@@ -2,7 +2,7 @@
 <project version="4">
   <component name="JavacSettings">
     <option name="ADDITIONAL_OPTIONS_OVERRIDE">
-      <module name="Lithos-Client" options="-encoding utf8 -g" />
+      <module name="lithos-client" options="-encoding utf8 -g" />
     </option>
   </component>
 </project>
