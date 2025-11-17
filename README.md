@@ -1,10 +1,10 @@
 # Lithos Reference Client
 Lithos Protocol is a decentralized mining pool protocol which uses smart contracts to evaluate miner's work and pay them
-accordingly. Lithos uses Non-Interactive Share Proofs to efficiently prove a miner's work.
+accordingly. Lithos uses Non-Interactive Share Proofs (NISPs) to efficiently prove a miner's work.
 
 ## Requirements
 In order to run Lithos, you must have a working Ergo node. To mine on a Lithos pool, you may use any mining software, but we
-recommend *Rigel Miner*. Lithos releases require a working Java 11 installation.
+recommend [Rigel Miner](https://github.com/rigelminer/rigel). Lithos releases require a working Java 11 installation.
 ## Instructions
 To run the client, download a release `.zip` file. Unzip the file,
 and navigate to `lithos-client-[version]/conf`. Open up the config file `application.conf` and input relevant data for
@@ -19,10 +19,6 @@ your node in the `node` section. An example of this section is shown below.
     explorerURL = "https://api-testnet.ergoplatform.com"
   }
 ```
-### KYA
-The Lithos Testnet release accesses your node's secret keys via it's keystore in order to sign and generate transactions.
-We **heavily** recommend that you generate a new secret key for testnet which is not related to any mainnet wallets you
-own. This may change on future releases.
 
 After setting the node configuration, you must set
 ```
@@ -31,14 +27,12 @@ play.http.secret.key="NEW_SECRET"
 to some new secret value. The value is not used by the current testnet release, but will be needed in the future
 when using the HTML Panel.
 
-## Testnet
-The current testnet release (`1.0-SNAPSHOT`) is for testing the stratum, rollup syncing, and basic contract transformations.
-Because of this, NISP storage and submission are disabled at the moment, but will be re-enabled next week when fraud proof
-contracts are added. Since no NISPs are evaluated, the Lithos client will attempt to submit work any time a block is found on the
-network.
+After setting up your config file, ensure that your node is running before executing the start script in
+`lithos-client-[version]/bin`. This script will start the Lithos Client.
 
 ## Stratum
-In Lithos, miners are not paid via shares. Instead, miners submit NISPs to the blockchain, and are paid according to the
+Once your client has started, it will attempt to sync to the blockchain and will spin up a
+stratum server for you to connect your miner to. In Lithos, miners are not paid via shares. Instead, miners submit NISPs to the blockchain, and are paid according to the
 difficulty value associated with the NISP. To change your difficulty value, change the stratum configuration located in
 `application.conf`
 
@@ -58,4 +52,22 @@ the following command:
 rigel.exe -a autolykos2 -o stratum+tcp://127.0.0.1:4444 -u YOUR_ERG_WALLET -w my_rig --log-file logs/miner.log
 ```
 Keep in mind that the `ERG_WALLET` and Worker name have no effect on Lithos, and can be set to any valid String.
+
+
+## KYA
+The Lithos Testnet release accesses your node's secret keys via it's keystore in order to sign and generate transactions.
+We **heavily** recommend that you generate a new secret key for testnet which is not related to any mainnet wallets you
+own. This may change on future releases.
+
+
+## Testnet
+The current testnet release (`1.0-SNAPSHOT`) is for testing the stratum, rollup syncing, and basic contract transformations.
+Because of this, NISP storage and submission are disabled at the moment, but will be re-enabled next week when fraud proof
+contracts are added. Since no NISPs are evaluated, the Lithos client will attempt to submit work any time a block is found on the
+network.
+
+## Acknowledgments
+Big thanks to the creator of [Rigel Miner](https://github.com/rigelminer/rigel) for helping me with some Stratum issues.
+Also thanks to [Satergo](https://github.com/Satergo) for creating the [stratum4ergo](https://github.com/Satergo/stratum4ergo) repo which the Lithos stratum implementation heavily takes from.  
+
 
