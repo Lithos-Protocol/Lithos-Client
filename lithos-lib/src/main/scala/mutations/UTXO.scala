@@ -1,7 +1,6 @@
 package work.lithos.mutations
 
-import org.ergoplatform.appkit.{BlockchainContext, ErgoValue, OutBox, Parameters}
-import org.ergoplatform.sdk.ErgoId
+import org.ergoplatform.appkit.{BlockchainContext, ErgoId, ErgoValue, OutBox, Parameters}
 import sigmastate.utils.Helpers
 
 import scala.util.{Failure, Success, Try}
@@ -14,7 +13,7 @@ case class UTXO(contract: Contract, value: Long,
 
   def setRegs(regs: ErgoValue[_]*): UTXO = this.copy(registers = regs)
 
-  def withReg(reg: ErgoValue[_], idx: Int): UTXO = {
+  def withReg(idx: Int, reg: ErgoValue[_]): UTXO = {
     setRegs(registers.patch(idx, Seq(reg), 1): _*)
   }
 

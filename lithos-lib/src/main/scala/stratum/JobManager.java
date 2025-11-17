@@ -1,9 +1,11 @@
 package stratum;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import sigma.pow.Autolykos2PowValidation;
 import stratum.counter.ExtraNonceCounter;
 import stratum.counter.JobCounter;
 import stratum.data.*;
-import org.bouncycastle.util.encoders.Hex;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -17,7 +19,7 @@ import java.util.stream.IntStream;
 public class JobManager {
 
 	private static final BigInteger N_BASE = new BigInteger("2").pow(26);
-
+    private final Logger logger = LoggerFactory.getLogger("JobManager");
 	private static final long
 			INCREASE_START = 600 * 1024,
 			INCREASE_PERIOD_FOR_N = 50 * 1024,
@@ -90,7 +92,8 @@ public class JobManager {
 	public void updateCurrentJob(MiningCandidate miningCandidate) {
 		BlockTemplate blockTemplate = new BlockTemplate(
 				jobCounter.next(),
-				miningCandidate
+				miningCandidate,
+				options.tau
 		);
 
 		this.currentJob = blockTemplate;
@@ -103,17 +106,10 @@ public class JobManager {
 	/**
 	 * @return whether a new block was processed
 	 */
-	public boolean processTemplate(MiningCandidate candidate) {
+	public boolean processTemplate(MiningCandidate candidate, BigInteger tau) {
 		boolean isNewBlock = currentJob == null;
 		// Block is new if it's the first one seen or if the hash is different and the height is higher
-		if(currentJob != null) {
-			System.out.println("currentJobHeight: " + currentJob.candidate.height);
-			System.out.println("currentJobMsg: " + Hex.toHexString(currentJob.candidate.msg));
-			System.out.println("templateMsg: " + Hex.toHexString(candidate.msg));
-		}
-
 		if (!isNewBlock && !Arrays.equals(currentJob.candidate.msg, candidate.msg)) {
-			System.out.println("Msg not equal");
 			isNewBlock = true;
 
 			// If new block is outdated/out-of-sync then return
@@ -122,10 +118,11 @@ public class JobManager {
 		}
 
 		if (!isNewBlock) return false;
-
+		logger.info("Job manager got new block template");
 		BlockTemplate blockTemplate = new BlockTemplate(
 				jobCounter.next(),
-				candidate
+				candidate,
+				tau
 		);
 
 		currentJob = blockTemplate;
@@ -135,7 +132,7 @@ public class JobManager {
 		triggerEvent(new NewBlock(blockTemplate));
 
 		validJobs.put(blockTemplate.jobId, blockTemplate);
-		System.out.println("New block template processed with diff: " + candidate.b);
+        logger.info("Sent new job with height = {}, b = {}", candidate.height, candidate.b);
 		return true;
 	}
 
@@ -167,9 +164,6 @@ public class JobManager {
 		};
 
 		if (extraNonce2.length != extraNonce2Size) {
-//			System.out.println("extraNonce2Length" + extraNonce2.length);
-//			System.out.println("extraNonce2asddLength " + extraNonceCounter.size);
-//			System.out.println("extraNonce2Size" + extraNonce2Size);
 			shareError.run(20, "incorrect size of extraNonce2");
 			return null;
 		}
@@ -177,7 +171,7 @@ public class JobManager {
 		BlockTemplate job = validJobs.get(jobId);
 
 		if (job == null) {
-			shareError.run(21, "job not found");
+			shareError.run(21, "solution was for old block");
 			return null;
 		}
 
@@ -192,27 +186,17 @@ public class JobManager {
 			shareError.run(22, "duplicate share");
 			return null;
 		}
-
-		byte[] coinbase = job.serializeCoinbase(extraNonce1, extraNonce2);
-
 		byte[] h = Utils.intBytes((int) job.candidate.height);
-		byte[] i = Utils.intBytes((int) BigInteger.valueOf(Utils.longValue(Arrays.copyOfRange(Utils.blake2b256(coinbase), 24, 32))).remainder(N(job.candidate.height)).longValue());
-		byte[] e = Arrays.copyOfRange(Utils.blake2b256(Utils.concat(
-				i, h, M
-		)), 1, 32);
-		List<byte[]> J = Arrays.stream(generateIndexes(Utils.concat(e, coinbase), job.candidate.height)).mapToObj(Utils::intBytes).collect(Collectors.toList());
-		BigInteger f = J.stream().map(item -> new BigInteger(Arrays.copyOfRange(Utils.blake2b256(Utils.concat(item, h, M)), 1, 32)))
-				.reduce(BigInteger::add)
-				.orElseThrow();
-		BigInteger fh = new BigInteger(Utils.blake2b256(Utils.padStart(f.toByteArray(), 32)));
+		BigInteger fH = Autolykos2PowValidation.hitForVersion2ForMessageWithChecks(32, job.msg, nonce, h, N(job.candidate.height).intValue()).bigInteger();
+
 		byte[] blockHash;
 		// Check if share is a block candidate (matched network difficulty)
-		if (job.candidate.b.compareTo(fh) >= 0) {
+		if (job.candidate.b.compareTo(fH) >= 0) {
 			// Must submit solution
-			blockHash = Utils.padStart(f.toByteArray(), 32);
+			blockHash = fH.toByteArray();
 		} else {
 			// Check if share didn't reach the miner's difficulty
-			if (new BigInteger(job.getJobParams().getString(6)).multiply(difficulty).compareTo(fh) <= 0) {
+			if (new BigInteger(job.getJobParams().getString(6)).compareTo(fH) <= 0) {
 				shareError.run(32, "Low difficulty share");
 				return null;
 			}
@@ -228,7 +212,7 @@ public class JobManager {
 				job.candidate.msg,
 				1,
 				false,
-				job.difficulty,
+				job.tau,
 				blockHash,
 				false
 		), nonce));

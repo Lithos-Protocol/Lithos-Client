@@ -4,6 +4,6 @@ import java.math.BigInteger;
 
 public class Data {
 
-	public BigInteger difficulty;
+	public BigInteger chainDifficulty;
 	public int protocolVersion;
 }

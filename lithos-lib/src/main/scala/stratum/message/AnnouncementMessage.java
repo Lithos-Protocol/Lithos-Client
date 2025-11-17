@@ -26,7 +26,7 @@ public class AnnouncementMessage extends ResponseMessage {
 
 		Result result = this.getResult();
 		String error = this.getError();
-
+		obj.put("id", JSONObject.NULL);
 		obj.put("method", method);
 		//obj.put(JSON_STRATUM_KEY_ERROR, Objects.requireNonNullElse(error, JSONObject.NULL));
 		obj.put("params", (result != null) ? result.toJson() : JSONObject.NULL);

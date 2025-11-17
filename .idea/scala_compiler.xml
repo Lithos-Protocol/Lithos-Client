@@ -1,7 +1,8 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <project version="4">
   <component name="ScalaCompilerConfiguration">
-    <profile name="sbt 1" modules="Lithos-,Lithos-Library,lithos-client_1933,lithos-lib,lithos-lib_4887" />
+    <option name="separateProdTestSources" value="true" />
+    <profile name="sbt 1" modules="Lithos-,Lithos-Library,lithos-client,lithos-client.lithos-lib,lithos-client.lithos-lib.main,lithos-client.lithos-lib.test,lithos-client_1933,lithos-client_4906,lithos-lib,lithos-lib.main,lithos-lib.test,lithos-lib_2003,lithos-lib_4887" />
     <profile name="sbt 2" modules="play-scala-hello-world-tutorial">
       <option name="deprecationWarnings" value="true" />
       <option name="uncheckedWarnings" value="true" />
@@ -12,7 +13,7 @@
         <parameter value="-Werror" />
       </parameters>
     </profile>
-    <profile name="sbt 3" modules="Lithos-Client,lithos-client">
+    <profile name="sbt 3" modules="Lithos-Client,lithos-client.main,lithos-client.test">
       <option name="deprecationWarnings" value="true" />
       <option name="uncheckedWarnings" value="true" />
       <parameters>

@@ -1,0 +1,11 @@
+<component name="libraryTable">
+  <library name="sbt: org.iq80.leveldb:leveldb:0.12:jar" external-system-id="SBT">
+    <CLASSES>
+      <root url="jar://$USER_HOME$/AppData/Local/Coursier/cache/v1/https/repo1.maven.org/maven2/org/iq80/leveldb/leveldb/0.12/leveldb-0.12.jar!/" />
+    </CLASSES>
+    <JAVADOC />
+    <SOURCES>
+      <root url="jar://$USER_HOME$/AppData/Local/Coursier/cache/v1/https/repo1.maven.org/maven2/org/iq80/leveldb/leveldb/0.12/leveldb-0.12-sources.jar!/" />
+    </SOURCES>
+  </library>
+</component>

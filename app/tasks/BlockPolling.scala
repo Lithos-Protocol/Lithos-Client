@@ -1,0 +1,109 @@
+package tasks
+
+import akka.Done
+import akka.actor.{ActorSystem, Cancellable, CoordinatedShutdown}
+import configs.TasksConfig.TaskConfiguration
+import configs.{Contexts, NodeConfig, StratumConfig, SyncConfig, TasksConfig}
+import lfsm.LFSMHelpers
+import org.ergoplatform.appkit.impl.NodeAndExplorerDataSourceImpl
+import org.ergoplatform.restapi.client.FullBlock
+import org.ergoplatform.sdk.BlockchainContext
+import org.slf4j.{Logger, LoggerFactory}
+import play.api.Configuration
+import play.api.cache.{AsyncCacheApi, SyncCacheApi}
+import stratum.ErgoStratumServer
+import stratum.data.{Data, Options}
+import utils.{BlockListener, BlockSync, NISPTreeCache}
+
+import javax.inject.{Inject, Singleton}
+import scala.concurrent.duration.DurationInt
+import scala.concurrent.{Await, ExecutionContext, Future}
+import scala.language.postfixOps
+import scala.util.{Failure, Success, Try}
+
+@Singleton
+class BlockPolling @Inject()(cache: SyncCacheApi, system: ActorSystem, config: Configuration, cs: CoordinatedShutdown) {
+
+  val logger: Logger = LoggerFactory.getLogger("BlockPolling")
+  val taskConfig: TaskConfiguration = new TasksConfig(config).blockPolling
+
+  val contexts: Contexts = new Contexts(system)
+  val syncConfig: SyncConfig = new SyncConfig(config)
+  val nodeConfig: NodeConfig = new NodeConfig(config)
+  val stratumConfig: StratumConfig = new StratumConfig(config)
+  if(taskConfig.enabled) {
+    logger.info("Starting synchronization via block polling")
+    logger.info(s"Synchronization will start at height ${syncConfig.startHeight}")
+
+    var polling: Option[Cancellable] = None
+    var currentHeight = syncConfig.startHeight
+    var synced = false
+    val nodeDataSource = nodeConfig.getClient.getDataSource.asInstanceOf[NodeAndExplorerDataSourceImpl]
+
+    cache.set(NISPTreeCache.TREE_SET, Seq.empty[String])
+    //logger.info(s"Polling block at height ${currentHeight} for synchronization")
+    // Blocking code until synced
+    while(currentHeight <= chainHeight && !synced) {
+      loadBlock(currentHeight, nodeDataSource) match {
+        case Success(value) =>
+          if (currentHeight != chainHeight) {
+            currentHeight = currentHeight + 1
+          } else {
+            // Start listening once synced
+            logger.info(s"Finished syncing to height ${chainHeight}")
+            logger.info(s"Now listening every ${syncConfig.listeningInterval} for new blocks")
+            system.scheduler.scheduleWithFixedDelay(initialDelay = 10 seconds,
+              delay = syncConfig.listeningInterval)({
+              () =>
+                while (currentHeight <= chainHeight) {
+                  logger.info(s"Found block ${currentHeight} while listening")
+                  loadBlock(currentHeight, nodeDataSource) match {
+                    case Failure(exception) =>
+                      logger.error(s"Failed to load block ${currentHeight} while listening", exception)
+                    case Success(value) =>
+
+                      currentHeight = currentHeight + 1
+                  }
+                }
+                BlockListener.onSync(nodeConfig.getClient, cache, nodeConfig.prover, stratumConfig.diff)
+            })(contexts.pollingContext)
+            synced = true
+          }
+        case Failure(exception) => logger.error(s"Failed to load block ${currentHeight} while syncing", exception)
+      }
+      //Thread.sleep(taskConfig.interval.toMillis)
+    }
+
+  }else{
+    logger.info("Block Polling was not enabled")
+  }
+  private def chainHeight: Int = {
+    nodeConfig.getClient.execute{
+      ctx => ctx.getHeight
+    }
+  }
+  private def loadBlock(height: Int, dataSource: NodeAndExplorerDataSourceImpl): Try[Unit] = {
+    if(height % 100 == 0)
+      logger.info(s"Loading block at height ${height}")
+    Try {
+
+      val blockHeader = dataSource
+        .getNodeBlocksApi.getFullBlockAt(height)
+        .execute()
+        .body().get(0)
+
+      val fullBlock = dataSource
+        .getNodeBlocksApi.getFullBlockById(blockHeader)
+        .execute()
+        .body()
+      checkBlockTransactions(fullBlock)
+    }
+
+  }
+
+  private def checkBlockTransactions(block: FullBlock): Unit = {
+    BlockSync.searchHoldingContracts(block, nodeConfig.getClient, cache, nodeConfig.prover)
+    BlockSync.searchEvalContracts(block, nodeConfig.getClient, cache, nodeConfig.prover)
+    BlockSync.searchPayoutContracts(block, nodeConfig.getClient, cache, nodeConfig.prover)
+  }
+}

@@ -1,15 +1,17 @@
 package stratum.data;
 
-import java.util.Properties;
+import java.math.BigInteger;
 
 public class Options {
 
-	public Options(int extraNonce1Size, long difficultyMultiplier, long connectionTimeout, long blockRefreshInterval, String nodeApiUrl, Data data) {
+	public Options(int extraNonce1Size, long difficultyMultiplier, long connectionTimeout, long blockRefreshInterval,
+				   String nodeApiUrl, BigInteger tau, Data data) {
 		this.extraNonce1Size = extraNonce1Size;
 		this.difficultyMultiplier = difficultyMultiplier;
 		this.connectionTimeout = connectionTimeout;
 		this.blockRefreshInterval = blockRefreshInterval;
 		this.nodeApiUrl = nodeApiUrl;
+		this.tau = tau;
 		this.data = data;
 
 		if (!nodeApiUrl.endsWith("/"))
@@ -22,16 +24,5 @@ public class Options {
 	public long blockRefreshInterval; // ms
 	public String nodeApiUrl;
 	public Data data;
-
-
-	public static Options fromProperties(Properties properties) {
-		return new Options(
-				Integer.parseInt(properties.getProperty("extraNonce1Size")),
-				Long.parseLong(properties.getProperty("difficultyMultiplier")),
-				Long.parseLong(properties.getProperty("connectionTimeout")),
-				Long.parseLong(properties.getProperty("blockRefreshInterval")),
-				properties.getProperty("nodeApiUrl"),
-				new Data()
-		);
-	}
+	public BigInteger tau;
 }

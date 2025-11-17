@@ -1,0 +1,11 @@
+<component name="libraryTable">
+  <library name="sbt: com.github.Satergo:JStratum:b3ad654112:jar" external-system-id="SBT">
+    <CLASSES>
+      <root url="jar://$USER_HOME$/AppData/Local/Coursier/cache/v1/https/jitpack.io/com/github/Satergo/JStratum/b3ad654112/JStratum-b3ad654112.jar!/" />
+    </CLASSES>
+    <JAVADOC />
+    <SOURCES>
+      <root url="jar://$USER_HOME$/AppData/Local/Coursier/cache/v1/https/jitpack.io/com/github/Satergo/JStratum/b3ad654112/JStratum-b3ad654112-sources.jar!/" />
+    </SOURCES>
+  </library>
+</component>

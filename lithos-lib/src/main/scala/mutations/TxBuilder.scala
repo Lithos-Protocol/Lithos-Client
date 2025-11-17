@@ -1,7 +1,7 @@
 package work.lithos
 package mutations
 
-import org.ergoplatform.appkit.{Address, BlockchainContext, PreHeader, UnsignedTransaction, UnsignedTransactionBuilder}
+import org.ergoplatform.appkit.{Address, BlockchainContext, JavaHelpers, PreHeader, UnsignedTransaction, UnsignedTransactionBuilder}
 
 class TxBuilder(ctx: BlockchainContext){
   val uTxB: UnsignedTransactionBuilder = ctx.newTxBuilder()
@@ -48,11 +48,13 @@ class TxBuilder(ctx: BlockchainContext){
 
   def buildTx(fee: Long, changeAddress: Address, burntTokens: Seq[Token] = Seq.empty[Token]): UnsignedTransaction = {
     val uTx = uTxB
-      .addInputs(inputs.map(_.toFullInput): _*)
-      .addDataInputs(dataInputs.map(_.input): _*)
-      .addOutputs(outputs.map(_.toOutBox(ctx)): _*)
-      .fee(fee)
-      .sendChangeTo(changeAddress)
+      .boxesToSpend(JavaHelpers.toJList(inputs.map(_.toFullInput).toIndexedSeq))
+      .withDataInputs(JavaHelpers.toJList(dataInputs.map(_.input).toIndexedSeq))
+      .outputs(outputs.map(_.toOutBox(ctx)): _*)
+      .sendChangeTo(changeAddress.getErgoAddress)
+
+    if(fee > 0)
+      uTx.fee(fee)
 
     if(burntTokens.nonEmpty)
       uTx.tokensToBurn(burntTokens.map(_.toErgo): _*)

@@ -1,0 +1,11 @@
+<component name="libraryTable">
+  <library name="sbt: com.github.ben-manes.caffeine:jcache:2.8.8:jar" external-system-id="SBT">
+    <CLASSES>
+      <root url="jar://$USER_HOME$/AppData/Local/Coursier/cache/v1/https/repo1.maven.org/maven2/com/github/ben-manes/caffeine/jcache/2.8.8/jcache-2.8.8.jar!/" />
+    </CLASSES>
+    <JAVADOC />
+    <SOURCES>
+      <root url="jar://$USER_HOME$/AppData/Local/Coursier/cache/v1/https/repo1.maven.org/maven2/com/github/ben-manes/caffeine/jcache/2.8.8/jcache-2.8.8-sources.jar!/" />
+    </SOURCES>
+  </library>
+</component>

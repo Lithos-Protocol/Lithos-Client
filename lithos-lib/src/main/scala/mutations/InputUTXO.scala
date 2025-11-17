@@ -1,8 +1,7 @@
 package work.lithos
 package mutations
 
-import org.ergoplatform.appkit.{ContextVar, ErgoValue, InputBox}
-import org.ergoplatform.sdk.ErgoId
+import org.ergoplatform.appkit.{ContextVar, ErgoId, ErgoValue, InputBox}
 
 import scala.collection.JavaConverters.collectionAsScalaIterableConverter
 

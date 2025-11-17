@@ -10,10 +10,7 @@ public class Response {
 	public static ResponseMessage2 subscribe(String id, String subscriptionId, String extraNonce1, int extraNonce2Size) {
 		return new ResponseMessage2(id, () ->
 				jsonArray(
-					jsonArray(
-							jsonArray("mining.set_difficulty", subscriptionId),
-							jsonArray("mining.notify", subscriptionId)
-					),
+					null,
 					extraNonce1,
 					extraNonce2Size
 				)

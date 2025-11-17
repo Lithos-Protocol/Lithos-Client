@@ -1,5 +1,5 @@
 <component name="libraryTable">
-  <library name="sbt: com.google.errorprone:error_prone_annotations:2.21.1:jar">
+  <library name="sbt: com.google.errorprone:error_prone_annotations:2.21.1:jar" external-system-id="SBT">
     <CLASSES>
       <root url="jar://$USER_HOME$/AppData/Local/Coursier/cache/v1/https/repo1.maven.org/maven2/com/google/errorprone/error_prone_annotations/2.21.1/error_prone_annotations-2.21.1.jar!/" />
     </CLASSES>

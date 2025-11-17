@@ -5,9 +5,7 @@ import stratum.data.MiningCandidate;
 import org.bouncycastle.util.encoders.Hex;
 import org.json.JSONArray;
 
-import java.math.BigDecimal;
 import java.math.BigInteger;
-import java.math.RoundingMode;
 import java.util.*;
 
 import static stratum.Utils.jsonArray;
@@ -34,7 +32,7 @@ public class BlockTemplate {
 
 		@Override
 		public boolean equals(Object o) {
-			//if (this == o) return true;
+			if (this == o) return true;
 			if (!(o instanceof Submission)) return false;
 			else {
 				Submission that = (Submission) o;
@@ -58,14 +56,22 @@ public class BlockTemplate {
 		this.jobId = jobId;
 		this.candidate = miningCandidate;
 		this.target = miningCandidate.b;
-		this.difficulty = new BigDecimal(DIFF_1).divide(new BigDecimal(target), RoundingMode.DOWN).setScale(2, RoundingMode.DOWN);
+		this.tau = BigInteger.valueOf(0);
+		this.msg = miningCandidate.msg;
+	}
+
+	public BlockTemplate(String jobId, MiningCandidate miningCandidate, BigInteger tau) {
+		this.jobId = jobId;
+		this.candidate = miningCandidate;
+		this.target = miningCandidate.b;
+		this.tau = tau;
 		this.msg = miningCandidate.msg;
 	}
 
 	public MiningCandidate candidate;
 	public String jobId;
 	public BigInteger target;
-	public BigDecimal difficulty;
+	public BigInteger tau;
 	public byte[] msg;
 
 	public byte[] serializeCoinbase(byte[] extraNonce1, byte[] extraNonce2) {
@@ -79,17 +85,16 @@ public class BlockTemplate {
 	private JSONArray jobParams;
 
 	public JSONArray getJobParams() {
-		System.out.println(candidate.b);
-		System.out.println(candidate.b.toString(16));
+
 		if (jobParams != null) return jobParams;
 		return jobParams = jsonArray(
 				jobId,
 				candidate.height,
-				Hex.decode(candidate.msg),
+				Hex.toHexString(candidate.msg),
 				"",
 				"",
 				Integer.toHexString(candidate.version),
-				candidate.b.toString(),
+				tau.toString(),
 				"",
 				true
 		);

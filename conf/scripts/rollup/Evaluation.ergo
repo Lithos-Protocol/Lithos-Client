@@ -1,0 +1,81 @@
+{
+  // Evaluation Contract
+  // Value: Block Reward
+
+
+  //TODO Add back command box and fp code after first week of testnet
+
+  // REGISTERS
+  // R4: NISP Tree, initially, an empty AVL Tree. AVL Tree of ( hashedPropBytes -> NISP )
+  // R5: Total Miners (decremented after FP posted) for this period
+  // R6: Total Share Score (removed from after valid FP is posted)
+  // R7: Period Start (time or height of block mining in which this box was created, in this case after holding period.)
+  val nispTree:      AvlTree = SELF.R4[AvlTree].get
+  val currentMiners: Int     = SELF.R5[Int].get
+  val totalScore:    Long    = SELF.R6[BigInt].get
+  val currentPeriod: Long    = SELF.R7[Long].get
+
+  // CONSTANTS
+  // CONST_PERIOD_LENGTH: Length of evaluation period, helps determine current spending path
+  // CONST_PAYOUT_PROPBYTES: Hashed proposition bytes of payout contract
+  // CONST_FP_ID: Id of singleton token for utxo holding valid fraud proofs
+
+
+  // CONTEXT VARS
+  // None
+
+  // NEXT VALUES
+  val nextUTXO   = OUTPUTS(0)
+  val nextTree   = nextUTXO.R4[AvlTree].get
+  val nextMiners = nextUTXO.R5[Int].get
+  val nextScore  = nextUTXO.R6[BigInt].get
+  val nextPeriod = nextUTXO.R7[Long].get
+
+  // DATA INPUTS
+  // fpData: UTXO holding hashed propBytes of valid fraud proof contracts which may be spent with the eval contract
+  //val fpData     = CONTEXT.dataInputs(0)
+
+  // ASSUMPTIONS - statements which can be assumed to be true due to other contracts enforcing them during
+  // creation of this UTXO
+  // currentMiners initialized from HoldingContract
+  // totalScore initialized from HoldingContract
+  // nispTree initialized to filled tree, with deletion enabled
+  // currentPeriod initialized to height at time of this UTXO's creation
+  // value of this UTXO is initialized to be the block reward
+  // fpData is a utxo holding collection of hashed propBytes of distinct valid fraud proof contracts
+
+
+  // Spending Path 1: Eval Contract is in validation phase
+  // if we're spending this utxo during evaluation, then it implies fraud has been found! We therefore check to see
+  // if a FP is posted.
+  // if(HEIGHT < currentPeriod + CONST_PERIOD_LENGTH){
+  //  val authenticFPData = fpData.tokens(0)._1 == CONST_FP_ID
+
+    // TODO: Can we optimize in the future to allow multiple FPs to be spent / modify the tree in the same tx?
+  //  val fpUtxo = INPUTS(1)
+  //  val validFP = fpUtxo.R4[Coll[Coll[Byte]].get.exists{ (x: Coll[Byte]) => x == blake2b256( fpUtxo.propositionBytes ) }
+
+    // Fraud Proof contracts will handle the updated state of the Evaluation Contract, so we do not need to check
+    // for anything else.
+
+  //  sigmaProp( validFP )
+  //}else{
+  // Spending Path 2: Evaluation phase is over, transform utxo into payout contract
+    val passedEvalPeriod = HEIGHT >= currentPeriod + CONST_PERIOD_LENGTH
+    val conservedValues = allOf(
+        Coll(
+          nextUTXO.value  == SELF.value,
+          nextTree        == nispTree,
+          nextMiners      == currentMiners,
+          nextScore       == totalScore,
+          nextPeriod      == SELF.value     // Period becomes block reward when transforming to payout contract
+        )
+    )
+
+    val isPayoutContract = blake2b256( nextUTXO.propositionBytes ) == CONST_PAYOUT_PROPBYTES
+
+    sigmaProp(isPayoutContract && conservedValues && passedEvalPeriod)
+
+  //}
+
+}

@@ -1,0 +1,13 @@
+<component name="libraryTable">
+  <library name="sbt: org.scodec:scodec-bits_2.12:1.1.34:jar" external-system-id="SBT">
+    <CLASSES>
+      <root url="jar://$USER_HOME$/AppData/Local/Coursier/cache/v1/https/repo1.maven.org/maven2/org/scodec/scodec-bits_2.12/1.1.34/scodec-bits_2.12-1.1.34.jar!/" />
+    </CLASSES>
+    <JAVADOC>
+      <root url="jar://$USER_HOME$/AppData/Local/Coursier/cache/v1/https/repo1.maven.org/maven2/org/scodec/scodec-bits_2.12/1.1.34/scodec-bits_2.12-1.1.34-javadoc.jar!/" />
+    </JAVADOC>
+    <SOURCES>
+      <root url="jar://$USER_HOME$/AppData/Local/Coursier/cache/v1/https/repo1.maven.org/maven2/org/scodec/scodec-bits_2.12/1.1.34/scodec-bits_2.12-1.1.34-sources.jar!/" />
+    </SOURCES>
+  </library>
+</component>

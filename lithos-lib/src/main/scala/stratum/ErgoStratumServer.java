@@ -7,25 +7,32 @@ import com.redbottledesign.bitcoin.rpc.stratum.transport.ConnectionState;
 import com.redbottledesign.bitcoin.rpc.stratum.transport.StatefulMessageTransport;
 import com.redbottledesign.bitcoin.rpc.stratum.transport.tcp.StratumTcpServer;
 import com.redbottledesign.bitcoin.rpc.stratum.transport.tcp.StratumTcpServerConnection;
+import org.ergoplatform.appkit.ErgoClient;
+import org.ergoplatform.appkit.ErgoProver;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import stratum.counter.SubscriptionIdCounter;
 import stratum.data.Options;
 import stratum.message.Announcement;
 import stratum.message.Requests;
 import stratum.message.Response;
+
 import org.bouncycastle.util.encoders.Hex;
 
 import java.io.IOException;
+import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.net.InetSocketAddress;
 import java.net.Socket;
+import java.util.Iterator;
 
 
 public class ErgoStratumServer extends StratumTcpServer {
 
 	private final Options options;
 	private final SubscriptionIdCounter subscriptionIdCounter = new SubscriptionIdCounter();
-	private final Pool pool;
-
+	public final Pool pool;
+    private final Logger logger = LoggerFactory.getLogger("ErgoStratumServer");
 	public ErgoStratumServer(Options options) {
 		this.options = options;
 		pool = new Pool(options, this);
@@ -36,6 +43,25 @@ public class ErgoStratumServer extends StratumTcpServer {
 		}
 	}
 
+    public ErgoStratumServer(Options options, boolean thirdPartyScheduling,
+                             boolean useCollateral, ErgoClient client, ErgoProver prover, String apiKey) {
+        this.options = options;
+        pool = new Pool(options, this, useCollateral, client, prover, apiKey);
+        if(!thirdPartyScheduling){
+            try {
+                pool.start();
+            } catch (IOException e) {
+                throw new RuntimeException(e);
+            }
+        }else{
+            try {
+                pool.startThirdParty();
+            } catch (IOException e) {
+                throw new RuntimeException(e);
+            }
+        }
+    }
+
 	@Override
 	protected StratumTcpServerConnection createConnection(Socket connectionSocket) {
 		return new StratumTcpServerConnection(this, connectionSocket) {
@@ -43,8 +69,40 @@ public class ErgoStratumServer extends StratumTcpServer {
 			protected ConnectionState createPostConnectState() {
 				return new ErgoConnectionState(ErgoStratumServer.this, this, subscriptionIdCounter.next(), (InetSocketAddress) connectionSocket.getRemoteSocketAddress());
 			}
+
+            @Override
+            public void close() {
+                if (this.isOpen()) {
+                    try {
+                        this.getSocket().close();
+                        this.getOutputThread().interrupt();
+                        this.getInputThread().interrupt();
+                    } catch (IOException ex) {
+                        ex.printStackTrace();
+                    }
+                }
+            }
 		};
 	}
+    @Override
+    public void stopListening() {
+        logger.info("Now stopping ErgoStratumServer");
+
+            try {
+                logger.info("Attempting to close sockets");
+                if(this.getServerSocket() != null) {
+                    this.getServerSocket().close();
+                }
+                Iterator<StratumTcpServerConnection> i = this.getConnections().asMap().values().iterator();
+                while(i.hasNext()){
+                    logger.info("Closing stratum connection");
+                    i.next().close();
+                }
+            } catch (final IOException ex) {
+                ex.printStackTrace();
+            }
+
+    }
 
 	@Override
 	protected void acceptConnection(StratumTcpServerConnection connection) {
@@ -58,22 +116,25 @@ public class ErgoStratumServer extends StratumTcpServer {
 	public static class ErgoConnectionState extends AbstractConnectionState {
 
 		private String extraNonce1;
-
+        private final Logger logger = LoggerFactory.getLogger("ErgoConnectionState");
 		public ErgoConnectionState(ErgoStratumServer server, StatefulMessageTransport transport, String subscriptionId, InetSocketAddress socketAddress) {
 			super(transport);
 			registerRequestHandler(Requests.Subscribe.NAME, Requests.Subscribe.class, m -> {
-				System.out.println("Subscription request: " + m);
+                logger.info("Got new subscription request: {}", m);
 				try {
 					extraNonce1 = server.pool.jobManager.extraNonceCounter.next();
 					getTransport().sendResponse(Response.subscribe(m.getId(), subscriptionId, extraNonce1, 4));
-					getTransport().sendResponse(Announcement.difficulty(new BigInteger("1")));
+					getTransport().sendResponse(Announcement.difficulty(new BigDecimal("1.0")));
 					getTransport().sendResponse(Announcement.miningJob(server.pool.jobManager.currentJob));
+
 				} catch (IOException e) {
 					throw new RuntimeException(e);
+				} catch (Exception e){
+					logger.error("Connection error", e);
 				}
 			});
 			registerRequestHandler(Requests.Authorize.NAME, Requests.Authorize.class, m -> {
-				System.out.println("Authorization request: workerName=" + m.workerName + ", password=" + m.password + ". Authorized.");
+                logger.info("Got new authorization request: workerName={}, password={}. Authorized.", m.workerName, m.password);
 				try {
 					getTransport().sendResponse(Response.authorize(m.getId(), true, null));
 				} catch (IOException e) {
@@ -96,9 +157,16 @@ public class ErgoStratumServer extends StratumTcpServer {
 				} catch (IOException e) {
 					throw new RuntimeException(e);
 				} catch (JobManager.ProcessingException e) {
-					e.printStackTrace();
+					try {
+						e.printStackTrace();
+						getTransport().sendResponse(Response.submit(m.getId(), null, e.getId()+ ": " + e.getMessage()));
+						if(e.getId() == 21) //job not found
+							getTransport().sendResponse(Announcement.miningJob(server.pool.jobManager.currentJob));
+					} catch (IOException ex) {
+						throw new RuntimeException(e);
+					}
 				} catch (MalformedStratumMessageException e) {
-					e.printStackTrace();
+					logger.error("MalformedStratumMessage", e);
 				}
 			});
 		}

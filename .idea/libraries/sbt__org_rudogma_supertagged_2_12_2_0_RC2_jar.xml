@@ -1,0 +1,13 @@
+<component name="libraryTable">
+  <library name="sbt: org.rudogma:supertagged_2.12:2.0-RC2:jar" external-system-id="SBT">
+    <CLASSES>
+      <root url="jar://$USER_HOME$/AppData/Local/Coursier/cache/v1/https/repo1.maven.org/maven2/org/rudogma/supertagged_2.12/2.0-RC2/supertagged_2.12-2.0-RC2.jar!/" />
+    </CLASSES>
+    <JAVADOC>
+      <root url="jar://$USER_HOME$/AppData/Local/Coursier/cache/v1/https/repo1.maven.org/maven2/org/rudogma/supertagged_2.12/2.0-RC2/supertagged_2.12-2.0-RC2-javadoc.jar!/" />
+    </JAVADOC>
+    <SOURCES>
+      <root url="jar://$USER_HOME$/AppData/Local/Coursier/cache/v1/https/repo1.maven.org/maven2/org/rudogma/supertagged_2.12/2.0-RC2/supertagged_2.12-2.0-RC2-sources.jar!/" />
+    </SOURCES>
+  </library>
+</component>

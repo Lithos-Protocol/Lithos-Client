@@ -2,9 +2,13 @@
 <project version="4">
   <component name="ProjectModuleManager">
     <modules>
-      <module fileurl="file://$PROJECT_DIR$/.idea/modules/lithos-client.iml" filepath="$PROJECT_DIR$/.idea/modules/lithos-client.iml" />
-      <module fileurl="file://$PROJECT_DIR$/.idea/modules/lithos-client-build.iml" filepath="$PROJECT_DIR$/.idea/modules/lithos-client-build.iml" />
-      <module fileurl="file://$PROJECT_DIR$/lithos-lib/lithos-lib.iml" filepath="$PROJECT_DIR$/lithos-lib/lithos-lib.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/modules/Lithos-Client/lithos-client.iml" filepath="$PROJECT_DIR$/.idea/modules/Lithos-Client/lithos-client.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/modules/Lithos-Client/lithos-client.lithos-client-build.iml" filepath="$PROJECT_DIR$/.idea/modules/Lithos-Client/lithos-client.lithos-client-build.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/modules/Lithos-Client/lithos-lib/lithos-client.lithos-lib.iml" filepath="$PROJECT_DIR$/.idea/modules/Lithos-Client/lithos-lib/lithos-client.lithos-lib.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/modules/Lithos-Client/lithos-lib/lithos-client.lithos-lib.main.iml" filepath="$PROJECT_DIR$/.idea/modules/Lithos-Client/lithos-lib/lithos-client.lithos-lib.main.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/modules/Lithos-Client/lithos-lib/lithos-client.lithos-lib.test.iml" filepath="$PROJECT_DIR$/.idea/modules/Lithos-Client/lithos-lib/lithos-client.lithos-lib.test.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/modules/Lithos-Client/lithos-client.main.iml" filepath="$PROJECT_DIR$/.idea/modules/Lithos-Client/lithos-client.main.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/modules/Lithos-Client/lithos-client.test.iml" filepath="$PROJECT_DIR$/.idea/modules/Lithos-Client/lithos-client.test.iml" />
     </modules>
   </component>
 </project>

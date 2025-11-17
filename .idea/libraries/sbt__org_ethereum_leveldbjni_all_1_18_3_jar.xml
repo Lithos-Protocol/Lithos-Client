@@ -1,0 +1,11 @@
+<component name="libraryTable">
+  <library name="sbt: org.ethereum:leveldbjni-all:1.18.3:jar" external-system-id="SBT">
+    <CLASSES>
+      <root url="jar://$USER_HOME$/AppData/Local/Coursier/cache/v1/https/jcenter.bintray.com/org/ethereum/leveldbjni-all/1.18.3/leveldbjni-all-1.18.3.jar!/" />
+    </CLASSES>
+    <JAVADOC />
+    <SOURCES>
+      <root url="jar://$USER_HOME$/AppData/Local/Coursier/cache/v1/https/jcenter.bintray.com/org/ethereum/leveldbjni-all/1.18.3/leveldbjni-all-1.18.3-sources.jar!/" />
+    </SOURCES>
+  </library>
+</component>

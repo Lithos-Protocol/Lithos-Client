@@ -1,6 +1,6 @@
 package work.lithos.mutations
 
-import org.ergoplatform.sdk.{ErgoId, ErgoToken}
+import org.ergoplatform.appkit.{ErgoId, ErgoToken}
 
 
 case class Token(id: ErgoId, amount: Long){

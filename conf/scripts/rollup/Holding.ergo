@@ -1,0 +1,105 @@
+{
+  // Holding Contract
+  // Value: Block Reward
+
+  // REGISTERS
+  // R4: NISP Tree, initially, an empty AVL Tree. AVL Tree of ( hashedPropBytes -> NISP )
+  // R5: Total Miners (incremented every NISP posted) for this period
+  // R6: Total Share Score (added to for every NISP posted, using given ShareScore from first 8 bytes of NISP)
+  // NOTE: R6 is of type BigInt, but share scores are of type Long. This is NOT a tau representation of score!!!
+  // It is simply the sum of all (Long) share scores stored in a BigInt value, so as to save blockchain space.
+  // R7: Period Start (time or height of block mining in which this box was created, ex. during block mining and collateral exchange)
+  val nispTree:      AvlTree = SELF.R4[AvlTree].get
+  val currentMiners: Int     = SELF.R5[Int].get
+  val totalScore:    Long    = SELF.R6[BigInt].get
+  val currentPeriod: Int     = SELF.R7[Long].get
+
+  // CONSTANTS
+  // CONST_PERIOD_LENGTH: Length of submission period, helps determine current spending path
+  // CONST_EVAL_PROPBYTES: Hashed proposition bytes of evaluation contract
+
+  // CONTEXT VARS
+  // CTX_SIGNER(0): Signer of transaction, used to authenticate submission of NISPs
+  // CTX_NISP_DATA(1): Data to insert into NISP tree, ( hashedPropBytes -> NISP )
+  // CTX_NISP_PROOF(2): Proof for insertion
+  val CTX_SIGNER      = getVar[SigmaProp](0).getOrElse(sigmaProp(false))
+  val CTX_NISP_DATA   = getVar[(Coll[Byte], Coll[Byte])](1).getOrElse((Coll(0.toByte), Coll(0.toByte)))
+  val CTX_NISP_PROOF  = getVar[Coll[Byte]](2).getOrElse(Coll(0.toByte))
+
+  // NEXT VALUES
+  val nextUTXO   = OUTPUTS(0)
+  val nextTree   = nextUTXO.R4[AvlTree].get
+  val nextMiners = nextUTXO.R5[Int].get
+  val nextScore  = nextUTXO.R6[BigInt].get
+  val nextPeriod = nextUTXO.R7[Long].get
+
+  // ASSUMPTIONS - statements which can be assumed to be true due to other contracts enforcing them during
+  // creation of this UTXO
+  // currentMiners initialized at 0
+  // totalScore initialized at 0
+  // nispTree initialized to empty tree, with only insertions enabled
+  // currentPeriod initialized to height at time of this UTXO's creation
+  // value of this UTXO is initialized to be the block reward
+
+
+  // Spending Path 1: Holding Contract is in submission phase (miners may submit NISPs to the AVL Tree)
+  if(HEIGHT < currentPeriod + CONST_PERIOD_LENGTH){
+
+    val authenticMiner  = blake2b256( CTX_SIGNER.propBytes ) == CTX_NISP_DATA._1
+    val validUTXO       = nextUTXO.propositionBytes == SELF.propositionBytes
+    val rewardConserved = nextUTXO.value == SELF.value
+
+    // We are only checking the minimum amount of information required in this contract, such as valid format for
+    // NISP data which includes positive shareScore as first 8 bytes. More information will be verified during
+    // evaluation phase.
+    val validNISP = {
+      if(CTX_NISP_DATA._2.size > 8){
+        // TODO: Attack vector by posting too large score and causing overflow?
+        val score: Long = byteArrayToLong( CTX_NISP_DATA._2.slice(0,8) )
+        score > 0 && nextScore == totalScore + score.toBigInt
+      }else{
+        false
+      }
+    }
+
+    val treeUpdated = {
+      val insertTree = nispTree.insert(Coll(CTX_NISP_DATA), CTX_NISP_PROOF).get
+      insertTree.digest == nextTree.digest
+    }
+
+    val incrementedMiners = nextMiners == currentMiners + 1
+    val samePeriod = nextPeriod == currentPeriod
+
+    val statements = allOf(
+      Coll(
+        authenticMiner,
+        validUTXO,
+        rewardConserved,
+        validNISP,
+        treeUpdated,
+        incrementedMiners,
+        samePeriod
+      )
+    )
+
+    sigmaProp(statements) && CTX_SIGNER
+  }else{
+    // Spending Path 2: Transform UTXO into evaluation contract to start checking for fraud proofs after
+    // submission period has expired
+    val conservedValues = allOf(
+      Coll(
+        nextUTXO.value  == SELF.value,
+        nextTree        == nispTree,
+        nextMiners      == currentMiners,
+        nextScore       == totalScore,
+        nextPeriod      <= HEIGHT, // Period start is updated as we enter new phase
+        nextPeriod      >= currentPeriod + CONST_PERIOD_LENGTH,
+        SELF.id         == INPUTS(0).id // Prevent weirdness / exploits by enforcing one Holding UTXO per tx
+      )
+    )
+
+    val isEvaluationContract = blake2b256( nextUTXO.propositionBytes ) == CONST_EVAL_PROPBYTES
+
+    sigmaProp(isEvaluationContract && conservedValues)
+  }
+}

@@ -5,7 +5,7 @@ import java.math.BigInteger;
 
 public class Success extends ShareData {
     public Success(String jobId, String ipAddress, String workerName, BigInteger difficulty,
-                   long height, byte[] msg, long shareDiff, boolean blockDiff, BigDecimal blockDiffActual,
+                   long height, byte[] msg, long shareDiff, boolean blockDiff, BigInteger blockDiffActual,
                    byte[] blockHash, boolean blockHashInvalid) {
         super(jobId, ipAddress, workerName, difficulty);
         this.height = height;
@@ -21,7 +21,7 @@ public class Success extends ShareData {
     public byte[] msg;
     public long shareDiff;
     public boolean blockDiff;
-    public BigDecimal blockDiffActual;
+    public BigInteger blockDiffActual;
     public byte[] blockHash;
     public boolean blockHashInvalid;
 

@@ -1,6 +1,9 @@
 package stratum;
 
+import org.ergoplatform.appkit.ErgoClient;
 import org.json.JSONObject;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.net.URI;
@@ -9,7 +12,7 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 
 public class NodeInterface {
-
+    private final Logger logger = LoggerFactory.getLogger("NodeStratumBridge");
 	private HttpRequest.Builder req(String path) {
 		return HttpRequest.newBuilder(baseURI.resolve(path)).header("User-Agent", "stratum4ergo 1.0.0");
 	}
@@ -47,9 +50,35 @@ public class NodeInterface {
 
 
 
-	public JSONObject miningCandidate() {
+	public JSONObject miningCandidate(boolean useCollateral, String post, String apiKey) {
 		try {
-			return new JSONObject(http.send(req("/mining/candidate").build(), HttpResponse.BodyHandlers.ofString()).body());
+            if(!useCollateral) {
+                JSONObject json = new JSONObject(http.send(req("/mining/candidate").build(), HttpResponse.BodyHandlers.ofString()).body());
+                if (json.has("error")) {
+                    logger.error("Error occurred while requesting mining candidate");
+                    logger.error("errorCode: {}", json.getInt("error"));
+                    logger.error("reason: {}", json.getString("reason"));
+                    logger.error("details: {}", json.getString("detail"));
+                    throw new RuntimeException("HTTP Request failed");
+                } else
+                    return json;
+            }else{
+                JSONObject json = new JSONObject(
+                        http.send(req("/mining/candidateWithTxs")
+                                .header("Content-Type", "application/json")
+                                .header("api_key", apiKey)
+                                .POST(HttpRequest.BodyPublishers.ofString("[" + post + "]"))
+                                .build(), HttpResponse.BodyHandlers.ofString()).body()
+                );
+                if (json.has("error")) {
+                    logger.error("Error occurred while requesting mining candidate with transactions");
+                    logger.error("errorCode: {}", json.getInt("error"));
+                    logger.error("reason: {}", json.getString("reason"));
+                    logger.error("details: {}", json.getString("detail"));
+                    throw new RuntimeException("HTTP Request failed");
+                } else
+                    return json;
+            }
 		} catch (IOException | InterruptedException e) {
 			throw new RuntimeException(e);
 		}

@@ -1,5 +1,10 @@
 package stratum;
 
+import org.ergoplatform.appkit.ErgoClient;
+import org.ergoplatform.appkit.ErgoProver;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import scala.Tuple2;
 import stratum.data.MiningCandidate;
 import stratum.data.Options;
 import stratum.data.ShareData;
@@ -20,7 +25,12 @@ public class Pool {
 
 	public JobManager jobManager;
 	private NodeInterface nodeInterface;
-
+    private final Logger logger = LoggerFactory.getLogger("StratumPool");
+    private boolean useCollateral = false;
+    private ErgoClient client = null;
+    private String pk = null;
+    private ErgoProver prover = null;
+    private String apiKey = null;
 	public Pool(Options options, ErgoStratumServer server) {
 
 		this.options = options;
@@ -29,28 +39,52 @@ public class Pool {
 		setupJobManager();
 	}
 
+    public Pool(Options options, ErgoStratumServer server,
+                boolean withCollateral, ErgoClient client, ErgoProver prover,
+                String apiKey) {
+
+        this.options = options;
+        this.server = server;
+        this.useCollateral = withCollateral;
+        this.client = client;
+        this.prover = prover;
+        this.apiKey = apiKey;
+        setupJobManager();
+    }
+
 	public void start() throws IOException {
 		nodeInterface = new NodeInterface(options.nodeApiUrl);
 		if (!nodeInterface.isOnline())
 			throw new ConnectException("node is offline");
 		JSONObject info = nodeInterface.info();
 		options.data.protocolVersion = info.getJSONObject("parameters").getInt("blockVersion");
-		options.data.difficulty = info.getBigInteger("difficulty").multiply(BigInteger.valueOf(options.difficultyMultiplier));
+		options.data.chainDifficulty = info.getBigInteger("difficulty").multiply(BigInteger.valueOf(options.difficultyMultiplier));
 		setupJobManager();
 		getBlockTemplate();
 		Executors.newSingleThreadScheduledExecutor().scheduleAtFixedRate(() -> {
 			try {
-				System.out.println("Searching for block");
+				//System.out.println("Searching for block");
 				if (getBlockTemplate()) {
-					System.out.println("Found block with polling");
+					logger.info("Found block with polling");
 				}
 			} catch (Exception e) {
 				e.printStackTrace();
 			}
 		}, 0, options.blockRefreshInterval, TimeUnit.MILLISECONDS);
 	}
-
-	private void setupJobManager() {
+    //Starts pool, but lets thread scheduling be handled by outside source
+    public void startThirdParty() throws IOException {
+        logger.info("Starting StratumPool with third party scheduling");
+        nodeInterface = new NodeInterface(options.nodeApiUrl);
+        if (!nodeInterface.isOnline())
+            throw new ConnectException("node is offline");
+        JSONObject info = nodeInterface.info();
+        options.data.protocolVersion = info.getJSONObject("parameters").getInt("blockVersion");
+        options.data.chainDifficulty = info.getBigInteger("difficulty").multiply(BigInteger.valueOf(options.difficultyMultiplier));
+        setupJobManager();
+        getBlockTemplate();
+    }
+    public void setupJobManager() {
 
 		jobManager = new JobManager(options);
 
@@ -67,27 +101,49 @@ public class Pool {
 			if (isValidBlock) {
 				submitBlock(shareData, e.nonce);
 				if (getBlockTemplate())
-					System.out.println("New block found after submission");
+                    logger.info("New block found after submission!");
 			}
 		});
 	}
 
-	private void submitBlock(ShareData shareData, byte[] nonce) {
-		System.out.println("Submitted block with nonce: " + Hex.toHexString(nonce));
+    public void submitBlock(ShareData shareData, byte[] nonce) {
+        logger.info("Submitted block with nonce: {}", Hex.toHexString(nonce));
 		//TODO Change this constant
-		nodeInterface.sendSolution(Hex.toHexString(nonce), "02a7955281885bf0f0ca4a48678848cad8dc5b328ce8bc1d4481d041c98e891ff3");
+		nodeInterface.sendSolution(Hex.toHexString(nonce), pk);
 
 	}
 
-	private boolean getBlockTemplate() {
-		JSONObject miningCandidate = nodeInterface.miningCandidate();
-		System.out.println(miningCandidate.toString());
-		MiningCandidate candidate = MiningCandidate.fromJson(
-				nodeInterface.miningCandidate(),
-				options.data.protocolVersion // unused
-		);
-		System.out.println("candidate: " + candidate.b + " height: " + candidate.height);
-		//System.out.println("b: " + candidate.b() + " | height: " + candidate.height());
-		return jobManager.processTemplate(candidate);
+    public boolean getBlockTemplate() {
+        MiningCandidate candidate = null;
+        if(!useCollateral) {
+            candidate = MiningCandidate.fromJson(
+                    nodeInterface.miningCandidate(false, null, null),
+                    options.data.protocolVersion // unused
+            );
+        }else{
+            try {
+                //TODO If script fails on node-side, does pk get reset?
+                CollateralRetriever retriever = new CollateralRetriever(client, prover);
+                Tuple2<String, String> tuple = retriever.getCollateral();
+                candidate = MiningCandidate.fromJson(
+                        nodeInterface.miningCandidate(true, tuple._1, apiKey),
+                        options.data.protocolVersion // unused
+                );
+                pk = tuple._2;
+            } catch (Exception e) {
+                //e.printStackTrace();
+                logger.error(e.getMessage());
+                logger.error("Defaulting to solo-mining in order to get block templates");
+                candidate = MiningCandidate.fromJson(
+                        nodeInterface.miningCandidate(false, null, null),
+                        options.data.protocolVersion // unused
+                );
+                pk = candidate.pk;
+            }
+        }
+        if(pk == null){
+            pk = candidate.pk;
+        }
+		return jobManager.processTemplate(candidate, options.tau);
 	}
 }
