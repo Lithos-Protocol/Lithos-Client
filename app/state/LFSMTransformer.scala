@@ -1,12 +1,13 @@
 package state
 
 import lfsm.LFSMHelpers
+import org.bouncycastle.util.encoders.Hex
 import org.ergoplatform.ErgoTreePredef
 import org.ergoplatform.appkit._
 import org.slf4j.{Logger, LoggerFactory}
 import play.api.cache.SyncCacheApi
 import scorex.utils.Longs
-import sigma.Colls
+import sigma.{AvlTree, Colls}
 import sigma.data.CBigInt
 import state.LFSMPhase.{EVAL, HOLDING, PAYOUT}
 import utils.Helpers.{evalContract, holdingContract, payoutContract}
@@ -137,11 +138,13 @@ object LFSMTransformer {
     val tree = holdTree._2.tree
     val copiedTree = tree.copy()
     val score = LFSMHelpers.convertTauOrScore(BigInt(LFSMHelpers.parseDiffValueForStratum(diff).get))
+    val realDigest = Hex.toHexString(holdingInput.registers.head.getValue.asInstanceOf[AvlTree].digest.toArray)
+    logger.info(s"Digests before transform: (${realDigest}, ${tree}, ${copiedTree})")
     // TODO Change back to real NISP concatenation
     val insert = copiedTree.insert(
       Contract.fromAddress(prover.getAddress).hashedPropBytes -> (Longs.toByteArray(score.toLong) ++ Array(0.toByte)))
 
-
+    logger.info(s"Digests after transform: (${realDigest}, ${tree}, ${copiedTree})")
 
 
     val inputWithContext = holdingInput.setCtxVars(
@@ -184,9 +187,12 @@ object LFSMTransformer {
     val otherInputs = loadBoxes(Parameters.MinFee, JavaHelpers.toIndexedSeq(boxes).map(InputUTXO(_)))
     val tree = payments._2.tree
     val copiedTree = tree.copy()
+    val realDigest = Hex.toHexString(payInput.registers.head.getValue.asInstanceOf[AvlTree].digest.toArray)
+    logger.info(s"Digests before transform: (${realDigest}, ${tree}, ${copiedTree})")
+
     val lookUp = copiedTree.lookUp(Contract.fromAddress(prover.getAddress).hashedPropBytes)
     val delete = copiedTree.delete(Contract.fromAddress(prover.getAddress).hashedPropBytes)
-
+    logger.info(s"Digests after transform: (${realDigest}, ${tree}, ${copiedTree})")
     val score = Longs.fromByteArray(lookUp.response.head.ergoValue.getValue.toArray.slice(0, 8))
     val amountToPay = LFSMHelpers.paymentFromScore(score, payments._2.totalScore, payments._2.totalReward)
     val inputWithContext = payInput.setCtxVars(

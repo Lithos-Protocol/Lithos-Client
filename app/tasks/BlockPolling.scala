@@ -45,36 +45,39 @@ class BlockPolling @Inject()(cache: SyncCacheApi, system: ActorSystem, config: C
     cache.set(NISPTreeCache.TREE_SET, Seq.empty[String])
     //logger.info(s"Polling block at height ${currentHeight} for synchronization")
     // Blocking code until synced
-    while(currentHeight <= chainHeight && !synced) {
-      loadBlock(currentHeight, nodeDataSource) match {
-        case Success(value) =>
-          if (currentHeight != chainHeight) {
-            currentHeight = currentHeight + 1
-          } else {
-            // Start listening once synced
-            logger.info(s"Finished syncing to height ${chainHeight}")
-            logger.info(s"Now listening every ${syncConfig.listeningInterval} for new blocks")
-            system.scheduler.scheduleWithFixedDelay(initialDelay = 10 seconds,
-              delay = syncConfig.listeningInterval)({
-              () =>
-                while (currentHeight <= chainHeight) {
-                  logger.info(s"Found block ${currentHeight} while listening")
-                  loadBlock(currentHeight, nodeDataSource) match {
-                    case Failure(exception) =>
-                      logger.error(s"Failed to load block ${currentHeight} while listening", exception)
-                    case Success(value) =>
-
-                      currentHeight = currentHeight + 1
+    Future{
+      while(currentHeight <= chainHeight && !synced) {
+        loadBlockSync(currentHeight, nodeDataSource) match {
+          case Success(value) =>
+            if (currentHeight != chainHeight) {
+              currentHeight = currentHeight + 1
+            } else {
+              // Start listening once synced
+              logger.info(s"Finished syncing to height ${chainHeight}")
+              logger.info(s"Now listening every ${syncConfig.listeningInterval} for new blocks")
+              system.scheduler.scheduleWithFixedDelay(initialDelay = 10 seconds,
+                delay = syncConfig.listeningInterval)({
+                () =>
+                  if (currentHeight <= chainHeight) {
+                    logger.info(s"Found new block ${currentHeight} on listen")
+                    loadBlockAsync(currentHeight, nodeDataSource).onComplete {
+                      case Failure(exception) =>
+                        logger.error(s"Failed to load block ${currentHeight} while listening", exception)
+                      case Success(value) =>
+                        currentHeight = currentHeight + 1
+                        if(currentHeight > chainHeight)
+                          LFSMTransformer.onSync(nodeConfig.getClient, cache, nodeConfig.prover, stratumConfig.diff)
+                    }(contexts.pollingContext)
                   }
-                }
-                LFSMTransformer.onSync(nodeConfig.getClient, cache, nodeConfig.prover, stratumConfig.diff)
-            })(contexts.pollingContext)
-            synced = true
-          }
-        case Failure(exception) => logger.error(s"Failed to load block ${currentHeight} while syncing", exception)
+
+              })(contexts.pollingContext)
+              synced = true
+            }
+          case Failure(exception) => logger.error(s"Failed to load block ${currentHeight} while syncing", exception)
+        }
       }
       //Thread.sleep(taskConfig.interval.toMillis)
-    }
+    }(contexts.pollingContext)
 
   }else{
     logger.info("Block Polling was not enabled")
@@ -84,7 +87,7 @@ class BlockPolling @Inject()(cache: SyncCacheApi, system: ActorSystem, config: C
       ctx => ctx.getHeight
     }
   }
-  private def loadBlock(height: Int, dataSource: NodeAndExplorerDataSourceImpl): Try[Unit] = {
+  private def loadBlockSync(height: Int, dataSource: NodeAndExplorerDataSourceImpl): Try[Unit] = {
     if(height % 100 == 0)
       logger.info(s"Loading block at height ${height}")
     Try {
@@ -100,6 +103,28 @@ class BlockPolling @Inject()(cache: SyncCacheApi, system: ActorSystem, config: C
         .body()
       checkBlockTransactions(fullBlock)
     }
+
+  }
+
+  private def loadBlockAsync(height: Int, dataSource: NodeAndExplorerDataSourceImpl) = {
+    implicit val context: ExecutionContext = contexts.pollingContext
+    Future {
+      if (height % 100 == 0)
+        logger.info(s"Loading block at height ${height}")
+      Try {
+
+        val blockHeader = dataSource
+          .getNodeBlocksApi.getFullBlockAt(height)
+          .execute()
+          .body().get(0)
+
+        val fullBlock = dataSource
+          .getNodeBlocksApi.getFullBlockById(blockHeader)
+          .execute()
+          .body()
+        checkBlockTransactions(fullBlock)
+      }
+    }.map(_.get)
 
   }
 

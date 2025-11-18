@@ -4,10 +4,11 @@ import akka.Done
 import lfsm.LFSMHelpers
 import lfsm.rollup.RollupContracts
 import org.bouncycastle.util.encoders.Hex
-import org.ergoplatform.appkit.{BlockchainContext, ErgoClient, ErgoProver, ErgoValue}
+import org.ergoplatform.appkit.{Address, BlockchainContext, ErgoClient, ErgoProver, ErgoValue}
 import org.ergoplatform.restapi.client.{ErgoTransactionInput, ErgoTransactionOutput, FullBlock}
 import org.slf4j.{Logger, LoggerFactory}
 import play.api.cache.{AsyncCacheApi, SyncCacheApi}
+import sigma.ast.ErgoTree
 import sigma.{Coll, Colls, SigmaProp}
 import sigma.data.{AvlTreeFlags, CBigInt}
 import state.{LFSMPhase, NISPTree}
@@ -57,8 +58,12 @@ object NISPTreeCache {
     val insertion    = dictionary.insert(keyValue._1.toArray -> keyValue._2.toArray)
     require(insertion.proof.ergoValue.getValue == proof, "Proofs must be equal on holding transformation")
     logger.info(s"Found existing holding utxo ${output.getBoxId}")
-    if(isMiner)
+    if(isMiner) {
       logger.info(s"Holding utxo ${output.getBoxId} contains local miner!")
+    }else{
+      logger.info(s"Holding utxo ${output.getBoxId} contains miner" +
+        s" ${Address.fromErgoTree(ErgoTree.fromProposition(signer), ctx.getNetworkType)}")
+    }
     val nextTree    = oldNISPTree.copy(tree = dictionary, numMiners = nextMiners, totalScore = nextScore,
       currentPeriod = Some(nextPeriod), hasMiner = isMiner)
     cache.remove(input.getBoxId)
