@@ -29,6 +29,15 @@ play.http.secret.key="NEW_SECRET"
 to some new secret value. The value is not used by the current testnet release, but will be needed in the future
 when using the HTML Panel.
 
+Finally, change the `basePath` variable under `state` so that it leads to the `/conf` holding the config
+```  
+  state {
+    # Path to the lithos conf folder (in the same directory as /bin where the binary executable is run)
+    basePath = "path/to/lithos-client-[version]/conf"
+  }
+```
+  
+
 After setting up your config file, ensure that your node is running before executing the start script in
 `lithos-client-[version]/bin`. This script will start the Lithos Client.
 
