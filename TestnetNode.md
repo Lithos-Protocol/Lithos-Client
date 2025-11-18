@@ -77,7 +77,7 @@ ergo {
 
 scorex {
   restApi {
-    # Hash of API key "hello"
+    # Hash of API key "hello" as default.  Details on how to change below
     apiKeyHash = "324dcf027dd4a30a932c441f365a25e86b173defa4b8e58948253471b81b72cf"
   }
   network {
@@ -97,6 +97,10 @@ hello
 ```
 
 This key must later be provided to Lithos.
+
+Changing Your Ergo Node API Key Through the Node’s Swagger Interface
+
+To update the API key used by your Ergo node, you can do it directly from the node’s built-in Swagger panel at http://127.0.0.1:9052/swagger. In the /utils section of the API, look for the endpoint POST /utils/updateApiKey. This call allows you to set a brand-new API key without restarting the node. Simply open the endpoint, enter your desired new key into the request body, and execute the call. You must update your node configuration with this API key and restart the node.  Be sure to update any external services (Lithos Client, bots, dashboards, miners, etc.) that connect to your node, as they will need to use this new API key going forward.
 
 ---
 
@@ -138,7 +142,11 @@ sudo apt install openjdk-11-jdk -y
 cd /opt/ergo-testnet
 java -jar ./ergo-testnet.jar --testnet -c ergo.conf
 ```
+Example with testnet jar (For easy copy / pasta)
 
+```bash
+cd /opt/ergo-testnet
+java -jar ergo-6.0.1-1-91aa8056-SNAPSHOT.jar --testnet -c ergo.conf
 ---
 
 ## 6. Accessing the Node Panel and Swagger
@@ -147,12 +155,12 @@ Once the node is running, you can access:
 
 ### Node Panel (Web UI)
 ```
-http://127.0.0.1:9053/panel
+http://127.0.0.1:9052/panel
 ```
 
 ### Swagger API Explorer
 ```
-http://127.0.0.1:9053/swagger
+http://127.0.0.1:9052/swagger
 ```
 
 The node panel provides:
@@ -182,7 +190,7 @@ The easiest way to create a Testnet wallet is through the node’s built-in Pane
 
 1. Open:
    ```
-   http://127.0.0.1:9053/panel
+   http://127.0.0.1:9052/panel
    ```
 2. Go to the **Wallet** tab.
 3. Click **Create Wallet**.
