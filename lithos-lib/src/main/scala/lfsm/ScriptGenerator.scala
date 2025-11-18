@@ -19,14 +19,14 @@ object ScriptGenerator {
   }
 
   def mkCollatScript(name: String): String = {
-    val src = Source.fromFile(mkBasePath + SCRIPT_PATH + COLLAT + name + EXT)
+    val src = Source.fromResource(COLLAT + name + EXT)
     val script = src.mkString
     src.close()
     script
   }
 
   def mkRollupScript(name: String): String = {
-    val src = Source.fromFile(mkBasePath + SCRIPT_PATH + ROLLUP + name + EXT)
+    val src = Source.fromResource(ROLLUP + name + EXT)
     val script = src.mkString
     src.close()
     script

@@ -1,0 +1,117 @@
+{
+  // Payout Contract
+  // Value: Block Reward -> 0
+
+  // REGISTERS
+  // R4: NISP Tree, initially, an empty AVL Tree. AVL Tree of ( hashedPropBytes -> NISP )
+  // R5: Total Miners, constant on spend
+  // R6: Total Share Score constant on spend
+  // R7: Total block reward, equal to initial block value when transforming from EvalContract
+  //TODO Add back command box code after first week of testnet
+  val nispTree:      AvlTree = SELF.R4[AvlTree].get
+  val currentMiners: Int     = SELF.R5[Int].get
+  val totalScore:    BigInt  = SELF.R6[BigInt].get
+  val totalReward:   Long    = SELF.R7[Long].get
+  // CONSTANTS
+  // None
+
+  // CONTEXT VARS
+  // CTX_KEY_DATA(0): Keys of miners to lookup in NISP tree and remove, ( hashedPropBytes )
+  // CTX_LOOKUP_PROOF(1): Proof for lookup
+  // CTX_REMOVE_PROOF(2): Proof for removal
+  val CTX_KEY_DATA   = getVar[Coll[Coll[Byte]]](0).getOrElse(Coll(Coll(0.toByte)))
+  val CTX_LOOKUP_PROOF  = getVar[Coll[Byte]](1).getOrElse(Coll(0.toByte))
+  val CTX_REMOVE_PROOF = getVar[Coll[Byte]](2).getOrElse(Coll(0.toByte))
+
+  // ASSUMPTIONS - statements which can be assumed to be true due to other contracts enforcing them during
+  // creation of this UTXO
+  // currentMiners is constant from creation
+  // totalScore is constant from creation
+  // nispTree initialized to filled tree, with only removals enabled
+  // value of this UTXO is initialized to be the block reward, but may change as miners are paid out
+
+  val minersToPay: Coll[(Coll[Byte], Coll[Byte])] = {
+    CTX_KEY_DATA.zip(nispTree.getMany(CTX_KEY_DATA, CTX_LOOKUP_PROOF).map{ (x: Option[Coll[Byte]]) => x.get })
+  }
+
+  val minersWithScore = {
+    minersToPay.map{
+      (x: (Coll[Byte], Coll[Byte])) => (x._1, byteArrayToLong(x._2.slice(0, 8)))
+    }
+  }
+
+
+  val minersWithReward: Coll[(Coll[Byte], Long)] = {
+    minersWithScore.map{
+      (x: (Coll[Byte], Long)) => (x._1, ((totalReward.toBigInt * x._2.toBigInt) / totalScore).toLong)
+    }
+  }
+
+  val totalMinerRewards = minersWithReward.fold(0L, {
+  (accum: Long, x:(Coll[Byte], Long)) =>
+    accum + x._2
+  })
+
+  // Spending path 1: Paid miners, but still ERG left in utxo.
+  // We only take this path if the ERG left in the UTXO is greater than the min change value
+  if(totalMinerRewards < SELF.value && SELF.value - totalMinerRewards > 1000000L){
+
+    // NEXT VALUES
+    val nextUTXO     = OUTPUTS(0)
+    val nextTree     = nextUTXO.R4[AvlTree].get
+    val nextMiners   = nextUTXO.R5[Int].get
+    val nextScore    = nextUTXO.R6[BigInt].get
+    val nextReward   = nextUTXO.R7[Long].get
+
+    val minerOutputBoxes = OUTPUTS.slice(1, minersWithReward.size + 1)
+
+    // Statements
+    val treeUpdated = {
+      val removeTree = nispTree.remove(CTX_KEY_DATA, CTX_REMOVE_PROOF).get
+      removeTree.digest == nextTree.digest
+    }
+    val minersRewarded = minerOutputBoxes.zip(minersWithReward).forall{
+        (x: (Box, (Coll[Byte], Long))) => blake2b256(x._1.propositionBytes) == x._2._1 && x._1.value == x._2._2
+    }
+    val validUTXO       = nextUTXO.propositionBytes == SELF.propositionBytes
+    val usedReward      = nextUTXO.value == SELF.value - totalMinerRewards
+    val sameTotal       = totalReward == nextReward
+    val sameScore       = totalScore  == nextScore
+    val sameMiners      = currentMiners == nextMiners
+    val onlyOne         = SELF.id == INPUTS(0).id // Prevent weirdness / exploits by enforcing only one per tx
+    val statements = allOf(
+      Coll(
+        validUTXO,
+        usedReward,
+        sameScore,
+        sameTotal,
+        sameMiners,
+        treeUpdated,
+        minersRewarded,
+        onlyOne
+      )
+    )
+    sigmaProp(statements)
+  }else{ // Spending Path 2: Paying miners with all remaining ERG, thereby spending this box
+    val minerOutputBoxes = OUTPUTS.slice(0, minersWithReward.size)
+
+    // Statements
+    val minersRewarded = minerOutputBoxes.zip(minersWithReward).forall{
+    // We use >= to check value here, so that min change value can be added to one of the outputs without causing error
+        (x: (Box, (Coll[Byte], Long))) => blake2b256(x._1.propositionBytes) == x._2._1 && x._1.value >= x._2._2
+    }
+    val onlyOne = SELF.id == INPUTS(0).id // Prevent weirdness / exploits by enforcing only one per tx
+
+    // I guess there is a chance someone can add new utxo with enough
+    // ERG into inputs here and not use ERG from the payout box
+    // But it is irrational to do so
+    val statements = allOf(
+      Coll(
+        onlyOne,
+        minersRewarded
+      )
+    )
+    sigmaProp(statements)
+  }
+
+}
