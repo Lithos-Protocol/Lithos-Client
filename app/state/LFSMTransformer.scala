@@ -135,9 +135,10 @@ object LFSMTransformer {
     val boxes = ctx.getDataSource.getUnspentWalletBoxes
     val otherInputs = loadBoxes(Parameters.MinFee, JavaHelpers.toIndexedSeq(boxes).map(InputUTXO(_)))
     val tree = holdTree._2.tree
+    val copiedTree = tree.copy()
     val score = LFSMHelpers.convertTauOrScore(BigInt(LFSMHelpers.parseDiffValueForStratum(diff).get))
     // TODO Change back to real NISP concatenation
-    val insert = tree.insert(
+    val insert = copiedTree.insert(
       Contract.fromAddress(prover.getAddress).hashedPropBytes -> (Longs.toByteArray(score.toLong) ++ Array(0.toByte)))
 
 
@@ -159,7 +160,7 @@ object LFSMTransformer {
 
     val output = UTXO(holding, holdingInput.value,
       registers = Seq(
-        tree.ergoValue,
+        copiedTree.ergoValue,
         ErgoValue.of(lastMiners + 1),
         ErgoValue.of((score + BigInt(lastScore)).bigInteger),
         holdingInput.registers(3)
@@ -182,8 +183,9 @@ object LFSMTransformer {
     val boxes = ctx.getDataSource.getUnspentWalletBoxes
     val otherInputs = loadBoxes(Parameters.MinFee, JavaHelpers.toIndexedSeq(boxes).map(InputUTXO(_)))
     val tree = payments._2.tree
-    val lookUp = tree.lookUp(Contract.fromAddress(prover.getAddress).hashedPropBytes)
-    val delete = tree.delete(Contract.fromAddress(prover.getAddress).hashedPropBytes)
+    val copiedTree = tree.copy()
+    val lookUp = copiedTree.lookUp(Contract.fromAddress(prover.getAddress).hashedPropBytes)
+    val delete = copiedTree.delete(Contract.fromAddress(prover.getAddress).hashedPropBytes)
 
     val score = Longs.fromByteArray(lookUp.response.head.ergoValue.getValue.toArray.slice(0, 8))
     val amountToPay = LFSMHelpers.paymentFromScore(score, payments._2.totalScore, payments._2.totalReward)
@@ -197,7 +199,7 @@ object LFSMTransformer {
     if(amountToPay < payInput.value && payInput.value - amountToPay > 1000000L) {
       val output = UTXO(payout, payInput.value - amountToPay,
         registers = Seq(
-          tree.ergoValue,
+          copiedTree.ergoValue,
           payInput.registers(1),
           payInput.registers(2),
           payInput.registers(3)
