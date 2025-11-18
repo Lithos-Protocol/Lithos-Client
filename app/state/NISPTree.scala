@@ -1,6 +1,6 @@
 package state
 
-import utils.LFSMPhase
+
 import work.lithos.plasma.collections.PlasmaMap
 
 case class NISPTree(tree: PlasmaMap[Array[Byte], Array[Byte]],
