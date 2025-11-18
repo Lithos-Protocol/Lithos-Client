@@ -1,17 +1,18 @@
-package utils
+package state
 
 import org.bouncycastle.util.encoders.Hex
 import org.ergoplatform.appkit.{ErgoClient, ErgoProver, ErgoValue}
 import org.ergoplatform.restapi.client.FullBlock
 import org.slf4j.{Logger, LoggerFactory}
-import play.api.cache.{AsyncCacheApi, SyncCacheApi}
+import play.api.cache.SyncCacheApi
 import utils.Helpers.{evalContract, holdingContract, payoutContract}
 import utils.NISPTreeCache.TREE_SET
+import utils.NISPTreeCache
 
 import scala.collection.JavaConverters
 
-object BlockSync {
-  private val logger: Logger = LoggerFactory.getLogger("BlockSync")
+object LFSMSync {
+  private val logger: Logger = LoggerFactory.getLogger("LFSMSync")
 
   def searchHoldingContracts(fullBlock: FullBlock, client: ErgoClient, cache: SyncCacheApi, prover: ErgoProver): Unit = {
     client.execute {

@@ -11,9 +11,10 @@ import org.ergoplatform.sdk.BlockchainContext
 import org.slf4j.{Logger, LoggerFactory}
 import play.api.Configuration
 import play.api.cache.{AsyncCacheApi, SyncCacheApi}
+import state.{LFSMSync, LFSMTransformer}
 import stratum.ErgoStratumServer
 import stratum.data.{Data, Options}
-import utils.{BlockListener, BlockSync, NISPTreeCache}
+import utils.NISPTreeCache
 
 import javax.inject.{Inject, Singleton}
 import scala.concurrent.duration.DurationInt
@@ -65,7 +66,7 @@ class BlockPolling @Inject()(cache: SyncCacheApi, system: ActorSystem, config: C
                       currentHeight = currentHeight + 1
                   }
                 }
-                BlockListener.onSync(nodeConfig.getClient, cache, nodeConfig.prover, stratumConfig.diff)
+                LFSMTransformer.onSync(nodeConfig.getClient, cache, nodeConfig.prover, stratumConfig.diff)
             })(contexts.pollingContext)
             synced = true
           }
@@ -102,8 +103,8 @@ class BlockPolling @Inject()(cache: SyncCacheApi, system: ActorSystem, config: C
   }
 
   private def checkBlockTransactions(block: FullBlock): Unit = {
-    BlockSync.searchHoldingContracts(block, nodeConfig.getClient, cache, nodeConfig.prover)
-    BlockSync.searchEvalContracts(block, nodeConfig.getClient, cache, nodeConfig.prover)
-    BlockSync.searchPayoutContracts(block, nodeConfig.getClient, cache, nodeConfig.prover)
+    LFSMSync.searchHoldingContracts(block, nodeConfig.getClient, cache, nodeConfig.prover)
+    LFSMSync.searchEvalContracts(block, nodeConfig.getClient, cache, nodeConfig.prover)
+    LFSMSync.searchPayoutContracts(block, nodeConfig.getClient, cache, nodeConfig.prover)
   }
 }

@@ -10,6 +10,7 @@ import org.slf4j.{Logger, LoggerFactory}
 import play.api.cache.{AsyncCacheApi, SyncCacheApi}
 import sigma.{Coll, Colls, SigmaProp}
 import sigma.data.{AvlTreeFlags, CBigInt}
+import state.{LFSMPhase, NISPTree}
 import utils.Helpers.holdingContract
 import work.lithos.mutations.Contract
 import work.lithos.plasma.PlasmaParameters
@@ -106,7 +107,7 @@ object NISPTreeCache {
 //  }
 
   def cacheNewPayout(ctx:BlockchainContext,input: ErgoTransactionInput,
-                        output: ErgoTransactionOutput, cache: SyncCacheApi) = {
+                        output: ErgoTransactionOutput, cache: SyncCacheApi): Unit = {
     val payoutBox = Helpers.parseOutput(ctx, output)
     val optNISPTree = cache.get[NISPTree](input.getBoxId)
     optNISPTree match {
@@ -132,7 +133,7 @@ object NISPTreeCache {
   }
 
   def cacheExistingPayout(ctx:BlockchainContext,input: ErgoTransactionInput,
-                     output: Option[ErgoTransactionOutput], cache: SyncCacheApi, prover: ErgoProver) = {
+                     output: Option[ErgoTransactionOutput], cache: SyncCacheApi, prover: ErgoProver): Unit = {
 
     val optNISPTree = cache.get[NISPTree](input.getBoxId)
     optNISPTree match {

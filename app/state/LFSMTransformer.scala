@@ -1,27 +1,24 @@
-package utils
+package state
 
 import lfsm.LFSMHelpers
-import lfsm.rollup.RollupContracts
-import org.bouncycastle.util.encoders.Hex
 import org.ergoplatform.ErgoTreePredef
-import org.ergoplatform.appkit.{BlockchainContext, ContextVar, ErgoClient, ErgoProver, ErgoType, ErgoValue, ExplorerAndPoolUnspentBoxesLoader, JavaHelpers, Parameters}
-import org.ergoplatform.restapi.client.FullBlock
+import org.ergoplatform.appkit._
 import org.slf4j.{Logger, LoggerFactory}
 import play.api.cache.SyncCacheApi
 import scorex.utils.Longs
+import sigma.Colls
 import sigma.data.CBigInt
-import sigma.{Coll, Colls}
+import state.LFSMPhase.{EVAL, HOLDING, PAYOUT}
 import utils.Helpers.{evalContract, holdingContract, payoutContract}
-import utils.LFSMPhase.{EVAL, HOLDING, PAYOUT}
+import utils.NISPTreeCache
 import work.lithos.mutations.{Contract, InputUTXO, TxBuilder, UTXO}
 
-import scala.collection.JavaConverters
 import scala.util.Try
 
-object BlockListener {
-  private val logger: Logger = LoggerFactory.getLogger("BlockListener")
+object LFSMTransformer {
+  private val logger: Logger = LoggerFactory.getLogger("LFSMTransformer")
 
-  def onSync(client: ErgoClient, cache: SyncCacheApi, prover: ErgoProver, diff: String) = {
+  def onSync(client: ErgoClient, cache: SyncCacheApi, prover: ErgoProver, diff: String): Unit = {
     logger.info("Starting LFSM state updates")
     val treeSet   = cache.get[Seq[String]](NISPTreeCache.TREE_SET).get
     val nispTrees = for(t <- treeSet) yield t -> cache.get[NISPTree](t).get
@@ -39,7 +36,7 @@ object BlockListener {
     }
   }
   // TODO: Add disable for transforms
-  def checkHoldingTransforms(ctx: BlockchainContext, holdingTrees: Seq[(String, NISPTree)], prover: ErgoProver): Unit = {
+  private def checkHoldingTransforms(ctx: BlockchainContext, holdingTrees: Seq[(String, NISPTree)], prover: ErgoProver): Unit = {
     val transformable = holdingTrees.filter(h => ctx.getHeight - h._2.currentPeriod.get >= LFSMHelpers.HOLDING_PERIOD)
     val transforms = transformable.map(t => Try(transformHolding(ctx, t, prover)))
     logger.info(s"Transformed ${transforms.count(_.isSuccess)} holding utxos successfully")
@@ -51,7 +48,7 @@ object BlockListener {
   }
 
   // TODO: Add disable for transforms
-  def checkEvalTransforms(ctx: BlockchainContext, evalTrees: Seq[(String, NISPTree)], prover: ErgoProver): Unit = {
+  private def checkEvalTransforms(ctx: BlockchainContext, evalTrees: Seq[(String, NISPTree)], prover: ErgoProver): Unit = {
     val transformable = evalTrees.filter(h => ctx.getHeight - h._2.currentPeriod.get >= LFSMHelpers.EVAL_PERIOD)
     val transforms = transformable.map(t => Try(transformEval(ctx, t, prover)))
     logger.info(s"Transformed ${transforms.count(_.isSuccess)} eval utxos successfully")
@@ -62,7 +59,7 @@ object BlockListener {
     }
   }
 
-  def attemptPayouts(ctx: BlockchainContext, payoutTrees: Seq[(String, NISPTree)], prover: ErgoProver): Unit = {
+  private def attemptPayouts(ctx: BlockchainContext, payoutTrees: Seq[(String, NISPTree)], prover: ErgoProver): Unit = {
     val transforms = payoutTrees.map(t => Try(payoutERG(ctx, t, prover)))
     logger.info(s"Paid out ${transforms.count(_.isSuccess)} payout utxos successfully")
     logger.info(s"Failed to pay out ${transforms.count(_.isFailure)} payout utxos")
@@ -72,8 +69,8 @@ object BlockListener {
     }
   }
   // TODO Change back after week 1 so NISP existence is required to submit
-  def attemptHoldingSubmissions(ctx: BlockchainContext, holdingTrees: Seq[(String, NISPTree)],
-                                prover: ErgoProver, diff: String): Unit = {
+  private def attemptHoldingSubmissions(ctx: BlockchainContext, holdingTrees: Seq[(String, NISPTree)],
+                                        prover: ErgoProver, diff: String): Unit = {
     val transformable = holdingTrees.filter{
       h =>
         ctx.getHeight - h._2.currentPeriod.get < LFSMHelpers.HOLDING_PERIOD && !h._2.hasMiner
@@ -108,7 +105,7 @@ object BlockListener {
     ctx.sendTransaction(sTx)
   }
 
-  def transformEval(ctx: BlockchainContext, eval: (String, NISPTree), prover: ErgoProver) = {
+  private def transformEval(ctx: BlockchainContext, eval: (String, NISPTree), prover: ErgoProver): Unit = {
     val evalInput = InputUTXO(ctx.getBoxesById(eval._1).head)
     val payout = payoutContract(ctx)
     val boxes = ctx.getDataSource.getUnspentWalletBoxes
@@ -130,7 +127,7 @@ object BlockListener {
     logger.info(s"Sent transaction ${txId} to transform eval contract")
   }
   // TODO Change this back to real NISP submission after week 1
-  def submitNISPs(ctx: BlockchainContext, holdTree: (String, NISPTree), prover: ErgoProver, diff: String) = {
+  private def submitNISPs(ctx: BlockchainContext, holdTree: (String, NISPTree), prover: ErgoProver, diff: String): Unit = {
     logger.info(s"Submitting (Fake) NISP to NISPTree ${holdTree._1}")
     val holdingInput = InputUTXO(ctx.getBoxesById(holdTree._1).head)
 
@@ -178,7 +175,7 @@ object BlockListener {
     logger.info(s"Sent transaction ${txId} to submit NISP")
   }
 
-  def payoutERG(ctx: BlockchainContext, payments: (String, NISPTree), prover: ErgoProver) = {
+  private def payoutERG(ctx: BlockchainContext, payments: (String, NISPTree), prover: ErgoProver): Unit = {
     logger.info(s"Paying out ERG for NISPTree ${payments._1}")
     val payInput = InputUTXO(ctx.getBoxesById(payments._1).head)
     val payout = payoutContract(ctx)
@@ -230,7 +227,7 @@ object BlockListener {
 
 
   // TODO: Better box loading algo this is ugly
-  def loadBoxes(value: Long, boxes: Seq[InputUTXO]): Seq[InputUTXO] = {
+  private def loadBoxes(value: Long, boxes: Seq[InputUTXO]): Seq[InputUTXO] = {
     var initVal = 0L
     var counter = 0
     var initSeq = Seq.empty[InputUTXO]

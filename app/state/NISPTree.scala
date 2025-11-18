@@ -1,6 +1,6 @@
-package utils
+package state
 
-import org.ergoplatform.appkit.ErgoId
+import utils.LFSMPhase
 import work.lithos.plasma.collections.PlasmaMap
 
 case class NISPTree(tree: PlasmaMap[Array[Byte], Array[Byte]],
