@@ -138,7 +138,11 @@ sudo apt install openjdk-11-jdk -y
 cd /opt/ergo-testnet
 java -jar ./ergo-testnet.jar --testnet -c ergo.conf
 ```
+Example with testnet jar (For easy copy / pasta)
 
+```bash
+cd /opt/ergo-testnet
+java -jar ergo-6.0.1-1-91aa8056-SNAPSHOT.jar --testnet -c ergo.conf
 ---
 
 ## 6. Accessing the Node Panel and Swagger
