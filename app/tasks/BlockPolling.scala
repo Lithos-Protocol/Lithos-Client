@@ -3,7 +3,7 @@ package tasks
 import akka.Done
 import akka.actor.{ActorSystem, Cancellable, CoordinatedShutdown}
 import configs.TasksConfig.TaskConfiguration
-import configs.{Contexts, NodeConfig, StratumConfig, SyncConfig, TasksConfig}
+import configs.{Contexts, NodeConfig, StateConfig, StratumConfig, SyncConfig, TasksConfig}
 import lfsm.LFSMHelpers
 import org.ergoplatform.appkit.impl.NodeAndExplorerDataSourceImpl
 import org.ergoplatform.restapi.client.FullBlock
@@ -32,6 +32,7 @@ class BlockPolling @Inject()(cache: SyncCacheApi, system: ActorSystem, config: C
   val syncConfig: SyncConfig = new SyncConfig(config)
   val nodeConfig: NodeConfig = new NodeConfig(config)
   val stratumConfig: StratumConfig = new StratumConfig(config)
+  val stateConfig: StateConfig     = new StateConfig(config)
   if(taskConfig.enabled) {
     logger.info("Starting synchronization via block polling")
     logger.info(s"Synchronization will start at height ${syncConfig.startHeight}")

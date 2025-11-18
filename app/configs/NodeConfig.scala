@@ -20,7 +20,6 @@ class NodeConfig(config: Configuration) {
   //private val scriptBase: String = config.get[String]("params.scriptBasePath")
   private val secretStorage: SecretStorage = SecretStorage.loadFrom(storagePath)
   private var explorerURL: String = config.get[String]("node.explorerURL")
-
   secretStorage.unlock(password)
 
 

@@ -4,7 +4,7 @@ import akka.Done
 import akka.actor.{ActorRef, ActorSystem, CoordinatedShutdown, actorRef2Scala}
 import akka.pattern.{AskTimeoutException, ask}
 import akka.util.Timeout
-import configs.{Contexts, NodeConfig, StratumConfig, TasksConfig}
+import configs.{Contexts, NodeConfig, StateConfig, StratumConfig, TasksConfig}
 import configs.TasksConfig.TaskConfiguration
 import lfsm.LFSMHelpers
 import org.slf4j.{Logger, LoggerFactory}
@@ -29,7 +29,7 @@ class StratumServer @Inject()(system: ActorSystem, config: Configuration, cs: Co
   val contexts: Contexts = new Contexts(system)
   val stratumParams: StratumConfig = new StratumConfig(config)
   val nodeConfig: NodeConfig = new NodeConfig(config)
-
+  val stateConfig: StateConfig     = new StateConfig(config)
   if(taskConfig.enabled) {
     logger.info("Starting Stratum Server for Lithos")
 

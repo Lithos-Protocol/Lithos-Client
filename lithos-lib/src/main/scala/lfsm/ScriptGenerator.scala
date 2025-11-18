@@ -7,7 +7,8 @@ import work.lithos.mutations.Contract
 import scala.io.Source
 
 object ScriptGenerator {
-  var BASE_PATH = "C:/Users/Kirat/IdeaProjects/Lithos-Client/conf/scripts/"
+  var BASE_PATH = ""
+  private final val SCRIPT_PATH = "scripts/"
   private final val EXT = ".ergo"
 
   private final val COLLAT = "collateral/"
@@ -18,17 +19,24 @@ object ScriptGenerator {
   }
 
   def mkCollatScript(name: String): String = {
-    val src = Source.fromFile(BASE_PATH + COLLAT + name + EXT)
+    val src = Source.fromFile(mkBasePath + SCRIPT_PATH + COLLAT + name + EXT)
     val script = src.mkString
     src.close()
     script
   }
 
   def mkRollupScript(name: String): String = {
-    val src = Source.fromFile(BASE_PATH + ROLLUP + name + EXT)
+    val src = Source.fromFile(mkBasePath + SCRIPT_PATH + ROLLUP + name + EXT)
     val script = src.mkString
     src.close()
     script
   }
 
+  private def mkBasePath: String = {
+    if(BASE_PATH.last != '/') {
+      BASE_PATH = BASE_PATH + "/"
+      BASE_PATH
+    } else
+      BASE_PATH
+  }
 }
