@@ -6,6 +6,8 @@ accordingly. Lithos uses Non-Interactive Share Proofs (NISPs) to efficiently pro
 In order to run Lithos, you must have a working Ergo node. To mine on a Lithos pool, you may use any mining software, but we
 recommend [Rigel Miner](https://github.com/rigelminer/rigel). Lithos releases require a working Java 11 installation.
 ## Instructions
+Before running the Lithos client, you will need a fully synced node.  For testnet purposes follow this guide to set-up a testnet node: [Testnet Node Tutorial](https://github.com/Lithos-Protocol/Lithos-Client/blob/master/TestnetNode.md)
+
 To run the client, download a release `.zip` file. Unzip the file,
 and navigate to `lithos-client-[version]/conf`. Open up the config file `application.conf` and input relevant data for
 your node in the `node` section. An example of this section is shown below.
