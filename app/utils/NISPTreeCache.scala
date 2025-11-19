@@ -32,7 +32,7 @@ object NISPTreeCache {
     val holdingBox = Helpers.parseOutput(ctx, output)
     val newTree    = PlasmaMap[Array[Byte], Array[Byte]](AvlTreeFlags.AllOperationsAllowed, PlasmaParameters.default)
     val nispTree   = NISPTree(newTree, 0, BigInt(0), Some(holdingBox.registers(3).getValue.asInstanceOf[Long]),
-      holdingBox.value, ctx.getHeight, hasMiner = false, LFSMPhase.HOLDING)
+      holdingBox.value, output.getCreationHeight, hasMiner = false, LFSMPhase.HOLDING)
 
     logger.info(s"Found new holding utxo ${output.getBoxId} at height ${output.getCreationHeight}")
     cache.set(output.getBoxId, nispTree)
