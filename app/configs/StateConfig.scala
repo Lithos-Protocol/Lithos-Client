@@ -1,9 +1,9 @@
 package configs
 
 import lfsm.ScriptGenerator
-import play.api.Configuration
+import play.api.{ConfigLoader, Configuration}
 
 class StateConfig(config: Configuration) {
-  private val basePath: String = config.get[String]("state.basePath")
-  ScriptGenerator.BASE_PATH    = basePath
+  private val basePath: Option[String] = config.getOptional("state.basePath")(ConfigLoader.stringLoader)
+  ScriptGenerator.BASE_PATH    = basePath.getOrElse("")
 }
