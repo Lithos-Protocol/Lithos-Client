@@ -158,14 +158,22 @@ public class ErgoStratumServer extends StratumTcpServer {
 					throw new RuntimeException(e);
 				} catch (JobManager.ProcessingException e) {
 					try {
-						e.printStackTrace();
-						getTransport().sendResponse(Response.submit(m.getId(), null, e.getId()+ ": " + e.getMessage()));
-						if(e.getId() == 21) //job not found
-							getTransport().sendResponse(Announcement.miningJob(server.pool.jobManager.currentJob));
+
+                        // We can accept potentially old shares here since the final judge of shares being "stale" is the TIME_FP
+						if(e.getId() == 21) {
+                            logger.warn("Received potentially old share from miner");
+                            getTransport().sendResponse(Response.submit(m.getId(), ResultFactory.getInstance().createResult(Boolean.TRUE), null));
+                            getTransport().sendResponse(Announcement.miningJob(server.pool.jobManager.currentJob));
+                        }else{
+                            logger.error("Share processing error", e);
+                            getTransport().sendResponse(Response.submit(m.getId(), null, e.getId()+ ": " + e.getMessage()));
+                        }
 					} catch (IOException ex) {
 						throw new RuntimeException(e);
-					}
-				} catch (MalformedStratumMessageException e) {
+					} catch (MalformedStratumMessageException ex) {
+                        throw new RuntimeException(ex);
+                    }
+                } catch (MalformedStratumMessageException e) {
 					logger.error("MalformedStratumMessage", e);
 				}
 			});
