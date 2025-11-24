@@ -31,6 +31,7 @@ public class Pool {
     private String pk = null;
     private ErgoProver prover = null;
     private String apiKey = null;
+    private boolean reducedShareMessages = false;
 	public Pool(Options options, ErgoStratumServer server) {
 
 		this.options = options;
@@ -41,7 +42,7 @@ public class Pool {
 
     public Pool(Options options, ErgoStratumServer server,
                 boolean withCollateral, ErgoClient client, ErgoProver prover,
-                String apiKey) {
+                String apiKey, boolean reducedShareMessages) {
 
         this.options = options;
         this.server = server;
@@ -49,7 +50,9 @@ public class Pool {
         this.client = client;
         this.prover = prover;
         this.apiKey = apiKey;
+        this.reducedShareMessages = reducedShareMessages;
         setupJobManager();
+
     }
 
 	public void start() throws IOException {
@@ -96,12 +99,19 @@ public class Pool {
 		});
 		jobManager.addEventListener(Share.class, e -> {
 			ShareData shareData = e.shareData;
-			var isValidBlock = shareData instanceof Success;
+			var isValidShare = shareData instanceof Success;
 			//System.out.println("share: " + shareData.difficulty());
-			if (isValidBlock) {
-				submitBlock(shareData, e.nonce);
-				if (getBlockTemplate())
-                    logger.info("New block found after submission!");
+			if (isValidShare) {
+                Success successfulShare = ((Success) shareData);
+                if(successfulShare.isBlock) {
+                    submitBlock(shareData, e.nonce);
+                    if (getBlockTemplate())
+                        logger.info("New block found after submission!");
+                }
+                if(successfulShare.isSuperShare) {
+                    logger.info("Saving supershare for block {}", successfulShare.height);
+                }
+
 			}
 		});
 	}
@@ -115,6 +125,7 @@ public class Pool {
 
     public boolean getBlockTemplate() {
         MiningCandidate candidate = null;
+        boolean usedCollateral = useCollateral;
         if(!useCollateral) {
             candidate = MiningCandidate.fromJson(
                     nodeInterface.miningCandidate(false, null, null),
@@ -139,11 +150,12 @@ public class Pool {
                         options.data.protocolVersion // unused
                 );
                 pk = candidate.pk;
+                usedCollateral = false;
             }
         }
         if(pk == null){
             pk = candidate.pk;
         }
-		return jobManager.processTemplate(candidate, options.tau);
+		return jobManager.processTemplate(candidate, options.tau, usedCollateral, reducedShareMessages);
 	}
 }

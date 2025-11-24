@@ -19,7 +19,7 @@ object ContractTestHelpers {
   val localClient = RestApiErgoClient.create(
     "http://127.0.0.1" + ":9052/",
     NetworkType.TESTNET,
-    "",
+    "hello",
     RestApiErgoClient.getDefaultExplorerUrl(networkType))
 
   def getProver(ctx: BlockchainContext) = {

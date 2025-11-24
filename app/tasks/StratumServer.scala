@@ -41,8 +41,10 @@ class StratumServer @Inject()(system: ActorSystem, config: Configuration, cs: Co
           stratumParams.connectionTimeout, stratumParams.blockRefreshInterval,
           nodeConfig.getNodeApi, t, new Data())
         logger.info("Stratum server starting at port " + stratumParams.stratumPort)
+        if(stratumParams.reduceShareMessages)
+          logger.info("Using reduced share messages. Stratum diff will be 1000x lower than real diff.")
         val server = new ErgoStratumServer(options, true, true, nodeConfig.getClient,
-          nodeConfig.prover, nodeConfig.getNodeKey)
+          nodeConfig.prover, nodeConfig.getNodeKey, stratumParams.reduceShareMessages)
 
 
         cs.addTask(CoordinatedShutdown.PhaseServiceUnbind, "close-stratum-server"){

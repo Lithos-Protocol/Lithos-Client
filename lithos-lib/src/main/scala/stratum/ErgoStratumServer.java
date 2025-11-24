@@ -44,9 +44,10 @@ public class ErgoStratumServer extends StratumTcpServer {
 	}
 
     public ErgoStratumServer(Options options, boolean thirdPartyScheduling,
-                             boolean useCollateral, ErgoClient client, ErgoProver prover, String apiKey) {
+                             boolean useCollateral, ErgoClient client, ErgoProver prover,
+                             String apiKey, boolean reducedShareMessages) {
         this.options = options;
-        pool = new Pool(options, this, useCollateral, client, prover, apiKey);
+        pool = new Pool(options, this, useCollateral, client, prover, apiKey, reducedShareMessages);
         if(!thirdPartyScheduling){
             try {
                 pool.start();

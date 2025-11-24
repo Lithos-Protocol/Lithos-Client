@@ -1,6 +1,7 @@
 package state
 
 import lfsm.LFSMHelpers
+import mutations.BoxLoader
 import org.bouncycastle.util.encoders.Hex
 import org.ergoplatform.ErgoTreePredef
 import org.ergoplatform.appkit._
@@ -27,19 +28,21 @@ object LFSMTransformer {
     logger.info(s"Found ${nispTrees.size} NISPTrees")
     client.execute{
       ctx =>
+        val boxLoader    = new BoxLoader(ctx).loadBoxes
         val holdingTrees = nispTrees.filter(h => h._2.phase == HOLDING)
         val evalTrees    = nispTrees.filter(h => h._2.phase == EVAL)
         val payoutTrees  = nispTrees.filter(h => h._2.phase == PAYOUT)
-        checkHoldingTransforms(ctx, holdingTrees, prover)
-        checkEvalTransforms(ctx, evalTrees, prover)
-        attemptPayouts(ctx, payoutTrees, prover)
-        attemptHoldingSubmissions(ctx, holdingTrees, prover, diff)
+        checkHoldingTransforms(ctx, holdingTrees, prover, boxLoader)
+        checkEvalTransforms(ctx, evalTrees, prover, boxLoader)
+        attemptPayouts(ctx, payoutTrees, prover, boxLoader)
+        attemptHoldingSubmissions(ctx, holdingTrees, prover, diff, boxLoader)
     }
   }
   // TODO: Add disable for transforms
-  private def checkHoldingTransforms(ctx: BlockchainContext, holdingTrees: Seq[(String, NISPTree)], prover: ErgoProver): Unit = {
+  private def checkHoldingTransforms(ctx: BlockchainContext, holdingTrees: Seq[(String, NISPTree)],
+                                     prover: ErgoProver, loader: BoxLoader): Unit = {
     val transformable = holdingTrees.filter(h => ctx.getHeight - h._2.currentPeriod.get >= LFSMHelpers.HOLDING_PERIOD)
-    val transforms = transformable.map(t => Try(transformHolding(ctx, t, prover)))
+    val transforms = transformable.map(t => Try(transformHolding(ctx, t, prover, loader)))
     logger.info(s"Transformed ${transforms.count(_.isSuccess)} holding utxos successfully")
     logger.info(s"Failed to transform ${transforms.count(_.isFailure)} holding utxos")
     transforms.filter(_.isFailure).foreach{
@@ -49,9 +52,10 @@ object LFSMTransformer {
   }
 
   // TODO: Add disable for transforms
-  private def checkEvalTransforms(ctx: BlockchainContext, evalTrees: Seq[(String, NISPTree)], prover: ErgoProver): Unit = {
+  private def checkEvalTransforms(ctx: BlockchainContext, evalTrees: Seq[(String, NISPTree)],
+                                  prover: ErgoProver, loader: BoxLoader): Unit = {
     val transformable = evalTrees.filter(h => ctx.getHeight - h._2.currentPeriod.get >= LFSMHelpers.EVAL_PERIOD)
-    val transforms = transformable.map(t => Try(transformEval(ctx, t, prover)))
+    val transforms = transformable.map(t => Try(transformEval(ctx, t, prover, loader)))
     logger.info(s"Transformed ${transforms.count(_.isSuccess)} eval utxos successfully")
     logger.info(s"Failed to transform ${transforms.count(_.isFailure)} eval utxos")
     transforms.filter(_.isFailure).foreach{
@@ -60,8 +64,9 @@ object LFSMTransformer {
     }
   }
 
-  private def attemptPayouts(ctx: BlockchainContext, payoutTrees: Seq[(String, NISPTree)], prover: ErgoProver): Unit = {
-    val transforms = payoutTrees.map(t => Try(payoutERG(ctx, t, prover)))
+  private def attemptPayouts(ctx: BlockchainContext, payoutTrees: Seq[(String, NISPTree)],
+                             prover: ErgoProver, loader: BoxLoader): Unit = {
+    val transforms = payoutTrees.map(t => Try(payoutERG(ctx, t, prover, loader)))
     logger.info(s"Paid out ${transforms.count(_.isSuccess)} payout utxos successfully")
     logger.info(s"Failed to pay out ${transforms.count(_.isFailure)} payout utxos")
     transforms.filter(_.isFailure).foreach{
@@ -71,12 +76,12 @@ object LFSMTransformer {
   }
   // TODO Change back after week 1 so NISP existence is required to submit
   private def attemptHoldingSubmissions(ctx: BlockchainContext, holdingTrees: Seq[(String, NISPTree)],
-                                        prover: ErgoProver, diff: String): Unit = {
+                                        prover: ErgoProver, diff: String, loader: BoxLoader): Unit = {
     val transformable = holdingTrees.filter{
       h =>
         ctx.getHeight - h._2.currentPeriod.get < LFSMHelpers.HOLDING_PERIOD && !h._2.hasMiner
     }
-    val transforms = transformable.map(t => Try(submitNISPs(ctx, t, prover, diff)))
+    val transforms = transformable.map(t => Try(submitNISPs(ctx, t, prover, diff, loader)))
     logger.info(s"Submitted (Fake)NISPs to ${transforms.count(_.isSuccess)} holding utxos successfully")
     logger.info(s"Failed to submit ${transforms.count(_.isFailure)} NISPs")
     transforms.filter(_.isFailure).foreach{
@@ -85,11 +90,12 @@ object LFSMTransformer {
     }
   }
 
-  private def transformHolding(ctx: BlockchainContext, holding: (String, NISPTree), prover: ErgoProver) = {
+  private def transformHolding(ctx: BlockchainContext, holding: (String, NISPTree),
+                               prover: ErgoProver, loader: BoxLoader) = {
     val holdingInput = InputUTXO(ctx.getBoxesById(holding._1).head)
     val eval = evalContract(ctx)
-    val boxes = ctx.getDataSource.getUnspentWalletBoxes
-    val otherInputs = loadBoxes(Parameters.MinFee, JavaHelpers.toIndexedSeq(boxes).map(InputUTXO(_)))
+
+    val otherInputs = loader.getInputs(Parameters.MinFee)
     val output = UTXO(eval, holdingInput.value,
       registers = Seq(
         holdingInput.registers.head,
@@ -106,11 +112,12 @@ object LFSMTransformer {
     ctx.sendTransaction(sTx)
   }
 
-  private def transformEval(ctx: BlockchainContext, eval: (String, NISPTree), prover: ErgoProver): Unit = {
+  private def transformEval(ctx: BlockchainContext, eval: (String, NISPTree),
+                            prover: ErgoProver, loader: BoxLoader): Unit = {
     val evalInput = InputUTXO(ctx.getBoxesById(eval._1).head)
     val payout = payoutContract(ctx)
-    val boxes = ctx.getDataSource.getUnspentWalletBoxes
-    val otherInputs = loadBoxes(Parameters.MinFee, JavaHelpers.toIndexedSeq(boxes).map(InputUTXO(_)))
+
+    val otherInputs = loader.getInputs(Parameters.MinFee)
     val output = UTXO(payout, evalInput.value,
       registers = Seq(
         evalInput.registers.head,
@@ -128,13 +135,14 @@ object LFSMTransformer {
     logger.info(s"Sent transaction ${txId} to transform eval contract")
   }
   // TODO Change this back to real NISP submission after week 1
-  private def submitNISPs(ctx: BlockchainContext, holdTree: (String, NISPTree), prover: ErgoProver, diff: String): Unit = {
+  private def submitNISPs(ctx: BlockchainContext, holdTree: (String, NISPTree), prover: ErgoProver,
+                          diff: String, loader: BoxLoader): Unit = {
     logger.info(s"Submitting (Fake) NISP to NISPTree ${holdTree._1}")
     val holdingInput = InputUTXO(ctx.getBoxesById(holdTree._1).head)
 
     val holding = holdingContract(ctx)
-    val boxes = ctx.getDataSource.getUnspentWalletBoxes
-    val otherInputs = loadBoxes(Parameters.MinFee, JavaHelpers.toIndexedSeq(boxes).map(InputUTXO(_)))
+
+    val otherInputs = loader.getInputs(Parameters.MinFee)
     val tree = holdTree._2.tree
     val copiedTree = tree.copy()
     val score = LFSMHelpers.convertTauOrScore(BigInt(LFSMHelpers.parseDiffValueForStratum(diff).get))
@@ -179,12 +187,13 @@ object LFSMTransformer {
     logger.info(s"Sent transaction ${txId} to submit NISP")
   }
 
-  private def payoutERG(ctx: BlockchainContext, payments: (String, NISPTree), prover: ErgoProver): Unit = {
+  private def payoutERG(ctx: BlockchainContext, payments: (String, NISPTree),
+                        prover: ErgoProver, loader: BoxLoader): Unit = {
     logger.info(s"Paying out ERG for NISPTree ${payments._1}")
     val payInput = InputUTXO(ctx.getBoxesById(payments._1).head)
     val payout = payoutContract(ctx)
-    val boxes = ctx.getDataSource.getUnspentWalletBoxes
-    val otherInputs = loadBoxes(Parameters.MinFee, JavaHelpers.toIndexedSeq(boxes).map(InputUTXO(_)))
+
+    val otherInputs = loader.getInputs(Parameters.MinFee)
     val tree = payments._2.tree
     val copiedTree = tree.copy()
     val realDigest = Hex.toHexString(payInput.registers.head.getValue.asInstanceOf[AvlTree].digest.toArray)
@@ -232,20 +241,5 @@ object LFSMTransformer {
     }
   }
 
-
-
-  // TODO: Better box loading algo this is ugly
-  private def loadBoxes(value: Long, boxes: Seq[InputUTXO]): Seq[InputUTXO] = {
-    var initVal = 0L
-    var counter = 0
-    var initSeq = Seq.empty[InputUTXO]
-    val sortedBoxes = boxes.sortBy(_.value).reverse
-    while(initVal < value){
-      initSeq = initSeq :+ sortedBoxes(counter)
-      initVal = initVal + sortedBoxes(counter).value
-      counter = counter + 1
-    }
-    initSeq
-  }
 
 }

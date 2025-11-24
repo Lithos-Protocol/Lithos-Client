@@ -1,5 +1,6 @@
 package stratum;
 
+import lfsm.LFSMHelpers;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import sigma.pow.Autolykos2PowValidation;
@@ -93,7 +94,9 @@ public class JobManager {
 		BlockTemplate blockTemplate = new BlockTemplate(
 				jobCounter.next(),
 				miningCandidate,
-				options.tau
+				options.tau,
+                miningCandidate.proof != null,
+                false
 		);
 
 		this.currentJob = blockTemplate;
@@ -106,7 +109,8 @@ public class JobManager {
 	/**
 	 * @return whether a new block was processed
 	 */
-	public boolean processTemplate(MiningCandidate candidate, BigInteger tau) {
+	public boolean processTemplate(MiningCandidate candidate, BigInteger tau,
+                                   boolean usesCollateral, boolean reducedShareMessages) {
 		boolean isNewBlock = currentJob == null;
 		// Block is new if it's the first one seen or if the hash is different and the height is higher
 		if (!isNewBlock && !Arrays.equals(currentJob.candidate.msg, candidate.msg)) {
@@ -118,19 +122,21 @@ public class JobManager {
 		}
 
 		if (!isNewBlock) return false;
-		logger.info("Job manager got new block template");
+        logger.info("Job manager got new block template with usesCollateral = {}", usesCollateral);
 		BlockTemplate blockTemplate = new BlockTemplate(
 				jobCounter.next(),
 				candidate,
-				tau
+				tau,
+                usesCollateral,
+                reducedShareMessages
 		);
 
 		currentJob = blockTemplate;
 
-		validJobs.clear();
+
 
 		triggerEvent(new NewBlock(blockTemplate));
-
+        validJobs.clear();
 		validJobs.put(blockTemplate.jobId, blockTemplate);
         logger.info("Sent new job with height = {}, b = {}", candidate.height, candidate.b);
 		return true;
@@ -182,39 +188,54 @@ public class JobManager {
 			return null;
 		}
 
-		if (!job.registerSubmit(extraNonce1, extraNonce2, nTime, nonce)) {
-			shareError.run(22, "duplicate share");
-			return null;
-		}
+//		if (!job.registerSubmit(extraNonce1, extraNonce2, nTime, nonce)) {
+//			shareError.run(22, "duplicate share");
+//			return null;
+//		}
 		byte[] h = Utils.intBytes((int) job.candidate.height);
 		BigInteger fH = Autolykos2PowValidation.hitForVersion2ForMessageWithChecks(32, job.msg, nonce, h, N(job.candidate.height).intValue()).bigInteger();
 
 		byte[] blockHash;
+        boolean isBlock = false;
+        boolean isSuperShare = false;
 		// Check if share is a block candidate (matched network difficulty)
 		if (job.candidate.b.compareTo(fH) >= 0) {
 			// Must submit solution
-			blockHash = fH.toByteArray();
-		} else {
-			// Check if share didn't reach the miner's difficulty
-			if (new BigInteger(job.getJobParams().getString(6)).compareTo(fH) <= 0) {
-				shareError.run(32, "Low difficulty share");
-				return null;
-			}
-			blockHash = new byte[0];
+            isBlock = true;
+            logger.info("Got solution below target");
 		}
+        blockHash = fH.toByteArray();
+        BigInteger superShareThreshold = job.tau.divide(BigInteger.valueOf(LFSMHelpers.NISP_COEFFICIENT()));
+
+        if(superShareThreshold.compareTo(fH) >= 0){
+            if(job.usedCollateral) {
+                logger.info("Got super share at coefficient {}", job.tau.divide(fH));
+                isSuperShare = true;
+            }else{
+                logger.info("Got super share at coefficient {}, but miner was solo-mining!", job.tau.divide(fH));
+            }
+        }else {
+            // Check if share didn't reach the miner's difficulty
+            if (job.tau.compareTo(fH) < 0) {
+                shareError.run(32, "Low difficulty share");
+                return null;
+            }
+            blockHash = new byte[0];
+        }
 
 		triggerEvent(new Share(new Success(
 				jobId,
 				ipAddress,
 				workerName,
-				difficulty,
+                job.tau,
 				job.candidate.height,
 				job.candidate.msg,
-				1,
-				false,
-				job.tau,
+				fH,
+				isBlock,
+				job.candidate.b,
 				blockHash,
-				false
+                isSuperShare,
+                job.candidate
 		), nonce));
 
 		return blockHash;

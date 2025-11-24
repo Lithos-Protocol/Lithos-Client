@@ -16,6 +16,7 @@ object LFSMHelpers {
 
   final val HOLDING_PERIOD = 360L // 360 Blocks, or 12 hours
   final val EVAL_PERIOD    = 360L
+  final val NISP_COEFFICIENT = 10000 // Coefficient which separates normal shares from super-shares, used in evaluation
   // TODO: Change back FP token after first week of testnet
   final val FP_TOKEN       = ErgoId.create("5a3f8a958178fc6e3b37aeea8fb94d8e6d33a7e4d2c7e70aa7db4e13c08a9903")
 

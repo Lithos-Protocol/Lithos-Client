@@ -14,5 +14,5 @@ class StratumConfig(config: Configuration){
   val extraNonce1Size: Int = config.get[Int]("stratum.extraNonce1Size")
   val connectionTimeout: Int = config.get[Int]("stratum.connectionTimeout")
   val blockRefreshInterval: Int = config.get[Int]("stratum.blockRefreshInterval")
-
+  val reduceShareMessages: Boolean = config.get[Boolean]("stratum.reduceShareMessages")
 }

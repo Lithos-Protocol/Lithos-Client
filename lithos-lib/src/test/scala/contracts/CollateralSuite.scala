@@ -4,6 +4,7 @@ import contracts.ContractTestHelpers.{client, localClient}
 import lfsm.LFSMHelpers
 import lfsm.collateral.CollateralContract
 import lfsm.rollup.RollupContracts
+import mutations.BoxLoader
 import org.bouncycastle.util.encoders.Hex
 import org.ergoplatform.ErgoTreePredef
 import org.ergoplatform.appkit._
@@ -54,8 +55,6 @@ class CollateralSuite extends AnyFunSuite{
         println(sTx.toJson(true))
     }
   }
-
-
 
   test("Pay Collateral No Change"){
     client.execute{

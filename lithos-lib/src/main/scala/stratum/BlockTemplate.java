@@ -52,20 +52,24 @@ public class BlockTemplate {
 
 	private final Set<Object> submissions = new HashSet<>();
 
-	public BlockTemplate(String jobId, MiningCandidate miningCandidate) {
+	public BlockTemplate(String jobId, MiningCandidate miningCandidate, boolean usedCollateral) {
 		this.jobId = jobId;
 		this.candidate = miningCandidate;
 		this.target = miningCandidate.b;
 		this.tau = BigInteger.valueOf(0);
 		this.msg = miningCandidate.msg;
+        this.usedCollateral = usedCollateral;
 	}
 
-	public BlockTemplate(String jobId, MiningCandidate miningCandidate, BigInteger tau) {
+	public BlockTemplate(String jobId, MiningCandidate miningCandidate, BigInteger tau,
+                         boolean usedCollateral, boolean reducedShareMessages) {
 		this.jobId = jobId;
 		this.candidate = miningCandidate;
 		this.target = miningCandidate.b;
 		this.tau = tau;
 		this.msg = miningCandidate.msg;
+        this.usedCollateral = usedCollateral;
+        this.reducedShareMessages = reducedShareMessages;
 	}
 
 	public MiningCandidate candidate;
@@ -73,6 +77,8 @@ public class BlockTemplate {
 	public BigInteger target;
 	public BigInteger tau;
 	public byte[] msg;
+    public boolean usedCollateral;
+    public boolean reducedShareMessages;
 
 	public byte[] serializeCoinbase(byte[] extraNonce1, byte[] extraNonce2) {
 		return Utils.concat(msg, extraNonce1, extraNonce2);
@@ -94,7 +100,7 @@ public class BlockTemplate {
 				"",
 				"",
 				Integer.toHexString(candidate.version),
-				tau.toString(),
+                reducedShareMessages ? tau.divide(new BigInteger("1000")).toString() : tau.toString(),
 				"",
 				true
 		);
