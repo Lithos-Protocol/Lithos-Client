@@ -209,7 +209,7 @@ public class JobManager {
 
         if(superShareThreshold.compareTo(fH) >= 0){
             if(job.usedCollateral) {
-                logger.info("Got super share at coefficient {}", job.tau.divide(fH));
+                logger.info("Got super share at coefficient {} from base difficulty", job.tau.divide(fH));
                 isSuperShare = true;
             }else{
                 logger.info("Got super share at coefficient {}, but miner was solo-mining!", job.tau.divide(fH));

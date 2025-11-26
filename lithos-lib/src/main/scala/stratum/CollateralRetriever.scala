@@ -77,7 +77,7 @@ class CollateralRetriever(client: ErgoClient, prover: ErgoProver) {
           .setPreHeader(ctx.createPreHeader().minerPk(lenderAddress.getPublicKeyGE).build())
           .buildTx(0, lenderAddress)
         val sTx = prover.sign(uTx)
-        sTx.toJson(false, false) -> pkString
+        (sTx.getId.replace("\"", ""), sTx.toJson(false, false), pkString)
     }
   }
 }

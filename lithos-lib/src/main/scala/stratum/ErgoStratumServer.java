@@ -111,7 +111,14 @@ public class ErgoStratumServer extends StratumTcpServer {
 	}
 
 	public void broadcastMiningJob(BlockTemplate blockTemplate) {
-		getConnections().asMap().forEach((k, v) -> v.sendResponse(Announcement.miningJob(blockTemplate)));
+		getConnections().asMap().forEach((k, v) -> {
+            try {
+                v.sendResponse(Announcement.miningJob(blockTemplate));
+            } catch (Exception e) {
+                logger.warn("Failed to send mining job due to connection error (Did you reconnect your miner?)");
+            }
+        }
+    );
 	}
 
 	public static class ErgoConnectionState extends AbstractConnectionState {

@@ -1,10 +1,17 @@
 package stratum;
 
+import lfsm.LFSMHelpers;
+import nisp.NISP$;
+import nisp.NISPDatabase;
+import nisp.SuperShare;
 import org.ergoplatform.appkit.ErgoClient;
 import org.ergoplatform.appkit.ErgoProver;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import scala.Tuple2;
+import scala.Tuple3;
+import scala.math.BigInt;
+import scorex.utils.Ints;
 import stratum.data.MiningCandidate;
 import stratum.data.Options;
 import stratum.data.ShareData;
@@ -109,7 +116,24 @@ public class Pool {
                         logger.info("New block found after submission!");
                 }
                 if(successfulShare.isSuperShare) {
-                    logger.info("Saving supershare for block {}", successfulShare.height);
+                    SuperShare share = SuperShare.fromCandidate(e.nonce, successfulShare.candidate);
+                    logger.info("Saving super share for block {}", share.getHeight());
+                    NISPDatabase nispDB = new NISPDatabase();
+                    long score = LFSMHelpers.convertTauOrScore(BigInt.apply(successfulShare.difficulty)).longValue();
+                    boolean success = nispDB.addNISP(share.getHeight(), score, share);
+                    if(success){
+                        logger.info("Successfully saved super share");
+                        logger.info("NISP-DB: {} entries, lastHeight: {}, currentHeight: {}",
+                                nispDB.size(), // TODO: Potentially expensive call, consider removing later
+                                Ints.fromByteArray(nispDB.lastHeight().get()),
+                                Ints.fromByteArray(nispDB.currentHeight().get())
+                        );
+                    }else{
+                        // Failure to save super-share directly affects payments,
+                        // and should be treated as a critical error
+                        throw new RuntimeException("Failed to save super share to NISP database");
+                    }
+
                 }
 
 			}
@@ -135,12 +159,13 @@ public class Pool {
             try {
                 //TODO If script fails on node-side, does pk get reset?
                 CollateralRetriever retriever = new CollateralRetriever(client, prover);
-                Tuple2<String, String> tuple = retriever.getCollateral();
+                Tuple3<String, String, String> tuple = retriever.getCollateral();
                 candidate = MiningCandidate.fromJson(
-                        nodeInterface.miningCandidate(true, tuple._1, apiKey),
-                        options.data.protocolVersion // unused
+                        nodeInterface.miningCandidate(true, tuple._2(), apiKey),
+                        options.data.protocolVersion, tuple._1()
+                        // unused
                 );
-                pk = tuple._2;
+                pk = tuple._3();
             } catch (Exception e) {
                 //e.printStackTrace();
                 logger.error(e.getMessage());

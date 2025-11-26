@@ -11,7 +11,7 @@ Lithos relies on your local Ergo Testnet node to:
 
 - Sync the blockchain  
 - Sign transactions using the node wallet keystore  
-- Provide block and header data for rollup evaluation  
+- Provide block and superShare data for rollup evaluation  
 - Expose a REST API Lithos communicates with  
 
 The node must be running and fully synced before Lithos can operate.
