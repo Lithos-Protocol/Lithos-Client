@@ -1,5 +1,6 @@
 package state
 
+import lfsm.{LFSMPhase, NISPTree}
 import org.bouncycastle.util.encoders.Hex
 import org.ergoplatform.appkit.{ErgoClient, ErgoProver, ErgoValue}
 import org.ergoplatform.restapi.client.FullBlock
@@ -64,10 +65,24 @@ object LFSMSync {
               o => o.getErgoTree == Hex.toHexString(evalContract(ctx).propBytes)
             }.get
             val input = e.getInputs.get(0)
+            val optNISPTree = cache.get[NISPTree](input.getBoxId)
+            logger.info(s"Checking payout for ${input.getBoxId}")
+            optNISPTree match {
+              case Some(nispTree) =>
+                nispTree.phase match {
+                  case LFSMPhase.HOLDING =>
+                    logger.info(s"Found new evaluation contract at block ${fullBlock.getHeader.getHeight}")
+                    NISPTreeCache.cacheNewEval(ctx, input, output, cache)
+                  case LFSMPhase.EVAL =>
+                    logger.info(s"Found existing evaluation contract at block ${fullBlock.getHeader.getHeight}")
+                    NISPTreeCache.cacheExistingEval(ctx, input, e.getInputs.get(1), output, cache, prover)
+                  case _ =>
+                    logger.error("NISP Tree in invalid phase for evaluation")
+                }
+              case None =>
+                logger.error(s"Could not find NISP Tree ${input.getBoxId}")
+            }
 
-            logger.info(s"Found new evaluation contract at block ${fullBlock.getHeader.getHeight}")
-            NISPTreeCache.cacheNewEval(ctx, input, output, cache)
-            //TODO Add back FP stuff next week
 
         }
     }

@@ -1,4 +1,4 @@
-package state
+package lfsm
 
 sealed trait LFSMPhase
 object LFSMPhase extends {

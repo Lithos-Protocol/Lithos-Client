@@ -17,7 +17,7 @@ import stratum.data.MiningCandidate
  *
  * Where 1 SuperShare is:
  *
- * [SuperShare: (nonce: 8bytes)(headerPreImg: 179bytes)(numLevels: 1byte)(leaf: 32bytes)(levels: numLevels*33bytes)]
+ * [SuperShare: (N: 4bytes)(header: 220bytes)(numLevels: 1byte)(leaf: 32bytes)(levels: numLevels*33bytes)]
  * @param score Score representation of tau for this NISP
  * @param shares Set of SuperShares (Must equal 10 to be a valid NISP)
  */

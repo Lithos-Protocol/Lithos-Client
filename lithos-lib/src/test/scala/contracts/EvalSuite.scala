@@ -48,7 +48,8 @@ class EvalSuite extends AnyFunSuite{
         tree.ergoValue,
         ErgoValue.of(SCORE_VALUES.size),
         ErgoValue.of(BigInt(TOTAL_SCORE).bigInteger),
-        ErgoValue.of(ctx.getHeight.toLong - LFSMHelpers.EVAL_PERIOD + addHeight)
+        ErgoValue.of(ctx.getHeight.toLong - LFSMHelpers.EVAL_PERIOD + addHeight),
+        ErgoValue.of(ctx.getHeight.toLong - LFSMHelpers.EVAL_PERIOD + addHeight - LFSMHelpers.HOLDING_PERIOD)
       ))
   }
 

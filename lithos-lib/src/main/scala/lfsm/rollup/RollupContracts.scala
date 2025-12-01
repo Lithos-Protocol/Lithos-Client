@@ -3,6 +3,7 @@ package lfsm.rollup
 import lfsm.ScriptGenerator
 import org.ergoplatform.appkit.{BlockchainContext, ConstantsBuilder, ErgoId}
 import sigma.Colls
+import sigma.data.ProveDlog
 import work.lithos.mutations.Contract
 
 object RollupContracts {
@@ -16,8 +17,8 @@ object RollupContracts {
   def mkEvalContract(ctx: BlockchainContext, periodLength: Long, payoutBytes: Array[Byte], fpToken: ErgoId): Contract = {
     val constants = ConstantsBuilder.create()
       .item("CONST_PERIOD_LENGTH", periodLength)
-      .item("CONST_PAYOUT_PROPBYTES", payoutBytes)
-      .item("CONST_FP_ID", fpToken.getBytes)
+      .item("CONST_PAYOUT_PROPBYTES", Colls.fromArray(payoutBytes))
+      .item("CONST_FP_ID", Colls.fromArray(fpToken.getBytes))
       //.item("CONST_CMD_ID, cmdToken")
       .build()
 
@@ -27,11 +28,19 @@ object RollupContracts {
   def mkHoldingContract(ctx: BlockchainContext, periodLength: Long, evalBytes: Array[Byte]): Contract = {
     val constants = ConstantsBuilder.create()
       .item("CONST_PERIOD_LENGTH", periodLength)
-      .item("CONST_EVAL_PROPBYTES", evalBytes)
+      .item("CONST_EVAL_PROPBYTES", Colls.fromArray(evalBytes))
       //.item("CONST_CMD_ID, cmdToken")
       .build()
 
     Contract.fromErgoScript(ctx, constants, ScriptGenerator.mkRollupScript("Holding"))
+  }
+
+  def mkFPControlTestnetContract(ctx: BlockchainContext, proveDlog: ProveDlog): Contract = {
+    val constants = ConstantsBuilder.create()
+      .item("CONST_TESTNET_PK", proveDlog)
+      .build()
+
+    Contract.fromErgoScript(ctx, constants, ScriptGenerator.mkRollupScript("FP_Control_Testnet"))
   }
 
 }

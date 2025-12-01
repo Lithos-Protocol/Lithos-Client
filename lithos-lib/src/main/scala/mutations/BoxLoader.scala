@@ -14,7 +14,7 @@ class BoxLoader(ctx: BlockchainContext) {
     val boxes = JavaHelpers.toIndexedSeq(ctx.getDataSource.getUnconfirmedUnspentWalletBoxes)
       .map(InputUTXO(_)).sortBy(_.value)
     for(i <- boxes) boxStack.push(i)
-    println(s"Loaded ${boxStack.size} boxes in BoxLoader")
+    logger.info(s"Loaded ${boxStack.size} boxes in BoxLoader")
     this
   }
 
@@ -30,7 +30,7 @@ class BoxLoader(ctx: BlockchainContext) {
       currentValue = currentValue + input.value
       inputBoxes = inputBoxes :+ input
     }
-    logger.info(s"Loaded ${inputBoxes.size} boxes in BoxLoader")
+    logger.info(s"Returned ${inputBoxes.size} boxes from BoxLoader")
 
     inputBoxes.toSeq
   }

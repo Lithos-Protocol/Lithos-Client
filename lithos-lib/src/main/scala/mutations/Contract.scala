@@ -1,14 +1,22 @@
 package work.lithos
 package mutations
 
+
 import org.bouncycastle.util.encoders.Hex
+import org.ergoplatform.ErgoAddressEncoder.NetworkPrefix
 import org.ergoplatform.appkit._
 import scorex.crypto.hash.Blake2b256
-import sigma.ast.{ErgoTree, SBoolean, SSigmaProp, Value}
-import sigma.ast.syntax.{FalseSigmaProp, TrueSigmaProp}
+import sigma.VersionContext
+import sigma.ast.SCollection.SByteArray
+import sigma.ast.SigmaPredef.{PredefFuncInfo, PredefinedFunc, PredefinedFuncRegistry}
+import sigma.ast.{ErgoTree, Global, Lambda, MethodCall, OperationInfo, SBoolean, SByte, SCollection, SGlobalMethods, SInt, SSigmaProp, SType, SUnsignedBigInt, SigmaBuilder, TransformingSigmaBuilder, Value}
+import sigma.ast.syntax.{FalseSigmaProp, SValue, TrueSigmaProp}
 import sigma.compiler.ir.CompiletimeIRContext
-import sigma.compiler.{CompilerResult, SigmaCompiler}
+import sigma.compiler.phases.{SigmaBinder, SigmaTyper}
+import sigma.compiler.{CompilerResult, CompilerSettings, SigmaCompiler}
 import sigma.data.SigmaBoolean
+import sigma.serialization.CoreByteWriter.ArgInfo
+import sigmastate.interpreter.Interpreter.ScriptEnv
 
 import scala.collection.JavaConverters
 import scala.util.{Failure, Success, Try}
@@ -64,14 +72,19 @@ object Contract {
 
   def compileContract(script: String, constants: Constants, networkType: NetworkType) = {
     val compiler = new SigmaCompiler(networkType.networkPrefix)
-    val ergoTreeHeader = ErgoTree.defaultHeaderWithVersion(3.toByte)
-    Try(compiler.compile(JavaConverters.mapAsScalaMap(constants).toMap, script)(new CompiletimeIRContext)).flatMap {
-      case CompilerResult(_, _, _, script: Value[SSigmaProp.type@unchecked]) if script.tpe == SSigmaProp =>
-        Success(ErgoTree.fromProposition(ergoTreeHeader, script))
-      case CompilerResult(_, _, _, script: Value[SBoolean.type@unchecked]) if script.tpe == SBoolean =>
-        Success(ErgoTree.fromProposition(ergoTreeHeader, script.toSigmaProp))
-      case other =>
-        Failure(new Exception(s"Source compilation result is of type ${other.buildTree.tpe}, but `SBoolean` expected"))
+    VersionContext.withVersions(VersionContext.V6SoftForkVersion, VersionContext.V6SoftForkVersion){
+      val ergoTreeHeader = ErgoTree.defaultHeaderWithVersion(VersionContext.V6SoftForkVersion)
+      Try(compiler.compile(JavaConverters.mapAsScalaMap(constants).toMap, script)(new CompiletimeIRContext)).flatMap {
+        case CompilerResult(_, _, _, script: Value[SSigmaProp.type @unchecked]) if script.tpe == SSigmaProp =>
+          Success(ErgoTree.fromProposition(ergoTreeHeader, script))
+        case CompilerResult(_, _, _, script: Value[SBoolean.type @unchecked]) if script.tpe == SBoolean =>
+          Success(ErgoTree.fromProposition(ergoTreeHeader, script.toSigmaProp))
+        case other =>
+          Failure(new Exception(s"Source compilation result is of type ${other.buildTree.tpe}, but `SBoolean` expected"))
+      }
     }
   }
 }
+
+
+

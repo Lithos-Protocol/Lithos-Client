@@ -12,7 +12,7 @@
   val nispTree:      AvlTree = SELF.R4[AvlTree].get
   val currentMiners: Int     = SELF.R5[Int].get
   val totalScore:    Long    = SELF.R6[BigInt].get
-  val currentPeriod: Int     = SELF.R7[Long].get
+  val currentPeriod: Long    = SELF.R7[Long].get
 
   // CONSTANTS
   // CONST_PERIOD_LENGTH: Length of submission period, helps determine current spending path
@@ -54,7 +54,6 @@
     // evaluation phase.
     val validNISP = {
       if(CTX_NISP_DATA._2.size > 8){
-        // TODO: Attack vector by posting too large score and causing overflow?
         val score: Long = byteArrayToLong( CTX_NISP_DATA._2.slice(0,8) )
         score > 0 && nextScore == totalScore + score.toBigInt
       }else{
@@ -86,6 +85,7 @@
   }else{
     // Spending Path 2: Transform UTXO into evaluation contract to start checking for fraud proofs after
     // submission period has expired
+    val nextBlock = nextUTXO.R8[Long].getOrElse(0L)
     val conservedValues = allOf(
       Coll(
         nextUTXO.value  == SELF.value,
@@ -94,7 +94,8 @@
         nextScore       == totalScore,
         nextPeriod      <= HEIGHT, // Period start is updated as we enter new phase
         nextPeriod      >= currentPeriod + CONST_PERIOD_LENGTH,
-        SELF.id         == INPUTS(0).id // Prevent weirdness / exploits by enforcing one Holding UTXO per tx
+        SELF.id         == INPUTS(0).id, // Prevent weirdness / exploits by enforcing one Holding UTXO per tx
+        nextBlock       == currentPeriod // Save start of current period to be used in evaluation
       )
     )
 

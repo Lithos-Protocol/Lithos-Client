@@ -7,6 +7,8 @@ import org.bouncycastle.util.encoders.Hex
 import org.ergoplatform.ErgoTreePredef
 import org.ergoplatform.appkit._
 import org.scalatest.funsuite.AnyFunSuite
+import scorex.crypto.authds.avltree.batch.BatchAVLProver
+import scorex.crypto.hash.{Blake2b256, Digest32}
 import scorex.utils.Longs
 import sigma.Colls
 import sigma.data.AvlTreeFlags
@@ -91,7 +93,8 @@ class HoldingSuite extends AnyFunSuite{
             tree.ergoValue,
             ErgoValue.of(SCORE_VALUES.size),
             ErgoValue.of(BigInt(TOTAL_SCORE).bigInteger),
-            ErgoValue.of(ctx.getHeight.toLong)
+            ErgoValue.of(ctx.getHeight.toLong),
+            holdingInput.registers(3)
           ))
 
         val uTx = TxBuilder(ctx)
@@ -172,9 +175,23 @@ class HoldingSuite extends AnyFunSuite{
         val newKeyVal = getMiners(ctx).zip(SCORE_VALUES)
           .slice(0, 1)
           .map(x => x._1.hashedPropBytes -> (Longs.toByteArray(x._2) ++ Array(0.toByte)))
+        val copy = tree.copy()
+        copy.prover.generateProof()
+        println(s"Copy Digest: ${copy.toString()} Real Digest: ${tree.toString()}")
+
         val insertion = tree.insert(
           newKeyVal:_*
         )
+
+        val insertion2 = copy.insert(
+          newKeyVal:_*
+        )
+
+        println(s"Copy Digest: ${copy.toString()} Real Digest: ${tree.toString()}")
+        println(insertion2.proof.bytes sameElements insertion.proof.bytes)
+        println("Real Insertion: " + Hex.toHexString(insertion.proof.bytes))
+        println("Copy Insertion: " + Hex.toHexString(insertion2.proof.bytes))
+
         val inputWithContext = holdingInput.setCtxVars(
           ContextVar.of(0.toByte, getProverContract(ctx).sigmaBoolean.get),
           ContextVar.of(
@@ -184,11 +201,11 @@ class HoldingSuite extends AnyFunSuite{
               ErgoValue.ofColl(Colls.fromArray(newKeyVal.head._2), ErgoType.byteType())
             )
           ),
-          ContextVar.of(2.toByte, insertion.proof.ergoValue)
+          ContextVar.of(2.toByte, insertion2.proof.ergoValue)
         )
         val output = UTXO(holding, SIXTY_ERG,
           registers = Seq(
-            tree.ergoValue,
+            copy.ergoValue,
             ErgoValue.of(3),
             ErgoValue.of(BigInt(
               Longs.fromByteArray(newKeyVal.head._2.slice(0, 8)) + SCORE_VALUES.slice(1,3).sum).bigInteger

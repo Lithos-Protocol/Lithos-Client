@@ -145,12 +145,13 @@ class NISPDatabase {
   /**
    * Gets the best valid NISP before a given height and above a given score. If a NISP with 10 super-shares cannot be
    * made, `None` is returned.
-   * @param height Height that all super-shares must be under. Super-shares must be above (height - 360)
+   * @param height Height that all super-shares must be under. Super-shares must be above (height - NISP_PERIOD)
    * @param score Score that all super-shares must be above.
    * @return `Some(NISP)` with 10 super-shares below the given height and above the given score, or `None`
    */
   def getBestValidNISP(height: Int, score: Long): Option[NISP] = {
-    val minHeight = height - LFSMHelpers.HOLDING_PERIOD.toInt
+    require(lastHeight.isDefined, "Cannot search for NISPs when lastHeight is undefined")
+    val minHeight = height - LFSMHelpers.NISP_PERIOD.toInt
     val start = Math.max(minHeight, lastHeight.map(Ints.fromByteArray).get)
     val nisps = for(i <- start to height) yield getNISP(i)
     val validNISPs = nisps.filter(n => n.isDefined && n.get.score >= score).map(_.get)
@@ -167,7 +168,7 @@ class NISPDatabase {
     if(bestNISP.isEmpty || bestNISP.get.shares.size < 10){
       None
     }else{
-      bestNISP
+      Some(bestNISP.get.copy(shares = bestNISP.get.shares.take(10)))
     }
   }
 

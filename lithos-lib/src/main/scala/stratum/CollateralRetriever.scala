@@ -25,7 +25,7 @@ class CollateralRetriever(client: ErgoClient, prover: ErgoProver) {
         // TODO: Change back fp token after first week of testnet
         val eval     = RollupContracts.mkEvalContract(ctx,
           LFSMHelpers.EVAL_PERIOD, payout.hashedPropBytes,
-          LFSMHelpers.FP_TOKEN)
+          LFSMHelpers.getFPToken(ctx))
         val holding  = RollupContracts.mkHoldingContract(ctx, LFSMHelpers.HOLDING_PERIOD, eval.hashedPropBytes)
         val collateral = CollateralContract.mkTestnetCollatContract(ctx, holding.hashedPropBytes)
         val utxos = ctx.getUnspentBoxesFor(collateral.address(ctx.getNetworkType), 0, 10)

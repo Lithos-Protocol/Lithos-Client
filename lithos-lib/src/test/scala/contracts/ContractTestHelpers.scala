@@ -20,7 +20,7 @@ object ContractTestHelpers {
     "http://127.0.0.1" + ":9052/",
     NetworkType.TESTNET,
     "hello",
-    RestApiErgoClient.getDefaultExplorerUrl(networkType))
+    "https://api-testnet.ergoplatform.com")
 
   def getProver(ctx: BlockchainContext) = {
      ctx.newProverBuilder().withMnemonic(SecretString.create("Put Secret Key Here :)"),

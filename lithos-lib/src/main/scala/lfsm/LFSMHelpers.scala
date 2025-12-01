@@ -1,6 +1,9 @@
 package lfsm
 
-import org.ergoplatform.appkit.ErgoId
+import lfsm.rollup.RollupContracts
+import org.ergoplatform.appkit.impl.NodeAndExplorerDataSourceImpl
+import org.ergoplatform.appkit.{Address, BlockchainContext, ErgoId, JavaHelpers, NetworkType}
+import work.lithos.mutations.InputUTXO
 
 import java.math.{BigDecimal, BigInteger, RoundingMode}
 import scala.util.Try
@@ -16,10 +19,12 @@ object LFSMHelpers {
 
   final val HOLDING_PERIOD = 360L // 360 Blocks, or 12 hours
   final val EVAL_PERIOD    = 360L
+  final val NISP_PERIOD    = 360L
   final val NISP_COEFFICIENT = 10000 // Coefficient which separates normal shares from super-shares, used in evaluation
   // TODO: Change back FP token after first week of testnet
-  final val FP_TOKEN       = ErgoId.create("5a3f8a958178fc6e3b37aeea8fb94d8e6d33a7e4d2c7e70aa7db4e13c08a9903")
-
+  final val FP_TOKEN_MAINNET        = ErgoId.create("5a3f8a958178fc6e3b37aeea8fb94d8e6d33a7e4d2c7e70aa7db4e13c08a9903")
+  final val FP_TOKEN_TESTNET        = ErgoId.create("9c29e54b037db7c5dd21911ef924caca5c7eee2e00b87b31a49759db674d049d")
+  final val FP_CONTROL_TESTNET      = Address.create("ShDJAh75M4bDZbCowYGqtmHi4iiBMqWJcbQRYLaxx8tZZHtj23c7qEcEvUiXYvSdnjdWE6R328rSazggEzz7UWRqXGZWc6L28bo96jMNK8NZs1bQBHAxkb9rLFW8Gf3HFQRPUm26CX8LZeqF1iJvftCYHTp2KC2LisbheejGeoXkv")
   /**
    * Parse diff string and return its tau value
    * @param diffValue String such as "4.0G", "2.411T". Supports up to Petahash difficulty
@@ -77,5 +82,22 @@ object LFSMHelpers {
    */
   def paymentFromScore(score: Long, totalScore: BigInt, totalValue: Long): Long = {
     ((BigInt(totalValue) * BigInt(score)) / totalScore).toLong
+  }
+
+  def getFPToken(ctx: BlockchainContext): ErgoId = {
+    ctx.getNetworkType match {
+      case NetworkType.MAINNET => FP_TOKEN_MAINNET
+      case NetworkType.TESTNET => FP_TOKEN_TESTNET
+    }
+  }
+  // TODO: Change for mainnet
+  def getFPControlBox(ctx: BlockchainContext): InputUTXO = {
+
+    val fpControlBoxes = JavaHelpers.toIndexedSeq(ctx.getUnspentBoxesFor(FP_CONTROL_TESTNET, 0, 100)).map(InputUTXO(_))
+    val optFPControl = fpControlBoxes.find(i => i.tokens.exists(_.id == getFPToken(ctx)))
+    optFPControl match {
+      case Some(fpControl) => fpControl
+      case None => throw new RuntimeException("Could not find fpControl UTXO")
+    }
   }
 }

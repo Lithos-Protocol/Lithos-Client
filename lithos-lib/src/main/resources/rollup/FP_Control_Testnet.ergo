@@ -1,0 +1,37 @@
+{
+  // FP_Control_Testnet
+  // Value: unspecified (0.001 ERG)
+  // Holds R4[Coll[Coll[Byte]]] which defines valid fraud proof contracts to spend with eval box
+  // As this is testnet, it is spendable by given PK, so as to allow updates
+  // In mainnet, we should control this with some sort of DAO (paideia?) or keep it as a protocol constant
+
+  // REGISTERS
+  // R4: fpSet, representing hashedPropBytes of all valid FP contracts
+
+  val fpControl: Box          = SELF
+  val fpSet: Coll[Coll[Byte]] = fpControl.R4[Coll[Coll[Byte]]].get
+  val fpToken                 = fpControl.tokens(0)
+
+  // NEXT VALUES
+  val nextUTXO    = OUTPUTS(0)
+  val nextFPSet   = nextUTXO.R4[Coll[Coll[Byte]]].get
+  val nextFPToken = nextUTXO.tokens(0)
+
+  // Constants
+  // CONST_TESTNET_PK - Testnet owner who can change valid FP contracts
+
+  // Spending path 1: Re-create utxo to avoid storage rent
+  val recreated = allOf(
+    Coll(
+      SELF.id == INPUTS(0).id, // Only one FP control box per tx
+      nextFPSet == fpSet,
+      nextFPToken._2 == 1L,
+      nextFPToken == fpToken,
+      fpControl.propositionBytes == nextUTXO.propositionBytes
+    )
+  )
+
+  // Spending path 2: Signed by testnet owner
+  sigmaProp(recreated) || CONST_TESTNET_PK
+
+}

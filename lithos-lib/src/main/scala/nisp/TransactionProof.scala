@@ -16,6 +16,10 @@ object TransactionProof {
   final val LEVEL_SIZE  = 33
   def deserialize(bytes: Array[Byte], numLevels: Int): TransactionProof = {
     require(numLevels >= 1, "Number of levels for transaction proof must be greater than or equal to 1")
-    TransactionProof(bytes.slice(0, LEAF_SIZE), bytes.slice(LEAF_SIZE, LEVEL_SIZE * (1 + numLevels)).grouped(LEVEL_SIZE).toSeq)
+    val leaf = bytes.slice(0, LEAF_SIZE)
+    val levels = bytes.slice(LEAF_SIZE, LEVEL_SIZE * (1 + numLevels)).grouped(LEVEL_SIZE).toSeq
+    require(leaf.length == LEAF_SIZE, s"Merkle Proof leaf did not equal required size ${LEAF_SIZE}")
+    require(levels.forall(_.length == LEVEL_SIZE), s"Merkle Proof levels did not equal required size ${LEVEL_SIZE}")
+    TransactionProof(leaf, levels)
   }
 }

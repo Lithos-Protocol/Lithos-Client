@@ -2,53 +2,66 @@ package nisp
 
 import org.bouncycastle.util.encoders.Hex
 import org.ergoplatform.appkit.JavaHelpers
-import org.ergoplatform.{AutolykosSolution, HeaderWithoutPow, HeaderWithoutPowSerializer}
+import org.ergoplatform.{AutolykosSolution, ErgoHeader, HeaderWithoutPow, HeaderWithoutPowSerializer}
+import scorex.utils.Ints
+import sigma.pow.Autolykos2PowValidation
+import sigma.serialization.GroupElementSerializer
 import stratum.data.MiningCandidate
 
-case class SuperShare(nonce: Array[Byte], msgPreImg: Array[Byte], txProof: Option[TransactionProof] = None) {
+case class SuperShare(headerBytes: Array[Byte], txProof: Option[TransactionProof] = None) {
   def serialize: Array[Byte] = {
-    nonce ++ msgPreImg ++ Seq((if(txProof.isDefined) txProof.get.levels.size else 0).toByte) ++ txProof.map(_.serialize).toSeq.flatten
+    nBytes ++ headerBytes ++ Seq((if(txProof.isDefined) txProof.get.levels.size else 0).toByte) ++ txProof.map(_.serialize).toSeq.flatten
   }
 
   def size: Int = serialize.length
 
   override def toString: String = {
-    s"SuperShare(${Hex.toHexString(nonce)}, ${Hex.toHexString(msgPreImg)},\n " +
+    s"SuperShare(${Hex.toHexString(nBytes)}, ${Hex.toHexString(headerBytes)},\n " +
       s"${(if(txProof.isDefined) txProof.get.levels.size else 0).toByte}, \n " +
       s"${txProof})"
   }
 
-  def getHeaderWithoutPoW: HeaderWithoutPow = {
-    HeaderWithoutPowSerializer.fromBytes(msgPreImg)
+  def getHeader: ErgoHeader = {
+    ErgoHeader.sigmaSerializer.fromBytes(headerBytes)
   }
 
   def getHeight: Int =
-    getHeaderWithoutPoW.height
+    getHeader.height
+
+  def getN: Int = {
+    Autolykos2PowValidation.calcN(getHeight)
+  }
+
+  lazy val nBytes: Array[Byte] = Ints.toByteArray(getN)
+
 }
 object SuperShare {
-  final val HEADER_SIZE = 179
-  final val NONCE_SIZE = 8
+  final val HEADER_SIZE = 220
+  final val N_SIZE      = 4
   /**
    * Deserialize SuperShare from given bytes, discarding any unused bytes from end of the given array
    * @param bytes Bytes containing SuperShare
    * @return First SuperShare found within the given bytes
    */
   def deserialize(bytes: Array[Byte]): SuperShare = {
-    val nonce = bytes.slice(0, NONCE_SIZE)
-    val preImg = bytes.slice(NONCE_SIZE, NONCE_SIZE + HEADER_SIZE)
+    val nBytes = bytes.slice(0, N_SIZE)
+    val header = bytes.slice(N_SIZE, N_SIZE + HEADER_SIZE)
     val proof = {
-      if(bytes(HEADER_SIZE + NONCE_SIZE) != 0.toByte) {
+      if(bytes(N_SIZE + HEADER_SIZE) != 0.toByte) {
         Some(
           TransactionProof.deserialize(bytes.slice(
-            NONCE_SIZE + HEADER_SIZE + 1, NONCE_SIZE + HEADER_SIZE + 1 +
-              TransactionProof.LEAF_SIZE + (bytes(HEADER_SIZE + NONCE_SIZE).toInt * TransactionProof.LEVEL_SIZE)
-          ), bytes(HEADER_SIZE + NONCE_SIZE).toInt)
+            N_SIZE + HEADER_SIZE + 1, N_SIZE + HEADER_SIZE + 1 +
+              TransactionProof.LEAF_SIZE + (bytes(N_SIZE + HEADER_SIZE).toInt * TransactionProof.LEVEL_SIZE)
+          ), bytes(N_SIZE + HEADER_SIZE).toInt)
         )
       }else{
         None
       }
     }
-    SuperShare(nonce, preImg, proof)
+    require(Ints.fromByteArray(nBytes) == Autolykos2PowValidation
+      .calcN(ErgoHeader.sigmaSerializer.fromBytes(header).height),
+      "Stored N value and calculated N value must be equal")
+    SuperShare(header, proof)
   }
 
   def fromCandidate(nonce: Array[Byte], candidate: MiningCandidate): SuperShare = {
@@ -63,8 +76,12 @@ object SuperShare {
     val levelArr = collTxProof.get.getJSONArray("levels")
     val levels = for(i <- 0 until levelArr.toList.size()) yield levelArr.getString(i)
     val txProof = TransactionProof(Hex.decode(leaf), levels.map(Hex.decode))
+    val headerWithoutPow = HeaderWithoutPowSerializer.fromBytes(Hex.decode(preImage))
+    val ge = GroupElementSerializer.fromBytes(Hex.decode(candidate.pk))
+    val solution = new AutolykosSolution(ge, ge, nonce, BigInt("0"))
+    val header = headerWithoutPow.toHeader(solution, null)
 
-    SuperShare(nonce, Hex.decode(preImage), Some(txProof))
+    SuperShare(header.bytes, Some(txProof))
   }
 
   /**

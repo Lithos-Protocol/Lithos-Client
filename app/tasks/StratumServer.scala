@@ -14,6 +14,7 @@ import stratum.ErgoStratumServer
 import stratum.data.{Data, Options}
 import utils.Helpers
 
+import java.math.BigInteger
 import java.time.LocalDateTime
 import javax.inject.{Inject, Named, Singleton}
 import scala.concurrent.{Await, ExecutionContext, Future}
@@ -41,8 +42,13 @@ class StratumServer @Inject()(system: ActorSystem, config: Configuration, cs: Co
           stratumParams.connectionTimeout, stratumParams.blockRefreshInterval,
           nodeConfig.getNodeApi, t, new Data())
         logger.info("Stratum server starting at port " + stratumParams.stratumPort)
-        if(stratumParams.reduceShareMessages)
-          logger.info("Using reduced share messages. Stratum diff will be 1000x lower than real diff.")
+        if(stratumParams.reduceShareMessages) {
+          val stratumTau = t.divide(new BigInteger("1000"))
+          logger.info("Using reduced share messages. Stratum diff will be 1000x higher than real diff.")
+          logger.info(s"Stratum is using tau ${stratumTau}" +
+            s" (score: ${LFSMHelpers.convertTauOrScore(stratumTau)})")
+        }
+        logger.info(s"Using tau ${t} (score: ${LFSMHelpers.convertTauOrScore(t)}) for NISPs")
         val server = new ErgoStratumServer(options, true, true, nodeConfig.getClient,
           nodeConfig.prover, nodeConfig.getNodeKey, stratumParams.reduceShareMessages)
 

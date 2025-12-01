@@ -19,7 +19,7 @@ object Helpers {
   }
   def evalContract(ctx: BlockchainContext): Contract = {
     RollupContracts.mkEvalContract(ctx, LFSMHelpers.EVAL_PERIOD,
-      payoutContract(ctx).hashedPropBytes, LFSMHelpers.FP_TOKEN)
+      payoutContract(ctx).hashedPropBytes, LFSMHelpers.getFPToken(ctx))
   }
   def holdingContract(ctx: BlockchainContext): Contract = {
     RollupContracts.mkHoldingContract(ctx, LFSMHelpers.HOLDING_PERIOD, evalContract(ctx).hashedPropBytes)

@@ -165,7 +165,7 @@ public class Pool {
                         options.data.protocolVersion, tuple._1()
                         // unused
                 );
-                pk = tuple._3();
+                pk = candidate.pk; // TODO: Use candidate.pk until collateral is fixed
             } catch (Exception e) {
                 //e.printStackTrace();
                 logger.error(e.getMessage());

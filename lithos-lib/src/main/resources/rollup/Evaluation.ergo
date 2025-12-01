@@ -44,22 +44,29 @@
   // value of this UTXO is initialized to be the block reward
   // fpData is a utxo holding collection of hashed propBytes of distinct valid fraud proof contracts
 
-
+  val onlyOne = SELF.id == INPUTS(0).id // Enforce only one eval contract per transaction
   // Spending Path 1: Eval Contract is in validation phase
-  // if we're spending this utxo during evaluation, then it implies fraud has been found! We therefore check to see
+  // if we're spending this utxo during evaluation, then it implies fraud has been found. We therefore check to see
   // if a FP is posted.
-  // if(HEIGHT < currentPeriod + CONST_PERIOD_LENGTH){
-  //  val authenticFPData = fpData.tokens(0)._1 == CONST_FP_ID
 
-    // TODO: Can we optimize in the future to allow multiple FPs to be spent / modify the tree in the same tx?
-  //  val fpUtxo = INPUTS(1)
-  //  val validFP = fpUtxo.R4[Coll[Coll[Byte]].get.exists{ (x: Coll[Byte]) => x == blake2b256( fpUtxo.propositionBytes ) }
+  if(HEIGHT < currentPeriod + CONST_PERIOD_LENGTH){
+    val fpData     = CONTEXT.dataInputs(0)
+    val authenticFPData = fpData.tokens(0)._1 == CONST_FP_ID
 
-    // Fraud Proof contracts will handle the updated state of the Evaluation Contract, so we do not need to check
-    // for anything else.
+     //TODO: Can we optimize in the future to allow multiple FPs to be spent / modify the tree in the same tx?
+    val fpUtxo = INPUTS(1)
+    val fpSet = fpData.R4[Coll[Coll[Byte]]].get
+    val validFP = fpSet.exists{
+      (x: Coll[Byte]) =>
+       x == blake2b256( fpUtxo.propositionBytes )
+    }
 
-  //  sigmaProp( validFP )
-  //}else{
+
+    //Fraud Proof contracts will handle the updated state of the Evaluation Contract, so we do not need to check
+    //for anything else.
+
+    sigmaProp( authenticFPData && validFP && onlyOne )
+  }else{
   // Spending Path 2: Evaluation phase is over, transform utxo into payout contract
     val passedEvalPeriod = HEIGHT >= currentPeriod + CONST_PERIOD_LENGTH
     val conservedValues = allOf(
@@ -74,8 +81,8 @@
 
     val isPayoutContract = blake2b256( nextUTXO.propositionBytes ) == CONST_PAYOUT_PROPBYTES
 
-    sigmaProp(isPayoutContract && conservedValues && passedEvalPeriod)
+    sigmaProp(isPayoutContract && conservedValues && passedEvalPeriod && onlyOne)
 
-  //}
+  }
 
 }
