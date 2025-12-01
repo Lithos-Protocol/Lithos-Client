@@ -103,6 +103,12 @@ object FraudProof {
     contract match {
       case invalidDiff if propByteEquality(invalidDiff, FraudProofContracts.mkInvalidDiffContract(ctx)) =>
         InvalidDiffProof(contract, miner, nispTree, evalInput, fpControl)
+      case invalidSize if propByteEquality(invalidSize, FraudProofContracts.mkInvalidSizeContract(ctx)) =>
+        InvalidSizeProof(contract, miner, nispTree, evalInput, fpControl)
+      case nonUniqueHeaders if propByteEquality(nonUniqueHeaders, FraudProofContracts.mkNonUniqueHeadersContract(ctx)) =>
+        NonUniqueHeadersProof(contract, miner, nispTree, evalInput, fpControl)
+      case notInWindow if propByteEquality(notInWindow, FraudProofContracts.mkNotInWindowContract(ctx)) =>
+        NotInWindowProof(contract, miner, nispTree, evalInput, fpControl)
       case _ =>
         throw new IllegalArgumentException(s"Cannot find FraudProof for contract ${contract.address(ctx.getNetworkType)}")
     }

@@ -3,6 +3,7 @@ package stratum;
 import lfsm.LFSMHelpers;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import scala.math.BigInt;
 import sigma.pow.Autolykos2PowValidation;
 import stratum.counter.ExtraNonceCounter;
 import stratum.counter.JobCounter;
@@ -205,14 +206,15 @@ public class JobManager {
             logger.info("Got solution below target");
 		}
         blockHash = fH.toByteArray();
-        BigInteger superShareThreshold = job.tau.divide(BigInteger.valueOf(LFSMHelpers.NISP_COEFFICIENT()));
+        BigInteger realTau = LFSMHelpers.convertTauOrScore(LFSMHelpers.convertTauOrScore(BigInt.apply(job.tau))).bigInteger();
+        BigInteger superShareThreshold = realTau.divide(BigInteger.valueOf(LFSMHelpers.NISP_COEFFICIENT()));
 
         if(superShareThreshold.compareTo(fH) >= 0){
             if(job.usedCollateral) {
-                logger.info("Got super share at coefficient {} from base difficulty", job.tau.divide(fH));
+                logger.info("Got super share at coefficient {} from base difficulty", realTau.divide(fH));
                 isSuperShare = true;
             }else{
-                logger.info("Got super share at coefficient {}, but miner was solo-mining!", job.tau.divide(fH));
+                logger.info("Got super share at coefficient {}, but miner was solo-mining!", realTau.divide(fH));
             }
         }else {
             // Check if share didn't reach the miner's difficulty
@@ -227,7 +229,7 @@ public class JobManager {
 				jobId,
 				ipAddress,
 				workerName,
-                job.tau,
+                realTau,
 				job.candidate.height,
 				job.candidate.msg,
 				fH,

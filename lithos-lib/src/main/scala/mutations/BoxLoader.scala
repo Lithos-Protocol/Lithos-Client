@@ -11,7 +11,7 @@ class BoxLoader(ctx: BlockchainContext) {
   private val logger: Logger = LoggerFactory.getLogger("BoxLoader")
   def loadBoxes: BoxLoader = {
     boxStack.clear()
-    val boxes = JavaHelpers.toIndexedSeq(ctx.getDataSource.getUnconfirmedUnspentWalletBoxes)
+    val boxes = JavaHelpers.toIndexedSeq(ctx.getDataSource.getUnspentWalletBoxes)
       .map(InputUTXO(_)).sortBy(_.value)
     for(i <- boxes) boxStack.push(i)
     logger.info(s"Loaded ${boxStack.size} boxes in BoxLoader")

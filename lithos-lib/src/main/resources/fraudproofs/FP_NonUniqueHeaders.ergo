@@ -1,7 +1,7 @@
 {
-  // FP_InvalidDiff
+  // FP_NonUniqueHeaders
   // Value: unspecified (0.001 ERG)
-  // Proves fraud by showing that miner submitted a share which does not reach the super share threshold
+  // Proves fraud by showing that miner submitted at least two shares with identical header ids
 
   // REGISTERS
   // None
@@ -29,29 +29,19 @@
   val CTX_LOOKUP_PROOF     = getVar[Coll[Byte]](1).getOrElse(Coll(0.toByte))
   val CTX_REMOVE_PROOF     = getVar[Coll[Byte]](2).getOrElse(Coll(0.toByte))
   // CONSTANTS
-  // Constant sizes for various parts of NISPs, along with LFSM constants like TARGET_MAX and NISP_COEFFICIENT
+  // Constant sizes for various parts of NISPs
   val CONST_HEADER_SIZE       = 220
   val CONST_PREHEADER_SIZE    = 179
   val CONST_SCORE_SIZE        = 8
   val CONST_LEAF_SIZE         = 32
   val CONST_LEVEL_SIZE        = 33
-  val CONST_TARGET_MAX_LITHOS = bigInt("57896044618658097711785492504343953926634992332820282019728792003956564819949")
-  val CONST_NISP_COEFFICIENT  = 10000
   val CONST_N_SIZE            = 4
 
   // Helper Methods
-
-  def convertTauOrScore(dividend: UnsignedBigInt): UnsignedBigInt = {
-    CONST_TARGET_MAX_LITHOS.toUnsigned / dividend
-  }
-
   def getScore(nispBytes: Coll[Byte]): Long = {
     byteArrayToLong(nispBytes.slice(0,CONST_SCORE_SIZE))
   }
 
-  def getTau(nispBytes: Coll[Byte]): UnsignedBigInt = {
-    convertTauOrScore(getScore(nispBytes).toBigInt.toUnsigned)
-  }
   // NISPs are serialized as the following
   // [score: 8bytes][10 SuperShares]
   // Where SuperShares are serialized as the following
@@ -73,37 +63,28 @@
   def getHeader(shareBytes: Coll[Byte]): Header = {
     deserializeTo[Header](shareBytes.slice(CONST_N_SIZE, CONST_N_SIZE + CONST_HEADER_SIZE))
   }
-  // Get bytes of pre-header, then hash it to create msg used in PoW
-  def getMsg(shareBytes: Coll[Byte]): Coll[Byte] = {
-    blake2b256(shareBytes.slice(CONST_N_SIZE, CONST_N_SIZE + CONST_PREHEADER_SIZE))
-  }
 
-  def getN(shareBytes: Coll[Byte]): Int = {
-    fromBigEndianBytes[Int](shareBytes.slice(0, CONST_N_SIZE))
-  }
-
-  def getHeightAndNonce(shareBytes: Coll[Byte]): (Coll[Byte], Coll[Byte]) = {
-    val header: Header = getHeader(shareBytes)
-    (header.powNonce, longToByteArray(header.height.toLong).slice(4, 8))
-  }
   // Evaluation
   val minerNISP = nispTree.get(CTX_MINER_BYTES, CTX_LOOKUP_PROOF).get
-  val minerTau = getTau(minerNISP)
+
   val minerShares = getSuperShares(minerNISP)
-  val shareInfo: Coll[(Int, (Coll[Byte], (Coll[Byte], Coll[Byte])))] = minerShares.map{
+  val shareHeaders: Coll[Header] = minerShares.map{
     (x: Coll[Byte]) =>
-      (getN(x), (getMsg(x), getHeightAndNonce(x)))
+      getHeader(x)
   }
-  val superShareThreshold = minerTau / CONST_NISP_COEFFICIENT
-  val shareTaus: Coll[UnsignedBigInt] = shareInfo.map{
-    // N: Int, msg: Coll[Byte], nonce: Coll[Byte], height: Coll[Byte]
-    (x: (Int, (Coll[Byte], (Coll[Byte], Coll[Byte]))) ) =>
-      powHit(32, x._2._1, x._2._2._1, x._2._2._2, x._1)
-  }
-  // There exists some share for which the miner did not reach the super share threshold
-  val fraudExists = shareTaus.exists{
-    (x: UnsignedBigInt) =>
-      x > superShareThreshold
+
+  val indexedHeaders = shareHeaders.zip(shareHeaders.indices)
+  // There exists some share header which is identical to another share header
+  val fraudExists = indexedHeaders.exists{
+    (x: (Header, Int)) =>
+      indexedHeaders.exists{
+        (h: (Header, Int)) =>
+          if(h._2 == x._2){ //Skip if we are looking at the same header
+            false
+          }else{
+            x._1.id == h._1.id // If looking at different headers, check ids to see if they are equal or not
+          }
+      }
   }
   val score: Long = getScore(minerNISP)
   val minerRemoved = {

@@ -2,22 +2,18 @@ package evaluation
 
 import lfsm.NISPTree
 import mutations.BoxLoader
-import nisp.NISP
 import org.bouncycastle.util.encoders.Hex
-import org.ergoplatform.ErgoTreePredef
-import org.ergoplatform.appkit.{BlockchainContext, ContextVar, ErgoProver, ErgoValue, Parameters, SignedTransaction}
+import org.ergoplatform.appkit._
 import org.slf4j.{Logger, LoggerFactory}
-import scorex.utils.Longs
-import sigma.AvlTree
-import sigma.data.CBigInt
-import work.lithos.mutations.{Contract, InputUTXO, Mutator, TxBuilder, TxContext, UTXO}
-
-import scala.util.{Success, Try}
 import sigma.exceptions.InterpreterException
-case class InvalidDiffProof(contract: Contract, miner: Array[Byte], nispTree: NISPTree, evalInput: InputUTXO,
+import work.lithos.mutations.{Contract, InputUTXO, TxBuilder}
+
+import scala.util.Try
+
+case class NotInWindowProof(contract: Contract, miner: Array[Byte], nispTree: NISPTree, evalInput: InputUTXO,
                             fpControl: InputUTXO)
   extends FraudProof(contract, miner, nispTree, evalInput, fpControl) {
-  override val logger: Logger = LoggerFactory.getLogger("InvalidDiffProof")
+  override val logger: Logger = LoggerFactory.getLogger("NotInWindowProof")
   /**
    * Attempt to create fraud proof transaction using FraudProof parameters and transaction building information
    * @param ctx Context to perform transaction under
@@ -59,7 +55,7 @@ case class InvalidDiffProof(contract: Contract, miner: Array[Byte], nispTree: NI
             logger.error(s"Got critical interpreter exception while evaluating miner ${Hex.toHexString(miner)}", ie)
 
           }else{
-            logger.info("InvalidDiffProof reduced to false")
+            logger.info("NotInWindowProof reduced to false")
           }
         case e =>
           logger.error(s"Got error while evaluating miner ${Hex.toHexString(miner)}", e)

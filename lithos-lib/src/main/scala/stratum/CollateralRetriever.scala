@@ -22,7 +22,6 @@ class CollateralRetriever(client: ErgoClient, prover: ErgoProver) {
     client.execute{
       ctx =>
         val payout   = RollupContracts.mkPayoutContract(ctx)
-        // TODO: Change back fp token after first week of testnet
         val eval     = RollupContracts.mkEvalContract(ctx,
           LFSMHelpers.EVAL_PERIOD, payout.hashedPropBytes,
           LFSMHelpers.getFPToken(ctx))

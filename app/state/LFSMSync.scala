@@ -123,8 +123,6 @@ object LFSMSync {
                 logger.error(s"Could not find NISP Tree ${input.getBoxId}")
             }
 
-          //TODO Add back FP stuff next week
-
         }
     }
   }

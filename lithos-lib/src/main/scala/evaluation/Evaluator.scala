@@ -20,7 +20,7 @@ case class Evaluator(ctx: BlockchainContext, prover: ErgoProver, evalInput: Inpu
         println(s"Starting ${fpContracts.size} evaluations for miner ${Hex.toHexString(m)}")
         var txs = Option.empty[Seq[SignedTransaction]]
         var idx = 0
-        while(txs.isEmpty){
+        while(txs.isEmpty && idx < fpContracts.size){
           val fraudProof = FraudProof.genFraudProof(ctx, fpContracts(idx), m, nispTree, evalInput, fpControl)
           txs = fraudProof.attemptFraudProof(ctx, prover, TxBuilder(ctx), loader)
           idx = idx + 1
@@ -28,13 +28,13 @@ case class Evaluator(ctx: BlockchainContext, prover: ErgoProver, evalInput: Inpu
         txs match {
           case Some(txs) =>
             logger.info(s"Got FP transactions for miner ${Hex.toHexString(m)}")
-            println(s"Got FP transactions for miner ${Hex.toHexString(m)}")
             return txs
           case None =>
             logger.info(s"Could not find fraud for miner ${Hex.toHexString(m)}")
-            println(s"Could not find fraud for miner ${Hex.toHexString(m)}")
+
         }
     }
+    logger.info("Got no fraudulent miners")
     Seq.empty[SignedTransaction]
   }
 

@@ -1,0 +1,75 @@
+{
+  // FP_InvalidSize
+  // Value: unspecified (0.001 ERG)
+  // Proves fraud by showing that miner submitted NISP with invalid size
+
+  // REGISTERS
+  // None
+
+  val evalBox:       Box     = INPUTS(0)
+  val nispTree:      AvlTree = evalBox.R4[AvlTree].get
+  val currentMiners: Int     = evalBox.R5[Int].get
+  val totalScore:    BigInt  = evalBox.R6[BigInt].get
+  val currentPeriod: Long    = evalBox.R7[Long].get
+  val currentBlock:  Long    = evalBox.R8[Long].get
+
+  // NEXT VALUES
+  val nextUTXO   = OUTPUTS(0)
+  val nextTree   = nextUTXO.R4[AvlTree].get
+  val nextMiners = nextUTXO.R5[Int].get
+  val nextScore  = nextUTXO.R6[BigInt].get
+  val nextPeriod = nextUTXO.R7[Long].get
+  val nextBlock  = nextUTXO.R8[Long].get
+
+  // CONTEXT VARS
+  // CTX_MINER_BYTES(0) - Hashed PropBytes of miner who committed fraud
+  // CTX_LOOKUP_PROOF(1) - Lookup proof for miner
+  // CTX_REMOVE_PROOF(2) - Removal proof for miner
+  val CTX_MINER_BYTES      = getVar[Coll[Byte]](0).getOrElse(Coll(0.toByte))
+  val CTX_LOOKUP_PROOF     = getVar[Coll[Byte]](1).getOrElse(Coll(0.toByte))
+  val CTX_REMOVE_PROOF     = getVar[Coll[Byte]](2).getOrElse(Coll(0.toByte))
+  // CONSTANTS
+  // Constant sizes for various parts of NISPs
+
+  val CONST_HEADER_SIZE       = 220
+  val CONST_PREHEADER_SIZE    = 179
+  val CONST_SCORE_SIZE        = 8
+  val CONST_LEAF_SIZE         = 32
+  val CONST_LEVEL_SIZE        = 33
+  val CONST_N_SIZE            = 4
+  // Max allowable size for NISP
+  val CONST_NISP_MAX          = 40000
+  // Minimum allowable NISP size, with one level in super share's merkle proof
+  // Important so that iterating 10 times over nispBytes does not cause index out of bounds in other fp contracts
+  // CONST_SCORE_SIZE + 10 * (CONST_N_SIZE + CONST_HEADER_SIZE + 1 + CONST_LEAF_SIZE + CONST_LEVEL_SIZE)
+  val CONST_NISP_MIN          = 2908
+  // Helper Methods
+  def getScore(nispBytes: Coll[Byte]): Long = {
+    byteArrayToLong(nispBytes.slice(0,CONST_SCORE_SIZE))
+  }
+  // Evaluation
+  val minerNISP = nispTree.get(CTX_MINER_BYTES, CTX_LOOKUP_PROOF).get
+
+  // Size of miner NISP respects inequality defining valid sizes
+  val fraudExists = minerNISP.size < CONST_NISP_MIN || minerNISP.size > CONST_NISP_MAX
+
+  val score: Long = getScore(minerNISP)
+  val minerRemoved = {
+    val removeTree = nispTree.remove(Coll(CTX_MINER_BYTES), CTX_REMOVE_PROOF).get
+    removeTree.digest == nextTree.digest
+  }
+
+  val changedRegisters = allOf(
+    Coll(
+      nextUTXO.value  == evalBox.value,
+      minerRemoved,
+      nextMiners      == currentMiners - 1,
+      nextScore       == totalScore - score,
+      nextPeriod      == currentPeriod,
+      nextBlock       == currentBlock
+    )
+  )
+
+  sigmaProp(fraudExists && changedRegisters)
+
+}

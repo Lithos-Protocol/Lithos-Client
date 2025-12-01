@@ -151,18 +151,19 @@ class NISPDatabase {
    */
   def getBestValidNISP(height: Int, score: Long): Option[NISP] = {
     require(lastHeight.isDefined, "Cannot search for NISPs when lastHeight is undefined")
-    val minHeight = height - LFSMHelpers.NISP_PERIOD.toInt
+    val minHeight = height - LFSMHelpers.NISP_WINDOW.toInt
     val start = Math.max(minHeight, lastHeight.map(Ints.fromByteArray).get)
     val nisps = for(i <- start to height) yield getNISP(i)
     val validNISPs = nisps.filter(n => n.isDefined && n.get.score >= score).map(_.get)
     val bestNISP = validNISPs.foldLeft(Option.empty[NISP]){
       (z: Option[NISP], x: NISP) =>
         if(z.isEmpty) {
-          Some(x)
+          Some(x.copy(shares = makeUnique(x.shares)))
         }else if(z.get.shares.size >= 10){
           z
         }else{
-          Some(z.get.copy(score = score, shares = z.get.shares ++ x.shares))
+          val uniqueShares = makeUnique(x.shares).filter(s => !z.get.shares.exists(p => p.headerBytes sameElements s.headerBytes))
+          Some(z.get.copy(score = score, shares = z.get.shares ++ uniqueShares))
         }
     }
     if(bestNISP.isEmpty || bestNISP.get.shares.size < 10){
@@ -171,7 +172,15 @@ class NISPDatabase {
       Some(bestNISP.get.copy(shares = bestNISP.get.shares.take(10)))
     }
   }
-
+  def makeUnique(shares: Seq[SuperShare]): Seq[SuperShare] = {
+    shares.foldLeft(Seq.empty[SuperShare]){
+      (z, s) =>
+        if(z.exists(sh => sh.headerBytes sameElements s.headerBytes))
+          z
+        else
+          z ++ Seq(s)
+    }
+  }
   def updateLastHeight(newLastHeight: Array[Byte], storedLastHeight: Option[Array[Byte]]): Boolean = {
     storedLastHeight match {
       case Some(h) =>

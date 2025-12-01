@@ -87,7 +87,6 @@ public class NodeInterface {
 	public boolean sendSolution(String nonce, String pk) {
 		try {
 			JSONObject postBody = new JSONObject();
-			/*TODO FIX THIS CONSTANT*/
 			postBody.put("pk", pk);
 			postBody.put("w", "02a7955281885bf0f0ca4a48678848cad8dc5b328ce8bc1d4481d041c98e891ff3");
 			postBody.put("n", nonce);

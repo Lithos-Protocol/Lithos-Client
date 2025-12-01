@@ -142,7 +142,6 @@ public class Pool {
 
     public void submitBlock(ShareData shareData, byte[] nonce) {
         logger.info("Submitted block with nonce: {}", Hex.toHexString(nonce));
-		//TODO Change this constant
 		nodeInterface.sendSolution(Hex.toHexString(nonce), pk);
 
 	}
