@@ -45,6 +45,7 @@ stratum {
     extraNonce1Size = 4
     connectionTimeout = 60000
     blockRefreshInterval = 1000
+    reduceShareMessages  = false
   }
 ```
 The above configuration would mine at difficulty "4G". In the *Rigel Miner*, connecting to a Lithos stratum would require
@@ -55,6 +56,20 @@ rigel.exe -a autolykos2 -o stratum+tcp://127.0.0.1:4444 -u YOUR_ERG_WALLET -w my
 ```
 Keep in mind that the `ERG_WALLET` and Worker name have no effect on Lithos, and can be set to any valid String.
 
+### Share Messaging
+If you are running at a difficulty that causes your miner to send too many shares, you may get errors relating to
+"duplicate" or "potentially old" shares. To reduce the amount of shares sent between the mining software
+and the stratum, set `reduceShareMessages` to `true`. This will raise the stratum difficulty by 1000 times without affecting the
+difficulty that Lithos evaluates your shares at.
+
+### Super Shares
+When mining, you will get messages relating to super shares. Super shares are used to evaluate how much
+work you performed. As a Lithos miner, your goal is to create at least **10 super shares within
+a 12-hour window before the block was mined**. The amount of super shares you create is directly related to your
+chosen `diff` value and your hashrate. Increasing your `diff` value will decrease the amount of super shares you create.
+Likewise, decreasing your `diff` value will allow you to create more super shares. On the testnet, we recommend trying
+different values for your `diff` to see how super share creation functions with your hardware. All super shares you mine
+will be stored in the `.lithos` folder, which is generated when you mine your first super share. 
 
 ## KYA
 The Lithos Testnet release accesses your node's secret keys via it's keystore in order to sign and generate transactions.
