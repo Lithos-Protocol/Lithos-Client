@@ -17,7 +17,7 @@ case class Evaluator(ctx: BlockchainContext, prover: ErgoProver, evalInput: Inpu
       m =>
         val fpContracts = FraudProofContracts.getFraudProofContracts(ctx)
         logger.info(s"Starting ${fpContracts.size} evaluations for miner ${Hex.toHexString(m)}")
-        println(s"Starting ${fpContracts.size} evaluations for miner ${Hex.toHexString(m)}")
+
         var txs = Option.empty[Seq[SignedTransaction]]
         var idx = 0
         while(txs.isEmpty && idx < fpContracts.size){

@@ -54,12 +54,12 @@ case class InvalidSizeProof(contract: Contract, miner: Array[Byte], nispTree: NI
         case ie: InterpreterException =>
           if(!ie.getMessage.contains("Script reduced to false")) {
             logger.error(s"Got critical interpreter exception while evaluating miner ${Hex.toHexString(miner)}", ie)
-
+            throw ie
           }else{
             logger.info("InvalidSizeProof reduced to false")
           }
         case e =>
-          logger.error(s"Got error while evaluating miner ${Hex.toHexString(miner)}", e)
+          throw e
 
       }
 

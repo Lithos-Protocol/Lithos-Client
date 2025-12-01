@@ -4,7 +4,7 @@ import evaluation.Evaluator
 import lfsm.LFSMPhase.{EVAL, HOLDING, PAYOUT}
 import lfsm.rollup.RollupContracts
 import lfsm.{LFSMHelpers, NISPTree}
-import mutations.BoxLoader
+import mutations.{BoxLoader, NotEnoughInputsException}
 import nisp.NISPDatabase
 import org.bouncycastle.util.encoders.Hex
 import org.ergoplatform.ErgoTreePredef
@@ -16,6 +16,7 @@ import sigma.{AvlTree, Colls}
 import sigma.data.CBigInt
 import utils.Helpers.{evalContract, holdingContract, payoutContract}
 import utils.NISPTreeCache
+import utils.NISPTreeCache.TREE_SET
 import work.lithos.mutations.{Contract, InputUTXO, TxBuilder, UTXO}
 
 import scala.util.{Failure, Success, Try}
@@ -38,7 +39,7 @@ object LFSMTransformer {
         checkHoldingTransforms(ctx, holdingTrees, prover, boxLoader)
         checkEvalTransforms(ctx, evalTrees, prover, boxLoader)
         attemptPayouts(ctx, payoutTrees, prover, boxLoader)
-        attemptHoldingSubmissions(ctx, holdingTrees, prover, diff, boxLoader)
+        attemptHoldingSubmissions(ctx, holdingTrees, prover, diff, boxLoader, cache)
         attemptEvaluation(ctx, evalTrees, prover, boxLoader, cache)
     }
   }
@@ -54,6 +55,8 @@ object LFSMTransformer {
         t.failed.get match {
           case ds: ErgoClientException if ds.getMessage.contains("Double spending attempt") =>
             logger.warn("Skipped holding transformation due to double spend")
+          case inp: NotEnoughInputsException =>
+            logger.warn("Skipped holding transformation due to failure to find inputs")
           case e =>
             logger.error("Found error while transforming holdings", e)
         }
@@ -73,6 +76,8 @@ object LFSMTransformer {
         t.failed.get match {
           case ds: ErgoClientException if ds.getMessage.contains("Double spending attempt") =>
             logger.warn("Skipped eval transformation due to double spend")
+          case inp: NotEnoughInputsException =>
+            logger.warn("Skipped eval transformation due to failure to find inputs")
           case e =>
             logger.error("Found error while transforming evals", e)
         }
@@ -91,6 +96,8 @@ object LFSMTransformer {
         t.failed.get match {
           case ds: ErgoClientException if ds.getMessage.contains("Double spending attempt") =>
             logger.warn("Skipped evaluation due to double spend")
+          case inp: NotEnoughInputsException =>
+            logger.warn("Skipped evaluation due to failure to find inputs")
           case e =>
             logger.error("Found error while performing evaluations", e)
         }
@@ -106,7 +113,9 @@ object LFSMTransformer {
       t =>
         t.failed.get match {
           case ds: ErgoClientException if ds.getMessage.contains("Double spending attempt") =>
-            logger.warn("Skipped payouts due to double spend")
+            logger.warn("Skipped payout due to double spend")
+          case inp: NotEnoughInputsException =>
+            logger.warn("Skipped payout due to failure to find inputs")
           case e =>
             logger.error("Found error while attempting payouts", e)
         }
@@ -114,12 +123,12 @@ object LFSMTransformer {
   }
 
   private def attemptHoldingSubmissions(ctx: BlockchainContext, holdingTrees: Seq[(String, NISPTree)],
-                                        prover: ErgoProver, diff: String, loader: BoxLoader): Unit = {
+                                        prover: ErgoProver, diff: String, loader: BoxLoader, cache: SyncCacheApi): Unit = {
     val transformable = holdingTrees.filter{
       h =>
         ctx.getHeight - h._2.currentPeriod.get < LFSMHelpers.HOLDING_PERIOD && !h._2.hasMiner
     }
-    val transforms = transformable.map(t => Try(submitNISPs(ctx, t, prover, diff, loader)))
+    val transforms = transformable.map(t => Try(submitNISPs(ctx, t, prover, diff, loader, cache)))
     logger.info(s"Submitted NISPs to ${transforms.count(_.isSuccess)} holding utxos successfully")
     logger.info(s"Failed to submit ${transforms.count(_.isFailure)} NISPs")
     transforms.filter(_.isFailure).foreach{
@@ -129,6 +138,10 @@ object LFSMTransformer {
             logger.warn(f.getMessage)
           case ds: ErgoClientException if ds.getMessage.contains("Double spending attempt") =>
             logger.warn("Skipped NISP submission due to double spend")
+          case ia: IllegalArgumentException if ia.getMessage.contains("lastHeight is undefined") =>
+            logger.warn("Skipped NISP submission as no super shares have been found")
+          case inp: NotEnoughInputsException =>
+            logger.warn("Skipped NISP submission due to failure to find inputs")
           case e =>
             logger.error("Found error while submitting NISPs", e)
         }
@@ -191,19 +204,29 @@ object LFSMTransformer {
     // TODO: Optimize here by preventing redundant evaluations
     val currentMiners = eval._2.minerSet.toSeq.map(Hex.decode).sortBy(_ => Math.random())
     val evaluator = Evaluator(ctx, prover, evalBox, eval._2, currentMiners, fpControl, loader)
-    val txs = evaluator.evaluate
-    if(txs.nonEmpty){
-      logger.info(s"Got fraud proof transactions for NISPTree ${eval._1}")
-      val txIds = for(t <- txs) yield ctx.sendTransaction(t)
-      txIds.foreach(id => logger.info(s"Sent fraud proof transaction ${id} as part of evaluation"))
-    }else{
-      logger.info(s"Found no fraud in NISPTree ${eval._1}")
-      cache.set(eval._1, eval._2.copy(evaluated = true))
+    val attemptEval = Try(evaluator.evaluate)
+    attemptEval match {
+      case Failure(e) =>
+        e match {
+          case inp: NotEnoughInputsException =>
+            logger.warn("Skipped evaluation due to lack of input utxos")
+          case _ =>
+            logger.error("Got error while attempting evaluation", e)
+        }
+      case Success(txs) =>
+        if(txs.nonEmpty){
+          logger.info(s"Got fraud proof transactions for NISPTree ${eval._1}")
+          val txIds = for(t <- txs) yield ctx.sendTransaction(t)
+          txIds.foreach(id => logger.info(s"Sent fraud proof transaction ${id} as part of evaluation"))
+        }else{
+          logger.info(s"Found no fraud in NISPTree ${eval._1}")
+          cache.set(eval._1, eval._2.copy(evaluated = true))
+        }
     }
   }
 
   private def submitNISPs(ctx: BlockchainContext, holdTree: (String, NISPTree), prover: ErgoProver,
-                          diff: String, loader: BoxLoader): Unit = {
+                          diff: String, loader: BoxLoader, cache: SyncCacheApi): Unit = {
     logger.info(s"Submitting NISP to NISPTree ${holdTree._1}")
     val holdingInput = InputUTXO(ctx.getBoxesById(holdTree._1).head)
 
@@ -261,8 +284,12 @@ object LFSMTransformer {
         val txId = ctx.sendTransaction(sTx)
         logger.info(s"Sent transaction ${txId} to submit NISP")
       case None =>
-        throw new NoValidNISPException("Could not find enough super shares to produce a valid NISP" +
-          s" for NISPTree ${holdTree._1} for block ${holdTree._2.startHeight}")
+
+        cache.remove(holdTree._1)
+        val treeSet = cache.get[Seq[String]](TREE_SET).get
+        cache.set(TREE_SET, treeSet.filter(_ != holdTree._1))
+        throw new NoValidNISPException(s"Dropped NISPTree ${holdTree._1} for block ${holdTree._2.startHeight} " +
+          s"due to not having enough super shares to produce a valid NISP")
     }
 
   }

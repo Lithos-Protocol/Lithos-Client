@@ -23,7 +23,7 @@ class BoxLoader(ctx: BlockchainContext) {
     var inputBoxes   = Seq.empty[InputUTXO]
     while(currentValue < value){
       if(boxStack.isEmpty) {
-        throw new RuntimeException(s"Failed to find enough InputUTXOs for value ${value}" +
+        throw new NotEnoughInputsException(s"Failed to find enough InputUTXOs for value ${value}" +
           s" (only got ${inputBoxes.size} for ${currentValue})")
       }
       val input    = boxStack.pop()

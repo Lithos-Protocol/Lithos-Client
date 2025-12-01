@@ -56,7 +56,7 @@ object NISPTreeCache {
     }
     val nextMinerSet = oldNISPTree.minerSet ++ Set(Hex.toHexString(keyValue._1.toArray))
     val nextTree    = oldNISPTree.copy(tree = dictionary, numMiners = nextMiners, totalScore = nextScore,
-      currentPeriod = Some(nextPeriod), hasMiner = isMiner, minerSet = nextMinerSet)
+      currentPeriod = Some(nextPeriod), hasMiner = isMiner || oldNISPTree.hasMiner, minerSet = nextMinerSet)
     cache.remove(input.getBoxId)
     cache.set(output.getBoxId, nextTree)
     val treeSet = cache.get[Seq[String]](TREE_SET).get

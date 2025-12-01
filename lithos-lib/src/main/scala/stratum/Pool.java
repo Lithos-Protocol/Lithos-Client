@@ -116,24 +116,32 @@ public class Pool {
                         logger.info("New block found after submission!");
                 }
                 if(successfulShare.isSuperShare) {
-                    SuperShare share = SuperShare.fromCandidate(e.nonce, successfulShare.candidate);
-                    logger.info("Saving super share for block {}", share.getHeight());
-                    NISPDatabase nispDB = new NISPDatabase();
-                    long score = LFSMHelpers.convertTauOrScore(BigInt.apply(successfulShare.difficulty)).longValue();
-                    boolean success = nispDB.addNISP(share.getHeight(), score, share);
-                    if(success){
-                        logger.info("Successfully saved super share");
-                        logger.info("NISP-DB: {} entries, lastHeight: {}, currentHeight: {}",
-                                nispDB.size(), // TODO: Potentially expensive call, consider removing later
-                                Ints.fromByteArray(nispDB.lastHeight().get()),
-                                Ints.fromByteArray(nispDB.currentHeight().get())
-                        );
-                    }else{
-                        // Failure to save super-share directly affects payments,
-                        // and should be treated as a critical error
-                        throw new RuntimeException("Failed to save super share to NISP database");
+                    try {
+                        SuperShare share = SuperShare.fromCandidate(e.nonce, successfulShare.candidate);
+                        logger.info("Saving super share for block {}", share.getHeight());
+                        NISPDatabase nispDB = new NISPDatabase();
+                        long score = LFSMHelpers.convertTauOrScore(BigInt.apply(successfulShare.difficulty)).longValue();
+                        boolean success = nispDB.addNISP(share.getHeight(), score, share);
+                        if (success) {
+                            logger.info("Successfully saved super share");
+                            logger.info("NISP-DB: {} entries, lastHeight: {}, currentHeight: {}",
+                                    nispDB.size(), // TODO: Potentially expensive call, consider removing later
+                                    Ints.fromByteArray(nispDB.lastHeight().get()),
+                                    Ints.fromByteArray(nispDB.currentHeight().get())
+                            );
+                        } else {
+                            // Failure to save super-share directly affects payments,
+                            // and should be treated as a critical error
+                            throw new RuntimeException("Failed to save super share to NISP database");
+                        }
+                    } catch (Exception ex) {
+                        if(ex.getMessage().contains("merkle leaf for collateral")){
+                            // TODO: Fix merkle leaf error
+                            logger.warn("Skipped super share due to non-matching merkle leaf");
+                        }else{
+                            logger.error("Got error while saving super-share", ex);
+                        }
                     }
-
                 }
 
 			}

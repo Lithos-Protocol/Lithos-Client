@@ -72,9 +72,13 @@ public class NodeInterface {
                 );
                 if (json.has("error")) {
                     logger.error("Error occurred while requesting mining candidate with transactions");
-                    logger.error("errorCode: {}", json.getInt("error"));
-                    logger.error("reason: {}", json.getString("reason"));
-                    logger.error("details: {}", json.getString("detail"));
+                    if(json.getInt("error") == 403){
+                        logger.error("The given API Key does not match the node's API key");
+                    }else{
+                        logger.error("errorCode: {}", json.getInt("error"));
+                        logger.error("reason: {}", json.getString("reason"));
+                        logger.error("details: {}", json.getString("detail"));
+                    }
                     throw new RuntimeException("HTTP Request failed");
                 } else
                     return json;
