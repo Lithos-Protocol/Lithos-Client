@@ -32,57 +32,71 @@ object NISPTreeCache {
   def cacheExistingHolding(ctx:BlockchainContext, prover: ErgoProver, input: ErgoTransactionInput,
                            output: ErgoTransactionOutput, cache: SyncCacheApi): Unit = {
     val holdingBox  = Helpers.parseOutput(ctx, output)
-    val oldNISPTree = cache.get[NISPTree](input.getBoxId).get
-    val dictionary  = oldNISPTree.tree
+    val optNISPTree = cache.get[NISPTree](input.getBoxId)
+    optNISPTree match {
+      case Some(oldNISPTree) =>
+        val dictionary  = oldNISPTree.tree
 
-    val nextMiners  = holdingBox.registers(1).getValue.asInstanceOf[Int]
-    val nextScore   = holdingBox.registers(2).getValue.asInstanceOf[CBigInt].wrappedValue
-    val nextPeriod  = holdingBox.registers(3).getValue.asInstanceOf[Long]
+        val nextMiners  = holdingBox.registers(1).getValue.asInstanceOf[Int]
+        val nextScore   = holdingBox.registers(2).getValue.asInstanceOf[CBigInt].wrappedValue
+        val nextPeriod  = holdingBox.registers(3).getValue.asInstanceOf[Long]
 
-    val signer      = ErgoValue.fromHex(input.getSpendingProof.getExtension.get("0")).getValue.asInstanceOf[SigmaProp]
-    val keyValue    = ErgoValue.fromHex(input.getSpendingProof.getExtension.get("1")).getValue.asInstanceOf[(Coll[Byte], Coll[Byte])]
-    val proof       = ErgoValue.fromHex(input.getSpendingProof.getExtension.get("2")).getValue.asInstanceOf[Coll[Byte]]
+        val signer      = ErgoValue.fromHex(input.getSpendingProof.getExtension.get("0")).getValue.asInstanceOf[SigmaProp]
+        val keyValue    = ErgoValue.fromHex(input.getSpendingProof.getExtension.get("1")).getValue.asInstanceOf[(Coll[Byte], Coll[Byte])]
+        val proof       = ErgoValue.fromHex(input.getSpendingProof.getExtension.get("2")).getValue.asInstanceOf[Coll[Byte]]
 
-    val isMiner     = Helpers.pkHexFromSigmaProp(signer).get == Helpers.pkHexFromBoolean(
-      Contract.fromAddress(prover.getAddress).sigmaBoolean.get).get
-    val insertion    = dictionary.insert(keyValue._1.toArray -> keyValue._2.toArray)
-    require(insertion.proof.ergoValue.getValue == proof, "Proofs must be equal on holding transformation")
-    logger.info(s"Found existing holding utxo ${output.getBoxId}")
-    if(isMiner) {
-      logger.info(s"Holding utxo ${output.getBoxId} contains local miner!")
-    }else{
-      logger.info(s"Holding utxo ${output.getBoxId} contains miner" +
-        s" ${Address.fromErgoTree(ErgoTree.fromProposition(signer), ctx.getNetworkType)}")
+        val isMiner     = Helpers.pkHexFromSigmaProp(signer).get == Helpers.pkHexFromBoolean(
+          Contract.fromAddress(prover.getAddress).sigmaBoolean.get).get
+        val insertion    = dictionary.insert(keyValue._1.toArray -> keyValue._2.toArray)
+        require(insertion.proof.ergoValue.getValue == proof, "Proofs must be equal on holding transformation")
+        logger.info(s"Found existing holding utxo ${output.getBoxId}")
+        if(isMiner) {
+          logger.info(s"Holding utxo ${output.getBoxId} contains local miner!")
+        }else{
+          logger.info(s"Holding utxo ${output.getBoxId} contains miner" +
+            s" ${Address.fromErgoTree(ErgoTree.fromProposition(signer), ctx.getNetworkType)}")
+        }
+        val nextMinerSet = oldNISPTree.minerSet ++ Set(Hex.toHexString(keyValue._1.toArray))
+        val nextTree    = oldNISPTree.copy(tree = dictionary, numMiners = nextMiners, totalScore = nextScore,
+          currentPeriod = Some(nextPeriod), hasMiner = isMiner || oldNISPTree.hasMiner, minerSet = nextMinerSet)
+        cache.remove(input.getBoxId)
+        cache.set(output.getBoxId, nextTree)
+        val treeSet = cache.get[Seq[String]](TREE_SET).get
+        cache.set(TREE_SET, treeSet.filter(_ != input.getBoxId) :+ output.getBoxId)
+      case None =>
+        logger.warn(s"Skipping existing holding output in block ${output.getCreationHeight}" +
+          s" because associated NISPTree ${input.getBoxId} could not be found")
     }
-    val nextMinerSet = oldNISPTree.minerSet ++ Set(Hex.toHexString(keyValue._1.toArray))
-    val nextTree    = oldNISPTree.copy(tree = dictionary, numMiners = nextMiners, totalScore = nextScore,
-      currentPeriod = Some(nextPeriod), hasMiner = isMiner || oldNISPTree.hasMiner, minerSet = nextMinerSet)
-    cache.remove(input.getBoxId)
-    cache.set(output.getBoxId, nextTree)
-    val treeSet = cache.get[Seq[String]](TREE_SET).get
-    cache.set(TREE_SET, treeSet.filter(_ != input.getBoxId) :+ output.getBoxId)
+
   }
 
   def cacheNewEval(ctx:BlockchainContext,input: ErgoTransactionInput,
                    output: ErgoTransactionOutput, cache: SyncCacheApi): Unit = {
     val evalBox = Helpers.parseOutput(ctx, output)
-    val oldNISPTree = cache.get[NISPTree](input.getBoxId).get
-    if(oldNISPTree.hasMiner){
-      val nispTree   = oldNISPTree.copy(currentPeriod = Some(evalBox.registers(3).getValue.asInstanceOf[Long]),
-        phase = LFSMPhase.EVAL)
-      cache.remove(input.getBoxId)
-      cache.set(output.getBoxId, nispTree)
-      val treeSet = cache.get[Seq[String]](TREE_SET).get
-      cache.set(TREE_SET, treeSet.filter(_ != input.getBoxId) :+ output.getBoxId)
-      logger.info(s"Transformed NISPTree ${input.getBoxId} for block ${oldNISPTree.startHeight} of holding" +
-        s" contract to ${output.getBoxId} of evaluation contract")
-    }else{
-      cache.remove(input.getBoxId)
-      val treeSet = cache.get[Seq[String]](TREE_SET).get
-      cache.set(TREE_SET, treeSet.filter(_ != input.getBoxId))
-      logger.warn(s"Removed NISPTree ${input.getBoxId} for block ${oldNISPTree.startHeight} because" +
-        s" local miner was not present during holding phase")
+    val optNISPTree = cache.get[NISPTree](input.getBoxId)
+    optNISPTree match {
+      case Some(oldNISPTree) =>
+        if(oldNISPTree.hasMiner){
+          val nispTree   = oldNISPTree.copy(currentPeriod = Some(evalBox.registers(3).getValue.asInstanceOf[Long]),
+            phase = LFSMPhase.EVAL)
+          cache.remove(input.getBoxId)
+          cache.set(output.getBoxId, nispTree)
+          val treeSet = cache.get[Seq[String]](TREE_SET).get
+          cache.set(TREE_SET, treeSet.filter(_ != input.getBoxId) :+ output.getBoxId)
+          logger.info(s"Transformed NISPTree ${input.getBoxId} for block ${oldNISPTree.startHeight} of holding" +
+            s" contract to ${output.getBoxId} of evaluation contract")
+        }else{
+          cache.remove(input.getBoxId)
+          val treeSet = cache.get[Seq[String]](TREE_SET).get
+          cache.set(TREE_SET, treeSet.filter(_ != input.getBoxId))
+          logger.warn(s"Removed NISPTree ${input.getBoxId} for block ${oldNISPTree.startHeight} because" +
+            s" local miner was not present during holding phase")
+        }
+      case None =>
+        logger.warn(s"Skipping new eval output in block ${output.getCreationHeight} because" +
+          s" associated NISPTree ${input.getBoxId} could not be found ")
     }
+
   }
 
   def cacheExistingEval(ctx:BlockchainContext,input: ErgoTransactionInput, fpInput: ErgoTransactionInput,
