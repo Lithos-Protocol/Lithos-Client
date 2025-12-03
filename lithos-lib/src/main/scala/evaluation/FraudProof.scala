@@ -7,6 +7,7 @@ import nisp.NISP
 import org.ergoplatform.ErgoTreePredef
 import org.ergoplatform.appkit.{BlockchainContext, ErgoProver, ErgoValue, Parameters, SignedTransaction}
 import org.slf4j.Logger
+import scorex.utils.Longs
 import sigma.AvlTree
 import sigma.data.CBigInt
 import work.lithos.mutations.{Contract, InputUTXO, Mutator, TxBuilder, TxContext, UTXO}
@@ -59,7 +60,7 @@ object FraudProof {
   private def standardMutator(miner: Array[Byte], nispTree: NISPTree, contract: Contract): Mutator = new Mutator {
     override val preReqs: Seq[TxContext => Boolean] = FraudProof.standardPreReqs(nispTree, contract)
 
-
+    // We should assume no fraud proofs have been executed prior to this mutation
     override protected def mutation(tCtx: TxContext): Seq[UTXO] = {
       val evalOutput = tCtx.outputs.head
       val feeProp = Contract(ErgoTreePredef.feeProposition(720))
@@ -68,7 +69,7 @@ object FraudProof {
       val lookUp = copy.lookUp(miner)
       val removal = copy.delete(miner)
       val feeOutput = UTXO(feeProp, Parameters.MinFee)
-      val score = NISP.deserialize(lookUp.response.head.get).score
+      val score = Longs.fromByteArray(lookUp.response.head.get.slice(0, 8))
       val lastMiners = evalOutput.registers(1).getValue.asInstanceOf[Int]
       val lastScore = evalOutput.registers(2).getValue.asInstanceOf[CBigInt].wrappedValue
       val lastPeriod = evalOutput.registers(3)
@@ -84,12 +85,12 @@ object FraudProof {
   }
 
   /**
-   * Defines `FraudProof` mapping to FraudProofContract, this method generates the `FraudProof`
+   * Defines `FraudProof` mapping to `FraudProofContract`, this method generates the `FraudProof`
    * associated with a given contract
    * @param ctx Context to generate contracts
-   * @param contract Contract to find `FraudProof` for
+   * @param contract `Contract` to find FraudProof` for
    * @param miner Miner to check for fraud
-   * @param nispTree NISPTree associated with the given evalInput
+   * @param nispTree `NISPTree` associated with the given evalInput
    * @param evalInput Evaluation Input to evaluate for fraud
    * @param fpControl FP_Control box to use as data input, used to verify a valid FP contract is used
    */
