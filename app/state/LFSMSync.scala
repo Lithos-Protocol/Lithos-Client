@@ -36,11 +36,12 @@ object LFSMSync {
                 logger.warn("Found invalid holding contract, skipping it during sync process")
               case ergoVal =>
                 if (ergoVal == ErgoValue.of(0).toHex) {
-                  logger.info(s"Found new holding contract at block ${fullBlock.getHeader.getHeight}")
-                  NISPTreeCache.cacheNewHolding(ctx, output, cache)
+                  logger.info(s"Found new holding contract in block ${fullBlock.getHeader.getHeight}")
+                  NISPTreeCache.cacheNewHolding(ctx, output, cache, fullBlock.getHeader.getHeight)
                 } else if (ErgoValue.fromHex(ergoVal).getValue.asInstanceOf[Int] > 0) {
-                  logger.info(s"Found existing holding contract at block ${fullBlock.getHeader.getHeight}")
-                  NISPTreeCache.cacheExistingHolding(ctx, prover, e.getInputs.get(0), output, cache)
+                  logger.info(s"Found existing holding contract in block ${fullBlock.getHeader.getHeight}")
+                  NISPTreeCache.cacheExistingHolding(ctx, prover, e.getInputs.get(0), output,
+                    cache, fullBlock.getHeader.getHeight)
                 } else {
                   logger.warn("Found invalid holding contract, skipping it during sync process")
                 }
@@ -71,16 +72,18 @@ object LFSMSync {
               case Some(nispTree) =>
                 nispTree.phase match {
                   case LFSMPhase.HOLDING =>
-                    logger.info(s"Found new evaluation contract at block ${fullBlock.getHeader.getHeight}")
-                    NISPTreeCache.cacheNewEval(ctx, input, output, cache)
+                    logger.info(s"Found new evaluation contract in block ${fullBlock.getHeader.getHeight}")
+                    NISPTreeCache.cacheNewEval(ctx, input, output, cache, fullBlock.getHeader.getHeight)
                   case LFSMPhase.EVAL =>
-                    logger.info(s"Found existing evaluation contract at block ${fullBlock.getHeader.getHeight}")
-                    NISPTreeCache.cacheExistingEval(ctx, input, e.getInputs.get(1), output, cache, prover)
+                    logger.info(s"Found existing evaluation contract in block ${fullBlock.getHeader.getHeight}")
+                    NISPTreeCache.cacheExistingEval(ctx, input, e.getInputs.get(1), output, cache,
+                      prover, fullBlock.getHeader.getHeight)
                   case _ =>
-                    logger.error("NISP Tree in invalid phase for evaluation")
+                    logger.error("NISPTree in invalid phase for evaluation")
                 }
               case None =>
-                logger.error(s"Could not find NISP Tree ${input.getBoxId}")
+                logger.info(s"Skipped NISPTree without genesis history ${input.getBoxId}" +
+                  s" in block ${fullBlock.getHeader.getHeight}")
             }
 
 
@@ -111,16 +114,17 @@ object LFSMSync {
               case Some(nispTree) =>
                 nispTree.phase match {
                   case LFSMPhase.EVAL =>
-                    logger.info(s"Found new payout contract at block ${fullBlock.getHeader.getHeight}")
-                    NISPTreeCache.cacheNewPayout(ctx, input, output.get, cache)
+                    logger.info(s"Found new payout contract in block ${fullBlock.getHeader.getHeight}")
+                    NISPTreeCache.cacheNewPayout(ctx, input, output.get, cache, fullBlock.getHeader.getHeight)
                   case LFSMPhase.PAYOUT =>
-                    logger.info(s"Found existing payout contract at block ${fullBlock.getHeader.getHeight}")
-                    NISPTreeCache.cacheExistingPayout(ctx, input, output, cache, prover)
+                    logger.info(s"Found existing payout contract in block ${fullBlock.getHeader.getHeight}")
+                    NISPTreeCache.cacheExistingPayout(ctx, input, output, cache, prover, fullBlock.getHeader.getHeight)
                   case _ =>
-                    logger.error("NISP Tree in invalid phase for payouts")
+                    logger.error("NISPTree in invalid phase for payouts")
                 }
               case None =>
-                logger.error(s"Could not find NISP Tree ${input.getBoxId}")
+                logger.info(s"Skipped NISPTree without genesis history ${input.getBoxId}" +
+                  s" in block ${fullBlock.getHeader.getHeight}")
             }
 
         }
