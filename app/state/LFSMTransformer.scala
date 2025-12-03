@@ -48,19 +48,23 @@ object LFSMTransformer {
                                      prover: ErgoProver, loader: BoxLoader): Unit = {
     val transformable = holdingTrees.filter(h => ctx.getHeight - h._2.currentPeriod.get >= LFSMHelpers.HOLDING_PERIOD)
     val transforms = transformable.map(t => Try(transformHolding(ctx, t, prover, loader)))
-    logger.info(s"Transformed ${transforms.count(_.isSuccess)} holding utxos successfully")
-    logger.info(s"Failed to transform ${transforms.count(_.isFailure)} holding utxos")
-    transforms.filter(_.isFailure).foreach{
-      t =>
-        t.failed.get match {
-          case ds: ErgoClientException if ds.getMessage.contains("Double spending attempt") =>
-            logger.warn("Skipped holding transformation due to double spend")
-          case inp: NotEnoughInputsException =>
-            logger.warn("Skipped holding transformation due to failure to find inputs")
-          case e =>
-            logger.error("Found error while transforming holdings", e)
-        }
+    if(transforms.exists(_.isSuccess)) {
+      logger.info(s"Transformed ${transforms.count(_.isSuccess)} holding utxos successfully")
+    }
+    if(transforms.exists(_.isFailure)) {
+      logger.info(s"Failed to transform ${transforms.count(_.isFailure)} holding utxos")
+      transforms.filter(_.isFailure).foreach {
+        t =>
+          t.failed.get match {
+            case ds: ErgoClientException if ds.getMessage.contains("Double spending attempt") =>
+              logger.warn("Skipped holding transformation due to double spend")
+            case inp: NotEnoughInputsException =>
+              logger.warn("Skipped holding transformation due to failure to find inputs")
+            case e =>
+              logger.error("Found error while transforming holdings", e)
+          }
 
+      }
     }
   }
 
@@ -69,18 +73,22 @@ object LFSMTransformer {
                                   prover: ErgoProver, loader: BoxLoader): Unit = {
     val transformable = evalTrees.filter(h => ctx.getHeight - h._2.currentPeriod.get >= LFSMHelpers.EVAL_PERIOD)
     val transforms = transformable.map(t => Try(transformEval(ctx, t, prover, loader)))
-    logger.info(s"Transformed ${transforms.count(_.isSuccess)} eval utxos successfully")
-    logger.info(s"Failed to transform ${transforms.count(_.isFailure)} eval utxos")
-    transforms.filter(_.isFailure).foreach{
-      t =>
-        t.failed.get match {
-          case ds: ErgoClientException if ds.getMessage.contains("Double spending attempt") =>
-            logger.warn("Skipped eval transformation due to double spend")
-          case inp: NotEnoughInputsException =>
-            logger.warn("Skipped eval transformation due to failure to find inputs")
-          case e =>
-            logger.error("Found error while transforming evals", e)
-        }
+    if(transforms.exists(_.isSuccess)) {
+      logger.info(s"Transformed ${transforms.count(_.isSuccess)} eval utxos successfully")
+    }
+    if(transforms.exists(_.isFailure)) {
+      logger.info(s"Failed to transform ${transforms.count(_.isFailure)} eval utxos")
+      transforms.filter(_.isFailure).foreach {
+        t =>
+          t.failed.get match {
+            case ds: ErgoClientException if ds.getMessage.contains("Double spending attempt") =>
+              logger.warn("Skipped eval transformation due to double spend")
+            case inp: NotEnoughInputsException =>
+              logger.warn("Skipped eval transformation due to failure to find inputs")
+            case e =>
+              logger.error("Found error while transforming evals", e)
+          }
+      }
     }
   }
 
@@ -89,36 +97,44 @@ object LFSMTransformer {
     val transformable = evalTrees.filter(h => ctx.getHeight - h._2.currentPeriod.get < LFSMHelpers.EVAL_PERIOD)
     val unchecked = transformable.filter(!_._2.evaluated)
     val evaluations = unchecked.map(t => Try(evaluateSubmissions(ctx, t, prover, loader, cache)))
-    logger.info(s"Evaluated ${evaluations.count(_.isSuccess)} eval utxos successfully")
-    logger.info(s"Failed to evaluate ${evaluations.count(_.isFailure)} eval utxos")
-    evaluations.filter(_.isFailure).foreach{
-      t =>
-        t.failed.get match {
-          case ds: ErgoClientException if ds.getMessage.contains("Double spending attempt") =>
-            logger.warn("Skipped evaluation due to double spend")
-          case inp: NotEnoughInputsException =>
-            logger.warn("Skipped evaluation due to failure to find inputs")
-          case e =>
-            logger.error("Found error while performing evaluations", e)
-        }
+    if(evaluations.exists(_.isSuccess)) {
+      logger.info(s"Evaluated ${evaluations.count(_.isSuccess)} eval utxos successfully")
+    }
+    if(evaluations.exists(_.isFailure)) {
+      logger.info(s"Failed to evaluate ${evaluations.count(_.isFailure)} eval utxos")
+      evaluations.filter(_.isFailure).foreach {
+        t =>
+          t.failed.get match {
+            case ds: ErgoClientException if ds.getMessage.contains("Double spending attempt") =>
+              logger.warn("Skipped evaluation due to double spend")
+            case inp: NotEnoughInputsException =>
+              logger.warn("Skipped evaluation due to failure to find inputs")
+            case e =>
+              logger.error("Found error while performing evaluations", e)
+          }
+      }
     }
   }
 
   private def attemptPayouts(ctx: BlockchainContext, payoutTrees: Seq[(String, NISPTree)],
                              prover: ErgoProver, loader: BoxLoader): Unit = {
     val transforms = payoutTrees.map(t => Try(payoutERG(ctx, t, prover, loader)))
-    logger.info(s"Paid out ${transforms.count(_.isSuccess)} payout utxos successfully")
-    logger.info(s"Failed to pay out ${transforms.count(_.isFailure)} payout utxos")
-    transforms.filter(_.isFailure).foreach{
-      t =>
-        t.failed.get match {
-          case ds: ErgoClientException if ds.getMessage.contains("Double spending attempt") =>
-            logger.warn("Skipped payout due to double spend")
-          case inp: NotEnoughInputsException =>
-            logger.warn("Skipped payout due to failure to find inputs")
-          case e =>
-            logger.error("Found error while attempting payouts", e)
-        }
+    if(transforms.exists(_.isSuccess)) {
+      logger.info(s"Paid out ${transforms.count(_.isSuccess)} payout utxos successfully")
+    }
+    if(transforms.exists(_.isFailure)) {
+      logger.info(s"Failed to pay out ${transforms.count(_.isFailure)} payout utxos")
+      transforms.filter(_.isFailure).foreach {
+        t =>
+          t.failed.get match {
+            case ds: ErgoClientException if ds.getMessage.contains("Double spending attempt") =>
+              logger.warn("Skipped payout due to double spend")
+            case inp: NotEnoughInputsException =>
+              logger.warn("Skipped payout due to failure to find inputs")
+            case e =>
+              logger.error("Found error while attempting payouts", e)
+          }
+      }
     }
   }
 
@@ -129,23 +145,27 @@ object LFSMTransformer {
         ctx.getHeight - h._2.currentPeriod.get < LFSMHelpers.HOLDING_PERIOD && !h._2.hasMiner
     }
     val transforms = transformable.map(t => Try(submitNISPs(ctx, t, prover, diff, loader, cache)))
-    logger.info(s"Submitted NISPs to ${transforms.count(_.isSuccess)} holding utxos successfully")
-    logger.info(s"Failed to submit ${transforms.count(_.isFailure)} NISPs")
-    transforms.filter(_.isFailure).foreach{
-      t =>
-        t.failed.get match {
-          case f: NoValidNISPException =>
-            logger.warn(f.getMessage)
-          case ds: ErgoClientException if ds.getMessage.contains("Double spending attempt") =>
-            logger.warn("Skipped NISP submission due to double spend")
-          case ia: IllegalArgumentException if ia.getMessage.contains("lastHeight is undefined") =>
-            logger.warn("Skipped NISP submission as no super shares have been found")
-          case inp: NotEnoughInputsException =>
-            logger.warn("Skipped NISP submission due to failure to find inputs")
-          case e =>
-            logger.error("Found error while submitting NISPs", e)
-        }
+    if(transforms.exists(_.isSuccess)) {
+      logger.info(s"Submitted NISPs to ${transforms.count(_.isSuccess)} holding utxos successfully")
+    }
+    if(transforms.exists(_.isFailure)) {
+      logger.info(s"Failed to submit ${transforms.count(_.isFailure)} NISPs")
+      transforms.filter(_.isFailure).foreach {
+        t =>
+          t.failed.get match {
+            case f: NoValidNISPException =>
+              logger.warn(f.getMessage)
+            case ds: ErgoClientException if ds.getMessage.contains("Double spending attempt") =>
+              logger.warn("Skipped NISP submission due to double spend")
+            case ia: IllegalArgumentException if ia.getMessage.contains("lastHeight is undefined") =>
+              logger.warn("Skipped NISP submission as no super shares have been found")
+            case inp: NotEnoughInputsException =>
+              logger.warn("Skipped NISP submission due to failure to find inputs")
+            case e =>
+              logger.error("Found error while submitting NISPs", e)
+          }
 
+      }
     }
   }
 
