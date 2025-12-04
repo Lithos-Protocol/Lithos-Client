@@ -6,6 +6,7 @@ import org.ergoplatform.appkit.{Address, BlockchainContext, ErgoProver, ErgoValu
 import org.ergoplatform.restapi.client.{ErgoTransactionInput, ErgoTransactionOutput}
 import org.slf4j.{Logger, LoggerFactory}
 import play.api.cache.SyncCacheApi
+import scorex.utils.Longs
 import sigma.ast.ErgoTree
 import sigma.data.{AvlTreeFlags, CBigInt}
 import sigma.{Coll, SigmaProp}
@@ -117,14 +118,14 @@ object NISPTreeCache {
           require(lookUp.proof.ergoValue.getValue == lookProof, "Lookup proofs must be equal on eval transformation")
           val delete = dictionary.delete(miner.toArray)
           require(delete.proof.ergoValue.getValue == delProof, "Removal proofs must be equal on eval transformation")
-
+          val minerScore = Longs.fromByteArray(lookUp.response.head.get.slice(0,8))
           val removedMiner =
             Hex.toHexString(miner.toArray) == Hex.toHexString(Contract.fromAddress(prover.getAddress).hashedPropBytes)
-
+          val nextTotalScore = oldNISPTree.totalScore - minerScore
           val nextMinerSet = oldNISPTree.minerSet -- Set(Hex.toHexString(miner.toArray))
           val nispTree = {
             if(removedMiner)
-              oldNISPTree.copy(tree = dictionary, hasMiner = false, minerSet = nextMinerSet)
+              oldNISPTree.copy(tree = dictionary, hasMiner = false, totalScore = nextTotalScore, minerSet = nextMinerSet)
             else
               oldNISPTree.copy(tree = dictionary, minerSet = nextMinerSet)
           }
