@@ -331,7 +331,12 @@ object LFSMTransformer {
     val delete = copiedTree.delete(Contract.fromAddress(prover.getAddress).hashedPropBytes)
     logger.info(s"Digests after transform: (${realDigest}, ${tree}, ${copiedTree})")
     val score = Longs.fromByteArray(lookUp.response.head.ergoValue.getValue.toArray.slice(0, 8))
-    val amountToPay = LFSMHelpers.paymentFromScore(score, payments._2.totalScore, payments._2.totalReward)
+    val totalScore   = payInput.registers(2).getValue.asInstanceOf[CBigInt].wrappedValue
+    val totalReward  = payInput.registers(3).getValue.asInstanceOf[Long]
+
+    // The same is not true for totalScore, which stays constant during payouts, but is decreased during
+    // evals
+    val amountToPay = LFSMHelpers.paymentFromScore(score, totalScore, totalReward)
     val inputWithContext = payInput.setCtxVars(
       ContextVar.of(0.toByte,
         ErgoValue.ofArray(Array(Colls.fromArray(Contract.fromAddress(prover.getAddress).hashedPropBytes)),
