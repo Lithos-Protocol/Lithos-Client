@@ -35,7 +35,7 @@ case class Contract(ergoTree: ErgoTree, mutators: Seq[Mutator] = Seq.empty[Mutat
 
   def sigmaBoolean: Option[SigmaBoolean] = ergoTree.toSigmaBooleanOpt
   def address(networkType: NetworkType): Address = Address.fromErgoTree(ergoTree, networkType)
-
+  def address(ctx: BlockchainContext): Address = address(ctx.getNetworkType)
   override def toString: String = Hex.toHexString(hashedPropBytes)
 
   override def equals(obj: Any): Boolean = {
