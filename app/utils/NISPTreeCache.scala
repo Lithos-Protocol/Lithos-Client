@@ -127,7 +127,7 @@ object NISPTreeCache {
             if(removedMiner)
               oldNISPTree.copy(tree = dictionary, hasMiner = false, totalScore = nextTotalScore, minerSet = nextMinerSet)
             else
-              oldNISPTree.copy(tree = dictionary, minerSet = nextMinerSet)
+              oldNISPTree.copy(tree = dictionary, minerSet = nextMinerSet, totalScore = nextTotalScore)
           }
 
           cache.remove(input.getBoxId)
