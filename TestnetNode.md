@@ -100,7 +100,7 @@ This key must later be provided to Lithos.
 
 Changing Your Ergo Node API Key Through the Node’s Swagger Interface
 
-To update the API key used by your Ergo node, you can do it directly from the node’s built-in Swagger panel at http://127.0.0.1:9052/swagger. In the /utils section of the API, look for the endpoint POST /utils/updateApiKey. This call allows you to set a brand-new API key without restarting the node. Simply open the endpoint, enter your desired new key into the request body, and execute the call. You must update your node configuration with this API key and restart the node.  Be sure to update any external services (Lithos Client, bots, dashboards, miners, etc.) that connect to your node, as they will need to use this new API key going forward.
+To update the API key used by your Ergo node, you can do it directly from the node’s built-in Swagger panel at http://127.0.0.1:9052/swagger. In the /utils section of the API, look for the endpoint POST /utils/hash/blake2b. This call allows you to set a brand-new API key without restarting the node. Simply open the endpoint, enter your desired new key into the request body, and execute the call. You must update your node configuration with this API key and restart the node.  Be sure to update any external services (Lithos Client, bots, dashboards, miners, etc.) that connect to your node, as they will need to use this new API key going forward.
 
 ---
 
