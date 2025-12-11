@@ -1,0 +1,811 @@
+openapi: 3.0.0
+servers:
+  - url: http://localhost:9000
+    description: Lithos Client API
+info:
+  description: |
+    API Documentation for the Lithos client. Models used
+    here are expected to be consistent across any other implementations of the Lithos client.
+
+  version: 1.0.0
+  title: Lithos Client API
+  contact:
+    url: https://github.com/Lithos-Protocol
+tags:
+  - name: info
+    description: Information about the Lithos client and state
+    x-displayName: Info
+  - name: blocks
+    description: Blocks currently being processed by Lithos contracts
+    x-displayName: Blocks
+  - name: payments
+    description: Payments made to you from Lithos contracts
+    x-displayName: Payments
+  - name: mining
+    description: Information about the local stratum and mining process
+    x-displayName: Mining
+  - name: collateral
+    description: Find and interact with collateral UTXOs 
+    x-displayName: Collateral
+  - name: pool_block_model
+    x-displayName: The PoolBlock Model
+    description: |
+      <SchemaDefinition schemaRef="#/components/schemas/PoolBlock" />
+  - name: collateral_utxo_model
+    x-displayName: The CollateralUTXO Model
+    description: |
+      <SchemaDefinition schemaRef="#/components/schemas/CollateralUTXO" />
+x-tagGroups:
+  - name: Lithos
+    tags:
+      - info
+      - blocks
+      - payments
+      - collateral
+  - name: Stratum
+    tags:
+      - mining
+  - name: Models
+    tags:
+      - pool_block_model
+      - collateral_utxo_model
+paths:
+  /blocks:
+    get:
+      summary: List UTXO ids for blocks
+      description: Get an array of UTXO ids (hex encoded) representing contracts currently processing Lithos blocks.
+        Returns a page of the whole list starting from `offset` and containing `limit` items.
+      operationId: getContractIds
+      tags:
+        - blocks
+      parameters:
+        - in: query
+          name: limit
+          required: false
+          description: The number of items in list to return
+          schema:
+            type: integer
+            format: int32
+            minimum: 10
+            maximum: 100
+            default: 50
+        - in: query
+          name: offset
+          required: false
+          description: The offset to start the list from
+          schema:
+            type: integer
+            format: int32
+            default: 0
+      responses:
+        '200':
+          description: Array of UTXO ids
+          content:
+            application/json:
+              schema:
+                type: array
+                description: Array of UTXO ids
+                items:
+                  type: string
+                  example: '88c297f99da7172f6aa20efbead69aa40e2b7734a1873d66ca1db6b19d214db6'
+                example: ['88c297f99da7172f6aa20efbead69aa40e2b7734a1873d66ca1db6b19d214db6']
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+  /blocks/byHeight:
+    get:
+      summary: UTXO ids by block height
+      description: Get UTXO ids of Lithos contracts for blocks mined in a range of heights
+      operationId: getBlocksByHeight
+      tags:
+        - blocks
+      parameters:
+        - in: query
+          name: fromHeight
+          required: false
+          description: Min height (start of the range) to look for Lithos blocks
+          schema:
+            type: integer
+            format: int32
+            default: 0
+        - in: query
+          name: toHeight
+          required: false
+          description: Max height of the range (exclusive)
+          schema:
+            type: integer
+            format: int32
+            default: -1
+      responses:
+        '200':
+          description: Array of UTXO ids
+          content:
+            application/json:
+              schema:
+                type: array
+                example: ['88c297f99da7172f6aa20efbead69aa40e2b7734a1873d66ca1db6b19d214db6']
+                items:
+                  type: string
+                  example: '88c297f99da7172f6aa20efbead69aa40e2b7734a1873d66ca1db6b19d214db6'
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /blocks/{utxoId}:
+    get:
+      summary: Block info by UTXO id
+      description: Get information about a specific pool block being processed by a Lithos rollup contract
+      operationId: getBlockById
+      tags:
+        - blocks
+      parameters:
+        - in: path
+          name: utxoId
+          required: true
+          description: Id of the UTXO representing a Lithos block
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Pool block object which shows information about the given Lithos block
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PoolBlock'
+        '404':
+          description: UTXO with this id doesn't exist
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /blocks/utxoIds:
+    post:
+      summary: Block info for multiple UTXO ids
+      description: Get pool blocks by given UTXO ids
+      operationId: getPoolBlocksByIds
+      tags:
+        - blocks
+      requestBody:
+          required: true
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: string
+                  example: '88c297f99da7172f6aa20efbead69aa40e2b7734a1873d66ca1db6b19d214db6'
+      responses:
+        '200':
+          description: Pool blocks corresponding to ids provided
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/PoolBlock'
+        '404':
+          description: Not all ids correspond to an existing pool block
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /blocks/{utxoId}/miners:
+    get:
+      summary: Get a block's miner set
+      description: Get information of miners associated with this pool block
+      operationId: getBlockMinersById
+      tags:
+        - blocks
+      parameters:
+        - in: path
+          name: utxoId
+          required: true
+          description: UTXO id of the pool block whose miners are being queried
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Block Miners object
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/BlockMiners'
+        '404':
+          description: Could not find pool block with the given id
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+  /blocks/all:
+    get:
+      summary: List all pool blocks
+      description: List all pool blocks being processed by Lithos rollup contracts.
+       Returns a page of the whole list starting from `offset` and containing `limit` items.
+      operationId: getAllPoolBlocks
+      tags:
+        - blocks
+      parameters:
+        - in: query
+          name: limit
+          required: false
+          description: The number of items in list to return
+          schema:
+            type: integer
+            format: int32
+            minimum: 10
+            maximum: 100
+            default: 50
+        - in: query
+          name: offset
+          required: false
+          description: The offset to start the list from
+          schema:
+            type: integer
+            format: int32
+            default: 0
+      responses:
+        '200':
+          description: List of pool block objects describing all tracked LFSM rollups
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/PoolBlock'
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /payments:
+    get:
+      description: Get a list of payment transactions sent to you from Lithos contracts. Returns a page of the whole
+        list starting from `offset` and containing `limit` items.
+      summary: Get Lithos payouts
+      security:
+        - ApiKeyAuth: [api_key]
+      operationId: getPayments
+      tags:
+        - payments
+      parameters:
+        - in: query
+          name: limit
+          required: false
+          description: The number of items in list to return
+          schema:
+            type: integer
+            format: int32
+            minimum: 10
+            maximum: 100
+            default: 50
+        - in: query
+          name: offset
+          required: false
+          description: The offset to start the list from
+          schema:
+            type: integer
+            format: int32
+            default: 0
+      responses:
+        '200':
+          description: Array of Payment Transaction objects
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/PaymentTransaction'
+        '404':
+          description: Could not find any Lithos block payments for your mining address
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+  /info:
+    get:
+      description: Get information about the Lithos client and the current LFSM state
+      summary: Lithos client information
+      operationId: getLithosInfo
+      tags:
+        - info
+      responses:
+        '200':
+          description: Lithos info object
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LithosInfo'
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /mining:
+    get:
+      description: Information about the Lithos stratum
+      summary: Get Stratum information
+      operationId: getStratumInfo
+      tags:
+        - mining
+      responses:
+        '200':
+          description: Information about the Stratum server
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StratumInfo'
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+  /mining/bestNISP:
+    get:
+      description: Returns the best NISP produced for a given height and score, with exactly 10 super-shares
+      summary: Get best NISP at height
+      operationId: getBestNISPAtHeight
+      security:
+        - ApiKeyAuth: [api_key]
+      tags:
+        - mining
+      parameters:
+        - in: query
+          name: height
+          required: true
+          description: Height that all super shares in the NISP must be below
+          schema:
+            type: integer
+            format: int32
+            default: 0
+        - in: query
+          name: score
+          required: true
+          description: Score that all super shares in this NISP must be above
+          schema:
+            type: integer
+            format: int64
+            default: 5000000
+      responses:
+        '200':
+          description: Best NISP representation with 10 super shares
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NISPRepresentation'
+        '404':
+          description: Could not produce a NISP for the given height
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /collateral/all:
+    get:
+      summary: List all collateral UTXOs
+      description: Get list of collateral UTXOs which will be used by Lithos while mining.
+       Returns a page of the whole list starting from `offset` and containing `limit` items.
+      operationId: getAllCollateralInfo
+      tags:
+        - collateral
+      parameters:
+        - in: query
+          name: limit
+          required: false
+          description: The number of items in list to return
+          schema:
+            type: integer
+            format: int32
+            minimum: 10
+            maximum: 100
+            default: 50
+        - in: query
+          name: offset
+          required: false
+          description: The offset to start the list from
+          schema:
+            type: integer
+            format: int32
+            default: 0
+      responses:
+        '200':
+          description: Array of collateral UTXOs
+          content:
+            application/json:
+              schema:
+                type: array
+                description: Array of collateral UTXOs
+                items:
+                  $ref: '#/components/schemas/CollateralUTXO'
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+  /collateral/local:
+    get:
+      security:
+        - ApiKeyAuth: [api_key]
+      summary: List personal collateral UTXOs
+      description: Get the list of collateral UTXOs made by you. Returns a page of the whole list
+       starting from `offset` and containing `limit` items.
+      operationId: getLocalCollateralInfo
+      tags:
+        - collateral
+      parameters:
+        - in: query
+          name: limit
+          required: false
+          description: The number of items in list to return
+          schema:
+            type: integer
+            format: int32
+            minimum: 10
+            maximum: 100
+            default: 50
+        - in: query
+          name: offset
+          required: false
+          description: The offset to start the list from
+          schema:
+            type: integer
+            format: int32
+            default: 0
+      responses:
+        '200':
+          description: Array of collateral UTXOs
+          content:
+            application/json:
+              schema:
+                type: array
+                description: Array of collateral UTXOs
+                items:
+                  $ref: '#/components/schemas/CollateralUTXO'
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+  /collateral/create:
+    post:
+      summary: Create new collateral UTXOs
+      security:
+        - ApiKeyAuth: [api_key]
+      description: Create new collateral UTXOs which will be used by Lithos miners
+      operationId: createCollateralUTXO
+      tags:
+        - collateral
+      requestBody:
+          required: true
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CollateralInfo'
+      responses:
+        '200':
+          description: Successful transaction to create collateral UTXOs
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessfulTransaction'
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+components:
+  schemas:
+    ApiError:
+      description: Error response from API
+      type: object
+      required:
+        - error
+        - reason
+        - detail
+      properties:
+        error:
+          type: integer
+          description: Error code
+          example: 500
+        reason:
+          type: string
+          description: Error message explaining the reason of the error
+          example: 'Internal server error'
+        detail:
+          type: string
+          nullable: true
+          description: Detailed error description
+    PoolBlock:
+      description: Information about block mined by Lithos pool contracts
+      type: object
+      x-tags: blocks
+      required:
+        - utxoId
+        - blockId
+        - blockHeight
+        - numMiners
+        - phase
+      properties:
+        utxoId:
+          type: string
+          description: UTXO id of Lithos contract currently processing this block
+          example: '88c297f99da7172f6aa20efbead69aa40e2b7734a1873d66ca1db6b19d214db6'
+        blockId:
+          type: string
+          description: Header id associated with this block
+          example: '2a7de28034ca523685d9a03c30d06c36863a804f69c2e4add4d83c8c2ba26271'
+        blockHeight:
+          type: integer
+          format: int32
+          description: Height of this Lithos-mined block
+          example: 42853
+        numMiners:
+          type: integer
+          format: int32
+          description: Number of miners which are currently being processed by this Lithos pool contract
+          example: 12
+        phase:
+          type: string
+          description: Current LFSM phase of the associated Lithos contract
+          example: 'HOLDING'
+    BlockMiners:
+      description: Miner information associated with a Lithos block
+      type: object
+      x-tags: blocks
+      required:
+        - propBytesHash
+      properties:
+        propBytesHash:
+          type: string
+          description: Hexadecimal representation of hashed proposition bytes of the miner
+          example: '56002fb6194f8a7f147b54c98c98bd72205f46c35fed0f3c4111071ecb0763b7'
+    PaymentTransaction:
+      description: Transaction paid to miner by Lithos payout contract
+      type: object
+      x-tags: payments
+      required:
+        - transactionId
+        - payoutUTXO
+        - amount
+        - score
+        - paymentHeight
+        - blockId
+        - minedBlockHeight
+      properties:
+        transactionId:
+          type: string
+          description: Transaction Id of this mining reward payment
+          example: 'c42513da4dc695dbac3fb13482b604b289c9f1d39355e2e839899ed57780d9ab'
+        payoutUTXO:
+          type: string
+          description: UTXO id of the Lithos payout contract associated with this payment
+          example: '5035b2e112b4f5b873dd3444c01df1e7e697807fd84fe96790eacb128e46428d'
+        amount:
+          type: integer
+          format: int64
+          description: Amount of ERG paid to miner
+          example: 67500000000
+        score:
+          type: integer
+          format: int64
+          description: Score associated with this miner's NISP, used to determine payout amount
+          example: 5000000
+        paymentHeight:
+          type: integer
+          format: int32
+          description: Height that this payment was sent to miner
+          example: 47832
+        blockId:
+          type: string
+          description: Id of the block processed by Lithos and associated with this reward
+          example: 'd5bb8d6fcb179a427e21b7ad68ec9148916aac7604f75c642acc1c3e28bd4c59'
+        minedBlockHeight:
+          type: integer
+          format: int32
+          description: Height of the block processed by Lithos, and associated with this reward.
+          example: 47112
+    LithosInfo:
+      description: Information about this Lithos client and the current LFSM state
+      type: object
+      x-tags: info
+      required:
+        - numPoolBlocks
+        - synced
+      properties:
+        numPoolBlocks:
+          type: integer
+          description: Number of tracked blocks currently being processed by Lithos contracts
+          example: 64
+        synced:
+          type: boolean
+          description: Whether this Lithos client has synced to the blockchain
+          example: true
+    StratumInfo:
+      description: Information about the Stratum server
+      type: object
+      x-tags: mining
+      required:
+        - diff
+        - tau
+        - reducedMessaging
+        - superSharesPerHour
+      properties:
+        diff:
+          type: string
+          description: Difficulty used for Lithos calculations
+          example: '4.0G'
+        tau:
+          type: integer
+          description: Tau representation of the mining diff
+          example: 11579208923731619542357098500868790785326998466564056403945758400791312963993
+        reducedMessaging:
+          type: boolean
+          description: Whether the stratum server has the `reduceShareMessages` setting enabled
+          example: false
+        superSharesPerHour:
+          type: double
+          description: Number of super shares produced by the mining client within the last hour
+          example: 2.5
+    CollateralUTXO:
+      description: Collateral UTXO which is to be used by Lithos while mining
+      type: object
+      x-tags: collateral
+      required:
+        - id
+        - reward
+        - lender
+        - fee
+        - creationHeight
+      properties:
+        id:
+          type: string
+          description: Id of this collateral UTXO
+          example: 'ce00d6e0f4fd3390c0519bb0d24824e1e6b06978163f4845a7cf2c1c7d8f1b65'
+        reward:
+          type: integer
+          format: int64
+          description: Block reward this collateral UTXO covers
+          example: 67500000000
+        lender:
+          type: string
+          description: Address of lender who created this collateral UTXO
+          example: '3WwbQFz3vgi8ChY9dM1haQLGDeQYe5U9z98bwWW4TqxxEAvyYu5y'
+        fee:
+          type: integer
+          format: int64
+          description: Fee that this collateral UTXO charges from the entire pool
+          example: 1000000
+        creationHeight:
+          type: integer
+          description: Height this collateral UTXO was made
+          example: 41482
+    CollateralInfo:
+      description: Information needed to create collateral UTXOs
+      type: object
+      x-tags: collateral
+      required:
+        - reward
+        - fee
+        - numUtxos
+      properties:
+        reward:
+          type: integer
+          format: int64
+          description: Block reward this collateral UTXO covers
+          example: 67500000000
+        fee:
+          type: integer
+          format: int64
+          description: Fee that this collateral UTXO charges from the entire pool
+          example: 1000000
+        numUtxos:
+          type: integer
+          format: int32
+          description: Number of collateral UTXOs to create in this transaction
+          example: 5
+    
+    SuccessfulTransaction:
+      description: Transaction which was successfully sent to the node
+      type: object
+      required:
+        - txId
+        - height
+      properties:
+        txId:
+          type: string
+          description: Hex-encoded id of this transaction
+          example: '40b7d045a858d537cdbf072e46ffbb86c0c9f6b0e93c369c1ffcba76797636d7'
+        height:
+          type: integer
+          format: int32
+          description: Height this transaction was sent
+          example: 45096
+    NISPRepresentation:
+      description: Representation of a 10 super share NISP
+      x-tags: mining
+      type: object
+      required:
+        - score
+        - height
+        - headers
+        - bytes
+      properties:
+        score:
+          type: integer
+          format: int64
+          description: Score associated with this NISP, to be used in payout calculations
+          example: 5000000
+        height:
+          type: integer
+          format: int32
+          description: Height all super-shares in this NISP must be under
+          example: 45096
+        headers:
+          type: array
+          maxItems: 10
+          minItems: 10
+          description: Header bytes associated with each super-share in this NISP
+          items:
+            type: string
+            example: '04ecc45f0b20659f0a8a791872cf625d24b45832cfd3ac910da7cc9f560d42332b6ce08f276d1f3e8b45e637fa4918b3ea3c9d8c6d57ed8ee9fb1379d1b3d7756819a95ffafa172cb015ebf8e16c4ab4d3afcd34297e16206c4c8811a25bae6be43cd9c5e521b40ed281ddb1a1ebc52dfc1aa2835e20b20e795d979c8c025d23ae10edacdfe5ac330b65ac4eb10bdc52a7ab78abdfba7ef606a82c95168840839f1ca4da46c597630502383dc9be010000000002856c5e4eb4b915005dccb8e0f42bed1777cae48565be13a77cbf31e3c93f45150000000000000000'
+          example: ['04ecc45f0b20659f0a8a791872cf625d24b45832cfd3ac910da7cc9f560d42332b6ce08f276d1f3e8b45e637fa4918b3ea3c9d8c6d57ed8ee9fb1379d1b3d7756819a95ffafa172cb015ebf8e16c4ab4d3afcd34297e16206c4c8811a25bae6be43cd9c5e521b40ed281ddb1a1ebc52dfc1aa2835e20b20e795d979c8c025d23ae10edacdfe5ac330b65ac4eb10bdc52a7ab78abdfba7ef606a82c95168840839f1ca4da46c597630502383dc9be010000000002856c5e4eb4b915005dccb8e0f42bed1777cae48565be13a77cbf31e3c93f45150000000000000000']
+        bytes:
+          type: string
+          description: Serialized (hex-encoded) bytes of this NISP
+          example: '00f6318aa84791d0...a0bdc8045a70f931'
+  securitySchemes:
+    ApiKeyAuth:
+      description: >
+        Api key authorization used by Lithos. The hash of this key must be placed in your config, under `lithos.apiKeyHash`.
+        The default value is `hello`.
+      type: apiKey
+      name: api_key
+      in: header
