@@ -7,6 +7,7 @@ import org.bouncycastle.util.encoders.Hex
 import org.ergoplatform.appkit.{BlockchainContext, ErgoId, ErgoProver, ErgoValue}
 import org.ergoplatform.restapi.client.ErgoTransactionOutput
 import sigma.SigmaProp
+import sigma.ast.ErgoTree
 import sigma.data.{CSigmaProp, ProveDlog, SigmaBoolean, SigmaLeaf}
 import sigma.serialization.GroupElementSerializer
 import work.lithos.mutations.{Contract, InputUTXO, UTXO}
@@ -61,6 +62,8 @@ object Helpers {
         evalContract(ctx)
       case hex: String if (hex == payoutHex) =>
         payoutContract(ctx)
+      case _ =>
+        Contract(ErgoTree.fromHex(output.getErgoTree))
     }
     val value = output.getValue
 
