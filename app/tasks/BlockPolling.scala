@@ -55,6 +55,7 @@ class BlockPolling @Inject()(cache: SyncCacheApi, system: ActorSystem, config: C
               // Start listening once synced
               logger.info(s"Finished syncing to height ${chainHeight}")
               logger.info(s"Now listening every ${syncConfig.listeningInterval} for new blocks")
+              LFSMSync.synced = true
               system.scheduler.scheduleWithFixedDelay(initialDelay = 10 seconds,
                 delay = syncConfig.listeningInterval)({
                 () =>

@@ -11,5 +11,6 @@ case class NISPTree(tree: PlasmaMap[Array[Byte], Array[Byte]],
                     hasMiner: Boolean,
                     phase: LFSMPhase,
                     minerSet: Set[String] = Set.empty[String],
-                    evaluated: Boolean = false
+                    evaluated: Boolean = false,
+                    blockId: String
                    )

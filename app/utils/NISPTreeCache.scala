@@ -1,9 +1,9 @@
 package utils
 
-import lfsm.{LFSMPhase, NISPTree}
+import lfsm.{LFSMHelpers, LFSMPhase, NISPTree}
 import org.bouncycastle.util.encoders.Hex
-import org.ergoplatform.appkit.{Address, BlockchainContext, ErgoProver, ErgoValue}
-import org.ergoplatform.restapi.client.{ErgoTransactionInput, ErgoTransactionOutput}
+import org.ergoplatform.appkit.{Address, BlockchainContext, ErgoProver, ErgoValue, JavaHelpers}
+import org.ergoplatform.restapi.client.{ErgoTransaction, ErgoTransactionInput, ErgoTransactionOutput, FullBlock}
 import org.slf4j.{Logger, LoggerFactory}
 import play.api.cache.SyncCacheApi
 import scorex.utils.Longs
@@ -19,13 +19,15 @@ import work.lithos.plasma.collections.PlasmaMap
 object NISPTreeCache {
   val logger: Logger = LoggerFactory.getLogger("NISPTreeCache")
   final val TREE_SET = "TREE_SET"
-  def cacheNewHolding(ctx:BlockchainContext, output: ErgoTransactionOutput, cache: SyncCacheApi, height: Int): Unit = {
+  final val TRACKED_PAYOUTS = "TRACKED_PAYOUTS"
+  def cacheNewHolding(ctx:BlockchainContext, output: ErgoTransactionOutput, cache: SyncCacheApi, block: FullBlock): Unit = {
     val holdingBox = Helpers.parseOutput(ctx, output)
     val newTree    = PlasmaMap[Array[Byte], Array[Byte]](AvlTreeFlags.AllOperationsAllowed, PlasmaParameters.default)
     val nispTree   = NISPTree(newTree, 0, BigInt(0), Some(holdingBox.registers(3).getValue.asInstanceOf[Long]),
-      holdingBox.value, holdingBox.registers(3).getValue.asInstanceOf[Long].toInt, hasMiner = false, LFSMPhase.HOLDING)
+      holdingBox.value, holdingBox.registers(3).getValue.asInstanceOf[Long].toInt, hasMiner = false, LFSMPhase.HOLDING,
+      blockId = block.getHeader.getId)
 
-    logger.info(s"Found genesis for NISPTree ${output.getBoxId} in block ${height}")
+    logger.info(s"Found genesis for NISPTree ${output.getBoxId} in block ${block.getHeader.getHeight}")
     cache.set(output.getBoxId, nispTree)
     val treeSet = cache.get[Seq[String]](TREE_SET).get
     cache.set(TREE_SET, treeSet :+ output.getBoxId)
@@ -174,7 +176,7 @@ object NISPTreeCache {
   }
 
   def cacheExistingPayout(ctx:BlockchainContext,input: ErgoTransactionInput, output: Option[ErgoTransactionOutput],
-                          cache: SyncCacheApi, prover: ErgoProver, height: Int): Unit = {
+                          cache: SyncCacheApi, prover: ErgoProver, fullBlock: FullBlock, tx: ErgoTransaction): Unit = {
 
     val optNISPTree = cache.get[NISPTree](input.getBoxId)
     optNISPTree match {
@@ -192,10 +194,19 @@ object NISPTreeCache {
           }
           if(paidMiner){
 
+            val payoutOutput = Helpers.parseOutput(ctx,
+              JavaHelpers.toIndexedSeq(tx.getOutputs)
+                .find(_.getErgoTree == Contract.fromAddress(prover.getAddress).ergoTreeHex)
+                .get
+            )
             cache.remove(input.getBoxId)
             val treeSet = cache.get[Seq[String]](TREE_SET).get
             cache.set(TREE_SET, treeSet.filter(_ != input.getBoxId))
-            logger.info(s"Removed NISPTree ${input.getBoxId} in block ${height} because local miner was paid")
+            val payoutRecord = PayoutRecord(tx.getId, payoutOutput.value, LFSMHelpers.scoreFromPayment(payoutOutput.value, oldNISPTree.totalScore, oldNISPTree.totalReward),
+              input.getBoxId, fullBlock.getHeader.getId, oldNISPTree.startHeight, fullBlock.getHeader.getHeight)
+            val payoutSet = cache.getOrElseUpdate[Seq[PayoutRecord]](TRACKED_PAYOUTS)(Seq.empty[PayoutRecord])
+            cache.set(TRACKED_PAYOUTS, payoutSet ++ Seq(payoutRecord))
+            logger.info(s"Removed NISPTree ${input.getBoxId} in block ${fullBlock.getHeader.getHeight} because local miner was paid")
           }else {
             val lookUp = dictionary.lookUp(miners.toArray.map(_.toArray):_*)
             require(lookUp.proof.ergoValue.getValue == lookProof, "Lookup proofs must be equal on payout transformation")
@@ -207,17 +218,17 @@ object NISPTreeCache {
             cache.set(output.get.getBoxId, nispTree)
             val treeSet = cache.get[Seq[String]](TREE_SET).get
             cache.set(TREE_SET, treeSet.filter(_ != input.getBoxId) :+ output.get.getBoxId)
-            logger.info(s"Transformed NISPTree ${input.getBoxId} in block ${height} to" +
+            logger.info(s"Transformed NISPTree ${input.getBoxId} in block ${fullBlock.getHeader.getHeight} to" +
               s" output ${output.get.getBoxId} after payout application")
           }
         }else{
           cache.remove(input.getBoxId)
           val treeSet = cache.get[Seq[String]](TREE_SET).get
           cache.set(TREE_SET, treeSet.filter(_ != input.getBoxId))
-          logger.warn(s"Removed NISPTree ${input.getBoxId} in block ${height} because" +
+          logger.warn(s"Removed NISPTree ${input.getBoxId} in block ${fullBlock.getHeader.getHeight} because" +
             s" local miner was not present")
         }
-      case None => logger.info(s"Skipped payout application in block $height because" +
+      case None => logger.info(s"Skipped payout application in block $fullBlock.getHeader.getHeight because" +
         s" NISPTree ${input.getBoxId} had no genesis history")
     }
 

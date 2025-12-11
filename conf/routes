@@ -3,10 +3,41 @@
 # https://www.playframework.com/documentation/latest/ScalaRouting
 # ~~~~
 
+
+# Routes for Blocks API
+
+GET /blocks/byHeight          api.BlocksApiController.getBlocksByHeight()
+GET /blocks                   api.BlocksApiController.getContractIds()
+GET /blocks/all               api.BlocksApiController.getAllPoolBlocks()
++ nocsrf
+POST /blocks/utxoIds          api.BlocksApiController.getPoolBlocksByIds()
+GET /blocks/:utxoId           api.BlocksApiController.getBlockById(utxoId: String)
+GET /blocks/:utxoId/miners    api.BlocksApiController.getBlockMinersById(utxoId: String)
+
+# Routes for Collateral API
++ nocsrf
+POST /collateral/create       api.CollateralApiController.createCollateralUTXO()
+GET /collateral/all           api.CollateralApiController.getAllCollateralInfo()
+GET /collateral/local         api.CollateralApiController.getLocalCollateralInfo()
+
+# Routes for Info API
+
+GET /info                     api.InfoApiController.getLithosInfo()
+
+# Routes for Mining API
+
+GET /mining/bestNISP          api.MiningApiController.getBestNISPAtHeight()
+GET /mining                   api.MiningApiController.getStratumInfo()
+
+# Routes for Payments API
+
+GET /payments                 api.PaymentsApiController.getPayments()
+
 # An example controller showing a sample home page
-GET     /                                   controllers.RESTController.getHelp()
+GET     /assets                                   controllers.Assets.at(path="/public", file="index.html")
 
 
 
 # Map static resources from the /public folder to the /assets URL path
-
+GET /assets/*file controllers.Assets.versioned(path="/public", file: Asset)
+GET /assets/docs/intro/*file controllers.Assets.versioned(path="/public", file: Asset)

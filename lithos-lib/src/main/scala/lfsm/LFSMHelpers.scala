@@ -2,7 +2,7 @@ package lfsm
 
 import lfsm.rollup.RollupContracts
 import org.ergoplatform.appkit.impl.NodeAndExplorerDataSourceImpl
-import org.ergoplatform.appkit.{Address, BlockchainContext, ErgoId, JavaHelpers, NetworkType}
+import org.ergoplatform.appkit.{Address, BlockchainContext, ErgoId, JavaHelpers, NetworkType, Parameters}
 import work.lithos.mutations.InputUTXO
 
 import java.math.{BigDecimal, BigInteger, RoundingMode}
@@ -22,6 +22,7 @@ object LFSMHelpers {
   final val NISP_WINDOW    = 360L
   final val NISP_COEFFICIENT = 10000 // Coefficient which separates normal shares from super-shares, used in evaluation
   final val NISP_MAX         = 40000 // Max size of NISP in bytes
+  final val COLLAT_MAX_FEE   = Parameters.MinFee * 100
   final val FP_TOKEN_MAINNET        = ErgoId.create("5a3f8a958178fc6e3b37aeea8fb94d8e6d33a7e4d2c7e70aa7db4e13c08a9903")
   final val FP_TOKEN_TESTNET        = ErgoId.create("9c29e54b037db7c5dd21911ef924caca5c7eee2e00b87b31a49759db674d049d")
   final val FP_CONTROL_TESTNET      = Address.create("ShDJAh75M4bDZbCowYGqtmHi4iiBMqWJcbQRYLaxx8tZZHtj23c7qEcEvUiXYvSdnjdWE6R328rSazggEzz7UWRqXGZWc6L28bo96jMNK8NZs1bQBHAxkb9rLFW8Gf3HFQRPUm26CX8LZeqF1iJvftCYHTp2KC2LisbheejGeoXkv")
@@ -82,6 +83,10 @@ object LFSMHelpers {
    */
   def paymentFromScore(score: Long, totalScore: BigInt, totalValue: Long): Long = {
     ((BigInt(totalValue) * BigInt(score)) / totalScore).toLong
+  }
+
+  def scoreFromPayment(reward: Long, totalScore: BigInt, totalValue: Long): Long = {
+    ((totalScore * BigInt(reward)) / BigInt(totalValue)).toLong
   }
 
   def getFPToken(ctx: BlockchainContext): ErgoId = {

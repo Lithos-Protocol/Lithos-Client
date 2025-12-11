@@ -14,7 +14,7 @@ import scala.collection.JavaConverters
 
 object LFSMSync {
   private val logger: Logger = LoggerFactory.getLogger("LFSMSync")
-
+  var synced = false
   def searchHoldingContracts(fullBlock: FullBlock, client: ErgoClient, cache: SyncCacheApi, prover: ErgoProver): Unit = {
     client.execute {
       ctx =>
@@ -37,7 +37,7 @@ object LFSMSync {
               case ergoVal =>
                 if (ergoVal == ErgoValue.of(0).toHex) {
                   logger.info(s"Found new holding contract in block ${fullBlock.getHeader.getHeight}")
-                  NISPTreeCache.cacheNewHolding(ctx, output, cache, fullBlock.getHeader.getHeight)
+                  NISPTreeCache.cacheNewHolding(ctx, output, cache, fullBlock)
                 } else if (ErgoValue.fromHex(ergoVal).getValue.asInstanceOf[Int] > 0) {
                   logger.info(s"Found existing holding contract in block ${fullBlock.getHeader.getHeight}")
                   NISPTreeCache.cacheExistingHolding(ctx, prover, e.getInputs.get(0), output,
@@ -118,7 +118,7 @@ object LFSMSync {
                     NISPTreeCache.cacheNewPayout(ctx, input, output.get, cache, fullBlock.getHeader.getHeight)
                   case LFSMPhase.PAYOUT =>
                     logger.info(s"Found existing payout contract in block ${fullBlock.getHeader.getHeight}")
-                    NISPTreeCache.cacheExistingPayout(ctx, input, output, cache, prover, fullBlock.getHeader.getHeight)
+                    NISPTreeCache.cacheExistingPayout(ctx, input, output, cache, prover, fullBlock, e)
                   case _ =>
                     logger.error("NISPTree in invalid phase for payouts")
                 }

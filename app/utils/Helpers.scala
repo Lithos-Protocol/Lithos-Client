@@ -1,6 +1,7 @@
 package utils
 
 import lfsm.LFSMHelpers
+import lfsm.collateral.CollateralContract
 import lfsm.rollup.RollupContracts
 import org.bouncycastle.util.encoders.Hex
 import org.ergoplatform.appkit.{BlockchainContext, ErgoId, ErgoProver, ErgoValue}
@@ -23,6 +24,10 @@ object Helpers {
   }
   def holdingContract(ctx: BlockchainContext): Contract = {
     RollupContracts.mkHoldingContract(ctx, LFSMHelpers.HOLDING_PERIOD, evalContract(ctx).hashedPropBytes)
+  }
+
+  def collateralContract(ctx: BlockchainContext): Contract = {
+    CollateralContract.mkTestnetCollatContract(ctx, holdingContract(ctx).hashedPropBytes)
   }
 
   def pkHexFromBoolean(bool: SigmaBoolean): Option[String] = {

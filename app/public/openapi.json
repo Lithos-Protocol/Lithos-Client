@@ -1,0 +1,1046 @@
+{
+  "openapi" : "3.0.0",
+  "info" : {
+    "contact" : {
+      "url" : "https://github.com/Lithos-Protocol"
+    },
+    "description" : "API Documentation for the Lithos client. Models used\nhere are expected to be consistent across any other implementations of the Lithos client.\n",
+    "title" : "Lithos Client API",
+    "version" : "1.0.0"
+  },
+  "externalDocs" : {
+    "description" : "Find out how to create Github repo for your OpenAPI spec.",
+    "url" : "https://github.com/Rebilly/generator-openapi-repo"
+  },
+  "servers" : [ {
+    "description" : "Lithos Client API",
+    "url" : "http://127.0.0.1:9000"
+  } ],
+  "tags" : [ {
+    "description" : "Information about the Lithos client and state",
+    "name" : "info",
+    "x-displayName" : "Info"
+  }, {
+    "description" : "Blocks currently being processed by Lithos contracts",
+    "name" : "blocks",
+    "x-displayName" : "Blocks"
+  }, {
+    "description" : "Payments made to you from Lithos contracts",
+    "name" : "payments",
+    "x-displayName" : "Payments"
+  }, {
+    "description" : "Information about the local stratum and mining process",
+    "name" : "mining",
+    "x-displayName" : "Mining"
+  }, {
+    "description" : "Find and interact with collateral UTXOs",
+    "name" : "collateral",
+    "x-displayName" : "Collateral"
+  }, {
+    "description" : "<SchemaDefinition schemaRef=\"#/components/schemas/PoolBlock\" />\n",
+    "name" : "pool_block_model",
+    "x-displayName" : "The PoolBlock Model"
+  }, {
+    "description" : "<SchemaDefinition schemaRef=\"#/components/schemas/CollateralUTXO\" />\n",
+    "name" : "collateral_utxo_model",
+    "x-displayName" : "The CollateralUTXO Model"
+  } ],
+  "paths" : {
+    "/blocks" : {
+      "get" : {
+        "description" : "Get an array of UTXO ids (hex encoded) representing contracts currently processing Lithos blocks. Returns a page of the whole list starting from `offset` and containing `limit` items.",
+        "operationId" : "getContractIds",
+        "parameters" : [ {
+          "description" : "The number of items in list to return",
+          "explode" : true,
+          "in" : "query",
+          "name" : "limit",
+          "required" : false,
+          "schema" : {
+            "default" : 50,
+            "format" : "int32",
+            "maximum" : 100,
+            "minimum" : 10,
+            "type" : "integer"
+          },
+          "style" : "form"
+        }, {
+          "description" : "The offset to start the list from",
+          "explode" : true,
+          "in" : "query",
+          "name" : "offset",
+          "required" : false,
+          "schema" : {
+            "default" : 0,
+            "format" : "int32",
+            "type" : "integer"
+          },
+          "style" : "form"
+        } ],
+        "responses" : {
+          "200" : {
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "description" : "Array of UTXO ids",
+                  "example" : [ "88c297f99da7172f6aa20efbead69aa40e2b7734a1873d66ca1db6b19d214db6" ],
+                  "items" : {
+                    "example" : "88c297f99da7172f6aa20efbead69aa40e2b7734a1873d66ca1db6b19d214db6",
+                    "type" : "string"
+                  },
+                  "type" : "array"
+                }
+              }
+            },
+            "description" : "Array of UTXO ids"
+          },
+          "default" : {
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description" : "Error"
+          }
+        },
+        "summary" : "List UTXO ids for blocks",
+        "tags" : [ "blocks" ]
+      }
+    },
+    "/blocks/byHeight" : {
+      "get" : {
+        "description" : "Get UTXO ids of Lithos contracts for blocks mined in a range of heights",
+        "operationId" : "getBlocksByHeight",
+        "parameters" : [ {
+          "description" : "Min height (start of the range) to look for Lithos blocks",
+          "explode" : true,
+          "in" : "query",
+          "name" : "fromHeight",
+          "required" : false,
+          "schema" : {
+            "default" : 0,
+            "format" : "int32",
+            "type" : "integer"
+          },
+          "style" : "form"
+        }, {
+          "description" : "Max height of the range (exclusive)",
+          "explode" : true,
+          "in" : "query",
+          "name" : "toHeight",
+          "required" : false,
+          "schema" : {
+            "default" : -1,
+            "format" : "int32",
+            "type" : "integer"
+          },
+          "style" : "form"
+        } ],
+        "responses" : {
+          "200" : {
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "example" : [ "88c297f99da7172f6aa20efbead69aa40e2b7734a1873d66ca1db6b19d214db6" ],
+                  "items" : {
+                    "example" : "88c297f99da7172f6aa20efbead69aa40e2b7734a1873d66ca1db6b19d214db6",
+                    "type" : "string"
+                  },
+                  "type" : "array"
+                }
+              }
+            },
+            "description" : "Array of UTXO ids"
+          },
+          "default" : {
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description" : "Error"
+          }
+        },
+        "summary" : "UTXO ids by block height",
+        "tags" : [ "blocks" ]
+      }
+    },
+    "/blocks/{utxoId}" : {
+      "get" : {
+        "description" : "Get information about a specific block being processed by a Lithos contract",
+        "operationId" : "getBlockById",
+        "parameters" : [ {
+          "description" : "Id of the UTXO representing a Lithos block",
+          "explode" : false,
+          "in" : "path",
+          "name" : "utxoId",
+          "required" : true,
+          "schema" : {
+            "type" : "string"
+          },
+          "style" : "simple"
+        } ],
+        "responses" : {
+          "200" : {
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/PoolBlock"
+                }
+              }
+            },
+            "description" : "Pool block object which shows information about the given Lithos block"
+          },
+          "404" : {
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description" : "UTXO with this id doesn't exist"
+          },
+          "default" : {
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description" : "Error"
+          }
+        },
+        "summary" : "Block info by UTXO id",
+        "tags" : [ "blocks" ]
+      }
+    },
+    "/blocks/utxoIds" : {
+      "post" : {
+        "description" : "Get pool blocks by given UTXO ids",
+        "operationId" : "getPoolBlocksByIds",
+        "requestBody" : {
+          "content" : {
+            "application/json" : {
+              "schema" : {
+                "items" : {
+                  "example" : "88c297f99da7172f6aa20efbead69aa40e2b7734a1873d66ca1db6b19d214db6",
+                  "type" : "string"
+                },
+                "type" : "array"
+              }
+            }
+          },
+          "required" : true
+        },
+        "responses" : {
+          "200" : {
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "items" : {
+                    "$ref" : "#/components/schemas/PoolBlock"
+                  },
+                  "type" : "array"
+                }
+              }
+            },
+            "description" : "Pool blocks corresponding to ids provided"
+          },
+          "404" : {
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description" : "Not all ids correspond to an existing pool block"
+          },
+          "default" : {
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description" : "Error"
+          }
+        },
+        "summary" : "Block info for multiple UTXO ids",
+        "tags" : [ "blocks" ]
+      }
+    },
+    "/blocks/{utxoId}/miners" : {
+      "get" : {
+        "description" : "Get information of miners associated with this pool block",
+        "operationId" : "getBlockMinersById",
+        "parameters" : [ {
+          "description" : "UTXO id of the pool block whose miners are being queried",
+          "explode" : false,
+          "in" : "path",
+          "name" : "utxoId",
+          "required" : true,
+          "schema" : {
+            "type" : "string"
+          },
+          "style" : "simple"
+        } ],
+        "responses" : {
+          "200" : {
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "items" : {
+                    "$ref" : "#/components/schemas/BlockMiners"
+                  },
+                  "type" : "array"
+                }
+              }
+            },
+            "description" : "Block Miners object"
+          },
+          "404" : {
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description" : "Could not find pool block with the given id"
+          },
+          "default" : {
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description" : "Error"
+          }
+        },
+        "summary" : "Get a block's miner set",
+        "tags" : [ "blocks" ]
+      }
+    },
+    "/payments" : {
+      "get" : {
+        "description" : "Get a list of payment transactions sent to you from Lithos contracts. Returns a page of the whole list starting from `offset` and containing `limit` items.",
+        "operationId" : "getPayments",
+        "parameters" : [ {
+          "description" : "The number of items in list to return",
+          "explode" : true,
+          "in" : "query",
+          "name" : "limit",
+          "required" : false,
+          "schema" : {
+            "default" : 50,
+            "format" : "int32",
+            "maximum" : 100,
+            "minimum" : 10,
+            "type" : "integer"
+          },
+          "style" : "form"
+        }, {
+          "description" : "The offset to start the list from",
+          "explode" : true,
+          "in" : "query",
+          "name" : "offset",
+          "required" : false,
+          "schema" : {
+            "default" : 0,
+            "format" : "int32",
+            "type" : "integer"
+          },
+          "style" : "form"
+        } ],
+        "responses" : {
+          "200" : {
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "items" : {
+                    "$ref" : "#/components/schemas/PaymentTransaction"
+                  },
+                  "type" : "array"
+                }
+              }
+            },
+            "description" : "Array of Payment Transaction objects"
+          },
+          "404" : {
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description" : "Could not find any Lithos block payments for your mining address"
+          },
+          "default" : {
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description" : "Error"
+          }
+        },
+        "security" : [ {
+          "ApiKeyAuth" : [ "api_key" ]
+        } ],
+        "summary" : "Get Lithos payouts",
+        "tags" : [ "payments" ]
+      }
+    },
+    "/info" : {
+      "get" : {
+        "description" : "Get information about the Lithos client and the current LFSM state",
+        "operationId" : "getLithosInfo",
+        "responses" : {
+          "200" : {
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/LithosInfo"
+                }
+              }
+            },
+            "description" : "Lithos info object"
+          },
+          "default" : {
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description" : "Error"
+          }
+        },
+        "summary" : "Lithos client information",
+        "tags" : [ "info" ]
+      }
+    },
+    "/mining" : {
+      "get" : {
+        "description" : "Information about the Lithos stratum",
+        "operationId" : "getStratumInfo",
+        "responses" : {
+          "200" : {
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/StratumInfo"
+                }
+              }
+            },
+            "description" : "Information about the Stratum server"
+          },
+          "default" : {
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description" : "Error"
+          }
+        },
+        "summary" : "Get Stratum information",
+        "tags" : [ "mining" ]
+      }
+    },
+    "/mining/bestNISP" : {
+      "get" : {
+        "description" : "Returns the best NISP produced for a given height and score, with exactly 10 super-shares",
+        "operationId" : "getBestNISPAtHeight",
+        "parameters" : [ {
+          "description" : "Height that all super shares in the NISP must be below",
+          "explode" : true,
+          "in" : "query",
+          "name" : "height",
+          "required" : true,
+          "schema" : {
+            "default" : 0,
+            "format" : "int32",
+            "type" : "integer"
+          },
+          "style" : "form"
+        }, {
+          "description" : "Score that all super shares in this NISP must be above",
+          "explode" : true,
+          "in" : "query",
+          "name" : "score",
+          "required" : true,
+          "schema" : {
+            "default" : 5000000,
+            "format" : "int64",
+            "type" : "integer"
+          },
+          "style" : "form"
+        } ],
+        "responses" : {
+          "200" : {
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/NISPRepresentation"
+                }
+              }
+            },
+            "description" : "Best NISP representation"
+          },
+          "404" : {
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description" : "Could not produce a NISP for the given height"
+          },
+          "default" : {
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description" : "Error"
+          }
+        },
+        "summary" : "Get best NISP at height",
+        "tags" : [ "mining" ]
+      }
+    },
+    "/collateral/all" : {
+      "get" : {
+        "description" : "Get list of collateral UTXOs which will be used by Lithos while mining. Returns a page of the whole list starting from `offset` and containing `limit` items.",
+        "operationId" : "getAllCollateralInfo",
+        "parameters" : [ {
+          "description" : "The number of items in list to return",
+          "explode" : true,
+          "in" : "query",
+          "name" : "limit",
+          "required" : false,
+          "schema" : {
+            "default" : 50,
+            "format" : "int32",
+            "maximum" : 100,
+            "minimum" : 10,
+            "type" : "integer"
+          },
+          "style" : "form"
+        }, {
+          "description" : "The offset to start the list from",
+          "explode" : true,
+          "in" : "query",
+          "name" : "offset",
+          "required" : false,
+          "schema" : {
+            "default" : 0,
+            "format" : "int32",
+            "type" : "integer"
+          },
+          "style" : "form"
+        } ],
+        "responses" : {
+          "200" : {
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "description" : "Array of collateral UTXOs",
+                  "items" : {
+                    "$ref" : "#/components/schemas/CollateralUTXO"
+                  },
+                  "type" : "array"
+                }
+              }
+            },
+            "description" : "Array of collateral UTXOs"
+          },
+          "default" : {
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description" : "Error"
+          }
+        },
+        "summary" : "List all collateral UTXOs",
+        "tags" : [ "collateral" ]
+      }
+    },
+    "/collateral/local" : {
+      "get" : {
+        "description" : "Get the list of collateral UTXOs made by you. Returns a page of the whole list starting from `offset` and containing `limit` items.",
+        "operationId" : "getLocalCollateralInfo",
+        "parameters" : [ {
+          "description" : "The number of items in list to return",
+          "explode" : true,
+          "in" : "query",
+          "name" : "limit",
+          "required" : false,
+          "schema" : {
+            "default" : 50,
+            "format" : "int32",
+            "maximum" : 100,
+            "minimum" : 10,
+            "type" : "integer"
+          },
+          "style" : "form"
+        }, {
+          "description" : "The offset to start the list from",
+          "explode" : true,
+          "in" : "query",
+          "name" : "offset",
+          "required" : false,
+          "schema" : {
+            "default" : 0,
+            "format" : "int32",
+            "type" : "integer"
+          },
+          "style" : "form"
+        } ],
+        "responses" : {
+          "200" : {
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "description" : "Array of collateral UTXOs",
+                  "items" : {
+                    "$ref" : "#/components/schemas/CollateralUTXO"
+                  },
+                  "type" : "array"
+                }
+              }
+            },
+            "description" : "Array of collateral UTXOs"
+          },
+          "default" : {
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description" : "Error"
+          }
+        },
+        "security" : [ {
+          "ApiKeyAuth" : [ "api_key" ]
+        } ],
+        "summary" : "List personal collateral UTXOs",
+        "tags" : [ "collateral" ]
+      }
+    },
+    "/collateral/create" : {
+      "post" : {
+        "description" : "Create a new collateral UTXO which will be used by Lithos miners",
+        "operationId" : "createCollateralUTXO",
+        "requestBody" : {
+          "content" : {
+            "application/json" : {
+              "schema" : {
+                "$ref" : "#/components/schemas/CollateralInfo"
+              }
+            }
+          },
+          "required" : true
+        },
+        "responses" : {
+          "200" : {
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/SuccessfulTransaction"
+                }
+              }
+            },
+            "description" : "Successful transaction to create collateral UTXO"
+          },
+          "404" : {
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description" : "Not all ids correspond to an existing pool block"
+          },
+          "default" : {
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description" : "Error"
+          }
+        },
+        "security" : [ {
+          "ApiKeyAuth" : [ "api_key" ]
+        } ],
+        "summary" : "Create a new collateral UTXO",
+        "tags" : [ "collateral" ]
+      }
+    }
+  },
+  "components" : {
+    "schemas" : {
+      "ApiError" : {
+        "description" : "Error response from API",
+        "example" : {
+          "reason" : "Internal server error",
+          "detail" : "detail",
+          "error" : 500
+        },
+        "properties" : {
+          "error" : {
+            "description" : "Error code",
+            "example" : 500,
+            "type" : "integer"
+          },
+          "reason" : {
+            "description" : "Error message explaining the reason of the error",
+            "example" : "Internal server error",
+            "type" : "string"
+          },
+          "detail" : {
+            "description" : "Detailed error description",
+            "nullable" : true,
+            "type" : "string"
+          }
+        },
+        "required" : [ "detail", "error", "reason" ],
+        "type" : "object"
+      },
+      "PoolBlock" : {
+        "description" : "Information about block mined by Lithos pool contracts",
+        "example" : {
+          "utxoId" : "88c297f99da7172f6aa20efbead69aa40e2b7734a1873d66ca1db6b19d214db6",
+          "blockId" : "2a7de28034ca523685d9a03c30d06c36863a804f69c2e4add4d83c8c2ba26271",
+          "phase" : "HOLDING",
+          "numMiners" : 12,
+          "blockHeight" : 42853
+        },
+        "properties" : {
+          "utxoId" : {
+            "description" : "UTXO id of Lithos contract currently processing this block",
+            "example" : "88c297f99da7172f6aa20efbead69aa40e2b7734a1873d66ca1db6b19d214db6",
+            "type" : "string"
+          },
+          "blockId" : {
+            "description" : "Header id associated with this block",
+            "example" : "2a7de28034ca523685d9a03c30d06c36863a804f69c2e4add4d83c8c2ba26271",
+            "type" : "string"
+          },
+          "blockHeight" : {
+            "description" : "Height of this Lithos-mined block",
+            "example" : 42853,
+            "format" : "int32",
+            "type" : "int"
+          },
+          "numMiners" : {
+            "description" : "Number of miners which are currently being processed by this Lithos pool contract",
+            "example" : 12,
+            "format" : "int32",
+            "type" : "int"
+          },
+          "phase" : {
+            "description" : "Current LFSM phase of the associated Lithos contract",
+            "example" : "HOLDING",
+            "type" : "string"
+          }
+        },
+        "required" : [ "blockHeight", "blockId", "numMiners", "phase", "utxoId" ],
+        "type" : "object",
+        "x-tags" : "blocks"
+      },
+      "BlockMiners" : {
+        "description" : "Miner information associated with a Lithos block",
+        "example" : {
+          "propBytesHash" : "56002fb6194f8a7f147b54c98c98bd72205f46c35fed0f3c4111071ecb0763b7"
+        },
+        "properties" : {
+          "propBytesHash" : {
+            "description" : "Hexadecimal representation of hashed proposition bytes of the miner",
+            "example" : "56002fb6194f8a7f147b54c98c98bd72205f46c35fed0f3c4111071ecb0763b7",
+            "type" : "string"
+          }
+        },
+        "required" : [ "propBytesHash" ],
+        "type" : "object",
+        "x-tags" : "blocks"
+      },
+      "PaymentTransaction" : {
+        "description" : "Transaction paid to miner by Lithos payout contract",
+        "example" : {
+          "score" : 5000000,
+          "amount" : 67500000000,
+          "transactionId" : "c42513da4dc695dbac3fb13482b604b289c9f1d39355e2e839899ed57780d9ab",
+          "payoutUTXO" : "5035b2e112b4f5b873dd3444c01df1e7e697807fd84fe96790eacb128e46428d"
+        },
+        "properties" : {
+          "transactionId" : {
+            "description" : "Transaction Id of this mining reward payment",
+            "example" : "c42513da4dc695dbac3fb13482b604b289c9f1d39355e2e839899ed57780d9ab",
+            "type" : "string"
+          },
+          "payoutUTXO" : {
+            "description" : "UTXO id of the Lithos payout contract associated with this payment",
+            "example" : "5035b2e112b4f5b873dd3444c01df1e7e697807fd84fe96790eacb128e46428d",
+            "type" : "string"
+          },
+          "amount" : {
+            "description" : "Amount of ERG paid to miner",
+            "example" : 67500000000,
+            "format" : "int64",
+            "type" : "integer"
+          },
+          "score" : {
+            "description" : "Score associated with this miner's NISP, used to determine payout amount",
+            "example" : 5000000,
+            "format" : "int64",
+            "type" : "integer"
+          }
+        },
+        "required" : [ "amount", "payoutUTXO", "score", "transactionId" ],
+        "type" : "object",
+        "x-tags" : "payments"
+      },
+      "LithosInfo" : {
+        "description" : "Information about this Lithos client and the current LFSM state",
+        "example" : {
+          "synced" : true,
+          "numPoolBlocks" : 64
+        },
+        "properties" : {
+          "numPoolBlocks" : {
+            "description" : "Number of tracked blocks currently being processed by Lithos contracts",
+            "example" : 64,
+            "type" : "integer"
+          },
+          "synced" : {
+            "description" : "Whether this Lithos client has synced to the blockchain",
+            "example" : true,
+            "type" : "boolean"
+          }
+        },
+        "required" : [ "numPoolBlocks", "synced" ],
+        "type" : "object",
+        "x-tags" : "info"
+      },
+      "StratumInfo" : {
+        "description" : "Information about the Stratum server",
+        "example" : {
+          "reducedMessaging" : false,
+          "tau" : 0,
+          "diff" : "4.0G",
+          "superSharesPerHour" : 2.5
+        },
+        "properties" : {
+          "diff" : {
+            "description" : "Difficulty used for Lithos calculations",
+            "example" : "4.0G",
+            "type" : "string"
+          },
+          "tau" : {
+            "description" : "Tau representation of the mining diff",
+            "type" : "integer"
+          },
+          "reducedMessaging" : {
+            "description" : "Whether the stratum server has the `reduceShareMessages` setting enabled",
+            "example" : false,
+            "type" : "boolean"
+          },
+          "superSharesPerHour" : {
+            "description" : "Number of super shares produced by the mining client within the last hour",
+            "example" : 2.5,
+            "type" : "double"
+          }
+        },
+        "required" : [ "diff", "reducedMessaging", "superSharesPerHour", "tau" ],
+        "type" : "object",
+        "x-tags" : "mining"
+      },
+      "CollateralUTXO" : {
+        "description" : "Collateral UTXO which is to be used by Lithos while mining",
+        "example" : {
+          "reward" : 67500000000,
+          "lender" : "3WwbQFz3vgi8ChY9dM1haQLGDeQYe5U9z98bwWW4TqxxEAvyYu5y",
+          "creationHeight" : 41482,
+          "fee" : 1000000,
+          "id" : "ce00d6e0f4fd3390c0519bb0d24824e1e6b06978163f4845a7cf2c1c7d8f1b65"
+        },
+        "properties" : {
+          "id" : {
+            "description" : "Id of this collateral UTXO",
+            "example" : "ce00d6e0f4fd3390c0519bb0d24824e1e6b06978163f4845a7cf2c1c7d8f1b65",
+            "type" : "string"
+          },
+          "reward" : {
+            "description" : "Block reward this collateral UTXO covers",
+            "example" : 67500000000,
+            "format" : "int64",
+            "type" : "integer"
+          },
+          "lender" : {
+            "description" : "Address of lender who created this collateral UTXO",
+            "example" : "3WwbQFz3vgi8ChY9dM1haQLGDeQYe5U9z98bwWW4TqxxEAvyYu5y",
+            "type" : "string"
+          },
+          "fee" : {
+            "description" : "Fee that this collateral UTXO charges from the entire pool",
+            "example" : 1000000,
+            "format" : "int64",
+            "type" : "integer"
+          },
+          "creationHeight" : {
+            "description" : "Height this collateral UTXO was made",
+            "example" : 41482,
+            "type" : "integer"
+          }
+        },
+        "required" : [ "creationHeight", "fee", "id", "lender", "reward" ],
+        "type" : "object",
+        "x-tags" : "collateral"
+      },
+      "CollateralInfo" : {
+        "description" : "Information needed to create collateral UTXOs",
+        "example" : {
+          "reward" : 67500000000,
+          "fee" : 1000000,
+          "numUtxos" : 5
+        },
+        "properties" : {
+          "reward" : {
+            "description" : "Block reward this collateral UTXO covers",
+            "example" : 67500000000,
+            "format" : "int64",
+            "type" : "integer"
+          },
+          "fee" : {
+            "description" : "Fee that this collateral UTXO charges from the entire pool",
+            "example" : 1000000,
+            "format" : "int64",
+            "type" : "integer"
+          },
+          "numUtxos" : {
+            "description" : "Number of collateral UTXOs to create in this transaction",
+            "example" : 5,
+            "format" : "int32",
+            "type" : "integer"
+          }
+        },
+        "required" : [ "fee", "numUtxos", "reward" ],
+        "type" : "object",
+        "x-tags" : "collateral"
+      },
+      "SuccessfulTransaction" : {
+        "description" : "Transaction which was successfully sent to the node",
+        "example" : {
+          "txId" : "40b7d045a858d537cdbf072e46ffbb86c0c9f6b0e93c369c1ffcba76797636d7",
+          "height" : 45096
+        },
+        "properties" : {
+          "txId" : {
+            "description" : "Hex-encoded id of this transaction",
+            "example" : "40b7d045a858d537cdbf072e46ffbb86c0c9f6b0e93c369c1ffcba76797636d7",
+            "type" : "string"
+          },
+          "height" : {
+            "description" : "Height this transaction was sent",
+            "example" : 45096,
+            "format" : "int32",
+            "type" : "int"
+          }
+        },
+        "required" : [ "height", "txId" ],
+        "type" : "object"
+      },
+      "NISPRepresentation" : {
+        "description" : "Representation of a 10 super share NISP",
+        "example" : {
+          "score" : 5000000,
+          "headers" : [ "04ecc45f0b20659f0a8a791872cf625d24b45832cfd3ac910da7cc9f560d42332b6ce08f276d1f3e8b45e637fa4918b3ea3c9d8c6d57ed8ee9fb1379d1b3d7756819a95ffafa172cb015ebf8e16c4ab4d3afcd34297e16206c4c8811a25bae6be43cd9c5e521b40ed281ddb1a1ebc52dfc1aa2835e20b20e795d979c8c025d23ae10edacdfe5ac330b65ac4eb10bdc52a7ab78abdfba7ef606a82c95168840839f1ca4da46c597630502383dc9be010000000002856c5e4eb4b915005dccb8e0f42bed1777cae48565be13a77cbf31e3c93f45150000000000000000" ],
+          "bytes" : "00f6318aa84791d0...a0bdc8045a70f931",
+          "height" : 45096
+        },
+        "properties" : {
+          "score" : {
+            "description" : "Score associated with this NISP, to be used in payout calculations",
+            "example" : 5000000,
+            "format" : "int64",
+            "type" : "int"
+          },
+          "height" : {
+            "description" : "Height all super-shares in this NISP must be under",
+            "example" : 45096,
+            "format" : "int32",
+            "type" : "int"
+          },
+          "headers" : {
+            "description" : "Header bytes associated with each super-share in this NISP",
+            "example" : [ "04ecc45f0b20659f0a8a791872cf625d24b45832cfd3ac910da7cc9f560d42332b6ce08f276d1f3e8b45e637fa4918b3ea3c9d8c6d57ed8ee9fb1379d1b3d7756819a95ffafa172cb015ebf8e16c4ab4d3afcd34297e16206c4c8811a25bae6be43cd9c5e521b40ed281ddb1a1ebc52dfc1aa2835e20b20e795d979c8c025d23ae10edacdfe5ac330b65ac4eb10bdc52a7ab78abdfba7ef606a82c95168840839f1ca4da46c597630502383dc9be010000000002856c5e4eb4b915005dccb8e0f42bed1777cae48565be13a77cbf31e3c93f45150000000000000000" ],
+            "items" : {
+              "example" : "04ecc45f0b20659f0a8a791872cf625d24b45832cfd3ac910da7cc9f560d42332b6ce08f276d1f3e8b45e637fa4918b3ea3c9d8c6d57ed8ee9fb1379d1b3d7756819a95ffafa172cb015ebf8e16c4ab4d3afcd34297e16206c4c8811a25bae6be43cd9c5e521b40ed281ddb1a1ebc52dfc1aa2835e20b20e795d979c8c025d23ae10edacdfe5ac330b65ac4eb10bdc52a7ab78abdfba7ef606a82c95168840839f1ca4da46c597630502383dc9be010000000002856c5e4eb4b915005dccb8e0f42bed1777cae48565be13a77cbf31e3c93f45150000000000000000",
+              "type" : "string"
+            },
+            "maxItems" : 10,
+            "minItems" : 10,
+            "type" : "array"
+          },
+          "bytes" : {
+            "description" : "Serialized (hex-encoded) bytes of this NISP",
+            "example" : "00f6318aa84791d0...a0bdc8045a70f931",
+            "type" : "string"
+          }
+        },
+        "required" : [ "bytes", "headers", "height", "score" ],
+        "type" : "object",
+        "x-tags" : "mining"
+      }
+    },
+    "securitySchemes" : {
+      "ApiKeyAuth" : {
+        "description" : "Api key authorization used by Lithos. The value of this key can be found in your config, under `play.http.secret.key`.\n",
+        "in" : "header",
+        "name" : "api_key",
+        "type" : "apiKey"
+      }
+    }
+  },
+  "x-tagGroups" : [ {
+    "name" : "Lithos",
+    "tags" : [ "info", "blocks", "payments", "collateral" ]
+  }, {
+    "name" : "Stratum",
+    "tags" : [ "mining" ]
+  }, {
+    "name" : "Models",
+    "tags" : [ "pool_block_model", "collateral_utxo_model" ]
+  } ]
+}
