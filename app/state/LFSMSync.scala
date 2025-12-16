@@ -23,12 +23,12 @@ object LFSMSync {
           x =>
             JavaConverters
               .asScalaIterator(x.getOutputs.iterator()).toIndexedSeq
-              .map(_.getErgoTree).contains(Hex.toHexString(holdingContract(ctx).propBytes))
+              .map(_.getErgoTree).contains(holdingContract(ctx).ergoTreeHex)
         }
         holdingTxs.foreach {
           e =>
             val output = JavaConverters.asScalaIterator(e.getOutputs.iterator()).toIndexedSeq.find {
-              o => o.getErgoTree == Hex.toHexString(holdingContract(ctx).propBytes)
+              o => o.getErgoTree == holdingContract(ctx).ergoTreeHex
             }.get
             val numMiners = output.getAdditionalRegisters.getOrDefault("R5", "none")
             numMiners match {
@@ -58,12 +58,12 @@ object LFSMSync {
           x =>
             JavaConverters
               .asScalaIterator(x.getOutputs.iterator()).toIndexedSeq
-              .map(_.getErgoTree).contains(Hex.toHexString(evalContract(ctx).propBytes))
+              .map(_.getErgoTree).contains(evalContract(ctx).ergoTreeHex)
         }
         evalTxs.foreach {
           e =>
             val output = JavaConverters.asScalaIterator(e.getOutputs.iterator()).toIndexedSeq.find {
-              o => o.getErgoTree == Hex.toHexString(evalContract(ctx).propBytes)
+              o => o.getErgoTree == evalContract(ctx).ergoTreeHex
             }.get
             val input = e.getInputs.get(0)
             val optNISPTree = cache.get[NISPTree](input.getBoxId)
@@ -99,13 +99,13 @@ object LFSMSync {
           x =>
             JavaConverters
               .asScalaIterator(x.getOutputs.iterator()).toIndexedSeq
-              .map(_.getErgoTree).contains(Hex.toHexString(payoutContract(ctx).propBytes)) ||
+              .map(_.getErgoTree).contains(payoutContract(ctx).ergoTreeHex) ||
               cache.get[Seq[String]](TREE_SET).get.contains(x.getInputs.get(0).getBoxId)
         }
         payoutTxs.foreach {
           e =>
             val output = JavaConverters.asScalaIterator(e.getOutputs.iterator()).toIndexedSeq.find {
-              o => o.getErgoTree == Hex.toHexString(payoutContract(ctx).propBytes)
+              o => o.getErgoTree == payoutContract(ctx).ergoTreeHex
             }
             val input = e.getInputs.get(0)
             val optNISPTree = cache.get[NISPTree](input.getBoxId)

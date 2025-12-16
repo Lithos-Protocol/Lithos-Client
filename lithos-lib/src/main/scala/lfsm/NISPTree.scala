@@ -2,7 +2,7 @@ package lfsm
 
 import work.lithos.plasma.collections.PlasmaMap
 
-case class NISPTree(tree: PlasmaMap[Array[Byte], Array[Byte]],
+case class NISPTree(dictionary: PlasmaMap[Array[Byte], Array[Byte]],
                     numMiners: Int,
                     totalScore: BigInt,
                     currentPeriod: Option[Long],
@@ -12,5 +12,6 @@ case class NISPTree(tree: PlasmaMap[Array[Byte], Array[Byte]],
                     phase: LFSMPhase,
                     minerSet: Set[String] = Set.empty[String],
                     evaluated: Boolean = false,
-                    blockId: String
+                    blockId: String,
+                    utxoId: String
                    )

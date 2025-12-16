@@ -29,6 +29,7 @@ case class Contract(ergoTree: ErgoTree, mutators: Seq[Mutator] = Seq.empty[Mutat
 
   def hashedPropBytes: Array[Byte] = Blake2b256.hash(propBytes)
   def ergoTreeHex: String = Hex.toHexString(propBytes)
+  def hashedPropBytesHex: String = Hex.toHexString(hashedPropBytes)
 
   def mainnetAddress: Address = Address.fromErgoTree(ergoTree, NetworkType.MAINNET)
   def testnetAddress: Address = Address.fromErgoTree(ergoTree, NetworkType.TESTNET)
@@ -36,7 +37,7 @@ case class Contract(ergoTree: ErgoTree, mutators: Seq[Mutator] = Seq.empty[Mutat
   def sigmaBoolean: Option[SigmaBoolean] = ergoTree.toSigmaBooleanOpt
   def address(networkType: NetworkType): Address = Address.fromErgoTree(ergoTree, networkType)
   def address(ctx: BlockchainContext): Address = address(ctx.getNetworkType)
-  override def toString: String = Hex.toHexString(hashedPropBytes)
+  override def toString: String = ergoTreeHex
 
   override def equals(obj: Any): Boolean = {
     obj match {
@@ -67,7 +68,10 @@ object Contract {
   }
 
   def fromErgoScript(ctx: BlockchainContext, constants: Constants, script: String, mutators: Seq[Mutator] = Seq.empty[Mutator]): Contract = {
-    Contract(compileContract(script, constants, ctx.getNetworkType).get, mutators)
+    fromErgoScript(ctx.getNetworkType, constants, script, mutators)
+  }
+  def fromErgoScript(networkType: NetworkType, constants: Constants, script: String, mutators: Seq[Mutator]): Contract = {
+    Contract(compileContract(script, constants, networkType).get, mutators)
   }
 
   def compileContract(script: String, constants: Constants, networkType: NetworkType) = {

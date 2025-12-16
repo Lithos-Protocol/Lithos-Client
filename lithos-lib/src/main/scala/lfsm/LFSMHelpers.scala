@@ -95,6 +95,13 @@ object LFSMHelpers {
       case NetworkType.TESTNET => FP_TOKEN_TESTNET
     }
   }
+
+  def getFPToken(networkType: NetworkType): ErgoId = {
+    networkType match {
+      case NetworkType.MAINNET => FP_TOKEN_MAINNET
+      case NetworkType.TESTNET => FP_TOKEN_TESTNET
+    }
+  }
   // TODO: Change for mainnet
   def getFPControlBox(ctx: BlockchainContext): InputUTXO = {
 

@@ -14,7 +14,7 @@ import play.api.cache.SyncCacheApi
 import scorex.utils.Longs
 import sigma.{AvlTree, Colls}
 import sigma.data.CBigInt
-import utils.Helpers.{evalContract, holdingContract, payoutContract}
+import utils.Helpers.{compileEval, compileHolding, compilePayout, evalContract, holdingContract, payoutContract}
 import utils.NISPTreeCache
 import utils.NISPTreeCache.TREE_SET
 import work.lithos.mutations.{Contract, InputUTXO, TxBuilder, UTXO}
@@ -253,7 +253,7 @@ object LFSMTransformer {
     val holding = holdingContract(ctx)
 
     val otherInputs = loader.getInputs(Parameters.MinFee)
-    val tree = holdTree._2.tree
+    val tree = holdTree._2.dictionary
     val copiedTree = tree.copy()
     copiedTree.prover.generateProof() // Reset proof for copied tree, proofs will be incorrect if this is not done!
     val score = LFSMHelpers.convertTauOrScore(BigInt(LFSMHelpers.parseDiffValueForStratum(diff).get))
@@ -321,7 +321,7 @@ object LFSMTransformer {
     val payout = payoutContract(ctx)
 
     val otherInputs = loader.getInputs(Parameters.MinFee)
-    val tree = payments._2.tree
+    val tree = payments._2.dictionary
     val copiedTree = tree.copy()
     copiedTree.prover.generateProof() // Reset proof for copied tree
     val realDigest = Hex.toHexString(payInput.registers.head.getValue.asInstanceOf[AvlTree].digest.toArray)

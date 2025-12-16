@@ -45,7 +45,7 @@ object FraudProof {
       {(t: TxContext) => t.inputs(1).contract.hashedPropBytes sameElements contract.hashedPropBytes},
       {
         (t: TxContext) =>
-          t.inputs.head.registers.head.getValue.asInstanceOf[AvlTree].digest.toArray sameElements nispTree.tree.digest
+          t.inputs.head.registers.head.getValue.asInstanceOf[AvlTree].digest.toArray sameElements nispTree.dictionary.digest
       },
       {
         (t: TxContext) =>
@@ -64,7 +64,7 @@ object FraudProof {
     override protected def mutation(tCtx: TxContext): Seq[UTXO] = {
       val evalOutput = tCtx.outputs.head
       val feeProp = Contract(ErgoTreePredef.feeProposition(720))
-      val copy = nispTree.tree.copy()
+      val copy = nispTree.dictionary.copy()
       copy.prover.generateProof() // Reset prover before applying operations to tree
       val lookUp = copy.lookUp(miner)
       val removal = copy.delete(miner)

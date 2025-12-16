@@ -25,7 +25,7 @@ object NISPTreeCache {
     val newTree    = PlasmaMap[Array[Byte], Array[Byte]](AvlTreeFlags.AllOperationsAllowed, PlasmaParameters.default)
     val nispTree   = NISPTree(newTree, 0, BigInt(0), Some(holdingBox.registers(3).getValue.asInstanceOf[Long]),
       holdingBox.value, holdingBox.registers(3).getValue.asInstanceOf[Long].toInt, hasMiner = false, LFSMPhase.HOLDING,
-      blockId = block.getHeader.getId)
+      blockId = block.getHeader.getId, utxoId = output.getBoxId)
 
     logger.info(s"Found genesis for NISPTree ${output.getBoxId} in block ${block.getHeader.getHeight}")
     cache.set(output.getBoxId, nispTree)
@@ -38,7 +38,7 @@ object NISPTreeCache {
     val optNISPTree = cache.get[NISPTree](input.getBoxId)
     optNISPTree match {
       case Some(oldNISPTree) =>
-        val dictionary  = oldNISPTree.tree
+        val dictionary  = oldNISPTree.dictionary
 
         val nextMiners  = holdingBox.registers(1).getValue.asInstanceOf[Int]
         val nextScore   = holdingBox.registers(2).getValue.asInstanceOf[CBigInt].wrappedValue
@@ -61,7 +61,7 @@ object NISPTreeCache {
             s" after submission by miner ${Address.fromErgoTree(ErgoTree.fromProposition(signer), ctx.getNetworkType)}")
         }
         val nextMinerSet = oldNISPTree.minerSet ++ Set(Hex.toHexString(keyValue._1.toArray))
-        val nextTree    = oldNISPTree.copy(tree = dictionary, numMiners = nextMiners, totalScore = nextScore,
+        val nextTree    = oldNISPTree.copy(dictionary = dictionary, numMiners = nextMiners, totalScore = nextScore,
           currentPeriod = Some(nextPeriod), hasMiner = isMiner || oldNISPTree.hasMiner, minerSet = nextMinerSet)
         cache.remove(input.getBoxId)
         cache.set(output.getBoxId, nextTree)
@@ -110,7 +110,7 @@ object NISPTreeCache {
     optNISPTree match {
       case Some(oldNISPTree) =>
         if(oldNISPTree.hasMiner){
-          val dictionary  = oldNISPTree.tree
+          val dictionary  = oldNISPTree.dictionary
 
           val miner       = ErgoValue.fromHex(fpInput.getSpendingProof.getExtension.get("0")).getValue.asInstanceOf[Coll[Byte]]
           val lookProof   = ErgoValue.fromHex(fpInput.getSpendingProof.getExtension.get("1")).getValue.asInstanceOf[Coll[Byte]]
@@ -127,9 +127,9 @@ object NISPTreeCache {
           val nextMinerSet = oldNISPTree.minerSet -- Set(Hex.toHexString(miner.toArray))
           val nispTree = {
             if(removedMiner)
-              oldNISPTree.copy(tree = dictionary, hasMiner = false, totalScore = nextTotalScore, minerSet = nextMinerSet)
+              oldNISPTree.copy(dictionary = dictionary, hasMiner = false, totalScore = nextTotalScore, minerSet = nextMinerSet)
             else
-              oldNISPTree.copy(tree = dictionary, minerSet = nextMinerSet, totalScore = nextTotalScore)
+              oldNISPTree.copy(dictionary = dictionary, minerSet = nextMinerSet, totalScore = nextTotalScore)
           }
 
           cache.remove(input.getBoxId)
@@ -183,7 +183,7 @@ object NISPTreeCache {
       case Some(oldNISPTree) =>
         if(oldNISPTree.hasMiner){
 
-          val dictionary  = oldNISPTree.tree
+          val dictionary  = oldNISPTree.dictionary
 
           val miners      = ErgoValue.fromHex(input.getSpendingProof.getExtension.get("0")).getValue.asInstanceOf[Coll[Coll[Byte]]]
           val lookProof   = ErgoValue.fromHex(input.getSpendingProof.getExtension.get("1")).getValue.asInstanceOf[Coll[Byte]]
@@ -212,7 +212,7 @@ object NISPTreeCache {
             require(lookUp.proof.ergoValue.getValue == lookProof, "Lookup proofs must be equal on payout transformation")
             val delete = dictionary.delete(miners.toArray.map(_.toArray):_*)
             require(delete.proof.ergoValue.getValue == delProof, "Removal proofs must be equal on payout transformation")
-            val nispTree = oldNISPTree.copy(tree = dictionary)
+            val nispTree = oldNISPTree.copy(dictionary = dictionary)
 
             cache.remove(input.getBoxId)
             cache.set(output.get.getBoxId, nispTree)

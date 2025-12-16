@@ -14,7 +14,7 @@ object CollateralContract {
   final val FOUND_INIT_RWRD   = 7500000000L
   final val EPOCH_LENGTH      = 64800L
   final val ONE_EPOCH_RED     = 3000000000L
-
+  // TODO: Add collateral control contract to enforce 1 per block
   def mkMainnetCollatContract(ctx: BlockchainContext, emissionId: ErgoId): Contract = {
 
     val constants = ConstantsBuilder

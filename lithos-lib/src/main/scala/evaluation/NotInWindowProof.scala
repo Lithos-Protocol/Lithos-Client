@@ -30,7 +30,7 @@ case class NotInWindowProof(contract: Contract, miner: Array[Byte], nispTree: NI
       val mutateEval = evalInput.withMutator(new EvaluationMutator(evalInput.contract))
       val mutateFP   = fpInput.withMutator(mutator)
 
-      val copy = nispTree.tree.copy()
+      val copy = nispTree.dictionary.copy()
       copy.prover.generateProof()
       val lookUp = copy.lookUp(miner)
       val delete = copy.delete(miner)

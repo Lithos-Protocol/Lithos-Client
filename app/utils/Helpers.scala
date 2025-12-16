@@ -4,7 +4,7 @@ import lfsm.LFSMHelpers
 import lfsm.collateral.CollateralContract
 import lfsm.rollup.RollupContracts
 import org.bouncycastle.util.encoders.Hex
-import org.ergoplatform.appkit.{BlockchainContext, ErgoId, ErgoProver, ErgoValue}
+import org.ergoplatform.appkit.{BlockchainContext, ErgoClient, ErgoId, ErgoProver, ErgoValue, NetworkType}
 import org.ergoplatform.restapi.client.ErgoTransactionOutput
 import sigma.SigmaProp
 import sigma.ast.ErgoTree
@@ -17,18 +17,77 @@ import scala.util.Try
 
 object Helpers {
   def payoutContract(ctx: BlockchainContext): Contract = {
-    RollupContracts.mkPayoutContract(ctx)
+    ctx.getNetworkType match {
+      case NetworkType.MAINNET =>
+        payoutMainnet
+      case NetworkType.TESTNET =>
+        payoutTestnet
+    }
   }
   def evalContract(ctx: BlockchainContext): Contract = {
-    RollupContracts.mkEvalContract(ctx, LFSMHelpers.EVAL_PERIOD,
-      payoutContract(ctx).hashedPropBytes, LFSMHelpers.getFPToken(ctx))
+    ctx.getNetworkType match {
+      case NetworkType.MAINNET =>
+        evalMainnet
+      case NetworkType.TESTNET =>
+        evalTestnet
+    }
   }
   def holdingContract(ctx: BlockchainContext): Contract = {
-    RollupContracts.mkHoldingContract(ctx, LFSMHelpers.HOLDING_PERIOD, evalContract(ctx).hashedPropBytes)
+    ctx.getNetworkType match {
+      case NetworkType.MAINNET =>
+        holdingMainnet
+      case NetworkType.TESTNET =>
+        holdingTestnet
+    }
   }
 
   def collateralContract(ctx: BlockchainContext): Contract = {
     CollateralContract.mkTestnetCollatContract(ctx, holdingContract(ctx).hashedPropBytes)
+  }
+
+  private def compilePayout(networkType: NetworkType): Contract = {
+    RollupContracts.mkPayoutContract(networkType)
+  }
+  private def compileEval(networkType: NetworkType): Contract = {
+    RollupContracts.mkEvalContract(networkType, LFSMHelpers.EVAL_PERIOD,
+      compilePayout(networkType).hashedPropBytes, LFSMHelpers.getFPToken(networkType))
+  }
+  private def compileHolding(networkType: NetworkType): Contract = {
+    RollupContracts.mkHoldingContract(networkType, LFSMHelpers.HOLDING_PERIOD, compileEval(networkType).hashedPropBytes)
+  }
+
+  // Pre-compile contracts to avoid v6 issues
+  lazy val payoutMainnet: Contract  = compilePayout(NetworkType.MAINNET)
+  lazy val payoutTestnet: Contract  = compilePayout(NetworkType.TESTNET)
+  lazy val evalMainnet: Contract    = compileEval(NetworkType.MAINNET)
+  lazy val evalTestnet: Contract    = compileEval(NetworkType.TESTNET)
+  lazy val holdingMainnet: Contract = compileHolding(NetworkType.MAINNET)
+  lazy val holdingTestnet: Contract = compileHolding(NetworkType.TESTNET)
+
+
+  def relevantErgoTrees(client: ErgoClient): Seq[String] = {
+    client.execute{
+      ctx =>
+        relevantErgoTrees(ctx)
+    }
+  }
+
+  def relevantErgoTrees(ctx: BlockchainContext): Seq[String] = {
+    ctx.getNetworkType match {
+      case NetworkType.MAINNET =>
+        Seq(
+          holdingMainnet.ergoTreeHex,
+          evalMainnet.ergoTreeHex,
+          payoutMainnet.ergoTreeHex
+        )
+      case NetworkType.TESTNET =>
+        Seq(
+          holdingTestnet.ergoTreeHex,
+          evalTestnet.ergoTreeHex,
+          payoutTestnet.ergoTreeHex
+        )
+    }
+
   }
 
   def pkHexFromBoolean(bool: SigmaBoolean): Option[String] = {

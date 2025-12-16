@@ -10,4 +10,5 @@ class Contexts (system: ActorSystem) {
   private val prefix = "lithos-contexts."
   val stratumContext:      ExecutionContext = system.dispatchers.lookup(prefix+"stratum-dispatcher")
   val pollingContext:      ExecutionContext = system.dispatchers.lookup(prefix+"polling-dispatcher")
+  val syncContext:         ExecutionContext = system.dispatchers.lookup(prefix+"sync-dispatcher")
 }
