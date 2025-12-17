@@ -4,7 +4,7 @@ import configs.NodeConfig
 import model.PaymentTransaction
 import play.api.Configuration
 import play.api.cache.SyncCacheApi
-import utils.{NISPTreeCache, PayoutRecord}
+import utils.{Globals, PayoutRecord}
 
 
 /**
@@ -16,9 +16,10 @@ class PaymentsApiImpl extends PaymentsApi {
    */
   override def getPayments(limit: Option[Int], offset: Option[Int], config: Configuration, cache: SyncCacheApi): List[PaymentTransaction] = {
     // TODO: Uses tracked payouts from sync for right now
-    val nodeConfig = new NodeConfig(config)
     val page = ApiHelper.handlePagination(offset, limit)
-    val cached = cache.getOrElseUpdate[Seq[PayoutRecord]](NISPTreeCache.TRACKED_PAYOUTS)(Seq.empty[PayoutRecord])
+    val cached = cache.getOrElseUpdate[Seq[PayoutRecord]](Globals.TRACKED_PAYOUTS)(Seq.empty[PayoutRecord])
+      .sortBy(_.minedHeight)
+      .reverse
     cached.slice(page._1, page._1 + page._2)
       .map(p => PaymentTransaction(p.txId, p.utxoId, p.amount, p.score, p.creationHeight, p.blockId, p.minedHeight))
       .toList

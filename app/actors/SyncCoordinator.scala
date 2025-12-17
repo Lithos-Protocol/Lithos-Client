@@ -1,6 +1,6 @@
 package actors
 
-import actors.SyncHandler.{Genesis, StopTracking, Transform}
+import actors.SyncHandler.{FullSync, Genesis, GetSynced, PartialSync, RemoveTree, StopTracking, Transform}
 import akka.actor.{Actor, ActorRef, Terminated}
 import akka.util.Timeout
 import configs.NodeConfig
@@ -9,7 +9,7 @@ import org.slf4j.{Logger, LoggerFactory}
 import play.api.Configuration
 import play.api.cache.SyncCacheApi
 import play.api.libs.concurrent.InjectedActorSupport
-import utils.TreeCache
+import utils.{Globals, TreeCache}
 
 import javax.inject.Inject
 import scala.concurrent.duration.DurationInt
@@ -19,7 +19,7 @@ class SyncCoordinator @Inject() (syncFactory: TreeSyncer.SyncFactory, config: Co
   implicit val timeout: Timeout = 10 seconds
 
   val logger: Logger          = LoggerFactory.getLogger("SyncCoordinator")
-  val nodeConfig: NodeConfig  = new NodeConfig(config)
+  val nodeConfig: NodeConfig  = Globals.getNodeConfig
   val client: ErgoClient      = nodeConfig.getClient
   val prover: ErgoProver      = nodeConfig.prover
   val treeCache: TreeCache    = TreeCache(cacheApi)
@@ -38,10 +38,14 @@ class SyncCoordinator @Inject() (syncFactory: TreeSyncer.SyncFactory, config: Co
   // Maps utxoId -> blockId to keep track of children
   private def postInit(trees: Map[String, String]): Receive = {
     case gen: Genesis =>
-      handleGenesis(gen)
-      logger.info(s"Got ${trees.size + 1} trees")
-      treeCache.addToTreeSet(gen.tree.utxoId)
-      context.become(postInit(trees + (gen.tree.utxoId -> gen.tree.blockId)))
+      if(!trees.values.toSet.contains(gen.blockInfo.id)) {
+        handleGenesis(gen)
+        logger.info(s"Got ${trees.size + 1} trees")
+        treeCache.addToTreeSet(gen.tree.utxoId)
+        context.become(postInit(trees + (gen.tree.utxoId -> gen.tree.blockId)))
+      }else{
+        logger.warn(s"Skipping genesis for ${gen.blockInfo.id} at height ${gen.blockInfo.height} due to duplicate trees")
+      }
     case transform: Transform =>
       //logger.info(s"Got transform with id ${transform.tx.id}")
       val optBlockId = trees.get(transform.input.id)
@@ -55,12 +59,27 @@ class SyncCoordinator @Inject() (syncFactory: TreeSyncer.SyncFactory, config: Co
         case None =>
           logger.info(s"Skipping transform ${transform.tx.id} with no genesis history")
       }
+      // Stop Tracking should come only from children
     case stopTracking: StopTracking =>
       val removedTree = trees.find(_._2 == stopTracking.blockId)
       require(removedTree.isDefined, s"Map must contain actor name ${stopTracking.blockId} to remove tracking")
       context.become(postInit(trees - removedTree.get._1))
       logger.info(s"Removed NISPTree ${stopTracking.blockId}")
       treeCache.removeFromTreeSet(removedTree.get._1)
+      // Remove Tree should come from syncHandler, which is interfacing with tasks and other external actors
+    case removeTree: RemoveTree =>
+      val tree = trees.find(_._2 == removeTree.blockId)
+      require(tree.isDefined, s"Map must contain actor name ${removeTree.blockId} to remove tracking")
+      context.become(postInit(trees - tree.get._1))
+      logger.info(s"Removed NISPTree ${removeTree.blockId}")
+      treeCache.removeFromTreeSet(tree.get._1)
+      treeCache.remove(tree.get._1)
+    case GetSynced =>
+      val syncedTrees = (for(k: String <- trees.keys.toSet) yield treeCache.get(k).map(t => k -> t).toSeq).flatten
+      if(syncedTrees.size == trees.keys.size)
+        sender() ! FullSync(syncedTrees.toSeq)
+      else
+        sender() ! PartialSync(syncedTrees.toSeq, (trees.keys.toSet -- syncedTrees.map(_._1)).toSeq)
   }
 
   private def handleGenesis(genesis: Genesis): Unit = {

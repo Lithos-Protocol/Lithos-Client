@@ -1,24 +1,24 @@
 package tasks
 
 import actors.{BlockMessage, SyncHandler}
-import actors.SyncHandler.{GetSynced, SyncMessage, HandledBlock}
+import actors.SyncHandler.{GetSynced, HandledBlock, SyncMessage}
 import akka.Done
 import akka.actor.{ActorRef, ActorSystem, Cancellable, CoordinatedShutdown}
 import akka.pattern.ask
 import akka.util.Timeout
 import configs.TasksConfig.TaskConfiguration
 import configs.{Contexts, NodeConfig, StateConfig, StratumConfig, SyncConfig, TasksConfig}
-import lfsm.LFSMHelpers
+import lfsm.{LFSMHelpers, NISPTree}
 import org.ergoplatform.appkit.impl.NodeAndExplorerDataSourceImpl
 import org.ergoplatform.restapi.client.FullBlock
 import org.ergoplatform.sdk.BlockchainContext
 import org.slf4j.{Logger, LoggerFactory}
 import play.api.Configuration
 import play.api.cache.{AsyncCacheApi, SyncCacheApi}
-import state.{BlockInfo, LFSMSync, LFSMTransformer}
+import state.{BlockInfo, LFSMTransformer}
 import stratum.ErgoStratumServer
 import stratum.data.{Data, Options}
-import utils.NISPTreeCache
+import utils.Globals
 
 import javax.inject.{Inject, Named, Singleton}
 import scala.concurrent.duration.DurationInt
@@ -35,9 +35,10 @@ class BlockPolling @Inject()(cache: SyncCacheApi, system: ActorSystem, config: C
 
   val contexts: Contexts = new Contexts(system)
   val syncConfig: SyncConfig = new SyncConfig(config)
-  val nodeConfig: NodeConfig = new NodeConfig(config)
   val stratumConfig: StratumConfig = new StratumConfig(config)
   val stateConfig: StateConfig     = new StateConfig(config)
+
+  val nodeConfig: NodeConfig = Globals.getNodeConfig
   if(taskConfig.enabled) {
     logger.info("Starting synchronization via block polling")
     logger.info(s"Synchronization will start at height ${syncConfig.startHeight}")
@@ -47,7 +48,7 @@ class BlockPolling @Inject()(cache: SyncCacheApi, system: ActorSystem, config: C
     var synced = false
     val nodeDataSource = nodeConfig.getClient.getDataSource.asInstanceOf[NodeAndExplorerDataSourceImpl]
 
-    cache.set(NISPTreeCache.TREE_SET, Seq.empty[String])
+
     //logger.info(s"Polling block at height ${currentHeight} for synchronization")
     // Blocking code until synced
     Future{
@@ -61,20 +62,43 @@ class BlockPolling @Inject()(cache: SyncCacheApi, system: ActorSystem, config: C
               logger.info(s"Finished syncing to height ${chainHeight}")
               syncHandler ! GetSynced
               logger.info(s"Now listening every ${syncConfig.listeningInterval} for new blocks")
-              LFSMSync.synced = true
+              Globals.setSynced()
               system.scheduler.scheduleWithFixedDelay(initialDelay = 10 seconds,
                 delay = syncConfig.listeningInterval)({
                 () =>
+                  // Blocking code on synchronization
                   if (currentHeight <= chainHeight) {
                     logger.info(s"Found new block ${currentHeight} on listen")
                     loadBlockAsync(currentHeight, nodeDataSource).onComplete {
                       case Failure(exception) =>
                         logger.error(s"Failed to load block ${currentHeight} while listening", exception)
                       case Success(block) =>
-                        logger.info(s"Successfully synced block ${block.blockInfo.height}")
+                        logger.info(s"Successfully pre-applied block ${block.blockInfo.height}")
                         currentHeight = currentHeight + 1
-                        if(currentHeight > chainHeight)
-                          LFSMTransformer.onSync(nodeConfig.getClient, cache, nodeConfig.prover, stratumConfig.diff)
+                        if(currentHeight > chainHeight) {
+                          Try {
+                            implicit val timeout = Timeout(5 seconds)
+                            val msg = Await.result((syncHandler ? GetSynced).mapTo[SyncMessage], 5 seconds)
+                            msg match {
+                              case SyncHandler.FullSync(nispTrees) =>
+                                logger.info(s"Got fully synced state with ${nispTrees.size} trees")
+
+                                LFSMTransformer.onSync(nodeConfig.getClient, cache,
+                                  nodeConfig.prover, stratumConfig.diff, nispTrees, syncHandler)
+                              case SyncHandler.PartialSync(syncedTrees, unsyncedIds) =>
+                                logger.info(s"Got partially synced state with ${syncedTrees.size} synced trees" +
+                                  s" and ${unsyncedIds.size} unsynced trees")
+
+                                LFSMTransformer.onSync(nodeConfig.getClient, cache,
+                                  nodeConfig.prover, stratumConfig.diff, syncedTrees, syncHandler)
+                            }
+
+                          }.recoverWith{
+                            case t: Throwable =>
+                              logger.error(s"Got error during sync ${t.getMessage}", t)
+                              Failure(t)
+                          }
+                        }
                     }(contexts.pollingContext)
                   }
 //

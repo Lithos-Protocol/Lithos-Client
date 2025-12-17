@@ -39,6 +39,7 @@ public class Pool {
     private ErgoProver prover = null;
     private String apiKey = null;
     private boolean reducedShareMessages = false;
+    private NISPDatabase nispDB = null;
 	public Pool(Options options, ErgoStratumServer server) {
 
 		this.options = options;
@@ -49,7 +50,7 @@ public class Pool {
 
     public Pool(Options options, ErgoStratumServer server,
                 boolean withCollateral, ErgoClient client, ErgoProver prover,
-                String apiKey, boolean reducedShareMessages) {
+                String apiKey, boolean reducedShareMessages, NISPDatabase nispDB) {
 
         this.options = options;
         this.server = server;
@@ -58,6 +59,7 @@ public class Pool {
         this.prover = prover;
         this.apiKey = apiKey;
         this.reducedShareMessages = reducedShareMessages;
+        this.nispDB = nispDB;
         setupJobManager();
 
     }
@@ -119,7 +121,6 @@ public class Pool {
                     try {
                         SuperShare share = SuperShare.fromCandidate(e.nonce, successfulShare.candidate);
                         logger.info("Saving super share for block {}", share.getHeight());
-                        NISPDatabase nispDB = new NISPDatabase();
                         long score = LFSMHelpers.convertTauOrScore(BigInt.apply(successfulShare.difficulty)).longValue();
                         boolean success = nispDB.addNISP(share.getHeight(), score, share);
                         if (success) {

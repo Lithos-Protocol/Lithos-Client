@@ -5,7 +5,7 @@ import model.ApiError
 import model.BlockMiners
 import model.PoolBlock
 import play.api.cache.SyncCacheApi
-import utils.{NISPTreeCache, TreeCache}
+import utils.TreeCache
 
 /**
   * Provides a default implementation for [[BlocksApi]].
@@ -41,8 +41,10 @@ class BlocksApiImpl extends BlocksApi {
     */
   override def getBlocksByHeight(fromHeight: Option[Int], toHeight: Option[Int], cache: SyncCacheApi): List[String] = {
     // TODO: Implement better logic
-    val fullSet = cache.get[Seq[String]](NISPTreeCache.TREE_SET).get
-    val blocks = for(t <- fullSet) yield t -> cache.get[NISPTree](t).get
+    val treeCache = new TreeCache(cache)
+    val fullSet = treeCache.getTreeSet
+    val blocksOpt = for(t <- fullSet) yield treeCache.get(t).map(n => t -> n).toSeq
+    val blocks = blocksOpt.flatten
     val startHeight = fromHeight.getOrElse(0)
     val endHeight = toHeight.flatMap{h => if(h < 1) None else Some(h)}.getOrElse(10000000)
     blocks.filter(b => b._2.startHeight >= startHeight && b._2.startHeight < endHeight).map(_._1).toList

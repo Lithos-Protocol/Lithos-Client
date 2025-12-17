@@ -1,5 +1,7 @@
 package state
 
+import actors.SyncHandler.RemoveTree
+import akka.actor.ActorRef
 import evaluation.Evaluator
 import lfsm.LFSMPhase.{EVAL, HOLDING, PAYOUT}
 import lfsm.rollup.RollupContracts
@@ -15,8 +17,8 @@ import scorex.utils.Longs
 import sigma.{AvlTree, Colls}
 import sigma.data.CBigInt
 import utils.Helpers.{compileEval, compileHolding, compilePayout, evalContract, holdingContract, payoutContract}
-import utils.NISPTreeCache
-import utils.NISPTreeCache.TREE_SET
+import utils.Globals
+
 import work.lithos.mutations.{Contract, InputUTXO, TxBuilder, UTXO}
 
 import scala.util.{Failure, Success, Try}
@@ -24,12 +26,10 @@ import scala.util.{Failure, Success, Try}
 object LFSMTransformer {
   private val logger: Logger = LoggerFactory.getLogger("LFSMTransformer")
 
-  def onSync(client: ErgoClient, cache: SyncCacheApi, prover: ErgoProver, diff: String): Unit = {
-    logger.info("Starting LFSM state updates")
-    val treeSet   = cache.get[Seq[String]](NISPTreeCache.TREE_SET).get
-    val nispTrees = for(t <- treeSet) yield t -> cache.get[NISPTree](t).get
+  def onSync(client: ErgoClient, cache: SyncCacheApi, prover: ErgoProver, diff: String,
+             nispTrees: Seq[(String, NISPTree)], syncHandler: ActorRef): Unit = {
+    logger.info(s"Creating LFSM transforms for ${nispTrees.size} synced trees")
 
-    logger.info(s"Found ${nispTrees.size} NISPTrees")
     client.execute{
       ctx =>
         val boxLoader    = new BoxLoader(ctx).loadBoxes
@@ -39,7 +39,7 @@ object LFSMTransformer {
         checkHoldingTransforms(ctx, holdingTrees, prover, boxLoader)
         checkEvalTransforms(ctx, evalTrees, prover, boxLoader)
         attemptPayouts(ctx, payoutTrees, prover, boxLoader)
-        attemptHoldingSubmissions(ctx, holdingTrees, prover, diff, boxLoader, cache)
+        attemptHoldingSubmissions(ctx, holdingTrees, prover, diff, boxLoader, cache, syncHandler)
         attemptEvaluation(ctx, evalTrees, prover, boxLoader, cache)
     }
   }
@@ -139,12 +139,13 @@ object LFSMTransformer {
   }
 
   private def attemptHoldingSubmissions(ctx: BlockchainContext, holdingTrees: Seq[(String, NISPTree)],
-                                        prover: ErgoProver, diff: String, loader: BoxLoader, cache: SyncCacheApi): Unit = {
+                                        prover: ErgoProver, diff: String, loader: BoxLoader, cache: SyncCacheApi,
+                                        syncHandler: ActorRef): Unit = {
     val transformable = holdingTrees.filter{
       h =>
         ctx.getHeight - h._2.currentPeriod.get < LFSMHelpers.HOLDING_PERIOD && !h._2.hasMiner
     }
-    val transforms = transformable.map(t => Try(submitNISPs(ctx, t, prover, diff, loader, cache)))
+    val transforms = transformable.map(t => Try(submitNISPs(ctx, t, prover, diff, loader, cache, syncHandler)))
     if(transforms.exists(_.isSuccess)) {
       logger.info(s"Submitted NISPs to ${transforms.count(_.isSuccess)} holding utxos successfully")
     }
@@ -246,22 +247,24 @@ object LFSMTransformer {
   }
 
   private def submitNISPs(ctx: BlockchainContext, holdTree: (String, NISPTree), prover: ErgoProver,
-                          diff: String, loader: BoxLoader, cache: SyncCacheApi): Unit = {
-    logger.info(s"Submitting NISP to NISPTree ${holdTree._1}")
+                          diff: String, loader: BoxLoader, cache: SyncCacheApi, syncHandler: ActorRef): Unit = {
+
     val holdingInput = InputUTXO(ctx.getBoxesById(holdTree._1).head)
-
-    val holding = holdingContract(ctx)
-
-    val otherInputs = loader.getInputs(Parameters.MinFee)
-    val tree = holdTree._2.dictionary
-    val copiedTree = tree.copy()
-    copiedTree.prover.generateProof() // Reset proof for copied tree, proofs will be incorrect if this is not done!
     val score = LFSMHelpers.convertTauOrScore(BigInt(LFSMHelpers.parseDiffValueForStratum(diff).get))
-    val realDigest = Hex.toHexString(holdingInput.registers.head.getValue.asInstanceOf[AvlTree].digest.toArray)
-    val nispDB = new NISPDatabase
+    val nispDB = Globals.nispDB
     val bestNISP = nispDB.getBestValidNISP(holdingInput.input.getCreationHeight, score.toLong)
+
+
     bestNISP match {
       case Some(nisp) =>
+        val holding = holdingContract(ctx)
+
+        val otherInputs = loader.getInputs(Parameters.MinFee)
+        val tree = holdTree._2.dictionary
+        val copiedTree = tree.copy()
+        copiedTree.prover.generateProof() // Reset proof for copied tree, proofs will be incorrect if this is not done!
+
+        val realDigest = Hex.toHexString(holdingInput.registers.head.getValue.asInstanceOf[AvlTree].digest.toArray)
         logger.info(s"Got valid NISP with score ${nisp.score}, heights" +
           s" ${nisp.shares.map(_.getHeight).mkString(", ")} and size ${nisp.serialize.length} bytes")
         logger.info(s"Digests before transform: (${realDigest}, ${tree}, ${copiedTree})")
@@ -302,14 +305,12 @@ object LFSMTransformer {
           .buildTx(0, prover.getAddress)
         val sTx = prover.sign(uTx)
         val txId = ctx.sendTransaction(sTx)
-        logger.info(s"Sent transaction ${txId} to submit NISP")
+        logger.info(s"Sent transaction ${txId} to submit NISP for NISPTree ${holdTree._2.blockId}")
       case None =>
 
-        cache.remove(holdTree._1)
-        val treeSet = cache.get[Seq[String]](TREE_SET).get
-        cache.set(TREE_SET, treeSet.filter(_ != holdTree._1))
-        throw new NoValidNISPException(s"Dropped NISPTree ${holdTree._1} for block ${holdTree._2.startHeight} " +
-          s"due to not having enough super shares to produce a valid NISP")
+        syncHandler ! RemoveTree(holdTree._2.blockId, "Unable to submit valid NISP")
+        throw new NoValidNISPException(s"Could not produce valid NISP for lithos-mined block ${holdTree._2.startHeight}" +
+        s" with id ${holdTree._2.blockId}")
     }
 
   }

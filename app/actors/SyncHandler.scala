@@ -1,6 +1,6 @@
 package actors
 
-import actors.SyncHandler.{Genesis, GetSynced, RelevantTransactions, HandledBlock, SyncMessage, Transform}
+import actors.SyncHandler.{Genesis, GetSynced, HandledBlock, RelevantTransactions, RemoveTree, SyncMessage, Transform}
 import akka.actor.{Actor, ActorRef}
 import akka.pattern.ask
 import akka.util.Timeout
@@ -15,7 +15,7 @@ import play.api.libs.concurrent.InjectedActorSupport
 import sigma.data.AvlTreeFlags
 import state.{BlockInfo, BlockTx, TxInput, TxOutput}
 import utils.Helpers.{compileEval, compileHolding, compilePayout}
-import utils.{Helpers, TreeCache}
+import utils.{Globals, Helpers, TreeCache}
 import work.lithos.plasma.PlasmaParameters
 import work.lithos.plasma.collections.PlasmaMap
 
@@ -28,8 +28,8 @@ class SyncHandler @Inject()(config: Configuration, @Named("sync-coordinator") sy
                             cacheApi: SyncCacheApi) extends Actor with InjectedActorSupport {
   implicit val timeout: Timeout = 2 seconds
 
-  private val logger: Logger          = LoggerFactory.getLogger("BlockReceiver")
-  val nodeConfig: NodeConfig          = new NodeConfig(config)
+  private val logger: Logger          = LoggerFactory.getLogger("SyncHandler")
+  val nodeConfig: NodeConfig          = Globals.getNodeConfig
   val client: ErgoClient              = nodeConfig.getClient
   val prover: ErgoProver              = nodeConfig.prover
   lazy val relErgoTrees: Seq[String]  = Helpers.relevantErgoTrees(client)
@@ -65,6 +65,9 @@ class SyncHandler @Inject()(config: Configuration, @Named("sync-coordinator") sy
         case Success(msg) =>
           originalSender ! msg
       }
+    case removeTree: RemoveTree =>
+      logger.info(s"Removing tree ${removeTree.blockId} due to: ${removeTree.reason}")
+      syncCoordinator ! removeTree
   }
   // efficiency matters here
   private def buildRelevantTransactions(blockInfo: BlockInfo): RelevantTransactions = {
@@ -136,11 +139,12 @@ object SyncHandler {
     override def toString: String = s"Transform(${blockInfo.height}: ${input.id} => ${output.id})"
   }
   case class StopTracking(utxoId: String, blockId: String)
+  case class RemoveTree(blockId: String, reason: String)
   case object GetSynced
   case class HandledBlock(blockInfo: BlockInfo)
   sealed trait SyncMessage
-  case class FullSync(utxoIds: Seq[String]) extends SyncMessage
-  case class PartialSync(syncedIds: Seq[String], unsyncedIds: Seq[String]) extends SyncMessage
+  case class FullSync(nispTrees: Seq[(String, NISPTree)]) extends SyncMessage
+  case class PartialSync(syncedTrees: Seq[(String, NISPTree)], unsyncedIds: Seq[String]) extends SyncMessage
 
 
   object RelevantTransactions {

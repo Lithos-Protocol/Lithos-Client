@@ -11,13 +11,13 @@
   // _FOUNDER_INIT_REWARD - Ergo founder init reward
   // _EPOCH_LENGTH - Length of emission epoch
   // _ONE_EPOCH_REDUCTION - Amount of Erg reduced from emissions after epoch
-
+  //
 
   // THIS TESTNET CONTRACT DOES NOT CHECK FOR THE EMISSION NFT, WHICH IS NOT PRESENT ON THE TESTNET BLOCKCHAIN. IT IS
   // USED FOR LIVE TESTING OF TX INSERTION ON THE BLOCK.
 
   // If holding output is present, assume collateral is being spent by miner, otherwise, assume refund.
-
+  // TODO: add back collateral enforcer
   val holdingBox:     Box = OUTPUTS(0)
 
   val feeValue = SELF.R4[Long].get
@@ -50,7 +50,12 @@
         Coll(
           holdingBox.value >= coinsToIssue - feeValue,
           (feeValue * 100000) / coinsToIssue < 3000,
-
+          //empty digest
+          holdingBox.R4[AvlTree].get.digest == fromBase16("4ec61f485b98eb87153f7c57db4f5ecd75556fddbc403b41acf8441fde8e160900072000"),
+          holdingBox.R5[Int].get == 0,
+          holdingBox.R6[BigInt].get == 0.toBigInt,
+          holdingBox.R7[Long].get == HEIGHT,
+          holdingBox.R8[Coll[Byte]] == blake2b256(lenderPk.propBytes) // Used for miner verification in fraud proofs
           )
         )
 

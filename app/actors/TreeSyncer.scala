@@ -17,8 +17,7 @@ import sigma.ast.ErgoTree
 import sigma.data.CBigInt
 import sigma.{Coll, SigmaProp}
 import state.{BlockInfo, BlockTx, TxInput, TxOutput}
-import utils.NISPTreeCache.{TRACKED_PAYOUTS, TREE_SET}
-import utils.{Helpers, NISPTreeCache, PayoutRecord, TreeCache}
+import utils.{Globals, Helpers, PayoutRecord, TreeCache}
 import work.lithos.mutations.Contract
 
 import javax.inject.Inject
@@ -39,8 +38,6 @@ class TreeSyncer @Inject()(config: Configuration, @Assisted treeBlockId: String,
 
   def postInit(utxoId: String): Receive = {
     case transform: Transform =>
-      //      require(treeCache.get(treeBlockId).exists(t => t.utxoId == tree.utxoId),
-      //        "Cannot apply transform on de-synced tree")
       val tree = treeCache.get(utxoId).get
       val nextTree = matchTransform(tree, transform)
       context.become(postInit(nextTree.utxoId))
@@ -188,8 +185,8 @@ class TreeSyncer @Inject()(config: Configuration, @Assisted treeBlockId: String,
           .get.toUTXO(ctx)
         val payoutRecord = PayoutRecord(transform.tx.id, payoutOutput.value, LFSMHelpers.scoreFromPayment(payoutOutput.value, tree.totalScore, tree.totalReward),
           input.id, treeBlockId, tree.startHeight, transform.blockInfo.height)
-        val payoutSet = cacheApi.getOrElseUpdate[Seq[PayoutRecord]](TRACKED_PAYOUTS)(Seq.empty[PayoutRecord])
-        cacheApi.set(TRACKED_PAYOUTS, payoutSet ++ Seq(payoutRecord))
+        val payoutSet = cacheApi.getOrElseUpdate[Seq[PayoutRecord]](Globals.TRACKED_PAYOUTS)(Seq.empty[PayoutRecord])
+        cacheApi.set(Globals.TRACKED_PAYOUTS, payoutSet ++ Seq(payoutRecord))
         stopSync("Local miner was paid", tree)
       } else {
         val lookUp = dict.lookUp(miners.toArray.map(_.toArray): _*)

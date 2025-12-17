@@ -5,9 +5,9 @@ import lfsm.LFSMHelpers
 import model.ApiError
 import model.NISPRepresentation
 import model.StratumInfo
-import nisp.NISPDatabase
 import org.bouncycastle.util.encoders.Hex
 import play.api.Configuration
+import utils.Globals
 
 /**
   * Provides a default implementation for [[MiningApi]].
@@ -18,7 +18,7 @@ class MiningApiImpl extends MiningApi {
     */
   override def getBestNISPAtHeight(height: Int, score: Long): Option[NISPRepresentation] = {
 
-    val nispDb = new NISPDatabase
+    val nispDb = Globals.nispDB
     val bestNISP = nispDb.getBestValidNISP(height, score)
     bestNISP.map(n => NISPRepresentation(n.score, height,
       n.shares.map(s => Hex.toHexString(s.headerBytes)).toList, Hex.toHexString(n.serialize)))

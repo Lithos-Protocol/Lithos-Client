@@ -12,7 +12,7 @@ import play.api.Configuration
 import play.api.inject.ApplicationLifecycle
 import stratum.ErgoStratumServer
 import stratum.data.{Data, Options}
-import utils.Helpers
+import utils.{Globals, Helpers}
 
 import java.math.BigInteger
 import java.time.LocalDateTime
@@ -29,8 +29,9 @@ class StratumServer @Inject()(system: ActorSystem, config: Configuration, cs: Co
 
   val contexts: Contexts = new Contexts(system)
   val stratumParams: StratumConfig = new StratumConfig(config)
-  val nodeConfig: NodeConfig = new NodeConfig(config)
   val stateConfig: StateConfig     = new StateConfig(config)
+
+  val nodeConfig: NodeConfig = Globals.getNodeConfig
   if(taskConfig.enabled) {
     logger.info("Starting Stratum Server for Lithos")
 
@@ -50,7 +51,7 @@ class StratumServer @Inject()(system: ActorSystem, config: Configuration, cs: Co
         }
         logger.info(s"Using tau ${t} (score: ${LFSMHelpers.convertTauOrScore(t)}) for NISPs")
         val server = new ErgoStratumServer(options, true, true, nodeConfig.getClient,
-          nodeConfig.prover, nodeConfig.getNodeKey, stratumParams.reduceShareMessages)
+          nodeConfig.prover, nodeConfig.getNodeKey, stratumParams.reduceShareMessages, Globals.nispDB)
 
 
         cs.addTask(CoordinatedShutdown.PhaseServiceUnbind, "close-stratum-server"){

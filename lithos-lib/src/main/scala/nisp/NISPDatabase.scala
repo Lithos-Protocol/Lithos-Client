@@ -9,9 +9,9 @@ import scorex.utils.Ints
 
 import java.io.File
 
-class NISPDatabase {
-  private val db = LDBFactory.factory.open(new File(NISP_DIR), new Options())
-  private val kvstore = new LDBKVStore(db)
+class NISPDatabase extends NISPStorage {
+
+  private val kvstore = LDBFactory.createKvDb(NISP_DIR)
 
   def getAll: Seq[(Array[Byte], Array[Byte])] = kvstore.getAll.toSeq
   def size: Int = getAll.size
@@ -197,6 +197,10 @@ class NISPDatabase {
       case None =>
         kvstore.insert(CURRENT_HEIGHT, newCurrHeight).isSuccess
     }
+  }
+
+  def close(): Unit = {
+    kvstore.close()
   }
 
 }

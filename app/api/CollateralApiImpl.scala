@@ -14,7 +14,7 @@ import org.ergoplatform.appkit.{Address, BlockchainContext, ErgoValue, JavaHelpe
 import play.api.Configuration
 import sigma.SigmaProp
 import sigma.ast.ErgoTree
-import utils.Helpers
+import utils.{Globals, Helpers}
 import work.lithos.mutations.{Contract, InputUTXO, TxBuilder, UTXO}
 
 /**
@@ -25,7 +25,7 @@ class CollateralApiImpl extends CollateralApi {
     * @inheritdoc
     */
   override def createCollateralUTXO(collateralInfo: CollateralInfo, config: Configuration): SuccessfulTransaction = {
-    val nodeConfig = new NodeConfig(config)
+    val nodeConfig = Globals.getNodeConfig
     nodeConfig.getClient.execute {
       ctx =>
         if(collateralInfo.fee > LFSMHelpers.COLLAT_MAX_FEE)
@@ -61,7 +61,7 @@ class CollateralApiImpl extends CollateralApi {
     * @inheritdoc
     */
   override def getAllCollateralInfo(limit: Option[Int], offset: Option[Int], config: Configuration): List[CollateralUTXO] = {
-    val nodeConfig = new NodeConfig(config)
+    val nodeConfig = Globals.getNodeConfig
 
     nodeConfig.getClient.execute{
       ctx =>
@@ -77,7 +77,7 @@ class CollateralApiImpl extends CollateralApi {
     */
   override def getLocalCollateralInfo(limit: Option[Int], offset: Option[Int], config: Configuration): List[CollateralUTXO] = {
     // TODO: Implement better logic
-    val nodeConfig = new NodeConfig(config)
+    val nodeConfig = Globals.getNodeConfig
     getAllCollateralInfo(limit, offset, config).filter(c => c.lender == nodeConfig.prover.getAddress.toString)
   }
 
