@@ -1,7 +1,7 @@
 package actors
 
 
-import actors.BlockReceiver.{Genesis, StopTracking, Transform}
+import actors.SyncHandler.{Genesis, StopTracking, Transform}
 import akka.actor.Actor
 import com.google.inject.assistedinject.Assisted
 import configs.NodeConfig
@@ -33,16 +33,17 @@ class TreeSyncer @Inject()(config: Configuration, @Assisted treeBlockId: String,
   override def receive: Receive = {
     case Genesis(tree, _) =>
       logger.info(s"Generated tree $treeBlockId with utxo ${tree.utxoId}")
-      treeCache.addToTreeCache(tree.utxoId, treeBlockId, tree)
-      context.become(postInit(tree))
+      treeCache.addToTreeCache(tree.utxoId, tree)
+      context.become(postInit(tree.utxoId))
   }
 
-  def postInit(tree: NISPTree): Receive = {
+  def postInit(utxoId: String): Receive = {
     case transform: Transform =>
       //      require(treeCache.get(treeBlockId).exists(t => t.utxoId == tree.utxoId),
       //        "Cannot apply transform on de-synced tree")
+      val tree = treeCache.get(utxoId).get
       val nextTree = matchTransform(tree, transform)
-      context.become(postInit(nextTree))
+      context.become(postInit(nextTree.utxoId))
 
   }
 
@@ -97,7 +98,7 @@ class TreeSyncer @Inject()(config: Configuration, @Assisted treeBlockId: String,
     val nextTree = tree.copy(dictionary = dict, numMiners = nextMiners, totalScore = nextScore,
       currentPeriod = Some(nextPeriod), hasMiner = isMiner || tree.hasMiner, minerSet = nextMinerSet,
       utxoId = transform.output.id)
-    treeCache.updateTreeCache(transform.input.id, nextTree.utxoId, nextTree.blockId, nextTree)
+    treeCache.updateTreeCache(transform.input.id, nextTree.utxoId, nextTree)
 
     if (isMiner) {
       logger.info(s"Applied submission transform ${transform.tx.id} with $transform for local miner")
@@ -115,7 +116,7 @@ class TreeSyncer @Inject()(config: Configuration, @Assisted treeBlockId: String,
     if (tree.hasMiner) {
       val nispTree = tree.copy(currentPeriod = Some(evalBox.registers(3).getValue.asInstanceOf[Long]),
         phase = LFSMPhase.EVAL, utxoId = transform.output.id)
-      treeCache.updateTreeCache(transform.input.id, nispTree.utxoId, nispTree.blockId, nispTree)
+      treeCache.updateTreeCache(transform.input.id, nispTree.utxoId, nispTree)
       logger.info(s"Applied holding transform ${transform.tx.id} with $transform")
       nispTree
     } else {
@@ -151,7 +152,7 @@ class TreeSyncer @Inject()(config: Configuration, @Assisted treeBlockId: String,
           tree.copy(dictionary = dict, minerSet = nextMinerSet, totalScore = nextTotalScore,
             utxoId = transform.output.id)
       }
-      treeCache.updateTreeCache(transform.input.id, nispTree.utxoId, nispTree.blockId, nispTree)
+      treeCache.updateTreeCache(transform.input.id, nispTree.utxoId, nispTree)
       logger.info(s"Applied fraud proof transform ${transform.tx.id} with $transform")
       nispTree
     } else {
@@ -162,7 +163,7 @@ class TreeSyncer @Inject()(config: Configuration, @Assisted treeBlockId: String,
   private def evalTransform(tree: NISPTree, transform: Transform): NISPTree = {
     if (tree.hasMiner) {
       val nispTree = tree.copy(currentPeriod = None, phase = LFSMPhase.PAYOUT, utxoId = transform.output.id)
-      treeCache.updateTreeCache(transform.input.id, nispTree.utxoId, nispTree.blockId, nispTree)
+      treeCache.updateTreeCache(transform.input.id, nispTree.utxoId, nispTree)
       logger.info(s"Applied evaluation transform ${transform.tx.id} with $transform")
       nispTree
     } else {
@@ -199,7 +200,7 @@ class TreeSyncer @Inject()(config: Configuration, @Assisted treeBlockId: String,
         if (transform.output.ergoTree == Helpers.payoutContract(ctx).ergoTreeHex) {
           val nispTree = tree.copy(dictionary = dict, utxoId = transform.output.id)
 
-          treeCache.updateTreeCache(transform.input.id, nispTree.utxoId, nispTree.blockId, nispTree)
+          treeCache.updateTreeCache(transform.input.id, nispTree.utxoId, nispTree)
           logger.info(s"Applied payout transform ${transform.tx.id} with $transform")
           nispTree
         } else {
@@ -215,7 +216,7 @@ class TreeSyncer @Inject()(config: Configuration, @Assisted treeBlockId: String,
   private def stopSync(reason: String, tree: NISPTree): NISPTree = {
     logger.info("Stopped sync due to: " + reason)
     context.stop(self)
-    treeCache.removeFromTreeCache(tree.utxoId, treeBlockId)
+    treeCache.removeFromTreeCache(tree.utxoId)
     sender() ! StopTracking(tree.utxoId, treeBlockId)
     // Return same tree after stopping sync, does not matter because message processing stops
     tree

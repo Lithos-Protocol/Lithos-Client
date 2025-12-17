@@ -1,7 +1,8 @@
 package actors
 
-import actors.BlockReceiver.{Genesis, RelevantTransactions, Transform}
+import actors.SyncHandler.{Genesis, GetSynced, RelevantTransactions, HandledBlock, SyncMessage, Transform}
 import akka.actor.{Actor, ActorRef}
+import akka.pattern.ask
 import akka.util.Timeout
 import configs.NodeConfig
 import lfsm.{LFSMPhase, NISPTree}
@@ -21,17 +22,20 @@ import work.lithos.plasma.collections.PlasmaMap
 import javax.inject.{Inject, Named}
 import scala.concurrent.duration.DurationInt
 import scala.language.postfixOps
+import scala.util.{Failure, Success}
 
-class BlockReceiver @Inject() (config: Configuration, @Named("sync-coordinator") syncCoordinator: ActorRef,
-                               cacheApi: SyncCacheApi) extends Actor with InjectedActorSupport {
-  implicit val timeout: Timeout = 10 seconds
+class SyncHandler @Inject()(config: Configuration, @Named("sync-coordinator") syncCoordinator: ActorRef,
+                            cacheApi: SyncCacheApi) extends Actor with InjectedActorSupport {
+  implicit val timeout: Timeout = 2 seconds
 
-  val logger: Logger                  = LoggerFactory.getLogger("BlockReceiver")
+  private val logger: Logger          = LoggerFactory.getLogger("BlockReceiver")
   val nodeConfig: NodeConfig          = new NodeConfig(config)
   val client: ErgoClient              = nodeConfig.getClient
   val prover: ErgoProver              = nodeConfig.prover
   lazy val relErgoTrees: Seq[String]  = Helpers.relevantErgoTrees(client)
   val treeCache: TreeCache            = TreeCache(cacheApi)
+  import context.dispatcher
+
 
   override def receive: Receive = {
     case BlockMessage(blockInfo) =>
@@ -40,6 +44,27 @@ class BlockReceiver @Inject() (config: Configuration, @Named("sync-coordinator")
       val relevantTransactions = buildRelevantTransactions(blockInfo)
       relevantTransactions.transforms.foreach(syncCoordinator ! _)
       relevantTransactions.genTxs.foreach(syncCoordinator ! _)
+    case GetSynced =>
+      logger.info("Got initial sync message")
+      context.become(postSync())
+  }
+
+  private def postSync(): Receive = {
+    case BlockMessage(blockInfo) =>
+      logger.info(s"Post-sync block message ${blockInfo.id} with height ${blockInfo.height}")
+      val relevantTransactions = buildRelevantTransactions(blockInfo)
+      relevantTransactions.transforms.foreach(syncCoordinator ! _)
+      relevantTransactions.genTxs.foreach(syncCoordinator ! _)
+      sender() ! HandledBlock(blockInfo)
+    case GetSynced =>
+      val originalSender = sender()
+      (syncCoordinator ? GetSynced).mapTo[SyncMessage].onComplete {
+        case Failure(exception) =>
+          // match errors
+          logger.error("Got error while asking for sync", exception)
+        case Success(msg) =>
+          originalSender ! msg
+      }
   }
   // efficiency matters here
   private def buildRelevantTransactions(blockInfo: BlockInfo): RelevantTransactions = {
@@ -94,14 +119,15 @@ class BlockReceiver @Inject() (config: Configuration, @Named("sync-coordinator")
   private def isRelevant(tx: BlockTx): Boolean = {
     relErgoTrees.contains(tx.outputs.head.ergoTree)
   }
+  // TODO: Analyze closely for potentially dropped blocks
 
-  private def relevantInput(tx: BlockTx): Option[NISPTree] = {
-    treeCache.get(tx.inputs.head.id)
+  private def relevantInput(tx: BlockTx): Option[String] = {
+    treeCache.getTreeSet.find(_ == tx.inputs.head.id)
   }
 
 }
 
-object BlockReceiver {
+object SyncHandler {
   case class Genesis(tree: NISPTree, blockInfo: BlockInfo)
   case class RelevantTransactions(genTxs: Seq[Genesis], transforms: Seq[Transform])
   case class Transform(blockInfo: BlockInfo, tx: BlockTx) {
@@ -110,6 +136,12 @@ object BlockReceiver {
     override def toString: String = s"Transform(${blockInfo.height}: ${input.id} => ${output.id})"
   }
   case class StopTracking(utxoId: String, blockId: String)
+  case object GetSynced
+  case class HandledBlock(blockInfo: BlockInfo)
+  sealed trait SyncMessage
+  case class FullSync(utxoIds: Seq[String]) extends SyncMessage
+  case class PartialSync(syncedIds: Seq[String], unsyncedIds: Seq[String]) extends SyncMessage
+
 
   object RelevantTransactions {
     def empty = RelevantTransactions(Seq.empty[Genesis], Seq.empty[Transform])

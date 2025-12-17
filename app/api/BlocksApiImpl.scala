@@ -5,7 +5,7 @@ import model.ApiError
 import model.BlockMiners
 import model.PoolBlock
 import play.api.cache.SyncCacheApi
-import utils.NISPTreeCache
+import utils.{NISPTreeCache, TreeCache}
 
 /**
   * Provides a default implementation for [[BlocksApi]].
@@ -52,7 +52,8 @@ class BlocksApiImpl extends BlocksApi {
     * @inheritdoc
     */
   override def getContractIds(limit: Option[Int], offset: Option[Int], cache: SyncCacheApi): List[String] = {
-    val set = cache.get[Seq[String]](NISPTreeCache.TREE_SET).get
+    val treeCache = TreeCache(cache)
+    val set = treeCache.getTreeSet
     val page = ApiHelper.handlePagination(offset, limit)
     set.slice(page._1, page._1 + page._2).toList
   }
@@ -66,6 +67,7 @@ class BlocksApiImpl extends BlocksApi {
 
   override def getAllPoolBlocks(limit: Option[Int], offset: Option[Int], cache: SyncCacheApi): List[PoolBlock] = {
     val set = getContractIds(limit, offset, cache)
-    for(id <- set) yield getBlockById(id, cache).get
+    // TODO: Dont use .get, because trees are individually synced now and treeSet not guaranteed to map to NISPTree
+    (for(id <- set) yield getBlockById(id, cache).toSeq).flatten.sortBy(_.blockHeight)
   }
 }

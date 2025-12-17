@@ -1,6 +1,6 @@
 package actors
 
-import actors.BlockReceiver.{Genesis, StopTracking, Transform}
+import actors.SyncHandler.{Genesis, StopTracking, Transform}
 import akka.actor.{Actor, ActorRef, Terminated}
 import akka.util.Timeout
 import configs.NodeConfig
@@ -30,6 +30,7 @@ class SyncCoordinator @Inject() (syncFactory: TreeSyncer.SyncFactory, config: Co
       handleGenesis(gen)
       context.become(postInit(Map(gen.tree.utxoId -> gen.tree.blockId)))
       logger.info(s"Got 1 tree")
+      treeCache.setTreeSet(Set(gen.tree.utxoId))
     case _ =>
       logger.info("Skipped non-genesis transaction before initialization")
 
@@ -39,6 +40,7 @@ class SyncCoordinator @Inject() (syncFactory: TreeSyncer.SyncFactory, config: Co
     case gen: Genesis =>
       handleGenesis(gen)
       logger.info(s"Got ${trees.size + 1} trees")
+      treeCache.addToTreeSet(gen.tree.utxoId)
       context.become(postInit(trees + (gen.tree.utxoId -> gen.tree.blockId)))
     case transform: Transform =>
       //logger.info(s"Got transform with id ${transform.tx.id}")
@@ -48,13 +50,17 @@ class SyncCoordinator @Inject() (syncFactory: TreeSyncer.SyncFactory, config: Co
           handleTransform(transform, treeBlockId)
           context.become(postInit(trees - transform.input.id + (transform.output.id -> treeBlockId)))
           logger.info(s"Pre-applied transform ${transform.tx.id} for NISPTree ${treeBlockId.slice(0, 12)} at ${transform.blockInfo.height}")
+          treeCache.removeFromTreeSet(transform.input.id)
+          treeCache.addToTreeSet(transform.output.id)
         case None =>
           logger.info(s"Skipping transform ${transform.tx.id} with no genesis history")
       }
     case stopTracking: StopTracking =>
-      require(trees.exists(_._2 == stopTracking.blockId), s"Map must contain actor name ${stopTracking.blockId} to remove tracking")
-      context.become(postInit(trees.filter(_._2 != stopTracking.blockId)))
+      val removedTree = trees.find(_._2 == stopTracking.blockId)
+      require(removedTree.isDefined, s"Map must contain actor name ${stopTracking.blockId} to remove tracking")
+      context.become(postInit(trees - removedTree.get._1))
       logger.info(s"Removed NISPTree ${stopTracking.blockId}")
+      treeCache.removeFromTreeSet(removedTree.get._1)
   }
 
   private def handleGenesis(genesis: Genesis): Unit = {

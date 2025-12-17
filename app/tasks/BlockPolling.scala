@@ -1,8 +1,11 @@
 package tasks
 
-import actors.BlockMessage
+import actors.{BlockMessage, SyncHandler}
+import actors.SyncHandler.{GetSynced, SyncMessage, HandledBlock}
 import akka.Done
 import akka.actor.{ActorRef, ActorSystem, Cancellable, CoordinatedShutdown}
+import akka.pattern.ask
+import akka.util.Timeout
 import configs.TasksConfig.TaskConfiguration
 import configs.{Contexts, NodeConfig, StateConfig, StratumConfig, SyncConfig, TasksConfig}
 import lfsm.LFSMHelpers
@@ -25,7 +28,7 @@ import scala.util.{Failure, Success, Try}
 
 @Singleton
 class BlockPolling @Inject()(cache: SyncCacheApi, system: ActorSystem, config: Configuration,
-                             @Named("block-receiver") blockReceiver: ActorRef, cs: CoordinatedShutdown) {
+                             @Named("sync-handler") syncHandler: ActorRef, cs: CoordinatedShutdown) {
 
   val logger: Logger = LoggerFactory.getLogger("BlockPolling")
   val taskConfig: TaskConfiguration = new TasksConfig(config).blockPolling
@@ -48,32 +51,34 @@ class BlockPolling @Inject()(cache: SyncCacheApi, system: ActorSystem, config: C
     //logger.info(s"Polling block at height ${currentHeight} for synchronization")
     // Blocking code until synced
     Future{
-      while(currentHeight <= 31000 && !synced) {
+      while(currentHeight <= chainHeight && !synced) {
         loadBlockSync(currentHeight, nodeDataSource) match {
           case Success(value) =>
-            if (currentHeight != 31000) {
+            if (currentHeight != chainHeight) {
               currentHeight = currentHeight + 1
             } else {
               // Start listening once synced
-              logger.info(s"Finished syncing to height ${chainHeight - 7000}")
-//              logger.info(s"Now listening every ${syncConfig.listeningInterval} for new blocks")
-//              LFSMSync.synced = true
-//              system.scheduler.scheduleWithFixedDelay(initialDelay = 10 seconds,
-//                delay = syncConfig.listeningInterval)({
-//                () =>
-//                  if (currentHeight <= chainHeight) {
-//                    logger.info(s"Found new block ${currentHeight} on listen")
-//                    loadBlockAsync(currentHeight, nodeDataSource).onComplete {
-//                      case Failure(exception) =>
-//                        logger.error(s"Failed to load block ${currentHeight} while listening", exception)
-//                      case Success(value) =>
-//                        currentHeight = currentHeight + 1
-//                        if(currentHeight > chainHeight)
-//                          LFSMTransformer.onSync(nodeConfig.getClient, cache, nodeConfig.prover, stratumConfig.diff)
-//                    }(contexts.pollingContext)
-//                  }
+              logger.info(s"Finished syncing to height ${chainHeight}")
+              syncHandler ! GetSynced
+              logger.info(s"Now listening every ${syncConfig.listeningInterval} for new blocks")
+              LFSMSync.synced = true
+              system.scheduler.scheduleWithFixedDelay(initialDelay = 10 seconds,
+                delay = syncConfig.listeningInterval)({
+                () =>
+                  if (currentHeight <= chainHeight) {
+                    logger.info(s"Found new block ${currentHeight} on listen")
+                    loadBlockAsync(currentHeight, nodeDataSource).onComplete {
+                      case Failure(exception) =>
+                        logger.error(s"Failed to load block ${currentHeight} while listening", exception)
+                      case Success(block) =>
+                        logger.info(s"Successfully synced block ${block.blockInfo.height}")
+                        currentHeight = currentHeight + 1
+                        if(currentHeight > chainHeight)
+                          LFSMTransformer.onSync(nodeConfig.getClient, cache, nodeConfig.prover, stratumConfig.diff)
+                    }(contexts.pollingContext)
+                  }
 //
-//              })(contexts.pollingContext)
+              })(contexts.pollingContext)
               synced = true
             }
           case Failure(exception) => logger.error(s"Failed to load block ${currentHeight} while syncing", exception)
@@ -125,13 +130,19 @@ class BlockPolling @Inject()(cache: SyncCacheApi, system: ActorSystem, config: C
           .getNodeBlocksApi.getFullBlockById(blockHeader)
           .execute()
           .body()
-        checkBlockTransactions(fullBlock)
+        awaitBlockSync(fullBlock)
       }
     }.map(_.get)
 
   }
 
   private def checkBlockTransactions(block: FullBlock): Unit = {
-    blockReceiver ! BlockMessage(BlockInfo.fromSync(block))
+    syncHandler ! BlockMessage(BlockInfo.fromSync(block))
+  }
+
+  private def awaitBlockSync(block: FullBlock) = {
+    implicit val timeout: Timeout = Timeout(7 seconds)
+
+    Await.result((syncHandler ? BlockMessage(BlockInfo.fromSync(block))).mapTo[HandledBlock], 7 seconds)
   }
 }
