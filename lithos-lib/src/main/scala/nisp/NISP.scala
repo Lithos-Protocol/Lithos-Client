@@ -1,8 +1,12 @@
 package nisp
 
+import org.bouncycastle.util.encoders.Hex
 import org.ergoplatform.HeaderWithoutPow
 import org.ergoplatform.appkit.ErgoValue
 import scorex.utils.Longs
+import sigma.data.CHeader
+import sigma.pow.Autolykos2PowValidation
+import sigma.util.NBitsUtils
 import sigma.{Coll, Colls}
 import stratum.data.MiningCandidate
 
@@ -22,6 +26,8 @@ import stratum.data.MiningCandidate
  * @param shares Set of SuperShares (Must equal 10 to be a valid NISP)
  */
 case class NISP(score: Long, shares: Seq[SuperShare]) {
+
+
   def serialize: Array[Byte] = {
     Longs.toByteArray(score) ++ shares.flatMap(_.serialize)
   }
@@ -31,6 +37,21 @@ case class NISP(score: Long, shares: Seq[SuperShare]) {
   }
 
   def ergoValue: ErgoValue[Coll[Byte]] = ErgoValue.of(serialize)
+
+  /**
+   * Returns NISP with only distinct shares, based on header id of each super share
+   */
+  def distinct: NISP = this.copy(shares = getDistinctShares)
+
+  def getDistinctShares: Seq[SuperShare] = {
+    shares.distinct
+  }
+
+  def isDistinct = {
+    shares.map(s => Hex.toHexString(s.toHeader.id.toArray)).toSet.size == shares.size
+  }
+
+
 }
 
 object NISP {

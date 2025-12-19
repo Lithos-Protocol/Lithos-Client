@@ -3,41 +3,63 @@ package nisp
 import org.bouncycastle.util.encoders.Hex
 import org.ergoplatform.appkit.JavaHelpers
 import org.ergoplatform.{AutolykosSolution, ErgoHeader, HeaderWithoutPow, HeaderWithoutPowSerializer}
-import scorex.utils.Ints
+import scorex.crypto.hash.Blake2b256
+import scorex.utils.{Ints, Shorts}
 import sigma.pow.Autolykos2PowValidation
 import sigma.serialization.GroupElementSerializer
 import stratum.data.MiningCandidate
 
-case class SuperShare(headerBytes: Array[Byte], txProof: Option[TransactionProof] = None) {
-  def serialize: Array[Byte] = {
-    nBytes ++ headerBytes ++ Seq((if(txProof.isDefined) txProof.get.levels.size else 0).toByte) ++ txProof.map(_.serialize).toSeq.flatten
-  }
+import java.nio.{ByteBuffer, ByteOrder}
 
-  def size: Int = serialize.length
-
-  override def toString: String = {
-    s"SuperShare(${Hex.toHexString(nBytes)}, ${Hex.toHexString(headerBytes)},\n " +
-      s"${(if(txProof.isDefined) txProof.get.levels.size else 0).toByte}, \n " +
-      s"${txProof})"
-  }
-
-  def getHeader: ErgoHeader = {
-    ErgoHeader.sigmaSerializer.fromBytes(headerBytes)
-  }
-
-  def getHeight: Int =
-    getHeader.height
+case class SuperShare(headerBytes: Array[Byte], txProof: TransactionProof) {
+  lazy val nBytes: Array[Byte] = Ints.toByteArray(getN)
 
   def getN: Int = {
     Autolykos2PowValidation.calcN(getHeight)
   }
+  def serialize: Array[Byte] = {
+    nBytes ++ headerBytes ++ Shorts.toByteArray(txProof.tx.length.toShort) ++
+      Array(txProof.levels.size.toByte) ++ txProof.serialize
+  }
 
-  lazy val nBytes: Array[Byte] = Ints.toByteArray(getN)
+  lazy val size: Int = serialize.length
 
+  override def toString: String = {
+    s"SuperShare(${Hex.toHexString(nBytes)}, ${Hex.toHexString(headerBytes)},\n " +
+      s"${Hex.toHexString(Shorts.toByteArray(txProof.tx.length.toShort))}, \n " +
+      s"${txProof.levels.size.toByte.toHexString}, \n " +
+      s"${txProof})"
+  }
+
+  def toHeader: ErgoHeader = {
+    ErgoHeader.sigmaSerializer.fromBytes(headerBytes)
+  }
+
+  def getMerkleRoot: Array[Byte] = {
+    headerBytes.slice(65, 97)
+  }
+
+  def id: Array[Byte] = toHeader.id.toArray
+
+  def idHex: String = Hex.toHexString(id)
+
+  def getHeight: Int =
+    toHeader.height
+
+  override def equals(obj: Any): Boolean = {
+    obj match {
+      case otr: SuperShare =>
+        otr.id sameElements this.id
+      case _ =>
+        false
+    }
+  }
 }
 object SuperShare {
   final val HEADER_SIZE = 220
   final val N_SIZE      = 4
+  final val TX_SIZE_SHORT = 2
+  final val LEVELS_BYTE = 1
   /**
    * Deserialize SuperShare from given bytes, discarding any unused bytes from end of the given array
    * @param bytes Bytes containing SuperShare
@@ -46,17 +68,17 @@ object SuperShare {
   def deserialize(bytes: Array[Byte]): SuperShare = {
     val nBytes = bytes.slice(0, N_SIZE)
     val header = bytes.slice(N_SIZE, N_SIZE + HEADER_SIZE)
+    val txSize = ByteBuffer.wrap(bytes.slice(N_SIZE + HEADER_SIZE, N_SIZE + HEADER_SIZE + TX_SIZE_SHORT))
+      .order(ByteOrder.BIG_ENDIAN)
+      .asShortBuffer()
+      .get()
+
+    val numLevels = bytes(N_SIZE + HEADER_SIZE + TX_SIZE_SHORT)
     val proof = {
-      if(bytes(N_SIZE + HEADER_SIZE) != 0.toByte) {
-        Some(
           TransactionProof.deserialize(bytes.slice(
-            N_SIZE + HEADER_SIZE + 1, N_SIZE + HEADER_SIZE + 1 +
-              TransactionProof.LEAF_SIZE + (bytes(N_SIZE + HEADER_SIZE).toInt * TransactionProof.LEVEL_SIZE)
-          ), bytes(N_SIZE + HEADER_SIZE).toInt)
-        )
-      }else{
-        None
-      }
+            N_SIZE + HEADER_SIZE + TX_SIZE_SHORT + LEVELS_BYTE, N_SIZE + HEADER_SIZE + TX_SIZE_SHORT + LEVELS_BYTE +
+              txSize + (numLevels * TransactionProof.LEVEL_SIZE)
+          ), txSize, numLevels)
     }
     require(Ints.fromByteArray(nBytes) == Autolykos2PowValidation
       .calcN(ErgoHeader.sigmaSerializer.fromBytes(header).height),
@@ -71,17 +93,22 @@ object SuperShare {
     val txProofs = for(i <- 0 until jsonArr.length()) yield jsonArr.getJSONObject(i)
     val collTxProof = txProofs.find(t => t.getString("leaf") == candidate.txId)
     require(collTxProof.isDefined,
-      s"Could not find correct merkle leaf for collateral txId ${candidate.txId}")
+      s"Could not find correct merkle leaf for collateral txId ${candidate.txId}. \n " +
+        s" ${txProofs.map(t => "leaf: " + t.getString("leaf")).mkString(", ")} \n" +
+      s"txBytesHash: ${Hex.toHexString(Blake2b256(candidate.txBytes))}"
+    )
+
     val leaf = collTxProof.get.getString("leaf")
     val levelArr = collTxProof.get.getJSONArray("levels")
     val levels = for(i <- 0 until levelArr.toList.size()) yield levelArr.getString(i)
-    val txProof = TransactionProof(Hex.decode(leaf), levels.map(Hex.decode))
+    require(Blake2b256(candidate.txBytes).toArray sameElements Hex.decode(leaf), "Tx bytes did not match merkle leaf")
+    val txProof = TransactionProof(candidate.txBytes, levels.map(Hex.decode))
     val headerWithoutPow = HeaderWithoutPowSerializer.fromBytes(Hex.decode(preImage))
     val ge = GroupElementSerializer.fromBytes(Hex.decode(candidate.pk))
     val solution = new AutolykosSolution(ge, ge, nonce, BigInt("0"))
     val header = headerWithoutPow.toHeader(solution, null)
 
-    SuperShare(header.bytes, Some(txProof))
+    SuperShare(header.bytes, txProof)
   }
 
   /**

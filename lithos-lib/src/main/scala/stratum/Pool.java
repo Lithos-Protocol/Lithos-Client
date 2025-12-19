@@ -120,9 +120,9 @@ public class Pool {
                 if(successfulShare.isSuperShare) {
                     try {
                         SuperShare share = SuperShare.fromCandidate(e.nonce, successfulShare.candidate);
-                        logger.info("Saving super share for block {}", share.getHeight());
+                        logger.info("Saving super share for block {} with nonce {}", share.getHeight(), Hex.toHexString(e.nonce));
                         long score = LFSMHelpers.convertTauOrScore(BigInt.apply(successfulShare.difficulty)).longValue();
-                        boolean success = nispDB.addNISP(share.getHeight(), score, share);
+                        boolean success = nispDB.addNISP(score, share);
                         if (success) {
                             logger.info("Successfully saved super share");
                             logger.info("NISP-DB: {} entries, lastHeight: {}, currentHeight: {}",
@@ -139,7 +139,11 @@ public class Pool {
                         if(ex.getMessage().contains("merkle leaf for collateral")){
                             // TODO: Fix merkle leaf error
                             logger.warn("Skipped super share due to non-matching merkle leaf");
-                        }else{
+
+                        }else if(ex.getMessage().contains("Cannot store non-distinct NISP")){
+                            logger.warn("Got duplicate nonce on super-share submission");
+
+                        }else {
                             logger.error("Got error while saving super-share", ex);
                         }
                     }
@@ -167,10 +171,10 @@ public class Pool {
             try {
                 //TODO If script fails on node-side, does pk get reset?
                 CollateralRetriever retriever = new CollateralRetriever(client, prover);
-                Tuple3<String, String, String> tuple = retriever.getCollateral();
+                CollateralData collData = retriever.getCollateral();
                 candidate = MiningCandidate.fromJson(
-                        nodeInterface.miningCandidate(true, tuple._2(), apiKey),
-                        options.data.protocolVersion, tuple._1()
+                        nodeInterface.miningCandidate(true, collData.txJSON(), apiKey),
+                        options.data.protocolVersion, collData.txId(), collData.txBytes()
                         // unused
                 );
                 pk = candidate.pk; // TODO: Use candidate.pk until collateral is fixed

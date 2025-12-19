@@ -22,8 +22,8 @@ import work.lithos.mutations.Contract
 
 import javax.inject.Inject
 
-class TreeSyncer @Inject()(config: Configuration, @Assisted treeBlockId: String, @Assisted ctx: BlockchainContext, @Assisted prover: ErgoProver, cacheApi: SyncCacheApi) extends Actor {
-  val logger: Logger = LoggerFactory.getLogger("TreeSyncer-" + treeBlockId.slice(0, 12))
+class TreeSynchronizer @Inject()(config: Configuration, @Assisted treeBlockId: String, @Assisted ctx: BlockchainContext, @Assisted prover: ErgoProver, cacheApi: SyncCacheApi) extends Actor {
+  val logger: Logger = LoggerFactory.getLogger("TreeSynchronizer-" + treeBlockId.slice(0, 12))
   val treeCache: TreeCache = TreeCache(cacheApi)
 
 
@@ -220,7 +220,7 @@ class TreeSyncer @Inject()(config: Configuration, @Assisted treeBlockId: String,
   }
 }
 
-object TreeSyncer {
+object TreeSynchronizer {
 
   trait SyncFactory {
     def apply(treeBlockId: String, ctx: BlockchainContext, prover: ErgoProver): Actor

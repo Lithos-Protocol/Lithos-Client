@@ -12,6 +12,7 @@ import scala.util.Try
  * Helpers for Lithos Finite State Machine
  */
 object LFSMHelpers {
+  // TODO: Converge targets to use TARGET_MAX_STRATUM and unsignedBigInt in lithos contracts
   // Target max used in contracts, 2^255 - 1
   final val TARGET_MAX_LITHOS = BigInt("57896044618658097711785492504343953926634992332820282019728792003956564819949")
   // Rigel miner uses 2^256 as target max

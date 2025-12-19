@@ -22,8 +22,8 @@ class NISPDatabase extends NISPStorage {
    * @param shareBytes Bytes of SuperShare to add to database
    * @return Whether all operations returned successfully
    */
-  def addNISP(height: Int, score: Long, shareBytes: Array[Byte]): Boolean = {
-    addNISP(height, score, SuperShare.deserialize(shareBytes))
+  def addNISP(score: Long, shareBytes: Array[Byte]): Boolean = {
+    addNISP(score, SuperShare.deserialize(shareBytes))
   }
 
   /**
@@ -33,24 +33,25 @@ class NISPDatabase extends NISPStorage {
    * @param share Share to add to database
    * @return Whether all operations returned successfully
    */
-  def addNISP(height: Int, score: Long, share: SuperShare): Boolean = {
-    val hKey = Ints.toByteArray(height)
+  def addNISP(score: Long, share: SuperShare): Boolean = {
+    val header = share.toHeader
+    val hKey = Ints.toByteArray(header.height)
 
     def heightsUpdated: Boolean = {
       val storedLastHeight = lastHeight
       val lastHeightUpdated = storedLastHeight match {
-        case Some(value) => true
+        case Some(_) => true // Only update last height if it is not yet stored
         case None => updateLastHeight(hKey, storedLastHeight)
       }
       val storedCurrHeight = currentHeight
       val currentHeightUpdated = storedCurrHeight match {
         case Some(curr) =>
-          if(Ints.fromByteArray(curr) < height) {
-            updateCurrentHeight(hKey, storedCurrHeight)
+          if(Ints.fromByteArray(curr) < header.height) {
+            updateCurrentHeight(hKey, storedCurrHeight) // Update current height if we have header with new height
           }else{
             true
           }
-        case None => updateCurrentHeight(hKey, storedCurrHeight)
+        case None => updateCurrentHeight(hKey, storedCurrHeight) // Update if current height does not exist yet
       }
       currentHeightUpdated && lastHeightUpdated
     }
@@ -58,6 +59,7 @@ class NISPDatabase extends NISPStorage {
     kvstore.get(hKey) match {
       case Some(bytes) =>
         val nextNISP = NISP.deserialize(bytes).withSuperShare(share)
+        require(nextNISP.isDistinct, "Cannot store non-distinct NISP")
         kvstore.remove(Seq(hKey)).isSuccess && kvstore.insert(hKey, nextNISP.serialize).isSuccess &&
           heightsUpdated
       case None =>
@@ -122,7 +124,7 @@ class NISPDatabase extends NISPStorage {
           return None
         Some(Ints.toByteArray(heightCounter))
       case None =>
-        throw new Exception("Can't get next height when current height is undefined. Is this database empty?")
+        throw new Exception("Can't get next height when current height is undefined.")
     }
   }
 
@@ -153,7 +155,7 @@ class NISPDatabase extends NISPStorage {
     require(lastHeight.isDefined, "Cannot search for NISPs when lastHeight is undefined")
     val minHeight = height - LFSMHelpers.NISP_WINDOW.toInt
     val start = Math.max(minHeight, lastHeight.map(Ints.fromByteArray).get)
-    val nisps = for(i <- start to height) yield getNISP(i)
+    val nisps = for(i <- start until height) yield getNISP(i)
     val validNISPs = nisps.filter(n => n.isDefined && n.get.score >= score).map(_.get)
     val bestNISP = validNISPs.foldLeft(Option.empty[NISP]){
       (z: Option[NISP], x: NISP) =>

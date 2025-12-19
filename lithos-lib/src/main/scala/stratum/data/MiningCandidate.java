@@ -14,8 +14,9 @@ public class MiningCandidate {
     public String pk;
     public JSONObject proof;
     public String txId;
+    public byte[] txBytes;
 	public MiningCandidate(byte[] msg, long height, int version, BigInteger b, String pk,
-                           JSONObject proof, String txId) {
+                           JSONObject proof, String txId, byte[] txBytes) {
 		this.msg = msg;
 		this.height = height;
 		this.version = version;
@@ -23,6 +24,7 @@ public class MiningCandidate {
         this.pk = pk;
         this.proof = proof;
         this.txId = txId;
+        this.txBytes = txBytes;
 	}
 
 
@@ -35,9 +37,10 @@ public class MiningCandidate {
 				obj.has("b") ? obj.getBigInteger("b") : null,
                 obj.getString("pk"),
                 obj.has("proof") ? obj.getJSONObject("proof") : null,
+                null,
                 null);
 	}
-    public static MiningCandidate fromJson(JSONObject obj, int version, String txId) {
+    public static MiningCandidate fromJson(JSONObject obj, int version, String txId, byte[] txBytes) {
         return new MiningCandidate(
                 Hex.decode(obj.getString("msg")),
                 obj.getInt("h"),
@@ -45,6 +48,7 @@ public class MiningCandidate {
                 obj.has("b") ? obj.getBigInteger("b") : null,
                 obj.getString("pk"),
                 obj.has("proof") ? obj.getJSONObject("proof") : null,
-                txId);
+                txId,
+                txBytes);
     }
 }

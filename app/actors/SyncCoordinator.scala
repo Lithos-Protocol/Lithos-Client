@@ -15,7 +15,7 @@ import javax.inject.Inject
 import scala.concurrent.duration.DurationInt
 import scala.language.postfixOps
 
-class SyncCoordinator @Inject() (syncFactory: TreeSyncer.SyncFactory, config: Configuration, cacheApi: SyncCacheApi) extends Actor with InjectedActorSupport {
+class SyncCoordinator @Inject() (syncFactory: TreeSynchronizer.SyncFactory, config: Configuration, cacheApi: SyncCacheApi) extends Actor with InjectedActorSupport {
   implicit val timeout: Timeout = 10 seconds
 
   val logger: Logger          = LoggerFactory.getLogger("SyncCoordinator")

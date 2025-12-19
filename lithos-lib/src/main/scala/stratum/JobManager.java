@@ -145,13 +145,16 @@ public class JobManager {
 
 	public static class ProcessingException extends Exception {
 		private final int id;
-
-		public ProcessingException(int id, String message) {
+        private byte[] nonce1;
+		public ProcessingException(int id, String message, byte[] extraNonce1) {
 			super(message);
 			this.id = id;
+            this.nonce1 = extraNonce1;
 		}
 
 		public int getId() { return id; }
+
+        public byte[] getExtraNonce1() {return nonce1;}
 	}
 
 	private interface ThrowException {
@@ -167,7 +170,7 @@ public class JobManager {
 					difficulty,
 					errorMessage
 			), null));
-			throw new ProcessingException(errorId, errorMessage);
+			throw new ProcessingException(errorId, errorMessage, extraNonce1);
 		};
 
 		if (extraNonce2.length != extraNonce2Size) {
@@ -189,10 +192,10 @@ public class JobManager {
 			return null;
 		}
 
-//		if (!job.registerSubmit(extraNonce1, extraNonce2, nTime, nonce)) {
-//			shareError.run(22, "duplicate share");
-//			return null;
-//		}
+		if (!job.registerSubmit(extraNonce1, extraNonce2, nTime, nonce)) {
+			shareError.run(22, "duplicate share");
+			return null;
+		}
 		byte[] h = Utils.intBytes((int) job.candidate.height);
 		BigInteger fH = Autolykos2PowValidation.hitForVersion2ForMessageWithChecks(32, job.msg, nonce, h, N(job.candidate.height).intValue()).bigInteger();
 
