@@ -17,6 +17,13 @@
   // CONSTANTS
   // CONST_PERIOD_LENGTH: Length of submission period, helps determine current spending path
   // CONST_EVAL_PROPBYTES: Hashed proposition bytes of evaluation contract
+  // Max allowable size for NISP
+  val CONST_NISP_MAX          = 26000
+  // Minimum allowable NISP size, with one level in super share's merkle proof
+  // Important so that iterating 10 times over nispBytes does not cause index out of bounds in other fp contracts
+  // CONST_SCORE_SIZE + 10 * (CONST_N_SIZE + headerSize + 2 + 1 + CONST_TX_MIN_SIZE + CONST_LEVEL_SIZE)
+  // NOTE: headerSize is assuming minimum of 3 bytes for height and 6 for timestamp
+  val CONST_NISP_MIN          = 7108
 
   // CONTEXT VARS
   // CTX_SIGNER(0): Signer of transaction, used to authenticate submission of NISPs
@@ -55,7 +62,9 @@
     val validNISP = {
       if(CTX_NISP_DATA._2.size > 8){
         val score: Long = byteArrayToLong( CTX_NISP_DATA._2.slice(0,8) )
-        score > 0 && nextScore == totalScore + score.toBigInt
+        score > 0 && nextScore == totalScore + score.toBigInt &&
+        CTX_NISP_DATA._2.size >= CONST_NISP_MIN || CTX_NISP_DATA._2.size < CONST_NISP_MAX
+        // Check basic size requirements at holding contract to prevent spam from entering tree
       }else{
         false
       }

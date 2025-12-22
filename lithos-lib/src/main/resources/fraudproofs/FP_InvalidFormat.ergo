@@ -1,0 +1,218 @@
+{
+  // FP_InvalidFormat
+  // Value: unspecified (0.001 ERG)
+  // Proves fraud by showing that miner submitted NISP with invalid formatting
+
+  // REGISTERS
+  // None
+
+  val evalBox:       Box     = INPUTS(0)
+  val nispTree:      AvlTree = evalBox.R4[AvlTree].get
+  val currentMiners: Int     = evalBox.R5[Int].get
+  val totalScore:    BigInt  = evalBox.R6[BigInt].get
+  val currentPeriod: Long    = evalBox.R7[Long].get
+  val currentBlock:  Long    = evalBox.R8[Long].get
+
+  // NEXT VALUES
+  val nextUTXO   = OUTPUTS(0)
+  val nextTree   = nextUTXO.R4[AvlTree].get
+  val nextMiners = nextUTXO.R5[Int].get
+  val nextScore  = nextUTXO.R6[BigInt].get
+  val nextPeriod = nextUTXO.R7[Long].get
+  val nextBlock  = nextUTXO.R8[Long].get
+
+  // CONTEXT VARS
+  // CTX_MINER_BYTES(0) - Hashed PropBytes of miner who committed fraud
+  // CTX_LOOKUP_PROOF(1) - Lookup proof for miner
+  // CTX_REMOVE_PROOF(2) - Removal proof for miner
+  val CTX_MINER_BYTES      = getVarFromInput[Coll[Byte]](1, 0).getOrElse(Coll(0.toByte))
+  val CTX_LOOKUP_PROOF     = getVarFromInput[Coll[Byte]](1, 1).getOrElse(Coll(0.toByte))
+  val CTX_REMOVE_PROOF     = getVarFromInput[Coll[Byte]](1, 2).getOrElse(Coll(0.toByte))
+  // CONSTANTS
+  // Constant sizes for various parts of NISPs, inserted at compile time
+  //  CONST_TX_MIN_SIZE       = 450
+  //  CONST_TX_MAX_SIZE       = 2000
+  //  CONST_NUM_LVLS_MAX      = 16
+
+  // First 130 bytes of header which do not vary in size, after this comes vlq encoded ULong for timestamp
+  // Includes version, parentId, ADProofsRoot, stateRoot, and transactionsRoot
+  val CONST_INVARIANT_PREFIX  = 130
+  // 36 bytes in the middle of the header, which do not change in size. These bytes are found between
+  // the timestamp and height. They include the extension root and NBits serialized diff
+  val CONST_INVARIANT_MID     = 36
+  // Last 45 bytes of header which do not vary in size, before this comes vlq encoded UInt for height
+  // Includes votes, unparsedBytesSize, minerPK GroupElement, and nonce
+  val CONST_INVARIANT_SUFFIX  = 45
+  val CONST_SCORE_SIZE        = 8
+  val CONST_LEVEL_SIZE        = 33
+  val CONST_N_SIZE            = 4
+  // Technically this value is making some assumptions about height and timestamp size
+  // such that height is at least 3 bytes and timestamp is 6 bytes
+  // Practically speaking, we know that height is >= 3 bytes on both testnet and mainnet
+  // and we know that timestamp will always be >= 6 bytes from current point in time
+  val CONST_SUPER_SHARE_MIN   = 710
+
+  // Helper Methods
+
+  // NOTE: When last byte of VLQ is 0, sigma serializer may successfully parse an array that is 1 byte over the required max size
+  // (5 for int, 9 for long). However when deserializing the value, it returns an array at the required max size, with
+  // the last byte set to 127
+  // Most of the time, we don't enforce that the last byte of the VLQ byte array is > 0, as it seems to parse correctly regardless.
+  // However, in the case of being near the max value of the encoded numeric, we do enforce that last byte > 0, as
+  // we don't want to deal with arrays of size 6 (for ints) or 10 (for longs).
+
+
+  // Checks if VLQ encoded UInt at position 0 of the byte array is encoded correctly
+  def validVLQUInt(vlqBytes: Coll[Byte]): (Int, Boolean) = {
+    val vlqSize = vlqBytes.fold((0, false), {
+      (a: (Int, Boolean), b: Byte) =>
+        if(a._2 || a._1 > 5){ // vlq encoded numeric greater than 5 bytes is ignored
+          a
+        }else{
+          val continue = b < 0 // If byte is negative, most-signficant bit is set to 1
+          (a._1 + 1, !continue)
+        }
+    })
+
+    if(!vlqSize._2) // If vlq parsing didn't finish, return false
+      (vlqSize._1, false)
+    else if(vlqSize._1 > 5) // Max of 5 bytes allowed for UInt
+      (vlqSize._1, false)
+    else if(vlqBytes.slice(0, 4).forall{(b: Byte) => b == -1}){
+      // If bytes are near max value, then we should verify last byte is less than or equal to 7 (Int.MAX)
+      (vlqSize._1, vlqBytes(4) > 0.toByte && vlqBytes(4) <= 7.toByte)
+    }else
+      (vlqSize._1, true)
+  }
+  // Checks if VLQ encoded ULong at position 0 of the byte array is encoded correctly
+  def validVLQULong(vlqBytes: Coll[Byte]): (Int, Boolean) = {
+    val vlqSize = vlqBytes.fold((0, false), {
+      (a: (Int, Boolean), b: Byte) =>
+
+        if(a._2 || a._1 > 9){ // vlq encoded numeric greater than 9 bytes is ignored, to prevent unnecessary computation
+          a
+        }else{
+          val continue = b < 0 // If byte is negative, most-signficant bit is set to 1
+          (a._1 + 1, !continue)
+        }
+    })
+
+    if(!vlqSize._2) // If vlq parsing didn't finish, return false
+      (vlqSize._1, false)
+    else if(vlqSize._1 > 9) // Max of 9 bytes allowed for ULong
+      (vlqSize._1, false)
+    else if(vlqBytes.slice(0, 8).forall{(b: Byte) => b == -1}){
+      // If bytes are near max value, then we should verify last byte is less than or equal to 127 (Long.MAX)
+      (vlqSize._1, vlqBytes(8) > 0.toByte && vlqBytes(8) <= 127.toByte)
+    }else
+      (vlqSize._1, true)
+  }
+
+
+  // NISPs are serialized as the following
+  // [score: 8bytes][10 SuperShares]
+  // Where SuperShares are serialized as the following
+  //  Int        Header            Short           Byte             Coll[Byte]             Coll[Byte]
+  // [N: 4bytes][header: headerSize][txSize: 2bytes][numLevels: 1byte][tx: txSize * 1 bytes][levels: numLevels * 33 bytes]
+  def isValidFormat(nispBytes: Coll[Byte]): Boolean = {
+    val shareBytes = nispBytes.slice(CONST_SCORE_SIZE, nispBytes.size)
+
+
+    // Iterate 10 times for 10 shares.
+    // We can prevent index out of bounds errors by using the following process:
+    // Before this fraud proof runs, we have guarantee that NISP is at least 7108 bytes(so share set is at least 7100 bytes).
+    // After verifying VLQ's, we know that iter 0 will always work without out of bounds exceptions
+    // Every iteration, we should check that notFraudulent is true, then
+    // verify some predicates about the slice of shareBytes, then update
+    // notFraudulent and startIdx for the next iteration
+    // Each iteration will automatically default to returning the passed in accumulator if notFraudulent == false
+    // i.e fraud was found inside the iteration before this one. This will avoid index out of bounds for
+    // the next iterations
+
+
+    val iters = Coll(0,1,2,3,4,5,6,7,8,9)
+    val formatted = iters.fold((0, true), {
+      (a: (Int, Boolean), i: Int) =>
+
+        val startIdx = a._1
+        val notFraudulent = a._2
+
+
+        if(notFraudulent){
+          val timestampBytes = shareBytes.slice(
+            startIdx + CONST_N_SIZE + CONST_INVARIANT_PREFIX,
+            startIdx + CONST_N_SIZE + CONST_INVARIANT_PREFIX + 11 // 11 byte buffer to read long, not all used necessarily
+          )
+          val validTimestamp = validVLQULong(timestampBytes)
+          if(validTimestamp._2){
+
+            val heightBytes = shareBytes.slice(
+              startIdx + CONST_N_SIZE + CONST_INVARIANT_PREFIX + validTimestamp._1 + CONST_INVARIANT_MID,
+              startIdx + CONST_N_SIZE + CONST_INVARIANT_PREFIX + validTimestamp._1 + CONST_INVARIANT_MID + 7 // 7 byte buffer to read int, not all used necessarily
+            )
+            val validHeight = validVLQUInt(heightBytes)
+            if(validHeight._2){
+
+              val headerSize = CONST_INVARIANT_PREFIX + validTimestamp._1 + CONST_INVARIANT_MID + validHeight._1 + CONST_INVARIANT_SUFFIX
+              val txSize = fromBigEndianBytes[Short](
+                shareBytes.slice(
+                  startIdx + CONST_N_SIZE + headerSize,
+                  startIdx + CONST_N_SIZE + headerSize + 2
+                )
+              )
+              val numLevels: Byte = shareBytes(startIdx + CONST_N_SIZE + headerSize + 2)
+              val totalLevels = numLevels.toInt * CONST_LEVEL_SIZE
+              val end = startIdx + CONST_N_SIZE + headerSize + 3 + txSize + totalLevels
+              val validNumLevels = numLevels > 0  && numLevels <= CONST_NUM_LVLS_MAX // (0 - 16]
+              val validTxSize = txSize >= CONST_TX_MIN_SIZE && txSize < CONST_TX_MAX_SIZE // [450 - 2000)
+              val canReadNext = {
+                if(i == 9) // last iteration, we should end cleanly on the size of our shareBytes array
+                  end == shareBytes.size
+                else
+                  shareBytes.size - end >= CONST_SUPER_SHARE_MIN // At least 710 more bytes to read next iter
+              }
+              val predicates = validNumLevels && validTxSize && canReadNext
+               // If we got here, VLQs are all verified, and we are just checking that NISP formatting of txSize and numLevels is correct
+              (end, notFraudulent && predicates)
+            }else{
+              (a._1, false) // Fraud immediately found if we cant validate VLQ bytes for height
+            }
+          }else{
+            (a._1, false) // Fraud immediately found if we cant validate VLQ bytes for timestamp
+          }
+        }else{
+          a // Return accumulator when fraud is found to prevent further computation
+        }
+    })
+    formatted._2 // Returns true when NISP is formatted correctly, false when it is not
+  }
+
+  def getScore(nispBytes: Coll[Byte]): Long = {
+    byteArrayToLong(nispBytes.slice(0,CONST_SCORE_SIZE))
+  }
+
+  // Evaluation
+  val minerNISP = nispTree.get(CTX_MINER_BYTES, CTX_LOOKUP_PROOF).get
+
+  val formattedCorrectly: Boolean = isValidFormat(minerNISP)
+  // NISP bytes are not formatted correctly
+  val fraudExists = !formattedCorrectly
+  val score: Long = getScore(minerNISP)
+  val minerRemoved = {
+    val removeTree = nispTree.remove(Coll(CTX_MINER_BYTES), CTX_REMOVE_PROOF).get
+    removeTree.digest == nextTree.digest
+  }
+  val changedRegisters = allOf(
+    Coll(
+      nextUTXO.value  == evalBox.value,
+      minerRemoved,
+      nextMiners      == currentMiners - 1,
+      nextScore       == totalScore - score,
+      nextPeriod      == currentPeriod,
+      nextBlock       == currentBlock
+    )
+  )
+
+  sigmaProp(fraudExists && changedRegisters)
+
+}

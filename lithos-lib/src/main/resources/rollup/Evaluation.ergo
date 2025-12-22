@@ -52,20 +52,24 @@
   if(HEIGHT < currentPeriod + CONST_PERIOD_LENGTH){
     val fpData     = CONTEXT.dataInputs(0)
     val authenticFPData = fpData.tokens(0)._1 == CONST_FP_ID
-
+    val script = getVar[Coll[Byte]](0).getOrElse(Coll(0.toByte))
      //TODO: Can we optimize in the future to allow multiple FPs to be spent / modify the tree in the same tx?
-    val fpUtxo = INPUTS(1)
+
     val fpSet = fpData.R4[Coll[Coll[Byte]]].get
     val validFP = fpSet.exists{
       (x: Coll[Byte]) =>
-       x == blake2b256( fpUtxo.propositionBytes )
+       x == blake2b256( script )
     }
+    val contractSame = SELF.propositionBytes == nextUTXO.propositionBytes
+    val correctInputs = INPUTS.size == 2
+
+    sigmaProp( validFP && authenticFPData && onlyOne && contractSame && correctInputs ) && executeFromVar[SigmaProp](0)
+
 
 
     //Fraud Proof contracts will handle the updated state of the Evaluation Contract, so we do not need to check
     //for anything else.
 
-    sigmaProp( authenticFPData && validFP && onlyOne )
   }else{
   // Spending Path 2: Evaluation phase is over, transform utxo into payout contract
     val passedEvalPeriod = HEIGHT >= currentPeriod + CONST_PERIOD_LENGTH
