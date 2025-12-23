@@ -29,7 +29,6 @@
   // CTX_MINER_BYTES(0) - Hashed PropBytes of miner who committed fraud
   // CTX_LOOKUP_PROOF(1) - Lookup proof for miner
   // CTX_REMOVE_PROOF(2) - Removal proof for miner
-  // CTX_N_TABLE(3)      - Collection of (height -> N value) pairs which defines correct N value for a given height
 
   val CTX_MINER_BYTES      = getVarFromInput[Coll[Byte]](1, 0).getOrElse(Coll(0.toByte))
   val CTX_LOOKUP_PROOF     = getVarFromInput[Coll[Byte]](1, 1).getOrElse(Coll(0.toByte))
