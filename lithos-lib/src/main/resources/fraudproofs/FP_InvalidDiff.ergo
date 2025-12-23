@@ -48,7 +48,7 @@
   val CONST_TARGET_MAX_LITHOS = unsignedBigInt("115792089237316195423570985008687907853269984665640564039457584007913129639935")
   val CONST_NISP_COEFFICIENT  = 10000
   val CONST_N_SIZE            = 4
-
+  val CONST_Y_COORD_SIZE      = 32
   // Helper Methods
 
   def convertTauOrScore(dividend: UnsignedBigInt): UnsignedBigInt = {
@@ -111,7 +111,7 @@
         )
         val numLevels: Byte = shareSetBytes(a._2 + CONST_N_SIZE + headerSize + 2)
         val totalLevels = numLevels.toInt * CONST_LEVEL_SIZE
-        val end = a._2 + CONST_N_SIZE + headerSize + 3 + txSize + totalLevels
+        val end = a._2 + CONST_N_SIZE + headerSize + 3 + txSize + totalLevels + CONST_Y_COORD_SIZE
         (a._1.append(Coll(shareSetBytes.slice(a._2, end))), end)
     })
     shares._1

@@ -33,6 +33,7 @@
   val CONST_SCORE_SIZE        = 8
   val CONST_LEVEL_SIZE        = 33
   val CONST_N_SIZE            = 4
+  val CONST_Y_COORD_SIZE      = 32
   // For header invariants explanation, please view InvalidFormat Proof
   val CONST_INVARIANT_PREFIX  = 130
   val CONST_INVARIANT_MID     = 36
@@ -90,7 +91,7 @@
         )
         val numLevels: Byte = shareSetBytes(a._2 + CONST_N_SIZE + headerSize + 2)
         val totalLevels = numLevels.toInt * CONST_LEVEL_SIZE
-        val end = a._2 + CONST_N_SIZE + headerSize + 3 + txSize + totalLevels
+        val end = a._2 + CONST_N_SIZE + headerSize + 3 + txSize + totalLevels + CONST_Y_COORD_SIZE
         (a._1.append(Coll(shareSetBytes.slice(a._2, end))), end)
     })
     shares._1

@@ -46,11 +46,12 @@
   val CONST_SCORE_SIZE        = 8
   val CONST_LEVEL_SIZE        = 33
   val CONST_N_SIZE            = 4
+  val CONST_Y_COORD_SIZE      = 32
   // Technically this value is making some assumptions about height and timestamp size
   // such that height is at least 3 bytes and timestamp is 6 bytes
   // Practically speaking, we know that height is >= 3 bytes on both testnet and mainnet
   // and we know that timestamp will always be >= 6 bytes from current point in time
-  val CONST_SUPER_SHARE_MIN   = 710
+  val CONST_SUPER_SHARE_MIN   = 742
 
   // Helper Methods
 
@@ -112,8 +113,8 @@
   // NISPs are serialized as the following
   // [score: 8bytes][10 SuperShares]
   // Where SuperShares are serialized as the following
-  //  Int        Header            Short           Byte             Coll[Byte]             Coll[Byte]
-  // [N: 4bytes][header: headerSize][txSize: 2bytes][numLevels: 1byte][tx: txSize * 1 bytes][levels: numLevels * 33 bytes]
+  //  Int        Header            Short           Byte             Coll[Byte]             Coll[Byte]                      Coll[Byte]
+  // [N: 4bytes][header: headerSize][txSize: 2bytes][numLevels: 1byte][tx: txSize * 1 bytes][levels: numLevels * 33 bytes][y-coord: 32 bytes]
   def isValidFormat(nispBytes: Coll[Byte]): Boolean = {
     val shareBytes = nispBytes.slice(CONST_SCORE_SIZE, nispBytes.size)
 
@@ -162,14 +163,14 @@
               )
               val numLevels: Byte = shareBytes(startIdx + CONST_N_SIZE + headerSize + 2)
               val totalLevels = numLevels.toInt * CONST_LEVEL_SIZE
-              val end = startIdx + CONST_N_SIZE + headerSize + 3 + txSize + totalLevels
+              val end = startIdx + CONST_N_SIZE + headerSize + 3 + txSize + totalLevels + CONST_Y_COORD_SIZE
               val validNumLevels = numLevels > 0  && numLevels <= CONST_NUM_LVLS_MAX // (0 - 16]
               val validTxSize = txSize >= CONST_TX_MIN_SIZE && txSize < CONST_TX_MAX_SIZE // [450 - 2000)
               val canReadNext = {
                 if(i == 9) // last iteration, we should end cleanly on the size of our shareBytes array
                   end == shareBytes.size
                 else
-                  shareBytes.size - end >= CONST_SUPER_SHARE_MIN // At least 710 more bytes to read next iter
+                  shareBytes.size - end >= CONST_SUPER_SHARE_MIN // At least 742 more bytes to read next iter
               }
               val predicates = validNumLevels && validTxSize && canReadNext
                // If we got here, VLQs are all verified, and we are just checking that NISP formatting of txSize and numLevels is correct
