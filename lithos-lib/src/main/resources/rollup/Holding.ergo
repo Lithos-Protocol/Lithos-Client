@@ -24,7 +24,7 @@
   // Important so that iterating 10 times over nispBytes does not cause index out of bounds in other fp contracts
   // CONST_SCORE_SIZE + 10 * (CONST_N_SIZE + headerSize + 2 + 1 + CONST_TX_MIN_SIZE + CONST_LEVEL_SIZE + CONST_Y_COORD)
   // NOTE: headerSize is assuming minimum of 3 bytes for height and 6 for timestamp
-  val CONST_NISP_MIN          = 7428
+  val CONST_NISP_MIN          = 7948
 
   // CONTEXT VARS
   // CTX_SIGNER(0): Signer of transaction, used to authenticate submission of NISPs

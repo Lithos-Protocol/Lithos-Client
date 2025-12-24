@@ -1,7 +1,7 @@
 {
-  // FP_NotInWindow
+  // FP_MalformedTransaction
   // Value: unspecified (0.001 ERG)
-  // Proves fraud by showing that miner submitted at least one share that is not within the NISP window
+  // Proves fraud by showing that miner submitted a malformed / invalid collateral transaction
 
   // REGISTERS
   // None
@@ -39,7 +39,6 @@
   val CONST_INVARIANT_MID     = 36
   val CONST_INVARIANT_SUFFIX  = 45
 
-  val CONST_NISP_WINDOW       = 360
   // Helper Methods
   def getScore(nispBytes: Coll[Byte]): Long = {
     byteArrayToLong(nispBytes.slice(0,CONST_SCORE_SIZE))
@@ -98,29 +97,83 @@
     shares._1
   }
 
-  def getHeader(shareBytes: Coll[Byte]): Header = {
+  def getMerkleProofInfo(shareBytes: Coll[Byte]): ((Coll[Byte], Coll[Byte]), Coll[Coll[Byte]]) = {
     val headerSize = getHeaderSize(shareBytes)
-    deserializeTo[Header](shareBytes.slice(CONST_N_SIZE, CONST_N_SIZE + headerSize))
+
+    val txProofSize = fromBigEndianBytes[Short](
+      shareSetBytes.slice(
+        CONST_N_SIZE + headerSize,
+        CONST_N_SIZE + headerSize + 2
+      )
+    )
+    val txSize = fromBigEndianBytes[Short](
+      shareSetBytes.slice(
+        CONST_N_SIZE + headerSize + 3,
+        CONST_N_SIZE + headerSize + 5
+      )
+    )
+
+    val merkleRoot = header.transactionsRoot
+    val txProof = shareBytes.slice(CONST_N_SIZE + headerSize + 3, CONST_N_SIZE + headerSize + 3 + txProofSize )
+    val lvlsFlat = shareBytes.slice(CONST_N_SIZE + headerSize + 3 + txProofSize, CONST_N_SIZE + headerSize + 3 + txProofSize + totalLevels)
+    val unpackedLevels = lvlsFlat.fold((Coll[Coll[Byte]](), 0), {
+      (a: (Coll[Coll[Byte]], Int), b: Byte) =>
+        if(a._1 < totalLevels.toInt){
+          (a._1.append(Coll(lvlsFlat.slice(a._2, a._2 + CONST_LEVEL_SIZE))), a._2 + CONST_LEVEL_SIZE)
+        }else{
+          a
+        }
+    })
+    // First two bytes of tx proof encode size of the unsigned transaction
+    val unsignedTxSize = fromBigEndianBytes[Short](
+      shareBytes.slice(
+        CONST_N_SIZE + headerSize + 3,
+        CONST_N_SIZE + headerSize + 5
+      )
+    )
+    val unsignedTx = shareBytes.slice(CONST_N_SIZE + headerSize + 5, CONST_N_SIZE + headerSize + 5 + unsignedTxSize)
+    ((merkleRoot, unsignedTx), unpackedLevels._1)
   }
 
   // Evaluation
   val minerNISP = nispTree.get(CTX_MINER_BYTES, CTX_LOOKUP_PROOF).get
 
   val minerShares = getSuperShares(minerNISP)
-  val shareHeaders: Coll[Header] = minerShares.map{
-    (x: Coll[Byte]) =>
-      getHeader(x)
+  val merkleProofInfos = minerShares.map{
+    (share: Coll[Byte]) =>
+      getMerkleProofInfo(share)
   }
 
-  // Valid height for header in NISP is defined as
-  // currentBlock - CONST_NISP_WINDOW <= validHeight <= currentBlock
+  val hasInvalidMerkleProof = merkleProofInfos.exists{
+    (m: ((Coll[Byte], Coll[Byte]), Coll[Coll[Byte]])) =>
+      val merkleRoot = m._1._1
+      val unsignedTx = m._1._2
+      val levels = m._2
 
-
-  // There exists some share header not within the NISP Window
-  val fraudExists = shareHeaders.exists{
-    (h: Header) =>
-     h.height < currentBlock - CONST_NISP_WINDOW || h.height > currentBlock
+      val txId = blake2b256(unsignedTx)
+      val leafHash = blake2b256(Coll(0.toByte).append(txId))
+      val derivedRoot = levels.fold(leafHash, {
+        (a: Coll[Byte], lvl: Coll[Byte]) =>
+          val prefix = lvl(0)
+          val siblingHash = lvl.slice(1, CONST_LEVEL_SIZE)
+          val concatenated = {
+            if(prefix == 0.toByte){
+              a.append(siblingHash)
+            }else{
+              siblingHash.append(a)
+            }
+          }
+          val result = blake2b256(Coll(1.toByte).append(concatenated))
+          result
+      })
+      // If we find a share who's derivedRoot != merkleRoot, we found fraudulence
+      // as miner must include collateral transaction inside their block to be considered
+      // a lithos miner
+      derivedRoot != merkleRoot
   }
+
+  // There exists some super-share with a collateral transaction which was not included in the potential block
+  val fraudExists = hasInvalidMerkleProof
   val score: Long = getScore(minerNISP)
   val minerRemoved = {
     val removeTree = nispTree.remove(Coll(CTX_MINER_BYTES), CTX_REMOVE_PROOF).get

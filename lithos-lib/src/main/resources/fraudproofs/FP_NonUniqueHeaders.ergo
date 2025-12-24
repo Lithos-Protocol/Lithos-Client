@@ -83,7 +83,7 @@
     val shares = iters.fold((Coll[Coll[Byte]](), 0), {
       (a: (Coll[Coll[Byte]], Int), b: Int) =>
         val headerSize = getHeaderSize(shareSetBytes.slice(a._2, shareSetBytes.size))
-        val txSize = fromBigEndianBytes[Short](
+        val txProofSize = fromBigEndianBytes[Short](
           shareSetBytes.slice(
             a._2 + CONST_N_SIZE + headerSize,
             a._2 + CONST_N_SIZE + headerSize + 2
@@ -91,7 +91,7 @@
         )
         val numLevels: Byte = shareSetBytes(a._2 + CONST_N_SIZE + headerSize + 2)
         val totalLevels = numLevels.toInt * CONST_LEVEL_SIZE
-        val end = a._2 + CONST_N_SIZE + headerSize + 3 + txSize + totalLevels + CONST_Y_COORD_SIZE
+        val end = a._2 + CONST_N_SIZE + headerSize + 3 + txProofSize + totalLevels + CONST_Y_COORD_SIZE
         (a._1.append(Coll(shareSetBytes.slice(a._2, end))), end)
     })
     shares._1

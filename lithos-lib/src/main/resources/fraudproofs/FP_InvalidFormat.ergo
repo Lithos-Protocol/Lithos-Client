@@ -30,8 +30,10 @@
   val CTX_REMOVE_PROOF     = getVarFromInput[Coll[Byte]](1, 2).getOrElse(Coll(0.toByte))
   // CONSTANTS
   // Constant sizes for various parts of NISPs, inserted at compile time
-  //  CONST_TX_MIN_SIZE       = 450
-  //  CONST_TX_MAX_SIZE       = 2000
+  //  CONST_TX_PROOF_MIN      = 502
+  //  CONST_TX_PROOF_MAX      = 2000
+  //  CONST_TX_SIZE_MIN       = 450
+  //  CONST_COLLAT_BOX_MIN    = 50
   //  CONST_NUM_LVLS_MAX      = 16
 
   // First 130 bytes of header which do not vary in size, after this comes vlq encoded ULong for timestamp
@@ -51,7 +53,7 @@
   // such that height is at least 3 bytes and timestamp is 6 bytes
   // Practically speaking, we know that height is >= 3 bytes on both testnet and mainnet
   // and we know that timestamp will always be >= 6 bytes from current point in time
-  val CONST_SUPER_SHARE_MIN   = 742
+  val CONST_SUPER_SHARE_MIN   = 794
 
   // Helper Methods
 
@@ -113,15 +115,15 @@
   // NISPs are serialized as the following
   // [score: 8bytes][10 SuperShares]
   // Where SuperShares are serialized as the following
-  //  Int        Header            Short           Byte             Coll[Byte]             Coll[Byte]                      Coll[Byte]
-  // [N: 4bytes][header: headerSize][txSize: 2bytes][numLevels: 1byte][tx: txSize * 1 bytes][levels: numLevels * 33 bytes][y-coord: 32 bytes]
+  //  Int        Header               Short               Byte              Coll[Byte]                Coll[Byte]                      Coll[Byte]
+  // [N: 4bytes][header: headerSize][txProofSize: 2bytes][numLevels: 1byte][tx: txProofSize * 1 bytes][levels: numLevels * 33 bytes][y-coord: 32 bytes]
   def isValidFormat(nispBytes: Coll[Byte]): Boolean = {
     val shareBytes = nispBytes.slice(CONST_SCORE_SIZE, nispBytes.size)
 
 
     // Iterate 10 times for 10 shares.
     // We can prevent index out of bounds errors by using the following process:
-    // Before this fraud proof runs, we have guarantee that NISP is at least 7108 bytes(so share set is at least 7100 bytes).
+    // Before this fraud proof runs, we have guarantee that NISP is at least 7948 bytes(so share set is at least 7940 bytes).
     // After verifying VLQ's, we know that iter 0 will always work without out of bounds exceptions
     // Every iteration, we should check that notFraudulent is true, then
     // verify some predicates about the slice of shareBytes, then update
@@ -155,25 +157,34 @@
             if(validHeight._2){
 
               val headerSize = CONST_INVARIANT_PREFIX + validTimestamp._1 + CONST_INVARIANT_MID + validHeight._1 + CONST_INVARIANT_SUFFIX
-              val txSize = fromBigEndianBytes[Short](
+              val txProofSize = fromBigEndianBytes[Short](
                 shareBytes.slice(
                   startIdx + CONST_N_SIZE + headerSize,
                   startIdx + CONST_N_SIZE + headerSize + 2
                 )
               )
+
+              val txSize = fromBigEndianBytes[Short](
+                shareBytes.slice(
+                  startIdx + CONST_N_SIZE + headerSize + 3,
+                  startIdx + CONST_N_SIZE + headerSize + 5
+                )
+              )
               val numLevels: Byte = shareBytes(startIdx + CONST_N_SIZE + headerSize + 2)
               val totalLevels = numLevels.toInt * CONST_LEVEL_SIZE
-              val end = startIdx + CONST_N_SIZE + headerSize + 3 + txSize + totalLevels + CONST_Y_COORD_SIZE
+              val end = startIdx + CONST_N_SIZE + headerSize + 3 + txProofSize + totalLevels + CONST_Y_COORD_SIZE
               val validNumLevels = numLevels > 0  && numLevels <= CONST_NUM_LVLS_MAX // (0 - 16]
-              val validTxSize = txSize >= CONST_TX_MIN_SIZE && txSize < CONST_TX_MAX_SIZE // [450 - 2000)
+              val validTxProofSize = txProofSize >= CONST_TX_PROOF_MIN && txProofSize < CONST_TX_PROOF_MAX // [502 - 2000)
+              // valid tx has at least 450 bytes, and associated collateral box bytes are the left over bytes (min of 50)
+              val validTxSize = txSize >= CONST_TX_SIZE_MIN && txSize < txProofSize - CONST_COLLAT_BOX_MIN - 1 // [450 - txProofSize-51)
               val canReadNext = {
                 if(i == 9) // last iteration, we should end cleanly on the size of our shareBytes array
                   end == shareBytes.size
                 else
-                  shareBytes.size - end >= CONST_SUPER_SHARE_MIN // At least 742 more bytes to read next iter
+                  shareBytes.size - end >= CONST_SUPER_SHARE_MIN // At least 794 more bytes to read next iter
               }
-              val predicates = validNumLevels && validTxSize && canReadNext
-               // If we got here, VLQs are all verified, and we are just checking that NISP formatting of txSize and numLevels is correct
+              val predicates = validNumLevels && validTxProofSize && validTxSize && canReadNext
+               // If we got here, VLQs are all verified, and we are just checking that NISP formatting of txProofSize and numLevels is correct
               (end, notFraudulent && predicates)
             }else{
               (a._1, false) // Fraud immediately found if we cant validate VLQ bytes for height

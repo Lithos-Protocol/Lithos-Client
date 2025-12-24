@@ -80,7 +80,7 @@
         if(a._2){
           a
         }else{
-          val continue = b < 0 // If byte is negative, most-signficant bit is set to 1
+          val continue = b < 0 // If byte is negative, most-significant bit is set to 1
           (a._1 + 1, !continue)
         }
     })
@@ -112,7 +112,7 @@
       val shares = iters.fold((Coll[Coll[Byte]](), 0), {
         (a: (Coll[Coll[Byte]], Int), b: Int) =>
           val headerSize = getHeaderSize(shareSetBytes.slice(a._2, shareSetBytes.size))
-          val txSize = fromBigEndianBytes[Short](
+          val txProofSize = fromBigEndianBytes[Short](
             shareSetBytes.slice(
               a._2 + CONST_N_SIZE + headerSize,
               a._2 + CONST_N_SIZE + headerSize + 2
@@ -120,7 +120,7 @@
           )
           val numLevels: Byte = shareSetBytes(a._2 + CONST_N_SIZE + headerSize + 2)
           val totalLevels = numLevels.toInt * CONST_LEVEL_SIZE
-          val end = a._2 + CONST_N_SIZE + headerSize + 3 + txSize + totalLevels + CONST_Y_COORD_SIZE
+          val end = a._2 + CONST_N_SIZE + headerSize + 3 + txProofSize + totalLevels + CONST_Y_COORD_SIZE
           (a._1.append(Coll(shareSetBytes.slice(a._2, end))), end)
       })
       shares._1
@@ -155,8 +155,10 @@
       // When deserializing BigInt, sigma serializer expects first byte to represent size of the rest of the array
       // we don't store this byte in NISPs, but we know the size of our array is always 32
       val xCoord = deserializeTo[UnsignedBigInt](Coll(32.toByte).append(sc._1.slice(1, 33)))
+
       // Only accept 0x02 and 0x03 for parity, then check that parity matches given yCoord
       val correctParity = (parity == 2.toByte && yCoord.mod(2.toBigInt.toUnsigned) == 0) || (parity == 3.toByte && yCoord.mod(2.toBigInt.toUnsigned) == 1)
+
       val coordsInRange = (xCoord >= 0 && xCoord < CONST_P) && (yCoord >= 0 && yCoord < CONST_P)
 
       // We got coords in range and parity is correct, so lets verify curve equation
