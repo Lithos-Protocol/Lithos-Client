@@ -1,14 +1,11 @@
 package actors
 
 
-import actors.SyncHandler.{Genesis, StopTracking, Transform}
 import akka.actor.Actor
 import com.google.inject.assistedinject.Assisted
-import configs.NodeConfig
 import lfsm.{LFSMHelpers, LFSMPhase, NISPTree}
 import org.bouncycastle.util.encoders.Hex
-import org.ergoplatform.appkit.{Address, BlockchainContext, ErgoClient, ErgoProver, ErgoValue, JavaHelpers}
-import org.ergoplatform.restapi.client.{ErgoTransactionInput, ErgoTransactionOutput, FullBlock}
+import org.ergoplatform.appkit.{Address, BlockchainContext, ErgoProver, ErgoValue}
 import org.slf4j.{Logger, LoggerFactory}
 import play.api.Configuration
 import play.api.cache.SyncCacheApi
@@ -16,14 +13,14 @@ import scorex.utils.Longs
 import sigma.ast.ErgoTree
 import sigma.data.CBigInt
 import sigma.{Coll, SigmaProp}
-import state.{BlockInfo, BlockTx, TxInput, TxOutput}
+import state.messages.RollupMessages._
 import utils.{Globals, Helpers, PayoutRecord, TreeCache}
 import work.lithos.mutations.Contract
 
 import javax.inject.Inject
 
-class TreeSynchronizer @Inject()(config: Configuration, @Assisted treeBlockId: String, @Assisted ctx: BlockchainContext, @Assisted prover: ErgoProver, cacheApi: SyncCacheApi) extends Actor {
-  val logger: Logger = LoggerFactory.getLogger("TreeSynchronizer-" + treeBlockId.slice(0, 12))
+class RollupSynchronizer @Inject()(config: Configuration, @Assisted treeBlockId: String, @Assisted ctx: BlockchainContext, @Assisted prover: ErgoProver, cacheApi: SyncCacheApi) extends Actor {
+  val logger: Logger = LoggerFactory.getLogger("RollupSynchronizer-" + treeBlockId.slice(0, 12))
   val treeCache: TreeCache = TreeCache(cacheApi)
 
 
@@ -220,7 +217,7 @@ class TreeSynchronizer @Inject()(config: Configuration, @Assisted treeBlockId: S
   }
 }
 
-object TreeSynchronizer {
+object RollupSynchronizer {
 
   trait SyncFactory {
     def apply(treeBlockId: String, ctx: BlockchainContext, prover: ErgoProver): Actor

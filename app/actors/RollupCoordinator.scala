@@ -1,6 +1,6 @@
 package actors
 
-import actors.SyncHandler.{FullSync, Genesis, GetSynced, PartialSync, RemoveTree, StopTracking, Transform}
+
 import akka.actor.{Actor, ActorRef, Terminated}
 import akka.util.Timeout
 import configs.NodeConfig
@@ -9,16 +9,18 @@ import org.slf4j.{Logger, LoggerFactory}
 import play.api.Configuration
 import play.api.cache.SyncCacheApi
 import play.api.libs.concurrent.InjectedActorSupport
+import state.messages.RollupMessages._
+import state.messages.SyncMessages._
 import utils.{Globals, TreeCache}
 
 import javax.inject.Inject
 import scala.concurrent.duration.DurationInt
 import scala.language.postfixOps
 
-class SyncCoordinator @Inject() (syncFactory: TreeSynchronizer.SyncFactory, config: Configuration, cacheApi: SyncCacheApi) extends Actor with InjectedActorSupport {
+class RollupCoordinator @Inject()(syncFactory: RollupSynchronizer.SyncFactory, config: Configuration, cacheApi: SyncCacheApi) extends Actor with InjectedActorSupport {
   implicit val timeout: Timeout = 10 seconds
 
-  val logger: Logger          = LoggerFactory.getLogger("SyncCoordinator")
+  val logger: Logger          = LoggerFactory.getLogger("RollupCoordinator")
   val nodeConfig: NodeConfig  = Globals.getNodeConfig
   val client: ErgoClient      = nodeConfig.getClient
   val prover: ErgoProver      = nodeConfig.prover
@@ -26,7 +28,7 @@ class SyncCoordinator @Inject() (syncFactory: TreeSynchronizer.SyncFactory, conf
 
   override def receive: Receive = {
     case gen: Genesis =>
-      logger.info("Initialized SyncCoordinator")
+      logger.info("Initialized RollupCoordinator")
       handleGenesis(gen)
       context.become(postInit(Map(gen.tree.utxoId -> gen.tree.blockId)))
       logger.info(s"Got 1 tree")
@@ -53,7 +55,7 @@ class SyncCoordinator @Inject() (syncFactory: TreeSynchronizer.SyncFactory, conf
         case Some(treeBlockId) =>
           handleTransform(transform, treeBlockId)
           context.become(postInit(trees - transform.input.id + (transform.output.id -> treeBlockId)))
-          logger.info(s"Pre-applied transform ${transform.tx.id} for NISPTree ${treeBlockId.slice(0, 12)} at ${transform.blockInfo.height}")
+          logger.info(s"Pre-applied transform ${transform.tx.id} for Rollup ${treeBlockId.slice(0, 12)} at ${transform.blockInfo.height}")
           treeCache.removeFromTreeSet(transform.input.id)
           treeCache.addToTreeSet(transform.output.id)
         case None =>
@@ -64,14 +66,14 @@ class SyncCoordinator @Inject() (syncFactory: TreeSynchronizer.SyncFactory, conf
       val removedTree = trees.find(_._2 == stopTracking.blockId)
       require(removedTree.isDefined, s"Map must contain actor name ${stopTracking.blockId} to remove tracking")
       context.become(postInit(trees - removedTree.get._1))
-      logger.info(s"Removed NISPTree ${stopTracking.blockId}")
+      logger.info(s"Removed Rollup ${stopTracking.blockId}")
       treeCache.removeFromTreeSet(removedTree.get._1)
-      // Remove Tree should come from syncHandler, which is interfacing with tasks and other external actors
-    case removeTree: RemoveTree =>
+      // Remove Rollup should come from syncHandler, which is interfacing with tasks and other external actors
+    case removeTree: RemoveRollup =>
       val tree = trees.find(_._2 == removeTree.blockId)
       require(tree.isDefined, s"Map must contain actor name ${removeTree.blockId} to remove tracking")
       context.become(postInit(trees - tree.get._1))
-      logger.info(s"Removed NISPTree ${removeTree.blockId}")
+      logger.info(s"Removed Rollup ${removeTree.blockId}")
       treeCache.removeFromTreeSet(tree.get._1)
       treeCache.remove(tree.get._1)
     case GetSynced =>
@@ -100,13 +102,12 @@ class SyncCoordinator @Inject() (syncFactory: TreeSynchronizer.SyncFactory, conf
       case Some(child) =>
         child ! transform
       case None =>
-        logger.warn(s"Could not apply transform ${transform.tx.id} to non-existent NISPTree ${transform.blockInfo.id}")
+        logger.warn(s"Could not apply transform ${transform.tx.id} to non-existent Rollup ${transform.blockInfo.id}")
     }
   }
 
 }
 
-object SyncCoordinator {
+object RollupCoordinator {
 
-  case class HandleGenesis(actorRef: ActorRef)
 }

@@ -3,31 +3,27 @@ package evaluation
 import lfsm.NISPTree
 import mutations.BoxLoader
 import org.bouncycastle.util.encoders.Hex
-import org.ergoplatform.appkit._
+import org.ergoplatform.appkit.{BlockchainContext, ContextVar, ErgoProver, ErgoType, ErgoValue, Parameters, SignedTransaction}
 import org.slf4j.{Logger, LoggerFactory}
+import sigma.Colls
 import sigma.exceptions.InterpreterException
 import work.lithos.mutations.{Contract, InputUTXO, TxBuilder}
 
 import scala.util.Try
 
-case class InvalidSizeProof(contract: Contract, miner: Array[Byte], nispTree: NISPTree, evalInput: InputUTXO,
-                            fpControl: InputUTXO)
+case class IncorrectNProof(contract: Contract, miner: Array[Byte], nispTree: NISPTree, evalInput: InputUTXO,
+                           fpControl: InputUTXO)
   extends FraudProof(contract, miner, nispTree, evalInput, fpControl) {
-  override val logger: Logger = LoggerFactory.getLogger("InvalidSizeProof")
-  /**
-   * Attempt to create fraud proof transaction using FraudProof parameters and transaction building information
-   * @param ctx Context to perform transaction under
-   * @param prover Prover to sign transaction and receive change
-   * @param txBuilder pre-mutated tx builder with `EvaluationMutator` applied
-   * @param loader BoxLoader to retrieve new inputs utxos
-   * @return `Some(SignedTransaction)` if fraud was proven, None otherwise
-   */
-  override def attemptFraudProof(ctx: BlockchainContext, prover: ErgoProver,
-                                 txBuilder: TxBuilder, loader: BoxLoader): Option[Seq[SignedTransaction]] = {
+  override val logger: Logger = LoggerFactory.getLogger("IncorrectNProof")
+
+  override def attemptFraudProof(ctx: BlockchainContext, prover: ErgoProver, txBuilder: TxBuilder, loader: BoxLoader): Option[Seq[SignedTransaction]] = {
+    println(s"Using contract ${contract.address(ctx).toString}")
     val fpAttempt = Try{
-      val initialTx = createFraudProof(ctx, prover, loader)
-      val fpInput = InputUTXO(initialTx.getOutputsToSpend.get(0))
-      val mutateEval = evalInput.withMutator(new EvaluationMutator(evalInput.contract))
+
+      val fpInput = loader.getInputs(Parameters.MinFee).head
+      val mutateEval = evalInput
+        .withCtxVar(ContextVar.of(0.toByte, ErgoValue.ofColl(Colls.fromArray(contract.valueBytes), ErgoType.byteType())))
+        .withMutator(new EvaluationMutator(evalInput.contract))
       val mutateFP   = fpInput.withMutator(mutator)
 
       val copy = nispTree.dictionary.copy()
@@ -37,7 +33,8 @@ case class InvalidSizeProof(contract: Contract, miner: Array[Byte], nispTree: NI
       val fpWithContext = mutateFP.setCtxVars(
         ContextVar.of(0.toByte, ErgoValue.of(miner)),
         ContextVar.of(1.toByte, lookUp.proof.ergoValue),
-        ContextVar.of(2.toByte, delete.proof.ergoValue)
+        ContextVar.of(2.toByte, delete.proof.ergoValue),
+        ContextVar.of(3.toByte, NTable.ergoValue)
       )
 
       val sTx = prover.sign(txBuilder
@@ -45,7 +42,7 @@ case class InvalidSizeProof(contract: Contract, miner: Array[Byte], nispTree: NI
         .setDataInputs(fpControl)
         .mutateOutputs
         .buildTx(0, prover.getAddress))
-      Seq(initialTx, sTx)
+      Seq(sTx)
     }
     if(fpAttempt.isFailure){
 
@@ -56,7 +53,7 @@ case class InvalidSizeProof(contract: Contract, miner: Array[Byte], nispTree: NI
             logger.error(s"Got critical interpreter exception while evaluating miner ${Hex.toHexString(miner)}", ie)
             throw ie
           }else{
-            logger.info("InvalidSizeProof reduced to false")
+            logger.info("Proof reduced to false")
           }
         case e =>
           throw e

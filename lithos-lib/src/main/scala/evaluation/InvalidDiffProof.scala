@@ -18,58 +18,7 @@ case class InvalidDiffProof(contract: Contract, miner: Array[Byte], nispTree: NI
                             fpControl: InputUTXO)
   extends FraudProof(contract, miner, nispTree, evalInput, fpControl) {
   override val logger: Logger = LoggerFactory.getLogger("InvalidDiffProof")
-  /**
-   * Attempt to create fraud proof transaction using FraudProof parameters and transaction building information
-   * @param ctx Context to perform transaction under
-   * @param prover Prover to sign transaction and receive change
-   * @param txBuilder pre-mutated tx builder with `EvaluationMutator` applied
-   * @param loader BoxLoader to retrieve new inputs utxos
-   * @return `Some(SignedTransaction)` if fraud was proven, None otherwise
-   */
-  override def attemptFraudProof(ctx: BlockchainContext, prover: ErgoProver,
-                                 txBuilder: TxBuilder, loader: BoxLoader): Option[Seq[SignedTransaction]] = {
-    val fpAttempt = Try{
-      val initialTx = createFraudProof(ctx, prover, loader)
-      val fpInput = InputUTXO(initialTx.getOutputsToSpend.get(0))
-      val mutateEval = evalInput.withMutator(new EvaluationMutator(evalInput.contract))
-      val mutateFP   = fpInput.withMutator(mutator)
 
-      val copy = nispTree.dictionary.copy()
-      copy.prover.generateProof()
-      val lookUp = copy.lookUp(miner)
-      val delete = copy.delete(miner)
-      val fpWithContext = mutateFP.setCtxVars(
-        ContextVar.of(0.toByte, ErgoValue.of(miner)),
-        ContextVar.of(1.toByte, lookUp.proof.ergoValue),
-        ContextVar.of(2.toByte, delete.proof.ergoValue)
-      )
-
-      val sTx = prover.sign(txBuilder
-        .setInputs(mutateEval,fpWithContext)
-        .setDataInputs(fpControl)
-        .mutateOutputs
-        .buildTx(0, prover.getAddress))
-      Seq(initialTx, sTx)
-    }
-    if(fpAttempt.isFailure){
-
-      fpAttempt.failed.get match {
-        case ie: InterpreterException =>
-          if(!ie.getMessage.contains("Script reduced to false")) {
-            logger.error(s"Got critical interpreter exception while evaluating miner ${Hex.toHexString(miner)}", ie)
-            throw ie
-          }else{
-            logger.info("InvalidDiffProof reduced to false")
-          }
-        case e =>
-          throw e
-      }
-
-    }else{
-      logger.info(s"Found fraud for miner ${Hex.toHexString(miner)}")
-    }
-    fpAttempt.toOption
-  }
 }
 
 

@@ -147,7 +147,10 @@ class NISPDatabase extends NISPStorage {
   /**
    * Gets the best valid NISP before a given height and above a given score. If a NISP with 10 super-shares cannot be
    * made, `None` is returned.
-   * @param height Height that all super-shares must be under. Super-shares must be above (height - NISP_PERIOD)
+   *
+   * NOTE: The passed in height should correspond to periodStart set on the holding contract
+   * This is found on R7 of the holding contract, and R8 of the eval contract
+   * @param height Height that all super-shares must be under. Super-shares must be >= (height - NISP_PERIOD)
    * @param score Score that all super-shares must be above.
    * @return `Some(NISP)` with 10 super-shares below the given height and above the given score, or `None`
    */
@@ -155,7 +158,9 @@ class NISPDatabase extends NISPStorage {
     require(lastHeight.isDefined, "Cannot search for NISPs when lastHeight is undefined")
     val minHeight = height - LFSMHelpers.NISP_WINDOW.toInt
     val start = Math.max(minHeight, lastHeight.map(Ints.fromByteArray).get)
-    val nisps = for(i <- start until height) yield getNISP(i)
+    // as defined by NotInWindow fraud proof
+    // start <= validNispHeight <= height
+    val nisps = for(i <- start to height) yield getNISP(i)
     val validNISPs = nisps.filter(n => n.isDefined && n.get.score >= score).map(_.get)
     val bestNISP = validNISPs.foldLeft(Option.empty[NISP]){
       (z: Option[NISP], x: NISP) =>
@@ -174,6 +179,7 @@ class NISPDatabase extends NISPStorage {
       Some(bestNISP.get.copy(shares = bestNISP.get.shares.take(10)))
     }
   }
+  // Ensures unique shares, as defined by NonUniqueHeaders fraud proof
   def makeUnique(shares: Seq[SuperShare]): Seq[SuperShare] = {
     shares.foldLeft(Seq.empty[SuperShare]){
       (z, s) =>
