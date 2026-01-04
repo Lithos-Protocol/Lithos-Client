@@ -111,7 +111,7 @@
     (x: Coll[Byte]) =>
       getHeader(x)
   }
-
+  // TODO: Check for non-monotonic header timestamps
   // Valid height for header in NISP is defined as
   // currentBlock - CONST_NISP_WINDOW <= validHeight <= currentBlock
 
