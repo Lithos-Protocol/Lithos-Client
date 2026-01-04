@@ -1,4 +1,4 @@
-package state
+package state.messages
 
 import org.ergoplatform.appkit.JavaHelpers
 import org.ergoplatform.restapi.client.FullBlock

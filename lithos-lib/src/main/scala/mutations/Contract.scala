@@ -16,6 +16,7 @@ import sigma.compiler.phases.{SigmaBinder, SigmaTyper}
 import sigma.compiler.{CompilerResult, CompilerSettings, SigmaCompiler}
 import sigma.data.SigmaBoolean
 import sigma.serialization.CoreByteWriter.ArgInfo
+import sigma.serialization.ValueSerializer
 import sigmastate.interpreter.Interpreter.ScriptEnv
 
 import scala.collection.JavaConverters
@@ -28,6 +29,10 @@ case class Contract(ergoTree: ErgoTree, mutators: Seq[Mutator] = Seq.empty[Mutat
   def propBytes: Array[Byte] = ergoTree.bytes
 
   def hashedPropBytes: Array[Byte] = Blake2b256.hash(propBytes)
+
+  def valueBytes = Contract.compileValue(ergoTree)
+  def hashedValueBytes = Blake2b256.hash(valueBytes)
+
   def ergoTreeHex: String = Hex.toHexString(propBytes)
   def hashedPropBytesHex: String = Hex.toHexString(hashedPropBytes)
 
@@ -86,6 +91,11 @@ object Contract {
         case other =>
           Failure(new Exception(s"Source compilation result is of type ${other.buildTree.tpe}, but `SBoolean` expected"))
       }
+    }
+  }
+  def compileValue(ergoTree: ErgoTree) = {
+    VersionContext.withVersions(VersionContext.V6SoftForkVersion, VersionContext.V6SoftForkVersion) {
+      ValueSerializer.serialize(ergoTree.toProposition(true))
     }
   }
 }

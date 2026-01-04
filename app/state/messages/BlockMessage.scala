@@ -1,5 +1,3 @@
-package actors
-
-import state.BlockInfo
+package state.messages
 
 case class BlockMessage(blockInfo: BlockInfo)

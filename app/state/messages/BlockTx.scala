@@ -1,4 +1,4 @@
-package state
+package state.messages
 
 import org.ergoplatform.appkit.{BlockchainContext, JavaHelpers}
 import org.ergoplatform.restapi.client.ErgoTransaction
