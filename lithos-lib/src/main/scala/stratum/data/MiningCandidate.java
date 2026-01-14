@@ -2,6 +2,7 @@ package stratum.data;
 
 import org.bouncycastle.util.encoders.Hex;
 import org.json.JSONObject;
+import stratum.CollateralData;
 
 import java.math.BigInteger;
 
@@ -13,18 +14,16 @@ public class MiningCandidate {
 	public BigInteger b;
     public String pk;
     public JSONObject proof;
-    public String txId;
-    public byte[] txBytes;
+    public CollateralData collateralData;
 	public MiningCandidate(byte[] msg, long height, int version, BigInteger b, String pk,
-                           JSONObject proof, String txId, byte[] txBytes) {
+                           JSONObject proof, CollateralData collateralData) {
 		this.msg = msg;
 		this.height = height;
 		this.version = version;
 		this.b = b;
         this.pk = pk;
         this.proof = proof;
-        this.txId = txId;
-        this.txBytes = txBytes;
+        this.collateralData = collateralData;
 	}
 
 
@@ -37,10 +36,9 @@ public class MiningCandidate {
 				obj.has("b") ? obj.getBigInteger("b") : null,
                 obj.getString("pk"),
                 obj.has("proof") ? obj.getJSONObject("proof") : null,
-                null,
                 null);
 	}
-    public static MiningCandidate fromJson(JSONObject obj, int version, String txId, byte[] txBytes) {
+    public static MiningCandidate fromJson(JSONObject obj, int version, CollateralData collateralData) {
         return new MiningCandidate(
                 Hex.decode(obj.getString("msg")),
                 obj.getInt("h"),
@@ -48,7 +46,6 @@ public class MiningCandidate {
                 obj.has("b") ? obj.getBigInteger("b") : null,
                 obj.getString("pk"),
                 obj.has("proof") ? obj.getJSONObject("proof") : null,
-                txId,
-                txBytes);
+                collateralData);
     }
 }

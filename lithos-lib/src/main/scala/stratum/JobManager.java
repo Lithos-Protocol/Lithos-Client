@@ -1,5 +1,6 @@
 package stratum;
 
+import evaluation.NTable;
 import lfsm.LFSMHelpers;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -197,7 +198,7 @@ public class JobManager {
 			return null;
 		}
 		byte[] h = Utils.intBytes((int) job.candidate.height);
-		BigInteger fH = Autolykos2PowValidation.hitForVersion2ForMessageWithChecks(32, job.msg, nonce, h, N(job.candidate.height).intValue()).bigInteger();
+		BigInteger fH = Autolykos2PowValidation.hitForVersion2ForMessageWithChecks(32, job.msg, nonce, h, NTable.lookUp((int) job.candidate.height)).bigInteger();
 
 		byte[] blockHash;
         boolean isBlock = false;

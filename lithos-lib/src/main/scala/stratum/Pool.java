@@ -119,7 +119,7 @@ public class Pool {
                 }
                 if(successfulShare.isSuperShare) {
                     try {
-                        SuperShare share = SuperShare.fromCandidate(e.nonce, successfulShare.candidate);
+                        SuperShare share = SuperShare.fromCandidate(e.nonce, successfulShare.candidate, successfulShare.candidate.collateralData);
                         logger.info("Saving super share for block {} with nonce {}", share.getHeight(), Hex.toHexString(e.nonce));
                         long score = LFSMHelpers.convertTauOrScore(BigInt.apply(successfulShare.difficulty)).longValue();
                         boolean success = nispDB.addNISP(score, share);
@@ -136,10 +136,12 @@ public class Pool {
                             throw new RuntimeException("Failed to save super share to NISP database");
                         }
                     } catch (Exception ex) {
-                        if(ex.getMessage().contains("merkle leaf for collateral")){
+                        if(ex.getMessage() == null){
+                            logger.error("error: ", ex);
+                        }else if(ex.getMessage().contains("merkle leaf for collateral")){
                             // TODO: Fix merkle leaf error
                             logger.warn("Skipped super share due to non-matching merkle leaf");
-
+                            logger.error("error: ", ex);
                         }else if(ex.getMessage().contains("Cannot store non-distinct NISP")){
                             logger.warn("Got duplicate nonce on super-share submission");
 
@@ -174,7 +176,7 @@ public class Pool {
                 CollateralData collData = retriever.getCollateral();
                 candidate = MiningCandidate.fromJson(
                         nodeInterface.miningCandidate(true, collData.txJSON(), apiKey),
-                        options.data.protocolVersion, collData.txId(), collData.txBytes()
+                        options.data.protocolVersion, collData
                         // unused
                 );
                 pk = candidate.pk; // TODO: Use candidate.pk until collateral is fixed
