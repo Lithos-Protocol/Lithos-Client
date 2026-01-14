@@ -137,7 +137,8 @@ object SuperShare {
     require(collTxProof.isDefined,
       s"Could not find correct merkle leaf for collateral txId ${collateralData.txId}. \n " +
         s" ${txProofs.map(t => "leaf: " + t.getString("leaf")).mkString(", ")} \n" +
-      s"txBytesHash: ${Hex.toHexString(Blake2b256(collateralData.txBytes))}"
+      s"txBytesHash: ${Hex.toHexString(Blake2b256(collateralData.txBytes))}" +
+        s"candidate: ${candidate.height} : ${Hex.toHexString(Blake2b256(candidate.collateralData.txBytes))}"
     )
 
     val leaf = collTxProof.get.getString("leaf")

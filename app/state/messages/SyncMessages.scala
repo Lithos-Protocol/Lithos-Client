@@ -1,6 +1,6 @@
 package state.messages
 
-import lfsm.NISPTree
+import lfsm.states.NISPTree
 import state.messages.DictionaryMessages.DictionaryTransform
 import state.messages.RollupMessages.{Genesis, Transform}
 object SyncMessages {
@@ -22,4 +22,6 @@ object SyncMessages {
   case class FullSync(rollups: Seq[(String, NISPTree)]) extends SyncMessage
 
   case class PartialSync(syncedRollups: Seq[(String, NISPTree)], unsyncedIds: Seq[String]) extends SyncMessage
+
+  case class NoRollups() extends SyncMessage
 }

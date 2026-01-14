@@ -1,6 +1,6 @@
 package state.messages
 
-import lfsm.NISPTree
+import lfsm.states.NISPTree
 
 object RollupMessages {
 

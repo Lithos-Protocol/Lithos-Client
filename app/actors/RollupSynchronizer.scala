@@ -2,8 +2,10 @@ package actors
 
 
 import akka.actor.Actor
+import cache.RollupCache
 import com.google.inject.assistedinject.Assisted
-import lfsm.{LFSMHelpers, LFSMPhase, NISPTree}
+import lfsm.states.NISPTree
+import lfsm.{LFSMHelpers, LFSMPhase}
 import org.bouncycastle.util.encoders.Hex
 import org.ergoplatform.appkit.{Address, BlockchainContext, ErgoProver, ErgoValue}
 import org.slf4j.{Logger, LoggerFactory}
@@ -14,21 +16,21 @@ import sigma.ast.ErgoTree
 import sigma.data.CBigInt
 import sigma.{Coll, SigmaProp}
 import state.messages.RollupMessages._
-import utils.{Globals, Helpers, PayoutRecord, TreeCache}
+import utils.{Globals, Helpers, PayoutRecord}
 import work.lithos.mutations.Contract
 
 import javax.inject.Inject
 
-class RollupSynchronizer @Inject()(config: Configuration, @Assisted treeBlockId: String, @Assisted ctx: BlockchainContext, @Assisted prover: ErgoProver, cacheApi: SyncCacheApi) extends Actor {
-  val logger: Logger = LoggerFactory.getLogger("RollupSynchronizer-" + treeBlockId.slice(0, 12))
-  val treeCache: TreeCache = TreeCache(cacheApi)
+class RollupSynchronizer @Inject()(config: Configuration, @Assisted rollupBlockId: String, @Assisted ctx: BlockchainContext, @Assisted prover: ErgoProver, cacheApi: SyncCacheApi) extends Actor {
+  val logger: Logger = LoggerFactory.getLogger("RollupSynchronizer-" + rollupBlockId.slice(0, 12))
+  val treeCache: RollupCache = RollupCache(cacheApi)
 
 
-  val relErgoTrees: Seq[String] = Helpers.relevantErgoTrees(ctx)
+  val relErgoTrees: Seq[String] = Helpers.rollupErgoTrees(ctx)
 
   override def receive: Receive = {
     case Genesis(tree, _) =>
-      logger.info(s"Generated tree $treeBlockId with utxo ${tree.utxoId}")
+      logger.info(s"Generated rollup $rollupBlockId with utxo ${tree.utxoId}")
       treeCache.addToTreeCache(tree.utxoId, tree)
       context.become(postInit(tree.utxoId))
   }
@@ -181,7 +183,7 @@ class RollupSynchronizer @Inject()(config: Configuration, @Assisted treeBlockId:
           .find(_.ergoTree == Contract.fromAddress(prover.getAddress).ergoTreeHex)
           .get.toUTXO(ctx)
         val payoutRecord = PayoutRecord(transform.tx.id, payoutOutput.value, LFSMHelpers.scoreFromPayment(payoutOutput.value, tree.totalScore, tree.totalReward),
-          input.id, treeBlockId, tree.startHeight, transform.blockInfo.height)
+          input.id, rollupBlockId, tree.startHeight, transform.blockInfo.height)
         val payoutSet = cacheApi.getOrElseUpdate[Seq[PayoutRecord]](Globals.TRACKED_PAYOUTS)(Seq.empty[PayoutRecord])
         cacheApi.set(Globals.TRACKED_PAYOUTS, payoutSet ++ Seq(payoutRecord))
         stopSync("Local miner was paid", tree)
@@ -210,8 +212,8 @@ class RollupSynchronizer @Inject()(config: Configuration, @Assisted treeBlockId:
   private def stopSync(reason: String, tree: NISPTree): NISPTree = {
     logger.info("Stopped sync due to: " + reason)
     context.stop(self)
-    treeCache.removeFromTreeCache(tree.utxoId)
-    sender() ! StopTracking(tree.utxoId, treeBlockId)
+    treeCache.remove(tree.utxoId)
+    sender() ! StopTracking(tree.utxoId, rollupBlockId)
     // Return same tree after stopping sync, does not matter because message processing stops
     tree
   }
@@ -219,7 +221,7 @@ class RollupSynchronizer @Inject()(config: Configuration, @Assisted treeBlockId:
 
 object RollupSynchronizer {
 
-  trait SyncFactory {
-    def apply(treeBlockId: String, ctx: BlockchainContext, prover: ErgoProver): Actor
+  trait RollupSyncFactory {
+    def apply(rollupBlockId: String, ctx: BlockchainContext, prover: ErgoProver): Actor
   }
 }

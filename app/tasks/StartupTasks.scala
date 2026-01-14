@@ -24,19 +24,20 @@ class StartupTasks @Inject()(system: ActorSystem, config: Configuration, cs: Coo
   val logger: Logger = LoggerFactory.getLogger("StartupTasks")
   val contexts: Contexts = new Contexts(system)
   val nispDB = Globals.nispDB
-
-  cs.addTask(CoordinatedShutdown.PhaseServiceUnbind, "close-nisp-db"){
+  val mdDb = Globals.mdDB
+  cs.addTask(CoordinatedShutdown.PhaseServiceUnbind, "close-db"){
     () =>
-      logger.info("Closing NISP DB server")
+      logger.info("Closing DBs")
       Await.result(Future(nispDB.close())(contexts.pollingContext), 10 seconds)
-
+      Await.result(Future(mdDb.close())(contexts.pollingContext), 10 seconds)
       Future(Done.getInstance())(contexts.pollingContext)
   }
 
   cs.addJvmShutdownHook{
     () =>
-      logger.info("Stopping nisp DB on JVM shutdown")
+      logger.info("Stopping dbs on JVM shutdown")
       nispDB.close()
+      mdDb.close()
   }
 
 

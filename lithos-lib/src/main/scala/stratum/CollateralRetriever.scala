@@ -77,8 +77,9 @@ class CollateralRetriever(client: ErgoClient, prover: ErgoProver) {
           .buildTx(0, lenderAddress)
         val sTx = prover.sign(uTx)
         val utxBytes = uTx.asInstanceOf[UnsignedTransactionImpl].getTx.messageToSign
-        logger.info(s"Generated collateral tx with size: ${utxBytes.length} and collateral input with size: ${collateralInput.bytes.length}")
-        CollateralData(sTx.getId.replace("\"", ""), sTx.toJson(false, false), pkString, utxBytes, collateralInput.bytes)
+        val collData = CollateralData(sTx.getId.replace("\"", ""), sTx.toJson(false, false), pkString, utxBytes, collateralInput.bytes)
+        logger.info(s"Generated $collData with tx size: ${utxBytes.length} and input size: ${collateralInput.bytes.length}")
+        collData
     }
   }
 }

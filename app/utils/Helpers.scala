@@ -1,8 +1,7 @@
 package utils
 
 import lfsm.LFSMHelpers
-import lfsm.collateral.CollateralContract
-import lfsm.rollup.RollupContracts
+import lfsm.contracts.{CollateralContract, DictionaryContracts, RollupContracts}
 import org.bouncycastle.util.encoders.Hex
 import org.ergoplatform.appkit.{BlockchainContext, ErgoClient, ErgoId, ErgoProver, ErgoValue, NetworkType}
 import org.ergoplatform.restapi.client.ErgoTransactionOutput
@@ -64,15 +63,49 @@ object Helpers {
   lazy val holdingMainnet: Contract = compileHolding(NetworkType.MAINNET)
   lazy val holdingTestnet: Contract = compileHolding(NetworkType.TESTNET)
 
+  // MD contracts
+  lazy val mdMainnet: Contract = DictionaryContracts.mkMinerDictionaryContract(NetworkType.MAINNET, LFSMHelpers.MD_TOKEN_MAINNET)
+  lazy val mdTestnet: Contract = DictionaryContracts.mkMinerDictionaryContract(NetworkType.TESTNET, LFSMHelpers.MD_TOKEN_TESTNET)
+  lazy val minerDataMainnet: Contract = DictionaryContracts.mkMinerDataContract(NetworkType.MAINNET, LFSMHelpers.MD_TOKEN_MAINNET)
+  lazy val minerDataTestnet: Contract = DictionaryContracts.mkMinerDataContract(NetworkType.TESTNET, LFSMHelpers.MD_TOKEN_TESTNET)
 
-  def relevantErgoTrees(client: ErgoClient): Seq[String] = {
+  def mdErgoTrees(client: ErgoClient): Seq[String] = {
     client.execute{
-      ctx =>
-        relevantErgoTrees(ctx)
+      ctx => mdErgoTrees(ctx)
     }
   }
 
-  def relevantErgoTrees(ctx: BlockchainContext): Seq[String] = {
+  def dataBoxContract(ctx: BlockchainContext): Contract = {
+    ctx.getNetworkType match {
+      case NetworkType.MAINNET => minerDataMainnet
+      case NetworkType.TESTNET => minerDataTestnet
+    }
+  }
+
+  def mdErgoTrees(ctx: BlockchainContext): Seq[String] = {
+    ctx.getNetworkType match {
+      case NetworkType.MAINNET =>
+        Seq(
+          mdMainnet.ergoTreeHex
+          //minerDataMainnet.ergoTreeHex
+        )
+      case NetworkType.TESTNET =>
+        Seq(
+          mdTestnet.ergoTreeHex
+          //minerDataTestnet.ergoTreeHex
+        )
+    }
+
+  }
+
+  def rollupErgoTrees(client: ErgoClient): Seq[String] = {
+    client.execute{
+      ctx =>
+        rollupErgoTrees(ctx)
+    }
+  }
+
+  def rollupErgoTrees(ctx: BlockchainContext): Seq[String] = {
     ctx.getNetworkType match {
       case NetworkType.MAINNET =>
         Seq(
@@ -107,29 +140,5 @@ object Helpers {
       case CSigmaProp(sigmaTree) => Some(pkHexFromBoolean(sigmaTree)).flatten
       case _ => None
     }
-  }
-
-  def parseOutput(ctx: BlockchainContext, output: ErgoTransactionOutput): InputUTXO = {
-    val holdingHex = holdingContract(ctx).ergoTreeHex
-    val evalHex = evalContract(ctx).ergoTreeHex
-    val payoutHex = payoutContract(ctx).ergoTreeHex
-
-    val contract = output.getErgoTree match {
-      case hex: String if (hex == holdingHex) =>
-        holdingContract(ctx)
-      case hex: String if (hex == evalHex) =>
-        evalContract(ctx)
-      case hex: String if (hex == payoutHex) =>
-        payoutContract(ctx)
-      case _ =>
-        Contract(ErgoTree.fromHex(output.getErgoTree))
-    }
-    val value = output.getValue
-
-    val regHexes = for (i <- 4 to 9) yield output.getAdditionalRegisters.getOrDefault("R" + i, "none")
-    val validRegHexes = regHexes.filter(_ != "none")
-    val registers = validRegHexes.map(ErgoValue.fromHex)
-    UTXO(contract, value, registers = registers)
-      .toInput(ctx, ErgoId.create(output.getTransactionId), output.getIndex.toShort)
   }
 }

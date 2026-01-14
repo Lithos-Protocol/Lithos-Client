@@ -138,9 +138,16 @@ public class JobManager {
 
 
 		triggerEvent(new NewBlock(blockTemplate));
-        validJobs.clear();
 		validJobs.put(blockTemplate.jobId, blockTemplate);
-        logger.info("Sent new job with height = {}, b = {}", candidate.height, candidate.b);
+        int jobNum = Integer.decode("0x" + blockTemplate.jobId);
+        int jobToRemove;
+        if(jobNum >= 5){
+            jobToRemove = jobNum - 5;
+        }else{
+            jobToRemove = 65535 - (5 - jobNum);
+        }
+        validJobs.remove(Integer.toHexString(jobToRemove));
+        logger.info("Sent new job with id = {}, height = {}, b = {}", blockTemplate.jobId, candidate.height, candidate.b);
 		return true;
 	}
 
@@ -178,7 +185,6 @@ public class JobManager {
 			shareError.run(20, "incorrect size of extraNonce2");
 			return null;
 		}
-
 		BlockTemplate job = validJobs.get(jobId);
 
 		if (job == null) {
@@ -241,7 +247,7 @@ public class JobManager {
 				job.candidate.b,
 				blockHash,
                 isSuperShare,
-                job.candidate
+                MiningCandidate.copy(job.candidate)
 		), nonce));
 
 		return blockHash;

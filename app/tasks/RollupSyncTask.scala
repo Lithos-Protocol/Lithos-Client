@@ -3,26 +3,28 @@ package tasks
 import actors.SyncHandler
 import akka.Done
 import akka.actor.{ActorRef, ActorSystem, Cancellable, CoordinatedShutdown}
-import akka.pattern.ask
+import akka.pattern.{AskTimeoutException, ask}
 import akka.util.Timeout
 import configs.TasksConfig.TaskConfiguration
 import configs.{Contexts, NodeConfig, StateConfig, StratumConfig, SyncConfig, TasksConfig}
-import lfsm.{LFSMHelpers, NISPTree}
+import lfsm.LFSMHelpers
+import lfsm.states.NISPTree
 import org.ergoplatform.appkit.impl.NodeAndExplorerDataSourceImpl
 import org.ergoplatform.restapi.client.FullBlock
 import org.ergoplatform.sdk.BlockchainContext
 import org.slf4j.{Logger, LoggerFactory}
 import play.api.Configuration
 import play.api.cache.{AsyncCacheApi, SyncCacheApi}
-import state.messages.SyncMessages.{FullSync, GetSynced, HandledBlock, PartialSync, SyncMessage}
-import state.{BlockInfo, BlockMessage, LFSMTransformer}
+import state.messages.{BlockInfo, BlockMessage}
+import state.messages.SyncMessages.{FullSync, GetSynced, HandledBlock, NoRollups, PartialSync, SyncMessage}
+import state.LFSMTransformer
 import stratum.ErgoStratumServer
 import stratum.data.{Data, Options}
 import utils.Globals
 
 import javax.inject.{Inject, Named, Singleton}
 import scala.concurrent.duration.DurationInt
-import scala.concurrent.{Await, ExecutionContext, Future}
+import scala.concurrent.{Await, ExecutionContext, Future, TimeoutException}
 import scala.language.postfixOps
 import scala.util.{Failure, Success, Try}
 
@@ -82,21 +84,26 @@ class RollupSyncTask @Inject()(cache: SyncCacheApi, system: ActorSystem, config:
                               val msg = Await.result((syncHandler ? GetSynced).mapTo[SyncMessage], 5 seconds)
                               msg match {
                                 case FullSync(nispTrees) =>
-                                  logger.info(s"Got fully synced state with ${nispTrees.size} trees")
+                                  logger.info(s"Got FullSync() state with ${nispTrees.size} rollups")
 
                                   LFSMTransformer.onSync(nodeConfig.getClient, cache,
-                                    nodeConfig.prover, stratumConfig.diff, nispTrees, syncHandler)
+                                    nodeConfig.prover, stratumConfig.diff, nispTrees, syncHandler, stateConfig.autoCommit.getOrElse(true))
                                 case PartialSync(syncedTrees, unsyncedIds) =>
-                                  logger.info(s"Got partially synced state with ${syncedTrees.size} synced trees" +
-                                    s" and ${unsyncedIds.size} unsynced trees")
+                                  logger.info(s"Got PartialSync() state with ${syncedTrees.size} synced rollups" +
+                                    s" and ${unsyncedIds.size} unsynced rollups")
 
                                   LFSMTransformer.onSync(nodeConfig.getClient, cache,
-                                    nodeConfig.prover, stratumConfig.diff, syncedTrees, syncHandler)
+                                    nodeConfig.prover, stratumConfig.diff, syncedTrees, syncHandler, stateConfig.autoCommit.getOrElse(true))
+                                case NoRollups() =>
+                                  logger.info(s"Got NoRollups() state with 0 rollups")
                               }
 
                             }.recoverWith {
+                              case timeout: TimeoutException =>
+                                logger.warn("Skipping transforms due to no GetSynced response")
+                                Failure(timeout)
                               case t: Throwable =>
-                                logger.error(s"Got error during sync ${t.getMessage}", t)
+                                logger.error(s"Got error during transformations: ${t.getMessage} \n", t)
                                 Failure(t)
                             }
                           }

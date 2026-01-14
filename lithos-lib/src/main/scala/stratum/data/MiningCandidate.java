@@ -26,6 +26,10 @@ public class MiningCandidate {
         this.collateralData = collateralData;
 	}
 
+    public static MiningCandidate copy(MiningCandidate old) {
+        return new MiningCandidate(old.msg, old.height, old.version, old.b, old.pk, old.proof, old.collateralData);
+    }
+
 
 
 	public static MiningCandidate fromJson(JSONObject obj, int version) {

@@ -1,4 +1,4 @@
-package lfsm.rollup
+package lfsm.contracts
 
 import lfsm.ScriptGenerator
 import org.ergoplatform.appkit.{BlockchainContext, ConstantsBuilder, ErgoId, NetworkType}

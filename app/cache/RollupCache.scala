@@ -1,14 +1,14 @@
-package utils
+package cache
 
-import lfsm.NISPTree
+import lfsm.states.NISPTree
 import play.api.cache.SyncCacheApi
 
 /**
  * Cache Mapping of blockId -> NISPTree
  * @param cacheApi
  */
-class TreeCache(cacheApi: SyncCacheApi){
-
+class RollupCache(cacheApi: SyncCacheApi){
+  // TODO: Extend UTXOSetCache
   private final val TREE_LIST = "TREE_LIST"
 
   def get(id: String): Option[NISPTree] = {
@@ -53,6 +53,6 @@ class TreeCache(cacheApi: SyncCacheApi){
   }
 }
 
-object TreeCache {
-  def apply(cacheApi: SyncCacheApi) = new TreeCache(cacheApi)
+object RollupCache {
+  def apply(cacheApi: SyncCacheApi) = new RollupCache(cacheApi)
 }

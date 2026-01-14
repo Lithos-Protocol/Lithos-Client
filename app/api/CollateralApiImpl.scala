@@ -2,8 +2,7 @@ package api
 
 import configs.NodeConfig
 import lfsm.LFSMHelpers
-import lfsm.collateral.CollateralContract
-import lfsm.rollup.RollupContracts
+import lfsm.contracts.{CollateralContract, RollupContracts}
 import model.ApiError
 import model.CollateralInfo
 import model.CollateralUTXO

@@ -1,21 +1,22 @@
 package actors
 
-import actors.SyncHandler.{Genesis, GetSynced, HandledBlock, RelevantTransactions, RemoveTree, SyncMessage, Transform}
 import akka.actor.{Actor, ActorRef}
 import akka.pattern.ask
 import akka.util.Timeout
+import cache.RollupCache
 import configs.NodeConfig
-import lfsm.{LFSMPhase, NISPTree}
-import org.bouncycastle.util.encoders.Hex
+import lfsm.LFSMPhase
+import lfsm.states.NISPTree
 import org.ergoplatform.appkit.{BlockchainContext, ErgoClient, ErgoProver, ErgoValue}
 import org.slf4j.{Logger, LoggerFactory}
 import play.api.Configuration
 import play.api.cache.SyncCacheApi
 import play.api.libs.concurrent.InjectedActorSupport
 import sigma.data.AvlTreeFlags
-import state.{BlockInfo, BlockTx, TxInput, TxOutput}
-import utils.Helpers.{compileEval, compileHolding, compilePayout}
-import utils.{Globals, Helpers, TreeCache}
+import state.messages.{BlockInfo, BlockMessage, BlockTx}
+import state.messages.RollupMessages._
+import state.messages.SyncMessages._
+import utils.{Globals, Helpers}
 import work.lithos.plasma.PlasmaParameters
 import work.lithos.plasma.collections.PlasmaMap
 
@@ -24,16 +25,16 @@ import scala.concurrent.duration.DurationInt
 import scala.language.postfixOps
 import scala.util.{Failure, Success}
 
-class SyncHandler @Inject()(config: Configuration, @Named("sync-coordinator") syncCoordinator: ActorRef,
+class SyncHandler @Inject()(config: Configuration, @Named("rollup-coordinator") rollupCoordinator: ActorRef,
                             cacheApi: SyncCacheApi) extends Actor with InjectedActorSupport {
-  implicit val timeout: Timeout = 2 seconds
+  implicit val timeout: Timeout = 5 seconds
 
   private val logger: Logger          = LoggerFactory.getLogger("SyncHandler")
   val nodeConfig: NodeConfig          = Globals.getNodeConfig
   val client: ErgoClient              = nodeConfig.getClient
   val prover: ErgoProver              = nodeConfig.prover
-  lazy val relErgoTrees: Seq[String]  = Helpers.relevantErgoTrees(client)
-  val treeCache: TreeCache            = TreeCache(cacheApi)
+  lazy val relErgoTrees: Seq[String]  = Helpers.rollupErgoTrees(client)
+  val rollupCache: RollupCache            = RollupCache(cacheApi)
   import context.dispatcher
 
 
@@ -42,8 +43,8 @@ class SyncHandler @Inject()(config: Configuration, @Named("sync-coordinator") sy
       logger.info(s"Got block message ${blockInfo.id} with height ${blockInfo.height}")
 
       val relevantTransactions = buildRelevantTransactions(blockInfo)
-      relevantTransactions.transforms.foreach(syncCoordinator ! _)
-      relevantTransactions.genTxs.foreach(syncCoordinator ! _)
+      relevantTransactions.transforms.foreach(rollupCoordinator ! _)
+      relevantTransactions.genTxs.foreach(rollupCoordinator ! _)
     case GetSynced =>
       logger.info("Got initial sync message")
       context.become(postSync())
@@ -53,21 +54,21 @@ class SyncHandler @Inject()(config: Configuration, @Named("sync-coordinator") sy
     case BlockMessage(blockInfo) =>
       logger.info(s"Post-sync block message ${blockInfo.id} with height ${blockInfo.height}")
       val relevantTransactions = buildRelevantTransactions(blockInfo)
-      relevantTransactions.transforms.foreach(syncCoordinator ! _)
-      relevantTransactions.genTxs.foreach(syncCoordinator ! _)
+      relevantTransactions.transforms.foreach(rollupCoordinator ! _)
+      relevantTransactions.genTxs.foreach(rollupCoordinator ! _)
       sender() ! HandledBlock(blockInfo)
     case GetSynced =>
       val originalSender = sender()
-      (syncCoordinator ? GetSynced).mapTo[SyncMessage].onComplete {
+      (rollupCoordinator ? GetSynced).mapTo[SyncMessage].onComplete {
         case Failure(exception) =>
           // match errors
           logger.error("Got error while asking for sync", exception)
         case Success(msg) =>
           originalSender ! msg
       }
-    case removeTree: RemoveTree =>
+    case removeTree: RemoveRollup =>
       logger.info(s"Removing tree ${removeTree.blockId} due to: ${removeTree.reason}")
-      syncCoordinator ! removeTree
+      rollupCoordinator ! removeTree
   }
   // efficiency matters here
   private def buildRelevantTransactions(blockInfo: BlockInfo): RelevantTransactions = {
@@ -125,29 +126,7 @@ class SyncHandler @Inject()(config: Configuration, @Named("sync-coordinator") sy
   // TODO: Analyze closely for potentially dropped blocks
 
   private def relevantInput(tx: BlockTx): Option[String] = {
-    treeCache.getTreeSet.find(_ == tx.inputs.head.id)
+    rollupCache.getTreeSet.find(_ == tx.inputs.head.id)
   }
 
-}
-
-object SyncHandler {
-  case class Genesis(tree: NISPTree, blockInfo: BlockInfo)
-  case class RelevantTransactions(genTxs: Seq[Genesis], transforms: Seq[Transform])
-  case class Transform(blockInfo: BlockInfo, tx: BlockTx) {
-    val input: TxInput   = tx.inputs.head
-    val output: TxOutput = tx.outputs.head
-    override def toString: String = s"Transform(${blockInfo.height}: ${input.id} => ${output.id})"
-  }
-  case class StopTracking(utxoId: String, blockId: String)
-  case class RemoveTree(blockId: String, reason: String)
-  case object GetSynced
-  case class HandledBlock(blockInfo: BlockInfo)
-  sealed trait SyncMessage
-  case class FullSync(nispTrees: Seq[(String, NISPTree)]) extends SyncMessage
-  case class PartialSync(syncedTrees: Seq[(String, NISPTree)], unsyncedIds: Seq[String]) extends SyncMessage
-
-
-  object RelevantTransactions {
-    def empty = RelevantTransactions(Seq.empty[Genesis], Seq.empty[Transform])
-  }
 }

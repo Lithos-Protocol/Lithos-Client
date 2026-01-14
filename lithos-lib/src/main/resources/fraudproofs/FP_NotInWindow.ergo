@@ -38,8 +38,8 @@
   val CONST_INVARIANT_PREFIX  = 130
   val CONST_INVARIANT_MID     = 36
   val CONST_INVARIANT_SUFFIX  = 45
-
-  val CONST_NISP_WINDOW       = 360
+  // TODO: Grab from contract constants
+  val CONST_NISP_WINDOW       = 160
   // Helper Methods
   def getScore(nispBytes: Coll[Byte]): Long = {
     byteArrayToLong(nispBytes.slice(0,CONST_SCORE_SIZE))

@@ -141,7 +141,7 @@ public class Pool {
                         }else if(ex.getMessage().contains("merkle leaf for collateral")){
                             // TODO: Fix merkle leaf error
                             logger.warn("Skipped super share due to non-matching merkle leaf");
-                            logger.error("error: ", ex);
+                           // logger.error("error: ", ex);
                         }else if(ex.getMessage().contains("Cannot store non-distinct NISP")){
                             logger.warn("Got duplicate nonce on super-share submission");
 

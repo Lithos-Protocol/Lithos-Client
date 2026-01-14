@@ -1,11 +1,12 @@
 package state
 
-import actors.SyncHandler.RemoveTree
-import akka.actor.ActorRef
+import akka.actor.{ActorRef, Cancellable}
+import cache.MDCache
 import evaluation.Evaluator
 import lfsm.LFSMPhase.{EVAL, HOLDING, PAYOUT}
-import lfsm.rollup.RollupContracts
-import lfsm.{LFSMHelpers, NISPTree}
+import lfsm.contracts.{DictionaryContracts, FraudProofContracts, RollupContracts}
+import lfsm.LFSMHelpers
+import lfsm.states.NISPTree
 import mutations.{BoxLoader, NotEnoughInputsException}
 import nisp.NISPDatabase
 import org.bouncycastle.util.encoders.Hex
@@ -14,21 +15,73 @@ import org.ergoplatform.appkit._
 import org.slf4j.{Logger, LoggerFactory}
 import play.api.cache.SyncCacheApi
 import scorex.utils.Longs
-import sigma.{AvlTree, Colls}
+import sigma.{AvlTree, Coll, Colls}
 import sigma.data.CBigInt
+import state.messages.RollupMessages.RemoveRollup
 import utils.Helpers.{compileEval, compileHolding, compilePayout, evalContract, holdingContract, payoutContract}
-import utils.Globals
-
-import work.lithos.mutations.{Contract, InputUTXO, TxBuilder, UTXO}
+import utils.{Globals, Helpers}
+import work.lithos.mutations.{Contract, InputUTXO, Token, TxBuilder, UTXO}
 
 import scala.util.{Failure, Success, Try}
 
 object LFSMTransformer {
   private val logger: Logger = LoggerFactory.getLogger("LFSMTransformer")
+  private final val DATA_BOX_BUFFER = (LFSMHelpers.NISP_WINDOW + 50).toInt
+
+  private def makeMinerDataBox(ctx: BlockchainContext, minerContract: Contract, addToken: ErgoId, score: Long) = {
+    val contract =  Helpers.dataBoxContract(ctx)
+    val commit = ctx.getHeight + DATA_BOX_BUFFER -> score
+    logger.info(s"Making new data box for miner with id $addToken, and commit $commit")
+    val utxo = UTXO(contract, Parameters.MinFee, Seq(Token(addToken, 1L)),
+      registers = Seq(
+        ErgoValue.ofColl(Colls.fromArray(Array(commit)), ErgoType.pairType(ErgoType.integerType(), ErgoType.longType())),
+        ErgoValue.ofColl(Colls.fromArray(minerContract.hashedPropBytes), ErgoType.byteType())
+      ))
+    utxo
+  }
+
+  def addToMD(client: ErgoClient, cache: SyncCacheApi, prover: ErgoProver, diff: String): String = {
+    logger.info("Attempting to add self to miner dictionary")
+    client.execute {
+      ctx =>
+        val inputs = new BoxLoader(ctx).loadBoxes.getInputs(Parameters.MinFee*2)
+        val tau = LFSMHelpers.parseDiffValueForStratum(diff)
+        val score = LFSMHelpers.convertTauOrScore(tau.get).toLong
+        val minerTree = MDCache(cache).getMD.get
+
+        val proverContract = Contract.fromErgoContract(prover.getAddress.toErgoContract)
+        val insertionTree = minerTree.dictionary.copy()
+        insertionTree.prover.generateProof()
+        val dictInput = InputUTXO(ctx.getBoxesById(minerTree.utxoId).head)
+        insertionTree.prover.generateProof()
+        val insertion = insertionTree.insert(proverContract.hashedPropBytes -> dictInput.id.getBytes)
+
+        val ctxDictInput = dictInput
+          .withCtxVar(ContextVar.of(0.toByte, 0.toByte))
+          .withCtxVar(ContextVar.of(1.toByte, proverContract.sigmaBoolean.get))
+          .withCtxVar(ContextVar.of(
+            2.toByte,
+            ErgoValue.pairOf(
+              ErgoValue.ofColl(Colls.fromArray(proverContract.hashedPropBytes), ErgoType.byteType()),
+              ErgoValue.ofColl(Colls.fromArray(dictInput.id.getBytes), ErgoType.byteType())
+            )))
+          .withCtxVar(ContextVar.of(3.toByte, insertion.proof.ergoValue))
+        val dictOutput = dictInput.toUTXO.copy(registers = Seq(insertionTree.ergoValue))
+        val output = makeMinerDataBox(ctx, Contract.fromErgoContract(prover.getAddress.toErgoContract), dictInput.id, score)
+        val feeOutput = UTXO(Contract(ErgoTreePredef.feeProposition(720)), Parameters.MinFee)
+        val uTx = TxBuilder(ctx)
+          .setInputs((Seq(ctxDictInput) ++ inputs): _*)
+          .setOutputs(dictOutput, output, feeOutput)
+          .buildTx(0, prover.getAddress)
+
+        val sTx = prover.sign(uTx)
+        ctx.sendTransaction(sTx)
+    }
+  }
 
   def onSync(client: ErgoClient, cache: SyncCacheApi, prover: ErgoProver, diff: String,
-             nispTrees: Seq[(String, NISPTree)], syncHandler: ActorRef): Unit = {
-    logger.info(s"Creating LFSM transforms for ${nispTrees.size} synced trees")
+             nispTrees: Seq[(String, NISPTree)], syncHandler: ActorRef, autoCommits: Boolean): Unit = {
+    logger.info(s"Creating LFSM transforms for ${nispTrees.size} synced rollups")
 
     client.execute{
       ctx =>
@@ -41,7 +94,80 @@ object LFSMTransformer {
         attemptPayouts(ctx, payoutTrees, prover, boxLoader)
         attemptHoldingSubmissions(ctx, holdingTrees, prover, diff, boxLoader, cache, syncHandler)
         attemptEvaluation(ctx, evalTrees, prover, boxLoader, cache)
+
+        if(autoCommits)
+          checkAutoCommits(ctx, diff, prover, boxLoader)
     }
+  }
+
+
+  private def checkAutoCommits(ctx: BlockchainContext, diff: String, prover: ErgoProver, boxLoader: BoxLoader) = {
+    Try{
+      val dataNFT = Globals.mdDB.getDataBoxToken
+      dataNFT match {
+        case Some(nft) =>
+          logger.info(s"Found saved DataBox token ${nft}")
+
+          val tau = LFSMHelpers.parseDiffValueForStratum(diff)
+          val score = LFSMHelpers.convertTauOrScore(tau.get)
+          val dataContract = Helpers.dataBoxContract(ctx)
+          val dataBoxes = ctx.getCoveringBoxesFor(dataContract.address(ctx.getNetworkType), Parameters.MinFee,
+            JavaHelpers.toJList(IndexedSeq(new ErgoToken(nft, 1))))
+          if (dataBoxes.getBoxes.size() == 0) {
+            logger.warn(s"Could not find data box with saved id ${nft}")
+          } else {
+            val dataInput = InputUTXO(dataBoxes.getBoxes.get(0))
+            val commits = dataInput.registers.head.getValue.asInstanceOf[Coll[(Int, Long)]]
+            val currentCommit = commits(0)
+            // commit 0 is currently in effect
+            if(ctx.getHeight - currentCommit._1 >= LFSMHelpers.NISP_WINDOW) {
+              if (currentCommit._2 != score) {
+                logger.info(s"Config has diff ${score} but currentCommit is ${currentCommit._2}")
+                val newCommit = ctx.getHeight + DATA_BOX_BUFFER -> score.toLong
+                val nextCommits = commits
+                  .updated(0, newCommit)
+                  .append(Colls.fromArray(Array(currentCommit)))
+                logger.info(s"Next commitment set: ${newCommit}")
+                val otherInputs = boxLoader.getInputs(Parameters.MinFee)
+                val nextDataBox = dataInput.toUTXO.copy(
+                  registers = dataInput.registers.updated(0, ErgoValue.ofColl(
+                    nextCommits,
+                    ErgoType.pairType(ErgoType.integerType(), ErgoType.longType())
+                  ))
+                )
+                val proverContract = Contract.fromErgoContract(prover.getAddress.toErgoContract)
+                val fee = UTXO(Contract(ErgoTreePredef.feeProposition(720)), Parameters.MinFee)
+                val inputWithCtx = dataInput
+                  .withCtxVar(0.toByte, ErgoValue.of(0.toByte))
+                  .withCtxVar(ContextVar.of(1.toByte, proverContract.sigmaBoolean.get))
+
+                val txB = TxBuilder(ctx)
+                val uTx = txB
+                  .setInputs((Seq(inputWithCtx) ++ otherInputs):_*)
+                  .setOutputs(nextDataBox, fee)
+                  .buildTx(0, prover.getAddress)
+
+                val sTx = prover.sign(uTx)
+                val txId = ctx.sendTransaction(sTx)
+                logger.info(s"Sent transaction ${txId} to submit commitment ${newCommit} for data box ${nft}")
+              } else {
+                logger.info("No commitment change needed")
+              }
+            }else{
+              logger.info(s"Not changing commits until next commit takes effect " +
+                s"(height: ${ctx.getHeight}, commit: ${currentCommit})")
+            }
+          }
+        case None =>
+          logger.info("Cannot auto-commit due to no saved data box token")
+      }
+    }.recoverWith{
+      case t: Throwable =>
+        logger.error("Got error while attempting autoCommits", t)
+        Failure(t)
+    }
+
+
   }
   // TODO: Add disable for transforms
   private def checkHoldingTransforms(ctx: BlockchainContext, holdingTrees: Seq[(String, NISPTree)],
@@ -224,7 +350,8 @@ object LFSMTransformer {
     // Sort miners randomly for more unique fp transactions, helps to prevent competing fraud proof checks
     // TODO: Optimize here by preventing redundant evaluations
     val currentMiners = eval._2.minerSet.toSeq.map(Hex.decode).sortBy(_ => Math.random())
-    val evaluator = Evaluator(ctx, prover, evalBox, eval._2, currentMiners, fpControl, loader)
+    val evaluator = Evaluator(ctx, prover, evalBox, eval._2, currentMiners, fpControl, loader,
+      FraudProofContracts.getFraudProofContracts(ctx))
     val attemptEval = Try(evaluator.evaluate)
     attemptEval match {
       case Failure(e) =>
@@ -252,7 +379,7 @@ object LFSMTransformer {
     val holdingInput = InputUTXO(ctx.getBoxesById(holdTree._1).head)
     val score = LFSMHelpers.convertTauOrScore(BigInt(LFSMHelpers.parseDiffValueForStratum(diff).get))
     val nispDB = Globals.nispDB
-    val bestNISP = nispDB.getBestValidNISP(holdingInput.input.getCreationHeight, score.toLong)
+    val bestNISP = nispDB.getBestValidNISP(holdingInput.registers(3).getValue.asInstanceOf[Long].toInt, score.toLong)
 
 
     bestNISP match {
@@ -308,7 +435,7 @@ object LFSMTransformer {
         logger.info(s"Sent transaction ${txId} to submit NISP for NISPTree ${holdTree._2.blockId}")
       case None =>
 
-        syncHandler ! RemoveTree(holdTree._2.blockId, "Unable to submit valid NISP")
+        syncHandler ! RemoveRollup(holdTree._2.blockId, "Unable to submit valid NISP")
         throw new NoValidNISPException(s"Could not produce valid NISP for lithos-mined block ${holdTree._2.startHeight}" +
         s" with id ${holdTree._2.blockId}")
     }
