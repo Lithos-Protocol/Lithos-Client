@@ -1,10 +1,8 @@
-package lfsm.collateral
+package lfsm.contracts
 
 import lfsm.ScriptGenerator
 import org.ergoplatform.appkit.{BlockchainContext, ConstantsBuilder, ErgoId}
 import sigma.Colls
-import sigma.pow.Autolykos2PowValidation
-import sigma.util.NBitsUtils
 import work.lithos.mutations.Contract
 
 object CollateralContract {

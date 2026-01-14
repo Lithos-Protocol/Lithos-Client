@@ -93,7 +93,7 @@
     // Spending Path 3: Miner Data UTXO is spent to remove miner from Miner Dictionary
   }else if(removeMinerOp){
     // Verify correct MinerDictionary UTXO is being used
-    val authenticDictionary = blake2b256(INPUTS(0).tokens(0)._1) == CONST_MD_ID
+    val authenticDictionary = INPUTS(0).tokens(0)._1 == CONST_MD_ID
     val authenticSigner = blake2b256( CTX_SIGNER.propBytes ) == minerHash
     // Check signer is correct and two inputs used, rest is handled by miner dictionary
     sigmaProp( authenticDictionary && authenticSigner && INPUTS.size == 2) && CTX_SIGNER

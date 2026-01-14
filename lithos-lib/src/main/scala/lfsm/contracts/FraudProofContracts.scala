@@ -1,7 +1,7 @@
-package lfsm.fraudproofs
+package lfsm.contracts
 
 import lfsm.{LFSMHelpers, ScriptGenerator}
-import org.ergoplatform.appkit.{BlockchainContext, ConstantsBuilder, ErgoId}
+import org.ergoplatform.appkit.{BlockchainContext, ConstantsBuilder}
 import work.lithos.mutations.Contract
 
 object FraudProofContracts {

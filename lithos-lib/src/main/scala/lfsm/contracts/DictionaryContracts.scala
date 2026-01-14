@@ -1,10 +1,9 @@
-package lfsm.dictionaries
+package lfsm.contracts
 
 import lfsm.{LFSMHelpers, ScriptGenerator}
-import org.ergoplatform.appkit.{BlockchainContext, ConstantsBuilder, ErgoId, NetworkType}
+import org.ergoplatform.appkit.{ConstantsBuilder, ErgoId, NetworkType}
 import sigma.Colls
-import sigma.data.ProveDlog
-import work.lithos.mutations.{Contract, Mutator}
+import work.lithos.mutations.Contract
 
 object DictionaryContracts {
 
