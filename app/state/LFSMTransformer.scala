@@ -168,7 +168,7 @@ object LFSMTransformer {
 
 
   }
-  // TODO: Add disable for transforms
+
   private def checkHoldingTransforms(ctx: BlockchainContext, holdingTrees: Seq[(String, NISPTree)],
                                      prover: NodeWallet, loader: BoxLoader): Unit = {
     val transformable = holdingTrees.filter(h => ctx.getHeight - h._2.currentPeriod.get >= LFSMHelpers.HOLDING_PERIOD)
@@ -193,7 +193,6 @@ object LFSMTransformer {
     }
   }
 
-  // TODO: Add disable for transforms
   private def checkEvalTransforms(ctx: BlockchainContext, evalTrees: Seq[(String, NISPTree)],
                                   prover: NodeWallet, loader: BoxLoader): Unit = {
     val transformable = evalTrees.filter(h => ctx.getHeight - h._2.currentPeriod.get >= LFSMHelpers.EVAL_PERIOD)

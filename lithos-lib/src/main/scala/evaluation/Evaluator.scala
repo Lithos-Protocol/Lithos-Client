@@ -15,7 +15,7 @@ case class Evaluator(ctx: BlockchainContext, prover: NodeWallet, evalInput: Inpu
   def evaluate: Seq[SignedTransaction] = {
     miners.foreach{
       m =>
-        // TODO: Fix logging here
+
         logger.info(s"Starting ${fpContracts.size} evaluations for miner ${Hex.toHexString(m)}")
 
         var txs = Option.empty[Seq[SignedTransaction]]
