@@ -8,7 +8,6 @@ import play.api.cache.SyncCacheApi
  * @param cacheApi
  */
 class RollupCache(cacheApi: SyncCacheApi){
-  // TODO: Extend UTXOSetCache
   private final val TREE_LIST = "TREE_LIST"
 
   def get(id: String): Option[NISPTree] = {

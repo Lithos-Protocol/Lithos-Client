@@ -10,6 +10,7 @@ import lfsm.LFSMHelpers
 import org.slf4j.{Logger, LoggerFactory}
 import play.api.Configuration
 import play.api.inject.ApplicationLifecycle
+import state.LFSMTransformer
 import stratum.ErgoStratumServer
 import stratum.data.{Data, Options}
 import utils.{Globals, Helpers}
@@ -36,7 +37,13 @@ class StratumServer @Inject()(system: ActorSystem, config: Configuration, cs: Co
     logger.info("Starting Stratum Server for Lithos")
 
     //System.out.println(s"Stratum Server will initiate in ${taskConfig.startup.toString()}")
-    val tau = LFSMHelpers.parseDiffValueForStratum(stratumParams.diff)
+    val tau = nodeConfig.getClient.execute{
+      ctx =>
+        LFSMTransformer.getCommitedScore(ctx, stratumParams.diff, "stratum mining").map{
+          s =>
+            LFSMHelpers.convertTauOrScore(s).bigInteger
+        }
+    }
     tau match {
       case Success(t) =>
         val options = new Options(stratumParams.extraNonce1Size, 256,
@@ -82,10 +89,10 @@ class StratumServer @Inject()(system: ActorSystem, config: Configuration, cs: Co
 
         logger.info(s"Stratum server now listening for connections on port ${stratumParams.stratumPort}")
         Future(server.startListening(stratumParams.stratumPort))(contexts.stratumContext)
-       // System.out.println("Fully stopped listening")
+
 
       case Failure(e) =>
-        System.out.println("Failed to start stratum due to invalid difficulty value")
+        logger.error("Failed to start stratum due to error while retrieving difficulty value", e)
     }
 
   }else{

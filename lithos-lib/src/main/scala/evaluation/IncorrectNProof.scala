@@ -1,6 +1,6 @@
 package evaluation
 
-import lfsm.NISPTree
+import lfsm.states.NISPTree
 import mutations.BoxLoader
 import org.bouncycastle.util.encoders.Hex
 import org.ergoplatform.appkit.{BlockchainContext, ContextVar, ErgoProver, ErgoType, ErgoValue, Parameters, SignedTransaction}
@@ -17,7 +17,6 @@ case class IncorrectNProof(contract: Contract, miner: Array[Byte], nispTree: NIS
   override val logger: Logger = LoggerFactory.getLogger("IncorrectNProof")
 
   override def attemptFraudProof(ctx: BlockchainContext, prover: ErgoProver, txBuilder: TxBuilder, loader: BoxLoader): Option[Seq[SignedTransaction]] = {
-    println(s"Using contract ${contract.address(ctx).toString}")
     val fpAttempt = Try{
 
       val fpInput = loader.getInputs(Parameters.MinFee).head

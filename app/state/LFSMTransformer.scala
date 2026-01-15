@@ -372,14 +372,51 @@ object LFSMTransformer {
         }
     }
   }
-
+  def getCommitedScore(ctx: BlockchainContext, diff: String, reason: String): Try[Long] = {
+    Try {
+      val dataBoxNFT = Globals.mdDB.getDataBoxToken
+      val score = LFSMHelpers.convertTauOrScore(BigInt(LFSMHelpers.parseDiffValueForStratum(diff).get))
+      dataBoxNFT match {
+        case Some(nft) =>
+          val dataBox = Try(InputUTXO(ctx.getCoveringBoxesFor(Helpers.dataBoxContract(ctx).address(ctx), Parameters.MinFee,
+            JavaHelpers.toJList(IndexedSeq(new ErgoToken(nft, 1L)))).getBoxes.get(0)))
+          dataBox match {
+            case Failure(exception) =>
+              logger.error(s"Got error while retrieving data box from blockchain. Defaulting to config diff value $diff")
+              logger.error("NISPs submitted or mined in this manner may be considered fraudulent")
+              logger.error("error: ", exception)
+              score.toLong
+            case Success(dataInput) =>
+              val commits = dataInput.registers.head.getValue.asInstanceOf[Coll[(Int, Long)]]
+              if (commits.size == 1) {
+                logger.info(s"Using new diff commitment ${commits(0)} for $reason")
+                commits(0)._2
+              } else {
+                if (ctx.getHeight - commits(0)._1 >= LFSMHelpers.NISP_WINDOW) {
+                  logger.info(s"Using latest commitment ${commits(0)} for $reason")
+                  commits(0)._2
+                } else {
+                  logger.info(s"Using old commitment ${commits(1)} for $reason")
+                  commits(1)._2
+                }
+              }
+          }
+        case None =>
+          logger.warn(s"No stored data box, forcing config diff value $diff and score $score")
+          logger.warn("NISPs submitted or mined in this manner may be considered fraudulent")
+          score.toLong
+      }
+    }
+  }
   private def submitNISPs(ctx: BlockchainContext, holdTree: (String, NISPTree), prover: ErgoProver,
                           diff: String, loader: BoxLoader, cache: SyncCacheApi, syncHandler: ActorRef): Unit = {
 
     val holdingInput = InputUTXO(ctx.getBoxesById(holdTree._1).head)
-    val score = LFSMHelpers.convertTauOrScore(BigInt(LFSMHelpers.parseDiffValueForStratum(diff).get))
+
     val nispDB = Globals.nispDB
-    val bestNISP = nispDB.getBestValidNISP(holdingInput.registers(3).getValue.asInstanceOf[Long].toInt, score.toLong)
+
+    val commitedScore = getCommitedScore(ctx, diff, "NISP submission").get
+    val bestNISP = nispDB.getBestValidNISP(holdingInput.registers(3).getValue.asInstanceOf[Long].toInt, commitedScore)
 
 
     bestNISP match {
@@ -421,7 +458,7 @@ object LFSMTransformer {
           registers = Seq(
             copiedTree.ergoValue,
             ErgoValue.of(lastMiners + 1),
-            ErgoValue.of((score + BigInt(lastScore)).bigInteger),
+            ErgoValue.of((commitedScore + BigInt(lastScore)).bigInteger),
             holdingInput.registers(3)
           ))
 

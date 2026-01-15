@@ -1,6 +1,6 @@
 package evaluation
 
-import lfsm.NISPTree
+import lfsm.states.NISPTree
 import mutations.BoxLoader
 import org.bouncycastle.util.encoders.Hex
 import org.ergoplatform.appkit._

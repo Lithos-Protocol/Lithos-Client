@@ -1,6 +1,6 @@
 package evaluation
 
-import lfsm.NISPTree
+import lfsm.states.NISPTree
 import org.slf4j.{Logger, LoggerFactory}
 import work.lithos.mutations.{Contract, InputUTXO}
 
