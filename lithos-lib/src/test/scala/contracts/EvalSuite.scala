@@ -2,7 +2,7 @@ package contracts
 
 import contracts.ContractTestHelpers._
 import lfsm.LFSMHelpers
-import lfsm.rollup.RollupContracts
+import lfsm.contracts.RollupContracts
 import org.bouncycastle.util.encoders.Hex
 import org.ergoplatform.appkit._
 import org.scalatest.funsuite.AnyFunSuite

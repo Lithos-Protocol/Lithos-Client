@@ -2,7 +2,7 @@ package contracts
 
 import contracts.ContractTestHelpers.{CHANGE_ADDRESS, DUMMY_UTXO, ONE_ERG, SCORE_VALUES, SIXTY_ERG, TOTAL_SCORE, client, getMiners, getProver, insertValuesNoNISP, localClient}
 import lfsm.LFSMHelpers
-import lfsm.rollup.RollupContracts
+import lfsm.contracts.RollupContracts
 import org.bouncycastle.util.encoders.Hex
 import org.ergoplatform.appkit._
 import org.scalatest.funsuite.AnyFunSuite
