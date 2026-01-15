@@ -33,7 +33,7 @@ class RollupCoordinator @Inject()(syncFactory: RollupSynchronizer.RollupSyncFact
       logger.info("Initialized RollupCoordinator")
       handleGenesis(gen)
       context.become(postInit(Map(gen.tree.utxoId -> gen.tree.blockId)))
-      logger.info(s"Got 1 tree")
+      logger.info(s"Got 1 rollup")
       rollupCache.setTreeSet(Set(gen.tree.utxoId))
     case GetSynced =>
       sender() ! NoRollups()
@@ -77,7 +77,7 @@ class RollupCoordinator @Inject()(syncFactory: RollupSynchronizer.RollupSyncFact
       val tree = trees.find(_._2 == removeTree.blockId)
       require(tree.isDefined, s"Map must contain actor name ${removeTree.blockId} to remove tracking")
       context.become(postInit(trees - tree.get._1))
-      logger.info(s"Removed Rollup ${removeTree.blockId}")
+      logger.info(s"Removed rollup ${removeTree.blockId}")
       rollupCache.removeFromTreeSet(tree.get._1)
       rollupCache.remove(tree.get._1)
     case GetSynced =>

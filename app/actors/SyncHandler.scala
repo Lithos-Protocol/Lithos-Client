@@ -68,7 +68,7 @@ class SyncHandler @Inject()(config: Configuration, @Named("rollup-coordinator") 
           originalSender ! msg
       }
     case removeTree: RemoveRollup =>
-      logger.info(s"Removing tree ${removeTree.blockId} due to: ${removeTree.reason}")
+      logger.info(s"Removing rollup ${removeTree.blockId} due to: ${removeTree.reason}")
       rollupCoordinator ! removeTree
   }
   // efficiency matters here

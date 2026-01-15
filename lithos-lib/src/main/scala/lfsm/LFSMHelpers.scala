@@ -16,8 +16,8 @@ object LFSMHelpers {
   // Target max used in contracts, 2^256 - 1
   final val TARGET_MAX_LITHOS = BigInt("115792089237316195423570985008687907853269984665640564039457584007913129639935")
 
-  final val HOLDING_PERIOD = 10L // 360 Blocks, or 12 hours
-  final val EVAL_PERIOD    = 10L
+  final val HOLDING_PERIOD = 360L // 360 Blocks, or 12 hours
+  final val EVAL_PERIOD    = 360L
   final val NISP_WINDOW    = 160L // 160 on testnet is 2 hours (45 sec blocktime), equivalent on mainnet is 60 (2 min blocktime)
   final val NISP_COEFFICIENT = 10000 // Coefficient which separates normal shares from super-shares, used in evaluation
   final val NISP_MAX         = 26000 // Max size of NISP in bytes
