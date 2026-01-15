@@ -1,7 +1,7 @@
 package evaluation
 
 import lfsm.states.NISPTree
-import mutations.BoxLoader
+import mutations.{BoxLoader, NodeWallet}
 import org.bouncycastle.util.encoders.Hex
 import org.ergoplatform.appkit.{BlockchainContext, ContextVar, ErgoProver, ErgoType, ErgoValue, Parameters, SignedTransaction}
 import org.slf4j.{Logger, LoggerFactory}
@@ -16,7 +16,7 @@ case class IncorrectNProof(contract: Contract, miner: Array[Byte], nispTree: NIS
   extends FraudProof(contract, miner, nispTree, evalInput, fpControl) {
   override val logger: Logger = LoggerFactory.getLogger("IncorrectNProof")
 
-  override def attemptFraudProof(ctx: BlockchainContext, prover: ErgoProver, txBuilder: TxBuilder, loader: BoxLoader): Option[Seq[SignedTransaction]] = {
+  override def attemptFraudProof(ctx: BlockchainContext, prover: NodeWallet, txBuilder: TxBuilder, loader: BoxLoader): Option[Seq[SignedTransaction]] = {
     val fpAttempt = Try{
 
       val fpInput = loader.getInputs(Parameters.MinFee).head
@@ -40,7 +40,7 @@ case class IncorrectNProof(contract: Contract, miner: Array[Byte], nispTree: NIS
         .setInputs(mutateEval,fpWithContext)
         .setDataInputs(fpControl)
         .mutateOutputs
-        .buildTx(0, prover.getAddress))
+        .buildTx(0, prover.p2pk))
       Seq(sTx)
     }
     if(fpAttempt.isFailure){

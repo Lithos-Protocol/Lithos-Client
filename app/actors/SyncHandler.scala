@@ -7,6 +7,7 @@ import cache.RollupCache
 import configs.NodeConfig
 import lfsm.LFSMPhase
 import lfsm.states.NISPTree
+import mutations.NodeWallet
 import org.ergoplatform.appkit.{BlockchainContext, ErgoClient, ErgoProver, ErgoValue}
 import org.slf4j.{Logger, LoggerFactory}
 import play.api.Configuration
@@ -32,7 +33,7 @@ class SyncHandler @Inject()(config: Configuration, @Named("rollup-coordinator") 
   private val logger: Logger          = LoggerFactory.getLogger("SyncHandler")
   val nodeConfig: NodeConfig          = Globals.getNodeConfig
   val client: ErgoClient              = nodeConfig.getClient
-  val prover: ErgoProver              = nodeConfig.prover
+  val prover: NodeWallet              = nodeConfig.getNodeWallet
   lazy val relErgoTrees: Seq[String]  = Helpers.rollupErgoTrees(client)
   val rollupCache: RollupCache            = RollupCache(cacheApi)
   import context.dispatcher

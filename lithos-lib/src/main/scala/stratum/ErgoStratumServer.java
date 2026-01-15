@@ -7,6 +7,7 @@ import com.redbottledesign.bitcoin.rpc.stratum.transport.ConnectionState;
 import com.redbottledesign.bitcoin.rpc.stratum.transport.StatefulMessageTransport;
 import com.redbottledesign.bitcoin.rpc.stratum.transport.tcp.StratumTcpServer;
 import com.redbottledesign.bitcoin.rpc.stratum.transport.tcp.StratumTcpServerConnection;
+import mutations.NodeWallet;
 import nisp.NISPDatabase;
 import org.ergoplatform.appkit.ErgoClient;
 import org.ergoplatform.appkit.ErgoProver;
@@ -47,7 +48,7 @@ public class ErgoStratumServer extends StratumTcpServer {
 	}
 
     public ErgoStratumServer(Options options, boolean thirdPartyScheduling,
-                             boolean useCollateral, ErgoClient client, ErgoProver prover,
+                             boolean useCollateral, ErgoClient client, NodeWallet prover,
                              String apiKey, boolean reducedShareMessages, NISPDatabase nispDB) {
         this.options = options;
         pool = new Pool(options, this, useCollateral, client, prover, apiKey, reducedShareMessages, nispDB);

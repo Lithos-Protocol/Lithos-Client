@@ -1,6 +1,7 @@
 package stratum;
 
 import lfsm.LFSMHelpers;
+import mutations.NodeWallet;
 import nisp.NISP$;
 import nisp.NISPDatabase;
 import nisp.SuperShare;
@@ -36,7 +37,7 @@ public class Pool {
     private boolean useCollateral = false;
     private ErgoClient client = null;
     private String pk = null;
-    private ErgoProver prover = null;
+    private NodeWallet prover = null;
     private String apiKey = null;
     private boolean reducedShareMessages = false;
     private NISPDatabase nispDB = null;
@@ -49,7 +50,7 @@ public class Pool {
 	}
 
     public Pool(Options options, ErgoStratumServer server,
-                boolean withCollateral, ErgoClient client, ErgoProver prover,
+                boolean withCollateral, ErgoClient client, NodeWallet prover,
                 String apiKey, boolean reducedShareMessages, NISPDatabase nispDB) {
 
         this.options = options;

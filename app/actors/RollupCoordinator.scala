@@ -5,6 +5,7 @@ import akka.actor.{Actor, ActorRef, Terminated}
 import akka.util.Timeout
 import cache.RollupCache
 import configs.NodeConfig
+import mutations.NodeWallet
 import org.ergoplatform.appkit.{ErgoClient, ErgoProver}
 import org.slf4j.{Logger, LoggerFactory}
 import play.api.Configuration
@@ -24,7 +25,7 @@ class RollupCoordinator @Inject()(syncFactory: RollupSynchronizer.RollupSyncFact
   val logger: Logger          = LoggerFactory.getLogger("RollupCoordinator")
   val nodeConfig: NodeConfig  = Globals.getNodeConfig
   val client: ErgoClient      = nodeConfig.getClient
-  val prover: ErgoProver      = nodeConfig.prover
+  val prover: NodeWallet      = nodeConfig.getNodeWallet
   val rollupCache: RollupCache    = RollupCache(cacheApi)
 
   override def receive: Receive = {

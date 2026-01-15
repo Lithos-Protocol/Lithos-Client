@@ -2,14 +2,14 @@ package evaluation
 
 import lfsm.contracts.FraudProofContracts
 import lfsm.states.NISPTree
-import mutations.BoxLoader
+import mutations.{BoxLoader, NodeWallet}
 import org.bouncycastle.util.encoders.Hex
 import org.ergoplatform.appkit.{BlockchainContext, ErgoProver, SignedTransaction}
 import org.slf4j.{Logger, LoggerFactory}
 import work.lithos.mutations.{Contract, InputUTXO, TxBuilder}
 
-case class Evaluator(ctx: BlockchainContext, prover: ErgoProver, evalInput: InputUTXO, nispTree: NISPTree,
-                miners: Seq[Array[Byte]], fpControl: InputUTXO, loader: BoxLoader, fpContracts: Seq[Contract]) {
+case class Evaluator(ctx: BlockchainContext, prover: NodeWallet, evalInput: InputUTXO, nispTree: NISPTree,
+                     miners: Seq[Array[Byte]], fpControl: InputUTXO, loader: BoxLoader, fpContracts: Seq[Contract]) {
   private val logger: Logger = LoggerFactory.getLogger("Evaluator")
 
   def evaluate: Seq[SignedTransaction] = {

@@ -3,7 +3,7 @@ package lfsm
 import lfsm.contracts.RollupContracts
 import org.ergoplatform.appkit.impl.NodeAndExplorerDataSourceImpl
 import org.ergoplatform.appkit.{Address, BlockchainContext, ErgoClient, ErgoId, JavaHelpers, NetworkType, Parameters}
-import work.lithos.mutations.InputUTXO
+import work.lithos.mutations.{Contract, InputUTXO}
 
 import java.math.{BigDecimal, BigInteger, RoundingMode}
 import scala.util.Try
@@ -147,6 +147,13 @@ object LFSMHelpers {
     optFPControl match {
       case Some(fpControl) => fpControl
       case None => throw new RuntimeException("Could not find fpControl UTXO")
+    }
+  }
+
+  def getLocalDataBox(ctx: BlockchainContext, dataId: ErgoId, dataContract: Contract): Try[InputUTXO] = {
+    Try {
+      val allDataBoxes = JavaHelpers.toIndexedSeq(ctx.getUnspentBoxesFor(dataContract.address(ctx), 0, 100)).map(InputUTXO(_))
+      allDataBoxes.find(i => i.tokens.exists(_.id == dataId)).get
     }
   }
 }

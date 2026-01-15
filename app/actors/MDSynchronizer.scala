@@ -5,6 +5,7 @@ import cache.MDCache
 import configs.NodeConfig
 import lfsm.LFSMHelpers
 import lfsm.states.MinerTree
+import mutations.NodeWallet
 import org.bouncycastle.util.encoders.Hex
 import org.ergoplatform.appkit.{BlockchainContext, ErgoClient, ErgoProver, ErgoValue}
 import org.slf4j.{Logger, LoggerFactory}
@@ -25,7 +26,7 @@ class MDSynchronizer @Inject()(cacheApi: SyncCacheApi) extends Actor with Inject
   val logger: Logger = LoggerFactory.getLogger("MDSynchronizer")
   val nodeConfig: NodeConfig  = Globals.getNodeConfig
   val client: ErgoClient      = nodeConfig.getClient
-  val prover: ErgoProver      = nodeConfig.prover
+  val prover: NodeWallet      = nodeConfig.getNodeWallet
   val mdCache: MDCache = MDCache(cacheApi)
 
 
@@ -136,7 +137,7 @@ class MDSynchronizer @Inject()(cacheApi: SyncCacheApi) extends Actor with Inject
   private def addMinerTransform(tree: MinerTree, transform: DictionaryTransform, ctx: BlockchainContext) = {
       val nextDataBox = transform.tx.outputs(1)
       val dataBoxOptions = ErgoValue.fromHex(nextDataBox.registers(1)).getValue.asInstanceOf[Coll[Byte]].toArray
-      val proverContract = Contract.fromAddress(prover.getAddress).hashedPropBytes
+      val proverContract = prover.contract.hashedPropBytes
       val dataBoxMiner = dataBoxOptions.slice(0, 32)
       val isLocalMiner = dataBoxMiner sameElements proverContract
       val dict = tree.dictionary
@@ -162,7 +163,7 @@ class MDSynchronizer @Inject()(cacheApi: SyncCacheApi) extends Actor with Inject
   private def removeMinerTransform(tree: MinerTree, transform: DictionaryTransform, ctx: BlockchainContext) = {
     val dataBox = transform.tx.inputs(1)
 
-    val proverContract = Contract.fromAddress(prover.getAddress).hashedPropBytes
+    val proverContract = prover.contract.hashedPropBytes
 
 
     val dict = tree.dictionary

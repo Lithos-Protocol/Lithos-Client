@@ -89,7 +89,7 @@ class MDSyncTask @Inject()(cache: SyncCacheApi, system: ActorSystem, config: Con
                               if (!stateConfig.disableTransforms.getOrElse(false)) {
                                 Try {
                                   implicit val timeout = Timeout(5 seconds)
-                                  LFSMTransformer.addToMD(nodeConfig.getClient, cache, nodeConfig.prover, stratumConfig.diff)
+                                  LFSMTransformer.addToMD(nodeConfig.getClient, cache, nodeConfig.getNodeWallet, stratumConfig.diff)
                                 }.recoverWith {
                                   case t: Throwable =>
                                     logger.error(s"Got error during sync ${t.getMessage}", t)

@@ -6,6 +6,7 @@ import cache.RollupCache
 import com.google.inject.assistedinject.Assisted
 import lfsm.states.NISPTree
 import lfsm.{LFSMHelpers, LFSMPhase}
+import mutations.NodeWallet
 import org.bouncycastle.util.encoders.Hex
 import org.ergoplatform.appkit.{Address, BlockchainContext, ErgoProver, ErgoValue}
 import org.slf4j.{Logger, LoggerFactory}
@@ -21,7 +22,7 @@ import work.lithos.mutations.Contract
 
 import javax.inject.Inject
 
-class RollupSynchronizer @Inject()(config: Configuration, @Assisted rollupBlockId: String, @Assisted ctx: BlockchainContext, @Assisted prover: ErgoProver, cacheApi: SyncCacheApi) extends Actor {
+class RollupSynchronizer @Inject()(config: Configuration, @Assisted rollupBlockId: String, @Assisted ctx: BlockchainContext, @Assisted prover: NodeWallet, cacheApi: SyncCacheApi) extends Actor {
   val logger: Logger = LoggerFactory.getLogger("RollupSynchronizer-" + rollupBlockId.slice(0, 12))
   val treeCache: RollupCache = RollupCache(cacheApi)
 
@@ -86,7 +87,7 @@ class RollupSynchronizer @Inject()(config: Configuration, @Assisted rollupBlockI
     val proof = ErgoValue.fromHex(transform.input.spendingProof.get.ext("2")).getValue.asInstanceOf[Coll[Byte]]
 
     val isMiner = Helpers.pkHexFromSigmaProp(signer).get == Helpers.pkHexFromBoolean(
-      Contract.fromAddress(prover.getAddress).sigmaBoolean.get).get
+      prover.contract.sigmaBoolean.get).get
     val insertion = dict.insert(keyValue._1.toArray -> keyValue._2.toArray)
     require(insertion.proof.ergoValue.getValue == proof, "Proofs must be equal on submission transform")
 
@@ -137,7 +138,7 @@ class RollupSynchronizer @Inject()(config: Configuration, @Assisted rollupBlockI
       require(delete.proof.ergoValue.getValue == delProof, "Removal proofs must be equal on fraud proof transform")
       val minerScore = Longs.fromByteArray(lookUp.response.head.get.slice(0, 8))
       val removedMiner =
-        Hex.toHexString(miner.toArray) == Contract.fromAddress(prover.getAddress).hashedPropBytesHex
+        Hex.toHexString(miner.toArray) == prover.contract.hashedPropBytesHex
       val nextTotalScore = tree.totalScore - minerScore
       val nextMinerSet = tree.minerSet -- Set(Hex.toHexString(miner.toArray))
       val nispTree = {
@@ -176,11 +177,11 @@ class RollupSynchronizer @Inject()(config: Configuration, @Assisted rollupBlockI
       val delProof = ErgoValue.fromHex(input.spendingProof.get.ext("2")).getValue.asInstanceOf[Coll[Byte]]
 
       val paidMiner = miners.toArray.map(_.toArray).exists {
-        a => Hex.toHexString(a) == Contract.fromAddress(prover.getAddress).hashedPropBytesHex
+        a => Hex.toHexString(a) == prover.contract.hashedPropBytesHex
       }
       if (paidMiner) {
         val payoutOutput = transform.tx.outputs
-          .find(_.ergoTree == Contract.fromAddress(prover.getAddress).ergoTreeHex)
+          .find(_.ergoTree == prover.contract.ergoTreeHex)
           .get.toUTXO(ctx)
         val payoutRecord = PayoutRecord(transform.tx.id, payoutOutput.value, LFSMHelpers.scoreFromPayment(payoutOutput.value, tree.totalScore, tree.totalReward),
           input.id, rollupBlockId, tree.startHeight, transform.blockInfo.height)
@@ -222,6 +223,6 @@ class RollupSynchronizer @Inject()(config: Configuration, @Assisted rollupBlockI
 object RollupSynchronizer {
 
   trait RollupSyncFactory {
-    def apply(rollupBlockId: String, ctx: BlockchainContext, prover: ErgoProver): Actor
+    def apply(rollupBlockId: String, ctx: BlockchainContext, prover: NodeWallet): Actor
   }
 }

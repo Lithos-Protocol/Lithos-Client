@@ -58,7 +58,7 @@ class StratumServer @Inject()(system: ActorSystem, config: Configuration, cs: Co
         }
         logger.info(s"Using tau ${t} (score: ${LFSMHelpers.convertTauOrScore(t)}) for NISPs")
         val server = new ErgoStratumServer(options, true, true, nodeConfig.getClient,
-          nodeConfig.prover, nodeConfig.getNodeKey, stratumParams.reduceShareMessages, Globals.nispDB)
+          nodeConfig.getNodeWallet, nodeConfig.getNodeKey, stratumParams.reduceShareMessages, Globals.nispDB)
 
 
         cs.addTask(CoordinatedShutdown.PhaseServiceUnbind, "close-stratum-server"){

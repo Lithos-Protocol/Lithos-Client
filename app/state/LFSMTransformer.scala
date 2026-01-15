@@ -7,7 +7,7 @@ import lfsm.LFSMPhase.{EVAL, HOLDING, PAYOUT}
 import lfsm.contracts.{DictionaryContracts, FraudProofContracts, RollupContracts}
 import lfsm.LFSMHelpers
 import lfsm.states.NISPTree
-import mutations.{BoxLoader, NotEnoughInputsException}
+import mutations.{BoxLoader, NodeWallet, NotEnoughInputsException}
 import nisp.NISPDatabase
 import org.bouncycastle.util.encoders.Hex
 import org.ergoplatform.ErgoTreePredef
@@ -40,7 +40,7 @@ object LFSMTransformer {
     utxo
   }
 
-  def addToMD(client: ErgoClient, cache: SyncCacheApi, prover: ErgoProver, diff: String): String = {
+  def addToMD(client: ErgoClient, cache: SyncCacheApi, prover: NodeWallet, diff: String): String = {
     logger.info("Attempting to add self to miner dictionary")
     client.execute {
       ctx =>
@@ -49,7 +49,7 @@ object LFSMTransformer {
         val score = LFSMHelpers.convertTauOrScore(tau.get).toLong
         val minerTree = MDCache(cache).getMD.get
 
-        val proverContract = Contract.fromErgoContract(prover.getAddress.toErgoContract)
+        val proverContract = prover.contract
         val insertionTree = minerTree.dictionary.copy()
         insertionTree.prover.generateProof()
         val dictInput = InputUTXO(ctx.getBoxesById(minerTree.utxoId).head)
@@ -67,19 +67,19 @@ object LFSMTransformer {
             )))
           .withCtxVar(ContextVar.of(3.toByte, insertion.proof.ergoValue))
         val dictOutput = dictInput.toUTXO.copy(registers = Seq(insertionTree.ergoValue))
-        val output = makeMinerDataBox(ctx, Contract.fromErgoContract(prover.getAddress.toErgoContract), dictInput.id, score)
+        val output = makeMinerDataBox(ctx, proverContract, dictInput.id, score)
         val feeOutput = UTXO(Contract(ErgoTreePredef.feeProposition(720)), Parameters.MinFee)
         val uTx = TxBuilder(ctx)
           .setInputs((Seq(ctxDictInput) ++ inputs): _*)
           .setOutputs(dictOutput, output, feeOutput)
-          .buildTx(0, prover.getAddress)
+          .buildTx(0, prover.p2pk)
 
         val sTx = prover.sign(uTx)
         ctx.sendTransaction(sTx)
     }
   }
 
-  def onSync(client: ErgoClient, cache: SyncCacheApi, prover: ErgoProver, diff: String,
+  def onSync(client: ErgoClient, cache: SyncCacheApi, prover: NodeWallet, diff: String,
              nispTrees: Seq[(String, NISPTree)], syncHandler: ActorRef, autoCommits: Boolean): Unit = {
     logger.info(s"Creating LFSM transforms for ${nispTrees.size} synced rollups")
 
@@ -101,7 +101,7 @@ object LFSMTransformer {
   }
 
 
-  private def checkAutoCommits(ctx: BlockchainContext, diff: String, prover: ErgoProver, boxLoader: BoxLoader) = {
+  private def checkAutoCommits(ctx: BlockchainContext, diff: String, prover: NodeWallet, boxLoader: BoxLoader) = {
     Try{
       val dataNFT = Globals.mdDB.getDataBoxToken
       dataNFT match {
@@ -111,12 +111,11 @@ object LFSMTransformer {
           val tau = LFSMHelpers.parseDiffValueForStratum(diff)
           val score = LFSMHelpers.convertTauOrScore(tau.get)
           val dataContract = Helpers.dataBoxContract(ctx)
-          val dataBoxes = ctx.getCoveringBoxesFor(dataContract.address(ctx.getNetworkType), Parameters.MinFee,
-            JavaHelpers.toJList(IndexedSeq(new ErgoToken(nft, 1))))
-          if (dataBoxes.getBoxes.size() == 0) {
-            logger.warn(s"Could not find data box with saved id ${nft}")
+          val dataBox = LFSMHelpers.getLocalDataBox(ctx, nft, dataContract)
+          if (dataBox.isFailure) {
+            logger.warn(s"Could not find data box with saved id ${nft} on blockchain")
           } else {
-            val dataInput = InputUTXO(dataBoxes.getBoxes.get(0))
+            val dataInput = dataBox.get
             val commits = dataInput.registers.head.getValue.asInstanceOf[Coll[(Int, Long)]]
             val currentCommit = commits(0)
             // commit 0 is currently in effect
@@ -135,7 +134,7 @@ object LFSMTransformer {
                     ErgoType.pairType(ErgoType.integerType(), ErgoType.longType())
                   ))
                 )
-                val proverContract = Contract.fromErgoContract(prover.getAddress.toErgoContract)
+                val proverContract = prover.contract
                 val fee = UTXO(Contract(ErgoTreePredef.feeProposition(720)), Parameters.MinFee)
                 val inputWithCtx = dataInput
                   .withCtxVar(0.toByte, ErgoValue.of(0.toByte))
@@ -145,7 +144,7 @@ object LFSMTransformer {
                 val uTx = txB
                   .setInputs((Seq(inputWithCtx) ++ otherInputs):_*)
                   .setOutputs(nextDataBox, fee)
-                  .buildTx(0, prover.getAddress)
+                  .buildTx(0, prover.p2pk)
 
                 val sTx = prover.sign(uTx)
                 val txId = ctx.sendTransaction(sTx)
@@ -171,7 +170,7 @@ object LFSMTransformer {
   }
   // TODO: Add disable for transforms
   private def checkHoldingTransforms(ctx: BlockchainContext, holdingTrees: Seq[(String, NISPTree)],
-                                     prover: ErgoProver, loader: BoxLoader): Unit = {
+                                     prover: NodeWallet, loader: BoxLoader): Unit = {
     val transformable = holdingTrees.filter(h => ctx.getHeight - h._2.currentPeriod.get >= LFSMHelpers.HOLDING_PERIOD)
     val transforms = transformable.map(t => Try(transformHolding(ctx, t, prover, loader)))
     if(transforms.exists(_.isSuccess)) {
@@ -196,7 +195,7 @@ object LFSMTransformer {
 
   // TODO: Add disable for transforms
   private def checkEvalTransforms(ctx: BlockchainContext, evalTrees: Seq[(String, NISPTree)],
-                                  prover: ErgoProver, loader: BoxLoader): Unit = {
+                                  prover: NodeWallet, loader: BoxLoader): Unit = {
     val transformable = evalTrees.filter(h => ctx.getHeight - h._2.currentPeriod.get >= LFSMHelpers.EVAL_PERIOD)
     val transforms = transformable.map(t => Try(transformEval(ctx, t, prover, loader)))
     if(transforms.exists(_.isSuccess)) {
@@ -219,7 +218,7 @@ object LFSMTransformer {
   }
 
   private def attemptEvaluation(ctx: BlockchainContext, evalTrees: Seq[(String, NISPTree)],
-                                 prover: ErgoProver, loader: BoxLoader, cache: SyncCacheApi) = {
+                                 prover: NodeWallet, loader: BoxLoader, cache: SyncCacheApi) = {
     val transformable = evalTrees.filter(h => ctx.getHeight - h._2.currentPeriod.get < LFSMHelpers.EVAL_PERIOD)
     val unchecked = transformable.filter(!_._2.evaluated)
     val evaluations = unchecked.map(t => Try(evaluateSubmissions(ctx, t, prover, loader, cache)))
@@ -243,7 +242,7 @@ object LFSMTransformer {
   }
 
   private def attemptPayouts(ctx: BlockchainContext, payoutTrees: Seq[(String, NISPTree)],
-                             prover: ErgoProver, loader: BoxLoader): Unit = {
+                             prover: NodeWallet, loader: BoxLoader): Unit = {
     val transforms = payoutTrees.map(t => Try(payoutERG(ctx, t, prover, loader)))
     if(transforms.exists(_.isSuccess)) {
       logger.info(s"Paid out ${transforms.count(_.isSuccess)} payout utxos successfully")
@@ -265,7 +264,7 @@ object LFSMTransformer {
   }
 
   private def attemptHoldingSubmissions(ctx: BlockchainContext, holdingTrees: Seq[(String, NISPTree)],
-                                        prover: ErgoProver, diff: String, loader: BoxLoader, cache: SyncCacheApi,
+                                        prover: NodeWallet, diff: String, loader: BoxLoader, cache: SyncCacheApi,
                                         syncHandler: ActorRef): Unit = {
     val transformable = holdingTrees.filter{
       h =>
@@ -297,7 +296,7 @@ object LFSMTransformer {
   }
 
   private def transformHolding(ctx: BlockchainContext, holding: (String, NISPTree),
-                               prover: ErgoProver, loader: BoxLoader) = {
+                               prover: NodeWallet, loader: BoxLoader) = {
     val holdingInput = InputUTXO(ctx.getBoxesById(holding._1).head)
     val eval = evalContract(ctx)
 
@@ -314,13 +313,13 @@ object LFSMTransformer {
     val uTx = TxBuilder(ctx)
       .setInputs((Seq(holdingInput) ++ otherInputs):_*)
       .setOutputs(output, feeOutput)
-      .buildTx(0, prover.getAddress)
+      .buildTx(0, prover.p2pk)
     val sTx = prover.sign(uTx)
     ctx.sendTransaction(sTx)
   }
 
   private def transformEval(ctx: BlockchainContext, eval: (String, NISPTree),
-                            prover: ErgoProver, loader: BoxLoader): Unit = {
+                            prover: NodeWallet, loader: BoxLoader): Unit = {
     val evalInput = InputUTXO(ctx.getBoxesById(eval._1).head)
     val payout = payoutContract(ctx)
 
@@ -336,14 +335,14 @@ object LFSMTransformer {
     val uTx = TxBuilder(ctx)
       .setInputs((Seq(evalInput) ++ otherInputs):_*)
       .setOutputs(output, feeOutput)
-      .buildTx(0, prover.getAddress)
+      .buildTx(0, prover.p2pk)
     val sTx = prover.sign(uTx)
     val txId = ctx.sendTransaction(sTx)
     logger.info(s"Sent transaction ${txId} to transform eval contract")
   }
 
   private def evaluateSubmissions(ctx: BlockchainContext, eval: (String, NISPTree),
-                                  prover: ErgoProver, loader: BoxLoader, cache: SyncCacheApi): Unit = {
+                                  prover: NodeWallet, loader: BoxLoader, cache: SyncCacheApi): Unit = {
     logger.info(s"Evaluating NISP submissions for NISPTree ${eval._1}")
     val fpControl = LFSMHelpers.getFPControlBox(ctx)
     val evalBox = InputUTXO(ctx.getBoxesById(eval._1).head)
@@ -378,8 +377,7 @@ object LFSMTransformer {
       val score = LFSMHelpers.convertTauOrScore(BigInt(LFSMHelpers.parseDiffValueForStratum(diff).get))
       dataBoxNFT match {
         case Some(nft) =>
-          val dataBox = Try(InputUTXO(ctx.getCoveringBoxesFor(Helpers.dataBoxContract(ctx).address(ctx), Parameters.MinFee,
-            JavaHelpers.toJList(IndexedSeq(new ErgoToken(nft, 1L)))).getBoxes.get(0)))
+          val dataBox = LFSMHelpers.getLocalDataBox(ctx, nft, Helpers.dataBoxContract(ctx))
           dataBox match {
             case Failure(exception) =>
               logger.error(s"Got error while retrieving data box from blockchain. Defaulting to config diff value $diff")
@@ -408,7 +406,7 @@ object LFSMTransformer {
       }
     }
   }
-  private def submitNISPs(ctx: BlockchainContext, holdTree: (String, NISPTree), prover: ErgoProver,
+  private def submitNISPs(ctx: BlockchainContext, holdTree: (String, NISPTree), prover: NodeWallet,
                           diff: String, loader: BoxLoader, cache: SyncCacheApi, syncHandler: ActorRef): Unit = {
 
     val holdingInput = InputUTXO(ctx.getBoxesById(holdTree._1).head)
@@ -435,17 +433,17 @@ object LFSMTransformer {
 
 
         val insert = copiedTree.insert(
-          Contract.fromAddress(prover.getAddress).hashedPropBytes -> nisp.serialize)
+          prover.contract.hashedPropBytes -> nisp.serialize)
 
         logger.info(s"Digests after transform: (${realDigest}, ${tree}, ${copiedTree})")
 
 
         val inputWithContext = holdingInput.setCtxVars(
-          ContextVar.of(0.toByte, ErgoValue.of(Contract.fromAddress(prover.getAddress).sigmaBoolean.get)),
+          ContextVar.of(0.toByte, ErgoValue.of(prover.contract.sigmaBoolean.get)),
           ContextVar.of(
             1.toByte,
             ErgoValue.pairOf(
-              ErgoValue.ofColl(Colls.fromArray(Contract.fromAddress(prover.getAddress).hashedPropBytes), ErgoType.byteType()),
+              ErgoValue.ofColl(Colls.fromArray(prover.contract.hashedPropBytes), ErgoType.byteType()),
               nisp.ergoValue)
           ),
           ContextVar.of(2.toByte, insert.proof.ergoValue)
@@ -466,7 +464,7 @@ object LFSMTransformer {
         val uTx = TxBuilder(ctx)
           .setInputs((Seq(inputWithContext) ++ otherInputs): _*)
           .setOutputs(output, feeOutput)
-          .buildTx(0, prover.getAddress)
+          .buildTx(0, prover.p2pk)
         val sTx = prover.sign(uTx)
         val txId = ctx.sendTransaction(sTx)
         logger.info(s"Sent transaction ${txId} to submit NISP for NISPTree ${holdTree._2.blockId}")
@@ -480,7 +478,7 @@ object LFSMTransformer {
   }
 
   private def payoutERG(ctx: BlockchainContext, payments: (String, NISPTree),
-                        prover: ErgoProver, loader: BoxLoader): Unit = {
+                        prover: NodeWallet, loader: BoxLoader): Unit = {
     logger.info(s"Paying out ERG for NISPTree ${payments._1}")
     val payInput = InputUTXO(ctx.getBoxesById(payments._1).head)
     val payout = payoutContract(ctx)
@@ -492,8 +490,8 @@ object LFSMTransformer {
     val realDigest = Hex.toHexString(payInput.registers.head.getValue.asInstanceOf[AvlTree].digest.toArray)
     logger.info(s"Digests before transform: (${realDigest}, ${tree}, ${copiedTree})")
 
-    val lookUp = copiedTree.lookUp(Contract.fromAddress(prover.getAddress).hashedPropBytes)
-    val delete = copiedTree.delete(Contract.fromAddress(prover.getAddress).hashedPropBytes)
+    val lookUp = copiedTree.lookUp(prover.contract.hashedPropBytes)
+    val delete = copiedTree.delete(prover.contract.hashedPropBytes)
     logger.info(s"Digests after transform: (${realDigest}, ${tree}, ${copiedTree})")
     val score = Longs.fromByteArray(lookUp.response.head.ergoValue.getValue.toArray.slice(0, 8))
     val totalScore   = payInput.registers(2).getValue.asInstanceOf[CBigInt].wrappedValue
@@ -504,7 +502,7 @@ object LFSMTransformer {
     val amountToPay = LFSMHelpers.paymentFromScore(score, totalScore, totalReward)
     val inputWithContext = payInput.setCtxVars(
       ContextVar.of(0.toByte,
-        ErgoValue.ofArray(Array(Colls.fromArray(Contract.fromAddress(prover.getAddress).hashedPropBytes)),
+        ErgoValue.ofArray(Array(Colls.fromArray(prover.contract.hashedPropBytes)),
         ErgoType.collType(ErgoType.byteType()))),
       ContextVar.of(1.toByte, lookUp.proof.ergoValue),
       ContextVar.of(2.toByte, delete.proof.ergoValue)
@@ -517,22 +515,22 @@ object LFSMTransformer {
           payInput.registers(2),
           payInput.registers(3)
         ))
-      val minerOutput = UTXO(Contract.fromAddress(prover.getAddress), amountToPay)
+      val minerOutput = UTXO(prover.contract, amountToPay)
       val feeOutput = UTXO(Contract(ErgoTreePredef.feeProposition(720)), Parameters.MinFee)
       val uTx = TxBuilder(ctx)
         .setInputs((Seq(inputWithContext) ++ otherInputs): _*)
         .setOutputs(output, minerOutput, feeOutput)
-        .buildTx(0, prover.getAddress)
+        .buildTx(0, prover.p2pk)
       val sTx = prover.sign(uTx)
       val txId = ctx.sendTransaction(sTx)
       logger.info(s"Sent transaction ${txId} to pay local miner")
     }else{
-      val minerOutput = UTXO(Contract.fromAddress(prover.getAddress), amountToPay)
+      val minerOutput = UTXO(prover.contract, amountToPay)
       val feeOutput = UTXO(Contract(ErgoTreePredef.feeProposition(720)), Parameters.MinFee)
       val uTx = TxBuilder(ctx)
         .setInputs((Seq(inputWithContext) ++ otherInputs): _*)
         .setOutputs(minerOutput, feeOutput)
-        .buildTx(0, prover.getAddress)
+        .buildTx(0, prover.p2pk)
       val sTx = prover.sign(uTx)
       val txId = ctx.sendTransaction(sTx)
       logger.info(s"Sent transaction ${txId} to pay local miner")

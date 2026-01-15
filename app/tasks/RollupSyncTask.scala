@@ -87,13 +87,13 @@ class RollupSyncTask @Inject()(cache: SyncCacheApi, system: ActorSystem, config:
                                   logger.info(s"Got FullSync() state with ${nispTrees.size} rollups")
 
                                   LFSMTransformer.onSync(nodeConfig.getClient, cache,
-                                    nodeConfig.prover, stratumConfig.diff, nispTrees, syncHandler, stateConfig.autoCommit.getOrElse(true))
+                                    nodeConfig.getNodeWallet, stratumConfig.diff, nispTrees, syncHandler, stateConfig.autoCommit.getOrElse(true))
                                 case PartialSync(syncedTrees, unsyncedIds) =>
                                   logger.info(s"Got PartialSync() state with ${syncedTrees.size} synced rollups" +
                                     s" and ${unsyncedIds.size} unsynced rollups")
 
                                   LFSMTransformer.onSync(nodeConfig.getClient, cache,
-                                    nodeConfig.prover, stratumConfig.diff, syncedTrees, syncHandler, stateConfig.autoCommit.getOrElse(true))
+                                    nodeConfig.getNodeWallet, stratumConfig.diff, syncedTrees, syncHandler, stateConfig.autoCommit.getOrElse(true))
                                 case NoRollups() =>
                                   logger.info(s"Got NoRollups() state with 0 rollups")
                               }

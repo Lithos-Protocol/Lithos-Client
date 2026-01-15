@@ -2,6 +2,7 @@ package stratum
 
 import lfsm.LFSMHelpers
 import lfsm.contracts.{CollateralContract, RollupContracts}
+import mutations.NodeWallet
 import org.bouncycastle.util.encoders.Hex
 import org.ergoplatform.appkit.impl.UnsignedTransactionImpl
 import org.ergoplatform.appkit.{Address, ErgoClient, ErgoId, ErgoProver, ErgoValue, JavaHelpers, Parameters}
@@ -16,7 +17,7 @@ import work.lithos.plasma.collections.PlasmaMap
 
 import scala.util.Try
 
-class CollateralRetriever(client: ErgoClient, prover: ErgoProver) {
+class CollateralRetriever(client: ErgoClient, prover: NodeWallet) {
   private val logger: Logger = LoggerFactory.getLogger("CollateralRetriever")
   def getCollateral: CollateralData = {
     client.execute{

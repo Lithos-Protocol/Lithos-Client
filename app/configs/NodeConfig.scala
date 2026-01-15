@@ -24,7 +24,7 @@ class NodeConfig(config: Configuration) {
   private val ergoClient: ErgoClient = RestApiErgoClient.create(getNodeApi, networkType, nodeKey, "https://api-testnet.ergoplatform.com")
   val apiClient = new ApiClient(nodeURL, "ApiKeyAuth", nodeKey)
   // TODO: Change prover to private and use `NodeWallet`
-  val prover: ErgoProver = ergoClient.execute{
+  private val prover: ErgoProver = ergoClient.execute{
     ctx =>
       ctx.newProverBuilder().withSecretStorage(secretStorage).withEip3Secret(0).build()
   }

@@ -2,7 +2,7 @@ package evaluation
 
 import lfsm.contracts.FraudProofContracts
 import lfsm.states.NISPTree
-import mutations.BoxLoader
+import mutations.{BoxLoader, NodeWallet}
 import nisp.NISP
 import org.bouncycastle.util.encoders.Hex
 import org.ergoplatform.ErgoTreePredef
@@ -28,7 +28,7 @@ abstract class FraudProof(contract: Contract, miner: Array[Byte],
    * @param loader BoxLoader to retrieve new inputs utxos
    * @return Some(Sequence of chained transactions to prove fraud) or None
    */
-  def attemptFraudProof(ctx: BlockchainContext, prover: ErgoProver, txBuilder: TxBuilder, loader: BoxLoader): Option[Seq[SignedTransaction]] = {
+  def attemptFraudProof(ctx: BlockchainContext, prover: NodeWallet, txBuilder: TxBuilder, loader: BoxLoader): Option[Seq[SignedTransaction]] = {
     val fpAttempt = Try{
       val fpInput = loader.getInputs(Parameters.MinFee).head
       val mutateEval = evalInput
@@ -50,7 +50,7 @@ abstract class FraudProof(contract: Contract, miner: Array[Byte],
         .setInputs(mutateEval,fpWithContext)
         .setDataInputs(fpControl)
         .mutateOutputs
-        .buildTx(0, prover.getAddress))
+        .buildTx(0, prover.p2pk))
       Seq(sTx)
     }
     if(fpAttempt.isFailure){
