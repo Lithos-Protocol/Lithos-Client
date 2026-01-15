@@ -2,13 +2,10 @@ package configs
 
 
 
-import org.ergoplatform.appkit.impl.{ErgoTreeContract, NodeAndExplorerDataSourceImpl}
-import org.ergoplatform.appkit.{Address, BlockchainContext, ErgoClient, ErgoProver, InputBox, NetworkType, RestApiErgoClient, SecretStorage}
+import mutations.NodeWallet
+import org.ergoplatform.appkit._
 import org.ergoplatform.restapi.client.ApiClient
 import play.api.Configuration
-import work.lithos.mutations.Contract
-
-import java.util.concurrent.TimeUnit
 
 class NodeConfig(config: Configuration) {
   private val nodeURL: String = config.get[String]("node.url")
@@ -26,11 +23,12 @@ class NodeConfig(config: Configuration) {
 
   private val ergoClient: ErgoClient = RestApiErgoClient.create(getNodeApi, networkType, nodeKey, "https://api-testnet.ergoplatform.com")
   val apiClient = new ApiClient(nodeURL, "ApiKeyAuth", nodeKey)
-  val prover: ErgoProver = ergoClient.execute{
+
+  private val prover: ErgoProver = ergoClient.execute{
     ctx =>
       ctx.newProverBuilder().withSecretStorage(secretStorage).withEip3Secret(0).build()
   }
-  private val nodeWallet: NodeWallet = NodeWallet(PK(prover.getEip3Addresses.get(0)), prover)
+  private val nodeWallet: NodeWallet = NodeWallet(prover)
 
 
   def getNetwork: NetworkType   = networkType
@@ -48,14 +46,6 @@ class NodeConfig(config: Configuration) {
       case NetworkType.TESTNET => ":9052/"
     }
     nodeURL + port
-  }
-  case class NodeWallet(pk: PK, prover: ErgoProver) {
-    val p2pk: Address = pk.p2pk
-    val contract: Contract = pk.contract
-  }
-
-  case class PK(p2pk: Address) {
-    val contract: Contract = Contract(new ErgoTreeContract(p2pk.getErgoAddress.script, networkType).getErgoTree)
   }
 
 }

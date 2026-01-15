@@ -1,11 +1,12 @@
 package api
 
-import lfsm.{LFSMPhase, NISPTree}
+import cache.RollupCache
+import lfsm.LFSMPhase
+import lfsm.states.NISPTree
 import model.ApiError
 import model.BlockMiners
 import model.PoolBlock
 import play.api.cache.SyncCacheApi
-import utils.TreeCache
 
 /**
   * Provides a default implementation for [[BlocksApi]].
@@ -41,9 +42,9 @@ class BlocksApiImpl extends BlocksApi {
     */
   override def getBlocksByHeight(fromHeight: Option[Int], toHeight: Option[Int], cache: SyncCacheApi): List[String] = {
     // TODO: Implement better logic
-    val treeCache = new TreeCache(cache)
-    val fullSet = treeCache.getTreeSet
-    val blocksOpt = for(t <- fullSet) yield treeCache.get(t).map(n => t -> n).toSeq
+    val rollupCache = new RollupCache(cache)
+    val fullSet = rollupCache.getTreeSet
+    val blocksOpt = for(t <- fullSet) yield rollupCache.get(t).map(n => t -> n).toSeq
     val blocks = blocksOpt.flatten
     val startHeight = fromHeight.getOrElse(0)
     val endHeight = toHeight.flatMap{h => if(h < 1) None else Some(h)}.getOrElse(10000000)
@@ -54,8 +55,8 @@ class BlocksApiImpl extends BlocksApi {
     * @inheritdoc
     */
   override def getContractIds(limit: Option[Int], offset: Option[Int], cache: SyncCacheApi): List[String] = {
-    val treeCache = TreeCache(cache)
-    val set = treeCache.getTreeSet
+    val rollupCache = RollupCache(cache)
+    val set = rollupCache.getTreeSet
     val page = ApiHelper.handlePagination(offset, limit)
     set.slice(page._1, page._1 + page._2).toList
   }

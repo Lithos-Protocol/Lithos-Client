@@ -12,7 +12,7 @@ trait NISPStorage {
    * @param shareBytes Bytes of SuperShare to add to database
    * @return Whether all operations returned successfully
    */
-  def addNISP(height: Int, score: Long, shareBytes: Array[Byte]): Boolean
+  def addNISP(score: Long, shareBytes: Array[Byte]): Boolean
   /**
    * Adds SuperShare to create new NISP at given height, or adds the share to an existing NISP
    * @param height Height of the SuperShare
@@ -20,7 +20,7 @@ trait NISPStorage {
    * @param share Share to add to database
    * @return Whether all operations returned successfully
    */
-  def addNISP(height: Int, score: Long, share: SuperShare): Boolean
+  def addNISP(score: Long, share: SuperShare): Boolean
 
   /**
    * Remove NISPs from the db until the given height (exclusive)

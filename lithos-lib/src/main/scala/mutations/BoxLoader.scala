@@ -1,6 +1,7 @@
 package mutations
 
-import org.ergoplatform.appkit.{BlockchainContext, JavaHelpers}
+import org.ergoplatform.appkit.impl.NodeAndExplorerDataSourceImpl
+import org.ergoplatform.appkit.{BlockchainContext, ErgoId, JavaHelpers}
 import org.slf4j.{Logger, LoggerFactory}
 import work.lithos.mutations.InputUTXO
 
@@ -9,11 +10,16 @@ import scala.collection.mutable
 class BoxLoader(ctx: BlockchainContext) {
   private val boxStack = mutable.Stack.empty[InputUTXO]
   private val logger: Logger = LoggerFactory.getLogger("BoxLoader")
+  private val usedBoxes: mutable.HashSet[ErgoId] = mutable.HashSet.empty[ErgoId]
   def loadBoxes: BoxLoader = {
     boxStack.clear()
-    val boxes = JavaHelpers.toIndexedSeq(ctx.getDataSource.getUnspentWalletBoxes)
-      .map(InputUTXO(_)).sortBy(_.value)
-    for(i <- boxes) boxStack.push(i)
+    var totalAdded = 0
+    do {
+      val boxes = JavaHelpers.toIndexedSeq(ctx.getDataSource.getUnspentWalletBoxes)
+        .map(InputUTXO(_)).filter(i => !usedBoxes(i.id)).sortBy(_.value)
+      totalAdded += boxes.size
+      for (i <- boxes) boxStack.push(i)
+    }while(totalAdded < 500)
     logger.info(s"Loaded ${boxStack.size} boxes in BoxLoader")
     this
   }
@@ -27,12 +33,22 @@ class BoxLoader(ctx: BlockchainContext) {
           s" (only got ${inputBoxes.size} for ${currentValue})")
       }
       val input    = boxStack.pop()
-      currentValue = currentValue + input.value
-      inputBoxes = inputBoxes :+ input
+      if(!usedBoxes(input.id)) {
+        currentValue = currentValue + input.value
+        usedBoxes += input.id
+        inputBoxes = inputBoxes :+ input
+      }
     }
     logger.info(s"Returned ${inputBoxes.size} boxes from BoxLoader")
 
     inputBoxes.toSeq
+  }
+
+  def getAll = {
+    val all = boxStack.toArray
+    usedBoxes ++= all.map(_.id)
+    boxStack.clear()
+    all
   }
 
   def pushMempoolUTXO(output: InputUTXO): BoxLoader = {

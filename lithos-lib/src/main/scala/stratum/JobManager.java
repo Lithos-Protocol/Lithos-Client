@@ -1,5 +1,6 @@
 package stratum;
 
+import evaluation.NTable;
 import lfsm.LFSMHelpers;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -137,21 +138,31 @@ public class JobManager {
 
 
 		triggerEvent(new NewBlock(blockTemplate));
-        validJobs.clear();
 		validJobs.put(blockTemplate.jobId, blockTemplate);
-        logger.info("Sent new job with height = {}, b = {}", candidate.height, candidate.b);
+        int jobNum = Integer.decode("0x" + blockTemplate.jobId);
+        int jobToRemove;
+        if(jobNum >= 5){
+            jobToRemove = jobNum - 5;
+        }else{
+            jobToRemove = 65535 - (5 - jobNum);
+        }
+        validJobs.remove(Integer.toHexString(jobToRemove));
+        logger.info("Sent new job with id = {}, height = {}, b = {}", blockTemplate.jobId, candidate.height, candidate.b);
 		return true;
 	}
 
 	public static class ProcessingException extends Exception {
 		private final int id;
-
-		public ProcessingException(int id, String message) {
+        private byte[] nonce1;
+		public ProcessingException(int id, String message, byte[] extraNonce1) {
 			super(message);
 			this.id = id;
+            this.nonce1 = extraNonce1;
 		}
 
 		public int getId() { return id; }
+
+        public byte[] getExtraNonce1() {return nonce1;}
 	}
 
 	private interface ThrowException {
@@ -167,14 +178,13 @@ public class JobManager {
 					difficulty,
 					errorMessage
 			), null));
-			throw new ProcessingException(errorId, errorMessage);
+			throw new ProcessingException(errorId, errorMessage, extraNonce1);
 		};
 
 		if (extraNonce2.length != extraNonce2Size) {
 			shareError.run(20, "incorrect size of extraNonce2");
 			return null;
 		}
-
 		BlockTemplate job = validJobs.get(jobId);
 
 		if (job == null) {
@@ -189,12 +199,12 @@ public class JobManager {
 			return null;
 		}
 
-//		if (!job.registerSubmit(extraNonce1, extraNonce2, nTime, nonce)) {
-//			shareError.run(22, "duplicate share");
-//			return null;
-//		}
+		if (!job.registerSubmit(extraNonce1, extraNonce2, nTime, nonce)) {
+			shareError.run(22, "duplicate share");
+			return null;
+		}
 		byte[] h = Utils.intBytes((int) job.candidate.height);
-		BigInteger fH = Autolykos2PowValidation.hitForVersion2ForMessageWithChecks(32, job.msg, nonce, h, N(job.candidate.height).intValue()).bigInteger();
+		BigInteger fH = Autolykos2PowValidation.hitForVersion2ForMessageWithChecks(32, job.msg, nonce, h, NTable.lookUp((int) job.candidate.height)).bigInteger();
 
 		byte[] blockHash;
         boolean isBlock = false;
@@ -237,7 +247,7 @@ public class JobManager {
 				job.candidate.b,
 				blockHash,
                 isSuperShare,
-                job.candidate
+                MiningCandidate.copy(job.candidate)
 		), nonce));
 
 		return blockHash;

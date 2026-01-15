@@ -25,43 +25,82 @@
   // CTX_MINER_BYTES(0) - Hashed PropBytes of miner who committed fraud
   // CTX_LOOKUP_PROOF(1) - Lookup proof for miner
   // CTX_REMOVE_PROOF(2) - Removal proof for miner
-  val CTX_MINER_BYTES      = getVar[Coll[Byte]](0).getOrElse(Coll(0.toByte))
-  val CTX_LOOKUP_PROOF     = getVar[Coll[Byte]](1).getOrElse(Coll(0.toByte))
-  val CTX_REMOVE_PROOF     = getVar[Coll[Byte]](2).getOrElse(Coll(0.toByte))
+  val CTX_MINER_BYTES      = getVarFromInput[Coll[Byte]](1, 0).getOrElse(Coll(0.toByte))
+  val CTX_LOOKUP_PROOF     = getVarFromInput[Coll[Byte]](1, 1).getOrElse(Coll(0.toByte))
+  val CTX_REMOVE_PROOF     = getVarFromInput[Coll[Byte]](1, 2).getOrElse(Coll(0.toByte))
   // CONSTANTS
   // Constant sizes for various parts of NISPs
-  val CONST_HEADER_SIZE       = 220
-  val CONST_PREHEADER_SIZE    = 179
   val CONST_SCORE_SIZE        = 8
-  val CONST_LEAF_SIZE         = 32
   val CONST_LEVEL_SIZE        = 33
   val CONST_N_SIZE            = 4
-  val CONST_NISP_WINDOW       = 360
+  val CONST_Y_COORD_SIZE      = 32
+  // For header invariants explanation, please view InvalidFormat Proof
+  val CONST_INVARIANT_PREFIX  = 130
+  val CONST_INVARIANT_MID     = 36
+  val CONST_INVARIANT_SUFFIX  = 45
+  // TODO: Grab from contract constants
+  val CONST_NISP_WINDOW       = 160
   // Helper Methods
   def getScore(nispBytes: Coll[Byte]): Long = {
     byteArrayToLong(nispBytes.slice(0,CONST_SCORE_SIZE))
   }
 
-  // NISPs are serialized as the following
-  // [score: 8bytes][10 SuperShares]
-  // Where SuperShares are serialized as the following
-  // [N: 4bytes][header: 220bytes][numLevels: 1Byte][leaf: 33bytes][levels: numLevels * 33bytes]
+  // We assume vlq encoding is correct already due to InvalidFormat Proof so no additional checks here
+  def parseVLQSize(vlqBytes: Coll[Byte]): (Int, Boolean) = {
+    vlqBytes.fold((0, false), {
+      (a: (Int, Boolean), b: Byte) =>
+        if(a._2){
+          a
+        }else{
+          val continue = b < 0 // If byte is negative, most-signficant bit is set to 1
+          (a._1 + 1, !continue)
+        }
+    })
+  }
+
+  def getHeaderSize(shareBytes: Coll[Byte]) = {
+    // Build VLQ sizes to determine header size
+    val timestampBytes = shareBytes.slice(
+      CONST_N_SIZE + CONST_INVARIANT_PREFIX,
+      CONST_N_SIZE + CONST_INVARIANT_PREFIX + 11 // 11 byte buffer to read long, not all used necessarily
+    )
+    val timestampSize = parseVLQSize(timestampBytes)
+
+    val heightBytes = shareBytes.slice(
+      CONST_N_SIZE + CONST_INVARIANT_PREFIX + timestampSize._1 + CONST_INVARIANT_MID,
+      CONST_N_SIZE + CONST_INVARIANT_PREFIX + timestampSize._1 + CONST_INVARIANT_MID + 7 // 7 byte buffer to read int, not all used necessarily
+    )
+    val heightSize = parseVLQSize(heightBytes)
+
+    CONST_INVARIANT_PREFIX + timestampSize._1 + CONST_INVARIANT_MID + heightSize._1 + CONST_INVARIANT_SUFFIX
+  }
+
   def getSuperShares(nispBytes: Coll[Byte]): Coll[Coll[Byte]] = {
-    val shareBytes = nispBytes.slice(CONST_SCORE_SIZE, nispBytes.size)
-    // Iterate 10 times for 10 shares. We can assume this is true as it is checked in other FP contracts
+    val shareSetBytes = nispBytes.slice(CONST_SCORE_SIZE, nispBytes.size)
+
+    // Iterate 10 times for 10 shares.
+    // No index out of bounds checks needed here, due to InvalidFormatProof
     val iters = Coll(0,1,2,3,4,5,6,7,8,9)
     val shares = iters.fold((Coll[Coll[Byte]](), 0), {
       (a: (Coll[Coll[Byte]], Int), b: Int) =>
-        val numLevels: Byte = shareBytes(a._2 + CONST_N_SIZE + CONST_HEADER_SIZE)
+        val headerSize = getHeaderSize(shareSetBytes.slice(a._2, shareSetBytes.size))
+        val txProofSize = fromBigEndianBytes[Short](
+          shareSetBytes.slice(
+            a._2 + CONST_N_SIZE + headerSize,
+            a._2 + CONST_N_SIZE + headerSize + 2
+          )
+        )
+        val numLevels: Byte = shareSetBytes(a._2 + CONST_N_SIZE + headerSize + 2)
         val totalLevels = numLevels.toInt * CONST_LEVEL_SIZE
-        val end = a._2 + CONST_N_SIZE + CONST_HEADER_SIZE + 1 + CONST_LEAF_SIZE + totalLevels
-        (a._1.append(Coll(shareBytes.slice(a._2, end))), end)
+        val end = a._2 + CONST_N_SIZE + headerSize + 3 + txProofSize + totalLevels + CONST_Y_COORD_SIZE
+        (a._1.append(Coll(shareSetBytes.slice(a._2, end))), end)
     })
     shares._1
   }
 
   def getHeader(shareBytes: Coll[Byte]): Header = {
-    deserializeTo[Header](shareBytes.slice(CONST_N_SIZE, CONST_N_SIZE + CONST_HEADER_SIZE))
+    val headerSize = getHeaderSize(shareBytes)
+    deserializeTo[Header](shareBytes.slice(CONST_N_SIZE, CONST_N_SIZE + headerSize))
   }
 
   // Evaluation
@@ -72,6 +111,9 @@
     (x: Coll[Byte]) =>
       getHeader(x)
   }
+  // TODO: Check for non-monotonic header timestamps
+  // Valid height for header in NISP is defined as
+  // currentBlock - CONST_NISP_WINDOW <= validHeight <= currentBlock
 
 
   // There exists some share header not within the NISP Window

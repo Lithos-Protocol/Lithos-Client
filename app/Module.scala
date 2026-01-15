@@ -1,9 +1,9 @@
-import actors.{SyncCoordinator, SyncHandler, TreeSyncer}
+import actors.{MDSynchronizer, RollupCoordinator, RollupSynchronizer, SyncHandler}
 import api.{BlocksApi, BlocksApiImpl, CollateralApi, CollateralApiImpl, InfoApi, InfoApiImpl, MiningApi, MiningApiImpl, PaymentsApi, PaymentsApiImpl}
 import com.google.inject.AbstractModule
 import play.api.{Configuration, Environment}
 import play.libs.akka.AkkaGuiceSupport
-import tasks.{BlockPolling, StartupTasks, StratumServer}
+import tasks.{MDSyncTask, RollupSyncTask, StartupTasks, StratumServer}
 import utils.Globals
 
 class Module(environment: Environment, configuration: Configuration) extends AbstractModule with AkkaGuiceSupport
@@ -15,9 +15,10 @@ class Module(environment: Environment, configuration: Configuration) extends Abs
     Globals.setConfigs(configuration)
 
     // Bindings
-    bindActor(classOf[SyncCoordinator], "sync-coordinator", p => p.withDispatcher("lithos-contexts.sync-dispatcher"))
+    bindActor(classOf[RollupCoordinator], "rollup-coordinator", p => p.withDispatcher("lithos-contexts.sync-dispatcher"))
     bindActor(classOf[SyncHandler], "sync-handler", p => p.withDispatcher("lithos-contexts.sync-dispatcher"))
-    bindActorFactory(classOf[TreeSyncer], classOf[TreeSyncer.SyncFactory])
+    bindActor(classOf[MDSynchronizer], "md-synchronizer", p => p.withDispatcher("lithos-contexts.sync-dispatcher"))
+    bindActorFactory(classOf[RollupSynchronizer], classOf[RollupSynchronizer.RollupSyncFactory])
     bind(classOf[BlocksApi]).to(classOf[BlocksApiImpl])
     bind(classOf[CollateralApi]).to(classOf[CollateralApiImpl])
     bind(classOf[InfoApi]).to(classOf[InfoApiImpl])
@@ -25,6 +26,7 @@ class Module(environment: Environment, configuration: Configuration) extends Abs
     bind(classOf[PaymentsApi]).to(classOf[PaymentsApiImpl])
     bind[StartupTasks](classOf[StartupTasks]).asEagerSingleton()
     bind[StratumServer](classOf[StratumServer]).asEagerSingleton()
-    bind[BlockPolling](classOf[BlockPolling]).asEagerSingleton()
+    bind[RollupSyncTask](classOf[RollupSyncTask]).asEagerSingleton()
+    bind[MDSyncTask](classOf[MDSyncTask]).asEagerSingleton()
   }
 }

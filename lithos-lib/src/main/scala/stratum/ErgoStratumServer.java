@@ -7,6 +7,7 @@ import com.redbottledesign.bitcoin.rpc.stratum.transport.ConnectionState;
 import com.redbottledesign.bitcoin.rpc.stratum.transport.StatefulMessageTransport;
 import com.redbottledesign.bitcoin.rpc.stratum.transport.tcp.StratumTcpServer;
 import com.redbottledesign.bitcoin.rpc.stratum.transport.tcp.StratumTcpServerConnection;
+import mutations.NodeWallet;
 import nisp.NISPDatabase;
 import org.ergoplatform.appkit.ErgoClient;
 import org.ergoplatform.appkit.ErgoProver;
@@ -25,7 +26,9 @@ import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.net.InetSocketAddress;
 import java.net.Socket;
+import java.util.Arrays;
 import java.util.Iterator;
+import java.util.Objects;
 
 
 public class ErgoStratumServer extends StratumTcpServer {
@@ -45,7 +48,7 @@ public class ErgoStratumServer extends StratumTcpServer {
 	}
 
     public ErgoStratumServer(Options options, boolean thirdPartyScheduling,
-                             boolean useCollateral, ErgoClient client, ErgoProver prover,
+                             boolean useCollateral, ErgoClient client, NodeWallet prover,
                              String apiKey, boolean reducedShareMessages, NISPDatabase nispDB) {
         this.options = options;
         pool = new Pool(options, this, useCollateral, client, prover, apiKey, reducedShareMessages, nispDB);
@@ -132,7 +135,7 @@ public class ErgoStratumServer extends StratumTcpServer {
                 logger.info("Got new subscription request: {}", m);
 				try {
 					extraNonce1 = server.pool.jobManager.extraNonceCounter.next();
-					getTransport().sendResponse(Response.subscribe(m.getId(), subscriptionId, extraNonce1, 4));
+					getTransport().sendResponse(Response.subscribe(m.getId(), subscriptionId, extraNonce1, server.pool.jobManager.extraNonce2Size));
 					getTransport().sendResponse(Announcement.difficulty(new BigDecimal("1.0")));
 					getTransport().sendResponse(Announcement.miningJob(server.pool.jobManager.currentJob));
 
@@ -161,7 +164,8 @@ public class ErgoStratumServer extends StratumTcpServer {
 					String jobId = (String) m.getParams().get(1);
 					byte[] extraNonce2 = Hex.decode((String) m.getParams().get(2));
 					String nTime = (String) m.getParams().get(3);
-					server.pool.jobManager.processShare(jobId, new BigInteger("1"), Hex.decode(extraNonce1), extraNonce2, nTime, socketAddress.getHostString(), socketAddress.getPort(), name);
+                    byte[] shareExtraNonce1 = Arrays.copyOfRange(Hex.decode((String) m.getParams().get(4)), 0, 4);
+					server.pool.jobManager.processShare(jobId, new BigInteger("1"), shareExtraNonce1, extraNonce2, nTime, socketAddress.getHostString(), socketAddress.getPort(), name);
 					getTransport().sendResponse(Response.submit(m.getId(), ResultFactory.getInstance().createResult(Boolean.TRUE), null));
 				} catch (IOException e) {
 					throw new RuntimeException(e);
@@ -173,6 +177,18 @@ public class ErgoStratumServer extends StratumTcpServer {
                             logger.warn("Received potentially old share from miner");
                             getTransport().sendResponse(Response.submit(m.getId(), ResultFactory.getInstance().createResult(Boolean.TRUE), null));
                             getTransport().sendResponse(Announcement.miningJob(server.pool.jobManager.currentJob));
+                        }
+                        else if(e.getId() == 22) {
+                            logger.warn("Got potentially duplicate share from miner");
+                            if(Hex.toHexString(e.getExtraNonce1()).equalsIgnoreCase(extraNonce1)){
+                                extraNonce1 = server.pool.jobManager.extraNonceCounter.next();
+                                logger.info("Sending new extraNonce1 {}", extraNonce1);
+                                getTransport().sendResponse(Announcement.extraNonce1(extraNonce1, server.pool.jobManager.extraNonce2Size));
+                                getTransport().sendResponse(Announcement.miningJob(server.pool.jobManager.currentJob));
+                            }else{
+                                logger.warn("Skipping handled extraNonce1 {}", Hex.toHexString(e.getExtraNonce1()));
+                            }
+                            getTransport().sendResponse(Response.submit(m.getId(), ResultFactory.getInstance().createResult(Boolean.TRUE), null));
                         }else{
                             logger.error("Share processing error", e);
                             getTransport().sendResponse(Response.submit(m.getId(), null, e.getId()+ ": " + e.getMessage()));
@@ -187,5 +203,5 @@ public class ErgoStratumServer extends StratumTcpServer {
 				}
 			});
 		}
-	}
+    }
 }

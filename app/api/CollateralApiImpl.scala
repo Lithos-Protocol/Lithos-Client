@@ -2,8 +2,7 @@ package api
 
 import configs.NodeConfig
 import lfsm.LFSMHelpers
-import lfsm.collateral.CollateralContract
-import lfsm.rollup.RollupContracts
+import lfsm.contracts.{CollateralContract, RollupContracts}
 import model.ApiError
 import model.CollateralInfo
 import model.CollateralUTXO
@@ -38,17 +37,17 @@ class CollateralApiImpl extends CollateralApi {
           .loadBoxes
           .getInputs((collateralInfo.reward * collateralInfo.numUtxos) + Parameters.MinFee)
 
-        val prover = nodeConfig.prover
+        val prover = nodeConfig.getNodeWallet
         val collateral = Helpers.collateralContract(ctx)
         val outputs = Array.fill(collateralInfo.numUtxos)(UTXO(collateral, collateralInfo.reward, registers = Seq(
           ErgoValue.of(collateralInfo.fee),
-          ErgoValue.of(prover.getAddress.getPublicKey)
+          ErgoValue.of(prover.p2pk.getPublicKey)
         )))
         val feeOutput = UTXO(Contract(ErgoTreePredef.feeProposition(720)), Parameters.MinFee)
         val uTx = TxBuilder(ctx)
           .setInputs(inputs: _*)
           .setOutputs((outputs ++ Seq(feeOutput)): _*)
-          .buildTx(0, prover.getAddress)
+          .buildTx(0, prover.p2pk)
 
         val sTx = prover.sign(uTx)
         val txId = ctx.sendTransaction(sTx)
@@ -78,7 +77,7 @@ class CollateralApiImpl extends CollateralApi {
   override def getLocalCollateralInfo(limit: Option[Int], offset: Option[Int], config: Configuration): List[CollateralUTXO] = {
     // TODO: Implement better logic
     val nodeConfig = Globals.getNodeConfig
-    getAllCollateralInfo(limit, offset, config).filter(c => c.lender == nodeConfig.prover.getAddress.toString)
+    getAllCollateralInfo(limit, offset, config).filter(c => c.lender == nodeConfig.getNodeWallet.prover.toString)
   }
 
   def parseCollateralUTXO(ctx: BlockchainContext, i: InputUTXO) = {

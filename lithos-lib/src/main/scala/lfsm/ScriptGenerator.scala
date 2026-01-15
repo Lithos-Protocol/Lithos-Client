@@ -12,8 +12,9 @@ object ScriptGenerator {
   private final val EXT = ".ergo"
 
   private final val COLLAT = "collateral/"
-  private final val ROLLUP = "rollup/"
+  private final val ROLLUPS = "rollups/"
   private final val FRAUD_PROOFS = "fraudproofs/"
+  private final val DICTIONARIES = "dictionaries/"
 
   def mkSigTrue(ctx: BlockchainContext): Contract = {
     Contract.fromErgoScript(ctx, ConstantsBuilder.empty(), " { sigmaProp(true) } ")
@@ -27,7 +28,7 @@ object ScriptGenerator {
   }
 
   def mkRollupScript(name: String): String = {
-    val src = Source.fromResource(ROLLUP + name + EXT)
+    val src = Source.fromResource(ROLLUPS + name + EXT)
     val script = src.mkString
     src.close()
     script
@@ -35,6 +36,13 @@ object ScriptGenerator {
 
   def mkFraudProofScript(name: String): String = {
     val src = Source.fromResource(FRAUD_PROOFS + name + EXT)
+    val script = src.mkString
+    src.close()
+    script
+  }
+
+  def mkDictionaryScript(name: String): String = {
+    val src = Source.fromResource(DICTIONARIES + name + EXT)
     val script = src.mkString
     src.close()
     script

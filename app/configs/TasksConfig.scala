@@ -7,9 +7,10 @@ import scala.concurrent.duration.{Duration, FiniteDuration}
 class TasksConfig(config: Configuration){
   val stratumServerTaskConfig:   TasksConfig.TaskConfiguration =
     TasksConfig.TaskConfiguration.fromConfig(config, "stratum-server")
-  val blockPolling:   TasksConfig.TaskConfiguration =
-    TasksConfig.TaskConfiguration.fromConfig(config, "block-polling")
-
+  val rollupSyncTask:   TasksConfig.TaskConfiguration =
+    TasksConfig.TaskConfiguration.fromConfig(config, "rollup-sync-task")
+  val dictionarySyncTask:   TasksConfig.TaskConfiguration =
+    TasksConfig.TaskConfiguration.fromConfig(config, "dictionary-sync-task")
 }
 
 object TasksConfig {

@@ -18,4 +18,8 @@ public class Announcement {
 	public static AnnouncementMessage miningJob(BlockTemplate blockTemplate) {
 		return new AnnouncementMessage("mining.notify", blockTemplate::getJobParams);
 	}
+
+    public static AnnouncementMessage extraNonce1(String extraNonce1, int extraNonce2Size) {
+        return new AnnouncementMessage("mining.set_extranonce", () -> jsonArray(extraNonce1, extraNonce2Size));
+    }
 }

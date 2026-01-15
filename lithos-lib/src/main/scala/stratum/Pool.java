@@ -1,6 +1,7 @@
 package stratum;
 
 import lfsm.LFSMHelpers;
+import mutations.NodeWallet;
 import nisp.NISP$;
 import nisp.NISPDatabase;
 import nisp.SuperShare;
@@ -36,7 +37,7 @@ public class Pool {
     private boolean useCollateral = false;
     private ErgoClient client = null;
     private String pk = null;
-    private ErgoProver prover = null;
+    private NodeWallet prover = null;
     private String apiKey = null;
     private boolean reducedShareMessages = false;
     private NISPDatabase nispDB = null;
@@ -49,7 +50,7 @@ public class Pool {
 	}
 
     public Pool(Options options, ErgoStratumServer server,
-                boolean withCollateral, ErgoClient client, ErgoProver prover,
+                boolean withCollateral, ErgoClient client, NodeWallet prover,
                 String apiKey, boolean reducedShareMessages, NISPDatabase nispDB) {
 
         this.options = options;
@@ -119,10 +120,10 @@ public class Pool {
                 }
                 if(successfulShare.isSuperShare) {
                     try {
-                        SuperShare share = SuperShare.fromCandidate(e.nonce, successfulShare.candidate);
-                        logger.info("Saving super share for block {}", share.getHeight());
+                        SuperShare share = SuperShare.fromCandidate(e.nonce, successfulShare.candidate, successfulShare.candidate.collateralData);
+                        logger.info("Saving super share for block {} with nonce {}", share.getHeight(), Hex.toHexString(e.nonce));
                         long score = LFSMHelpers.convertTauOrScore(BigInt.apply(successfulShare.difficulty)).longValue();
-                        boolean success = nispDB.addNISP(share.getHeight(), score, share);
+                        boolean success = nispDB.addNISP(score, share);
                         if (success) {
                             logger.info("Successfully saved super share");
                             logger.info("NISP-DB: {} entries, lastHeight: {}, currentHeight: {}",
@@ -136,10 +137,16 @@ public class Pool {
                             throw new RuntimeException("Failed to save super share to NISP database");
                         }
                     } catch (Exception ex) {
-                        if(ex.getMessage().contains("merkle leaf for collateral")){
+                        if(ex.getMessage() == null){
+                            logger.error("error: ", ex);
+                        }else if(ex.getMessage().contains("merkle leaf for collateral")){
                             // TODO: Fix merkle leaf error
                             logger.warn("Skipped super share due to non-matching merkle leaf");
-                        }else{
+                           // logger.error("error: ", ex);
+                        }else if(ex.getMessage().contains("Cannot store non-distinct NISP")){
+                            logger.warn("Got duplicate nonce on super-share submission");
+
+                        }else {
                             logger.error("Got error while saving super-share", ex);
                         }
                     }
@@ -167,10 +174,10 @@ public class Pool {
             try {
                 //TODO If script fails on node-side, does pk get reset?
                 CollateralRetriever retriever = new CollateralRetriever(client, prover);
-                Tuple3<String, String, String> tuple = retriever.getCollateral();
+                CollateralData collData = retriever.getCollateral();
                 candidate = MiningCandidate.fromJson(
-                        nodeInterface.miningCandidate(true, tuple._2(), apiKey),
-                        options.data.protocolVersion, tuple._1()
+                        nodeInterface.miningCandidate(true, collData.txJSON(), apiKey),
+                        options.data.protocolVersion, collData
                         // unused
                 );
                 pk = candidate.pk; // TODO: Use candidate.pk until collateral is fixed

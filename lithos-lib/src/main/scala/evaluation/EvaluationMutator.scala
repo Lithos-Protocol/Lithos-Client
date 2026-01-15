@@ -1,7 +1,7 @@
 package evaluation
 
 import lfsm.LFSMHelpers
-import lfsm.fraudproofs.FraudProofContracts
+import lfsm.contracts.FraudProofContracts
 import work.lithos.mutations.{Contract, Mutator, TxContext, UTXO}
 // Setup Mutator to create initial output for fraud proof evaluation
 class EvaluationMutator(evalContract: Contract) extends Mutator{
@@ -10,6 +10,7 @@ class EvaluationMutator(evalContract: Contract) extends Mutator{
     {(t: TxContext) => t.inputs.head.contract.hashedPropBytes sameElements evalContract.hashedPropBytes },
    // {(t: TxContext) => FraudProofContracts.isFraudProof(t.inputs(1).contract) },
     {(t: TxContext) => t.dataInputs.head.tokens.head.id == LFSMHelpers.getFPToken(t.ctx) },
+    {(t: TxContext) => t.inputs.head.ctxVars.size == 1 },
   )
 
   override protected def mutation(tCtx: TxContext): Seq[UTXO] = {

@@ -1,7 +1,7 @@
 package contracts
 
 import contracts.ContractTestHelpers._
-import lfsm.fraudproofs.FraudProofContracts
+import lfsm.contracts.FraudProofContracts
 import org.scalatest.funsuite.AnyFunSuite
 
 class InvalidDiffSuite extends AnyFunSuite{

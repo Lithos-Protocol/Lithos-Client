@@ -2,9 +2,7 @@ package contracts
 
 import contracts.ContractTestHelpers.{client, localClient}
 import lfsm.LFSMHelpers
-import lfsm.collateral.CollateralContract
-import lfsm.fraudproofs.FraudProofContracts
-import lfsm.rollup.RollupContracts
+import lfsm.contracts.{CollateralContract, FraudProofContracts, RollupContracts}
 import mutations.BoxLoader
 import org.bouncycastle.util.encoders.Hex
 import org.ergoplatform.ErgoTreePredef

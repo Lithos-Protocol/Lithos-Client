@@ -1,0 +1,130 @@
+{
+  // MinerDictionary Contract
+  // Value: 0.001 ERG
+  // MinerDictionary is a dictionary linking hashed prop bytes of miners to their data box, which holds diff commitments
+  // along with balance information
+  // REGISTERS
+  // R4: MinerDataTree, initially, an empty AVL Tree. AVL Tree of ( hashedPropBytes -> minerDataTokenId )
+
+  val minerDataTree: AvlTree = SELF.R4[AvlTree].get
+  // TODO: Use executeFromVar instead of SigmaProp for CTX_SIGNER, to allow for more composability
+
+  // CONTEXT VARS
+  // CTX_OP(0): Operation performed on the tree
+
+  val CTX_OP      = getVar[Byte](0).get
+
+
+  // CONSTANTS
+  // CONST_MINERDATA_PROPBYTES: Hashed prop bytes of miner data contract
+  // CONST_MIN_DATA_BOX_AMNT: Minimum amount of ERG required for data box
+  // CONST_NISP_WINDOW: NISP Window used as `r` parameter, min number of rounds before commitment may take affect
+  val addMinerOp = CTX_OP == 0.toByte
+  val removeMinerOp = CTX_OP == 1.toByte
+
+  // NEXT VALUES
+  val nextUTXO   = OUTPUTS(0)
+  val nextTree   = nextUTXO.R4[AvlTree].get
+
+  // Spending Path 1: MinerData UTXO is created and added to the tree
+  if(addMinerOp){
+    // CONTEXT VARS
+    // CTX_SIGNER(1): Miner performing the operation
+    // CTX_MINER_DATA(2): Insertion data of miner, should be hashedPropBytes of Signer -> tokenId of new Data box
+    // CTX_INSERT_PROOF(3): Insertion proof for new miner into minerDataTree
+    val CTX_SIGNER  = getVar[SigmaProp](1).get
+    val CTX_MINER_DATA  = getVar[(Coll[Byte], Coll[Byte])](2).get
+    val CTX_INSERT_PROOF  = getVar[Coll[Byte]](3).get
+    val authenticMiner  = blake2b256( CTX_SIGNER.propBytes ) == CTX_MINER_DATA._1
+    val validUTXO       = nextUTXO.propositionBytes == SELF.propositionBytes
+    val valueConserved  = nextUTXO.value == SELF.value
+    val tokensConserved = nextUTXO.tokens == SELF.tokens
+    val onlyOne = SELF.id == INPUTS(0).id
+    val newDataBox = OUTPUTS(1)
+
+    val tokenAddedToTree = CTX_MINER_DATA._2 == SELF.id
+    val dataBoxMade = blake2b256(newDataBox.propositionBytes) == CONST_MINERDATA_PROPBYTES
+    val tokenAdded = newDataBox.tokens(0)._1 == SELF.id
+    val oneTokenMade = newDataBox.tokens.size == 1 && newDataBox.tokens(0)._2 == 1
+
+    val commitmentsDefined = newDataBox.R4[Coll[(Int, Long)]].get.size == 1
+    val validCommitHeight  =  newDataBox.R4[Coll[(Int, Long)]].get(0)._1 - HEIGHT >= CONST_NISP_WINDOW
+    val zeroBalance   = newDataBox.value == CONST_MIN_DATA_BOX_AMNT // 0.001 ERG is min amount for data box
+    val optionsHasPropBytesHash = newDataBox.R5[Coll[Byte]].get.slice(0, 32) == CTX_MINER_DATA._1
+    val treeUpdated = {
+      val insertTree = minerDataTree.insert(Coll(CTX_MINER_DATA), CTX_INSERT_PROOF).get
+      insertTree.digest == nextTree.digest
+    }
+
+
+    val statements = allOf(
+      Coll(
+        onlyOne,
+        authenticMiner,
+        validUTXO,
+        valueConserved,
+        tokensConserved,
+        tokenAddedToTree,
+        dataBoxMade,
+        tokenAdded,
+        oneTokenMade,
+        commitmentsDefined,
+        validCommitHeight,
+        zeroBalance,
+        optionsHasPropBytesHash,
+        treeUpdated
+      )
+    )
+
+    sigmaProp(statements) && CTX_SIGNER
+    // Spending Path 2: Miner Data UTXO is spent and token is removed from tree
+  }else if(removeMinerOp){
+    val dataBox = INPUTS(1)
+    // Signer is always ctxvar 1 of data box
+    val CTX_SIGNER         = getVarFromInput[SigmaProp](1, 1).get
+    val CTX_LOOKUP_PROOF   = getVarFromInput[Coll[Byte]](1, 2).get
+    val CTX_REMOVAL_PROOF  = getVarFromInput[Coll[Byte]](1, 3).get
+    val minerHash = blake2b256(CTX_SIGNER.propBytes)
+    // Authenticity of miner using the correct data box is checked in the data box contract
+    val validUTXO       = nextUTXO.propositionBytes == SELF.propositionBytes
+    val valueConserved  = nextUTXO.value == SELF.value
+    val tokensConserved = nextUTXO.tokens == SELF.tokens
+    val onlyOne = SELF.id == INPUTS(0).id
+
+    val lookup = minerDataTree.get(minerHash, CTX_LOOKUP_PROOF)
+    val correctToken = dataBox.tokens(0)._1 == lookup.get
+
+    val dataBoxRemoved = OUTPUTS.forall{
+      (o: Box) =>
+        val noDataBoxToken = !(o.tokens.exists{
+          (t: (Coll[Byte], Long)) =>
+            t._1 == dataBox.tokens(0)._1
+        })
+        val noDataBoxOutput = blake2b256(o.propositionBytes) != CONST_MINERDATA_PROPBYTES
+        noDataBoxOutput && noDataBoxToken
+    }
+
+
+
+    val treeUpdated = {
+      val removeTree = minerDataTree.remove(Coll(minerHash), CTX_REMOVAL_PROOF).get
+      removeTree.digest == nextTree.digest
+    }
+
+
+    val statements = allOf(
+      Coll(
+        onlyOne,
+        validUTXO,
+        valueConserved,
+        tokensConserved,
+        dataBoxRemoved,
+        treeUpdated
+      )
+    )
+
+    sigmaProp(statements) && CTX_SIGNER
+  }else{
+    sigmaProp(false)
+  }
+}

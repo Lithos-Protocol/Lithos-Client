@@ -23,6 +23,10 @@ public class ExtraNonceCounter {
 	}
 
 	public String next() {
+        if(counter == Integer.MAX_VALUE){
+            counter = 1 << 27;
+        }
+
 		return Hex.toHexString(ByteBuffer.allocate(4).putInt(Math.abs(counter++)).array()).substring(8 - 2 * size);
 	}
 

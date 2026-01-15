@@ -20,7 +20,7 @@ libraryDependencies ++= Seq(
   "com.squareup.retrofit2" % "converter-scalars" % "2.6.2",
   "com.squareup.retrofit2" % "converter-gson" % "2.6.2",
   "javax.xml.bind" % "jaxb-api" % "2.4.0-b180830.0359",
-  "org.ethereum" % "leveldbjni-all"     % "1.18.3",
+  "org.ethereum" % "leveldbjni-all" % "1.18.3",
   "org.iq80.leveldb" % "leveldb" % "0.12",
 )
 resolvers ++= Seq(
@@ -28,7 +28,8 @@ resolvers ++= Seq(
   "SonaType" at "https://oss.sonatype.org/content/groups/public",
   "Sonatype Snapshots" at "https://oss.sonatype.org/content/repositories/snapshots/",
   "Bintray" at "https://jcenter.bintray.com/",
-  "jitpack" at "https://jitpack.io"
+  "jitpack" at "https://jitpack.io",
+  "imageJ" at "https://maven.imagej.net/content/repositories/public/"
 )
 
 

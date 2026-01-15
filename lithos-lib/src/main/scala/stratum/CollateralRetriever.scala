@@ -1,9 +1,10 @@
 package stratum
 
 import lfsm.LFSMHelpers
-import lfsm.collateral.CollateralContract
-import lfsm.rollup.RollupContracts
+import lfsm.contracts.{CollateralContract, RollupContracts}
+import mutations.NodeWallet
 import org.bouncycastle.util.encoders.Hex
+import org.ergoplatform.appkit.impl.UnsignedTransactionImpl
 import org.ergoplatform.appkit.{Address, ErgoClient, ErgoId, ErgoProver, ErgoValue, JavaHelpers, Parameters}
 import org.slf4j.{Logger, LoggerFactory}
 import sigma.SigmaProp
@@ -16,9 +17,9 @@ import work.lithos.plasma.collections.PlasmaMap
 
 import scala.util.Try
 
-class CollateralRetriever(client: ErgoClient, prover: ErgoProver) {
+class CollateralRetriever(client: ErgoClient, prover: NodeWallet) {
   private val logger: Logger = LoggerFactory.getLogger("CollateralRetriever")
-  def getCollateral = {
+  def getCollateral: CollateralData = {
     client.execute{
       ctx =>
         val payout   = RollupContracts.mkPayoutContract(ctx)
@@ -76,7 +77,10 @@ class CollateralRetriever(client: ErgoClient, prover: ErgoProver) {
           .setPreHeader(ctx.createPreHeader().minerPk(lenderAddress.getPublicKeyGE).build())
           .buildTx(0, lenderAddress)
         val sTx = prover.sign(uTx)
-        (sTx.getId.replace("\"", ""), sTx.toJson(false, false), pkString)
+        val utxBytes = uTx.asInstanceOf[UnsignedTransactionImpl].getTx.messageToSign
+        val collData = CollateralData(sTx.getId.replace("\"", ""), sTx.toJson(false, false), pkString, utxBytes, collateralInput.bytes)
+        logger.info(s"Generated $collData with tx size: ${utxBytes.length} and input size: ${collateralInput.bytes.length}")
+        collData
     }
   }
 }

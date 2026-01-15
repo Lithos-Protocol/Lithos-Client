@@ -35,6 +35,9 @@ case class InputUTXO(input: InputBox,
   def withCtxVar(ctxVar: ContextVar): InputUTXO = {
     this.copy(ctxVars = ctxVars ++ Seq(ctxVar))
   }
+  def withCtxVar(idx: Byte, value: ErgoValue[_]): InputUTXO = {
+    this.copy(ctxVars = ctxVars ++ Seq(ContextVar.of(idx, value)))
+  }
 
   def setCtxVars(ctxVars: ContextVar*): InputUTXO = this.copy(ctxVars = ctxVars)
 
