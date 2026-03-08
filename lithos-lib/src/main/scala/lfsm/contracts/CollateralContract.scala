@@ -7,6 +7,7 @@ import work.lithos.mutations.Contract
 
 object CollateralContract {
   // Emission Parameters used by Ergo
+  // TODO: Change to use correct params
   final val FIXED_RATE_PERIOD = 525600L
   final val FIXED_RATE        = 75000000000L
   final val FOUND_INIT_RWRD   = 7500000000L
