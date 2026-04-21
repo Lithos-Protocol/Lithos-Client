@@ -18,6 +18,7 @@ import play.api.cache.SyncCacheApi
 import state.LFSMTransformer
 import state.LFSMTransformer.logger
 import state.messages.DictionaryMessages.InitialState
+import state.messages.StateFrameMessages.Attach
 import state.messages.SyncMessages._
 import state.messages.{BlockInfo, BlockMessage}
 import utils.Globals
@@ -30,7 +31,9 @@ import scala.util.{Failure, Success, Try}
 
 @Singleton
 class MDSyncTask @Inject()(cache: SyncCacheApi, system: ActorSystem, config: Configuration,
-                           @Named("md-synchronizer") mdSynchronizer: ActorRef, cs: CoordinatedShutdown) {
+                           @Named("md-synchronizer") mdSynchronizer: ActorRef,
+                           @Named("state-frame") stateFrame: ActorRef,
+                           cs: CoordinatedShutdown) {
 
   val logger: Logger = LoggerFactory.getLogger("MDSyncTask")
   val taskConfig: TaskConfiguration = new TasksConfig(config).dictionarySyncTask
@@ -60,46 +63,33 @@ class MDSyncTask @Inject()(cache: SyncCacheApi, system: ActorSystem, config: Con
               if (currentHeight != chainHeight) {
                 currentHeight = currentHeight + 1
               } else {
-                // Start listening once synced
+                // Initial sync complete — hand block delivery over to StateFrame.
                 logger.info(s"Finished syncing to height ${chainHeight}")
                 mdSynchronizer ! GetSynced
-                logger.info(s"Now listening every ${syncConfig.listeningInterval} for new blocks")
+                stateFrame ! Attach(mdSynchronizer)
+                logger.info(s"MDSynchronizer attached to StateFrame, listening every ${syncConfig.listeningInterval}")
                 Globals.setSynced()
                 if (Globals.mdDB.getDataBoxToken.isEmpty) {
                   logger.info(s"Found no data box token during sync, will continue polling" +
-                    s" blocks every ${syncConfig.listeningInterval} until data box is created")
+                    s" until data box is created")
+                  // StateFrame now delivers BlockMessages to MDSynchronizer.
+                  // This schedule only handles addToMD transforms until the data box token appears.
                   var syncTask: Option[Cancellable] = None
                   syncTask = Some(system.scheduler.scheduleWithFixedDelay(initialDelay = 10 seconds,
                     delay = syncConfig.listeningInterval)({
                     () =>
-                      // Blocking code on synchronization
-                      if (currentHeight <= chainHeight) {
-                        logger.info(s"Found new block ${currentHeight} on listen")
-                        loadBlockAsync(currentHeight, nodeDataSource).onComplete {
-                          case Failure(exception) =>
-                            logger.error(s"Failed to load block ${currentHeight} while listening", exception)
-                          case Success(block) =>
-                            logger.info(s"Successfully pre-applied block ${block.blockInfo.height}")
-                            currentHeight = currentHeight + 1
-                            if (Globals.mdDB.getDataBoxToken.isDefined) {
-                              // Cancel sync task if data box token is found
-                              logger.info(s"Ending sync task due to finding data box token ${Globals.mdDB.getDataBoxToken.get}")
-                              syncTask.get.cancel()
-                            }else if (currentHeight > chainHeight) {
-                              if (!stateConfig.disableTransforms.getOrElse(false)) {
-                                Try {
-                                  implicit val timeout = Timeout(5 seconds)
-                                  LFSMTransformer.addToMD(nodeConfig.getClient, cache, nodeConfig.getNodeWallet, stratumConfig.diff)
-                                }.recoverWith {
-                                  case t: Throwable =>
-                                    logger.error(s"Got error during sync ${t.getMessage}", t)
-                                    Failure(t)
-                                }
-                              }
-                            }
-                        }(contexts.pollingContext)
+                      if (Globals.mdDB.getDataBoxToken.isDefined) {
+                        logger.info(s"Ending sync task due to finding data box token ${Globals.mdDB.getDataBoxToken.get}")
+                        syncTask.get.cancel()
+                      } else if (!stateConfig.disableTransforms.getOrElse(false)) {
+                        Try {
+                          LFSMTransformer.addToMD(nodeConfig.getClient, cache, nodeConfig.getNodeWallet, stratumConfig.diff)
+                        }.recoverWith {
+                          case t: Throwable =>
+                            logger.error(s"Got error during sync ${t.getMessage}", t)
+                            Failure(t)
+                        }
                       }
-                    //
                   })(contexts.pollingContext))
                 } else {
                   logger.info(s"Got data box token ${Globals.mdDB.getDataBoxToken.get} during synchronization")
@@ -142,35 +132,7 @@ class MDSyncTask @Inject()(cache: SyncCacheApi, system: ActorSystem, config: Con
 
   }
 
-  private def loadBlockAsync(height: Int, dataSource: NodeAndExplorerDataSourceImpl) = {
-    implicit val context: ExecutionContext = contexts.syncContext
-    Future {
-      if (height % 100 == 0)
-        logger.info(s"Loading block at height ${height}")
-      Try {
-
-        val blockHeader = dataSource
-          .getNodeBlocksApi.getFullBlockAt(height)
-          .execute()
-          .body().get(0)
-
-        val fullBlock = dataSource
-          .getNodeBlocksApi.getFullBlockById(blockHeader)
-          .execute()
-          .body()
-        awaitBlockSync(fullBlock)
-      }
-    }.map(_.get)
-
-  }
-
   private def checkBlockTransactions(block: FullBlock): Unit = {
     mdSynchronizer ! BlockMessage(BlockInfo.fromSync(block))
-  }
-
-  private def awaitBlockSync(block: FullBlock) = {
-    implicit val timeout: Timeout = Timeout(7 seconds)
-
-    Await.result((mdSynchronizer ? BlockMessage(BlockInfo.fromSync(block))).mapTo[HandledBlock], 7 seconds)
   }
 }
