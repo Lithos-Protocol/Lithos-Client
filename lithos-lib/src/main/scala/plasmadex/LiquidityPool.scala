@@ -1,0 +1,76 @@
+package plasmadex
+
+import sigma.{AvlTree, Coll}
+import work.lithos.mutations.{InputUTXO, UTXO}
+import work.lithos.plasma.collections.PlasmaMap
+
+case class LiquidityPool(lpBox: InputUTXO) {
+  val lpToken = lpBox.tokens.head
+  val tokenY  = lpBox.tokens(1)
+
+  val lqAVL: Array[Byte] = lpBox.parseReg[AvlTree](0).digest.toArray
+  val liquidity: Long = lpBox.parseReg[Long](1)
+  val feeParams: Array[Long] = lpBox.parseCollReg[Long](2)
+  val feeInfo: Array[Long] = lpBox.parseCollReg[Long](3)
+
+  val lsFeesX: Long = feeInfo.head
+  val lsFeesY: Long = feeInfo(1)
+
+  val reservesX: Long = lpBox.value - lsFeesX
+  val reservesY: Long = tokenY.amount - lsFeesY
+  val supplyLP0 = PDHelpers.MAX_LIQ - liquidity
+
+
+  def simDeposit(amntX: Long, amntY: Long): Either[(BigInt, BigInt), (BigInt, BigInt)] = {
+    val deltaReservesX = amntX
+    val deltaReservesY = amntY
+
+    val sharesX = BigInt(deltaReservesX) * supplyLP0 / reservesX
+    val sharesY = BigInt(deltaReservesY) * supplyLP0 / reservesY
+    val minXY = minBigInt(sharesX, sharesY)
+    if(minXY == sharesX)
+      Left((minXY, (minXY * reservesY) / supplyLP0))
+    else
+      Right((minXY, (minXY * reservesX) / supplyLP0))
+  }
+
+  def simDeposit(amntLiq: Long): (BigInt, BigInt) = {
+    val deltaReservesX = BigInt(amntLiq) * reservesX / supplyLP0
+    val deltaReservesY = BigInt(amntLiq) * reservesY / supplyLP0
+
+    deltaReservesX -> deltaReservesY
+  }
+
+  def simRedemption(liqRedeemed: Long): (BigInt, BigInt) = {
+    val deltaSupplyLP = -liqRedeemed
+    val deltaReservesX = (BigInt(deltaSupplyLP) * reservesX) / supplyLP0
+    val deltaReservesY = (BigInt(deltaSupplyLP) * reservesY) / supplyLP0
+    deltaReservesX -> deltaReservesY
+  }
+  // NOTE: amntX is amount of ERG to swap after lsFee is removed
+  def simSwapX(amntX: Long): Long = {
+    ((BigInt(reservesY) * amntX * feeParams.head) /
+      (BigInt(reservesX) * PDHelpers.FEE_DENOM + BigInt(amntX) * feeParams.head)).toLong
+  }
+  // NOTE: amntY is amount of token to swap after lsFee is removed
+  def simSwapY(amntY: Long): Long = {
+    ((BigInt(reservesX) * amntY * feeParams.head) /
+      (BigInt(reservesY) * PDHelpers.FEE_DENOM + BigInt(amntY) * feeParams.head)).toLong
+  }
+
+  def calcLSFee(amount: Long, isERG: Boolean): Long = {
+    if (isERG) {
+      ((BigInt(amount) * feeParams(1) ) / PDHelpers.FEE_DENOM).toLong
+    }else {
+      ((BigInt(amount) * feeParams(2) ) / PDHelpers.FEE_DENOM).toLong
+    }
+  }
+
+  private def minBigInt(x: BigInt, y: BigInt) = {
+    if(x <= y)
+      x
+    else
+      y
+  }
+
+}

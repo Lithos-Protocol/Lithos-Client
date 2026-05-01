@@ -14,7 +14,6 @@ class TxBuilder(ctx: BlockchainContext){
 
   def setInputs(nextInputs: InputUTXO*): TxBuilder = {
     tCtx = tCtx.copy(inputs = nextInputs)
-
     this
   }
 
@@ -25,6 +24,11 @@ class TxBuilder(ctx: BlockchainContext){
 
   def setOutputs(nextOutputs: UTXO*): TxBuilder = {
     tCtx = tCtx.copy(outputs = nextOutputs)
+    this
+  }
+
+  def addOutputs(addedOutputs: Seq[UTXO]): TxBuilder = {
+    tCtx = tCtx.copy(outputs = outputs ++ addedOutputs)
     this
   }
 

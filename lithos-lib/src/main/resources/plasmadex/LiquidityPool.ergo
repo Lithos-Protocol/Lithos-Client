@@ -34,6 +34,8 @@
   val lsFeesX1 = nextFeeInfo(0)
   val lsFeesY1 = nextFeeInfo(1)
 
+  // CONSTANTS:
+  // CONST_FEE_REWARD_HASH - Hashed prop bytes of fee reward contract
 
   // CONTEXT VARS:
   // CTX_OP(0): Byte representing type of operation being performed,
@@ -50,7 +52,7 @@
   def numTokenInOutputs(tokenId: Coll[Byte]): Long = {
     OUTPUTS.fold(0L, {
       (a: Long, b: Box) =>
-        a + b.tokens.fold(0L, {
+        val totalTokens = b.tokens.fold(0L, {
           (z: Long, t: (Coll[Byte], Long)) =>
             if(t._1 == tokenId){
               z + t._2
@@ -58,6 +60,22 @@
               z
             }
         })
+        a + totalTokens
+    })
+  }
+
+  def numTokenInInputs(tokenId: Coll[Byte]): Long = {
+    INPUTS.fold(0L, {
+      (a: Long, b: Box) =>
+        val totalTokens = b.tokens.fold(0L, {
+          (z: Long, t: (Coll[Byte], Long)) =>
+            if(t._1 == tokenId){
+              z + t._2
+            }else{
+              z
+            }
+        })
+        a + totalTokens
     })
   }
   // AMM Code
@@ -82,15 +100,14 @@
   val preservedFeeConfig   = feeParams == nextFeeParams
 
   val preservedPoolNFT     = poolNFT1 == poolNFT0
-  val validLP              = reservedLP1._1 == reservedLP0._1
   val validY               = tokenY1._1 == tokenY0._1
   // since tokens can be repeated, we ensure for sanity that there are no more tokens
   val noMoreTokens         = successor.tokens.size == 2
 
   val validStorageRent     = successor.value > MinStorageRent
 
-  val supplyLP0 = InitiallyLockedLP - reservedLP0._2
-  val supplyLP1 = InitiallyLockedLP - reservedLP1._2
+  val supplyLP0 = InitiallyLockedLP - reservedLP0
+  val supplyLP1 = InitiallyLockedLP - reservedLP1
 
   val reservesX0 = SELF.value - lsFeesX0
   val reservesY0 = tokenY0._2 - lsFeesY0
@@ -109,11 +126,11 @@
 
   // Validates that fee rules have been satisfied whenever a liquidity state change occurs
   // Only used in deposits and redemptions
-  def satisfiesLSFees() = {
+  val satisfiesLSFees: Boolean = {
     // Has enough ERG to emit a fee box
     if(lsFeesX0 > MinStorageRent){
-      // fee box with correct params and tokens emitted
-      val feeBoxEmitted = OUTPUTS.exists{
+      // lpFeeReward with correct params and tokens emitted
+      val lpRewardEmitted = OUTPUTS.exists{
         (o: Box) =>
 
           val tokenHandled = {
@@ -122,15 +139,13 @@
             else
               o.tokens.size == 0
           }
-          blake2b256(o.propositionBytes) == CONST_FEEBOX_PROPBYTES
-          && o.value == lsFeesX0
-          && tokenHandled
-          && liquidityTree.digest == o.R4[AvlTree].get.digest
-          && liquidity == o.R5[Long].get
+          blake2b256(o.propositionBytes) == CONST_FEE_REWARD_HASH &&
+          o.value == lsFeesX0 && tokenHandled && liquidityTree.digest == o.R4[AvlTree].get.digest &&
+          liquidity == o.R5[Long].get
       }
       // both lsFees should always reset to 0 after fee box is emitted
       val feesReset = lsFeesX1 == 0 && lsFeesY1 == 0
-      feeBoxEmitted && feesReset
+      lpRewardEmitted && feesReset
     }else{
       // If there is not enough ERG to emit a fee box, then there should be no change in LS
       deltaLSFeesX == 0 && deltaLSFeesY == 0
@@ -159,11 +174,12 @@
       }
       val validProvisionData = allOf(Coll(
         CTX_PD_DATA._2.size == 8,
-        byteArrayToLong(CTX_PD_DATA._2.slice(0, 8)) == -1 * deltaSupplyLP,
+        byteArrayToLong(CTX_PD_DATA._2) == deltaSupplyLP,
+        byteArrayToLong(CTX_PD_DATA._2) > 0
       ))
       val nftInOutputs = numTokenInOutputs(SELF.id) == 1L
-      satisfiesLSFees() && satisfiesAMM && validProvisionNFT
-      && treeUpdated && validProvisionData && nftInOutputs
+      satisfiesLSFees && satisfiesAMM && validProvisionNFT &&
+      treeUpdated && validProvisionData && nftInOutputs
     }else{
       false
     }
@@ -179,22 +195,24 @@
     if(CTX_OP == 2){
       // Context Vars
       // CTX_PD_DATA(1) - PlasmaDex data to be removed
+      // CTX_LOOKUP_PROOF(2) - Proof of lookup
       // CTX_REMOVAL_PROOF(3) - Proof of removal
       val CTX_PD_DATA = getVar[Coll[Byte]](1).get
-      val CTX_PD_PROOF = getVar[Coll[Byte]](2).get
-      val provisionNFT = INPUTS(1).tokens(0)._1
-      val validProvisionNFT = provisionNFT == CTX_PD_DATA._1
+      val CTX_LOOKUP_PROOF = getVar[Coll[Byte]](2).get
+      val CTX_REMOVAL_PROOF = getVar[Coll[Byte]](3).get
+      val validProvisionNFT = numTokenInInputs(CTX_PD_DATA) == 1
 
-      val correctLiqChange = -1 * deltaSupplyLP == byteArrayToLong(lookUp.slice(0, 8))
+      val lookUp = liquidityTree.get(CTX_PD_DATA, CTX_LOOKUP_PROOF).get
+      val correctLiqChange = -1 * deltaSupplyLP == byteArrayToLong(lookUp)
       val treeUpdated = {
-        val removeTree = liquidityTree.remove(Coll(CTX_PD_DATA), CTX_PD_PROOF).get
+        val removeTree = liquidityTree.remove(Coll(CTX_PD_DATA), CTX_REMOVAL_PROOF).get
         removeTree.digest == nextTree.digest
       }
 
-      val nftBurned = numTokenInOutputs(provisionNFT) == 0L
+      val nftBurned = numTokenInOutputs(CTX_PD_DATA) == 0L
 
-      satisfiesLSFees() && satisfiesAMM && validProvisionNFT
-      && noUnpaidFees && correctLiqChange && treeUpdated && nftBurned
+      satisfiesLSFees && satisfiesAMM && validProvisionNFT &&
+      correctLiqChange && treeUpdated && nftBurned
     }else{
       false
     }
@@ -204,15 +222,15 @@
     // Swap ERG for token
     if (deltaReservesX > 0){
       val satisfiesAMM = reservesY0.toBigInt * deltaReservesX * feeNum0 >= -deltaReservesY * (reservesX0.toBigInt * FeeDenom + deltaReservesX * feeNum0)
-      val feeXAdded = deltaLSFeeX.toBigInt == (feeParams(1).toBigInt * totalDeltaX) / FeeDenom
-      val noOtherFees = deltaLSFeeY == 0
+      val feeXAdded = deltaLSFeesX.toBigInt == (feeParams(1).toBigInt * totalDeltaX) / FeeDenom
+      val noOtherFees = deltaLSFeesY == 0
       val correctOp = CTX_OP == 0
       satisfiesAMM && feeXAdded && noOtherFees && correctOp
     } // Swap token for ERG
     else{
       val satisfiesAMM = reservesX0.toBigInt * deltaReservesY * feeNum0 >= -deltaReservesX * (reservesY0.toBigInt * FeeDenom + deltaReservesY * feeNum0)
-      val feeYAdded = deltaLSFeeY.toBigInt == (feeParams(2).toBigInt * totalDeltaY) / FeeDenom
-      val noOtherFees = deltaLSFeeX == 0
+      val feeYAdded = deltaLSFeesY.toBigInt == (feeParams(2).toBigInt * totalDeltaY) / FeeDenom
+      val noOtherFees = deltaLSFeesX == 0
       val correctOp = CTX_OP == 0
       satisfiesAMM && feeYAdded && noOtherFees && correctOp
     }
@@ -230,7 +248,6 @@
       validSuccessorScript &&
       preservedFeeConfig &&
       preservedPoolNFT &&
-      validLP &&
       validY &&
       noMoreTokens &&
       validAction &&

@@ -1,6 +1,7 @@
 package work.lithos.mutations
 
 import org.ergoplatform.appkit.{BlockchainContext, ErgoId, ErgoValue, OutBox, Parameters}
+import sigma.Coll
 import sigmastate.utils.Helpers
 
 import scala.util.{Failure, Success, Try}
@@ -34,21 +35,27 @@ case class UTXO(contract: Contract, value: Long,
     }
   }
 
-  def removeToken(token: Token): UTXO = {
-    val tokenIdx = tokens.indexWhere(t => t.id.toString == token.id.toString)
-    val optToken: Option[Token] = if(tokenIdx != -1) Some(tokens(tokenIdx)) else None
-    optToken match {
-      case Some(value) =>
-        val trySub = Try(value - token.amount)
-
-        trySub match {
-          case Failure(exception) => setTokens(tokens.patch(tokenIdx, Seq(), 1): _*)
-          case Success(value) => setTokens(tokens.patch(tokenIdx, Seq(value), 1): _*)
-        }
-      case None =>
-        throw new Exception("Tried to subtract non existent token!")
+  def removeToken(tokenId: ErgoId, tokenAmount: Long): UTXO = {
+    if(tokenAmount > 0) {
+      val tokenIdx = tokens.indexWhere(t => t.id.toString == tokenId.toString)
+      val optToken: Option[Token] = if (tokenIdx != -1) Some(tokens(tokenIdx)) else None
+      optToken match {
+        case Some(value) =>
+          if (value.amount - tokenAmount > 0)
+            setTokens(tokens.patch(tokenIdx, Seq(value - tokenAmount), 1): _*)
+          else
+            setTokens(tokens.patch(tokenIdx, Seq(), 1): _*)
+        case None =>
+          throw new Exception("Tried to subtract non existent token!")
+      }
+    }else if(tokenAmount == 0){
+      this
+    }else{
+      throw new Exception("Tried to subtract negative token amount!")
     }
   }
+
+  def removeToken(token: Token): UTXO = removeToken(token.id, token.amount)
 
   def toOutBox(ctx: BlockchainContext): OutBox = {
     var out = ctx.newTxBuilder().outBoxBuilder()
@@ -70,6 +77,14 @@ case class UTXO(contract: Contract, value: Long,
 
   def toDummyInput(ctx: BlockchainContext): InputUTXO = {
     toInput(ctx, ErgoId.create("a1086e447695dc8dcb79c0bf3b06ed715ccfa2b28ef44889ebfbda16c00ff34b"), 0.toShort)
+  }
+
+  def parseReg[T](idx: Int): T = {
+    registers(idx).getValue.asInstanceOf[T]
+  }
+
+  def parseCollReg[T](idx: Int): Array[T] = {
+    registers(idx).getValue.asInstanceOf[Coll[T]].toArray
   }
 
 }

@@ -2,6 +2,7 @@ package work.lithos
 package mutations
 
 import org.ergoplatform.appkit.{ContextVar, ErgoId, ErgoValue, InputBox}
+import sigma.Coll
 
 import scala.collection.JavaConverters.collectionAsScalaIterableConverter
 
@@ -54,6 +55,14 @@ case class InputUTXO(input: InputBox,
 
   def toUTXO: UTXO = {
     UTXO(contract, value, tokens, registers)
+  }
+
+  def parseReg[T](idx: Int): T = {
+    registers(idx).getValue.asInstanceOf[T]
+  }
+
+  def parseCollReg[T](idx: Int): Array[T] = {
+    registers(idx).getValue.asInstanceOf[Coll[T]].toArray
   }
 
 }

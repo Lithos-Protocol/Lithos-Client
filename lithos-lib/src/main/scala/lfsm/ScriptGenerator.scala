@@ -2,7 +2,7 @@ package lfsm
 
 import org.ergoplatform.appkit._
 import sigma.util.NBitsUtils
-import work.lithos.mutations.Contract
+import work.lithos.mutations.{Contract, Mutator}
 
 import scala.io.Source
 
@@ -15,9 +15,14 @@ object ScriptGenerator {
   private final val ROLLUPS = "rollups/"
   private final val FRAUD_PROOFS = "fraudproofs/"
   private final val DICTIONARIES = "dictionaries/"
+  private final val PLASMA_DEX = "plasmadex/"
 
   def mkSigTrue(ctx: BlockchainContext): Contract = {
-    Contract.fromErgoScript(ctx, ConstantsBuilder.empty(), " { sigmaProp(true) } ")
+    mkSigTrue(ctx.getNetworkType)
+  }
+
+  def mkSigTrue(networkType: NetworkType): Contract = {
+    Contract.fromErgoScript(networkType, ConstantsBuilder.empty(), " { sigmaProp(true) } ", Seq.empty[Mutator])
   }
 
   def mkCollatScript(name: String): String = {
@@ -43,6 +48,14 @@ object ScriptGenerator {
 
   def mkDictionaryScript(name: String): String = {
     val src = Source.fromResource(DICTIONARIES + name + EXT)
+    val script = src.mkString
+    src.close()
+    script
+  }
+
+
+  def mkPlasmaDexScript(name: String): String = {
+    val src = Source.fromResource(PLASMA_DEX + name + EXT)
     val script = src.mkString
     src.close()
     script
