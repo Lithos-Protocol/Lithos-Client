@@ -17,7 +17,7 @@ import play.api.Configuration
 import play.api.cache.SyncCacheApi
 import state.LFSMTransformer
 import state.LFSMTransformer.logger
-import state.messages.DictionaryMessages.InitialState
+import state.messages.DictionaryMessages.InitialMDState
 import state.messages.SyncMessages._
 import state.messages.{BlockInfo, BlockMessage}
 import utils.Globals
@@ -51,7 +51,7 @@ class MDSyncTask @Inject()(cache: SyncCacheApi, system: ActorSystem, config: Con
       var currentHeight = LFSMHelpers.MD_GENESIS_HEIGHT
       var synced = false
       val nodeDataSource = nodeConfig.getClient.getDataSource.asInstanceOf[NodeAndExplorerDataSourceImpl]
-      mdSynchronizer ! InitialState(LFSMHelpers.MD_GENESIS_HEIGHT, MinerTree.initialState)
+      mdSynchronizer ! InitialMDState(LFSMHelpers.MD_GENESIS_HEIGHT, MinerTree.initialState)
 
       Future {
         while (currentHeight <= chainHeight && !synced) {
@@ -64,7 +64,7 @@ class MDSyncTask @Inject()(cache: SyncCacheApi, system: ActorSystem, config: Con
                 logger.info(s"Finished syncing to height ${chainHeight}")
                 mdSynchronizer ! GetSynced
                 logger.info(s"Now listening every ${syncConfig.listeningInterval} for new blocks")
-                Globals.setSynced()
+
                 if (Globals.mdDB.getDataBoxToken.isEmpty) {
                   logger.info(s"Found no data box token during sync, will continue polling" +
                     s" blocks every ${syncConfig.listeningInterval} until data box is created")

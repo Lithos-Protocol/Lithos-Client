@@ -9,6 +9,7 @@ case class LPRewardState(feeDictionary: PlasmaMap[Array[Byte], Array[Byte]],
                          lsFeesY: Long,
                          numProvisions: Int,
                          startHeight: Int,
+                         feeNFT: String,
                          utxoId: String) extends UTXOState {
 
 }

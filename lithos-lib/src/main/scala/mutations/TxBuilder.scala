@@ -1,7 +1,8 @@
 package work.lithos
 package mutations
 
-import org.ergoplatform.appkit.{Address, BlockchainContext, JavaHelpers, PreHeader, UnsignedTransaction, UnsignedTransactionBuilder}
+import org.ergoplatform.{ErgoScriptPredef, ErgoTreePredef}
+import org.ergoplatform.appkit.{Address, BlockchainContext, JavaHelpers, Parameters, PreHeader, UnsignedTransaction, UnsignedTransactionBuilder}
 
 class TxBuilder(ctx: BlockchainContext){
   val uTxB: UnsignedTransactionBuilder = ctx.newTxBuilder()
@@ -51,10 +52,20 @@ class TxBuilder(ctx: BlockchainContext){
   }
 
   def buildTx(fee: Long, changeAddress: Address, burntTokens: Seq[Token] = Seq.empty[Token]): UnsignedTransaction = {
+    val totalChange = inputs.map(_.value).sum - outputs.map(_.value).sum
+    val outputsToUse = {
+      if(totalChange < Parameters.MinChangeValue && totalChange != 0){
+        val feeIdx = outputs.indexWhere(_.contract.ergoTreeHex == Contract(ErgoTreePredef.feeProposition(720)).ergoTreeHex)
+        outputs.patch(feeIdx, Seq(outputs(feeIdx).addValue(totalChange)), 1)
+      }else{
+        outputs
+      }
+    }
+
     val uTx = uTxB
       .boxesToSpend(JavaHelpers.toJList(inputs.map(_.toFullInput).toIndexedSeq))
       .withDataInputs(JavaHelpers.toJList(dataInputs.map(_.input).toIndexedSeq))
-      .outputs(outputs.map(_.toOutBox(ctx)): _*)
+      .outputs(outputsToUse.map(_.toOutBox(ctx)): _*)
       .sendChangeTo(changeAddress.getErgoAddress)
 
     if(fee > 0)

@@ -1,11 +1,10 @@
 package state.messages
 
 import lfsm.states.MinerTree
+import plasmadex.states.LiquidityState
 import work.lithos.plasma.collections.LocalPlasmaMap
 
 object DictionaryMessages {
-
- case class MinerDictionary(persistent: LocalPlasmaMap[Array[Byte], Array[Byte]], mt: MinerTree)
 
   case class DictionaryTransform(blockInfo: BlockInfo, tx: BlockTx, tokenId: String) {
     val input: TxInput = tx.inputs.head
@@ -14,7 +13,11 @@ object DictionaryMessages {
     override def toString: String = s"DictionaryTransform(${blockInfo.height}: ${input.id} => ${output.id})"
   }
 
-  case class InitialState(height: Int, minerDictionary: MinerTree) {
-    override def toString: String = s"InitialState($height: ${minerDictionary.utxoId})"
+  case class InitialMDState(height: Int, minerDictionary: MinerTree) {
+    override def toString: String = s"InitialMDState($height: ${minerDictionary.utxoId})"
+  }
+
+  case class InitialLiqState(height: Int, liquidityState: LiquidityState) {
+    override def toString: String = s"InitialLiqState($height: ${liquidityState.utxoId})"
   }
 }

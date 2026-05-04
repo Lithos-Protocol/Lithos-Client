@@ -12,6 +12,8 @@
   val currentMiners: Int     = SELF.R5[Int].get
   val totalScore:    BigInt  = SELF.R6[BigInt].get
   val totalReward:   Long    = SELF.R7[Long].get
+  val totalTokens = SELF.tokens.getOrElse(0, (Coll(0.toByte), 0L))
+
   // CONSTANTS
   // None
 
@@ -47,7 +49,18 @@
     }
   }
 
+  val minersWithTokens: Coll[(Coll[Byte], Long)] = {
+    minersWithScore.map{
+      (x: (Coll[Byte], Long)) => (x._1, ((totalTokens._2.toBigInt * x._2.toBigInt) / totalScore).toLong)
+    }
+  }
+
   val totalMinerRewards = minersWithReward.fold(0L, {
+  (accum: Long, x:(Coll[Byte], Long)) =>
+    accum + x._2
+  })
+
+  val totalTokenRewards = minersWithTokens.fold(0L, {
   (accum: Long, x:(Coll[Byte], Long)) =>
     accum + x._2
   })
@@ -62,7 +75,7 @@
     val nextMiners   = nextUTXO.R5[Int].get
     val nextScore    = nextUTXO.R6[BigInt].get
     val nextReward   = nextUTXO.R7[Long].get
-
+    val nextTokens   = nextUTXO.tokens.getOrElse(0, (Coll(0.toByte), 0L))
     val minerOutputBoxes = OUTPUTS.slice(1, minersWithReward.size + 1)
 
     // Statements
@@ -73,8 +86,25 @@
     val minersRewarded = minerOutputBoxes.zip(minersWithReward).forall{
         (x: (Box, (Coll[Byte], Long))) => blake2b256(x._1.propositionBytes) == x._2._1 && x._1.value == x._2._2
     }
+
+    val tokensRewarded = {
+      if(totalTokens._2 > 0){
+        minerOutputBoxes.zip(minersWithTokens).forall{
+          (x: (Box, (Coll[Byte], Long))) =>
+            if(x._2._2 > 0){
+              blake2b256(x._1.propositionBytes) == x._2._1 &&
+                x._1.tokens(0)._1 == totalTokens._1 && x._1.tokens(0)._2 == x._2._2
+            }else{
+              true
+            }
+        }
+      }else{
+        true
+      }
+    }
     val validUTXO       = nextUTXO.propositionBytes == SELF.propositionBytes
     val usedReward      = nextUTXO.value == SELF.value - totalMinerRewards
+    val usedTokens      = nextTokens._1 == totalTokens._1 && nextTokens._2 == totalTokens._2 - totalTokenRewards
     val sameTotal       = totalReward == nextReward
     val sameScore       = totalScore  == nextScore
     val sameMiners      = currentMiners == nextMiners
@@ -83,11 +113,13 @@
       Coll(
         validUTXO,
         usedReward,
+        usedTokens,
         sameScore,
         sameTotal,
         sameMiners,
         treeUpdated,
         minersRewarded,
+        tokensRewarded,
         onlyOne
       )
     )
@@ -100,6 +132,22 @@
     // We use >= to check value here, so that min change value can be added to one of the outputs without causing error
         (x: (Box, (Coll[Byte], Long))) => blake2b256(x._1.propositionBytes) == x._2._1 && x._1.value >= x._2._2
     }
+    // NOTE: Any additional tokens not included in this payout may be withdrawn to change by tx creator
+    val tokensRewarded = {
+      if(totalTokens._2 > 0){
+        minerOutputBoxes.zip(minersWithTokens).forall{
+          (x: (Box, (Coll[Byte], Long))) =>
+            if(x._2._2 > 0){
+              blake2b256(x._1.propositionBytes) == x._2._1 &&
+                x._1.tokens(0)._1 == totalTokens._1 && x._1.tokens(0)._2 == x._2._2
+            }else{
+              true
+            }
+        }
+      }else{
+        true
+      }
+    }
     val onlyOne = SELF.id == INPUTS(0).id // Prevent weirdness / exploits by enforcing only one per tx
 
     // I guess there is a chance someone can add new utxo with enough
@@ -108,7 +156,8 @@
     val statements = allOf(
       Coll(
         onlyOne,
-        minersRewarded
+        minersRewarded,
+        tokensRewarded
       )
     )
     sigmaProp(statements)

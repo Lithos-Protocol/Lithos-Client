@@ -35,6 +35,9 @@ tags:
     x-displayName: The CollateralUTXO Model
     description: |
       <SchemaDefinition schemaRef="#/components/schemas/CollateralUTXO" />
+  - name: plasmadex
+    description: Interact with PlasmaDex liquidity pools
+    x-displayName: Plasma Dex
 x-tagGroups:
   - name: Lithos
     tags:
@@ -42,6 +45,7 @@ x-tagGroups:
       - blocks
       - payments
       - collateral
+      - plasmadex
   - name: Stratum
     tags:
       - mining
@@ -512,6 +516,383 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiError'
+  /dex:
+    get:
+      summary: PlasmaDex LP info
+      description: Provides information about the PlasmaDex Liquidity Pool.
+      operationId: getDexInfo
+      tags:
+        - plasmadex
+      responses:
+        '200':
+          description: DexInfo object with current LP state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DexInfo'
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /dex/{LP_Id}/swap/check:
+    post:
+      summary: Check swap result without sending transaction
+      description: Check the result of a swap in the PlasmaDex Liquidity Pool without sending a transaction
+      operationId: checkSwapDex
+      tags:
+        - plasmadex
+      parameters:
+        - in: path
+          name: LP_Id
+          required: true
+          description: Token Id of the LP NFT
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SwapInfo'
+      responses:
+        '200':
+          description: Result of the swap transaction
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SwapResult'
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /dex/{LP_Id}/swap:
+    post:
+      summary: Swap ERG or tokens in LP
+      description: Perform a swap in the PlasmaDex Liquidity Pool
+      operationId: swapDex
+      security:
+        - ApiKeyAuth: [api_key]
+      tags:
+        - plasmadex
+      parameters:
+        - in: path
+          name: LP_Id
+          required: true
+          description: Token Id of the LP NFT
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SwapInfo'
+      responses:
+        '200':
+          description: Result of the swap transaction
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SwapResult'
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /dex/{LP_Id}/deposit/check:
+    post:
+      summary: Check deposit result without sending transaction
+      description: Check the result of a liquidity deposit into the PlasmaDex LP without sending a transaction
+      operationId: checkDepositDex
+      tags:
+        - plasmadex
+      parameters:
+        - in: path
+          name: LP_Id
+          required: true
+          description: Token Id of the LP NFT
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DepositInfo'
+      responses:
+        '200':
+          description: Result of the deposit transaction
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DepositResult'
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /dex/{LP_Id}/deposit:
+    post:
+      summary: Deposit liquidity into LP
+      description: Deposit liquidity into the PlasmaDex Liquidity Pool
+      operationId: depositDex
+      security:
+        - ApiKeyAuth: [api_key]
+      tags:
+        - plasmadex
+      parameters:
+        - in: path
+          name: LP_Id
+          required: true
+          description: Token Id of the LP NFT
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DepositInfo'
+      responses:
+        '200':
+          description: Result of the deposit transaction
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DepositResult'
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /dex/{LP_Id}/redemption/check:
+    post:
+      summary: Check redemption result without sending transaction
+      description: Check the result of a liquidity redemption from the PlasmaDex LP without sending a transaction
+      operationId: checkRedemptionDex
+      tags:
+        - plasmadex
+      parameters:
+        - in: path
+          name: LP_Id
+          required: true
+          description: Token Id of the LP NFT
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RedemptionInfo'
+      responses:
+        '200':
+          description: Result of the redemption transaction
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RedemptionResult'
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /dex/{LP_Id}/redemption:
+    post:
+      summary: Redeem liquidity from LP
+      description: Redeem liquidity from the PlasmaDex Liquidity Pool
+      operationId: redemptionDex
+      security:
+        - ApiKeyAuth: [api_key]
+      tags:
+        - plasmadex
+      parameters:
+        - in: path
+          name: LP_Id
+          required: true
+          description: Token Id of the LP NFT
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RedemptionInfo'
+      responses:
+        '200':
+          description: Result of the redemption transaction
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RedemptionResult'
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /dex/{LP_Id}/sync:
+    get:
+      summary: LP sync status
+      description: Check synchronization status of PlasmaDex LP
+      operationId: getDexSyncStatus
+      tags:
+        - plasmadex
+      parameters:
+        - in: path
+          name: LP_Id
+          required: true
+          description: Token Id of the LP NFT
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Synchronization status of the PlasmaDex LP
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LPSyncStatus'
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /dex/{LP_Id}/withdraw/check:
+    post:
+      summary: Check withdrawal result without sending transaction
+      description: Check the result of a liquidity state fee withdrawal from the PlasmaDex LP without sending a transaction
+      operationId: checkWithdrawDex
+      tags:
+        - plasmadex
+      parameters:
+        - in: path
+          name: LP_Id
+          required: true
+          description: Token Id of the LP NFT
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Result of the fee withdrawal transaction
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WithdrawResult'
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /dex/{LP_Id}/withdraw:
+    post:
+      summary: Withdraw LP state fees
+      description: Withdraws liquidity state fees from the PlasmaDex LP
+      operationId: withdrawDex
+      security:
+        - ApiKeyAuth: [api_key]
+      tags:
+        - plasmadex
+      parameters:
+        - in: path
+          name: LP_Id
+          required: true
+          description: Token Id of the LP NFT
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Result of the fee withdrawal transaction
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WithdrawResult'
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /dex/syncFee/{feeNFT_Id}:
+    post:
+      summary: Synchronize fee reward box
+      description: Requests synchronization for a fee reward box
+      operationId: syncFee
+      security:
+        - ApiKeyAuth: [api_key]
+      tags:
+        - plasmadex
+      parameters:
+        - in: path
+          name: feeNFT_Id
+          required: true
+          description: Id of the NFT representing the fee reward box to be synchronized
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Synchronization status of the fee reward box
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FeeSyncResult'
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /dex/claimFee/{feeNFT_Id}:
+    post:
+      summary: Claim fee reward box
+      description: Sends a transaction to claim a fee reward box
+      operationId: claimFee
+      security:
+        - ApiKeyAuth: [api_key]
+      tags:
+        - plasmadex
+      parameters:
+        - in: path
+          name: feeNFT_Id
+          required: true
+          description: Id of the NFT representing the fee reward box to be claimed
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Result of the fee claim transaction
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FeeClaimResult'
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
   /collateral/create:
     post:
       summary: Create new collateral UTXOs
@@ -768,6 +1149,257 @@ components:
           format: int32
           description: Height this transaction was sent
           example: 45096
+    DexInfo:
+      description: Information about the PlasmaDex Liquidity Pool
+      type: object
+      x-tags: plasmadex
+      required:
+        - boxId
+        - LP_Id
+        - liquidity
+      properties:
+        boxId:
+          type: string
+          description: UTXO Id of the LP box
+          example: '88c297f99da7172f6aa20efbead69aa40e2b7734a1873d66ca1db6b19d214db6'
+        LP_Id:
+          type: string
+          description: Token Id of the LP NFT
+          example: 'ce00d6e0f4fd3390c0519bb0d24824e1e6b06978163f4845a7cf2c1c7d8f1b65'
+        liquidity:
+          type: integer
+          format: int64
+          description: Total liquidity in pool
+          example: 1000000000
+
+    SwapInfo:
+      description: Information needed to perform a swap in the PlasmaDex LP
+      type: object
+      x-tags: plasmadex
+      required:
+        - amount
+        - isERG
+      properties:
+        amount:
+          type: integer
+          format: int64
+          description: Amount to swap
+          example: 1000000000
+        isERG:
+          type: boolean
+          description: Whether ERG is being swapped or not
+          example: true
+
+    SwapResult:
+      description: Result of a PlasmaDex swap transaction
+      type: object
+      x-tags: plasmadex
+      required:
+        - swapOutput
+        - txId
+      properties:
+        swapOutput:
+          type: integer
+          format: int64
+          description: Amount of ERG or tokens outputted by the swap
+          example: 980000000
+        txId:
+          type: string
+          description: Hex-encoded id of this swap transaction
+          example: '40b7d045a858d537cdbf072e46ffbb86c0c9f6b0e93c369c1ffcba76797636d7'
+
+    DepositInfo:
+      description: Information needed to deposit liquidity into the PlasmaDex LP
+      type: object
+      x-tags: plasmadex
+      required:
+        - liquidity
+      properties:
+        liquidity:
+          type: integer
+          format: int64
+          description: Amount of liquidity to deposit
+          example: 1000000000
+
+    DepositResult:
+      description: Result of a PlasmaDex liquidity deposit transaction
+      type: object
+      x-tags: plasmadex
+      required:
+        - ergDeposited
+        - tokenDeposited
+        - txId
+        - provisionNFT
+      properties:
+        ergDeposited:
+          type: integer
+          format: int64
+          description: Amount of ERG deposited into the LP
+          example: 500000000
+        tokenDeposited:
+          type: integer
+          format: int64
+          description: Amount of tokens deposited into the LP
+          example: 500000000
+        txId:
+          type: string
+          description: Hex-encoded id of the deposit transaction
+          example: '40b7d045a858d537cdbf072e46ffbb86c0c9f6b0e93c369c1ffcba76797636d7'
+        provisionNFT:
+          type: string
+          description: Hex-encoded token Id of the resulting provision NFT
+          example: 'ce00d6e0f4fd3390c0519bb0d24824e1e6b06978163f4845a7cf2c1c7d8f1b65'
+
+    RedemptionInfo:
+      description: Information needed to redeem liquidity from the PlasmaDex LP
+      type: object
+      x-tags: plasmadex
+      required:
+        - provisionNFT
+      properties:
+        provisionNFT:
+          type: string
+          description: Hex-encoded token Id of the provision NFT
+          example: 'ce00d6e0f4fd3390c0519bb0d24824e1e6b06978163f4845a7cf2c1c7d8f1b65'
+
+    RedemptionResult:
+      description: Result of a PlasmaDex liquidity redemption transaction
+      type: object
+      x-tags: plasmadex
+      required:
+        - ergRedeemed
+        - tokensRedeemed
+        - liqRemoved
+        - txId
+      properties:
+        ergRedeemed:
+          type: integer
+          format: int64
+          description: Amount of ERG redeemed from the LP
+          example: 500000000
+        tokensRedeemed:
+          type: integer
+          format: int64
+          description: Amount of tokens redeemed from the LP
+          example: 500000000
+        liqRemoved:
+          type: integer
+          format: int64
+          description: Amount of liquidity removed from the LP
+          example: 1000000000
+        txId:
+          type: string
+          description: Hex-encoded id of the redemption transaction
+          example: '40b7d045a858d537cdbf072e46ffbb86c0c9f6b0e93c369c1ffcba76797636d7'
+
+    LPSyncStatus:
+      description: Synchronization status of a PlasmaDex Liquidity Pool
+      type: object
+      x-tags: plasmadex
+      required:
+        - blockHeight
+        - isSynced
+        - utxoId
+        - digest
+      properties:
+        blockHeight:
+          type: integer
+          format: int32
+          description: Block height the LP is currently synced to
+          example: 47832
+        isSynced:
+          type: boolean
+          description: Whether the LP is synced to the current blockchain height
+          example: true
+        utxoId:
+          type: string
+          description: UTXO Id of the LP
+          example: '88c297f99da7172f6aa20efbead69aa40e2b7734a1873d66ca1db6b19d214db6'
+        digest:
+          type: string
+          description: Digest of the PlasmaDex dictionary
+          example: 'ce00d6e0f4fd3390c0519bb0d24824e1e6b06978163f4845a7cf2c1c7d8f1b65'
+
+    WithdrawResult:
+      description: Result of a PlasmaDex LP state fee withdrawal transaction
+      type: object
+      x-tags: plasmadex
+      required:
+        - ergFees
+        - tokenFees
+        - feeNFT
+        - utxoId
+        - txId
+      properties:
+        ergFees:
+          type: integer
+          format: int64
+          description: Amount of ERG fees withdrawn from the LP
+          example: 500000000
+        tokenFees:
+          type: integer
+          format: int64
+          description: Amount of token fees withdrawn from the LP
+          example: 500000000
+        feeNFT:
+          type: string
+          description: Hex-encoded token Id of the fee NFT
+          example: 'ce00d6e0f4fd3390c0519bb0d24824e1e6b06978163f4845a7cf2c1c7d8f1b65'
+        utxoId:
+          type: string
+          description: UTXO Id of the fee reward box after withdrawal
+          example: '88c297f99da7172f6aa20efbead69aa40e2b7734a1873d66ca1db6b19d214db6'
+        txId:
+          type: string
+          description: Hex-encoded id of the withdrawal transaction
+          example: '40b7d045a858d537cdbf072e46ffbb86c0c9f6b0e93c369c1ffcba76797636d7'
+
+    FeeSyncResult:
+      description: Synchronization status of a PlasmaDex fee reward box
+      type: object
+      x-tags: plasmadex
+      required:
+        - isSynced
+        - isSyncing
+        - feeRewardBox
+      properties:
+        isSynced:
+          type: boolean
+          description: Whether the fee reward box is fully synced
+          example: true
+        isSyncing:
+          type: boolean
+          description: Whether the fee reward box is currently syncing
+          example: false
+        feeRewardBox:
+          type: string
+          description: The fee reward box currently being synchronized
+          example: '88c297f99da7172f6aa20efbead69aa40e2b7734a1873d66ca1db6b19d214db6'
+
+    FeeClaimResult:
+      description: Result of a PlasmaDex fee reward box claim transaction
+      type: object
+      x-tags: plasmadex
+      required:
+        - ergClaimed
+        - tokensClaimed
+        - txId
+      properties:
+        ergClaimed:
+          type: integer
+          format: int64
+          description: Amount of ERG claimed from the fee reward box
+          example: 500000000
+        tokensClaimed:
+          type: integer
+          format: int64
+          description: Amount of tokens claimed from the fee reward box
+          example: 500000000
+        txId:
+          type: string
+          description: Hex-encoded id of the fee claim transaction
+          example: '40b7d045a858d537cdbf072e46ffbb86c0c9f6b0e93c369c1ffcba76797636d7'
+
     NISPRepresentation:
       description: Representation of a 10 super share NISP
       x-tags: mining

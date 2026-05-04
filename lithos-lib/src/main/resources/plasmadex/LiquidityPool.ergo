@@ -42,10 +42,14 @@
   // helpful for synchronization and clearer assumptions
   // 0 - Swap - Swap ERG to token or token to ERG.
   // 1 - Deposit - Add liquidity to the AMM. A new liquidity provision will be created,
-  // and an NFT representing the provision will be outputted.
+  // and an NFT representing the provision will be outputted. The pool must not have any outstanding
+  // liquidity state fees in feeInfo in order to perform this operation.
   // 2 - Removal - Remove liquidity from the AMM. An NFT representing the liquidity provision
   // must exist in INPUTS(1) token(0) of the tx. The entire liquidity provision will be removed and
-  // the NFT will be burned.
+  // the NFT will be burned. The pool must not have any outstanding liquidity state fees in feeInfo in order to
+  // perform this operation.
+  // 3 - Withdraw - Remove liquidity state fees from the pool and output them into a fee reward box.
+  // The feeInfo register will be reset to 0.
   val CTX_OP = getVar[Byte](0).get
 
   // Helper Methods
@@ -80,7 +84,7 @@
   }
   // AMM Code
   val InitiallyLockedLP = 0x7fffffffffffffffL
-  val FeeDenom = 1000
+  val FeeDenom = 10000
   val MinStorageRent = 10000000L  // this number of nanoErgs are going to be permanently locked
 
   val poolNFT0    = SELF.tokens(0)
@@ -126,31 +130,46 @@
 
   // Validates that fee rules have been satisfied whenever a liquidity state change occurs
   // Only used in deposits and redemptions
-  val satisfiesLSFees: Boolean = {
-    // Has enough ERG to emit a fee box
-    if(lsFeesX0 > MinStorageRent){
-      // lpFeeReward with correct params and tokens emitted
-      val lpRewardEmitted = OUTPUTS.exists{
-        (o: Box) =>
-
-          val tokenHandled = {
-            if(lsFeesY0 >= 0)
-              o.tokens.size == 1 && o.tokens(0)._1 == tokenY0._1 && o.tokens(0)._2 == lsFeesY0
-            else
-              o.tokens.size == 0
-          }
-          blake2b256(o.propositionBytes) == CONST_FEE_REWARD_HASH &&
-          o.value == lsFeesX0 && tokenHandled && liquidityTree.digest == o.R4[AvlTree].get.digest &&
-          liquidity == o.R5[Long].get
+  val validWithdraw: Boolean = {
+    if(lsFeesX0 > 0 || lsFeesY0 > 0){
+      val feeReward = OUTPUTS(1)
+      val tokenRewarded = {
+        if(lsFeesY0 > 0)
+          feeReward.tokens.size == 2 && feeReward.tokens(1)._1 == tokenY0._1 &&
+          feeReward.tokens(1)._2 == lsFeesY0 && totalDeltaY == -lsFeesY0
+        else
+          feeReward.tokens.size == 0 && totalDeltaY == 0
       }
-      // both lsFees should always reset to 0 after fee box is emitted
+      // Someone else can choose to fund the fee reward box if there is situation where number of ERG fees is too
+      // small to create a box, but number of tokens is quite valuable. Only lsFeesX0 may be removed from LP.
+      val ergRewarded = feeReward.value >= lsFeesX0 && totalDeltaX == -lsFeesX0
+      val validFRBox = blake2b256(feeReward.propositionBytes) == CONST_FEE_REWARD_HASH
+      val nftEmitted = feeReward.tokens.size >= 1 && feeReward.tokens(0)._1 == SELF.id
+      val onlyOneNFT = numTokenInOutputs(SELF.id) == 1L
+      val dictionarySame = feeReward.R4[AvlTree].get == liquidityTree
+      val liquiditySame = liquidity == feeReward.R5[Long].get
+      // NOTE: No fee params in fee reward contract, so R6 of feeReward maps to R7 of SELF (feeInfo register)
+      val feeInfoSame = feeReward.R6[Coll[Long]].get == feeInfo
       val feesReset = lsFeesX1 == 0 && lsFeesY1 == 0
-      lpRewardEmitted && feesReset
+      // Preserved amm state
+      val ammPreserved = deltaSupplyLP == 0 && deltaReservesX == 0 && deltaReservesY == 0
+      allOf(
+        Coll(
+          ergRewarded,
+          tokenRewarded,
+          validFRBox,
+          nftEmitted,
+          onlyOneNFT,
+          dictionarySame,
+          liquiditySame,
+          feeInfoSame,
+          feesReset,
+          ammPreserved
+        )
+      )
     }else{
-      // If there is not enough ERG to emit a fee box, then there should be no change in LS
-      deltaLSFeesX == 0 && deltaLSFeesY == 0
+      false
     }
-
   }
 
   val validDepositing = {
@@ -160,6 +179,8 @@
         deltaReservesY.toBigInt * supplyLP0 / reservesY0
     )
     val satisfiesAMM = deltaSupplyLP <= sharesUnlocked
+
+    val lsFeesValid = lsFeesX0 == 0 && lsFeesY0 == 0 && deltaLSFeesX == 0 && deltaLSFeesY == 0
     // Deposit Op
     if(CTX_OP == 1){
       // Context Vars
@@ -178,7 +199,7 @@
         byteArrayToLong(CTX_PD_DATA._2) > 0
       ))
       val nftInOutputs = numTokenInOutputs(SELF.id) == 1L
-      satisfiesLSFees && satisfiesAMM && validProvisionNFT &&
+      lsFeesValid && satisfiesAMM && validProvisionNFT &&
       treeUpdated && validProvisionData && nftInOutputs
     }else{
       false
@@ -190,7 +211,7 @@
     val _deltaSupplyLP = deltaSupplyLP.toBigInt
     // note: _deltaSupplyLP, deltaReservesX and deltaReservesY are negative
     val satisfiesAMM = deltaReservesX.toBigInt * supplyLP0 >= _deltaSupplyLP * reservesX0 && deltaReservesY.toBigInt * supplyLP0 >= _deltaSupplyLP * reservesY0
-
+    val lsFeesValid = lsFeesX0 == 0 && lsFeesY0 == 0 && deltaLSFeesX == 0 && deltaLSFeesY == 0
     // Removal Op
     if(CTX_OP == 2){
       // Context Vars
@@ -211,7 +232,7 @@
 
       val nftBurned = numTokenInOutputs(CTX_PD_DATA) == 0L
 
-      satisfiesLSFees && satisfiesAMM && validProvisionNFT &&
+      lsFeesValid && satisfiesAMM && validProvisionNFT &&
       correctLiqChange && treeUpdated && nftBurned
     }else{
       false
@@ -237,12 +258,17 @@
   }
 
 
-  val validAction =
+  val validAction = {
+    if(CTX_OP == 3){
+      validWithdraw
+    }else{
       if (deltaSupplyLP == 0)
           validSwap
       else
           if (deltaReservesX > 0 && deltaReservesY > 0) validDepositing
           else validRedemption
+   }
+  }
 
   sigmaProp(
       validSuccessorScript &&

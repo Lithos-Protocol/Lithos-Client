@@ -11,6 +11,8 @@ class TasksConfig(config: Configuration){
     TasksConfig.TaskConfiguration.fromConfig(config, "rollup-sync-task")
   val dictionarySyncTask:   TasksConfig.TaskConfiguration =
     TasksConfig.TaskConfiguration.fromConfig(config, "dictionary-sync-task")
+  val dexSyncTask:   TasksConfig.TaskConfiguration =
+    TasksConfig.TaskConfiguration.fromConfig(config, "dex-sync-task")
 }
 
 object TasksConfig {

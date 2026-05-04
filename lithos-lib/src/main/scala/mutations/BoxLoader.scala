@@ -43,6 +43,28 @@ class BoxLoader(ctx: BlockchainContext) {
 
     inputBoxes.toSeq
   }
+  def getInputs(value: Long, tokenId: ErgoId, tokenAmount: Long): Seq[InputUTXO] = {
+    var currentValue = 0L
+    var currentTokens = 0L
+    var inputBoxes   = Seq.empty[InputUTXO]
+    while(currentValue < value || currentTokens < tokenAmount){
+      if(boxStack.isEmpty) {
+        throw new NotEnoughInputsException(s"Failed to find enough InputUTXOs for value $value and tokens $tokenAmount" +
+          s" (only got ${inputBoxes.size} for value $currentValue and tokens $currentTokens)")
+      }
+      val input    = boxStack.pop()
+      if(!usedBoxes(input.id)) {
+        currentValue = currentValue + input.value
+        val inputTokens = input.tokens.find(_.id == tokenId).map(_.amount)
+        currentTokens = currentTokens + inputTokens.getOrElse(0L)
+        usedBoxes += input.id
+        inputBoxes = inputBoxes :+ input
+      }
+    }
+    logger.info(s"Returned ${inputBoxes.size} boxes from BoxLoader")
+
+    inputBoxes.toSeq
+  }
 
   def getAll = {
     val all = boxStack.toArray

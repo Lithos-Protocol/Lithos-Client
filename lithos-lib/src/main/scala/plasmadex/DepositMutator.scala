@@ -30,6 +30,8 @@ class DepositMutator(lp: LiquidityPool, lqState: LiquidityState, amount: Long) e
   )
 
   override protected def mutation(tCtx: TxContext): Seq[UTXO] = {
+    if(lp.lsFeesX != 0 || lp.lsFeesY != 0)
+      throw new LSFeesNotResetException("Cannot perform deposit until liquidity state fees are withdrawn")
     val insertion = lqState.dictionary.insert((lp.lpBox.id.getBytes, Longs.toByteArray(amount)))
 
     ctxLP = Some(lp.lpBox

@@ -78,7 +78,7 @@
 
     val incrementedMiners = nextMiners == currentMiners + 1
     val samePeriod = nextPeriod == currentPeriod
-
+    val tokensConserved = nextUTXO.tokens == SELF.tokens
     val statements = allOf(
       Coll(
         authenticMiner,
@@ -87,7 +87,8 @@
         validNISP,
         treeUpdated,
         incrementedMiners,
-        samePeriod
+        samePeriod,
+        tokensConserved
       )
     )
 
@@ -99,6 +100,7 @@
     val conservedValues = allOf(
       Coll(
         nextUTXO.value  == SELF.value,
+        nextUTXO.tokens == SELF.tokens,
         nextTree        == nispTree,
         nextMiners      == currentMiners,
         nextScore       == totalScore,

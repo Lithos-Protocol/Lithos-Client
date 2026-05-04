@@ -44,18 +44,19 @@
 
 
       val enoughValue  = SELF.value >= coinsToIssue - feeValue
-
+      val tokensTransferred = SELF.tokens == holdingBox.tokens
       // Fee taken from holding box, and fee does not exceed 3% (to prevent abuse by miners who self collateralize)
       val holdingValid = allOf(
         Coll(
           holdingBox.value >= coinsToIssue - feeValue,
           (feeValue * 100000) / coinsToIssue < 3000,
+          tokensTransferred,
           //empty digest
-          holdingBox.R4[AvlTree].get.digest == fromBase16("4ec61f485b98eb87153f7c57db4f5ecd75556fddbc403b41acf8441fde8e160900072000"),
+          holdingBox.R4[AvlTree].get.digest == fromBase16("4ec61f485b98eb87153f7c57db4f5ecd75556fddbc403b41acf8441fde8e160900"),
           holdingBox.R5[Int].get == 0,
           holdingBox.R6[BigInt].get == 0.toBigInt,
           holdingBox.R7[Long].get == HEIGHT,
-          holdingBox.R8[Coll[Byte]] == blake2b256(lenderPk.propBytes) // Used for miner verification in fraud proofs
+          holdingBox.R8[Coll[Byte]].get == blake2b256(lenderPk.propBytes) // Used for miner verification in fraud proofs
           )
         )
 
@@ -63,21 +64,22 @@
       // This check inherently ensures that minerRewardBox is under lenderPk's associated miner reward contract
       val lenderIsBlockMiner = lenderPk.propBytes == proveDlog(CONTEXT.preHeader.minerPk).propBytes
 
-      val madeChangeBox = {
-        if(SELF.value > coinsToIssue - feeValue ){
-          val changeBox = OUTPUTS(1)
-
-          allOf(
-            Coll(
-              changeBox.value == SELF.value - (coinsToIssue - feeValue),
-              changeBox.propositionBytes == lenderPk.propBytes
-            )
-          )
-        }else{
-          true
-        }
-      }
+//      val madeChangeBox = {
+//        if(SELF.value > coinsToIssue - feeValue ){
+//          val changeBox = OUTPUTS(1)
+//
+//          allOf(
+//            Coll(
+//              changeBox.value == SELF.value - (coinsToIssue - feeValue),
+//              changeBox.propositionBytes == lenderPk.propBytes
+//            )
+//          )
+//        }else{
+//          true
+//        }
+//      }
       val onlyOne = INPUTS(0).id == SELF.id
+
       val validCoinbase = allOf(
         Coll(
          // correctEmission,
@@ -86,7 +88,7 @@
          enoughValue,
          holdingValid,
          lenderIsBlockMiner,
-         madeChangeBox,
+        // madeChangeBox,
          onlyOne
         )
       )

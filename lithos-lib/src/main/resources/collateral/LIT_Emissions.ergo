@@ -1,0 +1,90 @@
+{
+  // Lithos Emission Contract
+  // Emits decreasing amount of tokens every epoch, emissions are pre-made into collateral boxes
+
+
+  // Constants
+
+  // CONST_COLLATERAL_HASH - Hashed PropBytes of Collateral contract
+  // CONST_MAX_EPOCHS - Max num of epochs before tail emission kicks in
+  // CONST_EPOCH_LENGTH - Length of emission epoch
+  // CONST_EPOCH_REDUCTION - Amount of tokens reduced every epoch
+  // CONST_TAIL_EMISSIONS_RATE - Rate of tokens during tail emissions
+  // CONST_INITIAL_RATE - Initial rate of token emissions
+  // CONST_ERG_FIXED_RATE - Erg fixed rate to determine correct collateral contract
+  // CONST_ERG_FOUNDER_INIT_REWARD - Ergo init reward
+  // CONST_ERG_FIXED_RATE_PERIOD - Ergo fixed rate period
+  // CONST_ERG_EPOCH_LENGTH - Epoch length for Ergo
+  // Registers
+  // R4: Current Block (Int) - Number of blocks pre-emitted by this emission contract
+  val currentBlock = SELF.R4[Int].get
+  val emissionNFT = SELF.tokens(0)
+  val tokenLIT = SELF.tokens(1)
+
+  val nextEmission = OUTPUTS(0)
+  val nextBlock = nextEmission.R4[Int].get
+  val nextEmissionNFT = nextEmission.tokens(0)
+  val nextTokenLIT = nextEmission.tokens(1)
+
+
+  val collatBox:     Box = OUTPUTS(1)
+  val collatFee = collatBox.R4[Long].get
+
+  val numReductions = currentBlock / CONST_EPOCH_LENGTH
+  val amountReduced = numReductions * CONST_EPOCH_REDUCTION
+  val emissionRate = {
+    if(numReductions < CONST_MAX_EPOCHS)
+      CONST_INITIAL_RATE - amountReduced
+    else
+      CONST_TAIL_EMISSIONS_RATE
+  }
+
+
+  val minersReward = CONST_ERG_FIXED_RATE - CONST_ERG_FOUNDER_INIT_REWARD
+  val minersFixedRatePeriod = CONST_ERG_FIXED_RATE_PERIOD + 2 * CONST_ERG_EPOCH_LENGTH
+  val epoch = 1 + (HEIGHT - CONST_ERG_FIXED_RATE_PERIOD) / CONST_ERG_EPOCH_LENGTH
+
+  val coinsToIssue = if(HEIGHT < minersFixedRatePeriod){
+    minersReward
+  }else{
+    CONST_ERG_FIXED_RATE - (CONST_ERG_ONE_EPOCH_REDUCTION * epoch)
+  }
+
+
+
+  val enoughValue  = collatBox.value >= coinsToIssue
+  val validTokenEmitted = collatBox.tokens(0)._1 == SELF.tokens(1)._1
+  val nftPreserved = emissionNFT == nextEmissionNFT
+  val tokenIdPreserved = tokenLIT._1 == nextTokenLIT._1
+  val tokenEmitted = tokenLIT._2 - nextTokenLIT._2 == emissionRate
+  val collatHoldsEmissions = collatBox.tokens(0)._2 == emissionRate
+  val emissionValuePreserved = SELF.value == nextEmission.value
+  val blocksIncremented = nextBlock == currentBlock + 1
+  val contractSame = SELF.propositionBytes == nextEmission.propositionBytes
+  val correctCollat = blake2b256(collatBox.propositionBytes) == CONST_COLLATERAL_HASH
+  val correctFee = (collatFee * 100000) / coinsToIssue < 3000
+
+
+
+  val onlyOne = INPUTS(0).id == SELF.id
+  val validCycle = allOf(
+    Coll(
+     enoughValue,
+     validTokenEmitted,
+     nftPreserved,
+     tokenIdPreserved,
+     tokenEmitted,
+     collatHoldsEmissions,
+     emissionValuePreserved,
+     blocksIncremented,
+     contractSame,
+     correctCollat,
+     correctFee,
+     onlyOne
+    )
+  )
+
+  sigmaProp( validCycle )
+
+
+}

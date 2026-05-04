@@ -18,6 +18,7 @@ import scorex.utils.Longs
 import sigma.{AvlTree, Coll, Colls}
 import sigma.data.CBigInt
 import state.messages.RollupMessages.RemoveRollup
+import stratum.CollateralRetriever
 import utils.Helpers.{compileEval, compileHolding, compilePayout, evalContract, holdingContract, payoutContract}
 import utils.{Globals, Helpers}
 import work.lithos.mutations.{Contract, InputUTXO, Token, TxBuilder, UTXO}
@@ -94,7 +95,8 @@ object LFSMTransformer {
         attemptPayouts(ctx, payoutTrees, prover, boxLoader)
         attemptHoldingSubmissions(ctx, holdingTrees, prover, diff, boxLoader, cache, syncHandler)
         attemptEvaluation(ctx, evalTrees, prover, boxLoader, cache)
-
+        val collatRetriever = new CollateralRetriever(client, prover)
+        collatRetriever.checkCollateral(boxLoader)
         if(autoCommits)
           checkAutoCommits(ctx, diff, prover, boxLoader)
     }
@@ -300,7 +302,7 @@ object LFSMTransformer {
     val eval = evalContract(ctx)
 
     val otherInputs = loader.getInputs(Parameters.MinFee)
-    val output = UTXO(eval, holdingInput.value,
+    val output = UTXO(eval, holdingInput.value, holdingInput.tokens,
       registers = Seq(
         holdingInput.registers.head,
         holdingInput.registers(1),
@@ -323,7 +325,7 @@ object LFSMTransformer {
     val payout = payoutContract(ctx)
 
     val otherInputs = loader.getInputs(Parameters.MinFee)
-    val output = UTXO(payout, evalInput.value,
+    val output = UTXO(payout, evalInput.value, evalInput.tokens,
       registers = Seq(
         evalInput.registers.head,
         evalInput.registers(1),
@@ -451,7 +453,7 @@ object LFSMTransformer {
         val lastMiners  = holdingInput.registers(1).getValue.asInstanceOf[Int]
         val lastScore   = holdingInput.registers(2).getValue.asInstanceOf[CBigInt].wrappedValue
 
-        val output = UTXO(holding, holdingInput.value,
+        val output = UTXO(holding, holdingInput.value, holdingInput.tokens,
           registers = Seq(
             copiedTree.ergoValue,
             ErgoValue.of(lastMiners + 1),
@@ -495,10 +497,11 @@ object LFSMTransformer {
     val score = Longs.fromByteArray(lookUp.response.head.ergoValue.getValue.toArray.slice(0, 8))
     val totalScore   = payInput.registers(2).getValue.asInstanceOf[CBigInt].wrappedValue
     val totalReward  = payInput.registers(3).getValue.asInstanceOf[Long]
-
+    val totalTokens = payInput.tokens.headOption
     // The same is not true for totalScore, which stays constant during payouts, but is decreased during
     // evals
     val amountToPay = LFSMHelpers.paymentFromScore(score, totalScore, totalReward)
+    val amountTokens = LFSMHelpers.paymentFromScore(score, totalScore, totalTokens.map(_.amount).getOrElse(0L))
     val inputWithContext = payInput.setCtxVars(
       ContextVar.of(0.toByte,
         ErgoValue.ofArray(Array(Colls.fromArray(prover.contract.hashedPropBytes)),
@@ -507,14 +510,31 @@ object LFSMTransformer {
       ContextVar.of(2.toByte, delete.proof.ergoValue)
     )
     if(amountToPay < payInput.value && payInput.value - amountToPay > 1000000L) {
-      val output = UTXO(payout, payInput.value - amountToPay,
+      val nextTokens = {
+        if(totalTokens.isDefined) {
+          if(totalTokens.get.amount == amountTokens)
+            Seq.empty[Token]
+          else
+            Seq(totalTokens.get - amountTokens)
+        }else {
+          Seq.empty[Token]
+        }
+      }
+      val tokensOutputted = {
+        if(totalTokens.isDefined) {
+          Seq(Token(LFSMHelpers.LIT_ID, amountTokens))
+        }else {
+          Seq.empty[Token]
+        }
+      }
+      val output = UTXO(payout, payInput.value - amountToPay, nextTokens,
         registers = Seq(
           copiedTree.ergoValue,
           payInput.registers(1),
           payInput.registers(2),
           payInput.registers(3)
         ))
-      val minerOutput = UTXO(prover.contract, amountToPay)
+      val minerOutput = UTXO(prover.contract, amountToPay, tokensOutputted)
       val feeOutput = UTXO(Contract(ErgoTreePredef.feeProposition(720)), Parameters.MinFee)
       val uTx = TxBuilder(ctx)
         .setInputs((Seq(inputWithContext) ++ otherInputs): _*)
@@ -524,7 +544,15 @@ object LFSMTransformer {
       val txId = ctx.sendTransaction(sTx)
       logger.info(s"Sent transaction ${txId} to pay local miner")
     }else{
-      val minerOutput = UTXO(prover.contract, amountToPay)
+
+      val tokensOutputted = {
+        if(totalTokens.isDefined) {
+          Seq(Token(LFSMHelpers.LIT_ID, amountTokens))
+        }else {
+          Seq.empty[Token]
+        }
+      }
+      val minerOutput = UTXO(prover.contract, amountToPay, tokensOutputted)
       val feeOutput = UTXO(Contract(ErgoTreePredef.feeProposition(720)), Parameters.MinFee)
       val uTx = TxBuilder(ctx)
         .setInputs((Seq(inputWithContext) ++ otherInputs): _*)

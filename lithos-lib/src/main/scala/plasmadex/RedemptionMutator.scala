@@ -26,7 +26,8 @@ class RedemptionMutator(lp: LiquidityPool, lqState: LiquidityState, lqNFT: Array
   )
 
   override protected def mutation(tCtx: TxContext): Seq[UTXO] = {
-
+    if(lp.lsFeesX != 0 || lp.lsFeesY != 0)
+      throw new LSFeesNotResetException("Cannot perform redemption until liquidity state fees are withdrawn")
     val removal = lqState.dictionary.delete(lqNFT)
 
     ctxLP = Some(lp.lpBox

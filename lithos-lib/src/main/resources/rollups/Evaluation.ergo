@@ -62,8 +62,8 @@
     }
     val contractSame = SELF.propositionBytes == nextUTXO.propositionBytes
     val correctInputs = INPUTS.size == 2
-
-    sigmaProp( validFP && authenticFPData && onlyOne && contractSame && correctInputs ) && executeFromVar[SigmaProp](0)
+    val tokensConserved = SELF.tokens == nextUTXO.tokens
+    sigmaProp( validFP && authenticFPData && onlyOne && contractSame && correctInputs && tokensConserved ) && executeFromVar[SigmaProp](0)
 
 
 
@@ -76,6 +76,7 @@
     val conservedValues = allOf(
         Coll(
           nextUTXO.value  == SELF.value,
+          nextUTXO.tokens == SELF.tokens,
           nextTree        == nispTree,
           nextMiners      == currentMiners,
           nextScore       == totalScore,

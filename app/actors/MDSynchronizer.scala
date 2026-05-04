@@ -13,7 +13,7 @@ import play.api.cache.SyncCacheApi
 import play.api.libs.concurrent.InjectedActorSupport
 import sigma.ast.ErgoTree
 import sigma.{Coll, SigmaProp}
-import state.messages.DictionaryMessages.{DictionaryTransform, InitialState}
+import state.messages.DictionaryMessages.{DictionaryTransform, InitialMDState}
 import state.messages.SyncMessages.{GetSynced, HandledBlock}
 import state.messages.{BlockInfo, BlockMessage}
 import utils.Globals
@@ -31,8 +31,8 @@ class MDSynchronizer @Inject()(cacheApi: SyncCacheApi) extends Actor with Inject
 
 
   override def receive: Receive = {
-    case InitialState(height, md) =>
-      logger.info(s"Got ${InitialState(height, md)}")
+    case InitialMDState(height, md) =>
+      logger.info(s"Got ${InitialMDState(height, md)}")
       mdCache.setMD(md)
       context.become(initialSync(height, md.utxoId))
   }

@@ -29,6 +29,31 @@ GET /info                     api.InfoApiController.getLithosInfo()
 GET /mining/bestNISP          api.MiningApiController.getBestNISPAtHeight()
 GET /mining                   api.MiningApiController.getStratumInfo()
 
+# Routes for Dex API
+
+GET  /dex                               api.DexApiController.getDexInfo()
++ nocsrf
+POST /dex/syncFee/:feeNFTId             api.DexApiController.syncFee(feeNFTId: String)
++ nocsrf
+POST /dex/claimFee/:feeNFTId            api.DexApiController.claimFee(feeNFTId: String)
+GET  /dex/:lpId/sync                    api.DexApiController.getDexSyncStatus(lpId: String)
++ nocsrf
+POST /dex/:lpId/swap/check              api.DexApiController.checkSwapDex(lpId: String)
++ nocsrf
+POST /dex/:lpId/swap                    api.DexApiController.swapDex(lpId: String)
++ nocsrf
+POST /dex/:lpId/deposit/check           api.DexApiController.checkDepositDex(lpId: String)
++ nocsrf
+POST /dex/:lpId/deposit                 api.DexApiController.depositDex(lpId: String)
++ nocsrf
+POST /dex/:lpId/redemption/check        api.DexApiController.checkRedemptionDex(lpId: String)
++ nocsrf
+POST /dex/:lpId/redemption              api.DexApiController.redemptionDex(lpId: String)
++ nocsrf
+POST /dex/:lpId/withdraw/check          api.DexApiController.checkWithdrawDex(lpId: String)
++ nocsrf
+POST /dex/:lpId/withdraw                api.DexApiController.withdrawDex(lpId: String)
+
 # Routes for Payments API
 
 GET /payments                 api.PaymentsApiController.getPayments()
