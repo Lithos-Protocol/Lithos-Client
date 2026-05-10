@@ -2,11 +2,12 @@ package state.messages
 
 import lfsm.states.MinerTree
 import plasmadex.states.LiquidityState
+import state.messages.SyncMessages.Transform
 import work.lithos.plasma.collections.LocalPlasmaMap
 
 object DictionaryMessages {
 
-  case class DictionaryTransform(blockInfo: BlockInfo, tx: BlockTx, tokenId: String) {
+  case class DictionaryTransform(blockInfo: BlockInfo, tx: BlockTx, tokenId: String) extends Transform {
     val input: TxInput = tx.inputs.head
     val output: TxOutput = tx.outputs.head
 

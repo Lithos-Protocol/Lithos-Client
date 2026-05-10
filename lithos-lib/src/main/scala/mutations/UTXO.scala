@@ -8,7 +8,8 @@ import scala.util.{Failure, Success, Try}
 
 case class UTXO(contract: Contract, value: Long,
                 tokens: Seq[Token] = Seq.empty[Token],
-                registers: Seq[ErgoValue[_]] = Seq.empty[ErgoValue[_]]) {
+                registers: Seq[ErgoValue[_]] = Seq.empty[ErgoValue[_]],
+                creationHeight: Option[Int] = None) {
 
   def setTokens(tokens: Token*): UTXO = this.copy(tokens = tokens)
 
@@ -17,6 +18,8 @@ case class UTXO(contract: Contract, value: Long,
   def withReg(idx: Int, reg: ErgoValue[_]): UTXO = {
     setRegs(registers.patch(idx, Seq(reg), 1): _*)
   }
+
+  def setCreationHeight(height: Int): UTXO = this.copy(creationHeight = Some(height))
 
   def setValue(value: Long): UTXO = this.copy(value = value)
   def subValue(amnt: Long):  UTXO = this.copy(value = value - amnt)
@@ -68,6 +71,9 @@ case class UTXO(contract: Contract, value: Long,
     if(registers.nonEmpty)
       out = out.registers(registers: _*)
 
+    if(creationHeight.isDefined)
+      out = out.creationHeight(creationHeight.get)
+
     out.build()
   }
 
@@ -97,8 +103,9 @@ object UTXO {
 
   def apply(contract: Contract, value: Long,
             tokens: Seq[Token] = Seq.empty[Token],
-            registers: Seq[ErgoValue[_]] = Seq.empty[ErgoValue[_]]): UTXO = {
-    new UTXO(contract, value, tokens, registers)
+            registers: Seq[ErgoValue[_]] = Seq.empty[ErgoValue[_]],
+            creationHeight: Option[Int] = None): UTXO = {
+    new UTXO(contract, value, tokens, registers, creationHeight)
   }
 
 

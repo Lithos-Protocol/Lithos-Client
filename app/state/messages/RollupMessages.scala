@@ -1,12 +1,13 @@
 package state.messages
 
 import lfsm.states.NISPTree
+import state.messages.SyncMessages.Transform
 
 object RollupMessages {
 
   case class Genesis(tree: NISPTree, blockInfo: BlockInfo)
 
-  case class Transform(blockInfo: BlockInfo, tx: BlockTx) {
+  case class RollupTransform(blockInfo: BlockInfo, tx: BlockTx) extends Transform {
     val input: TxInput = tx.inputs.head
     val output: TxOutput = tx.outputs.head
 

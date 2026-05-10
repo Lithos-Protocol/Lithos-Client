@@ -1,7 +1,7 @@
 package state
 
 import akka.actor.{ActorRef, Cancellable}
-import cache.MDCache
+import cache.{MDCache, RollupCache}
 import evaluation.Evaluator
 import lfsm.LFSMPhase.{EVAL, HOLDING, PAYOUT}
 import lfsm.contracts.{DictionaryContracts, FraudProofContracts, RollupContracts}
@@ -17,6 +17,7 @@ import play.api.cache.SyncCacheApi
 import scorex.utils.Longs
 import sigma.{AvlTree, Coll, Colls}
 import sigma.data.CBigInt
+import state.messages.MempoolMessages.MempoolRollupState
 import state.messages.RollupMessages.RemoveRollup
 import stratum.CollateralRetriever
 import utils.Helpers.{compileEval, compileHolding, compilePayout, evalContract, holdingContract, payoutContract}
@@ -28,7 +29,8 @@ import scala.util.{Failure, Success, Try}
 object LFSMTransformer {
   private val logger: Logger = LoggerFactory.getLogger("LFSMTransformer")
   private final val DATA_BOX_BUFFER = (LFSMHelpers.NISP_WINDOW + 50).toInt
-
+  // Simple lock to make sure sync transforms are never made concurrently
+  private final var TRANSFORM_LOCK: Boolean = false
   private def makeMinerDataBox(ctx: BlockchainContext, minerContract: Contract, addToken: ErgoId, score: Long) = {
     val contract =  Helpers.dataBoxContract(ctx)
     val commit = ctx.getHeight + DATA_BOX_BUFFER -> score
@@ -82,23 +84,64 @@ object LFSMTransformer {
 
   def onSync(client: ErgoClient, cache: SyncCacheApi, prover: NodeWallet, diff: String,
              nispTrees: Seq[(String, NISPTree)], syncHandler: ActorRef, autoCommits: Boolean): Unit = {
-    logger.info(s"Creating LFSM transforms for ${nispTrees.size} synced rollups")
 
-    client.execute{
-      ctx =>
-        val boxLoader    = new BoxLoader(ctx).loadBoxes
-        val holdingTrees = nispTrees.filter(h => h._2.phase == HOLDING)
-        val evalTrees    = nispTrees.filter(h => h._2.phase == EVAL)
-        val payoutTrees  = nispTrees.filter(h => h._2.phase == PAYOUT)
-        checkHoldingTransforms(ctx, holdingTrees, prover, boxLoader)
-        checkEvalTransforms(ctx, evalTrees, prover, boxLoader)
-        attemptPayouts(ctx, payoutTrees, prover, boxLoader)
-        attemptHoldingSubmissions(ctx, holdingTrees, prover, diff, boxLoader, cache, syncHandler)
-        attemptEvaluation(ctx, evalTrees, prover, boxLoader, cache)
-        val collatRetriever = new CollateralRetriever(client, prover)
-        collatRetriever.checkCollateral(boxLoader)
-        if(autoCommits)
-          checkAutoCommits(ctx, diff, prover, boxLoader)
+    def useCorrectState(syncState: (String, NISPTree), mempoolMap: Map[String, MempoolRollupState]) = {
+      if(mempoolMap.contains(syncState._1))
+        syncState._1 -> mempoolMap(syncState._1).nispTree
+      else
+        syncState
+    }
+
+    if(!TRANSFORM_LOCK) {
+
+      TRANSFORM_LOCK = true
+      Try {
+        Thread.sleep(1000)
+        logger.info(s"Creating LFSM transforms for ${nispTrees.size} synced rollups")
+
+        client.execute {
+          ctx =>
+            val boxLoader = new BoxLoader(ctx).loadBoxes
+            val rollupCache = new RollupCache(cache)
+            val memStates = nispTrees.flatMap {
+              n =>
+                rollupCache.getMempoolState(n._2.blockId).map{
+                  s =>
+                    n._1 -> s
+                }
+            }.toMap
+            val statesToRemove = memStates.filter(_._2.toBeRemoved)
+            logger.info(s"Using mempool states for ${memStates.size - statesToRemove.size}" +
+              s" (with ${statesToRemove.size} states removed)")
+            val updatedTrees = nispTrees.map(useCorrectState(_, memStates))
+            val transformableTrees = updatedTrees.filterNot(u => statesToRemove.contains(u._1))
+
+            val holdingTrees = transformableTrees.filter(h => h._2.phase == HOLDING)
+            val evalTrees = nispTrees.filter(h => h._2.phase == EVAL)
+            val updatedEvalTrees = transformableTrees.filter(h => h._2.phase == EVAL)
+            val payoutTrees = transformableTrees.filter(h => h._2.phase == PAYOUT)
+
+            checkHoldingTransforms(ctx, holdingTrees, prover, boxLoader, memStates)
+            checkEvalTransforms(ctx, updatedEvalTrees, prover, boxLoader, memStates)
+            attemptPayouts(ctx, payoutTrees, prover, boxLoader, memStates)
+            attemptHoldingSubmissions(ctx, holdingTrees, prover, diff, boxLoader, cache, syncHandler, memStates)
+
+            // We do not use mempool states for evaluation
+            attemptEvaluation(ctx, evalTrees, prover, boxLoader, cache)
+
+            val collatRetriever = new CollateralRetriever(client, prover)
+            collatRetriever.checkCollateral(boxLoader)
+            if (autoCommits)
+              checkAutoCommits(ctx, diff, prover, boxLoader)
+        }
+      }.recoverWith{
+        case e =>
+          logger.error("Got top-level transformer error", e)
+          Failure(e)
+      }
+      TRANSFORM_LOCK = false
+    } else {
+      logger.info("Skipped onSync due to transform lock")
     }
   }
 
@@ -172,9 +215,9 @@ object LFSMTransformer {
   }
 
   private def checkHoldingTransforms(ctx: BlockchainContext, holdingTrees: Seq[(String, NISPTree)],
-                                     prover: NodeWallet, loader: BoxLoader): Unit = {
+                                     prover: NodeWallet, loader: BoxLoader, mempoolMap: Map[String, MempoolRollupState]): Unit = {
     val transformable = holdingTrees.filter(h => ctx.getHeight - h._2.currentPeriod.get >= LFSMHelpers.HOLDING_PERIOD)
-    val transforms = transformable.map(t => Try(transformHolding(ctx, t, prover, loader)))
+    val transforms = transformable.map(t => Try(transformHolding(ctx, t, prover, loader, mempoolMap.get(t._1))))
     if(transforms.exists(_.isSuccess)) {
       logger.info(s"Transformed ${transforms.count(_.isSuccess)} holding utxos successfully")
     }
@@ -196,9 +239,9 @@ object LFSMTransformer {
   }
 
   private def checkEvalTransforms(ctx: BlockchainContext, evalTrees: Seq[(String, NISPTree)],
-                                  prover: NodeWallet, loader: BoxLoader): Unit = {
+                                  prover: NodeWallet, loader: BoxLoader, mempoolMap: Map[String, MempoolRollupState]): Unit = {
     val transformable = evalTrees.filter(h => ctx.getHeight - h._2.currentPeriod.get >= LFSMHelpers.EVAL_PERIOD)
-    val transforms = transformable.map(t => Try(transformEval(ctx, t, prover, loader)))
+    val transforms = transformable.map(t => Try(transformEval(ctx, t, prover, loader, mempoolMap.get(t._1))))
     if(transforms.exists(_.isSuccess)) {
       logger.info(s"Transformed ${transforms.count(_.isSuccess)} eval utxos successfully")
     }
@@ -219,7 +262,7 @@ object LFSMTransformer {
   }
 
   private def attemptEvaluation(ctx: BlockchainContext, evalTrees: Seq[(String, NISPTree)],
-                                 prover: NodeWallet, loader: BoxLoader, cache: SyncCacheApi) = {
+                                 prover: NodeWallet, loader: BoxLoader, cache: SyncCacheApi): Unit = {
     val transformable = evalTrees.filter(h => ctx.getHeight - h._2.currentPeriod.get < LFSMHelpers.EVAL_PERIOD)
     val unchecked = transformable.filter(!_._2.evaluated)
     val evaluations = unchecked.map(t => Try(evaluateSubmissions(ctx, t, prover, loader, cache)))
@@ -243,8 +286,8 @@ object LFSMTransformer {
   }
 
   private def attemptPayouts(ctx: BlockchainContext, payoutTrees: Seq[(String, NISPTree)],
-                             prover: NodeWallet, loader: BoxLoader): Unit = {
-    val transforms = payoutTrees.map(t => Try(payoutERG(ctx, t, prover, loader)))
+                             prover: NodeWallet, loader: BoxLoader, mempoolMap: Map[String, MempoolRollupState]): Unit = {
+    val transforms = payoutTrees.map(t => Try(payoutERG(ctx, t, prover, loader, mempoolMap.get(t._2.blockId))))
     if(transforms.exists(_.isSuccess)) {
       logger.info(s"Paid out ${transforms.count(_.isSuccess)} payout utxos successfully")
     }
@@ -266,12 +309,12 @@ object LFSMTransformer {
 
   private def attemptHoldingSubmissions(ctx: BlockchainContext, holdingTrees: Seq[(String, NISPTree)],
                                         prover: NodeWallet, diff: String, loader: BoxLoader, cache: SyncCacheApi,
-                                        syncHandler: ActorRef): Unit = {
+                                        syncHandler: ActorRef, mempoolMap: Map[String, MempoolRollupState]): Unit = {
     val transformable = holdingTrees.filter{
       h =>
         ctx.getHeight - h._2.currentPeriod.get < LFSMHelpers.HOLDING_PERIOD && !h._2.hasMiner
     }
-    val transforms = transformable.map(t => Try(submitNISPs(ctx, t, prover, diff, loader, cache, syncHandler)))
+    val transforms = transformable.map(t => Try(submitNISPs(ctx, t, prover, diff, loader, cache, syncHandler, mempoolMap.get(t._1))))
     if(transforms.exists(_.isSuccess)) {
       logger.info(s"Submitted NISPs to ${transforms.count(_.isSuccess)} holding utxos successfully")
     }
@@ -297,8 +340,11 @@ object LFSMTransformer {
   }
 
   private def transformHolding(ctx: BlockchainContext, holding: (String, NISPTree),
-                               prover: NodeWallet, loader: BoxLoader) = {
-    val holdingInput = InputUTXO(ctx.getBoxesById(holding._1).head)
+                               prover: NodeWallet, loader: BoxLoader, memState: Option[MempoolRollupState]) = {
+
+    if(memState.isDefined)
+      logger.info(s"Using mempool state for rollup ${holding._2.blockId}")
+    val holdingInput = getRollupInput(ctx, holding._1, memState)
     val eval = evalContract(ctx)
 
     val otherInputs = loader.getInputs(Parameters.MinFee)
@@ -320,8 +366,10 @@ object LFSMTransformer {
   }
 
   private def transformEval(ctx: BlockchainContext, eval: (String, NISPTree),
-                            prover: NodeWallet, loader: BoxLoader): Unit = {
-    val evalInput = InputUTXO(ctx.getBoxesById(eval._1).head)
+                            prover: NodeWallet, loader: BoxLoader, memState: Option[MempoolRollupState]): Unit = {
+    if(memState.isDefined)
+      logger.info(s"Using mempool state for rollup ${eval._2.blockId}")
+    val evalInput = getRollupInput(ctx, eval._1, memState)
     val payout = payoutContract(ctx)
 
     val otherInputs = loader.getInputs(Parameters.MinFee)
@@ -408,9 +456,11 @@ object LFSMTransformer {
     }
   }
   private def submitNISPs(ctx: BlockchainContext, holdTree: (String, NISPTree), prover: NodeWallet,
-                          diff: String, loader: BoxLoader, cache: SyncCacheApi, syncHandler: ActorRef): Unit = {
-
-    val holdingInput = InputUTXO(ctx.getBoxesById(holdTree._1).head)
+                          diff: String, loader: BoxLoader, cache: SyncCacheApi, syncHandler: ActorRef,
+                          memState: Option[MempoolRollupState]): Unit = {
+    if(memState.isDefined)
+      logger.info(s"Using mempool state for rollup ${holdTree._2.blockId}")
+    val holdingInput = getRollupInput(ctx, holdTree._1, memState)
 
     val nispDB = Globals.nispDB
 
@@ -427,17 +477,11 @@ object LFSMTransformer {
         val copiedTree = tree.copy()
         copiedTree.prover.generateProof() // Reset proof for copied tree, proofs will be incorrect if this is not done!
 
-        val realDigest = Hex.toHexString(holdingInput.registers.head.getValue.asInstanceOf[AvlTree].digest.toArray)
         logger.info(s"Got valid NISP with score ${nisp.score}, heights" +
           s" ${nisp.shares.map(_.getHeight).mkString(", ")} and size ${nisp.serialize.length} bytes")
-        logger.info(s"Digests before transform: (${realDigest}, ${tree}, ${copiedTree})")
-
 
         val insert = copiedTree.insert(
           prover.contract.hashedPropBytes -> nisp.serialize)
-
-        logger.info(s"Digests after transform: (${realDigest}, ${tree}, ${copiedTree})")
-
 
         val inputWithContext = holdingInput.setCtxVars(
           ContextVar.of(0.toByte, ErgoValue.of(prover.contract.sigmaBoolean.get)),
@@ -479,21 +523,20 @@ object LFSMTransformer {
   }
 
   private def payoutERG(ctx: BlockchainContext, payments: (String, NISPTree),
-                        prover: NodeWallet, loader: BoxLoader): Unit = {
+                        prover: NodeWallet, loader: BoxLoader, memState: Option[MempoolRollupState]): Unit = {
     logger.info(s"Paying out ERG for NISPTree ${payments._1}")
-    val payInput = InputUTXO(ctx.getBoxesById(payments._1).head)
+    if(memState.isDefined)
+      logger.info(s"Using mempool state for rollup ${payments._2.blockId}")
+    val payInput = getRollupInput(ctx, payments._1, memState)
     val payout = payoutContract(ctx)
 
     val otherInputs = loader.getInputs(Parameters.MinFee)
     val tree = payments._2.dictionary
     val copiedTree = tree.copy()
     copiedTree.prover.generateProof() // Reset proof for copied tree
-    val realDigest = Hex.toHexString(payInput.registers.head.getValue.asInstanceOf[AvlTree].digest.toArray)
-    logger.info(s"Digests before transform: (${realDigest}, ${tree}, ${copiedTree})")
 
     val lookUp = copiedTree.lookUp(prover.contract.hashedPropBytes)
     val delete = copiedTree.delete(prover.contract.hashedPropBytes)
-    logger.info(s"Digests after transform: (${realDigest}, ${tree}, ${copiedTree})")
     val score = Longs.fromByteArray(lookUp.response.head.ergoValue.getValue.toArray.slice(0, 8))
     val totalScore   = payInput.registers(2).getValue.asInstanceOf[CBigInt].wrappedValue
     val totalReward  = payInput.registers(3).getValue.asInstanceOf[Long]
@@ -564,5 +607,10 @@ object LFSMTransformer {
     }
   }
 
-
+  private def getRollupInput(ctx: BlockchainContext, utxoId: String, memState: Option[MempoolRollupState]) = {
+    if(memState.isDefined)
+      memState.get.asInput
+    else
+      InputUTXO(ctx.getBoxesById(utxoId).head)
+  }
 }

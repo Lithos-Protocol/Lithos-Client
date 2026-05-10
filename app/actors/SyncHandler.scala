@@ -4,7 +4,7 @@ import akka.actor.{Actor, ActorRef}
 import akka.pattern.ask
 import akka.util.Timeout
 import cache.RollupCache
-import configs.NodeConfig
+import configs.{NodeConfig, StateConfig, StratumConfig}
 import lfsm.LFSMPhase
 import lfsm.states.NISPTree
 import mutations.NodeWallet
@@ -14,6 +14,9 @@ import play.api.Configuration
 import play.api.cache.SyncCacheApi
 import play.api.libs.concurrent.InjectedActorSupport
 import sigma.data.AvlTreeFlags
+import state.LFSMTransformer
+import state.messages.MempoolMessages.BuildRollupChains
+import state.messages.StateFrameMessages.NewBlock
 import state.messages.{BlockInfo, BlockMessage, BlockTx}
 import state.messages.RollupMessages._
 import state.messages.SyncMessages._
@@ -23,6 +26,7 @@ import work.lithos.plasma.collections.PlasmaMap
 
 import javax.inject.{Inject, Named}
 import scala.concurrent.duration.DurationInt
+import scala.concurrent.Future
 import scala.language.postfixOps
 import scala.util.{Failure, Success}
 
@@ -30,12 +34,14 @@ class SyncHandler @Inject()(config: Configuration, @Named("rollup-coordinator") 
                             cacheApi: SyncCacheApi) extends Actor with InjectedActorSupport {
   implicit val timeout: Timeout = 5 seconds
 
-  private val logger: Logger          = LoggerFactory.getLogger("SyncHandler")
-  val nodeConfig: NodeConfig          = Globals.getNodeConfig
-  val client: ErgoClient              = nodeConfig.getClient
-  val prover: NodeWallet              = nodeConfig.getNodeWallet
-  lazy val relErgoTrees: Seq[String]  = Helpers.rollupErgoTrees(client)
-  val rollupCache: RollupCache            = RollupCache(cacheApi)
+  private val logger: Logger         = LoggerFactory.getLogger("SyncHandler")
+  val nodeConfig: NodeConfig         = Globals.getNodeConfig
+  val client: ErgoClient             = nodeConfig.getClient
+  val prover: NodeWallet             = nodeConfig.getNodeWallet
+  lazy val relErgoTrees: Seq[String] = Helpers.rollupErgoTrees(client)
+  val rollupCache: RollupCache       = RollupCache(cacheApi)
+  val stratumConfig: StratumConfig   = new StratumConfig(config)
+  val stateConfig: StateConfig       = new StateConfig(config)
   import context.dispatcher
 
 
@@ -58,11 +64,37 @@ class SyncHandler @Inject()(config: Configuration, @Named("rollup-coordinator") 
       relevantTransactions.transforms.foreach(rollupCoordinator ! _)
       relevantTransactions.genTxs.foreach(rollupCoordinator ! _)
       sender() ! HandledBlock(blockInfo)
+
+    case NewBlock(blockInfo) =>
+      logger.info(s"StateFrame block ${blockInfo.id} at height ${blockInfo.height}")
+      val relevantTransactions = buildRelevantTransactions(blockInfo)
+      relevantTransactions.transforms.foreach(rollupCoordinator ! _)
+      relevantTransactions.genTxs.foreach(rollupCoordinator ! _)
+      rollupCoordinator ! BuildRollupChains
+      if (!stateConfig.disableTransforms.getOrElse(false)) {
+        val handler = self
+        (rollupCoordinator ? GetSynced).mapTo[SyncMessage].onComplete {
+          case Failure(ex) =>
+            logger.error("Failed to query sync state for transforms after NewBlock", ex)
+          case Success(FullSync(nispTrees)) =>
+            Future(LFSMTransformer.onSync(client, cacheApi, prover, stratumConfig.diff, nispTrees, handler,
+              stateConfig.autoCommit.getOrElse(true))).failed.foreach { ex =>
+              logger.error(s"Error during onSync transforms: ${ex.getMessage}", ex)
+            }
+          case Success(PartialSync(syncedTrees, _)) =>
+            Future(LFSMTransformer.onSync(client, cacheApi, prover, stratumConfig.diff, syncedTrees, handler,
+              stateConfig.autoCommit.getOrElse(true))).failed.foreach { ex =>
+              logger.error(s"Error during onSync transforms: ${ex.getMessage}", ex)
+            }
+          case Success(NoRollups()) =>
+            logger.info("No rollups present, skipping transforms")
+        }
+      }
+
     case GetSynced =>
       val originalSender = sender()
       (rollupCoordinator ? GetSynced).mapTo[SyncMessage].onComplete {
         case Failure(exception) =>
-          // match errors
           logger.error("Got error while asking for sync", exception)
         case Success(msg) =>
           originalSender ! msg
@@ -80,13 +112,13 @@ class SyncHandler @Inject()(config: Configuration, @Named("rollup-coordinator") 
             val transformInput = relevantInput(tx)
             transformInput match {
               case Some(_) =>
-                rel.copy(transforms = rel.transforms ++ Seq(Transform(blockInfo, tx)))
+                rel.copy(transforms = rel.transforms ++ Seq(RollupTransform(blockInfo, tx)))
               case None =>
                 val optGenesis = makeGenesis(ctx, blockInfo, tx)
                 if(optGenesis.isDefined){
                   rel.copy(genTxs = rel.genTxs ++ Seq(Genesis(optGenesis.get, blockInfo)))
                 }else if(isRelevant(tx)){
-                  rel.copy(transforms = rel.transforms ++ Seq(Transform(blockInfo, tx)))
+                  rel.copy(transforms = rel.transforms ++ Seq(RollupTransform(blockInfo, tx)))
                 }else{
                   rel
                 }

@@ -39,7 +39,7 @@ class BoxLoader(ctx: BlockchainContext) {
         inputBoxes = inputBoxes :+ input
       }
     }
-    logger.info(s"Returned ${inputBoxes.size} boxes from BoxLoader")
+    //logger.info(s"Returned ${inputBoxes.size} boxes from BoxLoader")
 
     inputBoxes.toSeq
   }
@@ -61,7 +61,7 @@ class BoxLoader(ctx: BlockchainContext) {
         inputBoxes = inputBoxes :+ input
       }
     }
-    logger.info(s"Returned ${inputBoxes.size} boxes from BoxLoader")
+    //logger.info(s"Returned ${inputBoxes.size} boxes from BoxLoader")
 
     inputBoxes.toSeq
   }

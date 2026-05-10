@@ -1,4 +1,4 @@
-import actors.{MDSynchronizer, PDSynchronizer, RollupCoordinator, RollupSynchronizer, SyncHandler}
+import actors.{MDSynchronizer, MempoolView, PDSynchronizer, RollupCoordinator, RollupSynchronizer, StateFrame, SyncHandler}
 import api.{BlocksApi, BlocksApiImpl, CollateralApi, CollateralApiImpl, DexApi, DexApiImpl, InfoApi, InfoApiImpl, MiningApi, MiningApiImpl, PaymentsApi, PaymentsApiImpl}
 import com.google.inject.AbstractModule
 import play.api.{Configuration, Environment}
@@ -15,6 +15,8 @@ class Module(environment: Environment, configuration: Configuration) extends Abs
     Globals.setConfigs(configuration)
 
     // Bindings
+    bindActor(classOf[StateFrame], "state-frame", p => p.withDispatcher("lithos-contexts.sync-dispatcher"))
+    bindActor(classOf[MempoolView], "mempool-view", p => p.withDispatcher("lithos-contexts.sync-dispatcher"))
     bindActor(classOf[RollupCoordinator], "rollup-coordinator", p => p.withDispatcher("lithos-contexts.sync-dispatcher"))
     bindActor(classOf[SyncHandler], "sync-handler", p => p.withDispatcher("lithos-contexts.sync-dispatcher"))
     bindActor(classOf[MDSynchronizer], "md-synchronizer", p => p.withDispatcher("lithos-contexts.sync-dispatcher"))

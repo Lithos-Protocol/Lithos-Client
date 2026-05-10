@@ -1,14 +1,15 @@
 package cache
 
+import cache.RollupCache.{MEM_PREFIX, TREE_LIST}
 import lfsm.states.NISPTree
 import play.api.cache.SyncCacheApi
+import state.messages.MempoolMessages.MempoolRollupState
 
 /**
  * Cache Mapping of blockId -> NISPTree
  * @param cacheApi
  */
 class RollupCache(cacheApi: SyncCacheApi){
-  private final val TREE_LIST = "TREE_LIST"
 
   def get(id: String): Option[NISPTree] = {
     cacheApi.get[NISPTree](id)
@@ -50,8 +51,22 @@ class RollupCache(cacheApi: SyncCacheApi){
   def removeFromTreeCache(utxoId: String): Unit = {
     remove(utxoId)
   }
+
+  def setMempoolState(blockId: String, mempoolRollupState: MempoolRollupState) = {
+    cacheApi.set(MEM_PREFIX + blockId, mempoolRollupState)
+  }
+
+  def removeMempoolState(blockId: String) = {
+    cacheApi.remove(MEM_PREFIX + blockId)
+  }
+
+  def getMempoolState(blockId: String): Option[MempoolRollupState] = {
+    cacheApi.get[MempoolRollupState](MEM_PREFIX+blockId)
+  }
 }
 
 object RollupCache {
   def apply(cacheApi: SyncCacheApi) = new RollupCache(cacheApi)
+  private final val TREE_LIST = "TREE_LIST"
+  private final val MEM_PREFIX = "MEMPOOL_"
 }
