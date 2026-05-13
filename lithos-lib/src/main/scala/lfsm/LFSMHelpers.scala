@@ -72,6 +72,29 @@ object LFSMHelpers {
     }
   }
 
+  def formatTau(tau: BigInt): String = {
+    val diff = convertTauOrScore(tau).toLong
+    def bestPowerOfTen(num: Long) = {
+      num match {
+        case p if p >= 1e15 =>
+          "P" -> num.toDouble / 1e15
+        case t if t >= 1e12 =>
+          "T" -> num.toDouble / 1e12
+        case g if g >= 1e9 =>
+          "G" -> num.toDouble / 1e9
+        case m if m >= 1e6 =>
+          "M" -> num.toDouble / 1e6
+        case k if k >= 1e3 =>
+          "K" -> num.toDouble / 1e3
+        case _ =>
+          "" -> num.toDouble
+      }
+    }
+    val formatInfo = bestPowerOfTen(diff)
+    val decimal = formatInfo._2
+    f"$decimal%.2f" + formatInfo._1
+  }
+
   /**
    * Get Tau from difficulty, represented as (diff E powOfTen)
    * @param diff Difficulty represented as double
@@ -87,10 +110,6 @@ object LFSMHelpers {
 
   /**
    * Converts between Tau value and Share Score value using TARGET_MAX_LITHOS
-   *
-   * NOTE: This is different from Tau and difficulty, as we are using different target maximum values
-   * in Stratum vs in contracts. We should treat the Tau value as the absolute truth to avoid confusion.
-   * Additionally, once we have a Tau value, we should never attempt to convert it back to a difficulty.
    * @param dividend Tau or Score value
    * @return If dividend was Tau, returns Score. If dividend was Score, returns Tau
    */

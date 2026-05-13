@@ -34,12 +34,12 @@ class CollateralRetriever(client: ErgoClient, prover: NodeWallet) {
         //val utxos = JavaHelpers.toJList(ctx.getBoxesById("ce00d6e0f4fd3390c0519bb0d24824e1e6b06978163f4845a7cf2c1c7d8f1b65").toIndexedSeq)
 
         val currentBlockReward = CollateralContract.coinsToIssue(ctx.getHeight)
-        logger.info(s"Found ${utxos.size()} collateral utxos")
+        //logger.info(s"Found ${utxos.size()} collateral utxos")
         val utxosWithLender = JavaHelpers.toIndexedSeq(utxos).filter{
           i => Try(InputUTXO(i).registers(1).getValue.asInstanceOf[SigmaProp]).isSuccess &&
             InputUTXO(i).value >= currentBlockReward
         }
-        logger.info(s"Found ${utxosWithLender.size} collateral utxos with value >= ${currentBlockReward}")
+        //logger.info(s"Found ${utxosWithLender.size} collateral utxos with value >= ${currentBlockReward}")
         if(utxos.size() == 0 || utxosWithLender.isEmpty) {
           throw new CollateralNotFoundException("Could not find collateral utxos needed to create block candidate")
         }
@@ -63,7 +63,7 @@ class CollateralRetriever(client: ErgoClient, prover: NodeWallet) {
           case _ => throw new InvalidSigmaBooleanException("Found invalid SigmaBoolean on collateral utxo")
         }
         val lenderAddress = Address.fromErgoTree(ErgoTree.fromSigmaBoolean(lenderBoolean), ctx.getNetworkType)
-        logger.info(s"Got collateral utxo ${collateralInput.id} from lender ${lenderAddress}")
+
         // TODO: Filter utxos by valid SigmaBoolean existence, we only check for SigmaProp
         val pkString = lenderBoolean match {
           case leaf: SigmaLeaf =>
@@ -83,8 +83,9 @@ class CollateralRetriever(client: ErgoClient, prover: NodeWallet) {
           .buildTx(0, lenderAddress)
         val sTx = prover.sign(uTx)
         val utxBytes = uTx.asInstanceOf[UnsignedTransactionImpl].getTx.messageToSign
-        val collData = CollateralData(sTx.getId.replace("\"", ""), sTx.toJson(false, false), pkString, utxBytes, collateralInput.bytes)
-        logger.info(s"Generated $collData with tx size: ${utxBytes.length} and input size: ${collateralInput.bytes.length}")
+        val collData = CollateralData(sTx.getId.replace("\"", ""), sTx.toJson(false, false), pkString, utxBytes, collateralInput.bytes,
+          collateralInput.id.toString, lenderAddress.toString)
+       // logger.info(s"Generated $collData with tx size: ${utxBytes.length} and input size: ${collateralInput.bytes.length}")
         collData
     }
   }

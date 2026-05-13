@@ -2,15 +2,20 @@ package state.messages
 
 import lfsm.states.NISPTree
 import state.messages.DictionaryMessages.DictionaryTransform
-import state.messages.RollupMessages.{Genesis, Transform}
+import state.messages.RollupMessages.{Genesis, RollupTransform}
 object SyncMessages {
 
 
 
-  case class RelevantTransactions(genTxs: Seq[Genesis], transforms: Seq[Transform], dictionaryTransforms: Seq[DictionaryTransform])
+  case class RelevantTransactions(genTxs: Seq[Genesis], transforms: Seq[RollupTransform], dictionaryTransforms: Seq[DictionaryTransform])
 
   object RelevantTransactions {
-    def empty = RelevantTransactions(Seq.empty[Genesis], Seq.empty[Transform], Seq.empty[DictionaryTransform])
+    def empty = RelevantTransactions(Seq.empty[Genesis], Seq.empty[RollupTransform], Seq.empty[DictionaryTransform])
+  }
+  trait Transform {
+    val tx: BlockTx
+    def input: TxInput
+    def output: TxOutput
   }
 
   case object GetSynced

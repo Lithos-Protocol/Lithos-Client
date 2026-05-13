@@ -52,7 +52,7 @@ case class IncorrectNProof(contract: Contract, miner: Array[Byte], nispTree: NIS
             logger.error(s"Got critical interpreter exception while evaluating miner ${Hex.toHexString(miner)}", ie)
             throw ie
           }else{
-            logger.info("Proof reduced to false")
+            //logger.info("Proof reduced to false")
           }
         case e =>
           throw e

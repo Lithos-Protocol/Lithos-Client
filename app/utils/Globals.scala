@@ -2,8 +2,12 @@ package utils
 
 import configs.NodeConfig
 import lfsm.MDDatabase
+import mining.MiningStratumServer
 import nisp.NISPDatabase
 import play.api.Configuration
+import stratum.data.Options
+
+import java.math.BigInteger
 
 // Accessor for global methods and variables
 // Not DI, so instantiated lazily
@@ -33,6 +37,9 @@ object Globals {
   def getSyncState: Boolean = {
     synced
   }
+
+
+
   // Should be set in eager singleton
   def setConfigs(config: Configuration): Unit = {
     nodeConfig = Some(new NodeConfig(config))

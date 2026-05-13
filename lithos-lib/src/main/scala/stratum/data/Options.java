@@ -25,4 +25,12 @@ public class Options {
 	public String nodeApiUrl;
 	public Data data;
 	public BigInteger tau;
+
+    public BigInteger getTau() {
+        return tau;
+    }
+
+    public void setTau(BigInteger tau) {
+        this.tau = tau;
+    }
 }

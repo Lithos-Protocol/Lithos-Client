@@ -14,6 +14,7 @@ import play.api.libs.concurrent.InjectedActorSupport
 import sigma.ast.ErgoTree
 import sigma.{Coll, SigmaProp}
 import state.messages.DictionaryMessages.{DictionaryTransform, InitialMDState}
+import state.messages.StateFrameMessages.NewBlock
 import state.messages.SyncMessages.{GetSynced, HandledBlock}
 import state.messages.{BlockInfo, BlockMessage}
 import utils.Globals
@@ -85,10 +86,15 @@ class MDSynchronizer @Inject()(cacheApi: SyncCacheApi) extends Actor with Inject
     case blockMsg: BlockMessage =>
       val relTxs = getRelevantTxs(blockMsg.blockInfo)
       relTxs.foreach(self ! _)
-
       if(relTxs.nonEmpty)
         logger.info(s"Pre-applied ${relTxs.length} transforms from block ${blockMsg.blockInfo.height}")
       sender() ! HandledBlock(blockMsg.blockInfo)
+
+    case NewBlock(blockInfo) =>
+      val relTxs = getRelevantTxs(blockInfo)
+      relTxs.foreach(self ! _)
+      if(relTxs.nonEmpty)
+        logger.info(s"Pre-applied ${relTxs.length} transforms from StateFrame block ${blockInfo.height}")
 
   }
 

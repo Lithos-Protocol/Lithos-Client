@@ -12,10 +12,11 @@ case class TxOutput(
                      registers: Seq[String],
                      assets: Seq[Token],
                      txId: String,
+                     creationHeight: Int,
                      index: Int
                    ) {
   def toUTXO(ctx: BlockchainContext): UTXO = {
-    UTXO(Contract(ErgoTree.fromHex(ergoTree)), value, assets, registers.map(ErgoValue.fromHex))
+    UTXO(Contract(ErgoTree.fromHex(ergoTree)), value, assets, registers.map(ErgoValue.fromHex), creationHeight = Some(creationHeight))
   }
 
   def toInput(ctx: BlockchainContext): InputUTXO = {
@@ -29,6 +30,7 @@ object TxOutput {
     val validRegHexes = regHexes.filter(_ != "none")
 
     val assets = for (a <- JavaHelpers.toIndexedSeq(eto.getAssets)) yield Token(a.getTokenId, a.getAmount.longValue())
-    TxOutput(eto.getBoxId, eto.getValue, eto.getErgoTree, validRegHexes, assets, eto.getTransactionId, eto.getIndex)
+    TxOutput(eto.getBoxId, eto.getValue, eto.getErgoTree,
+      validRegHexes, assets, eto.getTransactionId, eto.getCreationHeight, eto.getIndex)
   }
 }

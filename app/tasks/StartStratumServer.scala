@@ -1,31 +1,27 @@
 package tasks
 
 import akka.Done
-import akka.actor.{ActorRef, ActorSystem, CoordinatedShutdown, actorRef2Scala}
-import akka.pattern.{AskTimeoutException, ask}
-import akka.util.Timeout
-import configs.{Contexts, NodeConfig, StateConfig, StratumConfig, TasksConfig}
+import akka.actor.{ActorSystem, CoordinatedShutdown}
 import configs.TasksConfig.TaskConfiguration
+import configs._
 import lfsm.LFSMHelpers
 import org.slf4j.{Logger, LoggerFactory}
 import play.api.Configuration
-import play.api.inject.ApplicationLifecycle
 import state.LFSMTransformer
 import stratum.ErgoStratumServer
 import stratum.data.{Data, Options}
-import utils.{Globals, Helpers}
+import utils.Globals
 
 import java.math.BigInteger
-import java.time.LocalDateTime
-import javax.inject.{Inject, Named, Singleton}
-import scala.concurrent.{Await, ExecutionContext, Future}
+import javax.inject.{Inject, Singleton}
 import scala.concurrent.duration.DurationInt
+import scala.concurrent.{Await, ExecutionContext, Future}
 import scala.language.postfixOps
 import scala.util.{Failure, Success, Try}
 @Singleton
-class StratumServer @Inject()(system: ActorSystem, config: Configuration, cs: CoordinatedShutdown) {
+class StartStratumServer @Inject()(system: ActorSystem, config: Configuration, cs: CoordinatedShutdown) {
 
-  val logger: Logger = LoggerFactory.getLogger("StratumServer")
+  val logger: Logger = LoggerFactory.getLogger("StartStratumServer")
   val taskConfig: TaskConfiguration = new TasksConfig(config).stratumServerTaskConfig
 
   val contexts: Contexts = new Contexts(system)
@@ -37,9 +33,9 @@ class StratumServer @Inject()(system: ActorSystem, config: Configuration, cs: Co
     logger.info("Starting Stratum Server for Lithos")
 
     //System.out.println(s"Stratum Server will initiate in ${taskConfig.startup.toString()}")
-    val tau = nodeConfig.getClient.execute{
+    val tau: Try[BigInteger] = nodeConfig.getClient.execute {
       ctx =>
-        LFSMTransformer.getCommitedScore(ctx, stratumParams.diff, "stratum mining").map{
+        LFSMTransformer.getCommitedScore(ctx, stratumParams.diff, "stratum mining").map {
           s =>
             LFSMHelpers.convertTauOrScore(s).bigInteger
         }
@@ -99,18 +95,37 @@ class StratumServer @Inject()(system: ActorSystem, config: Configuration, cs: Co
     logger.info("Stratum server was not enabled")
   }
 
-  private def stopStratum(server: ErgoStratumServer): Unit = {
-
-    System.out.println("Stopping stratum server")
-    server.stopListening()
-  }
-
-  def startStratum(): Unit = {
-
-    implicit val taskContext: ExecutionContext = contexts.stratumContext
 
 
-  }
 
+  /** Important comment don't delete this
+   *
+   if(numBlocks % 5 == 0){
+   Future{
+   val tau = nodeConfig.getClient.execute{
+   ctx =>
+   LFSMTransformer.getCommitedScore(ctx, stratumParams.diff, "stratum mining").map{
+   s =>
+   LFSMHelpers.convertTauOrScore(s).bigInteger
+   }
+   }
+   tau match {
+   case Success(t) =>
+   logger.info(s"Using commitment tau ${t} (diff: ${LFSMHelpers.convertTauOrScore(t)}) for NISPs")
+   val stratumTau = Globals.getTau.get
+   logger.info(s"Using stratum tau $stratumTau (diff: ${LFSMHelpers.convertTauOrScore(stratumTau)})")
 
+   if(stratumTau != t){
+   Globals.setTau(t)
+   logger.info("Stratum difficulty updated to match commitment")
+   }
+   case Failure(e) =>
+   logger.error("Failed to check if on-chain diff commitment matches stratum difficulty", e)
+   }
+
+   }(contexts.pollingContext)
+   }
+   if(numBlocks == Int.MaxValue - 1)
+   numBlocks = 0
+   */
 }

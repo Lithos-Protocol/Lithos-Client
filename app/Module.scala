@@ -1,9 +1,9 @@
-import actors.{MDSynchronizer, PDSynchronizer, RollupCoordinator, RollupSynchronizer, SyncHandler}
+import actors.{MDSynchronizer, MempoolView, PDSynchronizer, RollupCoordinator, RollupSynchronizer, StateFrame, SyncHandler}
 import api.{BlocksApi, BlocksApiImpl, CollateralApi, CollateralApiImpl, DexApi, DexApiImpl, InfoApi, InfoApiImpl, MiningApi, MiningApiImpl, PaymentsApi, PaymentsApiImpl}
 import com.google.inject.AbstractModule
 import play.api.{Configuration, Environment}
 import play.libs.akka.AkkaGuiceSupport
-import tasks.{MDSyncTask, PDSyncTask, RollupSyncTask, StartupTasks, StratumServer}
+import tasks.{MDSyncTask, PDSyncTask, RollupSyncTask, StartMiningServer, StartupTasks, StartStratumServer}
 import utils.Globals
 
 class Module(environment: Environment, configuration: Configuration) extends AbstractModule with AkkaGuiceSupport
@@ -15,6 +15,8 @@ class Module(environment: Environment, configuration: Configuration) extends Abs
     Globals.setConfigs(configuration)
 
     // Bindings
+    bindActor(classOf[StateFrame], "state-frame", p => p.withDispatcher("lithos-contexts.sync-dispatcher"))
+    bindActor(classOf[MempoolView], "mempool-view", p => p.withDispatcher("lithos-contexts.sync-dispatcher"))
     bindActor(classOf[RollupCoordinator], "rollup-coordinator", p => p.withDispatcher("lithos-contexts.sync-dispatcher"))
     bindActor(classOf[SyncHandler], "sync-handler", p => p.withDispatcher("lithos-contexts.sync-dispatcher"))
     bindActor(classOf[MDSynchronizer], "md-synchronizer", p => p.withDispatcher("lithos-contexts.sync-dispatcher"))
@@ -28,7 +30,8 @@ class Module(environment: Environment, configuration: Configuration) extends Abs
     bind(classOf[PaymentsApi]).to(classOf[PaymentsApiImpl])
     bind(classOf[DexApi]).to(classOf[DexApiImpl])
     bind[StartupTasks](classOf[StartupTasks]).asEagerSingleton()
-    bind[StratumServer](classOf[StratumServer]).asEagerSingleton()
+    //bind[StartStratumServer](classOf[StartStratumServer]).asEagerSingleton()
+    bind[StartMiningServer](classOf[StartMiningServer]).asEagerSingleton()
     bind[RollupSyncTask](classOf[RollupSyncTask]).asEagerSingleton()
     bind[MDSyncTask](classOf[MDSyncTask]).asEagerSingleton()
     bind[PDSyncTask](classOf[PDSyncTask]).asEagerSingleton()
