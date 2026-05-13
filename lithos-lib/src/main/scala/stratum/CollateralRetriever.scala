@@ -6,7 +6,7 @@ import mutations.{BoxLoader, NodeWallet, NotEnoughInputsException}
 import org.bouncycastle.util.encoders.Hex
 import org.ergoplatform.ErgoTreePredef
 import org.ergoplatform.appkit.impl.UnsignedTransactionImpl
-import org.ergoplatform.appkit.{Address, BlockchainContext, ErgoClient, ErgoId, ErgoProver, ErgoValue, JavaHelpers, Parameters, SecretString}
+import org.ergoplatform.appkit.{Address, BlockchainContext, ErgoClient, ErgoClientException, ErgoId, ErgoProver, ErgoValue, JavaHelpers, Parameters, SecretString}
 import org.slf4j.{Logger, LoggerFactory}
 import scorex.crypto.hash.Blake2b256
 import sigma.SigmaProp
@@ -113,8 +113,10 @@ class CollateralRetriever(client: ErgoClient, prover: NodeWallet) {
           trySelfCollat match {
             case Failure(e) =>
               e match {
-                case noInputs: NotEnoughInputsException =>
+                case _: NotEnoughInputsException =>
                   logger.warn("Could not self-collateralize due to not having enough inputs")
+                case ds: ErgoClientException if ds.getMessage.contains("Double spending attempt") =>
+                  logger.warn("Could not self-collateralize due to double spending attempt")
                 case _ =>
                   logger.error(s"Could not self-collateralize due to: ${e.getMessage}")
               }

@@ -47,7 +47,12 @@ class StateFrame @Inject()() extends Actor with InjectedActorSupport {
             logger.info(s"StateFrame advancing to height $currentHeight, broadcasting to ${subscribers.size} subscriber(s)")
             subscribers.foreach(_ ! NewBlock(blockInfo))
           case Failure(ex) =>
-            logger.error(s"StateFrame failed to fetch block at height ${currentHeight + 1}", ex)
+            ex match {
+              case _: NullPointerException =>
+                logger.warn(s"StateFrame failed to fetch block at height ${currentHeight + 1}, will re-attempt")
+              case _ =>
+                logger.error(s"StateFrame failed to fetch block at height ${currentHeight + 1}", ex)
+            }
         }
       }
 
