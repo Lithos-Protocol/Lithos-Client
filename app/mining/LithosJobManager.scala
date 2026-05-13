@@ -1,6 +1,7 @@
 package mining
 
 import akka.actor.Actor
+import akka.pattern.pipe
 import evaluation.NTable
 import lfsm.LFSMHelpers
 import mining.MiningMessages._
@@ -14,6 +15,8 @@ import stratum.data.{MiningCandidate, Options}
 import java.math.BigInteger
 import java.util.Arrays
 import scala.collection.mutable
+import scala.concurrent.ExecutionContext.Implicits.global
+import scala.concurrent.Future
 
 /**
  * Actor that owns all job-management and share-validation state.
@@ -84,7 +87,7 @@ class LithosJobManager(options: Options) extends Actor {
     // duplicates.  Mirrors JobManager.processShare exactly.
     // ------------------------------------------------------------------
     case msg: ProcessShare =>
-      sender() ! validateShare(msg)
+      Future(validateShare(msg))(context.dispatcher).pipeTo(sender())
   }
 
   // ─── private helpers ──────────────────────────────────────────────────────
