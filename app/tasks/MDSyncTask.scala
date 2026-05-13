@@ -130,7 +130,7 @@ class MDSyncTask @Inject()(cache: SyncCacheApi, system: ActorSystem, config: Con
     nodeConfig.getClient.execute(ctx => ctx.getHeight)
 
   private def loadBlockSync(height: Int, dataSource: NodeAndExplorerDataSourceImpl): Try[Unit] = {
-    if (height % 100 == 0)
+    if (height % 10000 == 0)
       logger.info(s"Loading block at height $height")
     Try {
       val blockHeader = dataSource.getNodeBlocksApi.getFullBlockAt(height).execute().body().get(0)

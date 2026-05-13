@@ -3,7 +3,7 @@ import api.{BlocksApi, BlocksApiImpl, CollateralApi, CollateralApiImpl, DexApi, 
 import com.google.inject.AbstractModule
 import play.api.{Configuration, Environment}
 import play.libs.akka.AkkaGuiceSupport
-import tasks.{MDSyncTask, PDSyncTask, RollupSyncTask, StartupTasks, StratumServer}
+import tasks.{MDSyncTask, PDSyncTask, RollupSyncTask, StartMiningServer, StartupTasks, StartStratumServer}
 import utils.Globals
 
 class Module(environment: Environment, configuration: Configuration) extends AbstractModule with AkkaGuiceSupport
@@ -30,7 +30,8 @@ class Module(environment: Environment, configuration: Configuration) extends Abs
     bind(classOf[PaymentsApi]).to(classOf[PaymentsApiImpl])
     bind(classOf[DexApi]).to(classOf[DexApiImpl])
     bind[StartupTasks](classOf[StartupTasks]).asEagerSingleton()
-    bind[StratumServer](classOf[StratumServer]).asEagerSingleton()
+    //bind[StartStratumServer](classOf[StartStratumServer]).asEagerSingleton()
+    bind[StartMiningServer](classOf[StartMiningServer]).asEagerSingleton()
     bind[RollupSyncTask](classOf[RollupSyncTask]).asEagerSingleton()
     bind[MDSyncTask](classOf[MDSyncTask]).asEagerSingleton()
     bind[PDSyncTask](classOf[PDSyncTask]).asEagerSingleton()

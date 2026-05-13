@@ -169,6 +169,7 @@ object LFSMTransformer {
                 logger.info(s"Config has diff ${score} but currentCommit is ${currentCommit._2}")
                 val newCommit = ctx.getHeight + DATA_BOX_BUFFER -> score.toLong
                 val nextCommits = commits
+                  .slice(0, 1)
                   .updated(0, newCommit)
                   .append(Colls.fromArray(Array(currentCommit)))
                 logger.info(s"Next commitment set: ${newCommit}")
@@ -298,7 +299,7 @@ object LFSMTransformer {
           t.failed.get match {
             case ds: ErgoClientException if ds.getMessage.contains("Double spending attempt") =>
               logger.warn("Skipped payout due to double spend")
-            case inp: NotEnoughInputsException =>
+            case _: NotEnoughInputsException =>
               logger.warn("Skipped payout due to failure to find inputs")
             case e =>
               logger.error("Found error while attempting payouts", e)
@@ -420,6 +421,49 @@ object LFSMTransformer {
         }
     }
   }
+
+  def getCommitedTau(client: ErgoClient, tau: BigInt): Try[BigInt] = {
+    Try {
+      val score = LFSMHelpers.convertTauOrScore(tau).toLong
+      client.execute{
+        ctx =>
+          val dataBoxNFT = Globals.mdDB.getDataBoxToken
+          dataBoxNFT match {
+            case Some(nft) =>
+              val dataBox = LFSMHelpers.getLocalDataBox(ctx, nft, Helpers.dataBoxContract(ctx))
+              dataBox match {
+                case Failure(exception) =>
+                  logger.error(s"Got error while retrieving data box from blockchain. Pool difficulty may not be accurate" +
+                    s" to the current commitment state.")
+                  logger.error("error: ", exception)
+                  tau
+                case Success(dataInput) =>
+                  val commits = dataInput.registers.head.getValue.asInstanceOf[Coll[(Int, Long)]]
+                  if (commits.size == 1) {
+                    val nextTau = LFSMHelpers.convertTauOrScore(commits(0)._2)
+                    logger.info(s"Found new diff commitment ${commits(0)}")
+                    nextTau
+                  } else {
+                    if (ctx.getHeight - commits(0)._1 >= LFSMHelpers.NISP_WINDOW) {
+                      val nextTau = LFSMHelpers.convertTauOrScore(commits(0)._2)
+                      logger.info(s"Found latest commitment ${commits(0)}")
+                      nextTau
+                    } else {
+                      val nextTau = LFSMHelpers.convertTauOrScore(commits(1)._2)
+                      logger.info(s"Found old commitment ${commits(1)}")
+                      nextTau
+                    }
+                  }
+              }
+            case None =>
+              logger.warn(s"No stored data box, forcing config tau $tau and diff $score")
+              logger.warn("NISPs submitted or mined in this manner may be considered fraudulent")
+              tau
+          }
+      }
+    }
+  }
+
   def getCommitedScore(ctx: BlockchainContext, diff: String, reason: String): Try[Long] = {
     Try {
       val dataBoxNFT = Globals.mdDB.getDataBoxToken

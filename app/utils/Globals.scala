@@ -2,6 +2,7 @@ package utils
 
 import configs.NodeConfig
 import lfsm.MDDatabase
+import mining.MiningStratumServer
 import nisp.NISPDatabase
 import play.api.Configuration
 import stratum.data.Options
@@ -37,21 +38,6 @@ object Globals {
     synced
   }
 
-  // Stratum Options
-  private var stratumOptions: Option[Options] = None
-
-  def setStratumOptions(options: Options): Unit = stratumOptions = Some(options)
-
-  def getTau: Option[BigInteger] = stratumOptions.map(_.getTau)
-  // Return true if tau value is set
-  def setTau(tau: BigInt): Boolean = {
-    if(stratumOptions.isDefined){
-      stratumOptions.get.setTau(tau.bigInteger)
-      true
-    }else{
-      false
-    }
-  }
 
 
   // Should be set in eager singleton

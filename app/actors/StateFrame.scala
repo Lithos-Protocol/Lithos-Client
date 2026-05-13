@@ -66,6 +66,8 @@ class StateFrame @Inject()() extends Actor with InjectedActorSupport {
     case AutoSubscribe(subscriber) =>
       subscribers = subscribers + subscriber
       logger.info(s"StateFrame accepted auto-subscription of ${subscriber.path.name} (${subscribers.size} total subscriber(s))")
+    case CheckBlock =>
+      self ! Tick
   }
 
   private def chainHeight: Int =

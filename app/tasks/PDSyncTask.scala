@@ -98,7 +98,7 @@ class PDSyncTask @Inject()(cache: SyncCacheApi, system: ActorSystem, config: Con
     nodeConfig.getClient.execute(ctx => ctx.getHeight)
 
   private def loadBlockSync(height: Int, dataSource: NodeAndExplorerDataSourceImpl): Try[Unit] = {
-    if (height % 100 == 0)
+    if (height % 1000 == 0)
       logger.info(s"Loading PlasmaDex block at height $height")
     Try {
       val blockHeader = dataSource.getNodeBlocksApi.getFullBlockAt(height).execute().body().get(0)

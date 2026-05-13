@@ -17,8 +17,7 @@ object StateFrameMessages {
 
   /**
    * Automatically subscribe to StateFrame without height verification. Used for
-   * actors which want block updates but don't necessarily care about the current height or
-   * ordering of blocks. (e.g MempoolView)
+   * actors which want block updates but do not require synchronization (e.g MempoolView)
    */
   case class AutoSubscribe(subscriber: ActorRef)
 
@@ -34,4 +33,6 @@ object StateFrameMessages {
   /** Broadcast by StateFrame to every registered subscriber whenever a new block
    *  is detected on the chain. */
   case class NewBlock(blockInfo: BlockInfo)
+
+  case object CheckBlock
 }

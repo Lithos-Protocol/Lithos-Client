@@ -15,4 +15,6 @@ class StratumConfig(config: Configuration){
   val connectionTimeout: Int = config.get[Int]("stratum.connectionTimeout")
   val blockRefreshInterval: Int = config.get[Int]("stratum.blockRefreshInterval")
   val reduceShareMessages: Boolean = config.get[Boolean]("stratum.reduceShareMessages")
+  val forceConfigDifficulty: Boolean = config.getOptional[Boolean]("stratum.forceConfigDiff").getOrElse(false)
+  val diffRefreshInterval: Int = config.get[Int]("stratum.diffRefreshInterval")
 }
