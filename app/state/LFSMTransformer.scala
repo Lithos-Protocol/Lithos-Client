@@ -82,8 +82,15 @@ object LFSMTransformer {
     }
   }
 
-  def onSync(client: ErgoClient, cache: SyncCacheApi, prover: NodeWallet, diff: String,
-             nispTrees: Seq[(String, NISPTree)], syncHandler: ActorRef, autoCommits: Boolean): Unit = {
+  def onSync(client: ErgoClient,
+             cache: SyncCacheApi,
+             prover: NodeWallet,
+             diff: String,
+             nispTrees: Seq[(String, NISPTree)],
+             syncHandler: ActorRef,
+             autoCommits: Boolean,
+             autoCollat: Boolean,
+             maxCollat: Int): Unit = {
 
     def useCorrectState(syncState: (String, NISPTree), mempoolMap: Map[String, MempoolRollupState]) = {
       if(mempoolMap.contains(syncState._1))
@@ -129,8 +136,10 @@ object LFSMTransformer {
             // We do not use mempool states for evaluation
             attemptEvaluation(ctx, evalTrees, prover, boxLoader, cache)
 
-            val collatRetriever = new CollateralRetriever(client, prover)
-            collatRetriever.checkCollateral(boxLoader)
+            if(autoCollat) {
+              val collatRetriever = new CollateralRetriever(client, prover)
+              collatRetriever.checkCollateral(boxLoader, maxCollat)
+            }
             if (autoCommits)
               checkAutoCommits(ctx, diff, prover, boxLoader)
         }

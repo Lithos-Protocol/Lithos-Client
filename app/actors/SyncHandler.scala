@@ -78,12 +78,12 @@ class SyncHandler @Inject()(config: Configuration, @Named("rollup-coordinator") 
             logger.error("Failed to query sync state for transforms after NewBlock", ex)
           case Success(FullSync(nispTrees)) =>
             Future(LFSMTransformer.onSync(client, cacheApi, prover, stratumConfig.diff, nispTrees, handler,
-              stateConfig.autoCommit.getOrElse(true))).failed.foreach { ex =>
+              stateConfig.autoCommit.getOrElse(true), stateConfig.autoCollat, stateConfig.maxCollat)).failed.foreach { ex =>
               logger.error(s"Error during onSync transforms: ${ex.getMessage}", ex)
             }
           case Success(PartialSync(syncedTrees, _)) =>
             Future(LFSMTransformer.onSync(client, cacheApi, prover, stratumConfig.diff, syncedTrees, handler,
-              stateConfig.autoCommit.getOrElse(true))).failed.foreach { ex =>
+              stateConfig.autoCommit.getOrElse(true), stateConfig.autoCollat, stateConfig.maxCollat)).failed.foreach { ex =>
               logger.error(s"Error during onSync transforms: ${ex.getMessage}", ex)
             }
           case Success(NoRollups()) =>
