@@ -53,7 +53,10 @@ class SyncHandler @Inject()(config: Configuration, @Named("rollup-coordinator") 
       relevantTransactions.transforms.foreach(rollupCoordinator ! _)
       relevantTransactions.genTxs.foreach(rollupCoordinator ! _)
     case GetSynced =>
-      logger.info("Got initial sync message")
+      sender() ! NoRollups()
+      logger.warn("Tried to GetSynced during initial synchronization, returned NoRollups()")
+    case CompletedInitSync =>
+      logger.info("Got initial sync completion message")
       context.become(postSync())
   }
 
@@ -71,25 +74,25 @@ class SyncHandler @Inject()(config: Configuration, @Named("rollup-coordinator") 
       relevantTransactions.transforms.foreach(rollupCoordinator ! _)
       relevantTransactions.genTxs.foreach(rollupCoordinator ! _)
       rollupCoordinator ! BuildRollupChains
-      if (!stateConfig.disableTransforms.getOrElse(false)) {
-        val handler = self
-        (rollupCoordinator ? GetSynced).mapTo[SyncMessage].onComplete {
-          case Failure(ex) =>
-            logger.error("Failed to query sync state for transforms after NewBlock", ex)
-          case Success(FullSync(nispTrees)) =>
-            Future(LFSMTransformer.onSync(client, cacheApi, prover, stratumConfig.diff, nispTrees, handler,
-              stateConfig.autoCommit.getOrElse(true), stateConfig.autoCollat, stateConfig.maxCollat)).failed.foreach { ex =>
-              logger.error(s"Error during onSync transforms: ${ex.getMessage}", ex)
-            }
-          case Success(PartialSync(syncedTrees, _)) =>
-            Future(LFSMTransformer.onSync(client, cacheApi, prover, stratumConfig.diff, syncedTrees, handler,
-              stateConfig.autoCommit.getOrElse(true), stateConfig.autoCollat, stateConfig.maxCollat)).failed.foreach { ex =>
-              logger.error(s"Error during onSync transforms: ${ex.getMessage}", ex)
-            }
-          case Success(NoRollups()) =>
-            logger.info("No rollups present, skipping transforms")
-        }
-      }
+//      if (!stateConfig.disableTransforms.getOrElse(false)) {
+//        val handler = self
+//        (rollupCoordinator ? GetSynced).mapTo[SyncMessage].onComplete {
+//          case Failure(ex) =>
+//            logger.error("Failed to query sync state for transforms after NewBlock", ex)
+//          case Success(FullSync(nispTrees)) =>
+//            Future(LFSMTransformer.onSync(client, cacheApi, prover, stratumConfig.diff, nispTrees, handler,
+//              stateConfig.autoCommit.getOrElse(true), stateConfig.autoCollat, stateConfig.maxCollat)).failed.foreach { ex =>
+//              logger.error(s"Error during onSync transforms: ${ex.getMessage}", ex)
+//            }
+//          case Success(PartialSync(syncedTrees, _)) =>
+//            Future(LFSMTransformer.onSync(client, cacheApi, prover, stratumConfig.diff, syncedTrees, handler,
+//              stateConfig.autoCommit.getOrElse(true), stateConfig.autoCollat, stateConfig.maxCollat)).failed.foreach { ex =>
+//              logger.error(s"Error during onSync transforms: ${ex.getMessage}", ex)
+//            }
+//          case Success(NoRollups()) =>
+//            logger.info("No rollups present, skipping transforms")
+//        }
+//      }
 
     case GetSynced =>
       val originalSender = sender()

@@ -18,7 +18,7 @@ import sigma.ast.ErgoTree
 import sigma.{Coll, SigmaProp}
 import state.messages.DictionaryMessages.{DictionaryTransform, InitialLiqState, InitialMDState}
 import state.messages.StateFrameMessages.NewBlock
-import state.messages.SyncMessages.{GetSynced, HandledBlock}
+import state.messages.SyncMessages.{CompletedInitSync, GetSynced, HandledBlock}
 import state.messages.{BlockInfo, BlockMessage}
 import utils.Globals
 import work.lithos.mutations.Contract
@@ -63,8 +63,8 @@ class PDSynchronizer @Inject()(cacheApi: SyncCacheApi) extends Actor with Inject
       relTxs.foreach(self ! _)
       if(relTxs.nonEmpty)
         logger.info(s"Pre-applied ${relTxs.length} transforms from block ${blockMsg.blockInfo.height}")
-    case GetSynced =>
-      logger.info("Got initial sync message")
+    case CompletedInitSync =>
+      logger.info("Got initial sync completion message")
       context.become(postSync(height, utxoId))
 
   }

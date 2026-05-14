@@ -73,7 +73,7 @@ class MDSyncTask @Inject()(cache: SyncCacheApi, system: ActorSystem, config: Con
         }
 
         logger.info(s"Finished initial sync to height $currentHeight")
-        mdSynchronizer ! GetSynced
+        mdSynchronizer ! CompletedInitSync
 
         // Phase 2: handoff to StateFrame — keep loading blocks and retrying until accepted
         logger.info("Attempting subscription to StateFrame")

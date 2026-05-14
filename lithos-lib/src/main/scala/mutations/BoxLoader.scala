@@ -3,7 +3,7 @@ package mutations
 import org.ergoplatform.appkit.impl.NodeAndExplorerDataSourceImpl
 import org.ergoplatform.appkit.{BlockchainContext, ErgoId, JavaHelpers}
 import org.slf4j.{Logger, LoggerFactory}
-import work.lithos.mutations.InputUTXO
+import work.lithos.mutations.{InputUTXO, UTXO}
 
 import scala.collection.mutable
 
@@ -37,6 +37,18 @@ class BoxLoader(ctx: BlockchainContext) {
         currentValue = currentValue + input.value
         usedBoxes += input.id
         inputBoxes = inputBoxes :+ input
+      }
+      if(value == UTXO.MIN_FEE && input.tokens.nonEmpty && input.value == UTXO.MIN_FEE){
+        if(boxStack.isEmpty) {
+          throw new NotEnoughInputsException(s"Failed to find enough InputUTXOs for value ${value}" +
+            s" (only got ${inputBoxes.size} for ${currentValue}, but input had a token!)")
+        }
+        val nextInput = boxStack.pop()
+        if(!usedBoxes(nextInput.id)) {
+          currentValue = currentValue + nextInput.value
+          usedBoxes += nextInput.id
+          inputBoxes = inputBoxes :+ nextInput
+        }
       }
     }
     //logger.info(s"Returned ${inputBoxes.size} boxes from BoxLoader")

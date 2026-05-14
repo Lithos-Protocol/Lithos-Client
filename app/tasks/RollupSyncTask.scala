@@ -62,7 +62,7 @@ class RollupSyncTask @Inject()(cache: SyncCacheApi, system: ActorSystem, config:
       }
 
       logger.info(s"Finished initial rollup sync to height $currentHeight")
-      syncHandler ! GetSynced
+      syncHandler ! CompletedInitSync
       Globals.setSynced()
 
       // Phase 2: handoff to StateFrame — keep loading blocks and retrying until accepted

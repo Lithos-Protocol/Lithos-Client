@@ -66,7 +66,7 @@ class PDSyncTask @Inject()(cache: SyncCacheApi, system: ActorSystem, config: Con
       }
 
       logger.info(s"Finished initial PlasmaDex sync to height $currentHeight")
-      pdSynchronizer ! GetSynced
+      pdSynchronizer ! CompletedInitSync
       Globals.setPDSynced()
 
       // Phase 2: handoff to StateFrame — keep loading blocks and retrying until accepted

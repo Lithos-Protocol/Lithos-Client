@@ -19,7 +19,7 @@ object SyncMessages {
   }
 
   case object GetSynced
-
+  case object CompletedInitSync
   case class HandledBlock(blockInfo: BlockInfo)
 
   sealed trait SyncMessage
