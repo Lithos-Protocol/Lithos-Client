@@ -1,9 +1,12 @@
 package cache
 
-import cache.RollupCache.{MEM_PREFIX, TREE_LIST}
+import cache.MempoolCache.MEMSTATE_PREFIX
+import cache.RollupCache.TREE_LIST
 import lfsm.states.NISPTree
 import play.api.cache.SyncCacheApi
 import state.messages.MempoolMessages.MempoolRollupState
+
+import scala.reflect.ClassTag
 
 /**
  * Cache Mapping of blockId -> NISPTree
@@ -52,21 +55,34 @@ class RollupCache(cacheApi: SyncCacheApi){
     remove(utxoId)
   }
 
-  def setMempoolState(blockId: String, mempoolRollupState: MempoolRollupState) = {
-    cacheApi.set(MEM_PREFIX + blockId, mempoolRollupState)
+  /**
+   * Set mempool state for a rollup
+   * @param blockId blockId for the rollup
+   * @param mempoolRollupState State to set
+   */
+  def setMempoolState(blockId: String, mempoolRollupState: MempoolRollupState): Unit = {
+    MempoolCache(cacheApi).setMempoolState[MempoolRollupState](blockId, mempoolRollupState)
   }
 
-  def removeMempoolState(blockId: String) = {
-    cacheApi.remove(MEM_PREFIX + blockId)
+  /**
+   * Remove mempool state for a rollup
+   * @param blockId blockId of the rollup
+   */
+  def removeMempoolState(blockId: String): Unit = {
+    MempoolCache(cacheApi).removeMempoolState(blockId)
   }
 
+  /**
+   * Get the mempool state for a rollup
+   * @param blockId blockId of the rollup
+   * @return MempoolRollupState for the associated rollup, if it exists
+   */
   def getMempoolState(blockId: String): Option[MempoolRollupState] = {
-    cacheApi.get[MempoolRollupState](MEM_PREFIX+blockId)
+    MempoolCache(cacheApi).getMempoolState[MempoolRollupState](blockId)
   }
 }
 
 object RollupCache {
   def apply(cacheApi: SyncCacheApi) = new RollupCache(cacheApi)
   private final val TREE_LIST = "TREE_LIST"
-  private final val MEM_PREFIX = "MEMPOOL_"
 }
