@@ -104,7 +104,7 @@ class MDSynchronizer @Inject()(cacheApi: SyncCacheApi) extends Actor with Inject
       (rel, tx) =>
         if(tx.outputs.head.id != LFSMHelpers.MD_GENESIS_ID) {
           if (tx.outputs.head.assets.headOption.exists(t => t.id == mdToken)) {
-            rel :+ DictionaryTransform(blockInfo, tx, mdToken.toString)
+            rel :+ DictionaryTransform(blockInfo, tx)
           } else {
             rel
           }

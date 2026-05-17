@@ -9,6 +9,7 @@ import org.ergoplatform.appkit.impl.NodeAndExplorerDataSourceImpl
 import org.slf4j.{Logger, LoggerFactory}
 import play.api.Configuration
 import play.api.cache.SyncCacheApi
+import state.Subscribable.{Subscribe, SubscribeAck, SubscribeRejected, SubscribeResponse}
 import state.messages.StateFrameMessages._
 import state.messages.SyncMessages._
 import state.messages.{BlockInfo, BlockMessage}
@@ -61,9 +62,8 @@ class RollupSyncTask @Inject()(cache: SyncCacheApi, system: ActorSystem, config:
         }
       }
 
-      logger.info(s"Finished initial rollup sync to height $currentHeight")
-      syncHandler ! CompletedInitSync
-      Globals.setSynced()
+      logger.info(s"Finished catch up rollup sync to height $currentHeight")
+
 
       // Phase 2: handoff to StateFrame — keep loading blocks and retrying until accepted
       logger.info("Attempting rollup subscription to StateFrame")
@@ -74,6 +74,8 @@ class RollupSyncTask @Inject()(cache: SyncCacheApi, system: ActorSystem, config:
           case SubscribeAck =>
             logger.info(s"SyncHandler subscribed to StateFrame at height $currentHeight")
             subscribed = true
+            syncHandler ! CompletedInitSync
+            Globals.setSynced()
           case SubscribeRejected(reason) =>
             logger.warn(s"StateFrame rejected rollup subscription: $reason — catching up one block")
             loadBlockSync(currentHeight + 1, nodeDataSource) match {

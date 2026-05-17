@@ -107,7 +107,7 @@ class PDSynchronizer @Inject()(cacheApi: SyncCacheApi) extends Actor with Inject
       (rel, tx) =>
         if(tx.outputs.head.id != PDHelpers.LP_GENESIS_ID) {
           if (tx.outputs.head.assets.headOption.exists(t => t.id == lpToken)) {
-              rel :+ DictionaryTransform(blockInfo, tx, lpToken.toString)
+              rel :+ DictionaryTransform(blockInfo, tx)
             } else {
               rel
             }

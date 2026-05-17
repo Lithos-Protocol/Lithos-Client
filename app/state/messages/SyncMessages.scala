@@ -7,10 +7,10 @@ object SyncMessages {
 
 
 
-  case class RelevantTransactions(genTxs: Seq[Genesis], transforms: Seq[RollupTransform], dictionaryTransforms: Seq[DictionaryTransform])
+  case class RelevantTransactions(genTxs: Seq[Genesis], transforms: Seq[RollupTransform], dictionaryMap: Map[String, Seq[DictionaryTransform]])
 
   object RelevantTransactions {
-    def empty = RelevantTransactions(Seq.empty[Genesis], Seq.empty[RollupTransform], Seq.empty[DictionaryTransform])
+    def empty = RelevantTransactions(Seq.empty[Genesis], Seq.empty[RollupTransform], Map.empty[String, Seq[DictionaryTransform]])
   }
   trait Transform {
     val tx: BlockTx

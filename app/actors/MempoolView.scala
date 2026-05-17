@@ -1,19 +1,20 @@
 package actors
 
 import akka.actor.{Actor, ActorRef, Cancellable}
-import cache.{PDCache, RollupCache}
+import akka.util.Timeout
+import cache.{MempoolCache, RollupCache}
 import configs.NodeConfig
-import lfsm.LFSMHelpers
-import org.ergoplatform.appkit.{ErgoId, JavaHelpers}
+import org.ergoplatform.appkit.JavaHelpers
 import org.ergoplatform.appkit.impl.NodeAndExplorerDataSourceImpl
 import org.slf4j.{Logger, LoggerFactory}
-import plasmadex.PDHelpers
 import play.api.cache.SyncCacheApi
 import play.api.libs.concurrent.InjectedActorSupport
-import state.messages.MempoolMessages.{BuildRollupChains, MempoolChain, MempoolTransform}
-import state.messages.{BlockInfo, BlockTx}
+import state.AutoSubscribable
+import state.AutoSubscribable.AutoSubscribe
+import state.messages.BlockTx
+import state.messages.MempoolMessages.{MempoolChain, MempoolTransform, RebuildMempoolChains, UpdatedMempoolChains}
 import state.messages.StateFrameMessages._
-import utils.{Globals, Helpers}
+import utils.Globals
 
 import javax.inject.{Inject, Named}
 import scala.concurrent.duration._
@@ -23,27 +24,34 @@ object MempoolView {
   private case object Tick
 }
 
+/**
+ * Actor whose job is to publish current set of mempool chains to cache, and message subscribers
+ * when updates have occurred.
+ * @param stateFrame
+ * @param rollupCoordinator
+ * @param pdSynchronizer
+ * @param cacheApi
+ */
 class MempoolView @Inject()(@Named("state-frame") stateFrame: ActorRef,
                             @Named("rollup-coordinator") rollupCoordinator: ActorRef,
                             @Named("pd-synchronizer") pdSynchronizer: ActorRef,
-                            cacheApi: SyncCacheApi) extends Actor with InjectedActorSupport {
+                            cacheApi: SyncCacheApi) extends Actor with InjectedActorSupport with AutoSubscribable {
   import MempoolView._
+  implicit val timeout: Timeout = 5.seconds
 
-  private val logger: Logger = LoggerFactory.getLogger("MempoolView")
   private val nodeConfig: NodeConfig = Globals.getNodeConfig
 
   private val dataSource: NodeAndExplorerDataSourceImpl =
     nodeConfig.getClient.getDataSource.asInstanceOf[NodeAndExplorerDataSourceImpl]
-  private val rollupCache = new RollupCache(cacheApi)
-  private val pdCache = new PDCache(cacheApi)
-  private var currentHeight: Int = chainHeight
-  private var subscribers: Set[ActorRef] = Set.empty
-  private var lastTxs: Seq[BlockTx] = Seq.empty
-  private var rollupChains: Seq[MempoolChain] = Seq.empty
-  private var pdChain: Option[MempoolChain] = None
 
-  private var mdSet: Set[MempoolTransform] = Set.empty
-  private var pdSet: Set[MempoolTransform] = Set.empty
+  private val mempoolCache = MempoolCache(cacheApi)
+
+  override val logger: Logger = LoggerFactory.getLogger("MempoolView")
+  override var subscribers: Set[ActorRef] = Set.empty
+
+  private var lastTxs: Seq[BlockTx] = Seq.empty
+
+
   private val ticker: Cancellable =
     context.system.scheduler.scheduleWithFixedDelay(5.seconds, 5.seconds, self, Tick)(context.dispatcher)
 
@@ -51,72 +59,80 @@ class MempoolView @Inject()(@Named("state-frame") stateFrame: ActorRef,
   stateFrame ! AutoSubscribe(self)
   override def postStop(): Unit = ticker.cancel()
 
-  override def receive: Receive = {
+  override def receive: Receive = handleSubscriptions orElse {
 
     case Tick =>
       fetchTxs match {
         case Failure(exception) =>
           logger.error("Failed to update mempool", exception)
+          lastTxs = Seq.empty
         case Success(txs) =>
+          // Build mempool chains only if a change has been recognized in the mempool
           if(txs != lastTxs){
-            val rollupMap = buildRollupChains(txs)
-            if(rollupChains != rollupMap.values.toSeq){
-              rollupMap.foreach(rollupCoordinator ! _._2)
-              rollupChains = rollupMap.values.toSeq
-            }
-//            val pdMap = buildMempoolChains(pdCache.getPD.map(_.utxoId).toSet, txs)
-//            if(pdChain.contains(pdMap.values.toSeq)){
-//              rollupMap.foreach(rollupCoordinator ! _._2)
-//              rollupChains = rollupMap.values.toSeq
-//            }
-            // TODO ADD MORE HERE
+            val mempoolChains = buildTotalMempoolState(txs)
+            mempoolChains.foreach(c => mempoolCache.setMempoolChain(c._1, c._2))
+            subscribers.foreach(_ ! UpdatedMempoolChains)
             lastTxs = txs
           }
       }
 
     case NewBlock =>
       self ! Tick
-    case BuildRollupChains =>
+    case RebuildMempoolChains => // Forcefully rebuild mempool chains and send updates out to all subscribers.
       fetchTxs match {
         case Failure(exception) =>
           logger.error("Failed to update mempool", exception)
+          lastTxs = Seq.empty
         case Success(txs) =>
-          logger.info("Got request to rebuild rollup mempool chains")
-          val rollupMap = buildRollupChains(txs)
-          rollupMap.foreach(rollupCoordinator ! _._2)
-          rollupChains = rollupMap.values.toSeq
+          logger.info("Got request to rebuild mempool state")
+          val mempoolChains = buildTotalMempoolState(txs)
+          mempoolChains.foreach(c => mempoolCache.setMempoolChain(c._1, c._2))
+          subscribers.foreach(_ ! UpdatedMempoolChains)
           lastTxs = txs
       }
   }
 
-  private def chainHeight: Int =
-    nodeConfig.getClient.execute(ctx => ctx.getHeight)
-
-  private def buildRollupChains(mempoolTxs: Seq[BlockTx]) = {
-    buildMempoolChains(rollupCache.getTreeSet, mempoolTxs)
-  }
-  private def buildMempoolChains(utxoIds: Set[String], mempoolTxs: Seq[BlockTx]): Map[String, MempoolChain] = {
+  /**
+   * Build map of unique input utxoIds to the mempool chains they create
+   * @param mempoolTxs Mempool Txs to build map of
+   * @return Map of unique input utxoIds to chains of mempool txs. The key set of utxoIds
+   *         are ids which are guaranteed to never be used as inputs for any txs besides
+   *         the first of each chain (implicitly part of the latest UTXO set).
+   */
+  private def buildTotalMempoolState(mempoolTxs: Seq[BlockTx]): Map[String, MempoolChain] = {
     mempoolTxs.foldLeft(Map.empty[String, MempoolChain]){
       (z, t) =>
-        if(utxoIds.contains(t.inputs.head.id)){
-          if(z.contains(t.inputs.head.id)) {
-            logger.warn(s"Replacing existing mempool chain for utxo ${t.inputs.head.id}")
-          }
+        val chainOpt = z.find(c => c._2.endId == t.inputs.head.id)
+        chainOpt match {
+          case Some(existingChain) =>
+            z + (existingChain._1 -> MempoolChain(existingChain._2.transforms :+ MempoolTransform(t)))
+          case None =>
+            // There exists some tx whose index 0 utxoId is the same as this tx's index 0 utxoId
+            val hasDuplicateInput = z
+              .values
+              .toSeq
+              .flatMap(_.transforms)
+              .exists(zT => zT.input.id == t.inputs.head.id)
 
-          z + (t.inputs.head.id -> MempoolChain(Seq(MempoolTransform(t))))
-        }else {
-          val chain = z.find(c => c._2.transforms.exists(_.output.id == t.inputs.head.id))
-          if(chain.isDefined)
-            z + (chain.get._1 -> MempoolChain(chain.get._2.transforms :+ MempoolTransform(t)))
-          else {
-            //logger.warn(s"Dropping ${t.id} due to lack of viable tx chain")
-            z
-          }
+            if(hasDuplicateInput) {
+              // If duplicate input is the start of an actual chain, then we will just replace it
+              if(z.contains(t.inputs.head.id)) {
+                logger.warn(s"Replacing existing mempool chain for utxo ${t.inputs.head.id}")
+                z + (t.inputs.head.id -> MempoolChain(Seq(MempoolTransform(t))))
+              }else{
+                logger.warn("Skipping mempool transform with duplicate mid-chain input")
+                z
+              }
+            }else{
+              // Add to map as unique starting utxoId if there is no output or input associated with it
+              z + (t.inputs.head.id -> MempoolChain(Seq(MempoolTransform(t))))
+            }
         }
     }
   }
 
   private def fetchTxs: Try[Seq[BlockTx]] = Try {
+    // TODO: Expand mempool size
     val mempoolTxs = dataSource
       .getNodeTransactionsApi.getUnconfirmedTransactions(100, 0)
       .execute()

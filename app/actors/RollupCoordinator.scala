@@ -3,7 +3,7 @@ package actors
 
 import akka.actor.{Actor, ActorRef, Terminated}
 import akka.util.Timeout
-import cache.RollupCache
+import cache.{MempoolCache, RollupCache}
 import configs.NodeConfig
 import mutations.NodeWallet
 import org.ergoplatform.appkit.{ErgoClient, ErgoProver}
@@ -11,7 +11,8 @@ import org.slf4j.{Logger, LoggerFactory}
 import play.api.Configuration
 import play.api.cache.SyncCacheApi
 import play.api.libs.concurrent.InjectedActorSupport
-import state.messages.MempoolMessages.{BuildRollupChains, MempoolChain, MempoolTransform}
+import state.AutoSubscribable.AutoSubscribe
+import state.messages.MempoolMessages.{MempoolChain, MempoolTransform, RebuildMempoolChains, ResetMempoolState, UpdatedMempoolChains}
 import state.messages.RollupMessages._
 import state.messages.SyncMessages._
 import utils.Globals
@@ -81,31 +82,19 @@ class RollupCoordinator @Inject()(syncFactory: RollupSynchronizer.RollupSyncFact
       logger.info(s"Removed rollup ${removeTree.blockId}")
       rollupCache.removeFromTreeSet(tree.get._1)
       rollupCache.remove(tree.get._1)
-    case GetSynced =>
-      if(trees.keys.nonEmpty) {
-        val syncedTrees = (for (k: String <- trees.keys.toSet) yield rollupCache.get(k).map(t => k -> t).toSeq).flatten
-        if (syncedTrees.size == trees.keys.size)
-          sender() ! FullSync(syncedTrees.toSeq)
-        else
-          sender() ! PartialSync(syncedTrees.toSeq, (trees.keys.toSet -- syncedTrees.map(_._1)).toSeq)
-        if(syncedTrees.nonEmpty){
-          logger.info("Enabling mempool states for rollup coordinator")
-          context.become(postSync(trees, Map.empty))
-        }
-      }else{
-        sender() ! NoRollups()
-      }
+    case CompletedInitSync =>
+      logger.info("Enabling mempool states for rollup coordinator")
+      mempoolView ! AutoSubscribe(self)
+      context.become(postSync(trees))
   }
 
-  private def postSync(trees: Map[String, String],
-                       chainMap: Map[String, MempoolChain],
-                      ): Receive = {
+  private def postSync(trees: Map[String, String]): Receive = {
     case gen: Genesis =>
       if(!trees.values.toSet.contains(gen.blockInfo.id)) {
         handleGenesis(gen)
         logger.info(s"Got ${trees.size + 1} trees")
         rollupCache.addToTreeSet(gen.tree.utxoId)
-        context.become(postSync(trees + (gen.tree.utxoId -> gen.tree.blockId), chainMap))
+        context.become(postSync(trees + (gen.tree.utxoId -> gen.tree.blockId)))
       }else{
         logger.warn(s"Skipping genesis for ${gen.blockInfo.id} at height ${gen.blockInfo.height} due to duplicate trees")
       }
@@ -114,39 +103,48 @@ class RollupCoordinator @Inject()(syncFactory: RollupSynchronizer.RollupSyncFact
       optBlockId match {
         case Some(treeBlockId) =>
           handleTransform(transform, treeBlockId)
-          // Rollup transforms should reset mempool map, to avoid condition of new mempool txs
-          // arriving before BuildRollupChains and changing chains which will be reset anyway.
-
           context.become(postSync(
-            trees - transform.input.id + (transform.output.id -> treeBlockId),
-            chainMap - transform.input.id,
+            trees - transform.input.id + (transform.output.id -> treeBlockId)
           ))
           logger.info(s"Pre-applied transform ${transform.tx.id} for rollup ${treeBlockId.slice(0, 12)} at ${transform.blockInfo.height}")
           rollupCache.removeFromTreeSet(transform.input.id)
           rollupCache.addToTreeSet(transform.output.id)
+          // We can reset mempool state on transform pre-application, this will help avoid issues if tx which makes it onto the block
+          // is not the one that was stored in mempool state. Mempool states will be forcefully updated anyway after
+          // all transforms are pre-applied
           if(rollupCache.getMempoolState(treeBlockId).isDefined)
             rollupCache.removeMempoolState(treeBlockId)
         case None =>
           logger.info(s"Skipping transform ${transform.tx.id} with no genesis history")
-          context.become(postSync(trees, chainMap))
+          context.become(postSync(trees))
       }
-    case chain: MempoolChain =>
-      if(trees.contains(chain.startId)) {
-        if(!chainMap.contains(chain.startId) || (chainMap.contains(chain.startId) && chainMap(chain.startId) != chain )) {
-          sendMempoolChain(chain, trees(chain.startId))
-          val keysToRemove = chainMap.keySet -- trees.keySet
+    case UpdatedMempoolChains =>
+      //logger.info("Sending updated mempool chains to rollup synchronizers")
+      val mempoolCache = MempoolCache(cacheApi)
+      val relevantChains = trees.map(t => t._2 -> mempoolCache.getMempoolChain(t._1))
+      relevantChains.foreach{
+        rc =>
+          if(rc._2.isDefined)
+            sendMempoolChain(rc._2.get, rc._1)
+      }
+    case RebuildMempoolChains =>
+      mempoolView ! RebuildMempoolChains
+    case ResetMempoolState(blockId) =>
+      val resetTree = trees.find(_._2 == blockId)
+      if(resetTree.isDefined) {
+        logger.info(s"Manually resetting mempool state for rollup $blockId")
+        rollupCache.removeMempoolState(blockId)
 
-          context.become(postSync(trees, chainMap + (chain.startId -> chain) -- keysToRemove))
-        }
+        context.become(postSync(trees))
       }
-    case BuildRollupChains =>
-      mempoolView ! BuildRollupChains
+
     // Stop Tracking should come only from children
     case stopTracking: StopTracking =>
       val removedTree = trees.find(_._2 == stopTracking.blockId)
       require(removedTree.isDefined, s"Map must contain actor name ${stopTracking.blockId} to remove tracking")
-      context.become(postSync(trees - removedTree.get._1, chainMap))
+      context.become(postSync(trees - removedTree.get._1))
       logger.info(s"Removed Rollup ${stopTracking.blockId}")
+
       rollupCache.removeFromTreeSet(removedTree.get._1)
       if(rollupCache.getMempoolState(stopTracking.blockId).isDefined)
         rollupCache.removeMempoolState(stopTracking.blockId)
@@ -154,8 +152,8 @@ class RollupCoordinator @Inject()(syncFactory: RollupSynchronizer.RollupSyncFact
     case removeRollup: RemoveRollup =>
       val tree = trees.find(_._2 == removeRollup.blockId)
       require(tree.isDefined, s"Map must contain actor name ${removeRollup.blockId} to remove tracking")
-      context.become(postSync(trees - tree.get._1, chainMap))
-      logger.info(s"Removed rollup ${removeRollup.blockId}")
+      context.become(postSync(trees - tree.get._1))
+
       rollupCache.removeFromTreeSet(tree.get._1)
       rollupCache.remove(tree.get._1)
       if(rollupCache.getMempoolState(removeRollup.blockId).isDefined)
@@ -171,6 +169,18 @@ class RollupCoordinator @Inject()(syncFactory: RollupSynchronizer.RollupSyncFact
       }else{
         sender() ! NoRollups()
       }
+    case GetCurrentRollup(blockId) =>
+      // TODO: Maybe forward to rollup synchronizer for slightly better guarantee that mempool state is accurate
+      val rollupState = trees.find(_._2 == blockId)
+      rollupState match {
+        case Some(rollupKV) =>
+          val mempoolRollupState = rollupCache.getMempoolState(blockId)
+          sender() ! CurrentRollup(rollupKV._1, rollupCache.get(rollupKV._1).get, mempoolRollupState)
+        case None =>
+          sender() ! NoRollupFound()
+      }
+    case updateEvaluation: UpdateEvaluation =>
+      sendEvalUpdate(updateEvaluation)
   }
 
   private def handleGenesis(genesis: Genesis): Unit = {
@@ -202,23 +212,13 @@ class RollupCoordinator @Inject()(syncFactory: RollupSynchronizer.RollupSyncFact
     }
   }
 
-  private def buildMempoolChains(utxoIds: Set[String], mempoolTxs: Set[MempoolTransform]): Map[String, MempoolChain] = {
-    mempoolTxs.foldLeft(Map.empty[String, MempoolChain]){
-      (z, t) =>
-        if(utxoIds.contains(t.input.id)){
-          if(z.contains(t.input.id))
-            logger.warn(s"Replacing existing mempool sequence for utxo ${t.input.id}")
-
-          z + (t.input.id -> MempoolChain(Seq(t)))
-        }else {
-          val chain = z.find(c => c._2.transforms.exists(_.output.id == t.input.id))
-          if(chain.isDefined)
-            z + (chain.get._1 -> MempoolChain(chain.get._2.transforms :+ t))
-          else {
-            logger.warn(s"Dropping $t with id ${t.tx.id} due to lack of viable tx chain")
-            z
-          }
-        }
+  private def sendEvalUpdate(updateEvaluation: UpdateEvaluation): Unit = {
+    val optChild = context.child(updateEvaluation.blockId)
+    optChild match {
+      case Some(child) =>
+        child ! updateEvaluation
+      case None =>
+        logger.warn(s"Could not send evaluation update to non-existent rollup ${updateEvaluation.blockId}")
     }
   }
 

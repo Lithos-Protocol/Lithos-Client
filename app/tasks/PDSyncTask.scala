@@ -11,6 +11,7 @@ import plasmadex.PDHelpers
 import plasmadex.states.LiquidityState
 import play.api.Configuration
 import play.api.cache.SyncCacheApi
+import state.Subscribable.{Subscribe, SubscribeAck, SubscribeRejected, SubscribeResponse}
 import state.messages.DictionaryMessages.InitialLiqState
 import state.messages.StateFrameMessages._
 import state.messages.SyncMessages._
@@ -26,7 +27,7 @@ import scala.util.{Failure, Success, Try}
 @Singleton
 class PDSyncTask @Inject()(cache: SyncCacheApi, system: ActorSystem, config: Configuration,
                            @Named("pd-synchronizer") pdSynchronizer: ActorRef,
-                           @Named("state-frame")    stateFrame:     ActorRef,
+                           @Named("sync-handler")    syncHandler:       ActorRef,
                            cs: CoordinatedShutdown) {
 
   val logger: Logger = LoggerFactory.getLogger("PDSyncTask")
@@ -65,26 +66,28 @@ class PDSyncTask @Inject()(cache: SyncCacheApi, system: ActorSystem, config: Con
         }
       }
 
-      logger.info(s"Finished initial PlasmaDex sync to height $currentHeight")
-      pdSynchronizer ! CompletedInitSync
-      Globals.setPDSynced()
+      logger.info(s"Finished catch up PlasmaDex sync to height $currentHeight")
 
-      // Phase 2: handoff to StateFrame — keep loading blocks and retrying until accepted
-      logger.info("Attempting PlasmaDex subscription to StateFrame")
+
+      // Phase 2: handoff to SyncHandler — keep loading blocks and retrying until accepted
+      logger.info("Attempting PlasmaDex subscription to SyncHandler")
       var subscribed = false
       while (!subscribed) {
         implicit val timeout: Timeout = Timeout(10 seconds)
-        Await.result((stateFrame ? Subscribe(currentHeight, pdSynchronizer)).mapTo[SubscribeResponse], 10 seconds) match {
+        val pdToken = PDHelpers.getLPToken(nodeConfig.getClient).toString
+        Await.result((syncHandler ? Subscribe(currentHeight, pdSynchronizer, Some(pdToken))).mapTo[SubscribeResponse], 10 seconds) match {
           case SubscribeAck =>
-            logger.info(s"PDSynchronizer subscribed to StateFrame at height $currentHeight")
+            logger.info(s"PDSynchronizer subscribed to SyncHandler at height $currentHeight")
+            pdSynchronizer ! CompletedInitSync
+            Globals.setPDSynced()
             subscribed = true
           case SubscribeRejected(reason) =>
-            logger.warn(s"StateFrame rejected PlasmaDex subscription: $reason — catching up one block")
+            logger.warn(s"SyncHandler rejected PlasmaDex subscription: $reason — catching up one block")
             loadBlockSync(currentHeight + 1, nodeDataSource) match {
               case Success(_) => currentHeight += 1
               case Failure(ex) =>
                 logger.error(s"Failed to load block ${currentHeight + 1} during subscription handoff", ex)
-                Thread.sleep(2000)
+                Thread.sleep(5000)
             }
         }
       }
