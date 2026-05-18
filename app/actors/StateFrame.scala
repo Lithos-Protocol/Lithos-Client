@@ -18,7 +18,8 @@ object StateFrame {
   private case object Tick
 }
 
-class StateFrame @Inject()() extends Actor with InjectedActorSupport with Subscribable{
+class StateFrame @Inject()() extends Actor with InjectedActorSupport with Subscribable {
+
   import StateFrame._
 
 
@@ -40,21 +41,18 @@ class StateFrame @Inject()() extends Actor with InjectedActorSupport with Subscr
 
   override def receive: Receive = handleSubscriptions orElse {
     case Tick =>
-      val latestHeight = chainHeight
-      if (latestHeight > currentHeight) {
-        fetchBlock(currentHeight + 1) match {
-          case Success(blockInfo) =>
-            currentHeight = blockInfo.height
-            logger.info(s"StateFrame advancing to height $currentHeight, broadcasting to ${subscribers.size} subscriber(s)")
-            subscribers.foreach(_ ! NewBlock(blockInfo))
-          case Failure(ex) =>
-            ex match {
-              case _: NullPointerException =>
-                logger.warn(s"StateFrame failed to fetch block at height ${currentHeight + 1}, will re-attempt")
-              case _ =>
-                logger.error(s"StateFrame failed to fetch block at height ${currentHeight + 1}", ex)
-            }
-        }
+      fetchBlock(currentHeight + 1) match {
+        case Success(blockInfo) =>
+          currentHeight = blockInfo.height
+          logger.info(s"StateFrame advancing to height $currentHeight, broadcasting to ${subscribers.size} subscriber(s)")
+          subscribers.foreach(_ ! NewBlock(blockInfo))
+        case Failure(_) =>
+//          ex match {
+//            case _: NullPointerException =>
+//              logger.warn(s"StateFrame failed to fetch block at height ${currentHeight + 1}, will re-attempt")
+//            case _ =>
+//              logger.error(s"StateFrame failed to fetch block at height ${currentHeight + 1}", ex)
+//          }
       }
     case CheckBlock =>
       self ! Tick

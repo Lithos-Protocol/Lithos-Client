@@ -1,18 +1,18 @@
 package actors
 
 
-import akka.actor.{Actor, ActorRef, Terminated}
+import akka.actor.{Actor, ActorRef}
 import akka.util.Timeout
 import cache.{MempoolCache, RollupCache}
 import configs.NodeConfig
 import mutations.NodeWallet
-import org.ergoplatform.appkit.{ErgoClient, ErgoProver}
+import org.ergoplatform.appkit.ErgoClient
 import org.slf4j.{Logger, LoggerFactory}
 import play.api.Configuration
 import play.api.cache.SyncCacheApi
 import play.api.libs.concurrent.InjectedActorSupport
 import state.AutoSubscribable.AutoSubscribe
-import state.messages.MempoolMessages.{MempoolChain, MempoolTransform, RebuildMempoolChains, ResetMempoolState, UpdatedMempoolChains}
+import state.messages.MempoolMessages.{MempoolChain, RebuildMempoolChains, ResetMempoolState, UpdatedMempoolChains}
 import state.messages.RollupMessages._
 import state.messages.SyncMessages._
 import utils.Globals
@@ -61,6 +61,8 @@ class RollupCoordinator @Inject()(syncFactory: RollupSynchronizer.RollupSyncFact
         case Some(treeBlockId) =>
           handleTransform(transform, treeBlockId)
           context.become(postInit(trees - transform.input.id + (transform.output.id -> treeBlockId)))
+          // Any messages routed to the synchronizer after pre-application are guaranteed to have
+          // access to the correct post-transform state
           logger.info(s"Pre-applied transform ${transform.tx.id} for rollup ${treeBlockId.slice(0, 12)} at ${transform.blockInfo.height}")
           rollupCache.removeFromTreeSet(transform.input.id)
           rollupCache.addToTreeSet(transform.output.id)

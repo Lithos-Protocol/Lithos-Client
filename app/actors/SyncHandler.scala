@@ -35,7 +35,8 @@ import scala.util.{Failure, Success}
 
 /**
  * Actor whose goal is to process blocks and route transforms to the appropriate area. During initial synchronization,
- * this actor will only deal with the
+ * this actor will only deal with rollups. Post-sync, the actor will accept subscriptions with token information
+ * to route transforms to non-rollup sync actors after blocks have been parsed.
  * @param config
  * @param rollupCoordinator
  * @param cacheApi
