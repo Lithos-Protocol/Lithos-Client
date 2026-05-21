@@ -473,6 +473,35 @@ object LFSMTransformer {
     }
   }
 
+  def getCommitmentsForNISP(client: ErgoClient, height: Int): Try[Long] = {
+    Try {
+      client.execute {
+        ctx =>
+          val dataBoxNFT = Globals.mdDB.getDataBoxToken
+          dataBoxNFT match {
+            case Some(nft) =>
+              val dataBox = LFSMHelpers.getLocalDataBox(ctx, nft, Helpers.dataBoxContract(ctx))
+              if(dataBox.isSuccess) {
+                val dataInput = dataBox.get
+                val commits = dataInput.registers.head.getValue.asInstanceOf[Coll[(Int, Long)]].toArray
+                // Commit 0 is in effect
+                if (height - commits.head._1 >= LFSMHelpers.NISP_WINDOW)
+                  commits.head._2
+                else
+                  commits(1)._2
+              }else{
+                throw new DataBoxRetrievalException("Failed to retrieve data box information from blockchain")
+              }
+
+            case None =>
+              throw new DataBoxRetrievalException("Could not find a stored data box")
+          }
+      }
+    }
+  }
+
+
+
   def getCommitedScore(ctx: BlockchainContext, diff: String, reason: String): Try[Long] = {
     Try {
       val dataBoxNFT = Globals.mdDB.getDataBoxToken
