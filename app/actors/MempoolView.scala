@@ -84,7 +84,7 @@ class MempoolView @Inject()(@Named("state-frame") stateFrame: ActorRef,
           logger.error("Failed to update mempool", exception)
           lastTxs = Seq.empty
         case Success(txs) =>
-          logger.info("Got request to rebuild mempool state")
+          //logger.info("Got request to rebuild mempool state")
           val mempoolChains = buildTotalMempoolState(txs)
           mempoolChains.foreach(c => mempoolCache.setMempoolChain(c._1, c._2))
           subscribers.foreach(_ ! UpdatedMempoolChains)

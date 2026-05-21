@@ -63,13 +63,15 @@ class RollupSynchronizer @Inject()(config: Configuration, @Assisted rollupBlockI
           val nextTree = mempoolChain.transforms.foldLeft(tree) {
             (a, m) =>
               if (a.utxoId == m.input.id) {
-                matchTransform(a, m)
+                matchTransform(a, m, mempoolChain.transforms.size == 1)
               } else
                 a
           }
           val asInput = mempoolChain.transforms.last.output.toInput(ctx)
           if (mempoolChain.transforms.last.output.id == nextTree.utxoId) {
-            logger.info(s"Applied mempool chain $mempoolChain with initial transform ${mempoolChain.transforms.head.tx.id}")
+            if(mempoolChain.transforms.size > 1)
+              logger.info(s"Applied $mempoolChain with initial transform" +
+                s" ${mempoolChain.transforms.head.tx.id}")
             treeCache.setMempoolState(rollupBlockId, MempoolRollupState(asInput, nextTree))
           } else {
             // If transformations did not reach the end of the mempool sequence, then
@@ -100,36 +102,36 @@ class RollupSynchronizer @Inject()(config: Configuration, @Assisted rollupBlockI
   }
 
   /**
-   * Helper method to only log for nonMempool transforms
+   * Helper method to only log for certain transforms
    * @param msg Msg to log
-   * @param isMem isMempool transform
+   * @param shouldLog whether to transform or not
    */
-  private def log(msg: String, isMem: Boolean): Unit = {
-    if(!isMem)
+  private def log(msg: String, shouldLog: Boolean): Unit = {
+    if(shouldLog)
       logger.info(msg)
   }
-  private def matchTransform(tree: NISPTree, transform: Transform): NISPTree = {
+  private def matchTransform(tree: NISPTree, transform: Transform, shouldLog: Boolean = true): NISPTree = {
     val phase = tree.phase
     val isMempool = transform.isInstanceOf[MempoolTransform]
     phase match {
       case LFSMPhase.HOLDING =>
         transform.output.ergoTree match {
           case hContract if hContract == relErgoTrees.head =>
-            submissionTransform(tree, transform, isMempool)
+            submissionTransform(tree, transform, isMempool, shouldLog)
           case eContract if eContract == relErgoTrees(1) =>
-            holdingTransform(tree, transform, isMempool)
+            holdingTransform(tree, transform, isMempool, shouldLog)
         }
       case LFSMPhase.EVAL =>
         transform.output.ergoTree match {
           case eContract if eContract == relErgoTrees(1) =>
-            fraudProofTransform(tree, transform, isMempool)
+            fraudProofTransform(tree, transform, isMempool, shouldLog)
           case pContract if pContract == relErgoTrees(2) =>
-            evalTransform(tree, transform, isMempool)
+            evalTransform(tree, transform, isMempool, shouldLog)
         }
       case LFSMPhase.PAYOUT =>
         transform match {
           case mempool: MempoolTransform =>
-            mempoolPayoutTransform(tree, mempool)
+            mempoolPayoutTransform(tree, mempool, shouldLog)
           case rollup: RollupTransform =>
            rollupPayoutTransform(tree, rollup)
         }
@@ -137,7 +139,7 @@ class RollupSynchronizer @Inject()(config: Configuration, @Assisted rollupBlockI
     }
   }
 
-  private def submissionTransform(tree: NISPTree, transform: Transform, isMempool: Boolean): NISPTree = {
+  private def submissionTransform(tree: NISPTree, transform: Transform, isMempool: Boolean, shouldLog: Boolean): NISPTree = {
 
     val holdingBox = transform.output.toInput(ctx)
     val dict = {
@@ -171,16 +173,16 @@ class RollupSynchronizer @Inject()(config: Configuration, @Assisted rollupBlockI
       treeCache.updateTreeCache(transform.input.id, nextTree.utxoId, nextTree)
 
     if (isMiner) {
-      log(s"Applied submission transform ${transform.tx.id} with $transform for local miner", isMempool)
+      log(s"Applied submission transform ${transform.tx.id} with $transform for local miner", shouldLog)
     } else {
       log(s"Applied submission transform ${transform.tx.id} with $transform for miner" +
-        s" ${Address.fromErgoTree(ErgoTree.fromProposition(signer), ctx.getNetworkType)}", isMempool)
+        s" ${Address.fromErgoTree(ErgoTree.fromProposition(signer), ctx.getNetworkType)}", shouldLog)
     }
     nextTree
 
   }
 
-  private def holdingTransform(tree: NISPTree, transform: Transform, isMempool: Boolean): NISPTree = {
+  private def holdingTransform(tree: NISPTree, transform: Transform, isMempool: Boolean, shouldLog: Boolean): NISPTree = {
 
     val evalBox = transform.output.toInput(ctx)
     if (tree.hasMiner) {
@@ -189,14 +191,14 @@ class RollupSynchronizer @Inject()(config: Configuration, @Assisted rollupBlockI
       if(!isMempool) {
         treeCache.updateTreeCache(transform.input.id, nispTree.utxoId, nispTree)
       }
-      log(s"Applied holding transform ${transform.tx.id} with $transform", isMempool)
+      log(s"Applied holding transform ${transform.tx.id} with $transform", shouldLog)
       nispTree
     } else {
       stopSync("No local miner in holding transform", tree, isMempool)
     }
   }
 
-  private def fraudProofTransform(tree: NISPTree, transform: Transform, isMempool: Boolean): NISPTree = {
+  private def fraudProofTransform(tree: NISPTree, transform: Transform, isMempool: Boolean, shouldLog: Boolean): NISPTree = {
 
     val fpInput = transform.tx.inputs(1)
 
@@ -234,19 +236,19 @@ class RollupSynchronizer @Inject()(config: Configuration, @Assisted rollupBlockI
       }
       if(!isMempool)
         treeCache.updateTreeCache(transform.input.id, nispTree.utxoId, nispTree)
-      log(s"Applied fraud proof transform ${transform.tx.id} with $transform", isMempool)
+      log(s"Applied fraud proof transform ${transform.tx.id} with $transform", shouldLog)
       nispTree
     } else {
       stopSync("No local miner in fraud proof transform", tree, isMempool)
     }
   }
 
-  private def evalTransform(tree: NISPTree, transform: Transform, isMempool: Boolean): NISPTree = {
+  private def evalTransform(tree: NISPTree, transform: Transform, isMempool: Boolean, shouldLog: Boolean): NISPTree = {
     if (tree.hasMiner) {
       val nispTree = tree.copy(currentPeriod = None, phase = LFSMPhase.PAYOUT, utxoId = transform.output.id)
       if(!isMempool)
         treeCache.updateTreeCache(transform.input.id, nispTree.utxoId, nispTree)
-      log(s"Applied evaluation transform ${transform.tx.id} with $transform", isMempool)
+      log(s"Applied evaluation transform ${transform.tx.id} with $transform", shouldLog)
       nispTree
     } else {
       stopSync("No local miner in evaluation transform", tree, isMempool)
@@ -286,7 +288,7 @@ class RollupSynchronizer @Inject()(config: Configuration, @Assisted rollupBlockI
           logger.info(s"Applied payout transform ${transform.tx.id} with $transform")
           nispTree
         } else {
-          logger.warn("Removing tree with miner before miner was paid")
+          logger.warn(s"Got early removal in payout transform ${transform.tx.id} with $transform")
           stopSync("No payout contract output in transform", tree, isMempool = false)
         }
       }
@@ -295,7 +297,7 @@ class RollupSynchronizer @Inject()(config: Configuration, @Assisted rollupBlockI
     }
   }
 
-  private def mempoolPayoutTransform(tree: NISPTree, transform: MempoolTransform): NISPTree = {
+  private def mempoolPayoutTransform(tree: NISPTree, transform: MempoolTransform, shouldLog: Boolean): NISPTree = {
     if (tree.hasMiner) {
       val dict = tree.dictionary.copy()
       dict.prover.generateProof()
@@ -318,10 +320,10 @@ class RollupSynchronizer @Inject()(config: Configuration, @Assisted rollupBlockI
         if (transform.output.ergoTree == Helpers.payoutContract(ctx).ergoTreeHex) {
           val nispTree = tree.copy(dictionary = dict, utxoId = transform.output.id)
 
-          //logger.info(s"Applied payout transform ${transform.tx.id} with $transform")
+          log(s"Applied payout transform ${transform.tx.id} with $transform", shouldLog)
           nispTree
         } else {
-          //logger.warn("Removing tree with miner before miner was paid")
+          log(s"Got early removal in payout transform ${transform.tx.id} with $transform", shouldLog)
           stopSync("No payout contract output in transform", tree, isMempool = true)
         }
       }

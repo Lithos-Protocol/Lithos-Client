@@ -26,6 +26,7 @@ object MempoolMessages {
 
   /**
    * Chain of Mempool Transformations to be associated with a given UTXO
+   * NOTE: Should never hold empty sequence
    * @param transforms Sequence of transforms representing a chain
    */
   case class MempoolChain(transforms: Seq[MempoolTransform]) {
@@ -46,7 +47,7 @@ object MempoolMessages {
       }
     }
 
-    override def toString: String = s"MempoolChain($startId => $endId)"
+    override def toString: String = s"MempoolChain(${transforms.size}: $startId => $endId)"
 
     override def equals(obj: Any): Boolean =
       obj match {
