@@ -182,17 +182,34 @@ class SyncHandler @Inject()(config: Configuration, @Named("rollup-coordinator") 
   private def buildRelevantTransactions(blockInfo: BlockInfo): RelevantTransactions = {
     client.execute{
       ctx =>
-        blockInfo.txs.foldLeft(RelevantTransactions.empty){
-          (rel, tx) =>
+        blockInfo.txs.foldLeft((RelevantTransactions.empty, Set.empty[String])){
+          (relAcc, tx) =>
+            val rel = relAcc._1
+            val trackedOutputs = relAcc._2
             if(hasRollupInput(tx)) {
-              rel.copy(transforms = rel.transforms ++ Seq(RollupTransform(blockInfo, tx)))
-            }else {
+              // We can only add an output to tracking if we know it is a rollup output. That way we avoid
+              // adding final payout boxes.
+              val nextTrackedOutputs = if(hasRollupOutput(tx)) trackedOutputs + tx.outputs.head.id else trackedOutputs
+
+              rel.copy(transforms = rel.transforms ++ Seq(RollupTransform(blockInfo, tx))) -> nextTrackedOutputs
+            } else {
               val optGenesis = makeGenesis(ctx, blockInfo, tx)
               if (optGenesis.isDefined) {
-                rel.copy(genTxs = rel.genTxs ++ Seq(Genesis(optGenesis.get, blockInfo)))
+                // We don't need to add to tracked outputs since spending a genesis will always lead to having a rollup
+                // output
+                rel.copy(genTxs = rel.genTxs ++ Seq(Genesis(optGenesis.get, blockInfo))) -> trackedOutputs
               } else if (hasRollupOutput(tx)) {
-                rel.copy(transforms = rel.transforms ++ Seq(RollupTransform(blockInfo, tx)))
+                rel.copy(transforms = rel.transforms ++ Seq(RollupTransform(blockInfo, tx))) -> (trackedOutputs + tx.outputs.head.id)
+              } else if(hasChainedOutput(tx, trackedOutputs)) {
+                // UNDER NO CIRCUMSTANCE should you add the output of a rollup picked up this way
+                // to tracked outputs, as there is no guarantee the resulting output is a rollup
+
+                // In general, trackedOutputs set is only needed for payout txs which spend the entire rollup
+                // and are chained off of another payout transaction of the same rollup. hasRollupOutput MUST
+                // be used in all other cases to avoid critical sync failures.
+                rel.copy(transforms = rel.transforms ++ Seq(RollupTransform(blockInfo, tx))) -> trackedOutputs
               } else {
+                // Is non-rollup transform
                 val singleton = tx.outputs.head.assets.headOption
                 singleton match {
                   case Some(nft) =>
@@ -201,16 +218,16 @@ class SyncHandler @Inject()(config: Configuration, @Named("rollup-coordinator") 
                       rel.copy(
                         dictionaryMap = rel.dictionaryMap +
                           (nftId -> (rel.dictionaryMap.getOrElse(nftId, Seq.empty) :+ DictionaryTransform(blockInfo, tx)))
-                      )
+                      ) -> trackedOutputs
                     } else {
-                      rel
+                      rel -> trackedOutputs
                     }
                   case None =>
-                    rel
+                    rel -> trackedOutputs
                 }
               }
             }
-        }
+        }._1
     }
   }
 
@@ -247,6 +264,10 @@ class SyncHandler @Inject()(config: Configuration, @Named("rollup-coordinator") 
 
   private def hasRollupInput(tx: BlockTx): Boolean = {
     rollupCache.getTreeSet.contains(tx.inputs.head.id)
+  }
+
+  private def hasChainedOutput(tx: BlockTx, trackedOutputs: Set[String]) = {
+    trackedOutputs.contains(tx.inputs.head.id)
   }
 
 }
