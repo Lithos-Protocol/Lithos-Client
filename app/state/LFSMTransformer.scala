@@ -136,12 +136,6 @@ object LFSMTransformer {
             // We do not use mempool states for evaluation
             attemptEvaluation(ctx, evalTrees, prover, boxLoader, cache)
 
-            if(autoCollat) {
-              val collatRetriever = new CollateralRetriever(client, prover)
-              collatRetriever.checkCollateral(boxLoader, maxCollat)
-            }
-            if (autoCommits)
-              checkAutoCommits(ctx, diff, prover, boxLoader)
         }
       }.recoverWith{
         case e =>
@@ -155,7 +149,7 @@ object LFSMTransformer {
   }
 
 
-  private def checkAutoCommits(ctx: BlockchainContext, diff: String, prover: NodeWallet, boxLoader: BoxLoader) = {
+  def checkAutoCommits(ctx: BlockchainContext, diff: String, prover: NodeWallet, inputRetriever: (Long) => Seq[InputUTXO]) = {
     Try{
       val dataNFT = Globals.mdDB.getDataBoxToken
       dataNFT match {
@@ -182,7 +176,7 @@ object LFSMTransformer {
                   .updated(0, newCommit)
                   .append(Colls.fromArray(Array(currentCommit)))
                 logger.info(s"Next commitment set: ${newCommit}")
-                val otherInputs = boxLoader.getInputs(Parameters.MinFee)
+                val otherInputs = inputRetriever(Parameters.MinFee)
                 val nextDataBox = dataInput.toUTXO.copy(
                   registers = dataInput.registers.updated(0, ErgoValue.ofColl(
                     nextCommits,
@@ -472,6 +466,35 @@ object LFSMTransformer {
       }
     }
   }
+
+  def getCommitmentsForNISP(client: ErgoClient, height: Int): Try[Long] = {
+    Try {
+      client.execute {
+        ctx =>
+          val dataBoxNFT = Globals.mdDB.getDataBoxToken
+          dataBoxNFT match {
+            case Some(nft) =>
+              val dataBox = LFSMHelpers.getLocalDataBox(ctx, nft, Helpers.dataBoxContract(ctx))
+              if(dataBox.isSuccess) {
+                val dataInput = dataBox.get
+                val commits = dataInput.registers.head.getValue.asInstanceOf[Coll[(Int, Long)]].toArray
+                // Commit 0 is in effect
+                if (height - commits.head._1 >= LFSMHelpers.NISP_WINDOW)
+                  commits.head._2
+                else
+                  commits(1)._2
+              }else{
+                throw new DataBoxRetrievalException("Failed to retrieve data box information from blockchain")
+              }
+
+            case None =>
+              throw new DataBoxRetrievalException("Could not find a stored data box")
+          }
+      }
+    }
+  }
+
+
 
   def getCommitedScore(ctx: BlockchainContext, diff: String, reason: String): Try[Long] = {
     Try {

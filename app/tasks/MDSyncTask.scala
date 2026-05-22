@@ -13,6 +13,7 @@ import org.slf4j.{Logger, LoggerFactory}
 import play.api.Configuration
 import play.api.cache.SyncCacheApi
 import state.LFSMTransformer
+import state.Subscribable.{Subscribe, SubscribeAck, SubscribeRejected, SubscribeResponse}
 import state.messages.DictionaryMessages.InitialMDState
 import state.messages.StateFrameMessages._
 import state.messages.SyncMessages._
@@ -28,7 +29,7 @@ import scala.util.{Failure, Success, Try}
 @Singleton
 class MDSyncTask @Inject()(cache: SyncCacheApi, system: ActorSystem, config: Configuration,
                            @Named("md-synchronizer") mdSynchronizer: ActorRef,
-                           @Named("state-frame")    stateFrame:     ActorRef,
+                           @Named("sync-handler")    syncHandler:       ActorRef,
                            cs: CoordinatedShutdown) {
 
   val logger: Logger = LoggerFactory.getLogger("MDSyncTask")
@@ -72,25 +73,29 @@ class MDSyncTask @Inject()(cache: SyncCacheApi, system: ActorSystem, config: Con
           }
         }
 
-        logger.info(s"Finished initial sync to height $currentHeight")
-        mdSynchronizer ! GetSynced
+        logger.info(s"Finished catch up sync to height $currentHeight")
 
-        // Phase 2: handoff to StateFrame — keep loading blocks and retrying until accepted
-        logger.info("Attempting subscription to StateFrame")
+
+        // Phase 2: handoff to SyncHandler — keep loading blocks and retrying until accepted
+        logger.info("Attempting subscription to SyncHandler")
         var subscribed = false
         while (!subscribed) {
           implicit val timeout: Timeout = Timeout(10 seconds)
-          Await.result((stateFrame ? Subscribe(currentHeight, mdSynchronizer)).mapTo[SubscribeResponse], 10 seconds) match {
+
+          val mdToken = LFSMHelpers.getMDToken(nodeConfig.getClient).toString
+
+          Await.result((syncHandler ? Subscribe(currentHeight, mdSynchronizer, Some(mdToken))).mapTo[SubscribeResponse], 10 seconds) match {
             case SubscribeAck =>
-              logger.info(s"MDSynchronizer subscribed to StateFrame at height $currentHeight")
+              logger.info(s"MDSynchronizer subscribed to SyncHandler at height $currentHeight")
+              mdSynchronizer ! CompletedInitSync
               subscribed = true
             case SubscribeRejected(reason) =>
-              logger.warn(s"StateFrame rejected subscription: $reason — catching up one block")
+              logger.warn(s"SyncHandler rejected subscription: $reason — catching up one block")
               loadBlockSync(currentHeight + 1, nodeDataSource) match {
                 case Success(_) => currentHeight += 1
                 case Failure(ex) =>
                   logger.error(s"Failed to load block ${currentHeight + 1} during subscription handoff", ex)
-                  Thread.sleep(2000)
+                  Thread.sleep(5000)
               }
           }
         }

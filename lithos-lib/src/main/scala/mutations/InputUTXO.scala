@@ -65,6 +65,16 @@ case class InputUTXO(input: InputBox,
     registers(idx).getValue.asInstanceOf[Coll[T]].toArray
   }
 
+  override def hashCode(): Int = java.util.Arrays.hashCode(id.getBytes)
+
+  override def equals(obj: Any): Boolean = {
+    obj match {
+      case inputUTXO: InputUTXO =>
+        inputUTXO.id == id
+      case _ =>
+        false
+    }
+  }
 }
 
 object InputUTXO {

@@ -1,10 +1,10 @@
 package mining
 
-import akka.actor.{Actor, ActorRef, Cancellable, Props, Status}
+import akka.actor.{Actor, ActorRef, Cancellable, Props}
 import akka.pattern.pipe
 import lfsm.LFSMHelpers
-import mining.MiningMessages._
 import mining.LithosPool.{CollateralRefreshed, RefreshCollateral}
+import mining.MiningMessages._
 import mutations.NodeWallet
 import nisp.{NISPDatabase, SuperShare}
 import org.bouncycastle.util.encoders.Hex
@@ -12,15 +12,15 @@ import org.ergoplatform.appkit.ErgoClient
 import org.slf4j.{Logger, LoggerFactory}
 import scorex.utils.Ints
 import state.LFSMTransformer
-import state.messages.StateFrameMessages.{AutoSubscribe, CheckBlock, NewBlock}
-import stratum.{CollateralData, CollateralRetriever}
+import state.messages.StateFrameMessages.CheckBlock
 import stratum.data.{MiningCandidate, Options}
+import stratum.{CollateralData, CollateralRetriever}
 
 import java.io.{OutputStream, PrintStream}
 import java.net.ConnectException
 import scala.collection.mutable
-import scala.concurrent.{ExecutionContext, Future}
 import scala.concurrent.duration._
+import scala.concurrent.{ExecutionContext, Future}
 import scala.util.{Failure, Success}
 
 /**

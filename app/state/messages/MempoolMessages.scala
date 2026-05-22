@@ -26,6 +26,7 @@ object MempoolMessages {
 
   /**
    * Chain of Mempool Transformations to be associated with a given UTXO
+   * NOTE: Should never hold empty sequence
    * @param transforms Sequence of transforms representing a chain
    */
   case class MempoolChain(transforms: Seq[MempoolTransform]) {
@@ -46,7 +47,7 @@ object MempoolMessages {
       }
     }
 
-    override def toString: String = s"MempoolChain($startId => $endId)"
+    override def toString: String = s"MempoolChain(${transforms.size}: $startId => $endId)"
 
     override def equals(obj: Any): Boolean =
       obj match {
@@ -56,19 +57,24 @@ object MempoolMessages {
           false
       }
   }
+  /** Message sent from MempoolView to its subscribers when the mempool has been updated */
+  case object UpdatedMempoolChains
+  /** Message sent to MempoolView to tell it to re-build the mempool state and notify subscribers */
+  case object RebuildMempoolChains
 
-
-  case object BuildRollupChains
-
+  /** Message sent to manager of a MempoolState (usually a synchronizer of some kind) to reset it's mempool state */
+  case class ResetMempoolState(rollupBlockId: String)
   // Mempool States
   /**
    *  NOTE: If toBeRemoved is true, we should not assume the nispTree is accurate.
    *  TODO: Switch to option?
     */
-  case class MempoolRollupState(asInput: InputUTXO, nispTree: NISPTree, toBeRemoved: Boolean = false)
+  sealed trait MempoolState
 
-  case class MempoolMDState(asInput: InputUTXO, minerTree: MinerTree)
+  case class MempoolRollupState(asInput: InputUTXO, nispTree: NISPTree, toBeRemoved: Boolean = false) extends MempoolState
 
-  case class MempoolPDState(asInput: InputUTXO, liquidityState: LiquidityState)
+  case class MempoolMDState(asInput: InputUTXO, minerTree: MinerTree) extends MempoolState
+
+  case class MempoolPDState(asInput: InputUTXO, liquidityState: LiquidityState) extends MempoolState
 
 }

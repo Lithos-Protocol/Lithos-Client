@@ -14,7 +14,7 @@ import play.api.libs.concurrent.InjectedActorSupport
 import scorex.utils.Longs
 import sigma.Coll
 import state.messages.DictionaryMessages.{DictionaryTransform, InitialLiqState}
-import state.messages.SyncMessages.{GetSynced, HandledBlock}
+import state.messages.SyncMessages.{CompletedInitSync, GetSynced, HandledBlock}
 import state.messages.{BlockInfo, BlockMessage}
 import utils.Globals
 
@@ -62,8 +62,8 @@ class HistoricalPDSynchronizer @Inject()(cacheApi: SyncCacheApi) extends Actor w
       relTxs.foreach(self ! _)
       if(relTxs.nonEmpty)
         logger.info(s"Pre-applied ${relTxs.length} transforms from block ${blockMsg.blockInfo.height}")
-    case GetSynced =>
-      logger.info("Got initial sync message")
+    case CompletedInitSync =>
+      logger.info("Got initial sync completion message")
       context.become(postSync(height, utxoId))
 
   }
@@ -101,7 +101,7 @@ class HistoricalPDSynchronizer @Inject()(cacheApi: SyncCacheApi) extends Actor w
       (rel, tx) =>
         if(tx.outputs.head.id != PDHelpers.LP_GENESIS_ID) {
           if (tx.outputs.head.assets.headOption.exists(t => t.id == lpToken)) {
-              rel :+ DictionaryTransform(blockInfo, tx, lpToken.toString)
+              rel :+ DictionaryTransform(blockInfo, tx)
             } else {
               rel
             }

@@ -4,6 +4,7 @@ package mutations
 
 import org.bouncycastle.util.encoders.Hex
 import org.ergoplatform.ErgoAddressEncoder.NetworkPrefix
+import org.ergoplatform.ErgoTreePredef
 import org.ergoplatform.appkit._
 import scorex.crypto.hash.Blake2b256
 import sigma.VersionContext
@@ -55,7 +56,7 @@ case class Contract(ergoTree: ErgoTree, mutators: Seq[Mutator] = Seq.empty[Mutat
 object Contract {
   final val SIGMA_TRUE: Contract = new Contract(ErgoTree.fromProposition(TrueSigmaProp))
   final val SIGMA_FALSE: Contract = new Contract(ErgoTree.fromProposition(FalseSigmaProp))
-
+  final val FEE_720: Contract = new Contract(ErgoTreePredef.feeProposition(720))
   def apply(ergoTree: ErgoTree, mutators: Seq[Mutator] = Seq.empty[Mutator]): Contract = {
     new Contract(ergoTree, mutators)
   }

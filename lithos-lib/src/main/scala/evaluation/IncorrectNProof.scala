@@ -7,7 +7,7 @@ import org.ergoplatform.appkit.{BlockchainContext, ContextVar, ErgoProver, ErgoT
 import org.slf4j.{Logger, LoggerFactory}
 import sigma.Colls
 import sigma.exceptions.InterpreterException
-import work.lithos.mutations.{Contract, InputUTXO, TxBuilder}
+import work.lithos.mutations.{Contract, InputUTXO, TxBuilder, UTXO}
 
 import scala.util.Try
 
@@ -16,10 +16,10 @@ case class IncorrectNProof(contract: Contract, miner: Array[Byte], nispTree: NIS
   extends FraudProof(contract, miner, nispTree, evalInput, fpControl) {
   override val logger: Logger = LoggerFactory.getLogger("IncorrectNProof")
 
-  override def attemptFraudProof(ctx: BlockchainContext, prover: NodeWallet, txBuilder: TxBuilder, loader: BoxLoader): Option[Seq[SignedTransaction]] = {
+  override def attemptFraudProof(ctx: BlockchainContext, prover: NodeWallet, txBuilder: TxBuilder, initInputs: Option[Seq[InputUTXO]]): Option[SignedTransaction] = {
     val fpAttempt = Try{
-
-      val fpInput = loader.getInputs(Parameters.MinFee).head
+      val inputsToUse = initInputs.getOrElse(Seq(UTXO(prover.contract, UTXO.MIN_FEE).toDummyInput(ctx)))
+      val fpInput = inputsToUse.head
       val mutateEval = evalInput
         .withCtxVar(ContextVar.of(0.toByte, ErgoValue.ofColl(Colls.fromArray(contract.valueBytes), ErgoType.byteType())))
         .withMutator(new EvaluationMutator(evalInput.contract))
@@ -35,13 +35,13 @@ case class IncorrectNProof(contract: Contract, miner: Array[Byte], nispTree: NIS
         ContextVar.of(2.toByte, delete.proof.ergoValue),
         ContextVar.of(3.toByte, NTable.ergoValue)
       )
-
+      val totalInputs = Seq(mutateEval, fpWithContext) ++ inputsToUse.drop(1)
       val sTx = prover.sign(txBuilder
-        .setInputs(mutateEval,fpWithContext)
+        .setInputs(totalInputs:_*)
         .setDataInputs(fpControl)
         .mutateOutputs
         .buildTx(0, prover.p2pk))
-      Seq(sTx)
+      sTx
     }
     if(fpAttempt.isFailure){
 

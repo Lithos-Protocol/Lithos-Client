@@ -7,7 +7,7 @@ import work.lithos.plasma.collections.LocalPlasmaMap
 
 object DictionaryMessages {
 
-  case class DictionaryTransform(blockInfo: BlockInfo, tx: BlockTx, tokenId: String) extends Transform {
+  case class DictionaryTransform(blockInfo: BlockInfo, tx: BlockTx) extends Transform {
     val input: TxInput = tx.inputs.head
     val output: TxOutput = tx.outputs.head
 

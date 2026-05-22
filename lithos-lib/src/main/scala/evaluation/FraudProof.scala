@@ -25,12 +25,15 @@ abstract class FraudProof(contract: Contract, miner: Array[Byte],
    * @param ctx Context to perform transaction under
    * @param prover Prover to sign transaction and receive change
    * @param txBuilder pre-mutated tx builder with `EvaluationMutator` applied
-   * @param loader BoxLoader to retrieve new inputs utxos
+   * @param initInputs Wallet inputs to use for tx. If none are provided, the fraud proof will be evaluated using
+   *                   a virtual UTXO
    * @return Some(Sequence of chained transactions to prove fraud) or None
    */
-  def attemptFraudProof(ctx: BlockchainContext, prover: NodeWallet, txBuilder: TxBuilder, loader: BoxLoader): Option[Seq[SignedTransaction]] = {
+  def attemptFraudProof(ctx: BlockchainContext, prover: NodeWallet, txBuilder: TxBuilder, initInputs: Option[Seq[InputUTXO]]): Option[SignedTransaction] = {
+
     val fpAttempt = Try{
-      val fpInput = loader.getInputs(Parameters.MinFee).head
+      val inputsToUse = initInputs.getOrElse(Seq(UTXO(prover.contract, UTXO.MIN_FEE).toDummyInput(ctx)))
+      val fpInput = inputsToUse.head
       val mutateEval = evalInput
         .withCtxVar(ContextVar.of(0.toByte, ErgoValue.ofColl(Colls.fromArray(contract.valueBytes), ErgoType.byteType())))
         .withMutator(new EvaluationMutator(evalInput.contract))
@@ -45,13 +48,13 @@ abstract class FraudProof(contract: Contract, miner: Array[Byte],
         ContextVar.of(1.toByte, lookUp.proof.ergoValue),
         ContextVar.of(2.toByte, delete.proof.ergoValue)
       )
-
+      val totalInputs = Seq(mutateEval, fpWithContext) ++ inputsToUse.drop(1)
       val sTx = prover.sign(txBuilder
-        .setInputs(mutateEval,fpWithContext)
+        .setInputs(totalInputs:_*)
         .setDataInputs(fpControl)
         .mutateOutputs
         .buildTx(0, prover.p2pk))
-      Seq(sTx)
+      sTx
     }
     if(fpAttempt.isFailure){
 
