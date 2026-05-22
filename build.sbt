@@ -1,7 +1,7 @@
 
 name := """lithos-client"""
 organization := "work.lithos"
-version := "4.1.0-SNAPSHOT"
+version := "4.2.0-SNAPSHOT"
 scalaVersion := "2.12.10"
 libraryDependencies ++= Seq(
   //"org.ergoplatform" %% "ergo-appkit" % "5.0.4",
