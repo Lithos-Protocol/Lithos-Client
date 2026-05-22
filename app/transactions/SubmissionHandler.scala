@@ -3,6 +3,7 @@ package transactions
 import akka.actor.{Actor, ActorRef}
 import akka.pattern.ask
 import akka.util.Timeout
+import configs.{StateConfig, StratumConfig}
 import mutations.NotEnoughInputsException
 import org.ergoplatform.appkit._
 import org.slf4j.{Logger, LoggerFactory}
@@ -13,6 +14,7 @@ import state.messages.MempoolMessages.{RebuildMempoolChains, ResetMempoolState}
 import state.messages.RollupMessages
 import state.messages.RollupMessages.{GetCurrentRollup, RemoveRollup, RollupInfo}
 import state.{DataBoxRetrievalException, LFSMTransformer, NoValidNISPException}
+import stratum.CollateralRetriever
 import transactions.SubmissionHandler._
 import transactions.TransactionMessages.RollupTxType._
 import transactions.TransactionMessages._
@@ -41,6 +43,8 @@ class SubmissionHandler @Inject()(config: Configuration,
 
   private val logger: Logger = LoggerFactory.getLogger("SubmissionHandler")
   private val nodeConfig = Globals.getNodeConfig
+  private val stateConfig = new StateConfig(config)
+  private val stratumConfig = new StratumConfig(config)
   private val client = nodeConfig.getClient
   private val wallet = nodeConfig.getNodeWallet
   // Map of pre-allocated UTXOs to be used for fee payments, enabling parallel tx attempts
@@ -75,6 +79,24 @@ class SubmissionHandler @Inject()(config: Configuration,
 
             val remainingStubs = stubs.filter(s => feeAllocations.contains(s.rollupBlockId))
             submitRemainingTxs(remainingStubs)
+
+
+            Try{
+              if(stateConfig.autoCollat) {
+                logger.info("Auto-collateralization was enabled, now checking collateral state")
+                val collatRetriever = new CollateralRetriever(client, wallet)
+                collatRetriever.checkCollateral(getWalletInputs(_, Seq.empty, trackUsed = true), stateConfig.maxCollat)
+              }
+              if (stateConfig.autoCommit.getOrElse(true)) {
+                logger.info("Auto-commits were enabled, now checking difficulty commitment state")
+                client.execute(ctx => LFSMTransformer.checkAutoCommits(ctx, stratumConfig.diff,
+                  wallet, getWalletInputs(_, Seq.empty, trackUsed = true)))
+              }
+            }.recover{
+              case e =>
+                logger.error("Got exception during end of submission", e)
+                Failure(e)
+            }
         }
         batchLock = false
       } else {

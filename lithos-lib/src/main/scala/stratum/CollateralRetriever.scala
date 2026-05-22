@@ -89,7 +89,7 @@ class CollateralRetriever(client: ErgoClient, prover: NodeWallet) {
         collData
     }
   }
-  def checkCollateral(boxLoader: BoxLoader, numBoxes: Int): Unit = {
+  def checkCollateral(inputRetriever: (Long) => Seq[InputUTXO], numBoxes: Int): Unit = {
     client.execute{
       ctx =>
         val payout   = RollupContracts.mkPayoutContract(ctx)
@@ -107,9 +107,9 @@ class CollateralRetriever(client: ErgoClient, prover: NodeWallet) {
             InputUTXO(i).value >= currentBlockReward
         }
         logger.info(s"Found ${utxosWithLender.size} collateral utxos with value >= ${currentBlockReward}")
-        if(utxos.size() < 10 || utxosWithLender.size < 10) {
+        if(utxos.size() < 8 || utxosWithLender.size < 8) {
           logger.info(s"Attempting $numBoxes self-collateralization(s) to create more collateral UTXOs")
-          val trySelfCollat = mkCollateral(ctx, prover, boxLoader, numBoxes)
+          val trySelfCollat = mkCollateral(ctx, prover, inputRetriever, numBoxes)
           trySelfCollat match {
             case Failure(e) =>
               e match {
@@ -130,7 +130,7 @@ class CollateralRetriever(client: ErgoClient, prover: NodeWallet) {
     }
 
   }
-  def mkCollateral(ctx: BlockchainContext, wallet: NodeWallet, boxLoader: BoxLoader, numBoxes: Int): Try[Seq[String]] = {
+  def mkCollateral(ctx: BlockchainContext, wallet: NodeWallet, inputRetriever: (Long) => Seq[InputUTXO], numBoxes: Int): Try[Seq[String]] = {
     Try {
 
       val payout = RollupContracts.mkPayoutContract(ctx)
@@ -143,9 +143,14 @@ class CollateralRetriever(client: ErgoClient, prover: NodeWallet) {
       var emissions = InputUTXO(ctx.getCoveringBoxesFor(CollateralContract.mkEmissionsContract(ctx, collateral.hashedPropBytes).address(ctx),
         Parameters.MinFee, JavaHelpers.toJList(IndexedSeq(Token(LFSMHelpers.EMISSION_NFT, 1L).toErgo))).getBoxes.get(0))
       val blockReward = CollateralContract.coinsToIssue(ctx.getHeight)
-
+      var lastBox: Option[InputUTXO] = None
       val txs = for(i <- 0 until numBoxes) yield {
-        val inputs = boxLoader.getInputs(blockReward + Parameters.MinFee * 2)
+        val inputs = {
+          if(lastBox.isDefined)
+            Seq(lastBox.get)
+          else
+            inputRetriever(blockReward + Parameters.MinFee * 2)
+        }
         val totalInputs = Seq(emissions.withMutator(CollateralContract.emissionMutator(collateral, wallet.contract, 0L))) ++ inputs
 
         val feeOutput = UTXO(Contract(ErgoTreePredef.feeProposition(720)), Parameters.MinFee * 2)
@@ -161,7 +166,7 @@ class CollateralRetriever(client: ErgoClient, prover: NodeWallet) {
         if(sTx.getOutputs.size() > 3){
           val changeBox = InputUTXO(sTx.getOutputsToSpend.get(3))
           if(changeBox.value > blockReward + Parameters.MinFee * 2){
-            boxLoader.pushMempoolUTXO(changeBox)
+            lastBox = Some(changeBox)
           }
         }
         logger.info(s"Sent tx ${txId} to self-collateralize")

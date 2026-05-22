@@ -136,12 +136,6 @@ object LFSMTransformer {
             // We do not use mempool states for evaluation
             attemptEvaluation(ctx, evalTrees, prover, boxLoader, cache)
 
-            if(autoCollat) {
-              val collatRetriever = new CollateralRetriever(client, prover)
-              collatRetriever.checkCollateral(boxLoader, maxCollat)
-            }
-            if (autoCommits)
-              checkAutoCommits(ctx, diff, prover, boxLoader)
         }
       }.recoverWith{
         case e =>
@@ -155,7 +149,7 @@ object LFSMTransformer {
   }
 
 
-  private def checkAutoCommits(ctx: BlockchainContext, diff: String, prover: NodeWallet, boxLoader: BoxLoader) = {
+  def checkAutoCommits(ctx: BlockchainContext, diff: String, prover: NodeWallet, inputRetriever: (Long) => Seq[InputUTXO]) = {
     Try{
       val dataNFT = Globals.mdDB.getDataBoxToken
       dataNFT match {
@@ -182,7 +176,7 @@ object LFSMTransformer {
                   .updated(0, newCommit)
                   .append(Colls.fromArray(Array(currentCommit)))
                 logger.info(s"Next commitment set: ${newCommit}")
-                val otherInputs = boxLoader.getInputs(Parameters.MinFee)
+                val otherInputs = inputRetriever(Parameters.MinFee)
                 val nextDataBox = dataInput.toUTXO.copy(
                   registers = dataInput.registers.updated(0, ErgoValue.ofColl(
                     nextCommits,
