@@ -1,8 +1,8 @@
 package api
 
 import cache.RollupCache
-import model.ApiError
-import model.LithosInfo
+import models.ApiError
+import models.LithosInfo
 import play.api.cache.SyncCacheApi
 import utils.Globals
 

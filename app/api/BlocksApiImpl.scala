@@ -3,9 +3,9 @@ package api
 import cache.RollupCache
 import lfsm.LFSMPhase
 import lfsm.states.NISPTree
-import model.ApiError
-import model.BlockMiners
-import model.PoolBlock
+import models.ApiError
+import models.BlockMiners
+import models.PoolBlock
 import play.api.cache.SyncCacheApi
 
 /**

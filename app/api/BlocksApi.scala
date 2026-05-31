@@ -1,9 +1,9 @@
 package api
 
 import play.api.libs.json._
-import model.ApiError
-import model.BlockMiners
-import model.PoolBlock
+import models.ApiError
+import models.BlockMiners
+import models.PoolBlock
 import play.api.cache.SyncCacheApi
 
 trait BlocksApi {

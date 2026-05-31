@@ -1,7 +1,7 @@
 package api
 
 import configs.NodeConfig
-import model.PaymentTransaction
+import models.PaymentTransaction
 import play.api.Configuration
 import play.api.cache.SyncCacheApi
 import utils.{Globals, PayoutRecord}

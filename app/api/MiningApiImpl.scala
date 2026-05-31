@@ -2,9 +2,9 @@ package api
 
 import configs.StratumConfig
 import lfsm.LFSMHelpers
-import model.ApiError
-import model.NISPRepresentation
-import model.StratumInfo
+import models.ApiError
+import models.NISPRepresentation
+import models.StratumInfo
 import org.bouncycastle.util.encoders.Hex
 import play.api.Configuration
 import utils.Globals

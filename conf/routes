@@ -6,61 +6,61 @@
 
 # Routes for Blocks API
 
-GET /blocks/byHeight          api.BlocksApiController.getBlocksByHeight()
-GET /blocks                   api.BlocksApiController.getContractIds()
-GET /blocks/all               api.BlocksApiController.getAllPoolBlocks()
+GET /blocks/byHeight          controllers.BlocksApiController.getBlocksByHeight()
+GET /blocks                   controllers.BlocksApiController.getContractIds()
+GET /blocks/all               controllers.BlocksApiController.getAllPoolBlocks()
 + nocsrf
-POST /blocks/utxoIds          api.BlocksApiController.getPoolBlocksByIds()
-GET /blocks/:utxoId           api.BlocksApiController.getBlockById(utxoId: String)
-GET /blocks/:utxoId/miners    api.BlocksApiController.getBlockMinersById(utxoId: String)
+POST /blocks/utxoIds          controllers.BlocksApiController.getPoolBlocksByIds()
+GET /blocks/:utxoId           controllers.BlocksApiController.getBlockById(utxoId: String)
+GET /blocks/:utxoId/miners    controllers.BlocksApiController.getBlockMinersById(utxoId: String)
 
 # Routes for Collateral API
 + nocsrf
-POST /collateral/create       api.CollateralApiController.createCollateralUTXO()
-GET /collateral/all           api.CollateralApiController.getAllCollateralInfo()
-GET /collateral/local         api.CollateralApiController.getLocalCollateralInfo()
+POST /collateral/create       controllers.CollateralApiController.createCollateralUTXO()
+GET /collateral/all           controllers.CollateralApiController.getAllCollateralInfo()
+GET /collateral/local         controllers.CollateralApiController.getLocalCollateralInfo()
 
 # Routes for Info API
 
-GET /info                     api.InfoApiController.getLithosInfo()
+GET /info                     controllers.InfoApiController.getLithosInfo()
 
 # Routes for Mining API
 
-GET /mining/bestNISP          api.MiningApiController.getBestNISPAtHeight()
-GET /mining                   api.MiningApiController.getStratumInfo()
+GET /mining/bestNISP          controllers.MiningApiController.getBestNISPAtHeight()
+GET /mining                   controllers.MiningApiController.getStratumInfo()
 
 # Routes for Dex API
 
-GET  /dex                               api.DexApiController.getDexInfo()
+GET  /dex                               controllers.DexApiController.getDexInfo()
 + nocsrf
-POST /dex/syncFee/:feeNFTId             api.DexApiController.syncFee(feeNFTId: String)
+POST /dex/syncFee/:feeNFTId             controllers.DexApiController.syncFee(feeNFTId: String)
 + nocsrf
-POST /dex/claimFee/:feeNFTId            api.DexApiController.claimFee(feeNFTId: String)
-GET  /dex/:lpId/sync                    api.DexApiController.getDexSyncStatus(lpId: String)
+POST /dex/claimFee/:feeNFTId            controllers.DexApiController.claimFee(feeNFTId: String)
+GET  /dex/:lpId/sync                    controllers.DexApiController.getDexSyncStatus(lpId: String)
 + nocsrf
-POST /dex/:lpId/swap/check              api.DexApiController.checkSwapDex(lpId: String)
+POST /dex/:lpId/swap/check              controllers.DexApiController.checkSwapDex(lpId: String)
 + nocsrf
-POST /dex/:lpId/swap                    api.DexApiController.swapDex(lpId: String)
+POST /dex/:lpId/swap                    controllers.DexApiController.swapDex(lpId: String)
 + nocsrf
-POST /dex/:lpId/deposit/check           api.DexApiController.checkDepositDex(lpId: String)
+POST /dex/:lpId/deposit/check           controllers.DexApiController.checkDepositDex(lpId: String)
 + nocsrf
-POST /dex/:lpId/deposit                 api.DexApiController.depositDex(lpId: String)
+POST /dex/:lpId/deposit                 controllers.DexApiController.depositDex(lpId: String)
 + nocsrf
-POST /dex/:lpId/redemption/check        api.DexApiController.checkRedemptionDex(lpId: String)
+POST /dex/:lpId/redemption/check        controllers.DexApiController.checkRedemptionDex(lpId: String)
 + nocsrf
-POST /dex/:lpId/redemption              api.DexApiController.redemptionDex(lpId: String)
+POST /dex/:lpId/redemption              controllers.DexApiController.redemptionDex(lpId: String)
 + nocsrf
-POST /dex/:lpId/withdraw/check          api.DexApiController.checkWithdrawDex(lpId: String)
+POST /dex/:lpId/withdraw/check          controllers.DexApiController.checkWithdrawDex(lpId: String)
 + nocsrf
-POST /dex/:lpId/withdraw                api.DexApiController.withdrawDex(lpId: String)
+POST /dex/:lpId/withdraw                controllers.DexApiController.withdrawDex(lpId: String)
 
 # Routes for Payments API
 
-GET /payments                 api.PaymentsApiController.getPayments()
+GET /payments                 controllers.PaymentsApiController.getPayments()
 
 # An example controller showing a sample home page
 GET     /assets                                   controllers.Assets.at(path="/public", file="index.html")
-
+GET     /                                         controllers.Default.redirect(to = "/assets")
 
 
 # Map static resources from the /public folder to the /assets URL path

@@ -1,9 +1,9 @@
-import actors.{MDSynchronizer, MempoolView, PDSynchronizer, RollupCoordinator, RollupSynchronizer, StateFrame, SyncHandler}
 import transactions.{RollupEvaluator, SubmissionHandler, TransactionProcessor, TransactionPublisher, WalletManager}
 import api.{BlocksApi, BlocksApiImpl, CollateralApi, CollateralApiImpl, DexApi, DexApiImpl, InfoApi, InfoApiImpl, MiningApi, MiningApiImpl, PaymentsApi, PaymentsApiImpl}
 import com.google.inject.AbstractModule
 import play.api.{Configuration, Environment}
 import play.libs.akka.AkkaGuiceSupport
+import state.synchronization.{MDSynchronizer, MempoolView, PDSynchronizer, RollupCoordinator, RollupSynchronizer, StateFrame, SyncHandler}
 import tasks.{MDSyncTask, PDSyncTask, RollupSyncTask, StartMiningServer, StartupTasks, StartStratumServer}
 import utils.Globals
 

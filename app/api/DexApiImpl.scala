@@ -1,7 +1,7 @@
 package api
 
 import cache.PDCache
-import model._
+import models._
 import mutations.BoxLoader
 import org.bouncycastle.util.encoders.Hex
 import org.ergoplatform.ErgoTreePredef

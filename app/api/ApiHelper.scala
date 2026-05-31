@@ -1,6 +1,6 @@
 package api
 
-import model.ApiError
+import models.ApiError
 import play.api.libs.json.{JsValue, Json}
 import play.api.mvc._
 object ApiHelper {

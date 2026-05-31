@@ -13,7 +13,7 @@ import org.slf4j.{Logger, LoggerFactory}
 import play.api.Configuration
 import play.api.cache.SyncCacheApi
 import state.LFSMTransformer
-import state.Subscribable.{Subscribe, SubscribeAck, SubscribeRejected, SubscribeResponse}
+import state.synchronization.Subscribable.{Subscribe, SubscribeAck, SubscribeRejected, SubscribeResponse}
 import state.messages.DictionaryMessages.InitialMDState
 import state.messages.StateFrameMessages._
 import state.messages.SyncMessages._

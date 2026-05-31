@@ -11,7 +11,7 @@ import plasmadex.PDHelpers
 import plasmadex.states.LiquidityState
 import play.api.Configuration
 import play.api.cache.SyncCacheApi
-import state.Subscribable.{Subscribe, SubscribeAck, SubscribeRejected, SubscribeResponse}
+import state.synchronization.Subscribable.{Subscribe, SubscribeAck, SubscribeRejected, SubscribeResponse}
 import state.messages.DictionaryMessages.InitialLiqState
 import state.messages.StateFrameMessages._
 import state.messages.SyncMessages._

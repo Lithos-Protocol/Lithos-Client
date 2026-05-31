@@ -1,9 +1,9 @@
 package api
 
 import play.api.libs.json._
-import model.ApiError
-import model.NISPRepresentation
-import model.StratumInfo
+import models.ApiError
+import models.NISPRepresentation
+import models.StratumInfo
 import play.api.Configuration
 
 trait MiningApi {

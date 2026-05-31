@@ -1,7 +1,7 @@
 package api
 
 import cache.PDCache
-import model._
+import models._
 
 trait DexApi {
   /**

@@ -3,10 +3,10 @@ package api
 import configs.NodeConfig
 import lfsm.LFSMHelpers
 import lfsm.contracts.{CollateralContract, RollupContracts}
-import model.ApiError
-import model.CollateralInfo
-import model.CollateralUTXO
-import model.SuccessfulTransaction
+import models.ApiError
+import models.CollateralInfo
+import models.CollateralUTXO
+import models.SuccessfulTransaction
 import mutations.BoxLoader
 import org.ergoplatform.ErgoTreePredef
 import org.ergoplatform.appkit.{Address, BlockchainContext, ErgoValue, JavaHelpers, Parameters, SecretString}

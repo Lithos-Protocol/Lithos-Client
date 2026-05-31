@@ -1,10 +1,10 @@
 package api
 
 import play.api.libs.json._
-import model.ApiError
-import model.CollateralInfo
-import model.CollateralUTXO
-import model.SuccessfulTransaction
+import models.ApiError
+import models.CollateralInfo
+import models.CollateralUTXO
+import models.SuccessfulTransaction
 import play.api.Configuration
 
 trait CollateralApi {
