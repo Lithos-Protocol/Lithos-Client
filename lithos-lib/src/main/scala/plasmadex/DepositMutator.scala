@@ -13,11 +13,14 @@ import work.lithos.plasma.collections.PlasmaMap
 // NOTE: amount is total amount of liquidity to add, relative to total liquidity in R5 of lpBox
 class DepositMutator(lp: LiquidityPool, lqState: LiquidityState, amount: Long) extends Mutator{
   private val depositOutput = lp.simDeposit(amount)
-  private val amntX = depositOutput._1.toLong
-  private val amntY = depositOutput._2.toLong
+  private val bestDeposit = lp.simBestDeposit(depositOutput)
+  private val liqAmount = bestDeposit._1.toLong
+  private val amntX = bestDeposit._2.toLong
+  private val amntY = bestDeposit._3.toLong
   private var ctxLP: Option[InputUTXO] = None
   def getAmountX: Long = amntX
   def getAmountY: Long = amntY
+  def getLiquidityAmount: Long = liqAmount
 
   override val preReqs: Seq[TxContext => Boolean] = Seq(
     {(t: TxContext) => t.inputs.head.tokens.head.id == PDHelpers.getLPToken(t.ctx.getNetworkType) },
@@ -32,23 +35,23 @@ class DepositMutator(lp: LiquidityPool, lqState: LiquidityState, amount: Long) e
   override protected def mutation(tCtx: TxContext): Seq[UTXO] = {
     if(lp.lsFeesX != 0 || lp.lsFeesY != 0)
       throw new LSFeesNotResetException("Cannot perform deposit until liquidity state fees are withdrawn")
-    val insertion = lqState.dictionary.insert((lp.lpBox.id.getBytes, Longs.toByteArray(amount)))
+    val insertion = lqState.dictionary.insert((lp.lpBox.id.getBytes, Longs.toByteArray(liqAmount)))
 
     ctxLP = Some(lp.lpBox
       .withCtxVar(ContextVar.of(0.toByte, 1.toByte))
       .withCtxVar(ContextVar.of(1.toByte,
         ErgoValue.pairOf(ErgoValue.of(Colls.fromArray(lp.lpBox.id.getBytes),
-          ErgoType.byteType()), ErgoValue.of(Colls.fromArray(Longs.toByteArray(amount)),
+          ErgoType.byteType()), ErgoValue.of(Colls.fromArray(Longs.toByteArray(liqAmount)),
           ErgoType.byteType()))))
       .withCtxVar(ContextVar.of(2.toByte, insertion.proof.ergoValue)))
     val nextLP = lp.lpBox.toUTXO
       .addValue(amntX)
       .addToken(Token(lp.tokenY.id, amntY.toLong))
       .withReg(0, lqState.dictionary.ergoValue)
-      .withReg(1, ErgoValue.of(lp.liquidity - amount))
+      .withReg(1, ErgoValue.of(lp.liquidity - liqAmount))
     val nftOutput = UTXO(tCtx.inputs(1).contract, Parameters.MinFee, Seq(Token(lp.lpBox.id, 1)))
       .withReg(0, ErgoValue.of("Provision NFT".getBytes(Charsets.UTF_8)))
-      .withReg(1, ErgoValue.of(s"{LP: ${lp.lpToken.id} (ERG/LIT), initERG: $amntX, initLIT: $amntY, liqDeposited:$amount, totalLiq:${lp.supplyLP0 + amount} height: ${tCtx.ctx.getHeight}}".getBytes(Charsets.UTF_8)))
+      .withReg(1, ErgoValue.of(s"{LP: ${lp.lpToken.id} (ERG/LIT), initERG: $amntX, initLIT: $amntY, liqDeposited:$liqAmount, totalLiq:${lp.supplyLP0 + liqAmount} height: ${tCtx.ctx.getHeight}}".getBytes(Charsets.UTF_8)))
       .withReg(2, ErgoValue.of("0".getBytes(Charsets.UTF_8)))
     Seq(nextLP, nftOutput)
   }

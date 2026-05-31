@@ -20,18 +20,22 @@ case class LiquidityPool(lpBox: InputUTXO) {
   val reservesY: Long = tokenY.amount - lsFeesY
   val supplyLP0 = PDHelpers.MAX_LIQ - liquidity
 
+  /**
+   * Simulate the best deposit.
+   * @param amounts Amount of X and Y to check the best deposit for
+   * @return Tuple of minimum liquidity, amount X to deposit, and amount Y to deposit
+   */
+  def simBestDeposit(amounts: (BigInt, BigInt)): (BigInt, BigInt, BigInt) = {
+    val deltaReservesX = amounts._1
+    val deltaReservesY = amounts._2
 
-  def simDeposit(amntX: Long, amntY: Long): Either[(BigInt, BigInt), (BigInt, BigInt)] = {
-    val deltaReservesX = amntX
-    val deltaReservesY = amntY
-
-    val sharesX = BigInt(deltaReservesX) * supplyLP0 / reservesX
-    val sharesY = BigInt(deltaReservesY) * supplyLP0 / reservesY
+    val sharesX = deltaReservesX * supplyLP0 / reservesX
+    val sharesY = deltaReservesY * supplyLP0 / reservesY
     val minXY = minBigInt(sharesX, sharesY)
     if(minXY == sharesX)
-      Left((minXY, (minXY * reservesY) / supplyLP0))
+      (minXY, deltaReservesX, (minXY * reservesY) / supplyLP0)
     else
-      Right((minXY, (minXY * reservesX) / supplyLP0))
+      (minXY, (minXY * reservesX) / supplyLP0, deltaReservesY)
   }
 
   def simDeposit(amntLiq: Long): (BigInt, BigInt) = {
