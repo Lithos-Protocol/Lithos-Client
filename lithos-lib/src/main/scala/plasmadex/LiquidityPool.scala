@@ -39,17 +39,24 @@ case class LiquidityPool(lpBox: InputUTXO) {
   }
 
   def simDeposit(amntLiq: Long): (BigInt, BigInt) = {
-    val deltaReservesX = BigInt(amntLiq) * reservesX / supplyLP0
-    val deltaReservesY = BigInt(amntLiq) * reservesY / supplyLP0
-
-    deltaReservesX -> deltaReservesY
+    val xNum = BigInt(amntLiq) * reservesX
+    val yNum = BigInt(amntLiq) * reservesY
+    val deltaReservesX = xNum / supplyLP0
+    val deltaReservesY = yNum / supplyLP0
+    val xRem = xNum % supplyLP0
+    val yRem = yNum % supplyLP0
+    (deltaReservesX + xRem) -> (deltaReservesY + yRem)
   }
 
   def simRedemption(liqRedeemed: Long): (BigInt, BigInt) = {
     val deltaSupplyLP = -liqRedeemed
+    val xNum = BigInt(liqRedeemed) * reservesX
+    val yNum = BigInt(liqRedeemed) * reservesY
     val deltaReservesX = (BigInt(deltaSupplyLP) * reservesX) / supplyLP0
     val deltaReservesY = (BigInt(deltaSupplyLP) * reservesY) / supplyLP0
-    deltaReservesX -> deltaReservesY
+    val xRem = xNum % supplyLP0
+    val yRem = yNum % supplyLP0
+    (deltaReservesX - xRem) -> (deltaReservesY - yRem)
   }
   // NOTE: amntX is amount of ERG to swap after lsFee is removed
   def simSwapX(amntX: Long): Long = {

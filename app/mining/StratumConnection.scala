@@ -12,6 +12,7 @@ import stratum.message.{Announcement, Response}
 
 import java.math.BigDecimal
 import java.net.InetSocketAddress
+import java.util
 import java.util.Arrays
 import javax.inject.Inject
 import scala.concurrent.duration._
@@ -144,7 +145,7 @@ class StratumConnection(subscriptionId: String,
           val shareMsg = ProcessShare(
             jobId      = jobId,
             difficulty = java.math.BigInteger.ONE,
-            extraNonce1 = Arrays.copyOfRange(Hex.decode(en1Hex), 0, 4),
+            extraNonce1 = util.Arrays.copyOfRange(Hex.decode(en1Hex), 0, 4),
             extraNonce2 = Hex.decode(en2Hex),
             nTime      = nTime,
             ipAddress  = socketAddress.getHostString,
