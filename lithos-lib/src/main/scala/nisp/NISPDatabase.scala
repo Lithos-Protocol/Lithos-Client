@@ -165,9 +165,9 @@ class NISPDatabase extends NISPStorage {
     val bestNISP = validNISPs.foldLeft(Option.empty[NISP]){
       (z: Option[NISP], x: NISP) =>
         if(z.isEmpty) {
-          Some(x.copy(shares = makeUnique(x.shares)))
+          Some(x.copy(score = score, shares = makeUnique(x.shares)))
         }else if(z.get.shares.size >= 10){
-          z
+          Some(z.get.copy(score = score))
         }else{
           val uniqueShares = makeUnique(x.shares).filter(s => !z.get.shares.exists(p => p.headerBytes sameElements s.headerBytes))
           Some(z.get.copy(score = score, shares = z.get.shares ++ uniqueShares))
