@@ -73,7 +73,7 @@
 
     val treeUpdated = {
       val insertTree = nispTree.insert(Coll(CTX_NISP_DATA), CTX_NISP_PROOF).get
-      insertTree.digest == nextTree.digest
+      insertTree == nextTree
     }
 
     val incrementedMiners = nextMiners == currentMiners + 1

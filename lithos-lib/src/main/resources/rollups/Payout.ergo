@@ -82,7 +82,7 @@
     // Statements
     val treeUpdated = {
       val removeTree = nispTree.remove(CTX_KEY_DATA, CTX_REMOVE_PROOF).get
-      removeTree.digest == nextTree.digest
+      removeTree == nextTree
     }
     val minersRewarded = minerOutputBoxes.zip(minersWithReward).forall{
         (x: (Box, (Coll[Byte], Long))) => blake2b256(x._1.propositionBytes) == x._2._1 && x._1.value == x._2._2

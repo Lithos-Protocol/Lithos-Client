@@ -1,0 +1,144 @@
+{
+  // FeeRewards
+  // FeeRewards contract is a box generated off of the liquidity state of the LP contract
+  // when lsFees are withdrawn. It holds
+
+  // Registers:
+  // R4: liquidityTree - AVL Tree of Coll[Byte] storing NFTid -> Provision(liq: Long, feesProcessed: Long, unpaidFees: Long)
+  // R5: liquidity - Can be thought of as virtual LP tokens, representation of current liquidity state
+  // R6: feeInfo - Coll[Long] of fee info represented as total tokens / ERG
+  // First two elements are total fees (in ERG and tokens) collected during the current liquidity state (totalStateFeesX, totalStateFeesY)
+
+
+  val liquidityTree = SELF.R4[AvlTree].get
+  val liquidity = SELF.R5[Long].get
+  val feeInfo   = SELF.R6[Coll[Long]].get
+  val feeNFT0   = SELF.tokens(0)
+  // Tokens value can never be 0 in an actual UTXO, so getting 0 is a safe way of knowing that tokens is empty
+  val tokenY0 = SELF.tokens.getOrElse(1, (Coll(0.toByte), 0L))
+  val lsFeesX0 = feeInfo(0)
+  val lsFeesY0 = feeInfo(1)
+
+  // CONTEXT VARS:
+  // CTX_KEYS(0): Coll[Coll[Byte]] representing keys to payout. As keys are NFTids, exactly one of each key must exist
+  // in all inputs of the transaction.
+  // CTX_LOOKUP_PROOF(1): Coll[Byte] Lookup proof for all keys
+  // CTX_REMOVAL_PROOF(2): Coll[Byte] Removal proof for all keys
+  val CTX_KEYS = getVar[Coll[Coll[Byte]]](0).get
+
+  val CTX_LOOKUP_PROOF = getVar[Coll[Byte]](1).get
+  val CTX_REMOVAL_PROOF = getVar[Coll[Byte]](2).get
+  // TODO Add Founders NOOOOW
+
+  // Helper Methods
+  def tokenInInputs(tokenId: Coll[Byte]): Boolean = {
+    INPUTS.exists{
+      (b: Box) =>
+        b.tokens.exists{
+          (t: (Coll[Byte], Long)) =>
+            t._1 == tokenId
+        }
+    }
+  }
+
+
+  val InitiallyLockedLP = 0x7fffffffffffffffL
+  val FeeDenom = 10000
+
+  val allKeysExists = CTX_KEYS.forall{(key: Coll[Byte]) => tokenInInputs(key)}
+
+  val liqProvided = liquidityTree.getMany(CTX_KEYS, CTX_LOOKUP_PROOF)
+  val liqSupply = InitiallyLockedLP - liquidity
+  val totalProvided = liqProvided.fold(0L, {
+    (z: Long, optProvision: Option[Coll[Byte]]) =>
+      z + byteArrayToLong(optProvision.get)
+  })
+  val updatedTree = liquidityTree.remove(CTX_KEYS, CTX_REMOVAL_PROOF).get
+  val ergToClaim = ((totalProvided.toBigInt) * lsFeesX0.toBigInt) / liqSupply.toBigInt
+  val tokensToClaim = ((totalProvided.toBigInt) * lsFeesY0.toBigInt) / liqSupply.toBigInt
+  // Above min box value left, so box will be recreated
+  if(SELF.value - ergToClaim > 1000000L || tokenY0._2 - tokensToClaim > 0){
+    // Fee box should always map to exact output, allows batching while still preventing certain
+    // exploits. This does mean that filler outputs must be made when any fee box other than the
+    // last is fully claimed and spent.
+    val successor = OUTPUTS(CONTEXT.selfBoxIndex)
+
+    val nextTree      = successor.R4[AvlTree].get
+    val nextLiquidity = successor.R5[Long].get
+    val nextFeeInfo   = successor.R6[Coll[Long]].get
+    val feeNFT1       = successor.tokens(0)
+    val tokenY1       = successor.tokens.getOrElse(1, (Coll(0.toByte), 0L))
+
+
+    val statements = allOf(
+      Coll(
+        liquidity == nextLiquidity,
+        feeInfo == nextFeeInfo,
+        nextTree == updatedTree,
+        feeNFT0._1 == feeNFT1._1,
+        successor.value >= SELF.value - ergToClaim,
+        tokenY1._2 >= tokenY0._2 - tokensToClaim,
+        tokenY1._1 == tokenY0._1 || tokenY0._2 - tokensToClaim <= 0 && tokenY1._2 == 0L,
+        successor.tokens.size <= 2
+      )
+    )
+    true
+
+  }else {
+    true
+  }
+
+  val feeNFT0     = SELF.tokens(0)
+  val reservedLP0 = liquidity
+  val tokenY0     = SELF.tokens.getOrElse(1, (Coll(), 0L))
+
+
+//  val feeNFT1     = successor.tokens(0)
+//  val reservedLP1 = nextLiquidity
+//  val tokenY1     = successor.getOrElse(1, (Coll(), 0L))
+//
+//  val validSuccessorScript = successor.propositionBytes == SELF.propositionBytes
+//
+//  val preservedFeeNFT      = feeNFT0 == feeNFT1
+//
+//  // since tokens can be repeated, we ensure for sanity that there are no more tokens
+//  val noMoreTokens         = successor.tokens.size <= 2
+//
+//  val supplyLP0 = InitiallyLockedLP - reservedLP0
+//  val supplyLP1 = InitiallyLockedLP - reservedLP1
+//
+//  val reservesX0 = SELF.value - lsFeesX0
+//  val reservesY0 = tokenY0._2 - lsFeesY0
+//  val reservesX1 = successor.value - lsFeesX1
+//  val reservesY1 = tokenY1._2 - lsFeesY1
+//
+//  val totalDeltaX = successor.value - SELF.value
+//  val totalDeltaY = tokenY1._2 - tokenY0._2
+//
+//
+//  val deltaSupplyLP  = supplyLP1  - supplyLP0
+//  val deltaReservesX = reservesX1 - reservesX0
+//  val deltaReservesY = reservesY1 - reservesY0
+//
+//  val provisionsToPay =
+//
+//  val validAction = {
+//    if(CTX_OP == 3){
+//      validWithdraw
+//    }else{
+//      if (deltaSupplyLP == 0)
+//          validSwap
+//      else
+//          if (deltaReservesX > 0 && deltaReservesY > 0) validDepositing
+//          else validRedemption
+//   }
+//  }
+
+  sigmaProp(
+//      validSuccessorScript &&
+//      preservedFeeNFT &&
+      true
+//      noMoreTokens &&
+//      validAction
+  )
+}

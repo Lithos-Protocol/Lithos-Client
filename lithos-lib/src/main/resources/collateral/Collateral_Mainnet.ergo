@@ -1,0 +1,201 @@
+{
+  // Lithos Collateral Contract
+  // Value: block reward less the lender's fee -> 0
+  // Created by the emission box from the head of the collateral queue. It may only be spent by a miner
+  // inserting it into the block they are mining, never refunded, and spending it always retires its
+  // lender from the emission box's active set.
+
+  // REGISTERS
+  // R4: feeValue (Long) - Fee the lender takes out of the block reward
+  // R5: lenderPk (SigmaProp) - Receives the block's coinbase, and identifies this box's slot in the
+  // emission box's active set
+  // R6: litRewards ((Long, Coll[(Coll[Byte], Long)])) - This block's LIT emission, split into the pool's
+  // share and the founders' allocations. Set by the emission contract and paid out here.
+  // R7: extensionFlag (Byte) - Whether the collateral extension script must also be satisfied
+  // R8: rollupHoldingHash (Coll[Byte]) - Hashed prop bytes of the rollup holding contract this box may
+  // pay into. Stamped by the emission contract at activation from the emission config, rather than
+  // being a constant here, so the rollup chain can be replaced later for a fix without reissuing this
+  // contract or the emission box. A box keeps whatever hash it was minted under for its whole life.
+  val feeValue      = SELF.R4[Long].get
+  val lenderPk      = SELF.R5[SigmaProp].get
+  val litRewards    = SELF.R6[(Long, Coll[(Coll[Byte], Long)])].get
+  val extensionFlag = SELF.R7[Byte].get
+  val rollupHoldingHash = SELF.R8[Coll[Byte]].get
+
+  // TOKENS
+  // 0: collateral token, minted by the emission box. Always present, so its index never moves, which is
+  // why it sits ahead of LIT rather than behind it.
+  // 1: LIT, this block's emission plus the lender's permit
+  val collatToken = SELF.tokens(0)
+  // Identity comes from the constant, so a box carrying no LIT at all never leaves a placeholder id
+  // standing in for the real one
+  val tokenLIT    = SELF.tokens.getOrElse(1, (CONST_LIT_ID, 0L))
+
+  // CONSTANTS
+  // CONST_GATE_HASH: Hashed prop bytes of the emission gate, which guards proof-of-spend boxes
+  // CONST_EMCONFIG_NFT: NFT id of the emission config
+  // CONST_LIT_ID: Token id of LIT
+  // Share of this block's emission kept by whoever builds the genesis transaction, as a divisor.
+  // 25 gives a flat 4%, inside the band agreed for the finder reward.
+  val CONST_FINDER_DIVISOR = 25L
+
+
+
+  val holdingBox = OUTPUTS(0)
+
+  // ASSUMPTIONS - statements which can be assumed to be true due to other contracts enforcing them
+  // during creation of this UTXO
+  // R6 is set by the emission contract, so the founders' allocation cannot be tampered with here
+  // R8 is likewise set by the emission contract, copied from the emission config's R7, so it is not a
+  // value the lender or the miner can choose. It is trusted unverified here on purpose: re-checking it
+  // against the config would make the config a data input of every collateral spend, which is exactly
+  // the shared-state lookup collateral selection is built to avoid
+  // The emission box holds no two live collateral boxes under one lenderPk, which is what makes
+  // lenderIsBlockMiner sufficient to keep a block to a single collateral box
+  // Registers not named here may be set on this box by the collateral enforcer
+  //
+  // DELIBERATE OMISSIONS - conditions left out on purpose
+  // R8 of the holding box is only length checked. It is meant to be the miner's hashed prop bytes, and
+  // FP_MalformedTransaction slashes a miner who sets it wrongly. Because the genesis transaction is
+  // inserted before PoW, altering it changes the hash of the block carrying it, and so its usefulness
+  // as a super-share.
+
+  val litBlockReward = litRewards._1
+  val litPrivRewards = litRewards._2.fold(0L, {
+    (acc: Long, x: (Coll[Byte], Long)) =>
+      acc + x._2
+  })
+  val totalLITRewards = litBlockReward + litPrivRewards
+  // Whatever LIT sits on this box beyond the emission is the lender's permit, held for the life of the
+  // box and returned once it is used
+  val permitChange = tokenLIT._2 - totalLITRewards
+
+  val foundersPaid = {
+    if(litPrivRewards > 0){
+      litRewards._2.forall{
+        (x: (Coll[Byte], Long)) =>
+          OUTPUTS.exists{
+            (o: Box) =>
+              val oTokens = o.tokens.getOrElse(0, (Coll(0.toByte), 0L))
+              blake2b256(o.propositionBytes) == x._1 && o.value >= 1000000L &&
+              oTokens._1 == CONST_LIT_ID && oTokens._2 == x._2
+          }
+      }
+    }else
+      true
+  }
+
+  val permitChangeReturned = {
+    if(permitChange > 0){
+      OUTPUTS.exists{
+        (o: Box) =>
+          val oTokens = o.tokens.getOrElse(0, (Coll(0.toByte), 0L))
+          o.propositionBytes == lenderPk.propBytes && o.value >= 1000000L &&
+          oTokens._1 == CONST_LIT_ID && oTokens._2 == permitChange
+      }
+    }else{
+      true
+    }
+  }
+
+  // Retires this lender from the emission box's active set, freeing the slot for the next queue box.
+  // Every path that consumes this box produces one, so an identity can never be stranded in the set.
+  // It carries no value, only the collateral token and the identity being retired, which is what makes
+  // it safe for anyone to spend into the emission box without its lender present.
+  // Its creation height is pinned to this block so that the emission contract can refuse to consume it
+  // before the next one. That severs a chain a miner could otherwise build inside a single block:
+  // spend this box, take the retirement it produces, activate the same lender's next queue box, and
+  // spend that too. One coinbase recipient satisfies both spends, so the block would end up carrying
+  // two rollups. An exact height is safe to demand because the genesis transaction is built for a
+  // specific candidate height the miner already knows, and it is not forgeable downward the way an age
+  // comparison on a builder-declared creation height would be.
+  val proofOfSpendMade = OUTPUTS.exists{
+    (o: Box) =>
+      val oTokens = o.tokens.getOrElse(0, (Coll(0.toByte), 0L))
+      blake2b256(o.propositionBytes) == CONST_GATE_HASH &&
+      oTokens._1 == collatToken._1 && oTokens._2 == 1L &&
+      o.creationInfo._1 == HEIGHT &&
+      o.R4[Coll[Byte]].get == blake2b256(lenderPk.propBytes)
+  }
+
+  val extensionActivated = {
+    // If ext flag not 0, then some ext is activated for collateral. Ext script can then
+    // branch off depending on flag val
+    if(extensionFlag != 0x00){
+      // CONTEXT VARS
+      // CTX_EXT_SCRIPT(0): Serialized value bytes of the collateral extension script, read only when the
+      // extension flag is set. Additional constraints can be introduced later without the config box
+      // needing to be consulted on every collateral spend, which keeps collateral selection stateless.
+      val CTX_EXT_SCRIPT = getVar[Coll[Byte]](0).get
+      val emissionConfig      = CONTEXT.dataInputs(0)
+      val authenticConfig     = CONST_EMCONFIG_NFT == emissionConfig.tokens(0)._1
+      val extensionScriptHash = emissionConfig.R6[Coll[Byte]].get
+      val authenticExtension  = blake2b256(CTX_EXT_SCRIPT) == extensionScriptHash
+
+      sigmaProp(authenticConfig && authenticExtension) && executeFromVar[SigmaProp](0)
+    }else{
+      sigmaProp(true)
+    }
+  }
+
+  // The finder's share of this block's emission. Paid as slack rather than as a named output: whatever
+  // the holding box does not take stays in the transaction, and the transaction belongs to the finder,
+  // so no recipient has to be identified and nothing has to be matched against the block's miner.
+  // Taken as a share rather than a fixed amount, which keeps it constant across the whole schedule and
+  // makes it bound itself. It cannot exceed the reward, and it falls to zero on its own when emission
+  // ends or a box carries a short remainder.
+  val finderLIT = litBlockReward / CONST_FINDER_DIVISOR
+  val poolLIT   = litBlockReward - finderLIT
+
+  val tokensTransferred = {
+    if(poolLIT > 0){
+      val holdingTokens = holdingBox.tokens.getOrElse(0, (CONST_LIT_ID, 0L))
+      holdingTokens._1 == CONST_LIT_ID && holdingTokens._2 == poolLIT
+    }else{
+      true
+    }
+  }
+
+  val validAvlTree = allOf(
+    Coll(
+      // Empty digest and all operations allowed
+      holdingBox.R4[AvlTree].get.digest == fromBase16("4ec61f485b98eb87153f7c57db4f5ecd75556fddbc403b41acf8441fde8e160900"),
+      holdingBox.R4[AvlTree].get.isInsertAllowed,
+      holdingBox.R4[AvlTree].get.isUpdateAllowed,
+      holdingBox.R4[AvlTree].get.isRemoveAllowed
+    )
+  )
+
+  val holdingValid = allOf(
+    Coll(
+      holdingBox.value >= SELF.value - feeValue,
+      blake2b256( holdingBox.propositionBytes ) == rollupHoldingHash,
+      tokensTransferred,
+      validAvlTree,
+      holdingBox.R5[Int].get    == 0,
+      holdingBox.R6[BigInt].get == 0.toBigInt,
+      holdingBox.R7[Long].get   == HEIGHT,
+      holdingBox.R8[Coll[Byte]].get.size == 32
+    )
+  )
+
+  // The coinbase pays the lender, which is how their principal comes back. It is also what keeps a
+  // block to one collateral box: two boxes would demand two different coinbase recipients, and since
+  // the emission box holds every live lender distinct, no two live boxes ever share one.
+  val lenderIsBlockMiner = lenderPk.propBytes == proveDlog(CONTEXT.preHeader.minerPk).propBytes
+  val onlyOne = INPUTS(0).id == SELF.id
+
+  val validLithosBlock = allOf(
+    Coll(
+      holdingValid,
+      permitChangeReturned,
+      foundersPaid,
+      proofOfSpendMade,
+      lenderIsBlockMiner,
+      onlyOne
+    )
+  )
+
+  sigmaProp( validLithosBlock ) && extensionActivated
+
+}

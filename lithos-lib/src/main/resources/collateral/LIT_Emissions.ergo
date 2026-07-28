@@ -1,90 +1,457 @@
 {
   // Lithos Emission Contract
-  // Emits decreasing amount of tokens every epoch, emissions are pre-made into collateral boxes
+  // Value: min box value, constant
+  // Emits LIT on the finalized schedule and runs the collateral queue. Collateral boxes are pre-made
+  // here so that a miner never has to read this box, or any other shared state, while building a block
+  // candidate. Everything a miner needs is on the collateral box itself.
+  // Only lenders touch this box, and they do so off the critical path of PoW.
+  //
+  // One collateral box per block comes from the active set, not from any height schedule: the set holds
+  // at most CONST_MAX_ACTIVE distinct lender identities, and a collateral box requires the block's
+  // coinbase to pay its own lender. Two collateral boxes in one block would demand two different
+  // coinbase recipients, which is impossible, so at most one can ever be included.
+
+  // Designed this contract to ensure a few things:
+  // There is some order to the way in which lenders are added, so that people can make opportunity cost decisions
+  // Exactly one collateral box may be spent per block
+  // No global state is needed to check collateral boxes, because requring global state would slow down mining
+  // So to create a situation where only one collateral box can be spent per block we can use a condition already
+  // on the collat contract. LenderPK == minerPk restricts spendable collat boxes
+  // to those of one lender per block. And we ensure only one collat box per lender, so that miners cant abuse that loophole and steal from naive lenders.
+  // Lack of "global state" is ensured, because miners can check set of all collateral boxes and update it in parallel to block mining.
 
 
-  // Constants
-
-  // CONST_COLLATERAL_HASH - Hashed PropBytes of Collateral contract
-  // CONST_MAX_EPOCHS - Max num of epochs before tail emission kicks in
-  // CONST_EPOCH_LENGTH - Length of emission epoch
-  // CONST_EPOCH_REDUCTION - Amount of tokens reduced every epoch
-  // CONST_TAIL_EMISSIONS_RATE - Rate of tokens during tail emissions
-  // CONST_INITIAL_RATE - Initial rate of token emissions
-  // CONST_ERG_FIXED_RATE - Erg fixed rate to determine correct collateral contract
-  // CONST_ERG_FOUNDER_INIT_REWARD - Ergo init reward
-  // CONST_ERG_FIXED_RATE_PERIOD - Ergo fixed rate period
-  // CONST_ERG_EPOCH_LENGTH - Epoch length for Ergo
-  // Registers
-  // R4: Current Block (Int) - Number of blocks pre-emitted by this emission contract
+  // REGISTERS
+  // R4: currentBlock (Int) - Number of blocks pre-emitted, and so the position in the emission schedule.
+  // Advanced only by ACTIVATE, the one path that creates a collateral box to carry the emission.
+  // R5: lenderSet (Coll[Coll[Byte]]) - Hashed prop bytes of every lender holding a live collateral box,
+  // held distinct. Size never exceeds CONST_MAX_ACTIVE.
+  // R6: queueHead (Long) - Position of the queue box to be processed next.
+  // R7: queueTail (Long) - Position the next queue box created will be given.
   val currentBlock = SELF.R4[Int].get
+  val lenderSet    = SELF.R5[Coll[Coll[Byte]]].get
+  val queueHead    = SELF.R6[Long].get
+  val queueTail    = SELF.R7[Long].get
+
+  // TOKENS
+  // 0: emission NFT
+  // 1: queue token, one placed in every queue box, burned when that box leaves the queue
+  // 2: collateral token, one placed in every collateral box, carried into its proof-of-spend box
+  // 3: LIT. Kept last on purpose, so that running the supply down to nothing removes the final entry
+  // rather than shifting the index of any other token.
   val emissionNFT = SELF.tokens(0)
-  val tokenLIT = SELF.tokens(1)
+  val queueToken  = SELF.tokens(1)
+  val collatToken = SELF.tokens(2)
+  // Identity comes from the constant, never from the token entry, which disappears the moment the
+  // supply is exhausted. Reading identity out of slot 3 would leave every later spend comparing
+  // against a placeholder id, which is what would otherwise end permits along with emission.
+  val tokenLIT    = SELF.tokens.getOrElse(3, (CONST_LIT_ID, 0L))
 
-  val nextEmission = OUTPUTS(0)
-  val nextBlock = nextEmission.R4[Int].get
-  val nextEmissionNFT = nextEmission.tokens(0)
-  val nextTokenLIT = nextEmission.tokens(1)
+  // CONSTANTS
+  // CONST_EMCONFIG_NFT: Singleton NFT of the emission config box
+  // CONST_COLLATERAL_HASH: Hashed prop bytes of the collateral contract
+  // CONST_GATE_HASH: Hashed prop bytes of the emission gate, guarding queue and proof-of-spend boxes
+  // CONST_LIT_ID: Token id of LIT, the sole source of LIT identity in this contract
+  // CONST_F1: Hashed prop bytes of Team
+  // CONST_F2: Hashed prop bytes of Priv Investor
+  // CONST_F3: Hashed prop bytes of Auditors
 
+  // Finalized Emission Info for LIT
+  // Total Epochs: 22, Final Epoch Length: 75000, ending at block 2825000
+  val CONST_LIT_DECIMALS    = 1000000000L //1e9
+  val CONST_EPOCH_LENGTH    = 125000
+  val CONST_INIT_PUB_RATE   = 500L * CONST_LIT_DECIMALS
+  val CONST_INIT_PRIV_RATE  = 140L * CONST_LIT_DECIMALS
+  // Total num epochs private rate should exist for
+  val CONST_PRIV_LENGTH     = 8
+  // Change in rate for public alloc
+  val CONST_PUB_DECAY       = 50L * CONST_LIT_DECIMALS
+  // How many epochs to wait before rate change in p1 (initial emission phase)
+  val CONST_P1_DECAY_LENGTH = 2
+  // Rate for first epoch of phase 2 (so Epoch 14)
+  val CONST_P2_RATE_1       = 150L * CONST_LIT_DECIMALS
+  // Rate for second epoch of phase 2 (so Epoch 15)
+  val CONST_P2_RATE_2       = 100L * CONST_LIT_DECIMALS
+  // Constant emission rate for final phase
+  val CONST_P3_RATE         = 50L  * CONST_LIT_DECIMALS
+  val CONST_P2_START        = 14
+  val CONST_P3_START        = 16
+  // Block the schedule ends at. Integer division over epochs cannot express the truncated final epoch,
+  // so the end is an explicit block bound rather than an epoch one. Without it the rate stays at
+  // CONST_P3_RATE forever and the schedule ends only by the supply physically running out, which
+  // deadlocks every later activation.
+  val CONST_MAX_EPOCHS      = 22
+  val CONST_FINAL_EPOCH_LEN = 75000
+  val CONST_FINAL_BLOCK     = CONST_MAX_EPOCHS * CONST_EPOCH_LENGTH + CONST_FINAL_EPOCH_LEN // 2825000
+  // Priv Alloc Rates - Should add up to 140
+  val CONST_F1_RATE         = 100L * CONST_LIT_DECIMALS // Team rate
+  val CONST_F2_RATE         = 25L  * CONST_LIT_DECIMALS // Priv Invest Rate
+  val CONST_F3_RATE         = 15L  * CONST_LIT_DECIMALS // Auditor Rate
+  // Live collateral boxes, and so distinct lenders, allowed at once. Sized against the serialized size
+  // of R5, since the whole set is re-written into the successor on every spend of this box.
+  val CONST_MAX_ACTIVE      = 100 // TODO: make it lower if 3200 bytes too much
 
-  val collatBox:     Box = OUTPUTS(1)
-  val collatFee = collatBox.R4[Long].get
+  // CONTEXT VARS
+  // CTX_OP(0): Byte representing the operation
+  // 0 - Join    - Lock a lender's principal and permit into a queue box at the tail of the queue.
+  // 1 - Activate- Turn the head queue box into a collateral box, emitting this block's LIT into it.
+  // 2 - Refund  - Return the head queue box to its lender, allowed only when its lender is already
+  //               holding a live collateral box and so cannot be added to the set again.
+  // CTX_SLOT_IDX(1): Int, index in lenderSet the retiring lender occupies. Activate only, and unread
+  // while the set is still filling.
+  // CTX_ENFORCER_SCRIPT(2): Serialized value bytes of the collateral enforcer script to be executed.
+  // The enforcer sets the conditions a collateral or queue box must meet beyond emission itself,
+  // principal sizing, permit sizing and fee caps among them, so that the collateral scheme can change
+  // without touching the emission schedule. It must NOT affect the amount of LIT emitted, the founders'
+  // allocation, the queue order or the active set.
+  val CTX_OP              = getVar[Byte](0).get
+  val CTX_SLOT_IDX        = getVar[Int](1).getOrElse(-1)
+  val CTX_ENFORCER_SCRIPT = getVar[Coll[Byte]](2).get
 
-  val numReductions = currentBlock / CONST_EPOCH_LENGTH
-  val amountReduced = numReductions * CONST_EPOCH_REDUCTION
-  val emissionRate = {
-    if(numReductions < CONST_MAX_EPOCHS)
-      CONST_INITIAL_RATE - amountReduced
+  // DATA INPUTS
+  // emissionConfig: Authenticated by its NFT. Without that check anyone could present a box naming a
+  // script of their own and bypass the enforcer entirely.
+  // R5: hash of the currently valid enforcer script
+  // R6: hash of the collateral extension script, read by the collateral contract, not here
+  // R7: hashed prop bytes of the rollup holding contract collateral boxes must pay into
+  val emissionConfig     = CONTEXT.dataInputs(0)
+  val authenticConfig    = CONST_EMCONFIG_NFT == emissionConfig.tokens(0)._1
+  val enforcerScriptHash = emissionConfig.R5[Coll[Byte]].get
+  val authenticScript    = blake2b256(CTX_ENFORCER_SCRIPT) == enforcerScriptHash
+  val rollupHoldingHash  = emissionConfig.R7[Coll[Byte]].get
+
+  // NEXT VALUES
+  val nextEmission  = OUTPUTS(0)
+  val nextBlock     = nextEmission.R4[Int].get
+  val nextSet       = nextEmission.R5[Coll[Coll[Byte]]].get
+  val nextHead      = nextEmission.R6[Long].get
+  val nextTail      = nextEmission.R7[Long].get
+  val nextNFT       = nextEmission.tokens(0)
+  val nextQueueTok  = nextEmission.tokens(1)
+  val nextCollatTok = nextEmission.tokens(2)
+  val nextTokenLIT  = nextEmission.tokens.getOrElse(3, (CONST_LIT_ID, 0L))
+
+  // ASSUMPTIONS - statements which can be assumed to be true due to other contracts enforcing them
+  // during creation of this UTXO, or verifiable publicly at mint
+  // Funded at mint with the emission NFT, Long.Max queue tokens, Long.Max collateral tokens and
+  // 825,000,000 LIT at 9 decimals. The mint is publicly checkable on an explorer.
+  // The schedule ends exactly when the supply does. Over-minting runs emission past block 2825000 at
+  // the final rate, under-minting stops it early, and neither is detectable from inside this contract.
+  // R4, R6 and R7 start at 0 and R5 starts empty.
+  // The collateral contract always emits a proof-of-spend box, on every path that consumes it, so a
+  // retiring lender can always be removed from the set. Any exit that skipped it would leave a dead
+  // identity holding a slot forever, and enough of them would stall rotation permanently.
+  //
+  // DELIBERATE OMISSIONS - conditions left out on purpose
+  // Nothing caps how often this box is spent per block. The queue is meant to absorb lender demand in
+  // bursts, and rate limiting it here would cap queue growth at one box per block and turn lending into
+  // a race for block space. One collateral box per block is enforced by the coinbase, not here.
+  // Principal, permit and fee sizing are left to the enforcer, which is what makes the collateral
+  // scheme replaceable while the emission schedule stays fixed.
+
+  // NOTE: During official or my own audits, check to ensure that liveness is guaranteed (i.e no chance a queue box can
+  // stall the queue for any reason). Collat boxes will be equal initially (initial collat enforcer script ensures 3% fee and equal permit)
+  // so collat boxes will be chosen equally by miners (with preference for self-collat but no guarantee of it), so
+  // there shouldnt be liveness issues there probs,
+
+  // Emission schedule
+  val currentEpoch = currentBlock / CONST_EPOCH_LENGTH
+  val currentPrivRate = {
+    if(currentEpoch < CONST_PRIV_LENGTH)
+      CONST_INIT_PRIV_RATE
     else
-      CONST_TAIL_EMISSIONS_RATE
+      0L
+  }
+  val currentEmissionRate = {
+    if(currentBlock >= CONST_FINAL_BLOCK){
+      0L // Schedule is over. The box carries on running the queue with nothing left to emit.
+    }else if(currentEpoch < CONST_P2_START){
+      CONST_INIT_PUB_RATE - ((currentEpoch / CONST_P1_DECAY_LENGTH) * CONST_PUB_DECAY)
+    }else if(currentEpoch < CONST_P3_START){
+      if(currentEpoch == CONST_P2_START)
+        CONST_P2_RATE_1
+      else
+        CONST_P2_RATE_2
+    }else
+      CONST_P3_RATE
+  }
+  val totalEmissionRate = currentEmissionRate + currentPrivRate
+
+  // What is actually emitted, which is the scheduled amount unless the supply cannot cover it. Recording
+  // the nominal rate instead would let a short box promise LIT it does not hold, and the collateral
+  // contract would then take that LIT out of the lender's permit, or fail outright and kill a slot in
+  // the active set for good.
+  val emittedTotal = {
+    if(tokenLIT._2 < totalEmissionRate)
+      tokenLIT._2
+    else
+      totalEmissionRate
+  }
+  // The founders are paid in full or not at all, since a partial allocation has no defined split
+  // between the three of them
+  val emittedPriv = {
+    if(emittedTotal >= currentPrivRate)
+      currentPrivRate
+    else
+      0L
+  }
+  val emittedPub = emittedTotal - emittedPriv
+  // Empty once nothing is being emitted for the founders, so that a collateral box does not carry a
+  // claim on allocations it was never funded for. A fixed map here would make every collateral box past
+  // epoch CONST_PRIV_LENGTH demand 140 LIT it does not hold, and so unspendable.
+  val foundersMap: Coll[(Coll[Byte], Long)] = {
+    if(emittedPriv > 0)
+      Coll((CONST_F1, CONST_F1_RATE), (CONST_F2, CONST_F2_RATE), (CONST_F3, CONST_F3_RATE))
+    else
+      Coll[(Coll[Byte], Long)]()
   }
 
-
-  val minersReward = CONST_ERG_FIXED_RATE - CONST_ERG_FOUNDER_INIT_REWARD
-  val minersFixedRatePeriod = CONST_ERG_FIXED_RATE_PERIOD + 2 * CONST_ERG_EPOCH_LENGTH
-  val epoch = 1 + (HEIGHT - CONST_ERG_FIXED_RATE_PERIOD) / CONST_ERG_EPOCH_LENGTH
-
-  val coinsToIssue = if(HEIGHT < minersFixedRatePeriod){
-    minersReward
-  }else{
-    CONST_ERG_FIXED_RATE - (CONST_ERG_ONE_EPOCH_REDUCTION * epoch)
+  // Helper Methods
+  // Total of a token across every input. The queue and collateral tokens are what authenticate queue
+  // and proof-of-spend boxes, so a single one escaping this box's accounting is enough to forge either.
+  // Pinning the input total alongside the exact output amounts leaves no remainder to escape with.
+  def totalInInputs(tokenId: Coll[Byte]): Long = {
+    INPUTS.fold(0L, {
+      (a: Long, b: Box) =>
+        a + b.tokens.fold(0L, {
+          (z: Long, t: (Coll[Byte], Long)) =>
+            if(t._1 == tokenId) z + t._2 else z
+        })
+    })
   }
 
-
-
-  val enoughValue  = collatBox.value >= coinsToIssue
-  val validTokenEmitted = collatBox.tokens(0)._1 == SELF.tokens(1)._1
-  val nftPreserved = emissionNFT == nextEmissionNFT
-  val tokenIdPreserved = tokenLIT._1 == nextTokenLIT._1
-  val tokenEmitted = tokenLIT._2 - nextTokenLIT._2 == emissionRate
-  val collatHoldsEmissions = collatBox.tokens(0)._2 == emissionRate
-  val emissionValuePreserved = SELF.value == nextEmission.value
-  val blocksIncremented = nextBlock == currentBlock + 1
-  val contractSame = SELF.propositionBytes == nextEmission.propositionBytes
-  val correctCollat = blake2b256(collatBox.propositionBytes) == CONST_COLLATERAL_HASH
-  val correctFee = (collatFee * 100000) / coinsToIssue < 3000
-
-
-
+  // Held by every path. The token ids are pinned rather than the amounts, since each path moves a
+  // different amount, and the script and NFT are what make the successor this same box.
   val onlyOne = INPUTS(0).id == SELF.id
-  val validCycle = allOf(
+  val emissionBoxPreserved = allOf(
     Coll(
-     enoughValue,
-     validTokenEmitted,
-     nftPreserved,
-     tokenIdPreserved,
-     tokenEmitted,
-     collatHoldsEmissions,
-     emissionValuePreserved,
-     blocksIncremented,
-     contractSame,
-     correctCollat,
-     correctFee,
-     onlyOne
+      onlyOne,
+      SELF.propositionBytes == nextEmission.propositionBytes,
+      SELF.value            == nextEmission.value,
+      nextNFT               == emissionNFT,
+      nextQueueTok._1       == queueToken._1,
+      nextCollatTok._1      == collatToken._1,
+      authenticConfig,
+      authenticScript
     )
   )
 
-  sigmaProp( validCycle )
+  // Spending Path 1: A lender locks their principal and permit into the tail of the queue
+  if(CTX_OP == 0.toByte){
+    val queueOut  = OUTPUTS(1)
+    val queueLIT  = queueOut.tokens.getOrElse(1, (Coll(0.toByte), 0L))
 
+    val validQueueBox = allOf(
+      Coll(
+        blake2b256( queueOut.propositionBytes ) == CONST_GATE_HASH,
+        queueOut.tokens(0)._1 == queueToken._1,
+        queueOut.tokens(0)._2 == 1L,
+        queueOut.tokens.size  <= 2,
+        // The permit is LIT or it is nothing. Its size is the enforcer's business, not this contract's.
+        // Identified by constant, so permits keep working after the supply is gone.
+        queueLIT._1 == CONST_LIT_ID || queueLIT._2 == 0L,
+        // Position is assigned here, which is what makes the queue an order rather than a set
+        queueOut.R7[Long].get == queueTail,
+        queueOut.R5[SigmaProp].isDefined,
+        queueOut.R4[Long].isDefined,
+        queueOut.R6[Byte].isDefined
+      )
+    )
 
+    val queueGrown = allOf(
+      Coll(
+        nextTail          == queueTail + 1L,
+        // This box is the only source of either token, and the one queue token leaving is pinned to the
+        // queue box above, so nothing is left over for a forged box to be built from
+        totalInInputs(queueToken._1)  == queueToken._2,
+        totalInInputs(collatToken._1) == collatToken._2,
+        nextQueueTok._2   == queueToken._2 - 1L,
+        nextCollatTok._2  == collatToken._2,
+        // Joining changes nothing about emission or the active set
+        nextBlock         == currentBlock,
+        nextHead          == queueHead,
+        nextSet           == lenderSet,
+        nextTokenLIT._1   == CONST_LIT_ID,
+        nextTokenLIT._2   == tokenLIT._2,
+        nextEmission.tokens.size == SELF.tokens.size
+      )
+    )
+
+    sigmaProp( emissionBoxPreserved && validQueueBox && queueGrown ) && executeFromVar[SigmaProp](2)
+
+    // Spending Path 2: The head of the queue becomes a live collateral box, carrying this block's LIT
+  }else if(CTX_OP == 1.toByte){
+    val queueIn   = INPUTS(1)
+    val collatBox = OUTPUTS(1)
+
+    val lenderPk  = queueIn.R5[SigmaProp].get
+    val newEntry  = blake2b256( lenderPk.propBytes )
+    val queueLIT  = queueIn.tokens.getOrElse(1, (Coll(0.toByte), 0L))
+    val collatLIT = collatBox.tokens.getOrElse(1, (Coll(0.toByte), 0L))
+
+    val validQueueIn = allOf(
+      Coll(
+        blake2b256( queueIn.propositionBytes ) == CONST_GATE_HASH,
+        queueIn.tokens(0)._1 == queueToken._1,
+        // Strict order. Only the head may be processed, and processing it is what advances the head.
+        queueIn.R7[Long].get == queueHead
+      )
+    )
+    // TODO: Can miners maliciously order transactions in the block to create a situation where a lender with
+    // multiple queue boxes has them turned into collateral boxes AND spent in the same block that another
+    // one of his collateral boxes is spent? only thing thbat guarantees one collat box per block is unique lenderPKs,
+    // violating it this way would allow such abuse. Maybe it could happen during bootstrapping?
+
+    // Two live collateral boxes under one lender could both be included in a single block, since they
+    // would demand the same coinbase recipient, so the set is what makes the coinbase argument hold.
+
+    val notAlreadyActive = !( lenderSet.exists{ (x: Coll[Byte]) => x == newEntry } )
+    // NOTE: I avoided AVL cause it sucks here
+
+    // While the set is still filling there is no retiring lender to make room, so no proof of spend is
+    // required. Once full, a slot is only ever freed by a collateral box that was actually consumed.
+    val bootstrapping = lenderSet.size < CONST_MAX_ACTIVE
+
+    val setUpdated = {
+      if(bootstrapping){
+        nextSet == lenderSet.append(Coll(newEntry))
+      }else{
+        val posBox   = INPUTS(2)
+        val retiring = posBox.R4[Coll[Byte]].get
+        allOf(
+          Coll(
+            blake2b256( posBox.propositionBytes ) == CONST_GATE_HASH,
+            posBox.tokens(0)._1 == collatToken._1,
+            // A proof of spend cannot be used in the block that produced it.
+            // NOTE: This should probably fix the TODO above but still need to verify, since creation
+            // height is very manipulatable I will have to check diff conditions carefully
+            posBox.creationInfo._1 < HEIGHT,
+            lenderSet(CTX_SLOT_IDX) == retiring,
+            nextSet == lenderSet.updated(CTX_SLOT_IDX, newEntry)
+          )
+        )
+      }
+    }
+
+    // The collateral box carries this block's whole emission, public and private together, and records
+    // the split in R6. The founders are paid out of it by the collateral contract when a miner consumes
+    // it, which ties their allocation to Lithos blocks actually being mined rather than to how fast
+    // anyone chooses to drain the queue.
+    val validCollatBox = allOf(
+      Coll(
+        blake2b256( collatBox.propositionBytes ) == CONST_COLLATERAL_HASH,
+        collatBox.tokens(0)._1 == collatToken._1,
+        collatBox.tokens(0)._2 == 1L,
+        collatBox.tokens.size  <= 2,
+        collatLIT._1 == CONST_LIT_ID || emittedTotal + queueLIT._2 == 0L,
+        collatLIT._2 == emittedTotal + queueLIT._2,
+        // Actual amounts, not scheduled ones, so the collateral contract never demands LIT this box was
+        // not funded with
+        collatBox.R6[(Long, Coll[(Coll[Byte], Long)])].get == (emittedPub, foundersMap),
+        // Principal and the lender's own terms carry through untouched from the queue box
+        collatBox.value          >= queueIn.value,
+        collatBox.R4[Long].get   == queueIn.R4[Long].get,
+        collatBox.R5[SigmaProp].get.propBytes == lenderPk.propBytes,
+        collatBox.R7[Byte].get   == queueIn.R6[Byte].get,
+        // Which rollup contract this box may pay into is stamped here from the config rather than being
+        // a constant in the collateral contract, so the rollup chain can be replaced later without
+        // reissuing the collateral contract or the emission box. A box carries the hash it was minted
+        // under for its whole life, so a config change only ever governs boxes activated after it and
+        // can never redirect or strand one already live.
+        collatBox.R8[Coll[Byte]].get == rollupHoldingHash
+      )
+    )
+
+    // Whatever is emitted has already been pinned onto the collateral box above, so this only has to
+    // account for what stays behind. The entry survives while any LIT is left, including the case where
+    // the schedule has ended with supply still in the box, and disappears exactly when it is spent.
+    val litEmitted = {
+      if(tokenLIT._2 > emittedTotal){
+        nextTokenLIT._1 == CONST_LIT_ID &&
+        nextTokenLIT._2 == tokenLIT._2 - emittedTotal &&
+        nextEmission.tokens.size == 4
+      }else{
+        nextEmission.tokens.size == 3
+      }
+    }
+
+    // NOTE: Queue and Collat tokens should never leak out of this spending cycle under any circumstance
+    // or forgery is possible
+    val queueAdvanced = allOf(
+      Coll(
+        nextHead         == queueHead + 1L,
+        nextTail         == queueTail,
+        nextBlock        == currentBlock + 1,
+        totalInInputs(queueToken._1)  == queueToken._2 + 1L,
+        nextQueueTok._2  == queueToken._2 + 1L,
+        if(bootstrapping){
+          totalInInputs(collatToken._1) == collatToken._2 && nextCollatTok._2 == collatToken._2 - 1L
+        }else{
+          totalInInputs(collatToken._1) == collatToken._2 + 1L && nextCollatTok._2 == collatToken._2
+        }
+      )
+    )
+
+    sigmaProp(
+      emissionBoxPreserved && validQueueIn && notAlreadyActive &&
+      setUpdated && validCollatBox && litEmitted && queueAdvanced
+    ) && executeFromVar[SigmaProp](2)
+
+    // Spending Path 3: The head cannot be activated because its lender is already in the set, so it is
+    // returned. This is the only way a queue box comes back before being used, and it exists because
+    // strict order has no skip, so without it a duplicate lender would hold the whole queue still.
+  }else if(CTX_OP == 2.toByte){
+    val queueIn    = INPUTS(1)
+    val refundBox  = OUTPUTS(1)
+    val lenderPk   = queueIn.R5[SigmaProp].get
+    val entry      = blake2b256( lenderPk.propBytes )
+    val queueLIT   = queueIn.tokens.getOrElse(1, (Coll(0.toByte), 0L))
+    val refundLIT  = refundBox.tokens.getOrElse(0, (Coll(0.toByte), 0L))
+
+    val validQueueIn = allOf(
+      Coll(
+        blake2b256( queueIn.propositionBytes ) == CONST_GATE_HASH,
+        queueIn.tokens(0)._1 == queueToken._1,
+        queueIn.R7[Long].get == queueHead
+      )
+    )
+
+    // The one condition that permits a refund. Anything looser would let a lender walk their principal
+    // and permit back out of the queue at will, and the lock is what gives a queue slot its meaning.
+    val lenderAlreadyActive = lenderSet.exists{ (x: Coll[Byte]) => x == entry }
+
+    val refunded = allOf(
+      Coll(
+        refundBox.propositionBytes == lenderPk.propBytes,
+        refundBox.value >= queueIn.value,
+        refundLIT._1 == queueLIT._1 || queueLIT._2 == 0L,
+        refundLIT._2 >= queueLIT._2
+      )
+    )
+
+    val queueAdvanced = allOf(
+      Coll(
+        nextHead         == queueHead + 1L,
+        nextTail         == queueTail,
+        // Nothing was emitted, so the schedule does not move
+        nextBlock        == currentBlock,
+        nextSet          == lenderSet,
+        // The refunded box gives its queue token back here, and no collateral token is involved at all
+        totalInInputs(queueToken._1)  == queueToken._2 + 1L,
+        totalInInputs(collatToken._1) == collatToken._2,
+        nextQueueTok._2  == queueToken._2 + 1L,
+        nextCollatTok._2 == collatToken._2,
+        nextTokenLIT._1  == CONST_LIT_ID,
+        nextTokenLIT._2  == tokenLIT._2,
+        nextEmission.tokens.size == SELF.tokens.size
+      )
+    )
+
+    sigmaProp(
+      emissionBoxPreserved && validQueueIn && lenderAlreadyActive && refunded && queueAdvanced
+    ) && executeFromVar[SigmaProp](2)
+
+  }else{
+    sigmaProp(false)
+  }
 }

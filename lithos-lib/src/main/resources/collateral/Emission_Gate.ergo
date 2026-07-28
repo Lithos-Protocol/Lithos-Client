@@ -1,0 +1,27 @@
+{
+  // Emission Gate
+  // Value: queue boxes hold a lender's collateral principal, proof-of-spend boxes hold min box value
+  // Guards the two box types the emission box consumes: queue boxes waiting for a collateral slot, and
+  // proof-of-spend boxes retiring a lender from the active set. Both are spendable by anyone, but only
+  // in a transaction driven by the emission box, which is what decides where their contents may go.
+  // Permissionless spending is deliberate. A queue box must be activatable or refundable without its
+  // lender being online, and a proof-of-spend box must be consumable without the retiring lender, who
+  // has already been repaid by the coinbase and has no remaining reason to act.
+
+  // REGISTERS
+  // Queue box:           R4 feeValue (Long), R5 lenderPk (SigmaProp), R6 extensionFlag (Byte),
+  //                      R7 queue position (Long)
+  // Proof-of-spend box:  R4 hashed prop bytes of the retiring lender (Coll[Byte])
+
+  // CONSTANTS
+  // CONST_EMISSION_NFT: Singleton NFT of the emission box
+
+  // ASSUMPTIONS - statements which can be assumed to be true due to other contracts enforcing them
+  // during creation of this UTXO
+  // A queue box carries exactly one queue token, a proof-of-spend box exactly one collateral token,
+  // both minted only by the emission box
+  // The emission contract enforces where a spent box's value, permit and tokens are allowed to go
+
+  sigmaProp( INPUTS(0).tokens(0)._1 == CONST_EMISSION_NFT )
+
+}

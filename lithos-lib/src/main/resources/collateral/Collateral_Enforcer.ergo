@@ -1,0 +1,27 @@
+{
+//  // The generated collateral box must have the minimum amount of LIT tokens to permit collateralization,
+//  // and these tokens must come from the collateralizer, rather than the newly emitted LIT which will go to
+//  // the miners. The permit will be returned on block find.
+//  val hasPermit = totalCollatTokens - totalEmissionRate == permitAmnt
+
+//
+//  val minersReward = CONST_ERG_FIXED_RATE - CONST_ERG_FOUNDER_INIT_REWARD
+//  val minersFixedRatePeriod = CONST_ERG_FIXED_RATE_PERIOD + 2 * CONST_ERG_EPOCH_LENGTH
+//  val epoch = 1 + (HEIGHT - CONST_ERG_FIXED_RATE_PERIOD) / CONST_ERG_EPOCH_LENGTH
+//
+//  val coinsToIssue = if(HEIGHT < minersFixedRatePeriod){
+//    minersReward
+//  }else{
+//    CONST_ERG_FIXED_RATE - (CONST_ERG_ONE_EPOCH_REDUCTION * epoch)
+//  }
+  val collatBox = OUTPUTS(1)
+  val collatFee = collatBox.R4[Long].get
+  val totalCollatTokens = collatBox.tokens(0)._2
+  //  val correctCollat = blake2b256(collatBox.propositionBytes) == CONST_COLLATERAL_HASH
+  //  val correctFee = (collatFee * 100000) / coinsToIssue < 3000
+  //  val collatHoldsEmissions = collatBox.tokens(0)._2 == emissionRate
+
+  //  val enoughValue  = collatBox.value >= coinsToIssue
+  //  val validTokenEmitted = collatBox.tokens(0)._1 == SELF.tokens(1)._1
+  sigmaProp(true)
+}
