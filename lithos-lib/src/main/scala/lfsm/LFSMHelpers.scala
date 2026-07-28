@@ -46,7 +46,7 @@ object LFSMHelpers {
   final val MD_GENESIS_ID = "cb9b72be6a63471ef20f138494e58558fccc8e931901109e6838b6c9860f59cc"
 
   // Lithos token
-  final val INIT_MINT = Parameters.OneErg * 1000000000 // 1 million LIT
+  final val INIT_MINT = Parameters.OneErg * 1000000000 // 1 billion LIT
   final val LIT_ID = ErgoId.create("2acc02b686940b966475926b6387adaacddba50bb8ededf0a517350e947ab5a8")
   final val EMISSION_NFT = ErgoId.create("b10c476c8d10447d38e3301a703cb9303f732fe01786627b3f8f6f42b3ce35f4")
 

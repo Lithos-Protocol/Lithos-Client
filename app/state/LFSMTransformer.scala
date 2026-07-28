@@ -481,6 +481,9 @@ object LFSMTransformer {
                 // Commit 0 is in effect
                 if (height - commits.head._1 >= LFSMHelpers.NISP_WINDOW)
                   commits.head._2
+                else if(commits.length == 1) {
+                  throw new IllegalStateException()(s"Cannot submit NISPs until commit ${commits.head} is in effect")
+                }
                 else
                   commits(1)._2
               }else{
