@@ -53,7 +53,7 @@ class CollateralRetriever(client: ErgoClient, prover: NodeWallet) {
             ErgoValue.of(0),
             ErgoValue.of(BigInt(0).bigInteger),
             ErgoValue.of(ctx.getHeight.toLong+1L),
-            ErgoValue.of(Blake2b256.hash(lenderPK.propBytes.toArray))
+            ErgoValue.of(prover.contract.hashedPropBytes)
           ))
 
 
