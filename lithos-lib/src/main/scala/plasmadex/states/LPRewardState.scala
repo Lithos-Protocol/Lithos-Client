@@ -10,6 +10,19 @@ case class LPRewardState(feeDictionary: PlasmaMap[Array[Byte], Array[Byte]],
                          numProvisions: Int,
                          startHeight: Int,
                          feeNFT: String,
-                         utxoId: String) extends UTXOState {
+                         utxoId: String,
+                         claimed: Boolean) extends UTXOState {
 
+}
+
+object LPRewardState {
+
+  def fromLiquidityState(ls: LiquidityState, height: Int, utxoId: String): LPRewardState = {
+
+    val copiedDict = ls.dictionary.copy()
+    copiedDict.prover.generateProof()
+    LPRewardState(copiedDict, ls.liquidity, ls.lsFeesX, ls.lsFeesY, ls.numProvisions, height,
+      feeNFT = ls.utxoId, utxoId, claimed = false)
+
+  }
 }
