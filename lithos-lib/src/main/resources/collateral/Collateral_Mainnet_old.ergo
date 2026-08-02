@@ -1,0 +1,132 @@
+{
+  // Lithos Collateral Contract
+  // Lender creates a collateral box under this contract, which may be spent by a miner via a transaction included
+  // into the block. Once created, this box cannot be refunded and MUST be used for collateralization.
+
+  // Constants
+
+  // CONST_ROLLUP_HOLDING_HASH - Hashed PropBytes of Rollup Holding Contract (Currently filler prop bytes of "true" contract)
+  // CONST_EMCONFIG_NFT - NFT id of Emission Config
+
+  // Assumptions
+  // Certain registers, including ones potentially not mentioned in this contract, may be set on the box
+  // by the collateral enforcer. Founders is guaranteed to be set by the emission contract.
+
+
+  val holdingBox:     Box = OUTPUTS(0)
+
+  val feeValue = SELF.R4[Long].get
+  val lenderPk = SELF.R5[SigmaProp].get
+  val litRewards = SELF.R6[(Long, Coll[(Coll[Byte], Long)])].get
+  val extensionFlag = SELF.R7[Byte].get
+  val validHoldingContract =  blake2b256( holdingBox.propositionBytes ) == CONST_ROLLUP_HOLDING_HASH
+  val tokenLIT = SELF.tokens.getOrElse(0, (Coll(0.toByte), 0L))
+  val litBlockReward = litRewards._1
+  val litPrivRewards = litRewards._2.fold(0L, {
+      (acc: Long, x: (Coll[Byte], Long)) =>
+        acc + x._2
+  })
+  val totalLITRewards = litBlockReward + litPrivRewards
+  val permitChange = totalLITRewards - tokenLIT._2
+  val foundersPaid = {
+      if(litPrivRewards > 0){
+        litRewards._2.forall{
+          (x: (Coll[Byte], Long)) =>
+            OUTPUTS.exists{
+              (o: Box) =>
+                blake2b256(o.propositionBytes) == x._1 && o.value >= 1000000L && o.tokens(0)._1 == tokenLIT._1 &&
+                o.tokens(0)._2 == x._2
+            }
+        }
+      }else
+        true
+    }
+  // Excess LIT tokens due to permittance / "stake" is returned back to lender after collateral is used
+  val permitChangeReturned = {
+    if(permitChange > 0){
+      OUTPUTS.exists{
+        (o: Box) =>
+          o.propositionBytes == lenderPk.propBytes && o.value >= 1000000L && o.tokens(0)._1 == tokenLIT._1 &&
+          o.tokens(0)._2 == permitChange
+      }
+    }else{
+      true
+    }
+  }
+
+  val extensionActivated = {
+    if(extensionFlag == 0x01){
+      val emissionConfig = CONTEXT.dataInputs(0)
+      val authenticConfig = CONST_EMCONFIG_NFT == emissionConfig.tokens(0)._1
+      val extensionScriptHash = emissionConfig.R6[Coll[Byte]].get
+      // CONTEXT VARS
+      // CTX_EXT_SCRIPT(0): Serialized value bytes of collateral extension script to be executed
+      // Extension will enforce additional constraints in future. Ideally emissionConfig should not need to
+      // be checked often once the flag is activated, to ensure stateless collateral selection.
+      val CTX_EXT_SCRIPT = getVar[Coll[Byte]](0).get
+      val authenticExtension = blake2b256(CTX_EXT_SCRIPT) == extensionScriptHash
+
+      sigmaProp(authenticConfig && authenticExtension) && executeFromVar[SigmaProp](0)
+
+    }else{
+      sigmaProp(true)
+    }
+  }
+
+  val tokensTransferred = {
+    if(litBlockReward > 0){
+      SELF.tokens(0)._1 == holdingBox.tokens(0)._1 && holdingBox.tokens(0)._2 == litBlockReward
+    }else{
+      true
+    }
+  }
+
+  val validAvlTree = {
+    allOf(Coll(
+      // Empty digest and all operations allowed
+      holdingBox.R4[AvlTree].get.digest == fromBase16("4ec61f485b98eb87153f7c57db4f5ecd75556fddbc403b41acf8441fde8e160900"),
+      holdingBox.R4[AvlTree].get.isInsertAllowed,
+      holdingBox.R4[AvlTree].get.isUpdateAllowed,
+      holdingBox.R4[AvlTree].get.isRemoveAllowed,
+    ))
+  }
+  val holdingValid = allOf(
+    Coll(
+      holdingBox.value >= SELF.value - feeValue,
+      validHoldingContract,
+      tokensTransferred,
+      validAvlTree,
+      holdingBox.R5[Int].get == 0,
+      holdingBox.R6[BigInt].get == 0.toBigInt,
+      holdingBox.R7[Long].get == HEIGHT,
+
+      // R8 of HoldingBox is expected to be hash of the miner's prop bytes. We don't check that here
+      // but FP_MalformedTransaction ensures that miners who set it improperly will get slashed.
+      // As the genesis tx which spends this collateral box is inserted before PoW, changing this value
+      // inherently changes the hash of the block containing this tx, and therefore its viability as a
+      // supershare.
+      holdingBox.R8[Coll[Byte]].get.size == 32
+      )
+    )
+
+  // This check inherently ensures that minerRewardBox is under lenderPk's associated miner reward contract
+  // Additionally it means only boxes of this lender may be spent to create pools in this block.
+  // NOTE: It is hard to enforce only one lender UTXO if the lender has multiple UTXOs in total.
+  val lenderIsBlockMiner = lenderPk.propBytes == proveDlog(CONTEXT.preHeader.minerPk).propBytes
+  val onlyOne = INPUTS(0).id == SELF.id
+
+  val validLithosBlock = allOf(
+    Coll(
+     holdingValid,
+     permitChangeReturned,
+     foundersPaid,
+     lenderIsBlockMiner,
+     onlyOne
+    )
+  )
+
+  sigmaProp( validLithosBlock ) && extensionActivated
+
+
+
+}

@@ -93,9 +93,9 @@
 
   // CONTEXT VARS
   // CTX_OP(0): Byte representing the operation
-  // 0 - Join    - Lock a lender's principal and permit into a queue box at the tail of the queue.
+  // 0 - Join    - Lock a lender's principal and permit into a queue box.
   // 1 - Activate- Turn the head queue box into a collateral box, emitting this block's LIT into it.
-  // 2 - Refund  - Return the head queue box to its lender, allowed only when its lender is already
+  // 2 - Refund  - Return a queue box to its lender, allowed only when its lender is already
   //               holding a live collateral box and so cannot be added to the set again.
   // CTX_SLOT_IDX(1): Int, index in lenderSet the retiring lender occupies. Activate only, and unread
   // while the set is still filling.
@@ -103,7 +103,8 @@
   // The enforcer sets the conditions a collateral or queue box must meet beyond emission itself,
   // principal sizing, permit sizing and fee caps among them, so that the collateral scheme can change
   // without touching the emission schedule. It must NOT affect the amount of LIT emitted, the founders'
-  // allocation, the queue order or the active set.
+  // allocation, or the active set. The enforcer is EXPECTED to handle queue state, to allow for different
+  // selection mechanisms beyond FIFO / FCFS.
   val CTX_OP              = getVar[Byte](0).get
   val CTX_SLOT_IDX        = getVar[Int](1).getOrElse(-1)
   val CTX_ENFORCER_SCRIPT = getVar[Coll[Byte]](2).get
@@ -250,8 +251,6 @@
         // The permit is LIT or it is nothing. Its size is the enforcer's business, not this contract's.
         // Identified by constant, so permits keep working after the supply is gone.
         queueLIT._1 == CONST_LIT_ID || queueLIT._2 == 0L,
-        // Position is assigned here, which is what makes the queue an order rather than a set
-        queueOut.R7[Long].get == queueTail,
         queueOut.R5[SigmaProp].isDefined,
         queueOut.R4[Long].isDefined,
         queueOut.R6[Byte].isDefined
@@ -260,7 +259,6 @@
 
     val queueGrown = allOf(
       Coll(
-        nextTail          == queueTail + 1L,
         // This box is the only source of either token, and the one queue token leaving is pinned to the
         // queue box above, so nothing is left over for a forged box to be built from
         totalInInputs(queueToken._1)  == queueToken._2,
@@ -269,7 +267,6 @@
         nextCollatTok._2  == collatToken._2,
         // Joining changes nothing about emission or the active set
         nextBlock         == currentBlock,
-        nextHead          == queueHead,
         nextSet           == lenderSet,
         nextTokenLIT._1   == CONST_LIT_ID,
         nextTokenLIT._2   == tokenLIT._2,
@@ -292,9 +289,8 @@
     val validQueueIn = allOf(
       Coll(
         blake2b256( queueIn.propositionBytes ) == CONST_GATE_HASH,
-        queueIn.tokens(0)._1 == queueToken._1,
-        // Strict order. Only the head may be processed, and processing it is what advances the head.
-        queueIn.R7[Long].get == queueHead
+        queueIn.tokens(0)._1 == queueToken._1
+        // FCFS or other selection is decided by the collateral enforcer only
       )
     )
     // TODO: Can miners maliciously order transactions in the block to create a situation where a lender with
@@ -358,7 +354,8 @@
         // reissuing the collateral contract or the emission box. A box carries the hash it was minted
         // under for its whole life, so a config change only ever governs boxes activated after it and
         // can never redirect or strand one already live.
-        collatBox.R8[Coll[Byte]].get == rollupHoldingHash
+        collatBox.R8[Coll[Byte]].get == rollupHoldingHash,
+        rollupHoldingHash.size == 32
       )
     )
 
@@ -379,8 +376,7 @@
     // or forgery is possible
     val queueAdvanced = allOf(
       Coll(
-        nextHead         == queueHead + 1L,
-        nextTail         == queueTail,
+        // Queue state is the job of the collateral enforcer
         nextBlock        == currentBlock + 1,
         totalInInputs(queueToken._1)  == queueToken._2 + 1L,
         nextQueueTok._2  == queueToken._2 + 1L,
@@ -397,46 +393,35 @@
       setUpdated && validCollatBox && litEmitted && queueAdvanced
     ) && executeFromVar[SigmaProp](2)
 
-    // Spending Path 3: The head cannot be activated because its lender is already in the set, so it is
+    // Spending Path 3: A box cannot be activated because its lender is already in the set, so it is
     // returned. This is the only way a queue box comes back before being used, and it exists because
     // strict order has no skip, so without it a duplicate lender would hold the whole queue still.
+    // Boxes are not refunded to the lender because doing so encourages malicious spam (though this
+    // can be added later if needed in collateral enforcer)
   }else if(CTX_OP == 2.toByte){
     val queueIn    = INPUTS(1)
-    val refundBox  = OUTPUTS(1)
     val lenderPk   = queueIn.R5[SigmaProp].get
     val entry      = blake2b256( lenderPk.propBytes )
-    val queueLIT   = queueIn.tokens.getOrElse(1, (Coll(0.toByte), 0L))
-    val refundLIT  = refundBox.tokens.getOrElse(0, (Coll(0.toByte), 0L))
 
     val validQueueIn = allOf(
       Coll(
         blake2b256( queueIn.propositionBytes ) == CONST_GATE_HASH,
-        queueIn.tokens(0)._1 == queueToken._1,
-        queueIn.R7[Long].get == queueHead
+        queueIn.tokens(0)._1 == queueToken._1
       )
     )
 
-    // The one condition that permits a refund. Anything looser would let a lender walk their principal
-    // and permit back out of the queue at will, and the lock is what gives a queue slot its meaning.
+    // Only allows spending a queue box if the lender already exists in the set
     val lenderAlreadyActive = lenderSet.exists{ (x: Coll[Byte]) => x == entry }
-
-    val refunded = allOf(
-      Coll(
-        refundBox.propositionBytes == lenderPk.propBytes,
-        refundBox.value >= queueIn.value,
-        refundLIT._1 == queueLIT._1 || queueLIT._2 == 0L,
-        refundLIT._2 >= queueLIT._2
-      )
-    )
 
     val queueAdvanced = allOf(
       Coll(
-        nextHead         == queueHead + 1L,
-        nextTail         == queueTail,
+        // Queue state will be decided by collateral enforcer, so we can allow for better or more dynamic
+        // clean up options if needed. This should be ok with the caveat that collateral enforcer
+        // changes should be careful to set these values properly.
         // Nothing was emitted, so the schedule does not move
         nextBlock        == currentBlock,
         nextSet          == lenderSet,
-        // The refunded box gives its queue token back here, and no collateral token is involved at all
+        // The spent box gives its queue token back here, and no collateral token is involved at all
         totalInInputs(queueToken._1)  == queueToken._2 + 1L,
         totalInInputs(collatToken._1) == collatToken._2,
         nextQueueTok._2  == queueToken._2 + 1L,
@@ -448,7 +433,7 @@
     )
 
     sigmaProp(
-      emissionBoxPreserved && validQueueIn && lenderAlreadyActive && refunded && queueAdvanced
+      emissionBoxPreserved && validQueueIn && lenderAlreadyActive && queueAdvanced
     ) && executeFromVar[SigmaProp](2)
 
   }else{

@@ -1,0 +1,163 @@
+{
+  // Lithos Emission Contract
+  // Emits decreasing amount of tokens every epoch, emissions are pre-made into collateral boxes
+  // NOTE: We want to avoid having to reference this box at all during PoW. Looking up current state of this UTXO
+  // will cost time and reduce PoW efficiency. Ideally, this box should pre-generate collateral UTXOs
+  // who can be selected "statelessly" or in some pre-determined manner (FIFO Queue). That way, updating the queue
+  // can be done in parallel to PoW
+
+  // Constants
+
+  // CONST_COLLATERAL_HASH - Hashed PropBytes of Collateral contract
+  // CONST_MAX_EPOCHS - Max num of epochs before tail emission kicks in
+  // CONST_EPOCH_LENGTH - Length of emission epoch
+  // CONST_EPOCH_REDUCTION - Amount of tokens reduced every epoch
+  // CONST_TAIL_EMISSIONS_RATE - Rate of tokens during tail emissions
+  // CONST_INITIAL_RATE - Initial rate of token emissions
+  // CONST_ERG_FIXED_RATE - Erg fixed rate to determine correct collateral contract
+  // CONST_ERG_FOUNDER_INIT_REWARD - Ergo init reward
+  // CONST_ERG_FIXED_RATE_PERIOD - Ergo fixed rate period
+  // CONST_ERG_EPOCH_LENGTH - Epoch length for Ergo
+  // CONST_F1 - Hashed PropBytes of Team
+  // CONST_F2 - Hashed PropBytes of Priv Investor
+  // CONST_F3 - Hashed PropBytes of Auditors
+
+
+  // Assumptions
+  // Contract will initially be funded with emission NFT and 825million LIT
+
+  // Finalized Emission Info for LIT
+  // Total Epochs
+  // Total Epochs: 22
+  // Final Epoch Length: 75000
+  val CONST_LIT_DECIMALS = 1000000000L //1e9
+  val CONST_EPOCH_LENGTH = 125000
+
+  val CONST_INIT_PUB_RATE = 500L * CONST_LIT_DECIMALS
+  val CONST_INIT_PRIV_RATE = 140L * CONST_LIT_DECIMALS
+  // Total num epochs private rate should exist for
+  val CONST_PRIV_LENGTH = 8
+  // Change in rate for public alloc
+  val CONST_PUB_DECAY = 50L * CONST_LIT_DECIMALS
+  // How many epochs to wait before rate change in p1 (initial emission phase)
+  val CONST_P1_DECAY_LENGTH = 2
+  // Rate for first epoch of phase 2 (so Epoch 14)
+  val CONST_P2_RATE_1 = 150L * CONST_LIT_DECIMALS
+  // Rate for second epoch of phase 2 (so Epoch 15)
+  val CONST_P2_RATE_2 = 100L * CONST_LIT_DECIMALS
+  // Constant emission rate for final phase
+  val CONST_P3_RATE = 50L  * CONST_LIT_DECIMALS
+  val CONST_P2_START = 14
+  val CONST_P3_START = 16
+
+  // Priv Alloc Rates - Should add up to 140
+  val CONST_F1_RATE = 100 * CONST_LIT_DECIMALS // Team rate
+  val CONST_F2_RATE = 25 * CONST_LIT_DECIMALS // Priv Invest Rate
+  val CONST_F3_RATE = 15 * CONST_LIT_DECIMALS // Auditor Rate
+
+
+  val emissionConfig = CONTEXT.dataInputs(0)
+  val authenticConfig = CONST_EMCONFIG_NFT == emissionConfig.tokens(0)._1
+  val enforcerScriptHash = emissionConfig.R5[Coll[Byte]].get
+  // CONTEXT VARS
+  // CTX_ENFORCER_SCRIPT(0): Serialized value bytes of collateral enforcer script to be executed
+  // Collateral enforcer will set conditions required for outputted collateral box to be valid.
+  // It should NOT effect amount of LIT emitted or amount sent to founders.
+  val CTX_ENFORCER_SCRIPT = getVar[Coll[Byte]](0).get
+
+  // Registers
+  // R4: Current Block (Int) - Number of blocks pre-emitted by this emission contract
+  val currentBlock = SELF.R4[Int].get
+  val emissionNFT = SELF.tokens(0)
+  val tokenLIT = SELF.tokens.getOrElse(1, (Coll(0.toByte), 0L))
+
+  val nextEmission = OUTPUTS(0)
+  val nextBlock = nextEmission.R4[Int].get
+  val nextEmissionNFT = nextEmission.tokens(0)
+  // Get or else for very final emission
+  val nextTokenLIT = nextEmission.tokens.getOrElse(1, (Coll(0.toByte), 0L))
+
+
+  val currentEpoch = currentBlock / CONST_EPOCH_LENGTH
+  val currentPrivRate = {
+    if(currentEpoch < CONST_PRIV_LENGTH)
+      CONST_INIT_PRIV_RATE
+    else
+      0
+  }
+  val currentEmissionRate = {
+    if(currentEpoch < CONST_P2_START){
+      CONST_INIT_PUB_RATE - ((currentEpoch / CONST_P1_DECAY_LENGTH) * CONST_PUB_DECAY)
+    }else if(currentEpoch < CONST_P3_START){
+      if(currentEpoch == CONST_P2_START)
+        CONST_P2_RATE_1
+      else
+        CONST_P2_RATE_2
+    }else
+      CONST_P3_RATE
+  }
+
+  val totalEmissionRate = currentEmissionRate + currentPrivRate
+  val foundersMap: Coll[(Coll[Byte], Long)] = Coll((CONST_F1, CONST_F1_RATE), (CONST_F2, CONST_F2_RATE), (CONST_F3, CONST_F3_RATE))
+  val collatBox = OUTPUTS(1)
+
+  val minCollatTokens = collatBox.tokens(0)._1 == tokenLIT._1 && collatBox.tokens(0)._2 >= totalEmissionRate
+  val litInfo = collatBox.R6[(Long, Coll[(Coll[Byte], Long)])].get
+  val correctLITInfo = litInfo._1 == currentEmissionRate && litInfo._2 == foundersMap
+
+  // Rest of collateral verification is done by enforcer for more modularity, this holds minimum amount necessary to
+  // show that emitted tokens go there and that founders rewards are set on it.
+  val minimumCollatVerification = allOf(Coll(
+    minCollatTokens,
+    correctLITInfo
+  ))
+
+  val authenticScript = blake2b256(CTX_ENFORCER_SCRIPT) == enforcerScriptHash
+
+  val tokenEmitted = {
+    if(tokenLIT._2 > 0){
+      // More tokens than were emitted, so we can assume (and therefore ensure)
+      // left over exists
+      if(tokenLIT._2 > totalEmissionRate){
+        nextTokenLIT._1 == tokenLIT._1 && tokenLIT._2 - nextTokenLIT._2 == totalEmissionRate &&
+        nextEmission.tokens.size == 2
+      }else{
+        nextTokenLIT._2 == 0L // Token is removed
+      }
+    }else{
+      nextEmission.tokens.size == 1
+    }
+  }
+
+
+  val nftPreserved = emissionNFT == nextEmissionNFT
+
+
+  val emissionValuePreserved = SELF.value == nextEmission.value
+  // NOTE: Theoretically you could continuosly spend emission contract and create collateral UTXOs. We assume
+  // that collateral enforcer along with collateral contract will enforce conditions such that only a single collateral
+  // UTXO may be spent per block, and that those blocks must be Lithos blocks. Emission contract's goal is to
+  // pertain only to emission rates and founders allocation.
+  val blocksIncremented = nextBlock == currentBlock + 1
+  val contractSame = SELF.propositionBytes == nextEmission.propositionBytes
+
+
+
+  // Prevent certain attacks
+  val onlyOne = INPUTS(0).id == SELF.id
+  val validEmission = allOf(
+    Coll(
+     nftPreserved,
+     authenticConfig,
+     tokenEmitted,
+     emissionValuePreserved,
+     minimumCollatVerification,
+     authenticScript,
+     blocksIncremented,
+     contractSame,
+     onlyOne
+    )
+  )
+  // Valid emission and collateral enforcer reduced to true
+  sigmaProp( validEmission ) && executeFromVar[SigmaProp](0)
+}
