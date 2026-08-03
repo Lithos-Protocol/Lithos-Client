@@ -44,7 +44,7 @@ class StartStratumServer @Inject()(system: ActorSystem, config: Configuration, c
       case Success(t) =>
         val options = new Options(stratumParams.extraNonce1Size, 256,
           stratumParams.connectionTimeout, stratumParams.blockRefreshInterval,
-          nodeConfig.getNodeApi, t, new Data())
+          nodeConfig.getNodeUrl, t, new Data())
         logger.info("Stratum server starting at port " + stratumParams.stratumPort)
         if(stratumParams.reduceShareMessages) {
           val stratumTau = t.divide(new BigInteger("1000"))

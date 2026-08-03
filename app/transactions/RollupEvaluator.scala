@@ -139,7 +139,7 @@ class RollupEvaluator @Inject()(config: Configuration,
             val currentMiners = latestRollup.NISPTree.minerSet.toSeq.map(Hex.decode).sortBy(_ => Math.random())
             val fpControl = LFSMHelpers.getFPControlBox(ctx)
             val evaluator = Evaluator(ctx, wallet, latestRollup.inputUTXO, latestRollup.NISPTree, currentMiners,
-              fpControl, new BoxLoader(ctx), fpContracts)
+              fpControl, new BoxLoader(ctx, Globals.getNodeConfig.getNodeApi), fpContracts)
             val evals = evaluator.evaluateSync
             val minerEvaluationResults = evals.map(processEvaluationResult(stub, _))
             manageEvaluationState(stub, minerEvaluationResults)

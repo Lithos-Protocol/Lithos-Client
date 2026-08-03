@@ -3,6 +3,7 @@ package evaluation
 import lfsm.states.NISPTree
 import mutations.{BoxLoader, NodeWallet}
 import org.bouncycastle.util.encoders.Hex
+import org.ergoplatform.appkit.scalaapi.scalaByteType
 import org.ergoplatform.appkit.{BlockchainContext, ContextVar, ErgoProver, ErgoType, ErgoValue, Parameters, SignedTransaction}
 import org.slf4j.{Logger, LoggerFactory}
 import sigma.Colls
@@ -21,7 +22,7 @@ case class IncorrectNProof(contract: Contract, miner: Array[Byte], nispTree: NIS
       val inputsToUse = initInputs.getOrElse(Seq(UTXO(prover.contract, UTXO.MIN_FEE).toDummyInput(ctx)))
       val fpInput = inputsToUse.head
       val mutateEval = evalInput
-        .withCtxVar(ContextVar.of(0.toByte, ErgoValue.ofColl(Colls.fromArray(contract.valueBytes), ErgoType.byteType())))
+        .withCtxVar(ContextVar.of(0.toByte, ErgoValue.of(Colls.fromArray(contract.valueBytes), scalaByteType)))
         .withMutator(new EvaluationMutator(evalInput.contract))
       val mutateFP   = fpInput.withMutator(mutator)
 

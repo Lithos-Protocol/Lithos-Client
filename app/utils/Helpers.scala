@@ -3,7 +3,8 @@ package utils
 import lfsm.LFSMHelpers
 import lfsm.contracts.{CollateralContract, DictionaryContracts, RollupContracts}
 import org.bouncycastle.util.encoders.Hex
-import org.ergoplatform.appkit.{BlockchainContext, ErgoClient, ErgoId, ErgoProver, ErgoValue, NetworkType}
+import org.ergoplatform.appkit.{BlockchainContext, ErgoClient, ErgoProver, ErgoValue, NetworkType}
+import org.ergoplatform.sdk.ErgoId
 import org.ergoplatform.restapi.client.ErgoTransactionOutput
 import sigma.SigmaProp
 import sigma.ast.ErgoTree

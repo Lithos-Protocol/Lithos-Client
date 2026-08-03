@@ -1,6 +1,7 @@
 package plasmadex
 
-import org.ergoplatform.appkit.{ErgoClient, ErgoId, NetworkType}
+import org.ergoplatform.appkit.{ErgoClient, NetworkType}
+import org.ergoplatform.sdk.ErgoId
 
 object PDHelpers {
   final val MAX_LIQ: Long = 0x7fffffffffffffffL

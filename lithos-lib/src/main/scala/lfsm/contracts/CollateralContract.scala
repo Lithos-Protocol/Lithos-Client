@@ -1,7 +1,8 @@
 package lfsm.contracts
 
 import lfsm.ScriptGenerator
-import org.ergoplatform.appkit.{BlockchainContext, ConstantsBuilder, ErgoId, ErgoValue, Parameters}
+import org.ergoplatform.appkit.{BlockchainContext, ConstantsBuilder, ErgoValue, Parameters}
+import org.ergoplatform.sdk.ErgoId
 import sigma.Colls
 import work.lithos.mutations.{Contract, InputUTXO, Mutator, Token, TxContext, UTXO}
 

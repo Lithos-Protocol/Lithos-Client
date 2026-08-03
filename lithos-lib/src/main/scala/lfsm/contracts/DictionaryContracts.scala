@@ -1,7 +1,8 @@
 package lfsm.contracts
 
 import lfsm.{LFSMHelpers, ScriptGenerator}
-import org.ergoplatform.appkit.{ConstantsBuilder, ErgoId, NetworkType}
+import org.ergoplatform.appkit.{ConstantsBuilder, NetworkType}
+import org.ergoplatform.sdk.ErgoId
 import sigma.Colls
 import work.lithos.mutations.Contract
 

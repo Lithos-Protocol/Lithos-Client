@@ -2,7 +2,9 @@ package work.lithos
 package mutations
 
 import org.ergoplatform.{ErgoScriptPredef, ErgoTreePredef}
-import org.ergoplatform.appkit.{Address, BlockchainContext, JavaHelpers, Parameters, PreHeader, UnsignedTransaction, UnsignedTransactionBuilder}
+import org.ergoplatform.appkit.{Address, BlockchainContext, Parameters, PreHeader, UnsignedTransaction, UnsignedTransactionBuilder}
+
+import scala.collection.JavaConverters.seqAsJavaListConverter
 
 class TxBuilder(ctx: BlockchainContext){
   val uTxB: UnsignedTransactionBuilder = ctx.newTxBuilder()
@@ -63,8 +65,8 @@ class TxBuilder(ctx: BlockchainContext){
     }
 
     val uTx = uTxB
-      .boxesToSpend(JavaHelpers.toJList(inputs.map(_.toFullInput).toIndexedSeq))
-      .withDataInputs(JavaHelpers.toJList(dataInputs.map(_.input).toIndexedSeq))
+      .boxesToSpend(inputs.map(_.toFullInput).toIndexedSeq.asJava)
+      .withDataInputs(dataInputs.map(_.input).toIndexedSeq.asJava)
       .outputs(outputsToUse.map(_.toOutBox(ctx)): _*)
       .sendChangeTo(changeAddress.getErgoAddress)
 

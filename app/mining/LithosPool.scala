@@ -100,8 +100,8 @@ class LithosPool(options: Options,
       throw new ConnectException("Ergo node is offline — cannot start LithosPool")
 
     val info = nodeInterface.info()
-    options.data.protocolVersion = info.getJSONObject("parameters").getInt("blockVersion")
-    options.data.chainDifficulty = info.getBigInteger("difficulty")
+    options.data.protocolVersion = info.parameters.blockVersion
+    options.data.chainDifficulty = info.difficulty.getOrElse(BigInt(0)).bigInteger
       .multiply(java.math.BigInteger.valueOf(options.difficultyMultiplier))
 
     logger.info(s"LithosPool started. protocolVersion=${options.data.protocolVersion}, polling every ${options.blockRefreshInterval}ms")

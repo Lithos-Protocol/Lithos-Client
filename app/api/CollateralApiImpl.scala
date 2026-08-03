@@ -9,7 +9,8 @@ import models.CollateralUTXO
 import models.SuccessfulTransaction
 import mutations.BoxLoader
 import org.ergoplatform.ErgoTreePredef
-import org.ergoplatform.appkit.{Address, BlockchainContext, ErgoValue, JavaHelpers, Parameters, SecretString}
+import org.ergoplatform.appkit.{Address, BlockchainContext, ErgoValue, Parameters}
+import org.ergoplatform.sdk.{JavaHelpers, SecretString}
 import play.api.Configuration
 import sigma.SigmaProp
 import sigma.ast.ErgoTree
@@ -33,7 +34,7 @@ class CollateralApiImpl extends CollateralApi {
         if(collateralInfo.reward < coinsToIssue)
           throw new IllegalArgumentException(s"Cannot create collateral UTXO with reward less" +
             s" than current block reward ${coinsToIssue}")
-        val inputs = new BoxLoader(ctx)
+        val inputs = new BoxLoader(ctx, Globals.getNodeConfig.getNodeApi)
           .loadBoxes
           .getInputs((collateralInfo.reward * collateralInfo.numUtxos) + Parameters.MinFee)
 

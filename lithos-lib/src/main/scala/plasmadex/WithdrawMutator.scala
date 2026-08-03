@@ -1,7 +1,8 @@
 package plasmadex
 
 import com.google.common.base.Charsets
-import org.ergoplatform.appkit.{ContextVar, ErgoType, ErgoValue, Parameters}
+import org.ergoplatform.appkit.scalaapi.scalaLongType
+import org.ergoplatform.appkit.{ContextVar, ErgoValue, Parameters}
 import plasmadex.contracts.PlasmaDexContracts
 import plasmadex.states.LiquidityState
 import scorex.utils.Longs
@@ -21,7 +22,7 @@ class WithdrawMutator(lp: LiquidityPool) extends Mutator{
     val nextLP = lp.lpBox.toUTXO
       .subValue(lp.lsFeesX)
       .removeToken(lp.tokenY.id, lp.lsFeesY)
-      .withReg(3, ErgoValue.of(Colls.fromItems(0L, 0L), ErgoType.longType()))
+      .withReg(3, ErgoValue.of(Colls.fromItems(0L, 0L), scalaLongType))
     val outputAmount = if(lp.lsFeesX > Parameters.MinFee) lp.lsFeesX else Parameters.MinFee
     val outputTokens = {
       if(lp.lsFeesY > 0)

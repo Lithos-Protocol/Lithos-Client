@@ -1,7 +1,8 @@
 package plasmadex
 
 import org.ergoplatform.appkit.impl.Eip4TokenBuilder
-import org.ergoplatform.appkit.{ContextVar, ErgoType, ErgoValue, Parameters}
+import org.ergoplatform.appkit.scalaapi.scalaByteType
+import org.ergoplatform.appkit.{ContextVar, ErgoValue, Parameters}
 import plasmadex.states.LiquidityState
 import scorex.utils.Longs
 import sigma.Colls
@@ -34,7 +35,7 @@ class RedemptionMutator(lp: LiquidityPool, lqState: LiquidityState, lqNFT: Array
       .withCtxVar(ContextVar.of(0.toByte, 2.toByte))
       .withCtxVar(ContextVar.of(1.toByte,
           ErgoValue.of(Colls.fromArray(lqNFT),
-            ErgoType.byteType())))
+            scalaByteType)))
       .withCtxVar(ContextVar.of(2.toByte, lookUp.proof.ergoValue))
       .withCtxVar(ContextVar.of(3.toByte, removal.proof.ergoValue)))
     require(amntX < 0 && amntY < 0, "Redemption must produce positive ERG and tokens")

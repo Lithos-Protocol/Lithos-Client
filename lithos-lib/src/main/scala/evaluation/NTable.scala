@@ -1,6 +1,7 @@
 package evaluation
 
 import org.bouncycastle.util.encoders.Hex
+import org.ergoplatform.appkit.scalaapi.scalaIntType
 import org.ergoplatform.appkit.{ErgoType, ErgoValue}
 import scorex.crypto.hash.{Blake2b256, Digest32}
 import scorex.utils.Ints
@@ -32,7 +33,7 @@ object NTable {
   }
 
   def ergoValue: ErgoValue[Coll[(Int, Int)]] = {
-    ErgoValue.of(Colls.fromArray(N_Table), ErgoType.pairType(ErgoType.integerType(), ErgoType.integerType()))
+    ErgoValue.of(Colls.fromArray(N_Table), ErgoType.pairType(scalaIntType, scalaIntType))
   }
 
   def serialized: Array[Byte] = {

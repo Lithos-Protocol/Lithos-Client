@@ -12,6 +12,8 @@ import nisp.NISPDatabase
 import org.bouncycastle.util.encoders.Hex
 import org.ergoplatform.ErgoTreePredef
 import org.ergoplatform.appkit._
+import org.ergoplatform.appkit.scalaapi.{scalaByteType, scalaIntType, scalaLongType}
+import org.ergoplatform.sdk.ErgoId
 import org.slf4j.{Logger, LoggerFactory}
 import play.api.cache.SyncCacheApi
 import scorex.utils.Longs
@@ -37,8 +39,8 @@ object LFSMTransformer {
     logger.info(s"Making new data box for miner with id $addToken, and commit $commit")
     val utxo = UTXO(contract, Parameters.MinFee, Seq(Token(addToken, 1L)),
       registers = Seq(
-        ErgoValue.ofColl(Colls.fromArray(Array(commit)), ErgoType.pairType(ErgoType.integerType(), ErgoType.longType())),
-        ErgoValue.ofColl(Colls.fromArray(minerContract.hashedPropBytes), ErgoType.byteType())
+        ErgoValue.of(Colls.fromArray(Array(commit)), ErgoType.pairType(scalaIntType, scalaLongType)),
+        ErgoValue.of(Colls.fromArray(minerContract.hashedPropBytes), scalaByteType)
       ))
     utxo
   }
@@ -47,7 +49,7 @@ object LFSMTransformer {
     logger.info("Attempting to add self to miner dictionary")
     client.execute {
       ctx =>
-        val inputs = new BoxLoader(ctx).loadBoxes.getInputs(Parameters.MinFee*2)
+        val inputs = new BoxLoader(ctx, Globals.getNodeConfig.getNodeApi).loadBoxes.getInputs(Parameters.MinFee*2)
         val tau = LFSMHelpers.parseDiffValueForStratum(diff)
         val score = LFSMHelpers.convertTauOrScore(tau.get).toLong
         val minerTree = MDCache(cache).getMD.get
@@ -65,8 +67,8 @@ object LFSMTransformer {
           .withCtxVar(ContextVar.of(
             2.toByte,
             ErgoValue.pairOf(
-              ErgoValue.ofColl(Colls.fromArray(proverContract.hashedPropBytes), ErgoType.byteType()),
-              ErgoValue.ofColl(Colls.fromArray(dictInput.id.getBytes), ErgoType.byteType())
+              ErgoValue.of(Colls.fromArray(proverContract.hashedPropBytes), scalaByteType),
+              ErgoValue.of(Colls.fromArray(dictInput.id.getBytes), scalaByteType)
             )))
           .withCtxVar(ContextVar.of(3.toByte, insertion.proof.ergoValue))
         val dictOutput = dictInput.toUTXO.copy(registers = Seq(insertionTree.ergoValue))
@@ -108,7 +110,7 @@ object LFSMTransformer {
 
         client.execute {
           ctx =>
-            val boxLoader = new BoxLoader(ctx).loadBoxes
+            val boxLoader = new BoxLoader(ctx, Globals.getNodeConfig.getNodeApi).loadBoxes
             val rollupCache = new RollupCache(cache)
             val memStates = nispTrees.flatMap {
               n =>
@@ -178,9 +180,9 @@ object LFSMTransformer {
                 logger.info(s"Next commitment set: ${newCommit}")
                 val otherInputs = inputRetriever(Parameters.MinFee)
                 val nextDataBox = dataInput.toUTXO.copy(
-                  registers = dataInput.registers.updated(0, ErgoValue.ofColl(
+                  registers = dataInput.registers.updated(0, ErgoValue.of(
                     nextCommits,
-                    ErgoType.pairType(ErgoType.integerType(), ErgoType.longType())
+                    ErgoType.pairType(scalaIntType, scalaLongType)
                   ))
                 )
                 val proverContract = prover.contract
@@ -482,7 +484,7 @@ object LFSMTransformer {
                 if (height - commits.head._1 >= LFSMHelpers.NISP_WINDOW)
                   commits.head._2
                 else if(commits.length == 1) {
-                  throw new IllegalStateException()(s"Cannot submit NISPs until commit ${commits.head} is in effect")
+                  throw new IllegalStateException(s"Cannot submit NISPs until commit ${commits.head} is in effect")
                 }
                 else
                   commits(1)._2
@@ -567,7 +569,7 @@ object LFSMTransformer {
           ContextVar.of(
             1.toByte,
             ErgoValue.pairOf(
-              ErgoValue.ofColl(Colls.fromArray(prover.contract.hashedPropBytes), ErgoType.byteType()),
+              ErgoValue.of(Colls.fromArray(prover.contract.hashedPropBytes), scalaByteType),
               nisp.ergoValue)
           ),
           ContextVar.of(2.toByte, insert.proof.ergoValue)
@@ -626,8 +628,8 @@ object LFSMTransformer {
     val amountTokens = LFSMHelpers.paymentFromScore(score, totalScore, totalTokens.map(_.amount).getOrElse(0L))
     val inputWithContext = payInput.setCtxVars(
       ContextVar.of(0.toByte,
-        ErgoValue.ofArray(Array(Colls.fromArray(prover.contract.hashedPropBytes)),
-        ErgoType.collType(ErgoType.byteType()))),
+        ErgoValue.of(Array(Colls.fromArray(prover.contract.hashedPropBytes)),
+        ErgoType.collType(scalaByteType))),
       ContextVar.of(1.toByte, lookUp.proof.ergoValue),
       ContextVar.of(2.toByte, delete.proof.ergoValue)
     )

@@ -6,6 +6,7 @@ import akka.util.Timeout
 import configs.{StateConfig, StratumConfig}
 import mutations.NotEnoughInputsException
 import org.ergoplatform.appkit._
+import org.ergoplatform.sdk.JavaHelpers
 import org.slf4j.{Logger, LoggerFactory}
 import play.api.Configuration
 import play.api.cache.SyncCacheApi

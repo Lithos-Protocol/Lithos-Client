@@ -1,8 +1,8 @@
 package lfsm
 
 import lfsm.contracts.RollupContracts
-import org.ergoplatform.appkit.impl.NodeAndExplorerDataSourceImpl
-import org.ergoplatform.appkit.{Address, BlockchainContext, ErgoClient, ErgoId, JavaHelpers, NetworkType, Parameters}
+import org.ergoplatform.appkit.{Address, BlockchainContext, ErgoClient, NetworkType, Parameters}
+import org.ergoplatform.sdk.{ErgoId, JavaHelpers}
 import work.lithos.mutations.{Contract, InputUTXO}
 
 import java.math.{BigDecimal, BigInteger, RoundingMode}

@@ -7,7 +7,7 @@ import configs.TasksConfig.TaskConfiguration
 import configs._
 import lfsm.LFSMHelpers
 import lfsm.states.MinerTree
-import org.ergoplatform.appkit.impl.NodeAndExplorerDataSourceImpl
+import node.NodeApi
 import org.ergoplatform.restapi.client.FullBlock
 import org.slf4j.{Logger, LoggerFactory}
 import play.api.Configuration
@@ -17,7 +17,7 @@ import state.synchronization.Subscribable.{Subscribe, SubscribeAck, SubscribeRej
 import state.messages.DictionaryMessages.InitialMDState
 import state.messages.StateFrameMessages._
 import state.messages.SyncMessages._
-import state.messages.{BlockInfo, BlockMessage}
+import state.messages.{BlockInfo, BlockMessage, NodeSync}
 import utils.Globals
 
 import javax.inject.{Inject, Named, Singleton}
@@ -49,7 +49,7 @@ class MDSyncTask @Inject()(cache: SyncCacheApi, system: ActorSystem, config: Con
       logger.info(s"Dictionary synchronization will start at height ${LFSMHelpers.MD_GENESIS_HEIGHT}")
 
       var currentHeight = LFSMHelpers.MD_GENESIS_HEIGHT
-      val nodeDataSource = nodeConfig.getClient.getDataSource.asInstanceOf[NodeAndExplorerDataSourceImpl]
+      val nodeApi = nodeConfig.getNodeApi
       mdSynchronizer ! InitialMDState(LFSMHelpers.MD_GENESIS_HEIGHT, MinerTree.initialState)
 
       Future {
@@ -58,7 +58,7 @@ class MDSyncTask @Inject()(cache: SyncCacheApi, system: ActorSystem, config: Con
         while (!synced) {
           val tip = chainHeight
           if (currentHeight <= tip) {
-            loadBlockSync(currentHeight, nodeDataSource) match {
+            loadBlockSync(currentHeight, nodeApi) match {
               case Success(_) =>
                 if (currentHeight < tip) {
                   currentHeight += 1
@@ -91,7 +91,7 @@ class MDSyncTask @Inject()(cache: SyncCacheApi, system: ActorSystem, config: Con
               subscribed = true
             case SubscribeRejected(reason) =>
               logger.warn(s"SyncHandler rejected subscription: $reason — catching up one block")
-              loadBlockSync(currentHeight + 1, nodeDataSource) match {
+              loadBlockSync(currentHeight + 1, nodeApi) match {
                 case Success(_) => currentHeight += 1
                 case Failure(ex) =>
                   logger.error(s"Failed to load block ${currentHeight + 1} during subscription handoff", ex)
@@ -134,13 +134,12 @@ class MDSyncTask @Inject()(cache: SyncCacheApi, system: ActorSystem, config: Con
   private def chainHeight: Int =
     nodeConfig.getClient.execute(ctx => ctx.getHeight)
 
-  private def loadBlockSync(height: Int, dataSource: NodeAndExplorerDataSourceImpl): Try[Unit] = {
+  private def loadBlockSync(height: Int, nodeApi: NodeApi): Try[Unit] = {
     if (height % 10000 == 0)
       logger.info(s"Loading block at height $height")
     Try {
-      val blockHeader = dataSource.getNodeBlocksApi.getFullBlockAt(height).execute().body().get(0)
-      val fullBlock   = dataSource.getNodeBlocksApi.getFullBlockById(blockHeader).execute().body()
-      mdSynchronizer ! BlockMessage(BlockInfo.fromSync(fullBlock))
+      val block = nodeApi.blockAt(height).map(_.head).get
+      mdSynchronizer ! BlockMessage(NodeSync.blockInfo(block))
     }
   }
 }

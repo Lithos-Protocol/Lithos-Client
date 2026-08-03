@@ -1,7 +1,8 @@
 package lfsm.states
 
 import lfsm.LFSMHelpers
-import org.ergoplatform.appkit.{Address, ErgoId}
+import org.ergoplatform.appkit.Address
+import org.ergoplatform.sdk.ErgoId
 import sigma.data.AvlTreeFlags
 import work.lithos.plasma.PlasmaParameters
 import work.lithos.plasma.collections.{LocalPlasmaMap, PlasmaMap}

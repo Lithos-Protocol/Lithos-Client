@@ -5,7 +5,8 @@ import models._
 import mutations.BoxLoader
 import org.bouncycastle.util.encoders.Hex
 import org.ergoplatform.ErgoTreePredef
-import org.ergoplatform.appkit.{ErgoId, JavaHelpers, Parameters}
+import org.ergoplatform.appkit.Parameters
+import org.ergoplatform.sdk.{ErgoId, JavaHelpers}
 import plasmadex.{DepositMutator, LiquidityPool, PDHelpers, RedemptionMutator, SwapMutator, WithdrawMutator}
 import plasmadex.states.LiquidityState
 import utils.Globals
@@ -48,7 +49,7 @@ class DexApiImpl extends DexApi {
     require(lpId == PDHelpers.getLPToken(client).toString, "Invalid LP Id given")
     client.execute {
       ctx =>
-        val boxLoader = new BoxLoader(ctx)
+        val boxLoader = new BoxLoader(ctx, Globals.getNodeConfig.getNodeApi)
           .loadBoxes
 
         val lpBox = InputUTXO(ctx.getBoxesById(liqState.utxoId).head)
@@ -106,7 +107,7 @@ class DexApiImpl extends DexApi {
     require(lpId == PDHelpers.getLPToken(client).toString, "Invalid LP Id given")
     client.execute {
       ctx =>
-        val boxLoader = new BoxLoader(ctx)
+        val boxLoader = new BoxLoader(ctx, Globals.getNodeConfig.getNodeApi)
           .loadBoxes
         val lpBox = InputUTXO(ctx.getBoxesById(liqState.utxoId).head)
         val lp = LiquidityPool(lpBox)
@@ -163,7 +164,7 @@ class DexApiImpl extends DexApi {
     require(lpId == PDHelpers.getLPToken(client).toString, "Invalid LP Id given")
     client.execute{
       ctx =>
-        val boxLoader = new BoxLoader(ctx)
+        val boxLoader = new BoxLoader(ctx, Globals.getNodeConfig.getNodeApi)
           .loadBoxes
         val lpBox = InputUTXO(ctx.getBoxesById(liqState.utxoId).head)
         val lp = LiquidityPool(lpBox)
@@ -214,7 +215,7 @@ class DexApiImpl extends DexApi {
     require(lpId == PDHelpers.getLPToken(client).toString, "Invalid LP Id given")
     client.execute {
       ctx =>
-        val boxLoader = new BoxLoader(ctx)
+        val boxLoader = new BoxLoader(ctx, Globals.getNodeConfig.getNodeApi)
           .loadBoxes
         val lpBox = InputUTXO(ctx.getBoxesById(liqState.utxoId).head)
         val lp = LiquidityPool(lpBox)
@@ -228,7 +229,7 @@ class DexApiImpl extends DexApi {
           .setInputs(redemptionMutator.getCtxLP.get, initInput.get)
           .addOutputs(Seq(feeOutput))
           .buildTx(0, wallet.p2pk, Seq(redemptionNFT))
-        val signedTx = wallet.prover.sign(uTx, JavaHelpers.toJList(IndexedSeq(redemptionNFT.toErgo)))
+        val signedTx = wallet.prover.sign(uTx)
 
         val txId = ctx.sendTransaction(signedTx).replace("\"", "")
 

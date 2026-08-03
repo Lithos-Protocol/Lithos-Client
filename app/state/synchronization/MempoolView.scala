@@ -4,13 +4,13 @@ import akka.actor.{Actor, ActorRef, Cancellable}
 import akka.util.Timeout
 import cache.MempoolCache
 import configs.NodeConfig
-import org.ergoplatform.appkit.JavaHelpers
-import org.ergoplatform.appkit.impl.NodeAndExplorerDataSourceImpl
+import node.NodeApi
+import node.model.Paging
 import org.slf4j.{Logger, LoggerFactory}
 import play.api.cache.SyncCacheApi
 import play.api.libs.concurrent.InjectedActorSupport
 import AutoSubscribable.AutoSubscribe
-import state.messages.BlockTx
+import state.messages.{BlockTx, NodeSync}
 import state.messages.MempoolMessages.{MempoolChain, MempoolTransform, RebuildMempoolChains, UpdatedMempoolChains}
 import state.messages.StateFrameMessages._
 import utils.Globals
@@ -21,6 +21,8 @@ import scala.util.{Failure, Success, Try}
 
 object MempoolView {
   private case object Tick
+
+  private final val MempoolLimit = 100
 }
 
 /**
@@ -40,8 +42,7 @@ class MempoolView @Inject()(@Named("state-frame") stateFrame: ActorRef,
 
   private val nodeConfig: NodeConfig = Globals.getNodeConfig
 
-  private val dataSource: NodeAndExplorerDataSourceImpl =
-    nodeConfig.getClient.getDataSource.asInstanceOf[NodeAndExplorerDataSourceImpl]
+  private val nodeApi: NodeApi = nodeConfig.getNodeApi
 
   private val mempoolCache = MempoolCache(cacheApi)
 
@@ -130,16 +131,6 @@ class MempoolView @Inject()(@Named("state-frame") stateFrame: ActorRef,
     }
   }
 
-  private def fetchTxs: Try[Seq[BlockTx]] = Try {
-    // TODO: Expand mempool size
-    val mempoolTxs = dataSource
-      .getNodeTransactionsApi.getUnconfirmedTransactions(100, 0)
-      .execute()
-      .body()
-
-
-    val txsList = JavaHelpers.toIndexedSeq(mempoolTxs)
-    //logger.info(s"Txs: ${txsList.map(_.getId).mkString(", ")}")
-    txsList.map(BlockTx.fromSync)
-  }
+  private def fetchTxs: Try[Seq[BlockTx]] =
+    nodeApi.unconfirmedTransactions(Paging(0, MempoolView.MempoolLimit)).map(_.map(NodeSync.blockTx))
 }

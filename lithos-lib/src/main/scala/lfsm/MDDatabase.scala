@@ -2,7 +2,7 @@ package lfsm
 
 import lfsm.MDDatabase.{DATA_BOX_TOKEN, MD_DIR}
 import org.bouncycastle.util.encoders.Hex
-import org.ergoplatform.appkit.ErgoId
+import org.ergoplatform.sdk.ErgoId
 import scorex.crypto.hash.Blake2b256
 import scorex.db.LDBFactory
 import scorex.utils.Ints
@@ -16,7 +16,7 @@ class MDDatabase {
 
   def getDataBoxToken: Option[ErgoId] = kvstore.get(DATA_BOX_TOKEN).map(v => ErgoId.create(Hex.toHexString(v)))
   def setDataBoxToken(tokenId: ErgoId): Boolean = kvstore.insert(DATA_BOX_TOKEN, tokenId.getBytes).isSuccess
-  def delDataBoxToken: Boolean = kvstore.remove(Seq(DATA_BOX_TOKEN)).isSuccess
+  def delDataBoxToken: Boolean = kvstore.remove(Array[Array[Byte]](DATA_BOX_TOKEN)).isSuccess
   def close(): Unit = {
     kvstore.close()
   }

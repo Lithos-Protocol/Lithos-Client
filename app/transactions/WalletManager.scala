@@ -3,7 +3,10 @@ package transactions
 import akka.actor.{Actor, Cancellable}
 import akka.pattern.pipe
 import configs.NodeConfig
-import org.ergoplatform.appkit.{BlockchainContext, ErgoClient, JavaHelpers}
+import node.MutationConversions._
+import node.NodeApi
+import node.model.{ConfirmationRange, Paging}
+import org.ergoplatform.appkit.{BlockchainContext, ErgoClient}
 import org.slf4j.{Logger, LoggerFactory}
 import play.api.libs.concurrent.InjectedActorSupport
 import transactions.WalletManager._
@@ -76,6 +79,7 @@ class WalletManager @Inject()() extends Actor with InjectedActorSupport {
 
   val nodeConfig: NodeConfig = Globals.getNodeConfig
   val client: ErgoClient = nodeConfig.getClient
+  val nodeApi: NodeApi = nodeConfig.getNodeApi
 
   // ─── mutable state ────────────────────────────────────────────────────────
 
@@ -121,11 +125,13 @@ class WalletManager @Inject()() extends Actor with InjectedActorSupport {
       val excluded = usedInputs ++ externalExclusions
 
       client.execute { ctx =>
-        val apiBoxes = JavaHelpers.toIndexedSeq(ctx.getDataSource.getUnspentWalletBoxes)
-          .map(InputUTXO(_))
-          .filterNot(excluded.contains)
-
-        self ! BoxesRefreshed(apiBoxes.toSet)
+        nodeApi.walletUnspentBoxes(ConfirmationRange.Default, Paging(0, MAX_WALLET_BOXES)) match {
+          case Success(boxes) =>
+            val apiBoxes = boxes.map(_.toInputUTXO(ctx)).filterNot(excluded.contains(_))
+            self ! BoxesRefreshed(apiBoxes.toSet)
+          case Failure(ex) =>
+            logger.error(s"Failed to refresh wallet boxes: ${ex.getMessage}", ex)
+        }
       }
 
     case BoxesRefreshed(boxes) =>
@@ -344,6 +350,9 @@ class WalletManager @Inject()() extends Actor with InjectedActorSupport {
 object WalletManager {
   /** Maximum number of inputs returned in a single RetrieveInputs response. */
   final val MAX_TX_INPUTS: Int = 75
+
+  /** Maximum number of unspent wallet boxes pulled per refresh. */
+  final val MAX_WALLET_BOXES: Int = 500
 
   // ─── internal messages ────────────────────────────────────────────────────
 

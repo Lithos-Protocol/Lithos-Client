@@ -3,6 +3,8 @@ package configs
 
 
 import mutations.NodeWallet
+import node.NodeApi
+import node.rest.RestNodeApi
 import org.ergoplatform.appkit._
 import org.ergoplatform.restapi.client.ApiClient
 import play.api.Configuration
@@ -21,8 +23,10 @@ class NodeConfig(config: Configuration) {
 
 
 
-  private val ergoClient: ErgoClient = RestApiErgoClient.create(getNodeApi, networkType, nodeKey, "https://api-testnet.ergoplatform.com")
+  private val ergoClient: ErgoClient = RestApiErgoClient.create(getNodeUrl, networkType, nodeKey, "https://api-testnet.ergoplatform.com")
   val apiClient = new ApiClient(nodeURL, "ApiKeyAuth", nodeKey)
+
+  private val nodeApi: NodeApi = RestNodeApi(getNodeUrl, Some(nodeKey))
 
   private val prover: ErgoProver = ergoClient.execute{
     ctx =>
@@ -40,7 +44,8 @@ class NodeConfig(config: Configuration) {
   def getClient: ErgoClient     = ergoClient
   def getNodeWallet: NodeWallet = nodeWallet
   def getNodeKey: String        = nodeKey
-  def getNodeApi: String = {
+  def getNodeApi: NodeApi       = nodeApi
+  def getNodeUrl: String = {
     val port = networkType match {
       case NetworkType.MAINNET => ":9053/"
       case NetworkType.TESTNET => ":9052/"

@@ -70,7 +70,7 @@ class StartMiningServer @Inject()(system: ActorSystem, config: Configuration,
           256,
           stratumParams.connectionTimeout,
           stratumParams.blockRefreshInterval,
-          nodeConfig.getNodeApi,
+          nodeConfig.getNodeUrl,
           t,
           new Data()
         )

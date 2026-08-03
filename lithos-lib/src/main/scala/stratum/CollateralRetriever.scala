@@ -6,7 +6,8 @@ import mutations.{BoxLoader, NodeWallet, NotEnoughInputsException}
 import org.bouncycastle.util.encoders.Hex
 import org.ergoplatform.ErgoTreePredef
 import org.ergoplatform.appkit.impl.UnsignedTransactionImpl
-import org.ergoplatform.appkit.{Address, BlockchainContext, ErgoClient, ErgoClientException, ErgoId, ErgoProver, ErgoValue, JavaHelpers, Parameters, SecretString}
+import org.ergoplatform.appkit.{Address, BlockchainContext, ErgoClient, ErgoClientException, ErgoProver, ErgoValue, Parameters}
+import org.ergoplatform.sdk.{ErgoId, JavaHelpers, SecretString}
 import org.slf4j.{Logger, LoggerFactory}
 import scorex.crypto.hash.Blake2b256
 import sigma.SigmaProp
@@ -17,6 +18,7 @@ import work.lithos.mutations.{Contract, InputUTXO, Token, TxBuilder, UTXO}
 import work.lithos.plasma.PlasmaParameters
 import work.lithos.plasma.collections.PlasmaMap
 
+import scala.collection.JavaConverters.seqAsJavaListConverter
 import scala.util.{Failure, Success, Try}
 
 class CollateralRetriever(client: ErgoClient, prover: NodeWallet) {
@@ -141,7 +143,7 @@ class CollateralRetriever(client: ErgoClient, prover: NodeWallet) {
       val collateral: Contract = CollateralContract.mkTestnetCollatContract(ctx, holding.hashedPropBytes)
 
       var emissions = InputUTXO(ctx.getCoveringBoxesFor(CollateralContract.mkEmissionsContract(ctx, collateral.hashedPropBytes).address(ctx),
-        Parameters.MinFee, JavaHelpers.toJList(IndexedSeq(Token(LFSMHelpers.EMISSION_NFT, 1L).toErgo))).getBoxes.get(0))
+        Parameters.MinFee, IndexedSeq(Token(LFSMHelpers.EMISSION_NFT, 1L).toErgo).asJava).getBoxes.get(0))
       val blockReward = CollateralContract.coinsToIssue(ctx.getHeight)
       var lastBox: Option[InputUTXO] = None
       val txs = for(i <- 0 until numBoxes) yield {

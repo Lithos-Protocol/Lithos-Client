@@ -5,6 +5,7 @@ import lfsm.LFSMHelpers
 import lfsm.contracts.RollupContracts
 import org.bouncycastle.util.encoders.Hex
 import org.ergoplatform.appkit._
+import org.ergoplatform.appkit.scalaapi._
 import org.scalatest.funsuite.AnyFunSuite
 import scorex.crypto.authds.avltree.batch.PersistentBatchAVLProver
 import scorex.utils.Longs
@@ -13,7 +14,7 @@ import sigma.data.AvlTreeFlags
 import work.lithos.mutations._
 import work.lithos.plasma.PlasmaParameters
 import work.lithos.plasma.collections.{LocalPlasmaMap, PlasmaMap}
-import org.ergoplatform.appkit.JavaHelpers
+import org.ergoplatform.sdk.JavaHelpers
 
 import java.math.BigInteger
 
@@ -80,8 +81,8 @@ class PayoutSuite extends AnyFunSuite{
         val remove = tree.delete(keys:_*)
 
 
-        val keyErgoVal: ErgoValue[Coll[Coll[Byte]]] = ErgoValue.ofArray(
-          keys.toArray.map(x => Colls.fromArray(x)), ErgoType.collType(ErgoType.byteType()))
+        val keyErgoVal: ErgoValue[Coll[Coll[Byte]]] = ErgoValue.of(
+          keys.toArray.map(x => Colls.fromArray(x)), ErgoType.collType(scalaByteType))
         val payoutInput = makePayoutUTXO(ctx).toDummyInput(ctx).setCtxVars(
           ContextVar.of(0.toByte, keyErgoVal),
           ContextVar.of(1.toByte, lookup.proof.ergoValue),
@@ -117,8 +118,8 @@ class PayoutSuite extends AnyFunSuite{
         val remove = tree.delete(keys:_*)
 
 
-        val keyErgoVal: ErgoValue[Coll[Coll[Byte]]] = ErgoValue.ofArray(
-          keys.toArray.map(x => Colls.fromArray(x)), ErgoType.collType(ErgoType.byteType()))
+        val keyErgoVal: ErgoValue[Coll[Coll[Byte]]] = ErgoValue.of(
+          keys.toArray.map(x => Colls.fromArray(x)), ErgoType.collType(scalaByteType))
         val payoutInput = makePayoutUTXO(ctx).toDummyInput(ctx).setCtxVars(
           ContextVar.of(0.toByte, keyErgoVal),
           ContextVar.of(1.toByte, lookup.proof.ergoValue),

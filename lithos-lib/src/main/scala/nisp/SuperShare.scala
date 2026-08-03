@@ -1,7 +1,7 @@
 package nisp
 
 import org.bouncycastle.util.encoders.Hex
-import org.ergoplatform.appkit.JavaHelpers
+import org.ergoplatform.sdk.JavaHelpers
 import org.ergoplatform.{AutolykosSolution, ErgoHeader, HeaderWithoutPow, HeaderWithoutPowSerializer}
 import scorex.crypto.hash.Blake2b256
 import scorex.utils.{Ints, Shorts}

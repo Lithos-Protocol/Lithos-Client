@@ -60,7 +60,7 @@ class NISPDatabase extends NISPStorage {
       case Some(bytes) =>
         val nextNISP = NISP.deserialize(bytes).withSuperShare(share)
         require(nextNISP.isDistinct, "Cannot store non-distinct NISP")
-        kvstore.remove(Seq(hKey)).isSuccess && kvstore.insert(hKey, nextNISP.serialize).isSuccess &&
+        kvstore.remove(Array[Array[Byte]](hKey)).isSuccess && kvstore.insert(hKey, nextNISP.serialize).isSuccess &&
           heightsUpdated
       case None =>
         val nisp = NISP(score, Seq(share))
@@ -94,12 +94,12 @@ class NISPDatabase extends NISPStorage {
   def removeLastNISP: Boolean = {
     lastHeight match {
       case Some(bytes) =>
-        val removal = kvstore.remove(Seq(bytes)).isSuccess
+        val removal = kvstore.remove(Array[Array[Byte]](bytes)).isSuccess
         val nextHeight = getNextHeight(bytes)
         nextHeight match {
           case Some(nextHeightBytes) => updateLastHeight(nextHeightBytes, Some(bytes)) && removal
           case None =>
-            kvstore.remove(Seq(LAST_HEIGHT)).isSuccess && kvstore.remove(Seq(CURRENT_HEIGHT)).isSuccess && removal
+            kvstore.remove(Array[Array[Byte]](LAST_HEIGHT)).isSuccess && kvstore.remove(Array[Array[Byte]](CURRENT_HEIGHT)).isSuccess && removal
         }
 
       case None =>
@@ -192,7 +192,7 @@ class NISPDatabase extends NISPStorage {
   def updateLastHeight(newLastHeight: Array[Byte], storedLastHeight: Option[Array[Byte]]): Boolean = {
     storedLastHeight match {
       case Some(h) =>
-        kvstore.remove(Seq(LAST_HEIGHT)).isSuccess && kvstore.insert(LAST_HEIGHT, newLastHeight).isSuccess
+        kvstore.remove(Array[Array[Byte]](LAST_HEIGHT)).isSuccess && kvstore.insert(LAST_HEIGHT, newLastHeight).isSuccess
       case None =>
         kvstore.insert(LAST_HEIGHT, newLastHeight).isSuccess
     }
@@ -201,7 +201,7 @@ class NISPDatabase extends NISPStorage {
   def updateCurrentHeight(newCurrHeight: Array[Byte], storedCurrHeight: Option[Array[Byte]]): Boolean = {
     storedCurrHeight match {
       case Some(h) =>
-          kvstore.remove(Seq(CURRENT_HEIGHT)).isSuccess && kvstore.insert(CURRENT_HEIGHT, newCurrHeight).isSuccess
+          kvstore.remove(Array[Array[Byte]](CURRENT_HEIGHT)).isSuccess && kvstore.insert(CURRENT_HEIGHT, newCurrHeight).isSuccess
       case None =>
         kvstore.insert(CURRENT_HEIGHT, newCurrHeight).isSuccess
     }

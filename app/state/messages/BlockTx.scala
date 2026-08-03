@@ -1,6 +1,7 @@
 package state.messages
 
-import org.ergoplatform.appkit.{BlockchainContext, JavaHelpers}
+import org.ergoplatform.appkit.BlockchainContext
+import org.ergoplatform.sdk.JavaHelpers
 import org.ergoplatform.restapi.client.ErgoTransaction
 import work.lithos.mutations.{InputUTXO, UTXO}
 

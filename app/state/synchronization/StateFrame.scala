@@ -2,10 +2,10 @@ package state.synchronization
 
 import akka.actor.{Actor, ActorRef, Cancellable}
 import configs.NodeConfig
-import org.ergoplatform.appkit.impl.NodeAndExplorerDataSourceImpl
+import node.NodeApi
 import org.slf4j.{Logger, LoggerFactory}
 import play.api.libs.concurrent.InjectedActorSupport
-import state.messages.BlockInfo
+import state.messages.{BlockInfo, NodeSync}
 import state.messages.StateFrameMessages._
 import utils.Globals
 
@@ -24,8 +24,7 @@ class StateFrame @Inject()() extends Actor with InjectedActorSupport with Subscr
 
   val nodeConfig: NodeConfig = Globals.getNodeConfig
 
-  private val dataSource: NodeAndExplorerDataSourceImpl =
-    nodeConfig.getClient.getDataSource.asInstanceOf[NodeAndExplorerDataSourceImpl]
+  private val nodeApi: NodeApi = nodeConfig.getNodeApi
 
   override val logger: Logger = LoggerFactory.getLogger("StateFrame")
   override var currentHeight: Int = chainHeight
@@ -60,16 +59,6 @@ class StateFrame @Inject()() extends Actor with InjectedActorSupport with Subscr
   private def chainHeight: Int =
     nodeConfig.getClient.execute(ctx => ctx.getHeight)
 
-  private def fetchBlock(height: Int): Try[BlockInfo] = Try {
-    val blockHeader = dataSource
-      .getNodeBlocksApi.getFullBlockAt(height)
-      .execute()
-      .body()
-      .get(0)
-    val fullBlock = dataSource
-      .getNodeBlocksApi.getFullBlockById(blockHeader)
-      .execute()
-      .body()
-    BlockInfo.fromSync(fullBlock)
-  }
+  private def fetchBlock(height: Int): Try[BlockInfo] =
+    nodeApi.blockAt(height).map(_.head).map(NodeSync.blockInfo)
 }

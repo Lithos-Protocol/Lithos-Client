@@ -5,14 +5,14 @@ import akka.pattern.ask
 import akka.util.Timeout
 import configs.TasksConfig.TaskConfiguration
 import configs.{Contexts, NodeConfig, SyncConfig, TasksConfig}
-import org.ergoplatform.appkit.impl.NodeAndExplorerDataSourceImpl
+import node.NodeApi
 import org.slf4j.{Logger, LoggerFactory}
 import play.api.Configuration
 import play.api.cache.SyncCacheApi
 import state.synchronization.Subscribable.{Subscribe, SubscribeAck, SubscribeRejected, SubscribeResponse}
 import state.messages.StateFrameMessages._
 import state.messages.SyncMessages._
-import state.messages.{BlockInfo, BlockMessage}
+import state.messages.{BlockInfo, BlockMessage, NodeSync}
 import utils.Globals
 
 import javax.inject.{Inject, Named, Singleton}
@@ -39,7 +39,7 @@ class RollupSyncTask @Inject()(cache: SyncCacheApi, system: ActorSystem, config:
     logger.info(s"Rollup synchronization will start at height ${syncConfig.startHeight}")
 
     var currentHeight = syncConfig.startHeight
-    val nodeDataSource = nodeConfig.getClient.getDataSource.asInstanceOf[NodeAndExplorerDataSourceImpl]
+    val nodeApi = nodeConfig.getNodeApi
 
     Future {
       // Phase 1: catch up to chain head
@@ -47,7 +47,7 @@ class RollupSyncTask @Inject()(cache: SyncCacheApi, system: ActorSystem, config:
       while (!synced) {
         val tip = chainHeight
         if (currentHeight <= tip) {
-          loadBlockSync(currentHeight, nodeDataSource) match {
+          loadBlockSync(currentHeight, nodeApi) match {
             case Success(_) =>
               if (currentHeight < tip) {
                 currentHeight += 1
@@ -78,7 +78,7 @@ class RollupSyncTask @Inject()(cache: SyncCacheApi, system: ActorSystem, config:
             Globals.setSynced()
           case SubscribeRejected(reason) =>
             logger.warn(s"StateFrame rejected rollup subscription: $reason — catching up one block")
-            loadBlockSync(currentHeight + 1, nodeDataSource) match {
+            loadBlockSync(currentHeight + 1, nodeApi) match {
               case Success(_) => currentHeight += 1
               case Failure(ex) =>
                 logger.error(s"Failed to load block ${currentHeight + 1} during subscription handoff", ex)
@@ -95,13 +95,12 @@ class RollupSyncTask @Inject()(cache: SyncCacheApi, system: ActorSystem, config:
   private def chainHeight: Int =
     nodeConfig.getClient.execute(ctx => ctx.getHeight)
 
-  private def loadBlockSync(height: Int, dataSource: NodeAndExplorerDataSourceImpl): Try[Unit] = {
+  private def loadBlockSync(height: Int, nodeApi: NodeApi): Try[Unit] = {
     if (height % 100 == 0)
       logger.info(s"Loading rollup block at height $height")
     Try {
-      val blockHeader = dataSource.getNodeBlocksApi.getFullBlockAt(height).execute().body().get(0)
-      val fullBlock   = dataSource.getNodeBlocksApi.getFullBlockById(blockHeader).execute().body()
-      syncHandler ! BlockMessage(BlockInfo.fromSync(fullBlock))
+      val block = nodeApi.blockAt(height).map(_.head).get
+      syncHandler ! BlockMessage(NodeSync.blockInfo(block))
     }
   }
 }

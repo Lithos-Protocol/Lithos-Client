@@ -1,7 +1,8 @@
 package plasmadex
 
 import com.google.common.base.Charsets
-import org.ergoplatform.appkit.{ContextVar, ErgoType, ErgoValue, Parameters}
+import org.ergoplatform.appkit.scalaapi.scalaByteType
+import org.ergoplatform.appkit.{ContextVar, ErgoValue, Parameters}
 import plasmadex.states.LiquidityState
 import scorex.utils.Longs
 import sigma.Colls
@@ -38,8 +39,8 @@ class DepositMutator(lp: LiquidityPool, lqState: LiquidityState, amount: Long) e
       .withCtxVar(ContextVar.of(0.toByte, 1.toByte))
       .withCtxVar(ContextVar.of(1.toByte,
         ErgoValue.pairOf(ErgoValue.of(Colls.fromArray(lp.lpBox.id.getBytes),
-          ErgoType.byteType()), ErgoValue.of(Colls.fromArray(Longs.toByteArray(amount)),
-          ErgoType.byteType()))))
+          scalaByteType), ErgoValue.of(Colls.fromArray(Longs.toByteArray(amount)),
+          scalaByteType))))
       .withCtxVar(ContextVar.of(2.toByte, insertion.proof.ergoValue)))
     val nextLP = lp.lpBox.toUTXO
       .addValue(amntX)

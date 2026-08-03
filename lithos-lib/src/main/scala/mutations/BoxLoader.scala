@@ -1,27 +1,45 @@
 package mutations
 
-import org.ergoplatform.appkit.impl.NodeAndExplorerDataSourceImpl
-import org.ergoplatform.appkit.{BlockchainContext, ErgoId, JavaHelpers}
+import node.MutationConversions._
+import node.NodeApi
+import node.model.{ConfirmationRange, Paging}
+import org.ergoplatform.appkit.BlockchainContext
+import org.ergoplatform.sdk.ErgoId
 import org.slf4j.{Logger, LoggerFactory}
 import work.lithos.mutations.{InputUTXO, UTXO}
 
 import scala.collection.mutable
+import scala.util.{Failure, Success}
 
-class BoxLoader(ctx: BlockchainContext) {
+class BoxLoader(ctx: BlockchainContext, nodeApi: NodeApi) {
   private val boxStack = mutable.Stack.empty[InputUTXO]
   private val logger: Logger = LoggerFactory.getLogger("BoxLoader")
   private val usedBoxes: mutable.HashSet[ErgoId] = mutable.HashSet.empty[ErgoId]
+
   def loadBoxes: BoxLoader = {
     boxStack.clear()
-    var totalAdded = 0
-    do {
-      val boxes = JavaHelpers.toIndexedSeq(ctx.getDataSource.getUnspentWalletBoxes)
-        .map(InputUTXO(_)).filter(i => !usedBoxes(i.id)).sortBy(_.value)
-      totalAdded += boxes.size
-      for (i <- boxes) boxStack.push(i)
-    }while(totalAdded < 500)
+    val boxes = fetchUnspent.filter(i => !usedBoxes(i.id)).sortBy(_.value)
+    for (i <- boxes) boxStack.push(i)
     logger.info(s"Loaded ${boxStack.size} boxes in BoxLoader")
     this
+  }
+
+  private def fetchUnspent: Seq[InputUTXO] = {
+    var loaded = Seq.empty[InputUTXO]
+    var paging = Paging(0, BoxLoader.PageSize)
+    var exhausted = false
+    while (!exhausted && loaded.size < BoxLoader.MaxBoxes) {
+      nodeApi.walletUnspentBoxes(ConfirmationRange.Default, paging) match {
+        case Success(page) =>
+          loaded = loaded ++ page.map(_.toInputUTXO(ctx))
+          exhausted = page.size < paging.limit
+          paging = paging.next
+        case Failure(ex) =>
+          logger.error(s"Failed to load unspent wallet boxes: ${ex.getMessage}", ex)
+          exhausted = true
+      }
+    }
+    loaded.take(BoxLoader.MaxBoxes)
   }
 
   def getInputs(value: Long): Seq[InputUTXO] = {
@@ -89,4 +107,9 @@ class BoxLoader(ctx: BlockchainContext) {
     boxStack.push(output)
     this
   }
+}
+
+object BoxLoader {
+  final val PageSize = 500
+  final val MaxBoxes = 500
 }

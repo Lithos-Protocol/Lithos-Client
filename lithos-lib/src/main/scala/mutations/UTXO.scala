@@ -1,6 +1,7 @@
 package work.lithos.mutations
 
-import org.ergoplatform.appkit.{BlockchainContext, ErgoId, ErgoValue, OutBox, Parameters}
+import org.ergoplatform.appkit.{BlockchainContext, ErgoValue, OutBox, Parameters}
+import org.ergoplatform.sdk.ErgoId
 import sigma.Coll
 import sigmastate.utils.Helpers
 

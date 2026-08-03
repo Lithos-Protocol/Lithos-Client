@@ -1,7 +1,8 @@
 package plasmadex
 
 import lfsm.LFSMHelpers
-import org.ergoplatform.appkit.{ErgoType, ErgoValue}
+import org.ergoplatform.appkit.ErgoValue
+import org.ergoplatform.appkit.scalaapi.scalaLongType
 import sigma.Colls
 import work.lithos.mutations.{Contract, InputUTXO, Mutator, TxContext, UTXO}
 
@@ -27,7 +28,7 @@ class SwapMutator(lp: LiquidityPool, amount: Long, isERG: Boolean) extends Mutat
         value = lp.lpBox.value + amount,
         tokens = Seq(lp.lpToken, lp.tokenY - swapOutput),
         registers = lp.lpBox.registers.patch(3, Seq(
-          ErgoValue.ofColl(Colls.fromItems(lp.lsFeesX + liqStateFee, lp.lsFeesY), ErgoType.longType())
+          ErgoValue.of(Colls.fromItems(lp.lsFeesX + liqStateFee, lp.lsFeesY), scalaLongType)
         ), 1)
       )
 
@@ -36,7 +37,7 @@ class SwapMutator(lp: LiquidityPool, amount: Long, isERG: Boolean) extends Mutat
         value = lp.lpBox.value - swapOutput,
         tokens = Seq(lp.lpToken, lp.tokenY + amount),
         registers = lp.lpBox.registers.patch(3, Seq(
-          ErgoValue.ofColl(Colls.fromItems(lp.lsFeesX, lp.lsFeesY + liqStateFee), ErgoType.longType())
+          ErgoValue.of(Colls.fromItems(lp.lsFeesX, lp.lsFeesY + liqStateFee), scalaLongType)
         ), 1)
       )
 

@@ -1,6 +1,6 @@
 package state
 
-import org.ergoplatform.appkit.JavaHelpers
+import org.ergoplatform.sdk.JavaHelpers
 import org.ergoplatform.restapi.client.SpendingProof
 
 case class InputSpendingProof(proof: String, ext: Map[String, String])

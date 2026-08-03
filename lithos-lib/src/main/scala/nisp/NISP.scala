@@ -3,6 +3,7 @@ package nisp
 import org.bouncycastle.util.encoders.Hex
 import org.ergoplatform.HeaderWithoutPow
 import org.ergoplatform.appkit.ErgoValue
+import org.ergoplatform.appkit.scalaapi.scalaByteType
 import scorex.utils.Longs
 import sigma.data.CHeader
 import sigma.pow.Autolykos2PowValidation
@@ -36,7 +37,7 @@ case class NISP(score: Long, shares: Seq[SuperShare]) {
     this.copy(shares = this.shares ++ Seq(superShare))
   }
 
-  def ergoValue: ErgoValue[Coll[Byte]] = ErgoValue.of(serialize)
+  def ergoValue: ErgoValue[Coll[Byte]] = ErgoValue.of(Colls.fromArray(serialize), scalaByteType)
 
   /**
    * Returns NISP with only distinct shares, based on header id of each super share

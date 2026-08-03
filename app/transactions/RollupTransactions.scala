@@ -4,6 +4,7 @@ import lfsm.LFSMHelpers
 import mutations.NodeWallet
 import nisp.NISP
 import org.ergoplatform.appkit._
+import org.ergoplatform.appkit.scalaapi.scalaByteType
 import org.slf4j.{Logger, LoggerFactory}
 import scorex.utils.Longs
 import sigma.Colls
@@ -38,7 +39,7 @@ object RollupTransactions {
       ContextVar.of(
         1.toByte,
         ErgoValue.pairOf(
-          ErgoValue.ofColl(Colls.fromArray(wallet.contract.hashedPropBytes), ErgoType.byteType()),
+          ErgoValue.of(Colls.fromArray(wallet.contract.hashedPropBytes), scalaByteType),
           nisp.ergoValue)
       ),
       ContextVar.of(2.toByte, insert.proof.ergoValue)
@@ -136,8 +137,8 @@ object RollupTransactions {
     val amountTokens = LFSMHelpers.paymentFromScore(score, totalScore, totalTokens.map(_.amount).getOrElse(0L))
     val inputWithContext = payInput.setCtxVars(
       ContextVar.of(0.toByte,
-        ErgoValue.ofArray(Array(Colls.fromArray(wallet.contract.hashedPropBytes)),
-          ErgoType.collType(ErgoType.byteType()))),
+        ErgoValue.of(Array(Colls.fromArray(wallet.contract.hashedPropBytes)),
+          ErgoType.collType(scalaByteType))),
       ContextVar.of(1.toByte, lookUp.proof.ergoValue),
       ContextVar.of(2.toByte, delete.proof.ergoValue)
     )

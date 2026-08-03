@@ -1,8 +1,8 @@
 
 name := """lithos-client"""
 organization := "work.lithos"
-version := "4.2.0-SNAPSHOT"
-scalaVersion := "2.12.10"
+version := "5.0.0-SNAPSHOT"
+scalaVersion := "2.12.20"
 libraryDependencies ++= Seq(
   //"org.ergoplatform" %% "ergo-appkit" % "5.0.4",
   //"io.github.k-singh" %% "plasma-toolkit" % "1.0.3", sl4j error due to logging dependency, please fix later

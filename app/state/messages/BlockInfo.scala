@@ -1,6 +1,6 @@
 package state.messages
 
-import org.ergoplatform.appkit.JavaHelpers
+import org.ergoplatform.sdk.JavaHelpers
 import org.ergoplatform.restapi.client.FullBlock
 
 case class BlockInfo(id: String, height: Int, txs: Seq[BlockTx])

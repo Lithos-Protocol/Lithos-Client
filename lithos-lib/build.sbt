@@ -5,10 +5,10 @@ version := "1.0-SNAPSHOT"
 scalaVersion := "2.12.10"
 lazy val scriptClasspath = Seq("*")
 libraryDependencies ++= Seq(
-  //"org.ergoplatform" %% "ergo-appkit" % "5.0.4",
   "org.scorexfoundation" %% "sigma-state" % "6.0.2",
   "org.ergoplatform" %% "ergo-wallet" % "6.0.0",
-  //"io.github.k-singh" %% "plasma-toolkit" % "1.0.3", sl4j error due to logging dependency, please fix later
+  "org.ergoplatform" %% "ergo-appkit" % "6.0.0",
+  "io.github.k-singh" %% "plasma-toolkit" % "1.1.0",
   "org.scalatest" %% "scalatest" % "3.2.14" % "test",
   "com.github.Satergo" % "JStratum" % "b3ad654112",
   "org.bouncycastle" % "bcprov-jdk15on" % "1.70",
@@ -29,7 +29,10 @@ resolvers ++= Seq(
   "Sonatype Snapshots" at "https://oss.sonatype.org/content/repositories/snapshots/",
   "Bintray" at "https://jcenter.bintray.com/",
   "jitpack" at "https://jitpack.io",
-  "imageJ" at "https://maven.imagej.net/content/repositories/public/"
+  "imageJ" at "https://maven.imagej.net/content/repositories/public/",
+  "Repo for leveldbjni-all" at "https://gitlab.com/api/v4/projects/61211221/packages/maven",
+  "Typesafe maven releases" at "https://dl.bintray.com/typesafe/maven-releases/"
+
 )
 
 

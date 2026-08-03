@@ -1,11 +1,14 @@
 package mining
 
+import node.NodeApi
+import node.model.{MiningSolution, NodeInfo}
+import node.rest.RestNodeApi
 import org.json.JSONObject
 import org.slf4j.{Logger, LoggerFactory}
 
-import java.io.IOException
 import java.net.URI
 import java.net.http.{HttpClient, HttpRequest, HttpResponse}
+import scala.util.{Failure, Success}
 
 /**
  * Scala port of stratum.NodeInterface.
@@ -15,6 +18,10 @@ import java.net.http.{HttpClient, HttpRequest, HttpResponse}
  * The API surface is identical to the Java original so the rest of the mining
  * system can be swapped between the two implementations transparently.
  */
+object MiningNodeInterface {
+  private final val PlaceholderW = "02a7955281885bf0f0ca4a48678848cad8dc5b328ce8bc1d4481d041c98e891ff3"
+}
+
 class MiningNodeInterface(nodeApiUrl: String) {
 
   require(nodeApiUrl.endsWith("/"), "nodeApiUrl must end with a trailing slash")
@@ -22,6 +29,7 @@ class MiningNodeInterface(nodeApiUrl: String) {
   private val logger: Logger     = LoggerFactory.getLogger("MiningNodeInterface")
   private val http: HttpClient   = HttpClient.newHttpClient()
   private val baseURI: URI       = URI.create(nodeApiUrl)
+  private val nodeApi: NodeApi   = RestNodeApi(nodeApiUrl)
 
   // ─── internal helpers ─────────────────────────────────────────────────────
 
@@ -32,20 +40,13 @@ class MiningNodeInterface(nodeApiUrl: String) {
   // ─── public API ───────────────────────────────────────────────────────────
 
   /** Returns true when the node responds 200 to /info. */
-  def isOnline: Boolean =
-    try
-      http.send(req("/info").build(), HttpResponse.BodyHandlers.discarding()).statusCode() == 200
-    catch {
-      case _: IOException | _: InterruptedException => false
-    }
+  def isOnline: Boolean = nodeApi.isOnline
 
-  /** Fetches /info JSON (protocol version, chain difficulty, etc.). */
-  def info(): JSONObject =
-    try
-      new JSONObject(http.send(req("/info").build(), HttpResponse.BodyHandlers.ofString()).body())
-    catch {
-      case e: InterruptedException => throw new RuntimeException(e)
-    }
+  /** Fetches /info (protocol version, chain difficulty, etc.). */
+  def info(): NodeInfo = nodeApi.info() match {
+    case Success(nodeInfo) => nodeInfo
+    case Failure(ex)       => throw new RuntimeException("Failed to read node info", ex)
+  }
 
   /**
    * Fetches a mining candidate from the node.
@@ -96,23 +97,10 @@ class MiningNodeInterface(nodeApiUrl: String) {
    * @return true on HTTP 200, false otherwise
    */
   def sendSolution(nonce: String, pk: String): Boolean =
-    try {
-      val body = new JSONObject()
-      body.put("pk", pk)
-      body.put("w", "02a7955281885bf0f0ca4a48678848cad8dc5b328ce8bc1d4481d041c98e891ff3")
-      body.put("n", nonce)
-      body.put("d", 0)
-      val response = http.send(
-        req("/mining/solution")
-          .POST(HttpRequest.BodyPublishers.ofString(body.toString))
-          .header("Content-Type", "application/json")
-          .build(),
-        HttpResponse.BodyHandlers.ofString()
-      )
-      if (response.statusCode() == 500)
-        logger.error(s"Block submission returned HTTP 500: ${response.body()}")
-      response.statusCode() == 200
-    } catch {
-      case e: InterruptedException => throw new RuntimeException(e)
+    nodeApi.submitSolution(MiningSolution(pk, MiningNodeInterface.PlaceholderW, nonce, "0")) match {
+      case Success(_) => true
+      case Failure(ex) =>
+        logger.error(s"Block submission failed: ${ex.getMessage}", ex)
+        false
     }
 }
