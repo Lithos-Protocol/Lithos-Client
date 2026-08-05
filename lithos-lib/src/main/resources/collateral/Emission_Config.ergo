@@ -1,0 +1,57 @@
+{
+  // Emission_Config
+  // Value: unspecified (0.001 ERG)
+  // Script hashes and parameters for emissions
+  // How this box is referenced in offchain code is important for determining
+  // whether rules are hard-forkable or soft-forkable.
+
+  val emConfig: Box          = SELF
+  val permitParams = emConfig.R4[Coll[Long]].get
+  // Hashed VALUE bytes, not prop bytes!!
+  val enforcerHash = emConfig.R5[Coll[Byte]].get
+  // Hashed VALUE bytes, not prop bytes!!
+  val extensionHash = emConfig.R6[Coll[Byte]].get
+  // Hashed PROP bytes, not value bytes!!
+  val rollupHash = emConfig.R7[Coll[Byte]].get
+  val emConfigToken= emConfig.tokens(0)
+
+  // NEXT VALUES
+  val nextUTXO    = OUTPUTS(0)
+  val nextPermitParams = nextUTXO.R4[Coll[Long]].get
+  val nextEnforcerHash = nextUTXO.R5[Coll[Byte]].get
+  val nextExtensionHash = nextUTXO.R6[Coll[Byte]].get
+  val nextRollupHash = nextUTXO.R7[Coll[Byte]].get
+  val nextEmConfigToken= nextUTXO.tokens(0)
+
+  // Constants
+  // CONST_TESTNET_PK - Testnet owner who can change valid FP contracts
+  // NOTE: In mainnet, change to multi-sig
+  // Spending path 1: Re-create utxo to avoid storage rent
+  val recreated = allOf(
+    Coll(
+      SELF.id == INPUTS(0).id, // Only one FP control box per tx
+      nextPermitParams == permitParams,
+      nextEnforcerHash == enforcerHash,
+      nextExtensionHash == extensionHash,
+      nextRollupHash == rollupHash,
+      nextEmConfigToken._2 == 1L,
+      nextEmConfigToken == emConfigToken,
+      emConfig.propositionBytes == nextUTXO.propositionBytes
+    )
+  )
+  val successorWellFormed = allOf(
+    Coll(
+      nextEmConfigToken == emConfigToken,
+      emConfig.propositionBytes == nextUTXO.propositionBytes,
+      nextUTXO.R4[Coll[Long]].get.size >= 3,
+      nextUTXO.R5[Coll[Byte]].get.size == 32,
+      nextUTXO.R6[Coll[Byte]].get.size == 32,
+      nextUTXO.R7[Coll[Byte]].get.size == 32
+    )
+  )
+
+  // Spending path 2: Signed by testnet owner
+  // TODO: Change before launch
+  sigmaProp(recreated) || (CONST_TESTNET_PK && sigmaProp(successorWellFormed))
+
+}

@@ -13,6 +13,7 @@
   val currentMiners: Int     = SELF.R5[Int].get
   val totalScore:    BigInt  = SELF.R6[BigInt].get
   val totalReward:   Long    = SELF.R7[Long].get
+  val tokenReward: Long   = SELF.R8[Long].getOrElse(0L)
   val totalTokens = SELF.tokens.getOrElse(0, (Coll(0.toByte), 0L))
 
   // CONSTANTS
@@ -52,7 +53,7 @@
 
   val minersWithTokens: Coll[(Coll[Byte], Long)] = {
     minersWithScore.map{
-      (x: (Coll[Byte], Long)) => (x._1, ((totalTokens._2.toBigInt * x._2.toBigInt) / totalScore).toLong)
+      (x: (Coll[Byte], Long)) => (x._1, ((tokenReward.toBigInt * x._2.toBigInt) / totalScore).toLong)
     }
   }
 
@@ -73,9 +74,10 @@
     // NEXT VALUES
     val nextUTXO     = OUTPUTS(0)
     val nextTree     = nextUTXO.R4[AvlTree].get
-    val nextMiners   = nextUTXO.R5[Int].get
-    val nextScore    = nextUTXO.R6[BigInt].get
-    val nextReward   = nextUTXO.R7[Long].get
+    val nextMiners       = nextUTXO.R5[Int].get
+    val nextScore     = nextUTXO.R6[BigInt].get
+    val nextReward      = nextUTXO.R7[Long].get
+    val nextTokenReward = nextUTXO.R8[Long].getOrElse(0L)
     val nextTokens   = nextUTXO.tokens.getOrElse(0, (Coll(0.toByte), 0L))
     val minerOutputBoxes = OUTPUTS.slice(1, minersWithReward.size + 1)
 
@@ -89,7 +91,7 @@
     }
 
     val tokensRewarded = {
-      if(totalTokens._2 > 0){
+      if(tokenReward > 0){
         minerOutputBoxes.zip(minersWithTokens).forall{
           (x: (Box, (Coll[Byte], Long))) =>
             if(x._2._2 > 0){
@@ -109,6 +111,7 @@
     val sameTotal       = totalReward == nextReward
     val sameScore       = totalScore  == nextScore
     val sameMiners      = currentMiners == nextMiners
+    val sameTokenReward = tokenReward == nextTokenReward
     val onlyOne         = SELF.id == INPUTS(0).id // Prevent weirdness / exploits by enforcing only one per tx
     val statements = allOf(
       Coll(
@@ -118,6 +121,7 @@
         sameScore,
         sameTotal,
         sameMiners,
+        sameTokenReward,
         treeUpdated,
         minersRewarded,
         tokensRewarded,
@@ -135,7 +139,7 @@
     }
     // NOTE: Any additional tokens not included in this payout may be withdrawn to change by tx creator
     val tokensRewarded = {
-      if(totalTokens._2 > 0){
+      if(tokenReward > 0){
         minerOutputBoxes.zip(minersWithTokens).forall{
           (x: (Box, (Coll[Byte], Long))) =>
             if(x._2._2 > 0){

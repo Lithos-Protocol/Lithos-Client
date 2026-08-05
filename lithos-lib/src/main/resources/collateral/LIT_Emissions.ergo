@@ -1,13 +1,13 @@
 {
   // Lithos Emission Contract
-  // Value: min box value, constant
+  // Value: 0.01 ERG
   // Emits LIT on the finalized schedule and runs the collateral queue. Collateral boxes are pre-made
   // here so that a miner never has to read this box, or any other shared state, while building a block
   // candidate. Everything a miner needs is on the collateral box itself.
   // Only lenders touch this box, and they do so off the critical path of PoW.
   //
   // One collateral box per block comes from the active set, not from any height schedule: the set holds
-  // at most CONST_MAX_ACTIVE distinct lender identities, and a collateral box requires the block's
+  // at most CONST_MAX_ACTIVE distinct lender keys, and a collateral box requires the block's
   // coinbase to pay its own lender. Two collateral boxes in one block would demand two different
   // coinbase recipients, which is impossible, so at most one can ever be included.
 
@@ -24,7 +24,7 @@
   // REGISTERS
   // R4: currentBlock (Int) - Number of blocks pre-emitted, and so the position in the emission schedule.
   // Advanced only by ACTIVATE, the one path that creates a collateral box to carry the emission.
-  // R5: lenderSet (Coll[Coll[Byte]]) - Hashed prop bytes of every lender holding a live collateral box,
+  // R5: lenderSet (Coll[Coll[Byte]]) - Hashed prop bytes of every lender key holding a live collateral box,
   // held distinct. Size never exceeds CONST_MAX_ACTIVE.
   // R6: queueHead (Long) - Position of the queue box to be processed next.
   // R7: queueTail (Long) - Position the next queue box created will be given.
@@ -35,8 +35,9 @@
 
   // TOKENS
   // 0: emission NFT
-  // 1: queue token, one placed in every queue box, burned when that box leaves the queue
-  // 2: collateral token, one placed in every collateral box, carried into its proof-of-spend box
+  // 1: queue token, one placed in every queue box, total amount (LONG.MAX) should be conserved
+  // 2: collateral token, one placed in every collateral box, carried into its proof-of-spend box,
+  // total amount (LONG.MAX) should be conserved
   // 3: LIT. Kept last on purpose, so that running the supply down to nothing removes the final entry
   // rather than shifting the index of any other token.
   val emissionNFT = SELF.tokens(0)
@@ -48,7 +49,6 @@
   val tokenLIT    = SELF.tokens.getOrElse(3, (CONST_LIT_ID, 0L))
 
   // CONSTANTS
-  // CONST_EMCONFIG_NFT: Singleton NFT of the emission config box
   // CONST_COLLATERAL_HASH: Hashed prop bytes of the collateral contract
   // CONST_GATE_HASH: Hashed prop bytes of the emission gate, guarding queue and proof-of-spend boxes
   // CONST_LIT_ID: Token id of LIT, the sole source of LIT identity in this contract
@@ -87,7 +87,7 @@
   val CONST_F1_RATE         = 100L * CONST_LIT_DECIMALS // Team rate
   val CONST_F2_RATE         = 25L  * CONST_LIT_DECIMALS // Priv Invest Rate
   val CONST_F3_RATE         = 15L  * CONST_LIT_DECIMALS // Auditor Rate
-  // Live collateral boxes, and so distinct lenders, allowed at once. Sized against the serialized size
+  // Live collateral boxes, and so distinct lender keys, allowed at once. Sized against the serialized size
   // of R5, since the whole set is re-written into the successor on every spend of this box.
   val CONST_MAX_ACTIVE      = 100 // TODO: make it lower if 3200 bytes too much
 
@@ -95,30 +95,22 @@
   // CTX_OP(0): Byte representing the operation
   // 0 - Join    - Lock a lender's principal and permit into a queue box.
   // 1 - Activate- Turn the head queue box into a collateral box, emitting this block's LIT into it.
-  // 2 - Refund  - Return a queue box to its lender, allowed only when its lender is already
-  //               holding a live collateral box and so cannot be added to the set again.
+  // 2 - Clear - Remove a head queue box due to its lender already existing in the lenderSet
   // CTX_SLOT_IDX(1): Int, index in lenderSet the retiring lender occupies. Activate only, and unread
   // while the set is still filling.
-  // CTX_ENFORCER_SCRIPT(2): Serialized value bytes of the collateral enforcer script to be executed.
-  // The enforcer sets the conditions a collateral or queue box must meet beyond emission itself,
-  // principal sizing, permit sizing and fee caps among them, so that the collateral scheme can change
-  // without touching the emission schedule. It must NOT affect the amount of LIT emitted, the founders'
-  // allocation, or the active set. The enforcer is EXPECTED to handle queue state, to allow for different
-  // selection mechanisms beyond FIFO / FCFS.
+
   val CTX_OP              = getVar[Byte](0).get
   val CTX_SLOT_IDX        = getVar[Int](1).getOrElse(-1)
-  val CTX_ENFORCER_SCRIPT = getVar[Coll[Byte]](2).get
 
   // DATA INPUTS
-  // emissionConfig: Authenticated by its NFT. Without that check anyone could present a box naming a
-  // script of their own and bypass the enforcer entirely.
+  // emissionConfig: Authenticated by its NFT in Emission_Guard
+  // R4: Coll[Long] of permit params. 0 is the floor, 1 is the ceiling, 2 is the slope
   // R5: hash of the currently valid enforcer script
   // R6: hash of the collateral extension script, read by the collateral contract, not here
   // R7: hashed prop bytes of the rollup holding contract collateral boxes must pay into
   val emissionConfig     = CONTEXT.dataInputs(0)
-  val authenticConfig    = CONST_EMCONFIG_NFT == emissionConfig.tokens(0)._1
-  val enforcerScriptHash = emissionConfig.R5[Coll[Byte]].get
-  val authenticScript    = blake2b256(CTX_ENFORCER_SCRIPT) == enforcerScriptHash
+
+
   val rollupHoldingHash  = emissionConfig.R7[Coll[Byte]].get
 
   // NEXT VALUES
@@ -214,10 +206,11 @@
   def totalInInputs(tokenId: Coll[Byte]): Long = {
     INPUTS.fold(0L, {
       (a: Long, b: Box) =>
-        a + b.tokens.fold(0L, {
+        val totalTokens = b.tokens.fold(0L, {
           (z: Long, t: (Coll[Byte], Long)) =>
             if(t._1 == tokenId) z + t._2 else z
         })
+        a + totalTokens
     })
   }
 
@@ -231,9 +224,7 @@
       SELF.value            == nextEmission.value,
       nextNFT               == emissionNFT,
       nextQueueTok._1       == queueToken._1,
-      nextCollatTok._1      == collatToken._1,
-      authenticConfig,
-      authenticScript
+      nextCollatTok._1      == collatToken._1
     )
   )
 
@@ -274,7 +265,7 @@
       )
     )
 
-    sigmaProp( emissionBoxPreserved && validQueueBox && queueGrown ) && executeFromVar[SigmaProp](2)
+    sigmaProp( emissionBoxPreserved && validQueueBox && queueGrown )
 
     // Spending Path 2: The head of the queue becomes a live collateral box, carrying this block's LIT
   }else if(CTX_OP == 1.toByte){
@@ -391,10 +382,10 @@
     sigmaProp(
       emissionBoxPreserved && validQueueIn && notAlreadyActive &&
       setUpdated && validCollatBox && litEmitted && queueAdvanced
-    ) && executeFromVar[SigmaProp](2)
+    )
 
     // Spending Path 3: A box cannot be activated because its lender is already in the set, so it is
-    // returned. This is the only way a queue box comes back before being used, and it exists because
+    // spent. This is the only way a queue box comes back before being used, and it exists because
     // strict order has no skip, so without it a duplicate lender would hold the whole queue still.
     // Boxes are not refunded to the lender because doing so encourages malicious spam (though this
     // can be added later if needed in collateral enforcer)
@@ -434,7 +425,7 @@
 
     sigmaProp(
       emissionBoxPreserved && validQueueIn && lenderAlreadyActive && queueAdvanced
-    ) && executeFromVar[SigmaProp](2)
+    )
 
   }else{
     sigmaProp(false)

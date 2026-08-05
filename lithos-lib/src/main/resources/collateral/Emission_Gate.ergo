@@ -8,6 +8,9 @@
   // lender being online, and a proof-of-spend box must be consumable without the retiring lender, who
   // has already been repaid by the coinbase and has no remaining reason to act.
 
+  // Essentially, it is a contract which submits all control to emission box, which
+  // will do all calculations for it.
+
   // REGISTERS
   // Queue box:           R4 feeValue (Long), R5 lenderPk (SigmaProp), R6 extensionFlag (Byte),
   //                      R7 queue position (Long)

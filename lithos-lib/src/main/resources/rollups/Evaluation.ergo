@@ -63,7 +63,16 @@
     val contractSame = SELF.propositionBytes == nextUTXO.propositionBytes
     val correctInputs = INPUTS.size == 2
     val tokensConserved = SELF.tokens == nextUTXO.tokens
-    sigmaProp( validFP && authenticFPData && onlyOne && contractSame && correctInputs && tokensConserved ) && executeFromVar[SigmaProp](0)
+    val flagsConserved = allOf(
+      Coll(
+        nextTree.isInsertAllowed,
+        nextTree.isUpdateAllowed,
+        nextTree.isRemoveAllowed,
+        nextTree.keyLength == nispTree.keyLength,
+        nextTree.valueLengthOpt == nispTree.valueLengthOpt
+      )
+    )
+    sigmaProp( validFP && authenticFPData && onlyOne && contractSame && correctInputs && tokensConserved && flagsConserved) && executeFromVar[SigmaProp](0)
 
 
 
@@ -73,6 +82,12 @@
   }else{
   // Spending Path 2: Evaluation phase is over, transform utxo into payout contract
     val passedEvalPeriod = HEIGHT >= currentPeriod + CONST_PERIOD_LENGTH
+    val tokensAdded = {
+      if(SELF.tokens.size > 0L)
+        nextUTXO.R8[Long].get == SELF.tokens(0)._2
+      else
+        true
+    }
     val conservedValues = allOf(
         Coll(
           nextUTXO.value  == SELF.value,
@@ -80,7 +95,8 @@
           nextTree        == nispTree,
           nextMiners      == currentMiners,
           nextScore       == totalScore,
-          nextPeriod      == SELF.value     // Period becomes block reward when transforming to payout contract
+          nextPeriod      == SELF.value,     // Period becomes block reward when transforming to payout contract
+          tokensAdded // If tokens exist, verify total is in R8, otherwise do nothing
         )
     )
 

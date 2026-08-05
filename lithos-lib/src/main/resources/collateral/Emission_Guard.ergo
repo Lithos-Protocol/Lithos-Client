@@ -1,0 +1,28 @@
+{
+  // Emission Guard
+
+  // Executes emission script from context. Used to save utxo-space from large emission script.
+  // Important to not override idx 64,65 on protocol extensions
+
+  // CONSTANTS
+  // CONST_EM_SCRIPT_HASH - Hashed value bytes of the emission script
+  // CONST_EMCONFIG_NFT - Id of Emission Config NFT
+  // CONST_EMISSION_NFT - Id of Emission NFT (on this box)
+  // CONTEXT VARS
+  // CTX_EM_SCRIPT(64) - Serialized SigmaProp of emission script
+  // CTX_ENFORCER_SCRIPT(65) - Serialized SigmaProp of enforcer script
+
+
+  val CTX_EM_SCRIPT = getVar[Coll[Byte]](64).get
+  val CTX_ENFORCER_SCRIPT = getVar[Coll[Byte]](65).get
+  // Hashed value bytes, not propBytes!
+  val emissionConfig     = CONTEXT.dataInputs(0)
+  val authenticConfig    = CONST_EMCONFIG_NFT == emissionConfig.tokens(0)._1
+  val enforcerScriptHash = emissionConfig.R5[Coll[Byte]].get
+  // Hashed VALUE bytes, not prop bytes!!
+  val authenticEnforcerScript    = blake2b256(CTX_ENFORCER_SCRIPT) == enforcerScriptHash
+  val authenticEMScript = blake2b256(CTX_EM_SCRIPT) == CONST_EM_SCRIPT_HASH
+  val authenticGuard = SELF.tokens(0)._1 == CONST_EMISSION_NFT
+  sigmaProp( authenticConfig && authenticEMScript && authenticEnforcerScript && authenticGuard) && executeFromVar[SigmaProp](64) && executeFromVar[SigmaProp](65)
+
+}

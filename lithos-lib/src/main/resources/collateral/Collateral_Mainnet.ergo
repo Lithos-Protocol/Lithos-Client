@@ -6,7 +6,7 @@
   // lender from the emission box's active set.
 
   // REGISTERS
-  // R4: feeValue (Long) - Fee the lender takes out of the block reward
+  // R4: feeValue (Long) - Amount taken out of the block reward to fund other boxes
   // R5: lenderPk (SigmaProp) - Receives the block's coinbase, and identifies this box's slot in the
   // emission box's active set
   // R6: litRewards ((Long, Coll[(Coll[Byte], Long)])) - This block's LIT emission, split into the pool's
@@ -36,7 +36,7 @@
   // CONST_EMCONFIG_NFT: NFT id of the emission config
   // CONST_LIT_ID: Token id of LIT
   // Share of this block's emission kept by whoever builds the genesis transaction, as a divisor.
-  // 25 gives a flat 4%, inside the band agreed for the finder reward.
+  // 25 gives a flat 4% as incentive for behavior which finds blocks.
   val CONST_FINDER_DIVISOR = 25L
 
 
@@ -130,6 +130,7 @@
       val emissionConfig      = CONTEXT.dataInputs(0)
       val authenticConfig     = CONST_EMCONFIG_NFT == emissionConfig.tokens(0)._1
       val extensionScriptHash = emissionConfig.R6[Coll[Byte]].get
+      // Hashed VALUE(from sigma serializer) bytes, not prop bytes!!
       val authenticExtension  = blake2b256(CTX_EXT_SCRIPT) == extensionScriptHash
 
       sigmaProp(authenticConfig && authenticExtension) && executeFromVar[SigmaProp](0)
@@ -162,7 +163,9 @@
       holdingBox.R4[AvlTree].get.digest == fromBase16("4ec61f485b98eb87153f7c57db4f5ecd75556fddbc403b41acf8441fde8e160900"),
       holdingBox.R4[AvlTree].get.isInsertAllowed,
       holdingBox.R4[AvlTree].get.isUpdateAllowed,
-      holdingBox.R4[AvlTree].get.isRemoveAllowed
+      holdingBox.R4[AvlTree].get.isRemoveAllowed,
+      holdingBox.R4[AvlTree].get.keyLength == 32,
+      !holdingBox.R4[AvlTree].get.valueLengthOpt.isDefined
     )
   )
 

@@ -1,0 +1,139 @@
+{
+//  // The generated collateral box must have the minimum amount of LIT tokens to permit collateralization,
+//  // and these tokens must come from the collateralizer, rather than the newly emitted LIT which will go to
+//  // the miners. The permit will be returned on block find.
+//  val hasPermit = totalCollatTokens - totalEmissionRate == permitAmnt
+
+
+
+  val emissionBox = INPUTS(0)
+  //  val currentBlock = emissionBox.R4[Int].get
+  //  val lenderSet    = emissionBox.R5[Coll[Coll[Byte]]].get
+  val queueHead    = emissionBox.R6[Long].get
+  val queueTail    = emissionBox.R7[Long].get
+
+  // TOKENS
+  // 0: emission NFT
+  // 1: queue token, one placed in every queue box, total amount (LONG.MAX) should be conserved
+  // 2: collateral token, one placed in every collateral box, carried into its proof-of-spend box
+  // 3: LIT. Kept last on purpose, so that running the supply down to nothing removes the final entry
+  // rather than shifting the index of any other token.
+  val emissionNFT = emissionBox.tokens(0)
+  val queueToken  = emissionBox.tokens(1)
+  val collatToken = emissionBox.tokens(2)
+  // Identity comes from the constant, never from the token entry, which disappears the moment the
+  // supply is exhausted. Reading identity out of slot 3 would leave every later spend comparing
+  // against a placeholder id, which is what would otherwise end permits along with emission.
+  val tokenLIT    = emissionBox.tokens.getOrElse(3, (CONST_LIT_ID, 0L))
+
+  // CONTEXT VARS
+  // CTX_OP(0): Byte representing the operation
+  // 0 - Join    - Lock a lender's principal and permit into a queue box at the tail of the queue.
+  // 1 - Activate- Turn the head queue box into a collateral box, emitting this block's LIT into it.
+  // 2 - Clear - Remove a head queue box due to its lender already existing in the lenderSet
+
+  // CTX_SLOT_IDX(1): Int, index in lenderSet the retiring lender occupies. Activate only, and unread
+  // while the set is still filling.
+
+
+  // The enforcer may define additional context variables to use
+  val CTX_OP              = getVarFromInput[Byte](0, 0).get
+  //  val CTX_SLOT_IDX        = getVarFromInput[Int](0.toShort, 1).getOrElse(-1)
+
+  // DATA INPUTS
+  // emissionConfig: Authenticated by its NFT. Without that check anyone could present a box naming a
+  // script of their own and bypass the enforcer entirely.
+
+  // R4: Coll[Long] of permit params. 0 is the floor, 1 is the ceiling, 2 is the slope
+  // R5: hash of the currently valid enforcer script
+  // R6: hash of the collateral extension script, read by the collateral contract, not here
+  // R7: hashed prop bytes of the rollup holding contract collateral boxes must pay into
+  val emissionConfig     = CONTEXT.dataInputs(0)
+  val CONST_BLOCK_REWARD = 3000000000L
+  val CONST_FEE_CAP = 90000000L
+  val CONST_DUST_BUDGET = 5000000L
+
+  // NEXT VALUES
+  val nextEmission  = OUTPUTS(0)
+  //    val nextBlock     = nextEmission.R4[Int].get
+  //    val nextSet       = nextEmission.R5[Coll[Coll[Byte]]].get
+  val nextHead      = nextEmission.R6[Long].get
+  val nextTail      = nextEmission.R7[Long].get
+  //    val nextNFT       = nextEmission.tokens(0)
+  //    val nextQueueTok  = nextEmission.tokens(1)
+  //    val nextCollatTok = nextEmission.tokens(2)
+  //    val nextTokenLIT  = nextEmission.tokens.getOrElse(3, (CONST_LIT_ID, 0L))
+
+  if(CTX_OP == 0.toByte){
+    val queueOut = OUTPUTS(1)
+    // CTX_GE(2): GroupElement of SigmaProp to be added to queue box, used to verify
+    // we are dealing specifically with proveDlog
+    val CTX_GE = getVarFromInput[GroupElement](0, 2).get
+    // Queue state grows by 1 appended at the end of the queue
+    val queueGrown = allOf(
+      Coll(
+        nextHead         == queueHead,
+        nextTail         == queueTail + 1
+      )
+    )
+    val permitParams = emissionConfig.R4[Coll[Long]].get
+    val permitFloor  = permitParams(0)
+    val permitCeil   = permitParams(1)
+    val permitSlope  = permitParams(2)
+    val backlog = queueTail - queueHead
+    val scaled  = permitFloor.toBigInt + (permitSlope.toBigInt * backlog.toBigInt)
+    val permitRequired = {
+      if(scaled >= permitCeil.toBigInt)
+        permitCeil
+      else
+        scaled.toLong
+    }
+    // We can use LIT_ID in getOrElse since its verified by the em contract
+    val queueLIT = queueOut.tokens.getOrElse(1, (CONST_LIT_ID, 0L))
+    val permitPosted = queueLIT._2 == permitRequired
+    val permitValid = queueLIT._1 == CONST_LIT_ID
+    val queueProp = queueOut.R5[SigmaProp].get
+    val queueBoxValid = allOf(
+      Coll(
+        queueOut.R7[Long].get == queueTail,
+        queueProp.propBytes == proveDlog(CTX_GE).propBytes,
+        // Verify GE is not the identity, which could be invalid and unable to receive block rewards
+        CTX_GE.getEncoded(0) != 0.toByte,
+        // Mainnet block reward is constant 3 ERG now, CONST_FEE_CAP is the max difference the lender can post
+        queueOut.value >= CONST_BLOCK_REWARD - CONST_FEE_CAP + CONST_DUST_BUDGET,
+        // CONST_DUST_BUDGET is the amount the lender posted for extra UTXOs like founder boxes
+        // TODO: Consider changing eventually, will go to finder as reward after epoch 8
+        queueOut.R4[Long].get == CONST_DUST_BUDGET,
+        permitPosted,
+        permitValid,
+        queueOut.R6[Byte].get == 0x00 // No extensions at launch
+      )
+    )
+    sigmaProp(queueGrown && queueBoxValid)
+  }else if(CTX_OP == 1.toByte){
+    // Enforce FIFO/FCFS on queue advancement
+    val queueIn = INPUTS(1)
+    val queueAdvanced = allOf(
+      Coll(
+        queueIn.R7[Long].get == queueHead,
+        nextHead         == queueHead + 1L,
+        nextTail         == queueTail
+      )
+    )
+    sigmaProp(queueAdvanced)
+  }else if(CTX_OP == 2.toByte){
+    // Enforce FIFO/FCFS on queue cleaning
+    val queueIn = INPUTS(1)
+    val queueCleaned = allOf(
+      Coll(
+        queueIn.R7[Long].get == queueHead,
+        nextHead         == queueHead + 1L,
+        nextTail         == queueTail
+      )
+    )
+    sigmaProp(queueCleaned)
+  }else{
+    sigmaProp(false)
+  }
+
+}
