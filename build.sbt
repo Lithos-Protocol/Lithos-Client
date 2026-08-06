@@ -24,5 +24,6 @@ lazy val root = Project(id = "lithos-client", base = file("."))
   .enablePlugins(PlayScala, LauncherJarPlugin)
   .disablePlugins(PlayLogback)
   .dependsOn(lib)
+  .aggregate(lib)
 
 

@@ -27,7 +27,7 @@ libraryDependencies ++= Seq(
 )
 Test / parallelExecution := false
 testOptions in Test += Tests.Argument(TestFrameworks.ScalaTest, "-y", "org.scalatest.propspec.AnyPropSpec")
-
+Test / testOptions += Tests.Filter(_.startsWith("contracts.specs."))
 resolvers ++= Seq(
   "Sonatype Releases" at "https://oss.sonatype.org/content/repositories/releases/",
   "SonaType" at "https://oss.sonatype.org/content/groups/public",

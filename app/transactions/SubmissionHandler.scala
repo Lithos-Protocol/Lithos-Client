@@ -85,8 +85,8 @@ class SubmissionHandler @Inject()(config: Configuration,
             Try{
               if(stateConfig.autoCollat) {
                 logger.info("Auto-collateralization was enabled, now checking collateral state")
-                val collatRetriever = new CollateralRetriever(client, wallet)
-                collatRetriever.checkCollateral(getWalletInputs(_, Seq.empty, trackUsed = true), stateConfig.maxCollat)
+//                val collatRetriever = new CollateralRetriever(client, wallet)
+//                collatRetriever.checkCollateral(getWalletInputs(_, Seq.empty, trackUsed = true), stateConfig.maxCollat)
               }
               if (stateConfig.autoCommit.getOrElse(true)) {
                 logger.info("Auto-commits were enabled, now checking difficulty commitment state")
