@@ -8,9 +8,9 @@
         <option name="externalProjectPath" value="$PROJECT_DIR$" />
         <option name="modules">
           <set>
-            <option value="$PROJECT_DIR$" />
-            <option value="$PROJECT_DIR$/lithos-lib" />
-            <option value="$PROJECT_DIR$/project" />
+            <option value="C:\Users\Kirat\IdeaProjects\Lithos-Client" />
+            <option value="C:\Users\Kirat\IdeaProjects\Lithos-Client\lithos-lib" />
+            <option value="C:\Users\Kirat\IdeaProjects\Lithos-Client\project" />
           </set>
         </option>
         <option name="sbtVersion" value="1.6.2" />

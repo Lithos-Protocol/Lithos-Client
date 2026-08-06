@@ -173,7 +173,7 @@ public class Pool {
         }else{
             try {
                 //TODO If script fails on node-side, does pk get reset?
-                CollateralRetriever retriever = new CollateralRetriever(client, prover);
+                CollateralRetriever retriever = new CollateralRetriever(client, prover, null);
                 CollateralData collData = retriever.getCollateral();
                 candidate = MiningCandidate.fromJson(
                         nodeInterface.miningCandidate(true, collData.txJSON(), apiKey),

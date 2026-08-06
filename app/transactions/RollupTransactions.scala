@@ -35,7 +35,7 @@ object RollupTransactions {
       wallet.contract.hashedPropBytes -> nisp.serialize)
 
     val inputWithContext = holdingInput.setCtxVars(
-      ContextVar.of(0.toByte, ErgoValue.of(wallet.contract.sigmaBoolean.get)),
+      ContextVar.of(0.toByte, ErgoValue.of(Colls.fromArray(wallet.contract.valueBytes), scalaByteType)),
       ContextVar.of(
         1.toByte,
         ErgoValue.pairOf(
@@ -97,13 +97,20 @@ object RollupTransactions {
     val payout = payoutContract(ctx)
 
     val otherInputs = walletInputs
+    val regs = {
+        val registers = Seq(
+          evalInput.registers.head,
+          evalInput.registers(1),
+          evalInput.registers(2),
+          ErgoValue.of(evalInput.value)
+        )
+      if(evalInput.tokens.nonEmpty)
+        registers :+ ErgoValue.of(evalInput.tokens.head.amount)
+      else
+        registers
+    }
     val output = UTXO(payout, evalInput.value, evalInput.tokens,
-      registers = Seq(
-        evalInput.registers.head,
-        evalInput.registers(1),
-        evalInput.registers(2),
-        ErgoValue.of(evalInput.value)
-      ))
+      registers = regs)
     val totalOutputs = Seq(output) ++ feeOutputs
     val uTx = TxBuilder(ctx)
       .setInputs((Seq(evalInput) ++ otherInputs): _*)
@@ -131,10 +138,11 @@ object RollupTransactions {
     val score = Longs.fromByteArray(lookUp.response.head.ergoValue.getValue.toArray.slice(0, 8))
     val totalScore = payInput.registers(2).getValue.asInstanceOf[CBigInt].wrappedValue
     val totalReward = payInput.registers(3).getValue.asInstanceOf[Long]
+    val tokenReward = if(payInput.tokens.nonEmpty) payInput.registers(4).getValue.asInstanceOf[Long] else 0L
     val totalTokens = payInput.tokens.headOption
 
     val amountToPay = LFSMHelpers.paymentFromScore(score, totalScore, totalReward)
-    val amountTokens = LFSMHelpers.paymentFromScore(score, totalScore, totalTokens.map(_.amount).getOrElse(0L))
+    val amountTokens = LFSMHelpers.paymentFromScore(score, totalScore, tokenReward)
     val inputWithContext = payInput.setCtxVars(
       ContextVar.of(0.toByte,
         ErgoValue.of(Array(Colls.fromArray(wallet.contract.hashedPropBytes)),
@@ -146,7 +154,7 @@ object RollupTransactions {
       val nextTokens = {
         if (totalTokens.isDefined) {
           if (totalTokens.get.amount == amountTokens)
-            Seq.empty[Token]
+            Seq.empty[Token] // If this branch is taken, payout contract would fail
           else
             Seq(totalTokens.get - amountTokens)
         } else {
@@ -161,12 +169,7 @@ object RollupTransactions {
         }
       }
       val output = UTXO(payout, payInput.value - amountToPay, nextTokens,
-        registers = Seq(
-          copiedTree.ergoValue,
-          payInput.registers(1),
-          payInput.registers(2),
-          payInput.registers(3)
-        ))
+        registers = payInput.registers).withReg(0, copiedTree.ergoValue)
       val minerOutput = UTXO(wallet.contract, amountToPay, tokensOutputted)
       val totalOutputs = Seq(output, minerOutput) ++ feeOutputs
       val uTx = TxBuilder(ctx)

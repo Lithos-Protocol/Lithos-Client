@@ -45,10 +45,26 @@ object LFSMHelpers {
   // UTXO id of initial MD box
   final val MD_GENESIS_ID = "cb9b72be6a63471ef20f138494e58558fccc8e931901109e6838b6c9860f59cc"
 
-  // Lithos token
+  // Lithos token & emission parameters
   final val INIT_MINT = Parameters.OneErg * 1000000000 // 1 billion LIT
-  final val LIT_ID = ErgoId.create("2acc02b686940b966475926b6387adaacddba50bb8ededf0a517350e947ab5a8")
-  final val EMISSION_NFT = ErgoId.create("b10c476c8d10447d38e3301a703cb9303f732fe01786627b3f8f6f42b3ce35f4")
+  final val LIT_ID = ErgoId.create("cebfc7c3db9d638e8e7d6263b4a724135a9aa9df5a46cc9772d37d9153662d32")
+  final val EMISSION_NFT = ErgoId.create("04e8906663f66329c67a471e9209587254a56bc52ccc1d46961d08d67dde1e96")
+  // TODO: Change before launch
+  // Emission Config NFT
+  final val EMCONFIG_NFT = ErgoId.create("a26eac8332642e116ceb8abbe0ef432b7048ead37c30a179656e35a269cd3fdd")
+  // Ids and amount of proposition tokens on Emission contract
+  final val COLLAT_TOKEN = ErgoId.create("3e1baee3a2ee3f35d2c19d31458288429ae2b744d7b05f1b815ee373aed91c2b")
+  final val QUEUE_TOKEN  = ErgoId.create("93b552defdfdb588c1192ef246d9c2bc45e78e3c5779079dd8351cd12e6b637d")
+  final val PROP_TOKEN_AMNT = Long.MaxValue
+
+  final val PERMIT_FLOOR = 1000L * Parameters.OneErg
+  final val PERMIT_CEIL  = 30000L * Parameters.OneErg
+  final val PERMIT_SLOPE = 10 * Parameters.OneErg
+  final val PERMIT_PARAMS = Array(PERMIT_FLOOR, PERMIT_CEIL, PERMIT_SLOPE)
+  final val FOUNDER_1 = Contract.fromAddress(Address.create("3WwcyDX8iQjPR6H2VSGDp22SaJ3c8bo1RWWvHhZy19JXJzrxWFbu"))
+  final val FOUNDER_2 = Contract.fromAddress(Address.create("3WyZJc1pWf8P2o6AT2Ewq7yb5ThBHdk8SLSNyUyoGbSBXXpY3w8F"))
+  final val FOUNDER_3 = Contract.fromAddress(Address.create("3Wx1MUteyRXC15mor65vt7VTPvJLZvnJ2dzd4sczi49wvuS78vE1"))
+
 
   /**
    * Parse diff string and return its tau value

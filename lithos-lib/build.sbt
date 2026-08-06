@@ -8,6 +8,8 @@ libraryDependencies ++= Seq(
   "org.scorexfoundation" %% "sigma-state" % "6.0.2",
   "org.ergoplatform" %% "ergo-wallet" % "6.0.0",
   "org.ergoplatform" %% "ergo-appkit" % "6.0.0",
+  "org.ergoplatform" %% "ergo-appkit" % "6.0.0" % Test classifier "tests",
+  "com.squareup.okhttp3" % "mockwebserver" % "3.12.0" % Test,
   "io.github.k-singh" %% "plasma-toolkit" % "1.1.0",
   "org.scalatest" %% "scalatest" % "3.2.14" % "test",
   "com.github.Satergo" % "JStratum" % "b3ad654112",
@@ -23,6 +25,9 @@ libraryDependencies ++= Seq(
   "org.ethereum" % "leveldbjni-all" % "1.18.3",
   "org.iq80.leveldb" % "leveldb" % "0.12",
 )
+Test / parallelExecution := false
+testOptions in Test += Tests.Argument(TestFrameworks.ScalaTest, "-y", "org.scalatest.propspec.AnyPropSpec")
+
 resolvers ++= Seq(
   "Sonatype Releases" at "https://oss.sonatype.org/content/repositories/releases/",
   "SonaType" at "https://oss.sonatype.org/content/groups/public",

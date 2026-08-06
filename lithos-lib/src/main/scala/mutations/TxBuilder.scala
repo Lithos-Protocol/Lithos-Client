@@ -65,10 +65,10 @@ class TxBuilder(ctx: BlockchainContext){
     }
 
     val uTx = uTxB
-      .boxesToSpend(inputs.map(_.toFullInput).toIndexedSeq.asJava)
-      .withDataInputs(dataInputs.map(_.input).toIndexedSeq.asJava)
-      .outputs(outputsToUse.map(_.toOutBox(ctx)): _*)
-      .sendChangeTo(changeAddress.getErgoAddress)
+      .addInputs(inputs.map(_.toFullInput):_*)
+      .addDataInputs(dataInputs.map(_.input):_*)
+      .addOutputs(outputsToUse.map(_.toOutBox(ctx)): _*)
+      .sendChangeTo(changeAddress)
 
     if(fee > 0)
       uTx.fee(fee)

@@ -1,0 +1,290 @@
+{
+  // LiquidityPool
+  // Value: ERG reserves plus this liquidity state's externalized ERG fees
+  // AMM adapted from ErgoDex n2t Pool. A liquidity provision is a box carrying one provision token,
+  // whose whole supply lives here and can only leave through a deposit, so holding one is proof the
+  // pool created the box and therefore that its registers were set by the deposit rules. Ownership of
+  // the provision is bearer: a deposit mints an NFT and the provision box names it, so whoever holds
+  // that NFT can claim or redeem. Nothing is stored in a tree and nothing needs synchronizing.
+
+  // REGISTERS
+  // R4: liquidity (Long) - reserved LP. Supply is CONST_LOCKED_LP - liquidity.
+  // R5: feeParams (Coll[Long]) - [dexFee, ergFee, tokenFee] numerators over FeeDenom. dexFee returns to
+  // the pool, the other two are externalized into feeInfo.
+  // R6: feeInfo (Coll[Long]) - [lsFeesX, lsFeesY] fees accrued during the current liquidity state.
+  // R7: poolState (Coll[Long]) - [stateIndex, liveProvisions]. stateIndex advances on every fee
+  // withdrawal and identifies which fee box a provision may claim from. liveProvisions is stamped onto
+  // each fee box so it knows when every claim has been made and it may be consumed.
+  val liquidity  = SELF.R4[Long].get
+  val feeParams  = SELF.R5[Coll[Long]].get
+  val feeInfo    = SELF.R6[Coll[Long]].get
+  val poolState  = SELF.R7[Coll[Long]].get
+  val stateIndex     = poolState(0)
+  val liveProvisions = poolState(1)
+
+  val lsFeesX0 = feeInfo(0)
+  val lsFeesY0 = feeInfo(1)
+
+  // TOKENS
+  // 0: pool NFT
+  // 1: tokenY. The AMM invariant keeps reserves off zero, so this entry never disappears and the index
+  // below it never shifts.
+  // 2: provision token. Whole supply minted here at genesis; exactly one leaves per deposit and returns
+  // per redemption. A single token in a box is what proves the pool built that box.
+  val poolNFT0   = SELF.tokens(0)
+  val tokenY0    = SELF.tokens(1)
+  val provToken0 = SELF.tokens(2)
+
+  // CONSTANTS
+  // CONST_FEE_REWARD_HASH: Hashed prop bytes of the FeeRewards contract
+  // CONST_PROVISION_HASH: Hashed prop bytes of the Provision contract
+  val CONST_LOCKED_LP  = 0x7fffffffffffffffL
+  val CONST_FEE_DENOM  = 10000
+  val CONST_MIN_RENT   = 10000000L // permanently locked, keeps the pool above storage rent
+  // Refundable deposit funding a fee box's existence, returned on its last claim
+  val CONST_CLAIM_DEPOSIT = 1000000L
+  // A provision box is meant to sit for years, which is exactly what storage rent collects. If a box's
+  // value ever falls below the rent owed, a miner may take the whole box including its provision token,
+  // and the provision with it. The Provision contract's refresh path is the real defence, since a box
+  // that is periodically re-made never grows old enough; this buffer is what keeps a single sweep from
+  // clearing the tokens if nobody refreshes. Size it above storageFeeFactor times the compiled box
+  // size, which is not known until the contract compiles.
+  val CONST_PROVISION_MIN = 100000000L
+
+  // CONTEXT VARS
+  // CTX_OP(0): Byte, operation being performed
+  // 0 - Swap      - ERG for token or token for ERG.
+  // 1 - Deposit   - Add liquidity, mint the ownership NFT, hand out a provision token. Requires zero
+  //                 outstanding fees.
+  // 2 - Redeem    - Remove a whole provision and return its token. Requires zero outstanding fees.
+  // 3 - Withdraw  - Move this state's fees into a fee box and open the next liquidity state.
+  // CTX_DEPOSITOR(1): Coll[Byte], withdraw only - hashed prop bytes of whoever funds the claim deposit.
+  val CTX_OP = getVar[Byte](0).get
+
+  val successor = OUTPUTS(0)
+  val onlyOne   = INPUTS(0).id == SELF.id
+
+  // Helper Methods
+  def numTokenInOutputs(tokenId: Coll[Byte]): Long = {
+    OUTPUTS.fold(0L, {
+      (a: Long, b: Box) =>
+        a + b.tokens.fold(0L, {
+          (z: Long, t: (Coll[Byte], Long)) => if(t._1 == tokenId) z + t._2 else z
+        })
+    })
+  }
+
+  def numTokenInInputs(tokenId: Coll[Byte]): Long = {
+    INPUTS.fold(0L, {
+      (a: Long, b: Box) =>
+        a + b.tokens.fold(0L, {
+          (z: Long, t: (Coll[Byte], Long)) => if(t._1 == tokenId) z + t._2 else z
+        })
+    })
+  }
+
+  // ASSUMPTIONS - statements which can be assumed to be true due to other contracts enforcing them
+  // Minted at genesis with the pool NFT, the token reserve, and the whole provision token supply
+  // Deposits and redemptions are only reachable with feeInfo at zero, so within one liquidity state the
+  // supply is fixed once fees begin accruing. Every provision live during a state therefore shares one
+  // denominator, which is what lets a fee box hold a single supply figure.
+  // The Provision contract conserves the provision token, the NFT id and the provision amount for the
+  // life of a provision box, and requires the NFT in inputs before it may be spent at all
+  //
+  // DELIBERATE OMISSIONS - conditions left out on purpose
+  // Where a deposit's NFT goes is not pinned. The depositor builds the transaction, so it lands wherever
+  // they put it, and from then on ownership follows the token rather than an address.
+  // Fee boxes carry no token of their own. A forged one runs the real fee logic funded by its forger and
+  // can steal nothing; the only harm is a claimant advancing their own marker against a box they chose,
+  // which no one else can force on them. That changes if claims ever become permissionless.
+
+  val nextLiquidity = successor.R4[Long].get
+  val nextFeeParams = successor.R5[Coll[Long]].get
+  val nextFeeInfo   = successor.R6[Coll[Long]].get
+  val nextPoolState = successor.R7[Coll[Long]].get
+  val lsFeesX1 = nextFeeInfo(0)
+  val lsFeesY1 = nextFeeInfo(1)
+
+  val poolNFT1   = successor.tokens(0)
+  val tokenY1    = successor.tokens(1)
+  val provToken1 = successor.tokens(2)
+
+  val supplyLP0 = CONST_LOCKED_LP - liquidity
+  val supplyLP1 = CONST_LOCKED_LP - nextLiquidity
+
+  val reservesX0 = SELF.value - lsFeesX0
+  val reservesY0 = tokenY0._2 - lsFeesY0
+  val reservesX1 = successor.value - lsFeesX1
+  val reservesY1 = tokenY1._2 - lsFeesY1
+
+  val totalDeltaX = successor.value - SELF.value
+  val totalDeltaY = tokenY1._2 - tokenY0._2
+  val deltaLSFeesX = lsFeesX1 - lsFeesX0
+  val deltaLSFeesY = lsFeesY1 - lsFeesY0
+
+  val deltaSupplyLP  = supplyLP1  - supplyLP0
+  val deltaReservesX = reservesX1 - reservesX0
+  val deltaReservesY = reservesY1 - reservesY0
+
+  val feeNum0 = feeParams(0)
+
+  val poolPreserved = allOf(
+    Coll(
+      onlyOne,
+      successor.propositionBytes == SELF.propositionBytes,
+      poolNFT1 == poolNFT0,
+      tokenY1._1 == tokenY0._1,
+      provToken1._1 == provToken0._1,
+      successor.tokens.size == 3,
+      nextFeeParams == feeParams,
+      successor.value > CONST_MIN_RENT
+    )
+  )
+
+  // Deposits and redemptions may only happen on a clean fee slate, which is what makes a liquidity
+  // state a period of constant supply and so gives every provision in it one denominator
+  val feesSettled = lsFeesX0 == 0 && lsFeesY0 == 0 && deltaLSFeesX == 0 && deltaLSFeesY == 0
+
+  val validAction = {
+    // Swap
+    if(CTX_OP == 0.toByte){
+      val untouched =
+        nextPoolState == poolState &&
+        numTokenInInputs(provToken0._1) == provToken0._2 &&
+        provToken1._2 == provToken0._2
+
+      if(deltaReservesX > 0){
+        val satisfiesAMM = reservesY0.toBigInt * deltaReservesX * feeNum0 >=
+          -deltaReservesY * (reservesX0.toBigInt * CONST_FEE_DENOM + deltaReservesX * feeNum0)
+        val feeXAdded = deltaLSFeesX.toBigInt == (feeParams(1).toBigInt * totalDeltaX) / CONST_FEE_DENOM
+        satisfiesAMM && feeXAdded && deltaLSFeesY == 0 && deltaSupplyLP == 0 && untouched
+      }else{
+        val satisfiesAMM = reservesX0.toBigInt * deltaReservesY * feeNum0 >=
+          -deltaReservesX * (reservesY0.toBigInt * CONST_FEE_DENOM + deltaReservesY * feeNum0)
+        val feeYAdded = deltaLSFeesY.toBigInt == (feeParams(2).toBigInt * totalDeltaY) / CONST_FEE_DENOM
+        satisfiesAMM && feeYAdded && deltaLSFeesX == 0 && deltaSupplyLP == 0 && untouched
+      }
+
+    // Deposit - one transaction: the liquidity goes in, a provision token comes out, and the NFT that
+    // owns it is minted from this box's id
+    }else if(CTX_OP == 1.toByte){
+      val provisionBox = OUTPUTS(1)
+      val sharesUnlocked = min(
+        deltaReservesX.toBigInt * supplyLP0 / reservesX0,
+        deltaReservesY.toBigInt * supplyLP0 / reservesY0
+      )
+
+      allOf(
+        Coll(
+          feesSettled,
+          deltaSupplyLP > 0,
+          deltaSupplyLP <= sharesUnlocked,
+          blake2b256( provisionBox.propositionBytes ) == CONST_PROVISION_HASH,
+          provisionBox.tokens(0)._1 == provToken0._1,
+          provisionBox.tokens(0)._2 == 1L,
+          provisionBox.tokens.size  == 1,
+          // Kept above the rent a single sweep could charge, so a box left sitting cannot have its
+          // provision token taken out from under it
+          provisionBox.value >= CONST_PROVISION_MIN,
+          // Entitled to every fee box from this state onward, so the last claimed state starts one behind
+          provisionBox.R4[Long].get == stateIndex - 1L,
+          // The NFT's id can only be this box's id, which is what makes it unmintable anywhere else
+          provisionBox.R5[Coll[Byte]].get == SELF.id,
+          provisionBox.R6[Long].get == deltaSupplyLP,
+          numTokenInOutputs(SELF.id) == 1L,
+          // The provision token leaving is pinned to that one box, so none is left over to build a
+          // second provision from
+          numTokenInInputs(provToken0._1) == provToken0._2,
+          provToken1._2 == provToken0._2 - 1L,
+          nextPoolState == Coll(stateIndex, liveProvisions + 1L)
+        )
+      )
+
+    // Redeem - the whole provision leaves and its token comes home. The Provision contract has already
+    // required the NFT in inputs and burned it.
+    }else if(CTX_OP == 2.toByte){
+      val provisionBox = INPUTS(1)
+      val provision    = provisionBox.R6[Long].get
+
+      val _deltaSupplyLP = deltaSupplyLP.toBigInt
+      val satisfiesAMM =
+        deltaReservesX.toBigInt * supplyLP0 >= _deltaSupplyLP * reservesX0 &&
+        deltaReservesY.toBigInt * supplyLP0 >= _deltaSupplyLP * reservesY0
+
+      allOf(
+        Coll(
+          feesSettled,
+          // One provision token in the box is the whole proof it came from here, and therefore that the
+          // amount it records was written by this contract
+          blake2b256( provisionBox.propositionBytes ) == CONST_PROVISION_HASH,
+          provisionBox.tokens(0)._1 == provToken0._1,
+          provisionBox.tokens(0)._2 == 1L,
+          satisfiesAMM,
+          // Every fee state this provision was live for must already have been claimed. A provision
+          // that leaves with claims outstanding is one its fee boxes are still counting, so their
+          // claimsRemaining could never reach zero and the deposits behind them would never come back.
+          provisionBox.R4[Long].get == stateIndex - 1L,
+          // The whole provision leaves, never part of it
+          -1 * deltaSupplyLP == provision,
+          numTokenInInputs(provToken0._1) == provToken0._2 + 1L,
+          provToken1._2 == provToken0._2 + 1L,
+          nextPoolState == Coll(stateIndex, liveProvisions - 1L)
+        )
+      )
+
+    // Withdraw - this state's fees become a fee box and the next state opens
+    }else if(CTX_OP == 3.toByte){
+      // CTX_DEPOSITOR(1): hashed prop bytes of whoever funds this fee box's claim deposit
+      val CTX_DEPOSITOR = getVar[Coll[Byte]](1).get
+      val feeBox = OUTPUTS(1)
+      val feeY   = feeBox.tokens.getOrElse(1, (Coll(0.toByte), 0L))
+
+      val tokenRewarded = {
+        if(lsFeesY0 > 0)
+          feeY._1 == tokenY0._1 && feeY._2 == lsFeesY0 && totalDeltaY == -lsFeesY0
+        else
+          feeBox.tokens.size == 1 && totalDeltaY == 0
+      }
+
+      allOf(
+        Coll(
+          lsFeesX0 > 0 || lsFeesY0 > 0,
+          blake2b256( feeBox.propositionBytes ) == CONST_FEE_REWARD_HASH,
+          // A provision token rides along so a provision box can tell this fee box from a forgery, which
+          // is what makes it safe to let anyone settle a claim without the owner's NFT. It is burned
+          // when the box is consumed rather than returned, since nothing here is spent alongside it.
+          feeBox.tokens(0)._1 == provToken0._1,
+          feeBox.tokens(0)._2 == 1L,
+          feeBox.tokens.size <= 2,
+          // A state can close with less in fees than a box costs to hold, and charging that to claimants
+          // would price small provisions out of claiming at all. Whoever closes the state funds it, and
+          // gets it back on the last claim.
+          feeBox.value >= lsFeesX0 + CONST_CLAIM_DEPOSIT,
+          totalDeltaX == -lsFeesX0,
+          CTX_DEPOSITOR.size == 32,
+          tokenRewarded,
+          feeBox.R4[Long].get == stateIndex,
+          feeBox.R5[Long].get == supplyLP0,
+          feeBox.R6[Coll[Long]].get == feeInfo,
+          // How many claims are outstanding, so the fee box knows when it may be consumed
+          feeBox.R7[Long].get == liveProvisions,
+          feeBox.R8[Coll[Byte]].get == CTX_DEPOSITOR,
+          // The pool itself is untouched, only its fee slate is cleared and the state advances
+          lsFeesX1 == 0,
+          lsFeesY1 == 0,
+          deltaSupplyLP == 0,
+          deltaReservesX == 0,
+          deltaReservesY == 0,
+          numTokenInInputs(provToken0._1) == provToken0._2,
+          provToken1._2 == provToken0._2 - 1L,
+          nextPoolState == Coll(stateIndex + 1L, liveProvisions)
+        )
+      )
+
+    }else{
+      false
+    }
+  }
+
+  sigmaProp(poolPreserved && validAction)
+}

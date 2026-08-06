@@ -15,6 +15,7 @@ import state.LFSMTransformer
 import state.messages.StateFrameMessages.CheckBlock
 import stratum.data.{MiningCandidate, Options}
 import stratum.{CollateralData, CollateralRetriever}
+import utils.Globals
 
 import java.io.{OutputStream, PrintStream}
 import java.net.ConnectException
@@ -270,7 +271,7 @@ class LithosPool(options: Options,
       {
         try {
           if(checkCollat) {
-            val data = withSilencedStdout(new CollateralRetriever(client, prover).getCollateral)
+            val data = new CollateralRetriever(client, prover, Globals.getNodeConfig.getNodeApi).getCollateral
             if (!collateralData.contains(data)) {
               logger.info(s"Got collateral utxo ${data.collateralId} from lender ${data.lenderAddress}")
               logger.info(s"Generated $data with tx size: ${data.txBytes.length} and input size: ${data.collateralBoxBytes.length}")
@@ -299,7 +300,8 @@ class LithosPool(options: Options,
               nodeInterface.miningCandidate(
                 useCollateral = true,
                 Some(collData.txJSON),
-                Some(apiKey)
+                Some(apiKey),
+                Some(collData.pk)
               ),
               options.data.protocolVersion,
               collData
@@ -357,7 +359,7 @@ class LithosPool(options: Options,
     }
 
   private def refreshCollateral = {
-    Future(withSilencedStdout(new CollateralRetriever(client, prover).getCollateral))
+    Future(new CollateralRetriever(client, prover, Globals.getNodeConfig.getNodeApi).getCollateral)
       .map(CollateralRefreshed.apply)
       .pipeTo(self)
   }

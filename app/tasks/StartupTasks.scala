@@ -21,10 +21,22 @@ import scala.util.{Failure, Success, Try}
 @Singleton
 class StartupTasks @Inject()(system: ActorSystem, config: Configuration, cs: CoordinatedShutdown) {
 
-  val logger: Logger = LoggerFactory.getLogger("StartupTasks")
-  val contexts: Contexts = new Contexts(system)
-  val nispDB = Globals.nispDB
-  val mdDb = Globals.mdDB
+  private val logger: Logger = LoggerFactory.getLogger("StartupTasks")
+  private val contexts: Contexts = new Contexts(system)
+
+
+  // Check node is live and indexed
+  Globals.getNodeConfig.getNodeApi.indexedHeight() match {
+    case Failure(exception) =>
+      logger.error(s"Got error when checking node during startup", exception)
+      logger.error("Aborting startup...")
+      throw exception
+    case Success(value) =>
+      logger.info(s"Got indexed node with heights: ${value}")
+  }
+
+  private val nispDB = Globals.nispDB
+  private val mdDb = Globals.mdDB
   cs.addTask(CoordinatedShutdown.PhaseServiceUnbind, "close-db"){
     () =>
       logger.info("Closing DBs")

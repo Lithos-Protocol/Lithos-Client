@@ -3,7 +3,7 @@ package mining
 import node.NodeApi
 import node.model.{MiningSolution, NodeInfo}
 import node.rest.RestNodeApi
-import org.json.JSONObject
+import org.json.{JSONArray, JSONObject}
 import org.slf4j.{Logger, LoggerFactory}
 
 import java.net.URI
@@ -58,7 +58,8 @@ class MiningNodeInterface(nodeApiUrl: String) {
    */
   def miningCandidate(useCollateral: Boolean,
                       postBody: Option[String],
-                      apiKey: Option[String]): JSONObject =
+                      apiKey: Option[String],
+                      minerPk: Option[String] = None): JSONObject =
     try {
       if (!useCollateral) {
         val json = new JSONObject(
@@ -70,17 +71,22 @@ class MiningNodeInterface(nodeApiUrl: String) {
         }
         json
       } else {
-        val httpReq = req("/mining/candidateWithTxs")
+        val body = new JSONObject()
+          .put("txs", new JSONArray().put(new JSONObject(postBody.getOrElse("{}"))))
+          .put("pk", minerPk.getOrElse(""))
+        val httpReq = req("/mining/candidateWithTxsAndPk")
           .header("Content-Type", "application/json")
           .header("api_key", apiKey.getOrElse(""))
-          .POST(HttpRequest.BodyPublishers.ofString("[" + postBody.getOrElse("") + "]"))
+          .POST(HttpRequest.BodyPublishers.ofString(body.toString))
           .build()
         val json = new JSONObject(http.send(httpReq, HttpResponse.BodyHandlers.ofString()).body())
         if (json.has("error")) {
           if (json.getInt("error") == 403)
             logger.error("API key does not match the node's configured API key")
-          else
+          else {
             logger.error(s"Error while requesting candidateWithTxs: errorCode=${json.getInt("error")}, reason=${json.optString("reason", "unknown")}")
+            //logger.error(json.toString)
+          }
           throw new RuntimeException("HTTP request to /mining/candidateWithTxs failed")
         }
         json

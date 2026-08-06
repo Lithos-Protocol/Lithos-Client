@@ -47,7 +47,15 @@ case class IndexedBlock(header: NodeHeader,
                         adProofs: Option[NodeAdProofs],
                         size: Int)
 
-case class MerkleLevel(hash: String, side: Int)
+case class MerkleLevel(digest: String, side: Int) {
+  def encoded: String = f"${side & 0xff}%02x" + digest
+}
+
+object MerkleLevel {
+  def fromEncoded(hex: String): MerkleLevel =
+    if (hex.length < 2) MerkleLevel(hex, 0)
+    else MerkleLevel(hex.substring(2), Integer.parseInt(hex.substring(0, 2), 16))
+}
 
 case class NodeMerkleProof(leaf: String, levels: Seq[MerkleLevel])
 

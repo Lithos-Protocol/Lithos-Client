@@ -19,6 +19,11 @@ case class UTXO(contract: Contract, value: Long,
   def withReg(idx: Int, reg: ErgoValue[_]): UTXO = {
     setRegs(registers.patch(idx, Seq(reg), 1): _*)
   }
+  // Register by register number
+  def withRegNum(num: Int, reg: ErgoValue[_]): UTXO = {
+    require(num >= 4, "Cant get registers below R4")
+    withReg(num - 4, reg)
+  }
 
   def setCreationHeight(height: Int): UTXO = this.copy(creationHeight = Some(height))
 
@@ -35,7 +40,7 @@ case class UTXO(contract: Contract, value: Long,
       case Some(value) =>
         setTokens(tokens.patch(tokenIdx, Seq(value + token.amount), 1): _*)
       case None =>
-        addToken(token)
+        setTokens((tokens :+ token):_*)
     }
   }
 

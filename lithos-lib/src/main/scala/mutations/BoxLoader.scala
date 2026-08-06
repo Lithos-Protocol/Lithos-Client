@@ -28,7 +28,7 @@ class BoxLoader(ctx: BlockchainContext, nodeApi: NodeApi) {
     var loaded = Seq.empty[InputUTXO]
     var paging = Paging(0, BoxLoader.PageSize)
     var exhausted = false
-    while (!exhausted && loaded.size < BoxLoader.MaxBoxes) {
+    while (!exhausted) {
       nodeApi.walletUnspentBoxes(ConfirmationRange.Default, paging) match {
         case Success(page) =>
           loaded = loaded ++ page.map(_.toInputUTXO(ctx))
@@ -39,7 +39,7 @@ class BoxLoader(ctx: BlockchainContext, nodeApi: NodeApi) {
           exhausted = true
       }
     }
-    loaded.take(BoxLoader.MaxBoxes)
+    loaded
   }
 
   def getInputs(value: Long): Seq[InputUTXO] = {

@@ -165,7 +165,7 @@
       holdingBox.R4[AvlTree].get.isUpdateAllowed,
       holdingBox.R4[AvlTree].get.isRemoveAllowed,
       holdingBox.R4[AvlTree].get.keyLength == 32,
-      !holdingBox.R4[AvlTree].get.valueLengthOpt.isDefined
+      holdingBox.R4[AvlTree].get.valueLengthOpt.isEmpty
     )
   )
 
@@ -178,6 +178,8 @@
       holdingBox.R5[Int].get    == 0,
       holdingBox.R6[BigInt].get == 0.toBigInt,
       holdingBox.R7[Long].get   == HEIGHT,
+      // R8 Holds propBytesHash of the miner, so that a miner's claim over their supershares is tied to
+      // their PoW and cannot be faked
       holdingBox.R8[Coll[Byte]].get.size == 32
     )
   )
