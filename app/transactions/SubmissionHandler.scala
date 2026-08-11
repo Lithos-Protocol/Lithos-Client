@@ -3,8 +3,10 @@ package transactions
 import akka.actor.{Actor, ActorRef}
 import akka.pattern.ask
 import akka.util.Timeout
-import configs.{StateConfig, StratumConfig}
+import configs.{NodeContext, StateConfig, StratumConfig}
+import lfsm.contracts.FraudProofContracts
 import mutations.NotEnoughInputsException
+import org.bouncycastle.util.encoders.Hex
 import org.ergoplatform.appkit._
 import org.ergoplatform.sdk.JavaHelpers
 import org.slf4j.{Logger, LoggerFactory}
@@ -15,17 +17,17 @@ import state.messages.MempoolMessages.{RebuildMempoolChains, ResetMempoolState}
 import state.messages.RollupMessages
 import state.messages.RollupMessages.{GetCurrentRollup, RemoveRollup, RollupInfo}
 import state.{DataBoxRetrievalException, LFSMTransformer, NoValidNISPException}
-import stratum.CollateralRetriever
+import transactions.BlockTxMessages.{BlockTxsReady, CandidateTx}
 import transactions.SubmissionHandler._
 import transactions.TransactionMessages.RollupTxType._
-import transactions.TransactionMessages._
-import transactions.WalletMessages.{ExcludeInputs, RefreshBoxes, RetrieveInputs, WalletInputs}
+import transactions.TransactionMessages.{BatchAccepted, _}
+import transactions.WalletMessages.{ExcludeInputs, ReleaseInputs, RetrieveCoveringInput, RetrieveInputs, WalletInputs}
 import utils.Globals
-import work.lithos.mutations.{InputUTXO, Token, UTXO}
+import work.lithos.mutations.{Contract, InputUTXO, Token, UTXO}
 
 import javax.inject.{Inject, Named}
 import scala.concurrent.duration.DurationInt
-import scala.concurrent.{Await, ExecutionContext, Future}
+import scala.concurrent.{Await, ExecutionContext, Future, blocking}
 import scala.util.{Failure, Success, Try}
 
 /**
@@ -33,7 +35,7 @@ import scala.util.{Failure, Success, Try}
  * Receives RollupBatch messages from TransactionProcessor and performs
  * on-chain submission for each stub in priority order.
  */
-class SubmissionHandler @Inject()(config: Configuration,
+class SubmissionHandler @Inject()(config: Configuration, nodeContext: NodeContext,
                                   cacheApi: SyncCacheApi,
                                   @Named("sync-handler") syncHandler: ActorRef,
                                   @Named("mempool-view") mempoolView: ActorRef,
@@ -43,7 +45,7 @@ class SubmissionHandler @Inject()(config: Configuration,
   implicit val ec: ExecutionContext = context.dispatcher
 
   private val logger: Logger = LoggerFactory.getLogger("SubmissionHandler")
-  private val nodeConfig = Globals.getNodeConfig
+  private val nodeConfig: NodeContext = nodeContext
   private val stateConfig = new StateConfig(config)
   private val stratumConfig = new StratumConfig(config)
   private val client = nodeConfig.getClient
@@ -54,57 +56,187 @@ class SubmissionHandler @Inject()(config: Configuration,
   private var batchLock: Boolean = false
 
   override def receive: Receive = {
+    // Off the mailbox. A batch is up to five attemptTx retries with five-second sleeps per stub,
+    // plus selection asks, signing and node round trips — tens of seconds. This actor also answers
+    // BuildBlockTxs, which is a miner assembling a block against a 20-second budget, so running the
+    // batch inline silently cost every block its inserted transactions.
+    //
+    // It also makes batchLock mean something. Inline, nothing else could be processed while the
+    // batch ran, so the lock guarded nothing — while submitRemainingTxs' Futures went on reading
+    // feeAllocations and inputsUsed after receive returned, where a second batch could overwrite
+    // both underneath them.
     case RollupBatch(stubs) =>
-      if (!batchLock) {
-        batchLock = true
-        val initialTxInfo = InitialTxInfo(stubs.map {
-          s =>
-            if (s.txType != Payout)
-              s.rollupBlockId -> s.fee
-            else // Payouts should allocate a little extra, in case they can claim change with tokens
-              s.rollupBlockId -> (s.fee + UTXO.MIN_FEE)
-        }.toMap)
-        logger.info("Creating initial transaction to handle RollupBatch")
-        walletManager ! RefreshBoxes
-        val initialTx = submitInitialTransaction(stubs, initialTxInfo)
-        initialTx match {
-          case Failure(_) =>
-            logger.warn("Failed to produce an initial transaction from the RollupBatch")
-          case Success(txId) =>
-            logger.info(s"Successfully sent initial transaction with id $txId")
-            logger.info(s"Now attempting ${feeAllocations.size} remaining  transactions")
-
-            // Updates wallet manager to prevent issues with other txs later
-            walletManager ! ExcludeInputs(feeAllocations.values.toSeq)
-            walletManager ! ExcludeInputs(inputsUsed, dueToUsage = true)
-
-            val remainingStubs = stubs.filter(s => feeAllocations.contains(s.rollupBlockId))
-            submitRemainingTxs(remainingStubs)
-
-
-            Try{
-              if(stateConfig.autoCollat) {
-                logger.info("Auto-collateralization was enabled, now checking collateral state")
-//                val collatRetriever = new CollateralRetriever(client, wallet)
-//                collatRetriever.checkCollateral(getWalletInputs(_, Seq.empty, trackUsed = true), stateConfig.maxCollat)
-              }
-              if (stateConfig.autoCommit.getOrElse(true)) {
-                logger.info("Auto-commits were enabled, now checking difficulty commitment state")
-                client.execute(ctx => LFSMTransformer.checkAutoCommits(ctx, stratumConfig.diff,
-                  wallet, getWalletInputs(_, Seq.empty, trackUsed = true)))
-              }
-            }.recover{
-              case e =>
-                logger.error("Got exception during end of submission", e)
-                Failure(e)
-            }
-        }
-        batchLock = false
-      } else {
+      if (batchLock)
+        // Unacknowledged on purpose: the sender keeps these stubs and offers them again next tick.
         logger.info("Ignored incoming RollupBatch due to submission lock")
+      else {
+        batchLock = true
+        // Acknowledged on acceptance rather than on completion. A batch that fails part way has
+        // still consumed its stubs — the failures are per-stub and retried inside — whereas one that
+        // was never started must not lose them.
+        sender() ! BatchAccepted(stubs)
+        // flatMap, so the lock is held until the parallel attempts finish too. Releasing when the
+        // initial transaction is done would let the next batch overwrite feeAllocations while they
+        // are still reading it.
+        Future(runBatch(stubs)).flatMap(identity).onComplete {
+          case Success(_) => self ! BatchFinished
+          case Failure(ex) =>
+            logger.error("RollupBatch failed outside of transaction handling", ex)
+            self ! BatchFinished
+        }
       }
 
+    case BatchFinished =>
+      batchLock = false
+
+    // A block is being assembled: build the same work fee-less and hand it back without
+    // sending. The stubs stay queued so the funded copies still reach the mempool.
+    case BuildBlockTxs(blockHeight, stubs) =>
+      val replyTo = sender()
+      Future {
+        stubs.flatMap(buildFeeless)
+      }.onComplete {
+        case Success(built) =>
+          if (built.nonEmpty)
+            logger.info(s"Offering ${built.size} fee-less transaction(s) for block $blockHeight: " +
+              built.map(_.kind).mkString(", "))
+          replyTo ! BlockTxsReady(blockHeight, built)
+        case Failure(ex) =>
+          logger.warn(s"No rollup transactions for block $blockHeight: ${ex.getMessage}")
+          replyTo ! BlockTxsReady(blockHeight, Seq.empty[CandidateTx])
+      }
   }
+
+  /**
+   * One batch, start to finish. Runs in a single Future, so `feeAllocations` and `inputsUsed` are
+   * touched by one thread at a time for as long as `batchLock` is held — including by the parallel
+   * Futures `submitRemainingTxs` spawns, which are created after those fields are written.
+   */
+  private def runBatch(stubs: Seq[RollupTxStub]): Future[Unit] = {
+    val initialTxInfo = InitialTxInfo(stubs.map { s =>
+      if (s.txType != Payout)
+        s.rollupBlockId -> s.fee
+      else // Payouts should allocate a little extra, in case they can claim change with tokens
+        s.rollupBlockId -> (s.fee + UTXO.MIN_FEE)
+    }.toMap)
+    logger.info("Creating initial transaction to handle RollupBatch")
+    // No RefreshBoxes here: it is fire-and-forget, so its BoxesRefreshed lands behind the ask
+    // below and the selection would use the old set anyway. Freshness comes from the refresh
+    // ticker and from ReturnInputs handing change back.
+    val stubsReordered = {
+      if (stubs.exists(_.fpInfo.isDefined)) {
+        // Avoid letting fp stubs be the initial tx, since max inputs on them is 2
+        val nonFPIndex = stubs.indexWhere(_.fpInfo.isEmpty)
+        if (nonFPIndex != -1)
+          stubs(nonFPIndex) +: stubs.filter(_.rollupBlockId != stubs(nonFPIndex).rollupBlockId)
+        else // No choice, only fp txs exist
+          stubs
+      } else
+        stubs
+    }
+
+    submitInitialTransaction(stubsReordered, initialTxInfo) match {
+      case Failure(_) =>
+        logger.warn("Failed to produce an initial transaction from the RollupBatch")
+        // Nothing was sent, so the last attempt's inputs are still ours to give back. Leaving them
+        // reserved would hold them until the reservation ages out.
+        releaseInitialInputs()
+        Future.successful(())
+
+      case Success(txId) =>
+        logger.info(s"Successfully sent initial transaction with id $txId")
+        logger.info(s"Now attempting ${feeAllocations.size} remaining  transactions")
+
+        // The initial transaction's own inputs are already reserved by selection. These are its
+        // OUTPUTS, which the node cannot report yet, so they are excluded explicitly.
+        walletManager ! ExcludeInputs(feeAllocations.values.toSeq)
+        inputsUsed = Seq.empty
+
+        val remainingStubs = stubs.filter(s => feeAllocations.contains(s.rollupBlockId))
+        val remaining = submitRemainingTxs(remainingStubs)
+
+        Try {
+          if (stateConfig.autoCommit.getOrElse(true)) {
+            logger.info("Auto-commits were enabled, now checking difficulty commitment state")
+            client.execute(ctx => LFSMTransformer.checkAutoCommits(ctx, stratumConfig.diff,
+              wallet, getWalletInputs(_, Seq.empty, trackUsed = true)))
+          }
+        }.recover {
+          case e =>
+            logger.error("Got exception during end of submission", e)
+            Failure(e)
+        }
+
+        remaining
+    }
+  }
+
+  // ─── fee-less builds for this miner's own block ─────────────────────────────
+
+  /**
+   * The same transaction the normal path would send, with no fee output and no wallet input.
+   *
+   * Every rollup phase recreates its box at the same value, so these balance with nothing added.
+   * That also means they touch no wallet UTXO and cannot contend with the fee allocations the
+   * funded path depends on. Built against the same mempool-aware state, so anything chaining off an
+   * unconfirmed parent stays valid.
+   */
+  private def buildFeeless(stub: RollupTxStub): Option[CandidateTx] =
+    latestRollupState(stub).flatMap { latest =>
+      Try {
+        client.execute { ctx =>
+          checkRollupStubValidity(ctx, stub, latest)
+          val none = Seq.empty[InputUTXO]
+          val noFee = Seq.empty[UTXO]
+          stub.txType match {
+            case NISPSubmission =>
+              val score = LFSMTransformer.getCommitmentsForNISP(client, latest.NISPTree.startHeight).get
+              val holdingInput = latest.inputUTXO
+              Globals.nispDB.getBestValidNISP(
+                holdingInput.registers(3).getValue.asInstanceOf[Long].toInt, score) match {
+                case Some(nisp) =>
+                  val sTx = RollupTransactions.genNISPSubmission(
+                    ctx, wallet, holdingInput, none, latest, noFee, nisp, score)
+                  candidateTx(sTx, CandidateTx.NispSubmission)
+                case None =>
+                  throw new NoValidNISPException(
+                    s"no valid NISP for rollup ${stub.rollupBlockId}")
+              }
+
+            case HoldingTransform =>
+              candidateTx(
+                RollupTransactions.genHoldingTransform(ctx, wallet, latest.inputUTXO, none, noFee),
+                CandidateTx.HoldingTransform)
+
+            case EvalTransform =>
+              candidateTx(
+                RollupTransactions.genEvalTransform(ctx, wallet, latest.inputUTXO, none, noFee),
+                CandidateTx.EvalTransform)
+
+            case Payout =>
+              candidateTx(
+                RollupTransactions.genPayout(ctx, wallet, latest.inputUTXO, none, latest, noFee),
+                CandidateTx.Payout)
+
+            case NISPEvaluation =>
+              // The funded path works; this one does not yet. A fraud proof's context variables
+              // ride on a wallet input, so unlike the phases above it cannot balance on the rollup
+              // box alone. Explicit rather than falling through, because fraud proofs are the
+              // highest-priority thing this method should return once that is solved.
+              throw new IllegalStateException("fraud proofs cannot yet be built without wallet inputs")
+          }
+        }
+      }
+    } match {
+      case Success(tx) => Some(tx)
+      case Failure(ex) =>
+        logger.info(s"Skipping [${stub.txType}] for rollup ${stub.rollupBlockId} " +
+          s"in the block package: ${ex.getMessage}")
+        None
+    }
+
+  private def candidateTx(sTx: SignedTransaction, kind: String): CandidateTx =
+    CandidateTx(sTx.getId.replace("\"", ""), sTx.toJson(false, false), kind)
 
   // ─── submission ───────────────────────────────────────────────────────────
 
@@ -119,7 +251,7 @@ class SubmissionHandler @Inject()(config: Configuration,
       case EvalTransform => sendEvalTransform(_, _, initialTxInfo)
       case NISPEvaluation =>
         stub.fpInfo match {
-          case Some(minerFraudProofData) =>
+          case Some(_) =>
             sendFraudProof(_, _, initialTxInfo)
           case None =>
             // Should never happen
@@ -152,9 +284,20 @@ class SubmissionHandler @Inject()(config: Configuration,
    * @param initialTxInfo Information required for initial transaction
    * @return Sequence of InputUTXOs used in the initial transaction
    */
-  private def initialTxInputs(initialTxInfo: InitialTxInfo): Seq[InputUTXO] = {
+  private def initialTxInputs(initialTxInfo: InitialTxInfo, isFPTx: Boolean = false): Seq[InputUTXO] = {
+    // Reaching here again means the previous attempt never sent, so give its inputs back before
+    // reserving more — five attempts each holding a disjoint set would drain the wallet.
+    releaseInitialInputs()
+
     val ergForFees = initialTxInfo.feesToCreate.values.toSeq.sum
-    val feeInputs = getWalletInputs(ergForFees, Seq.empty, trackUsed = false)
+    // Reserved on selection, not after the send. EmissionHandler draws from the same WalletManager,
+    // and the gap between selecting and sending spans retries and their sleeps.
+    val feeInputs = {
+      if(!isFPTx)
+        getWalletInputs(ergForFees, Seq.empty, trackUsed = true)
+      else
+        getFPWalletInputs(ergForFees, trackUsed = true)
+    }
     if (feeInputs.isEmpty)
       throw new NotEnoughInputsException("WalletManager could not return enough inputs for initial rollup tx")
     else {
@@ -178,7 +321,7 @@ class SubmissionHandler @Inject()(config: Configuration,
    */
   private def rollupWalletInputs(rollupTxStub: RollupTxStub, initialTxInfo: Option[InitialTxInfo]): Seq[InputUTXO] = {
     if (initialTxInfo.isDefined)
-      initialTxInputs(initialTxInfo.get)
+      initialTxInputs(initialTxInfo.get, rollupTxStub.fpInfo.isDefined)
     else
       Seq(feeAllocations(rollupTxStub.rollupBlockId))
   }
@@ -187,12 +330,25 @@ class SubmissionHandler @Inject()(config: Configuration,
    * Update the fee map after the initial transaction, so that later transactions can chain the
    * outputs of the initial transaction to pay their own fees.
    *
+   * The wallet outputs are found by locating the FEE BOX and taking what follows, rather than by a
+   * fixed index. `mkFeeOutputs` always emits `feeBox +: walletOuts` as one run at the end, but the
+   * number of outputs in front of it is per-builder: one for the rollup phases and the fee-less
+   * fraud proof, but TWO for a Payout that pays a miner as well as recreating its box. A constant
+   * offset handed the first rollup the fee box — unsignable, so its transaction failed every attempt
+   * — and shifted every other rollup onto a neighbour's box, which can be worth less than its fee.
+   *
    * @param signed    Signed initial transaction
    * @param outputMap Output map which is the result of calling initialTxOutputs()
    */
   private def updateFeeMap(signed: SignedTransaction, outputMap: Map[String, UTXO]): Unit = {
     val outToSpend = JavaHelpers.toIndexedSeq(signed.getOutputsToSpend).map(InputUTXO(_))
-    feeAllocations = outputMap.keys.zip(outToSpend.slice(2, outputMap.size + 2)).toMap
+    val allocations = walletOutputsAfterFee(outToSpend, outputMap.size)
+    if (allocations.isEmpty && outputMap.nonEmpty)
+      // Cannot happen on a funded path: mkFeeOutputs put a fee box there. Refuse to guess rather
+      // than map rollups onto arbitrary outputs — an empty map leaves the stubs queued for a retry.
+      logger.error(s"Initial transaction ${signed.getId} carries no fee output, so its wallet " +
+        "outputs cannot be located. No fee allocations made; the batch's remaining stubs will retry")
+    feeAllocations = outputMap.keys.zip(allocations).toMap
   }
 
 
@@ -253,38 +409,42 @@ class SubmissionHandler @Inject()(config: Configuration,
   }
 
 
-  private def submitRemainingTxs(remainingStubs: Seq[RollupTxStub]): Unit = {
-    val stubAttempts = remainingStubs.map {
-      s =>
-        s -> Future {
-          attemptTx[RollupTxStub, LatestRollup](getRollupTransaction(s, None), latestRollupState, s)
+  /**
+   * The rest of the batch, in parallel. The returned Future completes only when every attempt has,
+   * which is what keeps `batchLock` covering the fields these read.
+   */
+  private def submitRemainingTxs(remainingStubs: Seq[RollupTxStub]): Future[Unit] = {
+    val attempts: Seq[Future[Unit]] = remainingStubs.map { s =>
+      Future(attemptTx[RollupTxStub, LatestRollup](getRollupTransaction(s, None), latestRollupState, s))
+        .map(reportAttempt(s, _))
+        .recover {
+          case attemptThreadEx =>
+            logger.error(s"Got unexpected error in tx attempt thread for $s", attemptThreadEx)
         }
     }
-    stubAttempts.foreach(s => s._2.onComplete {
-      case Failure(attemptThreadEx) =>
-        logger.error(s"Got unexpected error in tx attempt thread for ${s._1}", attemptThreadEx)
-      case Success(txAttempt) =>
-        txAttempt match {
-          case Failure(mal: ErgoClientException) if mal.getMessage.contains("Every input of the transaction should be in UTXO") =>
-            syncHandler ! ResetMempoolState(s._1.rollupBlockId)
-            logger.warn(s"Got de-synced mempool state for rollup ${s._1.rollupBlockId} attempting ${s._1.txType}")
-          case Failure(ds: ErgoClientException) if ds.getMessage.contains("Double spending") =>
-            logger.warn(s"Got double spend for rollup ${s._1.rollupBlockId} attempting ${s._1.txType}")
-          case Failure(_: NoValidNISPException) =>
-            ()
-          case Failure(_: IllegalStateException) =>
-            ()
-          case Failure(_: RollupRemovedException) =>
-            ()
-          case Failure(_: StubInvalidException) =>
-            ()
-          case Failure(exception) =>
-            logger.error(s"Got failure for rollup ${s._1.rollupBlockId} attempting ${s._1.txType}", exception)
-          case Success(_) =>
-            ()
-        }
-    })
+    Future.sequence(attempts).map(_ => ())
   }
+
+  private def reportAttempt(stub: RollupTxStub, txAttempt: Try[String]): Unit =
+    txAttempt match {
+      case Failure(mal: ErgoClientException) if mal.getMessage.contains("Every input of the transaction should be in UTXO") =>
+        syncHandler ! ResetMempoolState(stub.rollupBlockId)
+        logger.warn(s"Got de-synced mempool state for rollup ${stub.rollupBlockId} attempting ${stub.txType}")
+      case Failure(ds: ErgoClientException) if ds.getMessage.contains("Double spending") =>
+        logger.warn(s"Got double spend for rollup ${stub.rollupBlockId} attempting ${stub.txType}")
+      case Failure(_: NoValidNISPException) =>
+        ()
+      case Failure(_: IllegalStateException) =>
+        ()
+      case Failure(_: RollupRemovedException) =>
+        ()
+      case Failure(_: StubInvalidException) =>
+        ()
+      case Failure(exception) =>
+        logger.error(s"Got failure for rollup ${stub.rollupBlockId} attempting ${stub.txType}", exception)
+      case Success(_) =>
+        ()
+    }
 
 
   private def sendNISPSubmission(stub: RollupTxStub,
@@ -366,7 +526,24 @@ class SubmissionHandler @Inject()(config: Configuration,
   private def sendFraudProof(stub: RollupTxStub,
                              latestState: LatestRollup,
                              initialTxInfo: Option[InitialTxInfo]): Try[String] = {
-    Try("")
+    Try {
+      client.execute {
+        ctx =>
+          checkRollupStubValidity(ctx, stub, latestState)
+
+          val initOutputs = initialTxInfo.map(initialTxOutputs(stub, _))
+          val feeOutputs = mkFeeOutputs(stub, initOutputs)
+          val sTx = RollupTransactions.genFraudProofTransform(ctx, wallet, latestState.inputUTXO,
+            rollupWalletInputs(stub, initialTxInfo), latestState, feeOutputs, stub.fpInfo.get._1,
+            stub.fpInfo.get._2)
+          if (initOutputs.isDefined)
+            updateFeeMap(sTx, initOutputs.get._2)
+          val txId = ctx.sendTransaction(sTx).replace("\"", "")
+          logger.info(s"Sent transaction ${txId} to submit fraud proof for miner ${Hex.toHexString(stub.fpInfo.get._1)}" +
+            s" for rollup ${stub.rollupBlockId}")
+          txId
+      }
+    }
   }
 
   private def sendPayout(stub: RollupTxStub,
@@ -407,9 +584,12 @@ class SubmissionHandler @Inject()(config: Configuration,
     var attempts = 0
     var lastResult: Try[String] = Failure(new RuntimeException("No attempts made"))
 
+    // `blocking` matters: these run as parallel Futures on the same fork-join pool as WalletManager,
+    // and callers Await on that mailbox. Without it, enough concurrent retries sleeping starve the
+    // pool and those Awaits time out, which surfaces as transactions failing for no visible reason.
     def expectedFailure(): Unit = {
       attempts += 1
-      if (attempts < MAX_TX_ATTEMPTS) Thread.sleep(ATTEMPT_INTERVAL)
+      if (attempts < MAX_TX_ATTEMPTS) blocking(Thread.sleep(ATTEMPT_INTERVAL))
     }
 
     while (attempts < MAX_TX_ATTEMPTS) {
@@ -450,8 +630,18 @@ class SubmissionHandler @Inject()(config: Configuration,
     lastResult
   }
 
+  /** Hand back inputs reserved for an initial transaction that was never sent. */
+  private def releaseInitialInputs(): Unit =
+    if (inputsUsed.nonEmpty) {
+      walletManager ! ReleaseInputs(inputsUsed)
+      inputsUsed = Seq.empty
+    }
+
   private def getWalletInputs(amnt: Long, tokens: Seq[Token], trackUsed: Boolean): Seq[InputUTXO] = {
     Await.result((walletManager ? RetrieveInputs(amnt, tokens, trackUsed = trackUsed)).mapTo[WalletInputs], 5.seconds).inputs
+  }
+  private def getFPWalletInputs(amnt: Long, trackUsed: Boolean): Seq[InputUTXO] = {
+    Await.result((walletManager ? RetrieveCoveringInput(amnt, trackUsed = trackUsed)).mapTo[WalletInputs], 5.seconds).inputs
   }
 
   private def checkRollupStubValidity(ctx: BlockchainContext, stub: RollupTxStub, latestRollup: LatestRollup): Unit = {
@@ -484,6 +674,32 @@ class SubmissionHandler @Inject()(config: Configuration,
 }
 
 object SubmissionHandler {
+
+  /** The fee proposition every `UTXO.feeBox` sits at, derived once rather than per comparison. */
+  private val FeeTreeHex: String = Contract.FEE_720.ergoTreeHex
+
+  /**
+   * The initial transaction's pre-created wallet outputs: the `count` outputs following the fee box.
+   *
+   * Located by finding the fee box rather than by a fixed index, because the number of outputs in
+   * FRONT of it is per-builder. `mkFeeOutputs` always emits `feeBox +: walletOuts` as one run, and
+   * every builder appends that run after its own outputs — but a Payout that pays a miner as well as
+   * recreating its box puts TWO there where the others put one. A constant offset handed the first
+   * rollup the fee-proposition box, which this client cannot sign for, and shifted every other rollup
+   * onto a neighbour's box, which can be worth less than its own fee.
+   *
+   * Empty when there is no fee box, which the caller treats as "make no allocations" rather than
+   * guessing.
+   */
+  private[transactions] def walletOutputsAfterFee(outputs: Seq[InputUTXO], count: Int): Seq[InputUTXO] = {
+    val feeIdx = outputs.indexWhere(_.contract.ergoTreeHex == FeeTreeHex)
+    if (feeIdx < 0) Seq.empty[InputUTXO]
+    else outputs.slice(feeIdx + 1, feeIdx + 1 + count)
+  }
+
+  /** Self-message: the batch and every attempt in it are done, so the lock can come off. */
+  private case object BatchFinished
+
   /** Maximum number of times attemptTx will retry on an ErgoClientException. */
   final val MAX_TX_ATTEMPTS: Int = 5
 

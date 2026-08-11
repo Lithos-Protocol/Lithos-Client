@@ -1,9 +1,7 @@
 package mining
 
 import akka.actor.Actor
-import akka.pattern.pipe
 import evaluation.NTable
-import lfsm.LFSMHelpers
 import mining.MiningMessages._
 import org.bouncycastle.util.encoders.Hex
 import org.slf4j.{Logger, LoggerFactory}
@@ -12,11 +10,8 @@ import stratum.BlockTemplate
 import stratum.counter.{ExtraNonceCounter, JobCounter}
 import stratum.data.{MiningCandidate, Options}
 
-import java.math.BigInteger
-import java.util.Arrays
 import scala.collection.mutable
-import scala.concurrent.ExecutionContext.Implicits.global
-import scala.concurrent.Future
+import scala.util.Try
 
 /**
  * Actor that owns all job-management and share-validation state.
@@ -48,6 +43,12 @@ class LithosJobManager(options: Options) extends Actor {
   private var currentJob: Option[BlockTemplate]   = None
   private val validJobs: mutable.HashMap[String, BlockTemplate] = mutable.HashMap.empty
 
+  /** What the current job is FOR, as opposed to what its header happens to contain. See [[jobIdentity]]. */
+  private var currentIdentity: (Long, Boolean, String) = (-1L, false, "")
+
+  /** Templates ignored since the last real job, logged so the suppression is visible. */
+  private var suppressed: Int = 0
+
   // ─── receive ──────────────────────────────────────────────────────────────
 
   override def receive: Receive = {
@@ -56,22 +57,45 @@ class LithosJobManager(options: Options) extends Actor {
     // Process a new block template fetched from the node.
     // Mirrors JobManager.processTemplate exactly.
     // ------------------------------------------------------------------
-    case ProcessTemplate(candidate, tau, usesCollateral, reducedShareMessages) =>
-      val isNew = currentJob.isEmpty || {
-        !Arrays.equals(currentJob.get.candidate.msg, candidate.msg) &&
-          candidate.height >= currentJob.get.candidate.height
-      }
+    // A solo job must never carry collateral data. Its `pk` decides where the coinbase goes, and a
+    // candidate requested for a lender's key keeps that key even when the genesis transaction is not
+    // in it — mining that pays the lender for a block that spends no collateral, and costs this
+    // miner the reward. Refused outright rather than mined, because there is no safe way to use it.
+    case ProcessTemplate(candidate, _, usesCollateral, _, _)
+      if !usesCollateral && candidate.collateralData != null =>
+      logger.error(s"Refusing a solo template carrying collateral data for pk ${candidate.pk} at " +
+        s"height ${candidate.height} — this would pay a lender for a block with no genesis " +
+        "transaction. Nothing is mined on it")
+      sender() ! false
 
-      if (isNew) {
+    case ProcessTemplate(candidate, tau, usesCollateral, reducedShareMessages, mustPublish) =>
+      val identity = jobIdentity(candidate, usesCollateral)
+      val isNew = currentJob.isEmpty || identity != currentIdentity
+
+      // Never go backwards, whatever the caller says: a template for a height already passed is a
+      // dead block no matter how it was obtained.
+      val notBehind = currentJob.forall(candidate.height >= _.candidate.height)
+
+      // `mustPublish` overrides the identity test because it assumes dropping the template is free,
+      // and once it has been fetched from the node it is not — see the message's own documentation.
+      // Pacing is applied by whoever fetches, before fetching.
+      if (notBehind && (mustPublish || isNew)) {
         val jobId    = jobCounter.next()
         val template = new BlockTemplate(jobId, candidate, tau, usesCollateral, reducedShareMessages)
         currentJob   = Some(template)
+        currentIdentity = identity
         validJobs.put(jobId, template)
         pruneOldJobs(jobId)
-        logger.info(s"New job $jobId at height ${candidate.height} usesCollateral=$usesCollateral")
+        // The header is logged because it is the only way to tell a freshly assembled candidate from
+        // the one the node had cached — two jobs with the same header mean the node did no work.
+        logger.info(s"New job $jobId at height ${candidate.height} usesCollateral=$usesCollateral " +
+          s"msg=${Hex.toHexString(candidate.msg).take(16)}" +
+          (if (suppressed > 0) s" (ignored $suppressed mempool refresh(es) since the last job)" else ""))
+        suppressed = 0
         context.parent ! NewJobAvailable(template)
         sender() ! true
       } else {
+        suppressed += 1
         sender() ! false
       }
 
@@ -86,11 +110,40 @@ class LithosJobManager(options: Options) extends Actor {
     // Share submission: validate POW and record the submission to prevent
     // duplicates.  Mirrors JobManager.processShare exactly.
     // ------------------------------------------------------------------
+    // Validated on the actor thread, not in a Future. It reads `validJobs` and mutates the job's
+    // submission set, neither of which is thread-safe, so running it concurrently raced with
+    // ProcessTemplate and with other shares — losing duplicate detection at best. One Autolykos
+    // verification is cheap enough that serialising it is not the bottleneck; the mailbox hop that
+    // used to go through LithosPool was.
+    //
+    // Guarded because it now runs where a throw is fatal: an exception here restarts the actor and
+    // empties validJobs, so every connected miner is told "old block" until the next poll builds a
+    // job. The inputs are miner-supplied, so this must never be reachable.
     case msg: ProcessShare =>
-      Future(validateShare(msg))(context.dispatcher).pipeTo(sender())
+      sender() ! Try(validateShare(msg)).recover { case ex =>
+        logger.error(s"Share validation threw for job ${msg.jobId} from ${msg.ipAddress}", ex)
+        ShareRejected(20, "malformed share", msg.extraNonce1)
+      }.get
   }
 
   // ─── private helpers ──────────────────────────────────────────────────────
+
+  /**
+   * What makes a template a genuinely different job, as opposed to the same block with a different
+   * transaction set.
+   *
+   * Three things oblige a miner to switch: a new height, collateral appearing or disappearing, and a
+   * different genesis transaction. A newer mempool does not — the old header still mines a valid
+   * block, just without the newest fees — so it is not part of the identity.
+   *
+   * That does not mean mempool refreshes are dropped. LithosPool paces them and marks them
+   * `mustPublish`, because by the time one arrives it has already been fetched and holding it back
+   * would strand the job miners are on. This identity is what decides the rest.
+   */
+  private def jobIdentity(candidate: MiningCandidate, usesCollateral: Boolean): (Long, Boolean, String) =
+    (candidate.height,
+      usesCollateral,
+      Option(candidate.collateralData).map(_.txId).getOrElse(""))
 
   /**
    * Remove jobs more than 5 IDs behind the current one, matching the Java
@@ -133,11 +186,10 @@ class LithosJobManager(options: Options) extends Actor {
 
     val isBlock = job.candidate.b.compareTo(fH) >= 0
 
-    // Lithos super-share threshold: realTau / NISP_COEFFICIENT
-    val realTau = LFSMHelpers
-      .convertTauOrScore(LFSMHelpers.convertTauOrScore(scala.math.BigInt(job.tau)))
-      .bigInteger
-    val superShareThreshold = realTau.divide(BigInteger.valueOf(LFSMHelpers.NISP_COEFFICIENT))
+    // Both derived once when the job was built. They only depend on the job's tau, and recomputing
+    // them meant three BigInteger divisions on every share for an answer that never changes.
+    val realTau = job.realTau
+    val superShareThreshold = job.superShareThreshold
 
     val (blockHash, isSuperShare) =
       if (isBlock) {
@@ -177,7 +229,10 @@ class LithosJobManager(options: Options) extends Actor {
       blockDiffActual = job.candidate.b,
       blockHash       = blockHash,
       isSuperShare    = isSuperShare,
-      candidate       = MiningCandidate.copy(job.candidate),
+      // Only a block or a super share is ever read downstream, and those are one in tens of
+      // thousands. The candidate's fields are assigned in its constructors and nowhere else, so
+      // sharing the job's own is safe; the copy existed to guard a mutability that does not exist.
+      candidate       = if (isBlock || isSuperShare) MiningCandidate.copy(job.candidate) else job.candidate,
       nonce           = nonce
     )
   }

@@ -90,11 +90,12 @@ case class Evaluator(ctx: BlockchainContext, prover: NodeWallet, evalInput: Inpu
     }
   }
 
-  def evaluateFor(miner: Array[Byte], fpContractHashHex: String, initInputs: Seq[InputUTXO]): Option[SignedTransaction] = {
+  def evaluateFor(miner: Array[Byte], fpContractHashHex: String, initInputs: Seq[InputUTXO],
+                  additionalOutputs: Seq[UTXO]): Option[SignedTransaction] = {
     val fpContract = fpContracts.find(_.hashedPropBytesHex == fpContractHashHex).get
     val fraudProof = FraudProof.genFraudProof(ctx, fpContract, miner, nispTree, evalInput, fpControl)
     fraudProof
-      .attemptFraudProof(ctx, prover, TxBuilder(ctx), Some(initInputs))
+      .attemptFraudProof(ctx, prover, TxBuilder(ctx), Some(initInputs), Some(additionalOutputs), includeFee = false)
   }
 
 }

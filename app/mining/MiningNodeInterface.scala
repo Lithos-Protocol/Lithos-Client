@@ -8,6 +8,7 @@ import org.slf4j.{Logger, LoggerFactory}
 
 import java.net.URI
 import java.net.http.{HttpClient, HttpRequest, HttpResponse}
+import java.time.Duration
 import scala.util.{Failure, Success}
 
 /**
@@ -20,6 +21,14 @@ import scala.util.{Failure, Success}
  */
 object MiningNodeInterface {
   private final val PlaceholderW = "02a7955281885bf0f0ca4a48678848cad8dc5b328ce8bc1d4481d041c98e891ff3"
+
+  /**
+   * Both candidate calls run inside LithosPool's `receive`, so an unanswered one holds that mailbox
+   * for as long as it takes — and a found block waits in it. A node that accepts the connection and
+   * then goes quiet would stall mining outright with no error and nothing in the log.
+   */
+  private final val ConnectTimeout: Duration = Duration.ofSeconds(3)
+  private final val RequestTimeout: Duration = Duration.ofSeconds(10)
 }
 
 class MiningNodeInterface(nodeApiUrl: String) {
@@ -27,7 +36,9 @@ class MiningNodeInterface(nodeApiUrl: String) {
   require(nodeApiUrl.endsWith("/"), "nodeApiUrl must end with a trailing slash")
 
   private val logger: Logger     = LoggerFactory.getLogger("MiningNodeInterface")
-  private val http: HttpClient   = HttpClient.newHttpClient()
+  private val http: HttpClient   = HttpClient.newBuilder()
+    .connectTimeout(MiningNodeInterface.ConnectTimeout)
+    .build()
   private val baseURI: URI       = URI.create(nodeApiUrl)
   private val nodeApi: NodeApi   = RestNodeApi(nodeApiUrl)
 
@@ -35,6 +46,7 @@ class MiningNodeInterface(nodeApiUrl: String) {
 
   private def req(path: String): HttpRequest.Builder =
     HttpRequest.newBuilder(baseURI.resolve(path))
+      .timeout(MiningNodeInterface.RequestTimeout)
       .header("User-Agent", "lithos-stratum 1.0.0")
 
   // ─── public API ───────────────────────────────────────────────────────────
@@ -52,7 +64,7 @@ class MiningNodeInterface(nodeApiUrl: String) {
    * Fetches a mining candidate from the node.
    *
    * @param useCollateral  when true, POSTs the collateral transaction to
-   *                       /mining/candidateWithTxs; otherwise GETs /mining/candidate
+   *                       /mining/candidateWithTxsAndPk; otherwise GETs /mining/candidate
    * @param postBody       the collateral transaction JSON (required when useCollateral = true)
    * @param apiKey         the node's API key (required when useCollateral = true)
    */
@@ -60,40 +72,64 @@ class MiningNodeInterface(nodeApiUrl: String) {
                       postBody: Option[String],
                       apiKey: Option[String],
                       minerPk: Option[String] = None): JSONObject =
+    if (!useCollateral) soloCandidate()
+    else candidateWithTxs(postBody.toSeq, apiKey, minerPk)
+
+  /** GET /mining/candidate — the node's own reward key, no inserted transactions. */
+  def soloCandidate(): JSONObject =
     try {
-      if (!useCollateral) {
-        val json = new JSONObject(
-          http.send(req("/mining/candidate").build(), HttpResponse.BodyHandlers.ofString()).body()
-        )
-        if (json.has("error")) {
-          logger.error(s"Error while requesting mining candidate: errorCode=${json.getInt("error")}, reason=${json.getString("reason")}")
-          throw new RuntimeException("HTTP request to /mining/candidate failed")
-        }
-        json
-      } else {
-        val body = new JSONObject()
-          .put("txs", new JSONArray().put(new JSONObject(postBody.getOrElse("{}"))))
-          .put("pk", minerPk.getOrElse(""))
-        val httpReq = req("/mining/candidateWithTxsAndPk")
-          .header("Content-Type", "application/json")
-          .header("api_key", apiKey.getOrElse(""))
-          .POST(HttpRequest.BodyPublishers.ofString(body.toString))
-          .build()
-        val json = new JSONObject(http.send(httpReq, HttpResponse.BodyHandlers.ofString()).body())
-        if (json.has("error")) {
-          if (json.getInt("error") == 403)
-            logger.error("API key does not match the node's configured API key")
-          else {
-            logger.error(s"Error while requesting candidateWithTxs: errorCode=${json.getInt("error")}, reason=${json.optString("reason", "unknown")}")
-            //logger.error(json.toString)
-          }
-          throw new RuntimeException("HTTP request to /mining/candidateWithTxs failed")
-        }
-        json
+      val json = new JSONObject(
+        http.send(req("/mining/candidate").build(), HttpResponse.BodyHandlers.ofString()).body()
+      )
+      if (json.has("error")) {
+        logger.error(s"Error while requesting mining candidate: errorCode=${json.getInt("error")}, reason=${json.getString("reason")}")
+        throw new RuntimeException("HTTP request to /mining/candidate failed")
       }
+      json
     } catch {
       case e: InterruptedException => throw new RuntimeException(e)
     }
+
+  /**
+   * POST /mining/candidateWithTxsAndPk — a candidate carrying `txsJson` and paying its coinbase to
+   * `minerPk`, which is what the collateral contract's `lenderIsBlockMiner` needs (analysis §24.4).
+   *
+   * Transaction ORDER is preserved end to end: the node applies these in the order it is given them,
+   * so a transaction chaining off another must come after it.
+   */
+  def candidateWithTxs(txsJson: Seq[String],
+                       apiKey: Option[String],
+                       minerPk: Option[String]): JSONObject =
+    try {
+      val txs = new JSONArray()
+      txsJson.foreach(tx => txs.put(new JSONObject(tx)))
+      val body = new JSONObject()
+        .put("txs", txs)
+        .put("pk", minerPk.getOrElse(""))
+      val httpReq = req("/mining/candidateWithTxsAndPk")
+        .header("Content-Type", "application/json")
+        .header("api_key", apiKey.getOrElse(""))
+        .POST(HttpRequest.BodyPublishers.ofString(body.toString))
+        .build()
+      val json = new JSONObject(http.send(httpReq, HttpResponse.BodyHandlers.ofString()).body())
+      if (json.has("error")) {
+        if (json.getInt("error") == 403)
+          logger.error("API key does not match the node's configured API key")
+        else {
+          logger.error(s"Error while requesting candidateWithTxsAndPk: errorCode=${json.getInt("error")}, " +
+            s"reason=${json.optString("reason", "unknown")}")
+          //logger.error(json.toString)
+        }
+        throw new RuntimeException("HTTP request to /mining/candidateWithTxsAndPk failed")
+      }
+      json
+    } catch {
+      case e: InterruptedException => throw new RuntimeException(e)
+    }
+
+  /** The height of the block a candidate would be built for — one past the confirmed chain tip. */
+  def nextBlockHeight(): Option[Int] =
+    nodeApi.info().toOption.flatMap(_.fullHeight).map(_ + 1)
 
   /**
    * Submits a solved block to the node.

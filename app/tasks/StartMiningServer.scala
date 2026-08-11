@@ -33,7 +33,9 @@ import scala.util.{Failure, Success, Try}
 @Singleton
 class StartMiningServer @Inject()(system: ActorSystem, config: Configuration,
                                   cs: CoordinatedShutdown,
-                                  @Named("state-frame") stateFrame: ActorRef) {
+                                  @Named("state-frame") stateFrame: ActorRef,
+                                  @Named("transaction-processor") transactionProcessor: ActorRef,
+                                  @Named("emission-handler") emissionHandler: ActorRef) {
 
   val logger: Logger = LoggerFactory.getLogger("StartMiningServer")
 
@@ -94,7 +96,12 @@ class StartMiningServer @Inject()(system: ActorSystem, config: Configuration,
           nispDB          = Globals.nispDB,
           stateFrame      = stateFrame,
           forceConfigDiff = stratumParams.forceConfigDifficulty,
-          diffRefreshInterval = stratumParams.diffRefreshInterval
+          diffRefreshInterval = stratumParams.diffRefreshInterval,
+          candidateConfig = stratumParams.candidate,
+          // Asked in this order for this miner's own block, so rollup work — submissions and fraud
+          // proofs first — gets the slots ahead of collateral-queue maintenance.
+          txSources       = Seq(transactionProcessor, emissionHandler),
+          rotateExtraNonceInterval = stratumParams.rotateExtraNonceInterval
         )
 
         // ── shutdown hooks ───────────────────────────────────────────────────

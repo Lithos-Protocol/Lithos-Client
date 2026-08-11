@@ -8,6 +8,7 @@ class StateConfig(config: Configuration) {
   ScriptGenerator.BASE_PATH    = basePath.getOrElse("")
   val disableTransforms: Option[Boolean] = config.getOptional("state.disableTransforms")(ConfigLoader.booleanLoader)
   val autoCommit: Option[Boolean] = config.getOptional("state.autoCommit")(ConfigLoader.booleanLoader)
-  val autoCollat: Boolean = config.getOptional("state.autoCollateralize")(ConfigLoader.booleanLoader).getOrElse(true)
-  val maxCollat: Int = config.getOptional("state.maxCollateral")(ConfigLoader.intLoader).getOrElse(5)
+  // `state.autoCollateralize` / `state.maxCollateral` are now `emission.autoCollateralize` /
+  // `emission.maxJoinsPerRun`: the collateral queue is driven by EmissionHandler on its own timer,
+  // not by the rollup submission pipeline.
 }

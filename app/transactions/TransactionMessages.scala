@@ -3,6 +3,7 @@ package transactions
 import lfsm.LFSMHelpers
 import lfsm.LFSMPhase.{EVAL, HOLDING, PAYOUT}
 import lfsm.states.NISPTree
+import org.bouncycastle.util.encoders.Hex
 import transactions.TransactionMessages.RollupTxType.{EvalTransform, HoldingTransform, NISPEvaluation, NISPSubmission, Payout}
 import work.lithos.mutations.InputUTXO
 
@@ -61,7 +62,8 @@ object TransactionMessages {
                           fee: Long = RollupTxStub.ROLLUP_FEE,
                           fpInfo: Option[(Array[Byte], String)] = None) extends TxStub{
     override def toString: String = {
-      s"RollupTxStub($rollupBlockId, $txType, $currentPeriod, $fee, $fpInfo)"
+      s"RollupTxStub($rollupBlockId, $txType, $currentPeriod, $fee," +
+        s" ${fpInfo.map(i => Hex.toHexString(i._1) -> i._2)})"
     }
 
     /**
@@ -112,10 +114,27 @@ object TransactionMessages {
   case class RollupBatch(stubs: Seq[RollupTxStub])
 
   /**
+   * SubmissionHandler → TransactionProcessor: this batch was taken, so its stubs may be dropped.
+   *
+   * A batch refused by the submission lock is NOT acknowledged, and its stubs stay queued for the
+   * next tick. Dropping them on the send instead lost them whenever the lock was held — and while
+   * `TransactionPublisher` rebuilds most stub types from chain state every two minutes, fraud proof
+   * stubs only ever arrive through `FraudBatch` and nothing else re-derives them.
+   */
+  case class BatchAccepted(stubs: Seq[RollupTxStub])
+
+  /**
    * A batch of up to EVAL_SET_SIZE NISPEvaluation stubs sent from
    * TransactionProcessor to RollupEvaluator for fraud-proof checking.
    */
   case class EvaluationSet(stubs: Seq[RollupTxStub])
+
+  /**
+   * TransactionProcessor → SubmissionHandler: build these stubs fee-less and reply to the original
+   * requester WITHOUT sending them. The stubs stay queued, so the funded copies still reach the
+   * mempool on the normal tick; whichever lands first wins and the other is a double spend.
+   */
+  case class BuildBlockTxs(blockHeight: Int, stubs: Seq[RollupTxStub])
 
   // Trait representing entire rollup evaluation state
   sealed trait RollupEvaluationResult

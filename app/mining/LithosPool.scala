@@ -2,8 +2,10 @@ package mining
 
 import akka.actor.{Actor, ActorRef, Cancellable, Props}
 import akka.pattern.pipe
+import configs.CandidateConfig
 import lfsm.LFSMHelpers
-import mining.LithosPool.{CollateralRefreshed, RefreshCollateral}
+import evaluation.NTable
+import mining.LithosPool._
 import mining.MiningMessages._
 import mutations.NodeWallet
 import nisp.{NISPDatabase, SuperShare}
@@ -14,22 +16,20 @@ import scorex.utils.Ints
 import state.LFSMTransformer
 import state.messages.StateFrameMessages.CheckBlock
 import stratum.data.{MiningCandidate, Options}
-import stratum.{CollateralData, CollateralRetriever}
 import utils.Globals
 
-import java.io.{OutputStream, PrintStream}
 import java.net.ConnectException
 import scala.collection.mutable
 import scala.concurrent.duration._
 import scala.concurrent.{ExecutionContext, Future}
-import scala.util.{Failure, Success}
+import scala.util.{Failure, Success, Try}
 
 /**
  * Top-level pool coordination actor.
  *
  * Responsibilities
  * ────────────────
- *  • Owns and supervises LithosJobManager as a child.
+ *  • Owns and supervises LithosJobManager and CandidateBuilder as children.
  *  • Polls the Ergo node for new block templates via a scheduler tick.
  *  • Maintains the set of active ConnectionActors and broadcasts new jobs.
  *  • Forwards RequestSubscription and ProcessShare messages from ConnectionActors
@@ -37,21 +37,22 @@ import scala.util.{Failure, Success}
  *    originating StratumConnection (bypassing LithosPool on the return path).
  *  • Handles pool-level share events: block submission and NISP super-share saving.
  *
- * This actor is created programmatically (not via Guice injection) because its
- * constructor parameters are derived at runtime from the StratumConfig and
- * blockchain state.  Instantiate it with:
+ * CandidateBuilder pushes a finished BlockPackage here as soon as it has one; this actor never
+ * builds or fetches it, and mining continues whether or not a poll has one.
  *
- *   system.actorOf(Props(new LithosPool(options, ...)), "mining-pool")
+ * Created programmatically rather than through Guice, since its parameters come from StratumConfig
+ * and blockchain state at runtime: `system.actorOf(Props(new LithosPool(options, ...)))`.
  *
  * @param options             Stratum options (polling interval, tau, etc.)
  * @param useCollateral       Whether to request block candidates using collateral UTXOs
  * @param client              Ergo client for collateral retrieval
  * @param prover              Node wallet used to sign the collateral transaction
- * @param apiKey              Node API key required for /mining/candidateWithTxs
+ * @param apiKey              Node API key required for /mining/candidateWithTxsAndPk
  * @param reducedShareMessages Whether to divide the tau shown to miners by 1000
  * @param nispDB              NISP database for super-share persistence
- * @param stateFrame          StateFrame actor; LithosPool auto-subscribes to receive
- *                            NewBlock events that trigger CollateralData regeneration
+ * @param stateFrame          StateFrame actor, told to re-check the chain on every new job
+ * @param candidateConfig     Tuning for CandidateBuilder — what goes into a block and how much
+ *                            work may happen while a miner waits for a candidate
  */
 class LithosPool(options: Options,
                  useCollateral: Boolean,
@@ -62,7 +63,9 @@ class LithosPool(options: Options,
                  nispDB: NISPDatabase,
                  stateFrame: ActorRef,
                  forceConfigDiff: Boolean,
-                 diffRefreshInterval: Int) extends Actor {
+                 diffRefreshInterval: Int,
+                 candidateConfig: CandidateConfig = CandidateConfig.Default,
+                 txSources: Seq[ActorRef] = Seq.empty[ActorRef]) extends Actor {
 
   private val logger: Logger = LoggerFactory.getLogger("LithosPool")
   implicit private val ec: ExecutionContext = context.dispatcher
@@ -73,6 +76,13 @@ class LithosPool(options: Options,
   val jobManagerActor: ActorRef =
     context.actorOf(Props(new LithosJobManager(options)), "job-manager")
 
+  /** Child actor that builds the genesis transaction and assembles the rest of the block. */
+  val candidateBuilder: Option[ActorRef] =
+    if (useCollateral)
+      Some(context.actorOf(Props(new CandidateBuilder(
+        client, prover, Globals.getNodeConfig.getNodeApi, candidateConfig, txSources)), "candidate-builder"))
+    else None
+
   private val nodeInterface = new MiningNodeInterface(options.nodeApiUrl)
 
   // ─── mutable state ────────────────────────────────────────────────────────
@@ -80,19 +90,74 @@ class LithosPool(options: Options,
   /** connectionId → StratumConnection, used for broadcasting and connection tracking. */
   private val connections: mutable.HashMap[String, ActorRef] = mutable.HashMap.empty
 
-  /** Current miner public key, set from the first block candidate. */
-  private var pk: Option[String] = None
-
   private var pollTicker: Option[Cancellable] = None
   private var diffTicker: Option[Cancellable] = None
   private var tau: BigInt = BigInt(options.tau)
+
   /**
-   * Cached collateral data.  Populated during preStart's initial template fetch
-   * and subsequently refreshed asynchronously on every NewBlock from StateFrame.
-   * When Some, getCandidate uses it directly instead of calling CollateralRetriever.
+   * What CandidateBuilder has ready, and the block it was built for. Only usable at the exact
+   * height it names, since the genesis transaction pins that height into the holding box's R7 and
+   * its proof-of-spend box's creation height, so a stale one is dropped rather than offered.
    */
-  private var collateralData: Option[CollateralData] = None
-  private var checkCollat: Boolean = true
+  private var blockPackage: Option[BlockPackage] = None
+
+  /** Last block height observed from the node, i.e. the block currently being mined. */
+  private var lastBlockHeight: Int = 0
+
+  /** Height whose inserted transactions the node refused; its genesis transaction is still good. */
+  private var extrasRejectedAt: Option[Int] = None
+
+  /** Collateral rebuilds asked for during this block, capped by [[MaxRebuildsPerBlock]]. */
+  private var rebuildsThisBlock: Int = 0
+
+  /**
+   * Genesis transactions the node has already refused, so they are not offered again on every poll.
+   *
+   * Keyed by TRANSACTION, not by height: a rebuild for the same block produces a different genesis
+   * transaction from a different collateral box, and that one deserves a try. Keying by height
+   * blocked the corrected package too and sent the whole block solo.
+   */
+  private var rejectedGenesisTxs: Set[String] = Set.empty
+
+  /** When to stop waiting for this block's genesis transaction and put out a solo job instead. */
+  private var genesisDeadline: Option[Long] = None
+
+  /**
+   * What the candidate miners are currently working was fetched for: height, genesis transaction,
+   * and whether the inserted transactions were included.
+   *
+   * Asking the node for a candidate REPLACES the one it has cached, and it validates submitted
+   * solutions against that cache rather than against whatever it handed out. So polling the
+   * candidate endpoint on a timer quietly invalidates the job miners are hashing: a solution found
+   * more than a moment after its job comes back `h(f) < b`. So a candidate is only fetched when it
+   * will also be published: when this key changes, or on the mempool refresh below.
+   */
+  private var servedCandidate: Option[(Int, String, Boolean)] = None
+
+  /** When a job last went out, so nothing is fetched that the job manager would then hold back. */
+  private var lastJobAt: Long = 0L
+
+  /** The header last published, so a refetch that changed nothing is not broadcast again. */
+  private var servedMsg: Array[Byte] = Array.emptyByteArray
+
+  private def stillWaitingForGenesis: Boolean =
+    candidateBuilder.isDefined && genesisDeadline.exists(System.currentTimeMillis() < _)
+
+  /**
+   * Whether to pick up transactions that reached the mempool since this block's job went out.
+   *
+   * Worth doing — those are fees — and a same-height job costs a rig very little. It is paced rather
+   * than done every poll because each fetch replaces the copy the node validates solutions against,
+   * so a block found on the previous job in the moments after a refresh comes back `h(f) < b`. That
+   * window is the notify round trip; the interval decides how often it is opened.
+   *
+   * The decision belongs here, not where the job goes out: a candidate fetched and then held back
+   * strands the job miners are already on, which is the same failure with none of the benefit.
+   */
+  private def mempoolRefreshDue: Boolean =
+    candidateConfig.mempoolRefreshMs > 0 &&
+      System.currentTimeMillis() - lastJobAt >= candidateConfig.mempoolRefreshMs
+
   // ─── lifecycle ────────────────────────────────────────────────────────────
 
   override def preStart(): Unit = {
@@ -107,13 +172,13 @@ class LithosPool(options: Options,
 
     logger.info(s"LithosPool started. protocolVersion=${options.data.protocolVersion}, polling every ${options.blockRefreshInterval}ms")
 
-    // Fetch the initial template synchronously so miners get a job right away.
-    // This also performs the first (blocking) CollateralData retrieval and caches it.
-    fetchBlockTemplate()
+    // Force the N table now. It is a lazy val built by scanning every height to 4.2M, so whichever
+    // share arrives first would otherwise pay for it and answer seconds late.
+    NTable.lookUp(1)
 
-    // Auto-subscribe to StateFrame — no height matching needed, NewBlock events
-    // will drive all subsequent CollateralData refreshes.
-    // if (useCollateral) stateFrame ! AutoSubscribe(self)
+    // A solo candidate, since there is no package yet, but it is also what tells CandidateBuilder
+    // which block to build for.
+    fetchBlockTemplate()
 
     // Schedule periodic template refresh (mirrors Pool.start's ScheduledExecutor)
     pollTicker = Some(
@@ -142,14 +207,20 @@ class LithosPool(options: Options,
 
   override def receive: Receive = {
 
-    // ------------------------------------------------------------------
-    // StateFrame new-block notification: refresh CollateralData off-thread
-    // so the actor mailbox is never blocked by the HTTP/signing round-trip.
-    // ------------------------------------------------------------------
-//    case NewBlock(_) =>
-//      refreshCollateral
-    case RefreshCollateral =>
-      checkCollat = true
+    // Arrives at least twice per block: the genesis transaction alone, then each later revision.
+    case BlockPackageReady(pkg) =>
+      if (pkg.blockHeight >= lastBlockHeight) {
+        blockPackage = Some(pkg)
+        // Push the job out now rather than at the next poll tick, which is the whole point of
+        // publishing the genesis transaction on its own.
+        fetchBlockTemplate()
+      } else {
+        logger.info(s"Ignoring package for block ${pkg.blockHeight}; the chain is at $lastBlockHeight")
+      }
+
+    case GetJobManager =>
+      sender() ! jobManagerActor
+
     case RefreshDifficulty =>
       val stratumTau = {
         if(reducedShareMessages)
@@ -177,13 +248,6 @@ class LithosPool(options: Options,
             }
           }
       }
-//    case CollateralRefreshed(data) =>
-//      collateralData = Some(data)
-//      logger.info("CollateralData refreshed for new block")
-//
-//    case Status.Failure(ex) =>
-//      logger.error(s"Async CollateralData refresh failed: ${ex.getMessage}")
-//      collateralData = None
     // ------------------------------------------------------------------
     // Block-template polling
     // ------------------------------------------------------------------
@@ -194,6 +258,7 @@ class LithosPool(options: Options,
     // Job events from LithosJobManager
     // ------------------------------------------------------------------
     case NewJobAvailable(template) =>
+      lastJobAt = System.currentTimeMillis()
       logger.info(s"Broadcasting new job ${template.jobId} to ${connections.size} miner(s)")
       connections.values.foreach(_ ! BroadcastJob(template))
       stateFrame ! CheckBlock
@@ -232,102 +297,269 @@ class LithosPool(options: Options,
     case accepted: ShareAccepted =>
       if (accepted.isBlock) {
         logger.info(s"Submitting block solution from ${accepted.workerName} with nonce ${Hex.toHexString(accepted.nonce)}")
-        nodeInterface.sendSolution(Hex.toHexString(accepted.nonce), pk.getOrElse(""))
+        // The solved job's own key, never the pool's latest: a block starts on a solo candidate
+        // under the node's key and switches to the lender's when genesis lands, so the two differ
+        // within one block and a stale job would otherwise be submitted under the wrong one.
+        nodeInterface.sendSolution(Hex.toHexString(accepted.nonce), accepted.candidate.pk)
+        // If this block was mined on a collateral box, that box is now spent. Tell the builder before
+        // the next ChainAdvanced, which is the build it would otherwise poison.
+        Option(accepted.candidate.collateralData).foreach { data =>
+          candidateBuilder.foreach(_ ! CollateralSpent(data.collateralId))
+        }
         // Immediately fetch a new template after submitting a block
         fetchBlockTemplate()
       }
       if (accepted.isSuperShare) {
-        saveSuperShare(accepted)
+        // Off-thread: this deserialises the candidate proof, hashes it and writes to the NISP
+        // database. Doing it inline holds up every other message this actor handles, including the
+        // next block template.
+        Future(saveSuperShare(accepted))
       }
   }
 
   // ─── private helpers ──────────────────────────────────────────────────────
 
   /**
-   * Fetches a block template from the Ergo node, with optional collateral
-   * injection.  Mirrors Pool.getBlockTemplate exactly, including the fallback
-   * to solo-mining when collateral retrieval fails.
+   * Fetches a block template from the Ergo node, with the current BlockPackage inserted when there
+   * is one for the block being mined.  Mirrors Pool.getBlockTemplate, including the fallback to
+   * solo-mining whenever the collateral candidate cannot be produced.
    */
   private def fetchBlockTemplate(): Unit =
     try {
-      val (candidate, usedCollateral) = getCandidate
-      if (pk.isEmpty) pk = Some(candidate.pk)
-      jobManagerActor ! ProcessTemplate(candidate, tau.bigInteger, usedCollateral, reducedShareMessages)
+      getCandidate.foreach { case (candidate, usedCollateral) =>
+        // A mempool refresh often gets the candidate the node already had, because the mempool has
+        // not moved since the last fetch. Publishing that is a notify that restarts every rig's work
+        // for the header they are already on, and buys nothing.
+        //
+        // This is the one case where dropping a fetched candidate is safe, and it is safe for the
+        // exact reason 3.30 says the others are not: an identical header IS what the node still has
+        // cached, so there is no job to strand. Compare the header, not the key it was fetched under.
+        if (java.util.Arrays.equals(candidate.msg, servedMsg)) ()
+        else {
+          servedMsg = candidate.msg
+          // mustPublish, because getCandidate only answers with something it has just taken from the
+          // node — which cost the node's copy of whatever miners were on.
+          jobManagerActor ! ProcessTemplate(candidate, tau.bigInteger, usedCollateral,
+            reducedShareMessages, mustPublish = true)
+        }
+      }
     } catch {
       case ex: Exception =>
         logger.error(s"Failed to fetch block template: ${ex.getMessage}")
     }
 
-  private def getCandidate: (MiningCandidate, Boolean) =
-    if (!useCollateral) {
-      (MiningCandidate.fromJson(
-        nodeInterface.miningCandidate(useCollateral = false, None, None),
-        options.data.protocolVersion
-      ), false)
-    } else {
-      // Use the cached CollateralData if available; otherwise perform the
-      // initial blocking retrieval and populate the cache.
-      val collDataOpt: Option[CollateralData] = //collateralData.orElse {
-      {
-        try {
-          if(checkCollat) {
-            val data = new CollateralRetriever(client, prover, Globals.getNodeConfig.getNodeApi).getCollateral
-            if (!collateralData.contains(data)) {
-              logger.info(s"Got collateral utxo ${data.collateralId} from lender ${data.lenderAddress}")
-              logger.info(s"Generated $data with tx size: ${data.txBytes.length} and input size: ${data.collateralBoxBytes.length}")
-              collateralData = Some(data)
-            }
-            Some(data)
-          }else{
-            None
-          }
-        } catch {
-          case ex: Exception =>
-            logger.error(s"Collateral retrieval failed (${ex.getMessage}), falling back to solo-mining")
-            logger.error(s"Collateral state will be refreshed in 30 seconds")
-            checkCollat = false
-            context.system.scheduler.scheduleOnce(30.seconds){
-              self ! RefreshCollateral
-            }
-            None
-        }
-      }
+  /**
+   * The candidate to hand miners, or None to leave them on the job they already have.
+   *
+   * None only happens in the window after a new block while the genesis transaction is being built.
+   * Publishing a solo job there and replacing it a moment later means two notifies in quick
+   * succession, and rigs lose more to that than to a sub-second wait for the real job.
+   */
+  private def getCandidate: Option[(MiningCandidate, Boolean)] = {
+    noteChainHeight()
 
-      collDataOpt match {
-        case Some(collData) =>
-          try {
-            val candidate = MiningCandidate.fromJson(
-              nodeInterface.miningCandidate(
-                useCollateral = true,
-                Some(collData.txJSON),
-                Some(apiKey),
-                Some(collData.pk)
-              ),
-              options.data.protocolVersion,
-              collData
-            )
-            pk = Some(candidate.pk)
-            (candidate, true)
-          } catch {
-            case ex: Exception =>
-              logger.error(s"Collateral candidate fetch failed (${ex.getMessage}), falling back to solo-mining")
-              val candidate = MiningCandidate.fromJson(
-                nodeInterface.miningCandidate(useCollateral = false, None, None),
-                options.data.protocolVersion
-              )
-              pk = Some(candidate.pk)
-              (candidate, false)
-          }
+    if (!useCollateral) {
+      if (servedCandidate.exists(_._1 == lastBlockHeight) && !mempoolRefreshDue) None
+      else Some(soloCandidate)
+    } else {
+      // The height comes from /info rather than from /mining/candidate, which would answer under
+      // the node's own reward key and so evict the cached collateral candidate on every poll.
+      usablePackage.filterNot(p => rejectedGenesisTxs.contains(p.collateral.txId)) match {
+        case Some(pkg) =>
+          genesisDeadline = None
+          val withExtras = pkg.blockTxs.nonEmpty && !extrasRejectedAt.contains(pkg.blockHeight)
+          val key = (pkg.blockHeight, pkg.collateral.txId, withExtras)
+          // A changed key is mandatory — new block, new genesis transaction, or the inserted set
+          // dropped — and goes at once. An unchanged key only refetches on the mempool interval.
+          if (servedCandidate.contains(key) && !mempoolRefreshDue) None
+          else Some(fetchCollateralCandidate(pkg, withExtras, key))
+
+        // No package yet. Hold the miners on their current job while the genesis transaction is
+        // built, but not indefinitely — past the deadline a solo job is better than none, since
+        // otherwise they are working a height that is already gone.
+        case None if stillWaitingForGenesis =>
+          None
+
+        // Falling back to solo for this block, under the same rule as everything else.
+        case None if servedCandidate.exists(k => k._1 == lastBlockHeight && k._2.isEmpty) &&
+          !mempoolRefreshDue =>
+          None
 
         case None =>
-          val candidate = MiningCandidate.fromJson(
-            nodeInterface.miningCandidate(useCollateral = false, None, None),
-            options.data.protocolVersion
-          )
-          pk = Some(candidate.pk)
-          (candidate, false)
+          genesisDeadline = None
+          Some(soloCandidate)
       }
     }
+  }
+
+  /**
+   * Fetch the candidate for this package, dropping the inserted transactions if the node refuses
+   * them and falling back to solo if it refuses the whole thing.
+   */
+  private def fetchCollateralCandidate(pkg: BlockPackage,
+                                       withExtras: Boolean,
+                                       key: (Int, String, Boolean)): (MiningCandidate, Boolean) = {
+    servedCandidate = Some(key)
+    try candidateFor(pkg, if (withExtras) pkg.allTxs else pkg.genesisOnly)
+    catch {
+      case ex: Exception if withExtras =>
+        // Only the insertions are optional, so retry without them before giving up on collateral.
+        // Everything dropped here is in the mempool anyway.
+        logger.warn(s"Candidate with ${pkg.blockTxs.size} inserted transaction(s) was refused " +
+          s"(${ex.getMessage}); retrying with the genesis transaction alone")
+        extrasRejectedAt = Some(pkg.blockHeight)
+        candidateBuilder.foreach(_ ! BlockTxsRejected(pkg.blockHeight))
+        servedCandidate = Some((pkg.blockHeight, pkg.collateral.txId, false))
+        try candidateFor(pkg, pkg.genesisOnly)
+        catch { case ex2: Exception => genesisRefused(pkg, ex2) }
+      case ex: Exception => genesisRefused(pkg, ex)
+    }
+  }
+
+  /** The package for the block currently being mined, if CandidateBuilder has one yet. */
+  private def usablePackage: Option[BlockPackage] =
+    blockPackage.filter(p => lastBlockHeight == 0 || p.blockHeight == lastBlockHeight)
+
+  /**
+   * Even the genesis transaction was refused. Mine solo and ask for one rebuild — the usual cause is
+   * a collateral box just spent, which a rebuild resolves by drawing another. Once per block only,
+   * so a failure that will not clear does not spin against the node.
+   */
+  private def genesisRefused(pkg: BlockPackage, ex: Exception): (MiningCandidate, Boolean) = {
+    logger.error(s"Collateral candidate fetch failed (${ex.getMessage}), falling back to solo-mining")
+    requestRebuild()
+    soloCandidate
+  }
+
+  /**
+   * Ask for a different collateral box for this block, a bounded number of times.
+   *
+   * A spent box is the ordinary case and deserves a retry rather than writing the block off, but each
+   * retry costs a signature, a POST and eventually a job change, so the count is capped. The job gap
+   * spaces out whatever this produces.
+   */
+  private def requestRebuild(): Unit =
+    if (rebuildsThisBlock < MaxRebuildsPerBlock) {
+      rebuildsThisBlock += 1
+      candidateBuilder.foreach(_ ! RebuildCandidate)
+    } else
+      logger.warn(s"Already rebuilt the candidate $rebuildsThisBlock times for block " +
+        s"$lastBlockHeight; mining solo for the rest of it")
+
+  /** The builder's only trigger: which height to build for, and that a block arrived at all. */
+  private def noteChainHeight(): Unit =
+    Try(nodeInterface.nextBlockHeight()).toOption.flatten.foreach { height =>
+      if (height != lastBlockHeight) {
+        lastBlockHeight = height
+        extrasRejectedAt = None
+        rebuildsThisBlock = 0
+        genesisDeadline = Some(System.currentTimeMillis() + candidateConfig.genesisWaitMs)
+        // Bounded, since a genesis transaction is only valid at one height anyway.
+        if (rejectedGenesisTxs.size > 64) rejectedGenesisTxs = Set.empty
+        candidateBuilder.foreach(_ ! ChainAdvanced(height))
+      }
+    }
+
+  /**
+   * Retrieves the block candidate for the given package and transaction set
+   */
+  private def candidateFor(pkg: BlockPackage, txs: Seq[String]): (MiningCandidate, Boolean) = {
+    val json = nodeInterface.candidateWithTxs(txs, Some(apiKey), Some(pkg.collateral.pk))
+    val withCollateral = MiningCandidate.fromJson(json, options.data.protocolVersion, pkg.collateral)
+
+    // Check if at minimum, the genesis transaction was included in the candidate
+    // Node sometimes does not carry it
+    genesisMissingBecause(withCollateral, pkg) match {
+      case None => (withCollateral, true)
+      case Some(why) =>
+        noteGenesisRejected(pkg, withCollateral, why)
+      // A REAL solo candidate, not this one relabelled. This candidate was built for the LENDER's
+      // key, because that is what we asked for — so mining it without the genesis transaction would
+      // pay a lender 3 ERG for a block that spends no collateral and gives them nothing back, and
+      // cost this miner the reward. Never mine a candidate built for a key that is not ours unless
+      // the transaction that earns it is in the block.
+      soloCandidate
+    }
+  }
+
+  /**
+   * Why the node's candidate does not prove inclusion of our genesis transaction, or None if it does.
+   *
+   * The node derives the proof over the transactions it actually prioritised, so ours being absent
+   * means it was dropped — but it does not say at which stage. `CandidateGenerator` filters supplied
+   * transactions on `inputsNotSpent` BEFORE any validation, silently, so the common case is not a
+   * refusal at all: the input was missing from the state the candidate is built against. A missing
+   * proof is a third thing again, and worth naming rather than folding into the other two.
+   */
+  private def genesisMissingBecause(candidate: MiningCandidate, pkg: BlockPackage): Option[String] =
+    Option(candidate.proof) match {
+      case None =>
+        Some("the candidate carries NO proof at all, so the node did not derive one over any " +
+          "prioritised transaction")
+      case Some(proof) =>
+        Try {
+          // Searched as text rather than by field name. The node's encoder has changed shape across
+          // versions — `leaf` and `leafData` both exist, and a leaf may be the id or a Base16 blob
+          // with the id inside it — and reading the wrong field throws, which this used to swallow
+          // into a false "the node refused it". A 64-character id cannot collide by accident, so a
+          // substring match over the array is both safer and version-proof.
+          val leaves = proof.getJSONArray("txProofs").toString
+          if (leaves.toLowerCase.contains(pkg.collateral.txId.toLowerCase)) None
+          else Some(s"the candidate's proof does not mention it. Raw txProofs: " +
+            leaves.take(600))
+        }.getOrElse(Some(s"the candidate's proof could not be read. Raw proof: ${proof.toString.take(600)}"))
+    }
+
+  /**
+   * Record that the node will not take this block's genesis transaction, once per block.
+   *
+   * Once is enough: re-offering a transaction the node has already refused just repeats the POST on
+   * every poll. The pk comparison is the diagnostic that matters — if the candidate is not built for
+   * the lender's key then the node is ignoring the `pk` we send, `lenderIsBlockMiner` can never be
+   * satisfied, and no collateral box is spendable at all.
+   */
+  private def noteGenesisRejected(pkg: BlockPackage, candidate: MiningCandidate, why: String): Unit =
+    if (!rejectedGenesisTxs.contains(pkg.collateral.txId)) {
+      rejectedGenesisTxs += pkg.collateral.txId
+      // Drop the box AND ask for another package. Nothing else will: the refresh only rebuilds when
+      // it notices the selected box has gone, and CollateralSpent has already cleared the selection.
+      // Without the rebuild the whole block falls back to solo over one spent box.
+      candidateBuilder.foreach(_ ! CollateralSpent(pkg.collateral.collateralId))
+      requestRebuild()
+      logger.error(s"Node dropped genesis transaction ${pkg.collateral.txId} for block " +
+        s"${pkg.blockHeight}; mining solo for the rest of it. Requested pk ${pkg.collateral.pk}, got " +
+        s"a candidate for pk ${candidate.pk}" +
+        (if (candidate.pk != pkg.collateral.pk)
+          " — THESE DIFFER. The node is not honouring the requested coinbase key, so no collateral " +
+            "box can ever be spent. Check the node is 6.0.2+ and the api key is accepted"
+        else ", which match") + s". Why: $why")
+
+      // The node already knows why and writes it down; nothing we can ask from here beats reading it.
+      // `CandidateGenerator.collectTxs` treats a supplied transaction exactly like a mempool one and
+      // drops it silently on a missing input, a double spend against what it has already taken, a
+      // validation failure, or simply running out of block cost before reaching it.
+      logger.error(s"The node logs its own reason at INFO — search the node log for " +
+        s"'Not included transaction ${pkg.collateral.txId}'. Raise " +
+        "org.ergoplatform.mining.CandidateGenerator to DEBUG to also catch the double-spend and " +
+        "block-limit paths, which are logged one level lower")
+    }
+
+
+  /**
+   * The node's own candidate, recorded as served in the same step that fetches it.
+   *
+   * Recorded here rather than at the call sites because one of them is the collateral path's fallback:
+   * when the node drops the genesis transaction the candidate that was fetched for the lender's key
+   * is unusable, and this replaces it. Leaving the collateral key recorded there sent the next poll
+   * back for a second solo candidate — which the node then validated against while miners stayed on
+   * the first, so every block found for the rest of that height was lost.
+   */
+  private def soloCandidate: (MiningCandidate, Boolean) = {
+    val candidate = MiningCandidate.fromJson(nodeInterface.soloCandidate(), options.data.protocolVersion)
+    // Only once it is in hand. Recording a fetch that threw would leave the block with no job at all.
+    servedCandidate = Some((lastBlockHeight, "", false))
+    (candidate, false)
+  }
 
   /**
    * Persists a super-share to the NISP database.
@@ -358,29 +590,26 @@ class LithosPool(options: Options,
           logger.error("Error while saving super-share", ex)
     }
 
-  private def refreshCollateral = {
-    Future(new CollateralRetriever(client, prover, Globals.getNodeConfig.getNodeApi).getCollateral)
-      .map(CollateralRefreshed.apply)
-      .pipeTo(self)
-  }
-
   private def refreshDifficulty = {
-    Future(LFSMTransformer.getCommitedTau(client, tau))
+    // Read on the actor thread and passed in, not read inside the Future. `tau` is actor state
+    // written by UpdatedDifficulty, so evaluating it in the Future body reads it from another
+    // thread — harmless for an immutable BigInt today, and a real race for anything added later.
+    val current = tau
+    Future(LFSMTransformer.getCommitedTau(client, current))
       .map(UpdatedDifficulty.apply)
       .pipeTo(self)
-  }
-
-  private def withSilencedStdout[T](block: => T): T = {
-    val original = System.out
-    System.setOut(new PrintStream(OutputStream.nullOutputStream()))
-    try block finally System.setOut(original)
   }
 }
 
 
 
+
 object LithosPool {
-  /** Piped back to self when an async CollateralData refresh completes successfully. */
-  private[mining] case class CollateralRefreshed(data: CollateralData)
-  private[mining] case object RefreshCollateral
+
+  /**
+   * How many times one block may draw a fresh collateral box after the node refuses the genesis
+   * transaction. A spent box is the ordinary cause and worth retrying; an unbounded retry would
+   * burn through the whole active set on a block whose real problem is something else.
+   */
+  private final val MaxRebuildsPerBlock: Int = 3
 }

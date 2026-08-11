@@ -43,15 +43,20 @@ object NTable {
     }
   }
 
+  /** Same pairs as [[N_Table]], highest height first, so a lookup finds the newest match. */
+  private lazy val descending: Array[(Int, Int)] = N_Table.reverse
+
   /**
-   * Find the associated N value for a given height, without having to calculate N
+   * The N value in effect at `height`, without recomputing it.
    *
-   * NOTE: Should be faster than calling `Autolykos2PowValidation.calcN()`
+   * The table is ascending and each entry is the FIRST height at which its N applies, so the answer
+   * is the last entry at or below `height` — searching ascending would always return the genesis
+   * entry, which is only right below the first increase at 614,400.
+   *
    * @param height Height to find N value for
    */
-  def lookUp(height: Int): Int = {
-    N_Table.find(hn => height >= hn._1).get._2
-  }
+  def lookUp(height: Int): Int =
+    descending.find(hn => height >= hn._1).getOrElse(N_Table.head)._2
 
   /**
    * Hash of serialized NTable

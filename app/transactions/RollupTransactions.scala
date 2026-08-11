@@ -1,8 +1,10 @@
 package transactions
 
+import evaluation.Evaluator
 import lfsm.LFSMHelpers
-import mutations.NodeWallet
+import mutations.{BoxLoader, NodeWallet}
 import nisp.NISP
+import org.bouncycastle.util.encoders.Hex
 import org.ergoplatform.appkit._
 import org.ergoplatform.appkit.scalaapi.scalaByteType
 import org.slf4j.{Logger, LoggerFactory}
@@ -10,8 +12,9 @@ import scorex.utils.Longs
 import sigma.Colls
 import sigma.data.CBigInt
 import transactions.TransactionMessages.LatestRollup
+import utils.Globals
 import utils.Helpers.{evalContract, holdingContract, payoutContract}
-import work.lithos.mutations.{InputUTXO, Token, TxBuilder, UTXO}
+import work.lithos.mutations.{Contract, InputUTXO, Token, TxBuilder, UTXO}
 
 object RollupTransactions {
 
@@ -29,7 +32,6 @@ object RollupTransactions {
     val otherInputs = walletInputs
     val tree = latestState.NISPTree.dictionary
     val copiedTree = tree.copy()
-    copiedTree.prover.generateProof() // Reset proof for copied tree, proofs will be incorrect if this is not done!
 
     val insert = copiedTree.insert(
       wallet.contract.hashedPropBytes -> nisp.serialize)
@@ -131,7 +133,6 @@ object RollupTransactions {
     val otherInputs = walletInputs
     val tree = latestState.NISPTree.dictionary
     val copiedTree = tree.copy()
-    copiedTree.prover.generateProof() // Reset proof for copied tree
 
     val lookUp = copiedTree.lookUp(wallet.contract.hashedPropBytes)
     val delete = copiedTree.delete(wallet.contract.hashedPropBytes)
@@ -185,7 +186,13 @@ object RollupTransactions {
           Seq.empty[Token]
         }
       }
-      val minerOutput = UTXO(wallet.contract, amountToPay, tokensOutputted)
+      // This is the drain path, so what is left over is below the min change value. TxBuilder folds
+      // such a remainder into the fee output; with no fee output and no wallet input there is
+      // nothing to fold into and the fold throws. Payout.ergo checks the miner output with `>=`
+      // rather than `==` for exactly this reason, so the remainder can go to the miner instead.
+      val feeless = feeOutputs.isEmpty && otherInputs.isEmpty
+      val minerValue = if (feeless && payInput.value > amountToPay) payInput.value else amountToPay
+      val minerOutput = UTXO(wallet.contract, minerValue, tokensOutputted)
       val totalOutputs = Seq(minerOutput) ++ feeOutputs
       val uTx = TxBuilder(ctx)
         .setInputs((Seq(inputWithContext) ++ otherInputs): _*)
@@ -193,5 +200,35 @@ object RollupTransactions {
         .buildTx(0, wallet.p2pk)
       wallet.sign(uTx)
     }
+  }
+
+  /**
+   * Slash one miner out of a rollup's evaluation box, using the fraud proof `RollupEvaluator`
+   * already found for them.
+   *
+   * The proof is re-run rather than cached, because it is only valid against the exact tree state
+   * it was built on. That re-run is also the check that the fraud is still there: `evaluateFor`
+   * returns None when the proof no longer reduces to true, and `.get` turns that into a failure.
+   *
+   * @param miner             hashed prop bytes of the miner to slash
+   * @param fpContractHashHex which fraud proof contract to use, as found during evaluation
+   */
+  def genFraudProofTransform(ctx: BlockchainContext,
+                       wallet: NodeWallet,
+                       evalInput: InputUTXO,
+                       walletInputs: Seq[InputUTXO],
+                       latestState: LatestRollup,
+                       feeOutputs: Seq[UTXO],
+                       miner: Array[Byte],
+                       fpContractHashHex: String): SignedTransaction = {
+
+    // Compiled once for the JVM's life. This runs inside `attemptTx`, which retries up to five
+    // times, so compiling the seven proofs per attempt was 35 compilations for one slash.
+    val fpContracts = ProtocolContracts.fraudProofs(ctx)
+    val fpControl = LFSMHelpers.getFPControlBox(ctx)
+    val evaluator = Evaluator(ctx, wallet, evalInput, latestState.NISPTree, Seq.empty,
+      fpControl, new BoxLoader(ctx, Globals.getNodeConfig.getNodeApi), fpContracts)
+    val concreteEval = evaluator.evaluateFor(miner, fpContractHashHex, walletInputs, feeOutputs)
+    concreteEval.get
   }
 }

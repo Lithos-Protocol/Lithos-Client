@@ -1,6 +1,8 @@
 package stratum;
 
 
+import lfsm.LFSMHelpers;
+import scala.math.BigInt;
 import stratum.data.MiningCandidate;
 import org.bouncycastle.util.encoders.Hex;
 import org.json.JSONArray;
@@ -53,12 +55,7 @@ public class BlockTemplate {
 	private final Set<Object> submissions = new HashSet<>();
 
 	public BlockTemplate(String jobId, MiningCandidate miningCandidate, boolean usedCollateral) {
-		this.jobId = jobId;
-		this.candidate = miningCandidate;
-		this.target = miningCandidate.b;
-		this.tau = BigInteger.valueOf(0);
-		this.msg = miningCandidate.msg;
-        this.usedCollateral = usedCollateral;
+		this(jobId, miningCandidate, BigInteger.valueOf(0), usedCollateral, false);
 	}
 
 	public BlockTemplate(String jobId, MiningCandidate miningCandidate, BigInteger tau,
@@ -70,6 +67,20 @@ public class BlockTemplate {
 		this.msg = miningCandidate.msg;
         this.usedCollateral = usedCollateral;
         this.reducedShareMessages = reducedShareMessages;
+        // Derived once per job rather than per share. Both are two BigInteger divisions over values
+        // that cannot change while the job lives, and share validation is the hottest path here.
+        if (tau.signum() > 0) {
+            this.realTau = LFSMHelpers.convertTauOrScore(
+                    LFSMHelpers.convertTauOrScore(BigInt.apply(tau))).bigInteger();
+            this.superShareThreshold = realTau.divide(BigInteger.valueOf(LFSMHelpers.NISP_COEFFICIENT()));
+        } else {
+            this.realTau = BigInteger.ZERO;
+            this.superShareThreshold = BigInteger.ZERO;
+        }
+        // Built here, not on first read. It used to be a lazily-populated non-final field that every
+        // connection actor reads from its own thread when serialising a mining.notify, so a miner
+        // could be handed a half-constructed array.
+        this.jobParams = buildJobParams();
 	}
 
 	public MiningCandidate candidate;
@@ -80,6 +91,10 @@ public class BlockTemplate {
     public boolean usedCollateral;
     public boolean reducedShareMessages;
 
+    /** The miner's assigned difficulty as a score, and the super-share cut of it. */
+    public final BigInteger realTau;
+    public final BigInteger superShareThreshold;
+
 	public byte[] serializeCoinbase(byte[] extraNonce1, byte[] extraNonce2) {
 		return Utils.concat(msg, extraNonce1, extraNonce2);
 	}
@@ -88,12 +103,14 @@ public class BlockTemplate {
 		return submissions.add(new Submission(extraNonce1, extraNonce2, nTime, nonce));
 	}
 
-	private JSONArray jobParams;
+	private final JSONArray jobParams;
 
 	public JSONArray getJobParams() {
+		return jobParams;
+	}
 
-		if (jobParams != null) return jobParams;
-		return jobParams = jsonArray(
+	private JSONArray buildJobParams() {
+		return jsonArray(
 				jobId,
 				candidate.height,
 				Hex.toHexString(candidate.msg),

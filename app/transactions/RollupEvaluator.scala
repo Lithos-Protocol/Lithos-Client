@@ -3,10 +3,9 @@ package transactions
 import akka.actor.{Actor, ActorRef, Cancellable}
 import akka.pattern.ask
 import akka.util.Timeout
-import configs.StateConfig
+import configs.{NodeContext, StateConfig}
 import evaluation.Evaluator
 import lfsm.LFSMHelpers
-import lfsm.contracts.FraudProofContracts
 import mutations.BoxLoader
 import org.bouncycastle.util.encoders.Hex
 import org.ergoplatform.appkit.SignedTransaction
@@ -16,9 +15,8 @@ import play.api.libs.concurrent.InjectedActorSupport
 import sigma.exceptions.InterpreterException
 import state.messages.RollupMessages
 import state.messages.RollupMessages.{GetCurrentRollup, RollupInfo, UpdateEvaluation}
-import transactions.RollupEvaluator.{EVAL_BATCH_SIZE, EvaluateNextBatch, EvaluationBatch}
+import transactions.RollupEvaluator.{BatchEvaluated, EVAL_BATCH_SIZE, EvaluateNextBatch, EvaluationBatch}
 import transactions.TransactionMessages.{CriticalEvalError, EvaluationSet, FailedEvaluation, FraudBatch, FraudFound, LatestRollup, MinerEvaluationResult, NoFraudulence, NormalEvalError, RollupRemovedException, RollupTxStub, StopEvaluating, SuccessfulEvaluation}
-import utils.Globals
 import work.lithos.mutations.{Contract, InputUTXO}
 
 import javax.inject.{Inject, Named}
@@ -31,7 +29,7 @@ import scala.util.{Failure, Success, Try}
  * Receives EvaluationSet messages from TransactionProcessor and evaluates
  * each NISPEvaluation stub in the set.
  */
-class RollupEvaluator @Inject()(config: Configuration,
+class RollupEvaluator @Inject()(config: Configuration, nodeContext: NodeContext,
                                 @Named("sync-handler") syncHandler: ActorRef,
                                 @Named("transaction-processor") txProcessor: ActorRef)
   extends Actor with InjectedActorSupport {
@@ -40,11 +38,19 @@ class RollupEvaluator @Inject()(config: Configuration,
   implicit val ec: ExecutionContext = context.dispatcher
 
   private val stateConfig: StateConfig = new StateConfig(config)
-  private val nodeConfig = Globals.getNodeConfig
+  private val nodeConfig: NodeContext = nodeContext
   private val client = nodeConfig.getClient
   private val wallet = nodeConfig.getNodeWallet
   private val logger: Logger = LoggerFactory.getLogger("RollupEvaluator")
   private var evalMap: Map[String, RollupTxStub] = Map.empty
+
+  /**
+   * Whether a batch is running. A batch is up to five rollups, each running seven proof contracts
+   * against every miner in it, which is minutes of interpreter and AVL work — and entries only leave
+   * `evalMap` when that work reports back. Without this the four-minute tick starts the same rollups
+   * again, doubling the load on the dispatcher where WalletManager's five-second asks are waiting.
+   */
+  private var evaluating: Boolean = false
 
   private var ticker: Option[Cancellable] = None
 
@@ -73,30 +79,47 @@ class RollupEvaluator @Inject()(config: Configuration,
       evalMap = evalMap ++ stubsToAdd
 
     case EvaluateNextBatch =>
-      if (evalMap.nonEmpty)
-        self ! EvaluationBatch(evalMap.values.toSeq.sortBy(_.currentPeriod.get).take(EVAL_BATCH_SIZE))
+      // Oldest first, and tolerant of a missing period rather than throwing inside receive — an
+      // exception here restarts the actor and drops every rollup queued for evaluation.
+      if (evaluating)
+        logger.info("Skipping evaluation tick, the previous batch is still running")
+      else if (evalMap.nonEmpty) {
+        // Claimed HERE, where the decision is made, not in the EvaluationBatch handler below.
+        // That message is sent to self, so it goes to the back of the mailbox — and two ticks
+        // arriving before it is processed would both see the flag clear and both dispatch.
+        evaluating = true
+        self ! EvaluationBatch(
+          evalMap.values.toSeq.sortBy(_.currentPeriod.getOrElse(Long.MaxValue)).take(EVAL_BATCH_SIZE))
+      }
 
     case EvaluationBatch(stubs) =>
-      Try(getFPContracts) match {
-        case Success(fpContracts) =>
-          val evalAttempts = stubs.map(s => s.rollupBlockId -> attemptEvaluation(s, fpContracts))
-          // To be clear, such errors should only occur outside of evaluation futures (as errors inside eval
-          // threads will be handled properly). This means that the only expected errors here should be
-          // "normal" errors, such as failure to grab blockchain boxes or timeouts when grabbing the latest state.
-          // As such, we can treat them as normal errors and simply send StopEvaluating to self (as is done
-          // in attemptEvaluation() for normal errors found INSIDE evaluation futures)
-          evalAttempts.filter(_._2.isFailure).foreach { s =>
-            s._2 match {
-              case Failure(exception) =>
-                logger.error(s"Got error outside of evaluation attempt for rollup ${s._1}", exception)
-                self ! StopEvaluating(s._1)
-              case Success(_) => ()
-            }
+      evaluating = true
+      // Off the actor thread, and sequential within one Future. Each rollup runs up to seven proofs
+      // against every miner in it, which is minutes of interpreter work — inline it would block this
+      // mailbox, and running the batch in parallel would take several threads of the shared
+      // tx-dispatcher where WalletManager's callers wait on 5-second asks. The contracts are fetched
+      // in here too, since that opens a BlockchainContext.
+      Future {
+        val fpContracts = getFPContracts
+        stubs.foreach { s =>
+          // Errors reaching here are the ordinary kind — a box lookup or a state timeout, since
+          // per-miner failures are handled inside. Stop evaluating and pick it up next batch.
+          attemptEvaluation(s, fpContracts) match {
+            case Failure(ex) =>
+              logger.error(s"Got error outside of evaluation attempt for rollup ${s.rollupBlockId}", ex)
+              self ! StopEvaluating(s.rollupBlockId)
+            case Success(_) => ()
           }
-        case Failure(exception) =>
-          logger.error("Got error when grabbing FPContracts for evaluation", exception)
-          logger.error("Not changing evaluation state")
+        }
+      }.onComplete {
+        case Success(_) => self ! BatchEvaluated
+        case Failure(ex) =>
+          logger.error("Got error when running an evaluation batch; not changing evaluation state", ex)
+          self ! BatchEvaluated
       }
+
+    case BatchEvaluated =>
+      evaluating = false
 
 
     case SuccessfulEvaluation(rollupBlockId) =>
@@ -139,7 +162,7 @@ class RollupEvaluator @Inject()(config: Configuration,
             val currentMiners = latestRollup.NISPTree.minerSet.toSeq.map(Hex.decode).sortBy(_ => Math.random())
             val fpControl = LFSMHelpers.getFPControlBox(ctx)
             val evaluator = Evaluator(ctx, wallet, latestRollup.inputUTXO, latestRollup.NISPTree, currentMiners,
-              fpControl, new BoxLoader(ctx, Globals.getNodeConfig.getNodeApi), fpContracts)
+              fpControl, new BoxLoader(ctx, nodeContext.getNodeApi), fpContracts)
             val evals = evaluator.evaluateSync
             val minerEvaluationResults = evals.map(processEvaluationResult(stub, _))
             manageEvaluationState(stub, minerEvaluationResults)
@@ -205,7 +228,7 @@ class RollupEvaluator @Inject()(config: Configuration,
     }
   }
 
-  private def getFPContracts = client.execute(ctx => FraudProofContracts.getFraudProofContracts(ctx))
+  private def getFPContracts = client.execute(ctx => ProtocolContracts.fraudProofs(ctx))
 
   private def latestRollupState(rollupTxStub: RollupTxStub) = {
     Try {
@@ -237,5 +260,9 @@ object RollupEvaluator {
 
   private case class EvaluationBatch(stubs: Seq[RollupTxStub])
 
-  private case object EvaluateNextBatch
+  /** Widened from `private` so the package's tests can drive a tick instead of waiting 4 minutes. */
+  private[transactions] case object EvaluateNextBatch
+
+  /** Self-message: the batch Future has finished, however it went. */
+  private case object BatchEvaluated
 }

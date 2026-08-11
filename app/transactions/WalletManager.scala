@@ -2,16 +2,16 @@ package transactions
 
 import akka.actor.{Actor, Cancellable}
 import akka.pattern.pipe
-import configs.NodeConfig
+import configs.NodeContext
 import node.MutationConversions._
 import node.NodeApi
-import node.model.{ConfirmationRange, Paging}
+import mutations.NodeWallet.MINER_REWARD_DELAY
+import node.model.{ConfirmationRange, MempoolOptions, Paging, SortDirection}
 import org.ergoplatform.appkit.{BlockchainContext, ErgoClient}
 import org.slf4j.{Logger, LoggerFactory}
 import play.api.libs.concurrent.InjectedActorSupport
 import transactions.WalletManager._
 import transactions.WalletMessages._
-import utils.Globals
 import work.lithos.mutations.{InputUTXO, Token, UTXO}
 
 import javax.inject.Inject
@@ -22,81 +22,75 @@ import scala.language.postfixOps
 import scala.util.{Failure, Success, Try}
 
 /**
- * Actor that manages a bounded pool of wallet UTXOs for on-chain transaction building.
+ * The single source of wallet UTXOs for every transaction this client builds.
  *
- * The pool is capped at MAX_WALLET_BOXES (200) entries. On every RefreshBoxes tick
- * (every 10 minutes, and immediately at startup) it fetches fresh unspent wallet
- * boxes from the node, filtering out anything already in usedInputs.
+ * Everything that spends wallet funds goes through here — rollup transactions, fraud proofs and the
+ * emission queue. Selecting boxes anywhere else means two components can pick the same UTXO, and the
+ * loser of that race sees a double spend it cannot distinguish from anyone else's.
  *
- * When an actor sends RetrieveInputs, WalletManager selects a minimal irredundant
- * set of UTXOs covering the requested ERG and tokens, then optionally records the
- * selection in usedInputs to prevent double-spend errors. usedInputs is cleared
- * every 30 minutes by ResetUsedInputs.
+ * On every RefreshBoxes tick (10 minutes, and at startup) it pages the node's unspent wallet boxes to
+ * exhaustion and keeps those the prover can sign for. Reservations made by RetrieveInputs are held in
+ * usedInputs and subtracted at SELECTION rather than only at refresh — otherwise two selections
+ * inside one refresh window can return the same box.
  *
- * === Selection strategy ===
+ * A reservation ends in one of three ways, and the distinction is what stops a double spend: the box
+ * is SPENT, which a complete refresh detects because the node stops reporting it; it is RELEASED by
+ * a caller that abandoned the selection; or it goes STALE, meaning neither of those happened within
+ * ReservationTtlMs and the caller died in between.
  *
- * All selections are irredundant by construction — every returned UTXO is necessary,
- * satisfying Ergo's UnexpectedSelectedBoxes rule.
+ * It also tracks MINER REWARD boxes, which no wallet reports because they sit under a reward script
+ * rather than a plain key. They are preferred when one covers a request outright, since spending them
+ * here is the only thing that returns that ERG to an address ordinary wallets can see.
  *
- * The primary algorithm is dust-first irredundant selection:
- *   1. Sort available boxes ascending by value.
- *      2. Accumulate from the left (smallest first) until the prefix sum >= required.
- *      Call this prefix [b₁,...,bₖ] with slack = sum(prefix) - required.
- *      3. Trim redundant boxes from the left: find the leftmost j where bⱼ > slack.
- *      Every element before j has value <= slack and would be covered by the
- *      remaining selection, making it redundant.
- *      4. If [bⱼ,...,bₖ] is still sufficient, return it. Irredundancy holds because
- *      every bᵢ >= bⱼ > slack >= new_slack (the new slack of the trimmed set),
- *      so removing any element drops the sum below required.
- *      5. If trimming over-pruned (sum of candidate < required), fall back to the
- *      minimum suffix: scan from the right (largest first) until covered.
- *      This subset is also irredundant by the same argument applied in reverse.
- *
- * By preferring the smallest boxes when possible this algorithm cleans up wallet
- * dust (tiny UTXOs that accumulate over time without contributing significant ERG).
- *
- * ERG + token selection:
- * Token-bearing boxes are collected greedily (highest relevant token volume first,
- * stopping the moment all token needs are met — each selected box is therefore
- * necessary for at least one token requirement). Any remaining ERG shortfall is
- * covered by the dust-first algorithm on the non-token remainder.
- *
- * Change box check:
- * If the selected boxes contain any token in excess of what was requested
- * (including unrequested token IDs, where the required amount is zero) and the
- * ERG excess above requiredErg is less than UTXO.MIN_FEE, those surplus tokens
- * cannot be returned to the wallet without a dedicated change output. One extra
- * ERG-only UTXO (>= UTXO.MIN_FEE) is appended in that case. It stays irredundant
- * because without it the excess is insufficient to form the change output.
- *
- * All selections are capped at MAX_TX_INPUTS (50).
+ * Every selection is irredundant: no returned box could be dropped and still cover the request.
  */
-class WalletManager @Inject()() extends Actor with InjectedActorSupport {
+class WalletManager @Inject()(nodeContext: NodeContext) extends Actor with InjectedActorSupport {
 
   implicit val ec: ExecutionContext = context.dispatcher
 
   private val logger: Logger = LoggerFactory.getLogger("WalletManager")
 
-  val nodeConfig: NodeConfig = Globals.getNodeConfig
-  val client: ErgoClient = nodeConfig.getClient
-  val nodeApi: NodeApi = nodeConfig.getNodeApi
+  val client: ErgoClient = nodeContext.getClient
+  val nodeApi: NodeApi = nodeContext.getNodeApi
 
-  // ─── mutable state ────────────────────────────────────────────────────────
+  private val wallet = nodeContext.getNodeWallet
 
-  /** Current pool of available wallet UTXOs, capped at MAX_WALLET_BOXES. */
-  private var walletBoxes: Set[InputUTXO] = Set.empty
+  // ─── mutable state, all keyed by box id ───────────────────────────────────
 
-  /**
-   * UTXOs handed out with excludeInputs = true. Prevents double-spend errors
-   * until the next ResetUsedInputs tick.
-   */
-  private var usedInputs: Set[InputUTXO] = Set.empty
+  /** Known wallet UTXOs, including change handed back by ReturnInputs. */
+  private var walletBoxes: Map[String, InputUTXO] = Map.empty
 
-  /**
-   * UTXOs marked for exclusion by the ExcludeInputs message. Unlike usedInputs, this
-   * set can be replaced every time if needed, though it can also be additive
-   */
-  private var externalExclusions: Set[InputUTXO] = Set.empty
+  /** Reserved by RetrieveInputs and not yet known to be spent, with when each was taken. */
+  private var usedInputs: Map[String, Long] = Map.empty
+
+  /** Excluded by ExcludeInputs. Replaced wholesale rather than accumulated. */
+  private var externalExclusions: Set[String] = Set.empty
+
+  /** Coinbase boxes at this client's addresses, found by ergoTree since no wallet reports them. */
+  private var rewardBoxes: Map[String, InputUTXO] = Map.empty
+
+  /** Chain height as of the last refresh, used to tell which reward boxes have unlocked. */
+  private var chainHeight: Int = 0
+
+  /** Overridable so a test can age a reservation without waiting out the TTL. */
+  protected def now(): Long = System.currentTimeMillis()
+
+  private def reserve(ids: Seq[String]): Unit = {
+    val at = now()
+    usedInputs ++= ids.map(_ -> at)
+  }
+
+  private def unreserved(boxes: Map[String, InputUTXO]): Seq[InputUTXO] =
+    (boxes -- usedInputs.keys -- externalExclusions).values.toSeq
+
+  /** What a selection may draw from. */
+  private def available: Seq[InputUTXO] = unreserved(walletBoxes)
+
+  /** Reward boxes past their timelock. Uses the last refresh's height, so it errs to holding back. */
+  private def spendableRewards: Seq[InputUTXO] =
+    unreserved(rewardBoxes).filter(b => chainHeight > b.input.getCreationHeight + MINER_REWARD_DELAY)
+
+  private var warnedNoIndexer: Boolean = false
 
   private var refreshTicker: Option[Cancellable] = None
   private var resetTicker: Option[Cancellable] = None
@@ -121,23 +115,52 @@ class WalletManager @Inject()() extends Actor with InjectedActorSupport {
 
   override def receive: Receive = {
 
+    // Off the actor thread: this pages the wallet and then does one lookup per address, and callers
+    // Await on this mailbox with a 5-second budget. Blocking here fails their transactions.
     case RefreshBoxes =>
-      val excluded = usedInputs ++ externalExclusions
-
-      client.execute { ctx =>
-        nodeApi.walletUnspentBoxes(ConfirmationRange.Default, Paging(0, MAX_WALLET_BOXES)) match {
-          case Success(boxes) =>
-            val apiBoxes = boxes.map(_.toInputUTXO(ctx)).filterNot(excluded.contains(_))
-            self ! BoxesRefreshed(apiBoxes.toSet)
-          case Failure(ex) =>
-            logger.error(s"Failed to refresh wallet boxes: ${ex.getMessage}", ex)
-        }
+      Future(client.execute { ctx =>
+        val (boxes, walletComplete) = loadAll(ctx)
+        val (rewards, rewardsComplete) = loadRewards(ctx)
+        // One flag over both reads. The collector below infers "spent" from absence, so it may only
+        // run when everything that could report a box actually did.
+        BoxesRefreshed(boxes, rewards, ctx.getHeight, walletComplete && rewardsComplete)
+      }).onComplete {
+        case Success(msg) => self ! msg
+        case Failure(ex) => logger.error(s"Failed to refresh wallet boxes: ${ex.getMessage}", ex)
       }
 
-    case BoxesRefreshed(boxes) =>
-      walletBoxes = boxes
-      logger.info(s"Wallet boxes refreshed - ${walletBoxes.size} available, ${usedInputs.size} tracked as used," +
-        s" and ${externalExclusions.size} have been excluded from collection")
+    case BoxesRefreshed(boxes, rewards, height, complete) =>
+      val fresh = boxes.map(b => b.id.toString -> b).toMap
+      val freshRewards = rewards.map(b => b.id.toString -> b).toMap
+      if (complete) {
+        // A reserved box neither read still reports as unspent HAS been spent, so the box and its
+        // reservation go together. Keeping the reservation was what made a spent box selectable
+        // again: it is retained here BECAUSE it is reserved, so it survived every refresh and came
+        // back the moment the reservation was cleared.
+        //
+        // BOTH sets, not just the wallet. Coinbases are tracked separately because no wallet reports
+        // them, so comparing against the wallet alone declared every reserved coinbase spent on
+        // sight — and `coveringReward` hands one out for most ordinary fees.
+        val reported = fresh.keySet ++ freshRewards.keySet
+        val settled = usedInputs.keySet.diff(reported)
+        if (settled.nonEmpty) {
+          logger.info(s"${settled.size} reserved box(es) are no longer unspent - collecting them")
+          usedInputs = usedInputs -- settled
+        }
+        walletBoxes = fresh
+        rewardBoxes = freshRewards
+      } else {
+        // A run that stopped part way cannot tell "spent" from "not fetched", and guessing wrong
+        // there hands out a box sitting in an unconfirmed transaction. Collect nothing, and keep
+        // reserved boxes of either kind alive as before.
+        walletBoxes = walletBoxes.filter { case (id, _) => usedInputs.contains(id) } ++ fresh
+        rewardBoxes = rewardBoxes.filter { case (id, _) => usedInputs.contains(id) } ++ freshRewards
+      }
+      chainHeight = height
+      val locked = rewardBoxes.size - spendableRewards.size
+      logger.info(s"Wallet refreshed - ${available.size} available, ${usedInputs.size} reserved, " +
+        s"${externalExclusions.size} excluded, ${spendableRewards.size} reward box(es) spendable " +
+        s"($locked still locked)" + (if (complete) "" else ", PARTIAL"))
 
     case RetrieveInputs(erg, tokens, trackUsed) =>
       val replyTo = sender()
@@ -146,35 +169,139 @@ class WalletManager @Inject()() extends Actor with InjectedActorSupport {
           logger.error(s"Failed to select wallet inputs (needed $erg nanoERG): ${ex.getMessage}", ex)
           replyTo ! WalletInputs(Seq.empty)
         case Success(selected) =>
-          if (trackUsed) usedInputs = usedInputs ++ selected
+          if (trackUsed) reserve(selected.map(_.id.toString))
           replyTo ! WalletInputs(selected)
       }
 
+    case RetrieveCoveringInput(erg, trackUsed) =>
+      val replyTo = sender()
+      Try(selectLargest(erg)) match {
+        case Failure(ex) =>
+          logger.error(s"Failed to select wallet inputs (needed $erg nanoERG): ${ex.getMessage}", ex)
+          replyTo ! WalletInputs(Seq.empty)
+        case Success(selected) =>
+          if (selected.isDefined) {
+            if (trackUsed) reserve(selected.toSeq.map(_.id.toString))
+            replyTo ! WalletInputs(selected.toSeq)
+          } else {
+            logger.error(s"Failed to find large singular wallet UTXO (needed minimum of $erg nanoERG)")
+            replyTo ! WalletInputs(Seq.empty)
+          }
+      }
+
+    case ReturnInputs(inputs) =>
+      val signable = inputs.filter(b => wallet.signableTrees.contains(b.contract.ergoTreeHex))
+      walletBoxes ++= signable.map(b => b.id.toString -> b)
+
+    case ReleaseInputs(inputs) =>
+      usedInputs --= inputs.map(_.id.toString)
+
+    // By age, never wholesale. A reservation normally ends at the refresh above or with
+    // ReleaseInputs; what reaches this tick is a selection abandoned without either, which is a
+    // caller that died between reserving and sending. Clearing the whole set instead handed out
+    // boxes that were sitting in unconfirmed transactions, once every fifteen minutes.
     case ResetUsedInputs =>
-      logger.info(s"Resetting usedInputs set (was tracking ${usedInputs.size} UTXOs)")
-      usedInputs = Set.empty
+      val cutoff = now() - ReservationTtlMs
+      val stale = usedInputs.filter(_._2 < cutoff).keySet
+      if (stale.nonEmpty) {
+        logger.warn(s"Releasing ${stale.size} reservation(s) never spent or released within " +
+          s"${ReservationTtlMs / 60000} minutes; ${usedInputs.size - stale.size} still held")
+        usedInputs = usedInputs -- stale
+      }
 
     case ExcludeInputs(inputsExcluded, dueToUsage) =>
       if (dueToUsage)
-        usedInputs = usedInputs ++ inputsExcluded.toSet
+        reserve(inputsExcluded.map(_.id.toString))
       else
-        externalExclusions = inputsExcluded.toSet
+        externalExclusions = inputsExcluded.map(_.id.toString).toSet
+  }
+
+  /**
+   * Every unspent coinbase paid to one of this client's addresses, and whether every address
+   * answered.
+   *
+   * The completeness flag matters for the same reason `loadAll`'s does: the refresh collects a
+   * reservation when nothing reports the box, and a swallowed lookup failure is indistinguishable
+   * from "spent". A failed address must not be allowed to look like one.
+   *
+   * Needs an indexed node; without one they stay invisible and unspendable, which is a slow leak
+   * rather than a failure, so it logs once and carries on. Nothing can be reserved in that state
+   * either, so an empty answer is a complete one. A per-address lookup is cheap enough at this
+   * cadence and avoids a registered scan, which cannot be edited as new keys are derived.
+   */
+  private def loadRewards(ctx: BlockchainContext): (Seq[InputUTXO], Boolean) =
+    if (!nodeApi.indexerEnabled) {
+      if (!warnedNoIndexer) {
+        warnedNoIndexer = true
+        logger.warn("Node is not indexed (extraIndex = false), so mined coinbases cannot be found. " +
+          "They accrue at addresses no wallet reports and stay unspendable until it is enabled")
+      }
+      (Seq.empty, true)
+    } else {
+      var complete = true
+      val loaded = wallet.rewardTrees.keys.toSeq.flatMap { tree =>
+        nodeApi.unspentBoxesByErgoTree(tree, Paging(0, MAX_REWARD_BOXES), SortDirection.Asc,
+          MempoolOptions(includeUnconfirmed = false, excludeMempoolSpent = true)) match {
+          case Success(boxes) => boxes.map(_.toInputUTXO(ctx))
+          case Failure(ex) =>
+            logger.warn(s"Could not read reward boxes for one address: ${ex.getMessage}")
+            complete = false
+            Seq.empty[InputUTXO]
+        }
+      }
+      (loaded, complete)
+    }
+
+  /**
+   * Every unspent wallet box the prover can sign for, paged to exhaustion, and whether it got there.
+   *
+   * The completeness flag is load bearing: an absent box only means "spent" when the whole wallet
+   * was read, and the refresh collects reservations on exactly that inference.
+   *
+   * The signable filter should never drop anything: `node.numAddresses` is meant to cover every EIP-3
+   * index this client derives. If it fires, funds are sitting at addresses that cannot be spent.
+   */
+  private def loadAll(ctx: BlockchainContext): (Seq[InputUTXO], Boolean) = {
+    var loaded = Vector.empty[InputUTXO]
+    var paging = Paging(0, MAX_WALLET_BOXES)
+    var exhausted = false
+    var complete = true
+    while (!exhausted) {
+      nodeApi.walletUnspentBoxes(ConfirmationRange.Default, paging) match {
+        case Success(page) =>
+          loaded ++= page.map(_.toInputUTXO(ctx))
+          exhausted = page.size < paging.limit
+          paging = paging.next
+        case Failure(ex) =>
+          logger.error(s"Wallet paging stopped after ${loaded.size} box(es): ${ex.getMessage}")
+          exhausted = true
+          complete = false
+      }
+    }
+    val signable = loaded.filter(b => wallet.signableTrees.contains(b.contract.ergoTreeHex))
+    if (signable.size < loaded.size)
+      logger.error(s"${loaded.size - signable.size} wallet box(es) are at addresses this client " +
+        "cannot sign for and are unspendable. Raise node.numAddresses to cover every derived key")
+    (signable, complete)
   }
 
   // ─── box selection ────────────────────────────────────────────────────────
 
   /**
-   * Entry point. Delegates to the ERG-only or mixed path, applies the change-box
-   * check, then enforces the MAX_TX_INPUTS cap.
+   * Entry point. Prefers a reward box, then delegates to the ERG-only or mixed path, applies the
+   * change-box check and enforces the input cap.
    */
   private def selectBoxes(requiredErg: Long, requiredTokens: Seq[Token]): Seq[InputUTXO] = {
-    val available = walletBoxes.toSeq
+    val rewards = spendableRewards
+    val pool = available ++ rewards
 
-    val initial =
-      if (requiredTokens.isEmpty) selectErgBoxes(available, requiredErg)
-      else selectMixedBoxes(available, requiredErg, requiredTokens)
+    val initial = coveringReward(rewards, requiredErg, requiredTokens) match {
+      case Some(reward) => Seq(reward)
+      case None if requiredTokens.isEmpty => selectErgBoxes(pool, requiredErg)
+      case None => selectMixedBoxes(pool, requiredErg, requiredTokens)
+    }
 
-    val withChange = applyChangeBoxCheck(initial, available, requiredErg, requiredTokens)
+    val withChange = applyChangeBoxCheck(initial, pool, requiredErg, requiredTokens)
 
     if (withChange.size > MAX_TX_INPUTS + 1)
       throw new InsufficientWalletFundsException(
@@ -186,19 +313,36 @@ class WalletManager @Inject()() extends Actor with InjectedActorSupport {
   }
 
   /**
-   * ERG-only selection: sort ascending and apply the dust-first irredundant
-   * algorithm.
+   * The smallest unlocked reward box that covers an ERG-only request on its own.
+   *
+   * Preferred over wallet boxes because nothing else will ever spend these — no wallet reports them,
+   * so the client that mined the block is the only thing that can move the ERG, and the change lands
+   * at an ordinary address the user can see. Taken alone so the selection stays irredundant, and
+   * skipped entirely when tokens are needed, since a coinbase carries none.
    */
+  private def coveringReward(rewards: Seq[InputUTXO],
+                             requiredErg: Long,
+                             requiredTokens: Seq[Token]): Option[InputUTXO] =
+    if (requiredTokens.nonEmpty) None
+    else rewards.filter(_.value >= requiredErg).sortBy(_.value).headOption
+
+  /**
+   * Select largest singular box which covers the required amount of ERG.
+   * If requiredERG is equal to the box's value, the box is skipped
+   * @param requiredErg Required amount of ERG to cover
+   * @return Singular UTXO covering the required amount of ERG
+   */
+  private def selectLargest(requiredErg: Long): Option[InputUTXO] =
+    (spendableRewards ++ available).sortBy(-_.value)
+      .find(b => b.value > requiredErg || (b.value == requiredErg && b.tokens.isEmpty))
+
+  /** ERG-only selection: sort ascending and apply the dust-first algorithm. */
   private def selectErgBoxes(available: Seq[InputUTXO], requiredErg: Long): Seq[InputUTXO] =
     dustFirstIrredundant(available.sortBy(_.value), requiredErg)
 
-
   /**
-   * ERG + token selection.
-   *
-   * Collects token-bearing boxes greedily (sorted by relevant token volume
-   * descending) until all token needs are met, then covers any remaining ERG
-   * shortfall using the dust-first algorithm on the non-token remainder.
+   * ERG + token selection. Token-bearing boxes greedily by relevant volume until the token needs are
+   * met, then the dust-first algorithm covers any ERG shortfall from the non-token remainder.
    */
   private def selectMixedBoxes(available: Seq[InputUTXO],
                                requiredErg: Long,
@@ -235,26 +379,15 @@ class WalletManager @Inject()() extends Actor with InjectedActorSupport {
   }
 
   /**
-   * Dust-first irredundant selection over a pre-sorted ascending sequence.
+   * Smallest-first selection over an ascending sequence, which also clears wallet dust.
    *
-   * Phase 1 — dust-first:
-   * Accumulates boxes from the left (smallest first) to find the minimum
-   * sufficient prefix [b₁,...,bₖ]. Trims any boxes from the left whose value
-   * is <= slack (= sum − required), producing candidate [bⱼ,...,bₖ]. Returns
-   * the candidate if it remains sufficient — it is provably irredundant because
-   * every retained element exceeds the slack of the trimmed set.
-   *
-   * Phase 2 — minimum suffix fallback:
-   * If trimming left too many boxes caused the candidate to become insufficient,
-   * falls back to scanning from the right (largest first) until covered. The
-   * resulting suffix is irredundant by the symmetric argument: removing any
-   * element bᵢ drops the sum by at least the minimum element, which was chosen
-   * because the remaining suffix sum was still below required.
+   * Takes the shortest sufficient prefix, then drops any leading box worth no more than the slack —
+   * those are covered by what remains, so dropping them keeps the set irredundant. If trimming goes
+   * too far the fallback scans from the largest end instead, which is irredundant symmetrically.
    */
   private def dustFirstIrredundant(sortedAsc: Seq[InputUTXO], required: Long): Seq[InputUTXO] = {
     val indexed = sortedAsc.toIndexedSeq
 
-    // Phase 1: find minimum sufficient prefix
     var prefixSum = 0L
     var k = -1
     for (i <- indexed.indices if k == -1) {
@@ -265,26 +398,20 @@ class WalletManager @Inject()() extends Actor with InjectedActorSupport {
     if (k == -1)
       throw new InsufficientWalletFundsException(
         s"Insufficient wallet funds: need $required nanoERG, pool only has $prefixSum nanoERG " +
-          s"across ${walletBoxes.size} UTXOs"
+          s"across ${available.size} available UTXOs"
       )
 
-    // Phase 1: trim redundant prefix
     val slack = prefixSum - required
     val j = indexed.indices.find(i => indexed(i).value > slack).getOrElse(k)
     val candidate = indexed.slice(j, k + 1)
 
-    if (candidate.map(_.value).sum >= required && candidate.size <= MAX_TX_INPUTS)
-      candidate // dust-first irredundant selection
-    else
-      minimumSuffix(indexed, required) // Phase 2 fallback
+    if (candidate.map(_.value).sum >= required && candidate.size <= MAX_TX_INPUTS) candidate
+    else minimumSuffix(indexed, required)
   }
 
   /**
-   * Minimum-suffix fallback: scans a pre-sorted ascending sequence from the
-   * right (largest first) and collects boxes until the running total >= required.
-   * The resulting subset is irredundant: for any retained element bᵢ,
-   * sum − bᵢ ≤ sum − bₖ (the smallest retained element), and sum − bₖ equals
-   * the suffix without bₖ which was below required by the minimality condition.
+   * Fallback for when trimming left too little: scan from the largest end until covered. Guaranteed
+   * to succeed, since the caller already checked the total.
    */
   private def minimumSuffix(sortedAsc: IndexedSeq[InputUTXO], required: Long): Seq[InputUTXO] = {
     var acc = 0L
@@ -293,23 +420,15 @@ class WalletManager @Inject()() extends Actor with InjectedActorSupport {
       result += box
       acc += box.value
     }
-    // acc is guaranteed >= required here because dustFirstIrredundant verified
-    // the total prefix sum >= required before calling this method.
     result.toSeq
   }
 
   /**
-   * Checks whether an extra input is needed to fund a change box for surplus tokens.
+   * Adds one input when surplus tokens need a change box and the ERG excess cannot fund one.
    *
-   * For each token present in the selected boxes, the total amount across all
-   * selected inputs is compared against the requested amount (0 if the token was
-   * not requested at all). If any token total exceeds its required amount AND the
-   * ERG excess (sum − requiredErg) is less than UTXO.MIN_FEE, we cannot form a
-   * valid change output. In that case the smallest available ERG-only UTXO with
-   * value >= UTXO.MIN_FEE is appended. ERG-only boxes are preferred so the extra
-   * input does not itself carry further surplus tokens. The change-box input is
-   * always appended even if it pushes the selection past MAX_TX_INPUTS, since
-   * without it the surplus tokens cannot be returned to the wallet at all.
+   * Surplus means any token the selection carries beyond what was asked for, including tokens nobody
+   * asked for at all. ERG-only boxes are preferred so the extra input brings no further surplus, and
+   * it is appended even past the input cap, since otherwise those tokens cannot be returned.
    */
   private def applyChangeBoxCheck(selected: Seq[InputUTXO],
                                   available: Seq[InputUTXO],
@@ -330,11 +449,9 @@ class WalletManager @Inject()() extends Actor with InjectedActorSupport {
 
     if (!needsChangeBox || excess >= UTXO.MIN_FEE) return selected
 
-    // Need one extra input to fund the change box for surplus tokens
     val selectedIds = selected.map(_.id).toSet
     val remaining = available.filterNot(b => selectedIds.contains(b.id))
     val ergOnlyRemaining = remaining.filter(_.tokens.isEmpty)
-    // Prefer ERG-only boxes to avoid introducing further surplus tokens
     val candidates = if (ergOnlyRemaining.nonEmpty) ergOnlyRemaining else remaining
 
     candidates.filter(_.value >= UTXO.MIN_FEE).sortBy(_.value).headOption match {
@@ -351,10 +468,19 @@ object WalletManager {
   /** Maximum number of inputs returned in a single RetrieveInputs response. */
   final val MAX_TX_INPUTS: Int = 75
 
-  /** Maximum number of unspent wallet boxes pulled per refresh. */
+  /** Page size for the wallet refresh, which pages to exhaustion. */
   final val MAX_WALLET_BOXES: Int = 500
 
-  // ─── internal messages ────────────────────────────────────────────────────
+  /** Reward boxes pulled per address. One Lithos block pays one, so this is years of them. */
+  final val MAX_REWARD_BOXES: Int = 200
 
-  private case class BoxesRefreshed(boxes: Set[InputUTXO])
+  /**
+   * How long a reservation survives with no sign of being spent or released. Only reached by a
+   * caller that abandoned a selection without saying so, so it is generous: releasing early is a
+   * double spend, releasing late costs one delayed pass.
+   */
+  final val ReservationTtlMs: Long = 15 * 60 * 1000L
+
+  private case class BoxesRefreshed(boxes: Seq[InputUTXO], rewards: Seq[InputUTXO], height: Int,
+                                    complete: Boolean)
 }

@@ -27,6 +27,9 @@ import scala.util.Try
  *
  *   LithosPool ──── BroadcastJob ──────────────────────── ► StratumConnection
  *   StratumConnection ──── ShareAccepted (block/supershare) ► LithosPool
+ *
+ *   LithosPool ──── ChainAdvanced ─────────────────────── ► CandidateBuilder
+ *                   BlockPackageReady ◄─────────────────────┘
  */
 object MiningMessages {
 
@@ -38,9 +41,16 @@ object MiningMessages {
    * Sent by LithosPool to LithosJobManager whenever a new block template is fetched.
    * LithosJobManager replies with true if the template produced a NEW block job,
    * false if it was a duplicate of the current job.
+   *
+   * `mustPublish` says the candidate has already been taken from the node. The node keeps one
+   * candidate per key and validates solutions against that copy, so one it has handed out and had
+   * replaced is worthless — dropping such a template leaves miners hashing a header no solution can
+   * be submitted against. Set it whenever the fetch has happened; leave it false only for templates
+   * that can still be thrown away for free.
    */
   case class ProcessTemplate(candidate: MiningCandidate, tau: BigInteger,
-                             usesCollateral: Boolean, reducedShareMessages: Boolean)
+                             usesCollateral: Boolean, reducedShareMessages: Boolean,
+                             mustPublish: Boolean = false)
 
   /**
    * Sent by StratumConnection (via LithosPool.forward) when a miner subscribes.
@@ -120,8 +130,55 @@ object MiningMessages {
                          extraNonce2Hex: String, nTime: String, extraNonce1Hex: String)
 
   // ═══════════════════════════════════════════════════════════════════════════
+  // LithosPool ↔ CandidateBuilder
+  //
+  //   LithosPool ──── ChainAdvanced / RebuildCandidate / BlockTxsRejected ─► CandidateBuilder
+  //   CandidateBuilder ──── BlockPackageReady ─────────────────────────────► LithosPool
+  //
+  // Only LithosPool watches the node's height, so it decides when to build. The builder pushes
+  // finished packages back rather than being asked, so nothing on the mining path waits on it.
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  /**
+   * The block now being mined is at `blockHeight`, one past the confirmed chain tip. Ignored when
+   * it is not ahead of what the builder already has.
+   */
+  case class ChainAdvanced(blockHeight: Int)
+
+  /** Throw away the current package and build it again. */
+  case object RebuildCandidate
+
+  /**
+   * This collateral box has just been consumed by a block we mined.
+   *
+   * The builder cannot wait for a refresh to notice. A found block is exactly the case where the
+   * active set changes, and the next block's genesis transaction is built from the in-memory set
+   * moments later — so without this it spends the box it just spent.
+   */
+  case class CollateralSpent(boxId: String)
+
+  /**
+   * The node refused a candidate carrying this block's inserted transactions but accepted the
+   * genesis transaction alone, so only the insertions are at fault. They are in the mempool too.
+   */
+  case class BlockTxsRejected(blockHeight: Int)
+
+  /**
+   * Transactions are ready for the block at `pkg.blockHeight`. Sent once with the genesis
+   * transaction alone and again for each later revision.
+   */
+  case class BlockPackageReady(pkg: BlockPackage)
+
+  // ═══════════════════════════════════════════════════════════════════════════
   // LithosPool internal
   // ═══════════════════════════════════════════════════════════════════════════
+
+  /**
+   * MiningStratumServer → LithosPool, once at startup: hand back the job manager so connections can
+   * send shares straight to it. LithosPool blocks its own mailbox on node HTTP, so routing shares
+   * through it would put those round trips in front of every miner's response.
+   */
+  case object GetJobManager
 
   /** Scheduler tick: ask LithosPool to fetch the latest block template from the Ergo node. */
   case object PollBlockTemplate

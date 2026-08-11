@@ -14,11 +14,13 @@ import play.api.cache.SyncCacheApi
 import scorex.utils.Longs
 import sigma.ast.ErgoTree
 import sigma.data.CBigInt
-import sigma.{Coll, SigmaProp}
+import sigma.serialization.{SigmaSerializer, ValueSerializer}
+import sigma.{Coll, SigmaProp, VersionContext}
 import state.messages.MempoolMessages.{MempoolChain, MempoolRollupState, MempoolTransform}
 import state.messages.RollupMessages._
 import state.messages.SyncMessages.Transform
 import utils.{Globals, Helpers, PayoutRecord}
+import work.lithos.mutations.Contract
 
 import javax.inject.Inject
 
@@ -143,9 +145,7 @@ class RollupSynchronizer @Inject()(config: Configuration, @Assisted rollupBlockI
       if(!isMempool) {
         tree.dictionary
       } else {
-        val tmpDict = tree.dictionary.copy()
-        tmpDict.prover.generateProof()
-        tmpDict
+        tree.dictionary.copy()
       }
     }
 
@@ -153,12 +153,12 @@ class RollupSynchronizer @Inject()(config: Configuration, @Assisted rollupBlockI
     val nextScore = holdingBox.registers(2).getValue.asInstanceOf[CBigInt].wrappedValue
     val nextPeriod = holdingBox.registers(3).getValue.asInstanceOf[Long]
 
-    val signer = ErgoValue.fromHex(transform.input.spendingProof.get.ext("0")).getValue.asInstanceOf[SigmaProp]
+
     val keyValue = ErgoValue.fromHex(transform.input.spendingProof.get.ext("1")).getValue.asInstanceOf[(Coll[Byte], Coll[Byte])]
     val proof = ErgoValue.fromHex(transform.input.spendingProof.get.ext("2")).getValue.asInstanceOf[Coll[Byte]]
 
-    val isMiner = Helpers.pkHexFromSigmaProp(signer).get == Helpers.pkHexFromBoolean(
-      prover.contract.sigmaBoolean.get).get
+    val isMiner = keyValue._1.toArray sameElements prover.contract.hashedPropBytes
+
     val insertion = dict.insert(keyValue._1.toArray -> keyValue._2.toArray)
     require(insertion.proof.ergoValue.getValue == proof, "Proofs must be equal on submission transform")
 
@@ -173,7 +173,7 @@ class RollupSynchronizer @Inject()(config: Configuration, @Assisted rollupBlockI
       log(s"Applied submission transform ${transform.tx.id} with $transform for local miner", shouldLog)
     } else {
       log(s"Applied submission transform ${transform.tx.id} with $transform for miner" +
-        s" ${Address.fromErgoTree(ErgoTree.fromProposition(signer), ctx.getNetworkType)}", shouldLog)
+        s" ${Hex.toHexString(keyValue._1.toArray)}", shouldLog)
     }
     nextTree
 
@@ -204,9 +204,7 @@ class RollupSynchronizer @Inject()(config: Configuration, @Assisted rollupBlockI
         if(!isMempool) {
           tree.dictionary
         } else {
-          val tmpDict = tree.dictionary.copy()
-          tmpDict.prover.generateProof()
-          tmpDict
+          tree.dictionary.copy()
         }
       }
 
@@ -297,7 +295,6 @@ class RollupSynchronizer @Inject()(config: Configuration, @Assisted rollupBlockI
   private def mempoolPayoutTransform(tree: NISPTree, transform: MempoolTransform, shouldLog: Boolean): NISPTree = {
     if (tree.hasMiner) {
       val dict = tree.dictionary.copy()
-      dict.prover.generateProof()
       val input = transform.input
       val miners = ErgoValue.fromHex(input.spendingProof.get.ext("0")).getValue.asInstanceOf[Coll[Coll[Byte]]]
       val lookProof = ErgoValue.fromHex(input.spendingProof.get.ext("1")).getValue.asInstanceOf[Coll[Byte]]

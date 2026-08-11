@@ -1,6 +1,7 @@
-import transactions.{RollupEvaluator, SubmissionHandler, TransactionProcessor, TransactionPublisher, WalletManager}
+import transactions.{EmissionHandler, RollupEvaluator, SubmissionHandler, TransactionProcessor, TransactionPublisher, WalletManager}
 import api.{BlocksApi, BlocksApiImpl, CollateralApi, CollateralApiImpl, DexApi, DexApiImpl, InfoApi, InfoApiImpl, MiningApi, MiningApiImpl, PaymentsApi, PaymentsApiImpl}
 import com.google.inject.AbstractModule
+import configs.NodeContext
 import play.api.{Configuration, Environment}
 import play.libs.akka.AkkaGuiceSupport
 import state.synchronization.{MDSynchronizer, MempoolView, PDSynchronizer, RollupCoordinator, RollupSynchronizer, StateFrame, SyncHandler}
@@ -15,6 +16,12 @@ class Module(environment: Environment, configuration: Configuration) extends Abs
     // Set critical configs and databases
     Globals.setConfigs(configuration)
 
+    // The one NodeConfig, handed to whoever asks for a NodeContext. Bound to the instance Globals
+    // already built rather than to the class, so Guice cannot construct a second: each one unlocks
+    // secret storage, builds its own prover and opens its own client, and two would derive lender
+    // keys from separate sequences.
+    bind(classOf[NodeContext]).toInstance(Globals.getNodeConfig)
+
     // Bindings
     bindActor(classOf[StateFrame], "state-frame", p => p.withDispatcher("lithos-contexts.sync-dispatcher"))
     bindActor(classOf[MempoolView], "mempool-view", p => p.withDispatcher("lithos-contexts.sync-dispatcher"))
@@ -28,6 +35,7 @@ class Module(environment: Environment, configuration: Configuration) extends Abs
     bindActor(classOf[RollupEvaluator],      "rollup-evaluator",      p => p.withDispatcher("lithos-contexts.tx-dispatcher"))
     bindActor(classOf[TransactionProcessor], "transaction-processor", p => p.withDispatcher("lithos-contexts.tx-dispatcher"))
     bindActor(classOf[TransactionPublisher], "transaction-publisher", p => p.withDispatcher("lithos-contexts.tx-dispatcher"))
+    bindActor(classOf[EmissionHandler],      "emission-handler",      p => p.withDispatcher("lithos-contexts.tx-dispatcher"))
 
     bindActorFactory(classOf[RollupSynchronizer], classOf[RollupSynchronizer.RollupSyncFactory])
     bind(classOf[BlocksApi]).to(classOf[BlocksApiImpl])

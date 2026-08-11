@@ -1,7 +1,9 @@
 package mining
 
 import akka.actor.{ActorRef, ActorSystem, Props}
+import akka.pattern.ask
 import com.redbottledesign.bitcoin.rpc.stratum.MalformedStratumMessageException
+import configs.CandidateConfig
 import com.redbottledesign.bitcoin.rpc.stratum.transport.{AbstractConnectionState, ConnectionState, StatefulMessageTransport}
 import com.redbottledesign.bitcoin.rpc.stratum.transport.tcp.{StratumTcpServer, StratumTcpServerConnection}
 import mining.StratumConnection.ConnectionEstablished
@@ -20,8 +22,9 @@ import java.math.BigDecimal
 import java.net.{InetSocketAddress, Socket}
 import java.util.Arrays
 import java.util.concurrent.atomic.AtomicReference
-import scala.collection.mutable
-import scala.concurrent.duration.{Duration, FiniteDuration}
+import scala.collection.concurrent.TrieMap
+import scala.concurrent.Await
+import scala.concurrent.duration.{Duration, DurationInt, FiniteDuration}
 
 /**
  * Actor-based Stratum TCP server.
@@ -66,6 +69,8 @@ import scala.concurrent.duration.{Duration, FiniteDuration}
  * @param apiKey              Node API key for /mining/candidateWithTxs
  * @param reducedShareMessages Whether to divide the displayed tau by 1000
  * @param nispDB              NISP database for super-share persistence
+ * @param candidateConfig     Tuning for CandidateBuilder, which builds the transactions inserted
+ *                            into every Lithos block
  */
 class MiningStratumServer(system: ActorSystem,
                           options: Options,
@@ -77,7 +82,10 @@ class MiningStratumServer(system: ActorSystem,
                           nispDB: NISPDatabase,
                           stateFrame: ActorRef,
                           forceConfigDiff: Boolean,
-                          diffRefreshInterval: Int)
+                          diffRefreshInterval: Int,
+                          candidateConfig: CandidateConfig = CandidateConfig.Default,
+                          txSources: Seq[ActorRef] = Seq.empty[ActorRef],
+                          rotateExtraNonceInterval: Int = 0)
   extends StratumTcpServer {
 
   private val logger: Logger = LoggerFactory.getLogger("MiningStratumServer")
@@ -86,14 +94,31 @@ class MiningStratumServer(system: ActorSystem,
 
   val poolActor: ActorRef = system.actorOf(
     Props(new LithosPool(options, useCollateral, client, prover, apiKey,
-      reducedShareMessages, nispDB, stateFrame, forceConfigDiff, diffRefreshInterval)),
+      reducedShareMessages, nispDB, stateFrame, forceConfigDiff, diffRefreshInterval,
+      candidateConfig, txSources)),
     "mining-pool"
   )
+
+  /**
+   * Resolved once at startup so every connection can reach it without going through the pool. The
+   * Await is on the startup path only; nothing on the share path blocks.
+   */
+  private val jobManager: ActorRef = {
+    implicit val timeout: akka.util.Timeout = akka.util.Timeout(30.seconds)
+    Await.result((poolActor ? GetJobManager).mapTo[ActorRef], 30.seconds)
+  }
 
   // ─── per-connection tracking (for clean shutdown) ─────────────────────────
 
   private val subscriptionIdCounter = new SubscriptionIdCounter()
-  private val connectionActors: mutable.HashMap[String, ActorRef] = mutable.HashMap.empty
+
+  /**
+   * Live connection actors, so `stopListening` can stop them promptly rather than waiting out each
+   * one's liveness tick. Concurrent because entries are added on JStratum's accept thread and
+   * removed on each connection actor's own thread as it stops; a plain map only ever grew, holding a
+   * dead ActorRef for every connection the process had ever accepted.
+   */
+  private val connectionActors: TrieMap[String, ActorRef] = TrieMap.empty
 
   // ─── StratumTcpServer overrides ───────────────────────────────────────────
 
@@ -139,7 +164,8 @@ class MiningStratumServer(system: ActorSystem,
 
     // Step 3 — create the actor BEFORE populating the bridge
     val connectionActor = system.actorOf(
-      Props(new StratumConnection(subscriptionId, socketAddress, poolActor, connectionId)),
+      Props(new StratumConnection(subscriptionId, socketAddress, poolActor, jobManager, connectionId,
+        rotateExtraNonceInterval, () => connectionActors.remove(connectionId))),
       s"connection-$connectionId"
     )
 

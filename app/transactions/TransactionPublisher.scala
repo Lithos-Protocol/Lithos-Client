@@ -4,7 +4,7 @@ import akka.actor.{Actor, ActorRef, Cancellable}
 import akka.pattern.{ask, pipe}
 import akka.util.Timeout
 import cache.RollupCache
-import configs.{NodeConfig, StateConfig, StratumConfig}
+import configs.{NodeContext, StateConfig, StratumConfig}
 import lfsm.LFSMHelpers
 import lfsm.LFSMPhase.{EVAL, HOLDING, PAYOUT}
 import lfsm.states.NISPTree
@@ -19,7 +19,6 @@ import state.messages.SyncMessages._
 import transactions.TransactionMessages.RollupTxType._
 import transactions.TransactionMessages.{PublishRollupTxs, PublishedRollupMap, RollupTxStub, RollupTxType}
 import transactions.TransactionPublisher._
-import utils.Globals
 
 import javax.inject.{Inject, Named}
 import scala.collection.mutable
@@ -40,7 +39,7 @@ import scala.util.{Failure, Success, Try}
  *
  * Disabled entirely when `state.disableTransforms = true`.
  */
-class TransactionPublisher @Inject()(config: Configuration,
+class TransactionPublisher @Inject()(config: Configuration, nodeContext: NodeContext,
                              cacheApi: SyncCacheApi,
                              @Named("sync-handler") syncHandler: ActorRef,
                              @Named("transaction-processor") transactionProcessor: ActorRef)
@@ -51,7 +50,7 @@ class TransactionPublisher @Inject()(config: Configuration,
 
   private val logger: Logger             = LoggerFactory.getLogger("TransactionPublisher")
 
-  val nodeConfig: NodeConfig             = Globals.getNodeConfig
+  val nodeConfig: NodeContext             = nodeContext
   val client: ErgoClient                 = nodeConfig.getClient
   val prover: NodeWallet                 = nodeConfig.getNodeWallet
   val stateConfig: StateConfig           = new StateConfig(config)
