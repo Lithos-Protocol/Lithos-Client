@@ -1,0 +1,40 @@
+{
+  // LD_Provision_Guard
+  // Value: whatever the provision box holds
+  // The script every provision box actually carries. It holds nothing but the hash of the real
+  // provision logic and runs that logic, supplied at spend time and checked against the hash before a
+  // single line of it is trusted.
+  //
+  // The point is size. A provision box is meant to sit for years and there is one per liquidity
+  // position, so its serialized length is paid for twice over: once in the minimum value every box must
+  // hold, and again in storage rent, which is charged per byte. Carrying a few dozen bytes instead of
+  // the whole provision contract makes both of those small, and moves the cost of the logic onto the
+  // transactions that actually use it — where it is paid once, by whoever benefits, rather than by
+  // every box for as long as it exists.
+  //
+  // The same trade as Emission_Gate makes: a box that keeps no rules of its own and defers entirely to
+  // something else, except that here the rules arrive in the transaction rather than living in a
+  // singleton, so nothing has to be looked up to spend one.
+
+  // CONSTANTS
+  // CONST_PROVISION_LOGIC_HASH: blake2b256 of the serialized LD_Provision script
+
+  // CONTEXT VARS
+  // CTX_LOGIC(64): Serialized bytes of the provision logic. Every register, token and path a provision
+  // has is defined there; nothing about them is repeated here, so this contract never needs reissuing
+  // when they change — only the hash does, and that means a different guard and a different address.
+
+  // ASSUMPTIONS - statements which can be assumed to be true due to other contracts enforcing them
+  // during creation of this UTXO
+  // The pool only ever puts a provision token into a box under this exact script, so a box holding one
+  // is running the logic this hash names and no other
+  //
+  // DELIBERATE OMISSIONS - conditions left out on purpose
+  // Nothing here looks at registers, tokens or outputs. Every rule about what a provision is and what
+  // may be done to it belongs to the logic, and duplicating any of it here would only create a second
+  // place to keep in step.
+
+  val CTX_LOGIC = getVar[Coll[Byte]](64).get
+
+  sigmaProp( blake2b256( CTX_LOGIC ) == CONST_PROVISION_LOGIC_HASH ) && executeFromVar[SigmaProp](64)
+}

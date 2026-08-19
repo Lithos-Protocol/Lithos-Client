@@ -178,6 +178,24 @@ object JsonOps {
       }
       builder.result()
     }.getOrElse(Map.empty[String, String])
+
+    /**
+     * An object of `key -> number`, in document order.
+     *
+     * The node uses this shape wherever a field is a total per id rather than a list of records —
+     * `/wallet/balances` reports `assets` this way, while a box reports its `assets` as an array of
+     * `{tokenId, amount}`. Reading one with the other's accessor yields nothing rather than failing,
+     * so the two are kept apart here.
+     */
+    def longEntries(k: String): Seq[(String, Long)] = field(k).map { e =>
+      val entries = e.getAsJsonObject.entrySet().iterator()
+      val builder = Seq.newBuilder[(String, Long)]
+      while (entries.hasNext) {
+        val entry = entries.next()
+        if (!entry.getValue.isJsonNull) builder += entry.getKey -> entry.getValue.getAsLong
+      }
+      builder.result()
+    }.getOrElse(Seq.empty[(String, Long)])
   }
 
   def jsonArrayToSeq(e: JsonElement): Seq[JsonElement] = {

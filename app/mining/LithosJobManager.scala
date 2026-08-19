@@ -2,6 +2,7 @@ package mining
 
 import akka.actor.Actor
 import evaluation.NTable
+import lfsm.LFSMHelpers
 import mining.MiningMessages._
 import org.bouncycastle.util.encoders.Hex
 import org.slf4j.{Logger, LoggerFactory}
@@ -210,7 +211,10 @@ class LithosJobManager(options: Options) extends Actor {
 
       } else if (job.tau.compareTo(fH) < 0) {
         // Share did not even reach the miner's assigned difficulty
-        return ShareRejected(32, "Low difficulty share", extraNonce1)
+        return ShareRejected(32, s"Low difficulty share with " +
+          s"\n nonce = ${Hex.toHexString(nonce)}" +
+          s"\n strat-diff: ${job.tau} | ${LFSMHelpers.formatTau(job.tau)}" +
+          s"\n share-diff: ${fH} | ${LFSMHelpers.formatTau(fH)}", extraNonce1)
 
       } else {
         // Normal valid share — not a block, not a super-share

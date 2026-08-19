@@ -226,10 +226,17 @@ object NodeCodecs {
     size = o.optInt("size")
   )
 
+  /**
+   * `/wallet/balances` and `/wallet/balances/withUnconfirmed`.
+   *
+   * `assets` here is an OBJECT of `tokenId -> amount`, not the array of `{tokenId, amount}` a box
+   * carries under the same name. Reading it as an array is silent — the array helpers return empty
+   * for a non-array — so every balance came back with no tokens at all.
+   */
   def walletBalances(o: JsonObject): WalletBalances = WalletBalances(
     height = o.optInt("height").getOrElse(0),
     balance = o.optLong("balance").getOrElse(0L),
-    assets = o.objects("assets").map(asset)
+    assets = o.longEntries("assets").map { case (tokenId, amount) => NodeAsset(tokenId, amount) }
   )
 
   def walletStatus(o: JsonObject): WalletStatus = WalletStatus(

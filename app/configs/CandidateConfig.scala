@@ -5,8 +5,8 @@ import play.api.{ConfigLoader, Configuration}
 /**
  * Tuning for [[mining.CandidateBuilder]] — the genesis transaction, the collateral boxes it is
  * built from, and how much of this miner's own block goes to transactions that pay no fee. Those
- * transactions are built by [[transactions.TransactionProcessor]] and
- * [[transactions.EmissionHandler]], not here.
+ * transactions are built by [[transactions.rollups.TransactionProcessor]] and
+ * [[transactions.emissions.EmissionHandler]], not here.
  *
  * Every key is optional and falls back to [[CandidateConfig.Default]].
  *
@@ -28,6 +28,9 @@ import play.api.{ConfigLoader, Configuration}
  *                                  instead of a solo job followed by a collateral one; rigs lose more
  *                                  to two notifies in quick succession than to a short wait. Past
  *                                  this, a solo job goes out so nobody is left mining a dead height.
+ *                                  Kept short on purpose: a build that has not finished by then is not
+ *                                  a slow build, it is a node or selection fault, and the wait only
+ *                                  delays the fallback that would have covered it.
  * @param mempoolRefreshMs          How often to pick up transactions that reached the mempool after
  *                                  a block's job went out, in ms. 0 mines the transaction set the
  *                                  block started with. A new block always goes out at once; this
@@ -52,7 +55,7 @@ object CandidateConfig {
     collateralRefreshInterval = 60000,
     blockTransactions = false,
     maxBlockTxs = 5,
-    genesisWaitMs = 3000,
+    genesisWaitMs = 1500,
     mempoolRefreshMs = 10000,
     blockTxTimeout = 20000
   )

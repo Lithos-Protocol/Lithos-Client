@@ -1,7 +1,7 @@
 package mining
 
 import configs.CandidateConfig
-import contracts.specs.EmissionSpecBase
+import contracts.specs.emission.EmissionSpecBase
 import lfsm.{EmissionSchedule, LFSMHelpers}
 import mutations.NodeWallet
 import node.NodeApi

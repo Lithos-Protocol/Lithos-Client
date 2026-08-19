@@ -16,6 +16,7 @@ object ScriptGenerator {
   private final val FRAUD_PROOFS = "fraudproofs/"
   private final val DICTIONARIES = "dictionaries/"
   private final val PLASMA_DEX = "plasmadex/"
+  private final val LITHOS_DEX = "lithosdex/"
 
   def mkSigTrue(ctx: BlockchainContext): Contract = {
     mkSigTrue(ctx.getNetworkType)
@@ -56,6 +57,13 @@ object ScriptGenerator {
 
   def mkPlasmaDexScript(name: String): String = {
     val src = Source.fromResource(PLASMA_DEX + name + EXT)
+    val script = src.mkString
+    src.close()
+    script
+  }
+
+  def mkLithosDexScript(name: String): String = {
+    val src = Source.fromResource(LITHOS_DEX + name + EXT)
     val script = src.mkString
     src.close()
     script

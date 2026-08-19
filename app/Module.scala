@@ -1,5 +1,7 @@
-import transactions.{EmissionHandler, RollupEvaluator, SubmissionHandler, TransactionProcessor, TransactionPublisher, WalletManager}
-import api.{BlocksApi, BlocksApiImpl, CollateralApi, CollateralApiImpl, DexApi, DexApiImpl, InfoApi, InfoApiImpl, MiningApi, MiningApiImpl, PaymentsApi, PaymentsApiImpl}
+import transactions.emissions.EmissionHandler
+import transactions.rollups.{RollupEvaluator, SubmissionHandler, TransactionProcessor, TransactionPublisher}
+import transactions.wallet.WalletManager
+import api.{BlocksApi, BlocksApiImpl, CollateralApi, CollateralApiImpl, DexApi, DexApiImpl, InfoApi, InfoApiImpl, LithosDexApi, LithosDexApiImpl, MiningApi, MiningApiImpl, PaymentsApi, PaymentsApiImpl}
 import com.google.inject.AbstractModule
 import configs.NodeContext
 import play.api.{Configuration, Environment}
@@ -38,12 +40,14 @@ class Module(environment: Environment, configuration: Configuration) extends Abs
     bindActor(classOf[EmissionHandler],      "emission-handler",      p => p.withDispatcher("lithos-contexts.tx-dispatcher"))
 
     bindActorFactory(classOf[RollupSynchronizer], classOf[RollupSynchronizer.RollupSyncFactory])
+
     bind(classOf[BlocksApi]).to(classOf[BlocksApiImpl])
     bind(classOf[CollateralApi]).to(classOf[CollateralApiImpl])
     bind(classOf[InfoApi]).to(classOf[InfoApiImpl])
     bind(classOf[MiningApi]).to(classOf[MiningApiImpl])
     bind(classOf[PaymentsApi]).to(classOf[PaymentsApiImpl])
     bind(classOf[DexApi]).to(classOf[DexApiImpl])
+    bind(classOf[LithosDexApi]).to(classOf[LithosDexApiImpl])
     bind[StartupTasks](classOf[StartupTasks]).asEagerSingleton()
     //bind[StartStratumServer](classOf[StartStratumServer]).asEagerSingleton()
     bind[StartMiningServer](classOf[StartMiningServer]).asEagerSingleton()

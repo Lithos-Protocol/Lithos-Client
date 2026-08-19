@@ -7,7 +7,7 @@ import configs._
 import lfsm.LFSMHelpers
 import org.slf4j.{Logger, LoggerFactory}
 import play.api.Configuration
-import state.LFSMTransformer
+import transactions.rollups.{CommitmentTransactions, DataBoxSource}
 import stratum.ErgoStratumServer
 import stratum.data.{Data, Options}
 import utils.Globals
@@ -29,13 +29,14 @@ class StartStratumServer @Inject()(system: ActorSystem, config: Configuration, c
   val stateConfig: StateConfig     = new StateConfig(config)
 
   val nodeConfig: NodeConfig = Globals.getNodeConfig
+  val commitments = new CommitmentTransactions(nodeConfig, DataBoxSource.Stored)
   if(taskConfig.enabled) {
     logger.info("Starting Stratum Server for Lithos")
 
     //System.out.println(s"Stratum Server will initiate in ${taskConfig.startup.toString()}")
     val tau: Try[BigInteger] = nodeConfig.getClient.execute {
       ctx =>
-        LFSMTransformer.getCommitedScore(ctx, stratumParams.diff, "stratum mining").map {
+        commitments.committedScore(ctx, stratumParams.diff, "stratum mining").map {
           s =>
             LFSMHelpers.convertTauOrScore(s).bigInteger
         }
@@ -104,7 +105,7 @@ class StartStratumServer @Inject()(system: ActorSystem, config: Configuration, c
    Future{
    val tau = nodeConfig.getClient.execute{
    ctx =>
-   LFSMTransformer.getCommitedScore(ctx, stratumParams.diff, "stratum mining").map{
+   commitments.committedScore(ctx, stratumParams.diff, "stratum mining").map{
    s =>
    LFSMHelpers.convertTauOrScore(s).bigInteger
    }

@@ -418,7 +418,8 @@
         queueIn.tokens(0)._1 == queueToken._1
       )
     )
-
+    // TODO: Consider moving this to collateral enforcer this so we can clear queue boxes in case someone decides to
+    // spam the queue
     // Only allows spending a queue box if the lender already exists in the set
     val lenderAlreadyActive = lenderSet.exists{ (x: Coll[Byte]) => x == entry }
 

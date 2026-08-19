@@ -13,7 +13,7 @@ import org.bouncycastle.util.encoders.Hex
 import org.ergoplatform.appkit.ErgoClient
 import org.slf4j.{Logger, LoggerFactory}
 import scorex.utils.Ints
-import state.LFSMTransformer
+import transactions.rollups.{CommitmentTransactions, DataBoxSource}
 import state.messages.StateFrameMessages.CheckBlock
 import stratum.data.{MiningCandidate, Options}
 import utils.Globals
@@ -84,6 +84,14 @@ class LithosPool(options: Options,
     else None
 
   private val nodeInterface = new MiningNodeInterface(options.nodeApiUrl)
+
+  /**
+   * Reader for this miner's difficulty commitment. Lazy and built from the singleton, the same
+   * deliberate exception as `CandidateBuilder` above: this actor takes its client and prover as
+   * constructor arguments rather than a NodeContext, and the two paths move together.
+   */
+  private lazy val commitments =
+    new CommitmentTransactions(Globals.getNodeConfig, DataBoxSource.Stored)
 
   // ─── mutable state ────────────────────────────────────────────────────────
 
@@ -595,7 +603,7 @@ class LithosPool(options: Options,
     // written by UpdatedDifficulty, so evaluating it in the Future body reads it from another
     // thread — harmless for an immutable BigInt today, and a real race for anything added later.
     val current = tau
-    Future(LFSMTransformer.getCommitedTau(client, current))
+    Future(commitments.committedTau(current))
       .map(UpdatedDifficulty.apply)
       .pipeTo(self)
   }

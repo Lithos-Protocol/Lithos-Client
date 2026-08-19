@@ -151,74 +151,10 @@ object LFSMTransformer {
   }
 
 
-  def checkAutoCommits(ctx: BlockchainContext, diff: String, prover: NodeWallet, inputRetriever: (Long) => Seq[InputUTXO]) = {
-    Try{
-      val dataNFT = Globals.mdDB.getDataBoxToken
-      dataNFT match {
-        case Some(nft) =>
-          logger.info(s"Found saved DataBox token ${nft}")
-
-          val tau = LFSMHelpers.parseDiffValueForStratum(diff)
-          val score = LFSMHelpers.convertTauOrScore(tau.get)
-          val dataContract = Helpers.dataBoxContract(ctx)
-          val dataBox = LFSMHelpers.getLocalDataBox(ctx, nft, dataContract)
-          if (dataBox.isFailure) {
-            logger.warn(s"Could not find data box with saved id ${nft} on blockchain")
-          } else {
-            val dataInput = dataBox.get
-            val commits = dataInput.registers.head.getValue.asInstanceOf[Coll[(Int, Long)]]
-            val currentCommit = commits(0)
-            // commit 0 is currently in effect
-            if(ctx.getHeight - currentCommit._1 >= LFSMHelpers.NISP_WINDOW) {
-              if (currentCommit._2 != score) {
-                logger.info(s"Config has diff ${score} but currentCommit is ${currentCommit._2}")
-                val newCommit = ctx.getHeight + DATA_BOX_BUFFER -> score.toLong
-                val nextCommits = commits
-                  .slice(0, 1)
-                  .updated(0, newCommit)
-                  .append(Colls.fromArray(Array(currentCommit)))
-                logger.info(s"Next commitment set: ${newCommit}")
-                val otherInputs = inputRetriever(Parameters.MinFee)
-                val nextDataBox = dataInput.toUTXO.copy(
-                  registers = dataInput.registers.updated(0, ErgoValue.of(
-                    nextCommits,
-                    ErgoType.pairType(scalaIntType, scalaLongType)
-                  ))
-                )
-                val proverContract = prover.contract
-                val fee = UTXO(Contract(ErgoTreePredef.feeProposition(720)), Parameters.MinFee)
-                val inputWithCtx = dataInput
-                  .withCtxVar(0.toByte, ErgoValue.of(0.toByte))
-                  .withCtxVar(ContextVar.of(1.toByte, proverContract.sigmaBoolean.get))
-
-                val txB = TxBuilder(ctx)
-                val uTx = txB
-                  .setInputs((Seq(inputWithCtx) ++ otherInputs):_*)
-                  .setOutputs(nextDataBox, fee)
-                  .buildTx(0, prover.p2pk)
-
-                val sTx = prover.sign(uTx)
-                val txId = ctx.sendTransaction(sTx)
-                logger.info(s"Sent transaction ${txId} to submit commitment ${newCommit} for data box ${nft}")
-              } else {
-                logger.info("No commitment change needed")
-              }
-            }else{
-              logger.info(s"Not changing commits until next commit takes effect " +
-                s"(height: ${ctx.getHeight}, commit: ${currentCommit})")
-            }
-          }
-        case None =>
-          logger.info("Cannot auto-commit due to no saved data box token")
-      }
-    }.recoverWith{
-      case t: Throwable =>
-        logger.error("Got error while attempting autoCommits", t)
-        Failure(t)
-    }
-
-
-  }
+  // checkAutoCommits moved to transactions.rollups.CommitmentTransactions.commitScore, which owns
+  // the wallet reservation from selection through to commit or uncertain. Here it was a callback the
+  // caller passed in, so an acknowledged submission permit could be dropped on an escape — and a
+  // Submitting lease has no TTL, which made those boxes unspendable until the process restarted.
 
   private def checkHoldingTransforms(ctx: BlockchainContext, holdingTrees: Seq[(String, NISPTree)],
                                      prover: NodeWallet, loader: BoxLoader, mempoolMap: Map[String, MempoolRollupState]): Unit = {
@@ -427,115 +363,17 @@ object LFSMTransformer {
     }
   }
 
-  def getCommitedTau(client: ErgoClient, tau: BigInt): Try[BigInt] = {
-    Try {
-      val score = LFSMHelpers.convertTauOrScore(tau).toLong
-      client.execute{
-        ctx =>
-          val dataBoxNFT = Globals.mdDB.getDataBoxToken
-          dataBoxNFT match {
-            case Some(nft) =>
-              val dataBox = LFSMHelpers.getLocalDataBox(ctx, nft, Helpers.dataBoxContract(ctx))
-              dataBox match {
-                case Failure(exception) =>
-                  logger.error(s"Got error while retrieving data box from blockchain. Pool difficulty may not be accurate" +
-                    s" to the current commitment state.")
-                  logger.error("error: ", exception)
-                  tau
-                case Success(dataInput) =>
-                  val commits = dataInput.registers.head.getValue.asInstanceOf[Coll[(Int, Long)]]
-                  if (commits.size == 1) {
-                    val nextTau = LFSMHelpers.convertTauOrScore(commits(0)._2)
-                    logger.info(s"Found new diff commitment ${commits(0)}")
-                    nextTau
-                  } else {
-                    if (ctx.getHeight - commits(0)._1 >= LFSMHelpers.NISP_WINDOW) {
-                      val nextTau = LFSMHelpers.convertTauOrScore(commits(0)._2)
-                      logger.info(s"Found latest commitment ${commits(0)}")
-                      nextTau
-                    } else {
-                      val nextTau = LFSMHelpers.convertTauOrScore(commits(1)._2)
-                      logger.info(s"Found old commitment ${commits(1)}")
-                      nextTau
-                    }
-                  }
-              }
-            case None =>
-              logger.warn(s"No stored data box, forcing config tau $tau and diff $score")
-              logger.warn("NISPs submitted or mined in this manner may be considered fraudulent")
-              tau
-          }
-      }
-    }
-  }
+  // getCommitedTau, getCommitmentsForNISP and getCommitedScore moved to
+  // transactions.rollups.CommitmentTransactions, which takes its NodeContext and data-box token by
+  // constructor so it can be built in a test. This object reaches Globals throughout and cannot.
+  //
+  // The one caller left in here is `submitNISPs`, reached only through `onSync`, whose two call
+  // sites in SyncHandler are commented out. Pointed at the new reader rather than left broken,
+  // since this whole object is being retired.
+  private lazy val commitments =
+    new transactions.rollups.CommitmentTransactions(
+      Globals.getNodeConfig, transactions.rollups.DataBoxSource.Stored)
 
-  def getCommitmentsForNISP(client: ErgoClient, height: Int): Try[Long] = {
-    Try {
-      client.execute {
-        ctx =>
-          val dataBoxNFT = Globals.mdDB.getDataBoxToken
-          dataBoxNFT match {
-            case Some(nft) =>
-              val dataBox = LFSMHelpers.getLocalDataBox(ctx, nft, Helpers.dataBoxContract(ctx))
-              if(dataBox.isSuccess) {
-                val dataInput = dataBox.get
-                val commits = dataInput.registers.head.getValue.asInstanceOf[Coll[(Int, Long)]].toArray
-                // Commit 0 is in effect
-                if (height - commits.head._1 >= LFSMHelpers.NISP_WINDOW)
-                  commits.head._2
-                else if(commits.length == 1) {
-                  throw new IllegalStateException(s"Cannot submit NISPs until commit ${commits.head} is in effect")
-                }
-                else
-                  commits(1)._2
-              }else{
-                throw new DataBoxRetrievalException("Failed to retrieve data box information from blockchain")
-              }
-
-            case None =>
-              throw new DataBoxRetrievalException("Could not find a stored data box")
-          }
-      }
-    }
-  }
-
-
-
-  def getCommitedScore(ctx: BlockchainContext, diff: String, reason: String): Try[Long] = {
-    Try {
-      val dataBoxNFT = Globals.mdDB.getDataBoxToken
-      val score = LFSMHelpers.convertTauOrScore(BigInt(LFSMHelpers.parseDiffValueForStratum(diff).get))
-      dataBoxNFT match {
-        case Some(nft) =>
-          val dataBox = LFSMHelpers.getLocalDataBox(ctx, nft, Helpers.dataBoxContract(ctx))
-          dataBox match {
-            case Failure(exception) =>
-              logger.error(s"Got error while retrieving data box from blockchain. Defaulting to config diff value $diff")
-              logger.error("NISPs submitted or mined in this manner may be considered fraudulent")
-              logger.error("error: ", exception)
-              score.toLong
-            case Success(dataInput) =>
-              val commits = dataInput.registers.head.getValue.asInstanceOf[Coll[(Int, Long)]]
-              if (commits.size == 1) {
-                logger.info(s"Using new diff commitment ${commits(0)} for $reason")
-                commits(0)._2
-              } else {
-                if (ctx.getHeight - commits(0)._1 >= LFSMHelpers.NISP_WINDOW) {
-                  logger.info(s"Using latest commitment ${commits(0)} for $reason")
-                  commits(0)._2
-                } else {
-                  logger.info(s"Using old commitment ${commits(1)} for $reason")
-                  commits(1)._2
-                }
-              }
-          }
-        case None =>
-          logger.warn(s"No stored data box, forcing config diff value $diff and score $score")
-          logger.warn("NISPs submitted or mined in this manner may be considered fraudulent")
-          score.toLong
-      }
-    }
-  }
   private def submitNISPs(ctx: BlockchainContext, holdTree: (String, NISPTree), prover: NodeWallet,
                           diff: String, loader: BoxLoader, cache: SyncCacheApi, syncHandler: ActorRef,
                           memState: Option[MempoolRollupState]): Unit = {
@@ -545,7 +383,7 @@ object LFSMTransformer {
 
     val nispDB = Globals.nispDB
 
-    val commitedScore = getCommitedScore(ctx, diff, "NISP submission").get
+    val commitedScore = commitments.committedScore(ctx, diff, "NISP submission").get
     val bestNISP = nispDB.getBestValidNISP(holdingInput.registers(3).getValue.asInstanceOf[Long].toInt, commitedScore)
 
 

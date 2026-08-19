@@ -1,0 +1,401 @@
+{
+  // LD_LiquidityPool
+  // Value: ERG reserves plus fees accrued since the last flush
+  // AMM adapted from ErgoDex n2t Pool. Fees are tracked as a cumulative amount-per-share rather than
+  // snapshotted per period: every swap divides its externalized fee by the supply at that moment and
+  // adds the result to a running accumulator. A provision records the accumulator when it is created and
+  // is owed the difference ever after, so a change in supply never needs a snapshot, deposits and
+  // redemptions never need the fee slate cleared first, and nothing has to be stored in a tree.
+
+  // REGISTERS
+  // R4: liquidity (Long) - reserved LP. Supply is CONST_LOCKED_LP - liquidity.
+  // R5: feeParams (Coll[Long]) - [dexFee, ergFee, tokenFee] numerators over CONST_FEE_DENOM. dexFee
+  // returns to the pool, the other two are externalized into pending.
+  // R6: pending (Coll[Long]) - [pendingX, pendingY] fees accrued but not yet flushed to the vault. Held
+  // apart from the reserves so the AMM never trades against money it has already promised away.
+  // R7: accX (BigInt) - cumulative ERG fee per share, scaled by CONST_SCALE
+  // R8: accY (BigInt) - cumulative token fee per share, scaled by CONST_SCALE
+  val liquidity = SELF.R4[Long].get
+  val feeParams = SELF.R5[Coll[Long]].get
+  val pending   = SELF.R6[Coll[Long]].get
+  val accX      = SELF.R7[BigInt].get
+  val accY      = SELF.R8[BigInt].get
+
+  val pendingX0 = pending(0)
+  val pendingY0 = pending(1)
+
+  // TOKENS
+  // 0: pool NFT
+  // 1: tokenY. The AMM invariant keeps reserves off zero, so this entry never disappears.
+  // 2: provision token. One leaves per deposit and returns per redemption. A single one in a box is what
+  // proves the pool built that box, and therefore that the size and entry it records are real.
+  val poolNFT0   = SELF.tokens(0)
+  val tokenY0    = SELF.tokens(1)
+  val provToken0 = SELF.tokens(2)
+
+  // CONSTANTS
+  // CONST_PROVISION_GUARD_HASH: Hashed prop bytes of LD_Provision_Guard, the small script a provision
+  // box actually carries. The provision logic itself is named by hash inside the guard and arrives with
+  // the transaction, so a provision box stays short enough that neither its minimum value nor its
+  // storage rent is worth worrying about.
+  // CONST_VAULT_NFT: Singleton NFT of the fee vault
+  val CONST_LOCKED_LP  = 0x7fffffffffffffffL
+  val CONST_FEE_DENOM  = 10000
+  // Floor on the box value, and deliberately not sized against storage rent. Clearing the fee on a
+  // full-size box would need 5.12 ERG here, and this floor is paid for continuously by everyone: it is
+  // a floor under a redemption, so that much ERG is unwithdrawable, and a flush leaves exactly the ERG
+  // reserve behind, so fees freeze once pendingX passes the value's headroom over it. A pool that has
+  // gone a storage period unspent has no swaps, no deposits and no fees, so there is nothing to defend.
+  val CONST_MIN_RENT   = 10000000L
+  // Supply may never fall below this. The genesis convention is to issue provisions for less than the
+  // starting supply and leave a locked remainder, but nothing outside this line enforces it: a genesis
+  // that issued the lot would let the last redemption take supply to zero, and the next swap would
+  // divide by it and the pool would be finished. It is also what bounds the rounding a first depositor
+  // can be robbed of on a drained pool.
+  val CONST_MIN_SUPPLY = 1000000L
+  // Fixed-point scale for the accumulators, written as a product because it does not fit in a Long.
+  // Chosen to exceed the largest supply the pool can ever have: supply is bounded above by
+  // CONST_LOCKED_LP, about 9.2e18, so even at that ceiling a single nanoERG of fee still moves an
+  // accumulator by roughly 1e8. Truncating a fee away to nothing is therefore impossible by
+  // construction rather than merely unlikely — which matters because that failure is silent, costing
+  // fees with no error and no failed transaction to notice it by.
+  val CONST_SCALE = 1000000000L.toBigInt * 1000000000L.toBigInt * 1000000000L.toBigInt // 1e27
+  // A provision box may sit for years, and its refresh path is optional, so unlike the pool this is
+  // worth defending. It must clear the storage fee twice over: the first collection takes the fee and
+  // preserves the box, the second takes it outright if what is left no longer clears the fee. That fee
+  // is only knowable because a provision's registers are pinned and it may carry no R8, which bounds
+  // its length by the types it holds rather than by observation. At that bound the fee is under 0.3 ERG
+  // per period, so this covers two. Redemption returns it.
+  val CONST_PROVISION_MIN = 600000000L
+
+  // CONTEXT VARS
+  // CTX_OP(0): Byte, operation being performed
+  // 0 - Swap    - ERG for token or token for ERG.
+  // 1 - Deposit - Add liquidity, mint the ownership NFT, hand out a provision token.
+  // 2 - Redeem  - Remove a whole provision and return its token.
+  // 3 - Flush   - Move accrued fees into the vault and hand it the accumulator they belong to.
+  // 4 - Resize  - Change a provision's size in either direction without closing it. Flushes as part of
+  //               the same transaction, for the reason set out on that path.
+  val CTX_OP = getVar[Byte](0).get
+
+  val successor = OUTPUTS(0)
+  val onlyOne   = INPUTS(0).id == SELF.id
+
+  // Helper Methods
+  def numTokenInOutputs(tokenId: Coll[Byte]): Long = {
+    OUTPUTS.fold(0L, {
+      (a: Long, b: Box) =>
+        val totalTokens = b.tokens.fold(0L, {
+          (z: Long, t: (Coll[Byte], Long)) => if(t._1 == tokenId) z + t._2 else z
+        })
+        a + totalTokens
+    })
+  }
+
+  def numTokenInInputs(tokenId: Coll[Byte]): Long = {
+    INPUTS.fold(0L, {
+      (a: Long, b: Box) =>
+        val totalTokens = b.tokens.fold(0L, {
+          (z: Long, t: (Coll[Byte], Long)) => if(t._1 == tokenId) z + t._2 else z
+        })
+        a + totalTokens
+    })
+  }
+
+  // ASSUMPTIONS - statements which can be assumed to be true due to other contracts enforcing them
+  // Minted at genesis with the pool NFT, the token reserve and the whole provision token supply, with
+  // both accumulators at zero and a locked share of supply that no redemption can reach
+  // The Provision contract conserves a provision's size, owner and token for the box's life, and only
+  // ever moves its entry forward to whatever the vault's accumulator says
+  // The vault pays only against its own accumulator, which advances only when a flush funds it
+  //
+  // DELIBERATE OMISSIONS - conditions left out on purpose
+  // Where a deposit's NFT goes is not pinned. The depositor builds the transaction, so it lands wherever
+  // they put it, and ownership follows the token from then on rather than an address.
+  // A redemption does not require the provision's fees to have been claimed. Nothing depends on it any
+  // more: unclaimed fees simply stay in the vault, owed to nobody, at their former owner's own cost.
+
+  val nextLiquidity = successor.R4[Long].get
+  val nextFeeParams = successor.R5[Coll[Long]].get
+  val nextPending   = successor.R6[Coll[Long]].get
+  val nextAccX      = successor.R7[BigInt].get
+  val nextAccY      = successor.R8[BigInt].get
+
+  val pendingX1 = nextPending(0)
+  val pendingY1 = nextPending(1)
+
+  val poolNFT1   = successor.tokens(0)
+  val tokenY1    = successor.tokens(1)
+  val provToken1 = successor.tokens(2)
+
+  val supplyLP0 = CONST_LOCKED_LP - liquidity
+  val supplyLP1 = CONST_LOCKED_LP - nextLiquidity
+
+  // Reserves are what the AMM trades with: everything the box holds less what it already owes
+  val reservesX0 = SELF.value - pendingX0
+  val reservesY0 = tokenY0._2 - pendingY0
+  val reservesX1 = successor.value - pendingX1
+  val reservesY1 = tokenY1._2 - pendingY1
+
+  val totalDeltaX = successor.value - SELF.value
+  val totalDeltaY = tokenY1._2 - tokenY0._2
+  val deltaPendingX = pendingX1 - pendingX0
+  val deltaPendingY = pendingY1 - pendingY0
+
+  val deltaSupplyLP  = supplyLP1  - supplyLP0
+  val deltaReservesX = reservesX1 - reservesX0
+  val deltaReservesY = reservesY1 - reservesY0
+
+  val feeNum0 = feeParams(0)
+
+  // The successor must still hold every pending fee it has promised the vault and have something left
+  // to trade with. Reserves are a balance less pending, so a box whose pending exceeded its reserves
+  // carries them as negative numbers, and the swap condition is an ordering between two products that
+  // bounds nothing once both sides may be negative: it then admits a swap taking ERG and tokens out
+  // together, for nothing in. Strict rather than non-negative, because a zero reserve admits the same.
+  val reservesHeld = reservesX1 > 0 && reservesY1 > 0
+
+  val poolPreserved = allOf(
+    Coll(
+      onlyOne,
+      successor.propositionBytes == SELF.propositionBytes,
+      poolNFT1 == poolNFT0,
+      tokenY1._1 == tokenY0._1,
+      provToken1._1 == provToken0._1,
+      successor.tokens.size == 3,
+      nextFeeParams == feeParams,
+      successor.value > CONST_MIN_RENT,
+      reservesHeld,
+      // pending is exactly [pendingX, pendingY]; nothing above reads past index 1, so without this a
+      // successor could carry an arbitrarily long collection there.
+      nextPending.size == 2
+    )
+  )
+
+  // Only a swap ever moves an accumulator, and it moves by exactly what it accrued divided by the supply
+  // that was live to earn it. Every other path holds them still.
+  val accHeld = nextAccX == accX && nextAccY == accY
+
+  // One loose provision token is enough to forge a provision box, so no path may let one escape
+  val provTokenHeld = numTokenInInputs(provToken0._1) == provToken0._2
+
+  val validAction = {
+    // Swap
+    if(CTX_OP == 0.toByte){
+      // The supply that earned the fee is the supply right now, and a swap never changes it, so there is
+      // no ambiguity about the denominator. This is the whole reason no snapshot is needed anywhere.
+      val accXAdvanced =
+        nextAccX == accX + (deltaPendingX.toBigInt * CONST_SCALE) / supplyLP0.toBigInt
+      val accYAdvanced =
+        nextAccY == accY + (deltaPendingY.toBigInt * CONST_SCALE) / supplyLP0.toBigInt
+
+      val common =
+        deltaSupplyLP == 0 && provTokenHeld && provToken1._2 == provToken0._2 &&
+        accXAdvanced && accYAdvanced &&
+        // A swap that moves nothing satisfies every other condition here trivially — the AMM inequality
+        // holds at zero, no fee accrues, and no accumulator moves. It would still spend this box, and
+        // this box is what every swap, deposit and flush has to go through, so repeating it is a cheap
+        // way to keep invalidating everyone else's pending transactions.
+        ( totalDeltaX != 0 || totalDeltaY != 0 )
+
+      if(deltaReservesX > 0){
+        val satisfiesAMM = reservesY0.toBigInt * deltaReservesX * feeNum0 >=
+          -deltaReservesY * (reservesX0.toBigInt * CONST_FEE_DENOM + deltaReservesX * feeNum0)
+        val feeXAdded = deltaPendingX.toBigInt == (feeParams(1).toBigInt * totalDeltaX) / CONST_FEE_DENOM
+        satisfiesAMM && feeXAdded && deltaPendingY == 0 && common
+      }else{
+        val satisfiesAMM = reservesX0.toBigInt * deltaReservesY * feeNum0 >=
+          -deltaReservesX * (reservesY0.toBigInt * CONST_FEE_DENOM + deltaReservesY * feeNum0)
+        val feeYAdded = deltaPendingY.toBigInt == (feeParams(2).toBigInt * totalDeltaY) / CONST_FEE_DENOM
+        satisfiesAMM && feeYAdded && deltaPendingX == 0 && common
+      }
+
+    // Deposit - one transaction: liquidity in, a provision token out, and the NFT that owns it minted
+    // from this box's id. Outstanding fees are irrelevant: the new provision enters at the accumulator's
+    // current value, so it is owed nothing that accrued before it arrived.
+    }else if(CTX_OP == 1.toByte){
+      val provisionBox = OUTPUTS(1)
+      val sharesUnlocked = min(
+        deltaReservesX.toBigInt * supplyLP0 / reservesX0,
+        deltaReservesY.toBigInt * supplyLP0 / reservesY0
+      )
+
+      allOf(
+        Coll(
+          accHeld,
+          provTokenHeld,
+          deltaPendingX == 0,
+          deltaPendingY == 0,
+          deltaSupplyLP > 0,
+          deltaSupplyLP <= sharesUnlocked,
+          blake2b256( provisionBox.propositionBytes ) == CONST_PROVISION_GUARD_HASH,
+          provisionBox.tokens(0)._1 == provToken0._1,
+          provisionBox.tokens(0)._2 == 1L,
+          provisionBox.tokens.size  == 1,
+          provisionBox.value >= CONST_PROVISION_MIN,
+          // No R8, so this box's length is bounded by the types of the registers below and cannot be
+          // padded toward the storage fee CONST_PROVISION_MIN is sized against. LD_Provision asserts
+          // the same on every successor it produces; this is the one place the box is first created.
+          provisionBox.R8[Coll[Byte]].isDefined == false,
+          // Entering at the current accumulator is what makes the whole scheme work without snapshots
+          provisionBox.R4[BigInt].get == accX,
+          provisionBox.R5[BigInt].get == accY,
+          // The NFT's id can only be this box's id, which is what makes it unmintable anywhere else
+          provisionBox.R6[Coll[Byte]].get == SELF.id,
+          provisionBox.R7[Long].get == deltaSupplyLP,
+          numTokenInOutputs(SELF.id) == 1L,
+          provToken1._2 == provToken0._2 - 1L
+        )
+      )
+
+    // Redeem - the whole provision leaves and its token comes home. The Provision contract has already
+    // required the owning NFT in inputs and burned it.
+    }else if(CTX_OP == 2.toByte){
+      val provisionBox = INPUTS(1)
+      val provision    = provisionBox.R7[Long].get
+
+      val _deltaSupplyLP = deltaSupplyLP.toBigInt
+      val satisfiesAMM =
+        deltaReservesX.toBigInt * supplyLP0 >= _deltaSupplyLP * reservesX0 &&
+        deltaReservesY.toBigInt * supplyLP0 >= _deltaSupplyLP * reservesY0
+
+      allOf(
+        Coll(
+          accHeld,
+          deltaPendingX == 0,
+          deltaPendingY == 0,
+          blake2b256( provisionBox.propositionBytes ) == CONST_PROVISION_GUARD_HASH,
+          provisionBox.tokens(0)._1 == provToken0._1,
+          provisionBox.tokens(0)._2 == 1L,
+          satisfiesAMM,
+          supplyLP1 >= CONST_MIN_SUPPLY,
+          // The whole provision leaves, never part of it
+          -1 * deltaSupplyLP == provision,
+          numTokenInInputs(provToken0._1) == provToken0._2 + 1L,
+          provToken1._2 == provToken0._2 + 1L
+        )
+      )
+
+    // Flush - hand the vault the fees accrued so far along with the accumulator they paid for
+    }else if(CTX_OP == 3.toByte){
+      val vaultIn  = INPUTS(1)
+      val vaultOut = OUTPUTS(1)
+      val vaultY0  = vaultIn.tokens.getOrElse(1, (Coll(0.toByte), 0L))
+      val vaultY1  = vaultOut.tokens.getOrElse(1, (Coll(0.toByte), 0L))
+
+      allOf(
+        Coll(
+          accHeld,
+          provTokenHeld,
+          provToken1._2 == provToken0._2,
+          // Something to move, so flushing cannot be used to spend the pool for nothing and grief swaps
+          pendingX0 > 0 || pendingY0 > 0,
+          vaultIn.tokens(0)._1 == CONST_VAULT_NFT,
+          vaultOut.tokens(0) == vaultIn.tokens(0),
+          // Exactly the pending fees leave, and exactly the accumulator they funded arrives with them.
+          // Advancing the vault's accumulator by more than the money that came with it is the one way
+          // this design could promise fees that are not there.
+          totalDeltaX == -pendingX0,
+          totalDeltaY == -pendingY0,
+          vaultOut.value >= vaultIn.value + pendingX0,
+          vaultY1._2 >= vaultY0._2 + pendingY0,
+          vaultY1._1 == tokenY0._1 || vaultY1._2 == 0L,
+          vaultOut.R4[BigInt].get == accX,
+          vaultOut.R5[BigInt].get == accY,
+          pendingX1 == 0,
+          pendingY1 == 0,
+          deltaSupplyLP == 0,
+          deltaReservesX == 0,
+          deltaReservesY == 0
+        )
+      )
+
+    // Resize - change a provision's size without closing it, in either direction
+    }else if(CTX_OP == 4.toByte){
+      val provIn   = INPUTS(1)
+      val provOut  = OUTPUTS(1)
+      val vaultIn  = INPUTS(2)
+      val vaultOut = OUTPUTS(2)
+      val vaultY0  = vaultIn.tokens.getOrElse(1, (Coll(0.toByte), 0L))
+      val vaultY1  = vaultOut.tokens.getOrElse(1, (Coll(0.toByte), 0L))
+
+      val pOld = provIn.R7[Long].get
+      val pNew = provOut.R7[Long].get
+      val eX   = provIn.R4[BigInt].get
+      val eY   = provIn.R5[BigInt].get
+
+      val resizeAMM = {
+        if(deltaSupplyLP > 0){
+          val sharesUnlocked = min(
+            deltaReservesX.toBigInt * supplyLP0 / reservesX0,
+            deltaReservesY.toBigInt * supplyLP0 / reservesY0
+          )
+          deltaSupplyLP <= sharesUnlocked
+        }else{
+          val _deltaSupplyLP = deltaSupplyLP.toBigInt
+          deltaReservesX.toBigInt * supplyLP0 >= _deltaSupplyLP * reservesX0 &&
+          deltaReservesY.toBigInt * supplyLP0 >= _deltaSupplyLP * reservesY0
+        }
+      }
+
+      allOf(
+        Coll(
+          accHeld,
+          resizeAMM,
+          supplyLP1 >= CONST_MIN_SUPPLY,
+          deltaSupplyLP == pNew - pOld,
+          deltaSupplyLP != 0,
+          // A size of nothing is a closed provision, which is what Redeem is for and which burns the NFT
+          pNew > 0,
+          blake2b256( provIn.propositionBytes ) == CONST_PROVISION_GUARD_HASH,
+          provIn.tokens(0)._1 == provToken0._1,
+          provIn.tokens(0)._2 == 1L,
+          // The successor's script has to be pinned here and cannot be left to the provision logic.
+          // That logic only constrains a successor on its own resize path, and nothing forces the
+          // provision box to be spent under that path: spending it under Redeem instead satisfies
+          // everything Redeem asks for while leaving this output's script unconstrained, which puts a
+          // provision token in an ordinary box, where its holder writes any size they like into R7 and
+          // the vault pays against it.
+          blake2b256( provOut.propositionBytes ) == CONST_PROVISION_GUARD_HASH,
+          provOut.tokens(0)._1 == provToken0._1,
+          provOut.tokens(0)._2 == 1L,
+          provOut.tokens.size == 1,
+          provOut.value >= CONST_PROVISION_MIN,
+          provOut.R8[Coll[Byte]].isDefined == false,
+          provOut.R6[Coll[Byte]].get == provIn.R6[Coll[Byte]].get,
+          // The token stays with the provision, so this box's own holding does not move
+          numTokenInInputs(provToken0._1) == provToken0._2 + 1L,
+          provToken1._2 == provToken0._2,
+
+          // Fees already earned belong to the old size, and everything from here belongs to the new one.
+          // Moving the entry so that size times the distance to the accumulator comes out unchanged
+          // settles the first without paying anything out, and the second follows on its own.
+          // The division truncates, which can only shorten that distance, so a resize never manufactures
+          // an entitlement — it can only round one very slightly down.
+          provOut.R4[BigInt].get == accX - (pOld.toBigInt * (accX - eX)) / pNew.toBigInt,
+          provOut.R5[BigInt].get == accY - (pOld.toBigInt * (accY - eY)) / pNew.toBigInt,
+
+          // The flush is not optional here. Preserving what is owed against *this* box's accumulator
+          // leaves it wrong against the vault's by (pOld - pNew) times the distance between them, and a
+          // provision that shrinks would carry a claim on fees the vault has never been given. Flushing
+          // in the same breath closes that distance to nothing, which is the only way the identity holds
+          // on a pool that is still trading.
+          vaultIn.tokens(0)._1 == CONST_VAULT_NFT,
+          vaultOut.tokens(0) == vaultIn.tokens(0),
+          vaultOut.value >= vaultIn.value + pendingX0,
+          vaultY1._2 >= vaultY0._2 + pendingY0,
+          vaultY1._1 == tokenY0._1 || vaultY1._2 == 0L,
+          vaultOut.R4[BigInt].get == accX,
+          vaultOut.R5[BigInt].get == accY,
+          pendingX1 == 0,
+          pendingY1 == 0
+        )
+      )
+
+    }else{
+      false
+    }
+  }
+
+  sigmaProp(poolPreserved && validAction)
+}

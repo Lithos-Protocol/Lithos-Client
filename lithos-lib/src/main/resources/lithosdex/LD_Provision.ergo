@@ -1,0 +1,179 @@
+{
+  // LD_Provision
+  // Value: storage buffer only. Fees are paid straight to the owner and never held here.
+  // One liquidity provision. Holds a single provision token, whose whole supply lives in the pool and
+  // only leaves through a deposit, so the token is proof this box was built by the pool and that the
+  // size and entry it records are real.
+  // Ownership is bearer: the box names an NFT, and every path requires that NFT in the transaction's
+  // inputs, so the right to the fees and to the underlying liquidity transfers with the token and can be
+  // sold or lent against.
+  // What is owed is never stored. It is the size times how far the vault's accumulator has moved since
+  // this box last looked, which is two numbers and a subtraction — no history, nothing to synchronize.
+
+  // REGISTERS
+  // R4: entryX (BigInt) - value of the pool's ERG accumulator when this provision last settled
+  // R5: entryY (BigInt) - the same for the token accumulator
+  // R6: ownerNFT (Coll[Byte]) - id of the NFT that owns this provision, minted by the pool at deposit
+  // from the pool box's own id, so it exists nowhere else.
+  // R7: provision (Long) - LP shares this provision represents. Written by the pool, never changed.
+  val entryX    = SELF.R4[BigInt].get
+  val entryY    = SELF.R5[BigInt].get
+  val ownerNFT  = SELF.R6[Coll[Byte]].get
+  val provision = SELF.R7[Long].get
+
+  // TOKENS
+  // 0: provision token, amount 1
+  val provToken = SELF.tokens(0)
+
+  // This is the logic, not the script a provision box carries. Boxes are guarded by LD_Provision_Guard,
+  // which holds nothing but the hash of this and runs it from context variable 64 — so everything below
+  // reads SELF, INPUTS and OUTPUTS exactly as if it were the box's own script, because at the point it
+  // runs it is. Keeping it out of the box is what makes a provision small enough that its minimum value
+  // and its storage rent stop mattering, and it moves the cost of carrying these rules onto the
+  // transactions that use them.
+
+  // CONSTANTS
+  // CONST_POOL_NFT: Singleton NFT of the liquidity pool
+  // CONST_VAULT_NFT: Singleton NFT of the fee vault
+
+  // Two years of Ergo blocks at two minutes each: 2 * 365 * 24 * 30. Half the roughly four years after
+  // which storage rent may be collected, so an untouched box can always be renewed with a full window
+  // to spare, by anyone, whether or not its owner is still around.
+  val CONST_REFRESH_AGE = 525600
+  // How stale a successor's declared creation height may be. Wide enough that a transaction can wait in
+  // the mempool without going invalid, narrow enough that a refreshed box is genuinely young again.
+  val CONST_HEIGHT_SLACK = 1000
+
+  // CONTEXT VARS
+  // CTX_OP(0): Byte, operation being performed
+  // 0 - Claim   - Settle against the vault and move the entry forward. Owner only.
+  // 1 - Redeem  - Remove the liquidity from the pool and burn the owning NFT. Owner only.
+  // 2 - Refresh - Re-create the box unchanged to reset its age. Anyone may do this.
+  // 3 - Resize  - Change the size of the provision in either direction. Owner only.
+  val CTX_OP = getVar[Byte](0).get
+
+  // Positional convention: a claim spends the vault at input 0 and any number of provision boxes after
+  // it, each producing its successor at the matching output index.
+  val successor = OUTPUTS(CONTEXT.selfBoxIndex)
+
+
+
+  // Holding the NFT is the whole of ownership. It must be an *input* rather than merely referenced,
+  // because an input is a box actually being spent, so whatever guards it was satisfied and its owner
+  // authorised this transaction, whoever and whatever they are.
+  val ownerPresent = INPUTS.exists{
+    (b: Box) =>
+      b.tokens.exists{ (t: (Coll[Byte], Long)) => t._1 == ownerNFT }
+  }
+
+  // ASSUMPTIONS - statements which can be assumed to be true due to other contracts enforcing them
+  // during creation of this UTXO
+  // The pool created this box, put one provision token in it, set the entries to the accumulators as
+  // they stood at the deposit, and R7 to the shares deposited
+  // The vault computes what is owed and pins the entry the successor must carry, having only ever
+  // advanced its own accumulator against fees actually delivered to it
+  //
+  // DELIBERATE OMISSIONS - conditions left out on purpose
+  // Nothing pins where the fees or the redeemed liquidity go. Spending this box already required the
+  // owner to spend the box holding their NFT, so they built the transaction and everything unpinned is
+  // theirs by construction.
+  // Nothing here checks the vault beyond its NFT. Settling against a counterfeit would only move this
+  // box's own entry against fees it never received, which no one else can force and which costs its
+  // owner alone.
+
+  // Spending Path 1: Settle against the vault
+  if(CTX_OP == 0.toByte){
+    val vaultBox = INPUTS(0)
+    // Prevent padding additional registers, useful for preventing re-spends that try to increase
+    // the amount taken by storage rent. Realistically it is a small concern, but worth having.
+    val noExtraRegisters = successor.R8[Coll[Byte]].isDefined == false
+    val identityHeld = allOf(
+      Coll(
+        successor.propositionBytes == SELF.propositionBytes,
+        successor.value  >= SELF.value,
+        successor.tokens == SELF.tokens,
+        // The two facts a settlement must never be able to rewrite. Without them a claimant could raise
+        // their own size between claims and drain the vault, or repoint the box at another owner.
+        successor.R6[Coll[Byte]].get == ownerNFT,
+        successor.R7[Long].get       == provision,
+        // Entries only ever move forward. The vault pins the exact values; this refuses anything that
+        // would let the same stretch of accumulator be claimed twice.
+        successor.R4[BigInt].get >= entryX,
+        successor.R5[BigInt].get >= entryY,
+        noExtraRegisters
+      )
+    )
+
+    sigmaProp(vaultBox.tokens(0)._1 == CONST_VAULT_NFT && ownerPresent && identityHeld)
+
+  // Spending Path 2: Remove the liquidity and burn the owning NFT
+  }else if(CTX_OP == 1.toByte){
+    // The pool checks the liquidity removed matches R7 and takes the provision token back. All that is
+    // left here is the owner's authorisation and retiring the NFT, so nothing is left pointing at a
+    // provision that no longer exists. Anything unclaimed simply stays in the vault, owed to nobody.
+    val authenticPool = INPUTS(0).tokens(0)._1 == CONST_POOL_NFT
+
+    val nftBurned = OUTPUTS.forall{
+      (o: Box) =>
+        !( o.tokens.exists{ (t: (Coll[Byte], Long)) => t._1 == ownerNFT } )
+    }
+
+    sigmaProp(ownerPresent && authenticPool && nftBurned)
+
+  // Spending Path 3: Re-create the box unchanged so its age resets. Permissionless.
+  }else if(CTX_OP == 2.toByte){
+    // A provision may sit untouched for years, and a box old enough for storage rent can be taken by a
+    // miner along with everything in it — including the provision token, which is the provision.
+    // Renewing costs a transaction fee and moves nothing, so the only reason to do it is to keep a box
+    // alive, and anyone may have that reason — including for a box whose owner has lost their key.
+    val oldEnough = SELF.creationInfo._1 < HEIGHT - CONST_REFRESH_AGE
+
+    // Prevent padding additional registers, useful for preventing re-spends that try to increase
+    // the amount taken by storage rent. Realistically it is a small concern, but worth having.
+    val noExtraRegisters = successor.R8[Coll[Byte]].isDefined == false
+    val unchanged = allOf(
+      Coll(
+        successor.propositionBytes == SELF.propositionBytes,
+        successor.value  >= SELF.value,
+        successor.tokens == SELF.tokens,
+        successor.R4[BigInt].get     == entryX,
+        successor.R5[BigInt].get     == entryY,
+        successor.R6[Coll[Byte]].get == ownerNFT,
+        successor.R7[Long].get       == provision,
+        // The successor must really be young. Monotonicity alone only forces it above this box's own
+        // height, which for a box old enough to refresh is still old, so a refresher could otherwise
+        // hand back something instantly refreshable and spend it on repeat, costing them only fees
+        // while invalidating every transaction the owner attempted against their own box.
+        successor.creationInfo._1 > HEIGHT - CONST_HEIGHT_SLACK,
+        noExtraRegisters
+      )
+    )
+
+    sigmaProp(oldEnough && unchanged)
+
+  // Spending Path 4: Change the size of the provision without closing it
+  }else if(CTX_OP == 3.toByte){
+    // The pool moves the liquidity, works out the entry that leaves what is already earned untouched,
+    // and pins both the new size and the new entries. Everything it does not pin is pinned here: the
+    // token that makes this a provision at all, and the NFT that says whose it is.
+    val authenticPool = INPUTS(0).tokens(0)._1 == CONST_POOL_NFT
+
+    // Prevent padding additional registers, useful for preventing re-spends that try to increase
+    // the amount taken by storage rent. Realistically it is a small concern, but worth having.
+    val noExtraRegisters = successor.R8[Coll[Byte]].isDefined == false
+    val identityHeld = allOf(
+      Coll(
+        successor.propositionBytes == SELF.propositionBytes,
+        successor.value  >= SELF.value,
+        successor.tokens == SELF.tokens,
+        successor.R6[Coll[Byte]].get == ownerNFT,
+        noExtraRegisters
+      )
+    )
+
+    sigmaProp(ownerPresent && authenticPool && identityHeld)
+
+  }else{
+    sigmaProp(false)
+  }
+}

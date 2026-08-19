@@ -29,6 +29,44 @@ GET /info                     controllers.InfoApiController.getLithosInfo()
 GET /mining/bestNISP          controllers.MiningApiController.getBestNISPAtHeight()
 GET /mining                   controllers.MiningApiController.getStratumInfo()
 
+# Routes for LithosDex API
+#
+# Listed before the PlasmaDex routes below so a literal segment always wins over `:lpId`. The two sets
+# do not actually collide — they differ by a literal at every position — but order makes that free
+# rather than something to re-check whenever a route is added.
+
+GET  /dex/pool                                  controllers.LithosDexApiController.getPool()
+GET  /dex/vault                                 controllers.LithosDexApiController.getVault()
+GET  /dex/provisions                            controllers.LithosDexApiController.listProvisions()
+GET  /dex/fees/history                          controllers.LithosDexApiController.getFeeHistory(from: Option[Int], to: Option[Int], bucket: Option[Int])
+GET  /dex/provisions/:boxId/fees/history        controllers.LithosDexApiController.getProvisionFeeHistory(boxId: String, from: Option[Int], to: Option[Int], bucket: Option[Int])
++ nocsrf
+POST /dex/swap/check                            controllers.LithosDexApiController.checkSwap()
++ nocsrf
+POST /dex/swap/checkOutput                      controllers.LithosDexApiController.checkSwapOutput()
++ nocsrf
+POST /dex/swap                                  controllers.LithosDexApiController.swap()
++ nocsrf
+POST /dex/deposit/check                         controllers.LithosDexApiController.checkDeposit()
++ nocsrf
+POST /dex/deposit                               controllers.LithosDexApiController.deposit()
++ nocsrf
+POST /dex/redeem/check                          controllers.LithosDexApiController.checkRedeem()
++ nocsrf
+POST /dex/redeem                                controllers.LithosDexApiController.redeem()
++ nocsrf
+POST /dex/provisions/:boxId/claim               controllers.LithosDexApiController.claimProvision(boxId: String)
++ nocsrf
+POST /dex/provisions/:boxId/resize/check        controllers.LithosDexApiController.checkResize(boxId: String)
++ nocsrf
+POST /dex/provisions/:boxId/resize              controllers.LithosDexApiController.resize(boxId: String)
++ nocsrf
+POST /dex/flush/check                           controllers.LithosDexApiController.checkFlush()
++ nocsrf
+POST /dex/flush                                 controllers.LithosDexApiController.flush()
+
+GET  /wallet/balance                            controllers.LithosDexApiController.getWalletBalance()
+
 # Routes for Dex API
 
 GET  /dex                               controllers.DexApiController.getDexInfo()

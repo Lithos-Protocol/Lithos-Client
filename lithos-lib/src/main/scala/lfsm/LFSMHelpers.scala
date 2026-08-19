@@ -48,6 +48,7 @@ object LFSMHelpers {
   // Lithos token & emission parameters
   final val INIT_MINT = Parameters.OneErg * 1000000000 // 1 billion LIT
   final val LIT_ID = ErgoId.create("cebfc7c3db9d638e8e7d6263b4a724135a9aa9df5a46cc9772d37d9153662d32")
+  final val LIT_ID_MAINNET = ErgoId.create("c1980d829988229516430a47a5eca376060b6ce859616db0936e78ab25cb6de7")
   final val EMISSION_NFT = ErgoId.create("04e8906663f66329c67a471e9209587254a56bc52ccc1d46961d08d67dde1e96")
   // TODO: Change before launch
   // Emission Config NFT

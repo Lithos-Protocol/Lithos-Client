@@ -2,7 +2,8 @@ package transactions
 
 /**
  * The protocol between the mining path and the transaction actors for filling this miner's own block.
- * Kept apart from [[TransactionMessages]] and the emission messages because several unrelated
+ * Kept apart from [[transactions.rollups.TransactionMessages]] and the emission messages because
+ * several unrelated
  * sources answer the same request and none should know about the others' stub types.
  *
  * Everything the client builds is broadcast to the mempool as normal fee-paying transactions, since

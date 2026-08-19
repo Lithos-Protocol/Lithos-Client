@@ -8,8 +8,7 @@ import lfsm.LFSMHelpers
 import mining.MiningStratumServer
 import org.slf4j.{Logger, LoggerFactory}
 import play.api.Configuration
-import state.LFSMTransformer
-import state.LFSMTransformer.logger
+import transactions.rollups.{CommitmentTransactions, DataBoxSource}
 import stratum.data.{Data, Options}
 import utils.Globals
 
@@ -42,6 +41,7 @@ class StartMiningServer @Inject()(system: ActorSystem, config: Configuration,
   val taskConfig: TaskConfiguration = new TasksConfig(config).stratumServerTaskConfig
   val stratumParams: StratumConfig  = new StratumConfig(config)
   val nodeConfig: NodeConfig        = Globals.getNodeConfig
+  val commitments                   = new CommitmentTransactions(nodeConfig, DataBoxSource.Stored)
   val contexts: Contexts            = new Contexts(system)
 
   if (taskConfig.enabled) {
@@ -52,7 +52,7 @@ class StartMiningServer @Inject()(system: ActorSystem, config: Configuration,
     val tau: Try[BigInteger] = {
       if(!stratumParams.forceConfigDifficulty) {
         nodeConfig.getClient.execute { ctx =>
-          LFSMTransformer.getCommitedScore(ctx, stratumParams.diff, "stratum mining").map { s =>
+          commitments.committedScore(ctx, stratumParams.diff, "stratum mining").map { s =>
             LFSMHelpers.convertTauOrScore(s).bigInteger
           }
         }

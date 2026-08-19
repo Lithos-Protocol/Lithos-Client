@@ -218,11 +218,10 @@ class StratumConnection(subscriptionId: String,
         case ShareRejected(id, msg, rejectedNonce1) =>
           id match {
             case 21 =>
-              // Potentially stale job — we still accept the share and push the
-              // latest job so the miner can resume immediately
+              // Share may be stale, but we don't send any errors to client.
               logger.warn(s"Potentially stale share from ${workerName(requestId)} on connection $connectionId")
               safeResponse(connection.sendResponse(Response.submit(requestId, trueResult, null)))
-              currentJob.foreach(job => safeResponse(connection.sendResponse(Announcement.miningJob(job))))
+              //currentJob.foreach(job => safeResponse(connection.sendResponse(Announcement.miningJob(job))))
 
             case 22 =>
               // Duplicate nonce: if it's OUR extraNonce1 that caused it, rotate

@@ -1,0 +1,165 @@
+{
+  // LD_FeeVault
+  // Value: fees flushed from the pool, less what has been paid out
+  // A permanent singleton holding the pool's externalized fees. It exists so that settling a provision
+  // does not have to spend the pool box and contend with swaps.
+  // It holds a copy of the pool's accumulators as of the last flush, and pays a provision the difference
+  // between that and the provision's own entry. Because its accumulator only advances when a flush
+  // brings the matching money with it, it can never owe more than it holds.
+
+  // REGISTERS
+  // R4: accX (BigInt) - the pool's ERG accumulator as of the last flush
+  // R5: accY (BigInt) - the same for tokens
+  val accX = SELF.R4[BigInt].get
+  val accY = SELF.R5[BigInt].get
+
+  // TOKENS
+  // 0: vault NFT
+  // 1: tokenY, the token-side fees flushed so far. Absent until the first flush that carries any.
+  val vaultNFT = SELF.tokens(0)
+  val tokenY   = SELF.tokens.getOrElse(1, (Coll(0.toByte), 0L))
+
+  // CONSTANTS
+  // CONST_POOL_NFT: Singleton NFT of the liquidity pool
+  // CONST_PROV_TOKEN: Id of the provision token
+  // Must match the pool's own constant exactly, or every payout is computed on a different scale to the
+  // one the accumulators were built with. Written as a product because it does not fit in a Long.
+  val CONST_SCALE = 1000000000L.toBigInt * 1000000000L.toBigInt * 1000000000L.toBigInt // 1e27
+  // Kept back from every payout so the vault stays spendable between flushes, and deliberately not
+  // sized against storage rent: clearing the fee on a full-size box would mean locking 5.12 ERG here
+  // for good, against a case — a whole storage period with no flush and no claim — in which the pool
+  // has stopped trading and there are no fees to protect.
+  val CONST_VAULT_MIN = 100000000L
+
+  // CONTEXT VARS
+  // CTX_OP(0): Byte, operation being performed
+  // 0 - Claim - Settle one or more provision boxes.
+  // 1 - Flush - Receive fees and the accumulator from the pool.
+  // CTX_COUNT(1): Int, claim only - how many provision boxes are being settled. They occupy inputs
+  // 1..CTX_COUNT, each producing its successor at the matching output index, and anything after that is
+  // the claimant's own funding and change.
+  val CTX_OP    = getVar[Byte](0).get
+  val CTX_COUNT = getVar[Int](1).getOrElse(0)
+
+  // Positional: whatever index this box is spent at, its successor sits at the matching output. A flush
+  // reaches this box from more than one of the pool's paths, at different positions, so the successor is
+  // found by index rather than pinned to one.
+  val successor = OUTPUTS(CONTEXT.selfBoxIndex)
+  val onlyOne   = SELF.id == INPUTS(0).id
+
+  val nextY = successor.tokens.getOrElse(1, (Coll(0.toByte), 0L))
+
+  val vaultPreserved = allOf(
+    Coll(
+      onlyOne,
+      successor.propositionBytes == SELF.propositionBytes,
+      successor.tokens(0) == vaultNFT,
+      successor.tokens.size <= 2,
+      nextY._1 == tokenY._1 || nextY._2 == 0L
+    )
+  )
+
+  // ASSUMPTIONS - statements which can be assumed to be true due to other contracts enforcing them
+  // during creation of this UTXO
+  // Created at genesis with the vault NFT and both accumulators at zero
+  // The pool advances an accumulator only on a swap, by exactly the fee accrued divided by the supply
+  // live to earn it, and hands this box the matching money whenever it hands over a new accumulator
+  // The Provision contract conserves a provision's size and owner, and never lets an entry move
+  // backwards, so a stretch of accumulator cannot be settled twice
+  //
+  // The invariant that makes this safe: summed across every provision, what is owed comes to
+  // total_fees * (1 - locked/supply) at every point in the run, which is strictly less than the fees
+  // delivered here. Both roundings — the pool's when it advances an accumulator, and this box's when it
+  // computes a share — truncate downward, so every error accrues to the vault and never against it.
+  //
+  // DELIBERATE OMISSIONS - conditions left out on purpose
+  // Nobody is paid by name. A claim already required each provision's owner to spend the box holding
+  // their NFT, so they built the transaction and whatever this box releases is theirs; capping the
+  // release is all that is needed.
+  // The permanently locked share of supply earns fees that no provision can ever claim. They stay here
+  // forever, which is what leaves this box over-funded rather than short.
+
+  if(CTX_OP == 0.toByte){
+    val provIns  = INPUTS.slice(1, CTX_COUNT + 1)
+    val provOuts = OUTPUTS.slice(1, CTX_COUNT + 1)
+
+    // Each provision is owed its size times however far this box's accumulator has moved since it last
+    // settled. Two provisions in the same transaction can be owed quite different amounts, and one that
+    // has already settled up to here is owed nothing at all.
+    val settlement = provIns.zip(provOuts).fold((true, (0L, 0L)), {
+      (z: (Boolean, (Long, Long)), x: (Box, Box)) =>
+        val pIn  = x._1
+        val pOut = x._2
+        val prov = pIn.R7[Long].get
+        val eX   = pIn.R4[BigInt].get
+        val eY   = pIn.R5[BigInt].get
+
+        val owedX = ((prov.toBigInt * (accX - eX)) / CONST_SCALE).toLong
+        val owedY = ((prov.toBigInt * (accY - eY)) / CONST_SCALE).toLong
+
+        val ok = allOf(
+          Coll(
+            // A provision token is the whole of authentication: its supply only leaves the pool into a
+            // provision box, so a box holding one was built by the pool and the size it records was
+            // written by the deposit rules
+            pIn.tokens(0)._1 == CONST_PROV_TOKEN,
+            pIn.tokens(0)._2 == 1L,
+            // An entry ahead of this box's accumulator would mean settling against fees that have not
+            // been flushed yet, which is the one direction that could promise money not here
+            eX <= accX,
+            eY <= accY,
+            // Something must actually be owed. A settlement of nothing still spends this box, and since
+            // this box is the one place every claim has to pass through, doing it on repeat is a cheap
+            // way to keep invalidating everybody else's pending claims.
+            eX < accX || eY < accY,
+            // Pinned exactly. Leaving an entry short would let the same stretch be settled again.
+            pOut.R4[BigInt].get == accX,
+            pOut.R5[BigInt].get == accY
+          )
+        )
+
+        (z._1 && ok, (z._2._1 + owedX, z._2._2 + owedY))
+    })
+
+    val allSettled = settlement._1 && CTX_COUNT > 0
+    // What was owed, not what was moved. Measuring the outputs instead would let a claimant overpay one
+    // provision and take the difference out of the vault at every other provision's expense.
+    val owedX = settlement._2._1
+    val owedY = settlement._2._2
+
+    val paidOut = allOf(
+      Coll(
+        successor.value  >= SELF.value - owedX,
+        successor.value  >= CONST_VAULT_MIN,
+        nextY._2         >= tokenY._2 - owedY,
+        successor.R4[BigInt].get == accX,
+        successor.R5[BigInt].get == accY
+      )
+    )
+
+    sigmaProp(vaultPreserved && allSettled && paidOut)
+
+  // Receive a flush. The pool decides what arrives and what the accumulators become; this only has to
+  // be sure it is the real pool doing it, since anything else could hand over an accumulator with no
+  // money behind it. Reached both from the pool's own flush and from a resize, which flushes as part of
+  // the same transaction, so no particular input position is assumed.
+  }else if(CTX_OP == 1.toByte){
+    val poolBox = INPUTS(0)
+    // Which operation the pool is performing, read from its own context extension. Being spent next to
+    // the pool is not enough on its own: only the pool's flush and resize paths look at this box at all,
+    // and on any other path nothing it does is pinned by anybody. Without this, adding the vault as an
+    // extra input to an ordinary deposit or swap would leave its value and accumulators entirely
+    // unconstrained, and it could simply be emptied.
+    val poolOp = getVarFromInput[Byte](0, 0).getOrElse(0.toByte)
+
+    sigmaProp(
+      poolBox.tokens(0)._1 == CONST_POOL_NFT &&
+      ( poolOp == 3.toByte || poolOp == 4.toByte ) &&
+      successor.propositionBytes == SELF.propositionBytes &&
+      successor.tokens(0) == vaultNFT
+    )
+
+  }else{
+    sigmaProp(false)
+  }
+}

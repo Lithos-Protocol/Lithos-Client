@@ -11,7 +11,7 @@ import work.lithos.mutations.{InputUTXO, UTXO}
 import scala.collection.mutable
 import scala.util.{Failure, Success}
 
-class BoxLoader(ctx: BlockchainContext, nodeApi: NodeApi) {
+class BoxLoader(ctx: BlockchainContext, nodeApi: NodeApi) extends UTXOSelector {
   private val boxStack = mutable.Stack.empty[InputUTXO]
   private val logger: Logger = LoggerFactory.getLogger("BoxLoader")
   private val usedBoxes: mutable.HashSet[ErgoId] = mutable.HashSet.empty[ErgoId]
@@ -77,12 +77,13 @@ class BoxLoader(ctx: BlockchainContext, nodeApi: NodeApi) {
     var currentValue = 0L
     var currentTokens = 0L
     var inputBoxes   = Seq.empty[InputUTXO]
-    while(currentValue < value || currentTokens < tokenAmount){
-      if(boxStack.isEmpty) {
-        throw new NotEnoughInputsException(s"Failed to find enough InputUTXOs for value $value and tokens $tokenAmount" +
-          s" (only got ${inputBoxes.size} for value $currentValue and tokens $currentTokens)")
+    val tokenStack = boxStack.clone().filter(_.tokens.exists(_.id == tokenId))
+    while(currentTokens < tokenAmount){
+      if(tokenStack.isEmpty) {
+        throw new NotEnoughInputsException(s"Failed to find enough InputUTXOs for tokens $tokenId: $tokenAmount" +
+          s" (only got ${inputBoxes.size} for tokens $currentTokens)")
       }
-      val input    = boxStack.pop()
+      val input    = tokenStack.pop()
       if(!usedBoxes(input.id)) {
         currentValue = currentValue + input.value
         val inputTokens = input.tokens.find(_.id == tokenId).map(_.amount)
@@ -90,6 +91,21 @@ class BoxLoader(ctx: BlockchainContext, nodeApi: NodeApi) {
         usedBoxes += input.id
         inputBoxes = inputBoxes :+ input
       }
+    }
+    if(value > currentValue){
+      while(currentValue < value || currentTokens < tokenAmount) {
+        if (boxStack.isEmpty) {
+          throw new NotEnoughInputsException(s"Failed to find enough InputUTXOs for value $value" +
+            s" (only got ${inputBoxes.size} for value $currentValue and tokens $currentTokens)")
+        }
+        val input = boxStack.pop()
+        if (!usedBoxes(input.id)) {
+          currentValue = currentValue + input.value
+          usedBoxes += input.id
+          inputBoxes = inputBoxes :+ input
+        }
+      }
+
     }
     //logger.info(s"Returned ${inputBoxes.size} boxes from BoxLoader")
 

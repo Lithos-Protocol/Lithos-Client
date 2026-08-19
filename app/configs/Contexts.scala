@@ -12,4 +12,5 @@ class Contexts (system: ActorSystem) {
   val pollingContext:      ExecutionContext = system.dispatchers.lookup(prefix+"polling-dispatcher")
   val syncContext:         ExecutionContext = system.dispatchers.lookup(prefix+"sync-dispatcher")
   val txContext:      ExecutionContext = system.dispatchers.lookup(prefix+"tx-dispatcher")
+  val dexContext:     ExecutionContext = system.dispatchers.lookup(prefix+"dex-dispatcher")
 }
