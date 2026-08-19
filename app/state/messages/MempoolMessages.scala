@@ -1,7 +1,6 @@
 package state.messages
 
 import lfsm.states.{MinerTree, NISPTree}
-import plasmadex.states.LiquidityState
 import state.messages.RollupMessages.RollupTransform
 import state.messages.SyncMessages.Transform
 import work.lithos.mutations.InputUTXO
@@ -74,7 +73,5 @@ object MempoolMessages {
   case class MempoolRollupState(asInput: InputUTXO, nispTree: NISPTree, toBeRemoved: Boolean = false) extends MempoolState
 
   case class MempoolMDState(asInput: InputUTXO, minerTree: MinerTree) extends MempoolState
-
-  case class MempoolPDState(asInput: InputUTXO, liquidityState: LiquidityState) extends MempoolState
 
 }

@@ -1,13 +1,13 @@
-import transactions.emissions.EmissionHandler
-import transactions.rollups.{RollupEvaluator, SubmissionHandler, TransactionProcessor, TransactionPublisher}
-import transactions.wallet.WalletManager
-import api.{BlocksApi, BlocksApiImpl, CollateralApi, CollateralApiImpl, DexApi, DexApiImpl, InfoApi, InfoApiImpl, LithosDexApi, LithosDexApiImpl, MiningApi, MiningApiImpl, PaymentsApi, PaymentsApiImpl}
+import api._
 import com.google.inject.AbstractModule
 import configs.NodeContext
 import play.api.{Configuration, Environment}
 import play.libs.akka.AkkaGuiceSupport
-import state.synchronization.{MDSynchronizer, MempoolView, PDSynchronizer, RollupCoordinator, RollupSynchronizer, StateFrame, SyncHandler}
-import tasks.{MDSyncTask, PDSyncTask, RollupSyncTask, StartMiningServer, StartupTasks, StartStratumServer}
+import state.synchronization._
+import tasks.{MDSyncTask, RollupSyncTask, StartMiningServer, StartupTasks}
+import transactions.emissions.EmissionHandler
+import transactions.rollups.{RollupEvaluator, SubmissionHandler, TransactionProcessor, TransactionPublisher}
+import transactions.wallet.WalletManager
 import utils.Globals
 
 class Module(environment: Environment, configuration: Configuration) extends AbstractModule with AkkaGuiceSupport
@@ -30,7 +30,6 @@ class Module(environment: Environment, configuration: Configuration) extends Abs
     bindActor(classOf[RollupCoordinator], "rollup-coordinator", p => p.withDispatcher("lithos-contexts.sync-dispatcher"))
     bindActor(classOf[SyncHandler], "sync-handler", p => p.withDispatcher("lithos-contexts.sync-dispatcher"))
     bindActor(classOf[MDSynchronizer], "md-synchronizer", p => p.withDispatcher("lithos-contexts.sync-dispatcher"))
-    bindActor(classOf[PDSynchronizer], "pd-synchronizer", p => p.withDispatcher("lithos-contexts.sync-dispatcher"))
 
     bindActor(classOf[WalletManager],        "wallet-manager",        p => p.withDispatcher("lithos-contexts.tx-dispatcher"))
     bindActor(classOf[SubmissionHandler],    "submission-handler",    p => p.withDispatcher("lithos-contexts.tx-dispatcher"))
@@ -46,13 +45,12 @@ class Module(environment: Environment, configuration: Configuration) extends Abs
     bind(classOf[InfoApi]).to(classOf[InfoApiImpl])
     bind(classOf[MiningApi]).to(classOf[MiningApiImpl])
     bind(classOf[PaymentsApi]).to(classOf[PaymentsApiImpl])
-    bind(classOf[DexApi]).to(classOf[DexApiImpl])
     bind(classOf[LithosDexApi]).to(classOf[LithosDexApiImpl])
     bind[StartupTasks](classOf[StartupTasks]).asEagerSingleton()
     //bind[StartStratumServer](classOf[StartStratumServer]).asEagerSingleton()
     bind[StartMiningServer](classOf[StartMiningServer]).asEagerSingleton()
     bind[RollupSyncTask](classOf[RollupSyncTask]).asEagerSingleton()
     bind[MDSyncTask](classOf[MDSyncTask]).asEagerSingleton()
-    bind[PDSyncTask](classOf[PDSyncTask]).asEagerSingleton()
+
   }
 }

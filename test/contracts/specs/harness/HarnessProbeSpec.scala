@@ -5,7 +5,6 @@ import lfsm.contracts.{CollateralContract, DictionaryContracts, FraudProofContra
 import org.ergoplatform.appkit._
 import org.scalatest.propspec.AnyPropSpec
 import lithosdex.contracts.LDContracts
-import plasmadex.contracts.PlasmaDexContracts
 import work.lithos.mutations.Contract
 
 import java.math.BigInteger
@@ -65,8 +64,6 @@ class HarnessProbeSpec extends AnyPropSpec with ContractSpecBase {
                                                ctx.getNetworkType, LFSMHelpers.MD_TOKEN_TESTNET)),
         "dictionaries/MinerData"          -> Try(DictionaryContracts.mkMinerDataContract(
                                                ctx.getNetworkType, LFSMHelpers.MD_TOKEN_TESTNET)),
-        "plasmadex/LiquidityPool"         -> Try(PlasmaDexContracts.mkLPContract(ctx)),
-        "plasmadex/FeeRewards"            -> Try(PlasmaDexContracts.mkFeeRewardContract(ctx)),
         "lithosdex/LD_Provision"          -> Try(LDContracts(ctx).provisionLogic),
         "lithosdex/LD_Provision_Guard"    -> Try(LDContracts(ctx).provisionGuard),
         "lithosdex/LD_FeeVault"           -> Try(LDContracts(ctx).feeVault),

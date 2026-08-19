@@ -5,16 +5,18 @@ import org.ergoplatform.appkit.scalaapi._
 import org.ergoplatform.sdk.ErgoId
 import org.scalatest.propspec.AnyPropSpec
 import sigma.Colls
-import work.lithos.mutations.{Contract, InputUTXO, Token, UTXO}
+import work.lithos.mutations.{Contract, InputUTXO, Token, TxBuilder, UTXO}
 
 import java.math.BigInteger
 
 /**
  * Payout.ergo — one property per named condition in the contract.
  *
- * Path 1 (rewards paid leave more than the min change value behind): the box recreates itself with
+ * Path 1 (`currentMiners == 0`): the drain. A rollup that received no submissions owes nobody, so the
+ * box may be swept — by any transaction that carries no miner-fee output.
+ * Path 2 (rewards paid leave more than the min change value behind): the box recreates itself with
  * the paid miners removed from the tree.
- * Path 2 (otherwise): the remaining miners are paid and the box is consumed.
+ * Path 3 (otherwise): the remaining miners are paid and the box is consumed.
  */
 class PayoutSpec extends AnyPropSpec with RollupSpecBase {
 
@@ -381,38 +383,183 @@ class PayoutSpec extends AnyPropSpec with RollupSpecBase {
     }
   }
 
-  // ─── empty tree ───────────────────────────────────────────────────────────
+  // ─── path 1: the empty-tree drain ─────────────────────────────────────────
+  //
+  // A rollup that received no submissions reaches payout with R5 at zero and an empty tree, so it owes
+  // nobody. Before the drain path existed the box could only recreate itself, and its ERG and LIT were
+  // locked permanently (Protocol-Master §4.4). The drain lets anyone sweep it, gated on one condition:
+  // the transaction must carry no miner-fee output.
+  //
+  // That gate is an *incentive* barrier, not an authorisation check. The contract pins nothing about
+  // where the value goes and nobody has to sign. What it does is make the sweep worthless to relay —
+  // a fee-less transaction pays a block producer nothing through the normal channel — so in practice
+  // the value reaches whoever produces the block, or whoever pays them out of band. Several properties
+  // below pin the omissions deliberately, so that reading them together describes the real guarantee
+  // rather than the stronger one the contract comment suggests.
 
-  property("empty tree: the box can only recreate itself, so its value is locked (analysis 16.6)") {
+  private case class Drain(ctx: BlockchainContext, in: InputUTXO, sweeper: ErgoProver, value: Long)
+
+  /**
+   * A payout box that received no submissions. No context variables are attached: the drain path
+   * reaches none of them, and the `getOrElse` defaults on CTX_KEY_DATA and the two proofs are what
+   * make that safe.
+   */
+  private def drainable(ctx: BlockchainContext,
+                        minerCount: Int = 0,
+                        entries: Seq[Miner] = Seq.empty[Miner],
+                        totalScore: Long = 0L,
+                        tokens: Seq[Token] = Seq.empty[Token],
+                        tokenReward: Option[Long] = None,
+                        value: Long = boxValue): Drain = {
+    val tree = treeWith(entries.map(m => m.key -> m.nisp))
+    val base = Seq(
+      tree.ergoValue,
+      ErgoValue.of(minerCount),
+      ErgoValue.of(BigInt(totalScore).bigInteger),
+      ErgoValue.of(boxValue)
+    )
+    val regs = tokenReward.map(t => base :+ ErgoValue.of(t)).getOrElse(base)
+    val box = UTXO(payoutContract(ctx), value, tokens, regs)
+    Drain(ctx, box.toInput(ctx, ErgoId.create(dummyTxId), 0.toShort),
+      proverWith(ctx, BigInteger.valueOf(77L)), value)
+  }
+
+  /**
+   * The sweep. It carries no fee, which is the condition under test, so `TxBuilder` has nothing to
+   * fold a sub-minimum change amount into (Protocol-Master §7.7) — the outputs have to sum to exactly
+   * the input total or the build throws before the contract is ever consulted.
+   */
+  private def sweep(d: Drain)(outputs: Seq[UTXO],
+                              inputs: Seq[InputUTXO] = Seq(d.in),
+                              fee: Long = 0L): UnsignedTransaction =
+    TxBuilder(d.ctx).setInputs(inputs: _*).setOutputs(outputs: _*).buildTx(fee, d.sweeper.getAddress)
+
+  /** An explicit fee-proposition output, so a negative can put it at a chosen index. */
+  private def feeBox: UTXO = UTXO(Contract.FEE_720, Parameters.MinFee)
+
+  property("drain: an empty payout box is swept by a transaction that pays no miner fee") {
     withCtx { ctx =>
-      val prover = miner(ctx)
-      val tree = treeWith(Seq.empty)
-      val inTree = tree.ergoValue
-      val noKeys = ErgoValue.of(Colls.fromArray(Array.empty[sigma.Coll[Byte]]), ErgoType.collType(scalaByteType))
-      val lookup = tree.lookUp()
-      val removal = tree.delete()
+      val d = drainable(ctx)
+      accepts(d.sweeper, sweep(d)(Seq(UTXO(contractOf(d.sweeper), d.value))))
+    }
+  }
 
-      def boxWith(vars: Seq[ContextVar]): InputUTXO =
-        UTXO(payoutContract(ctx), boxValue, Seq.empty[Token], Seq(
-          inTree, ErgoValue.of(0), ErgoValue.of(BigInt(1L).bigInteger), ErgoValue.of(boxValue)
-        )).toInput(ctx, ErgoId.create(dummyTxId), 0.toShort).setCtxVars(vars: _*)
+  /**
+   * The replacement for the old lock. Analysis §16.6 recorded that an unsubmitted rollup could only
+   * recreate itself forever; that property asserted the lock and is inverted here. The recreate-itself
+   * spend is still permitted — the drain constrains no output at all — but it is no longer the only
+   * thing permitted.
+   */
+  property("drain: the value is no longer locked, which inverts analysis 16.6") {
+    withCtx { ctx =>
+      val d = drainable(ctx)
+      val stranger = proverWith(ctx, BigInteger.valueOf(88L))
+      accepts(d.sweeper, sweep(d)(Seq(UTXO(contractOf(stranger), d.value))))
+    }
+  }
 
-      val vars = Seq(
-        ContextVar.of(0.toByte, noKeys),
-        ContextVar.of(1.toByte, lookup.proof.ergoValue),
-        ContextVar.of(2.toByte, removal.proof.ergoValue)
-      )
+  property("drain: rejects a sweep carrying a miner-fee output (noFeeOutput)") {
+    withCtx { ctx =>
+      val d = drainable(ctx)
+      rejectsAtSigning(d.sweeper, sweep(d)(
+        Seq(UTXO(contractOf(d.sweeper), d.value - Parameters.MinFee), feeBox)))
+    }
+  }
 
-      val unchanged = UTXO(payoutContract(ctx), boxValue, Seq.empty[Token], Seq(
-        inTree, ErgoValue.of(0), ErgoValue.of(BigInt(1L).bigInteger), ErgoValue.of(boxValue)
-      ))
-      accepts(prover, build(ctx, Seq(boxWith(vars), fundingInput(ctx, prover)), Seq(unchanged), prover.getAddress))
+  /** `OUTPUTS.exists` scans the whole collection, so the position of the fee output cannot matter. */
+  property("drain: rejects a fee output at any position, not just the last (noFeeOutput)") {
+    withCtx { ctx =>
+      val d = drainable(ctx)
+      rejectsAtSigning(d.sweeper, sweep(d)(
+        Seq(feeBox, UTXO(contractOf(d.sweeper), d.value - Parameters.MinFee))))
+    }
+  }
 
-      val drained = UTXO(payoutContract(ctx), Parameters.MinFee, Seq.empty[Token], Seq(
-        inTree, ErgoValue.of(0), ErgoValue.of(BigInt(1L).bigInteger), ErgoValue.of(boxValue)
-      ))
-      rejects(prover, build(ctx, Seq(boxWith(vars), fundingInput(ctx, prover)),
-        Seq(drained, UTXO(contractOf(prover), boxValue - Parameters.MinFee)), prover.getAddress))
+  /**
+   * The cross-check that matters for the constant itself: `CONST_FEE_HASH` is injected from
+   * `Contract.FEE_720`, and this is the one property that runs it against the fee output appkit
+   * actually emits rather than one the spec built. If the two ever diverge, the drain silently stops
+   * being gated and this is what says so.
+   */
+  property("drain: the constant matches the fee output appkit itself builds (noFeeOutput)") {
+    withCtx { ctx =>
+      val d = drainable(ctx)
+      rejectsAtSigning(d.sweeper, build(ctx, Seq(d.in, fundingInput(ctx, d.sweeper)),
+        Seq(UTXO(contractOf(d.sweeper), d.value)), d.sweeper.getAddress))
+    }
+  }
+
+  property("drain: rejects when the payout box is not the first input (onlyOne)") {
+    withCtx { ctx =>
+      val d = drainable(ctx)
+      val funding = fundingInput(ctx, d.sweeper)
+      rejectsAtSigning(d.sweeper, sweep(d)(
+        Seq(UTXO(contractOf(d.sweeper), d.value + funding.value)),
+        inputs = Seq(funding, d.in)))
+    }
+  }
+
+  /** The LIT of an unsubmitted rollup leaves with the sweeper — nothing returns it to the pool. */
+  property("drain: sweeps the box's LIT along with its ERG") {
+    withCtx { ctx =>
+      val d = drainable(ctx, tokens = Seq(Token(fpTokenId, tokenTotal)), tokenReward = Some(tokenTotal))
+      accepts(d.sweeper, sweep(d)(
+        Seq(UTXO(contractOf(d.sweeper), d.value, Seq(Token(fpTokenId, tokenTotal))))))
+    }
+  }
+
+  /**
+   * Nothing in the drain path authenticates the spender, so the incentive argument in the contract
+   * comment is off-chain reasoning rather than an enforced condition. Pinned deliberately: a reader
+   * comparing the comment to the contract should find this property rather than assume a miner check
+   * exists somewhere.
+   */
+  property("drain: the sweeper is not authenticated and need not be the block producer") {
+    withCtx { ctx =>
+      val d = drainable(ctx)
+      val outsider = proverWith(ctx, BigInteger.valueOf(99L))
+      accepts(outsider, sweep(d)(Seq(UTXO(contractOf(outsider), d.value))))
+    }
+  }
+
+  /** R5 is the whole gate, so a box that still owes miners cannot take this path however it is built. */
+  property("drain: a box that still owes miners cannot be swept (currentMiners)") {
+    withCtx { ctx =>
+      val all = miners(ctx)
+      val d = drainable(ctx, minerCount = all.size, entries = all, totalScore = all.map(_.score).sum)
+      rejectsAtSigning(d.sweeper, sweep(d)(Seq(UTXO(contractOf(d.sweeper), d.value))))
+    }
+  }
+
+  /**
+   * The one state the drain does not reach. Path 2 removes miners from the tree but holds R5 constant
+   * (`sameMiners`), so after a partial payout the tree is shorter than R5 says — and a box emptied that
+   * way keeps a nonzero R5 and stays outside the drain.
+   *
+   * It is unreachable rather than dangerous, and the reason is arithmetic rather than a condition: the
+   * value left after paying a set is that set's rewards plus the truncation deficit, and the deficit is
+   * under one nanoERG per miner. So the final payment always leaves less than path 2's 1e6 threshold
+   * and drops into path 3, which consumes the box. That argument lives nowhere in the contract, so this
+   * property records the state it rules out.
+   */
+  property("drain: a box emptied by payouts keeps its miner count and stays outside the drain") {
+    withCtx { ctx =>
+      val all = miners(ctx)
+      val d = drainable(ctx, minerCount = all.size, entries = Seq.empty, totalScore = all.map(_.score).sum)
+      rejectsAtSigning(d.sweeper, sweep(d)(Seq(UTXO(contractOf(d.sweeper), d.value))))
+    }
+  }
+
+  /** The companion to the property above: paying everyone really does end on path 3. */
+  property("drain: paying every miner ends on path 3, so the emptied-tree state is never produced") {
+    withCtx { ctx =>
+      val all = miners(ctx)
+      val totalScore = all.map(_.score).sum
+      val paidFirst = all.take(2)
+      val remainder = boxValue - paidFirst.map(m => reward(m.score, totalScore, boxValue)).sum
+      val lastReward = reward(all.last.score, totalScore, boxValue)
+      // Path 2 needs the leftover above 1e6; what is actually left is the truncation deficit alone.
+      (remainder - lastReward) should be < 1000000L
     }
   }
 }

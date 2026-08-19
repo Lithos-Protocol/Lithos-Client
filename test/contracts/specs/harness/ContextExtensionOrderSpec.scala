@@ -139,9 +139,9 @@ class ContextExtensionOrderSpec extends AnyPropSpec with ContractSpecBase {
   }
 
   /**
-   * The fraud proofs and the PlasmaDex mutators attach small ids in ascending order, which is already
-   * the wire order for those sets — so they are safe, but by coincidence rather than by design. If a
-   * new variable is ever added at a two-digit id, or the attachment order is shuffled, this fails.
+   * The fraud proofs attach small ids in ascending order, which is already the wire order for that
+   * set — so they are safe, but by coincidence rather than by design. If a new variable is ever added
+   * at a two-digit id, or the attachment order is shuffled, this fails.
    */
   property("the id sets production already uses are safe as attached") {
     Seq[Seq[Byte]](Seq(0), Seq(0, 1), Seq(0, 1, 2), Seq(0, 1, 2, 3)).foreach { ids =>

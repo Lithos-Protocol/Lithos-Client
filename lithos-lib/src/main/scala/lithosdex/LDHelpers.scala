@@ -1,5 +1,6 @@
 package lithosdex
 
+import lfsm.LFSMHelpers
 import org.ergoplatform.appkit.{ErgoClient, NetworkType}
 import org.ergoplatform.sdk.ErgoId
 
@@ -88,15 +89,15 @@ object LDHelpers {
 
   // TODO: replace with the real ids once the genesis transaction is built. Nothing derived from these
   // is meaningful until then — every contract address below changes when they do.
-  private final val POOL_NFT_TESTNET  = ErgoId.create("8bbe65a126a7351727a262f66f5d167dd0591ee51e679eec1dad841d9d5f60f8")
+  private final val POOL_NFT_TESTNET  = ErgoId.create("feecf867f715dc6539401736a02bd7145648b4ebe70d23205165a38e792b32a1")
   private final val POOL_NFT_MAINNET  = ErgoId.create("1111111111111111111111111111111111111111111111111111111111111111")
-  private final val VAULT_NFT_TESTNET = ErgoId.create("41db223bd923c81076aaaa3d6b0fbf0a329e5973f1f87d4f78c8fb9c3aafc626")
+  private final val VAULT_NFT_TESTNET = ErgoId.create("b4c6fa23e9e14c577fe4f776e769d737857bd0794b960e90cff36b3573fff026")
   private final val VAULT_NFT_MAINNET = ErgoId.create("2222222222222222222222222222222222222222222222222222222222222222")
-  private final val PROV_TOKEN_TESTNET = ErgoId.create("baebd169f19596cfca500cf141a1584f08aad6d3193adfe9a10c9e9495e2183f")
+  private final val PROV_TOKEN_TESTNET = ErgoId.create("a4fea435f759fcb5fecb052dba466c63553411640265ba0076b861be1337e43b")
   private final val PROV_TOKEN_MAINNET = ErgoId.create("3333333333333333333333333333333333333333333333333333333333333333")
   // LIT token ids
-  private final val TOKEN_Y_TESTNET   = ErgoId.create("cebfc7c3db9d638e8e7d6263b4a724135a9aa9df5a46cc9772d37d9153662d32")
-  private final val TOKEN_Y_MAINNET   = ErgoId.create("4444444444444444444444444444444444444444444444444444444444444444")
+  private final val TOKEN_Y_TESTNET   = LFSMHelpers.LIT_ID
+  private final val TOKEN_Y_MAINNET   = LFSMHelpers.LIT_ID_MAINNET
 
   /**
    * Whole supply of the provision token, minted into the pool box at genesis.
@@ -118,13 +119,13 @@ object LDHelpers {
   /** feeParams as minted at genesis: [dexFee, ergFee, tokenFee] over [[FEE_DENOM]]. Filler. */
   final val GENESIS_FEE_PARAMS: Array[Long] = Array(9985L, 15L, 15L)
 
-  /** Height of the genesis transaction. Filler. */
+  /** Height of the genesis transaction. */
   final val GENESIS_HEIGHT: Int = 0
 
-  /** Box id of the pool at genesis. Filler. */
+  /** Box id of the pool at genesis. */
   final val POOL_GENESIS_ID: String = "0000000000000000000000000000000000000000000000000000000000000000"
 
-  /** Box id of the fee vault at genesis. Filler. */
+  /** Box id of the fee vault at genesis. */
   final val VAULT_GENESIS_ID: String = "0000000000000000000000000000000000000000000000000000000000000000"
 
   /** LD_LiquidityPool / LD_FeeVault / LD_Provision CONST_POOL_NFT. */

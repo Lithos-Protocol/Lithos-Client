@@ -31,7 +31,9 @@ class LDBoxesSpec extends AnyFlatSpec with Matchers with MockitoSugar {
 
   private lazy val fake = FakeNodeContext(numAddresses = 1)
 
-  private def withCtx[A](f: BlockchainContext => A): A = fake._1.getClient.execute(f)
+  // `ctx => f(ctx)` rather than `f`: appkit's `execute` takes a java.util.function.Function, and
+  // scalac SAM-converts a lambda literal where IntelliJ will not convert a Function1 value.
+  private def withCtx[A](f: BlockchainContext => A): A = fake._1.getClient.execute(ctx => f(ctx))
 
   private def provToken(ctx: BlockchainContext): ErgoId = LDHelpers.getProvToken(ctx.getNetworkType)
 

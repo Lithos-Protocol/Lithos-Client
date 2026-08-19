@@ -31,9 +31,8 @@ GET /mining                   controllers.MiningApiController.getStratumInfo()
 
 # Routes for LithosDex API
 #
-# Listed before the PlasmaDex routes below so a literal segment always wins over `:lpId`. The two sets
-# do not actually collide — they differ by a literal at every position — but order makes that free
-# rather than something to re-check whenever a route is added.
+# `/dex` is now LithosDex alone; the PlasmaDex routes that shared this prefix were removed with the
+# package. Nothing here takes a wildcard in first position, so ordering within this block is free.
 
 GET  /dex/pool                                  controllers.LithosDexApiController.getPool()
 GET  /dex/vault                                 controllers.LithosDexApiController.getVault()
@@ -66,31 +65,6 @@ POST /dex/flush/check                           controllers.LithosDexApiControll
 POST /dex/flush                                 controllers.LithosDexApiController.flush()
 
 GET  /wallet/balance                            controllers.LithosDexApiController.getWalletBalance()
-
-# Routes for Dex API
-
-GET  /dex                               controllers.DexApiController.getDexInfo()
-+ nocsrf
-POST /dex/syncFee/:feeNFTId             controllers.DexApiController.syncFee(feeNFTId: String)
-+ nocsrf
-POST /dex/claimFee/:feeNFTId            controllers.DexApiController.claimFee(feeNFTId: String)
-GET  /dex/:lpId/sync                    controllers.DexApiController.getDexSyncStatus(lpId: String)
-+ nocsrf
-POST /dex/:lpId/swap/check              controllers.DexApiController.checkSwapDex(lpId: String)
-+ nocsrf
-POST /dex/:lpId/swap                    controllers.DexApiController.swapDex(lpId: String)
-+ nocsrf
-POST /dex/:lpId/deposit/check           controllers.DexApiController.checkDepositDex(lpId: String)
-+ nocsrf
-POST /dex/:lpId/deposit                 controllers.DexApiController.depositDex(lpId: String)
-+ nocsrf
-POST /dex/:lpId/redemption/check        controllers.DexApiController.checkRedemptionDex(lpId: String)
-+ nocsrf
-POST /dex/:lpId/redemption              controllers.DexApiController.redemptionDex(lpId: String)
-+ nocsrf
-POST /dex/:lpId/withdraw/check          controllers.DexApiController.checkWithdrawDex(lpId: String)
-+ nocsrf
-POST /dex/:lpId/withdraw                controllers.DexApiController.withdrawDex(lpId: String)
 
 # Routes for Payments API
 

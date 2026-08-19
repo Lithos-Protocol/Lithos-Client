@@ -28,10 +28,7 @@ import scala.language.postfixOps
 import scala.util.{Failure, Success, Try}
 
 /**
- * The 18 `lithosdex` endpoints.
- *
- * Paths do not collide with the PlasmaDex `/dex/:lpId/...` routes — they differ by a literal segment
- * at every position — but both live under `/dex` for now.
+ * The 18 `lithosdex` endpoints, and the whole of `/dex` since PlasmaDex was removed.
  */
 @Singleton
 class LithosDexApiController @Inject()(cc: ControllerComponents,

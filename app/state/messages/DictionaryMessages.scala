@@ -1,9 +1,7 @@
 package state.messages
 
 import lfsm.states.MinerTree
-import plasmadex.states.LiquidityState
 import state.messages.SyncMessages.Transform
-import work.lithos.plasma.collections.LocalPlasmaMap
 
 object DictionaryMessages {
 
@@ -18,7 +16,4 @@ object DictionaryMessages {
     override def toString: String = s"InitialMDState($height: ${minerDictionary.utxoId})"
   }
 
-  case class InitialLiqState(height: Int, liquidityState: LiquidityState) {
-    override def toString: String = s"InitialLiqState($height: ${liquidityState.utxoId})"
-  }
 }

@@ -20,15 +20,6 @@ object Globals {
 
   // Sync State
   private var synced: Boolean = false
-  private var pdSynced: Boolean = false
-
-  def setPDSynced(): Unit = {
-    pdSynced = true
-  }
-
-  def getPDSyncState: Boolean = {
-    pdSynced
-  }
 
   def setSynced(): Unit = {
     synced = true

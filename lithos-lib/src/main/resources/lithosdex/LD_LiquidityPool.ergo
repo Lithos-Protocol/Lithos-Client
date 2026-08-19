@@ -34,24 +34,14 @@
   val provToken0 = SELF.tokens(2)
 
   // CONSTANTS
-  // CONST_PROVISION_GUARD_HASH: Hashed prop bytes of LD_Provision_Guard, the small script a provision
-  // box actually carries. The provision logic itself is named by hash inside the guard and arrives with
-  // the transaction, so a provision box stays short enough that neither its minimum value nor its
-  // storage rent is worth worrying about.
+  // CONST_PROVISION_GUARD_HASH: Hashed prop bytes of LD_Provision_Guard, guard script used
+  // to keep box size low and prevent storage rent from taking prov tokens.
   // CONST_VAULT_NFT: Singleton NFT of the fee vault
   val CONST_LOCKED_LP  = 0x7fffffffffffffffL
   val CONST_FEE_DENOM  = 10000
-  // Floor on the box value, and deliberately not sized against storage rent. Clearing the fee on a
-  // full-size box would need 5.12 ERG here, and this floor is paid for continuously by everyone: it is
-  // a floor under a redemption, so that much ERG is unwithdrawable, and a flush leaves exactly the ERG
-  // reserve behind, so fees freeze once pendingX passes the value's headroom over it. A pool that has
-  // gone a storage period unspent has no swaps, no deposits and no fees, so there is nothing to defend.
+  // Floor on the box value
   val CONST_MIN_RENT   = 10000000L
-  // Supply may never fall below this. The genesis convention is to issue provisions for less than the
-  // starting supply and leave a locked remainder, but nothing outside this line enforces it: a genesis
-  // that issued the lot would let the last redemption take supply to zero, and the next swap would
-  // divide by it and the pool would be finished. It is also what bounds the rounding a first depositor
-  // can be robbed of on a drained pool.
+  // Locked supply that can never be taken
   val CONST_MIN_SUPPLY = 1000000L
   // Fixed-point scale for the accumulators, written as a product because it does not fit in a Long.
   // Chosen to exceed the largest supply the pool can ever have: supply is bounded above by
@@ -59,13 +49,14 @@
   // accumulator by roughly 1e8. Truncating a fee away to nothing is therefore impossible by
   // construction rather than merely unlikely — which matters because that failure is silent, costing
   // fees with no error and no failed transaction to notice it by.
+
+  // NOTE: Essentially we store fee per supply in the accumulators. This scale value lets us
+  // multiply the fees so that division does not reduce them to 0 (supply could be a huge denominator).
+  // It is large so we can store as many fees
+  // as possible with no truncation / integer division
   val CONST_SCALE = 1000000000L.toBigInt * 1000000000L.toBigInt * 1000000000L.toBigInt // 1e27
-  // A provision box may sit for years, and its refresh path is optional, so unlike the pool this is
-  // worth defending. It must clear the storage fee twice over: the first collection takes the fee and
-  // preserves the box, the second takes it outright if what is left no longer clears the fee. That fee
-  // is only knowable because a provision's registers are pinned and it may carry no R8, which bounds
-  // its length by the types it holds rather than by observation. At that bound the fee is under 0.3 ERG
-  // per period, so this covers two. Redemption returns it.
+  // Minimum value for provision box, sized to survive at least two storage rent claims.
+  // Should give ample time for refresh.
   val CONST_PROVISION_MIN = 600000000L
 
   // CONTEXT VARS
@@ -183,7 +174,7 @@
     // Swap
     if(CTX_OP == 0.toByte){
       // The supply that earned the fee is the supply right now, and a swap never changes it, so there is
-      // no ambiguity about the denominator. This is the whole reason no snapshot is needed anywhere.
+      // no ambiguity about the denominator.
       val accXAdvanced =
         nextAccX == accX + (deltaPendingX.toBigInt * CONST_SCALE) / supplyLP0.toBigInt
       val accYAdvanced =
@@ -192,10 +183,7 @@
       val common =
         deltaSupplyLP == 0 && provTokenHeld && provToken1._2 == provToken0._2 &&
         accXAdvanced && accYAdvanced &&
-        // A swap that moves nothing satisfies every other condition here trivially — the AMM inequality
-        // holds at zero, no fee accrues, and no accumulator moves. It would still spend this box, and
-        // this box is what every swap, deposit and flush has to go through, so repeating it is a cheap
-        // way to keep invalidating everyone else's pending transactions.
+        // Ensure some kind of swap happened
         ( totalDeltaX != 0 || totalDeltaY != 0 )
 
       if(deltaReservesX > 0){

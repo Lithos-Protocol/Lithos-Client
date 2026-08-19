@@ -105,7 +105,10 @@ class KnownReservationSpec
     Fixture(mgr, wallet, probe, ctx, reported)
   }
 
-  private def withCtx[A](f: Fixture)(body: BlockchainContext => A): A = f.ctx.getClient.execute(body)
+  // `ctx => body(ctx)` rather than `body`: appkit's `execute` takes a java.util.function.Function,
+  // and scalac SAM-converts a lambda literal where IntelliJ will not convert a Function1 value.
+  private def withCtx[A](f: Fixture)(body: BlockchainContext => A): A =
+    f.ctx.getClient.execute(ctx => body(ctx))
 
   /** A signable box that exists only as a built output, exactly as a chained change box does. */
   private def knownOutput(f: Fixture, value: Long): InputUTXO =

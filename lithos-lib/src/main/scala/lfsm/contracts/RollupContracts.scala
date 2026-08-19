@@ -1,7 +1,7 @@
 package lfsm.contracts
 
 import lfsm.ScriptGenerator
-import org.ergoplatform.appkit.{BlockchainContext, ConstantsBuilder, NetworkType}
+import org.ergoplatform.appkit.{BlockchainContext, Constants, ConstantsBuilder, NetworkType}
 import org.ergoplatform.sdk.ErgoId
 import sigma.Colls
 import sigma.data.ProveDlog
@@ -9,15 +9,25 @@ import work.lithos.mutations.{Contract, Mutator}
 
 object RollupContracts {
 
+  /**
+   * The drain path refuses any transaction carrying a miner-fee output, which is what leaves a stuck
+   * payout box claimable only by a block producer or someone paying one.
+   *
+   * `feeProposition` reads the miner key out of the context rather than baking it in, and takes no
+   * network prefix, so the fee ergo tree — and therefore this hash — is a single global constant.
+   * It is derived here rather than hard-coded so it cannot drift from the fee output the client's own
+   * builders emit.
+   */
+  private def payoutConstants: Constants = ConstantsBuilder.create()
+    .item("CONST_FEE_HASH", Colls.fromArray(Contract.FEE_720.hashedPropBytes))
+    .build()
 
   def mkPayoutContract(ctx: BlockchainContext): Contract = {
-    val constants = ConstantsBuilder.empty()
-    Contract.fromErgoScript(ctx, constants, ScriptGenerator.mkRollupScript("Payout"))
+    Contract.fromErgoScript(ctx, payoutConstants, ScriptGenerator.mkRollupScript("Payout"))
   }
 
   def mkPayoutContract(networkType: NetworkType): Contract = {
-    val constants = ConstantsBuilder.empty()
-    Contract.fromErgoScript(networkType, constants, ScriptGenerator.mkRollupScript("Payout"), Seq.empty[Mutator])
+    Contract.fromErgoScript(networkType, payoutConstants, ScriptGenerator.mkRollupScript("Payout"), Seq.empty[Mutator])
   }
 
   def mkEvalContract(ctx: BlockchainContext, periodLength: Long, payoutBytes: Array[Byte], fpToken: ErgoId): Contract = {

@@ -30,12 +30,10 @@ object MempoolView {
  * when updates have occurred.
  * @param stateFrame
  * @param rollupCoordinator
- * @param pdSynchronizer
  * @param cacheApi
  */
 class MempoolView @Inject()(@Named("state-frame") stateFrame: ActorRef,
                             @Named("rollup-coordinator") rollupCoordinator: ActorRef,
-                            @Named("pd-synchronizer") pdSynchronizer: ActorRef,
                             cacheApi: SyncCacheApi) extends Actor with InjectedActorSupport with AutoSubscribable {
   import MempoolView._
   implicit val timeout: Timeout = 5.seconds

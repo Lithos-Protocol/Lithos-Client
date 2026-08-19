@@ -7,10 +7,12 @@ import play.api.cache.SyncCacheApi
 /**
  * Last known LithosDex state.
  *
- * Much simpler than [[PDCache]]: there is no plasma tree and nothing to synchronise, so following the
- * pool is following one box, plus the vault box. A provision's entitlement is derived from the
- * accumulators rather than recorded anywhere, so nothing about a provision is cached — it is read from
- * its own box when asked for.
+ * There is no plasma tree and nothing to synchronise, so following the pool is following one box,
+ * plus the vault box. A provision's entitlement is derived from the accumulators rather than recorded
+ * anywhere, so nothing about a provision is cached — it is read from its own box when asked for.
+ *
+ * That is what let the whole PlasmaDex mirroring layer — its cache, its two synchronizers and its
+ * sync task — be deleted rather than ported.
  *
  * That is also why there is no LithosDex equivalent of `/dex/:lpId/sync`: with no tree there is no
  * synchronisation to be behind on, and a snapshot here is only ever a saved read.

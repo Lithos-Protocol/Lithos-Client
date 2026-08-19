@@ -7,8 +7,7 @@
   // Ownership is bearer: the box names an NFT, and every path requires that NFT in the transaction's
   // inputs, so the right to the fees and to the underlying liquidity transfers with the token and can be
   // sold or lent against.
-  // What is owed is never stored. It is the size times how far the vault's accumulator has moved since
-  // this box last looked, which is two numbers and a subtraction — no history, nothing to synchronize.
+
 
   // REGISTERS
   // R4: entryX (BigInt) - value of the pool's ERG accumulator when this provision last settled
@@ -24,13 +23,6 @@
   // TOKENS
   // 0: provision token, amount 1
   val provToken = SELF.tokens(0)
-
-  // This is the logic, not the script a provision box carries. Boxes are guarded by LD_Provision_Guard,
-  // which holds nothing but the hash of this and runs it from context variable 64 — so everything below
-  // reads SELF, INPUTS and OUTPUTS exactly as if it were the box's own script, because at the point it
-  // runs it is. Keeping it out of the box is what makes a provision small enough that its minimum value
-  // and its storage rent stop mattering, and it moves the cost of carrying these rules onto the
-  // transactions that use them.
 
   // CONSTANTS
   // CONST_POOL_NFT: Singleton NFT of the liquidity pool
@@ -58,9 +50,7 @@
 
 
 
-  // Holding the NFT is the whole of ownership. It must be an *input* rather than merely referenced,
-  // because an input is a box actually being spent, so whatever guards it was satisfied and its owner
-  // authorised this transaction, whoever and whatever they are.
+  // Spending the NFT is the proof of ownership.
   val ownerPresent = INPUTS.exists{
     (b: Box) =>
       b.tokens.exists{ (t: (Coll[Byte], Long)) => t._1 == ownerNFT }
@@ -140,10 +130,8 @@
         successor.R5[BigInt].get     == entryY,
         successor.R6[Coll[Byte]].get == ownerNFT,
         successor.R7[Long].get       == provision,
-        // The successor must really be young. Monotonicity alone only forces it above this box's own
-        // height, which for a box old enough to refresh is still old, so a refresher could otherwise
-        // hand back something instantly refreshable and spend it on repeat, costing them only fees
-        // while invalidating every transaction the owner attempted against their own box.
+        // The successor must really be young so refreshes can't be abused by spending an already old UTXO.
+        // Realistically probably not a huge issue.
         successor.creationInfo._1 > HEIGHT - CONST_HEIGHT_SLACK,
         noExtraRegisters
       )
