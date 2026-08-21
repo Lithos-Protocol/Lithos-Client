@@ -20,21 +20,11 @@ The node must be running and fully synced before Lithos can operate.
 
 ## 2. Download the Ergo Testnet Node
 
-You may either download the latest prebuilt Testnet node JAR or build it from the required pull request branch.
+You can download the Ergo Testnet Jar from the releases page on the Ergo github.
 
-### Option A: Prebuilt Testnet Node JAR
+https://github.com/ergoplatform/ergo/releases
 
-The latest Testnet-enabled node build is provided here:
-
-https://t.me/ErgoDevelopers/36855
-
-Download the JAR file from the message contents and place it in your node directory.
-
-### Option B: Build From Source (Pull Request 2252)
-
----
-https://github.com/ergoplatform/ergo/pull/2252
----
+You must use versions 6.0.4 or above, as only these node versions contain support for API requests used specifically by the Lithos Client.
 
 ## 3. Create the Node Directory
 

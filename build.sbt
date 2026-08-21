@@ -1,7 +1,7 @@
 
 name := """lithos-client"""
 organization := "work.lithos"
-version := "5.0.0-SNAPSHOT"
+version := "5.0.0"
 scalaVersion := "2.12.20"
 libraryDependencies ++= Seq(
   //"org.ergoplatform" %% "ergo-appkit" % "5.0.4",
@@ -15,14 +15,24 @@ libraryDependencies ++= Seq(
   guice,
   caffeine
 )
+// Reads lithos.conf from bin by default
+Universal / javaOptions ++= Seq(
+  "-Dconfig.file=lithos.conf"
+)
+
+Universal / packageName := "lithos-client"
+Universal / packageBin := {
+  val originalZip = (Universal / packageBin).value
+  val newZip = originalZip.getParentFile / s"lithos-client-${version.value}.zip"
+  IO.move(originalZip, newZip)
+  newZip
+}
+
 
 Test / parallelExecution := false
 
 
-// Scoped to `test`, NOT to the whole Test config, so `testOnly` can still reach these by name.
-// They are excluded from a plain `sbt test` because several need a live node and a real key — but
-// the sandbox is a set of manual levers you are meant to run one at a time, and filtering the whole
-// configuration made it unreachable: `testOnly contracts.sandbox.…` answered "No tests to run".
+
 Test / test / testOptions += Tests.Filter(name =>
   !name.startsWith("contracts.old.") && !name.startsWith("contracts.sandbox."))
 
