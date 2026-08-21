@@ -23,7 +23,7 @@ object LFSMHelpers {
   final val NISP_MAX         = 26000 // Max size of NISP in bytes
   final val NISP_MIN         = 7108
   final val TX_PROOF_MIN       = 502
-  final val TX_PROOF_MAX       = 2000
+  final val TX_PROOF_MAX       = 4000
   final val TX_SIZE_MIN        = 450
   final val COLLAT_BOX_MIN     = 50
   final val NUM_LVLS_MAX      = 16
