@@ -326,6 +326,120 @@ class LithosDexApiImplSpec
   //  FEE HISTORY
   // ══════════════════════════════════════════════════════════════════════════
 
+  // ══════════════════════════════════════════════════════════════════════════
+  //  PRICE HISTORY
+  // ══════════════════════════════════════════════════════════════════════════
+
+  /** Serve one confirmed pool box for the lineage, plus that same box as the live singleton. */
+  private def servePrice(f: Fixture, lineage: Seq[IndexedBox], live: NodeBox): Unit = {
+    serve(f, Some(live), None)
+    when(f.nodeApi.boxesByTokenId(anyString(), any[Paging])).thenAnswer { inv =>
+      if (inv.getArgument[Paging](1).offset == 0) Success(Paged(lineage, lineage.size))
+      else Success(Paged(Seq.empty[IndexedBox], lineage.size))
+    }
+    when(f.nodeApi.chainSlice(any[Option[Int]], any[Option[Int]])).thenReturn(Success(Seq.empty[NodeHeader]))
+    when(f.nodeApi.tokenById(anyString())).thenReturn(Success(None))
+  }
+
+  "Price history" should "end on the live spot price, not the newest indexed one" in {
+    // The chart is drawn beside a stat strip fed from the same live read. The index lags the
+    // mempool, so ending the series on the newest INDEXED box makes the two visibly disagree about
+    // the price right now.
+    val f = fixture()
+    // Inside the default 24H window, which is 720 blocks back from the chain tip.
+    val h = withCtx(f)(_.getHeight)
+    val stale = withCtx(f)(ctx =>
+      LDNodeFixtures.indexed(LDNodeFixtures.poolBox(ctx, ReservesX, ReservesY), height = h - 100))
+    // The live box has traded since: half the ERG depth, so the price is visibly different.
+    val live = withCtx(f)(ctx => LDNodeFixtures.poolBox(ctx, ReservesX / 2, ReservesY, index = 1))
+    servePrice(f, Seq(stale), live)
+
+    val history = f.api.getPriceHistory(None, None, f.cache)
+    history.history should not be empty
+    val last = history.history.last
+    last.reservesX shouldEqual (ReservesX / 2).toString
+    // Half the ERG against the same tokens is twice the price.
+    last.price shouldEqual (2 * history.history.head.price) +- 0.0001
+  }
+
+  it should "report the range it served and a signed change across it" in {
+    val f = fixture()
+    val h = withCtx(f)(_.getHeight)
+    val early = withCtx(f)(ctx =>
+      LDNodeFixtures.indexed(LDNodeFixtures.poolBox(ctx, ReservesX, ReservesY), height = h - 100))
+    val live = withCtx(f)(ctx => LDNodeFixtures.poolBox(ctx, ReservesX * 2, ReservesY, index = 1))
+    servePrice(f, Seq(early), live)
+
+    val history = f.api.getPriceHistory(Some("7d"), None, f.cache)
+    // Echoed back uppercased, so a caller can tell a default from a choice.
+    history.range shouldEqual "7D"
+    // Twice the ERG against the same tokens halves the price: -50%.
+    history.changePct shouldEqual -0.5 +- 0.0001
+  }
+
+  it should "refuse a range it does not serve" in {
+    val f = fixture()
+    intercept[LDBadRequest](f.api.getPriceHistory(Some("3Y"), None, f.cache))
+      .getMessage should include("range")
+  }
+
+  it should "refuse a bucket that would return thousands of points" in {
+    // Nothing renders that many, only the first 250 could carry a timestamp, and the response would
+    // be megabytes. The message names a bucket that would work.
+    val f = fixture()
+    val thrown = intercept[LDBadRequest](f.api.getPriceHistory(Some("30D"), Some(1), f.cache))
+    thrown.getMessage should include("points")
+  }
+
+  it should "mark a series partial when the pool is younger than the range" in {
+    // Two ways the window comes up short and both mean the same thing to a caller: a lineage the
+    // walk could not reach the start of, and one that simply does not go back far enough.
+    val f = fixture()
+    val recent = withCtx(f)(ctx =>
+      LDNodeFixtures.indexed(LDNodeFixtures.poolBox(ctx, ReservesX, ReservesY),
+        height = withCtx(f)(_.getHeight) - 5))
+    val live = withCtx(f)(ctx => LDNodeFixtures.poolBox(ctx, ReservesX, ReservesY, index = 1))
+    servePrice(f, Seq(recent), live)
+
+    f.api.getPriceHistory(Some("30D"), None, f.cache).partial shouldBe true
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  //  RECENT SWAPS
+  // ══════════════════════════════════════════════════════════════════════════
+
+  "Recent swaps" should "return the newest first and cap the list" in {
+    val f = fixture()
+    val boxes = withCtx(f) { ctx =>
+      // Three swaps: each takes 1 ERG in and gives tokens out, so reserves march one way.
+      (0 to 3).map { i =>
+        LDNodeFixtures.indexed(
+          LDNodeFixtures.poolBox(ctx, ReservesX + i * erg, ReservesY - i * 30000000L,
+            pendingX = i * 1500000L, index = i),
+          height = 500 + i, globalIndex = i.toLong)
+      }
+    }
+    serve(f, Some(boxes.head.box), None)
+    when(f.nodeApi.boxesByTokenId(anyString(), any[Paging])).thenAnswer { inv =>
+      if (inv.getArgument[Paging](1).offset == 0) Success(Paged(boxes, boxes.size))
+      else Success(Paged(Seq.empty[IndexedBox], boxes.size))
+    }
+    when(f.nodeApi.unconfirmedTransactionsByErgoTree(anyString(), any[Paging]))
+      .thenReturn(Success(Seq.empty[NodeTransaction]))
+    when(f.nodeApi.chainSlice(any[Option[Int]], any[Option[Int]])).thenReturn(Success(Seq.empty[NodeHeader]))
+
+    val all = f.api.getRecentSwaps(None)
+    all.swaps.map(_.height) shouldEqual Seq(Some(503), Some(502), Some(501))
+    all.swaps.foreach(_.ergIn shouldBe true)
+
+    f.api.getRecentSwaps(Some(2)).swaps should have size 2
+  }
+
+  it should "refuse a non-positive limit" in {
+    intercept[LDBadRequest](fixture().api.getRecentSwaps(Some(0)))
+      .getMessage should include("limit")
+  }
+
   "Fee history" should "credit every transition when several land in one block" in {
     // Several pool transitions land in one block routinely — a swap and the flush behind it. Two
     // separate places used to break on that, and both present the same way: fees missing from the

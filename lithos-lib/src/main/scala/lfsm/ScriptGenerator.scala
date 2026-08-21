@@ -7,8 +7,6 @@ import work.lithos.mutations.{Contract, Mutator}
 import scala.io.Source
 
 object ScriptGenerator {
-  var BASE_PATH = ""
-  private final val SCRIPT_PATH = "scripts/"
   private final val EXT = ".ergo"
 
   private final val COLLAT = "collateral/"
@@ -61,11 +59,4 @@ object ScriptGenerator {
     script
   }
 
-  private def mkBasePath: String = {
-    if(BASE_PATH.last != '/') {
-      BASE_PATH = BASE_PATH + "/"
-      BASE_PATH
-    } else
-      BASE_PATH
-  }
 }

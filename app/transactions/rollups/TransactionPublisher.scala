@@ -103,14 +103,14 @@ class TransactionPublisher @Inject()(config: Configuration, nodeContext: NodeCon
 
         case Success(entries) =>
           if (entries.nonEmpty) {
-            logger.info(s"Publishing ${entries.size} transaction(s) to TransactionProcessor")
+            logger.debug(s"Publishing ${entries.size} transaction(s) to TransactionProcessor")
             val txGroups = entries.groupBy(_._2.txType)
             txGroups.foreach{
               g =>
                 logger.info(s"Got ${g._2.size} ${g._1} transactions")
             }
           } else {
-            logger.info("Publishing empty map to TransactionProcessor")
+            logger.debug("Publishing empty map to TransactionProcessor")
           }
           transactionProcessor ! PublishedRollupMap(entries)
       }

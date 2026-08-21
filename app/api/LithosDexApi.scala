@@ -125,6 +125,18 @@ trait LithosDexApi {
                              ldCache: LDCache): LDProvisionFeeHistory
 
   /**
+   * GET /dex/price/history
+   * Spot price over a range, for the swap page's chart.
+   */
+  def getPriceHistory(range: Option[String], bucket: Option[Int], ldCache: LDCache): LDPriceHistory
+
+  /**
+   * GET /dex/swaps/recent
+   * Swaps against the pool, newest first, including unconfirmed ones.
+   */
+  def getRecentSwaps(limit: Option[Int]): LDRecentSwaps
+
+  /**
    * GET /wallet/balance
    * ERG and token balances for the client's wallet.
    */

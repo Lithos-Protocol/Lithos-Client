@@ -158,6 +158,14 @@ class LithosDexApiController @Inject()(cc: ControllerComponents,
   def getFeeHistory(from: Option[Int], to: Option[Int], bucket: Option[Int]): Action[AnyContent] =
     Action.async { _ => offPool(respond(api.getFeeHistory(from, to, bucket, ldCache))) }
 
+  /** GET /dex/price/history */
+  def getPriceHistory(range: Option[String], bucket: Option[Int]): Action[AnyContent] =
+    Action.async { _ => offPool(respond(api.getPriceHistory(range, bucket, ldCache))) }
+
+  /** GET /dex/swaps/recent */
+  def getRecentSwaps(limit: Option[Int]): Action[AnyContent] =
+    Action.async { _ => offPool(respond(api.getRecentSwaps(limit))) }
+
   /** GET /dex/provisions/:boxId/fees/history */
   def getProvisionFeeHistory(boxId: String,
                              from: Option[Int],

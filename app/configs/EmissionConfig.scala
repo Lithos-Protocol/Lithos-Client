@@ -57,14 +57,14 @@ object EmissionConfig {
   /** Mirrors the `emission` block in `application.conf`; keep the two in step. */
   val Default: EmissionConfig = EmissionConfig(
     enabled = true,
-    queueInterval = 120000,
+    queueInterval = 240000,
     maxQueueSpends = 4,
     mempoolChaining = true,
     maxChainDepth = 16,
     queueScanLimit = 500,
     txFee = Parameters.MinFee,
     autoCollateralize = false,
-    collateralizeInterval = 600000,
+    collateralizeInterval = 900000,
     maxJoinsPerRun = 5,
     maxOwnCollateral = 10,
     // Must not exceed the shipped `node.numAddresses`, which is also 32: keys past the prover's

@@ -1314,6 +1314,107 @@ paths:
               schema:
                 $ref: '#/components/schemas/ApiError'
 
+  /dex/price/history:
+    get:
+      summary: Pool price history
+      description: >
+        Spot price over a range, for a chart. The series always ends at the current price, so it
+        agrees with `/dex/pool`. Check `partial` — it may not span the whole range.
+      operationId: getLDPriceHistory
+      tags:
+        - lithosdex
+      parameters:
+        - in: query
+          name: range
+          required: false
+          description: How far back to go
+          schema:
+            type: string
+            enum: ['1H', '24H', '7D', '30D']
+            default: '24H'
+        - in: query
+          name: bucket
+          required: false
+          description: Bucket size in blocks. Defaults to about 60 points across the range.
+          schema:
+            type: integer
+            format: int32
+      responses:
+        '200':
+          description: Price series for the requested range
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LDPriceHistory'
+        '400':
+          description: Unknown `range`, or a `bucket` that would return too many points.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '404':
+          description: No pool box found on this network.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '503':
+          description: Node unavailable. Retry.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /dex/swaps/recent:
+    get:
+      summary: Recent swaps
+      description: >
+        Swaps against the pool, newest first, including unconfirmed ones. An entry with no `height`
+        is still in the mempool and can still roll back.
+      operationId: getLDRecentSwaps
+      tags:
+        - lithosdex
+      parameters:
+        - in: query
+          name: limit
+          required: false
+          description: How many to return, capped at 50
+          schema:
+            type: integer
+            format: int32
+            default: 10
+      responses:
+        '200':
+          description: Swaps against the pool, newest first
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LDRecentSwaps'
+        '400':
+          description: A non-positive `limit`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '503':
+          description: Node or mempool unavailable. Retry.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
   /dex/provisions/{boxId}/fees/history:
     get:
       summary: Fee history for one provision
@@ -2709,6 +2810,118 @@ components:
           type: boolean
           description: True when the series does not reach back to the pool's start.
           example: false
+
+    LDPricePoint:
+      description: One point on the price series
+      type: object
+      x-tags: lithosdex
+      required:
+        - height
+        - price
+        - reservesX
+        - reservesY
+      properties:
+        height:
+          type: integer
+          format: int32
+          example: 484719
+        timestamp:
+          type: integer
+          format: int64
+          description: Unix milliseconds. Absent if unresolved.
+          example: 1765432100000
+        price:
+          type: number
+          format: double
+          description: >
+            Token per ERG with the token's decimals applied. A display value — recompute from the
+            reserves if you need it exact.
+          example: 35.6285
+        reservesX:
+          type: string
+          description: nanoERG the AMM traded with at this point. Decimal string.
+          example: '1133460000000'
+        reservesY:
+          type: string
+          description: Raw token units the AMM traded with at this point. Decimal string.
+          example: '403834600000'
+
+    LDPriceHistory:
+      description: Price series for a requested range
+      type: object
+      x-tags: lithosdex
+      required:
+        - range
+        - changePct
+        - partial
+        - history
+      properties:
+        range:
+          type: string
+          description: The range served, echoed back
+          example: '24H'
+        changePct:
+          type: number
+          format: double
+          description: Signed fraction across the range; 0.018 is +1.8%
+          example: 0.018
+        partial:
+          type: boolean
+          description: True when the series does not span the whole range.
+          example: false
+        history:
+          type: array
+          items:
+            $ref: '#/components/schemas/LDPricePoint'
+
+    LDSwapEntry:
+      description: One swap against the pool
+      type: object
+      x-tags: lithosdex
+      required:
+        - txId
+        - ergIn
+        - amountIn
+        - amountOut
+      properties:
+        txId:
+          type: string
+          example: '9f3c1ab7d2e45806c91f7b3ad4e2091856cbf740e3a92d5178cc0b46e21f5d38'
+        ergIn:
+          type: boolean
+          description: True when ERG was sold for the token
+          example: true
+        amountIn:
+          type: string
+          description: Raw units handed to the pool, fees included. Decimal string.
+          example: '12400000000'
+        amountOut:
+          type: string
+          description: Raw units received. Decimal string.
+          example: '441820000'
+        height:
+          type: integer
+          format: int32
+          description: >
+            Block height. Absent while the swap is still in the mempool, where it can still roll back.
+          example: 484719
+        timestamp:
+          type: integer
+          format: int64
+          description: Unix milliseconds. Absent for mempool entries.
+          example: 1765432100000
+
+    LDRecentSwaps:
+      description: Swaps against the pool, newest first
+      type: object
+      x-tags: lithosdex
+      required:
+        - swaps
+      properties:
+        swaps:
+          type: array
+          items:
+            $ref: '#/components/schemas/LDSwapEntry'
 
     WalletToken:
       description: A token balance held by the wallet

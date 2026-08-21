@@ -20,7 +20,7 @@ object Globals {
 
   // Sync State
   private var synced: Boolean = false
-
+  private var mdSynced: Boolean = false
   def setSynced(): Unit = {
     synced = true
   }
@@ -28,6 +28,12 @@ object Globals {
   def getSyncState: Boolean = {
     synced
   }
+
+  def setMDSynced(): Unit = {
+    mdSynced = true
+  }
+
+  def getMDSyncState: Boolean = mdSynced
 
 
 

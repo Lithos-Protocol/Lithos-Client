@@ -19,7 +19,7 @@ case class Evaluator(ctx: BlockchainContext, prover: NodeWallet, evalInput: Inpu
     miners.foreach {
       m =>
 
-        logger.info(s"Starting ${fpContracts.size} evaluations for miner ${Hex.toHexString(m)}")
+        logger.info(s"Starting ${fpContracts.size} evaluations for miner ${Hex.toHexString(m)} in rollup ${nispTree.blockId}")
 
         var txs = Option.empty[SignedTransaction]
         var idx = 0

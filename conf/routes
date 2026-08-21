@@ -38,6 +38,8 @@ GET  /dex/pool                                  controllers.LithosDexApiControll
 GET  /dex/vault                                 controllers.LithosDexApiController.getVault()
 GET  /dex/provisions                            controllers.LithosDexApiController.listProvisions()
 GET  /dex/fees/history                          controllers.LithosDexApiController.getFeeHistory(from: Option[Int], to: Option[Int], bucket: Option[Int])
+GET  /dex/price/history                         controllers.LithosDexApiController.getPriceHistory(range: Option[String], bucket: Option[Int])
+GET  /dex/swaps/recent                          controllers.LithosDexApiController.getRecentSwaps(limit: Option[Int])
 GET  /dex/provisions/:boxId/fees/history        controllers.LithosDexApiController.getProvisionFeeHistory(boxId: String, from: Option[Int], to: Option[Int], bucket: Option[Int])
 + nocsrf
 POST /dex/swap/check                            controllers.LithosDexApiController.checkSwap()

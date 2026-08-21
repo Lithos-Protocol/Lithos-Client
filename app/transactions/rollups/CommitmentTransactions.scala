@@ -1,18 +1,20 @@
 package transactions.rollups
 
+import cache.MDCache
 import configs.NodeContext
 import lfsm.LFSMHelpers
+import lfsm.states.MinerTree
 import mutations.NodeWallet
 import org.ergoplatform.ErgoTreePredef
 import org.ergoplatform.appkit._
-import org.ergoplatform.appkit.scalaapi.{scalaIntType, scalaLongType}
+import org.ergoplatform.appkit.scalaapi.{scalaByteType, scalaIntType, scalaLongType}
 import org.ergoplatform.sdk.ErgoId
 import org.slf4j.{Logger, LoggerFactory}
 import sigma.{Coll, Colls}
 import state.DataBoxRetrievalException
 import transactions.wallet.{WalletReservation, WalletSelector}
 import utils.{Globals, Helpers}
-import work.lithos.mutations.{Contract, InputUTXO, TxBuilder, UTXO}
+import work.lithos.mutations.{Contract, InputUTXO, Token, TxBuilder, UTXO}
 
 import scala.util.control.NonFatal
 import scala.util.{Failure, Success, Try}
@@ -99,7 +101,7 @@ class CommitmentTransactions(nodeContext: NodeContext, dataBoxes: DataBoxSource)
           logger.info(s"Using committed score $score, tau $next")
           next
         case Failure(ex) =>
-          logger.warn(s"No usable difficulty commitment, mining on the configured tau $tau: " +
+          logger.warn(s"No usable difficulty commitment, mining on the configured diff ${LFSMHelpers.formatTau(tau)}: " +
             s"${ex.getMessage}")
           logger.warn("NISPs submitted or mined in this manner may be considered fraudulent")
           tau
@@ -127,6 +129,92 @@ class CommitmentTransactions(nodeContext: NodeContext, dataBoxes: DataBoxSource)
   // ══════════════════════════════════════════════════════════════════════════
   //  THE WRITE
   // ══════════════════════════════════════════════════════════════════════════
+
+  private def makeMinerDataBox(ctx: BlockchainContext, minerContract: Contract, addToken: ErgoId, score: Long): UTXO = {
+    val contract =  Helpers.dataBoxContract(ctx)
+    val commit = ctx.getHeight + DataBoxBuffer -> score
+    logger.info(s"Making new data box for local miner with singleton id $addToken, and commit $commit")
+    val utxo = UTXO(contract, Parameters.MinFee, Seq(Token(addToken, 1L)),
+      registers = Seq(
+        ErgoValue.of(Colls.fromArray(Array(commit)), ErgoType.pairType(scalaIntType, scalaLongType)),
+        ErgoValue.of(Colls.fromArray(minerContract.hashedPropBytes), scalaByteType)
+      ))
+    utxo
+  }
+
+
+  def sendInitialCommitment(diff: String,
+                            cache: MDCache,
+                            walletSelector: WalletSelector): String = {
+    client.execute{
+      ctx =>
+        val prover: NodeWallet = nodeContext.getNodeWallet
+        val tau = LFSMHelpers.parseDiffValueForStratum(diff)
+        val score = LFSMHelpers.convertTauOrScore(tau.get).toLong
+        logger.info(s"Creating new commitment for local miner with hash ${prover.contract.hashedPropBytesHex}")
+
+        val reservation = walletSelector.reserve(Parameters.MinFee * 2)
+        val signed =
+          try signInitialCommitment(ctx, cache.getMD.get, prover, score, reservation.inputs)
+          catch {
+            // Nothing has left this process, so the exact selection is ours to hand straight back.
+            case NonFatal(ex) => reservation.release(); throw ex
+          }
+
+        // Converted before submission begins
+        val change = signableOutputs(signed, prover)
+
+        reservation.beginSubmission()
+        try {
+          val txId = ctx.sendTransaction(signed).replace("\"", "")
+          reservation.commit(change)
+          logger.info(s"Sent transaction $txId to create new commitment")
+          txId
+        } catch {
+          case NonFatal(ex) =>
+            reservation.uncertain()
+            throw ex
+        }
+    }
+  }
+
+  /**
+   * Add self to miner dictionary. Performed after initial MD synchronization found no existing entries.
+   *
+   * @return SignedTx which adds miner to miner dictionary
+   */
+  private def signInitialCommitment(ctx: BlockchainContext,
+                                    minerTree: MinerTree,
+                                    prover: NodeWallet,
+                                    score: Long,
+                                    funding: Seq[InputUTXO]): SignedTransaction = {
+    val proverContract = prover.contract
+
+    val insertionTree = minerTree.dictionary.copy()
+    val dictInput = InputUTXO(ctx.getBoxesById(minerTree.utxoId).head)
+    insertionTree.prover.generateProof()
+    val insertion = insertionTree.insert(proverContract.hashedPropBytes -> dictInput.id.getBytes)
+
+    val ctxDictInput = dictInput
+      .withCtxVar(ContextVar.of(0.toByte, 0.toByte))
+      .withCtxVar(ContextVar.of(1.toByte, proverContract.sigmaBoolean.get))
+      .withCtxVar(ContextVar.of(
+        2.toByte,
+        ErgoValue.pairOf(
+          ErgoValue.of(Colls.fromArray(proverContract.hashedPropBytes), scalaByteType),
+          ErgoValue.of(Colls.fromArray(dictInput.id.getBytes), scalaByteType)
+        )))
+      .withCtxVar(ContextVar.of(3.toByte, insertion.proof.ergoValue))
+    val dictOutput = dictInput.toUTXO.copy(registers = Seq(insertionTree.ergoValue))
+    val output = makeMinerDataBox(ctx, proverContract, dictInput.id, score)
+    val feeOutput = UTXO(Contract(ErgoTreePredef.feeProposition(720)), Parameters.MinFee)
+    val uTx = TxBuilder(ctx)
+      .setInputs((Seq(ctxDictInput) ++ funding): _*)
+      .setOutputs(dictOutput, output, feeOutput)
+      .buildTx(0, prover.p2pk)
+
+    prover.sign(uTx)
+  }
 
   /**
    * Move this miner's commitment to the configured difficulty, if it has to move.
@@ -184,10 +272,7 @@ class CommitmentTransactions(nodeContext: NodeContext, dataBoxes: DataBoxSource)
         case NonFatal(ex) => reservation.release(); throw ex
       }
 
-    // Converted BEFORE the permit is taken, which is what the method below claims and what the
-    // equivalent site in LithosDexApiImpl.send does. Reading it after the broadcast would put a
-    // conversion between acceptance and commit — harmless while it swallows its own failures, and a
-    // real defect the moment anyone removes that.
+    // Converted before submission begins
     val change = signableOutputs(signed, prover)
 
     reservation.beginSubmission()

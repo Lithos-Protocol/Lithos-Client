@@ -3,10 +3,12 @@ package tasks
 import akka.actor.{ActorRef, ActorSystem, Cancellable, CoordinatedShutdown}
 import akka.pattern.ask
 import akka.util.Timeout
+import cache.MDCache
 import configs.TasksConfig.TaskConfiguration
 import configs._
 import lfsm.LFSMHelpers
 import lfsm.states.MinerTree
+import mutations.NotEnoughInputsException
 import node.NodeApi
 import org.ergoplatform.restapi.client.FullBlock
 import org.slf4j.{Logger, LoggerFactory}
@@ -18,6 +20,8 @@ import state.messages.DictionaryMessages.InitialMDState
 import state.messages.StateFrameMessages._
 import state.messages.SyncMessages._
 import state.messages.{BlockInfo, BlockMessage, NodeSync}
+import transactions.rollups.{CommitmentTransactions, DataBoxSource}
+import transactions.wallet.{ReservationExpiredException, WalletSelector}
 import utils.Globals
 
 import javax.inject.{Inject, Named, Singleton}
@@ -28,18 +32,20 @@ import scala.util.{Failure, Success, Try}
 
 @Singleton
 class MDSyncTask @Inject()(cache: SyncCacheApi, system: ActorSystem, config: Configuration,
+                           nodeContext: NodeContext,
                            @Named("md-synchronizer") mdSynchronizer: ActorRef,
                            @Named("sync-handler")    syncHandler:       ActorRef,
+                           @Named("wallet-manager")  walletManager: ActorRef,
                            cs: CoordinatedShutdown) {
 
-  val logger: Logger = LoggerFactory.getLogger("MDSyncTask")
-  val taskConfig: TaskConfiguration = new TasksConfig(config).dictionarySyncTask
+  private val logger: Logger = LoggerFactory.getLogger("MDSyncTask")
+  private val taskConfig: TaskConfiguration = new TasksConfig(config).dictionarySyncTask
 
-  val contexts: Contexts       = new Contexts(system)
-  val syncConfig: SyncConfig   = new SyncConfig(config)
-  val stratumConfig: StratumConfig = new StratumConfig(config)
-  val stateConfig: StateConfig = new StateConfig(config)
-  val nodeConfig: NodeConfig   = Globals.getNodeConfig
+  private val contexts: Contexts       = new Contexts(system)
+  private val syncConfig: SyncConfig   = new SyncConfig(config)
+  private val stratumConfig: StratumConfig = new StratumConfig(config)
+  private val stateConfig: StateConfig = new StateConfig(config)
+
 
   if (taskConfig.enabled) {
 
@@ -49,7 +55,7 @@ class MDSyncTask @Inject()(cache: SyncCacheApi, system: ActorSystem, config: Con
       logger.info(s"Dictionary synchronization will start at height ${LFSMHelpers.MD_GENESIS_HEIGHT}")
 
       var currentHeight = LFSMHelpers.MD_GENESIS_HEIGHT
-      val nodeApi = nodeConfig.getNodeApi
+      val nodeApi = nodeContext.getNodeApi
       mdSynchronizer ! InitialMDState(LFSMHelpers.MD_GENESIS_HEIGHT, MinerTree.initialState)
 
       Future {
@@ -82,13 +88,14 @@ class MDSyncTask @Inject()(cache: SyncCacheApi, system: ActorSystem, config: Con
         while (!subscribed) {
           implicit val timeout: Timeout = Timeout(10 seconds)
 
-          val mdToken = LFSMHelpers.getMDToken(nodeConfig.getClient).toString
+          val mdToken = LFSMHelpers.getMDToken(nodeContext.getClient).toString
 
           Await.result((syncHandler ? Subscribe(currentHeight, mdSynchronizer, Some(mdToken))).mapTo[SubscribeResponse], 10 seconds) match {
             case SubscribeAck =>
               logger.info(s"MDSynchronizer subscribed to SyncHandler at height $currentHeight")
               mdSynchronizer ! CompletedInitSync
               subscribed = true
+              Globals.setMDSynced()
             case SubscribeRejected(reason) =>
               logger.warn(s"SyncHandler rejected subscription: $reason — catching up one block")
               loadBlockSync(currentHeight + 1, nodeApi) match {
@@ -102,20 +109,35 @@ class MDSyncTask @Inject()(cache: SyncCacheApi, system: ActorSystem, config: Con
 
         // Phase 3: if data box still not created, run a separate addToMD poller
         if (Globals.mdDB.getDataBoxToken.isEmpty && !stateConfig.disableTransforms.getOrElse(false)) {
-          logger.info("Data box token not yet created — starting addToMD polling")
+          logger.info("Data box token not yet created: starting addToMD polling")
           var addToMDTask: Option[Cancellable] = None
           addToMDTask = Some(system.scheduler.scheduleWithFixedDelay(
             initialDelay = 10 seconds,
-            delay        = syncConfig.listeningInterval)({
+            delay        = 1 minutes)({
             () =>
               if (Globals.mdDB.getDataBoxToken.isDefined) {
                 logger.info(s"Data box token found (${Globals.mdDB.getDataBoxToken.get}), stopping addToMD poller")
                 addToMDTask.foreach(_.cancel())
               } else {
-                Try {
-                  LFSMTransformer.addToMD(nodeConfig.getClient, cache, nodeConfig.getNodeWallet, stratumConfig.diff)
-                }.failed.foreach { ex =>
-                  logger.error(s"Error during addToMD: ${ex.getMessage}", ex)
+                if (stateConfig.autoCommit.getOrElse(true)) {
+                  Try {
+                    val walletSelector = WalletSelector(walletManager, 4 seconds, contexts.pollingContext)
+                    new CommitmentTransactions(nodeContext, DataBoxSource.Stored)
+                      .sendInitialCommitment(stratumConfig.diff, MDCache(cache), walletSelector)
+                  }.failed.foreach {
+                    case noInputs: NotEnoughInputsException =>
+                      logger.error("Could not send initial MinerDictionary commitment transaction due" +
+                        s" to not having enough ERG in wallet: ${noInputs.getMessage}")
+                    case badReservation: ReservationExpiredException =>
+                      logger.error("Could not send initial MinerDictionary commitment transaction due" +
+                        s" to a bad wallet reservation: ${badReservation.getMessage}")
+                    case ex =>
+                      logger.error(s"Got unexpected error while" +
+                        s" creating initial MinerDictionary commitment transaction: ${ex.getMessage}", ex)
+                  }
+                }else {
+                  logger.error("No data box exists, and auto-commit is set to false. You will not be able to gain" +
+                    "pooled rewards until auto-commit is enabled and a data box is made.")
                 }
               }
           })(contexts.pollingContext))
@@ -132,7 +154,7 @@ class MDSyncTask @Inject()(cache: SyncCacheApi, system: ActorSystem, config: Con
   }
 
   private def chainHeight: Int =
-    nodeConfig.getClient.execute(ctx => ctx.getHeight)
+    nodeContext.getClient.execute(ctx => ctx.getHeight)
 
   private def loadBlockSync(height: Int, nodeApi: NodeApi): Try[Unit] = {
     if (height % 10000 == 0)

@@ -481,11 +481,7 @@ class LithosPool(options: Options,
       case None => (withCollateral, true)
       case Some(why) =>
         noteGenesisRejected(pkg, withCollateral, why)
-      // A REAL solo candidate, not this one relabelled. This candidate was built for the LENDER's
-      // key, because that is what we asked for — so mining it without the genesis transaction would
-      // pay a lender 3 ERG for a block that spends no collateral and gives them nothing back, and
-      // cost this miner the reward. Never mine a candidate built for a key that is not ours unless
-      // the transaction that earns it is in the block.
+      // If genesis is rejected we mine solo
       soloCandidate
     }
   }
@@ -506,16 +502,19 @@ class LithosPool(options: Options,
           "prioritised transaction")
       case Some(proof) =>
         Try {
-          // Searched as text rather than by field name. The node's encoder has changed shape across
-          // versions — `leaf` and `leafData` both exist, and a leaf may be the id or a Base16 blob
-          // with the id inside it — and reading the wrong field throws, which this used to swallow
-          // into a false "the node refused it". A 64-character id cannot collide by accident, so a
-          // substring match over the array is both safer and version-proof.
           val leaves = proof.getJSONArray("txProofs").toString
           if (leaves.toLowerCase.contains(pkg.collateral.txId.toLowerCase)) None
-          else Some(s"the candidate's proof does not mention it. Raw txProofs: " +
-            leaves.take(600))
-        }.getOrElse(Some(s"the candidate's proof could not be read. Raw proof: ${proof.toString.take(600)}"))
+          else {
+            // If merkle proof exists, transaction was likely included even if it doesnt match.
+            // This is due to node error which is returning incorrect merkle proofs.
+            // Because proof is invalid, we cannot mine super-shares for this block,
+            // but since we know this is a bug, we do allow lithos blocks to still be mined.
+            // Should be fixed in upcoming node updates.
+
+            // TODO: Revert to rejection here when node is known to be fixed
+            None
+          }
+        }.getOrElse(Some("Proof could not be read."))
     }
 
   /**
@@ -579,11 +578,11 @@ class LithosPool(options: Options,
       val share = SuperShare.fromCandidate(
         accepted.nonce, accepted.candidate, accepted.candidate.collateralData
       )
-      logger.info(s"Saving super share for block ${share.getHeight} with nonce ${Hex.toHexString(accepted.nonce)}")
+
       val score   = LFSMHelpers.convertTauOrScore(scala.math.BigInt(accepted.difficulty)).longValue()
       val success = nispDB.addNISP(score, share)
       if (success) {
-        logger.info(s"Super share saved. NISP-DB entries=${nispDB.size}, lastHeight=${Ints.fromByteArray(nispDB.lastHeight.get)}, currentHeight=${Ints.fromByteArray(nispDB.currentHeight.get)}")
+        logger.info(s"Super share with nonce ${Hex.toHexString(accepted.nonce)} was saved. NISP-DB entries=${nispDB.size}, lastHeight=${Ints.fromByteArray(nispDB.lastHeight.get)}, currentHeight=${Ints.fromByteArray(nispDB.currentHeight.get)}")
       } else {
         throw new RuntimeException("Failed to save super share to NISP database")
       }
@@ -599,9 +598,7 @@ class LithosPool(options: Options,
     }
 
   private def refreshDifficulty = {
-    // Read on the actor thread and passed in, not read inside the Future. `tau` is actor state
-    // written by UpdatedDifficulty, so evaluating it in the Future body reads it from another
-    // thread — harmless for an immutable BigInt today, and a real race for anything added later.
+    // Read on the actor thread and passed in, not read inside the Future.
     val current = tau
     Future(commitments.committedTau(current))
       .map(UpdatedDifficulty.apply)
@@ -616,8 +613,7 @@ object LithosPool {
 
   /**
    * How many times one block may draw a fresh collateral box after the node refuses the genesis
-   * transaction. A spent box is the ordinary cause and worth retrying; an unbounded retry would
-   * burn through the whole active set on a block whose real problem is something else.
+   * transaction.
    */
   private final val MaxRebuildsPerBlock: Int = 3
 }

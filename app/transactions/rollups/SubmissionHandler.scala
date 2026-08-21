@@ -3,7 +3,7 @@ package transactions.rollups
 import akka.actor.{Actor, ActorRef}
 import akka.pattern.ask
 import akka.util.Timeout
-import configs.{NodeContext, StateConfig, StratumConfig}
+import configs.{NodeContext, StateConfig, StratumConfig, TasksConfig}
 import lfsm.contracts.FraudProofContracts
 import mutations.NotEnoughInputsException
 import org.bouncycastle.util.encoders.Hex
@@ -159,10 +159,7 @@ class SubmissionHandler @Inject()(config: Configuration, nodeContext: NodeContex
 
         if (stateConfig.autoCommit.getOrElse(true)) {
           logger.info("Auto-commits were enabled, now checking difficulty commitment state")
-          // CommitmentTransactions owns the reservation from selection through to commit or
-          // uncertain. It used to be a callback this block passed in, which left an acknowledged
-          // submission permit here to be dropped on any escape — and a Submitting lease has no TTL,
-          // so those boxes were unspendable until the process restarted.
+          // Send auto commitment transaction
           commitments.commitScore(stratumConfig.diff, walletSelector) match {
             case Success(_) => ()
             case Failure(ex) => logger.error("Got exception during end of submission", ex)
@@ -385,42 +382,58 @@ class SubmissionHandler @Inject()(config: Configuration, nodeContext: NodeContex
    */
   private def submitInitialTransaction(stubs: Seq[RollupTxStub], initialTxInfo: InitialTxInfo) = {
     val initTx: Try[String] = Failure.apply(new RuntimeException("InitTx never initialized"))
+    // We do not participate in rollup transactions if there is no data box created.
+    if(DataBoxSource.Stored.getDataBoxToken.isEmpty){
+      logger.warn("No saved data box token was found")
+      val isEnabled = new TasksConfig(config).dictionarySyncTask.enabled
+      if(isEnabled && !Globals.getMDSyncState){
+        logger.warn("Please wait for MDSyncTask to complete MinerDictionary synchronization")
+        Failure(new DataBoxRetrievalException("Could not find a stored data box"))
+      }else if(isEnabled && Globals.getMDSyncState){
+        logger.warn("MDSyncTask has completed synchronization. Please wait for a data box to be created.")
+        logger.warn("If this message persists, there may be an issue with sending the MinerDictionary transaction.")
+        Failure(new DataBoxRetrievalException("Could not find a stored data box"))
+      }else{
+        logger.warn("Please enable MDSyncTask in your config to create or synchronize to your data box.")
+        Failure(new DataBoxRetrievalException("Could not find a stored data box"))
+      }
+    }else {
+      stubs.foldLeft((initTx, initialTxInfo)) {
+        (z, s) =>
+          if (z._1.isFailure) {
+            val nextInit = attemptTx[RollupTxStub, LatestRollup](getRollupTransaction(s, Some(initialTxInfo)), latestRollupState, s)
 
-    stubs.foldLeft((initTx, initialTxInfo)) {
-      (z, s) =>
-        if (z._1.isFailure) {
-          val nextInit = attemptTx[RollupTxStub, LatestRollup](getRollupTransaction(s, Some(initialTxInfo)), latestRollupState, s)
+            val attemptFailure = (nextInit, z._2.copy(z._2.feesToCreate - s.rollupBlockId))
+            val attemptSuccess = (nextInit, z._2)
 
-          val attemptFailure = (nextInit, z._2.copy(z._2.feesToCreate - s.rollupBlockId))
-          val attemptSuccess = (nextInit, z._2)
-
-          nextInit match {
-            case Failure(init) if init.getMessage == "InitTx never initialized" =>
-              attemptFailure
-            case Failure(mal: ErgoClientException) if mal.getMessage.contains("Every input of the transaction should be in UTXO") =>
-              syncHandler ! ResetMempoolState(s.rollupBlockId)
-              logger.warn(s"Got de-synced mempool state for rollup ${s.rollupBlockId} attempting ${s.txType}")
-              attemptFailure
-            case Failure(_: NoValidNISPException) =>
-              attemptFailure
-            case Failure(_: IllegalStateException) =>
-              attemptFailure
-            case Failure(_: RollupRemovedException) =>
-              attemptFailure
-            case Failure(_: StubInvalidException) =>
-              attemptFailure
-            case Failure(_: NotEnoughInputsException) =>
-              attemptFailure
-            case Failure(ex) =>
-              logger.error(s"Got error while submitting initial transaction with rollup ${s.rollupBlockId}", ex)
-              attemptFailure
-            case Success(_) =>
-              attemptSuccess
+            nextInit match {
+              case Failure(init) if init.getMessage == "InitTx never initialized" =>
+                attemptFailure
+              case Failure(mal: ErgoClientException) if mal.getMessage.contains("Every input of the transaction should be in UTXO") =>
+                syncHandler ! ResetMempoolState(s.rollupBlockId)
+                logger.warn(s"Got de-synced mempool state for rollup ${s.rollupBlockId} attempting ${s.txType}")
+                attemptFailure
+              case Failure(_: NoValidNISPException) =>
+                attemptFailure
+              case Failure(_: IllegalStateException) =>
+                attemptFailure
+              case Failure(_: RollupRemovedException) =>
+                attemptFailure
+              case Failure(_: StubInvalidException) =>
+                attemptFailure
+              case Failure(_: NotEnoughInputsException) =>
+                attemptFailure
+              case Failure(ex) =>
+                logger.error(s"Got error while submitting initial transaction with rollup ${s.rollupBlockId}", ex)
+                attemptFailure
+              case Success(_) =>
+                attemptSuccess
+            }
+          } else {
+            z
           }
-        } else {
-          z
-        }
-    }._1
+      }._1
+    }
   }
 
 

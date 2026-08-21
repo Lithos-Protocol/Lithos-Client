@@ -612,6 +612,126 @@ class LithosDexApiImpl @Inject()(nodeContext: NodeContext) extends LithosDexApi 
     if (delta <= 0) 0L else (BigInt(shares) * delta / LDHelpers.SCALE).toLong
 
   // ══════════════════════════════════════════════════════════════════════════
+  //  PRICE HISTORY
+  // ══════════════════════════════════════════════════════════════════════════
+
+  /** @inheritdoc */
+  override def getPriceHistory(range: Option[String],
+                               bucket: Option[Int],
+                               ldCache: LDCache): LDPriceHistory = withDex { (ctx, nodeApi) =>
+    val name = range.map(_.trim.toUpperCase).getOrElse(LDPriceHistory.Default)
+    val blocks = LDPriceHistory.Ranges.getOrElse(name, throw LDBadRequest(
+      s"'range' must be one of ${LDPriceHistory.Ranges.keys.toSeq.sorted.mkString(", ")}, got '$name'"))
+    val size = bucket.getOrElse(math.max(1, blocks / LDPriceHistory.TargetPoints))
+    if (size <= 0) throw LDBadRequest(s"'bucket' must be positive, got $size")
+    // A bucket small enough to make thousands of points is refused rather than served. Nothing
+    // renders that many, only the first 250 could carry a timestamp, and the response would be
+    // megabytes — the caller asked for something specific, so say what would work instead.
+    if (blocks / size > LDPriceHistory.MaxPoints)
+      throw LDBadRequest(
+        s"'bucket' of $size over $name would return more than ${LDPriceHistory.MaxPoints} points; " +
+          s"use at least ${blocks / LDPriceHistory.MaxPoints + 1}")
+
+    // The live box, not the newest indexed one. The chart is drawn beside a stat strip fed from the
+    // same live read, and the index lags the mempool — ending the series on a stale point makes the
+    // two visibly disagree about the current price.
+    val livePool = LDBoxes.poolBox(ctx, nodeApi)
+    val liveState = poolState(ctx, livePool)
+    ldCache.setPool(liveState)
+    val live = liveState.pool
+
+    val decimals = tokenInfo(nodeApi, live.tokenY).map(_.decimals).getOrElse(0)
+    val (snapshots, complete) = lineage(nodeApi, ctx)
+
+    val lo = math.max(0, ctx.getHeight - blocks)
+    val inRange = snapshots.filter(_.height >= lo)
+    // `partial` covers both ways the window can be short: a lineage the walk could not reach the
+    // start of, and one whose earliest point is already inside the range because the pool is younger
+    // than the range asked for.
+    val reachedBack = snapshots.headOption.exists(_.height <= lo)
+
+    // One point per bucket, the last reading in it, so a bucket holding several transitions reports
+    // the price it ended at rather than the first one it saw.
+    val bucketed = inRange
+      .groupBy(s => (s.height - lo) / size)
+      .toSeq.sortBy(_._1)
+      .map { case (_, points) => points.maxBy(s => (s.height, s.globalIndex)) }
+
+    val current = LDPricePoint(
+      height = ctx.getHeight,
+      timestamp = None,
+      price = spotPrice(live.reservesX, live.reservesY, decimals),
+      reservesX = LDAmounts(live.reservesX),
+      reservesY = LDAmounts(live.reservesY))
+
+    val timestamps = LDBoxes.timestampsAt(nodeApi, bucketed.map(_.height))
+    val points = bucketed.map { s =>
+      LDPricePoint(
+        height = s.height,
+        timestamp = timestamps.get(s.height),
+        price = spotPrice(s.reservesX, s.reservesY, decimals),
+        reservesX = LDAmounts(s.reservesX),
+        reservesY = LDAmounts(s.reservesY))
+    }
+    // Replace rather than append when the last bucket is already at the current height, so the
+    // series never carries two points for one height.
+    val series = (if (points.lastOption.exists(_.height >= current.height)) points.init else points) :+ current
+
+    val first = series.headOption.map(_.price).getOrElse(0.0)
+    val changePct = if (first <= 0) 0.0 else (current.price - first) / first
+
+    LDPriceHistory(name, changePct, partial = !complete || !reachedBack, history = series)
+  }
+
+  /**
+   * Token per ERG with the token's decimals applied, for display.
+   *
+   * A double is right here and nowhere else in this tag: it is a number to draw, not one to spend.
+   * The raw reserves travel with every point so a client can redo this exactly.
+   */
+  private def spotPrice(reservesX: Long, reservesY: Long, decimals: Int): Double =
+    if (reservesX <= 0 || reservesY <= 0) 0.0
+    else {
+      val tokens = BigDecimal(reservesY) / BigDecimal(10).pow(decimals)
+      val ergs = BigDecimal(reservesX) / BigDecimal(10).pow(9)
+      (tokens / ergs).toDouble
+    }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  //  RECENT SWAPS
+  // ══════════════════════════════════════════════════════════════════════════
+
+  /** @inheritdoc */
+  override def getRecentSwaps(limit: Option[Int]): LDRecentSwaps =
+    withDex { (ctx, nodeApi) =>
+      val want = limit.getOrElse(LDRecentSwaps.DefaultLimit)
+      if (want <= 0) throw LDBadRequest(s"'limit' must be positive, got $want")
+      val take = math.min(want, LDRecentSwaps.MaxLimit)
+
+      val (snapshots, _) = lineage(nodeApi, ctx)
+      val confirmed = snapshots.sliding(2).collect {
+        case Seq(prev, next) => LDBoxes.classifySwap(prev, next, Some(next.height))
+      }.flatten.toSeq
+
+      // Every confirmed box, not just the newest: a mempool transaction can spend a box the index
+      // has not caught up to being the tip, and chaining by id resolves that without ordering.
+      val pending = LDBoxes.mempoolSwaps(ctx, nodeApi, snapshots.map(s => s.boxId -> s).toMap)
+      // Unconfirmed first — they are the newest, and the caller badges them rather than sorting.
+      val newest = (pending ++ confirmed.reverse).take(take)
+
+      val timestamps = LDBoxes.timestampsAt(nodeApi, newest.flatMap(_.height))
+      LDRecentSwaps(newest.map { s =>
+        LDSwapEntry(
+          txId = s.txId,
+          ergIn = s.ergIn,
+          amountIn = LDAmounts(s.amountIn),
+          amountOut = LDAmounts(s.amountOut),
+          height = s.height,
+          timestamp = s.height.flatMap(timestamps.get))
+      })
+    }
+
+  // ══════════════════════════════════════════════════════════════════════════
   //  WALLET
   // ══════════════════════════════════════════════════════════════════════════
 

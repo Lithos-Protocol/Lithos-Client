@@ -23,7 +23,7 @@ import work.lithos.mutations.{Contract, Token, UTXO}
  */
 object LDNodeFixtures {
 
-  private val txId = "ab" * 32
+  private val defaultTxId = "ab" * 32
 
   private def hexRegisters(values: Seq[ErgoValue[_]]): NodeRegisters =
     NodeRegisters(values.zipWithIndex.map { case (v, i) => s"R${i + 4}" -> v.toHex }.toMap)
@@ -41,7 +41,7 @@ object LDNodeFixtures {
    * than one chosen here — `toInputUTXO` derives it from contents, transaction id and index, so a
    * made-up id does not survive.
    */
-  private def nodeBox(ctx: BlockchainContext, utxo: UTXO, index: Int): NodeBox = {
+  private def nodeBox(ctx: BlockchainContext, utxo: UTXO, index: Int, txId: String): NodeBox = {
     val input = utxo.toInput(ctx, ErgoId.create(txId), index.toShort)
     NodeBox(
       boxId = input.id.toString,
@@ -68,7 +68,8 @@ object LDNodeFixtures {
               accX: BigInt = BigInt(0),
               accY: BigInt = BigInt(0),
               feeParams: Array[Long] = LDHelpers.GENESIS_FEE_PARAMS,
-              index: Int = 0): NodeBox = {
+              index: Int = 0,
+              txId: String = defaultTxId): NodeBox = {
     val n = ctx.getNetworkType
     nodeBox(ctx, UTXO(
       DexContracts(ctx).liquidityPool,
@@ -82,7 +83,7 @@ object LDNodeFixtures {
         longs(feeParams),
         longs(Array(pendingX, pendingY)),
         bigInt(accX),
-        bigInt(accY))), index)
+        bigInt(accY))), index, txId)
   }
 
   /** R4 accX, R5 accY. Tokens: vault NFT, and tokenY once a flush has carried any. */
@@ -91,14 +92,15 @@ object LDNodeFixtures {
                balanceY: Long = 0L,
                accX: BigInt = BigInt(0),
                accY: BigInt = BigInt(0),
-               index: Int = 1): NodeBox = {
+               index: Int = 1,
+               txId: String = defaultTxId): NodeBox = {
     val n = ctx.getNetworkType
     nodeBox(ctx, UTXO(
       DexContracts(ctx).feeVault,
       balanceX,
       Seq(Token(LDHelpers.getVaultNFT(n), 1L)) ++
         (if (balanceY > 0) Seq(Token(LDHelpers.getTokenY(n), balanceY)) else Seq.empty[Token]),
-      Seq(bigInt(accX), bigInt(accY))), index)
+      Seq(bigInt(accX), bigInt(accY))), index, txId)
   }
 
   /** R4 entryX, R5 entryY, R6 ownerNFT, R7 shares. One provision token, under the guard. */
@@ -109,10 +111,11 @@ object LDNodeFixtures {
                    entryY: BigInt = BigInt(0),
                    value: Long = LDHelpers.PROVISION_MIN,
                    contract: Contract = null,
-                   index: Int = 2): NodeBox =
+                   index: Int = 2,
+                   txId: String = defaultTxId): NodeBox =
     nodeBox(ctx, UTXO(
       if (contract == null) DexContracts(ctx).provisionGuard else contract,
       value,
       Seq(Token(LDHelpers.getProvToken(ctx.getNetworkType), 1L)),
-      Seq(bigInt(entryX), bigInt(entryY), bytes(ownerNFT.getBytes), ErgoValue.of(shares))), index)
+      Seq(bigInt(entryX), bigInt(entryY), bytes(ownerNFT.getBytes), ErgoValue.of(shares))), index, txId)
 }

@@ -42,7 +42,7 @@ class StateFrame @Inject()() extends Actor with InjectedActorSupport with Subscr
       fetchBlock(currentHeight + 1) match {
         case Success(blockInfo) =>
           currentHeight = blockInfo.height
-          logger.info(s"StateFrame advancing to height $currentHeight, broadcasting to ${subscribers.size} subscriber(s)")
+          logger.debug(s"StateFrame advancing to height $currentHeight, broadcasting to ${subscribers.size} subscriber(s)")
           subscribers.foreach(_ ! NewBlock(blockInfo))
         case Failure(_) =>
 //          ex match {

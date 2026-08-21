@@ -4,7 +4,7 @@ import lithosdex.LDHelpers
 import node.MutationConversions._
 import node.NodeApi
 import node.model.SortDirection.Asc
-import node.model.{IndexedBox, MempoolOptions, Paging}
+import node.model.{IndexedBox, MempoolOptions, NodeBox, Paging}
 import org.ergoplatform.appkit.{BlockchainContext, ErgoValue}
 import org.ergoplatform.sdk.ErgoId
 import org.bouncycastle.util.encoders.Hex
@@ -199,10 +199,59 @@ object LDBoxes {
    * One pool box reduced to what a history point needs.
    *
    * Decoded straight off the indexed box. Building an `InputUTXO` for each would construct a full
-   * appkit box — ErgoTree, tokens, every register — to extract four numbers, and the pool's lineage
-   * is one box per transaction that has ever touched it.
+   * appkit box — ErgoTree, tokens, every register — to extract a handful of numbers, and the pool's
+   * lineage is one box per transaction that has ever touched it.
+   *
+   * @param txId the transaction that CREATED this box, which is the transition that produced it
    */
-  case class PoolSnapshot(height: Int, globalIndex: Long, accX: BigInt, accY: BigInt, supply: Long)
+  case class PoolSnapshot(height: Int,
+                          globalIndex: Long,
+                          boxId: String,
+                          txId: String,
+                          reservesX: Long,
+                          reservesY: Long,
+                          pendingX: Long,
+                          pendingY: Long,
+                          accX: BigInt,
+                          accY: BigInt,
+                          supply: Long)
+
+  /**
+   * What moved between two consecutive pool boxes.
+   *
+   * Only a swap leaves the supply alone while moving the reserves: a deposit and a redemption both
+   * change supply, a flush zeroes pending without touching reserves, and a resize does both. So
+   * "supply unchanged and reserves moved" identifies a swap without having to read the spending
+   * transaction.
+   *
+   * `amountIn` is what the trader handed over, which is the reserve increase PLUS the fee that went
+   * to pending on the same side — the pool splits one input between the two.
+   */
+  case class SwapTransition(txId: String,
+                            height: Option[Int],
+                            ergIn: Boolean,
+                            amountIn: Long,
+                            amountOut: Long)
+
+  def classifySwap(prev: PoolSnapshot, next: PoolSnapshot, height: Option[Int]): Option[SwapTransition] = {
+    val dX = next.reservesX - prev.reservesX
+    val dY = next.reservesY - prev.reservesY
+    // Two independent tests, and it is worth knowing that either alone catches the operations the
+    // pool actually performs. A deposit, a redemption and a resize all move BOTH reserves the same
+    // way, so the direction test below excludes them; the supply test excludes them a second time,
+    // and additionally excludes a shape no legitimate operation produces — supply moving while the
+    // reserves move against each other. That shape can only reach here from a box read off chain,
+    // which is exactly the input this client does not get to trust.
+    if (next.supply != prev.supply) None
+    else if (dX > 0 && dY < 0)
+      Some(SwapTransition(next.txId, height, ergIn = true,
+        amountIn = dX + (next.pendingX - prev.pendingX), amountOut = -dY))
+    else if (dY > 0 && dX < 0)
+      Some(SwapTransition(next.txId, height, ergIn = false,
+        amountIn = dY + (next.pendingY - prev.pendingY), amountOut = -dX))
+    // A flush moves pending to the vault and leaves both reserves alone, so it lands here.
+    else None
+  }
 
   /**
    * The pool's box lineage as history points, and whether the walk saw all of it.
@@ -247,7 +296,11 @@ object LDBoxes {
   }
 
   /**
-   * R4 liquidity, R7 accX, R8 accY — read from the node's hex registers directly.
+   * R4 liquidity, R6 pending, R7 accX, R8 accY — read from the node's hex registers directly.
+   *
+   * Reserves are the box's balances LESS what it is holding for the vault, matching how the pool
+   * itself reads them: the value covers `reservesX + pendingX` and the token entry
+   * `reservesY + pendingY`.
    *
    * `None` rather than a throw for a box that does not decode: the lineage is filtered by ErgoTree,
    * so anything reaching here should be a pool box, but a history request is not the place to fail
@@ -259,13 +312,74 @@ object LDBoxes {
         ErgoValue.fromHex(b.box.additionalRegisters.get(i).getOrElse(
           throw new NoSuchBoxException(s"pool box ${b.boxId} has no R$i")))
 
+      val pending = reg(6).getValue.asInstanceOf[sigma.Coll[Long]].toArray
       PoolSnapshot(
         height = b.inclusionHeight,
         globalIndex = b.globalIndex,
+        boxId = b.boxId,
+        txId = b.box.transactionId,
+        reservesX = b.value - pending(0),
+        reservesY = b.assets(1).amount - pending(1),
+        pendingX = pending(0),
+        pendingY = pending(1),
         accX = BigInt(reg(7).getValue.asInstanceOf[sigma.data.CBigInt].wrappedValue),
         accY = BigInt(reg(8).getValue.asInstanceOf[sigma.data.CBigInt].wrappedValue),
         supply = LDHelpers.LOCKED_LP - reg(4).getValue.asInstanceOf[Long])
     }.toOption
+
+  /** The same decode, for a box that is still in the mempool and so has no height or global index. */
+  private def readMempoolSnapshot(b: NodeBox): Option[PoolSnapshot] =
+    readSnapshot(IndexedBox(box = b, address = "", inclusionHeight = -1, globalIndex = -1L))
+
+  /**
+   * Swaps sitting in the mempool, each with the pool box it spends.
+   *
+   * A mempool pool box has no height, so its predecessor cannot be found by ordering — it is found
+   * by id: whichever known pool box this transaction spends. That resolves a chain of any depth
+   * without assuming the node returns them in order, and it drops a transaction whose predecessor
+   * is neither the confirmed tip nor another mempool output.
+   *
+   * @param known the confirmed pool boxes to chain onto, keyed by box id
+   */
+  def mempoolSwaps(ctx: BlockchainContext,
+                   nodeApi: NodeApi,
+                   known: Map[String, PoolSnapshot]): Seq[SwapTransition] = {
+    val nft = LDHelpers.getPoolNFT(ctx.getNetworkType).toString
+    val ergoTreeHex = DexContracts(ctx).liquidityPool.ergoTreeHex
+
+    val txs = nodeApi.unconfirmedTransactionsByErgoTree(ergoTreeHex, Paging(0, PageSize)) match {
+      case Success(found) => found
+      case Failure(ex) => throw indexUnavailable("the mempool reading pool transactions", ex)
+    }
+
+    // Every pool box the mempool creates, so a chained swap can find its predecessor among them.
+    val produced = txs.flatMap { tx =>
+      tx.outputs
+        .find(o => o.ergoTree == ergoTreeHex && o.assets.headOption.exists(_.tokenId == nft))
+        .flatMap(o => readMempoolSnapshot(o).map(s => tx -> s))
+    }
+    val byId = known ++ produced.map { case (_, s) => s.boxId -> s }.toMap
+
+    // Depth from the confirmed tip, so newest-first ordering survives a chain of several.
+    def depth(s: PoolSnapshot, seen: Set[String]): Int =
+      produced.find { case (_, out) => out.boxId == s.boxId } match {
+        case None => 0
+        case Some((tx, _)) =>
+          tx.inputs.iterator.map(_.boxId).find(byId.contains) match {
+            case Some(prevId) if !seen.contains(prevId) => 1 + depth(byId(prevId), seen + prevId)
+            case _ => 1
+          }
+      }
+
+    produced.flatMap { case (tx, out) =>
+      tx.inputs.iterator.map(_.boxId).find(byId.contains)
+        .flatMap(prevId => classifySwap(byId(prevId), out, None))
+        // `tx.id`, not the output's own `transactionId`. The transaction being iterated IS the one
+        // that created this box, so taking the id from anywhere else is an indirection that can only
+        // be wrong — and a mempool response is not obliged to populate that field on its outputs.
+        .map(swap => depth(out, Set(out.boxId)) -> swap.copy(txId = tx.id))
+    }.sortBy(-_._1).map(_._2)
+  }
 
   /**
    * Header timestamps for the given heights, used for graphing and statistics.

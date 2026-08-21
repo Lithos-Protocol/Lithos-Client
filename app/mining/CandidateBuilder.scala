@@ -271,7 +271,8 @@ class CandidateBuilder(client: ErgoClient,
   }
 
   private def publish(pkg: BlockPackage): Unit = {
-    logger.info(s"Ready: ${pkg.describe}")
+    logger.info(s"Ready: ${pkg.describe} with" +
+      s" txSize: ${pkg.collateral.txBytes.length} and collatBytes: ${pkg.collateral.collateralBoxBytes.length}")
     context.parent ! BlockPackageReady(pkg)
   }
 

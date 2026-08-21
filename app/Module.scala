@@ -18,10 +18,7 @@ class Module(environment: Environment, configuration: Configuration) extends Abs
     // Set critical configs and databases
     Globals.setConfigs(configuration)
 
-    // The one NodeConfig, handed to whoever asks for a NodeContext. Bound to the instance Globals
-    // already built rather than to the class, so Guice cannot construct a second: each one unlocks
-    // secret storage, builds its own prover and opens its own client, and two would derive lender
-    // keys from separate sequences.
+    // Singular NodeContext to work from
     bind(classOf[NodeContext]).toInstance(Globals.getNodeConfig)
 
     // Bindings
