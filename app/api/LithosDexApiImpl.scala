@@ -326,7 +326,7 @@ class LithosDexApiImpl @Inject()(nodeContext: NodeContext) extends LithosDexApi 
         expectProvision(request.expectedProvisionBoxId, prov)
         if (!v.canClaim(prov.entryX, prov.entryY))
           throw LDBadRequest(
-            s"provision $boxId has nothing to settle — its entry is level with the vault's accumulator. " +
+            s"provision $boxId has nothing to settle: its entry is level with the vault's accumulator. " +
               "The pool has not been flushed since it last claimed; flush first, or wait for one.")
 
         val (owedX, owedY) = v.owed(prov.shares, prov.entryX, prov.entryY)
@@ -404,9 +404,9 @@ class LithosDexApiImpl @Inject()(nodeContext: NodeContext) extends LithosDexApi 
   private def newShares(request: LDResizeRequest, prov: Provision): Long = {
     val next = LDAmounts.parseLong("newShares", request.newShares)
     if (next <= 0) throw LDBadRequest(
-      "'newShares' must be positive — a resize to zero is a redemption, use /dex/redeem")
+      "'newShares' must be positive: a resize to zero is a redemption, use /dex/redeem")
     if (next == prov.shares) throw LDBadRequest(
-      s"provision ${prov.boxId} is already ${prov.shares} shares — a resize must change the size")
+      s"provision ${prov.boxId} is already ${prov.shares} shares: a resize must change the size")
     next
   }
 
@@ -445,7 +445,7 @@ class LithosDexApiImpl @Inject()(nodeContext: NodeContext) extends LithosDexApi 
 
         if (!state.pool.canFlush)
           throw LDBadRequest(
-            "nothing is pending — the pool refuses a flush that moves nothing. Fees accrue on swaps, so " +
+            "nothing is pending: the pool refuses a flush that moves nothing. Fees accrue on swaps, so " +
               "there is nothing to move until one happens.")
 
         val vaultBox = LDBoxes.vaultBox(ctx, nodeApi)
@@ -530,7 +530,7 @@ class LithosDexApiImpl @Inject()(nodeContext: NodeContext) extends LithosDexApi 
                     to: Option[Int],
                     bucket: Option[Int]): (Int, Int, Int) = {
     if (snapshots.isEmpty) throw LDBadRequest(
-      "no pool history is indexed — the node needs extraIndex on for this endpoint")
+      "no pool history is indexed: the node needs extraIndex on for this endpoint")
 
     val lo = from.getOrElse(snapshots.head.height)
     val hi = to.getOrElse(snapshots.last.height)
@@ -739,7 +739,7 @@ class LithosDexApiImpl @Inject()(nodeContext: NodeContext) extends LithosDexApi 
   override def getWalletBalance: WalletBalance = {
     val nodeApi = nodeContext.getNodeApi
     val balances = nodeApi.walletBalances().getOrElse(
-      throw new RuntimeException("could not read wallet balances — is the node wallet unlocked?"))
+      throw new RuntimeException("could not read wallet balances: is the node wallet unlocked?"))
 
     // One lookup for every token at once. Names and decimals are cosmetic, so a node without the index
     // returns the balances anyway rather than failing the request.
@@ -794,9 +794,9 @@ class LithosDexApiImpl @Inject()(nodeContext: NodeContext) extends LithosDexApi 
       if (heldFor > LithosDexApiImpl.StuckHolderMs)
         throw LDUnavailable(
           s"a LithosDex mutation has held the lock for ${heldFor}ms, which is longer than a node " +
-            s"round trip should take, so $what was not attempted — the node may not be answering")
+            s"round trip should take, so $what was not attempted: the node may not be answering")
       throw LDStateChanged(
-        s"another LithosDex mutation is still running, so $what was not attempted — re-read the pool " +
+        s"another LithosDex mutation is still running, so $what was not attempted: re-read the pool " +
           "and vault and quote again")
     }
     LithosDexApiImpl.markAcquired()

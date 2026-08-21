@@ -59,7 +59,7 @@ class LDProvisionSpec extends AnyPropSpec with LithosDexSpecBase {
     }
   }
 
-  property("guard: the supplied logic really runs — a path that must fail still fails") {
+  property("guard: the supplied logic really runs: a path that must fail still fails") {
     withCtx { ctx =>
       // Correct bytes, correct hash, and an op the logic rejects. If the guard only hashed and never
       // executed, this would sign.

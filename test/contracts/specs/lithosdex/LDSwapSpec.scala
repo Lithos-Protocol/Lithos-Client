@@ -45,7 +45,7 @@ class LDSwapSpec extends AnyPropSpec with LithosDexSpecBase {
     }
   }
 
-  property("swap: accepts less than the curve allows — slippage protection is the taker's problem") {
+  property("swap: accepts less than the curve allows: slippage protection is the taker's problem") {
     withCtx { ctx =>
       val s = swapScenario(ctx)
       accepts(s.prover, swapTx(s)(poolOut = poolUTXO(ctx, s.after.copy(reservesY = s.after.reservesY + 1L))))
@@ -157,7 +157,7 @@ class LDSwapSpec extends AnyPropSpec with LithosDexSpecBase {
     }
   }
 
-  property("swap: accepts a donation — tokens in, nothing out") {
+  property("swap: accepts a donation: tokens in, nothing out") {
     withCtx { ctx =>
       val s = swapScenario(ctx, amountIn = 2000L * 1000000L, ergIn = false)
       val donated = s.after.copy(reservesX = s.before.reservesX)

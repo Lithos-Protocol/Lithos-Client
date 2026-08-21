@@ -77,7 +77,7 @@ class RollupSyncTask @Inject()(cache: SyncCacheApi, system: ActorSystem, config:
             syncHandler ! CompletedInitSync
             Globals.setSynced()
           case SubscribeRejected(reason) =>
-            logger.warn(s"StateFrame rejected rollup subscription: $reason — catching up one block")
+            logger.warn(s"StateFrame rejected rollup subscription: $reason | catching up one block")
             loadBlockSync(currentHeight + 1, nodeApi) match {
               case Success(_) => currentHeight += 1
               case Failure(ex) =>

@@ -65,7 +65,7 @@ class LithosJobManager(options: Options) extends Actor {
     case ProcessTemplate(candidate, _, usesCollateral, _, _)
       if !usesCollateral && candidate.collateralData != null =>
       logger.error(s"Refusing a solo template carrying collateral data for pk ${candidate.pk} at " +
-        s"height ${candidate.height} — this would pay a lender for a block with no genesis " +
+        s"height ${candidate.height}: this would pay a lender for a block with no genesis " +
         "transaction. Nothing is mined on it")
       sender() ! false
 

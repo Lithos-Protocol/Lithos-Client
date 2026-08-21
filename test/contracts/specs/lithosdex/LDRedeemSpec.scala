@@ -43,7 +43,7 @@ class LDRedeemSpec extends AnyPropSpec with LithosDexSpecBase {
     }
   }
 
-  property("redeem: accepts leaving liquidity behind — the pool never owes the exact amount") {
+  property("redeem: accepts leaving liquidity behind: the pool never owes the exact amount") {
     withCtx { ctx =>
       val r = redeemScenario(ctx, shares)
       accepts(r.prover,

@@ -154,7 +154,7 @@ class CandidateBuilder(client: ErgoClient,
     // re-offering them; everything dropped is in the mempool anyway.
     case BlockTxsRejected(height) =>
       if (!blockTxsBlockedAt.contains(height)) {
-        logger.warn(s"Node rejected the inserted transactions for block $height — " +
+        logger.warn(s"Node rejected the inserted transactions for block $height: " +
           "mining on the genesis transaction alone until the next block")
         blockTxsBlockedAt = Some(height)
       }
@@ -197,7 +197,7 @@ class CandidateBuilder(client: ErgoClient,
         publish(pkg)
         if (config.blockTransactions && !blockTxsBlockedAt.contains(height)) collectBlockTxs(height)
       } else {
-        logger.info(s"Discarding genesis transaction for block $height — the chain is at $blockHeight")
+        logger.info(s"Discarding genesis transaction for block $height: the chain is at $blockHeight")
       }
       drainPending()
 
@@ -210,7 +210,7 @@ class CandidateBuilder(client: ErgoClient,
             currentPackage = Some(updated)
             publish(updated)
           case None =>
-            logger.info(s"Discarding ${txs.size} transaction(s) for block $height — " +
+            logger.info(s"Discarding ${txs.size} transaction(s) for block $height: " +
               "the package they were built for is gone")
         }
       }

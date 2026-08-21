@@ -67,7 +67,7 @@ class CandidateTxBuilder(prover: NodeWallet, nodeApi: NodeApi, config: Candidate
     if (usable.size < boxes.size)
       logger.error(s"${boxes.size - usable.size} of ${boxes.size} collateral boxes are NOT under the " +
         s"collateral script this build compiles (${collateralTree.take(16)}...) and were " +
-        "skipped. This should be impossible — check the injected constants against the deployment")
+        "skipped. This should be impossible: check the injected constants against the deployment")
 
     usable.map(_.toInputUTXO(ctx))
   }
@@ -97,7 +97,7 @@ class CandidateTxBuilder(prover: NodeWallet, nodeApi: NodeApi, config: Candidate
     val pkString = lenderBoolean match {
       case ProveDlog(value) => Hex.toHexString(GroupElementSerializer.toBytes(value))
       case _ => throw new InvalidSigmaBooleanException(
-        "Collateral utxo R5 is not a proveDlog — its coinbase cannot be requested")
+        "Collateral utxo R5 is not a proveDlog: its coinbase cannot be requested")
     }
 
     val rewards = collat.registers(2).getValue.asInstanceOf[(Long, Coll[(Coll[Byte], Long)])]

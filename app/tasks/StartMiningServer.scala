@@ -80,7 +80,7 @@ class StartMiningServer @Inject()(system: ActorSystem, config: Configuration,
 
         if (stratumParams.reduceShareMessages) {
           val displayTau = t.divide(new BigInteger("1000"))
-          logger.info("Reduced share messages enabled — stratum diff is 1000x real diff")
+          logger.info("Reduced share messages enabled: stratum diff is 1000x real diff")
           logger.info(s"Stratum tau: $displayTau (score: ${LFSMHelpers.convertTauOrScore(displayTau)})")
         }
         logger.info(s"Using tau $t (score: ${LFSMHelpers.convertTauOrScore(t)}) for NISPs")

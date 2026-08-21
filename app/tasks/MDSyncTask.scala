@@ -97,7 +97,7 @@ class MDSyncTask @Inject()(cache: SyncCacheApi, system: ActorSystem, config: Con
               subscribed = true
               Globals.setMDSynced()
             case SubscribeRejected(reason) =>
-              logger.warn(s"SyncHandler rejected subscription: $reason — catching up one block")
+              logger.warn(s"SyncHandler rejected subscription: $reason | catching up one block")
               loadBlockSync(currentHeight + 1, nodeApi) match {
                 case Success(_) => currentHeight += 1
                 case Failure(ex) =>

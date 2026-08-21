@@ -86,7 +86,7 @@ object LDBoxes {
     }
     found.headOption.map(_.toInputUTXO(ctx)).getOrElse(
       throw new NoSuchBoxException(
-        s"no unspent $what box carrying $nft — has LithosDex been launched on this network?"))
+        s"no unspent $what box carrying $nft: has LithosDex been launched on this network?"))
   }
 
   // ── provisions ───────────────────────────────────────────────────────────
@@ -147,7 +147,7 @@ object LDBoxes {
     nodeApi.unconfirmedInputByBoxId(boxId) match {
       case Success(Some(tx)) =>
         throw new BoxBeingSpentException(
-          s"provision $boxId is already being spent by unconfirmed transaction ${tx.id} — " +
+          s"provision $boxId is already being spent by unconfirmed transaction ${tx.id}: " +
             "read it again to find its successor")
       case Failure(ex) => throw indexUnavailable("the mempool", ex)
       case Success(None) => ()
@@ -164,12 +164,12 @@ object LDBoxes {
         case Failure(ex) => throw indexUnavailable("the mempool", ex)
       }
     }.getOrElse(throw new NoSuchBoxException(
-      s"no live provision box $boxId — it may have been spent, or it was never a provision"))
+      s"no live provision box $boxId: it may have been spent, or it was never a provision"))
 
     if (!isProvision(box.contract.ergoTreeHex, box.tokens.map(t => t.id.toString -> t.amount),
       guard, provTokenId))
       throw new NoSuchBoxException(
-        s"box $boxId is not a LithosDex provision — it is not under the provision guard, or it does " +
+        s"box $boxId is not a LithosDex provision: it is not under the provision guard, or it does " +
           "not hold exactly one provision token")
 
     readProvision(box)
@@ -187,7 +187,7 @@ object LDBoxes {
   def walletTokenIds(nodeApi: NodeApi): Set[String] =
     nodeApi.walletBalances() match {
       case Success(b) => b.assets.filter(_.amount > 0).map(_.tokenId).toSet
-      case Failure(ex) => throw indexUnavailable("the node wallet — is it unlocked?", ex)
+      case Failure(ex) => throw indexUnavailable("the node wallet: is it unlocked?", ex)
     }
 
   // ── history ──────────────────────────────────────────────────────────────
@@ -441,7 +441,7 @@ object LDBoxes {
 
   private def indexUnavailable(what: String, cause: Throwable): IndexUnavailableException =
     new IndexUnavailableException(
-      s"could not reach $what — is the node up with extraIndex on? (${cause.getMessage})", cause)
+      s"could not reach $what: is the node up with extraIndex on? (${cause.getMessage})", cause)
 
   /** The node, its index or its mempool could not answer. Not a statement about the request. */
   class IndexUnavailableException(msg: String, cause: Throwable) extends RuntimeException(msg, cause)

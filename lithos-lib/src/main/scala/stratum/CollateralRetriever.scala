@@ -77,7 +77,7 @@ class CollateralRetriever(client: ErgoClient, prover: NodeWallet, nodeApi: NodeA
         val height = ctx.getHeight + 1
 
         if (!rollupHash.sameElements(holding.hashedPropBytes))
-          logger.info("  !! that is not the holding contract this build produces — the box was minted under a different config R7")
+          logger.warn(s"Got collateral box with unknown holding hash ${Hex.toHexString(rollupHash)}")
 
         // Small boxes first, so what is left for the holding box is everything the fee channel did not
         // have to spend. Founder boxes carry a contract-imposed 1e6 floor; the other two only have to
@@ -103,7 +103,7 @@ class CollateralRetriever(client: ErgoClient, prover: NodeWallet, nodeApi: NodeA
         val holdingValue = collat.value - trailing.map(_.value).sum
 
         if (collat.value - holdingValue > feeValue)
-          logger.info("  !! that exceeds the fee channel — holdingValid will reject this")
+          logger.info("  !! that exceeds the fee channel: holdingValid will reject this")
 
         val holdingBox = UTXO(holding, holdingValue,
           if (poolLIT > 0) Seq(Token(LFSMHelpers.LIT_ID, poolLIT)) else Seq.empty[Token],

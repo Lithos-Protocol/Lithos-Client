@@ -171,7 +171,7 @@ class LithosPool(options: Options,
   override def preStart(): Unit = {
     // Verify node connectivity and read initial chain parameters
     if (!nodeInterface.isOnline)
-      throw new ConnectException("Ergo node is offline — cannot start LithosPool")
+      throw new ConnectException("Ergo node is offline: cannot start LithosPool")
 
     val info = nodeInterface.info()
     options.data.protocolVersion = info.parameters.blockVersion
@@ -537,7 +537,7 @@ class LithosPool(options: Options,
         s"${pkg.blockHeight}; mining solo for the rest of it. Requested pk ${pkg.collateral.pk}, got " +
         s"a candidate for pk ${candidate.pk}" +
         (if (candidate.pk != pkg.collateral.pk)
-          " — THESE DIFFER. The node is not honouring the requested coinbase key, so no collateral " +
+          " | THESE DIFFER. The node is not honouring the requested coinbase key, so no collateral " +
             "box can ever be spent. Check the node is 6.0.2+ and the api key is accepted"
         else ", which match") + s". Why: $why")
 
@@ -545,7 +545,7 @@ class LithosPool(options: Options,
       // `CandidateGenerator.collectTxs` treats a supplied transaction exactly like a mempool one and
       // drops it silently on a missing input, a double spend against what it has already taken, a
       // validation failure, or simply running out of block cost before reaching it.
-      logger.error(s"The node logs its own reason at INFO — search the node log for " +
+      logger.error(s"The node logs its own reason at INFO: search the node log for " +
         s"'Not included transaction ${pkg.collateral.txId}'. Raise " +
         "org.ergoplatform.mining.CandidateGenerator to DEBUG to also catch the double-spend and " +
         "block-limit paths, which are logged one level lower")

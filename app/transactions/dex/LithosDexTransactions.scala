@@ -89,7 +89,7 @@ object LithosDexTransactions {
       s"the pool cannot fill this swap: ${q.tradedIn} reaches the curve for ${q.amountOut} out " +
         s"of a ${q.reserveOut} reserve")
     require(q.amountOut >= minOutput,
-      s"the pool has moved since the quote — it would return ${q.amountOut}, below the ${minOutput} floor")
+      s"the pool has moved since the quote: it would return ${q.amountOut}, below the ${minOutput} floor")
 
     val advance = (BigInt(q.protocolFee) * LDHelpers.SCALE) / BigInt(p.supply)
     val out =
@@ -239,7 +239,7 @@ object LithosDexTransactions {
             vaultBox: InputUTXO): LDFlushTx = {
     val p = LDLiquidityPool(poolBox)
     val v = LDFeeValue.fromBox(vaultBox, 0, ctx.getHeight)
-    require(p.canFlush, "nothing is pending — the pool refuses a flush that moves nothing")
+    require(p.canFlush, "nothing is pending: the pool refuses a flush that moves nothing")
 
     val poolOut = poolUTXO(ctx, p,
       reservesX = p.reservesX, reservesY = p.reservesY,
@@ -285,14 +285,14 @@ object LithosDexTransactions {
 
     provisions.foreach { p =>
       require(v.canClaim(p.entryX, p.entryY),
-        s"provision ${p.boxId} has nothing to settle — the vault has not been flushed since it last claimed")
+        s"provision ${p.boxId} has nothing to settle: the vault has not been flushed since it last claimed")
     }
 
     val owed = provisions.map(p => v.owed(p.shares, p.entryX, p.entryY))
     val owedX = owed.map(_._1).sum
     val owedY = owed.map(_._2).sum
     require(v.payableX >= owedX,
-      s"the vault can only part with ${v.payableX} nanoERG of the $owedX owed — " +
+      s"the vault can only part with ${v.payableX} nanoERG of the $owedX owed: " +
         s"${LDHelpers.VAULT_MIN} is held back for storage rent and is never payable")
     require(v.payableY >= owedY, s"the vault holds only ${v.payableY} tokens of the $owedY owed")
 
@@ -398,7 +398,7 @@ object LithosDexTransactions {
               provision: Provision): LDRefreshTx = {
     val height = ctx.getHeight
     require(provision.createdHeight < height - LDHelpers.REFRESH_AGE,
-      s"provision ${provision.boxId} was created at ${provision.createdHeight} and is not old enough — " +
+      s"provision ${provision.boxId} was created at ${provision.createdHeight} and is not old enough: " +
         s"refresh needs a creation height below ${height - LDHelpers.REFRESH_AGE}")
 
     // The successor must be genuinely young, not merely younger: monotonicity alone would let a
