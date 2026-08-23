@@ -79,7 +79,7 @@ class BlockTemplateSpec extends AnyFlatSpec with Matchers {
     val reduced = template(reduced = true).getJobParams.getString(6)
 
     full shouldEqual shippedTau.toString
-    reduced shouldEqual shippedTau.divide(BigInteger.valueOf(1000L)).toString
+    reduced shouldEqual shippedTau.divide(BigInteger.valueOf(10000L)).toString
     BigInt(reduced) should be < BigInt(full)
   }
 

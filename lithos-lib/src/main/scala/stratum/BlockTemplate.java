@@ -117,7 +117,7 @@ public class BlockTemplate {
 				"",
 				"",
 				Integer.toHexString(candidate.version),
-                reducedShareMessages ? tau.divide(new BigInteger("1000")).toString() : tau.toString(),
+                reducedShareMessages ? tau.divide(new BigInteger("10000")).toString() : tau.toString(),
 				"",
 				true
 		);
