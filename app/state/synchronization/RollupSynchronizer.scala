@@ -3,6 +3,7 @@ package state.synchronization
 import akka.actor.Actor
 import cache.RollupCache
 import com.google.inject.assistedinject.Assisted
+import configs.NodeContext
 import lfsm.states.NISPTree
 import lfsm.{LFSMHelpers, LFSMPhase}
 import mutations.NodeWallet
@@ -24,12 +25,12 @@ import work.lithos.mutations.Contract
 
 import javax.inject.Inject
 
-class RollupSynchronizer @Inject()(config: Configuration, @Assisted rollupBlockId: String, @Assisted ctx: BlockchainContext, @Assisted prover: NodeWallet, cacheApi: SyncCacheApi) extends Actor {
+class RollupSynchronizer @Inject()(config: Configuration, @Assisted rollupBlockId: String,  @Assisted prover: NodeWallet, cacheApi: SyncCacheApi) extends Actor {
   val logger: Logger = LoggerFactory.getLogger("RollupSynchronizer-" + rollupBlockId.slice(0, 12))
   private val treeCache: RollupCache = RollupCache(cacheApi)
 
 
-  val relErgoTrees: Seq[String] = Helpers.rollupErgoTrees(ctx)
+  val relErgoTrees: Seq[String] = withCtx(ctx => Helpers.rollupErgoTrees(ctx))
 
   override def receive: Receive = {
     case Genesis(tree, _) =>
@@ -66,7 +67,7 @@ class RollupSynchronizer @Inject()(config: Configuration, @Assisted rollupBlockI
               } else
                 a
           }
-          val asInput = mempoolChain.transforms.last.output.toInput(ctx)
+          val asInput = withCtx(ctx => mempoolChain.transforms.last.output.toInput(ctx))
           if (mempoolChain.transforms.last.output.id == nextTree.utxoId) {
             if(mempoolChain.transforms.size > 1)
               logger.info(s"Applied $mempoolChain with initial transform" +
@@ -140,7 +141,7 @@ class RollupSynchronizer @Inject()(config: Configuration, @Assisted rollupBlockI
 
   private def submissionTransform(tree: NISPTree, transform: Transform, isMempool: Boolean, shouldLog: Boolean): NISPTree = {
 
-    val holdingBox = transform.output.toInput(ctx)
+    val holdingBox = withCtx(ctx => transform.output.toInput(ctx))
     val dict = {
       if(!isMempool) {
         tree.dictionary
@@ -181,7 +182,7 @@ class RollupSynchronizer @Inject()(config: Configuration, @Assisted rollupBlockI
 
   private def holdingTransform(tree: NISPTree, transform: Transform, isMempool: Boolean, shouldLog: Boolean): NISPTree = {
 
-    val evalBox = transform.output.toInput(ctx)
+    val evalBox = withCtx(ctx => transform.output.toInput(ctx))
     if (tree.hasMiner) {
       val nispTree = tree.copy(currentPeriod = Some(evalBox.registers(3).getValue.asInstanceOf[Long]),
         phase = LFSMPhase.EVAL, utxoId = transform.output.id)
@@ -262,9 +263,9 @@ class RollupSynchronizer @Inject()(config: Configuration, @Assisted rollupBlockI
         a => Hex.toHexString(a) == prover.contract.hashedPropBytesHex
       }
       if (paidMiner) {
-        val payoutOutput = transform.tx.outputs
+        val payoutOutput = withCtx(ctx => transform.tx.outputs
           .find(_.ergoTree == prover.contract.ergoTreeHex)
-          .get.toUTXO(ctx)
+          .get.toUTXO(ctx))
         val payoutRecord = PayoutRecord(transform.tx.id, payoutOutput.value, LFSMHelpers.scoreFromPayment(payoutOutput.value, tree.totalScore, tree.totalReward),
           input.id, rollupBlockId, tree.startHeight, transform.blockInfo.height)
         val payoutSet = cacheApi.getOrElseUpdate[Seq[PayoutRecord]](Globals.TRACKED_PAYOUTS)(Seq.empty[PayoutRecord])
@@ -276,7 +277,7 @@ class RollupSynchronizer @Inject()(config: Configuration, @Assisted rollupBlockI
         val delete = dict.delete(miners.toArray.map(_.toArray): _*)
         require(delete.proof.ergoValue.getValue == delProof, "Removal proofs must be equal on payout transformation")
 
-        if (transform.output.ergoTree == Helpers.payoutContract(ctx).ergoTreeHex) {
+        if (transform.output.ergoTree == withCtx(ctx => Helpers.payoutContract(ctx)).ergoTreeHex) {
           val nispTree = tree.copy(dictionary = dict, utxoId = transform.output.id)
 
           treeCache.updateTreeCache(transform.input.id, nispTree.utxoId, nispTree)
@@ -311,7 +312,7 @@ class RollupSynchronizer @Inject()(config: Configuration, @Assisted rollupBlockI
         val delete = dict.delete(miners.toArray.map(_.toArray): _*)
         require(delete.proof.ergoValue.getValue == delProof, "Removal proofs must be equal on payout transformation")
 
-        if (transform.output.ergoTree == Helpers.payoutContract(ctx).ergoTreeHex) {
+        if (transform.output.ergoTree == withCtx(ctx => Helpers.payoutContract(ctx)).ergoTreeHex) {
           val nispTree = tree.copy(dictionary = dict, utxoId = transform.output.id)
 
           log(s"Applied payout transform ${transform.tx.id} with $transform", shouldLog)
@@ -350,11 +351,15 @@ class RollupSynchronizer @Inject()(config: Configuration, @Assisted rollupBlockI
     // associated with the current state of this rollup.
     treeCache.updateTreeCache(utxoId, utxoId, tree.copy(evaluated = true))
   }
+
+  protected def withCtx[A](f: BlockchainContext => A): A = {
+    Globals.getNodeConfig.getClient.execute(f(_))
+  }
 }
 
 object RollupSynchronizer {
 
   trait RollupSyncFactory {
-    def apply(rollupBlockId: String, ctx: BlockchainContext, prover: NodeWallet): Actor
+    def apply(rollupBlockId: String, prover: NodeWallet): Actor
   }
 }

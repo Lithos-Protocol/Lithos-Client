@@ -3,7 +3,7 @@ package state.synchronization
 import akka.actor.{Actor, ActorRef}
 import akka.util.Timeout
 import cache.{MempoolCache, RollupCache}
-import configs.NodeConfig
+import configs.{NodeConfig, NodeContext}
 import mutations.NodeWallet
 import org.ergoplatform.appkit.ErgoClient
 import org.slf4j.{Logger, LoggerFactory}
@@ -21,13 +21,13 @@ import scala.concurrent.duration.DurationInt
 import scala.language.postfixOps
 
 class RollupCoordinator @Inject()(syncFactory: RollupSynchronizer.RollupSyncFactory, config: Configuration,
+                                  nodeContext: NodeContext,
                                   cacheApi: SyncCacheApi, @Named("mempool-view") mempoolView: ActorRef) extends Actor with InjectedActorSupport {
   implicit val timeout: Timeout = 10 seconds
 
   val logger: Logger          = LoggerFactory.getLogger("RollupCoordinator")
-  val nodeConfig: NodeConfig  = Globals.getNodeConfig
-  val client: ErgoClient      = nodeConfig.getClient
-  val prover: NodeWallet      = nodeConfig.getNodeWallet
+  val client: ErgoClient      = nodeContext.getClient
+  val prover: NodeWallet      = nodeContext.getNodeWallet
   val rollupCache: RollupCache    = RollupCache(cacheApi)
 
   override def receive: Receive = {
@@ -185,11 +185,12 @@ class RollupCoordinator @Inject()(syncFactory: RollupSynchronizer.RollupSyncFact
   }
 
   private def handleGenesis(genesis: Genesis): Unit = {
-    client.execute{
-      ctx =>
-        val child: ActorRef = injectedChild(syncFactory(genesis.tree.blockId, ctx, prover), genesis.tree.blockId)
-        child ! genesis
-    }
+    // Copy into val reduces mem usage, passing in genesis.tree.blockId
+    // keeps entire genesis message alive in actor props
+    val blockId = genesis.tree.blockId
+    val child: ActorRef = injectedChild(syncFactory(blockId, prover), blockId)
+    child ! genesis
+
 
   }
 
