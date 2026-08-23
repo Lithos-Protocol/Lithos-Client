@@ -218,6 +218,12 @@ class EmissionTransactions(prover: NodeWallet,
   /**
    * A proof-of-spend box that frees a slot in the active set, with the index it frees.
    *
+   * A retirement is valid from the block AFTER the one that minted it (`creationInfo._1 < HEIGHT`),
+   * but the transaction signs against the CURRENT height, `blockHeight - 1`. A box minted by the
+   * block just found therefore passes a landing-height filter yet fails signing with "Script reduced
+   * to false", poisoning every pass until the next block - so it is excluded here and picked up on
+   * a later pass instead.
+   *
    * The emission contract demands `creationInfo._1 < HEIGHT`, so a retirement produced by this
    * block is unusable. That is deliberate: it stops a miner spending a collateral box, activating
    * the same lender's next queue box on the retirement, and spending that too in one block.
@@ -225,9 +231,13 @@ class EmissionTransactions(prover: NodeWallet,
   def findProofOfSpend(ctx: BlockchainContext,
                        lenderSet: Seq[Array[Byte]],
                        blockHeight: Int,
-                       exclude: Set[String] = Set.empty[String]): Option[(InputUTXO, Int)] =
-    proofOfSpendBoxes(ctx, liveOnly)
-      .filter(b => b.box.creationHeight < blockHeight && !exclude.contains(b.boxId))
+                       exclude: Set[String] = Set.empty[String]): Option[(InputUTXO, Int)] = {
+    val candidates = proofOfSpendBoxes(ctx, liveOnly).filterNot(b => exclude.contains(b.boxId))
+    val (mintedThisBlock, usable) = candidates.partition(_.box.creationHeight >= blockHeight - 1)
+    if (mintedThisBlock.nonEmpty && usable.isEmpty)
+      logger.info(s"${mintedThisBlock.size} proof-of-spend box(es) only validate from block " +
+        s"$blockHeight - waiting rather than building an Activate that cannot sign")
+    usable
       .flatMap { b =>
         retiringKey(b).flatMap { r =>
           lenderSet.indexWhere(_.sameElements(r)) match {
@@ -237,6 +247,7 @@ class EmissionTransactions(prover: NodeWallet,
         }
       }
       .headOption
+  }
 
   /**
    * Every lender key already spoken for: in the active set, sitting in the queue, on a live
@@ -261,7 +272,7 @@ class EmissionTransactions(prover: NodeWallet,
       .map(hex)
 
     // Paged rather than capped at queueScanLimit: our most recent joins sit at the TAIL, which is
-    // exactly what a single ascending page would drop. Only the keys are kept — the queue runs to
+    // exactly what a single ascending page would drop. Only the keys are kept - the queue runs to
     // thousands of boxes and holding them all is the difference between kilobytes and tens of MB.
     scanByToken(ctx, LFSMHelpers.QUEUE_TOKEN, withMempool) { page =>
       keys ++= page
@@ -294,7 +305,7 @@ class EmissionTransactions(prover: NodeWallet,
    * Up to `count` wallet addresses that no live box already uses, deriving new EIP-3 keys through
    * the node when the existing ones are all spoken for.
    *
-   * Derivation goes through the node's wallet, not appkit, so the node knows the key — every one of
+   * Derivation goes through the node's wallet, not appkit, so the node knows the key - every one of
    * these addresses eventually receives a 3 ERG coinbase. The appkit prover holds EIP-3 index 0
    * only and cannot sign for them; `FundingSource` filters them out.
    */
@@ -516,7 +527,7 @@ class EmissionTransactions(prover: NodeWallet,
 
     /**
      * A Clear takes the head queue box's whole principal and gives nothing back, so it funds its own
-     * fee out of that and leaves the rest as change — which is the forfeit. Drawing a wallet box as
+     * fee out of that and leaves the rest as change - which is the forfeit. Drawing a wallet box as
      * well added an input for nothing and held a reservation against `SubmissionHandler`, which
      * draws from the same wallet.
      *
@@ -555,7 +566,7 @@ class EmissionTransactions(prover: NodeWallet,
                   else findProofOfSpend(ctx, st.lenderSet, blockHeight, usedProofs.toSet)
                 if (!st.bootstrapping && retiring.isEmpty) {
                   logger.info(s"Active set is full at ${st.lenderSet.size} and no proof-of-spend box " +
-                    s"older than height $blockHeight frees a slot - cannot activate")
+                    s"usable at height ${blockHeight - 1} frees a slot - cannot activate")
                   stop = true
                 } else {
                   retiring.foreach(r => usedProofs += r._1.id.toString)
@@ -575,7 +586,7 @@ class EmissionTransactions(prover: NodeWallet,
       completed = true
     } finally
       // Funded spends are broadcast by the caller the moment this returns, so their inputs stay
-      // reserved — but only if we got there: an exception discards everything built. Nothing is
+      // reserved - but only if we got there: an exception discards everything built. Nothing is
       // confirmed sent either way, so no change goes back.
       {
         if (!completed) built.flatMap(_.reservations).foreach(_.release())
@@ -753,7 +764,7 @@ class EmissionTransactions(prover: NodeWallet,
      * End of run. The two halves are decided separately and neither implies the other.
      *
      * `keepReservations` must hold whenever the built transactions will be broadcast, even if the
-     * broadcast has not happened yet — releasing first would let something else pick the same box.
+     * broadcast has not happened yet - releasing first would let something else pick the same box.
      * `returnChange` is stricter: it may only be set once the parent transactions are known to have
      * reached the node, since handing back change from a transaction that never lands would seed
      * the wallet with a box the chain has never seen.
@@ -784,7 +795,7 @@ class EmissionTransactions(prover: NodeWallet,
 
     /**
      * Token-carrying boxes first, then largest first, so a permit needs as few inputs as possible.
-     * A box is only taken if it moves one of the two requirements — otherwise an unmet token demand
+     * A box is only taken if it moves one of the two requirements - otherwise an unmet token demand
      * would drag in every ERG-only box on the way past.
      */
     private def drawFrom(from: Seq[InputUTXO], value: Long, token: Option[Token]): Seq[InputUTXO] = {

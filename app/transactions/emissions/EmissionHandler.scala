@@ -138,7 +138,13 @@ class EmissionHandler @Inject()(config: Configuration, nodeContext: NodeContext,
 
     case EmissionFailed(what, ex) =>
       spending = false
-      logger.error(s"Emission $what failed: ${ex.getMessage}", ex)
+      // The builders stop before building a spend the contracts reject, so this is state that moved
+      // between reading and sending - not a defect, and not worth a stack trace every pass.
+      if (Option(ex.getMessage).exists(_.contains("Script reduced to false")))
+        logger.warn(s"Emission $what stopped: the contracts rejected the built transaction " +
+          "- chain or active-set state moved under it. Retrying on the next pass")
+      else
+        logger.error(s"Emission $what failed: ${ex.getMessage}", ex)
 
     // ------------------------------------------------------------------
     // A block is being assembled — hand back fee-less copies

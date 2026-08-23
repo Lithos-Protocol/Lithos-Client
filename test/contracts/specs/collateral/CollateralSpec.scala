@@ -630,6 +630,13 @@ class CollateralSpec extends AnyPropSpec with EmissionSpecBase with RollupSpecBa
     }
   }
 
+  property("extension: accepts an NFT id extension") {
+    withCtx { ctx =>
+      val g = genesis(ctx, extensionFlag = 1.toByte, extScript = Contract.SIGMA_TRUE)
+      accepts(g.finderProver, genesisTx(g)())
+    }
+  }
+
   property("extension: rejects a script the config's R6 does not name (authenticExtension)") {
     withCtx { ctx =>
       val g = genesis(ctx, extensionFlag = 1.toByte, extScript = Contract.SIGMA_TRUE,
