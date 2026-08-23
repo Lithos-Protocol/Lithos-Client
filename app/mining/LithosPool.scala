@@ -232,7 +232,7 @@ class LithosPool(options: Options,
     case RefreshDifficulty =>
       val stratumTau = {
         if(reducedShareMessages)
-          tau / 1000
+          tau / 10000
         else
           tau
       }

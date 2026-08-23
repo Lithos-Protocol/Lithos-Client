@@ -10,23 +10,20 @@ import lfsm.LFSMHelpers
 import lfsm.states.MinerTree
 import mutations.NotEnoughInputsException
 import node.NodeApi
-import org.ergoplatform.restapi.client.FullBlock
 import org.slf4j.{Logger, LoggerFactory}
 import play.api.Configuration
 import play.api.cache.SyncCacheApi
-import state.LFSMTransformer
-import state.synchronization.Subscribable.{Subscribe, SubscribeAck, SubscribeRejected, SubscribeResponse}
 import state.messages.DictionaryMessages.InitialMDState
-import state.messages.StateFrameMessages._
 import state.messages.SyncMessages._
-import state.messages.{BlockInfo, BlockMessage, NodeSync}
+import state.messages.{BlockMessage, NodeSync}
+import state.synchronization.Subscribable.{Subscribe, SubscribeAck, SubscribeRejected, SubscribeResponse}
 import transactions.rollups.{CommitmentTransactions, DataBoxSource}
 import transactions.wallet.{ReservationExpiredException, WalletSelector}
 import utils.Globals
 
 import javax.inject.{Inject, Named, Singleton}
 import scala.concurrent.duration.DurationInt
-import scala.concurrent.{Await, ExecutionContext, Future}
+import scala.concurrent.{Await, Future}
 import scala.language.postfixOps
 import scala.util.{Failure, Success, Try}
 

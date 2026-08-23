@@ -37,8 +37,12 @@ object Globals {
 
 
 
-  // Should be set in eager singleton
-  def setConfigs(config: Configuration): Unit = {
+  // Set exactly once, from Module. NodeContext is bound to this single instance — a second
+  // NodeConfig would derive a second prover over the same secret storage.
+  def setConfigs(config: Configuration): Unit = synchronized {
+    if (nodeConfig.isDefined)
+      throw new IllegalStateException(
+        "NodeConfig is already initialised — there must be exactly one NodeContext")
     nodeConfig = Some(new NodeConfig(config))
   }
 

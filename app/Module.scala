@@ -1,6 +1,7 @@
 import api._
 import com.google.inject.AbstractModule
-import configs.NodeContext
+import configs.{ConfigValidationException, NodeContext}
+import org.slf4j.LoggerFactory
 import play.api.{Configuration, Environment}
 import play.libs.akka.AkkaGuiceSupport
 import state.synchronization._
@@ -10,11 +11,24 @@ import transactions.rollups.{RollupEvaluator, SubmissionHandler, TransactionProc
 import transactions.wallet.WalletManager
 import utils.Globals
 
+import scala.util.Try
+
 class Module(environment: Environment, configuration: Configuration) extends AbstractModule with AkkaGuiceSupport
 {
   @Override
   override def configure(): Unit = {
-    System.out.println("Binding Tasks")
+
+    // Every config is validated here, before anything binds, so a bad value stops startup with one
+    // readable report naming every offending key instead of a crash inside whichever actor read it.
+    try{
+      configs.Configs.validateAll(configuration)
+    } catch {
+      case c: ConfigValidationException =>
+        LoggerFactory.getLogger("Module").error("Got error during startup: ", c)
+        Thread.sleep(1000)
+        System.exit(0)
+    }
+
     // Set critical configs and databases
     Globals.setConfigs(configuration)
 

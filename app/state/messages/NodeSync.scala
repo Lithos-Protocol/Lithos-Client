@@ -2,7 +2,6 @@ package state.messages
 
 import node.model.{IndexedBlock, IndexedBox, IndexedTransaction, NodeAsset, NodeBlock, NodeBox, NodeDataInput, NodeInput, NodeSpendingProof, NodeTransaction, WalletBox}
 import org.ergoplatform.sdk.ErgoId
-import state.InputSpendingProof
 import work.lithos.mutations.Token
 
 /**

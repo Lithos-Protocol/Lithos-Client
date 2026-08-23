@@ -2,15 +2,25 @@ package configs
 
 import akka.actor.ActorSystem
 
-import javax.inject.Inject
 import scala.concurrent.ExecutionContext
 
 
 class Contexts (system: ActorSystem) {
   private val prefix = "lithos-contexts."
-  val stratumContext:      ExecutionContext = system.dispatchers.lookup(prefix+"stratum-dispatcher")
-  val pollingContext:      ExecutionContext = system.dispatchers.lookup(prefix+"polling-dispatcher")
-  val syncContext:         ExecutionContext = system.dispatchers.lookup(prefix+"sync-dispatcher")
-  val txContext:      ExecutionContext = system.dispatchers.lookup(prefix+"tx-dispatcher")
-  val dexContext:     ExecutionContext = system.dispatchers.lookup(prefix+"dex-dispatcher")
+
+  // A missing or malformed dispatcher block would otherwise surface as an opaque ConfigException
+  // from whoever looked up first; name the block to fix instead.
+  private def dispatcher(name: String): ExecutionContext =
+    try system.dispatchers.lookup(prefix + name)
+    catch {
+      case t: Throwable => Configs.fail(s"lithos-contexts.$name",
+        s"no dispatcher could be loaded for this name: check the lithos-contexts.$name block in " +
+          s"application.conf (${t.getMessage})")
+    }
+
+  val stratumContext:      ExecutionContext = dispatcher("stratum-dispatcher")
+  val pollingContext:      ExecutionContext = dispatcher("polling-dispatcher")
+  val syncContext:         ExecutionContext = dispatcher("sync-dispatcher")
+  val txContext:      ExecutionContext = dispatcher("tx-dispatcher")
+  val dexContext:     ExecutionContext = dispatcher("dex-dispatcher")
 }

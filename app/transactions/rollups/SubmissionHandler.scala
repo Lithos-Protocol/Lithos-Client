@@ -16,11 +16,11 @@ import play.api.libs.concurrent.InjectedActorSupport
 import state.messages.MempoolMessages.{RebuildMempoolChains, ResetMempoolState}
 import state.messages.RollupMessages
 import state.messages.RollupMessages.{GetCurrentRollup, RemoveRollup, RollupInfo}
-import state.{DataBoxRetrievalException, NoValidNISPException}
+import state.DataBoxRetrievalException
 import transactions.BlockTxMessages.{BlockTxsReady, CandidateTx}
 import transactions.rollups.SubmissionHandler._
 import transactions.rollups.TransactionMessages.RollupTxType._
-import transactions.rollups.TransactionMessages.{BatchAccepted, _}
+import transactions.rollups.TransactionMessages._
 import transactions.wallet.{WalletReservation, WalletSelector}
 import utils.Globals
 import work.lithos.mutations.{Contract, InputUTXO, Token, UTXO}

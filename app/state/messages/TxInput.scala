@@ -1,7 +1,6 @@
 package state.messages
 
 import org.ergoplatform.restapi.client.{ErgoTransactionDataInput, ErgoTransactionInput}
-import state.InputSpendingProof
 
 case class TxInput(
                     id: String,
