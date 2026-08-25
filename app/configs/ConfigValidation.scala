@@ -54,13 +54,16 @@ object Configs {
     // password. An empty one fails later, inside NodeConfig, with a message naming the key.
     v.requireExisting("node.storagePath", v.string("node.storagePath"))
     v.requireExisting("node.pass", v.string("node.pass"))
-    v.string("node.networkType").foreach { raw =>
+    v.requireExisting("node.networkType", v.string("node.networkType")).foreach { raw =>
       if (!Set("MAINNET", "TESTNET").contains(raw.trim.toUpperCase))
         v.problem("node.networkType", s""""$raw" is not a network type - use MAINNET or TESTNET""")
     }
     v.url("node.explorerURL", v.string("node.explorerURL"), allowDefaultSentinel = true)
+    // Required, not merely range-checked: NodeConfig falls back to ONE address when this is absent,
+    // while emission.maxLenderKeys defaults to 32. Silently deriving 31 lender keys the prover holds
+    // no secret for is stranded principal and stranded coinbases, not a tuning mistake.
     val numAddresses =
-      v.range("node.numAddresses", v.int("node.numAddresses"), 1, 1000,
+      v.range("node.numAddresses", v.intReq("node.numAddresses"), 1, 1000,
         "how many EIP-3 addresses the prover holds keys for")
 
     // ---- stratum ----
@@ -74,16 +77,18 @@ object Configs {
         case Success(_) => ()
       }
     }
+    // `intReq`/`boolReq` on exactly the keys StratumConfig reads with `get`, which throws on absence.
+    // The two below it read with `getOptional` and have real fallbacks, so their absence is fine.
     v.port("stratum.stratumPort", v.intReq("stratum.stratumPort"))
-    v.range("stratum.extraNonce1Size", v.int("stratum.extraNonce1Size"), 1, 8,
+    v.range("stratum.extraNonce1Size", v.intReq("stratum.extraNonce1Size"), 1, 8,
       "hex bytes of extraNonce1; 2 is recommended, higher invites duplicate shares")
+    v.range("stratum.connectionTimeout", v.intReq("stratum.connectionTimeout"), 1000, 3600000, "ms")
+    v.range("stratum.blockRefreshInterval", v.intReq("stratum.blockRefreshInterval"), 100, 600000, "ms")
+    v.boolReq("stratum.reduceShareMessages")
+    v.range("stratum.diffRefreshInterval", v.intReq("stratum.diffRefreshInterval"), 1000, 3600000, "ms")
     v.range("stratum.rotateExtraNonceInterval", v.int("stratum.rotateExtraNonceInterval"), 0, 3600000,
       "ms without work before extraNonce rotation; 0 disables it")
-    v.range("stratum.connectionTimeout", v.int("stratum.connectionTimeout"), 1000, 3600000, "ms")
-    v.range("stratum.blockRefreshInterval", v.int("stratum.blockRefreshInterval"), 100, 600000, "ms")
-    v.bool("stratum.reduceShareMessages")
     v.bool("stratum.forceConfigDiff")
-    v.range("stratum.diffRefreshInterval", v.int("stratum.diffRefreshInterval"), 1000, 3600000, "ms")
 
     // ---- stratum.candidate ----
     v.range("stratum.candidate.collateralPoolSize", v.int("stratum.candidate.collateralPoolSize"), 1, 100,
@@ -136,11 +141,30 @@ object Configs {
       "block height to start synchronizing from; minimum 1")
 
     // ---- lithos-tasks ----
-    Seq("stratum-server", "rollup-sync-task", "dictionary-sync-task").foreach { name =>
-      val base = s"lithos-tasks.$name"
-      v.bool(s"$base.enabled")
-      v.durationRange(s"$base.startup", 1, 604800000L)
-      v.durationRange(s"$base.interval", 1, 604800000L)
+    // Required, because `TasksConfig` reads all nine with `get`. A missing block used to pass here
+    // and then throw out of whichever task or actor read it first.
+    TasksConfig.Names.foreach { name =>
+      v.boolReq(TasksConfig.key(name, "enabled"))
+      v.durationRangeReq(TasksConfig.key(name, "startup"), 1, 604800000L)
+      v.durationRangeReq(TasksConfig.key(name, "interval"), 1, 604800000L)
+    }
+
+    // ---- lithos-contexts ----
+    // Presence only; Akka owns what a valid dispatcher block contains. Without this, a deleted or
+    // misspelled block fails inside whichever controller or task resolved it first, during Guice
+    // provisioning, where the report is wrapped in a CreationException rather than printed.
+    Contexts.Names.foreach(name => v.requireBlock(Contexts.key(name)))
+
+    // ---- api ----
+    // Every authenticated controller reads this with `get` at construction, so its absence is a
+    // failed start rather than a 403. The shape check catches the common mistake of pasting the
+    // password itself where its Blake2b256 hash belongs, which otherwise 403s everything silently.
+    v.requireExisting("lithos.apiKeyHash", v.string("lithos.apiKeyHash")).foreach { raw =>
+      val hash = raw.trim
+      if (!hash.matches("(?i)[0-9a-f]{64}"))
+        v.problem("lithos.apiKeyHash",
+          "is not a 64-character hex hash. This is the BLAKE2b-256 of your api key, not the key " +
+            "itself - hash it the same way you set your node's apiKeyHash")
     }
 
     v.finish()
@@ -174,6 +198,13 @@ final class ConfigValidator(config: Configuration) {
   /** An int whose absence is itself a problem - required keys the client cannot default sensibly. */
   def intReq(key: String): Option[Int] = requireExisting(key, int(key))
 
+  /** As [[intReq]]. Use wherever the reading code calls `Configuration.get`, which throws. */
+  def boolReq(key: String): Option[Boolean] = requireExisting(key, bool(key))
+
+  /** A whole config block must exist, without saying anything about what is inside it. */
+  def requireBlock(key: String): Unit =
+    requireExisting(key, read(ConfigLoader.configurationLoader, key, "a configuration block"))
+
   /** Reports absence unless something was already reported for this key. */
   def requireExisting[A](key: String, value: Option[A]): Option[A] =
     value.orElse {
@@ -192,8 +223,14 @@ final class ConfigValidator(config: Configuration) {
   def port(key: String, value: Option[Int]): Option[Int] =
     range(key, value, 1, 65535, "a TCP port")
 
-  def durationRange(key: String, minMs: Long, maxMs: Long): Unit =
-    duration(key).foreach { d =>
+  /**
+   * A duration that must exist and must be in range. Reads once, so a bad value is one problem.
+   *
+   * There is no tolerant variant because nothing reads a duration tolerantly: `TasksConfig` is the
+   * only consumer and it uses `get`.
+   */
+  def durationRangeReq(key: String, minMs: Long, maxMs: Long): Unit =
+    requireExisting(key, duration(key)).foreach { d =>
       if (d.toMillis < minMs || d.toMillis > maxMs)
         problem(key, s"${d.toString} is outside ${minMs}ms..${maxMs}ms")
     }

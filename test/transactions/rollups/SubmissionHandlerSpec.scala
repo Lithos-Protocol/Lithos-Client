@@ -2,6 +2,7 @@ package transactions.rollups
 
 import akka.actor.{ActorRef, ActorSystem, Props}
 import akka.testkit.{TestKit, TestProbe}
+import org.ergoplatform.sdk.ErgoId
 import org.scalatest.BeforeAndAfterAll
 import org.scalatest.flatspec.AnyFlatSpecLike
 import org.scalatest.matchers.should.Matchers
@@ -48,16 +49,28 @@ class SubmissionHandlerSpec extends TestKit(ActorSystem("submission-handler-spec
     "stratum.diffRefreshInterval" -> 60000
   ))
 
+  /**
+   * A data box token, supplied rather than read from disk.
+   *
+   * `submitInitialTransaction` refuses the whole batch when no data box exists, so with the
+   * production `DataBoxSource.Stored` these tests passed or failed on whether the developer's
+   * `.lithos/md` LevelDB happened to hold a token from some earlier testnet run. Both batch tests
+   * below assert on work that only happens past that guard.
+   */
+  private val storedDataBox: DataBoxSource = new DataBoxSource {
+    override def getDataBoxToken: Option[ErgoId] = Some(ErgoId.create("11" * 32))
+  }
+
   private case class Fixture(handler: ActorRef, sync: TestProbe, mempool: TestProbe,
                              wallet: TestProbe, probe: TestProbe)
 
-  private def fixture(): Fixture = {
+  private def fixture(dataBoxes: DataBoxSource = storedDataBox): Fixture = {
     val (ctx, _, _) = FakeNodeContext()
     val sync = TestProbe()
     val mempool = TestProbe()
     val wallet = TestProbe()
     val handler = system.actorOf(Props(new SubmissionHandler(
-      quietConfig, ctx, new FakeCache, sync.ref, mempool.ref, wallet.ref)))
+      quietConfig, ctx, new FakeCache, dataBoxes, sync.ref, mempool.ref, wallet.ref)))
     Fixture(handler, sync, mempool, wallet, TestProbe())
   }
 
@@ -127,6 +140,21 @@ class SubmissionHandlerSpec extends TestKit(ActorSystem("submission-handler-spec
     Thread.sleep(9000)
     f.probe.send(f.handler, RollupBatch(Seq(stub("rollup-b"))))
     f.probe.expectMsgType[BatchAccepted](10.seconds).stubs.map(_.rollupBlockId) shouldEqual Seq("rollup-b")
+  }
+
+  "A batch with no data box" should "be refused before any rollup state is read, and free the lock" in {
+    // The guard in front of the whole batch: without a data box this client cannot commit a score,
+    // so no rollup transaction is attempted. Asserted positively — the sync handler is asked for
+    // nothing — and then at the moment the two behaviours differ, which is the NEXT batch: an
+    // exception thrown while choosing the warning to log would also end the batch here, so only the
+    // second acceptance separates "refused cleanly" from "died on the way to a log line".
+    val f = fixture(new DataBoxSource { override def getDataBoxToken: Option[ErgoId] = None })
+    f.probe.send(f.handler, RollupBatch((1 to 4).map(i => stub(s"rollup-$i"))))
+    f.probe.expectMsgType[BatchAccepted](5.seconds)
+    f.sync.expectNoMessage(3.seconds)
+
+    f.probe.send(f.handler, RollupBatch(Seq(stub("rollup-late"))))
+    f.probe.expectMsgType[BatchAccepted](10.seconds).stubs.map(_.rollupBlockId) shouldEqual Seq("rollup-late")
   }
 
   // ─── fee-less builds ──────────────────────────────────────────────────────

@@ -38,6 +38,7 @@ import scala.util.control.NonFatal
  */
 class SubmissionHandler @Inject()(config: Configuration, nodeContext: NodeContext,
                                   cacheApi: SyncCacheApi,
+                                  dataBoxes: DataBoxSource,
                                   @Named("sync-handler") syncHandler: ActorRef,
                                   @Named("mempool-view") mempoolView: ActorRef,
                                   @Named("wallet-manager") walletManager: ActorRef)
@@ -46,12 +47,22 @@ class SubmissionHandler @Inject()(config: Configuration, nodeContext: NodeContex
   implicit val ec: ExecutionContext = context.dispatcher
 
   private val walletSelector = WalletSelector(walletManager, 5.seconds, ec)
-  private val commitments = new CommitmentTransactions(nodeContext, DataBoxSource.Stored)
+  private val commitments = new CommitmentTransactions(nodeContext, dataBoxes)
 
   private val logger: Logger = LoggerFactory.getLogger("SubmissionHandler")
   private val nodeConfig: NodeContext = nodeContext
   private val stateConfig = new StateConfig(config)
   private val stratumConfig = new StratumConfig(config)
+  /**
+   * Whether MDSyncTask runs, read once and tolerantly.
+   *
+   * It only decides which of three warnings to print when no data box exists. Constructing a whole
+   * `TasksConfig` per batch to get it read nine keys with `get`, so a config missing the
+   * `lithos-tasks` block threw out of `runBatch` and took every stub in the batch with it — a log
+   * line costing the miner its NISP submissions.
+   */
+  private val dictionarySyncEnabled: Boolean =
+    TasksConfig.isEnabled(config, TasksConfig.DictionarySync)
   private val client = nodeConfig.getClient
   private val wallet = nodeConfig.getNodeWallet
   // Map of pre-allocated UTXOs to be used for fee payments, enabling parallel tx attempts
@@ -383,9 +394,9 @@ class SubmissionHandler @Inject()(config: Configuration, nodeContext: NodeContex
   private def submitInitialTransaction(stubs: Seq[RollupTxStub], initialTxInfo: InitialTxInfo) = {
     val initTx: Try[String] = Failure.apply(new RuntimeException("InitTx never initialized"))
     // We do not participate in rollup transactions if there is no data box created.
-    if(DataBoxSource.Stored.getDataBoxToken.isEmpty){
+    if(dataBoxes.getDataBoxToken.isEmpty){
       logger.warn("No saved data box token was found")
-      val isEnabled = new TasksConfig(config).dictionarySyncTask.enabled
+      val isEnabled = dictionarySyncEnabled
       if(isEnabled && !Globals.getMDSyncState){
         logger.warn("Please wait for MDSyncTask to complete MinerDictionary synchronization")
         Failure(new DataBoxRetrievalException("Could not find a stored data box"))
