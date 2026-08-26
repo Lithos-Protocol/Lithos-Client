@@ -1,7 +1,7 @@
 package controllers
 
 import akka.actor.{ActorRef, ActorSystem}
-import api.LDErrors.{LDBadRequest, LDNotFound, LDStateChanged, LDUnavailable, LDUnprocessable}
+import api.LithosApiErrors.{LithosBadRequest, LithosNotFound, LithosStateChanged, LithosUnavailable, LithosUnprocessable}
 import api.models._
 import api.openapitools.OpenApiExceptions
 import api.{ApiHelper, LithosDexApi}
@@ -65,10 +65,6 @@ class LithosDexApiController @Inject()(cc: ControllerComponents,
   /** GET /dex/provisions */
   def listProvisions(): Action[AnyContent] =
     Action.async { _ => offPool(respond(api.listProvisions(ldCache))) }
-
-  /** GET /wallet/balance */
-  def getWalletBalance(): Action[AnyContent] =
-    Action.async { _ => offPool(respond(api.getWalletBalance)) }
 
   // ── swap ─────────────────────────────────────────────────────────────────
 
@@ -186,7 +182,7 @@ class LithosDexApiController @Inject()(cc: ControllerComponents,
       case None => throw new OpenApiExceptions.MissingRequiredParameterException("body", name)
       case Some(json) => json.validate[A] match {
         case JsSuccess(value, _) => value
-        case JsError(errors) => throw LDBadRequest(s"'$name' is not valid: ${describe(errors)}")
+        case JsError(errors) => throw LithosBadRequest(s"'$name' is not valid: ${describe(errors)}")
       }
     }
 
@@ -196,7 +192,7 @@ class LithosDexApiController @Inject()(cc: ControllerComponents,
       case None => empty
       case Some(json) => json.validate[A] match {
         case JsSuccess(value, _) => value
-        case JsError(errors) => throw LDBadRequest(s"request body is not valid: ${describe(errors)}")
+        case JsError(errors) => throw LithosBadRequest(s"request body is not valid: ${describe(errors)}")
       }
     }
 
@@ -217,27 +213,27 @@ class LithosDexApiController @Inject()(cc: ControllerComponents,
   private def respond[A](result: => A)(implicit writes: Writes[A]): Result =
     Try(result) match {
       case Success(value) => Ok(Json.toJson(value))
-      case Failure(e: LDBadRequest) =>
+      case Failure(e: LithosBadRequest) =>
         BadRequest(ApiHelper.makeError(400, "Bad request", e.getMessage))
-      case Failure(e: LDStateChanged) =>
+      case Failure(e: LithosStateChanged) =>
         Conflict(Json.toJson(LDStateChangedResponse(e)))
-      case Failure(e: LDUnprocessable) =>
+      case Failure(e: LithosUnprocessable) =>
         UnprocessableEntity(ApiHelper.makeError(422, "Cannot be executed", e.getMessage))
       // Named types, not `NoSuchElementException`. Matching the JDK type meant every accidental
       // `.get` on a `None` and every `.head` on an empty collection anywhere under the API was
       // reported as "not found" — the one status that tells a caller to stop trying.
-      case Failure(e: LDNotFound) =>
+      case Failure(e: LithosNotFound) =>
         NotFound(ApiHelper.makeError(404, "Not found", e.getMessage))
       case Failure(e: LDBoxes.NoSuchBoxException) =>
         NotFound(ApiHelper.makeError(404, "Not found", e.getMessage))
       // The box is there and something else is spending it, so there is a successor to read. That is
       // a conflict to retry against, not a 404 telling a UI the position is gone.
       case Failure(e: LDBoxes.BoxBeingSpentException) =>
-        Conflict(Json.toJson(LDStateChangedResponse(LDStateChanged(e.getMessage))))
+        Conflict(Json.toJson(LDStateChangedResponse(LithosStateChanged(e.getMessage))))
       // A lease that expired between building and broadcasting. A timing condition the caller
       // resolves by re-reading and resending, so it must not look like a defect in this client.
       case Failure(e: ReservationExpiredException) =>
-        Conflict(Json.toJson(LDStateChangedResponse(LDStateChanged(e.getMessage))))
+        Conflict(Json.toJson(LDStateChangedResponse(LithosStateChanged(e.getMessage))))
       // Insufficient selectable funds is a fact about this wallet right now, not a defect: a later
       // request after a confirmation or a refresh can succeed unchanged.
       case Failure(e: NotEnoughInputsException) =>
@@ -246,7 +242,7 @@ class LithosDexApiController @Inject()(cc: ControllerComponents,
         UnprocessableEntity(ApiHelper.makeError(422, "Cannot be executed", e.getMessage))
       // The node, its index, its mempool or its wallet did not answer. Nothing is wrong with the
       // request and nothing has been decided, so this must not look like either 400 or 500.
-      case Failure(e: LDUnavailable) =>
+      case Failure(e: LithosUnavailable) =>
         ServiceUnavailable(ApiHelper.makeError(503, "Node unavailable", e.getMessage))
       case Failure(e: LDBoxes.IndexUnavailableException) =>
         ServiceUnavailable(ApiHelper.makeError(503, "Node unavailable", e.getMessage))

@@ -1,23 +1,27 @@
 package transactions.wallet
 
 import akka.actor.{Actor, Cancellable}
-import akka.pattern.pipe
+import akka.pattern.{ask, pipe}
+import akka.util.Timeout
 import configs.NodeContext
 import node.MutationConversions._
 import node.NodeApi
 import mutations.NodeWallet.MINER_REWARD_DELAY
 import node.model.{ConfirmationRange, MempoolOptions, Paging, SortDirection}
-import org.ergoplatform.appkit.{BlockchainContext, ErgoClient}
+import org.ergoplatform.appkit.{BlockchainContext, ErgoClient, Parameters}
 import org.slf4j.{Logger, LoggerFactory}
 import play.api.libs.concurrent.InjectedActorSupport
 import transactions.wallet.WalletManager._
 import transactions.wallet.WalletMessages._
-import work.lithos.mutations.{InputUTXO, Token, UTXO}
+import work.lithos.mutations.{InputUTXO, Token, TxBuilder, UTXO}
 
+import java.util.UUID
 import javax.inject.Inject
+import scala.annotation.tailrec
 import scala.collection.mutable
-import scala.concurrent.{ExecutionContext, Future}
+import scala.concurrent.{Await, ExecutionContext, Future, Promise}
 import scala.concurrent.duration._
+import scala.concurrent.blocking
 import scala.language.postfixOps
 import scala.util.{Failure, Success, Try}
 
@@ -373,6 +377,47 @@ class WalletManager @Inject()(nodeContext: NodeContext) extends Actor with Injec
         usedInputs = usedInputs -- stale
       }
 
+    // ─── reward-box sweep ──────────────────────────────────────────────────
+
+    case GetUnlockedRewards =>
+      val unlocked = spendableRewards
+      val unlockedIds = unlocked.map(_.id.toString).toSet
+      val locked = rewardBoxes.values.toSeq.filterNot(b => unlockedIds.contains(b.id.toString))
+      val blocksUntilFirstUnlock =
+        if (locked.isEmpty) None
+        else Some(locked.map(b => math.max(0,
+          b.input.getCreationHeight + MINER_REWARD_DELAY - chainHeight)).min)
+      sender() ! RewardSummary(
+        lockedBoxes = locked.size,
+        unlockedBoxes = unlocked.size,
+        lockedNanoErgs = saturate(valueOf(locked)),
+        unlockedNanoErgs = saturate(valueOf(unlocked)),
+        blocksUntilFirstUnlock)
+
+    case GetSpendableBalance =>
+      sender() ! SpendableBalance(saturate(valueOf(available ++ spendableRewards)))
+
+    case ClaimUnlockedRewards =>
+      val replyTo = sender()
+      val rewards = spendableRewards.sortBy(_.value)
+      if (rewards.isEmpty) replyTo ! RewardsClaimed(Seq.empty)
+      else {
+        // Reserved on the actor thread BEFORE anything leaves the mailbox, so no other selection
+        // can take these boxes while the sweep runs. Each batch carries its own lease identity so
+        // one failed batch never blocks committing the ones around it.
+        val chunks = planRewardChunks(rewards, RewardSweepFee, MAX_TX_INPUTS)
+        val leaseIds = chunks.map(_ => UUID.randomUUID().toString)
+        chunks.zip(leaseIds).foreach { case (chunk, id) =>
+          reserve(chunk.map(_.id.toString), id)
+        }
+        val done = Promise[RewardsClaimed]()
+        Future(runRewardSweep(chunks, leaseIds, done))(context.dispatcher)
+        done.future.onComplete {
+          case Success(claimed) => replyTo ! claimed
+          case Failure(ex) => replyTo ! RewardClaimFailed(ex.getMessage)
+        }(context.dispatcher)
+      }
+
   }
 
   /**
@@ -446,6 +491,84 @@ class WalletManager @Inject()(nodeContext: NodeContext) extends Actor with Injec
         "cannot sign for and are unspendable. Raise node.numAddresses to cover every derived key")
     (signable, complete)
   }
+
+  // ─── reward sweep ─────────────────────────────────────────────────────────
+
+  /**
+   * Move every batch's coinboxes to the primary address, one broadcast per batch. Runs on a pool
+   * thread; every state change goes back through messages so the actor keeps sole ownership of
+   * `usedInputs`. A batch that cannot be built never crossed the send boundary, so its lease is
+   * CANCELLED — an acknowledged Submitting lease has no TTL, and ReleaseInputs would not touch it.
+   * One whose SEND fails ambiguously stays withheld until a complete refresh reconciles it, exactly
+   * like an external caller's uncertain broadcast.
+   */
+  private def runRewardSweep(chunks: Seq[Seq[InputUTXO]],
+                             leaseIds: Seq[String],
+                             done: Promise[RewardsClaimed]): Unit = {
+    var claimed = Vector.empty[RewardClaimChunk]
+    try {
+      chunks.zip(leaseIds).foreach { case (chunk, id) =>
+        val inputIds = chunk.map(_.id.toString).toSet
+        val net = chunk.map(_.value).sum - RewardSweepFee
+        // Permission to cross the send boundary, asked from this thread through the mailbox like
+        // any external caller. An unacknowledged lease means it expired or was collected elsewhere.
+        val deadline = System.currentTimeMillis() + RewardSweepLeaseMs
+        val acked = blocking {
+          val ack = Await.result(
+            (self ? BeginReservationSubmission(id, inputIds, deadline))(
+              Timeout(RewardSweepLeaseMs.milliseconds)),
+            RewardSweepLeaseMs.milliseconds)
+          ack match {
+            case ReservationSubmissionStarted(_, accepted) => accepted
+            case _ => false
+          }
+        }
+        if (!acked) {
+          logger.warn(s"A reward sweep lease for ${chunk.size} box(es) was not acknowledged - skipping")
+        } else if (net <= 0) {
+          // Whole-wallet dust below one fee. The planner merges everything it can; what is left here
+          // genuinely cannot move yet. Cancelled rather than released: this path is past the
+          // acknowledgement, and Cancel is the only transition that may retire a still-Selected
+          // lease without treating the outcome as ambiguous.
+          logger.warn(s"Skipping ${chunk.size} reward box(es): ${chunk.map(_.value).sum} nanoERG " +
+            "does not cover one network fee - they stay available until more accumulate")
+          self ! CancelReservationSubmission(id, inputIds)
+        } else {
+          Try(client.execute { ctx =>
+            wallet.sign(TxBuilder(ctx)
+              .setInputs(chunk: _*)
+              .setOutputs(UTXO(wallet.contract, net), UTXO.feeBox(RewardSweepFee))
+              .buildTx(0, wallet.p2pk))
+          }) match {
+            case Failure(ex) =>
+              logger.warn(s"Reward sweep batch could not be signed: ${ex.getMessage}")
+              self ! CancelReservationSubmission(id, inputIds)
+            case Success(sTx) =>
+              Try(client.execute { ctx => ctx.sendTransaction(sTx) }) match {
+                case Success(rawTxId) =>
+                  val txId = rawTxId.replace("\"", "")
+                  // The payout output is first and lands at an ordinary address ordinary wallets see.
+                  val payout = InputUTXO(sTx.getOutputsToSpend.get(0))
+                  self ! CommitReservation(id, Seq(payout))
+                  claimed :+= RewardClaimChunk(txId, chunk.size, net)
+                  logger.info(s"Swept ${chunk.size} reward box(es) ($net nanoERG) to the primary " +
+                    s"address: $txId")
+                case Failure(sendEx) =>
+                  logger.warn(s"Reward sweep broadcast failed ambiguously, withholding the batch " +
+                    s"until the next refresh reconciles it: ${sendEx.getMessage}")
+                  self ! MarkReservationUncertain(id)
+              }
+          }
+        }
+      }
+      done.success(RewardsClaimed(claimed))
+    } catch {
+      case ex: Throwable => done.failure(ex)
+    }
+  }
+
+  private def saturate(amount: BigInt): Long =
+    amount.min(BigInt(Long.MaxValue)).toLong
 
   // ─── box selection ────────────────────────────────────────────────────────
 
@@ -764,6 +887,24 @@ object WalletManager {
 
   /** Reward boxes pulled per address. One Lithos block pays one, so this is years of them. */
   final val MAX_REWARD_BOXES: Int = 200
+
+  /** Fee on each reward-sweep broadcast. */
+  final val RewardSweepFee: Long = Parameters.MinFee
+
+  /** How long a sweep batch's send-boundary lease stays valid, build through broadcast. */
+  final val RewardSweepLeaseMs: Long = 30000L
+
+  /**
+   * Batch the unlocked coinbases for sweeping, smallest first so dust consolidates into early
+   * batches instead of stranding a tail of sub-fee boxes.
+   *
+   * Batches are capped at `maxInputs`, so dust beyond that boundary waits for the next claim
+   * rather than joining a fuller batch - the input cap is hard. A batch whose gross still cannot
+   * cover one fee is cancelled by the sweep and becomes selectable again; nothing here drops it.
+   * Pure; unit-tested.
+   */
+  def planRewardChunks(rewards: Seq[InputUTXO], txFee: Long, maxInputs: Int): Seq[Seq[InputUTXO]] =
+    rewards.sortBy(_.value).grouped(math.max(1, maxInputs)).filter(_.nonEmpty).toSeq
 
   /**
    * How long a reservation survives with no sign of being spent or released. Only reached by a

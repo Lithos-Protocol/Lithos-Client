@@ -1,6 +1,6 @@
 package api
 
-import api.LDErrors.{LDBadRequest, LDStateChanged, LDUnavailable, LDUnprocessable}
+import api.LithosApiErrors.{LithosBadRequest, LithosStateChanged, LithosUnavailable, LithosUnprocessable}
 import api.models._
 import cache.LDCache
 import lithosdex.states.{LDFeeValue, LDLiquidityState}
@@ -112,7 +112,7 @@ class LithosDexApiImpl @Inject()(nodeContext: NodeContext) extends LithosDexApi 
       // An output must stay strictly under the reserve it is drawn from — the curve only approaches it.
       // That is a property of the pool rather than of the request, which is why it is a 422.
       p.simSwapForOutput(amountOut, request.ergIn).map(LDSwapQuote(_)).getOrElse(
-        throw LDUnprocessable(
+        throw LithosUnprocessable(
           s"the pool cannot produce $amountOut: it holds only " +
             s"${if (request.ergIn) p.reservesY else p.reservesX} on that side, and an output has to stay " +
             "strictly under the reserve it is drawn from"))
@@ -156,7 +156,7 @@ class LithosDexApiImpl @Inject()(nodeContext: NodeContext) extends LithosDexApi 
           // nothing about how many shares the funds can buy.
           (availableX, availableY) match {
             case (Some(x), Some(y)) => p.simDeposit(positive("availableX", x), positive("availableY", y))
-            case _ => throw LDBadRequest(
+            case _ => throw LithosBadRequest(
               "supply either 'shares', or both 'availableX' and 'availableY'")
           }
       }
@@ -243,7 +243,7 @@ class LithosDexApiImpl @Inject()(nodeContext: NodeContext) extends LithosDexApi 
         val v = vaultState(ctx, LDBoxes.vaultBox(ctx, nodeApi))
         val (unclaimedX, unclaimedY) = v.owed(prov.shares, prov.entryX, prov.entryY)
         if ((unclaimedX > 0 || unclaimedY > 0) && !request.acknowledgeUnclaimedFees.contains(true))
-          throw LDBadRequest(
+          throw LithosBadRequest(
             s"provision ${prov.boxId} has $unclaimedX nanoERG and $unclaimedY token(s) of settled " +
               "fees that closing it would forfeit to nobody. Claim first, or resend with " +
               "'acknowledgeUnclaimedFees': true.")
@@ -325,7 +325,7 @@ class LithosDexApiImpl @Inject()(nodeContext: NodeContext) extends LithosDexApi 
         val prov = LDBoxes.provisionById(ctx, nodeApi, boxId)
         expectProvision(request.expectedProvisionBoxId, prov)
         if (!v.canClaim(prov.entryX, prov.entryY))
-          throw LDBadRequest(
+          throw LithosBadRequest(
             s"provision $boxId has nothing to settle: its entry is level with the vault's accumulator. " +
               "The pool has not been flushed since it last claimed; flush first, or wait for one.")
 
@@ -403,9 +403,9 @@ class LithosDexApiImpl @Inject()(nodeContext: NodeContext) extends LithosDexApi 
   /** A resize to zero is a redemption, and a resize to the current size moves nothing: both refused. */
   private def newShares(request: LDResizeRequest, prov: Provision): Long = {
     val next = LDAmounts.parseLong("newShares", request.newShares)
-    if (next <= 0) throw LDBadRequest(
+    if (next <= 0) throw LithosBadRequest(
       "'newShares' must be positive: a resize to zero is a redemption, use /dex/redeem")
-    if (next == prov.shares) throw LDBadRequest(
+    if (next == prov.shares) throw LithosBadRequest(
       s"provision ${prov.boxId} is already ${prov.shares} shares: a resize must change the size")
     next
   }
@@ -444,7 +444,7 @@ class LithosDexApiImpl @Inject()(nodeContext: NodeContext) extends LithosDexApi 
         ldCache.setPool(state)
 
         if (!state.pool.canFlush)
-          throw LDBadRequest(
+          throw LithosBadRequest(
             "nothing is pending: the pool refuses a flush that moves nothing. Fees accrue on swaps, so " +
               "there is nothing to move until one happens.")
 
@@ -529,15 +529,15 @@ class LithosDexApiImpl @Inject()(nodeContext: NodeContext) extends LithosDexApi 
                     from: Option[Int],
                     to: Option[Int],
                     bucket: Option[Int]): (Int, Int, Int) = {
-    if (snapshots.isEmpty) throw LDBadRequest(
+    if (snapshots.isEmpty) throw LithosBadRequest(
       "no pool history is indexed: the node needs extraIndex on for this endpoint")
 
     val lo = from.getOrElse(snapshots.head.height)
     val hi = to.getOrElse(snapshots.last.height)
-    if (hi < lo) throw LDBadRequest(s"'to' ($hi) is below 'from' ($lo)")
+    if (hi < lo) throw LithosBadRequest(s"'to' ($hi) is below 'from' ($lo)")
 
     val size = bucket.getOrElse(DefaultBucket)
-    if (size <= 0) throw LDBadRequest(s"'bucket' must be positive, got $size")
+    if (size <= 0) throw LithosBadRequest(s"'bucket' must be positive, got $size")
     (lo, hi, size)
   }
 
@@ -620,15 +620,15 @@ class LithosDexApiImpl @Inject()(nodeContext: NodeContext) extends LithosDexApi 
                                bucket: Option[Int],
                                ldCache: LDCache): LDPriceHistory = withDex { (ctx, nodeApi) =>
     val name = range.map(_.trim.toUpperCase).getOrElse(LDPriceHistory.Default)
-    val blocks = LDPriceHistory.Ranges.getOrElse(name, throw LDBadRequest(
+    val blocks = LDPriceHistory.Ranges.getOrElse(name, throw LithosBadRequest(
       s"'range' must be one of ${LDPriceHistory.Ranges.keys.toSeq.sorted.mkString(", ")}, got '$name'"))
     val size = bucket.getOrElse(math.max(1, blocks / LDPriceHistory.TargetPoints))
-    if (size <= 0) throw LDBadRequest(s"'bucket' must be positive, got $size")
+    if (size <= 0) throw LithosBadRequest(s"'bucket' must be positive, got $size")
     // A bucket small enough to make thousands of points is refused rather than served. Nothing
     // renders that many, only the first 250 could carry a timestamp, and the response would be
     // megabytes — the caller asked for something specific, so say what would work instead.
     if (blocks / size > LDPriceHistory.MaxPoints)
-      throw LDBadRequest(
+      throw LithosBadRequest(
         s"'bucket' of $size over $name would return more than ${LDPriceHistory.MaxPoints} points; " +
           s"use at least ${blocks / LDPriceHistory.MaxPoints + 1}")
 
@@ -705,7 +705,7 @@ class LithosDexApiImpl @Inject()(nodeContext: NodeContext) extends LithosDexApi 
   override def getRecentSwaps(limit: Option[Int]): LDRecentSwaps =
     withDex { (ctx, nodeApi) =>
       val want = limit.getOrElse(LDRecentSwaps.DefaultLimit)
-      if (want <= 0) throw LDBadRequest(s"'limit' must be positive, got $want")
+      if (want <= 0) throw LithosBadRequest(s"'limit' must be positive, got $want")
       val take = math.min(want, LDRecentSwaps.MaxLimit)
 
       val (snapshots, _) = lineage(nodeApi, ctx)
@@ -731,32 +731,9 @@ class LithosDexApiImpl @Inject()(nodeContext: NodeContext) extends LithosDexApi 
       })
     }
 
-  // ══════════════════════════════════════════════════════════════════════════
-  //  WALLET
-  // ══════════════════════════════════════════════════════════════════════════
-
-  /** @inheritdoc */
-  override def getWalletBalance: WalletBalance = {
-    val nodeApi = nodeContext.getNodeApi
-    val balances = nodeApi.walletBalances().getOrElse(
-      throw new RuntimeException("could not read wallet balances: is the node wallet unlocked?"))
-
-    // One lookup for every token at once. Names and decimals are cosmetic, so a node without the index
-    // returns the balances anyway rather than failing the request.
-    val info = Try(nodeApi.tokensByIds(balances.assets.map(_.tokenId)).getOrElse(Seq.empty))
-      .getOrElse(Seq.empty)
-      .map(t => t.id -> t).toMap
-
-    WalletBalance(
-      nanoErgs = LDAmounts(balances.balance),
-      tokens = balances.assets.map { a =>
-        WalletToken(
-          tokenId = a.tokenId,
-          name = info.get(a.tokenId).map(_.name),
-          decimals = info.get(a.tokenId).map(_.decimals),
-          amount = LDAmounts(a.amount))
-      })
-  }
+  // Wallet balances moved to `WalletApiImpl`. LithosDex grew its own read for the swap card and the
+  // collateral market grew a second one, and the two disagreed whenever a join landed between them.
+  // One definition now, in the surface that is only about the wallet.
 
   // ══════════════════════════════════════════════════════════════════════════
   //  PLUMBING
@@ -792,10 +769,10 @@ class LithosDexApiImpl @Inject()(nodeContext: NodeContext) extends LithosDexApi 
       // an immediate retry, so a queue of callers hammers a node that is already not answering.
       val heldFor = LithosDexApiImpl.heldForMillis()
       if (heldFor > LithosDexApiImpl.StuckHolderMs)
-        throw LDUnavailable(
+        throw LithosUnavailable(
           s"a LithosDex mutation has held the lock for ${heldFor}ms, which is longer than a node " +
             s"round trip should take, so $what was not attempted: the node may not be answering")
-      throw LDStateChanged(
+      throw LithosStateChanged(
         s"another LithosDex mutation is still running, so $what was not attempted: re-read the pool " +
           "and vault and quote again")
     }
@@ -809,19 +786,19 @@ class LithosDexApiImpl @Inject()(nodeContext: NodeContext) extends LithosDexApi 
   /** Refuse a request quoted against a box that has since been spent, and say what replaced it. */
   private def expectPool(expected: Option[String], box: InputUTXO): Unit =
     expected.filter(_ != box.id.toString).foreach { stale =>
-      throw LDStateChanged(
+      throw LithosStateChanged(
         s"the pool has moved: quoted against $stale, now ${box.id}", poolBoxId = Some(box.id.toString))
     }
 
   private def expectVault(expected: Option[String], box: InputUTXO): Unit =
     expected.filter(_ != box.id.toString).foreach { stale =>
-      throw LDStateChanged(
+      throw LithosStateChanged(
         s"the vault has moved: quoted against $stale, now ${box.id}", vaultBoxId = Some(box.id.toString))
     }
 
   private def expectProvision(expected: Option[String], prov: Provision): Unit =
     expected.filter(_ != prov.boxId).foreach { stale =>
-      throw LDStateChanged(
+      throw LithosStateChanged(
         s"provision $stale has been spent; its successor is ${prov.boxId}",
         provisionBoxId = Some(prov.boxId))
     }
@@ -834,16 +811,16 @@ class LithosDexApiImpl @Inject()(nodeContext: NodeContext) extends LithosDexApi 
    */
   private def atMost(field: String, bound: Option[Long], actual: Long, what: String): Unit =
     bound.filter(actual > _).foreach { limit =>
-      throw LDUnprocessable(s"$what is $actual, above the '$field' ceiling of $limit")
+      throw LithosUnprocessable(s"$what is $actual, above the '$field' ceiling of $limit")
     }
 
   private def atLeast(field: String, bound: Option[Long], actual: Long, what: String): Unit =
     bound.filter(actual < _).foreach { limit =>
-      throw LDUnprocessable(s"$what is $actual, below the '$field' floor of $limit")
+      throw LithosUnprocessable(s"$what is $actual, below the '$field' floor of $limit")
     }
 
   private def nonNegative(field: String, value: Long): Long =
-    if (value >= 0) value else throw LDBadRequest(s"'$field' cannot be negative, got $value")
+    if (value >= 0) value else throw LithosBadRequest(s"'$field' cannot be negative, got $value")
 
   private def wallet: NodeWallet = nodeContext.getNodeWallet
 
@@ -893,7 +870,7 @@ class LithosDexApiImpl @Inject()(nodeContext: NodeContext) extends LithosDexApi 
   }
 
   private def positive(field: String, value: Long): Long =
-    if (value > 0) value else throw LDBadRequest(s"'$field' must be positive, got $value")
+    if (value > 0) value else throw LithosBadRequest(s"'$field' must be positive, got $value")
 
   /**
    * How long a mutation waits for the lock. Long enough for one node round trip and a signature —

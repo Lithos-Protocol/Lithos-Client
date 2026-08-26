@@ -67,6 +67,27 @@ object EmissionSchedule {
     val emittedPriv = if (total >= priv) priv else 0L
     (total, total - emittedPriv, if (emittedPriv > 0) founders else Seq.empty[(Array[Byte], Long)])
   }
+
+  /** Public-rate phase label for display: DECAYING, STEPPED, FLAT_50 or ENDED. */
+  def phaseAt(currentBlock: Int): String =
+    if (currentBlock >= FINAL_BLOCK) "ENDED"
+    else if (currentBlock / EPOCH_LENGTH >= P3_START) "FLAT_50"
+    else if (currentBlock / EPOCH_LENGTH >= P2_START) "STEPPED"
+    else "DECAYING"
+
+  /**
+   * The next height at which any rate component changes - a public decay step, the founder period
+   * ending, or one of the fixed phase starts. `None` once the schedule has ended.
+   */
+  def nextChangeAt(currentBlock: Int): Option[Int] = {
+    if (currentBlock >= FINAL_BLOCK) return None
+    val epoch = currentBlock / EPOCH_LENGTH
+    val boundary = (epoch + 1 to P3_START).find { e =>
+      e == PRIV_LENGTH || e == P2_START || e == P3_START ||
+        (e < P2_START && e % P1_DECAY_LENGTH == 0)
+    }
+    Some(boundary.map(_ * EPOCH_LENGTH).getOrElse(FINAL_BLOCK))
+  }
 }
 
 /**

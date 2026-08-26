@@ -14,11 +14,18 @@ POST /blocks/utxoIds          controllers.BlocksApiController.getPoolBlocksByIds
 GET /blocks/:utxoId           controllers.BlocksApiController.getBlockById(utxoId: String)
 GET /blocks/:utxoId/miners    controllers.BlocksApiController.getBlockMinersById(utxoId: String)
 
-# Routes for Collateral API
+# Routes for Collateral Market API
+GET  /collateral/market        controllers.CollateralMarketApiController.getMarketInfo()
+GET  /collateral/queue         controllers.CollateralMarketApiController.getQueue(limit: Option[Int], offset: Option[Int])
+GET  /collateral/active        controllers.CollateralMarketApiController.getActiveSet(limit: Option[Int], offset: Option[Int])
+GET  /collateral/permits/history controllers.CollateralMarketApiController.getPermitHistory(limit: Option[Int])
+GET  /collateral/rewards       controllers.CollateralMarketApiController.getRewardSummary()
 + nocsrf
-POST /collateral/create       controllers.CollateralApiController.createCollateralUTXO()
-GET /collateral/all           controllers.CollateralApiController.getAllCollateralInfo()
-GET /collateral/local         controllers.CollateralApiController.getLocalCollateralInfo()
+POST /collateral/rewards/claim controllers.CollateralMarketApiController.claimRewards()
++ nocsrf
+POST /collateral/join/check    controllers.CollateralMarketApiController.checkJoin()
++ nocsrf
+POST /collateral/join          controllers.CollateralMarketApiController.join()
 
 # Routes for Info API
 
@@ -66,7 +73,8 @@ POST /dex/flush/check                           controllers.LithosDexApiControll
 + nocsrf
 POST /dex/flush                                 controllers.LithosDexApiController.flush()
 
-GET  /wallet/balance                            controllers.LithosDexApiController.getWalletBalance()
+# Routes for Wallet API
+GET  /wallet/balances                           controllers.WalletApiController.getWalletBalances()
 
 # Routes for Payments API
 

@@ -91,10 +91,10 @@ class EmissionTransactions(prover: NodeWallet,
   private val logger: Logger = LoggerFactory.getLogger("EmissionTransactions")
 
   /** Boxes already consumed in the mempool are no use to us, confirmed or not. */
-  private val liveOnly = MempoolOptions(includeUnconfirmed = false, excludeMempoolSpent = true)
+  val liveOnly = MempoolOptions(includeUnconfirmed = false, excludeMempoolSpent = true)
 
   /** Everything live, mempool included - what a duplicate-key check has to see. */
-  private val withMempool = MempoolOptions.WithMempool
+  val withMempool = MempoolOptions.WithMempool
 
   def contracts(ctx: BlockchainContext): CompiledContracts = ProtocolContracts(ctx)
 
@@ -823,11 +823,11 @@ class EmissionTransactions(prover: NodeWallet,
   }
 
   /** Respend a just-built transaction's emission successor, and feed its change back to funding. */
-  private case class ChainResult(emission: InputUTXO, walletChange: Option[InputUTXO])
+  case class ChainResult(emission: InputUTXO, walletChange: Option[InputUTXO])
 
-  private def chainOn(sTx: SignedTransaction,
-                      funding: FundingSource,
-                      holdWalletChange: Boolean = true): ChainResult = {
+  def chainOn(sTx: SignedTransaction,
+              funding: FundingSource,
+              holdWalletChange: Boolean = true): ChainResult = {
     val outputs = sTx.getOutputsToSpend.asScala.toSeq.map(InputUTXO(_))
     val change = outputs.drop(1).find(_.contract.ergoTreeHex == walletTree)
     if (holdWalletChange) change.foreach(funding.push)
@@ -839,7 +839,7 @@ class EmissionTransactions(prover: NodeWallet,
   // ══════════════════════════════════════════════════════════════════════════
 
   /** The head of the queue is the OLDEST unspent queue box, so one ascending page always holds it. */
-  private def queueBoxes(ctx: BlockchainContext, mempool: MempoolOptions): Seq[IndexedBox] = {
+  def queueBoxes(ctx: BlockchainContext, mempool: MempoolOptions): Seq[IndexedBox] = {
     val gateTree = contracts(ctx).gate.ergoTreeHex
     nodeApi
       .unspentBoxesByTokenId(LFSMHelpers.QUEUE_TOKEN.toString, Paging.all(config.queueScanLimit),
@@ -848,7 +848,7 @@ class EmissionTransactions(prover: NodeWallet,
       .filter(b => carriesOne(b, LFSMHelpers.QUEUE_TOKEN) && b.ergoTree == gateTree)
   }
 
-  private def proofOfSpendBoxes(ctx: BlockchainContext, mempool: MempoolOptions): Seq[IndexedBox] = {
+  def proofOfSpendBoxes(ctx: BlockchainContext, mempool: MempoolOptions): Seq[IndexedBox] = {
     val gateTree = contracts(ctx).gate.ergoTreeHex
     nodeApi
       .unspentBoxesByTokenId(LFSMHelpers.COLLAT_TOKEN.toString, Paging.all(config.queueScanLimit),
@@ -866,8 +866,8 @@ class EmissionTransactions(prover: NodeWallet,
    * `consume` and dropped rather than accumulated, because the queue can run to thousands of boxes
    * and the callers only want a few bytes out of each. The hot paths stay capped.
    */
-  private def scanByToken(ctx: BlockchainContext, tokenId: ErgoId, mempool: MempoolOptions)
-                         (consume: Seq[IndexedBox] => Unit): Unit = {
+  def scanByToken(ctx: BlockchainContext, tokenId: ErgoId, mempool: MempoolOptions)
+                 (consume: Seq[IndexedBox] => Unit): Unit = {
     var seen = 0
     var paging = Paging(0, EmissionTransactions.ScanPageSize)
     var exhausted = false
@@ -889,17 +889,17 @@ class EmissionTransactions(prover: NodeWallet,
   }
 
   /** R5 of a queue or collateral box, as the hashed prop bytes the active set is keyed by. */
-  private def lenderKeyOf(b: IndexedBox): Option[Array[Byte]] =
+  def lenderKeyOf(b: IndexedBox): Option[Array[Byte]] =
     Try(lenderEntry(b.box.registerValues(1).getValue.asInstanceOf[SigmaProp])).toOption
 
   /** R4 of a proof-of-spend box: the identity it retires. */
-  private def retiringKey(b: IndexedBox): Option[Array[Byte]] =
+  def retiringKey(b: IndexedBox): Option[Array[Byte]] =
     Try(b.box.registerValues.head.getValue.asInstanceOf[Coll[Byte]].toArray).toOption
 
-  private def queuePosition(regs: Seq[ErgoValue[_]]): Option[Long] =
+  def queuePosition(regs: Seq[ErgoValue[_]]): Option[Long] =
     if (regs.size >= 4) Try(regs(3).getValue.asInstanceOf[Long]).toOption else None
 
-  private def carriesOne(b: IndexedBox, tokenId: ErgoId): Boolean =
+  def carriesOne(b: IndexedBox, tokenId: ErgoId): Boolean =
     b.assets.headOption.exists(a => a.tokenId == tokenId.toString && a.amount == 1L)
 
   /**

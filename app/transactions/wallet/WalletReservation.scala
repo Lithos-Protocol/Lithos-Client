@@ -96,7 +96,8 @@ object WalletReservation {
    * already acknowledged are manager-cancelled and the untouched suffix is released; no node call
    * has occurred at this point.
    */
-  private[transactions] def beginAll(reservations: Seq[WalletReservation]): Unit = {
+  /** Widened for the collateral-market API, which joins the queue from outside the package. */
+  def beginAll(reservations: Seq[WalletReservation]): Unit = {
     var begun = Vector.empty[WalletReservation]
     var index = 0
     try {

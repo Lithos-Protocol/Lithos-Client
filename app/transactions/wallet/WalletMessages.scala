@@ -92,6 +92,45 @@ object WalletMessages {
    */
   case object ResetUsedInputs
 
+  // ─── reward-box sweep ─────────────────────────────────────────────────────
+
+  /** Ask how many coinbase reward boxes this wallet holds, locked and unlocked. */
+  case object GetUnlockedRewards
+
+  /** Reply to [[GetUnlockedRewards]]. Amounts are nanoERG as of the last refresh's height. */
+  final case class RewardSummary(lockedBoxes: Int,
+                                 unlockedBoxes: Int,
+                                 lockedNanoErgs: Long,
+                                 unlockedNanoErgs: Long,
+                                 blocksUntilFirstUnlock: Option[Int])
+
+  /**
+   * Ask how much ERG is selectable right now — unreserved wallet boxes plus matured reward boxes.
+   * A dry-run figure: nothing is reserved by asking.
+   */
+  case object GetSpendableBalance
+
+  /** Reply to [[GetSpendableBalance]]. */
+  final case class SpendableBalance(nanoErgs: Long)
+
+  /**
+   * Sweep every unlocked coinbase box to the wallet's primary address (EIP-3 index 0). Runs off the
+   * actor in batches; each accepted batch retires its inputs exactly like an external send.
+   */
+  case object ClaimUnlockedRewards
+
+  /** One broadcast batch of a sweep. */
+  final case class RewardClaimChunk(txId: String, boxes: Int, nanoErgs: Long)
+
+  /**
+   * Reply to [[ClaimUnlockedRewards]] on success. Boxes are never dropped for being small — the
+   * sweep exists to consolidate them — so an empty result means another sweep held the leases.
+   */
+  final case class RewardsClaimed(chunks: Seq[RewardClaimChunk])
+
+  /** Reply to [[ClaimUnlockedRewards]] when the sweep could not run at all. */
+  final case class RewardClaimFailed(reason: String)
+
   // ─── exceptions ───────────────────────────────────────────────────────────
 
   class InsufficientWalletFundsException(msg: String) extends RuntimeException(msg)

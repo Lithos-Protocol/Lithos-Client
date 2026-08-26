@@ -24,17 +24,27 @@ tags:
   - name: mining
     description: Information about the local stratum and mining process
     x-displayName: Mining
-  - name: collateral
-    description: Find and interact with collateral UTXOs 
-    x-displayName: Collateral
+  - name: collateral-market
+    description: >
+      Stats and participation for the collateral market: the queue, the active set, emission
+      state, and joining the queue.
+
+
+      **All amounts are decimal strings, not JSON numbers.** ERG amounts are nanoERG; LIT amounts
+      are base units (9 decimals).
+    x-displayName: Collateral Market
+  - name: wallet
+    description: >
+      Balances and lending status for the client's own wallet. Requires an `api_key`.
+
+
+      **All amounts are decimal strings, not JSON numbers.** ERG amounts are nanoERG; LIT amounts
+      are base units (9 decimals).
+    x-displayName: Wallet
   - name: pool_block_model
     x-displayName: The PoolBlock Model
     description: |
       <SchemaDefinition schemaRef="#/components/schemas/PoolBlock" />
-  - name: collateral_utxo_model
-    x-displayName: The CollateralUTXO Model
-    description: |
-      <SchemaDefinition schemaRef="#/components/schemas/CollateralUTXO" />
   - name: lithosdex
     description: >
       Swap, provide liquidity and collect fees on the LithosDex pool.
@@ -49,15 +59,15 @@ x-tagGroups:
       - info
       - blocks
       - payments
-      - collateral
+      - collateral-market
       - lithosdex
+      - wallet
   - name: Stratum
     tags:
       - mining
   - name: Models
     tags:
       - pool_block_model
-      - collateral_utxo_model
 paths:
   /blocks:
     get:
@@ -433,94 +443,6 @@ paths:
               schema:
                 $ref: '#/components/schemas/ApiError'
 
-  /collateral/all:
-    get:
-      summary: List all collateral UTXOs
-      description: Get list of collateral UTXOs which will be used by Lithos while mining.
-       Returns a page of the whole list starting from `offset` and containing `limit` items.
-      operationId: getAllCollateralInfo
-      tags:
-        - collateral
-      parameters:
-        - in: query
-          name: limit
-          required: false
-          description: The number of items in list to return
-          schema:
-            type: integer
-            format: int32
-            minimum: 10
-            maximum: 100
-            default: 50
-        - in: query
-          name: offset
-          required: false
-          description: The offset to start the list from
-          schema:
-            type: integer
-            format: int32
-            default: 0
-      responses:
-        '200':
-          description: Array of collateral UTXOs
-          content:
-            application/json:
-              schema:
-                type: array
-                description: Array of collateral UTXOs
-                items:
-                  $ref: '#/components/schemas/CollateralUTXO'
-        default:
-          description: Error
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiError'
-  /collateral/local:
-    get:
-      security:
-        - ApiKeyAuth: [api_key]
-      summary: List personal collateral UTXOs
-      description: Get the list of collateral UTXOs made by you. Returns a page of the whole list
-       starting from `offset` and containing `limit` items.
-      operationId: getLocalCollateralInfo
-      tags:
-        - collateral
-      parameters:
-        - in: query
-          name: limit
-          required: false
-          description: The number of items in list to return
-          schema:
-            type: integer
-            format: int32
-            minimum: 10
-            maximum: 100
-            default: 50
-        - in: query
-          name: offset
-          required: false
-          description: The offset to start the list from
-          schema:
-            type: integer
-            format: int32
-            default: 0
-      responses:
-        '200':
-          description: Array of collateral UTXOs
-          content:
-            application/json:
-              schema:
-                type: array
-                description: Array of collateral UTXOs
-                items:
-                  $ref: '#/components/schemas/CollateralUTXO'
-        default:
-          description: Error
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiError'
   /dex/pool:
     get:
       summary: LithosDex pool state
@@ -1491,23 +1413,37 @@ paths:
               schema:
                 $ref: '#/components/schemas/ApiError'
 
-  /wallet/balance:
+  /wallet/balances:
     get:
-      summary: Wallet balance
+      security:
+        - ApiKeyAuth: [api_key]
+      summary: Wallet balances and lending status
       description: >
-        ERG and token balances for the client's wallet.
-      operationId: getWalletBalance
+        Spendable ERG, token balances, and — under `collateral` — lender keys, queued and live
+        positions, locked block rewards, and the self-collateralization settings in effect.
+
+
+        `nanoErgs` is the ERG available to spend right now: unreserved wallet boxes plus matured
+        block rewards. Reading balances and lending status in one call means both describe the same
+        instant.
+      operationId: getWalletBalances
       tags:
-        - lithosdex
+        - wallet
       responses:
         '200':
-          description: Current wallet balance
+          description: Current wallet balances and lending status
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/WalletBalance'
+                $ref: '#/components/schemas/WalletBalances'
+        '403':
+          description: Missing or wrong api_key
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
         '503':
-          description: Wallet unavailable — it may be locked. Retry.
+          description: Node or wallet unavailable — it may be locked. Retry.
           content:
             application/json:
               schema:
@@ -1519,28 +1455,373 @@ paths:
               schema:
                 $ref: '#/components/schemas/ApiError'
 
-  /collateral/create:
-    post:
-      summary: Create new collateral UTXOs
-      security:
-        - ApiKeyAuth: [api_key]
-      description: Create new collateral UTXOs which will be used by Lithos miners
-      operationId: createCollateralUTXO
+  /collateral/market:
+    get:
+      summary: Collateral market snapshot
+      description: >
+        Current queue and active-set sizes, total ERG and LIT locked, the permit a new join pays,
+        and where the emission schedule currently sits.
+      operationId: getCollateralMarketInfo
       tags:
-        - collateral
-      requestBody:
-          required: true
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/CollateralInfo'
+        - collateral-market
       responses:
         '200':
-          description: Successful transaction to create collateral UTXOs
+          description: Current market state
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/SuccessfulTransaction'
+                $ref: '#/components/schemas/CollateralMarketInfo'
+        '503':
+          description: Node unavailable. Retry.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /collateral/queue:
+    get:
+      summary: List queue boxes
+      description: >
+        Positions waiting for a slot, head first, oldest entries covered first. Use
+        `/collateral/market` for the current head to work out how many positions are ahead of any
+        one of them.
+      operationId: getCollateralQueue
+      tags:
+        - collateral-market
+      parameters:
+        - in: query
+          name: limit
+          required: false
+          description: The number of items in list to return
+          schema:
+            type: integer
+            format: int32
+            minimum: 10
+            maximum: 100
+            default: 50
+        - in: query
+          name: offset
+          required: false
+          description: The offset to start the list from
+          schema:
+            type: integer
+            format: int32
+            default: 0
+      responses:
+        '200':
+          description: Queue boxes, head first
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/CollateralQueueEntry'
+        '503':
+          description: Node unavailable. Retry.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /collateral/active:
+    get:
+      summary: List the active set
+      description: >
+        Live collateral boxes any miner can spend to make a Lithos block, newest first. At most
+        100 exist at once.
+      operationId: getCollateralActiveSet
+      tags:
+        - collateral-market
+      parameters:
+        - in: query
+          name: limit
+          required: false
+          description: The number of items in list to return
+          schema:
+            type: integer
+            format: int32
+            minimum: 10
+            maximum: 100
+            default: 50
+        - in: query
+          name: offset
+          required: false
+          description: The offset to start the list from
+          schema:
+            type: integer
+            format: int32
+            default: 0
+      responses:
+        '200':
+          description: Live collateral boxes, newest first
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/CollateralActiveEntry'
+        '503':
+          description: Node unavailable. Retry.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /collateral/permits/history:
+    get:
+      summary: Permit price history
+      description: >
+        What each waiting position paid to join, oldest first — the permit curve as actually
+        joined. Covers only positions still waiting; activated ones are not reconstructible. The
+        newest join is always the last point, so the series ends at today's price.
+      operationId: getCollateralPermitHistory
+      tags:
+        - collateral-market
+      parameters:
+        - in: query
+          name: limit
+          required: false
+          description: Roughly how many points to return, capped at 2000
+          schema:
+            type: integer
+            format: int32
+            default: 500
+      responses:
+        '200':
+          description: Sampled permit prices across the waiting queue
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CollateralPermitHistory'
+        '503':
+          description: Node unavailable. Retry.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /collateral/rewards:
+    get:
+      summary: Your locked block rewards
+      security:
+        - ApiKeyAuth: [api_key]
+      description: >
+        Coinbase reward boxes held by this wallet — how many are still behind the 720-block
+        timelock, how many are spendable now, and the ERG totals.
+      operationId: getCollateralRewardSummary
+      tags:
+        - collateral-market
+      responses:
+        '200':
+          description: Reward box counts and totals
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CollateralRewardSummary'
+        '503':
+          description: Node or wallet unavailable. Retry.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /collateral/rewards/claim:
+    post:
+      summary: Claim unlocked block rewards
+      security:
+        - ApiKeyAuth: [api_key]
+      description: >
+        Sweep every unlocked reward box to this wallet's primary address (EIP-3 index 0), batching
+        boxes into as few transactions as possible. Dust is consolidated, never dropped.
+
+
+        A sweep that broadcasts nothing returns an error status rather than an empty 200, so a
+        result with no claims is never ambiguous.
+      operationId: claimCollateralRewards
+      tags:
+        - collateral-market
+      responses:
+        '200':
+          description: The sweep transactions that were sent
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CollateralRewardClaimResult'
+        '400':
+          description: >
+            No unlocked reward boxes to claim, or another claim is already sweeping them.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '422':
+          description: >
+            The sweep started and could not finish. `detail` carries the reason it stopped; batches
+            broadcast before that point have still been sent.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '503':
+          description: Node or wallet unavailable. Nothing was decided; retry.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /collateral/join/check:
+    post:
+      security:
+        - ApiKeyAuth: [api_key]
+      summary: Quote joining the queue
+      description: >
+        What creating `count` positions costs right now: principal per position, network fee per
+        join, and the permit for each. Permits escalate because each join lengthens the queue the
+        next one is priced from.
+
+
+        Also reports whether the join would be accepted: check `manualJoinAllowed` and
+        `blockedReason` before enabling a send control. Requires an `api_key`, since the quote
+        names this wallet's lender addresses and its shortfall.
+      operationId: checkCollateralJoin
+      tags:
+        - collateral-market
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CollateralJoinCheckRequest'
+      responses:
+        '200':
+          description: Quote for the requested number of positions
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CollateralJoinQuote'
+        '400':
+          description: Malformed body, or a count outside 1..25.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '503':
+          description: Node or wallet unavailable. Retry.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /collateral/join:
+    post:
+      security:
+        - ApiKeyAuth: [api_key]
+      summary: Join the collateral queue
+      description: >
+        Post principal and permit for `count` new positions, each under its own lender key.
+        Positions cannot be withdrawn once queued, so `acknowledgeNoWithdrawal` must be true.
+        Send `expectedEmissionBoxId` from the quote to get a 409 instead of a join priced against
+        stale state.
+
+
+        **Refused with 409 while the client has `autoCollateralize` on.** The automated pass owns
+        lender-key selection, and a manual join can take a key it is already using; only one live
+        position per key is allowed, and the second is forfeited. Check `manualJoinAllowed` on the
+        quote first.
+
+
+        Positions are created one at a time, each chained onto the last. If one fails, the run stops
+        there: the response is 200 with the positions already created and a `stoppedReason`. A run
+        that creates none returns an error status instead.
+      operationId: joinCollateralQueue
+      tags:
+        - collateral-market
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CollateralJoinExecuteRequest'
+      responses:
+        '200':
+          description: The join transactions, one per position
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CollateralJoinResult'
+        '400':
+          description: >
+            Malformed body, a count outside 1..25, a permit cap below the current requirement, or
+            `acknowledgeNoWithdrawal` not set.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '409':
+          description: >
+            `autoCollateralize` is on, so manual joins are refused — the client's own pass owns
+            joining. Also returned when the emission box moved between quote and send, in which
+            case re-quote and resend.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '422':
+          description: >
+            The wallet cannot cover it, a permit exceeds `maxPermitEachLit`, fewer free lender keys
+            remain than positions requested, or the run created no position at all.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '503':
+          description: Node or wallet unavailable. Retry.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
         default:
           description: Error
           content:
@@ -1701,80 +1982,723 @@ components:
           type: double
           description: Number of super shares produced by the mining client within the last hour
           example: 2.5
-    CollateralUTXO:
-      description: Collateral UTXO which is to be used by Lithos while mining
+    CollateralMarketInfo:
+      description: >
+        One snapshot of the collateral market. ERG amounts are nanoERG decimal strings; permit and
+        emission amounts are LIT base units as decimal strings.
       type: object
-      x-tags: collateral
+      x-tags: collateral-market
       required:
-        - id
-        - reward
-        - lender
-        - fee
-        - creationHeight
+        - syncHeight
+        - activationCounter
+        - queueHead
+        - queueTail
+        - queueLength
+        - activeSetSize
+        - activeSetMax
+        - bootstrapping
+        - proofsOfSpendAvailable
+        - queuedNanoErgs
+        - activeNanoErgs
+        - permitLitLocked
+        - principalNanoErgs
+        - currentPermitLit
+        - permitFloorLit
+        - permitCeilingLit
+        - permitSlopeLitPerBox
+        - emissionPhase
+        - foundersActive
+        - currentEpoch
+        - emissionRatePublicLit
+        - emissionRatePrivateLit
+        - emissionRateTotalLit
+        - scheduleEndsAtHeight
       properties:
-        id:
-          type: string
-          description: Id of this collateral UTXO
-          example: 'ce00d6e0f4fd3390c0519bb0d24824e1e6b06978163f4845a7cf2c1c7d8f1b65'
-        reward:
-          type: integer
-          format: int64
-          description: Block reward this collateral UTXO covers
-          example: 67500000000
-        lender:
-          type: string
-          description: Address of lender who created this collateral UTXO
-          example: '3WwbQFz3vgi8ChY9dM1haQLGDeQYe5U9z98bwWW4TqxxEAvyYu5y'
-        fee:
-          type: integer
-          format: int64
-          description: Fee that this collateral UTXO charges from the entire pool
-          example: 1000000
-        creationHeight:
-          type: integer
-          description: Height this collateral UTXO was made
-          example: 41482
-    CollateralInfo:
-      description: Information needed to create collateral UTXOs
-      type: object
-      x-tags: collateral
-      required:
-        - reward
-        - fee
-        - numUtxos
-      properties:
-        reward:
-          type: integer
-          format: int64
-          description: Block reward this collateral UTXO covers
-          example: 67500000000
-        fee:
-          type: integer
-          format: int64
-          description: Fee that this collateral UTXO charges from the entire pool
-          example: 1000000
-        numUtxos:
+        syncHeight:
           type: integer
           format: int32
-          description: Number of collateral UTXOs to create in this transaction
-          example: 5
-    
-    SuccessfulTransaction:
-      description: Transaction which was successfully sent to the node
-      type: object
-      required:
-        - txId
-        - height
-      properties:
-        txId:
+          description: Chain height this snapshot was taken at
+          example: 484719
+        activationCounter:
+          type: integer
+          format: int32
+          description: Activations paid so far — the emission box's position in the schedule
+          example: 1234
+        queueHead:
+          type: integer
+          format: int64
+          description: Position of the queue box that activates next
+          example: 410
+        queueTail:
+          type: integer
+          format: int64
+          description: Position the next join will take
+          example: 1247
+        queueLength:
+          type: integer
+          format: int64
+          description: Positions waiting — queueTail less queueHead
+          example: 837
+        activeSetSize:
+          type: integer
+          format: int32
+          description: Distinct lender keys currently holding a live collateral box
+          example: 97
+        activeSetMax:
+          type: integer
+          format: int32
+          description: Slots the active set can hold. Fixed by contract.
+          example: 100
+        bootstrapping:
+          type: boolean
+          description: True while the set is still filling and an Activate needs no retirement
+          example: false
+        proofsOfSpendAvailable:
+          type: integer
+          format: int32
+          description: Retirements usable next block — how many queued positions could activate now
+          example: 2
+        queuedNanoErgs:
           type: string
-          description: Hex-encoded id of this transaction
-          example: '40b7d045a858d537cdbf072e46ffbb86c0c9f6b0e93c369c1ffcba76797636d7'
+          description: Total principal sitting in the queue. Decimal string.
+          example: '2439835500000'
+        activeNanoErgs:
+          type: string
+          description: Total value across the live collateral boxes. Decimal string.
+          example: '282755000000'
+        permitLitLocked:
+          type: string
+          description: LIT locked as permits across the queue and the active set. Decimal string.
+          example: '12840000000'
+        principalNanoErgs:
+          type: string
+          description: What one join posts — block reward less fee cap plus dust. Fixed by contract. Decimal string.
+          example: '2915000000'
+        currentPermitLit:
+          type: string
+          description: The permit the NEXT join pays at this backlog, before any escalation. Decimal string.
+          example: '19370000000'
+        permitFloorLit:
+          type: string
+          description: Permit at an empty queue, from the config box. Decimal string.
+          example: '1000000000000'
+        permitCeilingLit:
+          type: string
+          description: The most a permit can ever be. Decimal string.
+          example: '30000000000000'
+        permitSlopeLitPerBox:
+          type: string
+          description: Permit added per queued box. Decimal string.
+          example: '10000000000'
+        emissionPhase:
+          type: string
+          enum: ['DECAYING', 'STEPPED', 'FLAT_50', 'ENDED']
+          description: >
+            Public emission rate phase. DECAYING drops every two epochs; STEPPED is the two fixed
+            intermediate rates; FLAT_50 is the final constant rate; ENDED means the schedule is
+            complete.
+          example: 'DECAYING'
+        foundersActive:
+          type: boolean
+          description: True while the private founder allocation is still being paid alongside the public rate
+          example: true
+        currentEpoch:
+          type: integer
+          format: int32
+          description: Schedule epoch of the last activation
+          example: 0
+        nextPhaseChangeHeight:
+          type: integer
+          format: int32
+          nullable: true
+          description: Height of the next rate change or epoch boundary. Null once ENDED.
+          example: 250000
+        emissionRatePublicLit:
+          type: string
+          description: Public LIT per activation at this point in the schedule. Decimal string.
+          example: '500000000000'
+        emissionRatePrivateLit:
+          type: string
+          description: Founder-side LIT per activation, zero once that period ends. Decimal string.
+          example: '140000000000'
+        emissionRateTotalLit:
+          type: string
+          description: What one Activate actually emits, capped by what the box still holds. Decimal string.
+          example: '640000000000'
+        scheduleEndsAtHeight:
+          type: integer
+          format: int32
+          description: Activation count the schedule ends at (2,825,000)
+          example: 2825000
+
+    CollateralQueueEntry:
+      description: A position waiting in the collateral queue
+      type: object
+      x-tags: collateral-market
+      required:
+        - boxId
+        - position
+        - lenderAddress
+        - principalNanoErgs
+        - permitLit
+        - creationHeight
+      properties:
+        boxId:
+          type: string
+          description: Id of the queue box
+          example: 'ce00d6e0f4fd3390c0519bb0d24824e1e6b06978163f4845a7cf2c1c7d8f1b65'
+        position:
+          type: integer
+          format: int64
+          description: Place in the queue. Lower activates sooner; the head is the smallest live position.
+          example: 411
+        lenderAddress:
+          type: string
+          description: Address that receives the block reward when this box funds a block
+          example: '3WwbQFz3vgi8ChY9dM1haQLGDeQYe5U9z98bwWW4TqxxEAvyYu5y'
+        principalNanoErgs:
+          type: string
+          description: ERG committed to the block that consumes this box. Decimal string.
+          example: '2915000000'
+        permitLit:
+          type: string
+          description: LIT locked alongside it, returned on use. Zero when no permit applies. Decimal string.
+          example: '19380000000'
+        creationHeight:
+          type: integer
+          format: int32
+          description: Height this position joined at
+          example: 484102
+
+    CollateralActiveEntry:
+      description: A live collateral box waiting to be spent by whichever miner finds the next block
+      type: object
+      x-tags: collateral-market
+      required:
+        - boxId
+        - lenderAddress
+        - valueNanoErgs
+        - carriedLit
+        - creationHeight
+      properties:
+        boxId:
+          type: string
+          example: 'ce00d6e0f4fd3390c0519bb0d24824e1e6b06978163f4845a7cf2c1c7d8f1b65'
+        lenderAddress:
+          type: string
+          description: Address that receives the block reward when this box is spent by a miner
+          example: '3WwbQFz3vgi8ChY9dM1haQLGDeQYe5U9z98bwWW4TqxxEAvyYu5y'
+        valueNanoErgs:
+          type: string
+          description: ERG that becomes the pool's payout for the block spending it. Decimal string.
+          example: '2915000000'
+        carriedLit:
+          type: string
+          description: >
+            LIT carried on this box — its block's emission plus the lender's permit, held together.
+            Decimal string.
+          example: '19380000000'
+        creationHeight:
+          type: integer
+          format: int32
+          description: Height this box was activated at
+          example: 484650
+
+    CollateralPermitHistoryPoint:
+      description: What one waiting position paid to join
+      type: object
+      x-tags: collateral-market
+      required:
+        - position
+        - height
+        - permitLit
+      properties:
+        position:
+          type: integer
+          format: int64
+          description: Queue position taken at join time; ascending with the series
+          example: 411
         height:
           type: integer
           format: int32
-          description: Height this transaction was sent
-          example: 45096
+          description: Height the join confirmed at
+          example: 484102
+        permitLit:
+          type: string
+          description: Permit locked by this position. Decimal string.
+          example: '19370000000'
+
+    CollateralPermitHistory:
+      description: Permit prices across the positions still waiting, oldest first
+      type: object
+      x-tags: collateral-market
+      required:
+        - points
+        - coveredHeadPosition
+        - coveredTailPosition
+        - truncated
+      properties:
+        points:
+          type: array
+          items:
+            $ref: '#/components/schemas/CollateralPermitHistoryPoint'
+        coveredHeadPosition:
+          type: integer
+          format: int64
+          description: Queue head at snapshot time — the series starts no older than this
+          example: 410
+        coveredTailPosition:
+          type: integer
+          format: int64
+          description: Queue tail at snapshot time — where a new join would land
+          example: 1247
+        truncated:
+          type: boolean
+          description: True when the scan cap cut the window short of the whole waiting queue
+          example: false
+
+    CollateralLenderKeyStatus:
+      description: One wallet address that may hold a lending position
+      type: object
+      x-tags: collateral-market
+      required:
+        - address
+        - status
+      properties:
+        address:
+          type: string
+          example: '3WwbQFz3vgi8ChY9dM1haQLGDeQYe5U9z98bwWW4TqxxEAvyYu5y'
+        status:
+          type: string
+          enum: ['FREE', 'QUEUED', 'ACTIVE', 'RETIRING']
+          description: >
+            FREE has no position and can join. QUEUED is waiting in the queue. ACTIVE holds a live
+            collateral box. RETIRING held one until recently and cannot be reused yet. Only FREE
+            keys are available to a join. One key holds at most one position; a second position
+            under a key already in the active set is forfeited.
+          example: 'ACTIVE'
+        position:
+          type: integer
+          format: int64
+          description: Queue position, when QUEUED
+          example: 411
+
+    CollateralPositionSummary:
+      description: One of this wallet's positions, queued or live
+      type: object
+      x-tags: collateral-market
+      required:
+        - kind
+        - boxId
+        - principalNanoErgs
+        - permitLit
+        - creationHeight
+      properties:
+        kind:
+          type: string
+          enum: ['QUEUED', 'LIVE']
+          example: 'QUEUED'
+        boxId:
+          type: string
+          example: 'ce00d6e0f4fd3390c0519bb0d24824e1e6b06978163f4845a7cf2c1c7d8f1b65'
+        position:
+          type: integer
+          format: int64
+          description: Queue position, when QUEUED
+          example: 411
+        principalNanoErgs:
+          type: string
+          description: Decimal string.
+          example: '2915000000'
+        permitLit:
+          type: string
+          description: Permit paid at join. Present for QUEUED positions only.
+          example: '19380000000'
+        carriedLit:
+          type: string
+          description: >
+            LIT carried on the box — emission plus permit together. Present for LIVE positions only.
+            Decimal string.
+          example: '19380000000'
+        creationHeight:
+          type: integer
+          format: int32
+          example: 484102
+
+    CollateralRewardSummary:
+      description: This wallet's locked coinbase rewards
+      type: object
+      x-tags: collateral-market
+      required:
+        - boxes
+        - unlockedBoxes
+        - totalNanoErgs
+        - unlockedNanoErgs
+      properties:
+        boxes:
+          type: integer
+          format: int32
+          description: Reward boxes held, including ones still behind the timelock
+          example: 4
+        unlockedBoxes:
+          type: integer
+          format: int32
+          description: How many are spendable now
+          example: 2
+        totalNanoErgs:
+          type: string
+          description: Every reward box together. Decimal string.
+          example: '12000000000'
+        unlockedNanoErgs:
+          type: string
+          description: The part past its timelock. Decimal string.
+          example: '6000000000'
+        blocksUntilFirstUnlock:
+          type: integer
+          format: int32
+          description: Blocks until the earliest still-locked box matures. Absent when none are locked.
+
+    CollateralRewardClaimedChunk:
+      description: One broadcast batch of a reward claim
+      type: object
+      x-tags: collateral-market
+      required:
+        - txId
+        - boxes
+        - nanoErgs
+      properties:
+        txId:
+          type: string
+          example: '40b7d045a858d537cdbf072e46ffbb86c0c9f6b0e93c369c1ffcba76797636d7'
+        boxes:
+          type: integer
+          format: int32
+          description: Reward boxes this transaction swept
+          example: 12
+        nanoErgs:
+          type: string
+          description: ERG paid to the primary address by this transaction. Decimal string.
+          example: '36000000000'
+
+    CollateralRewardClaimResult:
+      description: Result of claiming unlocked block rewards to the primary address
+      type: object
+      x-tags: collateral-market
+      required:
+        - claims
+        - claimedNanoErgs
+      properties:
+        claims:
+          type: array
+          items:
+            $ref: '#/components/schemas/CollateralRewardClaimedChunk'
+        claimedNanoErgs:
+          type: string
+          description: Total ERG across every claim transaction. Decimal string.
+          example: '72000000000'
+
+    WalletCollateralStatus:
+      description: >
+        The collateral-market half of the wallet. Lender keys are the expensive part to compute, so
+        the client serves them from a short-lived cache rather than rescanning per request.
+      type: object
+      x-tags: collateral-market
+      required:
+        - autoCollateralize
+        - maxOwnCollateral
+        - maxJoinsPerRun
+        - maxLenderKeys
+        - maxPermitPerJoinLit
+        - ownPositionsQueued
+        - ownPositionsLive
+        - ownBudgetRemaining
+        - freeLenderKeys
+        - keysDerivable
+        - lenderKeys
+        - positions
+        - rewards
+      properties:
+        autoCollateralize:
+          type: boolean
+          description: >
+            Whether the client joins the queue on its own timer. **While this is true the client
+            refuses manual joins** — the automated pass owns lender-key selection, and a manual join
+            can take a key it is already using. Turn it off in the client config to join by hand.
+          example: false
+        maxOwnCollateral:
+          type: integer
+          format: int32
+          description: Configured ceiling on live positions owned by this wallet
+          example: 10
+        maxJoinsPerRun:
+          type: integer
+          format: int32
+          description: >
+            Most positions one automated pass creates. Does not bound a manual join, which is
+            limited by free lender keys, the exposure budget and the wallet balance.
+          example: 5
+        maxLenderKeys:
+          type: integer
+          format: int32
+          description: Wallet addresses dedicated to lending
+          example: 32
+        maxPermitPerJoinLit:
+          type: string
+          description: The permit price above which automated joins stop. Decimal string.
+          example: '30000000000000'
+        ownPositionsQueued:
+          type: integer
+          format: int32
+          example: 3
+        ownPositionsLive:
+          type: integer
+          format: int32
+          example: 7
+        ownBudgetRemaining:
+          type: integer
+          format: int32
+          description: How many more positions the configured exposure budget allows
+          example: 0
+        freeLenderKeys:
+          type: integer
+          format: int32
+          description: >
+            Keys with status FREE — positions that can be opened without deriving a new key. A join
+            needs one key per position.
+          example: 4
+        keysDerivable:
+          type: integer
+          format: int32
+          description: >
+            Further keys the client may derive before reaching `maxLenderKeys`. A join of N
+            positions is possible when `freeLenderKeys + keysDerivable >= N`.
+          example: 12
+        lenderKeys:
+          type: array
+          items:
+            $ref: '#/components/schemas/CollateralLenderKeyStatus'
+        positions:
+          type: array
+          items:
+            $ref: '#/components/schemas/CollateralPositionSummary'
+        rewards:
+          $ref: '#/components/schemas/CollateralRewardSummary'
+
+    CollateralJoinCheckRequest:
+      description: How many positions to price. Omitted fields default.
+      type: object
+      x-tags: collateral-market
+      properties:
+        count:
+          type: integer
+          format: int32
+          description: Positions to create, each under its own key
+          default: 1
+          minimum: 1
+          maximum: 25
+          example: 3
+
+    CollateralJoinQuote:
+      description: What creating `count` positions costs right now
+      type: object
+      x-tags: collateral-market
+      required:
+        - count
+        - principalEachNanoErgs
+        - txFeeEachNanoErgs
+        - permitsLit
+        - permitTotalLit
+        - totalNanoErgs
+        - firstPosition
+        - emissionTipBoxId
+        - affordNow
+        - shortfallNanoErgs
+        - ownRoomLeft
+        - manualJoinAllowed
+        - lenderAddresses
+        - freeLenderKeys
+        - keysRequired
+      properties:
+        count:
+          type: integer
+          format: int32
+          example: 3
+        principalEachNanoErgs:
+          type: string
+          description: Fixed by contract, identical for every position. Decimal string.
+          example: '2915000000'
+        txFeeEachNanoErgs:
+          type: string
+          description: Network fee per join transaction. Decimal string.
+          example: '1000000'
+        permitsLit:
+          type: array
+          description: >
+            Permit for each position, in join order. Each join lengthens the queue, so these
+            escalate. Decimal strings.
+          items:
+            type: string
+          example: ['19370000000', '19380000000', '19390000000']
+        permitTotalLit:
+          type: string
+          description: Sum of `permitsLit`. Decimal string.
+          example: '58140000000'
+        totalNanoErgs:
+          type: string
+          description: Total ERG leaving the wallet — principals plus fees. Decimal string.
+          example: '8748000000'
+        firstPosition:
+          type: integer
+          format: int64
+          description: Queue position the first join takes; the rest follow consecutively
+          example: 1247
+        emissionTipBoxId:
+          type: string
+          description: Emission box the quote was made against. Send back as `expectedEmissionBoxId`.
+          example: '88c297f99da7172f6aa20efbead69aa40e2b7734a1873d66ca1db6b19d214db6'
+        affordNow:
+          type: boolean
+          description: Whether the wallet can cover it today
+          example: true
+        shortfallNanoErgs:
+          type: string
+          description: How much short the wallet is when `affordNow` is false. Decimal string.
+          example: '0'
+        ownRoomLeft:
+          type: integer
+          format: int32
+          description: Positions the configured exposure budget would still allow after this
+          example: 4
+        manualJoinAllowed:
+          type: boolean
+          description: >
+            Whether `POST /collateral/join` will accept this join. Disable the send control when
+            false. The join endpoint checks the same conditions itself, so a quote taken before a
+            configuration change does not license the send.
+          example: true
+        blockedReason:
+          type: string
+          enum: ['AUTO_COLLATERALIZE', 'NO_LENDER_KEYS', 'BUDGET_EXHAUSTED', 'INSUFFICIENT_FUNDS']
+          description: >
+            Why `manualJoinAllowed` is false; absent when it is true. Only the first applicable
+            reason is reported, in the order listed above.
+
+
+            `AUTO_COLLATERALIZE` — the client joins on its own timer and refuses manual joins.
+            `BUDGET_EXHAUSTED` — `maxOwnCollateral` leaves room for fewer positions than requested.
+            `NO_LENDER_KEYS` — `freeLenderKeys + keysDerivable` is below `keysRequired`.
+            `INSUFFICIENT_FUNDS` — the wallet cannot cover `totalNanoErgs`.
+          example: 'AUTO_COLLATERALIZE'
+        lenderAddresses:
+          type: array
+          description: >
+            The lender keys this join would use, in join order, matching `permitsLit` index for
+            index. Shorter than `count` when the join would derive new keys to make up the
+            difference; those addresses do not exist yet and cannot be named in advance. Empty when
+            `blockedReason` is `NO_LENDER_KEYS`.
+          items:
+            type: string
+          example: ['3WwbQFz3vgi8ChY9dM1haQLGDeQYe5U9z98bwWW4TqxxEAvyYu5y']
+        freeLenderKeys:
+          type: integer
+          format: int32
+          description: Keys with status FREE at the moment of quoting
+          example: 4
+        keysRequired:
+          type: integer
+          format: int32
+          description: Keys this join consumes — one per position, so equal to `count`
+          example: 3
+
+    CollateralJoinExecuteRequest:
+      description: Join the queue. Send the quote's ids back so stale state becomes a 409, not a surprise price.
+      type: object
+      x-tags: collateral-market
+      required:
+        - count
+        - acknowledgeNoWithdrawal
+      properties:
+        count:
+          type: integer
+          format: int32
+          minimum: 1
+          maximum: 25
+          description: Positions to create
+          example: 3
+        acknowledgeNoWithdrawal:
+          type: boolean
+          description: >
+            Must be true, or the request is rejected with 400. A queued position cannot be withdrawn
+            or cancelled; its principal and permit return only when a block spends the box.
+          example: true
+        maxPermitEachLit:
+          type: string
+          description: >
+            Permit cap. If any single permit would exceed this, nothing is sent. Omit for no cap.
+            Decimal string.
+          example: '20000000000'
+        expectedEmissionBoxId:
+          type: string
+          description: Emission box the quote was made against
+          example: '88c297f99da7172f6aa20efbead69aa40e2b7734a1873d66ca1db6b19d214db6'
+
+    CollateralJoinEntry:
+      description: One join transaction that was sent
+      type: object
+      x-tags: collateral-market
+      required:
+        - txId
+        - position
+        - lenderAddress
+        - principalNanoErgs
+        - permitLit
+      properties:
+        txId:
+          type: string
+          example: '40b7d045a858d537cdbf072e46ffbb86c0c9f6b0e93c369c1ffcba76797636d7'
+        position:
+          type: integer
+          format: int64
+          description: Queue position taken
+          example: 1247
+        lenderAddress:
+          type: string
+          description: >
+            The key holding this position. It receives the block reward when the position is mined
+            against, and the permit back when the box is spent.
+          example: '3WwbQFz3vgi8ChY9dM1haQLGDeQYe5U9z98bwWW4TqxxEAvyYu5y'
+        principalNanoErgs:
+          type: string
+          description: Decimal string.
+          example: '2915000000'
+        permitLit:
+          type: string
+          description: Decimal string.
+          example: '19370000000'
+
+    CollateralJoinResult:
+      description: Result of joining the collateral queue
+      type: object
+      x-tags: collateral-market
+      required:
+        - joins
+        - totalNanoErgs
+      properties:
+        joins:
+          type: array
+          items:
+            $ref: '#/components/schemas/CollateralJoinEntry'
+        totalNanoErgs:
+          type: string
+          description: Everything sent, principals plus fees. Decimal string.
+          example: '8748000000'
+        stoppedReason:
+          type: string
+          description: >
+            Present when fewer positions were created than requested, giving the error that stopped
+            the run. The entries in `joins` were still created and their principal is committed.
+          example: 'Double spending attempt'
+
     LDStateChangedResponse:
       description: >
         409 body. A box this request was quoted against has moved. Carries the ids as they now
@@ -2946,22 +3870,35 @@ components:
           description: Raw token units held. Decimal string.
           example: '5420000000'
 
-    WalletBalance:
-      description: ERG and token balances for the client's wallet
+    WalletBalances:
+      description: >
+        This client's wallet, for both LithosDex and the collateral market. One call so a page does
+        not have to stitch two together, and so both halves describe the same instant.
       type: object
-      x-tags: lithosdex
+      x-tags: wallet
       required:
+        - primaryAddress
         - nanoErgs
         - tokens
+        - collateral
       properties:
+        primaryAddress:
+          type: string
+          description: The wallet's main P2PK address, where change and swept rewards land
+          example: '3WwbzR34YmLRy3Z6WLON5hBBkX8Zm1gUHmC7tEXDNRJfHBqhsZr'
         nanoErgs:
           type: string
-          description: nanoERG held by the wallet. Decimal string.
+          description: >
+            Unreserved ERG available to spend right now, matured coinbases included — the figure a
+            join quote's `affordNow` is decided against. Decimal string.
           example: '182400000000'
         tokens:
           type: array
+          description: Every token the wallet holds, including LIT.
           items:
             $ref: '#/components/schemas/WalletToken'
+        collateral:
+          $ref: '#/components/schemas/WalletCollateralStatus'
 
     NISPRepresentation:
       description: Representation of a 10 super share NISP

@@ -1,6 +1,6 @@
 package api.models
 
-import api.LDErrors.LDStateChanged
+import api.LithosApiErrors.LithosStateChanged
 import play.api.libs.json._
 
 /**
@@ -17,6 +17,6 @@ object LDStateChangedResponse {
   implicit lazy val ldStateChangedResponseJsonFormat: Format[LDStateChangedResponse] =
     Json.format[LDStateChangedResponse]
 
-  def apply(e: LDStateChanged): LDStateChangedResponse =
+  def apply(e: LithosStateChanged): LDStateChangedResponse =
     LDStateChangedResponse(409, "State changed", e.getMessage, e.poolBoxId, e.vaultBoxId, e.provisionBoxId)
 }

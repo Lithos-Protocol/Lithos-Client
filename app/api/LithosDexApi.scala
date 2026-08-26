@@ -135,10 +135,4 @@ trait LithosDexApi {
    * Swaps against the pool, newest first, including unconfirmed ones.
    */
   def getRecentSwaps(limit: Option[Int]): LDRecentSwaps
-
-  /**
-   * GET /wallet/balance
-   * ERG and token balances for the client's wallet.
-   */
-  def getWalletBalance: WalletBalance
 }

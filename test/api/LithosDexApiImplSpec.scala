@@ -1,6 +1,6 @@
 package api
 
-import api.LDErrors.{LDBadRequest, LDStateChanged, LDUnavailable, LDUnprocessable}
+import api.LithosApiErrors.{LithosBadRequest, LithosStateChanged, LithosUnavailable, LithosUnprocessable}
 import api.models._
 import akka.actor.ActorSystem
 import akka.testkit.{TestKit, TestProbe}
@@ -151,7 +151,7 @@ class LithosDexApiImplSpec
     entered.await(10, java.util.concurrent.TimeUnit.SECONDS) shouldBe true
 
     val second = Try(f.api.flush(LDFlushRequest.Empty, f.cache, f.selector))
-    second.failed.get shouldBe a[LDStateChanged]
+    second.failed.get shouldBe a[LithosStateChanged]
     second.failed.get.getMessage should include("re-read the pool and vault")
 
     // Asserted while the first request is still blocked inside the lock, so the only thing that
@@ -171,8 +171,8 @@ class LithosDexApiImplSpec
 
     // Nothing is pending, so this fails on its own terms rather than on the lock — and must still
     // hand the lock back, or every later mutation in the process is refused.
-    Try(f.api.flush(LDFlushRequest.Empty, f.cache, f.selector)).failed.get shouldBe a[LDBadRequest]
-    Try(f.api.flush(LDFlushRequest.Empty, f.cache, f.selector)).failed.get shouldBe a[LDBadRequest]
+    Try(f.api.flush(LDFlushRequest.Empty, f.cache, f.selector)).failed.get shouldBe a[LithosBadRequest]
+    Try(f.api.flush(LDFlushRequest.Empty, f.cache, f.selector)).failed.get shouldBe a[LithosBadRequest]
   }
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -184,7 +184,7 @@ class LithosDexApiImplSpec
     val live = poolBox(f)
     serve(f, Some(live), None)
 
-    val thrown = intercept[LDStateChanged](f.api.swap(
+    val thrown = intercept[LithosStateChanged](f.api.swap(
       LDSwapExecuteRequest("1000000", ergIn = true, "0", expectedPoolBoxId = Some("de" * 32)),
       f.cache, f.selector))
 
@@ -223,7 +223,7 @@ class LithosDexApiImplSpec
     val quoted = withCtx(f)(ctx => lithosdex.LDLiquidityPool(live.toInputUTXO(ctx))
       .simDepositForShares(shares))
 
-    val thrown = intercept[LDUnprocessable](f.api.deposit(
+    val thrown = intercept[LithosUnprocessable](f.api.deposit(
       LDDepositExecuteRequest(shares.toString, maxAmountX = Some((quoted.amountX - 1).toString)),
       f.cache, f.selector))
     thrown.getMessage should include("maxAmountX")
@@ -245,7 +245,7 @@ class LithosDexApiImplSpec
     val f = fixture()
     serve(f, Some(poolBox(f)), None)
 
-    intercept[LDBadRequest](f.api.swap(
+    intercept[LithosBadRequest](f.api.swap(
       LDSwapExecuteRequest("1000000", ergIn = true, "-1"), f.cache, f.selector))
       .getMessage should include("minOutput")
     f.wallet.expectNoMessage(200.millis)
@@ -265,7 +265,7 @@ class LithosDexApiImplSpec
     when(f.nodeApi.indexedBoxById(provision.boxId))
       .thenReturn(Success(Some(LDNodeFixtures.indexed(provision))))
 
-    val thrown = intercept[LDBadRequest](f.api.redeem(
+    val thrown = intercept[LithosBadRequest](f.api.redeem(
       LDRedeemRequest(provision.boxId), f.cache, f.selector))
     thrown.getMessage should include("acknowledgeUnclaimedFees")
     // Both amounts named, since "some fees" is not something a user can weigh.
@@ -306,7 +306,7 @@ class LithosDexApiImplSpec
     Thread.sleep(10500L)
 
     val second = Try(f.api.flush(LDFlushRequest.Empty, f.cache, f.selector))
-    second.failed.get shouldBe a[LDUnavailable]
+    second.failed.get shouldBe a[LithosUnavailable]
     second.failed.get.getMessage should include("may not be answering")
 
     release.countDown()
@@ -379,7 +379,7 @@ class LithosDexApiImplSpec
 
   it should "refuse a range it does not serve" in {
     val f = fixture()
-    intercept[LDBadRequest](f.api.getPriceHistory(Some("3Y"), None, f.cache))
+    intercept[LithosBadRequest](f.api.getPriceHistory(Some("3Y"), None, f.cache))
       .getMessage should include("range")
   }
 
@@ -387,7 +387,7 @@ class LithosDexApiImplSpec
     // Nothing renders that many, only the first 250 could carry a timestamp, and the response would
     // be megabytes. The message names a bucket that would work.
     val f = fixture()
-    val thrown = intercept[LDBadRequest](f.api.getPriceHistory(Some("30D"), Some(1), f.cache))
+    val thrown = intercept[LithosBadRequest](f.api.getPriceHistory(Some("30D"), Some(1), f.cache))
     thrown.getMessage should include("points")
   }
 
@@ -436,7 +436,7 @@ class LithosDexApiImplSpec
   }
 
   it should "refuse a non-positive limit" in {
-    intercept[LDBadRequest](fixture().api.getRecentSwaps(Some(0)))
+    intercept[LithosBadRequest](fixture().api.getRecentSwaps(Some(0)))
       .getMessage should include("limit")
   }
 
