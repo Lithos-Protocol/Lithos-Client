@@ -64,23 +64,64 @@ class MempoolPressureSpec extends TestKit(ActorSystem("mempool-pressure"))
     view ! akka.actor.PoisonPill
   }
 
+  /**
+   * A submission arriving between the two reads cannot cause a paged skip, so it must not fail one.
+   *
+   * Requiring the reads to be identical rejects most refreshes once submissions are frequent, and
+   * every rejection drops projections and logs at error — so the check would defeat itself exactly
+   * when mempool chaining is most useful.
+   */
+  it should "accept a revision when the second read only gained transactions" in {
+    val sync = TestProbe()
+    ready()
+    val view = viewOver(transactions = 3, bound = 100, sync, growBy = 2)
+
+    val snapshot = sync.expectMsgType[MempoolSnapshot]
+    // The second read is the one kept, so its arrivals are in the published revision.
+    snapshot.chains.size + snapshot.blockedRoots.size shouldEqual 5
+    view ! akka.actor.PoisonPill
+  }
+
+  /** A disappearance is the shape that can skip an entry, so it retries rather than publishing. */
+  it should "retry without withdrawing projections when a transaction left mid-read" in {
+    val sync = TestProbe()
+    ready()
+    val view = viewOver(transactions = 4, bound = 100, sync, growBy = -2)
+
+    // Neither a revision nor an unavailability: the last good answer stands and the next tick re-reads.
+    sync.expectNoMessage(500.millis)
+    view ! akka.actor.PoisonPill
+  }
+
   private def ready(): Unit =
     Globals.setSyncView(SyncView.initial.copy(
       status = Ready(SyncCursor(100, SyncFixtures.id(100), SyncFixtures.id(99))),
       canonical = Capability.Available))
 
-  private def viewOver(transactions: Int, bound: Int, sync: TestProbe): akka.actor.ActorRef = {
+  /**
+   * @param growBy how the mempool changes between the consistency read and the one after it:
+   *               positive adds transactions, negative removes them, zero holds it still.
+   */
+  private def viewOver(transactions: Int,
+                       bound: Int,
+                       sync: TestProbe,
+                       growBy: Int = 0): akka.actor.ActorRef = {
     val api = mock[NodeApi]
     val (nodeContext, _, wallet) = FakeNodeContext(api, numAddresses = 1)
     val protocol = ReducerFixtures.protocol(rollupStartHeight = 100)
     val tree = wallet.contract.ergoTreeHex
+    // The view reads the relevant mempool twice per refresh; this answers the second read differently.
+    val reads = new java.util.concurrent.atomic.AtomicInteger(0)
     // Only the holding script answers, so the dedup across the three rollup scripts is exercised too.
     when(api.unconfirmedTransactionsByErgoTree(any[String], any[Paging])).thenAnswer { invocation =>
       val requested = invocation.getArgument[String](0)
       val paging = invocation.getArgument[Paging](1)
-      Success(
-        if (requested != protocol.holdingErgoTree || paging.offset > 0) Seq.empty
-        else (0 until transactions).map(unconfirmed(tree)))
+      val relevant = requested == protocol.holdingErgoTree && paging.offset == 0
+      if (relevant) {
+        val secondPass = reads.getAndIncrement() >= 1
+        val count = if (secondPass) transactions + growBy else transactions
+        Success((0 until count).map(unconfirmed(tree)))
+      } else Success(Seq.empty)
     }
     val config = Configuration(ConfigFactory.parseString(
       s"sync.startHeight = 100\nsync.mempool.maxTransactions = $bound\n"))

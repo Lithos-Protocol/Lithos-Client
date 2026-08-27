@@ -16,13 +16,12 @@ import scala.util.{Failure, Success, Try}
 object StateSnapshotActor {
   case object RestoreLatest
   final case class SnapshotLoaded(snapshot: Option[PersistedSyncState], warning: Option[String] = None)
-  final case class SnapshotCandidate(state: CommittedSyncState,
-                                     recentCursors: Vector[SyncCursor],
-                                     force: Boolean = false)
+  /** An encoded generation. Serialization happens on the state owner's thread — see `offerSnapshot`. */
+  final case class SnapshotCandidate(cursor: SyncCursor, version: Long, encoded: Array[Byte])
 
   private final case class ValidationFinished(requester: ActorRef,
                                               result: Try[Either[String, PersistedSyncState]])
-  private final case class SaveFinished(state: CommittedSyncState, result: Either[SnapshotError, Unit])
+  private final case class SaveFinished(cursor: SyncCursor, result: Either[SnapshotError, Unit])
 }
 
 /** Persists snapshots off the actor mailbox and coalesces queued writes. */
@@ -41,13 +40,12 @@ class StateSnapshotActor @Inject()(config: Configuration,
     if (syncConfig.snapshotsEnabled)
       Some(new LevelDbStateSnapshotStore(
         KeyValueStore.openOrThrow(syncConfig.storageBackend, syncConfig.storagePath),
-        syncConfig.manifestDepth,
         syncConfig.snapshotRetention,
         snapshotIdentity))
     else None
 
   private var writing = false
-  private var pending = Option.empty[PersistedSyncState]
+  private var pending = Option.empty[SnapshotCandidate]
 
   override def postStop(): Unit = snapshotStore.foreach { store =>
     store.close().left.foreach(error => logger.error(error.message))
@@ -56,10 +54,8 @@ class StateSnapshotActor @Inject()(config: Configuration,
   override def receive: Receive = {
     case RestoreLatest => restore(sender())
 
-    // Cadence and the defensive copy are decided by the state owner, which is the thread that owns
-    // the dictionaries this will serialize.
-    case SnapshotCandidate(state, cursors, _) if snapshotStore.isDefined =>
-      val candidate = PersistedSyncState(state, cursors)
+    // Cadence and serialization both happen on the state owner's thread, so this only writes.
+    case candidate: SnapshotCandidate if snapshotStore.isDefined =>
       if (writing) pending = Some(candidate)
       else save(candidate)
 
@@ -75,13 +71,13 @@ class StateSnapshotActor @Inject()(config: Configuration,
       requester ! SnapshotLoaded(None, Some(
         s"Could not validate snapshot cursor: ${Option(ex.getMessage).getOrElse(ex.getClass.getSimpleName)}"))
 
-    case SaveFinished(state, Right(_)) =>
+    case SaveFinished(cursor, Right(_)) =>
       writing = false
-      logger.info(s"Saved synchronization snapshot ${state.cursor.blockId}@${state.cursor.height}")
+      logger.info(s"Saved synchronization snapshot ${cursor.blockId}@${cursor.height}")
       savePending()
-    case SaveFinished(state, Left(error)) =>
+    case SaveFinished(cursor, Left(error)) =>
       writing = false
-      logger.error(s"Failed to save synchronization snapshot at ${state.cursor.height}: ${error.message}")
+      logger.error(s"Failed to save synchronization snapshot at ${cursor.height}: ${error.message}")
       savePending()
   }
 
@@ -173,12 +169,12 @@ class StateSnapshotActor @Inject()(config: Configuration,
   private def name(key: Array[Byte]): String =
     new String(key, java.nio.charset.StandardCharsets.UTF_8).split('/').last
 
-  private def save(persisted: PersistedSyncState): Unit = {
+  private def save(candidate: SnapshotCandidate): Unit = {
     writing = true
     val store = snapshotStore.get
-    Future(store.save(persisted))(context.dispatcher)
-      .map(result => SaveFinished(persisted.state, result))
-      .recover { case ex => SaveFinished(persisted.state, Left(SnapshotError.Corrupt(
+    Future(store.save(candidate.cursor, candidate.version, candidate.encoded))(context.dispatcher)
+      .map(result => SaveFinished(candidate.cursor, result))
+      .recover { case ex => SaveFinished(candidate.cursor, Left(SnapshotError.Corrupt(
         Option(ex.getMessage).getOrElse(ex.getClass.getSimpleName)))) }
       .pipeTo(self)
   }

@@ -127,15 +127,18 @@ object Configs {
     // ---- sync ----
     v.range("sync.startHeight", v.intReq("sync.startHeight"), 2, 2000000000,
       "block height to start synchronizing from; minimum 1")
-    // Bound retained state copies to a practical heap limit.
-    v.range("sync.reorgWindow", v.int("sync.reorgWindow"), 1, 250,
+    // Retained states cost a dictionary copy per rollup touched per block, so the ceiling is low.
+    // Forks beyond it recover from a snapshot, which is why a small window is sufficient.
+    v.range("sync.reorgWindow", v.int("sync.reorgWindow"), 1, 20,
       "committed blocks retained for exact in-memory rollback; cost scales with active rollups and " +
         "dictionary size, so raise it only alongside the heap")
+    // Cursors are ~100 bytes, and the node serves at most 16384 headers in one chainSlice.
+    v.range("sync.cursorWindow", v.int("sync.cursorWindow"), 1, 16000,
+      "canonical cursors retained for locating a fork after restart")
     v.range("sync.catchUpBatchBlocks", v.int("sync.catchUpBatchBlocks"), 1, 64,
       "blocks fetched per canonical round trip; each is held whole until it commits")
-    v.duration("sync.tipRevalidation")
-    v.range("sync.incompleteBlockRetries", v.int("sync.incompleteBlockRetries"), 0, 100,
-      "refetches of a block with unresolved input scripts")
+    v.duration("sync.revalidationChecks")
+    v.duration("sync.minerDictionary.repairInterval")
     v.range("sync.retriesBeforeAlarm", v.int("sync.retriesBeforeAlarm"), 1, 10000,
       "consecutive failures at one height before synchronization reports itself stalled")
     v.range("sync.mempool.maxTransactions", v.int("sync.mempool.maxTransactions"), 1, 100000,
@@ -153,8 +156,6 @@ object Configs {
       "committed blocks between persistent snapshots")
     v.range("sync.snapshots.retention", v.int("sync.snapshots.retention"), 2, 100,
       "complete snapshot generations retained")
-    v.range("sync.snapshots.manifestDepth", v.int("sync.snapshots.manifestDepth"), 0, 64,
-      "Plasma manifest subtree depth")
 
     // ---- lithos-tasks ----
     // Require every task field that TasksConfig reads without a default.

@@ -6,20 +6,26 @@ import state.messages.{BlockInfo, NodeSync}
 
 import scala.util.{Failure, Success, Try}
 
+/**
+ * `chain` is how far the node's header chain reaches, and is the only height a fork is judged against.
+ * `usable` additionally waits for the indexer, because blocks are read from the index.
+ */
+final case class NodeHeights(chain: Int, usable: Int)
+
 /** Reads only blocks named by the node's canonical header chain. */
 final class CanonicalBlockSource(nodeApi: NodeApi) {
 
   private val logger = org.slf4j.LoggerFactory.getLogger("CanonicalBlockSource")
 
   /**
-   * Highest available height to read from. Indexed height is needed for input verification,
-   * so it takes priority.
+   * Header height and readable height, separately.
    */
-  def tipHeight: Try[Int] =
+  def heights: Try[NodeHeights] =
     nodeApi.info().flatMap { info =>
       info.fullHeight match {
         case None => Failure(new IllegalStateException("Node did not report a full-block height"))
-        case Some(full) => nodeApi.indexedHeight().map(index => math.min(full, index.indexedHeight))
+        case Some(full) =>
+          nodeApi.indexedHeight().map(index => NodeHeights(full, math.min(full, index.indexedHeight)))
       }
     }
 
@@ -95,21 +101,25 @@ final class CanonicalBlockSource(nodeApi: NodeApi) {
    * Rejecting an unverified shape assumption would stall synchronization at that height.
    */
   private def report(header: NodeHeader, block: BlockInfo): BlockInfo = {
+    // The node asserts every block carries at least a coinbase and omits a block whose transactions
+    // did not all resolve, so this should be unreachable.
     if (block.txs.isEmpty)
-      logger.warn(s"Indexed block ${header.id}@${header.height} decoded with no transactions. If this " +
-        "repeats, the block endpoint is not returning the shape this client reads.")
-    // Resolved inputs are derived from the same list as the transactions, so they cannot be absent
-    // while inputs exist. What the index can return is input boxes stripped to their ids.
-    else if (block.inputsLookStripped)
-      logger.warn(s"Indexed block ${header.id}@${header.height} resolved ${block.resolvedInputs.size} " +
-        "input box(es), none carrying a script. The caller decides whether to refetch.")
+      logger.warn(s"Indexed block ${header.id}@${header.height} decoded with no transactions.")
     block
   }
 
-  def commonAncestor(cursors: Seq[state.messages.SyncMessages.SyncCursor]): Try[Option[state.messages.SyncMessages.SyncCursor]] =
-    if (cursors.isEmpty) Success(None)
+  /**
+   * The newest retained cursor still on the canonical chain.
+   *
+   * Cursors above the node's header height cannot be canonical on a chain that short, and asking for
+   * them would fail the range check, so they are dropped rather than queried.
+   */
+  def commonAncestor(cursors: Seq[state.messages.SyncMessages.SyncCursor],
+                     chainHeight: Int): Try[Option[state.messages.SyncMessages.SyncCursor]] = {
+    val candidates = cursors.filter(_.height <= chainHeight)
+    if (candidates.isEmpty) Success(None)
     else {
-      val heights = cursors.map(_.height)
+      val heights = candidates.map(_.height)
       headerSlice(heights.min, heights.max).flatMap { headers =>
         val byHeight = headers.filter(header => heights.contains(header.height)).groupBy(_.height)
         val ambiguous = byHeight.collect { case (height, values) if values.size != 1 => height }.toSeq.sorted
@@ -118,7 +128,8 @@ final class CanonicalBlockSource(nodeApi: NodeApi) {
           s"Canonical chain slice returned multiple headers at heights ${ambiguous.mkString(",")}"))
         else if (missing.nonEmpty) Failure(new NoSuchElementException(
           s"Canonical chain slice omitted retained heights ${missing.mkString(",")}"))
-        else Success(cursors.reverse.find(cursor => byHeight(cursor.height).head.id == cursor.blockId))
+        else Success(candidates.reverse.find(cursor => byHeight(cursor.height).head.id == cursor.blockId))
       }
     }
+  }
 }

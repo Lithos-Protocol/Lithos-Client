@@ -34,7 +34,8 @@ object SnapshotError {
 final case class PersistedSyncState(state: CommittedSyncState, recentCursors: Vector[SyncCursor])
 
 trait StateSnapshotStore {
-  def save(persisted: PersistedSyncState): Either[SnapshotError, Unit]
+  /** Writes an already-encoded generation. Encoding happens on the thread that owns the state. */
+  def save(cursor: SyncCursor, version: Long, encoded: Array[Byte]): Either[SnapshotError, Unit]
 
   /** Generation keys, newest first, with the one the pointer names ahead of the rest. */
   def generationKeys(): Either[SnapshotError, Seq[Array[Byte]]]
@@ -67,7 +68,6 @@ object StateSnapshotIdentity {
 
 /** Atomic, generation-based LevelDB snapshot repository. */
 final class LevelDbStateSnapshotStore(store: KeyValueStore,
-                                      manifestDepth: Int,
                                       retention: Int,
                                       identity: StateSnapshotIdentity) extends StateSnapshotStore {
   import SnapshotError._
@@ -77,12 +77,12 @@ final class LevelDbStateSnapshotStore(store: KeyValueStore,
   private val dataPrefix = bytes("sync/snapshot/data/")
   private val currentKey = bytes("sync/snapshot/current")
 
-  override def save(persisted: PersistedSyncState): Either[SnapshotError, Unit] = {
-    val cursor = persisted.state.cursor
-    val suffix = f"${cursor.height}%010d-${persisted.state.version}%020d-${cursor.blockId}"
+  override def save(cursor: SyncCursor,
+                    version: Long,
+                    encoded: Array[Byte]): Either[SnapshotError, Unit] = {
+    val suffix = f"${cursor.height}%010d-$version%020d-${cursor.blockId}"
     val generationKey = dataPrefix ++ bytes(suffix)
     for {
-      encoded <- StateSnapshotCodec.encode(persisted, manifestDepth, identity).left.map(Corrupt)
       _ <- store.write(Seq(Put(generationKey, encoded), Put(currentKey, generationKey)),
         WriteDurability.Synchronous).left.map(Storage)
       _ <- prune(generationKey)
@@ -145,7 +145,6 @@ object StateSnapshotCodec {
   private val MaxEntries = 1000000
 
   def encode(persisted: PersistedSyncState,
-             manifestDepth: Int,
              identity: StateSnapshotIdentity): Either[String, Array[Byte]] =
     attempt {
       val state = persisted.state
@@ -166,7 +165,7 @@ object StateSnapshotCodec {
         out.writeInt(rollups.size)
         rollups.foreach { case (id, tree) =>
           writeString(out, id)
-          writeDictionary(out, tree.dictionary, manifestDepth)
+          writeDictionary(out, tree.dictionary)
           out.writeInt(tree.numMiners)
           writeBigInt(out, tree.totalScore)
           writeOptionalLong(out, tree.currentPeriod)
@@ -188,7 +187,7 @@ object StateSnapshotCodec {
           writeString(out, rollupId)
         }
 
-        writeDictionary(out, state.minerTree.dictionary, manifestDepth)
+        writeDictionary(out, state.minerTree.dictionary)
         out.writeInt(state.minerTree.numMiners)
         out.writeInt(state.minerTree.startHeight)
         val minerMap = state.minerTree.minerMap.toSeq.sortBy(_._1)
@@ -296,9 +295,8 @@ object StateSnapshotCodec {
       readString(in), readString(in), readString(in), readString(in), readString(in))
 
   private def writeDictionary(out: DataOutputStream,
-                              dictionary: AuthenticatedDictionaryView,
-                              depth: Int): Unit = {
-    val manifest = dictionary.getManifest(depth)
+                              dictionary: AuthenticatedDictionaryView): Unit = {
+    val manifest = dictionary.getManifest()
     out.writeByte(dictionary.flags.serializeToByte)
     out.writeInt(dictionary.parameters.keySize)
     out.writeBoolean(dictionary.parameters.valueSizeOpt.isDefined)

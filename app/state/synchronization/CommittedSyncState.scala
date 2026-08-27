@@ -23,16 +23,5 @@ case class CommittedSyncState(cursor: SyncCursor,
 
   def routedRollups: Seq[(String, NISPTree)] =
     routes.toSeq.sortBy(_._1).map { case (utxoId, rollupId) => utxoId -> rollups(rollupId) }
-
-  /**
-   * A copy whose dictionaries no other thread holds.
-   *
-   * Anything handing committed state to
-   * another dispatcher (such as snapshot serialization) takes this first.
-   */
-  def detached: CommittedSyncState =
-    copy(
-      rollups = rollups.map { case (id, tree) => id -> tree.copy(dictionary = tree.dictionary.copy()) },
-      minerTree = minerTree.copy(dictionary = minerTree.dictionary.copy()))
 }
 

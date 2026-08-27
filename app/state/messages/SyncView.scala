@@ -37,9 +37,6 @@ final case class SyncView(status: SyncStatus,
                           mempool: Capability) {
 
   def cursor: Option[SyncCursor] = status.cursor
-
-  /** Rollups this client may act on. Empty whenever canonical state cannot be trusted. */
-  def actionableRollups: Seq[(String, NISPTree)] = if (canonical.available) rollups else Seq.empty
 }
 
 object SyncView {

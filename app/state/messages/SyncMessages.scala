@@ -53,6 +53,16 @@ object SyncMessages {
   case class BlockCommitted(cursor: SyncCursor, stateVersion: Long, relevantEvents: Int,
                             stagedDictionaryCopies: Int)
   case class BlockRejected(cursor: Option[SyncCursor], blockId: String, reason: String)
+  /**
+   * Installs a rebuilt Miner Dictionary and clears its fault.
+   *
+   * Carries the height it was rebuilt at so a commit that landed during the rebuild rejects it rather
+   * than installing state one block stale.
+   */
+  case class RepairMinerDictionary(atHeight: Int,
+                                   minerTree: lfsm.states.MinerTree,
+                                   dataBoxToken: Option[org.ergoplatform.sdk.ErgoId])
+
   case class RollbackTo(blockId: String)
   case class RollbackCompleted(cursor: SyncCursor)
   case class RollbackRejected(reason: String)

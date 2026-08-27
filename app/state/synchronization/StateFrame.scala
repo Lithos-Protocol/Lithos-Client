@@ -23,15 +23,19 @@ object StateFrame {
   private sealed trait PollResult
   private final case class BatchFetched(blocks: Seq[BlockInfo], tipHeight: Int) extends PollResult
   private final case class AtTip(tipHeight: Int) extends PollResult
-  private final case class ForkDetected(cursor: SyncCursor, detail: String, tipHeight: Int) extends PollResult
+  private final case class ForkDetected(cursor: SyncCursor, detail: String, heights: NodeHeights)
+    extends PollResult
+  /** The header chain still covers the cursor; only the index cannot serve it yet. */
+  private final case class IndexBehind(cursor: SyncCursor, heights: NodeHeights) extends PollResult
   private final case class PollFinished(result: Try[PollResult])
   private final case class CommitFinished(block: BlockInfo, tipHeight: Int, result: Try[Any])
   private final case class StartupState(result: Try[Option[CommittedSyncState]])
-  private final case class CursorsLoaded(result: Try[Seq[SyncCursor]], tipHeight: Int)
-  private final case class AncestorLocated(result: Try[Option[SyncCursor]], tipHeight: Int)
+  private final case class CursorsLoaded(result: Try[Seq[SyncCursor]], heights: NodeHeights)
+  private final case class AncestorLocated(result: Try[Option[SyncCursor]], heights: NodeHeights)
   private final case class RollbackFinished(result: Try[Any], tipHeight: Int)
   private final case class ResetFinished(result: Try[Any])
   private final case class RecoveryPrepared(result: Try[Option[CommittedSyncState]])
+  private final case class DictionaryRepaired(atHeight: Int, result: Try[Either[String, MinerDictionarySeed]])
 }
 
 /**
@@ -56,8 +60,8 @@ class StateFrame @Inject()(config: Configuration,
   private val source = new CanonicalBlockSource(nodeContext.getNodeApi)
   private val batchBlocks = syncConfig.catchUpBatchBlocks
   private val retriesBeforeAlarm = syncConfig.retriesBeforeAlarm
-  private val tipRevalidation = syncConfig.tipRevalidation
-  private val incompleteBlockRetries = syncConfig.incompleteBlockRetries
+  private val tipRevalidation = syncConfig.revalidationChecks
+  private val repairInterval = syncConfig.dictionaryRepairInterval
   // Dictionary history is bootstrapped separately, so canonical block sync starts here.
   private val firstHeight = syncConfig.startHeight
 
@@ -76,6 +80,8 @@ class StateFrame @Inject()(config: Configuration,
   private var stalledSince = 0L
   // Last time the committed header was re-read while idle at tip.
   private var lastTipCheck = 0L
+  // Last attempt to rebuild a faulted Miner Dictionary.
+  private var lastDictionaryRepair = 0L
 
   private val ticker: Cancellable =
     context.system.scheduler.scheduleWithFixedDelay(5.seconds, 5.seconds, self, Tick)
@@ -106,6 +112,7 @@ class StateFrame @Inject()(config: Configuration,
 
     case StartSynchronization => self ! Tick
     case CheckBlock => self ! Tick
+    case Tick if active && !inFlight && dictionaryRepairDue => beginDictionaryRepair()
     case Tick if active && !inFlight => beginPoll()
     case Tick => ()
 
@@ -125,19 +132,7 @@ class StateFrame @Inject()(config: Configuration,
       if (pending.isEmpty)
         failPoll("Canonical block poll returned no blocks for a non-empty range",
           new IllegalStateException(s"expected at least one block from height $nextHeight"))
-      // A block whose input boxes came back without scripts authenticates no genesis, and a committed
-      // block is never re-read. Refetch a bounded number of times, then take it: the shape is a strong
-      // signal the index is behind, but not an invariant worth stalling the cursor on forever.
-      else if (pending.head.inputsLookStripped && stalledAttempts < incompleteBlockRetries)
-        failPoll(s"Indexed block ${pending.head.id} at height ${pending.head.height} resolved no input " +
-          "scripts; refetching", new IllegalStateException("indexed input boxes carry no script"))
-      else {
-        if (pending.head.inputsLookStripped)
-          logger.error(s"Accepting block ${pending.head.id} at height ${pending.head.height} after " +
-            s"$incompleteBlockRetries refetch(es) still resolved no input scripts. Any rollup genesis " +
-            "in it cannot be authenticated and will not be tracked.")
-        commitNext(tip)
-      }
+      else commitNext(tip)
 
     case PollFinished(Success(AtTip(_))) =>
       inFlight = false
@@ -146,16 +141,25 @@ class StateFrame @Inject()(config: Configuration,
         case None => logger.warn(s"Node tip is below synchronization start height $firstHeight")
       }
 
-    case PollFinished(Success(ForkDetected(at, detail, tip))) =>
+    // The chain is intact and only the index trails the cursor, so waiting is the correct option.
+    case PollFinished(Success(IndexBehind(at, heights))) =>
+      inFlight = false
+      val reason = s"node index is at height ${heights.usable}, below the committed height " +
+        s"${at.height} (headers reach ${heights.chain}); waiting for indexing to catch up"
+      logger.warn(reason)
+      recordStall(at.height, reason)
+      syncHandler ! MarkStale(reason)
+
+    case PollFinished(Success(ForkDetected(at, detail, heights))) =>
       logger.warn(s"Canonical chain diverged at height ${at.height}: $detail")
       syncHandler ! MarkStale(s"Canonical chain diverged at height ${at.height}: $detail")
       (syncHandler ? GetRetainedCursors)
         .map {
-          case RetainedCursors(values) => CursorsLoaded(Success(values), tip)
+          case RetainedCursors(values) => CursorsLoaded(Success(values), heights)
           case other => CursorsLoaded(Failure(new IllegalStateException(
-            s"Unexpected retained-cursor response $other")), tip)
+            s"Unexpected retained-cursor response $other")), heights)
         }
-        .recover { case ex => CursorsLoaded(Failure(ex), tip) }
+        .recover { case ex => CursorsLoaded(Failure(ex), heights) }
         .pipeTo(self)
 
     case PollFinished(Failure(ex)) => failPoll("Canonical block poll failed", ex)
@@ -197,18 +201,18 @@ class StateFrame @Inject()(config: Configuration,
 
     case CommitFinished(block, _, Failure(ex)) => failPoll(s"Block commit ask failed for ${block.id}", ex)
 
-    case CursorsLoaded(Success(cursors), tip) =>
-      Future(source.commonAncestor(cursors))(pollingContext)
-        .map(result => AncestorLocated(result, tip))
-        .recover { case ex => AncestorLocated(Failure(ex), tip) }
+    case CursorsLoaded(Success(cursors), heights) =>
+      Future(source.commonAncestor(cursors, heights.chain))(pollingContext)
+        .map(result => AncestorLocated(result, heights))
+        .recover { case ex => AncestorLocated(Failure(ex), heights) }
         .pipeTo(self)
 
     case CursorsLoaded(Failure(ex), _) => failPoll("Could not read retained rollback cursors", ex)
 
-    case AncestorLocated(Success(Some(ancestor)), tip) =>
+    case AncestorLocated(Success(Some(ancestor)), heights) =>
       (syncHandler ? RollbackTo(ancestor.blockId))
-        .map(result => RollbackFinished(Success(result), tip))
-        .recover { case ex => RollbackFinished(Failure(ex), tip) }
+        .map(result => RollbackFinished(Success(result), heights.usable))
+        .recover { case ex => RollbackFinished(Failure(ex), heights.usable) }
         .pipeTo(self)
 
     case AncestorLocated(Success(None), _) => beginSnapshotRecovery()
@@ -251,8 +255,28 @@ class StateFrame @Inject()(config: Configuration,
     case RecoveryPrepared(Success(None)) => beginFullRescan()
     case RecoveryPrepared(Failure(ex)) => failPoll("Snapshot reorg recovery failed", ex)
 
+    case DictionaryRepaired(at, Success(Right(seed))) =>
+      inFlight = false
+      (syncHandler ? RepairMinerDictionary(at, seed.minerTree, seed.dataBoxToken))
+        .map(_ => Tick)
+        .recover { case _ => Tick }
+        .pipeTo(self)
+
+    case DictionaryRepaired(_, Success(Left(reason))) =>
+      inFlight = false
+      logger.warn(s"Miner Dictionary bootstrap retry failed: $reason. Registration and commitment " +
+        s"fraud proofs stay unavailable; retrying in $repairInterval")
+      self ! Tick
+
+    case DictionaryRepaired(_, Failure(ex)) =>
+      inFlight = false
+      logger.warn(s"Miner Dictionary bootstrap retry could not run: ${message(ex)}", ex)
+      self ! Tick
+
     // MarkReady may reply to ask-based callers; this producer needs no response.
     case _: SyncStatus => ()
+    case _: BlockCommitted => ()
+    case _: BlockRejected => ()
   }
 
   private def beginPoll(): Unit = {
@@ -354,16 +378,18 @@ class StateFrame @Inject()(config: Configuration,
   /**
    * Fetches the committed header, successor headers, and matching blocks as one canonical batch.
    *
-   * At tip there is nothing to fetch, so the committed header is re-read on an interval instead.
+   * Both indexed and node heights used to determine synchronicity and the next action.
    */
   private def pollCanonical(): Try[PollResult] =
-    source.tipHeight.flatMap { tip =>
+    source.heights.flatMap { heights =>
       cursor match {
-        case Some(at) if tip < at.height =>
-          Success(ForkDetected(at, s"node tip $tip is below the committed height ${at.height}", tip))
-        case Some(at) if nextHeight > tip => revalidateTip(at, tip)
-        case _ if nextHeight > tip => Success(AtTip(tip))
-        case _ => fetchBatch(tip)
+        case Some(at) if heights.chain < at.height =>
+          Success(ForkDetected(at,
+            s"node header height ${heights.chain} is below the committed height ${at.height}", heights))
+        case Some(at) if heights.usable < at.height => Success(IndexBehind(at, heights))
+        case Some(at) if nextHeight > heights.usable => revalidateTip(at, heights.usable)
+        case _ if nextHeight > heights.usable => Success(AtTip(heights.usable))
+        case _ => fetchBatch(heights)
       }
     }
 
@@ -372,27 +398,53 @@ class StateFrame @Inject()(config: Configuration,
     else source.headerAt(at.height).map { canonical =>
       lastTipCheck = System.currentTimeMillis()
       if (canonical.id != at.blockId)
-        ForkDetected(at, s"header changed from ${at.blockId} to ${canonical.id}", tip)
+        ForkDetected(at, s"header changed from ${at.blockId} to ${canonical.id}",
+          NodeHeights(math.max(tip, at.height), tip))
       else AtTip(tip)
     }
 
-  private def fetchBatch(tip: Int): Try[PollResult] = {
+  private def fetchBatch(heights: NodeHeights): Try[PollResult] = {
+    val tip = heights.usable
     val last = math.min(nextHeight + batchBlocks - 1, tip)
     cursor match {
       case Some(at) =>
         source.headerSlice(at.height, last).flatMap { headers =>
           headers.headOption match {
             case Some(committedHeader) if committedHeader.id != at.blockId =>
-              Success(ForkDetected(at, s"header changed from ${at.blockId} to ${committedHeader.id}", tip))
+              Success(ForkDetected(at,
+                s"header changed from ${at.blockId} to ${committedHeader.id}", heights))
             case Some(_) => source.blocksFor(headers.tail).map(BatchFetched(_, tip))
             case None => Failure(new NoSuchElementException(
               s"Canonical chain slice returned no header at committed height ${at.height}"))
           }
         }
-      case None =>
-        source.headerSlice(nextHeight, last).flatMap(headers =>
-          source.blocksFor(headers).map(BatchFetched(_, tip)))
+      // Unreachable: the producer never polls before a seed establishes the cursor.
+      // Reaching it would mean committing blocks onto no base.
+      case None => Failure(new IllegalStateException(
+        "Canonical polling began before synchronization was seeded"))
     }
+  }
+
+  /** Whether a faulted dictionary is due another bootstrap attempt. */
+  private def dictionaryRepairDue: Boolean =
+    syncConfig.minerDictionaryBootstrap && cursor.isDefined &&
+      utils.Globals.syncView.canonical.available &&
+      !utils.Globals.syncView.minerDictionary.available &&
+      System.currentTimeMillis() - lastDictionaryRepair >= repairInterval.toMillis
+
+  /**
+   * Rebuilds a faulted dictionary at the committed height, without disturbing the cursor.
+   */
+  private def beginDictionaryRepair(): Unit = {
+    inFlight = true
+    lastDictionaryRepair = System.currentTimeMillis()
+    val at = cursor.get.height
+    logger.info(s"Retrying the Miner Dictionary bootstrap at height $at")
+    Future(Try(new MinerDictionaryBootstrap(nodeContext.getNodeApi, protocol,
+      syncConfig.minerDictionaryMaxTransforms).run(at)))(pollingContext)
+      .map(result => DictionaryRepaired(at, result))
+      .recover { case ex => DictionaryRepaired(at, Failure(ex)) }
+      .pipeTo(self)
   }
 
   private def beginFullRescan(): Unit = {
@@ -402,6 +454,9 @@ class StateFrame @Inject()(config: Configuration,
       .recover { case ex => ResetFinished(Failure(ex)) }
       .pipeTo(self)
   }
+
+  private def message(ex: Throwable): String =
+    Option(ex.getMessage).getOrElse(ex.getClass.getSimpleName)
 
   private def failPoll(message: String, ex: Throwable): Unit = {
     inFlight = false

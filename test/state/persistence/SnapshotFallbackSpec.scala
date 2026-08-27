@@ -35,7 +35,7 @@ class SnapshotFallbackSpec extends TestKit(ActorSystem("snapshot-fallback"))
   override def afterAll(): Unit = TestKit.shutdownActorSystem(system)
 
   "StateSnapshotActor" should "keep a generation whose header could not be read" in {
-    val (actor, requester) = actorOver(saved = Seq(600), headerAnswer = _ =>
+    val (actor, requester, identity) = actorOver(saved = Seq(600), headerAnswer = _ =>
       Failure(new java.net.ConnectException("node refused the connection")))
 
     requester.send(actor, RestoreLatest)
@@ -48,7 +48,7 @@ class SnapshotFallbackSpec extends TestKit(ActorSystem("snapshot-fallback"))
   }
 
   it should "restore a generation the node confirms" in {
-    val (actor, requester) = actorOver(saved = Seq(600), headerAnswer = height =>
+    val (actor, requester, identity) = actorOver(saved = Seq(600), headerAnswer = height =>
       Success(ChainFixtures.header(height)))
 
     requester.send(actor, RestoreLatest)
@@ -57,7 +57,7 @@ class SnapshotFallbackSpec extends TestKit(ActorSystem("snapshot-fallback"))
 
   it should "fall past a disproved generation to an older confirmed one" in {
     // Only the newest was replaced by a fork, so the older generation is still the chain's.
-    val (actor, requester) = actorOver(saved = Seq(500, 600), headerAnswer = height =>
+    val (actor, requester, identity) = actorOver(saved = Seq(500, 600), headerAnswer = height =>
       if (height == 600) Success(ChainFixtures.header(600).copy(id = "forked-600"))
       else Success(ChainFixtures.header(height)))
 
@@ -66,7 +66,7 @@ class SnapshotFallbackSpec extends TestKit(ActorSystem("snapshot-fallback"))
   }
 
   it should "report no canonical snapshot only when every generation was checked" in {
-    val (actor, requester) = actorOver(saved = Seq(500, 600), headerAnswer = height =>
+    val (actor, requester, identity) = actorOver(saved = Seq(500, 600), headerAnswer = height =>
       Success(ChainFixtures.header(height).copy(id = "forked-" + height)))
 
     requester.send(actor, RestoreLatest)
@@ -87,9 +87,9 @@ class SnapshotFallbackSpec extends TestKit(ActorSystem("snapshot-fallback"))
       // A stored data-box token says this miner registered; the dictionary says it holds nobody.
       MinerTree.initialState, Some(org.ergoplatform.sdk.ErgoId.create(SyncFixtures.id(7))))
 
-    val (actor, requester) = actorOver(saved = Seq.empty, headerAnswer = h =>
+    val (actor, requester, identity) = actorOver(saved = Seq.empty, headerAnswer = h =>
       Success(ChainFixtures.header(h)))
-    requester.send(actor, StateSnapshotActor.SnapshotCandidate(contradictory, Vector(cursor), force = true))
+    requester.send(actor, candidate(contradictory, Vector(cursor), identity))
     requester.expectNoMessage(scala.concurrent.duration.DurationInt(300).millis)
 
     requester.send(actor, RestoreLatest)
@@ -104,9 +104,9 @@ class SnapshotFallbackSpec extends TestKit(ActorSystem("snapshot-fallback"))
     val cursor = SyncCursor(600, header.id, header.parentId)
     val stale = SyncCursor(598, ChainFixtures.header(598).id, ChainFixtures.header(597).id)
 
-    val (actor, requester) = actorOver(saved = Seq.empty, headerAnswer = h =>
+    val (actor, requester, identity) = actorOver(saved = Seq.empty, headerAnswer = h =>
       Success(ChainFixtures.header(h)))
-    requester.send(actor, StateSnapshotActor.SnapshotCandidate(stateAt(600), Vector(stale), force = true))
+    requester.send(actor, candidate(stateAt(600), Vector(stale), identity))
     requester.expectNoMessage(scala.concurrent.duration.DurationInt(300).millis)
 
     requester.send(actor, RestoreLatest)
@@ -120,7 +120,8 @@ class SnapshotFallbackSpec extends TestKit(ActorSystem("snapshot-fallback"))
   }
 
   private def actorOver(saved: Seq[Int],
-                        headerAnswer: Int => Try[NodeHeader]): (akka.actor.ActorRef, TestProbe) = {
+                        headerAnswer: Int => Try[NodeHeader])
+  : (akka.actor.ActorRef, TestProbe, StateSnapshotIdentity) = {
     val nodeApi = mock[NodeApi]
     doAnswer(new Answer[Try[Seq[NodeHeader]]] {
       override def answer(invocation: InvocationOnMock): Try[Seq[NodeHeader]] = {
@@ -142,12 +143,19 @@ class SnapshotFallbackSpec extends TestKit(ActorSystem("snapshot-fallback"))
 
     val actor = system.actorOf(Props(new StateSnapshotActor(config, nodeContext, protocol)))
     val requester = TestProbe()
+    val identity = StateSnapshotIdentity(protocol)
     saved.foreach { height =>
-      requester.send(actor, StateSnapshotActor.SnapshotCandidate(
-        stateAt(height), Vector(stateAt(height).cursor), force = true))
+      requester.send(actor, candidate(stateAt(height), Vector(stateAt(height).cursor), identity))
     }
     // Each save is acknowledged internally; give them room before the restore reads generations.
     requester.expectNoMessage(scala.concurrent.duration.DurationInt(300).millis)
-    (actor, requester)
+    (actor, requester, identity)
   }
+
+  /** Encodes as the state owner does, so the actor receives the shape it handles. */
+  private def candidate(state: CommittedSyncState,
+                        cursors: Vector[SyncCursor],
+                        identity: StateSnapshotIdentity): StateSnapshotActor.SnapshotCandidate =
+    StateSnapshotActor.SnapshotCandidate(state.cursor, state.version,
+      StateSnapshotCodec.encode(PersistedSyncState(state, cursors), identity).toOption.get)
 }

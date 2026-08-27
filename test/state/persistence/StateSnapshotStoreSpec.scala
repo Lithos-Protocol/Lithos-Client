@@ -35,7 +35,7 @@ class StateSnapshotStoreSpec extends AnyFlatSpec with Matchers with BeforeAndAft
     val persisted = populatedSnapshot(height = 100, version = 8L)
     val original = persisted.state
 
-    val encoded = StateSnapshotCodec.encode(persisted, manifestDepth = 0, identity).toOption.get
+    val encoded = StateSnapshotCodec.encode(persisted, identity).toOption.get
     val decoded = StateSnapshotCodec.decode(encoded, identity).toOption.get
     val restored = decoded.state
 
@@ -60,7 +60,7 @@ class StateSnapshotStoreSpec extends AnyFlatSpec with Matchers with BeforeAndAft
   it should "round-trip the canonical cursors behind the committed state" in {
     val persisted = populatedSnapshot(height = 100, version = 8L)
 
-    val encoded = StateSnapshotCodec.encode(persisted, manifestDepth = 0, identity).toOption.get
+    val encoded = StateSnapshotCodec.encode(persisted, identity).toOption.get
 
     StateSnapshotCodec.decode(encoded, identity).toOption.get.recentCursors shouldEqual
       persisted.recentCursors
@@ -71,21 +71,21 @@ class StateSnapshotStoreSpec extends AnyFlatSpec with Matchers with BeforeAndAft
     val persisted = faulted.copy(
       state = faulted.state.copy(minerDictionaryFault = Some("input 1 does not spend the tracked box")))
 
-    val encoded = StateSnapshotCodec.encode(persisted, manifestDepth = 0, identity).toOption.get
+    val encoded = StateSnapshotCodec.encode(persisted, identity).toOption.get
 
     StateSnapshotCodec.decode(encoded, identity).toOption.get.state.minerDictionaryFault shouldEqual
       Some("input 1 does not spend the tracked box")
   }
 
   it should "reject a corrupt payload before publishing any state" in {
-    val encoded = StateSnapshotCodec.encode(populatedSnapshot(100, 8L), 0, identity).toOption.get
+    val encoded = StateSnapshotCodec.encode(populatedSnapshot(100, 8L), identity).toOption.get
     encoded(encoded.length / 2) = (encoded(encoded.length / 2) ^ 0x01).toByte
 
     StateSnapshotCodec.decode(encoded, identity).isLeft shouldBe true
   }
 
   it should "reject state created for another network, wallet, or protocol deployment" in {
-    val encoded = StateSnapshotCodec.encode(populatedSnapshot(100, 8L), 0, identity).toOption.get
+    val encoded = StateSnapshotCodec.encode(populatedSnapshot(100, 8L), identity).toOption.get
     val other = identity.copy(localMinerHash = "another-miner")
 
     StateSnapshotCodec.decode(encoded, other).left.toOption.get should include("does not match")
@@ -95,12 +95,12 @@ class StateSnapshotStoreSpec extends AnyFlatSpec with Matchers with BeforeAndAft
     val directory = Files.createTempDirectory("lithos-sync-snapshot-")
     directories :+= directory
     val keyValueStore = LevelDbKeyValueStore.openOrThrow(directory)
-    val snapshots = new LevelDbStateSnapshotStore(keyValueStore, manifestDepth = 0, retention = 2, identity)
+    val snapshots = new LevelDbStateSnapshotStore(keyValueStore, retention = 2, identity)
     val first = populatedSnapshot(100, 8L)
     val second = populatedSnapshot(101, 9L)
 
-    snapshots.save(first) shouldEqual Right(())
-    snapshots.save(second) shouldEqual Right(())
+    save(snapshots, first) shouldEqual Right(())
+    save(snapshots, second) shouldEqual Right(())
     firstUsable(snapshots).map(_.state.cursor) shouldEqual Some(second.state.cursor)
 
     val newest = keyValueStore.scanPrefix("sync/snapshot/data/".getBytes("UTF-8"))
@@ -112,6 +112,14 @@ class StateSnapshotStoreSpec extends AnyFlatSpec with Matchers with BeforeAndAft
     firstUsable(snapshots).map(_.state.cursor) shouldEqual Some(first.state.cursor)
     snapshots.close() shouldEqual Right(())
   }
+
+  /** Encodes and writes in one step, as the state owner does. */
+  private def save(store: LevelDbStateSnapshotStore,
+                   persisted: PersistedSyncState): Either[SnapshotError, Unit] =
+    StateSnapshotCodec.encode(persisted, identity) match {
+      case Right(encoded) => store.save(persisted.state.cursor, persisted.state.version, encoded)
+      case Left(reason) => Left(SnapshotError.Corrupt(reason))
+    }
 
   /** Returns the newest generation that decodes successfully. */
   private def firstUsable(store: LevelDbStateSnapshotStore): Option[PersistedSyncState] =

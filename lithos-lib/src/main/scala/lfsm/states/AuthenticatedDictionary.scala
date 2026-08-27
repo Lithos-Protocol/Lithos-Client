@@ -17,7 +17,11 @@ trait AuthenticatedDictionaryView {
   def parameters: PlasmaParameters
 
   def copy(): AuthenticatedDictionary
-  def getManifest(depth: Int = 0): Manifest
+
+  /**
+   * The complete AVL manifest.
+   */
+  def getManifest(): Manifest
 }
 
 /** Mutable dictionary used only by an isolated reducer or transaction-building projection. */
@@ -63,7 +67,7 @@ final class PlasmaDictionary private (private val map: PlasmaMap[Array[Byte], Ar
 
   override def copy(): AuthenticatedDictionary = new PlasmaDictionary(map.copy())
 
-  override def getManifest(depth: Int): Manifest = map.getManifest(depth)
+  override def getManifest(): Manifest = map.getManifest(0)
 }
 
 object PlasmaDictionary {
@@ -79,6 +83,10 @@ object PlasmaDictionary {
                    manifest: Manifest): Either[Throwable, PlasmaDictionary] =
     try {
       val loaded = PlasmaMap[Array[Byte], Array[Byte]](flags, parameters).loadManifest(manifest)
+      // Required by the toolkit after loadManifest, and what PlasmaMap.copy does for the same reason:
+      // without it the reconstructed prover produces proofs that differ from an equivalent map's, so a
+      // submission built from restored state carries a proof its contract rejects.
+      loaded.prover.generateProof()
       if (!java.util.Arrays.equals(loaded.digest, manifest.digest))
         Left(new IllegalArgumentException("Loaded dictionary digest does not match its manifest"))
       else Right(new PlasmaDictionary(loaded))

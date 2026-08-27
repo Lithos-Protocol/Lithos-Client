@@ -31,7 +31,6 @@ class ConfigDefaultsSpec extends AnyFlatSpec with Matchers {
     withClue("sync.snapshots.enabled: ") { absent.snapshotsEnabled shouldEqual shippedSync.snapshotsEnabled }
     withClue("sync.snapshots.intervalBlocks: ") { absent.snapshotInterval shouldEqual shippedSync.snapshotInterval }
     withClue("sync.snapshots.retention: ") { absent.snapshotRetention shouldEqual shippedSync.snapshotRetention }
-    withClue("sync.snapshots.manifestDepth: ") { absent.manifestDepth shouldEqual shippedSync.manifestDepth }
     withClue("sync.catchUpBatchBlocks: ") { absent.catchUpBatchBlocks shouldEqual shippedSync.catchUpBatchBlocks }
     withClue("sync.mempool.maxTransactions: ") {
       absent.mempoolMaxTransactions shouldEqual shippedSync.mempoolMaxTransactions
@@ -45,9 +44,10 @@ class ConfigDefaultsSpec extends AnyFlatSpec with Matchers {
     withClue("sync.retriesBeforeAlarm: ") {
       absent.retriesBeforeAlarm shouldEqual shippedSync.retriesBeforeAlarm
     }
-    withClue("sync.tipRevalidation: ") { absent.tipRevalidation shouldEqual shippedSync.tipRevalidation }
-    withClue("sync.incompleteBlockRetries: ") {
-      absent.incompleteBlockRetries shouldEqual shippedSync.incompleteBlockRetries
+    withClue("sync.revalidationChecks: ") { absent.revalidationChecks shouldEqual shippedSync.revalidationChecks }
+    withClue("sync.cursorWindow: ") { absent.cursorWindow shouldEqual shippedSync.cursorWindow }
+    withClue("sync.minerDictionary.repairInterval: ") {
+      absent.dictionaryRepairInterval shouldEqual shippedSync.dictionaryRepairInterval
     }
   }
 
@@ -67,11 +67,22 @@ class ConfigDefaultsSpec extends AnyFlatSpec with Matchers {
     }
   }
 
-  /** Keeps the retained-state window within its configured memory bound. */
-  "sync.reorgWindow" should "sit well inside the range validation permits" in {
+  /**
+   * The retained window is the subsystem's largest memory term, and its cost rises with the square of
+   * miners per rollup, so the ceiling is what stops a config change from being unsurvivable.
+   */
+  "sync.reorgWindow" should "sit inside the range validation permits" in {
     val window = new SyncConfig(shipped).reorgWindow
-    window should be <= 250
+    window should be <= 20
     window should be > 0
+  }
+
+  /** Cursors are cheap, so this is sized for reach and must outrange the state window. */
+  "sync.cursorWindow" should "reach further back than the retained-state window" in {
+    val sync = new SyncConfig(shipped)
+    sync.cursorWindow should be > sync.reorgWindow
+    // The node serves at most 16384 headers in one chainSlice, and commonAncestor asks in one call.
+    sync.cursorWindow should be <= 16000
   }
 
   // Every configured lender key must have a corresponding wallet secret.

@@ -10,6 +10,7 @@ import state.messages.MempoolMessages.{MempoolRollupState, MempoolSnapshot, Memp
 import state.messages.SyncMessages._
 import state.messages.{BlockInfo, Capability, SyncView}
 import state.persistence.StateSnapshotActor.SnapshotCandidate
+import state.persistence.{PersistedSyncState, StateSnapshotCodec, StateSnapshotIdentity}
 import utils.Globals
 
 import javax.inject.Inject
@@ -27,6 +28,7 @@ class SyncHandler @Inject()(config: Configuration,
   private val logger: Logger = LoggerFactory.getLogger("SyncHandler")
   private val syncConfig = new SyncConfig(config)
   private val repository = SyncStateRepository(cacheApi, Globals.mdDB)
+  private val snapshotIdentity = StateSnapshotIdentity(protocol)
 
   private var committed = Option.empty[CommittedSyncState]
   // Retained states support exact rollback; the longer cursor window locates ancestors after restart.
@@ -34,7 +36,6 @@ class SyncHandler @Inject()(config: Configuration,
   private var knownCursors = Vector.empty[SyncCursor]
   private var status: SyncStatus = Starting
   private var canonicalReadyRequested = false
-  private var locallyDisabledRollups = Set.empty[String]
   private var mempool = MempoolSnapshot(0L, Map.empty, Map.empty, Set.empty)
   private var projections = Map.empty[String, (Long, Long, MempoolRollupState)]
   private var suppressedProjections = Map.empty[String, Long]
@@ -142,7 +143,7 @@ class SyncHandler @Inject()(config: Configuration,
     case GetCurrentRollup(blockId) =>
       val requester = sender()
       try {
-        committed.flatMap(_.rollups.get(blockId)).filter(_ => !locallyDisabledRollups.contains(blockId)) match {
+        committed.flatMap(_.rollups.get(blockId)) match {
           case Some(tree) if status.isInstanceOf[Ready] =>
             if (mempool.blockedRoots.contains(tree.utxoId)) requester ! NoRollupFound()
             else requester ! CurrentRollup(tree.utxoId, tree, projectedRollup(committed.get, blockId, tree))
@@ -165,16 +166,54 @@ class SyncHandler @Inject()(config: Configuration,
         }
       }
 
+    // Stops tracking a rollup this client can never submit to. The NISP window closes at the rollup's
+    // own creation height, so the miss is permanent and its tree is dead weight until payout.
     case RemoveRollup(blockId, reason) =>
-      if (committed.exists(_.rollups.contains(blockId))) {
-        try {
-          locallyDisabledRollups += blockId
-          logger.warn(s"Disabled local use of rollup $blockId: $reason")
-        } catch {
-          case NonFatal(ex) => markRuntimeFailure(s"Could not disable local rollup $blockId", ex)
+      committed.filter(_.rollups.contains(blockId)).foreach { state =>
+        val tree = state.rollups(blockId)
+        val evicted = state.copy(rollups = state.rollups - blockId, routes = state.routes - tree.utxoId)
+        publishTransition(committed, evicted) match {
+          case Right(_) =>
+            committed = Some(evicted)
+            projections -= blockId
+            suppressedProjections -= blockId
+            logger.warn(s"Stopped tracking rollup $blockId: $reason")
+            publishStatus(status)
+          case Left(failed) => markRuntimeFailure(s"Could not stop tracking rollup $blockId", failed)
         }
       }
+
+    // Replaces dictionary state rebuilt at the committed height and clears its fault. A commit that
+    // landed while the rebuild ran makes the result one block stale, so the height must still match.
+    case RepairMinerDictionary(atHeight, minerTree, dataBoxToken) =>
+      val requester = sender()
+      committed match {
+        case Some(state) if state.cursor.height == atHeight =>
+          val repaired = state.copy(minerTree = minerTree, dataBoxToken = dataBoxToken,
+            minerDictionaryFault = None)
+          publishTransition(committed, repaired) match {
+            case Right(_) =>
+              committed = Some(repaired)
+              logger.info(s"Miner Dictionary restored at height $atHeight with " +
+                s"${minerTree.numMiners} miner(s); registration and commitment fraud proofs are " +
+                "available again")
+              publishStatus(status)
+              requester ! BlockCommitted(repaired.cursor, repaired.version, 0, 0)
+            case Left(failed) =>
+              markRuntimeFailure("Could not publish the rebuilt Miner Dictionary",
+                new IllegalStateException(failed))
+              requester ! BlockRejected(committed.map(_.cursor), "", failed)
+          }
+        case Some(state) =>
+          requester ! BlockRejected(Some(state.cursor), "",
+            s"dictionary was rebuilt at height $atHeight but the cursor is now ${state.cursor.height}")
+        case None =>
+          requester ! BlockRejected(None, "", "no committed state to repair")
+      }
   }
+
+  private def markRuntimeFailure(message: String, reason: String): Unit =
+    markRuntimeFailure(message, new IllegalStateException(reason))
 
   private def applyAndReply(block: BlockInfo): Unit = {
     val requester = sender()
@@ -219,10 +258,9 @@ class SyncHandler @Inject()(config: Configuration,
               case Right(_) =>
                 committed = Some(transition.state)
                 retained = (retained :+ transition.state).takeRight(syncConfig.reorgWindow + 1)
-                knownCursors = (knownCursors :+ transition.state.cursor).takeRight(syncConfig.reorgWindow + 1)
+                knownCursors = (knownCursors :+ transition.state.cursor).takeRight(syncConfig.cursorWindow + 1)
                 projections = Map.empty
                 suppressedProjections = Map.empty
-                locallyDisabledRollups = locallyDisabledRollups.intersect(transition.state.rollups.keySet)
                 reportFaults(block, transition)
                 reportProgress(block, transition)
                 status = status match {
@@ -294,7 +332,6 @@ class SyncHandler @Inject()(config: Configuration,
             knownCursors = knownCursors.filterNot(_.height > target.cursor.height)
             projections = Map.empty
             suppressedProjections = Map.empty
-            locallyDisabledRollups = locallyDisabledRollups.intersect(target.rollups.keySet)
             status = Reorganizing(target.cursor, target.cursor.height)
             publishStatus(status)
             sender() ! RollbackCompleted(target.cursor)
@@ -309,10 +346,9 @@ class SyncHandler @Inject()(config: Configuration,
       // Only the restored state supports exact rollback; older cursors still locate forks.
       retained = Vector(state)
       knownCursors =
-        (cursors.filter(_.height < state.cursor.height) :+ state.cursor).takeRight(syncConfig.reorgWindow + 1)
+        (cursors.filter(_.height < state.cursor.height) :+ state.cursor).takeRight(syncConfig.cursorWindow + 1)
       projections = Map.empty
       suppressedProjections = Map.empty
-      locallyDisabledRollups = Set.empty
       canonicalReadyRequested = false
       initialReadySnapshotRequested = false
       status = CatchingUp(state.cursor, state.cursor.height)
@@ -327,7 +363,6 @@ class SyncHandler @Inject()(config: Configuration,
       knownCursors = Vector.empty
       projections = Map.empty
       suppressedProjections = Map.empty
-      locallyDisabledRollups = Set.empty
       canonicalReadyRequested = false
       initialReadySnapshotRequested = false
       status = Starting
@@ -341,7 +376,7 @@ class SyncHandler @Inject()(config: Configuration,
   /** Rollups this client may act on. Cheap: no projection is built, so a commit can publish it. */
   private def usableRollups(state: CommittedSyncState): Seq[(String, lfsm.states.NISPTree)] =
     state.routedRollups.filterNot { case (utxoId, tree) =>
-      locallyDisabledRollups.contains(tree.blockId) || mempool.blockedRoots.contains(utxoId)
+      mempool.blockedRoots.contains(utxoId)
     }
 
   private def projectedRollup(state: CommittedSyncState,
@@ -377,15 +412,18 @@ class SyncHandler @Inject()(config: Configuration,
   }
 
   /**
-   * Hands a snapshot candidate to the writer, detached.
-   *
-   * The cadence decision lives here rather than in the writer so the copy is only paid when a write
-   * will follow — and it is made on this thread, which owns the dictionaries being copied.
+   * Serializes a snapshot here and hands the writer bytes.
    */
   private def offerSnapshot(state: CommittedSyncState, force: Boolean): Unit = {
     val due = force || state.cursor.height % syncConfig.snapshotInterval == 0
     if (syncConfig.snapshotsEnabled && due)
-      snapshotActor ! SnapshotCandidate(state.detached, knownCursors, force)
+      StateSnapshotCodec.encode(PersistedSyncState(state, knownCursors), snapshotIdentity) match {
+        case Right(encoded) =>
+          snapshotActor ! SnapshotCandidate(state.cursor, state.version, encoded)
+        case Left(reason) =>
+          logger.error(s"Could not encode a snapshot at height ${state.cursor.height}: $reason. " +
+            "Synchronization continues; restart recovery will use an older generation.")
+      }
   }
 
   private def safelyUpdateMempool(update: => Unit): Unit =

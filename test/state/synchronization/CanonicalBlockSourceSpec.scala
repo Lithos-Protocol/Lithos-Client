@@ -128,7 +128,7 @@ class CanonicalBlockSourceSpec extends AnyFlatSpec with Matchers with MockitoSug
       header(oldest.blockId, 100, oldest.parentId),
       header(ancestor.blockId, 101, oldest.blockId))))
 
-    new CanonicalBlockSource(nodeApi).commonAncestor(Seq(oldest, ancestor)).get shouldEqual Some(ancestor)
+    new CanonicalBlockSource(nodeApi).commonAncestor(Seq(oldest, ancestor), chainHeight = 101).get shouldEqual Some(ancestor)
   }
 
   // Reject discontinuous batches before any child block is applied.
@@ -175,7 +175,7 @@ class CanonicalBlockSourceSpec extends AnyFlatSpec with Matchers with MockitoSug
       header(ancestor.blockId, 101, oldest.blockId),
       header("canonical-102", 102, ancestor.blockId))))
 
-    val result = new CanonicalBlockSource(nodeApi).commonAncestor(Seq(oldest, ancestor, orphan)).get
+    val result = new CanonicalBlockSource(nodeApi).commonAncestor(Seq(oldest, ancestor, orphan), chainHeight = 102).get
 
     result shouldEqual Some(ancestor)
     verify(nodeApi).chainSlice(Some(99), Some(102))

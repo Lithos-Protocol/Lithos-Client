@@ -29,8 +29,8 @@ final class MinerDictionaryBootstrap(nodeApi: NodeApi,
   def run(seedHeight: Int): Either[String, MinerDictionarySeed] = {
     val started = System.currentTimeMillis()
     // Start empty so a pre-registration seed cannot inherit later dictionary state.
-    val empty = seedState(startState)
-    walk(empty, protocol.minerDictionaryGenesisId, seedHeight, applied = 0, seed = Some(empty)) match {
+    val replay = new BlockReducer.MinerDictionaryReplay(seedState(startState), protocol)
+    walk(replay, protocol.minerDictionaryGenesisId, seedHeight, applied = 0, seed = None) match {
       case Left(reason) => Left(reason)
       case Right(result) => verify(result).map { _ =>
         val elapsed = System.currentTimeMillis() - started
@@ -52,9 +52,14 @@ final class MinerDictionaryBootstrap(nodeApi: NodeApi,
                                       tipBoxId: String,
                                       applied: Int)
 
-  /** Follows each dictionary spend while retaining the latest state at or below `seedHeight`. */
+  /**
+   * Follows each dictionary spend, freezing the seed state the first time a transform lands above it.
+   *
+   * The replay mutates one dictionary, so the seed has to be taken before the transform that leaves
+   * its height rather than after every transform below it.
+   */
   @tailrec
-  private def walk(current: CommittedSyncState,
+  private def walk(replay: BlockReducer.MinerDictionaryReplay,
                    boxId: String,
                    seedHeight: Int,
                    applied: Int,
@@ -64,35 +69,35 @@ final class MinerDictionaryBootstrap(nodeApi: NodeApi,
       case Success(None) => Left(s"indexed node has no dictionary box $boxId")
       case Success(Some(box)) => box.spentTransactionId match {
         case None =>
-          Right(WalkResult(seed.getOrElse(current), current, boxId, applied))
+          // Every transform landed at or below the seed height, so the walk's end is also the seed.
+          Right(WalkResult(seed.getOrElse(replay.frozen), replay.current, boxId, applied))
         // Checked here rather than before the read, so a chain of exactly the bound still terminates.
         case Some(_) if applied >= maxTransforms =>
           Left(s"Miner Dictionary history exceeds sync.minerDictionary.maxTransforms ($maxTransforms)")
-        case Some(txId) => applySpend(current, box, txId) match {
+        case Some(txId) => readSpend(box, txId) match {
           case Left(reason) => Left(reason)
-          case Right((next, nextBoxId, height)) =>
-            val carried = if (height <= seedHeight) Some(next) else seed
-            walk(next, nextBoxId, seedHeight, applied + 1, carried)
+          case Right((tx, height, nextBoxId)) =>
+            val carried = if (height > seedHeight && seed.isEmpty) Some(replay.frozen) else seed
+            replay.apply(height, tx) match {
+              case Left(error) => Left(s"at height $height: ${error.message}")
+              case Right(_) => walk(replay, nextBoxId, seedHeight, applied + 1, carried)
+            }
         }
       }
     }
   }
 
-  private def applySpend(current: CommittedSyncState,
-                         box: IndexedBox,
-                         txId: String): Either[String, (CommittedSyncState, String, Int)] =
+  private def readSpend(box: IndexedBox,
+                        txId: String): Either[String, (BlockTx, Int, String)] =
     nodeApi.indexedTransactionById(txId) match {
       case Failure(ex) => Left(s"could not read dictionary transaction $txId: ${message(ex)}")
       case Success(None) => Left(s"indexed node has no transaction $txId spending ${box.boxId}")
       case Success(Some(indexed)) =>
         val tx: BlockTx = NodeSync.blockTx(indexed)
         val height = box.spendingHeight.getOrElse(indexed.inclusionHeight)
-        BlockReducer.applyMinerDictionaryTransform(current, height, tx, protocol) match {
-          case Left(error) => Left(s"at height $height: ${error.message}")
-          case Right(next) => tx.outputs.headOption match {
-            case Some(output) => Right((next, output.id, height))
-            case None => Left(s"dictionary transaction $txId has no output to follow")
-          }
+        tx.outputs.headOption match {
+          case Some(output) => Right((tx, height, output.id))
+          case None => Left(s"dictionary transaction $txId has no output to follow")
         }
     }
 

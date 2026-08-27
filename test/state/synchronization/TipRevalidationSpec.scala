@@ -103,7 +103,7 @@ class TipRevalidationSpec extends TestKit(ActorSystem("tip-revalidation"))
       s"""sync.startHeight = $startHeight
          |sync.catchUpBatchBlocks = 4
          |sync.minerDictionary.bootstrap = false
-         |sync.tipRevalidation = $revalidation
+         |sync.revalidationChecks = $revalidation
          |""".stripMargin))
     val frame = system.actorOf(Props(
       new StateFrame(config, nodeContext, protocol, sync.ref, snapshots.ref)))

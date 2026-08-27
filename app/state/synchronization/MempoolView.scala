@@ -20,6 +20,13 @@ object MempoolView {
   private case object Tick
   private final case class RefreshFinished(result: Try[BuiltSnapshot])
 
+  /**
+   * The page walk raced a change it could have skipped over, rather than the node failing.
+   *
+   * It means the previous revision is still the best answer and the next tick will do better.
+   */
+  final class MempoolRaced(detail: String) extends RuntimeException(detail)
+
   private final val PageSize = 500
 
   final case class Graph(chains: Map[String, MempoolChain], blockedRoots: Set[String])
@@ -126,6 +133,12 @@ class MempoolView @Inject()(config: play.api.Configuration,
       }
       healthy = true
 
+    // A raced page walk is expected traffic. The last revision stays published and the
+    // next tick re-reads
+    case RefreshFinished(Failure(raced: MempoolRaced)) =>
+      inFlight = false
+      logger.debug(s"Retrying the mempool view: ${raced.getMessage}")
+
     case RefreshFinished(Failure(ex)) =>
       inFlight = false
       healthy = false
@@ -144,17 +157,20 @@ class MempoolView @Inject()(config: play.api.Configuration,
   }
 
   /**
-   * Reads the relevant mempool twice and keeps the result only when both agree.
+   * Reads the relevant mempool twice and keeps the result when nothing disappeared between them.
    *
-   * Offsets shift as transactions enter and leave, so a page walk can skip an entry even when every
-   * response is individually valid. A changed set means the walk raced; the next tick retries.
+   * Offsets shift as transactions leave, so a page walk can skip an entry even when every response is
+   * individually valid. Arrivals cannot cause a skip and are the common case at any scale, so
+   * requiring the two reads to be identical would reject most refreshes once submissions are
+   * frequent. Only a disappearance forces a retry.
    */
   private def buildSnapshot(): Try[BuiltSnapshot] =
     fetchAll().flatMap { first =>
       fetchAll().flatMap { second =>
-        if (first.map(_.id).toSet == second.map(_.id).toSet) Success(second)
-        else Failure(new IllegalStateException(
-          "Unconfirmed rollup transactions changed while they were being paged"))
+        val vanished = first.map(_.id).toSet -- second.map(_.id).toSet
+        if (vanished.isEmpty) Success(second)
+        else Failure(new MempoolRaced(
+          s"${vanished.size} unconfirmed rollup transaction(s) left the mempool while it was paged"))
       }
     }.map { transactions =>
       val graph = buildGraph(transactions)

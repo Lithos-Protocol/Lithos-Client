@@ -12,6 +12,7 @@ import state.messages.MempoolMessages.{MempoolSnapshot, MempoolUnavailable}
 import state.messages.BlockInfo
 import state.messages.RollupMessages.GetCurrentRollup
 import state.persistence.StateSnapshotActor.SnapshotCandidate
+import state.persistence.{StateSnapshotCodec, StateSnapshotIdentity}
 import support.{FakeCache, FakeNodeContext, ReducerFixtures, SyncFixtures}
 
 import scala.concurrent.duration._
@@ -22,7 +23,7 @@ class SyncHandlerCommitSpec extends TestKit(ActorSystem("sync-handler-commit"))
   override def afterAll(): Unit = TestKit.shutdownActorSystem(system)
 
   "SyncHandler" should "publish readiness only after an exact block commit" in {
-    val (handler, snapshots) = newHandler()
+    val (handler, snapshots, _) = newHandler()
     val requester = TestProbe()
     seed(handler, requester)
     val block = BlockInfo(SyncFixtures.id(100), 100, Seq.empty, SyncFixtures.id(99))
@@ -63,7 +64,7 @@ class SyncHandlerCommitSpec extends TestKit(ActorSystem("sync-handler-commit"))
   }
 
   it should "leave the cursor unchanged on rejection and continue from the last commit" in {
-    val (handler, _) = newHandler()
+    val (handler, _, _) = newHandler()
     val requester = TestProbe()
     seed(handler, requester)
     val first = BlockInfo(SyncFixtures.id(100), 100, Seq.empty, SyncFixtures.id(99))
@@ -85,7 +86,7 @@ class SyncHandlerCommitSpec extends TestKit(ActorSystem("sync-handler-commit"))
   }
 
   it should "restore an exact retained state before applying a replacement branch" in {
-    val (handler, _) = newHandler()
+    val (handler, _, _) = newHandler()
     val requester = TestProbe()
     seed(handler, requester)
     val first = BlockInfo(SyncFixtures.id(100), 100, Seq.empty, SyncFixtures.id(99))
@@ -112,7 +113,7 @@ class SyncHandlerCommitSpec extends TestKit(ActorSystem("sync-handler-commit"))
    * dictionary.
    */
   it should "offer a snapshot only when one is due, and hand over a detached copy" in {
-    val (handler, snapshots) = newHandler()
+    val (handler, snapshots, protocol) = newHandler()
     val requester = TestProbe()
     seed(handler, requester)
     val first = BlockInfo(SyncFixtures.id(100), 100, Seq.empty, SyncFixtures.id(99))
@@ -126,13 +127,16 @@ class SyncHandlerCommitSpec extends TestKit(ActorSystem("sync-handler-commit"))
     requester.send(handler, MarkReady)
     requester.expectMsgType[Ready]
     val forced = snapshots.expectMsgType[SnapshotCandidate]
-    forced.force shouldBe true
 
-    // The writer must not be handed the dictionaries the reducer is still reading.
+    // The writer is handed bytes, not the dictionaries the reducer is still reading, so there is no
+    // shared object to copy defensively and no second getManifest on the database thread.
     requester.send(handler, GetCommittedState)
     val live = requester.expectMsgType[CommittedState].state
-    forced.state.minerTree.dictionary should not be theSameInstanceAs(live.minerTree.dictionary)
-    forced.state.minerTree.dictionary.digest should
+    forced.cursor shouldEqual live.cursor
+    forced.encoded.length should be > 0
+    val decoded = StateSnapshotCodec.decode(forced.encoded, StateSnapshotIdentity(protocol)).toOption.get
+    decoded.state.cursor shouldEqual live.cursor
+    decoded.state.minerTree.dictionary.digest should
       contain theSameElementsInOrderAs live.minerTree.dictionary.digest
 
     val second = BlockInfo(SyncFixtures.id(101), 101, Seq.empty, first.id)
@@ -146,7 +150,7 @@ class SyncHandlerCommitSpec extends TestKit(ActorSystem("sync-handler-commit"))
 
   /** Verifies that a rollup-scoped transform failure does not reject the canonical block. */
   it should "commit a block whose only recognized transform belongs to one rollup that fails" in {
-    val (handler, _) = newHandler()
+    val (handler, _, _) = newHandler()
     val requester = TestProbe()
     seed(handler, requester)
     val dictionary = lfsm.states.PlasmaDictionary.empty()
@@ -180,7 +184,7 @@ class SyncHandlerCommitSpec extends TestKit(ActorSystem("sync-handler-commit"))
 
   /** A parent mismatch is block-wide and must leave the cursor unchanged. */
   it should "refuse to advance the cursor when a block does not follow the committed one" in {
-    val (handler, _) = newHandler()
+    val (handler, _, _) = newHandler()
     val requester = TestProbe()
     seed(handler, requester)
     val first = BlockInfo(SyncFixtures.id(100), 100, Seq.empty, SyncFixtures.id(99))
@@ -204,7 +208,7 @@ class SyncHandlerCommitSpec extends TestKit(ActorSystem("sync-handler-commit"))
    * The producer seeds this owner before any block, so no committed state means the owner lost its own.
    */
   it should "refuse a block rather than invent state when it has never been seeded" in {
-    val (handler, _) = newHandler()
+    val (handler, _, _) = newHandler()
     val requester = TestProbe()
     val block = BlockInfo(SyncFixtures.id(100), 100, Seq.empty, SyncFixtures.id(99))
 
@@ -237,6 +241,6 @@ class SyncHandlerCommitSpec extends TestKit(ActorSystem("sync-handler-commit"))
         |sync.snapshots.intervalBlocks = 720
         |""".stripMargin))
     val handler = system.actorOf(Props(new SyncHandler(config, protocol, cache, snapshots.ref)))
-    handler -> snapshots
+    (handler, snapshots, protocol)
   }
 }
