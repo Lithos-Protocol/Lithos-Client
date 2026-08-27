@@ -1903,10 +1903,7 @@ components:
         - transactionId
         - payoutUTXO
         - amount
-        - score
         - paymentHeight
-        - blockId
-        - minedBlockHeight
       properties:
         transactionId:
           type: string
@@ -1924,7 +1921,8 @@ components:
         score:
           type: integer
           format: int64
-          description: Score associated with this miner's NISP, used to determine payout amount
+          nullable: true
+          description: Score associated with this miner's NISP, when independently available. It cannot be recovered exactly from a rounded payout amount.
           example: 5000000
         paymentHeight:
           type: integer
@@ -1933,12 +1931,14 @@ components:
           example: 47832
         blockId:
           type: string
-          description: Id of the block processed by Lithos and associated with this reward
+          nullable: true
+          description: Id of the block processed by Lithos and associated with this reward, when known from rollup state. This is not the chain block containing the payout transaction.
           example: 'd5bb8d6fcb179a427e21b7ad68ec9148916aac7604f75c642acc1c3e28bd4c59'
         minedBlockHeight:
           type: integer
           format: int32
-          description: Height of the block processed by Lithos, and associated with this reward.
+          nullable: true
+          description: Height of the block processed by Lithos and associated with this reward, when known from rollup state.
           example: 47112
     LithosInfo:
       description: Information about this Lithos client and the current LFSM state

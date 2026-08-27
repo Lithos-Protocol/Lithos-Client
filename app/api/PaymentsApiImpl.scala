@@ -1,87 +1,109 @@
 package api
 
-import configs.NodeConfig
+import api.LithosApiErrors.LithosUnavailable
+import configs.NodeContext
+import lfsm.contracts.RollupContracts
 import models.PaymentTransaction
+import node.model.{IndexedBox, IndexedTransaction, Paging}
 import play.api.Configuration
 import play.api.cache.SyncCacheApi
-import utils.{Globals, PayoutRecord}
 
+import javax.inject.{Inject, Singleton}
+import scala.util.{Failure, Success, Try}
 
-/**
-  * Provides a default implementation for [[PaymentsApi]].
-  */
-class PaymentsApiImpl extends PaymentsApi {
-  /**
-   * @inheritdoc
-   */
-  override def getPayments(limit: Option[Int], offset: Option[Int], config: Configuration, cache: SyncCacheApi): List[PaymentTransaction] = {
-    // TODO: Uses tracked payouts from sync for right now
-    val page = ApiHelper.handlePagination(offset, limit)
-    val cached = cache.getOrElseUpdate[Seq[PayoutRecord]](Globals.TRACKED_PAYOUTS)(Seq.empty[PayoutRecord])
-      .sortBy(_.minedHeight)
-      .reverse
-    cached.slice(page._1, page._1 + page._2)
-      .map(p => PaymentTransaction(p.txId, p.utxoId, p.amount, p.score, p.creationHeight, p.blockId, p.minedHeight))
-      .toList
+/** Reconstructs confirmed local payout history from the node's address index. */
+@Singleton
+class PaymentsApiImpl @Inject()(nodeContext: NodeContext) extends PaymentsApi {
+
+  private val IndexPageSize = 100
+
+  /** Maximum address-index pages scanned before reporting the requested history unavailable. */
+  private val MaxIndexPages = 200
+
+  /** The protocol script itself, not an address supplied by an index response. */
+  private lazy val payoutErgoTree: String =
+    RollupContracts.mkPayoutContract(nodeContext.getNetwork).ergoTreeHex
+
+  /** @inheritdoc */
+  override def getPayments(limit: Option[Int],
+                           offset: Option[Int],
+                           config: Configuration,
+                           cache: SyncCacheApi): List[PaymentTransaction] = {
+    val (start, count) = ApiHelper.handlePagination(offset, limit)
+    val minerAddress = nodeContext.getNodeWallet.p2pk.toString
+    val minerErgoTree = nodeContext.getNodeWallet.contract.ergoTreeHex
+    val nodeApi = nodeContext.getNodeApi
+
+    var rawOffset = 0
+    var matched = 0L
+    var selected = Vector.empty[PaymentTransaction]
+    var exhausted = false
+    var pagesRead = 0
+
+    // Apply pagination after filtering address history to protocol payouts.
+    while (!exhausted && selected.size < count) {
+      if (pagesRead >= MaxIndexPages)
+        throw LithosUnavailable(
+          s"payment history scan reached its bound of $MaxIndexPages index pages " +
+            s"(${MaxIndexPages * IndexPageSize} transactions) before filling this page; " +
+            "raise the bound or request a lower offset")
+      pagesRead += 1
+      val paging = Paging(rawOffset, IndexPageSize)
+      // Normalize synchronous client failures with the NodeApi failure result.
+      val page = Try(nodeApi.indexedTransactionsByAddress(minerAddress, paging)).flatten match {
+        case Success(found) => found
+        case Failure(cause) =>
+          throw LithosUnavailable(
+            s"could not read payment history from the node index at offset $rawOffset: " +
+              s"is the indexed node reachable and current? (${cause.getMessage})",
+            cause)
+      }
+
+      page.items.iterator
+        .flatMap(paymentFrom(_, minerAddress, minerErgoTree))
+        .foreach { payment =>
+          if (matched >= start.toLong && selected.size < count)
+            selected :+= payment
+          matched += 1L
+        }
+
+      val consumed = page.items.size
+      val nextOffset = rawOffset.toLong + consumed.toLong
+      val reachedReportedTotal = page.total > 0 && nextOffset >= page.total.toLong
+
+      // A short page is terminal when the node omits `total`; advance by the rows actually returned.
+      exhausted = consumed == 0 || reachedReportedTotal || (page.total <= 0 && consumed < paging.limit)
+      if (!exhausted) {
+        if (nextOffset > Int.MaxValue)
+          throw LithosUnavailable("payment history exceeds the node index paging range")
+        rawOffset = nextOffset.toInt
+      }
+    }
+
+    selected.toList
   }
 
-  /** TODO: Implement better logic
-   * Generally this is an expensive call, mostly because explorer takes a while. Either we only do tracked payouts
-   * from sync or we have separate task to build payout history. Both options suck, but at least tracked payouts is simple.
-   * Maybe add option to sync payouts from different start height?
-   */
+  /** Matches confirmed transactions that spend the payout script and pay the primary miner address. */
+  private def paymentFrom(tx: IndexedTransaction,
+                          minerAddress: String,
+                          minerErgoTree: String): Option[PaymentTransaction] = {
+    if (tx.numConfirmations <= 0) None
+    else {
+      val payoutInput: Option[IndexedBox] = tx.inputs.find(_.ergoTree == payoutErgoTree)
+      val minerOutput: Option[IndexedBox] = tx.outputs.find(out =>
+        out.address == minerAddress && out.ergoTree == minerErgoTree)
 
-  //  override def getPayments(limit: Option[Int], offset: Option[Int], config: Configuration, cache: SyncCacheApi): List[PaymentTransaction] = {
-  //
-  //    val nodeConfig = new NodeConfig(config)
-  //    val page = ApiHelper.handlePagination(offset, limit)
-  //    val cached = cache.get[Seq[PaymentTransaction]]("payouts").getOrElse(Seq.empty[PaymentTransaction])
-  //    if(page._1 + page._2 > cached.size) {
-  //      nodeConfig.getClient.execute {
-  //        ctx =>
-  //
-  //          val txs = getTransactions(ctx, nodeConfig.prover.getAddress.toString, page._1 + page._2, page._2)
-  //
-  //
-  //          val payouts = txs.map {
-  //            s =>
-  //              // TODO: Naive impl of score
-  //              val totalScore = ErgoValue.fromHex(s._1.getInputs.get(0).getAdditionalRegisters.get("R6").serializedValue)
-  //                .getValue.asInstanceOf[CBigInt].wrappedValue
-  //              val totalReward = BigInt(s._1.getInputs.get(0).getAdditionalRegisters.get("R7").renderedValue)
-  //              val score = (BigInt(s._2.getValue) * totalScore) / totalReward
-  //              PaymentTransaction(s._1.getId, s._1.getInputs.get(0).getBoxId, s._2.getValue, score.toLong)
-  //          }.toList
-  //          cache.set("payouts", payouts)
-  //          payouts.slice(page._1, page._1 + page._2)
-  //      }
-  //    }else{
-  //      cached.slice(page._1, page._1 + page._2).toList
-  //    }
-  //  }
-  //  def getTransactions(ctx: BlockchainContext, proverAddress: String, offset: Int, limit: Int): Seq[(TransactionInfo, OutputInfo)] = {
-  //    val dataSource = ctx.getDataSource.asInstanceOf[NodeAndExplorerDataSourceImpl]
-  //    var txsList = Seq.empty[(TransactionInfo, OutputInfo)]
-  //    var expOffset = 0
-  //
-  //    while(txsList.size < offset + limit){
-  //      val txs = dataSource.getExplorerApi.getApiV1AddressesP1Transactions(proverAddress, expOffset, limit, false).execute().body
-  //      if(txs.getTotal == 0){
-  //        return txsList
-  //      }
-  //      val filteredTxs = JavaHelpers.toIndexedSeq(txs.getItems)
-  //        .filter(t => t.getInputs.get(0).getAddress == Helpers.payoutContract(ctx).address(ctx).toString)
-  //      val withMiner = filteredTxs.map {
-  //        t =>
-  //          val outputs = JavaHelpers.toIndexedSeq(t.getOutputs)
-  //          val feeAddress = Contract(ErgoTreePredef.feeProposition(720)).address(ctx).toString
-  //          val feeIndex = outputs.indexWhere(o => o.getAddress == feeAddress)
-  //          t -> outputs.zipWithIndex.find(o => o._1.getAddress == proverAddress && o._2 < feeIndex)
-  //      }
-  //      val hasMiner = withMiner.filter(_._2.isDefined).map(h => h._1 -> h._2.get._1)
-  //      txsList = txsList ++ hasMiner
-  //      expOffset = expOffset + limit
-  //    }
-  //    txsList
-  //  }
+      for {
+        input <- payoutInput
+        output <- minerOutput
+      } yield PaymentTransaction(
+        transactionId = tx.id,
+        payoutUTXO = input.boxId,
+        amount = output.value,
+        score = None,
+        paymentHeight = tx.inclusionHeight,
+        blockId = None,
+        minedBlockHeight = None)
+    }
+  }
 }

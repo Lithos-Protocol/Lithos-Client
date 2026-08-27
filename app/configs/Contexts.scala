@@ -7,8 +7,7 @@ import scala.concurrent.ExecutionContext
 
 class Contexts (system: ActorSystem) {
 
-  // A missing or malformed dispatcher block would otherwise surface as an opaque ConfigException
-  // from whoever looked up first; name the block to fix instead.
+  // Name the dispatcher block when lookup fails during component construction.
   private def dispatcher(name: String): ExecutionContext =
     try system.dispatchers.lookup(Contexts.key(name))
     catch {
@@ -22,6 +21,7 @@ class Contexts (system: ActorSystem) {
   val syncContext:         ExecutionContext = dispatcher(Contexts.Sync)
   val txContext:      ExecutionContext = dispatcher(Contexts.Tx)
   val dexContext:     ExecutionContext = dispatcher(Contexts.Dex)
+  val databaseContext: ExecutionContext = dispatcher(Contexts.Database)
 }
 
 object Contexts {
@@ -31,10 +31,10 @@ object Contexts {
   final val Sync:    String = "sync-dispatcher"
   final val Tx:      String = "tx-dispatcher"
   final val Dex:     String = "dex-dispatcher"
+  final val Database: String = "database-dispatcher"
 
-  /** Every dispatcher this class looks up. `Configs.validateAll` checks exactly these blocks exist,
-   * so the two cannot drift into validating a name nothing resolves or missing one that is. */
-  final val Names: Seq[String] = Seq(Stratum, Polling, Sync, Tx, Dex)
+  /** Dispatcher names shared with startup configuration validation. */
+  final val Names: Seq[String] = Seq(Stratum, Polling, Sync, Tx, Dex, Database)
 
   def key(name: String): String = s"lithos-contexts.$name"
 }

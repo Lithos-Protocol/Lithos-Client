@@ -35,8 +35,8 @@ object LithosDexContracts {
    * LD_Provision — the provision logic.
    *
    * NOTE: this contract is never used as a box's script. Its serialized value bytes are handed to
-   * [[mkProvisionGuard]] at spend time through context var 64, the same trade Collateral_Enforcer makes.
-   * Use [[provisionLogicVar]] to build that context var.
+   * the provision guard at spend time through context var 64, the same trade Collateral_Enforcer makes.
+   * Use the provision contract below to build that context var.
    */
   def mkProvisionLogic(networkType: NetworkType, poolNFT: ErgoId, vaultNFT: ErgoId): Contract = {
     val constants = ConstantsBuilder
@@ -53,7 +53,7 @@ object LithosDexContracts {
   /**
    * LD_Provision_Guard — the script every provision box carries.
    *
-   * @param provisionLogicHash `hashedValueBytes` of [[mkProvisionLogic]], not its prop bytes: the guard
+   * @param provisionLogicHash `hashedValueBytes` of provision contract, not its prop bytes: the guard
    *                           hashes the bytes it is handed in a context var and then executes them.
    */
   def mkProvisionGuard(networkType: NetworkType, provisionLogicHash: Array[Byte]): Contract = {
@@ -83,7 +83,7 @@ object LithosDexContracts {
   /**
    * LD_LiquidityPool — the AMM.
    *
-   * @param provisionGuardHash `hashedPropBytes` of [[mkProvisionGuard]]. This is what a provision box is
+   * @param provisionGuardHash `hashedPropBytes` of provision guard. This is what a provision box is
    *                           actually locked under, so it is the prop bytes here rather than the value
    *                           bytes used for the logic.
    */

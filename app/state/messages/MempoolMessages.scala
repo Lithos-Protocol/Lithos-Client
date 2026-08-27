@@ -61,6 +61,13 @@ object MempoolMessages {
   /** Message sent to MempoolView to tell it to re-build the mempool state and notify subscribers */
   case object RebuildMempoolChains
 
+  /** Complete dependency-ordered mempool view for one monotonically increasing revision. */
+  case class MempoolSnapshot(revision: Long,
+                             chains: Map[String, MempoolChain],
+                             endInputs: Map[String, InputUTXO],
+                             blockedRoots: Set[String])
+  case class MempoolUnavailable(reason: String)
+
   /** Message sent to manager of a MempoolState (usually a synchronizer of some kind) to reset it's mempool state */
   case class ResetMempoolState(rollupBlockId: String)
   // Mempool States

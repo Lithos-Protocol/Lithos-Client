@@ -93,6 +93,10 @@ class TransactionPublisher @Inject()(config: Configuration, nodeContext: NodeCon
         case Success(NoRollups()) =>
           logger.info("No rollups present for transaction stub publishing")
           self ! PublishRollupTxs(Success(Map.empty))
+
+        case Success(SyncUnavailable(status)) =>
+          logger.warn(s"Skipping transaction publication while synchronization is $status")
+          self ! PublishRollupTxs(Success(Map.empty))
       }
 
     // Result of buildRollupMap piped back from the Future

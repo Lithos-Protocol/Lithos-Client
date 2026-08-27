@@ -4,26 +4,32 @@ import lfsm.MDDatabase.{DATA_BOX_TOKEN, MD_DIR}
 import org.bouncycastle.util.encoders.Hex
 import org.ergoplatform.sdk.ErgoId
 import scorex.crypto.hash.Blake2b256
-import scorex.db.LDBFactory
-import scorex.utils.Ints
+import storage.{KeyValueStore, LevelDbKeyValueStore}
 
-class MDDatabase {
+import java.nio.file.Paths
 
-  private val kvstore = LDBFactory.createKvDb(MD_DIR)
+class MDDatabase(private val kvstore: KeyValueStore) {
 
-  def getAll: Seq[(Array[Byte], Array[Byte])] = kvstore.getAll.toSeq
+  def this() = this(LevelDbKeyValueStore.openOrThrow(Paths.get(MD_DIR)))
+
+  def getAll: Seq[(Array[Byte], Array[Byte])] =
+    KeyValueStore.orThrow(kvstore.scanPrefix(Array.emptyByteArray))
+
   def size: Int = getAll.size
 
-  def getDataBoxToken: Option[ErgoId] = kvstore.get(DATA_BOX_TOKEN).map(v => ErgoId.create(Hex.toHexString(v)))
-  def setDataBoxToken(tokenId: ErgoId): Boolean = kvstore.insert(DATA_BOX_TOKEN, tokenId.getBytes).isSuccess
-  def delDataBoxToken: Boolean = kvstore.remove(Array[Array[Byte]](DATA_BOX_TOKEN)).isSuccess
-  def close(): Unit = {
-    kvstore.close()
-  }
+  def getDataBoxToken: Option[ErgoId] =
+    KeyValueStore.orThrow(kvstore.get(DATA_BOX_TOKEN)).map(value => ErgoId.create(Hex.toHexString(value)))
 
+  def setDataBoxToken(tokenId: ErgoId): Boolean =
+    kvstore.put(DATA_BOX_TOKEN, tokenId.getBytes).isRight
+
+  def delDataBoxToken: Boolean =
+    kvstore.delete(DATA_BOX_TOKEN).isRight
+
+  def close(): Unit = KeyValueStore.orThrow(kvstore.close())
 }
+
 object MDDatabase {
   private final val MD_DIR = ".lithos/md"
   private final val DATA_BOX_TOKEN = Blake2b256.hash("DATA_BOX_TOKEN")
-
 }

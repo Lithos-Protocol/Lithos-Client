@@ -1,9 +1,8 @@
 package lfsm.states
 
 import lfsm.LFSMPhase
-import work.lithos.plasma.collections.PlasmaMap
 
-case class NISPTree(dictionary: PlasmaMap[Array[Byte], Array[Byte]],
+case class NISPTree(dictionary: AuthenticatedDictionaryView,
                     numMiners: Int,
                     totalScore: BigInt,
                     currentPeriod: Option[Long],

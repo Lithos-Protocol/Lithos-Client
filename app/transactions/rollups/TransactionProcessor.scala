@@ -24,15 +24,7 @@ import scala.concurrent.duration._
 import scala.language.postfixOps
 import scala.util.{Failure, Success}
 
-/**
- * Owns `pendingRollupTxs`, the map of rollupBlockId -> stubs still waiting to be submitted.
- *
- * Each PublishedRollupMap from TransactionPublisher evicts stale entries against the current sync
- * state and merges in the new stubs. Every 3 minutes a tick dispatches the highest-priority stub
- * per rollup to SubmissionHandler, and the evaluation stubs to RollupEvaluator.
- *
- * Disabled entirely when `state.disableTransforms = true`.
- */
+/** Owns pending rollup work, removes stale entries, and dispatches ready transaction stubs. */
 class TransactionProcessor @Inject()(config: Configuration, nodeContext: NodeContext,
                                      cacheApi: SyncCacheApi,
                                      @Named("sync-handler")        syncHandler:       ActorRef,
@@ -143,6 +135,11 @@ class TransactionProcessor @Inject()(config: Configuration, nodeContext: NodeCon
             self ! msg
         }
 
+    // Preserve queued work when synchronization cannot provide a current rollup set.
+    case ProcessPublishedMap(unavailable: SyncUnavailable, _, _) =>
+      logger.warn(s"Keeping ${pendingRollupTxs.values.map(_.size).sum} pending stub(s) while " +
+        s"synchronization is ${unavailable.status}")
+
     case ProcessPublishedMap(syncMsg, newEntries, height) =>
       cleanupRollupTxs(syncMsg, height)
       addRollupStubs(newEntries)
@@ -153,13 +150,7 @@ class TransactionProcessor @Inject()(config: Configuration, nodeContext: NodeCon
    * time-boxed — a missed submission is a miner's whole claim on a rollup. Transforms and payouts
    * are on much longer clocks and lose nothing by riding the mempool instead.
    */
-  /**
-   * Forget stubs that have been taken by whoever they were dispatched to.
-   *
-   * Matched on the fraud target as well as the type. A rollup holds one NISPEvaluation stub per
-   * fraudulent miner, so matching on txType alone dropped the other miners' proofs after sending
-   * one — losing a slash that nothing else in this tick will re-derive.
-   */
+  /** Removes dispatched stubs by both transaction type and fraud target. */
   private def dropStubs(dispatched: Seq[RollupTxStub]): Unit =
     dispatched.foreach { stub =>
       pendingRollupTxs.get(stub.rollupBlockId).foreach { stubs =>
@@ -192,19 +183,14 @@ class TransactionProcessor @Inject()(config: Configuration, nodeContext: NodeCon
 
   // ─── pending tx management ────────────────────────────────────────────────
 
-  /**
-   * Removes stale entries from pendingRollupTxs using the latest sync state.
-   *
-   * First, any rollup whose blockId is no longer present in the synced trees
-   * is removed entirely. Then, for each remaining rollup, every RollupTxStub
-   * whose criteria are no longer met is removed from its Seq. If the Seq
-   * becomes empty after removal the key is dropped from the map.
-   */
+  /** Removes inactive rollups and stubs whose submission criteria no longer hold. */
   private def cleanupRollupTxs(syncMsg: SyncMessage, currentHeight: Int): Unit = {
+    // An empty synchronized result confirms that no active rollups remain.
     val rawTrees: Seq[(String, NISPTree)] = syncMsg match {
       case FullSync(trees)       => trees
       case PartialSync(trees, _) => trees
       case NoRollups()           => Seq.empty
+      case SyncUnavailable(_)    => Seq.empty
     }
 
     // ── mempool-state merging (mirrors TransactionPublisher.buildRollupMap) ──
@@ -257,15 +243,7 @@ class TransactionProcessor @Inject()(config: Configuration, nodeContext: NodeCon
     }
   }
 
-  /**
-   * Merges new RollupTxStubs from a PublishedRollupMap into pendingRollupTxs.
-   *
-   * For each incoming stub:
-   *   - If the blockId already exists and the Seq already contains a stub with
-   *     the same RollupTxType, the new stub is skipped (no duplicates).
-   *   - If the blockId exists but the type is new, the stub is appended.
-   *   - If the blockId does not exist, a new Seq is created for it.
-   */
+  /** Merges new stubs by rollup while suppressing duplicate transaction types. */
   private def addRollupStubs(newEntries: Map[String, RollupTxStub]): Unit = {
     newEntries.foreach { case (blockId, stub) =>
       pendingRollupTxs.get(blockId) match {

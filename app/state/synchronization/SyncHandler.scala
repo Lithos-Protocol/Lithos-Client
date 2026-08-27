@@ -1,271 +1,414 @@
 package state.synchronization
 
-import akka.actor.{Actor, ActorRef}
-import akka.pattern.ask
-import akka.util.Timeout
-import cache.RollupCache
-import configs.{NodeConfig, StateConfig, StratumConfig}
-import lfsm.LFSMPhase
-import lfsm.states.NISPTree
-import mutations.NodeWallet
-import org.ergoplatform.appkit.{BlockchainContext, ErgoClient, ErgoValue}
+import akka.actor.Actor
+import cache.{MDCache, RollupCache}
+import configs.{NodeContext, SyncConfig}
+import lfsm.states.MinerTree
 import org.slf4j.{Logger, LoggerFactory}
 import play.api.Configuration
 import play.api.cache.SyncCacheApi
-import play.api.libs.concurrent.InjectedActorSupport
-import sigma.data.AvlTreeFlags
-import AutoSubscribable.AutoSubscribe
-import Subscribable.{Subscribe, SubscribeAck, SubscribeRejected}
-import state.messages.DictionaryMessages.DictionaryTransform
-import state.messages.MempoolMessages.{RebuildMempoolChains, ResetMempoolState}
 import state.messages.RollupMessages._
+import state.messages.MempoolMessages.{MempoolRollupState, MempoolSnapshot, MempoolUnavailable, ResetMempoolState}
 import state.messages.StateFrameMessages.NewBlock
 import state.messages.SyncMessages._
-import state.messages.{BlockInfo, BlockMessage, BlockTx}
-import utils.{Globals, Helpers}
-import work.lithos.plasma.PlasmaParameters
-import work.lithos.plasma.collections.PlasmaMap
+import state.messages.{BlockInfo, BlockMessage}
+import state.persistence.StateSnapshotActor.SnapshotCandidate
+import utils.Globals
 
-import javax.inject.{Inject, Named}
-import scala.concurrent.duration.DurationInt
-import scala.language.postfixOps
-import scala.util.{Failure, Success}
+import javax.inject.Inject
+import scala.util.control.NonFatal
 
 /**
- * Actor whose goal is to process blocks and route transforms to the appropriate area. During initial synchronization,
- * this actor will only deal with rollups. Post-sync, the actor will accept subscriptions with token information
- * to route transforms to non-rollup sync actors after blocks have been parsed.
- * @param config
- * @param rollupCoordinator
- * @param cacheApi
+ * Owns canonical synchronized state and its committed cursor.
+ * Blocks are acknowledged only after reduction and mirror publication succeed.
  */
-class SyncHandler @Inject()(config: Configuration, @Named("rollup-coordinator") rollupCoordinator: ActorRef,
-                            cacheApi: SyncCacheApi) extends Actor with InjectedActorSupport with Subscribable{
-  implicit val timeout: Timeout = 5 seconds
+class SyncHandler @Inject()(config: Configuration,
+                            protocol: SyncProtocolContext,
+                            cacheApi: SyncCacheApi,
+                            @javax.inject.Named("state-snapshot") snapshotActor: akka.actor.ActorRef) extends Actor {
 
+  private val logger: Logger = LoggerFactory.getLogger("SyncHandler")
+  private val syncConfig = new SyncConfig(config)
+  private val repository = SyncStateRepository(cacheApi, Globals.mdDB)
 
-  val nodeConfig: NodeConfig         = Globals.getNodeConfig
-  val client: ErgoClient             = nodeConfig.getClient
-  val prover: NodeWallet             = nodeConfig.getNodeWallet
-  lazy val relErgoTrees: Seq[String] = Helpers.rollupErgoTrees(client)
-  val rollupCache: RollupCache       = RollupCache(cacheApi)
-  val stratumConfig: StratumConfig   = new StratumConfig(config)
-  val stateConfig: StateConfig       = new StateConfig(config)
+  private var committed = Option.empty[CommittedSyncState]
+  // Retained states support exact rollback; the longer cursor window locates ancestors after restart.
+  private var retained = Vector.empty[CommittedSyncState]
+  private var knownCursors = Vector.empty[SyncCursor]
+  private var status: SyncStatus = Starting
+  private var canonicalReadyRequested = false
+  private var locallyDisabledRollups = Set.empty[String]
+  private var mempool = MempoolSnapshot(0L, Map.empty, Map.empty, Set.empty)
+  private var projections = Map.empty[String, (Long, Long, MempoolRollupState)]
+  private var suppressedProjections = Map.empty[String, Long]
+  private var mempoolFailure: Option[String] =
+    Some("Mempool view has not completed its initial refresh")
+  private var initialReadySnapshotRequested = false
 
-  override val logger: Logger         = LoggerFactory.getLogger("SyncHandler")
-  // SyncHandler subscribers are synchronizers which are receiving non-rollup transforms or updates
-  override var subscribers: Set[ActorRef] = Set.empty
-  override var currentHeight: Int = -1
-  private var tokenMap: Map[String, ActorRef] = Map.empty[String, ActorRef]
-  import context.dispatcher
+  override def preStart(): Unit = publishStatus(Starting)
 
+  override def receive: Receive = {
+    case BeginCatchUp(targetHeight) =>
+      canonicalReadyRequested = false
+      status = committed.map(s => CatchingUp(s.cursor, targetHeight)).getOrElse(Starting)
+      publishStatus(status)
 
-  override def receive: Receive = rejectSubscriptions orElse {
-    case BlockMessage(blockInfo) =>
-      logger.info(s"Got block message ${blockInfo.id} with height ${blockInfo.height}")
-      currentHeight = blockInfo.height
-      val relevantTransactions = buildRelevantTransactions(blockInfo)
-      relevantTransactions.transforms.foreach(rollupCoordinator ! _)
-      relevantTransactions.genTxs.foreach(rollupCoordinator ! _)
+    // Canonical blocks enter only through StateFrame's commit request.
+    case ApplyBlock(block) => applyAndReply(block)
+
+    // Mempool failure removes projections but does not make confirmed state unavailable.
+    case MarkReady =>
+      canonicalReadyRequested = true
+      committed match {
+        case Some(state) => publishReady(state)
+        case None =>
+          status = SyncFailed(None, "Cannot become ready before a block has committed")
+          publishStatus(status)
+          logger.error(status.asInstanceOf[SyncFailed].reason)
+      }
+      sender() ! status
+
+    case MarkStale(reason) =>
+      canonicalReadyRequested = false
+      status = committed.map(s => Stale(s.cursor, reason)).getOrElse(SyncFailed(None, reason))
+      publishStatus(status)
+
+    case GetSyncStatus => sender() ! status
+    case GetCommittedState => committed match {
+      case Some(state) => sender() ! CommittedState(state)
+      case None => sender() ! SyncUnavailable(status)
+    }
+    // Return the cursor window used for ancestor discovery, not only exactly retained states.
+    case GetRetainedCursors => sender() ! RetainedCursors(knownCursors)
+
+    case ResetSyncState =>
+      reset() match {
+        case Right(_) => sender() ! SyncStateReset
+        case Left(reason) => sender() ! BlockRejected(committed.map(_.cursor), "", reason)
+      }
+
+    case RestoreCommittedState(state, cursors) =>
+      restore(state, cursors) match {
+        case Right(_) => sender() ! BlockCommitted(state.cursor, state.version, 0, 0)
+        case Left(reason) => sender() ! BlockRejected(committed.map(_.cursor), state.cursor.blockId, reason)
+      }
+
+    case RollbackTo(blockId) => rollback(blockId)
+
+    case snapshot: MempoolSnapshot =>
+      safelyUpdateMempool {
+        committed.toSeq.flatMap(_.rollups.keys).foreach(repository.removeMempoolState)
+        mempool = snapshot
+        projections = Map.empty
+        suppressedProjections = Map.empty
+        if (mempoolFailure.nonEmpty)
+          logger.info(s"Mempool view recovered at revision ${snapshot.revision} with " +
+            s"${snapshot.chains.size} chain(s)")
+        mempoolFailure = None
+      }
+
+    // Drop projections so consumers fall back to confirmed state.
+    case MempoolUnavailable(reason) =>
+      safelyUpdateMempool {
+        committed.toSeq.flatMap(_.rollups.keys).foreach(repository.removeMempoolState)
+        projections = Map.empty
+        mempool = MempoolSnapshot(mempool.revision, Map.empty, Map.empty, Set.empty)
+        if (mempoolFailure.isEmpty)
+          logger.warn(s"Mempool projections unavailable, chaining from confirmed state instead: $reason")
+        mempoolFailure = Some(reason)
+      }
+
+    case ResetMempoolState(blockId) =>
+      safelyUpdateMempool {
+        repository.removeMempoolState(blockId)
+        projections -= blockId
+        suppressedProjections += blockId -> mempool.revision
+      }
+
     case GetSynced =>
-      sender() ! NoRollups()
-      logger.warn("Tried to GetSynced during initial synchronization, returned NoRollups()")
-    case CompletedInitSync =>
-      logger.info("Got initial sync completion message")
-      rollupCoordinator ! CompletedInitSync
-      logger.info("SyncHandler will now accept subscriptions for transform routing")
-      context.become(postSync())
-  }
-
-  /**
-   * SyncHandler will reject subscriptions it receives until its own subscription to StateFrame is accepted.
-   */
-  private val rejectSubscriptions: Receive = {
-    case Subscribe(_, _, _) =>
-      sender() ! SubscribeRejected("Not synced: Can't accept subscribers until SyncHandler has fully synchronized")
-    case AutoSubscribe(_) =>
-      sender() ! SubscribeRejected("Can't auto-subscribe: SyncHandler does not accept auto-subscriptions")
-  }
-  /**
-   * When subscribing, a tokenId must be passed in so that relevant transforms may be tracked
-   */
-  override protected val handleSubscriptions: Receive = {
-    case Subscribe(height, subscriber, additionalInfo) =>
       val requester = sender()
-      if(additionalInfo.isDefined) {
-        if (height == currentHeight) {
-          tokenMap = tokenMap + (additionalInfo.get -> subscriber)
-          subscribers = subscribers + subscriber
-          requester ! SubscribeAck
-          logger.info(s"Accepted subscription of ${subscriber.path.name} at" +
-            s" height $height (${subscribers.size} total subscriber(s)) with token ${additionalInfo.get}")
-        } else {
-          requester ! SubscribeRejected(
-            s"Height mismatch: subscriber is at $height but publisher is at $currentHeight"
-          )
-          logger.warn(s"Rejected subscription of ${subscriber.path.name}: height $height != $currentHeight")
+      try {
+        committed match {
+          case Some(state) if status.isInstanceOf[Ready] => requester ! FullSync(activeRollups(state))
+          case _ => requester ! SyncUnavailable(status)
         }
-      } else {
-        requester ! SubscribeRejected(
-          s"Can't track: subscriber did not provide a tokenId in additionalInfo"
-        )
-        logger.warn(s"Rejected subscription of ${subscriber.path.name}: No tokenId provided")
+      } catch {
+        case NonFatal(ex) => failRequest(requester, "Could not build synchronized rollup view", ex)
       }
-    case AutoSubscribe(_) =>
-      sender() ! SubscribeRejected("Can't auto-subscribe: SyncHandler does not accept auto-subscriptions")
+
+    case GetCurrentRollup(blockId) =>
+      val requester = sender()
+      try {
+        committed.flatMap(_.rollups.get(blockId)).filter(_ => !locallyDisabledRollups.contains(blockId)) match {
+          case Some(tree) if status.isInstanceOf[Ready] =>
+            if (mempool.blockedRoots.contains(tree.utxoId)) requester ! NoRollupFound()
+            else requester ! CurrentRollup(tree.utxoId, tree, projectedRollup(committed.get, blockId, tree))
+          case _ => requester ! NoRollupFound()
+        }
+      } catch {
+        case NonFatal(ex) =>
+          markRuntimeFailure("Could not build the current rollup view", ex)
+          requester ! NoRollupFound()
+      }
+
+    case UpdateEvaluation(blockId) =>
+      committed.flatMap(_.rollups.get(blockId)).foreach { tree =>
+        try {
+          val updated = tree.copy(evaluated = true)
+          repository.setRollup(updated)
+          committed = committed.map(s => s.copy(rollups = s.rollups + (blockId -> updated)))
+        } catch {
+          case NonFatal(ex) => markRuntimeFailure(s"Could not publish evaluation state for $blockId", ex)
+        }
+      }
+
+    case RemoveRollup(blockId, reason) =>
+      if (committed.exists(_.rollups.contains(blockId))) {
+        try {
+          repository.removeMempoolState(blockId)
+          locallyDisabledRollups += blockId
+          logger.warn(s"Disabled local use of rollup $blockId: $reason")
+        } catch {
+          case NonFatal(ex) => markRuntimeFailure(s"Could not disable local rollup $blockId", ex)
+        }
+      }
   }
 
+  private def applyAndReply(block: BlockInfo): Unit = {
+    val requester = sender()
+    committed match {
+      case Some(state) if state.cursor.blockId == block.id =>
+        requester ! BlockCommitted(state.cursor, state.version, 0, 0)
+      case _ =>
+        val base = committed.getOrElse(seedFor(block))
+        val reduced = try BlockReducer.applyBlock(base, block, protocol)
+        catch {
+          case NonFatal(ex) => Left(SyncApplyError.InternalFailure(block.id,
+            Option(ex.getMessage).getOrElse(ex.getClass.getSimpleName)))
+        }
+        reduced match {
+          case Left(error) =>
+            val reason = error.message
+            status = error match {
+              case _: SyncApplyError.ParentMismatch => Stale(base.cursor, reason)
+              case _ => SyncFailed(committed.map(_.cursor), reason)
+            }
+            publishStatus(status)
+            logger.error(s"Rejected block ${block.id} at height ${block.height}: $reason")
+            requester ! BlockRejected(committed.map(_.cursor), block.id, reason)
 
-  private def postSync(): Receive = handleSubscriptions orElse {
-    case BlockMessage(blockInfo) =>
-      currentHeight = blockInfo.height
-      logger.info(s"Post-sync block message ${blockInfo.id} with height ${blockInfo.height}")
-      val relevantTransactions = buildRelevantTransactions(blockInfo)
-      relevantTransactions.transforms.foreach(rollupCoordinator ! _)
-      relevantTransactions.genTxs.foreach(rollupCoordinator ! _)
-      sender() ! HandledBlock(blockInfo)
-
-    case NewBlock(blockInfo) =>
-      currentHeight = blockInfo.height
-      logger.info(s"StateFrame block ${blockInfo.id} at height ${blockInfo.height}")
-      val relevantTransactions = buildRelevantTransactions(blockInfo)
-      relevantTransactions.transforms.foreach(rollupCoordinator ! _)
-      relevantTransactions.genTxs.foreach(rollupCoordinator ! _)
-      relevantTransactions.dictionaryMap.foreach{
-        dm =>
-          if(dm._2.nonEmpty)
-            dm._2.foreach(tokenMap(dm._1) ! _)
-      }
-      // RollupCoordinator can send this back to MempoolView to signify that all transforms are pre-applied
-      rollupCoordinator ! RebuildMempoolChains
-//      if (!stateConfig.disableTransforms.getOrElse(false)) {
-//        val handler = self
-//        (rollupCoordinator ? GetSynced).mapTo[SyncMessage].onComplete {
-//          case Failure(ex) =>
-//            logger.error("Failed to query sync state for transforms after NewBlock", ex)
-//          case Success(FullSync(nispTrees)) =>
-//            Future(LFSMTransformer.onSync(client, cacheApi, prover, stratumConfig.diff, nispTrees, handler,
-//              stateConfig.autoCommit.getOrElse(true), stateConfig.autoCollat, stateConfig.maxCollat)).failed.foreach { ex =>
-//              logger.error(s"Error during onSync transforms: ${ex.getMessage}", ex)
-//            }
-//          case Success(PartialSync(syncedTrees, _)) =>
-//            Future(LFSMTransformer.onSync(client, cacheApi, prover, stratumConfig.diff, syncedTrees, handler,
-//              stateConfig.autoCommit.getOrElse(true), stateConfig.autoCollat, stateConfig.maxCollat)).failed.foreach { ex =>
-//              logger.error(s"Error during onSync transforms: ${ex.getMessage}", ex)
-//            }
-//          case Success(NoRollups()) =>
-//            logger.info("No rollups present, skipping transforms")
-//        }
-//      }
-
-    case GetSynced =>
-      val originalSender = sender()
-      (rollupCoordinator ? GetSynced).mapTo[SyncMessage].onComplete {
-        case Failure(exception) =>
-          logger.error("Got error while asking for sync", exception)
-        case Success(msg) =>
-          originalSender ! msg
-      }
-    case getCurrentRollup: GetCurrentRollup =>
-      rollupCoordinator.forward(getCurrentRollup)
-    case updateEvaluation: UpdateEvaluation =>
-      rollupCoordinator ! updateEvaluation
-    case resetMempoolState: ResetMempoolState =>
-      rollupCoordinator ! resetMempoolState
-    case removeTree: RemoveRollup =>
-      logger.info(s"Removing rollup ${removeTree.blockId} due to: ${removeTree.reason}")
-      rollupCoordinator ! removeTree
-  }
-  // efficiency matters here
-  private def buildRelevantTransactions(blockInfo: BlockInfo): RelevantTransactions = {
-    client.execute{
-      ctx =>
-        blockInfo.txs.foldLeft((RelevantTransactions.empty, Set.empty[String])){
-          (relAcc, tx) =>
-            val rel = relAcc._1
-            val trackedOutputs = relAcc._2
-            if(hasRollupInput(tx)) {
-              // We can only add an output to tracking if we know it is a rollup output. That way we avoid
-              // adding final payout boxes.
-              val nextTrackedOutputs = if(hasRollupOutput(tx)) trackedOutputs + tx.outputs.head.id else trackedOutputs
-
-              rel.copy(transforms = rel.transforms ++ Seq(RollupTransform(blockInfo, tx))) -> nextTrackedOutputs
-            } else {
-              val optGenesis = makeGenesis(ctx, blockInfo, tx)
-              if (optGenesis.isDefined) {
-                // We don't need to add to tracked outputs since spending a genesis will always lead to having a rollup
-                // output
-                rel.copy(genTxs = rel.genTxs ++ Seq(Genesis(optGenesis.get, blockInfo))) -> trackedOutputs
-              } else if (hasRollupOutput(tx)) {
-                rel.copy(transforms = rel.transforms ++ Seq(RollupTransform(blockInfo, tx))) -> (trackedOutputs + tx.outputs.head.id)
-              } else if(hasChainedOutput(tx, trackedOutputs)) {
-                // UNDER NO CIRCUMSTANCE should you add the output of a rollup picked up this way
-                // to tracked outputs, as there is no guarantee the resulting output is a rollup
-
-                // In general, trackedOutputs set is only needed for payout txs which spend the entire rollup
-                // and are chained off of another payout transaction of the same rollup. hasRollupOutput MUST
-                // be used in all other cases to avoid critical sync failures.
-                rel.copy(transforms = rel.transforms ++ Seq(RollupTransform(blockInfo, tx))) -> trackedOutputs
-              } else {
-                // Is non-rollup transform
-                val singleton = tx.outputs.head.assets.headOption
-                singleton match {
-                  case Some(nft) =>
-                    val nftId = nft.id.toString
-                    if(tokenMap.contains(nftId)){
-                      rel.copy(
-                        dictionaryMap = rel.dictionaryMap +
-                          (nftId -> (rel.dictionaryMap.getOrElse(nftId, Seq.empty) :+ DictionaryTransform(blockInfo, tx)))
-                      ) -> trackedOutputs
-                    } else {
-                      rel -> trackedOutputs
-                    }
-                  case None =>
-                    rel -> trackedOutputs
+          case Right(transition) =>
+            publishTransition(committed, transition.state) match {
+              case Left(reason) =>
+                status = SyncFailed(committed.map(_.cursor), reason)
+                publishStatus(status)
+                logger.error(s"Failed to publish block ${block.id}: $reason")
+                requester ! BlockRejected(committed.map(_.cursor), block.id, reason)
+              case Right(_) =>
+                committed = Some(transition.state)
+                retained = (retained :+ transition.state).takeRight(syncConfig.reorgWindow + 1)
+                knownCursors = (knownCursors :+ transition.state.cursor).takeRight(syncConfig.reorgWindow + 1)
+                projections = Map.empty
+                suppressedProjections = Map.empty
+                locallyDisabledRollups = locallyDisabledRollups.intersect(transition.state.rollups.keySet)
+                reportFaults(block, transition)
+                reportProgress(block, transition)
+                status = status match {
+                  case CatchingUp(_, target) => CatchingUp(transition.state.cursor, target)
+                  case Ready(_) => Ready(transition.state.cursor)
+                  case Reorganizing(_, target) => Reorganizing(transition.state.cursor, target)
+                  case _ => CatchingUp(transition.state.cursor, transition.state.cursor.height)
                 }
-              }
-            }
-        }._1
-    }
-  }
-
-  private def makeGenesis(ctx: BlockchainContext, blockInfo: BlockInfo, tx: BlockTx): Option[NISPTree] = {
-    // Is holding contract
-    tx.outputs.find(o => o.ergoTree == relErgoTrees.head).flatMap{
-      output =>
-        val numMiners = output.registers.applyOrElse(1, "none")
-        numMiners match {
-          case "none" =>
-            logger.warn("Got malformed holding output")
-            None
-          case ergoVal: String =>
-            //TODO: Add checks for collateral utxo and others to prevent sync issues from malformed transactions
-            if (ergoVal == ErgoValue.of(0).toHex) {
-              val holdingBox = output.toInput(ctx)
-              val newTree    = PlasmaMap[Array[Byte], Array[Byte]](AvlTreeFlags.AllOperationsAllowed, PlasmaParameters.default)
-              Some(
-                NISPTree(newTree, 0, BigInt(0), Some(holdingBox.registers(3).getValue.asInstanceOf[Long]),
-                  holdingBox.value, holdingBox.registers(3).getValue.asInstanceOf[Long].toInt, hasMiner = false, LFSMPhase.HOLDING,
-                  blockId = blockInfo.id, utxoId = output.id)
-              )
-            } else {
-              //logger.warn("Got malformed holding output")
-              None
+                publishStatus(status)
+                snapshotActor ! SnapshotCandidate(transition.state, knownCursors)
+                requester ! BlockCommitted(transition.state.cursor, transition.state.version,
+                  transition.relevantEvents, transition.stagedDictionaryCopies)
             }
         }
     }
   }
-  private def hasRollupOutput(tx: BlockTx): Boolean = {
-    relErgoTrees.contains(tx.outputs.head.ergoTree)
-  }
-  // TODO: Analyze closely for potentially dropped blocks
 
-  private def hasRollupInput(tx: BlockTx): Boolean = {
-    rollupCache.getTreeSet.contains(tx.inputs.head.id)
+  /** Logs isolated rollup and dictionary faults that do not stop the canonical cursor. */
+  private def reportFaults(block: BlockInfo, transition: BlockTransition): Unit = {
+    transition.quarantined.foreach { case (rollupId, reason) =>
+      logger.error(s"Quarantined rollup $rollupId at height ${block.height}: $reason. " +
+        "The block committed and synchronization continues without it.")
+    }
+    transition.minerDictionaryFault.foreach { reason =>
+      logger.error(s"Miner Dictionary stopped tracking at height ${block.height}: $reason. " +
+        "State reverted to the last known-good entry; commitments and fraud proofs needing the " +
+        "dictionary are unavailable until it is bootstrapped again.")
+    }
+    // Missing input evidence prevents rollup tracking, so report it as a synchronization error.
+    transition.unauthenticatedGenesis.foreach { case (txId, reason) =>
+      logger.error(s"Could not authenticate a genesis at height ${block.height}: transaction $txId " +
+        s"creates a holding output but $reason. No rollup is tracked for it.")
+    }
+    transition.unrecognizedGenesis.foreach { txId =>
+      logger.error(s"Transaction $txId at height ${block.height} spends a collateral box into a " +
+        "genesis-shaped output under a holding script this build does not compile. Its rollup is " +
+        "invisible to this client. The deployed rollup chain has moved ahead of this release.")
+    }
   }
 
-  private def hasChainedOutput(tx: BlockTx, trackedOutputs: Set[String]) = {
-    trackedOutputs.contains(tx.inputs.head.id)
+  /** Logs state-changing blocks and periodic progress for empty catch-up blocks. */
+  private def reportProgress(block: BlockInfo, transition: BlockTransition): Unit = {
+    val cursor = transition.state.cursor
+    if (transition.relevantEvents > 0)
+      logger.info(s"Applied ${transition.relevantEvents} transform(s) at height ${cursor.height} " +
+        s"(${cursor.blockId}); ${transition.state.rollups.size} rollup(s) tracked, " +
+        s"${transition.stagedDictionaryCopies} dictionary copy/copies staged")
+    else if (cursor.height % SyncHandler.ProgressInterval == 0)
+      logger.info(s"Synchronized to height ${cursor.height} (${transition.state.rollups.size} rollup(s) " +
+        s"tracked, ${transition.state.minerTree.numMiners} miner(s) in the dictionary)")
   }
 
+  private def rollback(blockId: String): Unit = {
+    retained.indexWhere(_.cursor.blockId == blockId) match {
+      case -1 => sender() ! RollbackRejected(
+        s"Block $blockId is outside the retained ${syncConfig.reorgWindow}-block rollback window")
+      case index =>
+        val target = retained(index)
+        status = committed.map(s => Reorganizing(s.cursor, target.cursor.height)).getOrElse(Starting)
+        publishStatus(status)
+        publishTransition(committed, target) match {
+          case Left(reason) =>
+            status = SyncFailed(committed.map(_.cursor), reason)
+            publishStatus(status)
+            sender() ! RollbackRejected(reason)
+          case Right(_) =>
+            committed = Some(target)
+            retained = retained.take(index + 1)
+            knownCursors = knownCursors.filterNot(_.height > target.cursor.height)
+            projections = Map.empty
+            suppressedProjections = Map.empty
+            locallyDisabledRollups = locallyDisabledRollups.intersect(target.rollups.keySet)
+            status = Reorganizing(target.cursor, target.cursor.height)
+            publishStatus(status)
+            sender() ! RollbackCompleted(target.cursor)
+        }
+    }
+  }
+
+  private def restore(state: CommittedSyncState,
+                      cursors: Vector[SyncCursor]): Either[String, Unit] = {
+    publishTransition(committed, state).map { _ =>
+      committed = Some(state)
+      // Only the restored state supports exact rollback; older cursors still locate forks.
+      retained = Vector(state)
+      knownCursors =
+        (cursors.filter(_.height < state.cursor.height) :+ state.cursor).takeRight(syncConfig.reorgWindow + 1)
+      projections = Map.empty
+      suppressedProjections = Map.empty
+      locallyDisabledRollups = Set.empty
+      canonicalReadyRequested = false
+      initialReadySnapshotRequested = false
+      status = CatchingUp(state.cursor, state.cursor.height)
+      publishStatus(status)
+    }
+  }
+
+  private def reset(): Either[String, Unit] =
+    repository.clear(committed).map { _ =>
+      committed = None
+      retained = Vector.empty
+      knownCursors = Vector.empty
+      projections = Map.empty
+      suppressedProjections = Map.empty
+      locallyDisabledRollups = Set.empty
+      canonicalReadyRequested = false
+      initialReadySnapshotRequested = false
+      status = Starting
+      publishStatus(status)
+    }
+
+  private def publishTransition(previous: Option[CommittedSyncState],
+                                next: CommittedSyncState): Either[String, Unit] =
+    repository.publish(previous, next)
+
+  /** Returns actionable rollups and publishes their mempool projections to the shared cache. */
+  private def activeRollups(state: CommittedSyncState): Seq[(String, lfsm.states.NISPTree)] = {
+    val (unavailable, available) = state.routedRollups.partition { case (utxoId, tree) =>
+      locallyDisabledRollups.contains(tree.blockId) || mempool.blockedRoots.contains(utxoId)
+    }
+    unavailable.foreach { case (_, tree) => repository.removeMempoolState(tree.blockId) }
+    available.foreach { case (_, tree) => projectedRollup(state, tree.blockId, tree) }
+    available
+  }
+
+  private def projectedRollup(state: CommittedSyncState,
+                              blockId: String,
+                              tree: lfsm.states.NISPTree): Option[MempoolRollupState] = {
+    if (suppressedProjections.get(blockId).contains(mempool.revision)) None
+    else mempool.chains.get(tree.utxoId) match {
+      case None =>
+        projections -= blockId
+        repository.removeMempoolState(blockId)
+        None
+      case Some(chain) =>
+        projections.get(blockId) match {
+          case Some((version, revision, projection))
+            if version == state.version && revision == mempool.revision => Some(projection)
+          case _ =>
+            mempool.endInputs.get(tree.utxoId).map { endInput =>
+              val synthetic = BlockInfo(s"mempool-${mempool.revision}-$blockId", state.cursor.height + 1,
+                chain.transforms.map(_.tx), state.cursor.blockId)
+              val projection = BlockReducer.applyBlock(state, synthetic, protocol) match {
+                case Right(result) => result.state.rollups.get(blockId) match {
+                  case Some(next) => MempoolRollupState(endInput, next)
+                  case None => MempoolRollupState(endInput, tree, toBeRemoved = true)
+                }
+                case Left(error) =>
+                  logger.warn(s"Rejected mempool projection for rollup $blockId: ${error.message}")
+                  MempoolRollupState(endInput, tree, toBeRemoved = true)
+              }
+              projections += blockId -> ((state.version, mempool.revision, projection))
+              repository.setMempoolState(blockId, projection)
+              projection
+            }
+        }
+    }
+  }
+
+  private def seedFor(block: BlockInfo): CommittedSyncState = {
+    val tree = MinerTree.initialState.copy(syncHeight = block.height - 1, savedHeight = block.height - 1)
+    CommittedSyncState(SyncCursor(block.height - 1, block.parentId, ""), 0L,
+      Map.empty, Map.empty, tree, None)
+  }
+
+  private def safelyUpdateMempool(update: => Unit): Unit =
+    try update
+    catch {
+      case NonFatal(ex) => markRuntimeFailure("Could not publish the mempool revision", ex)
+    }
+
+  private def failRequest(requester: akka.actor.ActorRef, message: String, ex: Throwable): Unit = {
+    markRuntimeFailure(message, ex)
+    requester ! SyncUnavailable(status)
+  }
+
+  private def markRuntimeFailure(message: String, ex: Throwable): Unit = {
+    val reason = s"$message: ${Option(ex.getMessage).getOrElse(ex.getClass.getSimpleName)}"
+    status = committed.map(state => Stale(state.cursor, reason)).getOrElse(SyncFailed(None, reason))
+    publishStatus(status)
+    logger.error(reason, ex)
+  }
+
+  private def publishReady(state: CommittedSyncState): Unit = {
+    val newlyReady = status != Ready(state.cursor)
+    status = Ready(state.cursor)
+    publishStatus(status)
+    if (newlyReady && !initialReadySnapshotRequested) {
+      initialReadySnapshotRequested = true
+      if (state.cursor.height % syncConfig.snapshotInterval != 0)
+        snapshotActor ! SnapshotCandidate(state, knownCursors, force = true)
+    }
+  }
+
+  private def publishStatus(next: SyncStatus): Unit = Globals.setSyncStatus(next)
+}
+
+object SyncHandler {
+  /** Blocks between "still moving" lines during catch-up, when no block changed protocol state. */
+  private final val ProgressInterval = 500
 }

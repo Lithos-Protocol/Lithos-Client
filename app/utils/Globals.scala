@@ -5,22 +5,23 @@ import lfsm.MDDatabase
 import mining.MiningStratumServer
 import nisp.NISPDatabase
 import play.api.Configuration
+import state.messages.SyncMessages.{Ready, Starting, SyncStatus}
 import stratum.data.Options
 
 import java.math.BigInteger
 
-// Accessor for global methods and variables
-// Not DI, so instantiated lazily
+/** Process-wide holders retained for legacy callers outside dependency injection. */
 object Globals {
-  // Databases
+  // Database singletons
   val nispDB = new NISPDatabase
   val mdDB   = new MDDatabase
-  // Complex Configs
+  // Lazily initialized runtime configuration
   private var nodeConfig: Option[NodeConfig] = None
 
-  // Sync State
-  private var synced: Boolean = false
-  private var mdSynced: Boolean = false
+  // Compatibility flags mirrored from the detailed synchronization status
+  @volatile private var synced: Boolean = false
+  @volatile private var mdSynced: Boolean = false
+  @volatile private var syncStatus: SyncStatus = Starting
   def setSynced(): Unit = {
     synced = true
   }
@@ -35,10 +36,18 @@ object Globals {
 
   def getMDSyncState: Boolean = mdSynced
 
+  def setSyncStatus(status: SyncStatus): Unit = synchronized {
+    syncStatus = status
+    val ready = status.isInstanceOf[Ready]
+    synced = ready
+    mdSynced = ready
+  }
+
+  def getDetailedSyncStatus: SyncStatus = syncStatus
 
 
-  // Set exactly once, from Module. NodeContext is bound to this single instance — a second
-  // NodeConfig would derive a second prover over the same secret storage.
+
+  // Initialize once so all consumers share the same prover and secret storage.
   def setConfigs(config: Configuration): Unit = synchronized {
     if (nodeConfig.isDefined)
       throw new IllegalStateException(
@@ -47,7 +56,4 @@ object Globals {
   }
 
   def getNodeConfig: NodeConfig = nodeConfig.get
-
-  // TODO: Make PayoutCache
-  final val TRACKED_PAYOUTS = "TRACKED_PAYOUTS"
 }

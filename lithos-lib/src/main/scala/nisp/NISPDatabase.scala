@@ -2,22 +2,24 @@ package nisp
 
 import lfsm.LFSMHelpers
 import nisp.NISPDatabase.{CURRENT_HEIGHT, LAST_HEIGHT, NISP_DIR}
-import org.iq80.leveldb.Options
 import scorex.crypto.hash.Blake2b256
-import scorex.db.{LDBFactory, LDBKVStore}
 import scorex.utils.Ints
+import storage.KeyValueMutation.{Delete, Put}
+import storage.{KeyValueMutation, KeyValueReadView, KeyValueStore, LevelDbKeyValueStore, StoreError}
 
-import java.io.File
+import java.nio.file.Paths
 
-class NISPDatabase extends NISPStorage {
+class NISPDatabase(private val kvstore: KeyValueStore) extends NISPStorage {
 
-  private val kvstore = LDBFactory.createKvDb(NISP_DIR)
+  def this() = this(LevelDbKeyValueStore.openOrThrow(Paths.get(NISP_DIR)))
 
-  def getAll: Seq[(Array[Byte], Array[Byte])] = kvstore.getAll.toSeq
+  def getAll: Seq[(Array[Byte], Array[Byte])] =
+    KeyValueStore.orThrow(kvstore.scanPrefix(Array.emptyByteArray))
+
   def size: Int = getAll.size
+
   /**
    * Adds SuperShare to create new NISP at given height, or adds the share to an existing NISP
-   * @param height Height of the SuperShare
    * @param score Score associated with the share, only used in new insertions
    * @param shareBytes Bytes of SuperShare to add to database
    * @return Whether all operations returned successfully
@@ -28,190 +30,269 @@ class NISPDatabase extends NISPStorage {
 
   /**
    * Adds SuperShare to create new NISP at given height, or adds the share to an existing NISP
-   * @param height Height of the SuperShare
    * @param score Score associated with the share, only used in new insertions
    * @param share Share to add to database
    * @return Whether all operations returned successfully
    */
-  def addNISP(score: Long, share: SuperShare): Boolean = {
+  def addNISP(score: Long, share: SuperShare): Boolean = synchronized {
     val header = share.toHeader
-    val hKey = Ints.toByteArray(header.height)
-
-    def heightsUpdated: Boolean = {
-      val storedLastHeight = lastHeight
-      val lastHeightUpdated = storedLastHeight match {
-        case Some(_) => true // Only update last height if it is not yet stored
-        case None => updateLastHeight(hKey, storedLastHeight)
+    val heightKey = Ints.toByteArray(header.height)
+    val (storedNisp, storedLastHeight, storedCurrentHeight) = KeyValueStore.orThrow {
+      kvstore.readSnapshot { view =>
+        for {
+          nisp <- view.get(heightKey)
+          last <- view.get(LAST_HEIGHT)
+          current <- view.get(CURRENT_HEIGHT)
+        } yield (nisp, last, current)
       }
-      val storedCurrHeight = currentHeight
-      val currentHeightUpdated = storedCurrHeight match {
-        case Some(curr) =>
-          if(Ints.fromByteArray(curr) < header.height) {
-            updateCurrentHeight(hKey, storedCurrHeight) // Update current height if we have header with new height
-          }else{
-            true
-          }
-        case None => updateCurrentHeight(hKey, storedCurrHeight) // Update if current height does not exist yet
-      }
-      currentHeightUpdated && lastHeightUpdated
     }
 
-    kvstore.get(hKey) match {
+    val serialized = storedNisp match {
       case Some(bytes) =>
-        val nextNISP = NISP.deserialize(bytes).withSuperShare(share)
-        require(nextNISP.isDistinct, "Cannot store non-distinct NISP")
-        kvstore.remove(Array[Array[Byte]](hKey)).isSuccess && kvstore.insert(hKey, nextNISP.serialize).isSuccess &&
-          heightsUpdated
+        val nextNisp = NISP.deserialize(bytes).withSuperShare(share)
+        require(nextNisp.isDistinct, "Cannot store non-distinct NISP")
+        nextNisp.serialize
       case None =>
-        val nisp = NISP(score, Seq(share))
-        kvstore.insert(hKey, nisp.serialize).isSuccess && heightsUpdated
+        NISP(score, Seq(share)).serialize
     }
+
+    val mutations = Vector.newBuilder[KeyValueMutation]
+    mutations += Put(heightKey, serialized)
+    if (storedLastHeight.isEmpty)
+      mutations += Put(LAST_HEIGHT, heightKey)
+    if (storedCurrentHeight.forall(bytes => Ints.fromByteArray(bytes) < header.height))
+      mutations += Put(CURRENT_HEIGHT, heightKey)
+
+    kvstore.write(mutations.result()).isRight
   }
 
   /**
    * Remove NISPs from the db until the given height (exclusive)
    * @param height Threshold height such that all NISPs under this height are removed
    */
-  def removeUntil(height: Int): Boolean = {
-    val currHeight = currentHeight
-    if(currHeight.isEmpty || height > Ints.fromByteArray(currHeight.get)) {
-      throw new Exception(s"Cannot remove NISPs until height ${height} due to currHeight" +
-        s" ${currHeight} being too small or undefined")
-    }else{
-      lastHeight match {
-        case Some(last) =>
-          var removals = true
-          while(Ints.fromByteArray(lastHeight.get) < height){
-            removals = removals && removeLastNISP
-          }
-          removals
-        case None =>
-          throw new Exception("Cannot remove NISPs because lastHeight is undefined")
+  def removeUntil(height: Int): Boolean = synchronized {
+    val state = KeyValueStore.orThrow {
+      kvstore.readSnapshot { view =>
+        for {
+          current <- view.get(CURRENT_HEIGHT)
+          last <- view.get(LAST_HEIGHT)
+          plan <- planRemoval(view, current, last, height)
+        } yield (current, last, plan)
       }
-
     }
-  }
-  def removeLastNISP: Boolean = {
-    lastHeight match {
-      case Some(bytes) =>
-        val removal = kvstore.remove(Array[Array[Byte]](bytes)).isSuccess
-        val nextHeight = getNextHeight(bytes)
-        nextHeight match {
-          case Some(nextHeightBytes) => updateLastHeight(nextHeightBytes, Some(bytes)) && removal
-          case None =>
-            kvstore.remove(Array[Array[Byte]](LAST_HEIGHT)).isSuccess && kvstore.remove(Array[Array[Byte]](CURRENT_HEIGHT)).isSuccess && removal
-        }
 
-      case None =>
-        throw new Exception("Failed to remove last NISP because lastHeight was not defined")
+    val (currentHeightValue, lastHeightValue, plan) = state
+    if (currentHeightValue.isEmpty || height > Ints.fromByteArray(currentHeightValue.get)) {
+      throw new Exception(s"Cannot remove NISPs until height $height due to currHeight " +
+        s"$currentHeightValue being too small or undefined")
     }
+    if (lastHeightValue.isEmpty)
+      throw new Exception("Cannot remove NISPs because lastHeight is undefined")
+
+    if (plan.removals.isEmpty) true
+    else kvstore.write(removalMutations(plan)).isRight
   }
 
-  /**
-   * Gets next height with nisp starting from given height
-   */
+  def removeLastNISP: Boolean = synchronized {
+    val state = KeyValueStore.orThrow {
+      kvstore.readSnapshot { view =>
+        for {
+          last <- view.get(LAST_HEIGHT)
+          current <- view.get(CURRENT_HEIGHT)
+          next <- nextHeightFor(view, last, current)
+        } yield (last, current, next)
+      }
+    }
+
+    val (lastHeightValue, currentHeightValue, nextHeight) = state
+    val last = lastHeightValue.getOrElse {
+      throw new Exception("Failed to remove last NISP because lastHeight was not defined")
+    }
+    if (currentHeightValue.isEmpty)
+      throw new Exception("Can't get next height when current height is undefined.")
+
+    val metadata = nextHeight match {
+      case Some(next) => Vector[KeyValueMutation](Put(LAST_HEIGHT, next))
+      case None => Vector[KeyValueMutation](Delete(LAST_HEIGHT), Delete(CURRENT_HEIGHT))
+    }
+    kvstore.write(Delete(last) +: metadata).isRight
+  }
+
+  /** Gets the next height containing a NISP after the supplied height. */
   def getNextHeight(start: Array[Byte]): Option[Array[Byte]] = {
-    currentHeight match {
-      case Some(curr) =>
-        val hVal = Ints.fromByteArray(start)
-        var heightCounter = hVal + 1
-        var nextNISP = kvstore.get(Ints.toByteArray(heightCounter))
-        while (nextNISP.isEmpty && heightCounter <= Ints.fromByteArray(curr)) {
-          heightCounter = heightCounter + 1
-          nextNISP = kvstore.get(Ints.toByteArray(heightCounter))
+    val startHeight = Ints.fromByteArray(start)
+    val result = KeyValueStore.orThrow {
+      kvstore.readSnapshot { view =>
+        view.get(CURRENT_HEIGHT).flatMap {
+          case Some(current) => findNextHeight(view, startHeight, Ints.fromByteArray(current)).map(Some(_))
+          case None => Right(None)
         }
-        if(nextNISP.isEmpty)
-          return None
-        Some(Ints.toByteArray(heightCounter))
-      case None =>
-        throw new Exception("Can't get next height when current height is undefined.")
+      }
     }
+    result.getOrElse(throw new Exception("Can't get next height when current height is undefined."))
   }
 
-  def lastHeight: Option[Array[Byte]] = {
-    kvstore.get(LAST_HEIGHT)
-  }
+  def lastHeight: Option[Array[Byte]] =
+    KeyValueStore.orThrow(kvstore.get(LAST_HEIGHT))
 
-  def currentHeight: Option[Array[Byte]] = {
-    kvstore.get(CURRENT_HEIGHT)
-  }
+  def currentHeight: Option[Array[Byte]] =
+    KeyValueStore.orThrow(kvstore.get(CURRENT_HEIGHT))
 
-  def getNISPBytes(height: Int): Option[Array[Byte]] = {
-    kvstore.get(Ints.toByteArray(height))
-  }
+  def getNISPBytes(height: Int): Option[Array[Byte]] =
+    KeyValueStore.orThrow(kvstore.get(Ints.toByteArray(height)))
 
-  def getNISP(height: Int): Option[NISP] = {
+  def getNISP(height: Int): Option[NISP] =
     getNISPBytes(height).map(NISP.deserialize)
-  }
 
   /**
    * Gets the best valid NISP before a given height and above a given score. If a NISP with 10 super-shares cannot be
    * made, `None` is returned.
    *
-   * NOTE: The passed in height should correspond to periodStart set on the holding contract
-   * This is found on R7 of the holding contract, and R8 of the eval contract
-   * @param height Height that all super-shares must be under. Super-shares must be >= (height - NISP_PERIOD)
-   * @param score Score that all super-shares must be above.
-   * @return `Some(NISP)` with 10 super-shares below the given height and above the given score, or `None`
+   * NOTE: The passed in height should correspond to periodStart set on the holding contract.
    */
   def getBestValidNISP(height: Int, score: Long): Option[NISP] = {
-    require(lastHeight.isDefined, "Cannot search for NISPs when lastHeight is undefined")
-    val minHeight = height - LFSMHelpers.NISP_WINDOW.toInt
-    val start = Math.max(minHeight, lastHeight.map(Ints.fromByteArray).get)
-    // as defined by NotInWindow fraud proof
-    // start <= validNispHeight <= height
-    val nisps = for(i <- start to height) yield getNISP(i)
-    val validNISPs = nisps.filter(n => n.isDefined && n.get.score >= score).map(_.get)
-    val bestNISP = validNISPs.foldLeft(Option.empty[NISP]){
-      (z: Option[NISP], x: NISP) =>
-        if(z.isEmpty) {
-          Some(x.copy(score = score, shares = makeUnique(x.shares)))
-        }else if(z.get.shares.size >= 10){
-          Some(z.get.copy(score = score))
-        }else{
-          val uniqueShares = makeUnique(x.shares).filter(s => !z.get.shares.exists(p => p.headerBytes sameElements s.headerBytes))
-          Some(z.get.copy(score = score, shares = z.get.shares ++ uniqueShares))
+    val snapshot = KeyValueStore.orThrow {
+      kvstore.readSnapshot { view =>
+        view.get(LAST_HEIGHT).flatMap {
+          case Some(last) =>
+            val minHeight = height - LFSMHelpers.NISP_WINDOW.toInt
+            val start = Math.max(minHeight, Ints.fromByteArray(last))
+            readNispRange(view, start, height).map(values => Some(values))
+          case None => Right(None)
+        }
+      }
+    }
+    require(snapshot.isDefined, "Cannot search for NISPs when lastHeight is undefined")
+
+    val validNisps = snapshot.get.flatten.map(NISP.deserialize).filter(_.score >= score)
+    val bestNisp = validNisps.foldLeft(Option.empty[NISP]) {
+      (best: Option[NISP], candidate: NISP) =>
+        if (best.isEmpty) {
+          Some(candidate.copy(score = score, shares = makeUnique(candidate.shares)))
+        } else if (best.get.shares.size >= 10) {
+          Some(best.get.copy(score = score))
+        } else {
+          val uniqueShares = makeUnique(candidate.shares)
+            .filter(share => !best.get.shares.exists(existing => existing.headerBytes sameElements share.headerBytes))
+          Some(best.get.copy(score = score, shares = best.get.shares ++ uniqueShares))
         }
     }
-    if(bestNISP.isEmpty || bestNISP.get.shares.size < 10){
-      None
-    }else{
-      Some(bestNISP.get.copy(shares = bestNISP.get.shares.take(10)))
-    }
+    bestNisp.filter(_.shares.size >= 10).map(nisp => nisp.copy(shares = nisp.shares.take(10)))
   }
-  // Ensures unique shares, as defined by NonUniqueHeaders fraud proof
+
   def makeUnique(shares: Seq[SuperShare]): Seq[SuperShare] = {
-    shares.foldLeft(Seq.empty[SuperShare]){
-      (z, s) =>
-        if(z.exists(sh => sh.headerBytes sameElements s.headerBytes))
-          z
-        else
-          z ++ Seq(s)
-    }
-  }
-  def updateLastHeight(newLastHeight: Array[Byte], storedLastHeight: Option[Array[Byte]]): Boolean = {
-    storedLastHeight match {
-      case Some(h) =>
-        kvstore.remove(Array[Array[Byte]](LAST_HEIGHT)).isSuccess && kvstore.insert(LAST_HEIGHT, newLastHeight).isSuccess
-      case None =>
-        kvstore.insert(LAST_HEIGHT, newLastHeight).isSuccess
+    shares.foldLeft(Seq.empty[SuperShare]) {
+      (unique, share) =>
+        if (unique.exists(existing => existing.headerBytes sameElements share.headerBytes)) unique
+        else unique :+ share
     }
   }
 
-  def updateCurrentHeight(newCurrHeight: Array[Byte], storedCurrHeight: Option[Array[Byte]]): Boolean = {
-    storedCurrHeight match {
-      case Some(h) =>
-          kvstore.remove(Array[Array[Byte]](CURRENT_HEIGHT)).isSuccess && kvstore.insert(CURRENT_HEIGHT, newCurrHeight).isSuccess
-      case None =>
-        kvstore.insert(CURRENT_HEIGHT, newCurrHeight).isSuccess
+  def updateLastHeight(newLastHeight: Array[Byte], storedLastHeight: Option[Array[Byte]]): Boolean = synchronized {
+    replaceHeight(LAST_HEIGHT, newLastHeight, storedLastHeight)
+  }
+
+  def updateCurrentHeight(newCurrHeight: Array[Byte], storedCurrHeight: Option[Array[Byte]]): Boolean = synchronized {
+    replaceHeight(CURRENT_HEIGHT, newCurrHeight, storedCurrHeight)
+  }
+
+  def close(): Unit = KeyValueStore.orThrow(kvstore.close())
+
+  private def replaceHeight(key: Array[Byte], value: Array[Byte], stored: Option[Array[Byte]]): Boolean = {
+    val mutations = stored match {
+      case Some(_) => Vector[KeyValueMutation](Delete(key), Put(key, value))
+      case None => Vector[KeyValueMutation](Put(key, value))
+    }
+    kvstore.write(mutations).isRight
+  }
+
+  private def nextHeightFor(view: KeyValueReadView,
+                            last: Option[Array[Byte]],
+                            current: Option[Array[Byte]]): Either[StoreError, Option[Array[Byte]]] =
+    (last, current) match {
+      case (Some(lastBytes), Some(currentBytes)) =>
+        findNextHeight(view, Ints.fromByteArray(lastBytes), Ints.fromByteArray(currentBytes))
+      case _ => Right(None)
+    }
+
+  private def findNextHeight(view: KeyValueReadView,
+                             startHeight: Int,
+                             currentHeightValue: Int): Either[StoreError, Option[Array[Byte]]] = {
+    var height = startHeight.toLong + 1L
+    val maximum = currentHeightValue.toLong
+    var found: Option[Array[Byte]] = None
+    var failure: Option[StoreError] = None
+    while (height <= maximum && found.isEmpty && failure.isEmpty) {
+      val key = Ints.toByteArray(height.toInt)
+      view.get(key) match {
+        case Right(Some(_)) => found = Some(key)
+        case Right(None) => height += 1L
+        case Left(error) => failure = Some(error)
+      }
+    }
+    failure.map(Left(_)).getOrElse(Right(found))
+  }
+
+  private def planRemoval(view: KeyValueReadView,
+                          current: Option[Array[Byte]],
+                          last: Option[Array[Byte]],
+                          threshold: Int): Either[StoreError, RemovalPlan] =
+    (current, last) match {
+      case (Some(currentBytes), Some(lastBytes)) if threshold <= Ints.fromByteArray(currentBytes) =>
+        scanRemovalRange(view, Ints.fromByteArray(lastBytes), Ints.fromByteArray(currentBytes), threshold)
+      case _ => Right(RemovalPlan(Vector.empty, None))
+    }
+
+  private def scanRemovalRange(view: KeyValueReadView,
+                               firstHeight: Int,
+                               currentHeightValue: Int,
+                               threshold: Int): Either[StoreError, RemovalPlan] = {
+    val removals = Vector.newBuilder[Array[Byte]]
+    var nextLast: Option[Array[Byte]] = None
+    var height = firstHeight.toLong
+    val maximum = currentHeightValue.toLong
+    var failure: Option[StoreError] = None
+    while (height <= maximum && nextLast.isEmpty && failure.isEmpty) {
+      val key = Ints.toByteArray(height.toInt)
+      view.get(key) match {
+        case Right(Some(_)) if height < threshold.toLong => removals += key
+        case Right(Some(_)) => nextLast = Some(key)
+        case Right(None) => ()
+        case Left(error) => failure = Some(error)
+      }
+      height += 1L
+    }
+    failure.map(Left(_)).getOrElse(Right(RemovalPlan(removals.result(), nextLast)))
+  }
+
+  private def removalMutations(plan: RemovalPlan): Vector[KeyValueMutation] = {
+    val removals = plan.removals.map(Delete)
+    plan.nextLast match {
+      case Some(next) => removals :+ Put(LAST_HEIGHT, next)
+      case None => removals ++ Vector(Delete(LAST_HEIGHT), Delete(CURRENT_HEIGHT))
     }
   }
 
-  def close(): Unit = {
-    kvstore.close()
+  private def readNispRange(view: KeyValueReadView,
+                            startHeight: Int,
+                            endHeight: Int): Either[StoreError, Vector[Option[Array[Byte]]]] = {
+    val values = Vector.newBuilder[Option[Array[Byte]]]
+    var height = startHeight.toLong
+    val maximum = endHeight.toLong
+    var failure: Option[StoreError] = None
+    while (height <= maximum && failure.isEmpty) {
+      view.get(Ints.toByteArray(height.toInt)) match {
+        case Right(value) => values += value
+        case Left(error) => failure = Some(error)
+      }
+      height += 1L
+    }
+    failure.map(Left(_)).getOrElse(Right(values.result()))
   }
 
+  private final case class RemovalPlan(removals: Vector[Array[Byte]], nextLast: Option[Array[Byte]])
 }
+
 object NISPDatabase {
   final val NISP_DIR = ".lithos/nisp"
   final val LAST_HEIGHT = Blake2b256.hash("LAST_HEIGHT")

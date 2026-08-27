@@ -2,24 +2,25 @@ package api.models
 
 import play.api.libs.json._
 
-  /**
-  * Transaction paid to miner by Lithos payout contract
-  * @param transactionId Transaction Id of this mining reward payment
-  * @param payoutUTXO UTXO id of the Lithos payout contract associated with this payment
-  * @param amount Amount of ERG paid to miner
-  * @param score Score associated with this miner's NISP, used to determine payout amount
-  * @param paymentHeight Height that this payment was sent to miner
-  * @param blockId Id of the block processed by Lithos and associated with this reward
-  * @param minedBlockHeight Height of the block processed by Lithos, and associated with this reward.
-   */
+/**
+ * A confirmed payment from the Lithos payout contract to the local miner.
+ *
+ * @param transactionId payout transaction identifier
+ * @param payoutUTXO spent payout-contract box identifier
+ * @param amount amount paid in nanoERG
+ * @param score associated NISP score, when independently known
+ * @param paymentHeight payout transaction inclusion height
+ * @param blockId rewarded Lithos block identifier, when known; not the containing chain block
+ * @param minedBlockHeight rewarded Lithos block height, when known
+ */
 case class PaymentTransaction(
   transactionId: String,
   payoutUTXO: String,
   amount: Long,
-  score: Long,
+  score: Option[Long],
   paymentHeight: Int,
-  blockId: String,
-  minedBlockHeight: Int
+  blockId: Option[String],
+  minedBlockHeight: Option[Int]
 )
 
 object PaymentTransaction {

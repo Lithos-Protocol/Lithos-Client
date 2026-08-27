@@ -146,7 +146,7 @@ class MDSynchronizer @Inject()(cacheApi: SyncCacheApi) extends Actor with Inject
       val proverContract = prover.contract.hashedPropBytes
       val dataBoxMiner = dataBoxOptions.slice(0, 32)
       val isLocalMiner = dataBoxMiner sameElements proverContract
-      val dict = tree.dictionary
+      val dict = tree.dictionary.copy()
       val nextToken = nextDataBox.assets.head
       val sigmaProp = ErgoValue.fromHex(transform.input.spendingProof.get.ext("1")).getValue.asInstanceOf[SigmaProp]
       val kv = ErgoValue.fromHex(transform.input.spendingProof.get.ext("2")).getValue.asInstanceOf[(Coll[Byte], Coll[Byte])]
@@ -172,7 +172,7 @@ class MDSynchronizer @Inject()(cacheApi: SyncCacheApi) extends Actor with Inject
     val proverContract = prover.contract.hashedPropBytes
 
 
-    val dict = tree.dictionary
+    val dict = tree.dictionary.copy()
 
     val sigmaProp = ErgoValue.fromHex(dataBox.spendingProof.get.ext("1")).getValue.asInstanceOf[SigmaProp]
     val lookupProof = ErgoValue.fromHex(dataBox.spendingProof.get.ext("2")).getValue.asInstanceOf[Coll[Byte]]

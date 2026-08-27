@@ -192,7 +192,6 @@ class CommitmentTransactions(nodeContext: NodeContext, dataBoxes: DataBoxSource)
 
     val insertionTree = minerTree.dictionary.copy()
     val dictInput = InputUTXO(ctx.getBoxesById(minerTree.utxoId).head)
-    insertionTree.prover.generateProof()
     val insertion = insertionTree.insert(proverContract.hashedPropBytes -> dictInput.id.getBytes)
 
     val ctxDictInput = dictInput

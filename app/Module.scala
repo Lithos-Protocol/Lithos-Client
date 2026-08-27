@@ -5,6 +5,7 @@ import org.slf4j.LoggerFactory
 import play.api.{Configuration, Environment}
 import play.libs.akka.AkkaGuiceSupport
 import state.synchronization._
+import state.persistence.StateSnapshotActor
 import tasks.{MDSyncTask, RollupSyncTask, StartMiningServer, StartupTasks}
 import transactions.emissions.EmissionHandler
 import transactions.rollups.{DataBoxSource, RollupEvaluator, SubmissionHandler, TransactionProcessor, TransactionPublisher}
@@ -21,31 +22,32 @@ class Module(environment: Environment, configuration: Configuration) extends Abs
   @Override
   override def configure(): Unit = {
 
-    // Every config is validated here, before anything binds, so a bad value stops startup with one
-    // readable report naming every offending key instead of a crash inside whichever actor read it.
+    // Validate all configuration before constructing components that depend on it.
     haltOnConfigProblem {
       configs.Configs.validateAll(configuration)
 
-      // Inside the same handler: NodeConfig's constructor raises the same exception for the four
-      // errors a user hits most - a bad networkType, an unreadable keystore, a wrong password, an
-      // unreachable node. Outside it those surfaced as a Guice CreationException with the report
-      // buried in the stack trace, which is the outcome validateAll exists to avoid.
+      // Convert NodeConfig startup failures into the same concise configuration report.
       Globals.setConfigs(configuration)
     }
 
-    // Singular NodeContext to work from
+    // Share one NodeContext across all consumers.
     bind(classOf[NodeContext]).toInstance(Globals.getNodeConfig)
 
-    // The miner-dictionary data box, which lives in a disk-backed singleton. Bound rather than
-    // reached through Globals so SubmissionHandler can be built against a supplied one.
+    // Compile contracts once because the Sigma compiler mutates shared state during construction.
+    bind(classOf[SyncProtocolContext]).toInstance {
+      val nodeContext = Globals.getNodeConfig
+      SyncProtocolContext(nodeContext.getNetwork, new configs.SyncConfig(configuration).startHeight,
+        nodeContext.getNodeWallet.contract.hashedPropBytes)
+    }
+
+    // Bind the disk-backed data-box source so consumers can substitute it in tests.
     bind(classOf[DataBoxSource]).toInstance(DataBoxSource.Stored)
 
     // Bindings
+    bindActor(classOf[StateSnapshotActor], "state-snapshot", p => p.withDispatcher("lithos-contexts.database-dispatcher"))
     bindActor(classOf[StateFrame], "state-frame", p => p.withDispatcher("lithos-contexts.sync-dispatcher"))
     bindActor(classOf[MempoolView], "mempool-view", p => p.withDispatcher("lithos-contexts.sync-dispatcher"))
-    bindActor(classOf[RollupCoordinator], "rollup-coordinator", p => p.withDispatcher("lithos-contexts.sync-dispatcher"))
     bindActor(classOf[SyncHandler], "sync-handler", p => p.withDispatcher("lithos-contexts.sync-dispatcher"))
-    bindActor(classOf[MDSynchronizer], "md-synchronizer", p => p.withDispatcher("lithos-contexts.sync-dispatcher"))
 
     bindActor(classOf[WalletManager],        "wallet-manager",        p => p.withDispatcher("lithos-contexts.tx-dispatcher"))
     bindActor(classOf[SubmissionHandler],    "submission-handler",    p => p.withDispatcher("lithos-contexts.tx-dispatcher"))
@@ -53,8 +55,6 @@ class Module(environment: Environment, configuration: Configuration) extends Abs
     bindActor(classOf[TransactionProcessor], "transaction-processor", p => p.withDispatcher("lithos-contexts.tx-dispatcher"))
     bindActor(classOf[TransactionPublisher], "transaction-publisher", p => p.withDispatcher("lithos-contexts.tx-dispatcher"))
     bindActor(classOf[EmissionHandler],      "emission-handler",      p => p.withDispatcher("lithos-contexts.tx-dispatcher"))
-
-    bindActorFactory(classOf[RollupSynchronizer], classOf[RollupSynchronizer.RollupSyncFactory])
 
     bind(classOf[BlocksApi]).to(classOf[BlocksApiImpl])
     bind(classOf[CollateralMarketApi]).to(classOf[CollateralMarketApiImpl])
@@ -71,13 +71,7 @@ class Module(environment: Environment, configuration: Configuration) extends Abs
 
   }
 
-  /**
-   * Print a configuration problem and stop, rather than letting it become a Guice stack trace.
-   *
-   * Exits non-zero: a config the user has to fix is a failed start, and a supervisor reading 0
-   * treats it as a clean shutdown and neither restarts nor alarms. The sleep is there so the
-   * asynchronous appender flushes the report before the JVM goes.
-   */
+  /** Reports configuration failures, flushes the logger, and exits with a failure status. */
   private def haltOnConfigProblem[A](f: => A): A =
     try f
     catch {
@@ -89,17 +83,7 @@ class Module(environment: Environment, configuration: Configuration) extends Abs
         throw c
     }
 
-  /**
-   * Delete Play's RUNNING_PID before an early exit.
-   *
-   * Play writes it before the application starts and removes it from the server's own stop path.
-   * Exiting from inside `configure` never reaches that, so the file outlives the process and the
-   * next start refuses with "This application is already running" - one config mistake turning into
-   * a second, unrelated one that reads like a stuck instance.
-   *
-   * Only if it holds THIS pid. A file naming another process belongs to a client that really is
-   * running, and deleting it would let a second one start over the top.
-   */
+  /** Removes Play's PID file after early startup failure, but only when it names this process. */
   private def removeOwnPidFile(): Unit = {
     val logger = LoggerFactory.getLogger("Module")
     Try {
@@ -110,7 +94,7 @@ class Module(environment: Environment, configuration: Configuration) extends Abs
           val dir = sys.props.getOrElse("play.server.dir", sys.props.getOrElse("user.dir", "."))
           Paths.get(dir).resolve("RUNNING_PID")
         }
-        // getName is "<pid>@<host>" on every JVM this runs on; Java 8 has no ProcessHandle.
+        // Java 8 exposes the process identifier as the prefix of "<pid>@<host>".
         val ownPid = ManagementFactory.getRuntimeMXBean.getName.takeWhile(_ != '@')
         if (Files.exists(path)) {
           val recorded = new String(Files.readAllBytes(path), StandardCharsets.UTF_8).trim
@@ -122,8 +106,7 @@ class Module(environment: Environment, configuration: Configuration) extends Abs
         }
       }
     }.failed.foreach(ex =>
-      // Never in place of the report above: a pid file that survives costs one manual delete,
-      // whereas losing the reason the client stopped costs the user the whole diagnosis.
+      // PID cleanup failure must not replace the original configuration error.
       logger.warn(s"Could not remove Play's RUNNING_PID file: ${ex.getMessage}"))
   }
 }

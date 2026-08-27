@@ -30,14 +30,7 @@ object ConfigProblem {
 final class ConfigValidationException(problems: Seq[ConfigProblem])
   extends RuntimeException(ConfigProblem.render(problems))
 
-/**
- * Startup-time validation for every config the client reads. `Module.configure` runs
- * [[Configs.validateAll]] before anything binds, so a bad value stops startup here with a readable
- * report naming every offending key, instead of surfacing later as a crash inside whatever actor
- * happened to read it first.
- *
- * Ranges are deliberately generous - they catch typos, wrong units and nonsense, not tuning choices.
- */
+/** Validates all runtime configuration before dependency injection constructs its consumers. */
 object Configs {
 
   /** Throws immediately for a single fatal problem found outside the batch validation pass. */
@@ -50,8 +43,7 @@ object Configs {
     // ---- node ----
     v.url("node.url", v.string("node.url"))
     v.requireExisting("node.key", v.string("node.key"))
-    // Empty is what ships: these are placeholders the miner fills with their own keystore path and
-    // password. An empty one fails later, inside NodeConfig, with a message naming the key.
+    // Empty shipped values are placeholders validated by NodeConfig after user configuration.
     v.requireExisting("node.storagePath", v.string("node.storagePath"))
     v.requireExisting("node.pass", v.string("node.pass"))
     v.requireExisting("node.networkType", v.string("node.networkType")).foreach { raw =>
@@ -59,9 +51,7 @@ object Configs {
         v.problem("node.networkType", s""""$raw" is not a network type - use MAINNET or TESTNET""")
     }
     v.url("node.explorerURL", v.string("node.explorerURL"), allowDefaultSentinel = true)
-    // Required, not merely range-checked: NodeConfig falls back to ONE address when this is absent,
-    // while emission.maxLenderKeys defaults to 32. Silently deriving 31 lender keys the prover holds
-    // no secret for is stranded principal and stranded coinbases, not a tuning mistake.
+    // Require an explicit address count so lender keys cannot exceed available wallet secrets.
     val numAddresses =
       v.range("node.numAddresses", v.intReq("node.numAddresses"), 1, 1000,
         "how many EIP-3 addresses the prover holds keys for")
@@ -77,8 +67,7 @@ object Configs {
         case Success(_) => ()
       }
     }
-    // `intReq`/`boolReq` on exactly the keys StratumConfig reads with `get`, which throws on absence.
-    // The two below it read with `getOptional` and have real fallbacks, so their absence is fine.
+    // Require keys that StratumConfig reads without defaults.
     v.port("stratum.stratumPort", v.intReq("stratum.stratumPort"))
     v.range("stratum.extraNonce1Size", v.intReq("stratum.extraNonce1Size"), 1, 8,
       "hex bytes of extraNonce1; 2 is recommended, higher invites duplicate shares")
@@ -123,8 +112,7 @@ object Configs {
         v.problem("emission.maxPermitPerJoin", s"$permit must be positive (LIT base units); joins stop once the thermostat passes this price")
     }
 
-    // Cross-config: lender keys derived past the prover's last address receive permit returns and
-    // coinbases nothing can ever spend. This is stranded funds, not degraded performance.
+    // Every lender key must have a wallet secret capable of spending returned funds.
     for {
       addr <- numAddresses
       keys <- maxLenderKeys
@@ -139,10 +127,34 @@ object Configs {
     // ---- sync ----
     v.range("sync.startHeight", v.intReq("sync.startHeight"), 1, 2000000000,
       "block height to start synchronizing from; minimum 1")
+    // Bound retained state copies to a practical heap limit.
+    v.range("sync.reorgWindow", v.int("sync.reorgWindow"), 1, 1000,
+      "committed blocks retained for exact in-memory rollback; cost scales with active rollups and " +
+        "dictionary size, so raise it only alongside the heap")
+    v.range("sync.catchUpBatchBlocks", v.int("sync.catchUpBatchBlocks"), 1, 256,
+      "blocks fetched per canonical round trip; each is held whole until it commits")
+    v.range("sync.retriesBeforeAlarm", v.int("sync.retriesBeforeAlarm"), 1, 10000,
+      "consecutive failures at one height before synchronization reports itself stalled")
+    v.range("sync.mempool.maxTransactions", v.int("sync.mempool.maxTransactions"), 1, 1000000,
+      "unconfirmed transactions read before the mempool view gives up on a complete revision")
+    v.bool("sync.minerDictionary.bootstrap")
+    v.range("sync.minerDictionary.maxTransforms", v.int("sync.minerDictionary.maxTransforms"), 1, 10000000,
+      "dictionary spends followed during bootstrap")
+    v.requireExisting("sync.storage.backend", v.string("sync.storage.backend")).foreach { backend =>
+      if (backend.toLowerCase != "leveldb")
+        v.problem("sync.storage.backend", s"$backend is not available; use leveldb")
+    }
+    v.requireExisting("sync.storage.path", v.string("sync.storage.path"))
+    v.bool("sync.snapshots.enabled")
+    v.range("sync.snapshots.intervalBlocks", v.int("sync.snapshots.intervalBlocks"), 1, 10000000,
+      "committed blocks between persistent snapshots")
+    v.range("sync.snapshots.retention", v.int("sync.snapshots.retention"), 2, 100,
+      "complete snapshot generations retained")
+    v.range("sync.snapshots.manifestDepth", v.int("sync.snapshots.manifestDepth"), 0, 64,
+      "Plasma manifest subtree depth")
 
     // ---- lithos-tasks ----
-    // Required, because `TasksConfig` reads all nine with `get`. A missing block used to pass here
-    // and then throw out of whichever task or actor read it first.
+    // Require every task field that TasksConfig reads without a default.
     TasksConfig.Names.foreach { name =>
       v.boolReq(TasksConfig.key(name, "enabled"))
       v.durationRangeReq(TasksConfig.key(name, "startup"), 1, 604800000L)
@@ -150,15 +162,11 @@ object Configs {
     }
 
     // ---- lithos-contexts ----
-    // Presence only; Akka owns what a valid dispatcher block contains. Without this, a deleted or
-    // misspelled block fails inside whichever controller or task resolved it first, during Guice
-    // provisioning, where the report is wrapped in a CreationException rather than printed.
+    // Akka validates dispatcher contents; this pass verifies that each named block exists.
     Contexts.Names.foreach(name => v.requireBlock(Contexts.key(name)))
 
     // ---- api ----
-    // Every authenticated controller reads this with `get` at construction, so its absence is a
-    // failed start rather than a 403. The shape check catches the common mistake of pasting the
-    // password itself where its Blake2b256 hash belongs, which otherwise 403s everything silently.
+    // Controllers require a Blake2b256 API-key hash at construction.
     v.requireExisting("lithos.apiKeyHash", v.string("lithos.apiKeyHash")).foreach { raw =>
       val hash = raw.trim
       if (!hash.matches("(?i)[0-9a-f]{64}"))
@@ -223,12 +231,7 @@ final class ConfigValidator(config: Configuration) {
   def port(key: String, value: Option[Int]): Option[Int] =
     range(key, value, 1, 65535, "a TCP port")
 
-  /**
-   * A duration that must exist and must be in range. Reads once, so a bad value is one problem.
-   *
-   * There is no tolerant variant because nothing reads a duration tolerantly: `TasksConfig` is the
-   * only consumer and it uses `get`.
-   */
+  /** Validates a required task duration and reports one error for a malformed value. */
   def durationRangeReq(key: String, minMs: Long, maxMs: Long): Unit =
     requireExisting(key, duration(key)).foreach { d =>
       if (d.toMillis < minMs || d.toMillis > maxMs)

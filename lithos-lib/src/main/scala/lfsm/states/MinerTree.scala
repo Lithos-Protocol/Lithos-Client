@@ -3,11 +3,8 @@ package lfsm.states
 import lfsm.LFSMHelpers
 import org.ergoplatform.appkit.Address
 import org.ergoplatform.sdk.ErgoId
-import sigma.data.AvlTreeFlags
-import work.lithos.plasma.PlasmaParameters
-import work.lithos.plasma.collections.{LocalPlasmaMap, PlasmaMap}
 
-case class MinerTree(dictionary: PlasmaMap[Array[Byte], Array[Byte]],
+case class MinerTree(dictionary: AuthenticatedDictionaryView,
                      numMiners: Int,
                      startHeight: Int,
                      minerMap: Map[String, (Address, ErgoId)],
@@ -25,7 +22,7 @@ object MinerTree {
   final val REMOVE_MINER_OP = 1.toByte
 
   def initialState: MinerTree = {
-    val dictionary = new PlasmaMap[Array[Byte], Array[Byte]](AvlTreeFlags.AllOperationsAllowed, PlasmaParameters.default)
+    val dictionary = PlasmaDictionary.empty()
     MinerTree(dictionary, 0, LFSMHelpers.MD_GENESIS_HEIGHT, Map.empty[String, (Address, ErgoId)], hasMiner = false,
       LFSMHelpers.MD_GENESIS_ID, synced = false, 0, 0)
   }

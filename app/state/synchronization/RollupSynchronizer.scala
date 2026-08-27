@@ -5,7 +5,7 @@ import cache.RollupCache
 import com.google.inject.assistedinject.Assisted
 import configs.NodeContext
 import lfsm.states.NISPTree
-import lfsm.{LFSMHelpers, LFSMPhase}
+import lfsm.LFSMPhase
 import mutations.NodeWallet
 import org.bouncycastle.util.encoders.Hex
 import org.ergoplatform.appkit.{Address, BlockchainContext, ErgoValue}
@@ -20,7 +20,7 @@ import sigma.{Coll, SigmaProp, VersionContext}
 import state.messages.MempoolMessages.{MempoolChain, MempoolRollupState, MempoolTransform}
 import state.messages.RollupMessages._
 import state.messages.SyncMessages.Transform
-import utils.{Globals, Helpers, PayoutRecord}
+import utils.{Globals, Helpers}
 import work.lithos.mutations.Contract
 
 import javax.inject.Inject
@@ -142,13 +142,7 @@ class RollupSynchronizer @Inject()(config: Configuration, @Assisted rollupBlockI
   private def submissionTransform(tree: NISPTree, transform: Transform, isMempool: Boolean, shouldLog: Boolean): NISPTree = {
 
     val holdingBox = withCtx(ctx => transform.output.toInput(ctx))
-    val dict = {
-      if(!isMempool) {
-        tree.dictionary
-      } else {
-        tree.dictionary.copy()
-      }
-    }
+    val dict = tree.dictionary.copy()
 
     val nextMiners = holdingBox.registers(1).getValue.asInstanceOf[Int]
     val nextScore = holdingBox.registers(2).getValue.asInstanceOf[CBigInt].wrappedValue
@@ -201,13 +195,7 @@ class RollupSynchronizer @Inject()(config: Configuration, @Assisted rollupBlockI
     val fpInput = transform.tx.inputs(1)
 
     if (tree.hasMiner) {
-      val dict = {
-        if(!isMempool) {
-          tree.dictionary
-        } else {
-          tree.dictionary.copy()
-        }
-      }
+      val dict = tree.dictionary.copy()
 
       val miner = ErgoValue.fromHex(fpInput.spendingProof.get.ext("0")).getValue.asInstanceOf[Coll[Byte]]
       val lookProof = ErgoValue.fromHex(fpInput.spendingProof.get.ext("1")).getValue.asInstanceOf[Coll[Byte]]
@@ -253,7 +241,7 @@ class RollupSynchronizer @Inject()(config: Configuration, @Assisted rollupBlockI
 
   private def rollupPayoutTransform(tree: NISPTree, transform: RollupTransform): NISPTree = {
     if (tree.hasMiner) {
-      val dict = tree.dictionary
+      val dict = tree.dictionary.copy()
       val input = transform.input
       val miners = ErgoValue.fromHex(input.spendingProof.get.ext("0")).getValue.asInstanceOf[Coll[Coll[Byte]]]
       val lookProof = ErgoValue.fromHex(input.spendingProof.get.ext("1")).getValue.asInstanceOf[Coll[Byte]]
@@ -263,13 +251,6 @@ class RollupSynchronizer @Inject()(config: Configuration, @Assisted rollupBlockI
         a => Hex.toHexString(a) == prover.contract.hashedPropBytesHex
       }
       if (paidMiner) {
-        val payoutOutput = withCtx(ctx => transform.tx.outputs
-          .find(_.ergoTree == prover.contract.ergoTreeHex)
-          .get.toUTXO(ctx))
-        val payoutRecord = PayoutRecord(transform.tx.id, payoutOutput.value, LFSMHelpers.scoreFromPayment(payoutOutput.value, tree.totalScore, tree.totalReward),
-          input.id, rollupBlockId, tree.startHeight, transform.blockInfo.height)
-        val payoutSet = cacheApi.getOrElseUpdate[Seq[PayoutRecord]](Globals.TRACKED_PAYOUTS)(Seq.empty[PayoutRecord])
-        cacheApi.set(Globals.TRACKED_PAYOUTS, payoutSet ++ Seq(payoutRecord))
         stopSync("Local miner was paid", tree, isMempool = false)
       } else {
         val lookUp = dict.lookUp(miners.toArray.map(_.toArray): _*)

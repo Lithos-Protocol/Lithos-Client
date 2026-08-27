@@ -5,14 +5,7 @@ import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 import play.api.Configuration
 
-/**
- * `Configs.validateAll` must accept exactly what ships, and must report every bad key at once.
- *
- * The shipped conf is the one artefact every miner starts from, so if validation rejects it the
- * client never boots. And the point of the batch pass is aggregation — a validator that stops at
- * the first problem puts a user fixing five mistakes through five startups, which is the failure
- * mode this system exists to remove.
- */
+/** Verifies that startup validation accepts shipped configuration and aggregates invalid keys. */
 class ConfigsSpec extends AnyFlatSpec with Matchers {
 
   private def shipped: Configuration =
@@ -26,11 +19,7 @@ class ConfigsSpec extends AnyFlatSpec with Matchers {
   }
 
   it should "name every required key missing from an empty configuration" in {
-    // The required set is exactly the keys whose READER calls `Configuration.get`, which throws.
-    // Anything read with `getOptional` has a real fallback and is legitimately absent. Getting that
-    // line wrong in the tolerant direction is what this pins: the key passes validation, and the
-    // client then dies inside whichever actor or controller reads it first, which is the outcome
-    // validateAll exists to prevent.
+    // Required keys are those read without an application default.
     val thrown = the[ConfigValidationException] thrownBy
       Configs.validateAll(Configuration(ConfigFactory.empty()))
     val message = thrown.getMessage
@@ -63,17 +52,13 @@ class ConfigsSpec extends AnyFlatSpec with Matchers {
   }
 
   it should "name every dispatcher Contexts looks up" in {
-    // The validator walks Contexts.Names, so a dispatcher added to the class and not to the list
-    // would go unvalidated. ContextsSpec proves the shipped conf resolves them; this is about the
-    // conf a miner has edited.
+    // Keep runtime dispatcher lookups and validation names aligned.
     Contexts.Names should contain theSameElementsAs
-      Seq(Contexts.Stratum, Contexts.Polling, Contexts.Sync, Contexts.Tx, Contexts.Dex)
+      Seq(Contexts.Stratum, Contexts.Polling, Contexts.Sync, Contexts.Tx, Contexts.Dex, Contexts.Database)
   }
 
   it should "reject an apiKeyHash that is the key rather than its hash" in {
-    // The common mistake, and silent without this: every authenticated call 403s and nothing says
-    // why. Only this key is supplied, so the report is full of other problems - the assertion is
-    // that this one is among them.
+    // A plaintext key must be reported even when the configuration has other errors.
     val thrown = the[ConfigValidationException] thrownBy
       Configs.validateAll(Configuration(ConfigFactory.parseString("""lithos.apiKeyHash = "hello"""")))
     thrown.getMessage should include("lithos.apiKeyHash")
@@ -108,12 +93,7 @@ class ConfigsSpec extends AnyFlatSpec with Matchers {
     thrown.getMessage should include("node.pass")
   }
 
-  /**
-   * The two readers of a task's `enabled` flag differ on purpose, and the difference is the whole
-   * point of the tolerant one. `SubmissionHandler` wanted the flag only to pick which of three
-   * warnings to print, and building a `TasksConfig` to get it threw out of `runBatch` on a config
-   * without the block — losing every stub in the batch to a log line.
-   */
+  /** Distinguishes required task construction from tolerant status-message lookup. */
   "TasksConfig" should "throw on a missing task block, and read the flag tolerantly" in {
     val empty = Configuration(ConfigFactory.empty())
 
@@ -126,8 +106,7 @@ class ConfigsSpec extends AnyFlatSpec with Matchers {
   }
 
   it should "name every task the shipped conf configures" in {
-    // The validator walks TasksConfig.Names, so a task added to the class and not to the list would
-    // be unvalidated - and a name in the list with no block would fail the shipped-conf test above.
+    // Keep task construction and validation names aligned.
     TasksConfig.Names should contain theSameElementsAs
       Seq(TasksConfig.StratumServer, TasksConfig.RollupSync, TasksConfig.DictionarySync)
     noException should be thrownBy new TasksConfig(shipped)

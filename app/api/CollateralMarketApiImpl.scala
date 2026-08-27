@@ -30,7 +30,7 @@ import scala.reflect.ClassTag
 import scala.util.{Failure, Success, Try}
 
 /**
- * Read-side composition over [[EmissionTransactions]]' box scans, plus the wallet-facing sweep and
+ * Read-side composition over EmissionTransactions box scans, plus the wallet-facing sweep and
  * join flows. Every method does blocking node IO and is expected to run off the request pool.
  */
 @Singleton

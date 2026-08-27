@@ -1,106 +1,25 @@
 package tasks
 
-import akka.actor.{ActorRef, ActorSystem, CoordinatedShutdown}
-import akka.pattern.ask
-import akka.util.Timeout
-import configs.TasksConfig.TaskConfiguration
-import configs.{Contexts, NodeConfig, SyncConfig, TasksConfig}
-import node.NodeApi
+import akka.actor.{ActorRef, ActorSystem}
+import configs.{Contexts, TasksConfig}
 import org.slf4j.{Logger, LoggerFactory}
 import play.api.Configuration
-import play.api.cache.SyncCacheApi
-import state.synchronization.Subscribable.{Subscribe, SubscribeAck, SubscribeRejected, SubscribeResponse}
-import state.messages.StateFrameMessages._
-import state.messages.SyncMessages._
-import state.messages.{BlockInfo, BlockMessage, NodeSync}
-import utils.Globals
+import state.messages.StateFrameMessages.StartSynchronization
 
 import javax.inject.{Inject, Named, Singleton}
-import scala.concurrent.duration.DurationInt
-import scala.concurrent.{Await, Future}
-import scala.language.postfixOps
-import scala.util.{Failure, Success, Try}
 
+/** Starts the single canonical synchronization pipeline after the configured startup delay. */
 @Singleton
-class RollupSyncTask @Inject()(cache: SyncCacheApi, system: ActorSystem, config: Configuration,
-                               @Named("sync-handler") syncHandler: ActorRef,
-                               @Named("state-frame") stateFrame:   ActorRef,
-                               cs: CoordinatedShutdown) {
+class RollupSyncTask @Inject()(system: ActorSystem,
+                               config: Configuration,
+                               @Named("state-frame") stateFrame: ActorRef) {
 
-  val logger: Logger = LoggerFactory.getLogger("RollupSyncTask")
-  val taskConfig: TaskConfiguration = new TasksConfig(config).rollupSyncTask
-
-  val contexts: Contexts     = new Contexts(system)
-  val syncConfig: SyncConfig = new SyncConfig(config)
-  val nodeConfig: NodeConfig = Globals.getNodeConfig
+  private val logger: Logger = LoggerFactory.getLogger("RollupSyncTask")
+  private val taskConfig = new TasksConfig(config).rollupSyncTask
+  private val pollingContext = new Contexts(system).pollingContext
 
   if (taskConfig.enabled) {
-    logger.info("Starting rollup synchronization")
-    logger.info(s"Rollup synchronization will start at height ${syncConfig.startHeight}")
-
-    var currentHeight = syncConfig.startHeight
-    val nodeApi = nodeConfig.getNodeApi
-
-    Future {
-      // Phase 1: catch up to chain head
-      var synced = false
-      while (!synced) {
-        val tip = chainHeight
-        if (currentHeight <= tip) {
-          loadBlockSync(currentHeight, nodeApi) match {
-            case Success(_) =>
-              if (currentHeight < tip) {
-                currentHeight += 1
-              } else {
-                synced = true
-              }
-            case Failure(ex) =>
-              logger.error(s"Failed to load block $currentHeight while syncing rollups", ex)
-          }
-        } else {
-          synced = true
-        }
-      }
-
-      logger.info(s"Finished catch up rollup sync to height $currentHeight")
-
-
-      // Phase 2: handoff to StateFrame — keep loading blocks and retrying until accepted
-      logger.info("Attempting rollup subscription to StateFrame")
-      var subscribed = false
-      while (!subscribed) {
-        implicit val timeout: Timeout = Timeout(10 seconds)
-        Await.result((stateFrame ? Subscribe(currentHeight, syncHandler)).mapTo[SubscribeResponse], 10 seconds) match {
-          case SubscribeAck =>
-            logger.info(s"SyncHandler subscribed to StateFrame at height $currentHeight")
-            subscribed = true
-            syncHandler ! CompletedInitSync
-            Globals.setSynced()
-          case SubscribeRejected(reason) =>
-            logger.warn(s"StateFrame rejected rollup subscription: $reason | catching up one block")
-            loadBlockSync(currentHeight + 1, nodeApi) match {
-              case Success(_) => currentHeight += 1
-              case Failure(ex) =>
-                logger.error(s"Failed to load block ${currentHeight + 1} during subscription handoff", ex)
-                Thread.sleep(2000)
-            }
-        }
-      }
-
-    }(contexts.pollingContext)
-  } else {
-    logger.info("Block Polling was not enabled")
-  }
-
-  private def chainHeight: Int =
-    nodeConfig.getClient.execute(ctx => ctx.getHeight)
-
-  private def loadBlockSync(height: Int, nodeApi: NodeApi): Try[Unit] = {
-    if (height % 100 == 0)
-      logger.info(s"Loading rollup block at height $height")
-    Try {
-      val block = nodeApi.blockAt(height).map(_.head).get
-      syncHandler ! BlockMessage(NodeSync.blockInfo(block))
-    }
-  }
+    logger.info(s"Canonical synchronization will start after ${taskConfig.startup}")
+    system.scheduler.scheduleOnce(taskConfig.startup, stateFrame, StartSynchronization)(pollingContext, ActorRef.noSender)
+  } else logger.info("Canonical synchronization is disabled")
 }

@@ -4,13 +4,7 @@ import node.model.{IndexedBlock, IndexedBox, IndexedTransaction, NodeAsset, Node
 import org.ergoplatform.sdk.ErgoId
 import work.lithos.mutations.Token
 
-/**
- * Maps the node model onto the synchronization message types.
- *
- * The mirror of `node.MutationConversions`, which does the same job for the `work.lithos.mutations`
- * types. Both directions read the same node model, so a call site picks whichever shape it needs
- * without the node layer knowing either exists.
- */
+/** Converts node models into synchronization message types. */
 object NodeSync {
 
   def token(asset: NodeAsset): Token = Token(ErgoId.create(asset.tokenId), asset.amount)
@@ -52,10 +46,16 @@ object NodeSync {
   )
 
   def blockInfo(block: NodeBlock): BlockInfo =
-    BlockInfo(block.header.id, block.header.height, block.transactions.map(blockTx))
+    BlockInfo(block.header.id, block.header.height, block.transactions.map(blockTx), block.header.parentId)
 
-  def blockInfo(block: IndexedBlock): BlockInfo =
-    BlockInfo(block.header.id, block.header.height, block.blockTransactions.map(blockTx))
+  def blockInfo(block: IndexedBlock): BlockInfo = {
+    val transactions = block.blockTransactions.map(blockTx)
+    val inputs = block.blockTransactions.iterator
+      .flatMap(_.inputs.iterator)
+      .map(box => box.boxId -> txOutput(box))
+      .toMap
+    BlockInfo(block.header.id, block.header.height, transactions, block.header.parentId, inputs)
+  }
 
   implicit class NodeBlockSyncOps(val block: NodeBlock) extends AnyVal {
     def toBlockInfo: BlockInfo = blockInfo(block)

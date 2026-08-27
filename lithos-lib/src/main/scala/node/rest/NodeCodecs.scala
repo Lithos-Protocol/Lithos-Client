@@ -146,10 +146,15 @@ object NodeCodecs {
     size = o.optInt("size").getOrElse(0)
   )
 
+  /** Accepts transaction-array field names used by the indexed and singular block endpoints. */
   def indexedBlock(o: JsonObject): IndexedBlock = IndexedBlock(
     header = header(o.obj("header")),
-    blockTransactions = o.optObj("blockTransactions").map(_.objects("transactions").map(indexedTransaction))
-      .getOrElse(o.objects("blockTransactions").map(indexedTransaction)),
+    blockTransactions = {
+      val topLevel = o.objects("transactions").map(indexedTransaction)
+      if (topLevel.nonEmpty) topLevel
+      else o.optObj("blockTransactions").map(_.objects("transactions").map(indexedTransaction))
+        .getOrElse(o.objects("blockTransactions").map(indexedTransaction))
+    },
     extension = o.optObj("extension").map(extension).getOrElse(NodeExtension("", "", Seq.empty[NodeExtensionField])),
     adProofs = o.optObj("adProofs").map(adProofs),
     size = o.optInt("size").getOrElse(0)
@@ -226,13 +231,7 @@ object NodeCodecs {
     size = o.optInt("size")
   )
 
-  /**
-   * `/wallet/balances` and `/wallet/balances/withUnconfirmed`.
-   *
-   * `assets` here is an OBJECT of `tokenId -> amount`, not the array of `{tokenId, amount}` a box
-   * carries under the same name. Reading it as an array is silent — the array helpers return empty
-   * for a non-array — so every balance came back with no tokens at all.
-   */
+  /** Decodes wallet balance assets from their `tokenId -> amount` object representation. */
   def walletBalances(o: JsonObject): WalletBalances = WalletBalances(
     height = o.optInt("height").getOrElse(0),
     balance = o.optLong("balance").getOrElse(0L),
