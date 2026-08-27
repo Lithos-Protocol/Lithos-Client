@@ -1,8 +1,6 @@
 package state.messages
 
 import org.ergoplatform.appkit.BlockchainContext
-import org.ergoplatform.sdk.JavaHelpers
-import org.ergoplatform.restapi.client.ErgoTransaction
 import work.lithos.mutations.{InputUTXO, UTXO}
 
 
@@ -23,15 +21,4 @@ case class BlockTx(
       case _ =>
         false
     }
-}
-
-object BlockTx {
-  def fromSync(et: ErgoTransaction): BlockTx = {
-    BlockTx(
-      et.getId,
-      JavaHelpers.toIndexedSeq(et.getInputs).map(TxInput.fromSyncInput),
-      JavaHelpers.toIndexedSeq(et.getDataInputs).map(TxInput.fromSyncDataInput),
-      JavaHelpers.toIndexedSeq(et.getOutputs).map(TxOutput.fromSync)
-    )
-  }
 }

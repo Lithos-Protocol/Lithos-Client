@@ -1,8 +1,8 @@
 package state.messages
 
 import lfsm.states.NISPTree
-import state.messages.DictionaryMessages.DictionaryTransform
-import state.messages.RollupMessages.{Genesis, RollupTransform}
+import state.messages.MempoolMessages.MempoolRollupState
+
 object SyncMessages {
 
   case class SyncCursor(height: Int, blockId: String, parentId: String)
@@ -61,11 +61,6 @@ object SyncMessages {
 
 
 
-  case class RelevantTransactions(genTxs: Seq[Genesis], transforms: Seq[RollupTransform], dictionaryMap: Map[String, Seq[DictionaryTransform]])
-
-  object RelevantTransactions {
-    def empty = RelevantTransactions(Seq.empty[Genesis], Seq.empty[RollupTransform], Map.empty[String, Seq[DictionaryTransform]])
-  }
   trait Transform {
     val tx: BlockTx
     def input: TxInput
@@ -73,14 +68,16 @@ object SyncMessages {
   }
 
   case object GetSynced
-  case object CompletedInitSync
-  case class HandledBlock(blockInfo: BlockInfo)
+
+  /**
+   * Answered when a block arrives before synchronization has been seeded.
+   * Generally only happens if state owner lost its own state due to a restart.
+   */
+  case object SyncUnseeded
 
   sealed trait SyncMessage
 
-  case class FullSync(rollups: Seq[(String, NISPTree)]) extends SyncMessage
-
-  case class PartialSync(syncedRollups: Seq[(String, NISPTree)], unsyncedIds: Seq[String]) extends SyncMessage
-
-  case class NoRollups() extends SyncMessage
+  /** Committed rollups with their mempool projections, so a consumer reads one consistent pair. */
+  case class FullSync(rollups: Seq[(String, NISPTree)],
+                      projections: Map[String, MempoolRollupState]) extends SyncMessage
 }

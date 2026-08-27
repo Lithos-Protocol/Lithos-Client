@@ -14,6 +14,7 @@ import state.persistence.StateSnapshotActor.{RestoreLatest, SnapshotLoaded}
 import javax.inject.{Inject, Named}
 import scala.concurrent.{ExecutionContext, Future}
 import scala.concurrent.duration._
+import scala.util.control.NonFatal
 import scala.util.{Failure, Success, Try}
 
 object StateFrame {
@@ -22,7 +23,7 @@ object StateFrame {
   private sealed trait PollResult
   private final case class BatchFetched(blocks: Seq[BlockInfo], tipHeight: Int) extends PollResult
   private final case class AtTip(tipHeight: Int) extends PollResult
-  private final case class ForkDetected(cursor: SyncCursor, canonicalId: String, tipHeight: Int) extends PollResult
+  private final case class ForkDetected(cursor: SyncCursor, detail: String, tipHeight: Int) extends PollResult
   private final case class PollFinished(result: Try[PollResult])
   private final case class CommitFinished(block: BlockInfo, tipHeight: Int, result: Try[Any])
   private final case class StartupState(result: Try[Option[CommittedSyncState]])
@@ -42,7 +43,7 @@ class StateFrame @Inject()(config: Configuration,
                            protocol: SyncProtocolContext,
                            @Named("sync-handler") syncHandler: ActorRef,
                            @Named("state-snapshot") snapshotActor: ActorRef)
-  extends Actor with Subscribable {
+  extends Actor with AutoSubscribable {
 
   import StateFrame._
 
@@ -55,11 +56,12 @@ class StateFrame @Inject()(config: Configuration,
   private val source = new CanonicalBlockSource(nodeContext.getNodeApi)
   private val batchBlocks = syncConfig.catchUpBatchBlocks
   private val retriesBeforeAlarm = syncConfig.retriesBeforeAlarm
+  private val tipRevalidation = syncConfig.tipRevalidation
+  private val incompleteBlockRetries = syncConfig.incompleteBlockRetries
   // Dictionary history is bootstrapped separately, so canonical block sync starts here.
   private val firstHeight = syncConfig.startHeight
 
   override val logger: Logger = LoggerFactory.getLogger("StateFrame")
-  override var currentHeight: Int = firstHeight - 1
   override var subscribers: Set[ActorRef] = Set.empty
 
   private var cursor = Option.empty[SyncCursor]
@@ -72,17 +74,32 @@ class StateFrame @Inject()(config: Configuration,
   private var stalledAt = Option.empty[Int]
   private var stalledAttempts = 0
   private var stalledSince = 0L
+  // Last time the committed header was re-read while idle at tip.
+  private var lastTipCheck = 0L
 
   private val ticker: Cancellable =
     context.system.scheduler.scheduleWithFixedDelay(5.seconds, 5.seconds, self, Tick)
 
   override def postStop(): Unit = ticker.cancel()
 
+  /**
+   * Nothing here may throw. A restart resets `active`, and the one message that sets it is scheduled,
+   * so an escaped exception would leave this producer idle with a live ticker and no way back.
+   */
   override def receive: Receive = handleSubscriptions orElse {
+    case message if handlers.isDefinedAt(message) =>
+      try handlers(message)
+      catch {
+        case NonFatal(ex) =>
+          failPoll(s"Unhandled failure processing ${message.getClass.getSimpleName}", ex)
+      }
+  }
+
+  private val handlers: Receive = {
     case StartSynchronization if !active =>
       active = true
       inFlight = true
-      prepareStartup(allowExisting = true)
+      establishSeed()
         .map(state => StartupState(Success(state)))
         .recover { case ex => StartupState(Failure(ex)) }
         .pipeTo(self)
@@ -95,8 +112,7 @@ class StateFrame @Inject()(config: Configuration,
     case StartupState(Success(saved)) =>
       saved.foreach { state =>
         cursor = Some(state.cursor)
-        currentHeight = state.cursor.height
-        nextHeight = state.cursor.height + 1
+          nextHeight = state.cursor.height + 1
       }
       inFlight = false
       self ! Tick
@@ -106,7 +122,22 @@ class StateFrame @Inject()(config: Configuration,
     case PollFinished(Success(BatchFetched(blocks, tip))) =>
       syncHandler ! BeginCatchUp(tip)
       pending = blocks.toVector
-      commitNext(tip)
+      if (pending.isEmpty)
+        failPoll("Canonical block poll returned no blocks for a non-empty range",
+          new IllegalStateException(s"expected at least one block from height $nextHeight"))
+      // A block whose input boxes came back without scripts authenticates no genesis, and a committed
+      // block is never re-read. Refetch a bounded number of times, then take it: the shape is a strong
+      // signal the index is behind, but not an invariant worth stalling the cursor on forever.
+      else if (pending.head.inputsLookStripped && stalledAttempts < incompleteBlockRetries)
+        failPoll(s"Indexed block ${pending.head.id} at height ${pending.head.height} resolved no input " +
+          "scripts; refetching", new IllegalStateException("indexed input boxes carry no script"))
+      else {
+        if (pending.head.inputsLookStripped)
+          logger.error(s"Accepting block ${pending.head.id} at height ${pending.head.height} after " +
+            s"$incompleteBlockRetries refetch(es) still resolved no input scripts. Any rollup genesis " +
+            "in it cannot be authenticated and will not be tracked.")
+        commitNext(tip)
+      }
 
     case PollFinished(Success(AtTip(_))) =>
       inFlight = false
@@ -115,9 +146,9 @@ class StateFrame @Inject()(config: Configuration,
         case None => logger.warn(s"Node tip is below synchronization start height $firstHeight")
       }
 
-    case PollFinished(Success(ForkDetected(at, canonicalId, tip))) =>
-      logger.warn(s"Canonical header at ${at.height} changed from ${at.blockId} to $canonicalId")
-      syncHandler ! MarkStale(s"Canonical header changed at height ${at.height}")
+    case PollFinished(Success(ForkDetected(at, detail, tip))) =>
+      logger.warn(s"Canonical chain diverged at height ${at.height}: $detail")
+      syncHandler ! MarkStale(s"Canonical chain diverged at height ${at.height}: $detail")
       (syncHandler ? GetRetainedCursors)
         .map {
           case RetainedCursors(values) => CursorsLoaded(Success(values), tip)
@@ -131,15 +162,26 @@ class StateFrame @Inject()(config: Configuration,
 
     case CommitFinished(block, tip, Success(committedBlock: BlockCommitted)) =>
       cursor = Some(committedBlock.cursor)
-      currentHeight = committedBlock.cursor.height
-      nextHeight = currentHeight + 1
+      nextHeight = committedBlock.cursor.height + 1
       clearStall()
       subscribers.foreach(_ ! NewBlock(block))
       if (pending.nonEmpty) commitNext(tip)
       else {
         inFlight = false
-        if (currentHeight >= tip) syncHandler ! MarkReady else self ! Tick
+        if (committedBlock.cursor.height >= tip) syncHandler ! MarkReady else self ! Tick
       }
+
+    // The state owner lost its state, so re-establish the seed rather than retrying blocks it
+    // cannot place. Retrying would stall at this height until the process restarted.
+    case CommitFinished(_, _, Success(SyncUnseeded)) =>
+      pending = Vector.empty
+      cursor = None
+      nextHeight = firstHeight
+      logger.error("Synchronization holds no committed state; re-establishing it before continuing")
+      establishSeed()
+        .map(state => StartupState(Success(state)))
+        .recover { case ex => StartupState(Failure(ex)) }
+        .pipeTo(self)
 
     // Discard later blocks and derive the next batch from committed state.
     case CommitFinished(block, _, Success(rejected: BlockRejected)) =>
@@ -174,8 +216,7 @@ class StateFrame @Inject()(config: Configuration,
 
     case RollbackFinished(Success(done: RollbackCompleted), tip) =>
       cursor = Some(done.cursor)
-      currentHeight = done.cursor.height
-      nextHeight = currentHeight + 1
+      nextHeight = done.cursor.height + 1
       inFlight = false
       syncHandler ! BeginCatchUp(tip)
       self ! Tick
@@ -186,20 +227,25 @@ class StateFrame @Inject()(config: Configuration,
       failPoll("Unexpected rollback response", new IllegalStateException(other.toString))
     case RollbackFinished(Failure(ex), _) => failPoll("Rollback ask failed", ex)
 
+    // A reset discards dictionary state, and catch-up starts above the dictionary genesis, so ordinary
+    // polling could never rediscover it. Re-seed before resuming rather than committing against an
+    // empty dictionary the client would treat as correct.
     case ResetFinished(Success(SyncStateReset)) =>
       cursor = None
-      currentHeight = firstHeight - 1
       nextHeight = firstHeight
-      inFlight = false
-      self ! Tick
+      logger.warn("Full rescan cleared synchronization state; rebuilding the Miner Dictionary before " +
+        "canonical catch-up resumes")
+      seedFromMinerDictionary()
+        .map(state => StartupState(Success(state)))
+        .recover { case ex => StartupState(Failure(ex)) }
+        .pipeTo(self)
     case ResetFinished(Success(other)) =>
       failPoll("Unexpected state reset response", new IllegalStateException(other.toString))
     case ResetFinished(Failure(ex)) => failPoll("State reset failed", ex)
 
     case RecoveryPrepared(Success(Some(state))) =>
       cursor = Some(state.cursor)
-      currentHeight = state.cursor.height
-      nextHeight = currentHeight + 1
+      nextHeight = state.cursor.height + 1
       inFlight = false
       self ! Tick
     case RecoveryPrepared(Success(None)) => beginFullRescan()
@@ -218,17 +264,35 @@ class StateFrame @Inject()(config: Configuration,
   }
 
   /** Hand the next fetched block to the state owner and wait for its commit before the one after. */
-  private def commitNext(tip: Int): Unit = {
-    val block = pending.head
-    pending = pending.tail
-    inFlight = true
-    (syncHandler ? ApplyBlock(block))
-      .map(result => CommitFinished(block, tip, Success(result)))
-      .recover { case ex => CommitFinished(block, tip, Failure(ex)) }
-      .pipeTo(self)
+  private def commitNext(tip: Int): Unit = pending.headOption match {
+    case None =>
+      inFlight = false
+      self ! Tick
+    case Some(block) =>
+      pending = pending.tail
+      inFlight = true
+      (syncHandler ? ApplyBlock(block))
+        .map(result => CommitFinished(block, tip, Success(result)))
+        .recover { case ex => CommitFinished(block, tip, Failure(ex)) }
+        .pipeTo(self)
   }
 
-  private def prepareStartup(allowExisting: Boolean): Future[Option[CommittedSyncState]] =
+  /**
+   * Establishes committed state before any block is applied: a canonical snapshot if one exists,
+   * otherwise a fresh dictionary bootstrap. Never resolves to `None` — a caller that gets a state back
+   * may begin polling, and one that gets a failure must not.
+   */
+  private def establishSeed(): Future[Option[CommittedSyncState]] =
+    restoreSnapshot().flatMap {
+      case Some(state) => Future.successful(Some(state))
+      case None => seedFromMinerDictionary()
+    }
+
+  /**
+   * The newest canonical snapshot, or `None` when none is. Used alone by reorg recovery, where `None`
+   * indicates a full rescan rather than to seed.
+   */
+  private def restoreSnapshot(): Future[Option[CommittedSyncState]] =
     (snapshotActor ? RestoreLatest).flatMap {
       case SnapshotLoaded(Some(snapshot), _) =>
         (syncHandler ? RestoreCommittedState(snapshot.state, snapshot.recentCursors)).map {
@@ -238,12 +302,7 @@ class StateFrame @Inject()(config: Configuration,
         }
       case SnapshotLoaded(None, warning) =>
         warning.foreach(logger.warn)
-        if (allowExisting)
-          (syncHandler ? GetCommittedState).flatMap {
-            case CommittedState(state) => Future.successful(Some(state))
-            case _ => seedFromMinerDictionary()
-          }
-        else Future.successful(None)
+        Future.successful(None)
       case other => Future.failed(new IllegalStateException(s"Unexpected snapshot response $other"))
     }
 
@@ -286,35 +345,55 @@ class StateFrame @Inject()(config: Configuration,
 
   private def beginSnapshotRecovery(): Unit = {
     logger.warn("Reorganization exceeds the in-memory window; checking retained snapshots")
-    prepareStartup(allowExisting = false)
+    restoreSnapshot()
       .map(state => RecoveryPrepared(Success(state)))
       .recover { case ex => RecoveryPrepared(Failure(ex)) }
       .pipeTo(self)
   }
 
-  /** Fetches the committed header, successor headers, and matching blocks as one canonical batch. */
+  /**
+   * Fetches the committed header, successor headers, and matching blocks as one canonical batch.
+   *
+   * At tip there is nothing to fetch, so the committed header is re-read on an interval instead.
+   */
   private def pollCanonical(): Try[PollResult] =
     source.tipHeight.flatMap { tip =>
-      if (nextHeight > tip) Success(AtTip(tip))
-      else {
-        val last = math.min(nextHeight + batchBlocks - 1, tip)
-        cursor match {
-          case Some(at) =>
-            source.headerSlice(at.height, last).flatMap { headers =>
-              headers.headOption match {
-                case Some(committedHeader) if committedHeader.id != at.blockId =>
-                  Success(ForkDetected(at, committedHeader.id, tip))
-                case Some(_) => source.blocksFor(headers.tail).map(BatchFetched(_, tip))
-                case None => Failure(new NoSuchElementException(
-                  s"Canonical chain slice returned no header at committed height ${at.height}"))
-              }
-            }
-          case None =>
-            source.headerSlice(nextHeight, last).flatMap(headers =>
-              source.blocksFor(headers).map(BatchFetched(_, tip)))
-        }
+      cursor match {
+        case Some(at) if tip < at.height =>
+          Success(ForkDetected(at, s"node tip $tip is below the committed height ${at.height}", tip))
+        case Some(at) if nextHeight > tip => revalidateTip(at, tip)
+        case _ if nextHeight > tip => Success(AtTip(tip))
+        case _ => fetchBatch(tip)
       }
     }
+
+  private def revalidateTip(at: SyncCursor, tip: Int): Try[PollResult] =
+    if (System.currentTimeMillis() - lastTipCheck < tipRevalidation.toMillis) Success(AtTip(tip))
+    else source.headerAt(at.height).map { canonical =>
+      lastTipCheck = System.currentTimeMillis()
+      if (canonical.id != at.blockId)
+        ForkDetected(at, s"header changed from ${at.blockId} to ${canonical.id}", tip)
+      else AtTip(tip)
+    }
+
+  private def fetchBatch(tip: Int): Try[PollResult] = {
+    val last = math.min(nextHeight + batchBlocks - 1, tip)
+    cursor match {
+      case Some(at) =>
+        source.headerSlice(at.height, last).flatMap { headers =>
+          headers.headOption match {
+            case Some(committedHeader) if committedHeader.id != at.blockId =>
+              Success(ForkDetected(at, s"header changed from ${at.blockId} to ${committedHeader.id}", tip))
+            case Some(_) => source.blocksFor(headers.tail).map(BatchFetched(_, tip))
+            case None => Failure(new NoSuchElementException(
+              s"Canonical chain slice returned no header at committed height ${at.height}"))
+          }
+        }
+      case None =>
+        source.headerSlice(nextHeight, last).flatMap(headers =>
+          source.blocksFor(headers).map(BatchFetched(_, tip)))
+    }
+  }
 
   private def beginFullRescan(): Unit = {
     logger.warn(s"Reorganization exceeds the retained window; rescanning from height $firstHeight")

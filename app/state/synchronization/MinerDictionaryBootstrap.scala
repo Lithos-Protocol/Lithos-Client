@@ -2,7 +2,7 @@ package state.synchronization
 
 import lfsm.states.MinerTree
 import node.NodeApi
-import node.model.{IndexedBox, Paging}
+import node.model.{IndexedBox, MempoolOptions, Paging, SortDirection}
 import org.slf4j.{Logger, LoggerFactory}
 import state.messages.SyncMessages.SyncCursor
 import org.ergoplatform.sdk.ErgoId
@@ -59,14 +59,15 @@ final class MinerDictionaryBootstrap(nodeApi: NodeApi,
                    seedHeight: Int,
                    applied: Int,
                    seed: Option[CommittedSyncState]): Either[String, WalkResult] = {
-    if (applied > maxTransforms)
-      Left(s"Miner Dictionary history exceeds sync.minerDictionary.maxTransforms ($maxTransforms)")
-    else nodeApi.indexedBoxById(boxId) match {
+    nodeApi.indexedBoxById(boxId) match {
       case Failure(ex) => Left(s"could not read dictionary box $boxId: ${message(ex)}")
       case Success(None) => Left(s"indexed node has no dictionary box $boxId")
       case Success(Some(box)) => box.spentTransactionId match {
         case None =>
           Right(WalkResult(seed.getOrElse(current), current, boxId, applied))
+        // Checked here rather than before the read, so a chain of exactly the bound still terminates.
+        case Some(_) if applied >= maxTransforms =>
+          Left(s"Miner Dictionary history exceeds sync.minerDictionary.maxTransforms ($maxTransforms)")
         case Some(txId) => applySpend(current, box, txId) match {
           case Left(reason) => Left(reason)
           case Right((next, nextBoxId, height)) =>
@@ -110,10 +111,14 @@ final class MinerDictionaryBootstrap(nodeApi: NodeApi,
       }
     }
 
+  /**
+   * The unspent box holding the dictionary singleton.
+   */
   private def liveDictionaryBox: Either[String, IndexedBox] =
-    nodeApi.boxesByTokenId(protocol.minerDictionaryToken.toString, Paging(0, 10)) match {
+    nodeApi.unspentBoxesByTokenId(protocol.minerDictionaryToken.toString, Paging(0, 8),
+      SortDirection.Desc, MempoolOptions.ConfirmedOnly) match {
       case Failure(ex) => Left(s"could not read the live dictionary box: ${message(ex)}")
-      case Success(paged) => paged.items.filterNot(_.isSpent) match {
+      case Success(boxes) => boxes.filterNot(_.isSpent) match {
         case Seq(box) => Right(box)
         case Seq() => Left("no unspent box holds the Miner Dictionary singleton")
         case many => Left(s"${many.size} unspent boxes hold the Miner Dictionary singleton")

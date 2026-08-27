@@ -5,13 +5,13 @@ import nisp.NISPDatabase.{CURRENT_HEIGHT, LAST_HEIGHT, NISP_DIR}
 import scorex.crypto.hash.Blake2b256
 import scorex.utils.Ints
 import storage.KeyValueMutation.{Delete, Put}
-import storage.{KeyValueMutation, KeyValueReadView, KeyValueStore, LevelDbKeyValueStore, StoreError}
+import storage.{KeyValueMutation, KeyValueReadView, KeyValueStore, StoreError}
 
 import java.nio.file.Paths
 
 class NISPDatabase(private val kvstore: KeyValueStore) extends NISPStorage {
 
-  def this() = this(LevelDbKeyValueStore.openOrThrow(Paths.get(NISP_DIR)))
+  def this() = this(KeyValueStore.openOrThrow(KeyValueStore.DefaultBackend, Paths.get(NISP_DIR)))
 
   def getAll: Seq[(Array[Byte], Array[Byte])] =
     KeyValueStore.orThrow(kvstore.scanPrefix(Array.emptyByteArray))

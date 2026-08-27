@@ -14,6 +14,8 @@ import state.messages.RollupMessages.GetCurrentRollup
 import state.persistence.StateSnapshotActor.SnapshotCandidate
 import support.{FakeCache, FakeNodeContext, ReducerFixtures, SyncFixtures}
 
+import scala.concurrent.duration._
+
 class SyncHandlerCommitSpec extends TestKit(ActorSystem("sync-handler-commit"))
   with AnyFlatSpecLike with Matchers with BeforeAndAfterAll {
 
@@ -22,11 +24,12 @@ class SyncHandlerCommitSpec extends TestKit(ActorSystem("sync-handler-commit"))
   "SyncHandler" should "publish readiness only after an exact block commit" in {
     val (handler, snapshots) = newHandler()
     val requester = TestProbe()
+    seed(handler, requester)
     val block = BlockInfo(SyncFixtures.id(100), 100, Seq.empty, SyncFixtures.id(99))
 
     requester.send(handler, BeginCatchUp(100))
     requester.send(handler, GetSyncStatus)
-    requester.expectMsg(Starting)
+    requester.expectMsg(CatchingUp(SyncCursor(99, SyncFixtures.id(99), SyncFixtures.id(98)), 100))
 
     requester.send(handler, ApplyBlock(block))
     val committed = requester.expectMsgType[BlockCommitted]
@@ -41,7 +44,7 @@ class SyncHandlerCommitSpec extends TestKit(ActorSystem("sync-handler-commit"))
     requester.send(handler, MarkReady)
     requester.expectMsg(Ready(committed.cursor))
     requester.send(handler, GetSynced)
-    requester.expectMsg(FullSync(Seq.empty))
+    requester.expectMsg(FullSync(Seq.empty, Map.empty))
 
     handler ! MempoolSnapshot(1L, Map.empty, Map.empty, Set.empty)
     requester.send(handler, GetSyncStatus)
@@ -51,17 +54,18 @@ class SyncHandlerCommitSpec extends TestKit(ActorSystem("sync-handler-commit"))
     requester.send(handler, GetSyncStatus)
     requester.expectMsg(Ready(committed.cursor))
     requester.send(handler, GetSynced)
-    requester.expectMsg(FullSync(Seq.empty))
+    requester.expectMsg(FullSync(Seq.empty, Map.empty))
 
     handler ! MempoolSnapshot(2L, Map.empty, Map.empty, Set.empty)
     requester.send(handler, GetSynced)
-    requester.expectMsg(FullSync(Seq.empty))
+    requester.expectMsg(FullSync(Seq.empty, Map.empty))
     snapshots.expectMsgType[state.persistence.StateSnapshotActor.SnapshotCandidate]
   }
 
   it should "leave the cursor unchanged on rejection and continue from the last commit" in {
     val (handler, _) = newHandler()
     val requester = TestProbe()
+    seed(handler, requester)
     val first = BlockInfo(SyncFixtures.id(100), 100, Seq.empty, SyncFixtures.id(99))
     requester.send(handler, ApplyBlock(first))
     requester.expectMsgType[BlockCommitted]
@@ -83,6 +87,7 @@ class SyncHandlerCommitSpec extends TestKit(ActorSystem("sync-handler-commit"))
   it should "restore an exact retained state before applying a replacement branch" in {
     val (handler, _) = newHandler()
     val requester = TestProbe()
+    seed(handler, requester)
     val first = BlockInfo(SyncFixtures.id(100), 100, Seq.empty, SyncFixtures.id(99))
     val orphan = BlockInfo(SyncFixtures.id(101), 101, Seq.empty, first.id)
     requester.send(handler, ApplyBlock(first))
@@ -98,38 +103,52 @@ class SyncHandlerCommitSpec extends TestKit(ActorSystem("sync-handler-commit"))
 
     requester.send(handler, GetRetainedCursors)
     val retained = requester.expectMsgType[RetainedCursors].cursors
-    retained.map(_.blockId) shouldEqual Seq(first.id, replacement.id)
+    retained.map(_.blockId) shouldEqual Seq(SyncFixtures.id(99), first.id, replacement.id)
     retained.map(_.blockId) should not contain orphan.id
   }
 
-  it should "force only the first ready snapshot and then respect the configured interval" in {
+  /**
+   * A candidate is only offered when a write will follow, because each one costs a deep copy of every
+   * dictionary.
+   */
+  it should "offer a snapshot only when one is due, and hand over a detached copy" in {
     val (handler, snapshots) = newHandler()
     val requester = TestProbe()
+    seed(handler, requester)
     val first = BlockInfo(SyncFixtures.id(100), 100, Seq.empty, SyncFixtures.id(99))
 
+    // Height 100 is not a multiple of the configured interval, so nothing is offered.
     requester.send(handler, ApplyBlock(first))
     requester.expectMsgType[BlockCommitted]
-    snapshots.expectMsgType[SnapshotCandidate].force shouldBe false
+    snapshots.expectNoMessage(200.millis)
 
     handler ! MempoolSnapshot(1L, Map.empty, Map.empty, Set.empty)
     requester.send(handler, MarkReady)
     requester.expectMsgType[Ready]
-    snapshots.expectMsgType[SnapshotCandidate].force shouldBe true
+    val forced = snapshots.expectMsgType[SnapshotCandidate]
+    forced.force shouldBe true
+
+    // The writer must not be handed the dictionaries the reducer is still reading.
+    requester.send(handler, GetCommittedState)
+    val live = requester.expectMsgType[CommittedState].state
+    forced.state.minerTree.dictionary should not be theSameInstanceAs(live.minerTree.dictionary)
+    forced.state.minerTree.dictionary.digest should
+      contain theSameElementsInOrderAs live.minerTree.dictionary.digest
 
     val second = BlockInfo(SyncFixtures.id(101), 101, Seq.empty, first.id)
     requester.send(handler, BeginCatchUp(101))
     requester.send(handler, ApplyBlock(second))
     requester.expectMsgType[BlockCommitted]
-    snapshots.expectMsgType[SnapshotCandidate].force shouldBe false
     requester.send(handler, MarkReady)
     requester.expectMsgType[Ready]
-    snapshots.expectNoMessage()
+    snapshots.expectNoMessage(200.millis)
   }
 
   /** Verifies that a rollup-scoped transform failure does not reject the canonical block. */
   it should "commit a block whose only recognized transform belongs to one rollup that fails" in {
     val (handler, _) = newHandler()
     val requester = TestProbe()
+    seed(handler, requester)
     val dictionary = lfsm.states.PlasmaDictionary.empty()
     val rollupId = SyncFixtures.id(100)
     val utxoId = SyncFixtures.id(300001)
@@ -163,6 +182,7 @@ class SyncHandlerCommitSpec extends TestKit(ActorSystem("sync-handler-commit"))
   it should "refuse to advance the cursor when a block does not follow the committed one" in {
     val (handler, _) = newHandler()
     val requester = TestProbe()
+    seed(handler, requester)
     val first = BlockInfo(SyncFixtures.id(100), 100, Seq.empty, SyncFixtures.id(99))
     requester.send(handler, ApplyBlock(first))
     requester.expectMsgType[BlockCommitted]
@@ -178,6 +198,31 @@ class SyncHandlerCommitSpec extends TestKit(ActorSystem("sync-handler-commit"))
   private def firstState(requester: TestProbe, handler: akka.actor.ActorRef): CommittedSyncState = {
     requester.send(handler, GetCommittedState)
     requester.expectMsgType[CommittedState].state
+  }
+
+  /**
+   * The producer seeds this owner before any block, so no committed state means the owner lost its own.
+   */
+  it should "refuse a block rather than invent state when it has never been seeded" in {
+    val (handler, _) = newHandler()
+    val requester = TestProbe()
+    val block = BlockInfo(SyncFixtures.id(100), 100, Seq.empty, SyncFixtures.id(99))
+
+    requester.send(handler, ApplyBlock(block))
+    requester.expectMsg(SyncUnseeded)
+
+    requester.send(handler, GetCommittedState)
+    requester.expectMsgType[SyncUnavailable]
+  }
+
+  /**
+   * Seeds the owner the way the producer does. A block arriving before this is refused, because an
+   * owner with no committed state has lost it rather than started fresh.
+   */
+  private def seed(handler: akka.actor.ActorRef, requester: TestProbe): Unit = {
+    val base = ReducerFixtures.emptyState(height = 99, blockId = SyncFixtures.id(99), version = 0L)
+    requester.send(handler, RestoreCommittedState(base, Vector(base.cursor)))
+    requester.expectMsgType[BlockCommitted]
   }
 
   private def newHandler() = {

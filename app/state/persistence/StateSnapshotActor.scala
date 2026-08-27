@@ -7,7 +7,7 @@ import org.slf4j.{Logger, LoggerFactory}
 import play.api.Configuration
 import state.messages.SyncMessages.SyncCursor
 import state.synchronization.{CanonicalBlockSource, CommittedSyncState, SyncProtocolContext}
-import storage.LevelDbKeyValueStore
+import storage.KeyValueStore
 
 import javax.inject.Inject
 import scala.concurrent.{ExecutionContext, Future}
@@ -40,7 +40,7 @@ class StateSnapshotActor @Inject()(config: Configuration,
   private val snapshotStore =
     if (syncConfig.snapshotsEnabled)
       Some(new LevelDbStateSnapshotStore(
-        LevelDbKeyValueStore.openOrThrow(syncConfig.storagePath),
+        KeyValueStore.openOrThrow(syncConfig.storageBackend, syncConfig.storagePath),
         syncConfig.manifestDepth,
         syncConfig.snapshotRetention,
         snapshotIdentity))
@@ -56,8 +56,9 @@ class StateSnapshotActor @Inject()(config: Configuration,
   override def receive: Receive = {
     case RestoreLatest => restore(sender())
 
-    case SnapshotCandidate(state, cursors, force) if snapshotStore.isDefined &&
-      (force || state.cursor.height % syncConfig.snapshotInterval == 0) =>
+    // Cadence and the defensive copy are decided by the state owner, which is the thread that owns
+    // the dictionaries this will serialize.
+    case SnapshotCandidate(state, cursors, _) if snapshotStore.isDefined =>
       val candidate = PersistedSyncState(state, cursors)
       if (writing) pending = Some(candidate)
       else save(candidate)
@@ -100,29 +101,77 @@ class StateSnapshotActor @Inject()(config: Configuration,
       case Left(error) => Success(Left(error.message))
       case Right(Seq()) => Success(Left("No retained synchronization snapshot"))
       case Right(keys) =>
-        val corrupt = Vector.newBuilder[String]
-        keys.foldLeft[Try[Either[String, PersistedSyncState]]](Success(Left(""))) {
-          case (found@Success(Right(_)), _) => found
-          case (Failure(ex), _) => Failure(ex)
-          case (_, key) => store.load(key) match {
+        val rejected = Vector.newBuilder[String]
+        val unchecked = Vector.newBuilder[String]
+
+        val found = keys.foldLeft(Option.empty[PersistedSyncState]) { (chosen, key) =>
+          if (chosen.isDefined) chosen
+          else store.load(key) match {
             case Left(error) =>
-              corrupt += error.message
-              Success(Left(""))
-            case Right(snapshot) =>
-              source.headerAt(snapshot.state.cursor.height).map { header =>
-                if (header.id == snapshot.state.cursor.blockId &&
-                  header.parentId == snapshot.state.cursor.parentId) Right(snapshot)
-                else Left("")
-              }
+              rejected += s"${name(key)}: ${error.message}"
+              None
+            case Right(snapshot) => validate(snapshot) match {
+              case Right(())     => Some(snapshot)
+              case Left(Some(w)) => rejected += s"${name(key)}: $w"; None
+              // Unproven, so try older generations but never report "none is canonical".
+              case Left(None)    => unchecked += name(key); None
+            }
           }
-        }.map {
-          case Right(snapshot) => Right(snapshot)
-          case Left(_) =>
-            val failures = corrupt.result()
-            Left(if (failures.isEmpty) "No retained synchronization snapshot is canonical"
-            else s"No retained synchronization snapshot is usable: ${failures.mkString("; ")}")
+        }
+
+        val pending = unchecked.result()
+        found match {
+          case Some(snapshot) => Success(Right(snapshot))
+          case None if pending.nonEmpty =>
+            Success(Left(s"Could not verify retained snapshot(s) ${pending.mkString(", ")} against the " +
+              "node; keeping them and retrying rather than discarding recoverable state"))
+          case None =>
+            val failures = rejected.result()
+            Success(Left(if (failures.isEmpty) "No retained synchronization snapshot is canonical"
+            else s"No retained synchronization snapshot is usable: ${failures.mkString("; ")}"))
         }
     }
+
+  /**
+   * `Right` when the generation is canonical, `Left(Some(reason))` when it provably is not, and
+   * `Left(None)` when the node could not answer.
+   */
+  private def validate(snapshot: PersistedSyncState): Either[Option[String], Unit] =
+    semanticProblem(snapshot) match {
+      case Some(problem) => Left(Some(problem))
+      case None => source.headerAt(snapshot.state.cursor.height) match {
+        case Failure(ex) =>
+          logger.warn(s"Could not read the canonical header at ${snapshot.state.cursor.height} to " +
+            s"verify a snapshot: ${Option(ex.getMessage).getOrElse(ex.getClass.getSimpleName)}")
+          Left(None)
+        case Success(header) =>
+          if (header.id == snapshot.state.cursor.blockId &&
+            header.parentId == snapshot.state.cursor.parentId) Right(())
+          else Left(Some(s"header at ${snapshot.state.cursor.height} is ${header.id}, " +
+            s"not ${snapshot.state.cursor.blockId}"))
+      }
+    }
+
+  /**
+   * Cross-field checks the codec's checksum cannot make.
+   */
+  private def semanticProblem(snapshot: PersistedSyncState): Option[String] = {
+    val state = snapshot.state
+    val cursors = snapshot.recentCursors
+    if (cursors.map(_.height) != cursors.map(_.height).sorted.distinct)
+      Some("retained cursors are not strictly ascending")
+    else if (cursors.nonEmpty && cursors.last.height != state.cursor.height)
+      Some(s"retained cursors end at ${cursors.last.height}, not the committed ${state.cursor.height}")
+    else if (state.dataBoxToken.isDefined && !state.minerTree.hasMiner)
+      Some("a local data-box token is stored while the dictionary does not hold this miner")
+    else if (state.minerTree.minerMap.size > state.minerTree.numMiners)
+      Some(s"dictionary holds ${state.minerTree.minerMap.size} mapped miners but counts " +
+        s"${state.minerTree.numMiners}")
+    else None
+  }
+
+  private def name(key: Array[Byte]): String =
+    new String(key, java.nio.charset.StandardCharsets.UTF_8).split('/').last
 
   private def save(persisted: PersistedSyncState): Unit = {
     writing = true

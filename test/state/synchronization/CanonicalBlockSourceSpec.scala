@@ -65,15 +65,25 @@ class CanonicalBlockSourceSpec extends AnyFlatSpec with Matchers with MockitoSug
     block.txs shouldBe empty
   }
 
-  it should "still return a block whose inputs did not resolve, so one bad shape cannot stop the cursor" in {
+  /**
+   * The degraded shape the index can actually return is an input box stripped to its id. A block whose
+   * transaction inputs are absent entirely resolves no inputs either, so the two are indistinguishable
+   * from the outside; this fixture uses the one the reducer can tell apart.
+   */
+  it should "still return a block whose input boxes carry no script, so one bad shape cannot stop the cursor" in {
     val nodeApi = mock[NodeApi]
     val canonical = header("canonical", 100, "previous")
-    val unresolved = blockOf(canonical).copy(blockTransactions =
-      blockOf(canonical).blockTransactions.map(tx => tx.copy(inputs = Seq.empty)))
+    val stripped = blockOf(canonical).copy(blockTransactions = blockOf(canonical).blockTransactions.map(
+      tx => tx.copy(inputs = tx.inputs.map(in => in.copy(box = in.box.copy(ergoTree = ""))))))
     when(nodeApi.chainSlice(Some(99), Some(100))).thenReturn(Success(Seq(canonical)))
-    when(nodeApi.indexedBlocksByHeaderIds(Seq(canonical.id))).thenReturn(Success(Seq(unresolved)))
+    when(nodeApi.indexedBlocksByHeaderIds(Seq(canonical.id))).thenReturn(Success(Seq(stripped)))
 
-    new CanonicalBlockSource(nodeApi).blockAt(100).get.id shouldEqual canonical.id
+    val block = new CanonicalBlockSource(nodeApi).blockAt(100).get
+
+    block.id shouldEqual canonical.id
+    // The inputs resolve, so the reducer sees them; none authenticates a genesis.
+    block.resolvedInputs should not be empty
+    block.resolvedInputs.values.foreach(_.ergoTree shouldBe empty)
   }
 
   it should "reject a batch that omits a block the canonical headers named" in {
@@ -132,11 +142,24 @@ class CanonicalBlockSourceSpec extends AnyFlatSpec with Matchers with MockitoSug
       .failed.get.getMessage should include("not parent-linked")
   }
 
+  // A gap is also a short answer, so the count check reports it first and names both figures.
   it should "reject a header batch with a gap" in {
     val nodeApi = mock[NodeApi]
     val first = header("h-100", 100, "h-99")
     val skipped = header("h-102", 102, first.id)
     when(nodeApi.chainSlice(Some(99), Some(102))).thenReturn(Success(Seq(first, skipped)))
+
+    new CanonicalBlockSource(nodeApi).headerSlice(100, 102)
+      .failed.get.getMessage should include("returned 2 of 3 header(s)")
+  }
+
+  /** The one shape with the right count and the wrong positions, so the position check earns its place. */
+  it should "reject a header batch that repeats a height" in {
+    val nodeApi = mock[NodeApi]
+    val first = header("h-100", 100, "h-99")
+    val repeated = header("h-100-again", 100, "h-99")
+    val last = header("h-102", 102, repeated.id)
+    when(nodeApi.chainSlice(Some(99), Some(102))).thenReturn(Success(Seq(first, repeated, last)))
 
     new CanonicalBlockSource(nodeApi).headerSlice(100, 102)
       .failed.get.getMessage should include("not contiguous")

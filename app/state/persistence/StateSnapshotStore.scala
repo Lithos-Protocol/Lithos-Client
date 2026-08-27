@@ -162,6 +162,7 @@ object StateSnapshotCodec {
         state.minerDictionaryFault.foreach(writeString(out, _))
 
         val rollups = state.rollups.toSeq.sortBy(_._1)
+        requireCount(rollups.size, "rollup count")
         out.writeInt(rollups.size)
         rollups.foreach { case (id, tree) =>
           writeString(out, id)
@@ -180,6 +181,7 @@ object StateSnapshotCodec {
         }
 
         val routes = state.routes.toSeq.sortBy(_._1)
+        requireCount(routes.size, "route count")
         out.writeInt(routes.size)
         routes.foreach { case (utxoId, rollupId) =>
           writeString(out, utxoId)
@@ -190,6 +192,7 @@ object StateSnapshotCodec {
         out.writeInt(state.minerTree.numMiners)
         out.writeInt(state.minerTree.startHeight)
         val minerMap = state.minerTree.minerMap.toSeq.sortBy(_._1)
+        requireCount(minerMap.size, "miner map count")
         out.writeInt(minerMap.size)
         minerMap.foreach { case (hash, (address, token)) =>
           writeString(out, hash)
@@ -342,6 +345,7 @@ object StateSnapshotCodec {
   private def readBigInt(in: DataInputStream): BigInt = BigInt(readByteArray(in))
 
   private def writeStrings(out: DataOutputStream, values: Seq[String]): Unit = {
+    requireCount(values.size, "string count")
     out.writeInt(values.size)
     values.foreach(writeString(out, _))
   }
@@ -355,7 +359,10 @@ object StateSnapshotCodec {
   private def readString(in: DataInputStream): String =
     new String(readByteArray(in), StandardCharsets.UTF_8)
 
+  /** Writes refuse what reads would refuse, so a saved generation can always be loaded back. */
   private def writeByteArray(out: DataOutputStream, value: Array[Byte]): Unit = {
+    require(value.length <= MaxBlobBytes,
+      s"byte-array of ${value.length} exceeds the $MaxBlobBytes limit its decoder enforces")
     out.writeInt(value.length)
     out.write(value)
   }
@@ -373,6 +380,9 @@ object StateSnapshotCodec {
     require(count >= 0 && count <= MaxEntries, s"invalid $label $count")
     Vector.tabulate(count)(read)
   }
+
+  private def requireCount(size: Int, label: String): Unit =
+    require(size <= MaxEntries, s"$label of $size exceeds the $MaxEntries limit its decoder enforces")
 
   private def phaseByte(phase: LFSMPhase): Byte = phase match {
     case LFSMPhase.HOLDING => 0

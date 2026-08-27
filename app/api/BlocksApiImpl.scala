@@ -1,6 +1,6 @@
 package api
 
-import cache.RollupCache
+import utils.Globals
 import lfsm.LFSMPhase
 import lfsm.states.NISPTree
 import models.ApiError
@@ -16,7 +16,7 @@ class BlocksApiImpl extends BlocksApi {
     * @inheritdoc
     */
   override def getBlockById(utxoId: String, cache: SyncCacheApi): Option[PoolBlock] = {
-    val optNISPTree = cache.get[NISPTree](utxoId)
+    val optNISPTree = Globals.syncView.rollups.collectFirst { case (id, tree) if id == utxoId => tree }
     optNISPTree match {
       case Some(nispTree) =>
         val phase = nispTree.phase match {
@@ -33,7 +33,7 @@ class BlocksApiImpl extends BlocksApi {
     * @inheritdoc
     */
   override def getBlockMinersById(utxoId: String, cache: SyncCacheApi): Option[List[BlockMiners]] = {
-    val optNISPTree = cache.get[NISPTree](utxoId)
+    val optNISPTree = Globals.syncView.rollups.collectFirst { case (id, tree) if id == utxoId => tree }
     optNISPTree.map(n => n.minerSet.map(BlockMiners(_)).toList)
   }
 
@@ -42,10 +42,7 @@ class BlocksApiImpl extends BlocksApi {
     */
   override def getBlocksByHeight(fromHeight: Option[Int], toHeight: Option[Int], cache: SyncCacheApi): List[String] = {
     // TODO: Implement better logic
-    val rollupCache = new RollupCache(cache)
-    val fullSet = rollupCache.getTreeSet
-    val blocksOpt = for(t <- fullSet) yield rollupCache.get(t).map(n => t -> n).toSeq
-    val blocks = blocksOpt.flatten
+    val blocks = Globals.syncView.rollups
     val startHeight = fromHeight.getOrElse(0)
     val endHeight = toHeight.flatMap{h => if(h < 1) None else Some(h)}.getOrElse(10000000)
     blocks.filter(b => b._2.startHeight >= startHeight && b._2.startHeight < endHeight).map(_._1).toList
@@ -55,8 +52,7 @@ class BlocksApiImpl extends BlocksApi {
     * @inheritdoc
     */
   override def getContractIds(limit: Option[Int], offset: Option[Int], cache: SyncCacheApi): List[String] = {
-    val rollupCache = RollupCache(cache)
-    val set = rollupCache.getTreeSet
+    val set = Globals.syncView.rollups.map(_._1)
     val page = ApiHelper.handlePagination(offset, limit)
     set.slice(page._1, page._1 + page._2).toList
   }

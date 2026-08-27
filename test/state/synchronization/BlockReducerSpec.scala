@@ -1,5 +1,6 @@
 package state.synchronization
 
+import lfsm.LFSMPhase
 import lfsm.states.PlasmaDictionary
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
@@ -235,35 +236,81 @@ class BlockReducerSpec extends AnyFlatSpec with Matchers with OptionValues {
     transition.state.minerTree.dictionary should be theSameInstanceAs base.minerTree.dictionary
   }
 
-  /** Ensures a tracked rollup never claims the local miner while its dictionary is empty. */
-  it should "never track a rollup whose tree is empty while it still claims the local miner" in {
-    val protocolWithMiner = protocol.copy(localMinerHash = SyncFixtures.plasmaEntries(1, 16).head._1)
+
+  /**
+   * `Payout.ergo`'s drain path constrains almost nothing, and the reducer demands context variables it
+   * does not supply. What keeps that unreachable is `numMiners == 0` implying `hasMiner == false`, so a
+   * drained rollup is dropped at the Evaluation transition before it can ever reach Payout.
+   *
+   * The whole sequence runs here, because the earlier version of this test asserted the invariant over a
+   * state with one miner in it and could not fail.
+   *
+   * TODO: Add payout drain path to client?
+   */
+  it should "drop a rollup whose last miner was slashed before it can reach the payout phase" in {
+    val key = SyncFixtures.plasmaEntries(1, 16).head._1
+    val protocolWithMiner = protocol.copy(localMinerHash = key)
     val rollupId = SyncFixtures.id(900001)
     val utxoId = SyncFixtures.id(900002)
-    val dictionary = PlasmaDictionary.empty()
-    val base = ReducerFixtures.stateWithRollup(99, SyncFixtures.id(99), rollupId, utxoId, dictionary)
+    val base = ReducerFixtures.stateWithRollup(99, SyncFixtures.id(99), rollupId, utxoId,
+      PlasmaDictionary.empty())
 
-    // A local submission marks the rollup as containing the local miner.
-    val (key, _) = SyncFixtures.plasmaEntries(1, 16).head
+    def assertInvariant(state: CommittedSyncState, stage: String): Unit =
+      state.rollups.values.foreach { tree =>
+        withClue(s"after $stage, rollup ${tree.blockId} claims the local miner with an empty tree: ") {
+          (tree.numMiners == 0 && tree.hasMiner) shouldBe false
+        }
+      }
+
+    // 1. The local miner submits. The rollup now claims it.
     val value = Longs.toByteArray(9L) ++ Array.fill[Byte](8)(4)
-    val expected = PlasmaDictionary.empty()
-    val insertion = expected.insert(key -> value)
+    val tracked = PlasmaDictionary.empty()
+    val insertion = tracked.insert(key -> value)
     val submitted = ReducerFixtures.submissionTx(60, utxoId, SyncFixtures.id(900003), 100,
-      key, value, insertion.proof.ergoValue.toHex, expected,
+      key, value, insertion.proof.ergoValue.toHex, tracked,
       numMiners = 1, totalScore = BigInt(9), period = 99L)
     val afterSubmission = BlockReducer.applyBlock(base,
       BlockInfo(SyncFixtures.id(100), 100, Seq(submitted), base.cursor.blockId), protocolWithMiner)
       .toOption.value.state
-
     afterSubmission.rollups(rollupId).hasMiner shouldBe true
     afterSubmission.rollups(rollupId).numMiners shouldEqual 1
+    assertInvariant(afterSubmission, "the submission")
 
-    // Removing the last entry must also remove the local-miner claim or the rollup itself.
-    afterSubmission.rollups.values.foreach { tree =>
-      withClue(s"rollup ${tree.blockId} claims the local miner with an empty tree: ") {
-        (tree.numMiners == 0 && tree.hasMiner) shouldBe false
-      }
-    }
+    // 2. Holding to Evaluation conserves the tree, so the rollup survives on its local claim.
+    val evalUtxo = SyncFixtures.id(900004)
+    val toEvaluation = ReducerFixtures.holdingToEvaluationTx(61, SyncFixtures.id(900003), evalUtxo,
+      101, tracked, numMiners = 1, totalScore = BigInt(9), period = 101L)
+    val afterEvaluation = BlockReducer.applyBlock(afterSubmission,
+      BlockInfo(SyncFixtures.id(101), 101, Seq(toEvaluation), SyncFixtures.id(100)), protocolWithMiner)
+      .toOption.value.state
+    afterEvaluation.rollups(rollupId).phase shouldEqual LFSMPhase.EVAL
+    assertInvariant(afterEvaluation, "the evaluation transform")
+
+    // 3. A fraud proof slashes the only miner, which is this client. The tree is empty again.
+    val drained = tracked.copy()
+    val lookup = drained.lookUp(key)
+    val deletion = drained.delete(key)
+    val payoutUtxo = SyncFixtures.id(900005)
+    val slashed = ReducerFixtures.fraudProofTx(62, evalUtxo, SyncFixtures.id(900006), payoutUtxo, 102,
+      key, lookup.proof.ergoValue.toHex, deletion.proof.ergoValue.toHex, drained,
+      numMiners = 0, totalScore = BigInt(0), period = 101L)
+    val afterSlash = BlockReducer.applyBlock(afterEvaluation,
+      BlockInfo(SyncFixtures.id(102), 102, Seq(slashed), SyncFixtures.id(101)), protocolWithMiner)
+      .toOption.value.state
+    afterSlash.rollups(rollupId).numMiners shouldEqual 0
+    afterSlash.rollups(rollupId).hasMiner shouldBe false
+    assertInvariant(afterSlash, "the fraud proof")
+
+    // 4. The Payout transition drops it, so no tracked rollup can ever reach the drain path.
+    val toPayout = ReducerFixtures.evaluationToPayoutTx(63, payoutUtxo, SyncFixtures.id(900007),
+      103, drained, numMiners = 0, totalScore = BigInt(0), totalReward = 0L)
+    val afterPayout = BlockReducer.applyBlock(afterSlash,
+      BlockInfo(SyncFixtures.id(103), 103, Seq(toPayout), SyncFixtures.id(102)), protocolWithMiner)
+      .toOption.value.state
+
+    afterPayout.rollups.keySet should not contain rollupId
+    afterPayout.routes shouldBe empty
+    assertInvariant(afterPayout, "the payout transform")
   }
 
   private def assertBaseUnchanged(base: CommittedSyncState,

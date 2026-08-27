@@ -1,32 +1,25 @@
 package tasks
 
 import akka.actor.{ActorRef, ActorSystem}
-import akka.pattern.ask
-import akka.util.Timeout
-import cache.MDCache
 import configs._
 import mutations.NotEnoughInputsException
 import org.slf4j.{Logger, LoggerFactory}
 import play.api.Configuration
-import play.api.cache.SyncCacheApi
-import state.messages.SyncMessages.{CommittedState, GetCommittedState, Ready}
+import state.messages.SyncView
 import transactions.rollups.{CommitmentTransactions, DataBoxSource}
 import transactions.wallet.{ReservationExpiredException, WalletSelector}
 import utils.Globals
 
 import java.util.concurrent.atomic.AtomicBoolean
 import javax.inject.{Inject, Named, Singleton}
-import scala.concurrent.Await
 import scala.concurrent.duration.DurationInt
-import scala.util.{Failure, Success, Try}
+import scala.util.Try
 
 /** Creates the local Miner Dictionary entry only after canonical synchronization is ready. */
 @Singleton
-class MDSyncTask @Inject()(cache: SyncCacheApi,
-                           system: ActorSystem,
+class MDSyncTask @Inject()(system: ActorSystem,
                            config: Configuration,
                            nodeContext: NodeContext,
-                           @Named("sync-handler") syncHandler: ActorRef,
                            @Named("wallet-manager") walletManager: ActorRef) {
 
   private val logger: Logger = LoggerFactory.getLogger("MDSyncTask")
@@ -39,16 +32,17 @@ class MDSyncTask @Inject()(cache: SyncCacheApi,
 
   if (taskConfig.enabled) {
     system.scheduler.scheduleWithFixedDelay(taskConfig.startup, commitmentInterval) { () =>
-      if (Globals.getDetailedSyncStatus.isInstanceOf[Ready] &&
+      val view = Globals.syncView
+      if (view.canonical.available &&
+        dictionaryTrusted(view) &&
         Globals.mdDB.getDataBoxToken.isEmpty &&
         !stateConfig.disableTransforms.getOrElse(false) &&
         stateConfig.autoCommit.getOrElse(true) &&
-        dictionaryTrusted &&
         running.compareAndSet(false, true)) {
         Try {
           val walletSelector = WalletSelector(walletManager, 4.seconds, contexts.pollingContext)
           new CommitmentTransactions(nodeContext, DataBoxSource.Stored)
-            .sendInitialCommitment(stratumConfig.diff, MDCache(cache), walletSelector)
+            .sendInitialCommitment(stratumConfig.diff, view.minerTree.get, walletSelector)
         }.failed.foreach {
           case noInputs: NotEnoughInputsException =>
             logger.error(s"Could not create the Miner Dictionary entry: ${noInputs.getMessage}")
@@ -61,18 +55,12 @@ class MDSyncTask @Inject()(cache: SyncCacheApi,
     }(contexts.pollingContext)
   } else logger.info("Miner Dictionary commitment task is disabled")
 
-  /** Refuses registration while the tracked dictionary cannot produce a current insertion proof. */
-  private def dictionaryTrusted: Boolean = {
-    implicit val timeout: Timeout = Timeout(4.seconds)
-    Try(Await.result((syncHandler ? GetCommittedState).mapTo[Any], 4.seconds)) match {
-      case Success(CommittedState(state)) =>
-        state.minerDictionaryFault.foreach(reason =>
-          logger.warn(s"Not registering in the Miner Dictionary: its state is not current ($reason)"))
-        state.minerDictionaryFault.isEmpty
-      case Success(_) => false
-      case Failure(ex) =>
-        logger.warn(s"Could not read synchronization state before registering: ${ex.getMessage}")
-        false
-    }
+  /**
+   * Refuses registration while the tracked dictionary cannot produce a current insertion proof.
+   */
+  private def dictionaryTrusted(view: SyncView): Boolean = {
+    view.minerDictionary.reason.foreach(reason =>
+      logger.warn(s"Not registering in the Miner Dictionary: $reason"))
+    view.minerDictionary.available && view.minerTree.isDefined
   }
 }

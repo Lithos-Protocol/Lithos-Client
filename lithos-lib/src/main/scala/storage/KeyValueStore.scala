@@ -58,5 +58,24 @@ object KeyValueStore {
     case Right(value) => value
     case Left(error)  => throw new StoreException(error)
   }
+
+  /** Used where no configuration is in scope, which is the two disk-backed protocol databases. */
+  val DefaultBackend: String = LevelDbKeyValueStore.backendName
+
+  private val backends: Map[String, KeyValueStoreFactory] =
+    Seq(LevelDbKeyValueStore).map(factory => factory.backendName -> factory).toMap
+
+  def factoryFor(backendName: String): Either[StoreError, KeyValueStoreFactory] =
+    backends.get(backendName.toLowerCase) match {
+      case Some(factory) => Right(factory)
+      case None => Left(StoreError.InvalidArgument(
+        s"unknown storage backend '$backendName'; this build ships ${backends.keys.toSeq.sorted.mkString(", ")}"))
+    }
+
+  def open(backendName: String, path: Path): Either[StoreError, KeyValueStore] =
+    factoryFor(backendName).flatMap(_.open(path))
+
+  def openOrThrow(backendName: String, path: Path): KeyValueStore =
+    orThrow(open(backendName, path))
 }
 

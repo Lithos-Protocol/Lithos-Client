@@ -3,7 +3,6 @@ package transactions.rollups
 import akka.actor.{Actor, ActorRef, Cancellable}
 import akka.pattern.{ask, pipe}
 import akka.util.Timeout
-import cache.RollupCache
 import configs.{NodeContext, StateConfig, StratumConfig}
 import lfsm.LFSMHelpers
 import lfsm.LFSMPhase.{EVAL, HOLDING, PAYOUT}
@@ -82,17 +81,9 @@ class TransactionPublisher @Inject()(config: Configuration, nodeContext: NodeCon
         case Failure(ex) =>
           logger.error(s"TransactionPublisher failed to query sync state: ${ex.getMessage}", ex)
 
-        case Success(FullSync(nispTrees)) =>
+        case Success(FullSync(nispTrees, projections)) =>
           logger.info(s"Publishing rollup transactions for FullSync with ${nispTrees.size} rollup(s)")
-          Future(buildRollupMap(nispTrees)).map(PublishRollupTxs.apply).pipeTo(self)
-
-        case Success(PartialSync(syncedTrees, _)) =>
-          logger.info(s"Publishing rollup transactions for ${syncedTrees.size} synced rollup(s)")
-          Future(buildRollupMap(syncedTrees)).map(PublishRollupTxs.apply).pipeTo(self)
-
-        case Success(NoRollups()) =>
-          logger.info("No rollups present for transaction stub publishing")
-          self ! PublishRollupTxs(Success(Map.empty))
+          Future(buildRollupMap(nispTrees, projections)).map(PublishRollupTxs.apply).pipeTo(self)
 
         case Success(SyncUnavailable(status)) =>
           logger.warn(s"Skipping transaction publication while synchronization is $status")
@@ -131,13 +122,13 @@ class TransactionPublisher @Inject()(config: Configuration, nodeContext: NodeCon
    * methods.  Must be called off the actor thread (e.g. inside a Future)
    * because it calls client.execute.
    */
-  private def buildRollupMap(nispTrees: Seq[(String, NISPTree)]): Try[Map[String, RollupTxStub]] =
+  private def buildRollupMap(nispTrees: Seq[(String, NISPTree)],
+                             projections: Map[String, MempoolRollupState]): Try[Map[String, RollupTxStub]] =
     Try(client.execute { ctx =>
-      val rollupCache = new RollupCache(cacheApi)
-
-      // ── replicate onSync's mempool-state merging ──────────────────────────
+      // Projections arrive with the trees they belong to, so a tree can never be paired with a
+      // projection built against a different committed version.
       val memStates: Map[String, MempoolRollupState] = nispTrees.flatMap { n =>
-        rollupCache.getMempoolState(n._2.blockId).map(n._1 -> _)
+        projections.get(n._2.blockId).map(n._1 -> _)
       }.toMap
 
       val statesToRemove = memStates.filter(_._2.toBeRemoved)

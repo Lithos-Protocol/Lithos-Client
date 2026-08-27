@@ -1,6 +1,6 @@
 package state.messages
 
-import lfsm.states.{MinerTree, NISPTree}
+import lfsm.states.NISPTree
 import state.messages.RollupMessages.RollupTransform
 import state.messages.SyncMessages.Transform
 import work.lithos.mutations.InputUTXO
@@ -56,8 +56,6 @@ object MempoolMessages {
           false
       }
   }
-  /** Message sent from MempoolView to its subscribers when the mempool has been updated */
-  case object UpdatedMempoolChains
   /** Message sent to MempoolView to tell it to re-build the mempool state and notify subscribers */
   case object RebuildMempoolChains
 
@@ -78,7 +76,5 @@ object MempoolMessages {
   sealed trait MempoolState
 
   case class MempoolRollupState(asInput: InputUTXO, nispTree: NISPTree, toBeRemoved: Boolean = false) extends MempoolState
-
-  case class MempoolMDState(asInput: InputUTXO, minerTree: MinerTree) extends MempoolState
 
 }

@@ -4,13 +4,13 @@ import lfsm.MDDatabase.{DATA_BOX_TOKEN, MD_DIR}
 import org.bouncycastle.util.encoders.Hex
 import org.ergoplatform.sdk.ErgoId
 import scorex.crypto.hash.Blake2b256
-import storage.{KeyValueStore, LevelDbKeyValueStore}
+import storage.KeyValueStore
 
 import java.nio.file.Paths
 
 class MDDatabase(private val kvstore: KeyValueStore) {
 
-  def this() = this(LevelDbKeyValueStore.openOrThrow(Paths.get(MD_DIR)))
+  def this() = this(KeyValueStore.openOrThrow(KeyValueStore.DefaultBackend, Paths.get(MD_DIR)))
 
   def getAll: Seq[(Array[Byte], Array[Byte])] =
     KeyValueStore.orThrow(kvstore.scanPrefix(Array.emptyByteArray))

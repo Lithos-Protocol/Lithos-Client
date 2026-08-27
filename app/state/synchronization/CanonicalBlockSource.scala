@@ -11,11 +11,17 @@ final class CanonicalBlockSource(nodeApi: NodeApi) {
 
   private val logger = org.slf4j.LoggerFactory.getLogger("CanonicalBlockSource")
 
+  /**
+   * Highest available height to read from. Indexed height is needed for input verification,
+   * so it takes priority.
+   */
   def tipHeight: Try[Int] =
-    nodeApi.info().flatMap(_.fullHeight match {
-      case Some(height) => Success(height)
-      case None => Failure(new IllegalStateException("Node did not report a full-block height"))
-    })
+    nodeApi.info().flatMap { info =>
+      info.fullHeight match {
+        case None => Failure(new IllegalStateException("Node did not report a full-block height"))
+        case Some(full) => nodeApi.indexedHeight().map(index => math.min(full, index.indexedHeight))
+      }
+    }
 
   def headerAt(height: Int): Try[NodeHeader] =
     headerSlice(height, height).flatMap {
@@ -34,12 +40,17 @@ final class CanonicalBlockSource(nodeApi: NodeApi) {
     if (toHeight < fromHeight) Success(Seq.empty)
     else nodeApi.chainSlice(Some(math.max(fromHeight - 1, 0)), Some(toHeight)).flatMap { headers =>
       val ordered = headers.filter(h => h.height >= fromHeight && h.height <= toHeight).sortBy(_.height)
-      val contiguous = ordered.zipWithIndex.forall { case (h, i) => h.height == fromHeight + i }
+      // Count and positions are separate checks.
+      val expected = toHeight - fromHeight + 1
+      val positioned = ordered.zipWithIndex.forall { case (h, i) => h.height == fromHeight + i }
       val linked = ordered.sliding(2).forall {
         case Seq(previous, next) => next.parentId == previous.id
         case _ => true
       }
-      if (!contiguous) Failure(new IllegalStateException(
+      if (ordered.size != expected) Failure(new IllegalStateException(
+        s"Canonical chain slice $fromHeight-$toHeight returned ${ordered.size} of $expected header(s): " +
+          ordered.map(_.height).mkString(",")))
+      else if (!positioned) Failure(new IllegalStateException(
         s"Canonical chain slice $fromHeight-$toHeight is not contiguous: " +
           ordered.map(_.height).mkString(",")))
       else if (!linked) Failure(new IllegalStateException(
@@ -87,10 +98,11 @@ final class CanonicalBlockSource(nodeApi: NodeApi) {
     if (block.txs.isEmpty)
       logger.warn(s"Indexed block ${header.id}@${header.height} decoded with no transactions. If this " +
         "repeats, the block endpoint is not returning the shape this client reads.")
-    else if (block.resolvedInputs.isEmpty && block.txs.exists(_.inputs.nonEmpty))
-      logger.error(s"Indexed block ${header.id}@${header.height} carries transaction inputs but no " +
-        "input boxes. No genesis transaction can be authenticated from it, so no rollup will be " +
-        "tracked for this block.")
+    // Resolved inputs are derived from the same list as the transactions, so they cannot be absent
+    // while inputs exist. What the index can return is input boxes stripped to their ids.
+    else if (block.inputsLookStripped)
+      logger.warn(s"Indexed block ${header.id}@${header.height} resolved ${block.resolvedInputs.size} " +
+        "input box(es), none carrying a script. The caller decides whether to refetch.")
     block
   }
 

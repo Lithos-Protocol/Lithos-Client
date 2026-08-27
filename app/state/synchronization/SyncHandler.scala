@@ -1,17 +1,14 @@
 package state.synchronization
 
 import akka.actor.Actor
-import cache.{MDCache, RollupCache}
-import configs.{NodeContext, SyncConfig}
-import lfsm.states.MinerTree
+import configs.SyncConfig
 import org.slf4j.{Logger, LoggerFactory}
 import play.api.Configuration
 import play.api.cache.SyncCacheApi
 import state.messages.RollupMessages._
 import state.messages.MempoolMessages.{MempoolRollupState, MempoolSnapshot, MempoolUnavailable, ResetMempoolState}
-import state.messages.StateFrameMessages.NewBlock
 import state.messages.SyncMessages._
-import state.messages.{BlockInfo, BlockMessage}
+import state.messages.{BlockInfo, Capability, SyncView}
 import state.persistence.StateSnapshotActor.SnapshotCandidate
 import utils.Globals
 
@@ -97,7 +94,6 @@ class SyncHandler @Inject()(config: Configuration,
 
     case snapshot: MempoolSnapshot =>
       safelyUpdateMempool {
-        committed.toSeq.flatMap(_.rollups.keys).foreach(repository.removeMempoolState)
         mempool = snapshot
         projections = Map.empty
         suppressedProjections = Map.empty
@@ -106,21 +102,21 @@ class SyncHandler @Inject()(config: Configuration,
             s"${snapshot.chains.size} chain(s)")
         mempoolFailure = None
       }
+      publishStatus(status)
 
     // Drop projections so consumers fall back to confirmed state.
     case MempoolUnavailable(reason) =>
       safelyUpdateMempool {
-        committed.toSeq.flatMap(_.rollups.keys).foreach(repository.removeMempoolState)
         projections = Map.empty
         mempool = MempoolSnapshot(mempool.revision, Map.empty, Map.empty, Set.empty)
         if (mempoolFailure.isEmpty)
           logger.warn(s"Mempool projections unavailable, chaining from confirmed state instead: $reason")
         mempoolFailure = Some(reason)
       }
+      publishStatus(status)
 
     case ResetMempoolState(blockId) =>
       safelyUpdateMempool {
-        repository.removeMempoolState(blockId)
         projections -= blockId
         suppressedProjections += blockId -> mempool.revision
       }
@@ -129,7 +125,14 @@ class SyncHandler @Inject()(config: Configuration,
       val requester = sender()
       try {
         committed match {
-          case Some(state) if status.isInstanceOf[Ready] => requester ! FullSync(activeRollups(state))
+          case Some(state) if status.isInstanceOf[Ready] =>
+            val usable = usableRollups(state)
+            // Projections travel with the rollups they belong to, so a builder cannot pair a tree
+            // with a projection from a different committed version.
+            val projected = usable.flatMap { case (_, tree) =>
+              projectedRollup(state, tree.blockId, tree).map(tree.blockId -> _)
+            }.toMap
+            requester ! FullSync(usable, projected)
           case _ => requester ! SyncUnavailable(status)
         }
       } catch {
@@ -165,7 +168,6 @@ class SyncHandler @Inject()(config: Configuration,
     case RemoveRollup(blockId, reason) =>
       if (committed.exists(_.rollups.contains(blockId))) {
         try {
-          repository.removeMempoolState(blockId)
           locallyDisabledRollups += blockId
           logger.warn(s"Disabled local use of rollup $blockId: $reason")
         } catch {
@@ -179,8 +181,18 @@ class SyncHandler @Inject()(config: Configuration,
     committed match {
       case Some(state) if state.cursor.blockId == block.id =>
         requester ! BlockCommitted(state.cursor, state.version, 0, 0)
-      case _ =>
-        val base = committed.getOrElse(seedFor(block))
+
+      // The producer seeds this owner before any block, so no committed state means the owner lost
+      // its own.
+      case None =>
+        logger.error(s"Refused block ${block.id} at height ${block.height}: synchronization holds no " +
+          "committed state. It must be seeded from a snapshot or a dictionary bootstrap first.")
+        status = SyncFailed(None, "synchronization has no committed state")
+        publishStatus(status)
+        requester ! SyncUnseeded
+
+      case Some(_) =>
+        val base = committed.get
         val reduced = try BlockReducer.applyBlock(base, block, protocol)
         catch {
           case NonFatal(ex) => Left(SyncApplyError.InternalFailure(block.id,
@@ -220,7 +232,7 @@ class SyncHandler @Inject()(config: Configuration,
                   case _ => CatchingUp(transition.state.cursor, transition.state.cursor.height)
                 }
                 publishStatus(status)
-                snapshotActor ! SnapshotCandidate(transition.state, knownCursors)
+                offerSnapshot(transition.state, force = false)
                 requester ! BlockCommitted(transition.state.cursor, transition.state.version,
                   transition.relevantEvents, transition.stagedDictionaryCopies)
             }
@@ -326,15 +338,11 @@ class SyncHandler @Inject()(config: Configuration,
                                 next: CommittedSyncState): Either[String, Unit] =
     repository.publish(previous, next)
 
-  /** Returns actionable rollups and publishes their mempool projections to the shared cache. */
-  private def activeRollups(state: CommittedSyncState): Seq[(String, lfsm.states.NISPTree)] = {
-    val (unavailable, available) = state.routedRollups.partition { case (utxoId, tree) =>
+  /** Rollups this client may act on. Cheap: no projection is built, so a commit can publish it. */
+  private def usableRollups(state: CommittedSyncState): Seq[(String, lfsm.states.NISPTree)] =
+    state.routedRollups.filterNot { case (utxoId, tree) =>
       locallyDisabledRollups.contains(tree.blockId) || mempool.blockedRoots.contains(utxoId)
     }
-    unavailable.foreach { case (_, tree) => repository.removeMempoolState(tree.blockId) }
-    available.foreach { case (_, tree) => projectedRollup(state, tree.blockId, tree) }
-    available
-  }
 
   private def projectedRollup(state: CommittedSyncState,
                               blockId: String,
@@ -343,7 +351,6 @@ class SyncHandler @Inject()(config: Configuration,
     else mempool.chains.get(tree.utxoId) match {
       case None =>
         projections -= blockId
-        repository.removeMempoolState(blockId)
         None
       case Some(chain) =>
         projections.get(blockId) match {
@@ -363,17 +370,22 @@ class SyncHandler @Inject()(config: Configuration,
                   MempoolRollupState(endInput, tree, toBeRemoved = true)
               }
               projections += blockId -> ((state.version, mempool.revision, projection))
-              repository.setMempoolState(blockId, projection)
               projection
             }
         }
     }
   }
 
-  private def seedFor(block: BlockInfo): CommittedSyncState = {
-    val tree = MinerTree.initialState.copy(syncHeight = block.height - 1, savedHeight = block.height - 1)
-    CommittedSyncState(SyncCursor(block.height - 1, block.parentId, ""), 0L,
-      Map.empty, Map.empty, tree, None)
+  /**
+   * Hands a snapshot candidate to the writer, detached.
+   *
+   * The cadence decision lives here rather than in the writer so the copy is only paid when a write
+   * will follow — and it is made on this thread, which owns the dictionaries being copied.
+   */
+  private def offerSnapshot(state: CommittedSyncState, force: Boolean): Unit = {
+    val due = force || state.cursor.height % syncConfig.snapshotInterval == 0
+    if (syncConfig.snapshotsEnabled && due)
+      snapshotActor ! SnapshotCandidate(state.detached, knownCursors, force)
   }
 
   private def safelyUpdateMempool(update: => Unit): Unit =
@@ -400,15 +412,50 @@ class SyncHandler @Inject()(config: Configuration,
     publishStatus(status)
     if (newlyReady && !initialReadySnapshotRequested) {
       initialReadySnapshotRequested = true
-      if (state.cursor.height % syncConfig.snapshotInterval != 0)
-        snapshotActor ! SnapshotCandidate(state, knownCursors, force = true)
+      if (state.cursor.height % syncConfig.snapshotInterval != 0) offerSnapshot(state, force = true)
     }
   }
 
-  private def publishStatus(next: SyncStatus): Unit = Globals.setSyncStatus(next)
+  /**
+   * Publishes status and sync capabilities together.
+   *
+   * The three capabilities fail independently.
+   */
+  private def publishStatus(next: SyncStatus): Unit = {
+    val canonical =
+      if (next.isInstanceOf[Ready]) Capability.Available
+      else Capability.Unavailable(SyncHandler.describe(next))
+    val dictionary = committed.flatMap(_.minerDictionaryFault) match {
+      case Some(fault) => Capability.Unavailable(fault)
+      case None if canonical.available => Capability.Available
+      case None => Capability.Unavailable(SyncHandler.describe(next))
+    }
+    val mempoolCapability =
+      mempoolFailure.map(Capability.Unavailable).getOrElse(Capability.Available)
+
+    Globals.setSyncView(SyncView(
+      status = next,
+      version = committed.map(_.version).getOrElse(0L),
+      rollups = if (canonical.available) committed.map(usableRollups).getOrElse(Seq.empty) else Seq.empty,
+      minerTree = committed.map(_.minerTree),
+      dataBoxToken = committed.flatMap(_.dataBoxToken),
+      canonical = canonical,
+      minerDictionary = dictionary,
+      mempool = mempoolCapability))
+  }
 }
 
 object SyncHandler {
   /** Blocks between "still moving" lines during catch-up, when no block changed protocol state. */
   private final val ProgressInterval = 500
+
+  /** Why a capability is unavailable, in words an operator can act on. */
+  private def describe(status: SyncStatus): String = status match {
+    case Starting => "synchronization has not committed a block yet"
+    case CatchingUp(at, target) => s"catching up at height ${at.height} of $target"
+    case Reorganizing(from, target) => s"reorganizing from height ${from.height} toward $target"
+    case Stale(at, reason) => s"stale at height ${at.height}: $reason"
+    case SyncFailed(_, reason) => s"synchronization failed: $reason"
+    case Ready(_) => "ready"
+  }
 }

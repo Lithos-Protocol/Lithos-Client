@@ -4,7 +4,7 @@ import lfsm.states.MinerTree
 import node.NodeApi
 import node.model._
 import org.mockito.ArgumentMatchers.any
-import org.mockito.Mockito.when
+import org.mockito.Mockito.{never, verify, when}
 import org.scalatest.{EitherValues, OptionValues}
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
@@ -111,6 +111,30 @@ class MinerDictionaryBootstrapSpec extends AnyFlatSpec with Matchers with Mockit
       .left.value should include("maxTransforms")
   }
 
+  /** The bound is the number of transforms permitted, not the number after which one more runs. */
+  it should "walk exactly the configured maximum and refuse one more" in {
+    val chain = registrationChain(count = 3, firstHeight = 200)
+    val nodeApi = indexerFor(chain)
+
+    new MinerDictionaryBootstrap(nodeApi, protocol, maxTransforms = 3).run(500).isRight shouldBe true
+    new MinerDictionaryBootstrap(nodeApi, protocol, maxTransforms = 2).run(500)
+      .left.value should include("maxTransforms")
+  }
+
+  /**
+   * The live box is asked for directly.
+   */
+  it should "ask the index for the unspent dictionary box rather than its whole history" in {
+    val chain = registrationChain(count = 2, firstHeight = 200)
+    val nodeApi = indexerFor(chain)
+
+    new MinerDictionaryBootstrap(nodeApi, protocol, maxTransforms = 100).run(500).isRight shouldBe true
+
+    verify(nodeApi).unspentBoxesByTokenId(any[String], any[Paging], any[SortDirection],
+      any[MempoolOptions])
+    verify(nodeApi, never()).boxesByTokenId(any[String], any[Paging])
+  }
+
   it should "report a gap in the indexer rather than publish a short dictionary" in {
     val chain = registrationChain(count = 2, firstHeight = 200)
     val nodeApi = indexerFor(chain)
@@ -167,8 +191,10 @@ class MinerDictionaryBootstrapSpec extends AnyFlatSpec with Matchers with Mockit
     val liveId = liveBoxIdOverride.getOrElse(chain.last.outputId)
     val liveOutput = ReducerFixtures.dictionaryOutput(liveId, chain.last.tx.id, chain.last.height,
       liveDictionary, protocol.minerDictionaryToken)
-    when(nodeApi.boxesByTokenId(any[String], any[Paging]))
-      .thenReturn(Success(Paged(Seq(indexedBox(liveOutput, chain.last.height, None, None)), 1)))
+    // The bootstrap asks for the unspent box directly rather than filtering the token's history.
+    when(nodeApi.unspentBoxesByTokenId(any[String], any[Paging], any[SortDirection],
+      any[MempoolOptions]))
+      .thenReturn(Success(Seq(indexedBox(liveOutput, chain.last.height, None, None))))
     nodeApi
   }
 

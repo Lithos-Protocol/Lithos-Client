@@ -13,8 +13,9 @@ import org.scalatest.matchers.should.Matchers
 import org.scalatestplus.mockito.MockitoSugar
 import play.api.Configuration
 import state.messages.MempoolMessages.{MempoolSnapshot, MempoolUnavailable}
-import state.messages.SyncMessages.{Ready, Starting, SyncCursor}
-import support.{FakeNodeContext, SyncFixtures}
+import state.messages.SyncMessages.{Ready, SyncCursor}
+import state.messages.{Capability, SyncView}
+import support.{FakeNodeContext, ReducerFixtures, SyncFixtures}
 import utils.Globals
 
 import scala.concurrent.duration._
@@ -25,7 +26,7 @@ class MempoolPressureSpec extends TestKit(ActorSystem("mempool-pressure"))
   with AnyFlatSpecLike with Matchers with BeforeAndAfterAll with MockitoSugar {
 
   override def afterAll(): Unit = {
-    Globals.setSyncStatus(Starting)
+    Globals.setSyncView(SyncView.initial)
     TestKit.shutdownActorSystem(system)
   }
 
@@ -53,7 +54,7 @@ class MempoolPressureSpec extends TestKit(ActorSystem("mempool-pressure"))
   /** Avoids rebuilding projections that no consumer can use during catch-up. */
   it should "not touch the mempool while synchronization is not ready" in {
     val sync = TestProbe()
-    Globals.setSyncStatus(Starting)
+    Globals.setSyncView(SyncView.initial)
     val view = viewOver(transactions = 3, bound = 100, sync)
 
     view ! state.messages.StateFrameMessages.NewBlock(
@@ -64,19 +65,26 @@ class MempoolPressureSpec extends TestKit(ActorSystem("mempool-pressure"))
   }
 
   private def ready(): Unit =
-    Globals.setSyncStatus(Ready(SyncCursor(100, SyncFixtures.id(100), SyncFixtures.id(99))))
+    Globals.setSyncView(SyncView.initial.copy(
+      status = Ready(SyncCursor(100, SyncFixtures.id(100), SyncFixtures.id(99))),
+      canonical = Capability.Available))
 
   private def viewOver(transactions: Int, bound: Int, sync: TestProbe): akka.actor.ActorRef = {
     val api = mock[NodeApi]
     val (nodeContext, _, wallet) = FakeNodeContext(api, numAddresses = 1)
+    val protocol = ReducerFixtures.protocol(rollupStartHeight = 100)
     val tree = wallet.contract.ergoTreeHex
-    when(api.unconfirmedTransactions(any[Paging])).thenAnswer { invocation =>
-      val paging = invocation.getArgument[Paging](0)
-      Success(if (paging.offset > 0) Seq.empty else (0 until transactions).map(unconfirmed(tree)))
+    // Only the holding script answers, so the dedup across the three rollup scripts is exercised too.
+    when(api.unconfirmedTransactionsByErgoTree(any[String], any[Paging])).thenAnswer { invocation =>
+      val requested = invocation.getArgument[String](0)
+      val paging = invocation.getArgument[Paging](1)
+      Success(
+        if (requested != protocol.holdingErgoTree || paging.offset > 0) Seq.empty
+        else (0 until transactions).map(unconfirmed(tree)))
     }
     val config = Configuration(ConfigFactory.parseString(
       s"sync.startHeight = 100\nsync.mempool.maxTransactions = $bound\n"))
-    system.actorOf(Props(new MempoolView(config, nodeContext, TestProbe().ref, sync.ref)))
+    system.actorOf(Props(new MempoolView(config, nodeContext, protocol, TestProbe().ref, sync.ref)))
   }
 
   /** Builds an independent transaction with a valid ErgoTree for Appkit conversion. */

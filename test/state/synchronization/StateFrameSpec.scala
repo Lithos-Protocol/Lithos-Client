@@ -73,16 +73,23 @@ class StateFrameSpec extends TestKit(ActorSystem("state-frame"))
     frame ! akka.actor.PoisonPill
   }
 
-  /** A rejected block invalidates later blocks fetched in the same batch. */
+  /**
+   * A rejected block invalidates the later blocks fetched with it, so the retry must re-derive the batch
+   * rather than replay what it already held. Asserted by the height the retry asks for: a retained batch
+   * would offer the block after the rejected one.
+   */
   it should "abandon the rest of a batch when one block is rejected" in {
     val (frame, sync, _) = started(tip = startHeight + 3)
     sync.expectMsgType[BeginCatchUp]
     val first = sync.expectMsgType[ApplyBlock].blockInfo
+    first.height shouldEqual startHeight
 
     sync.reply(BlockRejected(None, first.id, "state invariant failed"))
-
     sync.expectMsgType[MarkStale].reason should include("state invariant")
-    sync.expectNoMessage(300.millis)
+
+    frame ! state.messages.StateFrameMessages.CheckBlock
+    sync.expectMsgType[BeginCatchUp]
+    sync.expectMsgType[ApplyBlock].blockInfo.height shouldEqual startHeight
     frame ! akka.actor.PoisonPill
   }
 
@@ -141,12 +148,17 @@ class StateFrameSpec extends TestKit(ActorSystem("state-frame"))
     frame ! akka.actor.PoisonPill
   }
 
-  /** Waits without committing while the chain tip is below the configured start height. */
+  /**
+   * Waits without committing while the chain tip is below the configured start height.
+   *
+   * The seed is established first, so the producer reaches its polling loop.
+   */
   it should "commit nothing while the tip is below the configured start height" in {
     val sync = TestProbe()
     val snapshots = TestProbe()
+    // The tip serves the seed header at startHeight - 1 but nothing at startHeight or above.
     val (nodeContext, _, wallet) = FakeNodeContext(
-      ChainFixtures.nodeAt(startHeight - 5), numAddresses = 1)
+      ChainFixtures.nodeAt(startHeight - 1), numAddresses = 1)
     val protocol = ReducerFixtures.protocol(rollupStartHeight = startHeight)
       .copy(localMinerHash = wallet.contract.hashedPropBytes)
     val frame = system.actorOf(Props(
@@ -155,14 +167,14 @@ class StateFrameSpec extends TestKit(ActorSystem("state-frame"))
     frame ! StartSynchronization
     snapshots.expectMsg(RestoreLatest)
     snapshots.reply(SnapshotLoaded(None))
-    sync.expectMsg(GetCommittedState)
-    sync.reply(SyncUnavailable(Starting))
 
-    sync.fishForMessage(2.seconds, "no block may be applied") {
-      case _: ApplyBlock => throw new AssertionError("applied a block below the start height")
-      case _: MarkStale => true
-      case _ => false
-    }
+    // The seed commits at startHeight - 1; nothing above it may follow.
+    val restore = sync.expectMsgType[RestoreCommittedState]
+    restore.state.cursor.height shouldEqual startHeight - 1
+    sync.reply(BlockCommitted(restore.state.cursor, 0L, 0, 0))
+
+    sync.expectMsg(MarkReady)
+    sync.expectNoMessage(500.millis)
     frame ! akka.actor.PoisonPill
   }
 
@@ -192,8 +204,6 @@ class StateFrameSpec extends TestKit(ActorSystem("state-frame"))
 
     snapshots.expectMsg(RestoreLatest)
     snapshots.reply(SnapshotLoaded(None))
-    sync.expectMsg(GetCommittedState)
-    sync.reply(SyncUnavailable(Starting))
     val restore = sync.expectMsgType[RestoreCommittedState]
     sync.reply(BlockCommitted(restore.state.cursor, 0L, 0, 0))
     (frame, sync, snapshots)

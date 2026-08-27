@@ -20,6 +20,9 @@ class RollupSyncTask @Inject()(system: ActorSystem,
 
   if (taskConfig.enabled) {
     logger.info(s"Canonical synchronization will start after ${taskConfig.startup}")
-    system.scheduler.scheduleOnce(taskConfig.startup, stateFrame, StartSynchronization)(pollingContext, ActorRef.noSender)
+    // Repeated rather than sent once to handle actor crashes and restarts.
+    // A repeat does nothing while it is already running.
+    system.scheduler.scheduleWithFixedDelay(taskConfig.startup, taskConfig.startup,
+      stateFrame, StartSynchronization)(pollingContext, ActorRef.noSender)
   } else logger.info("Canonical synchronization is disabled")
 }

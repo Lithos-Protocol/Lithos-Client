@@ -3,7 +3,7 @@ package configs
 import play.api.Configuration
 
 import java.nio.file.{Path, Paths}
-import scala.concurrent.duration.{Duration, FiniteDuration}
+import scala.concurrent.duration.{DurationInt, FiniteDuration}
 
 class SyncConfig(config: Configuration){
 
@@ -32,4 +32,14 @@ class SyncConfig(config: Configuration){
 
   /** Consecutive failures at one height before the client reports its cursor stalled. */
   val retriesBeforeAlarm: Int = config.getOptional[Int]("sync.retriesBeforeAlarm").getOrElse(12)
+
+  /** How often the committed header is re-read while idle at the chain tip. */
+  val tipRevalidation: FiniteDuration =
+    config.getOptional[FiniteDuration]("sync.tipRevalidation").getOrElse(30.seconds)
+
+  /**
+   * Number of refetches to perform on an incomplete or invalid block
+   */
+  val incompleteBlockRetries: Int =
+    config.getOptional[Int]("sync.incompleteBlockRetries").getOrElse(3)
 }

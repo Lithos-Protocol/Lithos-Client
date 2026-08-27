@@ -33,6 +33,8 @@ object ChainFixtures extends MockitoSugar {
   def nodeAt(tip: Int, firstHeight: Int = 1): NodeApi = {
     val api = mock[NodeApi]
     when(api.info()).thenReturn(Success(infoAt(tip)))
+    // The blocks and boxes this client reads come from the extra index, so catch-up follows it.
+    when(api.indexedHeight()).thenReturn(Success(BlockchainIndexHeight(tip, tip)))
 
     when(api.chainSlice(any[Option[Int]], any[Option[Int]])).thenAnswer { invocation =>
       val from = invocation.getArgument[Option[Int]](0).getOrElse(0)
@@ -50,7 +52,7 @@ object ChainFixtures extends MockitoSugar {
     api
   }
 
-  private def infoAt(tip: Int): NodeInfo =
+  def infoAt(tip: Int): NodeInfo =
     NodeInfo("test", "6.0.3", Some(tip), Some(tip), Some(tip), None, None, None, None, "utxo",
       None, isMining = false, 0, 0, None, 0L, 0L, None, None, None,
       NodeParameters(tip, 0, 0, 0, 0, 3, 0, 0, 0, 0), None, None, None)

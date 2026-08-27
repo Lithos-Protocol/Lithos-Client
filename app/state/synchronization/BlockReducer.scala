@@ -66,9 +66,6 @@ object BlockFault {
 
   /** Restores the dictionary base state while allowing the block to commit. */
   final case class MinerDictionary(error: SyncApplyError) extends BlockFault
-
-  /** Rejects the block because the fault cannot be isolated to one state branch. */
-  final case class Block(error: SyncApplyError) extends BlockFault
 }
 
 object SyncApplyError {
@@ -126,9 +123,8 @@ object BlockReducer {
       block.txs.foldLeft[Either[SyncApplyError, Unit]](Right(())) {
         case (Right(_), tx) =>
           staged.applyTransaction(block, tx) match {
-            case Right(())                          => Right(())
-            case Left(BlockFault.Block(error))      => Left(error)
-            case Left(BlockFault.Rollup(id, error)) => Right(staged.quarantine(id, error))
+            case Right(())                           => Right(())
+            case Left(BlockFault.Rollup(id, error))  => Right(staged.quarantine(id, error))
             case Left(BlockFault.MinerDictionary(e)) => Right(staged.failMinerDictionary(e))
           }
         case (left, _) => left
@@ -151,11 +147,15 @@ object BlockReducer {
                                     protocol: SyncProtocolContext): Either[SyncApplyError, CommittedSyncState] = {
     val staged = new StagedState(base, protocol)
     val block = BlockInfo(id = "", height = height, txs = Seq(tx), parentId = "")
-    if (!staged.recognizesMinerDictionary(tx))
+    if (base.minerDictionaryFault.nonEmpty)
+      // Otherwise the dictionary branch is skipped and the base returns unchanged, reported as success.
+      Left(StateInvariant(tx.id,
+        s"dictionary state is already faulted: ${base.minerDictionaryFault.get}"))
+    else if (!staged.recognizesMinerDictionary(tx))
       Left(StateInvariant(tx.id, "transaction does not carry the Miner Dictionary singleton"))
     else staged.applyTransaction(block, tx) match {
-      case Right(())                => Right(staged.result)
-      case Left(fault)              => Left(fault.error)
+      case Right(())   => Right(staged.result)
+      case Left(fault) => Left(fault.error)
     }
   }
 
@@ -187,6 +187,12 @@ object BlockReducer {
         case None if isMinerDictionaryTransform(tx) && minerDictionaryFault.isEmpty =>
           applyMinerDictionaryTransform(block, tx).left.map(BlockFault.MinerDictionary)
         case None => classifyGenesis(block, tx) match {
+          // Reported rather than attributed: quarantining this id would drop the rollup already
+          // tracked under it, which is the one that is legitimate.
+          case GenesisShape.Authentic if rollups.contains(block.id) =>
+            unauthenticatedGenesis :+= tx.id -> (s"block ${block.id} already created a rollup; " +
+              "a block carries at most one collateral spend")
+            Right(())
           // Attribute malformed genesis state to the rollup that would have been created.
           case GenesisShape.Authentic => applyGenesis(block, tx).left.map(BlockFault.Rollup(block.id, _))
           case GenesisShape.Unauthenticated(reason) =>
@@ -251,7 +257,6 @@ object BlockReducer {
         _ <- requireState(tx.id, registers.totalScore == 0, "genesis total score must be zero")
         _ <- requireState(tx.id, registers.periodOrReward == block.height.toLong,
           "genesis period must equal its containing block height")
-        _ <- requireState(tx.id, !rollups.contains(block.id), s"duplicate rollup id ${block.id}")
         dictionary = PlasmaDictionary.empty()
         _ <- requireDigest(tx.id, dictionary, registers.digest)
       } yield {
@@ -493,11 +498,16 @@ object BlockReducer {
         // _ <- requireProof(tx.id, "miner dictionary insertion", insertion.proof.ergoValue.getValue, expectedInsert)
         digest <- avlDigest(output, tx.id)
         _ <- requireDigest(tx.id, dictionary, digest)
+        // TODO: This could change with commitment changes in the future!
+        // Any SigmaProp may register, so the address derivation is guarded like every other read of
+        // stranger-supplied data. Escaping here would reach the caller as an unattributable failure.
+        address <- attempt(tx.id, "could not derive the miner address") {
+          miner.address(protocol.networkType)
+        }
       } yield {
         val isLocal = sameBytes(options.take(32), protocol.localMinerHash)
         minerTree = minerTree.copy(dictionary = dictionary, numMiners = minerTree.numMiners + 1,
-          minerMap = minerTree.minerMap + (Hex.toHexString(keyValue._1) ->
-            (miner.address(protocol.networkType), dataToken.id)),
+          minerMap = minerTree.minerMap + (Hex.toHexString(keyValue._1) -> (address, dataToken.id)),
           hasMiner = minerTree.hasMiner || isLocal, utxoId = output.id,
           syncHeight = block.height, savedHeight = block.height)
         if (isLocal) dataBoxToken = Some(dataToken.id)

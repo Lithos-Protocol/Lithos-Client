@@ -216,6 +216,80 @@ object ReducerFixtures {
 
   def proofHex(bytes: Array[Byte]): String = byteValue(bytes).toHex
 
+  /** Phase output at an arbitrary rollup script, so transform fixtures share one register layout. */
+  def phaseOutput(id: String,
+                  txId: String,
+                  height: Int,
+                  ergoTree: String,
+                  dictionary: AuthenticatedDictionaryView,
+                  numMiners: Int,
+                  totalScore: BigInt,
+                  periodOrReward: Long): TxOutput =
+    TxOutput(id, 1000000L, ergoTree,
+      rollupRegisters(dictionary, numMiners, totalScore, periodOrReward),
+      Seq.empty, txId, height, 0)
+
+  /** Holding to Evaluation: the tree and its counters are conserved, only the period moves. */
+  def holdingToEvaluationTx(number: Int,
+                            inputId: String,
+                            outputId: String,
+                            height: Int,
+                            dictionary: AuthenticatedDictionaryView,
+                            numMiners: Int,
+                            totalScore: BigInt,
+                            period: Long): BlockTx = {
+    val txId = SyncFixtures.id(310000 + number)
+    BlockTx(txId, Seq(TxInput(inputId, Some(InputSpendingProof("", Map.empty)))), Seq.empty,
+      Seq(phaseOutput(outputId, txId, height, EvaluationTree, dictionary, numMiners, totalScore, period)))
+  }
+
+  /** Evaluation to Payout: R7 becomes the total reward the rollup was created with. */
+  def evaluationToPayoutTx(number: Int,
+                           inputId: String,
+                           outputId: String,
+                           height: Int,
+                           dictionary: AuthenticatedDictionaryView,
+                           numMiners: Int,
+                           totalScore: BigInt,
+                           totalReward: Long): BlockTx = {
+    val txId = SyncFixtures.id(320000 + number)
+    BlockTx(txId, Seq(TxInput(inputId, Some(InputSpendingProof("", Map.empty)))), Seq.empty,
+      Seq(phaseOutput(outputId, txId, height, PayoutTree, dictionary, numMiners, totalScore, totalReward)))
+  }
+
+  /**
+   * A fraud proof spending the Evaluation box.
+   *
+   * The reducer reads its context variables from input 1, which is where every live fraud proof
+   * contract puts them with `getVarFromInput(1, ...)`.
+   */
+  def fraudProofTx(number: Int,
+                   evaluationInputId: String,
+                   proofInputId: String,
+                   outputId: String,
+                   height: Int,
+                   miner: Array[Byte],
+                   lookupProofHex: String,
+                   deleteProofHex: String,
+                   outputDictionary: AuthenticatedDictionaryView,
+                   numMiners: Int,
+                   totalScore: BigInt,
+                   period: Long): BlockTx = {
+    val txId = SyncFixtures.id(330000 + number)
+    val proof = InputSpendingProof("", Map(
+      "0" -> byteValue(miner).toHex,
+      "1" -> lookupProofHex,
+      "2" -> deleteProofHex))
+    BlockTx(
+      id = txId,
+      inputs = Seq(
+        TxInput(evaluationInputId, Some(InputSpendingProof("", Map.empty))),
+        TxInput(proofInputId, Some(proof))),
+      dataInputs = Seq.empty,
+      outputs = Seq(phaseOutput(outputId, txId, height, EvaluationTree, outputDictionary,
+        numMiners, totalScore, period)))
+  }
+
   private def byteValue(bytes: Array[Byte]): ErgoValue[_] =
     ErgoValue.of(Colls.fromArray(bytes), scalaByteType)
 }

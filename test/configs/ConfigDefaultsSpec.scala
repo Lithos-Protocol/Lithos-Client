@@ -42,12 +42,35 @@ class ConfigDefaultsSpec extends AnyFlatSpec with Matchers {
     withClue("sync.minerDictionary.maxTransforms: ") {
       absent.minerDictionaryMaxTransforms shouldEqual shippedSync.minerDictionaryMaxTransforms
     }
+    withClue("sync.retriesBeforeAlarm: ") {
+      absent.retriesBeforeAlarm shouldEqual shippedSync.retriesBeforeAlarm
+    }
+    withClue("sync.tipRevalidation: ") { absent.tipRevalidation shouldEqual shippedSync.tipRevalidation }
+    withClue("sync.incompleteBlockRetries: ") {
+      absent.incompleteBlockRetries shouldEqual shippedSync.incompleteBlockRetries
+    }
+  }
+
+  /**
+   * Every optional key is compared above. This fails when one is added to `SyncConfig` and not to the
+   * comparison, which is how a default silently drifts from the shipped file.
+   */
+  "SyncConfig" should "have every optional key covered by the defaults comparison" in {
+    // Every value except `startHeight`, which is required and so has no default to drift from.
+    val comparedOptional = 14
+    val required = 1
+    val fields = classOf[SyncConfig].getDeclaredMethods.count(m => m.getParameterCount == 0 &&
+      !m.getName.contains("$") && m.getName != "config")
+    withClue(s"SyncConfig exposes $fields values; the defaults test compares $comparedOptional " +
+      s"optional plus $required required: ") {
+      fields shouldEqual comparedOptional + required
+    }
   }
 
   /** Keeps the retained-state window within its configured memory bound. */
   "sync.reorgWindow" should "sit well inside the range validation permits" in {
     val window = new SyncConfig(shipped).reorgWindow
-    window should be <= 1000
+    window should be <= 250
     window should be > 0
   }
 

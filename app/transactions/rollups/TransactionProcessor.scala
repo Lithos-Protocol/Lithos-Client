@@ -3,7 +3,6 @@ package transactions.rollups
 import akka.actor.{Actor, ActorRef, Cancellable}
 import akka.pattern.ask
 import akka.util.Timeout
-import cache.RollupCache
 import configs.{NodeContext, StateConfig}
 import lfsm.states.NISPTree
 import org.ergoplatform.appkit.ErgoClient
@@ -140,8 +139,8 @@ class TransactionProcessor @Inject()(config: Configuration, nodeContext: NodeCon
       logger.warn(s"Keeping ${pendingRollupTxs.values.map(_.size).sum} pending stub(s) while " +
         s"synchronization is ${unavailable.status}")
 
-    case ProcessPublishedMap(syncMsg, newEntries, height) =>
-      cleanupRollupTxs(syncMsg, height)
+    case ProcessPublishedMap(FullSync(rollups, projections), newEntries, height) =>
+      cleanupRollupTxs(rollups, projections, height)
       addRollupStubs(newEntries)
   }
 
@@ -183,21 +182,17 @@ class TransactionProcessor @Inject()(config: Configuration, nodeContext: NodeCon
 
   // ─── pending tx management ────────────────────────────────────────────────
 
-  /** Removes inactive rollups and stubs whose submission criteria no longer hold. */
-  private def cleanupRollupTxs(syncMsg: SyncMessage, currentHeight: Int): Unit = {
-    // An empty synchronized result confirms that no active rollups remain.
-    val rawTrees: Seq[(String, NISPTree)] = syncMsg match {
-      case FullSync(trees)       => trees
-      case PartialSync(trees, _) => trees
-      case NoRollups()           => Seq.empty
-      case SyncUnavailable(_)    => Seq.empty
-    }
+  /**
+   * Removes inactive rollups and stubs whose submission criteria no longer hold.
+   */
+  private def cleanupRollupTxs(rollups: Seq[(String, NISPTree)],
+                               projections: Map[String, MempoolRollupState],
+                               currentHeight: Int): Unit = {
+    val rawTrees = rollups
 
-    // ── mempool-state merging (mirrors TransactionPublisher.buildRollupMap) ──
-    val rollupCache = new RollupCache(cacheApi)
-
+    // Projections arrive with the trees they belong to, so no second read can disagree with them.
     val memStates: Map[String, MempoolRollupState] = rawTrees.flatMap { n =>
-      rollupCache.getMempoolState(n._2.blockId).map(n._1 -> _)
+      projections.get(n._2.blockId).map(n._1 -> _)
     }.toMap
 
     val statesToRemove = memStates.filter(_._2.toBeRemoved)

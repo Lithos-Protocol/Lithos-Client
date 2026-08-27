@@ -15,8 +15,6 @@ object RollupMessages {
     override def toString: String = s"RollupTransform(${blockInfo.height}: ${input.id} => ${output.id})"
   }
 
-  case class StopTracking(utxoId: String, blockId: String)
-
   case class RemoveRollup(blockId: String, reason: String)
   // Safely updates evaluation status for a rollup synchronizer
   case class UpdateEvaluation(blockId: String)

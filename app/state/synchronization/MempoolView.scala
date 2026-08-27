@@ -77,6 +77,7 @@ object MempoolView {
 /** Publishes complete mempool revisions; canonical projections remain lazy in SyncHandler. */
 class MempoolView @Inject()(config: play.api.Configuration,
                             nodeContext: NodeContext,
+                            protocol: SyncProtocolContext,
                             @Named("state-frame") stateFrame: ActorRef,
                             @Named("sync-handler") syncHandler: ActorRef)
   extends Actor {
@@ -88,6 +89,10 @@ class MempoolView @Inject()(config: play.api.Configuration,
   private val logger: Logger = LoggerFactory.getLogger("MempoolView")
   private val nodeApi = nodeContext.getNodeApi
   private val maxTransactions = new configs.SyncConfig(config).mempoolMaxTransactions
+  // Relevant ErgoTrees to search mempool for
+  // TODO: Could be expanded in the future for mempool support of other UTXOs?
+  private val rollupTrees =
+    Seq(protocol.holdingErgoTree, protocol.evaluationErgoTree, protocol.payoutErgoTree)
 
   private var lastFingerprint = Set.empty[String]
   private var revision = 0L
@@ -138,8 +143,20 @@ class MempoolView @Inject()(config: play.api.Configuration,
       .pipeTo(self)
   }
 
+  /**
+   * Reads the relevant mempool twice and keeps the result only when both agree.
+   *
+   * Offsets shift as transactions enter and leave, so a page walk can skip an entry even when every
+   * response is individually valid. A changed set means the walk raced; the next tick retries.
+   */
   private def buildSnapshot(): Try[BuiltSnapshot] =
-    fetchAll().map { transactions =>
+    fetchAll().flatMap { first =>
+      fetchAll().flatMap { second =>
+        if (first.map(_.id).toSet == second.map(_.id).toSet) Success(second)
+        else Failure(new IllegalStateException(
+          "Unconfirmed rollup transactions changed while they were being paged"))
+      }
+    }.map { transactions =>
       val graph = buildGraph(transactions)
       val endInputs = nodeContext.getClient.execute { ctx =>
         graph.chains.map { case (root, chain) => root -> chain.transforms.last.output.toInput(ctx) }
@@ -147,25 +164,35 @@ class MempoolView @Inject()(config: play.api.Configuration,
       BuiltSnapshot(transactions.map(_.id).toSet, graph.chains, endInputs, graph.blockedRoots)
     }
 
-  private def fetchAll(): Try[Seq[BlockTx]] = {
-    @tailrec
-    def loop(offset: Int, collected: Vector[BlockTx]): Try[Seq[BlockTx]] = {
-      nodeApi.unconfirmedTransactions(Paging(offset, PageSize)) match {
-        case Failure(ex) => Failure(ex)
-        case Success(page) =>
-          val converted = page.map(NodeSync.blockTx)
-          val next = collected ++ converted
-          if (next.size > maxTransactions)
-            Failure(new IllegalStateException(
-              s"Mempool exceeds sync.mempool.maxTransactions ($maxTransactions); mempool-aware " +
-                "chaining is unavailable until it drains, and transactions build on confirmed state"))
-          else if (page.size < PageSize) Success(next)
-          else loop(offset + page.size, next)
-      }
+  /** Every unconfirmed transaction at a rollup script, deduplicated across the three scripts. */
+  private def fetchAll(): Try[Seq[BlockTx]] =
+    rollupTrees.foldLeft(Try(Vector.empty[BlockTx])) { (accumulated, tree) =>
+      accumulated.flatMap(collected => fetchByTree(tree, collected))
+    }.map { collected =>
+      // A transaction spending one rollup script and creating another is returned under both.
+      collected.foldLeft((Set.empty[String], Vector.empty[BlockTx])) {
+        case ((seen, unique), tx) =>
+          if (seen.contains(tx.id)) (seen, unique) else (seen + tx.id, unique :+ tx)
+      }._2
     }
-    loop(0, Vector.empty)
-  }
 
-  /** Readiness is owned by SyncHandler and mirrored here rather than asked for on every tick. */
-  private def ready: Boolean = utils.Globals.getDetailedSyncStatus.isInstanceOf[Ready]
+  @tailrec
+  private def fetchByTree(ergoTree: String,
+                          collected: Vector[BlockTx],
+                          offset: Int = 0): Try[Vector[BlockTx]] =
+    nodeApi.unconfirmedTransactionsByErgoTree(ergoTree, Paging(offset, PageSize)) match {
+      case Failure(ex) => Failure(ex)
+      case Success(page) =>
+        val next = collected ++ page.map(NodeSync.blockTx)
+        if (next.size > maxTransactions)
+          Failure(new IllegalStateException(
+            s"Unconfirmed rollup transactions exceed sync.mempool.maxTransactions ($maxTransactions); " +
+              "mempool chaining is unavailable, and transactions will build on " +
+              "confirmed state"))
+        else if (page.size < PageSize) Success(next)
+        else fetchByTree(ergoTree, next, offset + page.size)
+    }
+
+  /** Readiness is owned by SyncHandler and published, rather than asked for on every tick. */
+  private def ready: Boolean = utils.Globals.syncView.canonical.available
 }

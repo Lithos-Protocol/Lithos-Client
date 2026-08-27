@@ -1,6 +1,5 @@
 package transactions.rollups
 
-import cache.MDCache
 import configs.NodeContext
 import lfsm.LFSMHelpers
 import lfsm.states.MinerTree
@@ -144,7 +143,7 @@ class CommitmentTransactions(nodeContext: NodeContext, dataBoxes: DataBoxSource)
 
 
   def sendInitialCommitment(diff: String,
-                            cache: MDCache,
+                            minerTree: MinerTree,
                             walletSelector: WalletSelector): String = {
     client.execute{
       ctx =>
@@ -155,7 +154,7 @@ class CommitmentTransactions(nodeContext: NodeContext, dataBoxes: DataBoxSource)
 
         val reservation = walletSelector.reserve(Parameters.MinFee * 2)
         val signed =
-          try signInitialCommitment(ctx, cache.getMD.get, prover, score, reservation.inputs)
+          try signInitialCommitment(ctx, minerTree, prover, score, reservation.inputs)
           catch {
             // Nothing has left this process, so the exact selection is ours to hand straight back.
             case NonFatal(ex) => reservation.release(); throw ex

@@ -397,11 +397,13 @@ class SubmissionHandler @Inject()(config: Configuration, nodeContext: NodeContex
     if(dataBoxes.getDataBoxToken.isEmpty){
       logger.warn("No saved data box token was found")
       val isEnabled = dictionarySyncEnabled
-      if(isEnabled && !Globals.getMDSyncState){
-        logger.warn("Please wait for MDSyncTask to complete MinerDictionary synchronization")
+      val dictionary = Globals.syncView.minerDictionary
+      if(isEnabled && !dictionary.available){
+        // Naming the reason matters: "still catching up" clears on its own, a bootstrap fault does not.
+        logger.warn(s"Cannot register in the MinerDictionary yet: ${dictionary.reason.getOrElse("unavailable")}")
         Failure(new DataBoxRetrievalException("Could not find a stored data box"))
-      }else if(isEnabled && Globals.getMDSyncState){
-        logger.warn("MDSyncTask has completed synchronization. Please wait for a data box to be created.")
+      }else if(isEnabled){
+        logger.warn("The MinerDictionary is usable. Please wait for a data box to be created.")
         logger.warn("If this message persists, there may be an issue with sending the MinerDictionary transaction.")
         Failure(new DataBoxRetrievalException("Could not find a stored data box"))
       }else{

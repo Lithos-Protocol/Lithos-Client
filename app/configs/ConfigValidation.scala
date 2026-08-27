@@ -125,24 +125,27 @@ object Configs {
     v.bool("state.autoCommit")
 
     // ---- sync ----
-    v.range("sync.startHeight", v.intReq("sync.startHeight"), 1, 2000000000,
+    v.range("sync.startHeight", v.intReq("sync.startHeight"), 2, 2000000000,
       "block height to start synchronizing from; minimum 1")
     // Bound retained state copies to a practical heap limit.
-    v.range("sync.reorgWindow", v.int("sync.reorgWindow"), 1, 1000,
+    v.range("sync.reorgWindow", v.int("sync.reorgWindow"), 1, 250,
       "committed blocks retained for exact in-memory rollback; cost scales with active rollups and " +
         "dictionary size, so raise it only alongside the heap")
-    v.range("sync.catchUpBatchBlocks", v.int("sync.catchUpBatchBlocks"), 1, 256,
+    v.range("sync.catchUpBatchBlocks", v.int("sync.catchUpBatchBlocks"), 1, 64,
       "blocks fetched per canonical round trip; each is held whole until it commits")
+    v.duration("sync.tipRevalidation")
+    v.range("sync.incompleteBlockRetries", v.int("sync.incompleteBlockRetries"), 0, 100,
+      "refetches of a block with unresolved input scripts")
     v.range("sync.retriesBeforeAlarm", v.int("sync.retriesBeforeAlarm"), 1, 10000,
       "consecutive failures at one height before synchronization reports itself stalled")
-    v.range("sync.mempool.maxTransactions", v.int("sync.mempool.maxTransactions"), 1, 1000000,
+    v.range("sync.mempool.maxTransactions", v.int("sync.mempool.maxTransactions"), 1, 100000,
       "unconfirmed transactions read before the mempool view gives up on a complete revision")
     v.bool("sync.minerDictionary.bootstrap")
     v.range("sync.minerDictionary.maxTransforms", v.int("sync.minerDictionary.maxTransforms"), 1, 10000000,
       "dictionary spends followed during bootstrap")
     v.requireExisting("sync.storage.backend", v.string("sync.storage.backend")).foreach { backend =>
-      if (backend.toLowerCase != "leveldb")
-        v.problem("sync.storage.backend", s"$backend is not available; use leveldb")
+      storage.KeyValueStore.factoryFor(backend).left.foreach(error =>
+        v.problem("sync.storage.backend", error.message))
     }
     v.requireExisting("sync.storage.path", v.string("sync.storage.path"))
     v.bool("sync.snapshots.enabled")
