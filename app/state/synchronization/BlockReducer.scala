@@ -33,6 +33,7 @@ final case class SyncProtocolContext(networkType: NetworkType,
                                      holdingErgoTree: String,
                                      evaluationErgoTree: String,
                                      payoutErgoTree: String,
+                                     collateralErgoTree: String,
                                      minerDictionaryToken: ErgoId,
                                      minerDictionaryGenesisId: String = LFSMHelpers.MD_GENESIS_ID,
                                      collateralToken: ErgoId = LFSMHelpers.COLLAT_TOKEN)
@@ -41,13 +42,13 @@ object SyncProtocolContext {
   def apply(networkType: NetworkType, rollupStartHeight: Int, localMinerHash: Array[Byte]): SyncProtocolContext = {
     val contracts = networkType match {
       case NetworkType.MAINNET =>
-        (Helpers.holdingMainnet, Helpers.evalMainnet, Helpers.payoutMainnet)
+        (Helpers.holdingMainnet, Helpers.evalMainnet, Helpers.payoutMainnet, Helpers.collateralMainnet)
       case NetworkType.TESTNET =>
-        (Helpers.holdingTestnet, Helpers.evalTestnet, Helpers.payoutTestnet)
+        (Helpers.holdingTestnet, Helpers.evalTestnet, Helpers.payoutTestnet, Helpers.collateralTestnet)
     }
     SyncProtocolContext(networkType, rollupStartHeight, localMinerHash.clone(),
       contracts._1.ergoTreeHex, contracts._2.ergoTreeHex, contracts._3.ergoTreeHex,
-      LFSMHelpers.getMDToken(networkType))
+      contracts._4.ergoTreeHex, LFSMHelpers.getMDToken(networkType))
   }
 }
 
@@ -164,7 +165,7 @@ object BlockReducer {
    * Isolated from committed state, so a failed rebuild publishes nothing.
    */
   final class RollupReplay(protocol: SyncProtocolContext) {
-    private var state = CommittedSyncState(SyncCursor(0, "", ""), 0L, Map.empty, Map.empty,
+    private var state = CommittedSyncState(SyncCursor(0, "", ""), 0L, Map.empty, Map.empty, Map.empty,
       MinerTree.initialState, None)
 
     /** Applies one transaction, reporting whether it changed rollup state. */
@@ -212,6 +213,7 @@ object BlockReducer {
   private final class StagedState(base: CommittedSyncState, protocol: SyncProtocolContext) {
     private var rollups = base.rollups
     private var routes = base.routes
+    private var rollupOrigins = base.rollupOrigins
     private var minerTree = base.minerTree
     private var dataBoxToken = base.dataBoxToken
     private var stagedRollupDictionaries = Map.empty[String, AuthenticatedDictionary]
@@ -228,7 +230,8 @@ object BlockReducer {
     var minerDictionaryFault: Option[String] = base.minerDictionaryFault
 
     def result: CommittedSyncState =
-      base.copy(rollups = rollups, routes = routes, minerTree = minerTree, dataBoxToken = dataBoxToken,
+      base.copy(rollups = rollups, routes = routes, rollupOrigins = rollupOrigins,
+        minerTree = minerTree, dataBoxToken = dataBoxToken,
         minerDictionaryFault = minerDictionaryFault, quarantined = quarantines)
 
     /** Clears a fault when its rollup is tracked again, so a rebuild leaves no stale entry. */
@@ -248,8 +251,14 @@ object BlockReducer {
             unauthenticatedGenesis :+= tx.id -> (s"block ${block.id} already created a rollup; " +
               "a block carries at most one collateral spend")
             Right(())
-          // Attribute malformed genesis state to the rollup that would have been created.
-          case GenesisShape.Authentic => applyGenesis(block, tx).left.map(BlockFault.Rollup(block.id, _))
+          // The exact collateral contract enforces the decoded genesis shape. A failure here therefore
+          // denotes client or node-data integrity failure, not a chain shape a repair walk can fix.
+          case GenesisShape.Authentic => applyGenesis(block, tx) match {
+            case Right(_) => Right(())
+            case Left(error) =>
+              failAuthenticatedGenesis(block, tx, error)
+              Right(())
+          }
           case GenesisShape.Unauthenticated(reason) =>
             unauthenticatedGenesis :+= tx.id -> reason
             Right(())
@@ -263,13 +272,26 @@ object BlockReducer {
 
     /** Drop a rollup whose transform could not be applied. Its staged copy goes with it. */
     def quarantine(rollupId: String, error: SyncApplyError): Unit = {
-      val genesisHeight = rollups.get(rollupId).map(_.startHeight).getOrElse(0)
-      rollups.get(rollupId).foreach(tree => routes -= tree.utxoId)
+      val tree = rollups(rollupId)
+      val collateralBoxId = rollupOrigins(rollupId)
+      val genesisHeight = tree.startHeight
+      routes -= tree.utxoId
       rollups -= rollupId
+      rollupOrigins -= rollupId
       stagedRollupDictionaries -= rollupId
-      val fault = QuarantineFault(rollupId, genesisHeight, error.message,
+      val fault = QuarantineFault(rollupId, genesisHeight, collateralBoxId, error.message,
         BlockReducer.isRetryable(error), quarantines.get(rollupId).map(_.attempts).getOrElse(0))
       quarantines += rollupId -> fault
+      quarantined :+= fault
+    }
+
+    /** Records an impossible authenticated-genesis decode as terminal without offering it to repair. */
+    private def failAuthenticatedGenesis(block: BlockInfo, tx: BlockTx, error: SyncApplyError): Unit = {
+      val collateralBoxId = tx.inputs.head.id
+      val reason = s"Authenticated genesis ${tx.id} violated its contract-enforced shape: ${error.message}"
+      val fault = QuarantineFault(block.id, block.height, collateralBoxId, reason, retryable = false,
+        quarantines.get(block.id).map(_.attempts).getOrElse(0))
+      quarantines += block.id -> fault
       quarantined :+= fault
     }
 
@@ -295,8 +317,9 @@ object BlockReducer {
               "was not resolved by the block source, so its collateral token could not be checked")
           case Some(input) if spendsCollateral(input) => GenesisShape.Authentic
           case Some(input) =>
-            GenesisShape.Unauthenticated(s"input 0 carries no ${protocol.collateralToken} token; " +
-              s"it holds [${input.assets.map(t => s"${t.id}:${t.amount}").mkString(", ")}]")
+            GenesisShape.Unauthenticated(s"input 0 is not the configured collateral contract/token; " +
+              s"script is ${input.ergoTree}, assets are " +
+              s"[${input.assets.map(t => s"${t.id}:${t.amount}").mkString(", ")}]")
         }
       }
       // Report collateral spends targeting a holding script outside the configured protocol.
@@ -311,7 +334,8 @@ object BlockReducer {
         avlDigest(out, tx.id).exists(sameBytes(_, BlockReducer.EmptyDictionaryDigest)))
 
     private def spendsCollateral(input: TxOutput): Boolean =
-      input.assets.exists(t => t.id == protocol.collateralToken && t.amount == 1L)
+      input.assets.exists(t => t.id == protocol.collateralToken && t.amount == 1L) &&
+        input.ergoTree == protocol.collateralErgoTree
 
     private def applyGenesis(block: BlockInfo, tx: BlockTx): Either[SyncApplyError, Unit] = {
       for {
@@ -329,6 +353,7 @@ object BlockReducer {
           hasMiner = false, LFSMPhase.HOLDING, blockId = block.id, utxoId = output.id)
         rollups += block.id -> tree
         routes += output.id -> block.id
+        rollupOrigins += block.id -> tx.inputs.head.id
         // Tracking it again ends any fault held for it, which the state invariant requires.
         untrack(block.id)
         relevantEvents += 1
@@ -647,6 +672,7 @@ object BlockReducer {
     private def removeRollup(rollupId: String): Unit = {
       routes -= rollups(rollupId).utxoId
       rollups -= rollupId
+      rollupOrigins -= rollupId
     }
   }
 

@@ -1,7 +1,7 @@
 package lfsm.contracts
 
 import lfsm.{LFSMHelpers, ScriptGenerator}
-import org.ergoplatform.appkit.{BlockchainContext, ConstantsBuilder, ContextVar, ErgoValue, Parameters}
+import org.ergoplatform.appkit.{BlockchainContext, ConstantsBuilder, ContextVar, ErgoValue, NetworkType, Parameters}
 import org.ergoplatform.sdk.ErgoId
 import org.ergoplatform.appkit.scalaapi._
 import sigma.Colls
@@ -35,6 +35,18 @@ object CollateralContract {
 
     Contract.fromErgoScript(ctx, constants, ScriptGenerator.mkCollatScript("Collateral_Mainnet"))
   }
+  def mkMainnetCollatContract(networkType: NetworkType, emConfigId: ErgoId,
+                              emissionGateHash: Array[Byte], litID: ErgoId): Contract = {
+
+    val constants = ConstantsBuilder
+      .create()
+      .item("CONST_EMCONFIG_NFT", Colls.fromArray(emConfigId.getBytes))
+      .item("CONST_GATE_HASH", Colls.fromArray(emissionGateHash))
+      .item("CONST_LIT_ID", Colls.fromArray(litID.getBytes))
+      .build()
+
+    Contract.fromErgoScript(networkType, constants, ScriptGenerator.mkCollatScript("Collateral_Mainnet"), Seq.empty)
+  }
 
   def mkOfflineTestCollatContract(ctx: BlockchainContext, emissionId: ErgoId): Contract = {
     val constants = ConstantsBuilder
@@ -60,6 +72,14 @@ object CollateralContract {
 
     Contract.fromErgoScript(ctx, constants, ScriptGenerator.mkCollatScript("Emission_Gate"))
   }
+  def mkEmissionGateContract(networkType: NetworkType): Contract = {
+    val constants = ConstantsBuilder
+      .create()
+      .item("CONST_EMISSION_NFT", Colls.fromArray(LFSMHelpers.EMISSION_NFT.getBytes))
+      .build()
+    Contract.fromErgoScript(networkType, constants, ScriptGenerator.mkCollatScript("Emission_Gate"), Seq.empty)
+  }
+
   def mkTestnetCollatContract(ctx: BlockchainContext, holdingPropBytes: Array[Byte]): Contract = {
     val constants = ConstantsBuilder
       .create()

@@ -35,9 +35,12 @@ object StateFrame {
   private final case class RollbackFinished(result: Try[Any], tipHeight: Int)
   private final case class ResetFinished(result: Try[Any])
   private final case class RecoveryPrepared(result: Try[Option[CommittedSyncState]])
-  private final case class DictionaryRepaired(atHeight: Int, result: Try[Either[String, MinerDictionarySeed]])
+  private final case class DictionaryRepaired(atCursor: SyncCursor,
+                                              result: Try[Either[String, MinerDictionarySeed]])
   private final case class QuarantinesLoaded(result: Try[Any])
-  private final case class RollupRepaired(rollupId: String, atHeight: Int, result: Try[RollupRepairResult])
+  private final case class RollupRepaired(rollupId: String,
+                                         atCursor: SyncCursor,
+                                         result: Try[RollupRepairResult])
 }
 
 /**
@@ -291,7 +294,7 @@ class StateFrame @Inject()(config: Configuration,
           logger.info(s"Rebuilding quarantined rollup ${fault.rollupId} from height " +
             s"${fault.genesisHeight}, attempt ${fault.attempts + 1} of $quarantineAttempts")
           Future(new RollupRepair(nodeContext.getNodeApi, protocol,
-            syncConfig.minerDictionaryMaxTransforms).run(fault, at))(pollingContext)
+            syncConfig.minerDictionaryMaxTransforms).run(fault, at.height))(pollingContext)
             .map(result => RollupRepaired(fault.rollupId, at, Success(result)))
             .recover { case ex => RollupRepaired(fault.rollupId, at, Failure(ex)) }
             .pipeTo(self)
@@ -397,7 +400,7 @@ class StateFrame @Inject()(config: Configuration,
           "continue; registering a new miner and raising commitment fraud proofs do not.")
       }
       seedCursor().flatMap { cursor =>
-        val seed = CommittedSyncState(cursor, 0L, Map.empty, Map.empty,
+        val seed = CommittedSyncState(cursor, 0L, Map.empty, Map.empty, Map.empty,
           rebuilt.map(_.minerTree).getOrElse(lfsm.states.MinerTree.initialState),
           rebuilt.toOption.flatMap(_.dataBoxToken), rebuilt.left.toOption)
         (syncHandler ? RestoreCommittedState(seed, Vector(cursor))).map {
@@ -492,10 +495,10 @@ class StateFrame @Inject()(config: Configuration,
   private def beginDictionaryRepair(): Unit = {
     repairing = true
     lastDictionaryRepair = System.currentTimeMillis()
-    val at = cursor.get.height
-    logger.info(s"Retrying the Miner Dictionary bootstrap at height $at")
+    val at = cursor.get
+    logger.info(s"Retrying the Miner Dictionary bootstrap at ${at.blockId}@${at.height}")
     Future(Try(new MinerDictionaryBootstrap(nodeContext.getNodeApi, protocol,
-      syncConfig.minerDictionaryMaxTransforms).run(at)))(pollingContext)
+      syncConfig.minerDictionaryMaxTransforms).run(at.height)))(pollingContext)
       .map(result => DictionaryRepaired(at, result))
       .recover { case ex => DictionaryRepaired(at, Failure(ex)) }
       .pipeTo(self)

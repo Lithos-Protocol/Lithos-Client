@@ -75,6 +75,7 @@ class BlockReducerSpec extends AnyFlatSpec with Matchers with OptionValues {
     transition.relevantEvents shouldEqual 1
     transition.state.rollups.keySet shouldEqual Set(blockId)
     transition.state.routes shouldEqual Map(authenticOutput -> blockId)
+    transition.state.rollupOrigins shouldEqual Map(blockId -> authenticInput)
     transition.state.routes should not contain counterfeitOutput
   }
 
@@ -114,6 +115,7 @@ class BlockReducerSpec extends AnyFlatSpec with Matchers with OptionValues {
     transition.relevantEvents shouldEqual 2
     transition.stagedDictionaryCopies shouldEqual 1
     transition.state.routes shouldEqual Map(childOutput -> blockId)
+    transition.state.rollupOrigins shouldEqual Map(blockId -> collateralInput)
     transition.state.rollups(blockId).numMiners shouldEqual 1
     transition.state.rollups(blockId).dictionary.digest should contain theSameElementsInOrderAs expected.digest
   }
@@ -149,6 +151,7 @@ class BlockReducerSpec extends AnyFlatSpec with Matchers with OptionValues {
     transition.relevantEvents shouldEqual 2
     transition.stagedDictionaryCopies shouldEqual 1
     transition.state.routes shouldEqual Map(finalUtxo -> rollupId)
+    transition.state.rollupOrigins shouldEqual base.rollupOrigins
     transition.state.rollups(rollupId).dictionary.digest should contain theSameElementsInOrderAs expected.digest
     baseDictionary.digest should contain theSameElementsInOrderAs PlasmaDictionary.empty().digest
   }
@@ -200,6 +203,8 @@ class BlockReducerSpec extends AnyFlatSpec with Matchers with OptionValues {
     transition.quarantined.map(_.rollupId) shouldEqual Seq(rollupId)
     transition.state.rollups.keySet should not contain rollupId
     transition.state.routes shouldBe empty
+    transition.state.rollupOrigins shouldBe empty
+    transition.state.quarantined(rollupId).collateralBoxId shouldEqual base.rollupOrigins(rollupId)
     assertRollupBaseUnchanged(base, rollupId, inputUtxo, digestBefore)
   }
 
@@ -232,6 +237,7 @@ class BlockReducerSpec extends AnyFlatSpec with Matchers with OptionValues {
     transition.quarantined.map(_.rollupId) shouldEqual Seq(brokenId)
     transition.state.rollups.keySet shouldEqual Set(healthyId)
     transition.state.routes shouldEqual Map(healthyNext -> healthyId)
+    transition.state.rollupOrigins shouldEqual Map(healthyId -> base.rollupOrigins(healthyId))
     transition.minerDictionaryFault shouldBe empty
     transition.state.minerTree.dictionary should be theSameInstanceAs base.minerTree.dictionary
   }
@@ -256,6 +262,10 @@ class BlockReducerSpec extends AnyFlatSpec with Matchers with OptionValues {
       PlasmaDictionary.empty())
 
     def assertInvariant(state: CommittedSyncState, stage: String): Unit =
+      withClue(s"after $stage, origin keys must match active rollups: ") {
+        state.rollupOrigins.keySet shouldEqual state.rollups.keySet
+      }
+    def assertTreeInvariant(state: CommittedSyncState, stage: String): Unit =
       state.rollups.values.foreach { tree =>
         withClue(s"after $stage, rollup ${tree.blockId} claims the local miner with an empty tree: ") {
           (tree.numMiners == 0 && tree.hasMiner) shouldBe false
@@ -275,6 +285,7 @@ class BlockReducerSpec extends AnyFlatSpec with Matchers with OptionValues {
     afterSubmission.rollups(rollupId).hasMiner shouldBe true
     afterSubmission.rollups(rollupId).numMiners shouldEqual 1
     assertInvariant(afterSubmission, "the submission")
+    assertTreeInvariant(afterSubmission, "the submission")
 
     // 2. Holding to Evaluation conserves the tree, so the rollup survives on its local claim.
     val evalUtxo = SyncFixtures.id(900004)
@@ -285,6 +296,7 @@ class BlockReducerSpec extends AnyFlatSpec with Matchers with OptionValues {
       .toOption.value.state
     afterEvaluation.rollups(rollupId).phase shouldEqual LFSMPhase.EVAL
     assertInvariant(afterEvaluation, "the evaluation transform")
+    assertTreeInvariant(afterEvaluation, "the evaluation transform")
 
     // 3. A fraud proof slashes the only miner, which is this client. The tree is empty again.
     val drained = tracked.copy()
@@ -300,6 +312,7 @@ class BlockReducerSpec extends AnyFlatSpec with Matchers with OptionValues {
     afterSlash.rollups(rollupId).numMiners shouldEqual 0
     afterSlash.rollups(rollupId).hasMiner shouldBe false
     assertInvariant(afterSlash, "the fraud proof")
+    assertTreeInvariant(afterSlash, "the fraud proof")
 
     // 4. The Payout transition drops it, so no tracked rollup can ever reach the drain path.
     val toPayout = ReducerFixtures.evaluationToPayoutTx(63, payoutUtxo, SyncFixtures.id(900007),
@@ -310,7 +323,9 @@ class BlockReducerSpec extends AnyFlatSpec with Matchers with OptionValues {
 
     afterPayout.rollups.keySet should not contain rollupId
     afterPayout.routes shouldBe empty
+    afterPayout.rollupOrigins shouldBe empty
     assertInvariant(afterPayout, "the payout transform")
+    assertTreeInvariant(afterPayout, "the payout transform")
   }
 
   private def assertBaseUnchanged(base: CommittedSyncState,

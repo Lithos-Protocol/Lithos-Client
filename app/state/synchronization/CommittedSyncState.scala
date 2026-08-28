@@ -9,10 +9,13 @@ import state.messages.SyncMessages.SyncCursor
  * `retryable` is false where re-reading the same transaction gives the same answer.
  */
 final case class QuarantineFault(rollupId: String,
-                                 genesisHeight: Int,
-                                 reason: String,
-                                 retryable: Boolean,
-                                 attempts: Int = 0) {
+                                  genesisHeight: Int,
+                                  collateralBoxId: String,
+                                  reason: String,
+                                  retryable: Boolean,
+                                  attempts: Int = 0) {
+  require(collateralBoxId.nonEmpty, "A quarantined rollup must retain its collateral box id")
+
   def attempted: QuarantineFault = copy(attempts = attempts + 1)
 }
 
@@ -21,17 +24,20 @@ final case class QuarantineFault(rollupId: String,
  * Both fault maps are versioned with the state, so snapshots and reorgs preserve their lifetimes.
  */
 case class CommittedSyncState(cursor: SyncCursor,
-                              version: Long,
-                              rollups: Map[String, NISPTree],
-                              routes: Map[String, String],
-                              minerTree: MinerTree,
-                              dataBoxToken: Option[ErgoId],
+                               version: Long,
+                               rollups: Map[String, NISPTree],
+                               routes: Map[String, String],
+                               rollupOrigins: Map[String, String],
+                               minerTree: MinerTree,
+                               dataBoxToken: Option[ErgoId],
                               minerDictionaryFault: Option[String] = None,
                               quarantined: Map[String, QuarantineFault] = Map.empty) {
 
   require(routes.values.forall(rollups.contains), "Every rollup route must name committed state")
   require(routes.forall { case (utxoId, rollupId) => rollups(rollupId).utxoId == utxoId },
     "Every route must match its rollup's current UTXO")
+  require(rollupOrigins.keySet == rollups.keySet,
+    "Every committed rollup must retain exactly one collateral origin")
   require(quarantined.keySet.forall(!rollups.contains(_)),
     "A quarantined rollup must not also be tracked")
 

@@ -42,10 +42,11 @@ class CommittedSyncStateSpec extends AnyFlatSpec with Matchers {
     val secondUtxo = SyncFixtures.id(31)
     val first = ReducerFixtures.stateWithRollup(99, SyncFixtures.id(99),
       firstId, firstUtxo, PlasmaDictionary.empty())
-    val secondTree = ReducerFixtures.stateWithRollup(99, SyncFixtures.id(99),
-      secondId, secondUtxo, PlasmaDictionary.empty()).rollups(secondId)
+    val second = ReducerFixtures.stateWithRollup(99, SyncFixtures.id(99),
+      secondId, secondUtxo, PlasmaDictionary.empty())
     val combined = first.copy(
-      rollups = first.rollups + (secondId -> secondTree),
+      rollups = first.rollups + (secondId -> second.rollups(secondId)),
+      rollupOrigins = first.rollupOrigins + (secondId -> second.rollupOrigins(secondId)),
       routes = Map(secondUtxo -> secondId, firstUtxo -> firstId))
 
     combined.routedRollups.map(_._1) shouldEqual Seq(firstUtxo, secondUtxo)

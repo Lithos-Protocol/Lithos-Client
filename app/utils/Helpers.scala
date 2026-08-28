@@ -41,10 +41,6 @@ object Helpers {
     }
   }
 
-  def collateralContract(ctx: BlockchainContext): Contract = {
-    CollateralContract.mkTestnetCollatContract(ctx, holdingContract(ctx).hashedPropBytes)
-  }
-
   private def compilePayout(networkType: NetworkType): Contract = {
     RollupContracts.mkPayoutContract(networkType)
   }
@@ -55,6 +51,13 @@ object Helpers {
   private def compileHolding(networkType: NetworkType): Contract = {
     RollupContracts.mkHoldingContract(networkType, LFSMHelpers.HOLDING_PERIOD, compileEval(networkType).hashedPropBytes)
   }
+  private def compileCollateral(networkType: NetworkType): Contract = {
+    val gate = CollateralContract.mkEmissionGateContract(networkType)
+    // TODO: Refactor, there is no more testnet collateral contract
+    // The current naming is confusing
+    CollateralContract.mkMainnetCollatContract(
+      networkType, LFSMHelpers.EMCONFIG_NFT, gate.hashedPropBytes, LFSMHelpers.LIT_ID)
+  }
 
   // Pre-compile contracts to avoid v6 issues
   lazy val payoutMainnet: Contract  = compilePayout(NetworkType.MAINNET)
@@ -63,6 +66,8 @@ object Helpers {
   lazy val evalTestnet: Contract    = compileEval(NetworkType.TESTNET)
   lazy val holdingMainnet: Contract = compileHolding(NetworkType.MAINNET)
   lazy val holdingTestnet: Contract = compileHolding(NetworkType.TESTNET)
+  lazy val collateralMainnet: Contract = compileCollateral(NetworkType.MAINNET)
+  lazy val collateralTestnet: Contract = compileCollateral(NetworkType.TESTNET)
 
   // MD contracts
   lazy val mdMainnet: Contract = DictionaryContracts.mkMinerDictionaryContract(NetworkType.MAINNET, LFSMHelpers.MD_TOKEN_MAINNET)

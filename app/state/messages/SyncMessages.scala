@@ -56,25 +56,25 @@ object SyncMessages {
   /**
    * Installs a rebuilt Miner Dictionary and clears its fault.
    *
-   * Carries the height it was rebuilt at so a commit that landed during the rebuild rejects it rather
-   * than installing state one block stale.
+   * Carries the exact cursor it was rebuilt at so a commit or same-height reorg that landed during the
+   * rebuild rejects it rather than installing state from another chain.
    */
-  case class RepairMinerDictionary(atHeight: Int,
-                                   minerTree: lfsm.states.MinerTree,
-                                   dataBoxToken: Option[org.ergoplatform.sdk.ErgoId])
+  case class RepairMinerDictionary(atCursor: SyncCursor,
+                                    minerTree: lfsm.states.MinerTree,
+                                    dataBoxToken: Option[org.ergoplatform.sdk.ErgoId])
 
   /** Asks which quarantined rollups are worth rebuilding, newest first. */
   case object GetRepairableQuarantines
   case class RepairableQuarantines(faults: Seq[_root_.state.synchronization.QuarantineFault],
-                                   committedHeight: Int)
+                                    committedCursor: SyncCursor)
 
   /**
    * Installs a rebuilt rollup and clears its fault, or records the attempt when the rebuild failed.
-   * Carries the height it was rebuilt at, so a commit that landed meanwhile rejects it.
+   * Carries the exact cursor it was rebuilt at, so a commit or same-height reorg rejects it.
    */
   case class RepairRollup(rollupId: String,
-                          atHeight: Int,
-                          outcome: _root_.state.synchronization.RollupRepairResult)
+                           atCursor: SyncCursor,
+                           outcome: _root_.state.synchronization.RollupRepairResult)
 
   case class RollbackTo(blockId: String)
   case class RollbackCompleted(cursor: SyncCursor)

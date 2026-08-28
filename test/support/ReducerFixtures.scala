@@ -15,6 +15,7 @@ object ReducerFixtures {
   val HoldingTree = "holding-tree"
   val EvaluationTree = "evaluation-tree"
   val PayoutTree = "payout-tree"
+  val CollateralTree = "collateral-tree"
   val CollateralToken: ErgoId = ErgoId.create(SyncFixtures.id(900001))
   val MinerDictionaryToken: ErgoId = ErgoId.create(SyncFixtures.id(900002))
 
@@ -26,6 +27,7 @@ object ReducerFixtures {
       holdingErgoTree = HoldingTree,
       evaluationErgoTree = EvaluationTree,
       payoutErgoTree = PayoutTree,
+      collateralErgoTree = CollateralTree,
       minerDictionaryToken = MinerDictionaryToken,
       collateralToken = CollateralToken)
 
@@ -37,6 +39,7 @@ object ReducerFixtures {
       version = version,
       rollups = Map.empty,
       routes = Map.empty,
+      rollupOrigins = Map.empty,
       minerTree = MinerTree.initialState,
       dataBoxToken = None)
 
@@ -62,6 +65,7 @@ object ReducerFixtures {
       version = version,
       rollups = Map(rollupId -> tree),
       routes = Map(utxoId -> rollupId),
+      rollupOrigins = Map(rollupId -> SyncFixtures.id(800000)),
       minerTree = MinerTree.initialState,
       dataBoxToken = None)
   }
@@ -82,7 +86,10 @@ object ReducerFixtures {
       phase = LFSMPhase.HOLDING,
       blockId = rollupId,
       utxoId = utxoId)
-    state.copy(rollups = state.rollups + (rollupId -> tree), routes = state.routes + (utxoId -> rollupId))
+    state.copy(rollups = state.rollups + (rollupId -> tree),
+      routes = state.routes + (utxoId -> rollupId),
+      rollupOrigins = state.rollupOrigins +
+        (rollupId -> SyncFixtures.id(800000 + state.rollupOrigins.size)))
   }
 
   /** Builds the dictionary-add transaction shape shared by block reduction and bootstrap replay. */
@@ -179,13 +186,15 @@ object ReducerFixtures {
       outputs = Seq(holdingOutput(outputId, txId, height, PlasmaDictionary.empty(), period = height.toLong)))
   }
 
+  /** Defaults to the collateral script, which authentication now requires alongside the token. */
   def resolvedInput(id: String,
                     token: Option[ErgoId],
-                    height: Int): TxOutput =
+                    height: Int,
+                    ergoTree: String = CollateralTree): TxOutput =
     TxOutput(
       id = id,
       value = 1000000L,
-      ergoTree = "collateral-input",
+      ergoTree = ergoTree,
       registers = Seq.empty,
       assets = token.toSeq.map(Token(_, 1L)),
       txId = SyncFixtures.id(200000 + height),

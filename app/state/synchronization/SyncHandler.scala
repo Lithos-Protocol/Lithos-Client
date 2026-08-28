@@ -170,7 +170,8 @@ class SyncHandler @Inject()(config: Configuration,
     case RemoveRollup(blockId, reason) => try {
       committed.filter(_.rollups.contains(blockId)).foreach { state =>
         val tree = state.rollups(blockId)
-        val evicted = state.copy(rollups = state.rollups - blockId, routes = state.routes - tree.utxoId)
+        val evicted = state.copy(rollups = state.rollups - blockId,
+          routes = state.routes - tree.utxoId, rollupOrigins = state.rollupOrigins - blockId)
         publishTransition(committed, evicted) match {
           case Right(_) =>
             committed = Some(evicted)
@@ -185,30 +186,31 @@ class SyncHandler @Inject()(config: Configuration,
       case NonFatal(ex) => markRuntimeFailure(s"Could not stop tracking rollup $blockId", ex)
     }
 
-    case GetRepairableQuarantines =>
-      sender() ! RepairableQuarantines(
-        committed.map(_.repairableQuarantines(repairAttempts)).getOrElse(Seq.empty),
-        committed.map(_.cursor.height).getOrElse(0))
+    case GetRepairableQuarantines => committed match {
+      case Some(state) =>
+        sender() ! RepairableQuarantines(state.repairableQuarantines(repairAttempts), state.cursor)
+      case None => sender() ! BlockRejected(None, "", "no committed state to repair")
+    }
 
-    // A rebuild is only installable at the height it was built for
-    case RepairRollup(rollupId, atHeight, outcome) =>
-      committed.filter(_.cursor.height == atHeight).flatMap(_.quarantined.get(rollupId)) match {
+    // A rebuild is only installable at the exact chain cursor it was built for.
+    case RepairRollup(rollupId, atCursor, outcome) =>
+      committed.filter(_.cursor == atCursor).flatMap(_.quarantined.get(rollupId)) match {
         case None => ()
         case Some(fault) => applyRepair(fault, outcome)
       }
 
-    // Replaces dictionary state rebuilt at the committed height and clears its fault. A commit that
-    // landed while the rebuild ran makes the result one block stale, so the height must still match.
-    case RepairMinerDictionary(atHeight, minerTree, dataBoxToken) =>
+    // Replaces dictionary state rebuilt at the committed cursor and clears its fault. A commit or
+    // same-height reorg that landed while it ran makes the result stale, so the cursor must match.
+    case RepairMinerDictionary(atCursor, minerTree, dataBoxToken) =>
       val requester = sender()
       committed match {
-        case Some(state) if state.cursor.height == atHeight =>
+        case Some(state) if state.cursor == atCursor =>
           val repaired = state.copy(minerTree = minerTree, dataBoxToken = dataBoxToken,
             minerDictionaryFault = None)
           publishTransition(committed, repaired) match {
             case Right(_) =>
               committed = Some(repaired)
-              logger.info(s"Miner Dictionary restored at height $atHeight with " +
+              logger.info(s"Miner Dictionary restored at ${atCursor.blockId}@${atCursor.height} with " +
                 s"${minerTree.numMiners} miner(s); registration and commitment fraud proofs are " +
                 "available again")
               publishStatus(status)
@@ -222,7 +224,8 @@ class SyncHandler @Inject()(config: Configuration,
           }
         case Some(state) =>
           requester ! BlockRejected(Some(state.cursor), "",
-            s"dictionary was rebuilt at height $atHeight but the cursor is now ${state.cursor.height}")
+            s"dictionary was rebuilt at ${atCursor.blockId}@${atCursor.height} but the cursor is now " +
+              s"${state.cursor.blockId}@${state.cursor.height}")
         case None =>
           requester ! BlockRejected(None, "", "no committed state to repair")
       }
@@ -240,6 +243,7 @@ class SyncHandler @Inject()(config: Configuration,
             s"rebuild attempt(s); this miner can act on it once more")
           state.copy(rollups = state.rollups + (fault.rollupId -> tree),
             routes = state.routes + (tree.utxoId -> fault.rollupId),
+            rollupOrigins = state.rollupOrigins + (fault.rollupId -> fault.collateralBoxId),
             quarantined = state.quarantined - fault.rollupId)
         case RollupRepairResult.Terminated =>
           logger.info(s"Quarantined rollup ${fault.rollupId} had already ended on chain; " +

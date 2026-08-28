@@ -83,7 +83,7 @@ class SnapshotFallbackSpec extends TestKit(ActorSystem("snapshot-fallback"))
   it should "refuse a byte-valid generation whose fields contradict each other" in {
     val header = ChainFixtures.header(600)
     val cursor = SyncCursor(600, header.id, header.parentId)
-    val contradictory = CommittedSyncState(cursor, 600L, Map.empty, Map.empty,
+    val contradictory = CommittedSyncState(cursor, 600L, Map.empty, Map.empty, Map.empty,
       // A stored data-box token says this miner registered; the dictionary says it holds nobody.
       MinerTree.initialState, Some(org.ergoplatform.sdk.ErgoId.create(SyncFixtures.id(7))))
 
@@ -116,7 +116,7 @@ class SnapshotFallbackSpec extends TestKit(ActorSystem("snapshot-fallback"))
   private def stateAt(height: Int): CommittedSyncState = {
     val header = ChainFixtures.header(height)
     CommittedSyncState(SyncCursor(height, header.id, header.parentId), height.toLong,
-      Map.empty, Map.empty, MinerTree.initialState, None)
+      Map.empty, Map.empty, Map.empty, MinerTree.initialState, None)
   }
 
   private def actorOver(saved: Seq[Int],

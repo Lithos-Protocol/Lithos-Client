@@ -51,12 +51,13 @@ trait StateSnapshotStore {
 
 /** Configuration identity that must match before persisted protocol state can be reused. */
 final case class StateSnapshotIdentity(networkType: String,
-                                       rollupStartHeight: Int,
-                                       localMinerHash: String,
-                                       holdingErgoTree: String,
-                                       evaluationErgoTree: String,
-                                       payoutErgoTree: String,
-                                       minerDictionaryToken: String,
+                                        rollupStartHeight: Int,
+                                        localMinerHash: String,
+                                        holdingErgoTree: String,
+                                        evaluationErgoTree: String,
+                                        payoutErgoTree: String,
+                                        collateralErgoTree: String,
+                                        minerDictionaryToken: String,
                                        minerDictionaryGenesisId: String,
                                        collateralToken: String)
 
@@ -65,7 +66,7 @@ object StateSnapshotIdentity {
     StateSnapshotIdentity(protocol.networkType.toString, protocol.rollupStartHeight,
       org.bouncycastle.util.encoders.Hex.toHexString(protocol.localMinerHash),
       protocol.holdingErgoTree, protocol.evaluationErgoTree, protocol.payoutErgoTree,
-      protocol.minerDictionaryToken.toString, protocol.minerDictionaryGenesisId,
+      protocol.collateralErgoTree, protocol.minerDictionaryToken.toString, protocol.minerDictionaryGenesisId,
       protocol.collateralToken.toString)
 }
 
@@ -115,23 +116,25 @@ final class LevelDbStateSnapshotStore(store: KeyValueStore,
 
   override def load(base: Array[Byte]): Either[SnapshotError, PersistedSyncState] =
     store.readSnapshot { view =>
-      view.get(base ++ MetaSuffix).map(meta => view -> meta)
-    }.left.map(Storage).flatMap {
-      case (_, None) => Left(Corrupt(s"generation ${name(base)} has no metadata entry"))
-      case (_, Some(metaBytes)) =>
-        StateSnapshotCodec.decodeMeta(metaBytes, identity).left.map(Corrupt).flatMap { meta =>
-          meta.rollupIds.foldLeft[Either[SnapshotError, Map[String, NISPTree]]](Right(Map.empty)) {
-            (collected, id) =>
-              collected.flatMap { rollups =>
-                store.get(base ++ rollupKey(id)).left.map(Storage).flatMap {
-                  case None => Left(Corrupt(s"generation ${name(base)} is missing rollup $id"))
-                  case Some(value) => StateSnapshotCodec.decodeRollup(value, id)
-                    .left.map(Corrupt).map(tree => rollups + (id -> tree))
-                }
-              }
-          }.flatMap(rollups => StateSnapshotCodec.assemble(meta, rollups).left.map(Corrupt))
+      val loaded: Either[SnapshotError, PersistedSyncState] =
+        view.get(base ++ MetaSuffix).left.map(Storage).flatMap {
+          case None => Left(Corrupt(s"generation ${name(base)} has no metadata entry"))
+          case Some(metaBytes) =>
+            StateSnapshotCodec.decodeMeta(metaBytes, identity).left.map(Corrupt).flatMap { meta =>
+              meta.rollupIds.foldLeft[Either[SnapshotError, Map[String, NISPTree]]](Right(Map.empty)) {
+                (collected, id) =>
+                  collected.flatMap { rollups =>
+                    view.get(base ++ rollupKey(id)).left.map(Storage).flatMap {
+                      case None => Left(Corrupt(s"generation ${name(base)} is missing rollup $id"))
+                      case Some(value) => StateSnapshotCodec.decodeRollup(value, id)
+                        .left.map(Corrupt).map(tree => rollups + (id -> tree))
+                    }
+                  }
+              }.flatMap(rollups => StateSnapshotCodec.assemble(meta, rollups).left.map(Corrupt))
+            }
         }
-    }
+      Right[StoreError, Either[SnapshotError, PersistedSyncState]](loaded)
+    }.left.map(Storage).flatMap(result => result)
 
   override def close(): Either[SnapshotError, Unit] = store.close().left.map(Storage)
 
@@ -185,9 +188,10 @@ final case class SnapshotMeta(cursor: SyncCursor,
                               version: Long,
                               recentCursors: Vector[SyncCursor],
                               minerDictionaryFault: Option[String],
-                              quarantined: Map[String, QuarantineFault],
-                              routes: Map[String, String],
-                              minerTree: MinerTree,
+                               quarantined: Map[String, QuarantineFault],
+                               routes: Map[String, String],
+                               rollupOrigins: Map[String, String],
+                               minerTree: MinerTree,
                               dataBoxToken: Option[ErgoId],
                               rollupIds: Seq[String])
 
@@ -196,7 +200,7 @@ object StateSnapshotCodec {
   private val EnvelopeMagic = 0x4c535345
   private val MetaMagic = 0x4c53534d
   private val RollupMagic = 0x4c535352
-  private val SchemaVersion = 4
+  private val SchemaVersion = 5
   private val ToolkitVersion = "plasma-toolkit-1.1.0"
   private val MaxBlobBytes = 512 * 1024 * 1024
   private val MaxEntries = 1000000
@@ -237,6 +241,7 @@ object StateSnapshotCodec {
         faults.foreach { case (_, fault) =>
           writeString(out, fault.rollupId)
           out.writeInt(fault.genesisHeight)
+          writeString(out, fault.collateralBoxId)
           writeString(out, fault.reason)
           out.writeBoolean(fault.retryable)
           out.writeInt(fault.attempts)
@@ -247,6 +252,13 @@ object StateSnapshotCodec {
         routes.foreach { case (utxoId, rollupId) =>
           writeString(out, utxoId)
           writeString(out, rollupId)
+        }
+
+        val origins = state.rollupOrigins.toSeq.sortBy(_._1)
+        writeCount(out, origins.size, "rollup origin count")
+        origins.foreach { case (rollupId, collateralBoxId) =>
+          writeString(out, rollupId)
+          writeString(out, collateralBoxId)
         }
 
         writeMinerTree(out, state.minerTree)
@@ -273,14 +285,18 @@ object StateSnapshotCodec {
       val minerDictionaryFault = if (in.readBoolean()) Some(readString(in)) else None
       val quarantined = readCount(in, "quarantine count") { _ =>
         val rollupId = readString(in)
-        rollupId -> QuarantineFault(rollupId, in.readInt(), readString(in), in.readBoolean(), in.readInt())
+        rollupId -> QuarantineFault(rollupId, in.readInt(), readString(in), readString(in),
+          in.readBoolean(), in.readInt())
       }.toMap
       val routes = readCount(in, "route count") { _ => readString(in) -> readString(in) }.toMap
+      val origins = readCount(in, "rollup origin count") { _ =>
+        readString(in) -> readString(in)
+      }.toMap
       val minerTree = readMinerTree(in)
       val dataToken = if (in.readBoolean()) Some(ErgoId.create(readString(in))) else None
       val rollupIds = readStrings(in)
       require(in.available() == 0, "trailing bytes after snapshot metadata")
-      SnapshotMeta(cursor, version, recentCursors, minerDictionaryFault, quarantined, routes,
+      SnapshotMeta(cursor, version, recentCursors, minerDictionaryFault, quarantined, routes, origins,
         minerTree, dataToken, rollupIds)
     }
 
@@ -298,7 +314,7 @@ object StateSnapshotCodec {
   def assemble(meta: SnapshotMeta, rollups: Map[String, NISPTree]): Either[String, PersistedSyncState] =
     attempt {
       PersistedSyncState(
-        CommittedSyncState(meta.cursor, meta.version, rollups, meta.routes, meta.minerTree,
+        CommittedSyncState(meta.cursor, meta.version, rollups, meta.routes, meta.rollupOrigins, meta.minerTree,
           meta.dataBoxToken, meta.minerDictionaryFault, meta.quarantined),
         meta.recentCursors)
     }
@@ -390,6 +406,7 @@ object StateSnapshotCodec {
     writeString(out, identity.holdingErgoTree)
     writeString(out, identity.evaluationErgoTree)
     writeString(out, identity.payoutErgoTree)
+    writeString(out, identity.collateralErgoTree)
     writeString(out, identity.minerDictionaryToken)
     writeString(out, identity.minerDictionaryGenesisId)
     writeString(out, identity.collateralToken)
@@ -397,7 +414,7 @@ object StateSnapshotCodec {
 
   private def readIdentity(in: DataInputStream): StateSnapshotIdentity =
     StateSnapshotIdentity(readString(in), in.readInt(), readString(in), readString(in),
-      readString(in), readString(in), readString(in), readString(in), readString(in))
+      readString(in), readString(in), readString(in), readString(in), readString(in), readString(in))
 
   private def writeDictionary(out: DataOutputStream, dictionary: AuthenticatedDictionaryView): Unit = {
     val manifest = dictionary.getManifest()

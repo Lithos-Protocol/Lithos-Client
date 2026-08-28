@@ -66,10 +66,58 @@ class GenesisClassificationSpec extends AnyFlatSpec with Matchers with OptionVal
 
     transition.unauthenticatedGenesis shouldBe empty
     transition.state.routes shouldEqual Map(output -> blockId)
+    transition.state.rollupOrigins shouldEqual Map(blockId -> collateralInput)
+  }
+
+  it should "reject the collateral token when it is held under another script" in {
+    val base = ReducerFixtures.emptyState()
+    val collateralInput = SyncFixtures.id(930001)
+    val tx = ReducerFixtures.genesisTx(3, collateralInput, SyncFixtures.id(930002), height = 100)
+    val block = BlockInfo(SyncFixtures.id(100), 100, Seq(tx), base.cursor.blockId,
+      resolvedInputs = Map(collateralInput -> ReducerFixtures.resolvedInput(
+        collateralInput, Some(ReducerFixtures.CollateralToken), 100, ergoTree = "wrong-script")))
+
+    val transition = BlockReducer.applyBlock(base, block, protocol).toOption.value
+
+    transition.unauthenticatedGenesis.map(_._1) shouldEqual Seq(tx.id)
+    transition.state.rollups shouldBe empty
+    transition.state.quarantined shouldBe empty
+  }
+
+  it should "make an authenticated genesis decode failure terminal at its real origin" in {
+    val base = ReducerFixtures.emptyState()
+    val collateralInput = SyncFixtures.id(940001)
+    val valid = ReducerFixtures.genesisTx(4, collateralInput, SyncFixtures.id(940002), height = 100)
+    // R4 still identifies the empty AVL state, but the rest of the contract-enforced registers are
+    // absent. A real accepted collateral spend cannot have this shape; the fixture exercises the
+    // client/node-data integrity path without pretending it is repairable chain history.
+    val malformed = valid.copy(outputs = valid.outputs.map(out =>
+      out.copy(registers = out.registers.take(1))))
+    val blockId = SyncFixtures.id(100)
+    val block = BlockInfo(blockId, 100, Seq(malformed), base.cursor.blockId,
+      resolvedInputs = Map(collateralInput -> ReducerFixtures.resolvedInput(
+        collateralInput, Some(ReducerFixtures.CollateralToken), 100)))
+
+    val transition = BlockReducer.applyBlock(base, block, protocol).toOption.value
+    val fault = transition.quarantined.loneElement
+
+    fault.genesisHeight shouldEqual 100
+    fault.collateralBoxId shouldEqual collateralInput
+    fault.retryable shouldBe false
+    fault.reason should include("contract-enforced shape")
+    transition.state.repairableQuarantines(3) shouldBe empty
+    transition.state.rollups shouldBe empty
   }
 
   private def submissionEntry: (Array[Byte], Array[Byte]) = {
     val key = SyncFixtures.plasmaEntries(1, 16).head._1
     key -> (Longs.toByteArray(12L) ++ Array.fill[Byte](8)(3))
+  }
+
+  private implicit class LoneElement[A](values: Seq[A]) {
+    def loneElement: A = {
+      values should have size 1
+      values.head
+    }
   }
 }

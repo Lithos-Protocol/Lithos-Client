@@ -14,8 +14,8 @@ import support.{FakeNodeContext, ReducerFixtures, SyncFixtures}
 import scala.concurrent.duration._
 
 /**
- * A rebuild is only installable at the height it was built for. The producer walks the chain while
- * blocks keep committing, so an install has to prove it is not one block stale.
+ * A rebuild is only installable at the exact cursor it was built for. The producer walks the chain
+ * while blocks and reorgs continue, so an install has to prove it still belongs to that chain.
  */
 class RepairInstallSpec extends TestKit(ActorSystem("repair-install"))
   with AnyFlatSpecLike with Matchers with BeforeAndAfterAll {
@@ -32,32 +32,31 @@ class RepairInstallSpec extends TestKit(ActorSystem("repair-install"))
     requester.send(handler, RestoreCommittedState(seeded, Vector(seeded.cursor)))
     requester.expectMsgType[BlockCommitted]
 
-    val rebuilt = MinerTree.initialState.copy(numMiners = 2)
-    requester.send(handler, RepairMinerDictionary(seeded.cursor.height, rebuilt, None))
+    val rebuilt = MinerTree.initialState.copy(syncHeight = seeded.cursor.height)
+    requester.send(handler, RepairMinerDictionary(seeded.cursor, rebuilt, None))
     requester.expectMsgType[BlockCommitted]
 
     requester.send(handler, GetCommittedState)
     val state = requester.expectMsgType[CommittedState].state
     state.minerDictionaryFault shouldBe empty
-    state.minerTree.numMiners shouldEqual 2
+    state.minerTree.syncHeight shouldEqual seeded.cursor.height
     utils.Globals.syncView.minerDictionary.available shouldBe false // still catching up, not faulted
   }
 
   /**
-   * The height guard is the whole reason the rebuild carries one. Without it an install could replace
-   * current dictionary state with a reconstruction that predates the newest commit.
+   * The cursor guard rejects a reconstruction from a replaced tip even when the height is unchanged.
    */
-  it should "refuse a rebuilt dictionary once the cursor has moved past it" in {
+  it should "refuse a rebuilt dictionary from another block at the same height" in {
     val (handler, _) = newHandler()
     val requester = TestProbe()
     val seeded = faultedSeed
     requester.send(handler, RestoreCommittedState(seeded, Vector(seeded.cursor)))
     requester.expectMsgType[BlockCommitted]
 
-    val stale = seeded.cursor.height - 1
-    requester.send(handler, RepairMinerDictionary(stale, MinerTree.initialState.copy(numMiners = 9), None))
+    val stale = seeded.cursor.copy(blockId = SyncFixtures.id(799998), parentId = SyncFixtures.id(799997))
+    requester.send(handler, RepairMinerDictionary(stale, MinerTree.initialState, None))
     val rejected = requester.expectMsgType[BlockRejected]
-    rejected.reason should include(s"rebuilt at height $stale")
+    rejected.reason should include(s"rebuilt at ${stale.blockId}@${stale.height}")
 
     requester.send(handler, GetCommittedState)
     requester.expectMsgType[CommittedState].state.minerDictionaryFault should not be empty
@@ -71,13 +70,14 @@ class RepairInstallSpec extends TestKit(ActorSystem("repair-install"))
     requester.expectMsgType[BlockCommitted]
 
     val tree = SyncFixtures.emptyNispTree(rollupId, SyncFixtures.id(700002), 90)
-    requester.send(handler, RepairRollup(rollupId, seeded.cursor.height,
+    requester.send(handler, RepairRollup(rollupId, seeded.cursor,
       RollupRepairResult.Rebuilt(tree)))
 
     requester.send(handler, GetCommittedState)
     val state = requester.expectMsgType[CommittedState].state
     state.rollups.keySet shouldEqual Set(rollupId)
     state.routes shouldEqual Map(tree.utxoId -> rollupId)
+    state.rollupOrigins shouldEqual Map(rollupId -> seeded.quarantined(rollupId).collateralBoxId)
     state.quarantined shouldBe empty
   }
 
@@ -89,12 +89,13 @@ class RepairInstallSpec extends TestKit(ActorSystem("repair-install"))
     requester.send(handler, RestoreCommittedState(seeded, Vector(seeded.cursor)))
     requester.expectMsgType[BlockCommitted]
 
-    requester.send(handler, RepairRollup(rollupId, seeded.cursor.height, RollupRepairResult.Terminated))
+    requester.send(handler, RepairRollup(rollupId, seeded.cursor, RollupRepairResult.Terminated))
 
     requester.send(handler, GetCommittedState)
     val state = requester.expectMsgType[CommittedState].state
     state.quarantined shouldBe empty
     state.rollups shouldBe empty
+    state.rollupOrigins shouldBe empty
   }
 
   /** A failed rebuild has to count, or a permanently broken rollup is walked on every interval. */
@@ -105,7 +106,7 @@ class RepairInstallSpec extends TestKit(ActorSystem("repair-install"))
     requester.send(handler, RestoreCommittedState(seeded, Vector(seeded.cursor)))
     requester.expectMsgType[BlockCommitted]
 
-    requester.send(handler, RepairRollup(rollupId, seeded.cursor.height,
+    requester.send(handler, RepairRollup(rollupId, seeded.cursor,
       RollupRepairResult.Failed("indexed node has no rollup box", retryable = true)))
 
     requester.send(handler, GetCommittedState)
@@ -114,8 +115,8 @@ class RepairInstallSpec extends TestKit(ActorSystem("repair-install"))
     fault.reason should include("no rollup box")
   }
 
-  /** An install built against a cursor the owner has moved past is the same hazard as the dictionary. */
-  it should "ignore a rollup rebuild aimed at a height the cursor has left" in {
+  /** A same-height fork must not accept a rollup reconstructed from the replaced block. */
+  it should "ignore a rollup rebuild from another block at the same height" in {
     val (handler, _) = newHandler()
     val requester = TestProbe()
     val seeded = quarantinedSeed
@@ -123,7 +124,8 @@ class RepairInstallSpec extends TestKit(ActorSystem("repair-install"))
     requester.expectMsgType[BlockCommitted]
 
     val tree = SyncFixtures.emptyNispTree(rollupId, SyncFixtures.id(700002), 90)
-    requester.send(handler, RepairRollup(rollupId, seeded.cursor.height - 5,
+    val stale = seeded.cursor.copy(blockId = SyncFixtures.id(799996), parentId = SyncFixtures.id(799995))
+    requester.send(handler, RepairRollup(rollupId, stale,
       RollupRepairResult.Rebuilt(tree)))
     requester.expectNoMessage(200.millis)
 
@@ -143,7 +145,8 @@ class RepairInstallSpec extends TestKit(ActorSystem("repair-install"))
     ReducerFixtures.emptyState(height = startHeight - 1,
       blockId = SyncFixtures.id(startHeight - 1)).copy(
       quarantined = Map(rollupId ->
-        QuarantineFault(rollupId, 90, "missing context variable 2", retryable = true)))
+        QuarantineFault(rollupId, 90, SyncFixtures.id(700000),
+          "missing context variable 2", retryable = true)))
 
   private def newHandler() = {
     val snapshots = TestProbe()

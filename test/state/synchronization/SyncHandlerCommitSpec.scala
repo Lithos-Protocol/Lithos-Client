@@ -108,6 +108,32 @@ class SyncHandlerCommitSpec extends TestKit(ActorSystem("sync-handler-commit"))
     retained.map(_.blockId) should not contain orphan.id
   }
 
+  it should "restore the exact rollup origin map on rollback" in {
+    val (handler, _, _) = newHandler()
+    val requester = TestProbe()
+    seed(handler, requester)
+    val collateralInput = SyncFixtures.id(290001)
+    val holdingOutput = SyncFixtures.id(290002)
+    val rollupId = SyncFixtures.id(100)
+    val genesis = ReducerFixtures.genesisTx(29, collateralInput, holdingOutput, height = 100)
+    val first = BlockInfo(rollupId, 100, Seq(genesis), SyncFixtures.id(99),
+      resolvedInputs = Map(collateralInput -> ReducerFixtures.resolvedInput(
+        collateralInput, Some(ReducerFixtures.CollateralToken), 100)))
+    val second = BlockInfo(SyncFixtures.id(101), 101, Seq.empty, first.id)
+
+    requester.send(handler, ApplyBlock(first))
+    requester.expectMsgType[BlockCommitted]
+    requester.send(handler, ApplyBlock(second))
+    requester.expectMsgType[BlockCommitted]
+    requester.send(handler, RollbackTo(first.id))
+    requester.expectMsg(RollbackCompleted(SyncCursor(100, first.id, first.parentId)))
+    requester.send(handler, GetCommittedState)
+
+    val restored = requester.expectMsgType[CommittedState].state
+    restored.rollupOrigins shouldEqual Map(rollupId -> collateralInput)
+    restored.routes shouldEqual Map(holdingOutput -> rollupId)
+  }
+
   /**
    * A candidate is only offered when a write will follow, because each one costs a deep copy of every
    * dictionary.

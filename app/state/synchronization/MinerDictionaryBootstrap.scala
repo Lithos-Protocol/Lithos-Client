@@ -103,7 +103,7 @@ final class MinerDictionaryBootstrap(nodeApi: NodeApi,
 
   /** Wraps dictionary state in the reducer's complete-state input. */
   private def seedState(tree: MinerTree): CommittedSyncState =
-    CommittedSyncState(SyncCursor(0, "", ""), 0L, Map.empty, Map.empty, tree, None)
+    CommittedSyncState(SyncCursor(0, "", ""), 0L, Map.empty, Map.empty, Map.empty, tree, None)
 
   /** Verifies the reconstructed tip against the current unspent dictionary box and digest. */
   private def verify(result: WalkResult): Either[String, Unit] =

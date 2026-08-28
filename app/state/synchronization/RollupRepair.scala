@@ -2,10 +2,12 @@ package state.synchronization
 
 import lfsm.states.NISPTree
 import node.NodeApi
+import node.model.IndexedBox
 import org.slf4j.{Logger, LoggerFactory}
-import state.messages.{BlockTx, NodeSync}
+import state.messages.{BlockInfo, BlockTx, NodeSync}
 
 import scala.annotation.tailrec
+import scala.util.{Failure, Success}
 
 /** A quarantined rollup rebuilt to a committed height, or the reason it stays quarantined. */
 sealed trait RollupRepairResult
@@ -17,18 +19,23 @@ object RollupRepairResult {
 }
 
 /**
- * Rebuilds one quarantined rollup by replaying its own spend chain from its genesis block.
- * Two indexed calls per transform, similar to bootstrap protocols.
+ * Rebuilds one quarantined rollup from its collateral box and then follows only that rollup's boxes.
+ * Each applied link is authenticated against its indexed transaction and the canonical header chain;
+ * no full block is fetched or replayed.
  */
 final class RollupRepair(nodeApi: NodeApi, protocol: SyncProtocolContext, maxTransforms: Int) {
 
   private val logger: Logger = LoggerFactory.getLogger("RollupRepair")
   private val source = new CanonicalBlockSource(nodeApi)
 
+  private sealed trait SpendRead
+  private case object BeyondCursor extends SpendRead
+  private final case class Included(block: BlockInfo, tx: BlockTx) extends SpendRead
+
   def run(fault: QuarantineFault, committedHeight: Int): RollupRepairResult = {
     val started = System.currentTimeMillis()
     val replay = new BlockReducer.RollupReplay(protocol)
-    seed(replay, fault) match {
+    seed(replay, fault, committedHeight) match {
       case Left(failure) => failure
       case Right(utxoId) => walk(replay, fault.rollupId, utxoId, committedHeight, applied = 0) match {
         case Left(failure) => failure
@@ -44,31 +51,37 @@ final class RollupRepair(nodeApi: NodeApi, protocol: SyncProtocolContext, maxTra
     }
   }
 
-  /** Replays the genesis block so the rollup exists before its own spends are followed. */
+  /** Authenticate and apply the one genesis transaction that spent the retained collateral box. */
   private def seed(replay: BlockReducer.RollupReplay,
-                   fault: QuarantineFault): Either[RollupRepairResult, String] =
-    source.blockAt(fault.genesisHeight) match {
-      case scala.util.Failure(ex) =>
-        Left(RollupRepairResult.Failed(s"could not read genesis block at ${fault.genesisHeight}: " +
-          message(ex), retryable = true))
-      case scala.util.Success(block) if block.id != fault.rollupId =>
-        Left(RollupRepairResult.Failed(s"height ${fault.genesisHeight} now holds block ${block.id}, " +
-          s"not ${fault.rollupId}", retryable = false))
-      case scala.util.Success(block) =>
-        val applied = block.txs.foldLeft[Either[RollupRepairResult, Unit]](Right(())) {
-          case (Right(_), tx) => replay.apply(block, tx) match {
-            case Right(_) => Right(())
-            case Left(error) =>
-              Left(RollupRepairResult.Failed(error.message, BlockReducer.isRetryable(error)))
+                   fault: QuarantineFault,
+                   committedHeight: Int): Either[RollupRepairResult, String] =
+    readBox(fault.collateralBoxId, "collateral").flatMap { collateral =>
+      readLinkedSpend(collateral, committedHeight).flatMap {
+        case BeyondCursor => Left(RollupRepairResult.Failed(
+          s"collateral box ${fault.collateralBoxId} is spent above committed height $committedHeight",
+          retryable = true))
+        case Included(block, tx) if block.id != fault.rollupId =>
+          Left(RollupRepairResult.Failed(
+            s"collateral transaction ${tx.id} is in block ${block.id}, not rollup ${fault.rollupId}",
+            retryable = true))
+        case Included(block, tx) if block.height != fault.genesisHeight =>
+          Left(RollupRepairResult.Failed(
+            s"collateral transaction ${tx.id} is at height ${block.height}, not genesis height " +
+              s"${fault.genesisHeight}", retryable = true))
+        case Included(block, tx) => replay.apply(block, tx) match {
+          case Left(error) =>
+            Left(RollupRepairResult.Failed(error.message, BlockReducer.isRetryable(error)))
+          case Right(false) =>
+            Left(RollupRepairResult.Failed(
+              s"collateral transaction ${tx.id} created no recognized rollup state", retryable = false))
+          case Right(true) => replay.rollup(fault.rollupId) match {
+            case Some(tree) => Right(tree.utxoId)
+            case None => Left(RollupRepairResult.Failed(
+              s"collateral transaction ${tx.id} did not create rollup ${fault.rollupId}",
+              retryable = false))
           }
-          case (left, _) => left
         }
-        applied.flatMap(_ => replay.rollup(fault.rollupId) match {
-          case Some(tree) => Right(tree.utxoId)
-          case None => Left(RollupRepairResult.Failed(
-            s"block ${fault.rollupId} no longer produces a rollup this build recognizes",
-            retryable = false))
-        })
+      }
     }
 
   @tailrec
@@ -77,50 +90,101 @@ final class RollupRepair(nodeApi: NodeApi, protocol: SyncProtocolContext, maxTra
                    boxId: String,
                    committedHeight: Int,
                    applied: Int): Either[RollupRepairResult, Int] =
-    nodeApi.indexedBoxById(boxId) match {
-      case scala.util.Failure(ex) =>
-        Left(RollupRepairResult.Failed(s"could not read rollup box $boxId: ${message(ex)}",
-          retryable = true))
-      case scala.util.Success(None) =>
-        Left(RollupRepairResult.Failed(s"indexed node has no rollup box $boxId", retryable = true))
-      case scala.util.Success(Some(box)) => box.spentTransactionId match {
-        // Unspent, or spent above the cursor: the block path owns everything from here.
+    readBox(boxId, "rollup") match {
+      case Left(failure) => Left(failure)
+      case Right(box) => box.spentTransactionId match {
         case None => Right(applied)
-        case Some(_) if box.spendingHeight.exists(_ > committedHeight) => Right(applied)
-        case Some(_) if applied >= maxTransforms =>
-          Left(RollupRepairResult.Failed(
-            s"rollup history exceeds sync.minerDictionary.maxTransforms ($maxTransforms)",
-            retryable = false))
-        case Some(txId) => readSpend(txId, box.spendingHeight.getOrElse(committedHeight)) match {
+        case Some(_) => readLinkedSpend(box, committedHeight) match {
           case Left(failure) => Left(failure)
-          case Right((tx, height)) =>
-            val block = state.messages.BlockInfo(id = "", height = height, txs = Seq(tx), parentId = "")
-            replay.apply(block, tx) match {
-              case Left(error) =>
-                Left(RollupRepairResult.Failed(s"at height $height: ${error.message}",
-                  BlockReducer.isRetryable(error)))
-              case Right(false) =>
-                Left(RollupRepairResult.Failed(
-                  s"transaction $txId at height $height changed no rollup state", retryable = false))
-              case Right(true) => replay.rollup(rollupId) match {
-                // Removed by its own payout or phase transition, which is a clean ending.
-                case None => Right(applied + 1)
-                case Some(tree) =>
-                  walk(replay, rollupId, tree.utxoId, committedHeight, applied + 1)
-              }
+          // The current box is the committed state at the cutoff; its later spend belongs to block sync.
+          case Right(BeyondCursor) => Right(applied)
+          case Right(Included(_, _)) if applied >= maxTransforms =>
+            Left(RollupRepairResult.Failed(
+              s"rollup history exceeds sync.minerDictionary.maxTransforms ($maxTransforms)",
+              retryable = false))
+          case Right(Included(block, tx)) => replay.apply(block, tx) match {
+            case Left(error) =>
+              Left(RollupRepairResult.Failed(s"at height ${block.height}: ${error.message}",
+                BlockReducer.isRetryable(error)))
+            case Right(false) =>
+              Left(RollupRepairResult.Failed(
+                s"transaction ${tx.id} at height ${block.height} changed no rollup state",
+                retryable = false))
+            case Right(true) => replay.rollup(rollupId) match {
+              // Removed by its own payout or phase transition, which is a clean ending.
+              case None => Right(applied + 1)
+              case Some(tree) => walk(replay, rollupId, tree.utxoId, committedHeight, applied + 1)
             }
+          }
         }
       }
     }
 
-  private def readSpend(txId: String, height: Int): Either[RollupRepairResult, (BlockTx, Int)] =
-    nodeApi.indexedTransactionById(txId) match {
-      case scala.util.Failure(ex) =>
-        Left(RollupRepairResult.Failed(s"could not read rollup transaction $txId: ${message(ex)}",
+  private def readBox(boxId: String,
+                      kind: String): Either[RollupRepairResult, IndexedBox] =
+    nodeApi.indexedBoxById(boxId) match {
+      case Failure(ex) => Left(RollupRepairResult.Failed(
+        s"could not read $kind box $boxId: ${message(ex)}", retryable = true))
+      case Success(None) => Left(RollupRepairResult.Failed(
+        s"indexed node has no $kind box $boxId", retryable = true))
+      case Success(Some(box)) if box.boxId != boxId => Left(RollupRepairResult.Failed(
+        s"indexed node returned box ${box.boxId} for requested $kind box $boxId", retryable = true))
+      case Success(Some(box)) => Right(box)
+    }
+
+  /** Every spent link needs both index evidence and the authoritative transaction inclusion record. */
+  private def readLinkedSpend(box: IndexedBox,
+                              committedHeight: Int): Either[RollupRepairResult, SpendRead] =
+    box.spentTransactionId match {
+      case None => Left(RollupRepairResult.Failed(
+        s"box ${box.boxId} has no spending transaction", retryable = true))
+      case Some(txId) => box.spendingHeight match {
+        case None => Left(RollupRepairResult.Failed(
+          s"box ${box.boxId} names spending transaction $txId without a spending height",
           retryable = true))
-      case scala.util.Success(None) =>
-        Left(RollupRepairResult.Failed(s"indexed node has no transaction $txId", retryable = true))
-      case scala.util.Success(Some(indexed)) => Right((NodeSync.blockTx(indexed), height))
+        case Some(indexedHeight) => readSpend(txId, box, indexedHeight, committedHeight)
+      }
+    }
+
+  private def readSpend(txId: String,
+                        spentBox: IndexedBox,
+                        indexedSpendingHeight: Int,
+                        committedHeight: Int): Either[RollupRepairResult, SpendRead] =
+    nodeApi.indexedTransactionById(txId) match {
+      case Failure(ex) => Left(RollupRepairResult.Failed(
+        s"could not read rollup transaction $txId: ${message(ex)}", retryable = true))
+      case Success(None) => Left(RollupRepairResult.Failed(
+        s"indexed node has no transaction $txId", retryable = true))
+      case Success(Some(indexed)) if indexed.id != txId => Left(RollupRepairResult.Failed(
+        s"indexed node returned transaction ${indexed.id} for requested transaction $txId",
+        retryable = true))
+      case Success(Some(indexed)) if !indexed.inputs.exists(_.boxId == spentBox.boxId) =>
+        Left(RollupRepairResult.Failed(
+          s"transaction $txId does not spend followed box ${spentBox.boxId}", retryable = true))
+      case Success(Some(indexed)) if indexed.inclusionHeight < 0 =>
+        Left(RollupRepairResult.Failed(
+          s"transaction $txId has no valid inclusion height", retryable = true))
+      case Success(Some(indexed)) if indexed.inclusionHeight != indexedSpendingHeight =>
+        Left(RollupRepairResult.Failed(
+          s"transaction $txId is included at ${indexed.inclusionHeight}, but box ${spentBox.boxId} " +
+            s"reports spending height $indexedSpendingHeight", retryable = true))
+      case Success(Some(indexed)) => source.headerAt(indexed.inclusionHeight) match {
+        case Failure(ex) => Left(RollupRepairResult.Failed(
+          s"could not authenticate transaction $txId at height ${indexed.inclusionHeight}: ${message(ex)}",
+          retryable = true))
+        case Success(header) if header.id != indexed.blockId => Left(RollupRepairResult.Failed(
+          s"transaction $txId names block ${indexed.blockId}, but canonical height " +
+            s"${indexed.inclusionHeight} is ${header.id}", retryable = true))
+        case Success(_) if indexed.inclusionHeight > committedHeight => Right(BeyondCursor)
+        case Success(header) =>
+          val tx = NodeSync.blockTx(indexed)
+          // Resolve the followed input from the separately fetched box record, not another copy of
+          // its contents embedded in the transaction endpoint. The box id is the link; the retained
+          // record is the collateral/script evidence genesis classification authenticates.
+          val inputs = indexed.inputs.map(in => in.boxId -> NodeSync.txOutput(in)).toMap +
+            (spentBox.boxId -> NodeSync.txOutput(spentBox))
+          Right(Included(BlockInfo(header.id, header.height, Seq(tx), header.parentId, inputs), tx))
+      }
     }
 
   private def message(ex: Throwable): String =

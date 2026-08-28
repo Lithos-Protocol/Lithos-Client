@@ -170,7 +170,7 @@ class MinerDictionaryBootstrapSpec extends AnyFlatSpec with Matchers with Mockit
 
   private def seedState(tree: MinerTree): CommittedSyncState =
     CommittedSyncState(state.messages.SyncMessages.SyncCursor(0, "", ""), 0L,
-      Map.empty, Map.empty, tree, None)
+      Map.empty, Map.empty, Map.empty, tree, None)
 
   /** A node whose box index answers the spend links the walk follows. */
   private def indexerFor(chain: Vector[Step],

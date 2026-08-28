@@ -85,8 +85,11 @@ class BootstrapRecoverySpec extends TestKit(ActorSystem("bootstrap-recovery"))
     workingDictionary(nodeApi)
     frame ! CheckBlock
 
-    val repair = sync.expectMsgType[RepairMinerDictionary](5.seconds)
-    repair.atHeight shouldEqual committed.height
+    val repair = sync.fishForMessage(5.seconds) {
+      case _: RepairMinerDictionary => true
+      case _ => false
+    }.asInstanceOf[RepairMinerDictionary]
+    repair.atCursor shouldEqual committed
     repair.minerTree.utxoId shouldEqual genesisId
     frame ! akka.actor.PoisonPill
   }

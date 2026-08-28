@@ -192,35 +192,35 @@ class MempoolView @Inject()(config: play.api.Configuration,
 
   /** Every unconfirmed transaction at a rollup script, deduplicated, and whether any script paged. */
   private def fetchAll(): Try[(Seq[BlockTx], Boolean)] =
-    rollupTrees.foldLeft(Try((Vector.empty[BlockTx], false))) { case (accumulated, tree) =>
-      accumulated.flatMap { case (collected, paged) =>
-        fetchByTree(tree, collected).map { case (next, treePaged) => (next, paged || treePaged) }
+    rollupTrees.foldLeft(Try((Vector.empty[BlockTx], Set.empty[String], false))) {
+      case (accumulated, tree) =>
+      accumulated.flatMap { case (collected, seen, paged) =>
+        fetchByTree(tree, collected, seen).map { case (next, nextSeen, treePaged) =>
+          (next, nextSeen, paged || treePaged)
+        }
       }
-    }.map { case (collected, paged) =>
-      // A transaction spending one rollup script and creating another is returned under both.
-      val unique = collected.foldLeft((Set.empty[String], Vector.empty[BlockTx])) {
-        case ((seen, kept), tx) =>
-          if (seen.contains(tx.id)) (seen, kept) else (seen + tx.id, kept :+ tx)
-      }._2
-      (unique, paged)
-    }
+    }.map { case (collected, _, paged) => (collected, paged) }
 
   @tailrec
   private def fetchByTree(ergoTree: String,
-                          collected: Vector[BlockTx],
-                          offset: Int = 0,
-                          paged: Boolean = false): Try[(Vector[BlockTx], Boolean)] =
+                           collected: Vector[BlockTx],
+                           seen: Set[String],
+                           offset: Int = 0,
+                           paged: Boolean = false): Try[(Vector[BlockTx], Set[String], Boolean)] =
     nodeApi.unconfirmedTransactionsByErgoTree(ergoTree, Paging(offset, PageSize)) match {
       case Failure(ex) => Failure(ex)
       case Success(page) =>
-        val next = collected ++ page.map(NodeSync.blockTx)
+        val (next, nextSeen) = page.iterator.map(NodeSync.blockTx)
+          .foldLeft((collected, seen)) { case ((kept, ids), tx) =>
+            if (ids.contains(tx.id)) (kept, ids) else (kept :+ tx, ids + tx.id)
+          }
         if (next.size > maxTransactions)
           Failure(new IllegalStateException(
             s"Unconfirmed rollup transactions exceed sync.mempool.maxTransactions ($maxTransactions); " +
               "mempool chaining is unavailable, and transactions will build on " +
               "confirmed state"))
-        else if (page.size < PageSize) Success((next, paged))
-        else fetchByTree(ergoTree, next, offset + page.size, paged = true)
+        else if (page.size < PageSize) Success((next, nextSeen, paged))
+        else fetchByTree(ergoTree, next, nextSeen, offset + page.size, paged = true)
     }
 
   /** Readiness is owned by SyncHandler and published, rather than asked for on every tick. */

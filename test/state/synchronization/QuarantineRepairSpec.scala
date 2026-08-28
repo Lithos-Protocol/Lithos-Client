@@ -16,6 +16,7 @@ class QuarantineRepairSpec extends AnyFlatSpec with Matchers with OptionValues {
   private val protocol = ReducerFixtures.protocol()
   private val rollupId = SyncFixtures.id(600001)
   private val inputUtxo = SyncFixtures.id(600002)
+  private val origin = SyncFixtures.id(800000)
 
   "A quarantine" should "record the genesis height so the rollup can be walked again" in {
     val transition = quarantineWith(ReducerFixtures.proofHex(Array[Byte](1, 2, 3)))
@@ -23,6 +24,7 @@ class QuarantineRepairSpec extends AnyFlatSpec with Matchers with OptionValues {
     val fault = transition.quarantined.loneElement
     fault.rollupId shouldEqual rollupId
     fault.genesisHeight shouldEqual 99
+    fault.collateralBoxId shouldEqual origin
     fault.attempts shouldEqual 0
     transition.state.quarantined.keySet shouldEqual Set(rollupId)
   }
@@ -40,25 +42,35 @@ class QuarantineRepairSpec extends AnyFlatSpec with Matchers with OptionValues {
     BlockReducer.isRetryable(SyncApplyError.InvalidProof("tx", "insertion")) shouldBe false
   }
 
-  /** Attempts accumulate across blocks, or a fault would be retried for the rollup's whole life. */
-  it should "carry its attempt count into a later quarantine of the same rollup" in {
+  /** A later fault must not reset attempts already recorded for another quarantined rollup. */
+  it should "preserve attempt counts when a later block introduces another quarantine" in {
     val first = quarantineWith(ReducerFixtures.proofHex(Array[Byte](1, 2, 3)))
     val attempted = first.state.copy(
       quarantined = first.state.quarantined.mapValues(_.attempted.attempted).toMap)
+    val laterId = SyncFixtures.id(600010)
+    val laterInput = SyncFixtures.id(600011)
+    val withLater = ReducerFixtures.addRollup(attempted, laterId, laterInput, PlasmaDictionary.empty())
+    val (key, value) = SyncFixtures.plasmaEntries(1, 16).head
+    val expected = PlasmaDictionary.empty()
+    expected.insert(key -> value)
+    val bad = ReducerFixtures.submissionTx(31, laterInput, SyncFixtures.id(600012), 101,
+      key, value, ReducerFixtures.proofHex(Array[Byte](9)), expected,
+      numMiners = 1, totalScore = BigInt(0), period = 99L)
 
-    val next = BlockReducer.applyBlock(attempted,
-      BlockInfo(SyncFixtures.id(101), 101, Seq.empty, attempted.cursor.blockId), protocol)
+    val next = BlockReducer.applyBlock(withLater,
+      BlockInfo(SyncFixtures.id(101), 101, Seq(bad), withLater.cursor.blockId), protocol)
       .toOption.value
 
     next.state.quarantined(rollupId).attempts shouldEqual 2
+    next.state.quarantined(laterId).attempts shouldEqual 0
   }
 
   /** Only faults that could clear, and have attempts left, are worth the walk. */
   it should "offer only retryable faults inside the configured attempt budget" in {
     val base = ReducerFixtures.emptyState()
-    val retryable = QuarantineFault("a", 10, "decode", retryable = true, attempts = 1)
-    val exhausted = QuarantineFault("b", 20, "decode", retryable = true, attempts = 3)
-    val terminal = QuarantineFault("c", 30, "mismatch", retryable = false, attempts = 0)
+    val retryable = QuarantineFault("a", 10, "origin-a", "decode", retryable = true, attempts = 1)
+    val exhausted = QuarantineFault("b", 20, "origin-b", "decode", retryable = true, attempts = 3)
+    val terminal = QuarantineFault("c", 30, "origin-c", "mismatch", retryable = false, attempts = 0)
     val state = base.copy(quarantined =
       Map("a" -> retryable, "b" -> exhausted, "c" -> terminal))
 
@@ -68,8 +80,8 @@ class QuarantineRepairSpec extends AnyFlatSpec with Matchers with OptionValues {
   /** Newest first, because a rollup still inside its windows is the one worth rebuilding. */
   it should "offer the newest repairable fault first" in {
     val base = ReducerFixtures.emptyState()
-    val older = QuarantineFault("older", 10, "decode", retryable = true)
-    val newer = QuarantineFault("newer", 90, "decode", retryable = true)
+    val older = QuarantineFault("older", 10, "origin-older", "decode", retryable = true)
+    val newer = QuarantineFault("newer", 90, "origin-newer", "decode", retryable = true)
     val state = base.copy(quarantined = Map("older" -> older, "newer" -> newer))
 
     state.repairableQuarantines(maxAttempts = 3).map(_.rollupId) shouldEqual Seq("newer", "older")
@@ -81,7 +93,8 @@ class QuarantineRepairSpec extends AnyFlatSpec with Matchers with OptionValues {
       PlasmaDictionary.empty())
 
     an[IllegalArgumentException] should be thrownBy tracked.copy(
-      quarantined = Map(rollupId -> QuarantineFault(rollupId, 99, "decode", retryable = true)))
+      quarantined = Map(rollupId -> QuarantineFault(
+        rollupId, 99, origin, "decode", retryable = true)))
   }
 
   private def quarantineWith(proof: String): BlockTransition = {

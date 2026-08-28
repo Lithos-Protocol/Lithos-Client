@@ -18,8 +18,8 @@ class StateSnapshotStoreSpec extends AnyFlatSpec with Matchers with BeforeAndAft
   private var directories = Vector.empty[Path]
   private val MaxEntry = 64 * 1024 * 1024
   private val identity = StateSnapshotIdentity("TESTNET", 100, "miner-hash",
-    "holding-tree", "evaluation-tree", "payout-tree", SyncFixtures.id(7000), SyncFixtures.id(7002),
-    SyncFixtures.id(7001))
+    "holding-tree", "evaluation-tree", "payout-tree", "collateral-tree", SyncFixtures.id(7000),
+    SyncFixtures.id(7002), SyncFixtures.id(7001))
 
   override def afterEach(): Unit = {
     directories.foreach { path =>
@@ -41,6 +41,7 @@ class StateSnapshotStoreSpec extends AnyFlatSpec with Matchers with BeforeAndAft
     restored.cursor shouldEqual original.cursor
     restored.version shouldEqual original.version
     restored.routes shouldEqual original.routes
+    restored.rollupOrigins shouldEqual original.rollupOrigins
     restored.dataBoxToken shouldEqual original.dataBoxToken
     restored.minerDictionaryFault shouldEqual original.minerDictionaryFault
     restored.rollups.keySet shouldEqual original.rollups.keySet
@@ -74,7 +75,7 @@ class StateSnapshotStoreSpec extends AnyFlatSpec with Matchers with BeforeAndAft
   /** A fault that did not survive restart would silently start its attempt count again. */
   it should "round-trip quarantine faults with their attempt counts" in {
     val base = populatedSnapshot(100, 8L)
-    val fault = QuarantineFault("dropped-rollup", 88, "missing context variable 2",
+    val fault = QuarantineFault("dropped-rollup", 88, SyncFixtures.id(4999), "missing context variable 2",
       retryable = true, attempts = 2)
     val persisted = base.copy(state = base.state.copy(quarantined = Map(fault.rollupId -> fault)))
 
@@ -229,7 +230,9 @@ class StateSnapshotStoreSpec extends AnyFlatSpec with Matchers with BeforeAndAft
     val minerTree = MinerTree.initialState.copy(dictionary = minerDictionary, numMiners = 1,
       hasMiner = true, syncHeight = height, savedHeight = height)
     CommittedSyncState(SyncCursor(height, SyncFixtures.id(height), SyncFixtures.id(height - 1)),
-      version, tracked.toMap, tracked.map { case (id, tree) => tree.utxoId -> id }.toMap, minerTree,
+      version, tracked.toMap, tracked.map { case (id, tree) => tree.utxoId -> id }.toMap,
+      tracked.zipWithIndex.map { case ((id, _), index) => id -> SyncFixtures.id(5200 + index) }.toMap,
+      minerTree,
       Some(ErgoId.create(SyncFixtures.id(6000))))
   }
 }

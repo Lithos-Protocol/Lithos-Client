@@ -54,6 +54,17 @@ class MempoolPressureSpec extends TestKit(ActorSystem("mempool-pressure"))
     view ! akka.actor.PoisonPill
   }
 
+  it should "count one transaction returned under two scripts only once" in {
+    val sync = TestProbe()
+    ready(tracked = 1)
+    val view = viewOver(transactions = 1, bound = 1, sync, duplicateAcrossTrees = true)
+
+    val snapshot = sync.expectMsgType[MempoolSnapshot]
+    snapshot.chains.keySet shouldEqual Set(root(0))
+    snapshot.chains(root(0)).transforms.map(_.tx.id).toSet shouldEqual Set(SyncFixtures.id(400000))
+    view ! akka.actor.PoisonPill
+  }
+
   /** Following an untracked root would let anyone paying a rollup script cost this client work. */
   it should "build no chain for a root this client does not track" in {
     val sync = TestProbe()
@@ -145,7 +156,8 @@ class MempoolPressureSpec extends TestKit(ActorSystem("mempool-pressure"))
                        bound: Int,
                        sync: TestProbe,
                        growBy: Int = 0,
-                       reads: Option[java.util.concurrent.atomic.AtomicInteger] = None): akka.actor.ActorRef = {
+                       reads: Option[java.util.concurrent.atomic.AtomicInteger] = None,
+                       duplicateAcrossTrees: Boolean = false): akka.actor.ActorRef = {
     val api = mock[NodeApi]
     val (nodeContext, _, wallet) = FakeNodeContext(api, numAddresses = 1)
     val protocol = ReducerFixtures.protocol(rollupStartHeight = 100)
@@ -157,7 +169,9 @@ class MempoolPressureSpec extends TestKit(ActorSystem("mempool-pressure"))
       val requested = invocation.getArgument[String](0)
       val paging = invocation.getArgument[Paging](1)
       reads.foreach(_.incrementAndGet())
-      if (requested != protocol.holdingErgoTree) Success(Seq.empty)
+      val answers = requested == protocol.holdingErgoTree ||
+        (duplicateAcrossTrees && requested == protocol.evaluationErgoTree)
+      if (!answers) Success(Seq.empty)
       else {
         // A pass is one walk of this script; the second pass answers with the changed mempool.
         if (paging.offset == 0) passes.incrementAndGet()
