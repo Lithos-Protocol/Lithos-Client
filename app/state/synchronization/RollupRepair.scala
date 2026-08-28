@@ -100,7 +100,7 @@ final class RollupRepair(nodeApi: NodeApi, protocol: SyncProtocolContext, maxTra
           case Right(BeyondCursor) => Right(applied)
           case Right(Included(_, _)) if applied >= maxTransforms =>
             Left(RollupRepairResult.Failed(
-              s"rollup history exceeds sync.minerDictionary.maxTransforms ($maxTransforms)",
+              s"rollup history exceeds sync.quarantine.maxTransforms ($maxTransforms)",
               retryable = false))
           case Right(Included(block, tx)) => replay.apply(block, tx) match {
             case Left(error) =>

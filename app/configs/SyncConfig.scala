@@ -56,6 +56,22 @@ class SyncConfig(config: Configuration){
   val quarantineRepairAttempts: Int =
     config.getOptional[Int]("sync.quarantine.repairAttempts").getOrElse(3)
 
+  /** Blocks a terminal or retry-exhausted quarantine remains available for diagnostics. */
+  val quarantineRetentionBlocks: Int =
+    config.getOptional[Int]("sync.quarantine.retentionBlocks").getOrElse(720)
+
+  /** Pause catch-up periodically so a repair can install against a cursor that cannot move. */
+  val quarantineMaintenanceCheckpoints: Boolean =
+    config.getOptional[Boolean]("sync.quarantine.maintenanceCheckpoints").getOrElse(true)
+
+  /** Committed catch-up blocks between quarantine maintenance checkpoints. */
+  val quarantineCheckpointIntervalBlocks: Int =
+    config.getOptional[Int]("sync.quarantine.checkpointIntervalBlocks").getOrElse(10)
+
+  /** Maximum rollup spends followed during one quarantine rebuild. */
+  val quarantineMaxTransforms: Int =
+    config.getOptional[Int]("sync.quarantine.maxTransforms").getOrElse(100000)
+
   val minerDictionaryBootstrap: Boolean =
     config.getOptional[Boolean]("sync.minerDictionary.bootstrap").getOrElse(true)
 

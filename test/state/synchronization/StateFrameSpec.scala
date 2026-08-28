@@ -148,6 +148,43 @@ class StateFrameSpec extends TestKit(ActorSystem("state-frame"))
     frame ! akka.actor.PoisonPill
   }
 
+  it should "freeze catch-up at the configured maintenance checkpoint until a repair is published" in {
+    val (frame, sync, _) = started(tip = startHeight + 3, checkpointInterval = 2)
+    sync.expectMsgType[BeginCatchUp]
+
+    val first = sync.expectMsgType[ApplyBlock].blockInfo
+    sync.reply(commit(first.height, first.id, first.parentId))
+    val second = sync.expectMsgType[ApplyBlock].blockInfo
+    sync.reply(commit(second.height, second.id, second.parentId))
+
+    sync.expectMsg(GetRepairableQuarantines)
+    val at = SyncCursor(second.height, second.id, second.parentId)
+    val fault = QuarantineFault(ChainFixtures.headerId(100), 100, "missing-collateral",
+      "indexed decode gap", retryable = true)
+    sync.reply(RepairableQuarantines(Seq(fault), at))
+
+    val repair = sync.expectMsgType[RepairRollup]
+    repair.rollupId shouldEqual fault.rollupId
+    repair.atCursor shouldEqual at
+    sync.expectNoMessage(200.millis)
+
+    sync.reply(BlockRejected(Some(at), "", "repair cursor moved before publication"))
+    sync.expectMsgType[ApplyBlock].blockInfo.height shouldEqual startHeight + 2
+    frame ! akka.actor.PoisonPill
+  }
+
+  it should "continue catch-up without checkpoints when maintenance is disabled" in {
+    val (frame, sync, _) = started(tip = startHeight + 2, checkpoints = false,
+      checkpointInterval = 1)
+    sync.expectMsgType[BeginCatchUp]
+
+    val first = sync.expectMsgType[ApplyBlock].blockInfo
+    sync.reply(commit(first.height, first.id, first.parentId))
+
+    sync.expectMsgType[ApplyBlock].blockInfo.height shouldEqual startHeight + 1
+    frame ! akka.actor.PoisonPill
+  }
+
   /**
    * Waits without committing while the chain tip is below the configured start height.
    *
@@ -179,12 +216,17 @@ class StateFrameSpec extends TestKit(ActorSystem("state-frame"))
     frame ! akka.actor.PoisonPill
   }
 
-  private def configWith(start: Int, retriesBeforeAlarm: Int = 12): Configuration =
+  private def configWith(start: Int,
+                         retriesBeforeAlarm: Int = 12,
+                         checkpoints: Boolean = true,
+                         checkpointInterval: Int = 10): Configuration =
     Configuration(ConfigFactory.parseString(
       s"""sync.startHeight = $start
          |sync.catchUpBatchBlocks = 4
          |sync.minerDictionary.bootstrap = false
          |sync.retriesBeforeAlarm = $retriesBeforeAlarm
+         |sync.quarantine.maintenanceCheckpoints = $checkpoints
+         |sync.quarantine.checkpointIntervalBlocks = $checkpointInterval
          |""".stripMargin))
 
   private def commit(height: Int, blockId: String, parentId: String): BlockCommitted =
@@ -192,14 +234,17 @@ class StateFrameSpec extends TestKit(ActorSystem("state-frame"))
 
   /** Starts a producer on the first-run path with no snapshot or committed state. */
   private def started(tip: Int,
-                      retriesBeforeAlarm: Int = 12): (akka.actor.ActorRef, TestProbe, TestProbe) = {
+                      retriesBeforeAlarm: Int = 12,
+                      checkpoints: Boolean = true,
+                      checkpointInterval: Int = 10): (akka.actor.ActorRef, TestProbe, TestProbe) = {
     val sync = TestProbe()
     val snapshots = TestProbe()
     val (nodeContext, _, wallet) = FakeNodeContext(ChainFixtures.nodeAt(tip), numAddresses = 1)
     val protocol = ReducerFixtures.protocol(rollupStartHeight = startHeight)
       .copy(localMinerHash = wallet.contract.hashedPropBytes)
     val frame = system.actorOf(Props(
-      new StateFrame(configWith(startHeight, retriesBeforeAlarm), nodeContext, protocol,
+      new StateFrame(configWith(startHeight, retriesBeforeAlarm, checkpoints, checkpointInterval),
+        nodeContext, protocol,
         sync.ref, snapshots.ref)))
     frame ! StartSynchronization
 

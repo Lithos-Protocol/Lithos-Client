@@ -76,7 +76,7 @@ class StateSnapshotStoreSpec extends AnyFlatSpec with Matchers with BeforeAndAft
   it should "round-trip quarantine faults with their attempt counts" in {
     val base = populatedSnapshot(100, 8L)
     val fault = QuarantineFault("dropped-rollup", 88, SyncFixtures.id(4999), "missing context variable 2",
-      retryable = true, attempts = 2)
+      retryable = true, attempts = 2, removalHeight = Some(180), removalWarningLogged = true)
     val persisted = base.copy(state = base.state.copy(quarantined = Map(fault.rollupId -> fault)))
 
     roundTrip(persisted).state.quarantined shouldEqual Map(fault.rollupId -> fault)

@@ -56,6 +56,18 @@ class ConfigDefaultsSpec extends AnyFlatSpec with Matchers {
     withClue("sync.quarantine.repairAttempts: ") {
       absent.quarantineRepairAttempts shouldEqual shippedSync.quarantineRepairAttempts
     }
+    withClue("sync.quarantine.retentionBlocks: ") {
+      absent.quarantineRetentionBlocks shouldEqual shippedSync.quarantineRetentionBlocks
+    }
+    withClue("sync.quarantine.maintenanceCheckpoints: ") {
+      absent.quarantineMaintenanceCheckpoints shouldEqual shippedSync.quarantineMaintenanceCheckpoints
+    }
+    withClue("sync.quarantine.checkpointIntervalBlocks: ") {
+      absent.quarantineCheckpointIntervalBlocks shouldEqual shippedSync.quarantineCheckpointIntervalBlocks
+    }
+    withClue("sync.quarantine.maxTransforms: ") {
+      absent.quarantineMaxTransforms shouldEqual shippedSync.quarantineMaxTransforms
+    }
     withClue("sync.snapshots.maxEntryBytes: ") {
       absent.snapshotMaxEntryBytes shouldEqual shippedSync.snapshotMaxEntryBytes
     }
@@ -67,7 +79,7 @@ class ConfigDefaultsSpec extends AnyFlatSpec with Matchers {
    */
   "SyncConfig" should "have every optional key covered by the defaults comparison" in {
     // Every value except `startHeight`, which is required and so has no default to drift from.
-    val comparedOptional = 18
+    val comparedOptional = 22
     val required = 1
     val fields = classOf[SyncConfig].getDeclaredMethods.count(m => m.getParameterCount == 0 &&
       !m.getName.contains("$") && m.getName != "config")

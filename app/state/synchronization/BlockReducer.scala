@@ -280,7 +280,7 @@ object BlockReducer {
       rollupOrigins -= rollupId
       stagedRollupDictionaries -= rollupId
       val fault = QuarantineFault(rollupId, genesisHeight, collateralBoxId, error.message,
-        BlockReducer.isRetryable(error), quarantines.get(rollupId).map(_.attempts).getOrElse(0))
+        BlockReducer.isRetryable(error))
       quarantines += rollupId -> fault
       quarantined :+= fault
     }
@@ -289,8 +289,7 @@ object BlockReducer {
     private def failAuthenticatedGenesis(block: BlockInfo, tx: BlockTx, error: SyncApplyError): Unit = {
       val collateralBoxId = tx.inputs.head.id
       val reason = s"Authenticated genesis ${tx.id} violated its contract-enforced shape: ${error.message}"
-      val fault = QuarantineFault(block.id, block.height, collateralBoxId, reason, retryable = false,
-        quarantines.get(block.id).map(_.attempts).getOrElse(0))
+      val fault = QuarantineFault(block.id, block.height, collateralBoxId, reason, retryable = false)
       quarantines += block.id -> fault
       quarantined :+= fault
     }

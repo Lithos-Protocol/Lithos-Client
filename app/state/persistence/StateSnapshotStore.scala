@@ -200,7 +200,7 @@ object StateSnapshotCodec {
   private val EnvelopeMagic = 0x4c535345
   private val MetaMagic = 0x4c53534d
   private val RollupMagic = 0x4c535352
-  private val SchemaVersion = 5
+  private val SchemaVersion = 6
   private val ToolkitVersion = "plasma-toolkit-1.1.0"
   private val MaxBlobBytes = 512 * 1024 * 1024
   private val MaxEntries = 1000000
@@ -245,6 +245,9 @@ object StateSnapshotCodec {
           writeString(out, fault.reason)
           out.writeBoolean(fault.retryable)
           out.writeInt(fault.attempts)
+          out.writeBoolean(fault.removalHeight.isDefined)
+          fault.removalHeight.foreach(out.writeInt)
+          out.writeBoolean(fault.removalWarningLogged)
         }
 
         val routes = state.routes.toSeq.sortBy(_._1)
@@ -285,8 +288,15 @@ object StateSnapshotCodec {
       val minerDictionaryFault = if (in.readBoolean()) Some(readString(in)) else None
       val quarantined = readCount(in, "quarantine count") { _ =>
         val rollupId = readString(in)
-        rollupId -> QuarantineFault(rollupId, in.readInt(), readString(in), readString(in),
-          in.readBoolean(), in.readInt())
+        val genesisHeight = in.readInt()
+        val collateralBoxId = readString(in)
+        val reason = readString(in)
+        val retryable = in.readBoolean()
+        val attempts = in.readInt()
+        val removalHeight = if (in.readBoolean()) Some(in.readInt()) else None
+        val warningLogged = in.readBoolean()
+        rollupId -> QuarantineFault(rollupId, genesisHeight, collateralBoxId, reason,
+          retryable, attempts, removalHeight, warningLogged)
       }.toMap
       val routes = readCount(in, "route count") { _ => readString(in) -> readString(in) }.toMap
       val origins = readCount(in, "rollup origin count") { _ =>

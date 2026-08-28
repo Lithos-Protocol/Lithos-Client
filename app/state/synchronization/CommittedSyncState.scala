@@ -13,10 +13,23 @@ final case class QuarantineFault(rollupId: String,
                                   collateralBoxId: String,
                                   reason: String,
                                   retryable: Boolean,
-                                  attempts: Int = 0) {
+                                  attempts: Int = 0,
+                                  removalHeight: Option[Int] = None,
+                                  removalWarningLogged: Boolean = false) {
   require(collateralBoxId.nonEmpty, "A quarantined rollup must retain its collateral box id")
+  require(removalHeight.forall(_ >= 0), "A quarantine removal height cannot be negative")
+  require(!removalWarningLogged || removalHeight.isDefined,
+    "A quarantine removal warning requires a removal height")
 
   def attempted: QuarantineFault = copy(attempts = attempts + 1)
+
+  def repairable(maxAttempts: Int): Boolean = retryable && attempts < maxAttempts
+
+  /** Starts diagnostic retention only after this episode can no longer be repaired. */
+  def scheduleRemoval(currentHeight: Int, retentionBlocks: Int): QuarantineFault =
+    if (removalHeight.isDefined) this
+    else copy(removalHeight = Some(
+      math.min(Int.MaxValue.toLong, currentHeight.toLong + retentionBlocks.toLong).toInt))
 }
 
 /**
@@ -46,6 +59,6 @@ case class CommittedSyncState(cursor: SyncCursor,
 
   /** Faults worth node calls, newest first so a recent break is rebuilt before an old one. */
   def repairableQuarantines(maxAttempts: Int): Seq[QuarantineFault] =
-    quarantined.values.filter(fault => fault.retryable && fault.attempts < maxAttempts)
+    quarantined.values.filter(_.repairable(maxAttempts))
       .toSeq.sortBy(-_.genesisHeight)
 }

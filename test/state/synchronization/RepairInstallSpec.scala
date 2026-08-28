@@ -8,6 +8,7 @@ import org.scalatest.BeforeAndAfterAll
 import org.scalatest.flatspec.AnyFlatSpecLike
 import org.scalatest.matchers.should.Matchers
 import play.api.Configuration
+import state.messages.BlockInfo
 import state.messages.SyncMessages._
 import support.{FakeNodeContext, ReducerFixtures, SyncFixtures}
 
@@ -72,6 +73,7 @@ class RepairInstallSpec extends TestKit(ActorSystem("repair-install"))
     val tree = SyncFixtures.emptyNispTree(rollupId, SyncFixtures.id(700002), 90)
     requester.send(handler, RepairRollup(rollupId, seeded.cursor,
       RollupRepairResult.Rebuilt(tree)))
+    requester.expectMsgType[BlockCommitted]
 
     requester.send(handler, GetCommittedState)
     val state = requester.expectMsgType[CommittedState].state
@@ -90,6 +92,7 @@ class RepairInstallSpec extends TestKit(ActorSystem("repair-install"))
     requester.expectMsgType[BlockCommitted]
 
     requester.send(handler, RepairRollup(rollupId, seeded.cursor, RollupRepairResult.Terminated))
+    requester.expectMsgType[BlockCommitted]
 
     requester.send(handler, GetCommittedState)
     val state = requester.expectMsgType[CommittedState].state
@@ -108,6 +111,7 @@ class RepairInstallSpec extends TestKit(ActorSystem("repair-install"))
 
     requester.send(handler, RepairRollup(rollupId, seeded.cursor,
       RollupRepairResult.Failed("indexed node has no rollup box", retryable = true)))
+    requester.expectMsgType[BlockCommitted]
 
     requester.send(handler, GetCommittedState)
     val fault = requester.expectMsgType[CommittedState].state.quarantined(rollupId)
@@ -116,7 +120,7 @@ class RepairInstallSpec extends TestKit(ActorSystem("repair-install"))
   }
 
   /** A same-height fork must not accept a rollup reconstructed from the replaced block. */
-  it should "ignore a rollup rebuild from another block at the same height" in {
+  it should "refuse a rollup rebuild from another block at the same height without charging an attempt" in {
     val (handler, _) = newHandler()
     val requester = TestProbe()
     val seeded = quarantinedSeed
@@ -127,12 +131,67 @@ class RepairInstallSpec extends TestKit(ActorSystem("repair-install"))
     val stale = seeded.cursor.copy(blockId = SyncFixtures.id(799996), parentId = SyncFixtures.id(799995))
     requester.send(handler, RepairRollup(rollupId, stale,
       RollupRepairResult.Rebuilt(tree)))
-    requester.expectNoMessage(200.millis)
+    val rejected = requester.expectMsgType[BlockRejected]
+    rejected.reason should include(s"rebuilt at ${stale.blockId}@${stale.height}")
 
     requester.send(handler, GetCommittedState)
     val state = requester.expectMsgType[CommittedState].state
     state.rollups shouldBe empty
     state.quarantined.keySet shouldEqual Set(rollupId)
+    state.quarantined(rollupId).attempts shouldEqual 0
+  }
+
+  it should "start diagnostic retention when the final consecutive repair attempt fails" in {
+    val (handler, _) = newHandler()
+    val requester = TestProbe()
+    val seeded = quarantinedSeed.copy(quarantined = quarantinedSeed.quarantined.map {
+      case (id, fault) => id -> fault.copy(attempts = 2)
+    })
+    requester.send(handler, RestoreCommittedState(seeded, Vector(seeded.cursor)))
+    requester.expectMsgType[BlockCommitted]
+
+    requester.send(handler, RepairRollup(rollupId, seeded.cursor,
+      RollupRepairResult.Failed("still absent", retryable = true)))
+    requester.expectMsgType[BlockCommitted]
+
+    requester.send(handler, GetCommittedState)
+    val fault = requester.expectMsgType[CommittedState].state.quarantined(rollupId)
+    fault.attempts shouldEqual 3
+    fault.removalHeight shouldEqual Some(seeded.cursor.height + 720)
+    fault.removalWarningLogged shouldBe false
+  }
+
+  it should "start a later quarantine episode at zero after a successful repair" in {
+    val (handler, _) = newHandler()
+    val requester = TestProbe()
+    val seeded = quarantinedSeed.copy(quarantined = quarantinedSeed.quarantined.map {
+      case (id, fault) => id -> fault.copy(attempts = 2)
+    })
+    requester.send(handler, RestoreCommittedState(seeded, Vector(seeded.cursor)))
+    requester.expectMsgType[BlockCommitted]
+
+    val inputId = SyncFixtures.id(700010)
+    val tree = SyncFixtures.emptyNispTree(rollupId, inputId, 90)
+    requester.send(handler, RepairRollup(rollupId, seeded.cursor,
+      RollupRepairResult.Rebuilt(tree)))
+    requester.expectMsgType[BlockCommitted]
+
+    val (key, value) = SyncFixtures.plasmaEntries(1, 16).head
+    val output = PlasmaDictionary.empty()
+    output.insert(key -> value)
+    val shaped = ReducerFixtures.submissionTx(95, inputId, SyncFixtures.id(700011), startHeight,
+      key, value, ReducerFixtures.proofHex(Array[Byte](9)), output,
+      numMiners = 1, totalScore = BigInt(0), period = 90L)
+    val broken = shaped.copy(inputs = shaped.inputs.map(input => input.copy(
+      spendingProof = input.spendingProof.map(proof => proof.copy(ext = proof.ext - "2")))))
+    requester.send(handler, ApplyBlock(BlockInfo(SyncFixtures.id(startHeight), startHeight,
+      Seq(broken), seeded.cursor.blockId)))
+    requester.expectMsgType[BlockCommitted]
+
+    requester.send(handler, GetCommittedState)
+    val nextEpisode = requester.expectMsgType[CommittedState].state.quarantined(rollupId)
+    nextEpisode.attempts shouldEqual 0
+    nextEpisode.removalHeight shouldBe empty
   }
 
   private def faultedSeed: CommittedSyncState =

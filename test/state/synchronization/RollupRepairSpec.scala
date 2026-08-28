@@ -4,11 +4,14 @@ import node.NodeApi
 import node.model._
 import org.mockito.ArgumentMatchers.any
 import org.mockito.Mockito.{never, verify, when}
+import org.ergoplatform.appkit.scalaapi.scalaByteType
+import org.ergoplatform.appkit.{ErgoType, ErgoValue}
 import org.scalatest.OptionValues
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 import scorex.utils.Longs
-import state.messages.{BlockTx, InputSpendingProof, TxOutput}
+import sigma.Colls
+import state.messages.{BlockTx, InputSpendingProof, TxInput, TxOutput}
 import support.{ChainFixtures, ReducerFixtures, SyncFixtures}
 
 import scala.util.Success
@@ -38,6 +41,34 @@ class RollupRepairSpec extends AnyFlatSpec with Matchers with OptionValues {
 
     val result = failed(chain)
     result.reason should include("for requested transaction")
+    result.retryable shouldBe true
+  }
+
+  it should "rebuild a chain with exactly maxTransforms links" in {
+    val chain = repairChain()
+
+    new RollupRepair(chain.api, protocol, maxTransforms = 2)
+      .run(chain.fault, committedHeight = 110) shouldBe a[RollupRepairResult.Rebuilt]
+  }
+
+  it should "refuse the first link beyond maxTransforms" in {
+    val chain = repairChain()
+
+    val result = new RollupRepair(chain.api, protocol, maxTransforms = 1)
+      .run(chain.fault, committedHeight = 110).asInstanceOf[RollupRepairResult.Failed]
+
+    result.reason should include("sync.quarantine.maxTransforms")
+    result.retryable shouldBe false
+  }
+
+  it should "reject a box endpoint that returns another box id" in {
+    val chain = repairChain()
+    val box = chain.boxes(chain.genesisOutputId)
+    when(chain.api.indexedBoxById(chain.genesisOutputId)).thenReturn(Success(Some(
+      box.copy(box = box.box.copy(boxId = SyncFixtures.id(899000))))))
+
+    val result = failed(chain)
+    result.reason should include("for requested rollup box")
     result.retryable shouldBe true
   }
 
@@ -120,6 +151,46 @@ class RollupRepairSpec extends AnyFlatSpec with Matchers with OptionValues {
     result.asInstanceOf[RollupRepairResult.Rebuilt].tree.utxoId shouldEqual chain.genesisOutputId
   }
 
+  it should "refuse collateral spent above the repair cutoff" in {
+    val chain = repairChain()
+
+    val result = new RollupRepair(chain.api, protocol, maxTransforms = 10)
+      .run(chain.fault, committedHeight = 99).asInstanceOf[RollupRepairResult.Failed]
+
+    result.reason should include("collateral box")
+    result.reason should include("above committed height 99")
+    result.retryable shouldBe true
+  }
+
+  it should "refuse collateral whose canonical genesis block is not the quarantined rollup" in {
+    val chain = repairChain()
+    val wrongRollup = chain.fault.copy(rollupId = ChainFixtures.headerId(99))
+
+    val result = new RollupRepair(chain.api, protocol, maxTransforms = 10)
+      .run(wrongRollup, committedHeight = 110).asInstanceOf[RollupRepairResult.Failed]
+
+    result.reason should include(s"not rollup ${wrongRollup.rollupId}")
+    result.retryable shouldBe true
+  }
+
+  it should "refuse collateral whose canonical inclusion is not the recorded genesis height" in {
+    val chain = repairChain()
+    val wrongHeight = chain.fault.copy(genesisHeight = 99)
+
+    val result = new RollupRepair(chain.api, protocol, maxTransforms = 10)
+      .run(wrongHeight, committedHeight = 110).asInstanceOf[RollupRepairResult.Failed]
+
+    result.reason should include("not genesis height 99")
+    result.retryable shouldBe true
+  }
+
+  it should "return Terminated when the walk reaches this miner's own payout" in {
+    val chain = terminatedChain()
+
+    new RollupRepair(chain.api, protocol, maxTransforms = 10)
+      .run(chain.fault, committedHeight = 110) shouldEqual RollupRepairResult.Terminated
+  }
+
   private def failed(chain: RepairChain): RollupRepairResult.Failed =
     new RollupRepair(chain.api, protocol, maxTransforms = 10)
       .run(chain.fault, committedHeight = 110)
@@ -186,6 +257,72 @@ class RollupRepairSpec extends AnyFlatSpec with Matchers with OptionValues {
 
     RepairChain(api, QuarantineFault(rollupId, genesisHeight, collateralId,
       "prior indexed decode failure", retryable = true), genesisOutputId, firstSpend, tipId, boxes, indexed)
+  }
+
+  private def terminatedChain(): RepairChain = {
+    val genesisHeight = 100
+    val collateralId = SyncFixtures.id(881001)
+    val genesisOutputId = SyncFixtures.id(881002)
+    val holdingId = SyncFixtures.id(881003)
+    val evaluationId = SyncFixtures.id(881004)
+    val payoutId = SyncFixtures.id(881005)
+    val rollupId = ChainFixtures.headerId(genesisHeight)
+    val genesis = ReducerFixtures.genesisTx(90, collateralId, genesisOutputId, genesisHeight)
+
+    val dictionary = lfsm.states.PlasmaDictionary.empty()
+    val miner = protocol.localMinerHash
+    val value = Longs.toByteArray(5L) ++ Array.fill[Byte](8)(3)
+    val inserted = dictionary.insert(miner -> value)
+    val submission = ReducerFixtures.submissionTx(91, genesisOutputId, holdingId, 101,
+      miner, value, inserted.proof.ergoValue.toHex, dictionary,
+      numMiners = 1, totalScore = BigInt(5), period = genesisHeight.toLong)
+    val evaluation = ReducerFixtures.holdingToEvaluationTx(92, holdingId, evaluationId, 102,
+      dictionary, numMiners = 1, totalScore = BigInt(5), period = 102L)
+    val toPayout = ReducerFixtures.evaluationToPayoutTx(93, evaluationId, payoutId, 103,
+      dictionary, numMiners = 1, totalScore = BigInt(5), totalReward = 1000000L)
+    val payout = ownPayoutTx(payoutId, 104, miner)
+
+    val collateral = IndexedBox(
+      NodeBox(collateralId, SyncFixtures.id(880999), 1000000L, 0, 90,
+        ReducerFixtures.CollateralTree,
+        Seq(NodeAsset(ReducerFixtures.CollateralToken.toString, 1L)), NodeRegisters.empty),
+      "", 90, 0L, Some(genesis.id), Some(genesisHeight), None)
+    val genesisOutput = indexedOutput(genesis.outputs.head, genesisHeight,
+      Some(submission.id), Some(101), submission.inputs.head.spendingProof)
+    val holding = indexedOutput(submission.outputs.head, 101,
+      Some(evaluation.id), Some(102), evaluation.inputs.head.spendingProof)
+    val evaluationBox = indexedOutput(evaluation.outputs.head, 102,
+      Some(toPayout.id), Some(103), toPayout.inputs.head.spendingProof)
+    val payoutBox = indexedOutput(toPayout.outputs.head, 103,
+      Some(payout.id), Some(104), payout.inputs.head.spendingProof)
+
+    val boxes = Map(collateralId -> collateral, genesisOutputId -> genesisOutput,
+      holdingId -> holding, evaluationId -> evaluationBox, payoutId -> payoutBox)
+    val indexed = Map(
+      genesis.id -> indexedTransaction(genesis, genesisHeight, Seq(collateral), rollupId),
+      submission.id -> indexedTransaction(submission, 101, Seq(genesisOutput), ChainFixtures.headerId(101)),
+      evaluation.id -> indexedTransaction(evaluation, 102, Seq(holding), ChainFixtures.headerId(102)),
+      toPayout.id -> indexedTransaction(toPayout, 103, Seq(evaluationBox), ChainFixtures.headerId(103)),
+      payout.id -> indexedTransaction(payout, 104, Seq(payoutBox), ChainFixtures.headerId(104)))
+
+    val api = ChainFixtures.nodeAt(110)
+    boxes.foreach { case (id, box) => when(api.indexedBoxById(id)).thenReturn(Success(Some(box))) }
+    indexed.foreach { case (id, tx) => when(api.indexedTransactionById(id)).thenReturn(Success(Some(tx))) }
+
+    RepairChain(api, QuarantineFault(rollupId, genesisHeight, collateralId,
+      "prior indexed decode failure", retryable = true), genesisOutputId, submission, payoutId, boxes, indexed)
+  }
+
+  private def ownPayoutTx(inputId: String, height: Int, miner: Array[Byte]): BlockTx = {
+    val txId = SyncFixtures.id(881100 + height)
+    val miners = ErgoValue.of(Colls.fromArray(Array(Colls.fromArray(miner))),
+      ErgoType.collType(scalaByteType)).toHex
+    val placeholderProof = ErgoValue.of(Colls.fromArray(Array[Byte](1)), scalaByteType).toHex
+    val proof = InputSpendingProof("", Map(
+      "0" -> miners,
+      "1" -> placeholderProof,
+      "2" -> placeholderProof))
+    BlockTx(txId, Seq(TxInput(inputId, Some(proof))), Seq.empty, Seq.empty)
   }
 
   private def indexedTransaction(tx: BlockTx,

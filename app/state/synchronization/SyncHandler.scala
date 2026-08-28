@@ -16,7 +16,10 @@ import javax.inject.Inject
 import scala.util.control.NonFatal
 
 /**
- * Owns canonical synchronized state and its committed cursor.
+ * Owns canonical synchronized state and its committed cursor. SyncHandler
+ * is the overall manager of all synchronizable entities and determines what
+ * the correct publishable state is at a given moment. It also manages
+ * rollbacks, mempool projections, quarantines of sync entities.
  */
 class SyncHandler @Inject()(config: Configuration,
                             protocol: SyncProtocolContext,
@@ -27,6 +30,8 @@ class SyncHandler @Inject()(config: Configuration,
   private val repository = SyncStateRepository(Globals.mdDB)
   private val snapshotIdentity = StateSnapshotIdentity(protocol)
   private val repairAttempts = syncConfig.quarantineRepairAttempts
+  private val quarantineRetentionBlocks = syncConfig.quarantineRetentionBlocks
+  private val quarantineWarningBlocks = math.max(1, quarantineRetentionBlocks / 10)
 
   private var committed = Option.empty[CommittedSyncState]
   // Retained states support exact rollback; the longer cursor window locates ancestors after restart.
@@ -194,9 +199,21 @@ class SyncHandler @Inject()(config: Configuration,
 
     // A rebuild is only installable at the exact chain cursor it was built for.
     case RepairRollup(rollupId, atCursor, outcome) =>
-      committed.filter(_.cursor == atCursor).flatMap(_.quarantined.get(rollupId)) match {
-        case None => ()
-        case Some(fault) => applyRepair(fault, outcome)
+      val requester = sender()
+      committed match {
+        case Some(state) if state.cursor != atCursor =>
+          requester ! BlockRejected(Some(state.cursor), "",
+            s"rollup $rollupId was rebuilt at ${atCursor.blockId}@${atCursor.height} but the cursor " +
+              s"is now ${state.cursor.blockId}@${state.cursor.height}")
+        case Some(state) => state.quarantined.get(rollupId) match {
+          case None => requester ! BlockRejected(Some(state.cursor), "",
+            s"rollup $rollupId is no longer quarantined")
+          case Some(fault) => applyRepair(fault, outcome) match {
+            case Right(next) => requester ! BlockCommitted(next.cursor, next.version, 0, 0)
+            case Left(reason) => requester ! BlockRejected(committed.map(_.cursor), "", reason)
+          }
+        }
+        case None => requester ! BlockRejected(None, "", "no committed state to repair")
       }
 
     // Replaces dictionary state rebuilt at the committed cursor and clears its fault. A commit or
@@ -235,38 +252,47 @@ class SyncHandler @Inject()(config: Configuration,
     markRuntimeFailure(message, new IllegalStateException(reason))
 
   /** Installs a rebuilt rollup, or records the attempt so the fault stops being retried eventually. */
-  private def applyRepair(fault: QuarantineFault, outcome: RollupRepairResult): Unit =
-    committed.foreach { state =>
-      val next = outcome match {
+  private def applyRepair(fault: QuarantineFault,
+                          outcome: RollupRepairResult): Either[String, CommittedSyncState] =
+    committed.toRight("no committed state to repair").flatMap { state =>
+      val (next, report) = outcome match {
         case RollupRepairResult.Rebuilt(tree) =>
-          logger.warn(s"Rollup ${fault.rollupId} is tracked again after ${fault.attempts + 1} " +
-            s"rebuild attempt(s); this miner can act on it once more")
           state.copy(rollups = state.rollups + (fault.rollupId -> tree),
             routes = state.routes + (tree.utxoId -> fault.rollupId),
             rollupOrigins = state.rollupOrigins + (fault.rollupId -> fault.collateralBoxId),
-            quarantined = state.quarantined - fault.rollupId)
+            quarantined = state.quarantined - fault.rollupId) -> (() =>
+              logger.warn(s"Rollup ${fault.rollupId} is tracked again after ${fault.attempts + 1} " +
+                s"rebuild attempt(s); this miner can act on it once more"))
         case RollupRepairResult.Terminated =>
-          logger.info(s"Quarantined rollup ${fault.rollupId} had already ended on chain; " +
-            "dropping its fault")
-          state.copy(quarantined = state.quarantined - fault.rollupId)
+          state.copy(quarantined = state.quarantined - fault.rollupId) -> (() =>
+            logger.info(s"Quarantined rollup ${fault.rollupId} had already ended on chain; " +
+              "dropping its fault"))
         case RollupRepairResult.Failed(reason, retryable) =>
-          val attempted = fault.attempted.copy(reason = reason, retryable = retryable)
-          if (!retryable || attempted.attempts >= repairAttempts)
-            logger.error(s"Rollup ${fault.rollupId} stays quarantined after " +
-              s"${attempted.attempts} attempt(s): $reason. It will not be rebuilt again, and this " +
-              "miner earns nothing from it.")
-          else
-            logger.warn(s"Rebuild ${attempted.attempts} of ${fault.rollupId} failed: $reason")
-          state.copy(quarantined = state.quarantined + (fault.rollupId -> attempted))
+          val failed = fault.attempted.copy(reason = reason, retryable = retryable)
+          val attempted =
+            if (failed.repairable(repairAttempts)) failed
+            else failed.scheduleRemoval(state.cursor.height, quarantineRetentionBlocks)
+          val log = () => attempted.removalHeight match {
+            case Some(removeAt) =>
+              logger.error(s"Rollup ${fault.rollupId} stays quarantined after " +
+                s"${attempted.attempts} attempt(s): $reason. It will not be rebuilt again, and this " +
+                s"miner earns nothing from it. Its diagnostic record will be removed at height $removeAt.")
+            case None =>
+              logger.warn(s"Rebuild ${attempted.attempts} of ${fault.rollupId} failed: $reason")
+          }
+          state.copy(quarantined = state.quarantined + (fault.rollupId -> attempted)) -> log
       }
       publishTransition(committed, next) match {
         case Right(_) =>
           committed = Some(next)
           publishStatus(status)
-          // A rebuilt rollup that a restart would have to rebuild again is not worth the walk.
-          if (outcome.isInstanceOf[RollupRepairResult.Rebuilt]) offerSnapshot(next, force = true)
-        case Left(failed) => markRuntimeFailure(s"Could not publish the rebuilt rollup " +
-          s"${fault.rollupId}", failed)
+          // Attempts and retention deadlines must survive restart just as a successful rebuild does.
+          offerSnapshot(next, force = true)
+          report()
+          Right(next)
+        case Left(failed) =>
+          markRuntimeFailure(s"Could not publish the rebuilt rollup ${fault.rollupId}", failed)
+          Left(failed)
       }
     }
 
@@ -304,30 +330,33 @@ class SyncHandler @Inject()(config: Configuration,
             requester ! BlockRejected(committed.map(_.cursor), block.id, reason)
 
           case Right(transition) =>
-            publishTransition(committed, transition.state) match {
+            val (maintainedState, warnings, removed) = maintainQuarantines(transition.state)
+            val maintained = transition.copy(state = maintainedState)
+            publishTransition(committed, maintained.state) match {
               case Left(reason) =>
                 status = SyncFailed(committed.map(_.cursor), reason)
                 publishStatus(status)
                 logger.error(s"Failed to publish block ${block.id}: $reason")
                 requester ! BlockRejected(committed.map(_.cursor), block.id, reason)
               case Right(_) =>
-                committed = Some(transition.state)
-                retained = (retained :+ transition.state).takeRight(syncConfig.reorgWindow + 1)
-                knownCursors = (knownCursors :+ transition.state.cursor).takeRight(syncConfig.cursorWindow + 1)
+                committed = Some(maintained.state)
+                retained = (retained :+ maintained.state).takeRight(syncConfig.reorgWindow + 1)
+                knownCursors = (knownCursors :+ maintained.state.cursor).takeRight(syncConfig.cursorWindow + 1)
                 projections = Map.empty
                 suppressedProjections = Map.empty
-                reportFaults(block, transition)
-                reportProgress(block, transition)
+                reportFaults(block, maintained)
+                reportQuarantineRetention(warnings, removed, maintained.state.cursor.height)
+                reportProgress(block, maintained)
                 status = status match {
-                  case CatchingUp(_, target) => CatchingUp(transition.state.cursor, target)
-                  case Ready(_) => Ready(transition.state.cursor)
-                  case Reorganizing(_, target) => Reorganizing(transition.state.cursor, target)
-                  case _ => CatchingUp(transition.state.cursor, transition.state.cursor.height)
+                  case CatchingUp(_, target) => CatchingUp(maintained.state.cursor, target)
+                  case Ready(_) => Ready(maintained.state.cursor)
+                  case Reorganizing(_, target) => Reorganizing(maintained.state.cursor, target)
+                  case _ => CatchingUp(maintained.state.cursor, maintained.state.cursor.height)
                 }
                 publishStatus(status)
-                offerSnapshot(transition.state, force = false)
-                requester ! BlockCommitted(transition.state.cursor, transition.state.version,
-                  transition.relevantEvents, transition.stagedDictionaryCopies)
+                offerSnapshot(maintained.state, force = false)
+                requester ! BlockCommitted(maintained.state.cursor, maintained.state.version,
+                  maintained.relevantEvents, maintained.stagedDictionaryCopies)
             }
         }
     }
@@ -336,9 +365,14 @@ class SyncHandler @Inject()(config: Configuration,
   /** Logs isolated rollup and dictionary faults that do not stop the canonical cursor. */
   private def reportFaults(block: BlockInfo, transition: BlockTransition): Unit = {
     transition.quarantined.foreach { fault =>
-      val ending =
-        if (fault.retryable) s"Rebuilding it from the indexed chain, up to $repairAttempts time(s)."
-        else "Re-reading it cannot give a different answer, so it will not be rebuilt."
+      val ending = transition.state.quarantined.get(fault.rollupId) match {
+        case Some(retained) if retained.repairable(repairAttempts) =>
+          s"Rebuilding it from the indexed chain, up to $repairAttempts time(s)."
+        case Some(retained) => retained.removalHeight.fold(
+          "Re-reading it cannot give a different answer, so it will not be rebuilt.")(height =>
+          s"It will not be rebuilt; its diagnostic record will be removed at height $height.")
+        case None => "Its diagnostic retention ended at this height."
+      }
       logger.error(s"Quarantined rollup ${fault.rollupId} at height ${block.height}: " +
         s"${fault.reason}. The block committed and synchronization continues without it. $ending")
     }
@@ -356,6 +390,51 @@ class SyncHandler @Inject()(config: Configuration,
       logger.error(s"Transaction $txId at height ${block.height} spends a collateral box into a " +
         "genesis-shaped output under a holding script this build does not compile. Its rollup is " +
         "invisible to this client. The deployed rollup chain has moved ahead of this release.")
+    }
+  }
+
+  /**
+   * Starts retention only when a quarantine episode is terminal or out of retries, emits one warning
+   * near its deadline, and removes the diagnostic record at that committed height.
+   */
+  private def maintainQuarantines(state: CommittedSyncState):
+    (CommittedSyncState, Seq[QuarantineFault], Seq[QuarantineFault]) = {
+    val height = state.cursor.height
+    val scheduled = state.quarantined.map { case (id, fault) =>
+      val normalized =
+        if (fault.repairable(repairAttempts))
+          fault.copy(removalHeight = None, removalWarningLogged = false)
+        else fault.scheduleRemoval(height, quarantineRetentionBlocks)
+      id -> normalized
+    }
+    val (expired, retained) = scheduled.partition { case (_, fault) =>
+      fault.removalHeight.exists(_ <= height)
+    }
+    val warnings = retained.values.filter { fault =>
+      !fault.removalWarningLogged && fault.removalHeight.exists { removal =>
+        height.toLong >= removal.toLong - quarantineWarningBlocks.toLong
+      }
+    }.toSeq.sortBy(_.rollupId)
+    val warningIds = warnings.iterator.map(_.rollupId).toSet
+    val updated = retained.map { case (id, fault) =>
+      id -> (if (warningIds(id)) fault.copy(removalWarningLogged = true) else fault)
+    }
+    (state.copy(quarantined = updated), warnings,
+      expired.values.toSeq.sortBy(_.rollupId))
+  }
+
+  private def reportQuarantineRetention(warnings: Seq[QuarantineFault],
+                                        removed: Seq[QuarantineFault],
+                                        height: Int): Unit = {
+    warnings.foreach { fault =>
+      val removal = fault.removalHeight.get
+      logger.error(s"Quarantined rollup ${fault.rollupId} is terminal or out of rebuild attempts and " +
+        s"will be removed from diagnostic retention at height $removal, in ${removal - height} block(s). " +
+        "This miner earns nothing from it.")
+    }
+    removed.foreach { fault =>
+      logger.error(s"Removed quarantined rollup ${fault.rollupId} from diagnostic retention at height " +
+        s"$height after it became terminal or exhausted its rebuild attempts. Last fault: ${fault.reason}")
     }
   }
 
@@ -379,7 +458,8 @@ class SyncHandler @Inject()(config: Configuration,
       val pending = retryable.count(_.attempts < repairAttempts)
       logger.warn(s"${state.quarantined.size} rollup(s) are quarantined at height " +
         s"${state.cursor.height}: $pending awaiting a rebuild, ${retryable.size - pending} out of " +
-        s"attempts, ${terminal.size} not rebuildable. This miner earns nothing from them.")
+        s"attempts, ${terminal.size} not rebuildable. Terminal and exhausted records are retained for " +
+        s"$quarantineRetentionBlocks block(s). This miner earns nothing from them.")
     }
 
   private def rollback(blockId: String): Unit = {

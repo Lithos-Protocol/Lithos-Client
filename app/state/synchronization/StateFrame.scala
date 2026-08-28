@@ -41,6 +41,9 @@ object StateFrame {
   private final case class RollupRepaired(rollupId: String,
                                          atCursor: SyncCursor,
                                          result: Try[RollupRepairResult])
+  private final case class RollupRepairPublished(rollupId: String,
+                                                 atCursor: SyncCursor,
+                                                 result: Try[Any])
 }
 
 /**
@@ -64,6 +67,8 @@ class StateFrame @Inject()(config: Configuration,
   private val syncConfig = new SyncConfig(config)
   private val source = new CanonicalBlockSource(nodeContext.getNodeApi)
   private val quarantineAttempts = syncConfig.quarantineRepairAttempts
+  private val quarantineCheckpoints = syncConfig.quarantineMaintenanceCheckpoints
+  private val checkpointInterval = syncConfig.quarantineCheckpointIntervalBlocks
   private val batchBlocks = syncConfig.catchUpBatchBlocks
   private val retriesBeforeAlarm = syncConfig.retriesBeforeAlarm
   private val tipRevalidation = syncConfig.revalidationChecks
@@ -78,9 +83,12 @@ class StateFrame @Inject()(config: Configuration,
   private var nextHeight = firstHeight
   private var active = false
   private var inFlight = false
-  // Rebuilds run beside block production: they touch no cursor, and holding the producer for one
-  // stops synchronization for as long as the walk takes.
+  // At the live tip rebuilds run beside polling. During catch-up, configured maintenance checkpoints
+  // deliberately hold the producer so a long repair has one stable cursor at which it can install.
   private var repairing = false
+  // A maintenance checkpoint keeps `inFlight` true and the cursor frozen until its repair reply.
+  private var maintenanceTip = Option.empty[Int]
+  private var committedSinceCheckpoint = 0
   // Fetched as a batch but committed one at a time in chain order.
   private var pending = Vector.empty[BlockInfo]
   // Consecutive failures at one height; moving to another height resets the alarm.
@@ -179,13 +187,11 @@ class StateFrame @Inject()(config: Configuration,
     case CommitFinished(block, tip, Success(committedBlock: BlockCommitted)) =>
       cursor = Some(committedBlock.cursor)
       nextHeight = committedBlock.cursor.height + 1
+      committedSinceCheckpoint += 1
       clearStall()
       subscribers.foreach(_ ! NewBlock(block))
-      if (pending.nonEmpty) commitNext(tip)
-      else {
-        inFlight = false
-        if (committedBlock.cursor.height >= tip) syncHandler ! MarkReady else self ! Tick
-      }
+      if (maintenanceCheckpointDue(committedBlock.cursor, tip)) beginMaintenanceCheckpoint(tip)
+      else continueCanonical(tip)
 
     // The state owner lost its state, so re-establish the seed rather than retrying blocks it
     // cannot place. Retrying would stall at this height until the process restarted.
@@ -284,41 +290,104 @@ class StateFrame @Inject()(config: Configuration,
 
     // Names reason for Miner Dictionary failure
     case QuarantinesLoaded(Success(rejected: BlockRejected)) =>
-      repairing = false
-      logger.warn(s"Rebuilt Miner Dictionary was not installed: ${rejected.reason}")
+      val operation = if (maintenanceTip.isDefined) "Quarantine maintenance checkpoint"
+      else "Rebuilt Miner Dictionary"
+      logger.warn(s"$operation was not accepted: ${rejected.reason}")
+      completeRepairCycle()
 
     case QuarantinesLoaded(Success(RepairableQuarantines(faults, at))) =>
       faults.headOption match {
-        case None => repairing = false
+        case None => completeRepairCycle()
         case Some(fault) =>
           logger.info(s"Rebuilding quarantined rollup ${fault.rollupId} from height " +
             s"${fault.genesisHeight}, attempt ${fault.attempts + 1} of $quarantineAttempts")
           Future(new RollupRepair(nodeContext.getNodeApi, protocol,
-            syncConfig.minerDictionaryMaxTransforms).run(fault, at.height))(pollingContext)
+            syncConfig.quarantineMaxTransforms).run(fault, at.height))(pollingContext)
             .map(result => RollupRepaired(fault.rollupId, at, Success(result)))
             .recover { case ex => RollupRepaired(fault.rollupId, at, Failure(ex)) }
             .pipeTo(self)
       }
 
-    case QuarantinesLoaded(Success(_)) => repairing = false
+    case QuarantinesLoaded(Success(_)) => completeRepairCycle()
 
     case QuarantinesLoaded(Failure(ex)) =>
-      repairing = false
       logger.warn(s"Could not read repairable quarantines: ${message(ex)}", ex)
+      completeRepairCycle()
 
     case RollupRepaired(rollupId, at, Success(outcome)) =>
-      repairing = false
-      syncHandler ! RepairRollup(rollupId, at, outcome)
+      publishRollupRepair(rollupId, at, outcome)
 
     case RollupRepaired(rollupId, at, Failure(ex)) =>
-      repairing = false
-      syncHandler ! RepairRollup(rollupId, at,
+      publishRollupRepair(rollupId, at,
         RollupRepairResult.Failed(s"rebuild could not run: ${message(ex)}", retryable = true))
+
+    case RollupRepairPublished(_, _, Success(_: BlockCommitted)) =>
+      completeRepairCycle()
+
+    case RollupRepairPublished(rollupId, at, Success(rejected: BlockRejected)) =>
+      logger.warn(s"Repair result for rollup $rollupId rebuilt at ${at.blockId}@${at.height} was not " +
+        s"installed: ${rejected.reason}")
+      completeRepairCycle()
+
+    case RollupRepairPublished(rollupId, at, Success(other)) =>
+      logger.warn(s"Unexpected repair publication response for rollup $rollupId rebuilt at " +
+        s"${at.blockId}@${at.height}: $other")
+      completeRepairCycle()
+
+    case RollupRepairPublished(rollupId, at, Failure(ex)) =>
+      logger.warn(s"Could not publish repair result for rollup $rollupId rebuilt at " +
+        s"${at.blockId}@${at.height}: ${message(ex)}", ex)
+      completeRepairCycle()
 
     // MarkReady may reply to ask-based callers; this producer needs no response.
     case _: SyncStatus => ()
     case _: BlockCommitted => ()
-    case _: BlockRejected => ()
+  }
+
+  /** Continue the retained batch, or return to polling after the last fetched block. */
+  private def continueCanonical(tip: Int): Unit =
+    if (pending.nonEmpty) commitNext(tip)
+    else {
+      inFlight = false
+      if (cursor.exists(_.height >= tip)) {
+        committedSinceCheckpoint = 0
+        syncHandler ! MarkReady
+      } else self ! Tick
+    }
+
+  private def maintenanceCheckpointDue(at: SyncCursor, tip: Int): Boolean =
+    quarantineCheckpoints && quarantineAttempts > 0 && at.height < tip &&
+      committedSinceCheckpoint >= checkpointInterval
+
+  /**
+   * Keep the canonical producer occupied while one repair is selected, rebuilt, and published.
+   * Because no next commit can start, the exact cursor guard can accept a long repair during catch-up.
+   */
+  private def beginMaintenanceCheckpoint(tip: Int): Unit = {
+    maintenanceTip = Some(tip)
+    repairing = true
+    (syncHandler ? GetRepairableQuarantines)
+      .map(result => QuarantinesLoaded(Success(result)))
+      .recover { case ex => QuarantinesLoaded(Failure(ex)) }
+      .pipeTo(self)
+  }
+
+  private def publishRollupRepair(rollupId: String,
+                                  at: SyncCursor,
+                                  outcome: RollupRepairResult): Unit =
+    (syncHandler ? RepairRollup(rollupId, at, outcome))
+      .map(result => RollupRepairPublished(rollupId, at, Success(result)))
+      .recover { case ex => RollupRepairPublished(rollupId, at, Failure(ex)) }
+      .pipeTo(self)
+
+  /** Resume a frozen catch-up batch only after the repair owner has accepted or refused the result. */
+  private def completeRepairCycle(): Unit = {
+    repairing = false
+    maintenanceTip.foreach { tip =>
+      maintenanceTip = None
+      committedSinceCheckpoint = 0
+      continueCanonical(tip)
+    }
   }
 
   private def beginPoll(): Unit = {

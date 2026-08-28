@@ -149,6 +149,14 @@ object Configs {
       "unconfirmed transactions read before the mempool view gives up on a complete revision")
     v.range("sync.quarantine.repairAttempts", v.int("sync.quarantine.repairAttempts"), 0, 100,
       "rebuild attempts for a quarantined rollup before it is dropped for good")
+    v.range("sync.quarantine.retentionBlocks", v.int("sync.quarantine.retentionBlocks"), 1, 10000000,
+      "committed blocks a terminal or retry-exhausted quarantine is retained for diagnostics")
+    v.bool("sync.quarantine.maintenanceCheckpoints")
+    v.range("sync.quarantine.checkpointIntervalBlocks",
+      v.int("sync.quarantine.checkpointIntervalBlocks"), 1, 100000,
+      "committed catch-up blocks between quarantine repair checkpoints")
+    v.range("sync.quarantine.maxTransforms", v.int("sync.quarantine.maxTransforms"), 1, 10000000,
+      "rollup spends followed during one quarantine rebuild")
     v.bool("sync.minerDictionary.bootstrap")
     v.range("sync.minerDictionary.maxTransforms", v.int("sync.minerDictionary.maxTransforms"), 1, 10000000,
       "dictionary spends followed during bootstrap")
