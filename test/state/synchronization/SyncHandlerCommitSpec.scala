@@ -133,10 +133,10 @@ class SyncHandlerCommitSpec extends TestKit(ActorSystem("sync-handler-commit"))
     requester.send(handler, GetCommittedState)
     val live = requester.expectMsgType[CommittedState].state
     forced.cursor shouldEqual live.cursor
-    forced.encoded.length should be > 0
-    val decoded = StateSnapshotCodec.decode(forced.encoded, StateSnapshotIdentity(protocol)).toOption.get
-    decoded.state.cursor shouldEqual live.cursor
-    decoded.state.minerTree.dictionary.digest should
+    forced.encoded.meta.length should be > 0
+    val meta = StateSnapshotCodec.decodeMeta(forced.encoded.meta, StateSnapshotIdentity(protocol)).toOption.get
+    meta.cursor shouldEqual live.cursor
+    meta.minerTree.dictionary.digest should
       contain theSameElementsInOrderAs live.minerTree.dictionary.digest
 
     val second = BlockInfo(SyncFixtures.id(101), 101, Seq.empty, first.id)
@@ -230,7 +230,6 @@ class SyncHandlerCommitSpec extends TestKit(ActorSystem("sync-handler-commit"))
   }
 
   private def newHandler() = {
-    val cache = new FakeCache
     val snapshots = TestProbe()
     val (nodeContext, _, wallet) = FakeNodeContext(numAddresses = 1)
     val protocol = ReducerFixtures.protocol(rollupStartHeight = 100)
@@ -240,7 +239,7 @@ class SyncHandlerCommitSpec extends TestKit(ActorSystem("sync-handler-commit"))
         |sync.reorgWindow = 4
         |sync.snapshots.intervalBlocks = 720
         |""".stripMargin))
-    val handler = system.actorOf(Props(new SyncHandler(config, protocol, cache, snapshots.ref)))
+    val handler = system.actorOf(Props(new SyncHandler(config, protocol, snapshots.ref)))
     (handler, snapshots, protocol)
   }
 }

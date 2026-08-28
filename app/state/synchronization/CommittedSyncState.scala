@@ -5,9 +5,20 @@ import org.ergoplatform.sdk.ErgoId
 import state.messages.SyncMessages.SyncCursor
 
 /**
+ * A rollup this client stopped tracking, and whether rebuilding it could ever succeed.
+ * `retryable` is false where re-reading the same transaction gives the same answer.
+ */
+final case class QuarantineFault(rollupId: String,
+                                 genesisHeight: Int,
+                                 reason: String,
+                                 retryable: Boolean,
+                                 attempts: Int = 0) {
+  def attempted: QuarantineFault = copy(attempts = attempts + 1)
+}
+
+/**
  * Complete state published by one block commit.
- *
- * `minerDictionaryFault` is versioned with the state so snapshots and reorgs preserve its lifetime.
+ * Both fault maps are versioned with the state, so snapshots and reorgs preserve their lifetimes.
  */
 case class CommittedSyncState(cursor: SyncCursor,
                               version: Long,
@@ -15,13 +26,20 @@ case class CommittedSyncState(cursor: SyncCursor,
                               routes: Map[String, String],
                               minerTree: MinerTree,
                               dataBoxToken: Option[ErgoId],
-                              minerDictionaryFault: Option[String] = None) {
+                              minerDictionaryFault: Option[String] = None,
+                              quarantined: Map[String, QuarantineFault] = Map.empty) {
 
   require(routes.values.forall(rollups.contains), "Every rollup route must name committed state")
   require(routes.forall { case (utxoId, rollupId) => rollups(rollupId).utxoId == utxoId },
     "Every route must match its rollup's current UTXO")
+  require(quarantined.keySet.forall(!rollups.contains(_)),
+    "A quarantined rollup must not also be tracked")
 
   def routedRollups: Seq[(String, NISPTree)] =
     routes.toSeq.sortBy(_._1).map { case (utxoId, rollupId) => utxoId -> rollups(rollupId) }
-}
 
+  /** Faults worth node calls, newest first so a recent break is rebuilt before an old one. */
+  def repairableQuarantines(maxAttempts: Int): Seq[QuarantineFault] =
+    quarantined.values.filter(fault => fault.retryable && fault.attempts < maxAttempts)
+      .toSeq.sortBy(-_.genesisHeight)
+}

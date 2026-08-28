@@ -49,6 +49,16 @@ class ConfigDefaultsSpec extends AnyFlatSpec with Matchers {
     withClue("sync.minerDictionary.repairInterval: ") {
       absent.dictionaryRepairInterval shouldEqual shippedSync.dictionaryRepairInterval
     }
+    withClue("sync.pollInterval: ") { absent.pollInterval shouldEqual shippedSync.pollInterval }
+    withClue("sync.mempool.refreshInterval: ") {
+      absent.mempoolRefreshInterval shouldEqual shippedSync.mempoolRefreshInterval
+    }
+    withClue("sync.quarantine.repairAttempts: ") {
+      absent.quarantineRepairAttempts shouldEqual shippedSync.quarantineRepairAttempts
+    }
+    withClue("sync.snapshots.maxEntryBytes: ") {
+      absent.snapshotMaxEntryBytes shouldEqual shippedSync.snapshotMaxEntryBytes
+    }
   }
 
   /**
@@ -57,7 +67,7 @@ class ConfigDefaultsSpec extends AnyFlatSpec with Matchers {
    */
   "SyncConfig" should "have every optional key covered by the defaults comparison" in {
     // Every value except `startHeight`, which is required and so has no default to drift from.
-    val comparedOptional = 14
+    val comparedOptional = 18
     val required = 1
     val fields = classOf[SyncConfig].getDeclaredMethods.count(m => m.getParameterCount == 0 &&
       !m.getName.contains("$") && m.getName != "config")
@@ -75,6 +85,18 @@ class ConfigDefaultsSpec extends AnyFlatSpec with Matchers {
     val window = new SyncConfig(shipped).reorgWindow
     window should be <= 20
     window should be > 0
+  }
+
+  /**
+   * Intervals are floors: a zero repair interval makes every tick due, and the repair would then
+   * crowd out block polling for as long as the dictionary stays faulted.
+   */
+  "sync interval keys" should "sit above the floors validation enforces" in {
+    val sync = new SyncConfig(shipped)
+    sync.pollInterval.toMillis should be >= 1000L
+    sync.mempoolRefreshInterval.toMillis should be >= 1000L
+    sync.revalidationChecks.toMillis should be >= 1000L
+    sync.dictionaryRepairInterval.toMillis should be >= 30000L
   }
 
   /** Cursors are cheap, so this is sized for reach and must outrange the state window. */

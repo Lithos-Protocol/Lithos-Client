@@ -82,7 +82,7 @@ class SyncStateLifecycleSpec extends TestKit(ActorSystem("sync-state-lifecycle")
     requester.expectMsgType[Ready]
 
     val candidate = snapshots.expectMsgType[SnapshotCandidate]
-    candidate.encoded.length should be > 0
+    candidate.encoded.meta.length should be > 0
     candidate.cursor shouldEqual seeded.cursor
 
     // The dictionary the owner holds is untouched, because nothing had to be detached for the writer.
@@ -142,7 +142,6 @@ class SyncStateLifecycleSpec extends TestKit(ActorSystem("sync-state-lifecycle")
   }
 
   private def newHandler(reorgWindow: Int = 5, cursorWindow: Int = 720) = {
-    val cache = new FakeCache
     val snapshots = TestProbe()
     val (_, _, wallet) = FakeNodeContext(numAddresses = 1)
     val protocol = ReducerFixtures.protocol(rollupStartHeight = startHeight)
@@ -153,7 +152,7 @@ class SyncStateLifecycleSpec extends TestKit(ActorSystem("sync-state-lifecycle")
          |sync.cursorWindow = $cursorWindow
          |sync.snapshots.intervalBlocks = 720
          |""".stripMargin))
-    val handler = system.actorOf(Props(new SyncHandler(config, protocol, cache, snapshots.ref)))
+    val handler = system.actorOf(Props(new SyncHandler(config, protocol, snapshots.ref)))
     (handler, snapshots)
   }
 }

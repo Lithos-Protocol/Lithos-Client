@@ -197,7 +197,7 @@ class BlockReducerSpec extends AnyFlatSpec with Matchers with OptionValues {
     val transition = BlockReducer.applyBlock(base, block, protocol).toOption.value
 
     transition.state.cursor.blockId shouldEqual blockId
-    transition.quarantined.map(_._1) shouldEqual Seq(rollupId)
+    transition.quarantined.map(_.rollupId) shouldEqual Seq(rollupId)
     transition.state.rollups.keySet should not contain rollupId
     transition.state.routes shouldBe empty
     assertRollupBaseUnchanged(base, rollupId, inputUtxo, digestBefore)
@@ -229,7 +229,7 @@ class BlockReducerSpec extends AnyFlatSpec with Matchers with OptionValues {
 
     val transition = BlockReducer.applyBlock(base, block, protocol).toOption.value
 
-    transition.quarantined.map(_._1) shouldEqual Seq(brokenId)
+    transition.quarantined.map(_.rollupId) shouldEqual Seq(brokenId)
     transition.state.rollups.keySet shouldEqual Set(healthyId)
     transition.state.routes shouldEqual Map(healthyNext -> healthyId)
     transition.minerDictionaryFault shouldBe empty

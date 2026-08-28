@@ -97,7 +97,7 @@ object SyncApplyError {
 final case class BlockTransition(state: CommittedSyncState,
                                  relevantEvents: Int,
                                  stagedDictionaryCopies: Int,
-                                 quarantined: Seq[(String, String)] = Seq.empty,
+                                 quarantined: Seq[QuarantineFault] = Seq.empty,
                                  minerDictionaryFault: Option[String] = None,
                                  unrecognizedGenesis: Seq[String] = Seq.empty,
                                  unauthenticatedGenesis: Seq[(String, String)] = Seq.empty)
@@ -150,6 +150,36 @@ object BlockReducer {
   }
 
   /**
+   * Whether re-reading the same transaction could give a different answer.
+   * A shape or state the chain reports cannot change; a decode or an unexpected throw can.
+   */
+  def isRetryable(error: SyncApplyError): Boolean = error match {
+    case _: MalformedTransaction => true
+    case _: InternalFailure => true
+    case _ => false
+  }
+
+  /**
+   * Rebuilds one rollup from its genesis by replaying its own spend chain.
+   * Isolated from committed state, so a failed rebuild publishes nothing.
+   */
+  final class RollupReplay(protocol: SyncProtocolContext) {
+    private var state = CommittedSyncState(SyncCursor(0, "", ""), 0L, Map.empty, Map.empty,
+      MinerTree.initialState, None)
+
+    /** Applies one transaction, reporting whether it changed rollup state. */
+    def apply(block: BlockInfo, tx: BlockTx): Either[SyncApplyError, Boolean] = {
+      val staged = new StagedState(state, protocol)
+      staged.applyTransaction(block, tx).left.map(_.error).map { _ =>
+        state = staged.result
+        staged.relevantEvents > 0
+      }
+    }
+
+    def rollup(rollupId: String): Option[NISPTree] = state.rollups.get(rollupId)
+  }
+
+  /**
    * Replays dictionary transforms in order through one staged copy.
    *
    * The block path copies per transform because a failed block must leave its base untouched.
@@ -187,9 +217,11 @@ object BlockReducer {
     private var stagedRollupDictionaries = Map.empty[String, AuthenticatedDictionary]
     private var stagedMinerDictionary = Option.empty[AuthenticatedDictionary]
 
+    private var quarantines = base.quarantined
+
     var relevantEvents: Int = 0
     var dictionaryCopies: Int = 0
-    var quarantined: Seq[(String, String)] = Seq.empty
+    var quarantined: Seq[QuarantineFault] = Seq.empty
     var unrecognizedGenesis: Seq[String] = Seq.empty
     var unauthenticatedGenesis: Seq[(String, String)] = Seq.empty
     // Preserve a prior fault until a fresh bootstrap supplies known dictionary state.
@@ -197,7 +229,10 @@ object BlockReducer {
 
     def result: CommittedSyncState =
       base.copy(rollups = rollups, routes = routes, minerTree = minerTree, dataBoxToken = dataBoxToken,
-        minerDictionaryFault = minerDictionaryFault)
+        minerDictionaryFault = minerDictionaryFault, quarantined = quarantines)
+
+    /** Clears a fault when its rollup is tracked again, so a rebuild leaves no stale entry. */
+    def untrack(rollupId: String): Unit = quarantines -= rollupId
 
     def applyTransaction(block: BlockInfo, tx: BlockTx): Either[BlockFault, Unit] = {
       tx.inputs.headOption.flatMap(in => routes.get(in.id)) match {
@@ -228,10 +263,14 @@ object BlockReducer {
 
     /** Drop a rollup whose transform could not be applied. Its staged copy goes with it. */
     def quarantine(rollupId: String, error: SyncApplyError): Unit = {
+      val genesisHeight = rollups.get(rollupId).map(_.startHeight).getOrElse(0)
       rollups.get(rollupId).foreach(tree => routes -= tree.utxoId)
       rollups -= rollupId
       stagedRollupDictionaries -= rollupId
-      quarantined :+= rollupId -> error.message
+      val fault = QuarantineFault(rollupId, genesisHeight, error.message,
+        BlockReducer.isRetryable(error), quarantines.get(rollupId).map(_.attempts).getOrElse(0))
+      quarantines += rollupId -> fault
+      quarantined :+= fault
     }
 
     /** Restores the block's base dictionary because later spends cannot follow a failed transform. */
@@ -244,30 +283,35 @@ object BlockReducer {
 
     /**
      * Recognizes the configured holding output and authenticates its first input as collateral.
-     * Missing resolved input data is reported instead of treated as an unrelated transaction.
+     * If height is too low or is not collateral, we consider it unrelated
      */
     private def classifyGenesis(block: BlockInfo, tx: BlockTx): GenesisShape = {
-      if (block.height < protocol.rollupStartHeight) GenesisShape.Unrelated
+      if (block.height < protocol.rollupStartHeight || !createsEmptyRollupState(tx))
+        GenesisShape.Unrelated
       else if (tx.outputs.headOption.exists(_.ergoTree == protocol.holdingErgoTree)) {
         tx.inputs.headOption.flatMap(in => block.inputBox(in.id)) match {
           case None =>
             GenesisShape.Unauthenticated(s"input 0 (${tx.inputs.headOption.map(_.id).getOrElse("absent")}) " +
               "was not resolved by the block source, so its collateral token could not be checked")
-          case Some(input) if input.assets.exists(t => t.id == protocol.collateralToken && t.amount == 1L) =>
-            GenesisShape.Authentic
+          case Some(input) if spendsCollateral(input) => GenesisShape.Authentic
           case Some(input) =>
             GenesisShape.Unauthenticated(s"input 0 carries no ${protocol.collateralToken} token; " +
               s"it holds [${input.assets.map(t => s"${t.id}:${t.amount}").mkString(", ")}]")
         }
       }
       // Report collateral spends targeting a holding script outside the configured protocol.
-      else if (tx.inputs.headOption.flatMap(in => block.inputBox(in.id))
-        .exists(_.assets.exists(t => t.id == protocol.collateralToken && t.amount == 1L)) &&
-        tx.outputs.headOption.exists(out =>
-          avlDigest(out, tx.id).exists(sameBytes(_, BlockReducer.EmptyDictionaryDigest))))
+      else if (tx.inputs.headOption.flatMap(in => block.inputBox(in.id)).exists(spendsCollateral))
         GenesisShape.UnknownScript
       else GenesisShape.Unrelated
     }
+
+    /** Whether output 0 holds a freshly created, empty authenticated dictionary. */
+    private def createsEmptyRollupState(tx: BlockTx): Boolean =
+      tx.outputs.headOption.exists(out =>
+        avlDigest(out, tx.id).exists(sameBytes(_, BlockReducer.EmptyDictionaryDigest)))
+
+    private def spendsCollateral(input: TxOutput): Boolean =
+      input.assets.exists(t => t.id == protocol.collateralToken && t.amount == 1L)
 
     private def applyGenesis(block: BlockInfo, tx: BlockTx): Either[SyncApplyError, Unit] = {
       for {
@@ -285,6 +329,8 @@ object BlockReducer {
           hasMiner = false, LFSMPhase.HOLDING, blockId = block.id, utxoId = output.id)
         rollups += block.id -> tree
         routes += output.id -> block.id
+        // Tracking it again ends any fault held for it, which the state invariant requires.
+        untrack(block.id)
         relevantEvents += 1
       }
     }

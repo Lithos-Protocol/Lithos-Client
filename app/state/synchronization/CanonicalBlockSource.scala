@@ -120,15 +120,11 @@ final class CanonicalBlockSource(nodeApi: NodeApi) {
     if (candidates.isEmpty) Success(None)
     else {
       val heights = candidates.map(_.height)
-      headerSlice(heights.min, heights.max).flatMap { headers =>
-        val byHeight = headers.filter(header => heights.contains(header.height)).groupBy(_.height)
-        val ambiguous = byHeight.collect { case (height, values) if values.size != 1 => height }.toSeq.sorted
-        val missing = heights.distinct.filterNot(byHeight.contains).sorted
-        if (ambiguous.nonEmpty) Failure(new IllegalStateException(
-          s"Canonical chain slice returned multiple headers at heights ${ambiguous.mkString(",")}"))
-        else if (missing.nonEmpty) Failure(new NoSuchElementException(
-          s"Canonical chain slice omitted retained heights ${missing.mkString(",")}"))
-        else Success(candidates.reverse.find(cursor => byHeight(cursor.height).head.id == cursor.blockId))
+      // headerSlice already guarantees one header per height across the whole inclusive range,
+      // so a lookup here cannot miss or find two.
+      headerSlice(heights.min, heights.max).map { headers =>
+        val byHeight = headers.map(header => header.height -> header).toMap
+        candidates.reverse.find(cursor => byHeight.get(cursor.height).exists(_.id == cursor.blockId))
       }
     }
   }

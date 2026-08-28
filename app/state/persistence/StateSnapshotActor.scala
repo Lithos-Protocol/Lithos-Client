@@ -17,7 +17,7 @@ object StateSnapshotActor {
   case object RestoreLatest
   final case class SnapshotLoaded(snapshot: Option[PersistedSyncState], warning: Option[String] = None)
   /** An encoded generation. Serialization happens on the state owner's thread — see `offerSnapshot`. */
-  final case class SnapshotCandidate(cursor: SyncCursor, version: Long, encoded: Array[Byte])
+  final case class SnapshotCandidate(cursor: SyncCursor, version: Long, encoded: SnapshotWrite)
 
   private final case class ValidationFinished(requester: ActorRef,
                                               result: Try[Either[String, PersistedSyncState]])
@@ -160,9 +160,11 @@ class StateSnapshotActor @Inject()(config: Configuration,
       Some(s"retained cursors end at ${cursors.last.height}, not the committed ${state.cursor.height}")
     else if (state.dataBoxToken.isDefined && !state.minerTree.hasMiner)
       Some("a local data-box token is stored while the dictionary does not hold this miner")
-    else if (state.minerTree.minerMap.size > state.minerTree.numMiners)
+    else if (state.minerTree.minerMap.size != state.minerTree.numMiners)
       Some(s"dictionary holds ${state.minerTree.minerMap.size} mapped miners but counts " +
         s"${state.minerTree.numMiners}")
+    else if (state.quarantined.keySet.exists(state.rollups.contains))
+      Some("a rollup is recorded as both quarantined and tracked")
     else None
   }
 

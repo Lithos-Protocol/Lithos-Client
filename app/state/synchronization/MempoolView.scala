@@ -35,8 +35,11 @@ object MempoolView {
                                          endInputs: Map[String, work.lithos.mutations.InputUTXO],
                                          blockedRoots: Set[String])
 
-  /** Builds parent-before-child chains independently of the order returned by the node. */
-  def buildGraph(transactions: Seq[BlockTx]): Graph = {
+  /**
+   * Builds parent-before-child chains independently of the order returned by the node.
+   * Only roots this client tracks are followed: anyone can pay a rollup script, and nothing else reads.
+   */
+  def buildGraph(transactions: Seq[BlockTx], trackedRoots: Set[String]): Graph = {
     val inputGroups = transactions.flatMap(tx => tx.inputs.headOption.map(_.id -> tx)).groupBy(_._1)
       .map { case (input, entries) => input -> entries.map(_._2) }
     val conflictingInputs = inputGroups.collect { case (input, txs) if txs.size != 1 => input }.toSet
@@ -46,7 +49,8 @@ object MempoolView {
     }.toSet
     val usable = unique.filter { case (_, tx) => tx.outputs.headOption.isDefined }
     val produced = usable.values.flatMap(_.outputs.headOption.map(_.id)).toSet
-    val roots = (usable.keySet -- produced) ++ conflictingInputs ++ malformedInputs
+    val roots = ((usable.keySet -- produced) ++ conflictingInputs ++ malformedInputs)
+      .filter(trackedRoots.contains)
 
     roots.foldLeft(Graph(Map.empty, Set.empty)) { (graph, root) =>
       follow(root, usable, conflictingInputs ++ malformedInputs) match {
@@ -95,7 +99,8 @@ class MempoolView @Inject()(config: play.api.Configuration,
   private val pollingContext = context.system.dispatchers.lookup(Contexts.key(Contexts.Polling))
   private val logger: Logger = LoggerFactory.getLogger("MempoolView")
   private val nodeApi = nodeContext.getNodeApi
-  private val maxTransactions = new configs.SyncConfig(config).mempoolMaxTransactions
+  private val syncConfig = new configs.SyncConfig(config)
+  private val maxTransactions = syncConfig.mempoolMaxTransactions
   // Relevant ErgoTrees to search mempool for
   // TODO: Could be expanded in the future for mempool support of other UTXOs?
   private val rollupTrees =
@@ -107,7 +112,8 @@ class MempoolView @Inject()(config: play.api.Configuration,
   private var healthy = false
 
   private val ticker: Cancellable =
-    context.system.scheduler.scheduleWithFixedDelay(5.seconds, 5.seconds, self, Tick)
+    context.system.scheduler.scheduleWithFixedDelay(
+      syncConfig.mempoolRefreshInterval, syncConfig.mempoolRefreshInterval, self, Tick)
 
   stateFrame ! AutoSubscribable.AutoSubscribe(self)
 
@@ -157,45 +163,53 @@ class MempoolView @Inject()(config: play.api.Configuration,
   }
 
   /**
-   * Reads the relevant mempool twice and keeps the result when nothing disappeared between them.
-   *
-   * Offsets shift as transactions leave, so a page walk can skip an entry even when every response is
-   * individually valid. Arrivals cannot cause a skip and are the common case at any scale, so
-   * requiring the two reads to be identical would reject most refreshes once submissions are
-   * frequent. Only a disappearance forces a retry.
+   * Reads the relevant mempool, re-reading only when a page walk could have skipped an entry.
+   * A single page cannot skip, so the second read is paid for only when one script actually paged.
    */
   private def buildSnapshot(): Try[BuiltSnapshot] =
-    fetchAll().flatMap { first =>
-      fetchAll().flatMap { second =>
+    fetchAll().flatMap { case (first, paged) =>
+      if (!paged) Success(first)
+      else fetchAll().flatMap { case (second, _) =>
+        // Arrivals cannot cause a skip; only a disappearance shifts offsets under the walk.
         val vanished = first.map(_.id).toSet -- second.map(_.id).toSet
         if (vanished.isEmpty) Success(second)
         else Failure(new MempoolRaced(
           s"${vanished.size} unconfirmed rollup transaction(s) left the mempool while it was paged"))
       }
     }.map { transactions =>
-      val graph = buildGraph(transactions)
-      val endInputs = nodeContext.getClient.execute { ctx =>
-        graph.chains.map { case (root, chain) => root -> chain.transforms.last.output.toInput(ctx) }
-      }
+      val graph = buildGraph(transactions, trackedRoots)
+      // Opening a context is two node calls, so it is only worth it when a chain needs converting.
+      val endInputs =
+        if (graph.chains.isEmpty) Map.empty[String, work.lithos.mutations.InputUTXO]
+        else nodeContext.getClient.execute { ctx =>
+          graph.chains.map { case (root, chain) => root -> chain.transforms.last.output.toInput(ctx) }
+        }
       BuiltSnapshot(transactions.map(_.id).toSet, graph.chains, endInputs, graph.blockedRoots)
     }
 
-  /** Every unconfirmed transaction at a rollup script, deduplicated across the three scripts. */
-  private def fetchAll(): Try[Seq[BlockTx]] =
-    rollupTrees.foldLeft(Try(Vector.empty[BlockTx])) { (accumulated, tree) =>
-      accumulated.flatMap(collected => fetchByTree(tree, collected))
-    }.map { collected =>
+  /** UTXOs this client tracks. Chains rooted anywhere else have no reader. */
+  private def trackedRoots: Set[String] = utils.Globals.syncView.rollups.map(_._1).toSet
+
+  /** Every unconfirmed transaction at a rollup script, deduplicated, and whether any script paged. */
+  private def fetchAll(): Try[(Seq[BlockTx], Boolean)] =
+    rollupTrees.foldLeft(Try((Vector.empty[BlockTx], false))) { case (accumulated, tree) =>
+      accumulated.flatMap { case (collected, paged) =>
+        fetchByTree(tree, collected).map { case (next, treePaged) => (next, paged || treePaged) }
+      }
+    }.map { case (collected, paged) =>
       // A transaction spending one rollup script and creating another is returned under both.
-      collected.foldLeft((Set.empty[String], Vector.empty[BlockTx])) {
-        case ((seen, unique), tx) =>
-          if (seen.contains(tx.id)) (seen, unique) else (seen + tx.id, unique :+ tx)
+      val unique = collected.foldLeft((Set.empty[String], Vector.empty[BlockTx])) {
+        case ((seen, kept), tx) =>
+          if (seen.contains(tx.id)) (seen, kept) else (seen + tx.id, kept :+ tx)
       }._2
+      (unique, paged)
     }
 
   @tailrec
   private def fetchByTree(ergoTree: String,
                           collected: Vector[BlockTx],
-                          offset: Int = 0): Try[Vector[BlockTx]] =
+                          offset: Int = 0,
+                          paged: Boolean = false): Try[(Vector[BlockTx], Boolean)] =
     nodeApi.unconfirmedTransactionsByErgoTree(ergoTree, Paging(offset, PageSize)) match {
       case Failure(ex) => Failure(ex)
       case Success(page) =>
@@ -205,8 +219,8 @@ class MempoolView @Inject()(config: play.api.Configuration,
             s"Unconfirmed rollup transactions exceed sync.mempool.maxTransactions ($maxTransactions); " +
               "mempool chaining is unavailable, and transactions will build on " +
               "confirmed state"))
-        else if (page.size < PageSize) Success(next)
-        else fetchByTree(ergoTree, next, offset + page.size)
+        else if (page.size < PageSize) Success((next, paged))
+        else fetchByTree(ergoTree, next, offset + page.size, paged = true)
     }
 
   /** Readiness is owned by SyncHandler and published, rather than asked for on every tick. */

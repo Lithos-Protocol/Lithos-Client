@@ -157,5 +157,5 @@ class SnapshotFallbackSpec extends TestKit(ActorSystem("snapshot-fallback"))
                         cursors: Vector[SyncCursor],
                         identity: StateSnapshotIdentity): StateSnapshotActor.SnapshotCandidate =
     StateSnapshotActor.SnapshotCandidate(state.cursor, state.version,
-      StateSnapshotCodec.encode(PersistedSyncState(state, cursors), identity).toOption.get)
+      StateSnapshotCodec.encode(PersistedSyncState(state, cursors), identity, 64 * 1024 * 1024).toOption.get)
 }

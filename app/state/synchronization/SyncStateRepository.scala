@@ -1,22 +1,15 @@
 package state.synchronization
 
-import cache.{MDCache, RollupCache}
 import lfsm.MDDatabase
-import lfsm.states.NISPTree
-import play.api.cache.SyncCacheApi
 
 import scala.util.control.NonFatal
 
 /**
- * Publishes committed state to the rollup cache, Miner Dictionary cache, and local data-box store.
- *
- * These mirrors are not transactionally atomic; publication failures are returned to the state owner.
+ * Publishes the durable part of committed state: this miner's Miner Dictionary data-box token.
+ * Everything else consumers read travels in `Globals.syncView` or in the message they were given.
  */
-final class SyncStateRepository(rollupCache: RollupCache,
-                                mdCache: MDCache,
-                                dataBox: MDDatabase) {
+final class SyncStateRepository(dataBox: MDDatabase) {
 
-  /** Publishes the durable data token before updating the in-memory mirrors. */
   def publish(previous: Option[CommittedSyncState],
               next: CommittedSyncState): Either[String, Unit] =
     guard("state publication") {
@@ -29,24 +22,14 @@ final class SyncStateRepository(rollupCache: RollupCache,
           case _ => ()
         }
       }
-
-      next.routedRollups.foreach { case (utxoId, tree) => rollupCache.set(utxoId, tree) }
-      mdCache.setMD(next.minerTree)
-      rollupCache.setTreeSet(next.routes.keySet)
-
-      previous.toSeq.flatMap(_.routes.keys).filterNot(next.routes.contains).foreach(rollupCache.remove)
     }
 
-  /** Drops every published mirror, for a full rescan. */
-  def clear(previous: Option[CommittedSyncState]): Either[String, Unit] =
+  /** Drops durable state, for a full rescan. */
+  def clear(): Either[String, Unit] =
     guard("state reset") {
-      previous.toSeq.flatMap(_.routes.keys).foreach(rollupCache.remove)
-      rollupCache.setTreeSet(Set.empty)
       if (!dataBox.delDataBoxToken)
         throw new IllegalStateException("Miner Dictionary data-token deletion was rejected")
     }
-
-  def setRollup(tree: NISPTree): Unit = rollupCache.set(tree.utxoId, tree)
 
   private def guard(what: String)(publish: => Unit): Either[String, Unit] =
     try {
@@ -58,6 +41,5 @@ final class SyncStateRepository(rollupCache: RollupCache,
 }
 
 object SyncStateRepository {
-  def apply(cacheApi: SyncCacheApi, dataBox: MDDatabase): SyncStateRepository =
-    new SyncStateRepository(RollupCache(cacheApi), MDCache(cacheApi), dataBox)
+  def apply(dataBox: MDDatabase): SyncStateRepository = new SyncStateRepository(dataBox)
 }

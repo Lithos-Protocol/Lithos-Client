@@ -165,6 +165,7 @@ class StateFrameSpec extends TestKit(ActorSystem("state-frame"))
       new StateFrame(configWith(startHeight), nodeContext, protocol, sync.ref, snapshots.ref)))
 
     frame ! StartSynchronization
+    ChainFixtures.unseeded(sync)
     snapshots.expectMsg(RestoreLatest)
     snapshots.reply(SnapshotLoaded(None))
 
@@ -202,6 +203,7 @@ class StateFrameSpec extends TestKit(ActorSystem("state-frame"))
         sync.ref, snapshots.ref)))
     frame ! StartSynchronization
 
+    ChainFixtures.unseeded(sync)
     snapshots.expectMsg(RestoreLatest)
     snapshots.reply(SnapshotLoaded(None))
     val restore = sync.expectMsgType[RestoreCommittedState]

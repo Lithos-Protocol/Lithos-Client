@@ -133,6 +133,7 @@ class TipRegressionRecoverySpec extends TestKit(ActorSystem("tip-regression-reco
       new StateFrame(config, nodeContext, protocol, sync.ref, snapshots.ref)))
 
     frame ! StartSynchronization
+    ChainFixtures.unseeded(sync)
     snapshots.expectMsg(RestoreLatest)
     snapshots.reply(SnapshotLoaded(None))
     val seed = sync.expectMsgType[RestoreCommittedState]

@@ -36,6 +36,8 @@ object StateFrame {
   private final case class ResetFinished(result: Try[Any])
   private final case class RecoveryPrepared(result: Try[Option[CommittedSyncState]])
   private final case class DictionaryRepaired(atHeight: Int, result: Try[Either[String, MinerDictionarySeed]])
+  private final case class QuarantinesLoaded(result: Try[Any])
+  private final case class RollupRepaired(rollupId: String, atHeight: Int, result: Try[RollupRepairResult])
 }
 
 /**
@@ -58,6 +60,7 @@ class StateFrame @Inject()(config: Configuration,
 
   private val syncConfig = new SyncConfig(config)
   private val source = new CanonicalBlockSource(nodeContext.getNodeApi)
+  private val quarantineAttempts = syncConfig.quarantineRepairAttempts
   private val batchBlocks = syncConfig.catchUpBatchBlocks
   private val retriesBeforeAlarm = syncConfig.retriesBeforeAlarm
   private val tipRevalidation = syncConfig.revalidationChecks
@@ -72,19 +75,23 @@ class StateFrame @Inject()(config: Configuration,
   private var nextHeight = firstHeight
   private var active = false
   private var inFlight = false
+  // Rebuilds run beside block production: they touch no cursor, and holding the producer for one
+  // stops synchronization for as long as the walk takes.
+  private var repairing = false
   // Fetched as a batch but committed one at a time in chain order.
   private var pending = Vector.empty[BlockInfo]
   // Consecutive failures at one height; moving to another height resets the alarm.
   private var stalledAt = Option.empty[Int]
   private var stalledAttempts = 0
   private var stalledSince = 0L
-  // Last time the committed header was re-read while idle at tip.
+  // Written on the polling dispatcher, read there too; safe by the pipe-to-self between the two.
   private var lastTipCheck = 0L
   // Last attempt to rebuild a faulted Miner Dictionary.
   private var lastDictionaryRepair = 0L
 
   private val ticker: Cancellable =
-    context.system.scheduler.scheduleWithFixedDelay(5.seconds, 5.seconds, self, Tick)
+    context.system.scheduler.scheduleWithFixedDelay(
+      syncConfig.pollInterval, syncConfig.pollInterval, self, Tick)
 
   override def postStop(): Unit = ticker.cancel()
 
@@ -112,9 +119,9 @@ class StateFrame @Inject()(config: Configuration,
 
     case StartSynchronization => self ! Tick
     case CheckBlock => self ! Tick
-    case Tick if active && !inFlight && dictionaryRepairDue => beginDictionaryRepair()
-    case Tick if active && !inFlight => beginPoll()
-    case Tick => ()
+    case Tick =>
+      if (active && !repairing) beginRepairs()
+      if (active && !inFlight) beginPoll()
 
     case StartupState(Success(saved)) =>
       saved.foreach { state =>
@@ -138,7 +145,9 @@ class StateFrame @Inject()(config: Configuration,
       inFlight = false
       cursor match {
         case Some(_) => syncHandler ! MarkReady
-        case None => logger.warn(s"Node tip is below synchronization start height $firstHeight")
+        // Unreachable: a seed establishes the cursor before the first poll.
+        case None => failPoll("Reached the tip with no committed cursor",
+          new IllegalStateException("canonical polling ran before synchronization was seeded"))
       }
 
     // The chain is intact and only the index trails the cursor, so waiting is the correct option.
@@ -147,7 +156,7 @@ class StateFrame @Inject()(config: Configuration,
       val reason = s"node index is at height ${heights.usable}, below the committed height " +
         s"${at.height} (headers reach ${heights.chain}); waiting for indexing to catch up"
       logger.warn(reason)
-      recordStall(at.height, reason)
+      recordStall(reason)
       syncHandler ! MarkStale(reason)
 
     case PollFinished(Success(ForkDetected(at, detail, heights))) =>
@@ -192,7 +201,7 @@ class StateFrame @Inject()(config: Configuration,
       inFlight = false
       pending = Vector.empty
       logger.error(s"Synchronization rejected block ${block.id}: ${rejected.reason}")
-      recordStall(block.height, rejected.reason)
+      recordStall(rejected.reason)
       syncHandler ! MarkStale(rejected.reason)
 
     case CommitFinished(block, _, Success(other)) =>
@@ -256,22 +265,52 @@ class StateFrame @Inject()(config: Configuration,
     case RecoveryPrepared(Failure(ex)) => failPoll("Snapshot reorg recovery failed", ex)
 
     case DictionaryRepaired(at, Success(Right(seed))) =>
-      inFlight = false
       (syncHandler ? RepairMinerDictionary(at, seed.minerTree, seed.dataBoxToken))
-        .map(_ => Tick)
-        .recover { case _ => Tick }
+        .map(result => QuarantinesLoaded(Success(result)))
+        .recover { case ex => QuarantinesLoaded(Failure(ex)) }
         .pipeTo(self)
 
     case DictionaryRepaired(_, Success(Left(reason))) =>
-      inFlight = false
+      repairing = false
       logger.warn(s"Miner Dictionary bootstrap retry failed: $reason. Registration and commitment " +
         s"fraud proofs stay unavailable; retrying in $repairInterval")
-      self ! Tick
 
     case DictionaryRepaired(_, Failure(ex)) =>
-      inFlight = false
+      repairing = false
       logger.warn(s"Miner Dictionary bootstrap retry could not run: ${message(ex)}", ex)
-      self ! Tick
+
+    // Names reason for Miner Dictionary failure
+    case QuarantinesLoaded(Success(rejected: BlockRejected)) =>
+      repairing = false
+      logger.warn(s"Rebuilt Miner Dictionary was not installed: ${rejected.reason}")
+
+    case QuarantinesLoaded(Success(RepairableQuarantines(faults, at))) =>
+      faults.headOption match {
+        case None => repairing = false
+        case Some(fault) =>
+          logger.info(s"Rebuilding quarantined rollup ${fault.rollupId} from height " +
+            s"${fault.genesisHeight}, attempt ${fault.attempts + 1} of $quarantineAttempts")
+          Future(new RollupRepair(nodeContext.getNodeApi, protocol,
+            syncConfig.minerDictionaryMaxTransforms).run(fault, at))(pollingContext)
+            .map(result => RollupRepaired(fault.rollupId, at, Success(result)))
+            .recover { case ex => RollupRepaired(fault.rollupId, at, Failure(ex)) }
+            .pipeTo(self)
+      }
+
+    case QuarantinesLoaded(Success(_)) => repairing = false
+
+    case QuarantinesLoaded(Failure(ex)) =>
+      repairing = false
+      logger.warn(s"Could not read repairable quarantines: ${message(ex)}", ex)
+
+    case RollupRepaired(rollupId, at, Success(outcome)) =>
+      repairing = false
+      syncHandler ! RepairRollup(rollupId, at, outcome)
+
+    case RollupRepaired(rollupId, at, Failure(ex)) =>
+      repairing = false
+      syncHandler ! RepairRollup(rollupId, at,
+        RollupRepairResult.Failed(s"rebuild could not run: ${message(ex)}", retryable = true))
 
     // MarkReady may reply to ask-based callers; this producer needs no response.
     case _: SyncStatus => ()
@@ -302,14 +341,21 @@ class StateFrame @Inject()(config: Configuration,
   }
 
   /**
-   * Establishes committed state before any block is applied: a canonical snapshot if one exists,
-   * otherwise a fresh dictionary bootstrap. Never resolves to `None` — a caller that gets a state back
-   * may begin polling, and one that gets a failure must not.
+   * Get initial source for seed state. Checks committed state first in case
+   * this is an actor restart.
    */
   private def establishSeed(): Future[Option[CommittedSyncState]] =
-    restoreSnapshot().flatMap {
-      case Some(state) => Future.successful(Some(state))
-      case None => seedFromMinerDictionary()
+    (syncHandler ? GetCommittedState).flatMap {
+      // The owner outlived this producer, so its state is ahead of any snapshot and restoring one
+      // would discard everything committed since.
+      case CommittedState(state) =>
+        logger.info(s"Resuming from state the owner still holds at ${state.cursor.blockId}@" +
+          s"${state.cursor.height} rather than restoring a snapshot")
+        Future.successful(Some(state))
+      case _ => restoreSnapshot().flatMap {
+        case Some(state) => Future.successful(Some(state))
+        case None => seedFromMinerDictionary()
+      }
     }
 
   /**
@@ -345,8 +391,10 @@ class StateFrame @Inject()(config: Configuration,
       }
     }(pollingContext).flatMap { rebuilt =>
       rebuilt.left.foreach { reason =>
-        logger.error(s"Miner Dictionary bootstrap failed: $reason. Mining and submission continue; " +
-          "registering a new miner and raising commitment fraud proofs do not.")
+        // Disabling it is a configuration choice, not a failure to chase.
+        if (!syncConfig.minerDictionaryBootstrap) logger.info(reason)
+        else logger.error(s"Miner Dictionary bootstrap failed: $reason. Mining and submission " +
+          "continue; registering a new miner and raising commitment fraud proofs do not.")
       }
       seedCursor().flatMap { cursor =>
         val seed = CommittedSyncState(cursor, 0L, Map.empty, Map.empty,
@@ -433,10 +481,16 @@ class StateFrame @Inject()(config: Configuration,
       System.currentTimeMillis() - lastDictionaryRepair >= repairInterval.toMillis
 
   /**
-   * Rebuilds a faulted dictionary at the committed height, without disturbing the cursor.
+   * Rebuilds faulted protocol state beside block production. The dictionary comes first because it
+   * gates registration; a quarantined rollup only costs its own payout.
    */
+  private def beginRepairs(): Unit =
+    if (dictionaryRepairDue) beginDictionaryRepair()
+    else if (quarantineAttempts > 0 && cursor.isDefined &&
+      utils.Globals.syncView.canonical.available) askForQuarantines()
+
   private def beginDictionaryRepair(): Unit = {
-    inFlight = true
+    repairing = true
     lastDictionaryRepair = System.currentTimeMillis()
     val at = cursor.get.height
     logger.info(s"Retrying the Miner Dictionary bootstrap at height $at")
@@ -444,6 +498,14 @@ class StateFrame @Inject()(config: Configuration,
       syncConfig.minerDictionaryMaxTransforms).run(at)))(pollingContext)
       .map(result => DictionaryRepaired(at, result))
       .recover { case ex => DictionaryRepaired(at, Failure(ex)) }
+      .pipeTo(self)
+  }
+
+  private def askForQuarantines(): Unit = {
+    repairing = true
+    (syncHandler ? GetRepairableQuarantines)
+      .map(result => QuarantinesLoaded(Success(result)))
+      .recover { case ex => QuarantinesLoaded(Failure(ex)) }
       .pipeTo(self)
   }
 
@@ -464,12 +526,16 @@ class StateFrame @Inject()(config: Configuration,
     pending = Vector.empty
     val reason = s"$message: ${Option(ex.getMessage).getOrElse(ex.getClass.getSimpleName)}"
     logger.error(reason, ex)
-    recordStall(nextHeight, reason)
+    recordStall(reason)
     syncHandler ! MarkStale(reason)
   }
 
-  /** Reports persistent failures at one height while retries continue. */
-  private def recordStall(height: Int, reason: String): Unit = {
+  /**
+   * Reports persistent failures at one cursor while retries continue.
+   * Keyed on the committed height, so alternating failure shapes cannot reset the count forever.
+   */
+  private def recordStall(reason: String): Unit = {
+    val height = cursor.map(_.height).getOrElse(nextHeight)
     if (!stalledAt.contains(height)) {
       stalledAt = Some(height)
       stalledAttempts = 0

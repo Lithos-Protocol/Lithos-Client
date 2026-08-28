@@ -88,6 +88,7 @@ class IndexedBlockGatingSpec extends TestKit(ActorSystem("indexed-block-gating")
       new StateFrame(config, nodeContext, protocol, sync.ref, snapshots.ref)))
 
     frame ! StartSynchronization
+    ChainFixtures.unseeded(sync)
     snapshots.expectMsg(RestoreLatest)
     snapshots.reply(SnapshotLoaded(None))
     val seed = sync.expectMsgType[RestoreCommittedState]

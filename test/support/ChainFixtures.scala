@@ -6,6 +6,9 @@ import org.mockito.ArgumentMatchers.any
 import org.mockito.Mockito.when
 import org.scalatestplus.mockito.MockitoSugar
 
+import akka.testkit.TestProbe
+import state.messages.SyncMessages.{GetCommittedState, Starting, SyncUnavailable}
+
 import scala.util.{Success, Try}
 
 /** Parent-linked node fixtures using the node's exclusive `chainSlice.fromHeight` convention. */
@@ -50,6 +53,12 @@ object ChainFixtures extends MockitoSugar {
       Success(ids.flatMap(byId.get)): Try[Seq[IndexedBlock]]
     }
     api
+  }
+
+  /** Answers the producer's first startup question: this owner holds no state of its own yet. */
+  def unseeded(sync: TestProbe): Unit = {
+    sync.expectMsg(GetCommittedState)
+    sync.reply(SyncUnavailable(Starting))
   }
 
   def infoAt(tip: Int): NodeInfo =

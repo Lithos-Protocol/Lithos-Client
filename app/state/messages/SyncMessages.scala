@@ -63,6 +63,19 @@ object SyncMessages {
                                    minerTree: lfsm.states.MinerTree,
                                    dataBoxToken: Option[org.ergoplatform.sdk.ErgoId])
 
+  /** Asks which quarantined rollups are worth rebuilding, newest first. */
+  case object GetRepairableQuarantines
+  case class RepairableQuarantines(faults: Seq[_root_.state.synchronization.QuarantineFault],
+                                   committedHeight: Int)
+
+  /**
+   * Installs a rebuilt rollup and clears its fault, or records the attempt when the rebuild failed.
+   * Carries the height it was rebuilt at, so a commit that landed meanwhile rejects it.
+   */
+  case class RepairRollup(rollupId: String,
+                          atHeight: Int,
+                          outcome: _root_.state.synchronization.RollupRepairResult)
+
   case class RollbackTo(blockId: String)
   case class RollbackCompleted(cursor: SyncCursor)
   case class RollbackRejected(reason: String)

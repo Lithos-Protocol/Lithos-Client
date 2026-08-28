@@ -15,6 +15,8 @@ import play.api.Configuration
 import state.messages.MempoolMessages.{MempoolSnapshot, MempoolUnavailable}
 import state.messages.SyncMessages.{Ready, SyncCursor}
 import state.messages.{Capability, SyncView}
+import lfsm.LFSMPhase
+import lfsm.states.{NISPTree, PlasmaDictionary}
 import support.{FakeNodeContext, ReducerFixtures, SyncFixtures}
 import utils.Globals
 
@@ -48,6 +50,19 @@ class MempoolPressureSpec extends TestKit(ActorSystem("mempool-pressure"))
 
     val snapshot = sync.expectMsgType[MempoolSnapshot]
     snapshot.revision shouldEqual 1L
+    snapshot.chains.keySet shouldEqual (0 until 3).map(root).toSet
+    view ! akka.actor.PoisonPill
+  }
+
+  /** Following an untracked root would let anyone paying a rollup script cost this client work. */
+  it should "build no chain for a root this client does not track" in {
+    val sync = TestProbe()
+    ready(tracked = 1)
+    val view = viewOver(transactions = 3, bound = 100, sync)
+
+    val snapshot = sync.expectMsgType[MempoolSnapshot]
+    snapshot.chains.keySet shouldEqual Set(root(0))
+    snapshot.endInputs.keySet shouldEqual Set(root(0))
     view ! akka.actor.PoisonPill
   }
 
@@ -74,11 +89,25 @@ class MempoolPressureSpec extends TestKit(ActorSystem("mempool-pressure"))
   it should "accept a revision when the second read only gained transactions" in {
     val sync = TestProbe()
     ready()
-    val view = viewOver(transactions = 3, bound = 100, sync, growBy = 2)
+    // Over one page, so the walk could have skipped and the consistency read is actually taken.
+    val view = viewOver(transactions = PageSize + 1, bound = 5000, sync, growBy = 2)
 
-    val snapshot = sync.expectMsgType[MempoolSnapshot]
+    val snapshot = sync.expectMsgType[MempoolSnapshot](10.seconds)
     // The second read is the one kept, so its arrivals are in the published revision.
-    snapshot.chains.size + snapshot.blockedRoots.size shouldEqual 5
+    snapshot.chains.size shouldEqual PageSize + 3
+    view ! akka.actor.PoisonPill
+  }
+
+  /** A single page cannot skip an entry, so paying for a second read would be waste. */
+  it should "read once when everything fits in one page" in {
+    val sync = TestProbe()
+    ready()
+    val counted = new java.util.concurrent.atomic.AtomicInteger(0)
+    val view = viewOver(transactions = 3, bound = 100, sync, reads = Some(counted))
+
+    sync.expectMsgType[MempoolSnapshot]
+    // Three scripts, one page each, and no consistency pass over them.
+    counted.get() shouldEqual 3
     view ! akka.actor.PoisonPill
   }
 
@@ -86,17 +115,27 @@ class MempoolPressureSpec extends TestKit(ActorSystem("mempool-pressure"))
   it should "retry without withdrawing projections when a transaction left mid-read" in {
     val sync = TestProbe()
     ready()
-    val view = viewOver(transactions = 4, bound = 100, sync, growBy = -2)
+    val view = viewOver(transactions = PageSize + 2, bound = 5000, sync, growBy = -2)
 
     // Neither a revision nor an unavailability: the last good answer stands and the next tick re-reads.
     sync.expectNoMessage(500.millis)
     view ! akka.actor.PoisonPill
   }
 
-  private def ready(): Unit =
+  private val PageSize = 500
+
+  /** The first input of the fixture transaction at `index`, which is also its chain root. */
+  private def root(index: Int): String = SyncFixtures.id(410000 + index)
+
+  /** Publishes a view tracking the first `tracked` fixture roots, since only those are followed. */
+  private def ready(tracked: Int = PageSize + 10): Unit = {
+    val tree = NISPTree(PlasmaDictionary.empty(), 0, BigInt(0), Some(100L), 0L, 100,
+      hasMiner = false, LFSMPhase.HOLDING, Set.empty, evaluated = false, "rollup", "utxo")
     Globals.setSyncView(SyncView.initial.copy(
       status = Ready(SyncCursor(100, SyncFixtures.id(100), SyncFixtures.id(99))),
+      rollups = (0 until tracked).map(index => root(index) -> tree),
       canonical = Capability.Available))
+  }
 
   /**
    * @param growBy how the mempool changes between the consistency read and the one after it:
@@ -105,23 +144,27 @@ class MempoolPressureSpec extends TestKit(ActorSystem("mempool-pressure"))
   private def viewOver(transactions: Int,
                        bound: Int,
                        sync: TestProbe,
-                       growBy: Int = 0): akka.actor.ActorRef = {
+                       growBy: Int = 0,
+                       reads: Option[java.util.concurrent.atomic.AtomicInteger] = None): akka.actor.ActorRef = {
     val api = mock[NodeApi]
     val (nodeContext, _, wallet) = FakeNodeContext(api, numAddresses = 1)
     val protocol = ReducerFixtures.protocol(rollupStartHeight = 100)
     val tree = wallet.contract.ergoTreeHex
     // The view reads the relevant mempool twice per refresh; this answers the second read differently.
-    val reads = new java.util.concurrent.atomic.AtomicInteger(0)
+    val passes = new java.util.concurrent.atomic.AtomicInteger(0)
     // Only the holding script answers, so the dedup across the three rollup scripts is exercised too.
     when(api.unconfirmedTransactionsByErgoTree(any[String], any[Paging])).thenAnswer { invocation =>
       val requested = invocation.getArgument[String](0)
       val paging = invocation.getArgument[Paging](1)
-      val relevant = requested == protocol.holdingErgoTree && paging.offset == 0
-      if (relevant) {
-        val secondPass = reads.getAndIncrement() >= 1
-        val count = if (secondPass) transactions + growBy else transactions
-        Success((0 until count).map(unconfirmed(tree)))
-      } else Success(Seq.empty)
+      reads.foreach(_.incrementAndGet())
+      if (requested != protocol.holdingErgoTree) Success(Seq.empty)
+      else {
+        // A pass is one walk of this script; the second pass answers with the changed mempool.
+        if (paging.offset == 0) passes.incrementAndGet()
+        val count = if (passes.get() >= 2) transactions + growBy else transactions
+        Success((paging.offset until math.min(paging.offset + paging.limit, count))
+          .map(unconfirmed(tree)))
+      }
     }
     val config = Configuration(ConfigFactory.parseString(
       s"sync.startHeight = 100\nsync.mempool.maxTransactions = $bound\n"))

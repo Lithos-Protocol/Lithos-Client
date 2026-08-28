@@ -151,6 +151,7 @@ class BootstrapRecoverySpec extends TestKit(ActorSystem("bootstrap-recovery"))
       new StateFrame(config, nodeContext, protocol, sync.ref, snapshots.ref)))
 
     frame ! StartSynchronization
+    ChainFixtures.unseeded(sync)
     snapshots.expectMsg(RestoreLatest)
     snapshots.reply(SnapshotLoaded(None))
     (frame, sync, snapshots)

@@ -7,7 +7,7 @@ import org.scalatest.BeforeAndAfterEach
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 import state.messages.SyncMessages.SyncCursor
-import state.synchronization.CommittedSyncState
+import state.synchronization.{CommittedSyncState, QuarantineFault}
 import storage.LevelDbKeyValueStore
 import support.SyncFixtures
 
@@ -16,6 +16,7 @@ import scala.collection.JavaConverters._
 
 class StateSnapshotStoreSpec extends AnyFlatSpec with Matchers with BeforeAndAfterEach {
   private var directories = Vector.empty[Path]
+  private val MaxEntry = 64 * 1024 * 1024
   private val identity = StateSnapshotIdentity("TESTNET", 100, "miner-hash",
     "holding-tree", "evaluation-tree", "payout-tree", SyncFixtures.id(7000), SyncFixtures.id(7002),
     SyncFixtures.id(7001))
@@ -35,9 +36,7 @@ class StateSnapshotStoreSpec extends AnyFlatSpec with Matchers with BeforeAndAft
     val persisted = populatedSnapshot(height = 100, version = 8L)
     val original = persisted.state
 
-    val encoded = StateSnapshotCodec.encode(persisted, identity).toOption.get
-    val decoded = StateSnapshotCodec.decode(encoded, identity).toOption.get
-    val restored = decoded.state
+    val restored = roundTrip(persisted).state
 
     restored.cursor shouldEqual original.cursor
     restored.version shouldEqual original.version
@@ -60,10 +59,7 @@ class StateSnapshotStoreSpec extends AnyFlatSpec with Matchers with BeforeAndAft
   it should "round-trip the canonical cursors behind the committed state" in {
     val persisted = populatedSnapshot(height = 100, version = 8L)
 
-    val encoded = StateSnapshotCodec.encode(persisted, identity).toOption.get
-
-    StateSnapshotCodec.decode(encoded, identity).toOption.get.recentCursors shouldEqual
-      persisted.recentCursors
+    roundTrip(persisted).recentCursors shouldEqual persisted.recentCursors
   }
 
   it should "round-trip a Miner Dictionary fault so a snapshot cannot claim a stale tree is current" in {
@@ -71,31 +67,60 @@ class StateSnapshotStoreSpec extends AnyFlatSpec with Matchers with BeforeAndAft
     val persisted = faulted.copy(
       state = faulted.state.copy(minerDictionaryFault = Some("input 1 does not spend the tracked box")))
 
-    val encoded = StateSnapshotCodec.encode(persisted, identity).toOption.get
-
-    StateSnapshotCodec.decode(encoded, identity).toOption.get.state.minerDictionaryFault shouldEqual
+    roundTrip(persisted).state.minerDictionaryFault shouldEqual
       Some("input 1 does not spend the tracked box")
   }
 
-  it should "reject a corrupt payload before publishing any state" in {
-    val encoded = StateSnapshotCodec.encode(populatedSnapshot(100, 8L), identity).toOption.get
-    encoded(encoded.length / 2) = (encoded(encoded.length / 2) ^ 0x01).toByte
+  /** A fault that did not survive restart would silently start its attempt count again. */
+  it should "round-trip quarantine faults with their attempt counts" in {
+    val base = populatedSnapshot(100, 8L)
+    val fault = QuarantineFault("dropped-rollup", 88, "missing context variable 2",
+      retryable = true, attempts = 2)
+    val persisted = base.copy(state = base.state.copy(quarantined = Map(fault.rollupId -> fault)))
 
-    StateSnapshotCodec.decode(encoded, identity).isLeft shouldBe true
+    roundTrip(persisted).state.quarantined shouldEqual Map(fault.rollupId -> fault)
+  }
+
+  it should "reject a corrupt payload before publishing any state" in {
+    val encoded = encode(populatedSnapshot(100, 8L)).toOption.get
+    val meta = encoded.meta.clone()
+    meta(meta.length / 2) = (meta(meta.length / 2) ^ 0x01).toByte
+
+    StateSnapshotCodec.decodeMeta(meta, identity).isLeft shouldBe true
   }
 
   it should "reject state created for another network, wallet, or protocol deployment" in {
-    val encoded = StateSnapshotCodec.encode(populatedSnapshot(100, 8L), identity).toOption.get
+    val encoded = encode(populatedSnapshot(100, 8L)).toOption.get
     val other = identity.copy(localMinerHash = "another-miner")
 
-    StateSnapshotCodec.decode(encoded, other).left.toOption.get should include("does not match")
+    StateSnapshotCodec.decodeMeta(encoded.meta, other).left.toOption.get should include("does not match")
+  }
+
+  /**
+   * One entry per rollup is what keeps a generation's largest value independent of the rollup count.
+   */
+  it should "write one entry per rollup rather than one value for the whole state" in {
+    val persisted = populatedSnapshot(100, 8L, rollups = 4)
+
+    val encoded = encode(persisted).toOption.get
+
+    encoded.rollups.map(_._1).toSet shouldEqual persisted.state.rollups.keySet
+    // Metadata carries routes and the dictionary, never a rollup's own manifest.
+    encoded.rollups.foreach { case (_, value) => value.length should be > encoded.meta.length / 8 }
+  }
+
+  /** A generation too large to read back must be refused at the point it would be written. */
+  it should "refuse a generation whose entry would exceed the configured ceiling" in {
+    val persisted = populatedSnapshot(100, 8L)
+
+    val refused = encode(persisted, maxEntry = 64)
+
+    refused.isLeft shouldBe true
+    refused.left.toOption.get should include("over the configured 64 limit")
   }
 
   "LevelDbStateSnapshotStore" should "retain generations and recover through a corrupt newest one" in {
-    val directory = Files.createTempDirectory("lithos-sync-snapshot-")
-    directories :+= directory
-    val keyValueStore = LevelDbKeyValueStore.openOrThrow(directory)
-    val snapshots = new LevelDbStateSnapshotStore(keyValueStore, retention = 2, identity)
+    val (keyValueStore, snapshots) = store(retention = 2)
     val first = populatedSnapshot(100, 8L)
     val second = populatedSnapshot(101, 9L)
 
@@ -103,8 +128,9 @@ class StateSnapshotStoreSpec extends AnyFlatSpec with Matchers with BeforeAndAft
     save(snapshots, second) shouldEqual Right(())
     firstUsable(snapshots).map(_.state.cursor) shouldEqual Some(second.state.cursor)
 
-    val newest = keyValueStore.scanPrefix("sync/snapshot/data/".getBytes("UTF-8"))
-      .toOption.get.maxBy(entry => new String(entry._1, "UTF-8"))
+    val newest = keyValueStore.scanPrefix("sync/snapshot/gen/".getBytes("UTF-8"))
+      .toOption.get.filter(entry => new String(entry._1, "UTF-8").endsWith("/meta"))
+      .maxBy(entry => new String(entry._1, "UTF-8"))
     val corrupt = newest._2.clone()
     corrupt(corrupt.length / 2) = (corrupt(corrupt.length / 2) ^ 0x01).toByte
     keyValueStore.put(newest._1, corrupt)
@@ -113,10 +139,63 @@ class StateSnapshotStoreSpec extends AnyFlatSpec with Matchers with BeforeAndAft
     snapshots.close() shouldEqual Right(())
   }
 
+  /** A generation missing one rollup entry is not partially restorable. */
+  it should "refuse a generation whose rollup entry is absent" in {
+    val (keyValueStore, snapshots) = store(retention = 2)
+    val persisted = populatedSnapshot(100, 8L)
+    save(snapshots, persisted) shouldEqual Right(())
+
+    val rollupEntry = keyValueStore.scanKeys("sync/snapshot/gen/".getBytes("UTF-8"))
+      .toOption.get.find(key => new String(key, "UTF-8").contains("/r/")).get
+    keyValueStore.delete(rollupEntry)
+
+    val key = snapshots.generationKeys().toOption.get.head
+    snapshots.load(key).left.toOption.get.message should include("missing rollup")
+    snapshots.close() shouldEqual Right(())
+  }
+
+  /** Retention is what stops the database growing forever, and nothing else exercised it. */
+  it should "prune every entry of a generation past its retention" in {
+    val (keyValueStore, snapshots) = store(retention = 2)
+    (100 to 103).foreach(height => save(snapshots, populatedSnapshot(height, height.toLong)) shouldEqual Right(()))
+
+    val generations = snapshots.generationKeys().toOption.get
+    generations.size shouldEqual 2
+
+    // No stray rollup entries survive from the generations that were pruned.
+    val remaining = keyValueStore.scanKeys("sync/snapshot/gen/".getBytes("UTF-8")).toOption.get
+      .map(key => new String(key, "UTF-8"))
+    remaining.filter(_.contains("/r/")).size shouldEqual 2
+    firstUsable(snapshots).map(_.state.cursor.height) shouldEqual Some(103)
+    snapshots.close() shouldEqual Right(())
+  }
+
+  private def store(retention: Int): (LevelDbKeyValueStore, LevelDbStateSnapshotStore) = {
+    val directory = Files.createTempDirectory("lithos-sync-snapshot-")
+    directories :+= directory
+    val keyValueStore = LevelDbKeyValueStore.openOrThrow(directory).asInstanceOf[LevelDbKeyValueStore]
+    (keyValueStore, new LevelDbStateSnapshotStore(keyValueStore, retention, identity))
+  }
+
+  private def encode(persisted: PersistedSyncState,
+                     id: StateSnapshotIdentity = identity,
+                     maxEntry: Int = MaxEntry): Either[String, SnapshotWrite] =
+    StateSnapshotCodec.encode(persisted, id, maxEntry)
+
+  /** Decodes through the same two steps the store uses, so the spec exercises the real path. */
+  private def roundTrip(persisted: PersistedSyncState): PersistedSyncState = {
+    val encoded = encode(persisted).toOption.get
+    val meta = StateSnapshotCodec.decodeMeta(encoded.meta, identity).toOption.get
+    val rollups = encoded.rollups.map { case (id, value) =>
+      id -> StateSnapshotCodec.decodeRollup(value, id).toOption.get
+    }.toMap
+    StateSnapshotCodec.assemble(meta, rollups).toOption.get
+  }
+
   /** Encodes and writes in one step, as the state owner does. */
   private def save(store: LevelDbStateSnapshotStore,
                    persisted: PersistedSyncState): Either[SnapshotError, Unit] =
-    StateSnapshotCodec.encode(persisted, identity) match {
+    encode(persisted) match {
       case Right(encoded) => store.save(persisted.state.cursor, persisted.state.version, encoded)
       case Left(reason) => Left(SnapshotError.Corrupt(reason))
     }
@@ -126,27 +205,31 @@ class StateSnapshotStoreSpec extends AnyFlatSpec with Matchers with BeforeAndAft
     store.generationKeys().toOption.toSeq.flatten
       .flatMap(key => store.load(key).toOption).headOption
 
-  private def populatedSnapshot(height: Int, version: Long): PersistedSyncState =
-    PersistedSyncState(populatedState(height, version),
+  private def populatedSnapshot(height: Int,
+                                version: Long,
+                                rollups: Int = 1): PersistedSyncState =
+    PersistedSyncState(populatedState(height, version, rollups),
       Vector(
         SyncCursor(height - 2, SyncFixtures.id(height - 2), SyncFixtures.id(height - 3)),
         SyncCursor(height - 1, SyncFixtures.id(height - 1), SyncFixtures.id(height - 2)),
         SyncCursor(height, SyncFixtures.id(height), SyncFixtures.id(height - 1))))
 
-  private def populatedState(height: Int, version: Long): CommittedSyncState = {
+  private def populatedState(height: Int, version: Long, rollupCount: Int): CommittedSyncState = {
     val entries = SyncFixtures.plasmaEntries(2, 32)
-    val rollupDictionary = PlasmaDictionary.empty()
-    rollupDictionary.insert(entries.head)
     val minerDictionary = PlasmaDictionary.empty()
     minerDictionary.insert(entries(1))
-    val rollupId = SyncFixtures.id(5000)
-    val utxoId = SyncFixtures.id(5001 + height)
-    val rollup = NISPTree(rollupDictionary, 1, BigInt(50), Some(90L), 1000000L,
-      90, hasMiner = true, LFSMPhase.HOLDING, Set("miner"), evaluated = true, rollupId, utxoId)
+    val tracked = (0 until rollupCount).map { index =>
+      val dictionary = PlasmaDictionary.empty()
+      dictionary.insert(entries.head)
+      val rollupId = SyncFixtures.id(5000 + index)
+      val utxoId = SyncFixtures.id(5100 + index * 1000 + height)
+      rollupId -> NISPTree(dictionary, 1, BigInt(50), Some(90L), 1000000L, 90, hasMiner = true,
+        LFSMPhase.HOLDING, Set("miner"), evaluated = true, rollupId, utxoId)
+    }
     val minerTree = MinerTree.initialState.copy(dictionary = minerDictionary, numMiners = 1,
       hasMiner = true, syncHeight = height, savedHeight = height)
     CommittedSyncState(SyncCursor(height, SyncFixtures.id(height), SyncFixtures.id(height - 1)),
-      version, Map(rollupId -> rollup), Map(utxoId -> rollupId), minerTree,
+      version, tracked.toMap, tracked.map { case (id, tree) => tree.utxoId -> id }.toMap, minerTree,
       Some(ErgoId.create(SyncFixtures.id(6000))))
   }
 }

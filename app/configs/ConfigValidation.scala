@@ -137,12 +137,18 @@ object Configs {
       "canonical cursors retained for locating a fork after restart")
     v.range("sync.catchUpBatchBlocks", v.int("sync.catchUpBatchBlocks"), 1, 64,
       "blocks fetched per canonical round trip; each is held whole until it commits")
-    v.duration("sync.revalidationChecks")
-    v.duration("sync.minerDictionary.repairInterval")
+    // Intervals are floors, not just parseable durations. Zero or negative makes every tick due, and
+    // the repair holds the producer, so a zero interval stops canonical synchronization outright.
+    v.durationRangeReq("sync.pollInterval", 1000L, 600000L)
+    v.durationRangeReq("sync.revalidationChecks", 1000L, 3600000L)
+    v.durationRangeReq("sync.minerDictionary.repairInterval", 30000L, 86400000L)
+    v.durationRangeReq("sync.mempool.refreshInterval", 1000L, 600000L)
     v.range("sync.retriesBeforeAlarm", v.int("sync.retriesBeforeAlarm"), 1, 10000,
       "consecutive failures at one height before synchronization reports itself stalled")
     v.range("sync.mempool.maxTransactions", v.int("sync.mempool.maxTransactions"), 1, 100000,
       "unconfirmed transactions read before the mempool view gives up on a complete revision")
+    v.range("sync.quarantine.repairAttempts", v.int("sync.quarantine.repairAttempts"), 0, 100,
+      "rebuild attempts for a quarantined rollup before it is dropped for good")
     v.bool("sync.minerDictionary.bootstrap")
     v.range("sync.minerDictionary.maxTransforms", v.int("sync.minerDictionary.maxTransforms"), 1, 10000000,
       "dictionary spends followed during bootstrap")
@@ -156,6 +162,10 @@ object Configs {
       "committed blocks between persistent snapshots")
     v.range("sync.snapshots.retention", v.int("sync.snapshots.retention"), 2, 100,
       "complete snapshot generations retained")
+    // A generation is written as one entry per rollup plus a manifest, so this bounds the largest
+    // single entry rather than the whole generation.
+    v.range("sync.snapshots.maxEntryBytes", v.int("sync.snapshots.maxEntryBytes"), 1048576, 536870912,
+      "bytes one snapshot entry may reach before the generation is abandoned")
 
     // ---- lithos-tasks ----
     // Require every task field that TasksConfig reads without a default.

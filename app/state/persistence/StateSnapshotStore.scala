@@ -7,7 +7,7 @@ import org.ergoplatform.sdk.ErgoId
 import scorex.crypto.hash.Blake2b256
 import sigma.data.AvlTreeFlags
 import state.messages.SyncMessages.SyncCursor
-import state.synchronization.{CommittedSyncState, SyncProtocolContext}
+import state.synchronization.{CommittedSyncState, QuarantineFault, SyncProtocolContext}
 import storage.KeyValueMutation.{Delete, Put}
 import storage.{KeyValueStore, StoreError, WriteDurability}
 import work.lithos.plasma.PlasmaParameters
@@ -33,9 +33,12 @@ object SnapshotError {
 /** A committed state and the recent canonical cursors needed to locate forks after restart. */
 final case class PersistedSyncState(state: CommittedSyncState, recentCursors: Vector[SyncCursor])
 
+/** One generation, encoded. Each rollup is its own entry so no single value grows with the set. */
+final case class SnapshotWrite(meta: Array[Byte], rollups: Seq[(String, Array[Byte])])
+
 trait StateSnapshotStore {
   /** Writes an already-encoded generation. Encoding happens on the thread that owns the state. */
-  def save(cursor: SyncCursor, version: Long, encoded: Array[Byte]): Either[SnapshotError, Unit]
+  def save(cursor: SyncCursor, version: Long, encoded: SnapshotWrite): Either[SnapshotError, Unit]
 
   /** Generation keys, newest first, with the one the pointer names ahead of the rest. */
   def generationKeys(): Either[SnapshotError, Seq[Array[Byte]]]
@@ -66,30 +69,35 @@ object StateSnapshotIdentity {
       protocol.collateralToken.toString)
 }
 
-/** Atomic, generation-based LevelDB snapshot repository. */
+/**
+ * Generation-based LevelDB snapshot repository, one entry per rollup plus a metadata entry.
+ * The pointer commits with the metadata, so an interrupted write leaves the prior generation intact.
+ */
 final class LevelDbStateSnapshotStore(store: KeyValueStore,
                                       retention: Int,
                                       identity: StateSnapshotIdentity) extends StateSnapshotStore {
+  import LevelDbStateSnapshotStore._
   import SnapshotError._
 
   require(retention >= 2, "At least two snapshot generations must be retained")
 
-  private val dataPrefix = bytes("sync/snapshot/data/")
+  private val dataPrefix = bytes("sync/snapshot/gen/")
   private val currentKey = bytes("sync/snapshot/current")
 
   override def save(cursor: SyncCursor,
                     version: Long,
-                    encoded: Array[Byte]): Either[SnapshotError, Unit] = {
-    val suffix = f"${cursor.height}%010d-$version%020d-${cursor.blockId}"
-    val generationKey = dataPrefix ++ bytes(suffix)
+                    encoded: SnapshotWrite): Either[SnapshotError, Unit] = {
+    val base = dataPrefix ++ bytes(f"${cursor.height}%010d-$version%020d-${cursor.blockId}")
+    val rollupWrites = encoded.rollups.map { case (id, value) => Put(base ++ rollupKey(id), value) }
     for {
-      _ <- store.write(Seq(Put(generationKey, encoded), Put(currentKey, generationKey)),
+      // Rollups first and unpointed: a crash here leaves entries nothing names, which pruning removes.
+      _ <- writeChunked(rollupWrites)
+      _ <- store.write(Seq(Put(base ++ MetaSuffix, encoded.meta), Put(currentKey, base)),
         WriteDurability.Synchronous).left.map(Storage)
-      _ <- prune(generationKey)
+      _ <- prune(base)
     } yield ()
   }
 
-  /** Lists generation keys without decoding snapshot payloads. */
   override def generationKeys(): Either[SnapshotError, Seq[Array[Byte]]] =
     store.readSnapshot { view =>
       for {
@@ -97,29 +105,68 @@ final class LevelDbStateSnapshotStore(store: KeyValueStore,
         keys <- view.scanKeys(dataPrefix)
       } yield current -> keys
     }.left.map(Storage).map { case (current, keys) =>
-      val newestFirst = keys.sortWith((a, b) => unsignedCompare(a, b) > 0)
-      val pointed = current.toSeq.filter(key => keys.exists(java.util.Arrays.equals(_, key)))
+      val bases = keys.filter(endsWith(_, MetaSuffix)).map(key => key.dropRight(MetaSuffix.length))
+      val newestFirst = bases.sortWith((a, b) => unsignedCompare(a, b) > 0)
+      val pointed = current.toSeq.filter(key => bases.exists(java.util.Arrays.equals(_, key)))
       (pointed ++ newestFirst).foldLeft(Vector.empty[Array[Byte]]) { (result, key) =>
         if (result.exists(java.util.Arrays.equals(_, key))) result else result :+ key
       }
     }
 
-  override def load(key: Array[Byte]): Either[SnapshotError, PersistedSyncState] =
-    store.get(key).left.map(Storage).flatMap {
-      case Some(encoded) => StateSnapshotCodec.decode(encoded, identity).left.map(Corrupt)
-      case None => Left(Corrupt(s"snapshot generation ${new String(key, StandardCharsets.UTF_8)} is absent"))
+  override def load(base: Array[Byte]): Either[SnapshotError, PersistedSyncState] =
+    store.readSnapshot { view =>
+      view.get(base ++ MetaSuffix).map(meta => view -> meta)
+    }.left.map(Storage).flatMap {
+      case (_, None) => Left(Corrupt(s"generation ${name(base)} has no metadata entry"))
+      case (_, Some(metaBytes)) =>
+        StateSnapshotCodec.decodeMeta(metaBytes, identity).left.map(Corrupt).flatMap { meta =>
+          meta.rollupIds.foldLeft[Either[SnapshotError, Map[String, NISPTree]]](Right(Map.empty)) {
+            (collected, id) =>
+              collected.flatMap { rollups =>
+                store.get(base ++ rollupKey(id)).left.map(Storage).flatMap {
+                  case None => Left(Corrupt(s"generation ${name(base)} is missing rollup $id"))
+                  case Some(value) => StateSnapshotCodec.decodeRollup(value, id)
+                    .left.map(Corrupt).map(tree => rollups + (id -> tree))
+                }
+              }
+          }.flatMap(rollups => StateSnapshotCodec.assemble(meta, rollups).left.map(Corrupt))
+        }
     }
 
   override def close(): Either[SnapshotError, Unit] = store.close().left.map(Storage)
 
+  /** Keeps the newest generations whole and removes every entry belonging to the rest. */
   private def prune(current: Array[Byte]): Either[SnapshotError, Unit] =
     store.scanKeys(dataPrefix).left.map(Storage).flatMap { keys =>
-      val keep = keys.sortWith((a, b) => unsignedCompare(a, b) > 0).take(retention)
-      val obsolete = keys.filterNot { key =>
-        java.util.Arrays.equals(key, current) || keep.exists(java.util.Arrays.equals(_, key))
-      }
-      store.write(obsolete.map(Delete), WriteDurability.Buffered).left.map(Storage)
+      val bases = keys.filter(endsWith(_, MetaSuffix)).map(_.dropRight(MetaSuffix.length))
+      val keep = bases.sortWith((a, b) => unsignedCompare(a, b) > 0).take(retention) :+ current
+      val obsolete = keys.filterNot(key => keep.exists(base => startsWith(key, base)))
+      writeChunked(obsolete.map(Delete))
     }
+
+  /** Bounds one batch so a large generation does not build a single oversized write. */
+  private def writeChunked(mutations: Seq[storage.KeyValueMutation]): Either[SnapshotError, Unit] =
+    mutations.grouped(WriteChunk).foldLeft[Either[SnapshotError, Unit]](Right(())) { (result, chunk) =>
+      result.flatMap(_ => store.write(chunk, WriteDurability.Buffered).left.map(Storage))
+    }
+
+  private def rollupKey(id: String): Array[Byte] = bytes(RollupInfix + id)
+
+  private def name(key: Array[Byte]): String = new String(key, StandardCharsets.UTF_8)
+}
+
+object LevelDbStateSnapshotStore {
+  private val MetaSuffix: Array[Byte] = "/meta".getBytes(StandardCharsets.UTF_8)
+  private val RollupInfix: String = "/r/"
+  private val WriteChunk: Int = 32
+
+  private def bytes(value: String): Array[Byte] = value.getBytes(StandardCharsets.UTF_8)
+
+  private def startsWith(value: Array[Byte], prefix: Array[Byte]): Boolean =
+    value.length >= prefix.length && java.util.Arrays.equals(value.take(prefix.length), prefix)
+
+  private def endsWith(value: Array[Byte], suffix: Array[Byte]): Boolean =
+    value.length > suffix.length && java.util.Arrays.equals(value.takeRight(suffix.length), suffix)
 
   private def unsignedCompare(left: Array[Byte], right: Array[Byte]): Int = {
     val length = math.min(left.length, right.length)
@@ -131,103 +178,91 @@ final class LevelDbStateSnapshotStore(store: KeyValueStore,
     }
     java.lang.Integer.compare(left.length, right.length)
   }
-
-  private def bytes(value: String): Array[Byte] = value.getBytes(StandardCharsets.UTF_8)
 }
+
+/** Everything in a generation except the rollups, which are stored one entry each. */
+final case class SnapshotMeta(cursor: SyncCursor,
+                              version: Long,
+                              recentCursors: Vector[SyncCursor],
+                              minerDictionaryFault: Option[String],
+                              quarantined: Map[String, QuarantineFault],
+                              routes: Map[String, String],
+                              minerTree: MinerTree,
+                              dataBoxToken: Option[ErgoId],
+                              rollupIds: Seq[String])
 
 /** Explicit binary schema for metadata plus native Plasma manifests. */
 object StateSnapshotCodec {
   private val EnvelopeMagic = 0x4c535345
-  private val PayloadMagic = 0x4c535350
-  private val SchemaVersion = 3
+  private val MetaMagic = 0x4c53534d
+  private val RollupMagic = 0x4c535352
+  private val SchemaVersion = 4
   private val ToolkitVersion = "plasma-toolkit-1.1.0"
   private val MaxBlobBytes = 512 * 1024 * 1024
   private val MaxEntries = 1000000
 
+  /**
+   * Encodes a generation as one metadata entry plus one entry per rollup.
+   * `maxEntryBytes` bounds a single entry, so a large rollup set no longer builds one huge value.
+   */
   def encode(persisted: PersistedSyncState,
-             identity: StateSnapshotIdentity): Either[String, Array[Byte]] =
+             identity: StateSnapshotIdentity,
+             maxEntryBytes: Int): Either[String, SnapshotWrite] =
     attempt {
       val state = persisted.state
-      val payloadBytes = writeBytes { out =>
-        out.writeInt(PayloadMagic)
+      val rollups = state.rollups.toSeq.sortBy(_._1)
+      val encodedRollups = rollups.map { case (id, tree) =>
+        val payload = writeBytes { out =>
+          out.writeInt(RollupMagic)
+          writeString(out, id)
+          writeRollup(out, tree)
+        }
+        id -> sealEntry(payload, maxEntryBytes, s"rollup $id")
+      }
+
+      val meta = writeBytes { out =>
+        out.writeInt(MetaMagic)
         out.writeInt(SchemaVersion)
         writeString(out, ToolkitVersion)
         writeIdentity(out, identity)
         writeCursor(out, state.cursor)
         out.writeLong(state.version)
-        out.writeInt(persisted.recentCursors.size)
+        writeCount(out, persisted.recentCursors.size, "recent cursor count")
         persisted.recentCursors.foreach(writeCursor(out, _))
         out.writeBoolean(state.minerDictionaryFault.isDefined)
         state.minerDictionaryFault.foreach(writeString(out, _))
 
-        val rollups = state.rollups.toSeq.sortBy(_._1)
-        requireCount(rollups.size, "rollup count")
-        out.writeInt(rollups.size)
-        rollups.foreach { case (id, tree) =>
-          writeString(out, id)
-          writeDictionary(out, tree.dictionary)
-          out.writeInt(tree.numMiners)
-          writeBigInt(out, tree.totalScore)
-          writeOptionalLong(out, tree.currentPeriod)
-          out.writeLong(tree.totalReward)
-          out.writeInt(tree.startHeight)
-          out.writeBoolean(tree.hasMiner)
-          out.writeByte(phaseByte(tree.phase))
-          writeStrings(out, tree.minerSet.toSeq.sorted)
-          out.writeBoolean(tree.evaluated)
-          writeString(out, tree.blockId)
-          writeString(out, tree.utxoId)
+        val faults = state.quarantined.toSeq.sortBy(_._1)
+        writeCount(out, faults.size, "quarantine count")
+        faults.foreach { case (_, fault) =>
+          writeString(out, fault.rollupId)
+          out.writeInt(fault.genesisHeight)
+          writeString(out, fault.reason)
+          out.writeBoolean(fault.retryable)
+          out.writeInt(fault.attempts)
         }
 
         val routes = state.routes.toSeq.sortBy(_._1)
-        requireCount(routes.size, "route count")
-        out.writeInt(routes.size)
+        writeCount(out, routes.size, "route count")
         routes.foreach { case (utxoId, rollupId) =>
           writeString(out, utxoId)
           writeString(out, rollupId)
         }
 
-        writeDictionary(out, state.minerTree.dictionary)
-        out.writeInt(state.minerTree.numMiners)
-        out.writeInt(state.minerTree.startHeight)
-        val minerMap = state.minerTree.minerMap.toSeq.sortBy(_._1)
-        requireCount(minerMap.size, "miner map count")
-        out.writeInt(minerMap.size)
-        minerMap.foreach { case (hash, (address, token)) =>
-          writeString(out, hash)
-          writeString(out, address.toString)
-          writeString(out, token.toString)
-        }
-        out.writeBoolean(state.minerTree.hasMiner)
-        writeString(out, state.minerTree.utxoId)
-        out.writeBoolean(state.minerTree.synced)
-        out.writeInt(state.minerTree.syncHeight)
-        out.writeInt(state.minerTree.savedHeight)
-
+        writeMinerTree(out, state.minerTree)
         out.writeBoolean(state.dataBoxToken.isDefined)
         state.dataBoxToken.foreach(token => writeString(out, token.toString))
+        writeStrings(out, rollups.map(_._1))
       }
 
-      val checksum = Blake2b256.hash(payloadBytes)
-      writeBytes { out =>
-        out.writeInt(EnvelopeMagic)
-        writeByteArray(out, payloadBytes)
-        writeByteArray(out, checksum)
-      }
+      SnapshotWrite(sealEntry(meta, maxEntryBytes, "snapshot metadata"), encodedRollups)
     }
 
-  def decode(encoded: Array[Byte],
-             expectedIdentity: StateSnapshotIdentity): Either[String, PersistedSyncState] =
+  def decodeMeta(encoded: Array[Byte],
+                 expectedIdentity: StateSnapshotIdentity): Either[String, SnapshotMeta] =
     attempt {
-      val envelope = new DataInputStream(new ByteArrayInputStream(encoded))
-      require(envelope.readInt() == EnvelopeMagic, "invalid envelope magic")
-      val payload = readByteArray(envelope)
-      val checksum = readByteArray(envelope)
-      require(envelope.available() == 0, "trailing bytes after snapshot envelope")
-      require(java.util.Arrays.equals(Blake2b256.hash(payload), checksum), "payload checksum mismatch")
-
-      val in = new DataInputStream(new ByteArrayInputStream(payload))
-      require(in.readInt() == PayloadMagic, "invalid payload magic")
+      val in = openEntry(encoded)
+      require(in.readInt() == MetaMagic, "invalid metadata magic")
       require(in.readInt() == SchemaVersion, "unsupported snapshot schema version")
       require(readString(in) == ToolkitVersion, "unsupported Plasma Toolkit version")
       require(readIdentity(in) == expectedIdentity,
@@ -236,47 +271,117 @@ object StateSnapshotCodec {
       val version = in.readLong()
       val recentCursors = readCount(in, "recent cursor count")(_ => readCursor(in))
       val minerDictionaryFault = if (in.readBoolean()) Some(readString(in)) else None
-
-      val rollups = readCount(in, "rollup count") { _ =>
-        val id = readString(in)
-        val dictionary = readDictionary(in)
-        val numMiners = in.readInt()
-        val totalScore = readBigInt(in)
-        val currentPeriod = readOptionalLong(in)
-        val totalReward = in.readLong()
-        val startHeight = in.readInt()
-        val hasMiner = in.readBoolean()
-        val phase = readPhase(in.readByte())
-        val minerSet = readStrings(in).toSet
-        val evaluated = in.readBoolean()
-        val blockId = readString(in)
-        val utxoId = readString(in)
-        id -> NISPTree(dictionary, numMiners, totalScore, currentPeriod, totalReward, startHeight,
-          hasMiner, phase, minerSet, evaluated, blockId, utxoId)
+      val quarantined = readCount(in, "quarantine count") { _ =>
+        val rollupId = readString(in)
+        rollupId -> QuarantineFault(rollupId, in.readInt(), readString(in), in.readBoolean(), in.readInt())
       }.toMap
-
       val routes = readCount(in, "route count") { _ => readString(in) -> readString(in) }.toMap
-      val minerDictionary = readDictionary(in)
-      val minerCount = in.readInt()
-      val minerStart = in.readInt()
-      val minerMap = readCount(in, "miner map count") { _ =>
-        val hash = readString(in)
-        hash -> (Address.create(readString(in)), ErgoId.create(readString(in)))
-      }.toMap
-      val hasMiner = in.readBoolean()
-      val minerUtxo = readString(in)
-      val synced = in.readBoolean()
-      val syncHeight = in.readInt()
-      val savedHeight = in.readInt()
+      val minerTree = readMinerTree(in)
       val dataToken = if (in.readBoolean()) Some(ErgoId.create(readString(in))) else None
-      require(in.available() == 0, "trailing bytes after snapshot payload")
-
-      val minerTree = MinerTree(minerDictionary, minerCount, minerStart, minerMap, hasMiner,
-        minerUtxo, synced, syncHeight, savedHeight)
-      PersistedSyncState(
-        CommittedSyncState(cursor, version, rollups, routes, minerTree, dataToken, minerDictionaryFault),
-        recentCursors)
+      val rollupIds = readStrings(in)
+      require(in.available() == 0, "trailing bytes after snapshot metadata")
+      SnapshotMeta(cursor, version, recentCursors, minerDictionaryFault, quarantined, routes,
+        minerTree, dataToken, rollupIds)
     }
+
+  def decodeRollup(encoded: Array[Byte], expectedId: String): Either[String, NISPTree] =
+    attempt {
+      val in = openEntry(encoded)
+      require(in.readInt() == RollupMagic, "invalid rollup magic")
+      require(readString(in) == expectedId, s"rollup entry does not name $expectedId")
+      val tree = readRollup(in)
+      require(in.available() == 0, "trailing bytes after rollup entry")
+      tree
+    }
+
+  /** Rebuilds committed state once every named rollup has been read back. */
+  def assemble(meta: SnapshotMeta, rollups: Map[String, NISPTree]): Either[String, PersistedSyncState] =
+    attempt {
+      PersistedSyncState(
+        CommittedSyncState(meta.cursor, meta.version, rollups, meta.routes, meta.minerTree,
+          meta.dataBoxToken, meta.minerDictionaryFault, meta.quarantined),
+        meta.recentCursors)
+    }
+
+  private def sealEntry(payload: Array[Byte], maxEntryBytes: Int, what: String): Array[Byte] = {
+    require(payload.length <= maxEntryBytes,
+      s"$what is ${payload.length} bytes, over the configured $maxEntryBytes limit")
+    val checksum = Blake2b256.hash(payload)
+    writeBytes { out =>
+      out.writeInt(EnvelopeMagic)
+      writeByteArray(out, payload)
+      writeByteArray(out, checksum)
+    }
+  }
+
+  private def openEntry(encoded: Array[Byte]): DataInputStream = {
+    val envelope = new DataInputStream(new ByteArrayInputStream(encoded))
+    require(envelope.readInt() == EnvelopeMagic, "invalid envelope magic")
+    val payload = readByteArray(envelope)
+    val checksum = readByteArray(envelope)
+    require(envelope.available() == 0, "trailing bytes after snapshot envelope")
+    require(java.util.Arrays.equals(Blake2b256.hash(payload), checksum), "payload checksum mismatch")
+    new DataInputStream(new ByteArrayInputStream(payload))
+  }
+
+  private def writeRollup(out: DataOutputStream, tree: NISPTree): Unit = {
+    writeDictionary(out, tree.dictionary)
+    out.writeInt(tree.numMiners)
+    writeBigInt(out, tree.totalScore)
+    writeOptionalLong(out, tree.currentPeriod)
+    out.writeLong(tree.totalReward)
+    out.writeInt(tree.startHeight)
+    out.writeBoolean(tree.hasMiner)
+    out.writeByte(phaseByte(tree.phase))
+    writeStrings(out, tree.minerSet.toSeq.sorted)
+    out.writeBoolean(tree.evaluated)
+    writeString(out, tree.blockId)
+    writeString(out, tree.utxoId)
+  }
+
+  private def readRollup(in: DataInputStream): NISPTree = {
+    val dictionary = readDictionary(in)
+    val numMiners = in.readInt()
+    val totalScore = readBigInt(in)
+    val currentPeriod = readOptionalLong(in)
+    val totalReward = in.readLong()
+    val startHeight = in.readInt()
+    val hasMiner = in.readBoolean()
+    val phase = readPhase(in.readByte())
+    val minerSet = readStrings(in).toSet
+    val evaluated = in.readBoolean()
+    NISPTree(dictionary, numMiners, totalScore, currentPeriod, totalReward, startHeight,
+      hasMiner, phase, minerSet, evaluated, readString(in), readString(in))
+  }
+
+  private def writeMinerTree(out: DataOutputStream, tree: MinerTree): Unit = {
+    writeDictionary(out, tree.dictionary)
+    out.writeInt(tree.numMiners)
+    out.writeInt(tree.startHeight)
+    val minerMap = tree.minerMap.toSeq.sortBy(_._1)
+    writeCount(out, minerMap.size, "miner map count")
+    minerMap.foreach { case (hash, (address, token)) =>
+      writeString(out, hash)
+      writeString(out, address.toString)
+      writeString(out, token.toString)
+    }
+    out.writeBoolean(tree.hasMiner)
+    writeString(out, tree.utxoId)
+    out.writeBoolean(tree.synced)
+    out.writeInt(tree.syncHeight)
+    out.writeInt(tree.savedHeight)
+  }
+
+  private def readMinerTree(in: DataInputStream): MinerTree = {
+    val dictionary = readDictionary(in)
+    val numMiners = in.readInt()
+    val startHeight = in.readInt()
+    val minerMap = readCount(in, "miner map count") { _ =>
+      readString(in) -> (Address.create(readString(in)), ErgoId.create(readString(in)))
+    }.toMap
+    MinerTree(dictionary, numMiners, startHeight, minerMap, in.readBoolean(), readString(in),
+      in.readBoolean(), in.readInt(), in.readInt())
+  }
 
   private def writeIdentity(out: DataOutputStream, identity: StateSnapshotIdentity): Unit = {
     writeString(out, identity.networkType)
@@ -294,8 +399,7 @@ object StateSnapshotCodec {
     StateSnapshotIdentity(readString(in), in.readInt(), readString(in), readString(in),
       readString(in), readString(in), readString(in), readString(in), readString(in))
 
-  private def writeDictionary(out: DataOutputStream,
-                              dictionary: AuthenticatedDictionaryView): Unit = {
+  private def writeDictionary(out: DataOutputStream, dictionary: AuthenticatedDictionaryView): Unit = {
     val manifest = dictionary.getManifest()
     out.writeByte(dictionary.flags.serializeToByte)
     out.writeInt(dictionary.parameters.keySize)
@@ -303,7 +407,7 @@ object StateSnapshotCodec {
     dictionary.parameters.valueSizeOpt.foreach(out.writeInt)
     writeByteArray(out, manifest.digest)
     writeByteArray(out, manifest.bytes)
-    out.writeInt(manifest.subTrees.size)
+    writeCount(out, manifest.subTrees.size, "manifest subtree count")
     manifest.subTrees.foreach(writeByteArray(out, _))
   }
 
@@ -314,8 +418,8 @@ object StateSnapshotCodec {
     val digest = readByteArray(in)
     val bytes = readByteArray(in)
     val subTrees = readCount(in, "manifest subtree count")(_ => readByteArray(in))
-    val manifest = Manifest(digest, bytes, subTrees)
-    PlasmaDictionary.fromManifest(flags, PlasmaParameters(keySize, valueSize), manifest) match {
+    PlasmaDictionary.fromManifest(flags, PlasmaParameters(keySize, valueSize),
+      Manifest(digest, bytes, subTrees)) match {
       case Right(dictionary) => dictionary
       case Left(error) => throw new IllegalArgumentException(
         s"Plasma manifest could not be loaded: ${error.getMessage}", error)
@@ -343,8 +447,7 @@ object StateSnapshotCodec {
   private def readBigInt(in: DataInputStream): BigInt = BigInt(readByteArray(in))
 
   private def writeStrings(out: DataOutputStream, values: Seq[String]): Unit = {
-    requireCount(values.size, "string count")
-    out.writeInt(values.size)
+    writeCount(out, values.size, "string count")
     values.foreach(writeString(out, _))
   }
 
@@ -357,7 +460,7 @@ object StateSnapshotCodec {
   private def readString(in: DataInputStream): String =
     new String(readByteArray(in), StandardCharsets.UTF_8)
 
-  /** Writes refuse what reads would refuse, so a saved generation can always be loaded back. */
+  /** Writes refuse what reads would refuse, so a saved entry can always be loaded back. */
   private def writeByteArray(out: DataOutputStream, value: Array[Byte]): Unit = {
     require(value.length <= MaxBlobBytes,
       s"byte-array of ${value.length} exceeds the $MaxBlobBytes limit its decoder enforces")
@@ -379,8 +482,10 @@ object StateSnapshotCodec {
     Vector.tabulate(count)(read)
   }
 
-  private def requireCount(size: Int, label: String): Unit =
+  private def writeCount(out: DataOutputStream, size: Int, label: String): Unit = {
     require(size <= MaxEntries, s"$label of $size exceeds the $MaxEntries limit its decoder enforces")
+    out.writeInt(size)
+  }
 
   private def phaseByte(phase: LFSMPhase): Byte = phase match {
     case LFSMPhase.HOLDING => 0
