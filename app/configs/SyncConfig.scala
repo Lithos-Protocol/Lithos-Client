@@ -72,6 +72,10 @@ class SyncConfig(config: Configuration){
   val quarantineMaxTransforms: Int =
     config.getOptional[Int]("sync.quarantine.maxTransforms").getOrElse(100000)
 
+  /** Maximum wall-clock time one quarantine walk may hold a maintenance checkpoint. */
+  val quarantineRepairTimeout: FiniteDuration =
+    config.getOptional[FiniteDuration]("sync.quarantine.repairTimeout").getOrElse(3.minutes)
+
   val minerDictionaryBootstrap: Boolean =
     config.getOptional[Boolean]("sync.minerDictionary.bootstrap").getOrElse(true)
 

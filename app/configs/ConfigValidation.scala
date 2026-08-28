@@ -157,6 +157,7 @@ object Configs {
       "committed catch-up blocks between quarantine repair checkpoints")
     v.range("sync.quarantine.maxTransforms", v.int("sync.quarantine.maxTransforms"), 1, 10000000,
       "rollup spends followed during one quarantine rebuild")
+    v.durationRangeReq("sync.quarantine.repairTimeout", 1000L, 3600000L)
     v.bool("sync.minerDictionary.bootstrap")
     v.range("sync.minerDictionary.maxTransforms", v.int("sync.minerDictionary.maxTransforms"), 1, 10000000,
       "dictionary spends followed during bootstrap")

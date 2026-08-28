@@ -68,6 +68,9 @@ class ConfigDefaultsSpec extends AnyFlatSpec with Matchers {
     withClue("sync.quarantine.maxTransforms: ") {
       absent.quarantineMaxTransforms shouldEqual shippedSync.quarantineMaxTransforms
     }
+    withClue("sync.quarantine.repairTimeout: ") {
+      absent.quarantineRepairTimeout shouldEqual shippedSync.quarantineRepairTimeout
+    }
     withClue("sync.snapshots.maxEntryBytes: ") {
       absent.snapshotMaxEntryBytes shouldEqual shippedSync.snapshotMaxEntryBytes
     }
@@ -79,7 +82,7 @@ class ConfigDefaultsSpec extends AnyFlatSpec with Matchers {
    */
   "SyncConfig" should "have every optional key covered by the defaults comparison" in {
     // Every value except `startHeight`, which is required and so has no default to drift from.
-    val comparedOptional = 22
+    val comparedOptional = 23
     val required = 1
     val fields = classOf[SyncConfig].getDeclaredMethods.count(m => m.getParameterCount == 0 &&
       !m.getName.contains("$") && m.getName != "config")
@@ -109,6 +112,7 @@ class ConfigDefaultsSpec extends AnyFlatSpec with Matchers {
     sync.mempoolRefreshInterval.toMillis should be >= 1000L
     sync.revalidationChecks.toMillis should be >= 1000L
     sync.dictionaryRepairInterval.toMillis should be >= 30000L
+    sync.quarantineRepairTimeout.toMillis should be >= 1000L
   }
 
   /** Cursors are cheap, so this is sized for reach and must outrange the state window. */

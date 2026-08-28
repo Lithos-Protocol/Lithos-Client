@@ -255,16 +255,16 @@ class SyncHandler @Inject()(config: Configuration,
   private def applyRepair(fault: QuarantineFault,
                           outcome: RollupRepairResult): Either[String, CommittedSyncState] =
     committed.toRight("no committed state to repair").flatMap { state =>
-      val (next, report) = outcome match {
+      val (next, forceSnapshot, report) = outcome match {
         case RollupRepairResult.Rebuilt(tree) =>
-          state.copy(rollups = state.rollups + (fault.rollupId -> tree),
+          (state.copy(rollups = state.rollups + (fault.rollupId -> tree),
             routes = state.routes + (tree.utxoId -> fault.rollupId),
             rollupOrigins = state.rollupOrigins + (fault.rollupId -> fault.collateralBoxId),
-            quarantined = state.quarantined - fault.rollupId) -> (() =>
+            quarantined = state.quarantined - fault.rollupId), true, () =>
               logger.warn(s"Rollup ${fault.rollupId} is tracked again after ${fault.attempts + 1} " +
                 s"rebuild attempt(s); this miner can act on it once more"))
         case RollupRepairResult.Terminated =>
-          state.copy(quarantined = state.quarantined - fault.rollupId) -> (() =>
+          (state.copy(quarantined = state.quarantined - fault.rollupId), true, () =>
             logger.info(s"Quarantined rollup ${fault.rollupId} had already ended on chain; " +
               "dropping its fault"))
         case RollupRepairResult.Failed(reason, retryable) =>
@@ -272,6 +272,7 @@ class SyncHandler @Inject()(config: Configuration,
           val attempted =
             if (failed.repairable(repairAttempts)) failed
             else failed.scheduleRemoval(state.cursor.height, quarantineRetentionBlocks)
+          val scheduledRemoval = fault.removalHeight.isEmpty && attempted.removalHeight.isDefined
           val log = () => attempted.removalHeight match {
             case Some(removeAt) =>
               logger.error(s"Rollup ${fault.rollupId} stays quarantined after " +
@@ -280,14 +281,17 @@ class SyncHandler @Inject()(config: Configuration,
             case None =>
               logger.warn(s"Rebuild ${attempted.attempts} of ${fault.rollupId} failed: $reason")
           }
-          state.copy(quarantined = state.quarantined + (fault.rollupId -> attempted)) -> log
+          (state.copy(quarantined = state.quarantined + (fault.rollupId -> attempted)),
+            scheduledRemoval, log)
       }
       publishTransition(committed, next) match {
         case Right(_) =>
           committed = Some(next)
           publishStatus(status)
-          // Attempts and retention deadlines must survive restart just as a successful rebuild does.
-          offerSnapshot(next, force = true)
+          // Successful/terminal outcomes and the first retention deadline are durable immediately.
+          // Intermediate attempt counts use the ordinary snapshot cadence; replaying one after a crash
+          // is cheaper than encoding the complete synchronization state on every failed walk.
+          offerSnapshot(next, force = forceSnapshot)
           report()
           Right(next)
         case Left(failed) =>
@@ -331,6 +335,10 @@ class SyncHandler @Inject()(config: Configuration,
 
           case Right(transition) =>
             val (maintainedState, warnings, removed) = maintainQuarantines(transition.state)
+            val scheduledRemoval = maintainedState.quarantined.exists { case (id, fault) =>
+              fault.removalHeight.isDefined &&
+                transition.state.quarantined.get(id).forall(_.removalHeight.isEmpty)
+            }
             val maintained = transition.copy(state = maintainedState)
             publishTransition(committed, maintained.state) match {
               case Left(reason) =>
@@ -354,7 +362,10 @@ class SyncHandler @Inject()(config: Configuration,
                   case _ => CatchingUp(maintained.state.cursor, maintained.state.cursor.height)
                 }
                 publishStatus(status)
-                offerSnapshot(maintained.state, force = false)
+                // A deadline assigned during block maintenance (for example to a new terminal fault or
+                // after repairAttempts is lowered) has the same restart guarantee as one assigned by a
+                // repair result. Warning/removal logs continue on the periodic snapshot cadence.
+                offerSnapshot(maintained.state, force = scheduledRemoval)
                 requester ! BlockCommitted(maintained.state.cursor, maintained.state.version,
                   maintained.relevantEvents, maintained.stagedDictionaryCopies)
             }

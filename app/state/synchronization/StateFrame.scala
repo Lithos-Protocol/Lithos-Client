@@ -37,11 +37,19 @@ object StateFrame {
   private final case class RecoveryPrepared(result: Try[Option[CommittedSyncState]])
   private final case class DictionaryRepaired(atCursor: SyncCursor,
                                               result: Try[Either[String, MinerDictionarySeed]])
-  private final case class QuarantinesLoaded(result: Try[Any])
-  private final case class RollupRepaired(rollupId: String,
-                                         atCursor: SyncCursor,
-                                         result: Try[RollupRepairResult])
-  private final case class RollupRepairPublished(rollupId: String,
+  private final case class DictionaryRepairPublished(result: Try[Any])
+  /** Identity and optional frozen catch-up tip for exactly one quarantine-repair cycle. */
+  private final case class RepairCycle(id: Long, maintenanceTip: Option[Int])
+  private final case class QuarantinesLoaded(cycle: RepairCycle, result: Try[Any])
+  private final case class RollupRepaired(cycle: RepairCycle,
+                                          rollupId: String,
+                                          atCursor: SyncCursor,
+                                          result: Try[RollupRepairResult])
+  private final case class RollupRepairTimedOut(cycle: RepairCycle,
+                                                rollupId: String,
+                                                atCursor: SyncCursor)
+  private final case class RollupRepairPublished(cycle: RepairCycle,
+                                                 rollupId: String,
                                                  atCursor: SyncCursor,
                                                  result: Try[Any])
 }
@@ -69,6 +77,7 @@ class StateFrame @Inject()(config: Configuration,
   private val quarantineAttempts = syncConfig.quarantineRepairAttempts
   private val quarantineCheckpoints = syncConfig.quarantineMaintenanceCheckpoints
   private val checkpointInterval = syncConfig.quarantineCheckpointIntervalBlocks
+  private val quarantineRepairTimeout = syncConfig.quarantineRepairTimeout
   private val batchBlocks = syncConfig.catchUpBatchBlocks
   private val retriesBeforeAlarm = syncConfig.retriesBeforeAlarm
   private val tipRevalidation = syncConfig.revalidationChecks
@@ -86,8 +95,13 @@ class StateFrame @Inject()(config: Configuration,
   // At the live tip rebuilds run beside polling. During catch-up, configured maintenance checkpoints
   // deliberately hold the producer so a long repair has one stable cursor at which it can install.
   private var repairing = false
-  // A maintenance checkpoint keeps `inFlight` true and the cursor frozen until its repair reply.
-  private var maintenanceTip = Option.empty[Int]
+  // Quarantine messages carry this identity so dictionary, live-tip, and checkpoint completions cannot
+  // complete one another. A timed-out worker remains the only repair until it actually returns.
+  private var activeRepairCycle = Option.empty[RepairCycle]
+  private var nextRepairCycleId = 0L
+  private var repairWalkInFlight = false
+  private var repairWalkTimedOut = false
+  private var repairTimeoutTask = Option.empty[Cancellable]
   private var committedSinceCheckpoint = 0
   // Fetched as a batch but committed one at a time in chain order.
   private var pending = Vector.empty[BlockInfo]
@@ -104,7 +118,10 @@ class StateFrame @Inject()(config: Configuration,
     context.system.scheduler.scheduleWithFixedDelay(
       syncConfig.pollInterval, syncConfig.pollInterval, self, Tick)
 
-  override def postStop(): Unit = ticker.cancel()
+  override def postStop(): Unit = {
+    ticker.cancel()
+    repairTimeoutTask.foreach(_.cancel())
+  }
 
   /**
    * Nothing here may throw. A restart resets `active`, and the one message that sets it is scheduled,
@@ -275,69 +292,111 @@ class StateFrame @Inject()(config: Configuration,
 
     case DictionaryRepaired(at, Success(Right(seed))) =>
       (syncHandler ? RepairMinerDictionary(at, seed.minerTree, seed.dataBoxToken))
-        .map(result => QuarantinesLoaded(Success(result)))
-        .recover { case ex => QuarantinesLoaded(Failure(ex)) }
+        .map(result => DictionaryRepairPublished(Success(result)))
+        .recover { case ex => DictionaryRepairPublished(Failure(ex)) }
         .pipeTo(self)
 
     case DictionaryRepaired(_, Success(Left(reason))) =>
-      repairing = false
+      completeDictionaryRepair()
       logger.warn(s"Miner Dictionary bootstrap retry failed: $reason. Registration and commitment " +
         s"fraud proofs stay unavailable; retrying in $repairInterval")
 
     case DictionaryRepaired(_, Failure(ex)) =>
-      repairing = false
+      completeDictionaryRepair()
       logger.warn(s"Miner Dictionary bootstrap retry could not run: ${message(ex)}", ex)
 
-    // Names reason for Miner Dictionary failure
-    case QuarantinesLoaded(Success(rejected: BlockRejected)) =>
-      val operation = if (maintenanceTip.isDefined) "Quarantine maintenance checkpoint"
-      else "Rebuilt Miner Dictionary"
-      logger.warn(s"$operation was not accepted: ${rejected.reason}")
-      completeRepairCycle()
+    case DictionaryRepairPublished(Success(_: BlockCommitted)) =>
+      completeDictionaryRepair()
 
-    case QuarantinesLoaded(Success(RepairableQuarantines(faults, at))) =>
+    case DictionaryRepairPublished(Success(rejected: BlockRejected)) =>
+      logger.warn(s"Rebuilt Miner Dictionary was not accepted: ${rejected.reason}")
+      completeDictionaryRepair()
+
+    case DictionaryRepairPublished(Success(other)) =>
+      logger.warn(s"Unexpected Miner Dictionary repair response: $other")
+      completeDictionaryRepair()
+
+    case DictionaryRepairPublished(Failure(ex)) =>
+      logger.warn(s"Could not publish the rebuilt Miner Dictionary: ${message(ex)}", ex)
+      completeDictionaryRepair()
+
+    case QuarantinesLoaded(cycle, _) if !activeRepairCycle.contains(cycle) =>
+      logger.debug(s"Ignoring quarantine-list response for completed repair cycle ${cycle.id}")
+
+    case QuarantinesLoaded(cycle, Success(rejected: BlockRejected)) =>
+      val operation = if (cycle.maintenanceTip.isDefined) "Quarantine maintenance checkpoint"
+      else "Quarantine repair query"
+      logger.warn(s"$operation was not accepted: ${rejected.reason}")
+      completeRepairCycle(cycle)
+
+    case QuarantinesLoaded(cycle, Success(RepairableQuarantines(faults, at))) =>
       faults.headOption match {
-        case None => completeRepairCycle()
+        case None => completeRepairCycle(cycle)
         case Some(fault) =>
           logger.info(s"Rebuilding quarantined rollup ${fault.rollupId} from height " +
             s"${fault.genesisHeight}, attempt ${fault.attempts + 1} of $quarantineAttempts")
-          Future(new RollupRepair(nodeContext.getNodeApi, protocol,
-            syncConfig.quarantineMaxTransforms).run(fault, at.height))(pollingContext)
-            .map(result => RollupRepaired(fault.rollupId, at, Success(result)))
-            .recover { case ex => RollupRepaired(fault.rollupId, at, Failure(ex)) }
-            .pipeTo(self)
+          beginRollupRepair(cycle, fault, at)
       }
 
-    case QuarantinesLoaded(Success(_)) => completeRepairCycle()
+    case QuarantinesLoaded(cycle, Success(other)) =>
+      logger.warn(s"Unexpected quarantine-list response in repair cycle ${cycle.id}: $other")
+      completeRepairCycle(cycle)
 
-    case QuarantinesLoaded(Failure(ex)) =>
+    case QuarantinesLoaded(cycle, Failure(ex)) =>
       logger.warn(s"Could not read repairable quarantines: ${message(ex)}", ex)
-      completeRepairCycle()
+      completeRepairCycle(cycle)
 
-    case RollupRepaired(rollupId, at, Success(outcome)) =>
-      publishRollupRepair(rollupId, at, outcome)
+    case RollupRepairTimedOut(cycle, rollupId, at)
+      if activeRepairCycle.contains(cycle) && repairWalkInFlight && !repairWalkTimedOut =>
+      repairTimeoutTask = None
+      repairWalkTimedOut = true
+      val checkpoint = cycle.maintenanceTip.fold("")(_ =>
+        " Canonical catch-up is resuming from the frozen checkpoint.")
+      logger.error(s"Repair walk for quarantined rollup $rollupId at ${at.blockId}@${at.height} " +
+        s"exceeded sync.quarantine.repairTimeout ($quarantineRepairTimeout).$checkpoint " +
+        "The worker remains the only repair in flight; its eventual result must still pass the exact " +
+        "cursor guard.")
+      resumeMaintenanceCheckpoint(cycle)
 
-    case RollupRepaired(rollupId, at, Failure(ex)) =>
-      publishRollupRepair(rollupId, at,
-        RollupRepairResult.Failed(s"rebuild could not run: ${message(ex)}", retryable = true))
+    case _: RollupRepairTimedOut => ()
 
-    case RollupRepairPublished(_, _, Success(_: BlockCommitted)) =>
-      completeRepairCycle()
+    case RollupRepaired(cycle, _, _, _) if !activeRepairCycle.contains(cycle) =>
+      logger.debug(s"Ignoring result for completed repair cycle ${cycle.id}")
 
-    case RollupRepairPublished(rollupId, at, Success(rejected: BlockRejected)) =>
+    case RollupRepaired(cycle, rollupId, at, result) =>
+      cancelRepairTimeout()
+      repairWalkInFlight = false
+      if (repairWalkTimedOut) {
+        logger.warn(s"Repair result for rollup $rollupId completed after repair cycle ${cycle.id} " +
+          s"timed out; publishing it against the original cursor ${at.blockId}@${at.height}")
+      }
+      result match {
+        case Success(outcome) => publishRollupRepair(cycle, rollupId, at, outcome)
+        case Failure(ex) =>
+          publishRollupRepair(cycle, rollupId, at,
+            RollupRepairResult.Failed(s"rebuild could not run: ${message(ex)}", retryable = true))
+      }
+
+    case RollupRepairPublished(cycle, _, _, _) if !activeRepairCycle.contains(cycle) =>
+      logger.debug(s"Ignoring publication response for completed repair cycle ${cycle.id}")
+
+    case RollupRepairPublished(cycle, _, _, Success(_: BlockCommitted)) =>
+      completeRepairCycle(cycle)
+
+    case RollupRepairPublished(cycle, rollupId, at, Success(rejected: BlockRejected)) =>
       logger.warn(s"Repair result for rollup $rollupId rebuilt at ${at.blockId}@${at.height} was not " +
         s"installed: ${rejected.reason}")
-      completeRepairCycle()
+      completeRepairCycle(cycle)
 
-    case RollupRepairPublished(rollupId, at, Success(other)) =>
+    case RollupRepairPublished(cycle, rollupId, at, Success(other)) =>
       logger.warn(s"Unexpected repair publication response for rollup $rollupId rebuilt at " +
         s"${at.blockId}@${at.height}: $other")
-      completeRepairCycle()
+      completeRepairCycle(cycle)
 
-    case RollupRepairPublished(rollupId, at, Failure(ex)) =>
+    case RollupRepairPublished(cycle, rollupId, at, Failure(ex)) =>
       logger.warn(s"Could not publish repair result for rollup $rollupId rebuilt at " +
         s"${at.blockId}@${at.height}: ${message(ex)}", ex)
-      completeRepairCycle()
+      completeRepairCycle(cycle)
 
     // MarkReady may reply to ask-based callers; this producer needs no response.
     case _: SyncStatus => ()
@@ -356,7 +415,7 @@ class StateFrame @Inject()(config: Configuration,
     }
 
   private def maintenanceCheckpointDue(at: SyncCursor, tip: Int): Boolean =
-    quarantineCheckpoints && quarantineAttempts > 0 && at.height < tip &&
+    quarantineCheckpoints && quarantineAttempts > 0 && !repairing && at.height < tip &&
       committedSinceCheckpoint >= checkpointInterval
 
   /**
@@ -364,31 +423,71 @@ class StateFrame @Inject()(config: Configuration,
    * Because no next commit can start, the exact cursor guard can accept a long repair during catch-up.
    */
   private def beginMaintenanceCheckpoint(tip: Int): Unit = {
-    maintenanceTip = Some(tip)
-    repairing = true
+    val cycle = startRepairCycle(Some(tip))
     (syncHandler ? GetRepairableQuarantines)
-      .map(result => QuarantinesLoaded(Success(result)))
-      .recover { case ex => QuarantinesLoaded(Failure(ex)) }
+      .map(result => QuarantinesLoaded(cycle, Success(result)))
+      .recover { case ex => QuarantinesLoaded(cycle, Failure(ex)) }
       .pipeTo(self)
   }
 
-  private def publishRollupRepair(rollupId: String,
+  private def publishRollupRepair(cycle: RepairCycle,
+                                  rollupId: String,
                                   at: SyncCursor,
                                   outcome: RollupRepairResult): Unit =
     (syncHandler ? RepairRollup(rollupId, at, outcome))
-      .map(result => RollupRepairPublished(rollupId, at, Success(result)))
-      .recover { case ex => RollupRepairPublished(rollupId, at, Failure(ex)) }
+      .map(result => RollupRepairPublished(cycle, rollupId, at, Success(result)))
+      .recover { case ex => RollupRepairPublished(cycle, rollupId, at, Failure(ex)) }
       .pipeTo(self)
 
-  /** Resume a frozen catch-up batch only after the repair owner has accepted or refused the result. */
-  private def completeRepairCycle(): Unit = {
-    repairing = false
-    maintenanceTip.foreach { tip =>
-      maintenanceTip = None
+  private def beginRollupRepair(cycle: RepairCycle,
+                                fault: QuarantineFault,
+                                at: SyncCursor): Unit = {
+    repairWalkInFlight = true
+    repairWalkTimedOut = false
+    repairTimeoutTask = Some(context.system.scheduler.scheduleOnce(quarantineRepairTimeout, self,
+      RollupRepairTimedOut(cycle, fault.rollupId, at)))
+    Future(new RollupRepair(nodeContext.getNodeApi, protocol,
+      syncConfig.quarantineMaxTransforms).run(fault, at.height))(pollingContext)
+      .map(result => RollupRepaired(cycle, fault.rollupId, at, Success(result)))
+      .recover { case ex => RollupRepaired(cycle, fault.rollupId, at, Failure(ex)) }
+      .pipeTo(self)
+  }
+
+  private def startRepairCycle(maintenanceTip: Option[Int]): RepairCycle = {
+    nextRepairCycleId += 1L
+    val cycle = RepairCycle(nextRepairCycleId, maintenanceTip)
+    repairing = true
+    activeRepairCycle = Some(cycle)
+    repairWalkInFlight = false
+    repairWalkTimedOut = false
+    cycle
+  }
+
+  private def cancelRepairTimeout(): Unit = {
+    repairTimeoutTask.foreach(_.cancel())
+    repairTimeoutTask = None
+  }
+
+  /** Resume a frozen batch once. A timed-out worker stays active but no longer owns the producer. */
+  private def resumeMaintenanceCheckpoint(cycle: RepairCycle): Unit =
+    cycle.maintenanceTip.foreach { tip =>
       committedSinceCheckpoint = 0
       continueCanonical(tip)
     }
-  }
+
+  /** Resume a frozen catch-up batch only after this exact repair cycle accepts, refuses, or times out. */
+  private def completeRepairCycle(cycle: RepairCycle): Unit =
+    if (activeRepairCycle.contains(cycle)) {
+      val alreadyResumed = repairWalkTimedOut
+      cancelRepairTimeout()
+      repairing = false
+      activeRepairCycle = None
+      repairWalkInFlight = false
+      repairWalkTimedOut = false
+      if (!alreadyResumed) resumeMaintenanceCheckpoint(cycle)
+    }
+
+  private def completeDictionaryRepair(): Unit = repairing = false
 
   private def beginPoll(): Unit = {
     inFlight = true
@@ -574,10 +673,10 @@ class StateFrame @Inject()(config: Configuration,
   }
 
   private def askForQuarantines(): Unit = {
-    repairing = true
+    val cycle = startRepairCycle(None)
     (syncHandler ? GetRepairableQuarantines)
-      .map(result => QuarantinesLoaded(Success(result)))
-      .recover { case ex => QuarantinesLoaded(Failure(ex)) }
+      .map(result => QuarantinesLoaded(cycle, Success(result)))
+      .recover { case ex => QuarantinesLoaded(cycle, Failure(ex)) }
       .pipeTo(self)
   }
 

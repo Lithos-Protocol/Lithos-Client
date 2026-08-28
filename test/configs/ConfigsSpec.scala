@@ -18,6 +18,21 @@ class ConfigsSpec extends AnyFlatSpec with Matchers {
     }
   }
 
+  it should "allow a maintenance checkpoint after every committed catch-up block" in {
+    val configured = Configuration(ConfigFactory.parseString(
+      "sync.quarantine.checkpointIntervalBlocks = 1")
+      .withFallback(shipped.underlying).resolve())
+    noException should be thrownBy Configs.validateAll(configured)
+  }
+
+  it should "reject a quarantine repair timeout below the supported floor" in {
+    val configured = Configuration(ConfigFactory.parseString(
+      "sync.quarantine.repairTimeout = 500 milliseconds")
+      .withFallback(shipped.underlying).resolve())
+    val thrown = the[ConfigValidationException] thrownBy Configs.validateAll(configured)
+    thrown.getMessage should include("sync.quarantine.repairTimeout")
+  }
+
   it should "name every required key missing from an empty configuration" in {
     // Required keys are those read without an application default.
     val thrown = the[ConfigValidationException] thrownBy
