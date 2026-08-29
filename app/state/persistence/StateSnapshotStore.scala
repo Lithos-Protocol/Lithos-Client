@@ -4,6 +4,7 @@ import lfsm.LFSMPhase
 import lfsm.states.{AuthenticatedDictionaryView, DeferredDictionary, DictionaryManifestHeader, MinerDictionaryMetadata, PlasmaDictionary, RollupMetadata}
 import org.bouncycastle.util.encoders.Hex
 import org.ergoplatform.sdk.ErgoId
+import org.slf4j.{Logger, LoggerFactory}
 import scorex.crypto.hash.Blake2b256
 import sigma.data.AvlTreeFlags
 import state.messages.SyncMessages.SyncCursor
@@ -15,6 +16,7 @@ import work.lithos.plasma.collections.Manifest
 
 import java.io.{ByteArrayInputStream, ByteArrayOutputStream, DataInputStream, DataOutputStream}
 import java.nio.charset.StandardCharsets
+import java.util.concurrent.locks.ReentrantReadWriteLock
 import scala.util.control.NonFatal
 
 sealed trait SnapshotError {
@@ -111,9 +113,11 @@ final class LevelDbStateSnapshotStore(store: KeyValueStore,
   private val generationPrefix = bytes("sync/snapshot/gen/")
   private val dictionaryPrefix = bytes("sync/snapshot/blob/")
   private val currentKey = bytes("sync/snapshot/current")
+  private val logger: Logger = LoggerFactory.getLogger("LevelDbStateSnapshotStore")
+  private val lifecycleLock = new ReentrantReadWriteLock()
 
   override def save(snapshot: SnapshotCheckpoint,
-                    maxEntryBytes: Int): Either[SnapshotError, Unit] = {
+                    maxEntryBytes: Int): Either[SnapshotError, Unit] = withWriteLock {
     val state = snapshot.metadata
     val base = generationPrefix ++ bytes(
       f"${state.cursor.height}%010d-${state.version}%020d-${state.cursor.blockId}")
@@ -125,7 +129,7 @@ final class LevelDbStateSnapshotStore(store: KeyValueStore,
       case DictionaryId.Miner => state.minerDictionary.dictionaryDigest
     }
 
-    for {
+    val committed = for {
       _ <- if (snapshot.dictionaries.keySet == expectedIds) Right(()) else Left(Corrupt(
         "checkpoint dictionary sources do not exactly match its tracked metadata"))
       _ <- if (snapshot.dictionaries.forall { case (id, source) =>
@@ -140,13 +144,21 @@ final class LevelDbStateSnapshotStore(store: KeyValueStore,
       // The metadata and pointer are the only generation commit. All referenced blobs are complete.
       _ <- store.write(Seq(Put(base ++ MetaSuffix, meta), Put(currentKey, base)),
         WriteDurability.Synchronous).left.map(Storage)
-      _ <- pruneGenerations(base)
-      _ <- collectUnreferencedDictionaries()
     } yield ()
+    committed.map { _ =>
+      // The pointer commit above is the durability boundary. Cleanup is best effort and retried by
+      // every later save; reporting it as a failed checkpoint would retain an unnecessary journal.
+      pruneGenerations(base).left.foreach(error =>
+        logger.warn(s"Checkpoint ${state.cursor.blockId}@${state.cursor.height} committed, but " +
+          s"generation pruning failed: ${error.message}"))
+      collectUnreferencedDictionaries().left.foreach(error =>
+        logger.warn(s"Checkpoint ${state.cursor.blockId}@${state.cursor.height} committed, but " +
+          s"dictionary garbage collection failed: ${error.message}"))
+    }
   }
 
   override def generationKeys(): Either[SnapshotError, Seq[Array[Byte]]] =
-    store.readSnapshot { view =>
+    withReadLock(store.readSnapshot { view =>
       for {
         current <- view.get(currentKey)
         keys <- view.scanKeys(generationPrefix)
@@ -156,10 +168,10 @@ final class LevelDbStateSnapshotStore(store: KeyValueStore,
       val newestFirst = bases.sortWith((left, right) => unsignedCompare(left, right) > 0)
       val pointed = current.toSeq.filter(key => bases.exists(java.util.Arrays.equals(_, key)))
       distinctKeys(pointed ++ newestFirst)
-    }
+    })
 
   override def load(base: Array[Byte]): Either[SnapshotError, PersistedSyncState] =
-    store.readSnapshot { view =>
+    withReadLock(store.readSnapshot { view =>
       val copied: Either[SnapshotError, (Array[Byte], Map[String, Array[Byte]])] =
         view.get(base ++ MetaSuffix).left.map(Storage).flatMap {
           case None => Left(Corrupt(s"generation ${name(base)} has no metadata entry"))
@@ -198,9 +210,9 @@ final class LevelDbStateSnapshotStore(store: KeyValueStore,
         }
         assembled <- StateSnapshotCodec.assemble(meta, rollups, miner).left.map(Corrupt)
       } yield assembled
-    }
+    })
 
-  override def loadDictionary(digest: String): Either[SnapshotError, PlasmaDictionary] = {
+  override def loadDictionary(digest: String): Either[SnapshotError, PlasmaDictionary] = withReadLock {
     val base = dictionaryBase(digest)
     for {
       encodedHeader <- required(base ++ HeaderSuffix, s"dictionary $digest has no committed header")
@@ -233,7 +245,8 @@ final class LevelDbStateSnapshotStore(store: KeyValueStore,
     } yield DeferredDictionary(header.digest, header.flags, header.parameters)
   }
 
-  override def close(): Either[SnapshotError, Unit] = store.close().left.map(Storage)
+  override def close(): Either[SnapshotError, Unit] =
+    withWriteLock(store.close().left.map(Storage))
 
   private def ensureDictionary(dictionary: AuthenticatedDictionaryView,
                                maxEntryBytes: Int): Either[SnapshotError, Unit] = {
@@ -376,6 +389,18 @@ final class LevelDbStateSnapshotStore(store: KeyValueStore,
   }
 
   private def name(key: Array[Byte]): String = new String(key, StandardCharsets.UTF_8)
+
+  private def withReadLock[A](operation: => A): A = {
+    val lock = lifecycleLock.readLock()
+    lock.lock()
+    try operation finally lock.unlock()
+  }
+
+  private def withWriteLock[A](operation: => A): A = {
+    val lock = lifecycleLock.writeLock()
+    lock.lock()
+    try operation finally lock.unlock()
+  }
 }
 
 object LevelDbStateSnapshotStore {

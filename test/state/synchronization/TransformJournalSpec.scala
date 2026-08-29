@@ -98,4 +98,18 @@ class TransformJournalSpec extends AnyFlatSpec with Matchers {
     val error = intercept[IllegalArgumentException](TransformJournal(base, Vector(entry)))
     error.getMessage should include("immediately after its checkpoint")
   }
+
+  it should "account for retained metadata even when a block has no dictionary payload" in {
+    val cursor = SyncCursor(100, SyncFixtures.id(100), SyncFixtures.id(99))
+    val state = CommittedSyncState(cursor, 1L, Map.empty, Map.empty, Map.empty,
+      lfsm.states.MinerDictionary.initialState, None,
+      minerDictionaryFault = Some("x"), quarantined = Map.empty)
+    val short = TransformJournalEntry(cursor, CommittedSyncMetadata.from(state), Vector.empty)
+    val longerState = state.copy(minerDictionaryFault = Some("x" * 1000))
+    val longer = TransformJournalEntry(cursor, CommittedSyncMetadata.from(longerState), Vector.empty)
+
+    short.estimatedBytes shouldEqual 0L
+    short.accountedBytes should be > 0L
+    longer.accountedBytes should be > short.accountedBytes
+  }
 }

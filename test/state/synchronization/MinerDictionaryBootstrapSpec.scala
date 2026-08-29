@@ -145,6 +145,17 @@ class MinerDictionaryBootstrapSpec extends AnyFlatSpec with Matchers with Mockit
       .left.value should include("has no transaction")
   }
 
+  it should "use transaction inclusion instead of the box's redundant spending height" in {
+    val chain = registrationChain(count = 2, firstHeight = 200)
+    val nodeApi = indexerFor(chain)
+    when(nodeApi.indexedBoxById(chain.head.inputId)).thenReturn(Success(Some(
+      spentBox(chain.head.inputId, chain.head.tx.id, chain.head.height)
+        .copy(spendingHeight = None))))
+
+    new MinerDictionaryBootstrap(nodeApi, protocol, maxTransforms = 100).run(500)
+      .value.minerTree.numMiners shouldEqual 2
+  }
+
   private final case class Step(tx: BlockTx, tree: MinerDictionary, inputId: String, outputId: String, height: Int)
 
   /** One registration per step, each spending the previous dictionary box. */

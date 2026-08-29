@@ -1,6 +1,6 @@
 package state.synchronization
 
-import akka.actor.{Actor, ActorRef}
+import akka.actor.{Actor, ActorRef, Cancellable}
 import configs.SyncConfig
 import lfsm.states.{AuthenticatedDictionaryView, DeferredDictionary, PlasmaDictionary, Rollup}
 import org.bouncycastle.util.encoders.Hex
@@ -16,6 +16,7 @@ import utils.Globals
 
 import javax.inject.Inject
 import java.util.UUID
+import scala.concurrent.duration._
 import scala.util.control.NonFatal
 
 /**
@@ -61,20 +62,24 @@ class SyncHandler @Inject()(config: Configuration,
   private var checkpointInFlight = Option.empty[PendingCheckpoint]
   private var checkpointRequested = false
   private var checkpointRequestedForce = false
+  private var checkpointRetry = Option.empty[Cancellable]
+  private case object RetryCheckpoint
 
   private final case class MaterializationKey(dictionaryId: DictionaryId, digest: String)
+  private final case class MaterializationFailure(key: Option[MaterializationKey], reason: String)
   private final case class PendingOperation(epoch: Long,
                                             remaining: Set[MaterializationKey],
                                             dictionaries: Map[MaterializationKey, AuthenticatedDictionaryView],
                                             complete: Map[MaterializationKey, AuthenticatedDictionaryView] => Unit,
-                                            fail: String => Unit)
+                                            fail: MaterializationFailure => Unit)
   private final case class ActiveLoad(key: MaterializationKey,
                                       token: String,
                                       operations: Set[Long])
   private final case class PendingCheckpoint(token: String,
                                              boundary: CommittedSyncMetadata,
                                              cutEntries: Int,
-                                             sources: Map[DictionaryId, SnapshotDictionarySource])
+                                             sources: Map[DictionaryId, SnapshotDictionarySource],
+                                             forced: Boolean)
   private final case class DictionaryOverride(at: SyncCursor,
                                               dictionary: AuthenticatedDictionaryView)
   private final case class RepairPermit(cursor: SyncCursor,
@@ -87,6 +92,7 @@ class SyncHandler @Inject()(config: Configuration,
   private var loadsByToken = Map.empty[String, ActiveLoad]
   private var dictionaryCache = Map.empty[MaterializationKey, AuthenticatedDictionaryView]
   private var cacheOrder = Vector.empty[MaterializationKey]
+  private var dictionaryCacheBytes = 0L
   private var dictionaryOverrides = Map.empty[DictionaryId, DictionaryOverride]
   private var repairPermits = Map.empty[String, RepairPermit]
   private var repairPermitOrder = Vector.empty[String]
@@ -192,6 +198,9 @@ class SyncHandler @Inject()(config: Configuration,
 
     case SnapshotSaved(cursor, token) => checkpointSaved(cursor, token)
     case SnapshotSaveFailed(cursor, token, reason) => checkpointFailed(cursor, token, reason)
+    case RetryCheckpoint =>
+      checkpointRetry = None
+      if (checkpointRequested) offerSnapshot(force = checkpointRequestedForce)
 
     case UpdateEvaluation(blockId) =>
       committed.flatMap(_.rollups.get(blockId)).foreach { tree =>
@@ -281,25 +290,32 @@ class SyncHandler @Inject()(config: Configuration,
             case Some(state) if state.cursor == atCursor =>
               val repaired = state.copy(minerTree = minerTree, dataBoxToken = dataBoxToken,
                 minerDictionaryFault = None)
-              publishTransition(committed, repaired) match {
-                case Right(_) =>
-                  updateJournalTipMetadata(repaired)
-                  dictionaryOverrides += DictionaryId.Miner -> DictionaryOverride(atCursor,
-                    minerTree.dictionary)
-                  remember(keyFor(DictionaryId.Miner, minerTree.dictionary), minerTree.dictionary)
-                  committed = Some(dematerialize(repaired))
-                  stateEpoch += 1L
-                  logger.info(s"Miner Dictionary restored at ${atCursor.blockId}@${atCursor.height} with " +
-                    s"${minerTree.numMiners} miner(s); registration and commitment fraud proofs are " +
-                    "available again")
-                  publishStatus(status)
-                  // Durable now rather than at the next interval, or a restart repeats the whole repair.
-                  offerSnapshot(force = true)
-                  requester ! BlockCommitted(repaired.cursor, repaired.version, 0, 0)
+              val replacement = DictionaryOverride(atCursor, minerTree.dictionary)
+              val replacements = dictionaryOverrides + (DictionaryId.Miner -> replacement)
+              repairWithinJournalBudget(repaired, replacements) match {
                 case Left(failed) =>
-                  markRuntimeFailure("Could not publish the rebuilt Miner Dictionary",
-                    new IllegalStateException(failed))
+                  logger.warn(s"Did not install the rebuilt Miner Dictionary: $failed. " +
+                    "Its existing fault remains isolated and canonical synchronization continues.")
                   requester ! BlockRejected(committed.map(_.cursor), "", failed)
+                case Right(_) => publishTransition(committed, repaired) match {
+                  case Right(_) =>
+                    updateJournalTipMetadata(repaired)
+                    dictionaryOverrides = replacements
+                    remember(keyFor(DictionaryId.Miner, minerTree.dictionary), minerTree.dictionary)
+                    committed = Some(dematerialize(repaired))
+                    stateEpoch += 1L
+                    logger.info(s"Miner Dictionary restored at ${atCursor.blockId}@${atCursor.height} with " +
+                      s"${minerTree.numMiners} miner(s); registration and commitment fraud proofs are " +
+                      "available again")
+                    publishStatus(status)
+                    // Durable now rather than at the next interval, or a restart repeats the whole repair.
+                    offerSnapshot(force = true)
+                    requester ! BlockCommitted(repaired.cursor, repaired.version, 0, 0)
+                  case Left(failed) =>
+                    markRuntimeFailure("Could not publish the rebuilt Miner Dictionary",
+                      new IllegalStateException(failed))
+                    requester ! BlockRejected(committed.map(_.cursor), "", failed)
+                }
               }
             case Some(state) =>
               requester ! BlockRejected(Some(state.cursor), "",
@@ -375,13 +391,23 @@ class SyncHandler @Inject()(config: Configuration,
           (state.copy(quarantined = state.quarantined + (fault.rollupId -> attempted)),
             false, log)
       }
-      publishTransition(committed, next) match {
-        case Right(_) =>
+      val replacements = outcome match {
+        case RollupRepairResult.Rebuilt(tree) =>
+          dictionaryOverrides + (DictionaryId.Rollup(fault.rollupId) ->
+            DictionaryOverride(next.cursor, tree.dictionary))
+        case _ => dictionaryOverrides
+      }
+      repairWithinJournalBudget(next, replacements) match {
+        case Left(failed) =>
+          logger.warn(s"Did not install repair result for rollup ${fault.rollupId}: $failed. " +
+            "Its existing quarantine remains isolated and canonical synchronization continues.")
+          Left(failed)
+        case Right(_) => publishTransition(committed, next) match {
+          case Right(_) =>
           outcome match {
             case RollupRepairResult.Rebuilt(tree) =>
               updateJournalTipMetadata(next)
-              dictionaryOverrides += DictionaryId.Rollup(fault.rollupId) ->
-                DictionaryOverride(next.cursor, tree.dictionary)
+              dictionaryOverrides = replacements
               remember(keyFor(DictionaryId.Rollup(fault.rollupId), tree.dictionary), tree.dictionary)
             case _ => updateJournalTipMetadata(next)
           }
@@ -394,9 +420,10 @@ class SyncHandler @Inject()(config: Configuration,
           offerSnapshot(force = forceSnapshot)
           report()
           Right(next)
-        case Left(failed) =>
-          markRuntimeFailure(s"Could not publish the rebuilt rollup ${fault.rollupId}", failed)
-          Left(failed)
+          case Left(failed) =>
+            markRuntimeFailure(s"Could not publish the rebuilt rollup ${fault.rollupId}", failed)
+            Left(failed)
+        }
       }
     }
 
@@ -404,9 +431,9 @@ class SyncHandler @Inject()(config: Configuration,
   private def withMaterialized(epoch: Long,
                                targets: Set[MaterializationKey])
                               (complete: Map[MaterializationKey, AuthenticatedDictionaryView] => Unit)
-                              (fail: String => Unit): Unit = {
+                              (fail: MaterializationFailure => Unit): Unit = {
     val available = targets.flatMap { key =>
-      currentDictionary(key).filter(_.materialized).orElse(dictionaryCache.get(key)).map(key -> _)
+      currentDictionary(key).filter(_.materialized).orElse(cachedDictionary(key)).map(key -> _)
     }.toMap
     val remaining = targets -- available.keySet
     if (remaining.isEmpty) complete(available)
@@ -421,7 +448,7 @@ class SyncHandler @Inject()(config: Configuration,
             loadsByKey += key -> updated
             loadsByToken += load.token -> updated
           case None => materializationSource(key) match {
-            case Left(reason) => failOperation(operationId, reason)
+            case Left(reason) => failOperation(operationId, key, reason)
             case Right(source) =>
               sequence += 1L
               val token = s"$incarnation:dictionary:$sequence"
@@ -448,8 +475,9 @@ class SyncHandler @Inject()(config: Configuration,
           load.operations.foreach(completeOperation(_, load.key, dictionary))
         case Right(dictionary) =>
           val actual = Hex.toHexString(dictionary.digest)
-          load.operations.foreach(failOperation(_, s"materializer returned $actual for ${load.key.digest}"))
-        case Left(reason) => load.operations.foreach(failOperation(_, reason))
+          load.operations.foreach(failOperation(_, load.key,
+            s"materializer returned $actual for ${load.key.digest}"))
+        case Left(reason) => load.operations.foreach(failOperation(_, load.key, reason))
       }
     }
 
@@ -463,14 +491,17 @@ class SyncHandler @Inject()(config: Configuration,
       else {
         operations -= operationId
         if (stateEpoch == next.epoch) next.complete(next.dictionaries)
-        else next.fail("committed state changed during dictionary materialization")
+        else next.fail(MaterializationFailure(None,
+          "committed state changed during dictionary materialization"))
       }
     }
 
-  private def failOperation(operationId: Long, reason: String): Unit =
+  private def failOperation(operationId: Long,
+                            key: MaterializationKey,
+                            reason: String): Unit =
     operations.get(operationId).foreach { operation =>
       operations -= operationId
-      operation.fail(reason)
+      operation.fail(MaterializationFailure(Some(key), reason))
     }
 
   private def materializationSource(key: MaterializationKey): Either[String, SnapshotDictionarySource] =
@@ -521,18 +552,39 @@ class SyncHandler @Inject()(config: Configuration,
   }
 
   private def remember(key: MaterializationKey, dictionary: AuthenticatedDictionaryView): Unit = {
-    dictionaryCache += key -> dictionary
-    cacheOrder = cacheOrder.filterNot(_ == key) :+ key
-    while (cacheOrder.size > syncConfig.materializedDictionaryCacheEntries) {
-      val evicted = cacheOrder.head
-      cacheOrder = cacheOrder.tail
-      dictionaryCache -= evicted
-      projections = evicted.dictionaryId match {
-        case DictionaryId.Rollup(blockId) => projections - blockId
-        case DictionaryId.Miner => projections
-      }
+    forget(key)
+    val weight = dictionary.estimatedHeapBytes
+    if (weight <= maxMaterializedDictionaryCacheBytes) {
+      dictionaryCache += key -> dictionary
+      dictionaryCacheBytes = boundedAdd(dictionaryCacheBytes, weight)
+      cacheOrder :+= key
+      while (cacheOrder.size > syncConfig.materializedDictionaryCacheEntries ||
+        dictionaryCacheBytes > maxMaterializedDictionaryCacheBytes) forget(cacheOrder.head)
+    } else {
+      logger.warn(s"Materialized ${key.dictionaryId.value} ${key.digest} has a conservative " +
+        s"retained-heap weight of $weight bytes, over the $maxMaterializedDictionaryCacheBytes-byte " +
+        "cache budget. It remains usable for this operation but will not be retained.")
     }
   }
+
+  private def cachedDictionary(key: MaterializationKey): Option[AuthenticatedDictionaryView] =
+    dictionaryCache.get(key).map { dictionary =>
+      cacheOrder = cacheOrder.filterNot(_ == key) :+ key
+      dictionary
+    }
+
+  private def forget(key: MaterializationKey): Unit = dictionaryCache.get(key).foreach { dictionary =>
+    dictionaryCache -= key
+    cacheOrder = cacheOrder.filterNot(_ == key)
+    dictionaryCacheBytes = math.max(0L, dictionaryCacheBytes - dictionary.estimatedHeapBytes)
+    projections = key.dictionaryId match {
+      case DictionaryId.Rollup(blockId) => projections - blockId
+      case DictionaryId.Miner => projections
+    }
+  }
+
+  private def boundedAdd(left: Long, right: Long): Long =
+    if (left >= Long.MaxValue - right) Long.MaxValue else left + right
 
   /** Keeps only the bounded cache materialized in the always-resident committed state. */
   private def dematerialize(state: CommittedSyncState): CommittedSyncState = {
@@ -569,7 +621,8 @@ class SyncHandler @Inject()(config: Configuration,
       }
       val dictionaryOutput = tx.outputs.headOption.filter(_.assets.exists(token =>
         token.id == protocol.minerDictionaryToken && token.amount == 1L))
-      if (dictionaryOutput.exists(_.id != protocol.minerDictionaryGenesisId)) {
+      if (state.minerDictionaryFault.isEmpty &&
+        dictionaryOutput.exists(_.id != protocol.minerDictionaryGenesisId)) {
         if (tx.inputs.headOption.exists(_.id == minerUtxo))
           touched += keyFor(DictionaryId.Miner, state.minerTree.dictionary)
         dictionaryOutput.foreach(output => minerUtxo = output.id)
@@ -589,7 +642,7 @@ class SyncHandler @Inject()(config: Configuration,
               current.minerTree.copy(dictionary = dictionaries(key)))
           case _ => requester ! SyncUnavailable(status)
         }
-      }(reason => requester ! SyncUnavailable(Stale(state.cursor, reason)))
+      }(failure => requester ! SyncUnavailable(Stale(state.cursor, failure.reason)))
     case _ => requester ! SyncUnavailable(status)
   }
 
@@ -612,9 +665,9 @@ class SyncHandler @Inject()(config: Configuration,
               }
             case _ => respondCurrentRollup(blockId, requester)
           }
-        } { reason =>
-          logger.error(s"Could not materialize rollup $blockId: $reason")
-          requester ! RollupUnavailable(reason)
+        } { failure =>
+          logger.error(s"Could not materialize rollup $blockId: ${failure.reason}")
+          requester ! RollupUnavailable(failure.reason)
         }
       case None => requester ! NoRollupFound()
     }
@@ -646,7 +699,7 @@ class SyncHandler @Inject()(config: Configuration,
             requester ! FullSync(usable, projected)
           case _ => respondSynced(requester)
         }
-      }(reason => requester ! SyncUnavailable(Stale(state.cursor, reason)))
+      }(failure => requester ! SyncUnavailable(Stale(state.cursor, failure.reason)))
     case _ => requester ! SyncUnavailable(status)
   }
 
@@ -659,22 +712,60 @@ class SyncHandler @Inject()(config: Configuration,
 
   private def prepareBlock(block: BlockInfo, requester: ActorRef): Unit = committed match {
     case Some(state) if state.cursor.blockId != block.id =>
-      val epoch = stateEpoch
-      val targets = dictionariesTouchedBy(state, block)
-      withMaterialized(epoch, targets) { dictionaries =>
-        if (stateEpoch != epoch || committed.forall(_.cursor != state.cursor))
-          requester ! BlockRejected(committed.map(_.cursor), block.id,
-            "committed state changed while block dictionaries were materializing")
-        else applyAndReply(block, requester, Some(installDictionaries(state, dictionaries)))
-      } { reason =>
-        val detail = s"Could not materialize dictionaries for block ${block.id}: $reason"
-        status = Stale(state.cursor, detail)
-        publishStatus(status)
-        logger.error(detail)
-        requester ! BlockRejected(Some(state.cursor), block.id, detail)
-      }
+      prepareBlockAgainst(block, requester, state, stateEpoch)
     case _ => applyAndReply(block, requester, None)
   }
+
+  /** A cold-load failure removes only the entity that depends on that prover, then retries the block. */
+  private def prepareBlockAgainst(block: BlockInfo,
+                                  requester: ActorRef,
+                                  base: CommittedSyncState,
+                                  epoch: Long): Unit = {
+    val targets = dictionariesTouchedBy(base, block)
+    withMaterialized(epoch, targets) { dictionaries =>
+      if (stateEpoch != epoch || committed.forall(_.cursor != base.cursor))
+        requester ! BlockRejected(committed.map(_.cursor), block.id,
+          "committed state changed while block dictionaries were materializing")
+      else applyAndReply(block, requester, Some(installDictionaries(base, dictionaries)))
+    } { failure =>
+      if (stateEpoch != epoch || committed.forall(_.cursor != base.cursor))
+        requester ! BlockRejected(committed.map(_.cursor), block.id,
+          "committed state changed while block dictionaries were materializing")
+      else failure.key match {
+        case Some(key) =>
+          val degraded = degradeMaterializationFailure(base, key, failure.reason)
+          prepareBlockAgainst(block, requester, degraded, epoch)
+        case None =>
+          requester ! BlockRejected(Some(base.cursor), block.id,
+            s"Could not materialize dictionaries for block ${block.id}: ${failure.reason}")
+      }
+    }
+  }
+
+  private def degradeMaterializationFailure(base: CommittedSyncState,
+                                            key: MaterializationKey,
+                                            reason: String): CommittedSyncState =
+    key.dictionaryId match {
+      case DictionaryId.Rollup(blockId) => base.rollups.get(blockId) match {
+        case None => base
+        case Some(tree) =>
+          val origin = base.rollupOrigins.get(blockId)
+          val detail = s"Could not materialize rollup dictionary ${key.digest}: $reason"
+          val fault = QuarantineFault(blockId, tree.startHeight, origin.getOrElse(""), detail,
+            retryable = origin.isDefined)
+          logger.error(s"Quarantined rollup $blockId before block application: $detail. " +
+            "The canonical cursor and unrelated rollups will continue.")
+          base.copy(rollups = base.rollups - blockId,
+            routes = base.routes.filterNot(_._2 == blockId),
+            rollupOrigins = base.rollupOrigins - blockId,
+            quarantined = base.quarantined + (blockId -> fault))
+      }
+      case DictionaryId.Miner =>
+        val detail = s"Could not materialize Miner Dictionary ${key.digest}: $reason"
+        logger.error(s"Miner Dictionary stopped before block application: $detail. " +
+          "The canonical cursor and rollups will continue.")
+        base.copy(minerDictionaryFault = Some(detail))
+    }
 
   private def applyAndReply(block: BlockInfo,
                             requester: ActorRef,
@@ -713,18 +804,35 @@ class SyncHandler @Inject()(config: Configuration,
           case Right(transition) =>
             val (maintainedState, warnings, removed) = maintainQuarantines(transition.state)
             val maintained = transition.copy(state = maintainedState)
-            publishTransition(committed, maintained.state) match {
+            val entry = TransformJournalEntry(maintained.state.cursor,
+              CommittedSyncMetadata.from(maintained.state), maintained.dictionaryTransforms)
+            val nextJournal = try journal.map(_.append(entry)).orElse {
+              journalBase.map(checkpoint => TransformJournal(checkpoint.cursor).append(entry))
+            }.toRight("Synchronization has no checkpoint-backed transform journal")
+            catch {
+              case NonFatal(error) => Left(Option(error.getMessage)
+                .getOrElse(error.getClass.getSimpleName))
+            }
+            val bounded = nextJournal.flatMap { candidate =>
+              val bytes = volatileJournalBytes(candidate, dictionaryOverrides)
+              if (bytes <= maxTransformJournalBytes) Right(candidate)
+              else Left(s"Volatile synchronization journal would retain $bytes bytes, over the " +
+                s"$maxTransformJournalBytes-byte bound")
+            }
+            bounded match {
+              case Left(reason) =>
+                logger.error(s"Deferred block ${block.id} at height ${block.height}: $reason. " +
+                  "Forcing checkpoint compaction before retrying the same block.")
+                offerSnapshot(force = true)
+                requester ! BlockRejected(committed.map(_.cursor), block.id, reason)
+              case Right(candidateJournal) => publishTransition(committed, maintained.state) match {
               case Left(reason) =>
                 status = SyncFailed(committed.map(_.cursor), reason)
                 publishStatus(status)
                 logger.error(s"Failed to publish block ${block.id}: $reason")
                 requester ! BlockRejected(committed.map(_.cursor), block.id, reason)
               case Right(_) =>
-                val entry = TransformJournalEntry(maintained.state.cursor,
-                  CommittedSyncMetadata.from(maintained.state), maintained.dictionaryTransforms)
-                journal = journal.map(_.append(entry)).orElse {
-                  journalBase.map(base => TransformJournal(base.cursor).append(entry))
-                }
+                journal = Some(candidateJournal)
                 maintained.dictionaryTransforms.foreach { transform =>
                   dictionaryFrom(maintained.state, transform.dictionaryId).foreach { dictionary =>
                     remember(MaterializationKey(transform.dictionaryId,
@@ -751,9 +859,36 @@ class SyncHandler @Inject()(config: Configuration,
                 offerSnapshot(force = false)
                 requester ! BlockCommitted(maintained.state.cursor, maintained.state.version,
                   maintained.relevantEvents, maintained.stagedDictionaryCopies)
+              }
             }
         }
     }
+  }
+
+  private def volatileJournalBytes(active: TransformJournal,
+                                   overrides: Map[DictionaryId, DictionaryOverride]): Long =
+    overrides.values.foldLeft(active.accountedBytes) { (bytes, replacement) =>
+      boundedAdd(bytes, replacement.dictionary.estimatedHeapBytes)
+    }
+
+  /** Same-cursor repairs retain full dictionary overrides until their forced checkpoint commits. */
+  private def repairWithinJournalBudget(
+    state: CommittedSyncState,
+    replacements: Map[DictionaryId, DictionaryOverride]): Either[String, Unit] = journal match {
+    case Some(active) =>
+      val prospective =
+        if (active.entries.nonEmpty && active.entries.last.cursor == state.cursor)
+          Right(active.replaceTipMetadata(CommittedSyncMetadata.from(state)))
+        else if (active.entries.isEmpty && journalBase.exists(_.cursor == state.cursor)) Right(active)
+        else Left(s"Cannot account for a same-cursor repair at ${state.cursor.blockId}@" +
+          s"${state.cursor.height}")
+      prospective.flatMap { next =>
+        val bytes = volatileJournalBytes(next, replacements)
+        Either.cond(bytes <= maxTransformJournalBytes, (),
+          s"Repair would retain $bytes volatile synchronization bytes, over the " +
+            s"$maxTransformJournalBytes-byte bound")
+      }
+    case None => Left("Synchronization has no checkpoint-backed transform journal")
   }
 
   /** Logs isolated rollup and dictionary faults that do not stop the canonical cursor. */
@@ -916,12 +1051,15 @@ class SyncHandler @Inject()(config: Configuration,
       loadsByToken = Map.empty
       dictionaryCache = Map.empty
       cacheOrder = Vector.empty
+      dictionaryCacheBytes = 0L
       dictionaryOverrides = Map.empty
       repairPermits = Map.empty
       repairPermitOrder = Vector.empty
       checkpointInFlight = None
       checkpointRequested = false
       checkpointRequestedForce = false
+      checkpointRetry.foreach(_.cancel())
+      checkpointRetry = None
       journalBase = Some(state)
       journal = Some(TransformJournal(state.cursor))
       committed = Some(dematerialize(state))
@@ -952,12 +1090,15 @@ class SyncHandler @Inject()(config: Configuration,
       loadsByToken = Map.empty
       dictionaryCache = Map.empty
       cacheOrder = Vector.empty
+      dictionaryCacheBytes = 0L
       dictionaryOverrides = Map.empty
       repairPermits = Map.empty
       repairPermitOrder = Vector.empty
       checkpointInFlight = None
       checkpointRequested = false
       checkpointRequestedForce = false
+      checkpointRetry.foreach(_.cancel())
+      checkpointRetry = None
       stateEpoch += 1L
       status = Starting
       publishStatus(status)
@@ -1019,7 +1160,10 @@ class SyncHandler @Inject()(config: Configuration,
   private def offerSnapshot(force: Boolean): Unit = {
     val due = committed.exists(state => force ||
       state.cursor.height % syncConfig.snapshotInterval == 0)
-    if (syncConfig.snapshotsEnabled && due) checkpointInFlight match {
+    if (syncConfig.snapshotsEnabled && due && checkpointRetry.nonEmpty) {
+      checkpointRequested = true
+      checkpointRequestedForce = checkpointRequestedForce || force
+    } else if (syncConfig.snapshotsEnabled && due) checkpointInFlight match {
       case Some(_) =>
         checkpointRequested = true
         checkpointRequestedForce = checkpointRequestedForce || force
@@ -1041,7 +1185,7 @@ class SyncHandler @Inject()(config: Configuration,
               val token = s"$incarnation:checkpoint:$checkpointSequence"
               val cursors = (knownCursors.filter(_.height < boundary.cursor.height) :+ boundary.cursor)
                 .takeRight(syncConfig.cursorWindow + 1)
-              checkpointInFlight = Some(PendingCheckpoint(token, boundary, cutEntries, sources))
+              checkpointInFlight = Some(PendingCheckpoint(token, boundary, cutEntries, sources, force))
               checkpointRequested = false
               checkpointRequestedForce = false
               snapshotActor ! SnapshotCandidate(
@@ -1088,10 +1232,16 @@ class SyncHandler @Inject()(config: Configuration,
     case Some(pending) if pending.token == token && pending.boundary.cursor == cursor =>
       val compacted = for {
         active <- journal.toRight("transform journal disappeared while the checkpoint was saving")
-        _ <- if (pending.cutEntries == 0 && active.baseCursor == cursor ||
-          pending.cutEntries > 0 && active.entries.lift(pending.cutEntries - 1)
-            .exists(_.cursor == cursor)) Right(())
-        else Left("canonical journal no longer contains the saved checkpoint boundary")
+        currentBoundary <-
+          if (pending.cutEntries == 0 && active.baseCursor == cursor)
+            journalBase.map(CommittedSyncMetadata.from)
+              .toRight("checkpoint base disappeared while the checkpoint was saving")
+          else if (pending.cutEntries > 0)
+            active.entries.lift(pending.cutEntries - 1).filter(_.cursor == cursor).map(_.metadata)
+              .toRight("canonical journal no longer contains the saved checkpoint boundary")
+          else Left("canonical journal no longer contains the saved checkpoint boundary")
+        _ <- Either.cond(currentBoundary == pending.boundary, (),
+          "canonical state at the saved checkpoint cursor changed while the checkpoint was saving")
         rollupDictionaries = pending.boundary.rollups.map { case (id, metadata) =>
           val source = pending.sources(DictionaryId.Rollup(id))
           id -> DeferredDictionary(Hex.decode(metadata.dictionaryDigest), source.flags, source.parameters)
@@ -1125,10 +1275,21 @@ class SyncHandler @Inject()(config: Configuration,
       case Some(pending) if pending.token == token =>
         checkpointInFlight = None
         logger.error(s"Failed synchronization checkpoint ${cursor.blockId}@${cursor.height}: $reason. " +
-          "The volatile journal remains intact and restart will use an older retained checkpoint.")
-        if (checkpointRequested) offerSnapshot(force = checkpointRequestedForce)
+          s"The volatile journal remains intact and restart will use an older retained checkpoint. " +
+          s"Retrying after $checkpointRetryDelay.")
+        checkpointRequested = true
+        checkpointRequestedForce = checkpointRequestedForce || pending.forced
+        if (checkpointRetry.isEmpty)
+          checkpointRetry = Some(context.system.scheduler.scheduleOnce(checkpointRetryDelay,
+            self, RetryCheckpoint)(context.dispatcher, self))
       case _ => ()
     }
+
+  /** Test seams; production intentionally keeps these process-wide safety bounds non-configurable. */
+  protected def maxMaterializedDictionaryCacheBytes: Long =
+    SyncHandler.MaxMaterializedDictionaryCacheBytes
+  protected def maxTransformJournalBytes: Long = SyncHandler.MaxTransformJournalBytes
+  protected def checkpointRetryDelay: FiniteDuration = SyncHandler.CheckpointRetryDelay
 
   private def safelyUpdateMempool(update: => Unit): Unit =
     try update
@@ -1188,6 +1349,10 @@ class SyncHandler @Inject()(config: Configuration,
 }
 
 object SyncHandler {
+  private[synchronization] final val MaxMaterializedDictionaryCacheBytes = 300L * 1024L * 1024L
+  private[synchronization] final val MaxTransformJournalBytes = 256L * 1024L * 1024L
+  private[synchronization] final val CheckpointRetryDelay: FiniteDuration = 30.seconds
+
   /** Blocks between "still moving" lines during catch-up, when no block changed protocol state. */
   private final val ProgressInterval = 500
 

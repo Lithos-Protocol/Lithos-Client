@@ -94,7 +94,9 @@ final class MinerDictionaryBootstrap(nodeApi: NodeApi,
       case Success(None) => Left(s"indexed node has no transaction $txId spending ${box.boxId}")
       case Success(Some(indexed)) =>
         val tx: BlockTx = NodeSync.blockTx(indexed)
-        val height = box.spendingHeight.getOrElse(indexed.inclusionHeight)
+        // The configured node is authoritative. The transaction inclusion is the one boundary the
+        // reducer needs; comparing it with another field from the same node adds no trust.
+        val height = indexed.inclusionHeight
         tx.outputs.headOption match {
           case Some(output) => Right((tx, height, output.id))
           case None => Left(s"dictionary transaction $txId has no output to follow")

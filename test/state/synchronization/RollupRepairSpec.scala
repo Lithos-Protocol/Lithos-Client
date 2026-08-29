@@ -34,14 +34,13 @@ class RollupRepairSpec extends AnyFlatSpec with Matchers with OptionValues {
     verify(chain.api, never()).indexedBlocksByHeaderIds(any[Seq[String]])
   }
 
-  it should "reject a transaction endpoint that returns another transaction id" in {
+  it should "use the transaction record returned by the authoritative node without rechecking its id" in {
     val chain = repairChain()
     when(chain.api.indexedTransactionById(chain.firstSpend.id))
       .thenReturn(Success(Some(chain.indexed(chain.firstSpend.id).copy(id = SyncFixtures.id(899001)))))
 
-    val result = failed(chain)
-    result.reason should include("for requested transaction")
-    result.retryable shouldBe true
+    new RollupRepair(chain.api, protocol, maxTransforms = 10)
+      .run(chain.fault, committedHeight = 110) shouldBe a[RollupRepairResult.Rebuilt]
   }
 
   it should "rebuild a chain with exactly maxTransforms links" in {
@@ -61,18 +60,17 @@ class RollupRepairSpec extends AnyFlatSpec with Matchers with OptionValues {
     result.retryable shouldBe false
   }
 
-  it should "reject a box endpoint that returns another box id" in {
+  it should "avoid a redundant box-id comparison against the authoritative node" in {
     val chain = repairChain()
     val box = chain.boxes(chain.genesisOutputId)
     when(chain.api.indexedBoxById(chain.genesisOutputId)).thenReturn(Success(Some(
       box.copy(box = box.box.copy(boxId = SyncFixtures.id(899000))))))
 
-    val result = failed(chain)
-    result.reason should include("for requested rollup box")
-    result.retryable shouldBe true
+    new RollupRepair(chain.api, protocol, maxTransforms = 10)
+      .run(chain.fault, committedHeight = 110) shouldBe a[RollupRepairResult.Rebuilt]
   }
 
-  it should "reject a returned transaction that does not spend the followed box" in {
+  it should "let reducer state transitions reject a link that changes no followed rollup" in {
     val chain = repairChain()
     val indexed = chain.indexed(chain.firstSpend.id)
     when(chain.api.indexedTransactionById(chain.firstSpend.id)).thenReturn(Success(Some(
@@ -80,21 +78,20 @@ class RollupRepairSpec extends AnyFlatSpec with Matchers with OptionValues {
         box = indexed.inputs.head.box.copy(boxId = SyncFixtures.id(899002))))))))
 
     val result = failed(chain)
-    result.reason should include("does not spend followed box")
-    result.retryable shouldBe true
+    result.reason should include("changed no rollup state")
+    result.retryable shouldBe false
   }
 
-  it should "refuse a spent box whose index omits the spending height" in {
+  it should "use transaction inclusion when a spent box omits its redundant spending height" in {
     val chain = repairChain()
     when(chain.api.indexedBoxById(chain.genesisOutputId))
       .thenReturn(Success(Some(chain.boxes(chain.genesisOutputId).copy(spendingHeight = None))))
 
-    val result = failed(chain)
-    result.reason should include("without a spending height")
-    result.retryable shouldBe true
+    new RollupRepair(chain.api, protocol, maxTransforms = 10)
+      .run(chain.fault, committedHeight = 110) shouldBe a[RollupRepairResult.Rebuilt]
   }
 
-  it should "refuse an invalid transaction inclusion height" in {
+  it should "treat transaction inclusion as authoritative without a separate height-validity policy" in {
     val chain = repairChain()
     val indexed = chain.indexed(chain.firstSpend.id)
     when(chain.api.indexedBoxById(chain.genesisOutputId))
@@ -102,30 +99,27 @@ class RollupRepairSpec extends AnyFlatSpec with Matchers with OptionValues {
     when(chain.api.indexedTransactionById(chain.firstSpend.id))
       .thenReturn(Success(Some(indexed.copy(inclusionHeight = -1))))
 
-    val result = failed(chain)
-    result.reason should include("no valid inclusion height")
-    result.retryable shouldBe true
+    new RollupRepair(chain.api, protocol, maxTransforms = 10)
+      .run(chain.fault, committedHeight = 110) shouldBe a[RollupRepairResult.Rebuilt]
   }
 
-  it should "refuse a spend whose authoritative inclusion is inconsistent with the box index" in {
+  it should "not compare transaction inclusion with the same node's box spending height" in {
     val chain = repairChain()
     when(chain.api.indexedBoxById(chain.genesisOutputId))
       .thenReturn(Success(Some(chain.boxes(chain.genesisOutputId).copy(spendingHeight = Some(100)))))
 
-    val result = failed(chain)
-    result.reason should include("reports spending height 100")
-    result.retryable shouldBe true
+    new RollupRepair(chain.api, protocol, maxTransforms = 10)
+      .run(chain.fault, committedHeight = 110) shouldBe a[RollupRepairResult.Rebuilt]
   }
 
-  it should "refuse an indexed transaction that names a noncanonical block" in {
+  it should "use the indexed transaction block without a redundant same-node header lookup" in {
     val chain = repairChain()
     val indexed = chain.indexed(chain.firstSpend.id)
     when(chain.api.indexedTransactionById(chain.firstSpend.id))
       .thenReturn(Success(Some(indexed.copy(blockId = SyncFixtures.id(899003)))))
 
-    val result = failed(chain)
-    result.reason should include("but canonical height")
-    result.retryable shouldBe true
+    new RollupRepair(chain.api, protocol, maxTransforms = 10)
+      .run(chain.fault, committedHeight = 110) shouldBe a[RollupRepairResult.Rebuilt]
   }
 
   it should "reject a linked spend that changes no target rollup state" in {

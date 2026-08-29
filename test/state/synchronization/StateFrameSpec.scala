@@ -3,7 +3,7 @@ package state.synchronization
 import akka.actor.{ActorIdentity, ActorSystem, Identify, Kill, Props}
 import akka.testkit.{TestKit, TestProbe}
 import com.typesafe.config.ConfigFactory
-import org.scalatest.BeforeAndAfterAll
+import org.scalatest.{BeforeAndAfterAll, BeforeAndAfterEach}
 import org.scalatest.flatspec.AnyFlatSpecLike
 import org.scalatest.matchers.should.Matchers
 import play.api.Configuration
@@ -19,7 +19,17 @@ import scala.concurrent.duration._
  * Dictionary bootstrap is disabled so these tests isolate block production.
  */
 class StateFrameSpec extends TestKit(ActorSystem("state-frame"))
-  with AnyFlatSpecLike with Matchers with BeforeAndAfterAll {
+  with AnyFlatSpecLike with Matchers with BeforeAndAfterAll with BeforeAndAfterEach {
+
+  override def beforeEach(): Unit = {
+    super.beforeEach()
+    utils.Globals.setSyncView(state.messages.SyncView.initial)
+  }
+
+  override def afterEach(): Unit = {
+    utils.Globals.setSyncView(state.messages.SyncView.initial)
+    super.afterEach()
+  }
 
   override def afterAll(): Unit = TestKit.shutdownActorSystem(system)
 

@@ -10,6 +10,9 @@ import storage._
 import support.{ReducerFixtures, SyncFixtures}
 
 import java.nio.file.Path
+import java.util.concurrent.{CountDownLatch, TimeUnit}
+import scala.concurrent.duration._
+import scala.concurrent.{Await, ExecutionContext, Future, Promise}
 
 /** Proves generation metadata and every referenced dictionary header use one database view. */
 class SnapshotReadConsistencySpec extends AnyFlatSpec with Matchers {
@@ -18,20 +21,31 @@ class SnapshotReadConsistencySpec extends AnyFlatSpec with Matchers {
   private val MaxEntry = 64 * 1024 * 1024
 
   "LevelDbStateSnapshotStore" should "finish an old generation while concurrent saves prune it" in {
+    implicit val executionContext: ExecutionContext = ExecutionContext.global
     val keyValues = new InterleavingStore
     val snapshots = new LevelDbStateSnapshotStore(keyValues, retention = 2, identity)
     val first = persisted(100)
     save(snapshots, first) shouldEqual Right(())
     val firstKey = snapshots.generationKeys().toOption.get.head
+    val savesStarted = new CountDownLatch(1)
+    val savesFinished = Promise[Either[SnapshotError, Unit]]()
 
-    // The callback runs after metadata was obtained from the read view and before its headers are read.
-    // Two later saves prune the first generation from the live database.
+    // The callback runs after metadata was obtained from the read view and before its headers are
+    // read. Start the saves on another thread: they wait for this load's read lock instead of trying
+    // to upgrade that lock re-entrantly on the callback thread, which ReentrantReadWriteLock forbids.
     keyValues.afterNextMetaRead {
-      save(snapshots, persisted(101)) shouldEqual Right(())
-      save(snapshots, persisted(102)) shouldEqual Right(())
+      savesFinished.completeWith(Future {
+        savesStarted.countDown()
+        for {
+          _ <- save(snapshots, persisted(101))
+          _ <- save(snapshots, persisted(102))
+        } yield ()
+      })
+      savesStarted.await(5, TimeUnit.SECONDS) shouldBe true
     }
 
     val loaded = snapshots.load(firstKey).toOption.get
+    Await.result(savesFinished.future, 10.seconds) shouldEqual Right(())
 
     loaded.state.cursor shouldEqual first.state.cursor
     loaded.state.rollups.keySet shouldEqual first.state.rollups.keySet
@@ -67,8 +81,8 @@ class SnapshotReadConsistencySpec extends AnyFlatSpec with Matchers {
   }
 
   /**
-   * Its read view is immutable, while the hook mutates the live delegate exactly between metadata and
-   * header reads. An implementation that falls back to KeyValueStore.get observes the prune and fails.
+   * Its read view is immutable. The hook starts live writes exactly between metadata and header reads;
+   * the snapshot-store read lock lets the load finish before those writes can prune its generation.
    */
   private final class InterleavingStore extends KeyValueStore {
     private val delegate = new InMemoryKeyValueStore

@@ -9,8 +9,8 @@ import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 import state.messages.SyncMessages.SyncCursor
 import state.synchronization.{CommittedSyncMetadata, CommittedSyncState, DictionaryId, QuarantineFault}
-import storage.LevelDbKeyValueStore
-import storage.InMemoryKeyValueStore
+import storage.{InMemoryKeyValueStore, KeyValueMutation, KeyValueReadView, KeyValueStore,
+  LevelDbKeyValueStore, StorageBackend, StoreError, WriteDurability}
 import support.SyncFixtures
 import sigma.AvlTree
 import sigma.data.AvlTreeFlags
@@ -18,7 +18,11 @@ import work.lithos.plasma.PlasmaParameters
 import work.lithos.plasma.collections.Manifest
 
 import java.nio.file.{Files, Path}
+import java.io.IOException
+import java.util.concurrent.{CountDownLatch, TimeUnit}
 import scala.collection.JavaConverters._
+import scala.concurrent.duration._
+import scala.concurrent.{Await, ExecutionContext, Future}
 
 class StateSnapshotStoreSpec extends AnyFlatSpec with Matchers with BeforeAndAfterEach {
   private var directories = Vector.empty[Path]
@@ -247,6 +251,43 @@ class StateSnapshotStoreSpec extends AnyFlatSpec with Matchers with BeforeAndAft
     snapshots.close() shouldEqual Right(())
   }
 
+  it should "report success after the checkpoint commits even when post-commit cleanup fails" in {
+    val underlying = new InMemoryKeyValueStore
+    val keyValueStore = new CleanupFailingStore(underlying)
+    val snapshots = new LevelDbStateSnapshotStore(keyValueStore, retention = 2, identity)
+    val persisted = populatedSnapshot(100, 8L)
+
+    snapshots.save(plan(persisted), MaxEntry) shouldEqual Right(())
+    keyValueStore.cleanupFailures shouldEqual 1
+    val restored = snapshots.load(snapshots.generationKeys().toOption.get.head).toOption.get
+    restored.state.cursor shouldEqual persisted.state.cursor
+    snapshots.close() shouldEqual Right(())
+  }
+
+  it should "exclude checkpoint cleanup while a dictionary reconstruction is reading its blob" in {
+    implicit val executionContext: ExecutionContext = ExecutionContext.global
+    val underlying = new InMemoryKeyValueStore
+    val keyValueStore = new BlockingReadStore(underlying)
+    val snapshots = new LevelDbStateSnapshotStore(keyValueStore, retention = 2, identity)
+    val first = largeDictionarySnapshot(100)
+    snapshots.save(plan(first), MaxEntry) shouldEqual Right(())
+    val digest = first.state.minerTree.metadata.dictionaryDigest
+
+    keyValueStore.blockSubtreeReads = true
+    val loading = Future(snapshots.loadDictionary(digest))
+    keyValueStore.readEntered.await(5, TimeUnit.SECONDS) shouldBe true
+
+    keyValueStore.watchWrites = true
+    val saving = Future(snapshots.save(plan(largeDictionarySnapshot(101)), MaxEntry))
+    keyValueStore.writeEntered.await(250, TimeUnit.MILLISECONDS) shouldBe false
+
+    keyValueStore.releaseRead.countDown()
+    Await.result(loading, 10.seconds).isRight shouldBe true
+    Await.result(saving, 10.seconds) shouldEqual Right(())
+    keyValueStore.writeEntered.getCount shouldEqual 0L
+    snapshots.close() shouldEqual Right(())
+  }
+
   private def store(retention: Int): (LevelDbKeyValueStore, LevelDbStateSnapshotStore) = {
     val directory = Files.createTempDirectory("lithos-sync-snapshot-")
     directories :+= directory
@@ -322,6 +363,7 @@ class StateSnapshotStoreSpec extends AnyFlatSpec with Matchers with BeforeAndAft
     override val flags: AvlTreeFlags = AvlTreeFlags.AllOperationsAllowed
     override val parameters: PlasmaParameters = PlasmaParameters.default
     override val materialized: Boolean = true
+    override val estimatedHeapBytes: Long = 4096L + subtrees.toLong * 512L
     override def ergoValue: ErgoValue[AvlTree] = unsupported()
     override def copy(): AuthenticatedDictionary = unsupported()
     override def foreachKey(visit: Array[Byte] => Unit): Unit = unsupported()
@@ -332,5 +374,68 @@ class StateSnapshotStoreSpec extends AnyFlatSpec with Matchers with BeforeAndAft
       DictionaryManifestHeader(flags, parameters, digest, bytes("manifest"), subtrees)
     }
     private def unsupported[A](): A = throw new UnsupportedOperationException("not needed by this test")
+  }
+
+  private class DelegatingStore(underlying: KeyValueStore) extends KeyValueStore {
+    override def path: Path = underlying.path
+    override def backend: StorageBackend = underlying.backend
+    override def get(key: Array[Byte]): Either[StoreError, Option[Array[Byte]]] = underlying.get(key)
+    override def scanPrefix(prefix: Array[Byte]): Either[StoreError, Vector[(Array[Byte], Array[Byte])]] =
+      underlying.scanPrefix(prefix)
+    override def scanKeys(prefix: Array[Byte]): Either[StoreError, Vector[Array[Byte]]] =
+      underlying.scanKeys(prefix)
+    override def write(mutations: Seq[KeyValueMutation], durability: WriteDurability):
+      Either[StoreError, Unit] = underlying.write(mutations, durability)
+    override def readSnapshot[A](f: KeyValueReadView => Either[StoreError, A]): Either[StoreError, A] =
+      underlying.readSnapshot(f)
+    override def close(): Either[StoreError, Unit] = underlying.close()
+  }
+
+  private final class CleanupFailingStore(underlying: KeyValueStore)
+    extends DelegatingStore(underlying) {
+    private var pointerCommitted = false
+    private var failures = 0
+    def cleanupFailures: Int = synchronized(failures)
+
+    override def write(mutations: Seq[KeyValueMutation], durability: WriteDurability):
+      Either[StoreError, Unit] = {
+      val result = super.write(mutations, durability)
+      if (result.isRight && mutations.exists {
+        case KeyValueMutation.Put(key, _) => text(key) == "sync/snapshot/current"
+        case _ => false
+      }) synchronized(pointerCommitted = true)
+      result
+    }
+
+    override def scanKeys(prefix: Array[Byte]): Either[StoreError, Vector[Array[Byte]]] = synchronized {
+      if (pointerCommitted && failures == 0 && text(prefix) == "sync/snapshot/gen/") {
+        failures += 1
+        Left(StoreError.ReadFailed(path, "injected post-commit prune", new IOException("cleanup failed")))
+      } else super.scanKeys(prefix)
+    }
+  }
+
+  private final class BlockingReadStore(underlying: KeyValueStore)
+    extends DelegatingStore(underlying) {
+    val readEntered = new CountDownLatch(1)
+    val releaseRead = new CountDownLatch(1)
+    val writeEntered = new CountDownLatch(1)
+    @volatile var blockSubtreeReads = false
+    @volatile var watchWrites = false
+
+    override def get(key: Array[Byte]): Either[StoreError, Option[Array[Byte]]] = {
+      if (blockSubtreeReads && text(key).contains("/s/")) {
+        blockSubtreeReads = false
+        readEntered.countDown()
+        releaseRead.await(10, TimeUnit.SECONDS)
+      }
+      super.get(key)
+    }
+
+    override def write(mutations: Seq[KeyValueMutation], durability: WriteDurability):
+      Either[StoreError, Unit] = {
+      if (watchWrites) writeEntered.countDown()
+      super.write(mutations, durability)
+    }
   }
 }

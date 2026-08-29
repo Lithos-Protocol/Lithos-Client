@@ -167,17 +167,16 @@ class StateFrame @Inject()(config: Configuration,
 
     case StartSynchronization if !active =>
       active = true
-      inFlight = true
-      establishSeed()
-        .map(state => StartupState(incarnation, Success(state)))
-        .recover { case ex => StartupState(incarnation, Failure(ex)) }
-        .pipeTo(self)
+      beginSeed()
 
     case StartSynchronization => self ! Tick
     case CheckBlock => self ! Tick
     case Tick =>
       if (active && !repairing) beginRepairs()
-      if (active && !inFlight) beginPoll()
+      if (active && !inFlight) {
+        if (cursor.isDefined) beginPoll()
+        else beginSeed()
+      }
 
     case StartupState(_, Success(saved)) =>
       saved.foreach { state =>
@@ -245,10 +244,7 @@ class StateFrame @Inject()(config: Configuration,
       cursor = None
       nextHeight = firstHeight
       logger.error("Synchronization holds no committed state; re-establishing it before continuing")
-      establishSeed()
-        .map(state => StartupState(incarnation, Success(state)))
-        .recover { case ex => StartupState(incarnation, Failure(ex)) }
-        .pipeTo(self)
+      beginSeed()
 
     // Discard later blocks and derive the next batch from committed state.
     case CommitFinished(_, block, _, Success(rejected: BlockRejected)) =>
@@ -585,6 +581,14 @@ class StateFrame @Inject()(config: Configuration,
         case None => seedFromMinerDictionary()
       }
     }
+
+  private def beginSeed(): Unit = {
+    inFlight = true
+    establishSeed()
+      .map(state => StartupState(incarnation, Success(state)))
+      .recover { case ex => StartupState(incarnation, Failure(ex)) }
+      .pipeTo(self)
+  }
 
   /**
    * The newest canonical snapshot, or `None` when none is. Used alone by reorg recovery, where `None`

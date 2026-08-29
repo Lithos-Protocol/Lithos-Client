@@ -77,13 +77,37 @@ class StateFrameRestartSpec extends TestKit(ActorSystem("state-frame-restart"))
     frame ! akka.actor.PoisonPill
   }
 
-  private def producer(sync: TestProbe, snapshots: TestProbe, tip: Int): akka.actor.ActorRef = {
+  it should "retry startup seeding after a transient failure" in {
+    val sync = TestProbe()
+    val snapshots = TestProbe()
+    val frame = producer(sync, snapshots, tip = startHeight + 3, pollInterval = 100.millis)
+
+    frame ! StartSynchronization
+    ChainFixtures.unseeded(sync)
+    snapshots.expectMsg(RestoreLatest)
+    snapshots.reply("temporary snapshot failure")
+    sync.expectMsgType[MarkStale].reason should include("Could not read startup sync state")
+
+    sync.expectMsg(GetCommittedState)
+    val held = ReducerFixtures.emptyState(height = startHeight,
+      blockId = ChainFixtures.headerId(startHeight))
+    sync.reply(CommittedState(held))
+    sync.expectMsgType[BeginCatchUp]
+    sync.expectMsgType[ApplyBlock].blockInfo.height shouldEqual startHeight + 1
+    frame ! akka.actor.PoisonPill
+  }
+
+  private def producer(sync: TestProbe,
+                       snapshots: TestProbe,
+                       tip: Int,
+                       pollInterval: FiniteDuration = 5.seconds): akka.actor.ActorRef = {
     val (nodeContext, _, wallet) = FakeNodeContext(ChainFixtures.nodeAt(tip), numAddresses = 1)
     val protocol = ReducerFixtures.protocol(rollupStartHeight = startHeight)
       .copy(localMinerHash = wallet.contract.hashedPropBytes)
     val config = Configuration(ConfigFactory.parseString(
       s"""sync.startHeight = $startHeight
          |sync.catchUpBatchBlocks = 4
+         |sync.pollInterval = ${pollInterval.toMillis}ms
          |sync.minerDictionary.bootstrap = false
          |""".stripMargin))
     system.actorOf(Props(new StateFrame(config, nodeContext, protocol, sync.ref, snapshots.ref)))

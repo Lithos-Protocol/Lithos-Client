@@ -24,6 +24,13 @@ trait AuthenticatedDictionaryView {
   /** False for a digest-only reference that must be loaded before dictionary operations. */
   def materialized: Boolean
 
+  /**
+   * Conservative retained-heap weight used by synchronization cache admission. This is deliberately
+   * larger than serialized prover bytes and is carried through copies and mutations, so measuring a
+   * hot dictionary never requires serializing its complete AVL tree.
+   */
+  def estimatedHeapBytes: Long
+
   def copy(): AuthenticatedDictionary
 
   /**
@@ -67,6 +74,7 @@ final class DeferredDictionary private (private val ownedDigest: Array[Byte],
 
   override def digest: Array[Byte] = ownedDigest.clone()
   override val materialized: Boolean = false
+  override val estimatedHeapBytes: Long = 0L
 
   override def ergoValue: ErgoValue[AvlTree] = unavailable()
   override def copy(): AuthenticatedDictionary = unavailable()
@@ -104,7 +112,8 @@ object AuthenticatedDictionaryView {
     PlasmaDictionary.wrap(map)
 }
 
-final class PlasmaDictionary private (private val map: PlasmaMap[Array[Byte], Array[Byte]])
+final class PlasmaDictionary private (private val map: PlasmaMap[Array[Byte], Array[Byte]],
+                                      private var retainedHeapEstimate: Long)
   extends AuthenticatedDictionary {
 
   override def digest: Array[Byte] = map.digest.clone()
@@ -112,23 +121,35 @@ final class PlasmaDictionary private (private val map: PlasmaMap[Array[Byte], Ar
   override def flags: AvlTreeFlags = map.flags
   override def parameters: PlasmaParameters = map.params
   override val materialized: Boolean = true
+  override def estimatedHeapBytes: Long = retainedHeapEstimate
 
-  override def insert(entries: (Array[Byte], Array[Byte])*): ProvenResult[Array[Byte]] =
-    map.insert(entries: _*)
+  override def insert(entries: (Array[Byte], Array[Byte])*): ProvenResult[Array[Byte]] = {
+    val result = map.insert(entries: _*)
+    account(entries)
+    result
+  }
 
-  override def update(entries: (Array[Byte], Array[Byte])*): ProvenResult[Array[Byte]] =
-    map.update(entries: _*)
+  override def update(entries: (Array[Byte], Array[Byte])*): ProvenResult[Array[Byte]] = {
+    val result = map.update(entries: _*)
+    // Keep replacements conservative without looking up and retaining the previous values.
+    account(entries)
+    result
+  }
 
   override def delete(keys: Array[Byte]*): ProvenResult[Array[Byte]] = map.delete(keys: _*)
 
   override def lookUp(keys: Array[Byte]*): ProvenResult[Array[Byte]] = map.lookUp(keys: _*)
 
-  override def insertOrUpdate(entries: (Array[Byte], Array[Byte])*): ProvenResult[Array[Byte]] =
-    map.insertOrUpdate(entries: _*)
+  override def insertOrUpdate(entries: (Array[Byte], Array[Byte])*): ProvenResult[Array[Byte]] = {
+    val result = map.insertOrUpdate(entries: _*)
+    account(entries)
+    result
+  }
 
   override def generateProof(): Array[Byte] = map.prover.generateProof()
 
-  override def copy(): AuthenticatedDictionary = new PlasmaDictionary(map.copy())
+  override def copy(): AuthenticatedDictionary =
+    new PlasmaDictionary(map.copy(), retainedHeapEstimate)
 
   override def foreachKey(visit: Array[Byte] => Unit): Unit = {
     implicit val hash: Blake2b256.type = Blake2b256
@@ -169,15 +190,23 @@ final class PlasmaDictionary private (private val map: PlasmaMap[Array[Byte], Ar
     DictionaryManifestHeader(map.flags, map.params, map.digest.clone(),
       serializer.manifestToBytes(sliced._1), sliced._2.size)
   }
+
+  private def account(entries: Seq[(Array[Byte], Array[Byte])]): Unit = {
+    val growth = entries.foldLeft(0L) { case (total, (key, value)) =>
+      PlasmaDictionary.saturatingAdd(total,
+        PlasmaDictionary.mutationWeight(key.length.toLong + value.length.toLong))
+    }
+    retainedHeapEstimate = PlasmaDictionary.saturatingAdd(retainedHeapEstimate, growth)
+  }
 }
 
 object PlasmaDictionary {
   private[states] def wrap(map: PlasmaMap[Array[Byte], Array[Byte]]): PlasmaDictionary =
-    new PlasmaDictionary(map)
+    new PlasmaDictionary(map, manifestWeight(map.getManifest()))
 
   def empty(flags: AvlTreeFlags = AvlTreeFlags.AllOperationsAllowed,
             parameters: PlasmaParameters = PlasmaParameters.default): PlasmaDictionary =
-    new PlasmaDictionary(PlasmaMap[Array[Byte], Array[Byte]](flags, parameters))
+    new PlasmaDictionary(PlasmaMap[Array[Byte], Array[Byte]](flags, parameters), EmptyWeight)
 
   def fromManifest(flags: AvlTreeFlags,
                    parameters: PlasmaParameters,
@@ -190,9 +219,32 @@ object PlasmaDictionary {
       loaded.prover.generateProof()
       if (!java.util.Arrays.equals(loaded.digest, manifest.digest))
         Left(new IllegalArgumentException("Loaded dictionary digest does not match its manifest"))
-      else Right(new PlasmaDictionary(loaded))
+      else Right(new PlasmaDictionary(loaded, manifestWeight(manifest)))
     } catch {
       case t: Throwable => Left(t)
     }
+
+  private val EmptyWeight = 4096L
+  private val EntryOverhead = 256L
+  private val SerializedToHeapMultiplier = 4L
+
+  private[states] def mutationWeight(bytes: Long): Long =
+    saturatingAdd(EntryOverhead, saturatingMultiply(bytes, SerializedToHeapMultiplier))
+
+  private[states] def manifestWeight(manifest: Manifest): Long = {
+    val serialized = manifest.subTrees.foldLeft(
+      saturatingAdd(manifest.digest.length.toLong, manifest.bytes.length.toLong)) {
+      case (total, subtree) => saturatingAdd(total, subtree.length.toLong)
+    }
+    math.max(EmptyWeight, saturatingMultiply(serialized, SerializedToHeapMultiplier))
+  }
+
+  private[states] def saturatingAdd(left: Long, right: Long): Long =
+    if (left >= Long.MaxValue - right) Long.MaxValue else left + right
+
+  private def saturatingMultiply(value: Long, multiplier: Long): Long =
+    if (value == 0L || multiplier == 0L) 0L
+    else if (value > Long.MaxValue / multiplier) Long.MaxValue
+    else value * multiplier
 
 }

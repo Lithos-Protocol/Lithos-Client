@@ -3,6 +3,9 @@ package state.synchronization
 import akka.actor.{ActorSystem, Props}
 import akka.testkit.{TestKit, TestProbe}
 import com.typesafe.config.ConfigFactory
+import lfsm.{CollateralParams, LFSMHelpers}
+import lfsm.states.PlasmaDictionary
+import org.ergoplatform.appkit.Parameters
 import org.scalatest.BeforeAndAfterAll
 import org.scalatest.flatspec.AnyFlatSpecLike
 import org.scalatest.matchers.should.Matchers
@@ -105,6 +108,27 @@ class SyncHandlerCommitSpec extends TestKit(ActorSystem("sync-handler-commit"))
     val retained = requester.expectMsgType[RetainedCursors].cursors
     retained.map(_.blockId) shouldEqual Seq(SyncFixtures.id(99), first.id, replacement.id)
     retained.map(_.blockId) should not contain orphan.id
+  }
+
+  it should "pin a 300 MiB cache and separate 256 MiB volatile-journal budget" in {
+    SyncHandler.MaxMaterializedDictionaryCacheBytes shouldEqual 300L * 1024L * 1024L
+    SyncHandler.MaxTransformJournalBytes shouldEqual 256L * 1024L * 1024L
+  }
+
+  it should "put the cheapest max-size NISP cache-saturation path above one block reward" in {
+    val maxContractNispBytes = LFSMHelpers.NISP_MAX - 1
+    val dictionary = PlasmaDictionary.empty()
+    val emptyWeight = dictionary.estimatedHeapBytes
+    val key = Array.fill[Byte](dictionary.parameters.keySize)(1)
+
+    dictionary.insert(key -> Array.fill[Byte](maxContractNispBytes)(2))
+    val maxNispEntryWeight = dictionary.estimatedHeapBytes - emptyWeight
+    val firstEntryOverBudget =
+      ((SyncHandler.MaxMaterializedDictionaryCacheBytes - emptyWeight) / maxNispEntryWeight) + 1L
+
+    maxNispEntryWeight shouldEqual 104380L
+    firstEntryOverBudget shouldEqual 3014L
+    firstEntryOverBudget * Parameters.MinFee should be > CollateralParams.BLOCK_REWARD
   }
 
   it should "restore the exact rollup origin map on rollback" in {
@@ -220,6 +244,34 @@ class SyncHandlerCommitSpec extends TestKit(ActorSystem("sync-handler-commit"))
     requester.expectMsgType[CommittedState].state.cursor.blockId shouldEqual first.id
   }
 
+  it should "force checkpoint compaction before a block can cross the volatile journal bound" in {
+    val base = ReducerFixtures.emptyState(height = 99, blockId = SyncFixtures.id(99), version = 0L)
+    val first = BlockInfo(SyncFixtures.id(100), 100, Seq.empty, SyncFixtures.id(99))
+    val firstState = BlockReducer.applyBlock(base, first, ReducerFixtures.protocol(100))
+      .toOption.get.state
+    val oneEntry = TransformJournal(base.cursor).append(TransformJournalEntry(firstState.cursor,
+      CommittedSyncMetadata.from(firstState), Vector.empty)).accountedBytes
+    val (handler, snapshots, _) = newHandler(maxJournalBytes = oneEntry)
+    val requester = TestProbe()
+    seed(handler, requester)
+
+    requester.send(handler, ApplyBlock(first))
+    requester.expectMsgType[BlockCommitted]
+    val second = BlockInfo(SyncFixtures.id(101), 101, Seq.empty, first.id)
+    requester.send(handler, ApplyBlock(second))
+    requester.expectMsgType[BlockRejected].reason should include("journal would retain")
+    val compaction = snapshots.expectMsgType[SnapshotCandidate]
+    compaction.cursor shouldEqual SyncCursor(100, first.id, first.parentId)
+
+    requester.send(handler, GetCommittedState)
+    requester.expectMsgType[CommittedState].state.cursor.height shouldEqual 100
+
+    snapshots.send(handler, state.persistence.StateSnapshotActor.SnapshotSaved(
+      compaction.cursor, compaction.checkpointToken))
+    requester.send(handler, ApplyBlock(second))
+    requester.expectMsgType[BlockCommitted].cursor.height shouldEqual 101
+  }
+
   private def firstState(requester: TestProbe, handler: akka.actor.ActorRef): CommittedSyncState = {
     requester.send(handler, GetCommittedState)
     requester.expectMsgType[CommittedState].state
@@ -250,7 +302,7 @@ class SyncHandlerCommitSpec extends TestKit(ActorSystem("sync-handler-commit"))
     requester.expectMsgType[BlockCommitted]
   }
 
-  private def newHandler() = {
+  private def newHandler(maxJournalBytes: Long = SyncHandler.MaxTransformJournalBytes) = {
     val snapshots = TestProbe()
     val (nodeContext, _, wallet) = FakeNodeContext(numAddresses = 1)
     val protocol = ReducerFixtures.protocol(rollupStartHeight = 100)
@@ -259,7 +311,9 @@ class SyncHandlerCommitSpec extends TestKit(ActorSystem("sync-handler-commit"))
       """sync.startHeight = 100
         |sync.snapshots.intervalBlocks = 720
         |""".stripMargin))
-    val handler = system.actorOf(Props(new SyncHandler(config, protocol, snapshots.ref)))
+    val handler = system.actorOf(Props(new SyncHandler(config, protocol, snapshots.ref) {
+      override protected def maxTransformJournalBytes: Long = maxJournalBytes
+    }))
     (handler, snapshots, protocol)
   }
 }

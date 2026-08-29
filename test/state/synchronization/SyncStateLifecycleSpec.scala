@@ -167,6 +167,29 @@ class SyncStateLifecycleSpec extends TestKit(ActorSystem("sync-state-lifecycle")
     requester.expectMsgType[RollbackCompleted].cursor shouldEqual cursors.head
   }
 
+  it should "retry a failed checkpoint with backoff instead of hot-looping persistence" in {
+    val (handler, snapshots) = newHandler(snapshotsEnabled = true, snapshotInterval = 3,
+      retryDelay = 200.millis)
+    val requester = TestProbe()
+    val seeded = ReducerFixtures.emptyState().copy(
+      cursor = SyncCursor(startHeight - 1, SyncFixtures.id(startHeight - 1),
+        SyncFixtures.id(startHeight - 2)))
+    requester.send(handler, RestoreCommittedState(seeded, Vector(seeded.cursor)))
+    requester.expectMsgType[BlockCommitted]
+
+    (startHeight to startHeight + 2).foreach { height =>
+      requester.send(handler, ApplyBlock(state.messages.BlockInfo(SyncFixtures.id(height), height,
+        Seq.empty, SyncFixtures.id(height - 1))))
+      requester.expectMsgType[BlockCommitted]
+    }
+    val first = snapshots.expectMsgType[SnapshotCandidate]
+    snapshots.send(handler, SnapshotSaveFailed(first.cursor, first.checkpointToken, "disk full"))
+    snapshots.expectNoMessage(100.millis)
+    val retry = snapshots.expectMsgType[SnapshotCandidate](2.seconds)
+    retry.cursor shouldEqual first.cursor
+    retry.checkpointToken should not equal first.checkpointToken
+  }
+
   it should "refuse to compact a lagging acknowledgement from a replaced same-height branch" in {
     val (handler, snapshots) = newHandler(snapshotsEnabled = true, snapshotInterval = 3)
     val requester = TestProbe()
@@ -306,17 +329,19 @@ class SyncStateLifecycleSpec extends TestKit(ActorSystem("sync-state-lifecycle")
 
   private def newHandler(cursorWindow: Int = 720,
                          snapshotsEnabled: Boolean = false,
-                         snapshotInterval: Int = 720) = {
+                         snapshotInterval: Int = 720,
+                         retryDelay: FiniteDuration = SyncHandler.CheckpointRetryDelay) = {
     val snapshots = TestProbe()
     val handler = system.actorOf(handlerProps(snapshots.ref, cursorWindow, snapshotsEnabled,
-      snapshotInterval))
+      snapshotInterval, retryDelay))
     (handler, snapshots)
   }
 
   private def handlerProps(snapshotActor: akka.actor.ActorRef,
                            cursorWindow: Int = 720,
                            snapshotsEnabled: Boolean = false,
-                           snapshotInterval: Int = 720): Props = {
+                           snapshotInterval: Int = 720,
+                           retryDelay: FiniteDuration = SyncHandler.CheckpointRetryDelay): Props = {
     val (_, _, wallet) = FakeNodeContext(numAddresses = 1)
     val protocol = ReducerFixtures.protocol(rollupStartHeight = startHeight)
       .copy(localMinerHash = wallet.contract.hashedPropBytes)
@@ -326,6 +351,8 @@ class SyncStateLifecycleSpec extends TestKit(ActorSystem("sync-state-lifecycle")
          |sync.snapshots.enabled = $snapshotsEnabled
           |sync.snapshots.intervalBlocks = $snapshotInterval
          |""".stripMargin))
-    Props(new SyncHandler(config, protocol, snapshotActor))
+    Props(new SyncHandler(config, protocol, snapshotActor) {
+      override protected def checkpointRetryDelay: FiniteDuration = retryDelay
+    })
   }
 }

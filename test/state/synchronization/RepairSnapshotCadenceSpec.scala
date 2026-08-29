@@ -3,13 +3,16 @@ package state.synchronization
 import akka.actor.{ActorSystem, Props}
 import akka.testkit.{TestKit, TestProbe}
 import com.typesafe.config.ConfigFactory
+import lfsm.states.PlasmaDictionary
+import org.bouncycastle.util.encoders.Hex
 import org.scalatest.BeforeAndAfterAll
 import org.scalatest.flatspec.AnyFlatSpecLike
 import org.scalatest.matchers.should.Matchers
 import play.api.Configuration
 import state.messages.BlockInfo
 import state.messages.SyncMessages._
-import state.persistence.StateSnapshotActor.SnapshotCandidate
+import state.persistence.StateSnapshotActor.{SnapshotCandidate, SnapshotSaved}
+import state.persistence.SnapshotDictionaryBase
 import support.{FakeNodeContext, ReducerFixtures, SyncFixtures}
 
 import scala.concurrent.duration._
@@ -66,6 +69,37 @@ class RepairSnapshotCadenceSpec extends TestKit(ActorSystem("repair-snapshot-cad
         snapshots.expectMsgType[SnapshotCandidate].cursor shouldEqual seeded.cursor
         system.stop(handler)
       }
+  }
+
+  it should "replace a pending checkpoint when repair changes state at the same cursor" in {
+    val (handler, snapshots) = newHandler()
+    val requester = TestProbe()
+    val seeded = quarantinedSeed()
+    restore(requester, handler, seeded)
+
+    requester.send(handler, MarkReady)
+    requester.expectMsgType[Ready]
+    val stale = snapshots.expectMsgType[SnapshotCandidate]
+
+    val (key, value) = SyncFixtures.plasmaEntries(1, 16).head
+    val dictionary = PlasmaDictionary.empty()
+    dictionary.insert(key -> value)
+    val rebuilt = SyncFixtures.emptyRollup(rollupId, SyncFixtures.id(780011), 90)
+      .copy(dictionary = dictionary, numMiners = 1)
+    requester.send(handler, RepairRollup(rollupId, seeded.cursor,
+      RollupRepairResult.Rebuilt(rebuilt), permit(requester, handler)))
+    requester.expectMsgType[BlockCommitted]
+
+    snapshots.send(handler, SnapshotSaved(stale.cursor, stale.checkpointToken))
+    val replacement = snapshots.expectMsgType[SnapshotCandidate]
+    replacement.cursor shouldEqual seeded.cursor
+    replacement.snapshot.metadata.quarantined shouldBe empty
+    replacement.snapshot.metadata.rollups.keySet shouldEqual Set(rollupId)
+    replacement.snapshot.dictionaries(DictionaryId.Rollup(rollupId)).base match {
+      case SnapshotDictionaryBase.Materialized(saved) =>
+        Hex.toHexString(saved.digest) shouldEqual Hex.toHexString(dictionary.digest)
+      case other => fail(s"repaired dictionary was not retained for the replacement checkpoint: $other")
+    }
   }
 
   "Block maintenance" should "not force a snapshot for a deterministic terminal deadline" in {

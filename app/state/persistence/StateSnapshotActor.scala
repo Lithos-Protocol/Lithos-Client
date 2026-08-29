@@ -1,6 +1,6 @@
 package state.persistence
 
-import akka.actor.{Actor, ActorRef}
+import akka.actor.{Actor, ActorRef, Cancellable}
 import akka.pattern.pipe
 import configs.{Contexts, NodeContext, SyncConfig}
 import lfsm.states.{AuthenticatedDictionaryView, PlasmaDictionary}
@@ -13,10 +13,16 @@ import storage.KeyValueStore
 
 import javax.inject.Inject
 import java.util.UUID
+import java.util.concurrent.TimeoutException
+import scala.collection.immutable.Queue
 import scala.concurrent.{ExecutionContext, Future}
+import scala.concurrent.duration._
 import scala.util.{Failure, Success, Try}
 
 object StateSnapshotActor {
+  private[persistence] final val MaxConcurrentMaterializations = 2
+  private[persistence] final val OperationTimeout: FiniteDuration = 5.minutes
+
   case object RestoreLatest
   final case class SnapshotLoaded(snapshot: Option[PersistedSyncState], warning: Option[String] = None)
   /** An immutable checkpoint boundary. Serialization runs on the persistence dispatcher. */
@@ -49,6 +55,7 @@ object StateSnapshotActor {
                                                   requestToken: String,
                                                   result: Either[SnapshotError, AuthenticatedDictionaryView])
     extends ActorCompletion
+  private final case class WorkExpired(incarnation: String, kind: String, token: String)
 }
 
 /** Persists snapshots off the actor mailbox and coalesces queued writes. */
@@ -73,16 +80,47 @@ class StateSnapshotActor @Inject()(config: Configuration,
     else None
 
   private var writing = false
+  private var activeSave = Option.empty[(SnapshotCandidate, ActorRef)]
+  private var activeSaveDeadline = Option.empty[Cancellable]
   private var pending = Option.empty[(SnapshotCandidate, ActorRef)]
+  private final case class LoadWork(source: SnapshotDictionarySource,
+                                    requestToken: String,
+                                    requester: ActorRef,
+                                    deadline: Cancellable)
+  private var activeLoads = Map.empty[String, LoadWork]
+  private var queuedLoads = Queue.empty[LoadWork]
 
-  override def postStop(): Unit = snapshotStore.foreach { store =>
-    store.close().left.foreach(error => logger.error(error.message))
+  override def preRestart(reason: Throwable, message: Option[Any]): Unit = {
+    abortOwnedWork(s"Snapshot actor restarted: ${detail(reason)}")
+    super.preRestart(reason, message)
+  }
+
+  override def postStop(): Unit = {
+    abortOwnedWork("Snapshot actor stopped before the operation completed")
+    snapshotStore.foreach { store =>
+      store.close().left.foreach(error => logger.error(error.message))
+    }
   }
 
   override def receive: Receive = {
     // A persistence Future can finish after Akka has replaced this actor instance. Its completion no
     // longer owns the replacement's writer/materializer state and must be ignored.
     case completion: ActorCompletion if completion.incarnation != incarnation => ()
+    case WorkExpired(other, _, _) if other != incarnation => ()
+
+    case WorkExpired(_, kind, token) if kind == "save" &&
+      activeSave.exists(_._1.checkpointToken == token) =>
+      val reason = s"Synchronization checkpoint $token exceeded $operationTimeout"
+      abortOwnedWork(reason)
+      throw new TimeoutException(reason)
+
+    case WorkExpired(_, kind, token) if kind == "dictionary" &&
+      (activeLoads.contains(token) || queuedLoads.exists(_.requestToken == token)) =>
+      val reason = s"Dictionary materialization $token exceeded $operationTimeout"
+      abortOwnedWork(reason)
+      throw new TimeoutException(reason)
+
+    case _: WorkExpired => ()
 
     case RestoreLatest => restore(sender())
 
@@ -102,18 +140,30 @@ class StateSnapshotActor @Inject()(config: Configuration,
 
     case MaterializeDictionary(source, requestToken) =>
       val requester = sender()
-      Future(materialize(source))(pollingContext)
-        .map(result => DictionaryLoadFinished(incarnation, requester, source.expectedDigest,
-          requestToken, result))
-        .recover { case ex => DictionaryLoadFinished(incarnation, requester, source.expectedDigest,
-          requestToken, Left(SnapshotError.Corrupt(
-            Option(ex.getMessage).getOrElse(ex.getClass.getSimpleName)))) }
-        .pipeTo(self)
+      if (activeLoads.contains(requestToken) || queuedLoads.exists(_.requestToken == requestToken))
+        requester ! DictionaryLoadFailed(source.expectedDigest, requestToken,
+          "Dictionary materialization token is already active")
+      else {
+        val deadline = context.system.scheduler.scheduleOnce(operationTimeout, self,
+          WorkExpired(incarnation, "dictionary", requestToken))(context.dispatcher, self)
+        queuedLoads = queuedLoads.enqueue(LoadWork(source, requestToken, requester, deadline))
+        startLoads()
+      }
 
     case DictionaryLoadFinished(_, requester, digest, requestToken, Right(dictionary)) =>
-      requester ! DictionaryLoaded(digest, requestToken, dictionary)
+      activeLoads.get(requestToken).foreach { work =>
+        work.deadline.cancel()
+        activeLoads -= requestToken
+        requester ! DictionaryLoaded(digest, requestToken, dictionary)
+        startLoads()
+      }
     case DictionaryLoadFinished(_, requester, digest, requestToken, Left(error)) =>
-      requester ! DictionaryLoadFailed(digest, requestToken, error.message)
+      activeLoads.get(requestToken).foreach { work =>
+        work.deadline.cancel()
+        activeLoads -= requestToken
+        requester ! DictionaryLoadFailed(digest, requestToken, error.message)
+        startLoads()
+      }
 
     case ValidationFinished(_, requester, Success(Right(snapshot))) =>
       logger.info(s"Restoring synchronization from snapshot ${snapshot.state.cursor.blockId}@" +
@@ -127,11 +177,17 @@ class StateSnapshotActor @Inject()(config: Configuration,
 
     case SaveFinished(_, candidate, requester, Right(_)) =>
       writing = false
+      activeSaveDeadline.foreach(_.cancel())
+      activeSaveDeadline = None
+      activeSave = None
       logger.info(s"Saved synchronization snapshot ${candidate.cursor.blockId}@${candidate.cursor.height}")
       requester ! SnapshotSaved(candidate.cursor, candidate.checkpointToken)
       savePending()
     case SaveFinished(_, candidate, requester, Left(error)) =>
       writing = false
+      activeSaveDeadline.foreach(_.cancel())
+      activeSaveDeadline = None
+      activeSave = None
       logger.error(s"Failed to save synchronization snapshot at ${candidate.cursor.height}: ${error.message}")
       requester ! SnapshotSaveFailed(candidate.cursor, candidate.checkpointToken, error.message)
       savePending()
@@ -247,7 +303,7 @@ class StateSnapshotActor @Inject()(config: Configuration,
   private def name(key: Array[Byte]): String =
     new String(key, java.nio.charset.StandardCharsets.UTF_8).split('/').last
 
-  private def materialize(source: SnapshotDictionarySource):
+  protected def reconstruct(source: SnapshotDictionarySource):
     Either[SnapshotError, AuthenticatedDictionaryView] = {
     val starting: Either[SnapshotError, AuthenticatedDictionaryView] = source.base match {
       case SnapshotDictionaryBase.Materialized(dictionary) => Right(dictionary)
@@ -270,12 +326,29 @@ class StateSnapshotActor @Inject()(config: Configuration,
 
   private def save(candidate: SnapshotCandidate, requester: ActorRef): Unit = {
     writing = true
-    val store = snapshotStore.get
-    Future(store.save(candidate.snapshot, syncConfig.snapshotMaxEntryBytes))(pollingContext)
+    activeSave = Some(candidate -> requester)
+    activeSaveDeadline = Some(context.system.scheduler.scheduleOnce(operationTimeout, self,
+      WorkExpired(incarnation, "save", candidate.checkpointToken))(context.dispatcher, self))
+    Future(persist(candidate))(pollingContext)
       .map(result => SaveFinished(incarnation, candidate, requester, result))
       .recover { case ex => SaveFinished(incarnation, candidate, requester,
         Left(SnapshotError.Corrupt(Option(ex.getMessage).getOrElse(ex.getClass.getSimpleName)))) }
       .pipeTo(self)
+  }
+
+  private def startLoads(): Unit = {
+    while (activeLoads.size < StateSnapshotActor.MaxConcurrentMaterializations && queuedLoads.nonEmpty) {
+      val (work, remaining) = queuedLoads.dequeue
+      queuedLoads = remaining
+      activeLoads += work.requestToken -> work
+      Future(reconstruct(work.source))(pollingContext)
+        .map(result => DictionaryLoadFinished(incarnation, work.requester,
+          work.source.expectedDigest, work.requestToken, result))
+        .recover { case ex => DictionaryLoadFinished(incarnation, work.requester,
+          work.source.expectedDigest, work.requestToken, Left(SnapshotError.Corrupt(
+            Option(ex.getMessage).getOrElse(ex.getClass.getSimpleName)))) }
+        .pipeTo(self)
+    }
   }
 
   private def savePending(): Unit = pending match {
@@ -284,4 +357,38 @@ class StateSnapshotActor @Inject()(config: Configuration,
       save(candidate, requester)
     case None => ()
   }
+
+  protected def persist(candidate: SnapshotCandidate): Either[SnapshotError, Unit] =
+    snapshotStore.get.save(candidate.snapshot, syncConfig.snapshotMaxEntryBytes)
+
+  /** Test seam; production intentionally fixes both persistence operation classes at five minutes. */
+  protected def operationTimeout: FiniteDuration = StateSnapshotActor.OperationTimeout
+
+  /** Every accepted request receives a terminal reply even if Akka replaces this actor instance. */
+  private def abortOwnedWork(reason: String): Unit = {
+    activeSave.foreach { case (candidate, requester) =>
+      requester ! SnapshotSaveFailed(candidate.cursor, candidate.checkpointToken, reason)
+    }
+    pending.foreach { case (candidate, requester) =>
+      requester ! SnapshotSaveFailed(candidate.cursor, candidate.checkpointToken, reason)
+    }
+    activeSaveDeadline.foreach(_.cancel())
+    activeLoads.values.foreach { work =>
+      work.deadline.cancel()
+      work.requester ! DictionaryLoadFailed(work.source.expectedDigest, work.requestToken, reason)
+    }
+    queuedLoads.foreach { work =>
+      work.deadline.cancel()
+      work.requester ! DictionaryLoadFailed(work.source.expectedDigest, work.requestToken, reason)
+    }
+    writing = false
+    activeSave = None
+    activeSaveDeadline = None
+    pending = None
+    activeLoads = Map.empty
+    queuedLoads = Queue.empty
+  }
+
+  private def detail(reason: Throwable): String =
+    Option(reason.getMessage).getOrElse(reason.getClass.getSimpleName)
 }

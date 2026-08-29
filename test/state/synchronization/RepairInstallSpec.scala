@@ -63,6 +63,24 @@ class RepairInstallSpec extends TestKit(ActorSystem("repair-install"))
 
     requester.send(handler, GetCommittedState)
     requester.expectMsgType[CommittedState].state.minerDictionaryFault should not be empty
+    requester.send(handler, GetSyncStatus)
+    requester.expectMsgType[CatchingUp]
+  }
+
+  it should "leave the Miner Dictionary faulted when its repair exceeds the journal budget" in {
+    val (handler, _) = newHandler(maxJournalBytes = 1L)
+    val requester = TestProbe()
+    val seeded = faultedSeed
+    requester.send(handler, RestoreCommittedState(seeded, Vector(seeded.cursor)))
+    requester.expectMsgType[BlockCommitted]
+
+    val rebuilt = MinerDictionary.initialState.copy(syncHeight = seeded.cursor.height)
+    requester.send(handler, RepairMinerDictionary(seeded.cursor, rebuilt, None,
+      minerPermit(requester, handler)))
+    requester.expectMsgType[BlockRejected].reason should include("volatile synchronization bytes")
+
+    requester.send(handler, GetCommittedState)
+    requester.expectMsgType[CommittedState].state.minerDictionaryFault should not be empty
   }
 
   "A rebuilt rollup" should "be tracked again and its fault cleared" in {
@@ -83,6 +101,26 @@ class RepairInstallSpec extends TestKit(ActorSystem("repair-install"))
     state.routes shouldEqual Map(tree.utxoId -> rollupId)
     state.rollupOrigins shouldEqual Map(rollupId -> seeded.quarantined(rollupId).collateralBoxId)
     state.quarantined shouldBe empty
+  }
+
+  it should "stay quarantined when its repair exceeds the journal budget" in {
+    val (handler, _) = newHandler(maxJournalBytes = 1L)
+    val requester = TestProbe()
+    val seeded = quarantinedSeed
+    requester.send(handler, RestoreCommittedState(seeded, Vector(seeded.cursor)))
+    requester.expectMsgType[BlockCommitted]
+
+    val tree = SyncFixtures.emptyRollup(rollupId, SyncFixtures.id(700002), 90)
+    requester.send(handler, RepairRollup(rollupId, seeded.cursor,
+      RollupRepairResult.Rebuilt(tree), rollupPermit(requester, handler)))
+    requester.expectMsgType[BlockRejected].reason should include("volatile synchronization bytes")
+
+    requester.send(handler, GetCommittedState)
+    val state = requester.expectMsgType[CommittedState].state
+    state.rollups shouldBe empty
+    state.quarantined.keySet shouldEqual Set(rollupId)
+    requester.send(handler, GetSyncStatus)
+    requester.expectMsgType[CatchingUp]
   }
 
   /** A rollup that ended on chain needs no tracking, and its fault must not be retried forever. */
@@ -221,7 +259,7 @@ class RepairInstallSpec extends TestKit(ActorSystem("repair-install"))
     requester.expectMsgType[MinerDictionaryRepairPermit].repairPermit
   }
 
-  private def newHandler() = {
+  private def newHandler(maxJournalBytes: Long = SyncHandler.MaxTransformJournalBytes) = {
     val snapshots = TestProbe()
     val (_, _, wallet) = FakeNodeContext(numAddresses = 1)
     val protocol = ReducerFixtures.protocol(rollupStartHeight = startHeight)
@@ -231,6 +269,8 @@ class RepairInstallSpec extends TestKit(ActorSystem("repair-install"))
          |sync.quarantine.repairAttempts = 3
          |sync.snapshots.enabled = false
          |""".stripMargin))
-    (system.actorOf(Props(new SyncHandler(config, protocol, snapshots.ref))), snapshots)
+    (system.actorOf(Props(new SyncHandler(config, protocol, snapshots.ref) {
+      override protected def maxTransformJournalBytes: Long = maxJournalBytes
+    })), snapshots)
   }
 }
