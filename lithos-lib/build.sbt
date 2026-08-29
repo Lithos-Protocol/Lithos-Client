@@ -5,9 +5,9 @@ version := "1.0-SNAPSHOT"
 scalaVersion := "2.12.10"
 lazy val scriptClasspath = Seq("*")
 libraryDependencies ++= Seq(
-  "org.scorexfoundation" %% "sigma-state" % "6.0.2",
+  "org.scorexfoundation" %% "sigma-state" % "6.0.6",
   "org.ergoplatform" %% "ergo-wallet" % "6.0.0",
-  "org.ergoplatform" %% "ergo-appkit" % "6.0.0",
+  "org.ergoplatform" %% "ergo-appkit" % "6.0.1",
   "io.github.k-singh" %% "plasma-toolkit" % "1.1.0",
   "com.github.Satergo" % "JStratum" % "b3ad654112",
   "org.bouncycastle" % "bcprov-jdk15on" % "1.70",
@@ -21,6 +21,11 @@ libraryDependencies ++= Seq(
   "javax.xml.bind" % "jaxb-api" % "2.4.0-b180830.0359",
   "org.ethereum" % "leveldbjni-all" % "1.18.3",
   "org.iq80.leveldb" % "leveldb" % "0.12",
+)
+ThisBuild / libraryDependencySchemes ++= Seq(
+  "io.circe" %% "circe-core"    % VersionScheme.Always,
+  "io.circe" %% "circe-generic" % VersionScheme.Always,
+  "io.circe" %% "circe-parser"  % VersionScheme.Always
 )
 resolvers ++= Seq(
   "Sonatype Releases" at "https://oss.sonatype.org/content/repositories/releases/",

@@ -8,7 +8,7 @@ libraryDependencies ++= Seq(
   //"io.github.k-singh" %% "plasma-toolkit" % "1.0.3", sl4j error due to logging dependency, please fix later
   "org.scalatest" %% "scalatest" % "3.2.14" % "test",
   "com.typesafe.akka" %% "akka-testkit" % "2.6.19" % Test,
-  "org.ergoplatform" %% "ergo-appkit" % "6.0.0" % Test classifier "tests",
+  "org.ergoplatform" %% "ergo-appkit" % "6.0.1" % Test classifier "tests",
   "com.squareup.okhttp3" % "mockwebserver" % "3.12.0" % Test,
   "org.scalatestplus" %% "mockito-4-6" % "3.2.14.0" % Test,
   "ch.qos.logback" % "logback-classic" % "1.5.21",

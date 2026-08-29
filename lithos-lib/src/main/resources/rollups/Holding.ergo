@@ -11,7 +11,7 @@
   // R7: Period Start (time or height of block mining in which this box was created, ex. during block mining and collateral exchange)
   val nispTree:      AvlTree = SELF.R4[AvlTree].get
   val currentMiners: Int     = SELF.R5[Int].get
-  val totalScore:    Long    = SELF.R6[BigInt].get
+  val totalScore:    BigInt    = SELF.R6[BigInt].get
   val currentPeriod: Long    = SELF.R7[Long].get
 
   // CONSTANTS
