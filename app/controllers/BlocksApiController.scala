@@ -3,14 +3,18 @@ package controllers
 import api.models.{BlockMiners, PoolBlock}
 import api.openapitools.OpenApiExceptions
 import api.{ApiHelper, BlocksApi}
+import org.bouncycastle.util.encoders.Hex
+import play.api.Configuration
 import play.api.cache.SyncCacheApi
 import play.api.libs.json._
 import play.api.mvc._
+import scorex.crypto.hash.Blake2b256
 
 import javax.inject.{Inject, Singleton}
+import scala.concurrent.Future
 
 @Singleton
-class BlocksApiController @Inject()(cc: ControllerComponents, api: BlocksApi, cache: SyncCacheApi) extends AbstractController(cc) {
+class BlocksApiController @Inject()(cc: ControllerComponents, api: BlocksApi, cache: SyncCacheApi, config: Configuration) extends AbstractController(cc) {
   /**
     * GET /blocks/:utxoId
     * @param utxoId Id of the UTXO representing a Lithos block
@@ -38,24 +42,26 @@ class BlocksApiController @Inject()(cc: ControllerComponents, api: BlocksApi, ca
     * GET /blocks/:utxoId/miners
     * @param utxoId UTXO id of the pool block whose miners are being queried
     */
-  def getBlockMinersById(utxoId: String): Action[AnyContent] = Action { request =>
-    def executeApi(): Option[List[BlockMiners]] = {
-      api.getBlockMinersById(utxoId, cache)
+  def getBlockMinersById(utxoId: String): Action[AnyContent] = withApiKey {
+    Action {
+      def executeApi(): Option[List[BlockMiners]] = {
+        api.getBlockMinersById(utxoId, cache)
+      }
+
+      val optResult = executeApi()
+      optResult match {
+        case Some(result) =>
+          val json = Json.toJson(result)
+          Ok(json)
+        case None =>
+          NotFound(ApiHelper.makeError(404,
+            "Could not find PoolBlock with given utxoId",
+            s"PoolBlock with utxoId ${utxoId} could not be found. It may be untracked" +
+              s" or could not exist (could've been spent)"))
+      }
+
+
     }
-
-    val optResult = executeApi()
-    optResult match {
-      case Some(result) =>
-        val json = Json.toJson(result)
-        Ok(json)
-      case None =>
-        NotFound(ApiHelper.makeError(404,
-          "Could not find PoolBlock with given utxoId",
-          s"PoolBlock with utxoId ${utxoId} could not be found. It may be untracked" +
-            s" or could not exist (could've been spent)"))
-    }
-
-
   }
 
   /**
@@ -146,5 +152,17 @@ class BlocksApiController @Inject()(cc: ControllerComponents, api: BlocksApi, ca
       }
 
     paramValues.split(splitBy).toList
+  }
+
+  private def withApiKey[A](action: Action[A]) = Action.async(action.parser) { request =>
+    val secretKey = config.get[String]("lithos.apiKeyHash")
+    request.headers
+      .get("api_key")
+      .collect {
+        case key if Hex.toHexString(Blake2b256.hash(key)) == secretKey => action(request)
+      }
+      .getOrElse {
+        Future.successful(Forbidden(ApiHelper.makeError(403, "Forbidden request", "Could not authenticate request with given api key")))
+      }
   }
 }

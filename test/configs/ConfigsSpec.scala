@@ -69,7 +69,8 @@ class ConfigsSpec extends AnyFlatSpec with Matchers {
   it should "name every dispatcher Contexts looks up" in {
     // Keep runtime dispatcher lookups and validation names aligned.
     Contexts.Names should contain theSameElementsAs
-      Seq(Contexts.Stratum, Contexts.Polling, Contexts.Sync, Contexts.Tx, Contexts.Dex, Contexts.Database)
+      Seq(Contexts.Stratum, Contexts.Polling, Contexts.Sync, Contexts.Tx, Contexts.Dex,
+        Contexts.Database, Contexts.SnapshotIo)
   }
 
   it should "reject an apiKeyHash that is the key rather than its hash" in {

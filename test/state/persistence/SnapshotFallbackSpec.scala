@@ -79,7 +79,7 @@ class SnapshotFallbackSpec extends TestKit(ActorSystem("snapshot-fallback"))
     loaded.warning.get should include("not")
   }
 
-  it should "ignore snapshot validation completed by an actor incarnation that restarted" in {
+  it should "terminate a restore request on restart and ignore its stale validation completion" in {
     val calls = new AtomicInteger(0)
     val entered = new CountDownLatch(1)
     val release = new CountDownLatch(1)
@@ -94,9 +94,12 @@ class SnapshotFallbackSpec extends TestKit(ActorSystem("snapshot-fallback"))
     requester.send(actor, RestoreLatest)
     entered.await(5, TimeUnit.SECONDS) shouldBe true
     actor ! Kill
+    val interrupted = requester.expectMsgType[SnapshotLoaded](5.seconds)
+    interrupted.snapshot shouldBe empty
+    interrupted.warning.get should include("restarted")
+    release.countDown()
     actor.tell(Identify("snapshot-restarted"), testActor)
     expectMsg(ActorIdentity("snapshot-restarted", Some(actor)))
-    release.countDown()
 
     requester.expectNoMessage(500.millis)
     requester.send(actor, RestoreLatest)

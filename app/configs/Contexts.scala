@@ -22,6 +22,7 @@ class Contexts (system: ActorSystem) {
   val txContext:      ExecutionContext = dispatcher(Contexts.Tx)
   val dexContext:     ExecutionContext = dispatcher(Contexts.Dex)
   val databaseContext: ExecutionContext = dispatcher(Contexts.Database)
+  val snapshotIoContext: ExecutionContext = dispatcher(Contexts.SnapshotIo)
 }
 
 object Contexts {
@@ -32,9 +33,10 @@ object Contexts {
   final val Tx:      String = "tx-dispatcher"
   final val Dex:     String = "dex-dispatcher"
   final val Database: String = "database-dispatcher"
+  final val SnapshotIo: String = "snapshot-io-dispatcher"
 
   /** Dispatcher names shared with startup configuration validation. */
-  final val Names: Seq[String] = Seq(Stratum, Polling, Sync, Tx, Dex, Database)
+  final val Names: Seq[String] = Seq(Stratum, Polling, Sync, Tx, Dex, Database, SnapshotIo)
 
   def key(name: String): String = s"lithos-contexts.$name"
 }

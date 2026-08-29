@@ -13,7 +13,6 @@ import storage.KeyValueStore
 
 import javax.inject.Inject
 import java.util.UUID
-import java.util.concurrent.TimeoutException
 import scala.collection.immutable.Queue
 import scala.concurrent.{ExecutionContext, Future}
 import scala.concurrent.duration._
@@ -25,7 +24,7 @@ object StateSnapshotActor {
 
   case object RestoreLatest
   final case class SnapshotLoaded(snapshot: Option[PersistedSyncState], warning: Option[String] = None)
-  /** An immutable checkpoint boundary. Serialization runs on the persistence dispatcher. */
+  /** An immutable checkpoint boundary. Serialization runs on the isolated snapshot I/O dispatcher. */
   final case class SnapshotCandidate(snapshot: SnapshotCheckpoint, checkpointToken: String) {
     def cursor: SyncCursor = snapshot.metadata.cursor
     def version: Long = snapshot.metadata.version
@@ -42,7 +41,7 @@ object StateSnapshotActor {
     def incarnation: String
   }
   private final case class ValidationFinished(incarnation: String,
-                                              requester: ActorRef,
+                                              restoreToken: String,
                                               result: Try[Either[String, PersistedSyncState]])
     extends ActorCompletion
   private final case class SaveFinished(incarnation: String,
@@ -65,7 +64,7 @@ class StateSnapshotActor @Inject()(config: Configuration,
   import StateSnapshotActor._
 
   private implicit val actorContext: ExecutionContext = context.dispatcher
-  private val pollingContext = context.system.dispatchers.lookup(Contexts.key(Contexts.Polling))
+  private val snapshotIoContext = context.system.dispatchers.lookup(Contexts.key(Contexts.SnapshotIo))
   private val logger: Logger = LoggerFactory.getLogger("StateSnapshotActor")
   private val incarnation = UUID.randomUUID().toString
   private val syncConfig = new SyncConfig(config)
@@ -79,14 +78,22 @@ class StateSnapshotActor @Inject()(config: Configuration,
         snapshotIdentity))
     else None
 
-  private var writing = false
-  private var activeSave = Option.empty[(SnapshotCandidate, ActorRef)]
-  private var activeSaveDeadline = Option.empty[Cancellable]
-  private var pending = Option.empty[(SnapshotCandidate, ActorRef)]
+  private final case class SaveWork(candidate: SnapshotCandidate,
+                                    requester: ActorRef,
+                                    deadline: Cancellable,
+                                    expired: Boolean = false)
+  private final case class RestoreWork(token: String,
+                                       requester: ActorRef,
+                                       deadline: Cancellable,
+                                       expired: Boolean = false)
   private final case class LoadWork(source: SnapshotDictionarySource,
                                     requestToken: String,
                                     requester: ActorRef,
-                                    deadline: Cancellable)
+                                    deadline: Cancellable,
+                                    expired: Boolean = false)
+  private var activeSave = Option.empty[SaveWork]
+  private var pending = Option.empty[SaveWork]
+  private var activeRestore = Option.empty[RestoreWork]
   private var activeLoads = Map.empty[String, LoadWork]
   private var queuedLoads = Queue.empty[LoadWork]
 
@@ -109,30 +116,75 @@ class StateSnapshotActor @Inject()(config: Configuration,
     case WorkExpired(other, _, _) if other != incarnation => ()
 
     case WorkExpired(_, kind, token) if kind == "save" &&
-      activeSave.exists(_._1.checkpointToken == token) =>
+      activeSave.exists(work => work.candidate.checkpointToken == token && !work.expired) =>
       val reason = s"Synchronization checkpoint $token exceeded $operationTimeout"
-      abortOwnedWork(reason)
-      throw new TimeoutException(reason)
+      activeSave.foreach { work =>
+        work.deadline.cancel()
+        work.requester ! SnapshotSaveFailed(work.candidate.cursor, work.candidate.checkpointToken, reason)
+        activeSave = Some(work.copy(expired = true))
+      }
+      logger.error(s"$reason. The underlying snapshot I/O remains isolated and keeps its execution " +
+        "slot until it returns; no replacement write will be started over it.")
+
+    case WorkExpired(_, kind, token) if kind == "save" &&
+      pending.exists(work => work.candidate.checkpointToken == token && !work.expired) =>
+      val reason = s"Queued synchronization checkpoint $token exceeded $operationTimeout"
+      pending.foreach { work =>
+        work.deadline.cancel()
+        work.requester ! SnapshotSaveFailed(work.candidate.cursor, work.candidate.checkpointToken, reason)
+      }
+      pending = None
+      logger.error(s"$reason before the active snapshot write released its execution slot.")
 
     case WorkExpired(_, kind, token) if kind == "dictionary" &&
-      (activeLoads.contains(token) || queuedLoads.exists(_.requestToken == token)) =>
+      activeLoads.get(token).exists(!_.expired) =>
       val reason = s"Dictionary materialization $token exceeded $operationTimeout"
-      abortOwnedWork(reason)
-      throw new TimeoutException(reason)
+      activeLoads.get(token).foreach { work =>
+        work.deadline.cancel()
+        work.requester ! DictionaryLoadFailed(work.source.expectedDigest, work.requestToken, reason)
+        activeLoads += token -> work.copy(expired = true)
+      }
+      logger.error(s"$reason. Its isolated execution slot remains occupied until the underlying work " +
+        "returns; the two-worker physical limit will not be exceeded.")
+
+    case WorkExpired(_, kind, token) if kind == "dictionary" &&
+      queuedLoads.exists(_.requestToken == token) =>
+      val reason = s"Queued dictionary materialization $token exceeded $operationTimeout"
+      val expired = queuedLoads.find(_.requestToken == token)
+      queuedLoads = Queue(queuedLoads.filterNot(_.requestToken == token): _*)
+      expired.foreach { work =>
+        work.deadline.cancel()
+        work.requester ! DictionaryLoadFailed(work.source.expectedDigest, work.requestToken, reason)
+      }
+      logger.error(s"$reason before an isolated reconstruction slot became available.")
+
+    case WorkExpired(_, kind, token) if kind == "restore" &&
+      activeRestore.exists(work => work.token == token && !work.expired) =>
+      val reason = s"Synchronization snapshot restore $token exceeded $operationTimeout"
+      activeRestore.foreach { work =>
+        work.deadline.cancel()
+        work.requester ! SnapshotLoaded(None, Some(reason))
+        activeRestore = Some(work.copy(expired = true))
+      }
+      logger.error(s"$reason. Later callers will continue from the node rather than launch another " +
+        "restore over the blocked read.")
 
     case _: WorkExpired => ()
 
     case RestoreLatest => restore(sender())
 
     case candidate: SnapshotCandidate if snapshotStore.isDefined =>
-      if (writing) {
-        pending.foreach { case (superseded, requester) =>
-          requester ! SnapshotSaveFailed(superseded.cursor, superseded.checkpointToken,
+      val work = saveWork(candidate, sender())
+      if (activeSave.isDefined) {
+        pending.foreach { superseded =>
+          superseded.deadline.cancel()
+          superseded.requester ! SnapshotSaveFailed(superseded.candidate.cursor,
+            superseded.candidate.checkpointToken,
             "Checkpoint was superseded by a newer pending boundary")
         }
-        pending = Some(candidate -> sender())
+        pending = Some(work)
       }
-      else save(candidate, sender())
+      else save(work)
 
     case candidate: SnapshotCandidate =>
       sender() ! SnapshotSaveFailed(candidate.cursor, candidate.checkpointToken,
@@ -150,61 +202,56 @@ class StateSnapshotActor @Inject()(config: Configuration,
         startLoads()
       }
 
-    case DictionaryLoadFinished(_, requester, digest, requestToken, Right(dictionary)) =>
+    case DictionaryLoadFinished(_, _, digest, requestToken, Right(dictionary)) =>
       activeLoads.get(requestToken).foreach { work =>
         work.deadline.cancel()
         activeLoads -= requestToken
-        requester ! DictionaryLoaded(digest, requestToken, dictionary)
+        if (work.expired)
+          logger.warn(s"Dictionary materialization $requestToken completed after its deadline; " +
+            "discarding the unowned result")
+        else work.requester ! DictionaryLoaded(digest, requestToken, dictionary)
         startLoads()
       }
-    case DictionaryLoadFinished(_, requester, digest, requestToken, Left(error)) =>
+    case DictionaryLoadFinished(_, _, digest, requestToken, Left(error)) =>
       activeLoads.get(requestToken).foreach { work =>
         work.deadline.cancel()
         activeLoads -= requestToken
-        requester ! DictionaryLoadFailed(digest, requestToken, error.message)
+        if (work.expired)
+          logger.warn(s"Dictionary materialization $requestToken failed after its deadline: ${error.message}")
+        else work.requester ! DictionaryLoadFailed(digest, requestToken, error.message)
         startLoads()
       }
 
-    case ValidationFinished(_, requester, Success(Right(snapshot))) =>
-      logger.info(s"Restoring synchronization from snapshot ${snapshot.state.cursor.blockId}@" +
-        s"${snapshot.state.cursor.height} with ${snapshot.recentCursors.size} retained cursor(s)")
-      requester ! SnapshotLoaded(Some(snapshot))
-    case ValidationFinished(_, requester, Success(Left(reason))) =>
-      requester ! SnapshotLoaded(None, Some(reason))
-    case ValidationFinished(_, requester, Failure(ex)) =>
-      requester ! SnapshotLoaded(None, Some(
-        s"Could not validate snapshot cursor: ${Option(ex.getMessage).getOrElse(ex.getClass.getSimpleName)}"))
+    case ValidationFinished(_, token, result) => finishRestore(token, result)
 
     case SaveFinished(_, candidate, requester, Right(_)) =>
-      writing = false
-      activeSaveDeadline.foreach(_.cancel())
-      activeSaveDeadline = None
-      activeSave = None
-      logger.info(s"Saved synchronization snapshot ${candidate.cursor.blockId}@${candidate.cursor.height}")
-      requester ! SnapshotSaved(candidate.cursor, candidate.checkpointToken)
-      savePending()
+      finishSave(candidate, requester, Right(()))
     case SaveFinished(_, candidate, requester, Left(error)) =>
-      writing = false
-      activeSaveDeadline.foreach(_.cancel())
-      activeSaveDeadline = None
-      activeSave = None
-      logger.error(s"Failed to save synchronization snapshot at ${candidate.cursor.height}: ${error.message}")
-      requester ! SnapshotSaveFailed(candidate.cursor, candidate.checkpointToken, error.message)
-      savePending()
+      finishSave(candidate, requester, Left(error))
   }
 
   // Snapshot reads run off the mailbox because database scans and canonical validation can block.
+  // Only one physical restore may exist. A retry receives an explicit fallback instead of starting a
+  // second read that could outlive its caller and amplify a stalled backend.
   private def restore(requester: ActorRef): Unit = snapshotStore match {
     case None => requester ! SnapshotLoaded(None)
+    case Some(_) if activeRestore.isDefined =>
+      requester ! SnapshotLoaded(None, Some(
+        "A synchronization snapshot restore is already in progress; continuing from the node " +
+          "rather than launching duplicate blocking storage work"))
     case Some(store) =>
-      Future(findCanonical(store))(pollingContext)
-        .map(result => ValidationFinished(incarnation, requester, result))
-        .recover { case ex => ValidationFinished(incarnation, requester, Failure(ex)) }
+      val token = UUID.randomUUID().toString
+      val deadline = context.system.scheduler.scheduleOnce(operationTimeout, self,
+        WorkExpired(incarnation, "restore", token))(context.dispatcher, self)
+      activeRestore = Some(RestoreWork(token, requester, deadline))
+      Future(findCanonical(store))(snapshotIoContext)
+        .map(result => ValidationFinished(incarnation, token, result))
+        .recover { case ex => ValidationFinished(incarnation, token, Failure(ex)) }
         .pipeTo(self)
   }
 
   /** Loads generations newest-first and returns the first one still on the canonical chain. */
-  private def findCanonical(store: StateSnapshotStore): Try[Either[String, PersistedSyncState]] =
+  protected def findCanonical(store: StateSnapshotStore): Try[Either[String, PersistedSyncState]] =
     store.generationKeys() match {
       case Left(error) => Success(Left(error.message))
       case Right(Seq()) => Success(Left("No retained synchronization snapshot"))
@@ -324,14 +371,17 @@ class StateSnapshotActor @Inject()(config: Configuration,
     } yield dictionary
   }
 
-  private def save(candidate: SnapshotCandidate, requester: ActorRef): Unit = {
-    writing = true
-    activeSave = Some(candidate -> requester)
-    activeSaveDeadline = Some(context.system.scheduler.scheduleOnce(operationTimeout, self,
-      WorkExpired(incarnation, "save", candidate.checkpointToken))(context.dispatcher, self))
-    Future(persist(candidate))(pollingContext)
-      .map(result => SaveFinished(incarnation, candidate, requester, result))
-      .recover { case ex => SaveFinished(incarnation, candidate, requester,
+  private def saveWork(candidate: SnapshotCandidate, requester: ActorRef): SaveWork = {
+    val deadline = context.system.scheduler.scheduleOnce(operationTimeout, self,
+      WorkExpired(incarnation, "save", candidate.checkpointToken))(context.dispatcher, self)
+    SaveWork(candidate, requester, deadline)
+  }
+
+  private def save(work: SaveWork): Unit = {
+    activeSave = Some(work)
+    Future(persist(work.candidate))(snapshotIoContext)
+      .map(result => SaveFinished(incarnation, work.candidate, work.requester, result))
+      .recover { case ex => SaveFinished(incarnation, work.candidate, work.requester,
         Left(SnapshotError.Corrupt(Option(ex.getMessage).getOrElse(ex.getClass.getSimpleName)))) }
       .pipeTo(self)
   }
@@ -341,7 +391,7 @@ class StateSnapshotActor @Inject()(config: Configuration,
       val (work, remaining) = queuedLoads.dequeue
       queuedLoads = remaining
       activeLoads += work.requestToken -> work
-      Future(reconstruct(work.source))(pollingContext)
+      Future(reconstruct(work.source))(snapshotIoContext)
         .map(result => DictionaryLoadFinished(incarnation, work.requester,
           work.source.expectedDigest, work.requestToken, result))
         .recover { case ex => DictionaryLoadFinished(incarnation, work.requester,
@@ -352,39 +402,89 @@ class StateSnapshotActor @Inject()(config: Configuration,
   }
 
   private def savePending(): Unit = pending match {
-    case Some((candidate, requester)) =>
+    case Some(work) =>
       pending = None
-      save(candidate, requester)
+      save(work)
     case None => ()
   }
+
+  private def finishSave(candidate: SnapshotCandidate,
+                         requester: ActorRef,
+                         result: Either[SnapshotError, Unit]): Unit =
+    activeSave.filter(_.candidate.checkpointToken == candidate.checkpointToken).foreach { work =>
+      work.deadline.cancel()
+      activeSave = None
+      if (work.expired) result match {
+        case Right(_) => logger.warn(s"Synchronization snapshot ${candidate.cursor.blockId}@" +
+          s"${candidate.cursor.height} committed after its deadline; the late unowned result is ignored")
+        case Left(error) => logger.warn(s"Synchronization snapshot at ${candidate.cursor.height} failed " +
+          s"after its deadline: ${error.message}")
+      }
+      else result match {
+        case Right(_) =>
+          logger.info(s"Saved synchronization snapshot ${candidate.cursor.blockId}@${candidate.cursor.height}")
+          requester ! SnapshotSaved(candidate.cursor, candidate.checkpointToken)
+        case Left(error) =>
+          logger.error(s"Failed to save synchronization snapshot at ${candidate.cursor.height}: ${error.message}")
+          requester ! SnapshotSaveFailed(candidate.cursor, candidate.checkpointToken, error.message)
+      }
+      savePending()
+    }
+
+  private def finishRestore(token: String,
+                            result: Try[Either[String, PersistedSyncState]]): Unit =
+    activeRestore.filter(_.token == token).foreach { work =>
+      work.deadline.cancel()
+      activeRestore = None
+      if (work.expired)
+        logger.warn(s"Synchronization snapshot restore $token completed after its deadline; " +
+          "discarding the unowned result")
+      else result match {
+        case Success(Right(snapshot)) =>
+          logger.info(s"Restoring synchronization from snapshot ${snapshot.state.cursor.blockId}@" +
+            s"${snapshot.state.cursor.height} with ${snapshot.recentCursors.size} retained cursor(s)")
+          work.requester ! SnapshotLoaded(Some(snapshot))
+        case Success(Left(reason)) => work.requester ! SnapshotLoaded(None, Some(reason))
+        case Failure(ex) =>
+          work.requester ! SnapshotLoaded(None, Some(
+            s"Could not validate snapshot cursor: ${Option(ex.getMessage).getOrElse(ex.getClass.getSimpleName)}"))
+      }
+    }
 
   protected def persist(candidate: SnapshotCandidate): Either[SnapshotError, Unit] =
     snapshotStore.get.save(candidate.snapshot, syncConfig.snapshotMaxEntryBytes)
 
-  /** Test seam; production intentionally fixes both persistence operation classes at five minutes. */
+  /** Test seam; production fixes save, reconstruction and restore ownership at five minutes. */
   protected def operationTimeout: FiniteDuration = StateSnapshotActor.OperationTimeout
 
   /** Every accepted request receives a terminal reply even if Akka replaces this actor instance. */
   private def abortOwnedWork(reason: String): Unit = {
-    activeSave.foreach { case (candidate, requester) =>
-      requester ! SnapshotSaveFailed(candidate.cursor, candidate.checkpointToken, reason)
+    activeSave.foreach { work =>
+      if (!work.expired)
+        work.requester ! SnapshotSaveFailed(work.candidate.cursor, work.candidate.checkpointToken, reason)
+      work.deadline.cancel()
     }
-    pending.foreach { case (candidate, requester) =>
-      requester ! SnapshotSaveFailed(candidate.cursor, candidate.checkpointToken, reason)
+    pending.foreach { work =>
+      if (!work.expired)
+        work.requester ! SnapshotSaveFailed(work.candidate.cursor, work.candidate.checkpointToken, reason)
+      work.deadline.cancel()
     }
-    activeSaveDeadline.foreach(_.cancel())
+    activeRestore.foreach { work =>
+      if (!work.expired) work.requester ! SnapshotLoaded(None, Some(reason))
+      work.deadline.cancel()
+    }
     activeLoads.values.foreach { work =>
       work.deadline.cancel()
-      work.requester ! DictionaryLoadFailed(work.source.expectedDigest, work.requestToken, reason)
+      if (!work.expired)
+        work.requester ! DictionaryLoadFailed(work.source.expectedDigest, work.requestToken, reason)
     }
     queuedLoads.foreach { work =>
       work.deadline.cancel()
       work.requester ! DictionaryLoadFailed(work.source.expectedDigest, work.requestToken, reason)
     }
-    writing = false
     activeSave = None
-    activeSaveDeadline = None
     pending = None
+    activeRestore = None
     activeLoads = Map.empty
     queuedLoads = Queue.empty
   }

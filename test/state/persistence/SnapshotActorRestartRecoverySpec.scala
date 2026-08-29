@@ -6,6 +6,7 @@ import com.typesafe.config.ConfigFactory
 import lfsm.states.{AuthenticatedDictionaryView, PlasmaDictionary}
 import org.bouncycastle.util.encoders.Hex
 import org.scalatest.BeforeAndAfterAll
+import org.scalatest.OptionValues
 import org.scalatest.flatspec.AnyFlatSpecLike
 import org.scalatest.matchers.should.Matchers
 import play.api.Configuration
@@ -15,12 +16,14 @@ import support.{FakeNodeContext, ReducerFixtures, RestartingSupervisor, SyncFixt
 
 import java.nio.file.Files
 import java.util.concurrent.{CountDownLatch, TimeUnit}
-import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.{AtomicInteger, AtomicReference}
+import scala.concurrent.{Await, Future}
 import scala.concurrent.duration._
+import scala.util.{Success, Try}
 
 /** A restarted persistence worker must terminate every request accepted by its old incarnation. */
 class SnapshotActorRestartRecoverySpec extends TestKit(ActorSystem("snapshot-actor-restart-recovery"))
-  with AnyFlatSpecLike with Matchers with BeforeAndAfterAll {
+  with AnyFlatSpecLike with Matchers with BeforeAndAfterAll with OptionValues {
 
   override def afterAll(): Unit = TestKit.shutdownActorSystem(system)
 
@@ -54,6 +57,10 @@ class SnapshotActorRestartRecoverySpec extends TestKit(ActorSystem("snapshot-act
   it should "pin the production operation deadline and materialization concurrency" in {
     StateSnapshotActor.OperationTimeout shouldEqual 5.minutes
     StateSnapshotActor.MaxConcurrentMaterializations shouldEqual 2
+    system.settings.config.getInt(
+      "lithos-contexts.snapshot-io-dispatcher.thread-pool-executor.fixed-pool-size") shouldEqual 4
+    system.settings.config.getInt(
+      "lithos-contexts.snapshot-io-dispatcher.thread-pool-executor.task-queue-size") shouldEqual 4
   }
 
   it should "fail an in-flight dictionary load and accept a retry after restart" in {
@@ -110,7 +117,7 @@ class SnapshotActorRestartRecoverySpec extends TestKit(ActorSystem("snapshot-act
     loaded.map(_.requestToken).toSet shouldEqual Set("queued-1", "queued-2", "queued-3")
   }
 
-  it should "restart and fail a save that exceeds the persistence deadline" in {
+  it should "fail a timed-out save without starting replacement I/O over it" in {
     val entered = new CountDownLatch(1)
     val release = new CountDownLatch(1)
     val calls = new AtomicInteger(0)
@@ -122,7 +129,7 @@ class SnapshotActorRestartRecoverySpec extends TestKit(ActorSystem("snapshot-act
         }
         Right(())
       },
-      timeout = 150.millis)
+      timeout = 500.millis)
     val first = candidate(fixture.protocol, "save-timeout")
 
     fixture.requester.send(fixture.actor, first)
@@ -131,21 +138,27 @@ class SnapshotActorRestartRecoverySpec extends TestKit(ActorSystem("snapshot-act
     failed.checkpointToken shouldEqual first.checkpointToken
     failed.reason should include("exceeded")
 
-    release.countDown()
     val retry = first.copy(checkpointToken = "save-after-timeout")
     fixture.requester.send(fixture.actor, retry)
+    Thread.sleep(100)
+    calls.get() shouldEqual 1
+
+    release.countDown()
     fixture.requester.expectMsgType[SnapshotSaved](5.seconds).checkpointToken shouldEqual
       retry.checkpointToken
+    calls.get() shouldEqual 2
   }
 
-  it should "restart and fail every accepted dictionary request when one exceeds the deadline" in {
+  it should "fail expired dictionary requests without exceeding the two-worker physical limit" in {
     val dictionary = PlasmaDictionary.empty()
     val source = SnapshotDictionarySource(Hex.toHexString(dictionary.digest), dictionary.flags,
       dictionary.parameters, SnapshotDictionaryBase.Materialized(dictionary), Vector.empty)
     val entered = new CountDownLatch(1)
     val release = new CountDownLatch(1)
+    val calls = new AtomicInteger(0)
     val fixture = actorWithOverrides(
       reconstructFn = _ => {
+        calls.incrementAndGet()
         entered.countDown()
         release.await(10, TimeUnit.SECONDS)
         Right(dictionary)
@@ -161,7 +174,111 @@ class SnapshotActorRestartRecoverySpec extends TestKit(ActorSystem("snapshot-act
     failures.map(_.requestToken).toSet shouldEqual
       Set("active-timeout", "accepted-peer", "queued-peer")
     failures.foreach(_.reason should include("exceeded"))
+    calls.get() shouldEqual 2
     release.countDown()
+  }
+
+  it should "coalesce a blocked restore and let later callers continue without it" in {
+    val entered = new CountDownLatch(1)
+    val release = new CountDownLatch(1)
+    val calls = new AtomicInteger(0)
+    val fixture = actorWithOverrides(
+      restoreFn = Some(_ => {
+        calls.incrementAndGet()
+        entered.countDown()
+        release.await(10, TimeUnit.SECONDS)
+        Success(Left("no retained snapshot in test"))
+      }))
+
+    fixture.requester.send(fixture.actor, RestoreLatest)
+    entered.await(5, TimeUnit.SECONDS) shouldBe true
+    val retry = TestProbe()
+    retry.send(fixture.actor, RestoreLatest)
+    val fallback = retry.expectMsgType[SnapshotLoaded](5.seconds)
+    fallback.snapshot shouldBe empty
+    fallback.warning.value should include("already in progress")
+    calls.get() shouldEqual 1
+
+    release.countDown()
+    fixture.requester.expectMsgType[SnapshotLoaded](5.seconds).warning.value should include(
+      "no retained snapshot")
+  }
+
+  it should "retain a timed-out restore slot until its underlying read returns" in {
+    val entered = new CountDownLatch(1)
+    val release = new CountDownLatch(1)
+    val calls = new AtomicInteger(0)
+    val fixture = actorWithOverrides(
+      restoreFn = Some(_ => {
+        val call = calls.incrementAndGet()
+        if (call == 1) {
+          entered.countDown()
+          release.await(10, TimeUnit.SECONDS)
+        }
+        Success(Left(s"restore call $call"))
+      }),
+      timeout = 150.millis)
+
+    fixture.requester.send(fixture.actor, RestoreLatest)
+    entered.await(5, TimeUnit.SECONDS) shouldBe true
+    val expired = fixture.requester.expectMsgType[SnapshotLoaded](5.seconds)
+    expired.snapshot shouldBe empty
+    expired.warning.value should include("exceeded")
+
+    val retry = TestProbe()
+    retry.send(fixture.actor, RestoreLatest)
+    retry.expectMsgType[SnapshotLoaded](5.seconds).warning.value should include("already in progress")
+    calls.get() shouldEqual 1
+
+    release.countDown()
+    awaitAssert({
+      val afterRelease = TestProbe()
+      afterRelease.send(fixture.actor, RestoreLatest)
+      afterRelease.expectMsgType[SnapshotLoaded](1.second).warning.value should include("restore call 2")
+    }, 5.seconds, 100.millis)
+    calls.get() shouldEqual 2
+  }
+
+  it should "keep four blocked snapshot operations off the canonical polling dispatcher" in {
+    val dictionary = PlasmaDictionary.empty()
+    val source = SnapshotDictionarySource(Hex.toHexString(dictionary.digest), dictionary.flags,
+      dictionary.parameters, SnapshotDictionaryBase.Materialized(dictionary), Vector.empty)
+    val entered = new CountDownLatch(4)
+    val release = new CountDownLatch(1)
+    def block(): Unit = {
+      entered.countDown()
+      release.await(10, TimeUnit.SECONDS)
+    }
+    val fixture = actorWithOverrides(
+      persistFn = _ => { block(); Right(()) },
+      reconstructFn = _ => { block(); Right(dictionary) },
+      restoreFn = Some(_ => { block(); Success(Left("isolation test")) }))
+
+    fixture.requester.send(fixture.actor, candidate(fixture.protocol, "isolated-save"))
+    fixture.requester.send(fixture.actor, MaterializeDictionary(source, "isolated-load-1"))
+    fixture.requester.send(fixture.actor, MaterializeDictionary(source, "isolated-load-2"))
+    fixture.requester.send(fixture.actor, RestoreLatest)
+    entered.await(5, TimeUnit.SECONDS) shouldBe true
+
+    val polling = system.dispatchers.lookup(configs.Contexts.key(configs.Contexts.Polling))
+    Await.result(Future("polling-remains-live")(polling), 2.seconds) shouldEqual "polling-remains-live"
+    release.countDown()
+    fixture.requester.receiveN(4, 5.seconds)
+  }
+
+  it should "execute snapshot work only on the isolated snapshot dispatcher" in {
+    val dictionary = PlasmaDictionary.empty()
+    val source = SnapshotDictionarySource(Hex.toHexString(dictionary.digest), dictionary.flags,
+      dictionary.parameters, SnapshotDictionaryBase.Materialized(dictionary), Vector.empty)
+    val observed = new AtomicReference[String]("")
+    val fixture = actorWithOverrides(reconstructFn = _ => {
+      observed.set(Thread.currentThread().getName)
+      Right(dictionary)
+    })
+
+    fixture.requester.send(fixture.actor, MaterializeDictionary(source, "dispatcher-check"))
+    fixture.requester.expectMsgType[DictionaryLoaded](5.seconds)
+    observed.get() should include("snapshot-io-dispatcher")
   }
 
   private final case class Fixture(actor: akka.actor.ActorRef,
@@ -175,6 +292,7 @@ class SnapshotActorRestartRecoverySpec extends TestKit(ActorSystem("snapshot-act
         case SnapshotDictionaryBase.Materialized(dictionary) => Right(dictionary)
         case _ => Left(SnapshotError.Corrupt("test source was not materialized"))
       },
+    restoreFn: Option[StateSnapshotStore => Try[Either[String, PersistedSyncState]]] = None,
     timeout: FiniteDuration = 5.minutes): Fixture = {
     val (nodeContext, _, wallet) = FakeNodeContext(numAddresses = 1)
     val protocol = ReducerFixtures.protocol(rollupStartHeight = 100)
@@ -191,6 +309,9 @@ class SnapshotActorRestartRecoverySpec extends TestKit(ActorSystem("snapshot-act
 
       override protected def reconstruct(source: SnapshotDictionarySource):
         Either[SnapshotError, AuthenticatedDictionaryView] = reconstructFn(source)
+
+      override protected def findCanonical(store: StateSnapshotStore):
+        Try[Either[String, PersistedSyncState]] = restoreFn.fold(super.findCanonical(store))(_(store))
 
       override protected def operationTimeout: FiniteDuration = timeout
     })
