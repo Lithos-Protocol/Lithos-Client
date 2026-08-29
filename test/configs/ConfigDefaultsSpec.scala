@@ -25,7 +25,9 @@ class ConfigDefaultsSpec extends AnyFlatSpec with Matchers {
     val absent = new SyncConfig(Configuration(ConfigFactory.parseString(
       s"sync.startHeight = ${shippedSync.startHeight}")))
 
-    withClue("sync.reorgWindow: ") { absent.reorgWindow shouldEqual shippedSync.reorgWindow }
+    withClue("sync.materializedDictionaryCacheEntries: ") {
+      absent.materializedDictionaryCacheEntries shouldEqual shippedSync.materializedDictionaryCacheEntries
+    }
     withClue("sync.storage.backend: ") { absent.storageBackend shouldEqual shippedSync.storageBackend }
     withClue("sync.storage.path: ") { absent.storagePath shouldEqual shippedSync.storagePath }
     withClue("sync.snapshots.enabled: ") { absent.snapshotsEnabled shouldEqual shippedSync.snapshotsEnabled }
@@ -92,14 +94,10 @@ class ConfigDefaultsSpec extends AnyFlatSpec with Matchers {
     }
   }
 
-  /**
-   * The retained window is the subsystem's largest memory term, and its cost rises with the square of
-   * miners per rollup, so the ceiling is what stops a config change from being unsurvivable.
-   */
-  "sync.reorgWindow" should "sit inside the range validation permits" in {
-    val window = new SyncConfig(shipped).reorgWindow
-    window should be <= 20
-    window should be > 0
+  "sync.materializedDictionaryCacheEntries" should "bound always-resident AVL provers" in {
+    val entries = new SyncConfig(shipped).materializedDictionaryCacheEntries
+    entries should be <= 64
+    entries should be > 0
   }
 
   /**
@@ -115,10 +113,10 @@ class ConfigDefaultsSpec extends AnyFlatSpec with Matchers {
     sync.quarantineRepairTimeout.toMillis should be >= 1000L
   }
 
-  /** Cursors are cheap, so this is sized for reach and must outrange the state window. */
-  "sync.cursorWindow" should "reach further back than the retained-state window" in {
+  /** Cursors are cheap, so this is sized for fork discovery rather than dictionary retention. */
+  "sync.cursorWindow" should "fit in one node chain-slice request" in {
     val sync = new SyncConfig(shipped)
-    sync.cursorWindow should be > sync.reorgWindow
+    sync.cursorWindow should be > 0
     // The node serves at most 16384 headers in one chainSlice, and commonAncestor asks in one call.
     sync.cursorWindow should be <= 16000
   }

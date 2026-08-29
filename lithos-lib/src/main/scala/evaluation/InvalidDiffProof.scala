@@ -1,6 +1,6 @@
 package evaluation
 
-import lfsm.states.NISPTree
+import lfsm.states.Rollup
 import mutations.BoxLoader
 import nisp.NISP
 import org.bouncycastle.util.encoders.Hex
@@ -14,7 +14,7 @@ import work.lithos.mutations.{Contract, InputUTXO, Mutator, TxBuilder, TxContext
 
 import scala.util.{Success, Try}
 import sigma.exceptions.InterpreterException
-case class InvalidDiffProof(contract: Contract, miner: Array[Byte], nispTree: NISPTree, evalInput: InputUTXO,
+case class InvalidDiffProof(contract: Contract, miner: Array[Byte], nispTree: Rollup, evalInput: InputUTXO,
                             fpControl: InputUTXO)
   extends FraudProof(contract, miner, nispTree, evalInput, fpControl) {
   override val logger: Logger = LoggerFactory.getLogger("InvalidDiffProof")

@@ -4,13 +4,13 @@ import akka.actor.{Actor, ActorRef, Cancellable}
 import akka.pattern.ask
 import akka.util.Timeout
 import configs.{NodeContext, StateConfig}
-import lfsm.states.NISPTree
+import lfsm.states.RollupMetadata
 import org.ergoplatform.appkit.ErgoClient
 import org.slf4j.{Logger, LoggerFactory}
 import play.api.Configuration
 import play.api.cache.SyncCacheApi
 import play.api.libs.concurrent.InjectedActorSupport
-import state.messages.MempoolMessages.MempoolRollupState
+import state.messages.MempoolMessages.MempoolRollupMetadata
 import state.messages.SyncMessages._
 import transactions.BlockTxMessages.{BlockTxsReady, CandidateTx, RequestBlockTxs}
 import transactions.rollups.TransactionMessages.RollupTxType._
@@ -185,24 +185,24 @@ class TransactionProcessor @Inject()(config: Configuration, nodeContext: NodeCon
   /**
    * Removes inactive rollups and stubs whose submission criteria no longer hold.
    */
-  private def cleanupRollupTxs(rollups: Seq[(String, NISPTree)],
-                               projections: Map[String, MempoolRollupState],
+  private def cleanupRollupTxs(rollups: Seq[(String, RollupMetadata)],
+                               projections: Map[String, MempoolRollupMetadata],
                                currentHeight: Int): Unit = {
     val rawTrees = rollups
 
     // Projections arrive with the trees they belong to, so no second read can disagree with them.
-    val memStates: Map[String, MempoolRollupState] = rawTrees.flatMap { n =>
+    val memStates: Map[String, MempoolRollupMetadata] = rawTrees.flatMap { n =>
       projections.get(n._2.blockId).map(n._1 -> _)
     }.toMap
 
     val statesToRemove = memStates.filter(_._2.toBeRemoved)
 
-    val updatedTrees: Seq[(String, NISPTree)] = rawTrees.map { t =>
-      if (memStates.contains(t._1)) t._1 -> memStates(t._1).nispTree else t
+    val updatedTrees: Seq[(String, RollupMetadata)] = rawTrees.map { t =>
+      if (memStates.contains(t._1)) t._1 -> memStates(t._1).metadata else t
     }
 
     // Build the lookup map from trees not flagged for removal, keyed by blockId
-    val syncedTrees: Map[String, NISPTree] =
+    val syncedTrees: Map[String, RollupMetadata] =
       updatedTrees.filterNot(u => statesToRemove.contains(u._1))
                   .map(t => t._2.blockId -> t._2)
                   .toMap

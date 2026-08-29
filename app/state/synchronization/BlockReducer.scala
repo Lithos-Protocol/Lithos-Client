@@ -1,6 +1,6 @@
 package state.synchronization
 
-import lfsm.states.{AuthenticatedDictionary, AuthenticatedDictionaryView, MinerTree, NISPTree, PlasmaDictionary}
+import lfsm.states.{AuthenticatedDictionary, AuthenticatedDictionaryView, MinerDictionary, Rollup, PlasmaDictionary}
 import lfsm.{LFSMHelpers, LFSMPhase}
 import org.bouncycastle.util.encoders.Hex
 import org.ergoplatform.appkit.{ErgoValue, NetworkType}
@@ -101,9 +101,16 @@ final case class BlockTransition(state: CommittedSyncState,
                                  quarantined: Seq[QuarantineFault] = Seq.empty,
                                  minerDictionaryFault: Option[String] = None,
                                  unrecognizedGenesis: Seq[String] = Seq.empty,
-                                 unauthenticatedGenesis: Seq[(String, String)] = Seq.empty)
+                                 unauthenticatedGenesis: Seq[(String, String)] = Seq.empty,
+                                 dictionaryTransforms: Vector[DictionaryTransform] = Vector.empty)
 
-/** Applies a block deterministically to private dictionary copies without mutating the base state. */
+/**
+ *  Applies a block deterministically to private dictionary copies without mutating the base state.
+ *  A block's transactions are reduced into transforms, which are then applied to a copy of the current
+ *  state sequentially until block application is complete and a transition result is outputted.
+ *  Failures are separated and quarantined to prevent unnecessary downtime on unrelated dictionaries,
+ *  and to ensure certain client capabilities remain resilient under different failure modes.
+ *  */
 object BlockReducer {
   import SyncApplyError._
 
@@ -136,7 +143,7 @@ object BlockReducer {
         // Report only faults introduced by this block.
         BlockTransition(next, staged.relevantEvents, staged.dictionaryCopies, staged.quarantined,
           if (base.minerDictionaryFault.isEmpty) staged.minerDictionaryFault else None,
-          staged.unrecognizedGenesis, staged.unauthenticatedGenesis)
+          staged.unrecognizedGenesis, staged.unauthenticatedGenesis, staged.dictionaryTransforms)
       }
     }
   }
@@ -166,7 +173,7 @@ object BlockReducer {
    */
   final class RollupReplay(protocol: SyncProtocolContext) {
     private var state = CommittedSyncState(SyncCursor(0, "", ""), 0L, Map.empty, Map.empty, Map.empty,
-      MinerTree.initialState, None)
+      MinerDictionary.initialState, None)
 
     /** Applies one transaction, reporting whether it changed rollup state. */
     def apply(block: BlockInfo, tx: BlockTx): Either[SyncApplyError, Boolean] = {
@@ -177,7 +184,7 @@ object BlockReducer {
       }
     }
 
-    def rollup(rollupId: String): Option[NISPTree] = state.rollups.get(rollupId)
+    def rollup(rollupId: String): Option[Rollup] = state.rollups.get(rollupId)
   }
 
   /**
@@ -218,6 +225,8 @@ object BlockReducer {
     private var dataBoxToken = base.dataBoxToken
     private var stagedRollupDictionaries = Map.empty[String, AuthenticatedDictionary]
     private var stagedMinerDictionary = Option.empty[AuthenticatedDictionary]
+    private var stagedOperations = Map.empty[DictionaryId, Vector[DictionaryOperation]]
+    private var stagedBeforeDigests = Map.empty[DictionaryId, String]
 
     private var quarantines = base.quarantined
 
@@ -233,6 +242,16 @@ object BlockReducer {
       base.copy(rollups = rollups, routes = routes, rollupOrigins = rollupOrigins,
         minerTree = minerTree, dataBoxToken = dataBoxToken,
         minerDictionaryFault = minerDictionaryFault, quarantined = quarantines)
+
+    def dictionaryTransforms: Vector[DictionaryTransform] =
+      stagedOperations.toVector.sortBy(_._1.value).flatMap { case (dictionaryId, operations) =>
+        val after = dictionaryId match {
+          case DictionaryId.Rollup(id) => rollups.get(id).map(_.dictionary)
+          case DictionaryId.Miner => Some(minerTree.dictionary)
+        }
+        after.map(dictionary => DictionaryTransform(dictionaryId, stagedBeforeDigests(dictionaryId),
+          operations, Hex.toHexString(dictionary.digest)))
+      }
 
     /** Clears a fault when its rollup is tracked again, so a rebuild leaves no stale entry. */
     def untrack(rollupId: String): Unit = quarantines -= rollupId
@@ -279,6 +298,8 @@ object BlockReducer {
       rollups -= rollupId
       rollupOrigins -= rollupId
       stagedRollupDictionaries -= rollupId
+      stagedOperations -= DictionaryId.Rollup(rollupId)
+      stagedBeforeDigests -= DictionaryId.Rollup(rollupId)
       val fault = QuarantineFault(rollupId, genesisHeight, collateralBoxId, error.message,
         BlockReducer.isRetryable(error))
       quarantines += rollupId -> fault
@@ -299,6 +320,8 @@ object BlockReducer {
       minerTree = base.minerTree
       dataBoxToken = base.dataBoxToken
       stagedMinerDictionary = None
+      stagedOperations -= DictionaryId.Miner
+      stagedBeforeDigests -= DictionaryId.Miner
       minerDictionaryFault = Some(error.message)
     }
 
@@ -347,7 +370,7 @@ object BlockReducer {
         dictionary = PlasmaDictionary.empty()
         _ <- requireDigest(tx.id, dictionary, registers.digest)
       } yield {
-        val tree = NISPTree(dictionary, registers.numMiners, registers.totalScore,
+        val tree = Rollup(dictionary, registers.numMiners, registers.totalScore,
           Some(registers.periodOrReward), output.value, registers.periodOrReward.toInt,
           hasMiner = false, LFSMPhase.HOLDING, blockId = block.id, utxoId = output.id)
         rollups += block.id -> tree
@@ -377,7 +400,7 @@ object BlockReducer {
 
     private def applyHolding(tx: BlockTx,
                              rollupId: String,
-                             tree: NISPTree): Either[SyncApplyError, Unit] = {
+                             tree: Rollup): Either[SyncApplyError, Unit] = {
       required(tx.outputs.headOption, tx.id, "rollup output 0").flatMap { output =>
         if (output.ergoTree == protocol.holdingErgoTree) applySubmission(tx, rollupId, tree, output)
         else if (output.ergoTree == protocol.evaluationErgoTree) {
@@ -400,7 +423,7 @@ object BlockReducer {
 
     private def applySubmission(tx: BlockTx,
                                 rollupId: String,
-                                tree: NISPTree,
+                                tree: Rollup,
                                 output: TxOutput): Either[SyncApplyError, Unit] = {
       for {
         proof <- spendingProof(tx, 0)
@@ -414,6 +437,7 @@ object BlockReducer {
         insertion <- attempt(tx.id, "could not apply dictionary insertion") {
           dictionary.insert(keyValue._1 -> keyValue._2)
         }
+        _ = record(DictionaryId.Rollup(rollupId), DictionaryOperation.Insert(tx.id, Seq(keyValue)))
         // _ <- requireProof(tx.id, "insertion", insertion.proof.ergoValue.getValue, expectedProof)
         _ <- requireDigest(tx.id, dictionary, registers.digest)
         _ <- requireState(tx.id, registers.numMiners == tree.numMiners + 1,
@@ -423,18 +447,17 @@ object BlockReducer {
         _ <- requireState(tx.id, tree.currentPeriod.contains(registers.periodOrReward),
           "submission changed the holding-period start")
       } yield {
-        val minerHex = Hex.toHexString(keyValue._1)
         val next = tree.copy(dictionary = dictionary, numMiners = registers.numMiners,
           totalScore = registers.totalScore, currentPeriod = Some(registers.periodOrReward),
           hasMiner = tree.hasMiner || sameBytes(keyValue._1, protocol.localMinerHash),
-          minerSet = tree.minerSet + minerHex, utxoId = output.id)
+          utxoId = output.id)
         replaceRollup(rollupId, next)
       }
     }
 
     private def applyEvaluation(tx: BlockTx,
                                 rollupId: String,
-                                tree: NISPTree): Either[SyncApplyError, Unit] = {
+                                tree: Rollup): Either[SyncApplyError, Unit] = {
       required(tx.outputs.headOption, tx.id, "rollup output 0").flatMap { output =>
         if (output.ergoTree == protocol.evaluationErgoTree) applyFraudProof(tx, rollupId, tree, output)
         else if (output.ergoTree == protocol.payoutErgoTree) {
@@ -459,7 +482,7 @@ object BlockReducer {
 
     private def applyFraudProof(tx: BlockTx,
                                 rollupId: String,
-                                tree: NISPTree,
+                                tree: Rollup,
                                 output: TxOutput): Either[SyncApplyError, Unit] = {
       for {
         proof <- spendingProof(tx, 1)
@@ -478,6 +501,7 @@ object BlockReducer {
           Longs.fromByteArray(value.slice(0, 8))
         }
         deletion <- attempt(tx.id, "could not apply dictionary deletion") { dictionary.delete(miner) }
+        _ = record(DictionaryId.Rollup(rollupId), DictionaryOperation.Delete(tx.id, Seq(miner)))
         // _ <- requireProof(tx.id, "deletion", deletion.proof.ergoValue.getValue, expectedDelete)
         _ <- requireDigest(tx.id, dictionary, registers.digest)
         _ <- requireState(tx.id, registers.numMiners == tree.numMiners - 1,
@@ -487,18 +511,17 @@ object BlockReducer {
         _ <- requireState(tx.id, tree.currentPeriod.contains(registers.periodOrReward),
           "fraud proof changed the evaluation-period start")
       } yield {
-        val minerHex = Hex.toHexString(miner)
         val next = tree.copy(dictionary = dictionary, numMiners = registers.numMiners,
           totalScore = registers.totalScore, currentPeriod = Some(registers.periodOrReward),
           hasMiner = tree.hasMiner && !sameBytes(miner, protocol.localMinerHash),
-          minerSet = tree.minerSet - minerHex, utxoId = output.id)
+          utxoId = output.id)
         replaceRollup(rollupId, next)
       }
     }
 
     private def applyPayout(tx: BlockTx,
                             rollupId: String,
-                            tree: NISPTree): Either[SyncApplyError, Unit] = {
+                            tree: Rollup): Either[SyncApplyError, Unit] = {
       for {
         proof <- spendingProof(tx, 0)
         miners <- extensionNestedBytes(proof, "0", tx.id)
@@ -514,6 +537,7 @@ object BlockReducer {
         deletion <- attempt(tx.id, "could not apply payout dictionary deletion") {
           dictionary.delete(miners: _*)
         }
+        _ = record(DictionaryId.Rollup(rollupId), DictionaryOperation.Delete(tx.id, miners))
         // _ <- requireProof(tx.id, "deletion", deletion.proof.ergoValue.getValue, expectedDelete)
         paidLocal = miners.exists(sameBytes(_, protocol.localMinerHash))
         _ <- if (paidLocal) Right(removeRollup(rollupId))
@@ -525,7 +549,7 @@ object BlockReducer {
 
     private def applyPayoutSuccessor(tx: BlockTx,
                                      rollupId: String,
-                                     tree: NISPTree,
+                                     tree: Rollup,
                                      miners: Seq[Array[Byte]],
                                      dictionary: AuthenticatedDictionary): Either[SyncApplyError, Unit] =
       tx.outputs.headOption.filter(_.ergoTree == protocol.payoutErgoTree) match {
@@ -539,8 +563,7 @@ object BlockReducer {
                 "payout successor changed the committed total score")
               _ <- requireState(tx.id, registers.periodOrReward == tree.totalReward,
                 "payout successor changed the committed total reward")
-            } yield replaceRollup(rollupId, tree.copy(dictionary = dictionary,
-              minerSet = tree.minerSet -- miners.map(bytes => Hex.toHexString(bytes)), utxoId = output.id))
+            } yield replaceRollup(rollupId, tree.copy(dictionary = dictionary, utxoId = output.id))
           case None => Right(removeRollup(rollupId))
       }
 
@@ -554,8 +577,8 @@ object BlockReducer {
           proof <- spendingProof(tx, 0)
           operation <- extensionByte(proof, "0", tx.id)
           _ <- operation match {
-            case MinerTree.ADD_MINER_OP => applyMinerAdd(block, tx, proof)
-            case MinerTree.REMOVE_MINER_OP => applyMinerRemove(block, tx, proof)
+            case MinerDictionary.ADD_MINER_OP => applyMinerAdd(block, tx, proof)
+            case MinerDictionary.REMOVE_MINER_OP => applyMinerRemove(block, tx, proof)
             case other => Left(MalformedTransaction(tx.id, s"unknown miner dictionary operation $other"))
           }
         } yield relevantEvents += 1
@@ -585,19 +608,13 @@ object BlockReducer {
         insertion <- attempt(tx.id, "could not apply miner dictionary insertion") {
           dictionary.insert(keyValue._1 -> keyValue._2)
         }
+        _ = record(DictionaryId.Miner, DictionaryOperation.Insert(tx.id, Seq(keyValue)))
         // _ <- requireProof(tx.id, "miner dictionary insertion", insertion.proof.ergoValue.getValue, expectedInsert)
         digest <- avlDigest(output, tx.id)
         _ <- requireDigest(tx.id, dictionary, digest)
-        // TODO: This could change with commitment changes in the future!
-        // Any SigmaProp may register, so the address derivation is guarded like every other read of
-        // stranger-supplied data. Escaping here would reach the caller as an unattributable failure.
-        address <- attempt(tx.id, "could not derive the miner address") {
-          miner.address(protocol.networkType)
-        }
       } yield {
         val isLocal = sameBytes(options.take(32), protocol.localMinerHash)
         minerTree = minerTree.copy(dictionary = dictionary, numMiners = minerTree.numMiners + 1,
-          minerMap = minerTree.minerMap + (Hex.toHexString(keyValue._1) -> (address, dataToken.id)),
           hasMiner = minerTree.hasMiner || isLocal, utxoId = output.id,
           syncHeight = block.height, savedHeight = block.height)
         if (isLocal) dataBoxToken = Some(dataToken.id)
@@ -629,13 +646,14 @@ object BlockReducer {
         deletion <- attempt(tx.id, "could not apply miner dictionary deletion") {
           dictionary.delete(miner.hashedPropBytes)
         }
+        _ = record(DictionaryId.Miner,
+          DictionaryOperation.Delete(tx.id, Seq(miner.hashedPropBytes)))
         // _ <- requireProof(tx.id, "miner dictionary deletion", deletion.proof.ergoValue.getValue, expectedDelete)
         digest <- avlDigest(output, tx.id)
         _ <- requireDigest(tx.id, dictionary, digest)
       } yield {
         val isLocal = sameBytes(miner.hashedPropBytes, protocol.localMinerHash)
         minerTree = minerTree.copy(dictionary = dictionary, numMiners = minerTree.numMiners - 1,
-          minerMap = minerTree.minerMap - Hex.toHexString(miner.hashedPropBytes),
           hasMiner = minerTree.hasMiner && !isLocal, utxoId = output.id,
           syncHeight = block.height, savedHeight = block.height)
         if (isLocal) dataBoxToken = None
@@ -644,6 +662,8 @@ object BlockReducer {
 
     private def mutableRollupDictionary(rollupId: String): AuthenticatedDictionary = {
       stagedRollupDictionaries.getOrElse(rollupId, {
+        stagedBeforeDigests += DictionaryId.Rollup(rollupId) ->
+          Hex.toHexString(rollups(rollupId).dictionary.digest)
         val copied = rollups(rollupId).dictionary.copy()
         rollups += rollupId -> rollups(rollupId).copy(dictionary = copied)
         stagedRollupDictionaries += rollupId -> copied
@@ -654,6 +674,7 @@ object BlockReducer {
 
     private def mutableMinerDictionary(): AuthenticatedDictionary = {
       stagedMinerDictionary.getOrElse {
+        stagedBeforeDigests += DictionaryId.Miner -> Hex.toHexString(minerTree.dictionary.digest)
         val copied = minerTree.dictionary.copy()
         minerTree = minerTree.copy(dictionary = copied)
         stagedMinerDictionary = Some(copied)
@@ -662,7 +683,7 @@ object BlockReducer {
       }
     }
 
-    private def replaceRollup(rollupId: String, next: NISPTree): Unit = {
+    private def replaceRollup(rollupId: String, next: Rollup): Unit = {
       routes -= rollups(rollupId).utxoId
       rollups += rollupId -> next
       routes += next.utxoId -> rollupId
@@ -672,7 +693,12 @@ object BlockReducer {
       routes -= rollups(rollupId).utxoId
       rollups -= rollupId
       rollupOrigins -= rollupId
+      stagedOperations -= DictionaryId.Rollup(rollupId)
+      stagedBeforeDigests -= DictionaryId.Rollup(rollupId)
     }
+
+    private def record(dictionaryId: DictionaryId, operation: DictionaryOperation): Unit =
+      stagedOperations += dictionaryId -> (stagedOperations.getOrElse(dictionaryId, Vector.empty) :+ operation)
   }
 
   private final case class RollupRegisters(digest: Array[Byte],

@@ -21,9 +21,10 @@ import transactions.rollups.TransactionMessages.{CriticalEvalError, EvaluationSe
 import work.lithos.mutations.{Contract, InputUTXO}
 
 import javax.inject.{Inject, Named}
+import scala.collection.mutable.ArrayBuffer
 import scala.concurrent.duration.DurationInt
 import scala.concurrent.{Await, ExecutionContext, Future}
-import scala.util.{Failure, Success, Try}
+import scala.util.{Failure, Random, Success, Try}
 
 /**
  * Actor responsible for running fraud-proof checks on EVAL-phase rollups.
@@ -157,12 +158,30 @@ class RollupEvaluator @Inject()(config: Configuration, nodeContext: NodeContext,
       client.execute {
         ctx =>
           val latestRollup = latestRollupState(stub).get
-          val stillValid = stub.validate(ctx.getHeight, latestRollup.NISPTree)
+          val stillValid = stub.validate(ctx.getHeight, latestRollup.rollup)
 
           if (stillValid) {
-            val currentMiners = latestRollup.NISPTree.minerSet.toSeq.map(Hex.decode).sortBy(_ => Math.random())
+            val currentMiners = ArrayBuffer.empty[Array[Byte]]
+            latestRollup.rollup.dictionary.foreachKey { key =>
+              require(key.length == latestRollup.rollup.dictionary.parameters.keySize,
+                s"Rollup ${latestRollup.rollup.blockId} contains an invalid ${key.length}-byte miner key")
+              currentMiners += key
+            }
+            require(currentMiners.size == latestRollup.rollup.numMiners,
+              s"Rollup ${latestRollup.rollup.blockId} counts ${latestRollup.rollup.numMiners} " +
+                s"miners but its authenticated dictionary contains ${currentMiners.size}")
+            // Preserve randomized evaluation order without sortBy's O(n log n) comparisons and
+            // temporary random-key tuples. This list exists only for the active evaluation.
+            var index = currentMiners.size - 1
+            while (index > 0) {
+              val swap = Random.nextInt(index + 1)
+              val miner = currentMiners(index)
+              currentMiners(index) = currentMiners(swap)
+              currentMiners(swap) = miner
+              index -= 1
+            }
             val fpControl = LFSMHelpers.getFPControlBox(ctx)
-            val evaluator = Evaluator(ctx, wallet, latestRollup.inputUTXO, latestRollup.NISPTree, currentMiners,
+            val evaluator = Evaluator(ctx, wallet, latestRollup.inputUTXO, latestRollup.rollup, currentMiners,
               fpControl, new BoxLoader(ctx, nodeContext.getNodeApi), fpContracts)
             val evals = evaluator.evaluateSync
             val minerEvaluationResults = evals.map(processEvaluationResult(stub, _))
@@ -233,23 +252,27 @@ class RollupEvaluator @Inject()(config: Configuration, nodeContext: NodeContext,
 
   private def latestRollupState(rollupTxStub: RollupTxStub) = {
     Try {
-      val rollupInfo = Await.result[RollupInfo]((syncHandler ? GetCurrentRollup(rollupTxStub.rollupBlockId)).mapTo[RollupInfo], 5.seconds)
+      val rollupInfo = Await.result[RollupInfo](
+        (syncHandler ? GetCurrentRollup(rollupTxStub.rollupBlockId)).mapTo[RollupInfo], timeout.duration)
       rollupInfo match {
-        case RollupMessages.CurrentRollup(utxoId, nispTree, mempoolState) =>
+        case RollupMessages.CurrentRollup(utxoId, rollup, mempoolState) =>
           if (mempoolState.isDefined) {
             if (!mempoolState.get.toBeRemoved) {
               logger.info(s"Using mempool state for rollup ${rollupTxStub.rollupBlockId}" +
                 s" with synced id $utxoId and mempool id ${mempoolState.get.asInput.id}")
-              Success(LatestRollup(mempoolState.get.asInput, mempoolState.get.nispTree))
+              Success(LatestRollup(mempoolState.get.asInput, mempoolState.get.rollup))
             } else {
               Failure(RollupRemovedException(s"Cannot evaluate rollup" +
                 s" ${rollupTxStub.rollupBlockId} with upcoming removal"))
             }
           } else {
-            Success(LatestRollup(InputUTXO(client.execute(_.getBoxesById(utxoId).head)), nispTree))
+            Success(LatestRollup(InputUTXO(client.execute(_.getBoxesById(utxoId).head)), rollup))
           }
         case RollupMessages.NoRollupFound() =>
           Failure(new IllegalStateException(s"No existing rollup for blockId ${rollupTxStub.rollupBlockId}"))
+        case RollupMessages.RollupUnavailable(reason) =>
+          Failure(new IllegalStateException(
+            s"Rollup ${rollupTxStub.rollupBlockId} is temporarily unavailable: $reason"))
       }
     }.flatten
   }

@@ -1,6 +1,6 @@
 package state.synchronization
 
-import akka.actor.{ActorSystem, Props}
+import akka.actor.{ActorIdentity, ActorSystem, Identify, Kill, Props}
 import akka.testkit.{TestKit, TestProbe}
 import com.typesafe.config.ConfigFactory
 import lfsm.states.PlasmaDictionary
@@ -8,11 +8,11 @@ import org.scalatest.BeforeAndAfterAll
 import org.scalatest.flatspec.AnyFlatSpecLike
 import org.scalatest.matchers.should.Matchers
 import play.api.Configuration
-import state.messages.MempoolMessages.MempoolSnapshot
-import state.messages.RollupMessages.{GetCurrentRollup, NoRollupFound, RemoveRollup}
+import state.messages.MempoolMessages.{MempoolChain, MempoolSnapshot}
+import state.messages.RollupMessages.{CurrentRollup, GetCurrentRollup, NoRollupFound, RemoveRollup}
 import state.messages.SyncMessages._
-import state.persistence.StateSnapshotActor.SnapshotCandidate
-import support.{FakeCache, FakeNodeContext, ReducerFixtures, SyncFixtures}
+import state.persistence.StateSnapshotActor.{DictionaryLoaded, MaterializeDictionary, SnapshotCandidate, SnapshotSaveFailed, SnapshotSaved}
+import support.{FakeCache, FakeNodeContext, ReducerFixtures, RestartingSupervisor, SyncFixtures}
 
 import scala.concurrent.duration._
 
@@ -42,6 +42,8 @@ class SyncStateLifecycleSpec extends TestKit(ActorSystem("sync-state-lifecycle")
 
     requester.send(handler, RestoreCommittedState(seeded, Vector(seeded.cursor)))
     requester.expectMsgType[BlockCommitted]
+    requester.send(handler, MarkReady)
+    requester.expectMsg(Ready(seeded.cursor))
 
     requester.send(handler, GetCommittedState)
     requester.expectMsgType[CommittedState].state.rollups.keySet should contain(rollupId)
@@ -60,14 +62,8 @@ class SyncStateLifecycleSpec extends TestKit(ActorSystem("sync-state-lifecycle")
     requester.expectMsgType[NoRollupFound]
   }
 
-  /**
-   * The writer receives bytes, so the owner keeps the dictionaries it is still reducing against.
-   *
-   * Copying instead ran getManifest, loadManifest and generateProof per rollup and left the writer to
-   * run getManifest again — three times the work, and a second copy of the rollup set in memory.
-   */
-  it should "hand the snapshot writer encoded bytes and keep its own dictionaries" in {
-    val (handler, snapshots) = newHandler()
+  it should "hand the writer a replay plan while keeping committed state digest-only" in {
+    val (handler, snapshots) = newHandler(snapshotsEnabled = true)
     val requester = TestProbe()
     val seeded = ReducerFixtures.emptyState().copy(
       cursor = SyncCursor(startHeight - 1, SyncFixtures.id(startHeight - 1), SyncFixtures.id(startHeight - 2)))
@@ -76,24 +72,25 @@ class SyncStateLifecycleSpec extends TestKit(ActorSystem("sync-state-lifecycle")
     requester.expectMsgType[BlockCommitted]
     requester.send(handler, GetCommittedState)
     val before = requester.expectMsgType[CommittedState].state.minerTree.dictionary
+    before.materialized shouldBe false
 
     handler ! MempoolSnapshot(1L, Map.empty, Map.empty, Set.empty)
     requester.send(handler, MarkReady)
     requester.expectMsgType[Ready]
 
     val candidate = snapshots.expectMsgType[SnapshotCandidate]
-    candidate.encoded.meta.length should be > 0
     candidate.cursor shouldEqual seeded.cursor
+    candidate.snapshot.metadata.minerDictionary shouldEqual seeded.minerTree.metadata
+    candidate.snapshot.dictionaries.keySet shouldEqual Set(DictionaryId.Miner)
 
-    // The dictionary the owner holds is untouched, because nothing had to be detached for the writer.
+    // The materialized base lives only in the checkpoint source while the owner publishes metadata.
     requester.send(handler, GetCommittedState)
     val after = requester.expectMsgType[CommittedState].state.minerTree.dictionary
     after should be theSameInstanceAs before
   }
 
-  /** The retained window is the largest memory term, so its bound is worth pinning. */
-  it should "retain no more committed states than the configured window" in {
-    val (handler, _) = newHandler(reorgWindow = 3)
+  it should "roll back anywhere in the volatile transform journal without retained full states" in {
+    val (handler, _) = newHandler()
     val requester = TestProbe()
     val seeded = ReducerFixtures.emptyState().copy(
       cursor = SyncCursor(startHeight - 1, SyncFixtures.id(startHeight - 1), SyncFixtures.id(startHeight - 2)))
@@ -108,19 +105,185 @@ class SyncStateLifecycleSpec extends TestKit(ActorSystem("sync-state-lifecycle")
       requester.expectMsgType[BlockCommitted].cursor
     }
 
-    // Rolling back to a cursor inside the window succeeds.
+    // Both a recent and an old boundary are represented by metadata plus journal operations.
     val inWindow = committed(committed.size - 2)
     requester.send(handler, RollbackTo(inWindow.blockId))
     requester.expectMsgType[RollbackCompleted].cursor shouldEqual inWindow
 
-    // One outside it is refused, which is what routes a deeper fork to a snapshot instead.
     requester.send(handler, RollbackTo(committed.head.blockId))
-    requester.expectMsgType[RollbackRejected].reason should include("outside the retained")
+    requester.expectMsgType[RollbackCompleted].cursor shouldEqual committed.head
+  }
+
+  it should "compact only an acknowledged lagging prefix and retain commits made while it saved" in {
+    val (handler, snapshots) = newHandler(snapshotsEnabled = true, snapshotInterval = 3)
+    val requester = TestProbe()
+    val seeded = ReducerFixtures.emptyState().copy(
+      cursor = SyncCursor(startHeight - 1, SyncFixtures.id(startHeight - 1), SyncFixtures.id(startHeight - 2)))
+    requester.send(handler, RestoreCommittedState(seeded, Vector(seeded.cursor)))
+    requester.expectMsgType[BlockCommitted]
+
+    var pendingCheckpoint = Option.empty[SnapshotCandidate]
+    val cursors = (startHeight to startHeight + 4).map { height =>
+      requester.send(handler, ApplyBlock(state.messages.BlockInfo(SyncFixtures.id(height), height,
+        Seq.empty, SyncFixtures.id(height - 1))))
+      val committed = requester.expectMsgType[BlockCommitted].cursor
+      if (height == startHeight + 2) {
+        val candidate = snapshots.expectMsgType[SnapshotCandidate]
+        // Interval 3 retains one volatile entry, so height 101 is the immutable boundary.
+        candidate.cursor.height shouldEqual startHeight + 1
+        pendingCheckpoint = Some(candidate)
+      }
+      committed
+    }
+
+    val candidate = pendingCheckpoint.get
+    snapshots.send(handler, SnapshotSaved(candidate.cursor, candidate.checkpointToken))
+    snapshots.send(handler, GetCommittedState)
+    snapshots.expectMsgType[CommittedState].state.cursor shouldEqual cursors.last
+    snapshots.send(handler, RollbackTo(cursors(2).blockId))
+    snapshots.expectMsgType[RollbackCompleted].cursor shouldEqual cursors(2)
+    snapshots.send(handler, RollbackTo(cursors(1).blockId))
+    snapshots.expectMsgType[RollbackCompleted].cursor shouldEqual cursors(1)
+  }
+
+  it should "retain every volatile boundary when a lagging checkpoint fails" in {
+    val (handler, snapshots) = newHandler(snapshotsEnabled = true, snapshotInterval = 3)
+    val requester = TestProbe()
+    val seeded = ReducerFixtures.emptyState().copy(
+      cursor = SyncCursor(startHeight - 1, SyncFixtures.id(startHeight - 1), SyncFixtures.id(startHeight - 2)))
+    requester.send(handler, RestoreCommittedState(seeded, Vector(seeded.cursor)))
+    requester.expectMsgType[BlockCommitted]
+
+    val cursors = (startHeight to startHeight + 2).map { height =>
+      requester.send(handler, ApplyBlock(state.messages.BlockInfo(SyncFixtures.id(height), height,
+        Seq.empty, SyncFixtures.id(height - 1))))
+      requester.expectMsgType[BlockCommitted].cursor
+    }
+    val candidate = snapshots.expectMsgType[SnapshotCandidate]
+    candidate.cursor shouldEqual cursors(1)
+    snapshots.send(handler, SnapshotSaveFailed(candidate.cursor, candidate.checkpointToken, "disk full"))
+
+    requester.send(handler, RollbackTo(cursors.head.blockId))
+    requester.expectMsgType[RollbackCompleted].cursor shouldEqual cursors.head
+  }
+
+  it should "refuse to compact a lagging acknowledgement from a replaced same-height branch" in {
+    val (handler, snapshots) = newHandler(snapshotsEnabled = true, snapshotInterval = 3)
+    val requester = TestProbe()
+    val seeded = ReducerFixtures.emptyState().copy(
+      cursor = SyncCursor(startHeight - 1, SyncFixtures.id(startHeight - 1), SyncFixtures.id(startHeight - 2)))
+    requester.send(handler, RestoreCommittedState(seeded, Vector(seeded.cursor)))
+    requester.expectMsgType[BlockCommitted]
+
+    val original = (startHeight to startHeight + 2).map { height =>
+      requester.send(handler, ApplyBlock(state.messages.BlockInfo(SyncFixtures.id(height), height,
+        Seq.empty, SyncFixtures.id(height - 1))))
+      requester.expectMsgType[BlockCommitted].cursor
+    }
+    val stale = snapshots.expectMsgType[SnapshotCandidate]
+    stale.cursor shouldEqual original(1)
+
+    requester.send(handler, RollbackTo(original.head.blockId))
+    requester.expectMsgType[RollbackCompleted]
+    val replacement101 = SyncCursor(startHeight + 1, SyncFixtures.id(7101), original.head.blockId)
+    val replacement102 = SyncCursor(startHeight + 2, SyncFixtures.id(7102), replacement101.blockId)
+    Seq(replacement101, replacement102).foreach { cursor =>
+      requester.send(handler, ApplyBlock(state.messages.BlockInfo(cursor.blockId, cursor.height,
+        Seq.empty, cursor.parentId)))
+      requester.expectMsgType[BlockCommitted].cursor shouldEqual cursor
+    }
+
+    snapshots.send(handler, SnapshotSaved(stale.cursor, stale.checkpointToken))
+    val replacementCheckpoint = snapshots.expectMsgType[SnapshotCandidate]
+    replacementCheckpoint.cursor shouldEqual replacement101
+    replacementCheckpoint.cursor.blockId should not equal stale.cursor.blockId
+  }
+
+  it should "lose its volatile journal on restart and require a checkpoint restore" in {
+    val snapshots = TestProbe()
+    val childProps = handlerProps(snapshots.ref)
+    val supervisor = system.actorOf(RestartingSupervisor.props(childProps))
+    val requester = TestProbe()
+    requester.send(supervisor, RestartingSupervisor.GetChild)
+    val handler = requester.expectMsgType[RestartingSupervisor.Child].ref
+    val seeded = ReducerFixtures.emptyState().copy(
+      cursor = SyncCursor(startHeight - 1, SyncFixtures.id(startHeight - 1), SyncFixtures.id(startHeight - 2)))
+    requester.send(handler, RestoreCommittedState(seeded, Vector(seeded.cursor)))
+    requester.expectMsgType[BlockCommitted]
+    val next = state.messages.BlockInfo(SyncFixtures.id(startHeight), startHeight, Seq.empty,
+      seeded.cursor.blockId)
+    requester.send(handler, ApplyBlock(next))
+    requester.expectMsgType[BlockCommitted]
+
+    handler ! Kill
+    handler.tell(Identify("sync-restarted"), testActor)
+    expectMsg(ActorIdentity("sync-restarted", Some(handler)))
+    requester.send(handler, RollbackTo(next.id))
+    requester.expectMsgType[RollbackRejected].reason should include("no transform journal")
+
+    requester.send(handler, RestoreCommittedState(seeded, Vector(seeded.cursor)))
+    requester.expectMsgType[BlockCommitted].cursor shouldEqual seeded.cursor
+  }
+
+  it should "publish all metadata without materializing rollups and load only the requested root" in {
+    val (handler, snapshots) = newHandler()
+    val requester = TestProbe()
+    val firstId = SyncFixtures.id(610001)
+    val secondId = SyncFixtures.id(610002)
+    val first = SyncFixtures.emptyRollup(firstId, SyncFixtures.id(620001), startHeight - 1)
+    val second = SyncFixtures.emptyRollup(secondId, SyncFixtures.id(620002), startHeight - 1)
+    val seeded = ReducerFixtures.emptyState(startHeight - 1, SyncFixtures.id(startHeight - 1)).copy(
+      rollups = Map(firstId -> first, secondId -> second),
+      routes = Map(first.utxoId -> firstId, second.utxoId -> secondId),
+      rollupOrigins = Map(firstId -> SyncFixtures.id(630001), secondId -> SyncFixtures.id(630002)))
+
+    requester.send(handler, RestoreCommittedState(seeded, Vector(seeded.cursor)))
+    requester.expectMsgType[BlockCommitted]
+    handler ! MempoolSnapshot(1L, Map.empty, Map.empty, Set.empty)
+    requester.send(handler, MarkReady)
+    requester.expectMsgType[Ready]
+
+    requester.send(handler, GetSynced)
+    requester.expectMsgType[FullSync].rollups.map(_._2.blockId).toSet shouldEqual Set(firstId, secondId)
+    snapshots.expectNoMessage(150.millis)
+
+    requester.send(handler, GetCurrentRollup(firstId))
+    val load = snapshots.expectMsgType[MaterializeDictionary]
+    load.source.expectedDigest shouldEqual first.metadata.dictionaryDigest
+    snapshots.reply(DictionaryLoaded(load.source.expectedDigest, load.requestToken, first.dictionary))
+    requester.expectMsgType[CurrentRollup].rollup.blockId shouldEqual firstId
+    snapshots.expectNoMessage(150.millis)
+  }
+
+  it should "materialize only roots with active mempool chains when publishing global projections" in {
+    val (handler, snapshots) = newHandler()
+    val requester = TestProbe()
+    val firstId = SyncFixtures.id(640001)
+    val secondId = SyncFixtures.id(640002)
+    val first = SyncFixtures.emptyRollup(firstId, SyncFixtures.id(640011), startHeight - 1)
+    val second = SyncFixtures.emptyRollup(secondId, SyncFixtures.id(640012), startHeight - 1)
+    val seeded = ReducerFixtures.emptyState(startHeight - 1, SyncFixtures.id(startHeight - 1)).copy(
+      rollups = Map(firstId -> first, secondId -> second),
+      routes = Map(first.utxoId -> firstId, second.utxoId -> secondId),
+      rollupOrigins = Map(firstId -> SyncFixtures.id(640021), secondId -> SyncFixtures.id(640022)))
+
+    requester.send(handler, RestoreCommittedState(seeded, Vector(seeded.cursor)))
+    requester.expectMsgType[BlockCommitted]
+    handler ! MempoolSnapshot(1L, Map(first.utxoId -> MempoolChain(Seq.empty)), Map.empty, Set.empty)
+    requester.send(handler, MarkReady)
+    requester.expectMsgType[Ready]
+    requester.send(handler, GetSynced)
+
+    val load = snapshots.expectMsgType[MaterializeDictionary]
+    load.source.expectedDigest shouldEqual first.metadata.dictionaryDigest
+    snapshots.reply(DictionaryLoaded(load.source.expectedDigest, load.requestToken, first.dictionary))
+    requester.expectMsgType[FullSync].rollups.map(_._2.blockId).toSet shouldEqual Set(firstId, secondId)
+    snapshots.expectNoMessage(150.millis)
   }
 
   /** Cursors are cheap, so their window reaches past the states and locates deeper forks. */
   it should "keep more cursors than retained states" in {
-    val (handler, _) = newHandler(reorgWindow = 2, cursorWindow = 50)
+    val (handler, _) = newHandler(cursorWindow = 50)
     val requester = TestProbe()
     val seeded = ReducerFixtures.emptyState().copy(
       cursor = SyncCursor(startHeight - 1, SyncFixtures.id(startHeight - 1), SyncFixtures.id(startHeight - 2)))
@@ -141,18 +304,28 @@ class SyncStateLifecycleSpec extends TestKit(ActorSystem("sync-state-lifecycle")
     }
   }
 
-  private def newHandler(reorgWindow: Int = 5, cursorWindow: Int = 720) = {
+  private def newHandler(cursorWindow: Int = 720,
+                         snapshotsEnabled: Boolean = false,
+                         snapshotInterval: Int = 720) = {
     val snapshots = TestProbe()
+    val handler = system.actorOf(handlerProps(snapshots.ref, cursorWindow, snapshotsEnabled,
+      snapshotInterval))
+    (handler, snapshots)
+  }
+
+  private def handlerProps(snapshotActor: akka.actor.ActorRef,
+                           cursorWindow: Int = 720,
+                           snapshotsEnabled: Boolean = false,
+                           snapshotInterval: Int = 720): Props = {
     val (_, _, wallet) = FakeNodeContext(numAddresses = 1)
     val protocol = ReducerFixtures.protocol(rollupStartHeight = startHeight)
       .copy(localMinerHash = wallet.contract.hashedPropBytes)
     val config = Configuration(ConfigFactory.parseString(
       s"""sync.startHeight = $startHeight
-         |sync.reorgWindow = $reorgWindow
          |sync.cursorWindow = $cursorWindow
-         |sync.snapshots.intervalBlocks = 720
+         |sync.snapshots.enabled = $snapshotsEnabled
+          |sync.snapshots.intervalBlocks = $snapshotInterval
          |""".stripMargin))
-    val handler = system.actorOf(Props(new SyncHandler(config, protocol, snapshots.ref)))
-    (handler, snapshots)
+    Props(new SyncHandler(config, protocol, snapshotActor))
   }
 }

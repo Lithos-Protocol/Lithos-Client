@@ -50,7 +50,7 @@ class CheckpointPauseBudgetSpec extends TestKit(ActorSystem("checkpoint-pause-bu
       val at = SyncCursor(first.height, first.id, first.parentId)
       val fault = QuarantineFault(ChainFixtures.headerId(100), 100,
         ChainFixtures.headerId(99), "indexed repair is deliberately blocked", retryable = true)
-      sync.reply(RepairableQuarantines(Seq(fault), at))
+      sync.reply(RepairableQuarantines(Seq(fault), at, "repair-permit"))
 
       entered.await(2, TimeUnit.SECONDS) shouldBe true
       sync.expectNoMessage(50.millis)

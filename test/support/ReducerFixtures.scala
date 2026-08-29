@@ -1,6 +1,6 @@
 package support
 
-import lfsm.states.{AuthenticatedDictionaryView, MinerTree, NISPTree, PlasmaDictionary}
+import lfsm.states.{AuthenticatedDictionaryView, MinerDictionary, Rollup, PlasmaDictionary}
 import lfsm.LFSMPhase
 import org.ergoplatform.appkit.scalaapi.scalaByteType
 import org.ergoplatform.appkit.{ErgoValue, NetworkType}
@@ -40,7 +40,7 @@ object ReducerFixtures {
       rollups = Map.empty,
       routes = Map.empty,
       rollupOrigins = Map.empty,
-      minerTree = MinerTree.initialState,
+      minerTree = MinerDictionary.initialState,
       dataBoxToken = None)
 
   def stateWithRollup(height: Int,
@@ -49,7 +49,7 @@ object ReducerFixtures {
                       utxoId: String,
                       dictionary: AuthenticatedDictionaryView,
                       version: Long = 7L): CommittedSyncState = {
-    val tree = NISPTree(
+    val tree = Rollup(
       dictionary = dictionary,
       numMiners = 0,
       totalScore = BigInt(0),
@@ -66,7 +66,7 @@ object ReducerFixtures {
       rollups = Map(rollupId -> tree),
       routes = Map(utxoId -> rollupId),
       rollupOrigins = Map(rollupId -> SyncFixtures.id(800000)),
-      minerTree = MinerTree.initialState,
+      minerTree = MinerDictionary.initialState,
       dataBoxToken = None)
   }
 
@@ -75,7 +75,7 @@ object ReducerFixtures {
                 rollupId: String,
                 utxoId: String,
                 dictionary: AuthenticatedDictionaryView): CommittedSyncState = {
-    val tree = NISPTree(
+    val tree = Rollup(
       dictionary = dictionary,
       numMiners = 0,
       totalScore = BigInt(0),
@@ -93,7 +93,7 @@ object ReducerFixtures {
   }
 
   /** Builds the dictionary-add transaction shape shared by block reduction and bootstrap replay. */
-  def minerAdd(tree: MinerTree,
+  def minerAdd(tree: MinerDictionary,
                miner: work.lithos.mutations.Contract,
                mdToken: ErgoId,
                outputId: String,
@@ -104,7 +104,7 @@ object ReducerFixtures {
     val insertion = dictionary.insert(miner.hashedPropBytes -> value)
     val pair = ErgoValue.pairOf(collBytes(miner.hashedPropBytes), collBytes(value)).toHex
     val proof = InputSpendingProof("", Map(
-      "0" -> ErgoValue.of(MinerTree.ADD_MINER_OP).toHex,
+      "0" -> ErgoValue.of(MinerDictionary.ADD_MINER_OP).toHex,
       "1" -> ErgoValue.of(miner.sigmaBoolean.get).toHex,
       "2" -> pair,
       "3" -> insertion.proof.ergoValue.toHex))
@@ -117,7 +117,7 @@ object ReducerFixtures {
   }
 
   /** A dictionary removal: the operation rides input 0, the miner's own proofs ride input 1. */
-  def minerRemove(tree: MinerTree,
+  def minerRemove(tree: MinerDictionary,
                   miner: work.lithos.mutations.Contract,
                   mdToken: ErgoId,
                   outputId: String,
@@ -125,7 +125,7 @@ object ReducerFixtures {
     val dictionary = tree.dictionary.copy()
     val lookup = dictionary.lookUp(miner.hashedPropBytes)
     val deletion = dictionary.delete(miner.hashedPropBytes)
-    val operation = InputSpendingProof("", Map("0" -> ErgoValue.of(MinerTree.REMOVE_MINER_OP).toHex))
+    val operation = InputSpendingProof("", Map("0" -> ErgoValue.of(MinerDictionary.REMOVE_MINER_OP).toHex))
     val removal = InputSpendingProof("", Map(
       "1" -> ErgoValue.of(miner.sigmaBoolean.get).toHex,
       "2" -> lookup.proof.ergoValue.toHex,

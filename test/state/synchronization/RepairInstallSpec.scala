@@ -3,7 +3,7 @@ package state.synchronization
 import akka.actor.{ActorSystem, Props}
 import akka.testkit.{TestKit, TestProbe}
 import com.typesafe.config.ConfigFactory
-import lfsm.states.{MinerTree, PlasmaDictionary}
+import lfsm.states.{MinerDictionary, PlasmaDictionary}
 import org.scalatest.BeforeAndAfterAll
 import org.scalatest.flatspec.AnyFlatSpecLike
 import org.scalatest.matchers.should.Matchers
@@ -33,8 +33,9 @@ class RepairInstallSpec extends TestKit(ActorSystem("repair-install"))
     requester.send(handler, RestoreCommittedState(seeded, Vector(seeded.cursor)))
     requester.expectMsgType[BlockCommitted]
 
-    val rebuilt = MinerTree.initialState.copy(syncHeight = seeded.cursor.height)
-    requester.send(handler, RepairMinerDictionary(seeded.cursor, rebuilt, None))
+    val rebuilt = MinerDictionary.initialState.copy(syncHeight = seeded.cursor.height)
+    requester.send(handler, RepairMinerDictionary(seeded.cursor, rebuilt, None,
+      minerPermit(requester, handler)))
     requester.expectMsgType[BlockCommitted]
 
     requester.send(handler, GetCommittedState)
@@ -55,9 +56,10 @@ class RepairInstallSpec extends TestKit(ActorSystem("repair-install"))
     requester.expectMsgType[BlockCommitted]
 
     val stale = seeded.cursor.copy(blockId = SyncFixtures.id(799998), parentId = SyncFixtures.id(799997))
-    requester.send(handler, RepairMinerDictionary(stale, MinerTree.initialState, None))
+    requester.send(handler, RepairMinerDictionary(stale, MinerDictionary.initialState, None,
+      minerPermit(requester, handler)))
     val rejected = requester.expectMsgType[BlockRejected]
-    rejected.reason should include(s"rebuilt at ${stale.blockId}@${stale.height}")
+    rejected.reason should include("no longer names the exact committed state")
 
     requester.send(handler, GetCommittedState)
     requester.expectMsgType[CommittedState].state.minerDictionaryFault should not be empty
@@ -70,9 +72,9 @@ class RepairInstallSpec extends TestKit(ActorSystem("repair-install"))
     requester.send(handler, RestoreCommittedState(seeded, Vector(seeded.cursor)))
     requester.expectMsgType[BlockCommitted]
 
-    val tree = SyncFixtures.emptyNispTree(rollupId, SyncFixtures.id(700002), 90)
+    val tree = SyncFixtures.emptyRollup(rollupId, SyncFixtures.id(700002), 90)
     requester.send(handler, RepairRollup(rollupId, seeded.cursor,
-      RollupRepairResult.Rebuilt(tree)))
+      RollupRepairResult.Rebuilt(tree), rollupPermit(requester, handler)))
     requester.expectMsgType[BlockCommitted]
 
     requester.send(handler, GetCommittedState)
@@ -91,7 +93,8 @@ class RepairInstallSpec extends TestKit(ActorSystem("repair-install"))
     requester.send(handler, RestoreCommittedState(seeded, Vector(seeded.cursor)))
     requester.expectMsgType[BlockCommitted]
 
-    requester.send(handler, RepairRollup(rollupId, seeded.cursor, RollupRepairResult.Terminated))
+    requester.send(handler, RepairRollup(rollupId, seeded.cursor, RollupRepairResult.Terminated,
+      rollupPermit(requester, handler)))
     requester.expectMsgType[BlockCommitted]
 
     requester.send(handler, GetCommittedState)
@@ -110,7 +113,8 @@ class RepairInstallSpec extends TestKit(ActorSystem("repair-install"))
     requester.expectMsgType[BlockCommitted]
 
     requester.send(handler, RepairRollup(rollupId, seeded.cursor,
-      RollupRepairResult.Failed("indexed node has no rollup box", retryable = true)))
+      RollupRepairResult.Failed("indexed node has no rollup box", retryable = true),
+      rollupPermit(requester, handler)))
     requester.expectMsgType[BlockCommitted]
 
     requester.send(handler, GetCommittedState)
@@ -127,12 +131,12 @@ class RepairInstallSpec extends TestKit(ActorSystem("repair-install"))
     requester.send(handler, RestoreCommittedState(seeded, Vector(seeded.cursor)))
     requester.expectMsgType[BlockCommitted]
 
-    val tree = SyncFixtures.emptyNispTree(rollupId, SyncFixtures.id(700002), 90)
+    val tree = SyncFixtures.emptyRollup(rollupId, SyncFixtures.id(700002), 90)
     val stale = seeded.cursor.copy(blockId = SyncFixtures.id(799996), parentId = SyncFixtures.id(799995))
     requester.send(handler, RepairRollup(rollupId, stale,
-      RollupRepairResult.Rebuilt(tree)))
+      RollupRepairResult.Rebuilt(tree), rollupPermit(requester, handler)))
     val rejected = requester.expectMsgType[BlockRejected]
-    rejected.reason should include(s"rebuilt at ${stale.blockId}@${stale.height}")
+    rejected.reason should include("no longer names the exact committed state")
 
     requester.send(handler, GetCommittedState)
     val state = requester.expectMsgType[CommittedState].state
@@ -151,13 +155,13 @@ class RepairInstallSpec extends TestKit(ActorSystem("repair-install"))
     requester.expectMsgType[BlockCommitted]
 
     requester.send(handler, RepairRollup(rollupId, seeded.cursor,
-      RollupRepairResult.Failed("still absent", retryable = true)))
+      RollupRepairResult.Failed("still absent", retryable = true), rollupPermit(requester, handler)))
     requester.expectMsgType[BlockCommitted]
 
     requester.send(handler, GetCommittedState)
     val fault = requester.expectMsgType[CommittedState].state.quarantined(rollupId)
     fault.attempts shouldEqual 3
-    fault.removalHeight shouldEqual Some(seeded.cursor.height + 720)
+    fault.removalHeight shouldEqual Some(fault.genesisHeight + 720)
     fault.removalWarningLogged shouldBe false
   }
 
@@ -171,9 +175,9 @@ class RepairInstallSpec extends TestKit(ActorSystem("repair-install"))
     requester.expectMsgType[BlockCommitted]
 
     val inputId = SyncFixtures.id(700010)
-    val tree = SyncFixtures.emptyNispTree(rollupId, inputId, 90)
+    val tree = SyncFixtures.emptyRollup(rollupId, inputId, 90)
     requester.send(handler, RepairRollup(rollupId, seeded.cursor,
-      RollupRepairResult.Rebuilt(tree)))
+      RollupRepairResult.Rebuilt(tree), rollupPermit(requester, handler)))
     requester.expectMsgType[BlockCommitted]
 
     val (key, value) = SyncFixtures.plasmaEntries(1, 16).head
@@ -197,7 +201,7 @@ class RepairInstallSpec extends TestKit(ActorSystem("repair-install"))
   private def faultedSeed: CommittedSyncState =
     ReducerFixtures.emptyState(height = startHeight - 1,
       blockId = SyncFixtures.id(startHeight - 1)).copy(
-      minerTree = MinerTree.initialState.copy(dictionary = PlasmaDictionary.empty()),
+      minerTree = MinerDictionary.initialState.copy(dictionary = PlasmaDictionary.empty()),
       minerDictionaryFault = Some("dictionary advanced during bootstrap"))
 
   private def quarantinedSeed: CommittedSyncState =
@@ -206,6 +210,16 @@ class RepairInstallSpec extends TestKit(ActorSystem("repair-install"))
       quarantined = Map(rollupId ->
         QuarantineFault(rollupId, 90, SyncFixtures.id(700000),
           "missing context variable 2", retryable = true)))
+
+  private def rollupPermit(requester: TestProbe, handler: akka.actor.ActorRef): String = {
+    requester.send(handler, GetRepairableQuarantines)
+    requester.expectMsgType[RepairableQuarantines].repairPermit
+  }
+
+  private def minerPermit(requester: TestProbe, handler: akka.actor.ActorRef): String = {
+    requester.send(handler, GetMinerDictionaryRepairPermit)
+    requester.expectMsgType[MinerDictionaryRepairPermit].repairPermit
+  }
 
   private def newHandler() = {
     val snapshots = TestProbe()

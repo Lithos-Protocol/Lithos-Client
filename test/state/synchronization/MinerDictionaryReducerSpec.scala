@@ -1,6 +1,7 @@
 package state.synchronization
 
-import lfsm.states.MinerTree
+import lfsm.states.{MinerDictionary, PlasmaDictionary}
+import org.bouncycastle.util.encoders.Hex
 import org.ergoplatform.appkit.scalaapi.scalaByteType
 import org.ergoplatform.appkit.ErgoValue
 import org.ergoplatform.sdk.ErgoId
@@ -37,7 +38,8 @@ class MinerDictionaryReducerSpec extends AnyFlatSpec with Matchers {
 
     afterForeign.minerTree.hasMiner shouldBe true
     afterForeign.dataBoxToken shouldEqual afterLocal.dataBoxToken
-    afterForeign.minerTree.minerMap.keySet should contain allOf(
+    afterForeign.minerTree.dictionary.foldKeys(Set.empty[String])((keys, key) =>
+      keys + org.bouncycastle.util.encoders.Hex.toHexString(key)) should contain allOf(
       local.hashedPropBytesHex, foreign.hashedPropBytesHex)
   }
 
@@ -63,7 +65,37 @@ class MinerDictionaryReducerSpec extends AnyFlatSpec with Matchers {
 
     finalState.minerTree.hasMiner shouldBe false
     finalState.dataBoxToken shouldBe None
-    finalState.minerTree.minerMap.keySet shouldEqual Set(foreign.hashedPropBytesHex)
+    finalState.minerTree.dictionary.foldKeys(Set.empty[String])((keys, key) =>
+      keys + org.bouncycastle.util.encoders.Hex.toHexString(key)) shouldEqual Set(foreign.hashedPropBytesHex)
+  }
+
+  it should "enumerate every authenticated user leaf without retaining a second miner collection" in {
+    // A non-power-of-two population leaves leaves at different depths, so slicing must visit both
+    // those still embedded in the manifest and the detached subtrees.
+    val entries = SyncFixtures.plasmaEntries(2051, 32)
+    val dictionary = PlasmaDictionary.empty()
+    dictionary.insert(entries: _*)
+    val expected = entries.iterator.map(entry => Hex.toHexString(entry._1)).toSet
+    val observed = scala.collection.mutable.Set.empty[String]
+
+    dictionary.foreachKey { key =>
+      observed += Hex.toHexString(key)
+      // The callback owns a defensive copy; damaging it must not alter the prover's authenticated key.
+      key(0) = (key(0) ^ 0xff).toByte
+    }
+
+    observed.toSet shouldEqual expected
+    dictionary.foldKeys(Set.empty[String])((keys, key) => keys + Hex.toHexString(key)) shouldEqual expected
+  }
+
+  it should "omit both AVL sentinels from empty and shallow dictionaries" in {
+    val dictionary = PlasmaDictionary.empty()
+    dictionary.foldKeys(Vector.empty[String])((keys, key) => keys :+ Hex.toHexString(key)) shouldBe empty
+
+    val entry = SyncFixtures.plasmaEntries(1, 32).head
+    dictionary.insert(entry)
+    dictionary.foldKeys(Vector.empty[String])((keys, key) => keys :+ Hex.toHexString(key)) shouldEqual
+      Vector(Hex.toHexString(entry._1))
   }
 
 }

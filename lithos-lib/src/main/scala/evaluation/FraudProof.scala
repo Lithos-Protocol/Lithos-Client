@@ -1,7 +1,7 @@
 package evaluation
 
 import lfsm.contracts.FraudProofContracts
-import lfsm.states.NISPTree
+import lfsm.states.Rollup
 import mutations.{BoxLoader, NodeWallet}
 import nisp.NISP
 import org.bouncycastle.util.encoders.Hex
@@ -18,7 +18,7 @@ import work.lithos.mutations.{Contract, InputUTXO, Mutator, TxBuilder, TxContext
 import scala.util.Try
 
 abstract class FraudProof(contract: Contract, miner: Array[Byte],
-                          nispTree: NISPTree, evalInput: InputUTXO, fpControl: InputUTXO) {
+                          nispTree: Rollup, evalInput: InputUTXO, fpControl: InputUTXO) {
   val mutator: Mutator = FraudProof.standardMutator(miner, nispTree, contract)
   val logger: Logger
 
@@ -126,7 +126,7 @@ abstract class FraudProof(contract: Contract, miner: Array[Byte],
 
 object FraudProof {
 
-  private def standardPreReqs(nispTree: NISPTree, contract: Contract): Seq[TxContext => Boolean] = {
+  private def standardPreReqs(nispTree: Rollup, contract: Contract): Seq[TxContext => Boolean] = {
     Seq(
       {
         (t: TxContext) =>
@@ -147,7 +147,7 @@ object FraudProof {
    * `includeFee` decides whether the fee output is emitted here or supplied by the caller; the
    * mutation is otherwise identical, and every FraudProof subclass uses this one.
    */
-  def standardMutator(miner: Array[Byte], nispTree: NISPTree, contract: Contract, includeFee: Boolean = true): Mutator = new Mutator {
+  def standardMutator(miner: Array[Byte], nispTree: Rollup, contract: Contract, includeFee: Boolean = true): Mutator = new Mutator {
     override val preReqs: Seq[TxContext => Boolean] = FraudProof.standardPreReqs(nispTree, contract)
 
     // We should assume no fraud proofs have been executed prior to this mutation
@@ -187,12 +187,12 @@ object FraudProof {
    * @param ctx Context to generate contracts
    * @param contract `Contract` to find FraudProof` for
    * @param miner Miner to check for fraud
-   * @param nispTree `NISPTree` associated with the given evalInput
+   * @param nispTree `Rollup` associated with the given evalInput
    * @param evalInput Evaluation Input to evaluate for fraud
    * @param fpControl FP_Control box to use as data input, used to verify a valid FP contract is used
    */
   def genFraudProof(ctx: BlockchainContext, contract: Contract,
-                     miner: Array[Byte], nispTree: NISPTree, evalInput: InputUTXO,
+                     miner: Array[Byte], nispTree: Rollup, evalInput: InputUTXO,
                      fpControl: InputUTXO): FraudProof = {
     def propByteEquality(otrContract: Contract, fpContract: Contract): Boolean = {
       fpContract.hashedPropBytes sameElements otrContract.hashedPropBytes

@@ -1,6 +1,6 @@
 package state.messages
 
-import lfsm.states.NISPTree
+import lfsm.states.{Rollup, RollupMetadata}
 import state.messages.RollupMessages.RollupTransform
 import state.messages.SyncMessages.Transform
 import work.lithos.mutations.InputUTXO
@@ -70,11 +70,18 @@ object MempoolMessages {
   case class ResetMempoolState(rollupBlockId: String)
   // Mempool States
   /**
-   *  NOTE: If toBeRemoved is true, we should not assume the nispTree is accurate.
+   *  NOTE: If toBeRemoved is true, we should not assume the rollup is accurate.
    *  TODO: Switch to option?
     */
   sealed trait MempoolState
 
-  case class MempoolRollupState(asInput: InputUTXO, nispTree: NISPTree, toBeRemoved: Boolean = false) extends MempoolState
+  case class MempoolRollupState(asInput: InputUTXO,
+                                rollup: Rollup,
+                                toBeRemoved: Boolean = false) extends MempoolState
+
+  /** Metadata-only projection used to filter work before any authenticated dictionary is requested. */
+  case class MempoolRollupMetadata(asInput: InputUTXO,
+                                   metadata: RollupMetadata,
+                                   toBeRemoved: Boolean = false) extends MempoolState
 
 }

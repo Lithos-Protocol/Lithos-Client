@@ -20,26 +20,34 @@ class QuarantineExpirySpec extends TestKit(ActorSystem("quarantine-expiry"))
   private val startHeight = 100
   private val rollupId = SyncFixtures.id(760001)
 
-  "Quarantine retention" should "warn near the deadline and remove a terminal fault at its height" in {
+  "Quarantine retention" should "derive its deadline from the rollup start and remove it at that height" in {
     val handler = newHandler(retentionBlocks = 3)
     val requester = TestProbe()
-    val seed = seeded(QuarantineFault(rollupId, 80, SyncFixtures.id(760002),
+    val seed = seeded(QuarantineFault(rollupId, 99, SyncFixtures.id(760002),
       "contract state mismatch", retryable = false))
     restore(requester, handler, seed)
 
     applyEmpty(requester, handler, 100)
     var fault = current(requester, handler).quarantined(rollupId)
-    fault.removalHeight shouldEqual Some(103)
+    fault.removalHeight shouldEqual Some(102)
     fault.removalWarningLogged shouldBe false
 
     applyEmpty(requester, handler, 101)
-    current(requester, handler).quarantined should contain key rollupId
-
-    applyEmpty(requester, handler, 102)
     fault = current(requester, handler).quarantined(rollupId)
     fault.removalWarningLogged shouldBe true
 
-    applyEmpty(requester, handler, 103)
+    applyEmpty(requester, handler, 102)
+    current(requester, handler).quarantined shouldBe empty
+  }
+
+  it should "drop an already-expired terminal fault on the first catch-up block" in {
+    val handler = newHandler(retentionBlocks = 3)
+    val requester = TestProbe()
+    val seed = seeded(QuarantineFault(rollupId, 80, SyncFixtures.id(760004),
+      "old contract state mismatch", retryable = false))
+    restore(requester, handler, seed)
+
+    applyEmpty(requester, handler, 100)
     current(requester, handler).quarantined shouldBe empty
   }
 

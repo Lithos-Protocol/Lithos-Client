@@ -200,7 +200,7 @@ class SubmissionHandler @Inject()(config: Configuration, nodeContext: NodeContex
           val noFee = Seq.empty[UTXO]
           stub.txType match {
             case NISPSubmission =>
-              val score = commitments.commitmentForNISP(latest.NISPTree.startHeight).get
+              val score = commitments.commitmentForNISP(latest.rollup.startHeight).get
               val holdingInput = latest.inputUTXO
               Globals.nispDB.getBestValidNISP(
                 holdingInput.registers(3).getValue.asInstanceOf[Long].toInt, score) match {
@@ -495,7 +495,7 @@ class SubmissionHandler @Inject()(config: Configuration, nodeContext: NodeContex
       client.execute {
         ctx =>
           checkRollupStubValidity(ctx, stub, latestState)
-          val score = commitments.commitmentForNISP(latestState.NISPTree.startHeight).get
+          val score = commitments.commitmentForNISP(latestState.rollup.startHeight).get
           val nispDB = Globals.nispDB
           val holdingInput = latestState.inputUTXO
           val bestNISP = nispDB.getBestValidNISP(holdingInput.registers(3).getValue.asInstanceOf[Long].toInt, score)
@@ -504,7 +504,7 @@ class SubmissionHandler @Inject()(config: Configuration, nodeContext: NodeContex
           bestNISP match {
             case Some(nisp) =>
 
-              logger.info(s"Got valid NISP for lithos-mined block ${latestState.NISPTree.startHeight} with score ${nisp.score}, heights" +
+              logger.info(s"Got valid NISP for lithos-mined block ${latestState.rollup.startHeight} with score ${nisp.score}, heights" +
                 s" ${nisp.shares.map(_.getHeight).mkString(", ")} and size ${nisp.serialize.length} bytes")
 
               val sTx = RollupTransactions.genNISPSubmission(ctx, wallet, holdingInput,
@@ -512,12 +512,13 @@ class SubmissionHandler @Inject()(config: Configuration, nodeContext: NodeContex
 
               if (initOutputs.isDefined)
                 updateFeeMap(sTx, initOutputs.get._2)
-              val txId = submitSigned(ctx, sTx, initialTxInfo.isDefined, stub.rollupBlockId)
+              val txId = submitSigned(ctx, sTx, initialTxInfo.isDefined, stub.rollupBlockId,
+                latestState.inputUTXO.id.toString)
               logger.info(s"Sent transaction ${txId} to submit NISP for rollup ${stub.rollupBlockId}")
               txId
             case None =>
               syncHandler ! RemoveRollup(stub.rollupBlockId, "Unable to submit valid NISP")
-              throw new NoValidNISPException(s"Could not produce valid NISP for lithos-mined block ${latestState.NISPTree.startHeight}" +
+              throw new NoValidNISPException(s"Could not produce valid NISP for lithos-mined block ${latestState.rollup.startHeight}" +
                 s" with id ${stub.rollupBlockId}")
           }
       }
@@ -537,7 +538,8 @@ class SubmissionHandler @Inject()(config: Configuration, nodeContext: NodeContex
             rollupWalletInputs(stub, initialTxInfo), feeOutputs)
           if (initOutputs.isDefined)
             updateFeeMap(sTx, initOutputs.get._2)
-          val txId = submitSigned(ctx, sTx, initialTxInfo.isDefined, stub.rollupBlockId)
+          val txId = submitSigned(ctx, sTx, initialTxInfo.isDefined, stub.rollupBlockId,
+            latestState.inputUTXO.id.toString)
           logger.info(s"Sent transaction ${txId} to transform holding contract for rollup ${stub.rollupBlockId}")
           txId
       }
@@ -557,7 +559,8 @@ class SubmissionHandler @Inject()(config: Configuration, nodeContext: NodeContex
             rollupWalletInputs(stub, initialTxInfo), feeOutputs)
           if (initOutputs.isDefined)
             updateFeeMap(sTx, initOutputs.get._2)
-          val txId = submitSigned(ctx, sTx, initialTxInfo.isDefined, stub.rollupBlockId)
+          val txId = submitSigned(ctx, sTx, initialTxInfo.isDefined, stub.rollupBlockId,
+            latestState.inputUTXO.id.toString)
           logger.info(s"Sent transaction ${txId} to transform evaluation contract for rollup ${stub.rollupBlockId}")
           txId
       }
@@ -579,7 +582,8 @@ class SubmissionHandler @Inject()(config: Configuration, nodeContext: NodeContex
             stub.fpInfo.get._2)
           if (initOutputs.isDefined)
             updateFeeMap(sTx, initOutputs.get._2)
-          val txId = submitSigned(ctx, sTx, initialTxInfo.isDefined, stub.rollupBlockId)
+          val txId = submitSigned(ctx, sTx, initialTxInfo.isDefined, stub.rollupBlockId,
+            latestState.inputUTXO.id.toString)
           logger.info(s"Sent transaction ${txId} to submit fraud proof for miner ${Hex.toHexString(stub.fpInfo.get._1)}" +
             s" for rollup ${stub.rollupBlockId}")
           txId
@@ -599,7 +603,8 @@ class SubmissionHandler @Inject()(config: Configuration, nodeContext: NodeContex
             rollupWalletInputs(stub, initialTxInfo), latestState, feeOutputs)
           if (initOutputs.isDefined)
             updateFeeMap(sTx, initOutputs.get._2)
-          val txId = submitSigned(ctx, sTx, initialTxInfo.isDefined, stub.rollupBlockId)
+          val txId = submitSigned(ctx, sTx, initialTxInfo.isDefined, stub.rollupBlockId,
+            latestState.inputUTXO.id.toString)
           logger.info(s"Sent transaction ${txId} to payout local miner for rollup ${stub.rollupBlockId}")
           txId
       }
@@ -645,6 +650,14 @@ class SubmissionHandler @Inject()(config: Configuration, nodeContext: NodeContex
         case Failure(_: ErgoClientException) =>
           expectedFailure()
         case Failure(_: DataBoxRetrievalException) =>
+          expectedFailure()
+        case Failure(changed: ProjectionChangedException) =>
+          logger.info(changed.getMessage)
+          mempoolView ! RebuildMempoolChains
+          expectedFailure()
+        case Failure(_: java.util.concurrent.TimeoutException) =>
+          // The first request for a large digest may still be reconstructing snapshot + journal state.
+          // Its completion warms the bounded cache, so retry rather than dropping otherwise valid work.
           expectedFailure()
         case Failure(nv: NoValidNISPException) =>
           logger.warn(nv.getMessage)
@@ -692,7 +705,8 @@ class SubmissionHandler @Inject()(config: Configuration, nodeContext: NodeContex
   private def submitSigned(ctx: BlockchainContext,
                            tx: SignedTransaction,
                            usesInitialReservation: Boolean,
-                           rollupId: String): String = {
+                           rollupId: String,
+                           expectedRollupInput: String): String = {
     val reservation =
       if (usesInitialReservation) initialReservation
       else feeAllocationReservations.get(rollupId)
@@ -706,17 +720,24 @@ class SubmissionHandler @Inject()(config: Configuration, nodeContext: NodeContex
     // publishes is the change box — which otherwise sat unusable until the ten-minute refresh.
     val change = signableChange(tx)
 
-    reservation.foreach(_.beginSubmission())
-    try {
-      val txId = ctx.sendTransaction(tx).replace("\"", "")
-      reservation.foreach(_.commit(change))
-      if (usesInitialReservation) initialReservation = None
-      txId
-    } catch {
-      case NonFatal(ex) =>
-        reservation.foreach(_.uncertain())
+    // Re-read the projection after signing and immediately before the external send. A mempool
+    // revision or confirmed block can land during transaction construction; sending the old input
+    // would only create an avoidable double-spend and stale projection retry.
+    val current = Await.result[RollupInfo](
+      (syncHandler ? GetCurrentRollup(rollupId)).mapTo[RollupInfo], timeout.duration)
+    SubmissionHandler.sendIfCurrentInput(rollupId, expectedRollupInput, current) {
+      reservation.foreach(_.beginSubmission())
+      try {
+        val txId = ctx.sendTransaction(tx).replace("\"", "")
+        reservation.foreach(_.commit(change))
         if (usesInitialReservation) initialReservation = None
-        throw ex
+        txId
+      } catch {
+        case NonFatal(ex) =>
+          reservation.foreach(_.uncertain())
+          if (usesInitialReservation) initialReservation = None
+          throw ex
+      }
     }
   }
 
@@ -736,29 +757,33 @@ class SubmissionHandler @Inject()(config: Configuration, nodeContext: NodeContex
       }
 
   private def checkRollupStubValidity(ctx: BlockchainContext, stub: RollupTxStub, latestRollup: LatestRollup): Unit = {
-    if (!stub.validate(ctx.getHeight, latestRollup.NISPTree))
+    if (!stub.validate(ctx.getHeight, latestRollup.rollup))
       throw StubInvalidException(s"Invalid ${stub.txType} stub for rollup ${stub.rollupBlockId}")
   }
 
   private def latestRollupState(rollupTxStub: RollupTxStub) = {
     Try {
-      val rollupInfo = Await.result[RollupInfo]((syncHandler ? GetCurrentRollup(rollupTxStub.rollupBlockId)).mapTo[RollupInfo], 5.seconds)
+      val rollupInfo = Await.result[RollupInfo](
+        (syncHandler ? GetCurrentRollup(rollupTxStub.rollupBlockId)).mapTo[RollupInfo], timeout.duration)
       rollupInfo match {
-        case RollupMessages.CurrentRollup(utxoId, nispTree, mempoolState) =>
+        case RollupMessages.CurrentRollup(utxoId, rollup, mempoolState) =>
           if (mempoolState.isDefined) {
             if (!mempoolState.get.toBeRemoved) {
               logger.info(s"Using mempool state for rollup ${rollupTxStub.rollupBlockId}" +
                 s" with synced id $utxoId and mempool id ${mempoolState.get.asInput.id}")
-              Success(LatestRollup(mempoolState.get.asInput, mempoolState.get.nispTree))
+              Success(LatestRollup(mempoolState.get.asInput, mempoolState.get.rollup))
             } else {
               Failure(RollupRemovedException(s"Cannot send transaction for rollup" +
                 s" ${rollupTxStub.rollupBlockId} with upcoming removal"))
             }
           } else {
-            Success(LatestRollup(InputUTXO(client.execute(_.getBoxesById(utxoId).head)), nispTree))
+            Success(LatestRollup(InputUTXO(client.execute(_.getBoxesById(utxoId).head)), rollup))
           }
         case RollupMessages.NoRollupFound() =>
           Failure(new IllegalStateException(s"No existing rollup for blockId ${rollupTxStub.rollupBlockId}"))
+        case RollupMessages.RollupUnavailable(reason) =>
+          Failure(new IllegalStateException(
+            s"Rollup ${rollupTxStub.rollupBlockId} is temporarily unavailable: $reason"))
       }
     }.flatten
   }
@@ -768,6 +793,27 @@ object SubmissionHandler {
 
   /** The fee proposition every `UTXO.feeBox` sits at, derived once rather than per comparison. */
   private val FeeTreeHex: String = Contract.FEE_720.ergoTreeHex
+
+  /** The final send gate, kept directly testable so stale state cannot accidentally execute `send`. */
+  private[rollups] def sendIfCurrentInput(rollupId: String,
+                                          expectedRollupInput: String,
+                                          current: RollupInfo)(send: => String): String = {
+    val currentInput = current match {
+      case RollupMessages.CurrentRollup(_, _, Some(projected)) if !projected.toBeRemoved =>
+        projected.asInput.id.toString
+      case RollupMessages.CurrentRollup(utxoId, _, None) => utxoId
+      case RollupMessages.CurrentRollup(_, _, Some(_)) =>
+        throw ProjectionChangedException(s"Rollup $rollupId is being removed before send")
+      case RollupMessages.NoRollupFound() =>
+        throw ProjectionChangedException(s"Rollup $rollupId disappeared before send")
+      case RollupMessages.RollupUnavailable(reason) =>
+        throw ProjectionChangedException(s"Rollup $rollupId became unavailable before send: $reason")
+    }
+    if (currentInput != expectedRollupInput)
+      throw ProjectionChangedException(s"Rollup $rollupId input changed from $expectedRollupInput " +
+        s"to $currentInput before send")
+    send
+  }
 
   /**
    * The initial transaction's pre-created wallet outputs: the `count` outputs following the fee box.

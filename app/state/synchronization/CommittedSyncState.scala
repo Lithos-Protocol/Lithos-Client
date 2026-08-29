@@ -1,6 +1,6 @@
 package state.synchronization
 
-import lfsm.states.{MinerTree, NISPTree}
+import lfsm.states.{MinerDictionary, Rollup}
 import org.ergoplatform.sdk.ErgoId
 import state.messages.SyncMessages.SyncCursor
 
@@ -25,11 +25,11 @@ final case class QuarantineFault(rollupId: String,
 
   def repairable(maxAttempts: Int): Boolean = retryable && attempts < maxAttempts
 
-  /** Starts diagnostic retention only after this episode can no longer be repaired. */
-  def scheduleRemoval(currentHeight: Int, retentionBlocks: Int): QuarantineFault =
+  /** Deterministic across live sync, catch-up, and restart: derived only from rollup genesis. */
+  def scheduleRemoval(retentionBlocks: Int): QuarantineFault =
     if (removalHeight.isDefined) this
     else copy(removalHeight = Some(
-      math.min(Int.MaxValue.toLong, currentHeight.toLong + retentionBlocks.toLong).toInt))
+      math.min(Int.MaxValue.toLong, genesisHeight.toLong + retentionBlocks.toLong).toInt))
 }
 
 /**
@@ -38,10 +38,10 @@ final case class QuarantineFault(rollupId: String,
  */
 case class CommittedSyncState(cursor: SyncCursor,
                                version: Long,
-                               rollups: Map[String, NISPTree],
+                               rollups: Map[String, Rollup],
                                routes: Map[String, String],
                                rollupOrigins: Map[String, String],
-                               minerTree: MinerTree,
+                               minerTree: MinerDictionary,
                                dataBoxToken: Option[ErgoId],
                               minerDictionaryFault: Option[String] = None,
                               quarantined: Map[String, QuarantineFault] = Map.empty) {
@@ -54,7 +54,7 @@ case class CommittedSyncState(cursor: SyncCursor,
   require(quarantined.keySet.forall(!rollups.contains(_)),
     "A quarantined rollup must not also be tracked")
 
-  def routedRollups: Seq[(String, NISPTree)] =
+  def routedRollups: Seq[(String, Rollup)] =
     routes.toSeq.sortBy(_._1).map { case (utxoId, rollupId) => utxoId -> rollups(rollupId) }
 
   /** Faults worth node calls, newest first so a recent break is rebuilt before an old one. */

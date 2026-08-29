@@ -1,6 +1,6 @@
 package state.synchronization
 
-import akka.actor.{ActorSystem, Props}
+import akka.actor.{ActorIdentity, ActorSystem, Identify, Kill, Props}
 import akka.testkit.{TestKit, TestProbe}
 import com.typesafe.config.ConfigFactory
 import org.scalatest.BeforeAndAfterAll
@@ -10,7 +10,7 @@ import play.api.Configuration
 import state.messages.StateFrameMessages.{NewBlock, StartSynchronization}
 import state.messages.SyncMessages._
 import state.persistence.StateSnapshotActor.{RestoreLatest, SnapshotLoaded}
-import support.{ChainFixtures, FakeNodeContext, ReducerFixtures}
+import support.{ChainFixtures, FakeNodeContext, ReducerFixtures, RestartingSupervisor}
 
 import scala.concurrent.duration._
 
@@ -148,6 +148,26 @@ class StateFrameSpec extends TestKit(ActorSystem("state-frame"))
     frame ! akka.actor.PoisonPill
   }
 
+  it should "ignore an ask completion created by an actor incarnation that restarted" in {
+    val (frame, sync, _) = started(tip = startHeight + 1, restartable = true)
+    sync.expectMsgType[BeginCatchUp]
+    val staleApply = sync.expectMsgType[ApplyBlock]
+
+    // Kill restarts the actor without changing its ActorRef. The outstanding ask still completes and
+    // pipes its result to that ref, but it belongs to the stopped instance.
+    frame ! Kill
+    frame.tell(Identify("restarted"), testActor)
+    expectMsg(ActorIdentity("restarted", Some(frame)))
+    sync.reply(commit(staleApply.blockInfo.height, staleApply.blockInfo.id,
+      staleApply.blockInfo.parentId))
+
+    // Processing the stale completion would continue the old retained batch with height start + 1.
+    sync.expectNoMessage(300.millis)
+    frame ! StartSynchronization
+    sync.expectMsg(GetCommittedState)
+    frame ! akka.actor.PoisonPill
+  }
+
   it should "freeze catch-up at the configured maintenance checkpoint until a repair is published" in {
     val (frame, sync, _) = started(tip = startHeight + 3, checkpointInterval = 2)
     sync.expectMsgType[BeginCatchUp]
@@ -161,7 +181,7 @@ class StateFrameSpec extends TestKit(ActorSystem("state-frame"))
     val at = SyncCursor(second.height, second.id, second.parentId)
     val fault = QuarantineFault(ChainFixtures.headerId(100), 100, "missing-collateral",
       "indexed decode gap", retryable = true)
-    sync.reply(RepairableQuarantines(Seq(fault), at))
+    sync.reply(RepairableQuarantines(Seq(fault), at, "repair-permit"))
 
     val repair = sync.expectMsgType[RepairRollup]
     repair.rollupId shouldEqual fault.rollupId
@@ -236,16 +256,23 @@ class StateFrameSpec extends TestKit(ActorSystem("state-frame"))
   private def started(tip: Int,
                       retriesBeforeAlarm: Int = 12,
                       checkpoints: Boolean = true,
-                      checkpointInterval: Int = 10): (akka.actor.ActorRef, TestProbe, TestProbe) = {
+                      checkpointInterval: Int = 10,
+                      restartable: Boolean = false): (akka.actor.ActorRef, TestProbe, TestProbe) = {
     val sync = TestProbe()
     val snapshots = TestProbe()
     val (nodeContext, _, wallet) = FakeNodeContext(ChainFixtures.nodeAt(tip), numAddresses = 1)
     val protocol = ReducerFixtures.protocol(rollupStartHeight = startHeight)
       .copy(localMinerHash = wallet.contract.hashedPropBytes)
-    val frame = system.actorOf(Props(
+    val childProps = Props(
       new StateFrame(configWith(startHeight, retriesBeforeAlarm, checkpoints, checkpointInterval),
         nodeContext, protocol,
-        sync.ref, snapshots.ref)))
+        sync.ref, snapshots.ref))
+    val frame = if (restartable) {
+      val supervisor = system.actorOf(RestartingSupervisor.props(childProps))
+      val requester = TestProbe()
+      requester.send(supervisor, RestartingSupervisor.GetChild)
+      requester.expectMsgType[RestartingSupervisor.Child].ref
+    } else system.actorOf(childProps)
     frame ! StartSynchronization
 
     ChainFixtures.unseeded(sync)

@@ -12,7 +12,6 @@ import state.messages.MempoolMessages.{MempoolSnapshot, MempoolUnavailable}
 import state.messages.BlockInfo
 import state.messages.RollupMessages.GetCurrentRollup
 import state.persistence.StateSnapshotActor.SnapshotCandidate
-import state.persistence.{StateSnapshotCodec, StateSnapshotIdentity}
 import support.{FakeCache, FakeNodeContext, ReducerFixtures, SyncFixtures}
 
 import scala.concurrent.duration._
@@ -134,12 +133,8 @@ class SyncHandlerCommitSpec extends TestKit(ActorSystem("sync-handler-commit"))
     restored.routes shouldEqual Map(holdingOutput -> rollupId)
   }
 
-  /**
-   * A candidate is only offered when a write will follow, because each one costs a deep copy of every
-   * dictionary.
-   */
-  it should "offer a snapshot only when one is due, and hand over a detached copy" in {
-    val (handler, snapshots, protocol) = newHandler()
+  it should "offer a replayable checkpoint plan only when one is due" in {
+    val (handler, snapshots, _) = newHandler()
     val requester = TestProbe()
     seed(handler, requester)
     val first = BlockInfo(SyncFixtures.id(100), 100, Seq.empty, SyncFixtures.id(99))
@@ -154,16 +149,11 @@ class SyncHandlerCommitSpec extends TestKit(ActorSystem("sync-handler-commit"))
     requester.expectMsgType[Ready]
     val forced = snapshots.expectMsgType[SnapshotCandidate]
 
-    // The writer is handed bytes, not the dictionaries the reducer is still reading, so there is no
-    // shared object to copy defensively and no second getManifest on the database thread.
     requester.send(handler, GetCommittedState)
     val live = requester.expectMsgType[CommittedState].state
     forced.cursor shouldEqual live.cursor
-    forced.encoded.meta.length should be > 0
-    val meta = StateSnapshotCodec.decodeMeta(forced.encoded.meta, StateSnapshotIdentity(protocol)).toOption.get
-    meta.cursor shouldEqual live.cursor
-    meta.minerTree.dictionary.digest should
-      contain theSameElementsInOrderAs live.minerTree.dictionary.digest
+    forced.snapshot.metadata shouldEqual CommittedSyncMetadata.from(live)
+    forced.snapshot.dictionaries.keySet shouldEqual Set(DictionaryId.Miner)
 
     val second = BlockInfo(SyncFixtures.id(101), 101, Seq.empty, first.id)
     requester.send(handler, BeginCatchUp(101))
@@ -176,7 +166,7 @@ class SyncHandlerCommitSpec extends TestKit(ActorSystem("sync-handler-commit"))
 
   /** Verifies that a rollup-scoped transform failure does not reject the canonical block. */
   it should "commit a block whose only recognized transform belongs to one rollup that fails" in {
-    val (handler, _, _) = newHandler()
+    val (handler, snapshots, _) = newHandler()
     val requester = TestProbe()
     seed(handler, requester)
     val dictionary = lfsm.states.PlasmaDictionary.empty()
@@ -193,6 +183,8 @@ class SyncHandlerCommitSpec extends TestKit(ActorSystem("sync-handler-commit"))
     requester.expectMsgType[BlockCommitted]
     requester.send(handler, MarkReady)
     requester.expectMsgType[Ready]
+    // Readiness forces one checkpoint even when the normal interval is not due.
+    snapshots.expectMsgType[SnapshotCandidate]
 
     val (key, value) = SyncFixtures.plasmaEntries(1, 16).head
     val bad = ReducerFixtures.submissionTx(2, utxoId, SyncFixtures.id(300003), 101,
@@ -201,6 +193,9 @@ class SyncHandlerCommitSpec extends TestKit(ActorSystem("sync-handler-commit"))
     val second = BlockInfo(SyncFixtures.id(101), 101, Seq(bad), first.id)
 
     requester.send(handler, ApplyBlock(second))
+    val load = snapshots.expectMsgType[state.persistence.StateSnapshotActor.MaterializeDictionary]
+    snapshots.reply(state.persistence.StateSnapshotActor.DictionaryLoaded(
+      load.source.expectedDigest, load.requestToken, dictionary))
     val committed = requester.expectMsgType[BlockCommitted]
 
     committed.cursor.blockId shouldEqual second.id
@@ -262,7 +257,6 @@ class SyncHandlerCommitSpec extends TestKit(ActorSystem("sync-handler-commit"))
       .copy(localMinerHash = wallet.contract.hashedPropBytes)
     val config = Configuration(ConfigFactory.parseString(
       """sync.startHeight = 100
-        |sync.reorgWindow = 4
         |sync.snapshots.intervalBlocks = 720
         |""".stripMargin))
     val handler = system.actorOf(Props(new SyncHandler(config, protocol, snapshots.ref)))

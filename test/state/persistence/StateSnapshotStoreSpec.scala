@@ -1,15 +1,21 @@
 package state.persistence
 
 import lfsm.LFSMPhase
-import lfsm.states.{MinerTree, NISPTree, PlasmaDictionary}
+import lfsm.states.{AuthenticatedDictionary, AuthenticatedDictionaryView, DictionaryManifestHeader, MinerDictionary, PlasmaDictionary, Rollup}
+import org.ergoplatform.appkit.ErgoValue
 import org.ergoplatform.sdk.ErgoId
 import org.scalatest.BeforeAndAfterEach
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 import state.messages.SyncMessages.SyncCursor
-import state.synchronization.{CommittedSyncState, QuarantineFault}
+import state.synchronization.{CommittedSyncMetadata, CommittedSyncState, DictionaryId, QuarantineFault}
 import storage.LevelDbKeyValueStore
+import storage.InMemoryKeyValueStore
 import support.SyncFixtures
+import sigma.AvlTree
+import sigma.data.AvlTreeFlags
+import work.lithos.plasma.PlasmaParameters
+import work.lithos.plasma.collections.Manifest
 
 import java.nio.file.{Files, Path}
 import scala.collection.JavaConverters._
@@ -32,106 +38,142 @@ class StateSnapshotStoreSpec extends AnyFlatSpec with Matchers with BeforeAndAft
     directories = Vector.empty
   }
 
-  "StateSnapshotCodec" should "round-trip metadata and native Plasma manifests" in {
+  "StateSnapshotCodec" should "round-trip only checkpoint metadata and dictionary digests" in {
     val persisted = populatedSnapshot(height = 100, version = 8L)
-    val original = persisted.state
+    val checkpoint = plan(persisted)
 
-    val restored = roundTrip(persisted).state
+    val encoded = StateSnapshotCodec.encodeMeta(checkpoint, identity, MaxEntry).toOption.get
+    val restored = StateSnapshotCodec.decodeMeta(encoded, identity).toOption.get
 
-    restored.cursor shouldEqual original.cursor
-    restored.version shouldEqual original.version
-    restored.routes shouldEqual original.routes
-    restored.rollupOrigins shouldEqual original.rollupOrigins
-    restored.dataBoxToken shouldEqual original.dataBoxToken
-    restored.minerDictionaryFault shouldEqual original.minerDictionaryFault
-    restored.rollups.keySet shouldEqual original.rollups.keySet
-    restored.rollups.values.head.dictionary.digest should contain theSameElementsInOrderAs
-      original.rollups.values.head.dictionary.digest
-    restored.minerTree.dictionary.digest should contain theSameElementsInOrderAs
-      original.minerTree.dictionary.digest
-
-    val (nextKey, nextValue) = SyncFixtures.plasmaEntries(3, 32).last
-    val originalNext = original.rollups.values.head.dictionary.copy().insert(nextKey -> nextValue)
-    val restoredNext = restored.rollups.values.head.dictionary.copy().insert(nextKey -> nextValue)
-    restoredNext.proof.ergoValue.toHex shouldEqual originalNext.proof.ergoValue.toHex
+    restored.metadata shouldEqual checkpoint.metadata
+    restored.recentCursors shouldEqual checkpoint.recentCursors
+    restored.dictionaryDigests shouldEqual checkpoint.dictionaries.values.map(_.expectedDigest).toSet
   }
 
-  // Persisted cursors restore the common-ancestor search window after restart.
-  it should "round-trip the canonical cursors behind the committed state" in {
-    val persisted = populatedSnapshot(height = 100, version = 8L)
-
-    roundTrip(persisted).recentCursors shouldEqual persisted.recentCursors
-  }
-
-  it should "round-trip a Miner Dictionary fault so a snapshot cannot claim a stale tree is current" in {
-    val faulted = populatedSnapshot(100, 8L)
-    val persisted = faulted.copy(
-      state = faulted.state.copy(minerDictionaryFault = Some("input 1 does not spend the tracked box")))
-
-    roundTrip(persisted).state.minerDictionaryFault shouldEqual
-      Some("input 1 does not spend the tracked box")
-  }
-
-  /** A fault that did not survive restart would silently start its attempt count again. */
-  it should "round-trip quarantine faults with their attempt counts" in {
+  it should "round-trip quarantine deadlines and attempt counts" in {
     val base = populatedSnapshot(100, 8L)
     val fault = QuarantineFault("dropped-rollup", 88, SyncFixtures.id(4999), "missing context variable 2",
       retryable = true, attempts = 2, removalHeight = Some(180), removalWarningLogged = true)
-    val persisted = base.copy(state = base.state.copy(quarantined = Map(fault.rollupId -> fault)))
+    val checkpoint = plan(base.copy(state = base.state.copy(
+      minerDictionaryFault = Some("dictionary fault"),
+      quarantined = Map(fault.rollupId -> fault))))
 
-    roundTrip(persisted).state.quarantined shouldEqual Map(fault.rollupId -> fault)
+    val encoded = StateSnapshotCodec.encodeMeta(checkpoint, identity, MaxEntry).toOption.get
+    val restored = StateSnapshotCodec.decodeMeta(encoded, identity).toOption.get.metadata
+
+    restored.minerDictionaryFault shouldEqual Some("dictionary fault")
+    restored.quarantined shouldEqual Map(fault.rollupId -> fault)
   }
 
-  it should "reject a corrupt payload before publishing any state" in {
-    val encoded = encode(populatedSnapshot(100, 8L)).toOption.get
-    val meta = encoded.meta.clone()
-    meta(meta.length / 2) = (meta(meta.length / 2) ^ 0x01).toByte
+  it should "reject corrupt metadata and a different protocol identity" in {
+    val encoded = StateSnapshotCodec.encodeMeta(plan(populatedSnapshot(100, 8L)), identity,
+      MaxEntry).toOption.get
+    val corrupt = encoded.clone()
+    corrupt(corrupt.length / 2) = (corrupt(corrupt.length / 2) ^ 0x01).toByte
 
-    StateSnapshotCodec.decodeMeta(meta, identity).isLeft shouldBe true
+    StateSnapshotCodec.decodeMeta(corrupt, identity).isLeft shouldBe true
+    StateSnapshotCodec.decodeMeta(encoded, identity.copy(localMinerHash = "other"))
+      .left.toOption.get should include("does not match")
   }
 
-  it should "reject state created for another network, wallet, or protocol deployment" in {
-    val encoded = encode(populatedSnapshot(100, 8L)).toOption.get
-    val other = identity.copy(localMinerHash = "another-miner")
+  it should "bound each physical entry including its checksum envelope" in {
+    val refused = StateSnapshotCodec.encodeMeta(plan(populatedSnapshot(100, 8L)), identity, 64)
 
-    StateSnapshotCodec.decodeMeta(encoded.meta, other).left.toOption.get should include("does not match")
-  }
-
-  /**
-   * One entry per rollup is what keeps a generation's largest value independent of the rollup count.
-   */
-  it should "write one entry per rollup rather than one value for the whole state" in {
-    val persisted = populatedSnapshot(100, 8L, rollups = 4)
-
-    val encoded = encode(persisted).toOption.get
-
-    encoded.rollups.map(_._1).toSet shouldEqual persisted.state.rollups.keySet
-    // Metadata carries routes and the dictionary, never a rollup's own manifest.
-    encoded.rollups.foreach { case (_, value) => value.length should be > encoded.meta.length / 8 }
-  }
-
-  /** A generation too large to read back must be refused at the point it would be written. */
-  it should "refuse a generation whose entry would exceed the configured ceiling" in {
-    val persisted = populatedSnapshot(100, 8L)
-
-    val refused = encode(persisted, maxEntry = 64)
-
-    refused.isLeft shouldBe true
     refused.left.toOption.get should include("over the configured 64 limit")
   }
 
-  "LevelDbStateSnapshotStore" should "retain generations and recover through a corrupt newest one" in {
+  it should "refuse a source whose digest does not name the entity metadata" in {
+    val (_, snapshots) = store(retention = 2)
+    val checkpoint = plan(populatedSnapshot(100, 8L))
+    val source = checkpoint.dictionaries(DictionaryId.Miner)
+    val mismatched = checkpoint.copy(dictionaries = checkpoint.dictionaries +
+      (DictionaryId.Miner -> source.copy(expectedDigest = "00" * 32)))
+
+    snapshots.save(mismatched, MaxEntry).left.toOption.get.message should include(
+      "source digest does not match")
+    snapshots.generationKeys().toOption.get shouldBe empty
+    snapshots.close() shouldEqual Right(())
+  }
+
+  it should "reject a legacy 32-byte digest that omits the AVL height byte" in {
+    val checkpoint = plan(populatedSnapshot(100, 8L))
+    val legacy = "00" * 32
+    val metadata = checkpoint.metadata.copy(minerDictionary =
+      checkpoint.metadata.minerDictionary.copy(dictionaryDigest = legacy))
+    val encoded = StateSnapshotCodec.encodeMeta(checkpoint.copy(metadata = metadata), identity,
+      MaxEntry).toOption.get
+
+    StateSnapshotCodec.decodeMeta(encoded, identity).left.toOption.get should include(
+      "invalid dictionary digest")
+  }
+
+  "LevelDbStateSnapshotStore" should "restore digest-only state and load a requested dictionary" in {
+    val (_, snapshots) = store(retention = 2)
+    val persisted = populatedSnapshot(100, 8L)
+
+    snapshots.save(plan(persisted), MaxEntry) shouldEqual Right(())
+    val restored = snapshots.load(snapshots.generationKeys().toOption.get.head).toOption.get
+
+    restored.state.rollups.values.head.dictionary.materialized shouldBe false
+    restored.state.minerTree.dictionary.materialized shouldBe false
+    restored.state.rollups.values.head.metadata shouldEqual persisted.state.rollups.values.head.metadata
+
+    val digest = persisted.state.rollups.values.head.metadata.dictionaryDigest
+    val dictionary = snapshots.loadDictionary(digest).toOption.get
+    dictionary.digest should contain theSameElementsInOrderAs
+      persisted.state.rollups.values.head.dictionary.digest
+
+    val (nextKey, nextValue) = SyncFixtures.plasmaEntries(3, 32).last
+    val originalNext = persisted.state.rollups.values.head.dictionary.copy().insert(nextKey -> nextValue)
+    val restoredNext = dictionary.copy().insert(nextKey -> nextValue)
+    restoredNext.proof.ergoValue.toHex shouldEqual originalNext.proof.ergoValue.toHex
+    snapshots.close() shouldEqual Right(())
+  }
+
+  it should "reuse one content-addressed blob across identical rollups and generations" in {
+    val (keyValueStore, snapshots) = store(retention = 2)
+    val first = populatedSnapshot(100, 8L, rollups = 4)
+    val second = populatedSnapshot(101, 9L, rollups = 4)
+
+    snapshots.save(plan(first), MaxEntry) shouldEqual Right(())
+    val blobKeysAfterFirst = keyValueStore.scanKeys(bytes("sync/snapshot/blob/" )).toOption.get
+    snapshots.save(plan(second), MaxEntry) shouldEqual Right(())
+    val blobKeysAfterSecond = keyValueStore.scanKeys(bytes("sync/snapshot/blob/" )).toOption.get
+
+    // Every rollup has identical dictionary content, and the Miner Dictionary is identical too.
+    blobKeysAfterSecond.size shouldEqual blobKeysAfterFirst.size
+    blobKeysAfterSecond.count(key => text(key).endsWith("/header")) shouldEqual 2
+    keyValueStore.scanKeys(bytes("sync/snapshot/gen/")).toOption.get
+      .forall(key => text(key).endsWith("/meta")) shouldBe true
+    snapshots.close() shouldEqual Right(())
+  }
+
+  it should "consume and persist one serialized AVL subtree at a time before committing its header" in {
+    val keyValues = new InMemoryKeyValueStore
+    val snapshots = new LevelDbStateSnapshotStore(keyValues, retention = 2, identity)
+    val dictionary = new StreamingDictionary(3)
+    val base = populatedSnapshot(100, 8L, rollups = 0)
+    val state = base.state.copy(minerTree = base.state.minerTree.copy(dictionary = dictionary))
+
+    snapshots.save(plan(base.copy(state = state)), MaxEntry) shouldEqual Right(())
+
+    val batches = keyValues.recordedBatches
+    val keys = batches.flatten.collect { case storage.KeyValueMutation.Put(key, _) => text(key) }
+    keys.count(_.contains("/s/")) shouldEqual 3
+    val headerIndex = keys.indexWhere(_.endsWith("/header"))
+    headerIndex should be > keys.lastIndexWhere(_.contains("/s/"))
+    snapshots.close() shouldEqual Right(())
+  }
+
+  it should "recover through corrupt newest metadata" in {
     val (keyValueStore, snapshots) = store(retention = 2)
     val first = populatedSnapshot(100, 8L)
     val second = populatedSnapshot(101, 9L)
+    snapshots.save(plan(first), MaxEntry) shouldEqual Right(())
+    snapshots.save(plan(second), MaxEntry) shouldEqual Right(())
 
-    save(snapshots, first) shouldEqual Right(())
-    save(snapshots, second) shouldEqual Right(())
-    firstUsable(snapshots).map(_.state.cursor) shouldEqual Some(second.state.cursor)
-
-    val newest = keyValueStore.scanPrefix("sync/snapshot/gen/".getBytes("UTF-8"))
-      .toOption.get.filter(entry => new String(entry._1, "UTF-8").endsWith("/meta"))
-      .maxBy(entry => new String(entry._1, "UTF-8"))
+    val newest = keyValueStore.scanPrefix(bytes("sync/snapshot/gen/" )).toOption.get
+      .maxBy(entry => text(entry._1))
     val corrupt = newest._2.clone()
     corrupt(corrupt.length / 2) = (corrupt(corrupt.length / 2) ^ 0x01).toByte
     keyValueStore.put(newest._1, corrupt)
@@ -140,34 +182,68 @@ class StateSnapshotStoreSpec extends AnyFlatSpec with Matchers with BeforeAndAft
     snapshots.close() shouldEqual Right(())
   }
 
-  /** A generation missing one rollup entry is not partially restorable. */
-  it should "refuse a generation whose rollup entry is absent" in {
+  it should "refuse a generation whose referenced dictionary header is absent" in {
     val (keyValueStore, snapshots) = store(retention = 2)
     val persisted = populatedSnapshot(100, 8L)
-    save(snapshots, persisted) shouldEqual Right(())
+    snapshots.save(plan(persisted), MaxEntry) shouldEqual Right(())
 
-    val rollupEntry = keyValueStore.scanKeys("sync/snapshot/gen/".getBytes("UTF-8"))
-      .toOption.get.find(key => new String(key, "UTF-8").contains("/r/")).get
-    keyValueStore.delete(rollupEntry)
+    val header = keyValueStore.scanKeys(bytes("sync/snapshot/blob/" )).toOption.get
+      .find(key => text(key).endsWith("/header")).get
+    keyValueStore.delete(header)
 
-    val key = snapshots.generationKeys().toOption.get.head
-    snapshots.load(key).left.toOption.get.message should include("missing rollup")
+    snapshots.load(snapshots.generationKeys().toOption.get.head)
+      .left.toOption.get.message should include("no committed header")
     snapshots.close() shouldEqual Right(())
   }
 
-  /** Retention is what stops the database growing forever, and nothing else exercised it. */
-  it should "prune every entry of a generation past its retention" in {
+  it should "refuse a dictionary with a missing serialized subtree" in {
     val (keyValueStore, snapshots) = store(retention = 2)
-    (100 to 103).foreach(height => save(snapshots, populatedSnapshot(height, height.toLong)) shouldEqual Right(()))
+    val persisted = largeDictionarySnapshot(100)
+    snapshots.save(plan(persisted), MaxEntry) shouldEqual Right(())
+    val digest = persisted.state.minerTree.metadata.dictionaryDigest
+    val subtreeKeys = keyValueStore.scanKeys(bytes(s"sync/snapshot/blob/$digest/s/"))
+      .toOption.get.sortBy(text)
+    subtreeKeys.size should be > 1
+    keyValueStore.delete(subtreeKeys.head)
 
-    val generations = snapshots.generationKeys().toOption.get
-    generations.size shouldEqual 2
+    snapshots.loadDictionary(digest).left.toOption.get.message should include("missing subtree 0")
+    snapshots.close() shouldEqual Right(())
+  }
 
-    // No stray rollup entries survive from the generations that were pruned.
-    val remaining = keyValueStore.scanKeys("sync/snapshot/gen/".getBytes("UTF-8")).toOption.get
-      .map(key => new String(key, "UTF-8"))
-    remaining.filter(_.contains("/r/")).size shouldEqual 2
-    firstUsable(snapshots).map(_.state.cursor.height) shouldEqual Some(103)
+  it should "refuse subtree bytes stored under another subtree index" in {
+    val (keyValueStore, snapshots) = store(retention = 2)
+    val persisted = largeDictionarySnapshot(100)
+    snapshots.save(plan(persisted), MaxEntry) shouldEqual Right(())
+    val digest = persisted.state.minerTree.metadata.dictionaryDigest
+    val subtreeKeys = keyValueStore.scanKeys(bytes(s"sync/snapshot/blob/$digest/s/"))
+      .toOption.get.sortBy(text)
+    subtreeKeys.size should be > 1
+    val encodedZero = keyValueStore.get(subtreeKeys.head).toOption.flatten.get
+    keyValueStore.put(subtreeKeys(1), encodedZero)
+
+    val error = snapshots.loadDictionary(digest).left.toOption.get.message
+    snapshots.close() shouldEqual Right(())
+    error should include("does not name index 1")
+  }
+
+  it should "prune old generations and dictionaries unreachable from the retained set" in {
+    val (keyValueStore, snapshots) = store(retention = 2)
+    (100 to 103).foreach { height =>
+      val persisted = populatedSnapshot(height, height.toLong, valueSeed = height)
+      snapshots.save(plan(persisted), MaxEntry) shouldEqual Right(())
+    }
+
+    snapshots.generationKeys().toOption.get.size shouldEqual 2
+    val retainedDigests = snapshots.generationKeys().toOption.get
+      .flatMap(key => snapshots.load(key).toOption.toSeq)
+      .flatMap(value => value.state.rollups.values.map(_.metadata.dictionaryDigest) ++
+        Seq(value.state.minerTree.metadata.dictionaryDigest)).toSet
+    val storedDigests = keyValueStore.scanKeys(bytes("sync/snapshot/blob/" )).toOption.get
+      .filter(key => text(key).endsWith("/header"))
+      .map(key => text(key).stripPrefix("sync/snapshot/blob/").stripSuffix("/header")).toSet
+
+    retainedDigests.subsetOf(storedDigests) shouldBe true
+    storedDigests shouldEqual retainedDigests
     snapshots.close() shouldEqual Right(())
   }
 
@@ -175,48 +251,49 @@ class StateSnapshotStoreSpec extends AnyFlatSpec with Matchers with BeforeAndAft
     val directory = Files.createTempDirectory("lithos-sync-snapshot-")
     directories :+= directory
     val keyValueStore = LevelDbKeyValueStore.openOrThrow(directory).asInstanceOf[LevelDbKeyValueStore]
-    (keyValueStore, new LevelDbStateSnapshotStore(keyValueStore, retention, identity))
+    keyValueStore -> new LevelDbStateSnapshotStore(keyValueStore, retention, identity)
   }
 
-  private def encode(persisted: PersistedSyncState,
-                     id: StateSnapshotIdentity = identity,
-                     maxEntry: Int = MaxEntry): Either[String, SnapshotWrite] =
-    StateSnapshotCodec.encode(persisted, id, maxEntry)
-
-  /** Decodes through the same two steps the store uses, so the spec exercises the real path. */
-  private def roundTrip(persisted: PersistedSyncState): PersistedSyncState = {
-    val encoded = encode(persisted).toOption.get
-    val meta = StateSnapshotCodec.decodeMeta(encoded.meta, identity).toOption.get
-    val rollups = encoded.rollups.map { case (id, value) =>
-      id -> StateSnapshotCodec.decodeRollup(value, id).toOption.get
-    }.toMap
-    StateSnapshotCodec.assemble(meta, rollups).toOption.get
+  private def plan(persisted: PersistedSyncState): SnapshotCheckpoint = {
+    val state = persisted.state
+    val sources: Map[DictionaryId, SnapshotDictionarySource] = state.rollups.map { case (id, rollup) =>
+      (DictionaryId.Rollup(id): DictionaryId) -> source(rollup.dictionary)
+    } + (DictionaryId.Miner -> source(state.minerTree.dictionary))
+    SnapshotCheckpoint(CommittedSyncMetadata.from(state), persisted.recentCursors, sources)
   }
 
-  /** Encodes and writes in one step, as the state owner does. */
-  private def save(store: LevelDbStateSnapshotStore,
-                   persisted: PersistedSyncState): Either[SnapshotError, Unit] =
-    encode(persisted) match {
-      case Right(encoded) => store.save(persisted.state.cursor, persisted.state.version, encoded)
-      case Left(reason) => Left(SnapshotError.Corrupt(reason))
-    }
+  private def source(dictionary: lfsm.states.AuthenticatedDictionaryView): SnapshotDictionarySource =
+    SnapshotDictionarySource(org.bouncycastle.util.encoders.Hex.toHexString(dictionary.digest),
+      dictionary.flags, dictionary.parameters, SnapshotDictionaryBase.Materialized(dictionary), Vector.empty)
 
-  /** Returns the newest generation that decodes successfully. */
   private def firstUsable(store: LevelDbStateSnapshotStore): Option[PersistedSyncState] =
     store.generationKeys().toOption.toSeq.flatten
       .flatMap(key => store.load(key).toOption).headOption
 
   private def populatedSnapshot(height: Int,
                                 version: Long,
-                                rollups: Int = 1): PersistedSyncState =
-    PersistedSyncState(populatedState(height, version, rollups),
+                                rollups: Int = 1,
+                                valueSeed: Int = 1): PersistedSyncState =
+    PersistedSyncState(populatedState(height, version, rollups, valueSeed),
       Vector(
         SyncCursor(height - 2, SyncFixtures.id(height - 2), SyncFixtures.id(height - 3)),
         SyncCursor(height - 1, SyncFixtures.id(height - 1), SyncFixtures.id(height - 2)),
         SyncCursor(height, SyncFixtures.id(height), SyncFixtures.id(height - 1))))
 
-  private def populatedState(height: Int, version: Long, rollupCount: Int): CommittedSyncState = {
-    val entries = SyncFixtures.plasmaEntries(2, 32)
+  private def largeDictionarySnapshot(height: Int): PersistedSyncState = {
+    val dictionary = PlasmaDictionary.empty()
+    val entries = SyncFixtures.plasmaEntries(2051, 32)
+    dictionary.insert(entries: _*)
+    val base = populatedSnapshot(height, height.toLong, rollups = 0)
+    base.copy(state = base.state.copy(minerTree = base.state.minerTree.copy(
+      dictionary = dictionary, numMiners = entries.size, syncHeight = height, savedHeight = height)))
+  }
+
+  private def populatedState(height: Int,
+                             version: Long,
+                             rollupCount: Int,
+                             valueSeed: Int): CommittedSyncState = {
+    val entries = SyncFixtures.plasmaEntries(valueSeed + 2, 32).drop(valueSeed).take(2)
     val minerDictionary = PlasmaDictionary.empty()
     minerDictionary.insert(entries(1))
     val tracked = (0 until rollupCount).map { index =>
@@ -224,15 +301,36 @@ class StateSnapshotStoreSpec extends AnyFlatSpec with Matchers with BeforeAndAft
       dictionary.insert(entries.head)
       val rollupId = SyncFixtures.id(5000 + index)
       val utxoId = SyncFixtures.id(5100 + index * 1000 + height)
-      rollupId -> NISPTree(dictionary, 1, BigInt(50), Some(90L), 1000000L, 90, hasMiner = true,
-        LFSMPhase.HOLDING, Set("miner"), evaluated = true, rollupId, utxoId)
+      rollupId -> Rollup(dictionary, 1, BigInt(50), Some(90L), 1000000L, 90, hasMiner = true,
+        LFSMPhase.HOLDING, evaluated = true, rollupId, utxoId)
     }
-    val minerTree = MinerTree.initialState.copy(dictionary = minerDictionary, numMiners = 1,
+    val minerTree = MinerDictionary.initialState.copy(dictionary = minerDictionary, numMiners = 1,
       hasMiner = true, syncHeight = height, savedHeight = height)
     CommittedSyncState(SyncCursor(height, SyncFixtures.id(height), SyncFixtures.id(height - 1)),
       version, tracked.toMap, tracked.map { case (id, tree) => tree.utxoId -> id }.toMap,
       tracked.zipWithIndex.map { case ((id, _), index) => id -> SyncFixtures.id(5200 + index) }.toMap,
-      minerTree,
-      Some(ErgoId.create(SyncFixtures.id(6000))))
+      minerTree, Some(ErgoId.create(SyncFixtures.id(6000))))
+  }
+
+  private def bytes(value: String): Array[Byte] = value.getBytes("UTF-8")
+  private def text(value: Array[Byte]): String = new String(value, "UTF-8")
+
+  private final class StreamingDictionary(subtrees: Int) extends AuthenticatedDictionaryView {
+    // An AVL digest is the 32-byte root label followed by its one-byte tree height.
+    private val ownedDigest = scorex.crypto.hash.Blake2b256.hash(bytes("streaming-dictionary")) :+ 0.toByte
+    override def digest: Array[Byte] = ownedDigest.clone()
+    override val flags: AvlTreeFlags = AvlTreeFlags.AllOperationsAllowed
+    override val parameters: PlasmaParameters = PlasmaParameters.default
+    override val materialized: Boolean = true
+    override def ergoValue: ErgoValue[AvlTree] = unsupported()
+    override def copy(): AuthenticatedDictionary = unsupported()
+    override def foreachKey(visit: Array[Byte] => Unit): Unit = unsupported()
+    override def getManifest(): Manifest = unsupported()
+    override def writeManifest(subtreeDepth: Int)
+                              (writeSubtree: (Int, Array[Byte]) => Unit): DictionaryManifestHeader = {
+      (0 until subtrees).foreach(index => writeSubtree(index, Array.fill(128)((index + 1).toByte)))
+      DictionaryManifestHeader(flags, parameters, digest, bytes("manifest"), subtrees)
+    }
+    private def unsupported[A](): A = throw new UnsupportedOperationException("not needed by this test")
   }
 }

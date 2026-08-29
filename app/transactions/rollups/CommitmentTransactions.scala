@@ -2,7 +2,7 @@ package transactions.rollups
 
 import configs.NodeContext
 import lfsm.LFSMHelpers
-import lfsm.states.MinerTree
+import lfsm.states.MinerDictionary
 import mutations.NodeWallet
 import org.ergoplatform.ErgoTreePredef
 import org.ergoplatform.appkit._
@@ -143,7 +143,7 @@ class CommitmentTransactions(nodeContext: NodeContext, dataBoxes: DataBoxSource)
 
 
   def sendInitialCommitment(diff: String,
-                            minerTree: MinerTree,
+                            minerTree: MinerDictionary,
                             walletSelector: WalletSelector): String = {
     client.execute{
       ctx =>
@@ -183,7 +183,7 @@ class CommitmentTransactions(nodeContext: NodeContext, dataBoxes: DataBoxSource)
    * @return SignedTx which adds miner to miner dictionary
    */
   private def signInitialCommitment(ctx: BlockchainContext,
-                                    minerTree: MinerTree,
+                                    minerTree: MinerDictionary,
                                     prover: NodeWallet,
                                     score: Long,
                                     funding: Seq[InputUTXO]): SignedTransaction = {

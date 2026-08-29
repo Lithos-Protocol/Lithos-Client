@@ -1,6 +1,6 @@
 package state.synchronization
 
-import lfsm.states.MinerTree
+import lfsm.states.MinerDictionary
 import node.NodeApi
 import node.model.{IndexedBox, MempoolOptions, Paging, SortDirection}
 import org.slf4j.{Logger, LoggerFactory}
@@ -12,7 +12,7 @@ import scala.annotation.tailrec
 import scala.util.{Failure, Success, Try}
 
 /** Miner Dictionary state and local data-box token at the synchronization seed height. */
-final case class MinerDictionarySeed(minerTree: MinerTree, dataBoxToken: Option[ErgoId])
+final case class MinerDictionarySeed(minerTree: MinerDictionary, dataBoxToken: Option[ErgoId])
 
 /**
  * Rebuilds the Miner Dictionary by following its singleton box spend chain.
@@ -44,8 +44,8 @@ final class MinerDictionaryBootstrap(nodeApi: NodeApi,
   }
 
   /** Anchors the empty dictionary to the configured genesis box. */
-  private def startState: MinerTree =
-    MinerTree.initialState.copy(utxoId = protocol.minerDictionaryGenesisId)
+  private def startState: MinerDictionary =
+    MinerDictionary.initialState.copy(utxoId = protocol.minerDictionaryGenesisId)
 
   private final case class WalkResult(seed: CommittedSyncState,
                                       tip: CommittedSyncState,
@@ -102,7 +102,7 @@ final class MinerDictionaryBootstrap(nodeApi: NodeApi,
     }
 
   /** Wraps dictionary state in the reducer's complete-state input. */
-  private def seedState(tree: MinerTree): CommittedSyncState =
+  private def seedState(tree: MinerDictionary): CommittedSyncState =
     CommittedSyncState(SyncCursor(0, "", ""), 0L, Map.empty, Map.empty, Map.empty, tree, None)
 
   /** Verifies the reconstructed tip against the current unspent dictionary box and digest. */

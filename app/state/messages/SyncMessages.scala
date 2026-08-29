@@ -1,7 +1,7 @@
 package state.messages
 
-import lfsm.states.NISPTree
-import state.messages.MempoolMessages.MempoolRollupState
+import lfsm.states.{MinerDictionary, RollupMetadata}
+import state.messages.MempoolMessages.MempoolRollupMetadata
 
 object SyncMessages {
 
@@ -44,6 +44,8 @@ object SyncMessages {
                                    recentCursors: Vector[SyncCursor] = Vector.empty)
   case object GetCommittedState
   case class CommittedState(state: _root_.state.synchronization.CommittedSyncState)
+  case object GetMinerDictionary
+  case class CurrentMinerDictionary(dictionary: MinerDictionary)
   case object GetRetainedCursors
   case class RetainedCursors(cursors: Seq[SyncCursor])
   case object ResetSyncState
@@ -60,13 +62,17 @@ object SyncMessages {
    * rebuild rejects it rather than installing state from another chain.
    */
   case class RepairMinerDictionary(atCursor: SyncCursor,
-                                    minerTree: lfsm.states.MinerTree,
-                                    dataBoxToken: Option[org.ergoplatform.sdk.ErgoId])
+                                    minerTree: lfsm.states.MinerDictionary,
+                                    dataBoxToken: Option[org.ergoplatform.sdk.ErgoId],
+                                    repairPermit: String)
+  case object GetMinerDictionaryRepairPermit
+  case class MinerDictionaryRepairPermit(committedCursor: SyncCursor, repairPermit: String)
 
   /** Asks which quarantined rollups are worth rebuilding, newest first. */
   case object GetRepairableQuarantines
   case class RepairableQuarantines(faults: Seq[_root_.state.synchronization.QuarantineFault],
-                                    committedCursor: SyncCursor)
+                                    committedCursor: SyncCursor,
+                                    repairPermit: String)
 
   /**
    * Installs a rebuilt rollup and clears its fault, or records the attempt when the rebuild failed.
@@ -74,7 +80,8 @@ object SyncMessages {
    */
   case class RepairRollup(rollupId: String,
                            atCursor: SyncCursor,
-                           outcome: _root_.state.synchronization.RollupRepairResult)
+                           outcome: _root_.state.synchronization.RollupRepairResult,
+                           repairPermit: String)
 
   case class RollbackTo(blockId: String)
   case class RollbackCompleted(cursor: SyncCursor)
@@ -101,6 +108,6 @@ object SyncMessages {
   sealed trait SyncMessage
 
   /** Committed rollups with their mempool projections, so a consumer reads one consistent pair. */
-  case class FullSync(rollups: Seq[(String, NISPTree)],
-                      projections: Map[String, MempoolRollupState]) extends SyncMessage
+  case class FullSync(rollups: Seq[(String, RollupMetadata)],
+                      projections: Map[String, MempoolRollupMetadata]) extends SyncMessage
 }

@@ -1,9 +1,9 @@
 package state.persistence
 
-import akka.actor.{ActorSystem, Props}
+import akka.actor.{ActorIdentity, ActorSystem, Identify, Kill, Props}
 import akka.testkit.{TestKit, TestProbe}
 import com.typesafe.config.ConfigFactory
-import lfsm.states.MinerTree
+import lfsm.states.MinerDictionary
 import node.NodeApi
 import node.model.NodeHeader
 import org.mockito.ArgumentMatchers.any
@@ -16,11 +16,14 @@ import org.scalatest.matchers.should.Matchers
 import org.scalatestplus.mockito.MockitoSugar
 import play.api.Configuration
 import state.messages.SyncMessages.SyncCursor
-import state.persistence.StateSnapshotActor.{RestoreLatest, SnapshotLoaded}
-import state.synchronization.{CommittedSyncState, SyncProtocolContext}
-import support.{ChainFixtures, FakeNodeContext, ReducerFixtures, SyncFixtures}
+import state.persistence.StateSnapshotActor.{RestoreLatest, SnapshotLoaded, SnapshotSaved}
+import state.synchronization.{CommittedSyncMetadata, CommittedSyncState, DictionaryId, SyncProtocolContext}
+import support.{ChainFixtures, FakeNodeContext, ReducerFixtures, RestartingSupervisor, SyncFixtures}
 
 import java.nio.file.Files
+import java.util.concurrent.{CountDownLatch, TimeUnit}
+import java.util.concurrent.atomic.AtomicInteger
+import scala.concurrent.duration._
 import scala.util.{Failure, Success, Try}
 
 /**
@@ -76,6 +79,30 @@ class SnapshotFallbackSpec extends TestKit(ActorSystem("snapshot-fallback"))
     loaded.warning.get should include("not")
   }
 
+  it should "ignore snapshot validation completed by an actor incarnation that restarted" in {
+    val calls = new AtomicInteger(0)
+    val entered = new CountDownLatch(1)
+    val release = new CountDownLatch(1)
+    val (actor, requester, _) = actorOver(saved = Seq(600), headerAnswer = height => {
+      if (calls.getAndIncrement() == 0) {
+        entered.countDown()
+        release.await(10, TimeUnit.SECONDS)
+      }
+      Success(ChainFixtures.header(height))
+    }, restartable = true)
+
+    requester.send(actor, RestoreLatest)
+    entered.await(5, TimeUnit.SECONDS) shouldBe true
+    actor ! Kill
+    actor.tell(Identify("snapshot-restarted"), testActor)
+    expectMsg(ActorIdentity("snapshot-restarted", Some(actor)))
+    release.countDown()
+
+    requester.expectNoMessage(500.millis)
+    requester.send(actor, RestoreLatest)
+    requester.expectMsgType[SnapshotLoaded].snapshot.get.state.cursor.height shouldEqual 600
+  }
+
   /**
    * Cross-field checks the checksum cannot make: bytes can be intact while the combination is one the
    * reducer would never have produced.
@@ -85,12 +112,12 @@ class SnapshotFallbackSpec extends TestKit(ActorSystem("snapshot-fallback"))
     val cursor = SyncCursor(600, header.id, header.parentId)
     val contradictory = CommittedSyncState(cursor, 600L, Map.empty, Map.empty, Map.empty,
       // A stored data-box token says this miner registered; the dictionary says it holds nobody.
-      MinerTree.initialState, Some(org.ergoplatform.sdk.ErgoId.create(SyncFixtures.id(7))))
+      MinerDictionary.initialState, Some(org.ergoplatform.sdk.ErgoId.create(SyncFixtures.id(7))))
 
     val (actor, requester, identity) = actorOver(saved = Seq.empty, headerAnswer = h =>
       Success(ChainFixtures.header(h)))
     requester.send(actor, candidate(contradictory, Vector(cursor), identity))
-    requester.expectNoMessage(scala.concurrent.duration.DurationInt(300).millis)
+    requester.expectMsgType[SnapshotSaved]
 
     requester.send(actor, RestoreLatest)
     val loaded = requester.expectMsgType[SnapshotLoaded]
@@ -107,20 +134,33 @@ class SnapshotFallbackSpec extends TestKit(ActorSystem("snapshot-fallback"))
     val (actor, requester, identity) = actorOver(saved = Seq.empty, headerAnswer = h =>
       Success(ChainFixtures.header(h)))
     requester.send(actor, candidate(stateAt(600), Vector(stale), identity))
-    requester.expectNoMessage(scala.concurrent.duration.DurationInt(300).millis)
+    requester.expectMsgType[SnapshotSaved]
 
     requester.send(actor, RestoreLatest)
     requester.expectMsgType[SnapshotLoaded].warning.get should include("retained cursors end at 598")
   }
 
+  it should "refuse retained cursor identity from a same-height fork" in {
+    val state = stateAt(600)
+    val forked = state.cursor.copy(blockId = "aa" * 32, parentId = "bb" * 32)
+    val (actor, requester, identity) = actorOver(saved = Seq.empty, headerAnswer = h =>
+      Success(ChainFixtures.header(h)))
+    requester.send(actor, candidate(state, Vector(forked), identity))
+    requester.expectMsgType[SnapshotSaved]
+
+    requester.send(actor, RestoreLatest)
+    requester.expectMsgType[SnapshotLoaded].warning.get should include("retained cursors end at 600")
+  }
+
   private def stateAt(height: Int): CommittedSyncState = {
     val header = ChainFixtures.header(height)
     CommittedSyncState(SyncCursor(height, header.id, header.parentId), height.toLong,
-      Map.empty, Map.empty, Map.empty, MinerTree.initialState, None)
+      Map.empty, Map.empty, Map.empty, MinerDictionary.initialState, None)
   }
 
   private def actorOver(saved: Seq[Int],
-                        headerAnswer: Int => Try[NodeHeader])
+                        headerAnswer: Int => Try[NodeHeader],
+                        restartable: Boolean = false)
   : (akka.actor.ActorRef, TestProbe, StateSnapshotIdentity) = {
     val nodeApi = mock[NodeApi]
     doAnswer(new Answer[Try[Seq[NodeHeader]]] {
@@ -141,21 +181,33 @@ class SnapshotFallbackSpec extends TestKit(ActorSystem("snapshot-fallback"))
          |sync.storage.path = "${path.toString.replace("\\", "/")}"
          |""".stripMargin))
 
-    val actor = system.actorOf(Props(new StateSnapshotActor(config, nodeContext, protocol)))
     val requester = TestProbe()
+    val childProps = Props(new StateSnapshotActor(config, nodeContext, protocol))
+    val actor = if (restartable) {
+      val supervisor = system.actorOf(RestartingSupervisor.props(childProps))
+      requester.send(supervisor, RestartingSupervisor.GetChild)
+      requester.expectMsgType[RestartingSupervisor.Child].ref
+    } else system.actorOf(childProps)
     val identity = StateSnapshotIdentity(protocol)
     saved.foreach { height =>
       requester.send(actor, candidate(stateAt(height), Vector(stateAt(height).cursor), identity))
+      requester.expectMsgType[SnapshotSaved]
     }
-    // Each save is acknowledged internally; give them room before the restore reads generations.
-    requester.expectNoMessage(scala.concurrent.duration.DurationInt(300).millis)
     (actor, requester, identity)
   }
 
   /** Encodes as the state owner does, so the actor receives the shape it handles. */
   private def candidate(state: CommittedSyncState,
                         cursors: Vector[SyncCursor],
-                        identity: StateSnapshotIdentity): StateSnapshotActor.SnapshotCandidate =
-    StateSnapshotActor.SnapshotCandidate(state.cursor, state.version,
-      StateSnapshotCodec.encode(PersistedSyncState(state, cursors), identity, 64 * 1024 * 1024).toOption.get)
+                        identity: StateSnapshotIdentity): StateSnapshotActor.SnapshotCandidate = {
+    def source(dictionary: lfsm.states.AuthenticatedDictionaryView) =
+      SnapshotDictionarySource(org.bouncycastle.util.encoders.Hex.toHexString(dictionary.digest),
+        dictionary.flags, dictionary.parameters, SnapshotDictionaryBase.Materialized(dictionary), Vector.empty)
+    val dictionaries: Map[DictionaryId, SnapshotDictionarySource] = state.rollups.map { case (id, rollup) =>
+      (DictionaryId.Rollup(id): DictionaryId) -> source(rollup.dictionary)
+    } + (DictionaryId.Miner -> source(state.minerTree.dictionary))
+    StateSnapshotActor.SnapshotCandidate(
+      SnapshotCheckpoint(CommittedSyncMetadata.from(state), cursors, dictionaries),
+      s"test-${state.cursor.height}")
+  }
 }

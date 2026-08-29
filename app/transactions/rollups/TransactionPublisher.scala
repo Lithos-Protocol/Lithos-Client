@@ -6,14 +6,14 @@ import akka.util.Timeout
 import configs.{NodeContext, StateConfig, StratumConfig}
 import lfsm.LFSMHelpers
 import lfsm.LFSMPhase.{EVAL, HOLDING, PAYOUT}
-import lfsm.states.NISPTree
+import lfsm.states.RollupMetadata
 import mutations.NodeWallet
 import org.ergoplatform.appkit.ErgoClient
 import org.slf4j.{Logger, LoggerFactory}
 import play.api.Configuration
 import play.api.cache.SyncCacheApi
 import play.api.libs.concurrent.InjectedActorSupport
-import state.messages.MempoolMessages.MempoolRollupState
+import state.messages.MempoolMessages.MempoolRollupMetadata
 import state.messages.SyncMessages._
 import transactions.rollups.TransactionMessages.RollupTxType._
 import transactions.rollups.TransactionMessages.{PublishRollupTxs, PublishedRollupMap, RollupTxStub, RollupTxType}
@@ -31,7 +31,7 @@ import scala.util.{Failure, Success, Try}
  * of pending on-chain transactions as a [[TransactionMessages.PublishRollupTxs]] message.
  *
  * Every 2 minutes this actor asks SyncHandler for the current rollup sync
- * state.  For each synced NISPTree it applies the same phase + criteria checks
+ * state.  For each synced Rollup it applies the same phase + criteria checks
  * used by LFSMTransformer.onSync to decide which of the five transaction types
  * is due.  The resulting map is built fresh on every tick via buildRollupMap
  * so it always reflects the current chain state.
@@ -81,9 +81,9 @@ class TransactionPublisher @Inject()(config: Configuration, nodeContext: NodeCon
         case Failure(ex) =>
           logger.error(s"TransactionPublisher failed to query sync state: ${ex.getMessage}", ex)
 
-        case Success(FullSync(nispTrees, projections)) =>
-          logger.info(s"Publishing rollup transactions for FullSync with ${nispTrees.size} rollup(s)")
-          Future(buildRollupMap(nispTrees, projections)).map(PublishRollupTxs.apply).pipeTo(self)
+        case Success(FullSync(rollups, projections)) =>
+          logger.info(s"Publishing rollup transactions for FullSync with ${rollups.size} rollup(s)")
+          Future(buildRollupMap(rollups, projections)).map(PublishRollupTxs.apply).pipeTo(self)
 
         case Success(SyncUnavailable(status)) =>
           logger.warn(s"Skipping transaction publication while synchronization is $status")
@@ -114,7 +114,7 @@ class TransactionPublisher @Inject()(config: Configuration, nodeContext: NodeCon
   // ─── map building ───────────────────────────────────────────────────────
 
   /**
-   * Evaluates every synced NISPTree against the five transaction-type criteria
+   * Evaluates every synced Rollup against the five transaction-type criteria
    * and returns a map of rollupBlockId → RollupTxStub for all that are ready.
    *
    * Replicates the mempool-state merging and the phase + height-based
@@ -122,24 +122,24 @@ class TransactionPublisher @Inject()(config: Configuration, nodeContext: NodeCon
    * methods.  Must be called off the actor thread (e.g. inside a Future)
    * because it calls client.execute.
    */
-  private def buildRollupMap(nispTrees: Seq[(String, NISPTree)],
-                             projections: Map[String, MempoolRollupState]): Try[Map[String, RollupTxStub]] =
+  private def buildRollupMap(rollups: Seq[(String, RollupMetadata)],
+                             projections: Map[String, MempoolRollupMetadata]): Try[Map[String, RollupTxStub]] =
     Try(client.execute { ctx =>
       // Projections arrive with the trees they belong to, so a tree can never be paired with a
       // projection built against a different committed version.
-      val memStates: Map[String, MempoolRollupState] = nispTrees.flatMap { n =>
+      val memStates: Map[String, MempoolRollupMetadata] = rollups.flatMap { n =>
         projections.get(n._2.blockId).map(n._1 -> _)
       }.toMap
 
       val statesToRemove = memStates.filter(_._2.toBeRemoved)
 
       // Trees with mempool states substituted in where available
-      val updatedTrees: Seq[(String, NISPTree)] = nispTrees.map { t =>
-        if (memStates.contains(t._1)) t._1 -> memStates(t._1).nispTree else t
+      val updatedTrees: Seq[(String, RollupMetadata)] = rollups.map { t =>
+        if (memStates.contains(t._1)) t._1 -> memStates(t._1).metadata else t
       }
 
       // Trees not flagged for removal — used for all types except NISPEvaluation
-      val transformableTrees: Seq[(String, NISPTree)] =
+      val transformableTrees: Seq[(String, RollupMetadata)] =
         updatedTrees.filterNot(u => statesToRemove.contains(u._1))
 
       val currentHeight = ctx.getHeight
@@ -178,7 +178,7 @@ class TransactionPublisher @Inject()(config: Configuration, nodeContext: NodeCon
 
       // Evaluation (fraud-proof checks) uses the raw trees — onSync comment:
       // "We do not use mempool states for evaluation"
-      val rawEvalTrees = nispTrees.filter(_._2.phase == EVAL)
+      val rawEvalTrees = rollups.filter(_._2.phase == EVAL)
 
       rawEvalTrees.foreach { case (_, tree) =>
         val age = currentHeight - tree.currentPeriod.get

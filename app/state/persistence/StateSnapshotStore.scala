@@ -1,15 +1,15 @@
 package state.persistence
 
 import lfsm.LFSMPhase
-import lfsm.states.{AuthenticatedDictionaryView, MinerTree, NISPTree, PlasmaDictionary}
-import org.ergoplatform.appkit.Address
+import lfsm.states.{AuthenticatedDictionaryView, DeferredDictionary, DictionaryManifestHeader, MinerDictionaryMetadata, PlasmaDictionary, RollupMetadata}
+import org.bouncycastle.util.encoders.Hex
 import org.ergoplatform.sdk.ErgoId
 import scorex.crypto.hash.Blake2b256
 import sigma.data.AvlTreeFlags
 import state.messages.SyncMessages.SyncCursor
-import state.synchronization.{CommittedSyncState, QuarantineFault, SyncProtocolContext}
+import state.synchronization.{CommittedSyncMetadata, CommittedSyncState, DictionaryId, DictionaryTransform, QuarantineFault, SyncProtocolContext}
 import storage.KeyValueMutation.{Delete, Put}
-import storage.{KeyValueStore, StoreError, WriteDurability}
+import storage.{KeyValueMutation, KeyValueStore, StoreError, WriteDurability}
 import work.lithos.plasma.PlasmaParameters
 import work.lithos.plasma.collections.Manifest
 
@@ -30,49 +30,75 @@ object SnapshotError {
   }
 }
 
-/** A committed state and the recent canonical cursors needed to locate forks after restart. */
+/** A checkpoint boundary and the recent canonical cursors needed to locate forks after restart. */
 final case class PersistedSyncState(state: CommittedSyncState, recentCursors: Vector[SyncCursor])
 
-/** One generation, encoded. Each rollup is its own entry so no single value grows with the set. */
-final case class SnapshotWrite(meta: Array[Byte], rollups: Seq[(String, Array[Byte])])
+sealed trait SnapshotDictionaryBase
+object SnapshotDictionaryBase {
+  /** Used before the first persistent checkpoint; the view is treated as immutable. */
+  final case class Materialized(dictionary: AuthenticatedDictionaryView) extends SnapshotDictionaryBase
+  /** Content-addressed dictionary from an older retained checkpoint. */
+  final case class Persisted(digest: String) extends SnapshotDictionaryBase
+  /** A rollup introduced after the older checkpoint starts from the protocol empty tree. */
+  case object Empty extends SnapshotDictionaryBase
+}
+
+final case class SnapshotDictionarySource(expectedDigest: String,
+                                          flags: AvlTreeFlags,
+                                          parameters: PlasmaParameters,
+                                          base: SnapshotDictionaryBase,
+                                          transforms: Vector[DictionaryTransform])
+
+/** A lagging checkpoint boundary that can be reconstructed one dictionary at a time. */
+final case class SnapshotCheckpoint(metadata: CommittedSyncMetadata,
+                                    recentCursors: Vector[SyncCursor],
+                                    dictionaries: Map[DictionaryId, SnapshotDictionarySource])
 
 trait StateSnapshotStore {
-  /** Writes an already-encoded generation. Encoding happens on the thread that owns the state. */
-  def save(cursor: SyncCursor, version: Long, encoded: SnapshotWrite): Either[SnapshotError, Unit]
+  /**
+   * Persists a checkpoint. Dictionary serialization and database writes happen in this call so its
+   * caller can put the whole operation on the blocking persistence dispatcher.
+   */
+  def save(snapshot: SnapshotCheckpoint, maxEntryBytes: Int): Either[SnapshotError, Unit]
 
   /** Generation keys, newest first, with the one the pointer names ahead of the rest. */
   def generationKeys(): Either[SnapshotError, Seq[Array[Byte]]]
 
-  /** Decodes one generation. Separate from listing so a caller stops at the first it accepts. */
+  /** Loads one complete generation. */
   def load(key: Array[Byte]): Either[SnapshotError, PersistedSyncState]
+
+  /** Loads one immutable content-addressed dictionary without loading any generation. */
+  def loadDictionary(digest: String): Either[SnapshotError, PlasmaDictionary]
 
   def close(): Either[SnapshotError, Unit]
 }
 
 /** Configuration identity that must match before persisted protocol state can be reused. */
 final case class StateSnapshotIdentity(networkType: String,
-                                        rollupStartHeight: Int,
-                                        localMinerHash: String,
-                                        holdingErgoTree: String,
-                                        evaluationErgoTree: String,
-                                        payoutErgoTree: String,
-                                        collateralErgoTree: String,
-                                        minerDictionaryToken: String,
+                                       rollupStartHeight: Int,
+                                       localMinerHash: String,
+                                       holdingErgoTree: String,
+                                       evaluationErgoTree: String,
+                                       payoutErgoTree: String,
+                                       collateralErgoTree: String,
+                                       minerDictionaryToken: String,
                                        minerDictionaryGenesisId: String,
                                        collateralToken: String)
 
 object StateSnapshotIdentity {
   def apply(protocol: SyncProtocolContext): StateSnapshotIdentity =
     StateSnapshotIdentity(protocol.networkType.toString, protocol.rollupStartHeight,
-      org.bouncycastle.util.encoders.Hex.toHexString(protocol.localMinerHash),
-      protocol.holdingErgoTree, protocol.evaluationErgoTree, protocol.payoutErgoTree,
-      protocol.collateralErgoTree, protocol.minerDictionaryToken.toString, protocol.minerDictionaryGenesisId,
-      protocol.collateralToken.toString)
+      Hex.toHexString(protocol.localMinerHash), protocol.holdingErgoTree, protocol.evaluationErgoTree,
+      protocol.payoutErgoTree, protocol.collateralErgoTree, protocol.minerDictionaryToken.toString,
+      protocol.minerDictionaryGenesisId, protocol.collateralToken.toString)
 }
 
 /**
- * Generation-based LevelDB snapshot repository, one entry per rollup plus a metadata entry.
- * The pointer commits with the metadata, so an interrupted write leaves the prior generation intact.
+ * An atomic checkpoint pointer plus content-addressed immutable AVL blobs.
+ *
+ * A dictionary is sliced once and each serialized subtree is written before the next is produced.
+ * The dictionary header is committed last, so a crash cannot make a partial blob readable. A
+ * generation contains only metadata and digest references and is made current atomically.
  */
 final class LevelDbStateSnapshotStore(store: KeyValueStore,
                                       retention: Int,
@@ -82,20 +108,40 @@ final class LevelDbStateSnapshotStore(store: KeyValueStore,
 
   require(retention >= 2, "At least two snapshot generations must be retained")
 
-  private val dataPrefix = bytes("sync/snapshot/gen/")
+  private val generationPrefix = bytes("sync/snapshot/gen/")
+  private val dictionaryPrefix = bytes("sync/snapshot/blob/")
   private val currentKey = bytes("sync/snapshot/current")
 
-  override def save(cursor: SyncCursor,
-                    version: Long,
-                    encoded: SnapshotWrite): Either[SnapshotError, Unit] = {
-    val base = dataPrefix ++ bytes(f"${cursor.height}%010d-$version%020d-${cursor.blockId}")
-    val rollupWrites = encoded.rollups.map { case (id, value) => Put(base ++ rollupKey(id), value) }
+  override def save(snapshot: SnapshotCheckpoint,
+                    maxEntryBytes: Int): Either[SnapshotError, Unit] = {
+    val state = snapshot.metadata
+    val base = generationPrefix ++ bytes(
+      f"${state.cursor.height}%010d-${state.version}%020d-${state.cursor.blockId}")
+
+    val expectedIds: Set[DictionaryId] =
+      state.rollups.keySet.map(id => DictionaryId.Rollup(id): DictionaryId) + DictionaryId.Miner
+    def metadataDigest(id: DictionaryId): String = id match {
+      case DictionaryId.Rollup(blockId) => state.rollups(blockId).dictionaryDigest
+      case DictionaryId.Miner => state.minerDictionary.dictionaryDigest
+    }
+
     for {
-      // Rollups first and unpointed: a crash here leaves entries nothing names, which pruning removes.
-      _ <- writeChunked(rollupWrites)
-      _ <- store.write(Seq(Put(base ++ MetaSuffix, encoded.meta), Put(currentKey, base)),
+      _ <- if (snapshot.dictionaries.keySet == expectedIds) Right(()) else Left(Corrupt(
+        "checkpoint dictionary sources do not exactly match its tracked metadata"))
+      _ <- if (snapshot.dictionaries.forall { case (id, source) =>
+        source.expectedDigest == metadataDigest(id)
+      }) Right(()) else Left(Corrupt(
+        "checkpoint dictionary source digest does not match its entity metadata"))
+      _ <- snapshot.dictionaries.toSeq.sortBy(_._1.value)
+        .foldLeft[Either[SnapshotError, Unit]](Right(())) {
+        case (result, (_, source)) => result.flatMap(_ => ensureDictionary(source, maxEntryBytes))
+      }
+      meta <- StateSnapshotCodec.encodeMeta(snapshot, identity, maxEntryBytes).left.map(Corrupt)
+      // The metadata and pointer are the only generation commit. All referenced blobs are complete.
+      _ <- store.write(Seq(Put(base ++ MetaSuffix, meta), Put(currentKey, base)),
         WriteDurability.Synchronous).left.map(Storage)
-      _ <- prune(base)
+      _ <- pruneGenerations(base)
+      _ <- collectUnreferencedDictionaries()
     } yield ()
   }
 
@@ -103,65 +149,244 @@ final class LevelDbStateSnapshotStore(store: KeyValueStore,
     store.readSnapshot { view =>
       for {
         current <- view.get(currentKey)
-        keys <- view.scanKeys(dataPrefix)
+        keys <- view.scanKeys(generationPrefix)
       } yield current -> keys
     }.left.map(Storage).map { case (current, keys) =>
-      val bases = keys.filter(endsWith(_, MetaSuffix)).map(key => key.dropRight(MetaSuffix.length))
-      val newestFirst = bases.sortWith((a, b) => unsignedCompare(a, b) > 0)
+      val bases = keys.filter(endsWith(_, MetaSuffix)).map(_.dropRight(MetaSuffix.length))
+      val newestFirst = bases.sortWith((left, right) => unsignedCompare(left, right) > 0)
       val pointed = current.toSeq.filter(key => bases.exists(java.util.Arrays.equals(_, key)))
-      (pointed ++ newestFirst).foldLeft(Vector.empty[Array[Byte]]) { (result, key) =>
-        if (result.exists(java.util.Arrays.equals(_, key))) result else result :+ key
-      }
+      distinctKeys(pointed ++ newestFirst)
     }
 
   override def load(base: Array[Byte]): Either[SnapshotError, PersistedSyncState] =
     store.readSnapshot { view =>
-      val loaded: Either[SnapshotError, PersistedSyncState] =
+      val copied: Either[SnapshotError, (Array[Byte], Map[String, Array[Byte]])] =
         view.get(base ++ MetaSuffix).left.map(Storage).flatMap {
           case None => Left(Corrupt(s"generation ${name(base)} has no metadata entry"))
-          case Some(metaBytes) =>
-            StateSnapshotCodec.decodeMeta(metaBytes, identity).left.map(Corrupt).flatMap { meta =>
-              meta.rollupIds.foldLeft[Either[SnapshotError, Map[String, NISPTree]]](Right(Map.empty)) {
-                (collected, id) =>
-                  collected.flatMap { rollups =>
-                    view.get(base ++ rollupKey(id)).left.map(Storage).flatMap {
-                      case None => Left(Corrupt(s"generation ${name(base)} is missing rollup $id"))
-                      case Some(value) => StateSnapshotCodec.decodeRollup(value, id)
-                        .left.map(Corrupt).map(tree => rollups + (id -> tree))
-                    }
+          case Some(encodedMeta) => StateSnapshotCodec.decodeMeta(encodedMeta, identity)
+            .left.map(Corrupt).flatMap { meta =>
+              meta.dictionaryDigests.toSeq.sorted.foldLeft[
+                Either[SnapshotError, Map[String, Array[Byte]]]](Right(Map.empty)) {
+                case (result, digest) => result.flatMap { headers =>
+                  view.get(dictionaryBase(digest) ++ HeaderSuffix).left.map(Storage).flatMap {
+                    case Some(header) => Right(headers + (digest -> header))
+                    case None => Left(Corrupt(s"dictionary $digest has no committed header"))
                   }
-              }.flatMap(rollups => StateSnapshotCodec.assemble(meta, rollups).left.map(Corrupt))
+                }
+              }.map(encodedMeta -> _)
             }
         }
-      Right[StoreError, Either[SnapshotError, PersistedSyncState]](loaded)
-    }.left.map(Storage).flatMap(result => result)
+      Right[StoreError, Either[SnapshotError, (Array[Byte], Map[String, Array[Byte]])]](copied)
+    }.left.map(Storage).flatMap(result => result).flatMap { case (encodedMeta, headers) =>
+      for {
+        meta <- StateSnapshotCodec.decodeMeta(encodedMeta, identity).left.map(Corrupt)
+        references <- headers.foldLeft[
+          Either[SnapshotError, Map[String, DeferredDictionary]]](Right(Map.empty)) {
+          case (result, (digest, encoded)) => result.flatMap { found =>
+            decodeDictionaryReference(digest, encoded).map(reference => found + (digest -> reference))
+          }
+        }
+        miner <- references.get(meta.metadata.minerDictionary.dictionaryDigest).toRight(Corrupt(
+          s"Miner Dictionary ${meta.metadata.minerDictionary.dictionaryDigest} has no decoded reference"))
+        rollups <- meta.metadata.rollups.toSeq.foldLeft[
+          Either[SnapshotError, Map[String, AuthenticatedDictionaryView]]](Right(Map.empty)) {
+          case (result, (id, rollup)) => result.flatMap { found =>
+            references.get(rollup.dictionaryDigest).toRight(Corrupt(
+              s"rollup $id dictionary ${rollup.dictionaryDigest} has no decoded reference"))
+              .map(dictionary => found + (id -> dictionary))
+          }
+        }
+        assembled <- StateSnapshotCodec.assemble(meta, rollups, miner).left.map(Corrupt)
+      } yield assembled
+    }
+
+  override def loadDictionary(digest: String): Either[SnapshotError, PlasmaDictionary] = {
+    val base = dictionaryBase(digest)
+    for {
+      encodedHeader <- required(base ++ HeaderSuffix, s"dictionary $digest has no committed header")
+      header <- StateSnapshotCodec.decodeDictionaryHeader(encodedHeader).left.map(Corrupt)
+      _ <- if (Hex.toHexString(header.digest) == digest) Right(())
+      else Left(Corrupt(s"dictionary key $digest contains digest ${Hex.toHexString(header.digest)}"))
+      // Values returned by the store are owned copies. Decode after each database call has released
+      // its view; only this one dictionary's serialized subtrees are live during reconstruction.
+      subtrees <- (0 until header.subtreeCount).foldLeft[
+        Either[SnapshotError, Vector[Array[Byte]]]](Right(Vector.empty)) { (result, index) =>
+        result.flatMap { found =>
+          required(subtreeKey(base, index), s"dictionary $digest is missing subtree $index")
+            .flatMap(value => StateSnapshotCodec.decodeDictionarySubtree(value, index)
+              .left.map(Corrupt).map(found :+ _))
+        }
+      }
+      dictionary <- PlasmaDictionary.fromManifest(header.flags, header.parameters,
+        Manifest(header.digest, header.manifest, subtrees)).left.map { error =>
+        Corrupt(s"dictionary $digest could not be loaded: ${message(error)}")
+      }
+    } yield dictionary
+  }
+
+  private def decodeDictionaryReference(digest: String,
+                                        encoded: Array[Byte]): Either[SnapshotError, DeferredDictionary] = {
+    for {
+      header <- StateSnapshotCodec.decodeDictionaryHeader(encoded).left.map(Corrupt)
+      _ <- if (Hex.toHexString(header.digest) == digest) Right(())
+      else Left(Corrupt(s"dictionary key $digest contains digest ${Hex.toHexString(header.digest)}"))
+    } yield DeferredDictionary(header.digest, header.flags, header.parameters)
+  }
 
   override def close(): Either[SnapshotError, Unit] = store.close().left.map(Storage)
 
-  /** Keeps the newest generations whole and removes every entry belonging to the rest. */
-  private def prune(current: Array[Byte]): Either[SnapshotError, Unit] =
-    store.scanKeys(dataPrefix).left.map(Storage).flatMap { keys =>
+  private def ensureDictionary(dictionary: AuthenticatedDictionaryView,
+                               maxEntryBytes: Int): Either[SnapshotError, Unit] = {
+    val digest = Hex.toHexString(dictionary.digest)
+    val base = dictionaryBase(digest)
+
+    reusableDictionary(base, digest, dictionary.flags, dictionary.parameters) match {
+      case Left(error) => Left(error)
+      case Right(true) => Right(())
+      case Right(false) =>
+        for {
+          stale <- store.scanKeys(base).left.map(Storage)
+          _ <- writeChunked(stale.map(Delete))
+          header <- streamDictionary(dictionary, base, maxEntryBytes)
+          _ <- if (java.util.Arrays.equals(header.digest, dictionary.digest) &&
+            header.flags == dictionary.flags && header.parameters == dictionary.parameters) Right(())
+          else Left(Corrupt("serialized dictionary header does not match its source"))
+          encoded <- StateSnapshotCodec.encodeDictionaryHeader(header, maxEntryBytes).left.map(Corrupt)
+          // Header-last is the per-blob commit marker.
+          _ <- store.put(base ++ HeaderSuffix, encoded, WriteDurability.Synchronous).left.map(Storage)
+        } yield ()
+    }
+  }
+
+  private def ensureDictionary(source: SnapshotDictionarySource,
+                               maxEntryBytes: Int): Either[SnapshotError, Unit] = {
+    val base = dictionaryBase(source.expectedDigest)
+    reusableDictionary(base, source.expectedDigest, source.flags, source.parameters).flatMap {
+      case true => Right(())
+      case false =>
+        for {
+          starting <- source.base match {
+            case SnapshotDictionaryBase.Materialized(dictionary) => Right(dictionary)
+            case SnapshotDictionaryBase.Persisted(digest) => loadDictionary(digest)
+            case SnapshotDictionaryBase.Empty => Right(PlasmaDictionary.empty(source.flags, source.parameters))
+          }
+          materialized <- source.transforms.foldLeft[
+            Either[SnapshotError, AuthenticatedDictionaryView]](Right(starting)) {
+            case (result, transform) => result.flatMap(dictionary =>
+              transform.replay(dictionary).left.map(Corrupt))
+          }
+          actual = Hex.toHexString(materialized.digest)
+          _ <- if (actual == source.expectedDigest) Right(()) else Left(Corrupt(
+            s"checkpoint materialized dictionary $actual, expected ${source.expectedDigest}"))
+          _ <- if (materialized.flags == source.flags && materialized.parameters == source.parameters)
+            Right(()) else Left(Corrupt("checkpoint dictionary parameters changed during replay"))
+          _ <- ensureDictionary(materialized, maxEntryBytes)
+        } yield ()
+    }
+  }
+
+  private def reusableDictionary(base: Array[Byte],
+                                 digest: String,
+                                 flags: AvlTreeFlags,
+                                 parameters: PlasmaParameters): Either[SnapshotError, Boolean] =
+    store.get(base ++ HeaderSuffix).left.map(Storage).flatMap {
+      case None => Right(false)
+      case Some(value) => StateSnapshotCodec.decodeDictionaryHeader(value) match {
+        case Left(_) => Right(false)
+        case Right(header) if Hex.toHexString(header.digest) != digest || header.flags != flags ||
+          header.parameters != parameters => Right(false)
+        case Right(header) => store.scanKeys(base ++ SubtreeInfix).left.map(Storage).map { keys =>
+          keys.size == header.subtreeCount && (0 until header.subtreeCount).forall { index =>
+            keys.exists(java.util.Arrays.equals(_, subtreeKey(base, index)))
+          }
+        }
+      }
+    }
+
+  private def streamDictionary(dictionary: AuthenticatedDictionaryView,
+                               base: Array[Byte],
+                               maxEntryBytes: Int): Either[SnapshotError, DictionaryManifestHeader] =
+    try {
+      var failure = Option.empty[SnapshotError]
+      val header = dictionary.writeManifest(SubtreeDepth) { (index, bytes) =>
+        if (failure.isEmpty) {
+          StateSnapshotCodec.encodeDictionarySubtree(bytes, maxEntryBytes, index) match {
+            case Left(reason) => failure = Some(Corrupt(reason))
+            case Right(encoded) =>
+              store.put(subtreeKey(base, index), encoded, WriteDurability.Buffered) match {
+                case Left(error) => failure = Some(Storage(error))
+                case Right(()) => ()
+              }
+          }
+        }
+      }
+      failure.fold[Either[SnapshotError, DictionaryManifestHeader]](Right(header))(Left(_))
+    } catch {
+      case NonFatal(error) => Left(Corrupt(s"dictionary serialization failed: ${message(error)}"))
+    }
+
+  /** Keeps complete generation records; dictionaries are shared and collected separately. */
+  private def pruneGenerations(current: Array[Byte]): Either[SnapshotError, Unit] =
+    store.scanKeys(generationPrefix).left.map(Storage).flatMap { keys =>
       val bases = keys.filter(endsWith(_, MetaSuffix)).map(_.dropRight(MetaSuffix.length))
-      val keep = bases.sortWith((a, b) => unsignedCompare(a, b) > 0).take(retention) :+ current
+      val keep = distinctKeys(bases.sortWith((left, right) => unsignedCompare(left, right) > 0)
+        .take(retention) :+ current)
       val obsolete = keys.filterNot(key => keep.exists(base => startsWith(key, base)))
       writeChunked(obsolete.map(Delete))
     }
 
-  /** Bounds one batch so a large generation does not build a single oversized write. */
-  private def writeChunked(mutations: Seq[storage.KeyValueMutation]): Either[SnapshotError, Unit] =
-    mutations.grouped(WriteChunk).foldLeft[Either[SnapshotError, Unit]](Right(())) { (result, chunk) =>
-      result.flatMap(_ => store.write(chunk, WriteDurability.Buffered).left.map(Storage))
+  /** Removes a content-addressed blob only when no retained generation metadata references it. */
+  private def collectUnreferencedDictionaries(): Either[SnapshotError, Unit] =
+    for {
+      generationEntries <- store.scanPrefix(generationPrefix).left.map(Storage)
+      referenced <- generationEntries.filter(entry => endsWith(entry._1, MetaSuffix))
+        .foldLeft[Either[SnapshotError, Set[String]]](Right(Set.empty)) {
+          case (result, (_, value)) => result.flatMap { digests =>
+            StateSnapshotCodec.decodeMeta(value, identity).left.map(Corrupt).map { meta =>
+              digests ++ meta.dictionaryDigests
+            }
+          }
+        }
+      blobKeys <- store.scanKeys(dictionaryPrefix).left.map(Storage)
+      obsolete = blobKeys.filterNot { key =>
+        dictionaryDigestFromKey(key).exists(referenced.contains)
+      }
+      _ <- writeChunked(obsolete.map(Delete))
+    } yield ()
+
+  private def required(key: Array[Byte], absent: String): Either[SnapshotError, Array[Byte]] =
+    store.get(key).left.map(Storage).flatMap {
+      case Some(value) => Right(value)
+      case None => Left(Corrupt(absent))
     }
 
-  private def rollupKey(id: String): Array[Byte] = bytes(RollupInfix + id)
+  private def writeChunked(mutations: Seq[KeyValueMutation]): Either[SnapshotError, Unit] =
+    mutations.grouped(WriteChunk).foldLeft[Either[SnapshotError, Unit]](Right(())) {
+      case (result, chunk) => result.flatMap(_ =>
+        store.write(chunk, WriteDurability.Buffered).left.map(Storage))
+    }
+
+  private def dictionaryBase(digest: String): Array[Byte] = dictionaryPrefix ++ bytes(digest)
+
+  private def dictionaryDigestFromKey(key: Array[Byte]): Option[String] = {
+    val text = name(key)
+    val prefix = name(dictionaryPrefix)
+    if (!text.startsWith(prefix)) None
+    else text.substring(prefix.length).split('/').headOption.filter(_.nonEmpty)
+  }
 
   private def name(key: Array[Byte]): String = new String(key, StandardCharsets.UTF_8)
 }
 
 object LevelDbStateSnapshotStore {
-  private val MetaSuffix: Array[Byte] = "/meta".getBytes(StandardCharsets.UTF_8)
-  private val RollupInfix: String = "/r/"
-  private val WriteChunk: Int = 32
+  private val MetaSuffix = bytes("/meta")
+  private val HeaderSuffix = bytes("/header")
+  private val SubtreeInfix = bytes("/s/")
+  private val SubtreeDepth = 8
+  private val WriteChunk = 32
+
+  private def subtreeKey(base: Array[Byte], index: Int): Array[Byte] =
+    base ++ SubtreeInfix ++ bytes(f"$index%08d")
 
   private def bytes(value: String): Array[Byte] = value.getBytes(StandardCharsets.UTF_8)
 
@@ -181,233 +406,222 @@ object LevelDbStateSnapshotStore {
     }
     java.lang.Integer.compare(left.length, right.length)
   }
+
+  private def distinctKeys(keys: Seq[Array[Byte]]): Vector[Array[Byte]] =
+    keys.foldLeft(Vector.empty[Array[Byte]]) { (result, key) =>
+      if (result.exists(java.util.Arrays.equals(_, key))) result else result :+ key
+    }
+
+  private def message(error: Throwable): String =
+    Option(error.getMessage).getOrElse(error.getClass.getSimpleName)
 }
 
-/** Everything in a generation except the rollups, which are stored one entry each. */
-final case class SnapshotMeta(cursor: SyncCursor,
-                              version: Long,
-                              recentCursors: Vector[SyncCursor],
-                              minerDictionaryFault: Option[String],
-                               quarantined: Map[String, QuarantineFault],
-                               routes: Map[String, String],
-                               rollupOrigins: Map[String, String],
-                               minerTree: MinerTree,
-                              dataBoxToken: Option[ErgoId],
-                              rollupIds: Seq[String])
+/** One small generation record. Authenticated dictionaries live in content-addressed blobs. */
+final case class SnapshotMeta(metadata: CommittedSyncMetadata,
+                              recentCursors: Vector[SyncCursor]) {
+  def dictionaryDigests: Set[String] =
+    metadata.rollups.valuesIterator.map(_.dictionaryDigest).toSet +
+      metadata.minerDictionary.dictionaryDigest
+}
 
-/** Explicit binary schema for metadata plus native Plasma manifests. */
+/** Explicit binary schema for checkpoint metadata and streamed native Plasma manifests. */
 object StateSnapshotCodec {
   private val EnvelopeMagic = 0x4c535345
   private val MetaMagic = 0x4c53534d
-  private val RollupMagic = 0x4c535352
-  private val SchemaVersion = 6
+  private val DictionaryMagic = 0x4c535344
+  private val SubtreeMagic = 0x4c535353
+  private val SchemaVersion = 8
   private val ToolkitVersion = "plasma-toolkit-1.1.0"
   private val MaxBlobBytes = 512 * 1024 * 1024
   private val MaxEntries = 1000000
 
-  /**
-   * Encodes a generation as one metadata entry plus one entry per rollup.
-   * `maxEntryBytes` bounds a single entry, so a large rollup set no longer builds one huge value.
-   */
-  def encode(persisted: PersistedSyncState,
-             identity: StateSnapshotIdentity,
-             maxEntryBytes: Int): Either[String, SnapshotWrite] =
-    attempt {
-      val state = persisted.state
-      val rollups = state.rollups.toSeq.sortBy(_._1)
-      val encodedRollups = rollups.map { case (id, tree) =>
-        val payload = writeBytes { out =>
-          out.writeInt(RollupMagic)
-          writeString(out, id)
-          writeRollup(out, tree)
-        }
-        id -> sealEntry(payload, maxEntryBytes, s"rollup $id")
+  def encodeMeta(snapshot: SnapshotCheckpoint,
+                 identity: StateSnapshotIdentity,
+                 maxEntryBytes: Int): Either[String, Array[Byte]] = attempt {
+    val metadata = snapshot.metadata
+    val payload = writeBytes { out =>
+      out.writeInt(MetaMagic)
+      out.writeInt(SchemaVersion)
+      writeString(out, ToolkitVersion)
+      writeIdentity(out, identity)
+      writeCursor(out, metadata.cursor)
+      out.writeLong(metadata.version)
+      writeCount(out, snapshot.recentCursors.size, "recent cursor count")
+      snapshot.recentCursors.foreach(writeCursor(out, _))
+      out.writeBoolean(metadata.minerDictionaryFault.isDefined)
+      metadata.minerDictionaryFault.foreach(writeString(out, _))
+
+      val faults = metadata.quarantined.toSeq.sortBy(_._1)
+      writeCount(out, faults.size, "quarantine count")
+      faults.foreach { case (_, fault) => writeQuarantine(out, fault) }
+
+      writeStringMap(out, metadata.routes, "route count")
+      writeStringMap(out, metadata.rollupOrigins, "rollup origin count")
+      writeMinerMetadata(out, metadata.minerDictionary)
+      out.writeBoolean(metadata.dataBoxToken.isDefined)
+      metadata.dataBoxToken.foreach(token => writeString(out, token.toString))
+
+      val rollups = metadata.rollups.toSeq.sortBy(_._1)
+      writeCount(out, rollups.size, "rollup metadata count")
+      rollups.foreach { case (id, rollup) =>
+        writeString(out, id)
+        writeRollupMetadata(out, rollup)
       }
-
-      val meta = writeBytes { out =>
-        out.writeInt(MetaMagic)
-        out.writeInt(SchemaVersion)
-        writeString(out, ToolkitVersion)
-        writeIdentity(out, identity)
-        writeCursor(out, state.cursor)
-        out.writeLong(state.version)
-        writeCount(out, persisted.recentCursors.size, "recent cursor count")
-        persisted.recentCursors.foreach(writeCursor(out, _))
-        out.writeBoolean(state.minerDictionaryFault.isDefined)
-        state.minerDictionaryFault.foreach(writeString(out, _))
-
-        val faults = state.quarantined.toSeq.sortBy(_._1)
-        writeCount(out, faults.size, "quarantine count")
-        faults.foreach { case (_, fault) =>
-          writeString(out, fault.rollupId)
-          out.writeInt(fault.genesisHeight)
-          writeString(out, fault.collateralBoxId)
-          writeString(out, fault.reason)
-          out.writeBoolean(fault.retryable)
-          out.writeInt(fault.attempts)
-          out.writeBoolean(fault.removalHeight.isDefined)
-          fault.removalHeight.foreach(out.writeInt)
-          out.writeBoolean(fault.removalWarningLogged)
-        }
-
-        val routes = state.routes.toSeq.sortBy(_._1)
-        writeCount(out, routes.size, "route count")
-        routes.foreach { case (utxoId, rollupId) =>
-          writeString(out, utxoId)
-          writeString(out, rollupId)
-        }
-
-        val origins = state.rollupOrigins.toSeq.sortBy(_._1)
-        writeCount(out, origins.size, "rollup origin count")
-        origins.foreach { case (rollupId, collateralBoxId) =>
-          writeString(out, rollupId)
-          writeString(out, collateralBoxId)
-        }
-
-        writeMinerTree(out, state.minerTree)
-        out.writeBoolean(state.dataBoxToken.isDefined)
-        state.dataBoxToken.foreach(token => writeString(out, token.toString))
-        writeStrings(out, rollups.map(_._1))
-      }
-
-      SnapshotWrite(sealEntry(meta, maxEntryBytes, "snapshot metadata"), encodedRollups)
     }
+    sealEntry(payload, maxEntryBytes, "snapshot metadata")
+  }
 
   def decodeMeta(encoded: Array[Byte],
-                 expectedIdentity: StateSnapshotIdentity): Either[String, SnapshotMeta] =
-    attempt {
-      val in = openEntry(encoded)
-      require(in.readInt() == MetaMagic, "invalid metadata magic")
-      require(in.readInt() == SchemaVersion, "unsupported snapshot schema version")
-      require(readString(in) == ToolkitVersion, "unsupported Plasma Toolkit version")
-      require(readIdentity(in) == expectedIdentity,
-        "snapshot network, wallet, start height, or protocol identity does not match this client")
-      val cursor = readCursor(in)
-      val version = in.readLong()
-      val recentCursors = readCount(in, "recent cursor count")(_ => readCursor(in))
-      val minerDictionaryFault = if (in.readBoolean()) Some(readString(in)) else None
-      val quarantined = readCount(in, "quarantine count") { _ =>
-        val rollupId = readString(in)
-        val genesisHeight = in.readInt()
-        val collateralBoxId = readString(in)
-        val reason = readString(in)
-        val retryable = in.readBoolean()
-        val attempts = in.readInt()
-        val removalHeight = if (in.readBoolean()) Some(in.readInt()) else None
-        val warningLogged = in.readBoolean()
-        rollupId -> QuarantineFault(rollupId, genesisHeight, collateralBoxId, reason,
-          retryable, attempts, removalHeight, warningLogged)
-      }.toMap
-      val routes = readCount(in, "route count") { _ => readString(in) -> readString(in) }.toMap
-      val origins = readCount(in, "rollup origin count") { _ =>
-        readString(in) -> readString(in)
-      }.toMap
-      val minerTree = readMinerTree(in)
-      val dataToken = if (in.readBoolean()) Some(ErgoId.create(readString(in))) else None
-      val rollupIds = readStrings(in)
-      require(in.available() == 0, "trailing bytes after snapshot metadata")
-      SnapshotMeta(cursor, version, recentCursors, minerDictionaryFault, quarantined, routes, origins,
-        minerTree, dataToken, rollupIds)
-    }
-
-  def decodeRollup(encoded: Array[Byte], expectedId: String): Either[String, NISPTree] =
-    attempt {
-      val in = openEntry(encoded)
-      require(in.readInt() == RollupMagic, "invalid rollup magic")
-      require(readString(in) == expectedId, s"rollup entry does not name $expectedId")
-      val tree = readRollup(in)
-      require(in.available() == 0, "trailing bytes after rollup entry")
-      tree
-    }
-
-  /** Rebuilds committed state once every named rollup has been read back. */
-  def assemble(meta: SnapshotMeta, rollups: Map[String, NISPTree]): Either[String, PersistedSyncState] =
-    attempt {
-      PersistedSyncState(
-        CommittedSyncState(meta.cursor, meta.version, rollups, meta.routes, meta.rollupOrigins, meta.minerTree,
-          meta.dataBoxToken, meta.minerDictionaryFault, meta.quarantined),
-        meta.recentCursors)
-    }
-
-  private def sealEntry(payload: Array[Byte], maxEntryBytes: Int, what: String): Array[Byte] = {
-    require(payload.length <= maxEntryBytes,
-      s"$what is ${payload.length} bytes, over the configured $maxEntryBytes limit")
-    val checksum = Blake2b256.hash(payload)
-    writeBytes { out =>
-      out.writeInt(EnvelopeMagic)
-      writeByteArray(out, payload)
-      writeByteArray(out, checksum)
-    }
-  }
-
-  private def openEntry(encoded: Array[Byte]): DataInputStream = {
-    val envelope = new DataInputStream(new ByteArrayInputStream(encoded))
-    require(envelope.readInt() == EnvelopeMagic, "invalid envelope magic")
-    val payload = readByteArray(envelope)
-    val checksum = readByteArray(envelope)
-    require(envelope.available() == 0, "trailing bytes after snapshot envelope")
-    require(java.util.Arrays.equals(Blake2b256.hash(payload), checksum), "payload checksum mismatch")
-    new DataInputStream(new ByteArrayInputStream(payload))
-  }
-
-  private def writeRollup(out: DataOutputStream, tree: NISPTree): Unit = {
-    writeDictionary(out, tree.dictionary)
-    out.writeInt(tree.numMiners)
-    writeBigInt(out, tree.totalScore)
-    writeOptionalLong(out, tree.currentPeriod)
-    out.writeLong(tree.totalReward)
-    out.writeInt(tree.startHeight)
-    out.writeBoolean(tree.hasMiner)
-    out.writeByte(phaseByte(tree.phase))
-    writeStrings(out, tree.minerSet.toSeq.sorted)
-    out.writeBoolean(tree.evaluated)
-    writeString(out, tree.blockId)
-    writeString(out, tree.utxoId)
-  }
-
-  private def readRollup(in: DataInputStream): NISPTree = {
-    val dictionary = readDictionary(in)
-    val numMiners = in.readInt()
-    val totalScore = readBigInt(in)
-    val currentPeriod = readOptionalLong(in)
-    val totalReward = in.readLong()
-    val startHeight = in.readInt()
-    val hasMiner = in.readBoolean()
-    val phase = readPhase(in.readByte())
-    val minerSet = readStrings(in).toSet
-    val evaluated = in.readBoolean()
-    NISPTree(dictionary, numMiners, totalScore, currentPeriod, totalReward, startHeight,
-      hasMiner, phase, minerSet, evaluated, readString(in), readString(in))
-  }
-
-  private def writeMinerTree(out: DataOutputStream, tree: MinerTree): Unit = {
-    writeDictionary(out, tree.dictionary)
-    out.writeInt(tree.numMiners)
-    out.writeInt(tree.startHeight)
-    val minerMap = tree.minerMap.toSeq.sortBy(_._1)
-    writeCount(out, minerMap.size, "miner map count")
-    minerMap.foreach { case (hash, (address, token)) =>
-      writeString(out, hash)
-      writeString(out, address.toString)
-      writeString(out, token.toString)
-    }
-    out.writeBoolean(tree.hasMiner)
-    writeString(out, tree.utxoId)
-    out.writeBoolean(tree.synced)
-    out.writeInt(tree.syncHeight)
-    out.writeInt(tree.savedHeight)
-  }
-
-  private def readMinerTree(in: DataInputStream): MinerTree = {
-    val dictionary = readDictionary(in)
-    val numMiners = in.readInt()
-    val startHeight = in.readInt()
-    val minerMap = readCount(in, "miner map count") { _ =>
-      readString(in) -> (Address.create(readString(in)), ErgoId.create(readString(in)))
+                 expectedIdentity: StateSnapshotIdentity): Either[String, SnapshotMeta] = attempt {
+    val in = openEntry(encoded)
+    require(in.readInt() == MetaMagic, "invalid metadata magic")
+    require(in.readInt() == SchemaVersion, "unsupported snapshot schema version")
+    require(readString(in) == ToolkitVersion, "unsupported Plasma Toolkit version")
+    require(readIdentity(in) == expectedIdentity,
+      "snapshot network, wallet, start height, or protocol identity does not match this client")
+    val cursor = readCursor(in)
+    val version = in.readLong()
+    val recentCursors = readCount(in, "recent cursor count")(_ => readCursor(in))
+    val minerFault = if (in.readBoolean()) Some(readString(in)) else None
+    val quarantined = readCount(in, "quarantine count")(_ => readQuarantine(in))
+      .map(fault => fault.rollupId -> fault).toMap
+    val routes = readStringMap(in, "route count")
+    val origins = readStringMap(in, "rollup origin count")
+    val miner = readMinerMetadata(in)
+    val token = if (in.readBoolean()) Some(ErgoId.create(readString(in))) else None
+    val rollups = readCount(in, "rollup metadata count") { _ =>
+      readString(in) -> readRollupMetadata(in)
     }.toMap
-    MinerTree(dictionary, numMiners, startHeight, minerMap, in.readBoolean(), readString(in),
-      in.readBoolean(), in.readInt(), in.readInt())
+    requireDictionaryDigest(miner.dictionaryDigest, "Miner Dictionary")
+    rollups.foreach { case (id, rollup) =>
+      require(rollup.blockId == id, s"rollup metadata $id names block ${rollup.blockId}")
+      requireDictionaryDigest(rollup.dictionaryDigest, s"rollup $id")
+    }
+    require(in.available() == 0, "trailing bytes after snapshot metadata")
+    SnapshotMeta(CommittedSyncMetadata(cursor, version, rollups, routes, origins, miner, token,
+      minerFault, quarantined), recentCursors)
   }
+
+  def encodeDictionaryHeader(header: DictionaryManifestHeader,
+                             maxEntryBytes: Int): Either[String, Array[Byte]] = attempt {
+    val payload = writeBytes { out =>
+      out.writeInt(DictionaryMagic)
+      out.writeInt(SchemaVersion)
+      out.writeByte(header.flags.serializeToByte)
+      out.writeInt(header.parameters.keySize)
+      out.writeBoolean(header.parameters.valueSizeOpt.isDefined)
+      header.parameters.valueSizeOpt.foreach(out.writeInt)
+      writeByteArray(out, header.digest)
+      writeByteArray(out, header.manifest)
+      writeCount(out, header.subtreeCount, "manifest subtree count")
+    }
+    sealEntry(payload, maxEntryBytes, "dictionary header")
+  }
+
+  def decodeDictionaryHeader(encoded: Array[Byte]): Either[String, DictionaryManifestHeader] = attempt {
+    val in = openEntry(encoded)
+    require(in.readInt() == DictionaryMagic, "invalid dictionary header magic")
+    require(in.readInt() == SchemaVersion, "unsupported dictionary header version")
+    val flags = AvlTreeFlags(in.readByte())
+    val keySize = in.readInt()
+    val valueSize = if (in.readBoolean()) Some(in.readInt()) else None
+    val digest = readByteArray(in)
+    val manifest = readByteArray(in)
+    val count = readCountValue(in, "manifest subtree count")
+    require(in.available() == 0, "trailing bytes after dictionary header")
+    DictionaryManifestHeader(flags, PlasmaParameters(keySize, valueSize), digest, manifest, count)
+  }
+
+  def encodeDictionarySubtree(bytes: Array[Byte],
+                              maxEntryBytes: Int,
+                              index: Int): Either[String, Array[Byte]] = attempt {
+    val payload = writeBytes { out =>
+      out.writeInt(SubtreeMagic)
+      out.writeInt(SchemaVersion)
+      out.writeInt(index)
+      writeByteArray(out, bytes)
+    }
+    sealEntry(payload, maxEntryBytes, s"dictionary subtree $index")
+  }
+
+  def decodeDictionarySubtree(encoded: Array[Byte], expectedIndex: Int): Either[String, Array[Byte]] = attempt {
+    val in = openEntry(encoded)
+    require(in.readInt() == SubtreeMagic, "invalid dictionary subtree magic")
+    require(in.readInt() == SchemaVersion, "unsupported dictionary subtree version")
+    require(in.readInt() == expectedIndex, s"dictionary subtree does not name index $expectedIndex")
+    val bytes = readByteArray(in)
+    require(in.available() == 0, "trailing bytes after dictionary subtree")
+    bytes
+  }
+
+  def assemble(meta: SnapshotMeta,
+               rollupDictionaries: Map[String, AuthenticatedDictionaryView],
+               minerDictionary: AuthenticatedDictionaryView): Either[String, PersistedSyncState] =
+    CommittedSyncMetadata.materialize(meta.metadata, rollupDictionaries, minerDictionary)
+      .map(PersistedSyncState(_, meta.recentCursors))
+
+  private def writeRollupMetadata(out: DataOutputStream, rollup: RollupMetadata): Unit = {
+    out.writeInt(rollup.numMiners)
+    writeBigInt(out, rollup.totalScore)
+    writeOptionalLong(out, rollup.currentPeriod)
+    out.writeLong(rollup.totalReward)
+    out.writeInt(rollup.startHeight)
+    out.writeBoolean(rollup.hasMiner)
+    out.writeByte(phaseByte(rollup.phase))
+    out.writeBoolean(rollup.evaluated)
+    writeString(out, rollup.blockId)
+    writeString(out, rollup.utxoId)
+    writeString(out, rollup.dictionaryDigest)
+  }
+
+  private def readRollupMetadata(in: DataInputStream): RollupMetadata =
+    RollupMetadata(in.readInt(), readBigInt(in), readOptionalLong(in), in.readLong(), in.readInt(),
+      in.readBoolean(), readPhase(in.readByte()), in.readBoolean(), readString(in), readString(in),
+      readString(in))
+
+  private def writeMinerMetadata(out: DataOutputStream, miner: MinerDictionaryMetadata): Unit = {
+    out.writeInt(miner.numMiners)
+    out.writeInt(miner.startHeight)
+    out.writeBoolean(miner.hasMiner)
+    writeString(out, miner.utxoId)
+    out.writeBoolean(miner.synced)
+    out.writeInt(miner.syncHeight)
+    out.writeInt(miner.savedHeight)
+    writeString(out, miner.dictionaryDigest)
+  }
+
+  private def readMinerMetadata(in: DataInputStream): MinerDictionaryMetadata =
+    MinerDictionaryMetadata(in.readInt(), in.readInt(), in.readBoolean(), readString(in),
+      in.readBoolean(), in.readInt(), in.readInt(), readString(in))
+
+  private def writeQuarantine(out: DataOutputStream, fault: QuarantineFault): Unit = {
+    writeString(out, fault.rollupId)
+    out.writeInt(fault.genesisHeight)
+    writeString(out, fault.collateralBoxId)
+    writeString(out, fault.reason)
+    out.writeBoolean(fault.retryable)
+    out.writeInt(fault.attempts)
+    out.writeBoolean(fault.removalHeight.isDefined)
+    fault.removalHeight.foreach(out.writeInt)
+    out.writeBoolean(fault.removalWarningLogged)
+  }
+
+  private def readQuarantine(in: DataInputStream): QuarantineFault = {
+    val rollupId = readString(in)
+    QuarantineFault(rollupId, in.readInt(), readString(in), readString(in), in.readBoolean(),
+      in.readInt(), if (in.readBoolean()) Some(in.readInt()) else None, in.readBoolean())
+  }
+
+  private def writeStringMap(out: DataOutputStream,
+                             values: Map[String, String],
+                             label: String): Unit = {
+    val sorted = values.toSeq.sortBy(_._1)
+    writeCount(out, sorted.size, label)
+    sorted.foreach { case (key, value) => writeString(out, key); writeString(out, value) }
+  }
+
+  private def readStringMap(in: DataInputStream, label: String): Map[String, String] =
+    readCount(in, label)(_ => readString(in) -> readString(in)).toMap
 
   private def writeIdentity(out: DataOutputStream, identity: StateSnapshotIdentity): Unit = {
     writeString(out, identity.networkType)
@@ -426,33 +640,6 @@ object StateSnapshotCodec {
     StateSnapshotIdentity(readString(in), in.readInt(), readString(in), readString(in),
       readString(in), readString(in), readString(in), readString(in), readString(in), readString(in))
 
-  private def writeDictionary(out: DataOutputStream, dictionary: AuthenticatedDictionaryView): Unit = {
-    val manifest = dictionary.getManifest()
-    out.writeByte(dictionary.flags.serializeToByte)
-    out.writeInt(dictionary.parameters.keySize)
-    out.writeBoolean(dictionary.parameters.valueSizeOpt.isDefined)
-    dictionary.parameters.valueSizeOpt.foreach(out.writeInt)
-    writeByteArray(out, manifest.digest)
-    writeByteArray(out, manifest.bytes)
-    writeCount(out, manifest.subTrees.size, "manifest subtree count")
-    manifest.subTrees.foreach(writeByteArray(out, _))
-  }
-
-  private def readDictionary(in: DataInputStream) = {
-    val flags = AvlTreeFlags(in.readByte())
-    val keySize = in.readInt()
-    val valueSize = if (in.readBoolean()) Some(in.readInt()) else None
-    val digest = readByteArray(in)
-    val bytes = readByteArray(in)
-    val subTrees = readCount(in, "manifest subtree count")(_ => readByteArray(in))
-    PlasmaDictionary.fromManifest(flags, PlasmaParameters(keySize, valueSize),
-      Manifest(digest, bytes, subTrees)) match {
-      case Right(dictionary) => dictionary
-      case Left(error) => throw new IllegalArgumentException(
-        s"Plasma manifest could not be loaded: ${error.getMessage}", error)
-    }
-  }
-
   private def writeCursor(out: DataOutputStream, cursor: SyncCursor): Unit = {
     out.writeInt(cursor.height)
     writeString(out, cursor.blockId)
@@ -470,16 +657,32 @@ object StateSnapshotCodec {
   private def readOptionalLong(in: DataInputStream): Option[Long] =
     if (in.readBoolean()) Some(in.readLong()) else None
 
-  private def writeBigInt(out: DataOutputStream, value: BigInt): Unit = writeByteArray(out, value.toByteArray)
+  private def writeBigInt(out: DataOutputStream, value: BigInt): Unit =
+    writeByteArray(out, value.toByteArray)
+
   private def readBigInt(in: DataInputStream): BigInt = BigInt(readByteArray(in))
 
-  private def writeStrings(out: DataOutputStream, values: Seq[String]): Unit = {
-    writeCount(out, values.size, "string count")
-    values.foreach(writeString(out, _))
+  private def sealEntry(payload: Array[Byte], maxEntryBytes: Int, what: String): Array[Byte] = {
+    val checksum = Blake2b256.hash(payload)
+    val encoded = writeBytes { out =>
+      out.writeInt(EnvelopeMagic)
+      writeByteArray(out, payload)
+      writeByteArray(out, checksum)
+    }
+    require(encoded.length <= maxEntryBytes,
+      s"$what is ${encoded.length} bytes, over the configured $maxEntryBytes limit")
+    encoded
   }
 
-  private def readStrings(in: DataInputStream): Vector[String] =
-    readCount(in, "string count")(_ => readString(in))
+  private def openEntry(encoded: Array[Byte]): DataInputStream = {
+    val envelope = new DataInputStream(new ByteArrayInputStream(encoded))
+    require(envelope.readInt() == EnvelopeMagic, "invalid envelope magic")
+    val payload = readByteArray(envelope)
+    val checksum = readByteArray(envelope)
+    require(envelope.available() == 0, "trailing bytes after snapshot envelope")
+    require(java.util.Arrays.equals(Blake2b256.hash(payload), checksum), "payload checksum mismatch")
+    new DataInputStream(new ByteArrayInputStream(payload))
+  }
 
   private def writeString(out: DataOutputStream, value: String): Unit =
     writeByteArray(out, value.getBytes(StandardCharsets.UTF_8))
@@ -487,10 +690,9 @@ object StateSnapshotCodec {
   private def readString(in: DataInputStream): String =
     new String(readByteArray(in), StandardCharsets.UTF_8)
 
-  /** Writes refuse what reads would refuse, so a saved entry can always be loaded back. */
   private def writeByteArray(out: DataOutputStream, value: Array[Byte]): Unit = {
     require(value.length <= MaxBlobBytes,
-      s"byte-array of ${value.length} exceeds the $MaxBlobBytes limit its decoder enforces")
+      s"byte-array of ${value.length} exceeds the $MaxBlobBytes decoder limit")
     out.writeInt(value.length)
     out.write(value)
   }
@@ -503,14 +705,25 @@ object StateSnapshotCodec {
     value
   }
 
+  private def requireDictionaryDigest(value: String, label: String): Unit =
+    require(value.length == 66 && value.forall(character =>
+      (character >= '0' && character <= '9') || (character >= 'a' && character <= 'f')),
+      s"$label has an invalid dictionary digest")
+
   private def readCount[A](in: DataInputStream, label: String)(read: Int => A): Vector[A] = {
-    val count = in.readInt()
-    require(count >= 0 && count <= MaxEntries, s"invalid $label $count")
+    val count = readCountValue(in, label)
     Vector.tabulate(count)(read)
   }
 
+  private def readCountValue(in: DataInputStream, label: String): Int = {
+    val count = in.readInt()
+    require(count >= 0 && count <= MaxEntries, s"invalid $label $count")
+    count
+  }
+
   private def writeCount(out: DataOutputStream, size: Int, label: String): Unit = {
-    require(size <= MaxEntries, s"$label of $size exceeds the $MaxEntries limit its decoder enforces")
+    require(size >= 0 && size <= MaxEntries,
+      s"$label of $size exceeds the $MaxEntries decoder limit")
     out.writeInt(size)
   }
 
@@ -540,6 +753,6 @@ object StateSnapshotCodec {
   private def attempt[A](operation: => A): Either[String, A] =
     try Right(operation)
     catch {
-      case NonFatal(ex) => Left(Option(ex.getMessage).getOrElse(ex.getClass.getSimpleName))
+      case NonFatal(error) => Left(Option(error.getMessage).getOrElse(error.getClass.getSimpleName))
     }
 }

@@ -1,6 +1,6 @@
 package state.messages
 
-import lfsm.states.{MinerTree, NISPTree}
+import lfsm.states.{MinerDictionaryMetadata, RollupMetadata}
 import org.ergoplatform.sdk.ErgoId
 import state.messages.SyncMessages.{Starting, SyncCursor, SyncStatus}
 
@@ -29,8 +29,8 @@ object Capability {
  */
 final case class SyncView(status: SyncStatus,
                           version: Long,
-                          rollups: Seq[(String, NISPTree)],
-                          minerTree: Option[MinerTree],
+                          rollups: Seq[(String, RollupMetadata)],
+                          minerDictionaryMetadata: Option[MinerDictionaryMetadata],
                           dataBoxToken: Option[ErgoId],
                           canonical: Capability,
                           minerDictionary: Capability,

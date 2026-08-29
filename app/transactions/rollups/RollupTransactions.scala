@@ -31,7 +31,7 @@ object RollupTransactions {
     val holding = holdingContract(ctx)
 
     val otherInputs = walletInputs
-    val tree = latestState.NISPTree.dictionary
+    val tree = latestState.rollup.dictionary
     val copiedTree = tree.copy()
 
     val insert = copiedTree.insert(
@@ -132,7 +132,7 @@ object RollupTransactions {
     val payout = payoutContract(ctx)
 
     val otherInputs = walletInputs
-    val tree = latestState.NISPTree.dictionary
+    val tree = latestState.rollup.dictionary
     val copiedTree = tree.copy()
 
     val lookUp = copiedTree.lookUp(wallet.contract.hashedPropBytes)
@@ -227,7 +227,7 @@ object RollupTransactions {
     // times, so compiling the seven proofs per attempt was 35 compilations for one slash.
     val fpContracts = ProtocolContracts.fraudProofs(ctx)
     val fpControl = LFSMHelpers.getFPControlBox(ctx)
-    val evaluator = Evaluator(ctx, wallet, evalInput, latestState.NISPTree, Seq.empty,
+    val evaluator = Evaluator(ctx, wallet, evalInput, latestState.rollup, Seq.empty,
       fpControl, new BoxLoader(ctx, Globals.getNodeConfig.getNodeApi), fpContracts)
     val concreteEval = evaluator.evaluateFor(miner, fpContractHashHex, walletInputs, feeOutputs)
     concreteEval.get

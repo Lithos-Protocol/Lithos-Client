@@ -7,8 +7,8 @@ import org.scalatest.BeforeAndAfterAll
 import org.scalatest.flatspec.AnyFlatSpecLike
 import org.scalatest.matchers.should.Matchers
 import play.api.Configuration
-import state.messages.RollupMessages.GetCurrentRollup
-import support.{FakeCache, FakeNodeContext}
+import state.messages.RollupMessages.{CurrentRollup, GetCurrentRollup, RollupUnavailable}
+import support.{FakeCache, FakeNodeContext, SyncFixtures}
 import transactions.BlockTxMessages.{BlockTxsReady, RequestBlockTxs}
 import transactions.rollups.TransactionMessages.RollupTxType._
 import transactions.rollups.TransactionMessages._
@@ -24,8 +24,8 @@ import scala.concurrent.duration._
  * block its inserted transactions: the timeout fires, mining proceeds on genesis alone, and nothing
  * in the log connects the two.
  *
- * The sync handler deliberately never answers, which is how a batch is made slow here — every
- * `latestRollupState` sits on its five-second ask, the same shape as real work.
+ * Individual tests hold a state ask open when they need slow work; all other asks are answered
+ * explicitly so wall-clock timeouts are not being mistaken for concurrency coverage.
  */
 object SubmissionHandlerSpec {
   val config: com.typesafe.config.Config =
@@ -77,14 +77,19 @@ class SubmissionHandlerSpec extends TestKit(ActorSystem("submission-handler-spec
   private def stub(rollup: String, txType: RollupTxType = HoldingTransform): RollupTxStub =
     RollupTxStub(rollup, Some(100L), txType)
 
+  private def refuseState(f: Fixture, count: Int = 1): Unit =
+    (1 to count).foreach { _ =>
+      f.sync.expectMsgType[GetCurrentRollup](5.seconds)
+      f.sync.reply(RollupUnavailable("deliberately unavailable in mailbox test"))
+    }
+
   // ─── the property a miner actually cares about ────────────────────────────
 
   "A block being assembled" should "be answered while a batch is running" in {
-    // The regression for running the batch inline. Four stubs, each sitting on a five-second state
-    // ask, so the batch occupies the actor for roughly twenty seconds; the block's request must come
-    // back well inside that.
+    // Hold the worker on one state ask. If batch work ran in receive, the block request could not be
+    // answered until that ask timed out.
     val f = fixture()
-    f.handler ! RollupBatch((1 to 4).map(i => stub(s"rollup-$i")))
+    f.handler ! RollupBatch(Seq(stub("rollup-a")))
     f.sync.expectMsgType[GetCurrentRollup](10.seconds) // the batch is underway
 
     val start = System.currentTimeMillis()
@@ -95,6 +100,7 @@ class SubmissionHandlerSpec extends TestKit(ActorSystem("submission-handler-spec
     withClue(s"answered in ${elapsed}ms, which must be well short of the batch: ") {
       elapsed should be < 12000L
     }
+    f.sync.reply(RollupUnavailable("release held batch"))
   }
 
   it should "be answered immediately when it asks for nothing" in {
@@ -112,6 +118,7 @@ class SubmissionHandlerSpec extends TestKit(ActorSystem("submission-handler-spec
     f.probe.send(f.handler, RollupBatch(Seq(stub("rollup-a"))))
     val ack = f.probe.expectMsgType[BatchAccepted](5.seconds)
     ack.stubs.map(_.rollupBlockId) shouldEqual Seq("rollup-a")
+    refuseState(f)
   }
 
   "A second batch arriving during the first" should "be refused rather than interleaved" in {
@@ -119,7 +126,7 @@ class SubmissionHandlerSpec extends TestKit(ActorSystem("submission-handler-spec
     // the parallel attempts went on reading feeAllocations after receive returned, where a second
     // batch could overwrite them underneath.
     val f = fixture()
-    f.probe.send(f.handler, RollupBatch((1 to 4).map(i => stub(s"rollup-$i"))))
+    f.probe.send(f.handler, RollupBatch(Seq(stub("rollup-a"))))
     f.probe.expectMsgType[BatchAccepted](5.seconds)
     f.sync.expectMsgType[GetCurrentRollup](10.seconds) // underway
 
@@ -127,6 +134,7 @@ class SubmissionHandlerSpec extends TestKit(ActorSystem("submission-handler-spec
     withClue("a refused batch is not acknowledged, so its sender keeps the stubs: ") {
       f.probe.expectNoMessage(4.seconds)
     }
+    f.sync.reply(RollupUnavailable("release held batch"))
   }
 
   it should "be accepted again once the first has finished" in {
@@ -136,10 +144,12 @@ class SubmissionHandlerSpec extends TestKit(ActorSystem("submission-handler-spec
     f.probe.send(f.handler, RollupBatch(Seq(stub("rollup-a"))))
     f.probe.expectMsgType[BatchAccepted](5.seconds)
 
-    // One stub, one five-second ask, then the batch is done.
-    Thread.sleep(9000)
-    f.probe.send(f.handler, RollupBatch(Seq(stub("rollup-b"))))
-    f.probe.expectMsgType[BatchAccepted](10.seconds).stubs.map(_.rollupBlockId) shouldEqual Seq("rollup-b")
+    refuseState(f)
+    awaitAssert({
+      f.probe.send(f.handler, RollupBatch(Seq(stub("rollup-b"))))
+      f.probe.expectMsgType[BatchAccepted](500.millis).stubs.map(_.rollupBlockId) shouldEqual Seq("rollup-b")
+    }, 5.seconds, 100.millis)
+    refuseState(f)
   }
 
   "A batch with no data box" should "be refused before any rollup state is read, and free the lock" in {
@@ -164,6 +174,7 @@ class SubmissionHandlerSpec extends TestKit(ActorSystem("submission-handler-spec
     // Mining continues on the genesis transaction alone; the block is not held up.
     val f = fixture()
     f.probe.send(f.handler, BuildBlockTxs(700, Seq(stub("rollup-a"), stub("rollup-b"))))
+    refuseState(f, count = 2)
     val ready = f.probe.expectMsgType[BlockTxsReady](25.seconds)
     ready.blockHeight shouldEqual 700
     ready.txs shouldBe empty
@@ -177,6 +188,42 @@ class SubmissionHandlerSpec extends TestKit(ActorSystem("submission-handler-spec
     val fp = RollupTxStub("rollup-a", Some(100L), NISPEvaluation,
       fpInfo = Some(Array.fill[Byte](32)(1) -> "fp-hash"))
     f.probe.send(f.handler, BuildBlockTxs(800, Seq(fp)))
+    refuseState(f)
     f.probe.expectMsgType[BlockTxsReady](25.seconds).txs shouldBe empty
+  }
+
+  "The final send gate" should "not execute the node send after the confirmed input changes" in {
+    val rollupId = SyncFixtures.id(9001)
+    val oldInput = SyncFixtures.id(9002)
+    val newInput = SyncFixtures.id(9003)
+    val rollup = SyncFixtures.emptyRollup(rollupId, newInput, 100)
+    var sent = false
+
+    val changed = intercept[ProjectionChangedException] {
+      SubmissionHandler.sendIfCurrentInput(rollupId, oldInput,
+        CurrentRollup(newInput, rollup, None)) {
+        sent = true
+        "sent"
+      }
+    }
+
+    changed.getMessage should include(s"changed from $oldInput to $newInput")
+    sent shouldBe false
+  }
+
+  it should "execute the node send only after the final input matches" in {
+    val rollupId = SyncFixtures.id(9011)
+    val input = SyncFixtures.id(9012)
+    val rollup = SyncFixtures.emptyRollup(rollupId, input, 100)
+    var sends = 0
+
+    val result = SubmissionHandler.sendIfCurrentInput(rollupId, input,
+      CurrentRollup(input, rollup, None)) {
+      sends += 1
+      "tx-id"
+    }
+
+    result shouldEqual "tx-id"
+    sends shouldEqual 1
   }
 }

@@ -6,7 +6,7 @@ import org.scalatest.BeforeAndAfterAll
 import org.scalatest.flatspec.AnyFlatSpecLike
 import org.scalatest.matchers.should.Matchers
 import play.api.Configuration
-import state.messages.RollupMessages.GetCurrentRollup
+import state.messages.RollupMessages.{GetCurrentRollup, RollupUnavailable}
 import support.FakeNodeContext
 import transactions.rollups.RollupEvaluator.EvaluateNextBatch
 import transactions.rollups.TransactionMessages.RollupTxType.NISPEvaluation
@@ -63,6 +63,7 @@ class RollupEvaluatorSpec extends TestKit(ActorSystem("rollup-evaluator-spec", R
 
     f.sync.expectMsgType[GetCurrentRollup](30.seconds)
     f.sync.expectNoMessage(3.seconds)
+    f.sync.reply(RollupUnavailable("finish the duplicate-tick test batch"))
   }
 
   "A tick while a batch is running" should "be skipped rather than starting a second" in {
@@ -78,6 +79,7 @@ class RollupEvaluatorSpec extends TestKit(ActorSystem("rollup-evaluator-spec", R
     withClue("a second batch would ask for the same rollup's state again: ") {
       f.sync.expectNoMessage(3.seconds)
     }
+    f.sync.reply(RollupUnavailable("finish the in-flight guard test batch"))
   }
 
   "An evaluation set" should "not queue the same rollup twice" in {
@@ -90,6 +92,7 @@ class RollupEvaluatorSpec extends TestKit(ActorSystem("rollup-evaluator-spec", R
     f.evaluator ! EvaluateNextBatch
     f.sync.expectMsgType[GetCurrentRollup](30.seconds)
     f.sync.expectNoMessage(3.seconds)
+    f.sync.reply(RollupUnavailable("finish the deduplication test batch"))
   }
 
   "The guard" should "clear once the batch finishes, so later ticks still run" in {
@@ -102,14 +105,19 @@ class RollupEvaluatorSpec extends TestKit(ActorSystem("rollup-evaluator-spec", R
     val first = f.sync.expectMsgType[GetCurrentRollup](30.seconds)
     first.blockId shouldEqual "rollup-a"
 
-    // Let the state ask time out and the batch complete. The stub is dropped by StopEvaluating on
-    // failure, so a fresh one is needed to have anything to evaluate next.
-    Thread.sleep(7000)
+    // End the first batch explicitly rather than relying on the production state timeout. The stub
+    // is dropped by StopEvaluating on failure, so a fresh one is needed for the next batch.
+    f.sync.reply(RollupUnavailable("finish the first test batch"))
     f.evaluator ! EvaluationSet(Seq(stub("rollup-b")))
-    f.evaluator ! EvaluateNextBatch
 
-    val second = f.sync.expectMsgType[GetCurrentRollup](30.seconds)
+    // BatchEvaluated is posted by the Future completion callback. Retry the tick until that callback
+    // has cleared the guard instead of racing it with a fixed sleep.
+    val second = awaitAssert({
+      f.evaluator ! EvaluateNextBatch
+      f.sync.expectMsgType[GetCurrentRollup](1.second)
+    }, 10.seconds, 100.millis)
     second.blockId shouldEqual "rollup-b"
+    f.sync.reply(RollupUnavailable("finish the reopened-guard test batch"))
   }
 
   "An empty queue" should "not produce a batch at all" in {

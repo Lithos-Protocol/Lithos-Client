@@ -2,7 +2,7 @@ package transactions.rollups
 
 import contracts.specs.rollup.RollupSpecBase
 import lfsm.LFSMPhase
-import lfsm.states.NISPTree
+import lfsm.states.Rollup
 import mutations.NodeWallet
 import org.ergoplatform.appkit.{BlockchainContext, ErgoValue, SignedTransaction}
 import org.ergoplatform.sdk.{ErgoId, JavaHelpers}
@@ -44,7 +44,7 @@ class FeeAllocationSpec extends AnyPropSpec with RollupSpecBase {
   private def treeFor(miner: Array[Byte]) = treeWith(Seq(miner -> nispBytes(4000L, realisticNispSize)))
 
   private def nispTree(ctx: BlockchainContext, miner: Array[Byte], totalScore: Long, reward: Long) =
-    NISPTree(treeFor(miner), numMiners = 1, totalScore = BigInt(totalScore), currentPeriod = Some(100L),
+    Rollup(treeFor(miner), numMiners = 1, totalScore = BigInt(totalScore), currentPeriod = Some(100L),
       totalReward = reward, startHeight = 1, hasMiner = true, phase = LFSMPhase.PAYOUT,
       blockId = "bb" * 32, utxoId = dummyTxId)
 
@@ -63,7 +63,7 @@ class FeeAllocationSpec extends AnyPropSpec with RollupSpecBase {
    * A rollup box carrying the registers the builder reads, at the prover's own script.
    * R4 tree, R5 miner count, R6 total score, R7 the reward the payout divides up.
    */
-  private def rollupInput(ctx: BlockchainContext, owner: Contract, tree: NISPTree,
+  private def rollupInput(ctx: BlockchainContext, owner: Contract, tree: Rollup,
                           value: Long, reward: Long): InputUTXO =
     UTXO(owner, value, Seq.empty, Seq(
       tree.dictionary.ergoValue,

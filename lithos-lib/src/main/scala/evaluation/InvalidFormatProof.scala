@@ -1,6 +1,6 @@
 package evaluation
 
-import lfsm.states.NISPTree
+import lfsm.states.Rollup
 import mutations.BoxLoader
 import org.bouncycastle.util.encoders.Hex
 import org.ergoplatform.appkit._
@@ -11,7 +11,7 @@ import work.lithos.mutations.{Contract, InputUTXO, TxBuilder}
 
 import scala.util.Try
 
-case class InvalidFormatProof(contract: Contract, miner: Array[Byte], nispTree: NISPTree, evalInput: InputUTXO,
+case class InvalidFormatProof(contract: Contract, miner: Array[Byte], nispTree: Rollup, evalInput: InputUTXO,
                               fpControl: InputUTXO)
   extends FraudProof(contract, miner, nispTree, evalInput, fpControl) {
   override val logger: Logger = LoggerFactory.getLogger("InvalidFormatProof")

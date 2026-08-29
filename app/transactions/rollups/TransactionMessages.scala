@@ -2,7 +2,7 @@ package transactions.rollups
 
 import lfsm.LFSMHelpers
 import lfsm.LFSMPhase.{EVAL, HOLDING, PAYOUT}
-import lfsm.states.NISPTree
+import lfsm.states.{Rollup, RollupMetadata}
 import org.bouncycastle.util.encoders.Hex
 import transactions.rollups.TransactionMessages.RollupTxType.{EvalTransform, HoldingTransform, NISPEvaluation, NISPSubmission, Payout}
 import work.lithos.mutations.InputUTXO
@@ -49,8 +49,8 @@ object TransactionMessages {
   /**
    * Identifies a single rollup transaction which will be sent to the blockchain.
    *
-   * @param rollupBlockId  NISPTree.blockId — the block that originated this rollup
-   * @param currentPeriod  NISPTree.currentPeriod — the block height at which the
+   * @param rollupBlockId  Rollup.blockId — the block that originated this rollup
+   * @param currentPeriod  Rollup.currentPeriod — the block height at which the
    *                       rollup entered its current phase; None for PAYOUT-phase
    *                       rollups where the field is not set
    * @param txType         Which of the five transaction types is due
@@ -67,24 +67,26 @@ object TransactionMessages {
     }
 
     /**
-     * Check if this stub is valid against a given height and NISPTree
+     * Check if this stub is valid against a given height and Rollup
      * @param height Height to validate against
-     * @param NISPTree NISPTree to validate against
+     * @param rollup Rollup to validate against
      */
-    def validate(height: Int, NISPTree: NISPTree): Boolean = {
+    def validate(height: Int, rollup: RollupMetadata): Boolean = {
       txType match {
         case HoldingTransform =>
-          NISPTree.phase == HOLDING && (height - NISPTree.currentPeriod.get) >= LFSMHelpers.HOLDING_PERIOD
+          rollup.phase == HOLDING && (height - rollup.currentPeriod.get) >= LFSMHelpers.HOLDING_PERIOD
         case NISPSubmission =>
-          NISPTree.phase == HOLDING && (height - NISPTree.currentPeriod.get) < LFSMHelpers.HOLDING_PERIOD && !NISPTree.hasMiner
+          rollup.phase == HOLDING && (height - rollup.currentPeriod.get) < LFSMHelpers.HOLDING_PERIOD && !rollup.hasMiner
         case EvalTransform =>
-          NISPTree.phase == EVAL && (height - NISPTree.currentPeriod.get) >= LFSMHelpers.EVAL_PERIOD
+          rollup.phase == EVAL && (height - rollup.currentPeriod.get) >= LFSMHelpers.EVAL_PERIOD
         case NISPEvaluation =>
-          NISPTree.phase == EVAL && (height - NISPTree.currentPeriod.get) < LFSMHelpers.EVAL_PERIOD && !NISPTree.evaluated
+          rollup.phase == EVAL && (height - rollup.currentPeriod.get) < LFSMHelpers.EVAL_PERIOD && !rollup.evaluated
         case Payout =>
-          NISPTree.phase == PAYOUT
+          rollup.phase == PAYOUT
       }
     }
+
+    def validate(height: Int, rollup: Rollup): Boolean = validate(height, rollup.metadata)
   }
 
   object RollupTxStub {
@@ -158,8 +160,9 @@ object TransactionMessages {
 
   // Latest States
   sealed trait LatestState
-  case class LatestRollup(inputUTXO: InputUTXO, NISPTree: NISPTree) extends LatestState
+  case class LatestRollup(inputUTXO: InputUTXO, rollup: Rollup) extends LatestState
   // Exceptions
   case class RollupRemovedException(msg: String) extends Exception(msg)
   case class StubInvalidException(msg: String) extends Exception(msg)
+  case class ProjectionChangedException(msg: String) extends Exception(msg)
 }

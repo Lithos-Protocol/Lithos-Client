@@ -14,7 +14,7 @@ import support.{FakeNodeContext, ReducerFixtures, SyncFixtures}
 
 import scala.concurrent.duration._
 
-/** Repair attempts are cheap metadata; successful outcomes and retention deadlines are durable now. */
+/** Repair attempts and deterministic retention deadlines use cadence; rebuilt state is durable now. */
 class RepairSnapshotCadenceSpec extends TestKit(ActorSystem("repair-snapshot-cadence"))
   with AnyFlatSpecLike with Matchers with BeforeAndAfterAll {
 
@@ -30,27 +30,29 @@ class RepairSnapshotCadenceSpec extends TestKit(ActorSystem("repair-snapshot-cad
     restore(requester, handler, seeded)
 
     requester.send(handler, RepairRollup(rollupId, seeded.cursor,
-      RollupRepairResult.Failed("index still catching up", retryable = true)))
+      RollupRepairResult.Failed("index still catching up", retryable = true),
+      permit(requester, handler)))
     requester.expectMsgType[BlockCommitted]
     snapshots.expectNoMessage(250.millis)
     system.stop(handler)
   }
 
-  "The final failed repair" should "force a snapshot when it first assigns a removal deadline" in {
+  "The final failed repair" should "use cadence because its removal deadline is deterministic" in {
     val (handler, snapshots) = newHandler()
     val requester = TestProbe()
     val seeded = quarantinedSeed(attempts = 2)
     restore(requester, handler, seeded)
 
     requester.send(handler, RepairRollup(rollupId, seeded.cursor,
-      RollupRepairResult.Failed("retry budget exhausted", retryable = true)))
+      RollupRepairResult.Failed("retry budget exhausted", retryable = true),
+      permit(requester, handler)))
     requester.expectMsgType[BlockCommitted]
-    snapshots.expectMsgType[SnapshotCandidate].cursor shouldEqual seeded.cursor
+    snapshots.expectNoMessage(250.millis)
     system.stop(handler)
   }
 
   "A successful or terminal repair" should "force its state transition into a snapshot" in {
-    val rebuiltTree = SyncFixtures.emptyNispTree(rollupId, SyncFixtures.id(780010), 90)
+    val rebuiltTree = SyncFixtures.emptyRollup(rollupId, SyncFixtures.id(780010), 90)
     Seq[RollupRepairResult](RollupRepairResult.Rebuilt(rebuiltTree), RollupRepairResult.Terminated)
       .foreach { outcome =>
         val (handler, snapshots) = newHandler()
@@ -58,14 +60,15 @@ class RepairSnapshotCadenceSpec extends TestKit(ActorSystem("repair-snapshot-cad
         val seeded = quarantinedSeed()
         restore(requester, handler, seeded)
 
-        requester.send(handler, RepairRollup(rollupId, seeded.cursor, outcome))
+        requester.send(handler, RepairRollup(rollupId, seeded.cursor, outcome,
+          permit(requester, handler)))
         requester.expectMsgType[BlockCommitted]
         snapshots.expectMsgType[SnapshotCandidate].cursor shouldEqual seeded.cursor
         system.stop(handler)
       }
   }
 
-  "Block maintenance" should "force a snapshot when it assigns a terminal fault's deadline" in {
+  "Block maintenance" should "not force a snapshot for a deterministic terminal deadline" in {
     val (handler, snapshots) = newHandler()
     val requester = TestProbe()
     val seeded = quarantinedSeed().copy(quarantined = Map(rollupId ->
@@ -75,7 +78,7 @@ class RepairSnapshotCadenceSpec extends TestKit(ActorSystem("repair-snapshot-cad
     val block = BlockInfo(SyncFixtures.id(startHeight), startHeight, Seq.empty, seeded.cursor.blockId)
     requester.send(handler, ApplyBlock(block))
     requester.expectMsgType[BlockCommitted]
-    snapshots.expectMsgType[SnapshotCandidate].cursor.height shouldEqual startHeight
+    snapshots.expectNoMessage(250.millis)
     system.stop(handler)
   }
 
@@ -91,6 +94,11 @@ class RepairSnapshotCadenceSpec extends TestKit(ActorSystem("repair-snapshot-cad
       blockId = SyncFixtures.id(startHeight - 1)).copy(
       quarantined = Map(rollupId -> QuarantineFault(rollupId, 90, SyncFixtures.id(780000),
         "missing indexed context", retryable = true, attempts = attempts)))
+
+  private def permit(requester: TestProbe, handler: akka.actor.ActorRef): String = {
+    requester.send(handler, GetRepairableQuarantines)
+    requester.expectMsgType[RepairableQuarantines].repairPermit
+  }
 
   private def newHandler(): (akka.actor.ActorRef, TestProbe) = {
     val snapshots = TestProbe()

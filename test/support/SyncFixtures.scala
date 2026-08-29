@@ -1,7 +1,7 @@
 package support
 
 import lfsm.LFSMPhase
-import lfsm.states.NISPTree
+import lfsm.states.Rollup
 import sigma.data.AvlTreeFlags
 import state.messages.RollupMessages.{Genesis, RollupTransform}
 import state.messages.{BlockInfo, BlockTx, TxInput, TxOutput}
@@ -12,8 +12,8 @@ object SyncFixtures {
 
   def id(number: Int): String = f"$number%064x"
 
-  def emptyNispTree(blockId: String, utxoId: String, startHeight: Int): NISPTree =
-    NISPTree(
+  def emptyRollup(blockId: String, utxoId: String, startHeight: Int): Rollup =
+    Rollup(
       dictionary = PlasmaMap[Array[Byte], Array[Byte]](
         AvlTreeFlags.AllOperationsAllowed,
         PlasmaParameters.default),
@@ -28,7 +28,7 @@ object SyncFixtures {
       utxoId = utxoId)
 
   def genesis(blockId: String, utxoId: String, height: Int): Genesis =
-    Genesis(emptyNispTree(blockId, utxoId, height), BlockInfo(blockId, height, Seq.empty))
+    Genesis(emptyRollup(blockId, utxoId, height), BlockInfo(blockId, height, Seq.empty))
 
   def rollupTransform(number: Int, height: Int, inputId: String, outputId: String): RollupTransform = {
     val txId = id(10000 + number)

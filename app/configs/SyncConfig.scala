@@ -10,26 +10,24 @@ class SyncConfig(config: Configuration){
   val startHeight: Int = config.get[Int]("sync.startHeight")
 
   /**
-   * Committed states retained for exact in-memory rollback. Each holds a dictionary copy per rollup
-   * touched in its block, so this is the subsystem's largest memory term.
-   */
-  val reorgWindow: Int = config.getOptional[Int]("sync.reorgWindow").getOrElse(5)
-
-  /**
    * Canonical cursors retained for locating a fork. Cursors are ~100 bytes, so this is sized for
    * reach rather than for memory, and deeper forks recover from a snapshot instead.
    */
   val cursorWindow: Int = config.getOptional[Int]("sync.cursorWindow").getOrElse(720)
 
+  /** Materialized AVL provers retained after a request; everything else stays digest-only. */
+  val materializedDictionaryCacheEntries: Int =
+    config.getOptional[Int]("sync.materializedDictionaryCacheEntries").getOrElse(4)
+
   val storageBackend: String = config.getOptional[String]("sync.storage.backend").getOrElse("leveldb")
   val storagePath: Path = Paths.get(config.getOptional[String]("sync.storage.path").getOrElse(".lithos/sync"))
   val snapshotsEnabled: Boolean = config.getOptional[Boolean]("sync.snapshots.enabled").getOrElse(true)
-  val snapshotInterval: Int = config.getOptional[Int]("sync.snapshots.intervalBlocks").getOrElse(720)
-  val snapshotRetention: Int = config.getOptional[Int]("sync.snapshots.retention").getOrElse(3)
+  val snapshotInterval: Int = config.getOptional[Int]("sync.snapshots.intervalBlocks").getOrElse(90)
+  val snapshotRetention: Int = config.getOptional[Int]("sync.snapshots.retention").getOrElse(12)
 
   /**
-   * Ceiling on one snapshot entry. A generation is one entry per rollup plus a manifest, so this
-   * bounds the largest rollup rather than the whole state.
+   * Ceiling on one snapshot entry. Dictionaries are content-addressed and written as bounded
+   * subtrees plus a small header; generation metadata contains only digests.
    */
   val snapshotMaxEntryBytes: Int =
     config.getOptional[Int]("sync.snapshots.maxEntryBytes").getOrElse(64 * 1024 * 1024)

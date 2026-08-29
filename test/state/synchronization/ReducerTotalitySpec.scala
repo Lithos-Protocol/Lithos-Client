@@ -39,7 +39,8 @@ class ReducerTotalitySpec extends AnyFlatSpec with Matchers with OptionValues {
 
     // Either outcome is acceptable; an exception escaping to the caller is not.
     result.isRight shouldBe true
-    result.toOption.value.state.minerTree.minerMap.keySet should
+    result.toOption.value.state.minerTree.dictionary.foldKeys(Set.empty[String])((keys, key) =>
+      keys + org.bouncycastle.util.encoders.Hex.toHexString(key)) should
       contain(org.bouncycastle.util.encoders.Hex.toHexString(key))
   }
 

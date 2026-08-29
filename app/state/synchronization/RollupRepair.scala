@@ -1,6 +1,6 @@
 package state.synchronization
 
-import lfsm.states.NISPTree
+import lfsm.states.Rollup
 import node.NodeApi
 import node.model.IndexedBox
 import org.slf4j.{Logger, LoggerFactory}
@@ -12,7 +12,7 @@ import scala.util.{Failure, Success}
 /** A quarantined rollup rebuilt to a committed height, or the reason it stays quarantined. */
 sealed trait RollupRepairResult
 object RollupRepairResult {
-  final case class Rebuilt(tree: NISPTree) extends RollupRepairResult
+  final case class Rebuilt(tree: Rollup) extends RollupRepairResult
   /** The rollup ended on chain at or below the committed height, so nothing needs tracking. */
   case object Terminated extends RollupRepairResult
   final case class Failed(reason: String, retryable: Boolean) extends RollupRepairResult

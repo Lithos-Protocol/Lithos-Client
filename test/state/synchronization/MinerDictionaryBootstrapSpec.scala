@@ -1,6 +1,6 @@
 package state.synchronization
 
-import lfsm.states.MinerTree
+import lfsm.states.MinerDictionary
 import node.NodeApi
 import node.model._
 import org.mockito.ArgumentMatchers.any
@@ -57,7 +57,8 @@ class MinerDictionaryBootstrapSpec extends AnyFlatSpec with Matchers with Mockit
       .run(500).value.minerTree
 
     tree.hasMiner shouldBe true
-    tree.minerMap.keySet should contain(local.hashedPropBytesHex)
+    tree.dictionary.foldKeys(Set.empty[String])((keys, key) =>
+      keys + org.bouncycastle.util.encoders.Hex.toHexString(key)) should contain(local.hashedPropBytesHex)
   }
 
   /** Recovers the local data-box token with the seed that will publish it. */
@@ -89,7 +90,7 @@ class MinerDictionaryBootstrapSpec extends AnyFlatSpec with Matchers with Mockit
   // A reconstructed tip must match the live dictionary digest before publication.
   it should "refuse a walk whose digest does not match the live dictionary box" in {
     val chain = registrationChain(count = 2, firstHeight = 200)
-    val nodeApi = indexerFor(chain, liveDigestOverride = Some(MinerTree.initialState.dictionary))
+    val nodeApi = indexerFor(chain, liveDigestOverride = Some(MinerDictionary.initialState.dictionary))
 
     new MinerDictionaryBootstrap(nodeApi, protocol, maxTransforms = 100).run(500)
       .left.value should include("does not match the live dictionary box")
@@ -144,7 +145,7 @@ class MinerDictionaryBootstrapSpec extends AnyFlatSpec with Matchers with Mockit
       .left.value should include("has no transaction")
   }
 
-  private final case class Step(tx: BlockTx, tree: MinerTree, inputId: String, outputId: String, height: Int)
+  private final case class Step(tx: BlockTx, tree: MinerDictionary, inputId: String, outputId: String, height: Int)
 
   /** One registration per step, each spending the previous dictionary box. */
   private def registrationChain(count: Int,
@@ -155,7 +156,7 @@ class MinerDictionaryBootstrapSpec extends AnyFlatSpec with Matchers with Mockit
       if (miners.nonEmpty) miners
       else (0 until count).map(i => Contract.fromAddress(wallet.addresses(i)))
 
-    val start = MinerTree.initialState.copy(utxoId = genesisId)
+    val start = MinerDictionary.initialState.copy(utxoId = genesisId)
     (0 until count).foldLeft((start, Vector.empty[Step])) {
       case ((tree, steps), index) =>
         val height = firstHeight + index
@@ -168,7 +169,7 @@ class MinerDictionaryBootstrapSpec extends AnyFlatSpec with Matchers with Mockit
     }._2
   }
 
-  private def seedState(tree: MinerTree): CommittedSyncState =
+  private def seedState(tree: MinerDictionary): CommittedSyncState =
     CommittedSyncState(state.messages.SyncMessages.SyncCursor(0, "", ""), 0L,
       Map.empty, Map.empty, Map.empty, tree, None)
 

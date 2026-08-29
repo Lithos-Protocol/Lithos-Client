@@ -1,6 +1,6 @@
 package evaluation
 
-import lfsm.states.NISPTree
+import lfsm.states.Rollup
 import org.ergoplatform.appkit.{ContextVar, ErgoValue}
 import org.slf4j.{Logger, LoggerFactory}
 import work.lithos.mutations.{Contract, InputUTXO}
@@ -11,7 +11,7 @@ import work.lithos.mutations.{Contract, InputUTXO}
  * differently — everything else, including whether the mutator emits its own fee output, is the
  * shared implementation.
  */
-case class IncorrectNProof(contract: Contract, miner: Array[Byte], nispTree: NISPTree, evalInput: InputUTXO,
+case class IncorrectNProof(contract: Contract, miner: Array[Byte], nispTree: Rollup, evalInput: InputUTXO,
                            fpControl: InputUTXO)
   extends FraudProof(contract, miner, nispTree, evalInput, fpControl) {
   override val logger: Logger = LoggerFactory.getLogger("IncorrectNProof")

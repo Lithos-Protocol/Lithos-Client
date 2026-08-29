@@ -1,17 +1,17 @@
 package state.persistence
 
 import lfsm.LFSMPhase
-import lfsm.states.{MinerTree, NISPTree, PlasmaDictionary}
+import lfsm.states.{MinerDictionary, Rollup, PlasmaDictionary}
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 import state.messages.SyncMessages.SyncCursor
-import state.synchronization.CommittedSyncState
+import state.synchronization.{CommittedSyncMetadata, CommittedSyncState, DictionaryId}
 import storage._
 import support.{ReducerFixtures, SyncFixtures}
 
 import java.nio.file.Path
 
-/** Proves metadata and every named rollup stay on one point-in-time database view. */
+/** Proves generation metadata and every referenced dictionary header use one database view. */
 class SnapshotReadConsistencySpec extends AnyFlatSpec with Matchers {
 
   private val identity = StateSnapshotIdentity(ReducerFixtures.protocol())
@@ -24,7 +24,7 @@ class SnapshotReadConsistencySpec extends AnyFlatSpec with Matchers {
     save(snapshots, first) shouldEqual Right(())
     val firstKey = snapshots.generationKeys().toOption.get.head
 
-    // The callback runs after metadata was obtained from the read view and before its rollup is read.
+    // The callback runs after metadata was obtained from the read view and before its headers are read.
     // Two later saves prune the first generation from the live database.
     keyValues.afterNextMetaRead {
       save(snapshots, persisted(101)) shouldEqual Right(())
@@ -40,27 +40,35 @@ class SnapshotReadConsistencySpec extends AnyFlatSpec with Matchers {
 
   private def save(store: LevelDbStateSnapshotStore,
                    value: PersistedSyncState): Either[SnapshotError, Unit] =
-    StateSnapshotCodec.encode(value, identity, MaxEntry) match {
-      case Left(reason) => Left(SnapshotError.Corrupt(reason))
-      case Right(encoded) => store.save(value.state.cursor, value.state.version, encoded)
-    }
+    store.save(plan(value), MaxEntry)
+
+  private def plan(value: PersistedSyncState): SnapshotCheckpoint = {
+    val state = value.state
+    def source(dictionary: lfsm.states.AuthenticatedDictionaryView) =
+      SnapshotDictionarySource(org.bouncycastle.util.encoders.Hex.toHexString(dictionary.digest),
+        dictionary.flags, dictionary.parameters, SnapshotDictionaryBase.Materialized(dictionary), Vector.empty)
+    val dictionaries: Map[DictionaryId, SnapshotDictionarySource] = state.rollups.map { case (id, rollup) =>
+      (DictionaryId.Rollup(id): DictionaryId) -> source(rollup.dictionary)
+    } + (DictionaryId.Miner -> source(state.minerTree.dictionary))
+    SnapshotCheckpoint(CommittedSyncMetadata.from(state), value.recentCursors, dictionaries)
+  }
 
   private def persisted(height: Int): PersistedSyncState = {
     val rollupId = SyncFixtures.id(5500)
     val utxoId = SyncFixtures.id(5600 + height)
     val origin = SyncFixtures.id(5700)
-    val tree = NISPTree(PlasmaDictionary.empty(), 0, BigInt(0), Some(90L), 1000000L, 90,
-      hasMiner = false, LFSMPhase.HOLDING, Set.empty, evaluated = false, rollupId, utxoId)
+    val tree = Rollup(PlasmaDictionary.empty(), 0, BigInt(0), Some(90L), 1000000L, 90,
+      hasMiner = false, LFSMPhase.HOLDING, evaluated = false, rollupId, utxoId)
     val cursor = SyncCursor(height, SyncFixtures.id(height), SyncFixtures.id(height - 1))
     PersistedSyncState(
       CommittedSyncState(cursor, height.toLong, Map(rollupId -> tree), Map(utxoId -> rollupId),
-        Map(rollupId -> origin), MinerTree.initialState, None),
+        Map(rollupId -> origin), MinerDictionary.initialState, None),
       Vector(cursor))
   }
 
   /**
    * Its read view is immutable, while the hook mutates the live delegate exactly between metadata and
-   * rollup reads. An implementation that falls back to KeyValueStore.get observes the prune and fails.
+   * header reads. An implementation that falls back to KeyValueStore.get observes the prune and fails.
    */
   private final class InterleavingStore extends KeyValueStore {
     private val delegate = new InMemoryKeyValueStore

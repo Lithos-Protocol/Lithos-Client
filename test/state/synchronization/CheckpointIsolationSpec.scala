@@ -3,7 +3,7 @@ package state.synchronization
 import akka.actor.{ActorSystem, Props}
 import akka.testkit.{TestKit, TestProbe}
 import com.typesafe.config.ConfigFactory
-import lfsm.states.MinerTree
+import lfsm.states.MinerDictionary
 import node.NodeApi
 import node.model._
 import org.mockito.ArgumentMatchers.any
@@ -66,6 +66,8 @@ class CheckpointIsolationSpec extends TestKit(ActorSystem("checkpoint-isolation"
       // This Tick starts the dictionary worker and canonical polling together while the old tip is
       // Ready. The worker remains blocked as three new blocks commit.
       frame ! CheckBlock
+      sync.expectMsg(GetMinerDictionaryRepairPermit)
+      sync.reply(MinerDictionaryRepairPermit(readyAt, "dictionary-permit"))
       sync.expectMsgType[BeginCatchUp]
       val committed = (1 to 3).map { _ =>
         val block = sync.expectMsgType[ApplyBlock](2.seconds).blockInfo
@@ -113,7 +115,7 @@ class CheckpointIsolationSpec extends TestKit(ActorSystem("checkpoint-isolation"
   private def blockingDictionary(nodeApi: NodeApi,
                                  entered: CountDownLatch,
                                  release: CountDownLatch): Unit = {
-    val empty = MinerTree.initialState.dictionary
+    val empty = MinerDictionary.initialState.dictionary
     val token = ReducerFixtures.protocol().minerDictionaryToken
     val box = IndexedBox(
       NodeBox(genesisId, SyncFixtures.id(790001), 1000000L, 0, 1, "miner-dictionary",
