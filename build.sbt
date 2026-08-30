@@ -49,7 +49,14 @@ addCommandAlias("productionBudgetSmokeTest",
 
 addCommandAlias("operationalQualificationTest",
   "; set Test / fork := true; " +
-    "set Test / javaOptions += \"-Dlithos.productionBudget.scenarios=fanout-large\"; " +
+    "set Test / javaOptions += \"-Dlithos.productionBudget.scenarios=fanout-large,priority-pressure,leveldb-priority-large,storage-faults\"; " +
+    "Test / testOnly *ProductionBudgetSpec")
+
+// Requires disposable host paths already made read-only and quota-exhausted. Supply them through
+// Test / javaOptions as lithos.storageFault.readOnlyPath and lithos.storageFault.diskFullPath.
+addCommandAlias("externalStorageFaultQualificationTest",
+  "; set Test / fork := true; " +
+    "set Test / javaOptions += \"-Dlithos.productionBudget.scenarios=storage-faults-external\"; " +
     "Test / testOnly *ProductionBudgetSpec")
 
 resolvers ++= Seq(

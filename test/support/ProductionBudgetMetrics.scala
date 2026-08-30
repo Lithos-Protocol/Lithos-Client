@@ -114,11 +114,15 @@ object ForkedJvm {
           maximumHeapMiB: Int,
           arguments: Seq[String],
           timeout: FiniteDuration,
-          extraJvmArguments: Seq[String] = Seq.empty): Result = {
+          extraJvmArguments: Seq[String] = Seq.empty,
+          initialHeapMiB: Option[Int] = None): Result = {
+    val initial = initialHeapMiB.getOrElse(maximumHeapMiB)
+    require(initial > 0 && initial <= maximumHeapMiB,
+      s"initial heap $initial MiB must be within maximum heap $maximumHeapMiB MiB")
     val javaExecutable = Paths.get(System.getProperty("java.home"), "bin",
       if (System.getProperty("os.name").toLowerCase.contains("win")) "java.exe" else "java")
     val output = Files.createTempFile("lithos-production-budget-child-", ".log")
-    val command = Vector(javaExecutable.toString, s"-Xms${maximumHeapMiB}m",
+    val command = Vector(javaExecutable.toString, s"-Xms${initial}m",
       s"-Xmx${maximumHeapMiB}m") ++ extraJvmArguments ++
       Vector("-cp", System.getProperty("java.class.path"), mainClass) ++ arguments
     val started = System.nanoTime()
@@ -134,7 +138,21 @@ object ForkedJvm {
     val elapsed = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started)
     val text = Try(new String(Files.readAllBytes(output), StandardCharsets.UTF_8))
       .getOrElse("<could not read child output>")
-    Files.deleteIfExists(output)
+    deleteOutputEventually(output)
     Result(if (completed) process.exitValue() else -1, text, elapsed)
+  }
+
+  /** Forced Windows processes can release their redirected-file handle just after waitFor. */
+  private def deleteOutputEventually(path: Path): Unit = {
+    var remaining = 20
+    var deleted = false
+    while (!deleted && remaining > 0) {
+      try deleted = !Files.exists(path) || Files.deleteIfExists(path)
+      catch {
+        case _: java.nio.file.FileSystemException => Thread.sleep(50L)
+      }
+      remaining -= 1
+    }
+    if (!deleted && Files.exists(path)) path.toFile.deleteOnExit()
   }
 }

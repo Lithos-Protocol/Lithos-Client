@@ -11,13 +11,16 @@ import play.api.Configuration
 import state.messages.MempoolMessages.{MempoolChain, MempoolSnapshot, MempoolTransform}
 import state.messages.SyncMessages._
 import state.messages.{BlockTx, InputSpendingProof, TxInput, TxOutput}
-import state.persistence.StateSnapshotActor.{DictionaryLoaded, MaterializeDictionary}
+import state.persistence.StateSnapshotActor.{DictionaryLoadFailed, DictionaryLoaded,
+  MaterializationPriority, MaterializeDictionary}
 import state.persistence._
 import state.synchronization._
 import storage.{KeyValueMutation, KeyValueReadView, KeyValueStore, LevelDbKeyValueStore,
   StorageBackend, StoreError, WriteDurability}
 
 import java.nio.file.{Files, Path}
+import java.util.concurrent.{ConcurrentLinkedQueue, CountDownLatch, TimeUnit}
+import java.util.concurrent.atomic.{AtomicInteger, AtomicLong}
 import scala.collection.JavaConverters._
 import scala.concurrent.duration._
 
@@ -35,9 +38,14 @@ object SyncProductionBudgetWorker {
     if (enabled("snapshot")) snapshotProfiles()
     if (enabled("crash")) snapshotCrashProfiles()
     if (enabled("fanout")) fanoutProfiles()
+    if (enabled("priority-pressure")) priorityPressureProfiles()
+    if (enabled("storage-faults")) storageFaultProfiles()
     // Deliberately excluded from "all": this allocates several maximum-NISP-shaped AVL trees at
     // once. Operational qualification opts into it explicitly under a fixed heap.
     if (selected("fanout-large")) largeFanoutProfiles()
+    if (selected("leveldb-priority-large")) levelDbPriorityLargeProfiles()
+    // Requires disposable host paths that have already been made read-only and quota-exhausted.
+    if (selected("storage-faults-external")) externalStorageFaultProfiles()
     println("PRODUCTION_BUDGET_COMPLETED")
   }
 
@@ -388,6 +396,550 @@ object SyncProductionBudgetWorker {
   }
 
   /**
+   * Runs the production materialization actor rather than a probe so the measurement includes its
+   * mailbox, deadline timers and immutable priority queues. The sources intentionally reconstruct
+   * from the in-memory empty base: this isolates scheduling/request overhead and is not disk-I/O or
+   * large-dictionary evidence (the separate fanout-large profile supplies the latter).
+   */
+  private def priorityPressureProfiles(): Unit = {
+    val normalRequestCount = 720
+    // SnapshotActorRestartRecoverySpec separately pins the production constant to two.
+    val physicalLoadLimit = 2
+    val firstRelease = new CountDownLatch(1)
+    val secondRelease = new CountDownLatch(1)
+    val system = ActorSystem("sync-priority-pressure-budget")
+    try {
+      val requester = TestProbe()(system)
+      val (nodeContext, _, wallet) = FakeNodeContext(numAddresses = 1)
+      val protocol = ReducerFixtures.protocol(rollupStartHeight = 100)
+        .copy(localMinerHash = wallet.contract.hashedPropBytes)
+      val config = Configuration(ConfigFactory.parseString(
+        """sync.startHeight = 100
+          |sync.snapshots.enabled = false
+          |""".stripMargin))
+
+      val empty = PlasmaDictionary.empty()
+      val emptyDigest = Hex.toHexString(empty.digest)
+      val normalSources = Vector.tabulate(normalRequestCount) { _ =>
+        SnapshotDictionarySource(emptyDigest, empty.flags, empty.parameters,
+          SnapshotDictionaryBase.Empty, Vector.empty)
+      }
+      val criticalEntry = uniqueEntry(6000000)
+      val criticalDictionary = PlasmaDictionary.empty(empty.flags, empty.parameters)
+      criticalDictionary.insert(criticalEntry)
+      val criticalDigest = Hex.toHexString(criticalDictionary.digest)
+      val criticalTransform = DictionaryTransform(DictionaryId.Miner, emptyDigest,
+        Vector(DictionaryOperation.Insert("priority-pressure-critical", Seq(criticalEntry))),
+        criticalDigest)
+      val criticalSource = SnapshotDictionarySource(criticalDigest, empty.flags, empty.parameters,
+        SnapshotDictionaryBase.Empty, Vector(criticalTransform))
+
+      val calls = new AtomicInteger(0)
+      val active = new AtomicInteger(0)
+      val maximumActive = new AtomicInteger(0)
+      val starts = new ConcurrentLinkedQueue[(Int, String)]()
+      val firstTwoEntered = new CountDownLatch(2)
+      val criticalStarted = new CountDownLatch(1)
+      val criticalFinished = new CountDownLatch(1)
+      val criticalStartNanos = new AtomicLong(0L)
+      val criticalFinishNanos = new AtomicLong(0L)
+
+      def recordMaximum(current: Int): Unit = {
+        var previous = maximumActive.get()
+        while (current > previous && !maximumActive.compareAndSet(previous, current))
+          previous = maximumActive.get()
+      }
+
+      val worker = system.actorOf(Props(new StateSnapshotActor(config, nodeContext, protocol) {
+        override protected def reconstruct(source: SnapshotDictionarySource):
+          Either[SnapshotError, lfsm.states.AuthenticatedDictionaryView] = {
+          val ordinal = calls.incrementAndGet()
+          val category = if (source.expectedDigest == criticalDigest) "critical" else "normal"
+          starts.add(ordinal -> category)
+          val nowActive = active.incrementAndGet()
+          recordMaximum(nowActive)
+          try {
+            if (ordinal == 1) {
+              firstTwoEntered.countDown()
+              if (!firstRelease.await(10, TimeUnit.MINUTES))
+                throw new IllegalStateException("first pressure slot was not released")
+            } else if (ordinal == 2) {
+              firstTwoEntered.countDown()
+              if (!secondRelease.await(10, TimeUnit.MINUTES))
+                throw new IllegalStateException("second pressure slot was not released")
+            }
+            if (category == "critical") {
+              criticalStartNanos.compareAndSet(0L, System.nanoTime())
+              criticalStarted.countDown()
+            }
+            val result = super.reconstruct(source)
+            if (category == "critical") {
+              criticalFinishNanos.compareAndSet(0L, System.nanoTime())
+              criticalFinished.countDown()
+            }
+            result
+          } finally active.decrementAndGet()
+        }
+      }))
+
+      val normalTokens = Vector.tabulate(normalRequestCount)(index => f"normal-$index%04d")
+      val criticalToken = "critical-after-720-normal"
+      val before = ProductionBudgetMetrics.stabilizeHeap()
+      val started = System.nanoTime()
+      requester.send(worker, MaterializeDictionary(normalSources(0), normalTokens(0)))
+      requester.send(worker, MaterializeDictionary(normalSources(1), normalTokens(1)))
+      require(firstTwoEntered.await(30, TimeUnit.SECONDS),
+        "the two production materialization slots did not become active")
+      normalSources.drop(2).zip(normalTokens.drop(2)).foreach { case (source, token) =>
+        requester.send(worker, MaterializeDictionary(source, token))
+      }
+      val criticalQueuedAt = System.nanoTime()
+      requester.send(worker, MaterializeDictionary(criticalSource, criticalToken,
+        MaterializationPriority.Critical))
+
+      // Same-sender FIFO plus duplicate-token rejection forms a barrier proving that all prior
+      // requests, including the last critical one, reached the actor's logical queues.
+      requester.send(worker, MaterializeDictionary(criticalSource, criticalToken,
+        MaterializationPriority.Critical))
+      val duplicate = requester.expectMsgType[DictionaryLoadFailed](30.seconds)
+      require(duplicate.requestToken == criticalToken && duplicate.reason.contains("already active"))
+      val queueBarrierAt = System.nanoTime()
+      require(calls.get() == 2, s"queued work started while both slots were blocked: ${calls.get()}")
+      val pending = ProductionBudgetMetrics.stabilizeHeap()
+
+      val sampler = new PeakHeapSampler
+      val drainGcBefore = ProductionBudgetMetrics.gc
+      sampler.start()
+      firstRelease.countDown()
+      require(criticalStarted.await(30, TimeUnit.SECONDS),
+        "critical work did not take the first released physical slot")
+      require(criticalFinished.await(30, TimeUnit.SECONDS),
+        "critical reconstruction did not complete")
+      secondRelease.countDown()
+
+      val responses = requester.receiveN(normalRequestCount + 1, 5.minutes)
+      val completedAt = System.nanoTime()
+      val peak = sampler.stop()
+      val drainGcAfter = ProductionBudgetMetrics.gc
+      val loaded = responses.collect { case value: DictionaryLoaded => value }
+      val expectedTokens = (normalTokens :+ criticalToken).toSet
+      require(loaded.size == expectedTokens.size,
+        s"received ${loaded.size} successful loads for ${expectedTokens.size} accepted requests")
+      require(loaded.map(_.requestToken).toSet == expectedTokens,
+        "the pressure run did not terminate every accepted request exactly once")
+      require(calls.get() == expectedTokens.size,
+        s"started ${calls.get()} physical reconstructions for ${expectedTokens.size} requests")
+      require(active.get() == 0, s"${active.get()} physical reconstructions remained active")
+      require(maximumActive.get() == physicalLoadLimit,
+        s"observed physical concurrency ${maximumActive.get()}")
+      val orderedStarts = starts.iterator().asScala.toVector.sortBy(_._1)
+      require(orderedStarts.take(2).forall(_._2 == "normal"),
+        s"the original physical loads changed class: ${orderedStarts.take(2)}")
+      val criticalOrdinal = orderedStarts.indexWhere(_._2 == "critical") + 1
+      require(criticalOrdinal == 3,
+        s"critical reconstruction started at ordinal $criticalOrdinal rather than 3")
+      val completed = ProductionBudgetMetrics.stabilizeHeap()
+
+      ProductionBudgetMetrics.record("sync-priority-pressure", "normal-720-critical-1",
+        "normalRequestCount" -> normalRequestCount,
+        "criticalRequestCount" -> 1,
+        "queuedBehindActiveCount" -> (normalRequestCount - 2 + 1),
+        "physicalLoadCount" -> calls.get(),
+        "maximumConcurrentPhysicalLoads" -> maximumActive.get(),
+        "criticalPhysicalStartOrdinal" -> criticalOrdinal,
+        "queueBarrierElapsedNanos" -> (queueBarrierAt - started),
+        "criticalQueueWaitNanos" -> (criticalStartNanos.get() - criticalQueuedAt),
+        "criticalReconstructionNanos" ->
+          (criticalFinishNanos.get() - criticalStartNanos.get()),
+        "drainElapsedNanos" -> (completedAt - criticalStartNanos.get()),
+        "totalElapsedNanos" -> (completedAt - started),
+        "physicalLoadsPerSecond" ->
+          (calls.get().toDouble * 1000000000d / (completedAt - queueBarrierAt).toDouble),
+        "heapBeforeBytes" -> before.used,
+        "heapPendingBytes" -> pending.used,
+        "heapCompletedBytes" -> completed.used,
+        "peakHeapBytes" -> peak,
+        "pendingDeltaBytes" -> math.max(0L, pending.used - before.used),
+        "completedDeltaBytes" -> math.max(0L, completed.used - before.used),
+        "peakDeltaBytes" -> math.max(0L, peak - before.used),
+        "drainGcCollections" -> (drainGcAfter.collections - drainGcBefore.collections),
+        "drainGcMilliseconds" -> (drainGcAfter.milliseconds - drainGcBefore.milliseconds))
+      system.stop(worker)
+    } finally {
+      firstRelease.countDown()
+      secondRelease.countDown()
+      ActorSystemShutdown.shutdown(system)
+      ProductionBudgetMetrics.stabilizeHeap()
+    }
+  }
+
+  /**
+   * Safe host-level failure drills: an actual cross-process LevelDB lock conflict, operations after
+   * backend closure, a real invalid filesystem target, and forced process death while both
+   * production materialization slots remain stalled after successful LevelDB reads.
+   */
+  private def storageFaultProfiles(): Unit = {
+    val directory = Files.createTempDirectory("lithos-storage-faults-")
+    val invalidRoot = Files.createTempDirectory("lithos-storage-invalid-target-")
+    var snapshots: LevelDbStateSnapshotStore = null
+    try {
+      val checkpoint = SnapshotCrashFixtures.checkpoint(32)
+      val digest = checkpoint.dictionaries(DictionaryId.Miner).expectedDigest
+      val keyValues = LevelDbKeyValueStore.openOrThrow(directory)
+      snapshots = new LevelDbStateSnapshotStore(keyValues, 2, SnapshotCrashFixtures.identity)
+      require(snapshots.save(checkpoint, 64 * 1024 * 1024) == Right(()),
+        "could not write the storage-fault baseline")
+
+      val lockStarted = System.nanoTime()
+      val locked = ForkedJvm.run("support.SyncStorageFaultWorker", 256,
+        Seq("expect-lock-refusal", directory.toString), 1.minute)
+      val lockElapsed = System.nanoTime() - lockStarted
+      // scorex.db's registry exits the contender before LevelDbKeyValueStore.open can translate the
+      // JNI lock exception. Pin that process-level behavior separately from typed open failures.
+      val typedLockRefusal = locked.exitCode == 0 &&
+        locked.output.contains("REAL_LEVELDB_LOCK_REFUSED")
+      val fatalLockRefusal = locked.exitCode == 2 &&
+        locked.output.contains("database already in use") &&
+        locked.output.contains("could not acquire exclusive lock")
+      require(typedLockRefusal || fatalLockRefusal,
+        s"live LevelDB lock drill exited ${locked.exitCode}: ${locked.output.takeRight(4000)}")
+      require(snapshots.loadDictionary(digest).isRight,
+        "the owning LevelDB process was damaged by the rejected second opener")
+
+      require(snapshots.close() == Right(()), "could not close the baseline backend")
+      val closedReadTyped = snapshots.loadDictionary(digest) match {
+        case Left(SnapshotError.Storage(StoreError.Closed(path))) => path == directory
+        case _ => false
+      }
+      require(closedReadTyped, "a closed snapshot backend did not return StoreError.Closed")
+      snapshots = null
+      verifyPersistedDictionary(directory, SnapshotCrashFixtures.identity, digest)
+
+      val invalidTarget = invalidRoot.resolve("database-is-a-file")
+      Files.write(invalidTarget, Array[Byte](1, 2, 3))
+      val invalidOpenTyped = LevelDbKeyValueStore.open(invalidTarget) match {
+        case Left(_: StoreError.OpenFailed) => true
+        case Right(store) => store.close(); false
+        case _ => false
+      }
+      require(invalidOpenTyped, "a regular-file database target did not return StoreError.OpenFailed")
+      Files.deleteIfExists(invalidTarget)
+      val recoveredInvalidTarget = LevelDbKeyValueStore.openOrThrow(invalidTarget)
+      require(recoveredInvalidTarget.put(Array[Byte](1), Array[Byte](2),
+        WriteDurability.Synchronous) == Right(()))
+      require(recoveredInvalidTarget.get(Array[Byte](1)).exists(
+        _.exists(value => java.util.Arrays.equals(value, Array[Byte](2)))))
+      require(recoveredInvalidTarget.close() == Right(()))
+
+      val stalled = ForkedJvm.run("support.SyncStorageFaultWorker", 512,
+        Seq("stall-two-after-real-read", directory.toString, digest), 15.seconds)
+      require(stalled.exitCode == -1 &&
+        stalled.output.contains("POST_READ_DOUBLE_STALL_LOGICAL_TIMEOUTS_COMPLETE"),
+        s"double-stall process exited ${stalled.exitCode}: ${stalled.output.takeRight(6000)}")
+      val recoveryStarted = System.nanoTime()
+      verifyPersistedDictionary(directory, SnapshotCrashFixtures.identity, digest)
+      val recoveryElapsed = System.nanoTime() - recoveryStarted
+
+      ProductionBudgetMetrics.record("sync-storage-faults", "real-leveldb-and-process-recovery",
+        "levelDbLockRefused" -> true,
+        "lockRefusalReturnedTypedError" -> typedLockRefusal,
+        "lockRefusalTerminatedContender" -> fatalLockRefusal,
+        "lockContenderExitCode" -> locked.exitCode,
+        "ownerReadableAfterLockRefusal" -> true,
+        "closedBackendReturnedTypedError" -> closedReadTyped,
+        "invalidFilesystemTargetReturnedTypedError" -> invalidOpenTyped,
+        "invalidFilesystemTargetRecovered" -> true,
+        "postReadStallInjected" -> true,
+        "activeStalledPhysicalLoads" -> 2,
+        "queuedCriticalTimedOutWithoutStarting" -> true,
+        "stalledProcessForciblyTerminated" -> true,
+        "databaseReopenedAfterForcedTermination" -> true,
+        "lockRefusalElapsedNanos" -> lockElapsed,
+        "postKillRecoveryElapsedNanos" -> recoveryElapsed)
+    } finally {
+      if (snapshots != null) snapshots.close()
+      deleteTreeEventually(directory)
+      deleteTree(invalidRoot)
+    }
+  }
+
+  /**
+   * Opt-in host qualification. The caller must supply disposable paths whose mount/ACL state has
+   * already created the named condition; succeeding writes correctly fail the profile.
+   */
+  private def externalStorageFaultProfiles(): Unit = {
+    val paths = Vector(
+      "read-only" -> "lithos.storageFault.readOnlyPath",
+      "disk-full" -> "lithos.storageFault.diskFullPath")
+    paths.foreach { case (condition, property) =>
+      val path = Option(System.getProperty(property)).map(_.trim).filter(_.nonEmpty)
+        .getOrElse(throw new IllegalArgumentException(
+          s"storage-faults-external requires -D$property=<disposable-path>"))
+      val result = ForkedJvm.run("support.SyncStorageFaultWorker", 512,
+        Seq("expect-external-write-failure", path, condition), 2.minutes)
+      require(result.exitCode == 0 && result.output.contains(
+        s"EXTERNAL_${condition.toUpperCase.replace('-', '_')}_"),
+        s"external $condition drill exited ${result.exitCode}: ${result.output.takeRight(4000)}")
+      ProductionBudgetMetrics.record("sync-storage-faults-external", condition,
+        "conditionObserved" -> true,
+        "childElapsedMillis" -> result.elapsedMillis,
+        "writeAttemptBytes" -> (4 * 1024 * 1024))
+    }
+  }
+
+  private def verifyPersistedDictionary(directory: Path,
+                                        identity: StateSnapshotIdentity,
+                                        digest: String): Unit = {
+    val keyValues = LevelDbKeyValueStore.openOrThrow(directory)
+    val store = new LevelDbStateSnapshotStore(keyValues, 2, identity)
+    try {
+      require(store.generationKeys().exists(_.nonEmpty),
+        "the persisted checkpoint generation disappeared")
+      require(store.loadDictionary(digest).exists(dictionary =>
+        Hex.toHexString(dictionary.digest) == digest),
+        "the persisted dictionary did not survive recovery")
+    } finally require(store.close() == Right(()), "could not close the recovery backend")
+  }
+
+  /**
+   * Joins the two production-shape paths that the pressure and large-fanout profiles deliberately
+   * isolate: the real snapshot actor opens LevelDB, reconstructs maximum-NISP-shaped dictionaries,
+   * holds its production two-worker physical limit, and admits a transform-heavy critical request
+   * ahead of already queued normal work. Seven normal results plus the critical result are retained
+   * by the requester at once so the measurement also preserves the eight-root aggregate heap shape.
+   */
+  private def levelDbPriorityLargeProfiles(): Unit = {
+    val normalRequestCount = 7
+    val physicalLoadLimit = 2
+    val entries = 500
+    val valueBytes = lfsm.LFSMHelpers.NISP_MAX - 1
+    val transformCount = 4
+    val operationsPerTransform = 32
+    val directory = Files.createTempDirectory("lithos-leveldb-priority-large-")
+    val firstRelease = new CountDownLatch(1)
+    val secondRelease = new CountDownLatch(1)
+    val system = ActorSystem("sync-leveldb-priority-large-budget")
+    try {
+      val requester = TestProbe()(system)
+      val (nodeContext, _, wallet) = FakeNodeContext(numAddresses = 1)
+      val protocol = ReducerFixtures.protocol(rollupStartHeight = 100)
+        .copy(localMinerHash = wallet.contract.hashedPropBytes)
+      val fixture = writeLargePersistedFixture(directory, protocol, entries, valueBytes,
+        transformCount, operationsPerTransform)
+      ProductionBudgetMetrics.stabilizeHeap()
+
+      val config = Configuration(ConfigFactory.parseString(
+        s"""sync.startHeight = 100
+           |sync.snapshots.enabled = true
+           |sync.snapshots.retention = 2
+           |sync.storage.backend = "leveldb"
+           |sync.storage.path = "${directory.toString.replace("\\", "/")}"
+           |""".stripMargin))
+
+      val calls = new AtomicInteger(0)
+      val active = new AtomicInteger(0)
+      val maximumActive = new AtomicInteger(0)
+      val starts = new ConcurrentLinkedQueue[(Int, String)]()
+      val firstTwoLoaded = new CountDownLatch(2)
+      val criticalStarted = new CountDownLatch(1)
+      val criticalFinished = new CountDownLatch(1)
+      val criticalStartNanos = new AtomicLong(0L)
+      val criticalFinishNanos = new AtomicLong(0L)
+
+      def recordMaximum(current: Int): Unit = {
+        var previous = maximumActive.get()
+        while (current > previous && !maximumActive.compareAndSet(previous, current))
+          previous = maximumActive.get()
+      }
+
+      val worker = system.actorOf(Props(new StateSnapshotActor(config, nodeContext, protocol) {
+        override protected def reconstruct(source: SnapshotDictionarySource):
+          Either[SnapshotError, lfsm.states.AuthenticatedDictionaryView] = {
+          val ordinal = calls.incrementAndGet()
+          val category = if (source.expectedDigest == fixture.criticalSource.expectedDigest)
+            "critical" else "normal"
+          starts.add(ordinal -> category)
+          val nowActive = active.incrementAndGet()
+          recordMaximum(nowActive)
+          try {
+            if (category == "critical") {
+              criticalStartNanos.compareAndSet(0L, System.nanoTime())
+              criticalStarted.countDown()
+            }
+            // Perform the real LevelDB read and any journal replay before retaining the first two
+            // results in their physical slots. This makes the queue barrier storage evidence too.
+            val result = super.reconstruct(source)
+            if (ordinal == 1) {
+              firstTwoLoaded.countDown()
+              if (!firstRelease.await(10, TimeUnit.MINUTES))
+                throw new IllegalStateException("first LevelDB materialization was not released")
+            } else if (ordinal == 2) {
+              firstTwoLoaded.countDown()
+              if (!secondRelease.await(10, TimeUnit.MINUTES))
+                throw new IllegalStateException("second LevelDB materialization was not released")
+            }
+            if (category == "critical") {
+              criticalFinishNanos.compareAndSet(0L, System.nanoTime())
+              criticalFinished.countDown()
+            }
+            result
+          } finally active.decrementAndGet()
+        }
+      }))
+
+      val normalTokens = Vector.tabulate(normalRequestCount)(index => f"leveldb-normal-$index%02d")
+      val criticalToken = "leveldb-critical-transform-heavy"
+      val before = ProductionBudgetMetrics.stabilizeHeap()
+      val started = System.nanoTime()
+      requester.send(worker, MaterializeDictionary(fixture.normalSource, normalTokens(0)))
+      requester.send(worker, MaterializeDictionary(fixture.normalSource, normalTokens(1)))
+      require(firstTwoLoaded.await(5, TimeUnit.MINUTES),
+        "the first two production workers did not complete their LevelDB reads")
+      normalTokens.drop(2).foreach(token =>
+        requester.send(worker, MaterializeDictionary(fixture.normalSource, token)))
+      val criticalQueuedAt = System.nanoTime()
+      requester.send(worker, MaterializeDictionary(fixture.criticalSource, criticalToken,
+        MaterializationPriority.Critical))
+      requester.send(worker, MaterializeDictionary(fixture.criticalSource, criticalToken,
+        MaterializationPriority.Critical))
+      val duplicate = requester.expectMsgType[DictionaryLoadFailed](30.seconds)
+      require(duplicate.requestToken == criticalToken && duplicate.reason.contains("already active"))
+      val queueBarrierAt = System.nanoTime()
+      require(calls.get() == physicalLoadLimit,
+        s"queued LevelDB work started while both slots were retained: ${calls.get()}")
+      val pending = ProductionBudgetMetrics.stabilizeHeap()
+
+      val sampler = new PeakHeapSampler
+      val drainGcBefore = ProductionBudgetMetrics.gc
+      sampler.start()
+      firstRelease.countDown()
+      require(criticalStarted.await(5, TimeUnit.MINUTES),
+        "critical LevelDB work did not take the first released physical slot")
+      require(criticalFinished.await(10, TimeUnit.MINUTES),
+        "critical LevelDB reconstruction and transform replay did not complete")
+      secondRelease.countDown()
+
+      val responses = requester.receiveN(normalRequestCount + 1, 15.minutes)
+      val completedAt = System.nanoTime()
+      val peak = sampler.stop()
+      val drainGcAfter = ProductionBudgetMetrics.gc
+      val loaded = responses.collect { case value: DictionaryLoaded => value }
+      val expectedTokens = (normalTokens :+ criticalToken).toSet
+      require(loaded.size == expectedTokens.size,
+        s"received ${loaded.size} successful LevelDB loads for ${expectedTokens.size} requests")
+      require(loaded.map(_.requestToken).toSet == expectedTokens,
+        "the LevelDB pressure run did not terminate every accepted request exactly once")
+      require(calls.get() == expectedTokens.size,
+        s"started ${calls.get()} physical reconstructions for ${expectedTokens.size} requests")
+      require(active.get() == 0, s"${active.get()} physical reconstructions remained active")
+      require(maximumActive.get() == physicalLoadLimit,
+        s"observed physical concurrency ${maximumActive.get()}")
+      val orderedStarts = starts.iterator().asScala.toVector.sortBy(_._1)
+      require(orderedStarts.take(2).forall(_._2 == "normal"),
+        s"the original LevelDB loads changed class: ${orderedStarts.take(2)}")
+      val criticalOrdinal = orderedStarts.indexWhere(_._2 == "critical") + 1
+      require(criticalOrdinal == 3,
+        s"critical LevelDB reconstruction started at ordinal $criticalOrdinal rather than 3")
+      val completed = ProductionBudgetMetrics.stabilizeHeap()
+
+      ProductionBudgetMetrics.record("sync-leveldb-priority-large",
+        s"normal-$normalRequestCount-critical-1-entries-$entries-value-$valueBytes",
+        "normalRequestCount" -> normalRequestCount,
+        "criticalRequestCount" -> 1,
+        "entryCount" -> entries,
+        "valueBytes" -> valueBytes,
+        "estimatedBytesPerDictionary" -> fixture.estimatedBytesPerDictionary,
+        "aggregateEstimatedResultBytes" ->
+          (fixture.estimatedBytesPerDictionary * (normalRequestCount + 1L)),
+        "snapshotDirectoryBytes" -> fixture.snapshotDirectoryBytes,
+        "criticalTransformCount" -> fixture.criticalSource.transforms.size,
+        "criticalOperationCount" -> fixture.criticalOperationCount,
+        "criticalTransformAccountedBytes" ->
+          fixture.criticalSource.transforms.foldLeft(0L)(_ + _.accountedBytes),
+        "physicalLoadCount" -> calls.get(),
+        "maximumConcurrentPhysicalLoads" -> maximumActive.get(),
+        "criticalPhysicalStartOrdinal" -> criticalOrdinal,
+        "queueBarrierElapsedNanos" -> (queueBarrierAt - started),
+        "criticalQueueWaitNanos" -> (criticalStartNanos.get() - criticalQueuedAt),
+        "criticalReconstructionNanos" ->
+          (criticalFinishNanos.get() - criticalStartNanos.get()),
+        "totalElapsedNanos" -> (completedAt - started),
+        "heapBeforeBytes" -> before.used,
+        "heapPendingBytes" -> pending.used,
+        "heapCompletedBytes" -> completed.used,
+        "peakHeapBytes" -> peak,
+        "pendingDeltaBytes" -> math.max(0L, pending.used - before.used),
+        "completedDeltaBytes" -> math.max(0L, completed.used - before.used),
+        "peakDeltaBytes" -> math.max(0L, peak - before.used),
+        "drainGcCollections" -> (drainGcAfter.collections - drainGcBefore.collections),
+        "drainGcMilliseconds" -> (drainGcAfter.milliseconds - drainGcBefore.milliseconds))
+      system.stop(worker)
+    } finally {
+      firstRelease.countDown()
+      secondRelease.countDown()
+      ActorSystemShutdown.shutdown(system)
+      deleteTree(directory)
+      ProductionBudgetMetrics.stabilizeHeap()
+    }
+  }
+
+  private final case class LargePersistedFixture(normalSource: SnapshotDictionarySource,
+                                                  criticalSource: SnapshotDictionarySource,
+                                                  estimatedBytesPerDictionary: Long,
+                                                  criticalOperationCount: Int,
+                                                  snapshotDirectoryBytes: Long)
+
+  private def writeLargePersistedFixture(directory: Path,
+                                         protocol: SyncProtocolContext,
+                                         entries: Int,
+                                         valueBytes: Int,
+                                         transformCount: Int,
+                                         operationsPerTransform: Int): LargePersistedFixture = {
+    var dictionary = largeDictionary(entries, valueBytes)
+    val baseDigest = Hex.toHexString(dictionary.digest)
+    val flags = dictionary.flags
+    val parameters = dictionary.parameters
+    val estimatedBytes = dictionary.estimatedHeapBytes
+    var evolving: lfsm.states.AuthenticatedDictionaryView = dictionary
+    val transforms = Vector.tabulate(transformCount) { transformIndex =>
+      val beforeDigest = Hex.toHexString(evolving.digest)
+      val operations = Vector.tabulate(operationsPerTransform) { operationIndex =>
+        val entryIndex = 7000000 + transformIndex * operationsPerTransform + operationIndex
+        DictionaryOperation.Insert(s"leveldb-priority-$transformIndex-$operationIndex",
+          Seq(uniqueEntry(entryIndex)))
+      }
+      val next = evolving.copy()
+      operations.foreach(_.applyTo(next))
+      val afterDigest = Hex.toHexString(next.digest)
+      evolving = next
+      DictionaryTransform(DictionaryId.Miner, beforeDigest, operations, afterDigest)
+    }
+    val criticalDigest = Hex.toHexString(evolving.digest)
+    var state = ReducerFixtures.emptyState(100, SyncFixtures.id(100), 1L)
+    state = state.copy(minerTree = state.minerTree.copy(dictionary = dictionary,
+      numMiners = entries, synced = true, syncHeight = 100, savedHeight = 100))
+    var checkpoint = SnapshotCheckpoint(CommittedSyncMetadata.from(state), Vector(state.cursor),
+      Map(DictionaryId.Miner -> SnapshotDictionarySource(baseDigest, flags, parameters,
+        SnapshotDictionaryBase.Materialized(dictionary), Vector.empty)))
+    val keyValues = LevelDbKeyValueStore.openOrThrow(directory)
+    val snapshots = new LevelDbStateSnapshotStore(keyValues, 2, StateSnapshotIdentity(protocol))
+    try require(snapshots.save(checkpoint, 64 * 1024 * 1024) == Right(()),
+      "could not write the production-shaped LevelDB fixture")
+    finally require(snapshots.close() == Right(()),
+      "could not close the production-shaped LevelDB fixture")
+    checkpoint = null
+    state = null
+    evolving = null
+    dictionary = null
+    LargePersistedFixture(
+      SnapshotDictionarySource(baseDigest, flags, parameters,
+        SnapshotDictionaryBase.Persisted(baseDigest), Vector.empty),
+      SnapshotDictionarySource(criticalDigest, flags, parameters,
+        SnapshotDictionaryBase.Persisted(baseDigest), transforms),
+      estimatedBytes, transforms.foldLeft(0)(_ + _.operations.size), directoryBytes(directory))
+  }
+
+  /**
    * Exercises the aggregate heap path that the ordinary fanout profiles intentionally do not:
    * checkpoint state begins digest-only, then one full-view barrier owns every reconstructed
    * dictionary while the actor also builds and retains every mempool projection.
@@ -593,6 +1145,26 @@ object SyncProductionBudgetWorker {
     val paths = Files.walk(path)
     try paths.iterator().asScala.toVector.sortBy(_.getNameCount).reverse.foreach(Files.deleteIfExists)
     finally paths.close()
+  }
+
+  /** LevelDB JNI can release Windows memory-mapped table handles just after close returns. */
+  private def deleteTreeEventually(path: Path): Unit = {
+    var remaining = 50
+    var failure = Option.empty[Throwable]
+    while (Files.exists(path) && remaining > 0) {
+      try {
+        deleteTree(path)
+        failure = None
+      } catch {
+        case error: java.nio.file.FileSystemException =>
+          failure = Some(error)
+          System.gc()
+          Thread.sleep(100L)
+      }
+      remaining -= 1
+    }
+    if (Files.exists(path)) throw failure.getOrElse(
+      new IllegalStateException(s"could not delete temporary LevelDB directory $path"))
   }
 
   private final class PointerCountingStore(underlying: KeyValueStore) extends KeyValueStore {
