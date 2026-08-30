@@ -20,6 +20,8 @@ object RollupMessages {
   case class UpdateEvaluation(blockId: String)
   // Gets the current rollup state and returns RollupInfo
   case class GetCurrentRollup(blockId: String)
+  /** Internal time-sensitive submission/fraud-proof lookup; never exposed by the Blocks API. */
+  case class GetCurrentRollupCritical(blockId: String)
 
   sealed trait RollupInfo
   case class CurrentRollup(utxoId: String,

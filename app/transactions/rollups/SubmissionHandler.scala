@@ -15,7 +15,7 @@ import play.api.cache.SyncCacheApi
 import play.api.libs.concurrent.InjectedActorSupport
 import state.messages.MempoolMessages.{RebuildMempoolChains, ResetMempoolState}
 import state.messages.RollupMessages
-import state.messages.RollupMessages.{GetCurrentRollup, RemoveRollup, RollupInfo}
+import state.messages.RollupMessages.{GetCurrentRollupCritical, RemoveRollup, RollupInfo}
 import state.DataBoxRetrievalException
 import transactions.BlockTxMessages.{BlockTxsReady, CandidateTx}
 import transactions.rollups.SubmissionHandler._
@@ -724,7 +724,7 @@ class SubmissionHandler @Inject()(config: Configuration, nodeContext: NodeContex
     // revision or confirmed block can land during transaction construction; sending the old input
     // would only create an avoidable double-spend and stale projection retry.
     val current = Await.result[RollupInfo](
-      (syncHandler ? GetCurrentRollup(rollupId)).mapTo[RollupInfo], timeout.duration)
+      (syncHandler ? GetCurrentRollupCritical(rollupId)).mapTo[RollupInfo], timeout.duration)
     SubmissionHandler.sendIfCurrentInput(rollupId, expectedRollupInput, current) {
       reservation.foreach(_.beginSubmission())
       try {
@@ -764,7 +764,8 @@ class SubmissionHandler @Inject()(config: Configuration, nodeContext: NodeContex
   private def latestRollupState(rollupTxStub: RollupTxStub) = {
     Try {
       val rollupInfo = Await.result[RollupInfo](
-        (syncHandler ? GetCurrentRollup(rollupTxStub.rollupBlockId)).mapTo[RollupInfo], timeout.duration)
+        (syncHandler ? GetCurrentRollupCritical(rollupTxStub.rollupBlockId)).mapTo[RollupInfo],
+        timeout.duration)
       rollupInfo match {
         case RollupMessages.CurrentRollup(utxoId, rollup, mempoolState) =>
           if (mempoolState.isDefined) {

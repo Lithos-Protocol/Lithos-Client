@@ -47,6 +47,11 @@ addCommandAlias("productionBudgetSmokeTest",
     "set Test / javaOptions += \"-Dlithos.productionBudget.scenarios=all\"; " +
     "Test / testOnly *ProductionBudgetSpec")
 
+addCommandAlias("operationalQualificationTest",
+  "; set Test / fork := true; " +
+    "set Test / javaOptions += \"-Dlithos.productionBudget.scenarios=fanout-large\"; " +
+    "Test / testOnly *ProductionBudgetSpec")
+
 resolvers ++= Seq(
   "Sonatype Releases" at "https://oss.sonatype.org/content/repositories/releases/",
   "SonaType" at "https://oss.sonatype.org/content/groups/public",

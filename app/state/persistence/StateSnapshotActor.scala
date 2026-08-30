@@ -31,7 +31,17 @@ object StateSnapshotActor {
   }
   final case class SnapshotSaved(cursor: SyncCursor, checkpointToken: String)
   final case class SnapshotSaveFailed(cursor: SyncCursor, checkpointToken: String, reason: String)
-  final case class MaterializeDictionary(source: SnapshotDictionarySource, requestToken: String)
+  sealed trait MaterializationPriority
+  object MaterializationPriority {
+    case object Critical extends MaterializationPriority
+    case object Normal extends MaterializationPriority
+  }
+  final case class MaterializeDictionary(source: SnapshotDictionarySource,
+                                         requestToken: String,
+                                         priority: MaterializationPriority =
+                                           MaterializationPriority.Normal)
+  /** Raises queued work without duplicating or preempting a physical reconstruction. */
+  final case class PromoteMaterialization(requestToken: String)
   final case class DictionaryLoaded(digest: String,
                                     requestToken: String,
                                     dictionary: AuthenticatedDictionaryView)
@@ -90,12 +100,14 @@ class StateSnapshotActor @Inject()(config: Configuration,
                                     requestToken: String,
                                     requester: ActorRef,
                                     deadline: Cancellable,
+                                    priority: MaterializationPriority,
                                     expired: Boolean = false)
   private var activeSave = Option.empty[SaveWork]
   private var pending = Option.empty[SaveWork]
   private var activeRestore = Option.empty[RestoreWork]
   private var activeLoads = Map.empty[String, LoadWork]
-  private var queuedLoads = Queue.empty[LoadWork]
+  private var queuedCriticalLoads = Queue.empty[LoadWork]
+  private var queuedNormalLoads = Queue.empty[LoadWork]
 
   override def preRestart(reason: Throwable, message: Option[Any]): Unit = {
     abortOwnedWork(s"Snapshot actor restarted: ${detail(reason)}")
@@ -147,11 +159,9 @@ class StateSnapshotActor @Inject()(config: Configuration,
       logger.error(s"$reason. Its isolated execution slot remains occupied until the underlying work " +
         "returns; the two-worker physical limit will not be exceeded.")
 
-    case WorkExpired(_, kind, token) if kind == "dictionary" &&
-      queuedLoads.exists(_.requestToken == token) =>
+    case WorkExpired(_, kind, token) if kind == "dictionary" && queuedLoad(token).isDefined =>
       val reason = s"Queued dictionary materialization $token exceeded $operationTimeout"
-      val expired = queuedLoads.find(_.requestToken == token)
-      queuedLoads = Queue(queuedLoads.filterNot(_.requestToken == token): _*)
+      val expired = removeQueuedLoad(token)
       expired.foreach { work =>
         work.deadline.cancel()
         work.requester ! DictionaryLoadFailed(work.source.expectedDigest, work.requestToken, reason)
@@ -190,15 +200,30 @@ class StateSnapshotActor @Inject()(config: Configuration,
       sender() ! SnapshotSaveFailed(candidate.cursor, candidate.checkpointToken,
         "Synchronization snapshots are disabled")
 
-    case MaterializeDictionary(source, requestToken) =>
+    case MaterializeDictionary(source, requestToken, priority) =>
       val requester = sender()
-      if (activeLoads.contains(requestToken) || queuedLoads.exists(_.requestToken == requestToken))
+      if (activeLoads.contains(requestToken) || queuedLoad(requestToken).isDefined)
         requester ! DictionaryLoadFailed(source.expectedDigest, requestToken,
           "Dictionary materialization token is already active")
       else {
         val deadline = context.system.scheduler.scheduleOnce(operationTimeout, self,
           WorkExpired(incarnation, "dictionary", requestToken))(context.dispatcher, self)
-        queuedLoads = queuedLoads.enqueue(LoadWork(source, requestToken, requester, deadline))
+        val work = LoadWork(source, requestToken, requester, deadline, priority)
+        priority match {
+          case MaterializationPriority.Critical =>
+            queuedCriticalLoads = queuedCriticalLoads.enqueue(work)
+          case MaterializationPriority.Normal =>
+            queuedNormalLoads = queuedNormalLoads.enqueue(work)
+        }
+        startLoads()
+      }
+
+    case PromoteMaterialization(requestToken) =>
+      queuedNormalLoads.find(_.requestToken == requestToken).foreach { work =>
+        queuedNormalLoads = Queue(queuedNormalLoads.filterNot(
+          _.requestToken == requestToken): _*)
+        queuedCriticalLoads = queuedCriticalLoads.enqueue(
+          work.copy(priority = MaterializationPriority.Critical))
         startLoads()
       }
 
@@ -387,9 +412,8 @@ class StateSnapshotActor @Inject()(config: Configuration,
   }
 
   private def startLoads(): Unit = {
-    while (activeLoads.size < StateSnapshotActor.MaxConcurrentMaterializations && queuedLoads.nonEmpty) {
-      val (work, remaining) = queuedLoads.dequeue
-      queuedLoads = remaining
+    while (activeLoads.size < StateSnapshotActor.MaxConcurrentMaterializations && hasQueuedLoad) {
+      val work = dequeueLoad()
       activeLoads += work.requestToken -> work
       Future(reconstruct(work.source))(snapshotIoContext)
         .map(result => DictionaryLoadFinished(incarnation, work.requester,
@@ -398,6 +422,32 @@ class StateSnapshotActor @Inject()(config: Configuration,
           work.source.expectedDigest, work.requestToken, Left(SnapshotError.Corrupt(
             Option(ex.getMessage).getOrElse(ex.getClass.getSimpleName)))) }
         .pipeTo(self)
+    }
+  }
+
+  private def hasQueuedLoad: Boolean =
+    queuedCriticalLoads.nonEmpty || queuedNormalLoads.nonEmpty
+
+  private def queuedLoad(token: String): Option[LoadWork] =
+    queuedCriticalLoads.find(_.requestToken == token)
+      .orElse(queuedNormalLoads.find(_.requestToken == token))
+
+  private def removeQueuedLoad(token: String): Option[LoadWork] = {
+    val found = queuedLoad(token)
+    queuedCriticalLoads = Queue(queuedCriticalLoads.filterNot(_.requestToken == token): _*)
+    queuedNormalLoads = Queue(queuedNormalLoads.filterNot(_.requestToken == token): _*)
+    found
+  }
+
+  private def dequeueLoad(): LoadWork = {
+    if (queuedCriticalLoads.nonEmpty) {
+      val (work, remaining) = queuedCriticalLoads.dequeue
+      queuedCriticalLoads = remaining
+      work
+    } else {
+      val (work, remaining) = queuedNormalLoads.dequeue
+      queuedNormalLoads = remaining
+      work
     }
   }
 
@@ -478,7 +528,7 @@ class StateSnapshotActor @Inject()(config: Configuration,
       if (!work.expired)
         work.requester ! DictionaryLoadFailed(work.source.expectedDigest, work.requestToken, reason)
     }
-    queuedLoads.foreach { work =>
+    (queuedCriticalLoads.iterator ++ queuedNormalLoads.iterator).foreach { work =>
       work.deadline.cancel()
       work.requester ! DictionaryLoadFailed(work.source.expectedDigest, work.requestToken, reason)
     }
@@ -486,7 +536,8 @@ class StateSnapshotActor @Inject()(config: Configuration,
     pending = None
     activeRestore = None
     activeLoads = Map.empty
-    queuedLoads = Queue.empty
+    queuedCriticalLoads = Queue.empty
+    queuedNormalLoads = Queue.empty
   }
 
   private def detail(reason: Throwable): String =

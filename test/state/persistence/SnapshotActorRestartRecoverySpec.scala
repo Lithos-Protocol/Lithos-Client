@@ -93,6 +93,34 @@ class SnapshotActorRestartRecoverySpec extends TestKit(ActorSystem("snapshot-act
     Hex.toHexString(loaded.dictionary.digest) shouldEqual source.expectedDigest
   }
 
+  it should "terminate active and queued work from both priority classes on restart" in {
+    val source = materializedSource(99)
+    val dictionary = source.base.asInstanceOf[SnapshotDictionaryBase.Materialized].dictionary
+    val entered = new CountDownLatch(2)
+    val release = new CountDownLatch(1)
+    val fixture = actorWithOverrides(reconstructFn = _ => {
+      entered.countDown()
+      release.await(10, TimeUnit.SECONDS)
+      Right(dictionary)
+    })
+
+    fixture.requester.send(fixture.actor, MaterializeDictionary(source, "active-normal"))
+    fixture.requester.send(fixture.actor, MaterializeDictionary(source, "active-critical",
+      MaterializationPriority.Critical))
+    entered.await(5, TimeUnit.SECONDS) shouldBe true
+    fixture.requester.send(fixture.actor, MaterializeDictionary(source, "queued-normal"))
+    fixture.requester.send(fixture.actor, MaterializeDictionary(source, "queued-critical",
+      MaterializationPriority.Critical))
+
+    fixture.actor ! Kill
+    val failed = fixture.requester.receiveN(4, 5.seconds)
+      .map(_.asInstanceOf[DictionaryLoadFailed])
+    failed.map(_.requestToken).toSet shouldEqual
+      Set("active-normal", "active-critical", "queued-normal", "queued-critical")
+    all(failed.map(_.reason)) should include("restarted")
+    release.countDown()
+  }
+
   it should "run at most two dictionary reconstructions concurrently without refusing queued work" in {
     val dictionary = PlasmaDictionary.empty()
     val source = SnapshotDictionarySource(Hex.toHexString(dictionary.digest), dictionary.flags,
@@ -115,6 +143,89 @@ class SnapshotActorRestartRecoverySpec extends TestKit(ActorSystem("snapshot-act
     release.countDown()
     val loaded = (1 to 3).map(_ => fixture.requester.expectMsgType[DictionaryLoaded](5.seconds))
     loaded.map(_.requestToken).toSet shouldEqual Set("queued-1", "queued-2", "queued-3")
+  }
+
+  it should "run queued critical loads first without preempting either active load" in {
+    val sources = (1 to 5).map(number => materializedSource(number)).toVector
+    val entered = sources.map(source => source.expectedDigest -> new CountDownLatch(1)).toMap
+    val release = sources.map(source => source.expectedDigest -> new CountDownLatch(1)).toMap
+    val fixture = actorWithOverrides(reconstructFn = source => {
+      entered(source.expectedDigest).countDown()
+      release.get(source.expectedDigest).foreach(_.await(10, TimeUnit.SECONDS))
+      source.base match {
+        case SnapshotDictionaryBase.Materialized(dictionary) => Right(dictionary)
+        case _ => Left(SnapshotError.Corrupt("test source was not materialized"))
+      }
+    })
+
+    fixture.requester.send(fixture.actor, MaterializeDictionary(sources(0), "active-1"))
+    fixture.requester.send(fixture.actor, MaterializeDictionary(sources(1), "active-2"))
+    entered(sources(0).expectedDigest).await(5, TimeUnit.SECONDS) shouldBe true
+    entered(sources(1).expectedDigest).await(5, TimeUnit.SECONDS) shouldBe true
+
+    fixture.requester.send(fixture.actor, MaterializeDictionary(sources(2), "normal"))
+    fixture.requester.send(fixture.actor, MaterializeDictionary(sources(3), "critical-1",
+      MaterializationPriority.Critical))
+    fixture.requester.send(fixture.actor, MaterializeDictionary(sources(4), "critical-2",
+      MaterializationPriority.Critical))
+    entered(sources(3).expectedDigest).await(150, TimeUnit.MILLISECONDS) shouldBe false
+    entered(sources(4).expectedDigest).getCount shouldEqual 1L
+    entered(sources(2).expectedDigest).getCount shouldEqual 1L
+
+    release(sources(0).expectedDigest).countDown()
+    entered(sources(3).expectedDigest).await(5, TimeUnit.SECONDS) shouldBe true
+    entered(sources(4).expectedDigest).getCount shouldEqual 1L
+    entered(sources(2).expectedDigest).getCount shouldEqual 1L
+
+    release(sources(3).expectedDigest).countDown()
+    entered(sources(4).expectedDigest).await(5, TimeUnit.SECONDS) shouldBe true
+    entered(sources(2).expectedDigest).getCount shouldEqual 1L
+
+    entered(sources(4).expectedDigest).getCount shouldEqual 0L
+    entered(sources(2).expectedDigest).getCount shouldEqual 1L
+    release(sources(1).expectedDigest).countDown()
+    release(sources(2).expectedDigest).countDown()
+    release(sources(4).expectedDigest).countDown()
+
+    fixture.requester.receiveN(5, 5.seconds).map(_.asInstanceOf[DictionaryLoaded].requestToken).toSet shouldEqual
+      Set("active-1", "active-2", "normal", "critical-1", "critical-2")
+  }
+
+  it should "promote a queued normal token once without duplicating physical work" in {
+    val sources = (11 to 14).map(number => materializedSource(number)).toVector
+    val entered = sources.map(source => source.expectedDigest -> new CountDownLatch(1)).toMap
+    val release = sources.map(source => source.expectedDigest -> new CountDownLatch(1)).toMap
+    val calls = new AtomicInteger(0)
+    val fixture = actorWithOverrides(reconstructFn = source => {
+      calls.incrementAndGet()
+      entered(source.expectedDigest).countDown()
+      release(source.expectedDigest).await(10, TimeUnit.SECONDS)
+      source.base match {
+        case SnapshotDictionaryBase.Materialized(dictionary) => Right(dictionary)
+        case _ => Left(SnapshotError.Corrupt("test source was not materialized"))
+      }
+    })
+
+    fixture.requester.send(fixture.actor, MaterializeDictionary(sources(0), "active-1"))
+    fixture.requester.send(fixture.actor, MaterializeDictionary(sources(1), "active-2"))
+    entered(sources(0).expectedDigest).await(5, TimeUnit.SECONDS) shouldBe true
+    entered(sources(1).expectedDigest).await(5, TimeUnit.SECONDS) shouldBe true
+    fixture.requester.send(fixture.actor, MaterializeDictionary(sources(2), "normal-first"))
+    fixture.requester.send(fixture.actor, MaterializeDictionary(sources(3), "normal-promoted"))
+    fixture.requester.send(fixture.actor, PromoteMaterialization("normal-promoted"))
+    fixture.requester.send(fixture.actor, PromoteMaterialization("normal-promoted"))
+
+    release(sources(0).expectedDigest).countDown()
+    entered(sources(3).expectedDigest).await(5, TimeUnit.SECONDS) shouldBe true
+    entered(sources(2).expectedDigest).getCount shouldEqual 1L
+    release(sources(3).expectedDigest).countDown()
+    entered(sources(2).expectedDigest).await(5, TimeUnit.SECONDS) shouldBe true
+    release(sources(2).expectedDigest).countDown()
+    release(sources(1).expectedDigest).countDown()
+
+    fixture.requester.receiveN(4, 5.seconds).map(_.asInstanceOf[DictionaryLoaded].requestToken).toSet shouldEqual
+      Set("active-1", "active-2", "normal-first", "normal-promoted")
+    calls.get() shouldEqual 4
   }
 
   it should "fail a timed-out save without starting replacement I/O over it" in {
@@ -167,12 +278,14 @@ class SnapshotActorRestartRecoverySpec extends TestKit(ActorSystem("snapshot-act
 
     fixture.requester.send(fixture.actor, MaterializeDictionary(source, "active-timeout"))
     fixture.requester.send(fixture.actor, MaterializeDictionary(source, "accepted-peer"))
-    fixture.requester.send(fixture.actor, MaterializeDictionary(source, "queued-peer"))
+    fixture.requester.send(fixture.actor, MaterializeDictionary(source, "queued-normal"))
+    fixture.requester.send(fixture.actor, MaterializeDictionary(source, "queued-critical",
+      MaterializationPriority.Critical))
     entered.await(5, TimeUnit.SECONDS) shouldBe true
 
-    val failures = (1 to 3).map(_ => fixture.requester.expectMsgType[DictionaryLoadFailed](5.seconds))
+    val failures = (1 to 4).map(_ => fixture.requester.expectMsgType[DictionaryLoadFailed](5.seconds))
     failures.map(_.requestToken).toSet shouldEqual
-      Set("active-timeout", "accepted-peer", "queued-peer")
+      Set("active-timeout", "accepted-peer", "queued-normal", "queued-critical")
     failures.foreach(_.reason should include("exceeded"))
     calls.get() shouldEqual 2
     release.countDown()
@@ -328,5 +441,12 @@ class SnapshotActorRestartRecoverySpec extends TestKit(ActorSystem("snapshot-act
       dictionary.parameters, SnapshotDictionaryBase.Materialized(dictionary), Vector.empty)
     SnapshotCandidate(SnapshotCheckpoint(CommittedSyncMetadata.from(state), Vector(state.cursor),
       Map(DictionaryId.Miner -> source)), token)
+  }
+
+  private def materializedSource(marker: Int): SnapshotDictionarySource = {
+    val dictionary = PlasmaDictionary.empty()
+    dictionary.insert(SyncFixtures.plasmaEntries(1, 32 + marker).head)
+    SnapshotDictionarySource(Hex.toHexString(dictionary.digest), dictionary.flags,
+      dictionary.parameters, SnapshotDictionaryBase.Materialized(dictionary), Vector.empty)
   }
 }

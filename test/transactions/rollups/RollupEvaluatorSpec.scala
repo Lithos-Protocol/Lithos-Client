@@ -6,7 +6,7 @@ import org.scalatest.BeforeAndAfterAll
 import org.scalatest.flatspec.AnyFlatSpecLike
 import org.scalatest.matchers.should.Matchers
 import play.api.Configuration
-import state.messages.RollupMessages.{GetCurrentRollup, RollupUnavailable}
+import state.messages.RollupMessages.{GetCurrentRollupCritical, RollupUnavailable}
 import support.FakeNodeContext
 import transactions.rollups.RollupEvaluator.EvaluateNextBatch
 import transactions.rollups.TransactionMessages.RollupTxType.NISPEvaluation
@@ -61,7 +61,7 @@ class RollupEvaluatorSpec extends TestKit(ActorSystem("rollup-evaluator-spec", R
     f.evaluator ! EvaluateNextBatch
     f.evaluator ! EvaluateNextBatch
 
-    f.sync.expectMsgType[GetCurrentRollup](30.seconds)
+    f.sync.expectMsgType[GetCurrentRollupCritical](30.seconds)
     f.sync.expectNoMessage(3.seconds)
     f.sync.reply(RollupUnavailable("finish the duplicate-tick test batch"))
   }
@@ -73,7 +73,7 @@ class RollupEvaluatorSpec extends TestKit(ActorSystem("rollup-evaluator-spec", R
     f.evaluator ! EvaluationSet(Seq(stub("rollup-a")))
 
     f.evaluator ! EvaluateNextBatch
-    f.sync.expectMsgType[GetCurrentRollup](30.seconds) // the batch is underway
+    f.sync.expectMsgType[GetCurrentRollupCritical](30.seconds) // the batch is underway
 
     f.evaluator ! EvaluateNextBatch
     withClue("a second batch would ask for the same rollup's state again: ") {
@@ -90,7 +90,7 @@ class RollupEvaluatorSpec extends TestKit(ActorSystem("rollup-evaluator-spec", R
     f.evaluator ! EvaluationSet(Seq(stub("rollup-a")))
 
     f.evaluator ! EvaluateNextBatch
-    f.sync.expectMsgType[GetCurrentRollup](30.seconds)
+    f.sync.expectMsgType[GetCurrentRollupCritical](30.seconds)
     f.sync.expectNoMessage(3.seconds)
     f.sync.reply(RollupUnavailable("finish the deduplication test batch"))
   }
@@ -102,7 +102,7 @@ class RollupEvaluatorSpec extends TestKit(ActorSystem("rollup-evaluator-spec", R
     f.evaluator ! EvaluationSet(Seq(stub("rollup-a")))
 
     f.evaluator ! EvaluateNextBatch
-    val first = f.sync.expectMsgType[GetCurrentRollup](30.seconds)
+    val first = f.sync.expectMsgType[GetCurrentRollupCritical](30.seconds)
     first.blockId shouldEqual "rollup-a"
 
     // End the first batch explicitly rather than relying on the production state timeout. The stub
@@ -114,7 +114,7 @@ class RollupEvaluatorSpec extends TestKit(ActorSystem("rollup-evaluator-spec", R
     // has cleared the guard instead of racing it with a fixed sleep.
     val second = awaitAssert({
       f.evaluator ! EvaluateNextBatch
-      f.sync.expectMsgType[GetCurrentRollup](1.second)
+      f.sync.expectMsgType[GetCurrentRollupCritical](1.second)
     }, 10.seconds, 100.millis)
     second.blockId shouldEqual "rollup-b"
     f.sync.reply(RollupUnavailable("finish the reopened-guard test batch"))

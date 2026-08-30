@@ -7,7 +7,7 @@ import org.scalatest.BeforeAndAfterAll
 import org.scalatest.flatspec.AnyFlatSpecLike
 import org.scalatest.matchers.should.Matchers
 import play.api.Configuration
-import state.messages.RollupMessages.{CurrentRollup, GetCurrentRollup, RollupUnavailable}
+import state.messages.RollupMessages.{CurrentRollup, GetCurrentRollupCritical, RollupUnavailable}
 import support.{FakeCache, FakeNodeContext, SyncFixtures}
 import transactions.BlockTxMessages.{BlockTxsReady, RequestBlockTxs}
 import transactions.rollups.TransactionMessages.RollupTxType._
@@ -79,7 +79,7 @@ class SubmissionHandlerSpec extends TestKit(ActorSystem("submission-handler-spec
 
   private def refuseState(f: Fixture, count: Int = 1): Unit =
     (1 to count).foreach { _ =>
-      f.sync.expectMsgType[GetCurrentRollup](5.seconds)
+      f.sync.expectMsgType[GetCurrentRollupCritical](5.seconds)
       f.sync.reply(RollupUnavailable("deliberately unavailable in mailbox test"))
     }
 
@@ -90,7 +90,7 @@ class SubmissionHandlerSpec extends TestKit(ActorSystem("submission-handler-spec
     // answered until that ask timed out.
     val f = fixture()
     f.handler ! RollupBatch(Seq(stub("rollup-a")))
-    f.sync.expectMsgType[GetCurrentRollup](10.seconds) // the batch is underway
+    f.sync.expectMsgType[GetCurrentRollupCritical](10.seconds) // the batch is underway
 
     val start = System.currentTimeMillis()
     f.probe.send(f.handler, BuildBlockTxs(500, Seq.empty))
@@ -128,7 +128,7 @@ class SubmissionHandlerSpec extends TestKit(ActorSystem("submission-handler-spec
     val f = fixture()
     f.probe.send(f.handler, RollupBatch(Seq(stub("rollup-a"))))
     f.probe.expectMsgType[BatchAccepted](5.seconds)
-    f.sync.expectMsgType[GetCurrentRollup](10.seconds) // underway
+    f.sync.expectMsgType[GetCurrentRollupCritical](10.seconds) // underway
 
     f.probe.send(f.handler, RollupBatch(Seq(stub("rollup-late"))))
     withClue("a refused batch is not acknowledged, so its sender keeps the stubs: ") {

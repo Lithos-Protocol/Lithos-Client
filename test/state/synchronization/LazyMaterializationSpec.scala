@@ -20,7 +20,8 @@ import state.messages.MempoolMessages.{MempoolChain, MempoolSnapshot, MempoolTra
 import state.messages.RollupMessages.{CurrentRollup, GetCurrentRollup, RollupUnavailable}
 import state.messages.SyncMessages._
 import state.messages.BlockInfo
-import state.persistence.StateSnapshotActor.{DictionaryLoadFailed, DictionaryLoaded, MaterializeDictionary}
+import state.persistence.StateSnapshotActor.{DictionaryLoadFailed, DictionaryLoaded,
+  MaterializationPriority, MaterializeDictionary}
 import support.{FakeNodeContext, ReducerFixtures, SyncFixtures}
 import work.lithos.mutations.InputUTXO
 import work.lithos.plasma.PlasmaParameters
@@ -52,6 +53,7 @@ class LazyMaterializationSpec extends TestKit(ActorSystem("lazy-materialization"
 
     firstRequester.send(f.handler, GetCurrentRollup(f.first.blockId))
     val load = f.snapshots.expectMsgType[MaterializeDictionary]
+    load.priority shouldEqual MaterializationPriority.Normal
     secondRequester.send(f.handler, GetCurrentRollup(f.first.blockId))
     f.snapshots.expectNoMessage(150.millis)
 
@@ -162,6 +164,7 @@ class LazyMaterializationSpec extends TestKit(ActorSystem("lazy-materialization"
 
     f.requester.send(f.handler, ApplyBlock(block))
     val load = f.snapshots.expectMsgType[MaterializeDictionary]
+    load.priority shouldEqual MaterializationPriority.Critical
     load.source.expectedDigest shouldEqual f.first.metadata.dictionaryDigest
     f.snapshots.expectNoMessage(150.millis)
     f.snapshots.reply(DictionaryLoaded(load.source.expectedDigest, load.requestToken, f.first.dictionary))

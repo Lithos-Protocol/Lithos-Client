@@ -14,7 +14,7 @@ import play.api.Configuration
 import play.api.libs.concurrent.InjectedActorSupport
 import sigma.exceptions.InterpreterException
 import state.messages.RollupMessages
-import state.messages.RollupMessages.{GetCurrentRollup, RollupInfo, UpdateEvaluation}
+import state.messages.RollupMessages.{GetCurrentRollupCritical, RollupInfo, UpdateEvaluation}
 import transactions.ProtocolContracts
 import transactions.rollups.RollupEvaluator.{BatchEvaluated, EVAL_BATCH_SIZE, EvaluateNextBatch, EvaluationBatch}
 import transactions.rollups.TransactionMessages.{CriticalEvalError, EvaluationSet, FailedEvaluation, FraudBatch, FraudFound, LatestRollup, MinerEvaluationResult, NoFraudulence, NormalEvalError, RollupRemovedException, RollupTxStub, StopEvaluating, SuccessfulEvaluation}
@@ -253,7 +253,8 @@ class RollupEvaluator @Inject()(config: Configuration, nodeContext: NodeContext,
   private def latestRollupState(rollupTxStub: RollupTxStub) = {
     Try {
       val rollupInfo = Await.result[RollupInfo](
-        (syncHandler ? GetCurrentRollup(rollupTxStub.rollupBlockId)).mapTo[RollupInfo], timeout.duration)
+        (syncHandler ? GetCurrentRollupCritical(rollupTxStub.rollupBlockId)).mapTo[RollupInfo],
+        timeout.duration)
       rollupInfo match {
         case RollupMessages.CurrentRollup(utxoId, rollup, mempoolState) =>
           if (mempoolState.isDefined) {

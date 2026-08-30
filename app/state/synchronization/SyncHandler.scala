@@ -7,7 +7,7 @@ import org.bouncycastle.util.encoders.Hex
 import org.slf4j.{Logger, LoggerFactory}
 import play.api.Configuration
 import state.messages.RollupMessages._
-import state.messages.MempoolMessages.{MempoolRollupMetadata, MempoolRollupState, MempoolSnapshot, MempoolUnavailable, ResetMempoolState}
+import state.messages.MempoolMessages.{MempoolChain, MempoolRollupMetadata, MempoolRollupState, MempoolSnapshot, MempoolUnavailable, ResetMempoolState}
 import state.messages.SyncMessages._
 import state.messages.{BlockInfo, Capability, SyncView}
 import state.persistence.StateSnapshotActor._
@@ -189,7 +189,10 @@ class SyncHandler @Inject()(config: Configuration,
 
     case GetSynced => respondSynced(sender())
 
-    case GetCurrentRollup(blockId) => respondCurrentRollup(blockId, sender())
+    case GetCurrentRollup(blockId) =>
+      respondCurrentRollup(blockId, sender(), MaterializationPriority.Normal)
+    case GetCurrentRollupCritical(blockId) =>
+      respondCurrentRollup(blockId, sender(), MaterializationPriority.Critical)
 
     case DictionaryLoaded(digest, requestToken, dictionary) =>
       finishDictionaryLoad(digest, requestToken, Right(dictionary))
@@ -429,7 +432,8 @@ class SyncHandler @Inject()(config: Configuration,
 
   /** Runs one logical operation after exactly the dictionaries it names have been reconstructed. */
   private def withMaterialized(epoch: Long,
-                               targets: Set[MaterializationKey])
+                               targets: Set[MaterializationKey],
+                               priority: MaterializationPriority = MaterializationPriority.Normal)
                               (complete: Map[MaterializationKey, AuthenticatedDictionaryView] => Unit)
                               (fail: MaterializationFailure => Unit): Unit = {
     val available = targets.flatMap { key =>
@@ -447,6 +451,8 @@ class SyncHandler @Inject()(config: Configuration,
             val updated = load.copy(operations = load.operations + operationId)
             loadsByKey += key -> updated
             loadsByToken += load.token -> updated
+            if (priority == MaterializationPriority.Critical)
+              snapshotActor ! PromoteMaterialization(load.token)
           case None => materializationSource(key) match {
             case Left(reason) => failOperation(operationId, key, reason)
             case Right(source) =>
@@ -455,7 +461,7 @@ class SyncHandler @Inject()(config: Configuration,
               val load = ActiveLoad(key, token, Set(operationId))
               loadsByKey += key -> load
               loadsByToken += token -> load
-              snapshotActor ! MaterializeDictionary(source, token)
+              snapshotActor ! MaterializeDictionary(source, token, priority)
           }
         }
       }
@@ -646,13 +652,15 @@ class SyncHandler @Inject()(config: Configuration,
     case _ => requester ! SyncUnavailable(status)
   }
 
-  private def respondCurrentRollup(blockId: String, requester: ActorRef): Unit = committed match {
+  private def respondCurrentRollup(blockId: String,
+                                   requester: ActorRef,
+                                   priority: MaterializationPriority): Unit = committed match {
     case Some(state) if status.isInstanceOf[Ready] => state.rollups.get(blockId) match {
       case Some(rollup) =>
         val epoch = stateEpoch
         val projectionAtRequest = projectionFingerprint(blockId, rollup.utxoId)
         val key = keyFor(DictionaryId.Rollup(blockId), rollup.dictionary)
-        withMaterialized(epoch, Set(key)) { dictionaries =>
+        withMaterialized(epoch, Set(key), priority) { dictionaries =>
           committed match {
             case Some(current) if stateEpoch == epoch &&
               projectionFingerprint(blockId, rollup.utxoId) == projectionAtRequest =>
@@ -663,7 +671,7 @@ class SyncHandler @Inject()(config: Configuration,
                     projectedRollup(installDictionaries(current, dictionaries), blockId, materialized))
                 case _ => requester ! NoRollupFound()
               }
-            case _ => respondCurrentRollup(blockId, requester)
+            case _ => respondCurrentRollup(blockId, requester, priority)
           }
         } { failure =>
           logger.error(s"Could not materialize rollup $blockId: ${failure.reason}")
@@ -681,7 +689,9 @@ class SyncHandler @Inject()(config: Configuration,
       val revision = mempool.revision
       val usable = usableRollups(state)
       val targets = usable.flatMap { case (_, metadata) =>
-        state.rollups.get(metadata.blockId).filter(tree => mempool.chains.contains(tree.utxoId))
+        state.rollups.get(metadata.blockId).filter(tree =>
+          mempool.chains.contains(tree.utxoId) &&
+            unchangedProjection(state, tree.blockId, tree).isEmpty)
           .map(tree => keyFor(DictionaryId.Rollup(tree.blockId), tree.dictionary))
       }.toSet
       withMaterialized(epoch, targets) { dictionaries =>
@@ -689,8 +699,10 @@ class SyncHandler @Inject()(config: Configuration,
           case Some(current) if stateEpoch == epoch && mempool.revision == revision =>
             val working = installDictionaries(current, dictionaries)
             val projected = usable.flatMap { case (_, metadata) =>
-              working.rollups.get(metadata.blockId).filter(_.dictionary.materialized).flatMap { tree =>
-                projectedRollup(working, tree.blockId, tree).map { projection =>
+              working.rollups.get(metadata.blockId).flatMap { tree =>
+                unchangedProjection(working, tree.blockId, tree)
+                  .orElse(if (tree.dictionary.materialized)
+                    projectedRollup(working, tree.blockId, tree) else None).map { projection =>
                   tree.blockId -> MempoolRollupMetadata(projection.asInput,
                     projection.rollup.metadata, projection.toBeRemoved)
                 }
@@ -722,7 +734,7 @@ class SyncHandler @Inject()(config: Configuration,
                                   base: CommittedSyncState,
                                   epoch: Long): Unit = {
     val targets = dictionariesTouchedBy(base, block)
-    withMaterialized(epoch, targets) { dictionaries =>
+    withMaterialized(epoch, targets, MaterializationPriority.Critical) { dictionaries =>
       if (stateEpoch != epoch || committed.forall(_.cursor != base.cursor))
         requester ! BlockRejected(committed.map(_.cursor), block.id,
           "committed state changed while block dictionaries were materializing")
@@ -1129,8 +1141,7 @@ class SyncHandler @Inject()(config: Configuration,
         projections -= blockId
         None
       case Some(chain) =>
-        val stamp = ProjectionStamp(state.cursor, Hex.toHexString(tree.dictionary.digest), tree.utxoId,
-          mempool.revision, chain.transforms.iterator.map(_.tx.id).toVector)
+        val stamp = projectionStamp(state, tree, chain)
         projections.get(blockId) match {
           case Some(cached) if cached.stamp == stamp => Some(cached.state)
           case _ =>
@@ -1195,6 +1206,22 @@ class SyncHandler @Inject()(config: Configuration,
       }
     }
   }
+
+  private def projectionStamp(state: CommittedSyncState,
+                              tree: lfsm.states.Rollup,
+                              chain: MempoolChain): ProjectionStamp =
+    ProjectionStamp(state.cursor, Hex.toHexString(tree.dictionary.digest), tree.utxoId,
+      mempool.revision, chain.transforms.iterator.map(_.tx.id).toVector)
+
+  /** A projection is usable without reconstructing its unchanged confirmed dictionary again. */
+  private def unchangedProjection(state: CommittedSyncState,
+                                  blockId: String,
+                                  tree: lfsm.states.Rollup): Option[MempoolRollupState] =
+    if (suppressedProjections.get(blockId).contains(mempool.revision)) None
+    else mempool.chains.get(tree.utxoId).flatMap { chain =>
+      val stamp = projectionStamp(state, tree, chain)
+      projections.get(blockId).filter(_.stamp == stamp).map(_.state)
+    }
 
   private def checkpointSources(boundary: CommittedSyncMetadata,
                                 prefix: Vector[TransformJournalEntry]):
