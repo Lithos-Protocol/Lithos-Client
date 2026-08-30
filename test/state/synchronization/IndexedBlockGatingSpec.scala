@@ -83,6 +83,7 @@ class IndexedBlockGatingSpec extends TestKit(ActorSystem("indexed-block-gating")
       s"""sync.startHeight = $startHeight
          |sync.catchUpBatchBlocks = 4
          |sync.minerDictionary.bootstrap = false
+         |sync.quarantine.repairAttempts = 0
          |""".stripMargin))
     val frame = system.actorOf(Props(
       new StateFrame(config, nodeContext, protocol, sync.ref, snapshots.ref)))

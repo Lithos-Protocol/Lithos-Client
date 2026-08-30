@@ -122,6 +122,33 @@ class MempoolPressureSpec extends TestKit(ActorSystem("mempool-pressure"))
     view ! akka.actor.PoisonPill
   }
 
+  it should "treat an exact full page as complete only after the consistency pass" in {
+    val sync = TestProbe()
+    ready(tracked = PageSize)
+    val counted = new java.util.concurrent.atomic.AtomicInteger(0)
+    val view = viewOver(transactions = PageSize, bound = PageSize, sync,
+      reads = Some(counted))
+
+    sync.expectMsgType[MempoolSnapshot](10.seconds).chains should have size PageSize
+    // Holding: full page + empty terminator. Evaluation and payout: one empty page each.
+    // A full page makes the entire three-tree view repeat once for consistency.
+    counted.get() shouldEqual 8
+    view ! akka.actor.PoisonPill
+  }
+
+  it should "reject the first distinct transaction beyond the bound on the next page" in {
+    val sync = TestProbe()
+    ready(tracked = PageSize + 1)
+    val counted = new java.util.concurrent.atomic.AtomicInteger(0)
+    val view = viewOver(transactions = PageSize + 1, bound = PageSize, sync,
+      reads = Some(counted))
+
+    sync.expectMsgType[MempoolUnavailable](10.seconds).reason should include("maxTransactions")
+    // Failure happens on the holding script's second page, before another script or pass is read.
+    counted.get() shouldEqual 2
+    view ! akka.actor.PoisonPill
+  }
+
   /** A disappearance is the shape that can skip an entry, so it retries rather than publishing. */
   it should "retry without withdrawing projections when a transaction left mid-read" in {
     val sync = TestProbe()

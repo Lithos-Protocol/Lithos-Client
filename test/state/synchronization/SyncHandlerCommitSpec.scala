@@ -272,6 +272,30 @@ class SyncHandlerCommitSpec extends TestKit(ActorSystem("sync-handler-commit"))
     requester.expectMsgType[BlockCommitted].cursor.height shouldEqual 101
   }
 
+  it should "stop at the journal bound without growing when snapshots are disabled" in {
+    val base = ReducerFixtures.emptyState(height = 99, blockId = SyncFixtures.id(99), version = 0L)
+    val first = BlockInfo(SyncFixtures.id(100), 100, Seq.empty, base.cursor.blockId)
+    val firstState = BlockReducer.applyBlock(base, first, ReducerFixtures.protocol(100))
+      .toOption.get.state
+    val oneEntry = TransformJournal(base.cursor).append(TransformJournalEntry(firstState.cursor,
+      CommittedSyncMetadata.from(firstState), Vector.empty)).accountedBytes
+    val (handler, snapshots, _) = newHandler(maxJournalBytes = oneEntry, snapshotsEnabled = false)
+    val requester = TestProbe()
+    seed(handler, requester)
+
+    requester.send(handler, ApplyBlock(first))
+    requester.expectMsgType[BlockCommitted]
+    val second = BlockInfo(SyncFixtures.id(101), 101, Seq.empty, first.id)
+
+    (1 to 3).foreach { _ =>
+      requester.send(handler, ApplyBlock(second))
+      requester.expectMsgType[BlockRejected].reason should include("journal would retain")
+    }
+    snapshots.expectNoMessage(200.millis)
+    requester.send(handler, GetCommittedState)
+    requester.expectMsgType[CommittedState].state.cursor shouldEqual firstState.cursor
+  }
+
   private def firstState(requester: TestProbe, handler: akka.actor.ActorRef): CommittedSyncState = {
     requester.send(handler, GetCommittedState)
     requester.expectMsgType[CommittedState].state
@@ -302,15 +326,17 @@ class SyncHandlerCommitSpec extends TestKit(ActorSystem("sync-handler-commit"))
     requester.expectMsgType[BlockCommitted]
   }
 
-  private def newHandler(maxJournalBytes: Long = SyncHandler.MaxTransformJournalBytes) = {
+  private def newHandler(maxJournalBytes: Long = SyncHandler.MaxTransformJournalBytes,
+                         snapshotsEnabled: Boolean = true) = {
     val snapshots = TestProbe()
     val (nodeContext, _, wallet) = FakeNodeContext(numAddresses = 1)
     val protocol = ReducerFixtures.protocol(rollupStartHeight = 100)
       .copy(localMinerHash = wallet.contract.hashedPropBytes)
     val config = Configuration(ConfigFactory.parseString(
-      """sync.startHeight = 100
-        |sync.snapshots.intervalBlocks = 720
-        |""".stripMargin))
+      s"""sync.startHeight = 100
+         |sync.snapshots.enabled = $snapshotsEnabled
+         |sync.snapshots.intervalBlocks = 720
+         |""".stripMargin))
     val handler = system.actorOf(Props(new SyncHandler(config, protocol, snapshots.ref) {
       override protected def maxTransformJournalBytes: Long = maxJournalBytes
     }))

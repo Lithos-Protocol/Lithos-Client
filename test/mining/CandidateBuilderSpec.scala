@@ -64,12 +64,17 @@ class CandidateBuilderSpec extends TestKit(ActorSystem("candidate-builder-spec",
     extends CandidateTxBuilder(prover, api, c) {
 
     @volatile var builtFor: Seq[String] = Seq.empty
+    @volatile var failNextBuilds: Int = 0
 
     override def loadCollateral(ctx: BlockchainContext): Seq[InputUTXO] = available
 
     override def buildGenesis(ctx: BlockchainContext, collat: InputUTXO, blockHeight: Int): CollateralData = {
       val id = collat.id.toString
       builtFor = builtFor :+ id
+      if (failNextBuilds > 0) {
+        failNextBuilds -= 1
+        throw new CollateralNotFoundException(s"stub refuses first build on $id")
+      }
       if (failing.contains(id)) throw new CollateralNotFoundException(s"stub refuses $id")
       collateralData(id)
     }
@@ -183,14 +188,16 @@ class CandidateBuilderSpec extends TestKit(ActorSystem("candidate-builder-spec",
     // Sticky selection had no release path: a box that stayed in the set but could not produce a
     // valid genesis transaction re-picked itself on every retry and every later block, forever. One
     // such box would have ended collateral mining permanently and silently.
-    // Two boxes, one of which can never build. Whichever is drawn first, the package must name the
-    // good one — with the bug the failing box re-picks itself forever and no package ever arrives.
+    // Fail whichever box the random draw chooses first. The retry must select the other box; naming
+    // one fixed box as bad made this test pass without exercising the failure path whenever the
+    // random draw happened to choose the good box first.
     val f = fixture(boxCount = 2)
-    val doomed = f.ids.head
-    val good = f.ids(1)
-    f.stub.failing = Set(doomed)
+    f.stub.failNextBuilds = 1
 
-    advanceTo(f, 100).collateral.collateralId shouldEqual good
+    val recovered = advanceTo(f, 100)
+    f.stub.builtFor should have size 2
+    f.stub.builtFor.distinct should have size 2
+    recovered.collateral.collateralId shouldEqual f.stub.builtFor.last
   }
 
   "A set where every box fails" should "produce no package rather than a bad one" in {

@@ -242,11 +242,12 @@ class CandidateBuilder(client: ErgoClient,
       // Whatever was already loaded still mines, so this is not fatal on its own.
       logger.error(s"Failed to refresh the collateral set: ${ex.getMessage}", ex)
 
-    case BuildFailed(height, ex) =>
+    case BuildFailed(height, failedId, ex) =>
       building = false
       logger.error(s"Failed to build the genesis transaction for block $height: ${ex.getMessage}", ex)
       // Skip the box before retrying, so the next attempt draws a different one. Bounded, because a
       // failure that is not about the box would otherwise spin against the node.
+      failedId.foreach(id => skipped += id)
       selectedId.foreach(id => skipped += id)
       selectedId = None
       if (buildRetries < MaxBuildRetries) {
@@ -313,11 +314,15 @@ class CandidateBuilder(client: ErgoClient,
             .flatMap(id => boxes.find(_.id.toString == id))
             .getOrElse(boxes(random.nextInt(boxes.size)))
 
-          GenesisReady(height, loaded, chosen.id.toString, txBuilder.buildGenesis(ctx, chosen, height))
+          val chosenId = chosen.id.toString
+          Try(txBuilder.buildGenesis(ctx, chosen, height)) match {
+            case Success(data) => GenesisReady(height, loaded, chosenId, data)
+            case Failure(ex) => BuildFailed(height, Some(chosenId), ex)
+          }
         }
       }.onComplete {
         case Success(msg) => self ! msg
-        case Failure(ex) => self ! BuildFailed(height, ex)
+        case Failure(ex) => self ! BuildFailed(height, None, ex)
       }
     }
   }
@@ -399,5 +404,5 @@ object CandidateBuilder {
 
   private[mining] case class CollectTimedOut(blockHeight: Int)
 
-  private[mining] case class BuildFailed(blockHeight: Int, ex: Throwable)
+  private[mining] case class BuildFailed(blockHeight: Int, failedId: Option[String], ex: Throwable)
 }

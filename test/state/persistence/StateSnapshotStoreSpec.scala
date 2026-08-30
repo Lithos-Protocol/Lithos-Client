@@ -230,6 +230,28 @@ class StateSnapshotStoreSpec extends AnyFlatSpec with Matchers with BeforeAndAft
     error should include("does not name index 1")
   }
 
+  it should "replace a corrupt shared blob when the same dictionary is checkpointed again" in {
+    val (keyValueStore, snapshots) = store(retention = 2)
+    val persisted = largeDictionarySnapshot(100)
+    val checkpoint = plan(persisted)
+    snapshots.save(checkpoint, MaxEntry) shouldEqual Right(())
+    val digest = persisted.state.minerTree.metadata.dictionaryDigest
+    val subtreeKeys = keyValueStore.scanKeys(bytes(s"sync/snapshot/blob/$digest/s/"))
+      .toOption.get.sortBy(text)
+    subtreeKeys.size should be > 1
+
+    val corrupt = keyValueStore.get(subtreeKeys.head).toOption.flatten.get.clone()
+    corrupt(corrupt.length / 2) = (corrupt(corrupt.length / 2) ^ 0x01).toByte
+    keyValueStore.put(subtreeKeys.head, corrupt) shouldEqual Right(())
+    snapshots.loadDictionary(digest).isLeft shouldBe true
+
+    // A successful repair/checkpoint must not keep reusing bytes already proven corrupt.
+    snapshots.save(checkpoint, MaxEntry) shouldEqual Right(())
+    snapshots.loadDictionary(digest).toOption.get.digest should
+      contain theSameElementsInOrderAs persisted.state.minerTree.dictionary.digest
+    snapshots.close() shouldEqual Right(())
+  }
+
   it should "prune old generations and dictionaries unreachable from the retained set" in {
     val (keyValueStore, snapshots) = store(retention = 2)
     (100 to 103).foreach { height =>
@@ -286,6 +308,56 @@ class StateSnapshotStoreSpec extends AnyFlatSpec with Matchers with BeforeAndAft
     Await.result(saving, 10.seconds) shouldEqual Right(())
     keyValueStore.writeEntered.getCount shouldEqual 0L
     snapshots.close() shouldEqual Right(())
+  }
+
+  it should "exclude store close while a dictionary reconstruction owns the read lifecycle" in {
+    implicit val executionContext: ExecutionContext = ExecutionContext.global
+    val underlying = new InMemoryKeyValueStore
+    val keyValueStore = new BlockingReadStore(underlying)
+    val snapshots = new LevelDbStateSnapshotStore(keyValueStore, retention = 2, identity)
+    val persisted = largeDictionarySnapshot(100)
+    snapshots.save(plan(persisted), MaxEntry) shouldEqual Right(())
+
+    keyValueStore.blockSubtreeReads = true
+    val loading = Future(snapshots.loadDictionary(
+      persisted.state.minerTree.metadata.dictionaryDigest))
+    keyValueStore.readEntered.await(5, TimeUnit.SECONDS) shouldBe true
+
+    val closing = Future(snapshots.close())
+    keyValueStore.closeEntered.await(250, TimeUnit.MILLISECONDS) shouldBe false
+
+    keyValueStore.releaseRead.countDown()
+    Await.result(loading, 10.seconds).isRight shouldBe true
+    Await.result(closing, 10.seconds) shouldEqual Right(())
+    keyValueStore.closeEntered.getCount shouldEqual 0L
+  }
+
+  it should "recover after a failure at every physical write before the generation commit" in {
+    val baselineStore = new CommitCountingStore(new InMemoryKeyValueStore)
+    val baseline = new LevelDbStateSnapshotStore(baselineStore, retention = 2, identity)
+    baseline.save(plan(populatedSnapshot(100, 8L)), MaxEntry) shouldEqual Right(())
+    val commitWrite = baselineStore.pointerWrite.getOrElse(
+      fail("the checkpoint pointer was never written"))
+    baseline.close() shouldEqual Right(())
+
+    (1 to commitWrite).foreach { failedWrite =>
+      withClue(s"physical write $failedWrite of $commitWrite: ") {
+        val keyValues = new CommitCountingStore(new InMemoryKeyValueStore,
+          failAt = Some(failedWrite))
+        val snapshots = new LevelDbStateSnapshotStore(keyValues, retention = 2, identity)
+        val checkpoint = plan(populatedSnapshot(100, 8L))
+
+        snapshots.save(checkpoint, MaxEntry).isLeft shouldBe true
+        snapshots.generationKeys().toOption.get shouldBe empty
+
+        keyValues.failAt = None
+        snapshots.save(checkpoint, MaxEntry) shouldEqual Right(())
+        val restored = snapshots.load(snapshots.generationKeys().toOption.get.head).toOption.get
+        restored.state.cursor shouldEqual checkpoint.metadata.cursor
+        snapshots.loadDictionary(checkpoint.metadata.minerDictionary.dictionaryDigest).isRight shouldBe true
+        snapshots.close() shouldEqual Right(())
+      }
+    }
   }
 
   private def store(retention: Int): (LevelDbKeyValueStore, LevelDbStateSnapshotStore) = {
@@ -420,6 +492,7 @@ class StateSnapshotStoreSpec extends AnyFlatSpec with Matchers with BeforeAndAft
     val readEntered = new CountDownLatch(1)
     val releaseRead = new CountDownLatch(1)
     val writeEntered = new CountDownLatch(1)
+    val closeEntered = new CountDownLatch(1)
     @volatile var blockSubtreeReads = false
     @volatile var watchWrites = false
 
@@ -436,6 +509,33 @@ class StateSnapshotStoreSpec extends AnyFlatSpec with Matchers with BeforeAndAft
       Either[StoreError, Unit] = {
       if (watchWrites) writeEntered.countDown()
       super.write(mutations, durability)
+    }
+
+    override def close(): Either[StoreError, Unit] = {
+      closeEntered.countDown()
+      super.close()
+    }
+  }
+
+  private final class CommitCountingStore(underlying: KeyValueStore,
+                                          @volatile var failAt: Option[Int] = None)
+    extends DelegatingStore(underlying) {
+    private var writes = 0
+    private var pointerAt = Option.empty[Int]
+
+    def pointerWrite: Option[Int] = synchronized(pointerAt)
+
+    override def write(mutations: Seq[KeyValueMutation], durability: WriteDurability):
+      Either[StoreError, Unit] = synchronized {
+      writes += 1
+      if (mutations.exists {
+        case KeyValueMutation.Put(key, _) => text(key) == "sync/snapshot/current"
+        case _ => false
+      }) pointerAt = Some(writes)
+      if (failAt.contains(writes))
+        Left(StoreError.WriteFailed(path,
+          new IOException(s"injected failure at physical write $writes")))
+      else super.write(mutations, durability)
     }
   }
 }

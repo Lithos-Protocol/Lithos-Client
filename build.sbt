@@ -1,7 +1,7 @@
 
 name := """lithos-client"""
 organization := "work.lithos"
-version := "5.0.1"
+version := "5.1.0-SNAPSHOT"
 scalaVersion := "2.12.20"
 libraryDependencies ++= Seq(
   //"org.ergoplatform" %% "ergo-appkit" % "5.0.4",
@@ -34,7 +34,18 @@ Test / parallelExecution := false
 
 
 Test / test / testOptions += Tests.Filter(name =>
-  !name.startsWith("contracts.old.") && !name.startsWith("contracts.sandbox."))
+  !name.startsWith("contracts.old.") &&
+    !name.startsWith("contracts.sandbox.") &&
+    !name.endsWith("ProductionBudgetSpec"))
+
+addCommandAlias("productionBudgetTest",
+  "; set Test / fork := true; Test / testOnly *ProductionBudgetSpec")
+
+addCommandAlias("productionBudgetSmokeTest",
+  "; set Test / fork := true; " +
+    "set Test / javaOptions += \"-Dlithos.productionBudget.heapsMiB=1024\"; " +
+    "set Test / javaOptions += \"-Dlithos.productionBudget.scenarios=all\"; " +
+    "Test / testOnly *ProductionBudgetSpec")
 
 resolvers ++= Seq(
   "Sonatype Releases" at "https://oss.sonatype.org/content/repositories/releases/",

@@ -17,6 +17,7 @@ import work.lithos.plasma.collections.Manifest
 import java.io.{ByteArrayInputStream, ByteArrayOutputStream, DataInputStream, DataOutputStream}
 import java.nio.charset.StandardCharsets
 import java.util.concurrent.locks.ReentrantReadWriteLock
+import java.util.concurrent.ConcurrentHashMap
 import scala.util.control.NonFatal
 
 sealed trait SnapshotError {
@@ -115,6 +116,9 @@ final class LevelDbStateSnapshotStore(store: KeyValueStore,
   private val currentKey = bytes("sync/snapshot/current")
   private val logger: Logger = LoggerFactory.getLogger("LevelDbStateSnapshotStore")
   private val lifecycleLock = new ReentrantReadWriteLock()
+  // A digest is immutable only while its committed blob is readable. A proven-corrupt blob must not
+  // pass the cheap reuse check on a later checkpoint; the next materialized source rewrites it.
+  private val invalidDictionaries = ConcurrentHashMap.newKeySet[String]()
 
   override def save(snapshot: SnapshotCheckpoint,
                     maxEntryBytes: Int): Either[SnapshotError, Unit] = withWriteLock {
@@ -214,7 +218,7 @@ final class LevelDbStateSnapshotStore(store: KeyValueStore,
 
   override def loadDictionary(digest: String): Either[SnapshotError, PlasmaDictionary] = withReadLock {
     val base = dictionaryBase(digest)
-    for {
+    val loaded = for {
       encodedHeader <- required(base ++ HeaderSuffix, s"dictionary $digest has no committed header")
       header <- StateSnapshotCodec.decodeDictionaryHeader(encodedHeader).left.map(Corrupt)
       _ <- if (Hex.toHexString(header.digest) == digest) Right(())
@@ -234,6 +238,11 @@ final class LevelDbStateSnapshotStore(store: KeyValueStore,
         Corrupt(s"dictionary $digest could not be loaded: ${message(error)}")
       }
     } yield dictionary
+    loaded match {
+      case Left(Corrupt(_)) => invalidDictionaries.add(digest)
+      case _ => ()
+    }
+    loaded
   }
 
   private def decodeDictionaryReference(digest: String,
@@ -267,6 +276,7 @@ final class LevelDbStateSnapshotStore(store: KeyValueStore,
           encoded <- StateSnapshotCodec.encodeDictionaryHeader(header, maxEntryBytes).left.map(Corrupt)
           // Header-last is the per-blob commit marker.
           _ <- store.put(base ++ HeaderSuffix, encoded, WriteDurability.Synchronous).left.map(Storage)
+          _ = invalidDictionaries.remove(digest)
         } yield ()
     }
   }
@@ -302,7 +312,8 @@ final class LevelDbStateSnapshotStore(store: KeyValueStore,
                                  digest: String,
                                  flags: AvlTreeFlags,
                                  parameters: PlasmaParameters): Either[SnapshotError, Boolean] =
-    store.get(base ++ HeaderSuffix).left.map(Storage).flatMap {
+    if (invalidDictionaries.contains(digest)) Right(false)
+    else store.get(base ++ HeaderSuffix).left.map(Storage).flatMap {
       case None => Right(false)
       case Some(value) => StateSnapshotCodec.decodeDictionaryHeader(value) match {
         case Left(_) => Right(false)

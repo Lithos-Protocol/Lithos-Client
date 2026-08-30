@@ -1,7 +1,9 @@
 package state.synchronization
 
 import akka.actor.{ActorRef, ActorSystem, Props}
+import akka.pattern.ask
 import akka.testkit.{TestKit, TestProbe}
+import akka.util.Timeout
 import com.typesafe.config.ConfigFactory
 import lfsm.states.{AuthenticatedDictionary, AuthenticatedDictionaryView, DictionaryManifestHeader,
   PlasmaDictionary, Rollup}
@@ -24,6 +26,7 @@ import work.lithos.mutations.InputUTXO
 import work.lithos.plasma.PlasmaParameters
 import work.lithos.plasma.collections.Manifest
 
+import scala.concurrent.Await
 import scala.concurrent.duration._
 
 /** Concurrency and invalidation boundaries around the bounded materialized-dictionary cache. */
@@ -55,6 +58,30 @@ class LazyMaterializationSpec extends TestKit(ActorSystem("lazy-materialization"
     f.snapshots.reply(DictionaryLoaded(load.source.expectedDigest, load.requestToken, f.first.dictionary))
     firstRequester.expectMsgType[CurrentRollup].rollup.blockId shouldEqual f.first.blockId
     secondRequester.expectMsgType[CurrentRollup].rollup.blockId shouldEqual f.first.blockId
+  }
+
+  it should "let an ask time out and satisfy its retry from the original cold load" in {
+    val f = fixture()
+    val first = {
+      implicit val timeout: Timeout = Timeout(100.millis)
+      f.handler ? GetCurrentRollup(f.first.blockId)
+    }
+    val load = f.snapshots.expectMsgType[MaterializeDictionary]
+    intercept[akka.pattern.AskTimeoutException](Await.result(first, 1.second))
+
+    val retry = {
+      implicit val timeout: Timeout = Timeout(2.seconds)
+      f.handler ? GetCurrentRollup(f.first.blockId)
+    }
+    f.snapshots.expectNoMessage(150.millis)
+    f.snapshots.reply(DictionaryLoaded(load.source.expectedDigest, load.requestToken,
+      f.first.dictionary))
+
+    Await.result(retry, 2.seconds).asInstanceOf[CurrentRollup].rollup.blockId shouldEqual
+      f.first.blockId
+    f.requester.send(f.handler, GetCurrentRollup(f.first.blockId))
+    f.requester.expectMsgType[CurrentRollup]
+    f.snapshots.expectNoMessage(150.millis)
   }
 
   it should "evict the least-recent digest when its entry bound is reached" in {
@@ -143,6 +170,39 @@ class LazyMaterializationSpec extends TestKit(ActorSystem("lazy-materialization"
 
     f.requester.send(f.handler, GetCommittedState)
     f.requester.expectMsgType[CommittedState].state.rollups should contain key f.second.blockId
+  }
+
+  it should "apply a reducer-valid transition after loading only its dictionary" in {
+    val f = fixture()
+    val (entryKey, value) = SyncFixtures.plasmaEntries(1, 32).head
+    val expectedDictionary = f.first.dictionary.copy()
+    val insertion = expectedDictionary.insert(entryKey -> value)
+    val submittedScore = BigInt(com.google.common.primitives.Longs.fromByteArray(value.take(8)))
+    val outputId = SyncFixtures.id(7451)
+    val tx = ReducerFixtures.submissionTx(45, f.first.utxoId, outputId, startHeight,
+      entryKey, value, insertion.proof.ergoValue.toHex, expectedDictionary,
+      numMiners = 1, totalScore = submittedScore, period = f.first.currentPeriod.get)
+    val block = BlockInfo(SyncFixtures.id(startHeight), startHeight, Seq(tx),
+      SyncFixtures.id(startHeight - 1))
+
+    f.requester.send(f.handler, ApplyBlock(block))
+    val load = f.snapshots.expectMsgType[MaterializeDictionary]
+    load.source.expectedDigest shouldEqual f.first.metadata.dictionaryDigest
+    f.snapshots.expectNoMessage(150.millis)
+    f.snapshots.reply(DictionaryLoaded(load.source.expectedDigest, load.requestToken,
+      f.first.dictionary))
+
+    f.requester.expectMsgType[BlockCommitted].cursor shouldEqual
+      SyncCursor(startHeight, block.id, block.parentId)
+    f.requester.send(f.handler, GetCommittedState)
+    val state = f.requester.expectMsgType[CommittedState].state
+    state.quarantined shouldBe empty
+    state.rollups.keySet shouldEqual Set(f.first.blockId, f.second.blockId)
+    state.rollups(f.first.blockId).utxoId shouldEqual outputId
+    state.rollups(f.first.blockId).metadata.dictionaryDigest shouldEqual
+      org.bouncycastle.util.encoders.Hex.toHexString(expectedDictionary.digest)
+    state.routes should contain(outputId -> f.first.blockId)
+    state.routes should not contain key(f.first.utxoId)
   }
 
   it should "commit a block after quarantining only the rollup whose cold load failed" in {
