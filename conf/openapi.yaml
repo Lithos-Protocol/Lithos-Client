@@ -13,13 +13,13 @@ info:
     url: https://github.com/Lithos-Protocol
 tags:
   - name: info
-    description: Information about the Lithos client and state
+    description: Synchronization status and capability availability for the Lithos client
     x-displayName: Info
   - name: blocks
-    description: Blocks currently being processed by Lithos contracts
+    description: Usable, canonically committed blocks currently being processed by Lithos contracts
     x-displayName: Blocks
   - name: payments
-    description: Payments made to you from Lithos contracts
+    description: Confirmed Lithos payouts to this client's primary miner address
     x-displayName: Payments
   - name: mining
     description: Information about the local stratum and mining process
@@ -72,8 +72,9 @@ paths:
   /blocks:
     get:
       summary: List UTXO ids for blocks
-      description: Get an array of UTXO ids (hex encoded) representing contracts currently processing Lithos blocks.
-        Returns a page of the whole list starting from `offset` and containing `limit` items.
+      description: >
+        Get a page of UTXO ids (hex encoded) for usable rollups in the current canonically committed
+        synchronization view. The list is empty while canonical synchronization is unavailable.
       operationId: getContractIds
       tags:
         - blocks
@@ -117,7 +118,9 @@ paths:
   /blocks/byHeight:
     get:
       summary: UTXO ids by block height
-      description: Get UTXO ids of Lithos contracts for blocks mined in a range of heights
+      description: >
+        Get UTXO ids for usable, canonically committed Lithos rollups whose mined-block height is in
+        the requested range. The list is empty while canonical synchronization is unavailable.
       operationId: getBlocksByHeight
       tags:
         - blocks
@@ -159,7 +162,9 @@ paths:
   /blocks/{utxoId}:
     get:
       summary: Block info by UTXO id
-      description: Get information about a specific pool block being processed by a Lithos rollup contract
+      description: >
+        Get confirmed metadata for a specific pool block in the current usable synchronization view.
+        Unconfirmed mempool projections are not included.
       operationId: getBlockById
       tags:
         - blocks
@@ -193,7 +198,9 @@ paths:
   /blocks/utxoIds:
     post:
       summary: Block info for multiple UTXO ids
-      description: Get pool blocks by given UTXO ids
+      description: >
+        Get confirmed pool-block metadata for the requested UTXO ids from the current usable
+        synchronization view. The whole request returns 404 if any id is unavailable.
       operationId: getPoolBlocksByIds
       tags:
         - blocks
@@ -231,7 +238,11 @@ paths:
   /blocks/{utxoId}/miners:
     get:
       summary: Get a block's miner set
-      description: Get information of miners associated with this pool block
+      description: >
+        Get the confirmed miner proposition hashes for this pool block. This protected operation may
+        materialize the rollup's authenticated dictionary.
+      security:
+        - ApiKeyAuth: [api_key]
       operationId: getBlockMinersById
       tags:
         - blocks
@@ -252,7 +263,13 @@ paths:
                 items:
                   $ref: '#/components/schemas/BlockMiners'
         '404':
-          description: Could not find pool block with the given id
+          description: The pool block is not in the current usable view, or its miner set is unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '403':
+          description: Missing or wrong api_key
           content:
             application/json:
               schema:
@@ -266,8 +283,9 @@ paths:
   /blocks/all:
     get:
       summary: List all pool blocks
-      description: List all pool blocks being processed by Lithos rollup contracts.
-       Returns a page of the whole list starting from `offset` and containing `limit` items.
+      description: >
+        List a page of confirmed metadata for usable rollups in the current canonically committed
+        synchronization view. The list is empty while canonical synchronization is unavailable.
       operationId: getAllPoolBlocks
       tags:
         - blocks
@@ -308,8 +326,11 @@ paths:
 
   /payments:
     get:
-      description: Get a list of payment transactions sent to you from Lithos contracts. Returns a page of the whole
-        list starting from `offset` and containing `limit` items.
+      description: >
+        Reconstruct confirmed payouts to this client's primary miner address from the node's address
+        index. Pagination is applied after the indexed transaction history is filtered to exact spends
+        of the Lithos payout contract with an exact output to the primary miner address. This history
+        is independent of the synchronization cache.
       summary: Get Lithos payouts
       security:
         - ApiKeyAuth: [api_key]
@@ -337,15 +358,39 @@ paths:
             default: 0
       responses:
         '200':
-          description: Array of Payment Transaction objects
+          description: Page of confirmed payout transactions
           content:
             application/json:
               schema:
                 type: array
                 items:
                   $ref: '#/components/schemas/PaymentTransaction'
+        '400':
+          description: Malformed pagination value or other invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '403':
+          description: Missing or wrong api_key
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
         '404':
-          description: Could not find any Lithos block payments for your mining address
+          description: No confirmed Lithos payouts were found for the primary miner address
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '500':
+          description: Unexpected failure while reconstructing payment history
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '503':
+          description: The indexed node is unavailable, not current, or the bounded history scan cannot fill the page
           content:
             application/json:
               schema:
@@ -358,7 +403,9 @@ paths:
                 $ref: '#/components/schemas/ApiError'
   /info:
     get:
-      description: Get information about the Lithos client and the current LFSM state
+      description: >
+        Get the detailed synchronization state, last committed cursor, and independent availability
+        of canonical state, the Miner Dictionary, and mempool processing.
       summary: Lithos client information
       operationId: getLithosInfo
       tags:
@@ -1896,7 +1943,7 @@ components:
           description: Hexadecimal representation of hashed proposition bytes of the miner
           example: '56002fb6194f8a7f147b54c98c98bd72205f46c35fed0f3c4111071ecb0763b7'
     PaymentTransaction:
-      description: Transaction paid to miner by Lithos payout contract
+      description: A confirmed payment from the Lithos payout contract to the local miner
       type: object
       x-tags: payments
       required:
@@ -1907,16 +1954,16 @@ components:
       properties:
         transactionId:
           type: string
-          description: Transaction Id of this mining reward payment
+          description: Payout transaction identifier
           example: 'c42513da4dc695dbac3fb13482b604b289c9f1d39355e2e839899ed57780d9ab'
         payoutUTXO:
           type: string
-          description: UTXO id of the Lithos payout contract associated with this payment
+          description: Identifier of the spent payout-contract box
           example: '5035b2e112b4f5b873dd3444c01df1e7e697807fd84fe96790eacb128e46428d'
         amount:
           type: integer
           format: int64
-          description: Amount of ERG paid to miner
+          description: Amount paid to the miner in nanoERG
           example: 67500000000
         score:
           type: integer
@@ -1927,7 +1974,7 @@ components:
         paymentHeight:
           type: integer
           format: int32
-          description: Height that this payment was sent to miner
+          description: Inclusion height of the payout transaction
           example: 47832
         blockId:
           type: string
@@ -1941,21 +1988,72 @@ components:
           description: Height of the block processed by Lithos and associated with this reward, when known from rollup state.
           example: 47112
     LithosInfo:
-      description: Information about this Lithos client and the current LFSM state
+      description: Detailed synchronization and capability status for this Lithos client
       type: object
       x-tags: info
       required:
         - numPoolBlocks
         - synced
+        - status
+        - minerDictionaryAvailable
+        - mempoolAvailable
       properties:
         numPoolBlocks:
           type: integer
-          description: Number of tracked blocks currently being processed by Lithos contracts
+          format: int32
+          description: >
+            Number of usable rollups in the current canonical view. This is zero while canonical
+            synchronization is unavailable.
           example: 64
         synced:
           type: boolean
-          description: Whether this Lithos client has synced to the blockchain
+          description: Whether canonical synchronization is caught up and usable
           example: true
+        status:
+          type: string
+          description: Detailed synchronization-state name
+          enum:
+            - Starting
+            - CatchingUp
+            - Ready
+            - Stale
+            - Reorganizing
+            - SyncFailed
+          example: Ready
+        height:
+          type: integer
+          format: int32
+          nullable: true
+          description: Height of the last committed block, when one has committed
+          example: 484719
+        blockId:
+          type: string
+          nullable: true
+          description: Id of the last committed block, when one has committed
+          example: '2a7de28034ca523685d9a03c30d06c36863a804f69c2e4add4d83c8c2ba26271'
+        canonicalReason:
+          type: string
+          nullable: true
+          description: Why canonical state is unusable, when it is unavailable
+          example: 'catching up at height 484719 of 484900'
+        minerDictionaryAvailable:
+          type: boolean
+          description: Whether the Miner Dictionary can be read and committed against
+          example: true
+        minerDictionaryReason:
+          type: string
+          nullable: true
+          description: Why the Miner Dictionary is unusable, when it is unavailable
+          example: 'Miner Dictionary reconstruction failed'
+        mempoolAvailable:
+          type: boolean
+          description: Whether mempool processing has no recorded availability failure
+          example: true
+        mempoolReason:
+          type: string
+          nullable: true
+          description: Why mempool processing is unavailable, when it is unavailable
+          example: 'mempool transaction scan exceeded its configured bound'
     StratumInfo:
       description: Information about the Stratum server
       type: object
