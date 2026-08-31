@@ -14,6 +14,23 @@ import scala.util.{Failure, Success, Try}
 /** Miner Dictionary state and local data-box token at the synchronization seed height. */
 final case class MinerDictionarySeed(minerTree: MinerDictionary, dataBoxToken: Option[ErgoId])
 
+object MinerDictionaryBootstrap {
+  /**
+   * Walk segments allowed before a moving tip is reported as a failure. Each resume costs one box
+   * read plus the transforms that landed, so this bounds a dictionary registering faster than the
+   * client can read it without capping ordinary chain activity.
+   */
+  private[synchronization] final val MaxResumes = 16
+}
+
+/** Why a reconstructed tip did not match the live dictionary box. */
+private sealed trait VerifyFailure
+private object VerifyFailure {
+  /** The chain moved on while the walk ran. The walk can continue from where it stopped. */
+  final case class Advanced(liveBoxId: String) extends VerifyFailure
+  final case class Fatal(reason: String) extends VerifyFailure
+}
+
 /**
  * Rebuilds the Miner Dictionary by following its singleton box spend chain.
  *
@@ -30,24 +47,65 @@ final class MinerDictionaryBootstrap(nodeApi: NodeApi,
     val started = System.currentTimeMillis()
     // Start empty so a pre-registration seed cannot inherit later dictionary state.
     val replay = new BlockReducer.MinerDictionaryReplay(seedState(startState), protocol)
-    walk(replay, protocol.minerDictionaryGenesisId, seedHeight, applied = 0, seed = None) match {
+    converge(replay, protocol.minerDictionaryGenesisId, seedHeight, applied = 0, seed = None,
+      resumes = 0, started)
+  }
+
+  /**
+   * Walks to the tip, and on finding the chain moved on continues from the box already reached.
+   *
+   * Restarting from genesis instead makes the expected cost grow with the chain, so past the point
+   * where a walk takes longer than the gap between registrations it never finishes at all.
+   */
+  @tailrec
+  private def converge(replay: BlockReducer.MinerDictionaryReplay,
+                       boxId: String,
+                       seedHeight: Int,
+                       applied: Int,
+                       seed: Option[CommittedSyncState],
+                       resumes: Int,
+                       started: Long): Either[String, MinerDictionarySeed] =
+    walk(replay, boxId, seedHeight, applied, seed) match {
       case Left(reason) => Left(reason)
-      case Right(result) => verify(result).map { _ =>
-        val elapsed = System.currentTimeMillis() - started
-        val seed = MinerDictionarySeed(result.seed.minerTree, result.seed.dataBoxToken)
-        logger.info(s"Miner Dictionary bootstrap replayed ${result.applied} transform(s) in ${elapsed}ms; " +
-          s"${seed.minerTree.numMiners} miner(s) registered at height $seedHeight" +
-          seed.dataBoxToken.map(token => s"; this miner's data box is $token").getOrElse(""))
-        seed
+      case Right(result) => verify(result) match {
+        case Right(_) =>
+          val elapsed = System.currentTimeMillis() - started
+          // Every transform landed at or below the seed height, so the walk's end is also the seed.
+          val frozen = result.seed.getOrElse(replay.frozen)
+          val value = MinerDictionarySeed(frozen.minerTree, frozen.dataBoxToken)
+          val segments = if (resumes > 0) s" across ${resumes + 1} walk segment(s)" else ""
+          logger.info(s"Miner Dictionary bootstrap replayed ${result.applied} transform(s) in " +
+            s"${elapsed}ms$segments; ${value.minerTree.numMiners} miner(s) registered at height " +
+            s"$seedHeight" +
+            value.dataBoxToken.map(token => s"; this miner's data box is $token").getOrElse(""))
+          Right(value)
+
+        // The unresolved seed carries forward, so a segment that never reached seedHeight still
+        // freezes on the transform that crosses it rather than at the segment boundary.
+        case Left(VerifyFailure.Advanced(live)) if resumes < MinerDictionaryBootstrap.MaxResumes =>
+          logger.info(s"Miner Dictionary advanced to $live during bootstrap; continuing from " +
+            s"${result.tipBoxId} after ${result.applied} transform(s)")
+          converge(replay, result.tipBoxId, seedHeight, result.applied, result.seed,
+            resumes + 1, started)
+
+        case Left(VerifyFailure.Advanced(live)) =>
+          Left(s"dictionary advanced ${MinerDictionaryBootstrap.MaxResumes} times during bootstrap; " +
+            s"walked to ${result.tipBoxId}, chain holds $live")
+
+        case Left(VerifyFailure.Fatal(reason)) => Left(reason)
       }
     }
-  }
 
   /** Anchors the empty dictionary to the configured genesis box. */
   private def startState: MinerDictionary =
     MinerDictionary.initialState.copy(utxoId = protocol.minerDictionaryGenesisId)
 
-  private final case class WalkResult(seed: CommittedSyncState,
+  /**
+   * `seed` stays unresolved between segments. Resolving it per segment would both take a full
+   * dictionary copy each time and freeze the seed at the end of a segment that never reached
+   * `seedHeight`, which is a shorter dictionary than the height asked for.
+   */
+  private final case class WalkResult(seed: Option[CommittedSyncState],
                                       tip: CommittedSyncState,
                                       tipBoxId: String,
                                       applied: Int)
@@ -68,9 +126,7 @@ final class MinerDictionaryBootstrap(nodeApi: NodeApi,
       case Failure(ex) => Left(s"could not read dictionary box $boxId: ${message(ex)}")
       case Success(None) => Left(s"indexed node has no dictionary box $boxId")
       case Success(Some(box)) => box.spentTransactionId match {
-        case None =>
-          // Every transform landed at or below the seed height, so the walk's end is also the seed.
-          Right(WalkResult(seed.getOrElse(replay.frozen), replay.current, boxId, applied))
+        case None => Right(WalkResult(seed, replay.current, boxId, applied))
         // Checked here rather than before the read, so a chain of exactly the bound still terminates.
         case Some(_) if applied >= maxTransforms =>
           Left(s"Miner Dictionary history exceeds sync.minerDictionary.maxTransforms ($maxTransforms)")
@@ -107,14 +163,23 @@ final class MinerDictionaryBootstrap(nodeApi: NodeApi,
   private def seedState(tree: MinerDictionary): CommittedSyncState =
     CommittedSyncState(SyncCursor(0, "", ""), 0L, Map.empty, Map.empty, Map.empty, tree, None)
 
-  /** Verifies the reconstructed tip against the current unspent dictionary box and digest. */
-  private def verify(result: WalkResult): Either[String, Unit] =
-    liveDictionaryBox.flatMap { live =>
-      if (live.boxId != result.tipBoxId)
-        Left(s"dictionary advanced during bootstrap: walked to ${result.tipBoxId}, chain holds ${live.boxId}")
-      else liveDigest(live).flatMap { digest =>
-        if (java.util.Arrays.equals(digest, result.tip.minerTree.dictionary.digest)) Right(())
-        else Left("reconstructed dictionary digest does not match the live dictionary box")
+  /**
+   * Verifies the reconstructed tip against the current unspent dictionary box and digest.
+   *
+   * A tip that moved is separated from every other failure because it is the one the walk can
+   * continue from; the rest mean the reconstruction itself is wrong.
+   */
+  private def verify(result: WalkResult): Either[VerifyFailure, Unit] =
+    liveDictionaryBox match {
+      case Left(reason) => Left(VerifyFailure.Fatal(reason))
+      case Right(live) if live.boxId != result.tipBoxId =>
+        Left(VerifyFailure.Advanced(live.boxId))
+      case Right(live) => liveDigest(live) match {
+        case Left(reason) => Left(VerifyFailure.Fatal(reason))
+        case Right(digest) =>
+          if (java.util.Arrays.equals(digest, result.tip.minerTree.dictionary.digest)) Right(())
+          else Left(VerifyFailure.Fatal(
+            "reconstructed dictionary digest does not match the live dictionary box"))
       }
     }
 

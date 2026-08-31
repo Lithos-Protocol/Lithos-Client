@@ -37,8 +37,18 @@ object StateFrame {
                                           block: BlockInfo,
                                           tipHeight: Int,
                                           result: Try[Any]) extends OwnerCompletion
+  /** Result of a snapshot restore */
+  private sealed trait RestoreOutcome
+  private object RestoreOutcome {
+    final case class Restored(state: CommittedSyncState) extends RestoreOutcome
+    /** No usable generation exists. Only this may descend to a full re-seed. */
+    case object Absent extends RestoreOutcome
+    /** Storage or the node could not answer. Retry the same rung. */
+    final case class Deferred(reason: String) extends RestoreOutcome
+  }
+
   private final case class StartupState(incarnation: String,
-                                        result: Try[Option[CommittedSyncState]]) extends OwnerCompletion
+                                        result: Try[RestoreOutcome]) extends OwnerCompletion
   private final case class CursorsLoaded(incarnation: String,
                                          result: Try[Seq[SyncCursor]],
                                          heights: NodeHeights) extends OwnerCompletion
@@ -50,7 +60,7 @@ object StateFrame {
                                             tipHeight: Int) extends OwnerCompletion
   private final case class ResetFinished(incarnation: String, result: Try[Any]) extends OwnerCompletion
   private final case class RecoveryPrepared(incarnation: String,
-                                            result: Try[Option[CommittedSyncState]]) extends OwnerCompletion
+                                            result: Try[RestoreOutcome]) extends OwnerCompletion
   private final case class DictionaryPermitLoaded(incarnation: String, result: Try[Any])
   private final case class DictionaryRepaired(incarnation: String,
                                               atCursor: SyncCursor,
@@ -118,7 +128,10 @@ class StateFrame @Inject()(config: Configuration,
   private var inFlight = false
   // At the live tip rebuilds run beside polling. During catch-up, configured maintenance checkpoints
   // deliberately hold the producer so a long repair has one stable cursor at which it can install.
-  private var repairing = false
+  //
+  // Rollup and dictionary repair are gated separately.
+  private var rollupRepairing = false
+  private var dictionaryRepairing = false
   // Quarantine messages carry this identity so dictionary, live-tip, and checkpoint completions cannot
   // complete one another. A timed-out worker remains the only repair until it actually returns.
   private var activeRepairCycle = Option.empty[RepairCycle]
@@ -156,8 +169,23 @@ class StateFrame @Inject()(config: Configuration,
       try handlers(message)
       catch {
         case NonFatal(ex) =>
+          // Both repair gates are released only by the handlers that just failed, so an escaped
+          // exception would otherwise end every rebuild for the life of the process while polling
+          // carried on looking healthy.
+          abandonRepairs()
           failPoll(s"Unhandled failure processing ${message.getClass.getSimpleName}", ex)
       }
+  }
+
+  /** Releases both repair gates after an escaped exception; no handler can still do it. */
+  private def abandonRepairs(): Unit = {
+    cancelRepairTimeout()
+    rollupRepairing = false
+    activeRepairCycle = None
+    repairWalkInFlight = false
+    repairWalkTimedOut = false
+    dictionaryRepairing = false
+    lastDictionaryRepair = System.currentTimeMillis()
   }
 
   private val handlers: Receive = {
@@ -172,19 +200,26 @@ class StateFrame @Inject()(config: Configuration,
     case StartSynchronization => self ! Tick
     case CheckBlock => self ! Tick
     case Tick =>
-      if (active && !repairing) beginRepairs()
+      if (active) beginRepairs()
       if (active && !inFlight) {
         if (cursor.isDefined) beginPoll()
         else beginSeed()
       }
 
-    case StartupState(_, Success(saved)) =>
-      saved.foreach { state =>
-        cursor = Some(state.cursor)
-          nextHeight = state.cursor.height + 1
-      }
+    case StartupState(_, Success(RestoreOutcome.Restored(state))) =>
+      cursor = Some(state.cursor)
+      nextHeight = state.cursor.height + 1
       inFlight = false
       self ! Tick
+
+    // Re-seeding here would discard a retained snapshot and rescan from sync.startHeight because
+    // storage or the node was briefly unable to answer. Hold the rung and let the ticker retry.
+    case StartupState(_, Success(RestoreOutcome.Deferred(reason))) => deferStartup(reason)
+
+    case StartupState(_, Success(RestoreOutcome.Absent)) =>
+      // Seeding always produces state, so this is only reachable if that contract is broken.
+      failPoll("Startup produced no synchronization state",
+        new IllegalStateException("seeding returned no committed state"))
 
     case StartupState(_, Failure(ex)) => failPoll("Could not read startup sync state", ex)
 
@@ -307,12 +342,18 @@ class StateFrame @Inject()(config: Configuration,
       failPoll("Unexpected state reset response", new IllegalStateException(other.toString))
     case ResetFinished(_, Failure(ex)) => failPoll("State reset failed", ex)
 
-    case RecoveryPrepared(_, Success(Some(state))) =>
+    case RecoveryPrepared(_, Success(RestoreOutcome.Restored(state))) =>
       cursor = Some(state.cursor)
       nextHeight = state.cursor.height + 1
       inFlight = false
       self ! Tick
-    case RecoveryPrepared(_, Success(None)) => beginFullRescan()
+
+    // A full rescan clears the durable data-box token and rebuilds the whole dictionary, so it may
+    // only follow a snapshot search that actually completed.
+    case RecoveryPrepared(_, Success(RestoreOutcome.Deferred(reason))) =>
+      deferStartup(s"reorganization recovery is waiting: $reason")
+
+    case RecoveryPrepared(_, Success(RestoreOutcome.Absent)) => beginFullRescan()
     case RecoveryPrepared(_, Failure(ex)) => failPoll("Snapshot reorg recovery failed", ex)
 
     case DictionaryPermitLoaded(token, _) if token != incarnation => ()
@@ -465,9 +506,14 @@ class StateFrame @Inject()(config: Configuration,
       } else self ! Tick
     }
 
+  /**
+   * A maintenance checkpoint freezes the producer, so it stays suppressed while a dictionary walk
+   * runs: the two together would stop catch-up for the length of the walk. Live-tip quarantine
+   * repair is not suppressed, because it freezes nothing.
+   */
   private def maintenanceCheckpointDue(at: SyncCursor, tip: Int): Boolean =
-    quarantineCheckpoints && quarantineAttempts > 0 && !repairing && at.height < tip &&
-      committedSinceCheckpoint >= checkpointInterval
+    quarantineCheckpoints && quarantineAttempts > 0 && !rollupRepairing && !dictionaryRepairing &&
+      at.height < tip && committedSinceCheckpoint >= checkpointInterval
 
   /**
    * Keep the canonical producer occupied while one repair is selected, rebuilt, and published.
@@ -509,7 +555,7 @@ class StateFrame @Inject()(config: Configuration,
   private def startRepairCycle(maintenanceTip: Option[Int]): RepairCycle = {
     nextRepairCycleId += 1L
     val cycle = RepairCycle(incarnation, nextRepairCycleId, maintenanceTip)
-    repairing = true
+    rollupRepairing = true
     activeRepairCycle = Some(cycle)
     repairWalkInFlight = false
     repairWalkTimedOut = false
@@ -533,14 +579,20 @@ class StateFrame @Inject()(config: Configuration,
     if (activeRepairCycle.contains(cycle)) {
       val alreadyResumed = repairWalkTimedOut
       cancelRepairTimeout()
-      repairing = false
+      rollupRepairing = false
       activeRepairCycle = None
       repairWalkInFlight = false
       repairWalkTimedOut = false
       if (!alreadyResumed) resumeMaintenanceCheckpoint(cycle)
     }
 
-  private def completeDictionaryRepair(): Unit = repairing = false
+  /**
+   * The retry interval runs from when an attempt ended
+   */
+  private def completeDictionaryRepair(): Unit = {
+    dictionaryRepairing = false
+    lastDictionaryRepair = System.currentTimeMillis()
+  }
 
   private def beginPoll(): Unit = {
     inFlight = true
@@ -568,19 +620,32 @@ class StateFrame @Inject()(config: Configuration,
    * Get initial source for seed state. Checks committed state first in case
    * this is an actor restart.
    */
-  private def establishSeed(): Future[Option[CommittedSyncState]] =
+  private def establishSeed(): Future[RestoreOutcome] =
     (syncHandler ? GetCommittedState).flatMap {
       // The owner outlived this producer, so its state is ahead of any snapshot and restoring one
       // would discard everything committed since.
       case CommittedState(state) =>
         logger.info(s"Resuming from state the owner still holds at ${state.cursor.blockId}@" +
           s"${state.cursor.height} rather than restoring a snapshot")
-        Future.successful(Some(state))
+        Future.successful(RestoreOutcome.Restored(state))
       case _ => restoreSnapshot().flatMap {
-        case Some(state) => Future.successful(Some(state))
-        case None => seedFromMinerDictionary()
+        case restored: RestoreOutcome.Restored => Future.successful(restored)
+        case deferred: RestoreOutcome.Deferred => Future.successful(deferred)
+        case RestoreOutcome.Absent => seedFromMinerDictionary()
       }
     }
+
+  /**
+   * Holds the current recovery rung after an unanswered question. The ticker retries, and the stall
+   * counter escalates if it keeps happening, so no state is discarded to make progress.
+   */
+  private def deferStartup(reason: String): Unit = {
+    inFlight = false
+    val detail = s"Deferring synchronization startup: $reason"
+    logger.warn(detail)
+    recordStall(detail)
+    syncHandler ! MarkStale(detail)
+  }
 
   private def beginSeed(): Unit = {
     inFlight = true
@@ -591,20 +656,22 @@ class StateFrame @Inject()(config: Configuration,
   }
 
   /**
-   * The newest canonical snapshot, or `None` when none is. Used alone by reorg recovery, where `None`
-   * indicates a full rescan rather than to seed.
+   * The newest canonical snapshot, or why there is none.
    */
-  private def restoreSnapshot(): Future[Option[CommittedSyncState]] =
+  private def restoreSnapshot(): Future[RestoreOutcome] =
     (snapshotActor ? RestoreLatest).flatMap {
-      case SnapshotLoaded(Some(snapshot), _) =>
+      case SnapshotLoaded(Some(snapshot), _, _) =>
         (syncHandler ? RestoreCommittedState(snapshot.state, snapshot.recentCursors)).map {
-          case _: BlockCommitted => Some(snapshot.state)
+          case _: BlockCommitted => RestoreOutcome.Restored(snapshot.state)
           case rejected: BlockRejected => throw new IllegalStateException(rejected.reason)
           case other => throw new IllegalStateException(s"Unexpected snapshot restore response $other")
         }
-      case SnapshotLoaded(None, warning) =>
+      case SnapshotLoaded(None, warning, true) =>
+        Future.successful(RestoreOutcome.Deferred(
+          warning.getOrElse("the snapshot store could not be read")))
+      case SnapshotLoaded(None, warning, false) =>
         warning.foreach(logger.warn)
-        Future.successful(None)
+        Future.successful(RestoreOutcome.Absent)
       case other => Future.failed(new IllegalStateException(s"Unexpected snapshot response $other"))
     }
 
@@ -612,7 +679,7 @@ class StateFrame @Inject()(config: Configuration,
    * Seeds dictionary state from its indexed spend chain.
    * A bootstrap failure is stored on the seed while block and rollup sync remain available.
    */
-  private def seedFromMinerDictionary(): Future[Option[CommittedSyncState]] =
+  private def seedFromMinerDictionary(): Future[RestoreOutcome] =
     Future {
       if (!syncConfig.minerDictionaryBootstrap)
         Left("sync.minerDictionary.bootstrap is disabled, so the dictionary is not tracked")
@@ -633,7 +700,7 @@ class StateFrame @Inject()(config: Configuration,
           rebuilt.map(_.minerTree).getOrElse(lfsm.states.MinerDictionary.initialState),
           rebuilt.toOption.flatMap(_.dataBoxToken), rebuilt.left.toOption)
         (syncHandler ? RestoreCommittedState(seed, Vector(cursor))).map {
-          case _: BlockCommitted => Some(seed)
+          case _: BlockCommitted => RestoreOutcome.Restored(seed)
           case rejected: BlockRejected => throw new IllegalStateException(rejected.reason)
           case other => throw new IllegalStateException(s"Unexpected seed restore response $other")
         }
@@ -713,17 +780,17 @@ class StateFrame @Inject()(config: Configuration,
       System.currentTimeMillis() - lastDictionaryRepair >= repairInterval.toMillis
 
   /**
-   * Rebuilds faulted protocol state beside block production. The dictionary comes first because it
-   * gates registration; a quarantined rollup only costs its own payout.
+   * Rebuilds faulted protocol state beside block production, each entity on its own gate so a
+   * dictionary walk cannot hold up the rollup rebuild that recovers a payout.
    */
-  private def beginRepairs(): Unit =
-    if (dictionaryRepairDue) beginDictionaryRepair()
-    else if (quarantineAttempts > 0 && cursor.isDefined &&
+  private def beginRepairs(): Unit = {
+    if (!dictionaryRepairing && dictionaryRepairDue) beginDictionaryRepair()
+    if (!rollupRepairing && quarantineAttempts > 0 && cursor.isDefined &&
       utils.Globals.syncView.canonical.available) askForQuarantines()
+  }
 
   private def beginDictionaryRepair(): Unit = {
-    repairing = true
-    lastDictionaryRepair = System.currentTimeMillis()
+    dictionaryRepairing = true
     (syncHandler ? GetMinerDictionaryRepairPermit)
       .map(result => DictionaryPermitLoaded(incarnation, Success(result)))
       .recover { case ex => DictionaryPermitLoaded(incarnation, Failure(ex)) }

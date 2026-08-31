@@ -121,7 +121,7 @@ final class LevelDbStateSnapshotStore(store: KeyValueStore,
   private val invalidDictionaries = ConcurrentHashMap.newKeySet[String]()
 
   override def save(snapshot: SnapshotCheckpoint,
-                    maxEntryBytes: Int): Either[SnapshotError, Unit] = withWriteLock {
+                    maxEntryBytes: Int): Either[SnapshotError, Unit] = {
     val state = snapshot.metadata
     val base = generationPrefix ++ bytes(
       f"${state.cursor.height}%010d-${state.version}%020d-${state.cursor.blockId}")
@@ -133,7 +133,7 @@ final class LevelDbStateSnapshotStore(store: KeyValueStore,
       case DictionaryId.Miner => state.minerDictionary.dictionaryDigest
     }
 
-    val committed = for {
+    val committed = withWriteLock(for {
       _ <- if (snapshot.dictionaries.keySet == expectedIds) Right(()) else Left(Corrupt(
         "checkpoint dictionary sources do not exactly match its tracked metadata"))
       _ <- if (snapshot.dictionaries.forall { case (id, source) =>
@@ -148,10 +148,15 @@ final class LevelDbStateSnapshotStore(store: KeyValueStore,
       // The metadata and pointer are the only generation commit. All referenced blobs are complete.
       _ <- store.write(Seq(Put(base ++ MetaSuffix, meta), Put(currentKey, base)),
         WriteDurability.Synchronous).left.map(Storage)
-    } yield ()
+    } yield ())
     committed.map { _ =>
       // The pointer commit above is the durability boundary. Cleanup is best effort and retried by
       // every later save; reporting it as a failed checkpoint would retain an unnecessary journal.
+      //
+      // It runs after the write lock is released. Deciding what to delete means decoding every
+      // retained generation and scanning every blob key, and holding the exclusive lock across that
+      // added all of it to the window in which no dictionary can be materialized — including the
+      // reconstructions a canonical block is waiting on. Only the delete batches take the lock.
       pruneGenerations(base).left.foreach(error =>
         logger.warn(s"Checkpoint ${state.cursor.blockId}@${state.cursor.height} committed, but " +
           s"generation pruning failed: ${error.message}"))
@@ -351,17 +356,19 @@ final class LevelDbStateSnapshotStore(store: KeyValueStore,
 
   /** Keeps complete generation records; dictionaries are shared and collected separately. */
   private def pruneGenerations(current: Array[Byte]): Either[SnapshotError, Unit] =
-    store.scanKeys(generationPrefix).left.map(Storage).flatMap { keys =>
+    withReadLock(store.scanKeys(generationPrefix).left.map(Storage)).flatMap { keys =>
       val bases = keys.filter(endsWith(_, MetaSuffix)).map(_.dropRight(MetaSuffix.length))
       val keep = distinctKeys(bases.sortWith((left, right) => unsignedCompare(left, right) > 0)
         .take(retention) :+ current)
       val obsolete = keys.filterNot(key => keep.exists(base => startsWith(key, base)))
-      writeChunked(obsolete.map(Delete))
+      deleteExclusively(obsolete)
     }
 
-  /** Removes a content-addressed blob only when no retained generation metadata references it. */
+  /**
+   * Removes a content-addressed blob only when no retained generation metadata references it.
+   */
   private def collectUnreferencedDictionaries(): Either[SnapshotError, Unit] =
-    for {
+    withReadLock(for {
       generationEntries <- store.scanPrefix(generationPrefix).left.map(Storage)
       referenced <- generationEntries.filter(entry => endsWith(entry._1, MetaSuffix))
         .foldLeft[Either[SnapshotError, Set[String]]](Right(Set.empty)) {
@@ -372,11 +379,13 @@ final class LevelDbStateSnapshotStore(store: KeyValueStore,
           }
         }
       blobKeys <- store.scanKeys(dictionaryPrefix).left.map(Storage)
-      obsolete = blobKeys.filterNot { key =>
-        dictionaryDigestFromKey(key).exists(referenced.contains)
-      }
-      _ <- writeChunked(obsolete.map(Delete))
-    } yield ()
+    } yield blobKeys.filterNot { key =>
+      dictionaryDigestFromKey(key).exists(referenced.contains)
+    }).flatMap(deleteExclusively)
+
+  /** Deletions exclude readers; an empty set takes no lock at all. */
+  private def deleteExclusively(obsolete: Seq[Array[Byte]]): Either[SnapshotError, Unit] =
+    if (obsolete.isEmpty) Right(()) else withWriteLock(writeChunked(obsolete.map(Delete)))
 
   private def required(key: Array[Byte], absent: String): Either[SnapshotError, Array[Byte]] =
     store.get(key).left.map(Storage).flatMap {

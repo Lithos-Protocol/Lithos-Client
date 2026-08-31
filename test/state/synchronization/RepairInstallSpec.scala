@@ -4,12 +4,15 @@ import akka.actor.{ActorSystem, Props}
 import akka.testkit.{TestKit, TestProbe}
 import com.typesafe.config.ConfigFactory
 import lfsm.states.{MinerDictionary, PlasmaDictionary}
+import org.bouncycastle.util.encoders.Hex
 import org.scalatest.BeforeAndAfterAll
 import org.scalatest.flatspec.AnyFlatSpecLike
 import org.scalatest.matchers.should.Matchers
 import play.api.Configuration
 import state.messages.BlockInfo
 import state.messages.SyncMessages._
+import state.persistence.SnapshotDictionaryBase
+import state.persistence.StateSnapshotActor.{SnapshotCandidate, SnapshotSaveFailed}
 import support.{FakeNodeContext, ReducerFixtures, SyncFixtures}
 
 import scala.concurrent.duration._
@@ -43,6 +46,124 @@ class RepairInstallSpec extends TestKit(ActorSystem("repair-install"))
     state.minerDictionaryFault shouldBe empty
     state.minerTree.syncHeight shouldEqual seeded.cursor.height
     utils.Globals.syncView.minerDictionary.available shouldBe false // still catching up, not faulted
+  }
+
+  /**
+   * A dictionary walk takes minutes and blocks arrive every couple of minutes, so pinning its permit
+   * to the global state epoch meant any walk outlasting one block could never install — which, once
+   * the registration chain is long enough for a walk to exceed one block, is every walk.
+   *
+   * The rebuild is the dictionary as of the height it was built for, and no block in between touched
+   * the dictionary, so it is still exact at the cursor the client has since reached.
+   */
+  it should "install a rebuilt Miner Dictionary after ordinary blocks moved the cursor" in {
+    val (handler, _) = newHandler()
+    val requester = TestProbe()
+    val seeded = faultedSeed
+    requester.send(handler, RestoreCommittedState(seeded, Vector(seeded.cursor)))
+    requester.expectMsgType[BlockCommitted]
+
+    // Taken before the walk starts, exactly as the producer takes it.
+    val permit = minerPermit(requester, handler)
+
+    requester.send(handler, ApplyBlock(BlockInfo(SyncFixtures.id(startHeight), startHeight,
+      Seq.empty, seeded.cursor.blockId)))
+    val moved = requester.expectMsgType[BlockCommitted].cursor
+    moved.height shouldEqual startHeight
+
+    val rebuilt = MinerDictionary.initialState.copy(syncHeight = seeded.cursor.height)
+    requester.send(handler, RepairMinerDictionary(seeded.cursor, rebuilt, None, permit))
+    requester.expectMsgType[BlockCommitted]
+
+    requester.send(handler, GetCommittedState)
+    val state = requester.expectMsgType[CommittedState].state
+    state.minerDictionaryFault shouldBe empty
+    // Installed at the cursor the client is on now, not the one the walk was built for.
+    state.cursor shouldEqual moved
+  }
+
+  /**
+   * The relaxation above must still refuse a permit issued before dictionary state actually moved,
+   * or a stale rebuild could overwrite a newer one.
+   */
+  it should "refuse a rebuilt Miner Dictionary whose permit predates a dictionary change" in {
+    val (handler, _) = newHandler()
+    val requester = TestProbe()
+    val seeded = faultedSeed
+    requester.send(handler, RestoreCommittedState(seeded, Vector(seeded.cursor)))
+    requester.expectMsgType[BlockCommitted]
+
+    val stalePermit = minerPermit(requester, handler)
+    val currentPermit = minerPermit(requester, handler)
+    val rebuilt = MinerDictionary.initialState.copy(syncHeight = seeded.cursor.height)
+
+    requester.send(handler, RepairMinerDictionary(seeded.cursor, rebuilt, None, currentPermit))
+    requester.expectMsgType[BlockCommitted]
+
+    // That install moved the dictionary, which is exactly what the first permit was issued against.
+    requester.send(handler, RepairMinerDictionary(seeded.cursor, rebuilt, None, stalePermit))
+    requester.expectMsgType[BlockRejected].reason should
+      include("no longer names the exact committed state")
+  }
+
+  /**
+   * The dictionary override belongs to the cursor the repair was installed at, not the one it was
+   * rebuilt for.
+   *
+   * A rollback drops overrides above its target. Stamped with the rebuild cursor, an override
+   * survives a rollback that undoes the install itself — leaving the repaired dictionary as the
+   * reconstruction base for a boundary whose metadata still expects the pre-repair digest, which
+   * fails every checkpoint and materialization from it.
+   */
+  it should "drop a repaired dictionary override when a rollback undoes its install" in {
+    val (handler, snapshots) = newHandler(snapshotsEnabled = true, snapshotInterval = 2,
+      retryDelay = 200.millis)
+    val requester = TestProbe()
+    val seeded = faultedSeed
+    requester.send(handler, RestoreCommittedState(seeded, Vector(seeded.cursor)))
+    requester.expectMsgType[BlockCommitted]
+
+    def commit(height: Int): SyncCursor = {
+      requester.send(handler, ApplyBlock(BlockInfo(SyncFixtures.id(height), height, Seq.empty,
+        if (height == startHeight) seeded.cursor.blockId else SyncFixtures.id(height - 1))))
+      requester.expectMsgType[BlockCommitted].cursor
+    }
+
+    // The permit is taken before the walk, so the install lands two blocks above the rebuild cursor.
+    // That gap is what the override height has to follow.
+    val builtAt = commit(startHeight)
+    requester.send(handler, GetMinerDictionaryRepairPermit)
+    val permit = requester.expectMsgType[MinerDictionaryRepairPermit]
+    permit.committedCursor shouldEqual builtAt
+
+    val midpoint = commit(startHeight + 1)
+    val installedAt = commit(startHeight + 2)
+
+    // A distinct digest, or the repaired and pre-repair dictionaries would be indistinguishable.
+    val populated = PlasmaDictionary.empty()
+    populated.insert(SyncFixtures.plasmaEntries(1, 32): _*)
+    val rebuilt = MinerDictionary.initialState.copy(dictionary = populated, numMiners = 1)
+
+    requester.send(handler, RepairMinerDictionary(builtAt, rebuilt, None, permit.repairPermit))
+    requester.expectMsgType[BlockCommitted].cursor shouldEqual installedAt
+
+    // Fail the forced checkpoint so the override is still live across the rollback.
+    val forced = snapshots.expectMsgType[SnapshotCandidate]
+    snapshots.send(handler, SnapshotSaveFailed(forced.cursor, forced.checkpointToken, "held open"))
+
+    // Back below the install, so the repair no longer describes committed state at all.
+    requester.send(handler, RollbackTo(midpoint.blockId))
+    requester.expectMsgType[RollbackCompleted].cursor shouldEqual midpoint
+
+    // The boundary's metadata still carries the pre-repair digest, so a surviving override would
+    // hand the checkpoint a base that cannot produce it.
+    val retried = snapshots.expectMsgType[SnapshotCandidate](5.seconds)
+    val minerSource = retried.snapshot.dictionaries(DictionaryId.Miner)
+    minerSource.base match {
+      case SnapshotDictionaryBase.Materialized(dictionary) =>
+        Hex.toHexString(dictionary.digest) shouldEqual minerSource.expectedDigest
+      case _ => succeed
+    }
   }
 
   /**
@@ -259,7 +380,10 @@ class RepairInstallSpec extends TestKit(ActorSystem("repair-install"))
     requester.expectMsgType[MinerDictionaryRepairPermit].repairPermit
   }
 
-  private def newHandler(maxJournalBytes: Long = SyncHandler.MaxTransformJournalBytes) = {
+  private def newHandler(maxJournalBytes: Long = SyncHandler.MaxTransformJournalBytes,
+                         snapshotsEnabled: Boolean = false,
+                         snapshotInterval: Int = 90,
+                         retryDelay: FiniteDuration = SyncHandler.CheckpointRetryDelay) = {
     val snapshots = TestProbe()
     val (_, _, wallet) = FakeNodeContext(numAddresses = 1)
     val protocol = ReducerFixtures.protocol(rollupStartHeight = startHeight)
@@ -267,10 +391,12 @@ class RepairInstallSpec extends TestKit(ActorSystem("repair-install"))
     val config = Configuration(ConfigFactory.parseString(
       s"""sync.startHeight = $startHeight
          |sync.quarantine.repairAttempts = 3
-         |sync.snapshots.enabled = false
+         |sync.snapshots.enabled = $snapshotsEnabled
+         |sync.snapshots.intervalBlocks = $snapshotInterval
          |""".stripMargin))
     (system.actorOf(Props(new SyncHandler(config, protocol, snapshots.ref) {
       override protected def maxTransformJournalBytes: Long = maxJournalBytes
+      override protected def checkpointRetryDelay: FiniteDuration = retryDelay
     })), snapshots)
   }
 }
