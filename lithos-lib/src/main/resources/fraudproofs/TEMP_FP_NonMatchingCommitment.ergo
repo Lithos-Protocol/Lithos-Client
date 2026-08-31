@@ -1,0 +1,116 @@
+{
+  // FP_NonMatchingCommitment
+  // Value: unspecified
+  // Proves that a submitted NISP score differs from the commitment effective before its block.
+
+  // REGISTERS
+  // None
+  val evalBox       = INPUTS(0)
+  val nispTree      = evalBox.R4[AvlTree].get
+  val currentMiners = evalBox.R5[Int].get
+  val totalScore    = evalBox.R6[BigInt].get
+  val currentPeriod = evalBox.R7[Long].get
+  val currentBlock  = evalBox.R8[Long].get
+
+  // NEXT VALUES
+  val nextUTXO   = OUTPUTS(0)
+  val nextTree   = nextUTXO.R4[AvlTree].get
+  val nextMiners = nextUTXO.R5[Int].get
+  val nextScore  = nextUTXO.R6[BigInt].get
+  val nextPeriod = nextUTXO.R7[Long].get
+  val nextBlock  = nextUTXO.R8[Long].get
+
+  // DATA INPUTS
+  // dataInputs(0): FP_CONTROL, authenticated by Evaluation
+  // dataInputs(1): MinerDictionary, authenticated by its singleton NFT
+  // dataInputs(2): current MinerData box carrying the registered credential unit
+  val minerDictBox = CONTEXT.dataInputs(1)
+  val minerDataBox = CONTEXT.dataInputs(2)
+
+  // CONTEXT VARS
+  // CTX_MINER_BYTES(0): accused miner hash
+  // CTX_LOOKUP_PROOF(1): NISP lookup proof
+  // CTX_REMOVE_PROOF(2): NISP removal proof
+  // CTX_MD_LOOKUP_PROOF(3): MinerDictionary lookup proof, also consumed by Evaluation
+  val CTX_MINER_BYTES = getVarFromInput[Coll[Byte]](1, 0).getOrElse(Coll(0.toByte))
+  val CTX_LOOKUP_PROOF = getVarFromInput[Coll[Byte]](1, 1).getOrElse(Coll(0.toByte))
+  val CTX_REMOVE_PROOF = getVarFromInput[Coll[Byte]](1, 2).getOrElse(Coll(0.toByte))
+  val CTX_MD_LOOKUP_PROOF = getVarFromInput[Coll[Byte]](1, 3).getOrElse(Coll(0.toByte))
+
+  // CONSTANTS
+  // CONST_MD_ID: MinerDictionary singleton NFT id
+  val CONST_SCORE_SIZE = 8
+  val CONST_ENTRY_SIZE = 49
+
+  // ASSUMPTIONS - statements which can be assumed to be true due to other contracts enforcing them
+  // MinerData stores effective heights, not publication heights. Registration and every update require
+  // effectiveHeight >= HEIGHT + 160, so a commitment governing currentBlock existed before mining began.
+  // Updates may only be published 720 blocks after the newest commitment took effect. Combined with
+  // the 160-block notice, effective commitments are at least 880 blocks apart, so two slots retain the
+  // commitment needed by every live rollup.
+  // MinerDictionary keeps an exiting entry for 880 blocks and its three-year expiry predates storage rent.
+  //
+  // DELIBERATE OMISSIONS - conditions left out on purpose
+  // MinerData's proposition hash is not needed here: the registered credential unit cannot leave that
+  // contract, and its R4/R5 register types distinguish it from MinerBond.
+
+  val minerNISP = nispTree.get(CTX_MINER_BYTES, CTX_LOOKUP_PROOF).get
+  val score = byteArrayToLong(minerNISP.slice(0, CONST_SCORE_SIZE))
+
+  val minerDataTree = minerDictBox.R4[AvlTree].get
+  val entryOpt = minerDataTree.get(CTX_MINER_BYTES, CTX_MD_LOOKUP_PROOF)
+  val entry = entryOpt.getOrElse(Coll(0.toByte))
+  val credentialId = entry.slice(0, 32)
+  val validUntil = {
+    if(entry.size == CONST_ENTRY_SIZE)
+      byteArrayToLong(entry.slice(32, 40))
+    else
+      -1L
+  }
+  val dataCredential = minerDataBox.tokens.getOrElse(0, (Coll(0.toByte), 0L))
+  val commitments = minerDataBox.R4[Coll[(Int, Long)]].get
+  val minerHash = minerDataBox.R5[Coll[Byte]].get
+
+  val authenticDictionary = allOf(Coll(
+    minerDictBox.tokens.getOrElse(0, (Coll(0.toByte), 0L))._1 == CONST_MD_ID,
+    entryOpt.isDefined,
+    entry.size == CONST_ENTRY_SIZE,
+    validUntil >= currentBlock
+  ))
+  val authenticDataBox = allOf(Coll(
+    dataCredential._1 == credentialId,
+    dataCredential._2 == 1L,
+    minerHash == CTX_MINER_BYTES,
+    commitments.size == 1 || commitments.size == 2
+  ))
+
+  val committedScore = {
+    if(commitments(0)._1.toLong <= currentBlock){
+      commitments(0)._2
+    }else if(commitments.size == 2 && commitments(1)._1.toLong <= currentBlock){
+      commitments(1)._2
+    }else{
+      -1L
+    }
+  }
+  val fraudExists = allOf(Coll(
+    authenticDictionary,
+    authenticDataBox,
+    score != committedScore
+  ))
+  val minerRemoved = {
+    val removeTree = nispTree.remove(Coll(CTX_MINER_BYTES), CTX_REMOVE_PROOF).get
+    removeTree.digest == nextTree.digest
+  }
+  val changedRegisters = allOf(Coll(
+    // Evaluation centrally computes and pays bondForScore(score).
+    nextUTXO.value < evalBox.value,
+    minerRemoved,
+    nextMiners == currentMiners - 1,
+    nextScore == totalScore - score.toBigInt,
+    nextPeriod == currentPeriod,
+    nextBlock == currentBlock
+  ))
+
+  sigmaProp(fraudExists && changedRegisters)
+}

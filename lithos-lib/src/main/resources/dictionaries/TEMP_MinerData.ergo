@@ -1,0 +1,221 @@
+{
+  // MinerData Contract
+  // Value: storage reserve plus any future miner balance
+  // Holds the miner's delayed difficulty commitments, identity and bounded extension bytes.
+
+  // REGISTERS
+  // R4: commitments - one or two (effectiveHeight, score) pairs, newest first
+  // R5: minerHash - blake2b256 of the miner's proposition bytes
+  // R6: extensions - versioned application bytes, bounded so this box cannot grow without limit
+  val commitments = SELF.R4[Coll[(Int, Long)]].get
+  val minerHash    = SELF.R5[Coll[Byte]].get
+  val extensions   = SELF.R6[Coll[Byte]].get
+  val credential   = SELF.tokens.getOrElse(0, (Coll(0.toByte), 0L))
+
+  // CONSTANTS
+  // CONST_MIN_DATA_BOX_AMNT: ERG reserve which cannot be withdrawn
+  // CONST_NISP_WINDOW: blocks between publishing a commitment and its effective height
+  // CONST_ROLLUP_LIFETIME: holding plus evaluation lifetime, 720 blocks
+  // CONST_MD_ID: MinerDictionary singleton NFT id
+  val CONST_MAX_EXT_SIZE = 512
+
+  // CONTEXT VARS
+  // CTX_OP(0): 0 change commitment, 1 change extensions, 2 deposit, 3 withdraw,
+  //            4 dictionary renewal, 5 dictionary final exit
+  val CTX_OP = getVar[Byte](0).getOrElse((-1).toByte)
+
+  val validIdentity = minerHash.size == 32
+  val validExtensions = extensions.size <= CONST_MAX_EXT_SIZE
+  val validCommitments = commitments.size == 1 || commitments.size == 2
+  val validCredential = credential._1.size == 32 && credential._2 == 1L
+  val boundedRegisters = SELF.R7[Coll[Byte]].isEmpty
+
+  // ASSUMPTIONS - statements which can be assumed to be true due to other contracts enforcing them
+  // during creation of this UTXO
+  // MinerDictionary mints exactly two units of one credential id: one into this box and one into
+  // MinerBond. It also pins this script, the identity, the first commitment and the register bound.
+  // MinerDictionary retains an exiting entry for the full withdrawal delay, so a pending rollup can
+  // still authenticate this box until every challenge window has ended.
+  // A future payout contract may place this box first and use the permissionless deposit path.
+  //
+  // DELIBERATE OMISSIONS - conditions left out on purpose
+  // Deposit and signed withdrawal do not constrain non-credential assets. That is the extension point
+  // for future ERG and token balances; Ergo's transaction-level conservation still applies.
+
+  if(CTX_OP == 0.toByte){
+    // Spending Path 1: The miner publishes the next delayed difficulty commitment
+    val CTX_SIGNER = getVar[SigmaProp](1).get
+    val nextUTXO = OUTPUTS(0)
+    val nextCommitments = nextUTXO.R4[Coll[(Int, Long)]].get
+
+    val authenticMiner = blake2b256(CTX_SIGNER.propBytes) == minerHash
+    val onlyOne = SELF.id == INPUTS(0).id
+    val validUTXO = nextUTXO.propositionBytes == SELF.propositionBytes
+    val stateConserved = allOf(Coll(
+      nextUTXO.value == SELF.value,
+      nextUTXO.tokens == SELF.tokens,
+      nextUTXO.R5[Coll[Byte]].get == minerHash,
+      nextUTXO.R6[Coll[Byte]].get == extensions,
+      nextUTXO.R7[Coll[Byte]].isEmpty
+    ))
+    val correctCommit = {
+      if(validCommitments){
+        allOf(Coll(
+          nextCommitments.size == 2,
+          nextCommitments(1) == commitments(0),
+          HEIGHT.toLong >= commitments(0)._1.toLong + CONST_ROLLUP_LIFETIME,
+          nextCommitments(0)._1.toLong >= HEIGHT.toLong + CONST_NISP_WINDOW,
+          nextCommitments(0)._2 > 0L
+        ))
+      }else{
+        false
+      }
+    }
+    val statements = allOf(Coll(
+      authenticMiner,
+      onlyOne,
+      validIdentity,
+      validExtensions,
+      validCredential,
+      boundedRegisters,
+      validUTXO,
+      stateConserved,
+      correctCommit
+    ))
+    sigmaProp(statements) && CTX_SIGNER
+
+  }else if(CTX_OP == 1.toByte){
+    // Spending Path 2: The miner changes bounded extension bytes without changing commitments
+    val CTX_SIGNER = getVar[SigmaProp](1).get
+    val nextUTXO = OUTPUTS(0)
+    val nextExtensions = nextUTXO.R6[Coll[Byte]].get
+    val authenticMiner = blake2b256(CTX_SIGNER.propBytes) == minerHash
+    val onlyOne = SELF.id == INPUTS(0).id
+    val validUTXO = nextUTXO.propositionBytes == SELF.propositionBytes
+    val stateConserved = allOf(Coll(
+      nextUTXO.value == SELF.value,
+      nextUTXO.tokens == SELF.tokens,
+      nextUTXO.R4[Coll[(Int, Long)]].get == commitments,
+      nextUTXO.R5[Coll[Byte]].get == minerHash,
+      nextExtensions.size <= CONST_MAX_EXT_SIZE,
+      nextUTXO.R7[Coll[Byte]].isEmpty
+    ))
+    val statements = allOf(Coll(
+      authenticMiner,
+      onlyOne,
+      validIdentity,
+      validCommitments,
+      validCredential,
+      boundedRegisters,
+      validUTXO,
+      stateConserved
+    ))
+    sigmaProp(statements) && CTX_SIGNER
+
+  }else if(CTX_OP == 2.toByte){
+    // Spending Path 3: Anyone adds ERG or tokens while preserving the authenticated data state
+    val nextUTXO = OUTPUTS(0)
+    val nextCredential = nextUTXO.tokens.getOrElse(0, (Coll(0.toByte), 0L))
+    val onlyOne = SELF.id == INPUTS(0).id
+    val validUTXO = nextUTXO.propositionBytes == SELF.propositionBytes
+    val stateConserved = allOf(Coll(
+      nextUTXO.value >= SELF.value,
+      nextCredential == credential,
+      nextUTXO.R4[Coll[(Int, Long)]].get == commitments,
+      nextUTXO.R5[Coll[Byte]].get == minerHash,
+      nextUTXO.R6[Coll[Byte]].get == extensions,
+      nextUTXO.R7[Coll[Byte]].isEmpty
+    ))
+    val statements = allOf(Coll(
+      onlyOne,
+      validIdentity,
+      validCommitments,
+      validExtensions,
+      validCredential,
+      boundedRegisters,
+      validUTXO,
+      stateConserved
+    ))
+    sigmaProp(statements)
+
+  }else if(CTX_OP == 3.toByte){
+    // Spending Path 4: The miner withdraws any balance above the reserve
+    val CTX_SIGNER = getVar[SigmaProp](1).get
+    val nextUTXO = OUTPUTS(0)
+    val nextCredential = nextUTXO.tokens.getOrElse(0, (Coll(0.toByte), 0L))
+    val authenticMiner = blake2b256(CTX_SIGNER.propBytes) == minerHash
+    val onlyOne = SELF.id == INPUTS(0).id
+    val validUTXO = nextUTXO.propositionBytes == SELF.propositionBytes
+    val stateConserved = allOf(Coll(
+      nextUTXO.value >= CONST_MIN_DATA_BOX_AMNT,
+      nextCredential == credential,
+      nextUTXO.R4[Coll[(Int, Long)]].get == commitments,
+      nextUTXO.R5[Coll[Byte]].get == minerHash,
+      nextUTXO.R6[Coll[Byte]].get == extensions,
+      nextUTXO.R7[Coll[Byte]].isEmpty
+    ))
+    val statements = allOf(Coll(
+      authenticMiner,
+      onlyOne,
+      validIdentity,
+      validCommitments,
+      validExtensions,
+      validCredential,
+      boundedRegisters,
+      validUTXO,
+      stateConserved
+    ))
+    sigmaProp(statements) && CTX_SIGNER
+
+  }else if(CTX_OP == 4.toByte){
+    // Spending Path 5: MinerDictionary renews this box and resets its storage-rent age
+    val CTX_SIGNER = getVar[SigmaProp](1).get
+    val nextUTXO = OUTPUTS(1)
+    val authenticDictionary = INPUTS(0).tokens.getOrElse(0, (Coll(0.toByte), 0L))._1 == CONST_MD_ID
+    val authenticMiner = blake2b256(CTX_SIGNER.propBytes) == minerHash
+    val correctPosition = INPUTS.size >= 3 && SELF.id == INPUTS(1).id
+    val stateConserved = allOf(Coll(
+      nextUTXO.propositionBytes == SELF.propositionBytes,
+      nextUTXO.value == SELF.value,
+      nextUTXO.tokens == SELF.tokens,
+      nextUTXO.R4[Coll[(Int, Long)]].get == commitments,
+      nextUTXO.R5[Coll[Byte]].get == minerHash,
+      nextUTXO.R6[Coll[Byte]].get == extensions,
+      nextUTXO.R7[Coll[Byte]].isEmpty,
+      nextUTXO.creationInfo._1 == HEIGHT
+    ))
+    val statements = allOf(Coll(
+      authenticDictionary,
+      authenticMiner,
+      correctPosition,
+      validIdentity,
+      validCommitments,
+      validExtensions,
+      validCredential,
+      boundedRegisters,
+      stateConserved
+    ))
+    sigmaProp(statements) && CTX_SIGNER
+
+  }else if(CTX_OP == 5.toByte){
+    // Spending Path 6: MinerDictionary completes a delayed exit and burns the credential
+    val CTX_SIGNER = getVar[SigmaProp](1).get
+    val authenticDictionary = INPUTS(0).tokens.getOrElse(0, (Coll(0.toByte), 0L))._1 == CONST_MD_ID
+    val authenticMiner = blake2b256(CTX_SIGNER.propBytes) == minerHash
+    val correctPosition = INPUTS.size >= 3 && SELF.id == INPUTS(1).id
+    val statements = allOf(Coll(
+      authenticDictionary,
+      authenticMiner,
+      correctPosition,
+      validIdentity,
+      validCommitments,
+      validExtensions,
+      validCredential,
+      boundedRegisters
+    ))
+    sigmaProp(statements) && CTX_SIGNER
+
+  }else{
+    sigmaProp(false)
+  }
+}

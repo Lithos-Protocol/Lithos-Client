@@ -1,0 +1,182 @@
+{
+  // FP_InvalidDiff
+  // Value: unspecified (0.001 ERG)
+  // Proves fraud by showing that miner submitted a share which does not reach the super share threshold
+
+  // REGISTERS
+  // None
+
+  val evalBox:       Box     = INPUTS(0)
+  val nispTree:      AvlTree = evalBox.R4[AvlTree].get
+  val currentMiners: Int     = evalBox.R5[Int].get
+  val totalScore:    BigInt  = evalBox.R6[BigInt].get
+  val currentPeriod: Long    = evalBox.R7[Long].get
+  val currentBlock:  Long    = evalBox.R8[Long].get
+
+  // NEXT VALUES
+  val nextUTXO   = OUTPUTS(0)
+  val nextTree   = nextUTXO.R4[AvlTree].get
+  val nextMiners = nextUTXO.R5[Int].get
+  val nextScore  = nextUTXO.R6[BigInt].get
+  val nextPeriod = nextUTXO.R7[Long].get
+  val nextBlock  = nextUTXO.R8[Long].get
+
+  // CONTEXT VARS
+  // Context vars set on input 1 of tx
+  // CTX_MINER_BYTES(0) - Hashed PropBytes of miner who committed fraud
+  // CTX_LOOKUP_PROOF(1) - Lookup proof for miner
+  // CTX_REMOVE_PROOF(2) - Removal proof for miner
+  val CTX_MINER_BYTES      = getVarFromInput[Coll[Byte]](1, 0).getOrElse(Coll(0.toByte))
+  val CTX_LOOKUP_PROOF     = getVarFromInput[Coll[Byte]](1, 1).getOrElse(Coll(0.toByte))
+  val CTX_REMOVE_PROOF     = getVarFromInput[Coll[Byte]](1, 2).getOrElse(Coll(0.toByte))
+
+  // ASSUMPTIONS
+  // Evaluation authenticated this script through FP_CONTROL and enforces the exact R9 decrement,
+  // ERG value reduction and prover payment for the removed score. This proof is responsible only for
+  // the fraud predicate, AVL removal, miner count, score, period and block-height transition.
+  // CONSTANTS
+  // Constant sizes for various parts of NISPs, along with LFSM constants like TARGET_MAX and NISP_COEFFICIENT
+  val CONST_HEADER_SIZE       = 220
+  val CONST_PREHEADER_SIZE    = 179
+
+  // For header invariants explanation, please view InvalidFormat Proof
+  val CONST_INVARIANT_PREFIX  = 130
+  val CONST_INVARIANT_MID     = 36
+
+  // No Invariant suffix here because we use pre-header
+  val CONST_PREHEADER_END     = 4 // Only includes votes and unparsedBytesSize
+
+  val CONST_POW_SOLUTION_SIZE = 41 // minerPK GroupElement and nonce
+
+  val CONST_SCORE_SIZE        = 8
+  val CONST_LEVEL_SIZE        = 33
+  val CONST_TARGET_MAX_LITHOS = unsignedBigInt("115792089237316195423570985008687907853269984665640564039457584007913129639935")
+  val CONST_NISP_COEFFICIENT  = 10000
+  val CONST_N_SIZE            = 4
+  val CONST_Y_COORD_SIZE      = 32
+  // Helper Methods
+
+  def convertTauOrScore(dividend: UnsignedBigInt): UnsignedBigInt = {
+    CONST_TARGET_MAX_LITHOS / dividend
+  }
+
+  def getScore(nispBytes: Coll[Byte]): Long = {
+    byteArrayToLong(nispBytes.slice(0,CONST_SCORE_SIZE))
+  }
+
+  def getTau(nispBytes: Coll[Byte]): UnsignedBigInt = {
+    convertTauOrScore(getScore(nispBytes).toBigInt.toUnsigned)
+  }
+
+  // We assume vlq encoding is correct already due to InvalidFormat Proof so no additional checks here
+  def parseVLQSize(vlqBytes: Coll[Byte]): (Int, Boolean) = {
+    vlqBytes.fold((0, false), {
+      (a: (Int, Boolean), b: Byte) =>
+        if(a._2){
+          a
+        }else{
+          val continue = b < 0 // If byte is negative, most-signficant bit is set to 1
+          (a._1 + 1, !continue)
+        }
+    })
+  }
+
+  def getPreHeaderSize(shareBytes: Coll[Byte]) = {
+    // Build VLQ sizes to determine preheader size
+    val timestampBytes = shareBytes.slice(
+      CONST_N_SIZE + CONST_INVARIANT_PREFIX,
+      CONST_N_SIZE + CONST_INVARIANT_PREFIX + 11 // 11 byte buffer to read long, not all used necessarily
+    )
+    val timestampSize = parseVLQSize(timestampBytes)
+
+    val heightBytes = shareBytes.slice(
+      CONST_N_SIZE + CONST_INVARIANT_PREFIX + timestampSize._1 + CONST_INVARIANT_MID,
+      CONST_N_SIZE + CONST_INVARIANT_PREFIX + timestampSize._1 + CONST_INVARIANT_MID + 7 // 7 byte buffer to read int, not all used necessarily
+    )
+    val heightSize = parseVLQSize(heightBytes)
+
+    CONST_INVARIANT_PREFIX + timestampSize._1 + CONST_INVARIANT_MID + heightSize._1 + CONST_PREHEADER_END
+  }
+
+  def getSuperShares(nispBytes: Coll[Byte]): Coll[Coll[Byte]] = {
+    val shareSetBytes = nispBytes.slice(CONST_SCORE_SIZE, nispBytes.size)
+
+    // Iterate 10 times for 10 shares.
+    // No index out of bounds checks needed here, due to InvalidFormatProof
+    val iters = Coll(0,1,2,3,4,5,6,7,8,9)
+    val shares = iters.fold((Coll[Coll[Byte]](), 0), {
+      (a: (Coll[Coll[Byte]], Int), b: Int) =>
+        val preHeaderSize = getPreHeaderSize(shareSetBytes.slice(a._2, shareSetBytes.size))
+        val headerSize = preHeaderSize + CONST_POW_SOLUTION_SIZE
+        val txProofSize = fromBigEndianBytes[Short](
+          shareSetBytes.slice(
+            a._2 + CONST_N_SIZE + headerSize,
+            a._2 + CONST_N_SIZE + headerSize + 2
+          )
+        )
+        val numLevels: Byte = shareSetBytes(a._2 + CONST_N_SIZE + headerSize + 2)
+        val totalLevels = numLevels.toInt * CONST_LEVEL_SIZE
+        val end = a._2 + CONST_N_SIZE + headerSize + 3 + txProofSize + totalLevels + CONST_Y_COORD_SIZE
+        (a._1.append(Coll(shareSetBytes.slice(a._2, end))), end)
+    })
+    shares._1
+  }
+
+  def getHeader(shareBytes: Coll[Byte]): Header = {
+    val headerSize = getPreHeaderSize(shareBytes) + CONST_POW_SOLUTION_SIZE
+    deserializeTo[Header](shareBytes.slice(CONST_N_SIZE, CONST_N_SIZE + headerSize))
+  }
+  // Get bytes of pre-header, then hash it to create msg used in PoW
+  def getMsg(shareBytes: Coll[Byte]): Coll[Byte] = {
+    val preHeaderSize = getPreHeaderSize(shareBytes)
+    blake2b256(shareBytes.slice(CONST_N_SIZE, CONST_N_SIZE + preHeaderSize))
+  }
+
+  def getN(shareBytes: Coll[Byte]): Int = {
+    fromBigEndianBytes[Int](shareBytes.slice(0, CONST_N_SIZE))
+  }
+
+  def getHeightAndNonce(shareBytes: Coll[Byte]): (Coll[Byte], Coll[Byte]) = {
+    val header: Header = getHeader(shareBytes)
+    (header.powNonce, longToByteArray(header.height.toLong).slice(4, 8))
+  }
+  // Evaluation
+  val minerNISP = nispTree.get(CTX_MINER_BYTES, CTX_LOOKUP_PROOF).get
+  val minerTau = getTau(minerNISP)
+  val minerShares = getSuperShares(minerNISP)
+  val shareInfo: Coll[(Int, (Coll[Byte], (Coll[Byte], Coll[Byte])))] = minerShares.map{
+    (x: Coll[Byte]) =>
+      (getN(x), (getMsg(x), getHeightAndNonce(x)))
+  }
+  val superShareThreshold = minerTau / CONST_NISP_COEFFICIENT
+  val shareTaus: Coll[UnsignedBigInt] = shareInfo.map{
+    // N: Int, msg: Coll[Byte], nonce: Coll[Byte], height: Coll[Byte]
+    (x: (Int, (Coll[Byte], (Coll[Byte], Coll[Byte]))) ) =>
+      powHit(32, x._2._1, x._2._2._1, x._2._2._2, x._1)
+  }
+  // There exists some share for which the miner did not reach the super share threshold
+  val fraudExists = shareTaus.exists{
+    (x: UnsignedBigInt) =>
+      x > superShareThreshold
+  }
+  val score: Long = getScore(minerNISP)
+  val minerRemoved = {
+    val removeTree = nispTree.remove(Coll(CTX_MINER_BYTES), CTX_REMOVE_PROOF).get
+    removeTree.digest == nextTree.digest
+  }
+
+  val changedRegisters = allOf(
+    Coll(
+      // Evaluation centrally computes and pays bondForScore(score).
+      nextUTXO.value  < evalBox.value,
+      minerRemoved,
+      nextMiners      == currentMiners - 1,
+      nextScore       == totalScore - score,
+      nextPeriod      == currentPeriod,
+      nextBlock       == currentBlock
+    )
+  )
+
+  sigmaProp(fraudExists && changedRegisters)
+
+}
