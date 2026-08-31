@@ -68,11 +68,14 @@ object SyncProductionBudgetWorker {
         val transactions = Vector.tabulate(count) { index =>
           def payload(character: Char): String = if (payloadBytes == 0) "" else
             f"$index%08x" + (character.toString * math.max(0, payloadBytes - 8))
-          val proofPayload = payload('p')
+          // Weight carried in the context extension rather than the spending proof: that is where a
+          // real NISP rides, and the proof bytes are no longer retained at all.
+          val extensionPayload =
+            if (payloadBytes == 0) Map.empty[String, String] else Map("1" -> payload('p'))
           val registerPayload = payload('r')
           val id = SyncFixtures.id(2100000 + index)
           BlockTx(id,
-            Seq(TxInput(ids(index), Some(InputSpendingProof(proofPayload, Map.empty)))), Seq.empty,
+            Seq(TxInput(ids(index), Some(InputSpendingProof(extensionPayload)))), Seq.empty,
             Seq(TxOutput(ids(index + 1), 1000000L, "", Seq(registerPayload), Seq.empty,
               id, 100, 0)))
         }

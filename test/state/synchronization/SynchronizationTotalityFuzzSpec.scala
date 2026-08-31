@@ -120,7 +120,6 @@ class SynchronizationTotalityFuzzSpec extends AnyFlatSpec with Matchers {
 
     (1 to 500).foreach { iteration =>
       val proof = if (random.nextBoolean()) None else Some(InputSpendingProof(
-        random.alphanumeric.take(random.nextInt(80)).mkString,
         (0 until random.nextInt(8)).map { _ =>
           random.nextInt(8).toString -> contextValues(random.nextInt(contextValues.size))
         }.toMap))

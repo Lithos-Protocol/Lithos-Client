@@ -1,6 +1,6 @@
 package state.synchronization
 
-import lfsm.states.{AuthenticatedDictionary, AuthenticatedDictionaryView, MinerDictionaryMetadata, PlasmaDictionary, RollupMetadata}
+import lfsm.states.{AuthenticatedDictionary, AuthenticatedDictionaryView, MinerDictionaryMetadata, RollupMetadata}
 import org.bouncycastle.util.encoders.Hex
 import org.ergoplatform.sdk.ErgoId
 import state.messages.SyncMessages.SyncCursor
@@ -23,6 +23,10 @@ object DictionaryId {
 /** An owned, replayable authenticated-map mutation. Every byte array is copied at construction. */
 sealed trait DictionaryOperation {
   def transactionId: String
+
+  /**
+   * Serialized payload size, for measurement only. Computed on demand.
+   */
   def estimatedBytes: Long
   def accountedBytes: Long
   def applyTo(dictionary: AuthenticatedDictionary): Unit
@@ -34,7 +38,7 @@ object DictionaryOperation {
     extends DictionaryOperation {
     def entries: Vector[(Array[Byte], Array[Byte])] =
       ownedEntries.map { case (key, value) => key.clone() -> value.clone() }
-    override val estimatedBytes: Long =
+    override def estimatedBytes: Long =
       ownedEntries.foldLeft(0L) { case (size, (key, value)) => size + key.length + value.length }
     override val accountedBytes: Long = ownedEntries.foldLeft(
       JournalAccounting.add(96L, JournalAccounting.string(transactionId))) {
@@ -53,7 +57,7 @@ object DictionaryOperation {
   final class Delete private (val transactionId: String, private val ownedKeys: Vector[Array[Byte]])
     extends DictionaryOperation {
     def keys: Vector[Array[Byte]] = ownedKeys.map(_.clone())
-    override val estimatedBytes: Long = ownedKeys.foldLeft(0L)(_ + _.length)
+    override def estimatedBytes: Long = ownedKeys.foldLeft(0L)(_ + _.length)
     override val accountedBytes: Long = ownedKeys.foldLeft(
       JournalAccounting.add(96L, JournalAccounting.string(transactionId))) { (size, key) =>
       JournalAccounting.add(size, 40L, key.length.toLong)
@@ -74,7 +78,7 @@ final case class DictionaryTransform(dictionaryId: DictionaryId,
                                      afterDigest: String) {
   require(operations.nonEmpty, "A dictionary transform must contain at least one operation")
 
-  val estimatedBytes: Long = operations.foldLeft(0L)(_ + _.estimatedBytes)
+  def estimatedBytes: Long = operations.foldLeft(0L)(_ + _.estimatedBytes)
   val accountedBytes: Long = operations.foldLeft(JournalAccounting.add(160L,
     JournalAccounting.string(dictionaryId.value), JournalAccounting.string(beforeDigest),
     JournalAccounting.string(afterDigest))) { (size, operation) =>
@@ -140,7 +144,7 @@ final case class TransformJournalEntry(cursor: SyncCursor,
                                        metadata: CommittedSyncMetadata,
                                        transforms: Vector[DictionaryTransform]) {
   require(cursor == metadata.cursor, "Journal cursor and metadata boundary must match")
-  val estimatedBytes: Long = transforms.foldLeft(0L)(_ + _.estimatedBytes)
+  def estimatedBytes: Long = transforms.foldLeft(0L)(_ + _.estimatedBytes)
   val accountedBytes: Long = transforms.foldLeft(JournalAccounting.add(96L,
     JournalAccounting.cursor(cursor), JournalAccounting.metadata(metadata))) { (size, transform) =>
     JournalAccounting.add(size, transform.accountedBytes)
@@ -212,49 +216,4 @@ private[synchronization] object JournalAccounting {
     values.foldLeft(64L) { case (size, (key, value)) =>
       add(size, 64L, string(key), string(value))
     }
-}
-
-object TransformJournal {
-  /** Reconstructs one boundary from the checkpoint base without retaining intermediate trees. */
-  def materialize(base: CommittedSyncState,
-                  entries: Seq[TransformJournalEntry]): Either[String, CommittedSyncState] = {
-    var rollupDictionaries: Map[String, AuthenticatedDictionaryView] =
-      base.rollups.map { case (id, rollup) => id -> rollup.dictionary }
-    var minerDictionary: AuthenticatedDictionaryView = base.minerTree.dictionary
-    var failure = Option.empty[String]
-
-    entries.iterator.takeWhile(_ => failure.isEmpty).foreach { entry =>
-      entry.transforms.foreach { transform =>
-        if (failure.isEmpty) transform.dictionaryId match {
-          case DictionaryId.Rollup(id) =>
-            val starting = rollupDictionaries.getOrElse(id, PlasmaDictionary.empty())
-            transform.replay(starting) match {
-              case Right(dictionary) => rollupDictionaries += id -> dictionary
-              case Left(reason) => failure = Some(reason)
-            }
-          case DictionaryId.Miner => transform.replay(minerDictionary) match {
-            case Right(dictionary) => minerDictionary = dictionary
-            case Left(reason) => failure = Some(reason)
-          }
-        }
-      }
-      rollupDictionaries = rollupDictionaries.filter { case (id, _) => entry.metadata.rollups.contains(id) }
-      entry.metadata.rollups.keysIterator.filterNot(rollupDictionaries.contains).foreach { id =>
-        // A genesis with no same-block insertion is the authenticated empty dictionary.
-        val empty = PlasmaDictionary.empty()
-        if (Hex.toHexString(empty.digest) == entry.metadata.rollups(id).dictionaryDigest)
-          rollupDictionaries += id -> empty
-        else failure = Some(s"Journal introduced rollup $id without its dictionary transform")
-      }
-    }
-
-    failure match {
-      case Some(reason) => Left(reason)
-      case None => entries.lastOption match {
-        case Some(last) => CommittedSyncMetadata.materialize(last.metadata, rollupDictionaries,
-          minerDictionary)
-        case None => Right(base)
-      }
-    }
-  }
 }

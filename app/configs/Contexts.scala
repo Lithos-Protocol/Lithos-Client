@@ -22,7 +22,8 @@ class Contexts (system: ActorSystem) {
   val txContext:      ExecutionContext = dispatcher(Contexts.Tx)
   val dexContext:     ExecutionContext = dispatcher(Contexts.Dex)
   val databaseContext: ExecutionContext = dispatcher(Contexts.Database)
-  val snapshotIoContext: ExecutionContext = dispatcher(Contexts.SnapshotIo)
+  // No snapshot-I/O entry: StateSnapshotActor looks that dispatcher up itself, and
+  // ConfigValidation already requires a block for every name in Contexts.Names.
 }
 
 object Contexts {

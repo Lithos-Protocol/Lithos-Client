@@ -58,18 +58,18 @@ class ReducerTotalitySpec extends AnyFlatSpec with Matchers with OptionValues {
           Seq(ReducerFixtures.holdingOutput(SyncFixtures.id(2), SyncFixtures.id(1), 100, dictionary))),
       "context variable that is not a pair" ->
         BlockTx(SyncFixtures.id(3),
-          Seq(TxInput(utxoId, Some(InputSpendingProof("", Map("1" -> ErgoValue.of(7).toHex,
+          Seq(TxInput(utxoId, Some(InputSpendingProof(Map("1" -> ErgoValue.of(7).toHex,
             "2" -> ReducerFixtures.proofHex(Array[Byte](1))))))), Seq.empty,
           Seq(ReducerFixtures.holdingOutput(SyncFixtures.id(4), SyncFixtures.id(3), 100, dictionary))),
       "undecodable register" ->
         BlockTx(SyncFixtures.id(5),
-          Seq(TxInput(utxoId, Some(InputSpendingProof("", Map("1" -> pair(key, value),
+          Seq(TxInput(utxoId, Some(InputSpendingProof(Map("1" -> pair(key, value),
             "2" -> ReducerFixtures.proofHex(Array[Byte](1))))))), Seq.empty,
           Seq(ReducerFixtures.holdingOutput(SyncFixtures.id(6), SyncFixtures.id(5), 100, dictionary)
             .copy(registers = Seq("not-a-register")))),
       "output with no registers at all" ->
         BlockTx(SyncFixtures.id(7),
-          Seq(TxInput(utxoId, Some(InputSpendingProof("", Map("1" -> pair(key, value),
+          Seq(TxInput(utxoId, Some(InputSpendingProof(Map("1" -> pair(key, value),
             "2" -> ReducerFixtures.proofHex(Array[Byte](1))))))), Seq.empty,
           Seq(ReducerFixtures.holdingOutput(SyncFixtures.id(8), SyncFixtures.id(7), 100, dictionary)
             .copy(registers = Seq.empty))))
@@ -95,7 +95,7 @@ class ReducerTotalitySpec extends AnyFlatSpec with Matchers with OptionValues {
     val value = Longs.toByteArray(1L) ++ Array.fill[Byte](24)(2)
     val expected = PlasmaDictionary.empty()
     val insertion = expected.insert(key -> value)
-    val proof = InputSpendingProof("", Map(
+    val proof = InputSpendingProof(Map(
       "0" -> ErgoValue.of(0.toByte).toHex,
       "1" -> signerHex,
       "2" -> pair(key, value),

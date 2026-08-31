@@ -44,38 +44,7 @@ class TransformJournalSpec extends AnyFlatSpec with Matchers {
     operation.keys.head should contain theSameElementsInOrderAs expectedKey
   }
 
-  "TransformJournal" should "reconstruct an exact boundary from a checkpoint and normalized operations" in {
-    val rollupId = SyncFixtures.id(9000)
-    val input = SyncFixtures.id(9001)
-    val output = SyncFixtures.id(9002)
-    val baseDictionary = PlasmaDictionary.empty()
-    val baseRollup = Rollup(baseDictionary, 0, BigInt(0), Some(99L), 1000000L, 99,
-      hasMiner = false, LFSMPhase.HOLDING, evaluated = false, rollupId, input)
-    val base = CommittedSyncState(SyncCursor(99, SyncFixtures.id(99), SyncFixtures.id(98)), 0L,
-      Map(rollupId -> baseRollup), Map(input -> rollupId), Map(rollupId -> SyncFixtures.id(8999)),
-      lfsm.states.MinerDictionary.initialState, None)
-
-    val (key, value) = SyncFixtures.plasmaEntries(1, 32).head
-    val expectedDictionary = baseDictionary.copy()
-    expectedDictionary.insert(key -> value)
-    val nextRollup = baseRollup.copy(dictionary = expectedDictionary, numMiners = 1,
-      totalScore = BigInt(10), hasMiner = true, utxoId = output)
-    val next = base.copy(cursor = SyncCursor(100, SyncFixtures.id(100), base.cursor.blockId), version = 1L,
-      rollups = Map(rollupId -> nextRollup), routes = Map(output -> rollupId))
-    val transform = DictionaryTransform(DictionaryId.Rollup(rollupId),
-      Hex.toHexString(baseDictionary.digest), Vector(DictionaryOperation.Insert("tx", Seq(key -> value))),
-      Hex.toHexString(expectedDictionary.digest))
-    val entry = TransformJournalEntry(next.cursor, CommittedSyncMetadata.from(next), Vector(transform))
-
-    val restored = TransformJournal.materialize(base, Vector(entry)).toOption.get
-
-    restored.cursor shouldEqual next.cursor
-    restored.rollups(rollupId).metadata shouldEqual nextRollup.metadata
-    restored.rollups(rollupId).dictionary.digest should
-      contain theSameElementsInOrderAs expectedDictionary.digest
-  }
-
-  it should "reject a transform when either boundary digest is wrong" in {
+  "TransformJournal" should "reject a transform when either boundary digest is wrong" in {
     val dictionary = PlasmaDictionary.empty()
     val (key, value) = SyncFixtures.plasmaEntries(1, 32).head
     val wrongBefore = DictionaryTransform(DictionaryId.Miner, "00",

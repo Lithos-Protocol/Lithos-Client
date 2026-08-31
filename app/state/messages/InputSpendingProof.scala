@@ -1,4 +1,9 @@
 package state.messages
 
 
-case class InputSpendingProof(proof: String, ext: Map[String, String])
+/**
+ * The context extension of one spent input.
+ *
+ * The serialized proof bytes are deliberately not retained.
+ */
+case class InputSpendingProof(ext: Map[String, String])

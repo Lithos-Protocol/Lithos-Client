@@ -15,7 +15,8 @@ final case class QuarantineFault(rollupId: String,
                                   retryable: Boolean,
                                   attempts: Int = 0,
                                   removalHeight: Option[Int] = None,
-                                  removalWarningLogged: Boolean = false) {
+                                  removalWarningLogged: Boolean = false,
+                                  utxoId: String = "") {
   require(collateralBoxId.nonEmpty, "A quarantined rollup must retain its collateral box id")
   require(removalHeight.forall(_ >= 0), "A quarantine removal height cannot be negative")
   require(!removalWarningLogged || removalHeight.isDefined,

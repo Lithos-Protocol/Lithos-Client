@@ -285,7 +285,7 @@ class MinerDictionaryBootstrapSpec extends AnyFlatSpec with Matchers with Mockit
       inputs = tx.inputs.zipWithIndex.map { case (in, index) =>
         IndexedBox(NodeBox(in.id, "", 1000000L, index, height, "miner-dictionary"), "", height, 0L,
           Some(tx.id), Some(height),
-          in.spendingProof.map(p => NodeSpendingProof(p.proof, p.ext)))
+          in.spendingProof.map(p => NodeSpendingProof("", p.ext)))
       },
       dataInputs = Seq.empty,
       outputs = tx.outputs.map(indexedBox(_, height, None, None)),

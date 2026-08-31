@@ -103,7 +103,7 @@ object ReducerFixtures {
     val value = ErgoId.create(dataTokenId).getBytes
     val insertion = dictionary.insert(miner.hashedPropBytes -> value)
     val pair = ErgoValue.pairOf(collBytes(miner.hashedPropBytes), collBytes(value)).toHex
-    val proof = InputSpendingProof("", Map(
+    val proof = InputSpendingProof(Map(
       "0" -> ErgoValue.of(MinerDictionary.ADD_MINER_OP).toHex,
       "1" -> ErgoValue.of(miner.sigmaBoolean.get).toHex,
       "2" -> pair,
@@ -125,8 +125,8 @@ object ReducerFixtures {
     val dictionary = tree.dictionary.copy()
     val lookup = dictionary.lookUp(miner.hashedPropBytes)
     val deletion = dictionary.delete(miner.hashedPropBytes)
-    val operation = InputSpendingProof("", Map("0" -> ErgoValue.of(MinerDictionary.REMOVE_MINER_OP).toHex))
-    val removal = InputSpendingProof("", Map(
+    val operation = InputSpendingProof(Map("0" -> ErgoValue.of(MinerDictionary.REMOVE_MINER_OP).toHex))
+    val removal = InputSpendingProof(Map(
       "1" -> ErgoValue.of(miner.sigmaBoolean.get).toHex,
       "2" -> lookup.proof.ergoValue.toHex,
       "3" -> deletion.proof.ergoValue.toHex))
@@ -214,7 +214,7 @@ object ReducerFixtures {
                    period: Long): BlockTx = {
     val txId = SyncFixtures.id(300000 + number)
     val pairHex = ErgoValue.pairOf(byteValue(key), byteValue(value)).toHex
-    val spendingProof = InputSpendingProof("", Map("1" -> pairHex, "2" -> proofHex))
+    val spendingProof = InputSpendingProof(Map("1" -> pairHex, "2" -> proofHex))
     BlockTx(
       id = txId,
       inputs = Seq(TxInput(inputId, Some(spendingProof))),
@@ -248,7 +248,7 @@ object ReducerFixtures {
                             totalScore: BigInt,
                             period: Long): BlockTx = {
     val txId = SyncFixtures.id(310000 + number)
-    BlockTx(txId, Seq(TxInput(inputId, Some(InputSpendingProof("", Map.empty)))), Seq.empty,
+    BlockTx(txId, Seq(TxInput(inputId, Some(InputSpendingProof(Map.empty)))), Seq.empty,
       Seq(phaseOutput(outputId, txId, height, EvaluationTree, dictionary, numMiners, totalScore, period)))
   }
 
@@ -262,7 +262,7 @@ object ReducerFixtures {
                            totalScore: BigInt,
                            totalReward: Long): BlockTx = {
     val txId = SyncFixtures.id(320000 + number)
-    BlockTx(txId, Seq(TxInput(inputId, Some(InputSpendingProof("", Map.empty)))), Seq.empty,
+    BlockTx(txId, Seq(TxInput(inputId, Some(InputSpendingProof(Map.empty)))), Seq.empty,
       Seq(phaseOutput(outputId, txId, height, PayoutTree, dictionary, numMiners, totalScore, totalReward)))
   }
 
@@ -285,14 +285,14 @@ object ReducerFixtures {
                    totalScore: BigInt,
                    period: Long): BlockTx = {
     val txId = SyncFixtures.id(330000 + number)
-    val proof = InputSpendingProof("", Map(
+    val proof = InputSpendingProof(Map(
       "0" -> byteValue(miner).toHex,
       "1" -> lookupProofHex,
       "2" -> deleteProofHex))
     BlockTx(
       id = txId,
       inputs = Seq(
-        TxInput(evaluationInputId, Some(InputSpendingProof("", Map.empty))),
+        TxInput(evaluationInputId, Some(InputSpendingProof(Map.empty))),
         TxInput(proofInputId, Some(proof))),
       dataInputs = Seq.empty,
       outputs = Seq(phaseOutput(outputId, txId, height, EvaluationTree, outputDictionary,

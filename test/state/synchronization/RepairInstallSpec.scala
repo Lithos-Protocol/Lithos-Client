@@ -9,7 +9,7 @@ import org.scalatest.BeforeAndAfterAll
 import org.scalatest.flatspec.AnyFlatSpecLike
 import org.scalatest.matchers.should.Matchers
 import play.api.Configuration
-import state.messages.BlockInfo
+import state.messages.{BlockInfo, BlockTx, TxInput, TxOutput}
 import state.messages.SyncMessages._
 import state.persistence.SnapshotDictionaryBase
 import state.persistence.StateSnapshotActor.{SnapshotCandidate, SnapshotSaveFailed}
@@ -104,6 +104,109 @@ class RepairInstallSpec extends TestKit(ActorSystem("repair-install"))
     requester.send(handler, RepairMinerDictionary(seeded.cursor, rebuilt, None, stalePermit))
     requester.expectMsgType[BlockRejected].reason should
       include("no longer names the exact committed state")
+  }
+
+  /**
+   * The dictionary half of the same hazard.
+   *
+   * While faulted, `applyTransaction` skips the dictionary branch entirely, so a spend of the
+   * singleton is not applied — and that is exactly why "the dictionary epoch did not move" would
+   * otherwise mean "we were not watching". A rebuild installed across such a block would name a
+   * spent box and be published as available while already behind the chain.
+   */
+  it should "refuse a rebuilt Miner Dictionary after the chain spent the dictionary box" in {
+    val (handler, _) = newHandler()
+    val requester = TestProbe()
+    val seeded = faultedSeed
+    requester.send(handler, RestoreCommittedState(seeded, Vector(seeded.cursor)))
+    requester.expectMsgType[BlockCommitted]
+
+    val permit = minerPermit(requester, handler)
+
+    val protocol = ReducerFixtures.protocol(rollupStartHeight = startHeight)
+    val moved = BlockTx(SyncFixtures.id(700300),
+      Seq(TxInput(SyncFixtures.id(700301), None)), Seq.empty,
+      Seq(ReducerFixtures.dictionaryOutput(SyncFixtures.id(700302), SyncFixtures.id(700300),
+        startHeight, PlasmaDictionary.empty(), protocol.minerDictionaryToken)))
+    requester.send(handler, ApplyBlock(BlockInfo(SyncFixtures.id(startHeight), startHeight,
+      Seq(moved), seeded.cursor.blockId)))
+    requester.expectMsgType[BlockCommitted]
+
+    val rebuilt = MinerDictionary.initialState.copy(syncHeight = seeded.cursor.height)
+    requester.send(handler, RepairMinerDictionary(seeded.cursor, rebuilt, None, permit))
+    requester.expectMsgType[BlockRejected].reason should
+      include("no longer names the exact committed state")
+
+    requester.send(handler, GetCommittedState)
+    requester.expectMsgType[CommittedState].state.minerDictionaryFault should not be empty
+  }
+
+  /**
+   * A rollup rebuild must survive the blocks its walk runs beside.
+   *
+   * At the live tip nothing freezes the producer, so pinning the permit to the global epoch meant
+   * any walk outlasting one block returned to a dead permit — and because the rejection happens
+   * before `applyRepair`, no attempt was ever charged, so the client re-walked the rollup's whole
+   * chain forever without ever installing.
+   */
+  it should "install a rebuilt rollup after ordinary blocks moved the cursor" in {
+    val (handler, _) = newHandler()
+    val requester = TestProbe()
+    val seeded = quarantinedSeed
+    requester.send(handler, RestoreCommittedState(seeded, Vector(seeded.cursor)))
+    requester.expectMsgType[BlockCommitted]
+
+    val permit = rollupPermit(requester, handler)
+
+    requester.send(handler, ApplyBlock(BlockInfo(SyncFixtures.id(startHeight), startHeight,
+      Seq.empty, seeded.cursor.blockId)))
+    val moved = requester.expectMsgType[BlockCommitted].cursor
+
+    val rebuilt = SyncFixtures.emptyRollup(rollupId, SyncFixtures.id(700123), 90)
+    requester.send(handler, RepairRollup(rollupId, seeded.cursor,
+      RollupRepairResult.Rebuilt(rebuilt), permit))
+    requester.expectMsgType[BlockCommitted]
+
+    requester.send(handler, GetCommittedState)
+    val state = requester.expectMsgType[CommittedState].state
+    state.quarantined should not contain key(rollupId)
+    state.rollups should contain key rollupId
+    state.cursor shouldEqual moved
+  }
+
+  /**
+   * The relaxation must still refuse a rebuild the chain has overtaken.
+   *
+   * A quarantined rollup has no route, so the reducer cannot see its spends — which is exactly why
+   * "the quarantine epoch did not move" would otherwise mean "we were not watching" rather than
+   * "nothing happened". The fault retains the UTXO so that spend is still noticed.
+   */
+  it should "refuse a rebuilt rollup after the chain spent the quarantined rollup" in {
+    val (handler, _) = newHandler()
+    val requester = TestProbe()
+    val seeded = quarantinedSeed
+    requester.send(handler, RestoreCommittedState(seeded, Vector(seeded.cursor)))
+    requester.expectMsgType[BlockCommitted]
+
+    val permit = rollupPermit(requester, handler)
+
+    // A block spending the quarantined rollup's retained UTXO: untracked, but not unnoticed.
+    val spend = BlockTx(SyncFixtures.id(700200),
+      Seq(TxInput(quarantinedUtxo, None)), Seq.empty,
+      Seq(TxOutput(SyncFixtures.id(700201), 1000000L, "", Seq.empty, Seq.empty,
+        SyncFixtures.id(700200), startHeight, 0)))
+    requester.send(handler, ApplyBlock(BlockInfo(SyncFixtures.id(startHeight), startHeight,
+      Seq(spend), seeded.cursor.blockId)))
+    requester.expectMsgType[BlockCommitted]
+
+    val rebuilt = SyncFixtures.emptyRollup(rollupId, SyncFixtures.id(700123), 90)
+    requester.send(handler, RepairRollup(rollupId, seeded.cursor,
+      RollupRepairResult.Rebuilt(rebuilt), permit))
+    requester.expectMsgType[BlockRejected].reason should
+      include("no longer names the exact committed state")
+
+    requester.send(handler, GetCommittedState)
+    requester.expectMsgType[CommittedState].state.quarantined should contain key rollupId
   }
 
   /**
@@ -363,12 +466,14 @@ class RepairInstallSpec extends TestKit(ActorSystem("repair-install"))
       minerTree = MinerDictionary.initialState.copy(dictionary = PlasmaDictionary.empty()),
       minerDictionaryFault = Some("dictionary advanced during bootstrap"))
 
+  private val quarantinedUtxo = SyncFixtures.id(700100)
+
   private def quarantinedSeed: CommittedSyncState =
     ReducerFixtures.emptyState(height = startHeight - 1,
       blockId = SyncFixtures.id(startHeight - 1)).copy(
       quarantined = Map(rollupId ->
         QuarantineFault(rollupId, 90, SyncFixtures.id(700000),
-          "missing context variable 2", retryable = true)))
+          "missing context variable 2", retryable = true, utxoId = quarantinedUtxo)))
 
   private def rollupPermit(requester: TestProbe, handler: akka.actor.ActorRef): String = {
     requester.send(handler, GetRepairableQuarantines)

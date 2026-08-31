@@ -13,10 +13,17 @@ trait AutoSubscribable {
   protected var subscribers: Set[ActorRef]
   protected val logger: Logger
 
+  /**
+   * Subscribers re-send periodically so a publisher restart cannot silently drop them, so this logs
+   * only when the set actually changes.
+   */
   protected val handleSubscriptions: Receive = {
     case AutoSubscribe(subscriber) =>
-      subscribers = subscribers + subscriber
-      logger.info(s"Publisher accepted auto-subscription of ${subscriber.path.name} (${subscribers.size} total subscriber(s))")
+      if (!subscribers.contains(subscriber)) {
+        subscribers = subscribers + subscriber
+        logger.info(s"Publisher accepted auto-subscription of ${subscriber.path.name} " +
+          s"(${subscribers.size} total subscriber(s))")
+      }
   }
 
 }

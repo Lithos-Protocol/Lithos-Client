@@ -475,7 +475,7 @@ object StateSnapshotCodec {
   private val MetaMagic = 0x4c53534d
   private val DictionaryMagic = 0x4c535344
   private val SubtreeMagic = 0x4c535353
-  private val SchemaVersion = 8
+  private val SchemaVersion = 9
   private val ToolkitVersion = "plasma-toolkit-1.1.0"
   private val MaxBlobBytes = 512 * 1024 * 1024
   private val MaxEntries = 1000000
@@ -649,12 +649,14 @@ object StateSnapshotCodec {
     out.writeBoolean(fault.removalHeight.isDefined)
     fault.removalHeight.foreach(out.writeInt)
     out.writeBoolean(fault.removalWarningLogged)
+    writeString(out, fault.utxoId)
   }
 
   private def readQuarantine(in: DataInputStream): QuarantineFault = {
     val rollupId = readString(in)
     QuarantineFault(rollupId, in.readInt(), readString(in), readString(in), in.readBoolean(),
-      in.readInt(), if (in.readBoolean()) Some(in.readInt()) else None, in.readBoolean())
+      in.readInt(), if (in.readBoolean()) Some(in.readInt()) else None, in.readBoolean(),
+      readString(in))
   }
 
   private def writeStringMap(out: DataOutputStream,

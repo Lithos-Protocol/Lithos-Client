@@ -43,7 +43,6 @@ class SyncHandler @Inject()(config: Configuration,
   private var journal = Option.empty[TransformJournal]
   private var knownCursors = Vector.empty[SyncCursor]
   private var status: SyncStatus = Starting
-  private var canonicalReadyRequested = false
   private var mempool = MempoolSnapshot(0L, Map.empty, Map.empty, Set.empty)
   private final case class ProjectionStamp(cursor: SyncCursor,
                                            dictionaryDigest: String,
@@ -58,6 +57,7 @@ class SyncHandler @Inject()(config: Configuration,
   private var initialReadySnapshotRequested = false
   private var stateEpoch = 0L
   private var minerDictionaryEpoch = 0L
+  private var quarantineEpoch = 0L
   private var sequence = 0L
   private var checkpointSequence = 0L
   private var checkpointInFlight = Option.empty[PendingCheckpoint]
@@ -82,7 +82,7 @@ class SyncHandler @Inject()(config: Configuration,
    * and the two load maps grow by one entry per request for the life of the process, and the caller
    * waits forever on a barrier that can never complete.
    */
-  private final case class MaterializationExpired(operationId: Long)
+  private final case class MaterializationExpired(incarnation: String, operationId: Long)
   private final case class ActiveLoad(key: MaterializationKey,
                                       token: String,
                                       operations: Set[Long])
@@ -96,6 +96,7 @@ class SyncHandler @Inject()(config: Configuration,
   private final case class RepairPermit(cursor: SyncCursor,
                                         epoch: Long,
                                         minerEpoch: Long,
+                                        quarantineEpoch: Long,
                                         rollups: Set[String],
                                         minerDictionary: Boolean)
 
@@ -113,7 +114,6 @@ class SyncHandler @Inject()(config: Configuration,
 
   override def receive: Receive = {
     case BeginCatchUp(targetHeight) =>
-      canonicalReadyRequested = false
       status = committed.map(s => CatchingUp(s.cursor, targetHeight)).getOrElse(Starting)
       publishStatus(status)
 
@@ -122,7 +122,6 @@ class SyncHandler @Inject()(config: Configuration,
 
     // Mempool failure removes projections but does not make confirmed state unavailable.
     case MarkReady =>
-      canonicalReadyRequested = true
       committed match {
         case Some(state) => publishReady(state)
         case None =>
@@ -133,7 +132,6 @@ class SyncHandler @Inject()(config: Configuration,
       sender() ! status
 
     case MarkStale(reason) =>
-      canonicalReadyRequested = false
       status = committed.map(s => Stale(s.cursor, reason)).getOrElse(SyncFailed(None, reason))
       publishStatus(status)
 
@@ -217,7 +215,12 @@ class SyncHandler @Inject()(config: Configuration,
       checkpointRetry = None
       if (checkpointRequested) offerSnapshot(force = checkpointRequestedForce)
 
-    case MaterializationExpired(operationId) => expireOperation(operationId)
+    // `sequence` restarts at zero with the actor, so operation ids are reused across incarnations.
+    // A deadline scheduled by a dead instance would otherwise expire a healthy operation that
+    // happened to be given the same id.
+    case MaterializationExpired(token, operationId) if token == incarnation =>
+      expireOperation(operationId)
+    case _: MaterializationExpired => ()
 
     case UpdateEvaluation(blockId) =>
       committed.flatMap(_.rollups.get(blockId)).foreach { tree =>
@@ -259,7 +262,7 @@ class SyncHandler @Inject()(config: Configuration,
       case Some(state) =>
         val faults = state.repairableQuarantines(repairAttempts)
         val permit = issueRepairPermit(RepairPermit(state.cursor, stateEpoch, minerDictionaryEpoch,
-          faults.map(_.rollupId).toSet, minerDictionary = false))
+          quarantineEpoch, faults.map(_.rollupId).toSet, minerDictionary = false))
         sender() ! RepairableQuarantines(faults, state.cursor, permit)
       case None => sender() ! BlockRejected(None, "", "no committed state to repair")
     }
@@ -267,7 +270,7 @@ class SyncHandler @Inject()(config: Configuration,
     case GetMinerDictionaryRepairPermit => committed match {
       case Some(state) if state.minerDictionaryFault.isDefined =>
         val permit = issueRepairPermit(RepairPermit(state.cursor, stateEpoch, minerDictionaryEpoch,
-          Set.empty, minerDictionary = true))
+          quarantineEpoch, Set.empty, minerDictionary = true))
         sender() ! MinerDictionaryRepairPermit(state.cursor, permit)
       case Some(state) => sender() ! BlockRejected(Some(state.cursor), "",
         "Miner Dictionary is not faulted")
@@ -281,10 +284,12 @@ class SyncHandler @Inject()(config: Configuration,
         case Left(reason) => requester ! BlockRejected(committed.map(_.cursor), "", reason)
         case Right(_) =>
           committed match {
-            case Some(state) if state.cursor != atCursor =>
+            // Installed at the current cursor. The permit proved the quarantine did not move in
+            // between, and a quarantined rollup has no route, so no block could have changed it.
+            case Some(state) if state.cursor.height < atCursor.height =>
               requester ! BlockRejected(Some(state.cursor), "",
                 s"rollup $rollupId was rebuilt at ${atCursor.blockId}@${atCursor.height} but the cursor " +
-                  s"is now ${state.cursor.blockId}@${state.cursor.height}")
+                  s"has gone back to ${state.cursor.blockId}@${state.cursor.height}")
             case Some(state) => state.quarantined.get(rollupId) match {
               case None => requester ! BlockRejected(Some(state.cursor), "",
                 s"rollup $rollupId is no longer quarantined")
@@ -379,12 +384,14 @@ class SyncHandler @Inject()(config: Configuration,
     repairPermitOrder = repairPermitOrder.filterNot(_ == token)
     permit.toRight("repair permit is absent, already consumed, or from another actor incarnation")
       .flatMap { issued =>
-        // A rollup rebuild replaces state on one exact branch, so it is pinned to the global epoch.
-        // A dictionary rebuild is pinned to dictionary state only: every reorg, restore and reset
-        // advances that too, so a permit still cannot cross branches.
+        // Each rebuild is pinned to the state of the entity it rebuilds rather than to the global
+        // epoch, which advances on every commit and so could never be survived by a walk longer
+        // than one block. Both entity epochs advance on every reorg, restore and reset, and on any
+        // sign the chain touched the entity while it was untracked, so a permit still cannot cross
+        // branches or admit a stale rebuild.
         val superseded =
           if (minerDictionary) issued.minerEpoch != minerDictionaryEpoch
-          else issued.epoch != stateEpoch
+          else issued.quarantineEpoch != quarantineEpoch
         if (issued.cursor != cursor || superseded)
           Left("repair permit no longer names the exact committed state")
         else if (issued.minerDictionary != minerDictionary)
@@ -449,6 +456,8 @@ class SyncHandler @Inject()(config: Configuration,
           }
           committed = Some(dematerialize(next))
           stateEpoch += 1L
+          // Every outcome here rewrites the quarantine map, so no permit taken before it may install.
+          quarantineEpoch += 1L
           publishStatus(status)
           // A rebuilt dictionary or terminal repair outcome is durable immediately. Failed-attempt
           // counts and retention deadlines use ordinary cadence: the deadline is deterministically
@@ -478,7 +487,7 @@ class SyncHandler @Inject()(config: Configuration,
       sequence += 1L
       val operationId = sequence
       val deadline = context.system.scheduler.scheduleOnce(materializationDeadline, self,
-        MaterializationExpired(operationId))(context.dispatcher, self)
+        MaterializationExpired(incarnation, operationId))(context.dispatcher, self)
       operations += operationId -> PendingOperation(epoch, remaining, available, complete, fail,
         deadline)
       remaining.foreach { key =>
@@ -841,7 +850,7 @@ class SyncHandler @Inject()(config: Configuration,
           val origin = base.rollupOrigins.get(blockId)
           val detail = s"Could not materialize rollup dictionary ${key.digest}: $reason"
           val fault = QuarantineFault(blockId, tree.startHeight, origin.getOrElse(""), detail,
-            retryable = origin.isDefined)
+            retryable = origin.isDefined, utxoId = tree.utxoId)
           logger.error(s"Quarantined rollup $blockId before block application: $detail. " +
             "The canonical cursor and unrelated rollups will continue.")
           base.copy(rollups = base.rollups - blockId,
@@ -922,7 +931,9 @@ class SyncHandler @Inject()(config: Configuration,
                 requester ! BlockRejected(committed.map(_.cursor), block.id, reason)
               case Right(_) =>
                 journal = Some(candidateJournal)
-                if (minerDictionaryChanged(committed, maintained.state)) minerDictionaryEpoch += 1L
+                if (minerDictionaryChanged(committed, maintained.state) ||
+                  maintained.minerDictionaryMoved) minerDictionaryEpoch += 1L
+                if (quarantineChanged(committed, maintained.state)) quarantineEpoch += 1L
                 maintained.dictionaryTransforms.foreach { transform =>
                   dictionaryFrom(maintained.state, transform.dictionaryId).foreach { dictionary =>
                     remember(MaterializationKey(transform.dictionaryId,
@@ -965,6 +976,17 @@ class SyncHandler @Inject()(config: Configuration,
       before.minerTree.utxoId != next.minerTree.utxoId ||
       before.minerDictionaryFault != next.minerDictionaryFault ||
       before.dataBoxToken != next.dataBoxToken
+  }
+
+  /**
+   * Whether a commit moved anything a rollup rebuild reproduces.
+   */
+  private def quarantineChanged(previous: Option[CommittedSyncState],
+                                next: CommittedSyncState): Boolean = previous.forall { before =>
+    before.quarantined.keySet != next.quarantined.keySet ||
+      before.quarantined.exists { case (id, fault) =>
+        next.quarantined.get(id).exists(_.utxoId != fault.utxoId)
+      }
   }
 
   private def volatileJournalBytes(active: TransformJournal,
@@ -1135,9 +1157,10 @@ class SyncHandler @Inject()(config: Configuration,
               replacement.at.height <= target.cursor.height
             }
             stateEpoch += 1L
-            // Unconditional: a rollback can move the dictionary to another branch's contents, and it
+            // Unconditional: a rollback can move either entity to another branch's contents, and it
             // is what stops a repair permit issued before the fork from installing after it.
             minerDictionaryEpoch += 1L
+            quarantineEpoch += 1L
             knownCursors = knownCursors.filterNot(_.height > target.cursor.height)
             projections = Map.empty
             suppressedProjections = Map.empty
@@ -1172,11 +1195,11 @@ class SyncHandler @Inject()(config: Configuration,
         (cursors.filter(_.height < state.cursor.height) :+ state.cursor).takeRight(syncConfig.cursorWindow + 1)
       projections = Map.empty
       suppressedProjections = Map.empty
-      canonicalReadyRequested = false
       initialReadySnapshotRequested = false
       stateEpoch += 1L
-      // A restore replaces the dictionary wholesale, so no permit issued before it may install.
+      // A restore replaces both wholesale, so no permit issued before it may install.
       minerDictionaryEpoch += 1L
+      quarantineEpoch += 1L
       status = CatchingUp(state.cursor, state.cursor.height)
       publishStatus(status)
     }
@@ -1190,7 +1213,6 @@ class SyncHandler @Inject()(config: Configuration,
       knownCursors = Vector.empty
       projections = Map.empty
       suppressedProjections = Map.empty
-      canonicalReadyRequested = false
       initialReadySnapshotRequested = false
       abandonOperations("synchronization state was reset for a full rescan")
       loadsByKey = Map.empty
@@ -1207,8 +1229,9 @@ class SyncHandler @Inject()(config: Configuration,
       checkpointRetry.foreach(_.cancel())
       checkpointRetry = None
       stateEpoch += 1L
-      // A reset discards the dictionary entirely, so no permit issued before it may install.
+      // A reset discards both entirely, so no permit issued before it may install.
       minerDictionaryEpoch += 1L
+      quarantineEpoch += 1L
       status = Starting
       publishStatus(status)
     }

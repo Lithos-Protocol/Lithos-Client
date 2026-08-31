@@ -115,16 +115,15 @@ class MempoolView @Inject()(config: play.api.Configuration,
     context.system.scheduler.scheduleWithFixedDelay(
       syncConfig.mempoolRefreshInterval, syncConfig.mempoolRefreshInterval, self, Tick)
 
-  stateFrame ! AutoSubscribable.AutoSubscribe(self)
-
   override def preStart(): Unit = self ! Tick
 
   override def postStop(): Unit = ticker.cancel()
 
   override def receive: Receive = {
     // Skip projections before readiness; no consumer can use them during catch-up.
-    case Tick if !inFlight && ready => refresh()
-    case Tick => ()
+    case Tick =>
+      stateFrame ! AutoSubscribable.AutoSubscribe(self)
+      if (!inFlight && ready) refresh()
     case NewBlock(_) => self ! Tick
     case RebuildMempoolChains => self ! Tick
 
