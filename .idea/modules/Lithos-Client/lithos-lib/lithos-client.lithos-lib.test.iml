@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<module external.linked.project.id="lithos-lib:test [file:/C:/Users/Kirat/IdeaProjects/Lithos-Client/]" external.linked.project.path="$MODULE_DIR$/../../../../lithos-lib" external.root.project.path="$MODULE_DIR$/../../../.." external.system.id="SBT" external.system.module.type="sbtSourceSet" type="JAVA_MODULE" version="4">
+<module external.linked.project.id="lithos-lib:test [file:///C:/Users/Kirat/IdeaProjects/Lithos-Client/]" external.linked.project.path="C:\Users\Kirat\IdeaProjects\Lithos-Client\lithos-lib" external.root.project.path="$MODULE_DIR$/../../../.." external.system.id="SBT" external.system.module.type="sbtSourceSet" type="JAVA_MODULE" version="4">
   <component name="DisplayModuleName">
     <option name="name" value="lithos-lib.test" />
   </component>
@@ -15,20 +15,11 @@
     <orderEntry type="sourceFolder" forTests="false" />
     <orderEntry type="library" name="sbt: scala-sdk-2.12.10" level="project" />
     <orderEntry type="module" module-name="lithos-client.lithos-lib.main" />
-    <orderEntry type="module-library">
-      <library name="sbt: unmanaged-jars">
-        <CLASSES>
-          <root url="jar://$MODULE_DIR$/../../../../lithos-lib/lib/ergo-appkit_2.12-node-wallet-support-13d8ef95-SNAPSHOT.jar!/" />
-          <root url="jar://$MODULE_DIR$/../../../../lithos-lib/lib/plasma-toolkit_2.12-1.0.4.jar!/" />
-        </CLASSES>
-        <JAVADOC />
-        <SOURCES />
-      </library>
-    </orderEntry>
     <orderEntry type="library" name="sbt: org.scala-lang:scala-library:2.12.10:jar" level="project" />
-    <orderEntry type="library" name="sbt: org.scorexfoundation:sigma-state_2.12:6.0.2:jar" level="project" />
+    <orderEntry type="library" name="sbt: org.scorexfoundation:sigma-state_2.12:6.0.6:jar" level="project" />
     <orderEntry type="library" name="sbt: org.ergoplatform:ergo-wallet_2.12:6.0.0:jar" level="project" />
-    <orderEntry type="library" name="sbt: org.scalatest:scalatest_2.12:3.2.14:jar" level="project" />
+    <orderEntry type="library" name="sbt: org.ergoplatform:ergo-appkit_2.12:6.0.1:jar" level="project" />
+    <orderEntry type="library" name="sbt: io.github.k-singh:plasma-toolkit_2.12:1.1.0:jar" level="project" />
     <orderEntry type="library" name="sbt: com.github.Satergo:JStratum:b3ad654112:jar" level="project" />
     <orderEntry type="library" name="sbt: org.bouncycastle:bcprov-jdk15on:1.70:jar" level="project" />
     <orderEntry type="library" name="sbt: com.squareup.okhttp3:okhttp:3.12.0:jar" level="project" />
@@ -44,26 +35,14 @@
     <orderEntry type="library" name="sbt: org.scala-lang:scala-reflect:2.12.10:jar" level="project" />
     <orderEntry type="library" name="sbt: org.scorexfoundation:debox_2.12:0.10.0:jar" level="project" />
     <orderEntry type="library" name="sbt: org.scala-lang.modules:scala-collection-compat_2.12:2.7.0:jar" level="project" />
-    <orderEntry type="library" name="sbt: org.scorexfoundation:scorex-util_2.12:0.2.1:jar" level="project" />
+    <orderEntry type="library" name="sbt: org.scorexfoundation:scorex-util_2.12:0.2.2:jar" level="project" />
+    <orderEntry type="library" name="sbt: org.bouncycastle:bcprov-jdk15to18:1.85.1:jar" level="project" />
     <orderEntry type="library" name="sbt: com.lihaoyi:fastparse_2.12:2.3.3:jar" level="project" />
-    <orderEntry type="library" name="sbt: io.circe:circe-core_2.12:0.13.0:jar" level="project" />
-    <orderEntry type="library" name="sbt: io.circe:circe-generic_2.12:0.13.0:jar" level="project" />
-    <orderEntry type="library" name="sbt: io.circe:circe-parser_2.12:0.13.0:jar" level="project" />
-    <orderEntry type="library" name="sbt: org.scorexfoundation:scrypto_2.12:3.0.0:jar" level="project" />
+    <orderEntry type="library" name="sbt: io.circe:circe-core_2.12:0.14.15:jar" level="project" />
+    <orderEntry type="library" name="sbt: io.circe:circe-generic_2.12:0.14.15:jar" level="project" />
+    <orderEntry type="library" name="sbt: io.circe:circe-parser_2.12:0.14.15:jar" level="project" />
+    <orderEntry type="library" name="sbt: org.scorexfoundation:scrypto_2.12:3.1.1:jar" level="project" />
     <orderEntry type="library" name="sbt: org.scodec:scodec-bits_2.12:1.1.34:jar" level="project" />
-    <orderEntry type="library" name="sbt: org.scalatest:scalatest-core_2.12:3.2.14:jar" level="project" />
-    <orderEntry type="library" name="sbt: org.scalatest:scalatest-featurespec_2.12:3.2.14:jar" level="project" />
-    <orderEntry type="library" name="sbt: org.scalatest:scalatest-flatspec_2.12:3.2.14:jar" level="project" />
-    <orderEntry type="library" name="sbt: org.scalatest:scalatest-freespec_2.12:3.2.14:jar" level="project" />
-    <orderEntry type="library" name="sbt: org.scalatest:scalatest-funsuite_2.12:3.2.14:jar" level="project" />
-    <orderEntry type="library" name="sbt: org.scalatest:scalatest-funspec_2.12:3.2.14:jar" level="project" />
-    <orderEntry type="library" name="sbt: org.scalatest:scalatest-propspec_2.12:3.2.14:jar" level="project" />
-    <orderEntry type="library" name="sbt: org.scalatest:scalatest-refspec_2.12:3.2.14:jar" level="project" />
-    <orderEntry type="library" name="sbt: org.scalatest:scalatest-wordspec_2.12:3.2.14:jar" level="project" />
-    <orderEntry type="library" name="sbt: org.scalatest:scalatest-diagrams_2.12:3.2.14:jar" level="project" />
-    <orderEntry type="library" name="sbt: org.scalatest:scalatest-matchers-core_2.12:3.2.14:jar" level="project" />
-    <orderEntry type="library" name="sbt: org.scalatest:scalatest-shouldmatchers_2.12:3.2.14:jar" level="project" />
-    <orderEntry type="library" name="sbt: org.scalatest:scalatest-mustmatchers_2.12:3.2.14:jar" level="project" />
     <orderEntry type="library" name="sbt: org.json:json:20230227:jar" level="project" />
     <orderEntry type="library" name="sbt: com.github.ben-manes.caffeine:caffeine:3.1.8:jar" level="project" />
     <orderEntry type="library" name="sbt: org.slf4j:slf4j-api:2.0.7:jar" level="project" />
@@ -74,26 +53,20 @@
     <orderEntry type="library" name="sbt: org.iq80.leveldb:leveldb-api:0.12:jar" level="project" />
     <orderEntry type="library" name="sbt: com.google.guava:guava:21.0:jar" level="project" />
     <orderEntry type="library" name="sbt: org.typelevel:spire-macros_2.12:0.17.0-M1:jar" level="project" />
+    <orderEntry type="library" name="sbt: com.typesafe.scala-logging:scala-logging_2.12:3.9.5:jar" level="project" />
     <orderEntry type="library" name="sbt: org.rudogma:supertagged_2.12:2.0-RC2:jar" level="project" />
-    <orderEntry type="library" name="sbt: com.typesafe.scala-logging:scala-logging_2.12:3.9.2:jar" level="project" />
     <orderEntry type="library" name="sbt: com.lihaoyi:sourcecode_2.12:0.2.3:jar" level="project" />
     <orderEntry type="library" name="sbt: com.lihaoyi:geny_2.12:0.6.10:jar" level="project" />
-    <orderEntry type="library" name="sbt: io.circe:circe-numbers_2.12:0.13.0:jar" level="project" />
-    <orderEntry type="library" name="sbt: org.typelevel:cats-core_2.12:2.1.0:jar" level="project" />
-    <orderEntry type="library" name="sbt: com.chuusai:shapeless_2.12:2.3.3:jar" level="project" />
-    <orderEntry type="library" name="sbt: io.circe:circe-jawn_2.12:0.13.0:jar" level="project" />
-    <orderEntry type="library" name="sbt: org.bouncycastle:bcprov-jdk15to18:1.66:jar" level="project" />
-    <orderEntry type="library" name="sbt: org.scalatest:scalatest-compatible:3.2.14:jar" level="project" />
-    <orderEntry type="library" name="sbt: org.scalactic:scalactic_2.12:3.2.14:jar" level="project" />
-    <orderEntry type="library" name="sbt: org.scala-lang.modules:scala-xml_2.12:2.1.0:jar" level="project" />
+    <orderEntry type="library" name="sbt: io.circe:circe-numbers_2.12:0.14.15:jar" level="project" />
+    <orderEntry type="library" name="sbt: org.typelevel:cats-core_2.12:2.13.0:jar" level="project" />
+    <orderEntry type="library" name="sbt: com.chuusai:shapeless_2.12:2.3.13:jar" level="project" />
+    <orderEntry type="library" name="sbt: io.circe:circe-jawn_2.12:0.14.15:jar" level="project" />
     <orderEntry type="library" name="sbt: org.checkerframework:checker-qual:3.37.0:jar" level="project" />
     <orderEntry type="library" name="sbt: com.google.errorprone:error_prone_annotations:2.21.1:jar" level="project" />
     <orderEntry type="library" name="sbt: org.typelevel:machinist_2.12:0.6.8:jar" level="project" />
     <orderEntry type="library" name="sbt: org.typelevel:algebra_2.12:2.0.0-M2:jar" level="project" />
-    <orderEntry type="library" name="sbt: org.typelevel:cats-macros_2.12:2.1.0:jar" level="project" />
-    <orderEntry type="library" name="sbt: org.typelevel:cats-kernel_2.12:2.1.0:jar" level="project" />
-    <orderEntry type="library" name="sbt: org.typelevel:macro-compat_2.12:1.1.1:jar" level="project" />
-    <orderEntry type="library" name="sbt: org.typelevel:jawn-parser_2.12:1.0.0:jar" level="project" />
+    <orderEntry type="library" name="sbt: org.typelevel:cats-kernel_2.12:2.13.0:jar" level="project" />
+    <orderEntry type="library" name="sbt: org.typelevel:jawn-parser_2.12:1.6.0:jar" level="project" />
   </component>
   <component name="TestModuleProperties" production-module="lithos-client.lithos-lib.main" />
 </module>

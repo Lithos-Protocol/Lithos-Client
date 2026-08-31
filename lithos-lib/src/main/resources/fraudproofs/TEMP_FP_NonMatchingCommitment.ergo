@@ -103,8 +103,6 @@
     removeTree.digest == nextTree.digest
   }
   val changedRegisters = allOf(Coll(
-    // Evaluation centrally computes and pays bondForScore(score).
-    nextUTXO.value < evalBox.value,
     minerRemoved,
     nextMiners == currentMiners - 1,
     nextScore == totalScore - score.toBigInt,

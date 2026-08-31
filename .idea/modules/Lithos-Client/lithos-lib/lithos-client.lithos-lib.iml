@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<module external.linked.project.id="lithos-lib [file:/C:/Users/Kirat/IdeaProjects/Lithos-Client/]" external.linked.project.path="$MODULE_DIR$/../../../../lithos-lib" external.root.project.path="$MODULE_DIR$/../../../.." external.system.id="SBT" external.system.module.type="nestedProject" type="JAVA_MODULE" version="4">
+<module external.linked.project.id="lithos-lib [file:///C:/Users/Kirat/IdeaProjects/Lithos-Client/]" external.linked.project.path="C:\Users\Kirat\IdeaProjects\Lithos-Client\lithos-lib" external.root.project.path="$MODULE_DIR$/../../../.." external.system.id="SBT" external.system.module.type="nestedProject" type="JAVA_MODULE" version="4">
   <component name="DisplayModuleName">
     <option name="name" value="lithos-lib" />
   </component>

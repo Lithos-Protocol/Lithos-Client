@@ -7,13 +7,12 @@
   // R5: number of submitted miners
   // R6: sum of submitted scores
   // R7: period start
-  // R8: miner hash stamped by collateral at genesis and preserved during Holding
+  // R8: miner hash stamped by collateral at genesis; present so R9 is contiguous
   // R9: total refundable ERG bond currently held by this rollup
   val nispTree = SELF.R4[AvlTree].get
   val currentMiners = SELF.R5[Int].get
   val totalScore = SELF.R6[BigInt].get
   val currentPeriod = SELF.R7[Long].get
-  val rollupMiner = SELF.R8[Coll[Byte]].get
   val totalBond = SELF.R9[Long].get
 
   // CONSTANTS
@@ -54,14 +53,6 @@
     if(proportional > CONST_MIN_ENTRY_BOND) proportional else CONST_MIN_ENTRY_BOND
   }
 
-  val validCurrentAccounting = allOf(Coll(
-    currentMiners >= 0,
-    totalScore >= 0.toBigInt,
-    totalBond >= 0L,
-    totalBond <= SELF.value,
-    rollupMiner.size == 32
-  ))
-
   // Spending Path 1: insert one NISP and its refundable score bond.
   if(HEIGHT < currentPeriod + CONST_PERIOD_LENGTH){
     val signerProp = executeFromVar[SigmaProp](0)
@@ -69,8 +60,6 @@
     val onlyOne = SELF.id == INPUTS(0).id
     val sameContract = nextUTXO.propositionBytes == SELF.propositionBytes
     val tokensConserved = nextUTXO.tokens == SELF.tokens
-    val minerPreserved = nextUTXO.R8[Coll[Byte]].get == rollupMiner
-
     val validNISP = {
       if(CTX_NISP_DATA._2.size > 8){
         val score = byteArrayToLong(CTX_NISP_DATA._2.slice(0, 8))
@@ -91,26 +80,22 @@
     }
     val entryBond = bondForScore(score)
     val bondCollected = allOf(Coll(
-      score > 0L,
       nextUTXO.value.toBigInt == SELF.value.toBigInt + entryBond.toBigInt,
-      nextBond.toBigInt == totalBond.toBigInt + entryBond.toBigInt,
-      nextBond <= nextUTXO.value
+      nextBond.toBigInt == totalBond.toBigInt + entryBond.toBigInt
     ))
 
     val treeUpdated = {
       val insertTree = nispTree.insert(Coll(CTX_NISP_DATA), CTX_NISP_PROOF).get
       insertTree == nextTree
     }
-    val incrementedMiners = currentMiners < 2147483647 && nextMiners == currentMiners + 1
+    val incrementedMiners = nextMiners == currentMiners + 1
     val samePeriod = nextPeriod == currentPeriod
 
     val validSubmission = allOf(Coll(
-      validCurrentAccounting,
       authenticMiner,
       onlyOne,
       sameContract,
       tokensConserved,
-      minerPreserved,
       validNISP,
       bondCollected,
       treeUpdated,
@@ -125,7 +110,6 @@
     val onlyOne = SELF.id == INPUTS(0).id
     val isEvaluationContract = blake2b256(nextUTXO.propositionBytes) == CONST_EVAL_PROPBYTES
     val conservedValues = allOf(Coll(
-      validCurrentAccounting,
       nextUTXO.value == SELF.value,
       nextUTXO.tokens == SELF.tokens,
       nextTree == nispTree,

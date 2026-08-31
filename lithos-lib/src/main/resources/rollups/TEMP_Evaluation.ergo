@@ -13,7 +13,6 @@
   val currentMiners = SELF.R5[Int].get
   val totalScore = SELF.R6[BigInt].get
   val currentPeriod = SELF.R7[Long].get
-  val currentBlock = SELF.R8[Long].get
   val totalBond = SELF.R9[Long].get
 
   // CONSTANTS
@@ -35,8 +34,8 @@
   // Whitelisted fraud proofs establish which miner and score were removed. This contract centrally
   // enforces the corresponding ERG slash, R9 decrement and prover payment, so the bond formula does
   // not have to be duplicated across every fraud-proof script.
-  // INPUTS(1) is the tokenless prover-controlled input carrying fraud-proof context variables. Its
-  // proposition is also the recipient of the slashed bond. The prover input funds the transaction fee.
+  // INPUTS(1) is the prover-controlled input carrying fraud-proof context variables. Its proposition
+  // is also the recipient of the slashed bond. The prover input funds the transaction fee.
 
   def bondForScore(score: Long): Long = {
     val proportional = score / CONST_BOND_DIVISOR
@@ -44,12 +43,6 @@
   }
 
   val onlyOne = SELF.id == INPUTS(0).id
-  val validCurrentAccounting = allOf(Coll(
-    currentMiners >= 0,
-    totalScore >= 0.toBigInt,
-    totalBond >= 0L,
-    totalBond <= SELF.value
-  ))
 
   // Spending Path 1: remove one fraudulent NISP and pay its complete bond to the prover.
   if(HEIGHT < currentPeriod + CONST_PERIOD_LENGTH){
@@ -61,44 +54,21 @@
       (x: Coll[Byte]) => x == blake2b256(script)
     }
 
-    val removedScoreBig = totalScore - nextScore
-    val removedScoreFitsLong = allOf(Coll(
-      removedScoreBig > 0.toBigInt,
-      removedScoreBig <= 9223372036854775807L.toBigInt
-    ))
-    val removedScore = removedScoreBig.toLong
+    val removedScore = (totalScore - nextScore).toLong
     val slashedBond = bondForScore(removedScore)
 
     val proverInput = INPUTS(1)
     val rewardOutput = OUTPUTS(1)
-    val correctShape = allOf(Coll(
-      INPUTS.size == 2,
-      OUTPUTS.size >= 2,
-      proverInput.tokens.size == 0,
-      rewardOutput.tokens.size == 0
-    ))
+    val correctInputs = INPUTS.size == 2
     val proverPaid = allOf(Coll(
       rewardOutput.propositionBytes == proverInput.propositionBytes,
       rewardOutput.value == slashedBond
     ))
 
     val contractSame = SELF.propositionBytes == nextUTXO.propositionBytes
-    val oneMinerRemoved = currentMiners > 0 && nextMiners == currentMiners - 1
-    val scoreRemoved = nextScore == totalScore - removedScore.toBigInt
-    val valueSlashed = allOf(Coll(
-      SELF.value >= slashedBond,
-      nextUTXO.value == SELF.value - slashedBond
-    ))
-    val bondSlashed = allOf(Coll(
-      totalBond >= slashedBond,
-      nextBond == totalBond - slashedBond,
-      nextBond <= nextUTXO.value
-    ))
-    val stateConserved = allOf(Coll(
-      nextPeriod == currentPeriod,
-      nextUTXO.R8[Long].get == currentBlock,
-      SELF.tokens == nextUTXO.tokens
-    ))
+    val valueSlashed = nextUTXO.value == SELF.value - slashedBond
+    val bondSlashed = nextBond == totalBond - slashedBond
+    val tokensConserved = SELF.tokens == nextUTXO.tokens
     val flagsConserved = allOf(Coll(
       nextTree.isInsertAllowed,
       nextTree.isUpdateAllowed,
@@ -108,35 +78,25 @@
     ))
 
     val validSlash = allOf(Coll(
-      validCurrentAccounting,
       authenticFPData,
       validFP,
       onlyOne,
-      correctShape,
-      removedScoreFitsLong,
-      oneMinerRemoved,
-      scoreRemoved,
+      correctInputs,
       valueSlashed,
       bondSlashed,
       proverPaid,
       contractSame,
-      stateConserved,
+      tokensConserved,
       flagsConserved
     ))
 
     sigmaProp(validSlash) && executeFromVar[SigmaProp](0)
   }else{
     // Spending Path 2: preserve remaining bonds and expose only the original reward as Payout R7.
-    val heldToken = SELF.tokens.getOrElse(0, (Coll(0.toByte), 0L))
-    val tokenReward = {
-      if(SELF.tokens.size == 1) heldToken._2 else 0L
-    }
+    val tokenReward = SELF.tokens.getOrElse(0, (Coll(0.toByte), 0L))._2
     val baseReward = SELF.value - totalBond
     val isPayoutContract = blake2b256(nextUTXO.propositionBytes) == CONST_PAYOUT_PROPBYTES
-    val validTokenShape = SELF.tokens.size <= 1
     val conservedValues = allOf(Coll(
-      validCurrentAccounting,
-      baseReward >= 0L,
       nextUTXO.value == SELF.value,
       nextUTXO.tokens == SELF.tokens,
       nextTree == nispTree,
@@ -145,7 +105,6 @@
       nextPeriod == baseReward,
       nextUTXO.R8[Long].get == tokenReward,
       nextBond == totalBond,
-      validTokenShape,
       onlyOne
     ))
 

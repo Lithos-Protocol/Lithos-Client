@@ -43,16 +43,6 @@
     if(proportional > CONST_MIN_ENTRY_BOND) proportional else CONST_MIN_ENTRY_BOND
   }
 
-  val validCurrentAccounting = allOf(Coll(
-    currentMiners >= 0,
-    totalScore >= 0.toBigInt,
-    totalReward >= 0L,
-    tokenReward >= 0L,
-    totalBond >= 0L,
-    totalBond <= SELF.value,
-    SELF.tokens.size <= 1
-  ))
-
   // Spending Path 1: an empty rollup can be swept, but no refundable bond may remain.
   if(currentMiners == 0){
     val hasFeeOutput = OUTPUTS.exists{
@@ -61,7 +51,7 @@
     val onlyOne = SELF.id == INPUTS(0).id
     val noFeeOutput = !hasFeeOutput
     val noBondLiability = totalBond == 0L
-    sigmaProp(validCurrentAccounting && noFeeOutput && noBondLiability && onlyOne)
+    sigmaProp(noFeeOutput && noBondLiability && onlyOne)
   }else{
     val minersToPay = CTX_KEY_DATA.zip(
       nispTree.getMany(CTX_KEY_DATA, CTX_LOOKUP_PROOF).map{
@@ -94,12 +84,6 @@
     val totalBondRefunds = minersWithBond.fold(0.toBigInt, {
       (accum: BigInt, x: (Coll[Byte], Long)) => accum + x._2.toBigInt
     })
-    val rewardsFit = allOf(Coll(
-      totalScore > 0.toBigInt,
-      totalMinerRewards >= totalBondRefunds,
-      totalMinerRewards <= SELF.value.toBigInt,
-      totalBondRefunds <= totalBond.toBigInt
-    ))
     val remainder = SELF.value.toBigInt - totalMinerRewards
 
     // Spending Path 2: pay the selected miners and keep a successor for all remaining liabilities.
@@ -153,8 +137,6 @@
       ))
       val onlyOne = SELF.id == INPUTS(0).id
       val validPartialPayout = allOf(Coll(
-        validCurrentAccounting,
-        rewardsFit,
         validUTXO,
         usedReward,
         usedTokens,
@@ -193,8 +175,6 @@
       val allBondsRefunded = totalBondRefunds == totalBond.toBigInt
       val onlyOne = SELF.id == INPUTS(0).id
       val validFinalPayout = allOf(Coll(
-        validCurrentAccounting,
-        rewardsFit,
         allBondsRefunded,
         minersRewarded,
         tokensRewarded,
