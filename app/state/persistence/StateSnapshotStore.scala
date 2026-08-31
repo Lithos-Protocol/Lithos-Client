@@ -475,8 +475,7 @@ object StateSnapshotCodec {
   private val MetaMagic = 0x4c53534d
   private val DictionaryMagic = 0x4c535344
   private val SubtreeMagic = 0x4c535353
-  private val SchemaVersion = 9
-  private val ToolkitVersion = "plasma-toolkit-1.1.0"
+  private val SchemaVersion = 1
   private val MaxBlobBytes = 512 * 1024 * 1024
   private val MaxEntries = 1000000
 
@@ -487,7 +486,6 @@ object StateSnapshotCodec {
     val payload = writeBytes { out =>
       out.writeInt(MetaMagic)
       out.writeInt(SchemaVersion)
-      writeString(out, ToolkitVersion)
       writeIdentity(out, identity)
       writeCursor(out, metadata.cursor)
       out.writeLong(metadata.version)
@@ -521,7 +519,6 @@ object StateSnapshotCodec {
     val in = openEntry(encoded)
     require(in.readInt() == MetaMagic, "invalid metadata magic")
     require(in.readInt() == SchemaVersion, "unsupported snapshot schema version")
-    require(readString(in) == ToolkitVersion, "unsupported Plasma Toolkit version")
     require(readIdentity(in) == expectedIdentity,
       "snapshot network, wallet, start height, or protocol identity does not match this client")
     val cursor = readCursor(in)
