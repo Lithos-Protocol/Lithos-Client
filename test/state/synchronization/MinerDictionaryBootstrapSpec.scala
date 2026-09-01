@@ -4,7 +4,8 @@ import lfsm.states.MinerDictionary
 import node.NodeApi
 import node.model._
 import org.mockito.ArgumentMatchers.any
-import org.mockito.Mockito.{never, verify, when}
+import org.mockito.Mockito.{doAnswer, never, times, verify, when}
+import org.mockito.invocation.InvocationOnMock
 import org.scalatest.{EitherValues, OptionValues}
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
@@ -13,7 +14,8 @@ import state.messages.{BlockTx, TxOutput}
 import support.{FakeNodeContext, ReducerFixtures, SyncFixtures}
 import work.lithos.mutations.Contract
 
-import scala.util.Success
+import java.util.concurrent.atomic.AtomicInteger
+import scala.util.{Success, Try}
 
 /** Covers seed-height selection, data-box recovery, and live-tip verification. */
 class MinerDictionaryBootstrapSpec extends AnyFlatSpec with Matchers with MockitoSugar
@@ -96,12 +98,72 @@ class MinerDictionaryBootstrapSpec extends AnyFlatSpec with Matchers with Mockit
       .left.value should include("does not match the live dictionary box")
   }
 
-  it should "refuse a walk that ended on a box the chain no longer holds" in {
+  /**
+   * A registration confirming mid-walk must be continued from, not restarted.
+   *
+   * Restarting makes a walk cost grow with the whole chain every time the chain moves, so past the
+   * point where one walk takes longer than the gap between registrations it never completes at all.
+   * Both behaviours end at the same tree, so the genesis read count is what separates them.
+   */
+  it should "resume from the box it reached when the dictionary advances mid-walk" in {
+    val chain = registrationChain(count = 3, firstHeight = 200)
+    val nodeApi = indexerFor(chain)
+    val midpoint = chain(1).outputId
+    val reads = new AtomicInteger(0)
+
+    // The first read ends the walk; by the second, the registration that raced it has landed.
+    doAnswer { _: InvocationOnMock =>
+      val box =
+        if (reads.incrementAndGet() == 1) unspentBox(midpoint, chain(1).tx.id, chain(1).height)
+        else spentBox(midpoint, chain(2).tx.id, chain(2).height)
+      Success(Some(box)): Try[Option[IndexedBox]]
+    }.when(nodeApi).indexedBoxById(midpoint)
+
+    val rebuilt = new MinerDictionaryBootstrap(nodeApi, protocol, maxTransforms = 100).run(500)
+
+    rebuilt.value.minerTree.numMiners shouldEqual 3
+    rebuilt.value.minerTree.utxoId shouldEqual chain.last.outputId
+    verify(nodeApi, times(1)).indexedBoxById(genesisId)
+  }
+
+  /**
+   * The seed is frozen by the transform that crosses `seedHeight`, not by a segment boundary.
+   *
+   * A resume whose first segment ended below the seed height must still pick the seed up from the
+   * later transform, or the rebuilt dictionary is short by everything the resume replayed.
+   */
+  it should "freeze the seed at the seed height across a resumed walk" in {
+    val chain = registrationChain(count = 3, firstHeight = 200)
+    val nodeApi = indexerFor(chain)
+    val midpoint = chain(1).outputId
+    val reads = new AtomicInteger(0)
+
+    doAnswer { _: InvocationOnMock =>
+      val box =
+        if (reads.incrementAndGet() == 1) unspentBox(midpoint, chain(1).tx.id, chain(1).height)
+        else spentBox(midpoint, chain(2).tx.id, chain(2).height)
+      Success(Some(box)): Try[Option[IndexedBox]]
+    }.when(nodeApi).indexedBoxById(midpoint)
+
+    // Seeded at 201: the third registration is above it and belongs to block synchronization, and
+    // the first segment ends before ever reaching that height.
+    val seed = new MinerDictionaryBootstrap(nodeApi, protocol, maxTransforms = 100).run(201).value
+
+    seed.minerTree.numMiners shouldEqual 2
+    seed.minerTree.dictionary.digest should
+      contain theSameElementsInOrderAs chain(1).tree.dictionary.digest
+  }
+
+  /**
+   * A tip that moved is resumed from rather than restarted, but not without limit: a live box the
+   * walk can never reach still has to end in a reported failure instead of an unbounded walk.
+   */
+  it should "give up after bounding how many times it resumes a moving tip" in {
     val chain = registrationChain(count = 2, firstHeight = 200)
     val nodeApi = indexerFor(chain, liveBoxIdOverride = Some(SyncFixtures.id(79999)))
 
     new MinerDictionaryBootstrap(nodeApi, protocol, maxTransforms = 100).run(500)
-      .left.value should include("advanced during bootstrap")
+      .left.value should include(s"advanced ${MinerDictionaryBootstrap.MaxResumes} times")
   }
 
   it should "give up rather than walk an unbounded history" in {
@@ -223,7 +285,7 @@ class MinerDictionaryBootstrapSpec extends AnyFlatSpec with Matchers with Mockit
       inputs = tx.inputs.zipWithIndex.map { case (in, index) =>
         IndexedBox(NodeBox(in.id, "", 1000000L, index, height, "miner-dictionary"), "", height, 0L,
           Some(tx.id), Some(height),
-          in.spendingProof.map(p => NodeSpendingProof(p.proof, p.ext)))
+          in.spendingProof.map(p => NodeSpendingProof("", p.ext)))
       },
       dataInputs = Seq.empty,
       outputs = tx.outputs.map(indexedBox(_, height, None, None)),

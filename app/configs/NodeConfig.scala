@@ -10,6 +10,8 @@ import org.ergoplatform.restapi.client.ApiClient
 import org.slf4j.{Logger, LoggerFactory}
 import play.api.Configuration
 
+import java.net.URI
+
 import scala.util.{Failure, Success, Try}
 
 class NodeConfig(config: Configuration) extends NodeContext {
@@ -97,12 +99,21 @@ class NodeConfig(config: Configuration) extends NodeContext {
   override def getNodeWallet: NodeWallet = nodeWallet
   override def getNodeKey: String        = nodeKey
   override def getNodeApi: NodeApi       = nodeApi
+  /**
+   * `node.url` may carry its own port for a node on a custom one; when it does not, the network's
+   * default port is appended as before.
+   */
   override def getNodeUrl: String = {
-    val port = networkType match {
-      case NetworkType.MAINNET => ":9053/"
-      case NetworkType.TESTNET => ":9052/"
+    val trimmed = nodeURL.trim.stripSuffix("/")
+    val hasPort = Try(new URI(trimmed).getPort).getOrElse(-1) != -1
+    if (hasPort) trimmed + "/"
+    else {
+      val port = networkType match {
+        case NetworkType.MAINNET => ":9053/"
+        case NetworkType.TESTNET => ":9052/"
+      }
+      trimmed + port
     }
-    nodeURL + port
   }
 
 }

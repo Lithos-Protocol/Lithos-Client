@@ -300,7 +300,7 @@ class SnapshotActorRestartRecoverySpec extends TestKit(ActorSystem("snapshot-act
         calls.incrementAndGet()
         entered.countDown()
         release.await(10, TimeUnit.SECONDS)
-        Success(Left("no retained snapshot in test"))
+        Success(Left(NoSnapshot("no retained snapshot in test", retryable = false)))
       }))
 
     fixture.requester.send(fixture.actor, RestoreLatest)
@@ -328,7 +328,7 @@ class SnapshotActorRestartRecoverySpec extends TestKit(ActorSystem("snapshot-act
           entered.countDown()
           release.await(10, TimeUnit.SECONDS)
         }
-        Success(Left(s"restore call $call"))
+        Success(Left(NoSnapshot(s"restore call $call", retryable = false)))
       }),
       timeout = 150.millis)
 
@@ -365,7 +365,7 @@ class SnapshotActorRestartRecoverySpec extends TestKit(ActorSystem("snapshot-act
     val fixture = actorWithOverrides(
       persistFn = _ => { block(); Right(()) },
       reconstructFn = _ => { block(); Right(dictionary) },
-      restoreFn = Some(_ => { block(); Success(Left("isolation test")) }))
+      restoreFn = Some(_ => { block(); Success(Left(NoSnapshot("isolation test", retryable = false))) }))
 
     fixture.requester.send(fixture.actor, candidate(fixture.protocol, "isolated-save"))
     fixture.requester.send(fixture.actor, MaterializeDictionary(source, "isolated-load-1"))
@@ -405,7 +405,7 @@ class SnapshotActorRestartRecoverySpec extends TestKit(ActorSystem("snapshot-act
         case SnapshotDictionaryBase.Materialized(dictionary) => Right(dictionary)
         case _ => Left(SnapshotError.Corrupt("test source was not materialized"))
       },
-    restoreFn: Option[StateSnapshotStore => Try[Either[String, PersistedSyncState]]] = None,
+    restoreFn: Option[StateSnapshotStore => Try[Either[NoSnapshot, PersistedSyncState]]] = None,
     timeout: FiniteDuration = 5.minutes): Fixture = {
     val (nodeContext, _, wallet) = FakeNodeContext(numAddresses = 1)
     val protocol = ReducerFixtures.protocol(rollupStartHeight = 100)
@@ -424,7 +424,7 @@ class SnapshotActorRestartRecoverySpec extends TestKit(ActorSystem("snapshot-act
         Either[SnapshotError, AuthenticatedDictionaryView] = reconstructFn(source)
 
       override protected def findCanonical(store: StateSnapshotStore):
-        Try[Either[String, PersistedSyncState]] = restoreFn.fold(super.findCanonical(store))(_(store))
+        Try[Either[NoSnapshot, PersistedSyncState]] = restoreFn.fold(super.findCanonical(store))(_(store))
 
       override protected def operationTimeout: FiniteDuration = timeout
     })

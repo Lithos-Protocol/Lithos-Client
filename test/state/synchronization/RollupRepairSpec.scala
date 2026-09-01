@@ -312,7 +312,7 @@ class RollupRepairSpec extends AnyFlatSpec with Matchers with OptionValues {
     val miners = ErgoValue.of(Colls.fromArray(Array(Colls.fromArray(miner))),
       ErgoType.collType(scalaByteType)).toHex
     val placeholderProof = ErgoValue.of(Colls.fromArray(Array[Byte](1)), scalaByteType).toHex
-    val proof = InputSpendingProof("", Map(
+    val proof = InputSpendingProof(Map(
       "0" -> miners,
       "1" -> placeholderProof,
       "2" -> placeholderProof))
@@ -324,7 +324,7 @@ class RollupRepairSpec extends AnyFlatSpec with Matchers with OptionValues {
                                  inputs: Seq[IndexedBox],
                                  blockId: String): IndexedTransaction = {
     val withProofs = inputs.zip(tx.inputs).map { case (box, in) =>
-      box.copy(spendingProof = in.spendingProof.map(p => NodeSpendingProof(p.proof, p.ext)))
+      box.copy(spendingProof = in.spendingProof.map(p => NodeSpendingProof("", p.ext)))
     }
     IndexedTransaction(tx.id, withProofs, Seq.empty,
       tx.outputs.map(out => indexedOutput(out, height, None, None, None)),
@@ -343,5 +343,5 @@ class RollupRepairSpec extends AnyFlatSpec with Matchers with OptionValues {
           s"R${index + 4}" -> value
         }.toMap)),
       "", inclusionHeight, 0L, spentBy, spendingHeight,
-      proof.map(value => NodeSpendingProof(value.proof, value.ext)))
+      proof.map(value => NodeSpendingProof("", value.ext)))
 }

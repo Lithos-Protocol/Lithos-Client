@@ -102,7 +102,9 @@ final case class BlockTransition(state: CommittedSyncState,
                                  minerDictionaryFault: Option[String] = None,
                                  unrecognizedGenesis: Seq[String] = Seq.empty,
                                  unauthenticatedGenesis: Seq[(String, String)] = Seq.empty,
-                                 dictionaryTransforms: Vector[DictionaryTransform] = Vector.empty)
+                                 dictionaryTransforms: Vector[DictionaryTransform] = Vector.empty,
+                                 /** The chain moved the dictionary while its state was faulted. */
+                                 minerDictionaryMoved: Boolean = false)
 
 /**
  *  Applies a block deterministically to private dictionary copies without mutating the base state.
@@ -143,7 +145,8 @@ object BlockReducer {
         // Report only faults introduced by this block.
         BlockTransition(next, staged.relevantEvents, staged.dictionaryCopies, staged.quarantined,
           if (base.minerDictionaryFault.isEmpty) staged.minerDictionaryFault else None,
-          staged.unrecognizedGenesis, staged.unauthenticatedGenesis, staged.dictionaryTransforms)
+          staged.unrecognizedGenesis, staged.unauthenticatedGenesis, staged.dictionaryTransforms,
+          staged.minerDictionaryMoved)
       }
     }
   }
@@ -235,6 +238,13 @@ object BlockReducer {
     var quarantined: Seq[QuarantineFault] = Seq.empty
     var unrecognizedGenesis: Seq[String] = Seq.empty
     var unauthenticatedGenesis: Seq[(String, String)] = Seq.empty
+    /** Set when a block spends the dictionary singleton while its state is faulted. */
+    var minerDictionaryMoved: Boolean = false
+
+    /** The quarantined rollup whose current UTXO this input spends, if any. */
+    private def quarantinedUtxo(inputId: String): Option[String] =
+      if (inputId.isEmpty) None
+      else quarantines.collectFirst { case (id, fault) if fault.utxoId == inputId => id }
     // Preserve a prior fault until a fresh bootstrap supplies known dictionary state.
     var minerDictionaryFault: Option[String] = base.minerDictionaryFault
 
@@ -263,6 +273,24 @@ object BlockReducer {
         // Skip later dictionary spends after the tracked UTXO becomes unknown.
         case None if isMinerDictionaryTransform(tx) && minerDictionaryFault.isEmpty =>
           applyMinerDictionaryTransform(block, tx).left.map(BlockFault.MinerDictionary)
+
+        // Faulted: there is no tracked tree to apply this to, and it is still the case that the
+        // chain moved the dictionary. A rebuild started before this block is now stale, so the
+        // block has to say so or a repair permit taken earlier would still look current.
+        case None if isMinerDictionaryTransform(tx) =>
+          minerDictionaryMoved = true
+          Right(())
+
+        // Same for a quarantined rollup, which has no route and so can only be recognized by the
+        // UTXO the fault retained. Advancing it keeps the next spend detectable too.
+        case None if tx.inputs.headOption.exists(in => quarantinedUtxo(in.id).isDefined) =>
+          tx.inputs.headOption.flatMap(in => quarantinedUtxo(in.id)).foreach { rollupId =>
+            quarantines.get(rollupId).foreach { fault =>
+              quarantines += rollupId -> fault.copy(utxoId = tx.outputs.headOption.map(_.id).getOrElse(""))
+            }
+          }
+          Right(())
+
         case None => classifyGenesis(block, tx) match {
           // Reported rather than attributed: quarantining this id would drop the rollup already
           // tracked under it, which is the one that is legitimate.
@@ -301,7 +329,7 @@ object BlockReducer {
       stagedOperations -= DictionaryId.Rollup(rollupId)
       stagedBeforeDigests -= DictionaryId.Rollup(rollupId)
       val fault = QuarantineFault(rollupId, genesisHeight, collateralBoxId, error.message,
-        BlockReducer.isRetryable(error))
+        BlockReducer.isRetryable(error), utxoId = tree.utxoId)
       quarantines += rollupId -> fault
       quarantined :+= fault
     }

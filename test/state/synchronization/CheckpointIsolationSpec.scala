@@ -24,7 +24,12 @@ import java.util.concurrent.{CountDownLatch, TimeUnit}
 import scala.concurrent.duration._
 import scala.util.{Failure, Success, Try}
 
-/** A dictionary retry and a quarantine checkpoint must never share completion state. */
+/**
+ * A dictionary retry and a quarantine checkpoint must never share completion state.
+ *
+ * They are gated separately: a dictionary walk suppresses the maintenance checkpoints that would
+ * freeze catch-up, and nothing else.
+ */
 class CheckpointIsolationSpec extends TestKit(ActorSystem("checkpoint-isolation"))
   with AnyFlatSpecLike with Matchers with BeforeAndAfterAll with BeforeAndAfterEach {
 
@@ -68,6 +73,13 @@ class CheckpointIsolationSpec extends TestKit(ActorSystem("checkpoint-isolation"
       frame ! CheckBlock
       sync.expectMsg(GetMinerDictionaryRepairPermit)
       sync.reply(MinerDictionaryRepairPermit(readyAt, "dictionary-permit"))
+
+      // A blocked dictionary walk does not suppress the quarantine query. Sharing one gate meant a
+      // faulted dictionary silently stopped every rollup rebuild — the repair that recovers a
+      // payout — for as long as the fault lasted.
+      sync.expectMsg(GetRepairableQuarantines)
+      sync.reply(RepairableQuarantines(Seq.empty, readyAt, "quarantine-permit"))
+
       sync.expectMsgType[BeginCatchUp]
       val committed = (1 to 3).map { _ =>
         val block = sync.expectMsgType[ApplyBlock](2.seconds).blockInfo
@@ -75,12 +87,13 @@ class CheckpointIsolationSpec extends TestKit(ActorSystem("checkpoint-isolation"
           block.height.toLong, 0, 0))
         block.height
       }
+      // checkpointIntervalBlocks is 1, so every one of these commits would freeze the producer for a
+      // maintenance checkpoint if the dictionary walk did not suppress them. Reaching the tip is
+      // what proves it still does: the query above freezes nothing, a checkpoint would.
       committed shouldEqual Seq(startHeight + 1, startHeight + 2, startHeight + 3)
       sync.expectMsg(MarkReady)
       entered.await(2, TimeUnit.SECONDS) shouldBe true
 
-      // With the old missing guard, the first commit above would emit GetRepairableQuarantines and
-      // freeze. Reaching the tip proves no checkpoint or second repair flow overlapped the dictionary.
       release.countDown()
       val repair = sync.expectMsgType[RepairMinerDictionary](2.seconds)
       repair.atCursor shouldEqual readyAt

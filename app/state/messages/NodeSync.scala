@@ -10,7 +10,7 @@ object NodeSync {
   def token(asset: NodeAsset): Token = Token(ErgoId.create(asset.tokenId), asset.amount)
 
   def spendingProof(proof: NodeSpendingProof): InputSpendingProof =
-    InputSpendingProof(proof.proofBytes, proof.extension)
+    InputSpendingProof(proof.extension)
 
   def txInput(in: NodeInput): TxInput = TxInput(in.boxId, Some(spendingProof(in.spendingProof)))
 

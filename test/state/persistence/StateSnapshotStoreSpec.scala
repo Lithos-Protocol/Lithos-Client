@@ -360,6 +360,34 @@ class StateSnapshotStoreSpec extends AnyFlatSpec with Matchers with BeforeAndAft
     }
   }
 
+  /**
+   * Deciding what to collect means decoding every retained generation and scanning every blob key.
+   * Held under the lifecycle write lock, that whole scan sat inside the window in which no
+   * dictionary can be materialized — including the reconstruction a canonical block is waiting on,
+   * whose caller gives up after thirty seconds.
+   */
+  it should "let a dictionary load run while a committed checkpoint is still cleaning up" in {
+    val (keyValueStore, _) = store(retention = 2)
+    val blocking = new BlockingCleanupStore(keyValueStore)
+    val snapshots = new LevelDbStateSnapshotStore(blocking, 2, identity)
+    val first = plan(populatedSnapshot(height = 100, version = 8L))
+    snapshots.save(first, MaxEntry) shouldEqual Right(())
+    val digest = first.metadata.minerDictionary.dictionaryDigest
+
+    implicit val ec: ExecutionContext = ExecutionContext.global
+    blocking.blockCleanup = true
+    val saving = Future(snapshots.save(plan(populatedSnapshot(height = 101, version = 9L)), MaxEntry))
+    blocking.cleanupEntered.await(10, TimeUnit.SECONDS) shouldBe true
+
+    // The generation pointer is already committed here; only best-effort cleanup is still running.
+    val loading = Future(snapshots.loadDictionary(digest))
+    Await.result(loading, 10.seconds).isRight shouldBe true
+
+    blocking.releaseCleanup.countDown()
+    Await.result(saving, 10.seconds) shouldEqual Right(())
+    snapshots.close() shouldEqual Right(())
+  }
+
   private def store(retention: Int): (LevelDbKeyValueStore, LevelDbStateSnapshotStore) = {
     val directory = Files.createTempDirectory("lithos-sync-snapshot-")
     directories :+= directory
@@ -446,6 +474,24 @@ class StateSnapshotStoreSpec extends AnyFlatSpec with Matchers with BeforeAndAft
       DictionaryManifestHeader(flags, parameters, digest, bytes("manifest"), subtrees)
     }
     private def unsupported[A](): A = throw new UnsupportedOperationException("not needed by this test")
+  }
+
+  /** Blocks inside the post-commit blob collection, which is the only generation-prefix scan. */
+  private final class BlockingCleanupStore(underlying: KeyValueStore)
+    extends DelegatingStore(underlying) {
+    val cleanupEntered = new CountDownLatch(1)
+    val releaseCleanup = new CountDownLatch(1)
+    @volatile var blockCleanup = false
+
+    override def scanPrefix(prefix: Array[Byte]):
+      Either[StoreError, Vector[(Array[Byte], Array[Byte])]] = {
+      if (blockCleanup && text(prefix) == "sync/snapshot/gen/") {
+        blockCleanup = false
+        cleanupEntered.countDown()
+        releaseCleanup.await(10, TimeUnit.SECONDS)
+      }
+      super.scanPrefix(prefix)
+    }
   }
 
   private class DelegatingStore(underlying: KeyValueStore) extends KeyValueStore {
