@@ -8,8 +8,13 @@ import scorex.crypto.hash.Blake2b256
 import sigma.SigmaProp
 import work.lithos.mutations.Contract
 
-/** The emission- and rollup-side contracts the client compiles, held together so they are built once. */
+/**
+ * The emission- and rollup-side contracts the client compiles, held together so they are built once.
+ * `holdingLogic` is the script a holding spend hands to context variable 64; it is the instance whose
+ * hash `holding` carries, so the two may not be sourced separately.
+ */
 case class CompiledContracts(holding: Contract,
+                             holdingLogic: Contract,
                              gate: Contract,
                              collateral: Contract,
                              emission: Contract,
@@ -33,7 +38,7 @@ object ProtocolContracts {
       val payout = RollupContracts.mkPayoutContract(ctx)
       val eval = RollupContracts.mkEvalContract(
         ctx, LFSMHelpers.EVAL_PERIOD, payout.hashedPropBytes, LFSMHelpers.getFPToken(ctx))
-      val holding = RollupContracts.mkHoldingContract(ctx, LFSMHelpers.HOLDING_PERIOD, eval.hashedPropBytes)
+      val holding = RollupContracts.mkHoldingScripts(ctx, LFSMHelpers.HOLDING_PERIOD, eval.hashedPropBytes)
 
       val gate = CollateralContract.mkEmissionGateContract(ctx)
       val collateral = CollateralContract.mkMainnetCollatContract(
@@ -45,7 +50,8 @@ object ProtocolContracts {
         collateral.hashedPropBytes, gate.hashedPropBytes, LFSMHelpers.LIT_ID)
       val enforcer = CollateralContract.mkCollateralEnforcerContract(ctx, LFSMHelpers.LIT_ID)
 
-      val all = CompiledContracts(holding, gate, collateral, emission, guard, enforcer)
+      val all = CompiledContracts(holding.guard, holding.logic, gate, collateral, emission, guard,
+        enforcer)
       compiled = Some(all)
       all
     }

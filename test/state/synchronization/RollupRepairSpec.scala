@@ -211,9 +211,10 @@ class RollupRepairSpec extends AnyFlatSpec with Matchers with OptionValues {
     val firstKey = SyncFixtures.plasmaEntries(1, 16).head._1
     val firstValue = Longs.toByteArray(5L) ++ Array.fill[Byte](8)(1)
     val firstInsertion = firstDictionary.insert(firstKey -> firstValue)
+    val firstBond = ReducerFixtures.bondFor(firstValue)
     val firstSpend = ReducerFixtures.submissionTx(81, genesisOutputId, firstOutputId, 101,
       firstKey, firstValue, firstInsertion.proof.ergoValue.toHex, firstDictionary,
-      numMiners = 1, totalScore = BigInt(5), period = genesisHeight.toLong)
+      numMiners = 1, totalScore = BigInt(5), period = genesisHeight.toLong, nft = collateralId)
 
     val secondDictionary = firstDictionary.copy()
     val secondKey = SyncFixtures.plasmaEntries(2, 16).last._1
@@ -221,7 +222,9 @@ class RollupRepairSpec extends AnyFlatSpec with Matchers with OptionValues {
     val secondInsertion = secondDictionary.insert(secondKey -> secondValue)
     val secondSpend = ReducerFixtures.submissionTx(82, firstOutputId, tipId, 102,
       secondKey, secondValue, secondInsertion.proof.ergoValue.toHex, secondDictionary,
-      numMiners = 2, totalScore = BigInt(12), period = genesisHeight.toLong)
+      numMiners = 2, totalScore = BigInt(12), period = genesisHeight.toLong,
+      inputValue = ReducerFixtures.RollupValue + firstBond, inputBond = firstBond,
+      nft = collateralId)
 
     val collateral = IndexedBox(
       NodeBox(collateralId, SyncFixtures.id(879999), 1000000L, 0, 90,
@@ -267,13 +270,17 @@ class RollupRepairSpec extends AnyFlatSpec with Matchers with OptionValues {
     val miner = protocol.localMinerHash
     val value = Longs.toByteArray(5L) ++ Array.fill[Byte](8)(3)
     val inserted = dictionary.insert(miner -> value)
+    val bond = ReducerFixtures.bondFor(value)
+    val held = ReducerFixtures.RollupValue + bond
     val submission = ReducerFixtures.submissionTx(91, genesisOutputId, holdingId, 101,
       miner, value, inserted.proof.ergoValue.toHex, dictionary,
-      numMiners = 1, totalScore = BigInt(5), period = genesisHeight.toLong)
+      numMiners = 1, totalScore = BigInt(5), period = genesisHeight.toLong, nft = collateralId)
     val evaluation = ReducerFixtures.holdingToEvaluationTx(92, holdingId, evaluationId, 102,
-      dictionary, numMiners = 1, totalScore = BigInt(5), period = 102L)
+      dictionary, numMiners = 1, totalScore = BigInt(5), period = genesisHeight + 360L,
+      nispBlock = genesisHeight.toLong, bond = bond, value = held, nft = collateralId)
     val toPayout = ReducerFixtures.evaluationToPayoutTx(93, evaluationId, payoutId, 103,
-      dictionary, numMiners = 1, totalScore = BigInt(5), totalReward = 1000000L)
+      dictionary, numMiners = 1, totalScore = BigInt(5),
+      totalReward = ReducerFixtures.RollupValue, bond = bond, value = held, nft = collateralId)
     val payout = ownPayoutTx(payoutId, 104, miner)
 
     val collateral = IndexedBox(

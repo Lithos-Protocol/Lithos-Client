@@ -110,6 +110,24 @@ trait ContractSpecBase extends Matchers {
       .setOutputs(outputs: _*)
       .buildTx(Parameters.MinFee, changeTo, burn)
 
+  /**
+   * The same build with HEIGHT pinned to `height`. A preHeader is the only way to move HEIGHT off the
+   * mocked context's own height, so any condition comparing against an exact height needs one.
+   */
+  protected def buildAt(ctx: BlockchainContext,
+                        height: Int,
+                        inputs: Seq[InputUTXO],
+                        outputs: Seq[UTXO],
+                        changeTo: Address,
+                        dataInputs: Seq[InputUTXO] = Seq.empty[InputUTXO],
+                        burn: Seq[Token] = Seq.empty[Token]): UnsignedTransaction =
+    TxBuilder(ctx)
+      .setInputs(inputs: _*)
+      .setDataInputs(dataInputs: _*)
+      .setOutputs(outputs: _*)
+      .setPreHeader(ctx.createPreHeader().height(height).build())
+      .buildTx(Parameters.MinFee, changeTo, burn)
+
   // ─── assertions ───────────────────────────────────────────────────────────
 
   /** The spend must be accepted by the contract. */

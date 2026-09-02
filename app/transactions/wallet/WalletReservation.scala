@@ -16,11 +16,28 @@ import scala.util.control.NonFatal
 final class WalletReservation private[wallet](val id: String,
                                               val inputs: Seq[InputUTXO],
                                               selector: WalletSelector) {
-  // 0 selected, 1 submitting, 2 uncertain, 3 resolved.
+  // 0 selected, 1 submitting, 2 uncertain, 3 resolved, 4 candidate-held.
   private val state = new AtomicInteger(0)
 
   def release(): Unit =
     if (state.compareAndSet(0, 3)) selector.releaseReservation(id)
+
+  /**
+   * Withhold this lease for a transaction handed to a block candidate rather than to the node.
+   *
+   * Taken before the signed transaction leaves this actor, because from that moment the input may
+   * end up spent by a block and must not be selectable again. Nothing releases it: the only exit is
+   * [[uncertain]] once the height is over, followed by an authoritative refresh.
+   */
+  def holdForCandidate(): Unit = {
+    if (!state.compareAndSet(0, 4))
+      throw new ReservationExpiredException(s"Wallet reservation $id cannot be held for a candidate")
+    if (!selector.holdReservationForCandidate(id)) {
+      state.set(3)
+      throw new ReservationExpiredException(
+        s"Wallet reservation $id expired before it could be held for a candidate")
+    }
+  }
 
   /**
    * Acquire an identity-bound send permit before calling the node.
@@ -67,7 +84,8 @@ final class WalletReservation private[wallet](val id: String,
   }
 
   def uncertain(): Unit = {
-    val transitioned = state.compareAndSet(1, 2) || state.compareAndSet(0, 2)
+    val transitioned =
+      state.compareAndSet(1, 2) || state.compareAndSet(0, 2) || state.compareAndSet(4, 2)
     if (transitioned) selector.markReservationUncertain(id)
   }
 

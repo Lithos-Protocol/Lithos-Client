@@ -2,7 +2,8 @@ package mining
 
 import configs.CandidateConfig
 import contracts.specs.emission.EmissionSpecBase
-import lfsm.{EmissionSchedule, LFSMHelpers}
+import lfsm.states.RollupInfoState
+import lfsm.{EmissionSchedule, LFSMHelpers, LFSMPhase}
 import mutations.NodeWallet
 import node.NodeApi
 import org.ergoplatform.appkit.{BlockchainContext, ContextVar, ErgoValue}
@@ -52,14 +53,25 @@ class CandidateTxBuilderSpec extends AnyFlatSpec with Matchers with EmissionSpec
   private def collateralInput(ctx: BlockchainContext,
                               currentBlock: Int = 0,
                               permit: Long = LFSMHelpers.PERMIT_FLOOR,
-                              rollupHash: Array[Byte] = null): InputUTXO = {
+                              rollupHash: Array[Byte] = null,
+                              finderFee: Long = 0L): InputUTXO = {
     val c = ProtocolContracts(ctx)
     val (emitted, pub, split) = emissionAt(currentBlock, litSupply)
+    // A bidding lender posts five times their offer: the enforcer demands the extra principal at
+    // Join, so a box offering `f` holds `principalFloor + 5f` and names `DUST_BUDGET + f` in R4.
     val box = collateralUTXO(ctx, lender(ctx), lit = emitted + permit, pub = pub,
       founderSplit = split,
       rollupHash = if (rollupHash == null) c.holding.hashedPropBytes else rollupHash,
+      feeValue = DUST_BUDGET + finderFee,
+      value = principalFloor + 5L * finderFee,
       contract = c.collateral)
     inputAt(box, ctx, 0)
+  }
+
+  /** The genesis outputs as JSON, which is the only form the builder hands back. */
+  private def outputsOf(data: stratum.CollateralData): Seq[org.json.JSONObject] = {
+    val array = new org.json.JSONObject(data.txJSON).getJSONArray("outputs")
+    (0 until array.length()).map(array.getJSONObject)
   }
 
   // ─── the round trip ───────────────────────────────────────────────────────
@@ -143,6 +155,71 @@ class CandidateTxBuilderSpec extends AnyFlatSpec with Matchers with EmissionSpec
       val (txBuilder, _) = builder(ctx)
       val collat = collateralInput(ctx, permit = 0L)
       val data = txBuilder.buildGenesis(ctx, collat, ctx.getHeight + 1)
+      data.txId should not be empty
+    }
+  }
+
+  // ─── the shape the rollup contracts read ──────────────────────────────────
+
+  "The genesis holding box" should "carry the rollup NFT at index 0 and pool LIT at index 1" in {
+    withCtx { ctx =>
+      val (txBuilder, _) = builder(ctx)
+      val collat = collateralInput(ctx)
+      val data = txBuilder.buildGenesis(ctx, collat, ctx.getHeight + 1)
+
+      val tokens = outputsOf(data).head.getJSONArray("assets")
+      tokens.getJSONObject(0).getString("tokenId") shouldEqual collat.id.toString
+      tokens.getJSONObject(0).getLong("amount") shouldEqual 1L
+      tokens.getJSONObject(1).getString("tokenId") shouldEqual LFSMHelpers.LIT_ID.toString
+    }
+  }
+
+  it should "write R7 as the block height twice and an empty bond ledger" in {
+    withCtx { ctx =>
+      val (txBuilder, _) = builder(ctx)
+      val target = ctx.getHeight + 1
+      val data = txBuilder.buildGenesis(ctx, collateralInput(ctx), target)
+
+      val registers = outputsOf(data).head.getJSONObject("additionalRegisters")
+      val state = RollupInfoState.fromErgoValue(
+        ErgoValue.fromHex(registers.getString("R7")), LFSMPhase.HOLDING)
+      state shouldEqual RollupInfoState.holding(target.toLong, target.toLong, 0L)
+    }
+  }
+
+  /**
+   * The whole point of a bid: four parts reach the pool through the holding box and one part is the
+   * finder's. Asserted on the signed transaction rather than on an intermediate figure, because the
+   * finder's part only exists if it actually lands in an output.
+   */
+  "A bid of f" should "raise the holding box by 4f and the finder's box by f" in {
+    withCtx { ctx =>
+      val (txBuilder, wallet) = builder(ctx)
+      val f = 3000000L
+      val zero = outputsOf(txBuilder.buildGenesis(ctx, collateralInput(ctx), ctx.getHeight + 1))
+      val bid = outputsOf(
+        txBuilder.buildGenesis(ctx, collateralInput(ctx, finderFee = f), ctx.getHeight + 1))
+
+      zero should have size bid.size
+      bid.head.getLong("value") - zero.head.getLong("value") shouldEqual 4L * f
+
+      val finderTree = wallet.contract.ergoTreeHex
+      def finderValue(outputs: Seq[org.json.JSONObject]): Long =
+        outputs.filter(_.getString("ergoTree") == finderTree).map(_.getLong("value")).sum
+      finderValue(bid) - finderValue(zero) shouldEqual f
+
+      // Nothing else moves: the founders, the permit and the proof-of-spend are paid the same.
+      zero.tail.zip(bid.tail)
+        .filterNot { case (a, _) => a.getString("ergoTree") == finderTree }
+        .foreach { case (a, b) => b.getLong("value") shouldEqual a.getLong("value") }
+    }
+  }
+
+  it should "still be accepted by the collateral contract" in {
+    withCtx { ctx =>
+      val (txBuilder, _) = builder(ctx)
+      val data = txBuilder.buildGenesis(
+        ctx, collateralInput(ctx, finderFee = 3000000L), ctx.getHeight + 1)
       data.txId should not be empty
     }
   }

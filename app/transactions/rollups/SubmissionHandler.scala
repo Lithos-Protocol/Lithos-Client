@@ -17,7 +17,7 @@ import state.messages.MempoolMessages.{RebuildMempoolChains, ResetMempoolState}
 import state.messages.RollupMessages
 import state.messages.RollupMessages.{GetCurrentRollupCritical, RemoveRollup, RollupInfo}
 import state.DataBoxRetrievalException
-import transactions.BlockTxMessages.{BlockTxsReady, CandidateTx}
+import transactions.BlockTxMessages.{BlockTxsReady, CandidateTx, CandidateTxsDropped}
 import transactions.rollups.SubmissionHandler._
 import transactions.rollups.TransactionMessages.RollupTxType._
 import transactions.rollups.TransactionMessages._
@@ -72,6 +72,18 @@ class SubmissionHandler @Inject()(config: Configuration, nodeContext: NodeContex
   private var initialReservation: Option[WalletReservation] = None
   private var batchLock: Boolean = false
 
+  /**
+   * Bond inputs withheld for fee-less submissions offered into this miner's own block, by the
+   * height they were built for. They are never broadcast, so only a terminal event for that height
+   * can end them, and it ends them as uncertain rather than free: the block may have taken them.
+   */
+  private var candidateLeases: Map[Int, Seq[WalletReservation]] = Map.empty
+
+  /** The most recent height a candidate package was built for, so a late lease is not stranded. */
+  private var latestCandidateHeight: Int = 0
+
+  override def postStop(): Unit = candidateLeases.keys.toSeq.foreach(reconcileCandidates)
+
   override def receive: Receive = {
     // Off the mailbox. A batch is up to five attemptTx retries with five-second sleeps per stub,
     // plus selection asks, signing and node round trips — tens of seconds. This actor also answers
@@ -107,12 +119,27 @@ class SubmissionHandler @Inject()(config: Configuration, nodeContext: NodeContex
       releaseFeeAllocations()
       batchLock = false
 
+    // Sent from the build Future, so the map is only ever written on this thread. A lease that
+    // arrives after its height has passed is reconciled at once rather than stored and forgotten.
+    case CandidateLeaseTaken(blockHeight, reservation) =>
+      if (blockHeight < latestCandidateHeight) reservation.uncertain()
+      else candidateLeases += blockHeight ->
+        (candidateLeases.getOrElse(blockHeight, Seq.empty[WalletReservation]) :+ reservation)
+
+    // Whatever was offered for that height can no longer land, so its bond inputs stop being
+    // candidate-held. Uncertain, not released: the block may have included the transaction.
+    case CandidateTxsDropped(blockHeight) =>
+      reconcileCandidates(blockHeight)
+
     // A block is being assembled: build the same work fee-less and hand it back without
     // sending. The stubs stay queued so the funded copies still reach the mempool.
     case BuildBlockTxs(blockHeight, stubs) =>
       val replyTo = sender()
+      // A height that never got its own drop signal is over the moment a later one starts.
+      latestCandidateHeight = math.max(latestCandidateHeight, blockHeight)
+      candidateLeases.keys.filter(_ < blockHeight).toSeq.foreach(reconcileCandidates)
       Future {
-        stubs.flatMap(buildFeeless)
+        stubs.flatMap(buildFeeless(_, blockHeight))
       }.onComplete {
         case Success(built) =>
           if (built.nonEmpty)
@@ -184,14 +211,15 @@ class SubmissionHandler @Inject()(config: Configuration, nodeContext: NodeContex
   // ─── fee-less builds for this miner's own block ─────────────────────────────
 
   /**
-   * The same transaction the normal path would send, with no fee output and no wallet input.
+   * The same transaction the normal path would send, with no fee output.
    *
-   * Every rollup phase recreates its box at the same value, so these balance with nothing added.
-   * That also means they touch no wallet UTXO and cannot contend with the fee allocations the
-   * funded path depends on. Built against the same mempool-aware state, so anything chaining off an
+   * The transform and payout phases recreate their box at the same value, so those balance with no
+   * wallet input at all. A NISP submission does not: it has to post a refundable bond, which comes
+   * from a wallet box held for the whole height under [[candidateLeases]] so the funded copy cannot
+   * select it too. Built against the same mempool-aware state, so anything chaining off an
    * unconfirmed parent stays valid.
    */
-  private def buildFeeless(stub: RollupTxStub): Option[CandidateTx] =
+  private def buildFeeless(stub: RollupTxStub, blockHeight: Int): Option[CandidateTx] =
     latestRollupState(stub).flatMap { latest =>
       Try {
         client.execute { ctx =>
@@ -203,11 +231,26 @@ class SubmissionHandler @Inject()(config: Configuration, nodeContext: NodeContex
               val score = commitments.commitmentForNISP(latest.rollup.startHeight).get
               val holdingInput = latest.inputUTXO
               Globals.nispDB.getBestValidNISP(
-                holdingInput.registers(3).getValue.asInstanceOf[Long].toInt, score) match {
+                RollupTransactions.nispBlockHeight(holdingInput), score) match {
                 case Some(nisp) =>
-                  val sTx = RollupTransactions.genNISPSubmission(
-                    ctx, wallet, holdingInput, none, latest, noFee, nisp, score)
-                  candidateTx(sTx, CandidateTx.NispSubmission)
+                  // Reserved before the build and only handed to the candidate once it is signed, so
+                  // a build that fails gives the box straight back instead of stranding it.
+                  val bond = RollupTransactions.submissionBond(score)
+                  val reservation = walletSelector.reserveCovering(bond)
+                  val built = Try {
+                    val sTx = RollupTransactions.genNISPSubmission(
+                      ctx, wallet, holdingInput, reservation.inputs, latest, noFee, nisp, score)
+                    candidateTx(sTx, CandidateTx.NispSubmission)
+                  }
+                  built match {
+                    case Success(tx) =>
+                      reservation.holdForCandidate()
+                      self ! CandidateLeaseTaken(blockHeight, reservation)
+                      tx
+                    case Failure(ex) =>
+                      reservation.release()
+                      throw ex
+                  }
                 case None =>
                   throw new NoValidNISPException(
                     s"no valid NISP for rollup ${stub.rollupBlockId}")
@@ -498,7 +541,7 @@ class SubmissionHandler @Inject()(config: Configuration, nodeContext: NodeContex
           val score = commitments.commitmentForNISP(latestState.rollup.startHeight).get
           val nispDB = Globals.nispDB
           val holdingInput = latestState.inputUTXO
-          val bestNISP = nispDB.getBestValidNISP(holdingInput.registers(3).getValue.asInstanceOf[Long].toInt, score)
+          val bestNISP = nispDB.getBestValidNISP(RollupTransactions.nispBlockHeight(holdingInput), score)
           val initOutputs = initialTxInfo.map(initialTxOutputs(stub, _))
           val feeOutputs = mkFeeOutputs(stub, initOutputs)
           bestNISP match {
@@ -507,13 +550,31 @@ class SubmissionHandler @Inject()(config: Configuration, nodeContext: NodeContex
               logger.info(s"Got valid NISP for lithos-mined block ${latestState.rollup.startHeight} with score ${nisp.score}, heights" +
                 s" ${nisp.shares.map(_.getHeight).mkString(", ")} and size ${nisp.serialize.length} bytes")
 
-              val sTx = RollupTransactions.genNISPSubmission(ctx, wallet, holdingInput,
-                rollupWalletInputs(stub, initialTxInfo), latestState, feeOutputs, nisp, score)
+              // A submission funds a refundable bond as well as its fee, and the bond is priced off
+              // a score that is only known once a NISP has been chosen. The fee allocation was sized
+              // before that, so anything it does not cover is reserved here.
+              val base = rollupWalletInputs(stub, initialTxInfo)
+              val required = feeOutputs.map(_.value).sum + RollupTransactions.submissionBond(score)
+              val supplied = base.foldLeft(0L)(_ + _.value)
+              val topUp =
+                if (supplied >= required) None
+                else Some(walletSelector.reserveCovering(required - supplied))
 
-              if (initOutputs.isDefined)
-                updateFeeMap(sTx, initOutputs.get._2)
-              val txId = submitSigned(ctx, sTx, initialTxInfo.isDefined, stub.rollupBlockId,
-                latestState.inputUTXO.id.toString)
+              val txId = try {
+                val sTx = RollupTransactions.genNISPSubmission(ctx, wallet, holdingInput,
+                  base ++ topUp.toSeq.flatMap(_.inputs), latestState, feeOutputs, nisp, score)
+
+                if (initOutputs.isDefined)
+                  updateFeeMap(sTx, initOutputs.get._2)
+                submitSigned(ctx, sTx, initialTxInfo.isDefined, stub.rollupBlockId,
+                  latestState.inputUTXO.id.toString, topUp.toSeq)
+              } catch {
+                case NonFatal(ex) =>
+                  // Nothing reached the node on this path: submitSigned owns the lease from the
+                  // moment it begins one, and everything before that is local.
+                  topUp.foreach(r => Try(r.release()))
+                  throw ex
+              }
               logger.info(s"Sent transaction ${txId} to submit NISP for rollup ${stub.rollupBlockId}")
               txId
             case None =>
@@ -684,6 +745,24 @@ class SubmissionHandler @Inject()(config: Configuration, nodeContext: NodeContex
     lastResult
   }
 
+  /**
+   * End every bond lease taken for one height. Uncertain rather than released, because the block
+   * being assembled may have carried the transaction: only an authoritative mempool-aware refresh
+   * can say whether the input was spent, and that is what marking it uncertain triggers.
+   */
+  private def reconcileCandidates(blockHeight: Int): Unit =
+    candidateLeases.get(blockHeight).foreach { leases =>
+      candidateLeases -= blockHeight
+      leases.foreach { lease =>
+        try lease.uncertain()
+        catch {
+          case NonFatal(ex) =>
+            logger.warn(s"Could not reconcile a candidate bond input for block $blockHeight: " +
+              s"${ex.getMessage}")
+        }
+      }
+    }
+
   /** Hand back inputs reserved for an initial transaction that was never sent. */
   private def releaseInitialInputs(): Unit =
     {
@@ -706,13 +785,16 @@ class SubmissionHandler @Inject()(config: Configuration, nodeContext: NodeContex
                            tx: SignedTransaction,
                            usesInitialReservation: Boolean,
                            rollupId: String,
-                           expectedRollupInput: String): String = {
+                           expectedRollupInput: String,
+                           extraReservations: Seq[WalletReservation] = Seq.empty): String = {
     val reservation =
       if (usesInitialReservation) initialReservation
       else feeAllocationReservations.get(rollupId)
     if (reservation.isEmpty)
       throw new IllegalStateException(
         s"No wallet reservation owns the fee input for rollup $rollupId")
+    // Every lease the transaction spends, so a send that cannot acquire all of them acquires none.
+    val allReservations = reservation.toSeq ++ extraReservations
 
     // Converted BEFORE the node call, so a local conversion failure cannot happen after acceptance.
     // The fee allocations in this list are already held as Known reservations by their own rollups,
@@ -726,15 +808,16 @@ class SubmissionHandler @Inject()(config: Configuration, nodeContext: NodeContex
     val current = Await.result[RollupInfo](
       (syncHandler ? GetCurrentRollupCritical(rollupId)).mapTo[RollupInfo], timeout.duration)
     SubmissionHandler.sendIfCurrentInput(rollupId, expectedRollupInput, current) {
-      reservation.foreach(_.beginSubmission())
+      WalletReservation.beginAll(allReservations)
       try {
         val txId = ctx.sendTransaction(tx).replace("\"", "")
         reservation.foreach(_.commit(change))
+        extraReservations.foreach(_.commit())
         if (usesInitialReservation) initialReservation = None
         txId
       } catch {
         case NonFatal(ex) =>
-          reservation.foreach(_.uncertain())
+          allReservations.foreach(_.uncertain())
           if (usesInitialReservation) initialReservation = None
           throw ex
       }
@@ -837,6 +920,9 @@ object SubmissionHandler {
 
   /** Self-message: the batch and every attempt in it are done, so the lock can come off. */
   private case object BatchFinished
+
+  /** Self-message: a fee-less submission built off the actor thread took a bond input. */
+  private case class CandidateLeaseTaken(blockHeight: Int, reservation: WalletReservation)
 
   /** Maximum number of times attemptTx will retry on an ErgoClientException. */
   final val MAX_TX_ATTEMPTS: Int = 5

@@ -1,7 +1,8 @@
 package support
 
-import lfsm.states.{AuthenticatedDictionaryView, MinerDictionary, Rollup, PlasmaDictionary}
-import lfsm.LFSMPhase
+import lfsm.states.{AuthenticatedDictionaryView, MinerDictionary, PlasmaDictionary, Rollup, RollupInfoState}
+import lfsm.{LFSMPhase, RollupProtocol}
+import scorex.utils.Longs
 import org.ergoplatform.appkit.scalaapi.scalaByteType
 import org.ergoplatform.appkit.{ErgoValue, NetworkType}
 import org.ergoplatform.sdk.ErgoId
@@ -18,6 +19,12 @@ object ReducerFixtures {
   val CollateralTree = "collateral-tree"
   val CollateralToken: ErgoId = ErgoId.create(SyncFixtures.id(900001))
   val MinerDictionaryToken: ErgoId = ErgoId.create(SyncFixtures.id(900002))
+
+  /** The collateral box every fixture rollup is created from, so its NFT id is this. */
+  val DefaultOrigin: String = SyncFixtures.id(800000)
+
+  /** What a fixture rollup box holds before any submission adds a bond to it. */
+  val RollupValue: Long = 1000000L
 
   def protocol(rollupStartHeight: Int = 100): SyncProtocolContext =
     SyncProtocolContext(
@@ -53,11 +60,10 @@ object ReducerFixtures {
       dictionary = dictionary,
       numMiners = 0,
       totalScore = BigInt(0),
-      currentPeriod = Some(height.toLong),
-      totalReward = 0L,
+      state = RollupInfoState.holding(height.toLong, height.toLong, 0L),
+      value = RollupValue,
       startHeight = height,
       hasMiner = false,
-      phase = LFSMPhase.HOLDING,
       blockId = rollupId,
       utxoId = utxoId)
     CommittedSyncState(
@@ -65,7 +71,7 @@ object ReducerFixtures {
       version = version,
       rollups = Map(rollupId -> tree),
       routes = Map(utxoId -> rollupId),
-      rollupOrigins = Map(rollupId -> SyncFixtures.id(800000)),
+      rollupOrigins = Map(rollupId -> DefaultOrigin),
       minerTree = MinerDictionary.initialState,
       dataBoxToken = None)
   }
@@ -79,11 +85,10 @@ object ReducerFixtures {
       dictionary = dictionary,
       numMiners = 0,
       totalScore = BigInt(0),
-      currentPeriod = Some(state.cursor.height.toLong),
-      totalReward = 0L,
+      state = RollupInfoState.holding(state.cursor.height.toLong, state.cursor.height.toLong, 0L),
+      value = RollupValue,
       startHeight = state.cursor.height,
       hasMiner = false,
-      phase = LFSMPhase.HOLDING,
       blockId = rollupId,
       utxoId = utxoId)
     state.copy(rollups = state.rollups + (rollupId -> tree),
@@ -150,12 +155,15 @@ object ReducerFixtures {
   def rollupRegisters(dictionary: AuthenticatedDictionaryView,
                       numMiners: Int,
                       totalScore: BigInt,
-                      periodOrReward: Long): Seq[String] =
+                      state: RollupInfoState): Seq[String] =
     Seq(
       dictionary.ergoValue.toHex,
       ErgoValue.of(numMiners).toHex,
       ErgoValue.of(totalScore.bigInteger).toHex,
-      ErgoValue.of(periodOrReward).toHex)
+      state.ergoValue.toHex)
+
+  /** The rollup NFT every successor carries, minted from the collateral box the rollup came from. */
+  def rollupTokens(nft: String): Seq[Token] = Seq(Token(ErgoId.create(nft), 1L))
 
   def holdingOutput(id: String,
                     txId: String,
@@ -163,13 +171,18 @@ object ReducerFixtures {
                     dictionary: AuthenticatedDictionaryView,
                     numMiners: Int = 0,
                     totalScore: BigInt = BigInt(0),
-                    period: Long = 100L): TxOutput =
+                    period: Long = 100L,
+                    nispBlock: Long = -1L,
+                    bond: Long = 0L,
+                    value: Long = RollupValue,
+                    nft: String = DefaultOrigin): TxOutput =
     TxOutput(
       id = id,
-      value = 1000000L,
+      value = value,
       ergoTree = HoldingTree,
-      registers = rollupRegisters(dictionary, numMiners, totalScore, period),
-      assets = Seq.empty,
+      registers = rollupRegisters(dictionary, numMiners, totalScore,
+        RollupInfoState.holding(period, if (nispBlock < 0L) period else nispBlock, bond)),
+      assets = rollupTokens(nft),
       txId = txId,
       creationHeight = height,
       index = 0)
@@ -183,7 +196,32 @@ object ReducerFixtures {
       id = txId,
       inputs = Seq(TxInput(inputId, None)),
       dataInputs = Seq.empty,
-      outputs = Seq(holdingOutput(outputId, txId, height, PlasmaDictionary.empty(), period = height.toLong)))
+      outputs = Seq(holdingOutput(outputId, txId, height, PlasmaDictionary.empty(),
+        period = height.toLong, nft = inputId)))
+  }
+
+  /** The refundable bond a NISP whose first eight bytes carry this score has to post. */
+  def bondFor(nisp: Array[Byte]): Long =
+    RollupProtocol.bondForScore(Longs.fromByteArray(nisp.slice(0, 8)))
+
+  /** A top-up: the value rises inside the rollup's own block and nothing else moves. */
+  def topUpTx(number: Int,
+              inputId: String,
+              outputId: String,
+              height: Int,
+              dictionary: AuthenticatedDictionaryView,
+              numMiners: Int,
+              totalScore: BigInt,
+              period: Long,
+              added: Long,
+              inputValue: Long = RollupValue,
+              bond: Long = 0L,
+              nispBlock: Long = -1L,
+              nft: String = DefaultOrigin): BlockTx = {
+    val txId = SyncFixtures.id(340000 + number)
+    BlockTx(txId, Seq(TxInput(inputId, Some(InputSpendingProof(Map.empty)))), Seq.empty,
+      Seq(holdingOutput(outputId, txId, height, dictionary, numMiners, totalScore, period,
+        nispBlock, bond, inputValue + added, nft)))
   }
 
   /** Defaults to the collateral script, which authentication now requires alongside the token. */
@@ -211,16 +249,23 @@ object ReducerFixtures {
                    outputDictionary: AuthenticatedDictionaryView,
                    numMiners: Int,
                    totalScore: BigInt,
-                   period: Long): BlockTx = {
+                   period: Long,
+                   inputValue: Long = RollupValue,
+                   inputBond: Long = 0L,
+                   nispBlock: Long = -1L,
+                   nft: String = DefaultOrigin): BlockTx = {
     val txId = SyncFixtures.id(300000 + number)
     val pairHex = ErgoValue.pairOf(byteValue(key), byteValue(value)).toHex
     val spendingProof = InputSpendingProof(Map("1" -> pairHex, "2" -> proofHex))
+    // A submission raises the box and the ledger by the same bond, so the fixture prices it from
+    // the NISP it carries rather than taking it as another parameter that could disagree.
+    val bond = scala.util.Try(bondFor(value)).getOrElse(0L)
     BlockTx(
       id = txId,
       inputs = Seq(TxInput(inputId, Some(spendingProof))),
       dataInputs = Seq.empty,
       outputs = Seq(holdingOutput(outputId, txId, height, outputDictionary,
-        numMiners, totalScore, period)))
+        numMiners, totalScore, period, nispBlock, inputBond + bond, inputValue + bond, nft)))
   }
 
   def proofHex(bytes: Array[Byte]): String = byteValue(bytes).toHex
@@ -233,12 +278,15 @@ object ReducerFixtures {
                   dictionary: AuthenticatedDictionaryView,
                   numMiners: Int,
                   totalScore: BigInt,
-                  periodOrReward: Long): TxOutput =
-    TxOutput(id, 1000000L, ergoTree,
-      rollupRegisters(dictionary, numMiners, totalScore, periodOrReward),
-      Seq.empty, txId, height, 0)
+                  state: RollupInfoState,
+                  value: Long = RollupValue,
+                  nft: String = DefaultOrigin,
+                  lit: Seq[Token] = Seq.empty): TxOutput =
+    TxOutput(id, value, ergoTree,
+      rollupRegisters(dictionary, numMiners, totalScore, state),
+      rollupTokens(nft) ++ lit, txId, height, 0)
 
-  /** Holding to Evaluation: the tree and its counters are conserved, only the period moves. */
+  /** Holding to Evaluation: the tree, its counters, the value and the bonds are all conserved. */
   def holdingToEvaluationTx(number: Int,
                             inputId: String,
                             outputId: String,
@@ -246,13 +294,19 @@ object ReducerFixtures {
                             dictionary: AuthenticatedDictionaryView,
                             numMiners: Int,
                             totalScore: BigInt,
-                            period: Long): BlockTx = {
+                            period: Long,
+                            nispBlock: Long = -1L,
+                            bond: Long = 0L,
+                            value: Long = RollupValue,
+                            nft: String = DefaultOrigin): BlockTx = {
     val txId = SyncFixtures.id(310000 + number)
+    val state = RollupInfoState.evaluation(period, if (nispBlock < 0L) period else nispBlock, bond)
     BlockTx(txId, Seq(TxInput(inputId, Some(InputSpendingProof(Map.empty)))), Seq.empty,
-      Seq(phaseOutput(outputId, txId, height, EvaluationTree, dictionary, numMiners, totalScore, period)))
+      Seq(phaseOutput(outputId, txId, height, EvaluationTree, dictionary, numMiners, totalScore,
+        state, value, nft)))
   }
 
-  /** Evaluation to Payout: R7 becomes the total reward the rollup was created with. */
+  /** Evaluation to Payout: R7 heights become the ERG and LIT a miner share is taken from. */
   def evaluationToPayoutTx(number: Int,
                            inputId: String,
                            outputId: String,
@@ -260,10 +314,17 @@ object ReducerFixtures {
                            dictionary: AuthenticatedDictionaryView,
                            numMiners: Int,
                            totalScore: BigInt,
-                           totalReward: Long): BlockTx = {
+                           totalReward: Long,
+                           totalLit: Long = 0L,
+                           bond: Long = 0L,
+                           value: Long = RollupValue,
+                           nft: String = DefaultOrigin,
+                           lit: Seq[Token] = Seq.empty): BlockTx = {
     val txId = SyncFixtures.id(320000 + number)
+    val state = RollupInfoState.payout(totalReward, totalLit, bond)
     BlockTx(txId, Seq(TxInput(inputId, Some(InputSpendingProof(Map.empty)))), Seq.empty,
-      Seq(phaseOutput(outputId, txId, height, PayoutTree, dictionary, numMiners, totalScore, totalReward)))
+      Seq(phaseOutput(outputId, txId, height, PayoutTree, dictionary, numMiners, totalScore,
+        state, value, nft, lit)))
   }
 
   /**
@@ -283,12 +344,23 @@ object ReducerFixtures {
                    outputDictionary: AuthenticatedDictionaryView,
                    numMiners: Int,
                    totalScore: BigInt,
-                   period: Long): BlockTx = {
+                   period: Long,
+                   slashed: Long,
+                   nispBlock: Long = -1L,
+                   inputValue: Long = RollupValue,
+                   inputBond: Long = 0L,
+                   proverTree: String = "prover-script",
+                   nft: String = DefaultOrigin): BlockTx = {
     val txId = SyncFixtures.id(330000 + number)
     val proof = InputSpendingProof(Map(
       "0" -> byteValue(miner).toHex,
       "1" -> lookupProofHex,
       "2" -> deleteProofHex))
+    val state = RollupInfoState.evaluation(period, if (nispBlock < 0L) period else nispBlock,
+      inputBond - slashed)
+    // The forfeited bond leaves the box for the prover own script at output 1.
+    val reward = TxOutput(SyncFixtures.id(350000 + number), slashed, proverTree, Seq.empty,
+      Seq.empty, txId, height, 1)
     BlockTx(
       id = txId,
       inputs = Seq(
@@ -296,7 +368,7 @@ object ReducerFixtures {
         TxInput(proofInputId, Some(proof))),
       dataInputs = Seq.empty,
       outputs = Seq(phaseOutput(outputId, txId, height, EvaluationTree, outputDictionary,
-        numMiners, totalScore, period)))
+        numMiners, totalScore, state, inputValue - slashed, nft), reward))
   }
 
   private def byteValue(bytes: Array[Byte]): ErgoValue[_] =

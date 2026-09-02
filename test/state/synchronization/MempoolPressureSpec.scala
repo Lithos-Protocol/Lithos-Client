@@ -16,7 +16,7 @@ import state.messages.MempoolMessages.{MempoolSnapshot, MempoolUnavailable}
 import state.messages.SyncMessages.{Ready, SyncCursor}
 import state.messages.{Capability, SyncView}
 import lfsm.LFSMPhase
-import lfsm.states.{Rollup, PlasmaDictionary}
+import lfsm.states.{PlasmaDictionary, Rollup, RollupInfoState}
 import support.{FakeNodeContext, ReducerFixtures, SyncFixtures}
 import utils.Globals
 
@@ -167,8 +167,9 @@ class MempoolPressureSpec extends TestKit(ActorSystem("mempool-pressure"))
 
   /** Publishes a view tracking the first `tracked` fixture roots, since only those are followed. */
   private def ready(tracked: Int = PageSize + 10): Unit = {
-    val tree = Rollup(PlasmaDictionary.empty(), 0, BigInt(0), Some(100L), 0L, 100,
-      hasMiner = false, LFSMPhase.HOLDING, evaluated = false, "rollup", "utxo")
+    val tree = Rollup(PlasmaDictionary.empty(), 0, BigInt(0),
+      RollupInfoState.holding(100L, 100L, 0L), 0L, 100,
+      hasMiner = false, evaluated = false, blockId = "rollup", utxoId = "utxo")
     Globals.setSyncView(SyncView.initial.copy(
       status = Ready(SyncCursor(100, SyncFixtures.id(100), SyncFixtures.id(99))),
       rollups = (0 until tracked).map(index => root(index) -> tree.metadata),

@@ -190,10 +190,19 @@ class CollateralMarketApiImpl @Inject()(nodeContext: NodeContext,
 
       val litIdStr = st.lit.map(_.id).getOrElse(LFSMHelpers.LIT_ID).toString
       var permitLocked = BigInt(0)
+      var ergQueued = BigInt(0)
       tx.scanByToken(ctx, LFSMHelpers.QUEUE_TOKEN, tx.withMempool) { page =>
         permitLocked += page
-          .filter(b => tx.carriesOne(b, LFSMHelpers.QUEUE_TOKEN))
           .map(b => BigInt(permitOf(b, litIdStr))).sum
+        ergQueued += page
+          .map(b => BigInt(b.value)).sum
+      }
+
+      var collatLocked = BigInt(0)
+
+      tx.scanByToken(ctx, LFSMHelpers.COLLAT_TOKEN, tx.withMempool) { page =>
+        collatLocked += page
+          .map(b => BigInt(b.value)).sum
       }
 
       val (emittedTotal, _, founders) = EmissionSchedule.emissionAt(st.currentBlock, st.litHeld)
@@ -210,8 +219,7 @@ class CollateralMarketApiImpl @Inject()(nodeContext: NodeContext,
         bootstrapping = st.bootstrapping,
         proofsOfSpendAvailable = usableRetirements,
         queuedNanoErgs = (BigInt(st.backlog) * BigInt(CollateralParams.PRINCIPAL_FLOOR)).toString,
-        activeNanoErgs =
-          (BigInt(st.lenderSet.size) * BigInt(CollateralParams.PRINCIPAL_FLOOR)).toString,
+        activeNanoErgs = collatLocked.toString,
         permitLitLocked = permitLocked.toString,
         principalNanoErgs = CollateralParams.PRINCIPAL_FLOOR.toString,
         currentPermitLit = cfg.permitAt(st.backlog).toString,

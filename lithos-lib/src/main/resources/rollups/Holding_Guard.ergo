@@ -59,7 +59,8 @@
 
     sigmaProp(authenticLogic && authenticMiner) && signerProp && executeFromVar[SigmaProp](64)
   }else if(CTX_OP == 1.toByte){
-    // Spending Path 2: transform into the evaluation contract. No signer, no identity to bind.
+    // Spending Path 2: transform into the evaluation contract or add to the holding utxo value.
+    // No signer, no identity to bind.
     sigmaProp(authenticLogic) && executeFromVar[SigmaProp](64)
   }else{
     sigmaProp(false)

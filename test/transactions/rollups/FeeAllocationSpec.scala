@@ -2,14 +2,15 @@ package transactions.rollups
 
 import contracts.specs.rollup.RollupSpecBase
 import lfsm.LFSMPhase
-import lfsm.states.Rollup
+import lfsm.states.{Rollup, RollupInfoState}
+import lfsm.RollupProtocol
 import mutations.NodeWallet
 import org.ergoplatform.appkit.{BlockchainContext, ErgoValue, SignedTransaction}
 import org.ergoplatform.sdk.{ErgoId, JavaHelpers}
 import org.scalatest.propspec.AnyPropSpec
 import support.FakeNodeContext
 import transactions.rollups.TransactionMessages.LatestRollup
-import work.lithos.mutations.{Contract, InputUTXO, UTXO}
+import work.lithos.mutations.{Contract, InputUTXO, Token, UTXO}
 
 /**
  * Which outputs of a batch's initial transaction are the pre-created wallet boxes.
@@ -44,9 +45,9 @@ class FeeAllocationSpec extends AnyPropSpec with RollupSpecBase {
   private def treeFor(miner: Array[Byte]) = treeWith(Seq(miner -> nispBytes(4000L, realisticNispSize)))
 
   private def nispTree(ctx: BlockchainContext, miner: Array[Byte], totalScore: Long, reward: Long) =
-    Rollup(treeFor(miner), numMiners = 1, totalScore = BigInt(totalScore), currentPeriod = Some(100L),
-      totalReward = reward, startHeight = 1, hasMiner = true, phase = LFSMPhase.PAYOUT,
-      blockId = "bb" * 32, utxoId = dummyTxId)
+    Rollup(treeFor(miner), numMiners = 1, totalScore = BigInt(totalScore),
+      state = RollupInfoState.payout(reward, 0L, 0L), value = reward, startHeight = 1,
+      hasMiner = true, blockId = "bb" * 32, utxoId = dummyTxId)
 
   /**
    * A context and the client's own wallet over it.
@@ -63,14 +64,24 @@ class FeeAllocationSpec extends AnyPropSpec with RollupSpecBase {
    * A rollup box carrying the registers the builder reads, at the prover's own script.
    * R4 tree, R5 miner count, R6 total score, R7 the reward the payout divides up.
    */
+  /** The NFT every rollup box carries; here only its presence at index 0 is read. */
+  private val rollupNFT: ErgoId = ErgoId.create("cc" * 32)
+
   private def rollupInput(ctx: BlockchainContext, owner: Contract, tree: Rollup,
-                          value: Long, reward: Long): InputUTXO =
-    UTXO(owner, value, Seq.empty, Seq(
+                          value: Long, reward: Long, holding: Boolean = false): InputUTXO = {
+    // The one entry in the tree posted a bond, so the ledger has to hold it: payout refunds it on
+    // top of the pro-rata share and refuses to hand back more than it owes.
+    val bond = RollupProtocol.bondForScore(4000L)
+    val state =
+      if (holding) RollupInfoState.holding(100L, 100L, bond)
+      else RollupInfoState.payout(reward, 0L, bond)
+    UTXO(owner, value, Seq(Token(rollupNFT, 1L)), Seq(
       tree.dictionary.ergoValue,
       ErgoValue.of(1),
       ErgoValue.of(tree.totalScore.bigInteger),
-      ErgoValue.of(reward)))
+      state.ergoValue))
       .toInput(ctx, ErgoId.create(dummyTxId), 0.toShort)
+  }
 
   /**
    * The wallet input that funds the fee outputs. In production this is `rollupWalletInputs`; without
@@ -122,7 +133,8 @@ class FeeAllocationSpec extends AnyPropSpec with RollupSpecBase {
   property("a transform maps every rollup to a wallet output") {
     withWallet { (ctx, wallet) =>
       val tree = nispTree(ctx, wallet.contract.hashedPropBytes, totalScore = 4000L, reward = 0L)
-      val in = rollupInput(ctx, wallet.contract, tree, value = 60000000L, reward = 0L)
+      val in = rollupInput(ctx, wallet.contract, tree, value = 60000000L, reward = 0L,
+        holding = true)
 
       val signed = RollupTransactions.genHoldingTransform(ctx, wallet, in,
         Seq(funding(ctx, wallet.contract)), feeOutputs(wallet.contract))

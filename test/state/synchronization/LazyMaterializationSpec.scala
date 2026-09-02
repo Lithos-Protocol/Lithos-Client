@@ -184,7 +184,8 @@ class LazyMaterializationSpec extends TestKit(ActorSystem("lazy-materialization"
     val outputId = SyncFixtures.id(7451)
     val tx = ReducerFixtures.submissionTx(45, f.first.utxoId, outputId, startHeight,
       entryKey, value, insertion.proof.ergoValue.toHex, expectedDictionary,
-      numMiners = 1, totalScore = submittedScore, period = f.first.currentPeriod.get)
+      numMiners = 1, totalScore = submittedScore, period = f.first.currentPeriod.get,
+      inputValue = f.first.value, nft = SyncFixtures.id(7021))
     val block = BlockInfo(SyncFixtures.id(startHeight), startHeight, Seq(tx),
       SyncFixtures.id(startHeight - 1))
 

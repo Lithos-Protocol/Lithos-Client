@@ -7,6 +7,13 @@ import sigma.Colls
 import sigma.data.ProveDlog
 import work.lithos.mutations.{Contract, Mutator}
 
+/**
+ * A holding box's guard and the logic it executes out of context variable 64. They are produced
+ * together because the guard carries the hash of these exact logic bytes: a builder that attaches
+ * any other instance is refused before the logic runs at all.
+ */
+final case class HoldingScripts(guard: Contract, logic: Contract)
+
 object RollupContracts {
 
   /**
@@ -80,28 +87,36 @@ object RollupContracts {
     Contract.fromErgoScript(networkType, holdingLogicConstants(periodLength, evalBytes),
       ScriptGenerator.mkRollupScript("Holding_Logic"), Seq.empty[Mutator])
 
+  private def guardConstants(logic: Contract): Constants = ConstantsBuilder.create()
+    // Value bytes, not prop bytes: the guard hashes what it executes.
+    .item("CONST_HOLDING_LOGIC_HASH", Colls.fromArray(logic.hashedValueBytes))
+    .build()
+
   /**
-   * The script a holding box carries. Compiles the logic and injects its hash, so the guard can
-   * never be built against logic this build does not also produce. Value bytes, not prop bytes:
-   * the guard hashes what it executes. Compiles two scripts, so callers should cache.
+   * The script a holding box carries, together with the logic whose hash is injected into it. Both
+   * come from one call so a builder cannot pin one instance and attach another. Compiles two
+   * scripts, so callers should cache.
    */
-  def mkHoldingContract(ctx: BlockchainContext, periodLength: Long, evalBytes: Array[Byte]): Contract = {
+  def mkHoldingScripts(ctx: BlockchainContext, periodLength: Long, evalBytes: Array[Byte]): HoldingScripts = {
     val logic = mkHoldingLogicContract(ctx, periodLength, evalBytes)
-    val constants = ConstantsBuilder.create()
-      .item("CONST_HOLDING_LOGIC_HASH", Colls.fromArray(logic.hashedValueBytes))
-      .build()
-
-    Contract.fromErgoScript(ctx, constants, ScriptGenerator.mkRollupScript("Holding_Guard"))
+    HoldingScripts(
+      Contract.fromErgoScript(ctx, guardConstants(logic), ScriptGenerator.mkRollupScript("Holding_Guard")),
+      logic)
   }
 
-  def mkHoldingContract(networkType: NetworkType, periodLength: Long, evalBytes: Array[Byte]): Contract = {
+  def mkHoldingScripts(networkType: NetworkType, periodLength: Long, evalBytes: Array[Byte]): HoldingScripts = {
     val logic = mkHoldingLogicContract(networkType, periodLength, evalBytes)
-    val constants = ConstantsBuilder.create()
-      .item("CONST_HOLDING_LOGIC_HASH", Colls.fromArray(logic.hashedValueBytes))
-      .build()
-
-    Contract.fromErgoScript(networkType, constants, ScriptGenerator.mkRollupScript("Holding_Guard"), Seq.empty[Mutator])
+    HoldingScripts(
+      Contract.fromErgoScript(networkType, guardConstants(logic),
+        ScriptGenerator.mkRollupScript("Holding_Guard"), Seq.empty[Mutator]),
+      logic)
   }
+
+  def mkHoldingContract(ctx: BlockchainContext, periodLength: Long, evalBytes: Array[Byte]): Contract =
+    mkHoldingScripts(ctx, periodLength, evalBytes).guard
+
+  def mkHoldingContract(networkType: NetworkType, periodLength: Long, evalBytes: Array[Byte]): Contract =
+    mkHoldingScripts(networkType, periodLength, evalBytes).guard
 
   def mkFPControlTestnetContract(ctx: BlockchainContext, proveDlog: ProveDlog): Contract = {
     val constants = ConstantsBuilder.create()

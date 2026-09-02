@@ -1,7 +1,7 @@
 package state.persistence
 
 import lfsm.LFSMPhase
-import lfsm.states.{AuthenticatedDictionaryView, DeferredDictionary, DictionaryManifestHeader, MinerDictionaryMetadata, PlasmaDictionary, RollupMetadata}
+import lfsm.states.{AuthenticatedDictionaryView, DeferredDictionary, DictionaryManifestHeader, MinerDictionaryMetadata, PlasmaDictionary, RollupInfoState, RollupMetadata}
 import org.bouncycastle.util.encoders.Hex
 import org.ergoplatform.sdk.ErgoId
 import org.slf4j.{Logger, LoggerFactory}
@@ -475,7 +475,10 @@ object StateSnapshotCodec {
   private val MetaMagic = 0x4c53534d
   private val DictionaryMagic = 0x4c535344
   private val SubtreeMagic = 0x4c535353
-  private val SchemaVersion = 1
+  // A rollup's R7 became three longs and its boxes gained an NFT, so nothing written before this
+  // version can be decoded into a state whose fields still mean what they say. Loading one fails and
+  // the caller resynchronizes rather than guessing.
+  private val SchemaVersion = 2
   private val MaxBlobBytes = 512 * 1024 * 1024
   private val MaxEntries = 1000000
 
@@ -605,21 +608,29 @@ object StateSnapshotCodec {
   private def writeRollupMetadata(out: DataOutputStream, rollup: RollupMetadata): Unit = {
     out.writeInt(rollup.numMiners)
     writeBigInt(out, rollup.totalScore)
-    writeOptionalLong(out, rollup.currentPeriod)
-    out.writeLong(rollup.totalReward)
+    // The phase leads the three state values because it is what says what they mean.
+    out.writeByte(phaseByte(rollup.state.phase))
+    rollup.state.values.foreach(out.writeLong)
+    out.writeLong(rollup.value)
     out.writeInt(rollup.startHeight)
     out.writeBoolean(rollup.hasMiner)
-    out.writeByte(phaseByte(rollup.phase))
     out.writeBoolean(rollup.evaluated)
     writeString(out, rollup.blockId)
     writeString(out, rollup.utxoId)
     writeString(out, rollup.dictionaryDigest)
   }
 
-  private def readRollupMetadata(in: DataInputStream): RollupMetadata =
-    RollupMetadata(in.readInt(), readBigInt(in), readOptionalLong(in), in.readLong(), in.readInt(),
-      in.readBoolean(), readPhase(in.readByte()), in.readBoolean(), readString(in), readString(in),
-      readString(in))
+  private def readRollupMetadata(in: DataInputStream): RollupMetadata = {
+    val numMiners = in.readInt()
+    val totalScore = readBigInt(in)
+    val phase = readPhase(in.readByte())
+    val first = in.readLong()
+    val second = in.readLong()
+    val bond = in.readLong()
+    val state = RollupInfoState.fromValues(phase, Vector(first, second, bond))
+    RollupMetadata(numMiners, totalScore, state, in.readLong(), in.readInt(), in.readBoolean(),
+      in.readBoolean(), readString(in), readString(in), readString(in))
+  }
 
   private def writeMinerMetadata(out: DataOutputStream, miner: MinerDictionaryMetadata): Unit = {
     out.writeInt(miner.numMiners)
@@ -692,14 +703,6 @@ object StateSnapshotCodec {
 
   private def readCursor(in: DataInputStream): SyncCursor =
     SyncCursor(in.readInt(), readString(in), readString(in))
-
-  private def writeOptionalLong(out: DataOutputStream, value: Option[Long]): Unit = {
-    out.writeBoolean(value.isDefined)
-    value.foreach(out.writeLong)
-  }
-
-  private def readOptionalLong(in: DataInputStream): Option[Long] =
-    if (in.readBoolean()) Some(in.readLong()) else None
 
   private def writeBigInt(out: DataOutputStream, value: BigInt): Unit =
     writeByteArray(out, value.toByteArray)

@@ -100,7 +100,8 @@ class BlockReducerSpec extends AnyFlatSpec with Matchers with OptionValues {
       outputDictionary = expected,
       numMiners = 1,
       totalScore = BigInt(12),
-      period = 100L)
+      period = 100L,
+      nft = collateralInput)
     val blockId = SyncFixtures.id(100)
     val block = BlockInfo(
       id = blockId,
@@ -141,9 +142,11 @@ class BlockReducerSpec extends AnyFlatSpec with Matchers with OptionValues {
       numMiners = 1, totalScore = BigInt(4), period = 99L)
     val secondInsertion = expected.insert(entries(1)._1 -> secondValue)
     val finalUtxo = SyncFixtures.id(600004)
+    val firstBond = ReducerFixtures.bondFor(firstValue)
     val second = ReducerFixtures.submissionTx(21, middleUtxo, finalUtxo, 100,
       entries(1)._1, secondValue, secondInsertion.proof.ergoValue.toHex, expected,
-      numMiners = 2, totalScore = BigInt(11), period = 99L)
+      numMiners = 2, totalScore = BigInt(11), period = 99L,
+      inputValue = ReducerFixtures.RollupValue + firstBond, inputBond = firstBond)
     val block = BlockInfo(SyncFixtures.id(100), 100, Seq(first, second), base.cursor.blockId)
 
     val transition = BlockReducer.applyBlock(base, block, protocol).toOption.value
@@ -187,13 +190,15 @@ class BlockReducerSpec extends AnyFlatSpec with Matchers with OptionValues {
     val inputUtxo = SyncFixtures.id(800002)
     val base = ReducerFixtures.stateWithRollup(99, SyncFixtures.id(99), rollupId, inputUtxo, baseDictionary)
     val digestBefore = baseDictionary.digest.clone()
-    val (key, value) = SyncFixtures.plasmaEntries(1, 16).head
+    val key = SyncFixtures.plasmaEntries(1, 16).head._1
+    // A priced score, so this reaches the digest check rather than faulting on the bond first.
+    val value = Longs.toByteArray(8L) ++ Array.fill[Byte](8)(1)
     val proofSource = PlasmaDictionary.empty()
     val insertion = proofSource.insert(key -> value)
     val wrongDigest = PlasmaDictionary.empty()
     val tx = ReducerFixtures.submissionTx(40, inputUtxo, SyncFixtures.id(800003), 100,
       key, value, insertion.proof.ergoValue.toHex, wrongDigest,
-      numMiners = 1, totalScore = BigInt(0), period = 99L)
+      numMiners = 1, totalScore = BigInt(8), period = 99L)
     val blockId = SyncFixtures.id(100)
     val block = BlockInfo(blockId, 100, Seq(tx), base.cursor.blockId)
 
@@ -229,7 +234,8 @@ class BlockReducerSpec extends AnyFlatSpec with Matchers with OptionValues {
       numMiners = 1, totalScore = BigInt(6), period = 99L)
     val bad = ReducerFixtures.submissionTx(51, brokenUtxo, SyncFixtures.id(810006), 100,
       entries(1)._1, entries(1)._2, ReducerFixtures.proofHex(Array[Byte](9)), PlasmaDictionary.empty(),
-      numMiners = 1, totalScore = BigInt(0), period = 99L)
+      numMiners = 1, totalScore = BigInt(0), period = 99L,
+      nft = base.rollupOrigins(brokenId))
     val block = BlockInfo(SyncFixtures.id(100), 100, Seq(bad, good), base.cursor.blockId)
 
     val transition = BlockReducer.applyBlock(base, block, protocol).toOption.value
@@ -272,8 +278,10 @@ class BlockReducerSpec extends AnyFlatSpec with Matchers with OptionValues {
         }
       }
 
-    // 1. The local miner submits. The rollup now claims it.
+    // 1. The local miner submits. The rollup now claims it, and holds their bond.
     val value = Longs.toByteArray(9L) ++ Array.fill[Byte](8)(4)
+    val bond = ReducerFixtures.bondFor(value)
+    val held = ReducerFixtures.RollupValue + bond
     val tracked = PlasmaDictionary.empty()
     val insertion = tracked.insert(key -> value)
     val submitted = ReducerFixtures.submissionTx(60, utxoId, SyncFixtures.id(900003), 100,
@@ -290,7 +298,8 @@ class BlockReducerSpec extends AnyFlatSpec with Matchers with OptionValues {
     // 2. Holding to Evaluation conserves the tree, so the rollup survives on its local claim.
     val evalUtxo = SyncFixtures.id(900004)
     val toEvaluation = ReducerFixtures.holdingToEvaluationTx(61, SyncFixtures.id(900003), evalUtxo,
-      101, tracked, numMiners = 1, totalScore = BigInt(9), period = 101L)
+      101, tracked, numMiners = 1, totalScore = BigInt(9), period = 99L + 360L, nispBlock = 99L,
+      bond = bond, value = held)
     val afterEvaluation = BlockReducer.applyBlock(afterSubmission,
       BlockInfo(SyncFixtures.id(101), 101, Seq(toEvaluation), SyncFixtures.id(100)), protocolWithMiner)
       .toOption.value.state
@@ -305,7 +314,8 @@ class BlockReducerSpec extends AnyFlatSpec with Matchers with OptionValues {
     val payoutUtxo = SyncFixtures.id(900005)
     val slashed = ReducerFixtures.fraudProofTx(62, evalUtxo, SyncFixtures.id(900006), payoutUtxo, 102,
       key, lookup.proof.ergoValue.toHex, deletion.proof.ergoValue.toHex, drained,
-      numMiners = 0, totalScore = BigInt(0), period = 101L)
+      numMiners = 0, totalScore = BigInt(0), period = 99L + 360L, slashed = bond,
+      nispBlock = 99L, inputValue = held, inputBond = bond)
     val afterSlash = BlockReducer.applyBlock(afterEvaluation,
       BlockInfo(SyncFixtures.id(102), 102, Seq(slashed), SyncFixtures.id(101)), protocolWithMiner)
       .toOption.value.state
@@ -316,7 +326,8 @@ class BlockReducerSpec extends AnyFlatSpec with Matchers with OptionValues {
 
     // 4. The Payout transition drops it, so no tracked rollup can ever reach the drain path.
     val toPayout = ReducerFixtures.evaluationToPayoutTx(63, payoutUtxo, SyncFixtures.id(900007),
-      103, drained, numMiners = 0, totalScore = BigInt(0), totalReward = 0L)
+      103, drained, numMiners = 0, totalScore = BigInt(0),
+      totalReward = ReducerFixtures.RollupValue, value = ReducerFixtures.RollupValue)
     val afterPayout = BlockReducer.applyBlock(afterSlash,
       BlockInfo(SyncFixtures.id(103), 103, Seq(toPayout), SyncFixtures.id(102)), protocolWithMiner)
       .toOption.value.state

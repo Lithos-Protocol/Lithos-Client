@@ -43,4 +43,14 @@ object BlockTxMessages {
    * whatever chains off it. An empty sequence is a normal answer.
    */
   case class BlockTxsReady(blockHeight: Int, txs: Seq[CandidateTx])
+
+  /**
+   * Mining → every transaction source: nothing offered for `blockHeight` can land any more, because
+   * the node refused the package or the chain moved past it.
+   *
+   * A source that reserved a wallet box for one of those transactions has no other way to learn
+   * this. The transaction was never broadcast, so no send outcome resolves the box, and the block
+   * may still have taken it — which is why this is a signal to reconcile rather than to release.
+   */
+  case class CandidateTxsDropped(blockHeight: Int)
 }

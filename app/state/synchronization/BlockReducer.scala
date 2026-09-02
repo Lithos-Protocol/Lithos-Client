@@ -1,7 +1,7 @@
 package state.synchronization
 
-import lfsm.states.{AuthenticatedDictionary, AuthenticatedDictionaryView, MinerDictionary, Rollup, PlasmaDictionary}
-import lfsm.{LFSMHelpers, LFSMPhase}
+import lfsm.states.{AuthenticatedDictionary, AuthenticatedDictionaryView, MinerDictionary, PlasmaDictionary, Rollup, RollupInfoState}
+import lfsm.{LFSMHelpers, LFSMPhase, RollupProtocol}
 import org.bouncycastle.util.encoders.Hex
 import org.ergoplatform.appkit.{ErgoValue, NetworkType}
 import org.ergoplatform.sdk.ErgoId
@@ -269,7 +269,7 @@ object BlockReducer {
     def applyTransaction(block: BlockInfo, tx: BlockTx): Either[BlockFault, Unit] = {
       tx.inputs.headOption.flatMap(in => routes.get(in.id)) match {
         case Some(rollupId) =>
-          applyRollupTransform(tx, rollupId).left.map(BlockFault.Rollup(rollupId, _))
+          applyRollupTransform(block, tx, rollupId).left.map(BlockFault.Rollup(rollupId, _))
         // Skip later dictionary spends after the tracked UTXO becomes unknown.
         case None if isMinerDictionaryTransform(tx) && minerDictionaryFault.isEmpty =>
           applyMinerDictionaryTransform(block, tx).left.map(BlockFault.MinerDictionary)
@@ -390,20 +390,30 @@ object BlockReducer {
     private def applyGenesis(block: BlockInfo, tx: BlockTx): Either[SyncApplyError, Unit] = {
       for {
         output <- required(tx.outputs.headOption, tx.id, "genesis output 0")
-        registers <- rollupRegisters(output, tx.id)
+        collateral <- required(tx.inputs.headOption.map(_.id), tx.id, "genesis collateral input")
+        registers <- rollupRegisters(output, tx.id, LFSMPhase.HOLDING)
+        state = registers.state
         _ <- requireState(tx.id, registers.numMiners == 0, "genesis miner count must be zero")
         _ <- requireState(tx.id, registers.totalScore == 0, "genesis total score must be zero")
-        _ <- requireState(tx.id, registers.periodOrReward == block.height.toLong,
+        _ <- requireState(tx.id, state.periodStart == block.height.toLong,
           "genesis period must equal its containing block height")
+        _ <- requireState(tx.id, state.nispBlockHeight == block.height.toLong,
+          "genesis NISP block height must equal its containing block height")
+        _ <- requireState(tx.id, state.totalBond == 0L,
+          s"genesis bond ledger must be empty, found ${state.totalBond}")
+        // The NFT is minted from the collateral box's own id, so it is what ties every later spend
+        // of this chain back to the box the rollup was created out of.
+        _ <- requireState(tx.id,
+          RollupProtocol.carriesNFT(output.assets, ErgoId.create(collateral)),
+          s"genesis output 0 does not carry a single rollup NFT minted from collateral box $collateral")
         dictionary = PlasmaDictionary.empty()
         _ <- requireDigest(tx.id, dictionary, registers.digest)
       } yield {
-        val tree = Rollup(dictionary, registers.numMiners, registers.totalScore,
-          Some(registers.periodOrReward), output.value, registers.periodOrReward.toInt,
-          hasMiner = false, LFSMPhase.HOLDING, blockId = block.id, utxoId = output.id)
+        val tree = Rollup(dictionary, registers.numMiners, registers.totalScore, state,
+          output.value, block.height, hasMiner = false, blockId = block.id, utxoId = output.id)
         rollups += block.id -> tree
         routes += output.id -> block.id
-        rollupOrigins += block.id -> tx.inputs.head.id
+        rollupOrigins += block.id -> collateral
         // Tracking it again ends any fault held for it, which the state invariant requires.
         untrack(block.id)
         relevantEvents += 1
@@ -416,50 +426,118 @@ object BlockReducer {
       tx.outputs.headOption.exists(_.assets.exists(t => t.id == protocol.minerDictionaryToken && t.amount == 1L)) &&
         !tx.outputs.headOption.exists(_.id == protocol.minerDictionaryGenesisId)
 
-    private def applyRollupTransform(tx: BlockTx, rollupId: String): Either[SyncApplyError, Unit] = {
+    private def applyRollupTransform(block: BlockInfo,
+                                     tx: BlockTx,
+                                     rollupId: String): Either[SyncApplyError, Unit] = {
       val tree = rollups(rollupId)
       val applied = tree.phase match {
         case LFSMPhase.HOLDING => applyHolding(tx, rollupId, tree)
-        case LFSMPhase.EVAL => applyEvaluation(tx, rollupId, tree)
+        case LFSMPhase.EVAL => applyEvaluation(block, tx, rollupId, tree)
         case LFSMPhase.PAYOUT => applyPayout(tx, rollupId, tree)
       }
       applied.map { _ => relevantEvents += 1 }
     }
 
+    /**
+     * The NFT is minted from the collateral box the rollup came out of, so its id is the origin this
+     * reducer already retains. Every spend short of the final payout carries it forward at index 0.
+     */
+    private def requireNFT(txId: String,
+                           rollupId: String,
+                           output: TxOutput): Either[SyncApplyError, Unit] =
+      rollupOrigins.get(rollupId) match {
+        case Some(collateral) =>
+          requireState(txId, RollupProtocol.carriesNFT(output.assets, ErgoId.create(collateral)),
+            s"successor does not carry rollup NFT $collateral at token index 0")
+        case None =>
+          Left(StateInvariant(txId, s"rollup $rollupId has no recorded collateral origin"))
+      }
+
     private def applyHolding(tx: BlockTx,
                              rollupId: String,
                              tree: Rollup): Either[SyncApplyError, Unit] = {
       required(tx.outputs.headOption, tx.id, "rollup output 0").flatMap { output =>
-        if (output.ergoTree == protocol.holdingErgoTree) applySubmission(tx, rollupId, tree, output)
+        if (output.ergoTree == protocol.holdingErgoTree)
+          rollupRegisters(output, tx.id, LFSMPhase.HOLDING).flatMap { registers =>
+            if (isTopUp(tree, registers, output)) applyTopUp(tx, rollupId, tree, registers, output)
+            else applySubmission(tx, rollupId, tree, registers, output)
+          }
         else if (output.ergoTree == protocol.evaluationErgoTree) {
           for {
-            registers <- rollupRegisters(output, tx.id)
+            registers <- rollupRegisters(output, tx.id, LFSMPhase.EVAL)
+            state = registers.state
             _ <- requireDigest(tx.id, tree.dictionary, registers.digest)
             _ <- requireState(tx.id, registers.numMiners == tree.numMiners,
               "holding-to-evaluation changed miner count")
             _ <- requireState(tx.id, registers.totalScore == tree.totalScore,
               "holding-to-evaluation changed total score")
+            _ <- requireState(tx.id, output.value == tree.value,
+              s"holding-to-evaluation moved value from ${tree.value} to ${output.value}")
+            _ <- requireState(tx.id, state.totalBond == tree.totalBond,
+              "holding-to-evaluation changed the bond ledger")
+            _ <- requireState(tx.id, state.nispBlockHeight == tree.state.nispBlockHeight,
+              "holding-to-evaluation changed the rollup's own block height")
+            // The successor's period start is what the whole evaluation window is measured from, so
+            // it is checked here rather than adopted: the transform may not run early.
+            _ <- requireState(tx.id,
+              state.periodStart >= tree.state.periodStart + LFSMHelpers.HOLDING_PERIOD,
+              s"holding-to-evaluation started its period at ${state.periodStart}, before the " +
+                s"holding period ending at ${tree.state.periodStart + LFSMHelpers.HOLDING_PERIOD}")
+            _ <- requireNFT(tx.id, rollupId, output)
           } yield {
-            if (tree.hasMiner)
-              replaceRollup(rollupId, tree.copy(currentPeriod = Some(registers.periodOrReward),
-                phase = LFSMPhase.EVAL, utxoId = output.id))
+            if (tree.hasMiner) replaceRollup(rollupId, tree.copy(state = state, utxoId = output.id))
             else removeRollup(rollupId)
           }
         } else Left(StateInvariant(tx.id, s"unexpected output contract for holding phase: ${output.ergoTree}"))
       }
     }
 
+    /**
+     * A top-up raises the box value inside the rollup's own block and moves nothing else, so it is
+     * recognizable without reading a single context variable. Only the block's builder can produce
+     * one, and more than one may appear in the same block.
+     */
+    private def isTopUp(tree: Rollup, registers: RollupRegisters, output: TxOutput): Boolean =
+      output.value > tree.value &&
+        registers.numMiners == tree.numMiners &&
+        registers.totalScore == tree.totalScore &&
+        registers.state == tree.state &&
+        sameBytes(registers.digest, tree.dictionary.digest)
+
+    /**
+     * The raised value has to be accumulated, not merely accepted: it is what the evaluation
+     * transform later declares as the distributable reward.
+     */
+    private def applyTopUp(tx: BlockTx,
+                           rollupId: String,
+                           tree: Rollup,
+                           registers: RollupRegisters,
+                           output: TxOutput): Either[SyncApplyError, Unit] =
+      requireNFT(tx.id, rollupId, output).map { _ =>
+        replaceRollup(rollupId, tree.copy(value = output.value, utxoId = output.id))
+      }
+
     private def applySubmission(tx: BlockTx,
                                 rollupId: String,
                                 tree: Rollup,
+                                registers: RollupRegisters,
                                 output: TxOutput): Either[SyncApplyError, Unit] = {
       for {
         proof <- spendingProof(tx, 0)
         keyValue <- extensionPair(proof, "1", tx.id)
         expectedProof <- extensionBytes(proof, "2", tx.id)
-        registers <- rollupRegisters(output, tx.id)
+        state = registers.state
         score <- attempt(tx.id, "submitted NISP is too short to contain a score") {
           Longs.fromByteArray(keyValue._2.slice(0, 8))
+        }
+        // The bond is priced off the claimed score, and the same figure has to appear twice: once
+        // added to the box and once added to the ledger. A submission that funds one without the
+        // other would leave payout unable to settle.
+        bond <- attempt(tx.id, s"submitted score $score prices no valid bond") {
+          RollupProtocol.bondForScore(score)
+        }
+        expectedBond <- attempt(tx.id, "bond ledger overflowed") {
+          RollupProtocol.collectBond(tree.totalBond, bond)
         }
         dictionary = mutableRollupDictionary(rollupId)
         insertion <- attempt(tx.id, "could not apply dictionary insertion") {
@@ -472,43 +550,65 @@ object BlockReducer {
           s"expected miner count ${tree.numMiners + 1}, found ${registers.numMiners}")
         _ <- requireState(tx.id, registers.totalScore == tree.totalScore + score,
           "submission output total score does not include the submitted NISP")
-        _ <- requireState(tx.id, tree.currentPeriod.contains(registers.periodOrReward),
+        _ <- requireState(tx.id, state.periodStart == tree.state.periodStart,
           "submission changed the holding-period start")
+        _ <- requireState(tx.id, state.nispBlockHeight == tree.state.nispBlockHeight,
+          "submission changed the rollup's own block height")
+        _ <- requireState(tx.id, state.totalBond == expectedBond,
+          s"submission of score $score should have left a bond ledger of $expectedBond, " +
+            s"found ${state.totalBond}")
+        _ <- requireState(tx.id, output.value == tree.value + bond,
+          s"submission of score $score should have raised the box to ${tree.value + bond}, " +
+            s"found ${output.value}")
+        _ <- requireNFT(tx.id, rollupId, output)
       } yield {
         val next = tree.copy(dictionary = dictionary, numMiners = registers.numMiners,
-          totalScore = registers.totalScore, currentPeriod = Some(registers.periodOrReward),
+          totalScore = registers.totalScore, state = state, value = output.value,
           hasMiner = tree.hasMiner || sameBytes(keyValue._1, protocol.localMinerHash),
           utxoId = output.id)
         replaceRollup(rollupId, next)
       }
     }
 
-    private def applyEvaluation(tx: BlockTx,
+    private def applyEvaluation(block: BlockInfo,
+                                tx: BlockTx,
                                 rollupId: String,
                                 tree: Rollup): Either[SyncApplyError, Unit] = {
       required(tx.outputs.headOption, tx.id, "rollup output 0").flatMap { output =>
-        if (output.ergoTree == protocol.evaluationErgoTree) applyFraudProof(tx, rollupId, tree, output)
+        if (output.ergoTree == protocol.evaluationErgoTree)
+          applyFraudProof(block, tx, rollupId, tree, output)
         else if (output.ergoTree == protocol.payoutErgoTree) {
           for {
-            registers <- rollupRegisters(output, tx.id)
+            registers <- rollupRegisters(output, tx.id, LFSMPhase.PAYOUT)
+            state = registers.state
             _ <- requireDigest(tx.id, tree.dictionary, registers.digest)
             _ <- requireState(tx.id, registers.numMiners == tree.numMiners,
               "evaluation-to-payout changed miner count")
             _ <- requireState(tx.id, registers.totalScore == tree.totalScore,
               "evaluation-to-payout changed total score")
-            _ <- requireState(tx.id, registers.periodOrReward == tree.totalReward,
-              "evaluation-to-payout total reward does not match the tracked rollup value")
+            _ <- requireState(tx.id, output.value == tree.value,
+              s"evaluation-to-payout moved value from ${tree.value} to ${output.value}")
+            _ <- requireState(tx.id, state.totalBond == tree.totalBond,
+              "evaluation-to-payout changed the bond ledger")
+            // The bonds are refunded rather than distributed, so what a miner's share is taken from
+            // is the box less its ledger and nothing else.
+            _ <- requireState(tx.id, state.totalErgReward == tree.totalReward,
+              s"evaluation-to-payout declared a reward of ${state.totalErgReward}, but the box " +
+                s"holds ${tree.value} against a bond ledger of ${tree.totalBond}")
+            litHeld = RollupProtocol.litToken(output.assets).map(_.amount).getOrElse(0L)
+            _ <- requireState(tx.id, state.totalLitReward == litHeld,
+              s"evaluation-to-payout declared $litHeld LIT as ${state.totalLitReward}")
+            _ <- requireNFT(tx.id, rollupId, output)
           } yield {
-            if (tree.hasMiner)
-              replaceRollup(rollupId, tree.copy(currentPeriod = None,
-                totalReward = registers.periodOrReward, phase = LFSMPhase.PAYOUT, utxoId = output.id))
+            if (tree.hasMiner) replaceRollup(rollupId, tree.copy(state = state, utxoId = output.id))
             else removeRollup(rollupId)
           }
         } else Left(StateInvariant(tx.id, s"unexpected output contract for evaluation phase: ${output.ergoTree}"))
       }
     }
 
-    private def applyFraudProof(tx: BlockTx,
+    private def applyFraudProof(block: BlockInfo,
+                                tx: BlockTx,
                                 rollupId: String,
                                 tree: Rollup,
                                 output: TxOutput): Either[SyncApplyError, Unit] = {
@@ -517,7 +617,8 @@ object BlockReducer {
         miner <- extensionBytes(proof, "0", tx.id)
         expectedLookup <- extensionBytes(proof, "1", tx.id)
         expectedDelete <- extensionBytes(proof, "2", tx.id)
-        registers <- rollupRegisters(output, tx.id)
+        registers <- rollupRegisters(output, tx.id, LFSMPhase.EVAL)
+        state = registers.state
         dictionary = mutableRollupDictionary(rollupId)
         lookup <- attempt(tx.id, "could not apply dictionary lookup") { dictionary.lookUp(miner) }
         // _ <- requireProof(tx.id, "lookup", lookup.proof.ergoValue.getValue, expectedLookup)
@@ -528,6 +629,15 @@ object BlockReducer {
         score <- attempt(tx.id, "dictionary value is too short to contain a score") {
           Longs.fromByteArray(value.slice(0, 8))
         }
+        // The removed entry's own bond, which leaves the box and the ledger together and is paid
+        // whole to the prover. A proof that slashed more than the entry posted would leave payout
+        // owing refunds the box no longer holds.
+        slashed <- attempt(tx.id, s"removed score $score prices no valid bond") {
+          RollupProtocol.bondForScore(score)
+        }
+        expectedBond <- attempt(tx.id, "fraud proof left the bond ledger insolvent") {
+          RollupProtocol.releaseBond(tree.totalBond, slashed)
+        }
         deletion <- attempt(tx.id, "could not apply dictionary deletion") { dictionary.delete(miner) }
         _ = record(DictionaryId.Rollup(rollupId), DictionaryOperation.Delete(tx.id, Seq(miner)))
         // _ <- requireProof(tx.id, "deletion", deletion.proof.ergoValue.getValue, expectedDelete)
@@ -536,16 +646,44 @@ object BlockReducer {
           s"expected miner count ${tree.numMiners - 1}, found ${registers.numMiners}")
         _ <- requireState(tx.id, registers.totalScore == tree.totalScore - score,
           "fraud proof output total score does not match the removed NISP")
-        _ <- requireState(tx.id, tree.currentPeriod.contains(registers.periodOrReward),
+        _ <- requireState(tx.id, state.periodStart == tree.state.periodStart,
           "fraud proof changed the evaluation-period start")
+        _ <- requireState(tx.id, state.nispBlockHeight == tree.state.nispBlockHeight,
+          "fraud proof changed the rollup's own block height")
+        _ <- requireState(tx.id, state.totalBond == expectedBond,
+          s"fraud proof removing score $score should have left a bond ledger of $expectedBond, " +
+            s"found ${state.totalBond}")
+        _ <- requireState(tx.id, output.value == tree.value - slashed,
+          s"fraud proof removing score $score should have left the box at ${tree.value - slashed}, " +
+            s"found ${output.value}")
+        _ <- requireNFT(tx.id, rollupId, output)
+        _ <- requireProverPaid(block, tx, slashed)
       } yield {
         val next = tree.copy(dictionary = dictionary, numMiners = registers.numMiners,
-          totalScore = registers.totalScore, currentPeriod = Some(registers.periodOrReward),
+          totalScore = registers.totalScore, state = state, value = output.value,
           hasMiner = tree.hasMiner && !sameBytes(miner, protocol.localMinerHash),
           utxoId = output.id)
         replaceRollup(rollupId, next)
       }
     }
+
+    /**
+     * Output 1 pays the forfeited bond to whoever supplied input 1. The amount is always checkable;
+     * the recipient only when the block source resolved that input, which a degraded response may
+     * not have done.
+     */
+    private def requireProverPaid(block: BlockInfo,
+                                  tx: BlockTx,
+                                  slashed: Long): Either[SyncApplyError, Unit] =
+      for {
+        reward <- required(tx.outputs.lift(1), tx.id, "fraud proof reward output 1")
+        proverInput <- required(tx.inputs.lift(1), tx.id, "fraud proof prover input 1")
+        _ <- requireState(tx.id, reward.value == slashed,
+          s"fraud proof paid ${reward.value} to its prover, not the $slashed it slashed")
+        resolved = block.inputBox(proverInput.id).map(_.ergoTree).filter(_.nonEmpty)
+        _ <- requireState(tx.id, resolved.forall(_ == reward.ergoTree),
+          "fraud proof reward output is not under the prover input's script")
+      } yield ()
 
     private def applyPayout(tx: BlockTx,
                             rollupId: String,
@@ -560,8 +698,16 @@ object BlockReducer {
           dictionary.lookUp(miners: _*)
         }
         // _ <- requireProof(tx.id, "lookup", lookup.proof.ergoValue.getValue, expectedLookup)
-        _ <- requireState(tx.id, lookup.response.forall(_.tryOp.toOption.flatten.isDefined),
-          "payout contains a miner absent from the dictionary")
+        entries <- lookup.response.map(_.tryOp.toOption.flatten).foldLeft[
+          Either[SyncApplyError, Vector[Array[Byte]]]](Right(Vector.empty)) {
+          case (Right(acc), Some(bytes)) => Right(acc :+ bytes)
+          case (Right(_), None) =>
+            Left(StateInvariant(tx.id, "payout contains a miner absent from the dictionary"))
+          case (left, _) => left
+        }
+        // Read before the deletion, because settling this batch is what the successor's value and
+        // bond ledger have to account for.
+        settled <- payoutSettlement(tx.id, tree, entries)
         deletion <- attempt(tx.id, "could not apply payout dictionary deletion") {
           dictionary.delete(miners: _*)
         }
@@ -569,29 +715,53 @@ object BlockReducer {
         // _ <- requireProof(tx.id, "deletion", deletion.proof.ergoValue.getValue, expectedDelete)
         paidLocal = miners.exists(sameBytes(_, protocol.localMinerHash))
         _ <- if (paidLocal) Right(removeRollup(rollupId))
-        else applyPayoutSuccessor(tx, rollupId, tree, miners, dictionary)
+        else applyPayoutSuccessor(tx, rollupId, tree, settled, dictionary)
       } yield {
         ()
       }
     }
 
+    /** ERG leaving the box for this batch, and the share of it that is refunded bond. */
+    private def payoutSettlement(txId: String,
+                                 tree: Rollup,
+                                 entries: Seq[Array[Byte]]): Either[SyncApplyError, (BigInt, BigInt)] =
+      attempt(txId, "payout batch could not be priced") {
+        entries.foldLeft((BigInt(0), BigInt(0))) { case ((paid, bonds), value) =>
+          val score = Longs.fromByteArray(value.slice(0, 8))
+          val bond = BigInt(RollupProtocol.bondForScore(score))
+          val share = (BigInt(tree.state.totalErgReward) * BigInt(score)) / tree.totalScore
+          (paid + share + bond, bonds + bond)
+        }
+      }
+
     private def applyPayoutSuccessor(tx: BlockTx,
                                      rollupId: String,
                                      tree: Rollup,
-                                     miners: Seq[Array[Byte]],
+                                     settled: (BigInt, BigInt),
                                      dictionary: AuthenticatedDictionary): Either[SyncApplyError, Unit] =
       tx.outputs.headOption.filter(_.ergoTree == protocol.payoutErgoTree) match {
           case Some(output) =>
             for {
-              registers <- rollupRegisters(output, tx.id)
+              registers <- rollupRegisters(output, tx.id, LFSMPhase.PAYOUT)
+              state = registers.state
               _ <- requireDigest(tx.id, dictionary, registers.digest)
               _ <- requireState(tx.id, registers.numMiners == tree.numMiners,
                 "payout successor changed the committed miner count")
               _ <- requireState(tx.id, registers.totalScore == tree.totalScore,
                 "payout successor changed the committed total score")
-              _ <- requireState(tx.id, registers.periodOrReward == tree.totalReward,
+              _ <- requireState(tx.id, state.totalErgReward == tree.state.totalErgReward,
                 "payout successor changed the committed total reward")
-            } yield replaceRollup(rollupId, tree.copy(dictionary = dictionary, utxoId = output.id))
+              _ <- requireState(tx.id, state.totalLitReward == tree.state.totalLitReward,
+                "payout successor changed the committed LIT reward")
+              _ <- requireState(tx.id, BigInt(output.value) == BigInt(tree.value) - settled._1,
+                s"payout successor holds ${output.value} after settling ${settled._1} from ${tree.value}")
+              // Only the refunds leave rollup custody. Charging the reward share against the ledger
+              // as well would strand the surviving miners' deposits in the box.
+              _ <- requireState(tx.id, BigInt(state.totalBond) == BigInt(tree.totalBond) - settled._2,
+                s"payout successor owes ${state.totalBond} after refunding ${settled._2} of ${tree.totalBond}")
+              _ <- requireNFT(tx.id, rollupId, output)
+            } yield replaceRollup(rollupId,
+              tree.copy(dictionary = dictionary, state = state, value = output.value, utxoId = output.id))
           case None => Right(removeRollup(rollupId))
       }
 
@@ -732,19 +902,26 @@ object BlockReducer {
   private final case class RollupRegisters(digest: Array[Byte],
                                            numMiners: Int,
                                            totalScore: BigInt,
-                                           periodOrReward: Long)
+                                           state: RollupInfoState)
 
+  /**
+   * The phase is supplied by the caller from the script the output sits under, because it is what
+   * decides whether R7's first two slots are heights or rewards. Nothing here infers it.
+   */
   private def rollupRegisters(output: TxOutput,
-                              txId: String): Either[SyncApplyError, RollupRegisters] =
+                              txId: String,
+                              phase: LFSMPhase): Either[SyncApplyError, RollupRegisters] =
     for {
       digest <- avlDigest(output, txId)
       minersHex <- required(output.registers.lift(1), txId, "R5 miner count")
       miners <- decodeValue(minersHex, txId, "R5 miner count")(_.asInstanceOf[Int])
       scoreHex <- required(output.registers.lift(2), txId, "R6 total score")
       score <- decodeValue(scoreHex, txId, "R6 total score")(_.asInstanceOf[CBigInt].wrappedValue)
-      periodHex <- required(output.registers.lift(3), txId, "R7 period or total reward")
-      period <- decodeValue(periodHex, txId, "R7 period or total reward")(_.asInstanceOf[Long])
-    } yield RollupRegisters(digest, miners, score, period)
+      stateHex <- required(output.registers.lift(3), txId, "R7 rollup state")
+      state <- attempt(txId, "R7 is not a three-element Coll[Long]") {
+        RollupInfoState.fromErgoValue(ErgoValue.fromHex(stateHex), phase)
+      }
+    } yield RollupRegisters(digest, miners, score, state)
 
   private def avlDigest(output: TxOutput, txId: String): Either[SyncApplyError, Array[Byte]] =
     required(output.registers.headOption, txId, "R4 authenticated dictionary").flatMap { hex =>

@@ -2,7 +2,7 @@ package transactions.emissions
 
 import configs.EmissionConfig
 import contracts.specs.emission.EmissionSpecBase
-import lfsm.LFSMHelpers
+import lfsm.{CollateralParams, LFSMHelpers, RollupProtocol}
 import mutations.NodeWallet
 import node.NodeApi
 import org.ergoplatform.appkit.{BlockchainContext, Parameters, SignedTransaction}
@@ -117,6 +117,28 @@ class EmissionBuilderSpec extends AnyPropSpec with EmissionSpecBase with Mockito
         queueOut.getValue shouldEqual principalFloor
         queueOut.getTokens.get(1).getValue shouldEqual permit
       }
+    }
+  }
+
+  /**
+   * A lender may bid for priority by naming a fee channel above the dust budget and posting five
+   * times the offer, and the mining path ranks such a box. This client does not create one: there
+   * is no way to choose a bid, so every position it opens must offer the finder nothing.
+   */
+  property("genJoin creates only zero-priority positions") {
+    withBuilder { (ctx, wallet, txs) =>
+      val signed = signs(txs.genJoin(
+        ctx,
+        emissionAt(ctx, currentBlock = 0, lenderSet = Seq.empty, head = 0L, tail = 0L, lit = litSupply),
+        config(ctx),
+        wallet.p2pk,
+        Seq(funding(ctx, wallet, permitAt(0L)))))
+
+      val queueOut = signed.getOutputsToSpend.get(1)
+      val feeChannel = queueOut.getRegisters.get(0).getValue.asInstanceOf[Long]
+      feeChannel shouldEqual CollateralParams.DUST_BUDGET
+      RollupProtocol.finderFee(feeChannel) shouldEqual 0L
+      queueOut.getValue shouldEqual CollateralParams.PRINCIPAL_FLOOR
     }
   }
 

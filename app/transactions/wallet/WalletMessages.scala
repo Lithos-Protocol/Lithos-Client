@@ -79,6 +79,18 @@ object WalletMessages {
   private[transactions] case class ReservationSubmissionCancelled(reservationId: String,
                                                                     accepted: Boolean)
 
+  /**
+   * Withhold a selection for a transaction offered into this miner's own block candidate.
+   *
+   * Such a transaction is never broadcast, so no send outcome and no TTL can resolve it. The hold
+   * lasts until the height it was built for is over, at which point the caller marks it uncertain
+   * and an authoritative refresh decides whether the block took the input.
+   */
+  private[transactions] case class HoldReservationForCandidate(reservationId: String)
+
+  /** Identity-bound acknowledgement for HoldReservationForCandidate. */
+  private[transactions] case class ReservationHeldForCandidate(reservationId: String, accepted: Boolean)
+
   /** Send outcome is ambiguous; never age this reservation out without a complete node refresh. */
   private[transactions] case class MarkReservationUncertain(reservationId: String)
 

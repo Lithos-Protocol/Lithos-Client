@@ -107,6 +107,12 @@ object CollateralParams {
   /** Funds the genesis transaction's founder, permit, finder and proof-of-spend boxes. */
   final val DUST_BUDGET: Long = 5000000L
 
+  /**
+   * How much a lender must add to the pool for every nanoERG they offer the block's finder. A box
+   * whose fee channel exceeds the dust budget by `f` therefore posts `5f` above the floor.
+   */
+  final val POOL_MULTIPLE: Long = 4L
+
   /** The principal a queue box must post: 2.915 ERG. */
   final val PRINCIPAL_FLOOR: Long = BLOCK_REWARD - FEE_CAP + DUST_BUDGET
 

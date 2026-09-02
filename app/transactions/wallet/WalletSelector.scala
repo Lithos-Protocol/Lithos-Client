@@ -124,6 +124,16 @@ case class WalletSelector(walletRef: ActorRef,
     }
   }
 
+  private[wallet] def holdReservationForCandidate(reservationId: String): Boolean = {
+    val reply = Await.result(
+      (walletRef ? HoldReservationForCandidate(reservationId)).mapTo[ReservationHeldForCandidate],
+      timeout)
+    if (reply.reservationId != reservationId)
+      throw new ReservationExpiredException(
+        s"WalletManager held reservation ${reply.reservationId}, expected $reservationId")
+    reply.accepted
+  }
+
   private[wallet] def markReservationUncertain(reservationId: String): Unit =
     walletRef ! MarkReservationUncertain(reservationId)
 

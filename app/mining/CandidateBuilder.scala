@@ -11,8 +11,7 @@ import node.NodeApi
 import org.ergoplatform.appkit.ErgoClient
 import org.slf4j.{Logger, LoggerFactory}
 import stratum.{CollateralData, CollateralNotFoundException}
-import transactions.BlockTxMessages.{BlockTxsReady, CandidateTx, RequestBlockTxs}
-import work.lithos.mutations.InputUTXO
+import transactions.BlockTxMessages.{BlockTxsReady, CandidateTx, CandidateTxsDropped, RequestBlockTxs}
 
 import scala.concurrent.duration._
 import scala.concurrent.{ExecutionContext, Future}
@@ -55,8 +54,8 @@ class CandidateBuilder(client: ErgoClient,
 
   private var currentPackage: Option[BlockPackage] = None
 
-  /** The pre-loaded collateral set, and the box chosen out of it for as long as it lives. */
-  private var collateralSet: Vector[InputUTXO] = Vector.empty
+  /** The pre-loaded collateral set, and the box ranked out of it for the height being mined. */
+  private var collateralSet: Vector[CollateralCandidate] = Vector.empty
   private var selectedId: Option[String] = None
 
   /**
@@ -127,12 +126,18 @@ class CandidateBuilder(client: ErgoClient,
     // feels every bit of that, so nothing that can wait runs here.
     case ChainAdvanced(height) =>
       if (height > blockHeight) {
+        // Told before anything else: a source holding a wallet box for the previous height's
+        // candidate has no other way to learn that height is over.
+        if (blockHeight > 0) dropCandidates(blockHeight)
         blockHeight = height
         currentPackage = None
         blockTxsBlockedAt = None
         rebuildAfterRefresh = false
         buildRetries = 0
         skipped = Set.empty
+        // Re-ranked from scratch at every height. Holding the previous choice would freeze the set
+        // on whichever box happened to be picked first and no box would ever become overdue.
+        selectedId = None
         knownSpent = knownSpent.filter(e => height - e._2 < SpentMemoryBlocks)
         startBuild(height)
         context.system.scheduler.scheduleOnce(
@@ -157,6 +162,7 @@ class CandidateBuilder(client: ErgoClient,
         logger.warn(s"Node rejected the inserted transactions for block $height: " +
           "mining on the genesis transaction alone until the next block")
         blockTxsBlockedAt = Some(height)
+        dropCandidates(height)
       }
       currentPackage.filter(p => p.blockHeight == height && p.blockTxs.nonEmpty).foreach { pkg =>
         currentPackage = Some(pkg.copy(blockTxs = Seq.empty[CandidateTx]))
@@ -165,11 +171,11 @@ class CandidateBuilder(client: ErgoClient,
     // Drop it now rather than waiting for the refresh to notice. The build for the next block starts
     // in the same instant this arrives, and it works off this set.
     case CollateralSpent(boxId) =>
-      if (collateralSet.exists(_.id.toString == boxId)) {
+      if (collateralSet.exists(_.id == boxId)) {
         // Sent both when a block of ours spends the box and when the node refuses the transaction
         // built on it, so the message says what is known rather than assuming which.
         logger.info(s"Collateral box $boxId is no longer usable, removing it from the set")
-        collateralSet = collateralSet.filterNot(_.id.toString == boxId)
+        collateralSet = collateralSet.filterNot(_.id == boxId)
       }
       // Remembered across blocks, not just this one: the refresh runs against an indexer that has
       // not necessarily applied the block yet, and would otherwise hand the box straight back.
@@ -226,7 +232,7 @@ class CandidateBuilder(client: ErgoClient,
       refreshing = false
       val changed = boxes.size != collateralSet.size
       collateralSet = usable(boxes)
-      val lost = selectedId.exists(id => !collateralSet.exists(_.id.toString == id))
+      val lost = selectedId.exists(id => !collateralSet.exists(_.id == id))
       if (lost) {
         logger.info(s"Collateral box ${selectedId.get} is gone, a new one will be chosen")
         selectedId = None
@@ -265,11 +271,14 @@ class CandidateBuilder(client: ErgoClient,
    * has stopped reporting dropped from that memory — that is the node agreeing, so there is nothing
    * left to remember.
    */
-  private def usable(boxes: Seq[InputUTXO]): Vector[InputUTXO] = {
-    val reported = boxes.map(_.id.toString).toSet
+  private def usable(boxes: Seq[CollateralCandidate]): Vector[CollateralCandidate] = {
+    val reported = boxes.map(_.id).toSet
     knownSpent = knownSpent.filterKeys(reported.contains).toMap
-    boxes.filterNot(b => knownSpent.contains(b.id.toString)).toVector
+    boxes.filterNot(b => knownSpent.contains(b.id)).toVector
   }
+
+  private def dropCandidates(height: Int): Unit =
+    txSources.foreach(_ ! CandidateTxsDropped(height))
 
   private def publish(pkg: BlockPackage): Unit = {
     logger.info(s"Ready: ${pkg.describe} with" +
@@ -303,19 +312,23 @@ class CandidateBuilder(client: ErgoClient,
         client.execute { ctx =>
           val loaded = if (snapshot.isEmpty) Some(txBuilder.loadCollateral(ctx)) else None
           val all = loaded.getOrElse(snapshot)
-          val boxes = all.filterNot(b => avoid.contains(b.id.toString))
+          val boxes = all.filterNot(b => avoid.contains(b.id))
           if (boxes.isEmpty)
             throw new CollateralNotFoundException(
               s"no usable collateral boxes: ${all.size} live, ${avoid.size} skipped this block")
 
-          // Keep the box already chosen, so a changing coinbase key does not evict the node's
-          // candidate cache. The draw is uniform because the boxes are economically identical.
+          // Sticky for every rebuild at this height, so a candidate is not re-cut under a different
+          // coinbase key mid-block. A fresh height re-ranks, and the draw among exact equals is
+          // uniform because those boxes are economically identical.
           val chosen = sticky
-            .flatMap(id => boxes.find(_.id.toString == id))
-            .getOrElse(boxes(random.nextInt(boxes.size)))
+            .flatMap(id => boxes.find(_.id == id))
+            .getOrElse {
+              val best = CandidateTxBuilder.bestCandidates(boxes, height)
+              best(random.nextInt(best.size))
+            }
 
-          val chosenId = chosen.id.toString
-          Try(txBuilder.buildGenesis(ctx, chosen, height)) match {
+          val chosenId = chosen.id
+          Try(txBuilder.buildGenesis(ctx, chosen.input, height)) match {
             case Success(data) => GenesisReady(height, loaded, chosenId, data)
             case Failure(ex) => BuildFailed(height, Some(chosenId), ex)
           }
@@ -391,12 +404,12 @@ object CandidateBuilder {
   /** Scheduler tick and manual trigger for the background collateral refresh. */
   private[mining] case object RefreshCollateralSet
 
-  private[mining] case class CollateralSetLoaded(boxes: Seq[InputUTXO])
+  private[mining] case class CollateralSetLoaded(boxes: Seq[CollateralCandidate])
 
   private[mining] case class RefreshFailed(ex: Throwable)
 
   private[mining] case class GenesisReady(blockHeight: Int,
-                                          loaded: Option[Seq[InputUTXO]],
+                                          loaded: Option[Seq[CollateralCandidate]],
                                           chosenId: String,
                                           data: CollateralData)
 

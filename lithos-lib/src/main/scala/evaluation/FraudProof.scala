@@ -1,7 +1,8 @@
 package evaluation
 
 import lfsm.contracts.FraudProofContracts
-import lfsm.states.Rollup
+import lfsm.states.{Rollup, RollupInfoState}
+import lfsm.{LFSMPhase, RollupProtocol}
 import mutations.{BoxLoader, NodeWallet}
 import nisp.NISP
 import org.bouncycastle.util.encoders.Hex
@@ -143,9 +144,12 @@ object FraudProof {
   }
 
   /**
-   * Removes `miner` from the NISP dictionary and subtracts their score from the evaluation box.
-   * `includeFee` decides whether the fee output is emitted here or supplied by the caller; the
-   * mutation is otherwise identical, and every FraudProof subclass uses this one.
+   * Removes `miner` from the NISP dictionary, subtracts their score and their bond from the
+   * evaluation box, and pays that bond to whoever supplied input 1.
+   *
+   * The reward has to be output 1, so a caller supplying its own fee output must have it land after
+   * this. `includeFee` decides which of the two emits it; the mutation is otherwise identical, and
+   * every FraudProof subclass uses this one.
    */
   def standardMutator(miner: Array[Byte], nispTree: Rollup, contract: Contract, includeFee: Boolean = true): Mutator = new Mutator {
     override val preReqs: Seq[TxContext => Boolean] = FraudProof.standardPreReqs(nispTree, contract)
@@ -161,21 +165,27 @@ object FraudProof {
       val score = Longs.fromByteArray(lookUp.response.head.get.slice(0, 8))
       val lastMiners = evalOutput.registers(1).getValue.asInstanceOf[Int]
       val lastScore = evalOutput.registers(2).getValue.asInstanceOf[CBigInt].wrappedValue
-      val lastPeriod = evalOutput.registers(3)
-      val lastBlock = evalOutput.registers(4)
-      val nextEval = evalOutput.copy(registers = Seq(
-        copy.ergoValue,
-        ErgoValue.of(lastMiners - 1),
-        ErgoValue.of((BigInt(lastScore) - score).bigInteger),
-        lastPeriod,
-        lastBlock
-      ))
+      val state = RollupInfoState.fromErgoValue(evalOutput.registers(3), LFSMPhase.EVAL)
+      // The forfeited entry's own deposit. It leaves the box and the ledger by the same amount, so
+      // the miners still in the tree keep exactly what they posted.
+      val slashed = RollupProtocol.bondForScore(score)
+      val nextEval = evalOutput.copy(
+        value = evalOutput.value - slashed,
+        registers = evalOutput.registers
+          .updated(0, copy.ergoValue)
+          .updated(1, ErgoValue.of(lastMiners - 1))
+          .updated(2, ErgoValue.of((BigInt(lastScore) - score).bigInteger))
+          .updated(3, state.withBond(RollupProtocol.releaseBond(state.totalBond, slashed)).ergoValue))
+
+      // Paid to the input's own proposition rather than to this prover's address, because that is
+      // what the evaluation contract compares against.
+      val rewardOutput = UTXO(tCtx.inputs(1).contract, slashed)
       if(includeFee){
         val feeProp = Contract(ErgoTreePredef.feeProposition(720))
         val feeOutput = UTXO(feeProp, Parameters.MinFee)
-        Seq(nextEval, feeOutput)
+        Seq(nextEval, rewardOutput, feeOutput)
       }else{
-        Seq(nextEval)
+        Seq(nextEval, rewardOutput)
       }
 
     }

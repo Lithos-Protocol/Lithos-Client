@@ -1,7 +1,7 @@
 package state.persistence
 
 import lfsm.LFSMPhase
-import lfsm.states.{AuthenticatedDictionary, AuthenticatedDictionaryView, DictionaryManifestHeader, MinerDictionary, PlasmaDictionary, Rollup}
+import lfsm.states.{AuthenticatedDictionary, AuthenticatedDictionaryView, DictionaryManifestHeader, MinerDictionary, PlasmaDictionary, Rollup, RollupInfoState}
 import org.ergoplatform.appkit.ErgoValue
 import org.ergoplatform.sdk.ErgoId
 import org.scalatest.BeforeAndAfterEach
@@ -52,6 +52,48 @@ class StateSnapshotStoreSpec extends AnyFlatSpec with Matchers with BeforeAndAft
     restored.metadata shouldEqual checkpoint.metadata
     restored.recentCursors shouldEqual checkpoint.recentCursors
     restored.dictionaryDigests shouldEqual checkpoint.dictionaries.values.map(_.expectedDigest).toSet
+  }
+
+  /**
+   * The three values and the phase that says what they mean travel together. A payout snapshot read
+   * back as a holding one would turn a reward into a period start and put the rollup out of step
+   * with the chain from the next transition on.
+   */
+  it should "round-trip every rollup phase's three state values" in {
+    val base = populatedSnapshot(height = 100, version = 8L)
+    val id = base.state.rollups.keys.head
+    val phases = Seq(
+      RollupInfoState.holding(140L, 100L, 6000000L),
+      RollupInfoState.evaluation(500L, 100L, 6000000L),
+      RollupInfoState.payout(2994000000L, 750L, 6000000L))
+
+    phases.foreach { state =>
+      val tree = base.state.rollups(id).copy(state = state, value = 3000000000L)
+      val snapshot = base.copy(
+        state = base.state.copy(rollups = base.state.rollups.updated(id, tree)))
+      val encoded = StateSnapshotCodec.encodeMeta(plan(snapshot), identity, MaxEntry).toOption.get
+      val restored = StateSnapshotCodec.decodeMeta(encoded, identity).toOption.get
+
+      val read = restored.metadata.rollups(id)
+      read.state shouldEqual state
+      read.state.values shouldEqual state.values
+      read.phase shouldEqual state.phase
+      read.value shouldEqual 3000000000L
+    }
+  }
+
+  /**
+   * A rollup box's registers and tokens both changed, so nothing written before this schema can be
+   * decoded into fields that still mean what they say. Failing sends the caller to a rebuild.
+   */
+  it should "refuse a snapshot written under the previous schema" in {
+    val encoded = StateSnapshotCodec.encodeMeta(
+      plan(populatedSnapshot(100, 8L)), identity, MaxEntry).toOption.get
+    // The version is the second int of the sealed payload's body; the seal is re-applied by hand.
+    val previous = withSchemaVersion(encoded, 1)
+
+    StateSnapshotCodec.decodeMeta(previous, identity).left.toOption.get should
+      include("unsupported snapshot schema version")
   }
 
   it should "round-trip quarantine deadlines and attempt counts" in {
@@ -442,8 +484,8 @@ class StateSnapshotStoreSpec extends AnyFlatSpec with Matchers with BeforeAndAft
       dictionary.insert(entries.head)
       val rollupId = SyncFixtures.id(5000 + index)
       val utxoId = SyncFixtures.id(5100 + index * 1000 + height)
-      rollupId -> Rollup(dictionary, 1, BigInt(50), Some(90L), 1000000L, 90, hasMiner = true,
-        LFSMPhase.HOLDING, evaluated = true, rollupId, utxoId)
+      rollupId -> Rollup(dictionary, 1, BigInt(50), RollupInfoState.holding(90L, 90L, 0L),
+        1000000L, 90, hasMiner = true, evaluated = true, blockId = rollupId, utxoId = utxoId)
     }
     val minerTree = MinerDictionary.initialState.copy(dictionary = minerDictionary, numMiners = 1,
       hasMiner = true, syncHeight = height, savedHeight = height)
@@ -451,6 +493,27 @@ class StateSnapshotStoreSpec extends AnyFlatSpec with Matchers with BeforeAndAft
       version, tracked.toMap, tracked.map { case (id, tree) => tree.utxoId -> id }.toMap,
       tracked.zipWithIndex.map { case ((id, _), index) => id -> SyncFixtures.id(5200 + index) }.toMap,
       minerTree, Some(ErgoId.create(SyncFixtures.id(6000))))
+  }
+
+  /**
+   * The same envelope with a different schema version in its payload.
+   *
+   * A sealed entry is [magic][payload length][payload][checksum length][checksum], and the payload
+   * opens with its own magic then the version, so this rewrites four bytes and re-seals.
+   */
+  private def withSchemaVersion(encoded: Array[Byte], version: Int): Array[Byte] = {
+    val payloadStart = 8
+    val payloadLength = java.nio.ByteBuffer.wrap(encoded, 4, 4).getInt
+    val payload = encoded.slice(payloadStart, payloadStart + payloadLength)
+    java.nio.ByteBuffer.wrap(payload, 4, 4).putInt(version)
+    val checksum = scorex.crypto.hash.Blake2b256.hash(payload)
+    val out = java.nio.ByteBuffer.allocate(4 + 4 + payload.length + 4 + checksum.length)
+    out.putInt(java.nio.ByteBuffer.wrap(encoded, 0, 4).getInt)
+    out.putInt(payload.length)
+    out.put(payload)
+    out.putInt(checksum.length)
+    out.put(checksum)
+    out.array()
   }
 
   private def bytes(value: String): Array[Byte] = value.getBytes("UTF-8")

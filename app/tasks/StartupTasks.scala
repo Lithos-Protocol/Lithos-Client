@@ -2,21 +2,16 @@ package tasks
 
 import akka.Done
 import akka.actor.{ActorSystem, CoordinatedShutdown}
-import configs.TasksConfig.TaskConfiguration
 import configs._
-import lfsm.LFSMHelpers
 import org.slf4j.{Logger, LoggerFactory}
 import play.api.Configuration
-import stratum.ErgoStratumServer
-import stratum.data.{Data, Options}
 import utils.Globals
 
-import java.math.BigInteger
 import javax.inject.{Inject, Singleton}
 import scala.concurrent.duration.DurationInt
-import scala.concurrent.{Await, ExecutionContext, Future}
+import scala.concurrent.{Await, Future}
 import scala.language.postfixOps
-import scala.util.{Failure, Success, Try}
+import scala.util.{Failure, Success}
 
 @Singleton
 class StartupTasks @Inject()(system: ActorSystem, config: Configuration, cs: CoordinatedShutdown) {

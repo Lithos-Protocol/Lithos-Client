@@ -42,10 +42,16 @@ class CandidateBuilderSpec extends TestKit(ActorSystem("candidate-builder-spec",
 
   private val cfg = CandidateConfig.Default.copy(blockTransactions = false, collateralRefreshInterval = 600000)
 
-  /** A collateral box stand-in. Only its id is ever read by the code under test. */
-  private def box(ctx: BlockchainContext, wallet: NodeWallet, value: Long): InputUTXO = {
+  /** A collateral box stand-in. Only its id, age and bid are ever read by the code under test. */
+  private def box(ctx: BlockchainContext,
+                  wallet: NodeWallet,
+                  value: Long,
+                  inclusionHeight: Int = 100,
+                  finderFee: Long = 0L): CollateralCandidate = {
     import node.MutationConversions._
-    NodeBox(f"$value%064x", "aa" * 32, value, 0, 100, wallet.contract.ergoTreeHex).toInputUTXO(ctx)
+    val input = NodeBox(f"$value%064x", "aa" * 32, value, 0, 100, wallet.contract.ergoTreeHex)
+      .toInputUTXO(ctx)
+    CollateralCandidate(input, inclusionHeight, finderFee)
   }
 
   private def collateralData(boxId: String): CollateralData =
@@ -59,14 +65,14 @@ class CandidateBuilderSpec extends TestKit(ActorSystem("candidate-builder-spec",
    * how a lagging indexer looks from here. `buildGenesis` fails for any id in `failing`.
    */
   private class StubTxBuilder(prover: NodeWallet, api: NodeApi, c: CandidateConfig,
-                              @volatile var available: Seq[InputUTXO],
+                              @volatile var available: Seq[CollateralCandidate],
                               @volatile var failing: Set[String])
     extends CandidateTxBuilder(prover, api, c) {
 
     @volatile var builtFor: Seq[String] = Seq.empty
     @volatile var failNextBuilds: Int = 0
 
-    override def loadCollateral(ctx: BlockchainContext): Seq[InputUTXO] = available
+    override def loadCollateral(ctx: BlockchainContext): Seq[CollateralCandidate] = available
 
     override def buildGenesis(ctx: BlockchainContext, collat: InputUTXO, blockHeight: Int): CollateralData = {
       val id = collat.id.toString
@@ -88,17 +94,31 @@ class CandidateBuilderSpec extends TestKit(ActorSystem("candidate-builder-spec",
 
   private case class Fixture(builder: ActorRef, parent: TestProbe, stub: StubTxBuilder, ids: Seq[String])
 
-  private def fixture(boxCount: Int = 4, failing: Set[String] = Set.empty): Fixture = {
+
+
+  private def fixture(boxCount: Int = 4,
+                      failing: Set[String] = Set.empty,
+                      boxes: Option[Seq[CollateralCandidate]] = None): Fixture = {
     val api = mock[NodeApi]
     val (ctx, _, wallet) = FakeNodeContext(api, numAddresses = 1)
-    val boxes = ctx.getClient.execute(c => (1 to boxCount).map(i => box(c, wallet, i * 1000000L)))
-    val stub = new StubTxBuilder(wallet, api, cfg, boxes, failing)
+    val set = boxes.getOrElse(
+      ctx.getClient.execute(c => (1 to boxCount).map(i => box(c, wallet, i * 1000000L))))
+    val stub = new StubTxBuilder(wallet, api, cfg, set, failing)
     val parent = TestProbe()
     val builder = parent.childActorOf(Props(
       new TestableBuilder(ctx.getClient, wallet, api, cfg, stub)))
     // preStart runs a refresh; let it land so the set is warm before the first block.
     Thread.sleep(600)
-    Fixture(builder, parent, stub, boxes.map(_.id.toString))
+    Fixture(builder, parent, stub, set.map(_.id))
+  }
+
+  /** A set built against the offline context, so a test can choose each box age and bid. */
+  private def boxesWith(specs: Seq[(Long, Int, Long)]): Seq[CollateralCandidate] = {
+    val api = mock[NodeApi]
+    val (ctx, _, wallet) = FakeNodeContext(api, numAddresses = 1)
+    ctx.getClient.execute(c => specs.map { case (value, height, fee) =>
+      box(c, wallet, value, height, fee)
+    })
   }
 
   private def advanceTo(f: Fixture, height: Int): BlockPackage = {
@@ -120,11 +140,36 @@ class CandidateBuilderSpec extends TestKit(ActorSystem("candidate-builder-spec",
     second.collateral.collateralId should not equal first.collateral.collateralId
   }
 
-  it should "not be redrawn when a new block arrives and the box still lives" in {
-    val f = fixture()
-    val first = advanceTo(f, 100)
-    val second = advanceTo(f, 101)
-    second.collateral.collateralId shouldEqual first.collateral.collateralId
+  it should "be re-ranked when a new block arrives, so no box can hold the set" in {
+    // Selection is sticky within a height and only within one. Carrying it across blocks froze the
+    // set on whichever box was picked first, and nothing would ever become overdue.
+    val boxes = boxesWith(Seq((1000000L, 100, 0L), (2000000L, 100, 500000L)))
+    val f = fixture(boxes = Some(boxes))
+    advanceTo(f, 101).collateral.collateralId shouldEqual boxes(1).id
+    // The higher bid is still the higher bid, so a re-rank must land on it again.
+    advanceTo(f, 102).collateral.collateralId shouldEqual boxes(1).id
+  }
+
+  // ─── ranking ──────────────────────────────────────────────────────────────
+
+  "Ranking" should "prefer the highest bid while every box is young" in {
+    val boxes = boxesWith(Seq((1000000L, 100, 10L), (2000000L, 100, 900L), (3000000L, 100, 400L)))
+    val f = fixture(boxes = Some(boxes))
+    advanceTo(f, 150).collateral.collateralId shouldEqual boxes(1).id
+  }
+
+  it should "take the oldest overdue box even when a younger one bids more" in {
+    val boxes = boxesWith(Seq((1000000L, 100, 0L), (2000000L, 180, 900000L)))
+    val f = fixture(boxes = Some(boxes))
+    // The first box is 100 blocks old at height 200, the second is 20.
+    advanceTo(f, 200).collateral.collateralId shouldEqual boxes.head.id
+  }
+
+  it should "not treat a box one block short of the threshold as overdue" in {
+    val boxes = boxesWith(Seq((1000000L, 100, 0L), (2000000L, 180, 900000L)))
+    val f = fixture(boxes = Some(boxes))
+    // One block earlier the same box is only 99 old, so the bid still decides.
+    advanceTo(f, 199).collateral.collateralId shouldEqual boxes(1).id
   }
 
   // ─── the §3.25 / §3.2 regression: a spent box must not come back ──────────

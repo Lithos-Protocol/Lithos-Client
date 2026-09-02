@@ -1,7 +1,7 @@
 package utils
 
 import lfsm.LFSMHelpers
-import lfsm.contracts.{CollateralContract, DictionaryContracts, RollupContracts}
+import lfsm.contracts.{CollateralContract, DictionaryContracts, HoldingScripts, RollupContracts}
 import org.bouncycastle.util.encoders.Hex
 import org.ergoplatform.appkit.{BlockchainContext, ErgoClient, ErgoProver, ErgoValue, NetworkType}
 import org.ergoplatform.sdk.ErgoId
@@ -40,6 +40,15 @@ object Helpers {
         holdingTestnet
     }
   }
+  /** The rules a holding spend must hand to context variable 64. Never sits on a box. */
+  def holdingLogicContract(ctx: BlockchainContext): Contract = {
+    ctx.getNetworkType match {
+      case NetworkType.MAINNET =>
+        holdingLogicMainnet
+      case NetworkType.TESTNET =>
+        holdingLogicTestnet
+    }
+  }
 
   private def compilePayout(networkType: NetworkType): Contract = {
     RollupContracts.mkPayoutContract(networkType)
@@ -48,8 +57,8 @@ object Helpers {
     RollupContracts.mkEvalContract(networkType, LFSMHelpers.EVAL_PERIOD,
       compilePayout(networkType).hashedPropBytes, LFSMHelpers.getFPToken(networkType))
   }
-  private def compileHolding(networkType: NetworkType): Contract = {
-    RollupContracts.mkHoldingContract(networkType, LFSMHelpers.HOLDING_PERIOD, compileEval(networkType).hashedPropBytes)
+  private def compileHolding(networkType: NetworkType): HoldingScripts = {
+    RollupContracts.mkHoldingScripts(networkType, LFSMHelpers.HOLDING_PERIOD, compileEval(networkType).hashedPropBytes)
   }
   private def compileCollateral(networkType: NetworkType): Contract = {
     val gate = CollateralContract.mkEmissionGateContract(networkType)
@@ -64,8 +73,14 @@ object Helpers {
   lazy val payoutTestnet: Contract  = compilePayout(NetworkType.TESTNET)
   lazy val evalMainnet: Contract    = compileEval(NetworkType.MAINNET)
   lazy val evalTestnet: Contract    = compileEval(NetworkType.TESTNET)
-  lazy val holdingMainnet: Contract = compileHolding(NetworkType.MAINNET)
-  lazy val holdingTestnet: Contract = compileHolding(NetworkType.TESTNET)
+  // The guard and its logic together, so nothing can pin one instance into the guard's constant and
+  // hand a different one to context variable 64.
+  lazy val holdingScriptsMainnet: HoldingScripts = compileHolding(NetworkType.MAINNET)
+  lazy val holdingScriptsTestnet: HoldingScripts = compileHolding(NetworkType.TESTNET)
+  lazy val holdingMainnet: Contract = holdingScriptsMainnet.guard
+  lazy val holdingTestnet: Contract = holdingScriptsTestnet.guard
+  lazy val holdingLogicMainnet: Contract = holdingScriptsMainnet.logic
+  lazy val holdingLogicTestnet: Contract = holdingScriptsTestnet.logic
   lazy val collateralMainnet: Contract = compileCollateral(NetworkType.MAINNET)
   lazy val collateralTestnet: Contract = compileCollateral(NetworkType.TESTNET)
 

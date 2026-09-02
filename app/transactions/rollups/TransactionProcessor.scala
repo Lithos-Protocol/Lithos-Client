@@ -12,7 +12,7 @@ import play.api.cache.SyncCacheApi
 import play.api.libs.concurrent.InjectedActorSupport
 import state.messages.MempoolMessages.MempoolRollupMetadata
 import state.messages.SyncMessages._
-import transactions.BlockTxMessages.{BlockTxsReady, CandidateTx, RequestBlockTxs}
+import transactions.BlockTxMessages.{BlockTxsReady, CandidateTx, CandidateTxsDropped, RequestBlockTxs}
 import transactions.rollups.TransactionMessages.RollupTxType._
 import transactions.rollups.TransactionMessages.{BatchAccepted, BuildBlockTxs, EvaluationSet, FraudBatch, PublishedRollupMap, RollupBatch, RollupTxStub, RollupTxType}
 import transactions.rollups.TransactionProcessor._
@@ -120,6 +120,11 @@ class TransactionProcessor @Inject()(config: Configuration, nodeContext: NodeCon
 
       if (chosen.isEmpty) requester ! BlockTxsReady(blockHeight, Seq.empty[CandidateTx])
       else submissionHandler.tell(BuildBlockTxs(blockHeight, chosen), requester)
+
+    // Nothing queued here is affected — the stubs were never dispatched — but SubmissionHandler may
+    // be holding a wallet box for a submission it built into that package, so it has to be told.
+    case dropped: CandidateTxsDropped =>
+      submissionHandler ! dropped
 
     // The height comes back with the sync state rather than being read in the handler. This actor
     // answers RequestBlockTxs, so a BlockchainContext opened on its own thread is a node round trip

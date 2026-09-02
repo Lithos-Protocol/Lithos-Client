@@ -1,7 +1,7 @@
 package state.persistence
 
 import lfsm.LFSMPhase
-import lfsm.states.{MinerDictionary, Rollup, PlasmaDictionary}
+import lfsm.states.{MinerDictionary, PlasmaDictionary, Rollup, RollupInfoState}
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 import state.messages.SyncMessages.SyncCursor
@@ -71,8 +71,9 @@ class SnapshotReadConsistencySpec extends AnyFlatSpec with Matchers {
     val rollupId = SyncFixtures.id(5500)
     val utxoId = SyncFixtures.id(5600 + height)
     val origin = SyncFixtures.id(5700)
-    val tree = Rollup(PlasmaDictionary.empty(), 0, BigInt(0), Some(90L), 1000000L, 90,
-      hasMiner = false, LFSMPhase.HOLDING, evaluated = false, rollupId, utxoId)
+    val tree = Rollup(PlasmaDictionary.empty(), 0, BigInt(0),
+      RollupInfoState.holding(90L, 90L, 0L), 1000000L, 90,
+      hasMiner = false, evaluated = false, blockId = rollupId, utxoId = utxoId)
     val cursor = SyncCursor(height, SyncFixtures.id(height), SyncFixtures.id(height - 1))
     PersistedSyncState(
       CommittedSyncState(cursor, height.toLong, Map(rollupId -> tree), Map(utxoId -> rollupId),

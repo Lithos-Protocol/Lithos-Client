@@ -1,23 +1,41 @@
 package transactions.rollups
 
 import evaluation.Evaluator
-import lfsm.LFSMHelpers
+import lfsm.states.RollupInfoState
+import lfsm.{LFSMHelpers, LFSMPhase, RollupProtocol}
 import mutations.{BoxLoader, NodeWallet}
 import nisp.NISP
-import org.bouncycastle.util.encoders.Hex
 import org.ergoplatform.appkit._
 import org.ergoplatform.appkit.scalaapi.scalaByteType
-import org.slf4j.{Logger, LoggerFactory}
 import scorex.utils.Longs
 import sigma.Colls
 import sigma.data.CBigInt
 import transactions.ProtocolContracts
 import transactions.rollups.TransactionMessages.LatestRollup
 import utils.Globals
-import utils.Helpers.{evalContract, holdingContract, payoutContract}
+import utils.Helpers.{evalContract, holdingContract, holdingLogicContract, payoutContract}
 import work.lithos.mutations.{Contract, InputUTXO, Token, TxBuilder, UTXO}
 
 object RollupTransactions {
+
+  /** Holding op 0: submit a NISP. Op 1 is both the transform and the in-block top-up. */
+  private val SubmitOp: Byte = 0
+  private val TransformOp: Byte = 1
+
+  /** The guard runs the rules out of variable 64 after checking their hash, so every spend sends them. */
+  private def logicVar(ctx: BlockchainContext): ContextVar =
+    ContextVar.of(64.toByte, ErgoValue.of(Colls.fromArray(holdingLogicContract(ctx).valueBytes), scalaByteType))
+
+  /** R7 of a rollup box, read under the phase its script puts it in. */
+  private def stateOf(box: InputUTXO, phase: LFSMPhase): RollupInfoState =
+    RollupInfoState.fromErgoValue(box.registers(3), phase)
+
+  /** The height a rollup's NISPs must prove work against, which is the block it was created in. */
+  def nispBlockHeight(holdingInput: InputUTXO): Int =
+    stateOf(holdingInput, LFSMPhase.HOLDING).nispBlockHeight.toInt
+
+  /** The refundable ERG a submission of this score has to add to the holding box. */
+  def submissionBond(score: Long): Long = RollupProtocol.bondForScore(score)
 
   def genNISPSubmission(ctx: BlockchainContext,
                         wallet: NodeWallet,
@@ -45,19 +63,26 @@ object RollupTransactions {
           ErgoValue.of(Colls.fromArray(wallet.contract.hashedPropBytes), scalaByteType),
           nisp.ergoValue)
       ),
-      ContextVar.of(2.toByte, insert.proof.ergoValue)
+      ContextVar.of(2.toByte, insert.proof.ergoValue),
+      ContextVar.of(3.toByte, ErgoValue.of(SubmitOp)),
+      logicVar(ctx)
     )
 
     val lastMiners = holdingInput.registers(1).getValue.asInstanceOf[Int]
     val lastScore = holdingInput.registers(2).getValue.asInstanceOf[CBigInt].wrappedValue
+    val state = stateOf(holdingInput, LFSMPhase.HOLDING)
 
-    val output = UTXO(holding, holdingInput.value, holdingInput.tokens,
-      registers = Seq(
-        copiedTree.ergoValue,
-        ErgoValue.of(lastMiners + 1),
-        ErgoValue.of((score + BigInt(lastScore)).bigInteger),
-        holdingInput.registers(3)
-      ))
+    // The bond is funded out of the wallet inputs and enters rollup custody, so the box value and
+    // the ledger both rise by it. It comes back at payout, or goes to a prover who disproves this
+    // entry, and the contract refuses any other figure.
+    val bond = RollupProtocol.bondForScore(score)
+
+    val output = UTXO(holding, holdingInput.value + bond, holdingInput.tokens,
+      registers = holdingInput.registers
+        .updated(0, copiedTree.ergoValue)
+        .updated(1, ErgoValue.of(lastMiners + 1))
+        .updated(2, ErgoValue.of((score + BigInt(lastScore)).bigInteger))
+        .updated(3, state.withBond(RollupProtocol.collectBond(state.totalBond, bond)).ergoValue))
 
     val totalOutputs = Seq(output) ++ feeOutputs
     val uTx = TxBuilder(ctx)
@@ -75,18 +100,22 @@ object RollupTransactions {
     val eval = evalContract(ctx)
 
     val otherInputs = walletInputs
+    val state = stateOf(holdingInput, LFSMPhase.HOLDING)
+    // Only the period start moves. The rollup's own block and the bond ledger carry through, the
+    // latter because evaluation is where the bonds are slashed or handed on to payout.
+    val nextState = RollupInfoState.evaluation(
+      ctx.getHeight.toLong, state.nispBlockHeight, state.totalBond)
+
     val output = UTXO(eval, holdingInput.value, holdingInput.tokens,
-      registers = Seq(
-        holdingInput.registers.head,
-        holdingInput.registers(1),
-        holdingInput.registers(2),
-        ErgoValue.of(ctx.getHeight.toLong),
-        holdingInput.registers(3)
-      ))
+      registers = holdingInput.registers.updated(3, nextState.ergoValue))
+
+    val inputWithContext = holdingInput.setCtxVars(
+      ContextVar.of(3.toByte, ErgoValue.of(TransformOp)),
+      logicVar(ctx))
 
     val totalOutputs = Seq(output) ++ feeOutputs
     val uTx = TxBuilder(ctx)
-      .setInputs((Seq(holdingInput) ++ otherInputs): _*)
+      .setInputs((Seq(inputWithContext) ++ otherInputs): _*)
       .setOutputs(totalOutputs: _*)
       .buildTx(0, wallet.p2pk)
     wallet.sign(uTx)
@@ -100,20 +129,15 @@ object RollupTransactions {
     val payout = payoutContract(ctx)
 
     val otherInputs = walletInputs
-    val regs = {
-        val registers = Seq(
-          evalInput.registers.head,
-          evalInput.registers(1),
-          evalInput.registers(2),
-          ErgoValue.of(evalInput.value)
-        )
-      if(evalInput.tokens.nonEmpty)
-        registers :+ ErgoValue.of(evalInput.tokens.head.amount)
-      else
-        registers
-    }
+    val state = stateOf(evalInput, LFSMPhase.EVAL)
+    // R7 stops holding heights here. Slot 0 becomes the distributable ERG, which is the box less the
+    // bonds it owes back, and slot 1 becomes the LIT held rather than the rollup's block.
+    val litHeld = RollupProtocol.litToken(evalInput.tokens).map(_.amount).getOrElse(0L)
+    val nextState = RollupInfoState.payout(
+      RollupProtocol.distributableReward(evalInput.value, state.totalBond), litHeld, state.totalBond)
+
     val output = UTXO(payout, evalInput.value, evalInput.tokens,
-      registers = regs)
+      registers = evalInput.registers.updated(3, nextState.ergoValue))
     val totalOutputs = Seq(output) ++ feeOutputs
     val uTx = TxBuilder(ctx)
       .setInputs((Seq(evalInput) ++ otherInputs): _*)
@@ -139,12 +163,16 @@ object RollupTransactions {
     val delete = copiedTree.delete(wallet.contract.hashedPropBytes)
     val score = Longs.fromByteArray(lookUp.response.head.ergoValue.getValue.toArray.slice(0, 8))
     val totalScore = payInput.registers(2).getValue.asInstanceOf[CBigInt].wrappedValue
-    val totalReward = payInput.registers(3).getValue.asInstanceOf[Long]
-    val tokenReward = if(payInput.tokens.nonEmpty) payInput.registers(4).getValue.asInstanceOf[Long] else 0L
-    val totalTokens = payInput.tokens.headOption
+    val state = stateOf(payInput, LFSMPhase.PAYOUT)
+    val nftToken = RollupProtocol.rollupNFT(payInput.tokens)
+    val litHeld = RollupProtocol.litToken(payInput.tokens)
 
-    val amountToPay = LFSMHelpers.paymentFromScore(score, totalScore, totalReward)
-    val amountTokens = LFSMHelpers.paymentFromScore(score, totalScore, tokenReward)
+    // A miner takes their pro-rata share of the reward and their own bond back. The bond was never
+    // part of the reward, so it is added after the division rather than divided.
+    val bondRefund = RollupProtocol.bondForScore(score)
+    val amountToPay =
+      LFSMHelpers.paymentFromScore(score, totalScore, state.totalErgReward) + bondRefund
+    val amountTokens = LFSMHelpers.paymentFromScore(score, totalScore, state.totalLitReward)
     val inputWithContext = payInput.setCtxVars(
       ContextVar.of(0.toByte,
         ErgoValue.of(Array(Colls.fromArray(wallet.contract.hashedPropBytes)),
@@ -152,41 +180,27 @@ object RollupTransactions {
       ContextVar.of(1.toByte, lookUp.proof.ergoValue),
       ContextVar.of(2.toByte, delete.proof.ergoValue)
     )
+    val tokensOutputted =
+      if (litHeld.isDefined && amountTokens > 0) Seq(Token(litHeld.get.id, amountTokens))
+      else Seq.empty[Token]
+
     if (amountToPay < payInput.value && payInput.value - amountToPay > 1000000L) {
-      val nextTokens = {
-        if (totalTokens.isDefined) {
-          if (totalTokens.get.amount == amountTokens)
-            Seq.empty[Token] // If this branch is taken, payout contract would fail
-          else
-            Seq(totalTokens.get - amountTokens)
-        } else {
-          Seq.empty[Token]
-        }
-      }
-      val tokensOutputted = {
-        if (totalTokens.isDefined) {
-          Seq(Token(LFSMHelpers.LIT_ID, amountTokens))
-        } else {
-          Seq.empty[Token]
-        }
-      }
+      // The NFT stays with the successor; only the LIT paid out leaves it.
+      val nextTokens = Seq(nftToken) ++
+        litHeld.filter(_.amount > amountTokens).map(_ - amountTokens).toSeq
+      val nextState = state.withBond(RollupProtocol.releaseBond(state.totalBond, bondRefund))
       val output = UTXO(payout, payInput.value - amountToPay, nextTokens,
-        registers = payInput.registers).withReg(0, copiedTree.ergoValue)
+        registers = payInput.registers)
+        .withReg(0, copiedTree.ergoValue)
+        .withReg(3, nextState.ergoValue)
       val minerOutput = UTXO(wallet.contract, amountToPay, tokensOutputted)
       val totalOutputs = Seq(output, minerOutput) ++ feeOutputs
       val uTx = TxBuilder(ctx)
         .setInputs((Seq(inputWithContext) ++ otherInputs): _*)
-        .setOutputs(totalOutputs:_*)
+        .setOutputs(totalOutputs: _*)
         .buildTx(0, wallet.p2pk)
       wallet.sign(uTx)
     } else {
-      val tokensOutputted = {
-        if(totalTokens.isDefined) {
-          Seq(Token(LFSMHelpers.LIT_ID, amountTokens))
-        }else {
-          Seq.empty[Token]
-        }
-      }
       // This is the drain path, so what is left over is below the min change value. TxBuilder folds
       // such a remainder into the fee output; with no fee output and no wallet input there is
       // nothing to fold into and the fold throws. Payout.ergo checks the miner output with `>=`
@@ -197,8 +211,10 @@ object RollupTransactions {
       val totalOutputs = Seq(minerOutput) ++ feeOutputs
       val uTx = TxBuilder(ctx)
         .setInputs((Seq(inputWithContext) ++ otherInputs): _*)
-        .setOutputs(totalOutputs:_*)
-        .buildTx(0, wallet.p2pk)
+        .setOutputs(totalOutputs: _*)
+        // The box is consumed here, so its NFT has nowhere left to go and the contract requires
+        // that no output carries it.
+        .buildTx(0, wallet.p2pk, Seq(nftToken))
       wallet.sign(uTx)
     }
   }

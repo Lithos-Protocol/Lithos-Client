@@ -104,9 +104,8 @@
   // Spending Path 1: Holding Contract is in submission phase (miners may submit NISPs to the AVL Tree)
   if(CTX_OP == 0.toByte){
 
-    val inSubmissionPhase = HEIGHT < currentPeriod + CONST_PERIOD_LENGTH
+    val inSubmissionPhase = HEIGHT < currentPeriod + CONST_PERIOD_LENGTH && HEIGHT != currentBlock
     val validUTXO       = nextUTXO.propositionBytes == SELF.propositionBytes
-
     // Read once, because the bond is priced from it as well as checked. The guard is needed because
     // byteArrayToLong throws on a short slice; a zero falls through to validNISP's `score > 0`.
     val score: Long = {
@@ -161,30 +160,47 @@
 
     sigmaProp(statements)
   }else if(CTX_OP == 1.toByte){
-    // Spending Path 2: Transform UTXO into evaluation contract to start checking for fraud proofs after
-    // submission period has expired.
-    // No height conjunct is needed here and none is added: nextPeriod <= HEIGHT together with
-    // nextPeriod >= currentPeriod + CONST_PERIOD_LENGTH already forces
-    // HEIGHT >= currentPeriod + CONST_PERIOD_LENGTH, so this path cannot be taken early.
-    val conservedValues = allOf(
-      Coll(
-        nextUTXO.value  == SELF.value,
-        nextUTXO.tokens == SELF.tokens,
-        nextTree        == nispTree,
-        nextMiners      == currentMiners,
-        nextScore       == totalScore,
-        stateSized,
-        nextPeriod      <= HEIGHT, // Period start is updated as we enter new phase
-        nextPeriod      >= currentPeriod + CONST_PERIOD_LENGTH,
-        SELF.id         == INPUTS(0).id, // Prevent weirdness / exploits by enforcing one Holding UTXO per tx
-        nextBlock       == currentBlock, // The rollup's own block height, carried unchanged into evaluation
-        nextBond        == totalBond // Bonds carry into evaluation untouched, to be slashed or refunded there
+    // Spending Path 2: If HEIGHT == currentBlock (so in the genesis block),
+    // the miner may add to the holding UTXO's value.
+    // Otherwise, this op may be used to transform the UTXO into the evaluation contract
+    // to start checking for fraud proofs after the submission period has expired.
+    if(HEIGHT == currentBlock){
+      val valueAdded = allOf(
+        Coll(
+          nextUTXO.value  > SELF.value, // The value must increase or there is no reason to do this op
+          nextUTXO.tokens == SELF.tokens,
+          nextTree        == nispTree,
+          nextMiners      == currentMiners,
+          nextScore       == totalScore,
+          stateSized,
+          nextPeriod      == currentPeriod, // phase period stays unchanged
+          SELF.id         == INPUTS(0).id, // Prevent weirdness / exploits by enforcing one Holding UTXO per tx
+          nextBlock       == currentBlock, // The rollup's own block height must stay unchanged
+          nextBond        == totalBond, // Bond must stay at 0
+          SELF.propositionBytes == nextUTXO.propositionBytes
+        )
       )
-    )
+      sigmaProp(valueAdded)
+    }else{
+      val conservedValues = allOf(
+        Coll(
+          nextUTXO.value  == SELF.value,
+          nextUTXO.tokens == SELF.tokens,
+          nextTree        == nispTree,
+          nextMiners      == currentMiners,
+          nextScore       == totalScore,
+          stateSized,
+          nextPeriod      <= HEIGHT, // Period start is updated as we enter new phase
+          nextPeriod      >= currentPeriod + CONST_PERIOD_LENGTH,
+          SELF.id         == INPUTS(0).id, // Prevent weirdness / exploits by enforcing one Holding UTXO per tx
+          nextBlock       == currentBlock, // The rollup's own block height, carried unchanged into evaluation
+          nextBond        == totalBond // Bonds carry into evaluation untouched, to be slashed or refunded there
+        )
+      )
 
-    val isEvaluationContract = blake2b256( nextUTXO.propositionBytes ) == CONST_EVAL_PROPBYTES
-
-    sigmaProp(isEvaluationContract && conservedValues)
+      val isEvaluationContract = blake2b256( nextUTXO.propositionBytes ) == CONST_EVAL_PROPBYTES
+      sigmaProp(isEvaluationContract && conservedValues)
+    }
   }else{
     sigmaProp(false)
   }

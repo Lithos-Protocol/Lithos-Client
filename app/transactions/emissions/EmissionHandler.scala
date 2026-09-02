@@ -8,7 +8,7 @@ import org.ergoplatform.appkit.{ErgoClient, SignedTransaction}
 import org.slf4j.{Logger, LoggerFactory}
 import play.api.Configuration
 import play.api.libs.concurrent.InjectedActorSupport
-import transactions.BlockTxMessages.{BlockTxsReady, CandidateTx, RequestBlockTxs}
+import transactions.BlockTxMessages.{BlockTxsReady, CandidateTx, CandidateTxsDropped, RequestBlockTxs}
 import transactions.emissions.EmissionHandler._
 import transactions.wallet.{WalletReservation, WalletSelector}
 import work.lithos.mutations.InputUTXO
@@ -149,6 +149,10 @@ class EmissionHandler @Inject()(config: Configuration, nodeContext: NodeContext,
     // ------------------------------------------------------------------
     // A block is being assembled — hand back fee-less copies
     // ------------------------------------------------------------------
+
+    // Emission candidates reserve nothing that a dropped block has to reconcile, so there is
+    // nothing to undo. Matched anyway, because every transaction source is told.
+    case CandidateTxsDropped(_) => ()
 
     case RequestBlockTxs(blockHeight, limit) =>
       val replyTo = sender()

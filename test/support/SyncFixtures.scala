@@ -1,7 +1,6 @@
 package support
 
-import lfsm.LFSMPhase
-import lfsm.states.Rollup
+import lfsm.states.{Rollup, RollupInfoState}
 import sigma.data.AvlTreeFlags
 import state.messages.RollupMessages.{Genesis, RollupTransform}
 import state.messages.{BlockInfo, BlockTx, TxInput, TxOutput}
@@ -19,11 +18,10 @@ object SyncFixtures {
         PlasmaParameters.default),
       numMiners = 0,
       totalScore = BigInt(0),
-      currentPeriod = Some(startHeight.toLong),
-      totalReward = 0L,
+      state = RollupInfoState.holding(startHeight.toLong, startHeight.toLong, 0L),
+      value = 1000000L,
       startHeight = startHeight,
       hasMiner = false,
-      phase = LFSMPhase.HOLDING,
       blockId = blockId,
       utxoId = utxoId)
 

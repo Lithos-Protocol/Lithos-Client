@@ -348,11 +348,28 @@ class WalletManager @Inject()(nodeContext: NodeContext) extends Actor with Injec
       if (accepted) usedInputs = usedInputs -- matching.keySet
       replyTo ! ReservationSubmissionCancelled(reservationId, accepted)
 
+    case HoldReservationForCandidate(reservationId) =>
+      val replyTo = sender()
+      val matching = usedInputs.collect {
+        case (boxId, reservation) if reservation.id == reservationId => boxId -> reservation
+      }
+      val accepted = matching.nonEmpty &&
+        matching.values.forall(_.status == ReservationSelected)
+      if (accepted) {
+        usedInputs = usedInputs.map { case (boxId, reservation) =>
+          if (reservation.id == reservationId)
+            boxId -> reservation.copy(status = ReservationCandidate)
+          else boxId -> reservation
+        }
+      }
+      replyTo ! ReservationHeldForCandidate(reservationId, accepted)
+
     case MarkReservationUncertain(reservationId) =>
       usedInputs = usedInputs.map { case (boxId, reservation) =>
         if (reservation.id == reservationId &&
           (reservation.status == ReservationSubmitting ||
             reservation.status == ReservationSelected ||
+            reservation.status == ReservationCandidate ||
             reservation.status == ReservationKnown))
           boxId -> reservation.copy(status = ReservationUncertain)
         else boxId -> reservation
@@ -871,6 +888,12 @@ object WalletManager {
   /** A locally built signable output whose parent may not be node-visible yet. */
   private case object ReservationKnown extends ReservationStatus
   private case object ReservationSubmitting extends ReservationStatus
+  /**
+   * Held by a signed transaction offered into this miner's own block candidate. It never reaches
+   * the node, so no send boundary resolves it and no TTL may release it: the input is unavailable
+   * until the height it was built for is over and reconciliation says whether the block took it.
+   */
+  private case object ReservationCandidate extends ReservationStatus
   private case object ReservationUncertain extends ReservationStatus
   private case class ReservationState(id: String,
                                       reservedAtMillis: Long,

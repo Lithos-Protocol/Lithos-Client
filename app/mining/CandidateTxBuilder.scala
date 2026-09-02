@@ -1,7 +1,8 @@
 package mining
 
 import configs.CandidateConfig
-import lfsm.{EmissionSchedule, LFSMHelpers}
+import lfsm.states.RollupInfoState
+import lfsm.{EmissionSchedule, LFSMHelpers, RollupProtocol}
 import mutations.NodeWallet
 import node.MutationConversions._
 import node.NodeApi
@@ -22,6 +23,51 @@ import transactions.ProtocolContracts.{hex, lenderEntry}
 import work.lithos.mutations.{Contract, InputUTXO, Token, TxBuilder, UTXO}
 import work.lithos.plasma.PlasmaParameters
 import work.lithos.plasma.collections.PlasmaMap
+
+import scala.util.{Failure, Success, Try}
+
+/**
+ * A live collateral box and the two facts that decide whether it is drawn next.
+ *
+ * The age comes from the indexer's confirmed inclusion height, never from the box's declared
+ * creation height, which its builder chooses and could set to anything.
+ */
+final case class CollateralCandidate(input: InputUTXO, inclusionHeight: Int, finderFee: Long) {
+  def id: String = input.id.toString
+
+  def age(blockHeight: Int): Int = blockHeight - inclusionHeight
+}
+
+object CandidateTxBuilder {
+
+  /**
+   * Confirmed age at which a box stops competing on its bid and starts competing on age alone.
+   * The active set is bounded, so draining the overdue cohort oldest-first turns it over rather
+   * than starving it, and a lender who bids nothing still gets mined eventually.
+   */
+  final val OverdueAge: Int = 100
+
+  /**
+   * The boxes that tie for best, for the caller to draw from. Overdue boxes win outright, oldest
+   * first, so no bid can hold a stale box out of the set indefinitely; among the rest the highest
+   * bid wins and age breaks the tie.
+   */
+  def bestCandidates(candidates: Seq[CollateralCandidate], blockHeight: Int): Seq[CollateralCandidate] = {
+    val overdue = candidates.filter(_.age(blockHeight) >= OverdueAge)
+    if (overdue.nonEmpty) {
+      val oldest = overdue.map(_.inclusionHeight).min
+      val sameAge = overdue.filter(_.inclusionHeight == oldest)
+      val topBid = sameAge.map(_.finderFee).max
+      sameAge.filter(_.finderFee == topBid)
+    } else if (candidates.isEmpty) Seq.empty[CollateralCandidate]
+    else {
+      val topBid = candidates.map(_.finderFee).max
+      val bidding = candidates.filter(_.finderFee == topBid)
+      val oldest = bidding.map(_.inclusionHeight).min
+      bidding.filter(_.inclusionHeight == oldest)
+    }
+  }
+}
 
 /**
  * The genesis transaction, and the collateral boxes it is built from.
@@ -45,7 +91,7 @@ class CandidateTxBuilder(prover: NodeWallet, nodeApi: NodeApi, config: Candidate
    * collateral token rather than by address, because anyone may fund a box at the collateral
    * address but only the emission box mints that token.
    */
-  def loadCollateral(ctx: BlockchainContext): Seq[InputUTXO] = {
+  def loadCollateral(ctx: BlockchainContext): Seq[CollateralCandidate] = {
     val c = ProtocolContracts(ctx)
     // Hoisted out of the filters below. `Contract.ergoTreeHex` is a def that re-serialises the tree
     // and hex-encodes it on every call, and these run once per box across the whole active set.
@@ -69,7 +115,20 @@ class CandidateTxBuilder(prover: NodeWallet, nodeApi: NodeApi, config: Candidate
         s"collateral script this build compiles (${collateralTree.take(16)}...) and were " +
         "skipped. This should be impossible: check the injected constants against the deployment")
 
-    usable.map(_.toInputUTXO(ctx))
+    // A box whose fee channel does not price is unusable rather than fatal: it is one lender's box,
+    // and refusing to rank it leaves collateral mining running on every other box in the set.
+    usable.flatMap { box =>
+      Try {
+        val input = box.toInputUTXO(ctx)
+        CollateralCandidate(input, box.inclusionHeight, RollupProtocol.finderFee(input.parseReg[Long](0)))
+      } match {
+        case Success(candidate) => Some(candidate)
+        case Failure(ex) =>
+          logger.warn(s"Skipping collateral box ${box.boxId}: its fee channel does not price a " +
+            s"finder fee (${ex.getMessage})")
+          None
+      }
+    }
   }
 
   /**
@@ -134,8 +193,18 @@ class CandidateTxBuilder(prover: NodeWallet, nodeApi: NodeApi, config: Candidate
       if (permitChange > 0) Seq(UTXO(Contract.fromAddress(lenderAddress), 1000000L,
         Seq(Token(litId, permitChange))))
       else Seq.empty[UTXO]
+    // A lender bidding for priority posts five times their offer: four go to the pool through the
+    // holding box, and this one is the finder's, taken here rather than left to change so it lands
+    // at this miner's own key instead of the lender's. Below the floor there is no box that can
+    // legally carry it, so it stays with the pool.
+    val finderFee = RollupProtocol.finderFee(feeValue)
+    val finderValue =
+      if (finderLIT > 0) FinderBoxValue + finderFee
+      else if (finderFee >= FinderBoxValue) finderFee
+      else 0L
     val finderBox =
-      if (finderLIT > 0) Seq(UTXO(prover.contract, 100000L, Seq(Token(litId, finderLIT))))
+      if (finderValue > 0) Seq(UTXO(prover.contract, finderValue,
+        if (finderLIT > 0) Seq(Token(litId, finderLIT)) else Seq.empty[Token]))
       else Seq.empty[UTXO]
     val proofOfSpend = UTXO(c.gate, 150000L, Seq(Token(collat.tokens.head.id, 1L)),
       Seq(bytesValue(lenderEntry(lenderProp))))
@@ -157,7 +226,9 @@ class CandidateTxBuilder(prover: NodeWallet, nodeApi: NodeApi, config: Candidate
         emptyTreeValue,                                   // R4 empty NISP tree
         ErgoValue.of(0),                                  // R5 miner count
         ErgoValue.of(BigInt(0).bigInteger),               // R6 total score
-        ErgoValue.of(blockHeight.toLong),                 // R7 period start — must equal HEIGHT
+        // R7 period start, the rollup's own block, and an empty bond ledger. The collateral
+        // contract pins all three against HEIGHT, so a package built for another height is refused.
+        RollupInfoState.holding(blockHeight.toLong, blockHeight.toLong, 0L).ergoValue,
         // R8 the POOL's key, not the lender's — the lender is repaid by the coinbase, while R8 has
         // to be the identity this rollup's NISPs will be submitted under.
         bytesValue(prover.contract.hashedPropBytes)))
@@ -181,6 +252,9 @@ class CandidateTxBuilder(prover: NodeWallet, nodeApi: NodeApi, config: Candidate
     CollateralData(sTx.getId.replace("\"", ""), sTx.toJson(false, false), pkString, utxBytes,
       collat.bytes, collat.id.toString, lenderAddress.toString)
   }
+
+  /** What the finder's LIT box has always been worth, and the floor a bare fee box has to clear. */
+  private val FinderBoxValue: Long = 100000L
 
   private def carriesOne(b: IndexedBox, tokenId: ErgoId): Boolean =
     b.assets.headOption.exists(a => a.tokenId == tokenId.toString && a.amount == 1L)
