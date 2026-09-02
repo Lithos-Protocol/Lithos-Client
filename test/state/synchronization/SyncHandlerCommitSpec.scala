@@ -110,8 +110,8 @@ class SyncHandlerCommitSpec extends TestKit(ActorSystem("sync-handler-commit"))
     retained.map(_.blockId) should not contain orphan.id
   }
 
-  it should "pin a 300 MiB cache and separate 256 MiB volatile-journal budget" in {
-    SyncHandler.MaxMaterializedDictionaryCacheBytes shouldEqual 300L * 1024L * 1024L
+  it should "pin a 384 MiB cache and separate 256 MiB volatile-journal budget" in {
+    SyncHandler.MaxMaterializedDictionaryCacheBytes shouldEqual 384 * 1024L * 1024L
     SyncHandler.MaxTransformJournalBytes shouldEqual 256L * 1024L * 1024L
   }
 
@@ -126,8 +126,11 @@ class SyncHandlerCommitSpec extends TestKit(ActorSystem("sync-handler-commit"))
     val firstEntryOverBudget =
       ((SyncHandler.MaxMaterializedDictionaryCacheBytes - emptyWeight) / maxNispEntryWeight) + 1L
 
-    maxNispEntryWeight shouldEqual 104380L
-    firstEntryOverBudget shouldEqual 3014L
+    // This invariant is coupled to LFSMHelpers.NISP_MAX, which nothing else records.
+    info(s"NISP_MAX=${LFSMHelpers.NISP_MAX} entryWeight=$maxNispEntryWeight " +
+      s"entriesToSaturate=$firstEntryOverBudget " +
+      s"cost=${firstEntryOverBudget * Parameters.MinFee} vs blockReward=${CollateralParams.BLOCK_REWARD}")
+    maxNispEntryWeight shouldEqual 118896L // drift guard
     firstEntryOverBudget * Parameters.MinFee should be > CollateralParams.BLOCK_REWARD
   }
 

@@ -10,12 +10,17 @@ import sigma.Colls
 import work.lithos.mutations.{Contract, InputUTXO, Token, UTXO}
 
 /**
- * Holding.ergo — one property per named condition in the contract.
+ * Holding_Logic.ergo — one property per named condition in the contract.
  *
- * Path 1 (HEIGHT < periodStart + CONST_PERIOD_LENGTH): a miner inserts their NISP into the tree.
- * Path 2 (otherwise): the box transforms into the Evaluation contract.
+ * Every spend goes through Holding_Guard, so each transaction here carries the guard's two extra
+ * variables: the op byte in 3 and the logic's own value bytes in 64. Op 0 is a NISP submission, op 1
+ * is the transform into Evaluation. `HoldingGuardSpec` owns the dispatch and the hash check; this
+ * spec owns the rules the logic applies once it is running.
+ *
+ * A submission is no longer value-conserving: it posts a refundable bond priced from its own claimed
+ * score, so the successor is worth more than the box spent and R7's third slot grows to match.
  */
-class HoldingSpec extends AnyPropSpec with RollupSpecBase {
+class HoldingLogicSpec extends AnyPropSpec with RollupSpecBase {
 
   private val period = LFSMHelpers.HOLDING_PERIOD
 
@@ -27,6 +32,14 @@ class HoldingSpec extends AnyPropSpec with RollupSpecBase {
   private def signerVar(identity: Contract): ContextVar =
     ContextVar.of(0.toByte, ErgoValue.of(Colls.fromArray(identity.valueBytes), scalaByteType))
 
+  private def opVar(op: Byte): ContextVar = ContextVar.of(3.toByte, ErgoValue.of(op))
+
+  private def logicVar(ctx: BlockchainContext): ContextVar =
+    ContextVar.of(64.toByte, ErgoValue.of(Colls.fromArray(holdingLogic(ctx).valueBytes), scalaByteType))
+
+  /** The score the contract will read, which is zero for anything too short to carry one. */
+  private def scoreSeenBy(score: Long, nispSize: Int): Long = if (nispSize > 8) score else 0L
+
   /** State shared by every submission-path case. */
   private case class Submission(ctx: BlockchainContext,
                                 holdingIn: InputUTXO,
@@ -36,7 +49,8 @@ class HoldingSpec extends AnyPropSpec with RollupSpecBase {
                                 key: Array[Byte],
                                 nisp: Array[Byte],
                                 proof: ErgoValue[_],
-                                priorScore: Long)
+                                periodStart: Long,
+                                bond: Long)
 
   /**
    * Builds a well-formed submission. Each negative property takes this and perturbs exactly one
@@ -47,11 +61,13 @@ class HoldingSpec extends AnyPropSpec with RollupSpecBase {
                          nispSize: Int = 8000,
                          priorMiners: Int = 0,
                          priorScore: Long = 0L,
+                         priorBond: Long = 0L,
                          tokens: Seq[Token] = Seq.empty[Token]): Submission = {
     val holding = holdingContract(ctx)
     val prover = miner(ctx)
     val key = contractOf(prover).hashedPropBytes
     val nisp = nispBytes(score, nispSize)
+    val bond = bondFor(scoreSeenBy(score, nispSize))
 
     val tree = treeWith(Seq.empty)
     val inTree = tree.ergoValue
@@ -61,26 +77,66 @@ class HoldingSpec extends AnyPropSpec with RollupSpecBase {
     val periodStart = ctx.getHeight.toLong - 100L
 
     val holdingIn = UTXO(holding, boxValue, tokens, Seq(
-      inTree, ErgoValue.of(priorMiners), ErgoValue.of(BigInt(priorScore).bigInteger), ErgoValue.of(periodStart)
+      inTree, ErgoValue.of(priorMiners), ErgoValue.of(BigInt(priorScore).bigInteger),
+      stateReg(periodStart, periodStart, priorBond)
     )).toInput(ctx, ErgoId.create(dummyTxId), 0.toShort)
       .setCtxVars(
         signerVar(contractOf(prover)),
         ContextVar.of(1.toByte, ErgoValue.pairOf(
           ErgoValue.of(Colls.fromArray(key), scalaByteType),
           ErgoValue.of(Colls.fromArray(nisp), scalaByteType))),
-        ContextVar.of(2.toByte, insertion.proof.ergoValue)
+        ContextVar.of(2.toByte, insertion.proof.ergoValue),
+        opVar(0.toByte),
+        logicVar(ctx)
       )
 
-    val out = UTXO(holding, boxValue, tokens, Seq(
+    val out = UTXO(holding, boxValue + bond, tokens, Seq(
       outTree, ErgoValue.of(priorMiners + 1),
-      ErgoValue.of(BigInt(priorScore + score).bigInteger), ErgoValue.of(periodStart)
+      ErgoValue.of(BigInt(priorScore + score).bigInteger),
+      stateReg(periodStart, periodStart, priorBond + bond)
     ))
 
-    Submission(ctx, holdingIn, out, fundingInput(ctx, prover), prover, key, nisp, insertion.proof.ergoValue, priorScore)
+    Submission(ctx, holdingIn, out, fundingInput(ctx, prover), prover, key, nisp,
+      insertion.proof.ergoValue, periodStart, bond)
   }
 
   private def submit(s: Submission, output: UTXO): UnsignedTransaction =
     build(s.ctx, Seq(s.holdingIn, s.funding), Seq(output), s.prover.getAddress)
+
+  /** A submission whose identity is an arbitrary script rather than the signing miner's key. */
+  private def submissionAs(ctx: BlockchainContext,
+                           identity: Contract,
+                           treeKey: Array[Byte],
+                           spender: ErgoProver): (InputUTXO, UTXO, InputUTXO) = {
+    val holding = holdingContract(ctx)
+    val nisp = nispBytes(5000L, 8000)
+    val bond = bondFor(5000L)
+
+    val tree = treeWith(Seq.empty)
+    val inTree = tree.ergoValue
+    val insertion = tree.insert(treeKey -> nisp)
+    val outTree = tree.ergoValue
+    val periodStart = ctx.getHeight.toLong - 100L
+
+    val in = UTXO(holding, boxValue, Seq.empty[Token], Seq(
+      inTree, ErgoValue.of(0), ErgoValue.of(BigInt(0L).bigInteger),
+      stateReg(periodStart, periodStart, 0L)
+    )).toInput(ctx, ErgoId.create(dummyTxId), 0.toShort)
+      .setCtxVars(
+        signerVar(identity),
+        ContextVar.of(1.toByte, ErgoValue.pairOf(
+          ErgoValue.of(Colls.fromArray(treeKey), scalaByteType),
+          ErgoValue.of(Colls.fromArray(nisp), scalaByteType))),
+        ContextVar.of(2.toByte, insertion.proof.ergoValue),
+        opVar(0.toByte),
+        logicVar(ctx)
+      )
+    val out = UTXO(holding, boxValue + bond, Seq.empty[Token], Seq(
+      outTree, ErgoValue.of(1), ErgoValue.of(BigInt(5000L).bigInteger),
+      stateReg(periodStart, periodStart, bond)
+    ))
+    (in, out, fundingInput(ctx, spender))
+  }
 
   // ─── path 1: submission ───────────────────────────────────────────────────
 
@@ -96,6 +152,7 @@ class HoldingSpec extends AnyPropSpec with RollupSpecBase {
       val holding = holdingContract(ctx)
       val first = contractOf(proverWith(ctx, otherSecret)).hashedPropBytes
       val firstNisp = nispBytes(3000L, 8000)
+      val firstBond = bondFor(3000L)
 
       val tree = treeWith(Seq(first -> firstNisp))
       val inTree = tree.ergoValue
@@ -103,22 +160,27 @@ class HoldingSpec extends AnyPropSpec with RollupSpecBase {
       val prover = miner(ctx)
       val key = contractOf(prover).hashedPropBytes
       val nisp = nispBytes(5000L, 8000)
+      val bond = bondFor(5000L)
       val insertion = tree.insert(key -> nisp)
       val outTree = tree.ergoValue
 
       val periodStart = ctx.getHeight.toLong - 100L
       val in = UTXO(holding, boxValue, Seq.empty[Token], Seq(
-        inTree, ErgoValue.of(1), ErgoValue.of(BigInt(3000L).bigInteger), ErgoValue.of(periodStart)
+        inTree, ErgoValue.of(1), ErgoValue.of(BigInt(3000L).bigInteger),
+        stateReg(periodStart, periodStart, firstBond)
       )).toInput(ctx, ErgoId.create(dummyTxId), 0.toShort)
         .setCtxVars(
           signerVar(contractOf(prover)),
           ContextVar.of(1.toByte, ErgoValue.pairOf(
             ErgoValue.of(Colls.fromArray(key), scalaByteType),
             ErgoValue.of(Colls.fromArray(nisp), scalaByteType))),
-          ContextVar.of(2.toByte, insertion.proof.ergoValue)
+          ContextVar.of(2.toByte, insertion.proof.ergoValue),
+          opVar(0.toByte),
+          logicVar(ctx)
         )
-      val out = UTXO(holding, boxValue, Seq.empty[Token], Seq(
-        outTree, ErgoValue.of(2), ErgoValue.of(BigInt(8000L).bigInteger), ErgoValue.of(periodStart)
+      val out = UTXO(holding, boxValue + bond, Seq.empty[Token], Seq(
+        outTree, ErgoValue.of(2), ErgoValue.of(BigInt(8000L).bigInteger),
+        stateReg(periodStart, periodStart, firstBond + bond)
       ))
       accepts(prover, build(ctx, Seq(in, fundingInput(ctx, prover)), Seq(out), prover.getAddress))
     }
@@ -126,31 +188,10 @@ class HoldingSpec extends AnyPropSpec with RollupSpecBase {
 
   property("submission: rejects a NISP keyed to someone other than the signer (authenticMiner)") {
     withCtx { ctx =>
-      val holding = holdingContract(ctx)
       val prover = miner(ctx)
       val impostorKey = contractOf(proverWith(ctx, otherSecret)).hashedPropBytes
-      val nisp = nispBytes(5000L, 8000)
-
-      val tree = treeWith(Seq.empty)
-      val inTree = tree.ergoValue
-      val insertion = tree.insert(impostorKey -> nisp)
-      val outTree = tree.ergoValue
-
-      val periodStart = ctx.getHeight.toLong - 100L
-      val in = UTXO(holding, boxValue, Seq.empty[Token], Seq(
-        inTree, ErgoValue.of(0), ErgoValue.of(BigInt(0L).bigInteger), ErgoValue.of(periodStart)
-      )).toInput(ctx, ErgoId.create(dummyTxId), 0.toShort)
-        .setCtxVars(
-          signerVar(contractOf(prover)),
-          ContextVar.of(1.toByte, ErgoValue.pairOf(
-            ErgoValue.of(Colls.fromArray(impostorKey), scalaByteType),
-            ErgoValue.of(Colls.fromArray(nisp), scalaByteType))),
-          ContextVar.of(2.toByte, insertion.proof.ergoValue)
-        )
-      val out = UTXO(holding, boxValue, Seq.empty[Token], Seq(
-        outTree, ErgoValue.of(1), ErgoValue.of(BigInt(5000L).bigInteger), ErgoValue.of(periodStart)
-      ))
-      rejects(prover, build(ctx, Seq(in, fundingInput(ctx, prover)), Seq(out), prover.getAddress))
+      val (in, out, funding) = submissionAs(ctx, contractOf(prover), impostorKey, prover)
+      rejects(prover, build(ctx, Seq(in, funding), Seq(out), prover.getAddress))
     }
   }
 
@@ -158,13 +199,6 @@ class HoldingSpec extends AnyPropSpec with RollupSpecBase {
     withCtx { ctx =>
       val s = submission(ctx)
       rejects(s.prover, submit(s, s.out.setContract(Contract.SIGMA_TRUE)))
-    }
-  }
-
-  property("submission: rejects a change in box value (rewardConserved)") {
-    withCtx { ctx =>
-      val s = submission(ctx)
-      rejects(s.prover, submit(s, s.out.subValue(Parameters.OneErg)))
     }
   }
 
@@ -193,7 +227,16 @@ class HoldingSpec extends AnyPropSpec with RollupSpecBase {
   property("submission: rejects when the period start is moved (samePeriod)") {
     withCtx { ctx =>
       val s = submission(ctx)
-      rejects(s.prover, submit(s, s.out.withReg(3, ErgoValue.of(ctx.getHeight.toLong))))
+      rejectsAtSigning(s.prover, submit(s,
+        s.out.withReg(3, stateReg(ctx.getHeight.toLong, s.periodStart, s.bond))))
+    }
+  }
+
+  property("submission: rejects when the block height is moved (sameBlock)") {
+    withCtx { ctx =>
+      val s = submission(ctx)
+      rejectsAtSigning(s.prover, submit(s,
+        s.out.withReg(3, stateReg(s.periodStart, s.periodStart + 1L, s.bond))))
     }
   }
 
@@ -227,14 +270,14 @@ class HoldingSpec extends AnyPropSpec with RollupSpecBase {
 
   property("submission: accepts a NISP at exactly CONST_NISP_MIN") {
     withCtx { ctx =>
-      val s = submission(ctx, score = 5000L, nispSize = 7948)
+      val s = submission(ctx, score = 5000L, nispSize = LFSMHelpers.NISP_MIN)
       accepts(s.prover, submit(s, s.out))
     }
   }
 
   property("submission: rejects a NISP at CONST_NISP_MAX") {
     withCtx { ctx =>
-      val s = submission(ctx, score = 5000L, nispSize = 26000)
+      val s = submission(ctx, score = 5000L, nispSize = LFSMHelpers.NISP_MAX)
       rejects(s.prover, submit(s, s.out))
     }
   }
@@ -256,72 +299,39 @@ class HoldingSpec extends AnyPropSpec with RollupSpecBase {
 
   /**
    * The point of executing the identity from a context var: a miner identity can be any script, so
-   * a contract can hold a payout claim. Previously the var had to be a SigmaProp value.
+   * a contract can hold a payout claim.
    */
   property("submission: accepts a contract as the miner identity (executeFromVar)") {
     withCtx { ctx =>
-      val holding = holdingContract(ctx)
-      val identity = Contract.SIGMA_TRUE
-      val key = identity.hashedPropBytes
-      val nisp = nispBytes(5000L, 8000)
-
-      val tree = treeWith(Seq.empty)
-      val inTree = tree.ergoValue
-      val insertion = tree.insert(key -> nisp)
-      val outTree = tree.ergoValue
-
-      val periodStart = ctx.getHeight.toLong - 100L
       val anyone = proverWith(ctx, funderSecret)
-      val in = UTXO(holding, boxValue, Seq.empty[Token], Seq(
-        inTree, ErgoValue.of(0), ErgoValue.of(BigInt(0L).bigInteger), ErgoValue.of(periodStart)
-      )).toInput(ctx, ErgoId.create(dummyTxId), 0.toShort)
-        .setCtxVars(
-          signerVar(identity),
-          ContextVar.of(1.toByte, ErgoValue.pairOf(
-            ErgoValue.of(Colls.fromArray(key), scalaByteType),
-            ErgoValue.of(Colls.fromArray(nisp), scalaByteType))),
-          ContextVar.of(2.toByte, insertion.proof.ergoValue)
-        )
-      val out = UTXO(holding, boxValue, Seq.empty[Token], Seq(
-        outTree, ErgoValue.of(1), ErgoValue.of(BigInt(5000L).bigInteger), ErgoValue.of(periodStart)
-      ))
-      accepts(anyone, build(ctx, Seq(in, fundingInput(ctx, anyone)), Seq(out), anyone.getAddress))
+      val identity = Contract.SIGMA_TRUE
+      val (in, out, funding) = submissionAs(ctx, identity, identity.hashedPropBytes, anyone)
+      accepts(anyone, build(ctx, Seq(in, funding), Seq(out), anyone.getAddress))
     }
   }
 
   property("submission: rejects an identity script whose hash is not the tree key (authenticMiner)") {
     withCtx { ctx =>
-      val holding = holdingContract(ctx)
       val prover = miner(ctx)
-      val key = contractOf(prover).hashedPropBytes
-      val nisp = nispBytes(5000L, 8000)
+      // Satisfiable, but not the identity the key names.
+      val (in, out, funding) =
+        submissionAs(ctx, Contract.SIGMA_TRUE, contractOf(prover).hashedPropBytes, prover)
+      rejects(prover, build(ctx, Seq(in, funding), Seq(out), prover.getAddress))
+    }
+  }
 
-      val tree = treeWith(Seq.empty)
-      val inTree = tree.ergoValue
-      val insertion = tree.insert(key -> nisp)
-      val outTree = tree.ergoValue
-
-      val periodStart = ctx.getHeight.toLong - 100L
-      val in = UTXO(holding, boxValue, Seq.empty[Token], Seq(
-        inTree, ErgoValue.of(0), ErgoValue.of(BigInt(0L).bigInteger), ErgoValue.of(periodStart)
-      )).toInput(ctx, ErgoId.create(dummyTxId), 0.toShort)
-        .setCtxVars(
-          signerVar(Contract.SIGMA_TRUE), // satisfiable, but not the identity the key names
-          ContextVar.of(1.toByte, ErgoValue.pairOf(
-            ErgoValue.of(Colls.fromArray(key), scalaByteType),
-            ErgoValue.of(Colls.fromArray(nisp), scalaByteType))),
-          ContextVar.of(2.toByte, insertion.proof.ergoValue)
-        )
-      val out = UTXO(holding, boxValue, Seq.empty[Token], Seq(
-        outTree, ErgoValue.of(1), ErgoValue.of(BigInt(5000L).bigInteger), ErgoValue.of(periodStart)
-      ))
-      rejects(prover, build(ctx, Seq(in, fundingInput(ctx, prover)), Seq(out), prover.getAddress))
+  property("submission: rejects an identity script that evaluates to false (signerProp)") {
+    withCtx { ctx =>
+      val prover = miner(ctx)
+      val identity = Contract.SIGMA_FALSE
+      val (in, out, funding) = submissionAs(ctx, identity, identity.hashedPropBytes, prover)
+      rejects(prover, build(ctx, Seq(in, funding), Seq(out), prover.getAddress))
     }
   }
 
   /**
    * One NISP per identity per rollup, enforced by the AVL tree rejecting a duplicate key. The spam
-   * analysis in LITHOS_PROTOCOL_ANALYSIS 14.2 leans on this bound.
+   * bound leans on this.
    */
   property("submission: rejects a second NISP from an identity already in the tree") {
     withCtx { ctx =>
@@ -330,6 +340,8 @@ class HoldingSpec extends AnyPropSpec with RollupSpecBase {
       val key = contractOf(prover).hashedPropBytes
       val firstNisp = nispBytes(3000L, 8000)
       val secondNisp = nispBytes(5000L, 8000)
+      val firstBond = bondFor(3000L)
+      val bond = bondFor(5000L)
 
       val tree = treeWith(Seq(key -> firstNisp))
       val inTree = tree.ergoValue
@@ -338,50 +350,112 @@ class HoldingSpec extends AnyPropSpec with RollupSpecBase {
 
       val periodStart = ctx.getHeight.toLong - 100L
       val in = UTXO(holding, boxValue, Seq.empty[Token], Seq(
-        inTree, ErgoValue.of(1), ErgoValue.of(BigInt(3000L).bigInteger), ErgoValue.of(periodStart)
+        inTree, ErgoValue.of(1), ErgoValue.of(BigInt(3000L).bigInteger),
+        stateReg(periodStart, periodStart, firstBond)
       )).toInput(ctx, ErgoId.create(dummyTxId), 0.toShort)
         .setCtxVars(
           signerVar(contractOf(prover)),
           ContextVar.of(1.toByte, ErgoValue.pairOf(
             ErgoValue.of(Colls.fromArray(key), scalaByteType),
             ErgoValue.of(Colls.fromArray(secondNisp), scalaByteType))),
-          ContextVar.of(2.toByte, insertion.proof.ergoValue)
+          ContextVar.of(2.toByte, insertion.proof.ergoValue),
+          opVar(0.toByte),
+          logicVar(ctx)
         )
-      val out = UTXO(holding, boxValue, Seq.empty[Token], Seq(
-        outTree, ErgoValue.of(2), ErgoValue.of(BigInt(8000L).bigInteger), ErgoValue.of(periodStart)
+      val out = UTXO(holding, boxValue + bond, Seq.empty[Token], Seq(
+        outTree, ErgoValue.of(2), ErgoValue.of(BigInt(8000L).bigInteger),
+        stateReg(periodStart, periodStart, firstBond + bond)
       ))
       rejects(prover, build(ctx, Seq(in, fundingInput(ctx, prover)), Seq(out), prover.getAddress))
     }
   }
 
-  property("submission: rejects an identity script that evaluates to false (signerProp)") {
+  // ─── the entry bond (bondCollected) ───────────────────────────────────────
+  //
+  // Two equalities, and both matter. The box value has to rise by exactly the bond, and the ledger
+  // in R7 slot 2 has to rise by exactly the same amount. Either one alone would let ERG and the
+  // claim on it drift apart.
+
+  property("bond: rejects a successor that keeps the old value (bondCollected)") {
     withCtx { ctx =>
-      val holding = holdingContract(ctx)
-      val prover = miner(ctx)
-      val identity = Contract.SIGMA_FALSE
-      val key = identity.hashedPropBytes
-      val nisp = nispBytes(5000L, 8000)
+      val s = submission(ctx)
+      rejectsAtSigning(s.prover, submit(s, s.out.subValue(s.bond)))
+    }
+  }
 
-      val tree = treeWith(Seq.empty)
-      val inTree = tree.ergoValue
-      val insertion = tree.insert(key -> nisp)
-      val outTree = tree.ergoValue
+  property("bond: rejects a successor one nanoERG short of the bond (bondCollected)") {
+    withCtx { ctx =>
+      val s = submission(ctx)
+      rejectsAtSigning(s.prover, submit(s, s.out.subValue(1L)))
+    }
+  }
 
-      val periodStart = ctx.getHeight.toLong - 100L
-      val in = UTXO(holding, boxValue, Seq.empty[Token], Seq(
-        inTree, ErgoValue.of(0), ErgoValue.of(BigInt(0L).bigInteger), ErgoValue.of(periodStart)
-      )).toInput(ctx, ErgoId.create(dummyTxId), 0.toShort)
-        .setCtxVars(
-          signerVar(identity),
-          ContextVar.of(1.toByte, ErgoValue.pairOf(
-            ErgoValue.of(Colls.fromArray(key), scalaByteType),
-            ErgoValue.of(Colls.fromArray(nisp), scalaByteType))),
-          ContextVar.of(2.toByte, insertion.proof.ergoValue)
-        )
-      val out = UTXO(holding, boxValue, Seq.empty[Token], Seq(
-        outTree, ErgoValue.of(1), ErgoValue.of(BigInt(5000L).bigInteger), ErgoValue.of(periodStart)
-      ))
-      rejects(prover, build(ctx, Seq(in, fundingInput(ctx, prover)), Seq(out), prover.getAddress))
+  /** Overpaying is refused too: the value and the ledger are pinned to each other, not bounded. */
+  property("bond: rejects a successor holding more than the bond (bondCollected)") {
+    withCtx { ctx =>
+      val s = submission(ctx)
+      rejectsAtSigning(s.prover, submit(s, s.out.addValue(1L)))
+    }
+  }
+
+  property("bond: rejects a successor whose ledger does not record the bond (bondCollected)") {
+    withCtx { ctx =>
+      val s = submission(ctx)
+      rejectsAtSigning(s.prover, submit(s,
+        s.out.withReg(3, stateReg(s.periodStart, s.periodStart, 0L))))
+    }
+  }
+
+  /**
+   * The ledger is what Payout refunds against, so a successor claiming more than the ERG that
+   * actually arrived is the shape that would let one miner draw down another's deposit.
+   */
+  property("bond: rejects a ledger entry larger than the value posted (bondCollected)") {
+    withCtx { ctx =>
+      val s = submission(ctx)
+      rejectsAtSigning(s.prover, submit(s,
+        s.out.withReg(3, stateReg(s.periodStart, s.periodStart, s.bond * 2L))))
+    }
+  }
+
+  property("bond: accepts a submission onto a rollup that already holds bonds") {
+    withCtx { ctx =>
+      val s = submission(ctx, priorMiners = 1, priorScore = 3000L, priorBond = bondFor(3000L))
+      accepts(s.prover, submit(s, s.out))
+    }
+  }
+
+  /** Below the crossover the floor applies, above it the score does. */
+  property("bond: a small score posts the floor, a large score posts score/divisor") {
+    withCtx { ctx =>
+      val floorScore = LFSMHelpers.MIN_ENTRY_BOND * LFSMHelpers.BOND_DIVISOR
+      bondFor(floorScore / 2L) shouldBe LFSMHelpers.MIN_ENTRY_BOND
+      bondFor(floorScore * 4L) shouldBe floorScore * 4L / LFSMHelpers.BOND_DIVISOR
+
+      val big = submission(ctx, score = floorScore * 4L)
+      big.bond should be > LFSMHelpers.MIN_ENTRY_BOND
+      accepts(big.prover, submit(big, big.out))
+    }
+  }
+
+  /** A bond priced from a different score than the NISP claims is what the contract has to refuse. */
+  property("bond: rejects a bond priced below the claimed score") {
+    withCtx { ctx =>
+      val floorScore = LFSMHelpers.MIN_ENTRY_BOND * LFSMHelpers.BOND_DIVISOR
+      val s = submission(ctx, score = floorScore * 4L)
+      val cheap = LFSMHelpers.MIN_ENTRY_BOND
+      val out = UTXO(s.out.contract, boxValue + cheap, s.out.tokens,
+        s.out.registers.updated(3, stateReg(s.periodStart, s.periodStart, cheap)))
+      rejectsAtSigning(s.prover, submit(s, out))
+    }
+  }
+
+  property("state: rejects a successor whose state register is not three slots (stateSized)") {
+    withCtx { ctx =>
+      val s = submission(ctx)
+      val four = ErgoValue.of(
+        Colls.fromArray(Array(s.periodStart, s.periodStart, s.bond, 0L)), scalaLongType)
+      rejectsAtSigning(s.prover, submit(s, s.out.withReg(3, four)))
     }
   }
 
@@ -390,6 +464,7 @@ class HoldingSpec extends AnyPropSpec with RollupSpecBase {
   private def transform(ctx: BlockchainContext,
                         miners: Int = 3,
                         score: Long = 9000L,
+                        bond: Long = 0L,
                         tokens: Seq[Token] = Seq.empty[Token]) = {
     val holding = holdingContract(ctx)
     val eval = evalContract(ctx)
@@ -400,12 +475,14 @@ class HoldingSpec extends AnyPropSpec with RollupSpecBase {
     val periodStart = ctx.getHeight.toLong - period - 10L
 
     val in = UTXO(holding, boxValue, tokens, Seq(
-      tree.ergoValue, ErgoValue.of(miners), ErgoValue.of(BigInt(score).bigInteger), ErgoValue.of(periodStart)
+      tree.ergoValue, ErgoValue.of(miners), ErgoValue.of(BigInt(score).bigInteger),
+      stateReg(periodStart, periodStart, bond)
     )).toInput(ctx, ErgoId.create(dummyTxId), 0.toShort)
+      .setCtxVars(opVar(1.toByte), logicVar(ctx))
 
     val out = UTXO(eval, boxValue, tokens, Seq(
       tree.ergoValue, ErgoValue.of(miners), ErgoValue.of(BigInt(score).bigInteger),
-      ErgoValue.of(ctx.getHeight.toLong), ErgoValue.of(periodStart)
+      stateReg(ctx.getHeight.toLong, periodStart, bond)
     ))
     (prover, in, out, tree, periodStart)
   }
@@ -462,15 +539,45 @@ class HoldingSpec extends AnyPropSpec with RollupSpecBase {
     withCtx { ctx =>
       val (prover, in, out, _, periodStart) = transform(ctx)
       rejects(prover, build(ctx, Seq(in, fundingInput(ctx, prover)),
-        Seq(out.withReg(3, ErgoValue.of(periodStart + period - 1L))), prover.getAddress))
+        Seq(out.withReg(3, stateReg(periodStart + period - 1L, periodStart, 0L))), prover.getAddress))
     }
   }
 
-  property("transform: rejects when R8 does not carry the original period start (nextBlock)") {
+  property("transform: rejects when the block height is not carried over (sameBlock)") {
     withCtx { ctx =>
       val (prover, in, out, _, periodStart) = transform(ctx)
       rejects(prover, build(ctx, Seq(in, fundingInput(ctx, prover)),
-        Seq(out.withReg(4, ErgoValue.of(periodStart + 1L))), prover.getAddress))
+        Seq(out.withReg(3, stateReg(ctx.getHeight.toLong, periodStart + 1L, 0L))), prover.getAddress))
+    }
+  }
+
+  /**
+   * The bonds have to reach Evaluation intact: it is what Evaluation slashes against, and what it
+   * subtracts from the box value to work out the reward Payout divides.
+   */
+  property("transform: carries the bond total into evaluation unchanged") {
+    withCtx { ctx =>
+      val held = bondFor(9000L)
+      val (prover, in, out, _, _) = transform(ctx, bond = held)
+      accepts(prover, build(ctx, Seq(in, fundingInput(ctx, prover)), Seq(out), prover.getAddress))
+    }
+  }
+
+  property("transform: rejects a successor that drops the bond total") {
+    withCtx { ctx =>
+      val held = bondFor(9000L)
+      val (prover, in, out, _, periodStart) = transform(ctx, bond = held)
+      rejectsAtSigning(prover, build(ctx, Seq(in, fundingInput(ctx, prover)),
+        Seq(out.withReg(3, stateReg(ctx.getHeight.toLong, periodStart, 0L))), prover.getAddress))
+    }
+  }
+
+  property("transform: rejects a successor that inflates the bond total") {
+    withCtx { ctx =>
+      val held = bondFor(9000L)
+      val (prover, in, out, _, periodStart) = transform(ctx, bond = held)
+      rejectsAtSigning(prover, build(ctx, Seq(in, fundingInput(ctx, prover)),
+        Seq(out.withReg(3, stateReg(ctx.getHeight.toLong, periodStart, held * 2L))), prover.getAddress))
     }
   }
 

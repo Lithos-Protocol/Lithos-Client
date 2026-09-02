@@ -1497,7 +1497,8 @@ class SyncHandler @Inject()(config: Configuration,
 }
 
 object SyncHandler {
-  private[synchronization] final val MaxMaterializedDictionaryCacheBytes = 300L * 1024L * 1024L
+  // Sized according to NISP weights
+  private[synchronization] final val MaxMaterializedDictionaryCacheBytes = 384L * 1024L * 1024L
   private[synchronization] final val MaxTransformJournalBytes = 256L * 1024L * 1024L
   private[synchronization] final val CheckpointRetryDelay: FiniteDuration = 30.seconds
 

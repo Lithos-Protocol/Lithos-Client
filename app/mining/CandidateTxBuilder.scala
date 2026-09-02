@@ -151,7 +151,8 @@ class CandidateTxBuilder(prover: NodeWallet, nodeApi: NodeApi, config: Candidate
         s"nanoERG of a $feeValue fee channel on collateral box ${collat.id}")
 
     val holdingBox = UTXO(c.holding, holdingValue,
-      if (poolLIT > 0) Seq(Token(litId, poolLIT)) else Seq.empty[Token],
+      Seq(Token(collat.id, 1L)) ++
+        (if (poolLIT > 0) Seq(Token(litId, poolLIT)) else Seq.empty[Token]),
       Seq(
         emptyTreeValue,                                   // R4 empty NISP tree
         ErgoValue.of(0),                                  // R5 miner count

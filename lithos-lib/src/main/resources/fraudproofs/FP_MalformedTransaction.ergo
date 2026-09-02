@@ -9,16 +9,12 @@
   val nispTree      = evalBox.R4[AvlTree].get
   val currentMiners = evalBox.R5[Int].get
   val totalScore    = evalBox.R6[BigInt].get
-  val currentPeriod = evalBox.R7[Long].get
-  val currentBlock  = evalBox.R8[Long].get
 
   // NEXT VALUES
   val nextUTXO   = OUTPUTS(0)
   val nextTree   = nextUTXO.R4[AvlTree].get
   val nextMiners = nextUTXO.R5[Int].get
   val nextScore  = nextUTXO.R6[BigInt].get
-  val nextPeriod = nextUTXO.R7[Long].get
-  val nextBlock  = nextUTXO.R8[Long].get
 
   // CONTEXT VARS
   // CTX_MINER_BYTES(0): accused miner hash
@@ -232,9 +228,7 @@
   val changedRegisters = allOf(Coll(
     minerRemoved,
     nextMiners == currentMiners - 1,
-    nextScore == totalScore - score.toBigInt,
-    nextPeriod == currentPeriod,
-    nextBlock == currentBlock
+    nextScore == totalScore - score.toBigInt
   ))
 
   sigmaProp(malformedShareExists && changedRegisters)

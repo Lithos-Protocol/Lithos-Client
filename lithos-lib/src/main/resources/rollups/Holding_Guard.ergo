@@ -1,0 +1,67 @@
+{
+  // Holding_Guard
+  // Value: block reward
+  // The script a holding box actually carries. It holds the hash of the real holding logic,
+  // dispatches on an op byte, and runs that logic — supplied at spend time and checked against the
+  // hash before a single line of it is trusted.
+  //
+  // Size is the whole point, and it is paid in an unusual place. This script is serialized into the
+  // genesis transaction as an output, the genesis transaction is carried whole inside every
+  // super-share's TransactionProof, and a NISP holds ten super-shares — so one byte here is ten
+  // bytes of NISP, and a fraud proof carries three NISPs. Every byte moved out of this script and
+  // into a context variable is thirty bytes off the fraud-proof worst case, and it is paid instead
+  // by the submission transaction that actually uses it.
+  //
+  // Same trade as LD_Provision_Guard and Emission_Guard, with one structural difference forced on
+  // it: executeFromVar CANNOT NEST. The holding logic used to run the miner's own signing script
+  // out of var 0, and it cannot do that from inside a script that is itself being executed from a
+  // variable. So the miner's script is run HERE, and the tree key is bound HERE, and the logic
+  // never sees the signer at all — it takes CTX_NISP_DATA._1 as already authenticated.
+  //
+  // That is also why the op byte exists. The phase used to be chosen by an if on HEIGHT, which the
+  // logic could evaluate for itself; but this script has to know, before it executes anything,
+  // whether a signer script is going to be run. So the spender declares the path and BOTH scripts
+  // branch on the same variable. The declaration buys nothing on its own: the logic re-checks the
+  // height condition that the old if provided, as an ordinary conjunct on the submission path.
+
+  // CONSTANTS
+  // CONST_HOLDING_LOGIC_HASH: blake2b256 of the serialized value bytes of the holding logic
+
+  // CONTEXT VARS
+  // CTX_SIGNER(0): value bytes of the miner's signing proposition. Submission only.
+  // CTX_NISP_DATA(1): ( hashed miner proposition bytes -> NISP bytes ). Submission only.
+  // CTX_OP(3): 0 submit, 1 transform. Read by this script and by the logic, which see the same value.
+  // CTX_LOGIC(64): serialized value bytes of the holding logic.
+
+  // ASSUMPTIONS - statements which can be assumed to be true due to other contracts enforcing them
+  // during creation of this UTXO
+  // Collateral_Mainnet pins blake2b256 of this script as the holding box's proposition, so a box
+  // under this script is the rollup the collateral transaction opened.
+  //
+  // DELIBERATE OMISSIONS - conditions left out on purpose
+  // Nothing here looks at registers, tokens, values or outputs. Every rule about what a holding box
+  // is and what may be done to it belongs to the logic; duplicating any of it here would create a
+  // second place to keep in step, and cost the bytes this contract exists to save.
+
+  val CTX_OP    = getVar[Byte](3).getOrElse(-1.toByte)
+  val CTX_LOGIC = getVar[Coll[Byte]](64).get
+
+  val authenticLogic = blake2b256( CTX_LOGIC ) == CONST_HOLDING_LOGIC_HASH
+
+  // Spending Path 1: a miner submits a NISP, and signs for it
+  if(CTX_OP == 0.toByte){
+    val CTX_NISP_DATA = getVar[(Coll[Byte], Coll[Byte])](1).getOrElse((Coll(0.toByte), Coll(0.toByte)))
+    val signerProp = executeFromVar[SigmaProp](0)
+    // The tree key is the hash of the miner's proposition, so binding it here is what stops one
+    // miner submitting under another's identity. It lives in this script only because the logic
+    // cannot execute var 0 for itself.
+    val authenticMiner = blake2b256( signerProp.propBytes ) == CTX_NISP_DATA._1
+
+    sigmaProp(authenticLogic && authenticMiner) && signerProp && executeFromVar[SigmaProp](64)
+  }else if(CTX_OP == 1.toByte){
+    // Spending Path 2: transform into the evaluation contract. No signer, no identity to bind.
+    sigmaProp(authenticLogic) && executeFromVar[SigmaProp](64)
+  }else{
+    sigmaProp(false)
+  }
+}

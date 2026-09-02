@@ -60,6 +60,7 @@
   // inserted before PoW, altering it changes the hash of the block carrying it, and so its usefulness
   // as a super-share.
 
+
   val litBlockReward = litRewards._1
   val litPrivRewards = litRewards._2.fold(0L, {
     (acc: Long, x: (Coll[Byte], Long)) =>
@@ -150,12 +151,22 @@
 
   val tokensTransferred = {
     if(poolLIT > 0){
-      val holdingTokens = holdingBox.tokens.getOrElse(0, (CONST_LIT_ID, 0L))
+      val holdingTokens = holdingBox.tokens.getOrElse(1, (CONST_LIT_ID, 0L))
       holdingTokens._1 == CONST_LIT_ID && holdingTokens._2 == poolLIT
     }else{
       true
     }
   }
+
+  val rollupState = holdingBox.R7[Coll[Long]].get
+  val holdingNFT = holdingBox.tokens(0)._1 == SELF.id && holdingBox.tokens(0)._2 == 1L
+  val numNFT = OUTPUTS.fold(0L, {
+    (a: Long, b: Box) =>
+      val totalTokens = b.tokens.fold(0L, {
+        (z: Long, t: (Coll[Byte], Long)) => if(t._1 == SELF.id) z + t._2 else z
+      })
+      a + totalTokens
+    })
 
   val validAvlTree = allOf(
     Coll(
@@ -177,10 +188,18 @@
       validAvlTree,
       holdingBox.R5[Int].get    == 0,
       holdingBox.R6[BigInt].get == 0.toBigInt,
-      holdingBox.R7[Long].get   == HEIGHT,
+      // R7 is the rollup state, [period start, block height, bond total]. Period and block are
+      // this height at genesis; the bond ledger starts empty. The length is pinned because every
+      // rollup contract reads these by index.
+      rollupState.size == 3,
+      rollupState(0)   == HEIGHT,
+      rollupState(1)   == HEIGHT,
+      rollupState(2)   == 0L,
       // R8 Holds propBytesHash of the miner, so that a miner's claim over their supershares is tied to
       // their PoW and cannot be faked
-      holdingBox.R8[Coll[Byte]].get.size == 32
+      holdingBox.R8[Coll[Byte]].get.size == 32,
+      holdingNFT,
+      numNFT == 1L
     )
   )
 

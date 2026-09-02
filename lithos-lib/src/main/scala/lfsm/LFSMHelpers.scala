@@ -20,13 +20,29 @@ object LFSMHelpers {
   final val EVAL_PERIOD    = 360L
   final val NISP_WINDOW    = 160L // 160 on testnet is 2 hours (45 sec blocktime), equivalent on mainnet is 60 (2 min blocktime)
   final val NISP_COEFFICIENT = 10000 // Coefficient which separates normal shares from super-shares, used in evaluation
-  final val NISP_MAX         = 26000 // Max size of NISP in bytes
-  final val NISP_MIN         = 7108
+  // NISP size envelope, mirrored in Holding_Logic and injected into FP_InvalidFormat.
+  // share = [N: 4][header][txProofSize: 2][numLevels: 1][txProof][levels: 33n][yCoord: 32]
+  // NISP  = [score: 8][10 shares], header 220 bytes (221 once height passes 2^21).
+  // MIN = 8 + 10*(4 + 220 + 3 + 502 + 33 + 32). MAX = 8 + 10*(4 + 221 + 3 + 2174 + 528 + 32) + 1.
+  final val NISP_MAX         = 29629 // Max size of NISP in bytes
+  final val NISP_MIN         = 7948
   final val TX_PROOF_MIN       = 502
-  final val TX_PROOF_MAX       = 4000
+  // Worst honest txProof is 2074. The extra 100 bytes are the budget for a larger rollup contract,
+  // which is config-replaceable; every byte of one lands here and is multiplied by ten into
+  // NISP_MAX. Trimming this shrinks the largest rollup contract that can ever be deployed.
+  final val TX_PROOF_MAX       = 2174
   final val TX_SIZE_MIN        = 450
   final val COLLAT_BOX_MIN     = 50
   final val NUM_LVLS_MAX      = 16
+
+  // Refundable per-NISP bond, mirrored in Holding_Logic, Evaluation and Payout.
+  // A submission posts max(MIN_ENTRY_BOND, score / BOND_DIVISOR) alongside its NISP, gets it back at
+  // payout, and forfeits it to the prover if a fraud proof removes the entry. The floor is what
+  // prices dictionary-cache spam; the proportional term is what stops a large claimed score from
+  // being cheap to post. The floor also has to clear Ergo's 1e6 min box value, since a slash pays it
+  // out as a box of its own.
+  final val MIN_ENTRY_BOND     = 2000000L // 0.002 ERG
+  final val BOND_DIVISOR       = 100L     // score units per nanoERG of proportional bond
 
   final val COLLAT_MAX_FEE   = Parameters.MinFee * 100
 

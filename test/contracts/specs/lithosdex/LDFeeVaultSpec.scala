@@ -344,4 +344,41 @@ class LDFeeVaultSpec extends AnyPropSpec with LithosDexSpecBase {
           c.prover.getAddress, Seq.empty, Seq.empty))
     }
   }
+  // ─── the empty zip ────────────────────────────────────────────────────────
+  //
+  // provIns and provOuts are both slices, and slice clamps rather than throwing, so a claim whose
+  // outputs are shorter than its count forms no pairs and settles nothing. That direction is safe:
+  // owed is a sum of non-negative terms and appears only as a lower bound on what the vault keeps, so
+  // dropping pairs can only make it keep more. These two pin the boundary.
+
+  /**
+   * A claim that settles nobody is accepted, and moves nothing: the accumulators are pinned and the
+   * successor has to hold at least what the box held. It costs a fee-less transaction and a donation,
+   * and buys a new box id — the same respend-griefing any single-UTXO contract allows.
+   */
+  property("claim: a count with no matching outputs settles nothing and takes nothing") {
+    withCtx { ctx =>
+      val c = claimScenario(ctx)
+      val vIn = vaultInput(ctx, vaultUTXO(ctx, c.vaultX, c.vaultY, c.accX, c.accY),
+        LDHelpers.VAULT_CLAIM, 0, Some(1))
+      val fund = funding(ctx, 9)
+      val out = vaultUTXO(ctx, c.vaultX + fund.value, c.vaultY, c.accX, c.accY)
+      accepts(c.prover, work.lithos.mutations.TxBuilder(ctx).setInputs(vIn, fund)
+        .setOutputs(out).buildTx(0L, c.prover.getAddress))
+    }
+  }
+
+  /**
+   * The same shape with a fee is refused, which is what keeps the no-op above uninteresting: the fee
+   * output lands at the first provision slot, so the fold runs and finds no provision token there.
+   */
+  property("claim: a no-op claim cannot pay a fee, since the fee output fills the provision slot") {
+    withCtx { ctx =>
+      val c = claimScenario(ctx)
+      val vIn = vaultInput(ctx, vaultUTXO(ctx, c.vaultX, c.vaultY, c.accX, c.accY),
+        LDHelpers.VAULT_CLAIM, 0, Some(1))
+      val out = vaultUTXO(ctx, c.vaultX, c.vaultY, c.accX, c.accY)
+      rejectsAtSigning(c.prover, build(ctx, Seq(vIn, funding(ctx, 9)), Seq(out), c.prover.getAddress))
+    }
+  }
 }

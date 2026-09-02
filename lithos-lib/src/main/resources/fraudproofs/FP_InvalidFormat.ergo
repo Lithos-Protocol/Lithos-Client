@@ -10,16 +10,12 @@
   val nispTree:      AvlTree = evalBox.R4[AvlTree].get
   val currentMiners: Int     = evalBox.R5[Int].get
   val totalScore:    BigInt  = evalBox.R6[BigInt].get
-  val currentPeriod: Long    = evalBox.R7[Long].get
-  val currentBlock:  Long    = evalBox.R8[Long].get
 
   // NEXT VALUES
   val nextUTXO   = OUTPUTS(0)
   val nextTree   = nextUTXO.R4[AvlTree].get
   val nextMiners = nextUTXO.R5[Int].get
   val nextScore  = nextUTXO.R6[BigInt].get
-  val nextPeriod = nextUTXO.R7[Long].get
-  val nextBlock  = nextUTXO.R8[Long].get
 
   // CONTEXT VARS
   // CTX_MINER_BYTES(0) - Hashed PropBytes of miner who committed fraud
@@ -28,13 +24,28 @@
   val CTX_MINER_BYTES      = getVarFromInput[Coll[Byte]](1, 0).getOrElse(Coll(0.toByte))
   val CTX_LOOKUP_PROOF     = getVarFromInput[Coll[Byte]](1, 1).getOrElse(Coll(0.toByte))
   val CTX_REMOVE_PROOF     = getVarFromInput[Coll[Byte]](1, 2).getOrElse(Coll(0.toByte))
+
+  // ASSUMPTIONS
+  // Evaluation authenticated this script and owns the rest of the transition: the box value, the bond
+  // ledger, the period and the block height. This proof owns the fraud predicate, the AVL removal,
+  // the miner count and the score.
   // CONSTANTS
-  // Constant sizes for various parts of NISPs, inserted at compile time
-  //  CONST_TX_PROOF_MIN      = 502
-  //  CONST_TX_PROOF_MAX      = 2000
+  // Constant sizes for various parts of NISPs, inserted at compile time from LFSMHelpers
+  //  CONST_TX_PROOF_MIN      = 502   = 2 + CONST_TX_SIZE_MIN + CONST_COLLAT_BOX_MIN
+  //  CONST_TX_PROOF_MAX      = 2174  = worst honest txProof 2074, plus a 100 byte margin
   //  CONST_TX_SIZE_MIN       = 450
   //  CONST_COLLAT_BOX_MIN    = 50
   //  CONST_NUM_LVLS_MAX      = 16
+  //
+  // CONST_TX_PROOF_MAX is the most critical number for NISP sizing. The transaction proof (not the merkle proof
+  // of transaction inclusion) is the genesis tx bytes along with the collateral box used in the tx.
+  // Current sizing indicates an honest tx size of 962 bytes using minimal inputs and largest vlq sizes for nums.
+  // It should be noted that attacks focusing on bloating NISP values can only work on things the miner does NOT control
+  // For example, a miner chooses their own change output for the finder reward, so using a large script there
+  // would only hurt them and make their transactions count as fraud. NISP bloat attacks generally only work on things
+  // the miner has to include and can't control, like collateral box size. Collateral box size with max vlqs is roughly
+  // 1110 bytes. Combined with the genesis tx size above, that gives us 2074. We add 100 to it for some extra room,
+  // so we get 2174 bytes. The additional bytes may come from additional inputs or holding contract changes.
 
   // First 130 bytes of header which do not vary in size, after this comes vlq encoded ULong for timestamp
   // Includes version, parentId, ADProofsRoot, stateRoot, and transactionsRoot
@@ -174,7 +185,7 @@
               val totalLevels = numLevels.toInt * CONST_LEVEL_SIZE
               val end = startIdx + CONST_N_SIZE + headerSize + 3 + txProofSize + totalLevels + CONST_Y_COORD_SIZE
               val validNumLevels = numLevels > 0  && numLevels <= CONST_NUM_LVLS_MAX // (0 - 16]
-              val validTxProofSize = txProofSize >= CONST_TX_PROOF_MIN && txProofSize < CONST_TX_PROOF_MAX // [502 - 2000)
+              val validTxProofSize = txProofSize >= CONST_TX_PROOF_MIN && txProofSize < CONST_TX_PROOF_MAX // [502 - 2174)
               // valid tx has at least 450 bytes, and associated collateral box bytes are the left over bytes (min of 50)
               val validTxSize = txSize >= CONST_TX_SIZE_MIN && txSize < txProofSize - CONST_COLLAT_BOX_MIN - 1 // [450 - txProofSize-51)
               val canReadNext = {
@@ -216,12 +227,9 @@
   }
   val changedRegisters = allOf(
     Coll(
-      nextUTXO.value  == evalBox.value,
       minerRemoved,
       nextMiners      == currentMiners - 1,
-      nextScore       == totalScore - score,
-      nextPeriod      == currentPeriod,
-      nextBlock       == currentBlock
+      nextScore       == totalScore - score
     )
   )
 

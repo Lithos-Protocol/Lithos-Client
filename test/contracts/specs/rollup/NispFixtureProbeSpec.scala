@@ -1,5 +1,6 @@
 package contracts.specs.rollup
 
+import lfsm.LFSMHelpers
 import nisp.SuperShare
 import org.scalatest.propspec.AnyPropSpec
 
@@ -41,9 +42,10 @@ class NispFixtureProbeSpec extends AnyPropSpec with RollupSpecBase {
     withCtx { ctx =>
       val pk = NispFixtures.pkOf(miner(ctx))
       val bytes = NispFixtures.nisp(5000L, NispFixtures.cleanShares(2000, pk))
-      println(s"[fixture] full NISP=${bytes.length} bytes (NISP_MIN=7948, NISP_MAX=26000)")
-      bytes.length should be >= 7948
-      bytes.length should be < 26000
+      println(s"[fixture] full NISP=${bytes.length} bytes " +
+        s"(NISP_MIN=${LFSMHelpers.NISP_MIN}, NISP_MAX=${LFSMHelpers.NISP_MAX})")
+      bytes.length should be >= LFSMHelpers.NISP_MIN
+      bytes.length should be < LFSMHelpers.NISP_MAX
     }
   }
 }

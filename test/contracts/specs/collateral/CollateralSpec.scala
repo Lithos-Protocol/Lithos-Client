@@ -4,10 +4,11 @@ import contracts.specs.emission.EmissionSpecBase
 import contracts.specs.rollup.RollupSpecBase
 import lfsm.LFSMHelpers
 import org.ergoplatform.appkit._
+import org.ergoplatform.appkit.scalaapi._
 import org.ergoplatform.sdk.ErgoId
 import org.scalatest.propspec.AnyPropSpec
 import scorex.crypto.hash.Blake2b256
-import sigma.GroupElement
+import sigma.{Colls, GroupElement}
 import sigma.data.AvlTreeFlags
 import work.lithos.mutations.{Contract, InputUTXO, Token, TxBuilder, UTXO}
 import work.lithos.plasma.PlasmaParameters
@@ -124,13 +125,16 @@ class CollateralSpec extends AnyPropSpec with EmissionSpecBase with RollupSpecBa
       if (finderLIT > 0) Seq(Token(LFSMHelpers.LIT_ID, finderLIT)) else Seq.empty[Token])
 
     val dust = founderBoxes.map(_.value).sum + permitBox.map(_.value).getOrElse(0L) + posBoxValue + finderBoxValue
+    // Token 0 is the rollup NFT, taking the collateral box's id since that box is INPUTS(0).
     val holding = UTXO(holdingScript, collatBox.value - dust,
-      if (poolLIT > 0) Seq(Token(LFSMHelpers.LIT_ID, poolLIT)) else Seq.empty[Token],
+      Seq(Token(collatIn.id, 1L)) ++
+        (if (poolLIT > 0) Seq(Token(LFSMHelpers.LIT_ID, poolLIT)) else Seq.empty[Token]),
       Seq(
         emptyTree.ergoValue,
         ErgoValue.of(0),
         ErgoValue.of(BigInt(0).bigInteger),
-        ErgoValue.of(height.toLong),
+        // R7 is the rollup's Long state: period start, block height, and an empty bond ledger.
+        stateReg(height.toLong, height.toLong, 0L),
         bytesValue(minerHash(ctx))
       ))
 
@@ -244,12 +248,12 @@ class CollateralSpec extends AnyPropSpec with EmissionSpecBase with RollupSpecBa
     }
   }
 
-  /** Past the final block nothing is emitted, so the holding box carries no LIT at all. */
+  /** Past the final block nothing is emitted, so the holding box carries the NFT and no LIT. */
   property("genesis: accepts a spend once emission has ended (tokensTransferred)") {
     withCtx { ctx =>
       val g = genesis(ctx, currentBlock = FINAL_BLOCK)
       g.poolLIT shouldBe 0L
-      g.holding.tokens shouldBe empty
+      g.holding.tokens.map(_.id.toString) shouldBe Seq(g.collatIn.id.toString)
       accepts(g.finderProver, genesisTx(g)())
     }
   }
@@ -463,6 +467,73 @@ class CollateralSpec extends AnyPropSpec with EmissionSpecBase with RollupSpecBa
     }
   }
 
+  // ─── the rollup state, R7 ─────────────────────────────────────────────────
+  //
+  // Three Longs the whole rollup chain carries: period start, block height, bond total. The bond
+  // ledger has to start empty, and the length has to be exactly three because Holding, Evaluation,
+  // Payout and the fraud proofs all read these by index.
+
+  property("holding: rejects a holding box whose bond total does not start at zero") {
+    withCtx { ctx =>
+      val g = genesis(ctx)
+      rejectsAtSigning(g.finderProver, genesisTx(g)(
+        outputs = replacing(g, g.holding,
+          g.holding.withReg(3, stateReg(g.height.toLong, g.height.toLong, 1L))),
+        inputs = Seq(g.collatIn, slack(g))))
+    }
+  }
+
+  property("holding: rejects a holding box whose block height is not this block") {
+    withCtx { ctx =>
+      val g = genesis(ctx)
+      rejectsAtSigning(g.finderProver, genesisTx(g)(
+        outputs = replacing(g, g.holding,
+          g.holding.withReg(3, stateReg(g.height.toLong, g.height.toLong - 1L, 0L))),
+        inputs = Seq(g.collatIn, slack(g))))
+    }
+  }
+
+  /**
+   * A `Coll` is the one register type with no length of its own, so nothing but this condition stops
+   * a fourth slot appearing. Every contract downstream reads slots 0 to 2 by index and would ignore
+   * it, which is exactly why the length is pinned here rather than left to them.
+   */
+  property("holding: rejects a rollup state longer than three slots") {
+    withCtx { ctx =>
+      val g = genesis(ctx)
+      val four = ErgoValue.of(
+        Colls.fromArray(Array(g.height.toLong, g.height.toLong, 0L, 7L)), scalaLongType)
+      rejectsAtSigning(g.finderProver, genesisTx(g)(
+        outputs = replacing(g, g.holding, g.holding.withReg(3, four)),
+        inputs = Seq(g.collatIn, slack(g))))
+    }
+  }
+
+  property("holding: rejects a rollup state shorter than three slots") {
+    withCtx { ctx =>
+      val g = genesis(ctx)
+      val two = ErgoValue.of(Colls.fromArray(Array(g.height.toLong, g.height.toLong)), scalaLongType)
+      rejectsAtSigning(g.finderProver, genesisTx(g)(
+        outputs = replacing(g, g.holding, g.holding.withReg(3, two)),
+        inputs = Seq(g.collatIn, slack(g))))
+    }
+  }
+
+  /**
+   * R9 is deliberately left open for extensions to write into. Padding it enlarges the super-shares
+   * of miners working on this finder's own candidate and nobody else's, so it is a cost the finder
+   * and their miners choose rather than one anyone can impose.
+   */
+  property("holding: accepts a holding box carrying extension data in R9") {
+    withCtx { ctx =>
+      val g = genesis(ctx)
+      val extended = UTXO(g.holding.contract, g.holding.value, g.holding.tokens,
+        g.holding.registers :+ bytesValue(Array.fill(64)(7.toByte)))
+      accepts(g.finderProver, genesisTx(g)(
+        outputs = replacing(g, g.holding, extended), inputs = Seq(g.collatIn, slack(g))))
+    }
+  }
+
   // ─── permitChangeReturned ─────────────────────────────────────────────────
 
   property("permit: rejects a transaction that does not return the permit at all") {
@@ -608,11 +679,97 @@ class CollateralSpec extends AnyPropSpec with EmissionSpecBase with RollupSpecBa
     }
   }
 
+  /**
+   * `rejects` rather than `rejectsAtSigning`: since the rollup NFT takes the id of INPUTS(0), moving
+   * the collateral box off index 0 makes the transaction **unbuildable** — appkit cannot mint a token
+   * whose id names a box that is no longer first. The contract's `onlyOne` is still what would catch
+   * it; Ergo's minting rule simply gets there first. Same shape as LithosDex's deposit NFT.
+   */
   property("onlyOne: rejects when the collateral box is not INPUTS(0)") {
     withCtx { ctx =>
       val g = genesis(ctx)
-      rejectsAtSigning(g.finderProver, genesisTx(g)(
+      rejects(g.finderProver, genesisTx(g)(
         inputs = Seq(slack(g), g.collatIn), fee = Parameters.MinFee))
+    }
+  }
+
+  // ─── the rollup NFT (holdingNFT, numNFT) ─────────────────────────────────
+  //
+  // The holding box carries an NFT taking the collateral box's id, since that box is INPUTS(0).
+  // Holding it is the proof that this box is the rollup a real collateral spend opened.
+  //
+  // Ergo lets the spending transaction mint any amount of that new token, so constraining only the
+  // holding box would let one genesis yield many credentials. numNFT pins the total across every
+  // output, and the properties below are its test.
+
+  property("nft: the holding box carries an NFT with the collateral box's own id (holdingNFT)") {
+    withCtx { ctx =>
+      val g = genesis(ctx)
+      g.holding.tokens.head.id.toString shouldBe g.collatIn.id.toString
+      g.holding.tokens.head.amount shouldBe 1L
+      accepts(g.finderProver, genesisTx(g)())
+    }
+  }
+
+  property("nft: rejects a holding box with no NFT at all (holdingNFT)") {
+    withCtx { ctx =>
+      val g = genesis(ctx)
+      val bare = g.holding.setTokens(Token(LFSMHelpers.LIT_ID, g.poolLIT))
+      rejectsAtSigning(g.finderProver, genesisTx(g)(
+        outputs = replacing(g, g.holding, bare), inputs = Seq(g.collatIn, slack(g))))
+    }
+  }
+
+  /**
+   * An id that already exists is buildable, which is what makes this a contract test rather than an
+   * appkit one. It belongs to nothing in the protocol on purpose: a real token would collide with
+   * one of the proposition tokens, and COLLAT_TOKEN would starve the proof-of-spend box.
+   */
+  property("nft: rejects an NFT that is not the collateral box's id (holdingNFT)") {
+    withCtx { ctx =>
+      val g = genesis(ctx)
+      val stranger = ErgoId.create("11" * 32)
+      val funded = inputAt(UTXO(contractOf(g.finderProver), 2L * Parameters.OneErg,
+        Seq(Token(stranger, 1L), Token(LFSMHelpers.LIT_ID, 100L * LIT))), ctx, 5)
+      val wrong = g.holding.setTokens(Token(stranger, 1L), Token(LFSMHelpers.LIT_ID, g.poolLIT))
+      rejectsAtSigning(g.finderProver, genesisTx(g)(
+        outputs = replacing(g, g.holding, wrong), inputs = Seq(g.collatIn, funded)))
+    }
+  }
+
+  property("nft: rejects an NFT amount other than one (holdingNFT)") {
+    withCtx { ctx =>
+      val g = genesis(ctx)
+      val two = g.holding.setTokens(
+        Token(g.collatIn.id, 2L), Token(LFSMHelpers.LIT_ID, g.poolLIT))
+      rejectsAtSigning(g.finderProver, genesisTx(g)(
+        outputs = replacing(g, g.holding, two), inputs = Seq(g.collatIn, slack(g))))
+    }
+  }
+
+  /**
+   * A correct holding box, plus a second unit of the same freshly-minted token escaping to an
+   * ordinary box. numNFT folds over every output, so the escape is what it catches; the holding
+   * box itself is flawless here.
+   */
+  property("nft: rejects a second NFT unit escaping to another output (numNFT)") {
+    withCtx { ctx =>
+      val g = genesis(ctx)
+      val escapee = UTXO(contractOf(g.finderProver), finderBoxValue, Seq(Token(g.collatIn.id, 1L)))
+      rejectsAtSigning(g.finderProver, genesisTx(g)(
+        outputs = outputsOf(g) :+ escapee, inputs = Seq(g.collatIn, slack(g))))
+    }
+  }
+
+  /** LIT moved to index 1 behind the NFT, and `tokensTransferred` has to read it there. */
+  property("nft: rejects a holding box whose LIT sits at the wrong index (tokensTransferred)") {
+    withCtx { ctx =>
+      val g = genesis(ctx)
+      g.poolLIT should be > 0L
+      val swapped = g.holding.setTokens(
+        Token(LFSMHelpers.LIT_ID, g.poolLIT), Token(g.collatIn.id, 1L))
+      rejectsAtSigning(g.finderProver, genesisTx(g)(
+        outputs = replacing(g, g.holding, swapped), inputs = Seq(g.collatIn, slack(g))))
     }
   }
 

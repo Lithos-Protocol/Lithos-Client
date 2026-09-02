@@ -13,16 +13,14 @@
   val nispTree:      AvlTree = evalBox.R4[AvlTree].get
   val currentMiners: Int     = evalBox.R5[Int].get
   val totalScore:    BigInt  = evalBox.R6[BigInt].get
-  val currentPeriod: Long    = evalBox.R7[Long].get
-  val currentBlock:  Long    = evalBox.R8[Long].get
+  val rollupState:   Coll[Long] = evalBox.R7[Coll[Long]].get
+  val currentBlock:  Long    = rollupState(1)
 
   // NEXT VALUES
   val nextUTXO   = OUTPUTS(0)
   val nextTree   = nextUTXO.R4[AvlTree].get
   val nextMiners = nextUTXO.R5[Int].get
   val nextScore  = nextUTXO.R6[BigInt].get
-  val nextPeriod = nextUTXO.R7[Long].get
-  val nextBlock  = nextUTXO.R8[Long].get
 
   // DATA INPUTS
   // dataInputs(0) is the FP_CONTROL box, required and authenticated by the evaluation contract
@@ -42,6 +40,11 @@
   val CTX_LOOKUP_PROOF     = getVarFromInput[Coll[Byte]](1, 1).getOrElse(Coll(0.toByte))
   val CTX_REMOVE_PROOF     = getVarFromInput[Coll[Byte]](1, 2).getOrElse(Coll(0.toByte))
   val CTX_MD_LOOKUP_PROOF  = getVarFromInput[Coll[Byte]](1, 3).getOrElse(Coll(0.toByte))
+
+  // ASSUMPTIONS
+  // Evaluation authenticated this script and owns the rest of the transition: the box value, the bond
+  // ledger, the period and the block height. This proof owns the fraud predicate, the AVL removal,
+  // the miner count and the score.
 
   // CONSTANTS
   // CONST_MINERDATA_PROPBYTES: Hashed prop bytes of MinerData contract
@@ -136,12 +139,9 @@
 
     val changedRegisters = allOf(
       Coll(
-        nextUTXO.value  == evalBox.value,
         minerRemoved,
         nextMiners      == currentMiners - 1,
-        nextScore       == totalScore - score.toBigInt,
-        nextPeriod      == currentPeriod,
-        nextBlock       == currentBlock
+        nextScore       == totalScore - score.toBigInt
       )
     )
 
@@ -158,12 +158,9 @@
 
     val changedRegisters = allOf(
       Coll(
-        nextUTXO.value  == evalBox.value,
         minerRemoved,
         nextMiners      == currentMiners - 1,
-        nextScore       == totalScore - score.toBigInt,
-        nextPeriod      == currentPeriod,
-        nextBlock       == currentBlock
+        nextScore       == totalScore - score.toBigInt
       )
     )
     sigmaProp(fraudExists && changedRegisters)

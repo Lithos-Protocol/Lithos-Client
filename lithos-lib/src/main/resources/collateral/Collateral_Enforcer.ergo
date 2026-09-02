@@ -18,13 +18,13 @@
   // 2: collateral token, one placed in every collateral box, carried into its proof-of-spend box
   // 3: LIT. Kept last on purpose, so that running the supply down to nothing removes the final entry
   // rather than shifting the index of any other token.
-  val emissionNFT = emissionBox.tokens(0)
-  val queueToken  = emissionBox.tokens(1)
-  val collatToken = emissionBox.tokens(2)
+  // val emissionNFT = emissionBox.tokens(0)
+  // val queueToken  = emissionBox.tokens(1)
+  // val collatToken = emissionBox.tokens(2)
   // Identity comes from the constant, never from the token entry, which disappears the moment the
   // supply is exhausted. Reading identity out of slot 3 would leave every later spend comparing
   // against a placeholder id, which is what would otherwise end permits along with emission.
-  val tokenLIT    = emissionBox.tokens.getOrElse(3, (CONST_LIT_ID, 0L))
+  // val tokenLIT    = emissionBox.tokens.getOrElse(3, (CONST_LIT_ID, 0L))
 
   // CONTEXT VARS
   // CTX_OP(0): Byte representing the operation
@@ -52,6 +52,8 @@
   val CONST_BLOCK_REWARD = 3000000000L
   val CONST_FEE_CAP = 90000000L
   val CONST_DUST_BUDGET = 5000000L
+  // Multiplied by the feeValue to find the floor to add to the pool for a given feeValue
+  val CONST_POOL_MULTIPLE = 4
 
   // NEXT VALUES
   val nextEmission  = OUTPUTS(0)
@@ -88,6 +90,7 @@
       else
         scaled.toLong
     }
+    val finderFee = queueOut.R4[Long].get - CONST_DUST_BUDGET
     // We can use LIT_ID in getOrElse since its verified by the em contract
     val queueLIT = queueOut.tokens.getOrElse(1, (CONST_LIT_ID, 0L))
     val permitPosted = queueLIT._2 == permitRequired
@@ -99,14 +102,21 @@
         queueProp.propBytes == proveDlog(CTX_GE).propBytes,
         // Verify GE is not the identity, which could be invalid and unable to receive block rewards
         CTX_GE.getEncoded(0) != 0.toByte,
+
+        // If finderFee is 0, they are paying nothing extra to the pool (so the minimum for R4 is 0.005 or CONST_DUST_BUDGET)
+        finderFee >= 0L,
         // Mainnet block reward is constant 3 ERG now, CONST_FEE_CAP is the max difference the lender can post
-        queueOut.value >= CONST_BLOCK_REWARD - CONST_FEE_CAP + CONST_DUST_BUDGET,
-        // CONST_DUST_BUDGET is the amount the lender posted for extra UTXOs like founder boxes
-        // TODO: Consider changing eventually, will go to finder as reward after epoch 8
-        queueOut.R4[Long].get == CONST_DUST_BUDGET,
+        // We add finderFee * CONST_POOL_MULTIPLE to the premium. So if someone wants to pay finder
+        // (by increasing feeValue) they must also raise the value paid to the pool.
+        queueOut.value >= CONST_BLOCK_REWARD - CONST_FEE_CAP
+                          + queueOut.R4[Long].get
+                          + finderFee * CONST_POOL_MULTIPLE,
         permitPosted,
         permitValid,
-        queueOut.R6[Byte].get == 0x00 // No extensions at launch
+        queueOut.R6[Byte].get == 0x00, // No extensions at launch
+        // Set to false to prevent unnecessary bloat, though it is not as needed
+        // as the collat constraint
+        queueOut.R8[Coll[Byte]].isDefined == false
       )
     )
     sigmaProp(queueGrown && queueBoxValid)
@@ -120,7 +130,10 @@
         nextTail         == queueTail
       )
     )
-    sigmaProp(queueAdvanced)
+    val collatBox = OUTPUTS(1)
+    // Constrain registers on collat box to prevent dangerous NISP bloat spam attacks
+    val collatConstrained = collatBox.R9[Coll[Byte]].isDefined == false
+    sigmaProp(queueAdvanced && collatConstrained)
   }else if(CTX_OP == 2.toByte){
     // Enforce FIFO/FCFS on queue cleaning
     val queueIn = INPUTS(1)

@@ -1,22 +1,31 @@
 {
   // Payout Contract
-  // Value: Block Reward -> 0
+  // Value: Block Reward plus the refundable bonds of unpaid miners -> 0
 
   // REGISTERS
   // R4: NISP Tree, initially, an empty AVL Tree. AVL Tree of ( hashedPropBytes -> NISP )
   // R5: Total Miners, constant on spend
   // R6: Total Share Score constant on spend
-  // R7: Total block reward, equal to initial block value when transforming from EvalContract
+  // R7: Coll[Long] of the rollup's Long state, length 3, rewritten by Evaluation on the transform
+  //     (0) Total block reward, set as the evaluation box's value less the bonds it held. Excluding
+  //         the bonds is what keeps a miner's share off the other submitters' deposits.
+  //     (1) Total LIT reward
+  //     (2) Refundable ERG bond still owed to the entries remaining in R4
+  // R8, R9: Unconstrained, reserved for extensions.
 
-  val nispTree:      AvlTree = SELF.R4[AvlTree].get
-  val currentMiners: Int     = SELF.R5[Int].get
-  val totalScore:    BigInt  = SELF.R6[BigInt].get
-  val totalReward:   Long    = SELF.R7[Long].get
-  val tokenReward: Long   = SELF.R8[Long].getOrElse(0L)
-  val totalTokens = SELF.tokens.getOrElse(0, (Coll(0.toByte), 0L))
-
+  val nispTree:      AvlTree    = SELF.R4[AvlTree].get
+  val currentMiners: Int        = SELF.R5[Int].get
+  val totalScore:    BigInt     = SELF.R6[BigInt].get
+  val rollupState:   Coll[Long] = SELF.R7[Coll[Long]].get
+  val totalReward:   Long       = rollupState(0)
+  val LITReward:     Long       = rollupState(1)
+  val totalBond:     Long       = rollupState(2)
+  val totalLIT = SELF.tokens.getOrElse(1, (Coll(0.toByte), 0L))
+  val rollupNFT = SELF.tokens(0)
   // CONSTANTS
   // CONST_FEE_HASH - Hashed prop bytes of fee contract
+  // CONST_MIN_ENTRY_BOND: Floor on the refundable bond a submission posts, 0.002 ERG at launch
+  // CONST_BOND_DIVISOR: Score units per nanoERG of proportional bond, 100 at launch
 
   // CONTEXT VARS
   // CTX_KEY_DATA(0): Keys of miners to lookup in NISP tree and remove, ( hashedPropBytes )
@@ -32,6 +41,26 @@
   // totalScore is constant from creation
   // nispTree initialized to filled tree, with only removals enabled
   // value of this UTXO is initialized to be the block reward, but may change as miners are paid out
+  // The payout box holds the rollup NFT in tokens(0), which is burnt when the box is spent.
+  // Holding admitted each NISP only after collecting exactly bondForScore(score), and every fraud
+  // proof removed that entry and its bond together, so each entry still in R4 owns exactly one refund
+  // derived from its own first eight NISP bytes and R9 is the sum of them.
+
+  // Must match Holding_Logic, which collected these, and Evaluation, which slashed some of them.
+  def bondForScore(bondScore: Long): Long = {
+    val bondProportional = bondScore / CONST_BOND_DIVISOR
+    if(bondProportional > CONST_MIN_ENTRY_BOND) bondProportional else CONST_MIN_ENTRY_BOND
+  }
+
+  def numTokenInOutputs(tokenId: Coll[Byte]): Long = {
+    OUTPUTS.fold(0L, {
+      (a: Long, b: Box) =>
+        val totalTokens = b.tokens.fold(0L, {
+          (z: Long, t: (Coll[Byte], Long)) => if(t._1 == tokenId) z + t._2 else z
+        })
+        a + totalTokens
+    })
+  }
 
   // Spending path 1: An empty payout tree may be drained, with its value going to any miner
   // on the ergo blockchain. In general this should never happen, (would mean all miners were removed due to fraud
@@ -47,7 +76,10 @@
     // Verify that no fee output exists. Rational miners will not include transaction without a fee output,
     // so miners will end up being able to claim the box.
     val noFeeOutput = !hasFeeOutput
-    sigmaProp(noFeeOutput && onlyOne)
+    val nftBurned = numTokenInOutputs(rollupNFT._1) == 0L
+
+    val noBondLiability = totalBond == 0L
+    sigmaProp(noFeeOutput && onlyOne && nftBurned && noBondLiability)
   }
 
   else{
@@ -63,105 +95,142 @@
     }
 
 
-    val minersWithReward: Coll[(Coll[Byte], Long)] = {
+    val minersWithBond: Coll[(Coll[Byte], Long)] = {
       minersWithScore.map{
-        (x: (Coll[Byte], Long)) => (x._1, ((totalReward.toBigInt * x._2.toBigInt) / totalScore).toLong)
+        (x: (Coll[Byte], Long)) => (x._1, bondForScore(x._2))
       }
     }
 
-    val minersWithTokens: Coll[(Coll[Byte], Long)] = {
+    // What a miner is owed is their pro-rata share of the reward plus their own bond back.
+    val minersWithReward: Coll[(Coll[Byte], BigInt)] = {
       minersWithScore.map{
-        (x: (Coll[Byte], Long)) => (x._1, ((tokenReward.toBigInt * x._2.toBigInt) / totalScore).toLong)
+        (x: (Coll[Byte], Long)) =>
+          val ergShare   = (totalReward.toBigInt * x._2.toBigInt) / totalScore
+          val bondRefund = bondForScore(x._2).toBigInt
+          (x._1, ergShare + bondRefund)
       }
     }
 
-    val totalMinerRewards = minersWithReward.fold(0L, {
+    val minersWithLIT: Coll[(Coll[Byte], Long)] = {
+      minersWithScore.map{
+        (x: (Coll[Byte], Long)) => (x._1, ((LITReward.toBigInt * x._2.toBigInt) / totalScore).toLong)
+      }
+    }
+
+    val totalMinerRewards = minersWithReward.fold(0.toBigInt, {
+    (accum: BigInt, x:(Coll[Byte], BigInt)) =>
+      accum + x._2
+    })
+
+    val totalLITRewards = minersWithLIT.fold(0L, {
     (accum: Long, x:(Coll[Byte], Long)) =>
       accum + x._2
     })
 
-    val totalTokenRewards = minersWithTokens.fold(0L, {
-    (accum: Long, x:(Coll[Byte], Long)) =>
-      accum + x._2
+    val totalBondRefunds = minersWithBond.fold(0.toBigInt, {
+    (accum: BigInt, x:(Coll[Byte], Long)) =>
+      accum + x._2.toBigInt
     })
+
+    val remainder = SELF.value.toBigInt - totalMinerRewards
     // Spending path 2: Paid miners, but still ERG left in utxo.
     // We only take this path if the ERG left in the UTXO is greater than the min change value
-    if(totalMinerRewards < SELF.value && SELF.value - totalMinerRewards > 1000000L){
+    if(totalMinerRewards < SELF.value.toBigInt && remainder > 1000000L.toBigInt){
 
-        // NEXT VALUES
-        val nextUTXO     = OUTPUTS(0)
-        val nextTree     = nextUTXO.R4[AvlTree].get
-        val nextMiners       = nextUTXO.R5[Int].get
-        val nextScore     = nextUTXO.R6[BigInt].get
-        val nextReward      = nextUTXO.R7[Long].get
-        val nextTokenReward = nextUTXO.R8[Long].getOrElse(0L)
-        val nextTokens   = nextUTXO.tokens.getOrElse(0, (Coll(0.toByte), 0L))
-        val minerOutputBoxes = OUTPUTS.slice(1, minersWithReward.size + 1)
+      // NEXT VALUES
+      val nextUTXO     = OUTPUTS(0)
+      val nextTree     = nextUTXO.R4[AvlTree].get
+      val nextMiners       = nextUTXO.R5[Int].get
+      val nextScore     = nextUTXO.R6[BigInt].get
+      val nextState     = nextUTXO.R7[Coll[Long]].get
+      val nextReward      = nextState(0)
+      val nextLITReward = nextState(1)
+      val nextBond      = nextState(2)
+      val nextLIT   = nextUTXO.tokens.getOrElse(1, (Coll(0.toByte), 0L))
+      val nextRollupNFT          = nextUTXO.tokens(0)
+      val minerOutputBoxes = OUTPUTS.slice(1, minersWithReward.size + 1)
 
-        // Statements
-        val treeUpdated = {
-          val removeTree = nispTree.remove(CTX_KEY_DATA, CTX_REMOVE_PROOF).get
-          removeTree == nextTree
-        }
-        val minersRewarded = minerOutputBoxes.zip(minersWithReward).forall{
-            (x: (Box, (Coll[Byte], Long))) => blake2b256(x._1.propositionBytes) == x._2._1 && x._1.value == x._2._2
-        }
+      // Statements
+      // zip stops at the shorter side, so a transaction naming more miners than it produces outputs
+      // for would leave the surplus miners unchecked by minersRewarded. Pinning the slice's length
+      // is what makes "every named miner was paid" mean what it reads as.
+      val allMinersPaid = minerOutputBoxes.size == minersWithReward.size
+      val treeUpdated = {
+        val removeTree = nispTree.remove(CTX_KEY_DATA, CTX_REMOVE_PROOF).get
+        removeTree == nextTree
+      }
+      val minersRewarded = minerOutputBoxes.zip(minersWithReward).forall{
+          (x: (Box, (Coll[Byte], BigInt))) => blake2b256(x._1.propositionBytes) == x._2._1 && x._1.value.toBigInt == x._2._2
+      }
 
-        val tokensRewarded = {
-          if(tokenReward > 0){
-            minerOutputBoxes.zip(minersWithTokens).forall{
-              (x: (Box, (Coll[Byte], Long))) =>
-                if(x._2._2 > 0){
-                  blake2b256(x._1.propositionBytes) == x._2._1 &&
-                    x._1.tokens(0)._1 == totalTokens._1 && x._1.tokens(0)._2 == x._2._2
-                }else{
-                  true
-                }
-            }
-          }else{
-            true
+      val LITRewarded = {
+        if(LITReward > 0){
+          minerOutputBoxes.zip(minersWithLIT).forall{
+            (x: (Box, (Coll[Byte], Long))) =>
+              if(x._2._2 > 0){
+                blake2b256(x._1.propositionBytes) == x._2._1 &&
+                  x._1.tokens(0)._1 == totalLIT._1 && x._1.tokens(0)._2 == x._2._2
+              }else{
+                true
+              }
           }
+        }else{
+          true
         }
-        val validUTXO       = nextUTXO.propositionBytes == SELF.propositionBytes
-        val usedReward      = nextUTXO.value == SELF.value - totalMinerRewards
-        val usedTokens      = nextTokens._1 == totalTokens._1 && nextTokens._2 == totalTokens._2 - totalTokenRewards
-        val sameTotal       = totalReward == nextReward
-        val sameScore       = totalScore  == nextScore
-        val sameMiners      = currentMiners == nextMiners
-        val sameTokenReward = tokenReward == nextTokenReward
-        val onlyOne         = SELF.id == INPUTS(0).id // Prevent weirdness / exploits by enforcing only one per tx
-        val statements = allOf(
-          Coll(
-            validUTXO,
-            usedReward,
-            usedTokens,
-            sameScore,
-            sameTotal,
-            sameMiners,
-            sameTokenReward,
-            treeUpdated,
-            minersRewarded,
-            tokensRewarded,
-            onlyOne
-          )
+      }
+      val validUTXO       = nextUTXO.propositionBytes == SELF.propositionBytes
+      val stateSized      = nextState.size == 3
+      val usedReward      = nextUTXO.value.toBigInt == remainder
+      val usedLIT         = nextLIT._1 == totalLIT._1 && nextLIT._2 == totalLIT._2 - totalLITRewards
+      // The refunds just paid leave rollup custody with them, so the successor's liability drops by
+      // what the paid miners were owed and never by the reward share alongside it.
+      val usedBond        = nextBond.toBigInt == totalBond.toBigInt - totalBondRefunds
+      val sameTotal       = totalReward == nextReward
+      val sameScore       = totalScore  == nextScore
+      val sameMiners      = currentMiners == nextMiners
+      val sameLITReward   = LITReward == nextLITReward
+      val onlyOne         = SELF.id == INPUTS(0).id // Prevent weirdness / exploits by enforcing only one per tx
+      val statements = allOf(
+        Coll(
+          validUTXO,
+          stateSized,
+          allMinersPaid,
+          usedReward,
+          usedLIT,
+          usedBond,
+          sameScore,
+          sameTotal,
+          sameMiners,
+          sameLITReward,
+          treeUpdated,
+          minersRewarded,
+          LITRewarded,
+          rollupNFT == nextRollupNFT,
+          onlyOne
         )
-        sigmaProp(statements)
+      )
+      sigmaProp(statements)
       }else{ // Spending Path 3: Paying miners with all remaining ERG, thereby spending this box
         val minerOutputBoxes = OUTPUTS.slice(0, minersWithReward.size)
 
         // Statements
+        // Load bearing on this path, where nothing else pins where the box's value goes. zip stops at
+        // the shorter side, so without this a spend could name every remaining miner - which is what
+        // allBondsRefunded asks for - emit one output, and keep the rest of the miners' rewards and
+        // bonds as change.
+        val allMinersPaid = minerOutputBoxes.size == minersWithReward.size
         val minersRewarded = minerOutputBoxes.zip(minersWithReward).forall{
         // We use >= to check value here, so that min change value can be added to one of the outputs without causing error
-            (x: (Box, (Coll[Byte], Long))) => blake2b256(x._1.propositionBytes) == x._2._1 && x._1.value >= x._2._2
+            (x: (Box, (Coll[Byte], BigInt))) => blake2b256(x._1.propositionBytes) == x._2._1 && x._1.value.toBigInt >= x._2._2
         }
         // NOTE: Any additional tokens not included in this payout may be withdrawn to change by tx creator
-        val tokensRewarded = {
-          if(tokenReward > 0){
-            minerOutputBoxes.zip(minersWithTokens).forall{
+        val LITRewarded = {
+          if(LITReward > 0){
+            minerOutputBoxes.zip(minersWithLIT).forall{
               (x: (Box, (Coll[Byte], Long))) =>
                 if(x._2._2 > 0){
                   blake2b256(x._1.propositionBytes) == x._2._1 &&
-                    x._1.tokens(0)._1 == totalTokens._1 && x._1.tokens(0)._2 == x._2._2
+                    x._1.tokens(0)._1 == totalLIT._1 && x._1.tokens(0)._2 == x._2._2
                 }else{
                   true
                 }
@@ -171,15 +240,18 @@
           }
         }
         val onlyOne = SELF.id == INPUTS(0).id // Prevent weirdness / exploits by enforcing only one per tx
+        val nftBurned = numTokenInOutputs(rollupNFT._1) == 0L
 
-        // I guess there is a chance someone can add new utxo with enough
-        // ERG into inputs here and not use ERG from the payout box
-        // But it is irrational to do so
+        val allBondsRefunded = totalBondRefunds == totalBond.toBigInt
+
         val statements = allOf(
           Coll(
             onlyOne,
+            allMinersPaid,
             minersRewarded,
-            tokensRewarded
+            LITRewarded,
+            nftBurned,
+            allBondsRefunded
           )
         )
         sigmaProp(statements)

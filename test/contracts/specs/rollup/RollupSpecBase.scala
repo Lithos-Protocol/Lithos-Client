@@ -4,8 +4,10 @@ import contracts.specs.harness.ContractSpecBase
 import lfsm.LFSMHelpers
 import lfsm.contracts.RollupContracts
 import org.ergoplatform.appkit._
+import org.ergoplatform.appkit.scalaapi._
 import org.ergoplatform.sdk.ErgoId
 import scorex.utils.Longs
+import sigma.Colls
 import work.lithos.mutations.{Contract, Token, UTXO}
 
 /**
@@ -13,17 +15,23 @@ import work.lithos.mutations.{Contract, Token, UTXO}
  * compiling a script twice — or from two suites at once — throws "can only be set once".
  * `app/utils/Helpers.scala` works around the same thing with pre-compiled lazy vals.
  */
-object RollupSpecBase {
-  private var cache: Option[(Contract, Contract, Contract)] = None
+case class RollupSet(payout: Contract, eval: Contract, holding: Contract, holdingLogic: Contract)
 
-  def compiled(ctx: BlockchainContext, fpToken: ErgoId): (Contract, Contract, Contract) = synchronized {
+object RollupSpecBase {
+  private var cache: Option[RollupSet] = None
+
+  def compiled(ctx: BlockchainContext, fpToken: ErgoId): RollupSet = synchronized {
     cache.getOrElse {
       val payout = RollupContracts.mkPayoutContract(ctx)
       val eval = RollupContracts.mkEvalContract(
         ctx, LFSMHelpers.EVAL_PERIOD, payout.hashedPropBytes, fpToken)
+      // mkHoldingContract returns the guard. The logic is compiled again here so specs can hand it
+      // to context var 64; both must use identical constants or the guard rejects it.
       val holding = RollupContracts.mkHoldingContract(
         ctx, LFSMHelpers.HOLDING_PERIOD, eval.hashedPropBytes)
-      val all = (payout, eval, holding)
+      val logic = RollupContracts.mkHoldingLogicContract(
+        ctx, LFSMHelpers.HOLDING_PERIOD, eval.hashedPropBytes)
+      val all = RollupSet(payout, eval, holding, logic)
       cache = Some(all)
       all
     }
@@ -36,11 +44,27 @@ trait RollupSpecBase extends ContractSpecBase {
   protected val fpTokenId: ErgoId =
     ErgoId.create("20fa2bf23962cdf51b07722d6237c0c7b8a44f78856c0f7ec308dc1ef1a92a51")
 
-  protected def payoutContract(ctx: BlockchainContext): Contract = RollupSpecBase.compiled(ctx, fpTokenId)._1
+  protected def payoutContract(ctx: BlockchainContext): Contract = RollupSpecBase.compiled(ctx, fpTokenId).payout
 
-  protected def evalContract(ctx: BlockchainContext): Contract = RollupSpecBase.compiled(ctx, fpTokenId)._2
+  protected def evalContract(ctx: BlockchainContext): Contract = RollupSpecBase.compiled(ctx, fpTokenId).eval
 
-  protected def holdingContract(ctx: BlockchainContext): Contract = RollupSpecBase.compiled(ctx, fpTokenId)._3
+  /** The guard — what a holding box actually carries, and what the collateral contract pins. */
+  protected def holdingContract(ctx: BlockchainContext): Contract = RollupSpecBase.compiled(ctx, fpTokenId).holding
+
+  /** The rules the guard runs out of context var 64. Never on a box. */
+  protected def holdingLogic(ctx: BlockchainContext): Contract = RollupSpecBase.compiled(ctx, fpTokenId).holdingLogic
+
+  /**
+   * R7 for every box in the rollup chain: three Longs, whose meaning shifts by phase.
+   * Holding and Evaluation read (period start, block height, bond total); Payout reads
+   * (block reward, LIT reward, bond total).
+   */
+  protected def stateReg(first: Long, second: Long, bond: Long): ErgoValue[_] =
+    ErgoValue.of(Colls.fromArray(Array(first, second, bond)), scalaLongType)
+
+  /** The bond a submission of this score has to post, mirroring `bondForScore` in the contracts. */
+  protected def bondFor(score: Long): Long =
+    math.max(LFSMHelpers.MIN_ENTRY_BOND, score / LFSMHelpers.BOND_DIVISOR)
 
   /** A NISP is `[score: 8 BE bytes][payload]`; payload content is irrelevant to the rollup contracts. */
   protected def nispBytes(score: Long, totalSize: Int): Array[Byte] = {
@@ -58,12 +82,14 @@ trait RollupSpecBase extends ContractSpecBase {
                           periodOrReward: Long,
                           value: Long = boxValue,
                           tokens: Seq[Token] = Seq.empty[Token],
-                          extraRegister: Option[ErgoValue[_]] = None): UTXO = {
+                          extraRegister: Option[ErgoValue[_]] = None,
+                          blockOrLit: Long = 0L,
+                          bond: Long = 0L): UTXO = {
     val base = Seq(
       tree.ergoValue,
       ErgoValue.of(miners),
       ErgoValue.of(BigInt(totalScore).bigInteger),
-      ErgoValue.of(periodOrReward)
+      stateReg(periodOrReward, blockOrLit, bond)
     )
     UTXO(contract, value, tokens, base ++ extraRegister.toSeq)
   }

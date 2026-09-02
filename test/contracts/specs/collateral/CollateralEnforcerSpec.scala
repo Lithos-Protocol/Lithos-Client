@@ -3,10 +3,12 @@ package contracts.specs.collateral
 import contracts.specs.emission.EmissionSpecBase
 import lfsm.LFSMHelpers
 import org.ergoplatform.appkit._
+import org.ergoplatform.appkit.scalaapi._
 import org.scalatest.propspec.AnyPropSpec
+import sigma.Colls
 import sigma.crypto.CryptoConstants
 import sigma.data.{CGroupElement, ProveDlog}
-import work.lithos.mutations.{Contract, Token}
+import work.lithos.mutations.{Contract, Token, UTXO}
 
 /**
  * Collateral_Enforcer.ergo — one property per named condition in the contract.
@@ -292,6 +294,178 @@ class CollateralEnforcerSpec extends AnyPropSpec with EmissionSpecBase {
     withCtx { ctx =>
       enforced(ctx).ergoTreeHex should not be Contract.SIGMA_TRUE.ergoTreeHex
       enforced(ctx).ergoTree.version shouldBe 3
+    }
+  }
+
+  /** Filler whose only job is to make a box longer. */
+  private def pad(n: Int): ErgoValue[_] =
+    ErgoValue.of(Colls.fromArray(Array.fill(n)(7.toByte)), scalaByteType)
+
+  private def appendReg(box: UTXO, reg: ErgoValue[_]): UTXO =
+    box.setRegs((box.registers :+ reg): _*)
+
+  private val POOL_MULTIPLE = 4L
+
+  // ─── 1. NISP bloat: the collateral box is OUTPUTS(1) on Activate ──────────
+  //
+  // The collateral box's bytes are the tail of every super-share's TransactionProof, so its length
+  // is what the whole attack turns on. LIT_Emissions pins R4-R8 to exact values, which makes R9 the
+  // first unused register — and contiguity means refusing R9 refuses the whole tail.
+
+  property("activate: rejects a collateral box padded in R9 (NISP bloat)") {
+    withCtx { ctx =>
+      val a = activateScenario(ctx, head = 4L, tail = 9L, enfScript = enforced(ctx))
+      a.collatOut.registers.size shouldBe 5 // R4..R8
+      rejectsAtSigning(a.prover, activateTx(a)(collatOut = appendReg(a.collatOut, pad(2000))))
+    }
+  }
+
+  property("activate: rejects a collateral box padded in R9 with a single byte") {
+    withCtx { ctx =>
+      val a = activateScenario(ctx, head = 4L, tail = 9L, enfScript = enforced(ctx))
+      rejectsAtSigning(a.prover, activateTx(a)(collatOut = appendReg(a.collatOut, pad(1))))
+    }
+  }
+
+  /** R9 read as Coll[Byte] deliberately: it is the only type with no ceiling of its own, and a
+   * register holding any other type fails the read and the spend with it. */
+  property("activate: rejects a collateral box whose R9 is not a Coll[Byte]") {
+    withCtx { ctx =>
+      val a = activateScenario(ctx, head = 4L, tail = 9L, enfScript = enforced(ctx))
+      rejectsAtSigning(a.prover, activateTx(a)(collatOut = appendReg(a.collatOut, ErgoValue.of(42L))))
+    }
+  }
+
+  property("activate: an ordinary Activate still signs (bootstrapping)") {
+    withCtx { ctx =>
+      val a = activateScenario(ctx, head = 4L, tail = 9L, enfScript = enforced(ctx))
+      accepts(a.prover, activateTx(a)())
+    }
+  }
+
+  property("activate: an ordinary Activate still signs (rotating, with a proof of spend)") {
+    withCtx { ctx =>
+      val set = (0 until MAX_ACTIVE).map(i => setEntry(proverWith(ctx, java.math.BigInteger.valueOf(9000L + i))))
+      val a = activateScenario(ctx, head = 4L, tail = 9L, lenderSet = set,
+        retiring = Some((set(3), 3)), enfScript = enforced(ctx))
+      accepts(a.prover, activateTx(a)())
+    }
+  }
+
+  /** The emission successor is deliberately NOT bounded — it is spent every block and never idles,
+   * so a byte cap on it could only ever reject an honest spend. */
+  property("activate: an emission successor padded in R8 is accepted") {
+    withCtx { ctx =>
+      val a = activateScenario(ctx, head = 4L, tail = 9L, enfScript = enforced(ctx))
+      a.emissionOut.registers.size shouldBe 4 // R4..R7
+      accepts(a.prover, activateTx(a)(emissionOut = appendReg(a.emissionOut, pad(400))))
+    }
+  }
+
+  property("clear: is untouched by the collateral bound") {
+    withCtx { ctx =>
+      val c = clearScenario(ctx, head = 4L, tail = 9L, enfScript = enforced(ctx))
+      accepts(c.prover, clearTx(c)())
+    }
+  }
+
+  // ─── 2. feePriority ───────────────────────────────────────────────────────
+  //
+  // value >= 2.915 ERG + 5f, where f = R4 - CONST_DUST_BUDGET. The finder may take up to R4 as
+  // slack, so the pool's floor rises by 4f while the finder's cut rises by f.
+
+  property("join: baseline (feeValue == dust budget) still accepted at exactly the floor") {
+    withCtx { ctx =>
+      val j = joinScenario(ctx, enfScript = enforced(ctx))
+      j.queueOut.value shouldBe principalFloor
+      accepts(j.prover, joinTx(j)())
+    }
+  }
+
+  property("join: accepts a finder fee when the pool premium is posted (5x total)") {
+    withCtx { ctx =>
+      val j = joinScenario(ctx, enfScript = enforced(ctx))
+      val f = 10000000L // 0.01 ERG to the finder
+      val bid = queueUTXO(ctx, j.lenderProver, position = 0L, permit = j.permit,
+        feeValue = DUST_BUDGET + f,
+        value = principalFloor + (POOL_MULTIPLE + 1L) * f)
+      accepts(j.prover, joinTx(j)(queueOut = bid))
+    }
+  }
+
+  property("join: rejects a finder fee one nanoERG short of the pool premium") {
+    withCtx { ctx =>
+      val j = joinScenario(ctx, enfScript = enforced(ctx))
+      val f = 10000000L
+      val short = queueUTXO(ctx, j.lenderProver, position = 0L, permit = j.permit,
+        feeValue = DUST_BUDGET + f,
+        value = principalFloor + (POOL_MULTIPLE + 1L) * f - 1L)
+      rejectsAtSigning(j.prover, joinTx(j)(queueOut = short))
+    }
+  }
+
+  property("join: rejects a feeValue below the dust budget (finderFee >= 0)") {
+    withCtx { ctx =>
+      val j = joinScenario(ctx, enfScript = enforced(ctx))
+      val underfunded = queueUTXO(ctx, j.lenderProver, position = 0L, permit = j.permit,
+        feeValue = DUST_BUDGET - 1L,
+        value = principalFloor + Parameters.OneErg) // ample value, so only R4 is under test
+      rejectsAtSigning(j.prover, joinTx(j)(queueOut = underfunded))
+    }
+  }
+
+  /** A floor, not a pin: a lender may overpay the pool without raising the finder's cut. */
+  property("join: accepts principal above the premium floor at the same feeValue") {
+    withCtx { ctx =>
+      val j = joinScenario(ctx, enfScript = enforced(ctx))
+      val f = 10000000L
+      val generous = queueUTXO(ctx, j.lenderProver, position = 0L, permit = j.permit,
+        feeValue = DUST_BUDGET + f,
+        value = principalFloor + (POOL_MULTIPLE + 1L) * f + Parameters.OneErg)
+      accepts(j.prover, joinTx(j)(queueOut = generous))
+    }
+  }
+
+  /**
+   * `finderFee * CONST_POOL_MULTIPLE` is checked arithmetic, so a hostile R4 throws rather than
+   * wrapping to a small floor. Fails closed, and only the lender's own Join is lost.
+   */
+  property("join: a feeValue that overflows the premium fails closed") {
+    withCtx { ctx =>
+      val j = joinScenario(ctx, enfScript = enforced(ctx))
+      val hostile = queueUTXO(ctx, j.lenderProver, position = 0L, permit = j.permit,
+        feeValue = Long.MaxValue, value = principalFloor)
+      rejectsAtSigning(j.prover, joinTx(j)(queueOut = hostile))
+    }
+  }
+
+  /** A large but non-overflowing bid is simply unaffordable, not a wraparound. */
+  property("join: a large feeValue demands a proportionally large principal") {
+    withCtx { ctx =>
+      val j = joinScenario(ctx, enfScript = enforced(ctx))
+      val f = 1000000000L // 1 ERG to the finder demands 4 more to the pool
+      val unaffordable = queueUTXO(ctx, j.lenderProver, position = 0L, permit = j.permit,
+        feeValue = DUST_BUDGET + f, value = principalFloor + 4L * f)
+      rejectsAtSigning(j.prover, joinTx(j)(queueOut = unaffordable))
+    }
+  }
+
+  // ─── 3. the queue box's own structural bound ──────────────────────────────
+  //
+  // R4-R7 are all pinned on Join, so R8 is the first unused register here.
+
+  property("join: rejects a queue box carrying R8 (noExtraRegisters)") {
+    withCtx { ctx =>
+      val j = joinScenario(ctx, enfScript = enforced(ctx))
+      j.queueOut.registers.size shouldBe 4 // R4..R7
+      rejectsAtSigning(j.prover, joinTx(j)(queueOut = appendReg(j.queueOut, pad(400))))
+    }
+  }
+
+  property("join: rejects a queue box whose R8 is not a Coll[Byte]") {
+    withCtx { ctx =>
+      val j = joinScenario(ctx, enfScript = enforced(ctx))
+      rejectsAtSigning(j.prover, joinTx(j)(queueOut = appendReg(j.queueOut, ErgoValue.of(42L))))
     }
   }
 }

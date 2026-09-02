@@ -1,6 +1,6 @@
 {
   // Evaluation Contract
-  // Value: Block Reward
+  // Value: Block Reward, plus the refundable ERG bonds of the NISPs still in R4
 
 
   //TODO Add back command box and fp code after first week of testnet
@@ -9,16 +9,25 @@
   // R4: NISP Tree, initially, an empty AVL Tree. AVL Tree of ( hashedPropBytes -> NISP )
   // R5: Total Miners (decremented after FP posted) for this period
   // R6: Total Share Score (removed from after valid FP is posted)
-  // R7: Period Start (time or height of block mining in which this box was created, in this case after holding period.)
-  val nispTree:      AvlTree = SELF.R4[AvlTree].get
-  val currentMiners: Int     = SELF.R5[Int].get
-  val totalScore:    BigInt    = SELF.R6[BigInt].get
-  val currentPeriod: Long    = SELF.R7[Long].get
+  // R7: Coll[Long] of the rollup's state info, length 3, carried in from the holding phase
+  //     (0) Period Start - height this box was created at, in this case after the holding period
+  //     (1) Block Height - height the rollup's block was mined at, read by fraud proofs
+  //     (2) Bond Total   - refundable ERG belonging to the NISPs still in R4, decremented by each slash
+  // R8, R9: Unconstrained, reserved for extensions.
+  val nispTree:      AvlTree    = SELF.R4[AvlTree].get
+  val currentMiners: Int        = SELF.R5[Int].get
+  val totalScore:    BigInt     = SELF.R6[BigInt].get
+  val rollupState:   Coll[Long] = SELF.R7[Coll[Long]].get
+  val currentPeriod: Long       = rollupState(0)
+  val currentBlock:  Long       = rollupState(1)
+  val totalBond:     Long       = rollupState(2)
 
   // CONSTANTS
   // CONST_PERIOD_LENGTH: Length of evaluation period, helps determine current spending path
   // CONST_PAYOUT_PROPBYTES: Hashed proposition bytes of payout contract
   // CONST_FP_ID: Id of singleton token for utxo holding valid fraud proofs
+  // CONST_MIN_ENTRY_BOND: Floor on the refundable bond a submission posts, 0.002 ERG at launch
+  // CONST_BOND_DIVISOR: Score units per nanoERG of proportional bond, 100 at launch
 
 
   // CONTEXT VARS
@@ -29,7 +38,13 @@
   val nextTree   = nextUTXO.R4[AvlTree].get
   val nextMiners = nextUTXO.R5[Int].get
   val nextScore  = nextUTXO.R6[BigInt].get
-  val nextPeriod = nextUTXO.R7[Long].get
+  val nextState  = nextUTXO.R7[Coll[Long]].get
+  val nextPeriod = nextState(0)
+  val nextBlock  = nextState(1)
+  val nextBond   = nextState(2)
+  // Pinned on both paths: the successor is indexed by Payout and by every fraud proof, and a Coll is
+  // the one register type with no length of its own.
+  val stateSized = nextState.size == 3
 
   // DATA INPUTS
   // fpData: UTXO holding hashed propBytes of valid fraud proof contracts which may be spent with the eval contract
@@ -43,6 +58,18 @@
   // currentPeriod initialized to height at time of this UTXO's creation
   // value of this UTXO is initialized to be the block reward
   // fpData is a utxo holding collection of hashed propBytes of distinct valid fraud proof contracts
+  // totalBond is the sum of bondForScore(score) over every NISP Holding admitted, carried in unchanged
+  //
+  // This contract owns the whole state transition on the fraud proof path: the box value, the bond
+  // ledger, the period and the block. A fraud proof establishes which miner and score are removed and
+  // nothing else.
+
+  // The bond a submission of this score posted. Must match Holding_Logic, which collected it, and
+  // Payout, which refunds whatever is not slashed here.
+  def bondForScore(bondScore: Long): Long = {
+    val bondProportional = bondScore / CONST_BOND_DIVISOR
+    if(bondProportional > CONST_MIN_ENTRY_BOND) bondProportional else CONST_MIN_ENTRY_BOND
+  }
 
   val onlyOne = SELF.id == INPUTS(0).id // Enforce only one eval contract per transaction
   // Spending Path 1: Eval Contract is in validation phase
@@ -72,22 +99,69 @@
         nextTree.valueLengthOpt == nispTree.valueLengthOpt
       )
     )
-    sigmaProp( validFP && authenticFPData && onlyOne && contractSame && correctInputs && tokensConserved && flagsConserved) && executeFromVar[SigmaProp](0)
+
+    // Read off the register transition the fraud proof is about to be held to, not off the NISP:
+    // every whitelisted proof pins nextScore == totalScore - score for the single entry it removes.
+    // An out-of-range delta throws here, failing the prover's own transaction and nobody else's.
+    val removedScore = (totalScore - nextScore).toLong
+    val slashedBond  = bondForScore(removedScore)
+
+    // Paying the prover out of the forfeited bond means the reward comes from the fraudster rather
+    // than from a share of the pot, so it does not thin out as the pool grows. correctInputs is what
+    // makes INPUTS(1) the prover's own. The bond floor clears the minimum box value.
+    val proverInput  = INPUTS(1)
+    val rewardOutput = OUTPUTS(1)
+    val proverPaid = allOf(
+      Coll(
+        rewardOutput.propositionBytes == proverInput.propositionBytes,
+        rewardOutput.value            == slashedBond
+      )
+    )
+    val valueSlashed = nextUTXO.value == SELF.value - slashedBond
+    val bondSlashed  = nextBond       == totalBond - slashedBond
+    // A proof declaring a larger score delta than the entry it removes actually posted would price a
+    // bond bigger than the ledger holds, leaving Payout owing a negative amount it can never refund
+    // and the box unspendable. No shipped proof can do that, since each reads the score out of the
+    // entry it looks up, but the whitelist is what decides that and this contract should not depend
+    // on it.
+    val bondSolvent  = nextBond >= 0L
+    // All of rollupState is managed by eval contract
+    val samePeriod   = nextPeriod == currentPeriod
+    val sameBlock    = nextBlock  == currentBlock
+
+    val validSlash = allOf(
+      Coll(
+        validFP,
+        authenticFPData,
+        onlyOne,
+        contractSame,
+        correctInputs,
+        tokensConserved,
+        flagsConserved,
+        stateSized,
+        valueSlashed,
+        bondSlashed,
+        bondSolvent,
+        samePeriod,
+        sameBlock,
+        proverPaid
+      )
+    )
+    sigmaProp(validSlash) && executeFromVar[SigmaProp](0)
 
 
 
-    //Fraud Proof contracts will handle the updated state of the Evaluation Contract, so we do not need to check
-    //for anything else.
+    //Fraud Proof contracts will handle the rest of the updated state of the Evaluation Contract, so we
+    //do not need to check for anything else.
 
   }else{
   // Spending Path 2: Evaluation phase is over, transform utxo into payout contract
     val passedEvalPeriod = HEIGHT >= currentPeriod + CONST_PERIOD_LENGTH
-    val tokensAdded = {
-      if(SELF.tokens.size > 0L)
-        nextUTXO.R8[Long].get == SELF.tokens(0)._2
-      else
-        true
-    }
+    // Payout reads slot 1 as the LIT reward rather than as a block height, so the transform writes
+    // the total held. A box carrying only the rollup NFT writes a zero.
+    val LITReward = SELF.tokens.getOrElse(1, (Coll(0.toByte), 0L))._2
+    // Miners are paid everything on the box except the bond totals, which are returned to them.
+    val baseReward = SELF.value - totalBond
     val conservedValues = allOf(
         Coll(
           nextUTXO.value  == SELF.value,
@@ -95,8 +169,10 @@
           nextTree        == nispTree,
           nextMiners      == currentMiners,
           nextScore       == totalScore,
-          nextPeriod      == SELF.value,     // Period becomes block reward when transforming to payout contract
-          tokensAdded // If tokens exist, verify total is in R8, otherwise do nothing
+          stateSized,
+          nextPeriod      == baseReward,   // Slot 0 becomes the block reward when transforming to payout
+          nextState(1)    == LITReward,    // Slot 1 stops being a block height and becomes the LIT reward
+          nextBond        == totalBond     // Surviving bonds carry over to be refunded at payout
         )
     )
 

@@ -1,0 +1,191 @@
+{
+  // Holding_Logic
+  // Value: block reward, plus the refundable ERG bond of every NISP submitted so far
+  // The holding contract's rules. Never sits on a box: rides in context var 64 and is executed by
+  // Holding_Guard, which checks its hash first. Two consequences of that arrangement:
+  //
+  //  1. The phase comes from CTX_OP rather than from an if on HEIGHT, because the guard has to know
+  //     the path before it executes anything. The op byte is the spender's choice and proves nothing
+  //     on its own, so the height condition is re-checked below as `inSubmissionPhase`.
+  //  2. The miner's signing script is executed by the guard, since executeFromVar cannot nest. The
+  //     guard binds blake2b256(signerProp.propBytes) == CTX_NISP_DATA._1 and conjoins signerProp, so
+  //     this script takes CTX_NISP_DATA._1 as an authenticated identity.
+  //
+  // A submission posts a refundable ERG bond priced from its own claimed score, which is what makes
+  // writing to this tree cost something. It is returned in full at payout, and forfeited to whoever
+  // proves the entry fraudulent.
+
+  // REGISTERS
+  // R4: NISP Tree, initially, an empty AVL Tree. AVL Tree of ( hashedPropBytes -> NISP )
+  // R5: Total Miners (incremented every NISP posted) for this period
+  // R6: Total Share Score (added to for every NISP posted, using given ShareScore from first 8 bytes of NISP)
+  // NOTE: R6 is of type BigInt, but share scores are of type Long. This is NOT a tau representation of score!!!
+  // It is simply the sum of all (Long) share scores stored in a BigInt value, so as to save blockchain space.
+  // R7: Coll[Long] of the rollup's Long state, length 3, carried by every phase of the chain
+  //     (0) Period Start - height this box was created at, ex. during block mining and collateral exchange
+  //     (1) Block Height - height the rollup's block was mined at, set at genesis and never changed
+  //     (2) Bond Total   - refundable ERG this rollup holds on behalf of its submitters
+  // R8: Hashed prop bytes of the miner, stamped by the collateral contract at genesis. Not read here.
+  // R9: Unconstrained, reserved for extensions.
+  val nispTree:      AvlTree    = SELF.R4[AvlTree].get
+  val currentMiners: Int        = SELF.R5[Int].get
+  val totalScore:    BigInt     = SELF.R6[BigInt].get
+  val rollupState:   Coll[Long] = SELF.R7[Coll[Long]].get
+  val currentPeriod: Long       = rollupState(0)
+  val currentBlock:  Long       = rollupState(1)
+  val totalBond:     Long       = rollupState(2)
+
+  // CONSTANTS
+  // CONST_PERIOD_LENGTH: Length of submission period, helps determine current spending path
+  // CONST_EVAL_PROPBYTES: Hashed proposition bytes of evaluation contract
+  // CONST_MIN_ENTRY_BOND: Floor on the refundable bond a submission posts, 0.002 ERG at launch
+  // CONST_BOND_DIVISOR: Score units per nanoERG of proportional bond, 100 at launch
+
+  // Max allowable size for NISP, with CONST_NUM_LVLS_MAX levels in the super share's merkle proof.
+  // The same formula as the minimum below, run on the max side:
+  // CONST_SCORE_SIZE + 10 * (CONST_N_SIZE + headerSize + 2 + 1 + CONST_TX_PROOF_MAX + 16 * CONST_LEVEL_SIZE + CONST_Y_COORD) + 1
+  // 8 + 10 * (4 + 221 + 3 + 2174 + 528 + 32) + 1 = 29629
+  // NOTE: headerSize is 221 here, not 220. the height VLQ widens to 4 bytes past block 2,097,151
+  // The +1 is because this bound is strict (<) while the derivation gives the largest legal NISP.
+  val CONST_NISP_MAX          = 29629
+  // Minimum allowable NISP size, with one level in super share's merkle proof
+  // Important so that iterating 10 times over nispBytes does not cause index out of bounds in other fp contracts
+  // CONST_SCORE_SIZE + 10 * (CONST_N_SIZE + headerSize + 2 + 1 + CONST_TX_MIN_SIZE + CONST_LEVEL_SIZE + CONST_Y_COORD)
+  // NOTE: headerSize is assuming minimum of 3 bytes for height and 6 for timestamp
+  val CONST_NISP_MIN          = 7948
+
+  // CONTEXT VARS
+  // CTX_NISP_DATA(1): Data to insert into NISP tree, ( hashedPropBytes -> NISP ). Key authenticated by the guard.
+  // CTX_NISP_PROOF(2): Proof for insertion
+  // CTX_OP(3): 0 submit, 1 transform. The same variable the guard dispatched on.
+  val CTX_NISP_DATA   = getVar[(Coll[Byte], Coll[Byte])](1).getOrElse((Coll(0.toByte), Coll(0.toByte)))
+  val CTX_NISP_PROOF  = getVar[Coll[Byte]](2).getOrElse(Coll(0.toByte))
+  val CTX_OP          = getVar[Byte](3).getOrElse(-1.toByte)
+
+  // NEXT VALUES
+  val nextUTXO   = OUTPUTS(0)
+  val nextTree   = nextUTXO.R4[AvlTree].get
+  val nextMiners = nextUTXO.R5[Int].get
+  val nextScore  = nextUTXO.R6[BigInt].get
+  val nextState  = nextUTXO.R7[Coll[Long]].get
+  val nextPeriod = nextState(0)
+  val nextBlock  = nextState(1)
+  val nextBond   = nextState(2)
+  // rollupState is always 3 elements
+  val stateSized = nextState.size == 3
+
+  // ASSUMPTIONS - statements which can be assumed to be true due to other contracts enforcing them during
+  // creation of this UTXO
+  // currentMiners initialized at 0
+  // totalScore initialized at 0
+  // nispTree initialized to empty tree, with only insertions enabled
+  // rollupState initialized to (genesis height, genesis height, 0) with length 3
+  // value of this UTXO is initialized to be the block reward
+  // This script is only ever reached through Holding_Guard, which has already checked its hash and,
+  // on the submission path, executed the miner's script and bound CTX_NISP_DATA._1 to it.
+  // Each AVL key is unique, so one identity posts at most one bond into this rollup.
+  // Consensus value conservation is what makes the submitter fund the bond out of their own inputs;
+  // this contract only pins how much of it enters rollup custody.
+  //
+  // DELIBERATE OMISSIONS - conditions left out on purpose
+  // Nothing here checks the claimed score against the miner's difficulty commitment. That is a
+  // whitelisted fraud proof's job during evaluation, and the bond is what makes being wrong expensive.
+  // R8 and R9 are not conserved on either path. R8 is only read out of the genesis transaction bytes
+  // by a fraud proof, never off a live box, and R9 belongs to whatever extension wrote it.
+
+  // The bond a submission of this score must post. Evaluation slashes it and Payout refunds it using
+  // the same formula, so all three move together. The floor prices the cheapest spam entry; the
+  // proportional term stops a large claimed score from being cheap to post.
+  def bondForScore(bondScore: Long): Long = {
+    val bondProportional = bondScore / CONST_BOND_DIVISOR
+    if(bondProportional > CONST_MIN_ENTRY_BOND) bondProportional else CONST_MIN_ENTRY_BOND
+  }
+
+  // Spending Path 1: Holding Contract is in submission phase (miners may submit NISPs to the AVL Tree)
+  if(CTX_OP == 0.toByte){
+
+    val inSubmissionPhase = HEIGHT < currentPeriod + CONST_PERIOD_LENGTH
+    val validUTXO       = nextUTXO.propositionBytes == SELF.propositionBytes
+
+    // Read once, because the bond is priced from it as well as checked. The guard is needed because
+    // byteArrayToLong throws on a short slice; a zero falls through to validNISP's `score > 0`.
+    val score: Long = {
+      if(CTX_NISP_DATA._2.size > 8)
+        byteArrayToLong( CTX_NISP_DATA._2.slice(0,8) )
+      else
+        0L
+    }
+
+    // We are only checking the minimum amount of information required in this contract, such as valid format for
+    // NISP data which includes positive shareScore as first 8 bytes. More information will be verified during
+    // evaluation phase.
+    // Check basic size requirements at holding contract to prevent spam from entering tree
+    val validNISP = {
+      score > 0 && nextScore == totalScore + score.toBigInt &&
+      CTX_NISP_DATA._2.size >= CONST_NISP_MIN && CTX_NISP_DATA._2.size < CONST_NISP_MAX
+    }
+
+    // The box value grows by exactly the entry bond rather than being conserved.
+    val entryBond = bondForScore(score)
+    val bondCollected = allOf(
+      Coll(
+        nextUTXO.value.toBigInt == SELF.value.toBigInt + entryBond.toBigInt,
+        nextBond.toBigInt       == totalBond.toBigInt + entryBond.toBigInt
+      )
+    )
+
+    val treeUpdated = {
+      val insertTree = nispTree.insert(Coll(CTX_NISP_DATA), CTX_NISP_PROOF).get
+      insertTree == nextTree
+    }
+    val onlyOne = SELF.id == INPUTS(0).id
+    val incrementedMiners = nextMiners == currentMiners + 1
+    val samePeriod = nextPeriod == currentPeriod
+    val sameBlock  = nextBlock == currentBlock
+    val tokensConserved = nextUTXO.tokens == SELF.tokens
+    val statements = allOf(
+      Coll(
+        inSubmissionPhase,
+        onlyOne,
+        validUTXO,
+        stateSized,
+        bondCollected,
+        validNISP,
+        treeUpdated,
+        incrementedMiners,
+        samePeriod,
+        sameBlock,
+        tokensConserved
+      )
+    )
+
+    sigmaProp(statements)
+  }else if(CTX_OP == 1.toByte){
+    // Spending Path 2: Transform UTXO into evaluation contract to start checking for fraud proofs after
+    // submission period has expired.
+    // No height conjunct is needed here and none is added: nextPeriod <= HEIGHT together with
+    // nextPeriod >= currentPeriod + CONST_PERIOD_LENGTH already forces
+    // HEIGHT >= currentPeriod + CONST_PERIOD_LENGTH, so this path cannot be taken early.
+    val conservedValues = allOf(
+      Coll(
+        nextUTXO.value  == SELF.value,
+        nextUTXO.tokens == SELF.tokens,
+        nextTree        == nispTree,
+        nextMiners      == currentMiners,
+        nextScore       == totalScore,
+        stateSized,
+        nextPeriod      <= HEIGHT, // Period start is updated as we enter new phase
+        nextPeriod      >= currentPeriod + CONST_PERIOD_LENGTH,
+        SELF.id         == INPUTS(0).id, // Prevent weirdness / exploits by enforcing one Holding UTXO per tx
+        nextBlock       == currentBlock, // The rollup's own block height, carried unchanged into evaluation
+        nextBond        == totalBond // Bonds carry into evaluation untouched, to be slashed or refunded there
+      )
+    )
+
+    val isEvaluationContract = blake2b256( nextUTXO.propositionBytes ) == CONST_EVAL_PROPBYTES
+
+    sigmaProp(isEvaluationContract && conservedValues)
+  }else{
+    sigmaProp(false)
+  }
+}
