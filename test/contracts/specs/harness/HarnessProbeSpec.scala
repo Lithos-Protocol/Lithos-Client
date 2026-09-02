@@ -60,6 +60,8 @@ class HarnessProbeSpec extends AnyPropSpec with ContractSpecBase {
         "fraudproofs/FP_IncorrectN"       -> Try(FraudProofContracts.mkIncorrectNContract(ctx)),
         "fraudproofs/FP_MalformedGE"      -> Try(FraudProofContracts.mkMalformedGEContract(ctx)),
         "fraudproofs/FP_TransactionNotIncluded" -> Try(FraudProofContracts.mkTransactionNotIncludedContract(ctx)),
+        "fraudproofs/FP_NonMatchingCommitment" -> Try(FraudProofContracts.mkNonMatchingCommitmentContract(
+          ctx, lfsm.LFSMHelpers.getMDToken(ctx.getNetworkType))),
         "dictionaries/MinerDictionary"    -> Try(DictionaryContracts.mkMinerDictionaryContract(
                                                ctx.getNetworkType, LFSMHelpers.MD_TOKEN_TESTNET)),
         "dictionaries/MinerData"          -> Try(DictionaryContracts.mkMinerDataContract(

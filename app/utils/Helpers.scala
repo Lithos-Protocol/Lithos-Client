@@ -89,6 +89,8 @@ object Helpers {
   lazy val mdTestnet: Contract = DictionaryContracts.mkMinerDictionaryContract(NetworkType.TESTNET, LFSMHelpers.MD_TOKEN_TESTNET)
   lazy val minerDataMainnet: Contract = DictionaryContracts.mkMinerDataContract(NetworkType.MAINNET, LFSMHelpers.MD_TOKEN_MAINNET)
   lazy val minerDataTestnet: Contract = DictionaryContracts.mkMinerDataContract(NetworkType.TESTNET, LFSMHelpers.MD_TOKEN_TESTNET)
+  lazy val minerDataLogicMainnet: Contract = DictionaryContracts.mkMinerDataLogicContract(NetworkType.MAINNET, LFSMHelpers.MD_TOKEN_MAINNET)
+  lazy val minerDataLogicTestnet: Contract = DictionaryContracts.mkMinerDataLogicContract(NetworkType.TESTNET, LFSMHelpers.MD_TOKEN_TESTNET)
 
   def mdErgoTrees(client: ErgoClient): Seq[String] = {
     client.execute{
@@ -100,6 +102,14 @@ object Helpers {
     ctx.getNetworkType match {
       case NetworkType.MAINNET => minerDataMainnet
       case NetworkType.TESTNET => minerDataTestnet
+    }
+  }
+
+  /** The rules the data box's guard runs out of context var 64. Never sits on a box. */
+  def dataBoxLogic(ctx: BlockchainContext): Contract = {
+    ctx.getNetworkType match {
+      case NetworkType.MAINNET => minerDataLogicMainnet
+      case NetworkType.TESTNET => minerDataLogicTestnet
     }
   }
 

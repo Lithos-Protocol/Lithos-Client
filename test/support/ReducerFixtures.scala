@@ -97,7 +97,11 @@ object ReducerFixtures {
         (rollupId -> SyncFixtures.id(800000 + state.rollupOrigins.size)))
   }
 
-  /** Builds the dictionary-add transaction shape shared by block reduction and bootstrap replay. */
+  /**
+   * The dictionary-add shape shared by block reduction and bootstrap replay. The entry is the
+   * credential the transaction mints followed by the expiry the builder supplied, and that expiry
+   * rides in its own context variable because the contract bounds it rather than deriving it.
+   */
   def minerAdd(tree: MinerDictionary,
                miner: work.lithos.mutations.Contract,
                mdToken: ErgoId,
@@ -105,14 +109,16 @@ object ReducerFixtures {
                dataTokenId: String,
                height: Int): BlockTx = {
     val dictionary = tree.dictionary.copy()
-    val value = ErgoId.create(dataTokenId).getBytes
+    val validUntil = height.toLong + lfsm.LFSMHelpers.DATA_LIFETIME
+    val value = ErgoId.create(dataTokenId).getBytes ++ scorex.utils.Longs.toByteArray(validUntil)
     val insertion = dictionary.insert(miner.hashedPropBytes -> value)
-    val pair = ErgoValue.pairOf(collBytes(miner.hashedPropBytes), collBytes(value)).toHex
     val proof = InputSpendingProof(Map(
       "0" -> ErgoValue.of(MinerDictionary.ADD_MINER_OP).toHex,
-      "1" -> ErgoValue.of(miner.sigmaBoolean.get).toHex,
-      "2" -> pair,
-      "3" -> insertion.proof.ergoValue.toHex))
+      "1" -> collBytes(miner.valueBytes).toHex,
+      "2" -> ErgoValue.of(4242L).toHex,
+      "3" -> ErgoValue.of(height + lfsm.LFSMHelpers.NISP_WINDOW.toInt + 50).toHex,
+      "4" -> insertion.proof.ergoValue.toHex,
+      "8" -> ErgoValue.of(validUntil).toHex))
     val txId = SyncFixtures.id(30000 + height)
     val dataOutput = TxOutput(dataTokenId, 1000000L, "miner-data", Seq(
       ErgoValue.of(0).toHex, collBytes(miner.hashedPropBytes).toHex),
@@ -121,23 +127,44 @@ object ReducerFixtures {
       Seq(dictionaryOutput(outputId, txId, height, dictionary, mdToken), dataOutput))
   }
 
-  /** A dictionary removal: the operation rides input 0, the miner's own proofs ride input 1. */
+  /**
+   * A dictionary removal. The identity and both proofs ride the dictionary's own input, and the
+   * miner's data box is co-spent at input 1 without carrying anything the reducer reads.
+   */
   def minerRemove(tree: MinerDictionary,
                   miner: work.lithos.mutations.Contract,
                   mdToken: ErgoId,
                   outputId: String,
-                  height: Int): BlockTx = {
+                  height: Int): BlockTx =
+    minerDrop(tree, miner, mdToken, outputId, height, MinerDictionary.REMOVE_MINER_OP,
+      Seq(TxInput(SyncFixtures.id(50000 + height), None)))
+
+  /** An eviction: the same tree transition, with no data box spent at all. */
+  def minerEvict(tree: MinerDictionary,
+                 miner: work.lithos.mutations.Contract,
+                 mdToken: ErgoId,
+                 outputId: String,
+                 height: Int): BlockTx =
+    minerDrop(tree, miner, mdToken, outputId, height, MinerDictionary.EVICT_MINER_OP, Seq.empty)
+
+  private def minerDrop(tree: MinerDictionary,
+                        miner: work.lithos.mutations.Contract,
+                        mdToken: ErgoId,
+                        outputId: String,
+                        height: Int,
+                        op: Byte,
+                        extraInputs: Seq[TxInput]): BlockTx = {
     val dictionary = tree.dictionary.copy()
     val lookup = dictionary.lookUp(miner.hashedPropBytes)
     val deletion = dictionary.delete(miner.hashedPropBytes)
-    val operation = InputSpendingProof(Map("0" -> ErgoValue.of(MinerDictionary.REMOVE_MINER_OP).toHex))
-    val removal = InputSpendingProof(Map(
-      "1" -> ErgoValue.of(miner.sigmaBoolean.get).toHex,
-      "2" -> lookup.proof.ergoValue.toHex,
-      "3" -> deletion.proof.ergoValue.toHex))
+    val operation = InputSpendingProof(Map(
+      "0" -> ErgoValue.of(op).toHex,
+      "5" -> collBytes(miner.hashedPropBytes).toHex,
+      "6" -> lookup.proof.ergoValue.toHex,
+      "7" -> deletion.proof.ergoValue.toHex))
     val txId = SyncFixtures.id(40000 + height)
     BlockTx(txId,
-      Seq(TxInput(tree.utxoId, Some(operation)), TxInput(SyncFixtures.id(50000 + height), Some(removal))),
+      TxInput(tree.utxoId, Some(operation)) +: extraInputs,
       Seq.empty, Seq(dictionaryOutput(outputId, txId, height, dictionary, mdToken)))
   }
 

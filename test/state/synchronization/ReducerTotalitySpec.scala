@@ -92,17 +92,18 @@ class ReducerTotalitySpec extends AnyFlatSpec with Matchers with OptionValues {
 
   private def dictionaryAdd(signerHex: String, key: Array[Byte]): BlockTx = {
     val txId = SyncFixtures.id(920001)
-    val value = Longs.toByteArray(1L) ++ Array.fill[Byte](24)(2)
+    val dataToken = work.lithos.mutations.Token(
+      org.ergoplatform.sdk.ErgoId.create(SyncFixtures.id(920003)), 1L)
+    val validUntil = 100L + lfsm.LFSMHelpers.DATA_LIFETIME
+    val value = dataToken.id.getBytes ++ Longs.toByteArray(validUntil)
     val expected = PlasmaDictionary.empty()
     val insertion = expected.insert(key -> value)
     val proof = InputSpendingProof(Map(
       "0" -> ErgoValue.of(0.toByte).toHex,
       "1" -> signerHex,
-      "2" -> pair(key, value),
-      "3" -> ReducerFixtures.proofHex(insertion.proof.ergoValue.getValue
-        .asInstanceOf[sigma.Coll[Byte]].toArray)))
-    val dataToken = work.lithos.mutations.Token(
-      org.ergoplatform.sdk.ErgoId.create(SyncFixtures.id(920003)), 1L)
+      "4" -> ReducerFixtures.proofHex(insertion.proof.ergoValue.getValue
+        .asInstanceOf[sigma.Coll[Byte]].toArray),
+      "8" -> ErgoValue.of(validUntil).toHex))
     val dataBox = state.messages.TxOutput(SyncFixtures.id(920004), 1000000L, "miner-data",
       Seq(ErgoValue.of(0L).toHex, ReducerFixtures.collBytes(key).toHex), Seq(dataToken), txId, 100, 1)
     BlockTx(txId, Seq(TxInput(protocol.minerDictionaryGenesisId, Some(proof))), Seq.empty,

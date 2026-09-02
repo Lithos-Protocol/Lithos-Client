@@ -1,0 +1,116 @@
+{
+  // MinerData_Logic
+  // Value: CONST_MIN_DATA_BOX_AMNT
+  // The MinerData rules, run out of context var 64 by MinerData_Guard. One job: hold the miner's
+  // difficulty commitments and let only that miner change them. Bonds are posted per NISP on the
+  // rollup, so nothing here holds value on a miner's behalf.
+
+  // REGISTERS
+  // R4: commitments - up to two (commitHeight, score) pairs, index 0 newest. A commitment takes
+  // effect CONST_NISP_WINDOW blocks after it is set, so "the commitment in effect at height H" is the
+  // newest one whose commitHeight is at least that far behind H, which is not always index 0.
+  // Two are kept rather than one because a rollup can still be challenged long after its submission
+  // period closed, and the proof has to be able to see the commitment that governed it.
+  // R5: the miner's hashed proposition bytes, exactly 32 bytes. Never changes.
+  val commitments: Coll[(Int, Long)] = SELF.R4[Coll[(Int, Long)]].get
+  val minerHash:   Coll[Byte]        = SELF.R5[Coll[Byte]].get
+
+  // CONSTANTS
+  // CONST_MD_ID: id of the MinerDictionary singleton NFT
+  // CONST_NISP_WINDOW: blocks a commitment waits before it takes effect
+  // CONST_ROLLUP_LIFETIME: HOLDING_PERIOD + EVAL_PERIOD, how long a rollup stays challengeable
+  // CONST_EVICT_DELAY: the gap between a registration expiring and its box becoming collectible,
+  // used here as the slack on how far a successor's creation height may be backdated
+
+  // CONTEXT VARS
+  // CTX_SIGNER(0): executed by the guard, which has already bound it to minerHash
+  // CTX_OP(1): 0 changeDiff, 2 remove. Numbered to match MinerDictionary's own op byte, so 1 is
+  // absent: that is eviction, which never spends a data box.
+  val CTX_OP = getVar[Byte](1).getOrElse(-1.toByte)
+
+  // ASSUMPTIONS - statements which can be assumed to be true due to other contracts enforcing them
+  // during creation of this UTXO
+  // The guard checked this script's hash and executed the miner's signing script before reaching
+  // here, so identity is already established and no path below re-checks it.
+  // MinerDictionary minted the credential token into this box, funded it at CONST_MIN_DATA_BOX_AMNT,
+  // wrote the first commitment with its notice period served, stamped R5 and refused R6.
+  //
+  // DELIBERATE OMISSIONS - conditions left out on purpose
+  // Nothing here extends a registration. The entry's expiry is fixed at registration and runs down
+  // however active the miner is; the miner removes and registers again. Extending it would mean
+  // co-spending the dictionary on every difficulty change, or moving commitments mid-evaluation.
+  // No value floor. The box is collectible for storage rent, which is acceptable only because
+  // notCollectibleEarly keeps collection strictly after expiry, so a collected credential already
+  // names an entry no fraud proof will honour.
+
+  if(CTX_OP == 0.toByte){
+    // Spending Path 1: write a new difficulty commitment, keeping the previous one at index 1
+    val nextUTXO = OUTPUTS(0)
+    val onlyOne  = SELF.id == INPUTS(0).id
+
+    val validUTXO        = nextUTXO.propositionBytes == SELF.propositionBytes
+    val valueConserved   = nextUTXO.value  == SELF.value
+    val tokensConserved  = nextUTXO.tokens == SELF.tokens
+    val identityConserved = nextUTXO.R5[Coll[Byte]].get == minerHash
+    // Registers are contiguous, so refusing R6 refuses the whole tail and the successor's length
+    // stays bounded by its types.
+    val noExtraRegisters = nextUTXO.R6[Coll[Byte]].isDefined == false
+    // The same bound MinerDictionary puts on the box it creates. A successor declaring an old
+    // creation height is collectible sooner, and a collected credential sits in a box that is never
+    // spent, where nothing stops its holder naming any commitment. A bound rather than an exact
+    // height, so a change that waits in the mempool still lands.
+    val notCollectibleEarly = nextUTXO.creationInfo._1.toLong > HEIGHT.toLong - CONST_EVICT_DELAY
+
+    val nextCommitments = nextUTXO.R4[Coll[(Int, Long)]].get
+
+    val correctCommit = {
+      if(commitments.size == 1 || commitments.size == 2){
+        allOf(
+          Coll(
+            // Always exactly two afterwards. One is only ever the state a freshly registered box is in.
+            nextCommitments.size == 2,
+            nextCommitments(1) == commitments(0),
+            // A full rollup lifetime since the newest commitment took effect, so no rollup that can
+            // still be challenged was submitted under a commitment older than the two kept here.
+            // Loosen it and a miner evicts the governing commitment by churning.
+            (HEIGHT - commitments(0)._1).toLong >= CONST_NISP_WINDOW + CONST_ROLLUP_LIFETIME,
+            // The notice period. A commitment cannot take effect immediately, or a miner picks their
+            // difficulty after seeing which shares they got.
+            (nextCommitments(0)._1 - HEIGHT).toLong >= CONST_NISP_WINDOW,
+            nextCommitments(0)._2 > 0L
+          )
+        )
+      }else{
+        false
+      }
+    }
+
+    val statements = allOf(
+      Coll(
+        onlyOne,
+        validUTXO,
+        valueConserved,
+        tokensConserved,
+        identityConserved,
+        noExtraRegisters,
+        notCollectibleEarly,
+        correctCommit
+      )
+    )
+
+    sigmaProp(statements)
+
+  }else if(CTX_OP == 2.toByte){
+    // Spending Path 2: remove. MinerDictionary owns the burn and the tree, so all this box has to
+    // establish is that the dictionary is in front of it and that it is the box being handled.
+    val authenticDictionary = INPUTS(0).tokens.getOrElse(0, (Coll(0.toByte), 0L))._1 == CONST_MD_ID
+    // The dictionary constrains INPUTS(1) and nothing else. Without this a second data box at
+    // INPUTS(2) satisfies its own copy of this path with no contract constraining its successor.
+    val handledByDictionary = SELF.id == INPUTS(1).id
+
+    sigmaProp(authenticDictionary && handledByDictionary)
+
+  }else{
+    sigmaProp(false)
+  }
+}

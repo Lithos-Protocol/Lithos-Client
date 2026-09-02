@@ -2,6 +2,8 @@ package lfsm.contracts
 
 import lfsm.{LFSMHelpers, ScriptGenerator}
 import org.ergoplatform.appkit.{BlockchainContext, ConstantsBuilder}
+import org.ergoplatform.sdk.ErgoId
+import sigma.Colls
 import work.lithos.mutations.Contract
 
 object FraudProofContracts {
@@ -44,7 +46,25 @@ object FraudProofContracts {
     Contract.fromErgoScript(ctx, constants, ScriptGenerator.mkFraudProofScript("FP_TransactionNotIncluded"))
   }
 
-  // Order is important here, as `Evaluator` uses ordering of this sequence to create fraud proof transactions
+  /**
+   * The only proof that reads the Miner Dictionary, so the only one needing its NFT and the MinerData
+   * guard's hash. Compiling it compiles the guard and its logic underneath, so callers should cache.
+   */
+  def mkNonMatchingCommitmentContract(ctx: BlockchainContext, mdToken: ErgoId): Contract = {
+    val constants = ConstantsBuilder.create()
+      .item("CONST_MINERDATA_PROPBYTES",
+        Colls.fromArray(DictionaryContracts.mkMinerDataContract(ctx, mdToken).hashedPropBytes))
+      .item("CONST_MD_ID", Colls.fromArray(mdToken.getBytes))
+      .item("CONST_NISP_WINDOW", LFSMHelpers.NISP_WINDOW)
+      .build()
+    Contract.fromErgoScript(ctx, constants,
+      ScriptGenerator.mkFraudProofScript("FP_NonMatchingCommitment"))
+  }
+
+  /**
+   * Order is important here, as `Evaluator` uses ordering of this sequence to create fraud proof
+   * transactions. Anything new is APPENDED, never inserted.
+   */
   def getFraudProofContracts(ctx: BlockchainContext): Seq[Contract] = {
     Seq(
       mkInvalidFormatContract(ctx),
@@ -53,7 +73,8 @@ object FraudProofContracts {
       mkNonUniqueHeadersContract(ctx),
       mkIncorrectNContract(ctx),
       mkInvalidDiffContract(ctx),
-      mkTransactionNotIncludedContract(ctx)
+      mkTransactionNotIncludedContract(ctx),
+      mkNonMatchingCommitmentContract(ctx, LFSMHelpers.getMDToken(ctx.getNetworkType))
     )
   }
 

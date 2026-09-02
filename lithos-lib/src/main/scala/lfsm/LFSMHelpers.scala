@@ -51,8 +51,27 @@ object LFSMHelpers {
   final val FP_TOKEN_TESTNET        = ErgoId.create("a6d4fa307b654dcf31ce07e2462c1be5ca7c5dcc35c1363a0eff62d0b3b9ed37")
   final val FP_CONTROL_TESTNET      = Address.create("ShDJAh75M4bDZbCowYGqtmHi4iiBMqWJcbQRYLaxx8tZZHtj23c7qEcEvUiXYvSdnjdWE6R328rSazggEzz7UWRqXGZWc6L28bo96jMNK8NZs1bQBHAxkb9rLFW8Gf3HFQRPUm26CX8LZeqF1iJvftCYHTp2KC2LisbheejGeoXkv")
 
+  // How long a rollup stays challengeable. MinerData_Logic spaces commitment changes by NISP_WINDOW
+  // plus this, so the commitment governing any live rollup is still in one of its two slots.
+  final val ROLLUP_LIFETIME = HOLDING_PERIOD + EVAL_PERIOD
+
   // MinerDictionary Params
-  final val MIN_DATA_BOX_AMNT = 1000000L
+  // A MinerData box is deliberately collectible for storage rent. That is safe because a registration
+  // expires DATA_LIFETIME after it is made while the box cannot be collected until STORAGE_PERIOD
+  // after it is created, so a collected credential names an entry no fraud proof will honour.
+  final val MIN_DATA_BOX_AMNT = 1000000L // 0.001 ERG
+  // How long a registration lasts, in the 365-day, 720-blocks-per-day units Ergo uses for its own
+  // storage period. A miner registers again rather than renewing.
+  final val DATA_LIFETIME     = 919800L // 3.5 years at 2-minute blocks
+  final val STORAGE_PERIOD    = 1051200L // Ergo's own
+  // The gap between a registration expiring and its box becoming collectible. An entry may only be
+  // evicted this long after expiry, so eviction can never retire a registration a live rollup was
+  // judged against, and a data box's creation height may be backdated at most this far.
+  final val EVICT_DELAY       = STORAGE_PERIOD - DATA_LIFETIME // 131400, about six months
+  // How far below the full lifetime a registration's supplied expiry may sit. The expiry is written
+  // into the dictionary tree by the builder, so this band is how long a registration may wait in the
+  // mempool before it has to be rebuilt.
+  final val REGISTER_SLACK    = 720L // one day at 2-minute blocks
   final val MD_TOKEN_MAINNET = ErgoId.create("7f9609b232d3e2f0638d60a03a26831bf80155ed1e87a1b914e2623dfbd05518")
   final val MD_TOKEN_TESTNET = ErgoId.create("7f9609b232d3e2f0638d60a03a26831bf80155ed1e87a1b914e2623dfbd05518")
   final val MD_GENESIS_HEIGHT = 111755

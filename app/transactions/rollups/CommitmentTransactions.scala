@@ -129,11 +129,12 @@ class CommitmentTransactions(nodeContext: NodeContext, dataBoxes: DataBoxSource)
   //  THE WRITE
   // ══════════════════════════════════════════════════════════════════════════
 
-  private def makeMinerDataBox(ctx: BlockchainContext, minerContract: Contract, addToken: ErgoId, score: Long): UTXO = {
+  private def makeMinerDataBox(ctx: BlockchainContext, minerContract: Contract, addToken: ErgoId,
+                               commitHeight: Int, score: Long): UTXO = {
     val contract =  Helpers.dataBoxContract(ctx)
-    val commit = ctx.getHeight + DataBoxBuffer -> score
+    val commit = commitHeight -> score
     logger.info(s"Making new data box for local miner with singleton id $addToken, and commit $commit")
-    val utxo = UTXO(contract, Parameters.MinFee, Seq(Token(addToken, 1L)),
+    val utxo = UTXO(contract, LFSMHelpers.MIN_DATA_BOX_AMNT, Seq(Token(addToken, 1L)),
       registers = Seq(
         ErgoValue.of(Colls.fromArray(Array(commit)), ErgoType.pairType(scalaIntType, scalaLongType)),
         ErgoValue.of(Colls.fromArray(minerContract.hashedPropBytes), scalaByteType)
@@ -191,20 +192,26 @@ class CommitmentTransactions(nodeContext: NodeContext, dataBoxes: DataBoxSource)
 
     val insertionTree = minerTree.dictionary.copy()
     val dictInput = InputUTXO(ctx.getBoxesById(minerTree.utxoId).head)
-    val insertion = insertionTree.insert(proverContract.hashedPropBytes -> dictInput.id.getBytes)
+    val commitHeight = ctx.getHeight + DataBoxBuffer
+
+    // The credential this transaction mints takes the dictionary box's id, and the entry is that id
+    // with the expiry appended. The contract bounds the expiry rather than deriving it, so a
+    // registration that waits in the mempool still inserts the value it proved -- but only for
+    // REGISTER_SLACK blocks, after which it has to be rebuilt.
+    val validUntil = ctx.getHeight.toLong + LFSMHelpers.DATA_LIFETIME
+    val entry = dictInput.id.getBytes ++ scorex.utils.Longs.toByteArray(validUntil)
+    val insertion = insertionTree.insert(proverContract.hashedPropBytes -> entry)
 
     val ctxDictInput = dictInput
       .withCtxVar(ContextVar.of(0.toByte, 0.toByte))
-      .withCtxVar(ContextVar.of(1.toByte, proverContract.sigmaBoolean.get))
-      .withCtxVar(ContextVar.of(
-        2.toByte,
-        ErgoValue.pairOf(
-          ErgoValue.of(Colls.fromArray(proverContract.hashedPropBytes), scalaByteType),
-          ErgoValue.of(Colls.fromArray(dictInput.id.getBytes), scalaByteType)
-        )))
-      .withCtxVar(ContextVar.of(3.toByte, insertion.proof.ergoValue))
+      .withCtxVar(ContextVar.of(1.toByte,
+        ErgoValue.of(Colls.fromArray(proverContract.valueBytes), scalaByteType)))
+      .withCtxVar(ContextVar.of(2.toByte, ErgoValue.of(score)))
+      .withCtxVar(ContextVar.of(3.toByte, ErgoValue.of(commitHeight)))
+      .withCtxVar(ContextVar.of(4.toByte, insertion.proof.ergoValue))
+      .withCtxVar(ContextVar.of(8.toByte, ErgoValue.of(validUntil)))
     val dictOutput = dictInput.toUTXO.copy(registers = Seq(insertionTree.ergoValue))
-    val output = makeMinerDataBox(ctx, proverContract, dictInput.id, score)
+    val output = makeMinerDataBox(ctx, proverContract, dictInput.id, commitHeight, score)
     val feeOutput = UTXO(Contract(ErgoTreePredef.feeProposition(720)), Parameters.MinFee)
     val uTx = TxBuilder(ctx)
       .setInputs((Seq(ctxDictInput) ++ funding): _*)
@@ -233,8 +240,11 @@ class CommitmentTransactions(nodeContext: NodeContext, dataBoxes: DataBoxSource)
         case Success(input) =>
           val commits = commitments(input)
           val current = commits.head
-          if (ctx.getHeight - current._1 < LFSMHelpers.NISP_WINDOW) {
-            logger.info(s"Not changing commits until $current takes effect (height ${ctx.getHeight})")
+          // Only two commitments are kept, so the contract spaces changes by a full rollup lifetime
+          // past the window as well: any less and a change could evict the commitment a NISP still in
+          // evaluation was submitted under.
+          if (ctx.getHeight - current._1 < LFSMHelpers.NISP_WINDOW + LFSMHelpers.ROLLUP_LIFETIME) {
+            logger.info(s"Not changing commits until $current has aged out (height ${ctx.getHeight})")
             None
           } else if (current._2 == score) {
             logger.info("No commitment change needed")
@@ -303,8 +313,11 @@ class CommitmentTransactions(nodeContext: NodeContext, dataBoxes: DataBoxSource)
         ErgoValue.of(nextCommits, ErgoType.pairType(scalaIntType, scalaLongType))))
 
     val inputWithCtx = input
-      .withCtxVar(0.toByte, ErgoValue.of(0.toByte))
-      .withCtxVar(ContextVar.of(1.toByte, prover.contract.sigmaBoolean.get))
+      .withCtxVar(ContextVar.of(0.toByte,
+        ErgoValue.of(Colls.fromArray(prover.contract.valueBytes), scalaByteType)))
+      .withCtxVar(ContextVar.of(1.toByte, ErgoValue.of(0.toByte)))
+      .withCtxVar(ContextVar.of(64.toByte,
+        ErgoValue.of(Colls.fromArray(Helpers.dataBoxLogic(ctx).valueBytes), scalaByteType)))
 
     val fee = UTXO(Contract(ErgoTreePredef.feeProposition(720)), Parameters.MinFee)
     val uTx = TxBuilder(ctx)

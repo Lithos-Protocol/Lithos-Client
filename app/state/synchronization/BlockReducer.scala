@@ -7,11 +7,10 @@ import org.ergoplatform.appkit.{ErgoValue, NetworkType}
 import org.ergoplatform.sdk.ErgoId
 import scorex.utils.Longs
 import sigma.data.CBigInt
-import sigma.{AvlTree, Coll, SigmaProp}
+import sigma.{AvlTree, Coll}
 import state.messages.SyncMessages.SyncCursor
 import state.messages.{BlockInfo, BlockTx, InputSpendingProof, TxOutput}
 import utils.Helpers
-import work.lithos.mutations.Contract
 
 import scala.util.control.NonFatal
 
@@ -776,13 +775,20 @@ object BlockReducer {
           operation <- extensionByte(proof, "0", tx.id)
           _ <- operation match {
             case MinerDictionary.ADD_MINER_OP => applyMinerAdd(block, tx, proof)
-            case MinerDictionary.REMOVE_MINER_OP => applyMinerRemove(block, tx, proof)
+            case MinerDictionary.EVICT_MINER_OP => applyMinerDrop(block, tx, proof)
+            case MinerDictionary.REMOVE_MINER_OP => applyMinerDrop(block, tx, proof)
             case other => Left(MalformedTransaction(tx.id, s"unknown miner dictionary operation $other"))
           }
         } yield relevantEvents += 1
       }
     }
 
+    /**
+      * Registration. The key is read off the data box's R5 rather than derived from the signer script:
+      * the contract pins them equal, and a wrong key fails the digest check below rather than passing
+      * silently. The value is the credential the transaction minted, followed by the expiry the
+      * builder supplied.
+      */
     private def applyMinerAdd(block: BlockInfo,
                               tx: BlockTx,
                               proof: InputSpendingProof): Either[SyncApplyError, Unit] = {
@@ -790,28 +796,23 @@ object BlockReducer {
         output <- required(tx.outputs.headOption, tx.id, "miner dictionary output 0")
         dataBox <- required(tx.outputs.lift(1), tx.id, "miner data output 1")
         dataToken <- required(dataBox.assets.headOption, tx.id, "miner data singleton token")
-        options <- required(dataBox.registers.lift(1), tx.id, "miner data box R5").flatMap(extensionValueBytes(_, tx.id, "miner data box R5"))
-        _ <- requireState(tx.id, options.length >= 32, "miner data box R5 must contain a 32-byte miner hash")
-        sigmaProp <- extensionSigmaProp(proof, "1", tx.id)
-        keyValue <- extensionPair(proof, "2", tx.id)
-        expectedInsert <- extensionBytes(proof, "3", tx.id)
-        miner <- attempt(tx.id, "could not derive miner contract") {
-          new Contract(sigma.ast.ErgoTree.fromProposition(sigmaProp))
-        }
-        _ <- requireState(tx.id, sameBytes(miner.hashedPropBytes, keyValue._1),
-          "miner dictionary key does not match the signer")
-        _ <- requireState(tx.id, sameBytes(options.take(32), keyValue._1),
-          "miner data box identity does not match the dictionary key")
+        identity <- required(dataBox.registers.lift(1), tx.id, "miner data box R5")
+          .flatMap(extensionValueBytes(_, tx.id, "miner data box R5"))
+        _ <- requireState(tx.id, identity.length == 32,
+          "miner data box R5 must be a 32-byte miner hash")
+        validUntil <- extensionLong(proof, "8", tx.id)
+        credential = dataToken.id.getBytes
+        _ <- requireState(tx.id, credential.length == 32, "credential id must be 32 bytes")
+        entry = credential ++ Longs.toByteArray(validUntil)
         dictionary = mutableMinerDictionary()
-        insertion <- attempt(tx.id, "could not apply miner dictionary insertion") {
-          dictionary.insert(keyValue._1 -> keyValue._2)
+        _ <- attempt(tx.id, "could not apply miner dictionary insertion") {
+          dictionary.insert(identity -> entry)
         }
-        _ = record(DictionaryId.Miner, DictionaryOperation.Insert(tx.id, Seq(keyValue)))
-        // _ <- requireProof(tx.id, "miner dictionary insertion", insertion.proof.ergoValue.getValue, expectedInsert)
+        _ = record(DictionaryId.Miner, DictionaryOperation.Insert(tx.id, Seq(identity -> entry)))
         digest <- avlDigest(output, tx.id)
         _ <- requireDigest(tx.id, dictionary, digest)
       } yield {
-        val isLocal = sameBytes(options.take(32), protocol.localMinerHash)
+        val isLocal = sameBytes(identity, protocol.localMinerHash)
         minerTree = minerTree.copy(dictionary = dictionary, numMiners = minerTree.numMiners + 1,
           hasMiner = minerTree.hasMiner || isLocal, utxoId = output.id,
           syncHeight = block.height, savedHeight = block.height)
@@ -819,38 +820,35 @@ object BlockReducer {
       }
     }
 
-    private def applyMinerRemove(block: BlockInfo,
-                                 tx: BlockTx,
-                                 proof: InputSpendingProof): Either[SyncApplyError, Unit] = {
+    /**
+      * Removal and eviction. Both delete one key named by the dictionary's own context variables, and
+      * differ only in whether a MinerData box is co-spent, which the tree does not care about. The
+      * identity is taken from the variable rather than a signer, since eviction has no signer.
+      */
+    private def applyMinerDrop(block: BlockInfo,
+                               tx: BlockTx,
+                               proof: InputSpendingProof): Either[SyncApplyError, Unit] = {
       for {
         output <- required(tx.outputs.headOption, tx.id, "miner dictionary output 0")
-        removalInput <- required(tx.inputs.lift(1), tx.id, "miner data input 1")
-        removalProof <- required(removalInput.spendingProof, tx.id, "miner data input spending proof")
-        sigmaProp <- extensionSigmaProp(removalProof, "1", tx.id)
-        expectedLookup <- extensionBytes(removalProof, "2", tx.id)
-        expectedDelete <- extensionBytes(removalProof, "3", tx.id)
-        miner <- attempt(tx.id, "could not derive miner contract") {
-          new Contract(sigma.ast.ErgoTree.fromProposition(sigmaProp))
-        }
+        identity <- extensionBytes(proof, "5", tx.id)
+        _ <- requireState(tx.id, identity.length == 32,
+          "dropped miner identity must be a 32-byte hash")
         dictionary = mutableMinerDictionary()
         lookup <- attempt(tx.id, "could not apply miner dictionary lookup") {
-          dictionary.lookUp(miner.hashedPropBytes)
+          dictionary.lookUp(identity)
         }
-        // _ <- requireProof(tx.id, "miner dictionary lookup", lookup.proof.ergoValue.getValue, expectedLookup)
         _ <- lookup.response.headOption.flatMap(_.tryOp.toOption.flatten) match {
           case Some(_) => Right(())
-          case None => Left(StateInvariant(tx.id, "removed miner is absent from the dictionary"))
+          case None => Left(StateInvariant(tx.id, "dropped miner is absent from the dictionary"))
         }
-        deletion <- attempt(tx.id, "could not apply miner dictionary deletion") {
-          dictionary.delete(miner.hashedPropBytes)
+        _ <- attempt(tx.id, "could not apply miner dictionary deletion") {
+          dictionary.delete(identity)
         }
-        _ = record(DictionaryId.Miner,
-          DictionaryOperation.Delete(tx.id, Seq(miner.hashedPropBytes)))
-        // _ <- requireProof(tx.id, "miner dictionary deletion", deletion.proof.ergoValue.getValue, expectedDelete)
+        _ = record(DictionaryId.Miner, DictionaryOperation.Delete(tx.id, Seq(identity)))
         digest <- avlDigest(output, tx.id)
         _ <- requireDigest(tx.id, dictionary, digest)
       } yield {
-        val isLocal = sameBytes(miner.hashedPropBytes, protocol.localMinerHash)
+        val isLocal = sameBytes(identity, protocol.localMinerHash)
         minerTree = minerTree.copy(dictionary = dictionary, numMiners = minerTree.numMiners - 1,
           hasMiner = minerTree.hasMiner && !isLocal, utxoId = output.id,
           syncHeight = block.height, savedHeight = block.height)
@@ -952,6 +950,11 @@ object BlockReducer {
                                   field: String): Either[SyncApplyError, Array[Byte]] =
     decodeValue(hex, txId, field)(_.asInstanceOf[Coll[Byte]].toArray)
 
+  private def extensionLong(proof: InputSpendingProof,
+                            key: String,
+                            txId: String): Either[SyncApplyError, Long] =
+    extension(proof, key, txId).flatMap(decodeValue(_, txId, s"context variable $key")(_.asInstanceOf[Long]))
+
   private def extensionPair(proof: InputSpendingProof,
                             key: String,
                             txId: String): Either[SyncApplyError, (Array[Byte], Array[Byte])] =
@@ -970,11 +973,6 @@ object BlockReducer {
         _.asInstanceOf[Coll[Coll[Byte]]].toArray.toSeq.map(_.toArray)
       }
     }
-
-  private def extensionSigmaProp(proof: InputSpendingProof,
-                                 key: String,
-                                 txId: String): Either[SyncApplyError, SigmaProp] =
-    extension(proof, key, txId).flatMap(decodeValue(_, txId, s"context variable $key")(_.asInstanceOf[SigmaProp]))
 
   private def extension(proof: InputSpendingProof,
                         key: String,

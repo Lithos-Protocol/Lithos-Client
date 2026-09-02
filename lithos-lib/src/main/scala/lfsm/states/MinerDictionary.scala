@@ -37,7 +37,8 @@ final case class MinerDictionary(dictionary: AuthenticatedDictionaryView,
 
 object MinerDictionary {
   final val ADD_MINER_OP = 0.toByte
-  final val REMOVE_MINER_OP = 1.toByte
+  final val EVICT_MINER_OP = 1.toByte
+  final val REMOVE_MINER_OP = 2.toByte
 
   def initialState: MinerDictionary = {
     val dictionary = PlasmaDictionary.empty()

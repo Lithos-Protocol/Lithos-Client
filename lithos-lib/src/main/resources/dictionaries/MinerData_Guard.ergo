@@ -1,0 +1,46 @@
+{
+  // MinerData_Guard
+  // Value: CONST_MIN_DATA_BOX_AMNT
+  // The script a MinerData box actually carries. It binds the signer to the identity stamped in R5,
+  // then runs the real rules out of a context variable after checking their hash.
+  //
+  // Keeping it small keeps the box small, which matters because this is the one box in the protocol
+  // designed to sit untouched for years and Ergo prices collection by length.
+  //
+  // No op byte here: every MinerData path is the miner's own, so the signer script is unconditional
+  // and the logic dispatches for itself.
+
+  // REGISTERS
+  // R4: commitments, owned by the logic
+  // R5: the miner's hashed proposition bytes, 32 bytes. Read here because it is what the signer is
+  // bound against, and the logic conserves it on every path.
+
+  // CONSTANTS
+  // CONST_MINERDATA_LOGIC_HASH: blake2b256 of the serialized value bytes of the MinerData logic
+
+  // CONTEXT VARS
+  // CTX_SIGNER(0): value bytes of the miner's signing proposition
+  // CTX_OP(1): read by the logic, not here
+  // CTX_LOGIC(64): serialized value bytes of the MinerData logic
+
+  // ASSUMPTIONS - statements which can be assumed to be true due to other contracts enforcing them
+  // during creation of this UTXO
+  // MinerDictionary created this box: it pinned this script, the credential token, the initial
+  // commitment, R5, and refused R6. Every later path preserves all of it.
+  //
+  // DELIBERATE OMISSIONS - conditions left out on purpose
+  // Nothing here looks at the credential token, the value, the commitments or any output. All of that
+  // belongs to the logic, or to the dictionary on the paths it drives, and duplicating it would cost
+  // the bytes this contract exists to save.
+
+  val CTX_LOGIC = getVar[Coll[Byte]](64).get
+
+  val signerProp = executeFromVar[SigmaProp](0)
+
+  val authenticLogic = blake2b256( CTX_LOGIC ) == CONST_MINERDATA_LOGIC_HASH
+  // The identity this box speaks for. Binding it here is what stops one miner spending another's
+  // data box.
+  val authenticMiner = blake2b256( signerProp.propBytes ) == SELF.R5[Coll[Byte]].get
+
+  sigmaProp(authenticLogic && authenticMiner) && signerProp && executeFromVar[SigmaProp](64)
+}

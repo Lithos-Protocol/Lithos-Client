@@ -69,6 +69,40 @@ class MinerDictionaryReducerSpec extends AnyFlatSpec with Matchers {
       keys + org.bouncycastle.util.encoders.Hex.toHexString(key)) shouldEqual Set(foreign.hashedPropBytesHex)
   }
 
+  /**
+   * Eviction retires an entry without spending the miner's data box, so the reducer cannot take the
+   * identity from a signer the way removal used to. It reads the dictionary's own variable instead,
+   * and the two paths reduce identically because the tree does not care which one drove the spend.
+   */
+  it should "drop the entry on an eviction, which spends no data box" in {
+    val (_, _, wallet) = FakeNodeContext(numAddresses = 2)
+    val local = wallet.contract
+    val foreign = Contract.fromAddress(wallet.addresses(1))
+    val protocol = ReducerFixtures.protocol().copy(localMinerHash = local.hashedPropBytes)
+    val base = ReducerFixtures.emptyState()
+    val localAdd = ReducerFixtures.minerAdd(base.minerTree, local, protocol.minerDictionaryToken,
+      SyncFixtures.id(20001), SyncFixtures.id(20002), 100)
+    val first = BlockReducer.applyBlock(base,
+      BlockInfo(SyncFixtures.id(100), 100, Seq(localAdd), base.cursor.blockId), protocol).toOption.get.state
+    val foreignAdd = ReducerFixtures.minerAdd(first.minerTree, foreign, protocol.minerDictionaryToken,
+      SyncFixtures.id(20101), SyncFixtures.id(20102), 101)
+    val second = BlockReducer.applyBlock(first,
+      BlockInfo(SyncFixtures.id(101), 101, Seq(foreignAdd), first.cursor.blockId), protocol).toOption.get.state
+
+    val evict = ReducerFixtures.minerEvict(second.minerTree, foreign, protocol.minerDictionaryToken,
+      SyncFixtures.id(20301), 102)
+    evict.inputs.size shouldBe 1
+    val finalState = BlockReducer.applyBlock(second,
+      BlockInfo(SyncFixtures.id(102), 102, Seq(evict), second.cursor.blockId), protocol).toOption.get.state
+
+    // The evicted miner is gone; the local one is untouched and keeps its data token.
+    finalState.minerTree.dictionary.foldKeys(Set.empty[String])((keys, key) =>
+      keys + org.bouncycastle.util.encoders.Hex.toHexString(key)) shouldEqual Set(local.hashedPropBytesHex)
+    finalState.minerTree.hasMiner shouldBe true
+    finalState.dataBoxToken shouldEqual second.dataBoxToken
+    finalState.minerTree.numMiners shouldBe 1
+  }
+
   it should "enumerate every authenticated user leaf without retaining a second miner collection" in {
     // A non-power-of-two population leaves leaves at different depths, so slicing must visit both
     // those still embedded in the manifest and the detached subtrees.

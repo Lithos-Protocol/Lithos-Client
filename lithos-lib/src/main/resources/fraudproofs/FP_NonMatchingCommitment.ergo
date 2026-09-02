@@ -27,9 +27,9 @@
   // minerDictBox: MinerDictionary UTXO, authenticated by its singleton NFT. Needed because anyone can
   // send a box to the MinerData address, so the contract hash alone does not prove a data box is the
   // one this miner actually registered.
-  // minerDataBox: MinerData UTXO of the accused miner
+  // dataInputs(2): the accused miner's MinerData UTXO. Read only when the dictionary says they hold
+  // a live registration, so a proof against an unregistered or expired miner does not need one.
   val minerDictBox: Box = CONTEXT.dataInputs(1)
-
 
   // CONTEXT VARS
   // CTX_MINER_BYTES(0) - Hashed PropBytes of miner who committed fraud
@@ -41,31 +41,31 @@
   val CTX_REMOVE_PROOF     = getVarFromInput[Coll[Byte]](1, 2).getOrElse(Coll(0.toByte))
   val CTX_MD_LOOKUP_PROOF  = getVarFromInput[Coll[Byte]](1, 3).getOrElse(Coll(0.toByte))
 
-  // ASSUMPTIONS
-  // Evaluation authenticated this script and owns the rest of the transition: the box value, the bond
-  // ledger, the period and the block height. This proof owns the fraud predicate, the AVL removal,
-  // the miner count and the score.
-
   // CONSTANTS
-  // CONST_MINERDATA_PROPBYTES: Hashed prop bytes of MinerData contract
+  // CONST_MINERDATA_PROPBYTES: Hashed prop bytes of the MinerData guard
   // CONST_MD_ID: Id of MinerDictionary singleton NFT
   // CONST_NISP_WINDOW: NISP window, used here as the `r` delay a commitment waits before taking effect
   val CONST_SCORE_SIZE = 8
+  // A dictionary entry is [credentialId: 32][validUntil: 8].
+  val CONST_ENTRY_SIZE = 40
+  // Appended before the expiry is sliced out, so a malformed entry cannot make the read throw and
+  // take the proof down with it. entryWellFormed is what rejects such an entry; this keeps the read
+  // total, because a proof that cannot be built is a false negative.
+  val CONST_ENTRY_PAD = fromBase16("00000000000000000000000000000000000000000000000000000000000000000000000000000000")
 
   // ASSUMPTIONS - statements which can be assumed to be true due to other contracts enforcing them
   // currentBlock is the height the rollup's block was mined at, so the submission period ran over
   // [currentBlock, currentBlock + HOLDING_PERIOD] and this NISP was submitted somewhere inside it
-  // MinerDictionary maps hashedPropBytes -> minerDataTokenId, and mints exactly one such token per miner
-  // MinerData R4 holds 1 or 2 commitments, index 0 newest, and conserves R5 options on every path
-  // MinerData R5 options carries the miner's hashedPropBytes in its first 32 bytes
+  // MinerDictionary maps hashedPropBytes -> [credentialId][validUntil], mints exactly one credential
+  // per registration, and pins the total across every output so a credential means what it says
+  // MinerData R4 holds 1 or 2 commitments, index 0 newest, and conserves R5 on every path
+  // MinerData R5 carries the miner's hashedPropBytes, exactly 32 bytes
   // A commitment is in effect once height - commitHeight >= NISP_WINDOW, evaluated at the rollup's own
   // start height. This is the rule the client submits under, and it reads the same height this proof
   // does (LFSMTransformer.getCommitmentsForNISP, called from SubmissionHandler.sendNISPSubmission)
-  // MinerData spaces commitment changes far enough apart that the commitment in effect at currentBlock
-  // is still held in one of the two slots for as long as the rollup can be challenged. This is what
-  // lets the proof read current state and still speak about the past, and it is load-bearing. Loosen
-  // that spacing and a miner can evict the governing commitment by churning, which turns this proof
-  // into one that either declines or compares against the wrong score.
+  // MinerData spaces commitment changes by NISP_WINDOW + ROLLUP_LIFETIME, so the commitment in effect
+  // at currentBlock is still in one of the two slots for as long as the rollup can be challenged.
+  // That is what lets this proof read current state and still speak about the past.
   // The client stamps every submitted NISP with the score committed at currentBlock, so a NISP's score
   // is the governing commitment and not the score its shares happened to be mined under
   //
@@ -81,41 +81,63 @@
   val minerNISP = nispTree.get(CTX_MINER_BYTES, CTX_LOOKUP_PROOF).get
   val score: Long = getScore(minerNISP)
 
-  // The dictionary is the only thing that tells us which data box is really this miner's, so the
-  // token it recorded at registration must be the token the data box in front of us is carrying.
+  // The dictionary is the only thing that says which data box is this miner's, and for how long. Its
+  // entry carries the credential the box must hold and the height it stops being honoured.
   val minerDataTree: AvlTree = minerDictBox.R4[AvlTree].get
-  val registeredToken = minerDataTree.get(CTX_MINER_BYTES, CTX_MD_LOOKUP_PROOF)
+  val entryOpt = minerDataTree.get(CTX_MINER_BYTES, CTX_MD_LOOKUP_PROOF)
   val authenticDictionary = minerDictBox.tokens(0)._1 == CONST_MD_ID
 
-  if(registeredToken.isDefined){
-    // MinerData box only defined if it actually exists.
+  val entry = entryOpt.getOrElse(CONST_ENTRY_PAD)
+  val entryWellFormed = entry.size == CONST_ENTRY_SIZE
+  val credentialId = entry.slice(0, 32)
+  val validUntil = byteArrayToLong(entry.append(CONST_ENTRY_PAD).slice(32, 40))
+
+  // A registration expires CONST_DATA_LIFETIME blocks after it is made and is never renewed. An
+  // expired one counts as having no registration. This means that by the time storage rent kicks in,
+  // this comparison already refuses to honour it. Anchored at currentBlock so that the commitment is
+  // is compared in reference to the shares the miner was mining before the block and the current rollup
+  // were made.
+  val registrationLive = entryOpt.isDefined && entryWellFormed && currentBlock < validUntil
+
+  val minerRemoved = {
+    val removeTree = nispTree.remove(Coll(CTX_MINER_BYTES), CTX_REMOVE_PROOF).get
+    removeTree == nextTree
+  }
+
+  val changedRegisters = allOf(
+    Coll(
+      minerRemoved,
+      nextMiners      == currentMiners - 1,
+      nextScore       == totalScore - score.toBigInt
+    )
+  )
+
+  if(registrationLive){
+    // The MinerData box is only read on this branch, so a proof against an unregistered or expired
+    // miner needs two data inputs rather than three.
     val minerDataBox: Box = CONTEXT.dataInputs(2)
     val commitments: Coll[(Int, Long)] = minerDataBox.R4[Coll[(Int, Long)]].get
-    val minerHash: Coll[Byte] = minerDataBox.R5[Coll[Byte]].get.slice(0, 32)
+    val minerHash: Coll[Byte] = minerDataBox.R5[Coll[Byte]].get
 
-
+    // Anyone can send a box to the MinerData address, so the script hash alone proves nothing. The
+    // credential the dictionary recorded is what makes this box the miner's, and the dictionary is
+    // authenticated by its own NFT.
     val authenticDataBox = allOf(
       Coll(
         blake2b256( minerDataBox.propositionBytes ) == CONST_MINERDATA_PROPBYTES,
-        minerDataBox.tokens(0)._1 == registeredToken.get,
+        minerDataBox.tokens(0)._1 == credentialId,
         minerHash == CTX_MINER_BYTES
       )
     )
 
-    // The commitment that governs a NISP is the one in effect at the block the rollup was created for,
-    // not the one in effect whenever the miner got around to submitting. currentBlock is already on-chain
-    // in R8, so the governing commitment is fully determined here, and the miner has no say in it. Were
-    // this anchored on submission instead, a miner could sit on a NISP and submit it once a new
-    // commitment took effect, picking whichever of the two scores suited the shares they ended up with.
-    // This is the same rule the client applies, evaluated at currentBlock rather than the current height.
-    // A commitment set after currentBlock always carries a commit height beyond it, so it can never
-    // satisfy the first branch. That is what stops a miner from submitting any score they like and then
-    // setting a matching commitment during evaluation to escape this proof.
-    // A miner holding only their registration commitment, which had not yet taken effect at currentBlock,
-    // had no commitment in effect to submit under at all. The fallback score is one no NISP can carry,
-    // since the holding contract only accepts a score above zero, so any submission in that state is
-    // fraudulent. Returning the registration commitment instead would let a miner submit at a difficulty
-    // they picked moments earlier, skipping the notice period that makes a commitment binding.
+    // Governed by the commitment in effect at the rollup's own block, not whenever the miner got
+    // around to submitting. currentBlock is on-chain, so the miner has no say in which one applies.
+    // Anchoring on submission instead would let them sit on a NISP until a new commitment took effect
+    // and pick whichever score suited their shares.
+    //
+    // The -1 fallback covers a miner holding only a registration commitment that had not taken effect
+    // yet: they had nothing to submit under. No NISP can carry -1, since Holding requires a positive
+    // score, so any submission in that state is fraudulent.
     val committedScore = {
       if(currentBlock - commitments(0)._1.toLong >= CONST_NISP_WINDOW){
         commitments(0)._2
@@ -132,37 +154,13 @@
       )
     )
 
-    val minerRemoved = {
-      val removeTree = nispTree.remove(Coll(CTX_MINER_BYTES), CTX_REMOVE_PROOF).get
-      removeTree == nextTree
-    }
-
-    val changedRegisters = allOf(
-      Coll(
-        minerRemoved,
-        nextMiners      == currentMiners - 1,
-        nextScore       == totalScore - score.toBigInt
-      )
-    )
-
     sigmaProp(fraudExists && changedRegisters)
   }else{
-    // If the dictionary is authentic and we didn't find the miner in it, then by default
-    // this is a fraudulent NISP
-    val fraudExists = authenticDictionary
-
-    val minerRemoved = {
-      val removeTree = nispTree.remove(Coll(CTX_MINER_BYTES), CTX_REMOVE_PROOF).get
-      removeTree == nextTree
-    }
-
-    val changedRegisters = allOf(
-      Coll(
-        minerRemoved,
-        nextMiners      == currentMiners - 1,
-        nextScore       == totalScore - score.toBigInt
-      )
-    )
-    sigmaProp(fraudExists && changedRegisters)
+    // No entry, a malformed one, or one already expired when this rollup's block was mined. All three
+    // mean nothing on chain said what this miner could claim, so the submission is fraudulent.
+    //
+    // Still gated on authenticDictionary: without it an attacker passes a box holding an empty tree
+    // as dataInputs(1), forces the lookup to miss, and removes an arbitrary honest miner.
+    sigmaProp(authenticDictionary && changedRegisters)
   }
 }

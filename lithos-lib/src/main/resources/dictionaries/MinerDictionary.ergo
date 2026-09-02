@@ -1,129 +1,252 @@
 {
-  // MinerDictionary Contract
-  // Value: 0.001 ERG
-  // MinerDictionary is a dictionary linking hashed prop bytes of miners to their data box, which holds diff commitments
-  // along with balance information
+  // MinerDictionary
+  // Value: singleton reserve, conserved on every path
+  // Maps a miner identity to the credential token naming their MinerData box, and to the height that
+  // credential stops being usable. One box, one NFT, three operations.
+  //
+  // Holding the credential is what makes a box the miner's real MinerData, because a data box is only
+  // ever read as a data input and a data input's own script never runs. The mint is therefore pinned
+  // across every output, not just the one being built.
+  //
+  // A registration is not renewable. It expires and the miner registers again, which is what keeps a
+  // leaked credential worthless: the only way one leaves a legitimate box is Ergo's storage collector,
+  // and that cannot act until CONST_EVICT_DELAY blocks after the entry has already expired.
+
   // REGISTERS
-  // R4: MinerDataTree, initially, an empty AVL Tree. AVL Tree of ( hashedPropBytes -> minerDataTokenId )
-
-  val minerDataTree: AvlTree = SELF.R4[AvlTree].get
-  // TODO: Use executeFromVar instead of SigmaProp for CTX_SIGNER, to allow for more composability
-
-  // CONTEXT VARS
-  // CTX_OP(0): Operation performed on the tree
-
-  val CTX_OP      = getVar[Byte](0).get
-
+  // R4: minerTree - AVL tree of ( minerHash -> [credentialId: 32][validUntil: 8] )
+  val minerTree: AvlTree = SELF.R4[AvlTree].get
 
   // CONSTANTS
-  // CONST_MINERDATA_PROPBYTES: Hashed prop bytes of miner data contract
-  // CONST_MIN_DATA_BOX_AMNT: Minimum amount of ERG required for data box
-  // CONST_NISP_WINDOW: NISP Window used as `r` parameter, min number of rounds before commitment may take affect
-  val addMinerOp = CTX_OP == 0.toByte
-  val removeMinerOp = CTX_OP == 1.toByte
+  // CONST_MD_ID: this box's own singleton NFT
+  // CONST_MINERDATA_PROPBYTES: hashed proposition bytes of the MinerData guard
+  // CONST_MIN_DATA_BOX_AMNT: the ERG a MinerData box holds
+  // CONST_NISP_WINDOW: blocks a commitment waits before it takes effect
+  // CONST_DATA_LIFETIME: how long a registration lasts
+  // CONST_EVICT_DELAY: the gap between an entry expiring and its box becoming collectible
+  // CONST_REGISTER_SLACK: how far below the full lifetime a supplied expiry may sit
+  val CONST_ENTRY_SIZE = 40
+
+  // CONTEXT VARS
+  // CTX_OP(0): 0 register, 1 evict, 2 remove
+  //
+  // Slot 1 is the signer script and is read by executeFromVar, so nothing else may ever occupy it.
+  // Substitution covers the whole tree before any branch runs, so ordinary data in that slot is
+  // deserialized as a script on every path. Evict and remove start at slot 5 for that reason.
+  val CTX_OP = getVar[Byte](0).getOrElse(-1.toByte)
 
   // NEXT VALUES
-  val nextUTXO   = OUTPUTS(0)
-  val nextTree   = nextUTXO.R4[AvlTree].get
+  val nextUTXO = OUTPUTS(0)
+  val nextTree = nextUTXO.R4[AvlTree].get
 
-  // Spending Path 1: MinerData UTXO is created and added to the tree
-  if(addMinerOp){
-    // CONTEXT VARS
-    // CTX_SIGNER(1): Miner performing the operation
-    // CTX_MINER_DATA(2): Insertion data of miner, should be hashedPropBytes of Signer -> tokenId of new Data box
-    // CTX_INSERT_PROOF(3): Insertion proof for new miner into minerDataTree
-    val CTX_SIGNER  = getVar[SigmaProp](1).get
-    val CTX_MINER_DATA  = getVar[(Coll[Byte], Coll[Byte])](2).get
-    val CTX_INSERT_PROOF  = getVar[Coll[Byte]](3).get
-    val authenticMiner  = blake2b256( CTX_SIGNER.propBytes ) == CTX_MINER_DATA._1
-    val validUTXO       = nextUTXO.propositionBytes == SELF.propositionBytes
-    val valueConserved  = nextUTXO.value == SELF.value
-    val tokensConserved = nextUTXO.tokens == SELF.tokens
-    val onlyOne = SELF.id == INPUTS(0).id
-    val newDataBox = OUTPUTS(1)
+  // ASSUMPTIONS - statements which can be assumed to be true due to other contracts enforcing them
+  // during creation of this UTXO
+  // SELF carries the dictionary singleton NFT and R4 is an all-operations AVL tree with 32-byte keys.
+  // The MinerData guard requires the miner's signature on every path it has, so remove reads identity
+  // off the co-spent data box rather than executing a signer script here.
+  //
+  // DELIBERATE OMISSIONS - conditions left out on purpose
+  // No renewal. An expiring miner spends remove and then register again. A renewal would either leave
+  // the commitments alone, making it a pure freshness operation with nothing left to protect, or move
+  // them mid-evaluation, which is exactly what a fraud proof is comparing against.
+  // Eviction takes no MinerData box and pays nobody. The miner is the one who wants their identity
+  // back, so no incentive is needed. It races a miner removing cleanly, and an evicted miner forfeits
+  // the dust in a box that was collectible anyway.
 
-    val tokenAddedToTree = CTX_MINER_DATA._2 == SELF.id
-    val dataBoxMade = blake2b256(newDataBox.propositionBytes) == CONST_MINERDATA_PROPBYTES
-    val tokenAdded = newDataBox.tokens(0)._1 == SELF.id
-    val oneTokenMade = newDataBox.tokens.size == 1 && newDataBox.tokens(0)._2 == 1
-
-    val commitmentsDefined = newDataBox.R4[Coll[(Int, Long)]].get.size == 1
-    val validCommitHeight  =  newDataBox.R4[Coll[(Int, Long)]].get(0)._1 - HEIGHT >= CONST_NISP_WINDOW
-    val zeroBalance   = newDataBox.value == CONST_MIN_DATA_BOX_AMNT // 0.001 ERG is min amount for data box
-    val optionsHasPropBytesHash = newDataBox.R5[Coll[Byte]].get.slice(0, 32) == CTX_MINER_DATA._1
-    val treeUpdated = {
-      val insertTree = minerDataTree.insert(Coll(CTX_MINER_DATA), CTX_INSERT_PROOF).get
-      insertTree.digest == nextTree.digest
-    }
-
-
-    val statements = allOf(
-      Coll(
-        onlyOne,
-        authenticMiner,
-        validUTXO,
-        valueConserved,
-        tokensConserved,
-        tokenAddedToTree,
-        dataBoxMade,
-        tokenAdded,
-        oneTokenMade,
-        commitmentsDefined,
-        validCommitHeight,
-        zeroBalance,
-        optionsHasPropBytesHash,
-        treeUpdated
-      )
-    )
-
-    sigmaProp(statements) && CTX_SIGNER
-    // Spending Path 2: Miner Data UTXO is spent and token is removed from tree
-  }else if(removeMinerOp){
-    val dataBox = INPUTS(1)
-    // Signer is always ctxvar 1 of data box
-    val CTX_SIGNER         = getVarFromInput[SigmaProp](1, 1).get
-    val CTX_LOOKUP_PROOF   = getVarFromInput[Coll[Byte]](1, 2).get
-    val CTX_REMOVAL_PROOF  = getVarFromInput[Coll[Byte]](1, 3).get
-    val minerHash = blake2b256(CTX_SIGNER.propBytes)
-    // Authenticity of miner using the correct data box is checked in the data box contract
-    val validUTXO       = nextUTXO.propositionBytes == SELF.propositionBytes
-    val valueConserved  = nextUTXO.value == SELF.value
-    val tokensConserved = nextUTXO.tokens == SELF.tokens
-    val onlyOne = SELF.id == INPUTS(0).id
-
-    val lookup = minerDataTree.get(minerHash, CTX_LOOKUP_PROOF)
-    val correctToken = dataBox.tokens(0)._1 == lookup.get
-
-    val dataBoxRemoved = OUTPUTS.forall{
-      (o: Box) =>
-        val noDataBoxToken = !(o.tokens.exists{
-          (t: (Coll[Byte], Long)) =>
-            t._1 == dataBox.tokens(0)._1
+  // Ergo lets a transaction spending this box as INPUTS(0) mint any amount of the new token, so the
+  // registration path pins the total and the removal path pins the burn.
+  def totalInOutputs(tokenId: Coll[Byte]): Long = {
+    OUTPUTS.fold(0L, {
+      (acc: Long, b: Box) =>
+        val heldInBox = b.tokens.fold(0L, {
+          (z: Long, t: (Coll[Byte], Long)) => if(t._1 == tokenId) z + t._2 else z
         })
-        val noDataBoxOutput = blake2b256(o.propositionBytes) != CONST_MINERDATA_PROPBYTES
-        noDataBoxOutput && noDataBoxToken
-    }
+        acc + heldInBox
+    })
+  }
 
+  val onlyOne         = SELF.id == INPUTS(0).id
+  val authenticSelf   = SELF.tokens(0)._1 == CONST_MD_ID
+  val validUTXO       = nextUTXO.propositionBytes == SELF.propositionBytes
+  val valueConserved  = nextUTXO.value == SELF.value
+  val tokensConserved = nextUTXO.tokens == SELF.tokens
+  // R4 is the only register used here. Registers are contiguous, so refusing R5 refuses the whole
+  // tail and the successor's length stays bounded by its types.
+  val noExtraRegisters = nextUTXO.R5[Coll[Byte]].isDefined == false
 
+  val singletonConserved = allOf(
+    Coll(
+      onlyOne,
+      authenticSelf,
+      validUTXO,
+      valueConserved,
+      tokensConserved,
+      noExtraRegisters
+    )
+  )
+
+  if(CTX_OP == 0.toByte){
+    // Spending Path 1: register a miner, minting their credential and creating their MinerData box
+    // CTX_SIGNER(1): value bytes of the miner's signing proposition, executed here
+    // CTX_SCORE(2): the difficulty being committed to
+    // CTX_COMMIT_HEIGHT(3): height that commitment takes effect
+    // CTX_INSERT_PROOF(4): insertion proof for the new entry
+    // CTX_VALID_UNTIL(8): the expiry going into the entry. Supplied rather than derived from HEIGHT,
+    // because the entry the builder proves has to be the entry this contract inserts, and a derived
+    // one changes if the transaction lands late. Bounded below instead.
+    val CTX_SCORE         = getVar[Long](2).getOrElse(-1L)
+    val CTX_COMMIT_HEIGHT = getVar[Int](3).getOrElse(-1)
+    val CTX_INSERT_PROOF  = getVar[Coll[Byte]](4).getOrElse(Coll(0.toByte))
+    val CTX_VALID_UNTIL   = getVar[Long](8).getOrElse(-1L)
+
+    val signerProp = executeFromVar[SigmaProp](1)
+    val minerHash  = blake2b256( signerProp.propBytes )
+    // A token minted here takes the id of INPUTS(0), which onlyOne pins to this box.
+    val credentialId = SELF.id
+    val dataBox      = OUTPUTS(1)
+    val entry        = credentialId.append(longToByteArray(CTX_VALID_UNTIL))
+
+    val dataBoxMade    = blake2b256( dataBox.propositionBytes ) == CONST_MINERDATA_PROPBYTES
+    val dataBoxFunded  = dataBox.value == CONST_MIN_DATA_BOX_AMNT
+    val credentialHeld = dataBox.tokens.size == 1 &&
+                         dataBox.tokens(0)._1 == credentialId &&
+                         dataBox.tokens(0)._2 == 1L
+    // What makes the credential a credential. Without it one authorised registration mints as many
+    // units as the builder likes, and holding one stops meaning anything.
+    val mintPinned     = totalInOutputs(credentialId) == 1L
+
+    val commitmentSet  = dataBox.R4[Coll[(Int, Long)]].get == Coll((CTX_COMMIT_HEIGHT, CTX_SCORE))
+    val scorePositive  = CTX_SCORE > 0L
+    // The notice period that makes a commitment binding: it cannot take effect immediately.
+    val noticeGiven    = CTX_COMMIT_HEIGHT.toLong - HEIGHT.toLong >= CONST_NISP_WINDOW
+    // minerHash is a blake2b256 digest, so this pins the length for free.
+    val identityStamped = dataBox.R5[Coll[Byte]].get == minerHash
+    val dataBoxBounded  = dataBox.R6[Coll[Byte]].isDefined == false
+    // Collection falls CONST_STORAGE_PERIOD after the creation height the builder declares, so an
+    // unbounded one hands out a box collectible while its entry is live. A credential in a collector's
+    // hands sits in a box that is never spent, where the guard cannot stop it naming any commitment.
+    val notCollectibleEarly = dataBox.creationInfo._1.toLong > HEIGHT.toLong - CONST_EVICT_DELAY
+
+    // Nobody buys a longer registration than the schedule allows, which is what keeps expiry ahead of
+    // collection. The lower bound is a sanity band: a short expiry harms only its owner, and the width
+    // of the band is how long a registration may wait in the mempool before it must be rebuilt.
+    val expiryScheduled = CTX_VALID_UNTIL <= HEIGHT.toLong + CONST_DATA_LIFETIME
+    val expiryFresh     = CTX_VALID_UNTIL >= HEIGHT.toLong + CONST_DATA_LIFETIME - CONST_REGISTER_SLACK
 
     val treeUpdated = {
-      val removeTree = minerDataTree.remove(Coll(minerHash), CTX_REMOVAL_PROOF).get
-      removeTree.digest == nextTree.digest
+      val insertTree = minerTree.insert(Coll((minerHash, entry)), CTX_INSERT_PROOF).get
+      insertTree == nextTree
     }
-
 
     val statements = allOf(
       Coll(
-        onlyOne,
-        validUTXO,
-        valueConserved,
-        tokensConserved,
-        dataBoxRemoved,
+        singletonConserved,
+        dataBoxMade,
+        dataBoxFunded,
+        credentialHeld,
+        mintPinned,
+        commitmentSet,
+        scorePositive,
+        noticeGiven,
+        identityStamped,
+        dataBoxBounded,
+        notCollectibleEarly,
+        expiryScheduled,
+        expiryFresh,
         treeUpdated
       )
     )
 
-    sigmaProp(statements) && CTX_SIGNER
+    sigmaProp(statements) && signerProp
+
+  }else if(CTX_OP == 1.toByte){
+    // Spending Path 2: evict an entry long past its expiry. Permissionless, and takes no MinerData
+    // box, because the box this entry names may no longer exist. Being collected for storage rent is
+    // the case that leaves an identity unable to remove itself and so unable to register again.
+    // CTX_MINER_HASH(5): identity being evicted
+    // CTX_LOOKUP_PROOF(6): lookup proof for the entry
+    // CTX_REMOVE_PROOF(7): removal proof for the entry
+    val CTX_MINER_HASH   = getVar[Coll[Byte]](5).getOrElse(Coll(0.toByte))
+    val CTX_LOOKUP_PROOF = getVar[Coll[Byte]](6).getOrElse(Coll(0.toByte))
+    val CTX_REMOVE_PROOF = getVar[Coll[Byte]](7).getOrElse(Coll(0.toByte))
+
+    val oldEntryOpt = minerTree.get(CTX_MINER_HASH, CTX_LOOKUP_PROOF)
+
+    if(oldEntryOpt.isDefined){
+      val oldEntry = oldEntryOpt.get
+      val wellFormed = oldEntry.size == CONST_ENTRY_SIZE
+
+      // The wait is what makes this safe to do to someone else. Any rollup still in evaluation now was
+      // mined after the entry expired, so it was already judged against an expired registration.
+      // Retiring an entry sooner would retroactively turn a registered miner into a non-member.
+      val entryValidUntil = byteArrayToLong(oldEntry.slice(32, 40))
+      val longExpired = HEIGHT.toLong > entryValidUntil + CONST_EVICT_DELAY
+
+      val treeUpdated = {
+        val removeTree = minerTree.remove(Coll(CTX_MINER_HASH), CTX_REMOVE_PROOF).get
+        removeTree == nextTree
+      }
+
+      sigmaProp(allOf(Coll(singletonConserved, wellFormed, longExpired, treeUpdated)))
+    }else{
+      sigmaProp(false)
+    }
+
+  }else if(CTX_OP == 2.toByte){
+    // Spending Path 3: the miner removes themselves, destroying the data box and burning the
+    // credential. Also the first half of re-registering, since the tree key is the miner's identity
+    // and an insert on a key already present throws.
+    // CTX_MINER_HASH(5): identity being removed
+    // CTX_LOOKUP_PROOF(6): lookup proof for the entry
+    // CTX_REMOVE_PROOF(7): removal proof for the entry
+    val CTX_MINER_HASH   = getVar[Coll[Byte]](5).getOrElse(Coll(0.toByte))
+    val CTX_LOOKUP_PROOF = getVar[Coll[Byte]](6).getOrElse(Coll(0.toByte))
+    val CTX_REMOVE_PROOF = getVar[Coll[Byte]](7).getOrElse(Coll(0.toByte))
+
+    val oldEntryOpt = minerTree.get(CTX_MINER_HASH, CTX_LOOKUP_PROOF)
+
+    if(oldEntryOpt.isDefined){
+      val oldEntry     = oldEntryOpt.get
+      val credentialId = oldEntry.slice(0, 32)
+      val dataBox      = INPUTS(1)
+
+      // The data box is spent, so its own guard runs and is what proves the miner signed. Binding its
+      // R5 to the key being removed is what stops one miner removing another's entry.
+      val authenticData = allOf(
+        Coll(
+          oldEntry.size == CONST_ENTRY_SIZE,
+          blake2b256( dataBox.propositionBytes ) == CONST_MINERDATA_PROPBYTES,
+          dataBox.tokens.getOrElse(0, (Coll(0.toByte), 0L))._1 == credentialId,
+          dataBox.R5[Coll[Byte]].get == CTX_MINER_HASH
+        )
+      )
+
+      // Burned rather than moved. A surviving unit outside a data box is a working claim to be this
+      // miner for as long as the entry is live, since a fraud proof authenticates on the token alone.
+      val credentialBurned = totalInOutputs(credentialId) == 0L
+      val noDataBoxLeft = OUTPUTS.forall{
+        (o: Box) => blake2b256( o.propositionBytes ) != CONST_MINERDATA_PROPBYTES
+      }
+
+      val treeUpdated = {
+        val removeTree = minerTree.remove(Coll(CTX_MINER_HASH), CTX_REMOVE_PROOF).get
+        removeTree == nextTree
+      }
+
+      val statements = allOf(
+        Coll(
+          singletonConserved,
+          authenticData,
+          credentialBurned,
+          noDataBoxLeft,
+          treeUpdated
+        )
+      )
+
+      sigmaProp(statements)
+    }else{
+      sigmaProp(false)
+    }
+
   }else{
     sigmaProp(false)
   }

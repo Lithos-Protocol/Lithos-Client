@@ -152,8 +152,12 @@ class CommitmentTransactionsSpec
   /** The current height, which every fixture's commitment heights are chosen relative to. */
   private lazy val height: Int = FakeNodeContext()._1.getClient.execute(_.getHeight)
 
+  /**
+   * A commitment old enough both to be in force and to be replaceable. The contract spaces changes by
+   * a full rollup lifetime past the window, so anything younger is readable but cannot be moved.
+   */
   private def inForce(score: Long): Seq[(Int, Long)] =
-    Seq((height - LFSMHelpers.NISP_WINDOW.toInt - 1) -> score)
+    Seq((height - (LFSMHelpers.NISP_WINDOW + LFSMHelpers.ROLLUP_LIFETIME).toInt - 1) -> score)
 
   private def pending(nextScore: Long, oldScore: Long): Seq[(Int, Long)] =
     Seq(height -> nextScore, (height - 1000) -> oldScore)

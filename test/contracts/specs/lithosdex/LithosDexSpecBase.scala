@@ -51,34 +51,6 @@ object LithosDexSpecBase {
     }
   }
 
-  /**
-   * The same wiring over the `CLAUDE_` sources, so a proposal runs through every existing scenario
-   * before it is promoted. Mirrors `lithosdex.contracts.LithosDexContracts`: the logic is named by the
-   * guard, the guard by the pool, and the vault and pool name each other by NFT.
-   */
-  def compiledProposed(ctx: BlockchainContext): LDSet = synchronized {
-    proposed.getOrElse {
-      def script(n: String): String = ScriptGenerator.mkLithosDexScript("CLAUDE_" + n)
-      val logic = Contract.fromErgoScript(ctx.getNetworkType, ConstantsBuilder.create()
-        .item("CONST_POOL_NFT", Colls.fromArray(poolNFT.getBytes))
-        .item("CONST_VAULT_NFT", Colls.fromArray(vaultNFT.getBytes))
-        .build(), script("LD_Provision"), Seq.empty[Mutator])
-      val guard = Contract.fromErgoScript(ctx.getNetworkType, ConstantsBuilder.create()
-        .item("CONST_PROVISION_LOGIC_HASH", Colls.fromArray(logic.hashedValueBytes))
-        .build(), ScriptGenerator.mkLithosDexScript("LD_Provision_Guard"), Seq.empty[Mutator])
-      val vault = Contract.fromErgoScript(ctx.getNetworkType, ConstantsBuilder.create()
-        .item("CONST_POOL_NFT", Colls.fromArray(poolNFT.getBytes))
-        .item("CONST_PROV_TOKEN", Colls.fromArray(provToken.getBytes))
-        .build(), script("LD_FeeVault"), Seq.empty[Mutator])
-      val pool = Contract.fromErgoScript(ctx.getNetworkType, ConstantsBuilder.create()
-        .item("CONST_VAULT_NFT", Colls.fromArray(vaultNFT.getBytes))
-        .item("CONST_PROVISION_GUARD_HASH", Colls.fromArray(guard.hashedPropBytes))
-        .build(), script("LD_LiquidityPool"), Seq.empty[Mutator])
-      val all = LDSet(logic, guard, vault, pool)
-      proposed = Some(all)
-      all
-    }
-  }
 }
 
 /**
