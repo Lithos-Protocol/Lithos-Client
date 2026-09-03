@@ -62,7 +62,9 @@
       (a: UnsignedBigInt, b: Int) =>
         a.multiplyMod(base, CONST_P) // Should not overflow
     })
-    cubed + 7 // 7 mod P is just 7
+    // Reduced rather than added plainly: cubed can land within 7 of P, where an unreduced sum sits
+    // above the field and stops equalling the reduced LHS for a point that is genuinely on the curve.
+    cubed.plusMod(7.toBigInt.toUnsigned, CONST_P)
   }
   // Calculate LHS of secp256k1 curve equation using modular exponentiation
   // Y^2 mod P

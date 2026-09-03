@@ -32,20 +32,21 @@
   // CONSTANTS
   // Constant sizes for various parts of NISPs, inserted at compile time from LFSMHelpers
   //  CONST_TX_PROOF_MIN      = 502   = 2 + CONST_TX_SIZE_MIN + CONST_COLLAT_BOX_MIN
-  //  CONST_TX_PROOF_MAX      = 2174  = worst honest txProof 2074, plus a 100 byte margin
+  //  CONST_TX_PROOF_MAX      = 2174  = max amount of bytes a tx proof can be. Check explanation below
   //  CONST_TX_SIZE_MIN       = 450
   //  CONST_COLLAT_BOX_MIN    = 50
   //  CONST_NUM_LVLS_MAX      = 16
   //
   // CONST_TX_PROOF_MAX is the most critical number for NISP sizing. The transaction proof (not the merkle proof
   // of transaction inclusion) is the genesis tx bytes along with the collateral box used in the tx.
-  // Current sizing indicates an honest tx size of 962 bytes using minimal inputs and largest vlq sizes for nums.
+  // Current sizing indicates an honest tx size of 731 bytes using minimal inputs and largest vlq sizes for nums.
   // It should be noted that attacks focusing on bloating NISP values can only work on things the miner does NOT control
   // For example, a miner chooses their own change output for the finder reward, so using a large script there
   // would only hurt them and make their transactions count as fraud. NISP bloat attacks generally only work on things
   // the miner has to include and can't control, like collateral box size. Collateral box size with max vlqs is roughly
-  // 1110 bytes. Combined with the genesis tx size above, that gives us 2074. We add 100 to it for some extra room,
-  // so we get 2174 bytes. The additional bytes may come from additional inputs or holding contract changes.
+  // 1250 bytes. Combined with the genesis tx size above, that gives us 1981 bytes for an honest miner. The current value
+  // of 2174 therefore leaves us with 193 potential extra bytes per supershare. That can be used as room for
+  // extensions (e.g adding a Coll[Byte] on R9 of the holding output)
 
   // First 130 bytes of header which do not vary in size, after this comes vlq encoded ULong for timestamp
   // Includes version, parentId, ADProofsRoot, stateRoot, and transactionsRoot
@@ -65,6 +66,11 @@
   // Practically speaking, we know that height is >= 3 bytes on both testnet and mainnet
   // and we know that timestamp will always be >= 6 bytes from current point in time
   val CONST_SUPER_SHARE_MIN   = 794
+  // Oldest block version an honest share can carry. Anything below this is no longer mined.
+  val CONST_MIN_HEADER_VERSION = 4.toByte
+  // Distance back from the end of a header to the byte counting its unparsed bytes: the nonce is 8,
+  // the miner key 33, and the count sits one before those.
+  val CONST_UNPARSED_OFFSET    = 42
 
   // Helper Methods
 
@@ -92,8 +98,11 @@
       (vlqSize._1, false)
     else if(vlqSize._1 > 5) // Max of 5 bytes allowed for UInt
       (vlqSize._1, false)
-    else if(vlqBytes.slice(0, 4).forall{(b: Byte) => b == -1}){
-      // If bytes are near max value, then we should verify last byte is less than or equal to 7 (Int.MAX)
+    else if(vlqSize._1 == 5){
+      // A five byte VLQ carries its top payload in byte 4, shifted 28 places, so anything above 7
+      // there decodes past Int.MAX. The header parser narrows the height with toIntExact and throws
+      // an exception. The bound enforced by the boolean in idx 1 of the tuple applies
+      // to every five byte VLQ, not just to those with leading bytes 0xFF.
       (vlqSize._1, vlqBytes(4) > 0.toByte && vlqBytes(4) <= 7.toByte)
     }else
       (vlqSize._1, true)
@@ -183,6 +192,11 @@
               )
               val numLevels: Byte = shareBytes(startIdx + CONST_N_SIZE + headerSize + 2)
               val totalLevels = numLevels.toInt * CONST_LEVEL_SIZE
+              // A header carrying unparsed bytes is longer than the fixed 45 byte suffix accounts for,
+              // so we require it to be set to 0 (which is standard serialization format for the node)
+              val version = shareBytes(startIdx + CONST_N_SIZE)
+              val unparsedSize = shareBytes(startIdx + CONST_N_SIZE + headerSize - CONST_UNPARSED_OFFSET)
+              val validVersion = version >= CONST_MIN_HEADER_VERSION && unparsedSize == 0.toByte
               val end = startIdx + CONST_N_SIZE + headerSize + 3 + txProofSize + totalLevels + CONST_Y_COORD_SIZE
               val validNumLevels = numLevels > 0  && numLevels <= CONST_NUM_LVLS_MAX // (0 - 16]
               val validTxProofSize = txProofSize >= CONST_TX_PROOF_MIN && txProofSize < CONST_TX_PROOF_MAX // [502 - 2174)
@@ -194,7 +208,7 @@
                 else
                   shareBytes.size - end >= CONST_SUPER_SHARE_MIN // At least 794 more bytes to read next iter
               }
-              val predicates = validNumLevels && validTxProofSize && validTxSize && canReadNext
+              val predicates = validNumLevels && validTxProofSize && validTxSize && canReadNext && validVersion
                // If we got here, VLQs are all verified, and we are just checking that NISP formatting of txProofSize and numLevels is correct
               (end, notFraudulent && predicates)
             }else{

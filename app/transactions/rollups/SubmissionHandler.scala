@@ -638,9 +638,14 @@ class SubmissionHandler @Inject()(config: Configuration, nodeContext: NodeContex
 
           val initOutputs = initialTxInfo.map(initialTxOutputs(stub, _))
           val feeOutputs = mkFeeOutputs(stub, initOutputs)
+          // Rebuilt rather than cached, so the dictionary has to be re-read here too. Only
+          // FP_NonMatchingCommitment reads it, and it is the accused's own miner hash that decides
+          // whether their MinerData box is needed at all.
+          val commitment = CommitmentSources.load(ctx, nodeConfig.getNodeApi, syncHandler,
+            Seq(stub.fpInfo.get._1))
           val sTx = RollupTransactions.genFraudProofTransform(ctx, wallet, latestState.inputUTXO,
             rollupWalletInputs(stub, initialTxInfo), latestState, feeOutputs, stub.fpInfo.get._1,
-            stub.fpInfo.get._2)
+            stub.fpInfo.get._2, commitment)
           if (initOutputs.isDefined)
             updateFeeMap(sTx, initOutputs.get._2)
           val txId = submitSigned(ctx, sTx, initialTxInfo.isDefined, stub.rollupBlockId,

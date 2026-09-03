@@ -1,6 +1,6 @@
 package transactions.rollups
 
-import evaluation.Evaluator
+import evaluation.{CommitmentSource, Evaluator}
 import lfsm.states.RollupInfoState
 import lfsm.{LFSMHelpers, LFSMPhase, RollupProtocol}
 import mutations.{BoxLoader, NodeWallet}
@@ -229,6 +229,9 @@ object RollupTransactions {
    *
    * @param miner             hashed prop bytes of the miner to slash
    * @param fpContractHashHex which fraud proof contract to use, as found during evaluation
+   * @param commitment        Miner Dictionary state, needed only when the chosen proof is
+   *                          `FP_NonMatchingCommitment`. Absent makes that rebuild fail rather than
+   *                          emit a transaction whose data inputs the contract would index past
    */
   def genFraudProofTransform(ctx: BlockchainContext,
                        wallet: NodeWallet,
@@ -237,14 +240,15 @@ object RollupTransactions {
                        latestState: LatestRollup,
                        feeOutputs: Seq[UTXO],
                        miner: Array[Byte],
-                       fpContractHashHex: String): SignedTransaction = {
+                       fpContractHashHex: String,
+                       commitment: Option[CommitmentSource] = None): SignedTransaction = {
 
     // Compiled once for the JVM's life. This runs inside `attemptTx`, which retries up to five
     // times, so compiling the seven proofs per attempt was 35 compilations for one slash.
     val fpContracts = ProtocolContracts.fraudProofs(ctx)
     val fpControl = LFSMHelpers.getFPControlBox(ctx)
     val evaluator = Evaluator(ctx, wallet, evalInput, latestState.rollup, Seq.empty,
-      fpControl, new BoxLoader(ctx, Globals.getNodeConfig.getNodeApi), fpContracts)
+      fpControl, new BoxLoader(ctx, Globals.getNodeConfig.getNodeApi), fpContracts, commitment)
     val concreteEval = evaluator.evaluateFor(miner, fpContractHashHex, walletInputs, feeOutputs)
     concreteEval.get
   }

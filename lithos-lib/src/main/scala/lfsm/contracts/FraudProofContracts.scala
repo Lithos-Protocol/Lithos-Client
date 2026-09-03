@@ -27,7 +27,9 @@ object FraudProofContracts {
     Contract.fromErgoScript(ctx, constants, ScriptGenerator.mkFraudProofScript("FP_NonUniqueHeaders"))
   }
   def mkNotInWindowContract(ctx: BlockchainContext): Contract = {
-    val constants = ConstantsBuilder.empty()
+    val constants = ConstantsBuilder.create()
+      .item("CONST_NISP_WINDOW", LFSMHelpers.NISP_WINDOW)
+      .build()
     Contract.fromErgoScript(ctx, constants, ScriptGenerator.mkFraudProofScript("FP_NotInWindow"))
   }
 

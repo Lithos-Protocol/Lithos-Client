@@ -18,6 +18,7 @@ object LFSMHelpers {
 
   final val HOLDING_PERIOD = 360L // 360 Blocks, or 12 hours
   final val EVAL_PERIOD    = 360L
+  // TODO: Change to 60 before mainnet
   final val NISP_WINDOW    = 160L // 160 on testnet is 2 hours (45 sec blocktime), equivalent on mainnet is 60 (2 min blocktime)
   final val NISP_COEFFICIENT = 10000 // Coefficient which separates normal shares from super-shares, used in evaluation
   // NISP size envelope, mirrored in Holding_Logic and injected into FP_InvalidFormat.

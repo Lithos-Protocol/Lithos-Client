@@ -41,8 +41,8 @@
   val CONST_INVARIANT_PREFIX  = 130
   val CONST_INVARIANT_MID     = 36
   val CONST_INVARIANT_SUFFIX  = 45
-  // TODO: Grab from contract constants
-  val CONST_NISP_WINDOW       = 160
+  // Injected at compile time:
+  // CONST_NISP_WINDOW - Number of blocks before the current rollup that a NISP is valid in
   // Helper Methods
   def getScore(nispBytes: Coll[Byte]): Long = {
     byteArrayToLong(nispBytes.slice(0,CONST_SCORE_SIZE))

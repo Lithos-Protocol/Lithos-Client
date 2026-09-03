@@ -2,7 +2,7 @@ package evaluation
 
 import lfsm.contracts.FraudProofContracts
 import lfsm.states.{Rollup, RollupInfoState}
-import lfsm.{LFSMPhase, RollupProtocol}
+import lfsm.{LFSMHelpers, LFSMPhase, RollupProtocol}
 import mutations.{BoxLoader, NodeWallet}
 import nisp.NISP
 import org.bouncycastle.util.encoders.Hex
@@ -40,6 +40,17 @@ abstract class FraudProof(contract: Contract, miner: Array[Byte],
    * constant true still passes, so it looks fine until a real signature is on the transaction.
    */
   protected def extraCtxVars: Seq[ContextVar] = Seq.empty
+
+  /**
+   * Data inputs this proof needs after `dataInputs(0)`, which is always FP_CONTROL.
+   *
+   * Positional and unauthenticated by consensus, so the contract reading them is the only thing
+   * checking they are the right boxes. A proof that needs one and does not get it indexes past the
+   * end and throws, which `Evaluator` cannot tell from a proof it never ran — so a builder that
+   * cannot supply them must fail loudly here rather than emit a transaction that will.
+   */
+  protected def extraDataInputs: Seq[InputUTXO] = Seq.empty
+
   /**
    * Attempt to create fraud proof transaction using FraudProof parameters and transaction building information
    * @param ctx Context to perform transaction under
@@ -82,7 +93,7 @@ abstract class FraudProof(contract: Contract, miner: Array[Byte],
       val totalInputs = Seq(mutateEval, fpWithContext) ++ inputsToUse.drop(1)
       val uTx = txBuilder
         .setInputs(totalInputs:_*)
-        .setDataInputs(fpControl)
+        .setDataInputs((fpControl +: extraDataInputs):_*)
         .mutateOutputs
 
       if(additionalOutputs.isDefined)
@@ -200,10 +211,13 @@ object FraudProof {
    * @param nispTree `Rollup` associated with the given evalInput
    * @param evalInput Evaluation Input to evaluate for fraud
    * @param fpControl FP_Control box to use as data input, used to verify a valid FP contract is used
+   * @param commitment Miner Dictionary state, needed only by `FP_NonMatchingCommitment`. Absent means
+   *                   that proof cannot be built, which is a skipped proof rather than a silent pass
    */
   def genFraudProof(ctx: BlockchainContext, contract: Contract,
                      miner: Array[Byte], nispTree: Rollup, evalInput: InputUTXO,
-                     fpControl: InputUTXO): FraudProof = {
+                     fpControl: InputUTXO,
+                     commitment: Option[CommitmentSource] = None): FraudProof = {
     def propByteEquality(otrContract: Contract, fpContract: Contract): Boolean = {
       fpContract.hashedPropBytes sameElements otrContract.hashedPropBytes
     }
@@ -223,6 +237,11 @@ object FraudProof {
         MalformedGEProof(contract, miner, nispTree, evalInput, fpControl)
       case transactionNotIncluded if propByteEquality(transactionNotIncluded, FraudProofContracts.mkTransactionNotIncludedContract(ctx)) =>
         TransactionNotIncludedProof(contract, miner, nispTree, evalInput, fpControl)
+      case nonMatchingCommitment if propByteEquality(nonMatchingCommitment,
+        FraudProofContracts.mkNonMatchingCommitmentContract(ctx, LFSMHelpers.getMDToken(ctx.getNetworkType))) =>
+        NonMatchingCommitmentProof(contract, miner, nispTree, evalInput, fpControl,
+          commitment.getOrElse(throw new IllegalArgumentException(
+            "FP_NonMatchingCommitment reads the Miner Dictionary, and no CommitmentSource was supplied")))
       case _ =>
         throw new IllegalArgumentException(s"Cannot find FraudProof for contract ${contract.address(ctx.getNetworkType)}")
     }

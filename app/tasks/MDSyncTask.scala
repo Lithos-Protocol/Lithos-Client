@@ -43,7 +43,7 @@ class MDSyncTask @Inject()(system: ActorSystem,
         dictionaryTrusted(view) &&
         Globals.mdDB.getDataBoxToken.isEmpty &&
         !stateConfig.disableTransforms.getOrElse(false) &&
-        stateConfig.autoCommit.getOrElse(true) &&
+        stateConfig.autoCommit.getOrElse(false) &&
         running.compareAndSet(false, true)) {
         Try {
           val walletSelector = WalletSelector(walletManager, 4.seconds, contexts.pollingContext)
