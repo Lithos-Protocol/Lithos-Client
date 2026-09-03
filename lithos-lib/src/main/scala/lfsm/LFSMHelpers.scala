@@ -52,7 +52,7 @@ object LFSMHelpers {
   final val FP_TOKEN_MAINNET        = ErgoId.create("5a3f8a958178fc6e3b37aeea8fb94d8e6d33a7e4d2c7e70aa7db4e13c08a9903")
   final val FP_TOKEN_TESTNET        = ErgoId.create("a6d4fa307b654dcf31ce07e2462c1be5ca7c5dcc35c1363a0eff62d0b3b9ed37")
   final val FP_CONTROL_TESTNET      = Address.create("ShDJAh75M4bDZbCowYGqtmHi4iiBMqWJcbQRYLaxx8tZZHtj23c7qEcEvUiXYvSdnjdWE6R328rSazggEzz7UWRqXGZWc6L28bo96jMNK8NZs1bQBHAxkb9rLFW8Gf3HFQRPUm26CX8LZeqF1iJvftCYHTp2KC2LisbheejGeoXkv")
-ErgoTreePredef
+
   // How long a rollup stays challengeable. MinerData_Logic spaces commitment changes by NISP_WINDOW
   // plus this, so the commitment governing any live rollup is still in one of its two slots.
   final val ROLLUP_LIFETIME = HOLDING_PERIOD + EVAL_PERIOD
