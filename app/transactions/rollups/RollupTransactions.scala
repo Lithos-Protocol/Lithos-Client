@@ -11,6 +11,7 @@ import scorex.utils.Longs
 import sigma.Colls
 import sigma.data.CBigInt
 import transactions.ProtocolContracts
+import transactions.dex.DexContracts
 import transactions.rollups.TransactionMessages.LatestRollup
 import utils.Globals
 import utils.Helpers.{evalContract, holdingContract, holdingLogicContract, payoutContract}
@@ -31,8 +32,8 @@ object RollupTransactions {
     RollupInfoState.fromErgoValue(box.registers(3), phase)
 
   /** The height a rollup's NISPs must prove work against, which is the block it was created in. */
-  def nispBlockHeight(holdingInput: InputUTXO): Int =
-    stateOf(holdingInput, LFSMPhase.HOLDING).nispBlockHeight.toInt
+  def genesisBlockHeight(holdingInput: InputUTXO): Int =
+    stateOf(holdingInput, LFSMPhase.HOLDING).genesisBlockHeight.toInt
 
   /** The refundable ERG a submission of this score has to add to the holding box. */
   def submissionBond(score: Long): Long = RollupProtocol.bondForScore(score)
@@ -104,14 +105,15 @@ object RollupTransactions {
     // Only the period start moves. The rollup's own block and the bond ledger carry through, the
     // latter because evaluation is where the bonds are slashed or handed on to payout.
     val nextState = RollupInfoState.evaluation(
-      ctx.getHeight.toLong, state.nispBlockHeight, state.totalBond)
+      ctx.getHeight.toLong, state.genesisBlockHeight, state.totalBond)
 
     val output = UTXO(eval, holdingInput.value, holdingInput.tokens,
       registers = holdingInput.registers.updated(3, nextState.ergoValue))
-
-    val inputWithContext = holdingInput.setCtxVars(
-      ContextVar.of(3.toByte, ErgoValue.of(TransformOp)),
-      logicVar(ctx))
+    // Attach context vars like this until SigmaMap impl in sigma state
+    val holdingLogic = logicVar(ctx)
+    val inputWithContext = DexContracts.attachCtxVars (holdingInput,
+      Seq((3.toByte, ErgoValue.of(TransformOp)),
+        (holdingLogic.getId, holdingLogic.getValue)))
 
     val totalOutputs = Seq(output) ++ feeOutputs
     val uTx = TxBuilder(ctx)

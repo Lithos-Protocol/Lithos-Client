@@ -1,0 +1,400 @@
+{
+  // FP_MalformedGenesis
+  // Value: unspecified (0.001 ERG)
+  // Proves fraud by showing that a super-share's collateral-spending genesis transaction
+  // is inproperly formatted, fabricated, or belongs to another miner.
+
+  // We validate the following important rules about the genesis transaction, proven to be
+  // included in the miner's share after successful evaluation of TransactionNotIncluded
+  // Provided collateral box bytes hash to id of input 0 in the transaction
+  // collateral box is well formed
+  // collateral box bytes hold the collateral token
+  // collateral box bytes hold the collateral ergotree
+  // collateral box bytes lender SigmaProp(R5) is equal to minerPK group element on the super-share's header
+
+  // holding output is well formed
+  // holding output r8 is this miner's hashed prop bytes
+  // holding output holds a rollupNFT equal to the collateral box id. This is the share's own
+  // collateral box, which is whichever one that miner drew, not the one that opened this rollup
+
+  // REGISTERS
+  // None
+  val evalBox:       Box     = INPUTS(0)
+  val nispTree:      AvlTree = evalBox.R4[AvlTree].get
+  val currentMiners: Int     = evalBox.R5[Int].get
+  val totalScore:    BigInt  = evalBox.R6[BigInt].get
+
+  // NEXT VALUES
+  val nextUTXO   = OUTPUTS(0)
+  val nextTree   = nextUTXO.R4[AvlTree].get
+  val nextMiners = nextUTXO.R5[Int].get
+  val nextScore  = nextUTXO.R6[BigInt].get
+
+  // CONTEXT VARS
+  // CTX_MINER_BYTES(0) - Hashed PropBytes of miner who committed fraud
+  // CTX_LOOKUP_PROOF(1) - Lookup proof for miner
+  // CTX_REMOVE_PROOF(2) - Removal proof for miner
+  val CTX_MINER_BYTES      = getVarFromInput[Coll[Byte]](1, 0).getOrElse(Coll(0.toByte))
+  val CTX_LOOKUP_PROOF     = getVarFromInput[Coll[Byte]](1, 1).getOrElse(Coll(0.toByte))
+  val CTX_REMOVE_PROOF     = getVarFromInput[Coll[Byte]](1, 2).getOrElse(Coll(0.toByte))
+
+  // CONSTANTS
+  // CONST_COLLAT_ERGOTREE: serialized ergoTree of the collateral contract
+  // CONST_HOLDING_ERGOTREE: serialized ergoTree of the holding contract
+  // CONST_COLLAT_TOKEN: id of the token every live collateral box carries
+  val CONST_SCORE_SIZE        = 8
+  val CONST_LEVEL_SIZE        = 33
+  val CONST_N_SIZE            = 4
+  val CONST_Y_COORD_SIZE      = 32
+  // For header invariants explanation, please view InvalidFormat Proof
+  val CONST_INVARIANT_PREFIX  = 130
+  val CONST_INVARIANT_MID     = 36
+  val CONST_INVARIANT_SUFFIX  = 45
+
+  // Serialized register type codes, as ConstantSerializer writes them ahead of each value.
+  val CONST_AVL_TYPE        = 100.toByte
+  val CONST_INT_TYPE        = 4.toByte
+  val CONST_BIGINT_TYPE     = 6.toByte
+  // Collection code 12 plus SLong 5. R7 is a Coll[Long] of three slots, not a bare Long.
+  val CONST_LONG_COLL_TYPE  = 17.toByte
+  // Collection code 12 plus SByte 2.
+  val CONST_BYTE_COLL_TYPE  = 14.toByte
+  val CONST_STATE_SLOTS     = 3.toByte
+  val CONST_HASH_SIZE       = 32
+  // A genesis transaction spends the collateral box and nothing else, so the id sits at a fixed
+  // offset: one count byte, then the box id, then an empty spending proof and empty extension.
+  val CONST_ID_START        = 1
+  val CONST_ID_END          = 33
+
+  // ASSUMPTIONS - statements which can be assumed to be true due to other contracts enforcing them
+  // FP_InvalidFormat runs earlier and establishes the ten-share framing and every size bound, so the
+  // share walk below cannot read outside a share.
+  // The collateral contract pins the holding box's script, its empty tree, its zero counters and its
+  // five contiguous registers, so the fixed register bytes this parser skips are the only legal ones.
+  // The genesis transaction carries exactly one input, no data inputs and no context extension.
+  //
+  // DELIBERATE OMISSIONS - conditions left out on purpose
+  // Nothing is deserialized. Every byte read here came out of a NISP the accused wrote, and a
+  // deserializer handed hostile bytes throws rather than returning a verdict - which Evaluation
+  // cannot tell from a proof that never ran, leaving the miner unslashable. So the collateral box is
+  // compared as raw bytes and never parsed into a Box, and the lender key is compared as raw bytes
+  // and never decoded into a GroupElement.
+  // Merkle inclusion belongs to FP_TransactionNotIncluded. That proof shows the transaction was in
+  // the header; this one shows it was the right transaction.
+
+  // Helper Methods
+  def getScore(nispBytes: Coll[Byte]): Long = {
+    byteArrayToLong(nispBytes.slice(0,CONST_SCORE_SIZE))
+  }
+
+  // Nothing has validated the VLQs inside a genesis transaction or a collateral box before this proof
+  // runs, unlike the header ones the other proofs read. Safety is at the call sites: every buffer is
+  // capped at the widest legal encoding of its field, the returned flag is conjoined wherever the size
+  // is used, and a slice running off the end clamps rather than throwing.
+  def parseVLQSize(vlqBytes: Coll[Byte]): (Int, Boolean) = {
+    vlqBytes.fold((0, false), {
+      (a: (Int, Boolean), b: Byte) =>
+        if(a._2){
+          a
+        }else{
+          val continue = b < 0 // If byte is negative, most-significant bit is set to 1
+          (a._1 + 1, !continue)
+        }
+    })
+  }
+
+  def getHeaderSize(shareBytes: Coll[Byte]): Int = {
+    val timestampBytes = shareBytes.slice(
+      CONST_N_SIZE + CONST_INVARIANT_PREFIX,
+      CONST_N_SIZE + CONST_INVARIANT_PREFIX + 11 // 11 byte buffer to read long, not all used necessarily
+    )
+    val timestampSize = parseVLQSize(timestampBytes)
+
+    val heightBytes = shareBytes.slice(
+      CONST_N_SIZE + CONST_INVARIANT_PREFIX + timestampSize._1 + CONST_INVARIANT_MID,
+      CONST_N_SIZE + CONST_INVARIANT_PREFIX + timestampSize._1 + CONST_INVARIANT_MID + 7 // 7 byte buffer to read int
+    )
+    val heightSize = parseVLQSize(heightBytes)
+
+    CONST_INVARIANT_PREFIX + timestampSize._1 + CONST_INVARIANT_MID + heightSize._1 + CONST_INVARIANT_SUFFIX
+  }
+
+  def getSuperShares(nispBytes: Coll[Byte]): Coll[Coll[Byte]] = {
+    val shareSetBytes = nispBytes.slice(CONST_SCORE_SIZE, nispBytes.size)
+
+    // Iterate 10 times for 10 shares.
+    // No index out of bounds checks needed here, due to InvalidFormatProof
+    val iters = Coll(0,1,2,3,4,5,6,7,8,9)
+    val shares = iters.fold((Coll[Coll[Byte]](), 0), {
+      (a: (Coll[Coll[Byte]], Int), b: Int) =>
+        val headerSize = getHeaderSize(shareSetBytes.slice(a._2, shareSetBytes.size))
+        val txProofSize = fromBigEndianBytes[Short](
+          shareSetBytes.slice(
+            a._2 + CONST_N_SIZE + headerSize,
+            a._2 + CONST_N_SIZE + headerSize + 2
+          )
+        )
+        val numLevels: Byte = shareSetBytes(a._2 + CONST_N_SIZE + headerSize + 2)
+        val totalLevels = numLevels.toInt * CONST_LEVEL_SIZE
+        val end = a._2 + CONST_N_SIZE + headerSize + 3 + txProofSize + totalLevels + CONST_Y_COORD_SIZE
+        (a._1.append(Coll(shareSetBytes.slice(a._2, end))), end)
+    })
+    shares._1
+  }
+
+  // ( genesis tx bytes, collateral box bytes, header's lender key bytes )
+  def getShareParts(shareBytes: Coll[Byte]): (Coll[Byte], (Coll[Byte], Coll[Byte])) = {
+    val headerSize = getHeaderSize(shareBytes)
+    val txProofSize = fromBigEndianBytes[Short](
+      shareBytes.slice(CONST_N_SIZE + headerSize, CONST_N_SIZE + headerSize + 2)
+    )
+    val txProofStart = CONST_N_SIZE + headerSize + 3
+    val txSize = fromBigEndianBytes[Short](shareBytes.slice(txProofStart, txProofStart + 2))
+    val unsignedTx = shareBytes.slice(txProofStart + 2, txProofStart + 2 + txSize)
+    val collateralBytes = shareBytes.slice(txProofStart + 2 + txSize, txProofStart + txProofSize)
+    // The compressed key sits inside the fixed suffix: 33 bytes ending 8 before the header does.
+    val lenderKey = shareBytes.slice(CONST_N_SIZE + headerSize - 41, CONST_N_SIZE + headerSize - 8)
+    (unsignedTx, (collateralBytes, lenderKey))
+  }
+
+  // The supplied bytes are a collateral box: the right script, and the collateral token on it.
+  // Returns ( holds up, offset of the lender key ). Reads are total, so hostile bytes should return false
+  // rather than exception.
+  def collateralWellFormed(collatBytes: Coll[Byte]): (Boolean, Int) = {
+    val valueSize = parseVLQSize(collatBytes.slice(0, 10))
+    val treeStart = valueSize._1
+    val treeEnd   = treeStart + CONST_COLLAT_ERGOTREE.size
+    val treeMatches = collatBytes.slice(treeStart, treeEnd) == CONST_COLLAT_ERGOTREE
+
+    val heightSize = parseVLQSize(collatBytes.slice(treeEnd, treeEnd + 6))
+    val tokenCountPos = treeEnd + heightSize._1
+    val tokenCount = collatBytes.getOrElse(tokenCountPos, 0.toByte).toInt
+    val tokenIdMatches =
+      collatBytes.slice(tokenCountPos + 1, tokenCountPos + 1 + CONST_HASH_SIZE) == CONST_COLLAT_TOKEN
+
+    // Each token is a full 32 byte id then a VLQ amount, since a box serializes its own ids
+    val tokenEnd = Coll(0, 1).fold((tokenCountPos + 1, true), {
+      (a: (Int, Boolean), i: Int) =>
+        if(a._2 && i < tokenCount){
+          val amountStart = a._1 + CONST_HASH_SIZE
+          val amountSize = parseVLQSize(collatBytes.slice(amountStart, amountStart + 10))
+          (amountStart + amountSize._1, amountSize._2)
+        }else{
+          a
+        }
+    })
+
+    // R4 is the fee value, a Long. R5 is the lender key, whose 33 encoded bytes follow the SigmaProp
+    // type byte and the proveDlog opcode.
+    val regCountPos = tokenEnd._1
+    val regCount = collatBytes.getOrElse(regCountPos, 0.toByte).toInt
+    val r4 = regCountPos + 1
+    val r4Typed = collatBytes.getOrElse(r4, 0.toByte) == 5.toByte
+    val r4Size = parseVLQSize(collatBytes.slice(r4 + 1, r4 + 11))
+    val keyStart = r4 + 1 + r4Size._1 + 2
+
+    val wellFormed = allOf(
+      Coll(
+        valueSize._2,
+        heightSize._2,
+        treeMatches,
+        tokenCount >= 1,
+        tokenCount <= 2,
+        tokenIdMatches,
+        tokenEnd._2,
+        regCount >= 2,
+        r4Typed,
+        r4Size._2
+      )
+    )
+    (wellFormed, keyStart)
+  }
+
+  // The miner hash the genesis transaction's holding output carries in R8, walked from the serialized
+  // transaction with no deserializer. Returns ( hash, parsed cleanly ).
+  def getHoldingMiner(tx: Coll[Byte]): (Coll[Byte], Boolean) = {
+    // One input, an empty spending proof, an empty context extension, and no data inputs.
+    val prefixOk = allOf(
+      Coll(
+        tx.getOrElse(0, 0.toByte) == 1.toByte,
+        tx.getOrElse(33, 1.toByte) == 0.toByte,
+        tx.getOrElse(34, 1.toByte) == 0.toByte,
+        tx.getOrElse(35, 1.toByte) == 0.toByte
+      )
+    )
+    val distinctTokens = tx.getOrElse(36, 0.toByte).toInt
+    val outCountPos = 37 + distinctTokens * CONST_HASH_SIZE
+    val outCount = tx.getOrElse(outCountPos, 0.toByte).toInt
+
+    // Output 0 is the holding box: value, then its script, then the creation height.
+    val outStart = outCountPos + 1
+    val valueSize = parseVLQSize(tx.slice(outStart, outStart + 10))
+    val scriptStart = outStart + valueSize._1
+    val scriptEnd = scriptStart + CONST_HOLDING_ERGOTREE.size
+    val scriptMatches = tx.slice(scriptStart, scriptEnd) == CONST_HOLDING_ERGOTREE
+
+    val heightSize = parseVLQSize(tx.slice(scriptEnd, scriptEnd + 6))
+    val tokenCountPos = scriptEnd + heightSize._1
+    val holdingTokens = tx.getOrElse(tokenCountPos, 0.toByte).toInt
+
+    // Inside a transaction each token is an index into the distinct table, then an amount. The
+    // holding box's first token is the rollup NFT, and pinning it to index 0 amount 1 is what makes
+    // the head of that table the NFT rather than whichever token a hand-built table put first.
+    val nftFirst = tx.getOrElse(tokenCountPos + 1, 1.toByte) == 0.toByte &&
+      tx.getOrElse(tokenCountPos + 2, 0.toByte) == 1.toByte
+
+    val tokenEnd = Coll(0, 1).fold((tokenCountPos + 1, true), {
+      (a: (Int, Boolean), i: Int) =>
+        if(a._2 && i < holdingTokens){
+          val indexSize = parseVLQSize(tx.slice(a._1, a._1 + 6))
+          val amountStart = a._1 + indexSize._1
+          val amountSize = parseVLQSize(tx.slice(amountStart, amountStart + 10))
+          (amountStart + amountSize._1, indexSize._2 && amountSize._2)
+        }else{
+          a
+        }
+    })
+
+    // R4 to R7 are pinned by the collateral contract, so their serialized forms are fixed apart from
+    // R7's three VLQ slots. Checking the type bytes as we pass is what makes the walk to R8 sound.
+    val regCountPos = tokenEnd._1
+    val regCount = tx.getOrElse(regCountPos, 0.toByte).toInt
+    val r4 = regCountPos + 1
+    val r4Ok = allOf(
+      Coll(
+        tx.getOrElse(r4, 0.toByte) == CONST_AVL_TYPE,
+        tx.getOrElse(r4 + 35, 0.toByte) == 32.toByte,  // key length
+        tx.getOrElse(r4 + 36, 1.toByte) == 0.toByte    // no fixed value length
+      )
+    )
+    val r5 = r4 + 37
+    val r5Ok = tx.getOrElse(r5, 0.toByte) == CONST_INT_TYPE &&
+      tx.getOrElse(r5 + 1, 1.toByte) == 0.toByte
+    val r6 = r5 + 2
+    val r6Ok = allOf(
+      Coll(
+        tx.getOrElse(r6, 0.toByte) == CONST_BIGINT_TYPE,
+        tx.getOrElse(r6 + 1, 0.toByte) == 1.toByte,
+        tx.getOrElse(r6 + 2, 1.toByte) == 0.toByte
+      )
+    )
+    val r7 = r6 + 3
+    val r7Ok = tx.getOrElse(r7, 0.toByte) == CONST_LONG_COLL_TYPE &&
+      tx.getOrElse(r7 + 1, 0.toByte) == CONST_STATE_SLOTS
+    val slotsEnd = Coll(0, 1, 2).fold((r7 + 2, true), {
+      (a: (Int, Boolean), i: Int) =>
+        if(a._2){
+          val slotSize = parseVLQSize(tx.slice(a._1, a._1 + 10))
+          (a._1 + slotSize._1, slotSize._2)
+        }else{
+          a
+        }
+    })
+
+    val r8 = slotsEnd._1
+    val r8Ok = tx.getOrElse(r8, 0.toByte) == CONST_BYTE_COLL_TYPE &&
+      tx.getOrElse(r8 + 1, 0.toByte) == CONST_HASH_SIZE.toByte
+    val minerHash = tx.slice(r8 + 2, r8 + 2 + CONST_HASH_SIZE)
+
+    val parsed = allOf(
+      Coll(
+        prefixOk,
+        distinctTokens >= 1,
+        distinctTokens <= 8,
+        outCount > 0,
+        valueSize._2,
+        scriptMatches,
+        heightSize._2,
+        holdingTokens >= 1,
+        holdingTokens <= 2,
+        nftFirst,
+        tokenEnd._2,
+        regCount == 5,
+        r4Ok, r5Ok, r6Ok, r7Ok,
+        slotsEnd._2,
+        r8Ok,
+        minerHash.size == CONST_HASH_SIZE
+      )
+    )
+    (minerHash, parsed)
+  }
+
+  // Evaluation
+  val minerNISP = nispTree.get(CTX_MINER_BYTES, CTX_LOOKUP_PROOF).get
+  val minerShares = getSuperShares(minerNISP)
+  // TODO: During audit, re-verify all of the statements below and ensure they
+  // are correct
+  val malformedShareExists = minerShares.exists{
+    (share: Coll[Byte]) =>
+      val parts = getShareParts(share)
+      val unsignedTx = parts._1
+      val collatBytes = parts._2._1
+      val lenderKey = parts._2._2
+      val collatId = blake2b256(collatBytes)
+
+      // Verify transaction spends the provided collateral box.
+      val spendsSuppliedBox = unsignedTx.slice(CONST_ID_START, CONST_ID_END) == collatId
+
+      // Provided bytes really are a collateral box: the deployed script, and the collateral token that
+      // only the emission box mints. Without these a miner fabricates a box, hashes it, and builds a
+      // transaction naming that hash.
+      val collateral = collateralWellFormed(collatBytes)
+
+      // The holding output's own NFT takes the id of the box the transaction spends, which is what a
+      // real collateral spend mints. Read off the head of the distinct token table, because the
+      // holding box is output 0 and the NFT is its first token.
+      //
+      // This is the NFT inside the share's own transaction, NOT the one on the evaluation box. Those
+      // are different boxes: a miner draws whichever collateral box they like from the active set, and
+      // it is almost never the one whose spend opened the rollup they submit to. Comparing against the
+      // evaluation box's NFT would slash every miner who drew a different box
+      val nftMinted = unsignedTx.slice(37, 37 + CONST_HASH_SIZE) == collatId
+
+      // TODO Verify don't assume following:
+      // R8 of the holding output has the hashed prop bytes of this miner. Enforcing this check
+      // means malicious actors cannot steal another miner's NISP, as changing R8 would
+      // have the cascading effect of changing various hashes
+      // (collat id -> tx id -> tx merkle tree -> preheader -> Autolykos PoW hash)
+      // inherently changing the value of the Autolykos PoW hash and creating an overwhelmingly
+      // large probability that InvalidDiff would fail due to the superShare inequality being broken.
+      // Therefore, you must genuinely perform work under a certain miner hash to get rewards for it,
+      // stealing another NISP is not an option.
+      val holdingMiner = getHoldingMiner(unsignedTx)
+      val namesSubmitter = holdingMiner._2 && holdingMiner._1 == CTX_MINER_BYTES
+
+      // The share was mined under the key the collateral box pays, compared as raw encoded bytes so a
+      // malformed key cannot throw here.
+      // FP_MalformedGE proves whether the key on the header is a real elliptic curve point.
+      val minedForLender =
+        collatBytes.slice(collateral._2, collateral._2 + 33) == lenderKey
+
+      val bound = allOf(
+        Coll(
+          spendsSuppliedBox,
+          collateral._1,
+          nftMinted,
+          namesSubmitter,
+          minedForLender
+        )
+      )
+      !bound
+  }
+
+  val fraudExists = malformedShareExists
+  val score: Long = getScore(minerNISP)
+  val minerRemoved = {
+    val removeTree = nispTree.remove(Coll(CTX_MINER_BYTES), CTX_REMOVE_PROOF).get
+    removeTree.digest == nextTree.digest
+  }
+
+  val changedRegisters = allOf(
+    Coll(
+      minerRemoved,
+      nextMiners      == currentMiners - 1,
+      nextScore       == totalScore - score
+    )
+  )
+
+  sigmaProp(fraudExists && changedRegisters)
+
+}

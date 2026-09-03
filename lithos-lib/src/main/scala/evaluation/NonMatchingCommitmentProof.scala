@@ -45,7 +45,7 @@ case class NonMatchingCommitmentProof(contract: Contract, miner: Array[Byte], ni
   override val logger: Logger = LoggerFactory.getLogger("NonMatchingCommitmentProof")
 
   /** The rollup's own block, which the contract compares the registration's expiry against. */
-  private val currentBlock: Long = nispTree.state.nispBlockHeight
+  private val currentBlock: Long = nispTree.state.genesisBlockHeight
 
   private val lookUp = source.dictionary.copy().lookUp(miner)
 

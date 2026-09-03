@@ -2,7 +2,7 @@ package evaluation
 
 import lfsm.contracts.FraudProofContracts
 import lfsm.states.{Rollup, RollupInfoState}
-import lfsm.{LFSMHelpers, LFSMPhase, RollupProtocol}
+import lfsm.{LFSMPhase, RollupProtocol}
 import mutations.{BoxLoader, NodeWallet}
 import nisp.NISP
 import org.bouncycastle.util.encoders.Hex
@@ -218,33 +218,25 @@ object FraudProof {
                      miner: Array[Byte], nispTree: Rollup, evalInput: InputUTXO,
                      fpControl: InputUTXO,
                      commitment: Option[CommitmentSource] = None): FraudProof = {
-    def propByteEquality(otrContract: Contract, fpContract: Contract): Boolean = {
-      fpContract.hashedPropBytes sameElements otrContract.hashedPropBytes
-    }
+    // Identified against the compiled set rather than by recompiling each candidate in turn, which
+    // was eight compilations for every proof attempted against every miner.
+    val set = FraudProofContracts.fraudProofSet(ctx)
+    val held = contract.hashedPropBytesHex
+    def is(fpContract: Contract): Boolean = fpContract.hashedPropBytesHex == held
 
-    contract match {
-      case invalidDiff if propByteEquality(invalidDiff, FraudProofContracts.mkInvalidDiffContract(ctx)) =>
-        InvalidDiffProof(contract, miner, nispTree, evalInput, fpControl)
-      case invalidFormat if propByteEquality(invalidFormat, FraudProofContracts.mkInvalidFormatContract(ctx)) =>
-        InvalidFormatProof(contract, miner, nispTree, evalInput, fpControl)
-      case nonUniqueHeaders if propByteEquality(nonUniqueHeaders, FraudProofContracts.mkNonUniqueHeadersContract(ctx)) =>
-        NonUniqueHeadersProof(contract, miner, nispTree, evalInput, fpControl)
-      case notInWindow if propByteEquality(notInWindow, FraudProofContracts.mkNotInWindowContract(ctx)) =>
-        NotInWindowProof(contract, miner, nispTree, evalInput, fpControl)
-      case incorrectN if propByteEquality(incorrectN, FraudProofContracts.mkIncorrectNContract(ctx)) =>
-        IncorrectNProof(contract, miner, nispTree, evalInput, fpControl)
-      case malformedGE if propByteEquality(malformedGE, FraudProofContracts.mkMalformedGEContract(ctx)) =>
-        MalformedGEProof(contract, miner, nispTree, evalInput, fpControl)
-      case transactionNotIncluded if propByteEquality(transactionNotIncluded, FraudProofContracts.mkTransactionNotIncludedContract(ctx)) =>
-        TransactionNotIncludedProof(contract, miner, nispTree, evalInput, fpControl)
-      case nonMatchingCommitment if propByteEquality(nonMatchingCommitment,
-        FraudProofContracts.mkNonMatchingCommitmentContract(ctx, LFSMHelpers.getMDToken(ctx.getNetworkType))) =>
-        NonMatchingCommitmentProof(contract, miner, nispTree, evalInput, fpControl,
-          commitment.getOrElse(throw new IllegalArgumentException(
-            "FP_NonMatchingCommitment reads the Miner Dictionary, and no CommitmentSource was supplied")))
-      case _ =>
-        throw new IllegalArgumentException(s"Cannot find FraudProof for contract ${contract.address(ctx.getNetworkType)}")
-    }
-
+    if (is(set.nonMatchingCommitment))
+      NonMatchingCommitmentProof(contract, miner, nispTree, evalInput, fpControl,
+        commitment.getOrElse(throw new IllegalArgumentException(
+          "FP_NonMatchingCommitment reads the Miner Dictionary, and no CommitmentSource was supplied")))
+    else if (is(set.invalidFormat)) InvalidFormatProof(contract, miner, nispTree, evalInput, fpControl)
+    else if (is(set.malformedGE)) MalformedGEProof(contract, miner, nispTree, evalInput, fpControl)
+    else if (is(set.notInWindow)) NotInWindowProof(contract, miner, nispTree, evalInput, fpControl)
+    else if (is(set.nonUniqueHeaders)) NonUniqueHeadersProof(contract, miner, nispTree, evalInput, fpControl)
+    else if (is(set.incorrectN)) IncorrectNProof(contract, miner, nispTree, evalInput, fpControl)
+    else if (is(set.invalidDiff)) InvalidDiffProof(contract, miner, nispTree, evalInput, fpControl)
+    else if (is(set.transactionNotIncluded)) TransactionNotIncludedProof(contract, miner, nispTree, evalInput, fpControl)
+    else if (is(set.malformedGenesis)) MalformedGenesisProof(contract, miner, nispTree, evalInput, fpControl)
+    else throw new IllegalArgumentException(
+      s"Cannot find FraudProof for contract ${contract.address(ctx.getNetworkType)}")
   }
 }

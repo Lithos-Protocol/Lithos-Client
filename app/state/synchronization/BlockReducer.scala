@@ -396,7 +396,7 @@ object BlockReducer {
         _ <- requireState(tx.id, registers.totalScore == 0, "genesis total score must be zero")
         _ <- requireState(tx.id, state.periodStart == block.height.toLong,
           "genesis period must equal its containing block height")
-        _ <- requireState(tx.id, state.nispBlockHeight == block.height.toLong,
+        _ <- requireState(tx.id, state.genesisBlockHeight == block.height.toLong,
           "genesis NISP block height must equal its containing block height")
         _ <- requireState(tx.id, state.totalBond == 0L,
           s"genesis bond ledger must be empty, found ${state.totalBond}")
@@ -474,7 +474,7 @@ object BlockReducer {
               s"holding-to-evaluation moved value from ${tree.value} to ${output.value}")
             _ <- requireState(tx.id, state.totalBond == tree.totalBond,
               "holding-to-evaluation changed the bond ledger")
-            _ <- requireState(tx.id, state.nispBlockHeight == tree.state.nispBlockHeight,
+            _ <- requireState(tx.id, state.genesisBlockHeight == tree.state.genesisBlockHeight,
               "holding-to-evaluation changed the rollup's own block height")
             // The successor's period start is what the whole evaluation window is measured from, so
             // it is checked here rather than adopted: the transform may not run early.
@@ -551,7 +551,7 @@ object BlockReducer {
           "submission output total score does not include the submitted NISP")
         _ <- requireState(tx.id, state.periodStart == tree.state.periodStart,
           "submission changed the holding-period start")
-        _ <- requireState(tx.id, state.nispBlockHeight == tree.state.nispBlockHeight,
+        _ <- requireState(tx.id, state.genesisBlockHeight == tree.state.genesisBlockHeight,
           "submission changed the rollup's own block height")
         _ <- requireState(tx.id, state.totalBond == expectedBond,
           s"submission of score $score should have left a bond ledger of $expectedBond, " +
@@ -647,7 +647,7 @@ object BlockReducer {
           "fraud proof output total score does not match the removed NISP")
         _ <- requireState(tx.id, state.periodStart == tree.state.periodStart,
           "fraud proof changed the evaluation-period start")
-        _ <- requireState(tx.id, state.nispBlockHeight == tree.state.nispBlockHeight,
+        _ <- requireState(tx.id, state.genesisBlockHeight == tree.state.genesisBlockHeight,
           "fraud proof changed the rollup's own block height")
         _ <- requireState(tx.id, state.totalBond == expectedBond,
           s"fraud proof removing score $score should have left a bond ledger of $expectedBond, " +

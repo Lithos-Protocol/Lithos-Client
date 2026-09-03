@@ -231,7 +231,7 @@ class SubmissionHandler @Inject()(config: Configuration, nodeContext: NodeContex
               val score = commitments.commitmentForNISP(latest.rollup.startHeight).get
               val holdingInput = latest.inputUTXO
               Globals.nispDB.getBestValidNISP(
-                RollupTransactions.nispBlockHeight(holdingInput), score) match {
+                RollupTransactions.genesisBlockHeight(holdingInput), score) match {
                 case Some(nisp) =>
                   // Reserved before the build and only handed to the candidate once it is signed, so
                   // a build that fails gives the box straight back instead of stranding it.
@@ -541,7 +541,7 @@ class SubmissionHandler @Inject()(config: Configuration, nodeContext: NodeContex
           val score = commitments.commitmentForNISP(latestState.rollup.startHeight).get
           val nispDB = Globals.nispDB
           val holdingInput = latestState.inputUTXO
-          val bestNISP = nispDB.getBestValidNISP(RollupTransactions.nispBlockHeight(holdingInput), score)
+          val bestNISP = nispDB.getBestValidNISP(RollupTransactions.genesisBlockHeight(holdingInput), score)
           val initOutputs = initialTxInfo.map(initialTxOutputs(stub, _))
           val feeOutputs = mkFeeOutputs(stub, initOutputs)
           bestNISP match {

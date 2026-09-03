@@ -5,7 +5,7 @@ import lfsm.contracts.FraudProofContracts
 import nisp.SuperShare
 import org.ergoplatform.appkit._
 import org.scalatest.propspec.AnyPropSpec
-import work.lithos.mutations.Contract
+import work.lithos.mutations.{Contract, Token}
 
 /**
  * The order the proofs run in, asserted as a property rather than left as a comment.
@@ -18,12 +18,14 @@ import work.lithos.mutations.Contract
  * The set avoids it by ordering rather than by defending every proof separately. Each proof assumes
  * the ones before it declined, and reads bytes on that assumption:
  *
- *   1. `FP_InvalidFormat`   parses nothing. Validates the VLQ fields, the sizes and the version, so
- *                           every later proof's index arithmetic lands inside the share.
- *   2. `FP_MalformedGE`     reads raw bytes only. Establishes the header's miner key is a real point,
- *                           which is what `deserializeTo[Header]` would otherwise throw on.
- *   3-7. everything else    may parse headers. `FP_IncorrectN` additionally has to precede
- *                           `FP_InvalidDiff`, which feeds the share's `N` into `powHit`.
+ *   `FP_NonMatchingCommitment`  reads eight score bytes and nothing else, so it depends on nothing
+ *                               and leads.
+ *   `FP_InvalidFormat`          parses nothing. Validates the VLQ fields, the sizes and the version,
+ *                               so every later proof's index arithmetic lands inside the share.
+ *   `FP_MalformedGE`            reads raw bytes only. Establishes the header's miner key is a real
+ *                               point, which `deserializeTo[Header]` would otherwise throw on.
+ *   everything after           may parse headers. `FP_IncorrectN` additionally has to precede
+ *                               `FP_InvalidDiff`, which feeds the share's `N` into `powHit`.
  *
  * Two properties hold the whole thing: a NISP the gates decline is one every later proof can read,
  * and each shape that breaks a later proof is caught by the gate that claims it.
@@ -57,11 +59,15 @@ class FraudProofOrderingSpec extends AnyPropSpec with FraudProofSpecBase {
     ("NonUniqueHeaders", fpNonUniqueHeaders(ctx), Seq.empty),
     ("IncorrectN", fpIncorrectN(ctx), Seq(ContextVar.of(3.toByte, NTable.ergoValue))),
     ("InvalidDiff", fpInvalidDiff(ctx), Seq.empty),
-    ("TransactionNotIncluded", fpTransactionNotIncluded(ctx), Seq.empty))
+    ("TransactionNotIncluded", fpTransactionNotIncluded(ctx), Seq.empty),
+    ("MalformedGenesis", fpMalformedGenesis(ctx), Seq.empty))
+
+  /** Every real evaluation box carries the rollup NFT, so the sweep runs against one that does. */
+  private def nft: Seq[Token] = Seq(Token(fpTokenId, 1L))
 
   private def verdictsOn(ctx: BlockchainContext, nisp: Array[Byte]): Seq[(String, String)] =
     readers(ctx).map { case (name, script, extra) =>
-      val f = fraud(ctx, script, nisp, score, extraVars = extra)
+      val f = fraud(ctx, script, nisp, score, extraVars = extra, tokens = nft)
       name -> evaluatesCleanly(f.prover, fraudTx(f)())
     }
 
@@ -156,20 +162,71 @@ class FraudProofOrderingSpec extends AnyPropSpec with FraudProofSpecBase {
   // ─── the sequence itself ──────────────────────────────────────────────────
 
   /**
-   * The deployed order, which `Evaluator` walks by index and `FP_CONTROL` whitelists by hash. The
-   * dependencies above are what make it load bearing rather than arbitrary.
+   * The deployed order, which `Evaluator` walks by index and `FP_CONTROL` whitelists by hash.
+   *
+   * Only two things in it are load bearing, and both are stated as dependencies rather than as
+   * positions: the gates precede everyone who reads a header, and `FP_IncorrectN` precedes the proof
+   * that feeds N to `powHit`. `FP_NonMatchingCommitment` sits ahead of the gates because it reads
+   * eight bytes and depends on nothing.
    */
-  property("sequence: the deployed order still puts the two gates first") {
+  property("sequence: every proof that reads a NISP runs after the two gates") {
     withCtx { ctx =>
       val deployed = FraudProofContracts.getFraudProofContracts(ctx).map(_.hashedPropBytesHex)
-      deployed.head shouldBe fpInvalidFormat(ctx).hashedPropBytesHex
-      deployed(1) shouldBe fpMalformedGE(ctx).hashedPropBytesHex
+      deployed.distinct.size shouldBe deployed.size
+      deployed.size shouldBe 9
 
-      val incorrectN = deployed.indexOf(fpIncorrectN(ctx).hashedPropBytesHex)
-      val invalidDiff = deployed.indexOf(fpInvalidDiff(ctx).hashedPropBytesHex)
+      def at(c: Contract): Int = deployed.indexOf(c.hashedPropBytesHex)
+      val format = at(fpInvalidFormat(ctx))
+      val ge = at(fpMalformedGE(ctx))
+
+      withClue("the format gate precedes the group-element gate: ") { format should be < ge }
+      Seq("NotInWindow" -> fpNotInWindow(ctx),
+        "NonUniqueHeaders" -> fpNonUniqueHeaders(ctx),
+        "IncorrectN" -> fpIncorrectN(ctx),
+        "InvalidDiff" -> fpInvalidDiff(ctx),
+        "TransactionNotIncluded" -> fpTransactionNotIncluded(ctx)).foreach { case (name, c) =>
+        withClue(s"$name deserializes headers, so it must run after both gates: ") {
+          at(c) should be > ge
+        }
+      }
+      withClue("MalformedGenesis walks a NISP, so it must run after the format gate: ") {
+        at(fpMalformedGenesis(ctx)) should be > format
+      }
       withClue("IncorrectN has to pin N before InvalidDiff feeds it to powHit: ") {
-        incorrectN should be < invalidDiff
+        at(fpIncorrectN(ctx)) should be < at(fpInvalidDiff(ctx))
+      }
+      withClue("NonMatchingCommitment reads only the score, so it leads: ") {
+        at(fpNonMatchingCommitment(ctx)) shouldBe 0
       }
     }
   }
+
+  /**
+   * Every proof is reachable through the dispatcher. It used to identify one by recompiling each
+   * candidate, and a proof with no case fell through to a throw that `Evaluator` swallowed as a
+   * skipped attempt — so a whitelisted proof could be silently unbuildable, which is a fraud nobody
+   * can prove.
+   */
+  property("dispatch: every proof in the set maps to a builder") {
+    withCtx { ctx =>
+      val rollup = lfsm.states.Rollup(FraudProofOrderingSpec.noDictionary,
+        1, 0L, lfsm.states.RollupInfoState.evaluation(0L, 0L, 0L), 0L, 0, hasMiner = false,
+        evaluated = false, blockId = "", utxoId = "")
+      val evalIn = fundingInput(ctx, miner(ctx))
+      FraudProofContracts.getFraudProofContracts(ctx).foreach { c =>
+        val built = scala.util.Try(evaluation.FraudProof.genFraudProof(
+          ctx, c, Array.fill(32)(0.toByte), rollup, evalIn, evalIn,
+          Some(evaluation.CommitmentSource(
+            FraudProofOrderingSpec.noDictionary, evalIn, Map.empty))))
+        withClue(s"${c.hashedPropBytesHex.take(16)} has no builder: ") {
+          built.isSuccess shouldBe true
+        }
+      }
+    }
+  }
+}
+
+object FraudProofOrderingSpec {
+  /** A dictionary view the dispatch check never reads, since it only builds the proof objects. */
+  def noDictionary: lfsm.states.AuthenticatedDictionaryView = lfsm.states.PlasmaDictionary.empty()
 }

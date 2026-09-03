@@ -30,7 +30,7 @@ class RollupProtocolSpec extends AnyFlatSpec with Matchers {
     val decoded = RollupInfoState.fromErgoValue(state.ergoValue, LFSMPhase.HOLDING)
     decoded shouldEqual state
     decoded.periodStart shouldEqual 120L
-    decoded.nispBlockHeight shouldEqual 100L
+    decoded.genesisBlockHeight shouldEqual 100L
     decoded.totalBond shouldEqual 7000000L
   }
 
@@ -67,7 +67,7 @@ class RollupProtocolSpec extends AnyFlatSpec with Matchers {
 
   it should "refuse to read a height off a payout state" in {
     an[IllegalArgumentException] should be thrownBy RollupInfoState.payout(1L, 2L, 3L).periodStart
-    an[IllegalArgumentException] should be thrownBy RollupInfoState.payout(1L, 2L, 3L).nispBlockHeight
+    an[IllegalArgumentException] should be thrownBy RollupInfoState.payout(1L, 2L, 3L).genesisBlockHeight
   }
 
   it should "expose the bond ledger in every phase" in {

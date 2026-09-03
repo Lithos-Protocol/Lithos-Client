@@ -42,14 +42,18 @@ trait FraudProofSpecBase extends RollupSpecBase {
 
   protected def fraudProofs(ctx: BlockchainContext): Seq[Contract] = FraudProofSpecBase.compiled(ctx)
 
-  protected def fpNonMatchingCommitment(ctx: BlockchainContext): Contract = fraudProofs(ctx)(7)
-  protected def fpInvalidFormat(ctx: BlockchainContext): Contract = fraudProofs(ctx).head
-  protected def fpMalformedGE(ctx: BlockchainContext): Contract = fraudProofs(ctx)(1)
-  protected def fpNotInWindow(ctx: BlockchainContext): Contract = fraudProofs(ctx)(2)
-  protected def fpNonUniqueHeaders(ctx: BlockchainContext): Contract = fraudProofs(ctx)(3)
-  protected def fpIncorrectN(ctx: BlockchainContext): Contract = fraudProofs(ctx)(4)
-  protected def fpInvalidDiff(ctx: BlockchainContext): Contract = fraudProofs(ctx)(5)
-  protected def fpTransactionNotIncluded(ctx: BlockchainContext): Contract = fraudProofs(ctx)(6)
+  /** Named off the compiled set, so a change to the try order does not silently retarget a spec. */
+  private def set(ctx: BlockchainContext) = FraudProofContracts.fraudProofSet(ctx)
+
+  protected def fpNonMatchingCommitment(ctx: BlockchainContext): Contract = set(ctx).nonMatchingCommitment
+  protected def fpInvalidFormat(ctx: BlockchainContext): Contract = set(ctx).invalidFormat
+  protected def fpMalformedGE(ctx: BlockchainContext): Contract = set(ctx).malformedGE
+  protected def fpNotInWindow(ctx: BlockchainContext): Contract = set(ctx).notInWindow
+  protected def fpNonUniqueHeaders(ctx: BlockchainContext): Contract = set(ctx).nonUniqueHeaders
+  protected def fpIncorrectN(ctx: BlockchainContext): Contract = set(ctx).incorrectN
+  protected def fpInvalidDiff(ctx: BlockchainContext): Contract = set(ctx).invalidDiff
+  protected def fpTransactionNotIncluded(ctx: BlockchainContext): Contract = set(ctx).transactionNotIncluded
+  protected def fpMalformedGenesis(ctx: BlockchainContext): Contract = set(ctx).malformedGenesis
 
   // ─── outcomes ─────────────────────────────────────────────────────────────
 
@@ -169,7 +173,8 @@ trait FraudProofSpecBase extends RollupSpecBase {
                       blockHeight: Long = -1L,
                       extraVars: Seq[ContextVar] = Seq.empty,
                       dataInputs: Seq[InputUTXO] = null,
-                      minerHash: Array[Byte] = null): Fraud = {
+                      minerHash: Array[Byte] = null,
+                      tokens: Seq[Token] = Seq.empty[Token]): Fraud = {
     val prover = miner(ctx)
     val accused = if (minerHash == null) contractOf(prover).hashedPropBytes else minerHash
     val bystander = contractOf(proverWith(ctx, otherSecret)).hashedPropBytes
@@ -189,7 +194,7 @@ trait FraudProofSpecBase extends RollupSpecBase {
     val removal = tree.delete(accused)
     val outTree = tree.ergoValue
 
-    val evalIn = UTXO(evalContract(ctx), boxValue, Seq.empty[Token], Seq(
+    val evalIn = UTXO(evalContract(ctx), boxValue, tokens, Seq(
       inTree, ErgoValue.of(2), ErgoValue.of(BigInt(totalScore).bigInteger),
       stateReg(periodStart, block, bondHeld)))
       .toInput(ctx, ErgoId.create(dummyTxId), 0.toShort)
@@ -202,7 +207,7 @@ trait FraudProofSpecBase extends RollupSpecBase {
         ContextVar.of(1.toByte, lookup.proof.ergoValue),
         ContextVar.of(2.toByte, removal.proof.ergoValue)) ++ extraVars): _*)
 
-    val out = UTXO(evalContract(ctx), boxValue - bond, Seq.empty[Token], Seq(
+    val out = UTXO(evalContract(ctx), boxValue - bond, tokens, Seq(
       outTree, ErgoValue.of(1), ErgoValue.of(BigInt(bystanderScore).bigInteger),
       stateReg(periodStart, block, bondHeld - bond)))
 

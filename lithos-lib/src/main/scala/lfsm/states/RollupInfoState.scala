@@ -20,7 +20,7 @@ final case class RollupInfoState(phase: LFSMPhase, values: Vector[Long]) {
   def periodStart: Long = timed(0, "period start")
 
   /** Height the rollup's own block was mined at, fixed at genesis and never moved. */
-  def nispBlockHeight: Long = timed(1, "NISP block height")
+  def genesisBlockHeight: Long = timed(1, "genesis block height")
 
   /** Distributable ERG, bonds excluded. */
   def totalErgReward: Long = paying(0, "total ERG reward")
