@@ -73,25 +73,25 @@ object LFSMHelpers {
   // mempool before it has to be rebuilt.
   final val REGISTER_SLACK    = 720L // one day at 2-minute blocks
   final val MD_TOKEN_MAINNET = ErgoId.create("7f9609b232d3e2f0638d60a03a26831bf80155ed1e87a1b914e2623dfbd05518")
-  final val MD_TOKEN_TESTNET = ErgoId.create("7f9609b232d3e2f0638d60a03a26831bf80155ed1e87a1b914e2623dfbd05518")
-  final val MD_GENESIS_HEIGHT = 111755
+  final val MD_TOKEN_TESTNET = ErgoId.create("61836bb37229bedd3de8a21813c65d8d111fe50fb2137e3047e2c4ff449cd004")
+  final val MD_GENESIS_HEIGHT = 521056
 
   // Genesis Tx: 3469b46b3f04a9a6a93e6eb9ef507e0c9dafe12117e3bfd2c0cba486de27a5f9
   // UTXO id of initial MD box
-  final val MD_GENESIS_ID = "cb9b72be6a63471ef20f138494e58558fccc8e931901109e6838b6c9860f59cc"
+  final val MD_GENESIS_ID = "2ed003e1b82b0bdb6094142f82bc70d45ab3ada177d34a631f68d52f43e0a840"
 
   // Lithos token & emission parameters
   final val INIT_MINT = Parameters.OneErg * 1000000000 // 1 billion LIT
   final val LIT_ID = ErgoId.create("7b728ca02a23085f1f7093e949535938c55307ab1b61e848008201c5109bd18b")
   // CONFIRMED MAINNET ID
   final val LIT_ID_MAINNET = ErgoId.create("c1980d829988229516430a47a5eca376060b6ce859616db0936e78ab25cb6de7")
-  final val EMISSION_NFT = ErgoId.create("2900df8ddf4a1c343f6e8602a0d0f6e2e3667db2ee9ad23dc0746c5b57ac4a82")
+  final val EMISSION_NFT = ErgoId.create("8ebb219e7dceb5fd796eb6e52eb5b0ff040a23d5edaf5224eee456ee4db4877c")
   // TODO: Change before launch
   // Emission Config NFT
-  final val EMCONFIG_NFT = ErgoId.create("410116591473432aafc96d3d32dbb515fb76156bc832795b419f310a6e9aa455")
+  final val EMCONFIG_NFT = ErgoId.create("75dc8b682c4efdf7f3354ea1acb8799a37aa7203606480b36da027bb9813719a")
   // Ids and amount of proposition tokens on Emission contract
-  final val COLLAT_TOKEN = ErgoId.create("c4bf900750da88ad3e34c19132c840fe4a863b03eee91ea18cbc1bd34e4d1741")
-  final val QUEUE_TOKEN  = ErgoId.create("63e18668dd746bc19c8e321bfbf889a7161062c0394fbafbdd6232e8cc5dbace")
+  final val COLLAT_TOKEN = ErgoId.create("5c76ae9d3d01bcee13df0417a719af6d87b766ee72c21ce954dd8421a897a1cd")
+  final val QUEUE_TOKEN  = ErgoId.create("f31423f43a697602208d84f1288bcb8b9c1d5a8c9ead7e02d3f0f403525edc54")
   final val PROP_TOKEN_AMNT = Long.MaxValue
 
   final val PERMIT_FLOOR = 1000L * Parameters.OneErg
