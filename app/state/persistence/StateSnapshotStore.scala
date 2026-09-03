@@ -373,7 +373,7 @@ final class LevelDbStateSnapshotStore(store: KeyValueStore,
       referenced <- generationEntries.filter(entry => endsWith(entry._1, MetaSuffix))
         .foldLeft[Either[SnapshotError, Set[String]]](Right(Set.empty)) {
           case (result, (_, value)) => result.flatMap { digests =>
-            StateSnapshotCodec.decodeMeta(value, identity).left.map(Corrupt).map { meta =>
+            StateSnapshotCodec.decodeMetaForDeletion(value).left.map(Corrupt).map { meta =>
               digests ++ meta.dictionaryDigests
             }
           }
@@ -524,6 +524,34 @@ object StateSnapshotCodec {
     require(in.readInt() == SchemaVersion, "unsupported snapshot schema version")
     require(readIdentity(in) == expectedIdentity,
       "snapshot network, wallet, start height, or protocol identity does not match this client")
+    val cursor = readCursor(in)
+    val version = in.readLong()
+    val recentCursors = readCount(in, "recent cursor count")(_ => readCursor(in))
+    val minerFault = if (in.readBoolean()) Some(readString(in)) else None
+    val quarantined = readCount(in, "quarantine count")(_ => readQuarantine(in))
+      .map(fault => fault.rollupId -> fault).toMap
+    val routes = readStringMap(in, "route count")
+    val origins = readStringMap(in, "rollup origin count")
+    val miner = readMinerMetadata(in)
+    val token = if (in.readBoolean()) Some(ErgoId.create(readString(in))) else None
+    val rollups = readCount(in, "rollup metadata count") { _ =>
+      readString(in) -> readRollupMetadata(in)
+    }.toMap
+    requireDictionaryDigest(miner.dictionaryDigest, "Miner Dictionary")
+    rollups.foreach { case (id, rollup) =>
+      require(rollup.blockId == id, s"rollup metadata $id names block ${rollup.blockId}")
+      requireDictionaryDigest(rollup.dictionaryDigest, s"rollup $id")
+    }
+    require(in.available() == 0, "trailing bytes after snapshot metadata")
+    SnapshotMeta(CommittedSyncMetadata(cursor, version, rollups, routes, origins, miner, token,
+      minerFault, quarantined), recentCursors)
+  }
+  // Decode metadata for deletion, skipping certain checks.
+  def decodeMetaForDeletion(encoded: Array[Byte]): Either[String, SnapshotMeta] = attempt {
+    val in = openEntry(encoded)
+    in.readInt() // Magic is not checked during deletion
+    in.readInt() // Schema is not checked during deletion
+    readIdentity(in) // Identity is not checked during deletion
     val cursor = readCursor(in)
     val version = in.readLong()
     val recentCursors = readCount(in, "recent cursor count")(_ => readCursor(in))
