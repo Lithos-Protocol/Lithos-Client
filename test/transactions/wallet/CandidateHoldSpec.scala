@@ -70,8 +70,15 @@ class CandidateHoldSpec extends TestKit(ActorSystem("candidate-hold-spec", Candi
 
     val mgr = system.actorOf(Props(new WalletManager(ctx)))
     mgr ! RefreshBoxes
-    Thread.sleep(1200)
-    (mgr, TestProbe())
+
+    // Asked rather than slept on, and asked rather than selected: a selection would reserve the one
+    // box these properties are about.
+    val probe = TestProbe()
+    awaitAssert({
+      probe.send(mgr, GetSpendableBalance)
+      probe.expectMsgType[SpendableBalance](1.second).nanoErgs shouldEqual 5 * erg
+    }, 15.seconds, 200.millis)
+    (mgr, probe)
   }
 
   private def covering(mgr: ActorRef, probe: TestProbe, id: String): Seq[InputUTXO] = {
@@ -124,13 +131,17 @@ class CandidateHoldSpec extends TestKit(ActorSystem("candidate-hold-spec", Candi
     covering(mgr, probe, "lost-before-hold").map(_.value) shouldEqual Seq(5 * erg)
 
     probe.send(mgr, MarkReservationUncertain("lost-before-hold"))
-    awaitAssert(covering(mgr, probe, "after-2").map(_.value) shouldEqual Seq(5 * erg),
-      10.seconds, 300.millis)
 
+    // Asserted before the refresh below reclaims the lease, so the refusal is the manager reading a
+    // status it will not hold from, rather than a reservation that is simply no longer there.
+    // Deterministic: the uncertain message queues its own refresh behind this hold.
     withClue("a hold arriving after the lease went uncertain must be refused: ") {
       probe.send(mgr, HoldReservationForCandidate("lost-before-hold"))
       probe.expectMsg(5.seconds, ReservationHeldForCandidate("lost-before-hold", accepted = false))
     }
+
+    awaitAssert(covering(mgr, probe, "after-2").map(_.value) shouldEqual Seq(5 * erg),
+      10.seconds, 300.millis)
   }
 
   // ─── the refusal is knowledge, not a gap ──────────────────────────────────

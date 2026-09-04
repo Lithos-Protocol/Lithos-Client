@@ -2,7 +2,7 @@
   // FP_MalformedGenesis
   // Value: unspecified (0.001 ERG)
   // Proves fraud by showing that a super-share's collateral-spending genesis transaction
-  // is inproperly formatted, fabricated, or belongs to another miner.
+  // is improperly formatted, fabricated, or belongs to another miner.
 
   // We validate the following important rules about the genesis transaction, proven to be
   // included in the miner's share after successful evaluation of TransactionNotIncluded
@@ -338,8 +338,6 @@
   // Evaluation
   val minerNISP = nispTree.get(CTX_MINER_BYTES, CTX_LOOKUP_PROOF).get
   val minerShares = getSuperShares(minerNISP)
-  // TODO: During audit, re-verify all of the statements below and ensure they
-  // are correct
   val malformedShareExists = minerShares.exists{
     (share: Coll[Byte]) =>
       val parts = getShareParts(share)

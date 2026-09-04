@@ -96,6 +96,10 @@ object CollateralContract {
   }
 
   def mkEmissionsContract(ctx: BlockchainContext, collatPropBytesHash: Array[Byte],
+                          emissionGateHash: Array[Byte], litID: ErgoId): Contract =
+    mkEmissionsContract(ctx.getNetworkType, collatPropBytesHash, emissionGateHash, litID)
+
+  def mkEmissionsContract(networkType: NetworkType, collatPropBytesHash: Array[Byte],
                           emissionGateHash: Array[Byte], litID: ErgoId): Contract = {
     val constants = ConstantsBuilder
       .create()
@@ -107,13 +111,18 @@ object CollateralContract {
       .item("CONST_F2", Colls.fromArray(LFSMHelpers.FOUNDER_2.hashedPropBytes))
       .item("CONST_F3", Colls.fromArray(LFSMHelpers.FOUNDER_3.hashedPropBytes))
       .build()
-    Contract.fromErgoScript(ctx, constants, ScriptGenerator.mkCollatScript("LIT_Emissions"))
+    Contract.fromErgoScript(networkType, constants, ScriptGenerator.mkCollatScript("LIT_Emissions"), Seq.empty)
 
   }
 
   def mkEmissionsGuardContract(ctx: BlockchainContext, emissionId: ErgoId, emConfigId: ErgoId, collatPropBytesHash: Array[Byte],
+                       emissionGateHash: Array[Byte], litID: ErgoId): Contract =
+    mkEmissionsGuardContract(ctx.getNetworkType, emissionId, emConfigId, collatPropBytesHash,
+      emissionGateHash, litID)
+
+  def mkEmissionsGuardContract(networkType: NetworkType, emissionId: ErgoId, emConfigId: ErgoId, collatPropBytesHash: Array[Byte],
                        emissionGateHash: Array[Byte], litID: ErgoId): Contract = {
-    val emissionsContract = mkEmissionsContract(ctx, collatPropBytesHash, emissionGateHash, litID)
+    val emissionsContract = mkEmissionsContract(networkType, collatPropBytesHash, emissionGateHash, litID)
     val constants = ConstantsBuilder
       .create()
       .item("CONST_EMCONFIG_NFT", Colls.fromArray(emConfigId.getBytes))
@@ -121,7 +130,7 @@ object CollateralContract {
       .item("CONST_EM_SCRIPT_HASH", Colls.fromArray(emissionsContract.hashedValueBytes))
       .build()
 
-    Contract.fromErgoScript(ctx, constants, ScriptGenerator.mkCollatScript("Emission_Guard"))
+    Contract.fromErgoScript(networkType, constants, ScriptGenerator.mkCollatScript("Emission_Guard"), Seq.empty)
   }
   def mkEmConfigContract(ctx: BlockchainContext, ownerPK: Contract): Contract = {
     val constants = ConstantsBuilder
@@ -132,12 +141,15 @@ object CollateralContract {
   }
   // NOTE: The contract is never actually used in a box, its serialized value bytes are instead attached
   // as a context var to emissions.
-  def mkCollateralEnforcerContract(ctx: BlockchainContext, litID: ErgoId): Contract = {
+  def mkCollateralEnforcerContract(ctx: BlockchainContext, litID: ErgoId): Contract =
+    mkCollateralEnforcerContract(ctx.getNetworkType, litID)
+
+  def mkCollateralEnforcerContract(networkType: NetworkType, litID: ErgoId): Contract = {
     val constants = ConstantsBuilder
       .create()
       .item("CONST_LIT_ID", Colls.fromArray(litID.getBytes))
       .build()
-    Contract.fromErgoScript(ctx, constants, ScriptGenerator.mkCollatScript("Collateral_Enforcer"))
+    Contract.fromErgoScript(networkType, constants, ScriptGenerator.mkCollatScript("Collateral_Enforcer"), Seq.empty)
   }
 
   def coinsToIssue(height: Long): Long = {

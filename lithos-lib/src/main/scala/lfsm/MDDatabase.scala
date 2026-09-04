@@ -39,19 +39,16 @@ class MDDatabase(private val kvstore: KeyValueStore) {
     getAll.map(entry => kvstore.delete(entry._1).isRight).forall(identity)
 
   /**
-   * Drops the store when its schema is older than this build's, or was never written.
-   *
-   * Nothing kept here is authoritative. The data-box token is republished from committed sync state
-   * and the expiry is rewritten at the next registration, so re-deriving both costs less than reading
-   * one under an encoding that has since changed.
+   * Clears the store and stamps it when the stored schema is below this build's or absent, and
+   * stamps only if the clear completed. Nothing kept here is authoritative, so dropping it costs
+   * only the republish that refills it.
    *
    * @return whether anything was cleared
    */
   def migrate(): Boolean = {
-    val stored = getSchemaVersion
-    if (stored.exists(_ >= Schema)) false
+    if (getSchemaVersion.exists(_ >= Schema)) false
+    else if (!clearAll()) false
     else {
-      clearAll()
       setSchemaVersion(Schema)
       true
     }

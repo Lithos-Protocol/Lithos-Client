@@ -148,6 +148,10 @@ class LithosPool(options: Options,
   /** The header last published, so a refetch that changed nothing is not broadcast again. */
   private var servedMsg: Array[Byte] = Array.emptyByteArray
 
+  /** `System.nanoTime` when the last candidate went to the job manager, and which stage it was. */
+  private var candidateSentAt: Long = 0L
+  private var candidateStage: String = ""
+
   private def stillWaitingForGenesis: Boolean =
     candidateBuilder.isDefined && genesisDeadline.exists(System.currentTimeMillis() < _)
 
@@ -267,13 +271,15 @@ class LithosPool(options: Options,
     // ------------------------------------------------------------------
     case NewJobAvailable(template) =>
       lastJobAt = System.currentTimeMillis()
-      logger.info(s"Broadcasting new job ${template.jobId} to ${connections.size} miner(s)")
       connections.values.foreach(_ ! BroadcastJob(template))
+      logger.info(s"Broadcasting new job ${template.jobId} to ${connections.size} miner(s)" +
+        publicationLatency())
       stateFrame ! CheckBlock
 
     case JobUpdated(template) =>
-      logger.info(s"Broadcasting refreshed job ${template.jobId} to ${connections.size} miner(s)")
       connections.values.foreach(_ ! BroadcastJob(template))
+      logger.info(s"Broadcasting refreshed job ${template.jobId} to ${connections.size} miner(s)" +
+        publicationLatency())
 
     // ------------------------------------------------------------------
     // Connection lifecycle
@@ -334,6 +340,7 @@ class LithosPool(options: Options,
    */
   private def fetchBlockTemplate(): Unit =
     try {
+      val publicationStartedAtNanos = System.nanoTime()
       getCandidate.foreach { case (candidate, usedCollateral) =>
         // A mempool refresh often gets the candidate the node already had, because the mempool has
         // not moved since the last fetch. Publishing that is a notify that restarts every rig's work
@@ -345,6 +352,10 @@ class LithosPool(options: Options,
         if (java.util.Arrays.equals(candidate.msg, servedMsg)) ()
         else {
           servedMsg = candidate.msg
+          if (usedCollateral) {
+            candidateSentAt = publicationStartedAtNanos
+            candidateStage = if (servedCandidate.exists(_._3)) "augmented" else "genesis"
+          }
           // mustPublish, because getCandidate only answers with something it has just taken from the
           // node — which cost the node's copy of whatever miners were on.
           jobManagerActor ! ProcessTemplate(candidate, tau.bigInteger, usedCollateral,
@@ -459,6 +470,7 @@ class LithosPool(options: Options,
     Try(nodeInterface.nextBlockHeight()).toOption.flatten.foreach { height =>
       if (height != lastBlockHeight) {
         lastBlockHeight = height
+        candidateSentAt = 0L
         extrasRejectedAt = None
         rebuildsThisBlock = 0
         genesisDeadline = Some(System.currentTimeMillis() + candidateConfig.genesisWaitMs)
@@ -466,6 +478,18 @@ class LithosPool(options: Options,
         if (rejectedGenesisTxs.size > 64) rejectedGenesisTxs = Set.empty
         candidateBuilder.foreach(_ ! ChainAdvanced(height))
       }
+    }
+
+  /**
+   * `; candidateStage=X publicationMs=N` for the last collateral candidate sent to the job manager.
+   * Consumed on read, so a refresh publishing nothing new does not report the previous fetch again.
+   */
+  private def publicationLatency(): String =
+    if (!candidateConfig.logTimings || candidateSentAt == 0L) ""
+    else {
+      val elapsedMs = (System.nanoTime() - candidateSentAt) / 1000000L
+      candidateSentAt = 0L
+      s"; candidateStage=$candidateStage publicationMs=$elapsedMs"
     }
 
   /**

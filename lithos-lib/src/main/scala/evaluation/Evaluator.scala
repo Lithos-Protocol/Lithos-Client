@@ -1,11 +1,11 @@
 package evaluation
 
+import lfsm.contracts.FraudProofContracts.FraudProofSet
 import lfsm.states.Rollup
 import mutations.{BoxLoader, NodeWallet}
 import org.bouncycastle.util.encoders.Hex
 import org.ergoplatform.appkit.{BlockchainContext, ErgoProver, SignedTransaction}
 import org.slf4j.{Logger, LoggerFactory}
-import sigma.exceptions.InterpreterException
 import evaluation.Evaluator.{Clean, Failed, Fraud, ProofOutcome}
 import work.lithos.mutations.{Contract, InputUTXO, TxBuilder, UTXO}
 
@@ -13,14 +13,22 @@ import scala.concurrent.{ExecutionContext, Future}
 import scala.util.{Failure, Success, Try}
 
 /**
+ * @param fpSet      The compiled proof set. Maps a held script back to the builder that knows its
+ *                   context variables, and supplies the run order unless one is given.
+ * @param fpContracts Which proofs to try, in order. Empty runs the whole set; a subset is a test
+ *                   seam, used by `EvaluatorOutcomeSpec` to drive one proof at a time.
  * @param commitment Miner Dictionary state for `FP_NonMatchingCommitment`. Optional because the rest
  *                   of the set needs nothing outside the rollup, and a client whose dictionary is
- *                   faulted should still be able to run the other seven proofs.
+ *                   faulted should still be able to run the other eight proofs.
  */
 case class Evaluator(ctx: BlockchainContext, prover: NodeWallet, evalInput: InputUTXO, nispTree: Rollup,
-                     miners: Seq[Array[Byte]], fpControl: InputUTXO, loader: BoxLoader, fpContracts: Seq[Contract],
+                     miners: Seq[Array[Byte]], fpControl: InputUTXO, loader: BoxLoader,
+                     fpSet: FraudProofSet, fpContracts: Seq[Contract] = Seq.empty,
                      commitment: Option[CommitmentSource] = None) {
   private val logger: Logger = LoggerFactory.getLogger("Evaluator")
+
+  /** The proofs this evaluator runs, in order. */
+  private val runOrder: Seq[Contract] = if (fpContracts.isEmpty) fpSet.ordered else fpContracts
 
   /**
    * One proof against one miner, with a throw costing only that attempt.
@@ -29,7 +37,7 @@ case class Evaluator(ctx: BlockchainContext, prover: NodeWallet, evalInput: Inpu
                       fpContract: Contract,
                       initInputs: Option[Seq[InputUTXO]]): ProofOutcome =
     Try {
-      FraudProof.genFraudProof(ctx, fpContract, miner, nispTree, evalInput, fpControl, commitment)
+      FraudProof.genFraudProof(fpSet, ctx, fpContract, miner, nispTree, evalInput, fpControl, commitment)
         .attemptFraudProof(ctx, prover, TxBuilder(ctx), initInputs)
     } match {
       case Success(Some(tx)) => Fraud(tx)
@@ -47,12 +55,12 @@ case class Evaluator(ctx: BlockchainContext, prover: NodeWallet, evalInput: Inpu
    */
   private def verdict(miner: Array[Byte])
                      (initInputs: => Option[Seq[InputUTXO]]): Try[Option[(SignedTransaction, String)]] = {
-    logger.info(s"Starting ${fpContracts.size} evaluations for miner ${Hex.toHexString(miner)}")
+    logger.info(s"Starting ${runOrder.size} evaluations for miner ${Hex.toHexString(miner)}")
     var failures = Vector.empty[Throwable]
     var found = Option.empty[(SignedTransaction, String)]
     var idx = 0
-    while (found.isEmpty && idx < fpContracts.size) {
-      val fpContract = fpContracts(idx)
+    while (found.isEmpty && idx < runOrder.size) {
+      val fpContract = runOrder(idx)
       attempt(miner, fpContract, initInputs) match {
         case Fraud(tx) => found = Some(tx -> fpContract.hashedPropBytesHex)
         case Failed(ex) => failures :+= ex
@@ -62,7 +70,7 @@ case class Evaluator(ctx: BlockchainContext, prover: NodeWallet, evalInput: Inpu
     }
     if (found.isDefined) Success(found)
     else if (failures.isEmpty) Success(None)
-    else Failure(Evaluator.incompleteEvaluation(miner, fpContracts.size, failures))
+    else Failure(Evaluator.incompleteEvaluation(miner, runOrder.size, failures))
   }
 
   def evaluate: Seq[SignedTransaction] = {
@@ -89,8 +97,8 @@ case class Evaluator(ctx: BlockchainContext, prover: NodeWallet, evalInput: Inpu
 
   def evaluateFor(miner: Array[Byte], fpContractHashHex: String, initInputs: Seq[InputUTXO],
                   additionalOutputs: Seq[UTXO]): Option[SignedTransaction] = {
-    val fpContract = fpContracts.find(_.hashedPropBytesHex == fpContractHashHex).get
-    val fraudProof = FraudProof.genFraudProof(ctx, fpContract, miner, nispTree, evalInput, fpControl, commitment)
+    val fpContract = fpSet.ordered.find(_.hashedPropBytesHex == fpContractHashHex).get
+    val fraudProof = FraudProof.genFraudProof(fpSet, ctx, fpContract, miner, nispTree, evalInput, fpControl, commitment)
     fraudProof
       .attemptFraudProof(ctx, prover, TxBuilder(ctx), Some(initInputs), Some(additionalOutputs), includeFee = false)
   }
@@ -111,21 +119,20 @@ object Evaluator {
   class ProofsIncompleteException(msg: String) extends RuntimeException(msg)
 
   /**
-   * The failure to report when a miner's evaluation did not finish.
+   * The failure to report when a miner's evaluation did not finish. Names how many proofs could not
+   * answer and carries the rest as suppressed causes, so one log line holds every reason.
    *
-   * An `InterpreterException` is preferred if one occurred, because that is a broken proof contract
-   * rather than a missing input and the caller escalates it differently. The rest ride along as
-   * suppressed causes so one log line carries every reason.
+   * One type for every cause. The caller counts these against a retry bound and does not read the
+   * exception, so nothing is gained by preferring one of them.
    */
   private[evaluation] def incompleteEvaluation(miner: Array[Byte],
                                                proofs: Int,
                                                failures: Seq[Throwable]): Throwable = {
-    val chosen = failures.collectFirst { case ie: InterpreterException => ie }
-      .getOrElse(new ProofsIncompleteException(
-        s"${failures.size} of $proofs fraud proofs could not run for miner " +
-          s"${Hex.toHexString(miner)}, so no fraud verdict was reached: " +
-          failures.map(f => Option(f.getMessage).getOrElse(f.getClass.getSimpleName)).mkString("; ")))
-    failures.filterNot(_ eq chosen).foreach(chosen.addSuppressed)
+    val chosen = new ProofsIncompleteException(
+      s"${failures.size} of $proofs fraud proofs could not run for miner " +
+        s"${Hex.toHexString(miner)}, so no fraud verdict was reached: " +
+        failures.map(f => Option(f.getMessage).getOrElse(f.getClass.getSimpleName)).mkString("; "))
+    failures.foreach(chosen.addSuppressed)
     chosen
   }
 }

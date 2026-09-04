@@ -11,7 +11,7 @@ import akka.pattern.ask
 import akka.util.Timeout
 import transactions.rollups.{CommitmentTransactions, DataBoxSource}
 import transactions.wallet.{ReservationExpiredException, WalletSelector}
-import lfsm.{LFSMHelpers, MDDatabase}
+import lfsm.LFSMHelpers
 import scorex.utils.Longs
 import utils.Globals
 
@@ -41,19 +41,19 @@ class MDSyncTask @Inject()(system: ActorSystem,
   private val minerHash: Array[Byte] = nodeContext.getNodeWallet.contract.hashedPropBytes
   /** Zero until this miner's entry has been read; it never moves without a re-registration. */
   private val expiry = new java.util.concurrent.atomic.AtomicLong(0L)
-
-  // Before anything reads it. What it drops is re-derived: the data-box token from committed sync
-  // state, the expiry at the next registration.
-  if (Try(Globals.mdDB.migrate()).getOrElse(false))
-    logger.warn(s"Miner Dictionary store was below schema ${MDDatabase.Schema} and has been cleared; " +
-      "it refills as synchronization republishes")
+  /**
+   * Attempts spent reading the expiry, capped at [[MDSyncTask.MaxExpiryReads]]. Only incremented
+   * while the expiry is still unknown, so a successful read costs nothing further.
+   */
+  private val expiryReads = new java.util.concurrent.atomic.AtomicInteger(0)
 
   if (taskConfig.enabled) {
     system.scheduler.scheduleWithFixedDelay(taskConfig.startup, commitmentInterval) { () =>
       val view = Globals.syncView
-      if (view.canonical.available && dictionaryTrusted(view)) warnIfExpiring(view)
-      if (view.canonical.available &&
-        dictionaryTrusted(view) &&
+      // Read once: it logs its reason as a side effect, so asking twice reports twice.
+      val trusted = view.canonical.available && dictionaryTrusted(view)
+      if (trusted) warnIfExpiring(view)
+      if (trusted &&
         Globals.mdDB.getDataBoxToken.isEmpty &&
         // The dictionary is what says whether this miner is in it. The local token is a cache, and a
         // cleared store would otherwise read as never having registered.
@@ -92,7 +92,7 @@ class MDSyncTask @Inject()(system: ActorSystem,
     for {
       height <- view.cursor.map(_.height.toLong)
       validUntil <- registrationExpiry(view)
-      if height >= MDSyncTask.removalUnsafeFrom(validUntil)
+      if MDSyncTask.shouldWarn(height, validUntil)
     } logger.warn(s"This miner's Miner Dictionary registration expires at height $validUntil " +
       s"(now $height). Submissions after that are worthless, but do NOT remove or re-register " +
       s"before height ${MDSyncTask.removalSafeAt(validUntil)}: rollups opened up to expiry stay " +
@@ -105,8 +105,9 @@ class MDSyncTask @Inject()(system: ActorSystem,
    * registration, so one read answers every later tick without materializing a prover again.
    */
   private def registrationExpiry(view: SyncView): Option[Long] = {
-    if (expiry.get() == 0L && view.minerDictionaryMetadata.exists(_.hasMiner)) {
-      Try {
+    if (expiry.get() == 0L && view.minerDictionaryMetadata.exists(_.hasMiner) &&
+      expiryReads.getAndIncrement() < MDSyncTask.MaxExpiryReads) {
+      val attempt = Try {
         scala.concurrent.Await.result(syncHandler ? GetMinerDictionary, timeout.duration) match {
           case CurrentMinerDictionary(md) =>
             md.dictionary.copy().lookUp(minerHash).response.headOption
@@ -115,8 +116,17 @@ class MDSyncTask @Inject()(system: ActorSystem,
               .foreach(entry => expiry.set(Longs.fromByteArray(entry.slice(32, MDSyncTask.EntrySize))))
           case other => throw new IllegalStateException(s"Miner Dictionary unavailable: $other")
         }
-      }.failed.foreach(ex =>
-        logger.info(s"Could not read this miner's registration expiry: ${ex.getMessage}"))
+      }
+      // Keyed on the expiry still being unset rather than on the Try failing. An ask that answers
+      // while the entry is missing throws nothing and would otherwise go unreported.
+      if (expiry.get() == 0L) {
+        val reason = attempt.failed.map(_.getMessage)
+          .getOrElse("the dictionary reports this miner but holds no well-formed entry for it")
+        if (expiryReads.get() >= MDSyncTask.MaxExpiryReads)
+          logger.warn(s"Could not read this miner's registration expiry: $reason. Giving up; this " +
+            "miner will not be warned before its registration expires")
+        else logger.info(s"Could not read this miner's registration expiry: $reason")
+      }
     }
     Some(expiry.get()).filter(_ > 0L)
   }
@@ -142,6 +152,16 @@ object MDSyncTask {
   /** Where it closes: the last rollup that could have been opened under this entry has finished. */
   private[tasks] def removalSafeAt(validUntil: Long): Long = validUntil + LFSMHelpers.ROLLUP_LIFETIME
 
+  /**
+   * Whether this height is inside the window where removal is unsafe, which is what decides the
+   * warning. Named rather than inlined so the boundary is testable without an actor.
+   */
+  private[tasks] def shouldWarn(height: Long, validUntil: Long): Boolean =
+    height >= removalUnsafeFrom(validUntil)
+
   /** A dictionary entry is `[credentialId: 32][validUntil: 8]`. */
   private[tasks] final val EntrySize: Int = 40
+
+  /** Attempts at reading this miner's expiry before the warning is given up on. */
+  private[tasks] final val MaxExpiryReads: Int = 3
 }

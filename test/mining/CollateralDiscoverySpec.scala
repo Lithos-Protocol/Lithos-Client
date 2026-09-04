@@ -128,7 +128,10 @@ class CollateralDiscoverySpec extends AnyFlatSpec with Matchers with MockitoSuga
       val expected = CandidateTxBuilder.bestCandidates(
         builderOver(wallet, nodeOver(Seq(boxes), batch = 100)._1, batch = 100).loadCollateral(c), 520)
 
-      Seq(5, 10, 25).foreach { batch =>
+      // 1 is the boundary and the one that matters: `ConfigValidation` permits it, and 40 boxes at a
+      // batch of 1 is 40 requests. A scan bounded by pages rather than by boxes truncates here while
+      // every larger batch passes.
+      Seq(1, 2, 5, 10, 25).foreach { batch =>
         val paged = boxes.grouped(batch).toSeq
         val (api, calls) = nodeOver(paged, batch)
         val loaded = builderOver(wallet, api, batch).loadCollateral(c)
@@ -158,6 +161,20 @@ class CollateralDiscoverySpec extends AnyFlatSpec with Matchers with MockitoSuga
         builderOver(wallet, api, batch = 100).loadCollateral(c)
       }
       thrown.getMessage should include("offset 100")
+    }
+  }
+
+  "A scan over the protocol's whole carrier population" should "reach the live boxes at the end of it" in {
+    withNode { (c, wallet) =>
+      // The worst case the protocol can produce: the emission singleton, one unrecycled retirement
+      // proof behind each live box, and the full active set. The index is read ascending and the
+      // proofs are older, so every live box sits behind 101 carriers that are not part of the market.
+      val carriers = (emissionCarrier(c) +: (0 until EmissionSchedule.MAX_ACTIVE).map(spentCarrier(c, _))) ++
+        (0 until EmissionSchedule.MAX_ACTIVE).map(i => liveBox(c, i, baseFee, at = 500))
+      carriers.size shouldBe CandidateTxBuilder.MaxCollateralCarriers
+
+      val (api, _) = nodeOver(carriers.grouped(20).toSeq, batch = 20)
+      builderOver(wallet, api, batch = 20).loadCollateral(c).size shouldBe EmissionSchedule.MAX_ACTIVE
     }
   }
 

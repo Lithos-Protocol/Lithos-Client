@@ -418,8 +418,12 @@ class WalletManagerSpec extends TestKit(ActorSystem("wallet-manager-spec", Walle
   it should "refuse rather than reserve when only coinbases can cover it" in {
     // Refusing is the right ending: the caller drops the attempt and retries next tick, where a
     // reward selected and then filtered would have consumed and had to release a lease.
+    //
+    // Tracked on purpose. Asked with trackUsed = false there is no reservation either way, so the
+    // follow-up below would hold whether or not the refused request had taken one.
     val f = fixture(mkRewards = w => Seq(coinbase(w, 3 * erg)))
-    coveringP2PK(f, erg) shouldBe empty
+    f.probe.send(f.mgr, RetrieveCoveringP2PKInput(erg, trackUsed = true, reservationId = "refused-p2pk"))
+    f.probe.expectMsgType[WalletInputs].inputs shouldBe empty
 
     withClue("nothing was reserved, so the generic request can still have it: ") {
       covering(f, erg).map(_.value) shouldEqual Seq(3 * erg)

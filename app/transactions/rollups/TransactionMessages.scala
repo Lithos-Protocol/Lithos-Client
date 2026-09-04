@@ -147,8 +147,8 @@ object TransactionMessages {
   sealed trait MinerEvaluationResult
   case object NoFraudulence extends MinerEvaluationResult
   case class FraudFound(fp: String) extends MinerEvaluationResult
-  case object CriticalEvalError extends MinerEvaluationResult
-  case object NormalEvalError extends MinerEvaluationResult
+  /** A proof neither found fraud nor declined: it threw, so this miner has no verdict. */
+  case object EvalError extends MinerEvaluationResult
 
   case class StopEvaluating(rollupBlockId: String)
 
@@ -163,6 +163,7 @@ object TransactionMessages {
   case class LatestRollup(inputUTXO: InputUTXO, rollup: Rollup) extends LatestState
   // Exceptions
   case class RollupRemovedException(msg: String) extends Exception(msg)
+  case class NewlyGeneratedRollupException(msg: String) extends Exception(msg)
   case class StubInvalidException(msg: String) extends Exception(msg)
   case class ProjectionChangedException(msg: String) extends Exception(msg)
 }

@@ -21,7 +21,7 @@ import scala.util.Try
 /**
  * Assembles what `FP_NonMatchingCommitment` reads outside the rollup.
  *
- * Everything here is best effort and returns `None` rather than throwing: the other seven proofs need
+ * Everything here is best effort and returns `None` rather than throwing: the other eight proofs need
  * none of it, and a client whose Miner Dictionary is still catching up or has faulted should go on
  * slashing the fraud it can still see. What must not happen is a `CommitmentSource` that is present
  * but wrong — a missing MinerData box makes the proof index past its data inputs and throw, which

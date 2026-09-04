@@ -10,6 +10,8 @@ import org.scalatest.propspec.AnyPropSpec
 import org.scalatestplus.mockito.MockitoSugar
 import work.lithos.mutations.{Contract, InputUTXO, Token, UTXO}
 
+import sigma.exceptions.InterpreterException
+
 import scala.util.{Failure, Success, Try}
 
 /**
@@ -70,7 +72,8 @@ class EvaluatorOutcomeSpec extends AnyPropSpec with FraudProofSpecBase with Mock
       blockId = "bb" * 32, utxoId = dummyTxId)
 
     Evaluator(ctx, wallet, evalIn, rollup, Seq(accused(ctx)),
-      fpDataInput(ctx, proofs, LFSMHelpers.getFPToken(ctx)), new BoxLoader(ctx, mock[NodeApi]), proofs)
+      fpDataInput(ctx, proofs, LFSMHelpers.getFPToken(ctx)), new BoxLoader(ctx, mock[NodeApi]),
+      set(ctx), proofs)
   }
 
   private def verdictOf(e: Evaluator): Try[Option[(SignedTransaction, String)]] =
@@ -137,6 +140,60 @@ class EvaluatorOutcomeSpec extends AnyPropSpec with FraudProofSpecBase with Mock
     withCtx { ctx =>
       val e = evaluatorOver(ctx, cleanNisp(ctx), Seq(fpTransactionNotIncluded(ctx)))
       verdictOf(e) shouldEqual Success(None)
+    }
+  }
+
+  // ─── a failure is a failure, and what the ordering is worth ───────────────
+  //
+  // Every failure is one `EvalError`, counted against `MaxEvaluationAttempts` and retired after it.
+  // There is no exception type to sort on: the accused chooses what each proof is handed, and the
+  // types that arrive do not say whether the proof contract or the input is the broken one.
+
+  /**
+   * A header whose miner key is not a curve point, which is the shape `FP_MalformedGE` exists for.
+   * `withGroupElement` does not validate what it patches in, and 0xFF is not a legal compressed
+   * prefix, so decoding it fails rather than yielding some other point.
+   */
+  private def unreadableNisp(ctx: BlockchainContext): Array[Byte] =
+    NispFixtures.rawNisp(score,
+      NispFixtures.cleanShares(rollupBlock(ctx).toInt, NispFixtures.pkOf(miner(ctx)))
+        .map(s => NispFixtures.shareWithHeader(s,
+          NispFixtures.withGroupElement(s.headerBytes, Array.fill(33)(0xFF.toByte)))))
+
+  property("a header proof handed an undecodable key gives no verdict") {
+    withCtx { ctx =>
+      // Run alone, skipping the gate that would have caught it. The throw arrives as an
+      // InvocationTargetException wrapping `Invalid point encoding`, which is neither a verdict nor
+      // an InterpreterException — the type the classification used to sort on.
+      val verdict = verdictOf(evaluatorOver(ctx, unreadableNisp(ctx), Seq(fpNotInWindow(ctx))))
+
+      verdict.isFailure shouldBe true
+      verdict.failed.get should not be an[InterpreterException]
+    }
+  }
+
+  property("the same NISP is caught as fraud by the gate that runs before it") {
+    withCtx { ctx =>
+      // What the ordering buys, and why the property above is not reachable in production: run in
+      // the deployed order, FP_MalformedGE establishes the key is not a point and the rollup is
+      // slashed before any header proof is handed it.
+      val e = evaluatorOver(ctx, unreadableNisp(ctx), set(ctx).ordered)
+      verdictOf(e) match {
+        case Success(Some((_, hash))) =>
+          hash shouldEqual fpMalformedGE(ctx).hashedPropBytesHex
+        case other => fail(s"expected FP_MalformedGE to establish fraud, got $other")
+      }
+    }
+  }
+
+  property("a proof that cannot be built gives no verdict either") {
+    withCtx { ctx =>
+      // The other way a proof fails to answer, and a different exception type. Both leave the miner
+      // without a verdict, which is the whole of what the caller acts on.
+      val verdict = verdictOf(evaluatorOver(ctx, cleanNisp(ctx), Seq(unbuildable(ctx))))
+
+      verdict.isFailure shouldBe true
+      verdict.failed.get should not be an[InterpreterException]
     }
   }
 }

@@ -38,6 +38,9 @@ import play.api.{ConfigLoader, Configuration}
  * @param blockTxTimeout            How long to wait for the transaction actors to answer, in ms. The
  *                                  genesis transaction is never subject to this: it is published on
  *                                  its own before anything else is asked for.
+ * @param logTimings                Append how long each stage took to the candidate log lines. Off
+ *                                  by default: it is a `System.nanoTime` per stage and log noise on a
+ *                                  miner that is working.
  */
 case class CandidateConfig(collateralPoolSize: Int,
                            collateralRefreshInterval: Int,
@@ -45,7 +48,8 @@ case class CandidateConfig(collateralPoolSize: Int,
                            maxBlockTxs: Int,
                            genesisWaitMs: Int,
                            mempoolRefreshMs: Int,
-                           blockTxTimeout: Int)
+                           blockTxTimeout: Int,
+                           logTimings: Boolean)
 
 object CandidateConfig {
 
@@ -57,7 +61,8 @@ object CandidateConfig {
     maxBlockTxs = 5,
     genesisWaitMs = 1500,
     mempoolRefreshMs = 10000,
-    blockTxTimeout = 20000
+    blockTxTimeout = 20000,
+    logTimings = false
   )
 
   def apply(config: Configuration): CandidateConfig = {
@@ -74,7 +79,8 @@ object CandidateConfig {
       maxBlockTxs = int("maxBlockTxs", Default.maxBlockTxs),
       genesisWaitMs = int("genesisWaitMs", Default.genesisWaitMs),
       mempoolRefreshMs = int("mempoolRefreshMs", Default.mempoolRefreshMs),
-      blockTxTimeout = int("blockTxTimeout", Default.blockTxTimeout)
+      blockTxTimeout = int("blockTxTimeout", Default.blockTxTimeout),
+      logTimings = bool("logTimings", Default.logTimings)
     )
   }
 }

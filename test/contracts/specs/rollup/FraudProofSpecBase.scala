@@ -1,31 +1,17 @@
 package contracts.specs.rollup
 
 import lfsm.LFSMHelpers
-import lfsm.contracts.{FraudProofContracts, RollupContracts}
+import lfsm.contracts.FraudProofContracts.FraudProofSet
+import lfsm.contracts.RollupContracts
 import org.ergoplatform.appkit._
 import org.ergoplatform.appkit.scalaapi._
 import org.ergoplatform.sdk.ErgoId
 import org.scalatest.propspec.AnyPropSpec
 import sigma.Colls
+import transactions.ProtocolContracts
 import work.lithos.mutations.{Contract, InputUTXO, Token, UTXO}
 
 import scala.util.{Failure, Success, Try}
-
-/**
- * Compiled once and shared, in the order `Evaluator` runs them. The sigma compiler mutates
- * `_sourceContext` on shared AST nodes, so compiling a script twice throws.
- */
-object FraudProofSpecBase {
-  private var cache: Option[Seq[Contract]] = None
-
-  def compiled(ctx: BlockchainContext): Seq[Contract] = synchronized {
-    cache.getOrElse {
-      val all = FraudProofContracts.getFraudProofContracts(ctx)
-      cache = Some(all)
-      all
-    }
-  }
-}
 
 /**
  * The shared shape of a fraud-proof spend: `INPUTS(0)` the evaluation box, `INPUTS(1)` the prover's
@@ -40,10 +26,11 @@ object FraudProofSpecBase {
  */
 trait FraudProofSpecBase extends RollupSpecBase {
 
-  protected def fraudProofs(ctx: BlockchainContext): Seq[Contract] = FraudProofSpecBase.compiled(ctx)
+  /** The deployed set, in the order `Evaluator` runs them. */
+  protected def fraudProofs(ctx: BlockchainContext): Seq[Contract] = set(ctx).ordered
 
   /** Named off the compiled set, so a change to the try order does not silently retarget a spec. */
-  private def set(ctx: BlockchainContext) = FraudProofContracts.fraudProofSet(ctx)
+  protected def set(ctx: BlockchainContext): FraudProofSet = ProtocolContracts(ctx).fraudProofs
 
   protected def fpNonMatchingCommitment(ctx: BlockchainContext): Contract = set(ctx).nonMatchingCommitment
   protected def fpInvalidFormat(ctx: BlockchainContext): Contract = set(ctx).invalidFormat

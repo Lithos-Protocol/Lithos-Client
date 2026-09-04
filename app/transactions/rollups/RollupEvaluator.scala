@@ -6,19 +6,19 @@ import akka.util.Timeout
 import configs.{NodeContext, StateConfig}
 import evaluation.Evaluator
 import lfsm.LFSMHelpers
+import lfsm.contracts.FraudProofContracts.FraudProofSet
 import mutations.BoxLoader
 import org.bouncycastle.util.encoders.Hex
 import org.ergoplatform.appkit.SignedTransaction
 import org.slf4j.{Logger, LoggerFactory}
 import play.api.Configuration
 import play.api.libs.concurrent.InjectedActorSupport
-import sigma.exceptions.InterpreterException
 import state.messages.RollupMessages
 import state.messages.RollupMessages.{GetCurrentRollupCritical, RollupInfo, UpdateEvaluation}
 import transactions.ProtocolContracts
 import transactions.rollups.RollupEvaluator.{BatchEvaluated, EVAL_BATCH_SIZE, EvaluateNextBatch, EvaluationBatch}
-import transactions.rollups.TransactionMessages.{CriticalEvalError, EvaluationSet, FailedEvaluation, FraudBatch, FraudFound, LatestRollup, MinerEvaluationResult, NoFraudulence, NormalEvalError, RollupRemovedException, RollupTxStub, StopEvaluating, SuccessfulEvaluation}
-import work.lithos.mutations.{Contract, InputUTXO}
+import transactions.rollups.TransactionMessages.{EvalError, EvaluationSet, FailedEvaluation, FraudBatch, FraudFound, LatestRollup, MinerEvaluationResult, NoFraudulence, RollupRemovedException, RollupTxStub, StopEvaluating, SuccessfulEvaluation}
+import work.lithos.mutations.InputUTXO
 
 import javax.inject.{Inject, Named}
 import scala.collection.mutable.ArrayBuffer
@@ -47,12 +47,22 @@ class RollupEvaluator @Inject()(config: Configuration, nodeContext: NodeContext,
   private var evalMap: Map[String, RollupTxStub] = Map.empty
 
   /**
-   * Whether a batch is running. A batch is up to five rollups, each running seven proof contracts
+   * Whether a batch is running. A batch is up to five rollups, each running nine proof contracts
    * against every miner in it, which is minutes of interpreter and AVL work — and entries only leave
    * `evalMap` when that work reports back. Without this the four-minute tick starts the same rollups
    * again, doubling the load on the dispatcher where WalletManager's five-second asks are waiting.
    */
   private var evaluating: Boolean = false
+
+  /**
+   * Rollup id to evaluations that left a miner without a verdict. Dropped on a successful
+   * evaluation and at [[RollupEvaluator.MaxEvaluationAttempts]]; emptied whole above
+   * [[RollupEvaluator.MaxTrackedRollups]].
+   *
+   * Never pruned by membership, because neither `evalMap` nor an `EvaluationSet` holds the rollups
+   * still being retried.
+   */
+  private var failedAttempts: Map[String, Int] = Map.empty
 
   private var ticker: Option[Cancellable] = None
 
@@ -96,17 +106,17 @@ class RollupEvaluator @Inject()(config: Configuration, nodeContext: NodeContext,
 
     case EvaluationBatch(stubs) =>
       evaluating = true
-      // Off the actor thread, and sequential within one Future. Each rollup runs up to seven proofs
+      // Off the actor thread, and sequential within one Future. Each rollup runs up to nine proofs
       // against every miner in it, which is minutes of interpreter work — inline it would block this
       // mailbox, and running the batch in parallel would take several threads of the shared
       // tx-dispatcher where WalletManager's callers wait on 5-second asks. The contracts are fetched
       // in here too, since that opens a BlockchainContext.
       Future {
-        val fpContracts = getFPContracts
+        val fpSet = getFPSet
         stubs.foreach { s =>
           // Errors reaching here are the ordinary kind — a box lookup or a state timeout, since
           // per-miner failures are handled inside. Stop evaluating and pick it up next batch.
-          attemptEvaluation(s, fpContracts) match {
+          attemptEvaluation(s, fpSet) match {
             case Failure(ex) =>
               logger.error(s"Got error outside of evaluation attempt for rollup ${s.rollupBlockId}", ex)
               self ! StopEvaluating(s.rollupBlockId)
@@ -126,14 +136,34 @@ class RollupEvaluator @Inject()(config: Configuration, nodeContext: NodeContext,
 
     case SuccessfulEvaluation(rollupBlockId) =>
       logger.info(s"Successfully evaluated rollup ${rollupBlockId}")
+      failedAttempts -= rollupBlockId
       syncHandler ! UpdateEvaluation(rollupBlockId)
       self ! StopEvaluating(rollupBlockId)
 
     case FailedEvaluation(rollupTxStub, fpMap) =>
       if (fpMap.isEmpty) {
-        // Explanation in attemptEvaluation()
-        logger.warn(s"Updating evaluation state for rollup ${rollupTxStub.rollupBlockId} with critical errors")
-        syncHandler ! UpdateEvaluation(rollupTxStub.rollupBlockId)
+        val rollupId = rollupTxStub.rollupBlockId
+        // Emptied whole rather than evicted one key at a time.
+        if (failedAttempts.size >= RollupEvaluator.MaxTrackedRollups) {
+          logger.warn(s"Counting failed evaluations for ${failedAttempts.size} rollups; clearing " +
+            "the counts, so any rollup mid-retry starts its attempts again")
+          failedAttempts = Map.empty
+        }
+        val attempts = failedAttempts.getOrElse(rollupId, 0) + 1
+        failedAttempts += rollupId -> attempts
+        if (attempts < RollupEvaluator.MaxEvaluationAttempts)
+          // Left unevaluated, so the next EvaluationSet offers it again.
+          logger.warn(s"Rollup $rollupId left a miner without a verdict, attempt $attempts of " +
+            s"${RollupEvaluator.MaxEvaluationAttempts}; leaving it for a later batch")
+        else {
+          logger.error("=" * 100)
+          logger.error(s"GIVING UP ON ROLLUP $rollupId after " +
+            s"${RollupEvaluator.MaxEvaluationAttempts} evaluation attempts. Every attempt left at " +
+            "least one miner without a verdict, so no fraud proof could be run against them.")
+          logger.error("=" * 100)
+          failedAttempts -= rollupId
+          syncHandler ! UpdateEvaluation(rollupId)
+        }
       } else {
         val updatedStubs = fpMap.map(fpm => rollupTxStub.copy(fpInfo = Some(fpm._1 -> fpm._2))).toSeq
 
@@ -153,7 +183,7 @@ class RollupEvaluator @Inject()(config: Configuration, nodeContext: NodeContext,
       evalMap = evalMap - rollupBlockId
   }
 
-  private def attemptEvaluation(stub: RollupTxStub, fpContracts: Seq[Contract]) = {
+  private def attemptEvaluation(stub: RollupTxStub, fpSet: FraudProofSet) = {
     Try {
       client.execute {
         ctx =>
@@ -182,11 +212,11 @@ class RollupEvaluator @Inject()(config: Configuration, nodeContext: NodeContext,
             }
             val fpControl = LFSMHelpers.getFPControlBox(ctx)
             // Only FP_NonMatchingCommitment reads this, and only for miners it finds registered.
-            // None leaves that one proof unbuildable and the other seven unaffected.
+            // None leaves that one proof unbuildable and the other eight unaffected.
             val commitment = CommitmentSources.load(ctx, nodeContext.getNodeApi, syncHandler,
               currentMiners.toSeq)
             val evaluator = Evaluator(ctx, wallet, latestRollup.inputUTXO, latestRollup.rollup, currentMiners,
-              fpControl, new BoxLoader(ctx, nodeContext.getNodeApi), fpContracts, commitment)
+              fpControl, new BoxLoader(ctx, nodeContext.getNodeApi), fpSet, commitment = commitment)
             val evals = evaluator.evaluateSync
             val minerEvaluationResults = evals.map(processEvaluationResult(stub, _))
             manageEvaluationState(stub, minerEvaluationResults)
@@ -206,14 +236,10 @@ class RollupEvaluator @Inject()(config: Configuration, nodeContext: NodeContext,
     val tryEval = minerEval._2
 
     tryEval match {
-      case Failure(crit: InterpreterException) =>
-        logger.error(s"Got critical error during evaluation of rollup ${stub.rollupBlockId} for" +
-          s" miner hash ${Hex.toHexString(minerEval._1)}", crit)
-        minerEval._1 -> CriticalEvalError
       case Failure(err) =>
-        logger.error(s"Got normal error during evaluation of rollup ${stub.rollupBlockId} for" +
+        logger.error(s"Got error during evaluation of rollup ${stub.rollupBlockId} for" +
           s" miner hash ${Hex.toHexString(minerEval._1)}", err)
-        minerEval._1 -> NormalEvalError
+        minerEval._1 -> EvalError
       case Success(evalResult) =>
         evalResult match {
           case Some(fpTx) => minerEval._1 -> FraudFound(fpTx._2)
@@ -222,37 +248,25 @@ class RollupEvaluator @Inject()(config: Configuration, nodeContext: NodeContext,
     }
   }
 
-  private def manageEvaluationState(stub: RollupTxStub, results:  Seq[(Array[Byte], MinerEvaluationResult)]): Unit = {
-    val critErrors = results.filter(_._2 == CriticalEvalError)
-    if (critErrors.nonEmpty) {
-      logger.error(s"Stopping evaluation due to critical errors in rollup ${stub.rollupBlockId}")
-      // Critical errors should never occur, as they indicate problems with
-      // the fraud proof contract itself. However, if they are found
-      // we should send a failed eval with empty fraud proofs. If such an error
-      // can only happen under special conditions, this ensures that
-      // un-affected rollups can still be evaluated properly without
-      // critically failing rollups clogging up the evalMap and therefore
-      // every evaluation batch until their phase changes.
+  private def manageEvaluationState(stub: RollupTxStub, results: Seq[(Array[Byte], MinerEvaluationResult)]): Unit = {
+    if (results.exists(_._2 == EvalError)) {
+      // Sent with an empty map, which is what the FailedEvaluation handler counts and bounds. Any
+      // fraud proof found beside the error is dropped and re-found on a later attempt.
+      logger.error(s"Rollup ${stub.rollupBlockId} has ${results.count(_._2 == EvalError)} of " +
+        s"${results.size} miner(s) without a verdict; retrying the rollup")
       self ! FailedEvaluation(stub, Map.empty)
+    } else if (results.forall(_._2 == NoFraudulence)) {
+      self ! SuccessfulEvaluation(stub.rollupBlockId)
     } else {
-      if (results.forall(_._2 == NoFraudulence)) {
-        self ! SuccessfulEvaluation(stub.rollupBlockId)
-      } else if (results.exists(_._2 == NormalEvalError)) {
-        // For normal(non interpreter exception) eval errors, we will stop evaluating for right now.
-        // As the evaluation state is not changing, they should get another chance to be evaluated
-        // when the next evaluation set is sent from TransactionProcessor
-        self ! StopEvaluating(stub.rollupBlockId)
-      } else {
-        val minerFPs = results
-          .filter(_._2.isInstanceOf[FraudFound])
-          .map(mfp => mfp._1 -> mfp._2.asInstanceOf[FraudFound].fp)
-          .toMap
-        self ! FailedEvaluation(stub, minerFPs)
-      }
+      val minerFPs = results
+        .filter(_._2.isInstanceOf[FraudFound])
+        .map(mfp => mfp._1 -> mfp._2.asInstanceOf[FraudFound].fp)
+        .toMap
+      self ! FailedEvaluation(stub, minerFPs)
     }
   }
 
-  private def getFPContracts = client.execute(ctx => ProtocolContracts.fraudProofs(ctx))
+  private def getFPSet = client.execute(ctx => ProtocolContracts(ctx).fraudProofs)
 
   private def latestRollupState(rollupTxStub: RollupTxStub) = {
     Try {
@@ -284,6 +298,16 @@ class RollupEvaluator @Inject()(config: Configuration, nodeContext: NodeContext,
 }
 
 object RollupEvaluator {
+
+  /**
+   * Evaluations a rollup may leave a miner without a verdict in before it is retired. Ticks are
+   * four minutes apart, so a fault has about forty minutes to clear.
+   */
+  private[rollups] final val MaxEvaluationAttempts: Int = 10
+
+  /** Rollups counted at once, above which the counts are dropped. Over the twenty a set can offer. */
+  private[rollups] final val MaxTrackedRollups: Int = 64
+
   /** Maximum number of rollups to evaluate. */
   private final val EVAL_BATCH_SIZE: Int = 5
 

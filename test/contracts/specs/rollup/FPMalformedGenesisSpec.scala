@@ -378,7 +378,7 @@ object FPMalformedGenesisSpec {
   def compiled(ctx: BlockchainContext, collateral: Contract, holding: Contract): Contract =
     synchronized {
       cache.getOrElse {
-        val contract = FraudProofContracts.mkMalformedGenesisContract(ctx, collateral, holding)
+        val contract = FraudProofContracts.mkMalformedGenesisContract(ctx.getNetworkType, collateral, holding)
         cache = Some(contract)
         contract
       }

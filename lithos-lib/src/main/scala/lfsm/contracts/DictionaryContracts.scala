@@ -33,8 +33,14 @@ object DictionaryContracts {
    * never be built against logic this build does not also produce. Value bytes, not prop bytes: the
    * guard hashes what it executes. Compiles two scripts, so callers should cache.
    */
-  def mkMinerDataContract(networkType: NetworkType, mdToken: ErgoId): Contract = {
-    val logic = mkMinerDataLogicContract(networkType, mdToken)
+  def mkMinerDataContract(networkType: NetworkType, mdToken: ErgoId): Contract =
+    mkMinerDataGuard(networkType, mkMinerDataLogicContract(networkType, mdToken))
+
+  /**
+   * The guard for logic already compiled, so a caller holding both compiles each once. The hash is
+   * of the logic's value bytes, which is what the guard executes.
+   */
+  def mkMinerDataGuard(networkType: NetworkType, logic: Contract): Contract = {
     val constants = ConstantsBuilder.create()
       .item("CONST_MINERDATA_LOGIC_HASH", Colls.fromArray(logic.hashedValueBytes))
       .build()
@@ -50,11 +56,10 @@ object DictionaryContracts {
     Contract.fromErgoScript(ctx, constants, ScriptGenerator.mkDictionaryScript("MinerData_Guard"))
   }
 
-  private def dictionaryConstants(networkType: NetworkType, mdToken: ErgoId): Constants =
+  private def dictionaryConstants(mdToken: ErgoId, minerDataHash: Array[Byte]): Constants =
     ConstantsBuilder.create()
       .item("CONST_MD_ID", Colls.fromArray(mdToken.getBytes))
-      .item("CONST_MINERDATA_PROPBYTES",
-        Colls.fromArray(mkMinerDataContract(networkType, mdToken).hashedPropBytes))
+      .item("CONST_MINERDATA_PROPBYTES", Colls.fromArray(minerDataHash))
       .item("CONST_MIN_DATA_BOX_AMNT", LFSMHelpers.MIN_DATA_BOX_AMNT)
       .item("CONST_NISP_WINDOW", LFSMHelpers.NISP_WINDOW)
       .item("CONST_DATA_LIFETIME", LFSMHelpers.DATA_LIFETIME)
@@ -63,7 +68,14 @@ object DictionaryContracts {
       .build()
 
   def mkMinerDictionaryContract(networkType: NetworkType, mdToken: ErgoId): Contract =
-    Contract.fromErgoScript(networkType, dictionaryConstants(networkType, mdToken),
+    mkMinerDictionaryContract(networkType, mdToken,
+      mkMinerDataContract(networkType, mdToken).hashedPropBytes)
+
+  /** For a caller that has already compiled the MinerData guard, so it is not compiled again. */
+  def mkMinerDictionaryContract(networkType: NetworkType,
+                                mdToken: ErgoId,
+                                minerDataHash: Array[Byte]): Contract =
+    Contract.fromErgoScript(networkType, dictionaryConstants(mdToken, minerDataHash),
       ScriptGenerator.mkDictionaryScript("MinerDictionary"), Seq.empty[Mutator])
 
   def mkMinerDictionaryContract(ctx: BlockchainContext, mdToken: ErgoId): Contract = {

@@ -15,8 +15,9 @@ import org.scalatestplus.mockito.MockitoSugar
 import play.api.Configuration
 import support.{FakeCache, FakeNodeContext}
 import transactions.wallet.WalletManager
-import transactions.wallet.WalletMessages.RefreshBoxes
+import transactions.wallet.WalletMessages.{GetSpendableBalance, RefreshBoxes, SpendableBalance}
 
+import scala.concurrent.duration._
 import scala.util.Success
 
 /**
@@ -88,8 +89,15 @@ class FraudProofFundingSpec extends TestKit(ActorSystem("fp-funding-spec", Fraud
 
     val mgr: ActorRef = system.actorOf(Props(new WalletManager(ctx)))
     mgr ! RefreshBoxes
-    // The refresh runs off the mailbox; settle it before selecting, as the wallet specs do.
-    Thread.sleep(1200)
+
+    // The refresh runs off the mailbox, and the balance is both halves of one BoxesRefreshed, so it
+    // reports the total only once the wallet boxes and the rewards have both been applied. Asked
+    // rather than slept on, and asked rather than selected, because a selection would reserve.
+    val probe = TestProbe()
+    awaitAssert({
+      probe.send(mgr, GetSpendableBalance)
+      probe.expectMsgType[SpendableBalance](1.second).nanoErgs shouldEqual walletErg + rewardErg
+    }, 15.seconds, 200.millis)
 
     val handler = TestActorRef[SubmissionHandler](Props(new SubmissionHandler(
       quietConfig, ctx, new FakeCache, storedDataBox,
@@ -117,7 +125,15 @@ class FraudProofFundingSpec extends TestKit(ActorSystem("fp-funding-spec", Fraud
     // Refusing is the right ending. The batch drops this attempt and retries, where taking the
     // coinbase would have cost the miner the reward for 720 blocks to save one retry. It surfaces as
     // the same exception an uncoverable request has always raised, so the caller needs no new branch.
-    val (handler, _) = handlerOver(walletErg = erg / 10, rewardErg = 5 * erg)
+    val (handler, wallet) = handlerOver(walletErg = erg / 10, rewardErg = 5 * erg)
+
+    // The generic request first, on this same wallet. Its message says "P2PK" whatever went wrong,
+    // so a refusal alone cannot tell "only a reward covers this" from "this wallet is empty" — and
+    // an empty wallet is what an unfinished refresh looks like. Taking the coinbase here is what
+    // says the reward box is present and selectable at the moment the P2PK request is refused.
+    val generic = handler.initialTxInputs(oneFee, isFPTx = false)
+    wallet.rewardTrees.keys should contain(generic.maxBy(_.value).contract.ergoTreeHex)
+
     val refused = intercept[NotEnoughInputsException] {
       handler.initialTxInputs(oneFee, isFPTx = true)
     }

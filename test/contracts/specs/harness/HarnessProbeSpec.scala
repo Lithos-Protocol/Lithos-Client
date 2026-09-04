@@ -53,15 +53,15 @@ class HarnessProbeSpec extends AnyPropSpec with ContractSpecBase {
         "rollups/Holding"                 -> holding,
         "rollups/FP_Control_Testnet"      -> Try(RollupContracts.mkFPControlTestnetContract(
                                                ctx, ContractProbe.dummyDlog(ctx))),
-        "fraudproofs/FP_InvalidDiff"      -> Try(FraudProofContracts.mkInvalidDiffContract(ctx)),
-        "fraudproofs/FP_InvalidFormat"    -> Try(FraudProofContracts.mkInvalidFormatContract(ctx)),
-        "fraudproofs/FP_NonUniqueHeaders" -> Try(FraudProofContracts.mkNonUniqueHeadersContract(ctx)),
-        "fraudproofs/FP_NotInWindow"      -> Try(FraudProofContracts.mkNotInWindowContract(ctx)),
-        "fraudproofs/FP_IncorrectN"       -> Try(FraudProofContracts.mkIncorrectNContract(ctx)),
-        "fraudproofs/FP_MalformedGE"      -> Try(FraudProofContracts.mkMalformedGEContract(ctx)),
-        "fraudproofs/FP_TransactionNotIncluded" -> Try(FraudProofContracts.mkTransactionNotIncludedContract(ctx)),
+        "fraudproofs/FP_InvalidDiff"      -> Try(FraudProofContracts.mkInvalidDiffContract(ctx.getNetworkType)),
+        "fraudproofs/FP_InvalidFormat"    -> Try(FraudProofContracts.mkInvalidFormatContract(ctx.getNetworkType)),
+        "fraudproofs/FP_NonUniqueHeaders" -> Try(FraudProofContracts.mkNonUniqueHeadersContract(ctx.getNetworkType)),
+        "fraudproofs/FP_NotInWindow"      -> Try(FraudProofContracts.mkNotInWindowContract(ctx.getNetworkType)),
+        "fraudproofs/FP_IncorrectN"       -> Try(FraudProofContracts.mkIncorrectNContract(ctx.getNetworkType)),
+        "fraudproofs/FP_MalformedGE"      -> Try(FraudProofContracts.mkMalformedGEContract(ctx.getNetworkType)),
+        "fraudproofs/FP_TransactionNotIncluded" -> Try(FraudProofContracts.mkTransactionNotIncludedContract(ctx.getNetworkType)),
         "fraudproofs/FP_NonMatchingCommitment" -> Try(FraudProofContracts.mkNonMatchingCommitmentContract(
-          ctx, lfsm.LFSMHelpers.getMDToken(ctx.getNetworkType))),
+          ctx.getNetworkType, lfsm.LFSMHelpers.getMDToken(ctx.getNetworkType))),
         "dictionaries/MinerDictionary"    -> Try(DictionaryContracts.mkMinerDictionaryContract(
                                                ctx.getNetworkType, LFSMHelpers.MD_TOKEN_TESTNET)),
         "dictionaries/MinerData"          -> Try(DictionaryContracts.mkMinerDataContract(

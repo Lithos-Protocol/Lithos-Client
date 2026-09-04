@@ -85,6 +85,10 @@ class CandidateBuilder(client: ErgoClient,
   /** The block a collection round is running for, if one is. */
   private var collectingFor: Option[Int] = None
 
+  /** `System.nanoTime` when the in-flight build and collection began; 0 when none is. */
+  private var buildStartedAt: Long = 0L
+  private var collectStartedAt: Long = 0L
+
   /** A height that asked for a build while one was already running. */
   private var pendingBuild: Option[Int] = None
 
@@ -203,7 +207,7 @@ class CandidateBuilder(client: ErgoClient,
         buildRetries = 0
         val pkg = BlockPackage(height, data)
         currentPackage = Some(pkg)
-        publish(pkg)
+        publish(pkg, "genesisBuildMs", buildStartedAt)
         if (config.blockTransactions && !blockTxsBlockedAt.contains(height)) collectBlockTxs(height)
       } else {
         logger.info(s"Discarding genesis transaction for block $height: the chain is at $blockHeight")
@@ -217,7 +221,7 @@ class CandidateBuilder(client: ErgoClient,
           case Some(pkg) =>
             val updated = pkg.withBlockTxs(txs)
             currentPackage = Some(updated)
-            publish(updated)
+            publish(updated, "augmentedBuildMs", collectStartedAt)
           case None =>
             logger.info(s"Discarding ${txs.size} transaction(s) for block $height: " +
               "the package they were built for is gone")
@@ -289,11 +293,17 @@ class CandidateBuilder(client: ErgoClient,
   private def dropCandidates(height: Int): Unit =
     txSources.foreach(_ ! CandidateTxsDropped(height))
 
-  private def publish(pkg: BlockPackage): Unit = {
+  private def publish(pkg: BlockPackage, stage: String, startedAtNanos: Long): Unit = {
     logger.info(s"Ready: ${pkg.describe} with" +
-      s" txSize: ${pkg.collateral.txBytes.length} and collatBytes: ${pkg.collateral.collateralBoxBytes.length}")
+      s" txSize: ${pkg.collateral.txBytes.length} and collatBytes: " +
+      s"${pkg.collateral.collateralBoxBytes.length}${elapsed(stage, startedAtNanos)}")
     context.parent ! BlockPackageReady(pkg)
   }
+
+  /** `; genesisBuildMs=N`, or empty when timing is off or the stage never started. */
+  private def elapsed(stage: String, startedAtNanos: Long): String =
+    if (!config.logTimings || startedAtNanos == 0L) ""
+    else s"; $stage=${(System.nanoTime() - startedAtNanos) / 1000000L}"
 
   /** Runs a build that arrived while another was in flight, if it is still the block being mined. */
   private def drainPending(): Unit =
@@ -312,6 +322,7 @@ class CandidateBuilder(client: ErgoClient,
       pendingBuild = Some(height)
     } else {
       building = true
+      buildStartedAt = System.nanoTime()
       val snapshot = collateralSet
       val sticky = selectedId
       // knownSpent as well as skipped, because the bootstrap branch below loads its own set and
@@ -357,6 +368,7 @@ class CandidateBuilder(client: ErgoClient,
   private def collectBlockTxs(height: Int): Unit =
     if (collectingFor.isEmpty && txSources.nonEmpty && config.maxBlockTxs > 0) {
       collectingFor = Some(height)
+      collectStartedAt = System.nanoTime()
       context.system.scheduler.scheduleOnce(
         config.blockTxTimeout.milliseconds, self, CollectTimedOut(height))(context.dispatcher)
 

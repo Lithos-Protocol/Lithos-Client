@@ -10,7 +10,7 @@ import sigma.data.CBigInt
 import sigma.{AvlTree, Coll}
 import state.messages.SyncMessages.SyncCursor
 import state.messages.{BlockInfo, BlockTx, InputSpendingProof, TxOutput}
-import utils.Helpers
+import transactions.ProtocolContracts
 
 import scala.util.control.NonFatal
 
@@ -40,15 +40,12 @@ final case class SyncProtocolContext(networkType: NetworkType,
 
 object SyncProtocolContext {
   def apply(networkType: NetworkType, rollupStartHeight: Int, localMinerHash: Array[Byte]): SyncProtocolContext = {
-    val contracts = networkType match {
-      case NetworkType.MAINNET =>
-        (Helpers.holdingMainnet, Helpers.evalMainnet, Helpers.payoutMainnet, Helpers.collateralMainnet)
-      case NetworkType.TESTNET =>
-        (Helpers.holdingTestnet, Helpers.evalTestnet, Helpers.payoutTestnet, Helpers.collateralTestnet)
-    }
+    // Keyed by network rather than by context, because synchronization builds these constants before
+    // any blockchain context exists.
+    val contracts = ProtocolContracts.forNetwork(networkType)
     SyncProtocolContext(networkType, rollupStartHeight, localMinerHash.clone(),
-      contracts._1.ergoTreeHex, contracts._2.ergoTreeHex, contracts._3.ergoTreeHex,
-      contracts._4.ergoTreeHex, LFSMHelpers.getMDToken(networkType))
+      contracts.holding.ergoTreeHex, contracts.eval.ergoTreeHex, contracts.payout.ergoTreeHex,
+      contracts.collateral.ergoTreeHex, LFSMHelpers.getMDToken(networkType))
   }
 }
 

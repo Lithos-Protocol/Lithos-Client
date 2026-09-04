@@ -151,9 +151,8 @@ object RollupTransactions {
   /**
    * What paying one miner out of this rollup will need, decided before anything is built.
    *
-   * `isFinal` is the spend that empties the box. It is the one that carries the LIT division
-   * residue: every share is floored against the original R7 snapshot, so after several partial
-   * payouts the box holds the last miner's exact share plus what the flooring left behind.
+   * `isFinal` is the spend that empties the box, and the one carrying the LIT residue left by
+   * flooring every earlier share against the original R7 snapshot.
    */
   final case class PayoutPlan(isFinal: Boolean, amountToPay: Long, amountTokens: Long,
                               litResidue: Long) {
@@ -202,17 +201,16 @@ object RollupTransactions {
     val lookUp = copiedTree.lookUp(wallet.contract.hashedPropBytes)
     val delete = copiedTree.delete(wallet.contract.hashedPropBytes)
     val score = Longs.fromByteArray(lookUp.response.head.ergoValue.getValue.toArray.slice(0, 8))
-    val totalScore = payInput.registers(2).getValue.asInstanceOf[CBigInt].wrappedValue
     val state = stateOf(payInput, LFSMPhase.PAYOUT)
     val nftToken = RollupProtocol.rollupNFT(payInput.tokens)
     val litHeld = RollupProtocol.litToken(payInput.tokens)
 
-    // A miner takes their pro-rata share of the reward and their own bond back. The bond was never
-    // part of the reward, so it is added after the division rather than divided.
+    // Every decision this build turns on. Taken from the plan rather than repeated here, so a caller
+    // that asked what the payout needs and the builder that makes it cannot answer differently.
+    val plan = planPayout(wallet, payInput, latestState)
     val bondRefund = RollupProtocol.bondForScore(score)
-    val amountToPay =
-      LFSMHelpers.paymentFromScore(score, totalScore, state.totalErgReward) + bondRefund
-    val amountTokens = LFSMHelpers.paymentFromScore(score, totalScore, state.totalLitReward)
+    val amountToPay = plan.amountToPay
+    val amountTokens = plan.amountTokens
     val inputWithContext = payInput.setCtxVars(
       ContextVar.of(0.toByte,
         ErgoValue.of(Array(Colls.fromArray(wallet.contract.hashedPropBytes)),
@@ -224,7 +222,7 @@ object RollupTransactions {
       if (litHeld.isDefined && amountTokens > 0) Seq(Token(litHeld.get.id, amountTokens))
       else Seq.empty[Token]
 
-    if (amountToPay < payInput.value && payInput.value - amountToPay > 1000000L) {
+    if (!plan.isFinal) {
       // The NFT stays with the successor; only the LIT paid out leaves it.
       val nextTokens = Seq(nftToken) ++
         litHeld.filter(_.amount > amountTokens).map(_ - amountTokens).toSeq
@@ -243,9 +241,8 @@ object RollupTransactions {
     } else {
       // The final spend. It carries the LIT the floored shares left behind, which has to leave in an
       // output of its own: the box is being consumed and only the NFT is burned.
-      val residue = RollupProtocol.litToken(payInput.tokens)
-        .filter(_.amount > amountTokens)
-        .map(t => Token(t.id, t.amount - amountTokens))
+      val residue = litHeld.filter(_ => plan.litResidue > 0)
+        .map(t => Token(t.id, plan.litResidue))
       if (residue.isDefined && feeOutputs.isEmpty)
         throw new IllegalArgumentException(
           s"final payout leaves ${residue.get.amount} LIT, which needs an ERG-bearing output this " +
@@ -294,11 +291,11 @@ object RollupTransactions {
                        commitment: Option[CommitmentSource] = None): SignedTransaction = {
 
     // Compiled once for the JVM's life. This runs inside `attemptTx`, which retries up to five
-    // times, so compiling the seven proofs per attempt was 35 compilations for one slash.
-    val fpContracts = ProtocolContracts.fraudProofs(ctx)
+    // times, so compiling the nine proofs per attempt was 45 compilations for one slash.
+    val fpSet = ProtocolContracts(ctx).fraudProofs
     val fpControl = LFSMHelpers.getFPControlBox(ctx)
     val evaluator = Evaluator(ctx, wallet, evalInput, latestState.rollup, Seq.empty,
-      fpControl, new BoxLoader(ctx, Globals.getNodeConfig.getNodeApi), fpContracts, commitment)
+      fpControl, new BoxLoader(ctx, Globals.getNodeConfig.getNodeApi), fpSet, commitment = commitment)
     val concreteEval = evaluator.evaluateFor(miner, fpContractHashHex, walletInputs, feeOutputs)
     concreteEval.get
   }

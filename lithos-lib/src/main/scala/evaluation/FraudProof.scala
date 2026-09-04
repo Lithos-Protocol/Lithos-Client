@@ -1,6 +1,6 @@
 package evaluation
 
-import lfsm.contracts.FraudProofContracts
+import lfsm.contracts.FraudProofContracts.FraudProofSet
 import lfsm.states.{Rollup, RollupInfoState}
 import lfsm.{LFSMPhase, RollupProtocol}
 import mutations.{BoxLoader, NodeWallet}
@@ -205,6 +205,7 @@ object FraudProof {
   /**
    * Defines `FraudProof` mapping to `FraudProofContract`, this method generates the `FraudProof`
    * associated with a given contract
+   * @param set The compiled proof set the held contract is identified against
    * @param ctx Context to generate contracts
    * @param contract `Contract` to find FraudProof` for
    * @param miner Miner to check for fraud
@@ -214,13 +215,12 @@ object FraudProof {
    * @param commitment Miner Dictionary state, needed only by `FP_NonMatchingCommitment`. Absent means
    *                   that proof cannot be built, which is a skipped proof rather than a silent pass
    */
-  def genFraudProof(ctx: BlockchainContext, contract: Contract,
+  def genFraudProof(set: FraudProofSet, ctx: BlockchainContext, contract: Contract,
                      miner: Array[Byte], nispTree: Rollup, evalInput: InputUTXO,
                      fpControl: InputUTXO,
                      commitment: Option[CommitmentSource] = None): FraudProof = {
-    // Identified against the compiled set rather than by recompiling each candidate in turn, which
-    // was eight compilations for every proof attempted against every miner.
-    val set = FraudProofContracts.fraudProofSet(ctx)
+    // Identified against the caller's compiled set rather than by recompiling each candidate in turn,
+    // which was nine compilations for every proof attempted against every miner.
     val held = contract.hashedPropBytesHex
     def is(fpContract: Contract): Boolean = fpContract.hashedPropBytesHex == held
 

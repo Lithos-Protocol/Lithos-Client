@@ -41,12 +41,13 @@ final case class CollateralCandidate(input: InputUTXO, inclusionHeight: Int, fin
 object CandidateTxBuilder {
 
   /**
-   * Pages of the collateral token index a single load will walk.
+   * Boxes carrying the collateral token that a single load will read: `MAX_ACTIVE` live boxes, one
+   * unrecycled retirement proof behind each, and the emission singleton.
    *
-   * At the configured maximum batch of 100 this is 2,000 carriers against 100 live boxes and one
-   * emission singleton, so the rest is headroom for unconsumed proof-of-spend boxes.
+   * Counted in boxes rather than pages, so the batch size decides how many calls the scan costs and
+   * never which boxes it reaches.
    */
-  private[mining] final val MaxCollateralPages: Int = 20
+  private[mining] final val MaxCollateralCarriers: Int = 2 * EmissionSchedule.MAX_ACTIVE + 1
 
   /**
    * Confirmed age at which a box stops competing on its bid and starts competing on age alone.
@@ -105,16 +106,16 @@ class CandidateTxBuilder(prover: NodeWallet, nodeApi: NodeApi, config: Candidate
     // and hex-encodes it on every call, and these run once per box across the whole active set.
     val gateTree = c.gate.ergoTreeHex
     val collateralTree = c.collateral.ergoTreeHex
+    // Collateral-shaped but not necessarily under this build's script. Proof-of-spend boxes carry
+    // the token too, and the gate-tree test is what keeps them out of the count below.
     val boxes = collateralCarriers(collateralTree)
-      .filter(b => carriesOne(b, LFSMHelpers.COLLAT_TOKEN) &&
-        b.box.additionalRegisters.ordered.size >= 5 &&
-        b.ergoTree != gateTree)
+      .filter(b => collateralShaped(b) && b.ergoTree != gateTree)
 
     // A box under a different collateral script is unspendable here — its gate hash, LIT id or
     // holding hash are not the ones this client builds against. Only the emission box mints the
     // collateral token and it mints into one script, so this can only mean the compiled contract
     // has drifted from the deployed one, and every Lithos block is being missed until it is fixed.
-    val usable = boxes.filter(_.ergoTree == collateralTree)
+    val usable = boxes.filter(usableCollateral(_, collateralTree))
     if (usable.size < boxes.size)
       logger.error(s"${boxes.size - usable.size} of ${boxes.size} collateral boxes are NOT under the " +
         s"collateral script this build compiles (${collateralTree.take(16)}...) and were " +
@@ -269,10 +270,11 @@ class CandidateTxBuilder(prover: NodeWallet, nodeApi: NodeApi, config: Candidate
     val carriers = Seq.newBuilder[IndexedBox]
     var paging = Paging.all(batch)
     var live = 0
-    var pages = 0
+    var seen = 0
     var exhausted = false
 
-    while (!exhausted && live < EmissionSchedule.MAX_ACTIVE && pages < CandidateTxBuilder.MaxCollateralPages) {
+    while (!exhausted && live < EmissionSchedule.MAX_ACTIVE &&
+      seen < CandidateTxBuilder.MaxCollateralCarriers) {
       val page = nodeApi.unspentBoxesByTokenId(LFSMHelpers.COLLAT_TOKEN.toString, paging,
         SortDirection.Asc, MempoolOptions.ConfirmedOnly) match {
         case Success(boxes) => boxes
@@ -283,20 +285,28 @@ class CandidateTxBuilder(prover: NodeWallet, nodeApi: NodeApi, config: Candidate
             s"ranked: ${ex.getMessage}")
       }
       carriers ++= page
-      live += page.count(_.ergoTree == collateralTree)
+      live += page.count(usableCollateral(_, collateralTree))
+      seen += page.size
       exhausted = page.size < batch
       paging = paging.next
-      pages += 1
     }
 
-    // Reported rather than refused: the cap rests on how many unconsumed proof-of-spend boxes can
-    // pile up, which is not a figure this client controls
+    // Reported rather than refused. More carriers than the protocol can produce means emission has
+    // stopped recycling retirement proofs, and refusing here would stop collateral mining outright.
     if (!exhausted && live < EmissionSchedule.MAX_ACTIVE)
-      logger.error(s"Stopped scanning collateral carriers after $pages pages of $batch with only " +
-        s"$live live boxes found; the ranking below is over an incomplete active set")
+      logger.error(s"Stopped scanning collateral carriers at $seen boxes with only $live live " +
+        "found; the ranking below is over an incomplete active set")
 
     carriers.result()
   }
+
+  /** One collateral token and the five registers a live box carries; says nothing about the script. */
+  private def collateralShaped(b: IndexedBox): Boolean =
+    carriesOne(b, LFSMHelpers.COLLAT_TOKEN) && b.box.additionalRegisters.ordered.size >= 5
+
+  /** The one test the ranked set is filtered by, so the scan's early exit counts what it will keep. */
+  private def usableCollateral(b: IndexedBox, collateralTree: String): Boolean =
+    b.ergoTree == collateralTree && collateralShaped(b)
 
   /** What the finder's LIT box has always been worth, and the floor a bare fee box has to clear. */
   private val FinderBoxValue: Long = 100000L

@@ -171,7 +171,7 @@ class FraudProofOrderingSpec extends AnyPropSpec with FraudProofSpecBase {
    */
   property("sequence: every proof that reads a NISP runs after the two gates") {
     withCtx { ctx =>
-      val deployed = FraudProofContracts.getFraudProofContracts(ctx).map(_.hashedPropBytesHex)
+      val deployed = fraudProofs(ctx).map(_.hashedPropBytesHex)
       deployed.distinct.size shouldBe deployed.size
       deployed.size shouldBe 9
 
@@ -213,9 +213,9 @@ class FraudProofOrderingSpec extends AnyPropSpec with FraudProofSpecBase {
         1, 0L, lfsm.states.RollupInfoState.evaluation(0L, 0L, 0L), 0L, 0, hasMiner = false,
         evaluated = false, blockId = "", utxoId = "")
       val evalIn = fundingInput(ctx, miner(ctx))
-      FraudProofContracts.getFraudProofContracts(ctx).foreach { c =>
+      fraudProofs(ctx).foreach { c =>
         val built = scala.util.Try(evaluation.FraudProof.genFraudProof(
-          ctx, c, Array.fill(32)(0.toByte), rollup, evalIn, evalIn,
+          set(ctx), ctx, c, Array.fill(32)(0.toByte), rollup, evalIn, evalIn,
           Some(evaluation.CommitmentSource(
             FraudProofOrderingSpec.noDictionary, evalIn, Map.empty))))
         withClue(s"${c.hashedPropBytesHex.take(16)} has no builder: ") {

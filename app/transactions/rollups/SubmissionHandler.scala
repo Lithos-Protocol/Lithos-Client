@@ -4,6 +4,7 @@ import akka.actor.{Actor, ActorRef}
 import akka.pattern.ask
 import akka.util.Timeout
 import configs.{NodeContext, StateConfig, StratumConfig, TasksConfig}
+import lfsm.LFSMPhase.HOLDING
 import lfsm.contracts.FraudProofContracts
 import lfsm.states.Rollup
 import mutations.NotEnoughInputsException
@@ -271,10 +272,9 @@ class SubmissionHandler @Inject()(config: Configuration, nodeContext: NodeContex
                 CandidateTx.EvalTransform)
 
             case Payout =>
-              // A final payout with LIT left over needs an ERG-bearing change output, which a
-              // fee-less transaction balancing on the rollup box alone cannot fund. Left to the
-              // funded copy, which has a fee box to draw on; the stub stays queued either way, so
-              // the payout still happens, it just does not ride in this miner's own block.
+              // Skipped here and left to the funded copy. A final payout with LIT left over needs
+              // an ERG-bearing change output, which a fee-less transaction balancing on the rollup
+              // box alone cannot fund. The stub stays queued, so the payout still happens.
               if (RollupTransactions.planPayout(wallet, latest.inputUTXO, latest).needsChangeOutput)
                 throw StubInvalidException(
                   s"final payout for rollup ${stub.rollupBlockId} leaves LIT change and cannot be " +
@@ -358,9 +358,8 @@ class SubmissionHandler @Inject()(config: Configuration, nodeContext: NodeContex
     val ergForFees = initialTxInfo.feesToCreate.values.toSeq.sum
     // Reserved on selection, not after the send. EmissionHandler draws from the same WalletManager,
     // and the gap between selecting and sending spans retries and their sleeps.
-    // A fraud proof pays the slashed bond to input 1's own proposition, so this input must be plain
-    // P2PK. A matured reward box here is contract-valid and silently relocks the reward for 720
-    // blocks under the miner-reward script.
+    // P2PK-only for a fraud proof, which pays the slashed bond to input 1's own proposition. A
+    // matured reward box here is contract-valid and silently relocks the reward for 720 blocks.
     val reservation =
       if (!isFPTx) walletSelector.reserve(ergForFees)
       else walletSelector.reserveCoveringP2PK(ergForFees)
@@ -495,6 +494,8 @@ class SubmissionHandler @Inject()(config: Configuration, nodeContext: NodeContex
                 attemptFailure
               case Failure(_: NotEnoughInputsException) =>
                 attemptFailure
+              case Failure(_: NewlyGeneratedRollupException) =>
+                attemptFailure
               case Failure(ex) =>
                 logger.error(s"Got error while submitting initial transaction with rollup ${s.rollupBlockId}", ex)
                 attemptFailure
@@ -539,6 +540,8 @@ class SubmissionHandler @Inject()(config: Configuration, nodeContext: NodeContex
       case Failure(_: RollupRemovedException) =>
         ()
       case Failure(_: StubInvalidException) =>
+        ()
+      case Failure(_: NewlyGeneratedRollupException) =>
         ()
       case Failure(exception) =>
         logger.error(s"Got failure for rollup ${stub.rollupBlockId} attempting ${stub.txType}", exception)
@@ -753,6 +756,9 @@ class SubmissionHandler @Inject()(config: Configuration, nodeContext: NodeContex
         case Failure(invalidated: StubInvalidException) =>
           logger.warn(invalidated.getMessage)
           return lastResult
+        case Failure(newGen: NewlyGeneratedRollupException) =>
+          logger.warn(newGen.getMessage)
+          return lastResult
         case Failure(_: NotEnoughInputsException) =>
           // Can only happen if this is an initial tx candidate, so we can
           // let real error handling happen there. However, it will not get solved
@@ -880,7 +886,9 @@ class SubmissionHandler @Inject()(config: Configuration, nodeContext: NodeContex
         timeout.duration)
       rollupInfo match {
         case RollupMessages.CurrentRollup(utxoId, rollup, mempoolState) =>
-          if (mempoolState.isDefined) {
+          if(rollup.phase == HOLDING && rollup.startHeight == client.execute(_.getHeight)){
+            Failure(NewlyGeneratedRollupException(s"Cannot submit NISPs to newly generated rollup ${rollup.blockId}"))
+          } else if (mempoolState.isDefined) {
             if (!mempoolState.get.toBeRemoved) {
               logger.info(s"Using mempool state for rollup ${rollupTxStub.rollupBlockId}" +
                 s" with synced id $utxoId and mempool id ${mempoolState.get.asInput.id}")
@@ -909,9 +917,8 @@ object SubmissionHandler {
 
   /**
    * Whether a stub may go into the candidate for `blockHeight`, built in a context at `tipHeight`.
-   *
-   * The tip is required as well because the transaction is built and signed in a tip-height context.
-   * Work that only becomes valid at the candidate height cannot be signed here and waits a block.
+   * Both are required: work valid at only one of the two cannot be both signed here and accepted
+   * there, so it waits a block.
    */
   private[rollups] def eligibleForCandidate(stub: RollupTxStub, rollup: Rollup,
                                             tipHeight: Int, blockHeight: Int): Boolean =

@@ -6,18 +6,18 @@ import org.scalatest.BeforeAndAfterAll
 import org.scalatest.flatspec.AnyFlatSpecLike
 import org.scalatest.matchers.should.Matchers
 import play.api.Configuration
-import state.messages.RollupMessages.{GetCurrentRollupCritical, RollupUnavailable}
+import state.messages.RollupMessages.{GetCurrentRollupCritical, RollupUnavailable, UpdateEvaluation}
 import support.FakeNodeContext
 import transactions.rollups.RollupEvaluator.EvaluateNextBatch
 import transactions.rollups.TransactionMessages.RollupTxType.NISPEvaluation
-import transactions.rollups.TransactionMessages.{EvaluationSet, RollupTxStub}
+import transactions.rollups.TransactionMessages.{EvaluationSet, FailedEvaluation, RollupTxStub, SuccessfulEvaluation}
 
 import scala.concurrent.duration._
 
 /**
  * The in-flight guard on `RollupEvaluator`.
  *
- * A batch is up to five rollups, each running seven proof contracts against every miner in it —
+ * A batch is up to five rollups, each running nine proof contracts against every miner in it —
  * minutes of interpreter and AVL work — and entries only leave `evalMap` when that work reports
  * back. Without a guard the four-minute tick starts the same rollups again, and the duplicate runs
  * on the ten-thread pool where `WalletManager`'s five-second asks are waiting.
@@ -118,6 +118,56 @@ class RollupEvaluatorSpec extends TestKit(ActorSystem("rollup-evaluator-spec", R
     }, 10.seconds, 100.millis)
     second.blockId shouldEqual "rollup-b"
     f.sync.reply(RollupUnavailable("finish the reopened-guard test batch"))
+  }
+
+  "A rollup whose proofs keep failing" should "be retried until its attempts run out, then retired" in {
+    // The accused chooses what each proof is handed, so one failed evaluation must not retire a
+    // rollup. The count has to survive the rollup leaving evalMap, which StopEvaluating does after
+    // every batch, and a set that does not mention it, since an EvaluationSet is truncated to twenty.
+    val f = fixture()
+    val a = stub("rollup-a")
+
+    (1 until RollupEvaluator.MaxEvaluationAttempts).foreach { attempt =>
+      f.evaluator ! EvaluationSet(Seq(a))
+      f.evaluator ! FailedEvaluation(a, Map.empty[Array[Byte], String])
+      withClue(s"attempt $attempt of ${RollupEvaluator.MaxEvaluationAttempts} must not retire it: ") {
+        f.sync.expectNoMessage(1.second)
+      }
+
+      // A tick with another rollup queued and this one not, which is where StopEvaluating has just
+      // left it. A count pruned against evalMap is dropped here and the attempts never run out.
+      f.evaluator ! EvaluationSet(Seq(stub(s"rollup-filler-$attempt")))
+      awaitAssert({
+        f.evaluator ! EvaluateNextBatch
+        f.sync.expectMsgType[GetCurrentRollupCritical](1.second)
+      }, 10.seconds, 100.millis)
+      f.sync.reply(RollupUnavailable("finish the filler batch"))
+    }
+
+    f.evaluator ! EvaluationSet(Seq(a))
+    f.evaluator ! FailedEvaluation(a, Map.empty[Array[Byte], String])
+    f.sync.expectMsg(10.seconds, UpdateEvaluation("rollup-a"))
+  }
+
+  "A rollup that evaluates cleanly" should "not carry its earlier failures" in {
+    // The count is dropped on success, so a rollup that fails once and then evaluates does not
+    // arrive at its next failure one attempt from being retired.
+    val f = fixture()
+    val a = stub("rollup-a")
+    f.evaluator ! EvaluationSet(Seq(a))
+
+    f.evaluator ! FailedEvaluation(a, Map.empty[Array[Byte], String])
+    f.sync.expectNoMessage(1.second)
+
+    f.evaluator ! SuccessfulEvaluation("rollup-a")
+    f.sync.expectMsg(10.seconds, UpdateEvaluation("rollup-a"))
+
+    // Back to a full budget: two more failures still must not retire it.
+    (1 until RollupEvaluator.MaxEvaluationAttempts).foreach { _ =>
+      f.evaluator ! EvaluationSet(Seq(a))
+      f.evaluator ! FailedEvaluation(a, Map.empty[Array[Byte], String])
+      f.sync.expectNoMessage(1.second)
+    }
   }
 
   "An empty queue" should "not produce a batch at all" in {

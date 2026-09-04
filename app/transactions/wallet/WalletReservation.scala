@@ -36,14 +36,14 @@ final class WalletReservation private[wallet](val id: String,
       try selector.holdReservationForCandidate(id)
       catch {
         case NonFatal(ex) =>
-          // A lost or late acknowledgement does not say whether the hold was applied, and nothing
-          // else can end this lease: Candidate has no TTL and release() cannot leave it.
+          // Marked uncertain, which is the only ending left: a lost acknowledgement does not say
+          // whether the hold was applied, Candidate has no TTL, and release() cannot leave it.
           try uncertain()
           catch { case NonFatal(cleanupEx) => ex.addSuppressed(cleanupEx) }
           throw ex
       }
     if (!held) {
-      // An explicit refusal is knowledge: the manager still owns the lease and did not move it.
+      // Left alone on an answered refusal, which says the manager still owns the lease.
       state.set(3)
       throw new ReservationExpiredException(
         s"Wallet reservation $id expired before it could be held for a candidate")
