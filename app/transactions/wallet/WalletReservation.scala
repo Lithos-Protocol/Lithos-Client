@@ -32,7 +32,18 @@ final class WalletReservation private[wallet](val id: String,
   def holdForCandidate(): Unit = {
     if (!state.compareAndSet(0, 4))
       throw new ReservationExpiredException(s"Wallet reservation $id cannot be held for a candidate")
-    if (!selector.holdReservationForCandidate(id)) {
+    val held =
+      try selector.holdReservationForCandidate(id)
+      catch {
+        case NonFatal(ex) =>
+          // A lost or late acknowledgement does not say whether the hold was applied, and nothing
+          // else can end this lease: Candidate has no TTL and release() cannot leave it.
+          try uncertain()
+          catch { case NonFatal(cleanupEx) => ex.addSuppressed(cleanupEx) }
+          throw ex
+      }
+    if (!held) {
+      // An explicit refusal is knowledge: the manager still owns the lease and did not move it.
       state.set(3)
       throw new ReservationExpiredException(
         s"Wallet reservation $id expired before it could be held for a candidate")

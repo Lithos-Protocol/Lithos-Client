@@ -44,6 +44,8 @@ class EmissionBuilderSpec extends AnyPropSpec with EmissionSpecBase with Mockito
       throw new IllegalStateException("a builder under test asked the wallet for funds")
     def reserveCovering(value: Long): WalletReservation =
       throw new IllegalStateException("a builder under test asked the wallet for one input")
+    def reserveCoveringP2PK(value: Long): WalletReservation =
+      throw new IllegalStateException("a builder under test asked the wallet for one P2PK input")
     def reserveKnown(inputs: Seq[InputUTXO]): WalletReservation =
       throw new IllegalStateException("a builder under test asked the wallet to hold known change")
     def giveBack(boxes: Seq[InputUTXO]): Unit = ()

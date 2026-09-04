@@ -32,8 +32,9 @@ class FPMalformedGenesisSpec extends AnyPropSpec with EmissionSpecBase with Frau
 
   private val score = 100000L
 
+  /** Compiled once: the sigma compiler mutates shared AST nodes, so one script twice can throw. */
   private def malformedGenesis(ctx: BlockchainContext): Contract =
-    FraudProofContracts.mkMalformedGenesisContract(ctx, collateralContract(ctx), holdingContract(ctx))
+    FPMalformedGenesisSpec.compiled(ctx, collateralContract(ctx), holdingContract(ctx))
 
   /** One built genesis transaction, and the pieces a super-share carries from it. */
   private case class Genesis(tx: Array[Byte], collat: InputUTXO, lenderKey: Array[Byte])
@@ -365,4 +366,21 @@ class FPMalformedGenesisSpec extends AnyPropSpec with EmissionSpecBase with Frau
   transitionChecks("malformedGenesis") { ctx =>
     proofOver(ctx, genesisFor(ctx, contractOf(proverWith(ctx, otherSecret)).hashedPropBytes))
   }
+}
+
+object FPMalformedGenesisSpec {
+  private var cache: Option[Contract] = None
+
+  /**
+   * This spec's own copy, built from the spec base's holding contract so the transactions it
+   * assembles are under the same script the proof is compiled against.
+   */
+  def compiled(ctx: BlockchainContext, collateral: Contract, holding: Contract): Contract =
+    synchronized {
+      cache.getOrElse {
+        val contract = FraudProofContracts.mkMalformedGenesisContract(ctx, collateral, holding)
+        cache = Some(contract)
+        contract
+      }
+    }
 }

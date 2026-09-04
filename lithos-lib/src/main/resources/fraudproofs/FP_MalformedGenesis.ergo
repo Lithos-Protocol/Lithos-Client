@@ -25,7 +25,11 @@
   // (which would be tough anyway, since parentIds are not necessarily canonical blocks
 
   // ANOTHER NOTE:
-  // This proof constrains on some parts of the protocol that do not necessarily have to be constrained:
+  // This proof constrains on some parts of the protocol that do not necessarily have to be constrained.
+  // This is mostly done to reduce complexity and assumptions. The additional constraints are here:
+  // The collateral transaction does not enforce INPUTS.size == 1, it only enforces onlyOne on the collateral box.
+  // However this proof may reduce to true if a second input is added. This just means collateral extensions
+  // require changing this proof before they are launched.
   // The collateral transaction must have less than 8 tokens in it. This is not enforced by the collateral contract,
   // but it is checked here.
 
@@ -347,9 +351,10 @@
       // Verify transaction spends the provided collateral box.
       val spendsSuppliedBox = unsignedTx.slice(CONST_ID_START, CONST_ID_END) == collatId
 
-      // Provided bytes really are a collateral box: the deployed script, and the collateral token that
-      // only the emission box mints. Without these a miner fabricates a box, hashes it, and builds a
-      // transaction naming that hash.
+      // The supplied bytes have a collateral box's shape: the ergotree, and the collateral
+      // token. This bounds what the id above can be the hash of; it does not
+      // technically show the box existed
+
       val collateral = collateralWellFormed(collatBytes)
 
       // The holding output's own NFT takes the id of the box the transaction spends, which is what a

@@ -190,20 +190,14 @@ class CollateralMarketApiImpl @Inject()(nodeContext: NodeContext,
 
       val litIdStr = st.lit.map(_.id).getOrElse(LFSMHelpers.LIT_ID).toString
       var permitLocked = BigInt(0)
-      var ergQueued = BigInt(0)
       tx.scanByToken(ctx, LFSMHelpers.QUEUE_TOKEN, tx.withMempool) { page =>
         permitLocked += page
           .map(b => BigInt(permitOf(b, litIdStr))).sum
-        ergQueued += page
-          .map(b => BigInt(b.value)).sum
       }
 
-      var collatLocked = BigInt(0)
-
-      tx.scanByToken(ctx, LFSMHelpers.COLLAT_TOKEN, tx.withMempool) { page =>
-        collatLocked += page
-          .map(b => BigInt(b.value)).sum
-      }
+      // Filtered, not the raw token index
+      val collatLocked = liveBoxes(ctx, tx, tx.contracts(ctx).gate.ergoTreeHex)
+        .map(b => BigInt(b.value)).sum
 
       val (emittedTotal, _, founders) = EmissionSchedule.emissionAt(st.currentBlock, st.litHeld)
       val epoch = st.currentBlock / EmissionSchedule.EPOCH_LENGTH

@@ -1,6 +1,6 @@
 package transactions.wallet
 
-import akka.actor.{Actor, Cancellable}
+import akka.actor.{Actor, ActorRef, Cancellable}
 import akka.pattern.{ask, pipe}
 import akka.util.Timeout
 import configs.NodeContext
@@ -249,23 +249,13 @@ class WalletManager @Inject()(nodeContext: NodeContext) extends Actor with Injec
       sender() ! WalletInputs(Seq.empty, reservationId)
 
     case RetrieveCoveringInput(erg, trackUsed, reservationId, _) =>
-      val replyTo = sender()
-      Try(selectLargest(erg)) match {
-        case Failure(ex: InsufficientWalletFundsException) =>
-          logger.debug(s"Wallet could not provide one input covering $erg nanoERG: ${ex.getMessage}")
-          replyTo ! WalletInputs(Seq.empty, reservationId)
-        case Failure(ex) =>
-          logger.error(s"Failed to select wallet inputs (needed $erg nanoERG): ${ex.getMessage}", ex)
-          replyTo ! WalletInputs(Seq.empty, reservationId)
-        case Success(selected) =>
-          if (selected.isDefined) {
-            if (trackUsed) reserve(selected.toSeq.map(_.id.toString), reservationId)
-            replyTo ! WalletInputs(selected.toSeq, reservationId)
-          } else {
-            logger.error(s"Failed to find large singular wallet UTXO (needed minimum of $erg nanoERG)")
-            replyTo ! WalletInputs(Seq.empty, reservationId)
-          }
-      }
+      answerCovering(sender(), erg, trackUsed, reservationId, "wallet or reward")(selectLargest)
+
+    case RetrieveCoveringP2PKInput(_, _, reservationId, deadlineMillis) if now() >= deadlineMillis =>
+      sender() ! WalletInputs(Seq.empty, reservationId)
+
+    case RetrieveCoveringP2PKInput(erg, trackUsed, reservationId, _) =>
+      answerCovering(sender(), erg, trackUsed, reservationId, "P2PK")(selectCoveringP2PK)
 
     case ReserveKnownInputs(_, reservationId, deadlineMillis) if now() >= deadlineMillis =>
       sender() ! WalletInputs(Seq.empty, reservationId)
@@ -664,14 +654,42 @@ class WalletManager @Inject()(nodeContext: NodeContext) extends Actor with Injec
    * somewhere to go.
    */
   private def selectLargest(requiredErg: Long): Option[InputUTXO] =
-    {
-      val candidates = spendableRewards ++ available
-      val tokenless = candidates.filter(_.tokens.isEmpty)
-      val source = if (tokenless.exists(_.value >= requiredErg)) tokenless else candidates
-      source.sortBy(_.value)
-        .find { b =>
-          if (b.tokens.isEmpty) b.value >= requiredErg
-          else BigInt(b.value) >= BigInt(requiredErg) + BigInt(UTXO.MIN_CHANGE)
+    selectCovering(spendableRewards ++ available, requiredErg)
+
+  /**
+   * One covering box from the plain P2PK wallet set, never a mining reward.
+   */
+  private def selectCoveringP2PK(requiredErg: Long): Option[InputUTXO] =
+    selectCovering(available, requiredErg)
+
+  private def selectCovering(candidates: Seq[InputUTXO], requiredErg: Long): Option[InputUTXO] = {
+    val tokenless = candidates.filter(_.tokens.isEmpty)
+    val source = if (tokenless.exists(_.value >= requiredErg)) tokenless else candidates
+    source.sortBy(_.value)
+      .find { b =>
+        if (b.tokens.isEmpty) b.value >= requiredErg
+        else BigInt(b.value) >= BigInt(requiredErg) + BigInt(UTXO.MIN_CHANGE)
+      }
+  }
+
+  /** Both single-box requests answer the same way; only the set they draw from differs. */
+  private def answerCovering(replyTo: ActorRef, erg: Long, trackUsed: Boolean,
+                             reservationId: String, set: String)
+                            (select: Long => Option[InputUTXO]): Unit =
+    Try(select(erg)) match {
+      case Failure(ex: InsufficientWalletFundsException) =>
+        logger.debug(s"Wallet could not provide one $set input covering $erg nanoERG: ${ex.getMessage}")
+        replyTo ! WalletInputs(Seq.empty, reservationId)
+      case Failure(ex) =>
+        logger.error(s"Failed to select wallet inputs (needed $erg nanoERG): ${ex.getMessage}", ex)
+        replyTo ! WalletInputs(Seq.empty, reservationId)
+      case Success(selected) =>
+        if (selected.isDefined) {
+          if (trackUsed) reserve(selected.toSeq.map(_.id.toString), reservationId)
+          replyTo ! WalletInputs(selected.toSeq, reservationId)
+        } else {
+          logger.error(s"Failed to find one $set UTXO covering $erg nanoERG")
+          replyTo ! WalletInputs(Seq.empty, reservationId)
         }
     }
 

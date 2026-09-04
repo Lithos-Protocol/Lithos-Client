@@ -387,6 +387,66 @@ class WalletManagerSpec extends TestKit(ActorSystem("wallet-manager-spec", Walle
     f.probe.awaitAssert(offered(f, erg / 2) should have size 1, 5.seconds, 100.millis)
   }
 
+  // ─── single-box selection: which set it may draw from ─────────────────────
+  //
+  // A fraud proof recreates the slashed bond under input 1's own proposition. A matured coinbase
+  // there is contract-valid and produces no error, and the reward is locked again for 720 blocks
+  // from the new output's creation height — so the two requests must draw from different sets.
+
+  private def covering(f: Fixture, need: Long): Seq[InputUTXO] = {
+    f.probe.send(f.mgr, RetrieveCoveringInput(need, trackUsed = false))
+    f.probe.expectMsgType[WalletInputs].inputs
+  }
+
+  private def coveringP2PK(f: Fixture, need: Long): Seq[InputUTXO] = {
+    f.probe.send(f.mgr, RetrieveCoveringP2PKInput(need, trackUsed = false))
+    f.probe.expectMsgType[WalletInputs].inputs
+  }
+
+  "The generic one-box request" should "still sweep a matured coinbase when it is the cheapest fit" in {
+    // Deliberate and unchanged: spending a coinbase here is the only thing that moves that ERG to an
+    // address an ordinary wallet can see.
+    val f = fixture(w => Seq(walletBox(w, 5 * erg)), w => Seq(coinbase(w, 2 * erg)))
+    covering(f, erg).map(_.value) shouldEqual Seq(2 * erg)
+  }
+
+  "The P2PK-only request" should "take the larger plain box over the cheaper coinbase" in {
+    val f = fixture(w => Seq(walletBox(w, 5 * erg)), w => Seq(coinbase(w, 2 * erg)))
+    coveringP2PK(f, erg).map(_.value) shouldEqual Seq(5 * erg)
+  }
+
+  it should "refuse rather than reserve when only coinbases can cover it" in {
+    // Refusing is the right ending: the caller drops the attempt and retries next tick, where a
+    // reward selected and then filtered would have consumed and had to release a lease.
+    val f = fixture(mkRewards = w => Seq(coinbase(w, 3 * erg)))
+    coveringP2PK(f, erg) shouldBe empty
+
+    withClue("nothing was reserved, so the generic request can still have it: ") {
+      covering(f, erg).map(_.value) shouldEqual Seq(3 * erg)
+    }
+  }
+
+  it should "answer empty once its deadline has passed" in {
+    val f = fixture(w => Seq(walletBox(w, 5 * erg)))
+    f.probe.send(f.mgr, RetrieveCoveringP2PKInput(erg, trackUsed = true,
+      reservationId = "expired-p2pk", deadlineMillis = 1L))
+    f.probe.expectMsgType[WalletInputs].inputs shouldBe empty
+
+    withClue("an expired request must not have reserved the box on its way out: ") {
+      covering(f, erg).map(_.value) shouldEqual Seq(5 * erg)
+    }
+  }
+
+  it should "release its reservation so the box comes back" in {
+    val f = fixture(w => Seq(walletBox(w, 5 * erg)))
+    f.probe.send(f.mgr, RetrieveCoveringP2PKInput(erg, trackUsed = true, reservationId = "held-p2pk"))
+    f.probe.expectMsgType[WalletInputs].inputs.map(_.value) shouldEqual Seq(5 * erg)
+    coveringP2PK(f, erg) shouldBe empty
+
+    f.probe.send(f.mgr, ReleaseInputs("held-p2pk"))
+    awaitAssert(coveringP2PK(f, erg).map(_.value) shouldEqual Seq(5 * erg), 5.seconds, 200.millis)
+  }
+
   // ─── the reward-box regression (audit §4b.1) ──────────────────────────────
 
   "A reserved coinbase" should "survive a complete refresh" in {

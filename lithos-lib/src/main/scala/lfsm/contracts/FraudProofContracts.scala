@@ -136,13 +136,7 @@ object FraudProofContracts {
       case _ =>
         // FP_MalformedGenesis compares serialized bytes inside a transaction it never deserializes,
         // so it needs the deployed trees themselves rather than their hashes.
-        val payout = RollupContracts.mkPayoutContract(ctx)
-        val eval = RollupContracts.mkEvalContract(
-          ctx, LFSMHelpers.EVAL_PERIOD, payout.hashedPropBytes, LFSMHelpers.getFPToken(ctx))
-        val holding = RollupContracts.mkHoldingContract(ctx, LFSMHelpers.HOLDING_PERIOD, eval.hashedPropBytes)
-        val gate = CollateralContract.mkEmissionGateContract(ctx)
-        val collateral = CollateralContract.mkMainnetCollatContract(
-          ctx, LFSMHelpers.EMCONFIG_NFT, gate.hashedPropBytes, LFSMHelpers.LIT_ID)
+        val deployed = DeployedContracts(ctx)
 
         val set = FraudProofSet(
           mkNonMatchingCommitmentContract(ctx, LFSMHelpers.getMDToken(ctx.getNetworkType)),
@@ -153,7 +147,7 @@ object FraudProofContracts {
           mkIncorrectNContract(ctx),
           mkInvalidDiffContract(ctx),
           mkTransactionNotIncludedContract(ctx),
-          mkMalformedGenesisContract(ctx, collateral, holding))
+          mkMalformedGenesisContract(ctx, deployed.collateral, deployed.holding.guard))
         cache = Some((network, set))
         set
     }

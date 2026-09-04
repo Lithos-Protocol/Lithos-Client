@@ -56,7 +56,7 @@
   //
   // DELIBERATE OMISSIONS - conditions left out on purpose
   // R8 of the holding box is only length checked. It is meant to be the miner's hashed prop bytes, and
-  // FP_MalformedTransaction slashes a miner who sets it wrongly. Because the genesis transaction is
+  // FP_MalformedGenesis slashes a miner who sets it wrongly. Because the genesis transaction is
   // inserted before PoW, altering it changes the hash of the block carrying it, and so its usefulness
   // as a super-share.
 

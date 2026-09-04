@@ -26,7 +26,13 @@ object ReducerFixtures {
   /** What a fixture rollup box holds before any submission adds a bond to it. */
   val RollupValue: Long = 1000000L
 
-  def protocol(rollupStartHeight: Int = 100): SyncProtocolContext =
+  /**
+   * @param minerDictionaryStartHeight height its genesis box was created at. Defaults below the
+   *                                   first block these fixtures replay, since a dictionary spend is
+   *                                   only recognized above it.
+   */
+  def protocol(rollupStartHeight: Int = 100,
+               minerDictionaryStartHeight: Int = 99): SyncProtocolContext =
     SyncProtocolContext(
       networkType = NetworkType.TESTNET,
       rollupStartHeight = rollupStartHeight,
@@ -36,6 +42,7 @@ object ReducerFixtures {
       payoutErgoTree = PayoutTree,
       collateralErgoTree = CollateralTree,
       minerDictionaryToken = MinerDictionaryToken,
+      minerDictionaryStartHeight = minerDictionaryStartHeight,
       collateralToken = CollateralToken)
 
   def emptyState(height: Int = 99,

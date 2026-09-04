@@ -148,6 +148,44 @@ object RollupTransactions {
     wallet.sign(uTx)
   }
 
+  /**
+   * What paying one miner out of this rollup will need, decided before anything is built.
+   *
+   * `isFinal` is the spend that empties the box. It is the one that carries the LIT division
+   * residue: every share is floored against the original R7 snapshot, so after several partial
+   * payouts the box holds the last miner's exact share plus what the flooring left behind.
+   */
+  final case class PayoutPlan(isFinal: Boolean, amountToPay: Long, amountTokens: Long,
+                              litResidue: Long) {
+    def needsChangeOutput: Boolean = isFinal && litResidue > 0
+  }
+
+  /**
+   * The remainder below which a payout cannot recreate its box, so it spends it instead. A successor
+   * holding less than this is not a legal output.
+   */
+  private final val MinSuccessorValue: Long = UTXO.MIN_CHANGE
+
+  def planPayout(wallet: NodeWallet,
+                 payInput: InputUTXO,
+                 latestState: LatestRollup): PayoutPlan = {
+    val lookUp = latestState.rollup.dictionary.copy().lookUp(wallet.contract.hashedPropBytes)
+    val score = Longs.fromByteArray(lookUp.response.head.ergoValue.getValue.toArray.slice(0, 8))
+    val totalScore = payInput.registers(2).getValue.asInstanceOf[CBigInt].wrappedValue
+    val state = stateOf(payInput, LFSMPhase.PAYOUT)
+
+    val bondRefund = RollupProtocol.bondForScore(score)
+    val amountToPay =
+      LFSMHelpers.paymentFromScore(score, totalScore, state.totalErgReward) + bondRefund
+    val amountTokens = LFSMHelpers.paymentFromScore(score, totalScore, state.totalLitReward)
+    val isFinal =
+      !(amountToPay < payInput.value && payInput.value - amountToPay > MinSuccessorValue)
+    val residue = RollupProtocol.litToken(payInput.tokens)
+      .map(_.amount - amountTokens).getOrElse(0L)
+
+    PayoutPlan(isFinal, amountToPay, amountTokens, math.max(residue, 0L))
+  }
+
   def genPayout(ctx: BlockchainContext,
                 wallet: NodeWallet,
                 payInput: InputUTXO,
@@ -203,14 +241,24 @@ object RollupTransactions {
         .buildTx(0, wallet.p2pk)
       wallet.sign(uTx)
     } else {
-      // This is the drain path, so what is left over is below the min change value. TxBuilder folds
-      // such a remainder into the fee output; with no fee output and no wallet input there is
-      // nothing to fold into and the fold throws. Payout.ergo checks the miner output with `>=`
-      // rather than `==` for exactly this reason, so the remainder can go to the miner instead.
+      // The final spend. It carries the LIT the floored shares left behind, which has to leave in an
+      // output of its own: the box is being consumed and only the NFT is burned.
+      val residue = RollupProtocol.litToken(payInput.tokens)
+        .filter(_.amount > amountTokens)
+        .map(t => Token(t.id, t.amount - amountTokens))
+      if (residue.isDefined && feeOutputs.isEmpty)
+        throw new IllegalArgumentException(
+          s"final payout leaves ${residue.get.amount} LIT, which needs an ERG-bearing output this " +
+            "transaction cannot fund without a fee box")
+      val residueOutput = residue.map(t => UTXO(wallet.contract, UTXO.MIN_CHANGE, Seq(t))).toSeq
+
+      // TxBuilder folds a below-minimum remainder into the fee output; with no fee output and no
+      // wallet input there is nothing to fold into and the fold throws. Payout.ergo checks the miner
+      // output with `>=` rather than `==` for exactly this reason, so the remainder goes there.
       val feeless = feeOutputs.isEmpty && otherInputs.isEmpty
       val minerValue = if (feeless && payInput.value > amountToPay) payInput.value else amountToPay
       val minerOutput = UTXO(wallet.contract, minerValue, tokensOutputted)
-      val totalOutputs = Seq(minerOutput) ++ feeOutputs
+      val totalOutputs = Seq(minerOutput) ++ residueOutput ++ feeOutputs
       val uTx = TxBuilder(ctx)
         .setInputs((Seq(inputWithContext) ++ otherInputs): _*)
         .setOutputs(totalOutputs: _*)

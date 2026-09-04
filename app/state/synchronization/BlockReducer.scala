@@ -35,6 +35,7 @@ final case class SyncProtocolContext(networkType: NetworkType,
                                      collateralErgoTree: String,
                                      minerDictionaryToken: ErgoId,
                                      minerDictionaryGenesisId: String = LFSMHelpers.MD_GENESIS_ID,
+                                     minerDictionaryStartHeight: Int = LFSMHelpers.MD_GENESIS_HEIGHT,
                                      collateralToken: ErgoId = LFSMHelpers.COLLAT_TOKEN)
 
 object SyncProtocolContext {
@@ -204,7 +205,7 @@ object BlockReducer {
         // Otherwise the dictionary branch is skipped and the base returns unchanged, as success.
         Left(StateInvariant(tx.id,
           s"dictionary state is already faulted: ${base.minerDictionaryFault.get}"))
-      else if (!staged.recognizesMinerDictionary(tx))
+      else if (!staged.recognizesMinerDictionary(height, tx))
         Left(StateInvariant(tx.id, "transaction does not carry the Miner Dictionary singleton"))
       else staged.applyTransaction(block, tx).left.map(_.error)
     }
@@ -270,13 +271,13 @@ object BlockReducer {
         case Some(rollupId) =>
           applyRollupTransform(block, tx, rollupId).left.map(BlockFault.Rollup(rollupId, _))
         // Skip later dictionary spends after the tracked UTXO becomes unknown.
-        case None if isMinerDictionaryTransform(tx) && minerDictionaryFault.isEmpty =>
+        case None if isMinerDictionaryTransform(block.height, tx) && minerDictionaryFault.isEmpty =>
           applyMinerDictionaryTransform(block, tx).left.map(BlockFault.MinerDictionary)
 
         // Faulted: there is no tracked tree to apply this to, and it is still the case that the
         // chain moved the dictionary. A rebuild started before this block is now stale, so the
         // block has to say so or a repair permit taken earlier would still look current.
-        case None if isMinerDictionaryTransform(tx) =>
+        case None if isMinerDictionaryTransform(block.height, tx) =>
           minerDictionaryMoved = true
           Right(())
 
@@ -419,10 +420,19 @@ object BlockReducer {
       }
     }
 
-    def recognizesMinerDictionary(tx: BlockTx): Boolean = isMinerDictionaryTransform(tx)
+    def recognizesMinerDictionary(height: Int, tx: BlockTx): Boolean =
+      isMinerDictionaryTransform(height, tx)
 
-    private def isMinerDictionaryTransform(tx: BlockTx): Boolean =
-      tx.outputs.headOption.exists(_.assets.exists(t => t.id == protocol.minerDictionaryToken && t.amount == 1L)) &&
+    /**
+     * A spend of the dictionary singleton, which can only happen above the height its genesis box was
+     * created at.
+     *
+     * The token is minted before that, into an ordinary P2PK box the deployment then spends into the
+     * genesis box.
+     */
+    private def isMinerDictionaryTransform(height: Int, tx: BlockTx): Boolean =
+      height > protocol.minerDictionaryStartHeight &&
+        tx.outputs.headOption.exists(_.assets.exists(t => t.id == protocol.minerDictionaryToken && t.amount == 1L)) &&
         !tx.outputs.headOption.exists(_.id == protocol.minerDictionaryGenesisId)
 
     private def applyRollupTransform(block: BlockInfo,

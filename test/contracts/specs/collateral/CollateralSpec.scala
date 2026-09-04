@@ -447,7 +447,7 @@ class CollateralSpec extends AnyPropSpec with EmissionSpecBase with RollupSpecBa
 
   /**
    * R8 is only length-checked here on purpose: it is meant to be the miner's hashed prop bytes, and
-   * `FP_MalformedTransaction` slashes a miner who sets it wrongly.
+   * `FP_MalformedGenesis` slashes a miner who sets it wrongly.
    */
   property("holding: rejects an R8 that is not 32 bytes long") {
     withCtx { ctx =>

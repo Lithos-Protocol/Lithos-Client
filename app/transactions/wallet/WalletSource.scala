@@ -8,8 +8,13 @@ trait WalletSource {
   /** Reserve inputs covering the requested ERG and tokens, or throw when the wallet cannot cover it. */
   def reserve(value: Long, tokens: Seq[Token] = Seq.empty): WalletReservation
 
-  /** Reserve one input that can cover the ERG request by itself. */
+  /** Reserve one input that can cover the ERG request by itself. May be a matured mining reward. */
   def reserveCovering(value: Long): WalletReservation
+
+  /**
+   * The same, restricted to plain P2PK wallet boxes.
+   */
+  def reserveCoveringP2PK(value: Long): WalletReservation
 
   /**
    * Hold exact signable outputs produced inside a transaction chain, including before the node can

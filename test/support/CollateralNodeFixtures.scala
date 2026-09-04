@@ -129,13 +129,15 @@ object CollateralNodeFixtures {
                     carriedLit: Long,
                     createdAt: Int = 400,
                     index: Int = 0,
-                    txId: String = "c2" * 32): NodeBox =
+                    txId: String = "c2" * 32,
+                    feeValue: Long = CollateralParams.DUST_BUDGET,
+                    value: Long = CollateralParams.PRINCIPAL_FLOOR): NodeBox =
     nodeBox(ctx, UTXO(
       ProtocolContracts(ctx).collateral,
-      CollateralParams.PRINCIPAL_FLOOR,
+      value,
       Seq(Token(LFSMHelpers.COLLAT_TOKEN, 1L)) ++
         (if (carriedLit > 0) Seq(Token(LFSMHelpers.LIT_ID, carriedLit)) else Seq.empty[Token]),
-      Seq(ErgoValue.of(CollateralParams.DUST_BUDGET),
+      Seq(ErgoValue.of(feeValue),
         ErgoValue.of(Contract.fromAddress(lender).sigmaBoolean.get),
         ErgoValue.pairOf(ErgoValue.of(0L),
           ErgoValue.of(Colls.fromArray(Array.empty[(sigma.Coll[Byte], Long)]),

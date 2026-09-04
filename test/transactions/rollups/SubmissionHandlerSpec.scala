@@ -9,11 +9,16 @@ import org.scalatest.matchers.should.Matchers
 import play.api.Configuration
 import state.messages.RollupMessages.{CurrentRollup, GetCurrentRollupCritical, RollupUnavailable}
 import support.{FakeCache, FakeNodeContext, SyncFixtures}
-import transactions.BlockTxMessages.{BlockTxsReady, RequestBlockTxs}
+import node.MutationConversions._
+import node.model.NodeBox
+import transactions.BlockTxMessages.{BlockTxsReady, CandidateTxsDropped, RequestBlockTxs}
+import transactions.wallet.WalletMessages.{MarkReservationUncertain, RetrieveCoveringInput, WalletInputs}
+import transactions.wallet.{WalletReservation, WalletSelector}
 import transactions.rollups.TransactionMessages.RollupTxType._
 import transactions.rollups.TransactionMessages._
 
 import scala.concurrent.duration._
+import scala.concurrent.{Await, ExecutionContext, Future}
 
 /**
  * `SubmissionHandler`'s mailbox, and the lock over the fields a batch mutates.
@@ -36,6 +41,8 @@ class SubmissionHandlerSpec extends TestKit(ActorSystem("submission-handler-spec
   with AnyFlatSpecLike with Matchers with BeforeAndAfterAll {
 
   override def afterAll(): Unit = TestKit.shutdownActorSystem(system)
+
+  private implicit val ec: ExecutionContext = system.dispatcher
 
   private val quietConfig = Configuration.from(Map(
     "state.disableTransforms" -> true,
@@ -190,6 +197,87 @@ class SubmissionHandlerSpec extends TestKit(ActorSystem("submission-handler-spec
     f.probe.send(f.handler, BuildBlockTxs(800, Seq(fp)))
     refuseState(f)
     f.probe.expectMsgType[BlockTxsReady](25.seconds).txs shouldBe empty
+  }
+
+  // ─── candidate eligibility ────────────────────────────────────────────────
+  //
+  // Asserted on the decision rather than through `BuildBlockTxs`: a NISP submission that gets past
+  // eligibility still fails at the NISP lookup in this fixture, so "no transaction was offered" is
+  // true either way and would pass with the defect present.
+
+  /** Holding age 359 at the tip, 360 at the block it would be mined in. */
+  private val boundaryPeriod = 123054L
+  private val boundaryTip = 123413
+
+  private def holdingRollup(seed: Int, periodStart: Long) =
+    SyncFixtures.emptyRollup(SyncFixtures.id(seed), SyncFixtures.id(seed + 1), periodStart.toInt)
+
+  "A NISP submission valid only at the tip" should "be refused for the next block's candidate" in {
+    // The node validates the package at the height it is mined at, and one rejection makes it refuse
+    // every optional transaction for that height — so a stale stub suppresses unrelated valid work.
+    val rollup = holdingRollup(9101, boundaryPeriod)
+    val submission = RollupTxStub("rollup-a", Some(boundaryPeriod), NISPSubmission)
+
+    withClue("valid at the tip, which is what made the tip the wrong height to ask about: ") {
+      submission.validate(boundaryTip, rollup) shouldBe true
+    }
+    SubmissionHandler.eligibleForCandidate(
+      submission, rollup, boundaryTip, boundaryTip + 1) shouldBe false
+  }
+
+  it should "be offered while it is still valid one height later" in {
+    val rollup = holdingRollup(9111, boundaryPeriod)
+    val submission = RollupTxStub("rollup-a", Some(boundaryPeriod), NISPSubmission)
+    SubmissionHandler.eligibleForCandidate(
+      submission, rollup, boundaryTip - 1, boundaryTip) shouldBe true
+  }
+
+  "A transform that only becomes valid at the candidate height" should "wait for the next block" in {
+    // Deliberately conservative. It is built and signed in a tip-height context where the contract's
+    // height condition does not hold yet, so offering it produces a build that cannot be signed.
+    val rollup = holdingRollup(9121, boundaryPeriod)
+    val transform = RollupTxStub("rollup-a", Some(boundaryPeriod), HoldingTransform)
+
+    transform.validate(boundaryTip + 1, rollup) shouldBe true
+    SubmissionHandler.eligibleForCandidate(
+      transform, rollup, boundaryTip, boundaryTip + 1) shouldBe false
+  }
+
+  // ─── candidate leases ─────────────────────────────────────────────────────
+
+  /** A real reservation over `probe`, so its lifecycle messages land where the test can see them. */
+  private def leaseOver(probe: TestProbe): WalletReservation = {
+    val (ctx, _, wallet) = FakeNodeContext()
+    val input = ctx.getClient.execute { c =>
+      NodeBox("bb" * 32, "aa" * 32, 5000000L, 0, 100, wallet.contract.ergoTreeHex).toInputUTXO(c)
+    }
+    val selector = WalletSelector(probe.ref, 5.seconds, ec)
+    val pending = Future(selector.reserveCovering(1000000L))
+    val ask = probe.expectMsgType[RetrieveCoveringInput](5.seconds)
+    probe.reply(WalletInputs(Seq(input), ask.reservationId))
+    Await.result(pending, 5.seconds)
+  }
+
+  "A lease taken for a height that was already dropped" should "be made uncertain at once" in {
+    // A source can finish building after its height was dropped. Stored under that height instead,
+    // nothing reconciles it again — the next height only moves the watermark if it asks for
+    // transactions at all — and the wallet input is withheld for the life of the process.
+    val f = fixture()
+    val lease = leaseOver(f.wallet)
+
+    f.probe.send(f.handler, CandidateTxsDropped(500))
+    f.probe.send(f.handler, SubmissionHandler.CandidateLeaseTaken(500, lease))
+
+    f.wallet.expectMsg(5.seconds, MarkReservationUncertain(lease.id))
+  }
+
+  it should "still be held while its own height is current" in {
+    // The other side of the same rule: a lease for a live height is candidate-held, not reconciled.
+    val f = fixture()
+    val lease = leaseOver(f.wallet)
+
+    f.probe.send(f.handler, SubmissionHandler.CandidateLeaseTaken(500, lease))
+    f.wallet.expectNoMessage(2.seconds)
   }
 
   "The final send gate" should "not execute the node send after the confirmed input changes" in {

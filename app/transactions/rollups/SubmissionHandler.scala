@@ -5,6 +5,7 @@ import akka.pattern.ask
 import akka.util.Timeout
 import configs.{NodeContext, StateConfig, StratumConfig, TasksConfig}
 import lfsm.contracts.FraudProofContracts
+import lfsm.states.Rollup
 import mutations.NotEnoughInputsException
 import org.bouncycastle.util.encoders.Hex
 import org.ergoplatform.appkit._
@@ -129,6 +130,9 @@ class SubmissionHandler @Inject()(config: Configuration, nodeContext: NodeContex
     // Whatever was offered for that height can no longer land, so its bond inputs stop being
     // candidate-held. Uncertain, not released: the block may have included the transaction.
     case CandidateTxsDropped(blockHeight) =>
+      // The watermark moves past the dropped height, not just to it, so a lease still in flight when
+      // this arrives is reconciled on the way in.
+      latestCandidateHeight = math.max(latestCandidateHeight, blockHeight + 1)
       reconcileCandidates(blockHeight)
 
     // A block is being assembled: build the same work fee-less and hand it back without
@@ -223,7 +227,7 @@ class SubmissionHandler @Inject()(config: Configuration, nodeContext: NodeContex
     latestRollupState(stub).flatMap { latest =>
       Try {
         client.execute { ctx =>
-          checkRollupStubValidity(ctx, stub, latest)
+          checkCandidateStubValidity(ctx, stub, latest, blockHeight)
           val none = Seq.empty[InputUTXO]
           val noFee = Seq.empty[UTXO]
           stub.txType match {
@@ -267,6 +271,14 @@ class SubmissionHandler @Inject()(config: Configuration, nodeContext: NodeContex
                 CandidateTx.EvalTransform)
 
             case Payout =>
+              // A final payout with LIT left over needs an ERG-bearing change output, which a
+              // fee-less transaction balancing on the rollup box alone cannot fund. Left to the
+              // funded copy, which has a fee box to draw on; the stub stays queued either way, so
+              // the payout still happens, it just does not ride in this miner's own block.
+              if (RollupTransactions.planPayout(wallet, latest.inputUTXO, latest).needsChangeOutput)
+                throw StubInvalidException(
+                  s"final payout for rollup ${stub.rollupBlockId} leaves LIT change and cannot be " +
+                    "built fee-less")
               candidateTx(
                 RollupTransactions.genPayout(ctx, wallet, latest.inputUTXO, none, latest, noFee),
                 CandidateTx.Payout)
@@ -325,7 +337,8 @@ class SubmissionHandler @Inject()(config: Configuration, nodeContext: NodeContex
    *         wallet UTXOs that will be used to pay fees in their transaction
    */
   private def initialTxOutputs(stub: RollupTxStub, initialTxInfo: InitialTxInfo): (UTXO, Map[String, UTXO]) = {
-    val feeToPay = initialTxInfo.feesToCreate(stub.rollupBlockId)
+    // The allocation is two fees wide so the initial transaction can also fund a change output
+    val feeToPay = math.min(stub.fee, initialTxInfo.feesToCreate(stub.rollupBlockId))
     val feesToOutput = initialTxInfo.feesToCreate - stub.rollupBlockId
     val outputs = feesToOutput.map(f => f._1 -> UTXO(wallet.contract, f._2))
     UTXO.feeBox(feeToPay) -> outputs
@@ -337,7 +350,7 @@ class SubmissionHandler @Inject()(config: Configuration, nodeContext: NodeContex
    * @param initialTxInfo Information required for initial transaction
    * @return Sequence of InputUTXOs used in the initial transaction
    */
-  private def initialTxInputs(initialTxInfo: InitialTxInfo, isFPTx: Boolean = false): Seq[InputUTXO] = {
+  private[rollups] def initialTxInputs(initialTxInfo: InitialTxInfo, isFPTx: Boolean = false): Seq[InputUTXO] = {
     // Reaching here again means the previous attempt never sent, so give its inputs back before
     // reserving more — five attempts each holding a disjoint set would drain the wallet.
     releaseInitialInputs()
@@ -345,9 +358,12 @@ class SubmissionHandler @Inject()(config: Configuration, nodeContext: NodeContex
     val ergForFees = initialTxInfo.feesToCreate.values.toSeq.sum
     // Reserved on selection, not after the send. EmissionHandler draws from the same WalletManager,
     // and the gap between selecting and sending spans retries and their sleeps.
+    // A fraud proof pays the slashed bond to input 1's own proposition, so this input must be plain
+    // P2PK. A matured reward box here is contract-valid and silently relocks the reward for 720
+    // blocks under the miner-reward script.
     val reservation =
       if (!isFPTx) walletSelector.reserve(ergForFees)
-      else walletSelector.reserveCovering(ergForFees)
+      else walletSelector.reserveCoveringP2PK(ergForFees)
     val feeInputs = reservation.inputs
     if (feeInputs.isEmpty)
       throw new NotEnoughInputsException("WalletManager could not return enough inputs for initial rollup tx")
@@ -849,6 +865,14 @@ class SubmissionHandler @Inject()(config: Configuration, nodeContext: NodeContex
       throw StubInvalidException(s"Invalid ${stub.txType} stub for rollup ${stub.rollupBlockId}")
   }
 
+  /** The same check for work offered to a candidate, which executes one height past the tip. */
+  private def checkCandidateStubValidity(ctx: BlockchainContext, stub: RollupTxStub,
+                                         latestRollup: LatestRollup, blockHeight: Int): Unit = {
+    if (!SubmissionHandler.eligibleForCandidate(stub, latestRollup.rollup, ctx.getHeight, blockHeight))
+      throw StubInvalidException(s"${stub.txType} stub for rollup ${stub.rollupBlockId} is not valid " +
+        s"at candidate height $blockHeight")
+  }
+
   private def latestRollupState(rollupTxStub: RollupTxStub) = {
     Try {
       val rollupInfo = Await.result[RollupInfo](
@@ -882,6 +906,16 @@ object SubmissionHandler {
 
   /** The fee proposition every `UTXO.feeBox` sits at, derived once rather than per comparison. */
   private val FeeTreeHex: String = Contract.FEE_720.ergoTreeHex
+
+  /**
+   * Whether a stub may go into the candidate for `blockHeight`, built in a context at `tipHeight`.
+   *
+   * The tip is required as well because the transaction is built and signed in a tip-height context.
+   * Work that only becomes valid at the candidate height cannot be signed here and waits a block.
+   */
+  private[rollups] def eligibleForCandidate(stub: RollupTxStub, rollup: Rollup,
+                                            tipHeight: Int, blockHeight: Int): Boolean =
+    stub.validate(blockHeight, rollup) && stub.validate(tipHeight, rollup)
 
   /** The final send gate, kept directly testable so stale state cannot accidentally execute `send`. */
   private[rollups] def sendIfCurrentInput(rollupId: String,
@@ -926,8 +960,10 @@ object SubmissionHandler {
   /** Self-message: the batch and every attempt in it are done, so the lock can come off. */
   private case object BatchFinished
 
-  /** Self-message: a fee-less submission built off the actor thread took a bond input. */
-  private case class CandidateLeaseTaken(blockHeight: Int, reservation: WalletReservation)
+  /**
+   * Self-message: a fee-less submission built off the actor thread took a bond input.
+   */
+  private[rollups] case class CandidateLeaseTaken(blockHeight: Int, reservation: WalletReservation)
 
   /** Maximum number of times attemptTx will retry on an ErgoClientException. */
   final val MAX_TX_ATTEMPTS: Int = 5

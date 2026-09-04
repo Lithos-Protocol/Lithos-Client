@@ -1,7 +1,7 @@
 package transactions
 
 import lfsm.LFSMHelpers
-import lfsm.contracts.{CollateralContract, FraudProofContracts, RollupContracts}
+import lfsm.contracts.{CollateralContract, DeployedContracts, FraudProofContracts}
 import org.ergoplatform.appkit.{Address, BlockchainContext}
 import org.bouncycastle.util.encoders.Hex
 import scorex.crypto.hash.Blake2b256
@@ -35,14 +35,11 @@ object ProtocolContracts {
 
   def apply(ctx: BlockchainContext): CompiledContracts = synchronized {
     compiled.getOrElse {
-      val payout = RollupContracts.mkPayoutContract(ctx)
-      val eval = RollupContracts.mkEvalContract(
-        ctx, LFSMHelpers.EVAL_PERIOD, payout.hashedPropBytes, LFSMHelpers.getFPToken(ctx))
-      val holding = RollupContracts.mkHoldingScripts(ctx, LFSMHelpers.HOLDING_PERIOD, eval.hashedPropBytes)
-
-      val gate = CollateralContract.mkEmissionGateContract(ctx)
-      val collateral = CollateralContract.mkMainnetCollatContract(
-        ctx, LFSMHelpers.EMCONFIG_NFT, gate.hashedPropBytes, LFSMHelpers.LIT_ID)
+      // Shared with the fraud-proof set, which injects the collateral and holding trees whole.
+      val deployed = DeployedContracts(ctx)
+      val holding = deployed.holding
+      val gate = deployed.gate
+      val collateral = deployed.collateral
       val emission = CollateralContract.mkEmissionsContract(
         ctx, collateral.hashedPropBytes, gate.hashedPropBytes, LFSMHelpers.LIT_ID)
       val guard = CollateralContract.mkEmissionsGuardContract(

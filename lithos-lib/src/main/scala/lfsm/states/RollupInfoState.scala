@@ -57,11 +57,11 @@ object RollupInfoState {
 
   val Size: Int = 3
 
-  def holding(periodStart: Long, nispBlockHeight: Long, totalBond: Long): RollupInfoState =
-    RollupInfoState(LFSMPhase.HOLDING, Vector(periodStart, nispBlockHeight, totalBond))
+  def holding(periodStart: Long, genesisBlockHeight: Long, totalBond: Long): RollupInfoState =
+    RollupInfoState(LFSMPhase.HOLDING, Vector(periodStart, genesisBlockHeight, totalBond))
 
-  def evaluation(periodStart: Long, nispBlockHeight: Long, totalBond: Long): RollupInfoState =
-    RollupInfoState(LFSMPhase.EVAL, Vector(periodStart, nispBlockHeight, totalBond))
+  def evaluation(periodStart: Long, genesisBlockHeight: Long, totalBond: Long): RollupInfoState =
+    RollupInfoState(LFSMPhase.EVAL, Vector(periodStart, genesisBlockHeight, totalBond))
 
   def payout(totalErgReward: Long, totalLitReward: Long, totalBond: Long): RollupInfoState =
     RollupInfoState(LFSMPhase.PAYOUT, Vector(totalErgReward, totalLitReward, totalBond))

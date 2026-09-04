@@ -41,6 +41,14 @@ final case class CollateralCandidate(input: InputUTXO, inclusionHeight: Int, fin
 object CandidateTxBuilder {
 
   /**
+   * Pages of the collateral token index a single load will walk.
+   *
+   * At the configured maximum batch of 100 this is 2,000 carriers against 100 live boxes and one
+   * emission singleton, so the rest is headroom for unconsumed proof-of-spend boxes.
+   */
+  private[mining] final val MaxCollateralPages: Int = 20
+
+  /**
    * Confirmed age at which a box stops competing on its bid and starts competing on age alone.
    * The active set is bounded, so draining the overdue cohort oldest-first turns it over rather
    * than starving it, and a lender who bids nothing still gets mined eventually.
@@ -97,10 +105,7 @@ class CandidateTxBuilder(prover: NodeWallet, nodeApi: NodeApi, config: Candidate
     // and hex-encodes it on every call, and these run once per box across the whole active set.
     val gateTree = c.gate.ergoTreeHex
     val collateralTree = c.collateral.ergoTreeHex
-    val boxes = nodeApi
-      .unspentBoxesByTokenId(LFSMHelpers.COLLAT_TOKEN.toString, Paging.all(config.collateralPoolSize),
-        SortDirection.Asc, MempoolOptions.ConfirmedOnly)
-      .getOrElse(Seq.empty[IndexedBox])
+    val boxes = collateralCarriers(collateralTree)
       .filter(b => carriesOne(b, LFSMHelpers.COLLAT_TOKEN) &&
         b.box.additionalRegisters.ordered.size >= 5 &&
         b.ergoTree != gateTree)
@@ -251,6 +256,46 @@ class CandidateTxBuilder(prover: NodeWallet, nodeApi: NodeApi, config: Candidate
 
     CollateralData(sTx.getId.replace("\"", ""), sTx.toJson(false, false), pkString, utxBytes,
       collat.bytes, collat.id.toString, lenderAddress.toString)
+  }
+
+  /**
+   * Every box carrying the collateral token, paged to exhaustion.
+   *
+   * Stops early once the protocol's own cap of live boxes has been seen, since nothing after that can
+   * outrank what is already held.
+   */
+  private def collateralCarriers(collateralTree: String): Seq[IndexedBox] = {
+    val batch = config.collateralPoolSize
+    val carriers = Seq.newBuilder[IndexedBox]
+    var paging = Paging.all(batch)
+    var live = 0
+    var pages = 0
+    var exhausted = false
+
+    while (!exhausted && live < EmissionSchedule.MAX_ACTIVE && pages < CandidateTxBuilder.MaxCollateralPages) {
+      val page = nodeApi.unspentBoxesByTokenId(LFSMHelpers.COLLAT_TOKEN.toString, paging,
+        SortDirection.Asc, MempoolOptions.ConfirmedOnly) match {
+        case Success(boxes) => boxes
+        // Ranking an incomplete prefix silently picks a different lender's box. Failing the load
+        // leaves the last complete set in place and the next refresh tries again.
+        case Failure(ex) => throw new CollateralNotFoundException(
+          s"collateral token page at offset ${paging.offset} failed, so the active set cannot be " +
+            s"ranked: ${ex.getMessage}")
+      }
+      carriers ++= page
+      live += page.count(_.ergoTree == collateralTree)
+      exhausted = page.size < batch
+      paging = paging.next
+      pages += 1
+    }
+
+    // Reported rather than refused: the cap rests on how many unconsumed proof-of-spend boxes can
+    // pile up, which is not a figure this client controls
+    if (!exhausted && live < EmissionSchedule.MAX_ACTIVE)
+      logger.error(s"Stopped scanning collateral carriers after $pages pages of $batch with only " +
+        s"$live live boxes found; the ranking below is over an incomplete active set")
+
+    carriers.result()
   }
 
   /** What the finder's LIT box has always been worth, and the floor a bare fee box has to clear. */

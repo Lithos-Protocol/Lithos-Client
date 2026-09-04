@@ -29,6 +29,8 @@ class SyncHandler @Inject()(config: Configuration,
                             protocol: SyncProtocolContext,
                             @javax.inject.Named("state-snapshot") snapshotActor: akka.actor.ActorRef) extends Actor {
 
+  import SyncHandler.MaterializationKey
+
   private val logger: Logger = LoggerFactory.getLogger("SyncHandler")
   private val syncConfig = new SyncConfig(config)
   private val repository = SyncStateRepository(Globals.mdDB)
@@ -66,7 +68,6 @@ class SyncHandler @Inject()(config: Configuration,
   private var checkpointRetry = Option.empty[Cancellable]
   private case object RetryCheckpoint
 
-  private final case class MaterializationKey(dictionaryId: DictionaryId, digest: String)
   private final case class MaterializationFailure(key: Option[MaterializationKey], reason: String)
   private final case class PendingOperation(epoch: Long,
                                             remaining: Set[MaterializationKey],
@@ -697,31 +698,9 @@ class SyncHandler @Inject()(config: Configuration,
   private def keyFor(id: DictionaryId, dictionary: AuthenticatedDictionaryView): MaterializationKey =
     MaterializationKey(id, Hex.toHexString(dictionary.digest))
 
-  /** Follows same-block UTXO chains so every dictionary the reducer can mutate is ready up front. */
   private def dictionariesTouchedBy(state: CommittedSyncState,
-                                    block: BlockInfo): Set[MaterializationKey] = {
-    var routes = state.routes
-    var minerUtxo = state.minerTree.utxoId
-    var touched = Set.empty[MaterializationKey]
-    block.txs.foreach { tx =>
-      tx.inputs.headOption.flatMap(input => routes.get(input.id)).foreach { blockId =>
-        state.rollups.get(blockId).foreach { rollup =>
-          touched += keyFor(DictionaryId.Rollup(blockId), rollup.dictionary)
-          routes -= tx.inputs.head.id
-          tx.outputs.headOption.foreach(output => routes += output.id -> blockId)
-        }
-      }
-      val dictionaryOutput = tx.outputs.headOption.filter(_.assets.exists(token =>
-        token.id == protocol.minerDictionaryToken && token.amount == 1L))
-      if (state.minerDictionaryFault.isEmpty &&
-        dictionaryOutput.exists(_.id != protocol.minerDictionaryGenesisId)) {
-        if (tx.inputs.headOption.exists(_.id == minerUtxo))
-          touched += keyFor(DictionaryId.Miner, state.minerTree.dictionary)
-        dictionaryOutput.foreach(output => minerUtxo = output.id)
-      }
-    }
-    touched
-  }
+                                    block: BlockInfo): Set[MaterializationKey] =
+    SyncHandler.dictionariesTouchedBy(state, block, protocol)
 
   private def respondMinerDictionary(requester: ActorRef): Unit = committed match {
     case Some(state) if status.isInstanceOf[Ready] && state.minerDictionaryFault.isEmpty =>
@@ -1497,6 +1476,45 @@ class SyncHandler @Inject()(config: Configuration,
 }
 
 object SyncHandler {
+
+  /** Identifies one dictionary at one digest, which is what a materialization request is keyed by. */
+  private[synchronization] final case class MaterializationKey(dictionaryId: DictionaryId, digest: String)
+
+  private def keyFor(id: DictionaryId, dictionary: AuthenticatedDictionaryView): MaterializationKey =
+    MaterializationKey(id, Hex.toHexString(dictionary.digest))
+
+  /**
+   * Follows same-block UTXO chains so every dictionary the reducer can mutate is ready up front.
+   */
+  private[synchronization] def dictionariesTouchedBy(state: CommittedSyncState,
+                                                     block: BlockInfo,
+                                                     protocol: SyncProtocolContext): Set[MaterializationKey] = {
+    var routes = state.routes
+    var minerUtxo = state.minerTree.utxoId
+    var touched = Set.empty[MaterializationKey]
+    block.txs.foreach { tx =>
+      tx.inputs.headOption.flatMap(input => routes.get(input.id)).foreach { blockId =>
+        state.rollups.get(blockId).foreach { rollup =>
+          touched += keyFor(DictionaryId.Rollup(blockId), rollup.dictionary)
+          routes -= tx.inputs.head.id
+          tx.outputs.headOption.foreach(output => routes += output.id -> blockId)
+        }
+      }
+      // Gated on the start height for the same reason the reducer is: below it the only transaction
+      // carrying this token is the mint that funds the deployment.
+      val dictionaryOutput = tx.outputs.headOption.filter(_.assets.exists(token =>
+        token.id == protocol.minerDictionaryToken && token.amount == 1L))
+      if (state.minerDictionaryFault.isEmpty &&
+        block.height > protocol.minerDictionaryStartHeight &&
+        dictionaryOutput.exists(_.id != protocol.minerDictionaryGenesisId)) {
+        if (tx.inputs.headOption.exists(_.id == minerUtxo))
+          touched += keyFor(DictionaryId.Miner, state.minerTree.dictionary)
+        dictionaryOutput.foreach(output => minerUtxo = output.id)
+      }
+    }
+    touched
+  }
+
   // Sized according to NISP weights
   private[synchronization] final val MaxMaterializedDictionaryCacheBytes = 384L * 1024L * 1024L
   private[synchronization] final val MaxTransformJournalBytes = 256L * 1024L * 1024L

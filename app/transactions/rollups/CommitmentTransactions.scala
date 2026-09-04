@@ -199,6 +199,10 @@ class CommitmentTransactions(nodeContext: NodeContext, dataBoxes: DataBoxSource)
     // registration that waits in the mempool still inserts the value it proved -- but only for
     // REGISTER_SLACK blocks, after which it has to be rebuilt.
     val validUntil = ctx.getHeight.toLong + LFSMHelpers.DATA_LIFETIME
+    // Recorded here because this is the only place it is known without materializing the dictionary.
+    // A write that fails costs a warning near expiry, not the registration, so it is not fatal.
+    if (!Globals.mdDB.setRegistrationExpiry(validUntil))
+      logger.warn(s"Could not record this registration's expiry height $validUntil")
     val entry = dictInput.id.getBytes ++ scorex.utils.Longs.toByteArray(validUntil)
     val insertion = insertionTree.insert(proverContract.hashedPropBytes -> entry)
 

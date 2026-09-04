@@ -42,19 +42,27 @@ case class WalletSelector(walletRef: ActorRef,
     reservation
   }
 
-  override def reserveCovering(value: Long): WalletReservation = {
+  override def reserveCovering(value: Long): WalletReservation =
+    reserveOneBox(value, "one input")(RetrieveCoveringInput(_, trackUsed = true, _, _))
+
+  override def reserveCoveringP2PK(value: Long): WalletReservation =
+    reserveOneBox(value, "one P2PK input")(RetrieveCoveringP2PKInput(_, trackUsed = true, _, _))
+
+  /** Both single-box requests differ only in which set the manager draws from. */
+  private def reserveOneBox(value: Long, what: String)
+                           (request: (Long, String, Long) => Any): WalletReservation = {
     if (value < 0)
       throw new IllegalArgumentException("Wallet requirements cannot be negative")
     val reservationId = UUID.randomUUID().toString
     val deadline = System.currentTimeMillis() + timeout.toMillis
     val selected = awaitReservation(
       reservationId,
-      (walletRef ? RetrieveCoveringInput(value, trackUsed = true, reservationId, deadline))
-        .mapTo[WalletInputs])
+      (walletRef ? request(value, reservationId, deadline)).mapTo[WalletInputs])
     val reservation = new WalletReservation(reservationId, selected, this)
     if (selected.isEmpty) {
       reservation.release()
-      throw new NotEnoughInputsException(s"WalletManager could not reserve one input covering $value nanoERG")
+      throw new NotEnoughInputsException(
+        s"WalletManager could not reserve $what covering $value nanoERG")
     }
     reservation
   }

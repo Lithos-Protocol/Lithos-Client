@@ -31,6 +31,14 @@ object WalletMessages {
                                                    deadlineMillis: Long = Long.MaxValue)
 
   /**
+   * The same single-box request, restricted to plain P2PK wallet boxes.
+   */
+  private[transactions] case class RetrieveCoveringP2PKInput(erg: Long,
+                                                   trackUsed: Boolean = true,
+                                                   reservationId: String = java.util.UUID.randomUUID().toString,
+                                                   deadlineMillis: Long = Long.MaxValue)
+
+  /**
    * Reserve exact signable outputs whose parent transaction has been built but may not be visible to
    * the node yet. This keeps intermediate change owned by its transaction chain across wallet
    * refreshes; unlike an ordinary selection, absence from a complete refresh is expected.

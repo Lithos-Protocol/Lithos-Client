@@ -138,6 +138,8 @@ class CandidateBuilder(client: ErgoClient,
         // Re-ranked from scratch at every height. Holding the previous choice would freeze the set
         // on whichever box happened to be picked first and no box would ever become overdue.
         selectedId = None
+        // Retires the previous height's collection round. Its answer can no longer reach a package
+        collectingFor = None
         knownSpent = knownSpent.filter(e => height - e._2 < SpentMemoryBlocks)
         startBuild(height)
         context.system.scheduler.scheduleOnce(
@@ -195,8 +197,9 @@ class CandidateBuilder(client: ErgoClient,
       // Only carries a set when the build had to load one, which is the bootstrap case. Otherwise
       // the build worked off this actor's own snapshot and there is nothing to write back.
       loaded.foreach(boxes => collateralSet = usable(boxes))
-      selectedId = Some(chosenId)
       if (height == blockHeight) {
+        // Height-local, so it is claimed here rather than before the check.
+        selectedId = Some(chosenId)
         buildRetries = 0
         val pkg = BlockPackage(height, data)
         currentPackage = Some(pkg)
@@ -250,16 +253,22 @@ class CandidateBuilder(client: ErgoClient,
 
     case BuildFailed(height, failedId, ex) =>
       building = false
-      logger.error(s"Failed to build the genesis transaction for block $height: ${ex.getMessage}", ex)
-      // Skip the box before retrying, so the next attempt draws a different one. Bounded, because a
-      // failure that is not about the box would otherwise spin against the node.
-      failedId.foreach(id => skipped += id)
-      selectedId.foreach(id => skipped += id)
-      selectedId = None
-      if (buildRetries < MaxBuildRetries) {
-        buildRetries += 1
-        rebuildAfterRefresh = true
-        startRefresh()
+      // Everything a failure touches — the skip set, the current choice and the retry budget — is
+      // owned by the height it was raised for.
+      if (height == blockHeight) {
+        logger.error(s"Failed to build the genesis transaction for block $height: ${ex.getMessage}", ex)
+        // Skip the box before retrying, so the next attempt draws a different one. Bounded until MaxBuildRetries.
+        failedId.foreach(id => skipped += id)
+        selectedId.foreach(id => skipped += id)
+        selectedId = None
+        if (buildRetries < MaxBuildRetries) {
+          buildRetries += 1
+          rebuildAfterRefresh = true
+          startRefresh()
+        }
+      } else {
+        logger.info(s"Discarding a failed build for block $height: the chain is at $blockHeight " +
+          s"(${ex.getMessage})")
       }
       drainPending()
   }

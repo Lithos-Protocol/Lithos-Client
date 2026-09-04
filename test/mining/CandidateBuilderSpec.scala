@@ -13,6 +13,7 @@ import org.scalatest.flatspec.AnyFlatSpecLike
 import org.scalatest.matchers.should.Matchers
 import org.scalatestplus.mockito.MockitoSugar
 import stratum.{CollateralData, CollateralNotFoundException}
+import transactions.BlockTxMessages.{CandidateTxsDropped, RequestBlockTxs}
 import support.FakeNodeContext
 import work.lithos.mutations.InputUTXO
 
@@ -72,11 +73,22 @@ class CandidateBuilderSpec extends TestKit(ActorSystem("candidate-builder-spec",
     @volatile var builtFor: Seq[String] = Seq.empty
     @volatile var failNextBuilds: Int = 0
 
+    /**
+     * Heights whose build blocks until [[release]]. A completion ordering has to be forced rather
+     * than waited for: what is under test is a result arriving after its own block is over.
+     */
+    @volatile var holdAt: Set[Int] = Set.empty
+    private val gate = new java.util.concurrent.CountDownLatch(1)
+
+    def release(): Unit = gate.countDown()
+
     override def loadCollateral(ctx: BlockchainContext): Seq[CollateralCandidate] = available
 
     override def buildGenesis(ctx: BlockchainContext, collat: InputUTXO, blockHeight: Int): CollateralData = {
       val id = collat.id.toString
       builtFor = builtFor :+ id
+      if (holdAt.contains(blockHeight))
+        gate.await(20, java.util.concurrent.TimeUnit.SECONDS)
       if (failNextBuilds > 0) {
         failNextBuilds -= 1
         throw new CollateralNotFoundException(s"stub refuses first build on $id")
@@ -87,8 +99,9 @@ class CandidateBuilderSpec extends TestKit(ActorSystem("candidate-builder-spec",
   }
 
   private class TestableBuilder(client: org.ergoplatform.appkit.ErgoClient, prover: NodeWallet,
-                                api: NodeApi, c: CandidateConfig, stub: StubTxBuilder)
-    extends CandidateBuilder(client, prover, api, c, Seq.empty) {
+                                api: NodeApi, c: CandidateConfig, stub: StubTxBuilder,
+                                sources: Seq[ActorRef] = Seq.empty)
+    extends CandidateBuilder(client, prover, api, c, sources) {
     override protected val txBuilder: CandidateTxBuilder = stub
   }
 
@@ -98,15 +111,17 @@ class CandidateBuilderSpec extends TestKit(ActorSystem("candidate-builder-spec",
 
   private def fixture(boxCount: Int = 4,
                       failing: Set[String] = Set.empty,
-                      boxes: Option[Seq[CollateralCandidate]] = None): Fixture = {
+                      boxes: Option[Seq[CollateralCandidate]] = None,
+                      sources: Seq[ActorRef] = Seq.empty,
+                      config: CandidateConfig = cfg): Fixture = {
     val api = mock[NodeApi]
     val (ctx, _, wallet) = FakeNodeContext(api, numAddresses = 1)
     val set = boxes.getOrElse(
       ctx.getClient.execute(c => (1 to boxCount).map(i => box(c, wallet, i * 1000000L))))
-    val stub = new StubTxBuilder(wallet, api, cfg, set, failing)
+    val stub = new StubTxBuilder(wallet, api, config, set, failing)
     val parent = TestProbe()
     val builder = parent.childActorOf(Props(
-      new TestableBuilder(ctx.getClient, wallet, api, cfg, stub)))
+      new TestableBuilder(ctx.getClient, wallet, api, config, stub, sources)))
     // preStart runs a refresh; let it land so the set is warm before the first block.
     Thread.sleep(600)
     Fixture(builder, parent, stub, set.map(_.id))
@@ -148,6 +163,76 @@ class CandidateBuilderSpec extends TestKit(ActorSystem("candidate-builder-spec",
     advanceTo(f, 101).collateral.collateralId shouldEqual boxes(1).id
     // The higher bid is still the higher bid, so a re-rank must land on it again.
     advanceTo(f, 102).collateral.collateralId shouldEqual boxes(1).id
+  }
+
+  // ─── generations ──────────────────────────────────────────────────────────
+  //
+  // A build runs off the actor thread, so its result can arrive after the block it was started for
+  // is over. Everything it writes — the chosen box, the skip set, the retry budget, the collection
+  // flag — belongs to that block, and a late result that writes them decides the next block's
+  // economics on the previous block's information. The gate forces that ordering rather than racing.
+
+  /** Two boxes whose ranking flips between one height and the next, purely on age. */
+  private def flipAt101: Seq[CollateralCandidate] =
+    boxesWith(Seq((1000000L, 1, 0L), (2000000L, 100, 900000L)))
+
+  "A genesis build that lands after its block" should "not become the next block's choice" in {
+    // At 100 nothing is overdue and the high bid wins. At 101 the older box crosses the overdue line
+    // and must win instead — which only happens if the late result's choice was not made sticky.
+    val boxes = flipAt101
+    val f = fixture(boxes = Some(boxes))
+    f.stub.holdAt = Set(100)
+
+    f.builder ! ChainAdvanced(100)
+    f.parent.expectNoMessage(1.second) // held, so nothing is published for 100
+    f.builder ! ChainAdvanced(101)
+    f.stub.release()
+
+    val pkg = f.parent.expectMsgType[BlockPackageReady].pkg
+    pkg.blockHeight shouldEqual 101
+    withClue("101 must re-rank rather than inherit the box 100 chose: ") {
+      pkg.collateral.collateralId shouldEqual boxes.head.id
+    }
+    f.parent.expectNoMessage(1.second)
+  }
+
+  "A build failure that lands after its block" should "not skip a box the next block wants" in {
+    // Both boxes are the same age at both heights, so the high bidder wins twice. The failure at 100
+    // is about that block's attempt; applying its skip to 101 hands 101 the box nobody bid for.
+    val boxes = boxesWith(Seq((1000000L, 100, 0L), (2000000L, 100, 900000L)))
+    val f = fixture(boxes = Some(boxes))
+    f.stub.holdAt = Set(100)
+    f.stub.failNextBuilds = 1
+
+    f.builder ! ChainAdvanced(100)
+    f.builder ! ChainAdvanced(101)
+    f.stub.release()
+
+    val pkg = f.parent.expectMsgType[BlockPackageReady].pkg
+    pkg.blockHeight shouldEqual 101
+    withClue("100's failure must not exclude the highest bid from 101: ") {
+      pkg.collateral.collateralId shouldEqual boxes(1).id
+    }
+  }
+
+  "A collection round left running by a block" should "not suppress the next block's request" in {
+    // The source never answers, so the flag for 100 is still set when 101's genesis is ready. Left
+    // there, 101's request is a no-op that nothing restarts and the block mines on genesis alone.
+    val source = TestProbe()
+    val withTxs = cfg.copy(blockTransactions = true, maxBlockTxs = 4, blockTxTimeout = 30000)
+    val f = fixture(sources = Seq(source.ref), config = withTxs)
+
+    f.builder ! ChainAdvanced(100)
+    f.parent.expectMsgType[BlockPackageReady]
+    source.expectMsgType[RequestBlockTxs].blockHeight shouldEqual 100
+
+    f.builder ! ChainAdvanced(101)
+    // Every source is told the previous height is over before anything is asked of it again.
+    source.expectMsgType[CandidateTxsDropped].blockHeight shouldEqual 100
+    f.parent.expectMsgType[BlockPackageReady]
+    withClue("101 has its own package, so it must get its own collection round: ") {
+      source.expectMsgType[RequestBlockTxs](10.seconds).blockHeight shouldEqual 101
+    }
   }
 
   // ─── ranking ──────────────────────────────────────────────────────────────

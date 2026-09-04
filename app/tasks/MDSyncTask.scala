@@ -11,6 +11,7 @@ import akka.pattern.ask
 import akka.util.Timeout
 import transactions.rollups.{CommitmentTransactions, DataBoxSource}
 import transactions.wallet.{ReservationExpiredException, WalletSelector}
+import lfsm.LFSMHelpers
 import utils.Globals
 
 import java.util.concurrent.atomic.AtomicBoolean
@@ -39,6 +40,7 @@ class MDSyncTask @Inject()(system: ActorSystem,
   if (taskConfig.enabled) {
     system.scheduler.scheduleWithFixedDelay(taskConfig.startup, commitmentInterval) { () =>
       val view = Globals.syncView
+      if (view.canonical.available && dictionaryTrusted(view)) warnIfExpiring(view)
       if (view.canonical.available &&
         dictionaryTrusted(view) &&
         Globals.mdDB.getDataBoxToken.isEmpty &&
@@ -67,6 +69,22 @@ class MDSyncTask @Inject()(system: ActorSystem,
   } else logger.info("Miner Dictionary commitment task is disabled")
 
   /**
+   * Warns while removing this registration would strike one of this miner's own honest NISPs.
+   *
+   * A rollup opened just before the entry expires stays slashable for its whole lifetime afterwards,
+   * and the commitment proof reads the dictionary as it stands rather than as it stood then.
+   */
+  private def warnIfExpiring(view: SyncView): Unit =
+    for {
+      height <- view.cursor.map(_.height.toLong)
+      validUntil <- Try(Globals.mdDB.getRegistrationExpiry).toOption.flatten
+      if height >= MDSyncTask.removalUnsafeFrom(validUntil)
+    } logger.warn(s"This miner's Miner Dictionary registration expires at height $validUntil " +
+      s"(now $height). Submissions after that are worthless, but do NOT remove or re-register " +
+      s"before height ${MDSyncTask.removalSafeAt(validUntil)}: rollups opened up to expiry stay " +
+      "slashable until then, and removing lets anyone claim this miner's bond on an honest NISP")
+
+  /**
    * Refuses registration while the tracked dictionary cannot produce a current insertion proof.
    */
   private def dictionaryTrusted(view: SyncView): Boolean = {
@@ -74,4 +92,16 @@ class MDSyncTask @Inject()(system: ActorSystem,
       logger.warn(s"Not registering in the Miner Dictionary: $reason"))
     view.minerDictionary.available && view.minerDictionaryMetadata.isDefined
   }
+}
+
+object MDSyncTask {
+
+  /**
+   * Where the removal danger window opens. A rollup opened this close to expiry is still live at it,
+   * and removing the entry while it is makes the miner's own honest submission look fraudulent.
+   */
+  private[tasks] def removalUnsafeFrom(validUntil: Long): Long = validUntil - LFSMHelpers.ROLLUP_LIFETIME
+
+  /** Where it closes: the last rollup that could have been opened under this entry has finished. */
+  private[tasks] def removalSafeAt(validUntil: Long): Long = validUntil + LFSMHelpers.ROLLUP_LIFETIME
 }

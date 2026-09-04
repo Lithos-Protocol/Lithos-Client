@@ -360,4 +360,47 @@ class CollateralMarketApiImplSpec
     f.api.getMarketInfo
     f.index.calls.get() should be > afterFirst
   }
+
+  // ─── what the collateral token index actually returns ─────────────────────
+  //
+  // The real index answers with every box carrying the token, which is the emission singleton and
+  // each unconsumed proof of spend as well as the live set. `baseBoxes` registered the singleton
+  // only under the emission NFT, so no fixture here had ever posed that — which is how a reported
+  // market value counting protocol control boxes went unnoticed.
+
+  private val premium = 3000000L
+
+  /** The token index as the node answers it, with the singleton listed under every token it holds. */
+  private def marketBoxes(ctx: BlockchainContext,
+                          lender: Address,
+                          live: Seq[IndexedBox]): Map[String, Seq[IndexedBox]] = {
+    val emission = Fx.indexed(Fx.emissionBox(ctx, lenderSet = Seq(Fx.entryOf(lender))))
+    val spent = Fx.indexed(Fx.proofOfSpendBox(ctx, Fx.entryOf(lender)))
+    baseBoxes(ctx, lenderSet = Seq(Fx.entryOf(lender))) ++ Map(
+      LFSMHelpers.COLLAT_TOKEN.toString -> ((emission +: live) :+ spent))
+  }
+
+  "activeNanoErgs" should "count the live collateral boxes and nothing else" in {
+    val f = fixture(numAddresses = 2, boxes = (ctx, addrs) =>
+      marketBoxes(ctx, addrs.head, Seq(Fx.indexed(Fx.collateralBox(ctx, addrs.head, carriedLit = 0L,
+        value = CollateralParams.PRINCIPAL_FLOOR + premium)))))
+
+    val info = f.api.getMarketInfo
+    info.activeSetSize shouldBe 1
+    withClue("the emission singleton and the proof of spend carry this token too: ") {
+      info.activeNanoErgs shouldEqual (CollateralParams.PRINCIPAL_FLOOR + premium).toString
+    }
+  }
+
+  it should "include every live box's premium and still exclude the control boxes" in {
+    val f = fixture(numAddresses = 3, boxes = (ctx, addrs) =>
+      marketBoxes(ctx, addrs.head, Seq(
+        Fx.indexed(Fx.collateralBox(ctx, addrs.head, carriedLit = 0L, txId = "d1" * 32,
+          value = CollateralParams.PRINCIPAL_FLOOR + premium)),
+        Fx.indexed(Fx.collateralBox(ctx, addrs(1), carriedLit = 0L, txId = "d2" * 32,
+          value = CollateralParams.PRINCIPAL_FLOOR)))))
+
+    f.api.getMarketInfo.activeNanoErgs shouldEqual
+      (2L * CollateralParams.PRINCIPAL_FLOOR + premium).toString
+  }
 }
