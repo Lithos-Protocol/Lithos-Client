@@ -9,6 +9,7 @@ import org.ergoplatform.appkit.impl.UnsignedTransactionImpl
 import org.ergoplatform.sdk.ErgoId
 import org.scalatest.propspec.AnyPropSpec
 import scorex.crypto.hash.Blake2b256
+import sigma.Colls
 import work.lithos.mutations.{Contract, InputUTXO, Token, TxBuilder, UTXO}
 
 /**
@@ -46,7 +47,8 @@ class FPMalformedGenesisSpec extends AnyPropSpec with EmissionSpecBase with Frau
   private def genesisFor(ctx: BlockchainContext,
                          minerHash: Array[Byte],
                          lenderSecret: java.math.BigInteger = null,
-                         wide: Boolean = false): Genesis = {
+                         wide: Boolean = false,
+                         r9: Option[ErgoValue[_]] = None): Genesis = {
     val lenderProver =
       if (lenderSecret == null) lender(ctx) else proverWith(ctx, lenderSecret)
     val height = ctx.getHeight + 1
@@ -74,10 +76,12 @@ class FPMalformedGenesisSpec extends AnyPropSpec with EmissionSpecBase with Frau
     val finderBox = UTXO(contractOf(miner(ctx)), 200000L, Seq(Token(LFSMHelpers.LIT_ID, finderLIT)))
 
     val trailing = founderBoxes ++ Seq(permitBox, pos, finderBox)
+    val holdingRegs = Seq(emptyTree.ergoValue, ErgoValue.of(0), ErgoValue.of(BigInt(0).bigInteger),
+      stateReg(height.toLong, height.toLong, 0L), bytesValue(minerHash)) ++ r9.toSeq
     val holding = UTXO(rollup, collatBox.value - trailing.map(_.value).sum,
       Seq(Token(collatIn.id, 1L), Token(LFSMHelpers.LIT_ID, poolLIT)),
-      Seq(emptyTree.ergoValue, ErgoValue.of(0), ErgoValue.of(BigInt(0).bigInteger),
-        stateReg(height.toLong, height.toLong, 0L), bytesValue(minerHash)))
+      holdingRegs
+      )
 
     val uTx = TxBuilder(ctx)
       .setInputs(collatIn)
@@ -199,6 +203,14 @@ class FPMalformedGenesisSpec extends AnyPropSpec with EmissionSpecBase with Frau
     withCtx { ctx =>
       val other = genesisFor(ctx, accused(ctx), lenderSecret = java.math.BigInteger.valueOf(7007L))
       val f = proofOver(ctx, other)
+      findsNoFraud(f.prover, fraudTx(f)())
+    }
+  }
+
+  property("extension: an R9 existing is not fraudulent") {
+    withCtx { ctx =>
+      val g = genesisFor(ctx, accused(ctx), r9 = Some(ErgoValue.of(0)))
+      val f = proofOver(ctx, g)
       findsNoFraud(f.prover, fraudTx(f)())
     }
   }

@@ -17,6 +17,18 @@
   // holding output holds a rollupNFT equal to the collateral box id. This is the share's own
   // collateral box, which is whichever one that miner drew, not the one that opened this rollup
 
+  // NOTE: We can't strictly prove a hash would be a valid block (yet) besides
+  // its difficulty, but incentive structures (a miner mining invalid blocks forfeits the LIT finder fee
+  // mev, batcher fees) make it economically worse. So miners are incentivized heavily to mine real blocks
+  // the checks in the fraud proof then ensure that the real blocks they mine are Lithos blocks.
+  // This is also why we don't check that the collateral UTXO is included in the UTXO state root of the parent id
+  // (which would be tough anyway, since parentIds are not necessarily canonical blocks
+
+  // ANOTHER NOTE:
+  // This proof constrains on some parts of the protocol that do not necessarily have to be constrained:
+  // The collateral transaction must have less than 8 tokens in it. This is not enforced by the collateral contract,
+  // but it is checked here.
+
   // REGISTERS
   // None
   val evalBox:       Box     = INPUTS(0)
@@ -309,7 +321,7 @@
         holdingTokens <= 2,
         nftFirst,
         tokenEnd._2,
-        regCount == 5,
+        regCount >= 5, // An R9 existing is not inherently fraudulent
         r4Ok, r5Ok, r6Ok, r7Ok,
         slotsEnd._2,
         r8Ok,

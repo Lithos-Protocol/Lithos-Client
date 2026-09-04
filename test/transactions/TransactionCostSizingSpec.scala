@@ -689,6 +689,44 @@ class TransactionCostSizingSpec extends AnyPropSpec with BeforeAndAfterAll
     }
   }
 
+  property("fraud proof: a slash at the NISP ceiling for MalformedGenesis") {
+    withCtx { ctx =>
+      val score = 100000L
+      val pk = NispFixtures.pkOf(miner(ctx))
+      val at = rollupBlock(ctx)
+      printHeader()
+
+      // The worst honest share: a txProof at CONST_TX_PROOF_MAX and the deepest Merkle proof the
+      // format admits, which is the shape CONST_NISP_MAX was derived from.
+      val maximal = TransactionProof(
+        Array.fill(LFSMHelpers.TX_PROOF_MAX - 2 - 64)(1.toByte), Array.fill(64)(2.toByte))
+      val shares = (0 until 10).map(i =>
+        SuperShare(NispFixtures.header((at - i).toInt, pk, 1700000000000L + i).bytes, maximal,
+          NispFixtures.levels(LFSMHelpers.NUM_LVLS_MAX)))
+
+      // Malformed without being smaller: the declared txProof size is rewritten to 2, far under
+      // CONST_TX_PROOF_MIN, and every other byte stays where it was.
+      val broken = shares.map { s =>
+        val bytes = NispFixtures.shareWithHeader(s, s.headerBytes)
+        val sizeAt = 4 + s.headerBytes.length
+        bytes.slice(0, sizeAt) ++ Array(0.toByte, 2.toByte) ++ bytes.drop(sizeAt + 2)
+      }
+      val nisp = NispFixtures.rawNisp(score, broken)
+
+      val f = fraud(ctx, fpMalformedGenesis(ctx), nisp, score)
+      val m = measure("fraudproof", s"FP_MalformedGenesis, ${nisp.length}B NISP",
+        provesFraud(f.prover, fraudTx(f)()))
+
+      println(s"[budget] the accused's NISP is ${nisp.length} bytes against CONST_NISP_MAX " +
+        s"${LFSMHelpers.NISP_MAX}; the bystander's is $realisticNispSize, so a tree of ceiling-sized " +
+        "NISPs would push the removal proof further still")
+      println(f"[budget] one slash is ${100.0 * m.bytes / maxBlockSize}%.1f%% of a block by size " +
+        f"and ${100.0 * m.cost / maxBlockCost}%.1f%% by cost")
+
+      nisp.length should be < LFSMHelpers.NISP_MAX
+    }
+  }
+
   // ══════════════════════════════════════════════════════════════════════════
   //  the table
   // ══════════════════════════════════════════════════════════════════════════
