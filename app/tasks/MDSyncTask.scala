@@ -11,7 +11,8 @@ import akka.pattern.ask
 import akka.util.Timeout
 import transactions.rollups.{CommitmentTransactions, DataBoxSource}
 import transactions.wallet.{ReservationExpiredException, WalletSelector}
-import lfsm.LFSMHelpers
+import lfsm.{LFSMHelpers, MDDatabase}
+import scorex.utils.Longs
 import utils.Globals
 
 import java.util.concurrent.atomic.AtomicBoolean
@@ -37,6 +38,16 @@ class MDSyncTask @Inject()(system: ActorSystem,
   // A cold Miner Dictionary request may reconstruct one large prover from snapshot + journal.
   private implicit val timeout: Timeout = Timeout(30.seconds)
 
+  private val minerHash: Array[Byte] = nodeContext.getNodeWallet.contract.hashedPropBytes
+  /** Zero until this miner's entry has been read; it never moves without a re-registration. */
+  private val expiry = new java.util.concurrent.atomic.AtomicLong(0L)
+
+  // Before anything reads it. What it drops is re-derived: the data-box token from committed sync
+  // state, the expiry at the next registration.
+  if (Try(Globals.mdDB.migrate()).getOrElse(false))
+    logger.warn(s"Miner Dictionary store was below schema ${MDDatabase.Schema} and has been cleared; " +
+      "it refills as synchronization republishes")
+
   if (taskConfig.enabled) {
     system.scheduler.scheduleWithFixedDelay(taskConfig.startup, commitmentInterval) { () =>
       val view = Globals.syncView
@@ -44,6 +55,9 @@ class MDSyncTask @Inject()(system: ActorSystem,
       if (view.canonical.available &&
         dictionaryTrusted(view) &&
         Globals.mdDB.getDataBoxToken.isEmpty &&
+        // The dictionary is what says whether this miner is in it. The local token is a cache, and a
+        // cleared store would otherwise read as never having registered.
+        !view.minerDictionaryMetadata.exists(_.hasMiner) &&
         !stateConfig.disableTransforms.getOrElse(false) &&
         stateConfig.autoCommit.getOrElse(false) &&
         running.compareAndSet(false, true)) {
@@ -77,12 +91,35 @@ class MDSyncTask @Inject()(system: ActorSystem,
   private def warnIfExpiring(view: SyncView): Unit =
     for {
       height <- view.cursor.map(_.height.toLong)
-      validUntil <- Try(Globals.mdDB.getRegistrationExpiry).toOption.flatten
+      validUntil <- registrationExpiry(view)
       if height >= MDSyncTask.removalUnsafeFrom(validUntil)
     } logger.warn(s"This miner's Miner Dictionary registration expires at height $validUntil " +
       s"(now $height). Submissions after that are worthless, but do NOT remove or re-register " +
       s"before height ${MDSyncTask.removalSafeAt(validUntil)}: rollups opened up to expiry stay " +
       "slashable until then, and removing lets anyone claim this miner's bond on an honest NISP")
+
+  /**
+   * This miner's expiry, read from its own dictionary entry and then kept.
+   *
+   * The entry is `[credentialId: 32][validUntil: 8]` and the value is fixed for the life of a
+   * registration, so one read answers every later tick without materializing a prover again.
+   */
+  private def registrationExpiry(view: SyncView): Option[Long] = {
+    if (expiry.get() == 0L && view.minerDictionaryMetadata.exists(_.hasMiner)) {
+      Try {
+        scala.concurrent.Await.result(syncHandler ? GetMinerDictionary, timeout.duration) match {
+          case CurrentMinerDictionary(md) =>
+            md.dictionary.copy().lookUp(minerHash).response.headOption
+              .flatMap(_.tryOp.toOption).flatten
+              .filter(_.length == MDSyncTask.EntrySize)
+              .foreach(entry => expiry.set(Longs.fromByteArray(entry.slice(32, MDSyncTask.EntrySize))))
+          case other => throw new IllegalStateException(s"Miner Dictionary unavailable: $other")
+        }
+      }.failed.foreach(ex =>
+        logger.info(s"Could not read this miner's registration expiry: ${ex.getMessage}"))
+    }
+    Some(expiry.get()).filter(_ > 0L)
+  }
 
   /**
    * Refuses registration while the tracked dictionary cannot produce a current insertion proof.
@@ -104,4 +141,7 @@ object MDSyncTask {
 
   /** Where it closes: the last rollup that could have been opened under this entry has finished. */
   private[tasks] def removalSafeAt(validUntil: Long): Long = validUntil + LFSMHelpers.ROLLUP_LIFETIME
+
+  /** A dictionary entry is `[credentialId: 32][validUntil: 8]`. */
+  private[tasks] final val EntrySize: Int = 40
 }

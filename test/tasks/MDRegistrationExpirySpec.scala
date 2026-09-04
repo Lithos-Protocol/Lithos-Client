@@ -3,6 +3,7 @@ package tasks
 import lfsm.{LFSMHelpers, MDDatabase}
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
+import org.ergoplatform.sdk.ErgoId
 import storage.KeyValueStore
 
 import java.nio.file.Files
@@ -35,15 +36,50 @@ class MDRegistrationExpirySpec extends AnyFlatSpec with Matchers {
     (safe - 1L >= MDSyncTask.removalUnsafeFrom(validUntil)) shouldBe true
   }
 
-  "The recorded expiry" should "round-trip, since the warning reads it rather than the dictionary" in {
-    val dir = Files.createTempDirectory("md-expiry")
-    val db = new MDDatabase(KeyValueStore.openOrThrow(KeyValueStore.DefaultBackend, dir))
+  "The entry layout" should "put the expiry in its last eight bytes" in {
+    // What the warning reads: the dictionary entry is the credential the registration minted with
+    // the expiry appended, and the contract binds that value to the one the transaction declared.
+    MDSyncTask.EntrySize shouldEqual 40
+  }
 
-    db.getRegistrationExpiry shouldBe None
-    db.setRegistrationExpiry(validUntil) shouldBe true
-    db.getRegistrationExpiry shouldEqual Some(validUntil)
-    db.delRegistrationExpiry shouldBe true
-    db.getRegistrationExpiry shouldBe None
+  // ─── the schema guard ─────────────────────────────────────────────────────
+
+  private def store(): MDDatabase =
+    new MDDatabase(KeyValueStore.openOrThrow(
+      KeyValueStore.DefaultBackend, Files.createTempDirectory("md-schema")))
+
+  private val token = ErgoId.create("ab" * 32)
+
+  "A store written before the schema existed" should "be cleared and stamped" in {
+    val db = store()
+    db.setDataBoxToken(token) shouldBe true
+
+    db.migrate() shouldBe true
+    db.getDataBoxToken shouldBe None
+    db.getSchemaVersion shouldEqual Some(MDDatabase.Schema)
+    db.close()
+  }
+
+  "A store at an older schema" should "be cleared too" in {
+    val db = store()
+    db.setSchemaVersion(MDDatabase.Schema - 1) shouldBe true
+    db.setDataBoxToken(token) shouldBe true
+
+    db.migrate() shouldBe true
+    db.getDataBoxToken shouldBe None
+    db.getSchemaVersion shouldEqual Some(MDDatabase.Schema)
+    db.close()
+  }
+
+  "A store already at this schema" should "be left alone" in {
+    // The half that matters on every ordinary startup: a migration that ran unconditionally would
+    // drop the data-box token each time and make this miner look unregistered until sync republished.
+    val db = store()
+    db.migrate() shouldBe true
+    db.setDataBoxToken(token) shouldBe true
+
+    db.migrate() shouldBe false
+    db.getDataBoxToken shouldEqual Some(token)
     db.close()
   }
 }
