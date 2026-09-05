@@ -63,7 +63,7 @@ class TransactionPublisher @Inject()(config: Configuration, nodeContext: NodeCon
     if (!stateConfig.disableTransforms.getOrElse(false)) {
       logger.info("TransactionPublisher starting - evaluating rollup transactions every 2 minutes")
       ticker = Some(
-        context.system.scheduler.scheduleWithFixedDelay(2.minutes, 2.minutes, self, Tick)(context.dispatcher)
+        context.system.scheduler.scheduleWithFixedDelay(25.seconds, 25.seconds, self, Tick)(context.dispatcher)
       )
     } else {
       logger.info("TransactionPublisher disabled via disableTransforms config")

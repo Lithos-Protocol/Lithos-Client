@@ -56,7 +56,7 @@ class TransactionProcessor @Inject()(config: Configuration, nodeContext: NodeCon
     if (!stateConfig.disableTransforms.getOrElse(false)) {
       logger.info("TransactionProcessor starting - processing pending transactions every 3 minutes")
       ticker = Some(
-        context.system.scheduler.scheduleWithFixedDelay(3.minutes, 3.minutes, self, ProcessTransactions)(context.dispatcher)
+        context.system.scheduler.scheduleWithFixedDelay(35.seconds, 10.seconds, self, ProcessTransactions)(context.dispatcher)
       )
     } else {
       logger.info("TransactionProcessor disabled via disableTransforms config")

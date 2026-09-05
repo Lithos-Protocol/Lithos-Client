@@ -72,7 +72,7 @@ class RollupEvaluator @Inject()(config: Configuration, nodeContext: NodeContext,
     if (!stateConfig.disableTransforms.getOrElse(false)) {
       logger.info("RollupEvaluator starting - evaluating rollups every 4 minutes")
       ticker = Some(
-        context.system.scheduler.scheduleWithFixedDelay(4.minutes, 4.minutes, self, EvaluateNextBatch)(context.dispatcher)
+        context.system.scheduler.scheduleWithFixedDelay(30.seconds, 30.seconds, self, EvaluateNextBatch)(context.dispatcher)
       )
     } else {
       logger.info("RollupEvaluator disabled via disableTransforms config")
