@@ -154,9 +154,9 @@ class HoldingGuardSpec extends AnyPropSpec with RollupSpecBase {
     val treeKey = if (key == null) identity.hashedPropBytes else key
     val nisp = nispBytes(score, nispSize)
 
-    val tree = treeWith(Seq.empty)
+    val tree = commitmentTree(Seq.empty)
     val inTree = tree.ergoValue
-    val insertion = tree.insert(treeKey -> nisp)
+    val insertion = tree.insert(treeKey -> _root_.nisp.NispCommitment.fromPayload(nisp).bytes)
     val outTree = tree.ergoValue
     val start = if (periodStart < 0L) ctx.getHeight.toLong - 100L else periodStart
 
@@ -252,7 +252,7 @@ class HoldingGuardSpec extends AnyPropSpec with RollupSpecBase {
   private def transform(ctx: BlockchainContext, periodStart: Long, op: Byte = 1.toByte) = {
     val guard = holdingContract(ctx)
     val prover = miner(ctx)
-    val tree = treeWith(Seq(contractOf(prover).hashedPropBytes -> nispBytes(5000L, 8000)))
+    val tree = commitmentTree(Seq(contractOf(prover).hashedPropBytes -> nispBytes(5000L, 8000)))
     val t = tree.ergoValue
 
     val in = UTXO(guard, boxValue, Seq.empty[Token], Seq(

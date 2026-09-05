@@ -101,7 +101,7 @@ class RollupTransitionSpec extends AnyFlatSpec with Matchers with OptionValues {
     val state = base()
     val value = nisp(500000L)
     val expected = PlasmaDictionary.empty()
-    val insertion = expected.insert(minerKey -> value)
+    val insertion = expected.insert(minerKey -> _root_.nisp.NispCommitment.fromPayload(value).bytes)
     val tx = ReducerFixtures.submissionTx(6, baseUtxo, SyncFixtures.id(120008), 100,
       minerKey, value, insertion.proof.ergoValue.toHex, expected,
       numMiners = 1, totalScore = BigInt(500000), period = 99L)
@@ -120,7 +120,7 @@ class RollupTransitionSpec extends AnyFlatSpec with Matchers with OptionValues {
     val state = base()
     val value = nisp(500000L)
     val expected = PlasmaDictionary.empty()
-    val insertion = expected.insert(minerKey -> value)
+    val insertion = expected.insert(minerKey -> _root_.nisp.NispCommitment.fromPayload(value).bytes)
     val bond = ReducerFixtures.bondFor(value)
     val txId = SyncFixtures.id(130001)
     val output = ReducerFixtures.holdingOutput(SyncFixtures.id(120009), txId, 100, expected,
@@ -143,7 +143,7 @@ class RollupTransitionSpec extends AnyFlatSpec with Matchers with OptionValues {
     val state = base()
     val value = nisp(500000L)
     val expected = PlasmaDictionary.empty()
-    val insertion = expected.insert(minerKey -> value)
+    val insertion = expected.insert(minerKey -> _root_.nisp.NispCommitment.fromPayload(value).bytes)
     val txId = SyncFixtures.id(130002)
     val output = ReducerFixtures.holdingOutput(SyncFixtures.id(120010), txId, 100, expected,
       numMiners = 1, totalScore = BigInt(500000), period = 99L, bond = 1L,
@@ -166,7 +166,7 @@ class RollupTransitionSpec extends AnyFlatSpec with Matchers with OptionValues {
     val state = base()
     val value = nisp(500000L)
     val expected = PlasmaDictionary.empty()
-    val insertion = expected.insert(minerKey -> value)
+    val insertion = expected.insert(minerKey -> _root_.nisp.NispCommitment.fromPayload(value).bytes)
     val txId = SyncFixtures.id(130003)
     val output = ReducerFixtures
       .holdingOutput(SyncFixtures.id(120011), txId, 100, expected, 1, BigInt(500000), 99L)
@@ -199,7 +199,7 @@ class RollupTransitionSpec extends AnyFlatSpec with Matchers with OptionValues {
   "The evaluation transform" should "keep the bonds out of the declared reward" in {
     val dictionary = PlasmaDictionary.empty()
     val value = nisp(500000L)
-    val insertion = dictionary.insert(minerKey -> value)
+    val insertion = dictionary.insert(minerKey -> _root_.nisp.NispCommitment.fromPayload(value).bytes)
     val bond = ReducerFixtures.bondFor(value)
     val submitted = ReducerFixtures.submissionTx(8, baseUtxo, SyncFixtures.id(120013), 100,
       minerKey, value, insertion.proof.ergoValue.toHex, dictionary, 1, BigInt(500000), 99L)
@@ -242,7 +242,7 @@ class RollupTransitionSpec extends AnyFlatSpec with Matchers with OptionValues {
   it should "fault when the declared reward includes the bonds" in {
     val dictionary = PlasmaDictionary.empty()
     val value = nisp(500000L)
-    val insertion = dictionary.insert(minerKey -> value)
+    val insertion = dictionary.insert(minerKey -> _root_.nisp.NispCommitment.fromPayload(value).bytes)
     val bond = ReducerFixtures.bondFor(value)
     val mine = protocol.copy(localMinerHash = minerKey)
     val submitted = ReducerFixtures.submissionTx(11, baseUtxo, SyncFixtures.id(120016), 100,
@@ -272,7 +272,7 @@ class RollupTransitionSpec extends AnyFlatSpec with Matchers with OptionValues {
   "A fraud proof" should "take the entry's own bond out of the box, the ledger and into the prover" in {
     val dictionary = PlasmaDictionary.empty()
     val value = nisp(500000L)
-    val insertion = dictionary.insert(minerKey -> value)
+    val insertion = dictionary.insert(minerKey -> _root_.nisp.NispCommitment.fromPayload(value).bytes)
     val bond = ReducerFixtures.bondFor(value)
     val mine = protocol.copy(localMinerHash = SyncFixtures.plasmaEntries(2, 16)(1)._1)
     val submitted = ReducerFixtures.submissionTx(14, baseUtxo, SyncFixtures.id(120019), 100,
@@ -311,7 +311,7 @@ class RollupTransitionSpec extends AnyFlatSpec with Matchers with OptionValues {
   it should "fault when the prover is paid something other than the slashed bond" in {
     val dictionary = PlasmaDictionary.empty()
     val value = nisp(500000L)
-    val insertion = dictionary.insert(minerKey -> value)
+    val insertion = dictionary.insert(minerKey -> _root_.nisp.NispCommitment.fromPayload(value).bytes)
     val bond = ReducerFixtures.bondFor(value)
     val mine = protocol.copy(localMinerHash = SyncFixtures.plasmaEntries(2, 16)(1)._1)
     val submitted = ReducerFixtures.submissionTx(17, baseUtxo, SyncFixtures.id(120023), 100,

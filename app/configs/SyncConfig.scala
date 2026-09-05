@@ -22,8 +22,8 @@ class SyncConfig(config: Configuration){
   val storageBackend: String = config.getOptional[String]("sync.storage.backend").getOrElse("leveldb")
   val storagePath: Path = Paths.get(config.getOptional[String]("sync.storage.path").getOrElse(".lithos/sync"))
   val snapshotsEnabled: Boolean = config.getOptional[Boolean]("sync.snapshots.enabled").getOrElse(true)
-  val snapshotInterval: Int = config.getOptional[Int]("sync.snapshots.intervalBlocks").getOrElse(90)
-  val snapshotRetention: Int = config.getOptional[Int]("sync.snapshots.retention").getOrElse(12)
+  val snapshotInterval: Int = config.getOptional[Int]("sync.snapshots.intervalBlocks").getOrElse(10)
+  val snapshotRetention: Int = config.getOptional[Int]("sync.snapshots.retention").getOrElse(24)
 
   /**
    * Ceiling on one snapshot entry. Dictionaries are content-addressed and written as bounded

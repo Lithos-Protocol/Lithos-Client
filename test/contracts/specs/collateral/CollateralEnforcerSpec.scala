@@ -40,21 +40,21 @@ class CollateralEnforcerSpec extends AnyPropSpec with EmissionSpecBase {
 
   /**
    * Linear rather than stepped, so adjacent joiners pay nearly the same and there is no cliff to race
-   * around in the mempool (analysis §26.1).
+   * around in the mempool
    */
   property("thermostat: accepts the sloped permit at a backlog inside the sloped region") {
     withCtx { ctx =>
-      permitAt(100L) shouldBe 2000L * LIT
+      permitAt(100L) shouldBe 4000L * LIT
       val j = joinScenario(ctx, head = 0L, tail = 100L, enfScript = enforced(ctx))
-      j.permit shouldBe 2000L * LIT
+      j.permit shouldBe 4000L * LIT
       accepts(j.prover, joinTx(j)())
     }
   }
 
-  /** `1000 + 10Q >= 30000` at `Q = 2,900`; above that the thermostat is flat (analysis §26.2). */
+  /** `2000 + 20Q >= 40000` at `Q = 1,900`; above that the thermostat is flat */
   property("thermostat: clamps to the ceiling once the backlog saturates it") {
     withCtx { ctx =>
-      permitAt(2900L) shouldBe LFSMHelpers.PERMIT_CEIL
+      permitAt(1900L) shouldBe LFSMHelpers.PERMIT_CEIL
       permitAt(50000L) shouldBe LFSMHelpers.PERMIT_CEIL
       val j = joinScenario(ctx, head = 0L, tail = 50000L, enfScript = enforced(ctx))
       j.permit shouldBe LFSMHelpers.PERMIT_CEIL

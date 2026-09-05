@@ -41,6 +41,9 @@ object RollupSpecBase {
 /** Adds the three rollup contracts and NISP-shaped helpers to [[ContractSpecBase]]. */
 trait RollupSpecBase extends ContractSpecBase {
 
+  protected def commitmentTree(entries: Seq[(Array[Byte], Array[Byte])]): Tree =
+    treeWith(entries.map { case (key, payload) => key -> nisp.NispCommitment.fromPayload(payload).bytes })
+
   protected val fpTokenId: ErgoId =
     ErgoId.create("20fa2bf23962cdf51b07722d6237c0c7b8a44f78856c0f7ec308dc1ef1a92a51")
 

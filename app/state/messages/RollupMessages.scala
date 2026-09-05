@@ -17,7 +17,7 @@ object RollupMessages {
 
   case class RemoveRollup(blockId: String, reason: String)
   // Safely updates evaluation status for a rollup synchronizer
-  case class UpdateEvaluation(blockId: String)
+  case class UpdateEvaluation(blockId: String, expectedUtxoId: Option[String] = None)
   // Gets the current rollup state and returns RollupInfo
   case class GetCurrentRollup(blockId: String)
   /** Internal time-sensitive submission/fraud-proof lookup; never exposed by the Blocks API. */
@@ -26,7 +26,9 @@ object RollupMessages {
   sealed trait RollupInfo
   case class CurrentRollup(utxoId: String,
                            rollup: Rollup,
-                           mempoolState: Option[MempoolRollupState]) extends RollupInfo
+                           mempoolState: Option[MempoolRollupState],
+                           history: Option[RollupHistoryAnchor] = None) extends RollupInfo
+  case class RollupHistoryAnchor(collateralBoxId: String, confirmedHeight: Int)
   case class NoRollupFound() extends RollupInfo
   /** The rollup exists, but its authenticated dictionary could not be made current for this request. */
   case class RollupUnavailable(reason: String) extends RollupInfo

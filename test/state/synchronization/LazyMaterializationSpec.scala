@@ -179,7 +179,7 @@ class LazyMaterializationSpec extends TestKit(ActorSystem("lazy-materialization"
     val f = fixture()
     val (entryKey, value) = SyncFixtures.plasmaEntries(1, 32).head
     val expectedDictionary = f.first.dictionary.copy()
-    val insertion = expectedDictionary.insert(entryKey -> value)
+    val insertion = expectedDictionary.insert(entryKey -> _root_.nisp.NispCommitment.fromPayload(value).bytes)
     val submittedScore = BigInt(com.google.common.primitives.Longs.fromByteArray(value.take(8)))
     val outputId = SyncFixtures.id(7451)
     val tx = ReducerFixtures.submissionTx(45, f.first.utxoId, outputId, startHeight,

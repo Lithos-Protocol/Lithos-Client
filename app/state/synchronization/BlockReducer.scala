@@ -2,6 +2,7 @@ package state.synchronization
 
 import lfsm.states.{AuthenticatedDictionary, AuthenticatedDictionaryView, MinerDictionary, PlasmaDictionary, Rollup, RollupInfoState}
 import lfsm.{LFSMHelpers, LFSMPhase, RollupProtocol}
+import nisp.NispCommitment
 import org.bouncycastle.util.encoders.Hex
 import org.ergoplatform.appkit.{ErgoValue, NetworkType}
 import org.ergoplatform.sdk.ErgoId
@@ -171,13 +172,13 @@ object BlockReducer {
    * Rebuilds one rollup from its genesis by replaying its own spend chain.
    * Isolated from committed state, so a failed rebuild publishes nothing.
    */
-  final class RollupReplay(protocol: SyncProtocolContext) {
+  final class RollupReplay(protocol: SyncProtocolContext, retainUnownedRollups: Boolean = false) {
     private var state = CommittedSyncState(SyncCursor(0, "", ""), 0L, Map.empty, Map.empty, Map.empty,
       MinerDictionary.initialState, None)
 
     /** Applies one transaction, reporting whether it changed rollup state. */
     def apply(block: BlockInfo, tx: BlockTx): Either[SyncApplyError, Boolean] = {
-      val staged = new StagedState(state, protocol)
+      val staged = new StagedState(state, protocol, retainUnownedRollups)
       staged.applyTransaction(block, tx).left.map(_.error).map { _ =>
         state = staged.result
         staged.relevantEvents > 0
@@ -185,6 +186,7 @@ object BlockReducer {
     }
 
     def rollup(rollupId: String): Option[Rollup] = state.rollups.get(rollupId)
+    def origin(rollupId: String): Option[String] = state.rollupOrigins.get(rollupId)
   }
 
   /**
@@ -217,7 +219,8 @@ object BlockReducer {
     }
   }
 
-  private final class StagedState(base: CommittedSyncState, protocol: SyncProtocolContext) {
+  private final class StagedState(base: CommittedSyncState, protocol: SyncProtocolContext,
+                                  retainUnownedRollups: Boolean = false) {
     private var rollups = base.rollups
     private var routes = base.routes
     private var rollupOrigins = base.rollupOrigins
@@ -491,7 +494,7 @@ object BlockReducer {
                 s"holding period ending at ${tree.state.periodStart + LFSMHelpers.HOLDING_PERIOD}")
             _ <- requireNFT(tx.id, rollupId, output)
           } yield {
-            if (tree.hasMiner) replaceRollup(rollupId, tree.copy(state = state, utxoId = output.id))
+            if (tree.hasMiner || retainUnownedRollups) replaceRollup(rollupId, tree.copy(state = state, utxoId = output.id))
             else removeRollup(rollupId)
           }
         } else Left(StateInvariant(tx.id, s"unexpected output contract for holding phase: ${output.ergoTree}"))
@@ -533,9 +536,11 @@ object BlockReducer {
         keyValue <- extensionPair(proof, "1", tx.id)
         expectedProof <- extensionBytes(proof, "2", tx.id)
         state = registers.state
-        score <- attempt(tx.id, "submitted NISP is too short to contain a score") {
-          Longs.fromByteArray(keyValue._2.slice(0, 8))
+        commitment <- attempt(tx.id, "submitted NISP is too short to contain a score") {
+          NispCommitment.fromPayload(keyValue._2)
         }
+        score = commitment.score
+        compact = keyValue._1 -> commitment.bytes
         // The bond is priced off the claimed score, and the same figure has to appear twice: once
         // added to the box and once added to the ledger. A submission that funds one without the
         // other would leave payout unable to settle.
@@ -547,9 +552,9 @@ object BlockReducer {
         }
         dictionary = mutableRollupDictionary(rollupId)
         insertion <- attempt(tx.id, "could not apply dictionary insertion") {
-          dictionary.insert(keyValue._1 -> keyValue._2)
+          dictionary.insert(compact)
         }
-        _ = record(DictionaryId.Rollup(rollupId), DictionaryOperation.Insert(tx.id, Seq(keyValue)))
+        _ = record(DictionaryId.Rollup(rollupId), DictionaryOperation.Insert(tx.id, Seq(compact)))
         // _ <- requireProof(tx.id, "insertion", insertion.proof.ergoValue.getValue, expectedProof)
         _ <- requireDigest(tx.id, dictionary, registers.digest)
         _ <- requireState(tx.id, registers.numMiners == tree.numMiners + 1,
@@ -632,8 +637,8 @@ object BlockReducer {
           case Some(bytes) => Right(bytes)
           case None => Left(StateInvariant(tx.id, "fraud proof miner is absent from the dictionary"))
         }
-        score <- attempt(tx.id, "dictionary value is too short to contain a score") {
-          Longs.fromByteArray(value.slice(0, 8))
+        score <- attempt(tx.id, "dictionary value is not a compact NISP commitment") {
+          NispCommitment.decode(value).score
         }
         // The removed entry's own bond, which leaves the box and the ledger together and is paid
         // whole to the prover. A proof that slashed more than the entry posted would leave payout
@@ -733,7 +738,7 @@ object BlockReducer {
                                  entries: Seq[Array[Byte]]): Either[SyncApplyError, (BigInt, BigInt)] =
       attempt(txId, "payout batch could not be priced") {
         entries.foldLeft((BigInt(0), BigInt(0))) { case ((paid, bonds), value) =>
-          val score = Longs.fromByteArray(value.slice(0, 8))
+          val score = NispCommitment.decode(value).score
           val bond = BigInt(RollupProtocol.bondForScore(score))
           val share = (BigInt(tree.state.totalErgReward) * BigInt(score)) / tree.totalScore
           (paid + share + bond, bonds + bond)

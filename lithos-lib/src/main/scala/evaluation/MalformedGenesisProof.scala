@@ -12,7 +12,7 @@ import work.lithos.mutations.{Contract, InputUTXO}
  * box are already inside the NISP, and the rollup NFT is on the evaluation box.
  */
 case class MalformedGenesisProof(contract: Contract, miner: Array[Byte], nispTree: Rollup,
-                                 evalInput: InputUTXO, fpControl: InputUTXO)
-  extends FraudProof(contract, miner, nispTree, evalInput, fpControl) {
+                                 evalInput: InputUTXO, fpControl: InputUTXO, payload: Option[nisp.ResolvedNisp] = None)
+  extends FraudProof(contract, miner, nispTree, evalInput, fpControl, payload) {
   override val logger: Logger = LoggerFactory.getLogger("MalformedGenesisProof")
 }

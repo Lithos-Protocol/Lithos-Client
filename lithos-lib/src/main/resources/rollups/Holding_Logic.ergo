@@ -2,15 +2,8 @@
   // Holding_Logic
   // Value: block reward, plus the refundable ERG bond of every NISP submitted so far
   // The holding contract's rules. Never sits on a box: rides in context var 64 and is executed by
-  // Holding_Guard, which checks its hash first. Two consequences of that arrangement:
-  //
-  //  1. The phase comes from CTX_OP rather than from an if on HEIGHT, because the guard has to know
-  //     the path before it executes anything. The op byte is the spender's choice and proves nothing
-  //     on its own, so the height condition is re-checked below as `inSubmissionPhase`.
-  //  2. The miner's signing script is executed by the guard, since executeFromVar cannot nest. The
-  //     guard binds blake2b256(signerProp.propBytes) == CTX_NISP_DATA._1 and conjoins signerProp, so
-  //     this script takes CTX_NISP_DATA._1 as an authenticated identity.
-  //
+  // Holding_Guard, which checks its hash first.
+  // Employs a NISP-Hash rollup design to ensure individual AVL leaves are small in size
   // A submission posts a refundable ERG bond priced from its own claimed score, which is what makes
   // writing to this tree cost something. It is returned in full at payout, and forfeited to whoever
   // proves the entry fraudulent.
@@ -103,62 +96,66 @@
 
   // Spending Path 1: Holding Contract is in submission phase (miners may submit NISPs to the AVL Tree)
   if(CTX_OP == 0.toByte){
+    if(CTX_NISP_DATA._2.size >= CONST_NISP_MIN){
+      val inSubmissionPhase = HEIGHT < currentPeriod + CONST_PERIOD_LENGTH && HEIGHT != currentBlock
+      val validUTXO       = nextUTXO.propositionBytes == SELF.propositionBytes
 
-    val inSubmissionPhase = HEIGHT < currentPeriod + CONST_PERIOD_LENGTH && HEIGHT != currentBlock
-    val validUTXO       = nextUTXO.propositionBytes == SELF.propositionBytes
-    // Read once, because the bond is priced from it as well as checked. The guard is needed because
-    // byteArrayToLong throws on a short slice; a zero falls through to validNISP's `score > 0`.
-    val score: Long = {
-      if(CTX_NISP_DATA._2.size > 8)
-        byteArrayToLong( CTX_NISP_DATA._2.slice(0,8) )
-      else
-        0L
-    }
+      val scoreBytes =  CTX_NISP_DATA._2.slice(0,8)
+      val score: Long = byteArrayToLong(scoreBytes)
 
-    // We are only checking the minimum amount of information required in this contract, such as valid format for
-    // NISP data which includes positive shareScore as first 8 bytes. More information will be verified during
-    // evaluation phase.
-    // Check basic size requirements at holding contract to prevent spam from entering tree
-    val validNISP = {
-      score > 0 && nextScore == totalScore + score.toBigInt &&
-      CTX_NISP_DATA._2.size >= CONST_NISP_MIN && CTX_NISP_DATA._2.size < CONST_NISP_MAX
-    }
 
-    // The box value grows by exactly the entry bond rather than being conserved.
-    val entryBond = bondForScore(score)
-    val bondCollected = allOf(
-      Coll(
-        nextUTXO.value.toBigInt == SELF.value.toBigInt + entryBond.toBigInt,
-        nextBond.toBigInt       == totalBond.toBigInt + entryBond.toBigInt
+      // We are only checking the minimum amount of information required in this contract, such as valid format for
+      // NISP data which includes positive shareScore as first 8 bytes. More information will be verified during
+      // evaluation phase.
+      // Check basic size requirements at holding contract to prevent spam from entering tree
+      val validNISP = {
+        score > 0 && nextScore == totalScore + score.toBigInt && CTX_NISP_DATA._2.size < CONST_NISP_MAX
+      }
+
+      // The box value grows by exactly the entry bond rather than being conserved.
+      val entryBond = bondForScore(score)
+      val bondCollected = allOf(
+        Coll(
+          nextUTXO.value.toBigInt == SELF.value.toBigInt + entryBond.toBigInt,
+          nextBond.toBigInt       == totalBond.toBigInt + entryBond.toBigInt
+        )
       )
-    )
 
-    val treeUpdated = {
-      val insertTree = nispTree.insert(Coll(CTX_NISP_DATA), CTX_NISP_PROOF).get
-      insertTree == nextTree
-    }
-    val onlyOne = SELF.id == INPUTS(0).id
-    val incrementedMiners = nextMiners == currentMiners + 1
-    val samePeriod = nextPeriod == currentPeriod
-    val sameBlock  = nextBlock == currentBlock
-    val tokensConserved = nextUTXO.tokens == SELF.tokens
-    val statements = allOf(
-      Coll(
-        inSubmissionPhase,
-        onlyOne,
-        validUTXO,
-        stateSized,
-        bondCollected,
-        validNISP,
-        treeUpdated,
-        incrementedMiners,
-        samePeriod,
-        sameBlock,
-        tokensConserved
+      val treeUpdated = {
+        // NISP-Hash tree stores the first 8 bytes (score) of the NISP,
+        // then a hash commitment to the entire NISP (including the score) appended to it.
+        val NISPHash  = blake2b256(CTX_NISP_DATA._2)
+
+        val NISPHashKV = (CTX_NISP_DATA._1, scoreBytes.append(NISPHash))
+        val insertTree = nispTree.insert(Coll(NISPHashKV), CTX_NISP_PROOF).get
+        insertTree == nextTree
+      }
+      val onlyOne = SELF.id == INPUTS(0).id
+      val incrementedMiners = nextMiners == currentMiners + 1
+      val samePeriod = nextPeriod == currentPeriod
+      val sameBlock  = nextBlock == currentBlock
+      val tokensConserved = nextUTXO.tokens == SELF.tokens
+      val statements = allOf(
+        Coll(
+          inSubmissionPhase,
+          onlyOne,
+          validUTXO,
+          stateSized,
+          bondCollected,
+          validNISP,
+          treeUpdated,
+          incrementedMiners,
+          samePeriod,
+          sameBlock,
+          tokensConserved
+        )
       )
-    )
 
-    sigmaProp(statements)
+      sigmaProp(statements)
+    }else{
+      sigmaProp(false)
+    }
+
   }else if(CTX_OP == 1.toByte){
     // Spending Path 2: If HEIGHT == currentBlock (so in the genesis block),
     // the miner may add to the holding UTXO's value.

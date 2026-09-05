@@ -91,8 +91,8 @@ class RollupProtocolSpec extends AnyFlatSpec with Matchers {
   }
 
   it should "use the same truncating division the contracts do" in {
-    RollupProtocol.bondForScore(1000000000L) shouldEqual 10000000L
-    RollupProtocol.bondForScore(1000000099L) shouldEqual 10000000L
+    RollupProtocol.bondForScore(1000000000L) shouldEqual 40000000L
+    RollupProtocol.bondForScore(1000000009L) shouldEqual 40000000L
   }
 
   it should "reject a score no valid NISP could carry" in {

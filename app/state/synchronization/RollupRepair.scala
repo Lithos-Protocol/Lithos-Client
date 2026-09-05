@@ -23,7 +23,8 @@ object RollupRepairResult {
  * The configured node is authoritative: each box names the next transaction and that transaction's
  * indexed inclusion names the block boundary. No redundant same-node header comparison is performed.
  */
-final class RollupRepair(nodeApi: NodeApi, protocol: SyncProtocolContext, maxTransforms: Int) {
+final class RollupRepair(nodeApi: NodeApi, protocol: SyncProtocolContext, maxTransforms: Int,
+                          onIndexedRead: () => Unit = () => ()) {
 
   private val logger: Logger = LoggerFactory.getLogger("RollupRepair")
 
@@ -51,7 +52,7 @@ final class RollupRepair(nodeApi: NodeApi, protocol: SyncProtocolContext, maxTra
   }
 
   /** Authenticate and apply the one genesis transaction that spent the retained collateral box. */
-  private def seed(replay: BlockReducer.RollupReplay,
+  private[synchronization] def seed(replay: BlockReducer.RollupReplay,
                    fault: QuarantineFault,
                    committedHeight: Int): Either[RollupRepairResult, String] =
     readBox(fault.collateralBoxId, "collateral").flatMap { collateral =>
@@ -120,7 +121,8 @@ final class RollupRepair(nodeApi: NodeApi, protocol: SyncProtocolContext, maxTra
     }
 
   private def readBox(boxId: String,
-                      kind: String): Either[RollupRepairResult, IndexedBox] =
+                      kind: String): Either[RollupRepairResult, IndexedBox] = {
+    onIndexedRead()
     nodeApi.indexedBoxById(boxId) match {
       case Failure(ex) => Left(RollupRepairResult.Failed(
         s"could not read $kind box $boxId: ${message(ex)}", retryable = true))
@@ -128,6 +130,7 @@ final class RollupRepair(nodeApi: NodeApi, protocol: SyncProtocolContext, maxTra
         s"indexed node has no $kind box $boxId", retryable = true))
       case Success(Some(box)) => Right(box)
     }
+  }
 
   /** A missing transaction id is the only unspent-chain terminator; inclusion comes from the tx. */
   private def readLinkedSpend(box: IndexedBox,
@@ -140,7 +143,8 @@ final class RollupRepair(nodeApi: NodeApi, protocol: SyncProtocolContext, maxTra
 
   private def readSpend(txId: String,
                         spentBox: IndexedBox,
-                        committedHeight: Int): Either[RollupRepairResult, SpendRead] =
+                        committedHeight: Int): Either[RollupRepairResult, SpendRead] = {
+    onIndexedRead()
     nodeApi.indexedTransactionById(txId) match {
       case Failure(ex) => Left(RollupRepairResult.Failed(
         s"could not read rollup transaction $txId: ${message(ex)}", retryable = true))
@@ -158,6 +162,7 @@ final class RollupRepair(nodeApi: NodeApi, protocol: SyncProtocolContext, maxTra
           Right(Included(BlockInfo(indexed.blockId, indexed.inclusionHeight, Seq(tx), "", inputs), tx))
         }
     }
+  }
 
   private def message(ex: Throwable): String =
     Option(ex.getMessage).getOrElse(ex.getClass.getSimpleName)

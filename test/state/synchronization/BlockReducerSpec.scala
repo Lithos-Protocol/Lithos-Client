@@ -88,7 +88,7 @@ class BlockReducerSpec extends AnyFlatSpec with Matchers with OptionValues {
     val key = SyncFixtures.plasmaEntries(1, 16).head._1
     val value = Longs.toByteArray(12L) ++ Array.fill[Byte](8)(3)
     val expected = PlasmaDictionary.empty()
-    val insertion = expected.insert(key -> value)
+    val insertion = expected.insert(key -> _root_.nisp.NispCommitment.fromPayload(value).bytes)
     val child = ReducerFixtures.submissionTx(
       number = 11,
       inputId = genesisOutput,
@@ -135,12 +135,12 @@ class BlockReducerSpec extends AnyFlatSpec with Matchers with OptionValues {
     val entries = SyncFixtures.plasmaEntries(2, 16)
     val firstValue = Longs.toByteArray(4L) ++ entries.head._2.drop(8)
     val secondValue = Longs.toByteArray(7L) ++ entries(1)._2.drop(8)
-    val firstInsertion = expected.insert(entries.head._1 -> firstValue)
+    val firstInsertion = expected.insert(entries.head._1 -> _root_.nisp.NispCommitment.fromPayload(firstValue).bytes)
     val middleUtxo = SyncFixtures.id(600003)
     val first = ReducerFixtures.submissionTx(20, baseUtxo, middleUtxo, 100,
       entries.head._1, firstValue, firstInsertion.proof.ergoValue.toHex, expected,
       numMiners = 1, totalScore = BigInt(4), period = 99L)
-    val secondInsertion = expected.insert(entries(1)._1 -> secondValue)
+    val secondInsertion = expected.insert(entries(1)._1 -> _root_.nisp.NispCommitment.fromPayload(secondValue).bytes)
     val finalUtxo = SyncFixtures.id(600004)
     val firstBond = ReducerFixtures.bondFor(firstValue)
     val second = ReducerFixtures.submissionTx(21, middleUtxo, finalUtxo, 100,
@@ -169,7 +169,7 @@ class BlockReducerSpec extends AnyFlatSpec with Matchers with OptionValues {
     val key = SyncFixtures.plasmaEntries(1, 16).head._1
     val value = Longs.toByteArray(5L) ++ Array.fill[Byte](8)(2)
     val expected = PlasmaDictionary.empty()
-    expected.insert(key -> value)
+    expected.insert(key -> _root_.nisp.NispCommitment.fromPayload(value).bytes)
     val tx = ReducerFixtures.submissionTx(30, inputUtxo, outputUtxo, 100,
       key, value, ReducerFixtures.proofHex(Array[Byte](1, 2, 3)), expected,
       numMiners = 1, totalScore = BigInt(5), period = 99L)
@@ -194,7 +194,7 @@ class BlockReducerSpec extends AnyFlatSpec with Matchers with OptionValues {
     // A priced score, so this reaches the digest check rather than faulting on the bond first.
     val value = Longs.toByteArray(8L) ++ Array.fill[Byte](8)(1)
     val proofSource = PlasmaDictionary.empty()
-    val insertion = proofSource.insert(key -> value)
+    val insertion = proofSource.insert(key -> _root_.nisp.NispCommitment.fromPayload(value).bytes)
     val wrongDigest = PlasmaDictionary.empty()
     val tx = ReducerFixtures.submissionTx(40, inputUtxo, SyncFixtures.id(800003), 100,
       key, value, insertion.proof.ergoValue.toHex, wrongDigest,
@@ -228,7 +228,7 @@ class BlockReducerSpec extends AnyFlatSpec with Matchers with OptionValues {
     val entries = SyncFixtures.plasmaEntries(2, 16)
     val healthyValue = Longs.toByteArray(6L) ++ entries.head._2.drop(8)
     val expected = PlasmaDictionary.empty()
-    val insertion = expected.insert(entries.head._1 -> healthyValue)
+    val insertion = expected.insert(entries.head._1 -> _root_.nisp.NispCommitment.fromPayload(healthyValue).bytes)
     val good = ReducerFixtures.submissionTx(50, healthyUtxo, healthyNext, 100,
       entries.head._1, healthyValue, insertion.proof.ergoValue.toHex, expected,
       numMiners = 1, totalScore = BigInt(6), period = 99L)
@@ -283,7 +283,7 @@ class BlockReducerSpec extends AnyFlatSpec with Matchers with OptionValues {
     val bond = ReducerFixtures.bondFor(value)
     val held = ReducerFixtures.RollupValue + bond
     val tracked = PlasmaDictionary.empty()
-    val insertion = tracked.insert(key -> value)
+    val insertion = tracked.insert(key -> _root_.nisp.NispCommitment.fromPayload(value).bytes)
     val submitted = ReducerFixtures.submissionTx(60, utxoId, SyncFixtures.id(900003), 100,
       key, value, insertion.proof.ergoValue.toHex, tracked,
       numMiners = 1, totalScore = BigInt(9), period = 99L)

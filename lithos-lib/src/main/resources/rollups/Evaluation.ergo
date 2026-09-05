@@ -6,7 +6,7 @@
   //TODO Add back command box and fp code after first week of testnet
 
   // REGISTERS
-  // R4: NISP Tree, initially, an empty AVL Tree. AVL Tree of ( hashedPropBytes -> NISP )
+  // R4: AVL Tree of (hashedPropBytes -> scoreBE64 || blake2b256(original NISP bytes))
   // R5: Total Miners (decremented after FP posted) for this period
   // R6: Total Share Score (removed from after valid FP is posted)
   // R7: Coll[Long] of the rollup's state info, length 3, carried in from the holding phase
@@ -54,7 +54,8 @@
   // creation of this UTXO
   // currentMiners initialized from HoldingContract
   // totalScore initialized from HoldingContract
-  // nispTree initialized to filled tree, with deletion enabled
+  // nispTree holds 40-byte score/hash entries admitted by Holding, with deletion enabled.
+  // Whitelisted payload proofs bind slot 4 to the entry hash and score before parsing or removing it.
   // currentPeriod initialized to height at time of this UTXO's creation
   // value of this UTXO is initialized to be the block reward
   // fpData is a utxo holding collection of hashed propBytes of distinct valid fraud proof contracts
@@ -100,7 +101,7 @@
       )
     )
 
-    // Read off the register transition the fraud proof is about to be held to, not off the NISP:
+    // Read the register transition authenticated by the proof against the compact entry:
     // every whitelisted proof pins nextScore == totalScore - score for the single entry it removes.
     // An out-of-range delta throws here, failing the prover's own transaction and nobody else's.
     val removedScore = (totalScore - nextScore).toLong

@@ -223,8 +223,9 @@ class SyncHandler @Inject()(config: Configuration,
       expireOperation(operationId)
     case _: MaterializationExpired => ()
 
-    case UpdateEvaluation(blockId) =>
-      committed.flatMap(_.rollups.get(blockId)).foreach { tree =>
+    case UpdateEvaluation(blockId, expectedUtxoId) =>
+      committed.flatMap(_.rollups.get(blockId)).filter(tree =>
+        expectedUtxoId.forall(_ == tree.utxoId)).foreach { tree =>
         try {
           val updated = tree.copy(evaluated = true)
           committed = committed.map(s => s.copy(rollups = s.rollups + (blockId -> updated)))
@@ -733,7 +734,9 @@ class SyncHandler @Inject()(config: Configuration,
                 case Some(latest) if Hex.toHexString(latest.dictionary.digest) == key.digest =>
                   val materialized = latest.copy(dictionary = dictionaries(key))
                   requester ! CurrentRollup(materialized.utxoId, materialized,
-                    projectedRollup(installDictionaries(current, dictionaries), blockId, materialized))
+                    projectedRollup(installDictionaries(current, dictionaries), blockId, materialized),
+                    current.rollupOrigins.get(blockId).map(origin =>
+                      RollupHistoryAnchor(origin, current.cursor.height)))
                 case _ => requester ! NoRollupFound()
               }
             case _ => respondCurrentRollup(blockId, requester, priority)

@@ -70,12 +70,14 @@ class PayoutSpec extends AnyPropSpec with RollupSpecBase {
                      litSnapshot: Long = 0L,
                      litHeld: Long = -1L,
                      value: Long = -1L,
-                     inTreeEntries: Option[Seq[Miner]] = None): Pot = {
+                     inTreeEntries: Option[Seq[Miner]] = None,
+                     entrySize: Int = 40): Pot = {
     val entries = inTreeEntries.getOrElse(all)
     val totalScore = all.map(_.score).sum
     val bondsHeld = bondsOf(entries)
     val heldLit = if (litHeld < 0L) litSnapshot else litHeld
-    val tree = treeWith(entries.map(m => m.key -> m.nisp))
+    val tree = treeWith(entries.map(m => m.key ->
+      (nisp.NispCommitment.fromPayload(m.nisp).bytes ++ Array[Byte](0)).take(entrySize)))
     val inTree = tree.ergoValue
 
     val keys = toPay.map(_.key)
@@ -114,10 +116,11 @@ class PayoutSpec extends AnyPropSpec with RollupSpecBase {
                              paid: Miner)
 
   /** Pays the first miner only, leaving a large remainder so the partial path is taken. */
-  private def partial(ctx: BlockchainContext, litSnapshot: Long = 0L, litHeld: Long = -1L): Partial = {
+  private def partial(ctx: BlockchainContext, litSnapshot: Long = 0L, litHeld: Long = -1L,
+                       entrySize: Int = 40): Partial = {
     val all = miners(ctx)
     val paid = all.head
-    val pot = payout(ctx, all, Seq(paid), litSnapshot, litHeld)
+    val pot = payout(ctx, all, Seq(paid), litSnapshot, litHeld, entrySize = entrySize)
     val amount = owed(paid, pot.totalScore)
     val litShare = if (pot.litSnapshot > 0L) reward(paid.score, pot.totalScore, pot.litSnapshot) else 0L
     val nextLit = pot.litHeld - litShare
@@ -147,6 +150,16 @@ class PayoutSpec extends AnyPropSpec with RollupSpecBase {
     }
   }
 
+  property("compact entries: rejects short and oversized leaves before reading their scores") {
+    withCtx { ctx =>
+      Seq(7, 39, 41).foreach { size =>
+        val p = partial(ctx, entrySize = size)
+        val result = scala.util.Try(p.prover.sign(partialTx(ctx, p)))
+        result.failed.get.getMessage should include("Script reduced to false")
+      }
+    }
+  }
+
   property("partial: rejects a payout of the wrong amount (minersRewarded)") {
     withCtx { ctx =>
       val p = partial(ctx)
@@ -164,7 +177,7 @@ class PayoutSpec extends AnyPropSpec with RollupSpecBase {
   property("partial: rejects a successor tree that does not match the removal (treeUpdated)") {
     withCtx { ctx =>
       val p = partial(ctx)
-      val other = treeWith(Seq(scorex.crypto.hash.Blake2b256.hash("nope") -> nispBytes(1L, 16)))
+      val other = commitmentTree(Seq(scorex.crypto.hash.Blake2b256.hash("nope") -> nispBytes(1L, 16)))
       rejects(p.prover, partialTx(ctx, p, successor = p.successor.withReg(0, other.ergoValue)))
     }
   }
@@ -509,7 +522,7 @@ class PayoutSpec extends AnyPropSpec with RollupSpecBase {
                         lit: Long = 0L,
                         bondHeld: Long = 0L,
                         value: Long = boxValue): Drain = {
-    val tree = treeWith(entries.map(m => m.key -> m.nisp))
+    val tree = commitmentTree(entries.map(m => m.key -> m.nisp))
     val tokens = if (lit > 0L) Seq(nft, Token(fpTokenId, lit)) else Seq(nft)
     val box = UTXO(payoutContract(ctx), value, tokens, Seq(
       tree.ergoValue,

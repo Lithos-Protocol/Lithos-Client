@@ -20,7 +20,7 @@ class GenesisClassificationSpec extends AnyFlatSpec with Matchers with OptionVal
     val base = ReducerFixtures.emptyState()
     val (key, value) = submissionEntry
     val expected = PlasmaDictionary.empty()
-    val insertion = expected.insert(key -> value)
+    val insertion = expected.insert(key -> _root_.nisp.NispCommitment.fromPayload(value).bytes)
     // Nothing in the base tracks this rollup, so the routing branch cannot claim the transaction.
     val tx = ReducerFixtures.submissionTx(number = 1, inputId = SyncFixtures.id(900001),
       outputId = SyncFixtures.id(900002), height = 100, key = key, value = value,

@@ -43,6 +43,7 @@ case class NonMatchingCommitmentProof(contract: Contract, miner: Array[Byte], ni
                                       source: CommitmentSource)
   extends FraudProof(contract, miner, nispTree, evalInput, fpControl) {
   override val logger: Logger = LoggerFactory.getLogger("NonMatchingCommitmentProof")
+  override protected def needsPayload: Boolean = false
 
   /** The rollup's own block, which the contract compares the registration's expiry against. */
   private val currentBlock: Long = nispTree.state.genesisBlockHeight

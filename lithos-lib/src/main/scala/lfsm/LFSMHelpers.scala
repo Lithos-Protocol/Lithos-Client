@@ -20,7 +20,7 @@ object LFSMHelpers {
   final val HOLDING_PERIOD = 360L // 360 Blocks, or 12 hours
   final val EVAL_PERIOD    = 360L
   // TODO: Change to 60 before mainnet
-  final val NISP_WINDOW    = 160L // 160 on testnet is 2 hours (45 sec blocktime), equivalent on mainnet is 60 (2 min blocktime)
+  final val NISP_WINDOW    = 60 // 2 hours on mainnet (less on testnet but its ok)
   final val NISP_COEFFICIENT = 10000 // Coefficient which separates normal shares from super-shares, used in evaluation
   // NISP size envelope, mirrored in Holding_Logic and injected into FP_InvalidFormat.
   // share = [N: 4][header][txProofSize: 2][numLevels: 1][txProof][levels: 33n][yCoord: 32]
@@ -44,7 +44,8 @@ object LFSMHelpers {
   // being cheap to post. The floor also has to clear Ergo's 1e6 min box value, since a slash pays it
   // out as a box of its own.
   final val MIN_ENTRY_BOND     = 2000000L // 0.002 ERG
-  final val BOND_DIVISOR       = 100L     // score units per nanoERG of proportional bond
+  final val BOND_DIVISOR       = 25L
+  // score units per nanoERG of proportional bond
 
   final val COLLAT_MAX_FEE   = Parameters.MinFee * 100
 
@@ -75,30 +76,30 @@ object LFSMHelpers {
   // mempool before it has to be rebuilt.
   final val REGISTER_SLACK    = 720L // one day at 2-minute blocks
   final val MD_TOKEN_MAINNET = ErgoId.create("7f9609b232d3e2f0638d60a03a26831bf80155ed1e87a1b914e2623dfbd05518")
-  final val MD_TOKEN_TESTNET = ErgoId.create("61836bb37229bedd3de8a21813c65d8d111fe50fb2137e3047e2c4ff449cd004")
-  final val MD_GENESIS_HEIGHT = 521056
+  final val MD_TOKEN_TESTNET = ErgoId.create("2aee4d20d743e19042b68b99045e7c482d3580fe2797c39de4235989f788021b")
+  final val MD_GENESIS_HEIGHT = 526309
 
-  // Genesis Tx: 3469b46b3f04a9a6a93e6eb9ef507e0c9dafe12117e3bfd2c0cba486de27a5f9
+  // Genesis Tx: 5c5a34f1f337740a2b3fc4286f39636a4e1791793398c6255f8b9730c3c97094
   // UTXO id of initial MD box
-  final val MD_GENESIS_ID = "2ed003e1b82b0bdb6094142f82bc70d45ab3ada177d34a631f68d52f43e0a840"
+  final val MD_GENESIS_ID = "5a3f118ec5be3b73623695054302bb4411307d248dbfee4abaa5d412e8df9028"
 
   // Lithos token & emission parameters
   final val INIT_MINT = Parameters.OneErg * 1000000000 // 1 billion LIT
   final val LIT_ID = ErgoId.create("7b728ca02a23085f1f7093e949535938c55307ab1b61e848008201c5109bd18b")
   // CONFIRMED MAINNET ID
   final val LIT_ID_MAINNET = ErgoId.create("c1980d829988229516430a47a5eca376060b6ce859616db0936e78ab25cb6de7")
-  final val EMISSION_NFT = ErgoId.create("8ebb219e7dceb5fd796eb6e52eb5b0ff040a23d5edaf5224eee456ee4db4877c")
+  final val EMISSION_NFT = ErgoId.create("4169fcef923f8cb791f238103b900792427b79148a6ef709134d5c196212ae88")
   // TODO: Change before launch
   // Emission Config NFT
-  final val EMCONFIG_NFT = ErgoId.create("75dc8b682c4efdf7f3354ea1acb8799a37aa7203606480b36da027bb9813719a")
+  final val EMCONFIG_NFT = ErgoId.create("fd8752a46a68340ff33805db57d0ff4d8bd1680c533c4313dc4e9cb71b260725")
   // Ids and amount of proposition tokens on Emission contract
-  final val COLLAT_TOKEN = ErgoId.create("5c76ae9d3d01bcee13df0417a719af6d87b766ee72c21ce954dd8421a897a1cd")
-  final val QUEUE_TOKEN  = ErgoId.create("f31423f43a697602208d84f1288bcb8b9c1d5a8c9ead7e02d3f0f403525edc54")
+  final val COLLAT_TOKEN = ErgoId.create("09e991239e5544a6996216440d42e6ec636aea718c8c7cbc2e54f90e832f2e1e")
+  final val QUEUE_TOKEN  = ErgoId.create("0c3b6465e865278e80fba1fc903d4d390daf5d87c097936c181cd8d7b753f4dd")
   final val PROP_TOKEN_AMNT = Long.MaxValue
 
-  final val PERMIT_FLOOR = 1000L * Parameters.OneErg
-  final val PERMIT_CEIL  = 30000L * Parameters.OneErg
-  final val PERMIT_SLOPE = 10 * Parameters.OneErg
+  final val PERMIT_FLOOR = 2000L * Parameters.OneErg
+  final val PERMIT_CEIL  = 40000L * Parameters.OneErg
+  final val PERMIT_SLOPE = 20 * Parameters.OneErg
   final val PERMIT_PARAMS = Array(PERMIT_FLOOR, PERMIT_CEIL, PERMIT_SLOPE)
   final val FOUNDER_1 = Contract.fromAddress(Address.create("3WwcyDX8iQjPR6H2VSGDp22SaJ3c8bo1RWWvHhZy19JXJzrxWFbu"))
   final val FOUNDER_2 = Contract.fromAddress(Address.create("3WyZJc1pWf8P2o6AT2Ewq7yb5ThBHdk8SLSNyUyoGbSBXXpY3w8F"))

@@ -13,7 +13,7 @@ import play.api.Configuration
 import state.messages.SyncMessages._
 import state.messages.MempoolMessages.{MempoolSnapshot, MempoolUnavailable}
 import state.messages.BlockInfo
-import state.messages.RollupMessages.GetCurrentRollup
+import state.messages.RollupMessages.{GetCurrentRollup, UpdateEvaluation}
 import state.persistence.StateSnapshotActor.SnapshotCandidate
 import support.{FakeCache, FakeNodeContext, ReducerFixtures, SyncFixtures}
 
@@ -297,6 +297,25 @@ class SyncHandlerCommitSpec extends TestKit(ActorSystem("sync-handler-commit"))
     snapshots.expectNoMessage(200.millis)
     requester.send(handler, GetCommittedState)
     requester.expectMsgType[CommittedState].state.cursor shouldEqual firstState.cursor
+  }
+
+  it should "ignore evaluation completion for a superseded rollup box" in {
+    val (handler, _, _) = newHandler()
+    val requester = TestProbe()
+    seed(handler, requester)
+    val origin = SyncFixtures.id(301001)
+    val utxoId = SyncFixtures.id(301002)
+    val genesis = ReducerFixtures.genesisTx(1, origin, utxoId, height = 100)
+    val block = BlockInfo(SyncFixtures.id(100), 100, Seq(genesis), SyncFixtures.id(99),
+      resolvedInputs = Map(origin ->
+        ReducerFixtures.resolvedInput(origin, Some(ReducerFixtures.CollateralToken), 100)))
+    requester.send(handler, ApplyBlock(block))
+    requester.expectMsgType[BlockCommitted]
+
+    requester.send(handler, UpdateEvaluation(block.id, Some(SyncFixtures.id(301003))))
+    firstState(requester, handler).rollups(block.id).evaluated shouldBe false
+    requester.send(handler, UpdateEvaluation(block.id, Some(utxoId)))
+    firstState(requester, handler).rollups(block.id).evaluated shouldBe true
   }
 
   private def firstState(requester: TestProbe, handler: akka.actor.ActorRef): CommittedSyncState = {

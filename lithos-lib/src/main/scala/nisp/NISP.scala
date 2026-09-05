@@ -61,7 +61,7 @@ object NISP {
   }
 
   def fromErgoValue(ergoValue: ErgoValue[_]): NISP = {
-    require(ergoValue.getValue.isInstanceOf[Coll[Byte]], "Cannot deserialize NISP from types other than Coll[Byte]")
+    require(ergoValue.getValue.isInstanceOf[Coll[_]], "Cannot deserialize NISP from types other than Coll[Byte]")
     deserialize(ergoValue.getValue.asInstanceOf[Coll[Byte]].toArray)
   }
 }

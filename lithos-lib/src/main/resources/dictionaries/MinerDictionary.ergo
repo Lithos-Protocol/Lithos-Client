@@ -69,8 +69,7 @@
   val validUTXO       = nextUTXO.propositionBytes == SELF.propositionBytes
   val valueConserved  = nextUTXO.value == SELF.value
   val tokensConserved = nextUTXO.tokens == SELF.tokens
-  // R4 is the only register used here. Registers are contiguous, so refusing R5 refuses the whole
-  // tail and the successor's length stays bounded by its types.
+
   val noExtraRegisters = nextUTXO.R5[Coll[Byte]].isDefined == false
 
   val singletonConserved = allOf(

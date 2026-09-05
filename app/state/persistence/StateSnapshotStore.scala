@@ -478,7 +478,7 @@ object StateSnapshotCodec {
   // A rollup's R7 became three longs and its boxes gained an NFT, so nothing written before this
   // version can be decoded into a state whose fields still mean what they say. Loading one fails and
   // the caller resynchronizes rather than guessing.
-  private val SchemaVersion = 3
+  private val SchemaVersion = 4
   private val MaxBlobBytes = 512 * 1024 * 1024
   private val MaxEntries = 1000000
 

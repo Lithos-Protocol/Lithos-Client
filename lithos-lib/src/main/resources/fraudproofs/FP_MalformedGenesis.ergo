@@ -336,7 +336,13 @@
   }
 
   // Evaluation
-  val minerNISP = nispTree.get(CTX_MINER_BYTES, CTX_LOOKUP_PROOF).get
+  val nispEntry = nispTree.get(CTX_MINER_BYTES, CTX_LOOKUP_PROOF).getOrElse(Coll[Byte]())
+  // Slot 4 carries the original payload; slot 3 remains available for proof-specific evidence.
+  val minerNISP = getVarFromInput[Coll[Byte]](1, 4).getOrElse(Coll[Byte]())
+  // Reject an unauthenticated preimage before any payload-dependent parsing or fraud verdict.
+  if (nispEntry.size == 40 && minerNISP.size >= 8 &&
+      minerNISP.slice(0, 8) == nispEntry.slice(0, 8) &&
+      blake2b256(minerNISP) == nispEntry.slice(8, 40)) {
   val minerShares = getSuperShares(minerNISP)
   val malformedShareExists = minerShares.exists{
     (share: Coll[Byte]) =>
@@ -411,5 +417,8 @@
   )
 
   sigmaProp(fraudExists && changedRegisters)
+  } else {
+    sigmaProp(false)
+  }
 
 }

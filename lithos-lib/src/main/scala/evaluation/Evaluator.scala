@@ -2,6 +2,7 @@ package evaluation
 
 import lfsm.contracts.FraudProofContracts.FraudProofSet
 import lfsm.states.Rollup
+import nisp.ResolvedNisps
 import mutations.{BoxLoader, NodeWallet}
 import org.bouncycastle.util.encoders.Hex
 import org.ergoplatform.appkit.{BlockchainContext, ErgoProver, SignedTransaction}
@@ -24,7 +25,9 @@ import scala.util.{Failure, Success, Try}
 case class Evaluator(ctx: BlockchainContext, prover: NodeWallet, evalInput: InputUTXO, nispTree: Rollup,
                      miners: Seq[Array[Byte]], fpControl: InputUTXO, loader: BoxLoader,
                      fpSet: FraudProofSet, fpContracts: Seq[Contract] = Seq.empty,
-                     commitment: Option[CommitmentSource] = None) {
+                     commitment: Option[CommitmentSource] = None,
+                     resolved: Option[ResolvedNisps] = None) {
+  require(resolved.forall(_.rollupId == nispTree.blockId), "Recovered NISPs belong to another rollup")
   private val logger: Logger = LoggerFactory.getLogger("Evaluator")
 
   /** The proofs this evaluator runs, in order. */
@@ -37,7 +40,8 @@ case class Evaluator(ctx: BlockchainContext, prover: NodeWallet, evalInput: Inpu
                       fpContract: Contract,
                       initInputs: Option[Seq[InputUTXO]]): ProofOutcome =
     Try {
-      FraudProof.genFraudProof(fpSet, ctx, fpContract, miner, nispTree, evalInput, fpControl, commitment)
+      FraudProof.genFraudProof(fpSet, ctx, fpContract, miner, nispTree, evalInput, fpControl, commitment,
+        resolved.flatMap(_.get(miner)))
         .attemptFraudProof(ctx, prover, TxBuilder(ctx), initInputs)
     } match {
       case Success(Some(tx)) => Fraud(tx)
@@ -95,10 +99,15 @@ case class Evaluator(ctx: BlockchainContext, prover: NodeWallet, evalInput: Inpu
   def evaluateSync: Seq[(Array[Byte], Try[Option[(SignedTransaction, String)]])] =
     miners.map(m => m -> verdict(m)(None))
 
+  /** Release each trial transaction immediately; queued fraud work needs only its proof type. */
+  def evaluateProofTypes: Seq[(Array[Byte], Try[Option[String]])] =
+    miners.map(m => m -> verdict(m)(None).map(_.map(_._2)))
+
   def evaluateFor(miner: Array[Byte], fpContractHashHex: String, initInputs: Seq[InputUTXO],
                   additionalOutputs: Seq[UTXO]): Option[SignedTransaction] = {
     val fpContract = fpSet.ordered.find(_.hashedPropBytesHex == fpContractHashHex).get
-    val fraudProof = FraudProof.genFraudProof(fpSet, ctx, fpContract, miner, nispTree, evalInput, fpControl, commitment)
+    val fraudProof = FraudProof.genFraudProof(fpSet, ctx, fpContract, miner, nispTree, evalInput, fpControl,
+      commitment, resolved.flatMap(_.get(miner)))
     fraudProof
       .attemptFraudProof(ctx, prover, TxBuilder(ctx), Some(initInputs), Some(additionalOutputs), includeFee = false)
   }

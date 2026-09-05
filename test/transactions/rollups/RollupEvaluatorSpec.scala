@@ -2,15 +2,17 @@ package transactions.rollups
 
 import akka.actor.{ActorRef, ActorSystem, Props}
 import akka.testkit.{TestKit, TestProbe}
+import lfsm.LFSMHelpers
+import nisp.{ResolvedNisp, ResolvedNisps}
 import org.scalatest.BeforeAndAfterAll
 import org.scalatest.flatspec.AnyFlatSpecLike
 import org.scalatest.matchers.should.Matchers
 import play.api.Configuration
 import state.messages.RollupMessages.{GetCurrentRollupCritical, RollupUnavailable, UpdateEvaluation}
-import support.FakeNodeContext
+import support.{FakeNodeContext, NispHistoryFixtures}
 import transactions.rollups.RollupEvaluator.EvaluateNextBatch
-import transactions.rollups.TransactionMessages.RollupTxType.NISPEvaluation
-import transactions.rollups.TransactionMessages.{EvaluationSet, FailedEvaluation, RollupTxStub, SuccessfulEvaluation}
+import transactions.rollups.TransactionMessages.RollupTxType.{EvalTransform, NISPEvaluation}
+import transactions.rollups.TransactionMessages.{EvaluationSet, FailedEvaluation, FraudBatch, RollupTxStub, SuccessfulEvaluation}
 
 import scala.concurrent.duration._
 
@@ -120,7 +122,7 @@ class RollupEvaluatorSpec extends TestKit(ActorSystem("rollup-evaluator-spec", R
     f.sync.reply(RollupUnavailable("finish the reopened-guard test batch"))
   }
 
-  "A rollup whose proofs keep failing" should "be retried until its attempts run out, then retired" in {
+  "A rollup whose proofs keep failing" should "remain incomplete after its retry alarm threshold" in {
     // The accused chooses what each proof is handed, so one failed evaluation must not retire a
     // rollup. The count has to survive the rollup leaving evalMap, which StopEvaluating does after
     // every batch, and a set that does not mention it, since an EvaluationSet is truncated to twenty.
@@ -146,7 +148,11 @@ class RollupEvaluatorSpec extends TestKit(ActorSystem("rollup-evaluator-spec", R
 
     f.evaluator ! EvaluationSet(Seq(a))
     f.evaluator ! FailedEvaluation(a, Map.empty[Array[Byte], String])
-    f.sync.expectMsg(10.seconds, UpdateEvaluation("rollup-a"))
+    f.sync.expectNoMessage(1.second)
+    (1 to RollupEvaluator.MaxEvaluationAttempts).foreach { _ =>
+      f.evaluator ! FailedEvaluation(a, Map.empty[Array[Byte], String], payloadUnavailable = true)
+    }
+    f.sync.expectNoMessage(1.second)
   }
 
   "A rollup that evaluates cleanly" should "not carry its earlier failures" in {
@@ -175,5 +181,31 @@ class RollupEvaluatorSpec extends TestKit(ActorSystem("rollup-evaluator-spec", R
     f.evaluator ! EvaluateNextBatch
     f.sync.expectNoMessage(2.seconds)
     f.processor.expectNoMessage(500.millis)
+  }
+
+  "Fraud found during incomplete recovery" should "dispatch with shared payload ownership and leave evaluation incomplete" in {
+    val f = fixture()
+    val minerA = Array.fill[Byte](32)(1)
+    val minerB = Array.fill[Byte](32)(2)
+    val recovered = ResolvedNisps("rollup-a", Map("02" * 32 -> ResolvedNisp(Array.fill[Byte](8)(0))))
+    val a = stub("rollup-a").copy(resolvedNisps = Some(recovered))
+
+    f.evaluator ! FailedEvaluation(a, Map(minerA -> "commitment-proof", minerB -> "payload-proof"),
+      payloadUnavailable = true)
+
+    val batch = f.processor.expectMsgType[FraudBatch]
+    batch.fpStubs should have size 2
+    batch.fpStubs.map(_.fpInfo.get._2).toSet shouldEqual Set("commitment-proof", "payload-proof")
+    batch.fpStubs.foreach(_.resolvedNisps.get should be theSameInstanceAs recovered)
+    f.sync.expectNoMessage(500.millis)
+  }
+
+  "An evaluation transform" should "require a complete evaluation even after the challenge period" in {
+    val rollup = NispHistoryFixtures.chain().target
+    val transform = RollupTxStub(rollup.blockId, rollup.currentPeriod, EvalTransform)
+    val height = (rollup.currentPeriod.get + LFSMHelpers.EVAL_PERIOD).toInt
+
+    transform.validate(height, rollup) shouldBe false
+    transform.validate(height, rollup.copy(evaluated = true)) shouldBe true
   }
 }

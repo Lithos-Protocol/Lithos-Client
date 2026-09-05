@@ -3,6 +3,7 @@ package transactions.rollups
 import lfsm.LFSMHelpers
 import lfsm.LFSMPhase.{EVAL, HOLDING, PAYOUT}
 import lfsm.states.{Rollup, RollupMetadata}
+import nisp.ResolvedNisps
 import org.bouncycastle.util.encoders.Hex
 import transactions.rollups.TransactionMessages.RollupTxType.{EvalTransform, HoldingTransform, NISPEvaluation, NISPSubmission, Payout}
 import work.lithos.mutations.InputUTXO
@@ -60,7 +61,8 @@ object TransactionMessages {
                           currentPeriod: Option[Long],
                           txType: RollupTxType,
                           fee: Long = RollupTxStub.ROLLUP_FEE,
-                          fpInfo: Option[(Array[Byte], String)] = None) extends TxStub{
+                          fpInfo: Option[(Array[Byte], String)] = None,
+                          resolvedNisps: Option[ResolvedNisps] = None) extends TxStub{
     override def toString: String = {
       s"RollupTxStub($rollupBlockId, $txType, $currentPeriod, $fee," +
         s" ${fpInfo.map(i => Hex.toHexString(i._1) -> i._2)})"
@@ -78,7 +80,8 @@ object TransactionMessages {
         case NISPSubmission =>
           rollup.phase == HOLDING && (height - rollup.currentPeriod.get) < LFSMHelpers.HOLDING_PERIOD && !rollup.hasMiner
         case EvalTransform =>
-          rollup.phase == EVAL && (height - rollup.currentPeriod.get) >= LFSMHelpers.EVAL_PERIOD
+          rollup.phase == EVAL && rollup.evaluated &&
+            (height - rollup.currentPeriod.get) >= LFSMHelpers.EVAL_PERIOD
         case NISPEvaluation =>
           rollup.phase == EVAL && (height - rollup.currentPeriod.get) < LFSMHelpers.EVAL_PERIOD && !rollup.evaluated
         case Payout =>
@@ -140,9 +143,10 @@ object TransactionMessages {
 
   // Trait representing entire rollup evaluation state
   sealed trait RollupEvaluationResult
-  case class SuccessfulEvaluation(rollupBlockId: String) extends RollupEvaluationResult
+  case class SuccessfulEvaluation(rollupBlockId: String, expectedUtxoId: Option[String] = None) extends RollupEvaluationResult
   // Failed evaluation, holding map of hashed miner prop bytes to the hex representation of the fraud proof hash
-  case class FailedEvaluation(stub: RollupTxStub, minerFPMap: Map[Array[Byte], String]) extends RollupEvaluationResult
+  case class FailedEvaluation(stub: RollupTxStub, minerFPMap: Map[Array[Byte], String],
+                              payloadUnavailable: Boolean = false) extends RollupEvaluationResult
 
   sealed trait MinerEvaluationResult
   case object NoFraudulence extends MinerEvaluationResult

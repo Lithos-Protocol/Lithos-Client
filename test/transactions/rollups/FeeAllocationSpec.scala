@@ -42,7 +42,7 @@ class FeeAllocationSpec extends AnyPropSpec with RollupSpecBase {
   private def feeOutputs(owner: Contract): Seq[UTXO] =
     UTXO.feeBox(feeValue) +: walletOutValues.map(v => UTXO(owner, v))
 
-  private def treeFor(miner: Array[Byte]) = treeWith(Seq(miner -> nispBytes(4000L, realisticNispSize)))
+  private def treeFor(miner: Array[Byte]) = commitmentTree(Seq(miner -> nispBytes(4000L, realisticNispSize)))
 
   private def nispTree(ctx: BlockchainContext, miner: Array[Byte], totalScore: Long, reward: Long) =
     Rollup(treeFor(miner), numMiners = 1, totalScore = BigInt(totalScore),

@@ -210,7 +210,7 @@ class RollupRepairSpec extends AnyFlatSpec with Matchers with OptionValues {
     val firstDictionary = lfsm.states.PlasmaDictionary.empty()
     val firstKey = SyncFixtures.plasmaEntries(1, 16).head._1
     val firstValue = Longs.toByteArray(5L) ++ Array.fill[Byte](8)(1)
-    val firstInsertion = firstDictionary.insert(firstKey -> firstValue)
+    val firstInsertion = firstDictionary.insert(firstKey -> _root_.nisp.NispCommitment.fromPayload(firstValue).bytes)
     val firstBond = ReducerFixtures.bondFor(firstValue)
     val firstSpend = ReducerFixtures.submissionTx(81, genesisOutputId, firstOutputId, 101,
       firstKey, firstValue, firstInsertion.proof.ergoValue.toHex, firstDictionary,
@@ -219,7 +219,7 @@ class RollupRepairSpec extends AnyFlatSpec with Matchers with OptionValues {
     val secondDictionary = firstDictionary.copy()
     val secondKey = SyncFixtures.plasmaEntries(2, 16).last._1
     val secondValue = Longs.toByteArray(7L) ++ Array.fill[Byte](8)(2)
-    val secondInsertion = secondDictionary.insert(secondKey -> secondValue)
+    val secondInsertion = secondDictionary.insert(secondKey -> _root_.nisp.NispCommitment.fromPayload(secondValue).bytes)
     val secondSpend = ReducerFixtures.submissionTx(82, firstOutputId, tipId, 102,
       secondKey, secondValue, secondInsertion.proof.ergoValue.toHex, secondDictionary,
       numMiners = 2, totalScore = BigInt(12), period = genesisHeight.toLong,
@@ -269,7 +269,7 @@ class RollupRepairSpec extends AnyFlatSpec with Matchers with OptionValues {
     val dictionary = lfsm.states.PlasmaDictionary.empty()
     val miner = protocol.localMinerHash
     val value = Longs.toByteArray(5L) ++ Array.fill[Byte](8)(3)
-    val inserted = dictionary.insert(miner -> value)
+    val inserted = dictionary.insert(miner -> _root_.nisp.NispCommitment.fromPayload(value).bytes)
     val bond = ReducerFixtures.bondFor(value)
     val held = ReducerFixtures.RollupValue + bond
     val submission = ReducerFixtures.submissionTx(91, genesisOutputId, holdingId, 101,

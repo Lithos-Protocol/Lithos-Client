@@ -6,15 +6,19 @@ import akka.util.Timeout
 import configs.{NodeContext, StateConfig}
 import evaluation.Evaluator
 import lfsm.LFSMHelpers
+import lfsm.LFSMPhase
+import lfsm.states.RollupMetadata
+import nisp.{NispCommitment, NispPayloadUnavailable, ResolvedNisps}
 import lfsm.contracts.FraudProofContracts.FraudProofSet
 import mutations.BoxLoader
 import org.bouncycastle.util.encoders.Hex
-import org.ergoplatform.appkit.SignedTransaction
 import org.slf4j.{Logger, LoggerFactory}
 import play.api.Configuration
 import play.api.libs.concurrent.InjectedActorSupport
 import state.messages.RollupMessages
 import state.messages.RollupMessages.{GetCurrentRollupCritical, RollupInfo, UpdateEvaluation}
+import state.messages.RollupMessages.RollupHistoryAnchor
+import state.synchronization.{RollupNispResolver, SyncProtocolContext}
 import transactions.ProtocolContracts
 import transactions.rollups.RollupEvaluator.{BatchEvaluated, EVAL_BATCH_SIZE, EvaluateNextBatch, EvaluationBatch}
 import transactions.rollups.TransactionMessages.{EvalError, EvaluationSet, FailedEvaluation, FraudBatch, FraudFound, LatestRollup, MinerEvaluationResult, NoFraudulence, RollupRemovedException, RollupTxStub, StopEvaluating, SuccessfulEvaluation}
@@ -56,13 +60,19 @@ class RollupEvaluator @Inject()(config: Configuration, nodeContext: NodeContext,
 
   /**
    * Rollup id to evaluations that left a miner without a verdict. Dropped on a successful
-   * evaluation and at [[RollupEvaluator.MaxEvaluationAttempts]]; emptied whole above
+   * evaluation; emptied whole above
    * [[RollupEvaluator.MaxTrackedRollups]].
    *
    * Never pruned by membership, because neither `evalMap` nor an `EvaluationSet` holds the rollups
    * still being retried.
    */
   private var failedAttempts: Map[String, Int] = Map.empty
+  private val recoveryMaxTransforms = config.getOptional[Int]("evaluation.nispRecovery.maxTransforms")
+    .getOrElse(100000)
+  require(recoveryMaxTransforms > 0, "evaluation.nispRecovery.maxTransforms must be positive")
+
+  private case class EvaluationSnapshot(latest: LatestRollup, confirmed: RollupMetadata,
+                                         history: Option[RollupHistoryAnchor])
 
   private var ticker: Option[Cancellable] = None
 
@@ -134,13 +144,13 @@ class RollupEvaluator @Inject()(config: Configuration, nodeContext: NodeContext,
       evaluating = false
 
 
-    case SuccessfulEvaluation(rollupBlockId) =>
+    case SuccessfulEvaluation(rollupBlockId, expectedUtxoId) =>
       logger.info(s"Successfully evaluated rollup ${rollupBlockId}")
       failedAttempts -= rollupBlockId
-      syncHandler ! UpdateEvaluation(rollupBlockId)
+      syncHandler ! UpdateEvaluation(rollupBlockId, expectedUtxoId)
       self ! StopEvaluating(rollupBlockId)
 
-    case FailedEvaluation(rollupTxStub, fpMap) =>
+    case FailedEvaluation(rollupTxStub, fpMap, payloadUnavailable) =>
       if (fpMap.isEmpty) {
         val rollupId = rollupTxStub.rollupBlockId
         // Emptied whole rather than evicted one key at a time.
@@ -149,7 +159,7 @@ class RollupEvaluator @Inject()(config: Configuration, nodeContext: NodeContext,
             "the counts, so any rollup mid-retry starts its attempts again")
           failedAttempts = Map.empty
         }
-        val attempts = failedAttempts.getOrElse(rollupId, 0) + 1
+        val attempts = math.min(failedAttempts.getOrElse(rollupId, 0) + 1, RollupEvaluator.MaxEvaluationAttempts)
         failedAttempts += rollupId -> attempts
         if (attempts < RollupEvaluator.MaxEvaluationAttempts)
           // Left unevaluated, so the next EvaluationSet offers it again.
@@ -157,12 +167,9 @@ class RollupEvaluator @Inject()(config: Configuration, nodeContext: NodeContext,
             s"${RollupEvaluator.MaxEvaluationAttempts}; leaving it for a later batch")
         else {
           logger.error("=" * 100)
-          logger.error(s"GIVING UP ON ROLLUP $rollupId after " +
-            s"${RollupEvaluator.MaxEvaluationAttempts} evaluation attempts. Every attempt left at " +
-            "least one miner without a verdict, so no fraud proof could be run against them.")
+          logger.error(s"Rollup $rollupId remains incompletely evaluated after $attempts attempts; " +
+            s"payload unavailable: $payloadUnavailable. Retaining it for retry.")
           logger.error("=" * 100)
-          failedAttempts -= rollupId
-          syncHandler ! UpdateEvaluation(rollupId)
         }
       } else {
         val updatedStubs = fpMap.map(fpm => rollupTxStub.copy(fpInfo = Some(fpm._1 -> fpm._2))).toSeq
@@ -187,7 +194,8 @@ class RollupEvaluator @Inject()(config: Configuration, nodeContext: NodeContext,
     Try {
       client.execute {
         ctx =>
-          val latestRollup = latestRollupState(stub).get
+          val snapshot = latestRollupState(stub).get
+          val latestRollup = snapshot.latest
           val stillValid = stub.validate(ctx.getHeight, latestRollup.rollup)
 
           if (stillValid) {
@@ -215,11 +223,72 @@ class RollupEvaluator @Inject()(config: Configuration, nodeContext: NodeContext,
             // None leaves that one proof unbuildable and the other eight unaffected.
             val commitment = CommitmentSources.load(ctx, nodeContext.getNodeApi, syncHandler,
               currentMiners.toSeq)
-            val evaluator = Evaluator(ctx, wallet, latestRollup.inputUTXO, latestRollup.rollup, currentMiners,
-              fpControl, new BoxLoader(ctx, nodeContext.getNodeApi), fpSet, commitment = commitment)
-            val evals = evaluator.evaluateSync
-            val minerEvaluationResults = evals.map(processEvaluationResult(stub, _))
-            manageEvaluationState(stub, minerEvaluationResults)
+            val loader = new BoxLoader(ctx, nodeContext.getNodeApi)
+            val first = Evaluator(ctx, wallet, latestRollup.inputUTXO, latestRollup.rollup, currentMiners,
+              fpControl, loader, fpSet, Seq(fpSet.nonMatchingCommitment), commitment)
+              .evaluateProofTypes.map { case (key, result) => Hex.toHexString(key) -> result }.toMap
+            val entries = if (currentMiners.isEmpty) Seq.empty
+              else latestRollup.rollup.dictionary.copy().lookUp(currentMiners: _*).response
+            val commitments = currentMiners.zip(entries).map { case (key, entry) =>
+              Hex.toHexString(key) -> NispCommitment.decode(entry.get)
+            }.toMap
+            val pending = commitments.filterNot { case (key, _) => first(key).toOption.flatten.isDefined }
+            val recovered = if (pending.isEmpty) None else snapshot.history match {
+              case Some(anchor) if snapshot.confirmed.phase == LFSMPhase.EVAL =>
+                val protocol = SyncProtocolContext(ctx.getNetworkType, snapshot.confirmed.startHeight,
+                  wallet.contract.hashedPropBytes)
+                val resolution = new RollupNispResolver(nodeContext.getNodeApi, protocol, recoveryMaxTransforms)
+                  .resolve(snapshot.confirmed, anchor.collateralBoxId, anchor.confirmedHeight, pending)
+                logger.info(s"NISP recovery for ${stub.rollupBlockId}: ${resolution.indexRequests} indexed reads, " +
+                  s"${resolution.transforms} transforms, " +
+                  s"${resolution.elapsedMillis}ms, ${resolution.resolved.retainedBytes} payload bytes, " +
+                  s"${resolution.unavailable.size} unavailable")
+                resolution.historyError.foreach(logger.warn)
+                Some(resolution.resolved)
+              case _ =>
+                logger.info(s"Deferring payload recovery for ${stub.rollupBlockId} until its Evaluation transition is indexed")
+                None
+            }
+
+            // Slashes may have changed the root during recovery. Rebuild every trial witness from
+            // the current state and ignore entries that have already been removed.
+            val refreshed = latestRollupState(stub).get.latest
+            if (stub.validate(ctx.getHeight, refreshed.rollup)) {
+              val remaining = refreshed.rollup.dictionary.foldKeys(Vector.empty[Array[Byte]])(_ :+ _)
+              require(remaining.size == refreshed.rollup.numMiners, "Refreshed rollup miner count differs from its dictionary")
+              val currentEntries = if (remaining.isEmpty) Seq.empty
+                else refreshed.rollup.dictionary.copy().lookUp(remaining: _*).response
+              val unchanged = remaining.zip(currentEntries).map { case (key, entry) =>
+                Hex.toHexString(key) -> commitments.get(Hex.toHexString(key))
+                  .contains(NispCommitment.decode(entry.get))
+              }.toMap
+              val toEvaluate = remaining.filter { key =>
+                val hex = Hex.toHexString(key)
+                unchanged(hex) && !first.get(hex).flatMap(_.toOption.flatten).isDefined &&
+                  recovered.flatMap(_.get(key)).isDefined
+              }
+              val later = Evaluator(ctx, wallet, refreshed.inputUTXO, refreshed.rollup, toEvaluate,
+                fpControl, loader, fpSet, fpSet.ordered.tail, commitment, recovered)
+                .evaluateProofTypes.map { case (key, verdict) => Hex.toHexString(key) -> verdict }.toMap
+              val results = remaining.map { key =>
+                val hex = Hex.toHexString(key)
+                val verdict = if (!unchanged(hex)) Failure(new NispPayloadUnavailable(
+                  s"Entry changed during evaluation for miner $hex"))
+                else first(hex) match {
+                  case fraud @ Success(Some(_)) => fraud
+                  case firstVerdict => later.get(hex) match {
+                    case Some(fraud @ Success(Some(_))) => fraud
+                    case Some(Success(None)) => firstVerdict
+                    case Some(failure @ Failure(_)) => failure
+                    case None => Failure(new NispPayloadUnavailable(s"Payload unavailable for miner $hex"))
+                  }
+                }
+                processEvaluationResult(stub, key -> verdict)
+              }
+              manageEvaluationState(stub.copy(resolvedNisps = recovered), results,
+                Some(refreshed.rollup.utxoId), pending.nonEmpty &&
+                  pending.keys.exists(key => !recovered.exists(_.payloads.contains(key))))
+            } else self ! StopEvaluating(stub.rollupBlockId)
           }
           else {
             // If invalidated, rollup is either already invalidated or it has left its current phase
@@ -231,7 +300,7 @@ class RollupEvaluator @Inject()(config: Configuration, nodeContext: NodeContext,
 
   }
   private def processEvaluationResult(stub: RollupTxStub,
-                                      minerEval: (Array[Byte], Try[Option[(SignedTransaction, String)]])
+                                      minerEval: (Array[Byte], Try[Option[String]])
                                      ): (Array[Byte], MinerEvaluationResult) = {
     val tryEval = minerEval._2
 
@@ -242,27 +311,27 @@ class RollupEvaluator @Inject()(config: Configuration, nodeContext: NodeContext,
         minerEval._1 -> EvalError
       case Success(evalResult) =>
         evalResult match {
-          case Some(fpTx) => minerEval._1 -> FraudFound(fpTx._2)
+          case Some(fpHash) => minerEval._1 -> FraudFound(fpHash)
           case None => minerEval._1 -> NoFraudulence
         }
     }
   }
 
-  private def manageEvaluationState(stub: RollupTxStub, results: Seq[(Array[Byte], MinerEvaluationResult)]): Unit = {
-    if (results.exists(_._2 == EvalError)) {
-      // Sent with an empty map, which is what the FailedEvaluation handler counts and bounds. Any
-      // fraud proof found beside the error is dropped and re-found on a later attempt.
+  private def manageEvaluationState(stub: RollupTxStub, results: Seq[(Array[Byte], MinerEvaluationResult)],
+                                     expectedUtxoId: Option[String], payloadUnavailable: Boolean): Unit = {
+    val minerFPs = results.collect { case (miner, FraudFound(proof)) => miner -> proof }.toMap
+    if (minerFPs.nonEmpty) {
+      val queuedKeys = minerFPs.keysIterator.map(Hex.toHexString).toSet
+      val retained = stub.resolvedNisps.map(r => r.copy(payloads = r.payloads.filter {
+        case (key, _) => queuedKeys(key)
+      })).filter(_.payloads.nonEmpty)
+      self ! FailedEvaluation(stub.copy(resolvedNisps = retained), minerFPs, payloadUnavailable)
+    } else if (results.exists(_._2 == EvalError)) {
       logger.error(s"Rollup ${stub.rollupBlockId} has ${results.count(_._2 == EvalError)} of " +
         s"${results.size} miner(s) without a verdict; retrying the rollup")
-      self ! FailedEvaluation(stub, Map.empty)
+      self ! FailedEvaluation(stub, Map.empty, payloadUnavailable)
     } else if (results.forall(_._2 == NoFraudulence)) {
-      self ! SuccessfulEvaluation(stub.rollupBlockId)
-    } else {
-      val minerFPs = results
-        .filter(_._2.isInstanceOf[FraudFound])
-        .map(mfp => mfp._1 -> mfp._2.asInstanceOf[FraudFound].fp)
-        .toMap
-      self ! FailedEvaluation(stub, minerFPs)
+      self ! SuccessfulEvaluation(stub.rollupBlockId, expectedUtxoId)
     }
   }
 
@@ -274,18 +343,20 @@ class RollupEvaluator @Inject()(config: Configuration, nodeContext: NodeContext,
         (syncHandler ? GetCurrentRollupCritical(rollupTxStub.rollupBlockId)).mapTo[RollupInfo],
         timeout.duration)
       rollupInfo match {
-        case RollupMessages.CurrentRollup(utxoId, rollup, mempoolState) =>
+        case RollupMessages.CurrentRollup(utxoId, rollup, mempoolState, history) =>
           if (mempoolState.isDefined) {
             if (!mempoolState.get.toBeRemoved) {
               logger.info(s"Using mempool state for rollup ${rollupTxStub.rollupBlockId}" +
                 s" with synced id $utxoId and mempool id ${mempoolState.get.asInput.id}")
-              Success(LatestRollup(mempoolState.get.asInput, mempoolState.get.rollup))
+              Success(EvaluationSnapshot(LatestRollup(mempoolState.get.asInput, mempoolState.get.rollup),
+                rollup.metadata, history))
             } else {
               Failure(RollupRemovedException(s"Cannot evaluate rollup" +
                 s" ${rollupTxStub.rollupBlockId} with upcoming removal"))
             }
           } else {
-            Success(LatestRollup(InputUTXO(client.execute(_.getBoxesById(utxoId).head)), rollup))
+            Success(EvaluationSnapshot(LatestRollup(InputUTXO(client.execute(_.getBoxesById(utxoId).head)), rollup),
+              rollup.metadata, history))
           }
         case RollupMessages.NoRollupFound() =>
           Failure(new IllegalStateException(s"No existing rollup for blockId ${rollupTxStub.rollupBlockId}"))
@@ -299,10 +370,7 @@ class RollupEvaluator @Inject()(config: Configuration, nodeContext: NodeContext,
 
 object RollupEvaluator {
 
-  /**
-   * Evaluations a rollup may leave a miner without a verdict in before it is retired. Ticks are
-   * four minutes apart, so a fault has about forty minutes to clear.
-   */
+  /** Repeated incomplete evaluations trigger an alarm, never a successful verdict. */
   private[rollups] final val MaxEvaluationAttempts: Int = 10
 
   /** Rollups counted at once, above which the counts are dropped. Over the twenty a set can offer. */

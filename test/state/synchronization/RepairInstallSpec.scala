@@ -444,7 +444,7 @@ class RepairInstallSpec extends TestKit(ActorSystem("repair-install"))
 
     val (key, value) = SyncFixtures.plasmaEntries(1, 16).head
     val output = PlasmaDictionary.empty()
-    output.insert(key -> value)
+    output.insert(key -> _root_.nisp.NispCommitment.fromPayload(value).bytes)
     val shaped = ReducerFixtures.submissionTx(95, inputId, SyncFixtures.id(700011), startHeight,
       key, value, ReducerFixtures.proofHex(Array[Byte](9)), output,
       numMiners = 1, totalScore = BigInt(0), period = 90L)

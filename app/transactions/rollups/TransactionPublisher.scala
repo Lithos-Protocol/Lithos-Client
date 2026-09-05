@@ -170,7 +170,7 @@ class TransactionPublisher @Inject()(config: Configuration, nodeContext: NodeCon
       updatedEvalTrees.foreach { case (_, tree) =>
         val age = currentHeight - tree.currentPeriod.get
 
-        if (age >= LFSMHelpers.EVAL_PERIOD) {
+        if (age >= LFSMHelpers.EVAL_PERIOD && tree.evaluated) {
           // Eval period elapsed → ready to transform to PAYOUT
           entries(tree.blockId) = RollupTxStub(tree.blockId, tree.currentPeriod, EvalTransform)
         }

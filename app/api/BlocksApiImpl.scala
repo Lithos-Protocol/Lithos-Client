@@ -44,7 +44,7 @@ class BlocksApiImpl @Inject()(@Named("sync-handler") syncHandler: ActorRef) exte
     Globals.syncView.rollups.collectFirst { case (id, metadata) if id == utxoId => metadata.blockId }
       .flatMap { blockId =>
         Await.result(syncHandler ? GetCurrentRollup(blockId), timeout.duration) match {
-          case CurrentRollup(_, rollup, _) => Some(rollup)
+          case CurrentRollup(_, rollup, _, _) => Some(rollup)
           case _ => None
         }
       }.map { rollup =>

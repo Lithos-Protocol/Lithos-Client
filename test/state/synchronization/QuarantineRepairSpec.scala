@@ -52,7 +52,7 @@ class QuarantineRepairSpec extends AnyFlatSpec with Matchers with OptionValues {
     val withLater = ReducerFixtures.addRollup(attempted, laterId, laterInput, PlasmaDictionary.empty())
     val (key, value) = SyncFixtures.plasmaEntries(1, 16).head
     val expected = PlasmaDictionary.empty()
-    expected.insert(key -> value)
+    expected.insert(key -> _root_.nisp.NispCommitment.fromPayload(value).bytes)
     val bad = ReducerFixtures.submissionTx(31, laterInput, SyncFixtures.id(600012), 101,
       key, value, ReducerFixtures.proofHex(Array[Byte](9)), expected,
       numMiners = 1, totalScore = BigInt(0), period = 99L)
@@ -102,7 +102,7 @@ class QuarantineRepairSpec extends AnyFlatSpec with Matchers with OptionValues {
       PlasmaDictionary.empty())
     val (key, value) = SyncFixtures.plasmaEntries(1, 16).head
     val expected = PlasmaDictionary.empty()
-    expected.insert(key -> value)
+    expected.insert(key -> _root_.nisp.NispCommitment.fromPayload(value).bytes)
     val tx = ReducerFixtures.submissionTx(30, inputUtxo, SyncFixtures.id(600003), 100,
       key, value, proof, expected, numMiners = 1, totalScore = BigInt(0), period = 99L)
 

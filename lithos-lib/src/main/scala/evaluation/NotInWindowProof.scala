@@ -11,8 +11,8 @@ import work.lithos.mutations.{Contract, InputUTXO, TxBuilder}
 import scala.util.Try
 
 case class NotInWindowProof(contract: Contract, miner: Array[Byte], nispTree: Rollup, evalInput: InputUTXO,
-                            fpControl: InputUTXO)
-  extends FraudProof(contract, miner, nispTree, evalInput, fpControl) {
+                            fpControl: InputUTXO, payload: Option[nisp.ResolvedNisp] = None)
+  extends FraudProof(contract, miner, nispTree, evalInput, fpControl, payload) {
   override val logger: Logger = LoggerFactory.getLogger("NotInWindowProof")
 
 }

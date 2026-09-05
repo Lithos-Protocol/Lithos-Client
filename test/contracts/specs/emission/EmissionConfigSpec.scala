@@ -227,11 +227,11 @@ class EmissionConfigSpec extends AnyPropSpec with EmissionSpecBase {
 
   // ─── what the config actually carries ─────────────────────────────────────
 
-  property("config: the launch thermostat parameters are the ones §26.2 decided") {
+  property("config: the launch thermostat parameters are correct") {
     withCtx { ctx =>
-      LFSMHelpers.PERMIT_FLOOR shouldBe 1000L * LIT
-      LFSMHelpers.PERMIT_CEIL shouldBe 30000L * LIT
-      LFSMHelpers.PERMIT_SLOPE shouldBe 10L * LIT
+      LFSMHelpers.PERMIT_FLOOR shouldBe 2000 * LIT
+      LFSMHelpers.PERMIT_CEIL shouldBe 40000L * LIT
+      LFSMHelpers.PERMIT_SLOPE shouldBe 20L * LIT
       LFSMHelpers.PERMIT_PARAMS.length shouldBe 3
       config(ctx).registers.size shouldBe 4
     }

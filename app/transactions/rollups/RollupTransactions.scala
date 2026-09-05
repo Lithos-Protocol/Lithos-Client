@@ -4,7 +4,7 @@ import evaluation.{CommitmentSource, Evaluator}
 import lfsm.states.RollupInfoState
 import lfsm.{LFSMHelpers, LFSMPhase, RollupProtocol}
 import mutations.{BoxLoader, NodeWallet}
-import nisp.NISP
+import nisp.{NISP, NispCommitment, ResolvedNisps}
 import org.ergoplatform.appkit._
 import org.ergoplatform.appkit.scalaapi.scalaByteType
 import scorex.utils.Longs
@@ -53,8 +53,10 @@ object RollupTransactions {
     val tree = latestState.rollup.dictionary
     val copiedTree = tree.copy()
 
-    val insert = copiedTree.insert(
-      wallet.contract.hashedPropBytes -> nisp.serialize)
+    val payload = nisp.serialize
+    val entry = NispCommitment.fromPayload(payload)
+    require(entry.score == score, "Submission score does not match its serialized payload")
+    val insert = copiedTree.insert(wallet.contract.hashedPropBytes -> entry.bytes)
 
     val inputWithContext = holdingInput.setCtxVars(
       ContextVar.of(0.toByte, ErgoValue.of(Colls.fromArray(wallet.contract.valueBytes), scalaByteType)),
@@ -62,7 +64,7 @@ object RollupTransactions {
         1.toByte,
         ErgoValue.pairOf(
           ErgoValue.of(Colls.fromArray(wallet.contract.hashedPropBytes), scalaByteType),
-          nisp.ergoValue)
+          ErgoValue.of(payload))
       ),
       ContextVar.of(2.toByte, insert.proof.ergoValue),
       ContextVar.of(3.toByte, ErgoValue.of(SubmitOp)),
@@ -169,7 +171,7 @@ object RollupTransactions {
                  payInput: InputUTXO,
                  latestState: LatestRollup): PayoutPlan = {
     val lookUp = latestState.rollup.dictionary.copy().lookUp(wallet.contract.hashedPropBytes)
-    val score = Longs.fromByteArray(lookUp.response.head.ergoValue.getValue.toArray.slice(0, 8))
+    val score = NispCommitment.decode(lookUp.response.head.get).score
     val totalScore = payInput.registers(2).getValue.asInstanceOf[CBigInt].wrappedValue
     val state = stateOf(payInput, LFSMPhase.PAYOUT)
 
@@ -200,7 +202,7 @@ object RollupTransactions {
 
     val lookUp = copiedTree.lookUp(wallet.contract.hashedPropBytes)
     val delete = copiedTree.delete(wallet.contract.hashedPropBytes)
-    val score = Longs.fromByteArray(lookUp.response.head.ergoValue.getValue.toArray.slice(0, 8))
+    val score = NispCommitment.decode(lookUp.response.head.get).score
     val state = stateOf(payInput, LFSMPhase.PAYOUT)
     val nftToken = RollupProtocol.rollupNFT(payInput.tokens)
     val litHeld = RollupProtocol.litToken(payInput.tokens)
@@ -288,14 +290,16 @@ object RollupTransactions {
                        feeOutputs: Seq[UTXO],
                        miner: Array[Byte],
                        fpContractHashHex: String,
-                       commitment: Option[CommitmentSource] = None): SignedTransaction = {
+                       commitment: Option[CommitmentSource] = None,
+                       resolved: Option[ResolvedNisps] = None): SignedTransaction = {
 
     // Compiled once for the JVM's life. This runs inside `attemptTx`, which retries up to five
     // times, so compiling the nine proofs per attempt was 45 compilations for one slash.
     val fpSet = ProtocolContracts(ctx).fraudProofs
     val fpControl = LFSMHelpers.getFPControlBox(ctx)
     val evaluator = Evaluator(ctx, wallet, evalInput, latestState.rollup, Seq.empty,
-      fpControl, new BoxLoader(ctx, Globals.getNodeConfig.getNodeApi), fpSet, commitment = commitment)
+      fpControl, new BoxLoader(ctx, Globals.getNodeConfig.getNodeApi), fpSet,
+      commitment = commitment, resolved = resolved)
     val concreteEval = evaluator.evaluateFor(miner, fpContractHashHex, walletInputs, feeOutputs)
     concreteEval.get
   }

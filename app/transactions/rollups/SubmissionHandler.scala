@@ -664,7 +664,7 @@ class SubmissionHandler @Inject()(config: Configuration, nodeContext: NodeContex
             Seq(stub.fpInfo.get._1))
           val sTx = RollupTransactions.genFraudProofTransform(ctx, wallet, latestState.inputUTXO,
             rollupWalletInputs(stub, initialTxInfo), latestState, feeOutputs, stub.fpInfo.get._1,
-            stub.fpInfo.get._2, commitment)
+            stub.fpInfo.get._2, commitment, stub.resolvedNisps)
           if (initOutputs.isDefined)
             updateFeeMap(sTx, initOutputs.get._2)
           val txId = submitSigned(ctx, sTx, initialTxInfo.isDefined, stub.rollupBlockId,
@@ -885,7 +885,7 @@ class SubmissionHandler @Inject()(config: Configuration, nodeContext: NodeContex
         (syncHandler ? GetCurrentRollupCritical(rollupTxStub.rollupBlockId)).mapTo[RollupInfo],
         timeout.duration)
       rollupInfo match {
-        case RollupMessages.CurrentRollup(utxoId, rollup, mempoolState) =>
+        case RollupMessages.CurrentRollup(utxoId, rollup, mempoolState, _) =>
           if(rollup.phase == HOLDING && rollup.startHeight == client.execute(_.getHeight)){
             Failure(NewlyGeneratedRollupException(s"Cannot submit NISPs to newly generated rollup ${rollup.blockId}"))
           } else if (mempoolState.isDefined) {
@@ -929,10 +929,10 @@ object SubmissionHandler {
                                           expectedRollupInput: String,
                                           current: RollupInfo)(send: => String): String = {
     val currentInput = current match {
-      case RollupMessages.CurrentRollup(_, _, Some(projected)) if !projected.toBeRemoved =>
+      case RollupMessages.CurrentRollup(_, _, Some(projected), _) if !projected.toBeRemoved =>
         projected.asInput.id.toString
-      case RollupMessages.CurrentRollup(utxoId, _, None) => utxoId
-      case RollupMessages.CurrentRollup(_, _, Some(_)) =>
+      case RollupMessages.CurrentRollup(utxoId, _, None, _) => utxoId
+      case RollupMessages.CurrentRollup(_, _, Some(_), _) =>
         throw ProjectionChangedException(s"Rollup $rollupId is being removed before send")
       case RollupMessages.NoRollupFound() =>
         throw ProjectionChangedException(s"Rollup $rollupId disappeared before send")

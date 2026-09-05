@@ -54,6 +54,29 @@ class StateSnapshotStoreSpec extends AnyFlatSpec with Matchers with BeforeAndAft
     restored.dictionaryDigests shouldEqual checkpoint.dictionaries.values.map(_.expectedDigest).toSet
   }
 
+  it should "recover raw payloads from indexed history after restoring a compact checkpoint" in {
+    val chain = support.NispHistoryFixtures.chain()
+    val dictionary = PlasmaDictionary.empty()
+    chain.transactions.tail.init.foreach { tx =>
+      val pair = ErgoValue.fromHex(tx.inputs.head.spendingProof.get.extension("1")).getValue
+        .asInstanceOf[(sigma.Coll[Byte], sigma.Coll[Byte])]
+      dictionary.insert(pair._1.toArray -> nisp.NispCommitment.fromPayload(pair._2.toArray).bytes)
+    }
+    val target = chain.target.materialize(dictionary)
+    val base = populatedState(460, 1L, 0, 1)
+    val state = base.copy(rollups = Map(target.blockId -> target),
+      routes = Map(target.utxoId -> target.blockId), rollupOrigins = Map(target.blockId -> chain.origin))
+    val snapshots = new LevelDbStateSnapshotStore(new InMemoryKeyValueStore, retention = 2, identity)
+    snapshots.save(plan(PersistedSyncState(state, Vector(state.cursor))), MaxEntry) shouldBe Right(())
+    val restored = snapshots.load(snapshots.generationKeys().toOption.get.head).toOption.get.state
+    val recovered = new _root_.state.synchronization.RollupNispResolver(chain.api, support.ReducerFixtures.protocol(), 10)
+      .resolve(restored.rollups(target.blockId).metadata, restored.rollupOrigins(target.blockId),
+        restored.cursor.height, chain.requested)
+    recovered.complete shouldBe true
+    recovered.resolved.payloads.foreach { case (key, value) => value.bytes shouldEqual chain.raw(key) }
+    snapshots.close()
+  }
+
   /**
    * The three values and the phase that says what they mean travel together. A payout snapshot read
    * back as a holding one would turn a reward into a period start and put the rollup out of step
@@ -90,7 +113,7 @@ class StateSnapshotStoreSpec extends AnyFlatSpec with Matchers with BeforeAndAft
     val encoded = StateSnapshotCodec.encodeMeta(
       plan(populatedSnapshot(100, 8L)), identity, MaxEntry).toOption.get
     // The version is the second int of the sealed payload's body; the seal is re-applied by hand.
-    val previous = withSchemaVersion(encoded, 1)
+    val previous = withSchemaVersion(encoded, 3)
 
     StateSnapshotCodec.decodeMeta(previous, identity).left.toOption.get should
       include("unsupported snapshot schema version")

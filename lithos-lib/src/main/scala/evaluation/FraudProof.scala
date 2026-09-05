@@ -4,7 +4,7 @@ import lfsm.contracts.FraudProofContracts.FraudProofSet
 import lfsm.states.{Rollup, RollupInfoState}
 import lfsm.{LFSMPhase, RollupProtocol}
 import mutations.{BoxLoader, NodeWallet}
-import nisp.NISP
+import nisp.{NispCommitment, NispPayloadUnavailable, ResolvedNisp}
 import org.bouncycastle.util.encoders.Hex
 import org.ergoplatform.ErgoTreePredef
 import org.ergoplatform.appkit.scalaapi.scalaByteType
@@ -19,9 +19,11 @@ import work.lithos.mutations.{Contract, InputUTXO, Mutator, TxBuilder, TxContext
 import scala.util.Try
 
 abstract class FraudProof(contract: Contract, miner: Array[Byte],
-                          nispTree: Rollup, evalInput: InputUTXO, fpControl: InputUTXO) {
+                          nispTree: Rollup, evalInput: InputUTXO, fpControl: InputUTXO,
+                          payload: Option[ResolvedNisp] = None) {
   val mutator: Mutator = FraudProof.standardMutator(miner, nispTree, contract)
   val logger: Logger
+  protected def needsPayload: Boolean = true
 
   /**
    * Context variables this proof needs beyond the three every proof carries, appended after them.
@@ -82,13 +84,21 @@ abstract class FraudProof(contract: Contract, miner: Array[Byte],
       }
       val copy = nispTree.dictionary.copy()
       val lookUp = copy.lookUp(miner)
+      val entry = NispCommitment.decode(lookUp.response.head.get)
+      val payloadVars = if (!needsPayload) Seq.empty else {
+        val recovered = payload.getOrElse(throw new NispPayloadUnavailable(
+          s"No recovered NISP for miner ${Hex.toHexString(miner)}"))
+        require(recovered.commitment == entry,
+          s"Recovered NISP no longer matches miner ${Hex.toHexString(miner)} at ${nispTree.utxoId}")
+        Seq(recovered.contextVar)
+      }
       val delete = copy.delete(miner)
       val fpWithContext = mutateFP.setCtxVars(
         (Seq(
           ContextVar.of(0.toByte, ErgoValue.of(miner)),
           ContextVar.of(1.toByte, lookUp.proof.ergoValue),
           ContextVar.of(2.toByte, delete.proof.ergoValue)
-        ) ++ extraCtxVars): _*
+        ) ++ extraCtxVars ++ payloadVars): _*
       )
       val totalInputs = Seq(mutateEval, fpWithContext) ++ inputsToUse.drop(1)
       val uTx = txBuilder
@@ -173,7 +183,7 @@ object FraudProof {
       val lookUp = copy.lookUp(miner)
       val removal = copy.delete(miner)
 
-      val score = Longs.fromByteArray(lookUp.response.head.get.slice(0, 8))
+      val score = NispCommitment.decode(lookUp.response.head.get).score
       val lastMiners = evalOutput.registers(1).getValue.asInstanceOf[Int]
       val lastScore = evalOutput.registers(2).getValue.asInstanceOf[CBigInt].wrappedValue
       val state = RollupInfoState.fromErgoValue(evalOutput.registers(3), LFSMPhase.EVAL)
@@ -218,7 +228,8 @@ object FraudProof {
   def genFraudProof(set: FraudProofSet, ctx: BlockchainContext, contract: Contract,
                      miner: Array[Byte], nispTree: Rollup, evalInput: InputUTXO,
                      fpControl: InputUTXO,
-                     commitment: Option[CommitmentSource] = None): FraudProof = {
+                     commitment: Option[CommitmentSource] = None,
+                     payload: Option[ResolvedNisp] = None): FraudProof = {
     // Identified against the caller's compiled set rather than by recompiling each candidate in turn,
     // which was nine compilations for every proof attempted against every miner.
     val held = contract.hashedPropBytesHex
@@ -228,14 +239,14 @@ object FraudProof {
       NonMatchingCommitmentProof(contract, miner, nispTree, evalInput, fpControl,
         commitment.getOrElse(throw new IllegalArgumentException(
           "FP_NonMatchingCommitment reads the Miner Dictionary, and no CommitmentSource was supplied")))
-    else if (is(set.invalidFormat)) InvalidFormatProof(contract, miner, nispTree, evalInput, fpControl)
-    else if (is(set.malformedGE)) MalformedGEProof(contract, miner, nispTree, evalInput, fpControl)
-    else if (is(set.notInWindow)) NotInWindowProof(contract, miner, nispTree, evalInput, fpControl)
-    else if (is(set.nonUniqueHeaders)) NonUniqueHeadersProof(contract, miner, nispTree, evalInput, fpControl)
-    else if (is(set.incorrectN)) IncorrectNProof(contract, miner, nispTree, evalInput, fpControl)
-    else if (is(set.invalidDiff)) InvalidDiffProof(contract, miner, nispTree, evalInput, fpControl)
-    else if (is(set.transactionNotIncluded)) TransactionNotIncludedProof(contract, miner, nispTree, evalInput, fpControl)
-    else if (is(set.malformedGenesis)) MalformedGenesisProof(contract, miner, nispTree, evalInput, fpControl)
+    else if (is(set.invalidFormat)) InvalidFormatProof(contract, miner, nispTree, evalInput, fpControl, payload)
+    else if (is(set.malformedGE)) MalformedGEProof(contract, miner, nispTree, evalInput, fpControl, payload)
+    else if (is(set.notInWindow)) NotInWindowProof(contract, miner, nispTree, evalInput, fpControl, payload)
+    else if (is(set.nonUniqueHeaders)) NonUniqueHeadersProof(contract, miner, nispTree, evalInput, fpControl, payload)
+    else if (is(set.incorrectN)) IncorrectNProof(contract, miner, nispTree, evalInput, fpControl, payload)
+    else if (is(set.invalidDiff)) InvalidDiffProof(contract, miner, nispTree, evalInput, fpControl, payload)
+    else if (is(set.transactionNotIncluded)) TransactionNotIncludedProof(contract, miner, nispTree, evalInput, fpControl, payload)
+    else if (is(set.malformedGenesis)) MalformedGenesisProof(contract, miner, nispTree, evalInput, fpControl, payload)
     else throw new IllegalArgumentException(
       s"Cannot find FraudProof for contract ${contract.address(ctx.getNetworkType)}")
   }

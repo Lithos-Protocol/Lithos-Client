@@ -3,7 +3,7 @@
   // Value: Block Reward plus the refundable bonds of unpaid miners -> 0
 
   // REGISTERS
-  // R4: NISP Tree, initially, an empty AVL Tree. AVL Tree of ( hashedPropBytes -> NISP )
+  // R4: NISP Tree, initially, an empty AVL Tree. AVL Tree of ( hashedPropBytes -> scoreBE64 || blake2b256(NISP) )
   // R5: Total Miners, constant on spend
   // R6: Total Share Score constant on spend
   // R7: Coll[Long] of the rollup's Long state, length 3, rewritten by Evaluation on the transform
@@ -44,7 +44,7 @@
   // The payout box holds the rollup NFT in tokens(0), which is burnt when the box is spent.
   // Holding admitted each NISP only after collecting exactly bondForScore(score), and every fraud
   // proof removed that entry and its bond together, so each entry still in R4 owns exactly one refund
-  // derived from its own first eight NISP bytes and R9 is the sum of them.
+  // derived from its compact entry score; R7(2) is the sum of those refunds.
 
   // Must match Holding_Logic, which collected these, and Evaluation, which slashed some of them.
   def bondForScore(bondScore: Long): Long = {
@@ -88,6 +88,7 @@
       CTX_KEY_DATA.zip(nispTree.getMany(CTX_KEY_DATA, CTX_LOOKUP_PROOF).map{ (x: Option[Coll[Byte]]) => x.get })
     }
 
+    if (minersToPay.forall { (entry: (Coll[Byte], Coll[Byte])) => entry._2.size == 40 }) {
     val minersWithScore = {
       minersToPay.map{
         (x: (Coll[Byte], Coll[Byte])) => (x._1, byteArrayToLong(x._2.slice(0, 8)))
@@ -256,6 +257,8 @@
         )
         sigmaProp(statements)
       }
+    } else {
+      sigmaProp(false)
+    }
   }
-
 }

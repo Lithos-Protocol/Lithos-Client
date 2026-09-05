@@ -14,9 +14,9 @@ import work.lithos.mutations.{Contract, Token, TxBuilder, UTXO}
 import scala.util.Try
 
 /**
- * Sizing, not behaviour: measures what a super-share is made of and what a NISP of that size costs
- * in AVL proof bytes, then asserts the size constants still follow from it. Nothing here checks a
- * contract condition, so a failure means a number drifted rather than a rule broke.
+ * Measures serialization limits and compares full-payload AVL witnesses with compact commitments.
+ * The raw-value experiment retains the legacy format as a comparison; Holding cost measurements use
+ * the current compact format. The payload size envelope remains unchanged.
  */
 class NISPFormatSizingSpec extends AnyPropSpec with EmissionSpecBase with RollupSpecBase {
 
@@ -207,15 +207,20 @@ class NISPFormatSizingSpec extends AnyPropSpec with EmissionSpecBase with Rollup
 
   // ─── 2b. contract-size leverage ───────────────────────────────────────────
 
-  /** lookup + remove, worst case: one NISP for the lookup, two for the removal. */
-  private def fraudProofBytes(nisp: Int): Int = 3 * nisp + 520
+  /** Raw witness bytes for a 256-neighbour fixture; excludes transaction and serialization overhead. */
+  private lazy val compactWitnessOverhead: Int = {
+    val proofs = commitmentProofs(256)
+    proofs.lookup + proofs.remove
+  }
+
+  private def fraudWitnessBytes(nisp: Int): Int = nisp + compactWitnessOverhead
 
   /** A NISP ceiling has to clear the honest worst case: 16 Merkle levels, 4-byte height VLQ. */
   private def nispCeilingFor(txProof: Int): Int = nispSize(txProof, 16, HDR_MAX)
 
   /**
-   * A byte off either contract is ten bytes off the NISP ceiling and thirty off a fraud proof: the
-   * genesis transaction rides in all ten super-shares, and a fraud proof carries three NISPs.
+   * A byte off either contract is ten bytes off the NISP ceiling and ten off a payload-dependent fraud witness: the
+   * genesis transaction rides in all ten super-shares, and a fraud proof carries one payload alongside compact AVL proofs.
    */
   property("leverage: what trimming Holding or Collateral_Mainnet actually buys") {
     withCtx { ctx =>
@@ -239,35 +244,36 @@ class NISPFormatSizingSpec extends AnyPropSpec with EmissionSpecBase with Rollup
 
       val txProof = 2 + realTx + collatBytes
       println(s"[leverage] today: txProof=$txProof ceiling=${nispCeilingFor(txProof)} " +
-        s"fraudProof=${fraudProofBytes(nispCeilingFor(txProof))}")
+        s"fraudWitness=${fraudWitnessBytes(nispCeilingFor(txProof))}")
       println("[leverage] bytes trimmed from the two contracts, and where it lands:")
       Seq(0, 100, 200, 400, 600, 800, 1000).foreach { saved =>
         val tp = txProof - saved
         val ceiling = nispCeilingFor(tp)
-        val fp = fraudProofBytes(ceiling)
+        val fp = fraudWitnessBytes(ceiling)
         println(f"[leverage]   -$saved%-5d txProof=$tp%-6d NISP ceiling=$ceiling%-6d " +
-          f"fraudProof=$fp%-7d ${if (fp <= 90000) "under 90k" else "OVER 90k"}")
+          f"fraudWitness=$fp%-7d ${if (fp <= 90000) "under 90k" else "OVER 90k"}")
       }
     }
   }
 
   /**
    * The 90 KB target, solved for the ceiling rather than guessed at.
-   * `3 * NISP + 520 <= 90000` gives the largest ceiling that fits.
+   * `NISP + compact lookup + compact removal <= 90000` bounds raw witness bytes.
+   * The separate payload must also fit its context-variable serialization limit.
    */
-  property("leverage: the NISP ceiling a 90 KB fraud-proof budget allows") {
+  property("leverage: the payload limit under a 90 KB witness budget and context serialization cap") {
     withCtx { ctx =>
       val txProof = worstProofUnder(ctx, holdingContract(ctx))
-      val budgetCeiling = (90000 - 520) / 3
+      val budgetCeiling = math.min(90000 - compactWitnessOverhead, MAX_CTXVAR_BYTES)
       val needed = nispCeilingFor(txProof)
 
-      println(s"[budget] a 90000-byte fraud proof allows a NISP ceiling of $budgetCeiling")
+      println(s"[budget] a 90000-byte witness budget and context cap allow a payload of $budgetCeiling")
       println(s"[budget] the honest worst case needs $needed (16 levels, txProof $txProof)")
       println(s"[budget] headroom = ${budgetCeiling - needed} bytes " +
         s"(${(budgetCeiling - needed) / 10} per share)")
 
       // It fits, but only just — which is the reason the leverage table above matters.
-      needed should be < budgetCeiling
+      needed should be <= budgetCeiling
     }
   }
 
@@ -290,14 +296,14 @@ class NISPFormatSizingSpec extends AnyPropSpec with EmissionSpecBase with Rollup
       val collatMax = collatBox + collatSlack
       val proofMax = 2 + txMax + collatMax
       val nispMax = nispCeilingFor(proofMax) + 1
-      val fp = fraudProofBytes(nispMax)
+      val fp = fraudWitnessBytes(nispMax - 1)
 
       f"holding=$holdingTree%-5d collat=$collatTree%-5d | honest ceiling=$honestCeiling%-6d | " +
         f"TX_SIZE_MAX=$txMax%-5d TX_PROOF_MAX=$proofMax%-5d NISP_MAX=$nispMax%-6d " +
-        f"fraudProof=$fp%-7d ${if (fp <= 90000) "under 90k" else "OVER 90k"}"
+        f"fraudWitness=$fp%-7d ${if (fp <= 90000) "under 90k" else "OVER 90k"}"
     }
 
-    println("[shave] today's scripts, last turn's generous headroom (this is where 35000 came from):")
+    println("[shave] illustrative script sizes and headroom:")
     println(s"[shave]   ${row(403, 783, txSlack = 543, collatSlack = 90)}")
 
     println("[shave] Holding trimmed to 200 bytes, same headroom — the direct answer:")
@@ -316,8 +322,8 @@ class NISPFormatSizingSpec extends AnyPropSpec with EmissionSpecBase with Rollup
     val after = nispCeilingFor(2 + (TX_ANCHOR + 200) + 543 + (COLLAT_ANCHOR + 783) + 90) + 1
     before - after shouldBe 2030
     println(s"[shave] Holding 403 -> 200 moves NISP_MAX $before -> $after (-${before - after}), " +
-      s"and the fraud proof ${fraudProofBytes(before)} -> ${fraudProofBytes(after)} " +
-      s"(-${fraudProofBytes(before) - fraudProofBytes(after)})")
+      s"and the fraud proof ${fraudWitnessBytes(before - 1)} -> ${fraudWitnessBytes(after - 1)} " +
+      s"(-${fraudWitnessBytes(before - 1) - fraudWitnessBytes(after - 1)})")
   }
 
   /**
@@ -428,9 +434,9 @@ class NISPFormatSizingSpec extends AnyPropSpec with EmissionSpecBase with Rollup
       Seq(0, 100, 200, 400).foreach { margin =>
         val proofMax = worstProof + margin
         val nispMax = nispCeilingFor(proofMax) + 1
-        val fpTx = fraudProofBytes(nispMax) + 679
+        val fpTx = fraudWitnessBytes(nispMax - 1)
         println(f"[worstcase]   margin=$margin%-4d TX_PROOF_MAX=$proofMax%-5d NISP_MAX=$nispMax%-6d " +
-          f"fraudTx=$fpTx%-7d slack=${98304 - fpTx}%-6d ${if (fpTx < 98304) "fits" else "OVER"}")
+          f"fraudWitness=$fpTx%-7d slack=${98304 - fpTx}%-6d ${if (fpTx < 98304) "fits" else "OVER"}")
       }
     }
   }
@@ -462,15 +468,15 @@ class NISPFormatSizingSpec extends AnyPropSpec with EmissionSpecBase with Rollup
 
         // (a) spend the saving as upgrade margin: NISP_MAX unchanged, TX_PROOF_MAX unchanged
         val marginIfKept = LFSMHelpers.TX_PROOF_MAX - proof
-        val fpIfKept = fraudProofBytes(LFSMHelpers.NISP_MAX) + 679
+        val fpIfKept = fraudWitnessBytes(LFSMHelpers.NISP_MAX - 1)
 
         // (b) spend it as transaction headroom: re-derive the ceiling from the new worst case
         val proofMax = proof + 100
         val nispMax = nispCeilingFor(proofMax) + 1
-        val fpIfRederived = fraudProofBytes(nispMax) + 679
+        val fpIfRederived = fraudWitnessBytes(nispMax - 1)
 
-        println(f"[guard] $tree%-5d $proof%-8d | margin=$marginIfKept%-4d fpTx=$fpIfKept%-6d " +
-          f"slack=${98304 - fpIfKept}%-6d | NISP_MAX=$nispMax%-6d fpTx=$fpIfRederived%-6d " +
+        println(f"[guard] $tree%-5d $proof%-8d | margin=$marginIfKept%-4d fpWitness=$fpIfKept%-6d " +
+          f"slack=${98304 - fpIfKept}%-6d | NISP_MAX=$nispMax%-6d fpWitness=$fpIfRederived%-6d " +
           f"slack=${98304 - fpIfRederived}")
       }
 
@@ -525,247 +531,78 @@ class NISPFormatSizingSpec extends AnyPropSpec with EmissionSpecBase with Rollup
 
   private case class Proofs(insert: Int, lookup: Int, remove: Int)
 
-  private def proofsAt(treeSize: Int, nisp: Int, filler: Int): Proofs = {
+  private def proofsAt(treeSize: Int, nisp: Int, filler: Int, compact: Boolean = false): Proofs = {
     val key = keyFor(1000000)
-    val bytes = nispBytes(5000L, nisp)
+    val payload = nispBytes(5000L, nisp)
+    val bytes = if (compact) _root_.nisp.NispCommitment.fromPayload(payload).bytes else payload
+    val entries = fill(treeSize, filler)
+    val values = if (compact) entries.map { case (k, raw) =>
+      k -> _root_.nisp.NispCommitment.fromPayload(raw).bytes
+    } else entries
 
     // Insert: the tree does NOT yet hold the key, which is the submission shape.
-    val insertTree = treeWith(fill(treeSize, filler))
+    val insertTree = treeWith(values)
     val insert = proofBytes(insertTree.insert(key -> bytes).proof.ergoValue)
 
     // Lookup and remove: the tree already holds it, which is the fraud-proof shape. lookUp first —
     // it does not move the digest, so both proofs are against the same input tree.
-    val readTree = treeWith(fill(treeSize, filler) :+ (key -> bytes))
+    val readTree = treeWith(values :+ (key -> bytes))
     val lookup = proofBytes(readTree.lookUp(key).proof.ergoValue)
     val remove = proofBytes(readTree.delete(key).proof.ergoValue)
 
     Proofs(insert, lookup, remove)
   }
 
-  /**
-   * Proof size is driven by neighbouring values, not by tree depth. AVL+ leaves are linked, so a
-   * lookup carries its target's value, an insert carries the leaf it splits, and a removal carries
-   * both. In a tree of full NISPs that is one to two NISPs per proof.
-   */
-  property("avl: proof size is driven by the neighbouring entry, not by tree depth") {
-    val cheap = proofsAt(treeSize = 64, nisp = 26000, filler = 64)
-    val real = proofsAt(treeSize = 64, nisp = 26000, filler = 26000)
-    println(s"[avl] 64 entries, 26000-byte target, tiny filler = $cheap")
-    println(s"[avl] 64 entries, 26000-byte target, full filler = $real")
+  private val MAX_CTXVAR_BYTES = 65535
 
-    // A lookup only ever carries its own target, so filler cannot move it.
-    cheap.lookup shouldBe real.lookup
-    real.lookup should be >= 26000
+  private def commitmentProofs(treeSize: Int): Proofs =
+    proofsAt(treeSize, LFSMHelpers.NISP_MIN, LFSMHelpers.NISP_MIN, compact = true)
 
-    // An insert carries the neighbour it splits: one NISP once the neighbours are real.
-    cheap.insert should be < 1000
-    real.insert should be >= 26000
-
-    // A removal carries both, so it is the expensive one — roughly two NISPs.
-    real.remove should be >= 2 * 26000
-  }
-
-  /**
-   * The sweep. `nisp + insert` is what a Holding submission has to fit in a transaction, and
-   * `lookup + remove` is what every fraud proof has to fit. Both regimes are shown: cheap filler
-   * isolates the O(log N) term, realistic filler is the number that actually applies.
-   */
-  property("avl: proof and transaction bytes by tree size, at today's and the proposed ceiling") {
-    val sizes = Seq(0, 1, 8, 64, 256, 1024)
-    Seq(LFSMHelpers.NISP_MAX -> "deployed", 35000 -> "proposed").foreach { case (nisp, label) =>
-      Seq(64 -> "tiny filler (depth only)", nisp -> "realistic filler (every miner a full NISP)")
-        .foreach { case (filler, regime) =>
-          println(s"[avl] ---- NISP = $nisp ($label ceiling), $regime ----")
-          println("[avl]  miners   insert   lookup   remove | submission(nisp+insert)  fraudproof(lookup+remove)")
-          sizes.foreach { n =>
-            val p = proofsAt(n, nisp, filler)
-            println(f"[avl]  $n%-8d ${p.insert}%-8d ${p.lookup}%-8d ${p.remove}%-8d | " +
-              f"${nisp + p.insert}%-23d ${p.lookup + p.remove}")
-          }
-        }
-    }
-  }
-
-  /** A Coll cannot exceed 100,000 elements, enforced when the ErgoValue is built. */
-  private val MAX_COLL_BYTES = 100000
-
-  /**
-   * A payout removes a batch of miners, and a removal proof grows by about two NISPs per key.
-   * Nothing bounds the key count in the contract, so the collection limit is the real cap and it
-   * shows up as a transaction that will not build.
-   */
-  property("avl: a batched Payout removal hits the 100,000-byte collection limit almost immediately") {
-    val treeSize = 256
-    val entries = fill(treeSize, LFSMHelpers.NISP_MAX)
-
-    def proofsFor(batch: Int): Option[(Int, Int)] = {
-      val tree = treeWith(entries)
-      val keys = entries.take(batch).map(_._1)
-      try Some((proofBytes(tree.lookUp(keys: _*).proof.ergoValue),
-        proofBytes(tree.delete(keys: _*).proof.ergoValue)))
-      catch { case _: IllegalArgumentException => None }
-    }
-
-    println(s"[payout] $treeSize miners holding ${LFSMHelpers.NISP_MAX}-byte NISPs, by batch size:")
-    val feasible = Seq(1, 2, 4, 8, 16).flatMap { batch =>
-      proofsFor(batch) match {
-        case Some((lookup, remove)) =>
-          println(f"[payout]   batch=$batch%-4d lookup=$lookup%-8d remove=$remove%-8d " +
-            f"total=${lookup + remove}%-8d perMiner=${(lookup + remove) / batch}")
-          Some(batch)
-        case None =>
-          println(f"[payout]   batch=$batch%-4d EXCEEDS the $MAX_COLL_BYTES-byte Coll limit — unbuildable")
-          None
+  property("avl: commitment witnesses carry one payload separately, independent of AVL value size") {
+    _root_.nisp.NispCommitment.EntrySize shouldBe SCORE + 32
+    Seq(0, 1, 8, 64, 256, 1024).foreach { miners =>
+      val proofs = commitmentProofs(miners)
+      Seq(proofs.insert, proofs.lookup, proofs.remove).foreach(_ should be < MAX_CTXVAR_BYTES)
+      Seq(LFSMHelpers.NISP_MAX - 1, 34999, 59999).foreach { payload =>
+        proofsAt(miners, payload, payload, compact = true) shouldBe proofs
+        println(s"[avl] miners=$miners payload=$payload proofs=$proofs " +
+          s"submissionWitness=${payload + proofs.insert} " +
+          s"payloadFraudWitness=${payload + proofs.lookup + proofs.remove} " +
+          s"payloadIndependentFraudWitness=${proofs.lookup + proofs.remove}")
       }
     }
-
-    // One miner per transaction is all that fits at the ceiling. That is the finding.
-    feasible should contain(1)
-    feasible should not contain 2
-    println(s"[payout] max miners settleable per Payout transaction at the ceiling: ${feasible.max}")
+    fraudWitnessBytes(34999) - fraudWitnessBytes(24999) shouldBe 10000
   }
 
-  /**
-   * Two ceilings apply and the tighter one comes second: 100,000 when the ErgoValue is built, and
-   * 65,535 when it is serialised into a transaction, since a Coll length is written as a ushort.
-   * Anything bound for a context variable is capped at 65,535.
-   */
-  private val MAX_CTXVAR_BYTES = 65535 // putUShort, CoreDataSerializer.serialize
-
-  property("avl: the serialisation limit caps CONST_NISP_MAX near 32.6k, not near 50k") {
-    def serialisable(v: ErgoValue[_]): Boolean =
-      try { ContextVar.of(9.toByte, v); v.toHex; true }
-      catch { case _: IllegalArgumentException => false }
-
-    Seq(26000, 29826, 32662, 35000, 45000).foreach { nisp =>
-      val built = try Some(proofsAt(treeSize = 8, nisp = nisp, filler = nisp).remove)
-      catch { case _: IllegalArgumentException => None }
-      val ok = built.exists(_ <= MAX_CTXVAR_BYTES)
-      println(f"[limit] NISP=$nisp%-6d worst-case removal proof = " +
-        f"${built.map(_.toString).getOrElse(s"over $MAX_COLL_BYTES")}%-8s " +
-        f"${if (ok) "serialisable" else s"OVER the $MAX_CTXVAR_BYTES ctx-var limit"}")
-    }
-
-    // The binding arithmetic: 2*NISP + 211 <= 65535.
-    proofsAt(treeSize = 8, nisp = 29826, filler = 29826).remove should be <= MAX_CTXVAR_BYTES
-    proofsAt(treeSize = 8, nisp = 35000, filler = 35000).remove should be > MAX_CTXVAR_BYTES
-    println(s"[limit] largest NISP whose removal proof still serialises = ${(MAX_CTXVAR_BYTES - 211) / 2}")
-  }
-
-  /** One shared proof instead of two puts a fraud proof at one NISP, clear of both ceilings. */
-  property("avl: a single shared proof clears both ceilings by a wide margin") {
-    // The lookup has to be built on its own: past ~50k the REMOVAL proof exceeds the 100,000-byte
-    // CollOverArray limit and throws before a combined measurement could be taken.
-    def lookupOnly(nisp: Int): Int = {
-      val entries = fill(256, nisp)
-      proofBytes(treeWith(entries).lookUp(entries.head._1).proof.ergoValue)
-    }
-
-    Seq(26000, 29826, 35000, 45000, 60000).foreach { nisp =>
-      val updateBased = lookupOnly(nisp) // one proof serves get() and update() alike
-      val removeBased = try {
-        val p = proofsAt(treeSize = 256, nisp = nisp, filler = nisp)
-        if (p.remove <= MAX_CTXVAR_BYTES) f"${p.lookup + p.remove}%-7d ok"
-        else f"${p.lookup + p.remove}%-7d UNSERIALISABLE"
-      } catch { case _: IllegalArgumentException => "unbuildable at all" }
-
-      println(f"[shared] NISP=$nisp%-6d remove-based=$removeBased%-24s " +
-        f"update-based=$updateBased%-7d ${if (updateBased <= MAX_CTXVAR_BYTES) "ok" else "UNSERIALISABLE"}")
-    }
-    lookupOnly(60000) should be <= MAX_CTXVAR_BYTES
-  }
-
-  // ─── 4. what is duplicated, and what a digest-valued tree would save ──────
-
-  /**
-   * A fraud proof carries the target's NISP twice, once in the lookup proof and once in the removal.
-   * The neighbour's copy in the removal is not duplication and cannot be removed, so two NISPs is
-   * the floor for anything that keeps NISPs in the tree.
-   */
-  property("dedup: the target NISP is carried twice, the neighbour's copy is structural") {
-    val nisp = LFSMHelpers.NISP_MAX
-    val alone = proofsAt(treeSize = 0, nisp = nisp, filler = nisp) // no neighbour exists
-    val withNeighbour = proofsAt(treeSize = 8, nisp = nisp, filler = nisp)
-
-    println(s"[dedup] removal with no neighbour  = ${alone.remove} (about 1 NISP)")
-    println(s"[dedup] removal with a neighbour   = ${withNeighbour.remove} (about 2 NISPs)")
-    println(s"[dedup] lookup                     = ${withNeighbour.lookup} (about 1 NISP)")
-    println(s"[dedup] fraud proof total          = ${withNeighbour.lookup + withNeighbour.remove}" +
-      s" — three NISPs, one of which is a duplicate of another")
-
-    alone.remove should be < (2 * nisp)
-    withNeighbour.remove should be >= (2 * nisp)
-  }
-
-  /**
-   * An update does not restructure the tree, so unlike a removal its proof carries no neighbour.
-   * Zeroing an entry instead of removing it would put a fraud proof at two NISPs rather than three,
-   * with the NISP still in the tree where the client keeps it.
-   */
-  property("dedup: an update proof carries the old value but not the neighbour") {
-    val nisp = LFSMHelpers.NISP_MAX
-    val marker = nispBytes(0L, 40) // what a slashed entry would be rewritten to
-    val entries = fill(256, nisp)
-    val key = entries.head._1
-
-    val readTree = treeWith(entries)
-    val lookup = proofBytes(readTree.lookUp(key).proof.ergoValue)
-    val updated = proofBytes(readTree.update(key -> marker).proof.ergoValue)
-
-    val removeTree = treeWith(entries)
-    val removed = proofBytes(removeTree.delete(key).proof.ergoValue)
-
-    println(s"[update] lookup proof                 = $lookup")
-    println(s"[update] update proof (zero the entry)= $updated")
-    println(s"[update] remove proof (for contrast)  = $removed")
-    println(s"[update] fraud proof, lookup+update   = ${lookup + updated}")
-    println(s"[update] fraud proof, lookup+remove   = ${lookup + removed} (today)")
-    println(s"[update] saving = ${(lookup + removed) - (lookup + updated)} bytes " +
-      f"(${100 - 100 * (lookup + updated) / (lookup + removed)}%%)")
-
-    // The claim under test: an update does not pull in the neighbour, a removal does.
-    updated should be < (2 * nisp)
-    removed should be >= (2 * nisp)
-    (lookup + updated) should be < (lookup + removed)
-  }
-
-  /**
-   * Same bytes, not just the same length: if so, one context variable serves both operations and a
-   * fraud proof that zeroes an entry costs one NISP rather than two.
-   */
-  property("dedup: a lookup proof and an update proof are byte-identical") {
-    val entries = fill(256, LFSMHelpers.NISP_MAX)
-    val key = entries.head._1
-    val marker = nispBytes(0L, 40)
-
-    def bytesOf(v: ErgoValue[_]): Array[Byte] = v.getValue.asInstanceOf[Coll[Byte]].toArray
-
-    val lookupProof = bytesOf(treeWith(entries).lookUp(key).proof.ergoValue)
-    val updateProof = bytesOf(treeWith(entries).update(key -> marker).proof.ergoValue)
-
-    println(s"[identical] lookup proof = ${lookupProof.length} bytes")
-    println(s"[identical] update proof = ${updateProof.length} bytes")
-    println(s"[identical] byte-identical = ${lookupProof.sameElements(updateProof)}")
-
-    lookupProof.length shouldBe updateProof.length
-    withClue("if these are identical, one context var can serve get() and update() together: ") {
-      lookupProof.sameElements(updateProof) shouldBe true
+  property("avl: compact Payout batch witnesses serialize without NISP payloads") {
+    val entries = fill(256, LFSMHelpers.NISP_MAX - 1)
+    Seq(1, 2, 8, 32, 128, 256).foreach { batch =>
+      val tree = commitmentTree(entries)
+      val keys = entries.take(batch).map(_._1)
+      val lookup = tree.lookUp(keys: _*).proof.ergoValue
+      val remove = tree.delete(keys: _*).proof.ergoValue
+      Seq(lookup, remove).foreach { proof =>
+        proofBytes(proof) should be <= MAX_CTXVAR_BYTES
+        proof.toHex should not be empty
+      }
+      // Witness serialization alone does not establish a transaction's cost or output-size limit.
+      println(s"[payout] batch=$batch lookup=${proofBytes(lookup)} remove=${proofBytes(remove)} " +
+        s"total=${proofBytes(lookup) + proofBytes(remove)}")
     }
   }
 
   /**
-   * The whole fraud-proof transaction, not just its proofs, against Ergo's 98304-byte limit. That
-   * limit is node policy rather than consensus, but it binds harder: an oversized transaction is
-   * refused on submit and the peer that relays one is penalised.
+   * Base serialization fixture with compact proofs and a separate payload. It omits signatures,
+   * script dispatch and proof-specific evidence, so this is not a production transaction bound.
    */
-  property("budget: a fraud-proof transaction against Ergo's 98304-byte maxTransactionSize") {
+  property("budget: compact fraud-proof base transaction carries the payload once") {
     withCtx { ctx =>
       val MAX_TX_SIZE = 98304 // ergo application.conf: maxTransactionSize = 98304 // 96 kb
 
       def fraudTxBytes(nisp: Int, treeSize: Int): (Int, Int) = {
         val entries = fill(treeSize, nisp)
         val key = entries.head._1
-        val tree = treeWith(entries)
+        val tree = commitmentTree(entries)
         val inTree = tree.ergoValue
         val lookup = tree.lookUp(key)
         val removal = tree.delete(key)
@@ -783,7 +620,8 @@ class NISPFormatSizingSpec extends AnyPropSpec with EmissionSpecBase with Rollup
           .setCtxVars(
             ContextVar.of(0.toByte, ErgoValue.of(Colls.fromArray(key), scalaByteType)),
             ContextVar.of(1.toByte, lookup.proof.ergoValue),
-            ContextVar.of(2.toByte, removal.proof.ergoValue))
+            ContextVar.of(2.toByte, removal.proof.ergoValue),
+            ContextVar.of(_root_.nisp.NispCommitment.PayloadContextSlot, bytesValue(entries.head._2)))
 
         val evalOut = UTXO(evalContract(ctx), boxValue, Seq.empty[Token], Seq(
           outTree, ErgoValue.of(treeSize - 1), ErgoValue.of(BigInt(0L).bigInteger),
@@ -793,74 +631,51 @@ class NISPFormatSizingSpec extends AnyPropSpec with EmissionSpecBase with Rollup
         (tx.asInstanceOf[UnsignedTransactionImpl].getTx.messageToSign.length, proofTotal)
       }
 
-      println(s"[budget] Evaluation ergoTree = ${evalContract(ctx).ergoTree.bytes.length} bytes")
-      println(s"[budget] Ergo maxTransactionSize = $MAX_TX_SIZE (node policy: API 400 + peer penalty)")
-      Seq(26000, 28949, 29826, 32368, 35000).foreach { nisp =>
-        val measured = try Some(fraudTxBytes(nisp, 256))
-        catch { case _: IllegalArgumentException => None }
-        measured match {
-          case Some((txBytes, proofTotal)) =>
-            val overhead = txBytes - proofTotal
-            val slack = MAX_TX_SIZE - txBytes
-            println(f"[budget] NISP=$nisp%-6d proofs=$proofTotal%-7d tx=$txBytes%-7d " +
-              f"overhead=$overhead%-5d slack=$slack%-7d ${if (slack > 0) "fits" else "OVER maxTransactionSize"}")
-          case None =>
-            println(f"[budget] NISP=$nisp%-6d removal proof exceeds the $MAX_CTXVAR_BYTES-byte " +
-              "ctx-var limit — the transaction cannot be serialised at all")
-        }
+      Seq(LFSMHelpers.NISP_MAX - 1, 34999, 59999).foreach { payload =>
+        val (txBytes, proofs) = fraudTxBytes(payload, 256)
+        val overhead = txBytes - payload - proofs
+        overhead should be > 0
+        txBytes should be < MAX_TX_SIZE
+        println(s"[budget] payload=$payload proofs=$proofs overhead=$overhead baseTx=$txBytes " +
+          s"slack=${MAX_TX_SIZE - txBytes}")
       }
-
-      // The proposed ceiling has to leave real room, not just fit.
-      val (txAt, _) = fraudTxBytes(28949, 256)
-      txAt should be < MAX_TX_SIZE
-      println(s"[budget] at NISP_MAX 28949 the transaction is $txAt, " +
-        s"${MAX_TX_SIZE - txAt} bytes under the limit " +
-        f"(${100.0 * (MAX_TX_SIZE - txAt) / MAX_TX_SIZE}%.1f%% headroom)")
+      val (smallTx, smallProofs) = fraudTxBytes(LFSMHelpers.NISP_MAX - 1, 256)
+      val (largeTx, largeProofs) = fraudTxBytes(LFSMHelpers.NISP_MAX - 1 + 1000, 256)
+      largeProofs shouldBe smallProofs
+      largeTx - smallTx shouldBe 1000
     }
   }
 
   /**
-   * Storing [score][hash] as the tree value instead of the NISP: the NISP then travels once, in its
-   * own context variable, checked against the stored hash. A payout needs only the score, so it
-   * would carry no NISP at all and could batch again.
+   * Compare the legacy full-payload tree with deployed score/hash commitments. Payload-dependent
+   * fraud proofs carry one original NISP; Payout only needs commitment scores.
    */
-  property("dedup: a digest-valued tree collapses the fraud proof to roughly one NISP") {
-    val nisp = LFSMHelpers.NISP_MAX
-    val entryBytes = 8 + 32 // [score][blake2b256(nisp)]
+  property("comparison: deployed commitments versus legacy full-payload AVL values") {
+    val nisp = LFSMHelpers.NISP_MAX - 1
 
-    val current = proofsAt(treeSize = 256, nisp = nisp, filler = nisp)
-    val digested = proofsAt(treeSize = 256, nisp = entryBytes, filler = entryBytes)
+    val legacy = proofsAt(treeSize = 256, nisp = nisp, filler = nisp)
+    val digested = proofsAt(treeSize = 256, nisp = nisp, filler = nisp, compact = true)
 
-    val currentFp = current.lookup + current.remove
+    val legacyFp = legacy.lookup + legacy.remove
     val digestedFp = nisp + digested.lookup + digested.remove // the NISP now rides separately
-    val currentSub = nisp + current.insert
+    val legacySub = nisp + legacy.insert
     val digestedSub = nisp + digested.insert
 
     println(s"[dedup] ---- 256 miners, ${nisp}-byte NISPs ----")
-    println(f"[dedup] fraud proof: NISP in tree = $currentFp%-8d digest in tree = $digestedFp%-8d " +
-      f"(${100 - 100 * digestedFp / currentFp}%% smaller)")
-    println(f"[dedup] submission : NISP in tree = $currentSub%-8d digest in tree = $digestedSub%-8d " +
-      f"(${100 - 100 * digestedSub / currentSub}%% smaller)")
+    println(f"[dedup] fraud proof: NISP in tree = $legacyFp%-8d digest in tree = $digestedFp%-8d " +
+      f"(${100 - 100 * digestedFp / legacyFp}%% smaller)")
+    println(f"[dedup] submission : NISP in tree = $legacySub%-8d digest in tree = $digestedSub%-8d " +
+      f"(${100 - 100 * digestedSub / legacySub}%% smaller)")
 
-    digestedFp should be < currentFp
+    digestedFp should be < legacyFp
     digestedFp should be < 90000
 
     // With a 40-byte value the ceiling stops being the binding constraint on the fraud proof,
     // so the NISP ceiling can be set from the format alone rather than from proof arithmetic.
     println(s"[dedup] fraud proof at a 35000 ceiling, digest-valued = " +
-      s"${35000 + digested.lookup + digested.remove}")
+      s"${34999 + digested.lookup + digested.remove}")
 
-    // And Payout, which needs only the score, can batch again.
-    println("[dedup] Payout batch removal against a digest-valued tree:")
-    val entries = fill(256, entryBytes)
-    Seq(1, 8, 32, 128, 256).foreach { batch =>
-      val tree = treeWith(entries)
-      val keys = entries.take(batch).map(_._1)
-      val lookup = proofBytes(tree.lookUp(keys: _*).proof.ergoValue)
-      val remove = proofBytes(tree.delete(keys: _*).proof.ergoValue)
-      println(f"[dedup]   batch=$batch%-5d lookup=$lookup%-7d remove=$remove%-7d " +
-        f"total=${lookup + remove}%-7d ${if (lookup + remove < MAX_COLL_BYTES) "builds" else "OVER the Coll limit"}")
-    }
+
   }
 
   /**
@@ -875,11 +690,10 @@ class NISPFormatSizingSpec extends AnyPropSpec with EmissionSpecBase with Rollup
         val key = contractOf(prover).hashedPropBytes
         val nisp = nispBytes(5000L, nispLen)
 
-        // Realistic filler: in a live Holding tree every other entry is another miner's NISP, and
-        // the insert proof carries whichever of them the new leaf splits.
-        val tree = treeWith(fill(treeSize, nispLen))
+        // Neighbouring leaves contain commitments; the original payload travels in context 1.
+        val tree = commitmentTree(fill(treeSize, nispLen))
         val inTree = tree.ergoValue
-        val insertion = tree.insert(key -> nisp)
+        val insertion = tree.insert(key -> _root_.nisp.NispCommitment.fromPayload(nisp).bytes)
         val outTree = tree.ergoValue
         val periodStart = ctx.getHeight.toLong - 100L
 
@@ -923,7 +737,7 @@ class NISPFormatSizingSpec extends AnyPropSpec with EmissionSpecBase with Rollup
         val deployed = submissionBytes(LFSMHelpers.NISP_MAX - 1, n)
         val proposed = submissionBytes(34999, n)
         println(f"[tx] $n%-5d miners: signed submission at deployed ceiling = $deployed%-7d " +
-          f"| at proposed ceiling = $proposed%-7d (+${proposed - deployed})")
+          f"| at hypothetical 35000-byte ceiling = $proposed%-7d (+${proposed - deployed})")
       }
     }
   }

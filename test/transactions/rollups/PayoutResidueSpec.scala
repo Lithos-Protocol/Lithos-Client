@@ -61,7 +61,7 @@ class PayoutResidueSpec extends AnyPropSpec with RollupSpecBase {
                       lit: Long,
                       bondHeld: Long): (InputUTXO, Rollup) = {
     val state = RollupInfoState.payout(ergReward, litReward, bondHeld)
-    val tree = treeWith(claimants.map { case (w, score) =>
+    val tree = commitmentTree(claimants.map { case (w, score) =>
       w.contract.hashedPropBytes -> nispBytes(score, realisticNispSize)
     })
     val tokens = Seq(nft) ++ (if (lit > 0) Seq(Token(litId, lit)) else Seq.empty[Token])

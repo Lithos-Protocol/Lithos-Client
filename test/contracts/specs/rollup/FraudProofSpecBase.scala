@@ -161,7 +161,8 @@ trait FraudProofSpecBase extends RollupSpecBase {
                       extraVars: Seq[ContextVar] = Seq.empty,
                       dataInputs: Seq[InputUTXO] = null,
                       minerHash: Array[Byte] = null,
-                      tokens: Seq[Token] = Seq.empty[Token]): Fraud = {
+                      tokens: Seq[Token] = Seq.empty[Token],
+                      committedEntry: Option[Array[Byte]] = None): Fraud = {
     val prover = miner(ctx)
     val accused = if (minerHash == null) contractOf(prover).hashedPropBytes else minerHash
     val bystander = contractOf(proverWith(ctx, otherSecret)).hashedPropBytes
@@ -173,8 +174,8 @@ trait FraudProofSpecBase extends RollupSpecBase {
     val bond = bondFor(score)
 
     val tree = treeWith(Seq(
-      accused -> nisp,
-      bystander -> nispBytes(bystanderScore, realisticNispSize)))
+      accused -> committedEntry.getOrElse(_root_.nisp.NispCommitment.fromPayload(nisp).bytes),
+      bystander -> _root_.nisp.NispCommitment.fromPayload(nispBytes(bystanderScore, realisticNispSize)).bytes))
     val inTree = tree.ergoValue
     // lookUp does not move the digest, so both proofs are against the same input tree.
     val lookup = tree.lookUp(accused)
@@ -192,7 +193,9 @@ trait FraudProofSpecBase extends RollupSpecBase {
       (Seq(
         ContextVar.of(0.toByte, ErgoValue.of(Colls.fromArray(accused), scalaByteType)),
         ContextVar.of(1.toByte, lookup.proof.ergoValue),
-        ContextVar.of(2.toByte, removal.proof.ergoValue)) ++ extraVars): _*)
+        ContextVar.of(2.toByte, removal.proof.ergoValue)) ++
+        (if (script.hashedPropBytesHex == fpNonMatchingCommitment(ctx).hashedPropBytesHex) Seq.empty
+         else Seq(ContextVar.of(_root_.nisp.NispCommitment.PayloadContextSlot, ErgoValue.of(nisp)))) ++ extraVars): _*)
 
     val out = UTXO(evalContract(ctx), boxValue - bond, tokens, Seq(
       outTree, ErgoValue.of(1), ErgoValue.of(BigInt(bystanderScore).bigInteger),

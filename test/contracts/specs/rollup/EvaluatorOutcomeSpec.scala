@@ -54,7 +54,7 @@ class EvaluatorOutcomeSpec extends AnyPropSpec with FraudProofSpecBase with Mock
                             proofs: Seq[Contract]): Evaluator = {
     val wallet = finder(ctx)
     val bystander = contractOf(proverWith(ctx, funderSecret)).hashedPropBytes
-    val tree = treeWith(Seq(
+    val tree = commitmentTree(Seq(
       accused(ctx) -> nisp,
       bystander -> nispBytes(bystanderScore, realisticNispSize)))
     val bondHeld = bondFor(score) + bondFor(bystanderScore)
@@ -73,7 +73,8 @@ class EvaluatorOutcomeSpec extends AnyPropSpec with FraudProofSpecBase with Mock
 
     Evaluator(ctx, wallet, evalIn, rollup, Seq(accused(ctx)),
       fpDataInput(ctx, proofs, LFSMHelpers.getFPToken(ctx)), new BoxLoader(ctx, mock[NodeApi]),
-      set(ctx), proofs)
+      set(ctx), proofs, resolved = Some(_root_.nisp.ResolvedNisps(rollup.blockId,
+        Map(org.bouncycastle.util.encoders.Hex.toHexString(accused(ctx)) -> _root_.nisp.ResolvedNisp(nisp)))))
   }
 
   private def verdictOf(e: Evaluator): Try[Option[(SignedTransaction, String)]] =
@@ -143,9 +144,68 @@ class EvaluatorOutcomeSpec extends AnyPropSpec with FraudProofSpecBase with Mock
     }
   }
 
+  property("payload unavailability is an incomplete evaluation and cannot be a clean verdict") {
+    withCtx { ctx =>
+      val e = evaluatorOver(ctx, cleanNisp(ctx), Seq(fpInvalidFormat(ctx))).copy(resolved = None)
+      verdictOf(e).isFailure shouldBe true
+      verdictOf(e).failed.get.getSuppressed.exists(_.isInstanceOf[nisp.NispPayloadUnavailable]) shouldBe true
+    }
+  }
+
+  property("commitment fraud remains usable without recovered payloads") {
+    withCtx { ctx =>
+      val dictionary = lfsm.states.PlasmaDictionary.empty()
+      val box = UTXO(liveEval(ctx), Parameters.MinFee,
+        Seq(Token(LFSMHelpers.getMDToken(ctx.getNetworkType), 1L)), Seq(dictionary.ergoValue))
+        .toInput(ctx, ErgoId.create("cd" * 32), 0.toShort)
+      val e = evaluatorOver(ctx, brokenNisp(ctx), Seq(fpNonMatchingCommitment(ctx)))
+        .copy(resolved = None, commitment = Some(evaluation.CommitmentSource(dictionary, box, Map.empty)))
+      verdictOf(e).get.get._2 shouldBe fpNonMatchingCommitment(ctx).hashedPropBytesHex
+    }
+  }
+
+  property("fraud rebuilding reuses recovered bytes with fresh witnesses after another miner is removed") {
+    withCtx { ctx =>
+      val e = evaluatorOver(ctx, brokenNisp(ctx), Seq(fpInvalidFormat(ctx)))
+      val tree = e.nispTree.dictionary.copy()
+      tree.delete(contractOf(proverWith(ctx, funderSecret)).hashedPropBytes)
+      val nextState = e.nispTree.state.withBond(bondFor(score))
+      val next = e.nispTree.copy(dictionary = tree, numMiners = 1, totalScore = BigInt(score),
+        state = nextState, value = e.nispTree.value - bondFor(bystanderScore), utxoId = "dd" * 32)
+      val input = UTXO(liveEval(ctx), next.value, e.evalInput.tokens, Seq(tree.ergoValue,
+        ErgoValue.of(1), ErgoValue.of(BigInt(score).bigInteger), nextState.ergoValue))
+        .toInput(ctx, ErgoId.create("de" * 32), 0.toShort)
+      val refreshed = e.copy(nispTree = next, evalInput = input)
+      refreshed.resolved.get should be theSameInstanceAs e.resolved.get
+      val rebuilt = refreshed.evaluateFor(accused(ctx), fpInvalidFormat(ctx).hashedPropBytesHex,
+        Seq(fundingInput(ctx, e.prover.prover)), Seq(UTXO.feeBox(Parameters.MinFee)))
+      rebuilt.isDefined shouldBe true
+      verdictOf(refreshed).get.isDefined shouldBe true
+      val wrong = nisp.ResolvedNisps(e.nispTree.blockId,
+        Map(org.bouncycastle.util.encoders.Hex.toHexString(accused(ctx)) -> nisp.ResolvedNisp(cleanNisp(ctx))))
+      verdictOf(e.copy(resolved = Some(wrong))).isFailure shouldBe true
+    }
+  }
+
+  property("a changed entry or removed accused invalidates recovered fraud work") {
+    withCtx { ctx =>
+      val e = evaluatorOver(ctx, brokenNisp(ctx), Seq(fpInvalidFormat(ctx)))
+      Seq(false, true).foreach { removed =>
+        val tree = e.nispTree.dictionary.copy()
+        if (removed) tree.delete(accused(ctx))
+        else tree.update(accused(ctx) -> nisp.NispCommitment.fromPayload(cleanNisp(ctx)).bytes)
+        val input = UTXO(liveEval(ctx), e.evalInput.value, e.evalInput.tokens,
+          e.evalInput.registers.updated(0, tree.ergoValue))
+          .toInput(ctx, ErgoId.create("ee" * 32), 0.toShort)
+        val stale = e.copy(evalInput = input, nispTree = e.nispTree.copy(dictionary = tree))
+        verdictOf(stale).isFailure shouldBe true
+      }
+    }
+  }
+
   // ─── a failure is a failure, and what the ordering is worth ───────────────
   //
-  // Every failure is one `EvalError`, counted against `MaxEvaluationAttempts` and retired after it.
+  // Every failure is one `EvalError`; repeated failures remain incomplete and eligible for retry.
   // There is no exception type to sort on: the accused chooses what each proof is handed, and the
   // types that arrive do not say whether the proof contract or the input is the broken one.
 

@@ -293,9 +293,9 @@ class TransactionCostSizingSpec extends AnyPropSpec with BeforeAndAfterAll
   /**
    * One NISP submission, built and signed by the real builder against the real holding guard.
    *
-   * The tree is stocked with `otherMiners` entries of the same NISP size, because an AVL insert proof
-   * carries whichever leaf the new key splits — a tree of full NISPs makes that proof a NISP wider
-   * than an empty one, and measuring against an empty tree flatters the result badly.
+   * The tree is stocked with `otherMiners` compact commitments so the insertion witness includes
+   * an existing leaf. Payload size changes the submitted context, while tree population changes
+   * the authentication path.
    */
   private def submission(ctx: BlockchainContext,
                          wallet: RecordingWallet,
@@ -306,7 +306,7 @@ class TransactionCostSizingSpec extends AnyPropSpec with BeforeAndAfterAll
     val nisp = NISP(score, sharesWith(ctx, wallet, proof, levels))
     val nispSize = nisp.serialize.length
 
-    val tree = treeWith((0 until otherMiners).map(i => keyFor(i) -> nispBytes(score, nispSize)))
+    val tree = commitmentTree((0 until otherMiners).map(i => keyFor(i) -> nispBytes(score, nispSize)))
     val heldBond = otherMiners.toLong * RollupProtocol.bondForScore(score)
     val periodStart = ctx.getHeight.toLong - 100L
     val value = boxValue + heldBond
@@ -330,8 +330,8 @@ class TransactionCostSizingSpec extends AnyPropSpec with BeforeAndAfterAll
   /**
    * The biggest thing this client submits, and the only one whose size a miner controls.
    *
-   * Both axes move together here for the same reason: the NISP travels in a context extension and so
-   * does the insert proof that puts it in the tree, and the holding logic reads and hashes both.
+   * The raw NISP and compact insertion witness travel in separate context variables. Holding hashes
+   * the raw bytes and authenticates their derived commitment against the insertion witness.
    */
   property("rollup: a NISP submission, at the shapes this client actually builds") {
     withCtx { ctx =>
@@ -385,7 +385,7 @@ class TransactionCostSizingSpec extends AnyPropSpec with BeforeAndAfterAll
       val wallet = walletOf(ctx)
       val score = 100000L
       val bond = RollupProtocol.bondForScore(score)
-      val tree = treeWith(Seq(wallet.contract.hashedPropBytes -> nispBytes(score, 24000)))
+      val tree = commitmentTree(Seq(wallet.contract.hashedPropBytes -> nispBytes(score, 24000)))
       printHeader()
 
       // Holding -> Evaluation. Only the period start moves; the tree, the counters and the bond
@@ -410,9 +410,8 @@ class TransactionCostSizingSpec extends AnyPropSpec with BeforeAndAfterAll
   }
 
   /**
-   * A payout, which is the other end of a NISP's cost. The entry went into the tree under one insert
-   * proof and comes out under a lookup AND a removal, and a removal proof carries both the entry and
-   * the neighbour it re-links — so a payout is roughly three NISPs where a submission was two.
+   * A payout carries lookup and removal witnesses containing compact entries. The original NISP
+   * size does not affect those witnesses and no payload accompanies this transaction.
    */
   property("rollup: a payout that pays one miner and recreates its box") {
     withCtx { ctx =>
@@ -424,7 +423,7 @@ class TransactionCostSizingSpec extends AnyPropSpec with BeforeAndAfterAll
 
       Seq(8000, 24000).foreach { nispSize =>
         // A bystander, so the removal proof carries a real neighbour rather than nothing at all.
-        val tree = treeWith(Seq(
+        val tree = commitmentTree(Seq(
           wallet.contract.hashedPropBytes -> nispBytes(score, nispSize),
           keyFor(1) -> nispBytes(score, nispSize)))
         val bonds = 2L * bond
@@ -644,10 +643,8 @@ class TransactionCostSizingSpec extends AnyPropSpec with BeforeAndAfterAll
   // ══════════════════════════════════════════════════════════════════════════
 
   /**
-   * A slash carries the accused's NISP three times over: once in the lookup proof and twice in the
-   * removal, which re-links the neighbour and so carries that miner's NISP too. Nothing else here is
-   * close to it on either axis, and it is the only shape whose cost is dominated by a script rather
-   * than by bytes.
+   * A payload-dependent slash carries the accused's raw NISP once in slot 4. Lookup and removal
+   * witnesses contain compact entries, so a bystander's payload size does not enlarge them.
    *
    * Built by the contract harness rather than by `genFraudProofTransform`, which reaches `Globals`.
    * The transaction is the same shape either way: `INPUTS(0)` the evaluation box, `INPUTS(1)` the
@@ -682,8 +679,7 @@ class TransactionCostSizingSpec extends AnyPropSpec with BeforeAndAfterAll
         provesFraud(f.prover, fraudTx(f)()))
 
       println(s"[budget] the accused's NISP is ${nisp.length} bytes against CONST_NISP_MAX " +
-        s"${LFSMHelpers.NISP_MAX}; the bystander's is $realisticNispSize, so a tree of ceiling-sized " +
-        "NISPs would push the removal proof further still")
+        s"${LFSMHelpers.NISP_MAX}; lookup and removal witnesses contain 40-byte commitments")
       println(f"[budget] one slash is ${100.0 * m.bytes / maxBlockSize}%.1f%% of a block by size " +
         f"and ${100.0 * m.cost / maxBlockCost}%.1f%% by cost")
 
@@ -720,8 +716,7 @@ class TransactionCostSizingSpec extends AnyPropSpec with BeforeAndAfterAll
         provesFraud(f.prover, fraudTx(f)()))
 
       println(s"[budget] the accused's NISP is ${nisp.length} bytes against CONST_NISP_MAX " +
-        s"${LFSMHelpers.NISP_MAX}; the bystander's is $realisticNispSize, so a tree of ceiling-sized " +
-        "NISPs would push the removal proof further still")
+        s"${LFSMHelpers.NISP_MAX}; lookup and removal witnesses contain 40-byte commitments")
       println(f"[budget] one slash is ${100.0 * m.bytes / maxBlockSize}%.1f%% of a block by size " +
         f"and ${100.0 * m.cost / maxBlockCost}%.1f%% by cost")
 

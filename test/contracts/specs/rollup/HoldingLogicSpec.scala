@@ -70,9 +70,9 @@ class HoldingLogicSpec extends AnyPropSpec with RollupSpecBase {
     val nisp = nispBytes(score, nispSize)
     val bond = bondFor(scoreSeenBy(score, nispSize))
 
-    val tree = treeWith(Seq.empty)
+    val tree = commitmentTree(Seq.empty)
     val inTree = tree.ergoValue
-    val insertion = tree.insert(key -> nisp)
+    val insertion = tree.insert(key -> _root_.nisp.NispCommitment.fromPayload(nisp).bytes)
     val outTree = tree.ergoValue
 
     val periodStart = ctx.getHeight.toLong - 100L
@@ -114,9 +114,9 @@ class HoldingLogicSpec extends AnyPropSpec with RollupSpecBase {
     val nisp = nispBytes(5000L, 8000)
     val bond = bondFor(5000L)
 
-    val tree = treeWith(Seq.empty)
+    val tree = commitmentTree(Seq.empty)
     val inTree = tree.ergoValue
-    val insertion = tree.insert(treeKey -> nisp)
+    val insertion = tree.insert(treeKey -> _root_.nisp.NispCommitment.fromPayload(nisp).bytes)
     val outTree = tree.ergoValue
     val periodStart = ctx.getHeight.toLong - 100L
 
@@ -156,14 +156,14 @@ class HoldingLogicSpec extends AnyPropSpec with RollupSpecBase {
       val firstNisp = nispBytes(3000L, 8000)
       val firstBond = bondFor(3000L)
 
-      val tree = treeWith(Seq(first -> firstNisp))
+      val tree = commitmentTree(Seq(first -> firstNisp))
       val inTree = tree.ergoValue
 
       val prover = miner(ctx)
       val key = contractOf(prover).hashedPropBytes
       val nisp = nispBytes(5000L, 8000)
       val bond = bondFor(5000L)
-      val insertion = tree.insert(key -> nisp)
+      val insertion = tree.insert(key -> _root_.nisp.NispCommitment.fromPayload(nisp).bytes)
       val outTree = tree.ergoValue
 
       val periodStart = ctx.getHeight.toLong - 100L
@@ -214,8 +214,23 @@ class HoldingLogicSpec extends AnyPropSpec with RollupSpecBase {
   property("submission: rejects a successor tree that does not match the insertion (treeUpdated)") {
     withCtx { ctx =>
       val s = submission(ctx)
-      val wrongTree = treeWith(Seq(Blake2b256.hash("unrelated") -> nispBytes(1L, 16)))
+      val wrongTree = commitmentTree(Seq(Blake2b256.hash("unrelated") -> nispBytes(1L, 16)))
       rejects(s.prover, submit(s, s.out.withReg(0, wrongTree.ergoValue)))
+    }
+  }
+
+  property("submission: rejects insertion values that differ from the raw payload's score and hash") {
+    withCtx { ctx =>
+      val s = submission(ctx)
+      val entry = _root_.nisp.NispCommitment.fromPayload(s.nisp)
+      Seq(s.nisp, entry.copy(score = entry.score + 1).bytes, entry.copy(hash = "00" * 32).bytes)
+        .foreach { wrongValue =>
+          val wrongTree = commitmentTree(Seq.empty)
+          val insertion = wrongTree.insert(s.key -> wrongValue)
+          val input = s.holdingIn.setCtxVars((s.holdingIn.ctxVars.filterNot(_.getId == 2.toByte) :+
+            ContextVar.of(2.toByte, insertion.proof.ergoValue)): _*)
+          rejects(s.prover, submit(s.copy(holdingIn = input), s.out.withReg(0, wrongTree.ergoValue)))
+        }
     }
   }
 
@@ -345,9 +360,9 @@ class HoldingLogicSpec extends AnyPropSpec with RollupSpecBase {
       val firstBond = bondFor(3000L)
       val bond = bondFor(5000L)
 
-      val tree = treeWith(Seq(key -> firstNisp))
+      val tree = commitmentTree(Seq(key -> firstNisp))
       val inTree = tree.ergoValue
-      val insertion = tree.insert(key -> secondNisp)
+      val insertion = tree.insert(key -> _root_.nisp.NispCommitment.fromPayload(secondNisp).bytes)
       val outTree = tree.ergoValue
 
       val periodStart = ctx.getHeight.toLong - 100L
@@ -471,7 +486,7 @@ class HoldingLogicSpec extends AnyPropSpec with RollupSpecBase {
     val holding = holdingContract(ctx)
     val eval = evalContract(ctx)
     val prover = miner(ctx)
-    val tree = treeWith(Seq(
+    val tree = commitmentTree(Seq(
       contractOf(prover).hashedPropBytes -> nispBytes(score, 8000)
     ))
     val periodStart = ctx.getHeight.toLong - period - 10L
@@ -507,7 +522,7 @@ class HoldingLogicSpec extends AnyPropSpec with RollupSpecBase {
   property("transform: rejects a change to the tree") {
     withCtx { ctx =>
       val (prover, in, out, _, _) = transform(ctx)
-      val other = treeWith(Seq(Blake2b256.hash("someone else") -> nispBytes(1L, 16)))
+      val other = commitmentTree(Seq(Blake2b256.hash("someone else") -> nispBytes(1L, 16)))
       rejects(prover, build(ctx, Seq(in, fundingInput(ctx, prover)),
         Seq(out.withReg(0, other.ergoValue)), prover.getAddress))
     }
@@ -617,7 +632,7 @@ class HoldingLogicSpec extends AnyPropSpec with RollupSpecBase {
     val h = ctx.getHeight
     // At the rollup's own block the period start and the block height are one value, which is what
     // the collateral contract writes at genesis.
-    val tree = treeWith(Seq.empty)
+    val tree = commitmentTree(Seq.empty)
     val regs = Seq(
       tree.ergoValue, ErgoValue.of(miners), ErgoValue.of(BigInt(score).bigInteger),
       stateReg(h.toLong, h.toLong, bond))
@@ -687,7 +702,7 @@ class HoldingLogicSpec extends AnyPropSpec with RollupSpecBase {
   property("topup: rejects a change to the tree") {
     withCtx { ctx =>
       val t = topUp(ctx)
-      val other = treeWith(Seq(Blake2b256.hash("unrelated") -> nispBytes(1L, 16)))
+      val other = commitmentTree(Seq(Blake2b256.hash("unrelated") -> nispBytes(1L, 16)))
       rejectsAtSigning(t.prover, topUpTx(ctx, t, out = t.out.withReg(0, other.ergoValue)))
     }
   }

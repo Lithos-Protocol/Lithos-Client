@@ -78,7 +78,8 @@
   }
 
   // Evaluation
-  val minerNISP = nispTree.get(CTX_MINER_BYTES, CTX_LOOKUP_PROOF).get
+  val minerNISP = nispTree.get(CTX_MINER_BYTES, CTX_LOOKUP_PROOF).getOrElse(Coll[Byte]())
+  if (minerNISP.size == 40) {
   val score: Long = getScore(minerNISP)
 
   // The dictionary is the only thing that says which data box is this miner's, and for how long. Its
@@ -162,5 +163,8 @@
     // Still gated on authenticDictionary: without it an attacker passes a box holding an empty tree
     // as dataInputs(1), forces the lookup to miss, and removes an arbitrary honest miner.
     sigmaProp(authenticDictionary && changedRegisters)
+  }
+  } else {
+    sigmaProp(false)
   }
 }
