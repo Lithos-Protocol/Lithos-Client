@@ -365,7 +365,7 @@ final class LevelDbStateSnapshotStore(store: KeyValueStore,
     }
 
   /**
-   * Removes a content-addressed blob only when no retained generation metadata references it.
+   * Removes a content-addressed blob only when no retained, supported-schema generation references it.
    */
   private def collectUnreferencedDictionaries(): Either[SnapshotError, Unit] =
     withReadLock(for {
@@ -373,8 +373,8 @@ final class LevelDbStateSnapshotStore(store: KeyValueStore,
       referenced <- generationEntries.filter(entry => endsWith(entry._1, MetaSuffix))
         .foldLeft[Either[SnapshotError, Set[String]]](Right(Set.empty)) {
           case (result, (_, value)) => result.flatMap { digests =>
-            StateSnapshotCodec.decodeMetaForDeletion(value).left.map(Corrupt).map { meta =>
-              digests ++ meta.dictionaryDigests
+            StateSnapshotCodec.decodeMetaForDeletion(value).left.map(Corrupt).map { references =>
+              digests ++ references
             }
           }
         }
@@ -478,7 +478,7 @@ object StateSnapshotCodec {
   // A rollup's R7 became three longs and its boxes gained an NFT, so nothing written before this
   // version can be decoded into a state whose fields still mean what they say. Loading one fails and
   // the caller resynchronizes rather than guessing.
-  private val SchemaVersion = 4
+  private val SchemaVersion = 5
   private val MaxBlobBytes = 512 * 1024 * 1024
   private val MaxEntries = 1000000
 
@@ -546,33 +546,19 @@ object StateSnapshotCodec {
     SnapshotMeta(CommittedSyncMetadata(cursor, version, rollups, routes, origins, miner, token,
       minerFault, quarantined), recentCursors)
   }
-  // Decode metadata for deletion, skipping certain checks.
-  def decodeMetaForDeletion(encoded: Array[Byte]): Either[String, SnapshotMeta] = attempt {
-    val in = openEntry(encoded)
-    in.readInt() // Magic is not checked during deletion
-    in.readInt() // Schema is not checked during deletion
-    readIdentity(in) // Identity is not checked during deletion
-    val cursor = readCursor(in)
-    val version = in.readLong()
-    val recentCursors = readCount(in, "recent cursor count")(_ => readCursor(in))
-    val minerFault = if (in.readBoolean()) Some(readString(in)) else None
-    val quarantined = readCount(in, "quarantine count")(_ => readQuarantine(in))
-      .map(fault => fault.rollupId -> fault).toMap
-    val routes = readStringMap(in, "route count")
-    val origins = readStringMap(in, "rollup origin count")
-    val miner = readMinerMetadata(in)
-    val token = if (in.readBoolean()) Some(ErgoId.create(readString(in))) else None
-    val rollups = readCount(in, "rollup metadata count") { _ =>
-      readString(in) -> readRollupMetadata(in)
-    }.toMap
-    requireDictionaryDigest(miner.dictionaryDigest, "Miner Dictionary")
-    rollups.foreach { case (id, rollup) =>
-      require(rollup.blockId == id, s"rollup metadata $id names block ${rollup.blockId}")
-      requireDictionaryDigest(rollup.dictionaryDigest, s"rollup $id")
+
+  /** Unsupported schemas cannot be restored and do not keep dictionary blobs alive.
+    * Validate the envelope before trusting its version, without parsing an obsolete layout.
+    */
+  def decodeMetaForDeletion(encoded: Array[Byte]): Either[String, Set[String]] = {
+    attempt {
+      val in = openEntry(encoded)
+      require(in.readInt() == MetaMagic, "invalid metadata magic")
+      if (in.readInt() != SchemaVersion) None else Some(readIdentity(in))
+    }.flatMap {
+      case None => Right(Set.empty[String])
+      case Some(identity) => decodeMeta(encoded, identity).map(_.dictionaryDigests)
     }
-    require(in.available() == 0, "trailing bytes after snapshot metadata")
-    SnapshotMeta(CommittedSyncMetadata(cursor, version, rollups, routes, origins, miner, token,
-      minerFault, quarantined), recentCursors)
   }
 
   def encodeDictionaryHeader(header: DictionaryManifestHeader,

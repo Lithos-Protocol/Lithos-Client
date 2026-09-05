@@ -338,6 +338,45 @@ class StateSnapshotStoreSpec extends AnyFlatSpec with Matchers with BeforeAndAft
     snapshots.close() shouldEqual Right(())
   }
 
+  it should "collect obsolete-schema blobs without decoding their layout and preserve live shared blobs" in {
+    val (keyValueStore, snapshots) = store(retention = 2)
+    val old = plan(populatedSnapshot(100, 8L, valueSeed = 100))
+    snapshots.save(old, MaxEntry) shouldBe Right(())
+    val oldKey = snapshots.generationKeys().toOption.get.head
+    val encoded = keyValueStore.get(oldKey ++ bytes("/meta")).toOption.get.get
+    // An opaque old body cannot be decoded by any of the current metadata field readers.
+    val obsolete = withSchemaVersion(encoded, 3, opaqueBody = true)
+    keyValueStore.write(Seq(KeyValueMutation.Put(oldKey ++ bytes("/meta"), obsolete)),
+      WriteDurability.Synchronous) shouldBe Right(())
+    snapshots.load(oldKey).left.toOption.get.message should include("unsupported snapshot schema")
+
+    val next = plan(populatedSnapshot(101, 9L, valueSeed = 101))
+    snapshots.save(next, MaxEntry) shouldBe Right(())
+    snapshots.generationKeys().toOption.get.size shouldBe 2
+    val live = next.dictionaries.values.map(_.expectedDigest).toSet
+    val oldDigests = old.dictionaries.values.map(_.expectedDigest).toSet
+    (oldDigests -- live) should not be empty
+    (oldDigests intersect live) should not be empty
+    val stored = keyValueStore.scanKeys(bytes("sync/snapshot/blob/")).toOption.get
+      .map(key => text(key).stripPrefix("sync/snapshot/blob/").takeWhile(_ != '/')).toSet
+    stored shouldEqual live
+    live.foreach(digest => snapshots.loadDictionary(digest).isRight shouldBe true)
+    snapshots.load(snapshots.generationKeys().toOption.get.head).isRight shouldBe true
+    snapshots.close() shouldBe Right(())
+  }
+
+  it should "keep garbage collection conservative for damaged current metadata" in {
+    val encoded = StateSnapshotCodec.encodeMeta(plan(populatedSnapshot(100, 8L)), identity,
+      MaxEntry).toOption.get
+    StateSnapshotCodec.decodeMetaForDeletion(encoded) shouldBe
+      Right(plan(populatedSnapshot(100, 8L)).dictionaries.values.map(_.expectedDigest).toSet)
+    StateSnapshotCodec.decodeMetaForDeletion(withSchemaVersion(encoded, 4, opaqueBody = true))
+      .isLeft shouldBe true
+    val corrupt = encoded.clone()
+    corrupt(corrupt.length - 1) = (corrupt.last ^ 1).toByte
+    StateSnapshotCodec.decodeMetaForDeletion(corrupt).left.toOption.get should include("checksum")
+  }
+
   it should "report success after the checkpoint commits even when post-commit cleanup fails" in {
     val underlying = new InMemoryKeyValueStore
     val keyValueStore = new CleanupFailingStore(underlying)
@@ -524,10 +563,10 @@ class StateSnapshotStoreSpec extends AnyFlatSpec with Matchers with BeforeAndAft
    * A sealed entry is [magic][payload length][payload][checksum length][checksum], and the payload
    * opens with its own magic then the version, so this rewrites four bytes and re-seals.
    */
-  private def withSchemaVersion(encoded: Array[Byte], version: Int): Array[Byte] = {
+  private def withSchemaVersion(encoded: Array[Byte], version: Int, opaqueBody: Boolean = false): Array[Byte] = {
     val payloadStart = 8
     val payloadLength = java.nio.ByteBuffer.wrap(encoded, 4, 4).getInt
-    val payload = encoded.slice(payloadStart, payloadStart + payloadLength)
+    val payload = encoded.slice(payloadStart, payloadStart + (if (opaqueBody) 8 else payloadLength))
     java.nio.ByteBuffer.wrap(payload, 4, 4).putInt(version)
     val checksum = scorex.crypto.hash.Blake2b256.hash(payload)
     val out = java.nio.ByteBuffer.allocate(4 + 4 + payload.length + 4 + checksum.length)
