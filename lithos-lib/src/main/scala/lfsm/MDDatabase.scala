@@ -63,5 +63,5 @@ object MDDatabase {
   private final val SCHEMA_VERSION = Blake2b256.hash("SCHEMA_VERSION")
 
   /** Bump whenever a key's meaning or encoding changes. Anything below it is discarded, not read. */
-  final val Schema: Int = 1
+  final val Schema: Int = 2
 }

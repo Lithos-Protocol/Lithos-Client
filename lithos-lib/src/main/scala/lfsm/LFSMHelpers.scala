@@ -77,11 +77,11 @@ object LFSMHelpers {
   final val REGISTER_SLACK    = 720L // one day at 2-minute blocks
   final val MD_TOKEN_MAINNET = ErgoId.create("7f9609b232d3e2f0638d60a03a26831bf80155ed1e87a1b914e2623dfbd05518")
   final val MD_TOKEN_TESTNET = ErgoId.create("2aee4d20d743e19042b68b99045e7c482d3580fe2797c39de4235989f788021b")
-  final val MD_GENESIS_HEIGHT = 526309
+  final val MD_GENESIS_HEIGHT = 526394
 
-  // Genesis Tx: 5c5a34f1f337740a2b3fc4286f39636a4e1791793398c6255f8b9730c3c97094
+  // Genesis Tx: 152145747776ee9e41b61fcf153ecc7dd0818044e2956277e40f8c9ff9386e59
   // UTXO id of initial MD box
-  final val MD_GENESIS_ID = "5a3f118ec5be3b73623695054302bb4411307d248dbfee4abaa5d412e8df9028"
+  final val MD_GENESIS_ID = "5c58ef843bda73373ff093e06f7bc48db713ccb0dd0cf3f17eb7e9bfabe409cd"
 
   // Lithos token & emission parameters
   final val INIT_MINT = Parameters.OneErg * 1000000000 // 1 billion LIT
