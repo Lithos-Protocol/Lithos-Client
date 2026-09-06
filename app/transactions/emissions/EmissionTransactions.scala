@@ -14,7 +14,7 @@ import sigma.{Coll, Colls, SigmaProp}
 import stratum.CollateralNotFoundException
 import transactions.ProtocolContracts.{hex, lenderEntry}
 import transactions.{CompiledContracts, ProtocolContracts}
-import transactions.wallet.{WalletReservation, WalletSource}
+import transactions.engine.{FundingAllocation, FundingSource}
 import work.lithos.mutations.{Contract, InputUTXO, Token, TxBuilder, UTXO}
 
 import scala.collection.JavaConverters._
@@ -63,7 +63,7 @@ case class EmissionTip(box: InputUTXO, ancestors: Seq[NodeTransaction])
 /** One built emission transaction and which path produced it. */
 case class EmissionSpend(tx: SignedTransaction,
                          kind: String,
-                         reservations: Seq[WalletReservation] = Seq.empty)
+                         reservations: Seq[FundingAllocation] = Seq.empty)
 
 object EmissionSpend {
   final val Join = "join"
@@ -86,7 +86,8 @@ object EmissionSpend {
 class EmissionTransactions(prover: NodeWallet,
                            nodeApi: NodeApi,
                            config: EmissionConfig,
-                           walletSource: WalletSource) {
+                           walletSource: FundingSource,
+                           alive: () => Boolean = () => true) {
 
   private val logger: Logger = LoggerFactory.getLogger("EmissionTransactions")
 
@@ -605,7 +606,7 @@ class EmissionTransactions(prover: NodeWallet,
    *
    * @return the ids of the transactions sent
    */
-  def selfCollateralize(ctx: BlockchainContext): Seq[String] = {
+  def selfCollateralize(ctx: BlockchainContext, broadcast: transactions.engine.EngineBroadcast): Seq[String] = {
     if (!config.autoCollateralize) return Seq.empty[String]
 
     val tip = emissionTip(ctx)
@@ -651,8 +652,7 @@ class EmissionTransactions(prover: NodeWallet,
             stop = true
           } else {
             val cost = CollateralParams.PRINCIPAL_FLOOR + config.txFee * 2
-            var attemptReservations = Seq.empty[WalletReservation]
-            var submissionStarted = false
+            var attemptReservations = Seq.empty[FundingAllocation]
             Try {
               val inputs = funding.take(cost, if (permit > 0) Some(Token(litId, permit)) else None)
               val sTx = genJoin(ctx, em, cfg, lender, inputs)
@@ -661,10 +661,7 @@ class EmissionTransactions(prover: NodeWallet,
               // the next join, so post-send reservation is too late.
               val chained = chainOn(sTx, funding)
               attemptReservations = funding.pendingReservations
-              WalletReservation.beginAll(attemptReservations)
-              submissionStarted = true
-              val txId = ctx.sendTransaction(sTx).replace("\"", "")
-              attemptReservations.foreach(_.commit())
+              val txId = broadcast.send(sTx, attemptReservations, "join:" + em.id.toString, alive).requireAccepted()
               funding.clearPending()
               chained.walletChange.foreach(funding.markAccepted)
               em = chained.emission
@@ -677,7 +674,6 @@ class EmissionTransactions(prover: NodeWallet,
                 logger.warn(s"Stopping self-collateralization after ${sent.size} join(s): ${ex.getMessage}")
                 stop = true
               case Failure(ex) =>
-                if (submissionStarted) attemptReservations.foreach(_.uncertain())
                 logger.error(s"Join for lender $lender failed, stopping: ${ex.getMessage}", ex)
                 stop = true
             }
@@ -697,16 +693,16 @@ class EmissionTransactions(prover: NodeWallet,
   /**
    * One run's view of the wallet.
    *
-   * Everything drawn from the shared [[WalletSource]] is reserved there, so nothing else can select
+   * Everything drawn from the shared [[FundingSource]] is reserved there, so nothing else can select
    * the same box. Change produced inside the run is spent first, since the wallet cannot know about
    * it until it confirms.
    */
   class FundingSource {
-    private case class ChainedInput(box: InputUTXO, reservation: WalletReservation)
+    private case class ChainedInput(box: InputUTXO, reservation: FundingAllocation)
 
     private var chained: Vector[ChainedInput] = Vector.empty
-    private var reserved: Vector[WalletReservation] = Vector.empty
-    private var pending: Vector[WalletReservation] = Vector.empty
+    private var reserved: Vector[FundingAllocation] = Vector.empty
+    private var pending: Vector[FundingAllocation] = Vector.empty
     private var used = Set.empty[String]
     private var accepted = Set.empty[String]
 
@@ -769,12 +765,12 @@ class EmissionTransactions(prover: NodeWallet,
      * reached the node, since handing back change from a transaction that never lands would seed
      * the wallet with a box the chain has never seen.
      */
-    def pendingReservations: Seq[WalletReservation] = pending
+    def pendingReservations: Seq[FundingAllocation] = pending
 
     def clearPending(): Unit = pending = Vector.empty
 
     /** Hand ownership of the latest build's reservations to its EmissionSpend. */
-    def transferPending(): Seq[WalletReservation] = {
+    def transferPending(): Seq[FundingAllocation] = {
       val transferred = pending
       val ids = transferred.map(_.id).toSet
       reserved = reserved.filterNot(r => ids.contains(r.id))

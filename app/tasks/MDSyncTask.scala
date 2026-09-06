@@ -9,8 +9,7 @@ import state.messages.SyncView
 import state.messages.SyncMessages.{CurrentMinerDictionary, GetMinerDictionary}
 import akka.pattern.ask
 import akka.util.Timeout
-import transactions.rollups.{CommitmentTransactions, DataBoxSource}
-import transactions.wallet.{ReservationExpiredException, WalletSelector}
+import transactions.engine.FundingExpiredException
 import lfsm.LFSMHelpers
 import scorex.utils.Longs
 import utils.Globals
@@ -26,7 +25,7 @@ class MDSyncTask @Inject()(system: ActorSystem,
                            config: Configuration,
                            nodeContext: NodeContext,
                            @Named("sync-handler") syncHandler: ActorRef,
-                           @Named("wallet-manager") walletManager: ActorRef) {
+                           @Named("transaction-engine") walletManager: ActorRef) {
 
   private val logger: Logger = LoggerFactory.getLogger("MDSyncTask")
   private val taskConfig = new TasksConfig(config).dictionarySyncTask
@@ -62,18 +61,12 @@ class MDSyncTask @Inject()(system: ActorSystem,
         stateConfig.autoCommit.getOrElse(false) &&
         running.compareAndSet(false, true)) {
         Try {
-          val walletSelector = WalletSelector(walletManager, 4.seconds, contexts.pollingContext)
-          val dictionary = scala.concurrent.Await.result(syncHandler ? GetMinerDictionary,
-            timeout.duration) match {
-            case CurrentMinerDictionary(value) => value
-            case other => throw new IllegalStateException(s"Miner Dictionary became unavailable: $other")
-          }
-          new CommitmentTransactions(nodeContext, DataBoxSource.Stored)
-            .sendInitialCommitment(stratumConfig.diff, dictionary, walletSelector)
+          scala.concurrent.Await.result(walletManager ? transactions.engine.TransactionEngine.RegisterMiner,
+            timeout.duration)
         }.failed.foreach {
           case noInputs: NotEnoughInputsException =>
             logger.error(s"Could not create the Miner Dictionary entry: ${noInputs.getMessage}")
-          case badReservation: ReservationExpiredException =>
+          case badReservation: FundingExpiredException =>
             logger.error(s"Miner Dictionary wallet reservation expired: ${badReservation.getMessage}")
           case ex => logger.error("Unexpected Miner Dictionary commitment failure", ex)
         }

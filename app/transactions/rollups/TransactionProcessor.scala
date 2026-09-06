@@ -27,8 +27,9 @@ import scala.util.{Failure, Success}
 class TransactionProcessor @Inject()(config: Configuration, nodeContext: NodeContext,
                                      cacheApi: SyncCacheApi,
                                      @Named("sync-handler")        syncHandler:       ActorRef,
-                                     @Named("submission-handler")  submissionHandler: ActorRef,
-                                     @Named("rollup-evaluator")    rollupEvaluator:   ActorRef)
+                                     @Named("transaction-engine")  submissionHandler: ActorRef,
+                                     @Named("rollup-evaluator")    rollupEvaluator:   ActorRef,
+                                     @Named("transaction-engine") transactionEngine: ActorRef)
   extends Actor with InjectedActorSupport {
 
   implicit val timeout: Timeout     = Timeout(30.seconds)
@@ -79,7 +80,8 @@ class TransactionProcessor @Inject()(config: Configuration, nodeContext: NodeCon
         .flatMap(_.headOption).toSeq
       // Separate by type; timed types sorted oldest-first by currentPeriod
       val nispSubmissions = headStubs.filter(_.txType == NISPSubmission).sortBy(_.currentPeriod)
-      val transforms      = headStubs.filter(s => s.txType == HoldingTransform || s.txType == EvalTransform).sortBy(_.currentPeriod)
+      val holding = headStubs.filter(_.txType == HoldingTransform).sortBy(_.currentPeriod)
+      val transforms      = headStubs.filter(_.txType == EvalTransform).sortBy(_.currentPeriod)
       val payouts         = headStubs.filter(_.txType == Payout)
       val evaluations     = headStubs.filter(e => e.txType == NISPEvaluation && e.fpInfo.isEmpty).sortBy(_.currentPeriod)
       val fraudProofs     = fpHeads.sortBy(_.currentPeriod)
@@ -92,6 +94,12 @@ class TransactionProcessor @Inject()(config: Configuration, nodeContext: NodeCon
 
       if (batch.stubs.nonEmpty)   submissionHandler ! batch
       if (evalSet.stubs.nonEmpty) rollupEvaluator   ! evalSet
+      holding.take(TX_BATCH_SIZE).foreach { stub =>
+        stub.currentPeriod.foreach { period =>
+          transactionEngine ! transactions.engine.TransactionEngine.Submit(
+            transactions.engine.TransactionEngine.HoldingTransform(stub.rollupBlockId, period, stub.fee))
+        }
+      }
 
       // Evaluation stubs are consumed on the send, because RollupEvaluator takes every set it is
       // given. The batch is not: SubmissionHandler refuses one while a batch is already running, so
@@ -101,6 +109,17 @@ class TransactionProcessor @Inject()(config: Configuration, nodeContext: NodeCon
 
     case BatchAccepted(stubs) =>
       dropStubs(stubs)
+    case outcome: transactions.engine.TransactionEngine.Outcome if sender() == transactionEngine =>
+      import transactions.engine.TransactionEngine._
+      outcome match {
+        case _: Accepted | _: Completed =>
+          val completed = pendingRollupTxs.values.flatten.filter { stub =>
+            stub.txType == RollupTxType.HoldingTransform && stub.currentPeriod.exists(p =>
+              transactions.engine.TransactionEngine.HoldingTransform(stub.rollupBlockId, p, stub.fee).key == outcome.key)
+          }.toSeq
+          dropStubs(completed)
+        case other => logger.warn(s"Holding transform remains queued: $other")
+      }
     // One stub per fraudulent miner, all for the SAME rollup. Keying them by rollupBlockId collapsed
     // every miner but one, so a rollup with three fraudulent miners only ever slashed one of them.
     // Merged directly rather than through PublishedRollupMap, which would also spend a full sync

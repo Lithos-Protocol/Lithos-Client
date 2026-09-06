@@ -1,4 +1,6 @@
 package transactions.wallet
+import transactions.engine.{EngineFunding, FundingAllocation, FundingSource, FundingExpiredException}
+import transactions.engine.EngineWalletState
 
 import akka.actor.{ActorRef, ActorSystem, Props}
 import akka.testkit.{TestKit, TestProbe}
@@ -15,7 +17,7 @@ import org.scalatest.matchers.should.Matchers
 import org.scalatestplus.mockito.MockitoSugar
 import org.ergoplatform.sdk.ErgoId
 import support.FakeNodeContext
-import transactions.wallet.WalletMessages._
+import transactions.engine.EngineWalletMessages._
 import work.lithos.mutations.{InputUTXO, Token, UTXO}
 
 import java.util.concurrent.atomic.{AtomicBoolean, AtomicLong, AtomicReference}
@@ -35,26 +37,26 @@ import scala.util.{Failure, Success}
  * Boxes are identified by VALUE, not by the id they are constructed with: `toInputUTXO` recomputes
  * the id from the box's contents, so a synthetic one does not survive the conversion.
  */
-object WalletManagerSpec {
+object EngineWalletStateSpec {
   val config: com.typesafe.config.Config =
-    com.typesafe.config.ConfigFactory.parseString("akka.test.single-expect-default = 20s")
+    com.typesafe.config.ConfigFactory.parseString("akka.test.single-expect-default = 20s").withFallback(com.typesafe.config.ConfigFactory.load())
 }
 
-class WalletManagerSpec extends TestKit(ActorSystem("wallet-manager-spec", WalletManagerSpec.config))
+class EngineWalletStateSpec extends TestKit(ActorSystem("wallet-manager-spec", EngineWalletStateSpec.config))
   with AnyFlatSpecLike with Matchers with BeforeAndAfterAll with MockitoSugar {
 
   override def afterAll(): Unit = TestKit.shutdownActorSystem(system)
 
   private val erg = 1000000000L
 
-  /** A WalletManager whose clock the test drives, so a reservation can age without waiting it out. */
-  private class TestableWalletManager(ctx: NodeContext, clock: () => Long) extends WalletManager(ctx) {
+  /** A EngineWalletState whose clock the test drives, so a reservation can age without waiting it out. */
+  private class TestableEngineWalletState(ctx: NodeContext, clock: () => Long) extends EngineWalletState(ctx) {
     override protected def now(): Long = clock()
   }
 
   private def walletBox(wallet: NodeWallet, value: Long, assets: Seq[NodeAsset] = Seq.empty): WalletBox =
     WalletBox(
-      box = NodeBox(boxId = f"$value%064x", transactionId = "aa" * 32, value = value, index = 0,
+      box = support.CanonicalNodeBox(boxId = f"$value%064x", transactionId = "aa" * 32, value = value, index = 0,
         creationHeight = 100, ergoTree = wallet.contract.ergoTreeHex, assets = assets),
       address = wallet.p2pk.toString, confirmationsNum = Some(10), creationTransaction = "aa" * 32,
       creationOutIndex = 0, inclusionHeight = Some(100), spendingTransaction = None,
@@ -62,7 +64,7 @@ class WalletManagerSpec extends TestKit(ActorSystem("wallet-manager-spec", Walle
 
   private def coinbase(wallet: NodeWallet, value: Long, creationHeight: Int = 1): IndexedBox =
     IndexedBox(
-      box = NodeBox(boxId = f"$value%064x", transactionId = "bb" * 32, value = value, index = 0,
+      box = support.CanonicalNodeBox(boxId = f"$value%064x", transactionId = "bb" * 32, value = value, index = 0,
         creationHeight = creationHeight, ergoTree = wallet.rewardTrees.keys.head),
       address = "reward", inclusionHeight = creationHeight, globalIndex = 1L)
 
@@ -71,7 +73,7 @@ class WalletManagerSpec extends TestKit(ActorSystem("wallet-manager-spec", Walle
   private case class Fixture(mgr: ActorRef, wallet: NodeWallet, probe: TestProbe, height: Int)
 
   /**
-   * A started WalletManager with the node reporting what the builders say, and its first refresh
+   * A started EngineWalletState with the node reporting what the builders say, and its first refresh
    * already applied — awaited rather than slept on, except where a test needs to observe an EMPTY
    * result, which cannot be distinguished from "not yet refreshed" by polling.
    */
@@ -99,7 +101,7 @@ class WalletManagerSpec extends TestKit(ActorSystem("wallet-manager-spec", Walle
           Success(rewards.filter(_.box.ergoTree == inv.getArgument[String](0)))
         }
 
-    val mgr = system.actorOf(Props(new TestableWalletManager(ctx, time)))
+    val mgr = system.actorOf(Props(new TestableEngineWalletState(ctx, time)))
     val probe = TestProbe()
     val height = ctx.getClient.execute(_.getHeight)
     mgr ! RefreshBoxes
@@ -118,6 +120,31 @@ class WalletManagerSpec extends TestKit(ActorSystem("wallet-manager-spec", Walle
   private def values(boxes: Seq[InputUTXO]): Seq[Long] = boxes.map(_.value).sorted
 
   // ─── the property the whole mechanism exists for ──────────────────────────
+
+  "Engine input ownership" should "survive ordinary refresh and refuse stale-attempt reconciliation" in {
+    val f = fixture(w => Seq(walletBox(w, erg)))
+    f.probe.send(f.mgr, RetrieveInputs(erg / 2, Seq.empty, reservationId = "engine-lease"))
+    val ids = f.probe.expectMsgType[WalletInputs].inputs.map(_.id.toString).toSet
+    val hold = EngineHold("holding-operation", "engine-lease", "ab" * 32, Set("cd" * 32), ids)
+    f.probe.send(f.mgr, PinEngineInputs(hold))
+    f.probe.expectMsg(true)
+    f.probe.send(f.mgr, MarkReservationUncertain(hold.reservationId))
+    f.probe.send(f.mgr, ResetUsedInputs)
+    f.probe.send(f.mgr, RefreshBoxes)
+    Thread.sleep(1200)
+    offered(f, erg / 2) shouldBe empty
+    f.probe.send(f.mgr, GetEngineHolds)
+    f.probe.expectMsgType[EngineHolds].holds shouldBe Vector(hold)
+    f.probe.send(f.mgr, ResolveEngineInputs(hold.reservationId, hold.txId, Set.empty, ids))
+    f.probe.expectMsg(false)
+    f.probe.send(f.mgr, EngineSendFinished(hold.reservationId, hold.txId, accepted = false))
+    f.probe.send(f.mgr, ResolveEngineInputs(hold.reservationId, "ef" * 32, Set.empty, ids))
+    f.probe.expectMsg(false)
+    offered(f, erg / 2) shouldBe empty
+    f.probe.send(f.mgr, ResolveEngineInputs(hold.reservationId, hold.txId, Set.empty, ids))
+    f.probe.expectMsg(true)
+    offered(f, erg / 2) should have size 1
+  }
 
   "Two selections inside one refresh window" should "never return the same box" in {
     // The highest-value test in the wallet list: the symptom of failure is a double spend that looks
@@ -147,7 +174,7 @@ class WalletManagerSpec extends TestKit(ActorSystem("wallet-manager-spec", Walle
       reservationId = firstId))
     f.probe.expectMsgType[WalletInputs].inputs should have size 1
 
-    clock.addAndGet(WalletManager.ReservationTtlMs + 1L)
+    clock.addAndGet(EngineWalletState.ReservationTtlMs + 1L)
     f.mgr ! ResetUsedInputs
     val secondId = "lease-two"
     f.probe.awaitAssert {
@@ -171,16 +198,16 @@ class WalletManagerSpec extends TestKit(ActorSystem("wallet-manager-spec", Walle
     val first = f.probe.expectMsgType[WalletInputs].inputs
     first should have size 1
 
-    clock.addAndGet(WalletManager.ReservationTtlMs + 1L)
+    clock.addAndGet(EngineWalletState.ReservationTtlMs + 1L)
     f.probe.send(f.mgr, ResetUsedInputs)
     val secondId = "replacement-submission"
     f.probe.send(f.mgr, RetrieveInputs(erg / 2, Seq.empty, trackUsed = true,
       reservationId = secondId))
     f.probe.expectMsgType[WalletInputs].inputs should have size 1
 
-    f.probe.send(f.mgr, BeginReservationSubmission(
-      firstId, first.map(_.id.toString).toSet, Long.MaxValue))
-    f.probe.expectMsg(ReservationSubmissionStarted(firstId, accepted = false))
+    f.probe.send(f.mgr, PinEngineInputs(EngineHold("test", firstId, "ab" * 32,
+      first.map(_.id.toString).toSet, first.map(_.id.toString).toSet)))
+    f.probe.expectMsg(false)
     offered(f, erg / 2) shouldBe empty
 
     f.probe.send(f.mgr, ReleaseInputs(secondId))
@@ -204,9 +231,10 @@ class WalletManagerSpec extends TestKit(ActorSystem("wallet-manager-spec", Walle
       reservationId = id))
     val held = f.probe.expectMsgType[WalletInputs].inputs
     held should have size 1
-    f.probe.send(f.mgr, BeginReservationSubmission(id, held.map(_.id.toString).toSet))
-    f.probe.expectMsg(ReservationSubmissionStarted(id, accepted = true))
-    clock.addAndGet(WalletManager.ReservationTtlMs + 1L)
+    f.probe.send(f.mgr, PinEngineInputs(EngineHold("test", id, "ab" * 32,
+      held.map(_.id.toString).toSet, held.map(_.id.toString).toSet)))
+    f.probe.expectMsg(true)
+    clock.addAndGet(EngineWalletState.ReservationTtlMs + 1L)
     f.mgr ! ResetUsedInputs
     f.mgr ! ReleaseInputs(id)
     offered(f, erg / 2) shouldBe empty
@@ -220,15 +248,13 @@ class WalletManagerSpec extends TestKit(ActorSystem("wallet-manager-spec", Walle
     val held = f.probe.expectMsgType[WalletInputs].inputs
     val expectedIds = held.map(_.id.toString).toSet
 
-    f.probe.send(f.mgr, BeginReservationSubmission(id, expectedIds))
-    f.probe.expectMsg(ReservationSubmissionStarted(id, accepted = true))
+    f.probe.send(f.mgr, PinEngineInputs(EngineHold("test", id, "ab" * 32, expectedIds, expectedIds)))
+    f.probe.expectMsg(true)
 
-    f.probe.send(f.mgr, CancelReservationSubmission(id, Set("ff" * 32)))
-    f.probe.expectMsg(ReservationSubmissionCancelled(id, accepted = false))
+    f.probe.send(f.mgr, CancelEngineInputs(id, "ff" * 32))
     offered(f, erg / 2) shouldBe empty
 
-    f.probe.send(f.mgr, CancelReservationSubmission(id, expectedIds))
-    f.probe.expectMsg(ReservationSubmissionCancelled(id, accepted = true))
+    f.probe.send(f.mgr, CancelEngineInputs(id, "ab" * 32))
     offered(f, erg / 2) should have size 1
   }
 
@@ -241,22 +267,24 @@ class WalletManagerSpec extends TestKit(ActorSystem("wallet-manager-spec", Walle
       reservationId = id))
     f.probe.expectMsgType[WalletInputs].inputs should have size 1
 
-    val nodeOutput = NodeBox("dd" * 32, "aa" * 32, 7 * erg, 0, 100,
+    val nodeOutput = support.CanonicalNodeBox("dd" * 32, "aa" * 32, 7 * erg, 0, 100,
       f.wallet.contract.ergoTreeHex)
     val output = FakeNodeContext.offlineClient().execute(ctx => nodeOutput.toInputUTXO(ctx))
 
-    f.probe.send(f.mgr, CommitReservation(id, Seq(output)))
+    f.probe.send(f.mgr, ResolveEngineInputs(id, "ab" * 32, Set.empty, Set("cd" * 32)))
+    f.probe.expectMsg(false)
     offered(f, 2 * erg) shouldBe empty
 
-    f.probe.send(f.mgr, CommitReservation("unknown-reservation", Seq(output)))
+    f.probe.send(f.mgr, ResolveEngineInputs("unknown-reservation", "ab" * 32, Set.empty, Set("cd" * 32)))
+    f.probe.expectMsg(false)
     offered(f, 2 * erg) shouldBe empty
   }
 
   it should "coordinate independent selector facades through one manager" in {
     implicit val ec = system.dispatcher
     val f = fixture(w => Seq(walletBox(w, erg), walletBox(w, 2 * erg)))
-    val one = WalletSelector(f.mgr, 2.seconds, ec)
-    val two = WalletSelector(f.mgr, 2.seconds, ec)
+    val one = EngineFunding(f.mgr, 2.seconds, ec)
+    val two = EngineFunding(f.mgr, 2.seconds, ec)
 
     val reservations = Await.result(Future.sequence(Seq(
       Future(one.reserve(erg / 2)), Future(two.reserve(erg / 2)))), 5.seconds)
@@ -295,7 +323,7 @@ class WalletManagerSpec extends TestKit(ActorSystem("wallet-manager-spec", Walle
       if (inv.getArgument[Paging](1).offset == 0) Success(reported.get()) else Success(Seq.empty[WalletBox])
     }
 
-    val mgr = system.actorOf(Props(new TestableWalletManager(ctx, () => System.currentTimeMillis())))
+    val mgr = system.actorOf(Props(new TestableEngineWalletState(ctx, () => System.currentTimeMillis())))
     val probe = TestProbe()
     mgr ! RefreshBoxes
     Thread.sleep(1200)
@@ -335,7 +363,7 @@ class WalletManagerSpec extends TestKit(ActorSystem("wallet-manager-spec", Walle
       } else Success(Seq.empty[WalletBox])
     }
 
-    val mgr = system.actorOf(Props(new TestableWalletManager(ctx, () => System.currentTimeMillis())))
+    val mgr = system.actorOf(Props(new TestableEngineWalletState(ctx, () => System.currentTimeMillis())))
     val probe = TestProbe()
     probe.send(mgr, RefreshBoxes)
     probe.awaitAssert(walletReads.get() should be >= 1L, 5.seconds, 50.millis)
@@ -346,19 +374,20 @@ class WalletManagerSpec extends TestKit(ActorSystem("wallet-manager-spec", Walle
       reservationId = reservationId))
     val selected = probe.expectMsgType[WalletInputs].inputs
     selected should have size 1
-    probe.send(mgr, BeginReservationSubmission(
-      reservationId, selected.map(_.id.toString).toSet, Long.MaxValue))
-    probe.expectMsg(ReservationSubmissionStarted(reservationId, accepted = true))
+    probe.send(mgr, PinEngineInputs(EngineHold("test", reservationId, "ab" * 32,
+      selected.map(_.id.toString).toSet, selected.map(_.id.toString).toSet)))
+    probe.expectMsg(true)
 
     reported.set(Seq.empty)
     probe.send(mgr, RefreshBoxes)
     probe.awaitAssert(walletReads.get() should be >= 2L, 5.seconds, 50.millis)
     Thread.sleep(300)
 
-    val nodeOutput = NodeBox("ee" * 32, "bb" * 32, 7 * erg, 0, 101,
+    val nodeOutput = support.CanonicalNodeBox("ee" * 32, "bb" * 32, 7 * erg, 0, 101,
       wallet.contract.ergoTreeHex)
     val output = FakeNodeContext.offlineClient().execute(bctx => nodeOutput.toInputUTXO(bctx))
-    probe.send(mgr, CommitReservation(reservationId, Seq(output)))
+    probe.send(mgr, EngineSendFinished(reservationId, "ab" * 32, accepted = true))
+    probe.send(mgr, ReturnInputs(Seq(output)))
     probe.send(mgr, RetrieveInputs(erg, Seq.empty, trackUsed = false))
     probe.expectMsgType[WalletInputs].inputs.map(_.value) shouldEqual Seq(7 * erg)
   }
@@ -382,7 +411,7 @@ class WalletManagerSpec extends TestKit(ActorSystem("wallet-manager-spec", Walle
     offered(f, erg / 2, track = true) should have size 1
     offered(f, erg / 2) shouldBe empty
 
-    clock.addAndGet(WalletManager.ReservationTtlMs + 1)
+    clock.addAndGet(EngineWalletState.ReservationTtlMs + 1)
     f.mgr ! ResetUsedInputs
     f.probe.awaitAssert(offered(f, erg / 2) should have size 1, 5.seconds, 100.millis)
   }
@@ -490,7 +519,7 @@ class WalletManagerSpec extends TestKit(ActorSystem("wallet-manager-spec", Walle
         else Success(if (inv.getArgument[String](0) == reward.box.ergoTree) Seq(reward) else Seq.empty[IndexedBox])
       }
 
-    val mgr = system.actorOf(Props(new TestableWalletManager(ctx, () => System.currentTimeMillis())))
+    val mgr = system.actorOf(Props(new TestableEngineWalletState(ctx, () => System.currentTimeMillis())))
     val probe = TestProbe()
     mgr ! RefreshBoxes
     Thread.sleep(1200)
@@ -531,7 +560,7 @@ class WalletManagerSpec extends TestKit(ActorSystem("wallet-manager-spec", Walle
     val held = walletBox(wallet, erg)
     // A FULL first page is what forces a second request, which is where the blip lands. A read that
     // fails on its first page is partial too, but it would not exercise the paging loop.
-    val filler = (1 to WalletManager.MAX_WALLET_BOXES).map(i => walletBox(wallet, erg + i))
+    val filler = (1 to EngineWalletState.MAX_WALLET_BOXES).map(i => walletBox(wallet, erg + i))
     val blip = new AtomicBoolean(false)
 
     when(api.indexerEnabled).thenReturn(false)
@@ -544,7 +573,7 @@ class WalletManagerSpec extends TestKit(ActorSystem("wallet-manager-spec", Walle
       else Failure(new RuntimeException("connection reset mid-paging"))
     }
 
-    val mgr = system.actorOf(Props(new TestableWalletManager(ctx, () => System.currentTimeMillis())))
+    val mgr = system.actorOf(Props(new TestableEngineWalletState(ctx, () => System.currentTimeMillis())))
     val probe = TestProbe()
     mgr ! RefreshBoxes
     Thread.sleep(1200)
@@ -608,7 +637,7 @@ class WalletManagerSpec extends TestKit(ActorSystem("wallet-manager-spec", Walle
                 else Seq.empty[IndexedBox])
       }
 
-    val mgr = system.actorOf(Props(new TestableWalletManager(ctx, () => System.currentTimeMillis())))
+    val mgr = system.actorOf(Props(new TestableEngineWalletState(ctx, () => System.currentTimeMillis())))
     val probe = TestProbe()
     mgr ! RefreshBoxes
     Thread.sleep(1200)
@@ -628,7 +657,7 @@ class WalletManagerSpec extends TestKit(ActorSystem("wallet-manager-spec", Walle
     val api = mock[NodeApi]
     val (ctx, _, wallet) = FakeNodeContext(api, numAddresses = 1)
     val foreign = WalletBox(
-      box = NodeBox("ff" * 32, "aa" * 32, erg, 0, 100,
+      box = support.CanonicalNodeBox("ff" * 32, "aa" * 32, erg, 0, 100,
         "0008cd02856c5e4eb4b915005dccb8e0f42bed1777cae48565be13a77cbf31e3c93f4515"),
       address = "foreign", confirmationsNum = Some(1), creationTransaction = "aa" * 32,
       creationOutIndex = 0, inclusionHeight = Some(100), spendingTransaction = None,
@@ -641,7 +670,7 @@ class WalletManagerSpec extends TestKit(ActorSystem("wallet-manager-spec", Walle
       if (inv.getArgument[Paging](1).offset == 0) Success(Seq(foreign)) else Success(Seq.empty[WalletBox])
     }
 
-    val mgr = system.actorOf(Props(new TestableWalletManager(ctx, () => System.currentTimeMillis())))
+    val mgr = system.actorOf(Props(new TestableEngineWalletState(ctx, () => System.currentTimeMillis())))
     val probe = TestProbe()
     mgr ! RefreshBoxes
     Thread.sleep(1200)
@@ -687,7 +716,7 @@ class WalletManagerSpec extends TestKit(ActorSystem("wallet-manager-spec", Walle
     val tokenB = "b2" * 32
     val f = fixture { w =>
       walletBox(w, 20000000L, Seq(NodeAsset(tokenA, 100L))) +:
-        (1 to WalletManager.MAX_TX_INPUTS).map { i =>
+        (1 to EngineWalletState.MAX_TX_INPUTS).map { i =>
           walletBox(w, 10000000L + i, Seq(NodeAsset(tokenA, 99L)))
         } :+
         walletBox(w, 30000000L, Seq(NodeAsset(tokenB, 1L)))
@@ -717,7 +746,7 @@ class WalletManagerSpec extends TestKit(ActorSystem("wallet-manager-spec", Walle
   }
 
   it should "use a compact token-bearing ERG top-up when tokenless change would exceed the cap" in {
-    val requiredTokenBoxes = WalletManager.MAX_TX_INPUTS - 1
+    val requiredTokenBoxes = EngineWalletState.MAX_TX_INPUTS - 1
     val requirements = (1 to requiredTokenBoxes).map { i =>
       val id = f"${i + 100}%064x"
       (NodeAsset(id, 1L), Token(ErgoId.create(id), 1L))
@@ -731,7 +760,7 @@ class WalletManagerSpec extends TestKit(ActorSystem("wallet-manager-spec", Walle
     }
 
     val chosen = offered(f, 100000000L, requirements.map(_._2))
-    chosen should have size WalletManager.MAX_TX_INPUTS
+    chosen should have size EngineWalletState.MAX_TX_INPUTS
     chosen.map(_.value) should contain(30000000L)
     chosen.map(_.value) should not contain 12000000L
     chosen.map(_.value) should not contain 14000000L
@@ -775,7 +804,7 @@ class WalletManagerSpec extends TestKit(ActorSystem("wallet-manager-spec", Walle
 
   it should "fall back to a compact token-bearing box when tokenless funds exceed the input cap" in {
     val tokenId = "b3" * 32
-    val tokenless = (1 to (WalletManager.MAX_TX_INPUTS + 1)).map(i => 1000000L + i)
+    val tokenless = (1 to (EngineWalletState.MAX_TX_INPUTS + 1)).map(i => 1000000L + i)
     val required = tokenless.sum
     val f = fixture { w =>
       tokenless.map(walletBox(w, _)) :+ walletBox(w, erg, Seq(NodeAsset(tokenId, 1L)))
@@ -788,8 +817,8 @@ class WalletManagerSpec extends TestKit(ActorSystem("wallet-manager-spec", Walle
   }
 
   "The input cap" should "reject a selection requiring more than MAX_TX_INPUTS boxes" in {
-    val f = fixture(w => (1 to (WalletManager.MAX_TX_INPUTS + 1)).map(i => walletBox(w, i.toLong)))
-    val total = (1L to (WalletManager.MAX_TX_INPUTS + 1).toLong).sum
+    val f = fixture(w => (1 to (EngineWalletState.MAX_TX_INPUTS + 1)).map(i => walletBox(w, i.toLong)))
+    val total = (1L to (EngineWalletState.MAX_TX_INPUTS + 1).toLong).sum
 
     offered(f, total) shouldBe empty
   }
@@ -804,7 +833,7 @@ class WalletManagerSpec extends TestKit(ActorSystem("wallet-manager-spec", Walle
     val f = fixture()
     offered(f, 1000L) shouldBe empty
 
-    val change = NodeBox("dd" * 32, "aa" * 32, 7 * erg, 0, 100, f.wallet.contract.ergoTreeHex)
+    val change = support.CanonicalNodeBox("dd" * 32, "aa" * 32, 7 * erg, 0, 100, f.wallet.contract.ergoTreeHex)
     val converted = FakeNodeContext.offlineClient().execute(ctx => change.toInputUTXO(ctx))
 
     f.mgr ! ReturnInputs(Seq(converted))
@@ -816,7 +845,7 @@ class WalletManagerSpec extends TestKit(ActorSystem("wallet-manager-spec", Walle
     import node.MutationConversions._
 
     val f = fixture()
-    val foreign = NodeBox("dd" * 32, "aa" * 32, 7 * erg, 0, 100,
+    val foreign = support.CanonicalNodeBox("dd" * 32, "aa" * 32, 7 * erg, 0, 100,
       "0008cd02856c5e4eb4b915005dccb8e0f42bed1777cae48565be13a77cbf31e3c93f4515")
     val converted = FakeNodeContext.offlineClient().execute(ctx => foreign.toInputUTXO(ctx))
 

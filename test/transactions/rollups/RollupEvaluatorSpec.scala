@@ -1,4 +1,5 @@
 package transactions.rollups
+import transactions.engine.EngineWalletState
 
 import akka.actor.{ActorRef, ActorSystem, Props}
 import akka.testkit.{TestKit, TestProbe}
@@ -22,7 +23,7 @@ import scala.concurrent.duration._
  * A batch is up to five rollups, each running nine proof contracts against every miner in it —
  * minutes of interpreter and AVL work — and entries only leave `evalMap` when that work reports
  * back. Without a guard the four-minute tick starts the same rollups again, and the duplicate runs
- * on the ten-thread pool where `WalletManager`'s five-second asks are waiting.
+ * on the ten-thread pool where `EngineWalletState`'s five-second asks are waiting.
  *
  * Observed through the sync handler's mailbox rather than through `evalMap`, which is private: one
  * batch asks for each rollup's state once, so a second batch shows up as a second ask.

@@ -1,4 +1,5 @@
 package transactions
+import transactions.engine.EngineWalletState
 
 import akka.actor.{Actor, ActorRef, ActorSystem, Props}
 import configs.{CandidateConfig, EmissionConfig}
@@ -25,8 +26,8 @@ import transactions.dex.{DexContracts, LDBoxes, LDFundedTx, LithosDexTransaction
 import transactions.emissions.EmissionTransactions
 import transactions.rollups.RollupTransactions
 import transactions.rollups.TransactionMessages.LatestRollup
-import transactions.wallet.WalletMessages.{RetrieveInputs, WalletInputs}
-import transactions.wallet.{WalletReservation, WalletSelector, WalletSource}
+import transactions.engine.EngineWalletMessages.{RetrieveInputs, WalletInputs}
+import transactions.engine.{FundingAllocation, EngineFunding, FundingSource}
 import work.lithos.mutations.{Contract, InputUTXO, Token, UTXO}
 
 import scala.collection.mutable
@@ -448,14 +449,14 @@ class TransactionCostSizingSpec extends AnyPropSpec with BeforeAndAfterAll
   // ══════════════════════════════════════════════════════════════════════════
 
   /** `genJoin`, `genActivate` and `genClear` take their funding as an argument, so this never runs. */
-  private object UnusedWallet extends WalletSource {
-    def reserve(value: Long, tokens: Seq[Token]): WalletReservation =
+  private object UnusedWallet extends FundingSource {
+    def reserve(value: Long, tokens: Seq[Token]): FundingAllocation =
       throw new IllegalStateException("a builder under measurement asked the wallet for funds")
-    def reserveCovering(value: Long): WalletReservation =
+    def reserveCovering(value: Long): FundingAllocation =
       throw new IllegalStateException("a builder under measurement asked the wallet for one input")
-    def reserveCoveringP2PK(value: Long): WalletReservation =
+    def reserveCoveringP2PK(value: Long): FundingAllocation =
       throw new IllegalStateException("a builder under measurement asked for one P2PK input")
-    def reserveKnown(inputs: Seq[InputUTXO]): WalletReservation =
+    def reserveKnown(inputs: Seq[InputUTXO]): FundingAllocation =
       throw new IllegalStateException("a builder under measurement asked the wallet to hold change")
     def giveBack(boxes: Seq[InputUTXO]): Unit = ()
   }
@@ -539,34 +540,11 @@ class TransactionCostSizingSpec extends AnyPropSpec with BeforeAndAfterAll
     s
   }
 
-  @volatile private var nextFunding: Seq[InputUTXO] = Seq.empty
-
-  /**
-   * The wallet boundary `WalletSelector` blocks on, and nothing else.
-   *
-   * The DEX builders reserve through the real selector, which is an ask to `WalletManager`. Standing
-   * a manager up would drag a node fixture in for no gain: what is being measured is the transaction
-   * the builder produces once it has its funding, not how the funding was chosen.
-   */
-  private class FundingResponder extends Actor {
-    override def receive: Receive = {
-      case r: RetrieveInputs => sender() ! WalletInputs(nextFunding, r.reservationId)
-      case _ => ()
-    }
+  private def funded[A <: LDFundedTx](funding: InputUTXO, signer: NodeWallet)
+                                    (build: => transactions.dex.DexPlan[A]): A = {
+    val unsigned = build.build(Seq(funding))
+    unsigned.describe(signer.sign(unsigned.tx))
   }
-
-  private lazy val selector: WalletSelector = {
-    val ref: ActorRef = system.actorOf(Props(new FundingResponder))
-    WalletSelector(ref, 30.seconds, ExecutionContext.global)
-  }
-
-  private def funded[A <: LDFundedTx](funding: InputUTXO)(build: => A): A = {
-    nextFunding = Seq(funding)
-    val built = build
-    built.reservation.release() // nothing is broadcast here, so close the lease the builder opened
-    built
-  }
-
   /**
    * Six of the seven. `refresh` is left out: it is only valid past `REFRESH_AGE`, which the offline
    * fixture's tip predates, and reaching it needs a proxied context rather than a different fixture.
@@ -588,8 +566,8 @@ class TransactionCostSizingSpec extends AnyPropSpec with BeforeAndAfterAll
       val swapIn = Parameters.OneErg
       val swapQuote = LDLiquidityPool(pool).simSwap(swapIn, ergIn = true)
       measure("dex", "swap",
-        funded(walletInput(ctx, wallet, swapIn + headroom, index = 10)) {
-          LithosDexTransactions.swap(ctx, wallet, selector, pool, swapIn,
+        funded(walletInput(ctx, wallet, swapIn + headroom, index = 10), wallet) {
+          LithosDexTransactions.swap(ctx, wallet, pool, swapIn,
             ergIn = true, minOutput = swapQuote.amountOut)
         }.tx)
 
@@ -598,19 +576,19 @@ class TransactionCostSizingSpec extends AnyPropSpec with BeforeAndAfterAll
         LithosDexTransactions.OWNER_BOX_VALUE + headroom
       measure("dex", "deposit (mints an ownership NFT)",
         funded(walletInput(ctx, wallet, depositErg,
-          Seq(Token(tokenY, depositQuote.amountY)), index = 10)) {
-          LithosDexTransactions.deposit(ctx, wallet, selector, pool, shares)
+          Seq(Token(tokenY, depositQuote.amountY)), index = 10), wallet) {
+          LithosDexTransactions.deposit(ctx, wallet, pool, shares)
         }.tx)
 
       measure("dex", "redeem (burns it again)",
-        funded(walletInput(ctx, wallet, headroom, Seq(Token(owner, 1L)), index = 10)) {
-          LithosDexTransactions.redeem(ctx, wallet, selector, pool, provision)
+        funded(walletInput(ctx, wallet, headroom, Seq(Token(owner, 1L)), index = 10), wallet) {
+          LithosDexTransactions.redeem(ctx, wallet, pool, provision)
         }.tx)
 
       val flushVault = DexFixtures.liveVault(ctx, DexFixtures.vaultMin, 0L, BigInt(0), BigInt(0), 1)
       measure("dex", "flush (pool fees into the vault)",
-        funded(walletInput(ctx, wallet, headroom, index = 10)) {
-          LithosDexTransactions.flush(ctx, wallet, selector, tradedPool, flushVault)
+        funded(walletInput(ctx, wallet, headroom, index = 10), wallet) {
+          LithosDexTransactions.flush(ctx, wallet, tradedPool, flushVault)
         }.tx)
 
       val owedX = DexFixtures.owedOn(shares, BigInt(0), DexFixtures.tradedAccX)
@@ -619,8 +597,8 @@ class TransactionCostSizingSpec extends AnyPropSpec with BeforeAndAfterAll
         DexFixtures.vaultMin + owedX + DexFixtures.surplus, owedY + DexFixtures.surplus,
         DexFixtures.tradedAccX, DexFixtures.tradedAccY, 0)
       measure("dex", "claim (one provision's accrued fees)",
-        funded(walletInput(ctx, wallet, headroom, Seq(Token(owner, 1L)), index = 10)) {
-          LithosDexTransactions.claim(ctx, wallet, selector, claimVault, Seq(provision))
+        funded(walletInput(ctx, wallet, headroom, Seq(Token(owner, 1L)), index = 10), wallet) {
+          LithosDexTransactions.claim(ctx, wallet, claimVault, Seq(provision))
         }.tx)
 
       // The widest of the six: it grows the provision, flushes the pool and settles the vault in one
@@ -631,8 +609,8 @@ class TransactionCostSizingSpec extends AnyPropSpec with BeforeAndAfterAll
         .simResize(shares, newShares, provision.entryX, provision.entryY)
       measure("dex", "resize (grow, flush and settle)",
         funded(walletInput(ctx, wallet, resizeQuote.amountX + headroom,
-          Seq(Token(owner, 1L), Token(tokenY, resizeQuote.amountY)), index = 10)) {
-          LithosDexTransactions.resize(ctx, wallet, selector, tradedPool, resizeVault, provision,
+          Seq(Token(owner, 1L), Token(tokenY, resizeQuote.amountY)), index = 10), wallet) {
+          LithosDexTransactions.resize(ctx, wallet, tradedPool, resizeVault, provision,
             newShares)
         }.tx)
     }

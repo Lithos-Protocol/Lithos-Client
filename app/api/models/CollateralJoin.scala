@@ -78,7 +78,8 @@ case class CollateralJoinEntry(txId: String,
                                position: Long,
                                lenderAddress: String,
                                principalNanoErgs: String,
-                               permitLit: String)
+                               permitLit: String,
+                               outcome: String = "accepted")
 
 object CollateralJoinEntry {
   implicit lazy val jsonFormat: Format[CollateralJoinEntry] = Json.format[CollateralJoinEntry]

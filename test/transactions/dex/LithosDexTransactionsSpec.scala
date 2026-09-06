@@ -1,4 +1,5 @@
 package transactions.dex
+import transactions.engine.EngineWalletState
 
 import akka.actor.ActorSystem
 import akka.testkit.{TestKit, TestProbe}
@@ -11,8 +12,8 @@ import org.scalatest.BeforeAndAfterAll
 import org.scalatest.flatspec.AnyFlatSpecLike
 import support.FakeNodeContext
 import transactions.dex.LDBoxes.{Provision => LiveProvision}
-import transactions.wallet.WalletMessages.{ReleaseInputs, RetrieveInputs, WalletInputs}
-import transactions.wallet.WalletSelector
+import transactions.engine.EngineWalletMessages.{ReleaseInputs, RetrieveInputs, WalletInputs}
+import transactions.engine.EngineFunding
 import work.lithos.mutations.{InputUTXO, Token, UTXO}
 
 import java.lang.reflect.{InvocationHandler, InvocationTargetException, Method, Proxy}
@@ -98,34 +99,20 @@ class LithosDexTransactionsSpec extends TestKit(ActorSystem("lithosdex-transacti
     inputAt(UTXO(wallet.contract, value, tokens), ctx, index)
 
   /**
-   * Exercise the real blocking WalletSelector without a second selector implementation. The probe
-   * acts only as the WalletManager boundary: it verifies the requested reservation and returns the
+   * Exercise the real blocking EngineFunding without a second selector implementation. The probe
+   * acts only as the EngineWalletState boundary: it verifies the requested reservation and returns the
    * signable box the production builder must consume.
    */
   private def buildFunded[A <: LDFundedTx](expectedValue: Long,
-                                            expectedTokens: Seq[Token],
-                                            funding: InputUTXO)
-                                           (build: WalletSelector => A): A = {
-    val manager = TestProbe()
-    val selector = WalletSelector(manager.ref, 30.seconds, ec)
-    val pending = Future(build(selector))
-
-    val request = manager.expectMsgType[RetrieveInputs](30.seconds)
-    request.erg shouldBe expectedValue
-    request.tokens shouldEqual expectedTokens
-    request.trackUsed shouldBe true
-    request.reservationId should not be empty
-    manager.reply(WalletInputs(Seq(funding), request.reservationId))
-
-    val built = Await.result(pending, 60.seconds)
-    built.reservation.inputs shouldEqual Seq(funding)
-
-    // Nothing is submitted in an offline builder spec, so close the real reservation lifecycle.
-    built.reservation.release()
-    manager.expectMsg(ReleaseInputs(request.reservationId))
-    built
+                                          expectedTokens: Seq[Token],
+                                          funding: InputUTXO)
+                                         (build: Unit => DexPlan[A]): A = {
+    val plan = build(())
+    plan.value shouldBe expectedValue
+    plan.tokens shouldEqual expectedTokens
+    val unsigned = plan.build(Seq(funding))
+    unsigned.describe(fake._3.sign(unsigned.tx))
   }
-
   "LithosDexTransactions.swap" should "reserve, build and sign the production swap" in withProduction {
     (ctx, wallet) =>
       val amountIn = Parameters.OneErg
@@ -133,8 +120,8 @@ class LithosDexTransactionsSpec extends TestKit(ActorSystem("lithosdex-transacti
       val quote = LDLiquidityPool(pool).simSwap(amountIn, ergIn = true)
       val funding = walletInput(ctx, wallet, amountIn + Headroom, Seq.empty, 10)
 
-      val built = buildFunded(amountIn + Headroom, Seq.empty, funding) { selector =>
-        LithosDexTransactions.swap(ctx, wallet, selector, pool, amountIn,
+      val built = buildFunded(amountIn + Headroom, Seq.empty, funding) { _ =>
+        LithosDexTransactions.swap(ctx, wallet, pool, amountIn,
           ergIn = true, minOutput = quote.amountOut)
       }
 
@@ -149,8 +136,8 @@ class LithosDexTransactionsSpec extends TestKit(ActorSystem("lithosdex-transacti
       val ergNeed = quote.amountX + PROVISION_MIN + LithosDexTransactions.OWNER_BOX_VALUE + Headroom
       val funding = walletInput(ctx, wallet, ergNeed, tokenNeed, 10)
 
-      val built = buildFunded(ergNeed, tokenNeed, funding) { selector =>
-        LithosDexTransactions.deposit(ctx, wallet, selector, pool, Shares)
+      val built = buildFunded(ergNeed, tokenNeed, funding) { _ =>
+        LithosDexTransactions.deposit(ctx, wallet, pool, Shares)
       }
 
       built.quote shouldEqual quote
@@ -167,8 +154,8 @@ class LithosDexTransactionsSpec extends TestKit(ActorSystem("lithosdex-transacti
       val funding = walletInput(ctx, wallet, Headroom, tokenNeed, 10)
       val quote = LDLiquidityPool(pool).simRedeem(Shares)
 
-      val built = buildFunded(Headroom, tokenNeed, funding) { selector =>
-        LithosDexTransactions.redeem(ctx, wallet, selector, pool, provision)
+      val built = buildFunded(Headroom, tokenNeed, funding) { _ =>
+        LithosDexTransactions.redeem(ctx, wallet, pool, provision)
       }
 
       built.quote shouldEqual quote
@@ -180,8 +167,8 @@ class LithosDexTransactionsSpec extends TestKit(ActorSystem("lithosdex-transacti
       val vault = liveVault(ctx, VAULT_MIN, 0L, BigInt(0), BigInt(0), 1)
       val funding = walletInput(ctx, wallet, Headroom, Seq.empty, 10)
 
-      val built = buildFunded(Headroom, Seq.empty, funding) { selector =>
-        LithosDexTransactions.flush(ctx, wallet, selector, pool, vault)
+      val built = buildFunded(Headroom, Seq.empty, funding) { _ =>
+        LithosDexTransactions.flush(ctx, wallet, pool, vault)
       }
 
       built.flushedX shouldBe traded.pendingX
@@ -203,8 +190,8 @@ class LithosDexTransactionsSpec extends TestKit(ActorSystem("lithosdex-transacti
       val tokenNeed = Seq(Token(owner, 1L))
       val funding = walletInput(ctx, wallet, Headroom, tokenNeed, 10)
 
-      val built = buildFunded(Headroom, tokenNeed, funding) { selector =>
-        LithosDexTransactions.claim(ctx, wallet, selector, vault, Seq(provision))
+      val built = buildFunded(Headroom, tokenNeed, funding) { _ =>
+        LithosDexTransactions.claim(ctx, wallet, vault, Seq(provision))
       }
 
       built.claimedX shouldBe owedX
@@ -225,8 +212,8 @@ class LithosDexTransactionsSpec extends TestKit(ActorSystem("lithosdex-transacti
       val ergNeed = quote.amountX + Headroom
       val funding = walletInput(ctx, wallet, ergNeed, tokenNeed, 10)
 
-      val built = buildFunded(ergNeed, tokenNeed, funding) { selector =>
-        LithosDexTransactions.resize(ctx, wallet, selector, pool, vault, provision, newShares)
+      val built = buildFunded(ergNeed, tokenNeed, funding) { _ =>
+        LithosDexTransactions.resize(ctx, wallet, pool, vault, provision, newShares)
       }
 
       built.quote shouldEqual quote
@@ -241,8 +228,8 @@ class LithosDexTransactionsSpec extends TestKit(ActorSystem("lithosdex-transacti
         owner, 0, createdHeight = Some(500000))
       val funding = walletInput(ctx, wallet, Headroom, Seq.empty, 10)
 
-      val built = buildFunded(Headroom, Seq.empty, funding) { selector =>
-        LithosDexTransactions.refresh(ctx, wallet, selector, provision)
+      val built = buildFunded(Headroom, Seq.empty, funding) { _ =>
+        LithosDexTransactions.refresh(ctx, wallet, provision)
       }
 
       built.boxId should not be empty

@@ -2,7 +2,7 @@ package api
 
 import cache.LDCache
 import api.models._
-import transactions.wallet.WalletSelector
+
 
 /**
  * The LithosDex API — the `lithosdex` tag of the spec, one method per endpoint.
@@ -43,7 +43,7 @@ trait LithosDexApi {
    * POST /dex/swap
    * Sign and submit a swap. `minOutput` is required and is checked against the pool as it stands.
    */
-  def swap(request: LDSwapExecuteRequest, ldCache: LDCache, walletSelector: WalletSelector): LDSwapResult
+  def swap(request: LDSwapExecuteRequest, ldCache: LDCache): LDSwapResult
 
   /**
    * POST /dex/deposit/check
@@ -55,7 +55,7 @@ trait LithosDexApi {
    * POST /dex/deposit
    * Deposit a balanced pair and mint a provision box.
    */
-  def deposit(request: LDDepositExecuteRequest, ldCache: LDCache, walletSelector: WalletSelector): LDDepositResult
+  def deposit(request: LDDepositExecuteRequest, ldCache: LDCache): LDDepositResult
 
   /**
    * POST /dex/redeem/check
@@ -67,7 +67,7 @@ trait LithosDexApi {
    * POST /dex/redeem
    * Close a provision and return its share of the reserves.
    */
-  def redeem(request: LDRedeemRequest, ldCache: LDCache, walletSelector: WalletSelector): LDRedeemResult
+  def redeem(request: LDRedeemRequest, ldCache: LDCache): LDRedeemResult
 
   /**
    * GET /dex/provisions
@@ -81,8 +81,7 @@ trait LithosDexApi {
    */
   def claimProvision(boxId: String,
                      request: LDClaimRequest,
-                     ldCache: LDCache,
-                     walletSelector: WalletSelector): LDClaimResult
+                     ldCache: LDCache): LDClaimResult
 
   /**
    * POST /dex/provisions/:boxId/resize/check
@@ -94,7 +93,7 @@ trait LithosDexApi {
    * POST /dex/provisions/:boxId/resize
    * Change a provision's size. Always flushes in the same transaction.
    */
-  def resize(boxId: String, request: LDResizeRequest, ldCache: LDCache, walletSelector: WalletSelector): LDResizeResult
+  def resize(boxId: String, request: LDResizeRequest, ldCache: LDCache): LDResizeResult
 
   /**
    * POST /dex/flush/check
@@ -106,7 +105,7 @@ trait LithosDexApi {
    * POST /dex/flush
    * Hand the pool's pending fees to the vault. Permissionless; pays the caller nothing.
    */
-  def flush(request: LDFlushRequest, ldCache: LDCache, walletSelector: WalletSelector): LDFlushResult
+  def flush(request: LDFlushRequest, ldCache: LDCache): LDFlushResult
 
   /**
    * GET /dex/fees/history

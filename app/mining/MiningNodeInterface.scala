@@ -2,7 +2,7 @@ package mining
 
 import node.NodeApi
 import node.model.{MiningSolution, NodeInfo}
-import node.rest.RestNodeApi
+import node.rest.{NodeHttpConfig, RestNodeApi}
 import org.json.{JSONArray, JSONObject}
 import org.slf4j.{Logger, LoggerFactory}
 
@@ -22,11 +22,7 @@ import scala.util.{Failure, Success}
 object MiningNodeInterface {
   private final val PlaceholderW = "02a7955281885bf0f0ca4a48678848cad8dc5b328ce8bc1d4481d041c98e891ff3"
 
-  /**
-   * Both candidate calls run inside LithosPool's `receive`, so an unanswered one holds that mailbox
-   * for as long as it takes — and a found block waits in it. A node that accepts the connection and
-   * then goes quiet would stall mining outright with no error and nothing in the log.
-   */
+  /** Bound stalled HTTP so serialized candidate work can recover and restore the node cache. */
   private final val ConnectTimeout: Duration = Duration.ofSeconds(3)
   private final val RequestTimeout: Duration = Duration.ofSeconds(10)
 }
@@ -40,7 +36,10 @@ class MiningNodeInterface(nodeApiUrl: String) {
     .connectTimeout(MiningNodeInterface.ConnectTimeout)
     .build()
   private val baseURI: URI       = URI.create(nodeApiUrl)
-  private val nodeApi: NodeApi   = RestNodeApi(nodeApiUrl)
+  private val nodeApi: NodeApi   = RestNodeApi(NodeHttpConfig(nodeApiUrl,
+    connectTimeoutMs = MiningNodeInterface.ConnectTimeout.toMillis,
+    readTimeoutMs = MiningNodeInterface.RequestTimeout.toMillis,
+    writeTimeoutMs = MiningNodeInterface.RequestTimeout.toMillis))
 
   // ─── internal helpers ─────────────────────────────────────────────────────
 

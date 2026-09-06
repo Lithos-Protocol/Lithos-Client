@@ -32,6 +32,7 @@ import scala.util.Success
 object EmissionHandlerSpec {
   val config: com.typesafe.config.Config =
     com.typesafe.config.ConfigFactory.parseString("akka.test.single-expect-default = 20s")
+      .withFallback(com.typesafe.config.ConfigFactory.load())
 }
 
 class EmissionHandlerSpec extends TestKit(ActorSystem("emission-handler-spec", EmissionHandlerSpec.config))
@@ -66,7 +67,7 @@ class EmissionHandlerSpec extends TestKit(ActorSystem("emission-handler-spec", E
       }
 
     val wallet = TestProbe()
-    val handler = system.actorOf(Props(new EmissionHandler(configuration, ctx, wallet.ref)))
+    val handler = system.actorOf(Props(new EmissionEngineHarness(configuration, ctx, wallet.ref)))
     Fixture(handler, api, wallet, TestProbe())
   }
 
@@ -83,7 +84,7 @@ class EmissionHandlerSpec extends TestKit(ActorSystem("emission-handler-spec", E
     val f = fixture(conf(autoCollateralize = true), slowLookup = true)
 
     f.handler ! DriveQueue
-    Thread.sleep(1500)          // the queue pass is inside its slow lookup
+    awaitAssert(lookupCount(f) shouldEqual 1, 20.seconds, 100.millis)
     val duringFirst = lookupCount(f)
     duringFirst shouldEqual 1
 
@@ -99,7 +100,8 @@ class EmissionHandlerSpec extends TestKit(ActorSystem("emission-handler-spec", E
     val f = fixture(conf(autoCollateralize = true))
 
     f.handler ! DriveQueue
-    Thread.sleep(2000)
+    awaitAssert(lookupCount(f) should be >= 1, 20.seconds, 100.millis)
+    Thread.sleep(500)
     val afterFirst = lookupCount(f)
     afterFirst should be >= 1
 

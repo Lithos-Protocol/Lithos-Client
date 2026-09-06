@@ -1,4 +1,5 @@
 package transactions.rollups
+import transactions.engine.EngineWalletState
 
 import akka.actor.{Actor, ActorRef, Cancellable}
 import akka.pattern.ask
@@ -54,7 +55,7 @@ class RollupEvaluator @Inject()(config: Configuration, nodeContext: NodeContext,
    * Whether a batch is running. A batch is up to five rollups, each running nine proof contracts
    * against every miner in it, which is minutes of interpreter and AVL work — and entries only leave
    * `evalMap` when that work reports back. Without this the four-minute tick starts the same rollups
-   * again, doubling the load on the dispatcher where WalletManager's five-second asks are waiting.
+   * again, doubling the load on the dispatcher where EngineWalletState's five-second asks are waiting.
    */
   private var evaluating: Boolean = false
 
@@ -119,7 +120,7 @@ class RollupEvaluator @Inject()(config: Configuration, nodeContext: NodeContext,
       // Off the actor thread, and sequential within one Future. Each rollup runs up to nine proofs
       // against every miner in it, which is minutes of interpreter work — inline it would block this
       // mailbox, and running the batch in parallel would take several threads of the shared
-      // tx-dispatcher where WalletManager's callers wait on 5-second asks. The contracts are fetched
+      // tx-dispatcher where EngineWalletState's callers wait on 5-second asks. The contracts are fetched
       // in here too, since that opens a BlockchainContext.
       Future {
         val fpSet = getFPSet

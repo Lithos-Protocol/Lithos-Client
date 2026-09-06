@@ -4,6 +4,7 @@ import akka.actor.{Actor, ActorRef, Cancellable}
 import akka.pattern.ask
 import akka.util.Timeout
 import configs.CandidateConfig
+import configs.Contexts
 import mining.CandidateBuilder._
 import mining.MiningMessages._
 import mutations.NodeWallet
@@ -12,6 +13,7 @@ import org.ergoplatform.appkit.ErgoClient
 import org.slf4j.{Logger, LoggerFactory}
 import stratum.{CollateralData, CollateralNotFoundException}
 import transactions.BlockTxMessages.{BlockTxsReady, CandidateTx, CandidateTxsDropped, RequestBlockTxs}
+import java.util.UUID
 
 import scala.concurrent.duration._
 import scala.concurrent.{ExecutionContext, Future}
@@ -36,10 +38,12 @@ class CandidateBuilder(client: ErgoClient,
 
   private val logger: Logger = LoggerFactory.getLogger("CandidateBuilder")
 
-  /** Node calls and signing run here, so a slow node cannot stall the mailbox. */
-  private implicit val buildEc: ExecutionContext =
-    Try(context.system.dispatchers.lookup("lithos-contexts.polling-dispatcher"))
-      .getOrElse(context.dispatcher)
+  private implicit val ec: ExecutionContext = context.dispatcher
+  /** Only genesis construction uses this capacity; refresh cannot delay a cached-input build. */
+  private val buildEc: ExecutionContext =
+    context.system.dispatchers.lookup(Contexts.key(Contexts.Genesis))
+  private val refreshEc: ExecutionContext =
+    context.system.dispatchers.lookup(Contexts.key(Contexts.Polling))
 
   private implicit val askTimeout: Timeout = Timeout(config.blockTxTimeout.milliseconds)
 
@@ -51,6 +55,8 @@ class CandidateBuilder(client: ErgoClient,
 
   /** Height of the block being built — one past the confirmed chain tip. */
   private var blockHeight: Int = 0
+  private var parentId: String = ""
+  private var augmentationStarted: Boolean = false
 
   private var currentPackage: Option[BlockPackage] = None
 
@@ -79,11 +85,15 @@ class CandidateBuilder(client: ErgoClient,
    */
   private var knownSpent: Map[String, Int] = Map.empty
 
-  private var building: Boolean = false
+  private var activeBuild: Option[UUID] = None
   private var refreshing: Boolean = false
 
-  /** The block a collection round is running for, if one is. */
-  private var collectingFor: Option[Int] = None
+  /** Identity and deadline of the only collection allowed to update the current genesis. */
+  private var collectingFor: Option[CollectionAttempt] = None
+  private var buildGeneration: UUID = UUID.randomUUID()
+
+  /** Monotonic clock seam for testing result admission independently of scheduler delivery. */
+  protected def nowNanos(): Long = System.nanoTime()
 
   /** `System.nanoTime` when the in-flight build and collection began; 0 when none is. */
   private var buildStartedAt: Long = 0L
@@ -128,12 +138,15 @@ class CandidateBuilder(client: ErgoClient,
     // build — while the instant a block lands is the busiest the machine gets, with this build, the
     // node applying the block and then constructing a candidate all at once. A rig sharing the host
     // feels every bit of that, so nothing that can wait runs here.
-    case ChainAdvanced(height) =>
-      if (height > blockHeight) {
+    case ChainAdvanced(height, parent) =>
+      if (height > 0 && (height > blockHeight ||
+        (parent.nonEmpty && (parent != parentId || height != blockHeight)))) {
         // Told before anything else: a source holding a wallet box for the previous height's
         // candidate has no other way to learn that height is over.
         if (blockHeight > 0) dropCandidates(blockHeight)
         blockHeight = height
+        parentId = parent
+        buildGeneration = UUID.randomUUID()
         currentPackage = None
         blockTxsBlockedAt = None
         rebuildAfterRefresh = false
@@ -154,6 +167,9 @@ class CandidateBuilder(client: ErgoClient,
     // from under us is the usual cause and looks exactly like this.
     case RebuildCandidate =>
       if (blockHeight > 0) {
+        buildGeneration = UUID.randomUUID()
+        collectingFor = None
+        dropCandidates(blockHeight)
         currentPackage = None
         buildRetries = 0
         selectedId.foreach(id => skipped += id)
@@ -163,7 +179,9 @@ class CandidateBuilder(client: ErgoClient,
 
     // Only the insertions were refused. Drop back to genesis for the rest of the block rather than
     // re-offering them; everything dropped is in the mempool anyway.
-    case BlockTxsRejected(height) =>
+    case BlockTxsRejected(height, identity) if height == blockHeight &&
+      identity.forall(id => currentPackage.exists(_.identity == id)) =>
+      collectingFor = None
       if (!blockTxsBlockedAt.contains(height)) {
         logger.warn(s"Node rejected the inserted transactions for block $height: " +
           "mining on the genesis transaction alone until the next block")
@@ -172,6 +190,14 @@ class CandidateBuilder(client: ErgoClient,
       }
       currentPackage.filter(p => p.blockHeight == height && p.blockTxs.nonEmpty).foreach { pkg =>
         currentPackage = Some(pkg.copy(blockTxs = Seq.empty[CandidateTx]))
+      }
+
+    case GenesisPublished(identity) =>
+      currentPackage.filter(p => p.identity == identity && p.blockTxs.isEmpty).foreach { _ =>
+        if (!augmentationStarted && config.blockTransactions && !blockTxsBlockedAt.contains(blockHeight)) {
+          augmentationStarted = true
+          collectBlockTxs(blockHeight)
+        }
       }
 
     // Drop it now rather than waiting for the refresh to notice. The build for the next block starts
@@ -196,44 +222,41 @@ class CandidateBuilder(client: ErgoClient,
     // Build results
     // ------------------------------------------------------------------
 
-    case GenesisReady(height, loaded, chosenId, data) =>
-      building = false
+    case GenesisReady(generation, height, loaded, chosenId, data) if activeBuild.contains(generation) =>
+      activeBuild = None
       // Only carries a set when the build had to load one, which is the bootstrap case. Otherwise
       // the build worked off this actor's own snapshot and there is nothing to write back.
-      loaded.foreach(boxes => collateralSet = usable(boxes))
-      if (height == blockHeight) {
+      if (height == blockHeight && generation == buildGeneration) {
+        loaded.foreach(boxes => collateralSet = usable(boxes))
         // Height-local, so it is claimed here rather than before the check.
         selectedId = Some(chosenId)
         buildRetries = 0
-        val pkg = BlockPackage(height, data)
+        val pkg = BlockPackage(height, data, parentId = parentId)
         currentPackage = Some(pkg)
         publish(pkg, "genesisBuildMs", buildStartedAt)
-        if (config.blockTransactions && !blockTxsBlockedAt.contains(height)) collectBlockTxs(height)
       } else {
         logger.info(s"Discarding genesis transaction for block $height: the chain is at $blockHeight")
       }
       drainPending()
 
-    case BlockTxsCollected(height, txs) =>
-      if (collectingFor.contains(height)) collectingFor = None
-      if (txs.nonEmpty) {
-        currentPackage.filter(_.blockHeight == height) match {
-          case Some(pkg) =>
-            val updated = pkg.withBlockTxs(txs)
-            currentPackage = Some(updated)
-            publish(updated, "augmentedBuildMs", collectStartedAt)
-          case None =>
-            logger.info(s"Discarding ${txs.size} transaction(s) for block $height: " +
-              "the package they were built for is gone")
+    case BlockTxsCollected(attempt, txs) =>
+      if (collectingFor.contains(attempt)) {
+        if (nowNanos() - attempt.startedAt >= config.blockTxTimeout.milliseconds.toNanos) {
+          expireCollection(attempt)
+        } else {
+          collectingFor = None
+          currentPackage.filter(p => p.blockHeight == attempt.height &&
+            p.collateral.txId == attempt.genesisId && !blockTxsBlockedAt.contains(attempt.height))
+            .filter(_ => txs.nonEmpty).foreach { pkg =>
+              val updated = pkg.withBlockTxs(txs)
+              currentPackage = Some(updated)
+              publish(updated, "augmentedBuildMs", collectStartedAt)
+            }
         }
       }
 
-    case CollectTimedOut(height) =>
-      if (collectingFor.contains(height)) {
-        collectingFor = None
-        logger.warn(s"Transaction sources did not answer for block $height within " +
-          s"${config.blockTxTimeout}ms. Now mining on the genesis transaction alone")
-      }
+    case CollectTimedOut(attempt) =>
+      if (collectingFor.contains(attempt)) expireCollection(attempt)
 
     case CollateralSetLoaded(boxes) =>
       refreshing = false
@@ -255,11 +278,11 @@ class CandidateBuilder(client: ErgoClient,
       // Whatever was already loaded still mines, so this is not fatal on its own.
       logger.error(s"Failed to refresh the collateral set: ${ex.getMessage}", ex)
 
-    case BuildFailed(height, failedId, ex) =>
-      building = false
+    case BuildFailed(generation, height, failedId, ex) if activeBuild.contains(generation) =>
+      activeBuild = None
       // Everything a failure touches — the skip set, the current choice and the retry budget — is
       // owned by the height it was raised for.
-      if (height == blockHeight) {
+      if (height == blockHeight && generation == buildGeneration) {
         logger.error(s"Failed to build the genesis transaction for block $height: ${ex.getMessage}", ex)
         // Skip the box before retrying, so the next attempt draws a different one. Bounded until MaxBuildRetries.
         failedId.foreach(id => skipped += id)
@@ -293,6 +316,14 @@ class CandidateBuilder(client: ErgoClient,
   private def dropCandidates(height: Int): Unit =
     txSources.foreach(_ ! CandidateTxsDropped(height))
 
+  private def expireCollection(attempt: CollectionAttempt): Unit = {
+    collectingFor = None
+    blockTxsBlockedAt = Some(attempt.height)
+    dropCandidates(attempt.height)
+    logger.warn(s"Transaction collection for block ${attempt.height} exceeded " +
+      s"${config.blockTxTimeout}ms; mining on genesis alone until the next block")
+  }
+
   private def publish(pkg: BlockPackage, stage: String, startedAtNanos: Long): Unit = {
     logger.info(s"Ready: ${pkg.describe} with" +
       s" txSize: ${pkg.collateral.txBytes.length} and collatBytes: " +
@@ -318,10 +349,13 @@ class CandidateBuilder(client: ErgoClient,
    * dispatcher. The set is only loaded inside the build when nothing has been pre-loaded yet.
    */
   private def startBuild(height: Int): Unit = {
-    if (building) {
+    if (activeBuild.nonEmpty) {
       pendingBuild = Some(height)
     } else {
-      building = true
+      activeBuild = Some(buildGeneration)
+      augmentationStarted = false
+      collectingFor = None
+      val generation = buildGeneration
       buildStartedAt = System.nanoTime()
       val snapshot = collateralSet
       val sticky = selectedId
@@ -349,13 +383,13 @@ class CandidateBuilder(client: ErgoClient,
 
           val chosenId = chosen.id
           Try(txBuilder.buildGenesis(ctx, chosen.input, height)) match {
-            case Success(data) => GenesisReady(height, loaded, chosenId, data)
-            case Failure(ex) => BuildFailed(height, Some(chosenId), ex)
+            case Success(data) => GenesisReady(generation, height, loaded, chosenId, data)
+            case Failure(ex) => BuildFailed(generation, height, Some(chosenId), ex)
           }
         }
-      }.onComplete {
+      }(buildEc).onComplete {
         case Success(msg) => self ! msg
-        case Failure(ex) => self ! BuildFailed(height, None, ex)
+        case Failure(ex) => self ! BuildFailed(generation, height, None, ex)
       }
     }
   }
@@ -367,17 +401,19 @@ class CandidateBuilder(client: ErgoClient,
    */
   private def collectBlockTxs(height: Int): Unit =
     if (collectingFor.isEmpty && txSources.nonEmpty && config.maxBlockTxs > 0) {
-      collectingFor = Some(height)
+      val attempt = CollectionAttempt(UUID.randomUUID(), height,
+        currentPackage.get.collateral.txId, nowNanos())
+      collectingFor = Some(attempt)
       collectStartedAt = System.nanoTime()
       context.system.scheduler.scheduleOnce(
-        config.blockTxTimeout.milliseconds, self, CollectTimedOut(height))(context.dispatcher)
+        config.blockTxTimeout.milliseconds, self, CollectTimedOut(attempt))(context.dispatcher)
 
       // Each source is asked for the whole budget and the cap applied afterwards, so an empty first
       // source does not waste the block's slots.
       val asks = txSources.map { source =>
         (source ? RequestBlockTxs(height, config.maxBlockTxs))
           .mapTo[BlockTxsReady]
-          .map(_.txs)
+          .map(reply => if (reply.blockHeight == height) reply.txs else Seq.empty[CandidateTx])
           .recover {
             case ex =>
               logger.warn(s"A transaction source failed for block $height: ${ex.getMessage}")
@@ -386,12 +422,12 @@ class CandidateBuilder(client: ErgoClient,
       }
 
       Future.sequence(asks)
-        .map(all => BlockTxsCollected(height, all.flatten.take(config.maxBlockTxs)))
+        .map(all => BlockTxsCollected(attempt, all.flatten.take(config.maxBlockTxs)))
         .onComplete {
           case Success(msg) => self ! msg
           case Failure(ex) =>
             logger.warn(s"Could not collect block transactions for $height: ${ex.getMessage}")
-            self ! BlockTxsCollected(height, Seq.empty[CandidateTx])
+            self ! BlockTxsCollected(attempt, Seq.empty[CandidateTx])
         }
     }
 
@@ -400,7 +436,7 @@ class CandidateBuilder(client: ErgoClient,
       refreshing = true
       Future {
         client.execute(ctx => CollateralSetLoaded(txBuilder.loadCollateral(ctx)))
-      }.onComplete {
+      }(refreshEc).onComplete {
         case Success(msg) => self ! msg
         case Failure(ex) => self ! RefreshFailed(ex)
       }
@@ -429,14 +465,16 @@ object CandidateBuilder {
 
   private[mining] case class RefreshFailed(ex: Throwable)
 
-  private[mining] case class GenesisReady(blockHeight: Int,
+  private[mining] case class GenesisReady(generation: UUID, blockHeight: Int,
                                           loaded: Option[Seq[CollateralCandidate]],
                                           chosenId: String,
                                           data: CollateralData)
 
-  private[mining] case class BlockTxsCollected(blockHeight: Int, txs: Seq[CandidateTx])
+  private[mining] case class CollectionAttempt(id: UUID, height: Int, genesisId: String, startedAt: Long)
 
-  private[mining] case class CollectTimedOut(blockHeight: Int)
+  private[mining] case class BlockTxsCollected(attempt: CollectionAttempt, txs: Seq[CandidateTx])
 
-  private[mining] case class BuildFailed(blockHeight: Int, failedId: Option[String], ex: Throwable)
+  private[mining] case class CollectTimedOut(attempt: CollectionAttempt)
+
+  private[mining] case class BuildFailed(generation: UUID, blockHeight: Int, failedId: Option[String], ex: Throwable)
 }

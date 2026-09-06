@@ -16,7 +16,11 @@ import transactions.BlockTxMessages.CandidateTx
 case class BlockPackage(blockHeight: Int,
                         collateral: CollateralData,
                         blockTxs: Seq[CandidateTx] = Seq.empty[CandidateTx],
-                        revision: Int = 0) {
+                        revision: Int = 0,
+                        parentId: String = "") {
+
+  def identity: MiningMessages.CandidateIdentity =
+    MiningMessages.CandidateIdentity(blockHeight, parentId, collateral.txId, revision)
 
   /** The full package. */
   def allTxs: Seq[String] = collateral.txJSON +: blockTxs.map(_.json)

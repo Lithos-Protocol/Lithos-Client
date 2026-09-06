@@ -1,4 +1,5 @@
 package transactions.wallet
+import transactions.engine.{EngineFunding, FundingAllocation, FundingSource, FundingExpiredException}
 
 import akka.actor.ActorSystem
 import akka.testkit.{TestKit, TestProbe}
@@ -12,14 +13,14 @@ import org.scalatest.flatspec.AnyFlatSpecLike
 import org.scalatest.matchers.should.Matchers
 import org.scalatestplus.mockito.MockitoSugar
 import support.FakeNodeContext
-import transactions.wallet.WalletMessages._
+import transactions.engine.EngineWalletMessages._
 import work.lithos.mutations.{InputUTXO, Token}
 
 import scala.concurrent.duration._
 import scala.concurrent.{Await, ExecutionContext, Future}
 import scala.util.Try
 
-class WalletSelectorSpec extends TestKit(ActorSystem("wallet-selector-spec"))
+class EngineFundingSpec extends TestKit(ActorSystem("wallet-selector-spec"))
   with AnyFlatSpecLike with Matchers with BeforeAndAfterAll with MockitoSugar {
 
   private implicit val ec: ExecutionContext = system.dispatcher
@@ -34,9 +35,9 @@ class WalletSelectorSpec extends TestKit(ActorSystem("wallet-selector-spec"))
     nodeContext.getClient.execute(ctx => box.toInputUTXO(ctx))
   }
 
-  "WalletSelector" should "provide the shared synchronous selection interface" in {
+  "EngineFunding" should "provide the shared synchronous selection interface" in {
     val manager = TestProbe()
-    val selector = WalletSelector(manager.ref, 2.seconds, ec)
+    val selector = EngineFunding(manager.ref, 2.seconds, ec)
     val selected = input(1000L)
 
     val result = Future(selector.reserve(1000L))
@@ -49,56 +50,38 @@ class WalletSelectorSpec extends TestKit(ActorSystem("wallet-selector-spec"))
     Await.result(result, 2.seconds).inputs shouldEqual Seq(selected)
   }
 
-  it should "stop before submission when the manager denies the lease" in {
+  it should "stop candidate publication when the engine refuses its allocation" in {
     val manager = TestProbe()
-    val selector = WalletSelector(manager.ref, 2.seconds, ec)
-    val selected = input(1000L)
-
-    val reserved = Future(selector.reserve(1000L))
+    val funding = EngineFunding(manager.ref, 2.seconds, ec)
+    val reserved = Future(funding.reserve(1000L))
     val request = manager.expectMsgType[RetrieveInputs]
-    manager.reply(WalletInputs(Seq(selected), request.reservationId))
-    val reservation = Await.result(reserved, 2.seconds)
-
-    val begun = Future(Try(reservation.beginSubmission()))
-    val begin = manager.expectMsgType[BeginReservationSubmission]
-    begin.reservationId shouldEqual request.reservationId
-    begin.expectedInputIds shouldEqual Set(selected.id.toString)
-    manager.reply(ReservationSubmissionStarted(begin.reservationId, accepted = false))
-
-    val cancel = manager.expectMsgType[CancelReservationSubmission]
-    cancel.reservationId shouldEqual request.reservationId
-    cancel.expectedInputIds shouldEqual Set(selected.id.toString)
-    manager.reply(ReservationSubmissionCancelled(cancel.reservationId, accepted = false))
-    Await.result(begun, 2.seconds).isFailure shouldBe true
-    manager.expectNoMessage(200.millis)
+    manager.reply(WalletInputs(Seq(input(1000L)), request.reservationId))
+    val allocation = Await.result(reserved, 2.seconds)
+    val held = Future(Try(allocation.holdForCandidate()))
+    manager.expectMsg(HoldReservationForCandidate(request.reservationId))
+    manager.reply(ReservationHeldForCandidate(request.reservationId, accepted = false))
+    Await.result(held, 2.seconds).isFailure shouldBe true
+    manager.expectNoMessage(100.millis)
   }
 
-  it should "cancel the exact lease when the submission acknowledgement times out" in {
+  it should "retain candidate ownership when its acknowledgement is lost" in {
     val manager = TestProbe()
-    val selector = WalletSelector(manager.ref, 200.millis, ec)
+    val funding = EngineFunding(manager.ref, 200.millis, ec)
     val selected = input(1000L)
-
-    val reserved = Future(selector.reserve(1000L))
+    val reserved = Future(funding.reserve(1000L))
     val request = manager.expectMsgType[RetrieveInputs]
     manager.reply(WalletInputs(Seq(selected), request.reservationId))
-    val reservation = Await.result(reserved, 2.seconds)
-
-    val begun = Future(Try(reservation.beginSubmission()))
-    val begin = manager.expectMsgType[BeginReservationSubmission]
-    begin.expectedInputIds shouldEqual Set(selected.id.toString)
-    // No acknowledgement: the caller must never proceed to the node on an ambiguous local ask.
-    val cancel = manager.expectMsgType[CancelReservationSubmission](2.seconds)
-    cancel.reservationId shouldEqual request.reservationId
-    cancel.expectedInputIds shouldEqual Set(selected.id.toString)
-    manager.reply(ReservationSubmissionCancelled(cancel.reservationId, accepted = true))
-
-    Await.result(begun, 2.seconds).isFailure shouldBe true
-    manager.expectNoMessage(200.millis)
+    val allocation = Await.result(reserved, 2.seconds)
+    val held = Future(Try(allocation.holdForCandidate()))
+    manager.expectMsg(HoldReservationForCandidate(request.reservationId))
+    manager.expectMsg(MarkReservationUncertain(request.reservationId))
+    Await.result(held, 2.seconds).isFailure shouldBe true
+    allocation.release()
+    manager.expectNoMessage(100.millis)
   }
-
   it should "release a partial reservation before reporting insufficient tokens" in {
     val manager = TestProbe()
-    val selector = WalletSelector(manager.ref, 2.seconds, ec)
+    val selector = EngineFunding(manager.ref, 2.seconds, ec)
     val tokenId = ErgoId.create("bb" * 32)
     val selected = input(1000L, Some(Token(tokenId, 1L)))
 
@@ -113,7 +96,7 @@ class WalletSelectorSpec extends TestKit(ActorSystem("wallet-selector-spec"))
 
   it should "expose covering selection, release, and returned change" in {
     val manager = TestProbe()
-    val selector = WalletSelector(manager.ref, 2.seconds, ec)
+    val selector = EngineFunding(manager.ref, 2.seconds, ec)
     val selected = input(2000L)
 
     val covering = Future(selector.reserveCovering(1000L))

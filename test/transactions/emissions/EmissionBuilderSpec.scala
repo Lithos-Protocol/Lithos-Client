@@ -11,7 +11,7 @@ import org.scalatest.propspec.AnyPropSpec
 import org.scalatestplus.mockito.MockitoSugar
 import support.FakeNodeContext
 import transactions.ProtocolContracts
-import transactions.wallet.{WalletReservation, WalletSource}
+import transactions.engine.{FundingAllocation, FundingSource}
 import work.lithos.mutations.{Contract, InputUTXO, Token, UTXO}
 
 /**
@@ -39,14 +39,14 @@ class EmissionBuilderSpec extends AnyPropSpec with EmissionSpecBase with Mockito
   private val emissionConfig: EmissionConfig = EmissionConfig.Default.copy(txFee = txFee)
 
   /** `genJoin`, `genActivate` and `genClear` take their funding as an argument, so this never runs. */
-  private object UnusedWallet extends WalletSource {
-    def reserve(value: Long, tokens: Seq[Token]): WalletReservation =
+  private object UnusedWallet extends FundingSource {
+    def reserve(value: Long, tokens: Seq[Token]): FundingAllocation =
       throw new IllegalStateException("a builder under test asked the wallet for funds")
-    def reserveCovering(value: Long): WalletReservation =
+    def reserveCovering(value: Long): FundingAllocation =
       throw new IllegalStateException("a builder under test asked the wallet for one input")
-    def reserveCoveringP2PK(value: Long): WalletReservation =
+    def reserveCoveringP2PK(value: Long): FundingAllocation =
       throw new IllegalStateException("a builder under test asked the wallet for one P2PK input")
-    def reserveKnown(inputs: Seq[InputUTXO]): WalletReservation =
+    def reserveKnown(inputs: Seq[InputUTXO]): FundingAllocation =
       throw new IllegalStateException("a builder under test asked the wallet to hold known change")
     def giveBack(boxes: Seq[InputUTXO]): Unit = ()
   }

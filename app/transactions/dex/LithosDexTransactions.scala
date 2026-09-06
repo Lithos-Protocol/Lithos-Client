@@ -7,7 +7,7 @@ import org.ergoplatform.appkit._
 import org.ergoplatform.appkit.scalaapi._
 import org.ergoplatform.sdk.ErgoId
 import sigma.Colls
-import transactions.wallet.{WalletReservation, WalletSelector}
+
 import transactions.dex.LDBoxes.Provision
 import work.lithos.mutations.{InputUTXO, Token, TxBuilder, UTXO}
 
@@ -46,20 +46,9 @@ object LithosDexTransactions {
   final val TX_FEE: Long = Parameters.MinFee * 2
   private final val FUNDING_HEADROOM: Long = Parameters.MinFee * 3
 
-  /** Release a reservation when local construction or signing fails. */
-  private def funded[A](walletSelector: WalletSelector,
-                        value: Long,
-                        tokens: Seq[Token] = Seq.empty)
-                       (build: WalletReservation => A): A = {
-    val reservation = walletSelector.reserve(value, tokens)
-    try build(reservation)
-    catch {
-      case NonFatal(ex) =>
-        reservation.release()
-        throw ex
-    }
-  }
-
+  private def funded[A <: LDFundedTx](value: Long, tokens: Seq[Token] = Seq.empty)
+                                    (build: Seq[InputUTXO] => DexUnsigned[A]): DexPlan[A] =
+    DexPlan(value, tokens, build)
   // ══════════════════════════════════════════════════════════════════════════
   //  SWAP — pool op 0
   // ══════════════════════════════════════════════════════════════════════════
@@ -77,11 +66,10 @@ object LithosDexTransactions {
    */
   def swap(ctx: BlockchainContext,
            wallet: NodeWallet,
-           walletSelector: WalletSelector,
            poolBox: InputUTXO,
            amountIn: Long,
            ergIn: Boolean,
-           minOutput: Long): LDSwapTx = {
+           minOutput: Long): DexPlan[LDSwapTx] = {
     val p = LDLiquidityPool(poolBox)
     val q = p.simSwap(amountIn, ergIn)
 
@@ -116,10 +104,10 @@ object LithosDexTransactions {
 
     val fundingValue = if (ergIn) amountIn + FUNDING_HEADROOM else FUNDING_HEADROOM
     val fundingTokens = if (ergIn) Seq.empty else Seq(Token(p.tokenY, amountIn))
-    funded(walletSelector, fundingValue, fundingTokens) { reservation =>
-      val funding = reservation.inputs
+    funded(fundingValue, fundingTokens) { funding =>
+
       val uTx = build(ctx, poolInput(poolBox, LDHelpers.POOL_SWAP) +: funding, Seq(out), wallet)
-      LDSwapTx(wallet.sign(uTx), q, reservation)
+      DexUnsigned(uTx, signed => LDSwapTx(signed, q))
     }
   }
 
@@ -136,9 +124,8 @@ object LithosDexTransactions {
    */
   def deposit(ctx: BlockchainContext,
               wallet: NodeWallet,
-              walletSelector: WalletSelector,
               poolBox: InputUTXO,
-              shares: Long): LDDepositTx = {
+              shares: Long): DexPlan[LDDepositTx] = {
     val p = LDLiquidityPool(poolBox)
     require(p.canDeposit, "the pool has no provision tokens left to hand out")
     val q = p.simDepositForShares(shares)
@@ -161,14 +148,13 @@ object LithosDexTransactions {
       LDHelpers.PROVISION_MIN)
     val ownerOut = ownerNftUTXO(ctx, wallet, p, ownerNFT, q.entryX, q.entryY, q.shares, q.amountX, q.amountY)
 
-    funded(walletSelector,
+    funded(
       q.amountX + LDHelpers.PROVISION_MIN + OWNER_BOX_VALUE + FUNDING_HEADROOM,
-      Seq(Token(p.tokenY, q.amountY))) { reservation =>
-      val funding = reservation.inputs
+      Seq(Token(p.tokenY, q.amountY))) { funding =>
+
       val uTx = build(ctx, poolInput(poolBox, LDHelpers.POOL_DEPOSIT) +: funding,
         Seq(poolOut, provisionOut, ownerOut), wallet)
-      val signed = wallet.sign(uTx)
-      LDDepositTx(signed, q, signed.getOutputsToSpend.get(1).getId.toString, ownerNFT, reservation)
+      DexUnsigned(uTx, signed => LDDepositTx(signed, q, signed.getOutputsToSpend.get(1).getId.toString, ownerNFT))
     }
   }
 
@@ -186,9 +172,8 @@ object LithosDexTransactions {
    */
   def redeem(ctx: BlockchainContext,
              wallet: NodeWallet,
-             walletSelector: WalletSelector,
              poolBox: InputUTXO,
-             provision: Provision): LDRedeemTx = {
+             provision: Provision): DexPlan[LDRedeemTx] = {
     val p = LDLiquidityPool(poolBox)
     val q = p.simRedeem(provision.shares)
     require(q.withinMinSupply,
@@ -210,15 +195,15 @@ object LithosDexTransactions {
 
     // Ownership is selected and reserved atomically with fee funding. Looking the NFT box up through
     // the node separately lets another DEX/emission/rollup request reserve the same wallet input.
-    funded(walletSelector, FUNDING_HEADROOM, Seq(Token(provision.ownerNFT, 1L))) { reservation =>
-      val walletInputs = reservation.inputs
+    funded(FUNDING_HEADROOM, Seq(Token(provision.ownerNFT, 1L))) { funding =>
+      val walletInputs = funding
       val inputs = Seq(
         poolInput(poolBox, LDHelpers.POOL_REDEEM),
         provisionInput(ctx, provision.box, LDHelpers.PROV_REDEEM)) ++ walletInputs
 
       val uTx = build(ctx, inputs, Seq(poolOut, payout), wallet,
         burn = Seq(Token(provision.ownerNFT, 1L)))
-      LDRedeemTx(wallet.sign(uTx), q, reservation)
+      DexUnsigned(uTx, signed => LDRedeemTx(signed, q))
     }
   }
 
@@ -234,9 +219,8 @@ object LithosDexTransactions {
    */
   def flush(ctx: BlockchainContext,
             wallet: NodeWallet,
-            walletSelector: WalletSelector,
             poolBox: InputUTXO,
-            vaultBox: InputUTXO): LDFlushTx = {
+            vaultBox: InputUTXO): DexPlan[LDFlushTx] = {
     val p = LDLiquidityPool(poolBox)
     val v = LDFeeValue.fromBox(vaultBox, 0, ctx.getHeight)
     require(p.canFlush, "nothing is pending: the pool refuses a flush that moves nothing")
@@ -252,14 +236,14 @@ object LithosDexTransactions {
       balanceY = v.balanceY + p.pendingY,
       accX = p.accX, accY = p.accY)
 
-    funded(walletSelector, FUNDING_HEADROOM) { reservation =>
-      val funding = reservation.inputs
+    funded(FUNDING_HEADROOM) { funding =>
+
       val inputs = Seq(
         poolInput(poolBox, LDHelpers.POOL_FLUSH),
         vaultInput(vaultBox, LDHelpers.VAULT_FLUSH)) ++ funding
 
       val uTx = build(ctx, inputs, Seq(poolOut, vaultOut), wallet)
-      LDFlushTx(wallet.sign(uTx), p.pendingX, p.pendingY, reservation)
+      DexUnsigned(uTx, signed => LDFlushTx(signed, p.pendingX, p.pendingY))
     }
   }
 
@@ -277,9 +261,8 @@ object LithosDexTransactions {
    */
   def claim(ctx: BlockchainContext,
             wallet: NodeWallet,
-            walletSelector: WalletSelector,
             vaultBox: InputUTXO,
-             provisions: Seq[Provision]): LDClaimTx = {
+             provisions: Seq[Provision]): DexPlan[LDClaimTx] = {
     require(provisions.nonEmpty, "a claim must settle at least one provision")
     val v = LDFeeValue.fromBox(vaultBox, 0, ctx.getHeight)
 
@@ -307,15 +290,15 @@ object LithosDexTransactions {
       provisionUTXO(ctx, p.box.tokens.head.id, v.accX, v.accY, p.ownerNFT, p.shares, p.value))
 
     val ownerRequirements = provisions.map(p => Token(p.ownerNFT, 1L))
-    funded(walletSelector, FUNDING_HEADROOM, ownerRequirements) { reservation =>
-      val walletInputs = reservation.inputs
+    funded(FUNDING_HEADROOM, ownerRequirements) { funding =>
+      val walletInputs = funding
       val inputs =
         Seq(vaultInput(vaultBox, LDHelpers.VAULT_CLAIM, provisions.size)) ++
           provisions.map(p => provisionInput(ctx, p.box, LDHelpers.PROV_CLAIM)) ++
           walletInputs
 
       val uTx = build(ctx, inputs, vaultOut +: provOuts, wallet)
-      LDClaimTx(wallet.sign(uTx), owedX, owedY, reservation)
+      DexUnsigned(uTx, signed => LDClaimTx(signed, owedX, owedY))
     }
   }
 
@@ -333,11 +316,10 @@ object LithosDexTransactions {
    */
   def resize(ctx: BlockchainContext,
              wallet: NodeWallet,
-             walletSelector: WalletSelector,
              poolBox: InputUTXO,
              vaultBox: InputUTXO,
              provision: Provision,
-             newShares: Long): LDResizeTx = {
+             newShares: Long): DexPlan[LDResizeTx] = {
     val p = LDLiquidityPool(poolBox)
     val v = LDFeeValue.fromBox(vaultBox, 0, ctx.getHeight)
     val q = p.simResize(provision.shares, newShares, provision.entryX, provision.entryY)
@@ -366,18 +348,17 @@ object LithosDexTransactions {
     val fundingRequirements =
       Seq(Token(provision.ownerNFT, 1L)) ++
         (if (q.increasing) Seq(Token(p.tokenY, q.amountY)) else Seq.empty)
-    funded(walletSelector,
+    funded(
       (if (q.increasing) q.amountX else 0L) + FUNDING_HEADROOM,
-      fundingRequirements) { reservation =>
-      val funding = reservation.inputs
+      fundingRequirements) { funding =>
+
       val inputs = Seq(
         poolInput(poolBox, LDHelpers.POOL_RESIZE),
         provisionInput(ctx, provision.box, LDHelpers.PROV_RESIZE),
         vaultInput(vaultBox, LDHelpers.VAULT_FLUSH)) ++ funding
 
       val uTx = build(ctx, inputs, Seq(poolOut, provOut, vaultOut), wallet)
-      val signed = wallet.sign(uTx)
-      LDResizeTx(signed, q, signed.getOutputsToSpend.get(1).getId.toString, reservation)
+      DexUnsigned(uTx, signed => LDResizeTx(signed, q, signed.getOutputsToSpend.get(1).getId.toString))
     }
   }
 
@@ -394,8 +375,7 @@ object LithosDexTransactions {
    */
   def refresh(ctx: BlockchainContext,
               wallet: NodeWallet,
-              walletSelector: WalletSelector,
-              provision: Provision): LDRefreshTx = {
+              provision: Provision): DexPlan[LDRefreshTx] = {
     val height = ctx.getHeight
     require(provision.createdHeight < height - LDHelpers.REFRESH_AGE,
       s"provision ${provision.boxId} was created at ${provision.createdHeight} and is not old enough: " +
@@ -406,13 +386,12 @@ object LithosDexTransactions {
     val out = provisionUTXO(ctx, provision.box.tokens.head.id, provision.entryX, provision.entryY,
       provision.ownerNFT, provision.shares, provision.value).setCreationHeight(height)
 
-    funded(walletSelector, FUNDING_HEADROOM) { reservation =>
-      val funding = reservation.inputs
+    funded(FUNDING_HEADROOM) { funding =>
+
       val inputs = provisionInput(ctx, provision.box, LDHelpers.PROV_REFRESH) +: funding
 
       val uTx = build(ctx, inputs, Seq(out), wallet)
-      val signed = wallet.sign(uTx)
-      LDRefreshTx(signed, signed.getOutputsToSpend.get(0).getId.toString, reservation)
+      DexUnsigned(uTx, signed => LDRefreshTx(signed, signed.getOutputsToSpend.get(0).getId.toString))
     }
   }
 
@@ -600,13 +579,12 @@ object LithosDexTransactions {
 
 sealed trait LDFundedTx {
   def tx: SignedTransaction
-  def reservation: WalletReservation
+
 }
 
 /** @param quote the swap as the pool would execute it, quoted against the very box being spent */
 case class LDSwapTx(tx: SignedTransaction,
-                    quote: lithosdex.LDSwapQuote,
-                    reservation: WalletReservation) extends LDFundedTx
+                    quote: lithosdex.LDSwapQuote) extends LDFundedTx
 
 /**
  * @param provisionBoxId id of the provision box this transaction creates, known only once signed
@@ -615,29 +593,28 @@ case class LDSwapTx(tx: SignedTransaction,
 case class LDDepositTx(tx: SignedTransaction,
                        quote: lithosdex.LDDepositQuote,
                        provisionBoxId: String,
-                       ownerNFT: ErgoId,
-                       reservation: WalletReservation) extends LDFundedTx
+                       ownerNFT: ErgoId) extends LDFundedTx
 
 case class LDRedeemTx(tx: SignedTransaction,
-                      quote: lithosdex.LDRedeemQuote,
-                      reservation: WalletReservation) extends LDFundedTx
+                      quote: lithosdex.LDRedeemQuote) extends LDFundedTx
 
 case class LDFlushTx(tx: SignedTransaction,
                      flushedX: Long,
-                     flushedY: Long,
-                     reservation: WalletReservation) extends LDFundedTx
+                     flushedY: Long) extends LDFundedTx
 
 case class LDClaimTx(tx: SignedTransaction,
                      claimedX: Long,
-                     claimedY: Long,
-                     reservation: WalletReservation) extends LDFundedTx
+                     claimedY: Long) extends LDFundedTx
 
 /** @param boxId id of the resized provision's successor */
 case class LDResizeTx(tx: SignedTransaction,
                       quote: lithosdex.LDResizeQuote,
-                      boxId: String,
-                      reservation: WalletReservation) extends LDFundedTx
+                      boxId: String) extends LDFundedTx
 
 case class LDRefreshTx(tx: SignedTransaction,
-                       boxId: String,
-                       reservation: WalletReservation) extends LDFundedTx
+                       boxId: String) extends LDFundedTx
+
+/** A worker-local funding requirement and pure unsigned builder; never queued in the engine mailbox. */
+case class DexPlan[A <: LDFundedTx](value: Long, tokens: Seq[Token],
+                                  build: Seq[InputUTXO] => DexUnsigned[A])
+case class DexUnsigned[A <: LDFundedTx](tx: UnsignedTransaction, describe: SignedTransaction => A)

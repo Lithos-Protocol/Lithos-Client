@@ -2461,10 +2461,15 @@ components:
       type: object
       x-tags: collateral-market
       required:
+        - outcome
         - txId
         - boxes
         - nanoErgs
       properties:
+        outcome:
+          type: string
+          enum: [accepted, rejected, uncertain]
+          description: Node submission outcome for the known transaction ID.
         txId:
           type: string
           example: '40b7d045a858d537cdbf072e46ffbb86c0c9f6b0e93c369c1ffcba76797636d7'
@@ -2745,12 +2750,17 @@ components:
       type: object
       x-tags: collateral-market
       required:
+        - outcome
         - txId
         - position
         - lenderAddress
         - principalNanoErgs
         - permitLit
       properties:
+        outcome:
+          type: string
+          enum: [accepted, rejected, uncertain]
+          description: Node submission outcome for the known transaction ID.
         txId:
           type: string
           example: '40b7d045a858d537cdbf072e46ffbb86c0c9f6b0e93c369c1ffcba76797636d7'
@@ -3159,9 +3169,14 @@ components:
       type: object
       x-tags: lithosdex
       required:
+        - outcome
         - amountOut
         - txId
       properties:
+        outcome:
+          type: string
+          enum: [accepted, rejected, uncertain]
+          description: Node submission outcome; uncertain retains the known transaction ID and input ownership.
         amountOut:
           type: string
           description: Amount received. Decimal string.
@@ -3268,6 +3283,7 @@ components:
       type: object
       x-tags: lithosdex
       required:
+        - outcome
         - provisionBoxId
         - ownerNFT
         - shares
@@ -3275,6 +3291,10 @@ components:
         - amountY
         - txId
       properties:
+        outcome:
+          type: string
+          enum: [accepted, rejected, uncertain]
+          description: Node submission outcome; uncertain retains the known transaction ID and input ownership.
         provisionBoxId:
           type: string
           description: UTXO id of the newly minted provision box
@@ -3373,11 +3393,16 @@ components:
       type: object
       x-tags: lithosdex
       required:
+        - outcome
         - shares
         - amountX
         - amountY
         - txId
       properties:
+        outcome:
+          type: string
+          enum: [accepted, rejected, uncertain]
+          description: Node submission outcome; uncertain retains the known transaction ID and input ownership.
         shares:
           type: string
           example: '12500000000'
@@ -3523,11 +3548,16 @@ components:
       type: object
       x-tags: lithosdex
       required:
+        - outcome
         - claimedX
         - claimedY
         - successorBoxId
         - txId
       properties:
+        outcome:
+          type: string
+          enum: [accepted, rejected, uncertain]
+          description: Node submission outcome; uncertain retains the known transaction ID and input ownership.
         claimedX:
           type: string
           description: nanoERG paid out of the vault. Decimal string.
@@ -3640,12 +3670,17 @@ components:
       type: object
       x-tags: lithosdex
       required:
+        - outcome
         - boxId
         - newShares
         - amountX
         - amountY
         - txId
       properties:
+        outcome:
+          type: string
+          enum: [accepted, rejected, uncertain]
+          description: Node submission outcome; uncertain retains the known transaction ID and input ownership.
         boxId:
           type: string
           description: New provision box id. Use it for the next request.
@@ -3741,10 +3776,15 @@ components:
       type: object
       x-tags: lithosdex
       required:
+        - outcome
         - flushedX
         - flushedY
         - txId
       properties:
+        outcome:
+          type: string
+          enum: [accepted, rejected, uncertain]
+          description: Node submission outcome; uncertain retains the known transaction ID and input ownership.
         flushedX:
           type: string
           description: nanoERG moved into the vault. Decimal string.

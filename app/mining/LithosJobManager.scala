@@ -54,6 +54,12 @@ class LithosJobManager(options: Options) extends Actor {
 
   override def receive: Receive = {
 
+    // Check admission before installing the job: subscriptions can observe it before the
+    // parent processes its publication acknowledgement.
+    case msg: ProcessTemplate if msg.publication.exists(_.expiresAt.exists(System.nanoTime() - _ >= 0L)) =>
+      sender() ! false
+      msg.publication.foreach(p => sender() ! TemplateRejected(p))
+
     // ------------------------------------------------------------------
     // Process a new block template fetched from the node.
     // Mirrors JobManager.processTemplate exactly.
@@ -62,14 +68,20 @@ class LithosJobManager(options: Options) extends Actor {
     // candidate requested for a lender's key keeps that key even when the genesis transaction is not
     // in it — mining that pays the lender for a block that spends no collateral, and costs this
     // miner the reward. Refused outright rather than mined, because there is no safe way to use it.
-    case ProcessTemplate(candidate, _, usesCollateral, _, _)
+    case ProcessTemplate(candidate, _, usesCollateral, _, _, publication)
       if !usesCollateral && candidate.collateralData != null =>
       logger.error(s"Refusing a solo template carrying collateral data for pk ${candidate.pk} at " +
         s"height ${candidate.height}: this would pay a lender for a block with no genesis " +
         "transaction. Nothing is mined on it")
       sender() ! false
+      publication.foreach(p => sender() ! TemplateRejected(p))
 
-    case ProcessTemplate(candidate, tau, usesCollateral, reducedShareMessages, mustPublish) =>
+    case InvalidateTemplate =>
+      currentJob = None
+      validJobs.clear()
+      currentIdentity = (-1L, false, "")
+
+    case ProcessTemplate(candidate, tau, usesCollateral, reducedShareMessages, mustPublish, publication) =>
       val identity = jobIdentity(candidate, usesCollateral)
       val isNew = currentJob.isEmpty || identity != currentIdentity
 
@@ -93,11 +105,12 @@ class LithosJobManager(options: Options) extends Actor {
           s"msg=${Hex.toHexString(candidate.msg).take(16)}" +
           (if (suppressed > 0) s" (ignored $suppressed mempool refresh(es) since the last job)" else ""))
         suppressed = 0
-        context.parent ! NewJobAvailable(template)
+        context.parent ! NewJobAvailable(template, publication)
         sender() ! true
       } else {
         suppressed += 1
         sender() ! false
+        publication.foreach(p => sender() ! TemplateRejected(p))
       }
 
     // ------------------------------------------------------------------

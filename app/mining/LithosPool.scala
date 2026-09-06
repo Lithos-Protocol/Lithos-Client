@@ -1,59 +1,36 @@
 package mining
 
 import akka.actor.{Actor, ActorRef, Cancellable, Props}
-import akka.pattern.pipe
-import configs.CandidateConfig
-import lfsm.LFSMHelpers
+import configs.{CandidateConfig, Contexts}
 import evaluation.NTable
+import lfsm.LFSMHelpers
 import mining.LithosPool._
 import mining.MiningMessages._
 import mutations.NodeWallet
 import nisp.{NISPDatabase, SuperShare}
+import node.model.NodeInfo
 import org.bouncycastle.util.encoders.Hex
+import org.ergoplatform.HeaderWithoutPowSerializer
 import org.ergoplatform.appkit.ErgoClient
-import org.slf4j.{Logger, LoggerFactory}
+import org.slf4j.LoggerFactory
+import scorex.crypto.hash.Blake2b256
 import scorex.utils.Ints
-import transactions.rollups.{CommitmentTransactions, DataBoxSource}
 import state.messages.StateFrameMessages.CheckBlock
+import stratum.BlockTemplate
 import stratum.data.{MiningCandidate, Options}
+import transactions.rollups.{CommitmentTransactions, DataBoxSource}
 import utils.Globals
 
-import java.net.ConnectException
+import java.util.UUID
 import scala.collection.mutable
-import scala.concurrent.duration._
 import scala.concurrent.{ExecutionContext, Future}
+import scala.concurrent.duration._
 import scala.util.{Failure, Success, Try}
 
-/**
- * Top-level pool coordination actor.
- *
- * Responsibilities
- * ────────────────
- *  • Owns and supervises LithosJobManager and CandidateBuilder as children.
- *  • Polls the Ergo node for new block templates via a scheduler tick.
- *  • Maintains the set of active ConnectionActors and broadcasts new jobs.
- *  • Forwards RequestSubscription and ProcessShare messages from ConnectionActors
- *    to LithosJobManager using `forward` so replies travel directly back to the
- *    originating StratumConnection (bypassing LithosPool on the return path).
- *  • Handles pool-level share events: block submission and NISP super-share saving.
- *
- * CandidateBuilder pushes a finished BlockPackage here as soon as it has one; this actor never
- * builds or fetches it, and mining continues whether or not a poll has one.
- *
- * Created programmatically rather than through Guice, since its parameters come from StratumConfig
- * and blockchain state at runtime: `system.actorOf(Props(new LithosPool(options, ...)))`.
- *
- * @param options             Stratum options (polling interval, tau, etc.)
- * @param useCollateral       Whether to request block candidates using collateral UTXOs
- * @param client              Ergo client for collateral retrieval
- * @param prover              Node wallet used to sign the collateral transaction
- * @param apiKey              Node API key required for /mining/candidateWithTxsAndPk
- * @param reducedShareMessages Whether to divide the tau shown to miners by 1000
- * @param nispDB              NISP database for super-share persistence
- * @param stateFrame          StateFrame actor, told to re-check the chain on every new job
- * @param candidateConfig     Tuning for CandidateBuilder — what goes into a block and how much
- *                            work may happen while a miner waits for a candidate
- */
+/** Coordinates this miner's jobs. Candidate cache mutations are serialized off-mailbox;
+  * chain observations and solved blocks retain independent capacity during slow candidate HTTP.
+  * Only a qualified, acknowledged job permits optional transaction collection.
+  */
 class LithosPool(options: Options,
                  useCollateral: Boolean,
                  client: ErgoClient,
@@ -65,538 +42,359 @@ class LithosPool(options: Options,
                  forceConfigDiff: Boolean,
                  diffRefreshInterval: Int,
                  candidateConfig: CandidateConfig = CandidateConfig.Default,
-                 txSources: Seq[ActorRef] = Seq.empty[ActorRef]) extends Actor {
+                 txSources: Seq[ActorRef] = Seq.empty) extends Actor {
 
-  private val logger: Logger = LoggerFactory.getLogger("LithosPool")
-  implicit private val ec: ExecutionContext = context.dispatcher
+  private val logger = LoggerFactory.getLogger("LithosPool")
+  private implicit val ec: ExecutionContext = context.dispatcher
+  private val candidateEc = context.system.dispatchers.lookup(Contexts.key(Contexts.CandidateIo))
+  private val controlEc = context.system.dispatchers.lookup(Contexts.key(Contexts.MiningControlIo))
+  private val backgroundEc = context.system.dispatchers.lookup(Contexts.key(Contexts.Database))
+  private val incarnation = UUID.randomUUID()
 
-  // ─── children & dependencies ──────────────────────────────────────────────
+  protected def createJobManager(): ActorRef = context.actorOf(Props(new LithosJobManager(options)), "job-manager")
+  lazy val jobManagerActor: ActorRef = createJobManager()
 
-  /** Child actor that owns all job and share-validation state. */
-  val jobManagerActor: ActorRef =
-    context.actorOf(Props(new LithosJobManager(options)), "job-manager")
-
-  /** Child actor that builds the genesis transaction and assembles the rest of the block. */
-  val candidateBuilder: Option[ActorRef] =
-    if (useCollateral)
-      Some(context.actorOf(Props(new CandidateBuilder(
-        client, prover, Globals.getNodeConfig.getNodeApi, candidateConfig, txSources)), "candidate-builder"))
+  /** Dependency seams keep the production handshake testable without Globals or live HTTP. */
+  protected lazy val nodeInterface: MiningNodeInterface = new MiningNodeInterface(options.nodeApiUrl)
+  protected def createCandidateBuilder(): Option[ActorRef] =
+    if (useCollateral) Some(context.actorOf(Props(new CandidateBuilder(
+      client, prover, Globals.getNodeConfig.getNodeApi, candidateConfig, txSources)), "candidate-builder"))
     else None
+  lazy val candidateBuilder: Option[ActorRef] = createCandidateBuilder()
+  protected def nowNanos(): Long = System.nanoTime()
 
-  private val nodeInterface = new MiningNodeInterface(options.nodeApiUrl)
-
-  /**
-   * Reader for this miner's difficulty commitment. Lazy and built from the singleton, the same
-   * deliberate exception as `CandidateBuilder` above: this actor takes its client and prover as
-   * constructor arguments rather than a NodeContext, and the two paths move together.
-   */
-  private lazy val commitments =
-    new CommitmentTransactions(Globals.getNodeConfig, DataBoxSource.Stored)
-
-  // ─── mutable state ────────────────────────────────────────────────────────
-
-  /** connectionId → StratumConnection, used for broadcasting and connection tracking. */
-  private val connections: mutable.HashMap[String, ActorRef] = mutable.HashMap.empty
-
+  private lazy val commitments = new CommitmentTransactions(Globals.getNodeConfig, DataBoxSource.Stored)
+  private val connections = mutable.HashMap.empty[String, ActorRef]
   private var pollTicker: Option[Cancellable] = None
   private var diffTicker: Option[Cancellable] = None
-  private var tau: BigInt = BigInt(options.tau)
-
-  /**
-   * What CandidateBuilder has ready, and the block it was built for. Only usable at the exact
-   * height it names, since the genesis transaction pins that height into the holding box's R7 and
-   * its proof-of-spend box's creation height, so a stale one is dropped rather than offered.
-   */
+  private var candidateTimer: Option[Cancellable] = None
+  private var tau = BigInt(options.tau)
+  private var refreshingDifficulty = false
+  private var tip: Option[ChainTip] = None
+  private var protocolVersion = options.data.protocolVersion
+  private var observing: Option[UUID] = None
+  private var observationRequired = true
   private var blockPackage: Option[BlockPackage] = None
+  private var activeRequest: Option[CandidateRequest] = None
+  private var publishing: Option[(CandidateRequest, MiningCandidate)] = None
+  private var servedCandidate: Option[CandidateIdentity] = None
+  private var servedWork: Option[(String, String)] = None
+  private var publishedGenesis: Option[(ChainTip, String)] = None
+  private var extrasRejected: Option[(ChainTip, String)] = None
+  private var rejectedGenesis = Set.empty[String]
+  private var rebuilds = 0
+  private var genesisDeadline = 0L
+  private var lastJobAt = 0L
+  private var cacheDirty = true
+  private var restoreGenesis = false
 
-  /** Last block height observed from the node, i.e. the block currently being mined. */
-  private var lastBlockHeight: Int = 0
-
-  /** Height whose inserted transactions the node refused; its genesis transaction is still good. */
-  private var extrasRejectedAt: Option[Int] = None
-
-  /** Collateral rebuilds asked for during this block, capped by [[MaxRebuildsPerBlock]]. */
-  private var rebuildsThisBlock: Int = 0
-
-  /**
-   * Genesis transactions the node has already refused, so they are not offered again on every poll.
-   *
-   * Keyed by TRANSACTION, not by height: a rebuild for the same block produces a different genesis
-   * transaction from a different collateral box, and that one deserves a try. Keying by height
-   * blocked the corrected package too and sent the whole block solo.
-   */
-  private var rejectedGenesisTxs: Set[String] = Set.empty
-
-  /** When to stop waiting for this block's genesis transaction and put out a solo job instead. */
-  private var genesisDeadline: Option[Long] = None
-
-  /**
-   * What the candidate miners are currently working was fetched for: height, genesis transaction,
-   * and whether the inserted transactions were included.
-   *
-   * Asking the node for a candidate REPLACES the one it has cached, and it validates submitted
-   * solutions against that cache rather than against whatever it handed out. So polling the
-   * candidate endpoint on a timer quietly invalidates the job miners are hashing: a solution found
-   * more than a moment after its job comes back `h(f) < b`. So a candidate is only fetched when it
-   * will also be published: when this key changes, or on the mempool refresh below.
-   */
-  private var servedCandidate: Option[(Int, String, Boolean)] = None
-
-  /** When a job last went out, so nothing is fetched that the job manager would then hold back. */
-  private var lastJobAt: Long = 0L
-
-  /** The header last published, so a refetch that changed nothing is not broadcast again. */
-  private var servedMsg: Array[Byte] = Array.emptyByteArray
-
-  /** `System.nanoTime` when the last candidate went to the job manager, and which stage it was. */
-  private var candidateSentAt: Long = 0L
-  private var candidateStage: String = ""
-
-  private def stillWaitingForGenesis: Boolean =
-    candidateBuilder.isDefined && genesisDeadline.exists(System.currentTimeMillis() < _)
-
-  /**
-   * Whether to pick up transactions that reached the mempool since this block's job went out.
-   *
-   * Worth doing — those are fees — and a same-height job costs a rig very little. It is paced rather
-   * than done every poll because each fetch replaces the copy the node validates solutions against,
-   * so a block found on the previous job in the moments after a refresh comes back `h(f) < b`. That
-   * window is the notify round trip; the interval decides how often it is opened.
-   *
-   * The decision belongs here, not where the job goes out: a candidate fetched and then held back
-   * strands the job miners are already on, which is the same failure with none of the benefit.
-   */
-  private def mempoolRefreshDue: Boolean =
-    candidateConfig.mempoolRefreshMs > 0 &&
-      System.currentTimeMillis() - lastJobAt >= candidateConfig.mempoolRefreshMs
-
-  // ─── lifecycle ────────────────────────────────────────────────────────────
+  // One useful solution per work message is sufficient. The bound covers the job manager's
+  // retained job window; a flood cannot create an unbounded HTTP queue.
+  private var submitting: Option[SolutionWork] = None
+  private var solutionQueue = Vector.empty[SolutionWork]
 
   override def preStart(): Unit = {
-    // Verify node connectivity and read initial chain parameters
-    if (!nodeInterface.isOnline)
-      throw new ConnectException("Ergo node is offline: cannot start LithosPool")
-
-    val info = nodeInterface.info()
-    options.data.protocolVersion = info.parameters.blockVersion
-    options.data.chainDifficulty = info.difficulty.getOrElse(BigInt(0)).bigInteger
-      .multiply(java.math.BigInteger.valueOf(options.difficultyMultiplier))
-
-    logger.info(s"LithosPool started. protocolVersion=${options.data.protocolVersion}, polling every ${options.blockRefreshInterval}ms")
-
-    // Force the N table now. It is a lazy val built by scanning every height to 4.2M, so whichever
-    // share arrives first would otherwise pay for it and answer seconds late.
     NTable.lookUp(1)
-
-    // A solo candidate, since there is no package yet, but it is also what tells CandidateBuilder
-    // which block to build for.
-    fetchBlockTemplate()
-
-    // Schedule periodic template refresh (mirrors Pool.start's ScheduledExecutor)
-    pollTicker = Some(
-      context.system.scheduler.scheduleWithFixedDelay(
-        options.blockRefreshInterval.milliseconds,
-        options.blockRefreshInterval.milliseconds,
-        self, PollBlockTemplate
-      )(context.dispatcher)
-    )
-
-    diffTicker = Some(
-      context.system.scheduler.scheduleWithFixedDelay(
-        diffRefreshInterval.milliseconds,
-        diffRefreshInterval.milliseconds,
-        self, RefreshDifficulty
-      )(context.dispatcher)
-    )
+    jobManagerActor
+    candidateBuilder
+    self ! PollBlockTemplate
+    pollTicker = Some(context.system.scheduler.scheduleWithFixedDelay(
+      options.blockRefreshInterval.milliseconds, options.blockRefreshInterval.milliseconds,
+      self, PollBlockTemplate))
+    diffTicker = Some(context.system.scheduler.scheduleWithFixedDelay(
+      diffRefreshInterval.milliseconds, diffRefreshInterval.milliseconds, self, RefreshDifficulty))
   }
 
   override def postStop(): Unit = {
     pollTicker.foreach(_.cancel())
     diffTicker.foreach(_.cancel())
+    candidateTimer.foreach(_.cancel())
   }
-
-  // ─── receive ──────────────────────────────────────────────────────────────
 
   override def receive: Receive = {
+    case PollBlockTemplate => observeChain()
+    case ChainObserved(id, result) if observing.contains(id) =>
+      observing = None
+      result match {
+        case Success(info) =>
+          acceptObservation(info)
+          driveCandidate()
+        case Failure(ex) =>
+          observationRequired = true
+          logger.warn(s"Cannot refresh mining chain state: ${ex.getMessage}; retaining existing work")
+      }
 
-    // Arrives at least twice per block: the genesis transaction alone, then each later revision.
     case BlockPackageReady(pkg) =>
-      if (pkg.blockHeight >= lastBlockHeight) {
+      if (tip.contains(ChainTip(pkg.blockHeight, pkg.parentId)) &&
+        rejectedGenesis.size <= MaxRebuildsPerBlock &&
+        !rejectedGenesis.contains(pkg.collateral.txId) &&
+        blockPackage.forall(p => p.collateral.txId != pkg.collateral.txId || pkg.revision >= p.revision)) {
         blockPackage = Some(pkg)
-        // Push the job out now rather than at the next poll tick, which is the whole point of
-        // publishing the genesis transaction on its own.
-        fetchBlockTemplate()
-      } else {
-        logger.info(s"Ignoring package for block ${pkg.blockHeight}; the chain is at $lastBlockHeight")
+        driveCandidate()
       }
 
-    case GetJobManager =>
-      sender() ! jobManagerActor
+    case CandidateFetched(id, result) if activeRequest.exists(_.id == id) =>
+      val request = activeRequest.get
+      activeRequest = None
+      admitCandidate(request, result)
 
-    case RefreshDifficulty =>
-      val stratumTau = {
-        if(reducedShareMessages)
-          tau / 10000
-        else
-          tau
+    case CandidateExpired(id) if activeRequest.orElse(publishing.map(_._1)).exists(_.id == id) =>
+      val request = activeRequest.orElse(publishing.map(_._1)).get
+      if (request.hasExtras && current(request)) {
+        rejectExtras(request, "candidate request exceeded its publication deadline")
+        invalidateCachedJob()
+        driveCandidate()
       }
-      logger.info(s"LithosPool is using the following difficulty settings:")
-      logger.info(s"NISP    | diff/tau/score: ${LFSMHelpers.formatTau(tau)} / $tau / ${LFSMHelpers.convertTauOrScore(tau)} ")
-      logger.info(s"Stratum | diff/tau/score: ${LFSMHelpers.formatTau(stratumTau)} / $stratumTau / ${LFSMHelpers.convertTauOrScore(stratumTau)} ")
-      refreshDifficulty
-    case UpdatedDifficulty(nextTau) =>
-      nextTau match {
-        case Failure(exception) =>
-          logger.error("Got error while refreshing difficulty", exception)
-        case Success(updatedTau) =>
-          if(updatedTau != tau){
-            if(!forceConfigDiff) {
-              tau = updatedTau
-              logger.info(s"Updated stratum diff ${LFSMHelpers.formatTau(updatedTau)} (score: ${LFSMHelpers.convertTauOrScore(updatedTau)})" +
-                s" and tau $updatedTau")
-            }else{
-              logger.warn(s"Got updated stratum diff ${LFSMHelpers.formatTau(updatedTau)} and tau ${updatedTau}," +
-                s"but forceConfigDiff was enabled")
-            }
-          }
-      }
-    // ------------------------------------------------------------------
-    // Block-template polling
-    // ------------------------------------------------------------------
-    case PollBlockTemplate =>
-      fetchBlockTemplate()
 
-    // ------------------------------------------------------------------
-    // Job events from LithosJobManager
-    // ------------------------------------------------------------------
-    case NewJobAvailable(template) =>
-      lastJobAt = System.currentTimeMillis()
-      connections.values.foreach(_ ! BroadcastJob(template))
-      logger.info(s"Broadcasting new job ${template.jobId} to ${connections.size} miner(s)" +
-        publicationLatency())
-      stateFrame ! CheckBlock
-
-    case JobUpdated(template) =>
-      connections.values.foreach(_ ! BroadcastJob(template))
-      logger.info(s"Broadcasting refreshed job ${template.jobId} to ${connections.size} miner(s)" +
-        publicationLatency())
-
-    // ------------------------------------------------------------------
-    // Connection lifecycle
-    // ------------------------------------------------------------------
-    case MinerConnected(connectionId, connectionActor) =>
-      connections.put(connectionId, connectionActor)
-      logger.info(s"Miner connected: $connectionId (${connections.size} active)")
-
-    case MinerDisconnected(connectionId) =>
-      connections.remove(connectionId)
-      logger.info(s"Miner disconnected: $connectionId (${connections.size} active)")
-
-    // ------------------------------------------------------------------
-    // Forward subscription and share messages to LithosJobManager.
-    // Using `forward` preserves the original sender (StratumConnection) so
-    // LithosJobManager's reply goes directly back without a second hop.
-    // ------------------------------------------------------------------
-    case RequestSubscription =>
-      jobManagerActor.forward(RequestSubscription)
-
-    case msg: ProcessShare =>
-      jobManagerActor.forward(msg)
-
-    // ------------------------------------------------------------------
-    // Pool-level share handling: block submission and NISP super-share saving.
-    // This message is sent by StratumConnection after it has already replied
-    // OK to the miner, so these operations run asynchronously.
-    // ------------------------------------------------------------------
-    case accepted: ShareAccepted =>
-      if (accepted.isBlock) {
-        logger.info(s"Submitting block solution from ${accepted.workerName} with nonce ${Hex.toHexString(accepted.nonce)}")
-        // The solved job's own key, never the pool's latest: a block starts on a solo candidate
-        // under the node's key and switches to the lender's when genesis lands, so the two differ
-        // within one block and a stale job would otherwise be submitted under the wrong one.
-        nodeInterface.sendSolution(Hex.toHexString(accepted.nonce), accepted.candidate.pk)
-        // If this block was mined on a collateral box, that box is now spent. Tell the builder before
-        // the next ChainAdvanced, which is the build it would otherwise poison.
-        Option(accepted.candidate.collateralData).foreach { data =>
-          candidateBuilder.foreach(_ ! CollateralSpent(data.collateralId))
-        }
-        // Immediately fetch a new template after submitting a block
-        fetchBlockTemplate()
-      }
-      if (accepted.isSuperShare) {
-        // Off-thread: this deserialises the candidate proof, hashes it and writes to the NISP
-        // database. Doing it inline holds up every other message this actor handles, including the
-        // next block template.
-        Future(saveSuperShare(accepted))
-      }
-  }
-
-  // ─── private helpers ──────────────────────────────────────────────────────
-
-  /**
-   * Fetches a block template from the Ergo node, with the current BlockPackage inserted when there
-   * is one for the block being mined.  Mirrors Pool.getBlockTemplate, including the fallback to
-   * solo-mining whenever the collateral candidate cannot be produced.
-   */
-  private def fetchBlockTemplate(): Unit =
-    try {
-      val publicationStartedAtNanos = System.nanoTime()
-      getCandidate.foreach { case (candidate, usedCollateral) =>
-        // A mempool refresh often gets the candidate the node already had, because the mempool has
-        // not moved since the last fetch. Publishing that is a notify that restarts every rig's work
-        // for the header they are already on, and buys nothing.
-        //
-        // This is the one case where dropping a fetched candidate is safe, and it is safe for the
-        // exact reason 3.30 says the others are not: an identical header IS what the node still has
-        // cached, so there is no job to strand. Compare the header, not the key it was fetched under.
-        if (java.util.Arrays.equals(candidate.msg, servedMsg)) ()
+    case NewJobAvailable(template, publication) if sender() == jobManagerActor =>
+      publishing.filter { case (request, candidate) =>
+        publication.contains(publicationFor(request)) &&
+          work(candidate) == work(template.candidate)
+      }.foreach { case (request, _) =>
+        candidateTimer.foreach(_.cancel())
+        candidateTimer = None
+        publishing = None
+        if (current(request) && !expired(request)) recordPublication(request, template)
         else {
-          servedMsg = candidate.msg
-          if (usedCollateral) {
-            candidateSentAt = publicationStartedAtNanos
-            candidateStage = if (servedCandidate.exists(_._3)) "augmented" else "genesis"
-          }
-          // mustPublish, because getCandidate only answers with something it has just taken from the
-          // node — which cost the node's copy of whatever miners were on.
-          jobManagerActor ! ProcessTemplate(candidate, tau.bigInteger, usedCollateral,
-            reducedShareMessages, mustPublish = true)
+          if (current(request) && expired(request)) rejectExtras(request, "job publication missed its deadline")
+          invalidateCachedJob()
         }
+        driveCandidate()
       }
-    } catch {
-      case ex: Exception =>
-        logger.error(s"Failed to fetch block template: ${ex.getMessage}")
+
+    case TemplateRejected(publication) if publishing.exists { case (request, _) =>
+      publication == publicationFor(request)
+    } =>
+      publishing.foreach { case (request, _) =>
+        if (request.hasExtras && current(request)) rejectExtras(request, "job manager refused augmentation")
+      }
+      publishing = None
+      invalidateCachedJob()
+      observationRequired = true
+      observeChain()
+    case true | false => ()
+
+    case GetJobManager => sender() ! jobManagerActor
+    case MinerConnected(id, connection) => connections.put(id, connection)
+    case MinerDisconnected(id) => connections.remove(id)
+    case RequestSubscription => jobManagerActor.forward(RequestSubscription)
+    case share: ProcessShare => jobManagerActor.forward(share)
+
+    case accepted: ShareAccepted =>
+      if (accepted.isBlock) enqueueSolution(accepted)
+      if (accepted.isSuperShare) run(backgroundEc)(saveSuperShare(accepted))(BackgroundDone.apply)
+
+    case SolutionSubmitted(id, result) if submitting.exists(_.id == id) =>
+      val submitted = submitting.get
+      submitting = None
+      if (result.getOrElse(false)) {
+        submitted.collateralId.foreach(id => candidateBuilder.foreach(_ ! CollateralSpent(id)))
+        logger.info(s"Block solution submitted for ${submitted.key._1}${timing("solutionMs", submitted.startedAt)}")
+      } else logger.warn(s"Block solution failed for ${submitted.key._1}: ${result.failed.toOption.map(_.getMessage).getOrElse("node refused solution")}")
+      observationRequired = true
+      startSolution()
+      observeChain()
+
+    case RefreshDifficulty if !refreshingDifficulty =>
+      refreshingDifficulty = true
+      val currentTau = tau
+      run(backgroundEc)(commitments.committedTau(currentTau).get)(DifficultyRead(incarnation, _))
+    case DifficultyRead(id, result) if id == incarnation =>
+      refreshingDifficulty = false
+      result match {
+        case Success(next) if !forceConfigDiff => tau = next
+        case Failure(ex) => logger.warn(s"Cannot refresh mining difficulty: ${ex.getMessage}")
+        case _ => ()
+      }
+    case BackgroundDone(Failure(ex)) => logger.warn(s"Super-share worker unavailable: ${ex.getMessage}")
+    case _: ChainObserved | _: CandidateFetched | _: CandidateExpired | _: SolutionSubmitted |
+         _: DifficultyRead | RefreshDifficulty | _: BackgroundDone => ()
+  }
+
+  /** Dispatch rejection is an ordinary completion, so saturation cannot restart the mailbox. */
+  private def run[A](worker: ExecutionContext)(body: => A)(completed: Try[A] => Any): Unit =
+    Try(Future(Try(body))(worker).foreach(result => self ! completed(result)))
+      .failed.foreach(ex => self ! completed(Failure(ex)))
+
+  private def observeChain(): Unit = if (observing.isEmpty) {
+    val id = UUID.randomUUID()
+    observing = Some(id)
+    val node = nodeInterface
+    run(controlEc) {
+      val info = node.info()
+      chainTip(info)
+      require(info.parameters != null && info.parameters.blockVersion > 0, "node has no mining parameters")
+      info
+    }(ChainObserved(id, _))
+  }
+
+  private def acceptObservation(info: NodeInfo): Unit = {
+    val observed = chainTip(info)
+    protocolVersion = info.parameters.blockVersion
+    options.data.protocolVersion = protocolVersion
+    options.data.chainDifficulty = info.difficulty.getOrElse(BigInt(0)).bigInteger
+      .multiply(java.math.BigInteger.valueOf(options.difficultyMultiplier))
+    observationRequired = false
+    if (!tip.contains(observed)) {
+      tip = Some(observed)
+      blockPackage = None
+      publishedGenesis = None
+      extrasRejected = None
+      rejectedGenesis = Set.empty
+      rebuilds = 0
+      genesisDeadline = nowNanos() + candidateConfig.genesisWaitMs.milliseconds.toNanos
+      invalidateCachedJob()
+      candidateBuilder.foreach(_ ! ChainAdvanced(observed.height, observed.parentId))
+      stateFrame ! CheckBlock
     }
+  }
 
-  /**
-   * The candidate to hand miners, or None to leave them on the job they already have.
-   *
-   * None only happens in the window after a new block while the genesis transaction is being built.
-   * Publishing a solo job there and replacing it a moment later means two notifies in quick
-   * succession, and rigs lose more to that than to a sub-second wait for the real job.
-   */
-  private def getCandidate: Option[(MiningCandidate, Boolean)] = {
-    noteChainHeight()
+  /** Desired work is derived from current state, so superseding packages occupy one slot. */
+  private def desired: Option[(CandidateIdentity, Option[BlockPackage])] = tip.flatMap { chain =>
+    blockPackage.filterNot(p => rejectedGenesis.contains(p.collateral.txId)) match {
+      case Some(pkg) =>
+        val extras = pkg.blockTxs.nonEmpty && publishedGenesis.contains(chain -> pkg.collateral.txId) &&
+          !extrasRejected.contains(chain -> pkg.collateral.txId) && !restoreGenesis
+        val selected = if (extras) pkg else pkg.copy(blockTxs = Seq.empty, revision = 0)
+        Some(selected.identity -> Some(selected))
+      case None if candidateBuilder.isDefined && nowNanos() < genesisDeadline => None
+      case None => Some(CandidateIdentity(chain.height, chain.parentId, "", 0) -> None)
+    }
+  }
 
-    if (!useCollateral) {
-      if (servedCandidate.exists(_._1 == lastBlockHeight) && !mempoolRefreshDue) None
-      else Some(soloCandidate)
-    } else {
-      // The height comes from /info rather than from /mining/candidate, which would answer under
-      // the node's own reward key and so evict the cached collateral candidate on every poll.
-      usablePackage.filterNot(p => rejectedGenesisTxs.contains(p.collateral.txId)) match {
-        case Some(pkg) =>
-          genesisDeadline = None
-          val withExtras = pkg.blockTxs.nonEmpty && !extrasRejectedAt.contains(pkg.blockHeight)
-          val key = (pkg.blockHeight, pkg.collateral.txId, withExtras)
-          // A changed key is mandatory — new block, new genesis transaction, or the inserted set
-          // dropped — and goes at once. An unchanged key only refetches on the mempool interval.
-          if (servedCandidate.contains(key) && !mempoolRefreshDue) None
-          else Some(fetchCollateralCandidate(pkg, withExtras, key))
-
-        // No package yet. Hold the miners on their current job while the genesis transaction is
-        // built, but not indefinitely — past the deadline a solo job is better than none, since
-        // otherwise they are working a height that is already gone.
-        case None if stillWaitingForGenesis =>
-          None
-
-        // Falling back to solo for this block, under the same rule as everything else.
-        case None if servedCandidate.exists(k => k._1 == lastBlockHeight && k._2.isEmpty) &&
-          !mempoolRefreshDue =>
-          None
-
-        case None =>
-          genesisDeadline = None
-          Some(soloCandidate)
+  private def driveCandidate(): Unit = {
+    if (observationRequired || activeRequest.nonEmpty || publishing.nonEmpty || submitting.nonEmpty ||
+      solutionQueue.nonEmpty) return
+    desired.foreach { case (identity, pkg) =>
+      val refresh = candidateConfig.mempoolRefreshMs > 0 &&
+        nowNanos() - lastJobAt >= candidateConfig.mempoolRefreshMs.milliseconds.toNanos
+      if (cacheDirty || !servedCandidate.contains(identity) || refresh) {
+        val request = CandidateRequest(UUID.randomUUID(), identity, pkg, protocolVersion, nowNanos())
+        activeRequest = Some(request)
+        if (request.hasExtras) candidateTimer = Some(context.system.scheduler.scheduleOnce(
+          candidateConfig.blockTxTimeout.milliseconds, self, CandidateExpired(request.id)))
+        val node = nodeInterface
+        run(candidateEc)(fetch(node, request, apiKey))(CandidateFetched(request.id, _))
       }
     }
   }
 
-  /**
-   * Fetch the candidate for this package, dropping the inserted transactions if the node refuses
-   * them and falling back to solo if it refuses the whole thing.
-   */
-  private def fetchCollateralCandidate(pkg: BlockPackage,
-                                       withExtras: Boolean,
-                                       key: (Int, String, Boolean)): (MiningCandidate, Boolean) = {
-    servedCandidate = Some(key)
-    try candidateFor(pkg, if (withExtras) pkg.allTxs else pkg.genesisOnly)
-    catch {
-      case ex: Exception if withExtras =>
-        // Only the insertions are optional, so retry without them before giving up on collateral.
-        // Everything dropped here is in the mempool anyway.
-        logger.warn(s"Candidate with ${pkg.blockTxs.size} inserted transaction(s) was refused " +
-          s"(${ex.getMessage}); retrying with the genesis transaction alone")
-        extrasRejectedAt = Some(pkg.blockHeight)
-        candidateBuilder.foreach(_ ! BlockTxsRejected(pkg.blockHeight))
-        servedCandidate = Some((pkg.blockHeight, pkg.collateral.txId, false))
-        try candidateFor(pkg, pkg.genesisOnly)
-        catch { case ex2: Exception => genesisRefused(pkg, ex2) }
-      case ex: Exception => genesisRefused(pkg, ex)
-    }
-  }
-
-  /** The package for the block currently being mined, if CandidateBuilder has one yet. */
-  private def usablePackage: Option[BlockPackage] =
-    blockPackage.filter(p => lastBlockHeight == 0 || p.blockHeight == lastBlockHeight)
-
-  /**
-   * Even the genesis transaction was refused. Mine solo and ask for one rebuild — the usual cause is
-   * a collateral box just spent, which a rebuild resolves by drawing another. Once per block only,
-   * so a failure that will not clear does not spin against the node.
-   */
-  private def genesisRefused(pkg: BlockPackage, ex: Exception): (MiningCandidate, Boolean) = {
-    logger.error(s"Collateral candidate fetch failed (${ex.getMessage}), falling back to solo-mining")
-    requestRebuild()
-    soloCandidate
-  }
-
-  /**
-   * Ask for a different collateral box for this block, a bounded number of times.
-   *
-   * A spent box is the ordinary case and deserves a retry rather than writing the block off, but each
-   * retry costs a signature, a POST and eventually a job change, so the count is capped. The job gap
-   * spaces out whatever this produces.
-   */
-  private def requestRebuild(): Unit =
-    if (rebuildsThisBlock < MaxRebuildsPerBlock) {
-      rebuildsThisBlock += 1
-      candidateBuilder.foreach(_ ! RebuildCandidate)
-    } else
-      logger.warn(s"Already rebuilt the candidate $rebuildsThisBlock times for block " +
-        s"$lastBlockHeight; mining solo for the rest of it")
-
-  /** The builder's only trigger: which height to build for, and that a block arrived at all. */
-  private def noteChainHeight(): Unit =
-    Try(nodeInterface.nextBlockHeight()).toOption.flatten.foreach { height =>
-      if (height != lastBlockHeight) {
-        lastBlockHeight = height
-        candidateSentAt = 0L
-        extrasRejectedAt = None
-        rebuildsThisBlock = 0
-        genesisDeadline = Some(System.currentTimeMillis() + candidateConfig.genesisWaitMs)
-        // Bounded, since a genesis transaction is only valid at one height anyway.
-        if (rejectedGenesisTxs.size > 64) rejectedGenesisTxs = Set.empty
-        candidateBuilder.foreach(_ ! ChainAdvanced(height))
+  private def current(request: CandidateRequest): Boolean =
+    tip.contains(request.chain) && request.version == protocolVersion && (request.pkg match {
+      case None => desired.exists(_._1.genesisId.isEmpty)
+      case Some(pkg) => blockPackage.exists { latest =>
+        latest.collateral.txId == pkg.collateral.txId &&
+          !rejectedGenesis.contains(pkg.collateral.txId) &&
+          (!request.hasExtras || (latest.identity == request.identity &&
+            !extrasRejected.contains(request.chain -> pkg.collateral.txId)))
       }
+    })
+
+  private def admitCandidate(request: CandidateRequest, result: Try[Fetched]): Unit = {
+    if (!current(request)) {
+      invalidateCachedJob()
+      restoreGenesis = true
+      driveCandidate()
+      return
     }
-
-  /**
-   * `; candidateStage=X publicationMs=N` for the last collateral candidate sent to the job manager.
-   * Consumed on read, so a refresh publishing nothing new does not report the previous fetch again.
-   */
-  private def publicationLatency(): String =
-    if (!candidateConfig.logTimings || candidateSentAt == 0L) ""
-    else {
-      val elapsedMs = (System.nanoTime() - candidateSentAt) / 1000000L
-      candidateSentAt = 0L
-      s"; candidateStage=$candidateStage publicationMs=$elapsedMs"
-    }
-
-  /**
-   * Retrieves the block candidate for the given package and transaction set
-   */
-  private def candidateFor(pkg: BlockPackage, txs: Seq[String]): (MiningCandidate, Boolean) = {
-    val json = nodeInterface.candidateWithTxs(txs, Some(apiKey), Some(pkg.collateral.pk))
-    val withCollateral = MiningCandidate.fromJson(json, options.data.protocolVersion, pkg.collateral)
-
-    // Check if at minimum, the genesis transaction was included in the candidate
-    // Node sometimes does not carry it
-    genesisMissingBecause(withCollateral, pkg) match {
-      case None => (withCollateral, true)
-      case Some(why) =>
-        noteGenesisRejected(pkg, withCollateral, why)
-      // If genesis is rejected we mine solo
-      soloCandidate
-    }
-  }
-
-  /**
-   * Why the node's candidate does not prove inclusion of our genesis transaction, or None if it does.
-   *
-   * The node derives the proof over the transactions it actually prioritised, so ours being absent
-   * means it was dropped — but it does not say at which stage. `CandidateGenerator` filters supplied
-   * transactions on `inputsNotSpent` BEFORE any validation, silently, so the common case is not a
-   * refusal at all: the input was missing from the state the candidate is built against. A missing
-   * proof is a third thing again, and worth naming rather than folding into the other two.
-   */
-  private def genesisMissingBecause(candidate: MiningCandidate, pkg: BlockPackage): Option[String] =
-    Option(candidate.proof) match {
-      case None =>
-        Some("the candidate carries NO proof at all, so the node did not derive one over any " +
-          "prioritised transaction")
-      case Some(proof) =>
-        Try {
-          val leaves = proof.getJSONArray("txProofs").toString
-          if (leaves.toLowerCase.contains(pkg.collateral.txId.toLowerCase)) None
-          else {
-            // If merkle proof exists, transaction was likely included even if it doesnt match.
-            // This is due to node error which is returning incorrect merkle proofs.
-            // Because proof is invalid, we cannot mine super-shares for this block,
-            // but since we know this is a bug, we do allow lithos blocks to still be mined.
-            // Should be fixed in upcoming node updates.
-
-            // TODO: Revert to rejection here when node is known to be fixed
-            None
+    result match {
+      case Success(fetched) if fetched.chain != request.chain || fetched.version != request.version =>
+        invalidateCachedJob()
+        observationRequired = true
+        observeChain()
+      case Success(_) if expired(request) =>
+        rejectExtras(request, "candidate completed after its publication deadline")
+        invalidateCachedJob()
+        driveCandidate()
+      case Success(fetched) =>
+        val candidate = fetched.candidate
+        if (!cacheDirty && servedWork.contains(work(candidate)) && servedCandidate.contains(request.identity)) {
+          candidateTimer.foreach(_.cancel())
+          candidateTimer = None
+          lastJobAt = nowNanos()
+        } else {
+          publishing = Some(request -> candidate)
+          jobManagerActor ! ProcessTemplate(candidate, tau.bigInteger, request.pkg.isDefined,
+            reducedShareMessages, mustPublish = true,
+            publication = Some(publicationFor(request)))
+        }
+      case Failure(ex) =>
+        invalidateCachedJob()
+        if (request.hasExtras) rejectExtras(request, ex.getMessage)
+        else request.pkg.foreach { pkg =>
+          rejectedGenesis += pkg.collateral.txId
+          blockPackage = None
+          genesisDeadline = 0L
+          if (rebuilds < MaxRebuildsPerBlock) {
+            rebuilds += 1
+            candidateBuilder.foreach(_ ! RebuildCandidate)
           }
-        }.getOrElse(Some("Proof could not be read."))
+        }
+        logger.warn(s"Candidate request failed: ${ex.getMessage}; falling back to ${if (request.hasExtras) "genesis" else "solo"}")
+        // A failed solo request waits for the next poll; it must not spin against an unavailable node.
+        if (request.pkg.isDefined) driveCandidate()
     }
-
-  /**
-   * Record that the node will not take this block's genesis transaction, once per block.
-   *
-   * Once is enough: re-offering a transaction the node has already refused just repeats the POST on
-   * every poll. The pk comparison is the diagnostic that matters — if the candidate is not built for
-   * the lender's key then the node is ignoring the `pk` we send, `lenderIsBlockMiner` can never be
-   * satisfied, and no collateral box is spendable at all.
-   */
-  private def noteGenesisRejected(pkg: BlockPackage, candidate: MiningCandidate, why: String): Unit =
-    if (!rejectedGenesisTxs.contains(pkg.collateral.txId)) {
-      rejectedGenesisTxs += pkg.collateral.txId
-      // Drop the box AND ask for another package. Nothing else will: the refresh only rebuilds when
-      // it notices the selected box has gone, and CollateralSpent has already cleared the selection.
-      // Without the rebuild the whole block falls back to solo over one spent box.
-      candidateBuilder.foreach(_ ! CollateralSpent(pkg.collateral.collateralId))
-      requestRebuild()
-      logger.error(s"Node dropped genesis transaction ${pkg.collateral.txId} for block " +
-        s"${pkg.blockHeight}; mining solo for the rest of it. Requested pk ${pkg.collateral.pk}, got " +
-        s"a candidate for pk ${candidate.pk}" +
-        (if (candidate.pk != pkg.collateral.pk)
-          " | THESE DIFFER. The node is not honouring the requested coinbase key, so no collateral " +
-            "box can ever be spent. Check the node is 6.0.2+ and the api key is accepted"
-        else ", which match") + s". Why: $why")
-
-      // The node already knows why and writes it down; nothing we can ask from here beats reading it.
-      // `CandidateGenerator.collectTxs` treats a supplied transaction exactly like a mempool one and
-      // drops it silently on a missing input, a double spend against what it has already taken, a
-      // validation failure, or simply running out of block cost before reaching it.
-      logger.error(s"The node logs its own reason at INFO: search the node log for " +
-        s"'Not included transaction ${pkg.collateral.txId}'. Raise " +
-        "org.ergoplatform.mining.CandidateGenerator to DEBUG to also catch the double-spend and " +
-        "block-limit paths, which are logged one level lower")
-    }
-
-
-  /**
-   * The node's own candidate, recorded as served in the same step that fetches it.
-   *
-   * Recorded here rather than at the call sites because one of them is the collateral path's fallback:
-   * when the node drops the genesis transaction the candidate that was fetched for the lender's key
-   * is unusable, and this replaces it. Leaving the collateral key recorded there sent the next poll
-   * back for a second solo candidate — which the node then validated against while miners stayed on
-   * the first, so every block found for the rest of that height was lost.
-   */
-  private def soloCandidate: (MiningCandidate, Boolean) = {
-    val candidate = MiningCandidate.fromJson(nodeInterface.soloCandidate(), options.data.protocolVersion)
-    // Only once it is in hand. Recording a fetch that threw would leave the block with no job at all.
-    servedCandidate = Some((lastBlockHeight, "", false))
-    (candidate, false)
   }
 
-  /**
-   * Persists a super-share to the NISP database.
-   * Mirrors Pool.setupJobManager's Share listener exactly, including all
-   * error-case log messages.
-   */
+  private def rejectExtras(request: CandidateRequest, why: String): Unit = {
+    extrasRejected = Some(request.chain -> request.identity.genesisId)
+    candidateBuilder.foreach(_ ! BlockTxsRejected(request.identity.height, Some(request.identity)))
+    logger.warn(s"Dropping optional candidate transactions: $why; mining genesis for this package")
+  }
+
+  private def publicationFor(request: CandidateRequest): CandidatePublication =
+    CandidatePublication(request.identity, request.id,
+      if (request.hasExtras) Some(request.startedAt + candidateConfig.blockTxTimeout.milliseconds.toNanos) else None)
+
+  private def expired(request: CandidateRequest): Boolean = request.hasExtras &&
+    nowNanos() - request.startedAt >= candidateConfig.blockTxTimeout.milliseconds.toNanos
+
+  private def invalidateCachedJob(): Unit = {
+    candidateTimer.foreach(_.cancel())
+    candidateTimer = None
+    cacheDirty = true
+    servedCandidate = None
+    publishing = None
+    jobManagerActor ! InvalidateTemplate
+  }
+
+  private def recordPublication(request: CandidateRequest, template: BlockTemplate): Unit = {
+    servedCandidate = Some(request.identity)
+    servedWork = Some(work(template.candidate))
+    cacheDirty = false
+    restoreGenesis = false
+    lastJobAt = nowNanos()
+    connections.values.foreach(_ ! BroadcastJob(template))
+    logger.info(s"Broadcasting job ${template.jobId} to ${connections.size} miner(s); " +
+      s"candidateStage=${if (request.hasExtras) "augmented" else if (request.pkg.isDefined) "genesis" else "solo"}" +
+      timing("publicationMs", request.startedAt))
+    request.pkg.filter(_ => !request.hasExtras).foreach { pkg =>
+      publishedGenesis = Some(request.chain -> pkg.collateral.txId)
+      candidateBuilder.foreach(_ ! GenesisPublished(request.identity))
+    }
+    stateFrame ! CheckBlock
+  }
+
+  private def enqueueSolution(accepted: ShareAccepted): Unit = {
+    val key = work(accepted.candidate)
+    if (submitting.exists(_.key == key) || solutionQueue.exists(_.key == key)) return
+    if (solutionQueue.size >= MaxQueuedSolutions) {
+      logger.error("Solved-block queue is full; refusing another solution until node submission progresses")
+    } else {
+      solutionQueue :+= SolutionWork(UUID.randomUUID(), key, Hex.toHexString(accepted.nonce),
+        Option(accepted.candidate.collateralData).map(_.collateralId), nowNanos())
+      startSolution()
+    }
+  }
+
+  private def startSolution(): Unit = if (submitting.isEmpty && solutionQueue.nonEmpty) {
+    val solution = solutionQueue.head
+    solutionQueue = solutionQueue.tail
+    submitting = Some(solution)
+    val node = nodeInterface
+    run(controlEc)(node.sendSolution(solution.nonce, solution.key._2))(SolutionSubmitted(solution.id, _))
+  }
+
   private def saveSuperShare(accepted: ShareAccepted): Unit =
     try {
       val share = SuperShare.fromCandidate(
@@ -621,23 +419,70 @@ class LithosPool(options: Options,
           logger.error("Error while saving super-share", ex)
     }
 
-  private def refreshDifficulty = {
-    // Read on the actor thread and passed in, not read inside the Future.
-    val current = tau
-    Future(commitments.committedTau(current))
-      .map(UpdatedDifficulty.apply)
-      .pipeTo(self)
-  }
+  private def timing(label: String, startedAt: Long): String =
+    if (candidateConfig.logTimings) s"; $label=${(nowNanos() - startedAt) / 1000000L}" else ""
 }
 
-
-
-
 object LithosPool {
+  private val MaxRebuildsPerBlock = 3
+  private val MaxQueuedSolutions = 6
+  private[mining] case class ChainTip(height: Int, parentId: String)
+  private[mining] case class CandidateRequest(id: UUID, identity: CandidateIdentity,
+                                             pkg: Option[BlockPackage], version: Int, startedAt: Long) {
+    def chain: ChainTip = ChainTip(identity.height, identity.parentId)
+    def hasExtras: Boolean = pkg.exists(_.blockTxs.nonEmpty)
+  }
+  private[mining] case class Fetched(candidate: MiningCandidate, chain: ChainTip, version: Int)
+  private case class ChainObserved(id: UUID, result: Try[NodeInfo])
+  private case class CandidateFetched(id: UUID, result: Try[Fetched])
+  private case class CandidateExpired(id: UUID)
+  private case class SolutionWork(id: UUID, key: (String, String), nonce: String,
+                                 collateralId: Option[String], startedAt: Long)
+  private case class SolutionSubmitted(id: UUID, result: Try[Boolean])
+  private case class DifficultyRead(incarnation: UUID, result: Try[BigInt])
+  private case class BackgroundDone(result: Try[Unit])
 
-  /**
-   * How many times one block may draw a fresh collateral box after the node refuses the genesis
-   * transaction.
-   */
-  private final val MaxRebuildsPerBlock: Int = 3
+  private def work(candidate: MiningCandidate): (String, String) = (Hex.toHexString(candidate.msg), candidate.pk)
+
+  private[mining] def chainTip(info: NodeInfo): ChainTip = {
+    val height = info.fullHeight.filter(h => h >= 0 && h < Int.MaxValue)
+      .getOrElse(throw new IllegalArgumentException("node has no usable full height"))
+    val parent = info.bestFullHeaderId.filter(_.matches("[0-9a-fA-F]{64}"))
+      .getOrElse(throw new IllegalArgumentException("node has no full-header identity"))
+    ChainTip(height + 1, parent.toLowerCase(java.util.Locale.ROOT))
+  }
+
+  /** One cache-changing call and a fresh chain observation. Fallbacks are chosen by the actor
+    * after checking whether this attempt still owns the package, never by a stale worker.
+    */
+  private[mining] def fetch(node: MiningNodeInterface, request: CandidateRequest, apiKey: String): Fetched = {
+    val json = request.pkg match {
+      case Some(pkg) => node.candidateWithTxs(pkg.allTxs, Some(apiKey), Some(pkg.collateral.pk))
+      case None => node.soloCandidate()
+    }
+    val candidate = request.pkg match {
+      case Some(pkg) => MiningCandidate.fromJson(json, request.version, pkg.collateral)
+      case None => MiningCandidate.fromJson(json, request.version)
+    }
+    require(candidate.msg.length == 32 && candidate.height == request.identity.height,
+      "candidate work message or height does not match the request")
+    require(candidate.b != null && candidate.b.signum() > 0, "candidate has no positive target")
+    request.pkg.foreach { pkg =>
+      require(candidate.pk.equalsIgnoreCase(pkg.collateral.pk), "candidate uses a different miner key")
+      require(candidate.proof != null, "collateral candidate has no proof")
+      val preimage = Hex.decode(candidate.proof.getString("msgPreimage"))
+      val header = HeaderWithoutPowSerializer.fromBytes(preimage)
+      require(Blake2b256(preimage).sameElements(candidate.msg), "candidate preimage does not bind its work message")
+      require(header.parentId == request.identity.parentId && header.height == request.identity.height &&
+        header.version >= 2, "candidate preimage names another chain or unsupported PoW version")
+      // At a voting boundary the upcoming header can activate a newer version than /info.
+      // The bound preimage supplies that version before this fresh candidate leaves the worker.
+      candidate.version = header.version
+      // Ordinary mining retains the known node leaf-mismatch compatibility. These proofs cannot
+      // qualify dependent revenue bundles; those require complete membership checks before launch.
+      candidate.proof.getJSONArray("txProofs")
+    }
+    val observed = node.info()
+    Fetched(candidate, chainTip(observed), observed.parameters.blockVersion)
+  }
 }

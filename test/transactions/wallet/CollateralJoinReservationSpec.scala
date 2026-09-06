@@ -1,8 +1,9 @@
 package transactions.wallet
+import transactions.engine.{EngineFunding, FundingAllocation, FundingSource, FundingExpiredException}
 
 import akka.actor.{Actor, ActorRef, ActorSystem, Props}
 import akka.testkit.{TestKit, TestProbe}
-import api.CollateralMarketApiImpl
+import transactions.engine.CollateralExecution
 import api.models.CollateralJoinExecuteRequest
 import lfsm.{CollateralParams, LFSMHelpers}
 import node.NodeApi
@@ -18,7 +19,7 @@ import org.scalatest.matchers.should.Matchers
 import org.scalatestplus.mockito.MockitoSugar
 import play.api.Configuration
 import support.{CollateralNodeFixtures => Fx, FakeNodeContext}
-import transactions.wallet.WalletMessages._
+import transactions.engine.EngineWalletMessages._
 import work.lithos.mutations.{Contract, InputUTXO, Token, UTXO}
 
 import scala.concurrent.duration._
@@ -32,7 +33,7 @@ import scala.util.{Success, Try}
  * acknowledged lease is given.
  *
  * The defect this pins was silent and permanent. `CollateralMarketApiImpl.join` called
- * `WalletReservation.beginAll` — Selected to Submitting — then `ctx.sendTransaction` with no
+ * `FundingAllocation.beginAll` — Selected to Submitting — then `ctx.sendTransaction` with no
  * `catch`. On a throw, `finally` ran `funding.finish`, whose `release()` is a NO-OP past Selected,
  * and `ResetUsedInputs` collects Selected and Known by age but never Submitting, which has no TTL.
  * So ~2.9 ERG of capacity was withheld until the process restarted, from a wallet the rollup and
@@ -71,16 +72,14 @@ class CollateralJoinReservationSpec
         watcher ! m
         sender() ! WalletInputs(inputs, id)
 
-      case m @ BeginReservationSubmission(id, _, _) =>
+      case m: PinEngineInputs =>
         watcher ! m
-        sender() ! ReservationSubmissionStarted(id, accepted = true)
-
-      case m @ CancelReservationSubmission(id, _) =>
-        watcher ! m
-        sender() ! ReservationSubmissionCancelled(id, accepted = true)
-
-      case m: MarkReservationUncertain => watcher ! m
-      case m: CommitReservation => watcher ! m
+        sender() ! true
+      case state.synchronization.CompleteMempool.Refresh =>
+        sender() ! state.synchronization.CompleteMempool.Observation(1L,
+          Some(state.synchronization.CompleteMempool.Snapshot("aa" * 32, Set.empty, Set.empty, System.nanoTime())), None)
+      case m: EngineSendFinished => watcher ! m
+      case m: CancelEngineInputs => watcher ! m
       case m: ReleaseInputs => watcher ! m
       case m: ReturnInputs => watcher ! m
     }
@@ -93,7 +92,7 @@ class CollateralJoinReservationSpec
       Seq(Token(LFSMHelpers.LIT_ID, permit * 2)))
       .toInput(ctx, ErgoId.create("ef" * 32), 0.toShort)
 
-  private case class Fixture(api: CollateralMarketApiImpl, watcher: TestProbe)
+  private case class Fixture(api: CollateralExecution, watcher: TestProbe)
 
   private def fixture(): Fixture = {
     val nodeApi = mock[NodeApi]
@@ -121,10 +120,12 @@ class CollateralJoinReservationSpec
     when(nodeApi.unconfirmedInputByBoxId(anyString())).thenReturn(Success(None))
     when(nodeApi.walletAddresses()).thenReturn(Success(addresses.map(_.toString)))
     when(nodeApi.indexerEnabled).thenReturn(true)
+    when(nodeApi.info()).thenReturn(Success(support.ChainFixtures.infoAt(100000).copy(bestFullHeaderId = Some("aa" * 32))))
+    when(nodeApi.sendTransaction(anyString())).thenReturn(scala.util.Failure(new RuntimeException("response lost")))
 
     val watcher = TestProbe()
     val walletRef = system.actorOf(Props(new GrantingWallet(Seq(funding), watcher.ref)))
-    val api = new CollateralMarketApiImpl(nodeCtx, Configuration.from(Map.empty[String, Any]),
+    val api = new CollateralExecution(nodeCtx, Configuration.from(Map.empty[String, Any]),
       system, walletRef)
     Fixture(api, watcher)
   }
@@ -134,22 +135,23 @@ class CollateralJoinReservationSpec
 
     // The send is a third node call on an offline client, so it throws. Nothing was created, so the
     // original failure is rethrown rather than becoming a partial result.
-    a[Exception] should be thrownBy
-      f.api.join(CollateralJoinExecuteRequest(1, Some(true), None, None))
+    val result = f.api.join(CollateralJoinExecuteRequest(1, Some(true), None, None))
+    result.joins should have size 1
+    result.joins.head.outcome shouldBe "uncertain"
+    result.totalNanoErgs shouldBe "0"
 
     // First: prove the run reached the send boundary at all. Without this the test would pass for
     // the wrong reason if the build failed earlier, where no lease is acknowledged and nothing is
     // owed. This is the assertion that makes the one below mean something.
     f.watcher.fishForMessage(20.seconds, "the lease was acknowledged") {
-      case _: BeginReservationSubmission => true
+      case _: PinEngineInputs => true
       case _ => false
     }
 
     // Then the ending it chose. `release()` is what the defective version effectively did, and the
     // manager ignores it past Selected — so the boxes stayed held with no TTL to free them.
     f.watcher.fishForMessage(20.seconds, "the acknowledged lease was ended as uncertain") {
-      case _: MarkReservationUncertain => true
-      case _: CommitReservation => fail("a broadcast that threw must not be committed")
+      case EngineSendFinished(_, _, accepted) => accepted shouldBe false; true
       case _ => false
     }
   }

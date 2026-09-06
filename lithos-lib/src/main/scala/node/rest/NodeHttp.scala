@@ -11,7 +11,9 @@ case class NodeHttpConfig(baseUrl: String,
                           apiKey: Option[String] = None,
                           connectTimeoutMs: Long = 5000L,
                           readTimeoutMs: Long = 30000L,
-                          writeTimeoutMs: Long = 30000L)
+                          writeTimeoutMs: Long = 30000L,
+                          maxResponseBytes: Int = Int.MaxValue,
+                          callTimeoutMs: Long = 0L)
 
 object NodeHttp {
 
@@ -22,6 +24,7 @@ object NodeHttp {
       .connectTimeout(config.connectTimeoutMs, TimeUnit.MILLISECONDS)
       .readTimeout(config.readTimeoutMs, TimeUnit.MILLISECONDS)
       .writeTimeout(config.writeTimeoutMs, TimeUnit.MILLISECONDS)
+      .callTimeout(config.callTimeoutMs, TimeUnit.MILLISECONDS)
       .build()
     new NodeHttp(config, client)
   }
@@ -48,7 +51,14 @@ class NodeHttp(config: NodeHttpConfig, client: OkHttpClient) {
     Try(client.newCall(req).execute()).transform({ response =>
       try {
         val code = response.code()
-        val body = Option(response.body()).map(_.string()).getOrElse("")
+        val body = Option(response.body()).map { body =>
+          if (config.maxResponseBytes == Int.MaxValue) body.string()
+          else {
+            val source = body.source()
+            require(!source.request(config.maxResponseBytes.toLong + 1L), "node response exceeds byte limit")
+            source.readUtf8()
+          }
+        }.getOrElse("")
         if (code == 404) Success(None)
         else if (response.isSuccessful) Success(Some(body))
         else Failure(errorFor(code, body, endpoint))

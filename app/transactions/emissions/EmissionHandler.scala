@@ -10,7 +10,7 @@ import play.api.Configuration
 import play.api.libs.concurrent.InjectedActorSupport
 import transactions.BlockTxMessages.{BlockTxsReady, CandidateTx, CandidateTxsDropped, RequestBlockTxs}
 import transactions.emissions.EmissionHandler._
-import transactions.wallet.{WalletReservation, WalletSelector}
+import transactions.engine.{FundingAllocation, EngineFunding}
 import work.lithos.mutations.InputUTXO
 
 import javax.inject.{Inject, Named}
@@ -29,24 +29,32 @@ import scala.util.{Failure, Success, Try}
  * would stall it and Activating the rest. Broadcasting is what actually moves the queue;
  * [[RequestBlockTxs]] only guarantees the same work lands in a block this miner finds.
  */
-class EmissionHandler @Inject()(config: Configuration, nodeContext: NodeContext,
-                                @Named("wallet-manager") walletManager: ActorRef)
-  extends Actor with InjectedActorSupport {
+trait EngineEmissions extends Actor with InjectedActorSupport {
+  protected def config: Configuration
+  protected def emissionNodeContext: NodeContext
+  protected def emissionWalletManager: ActorRef
 
   private val logger: Logger = LoggerFactory.getLogger("EmissionHandler")
 
-  private val nodeConfig: NodeContext = nodeContext
+  private val nodeConfig: NodeContext = emissionNodeContext
   private val client: ErgoClient = nodeConfig.getClient
-  private val nodeApi: NodeApi = nodeConfig.getNodeApi
+  protected def emissionNodeApi: NodeApi = nodeConfig.getNodeApi
   private val emissionConfig: EmissionConfig = EmissionConfig(config)
 
-  private implicit val ec: ExecutionContext =
-    Try(context.system.dispatchers.lookup("lithos-contexts.tx-dispatcher"))
-      .getOrElse(context.dispatcher)
+  private implicit val emissionEc: ExecutionContext = context.dispatcher
+  private val emissionWorker = context.system.dispatchers.lookup("lithos-contexts.engine-io-dispatcher")
+  private val candidateWorker = context.system.dispatchers.lookup("lithos-contexts.engine-candidate-dispatcher")
+  private val emissionIncarnation = java.util.UUID.randomUUID()
+  private val emissionAlive = new java.util.concurrent.atomic.AtomicBoolean(true)
+  private var candidateBusy = false
+  private lazy val collateral = new transactions.engine.CollateralExecution(
+    emissionNodeContext, config, context.system, emissionWalletManager, () => emissionAlive.get()) {
+    override protected def executionNode: NodeApi = emissionNodeApi
+  }
 
-  private val walletSelector = WalletSelector(walletManager, WalletSelector.AskTimeout, ec)
-  private val txs = new EmissionTransactions(
-    nodeConfig.getNodeWallet, nodeApi, emissionConfig, walletSelector)
+  private val walletSelector = EngineFunding(emissionWalletManager, EngineFunding.AskTimeout, context.dispatcher)
+  private lazy val txs = new EmissionTransactions(
+    nodeConfig.getNodeWallet, emissionNodeApi, emissionConfig, walletSelector, () => emissionAlive.get())
 
   private var collateralizeTicker: Option[Cancellable] = None
   private var queueTicker: Option[Cancellable] = None
@@ -61,7 +69,8 @@ class EmissionHandler @Inject()(config: Configuration, nodeContext: NodeContext,
 
   // ─── lifecycle ────────────────────────────────────────────────────────────
 
-  override def preStart(): Unit =
+  abstract override def preStart(): Unit = {
+    super.preStart()
     if (!emissionConfig.enabled) {
       logger.info("EmissionHandler disabled via emission.enabled")
     } else {
@@ -84,15 +93,39 @@ class EmissionHandler @Inject()(config: Configuration, nodeContext: NodeContext,
           emissionConfig.collateralizeInterval.milliseconds,
           self, Collateralize)(context.dispatcher))
     }
+  }
 
-  override def postStop(): Unit = {
+  abstract override def postStop(): Unit = {
+    emissionAlive.set(false)
     collateralizeTicker.foreach(_.cancel())
     queueTicker.foreach(_.cancel())
+    super.postStop()
   }
 
   // ─── receive ──────────────────────────────────────────────────────────────
 
-  override def receive: Receive = {
+  abstract override def receive: Receive = emissionReceive.orElse(super.receive)
+  private def emissionReceive: Receive = {
+    case transactions.engine.TransactionEngine.JoinCollateral(_) if spending =>
+      sender() ! akka.actor.Status.Failure(api.LithosApiErrors.LithosUnavailable("an emission submission is already running"))
+    case transactions.engine.TransactionEngine.JoinCollateral(request) =>
+      val reply = sender()
+      spending = true
+      dispatchEmission(collateral.join(request))(result =>
+        self ! ManualJoined(emissionIncarnation, reply, result))
+    case ManualJoined(incarnation, reply, result) if incarnation == emissionIncarnation =>
+      spending = false
+      result match {
+        case Success(value) => reply ! value
+        case Failure(ex) => reply ! akka.actor.Status.Failure(ex)
+      }
+    case _: ManualJoined => ()
+    case EmissionResult(incarnation, result) if incarnation == emissionIncarnation => emissionReceive(result)
+    case _: EmissionResult => ()
+    case CandidateBuilt(incarnation, reply, height, result) if incarnation == emissionIncarnation =>
+      candidateBusy = false
+      reply ! BlockTxsReady(height, result.getOrElse(Seq.empty))
+    case _: CandidateBuilt => ()
 
     // ------------------------------------------------------------------
     // Timers — build funded transactions and broadcast them
@@ -102,9 +135,10 @@ class EmissionHandler @Inject()(config: Configuration, nodeContext: NodeContext,
       if (spending) logger.info("Skipping self-collateralization, an emission pass is already running")
       else {
         spending = true
-        Future(client.execute(txs.selfCollateralize)).onComplete {
-          case Success(txIds) => self ! Collateralized(txIds)
-          case Failure(ex) => self ! EmissionFailed("self-collateralization", ex)
+        dispatchEmission(client.execute(ctx => txs.selfCollateralize(ctx,
+          new transactions.engine.EngineBroadcast(emissionWalletManager, emissionNodeApi)))) {
+          case Success(txIds) => self ! EmissionResult(emissionIncarnation, Collateralized(txIds))
+          case Failure(ex) => self ! EmissionResult(emissionIncarnation, EmissionFailed("self-collateralization", ex))
         }
       }
 
@@ -117,15 +151,15 @@ class EmissionHandler @Inject()(config: Configuration, nodeContext: NodeContext,
       if (spending) logger.info("Skipping queue pass, an emission pass is already running")
       else {
         spending = true
-        Future {
+        dispatchEmission {
           client.execute { ctx =>
             val (_, spends) = txs.buildQueueSpends(
               ctx, ctx.getHeight + 1, funded = true, emissionConfig.maxQueueSpends)
             sendQueue(ctx, spends)
           }
-        }.onComplete {
-          case Success(sent) => self ! QueueDriven(sent)
-          case Failure(ex) => self ! EmissionFailed("queue maintenance", ex)
+        } {
+          case Success(sent) => self ! EmissionResult(emissionIncarnation, QueueDriven(sent))
+          case Failure(ex) => self ! EmissionResult(emissionIncarnation, EmissionFailed("queue maintenance", ex))
         }
       }
 
@@ -152,13 +186,14 @@ class EmissionHandler @Inject()(config: Configuration, nodeContext: NodeContext,
 
     // Emission candidates reserve nothing that a dropped block has to reconcile, so there is
     // nothing to undo. Matched anyway, because every transaction source is told.
-    case CandidateTxsDropped(_) => ()
 
     case RequestBlockTxs(blockHeight, limit) =>
       val replyTo = sender()
-      if (!emissionConfig.enabled || limit <= 0) replyTo ! BlockTxsReady(blockHeight, Seq.empty[CandidateTx])
-      else
-        Future {
+      if (!emissionConfig.enabled || limit <= 0 || candidateBusy) replyTo ! BlockTxsReady(blockHeight, Seq.empty[CandidateTx])
+      else {
+        candidateBusy = true
+        Try(Future {
+          require(emissionAlive.get(), "emission engine attempt was superseded")
           client.execute { ctx =>
             val (tip, spends) = txs.buildQueueSpends(ctx, blockHeight, funded = false, limit)
             if (spends.isEmpty) Seq.empty[CandidateTx]
@@ -173,15 +208,16 @@ class EmissionHandler @Inject()(config: Configuration, nodeContext: NodeContext,
               (ancestors ++ own).take(limit)
             }
           }
-        }.onComplete {
-          case Success(built) => replyTo ! BlockTxsReady(blockHeight, built)
-          case Failure(ex) =>
-            logger.warn(s"No emission transactions for block $blockHeight: ${ex.getMessage}")
-            replyTo ! BlockTxsReady(blockHeight, Seq.empty[CandidateTx])
-        }
+        }(candidateWorker).onComplete(result =>
+          self ! CandidateBuilt(emissionIncarnation, replyTo, blockHeight, result)))
+          .failed.foreach(ex => self ! CandidateBuilt(emissionIncarnation, replyTo, blockHeight, Failure(ex)))
+      }
   }
 
   // ─── private helpers ──────────────────────────────────────────────────────
+  private def dispatchEmission[A](body: => A)(finished: Try[A] => Unit): Unit =
+    Try(Future { require(emissionAlive.get(), "emission engine attempt was superseded"); body }(emissionWorker)
+      .onComplete(finished)).failed.foreach(ex => finished(Failure(ex)))
 
   private def sendQueue(ctx: org.ergoplatform.appkit.BlockchainContext,
                         spends: Seq[EmissionSpend]): Seq[(String, Try[String])] = {
@@ -199,17 +235,13 @@ class EmissionHandler @Inject()(config: Configuration, nodeContext: NodeContext,
     var attempted = Vector.empty[(String, Try[String])]
     spends.zipWithIndex.foreach { case (spend, idx) =>
       if (!stopped) {
-        var submissionStarted = false
         val result = Try {
           // A spend can own both ordinary wallet funding and actor-held change from its parent.
-          // Acquire the whole set before contacting the node; beginAll cancels an acknowledged
-          // prefix and releases the untouched suffix if any later lease cannot begin.
-          WalletReservation.beginAll(spend.reservations)
-          submissionStarted = true
-          ctx.sendTransaction(spend.tx).replace("\"", "")
+          // The engine pins the entire funding set before contacting the node.
+          new transactions.engine.EngineBroadcast(emissionWalletManager, emissionNodeApi)
+            .send(spend.tx, spend.reservations, "emission:" + spend.tx.getId, () => emissionAlive.get())
+            .requireAccepted()
         }
-        result.foreach(_ => spend.reservations.foreach(_.commit()))
-        if (result.isFailure && submissionStarted) spend.reservations.foreach(_.uncertain())
         attempted :+= spend.kind -> result
         if (result.isFailure) {
           stopped = true
@@ -238,7 +270,12 @@ object EmissionHandler {
   private[transactions] case object Collateralize
   private[transactions] case object DriveQueue
 
-  private case class Collateralized(txIds: Seq[String])
-  private case class QueueDriven(sent: Seq[(String, Try[String])])
-  private case class EmissionFailed(what: String, ex: Throwable)
+  private[emissions] case class Collateralized(txIds: Seq[String])
+  private[emissions] case class QueueDriven(sent: Seq[(String, Try[String])])
+  private[emissions] case class EmissionFailed(what: String, ex: Throwable)
+  private[emissions] case class EmissionResult(incarnation: java.util.UUID, result: Any)
+  private[emissions] case class ManualJoined(incarnation: java.util.UUID, reply: ActorRef,
+    result: Try[api.models.CollateralJoinResult])
+  private[emissions] case class CandidateBuilt(incarnation: java.util.UUID, reply: ActorRef,
+    height: Int, result: Try[Seq[CandidateTx]])
 }

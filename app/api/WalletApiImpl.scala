@@ -5,7 +5,7 @@ import akka.pattern.ask
 import akka.util.Timeout
 import api.models._
 import configs.NodeContext
-import transactions.wallet.WalletMessages.{GetSpendableBalance, SpendableBalance}
+import transactions.engine.EngineWalletMessages.{GetSpendableBalance, SpendableBalance}
 
 import javax.inject.{Inject, Named, Singleton}
 import scala.concurrent.Await
@@ -26,7 +26,7 @@ import scala.util.Try
 @Singleton
 class WalletApiImpl @Inject()(nodeContext: NodeContext,
                               collateral: CollateralMarketApi,
-                              @Named("wallet-manager") walletManager: ActorRef) extends WalletApi {
+                              @Named("transaction-engine") walletManager: ActorRef) extends WalletApi {
 
   private val QuickAsk = Timeout(5 seconds)
 

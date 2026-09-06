@@ -15,9 +15,9 @@ import play.api.mvc._
 import scorex.crypto.hash.Blake2b256
 import mutations.NotEnoughInputsException
 import transactions.dex.LDBoxes
-import transactions.wallet.ReservationExpiredException
-import transactions.wallet.WalletMessages.InsufficientWalletFundsException
-import transactions.wallet.WalletSelector
+import transactions.engine.FundingExpiredException
+import transactions.engine.EngineWalletMessages.InsufficientWalletFundsException
+
 
 import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
@@ -35,12 +35,11 @@ class LithosDexApiController @Inject()(cc: ControllerComponents,
                                        api: LithosDexApi,
                                        config: Configuration,
                                        cache: SyncCacheApi,
-                                       @Named("wallet-manager")  walletManager: ActorRef,
+                                       @Named("transaction-engine")  walletManager: ActorRef,
                                        system: ActorSystem
                                       ) extends AbstractController(cc) {
 
 
-  private val walletSelector = WalletSelector(walletManager, 4 seconds, cc.executionContext)
 
   /**
    * Every endpoint here does blocking node IO — box scans, signing, broadcasting — and the execute
@@ -81,7 +80,7 @@ class LithosDexApiController @Inject()(cc: ControllerComponents,
   /** POST /dex/swap */
   def swap(): Action[AnyContent] = withApiKey {
     Action.async { request =>
-      offPool(respond(api.swap(body[LDSwapExecuteRequest](request, "swapExecuteRequest"), ldCache, walletSelector)))
+      offPool(respond(api.swap(body[LDSwapExecuteRequest](request, "swapExecuteRequest"), ldCache)))
     }
   }
 
@@ -95,7 +94,7 @@ class LithosDexApiController @Inject()(cc: ControllerComponents,
   /** POST /dex/deposit */
   def deposit(): Action[AnyContent] = withApiKey {
     Action.async { request =>
-      offPool(respond(api.deposit(body[LDDepositExecuteRequest](request, "depositExecuteRequest"), ldCache, walletSelector)))
+      offPool(respond(api.deposit(body[LDDepositExecuteRequest](request, "depositExecuteRequest"), ldCache)))
     }
   }
 
@@ -109,7 +108,7 @@ class LithosDexApiController @Inject()(cc: ControllerComponents,
   /** POST /dex/redeem */
   def redeem(): Action[AnyContent] = withApiKey {
     Action.async { request =>
-      offPool(respond(api.redeem(body[LDRedeemRequest](request, "redeemRequest"), ldCache, walletSelector)))
+      offPool(respond(api.redeem(body[LDRedeemRequest](request, "redeemRequest"), ldCache)))
     }
   }
 
@@ -119,7 +118,7 @@ class LithosDexApiController @Inject()(cc: ControllerComponents,
   def claimProvision(boxId: String): Action[AnyContent] = withApiKey {
     Action.async { request =>
       offPool(respond(api.claimProvision(
-        boxId, optionalBody[LDClaimRequest](request, LDClaimRequest.Empty), ldCache, walletSelector)))
+        boxId, optionalBody[LDClaimRequest](request, LDClaimRequest.Empty), ldCache)))
     }
   }
 
@@ -131,7 +130,7 @@ class LithosDexApiController @Inject()(cc: ControllerComponents,
   /** POST /dex/provisions/:boxId/resize */
   def resize(boxId: String): Action[AnyContent] = withApiKey {
     Action.async { request =>
-      offPool(respond(api.resize(boxId, body[LDResizeRequest](request, "resizeRequest"), ldCache, walletSelector)))
+      offPool(respond(api.resize(boxId, body[LDResizeRequest](request, "resizeRequest"), ldCache)))
     }
   }
 
@@ -144,7 +143,7 @@ class LithosDexApiController @Inject()(cc: ControllerComponents,
   def flush(): Action[AnyContent] = withApiKey {
     Action.async { request =>
       offPool(respond(api.flush(
-        optionalBody[LDFlushRequest](request, LDFlushRequest.Empty), ldCache, walletSelector)))
+        optionalBody[LDFlushRequest](request, LDFlushRequest.Empty), ldCache)))
     }
   }
 
@@ -232,7 +231,7 @@ class LithosDexApiController @Inject()(cc: ControllerComponents,
         Conflict(Json.toJson(LDStateChangedResponse(LithosStateChanged(e.getMessage))))
       // A lease that expired between building and broadcasting. A timing condition the caller
       // resolves by re-reading and resending, so it must not look like a defect in this client.
-      case Failure(e: ReservationExpiredException) =>
+      case Failure(e: FundingExpiredException) =>
         Conflict(Json.toJson(LDStateChangedResponse(LithosStateChanged(e.getMessage))))
       // Insufficient selectable funds is a fact about this wallet right now, not a defect: a later
       // request after a confirmation or a refresh can succeed unchanged.

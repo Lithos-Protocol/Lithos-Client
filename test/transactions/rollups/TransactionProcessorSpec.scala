@@ -42,16 +42,17 @@ class TransactionProcessorSpec extends TestKit(ActorSystem("tx-processor-spec", 
   private val quietConfig = Configuration.from(Map("state.disableTransforms" -> true))
 
   private case class Fixture(processor: ActorRef, sync: TestProbe, submission: TestProbe,
-                             evaluator: TestProbe, probe: TestProbe)
+                             evaluator: TestProbe, probe: TestProbe, engine: TestProbe)
 
   private def fixture(): Fixture = {
     val (ctx, _, _) = FakeNodeContext()
     val sync = TestProbe()
     val submission = TestProbe()
     val evaluator = TestProbe()
+    val engine = TestProbe()
     val processor = system.actorOf(Props(new TransactionProcessor(
-      quietConfig, ctx, new FakeCache, sync.ref, submission.ref, evaluator.ref)))
-    Fixture(processor, sync, submission, evaluator, TestProbe())
+      quietConfig, ctx, new FakeCache, sync.ref, submission.ref, evaluator.ref, engine.ref)))
+    Fixture(processor, sync, submission, evaluator, TestProbe(), engine)
   }
 
   private def fpStub(rollup: String, miner: Byte, period: Long = 100L): RollupTxStub =
@@ -67,6 +68,22 @@ class TransactionProcessorSpec extends TestKit(ActorSystem("tx-processor-spec", 
   }
 
   private def tick(f: Fixture): Unit = f.processor ! ProcessTransactions
+
+  "A funded holding transform" should "use only the engine and remain queued until its outcome" in {
+    val f = fixture()
+    val stub = RollupTxStub("ab" * 32, Some(100L), HoldingTransform)
+    val intent = transactions.engine.TransactionEngine.HoldingTransform(stub.rollupBlockId, 100L, stub.fee)
+    seed(f, stub)
+    tick(f)
+    f.engine.expectMsg(transactions.engine.TransactionEngine.Submit(intent))
+    f.submission.expectNoMessage(100.millis)
+    f.engine.send(f.processor, transactions.engine.TransactionEngine.Deferred(intent.key, "not ready"))
+    tick(f)
+    f.engine.expectMsg(transactions.engine.TransactionEngine.Submit(intent))
+    f.engine.send(f.processor, transactions.engine.TransactionEngine.Accepted(intent.key, "cd" * 32))
+    tick(f)
+    f.engine.expectNoMessage(200.millis)
+  }
 
   // ─── the §4b.2 regression ─────────────────────────────────────────────────
 

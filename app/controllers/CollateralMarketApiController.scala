@@ -9,7 +9,7 @@ import play.api.Configuration
 import play.api.libs.json._
 import play.api.mvc._
 import stratum.CollateralNotFoundException
-import transactions.wallet.WalletMessages.InsufficientWalletFundsException
+import transactions.engine.EngineWalletMessages.InsufficientWalletFundsException
 import mutations.NotEnoughInputsException
 
 import java.nio.charset.StandardCharsets

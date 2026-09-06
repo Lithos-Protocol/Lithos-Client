@@ -59,7 +59,7 @@ case class LDResizeResult(boxId: String,
                           newShares: String,
                           amountX: String,
                           amountY: String,
-                          txId: String)
+                          txId: String, outcome: String = "accepted")
 
 object LDResizeResult {
   implicit lazy val ldResizeResultJsonFormat: Format[LDResizeResult] = Json.format[LDResizeResult]

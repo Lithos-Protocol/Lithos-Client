@@ -77,7 +77,7 @@ object LDSwapQuote {
       isExecutable = q.isExecutable)
 }
 
-case class LDSwapResult(amountOut: String, txId: String)
+case class LDSwapResult(amountOut: String, txId: String, outcome: String = "accepted")
 
 object LDSwapResult {
   implicit lazy val ldSwapResultJsonFormat: Format[LDSwapResult] = Json.format[LDSwapResult]

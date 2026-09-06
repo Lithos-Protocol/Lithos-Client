@@ -64,7 +64,7 @@ object LDClaimRequest {
 case class LDClaimResult(claimedX: String,
                          claimedY: String,
                          successorBoxId: String,
-                         txId: String)
+                         txId: String, outcome: String = "accepted")
 
 object LDClaimResult {
   implicit lazy val ldClaimResultJsonFormat: Format[LDClaimResult] = Json.format[LDClaimResult]

@@ -20,8 +20,8 @@ import org.scalatest.matchers.should.Matchers
 import org.scalatestplus.mockito.MockitoSugar
 import support.{FakeCache, FakeNodeContext, LDNodeFixtures}
 import transactions.dex.{DexContracts, LDBoxes}
-import transactions.wallet.WalletMessages._
-import transactions.wallet.WalletSelector
+import transactions.engine.EngineWalletMessages._
+import transactions.engine.EngineFunding
 
 import java.util.concurrent.CountDownLatch
 import scala.concurrent.duration._
@@ -62,10 +62,10 @@ class LithosDexApiImplSpec
   private val ReservesX = 10L * erg
   private val ReservesY = 10000L * 1000000L
 
-  private case class Fixture(api: LithosDexApiImpl,
+  private case class Fixture(api: transactions.engine.DexExecution,
                              nodeApi: NodeApi,
                              ctxOf: NodeContext,
-                             selector: WalletSelector,
+                             selector: EngineFunding,
                              wallet: TestProbe,
                              cache: LDCache)
 
@@ -76,11 +76,11 @@ class LithosDexApiImplSpec
   private def fixture(mutationWait: Long = 15000L): Fixture = {
     val nodeApi = mock[NodeApi]
     val (nodeCtx, _, _) = FakeNodeContext(nodeApi, numAddresses = 1)
-    val impl = new LithosDexApiImpl(nodeCtx) {
+    val wallet = TestProbe()
+    val impl = new transactions.engine.DexExecution(nodeCtx, EngineFunding(wallet.ref, 2.seconds, ec)) {
       override protected def mutationWaitMs: Long = mutationWait
     }
-    val wallet = TestProbe()
-    Fixture(impl, nodeApi, nodeCtx, WalletSelector(wallet.ref, 2.seconds, ec), wallet,
+    Fixture(impl, nodeApi, nodeCtx, EngineFunding(wallet.ref, 2.seconds, ec), wallet,
       new LDCache(new FakeCache))
   }
 
@@ -111,7 +111,7 @@ class LithosDexApiImplSpec
   /**
    * The request got as far as asking the wallet for funding, which is where these fixtures stop.
    *
-   * Matched by simple name because `WalletMessages` is `private[transactions]` and this spec is in
+   * Matched by simple name because `EngineWalletMessages` is `private[transactions]` and this spec is in
    * `api` — the same package boundary that keeps production callers off those messages.
    */
   private def expectsSelection(f: Fixture): Unit =
@@ -147,10 +147,10 @@ class LithosDexApiImplSpec
         }
     }
 
-    val first = Future(Try(f.api.flush(LDFlushRequest.Empty, f.cache, f.selector)))
+    val first = Future(Try(f.api.flush(LDFlushRequest.Empty, f.cache)))
     entered.await(10, java.util.concurrent.TimeUnit.SECONDS) shouldBe true
 
-    val second = Try(f.api.flush(LDFlushRequest.Empty, f.cache, f.selector))
+    val second = Try(f.api.flush(LDFlushRequest.Empty, f.cache))
     second.failed.get shouldBe a[LithosStateChanged]
     second.failed.get.getMessage should include("re-read the pool and vault")
 
@@ -171,8 +171,8 @@ class LithosDexApiImplSpec
 
     // Nothing is pending, so this fails on its own terms rather than on the lock — and must still
     // hand the lock back, or every later mutation in the process is refused.
-    Try(f.api.flush(LDFlushRequest.Empty, f.cache, f.selector)).failed.get shouldBe a[LithosBadRequest]
-    Try(f.api.flush(LDFlushRequest.Empty, f.cache, f.selector)).failed.get shouldBe a[LithosBadRequest]
+    Try(f.api.flush(LDFlushRequest.Empty, f.cache)).failed.get shouldBe a[LithosBadRequest]
+    Try(f.api.flush(LDFlushRequest.Empty, f.cache)).failed.get shouldBe a[LithosBadRequest]
   }
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -186,7 +186,7 @@ class LithosDexApiImplSpec
 
     val thrown = intercept[LithosStateChanged](f.api.swap(
       LDSwapExecuteRequest("1000000", ergIn = true, "0", expectedPoolBoxId = Some("de" * 32)),
-      f.cache, f.selector))
+      f.cache))
 
     // The id it moved TO, so the caller can re-quote against it rather than read the pool again and
     // race a third request in the process.
@@ -203,7 +203,7 @@ class LithosDexApiImplSpec
     // Reaches the builder, which then asks the wallet — which is where this fixture stops.
     Future(Try(f.api.swap(
       LDSwapExecuteRequest("1000000", ergIn = true, "0", expectedPoolBoxId = Some(live.boxId)),
-      f.cache, f.selector)))
+      f.cache)))
     expectsSelection(f)
   }
 
@@ -225,7 +225,7 @@ class LithosDexApiImplSpec
 
     val thrown = intercept[LithosUnprocessable](f.api.deposit(
       LDDepositExecuteRequest(shares.toString, maxAmountX = Some((quoted.amountX - 1).toString)),
-      f.cache, f.selector))
+      f.cache))
     thrown.getMessage should include("maxAmountX")
     f.wallet.expectNoMessage(200.millis)
   }
@@ -235,7 +235,7 @@ class LithosDexApiImplSpec
     serve(f, Some(poolBox(f)), None)
     Future(Try(f.api.deposit(
       LDDepositExecuteRequest("1000000", maxAmountX = Some(Long.MaxValue.toString)),
-      f.cache, f.selector)))
+      f.cache)))
     expectsSelection(f)
   }
 
@@ -246,7 +246,7 @@ class LithosDexApiImplSpec
     serve(f, Some(poolBox(f)), None)
 
     intercept[LithosBadRequest](f.api.swap(
-      LDSwapExecuteRequest("1000000", ergIn = true, "-1"), f.cache, f.selector))
+      LDSwapExecuteRequest("1000000", ergIn = true, "-1"), f.cache))
       .getMessage should include("minOutput")
     f.wallet.expectNoMessage(200.millis)
   }
@@ -266,7 +266,7 @@ class LithosDexApiImplSpec
       .thenReturn(Success(Some(LDNodeFixtures.indexed(provision))))
 
     val thrown = intercept[LithosBadRequest](f.api.redeem(
-      LDRedeemRequest(provision.boxId), f.cache, f.selector))
+      LDRedeemRequest(provision.boxId), f.cache))
     thrown.getMessage should include("acknowledgeUnclaimedFees")
     // Both amounts named, since "some fees" is not something a user can weigh.
     thrown.getMessage should include("nanoERG")
@@ -300,12 +300,12 @@ class LithosDexApiImplSpec
         }
     }
 
-    val first = Future(Try(f.api.flush(LDFlushRequest.Empty, f.cache, f.selector)))
+    val first = Future(Try(f.api.flush(LDFlushRequest.Empty, f.cache)))
     entered.await(10, java.util.concurrent.TimeUnit.SECONDS) shouldBe true
     // Past the stuck-holder threshold, so the next caller must be told the node is the problem.
     Thread.sleep(10500L)
 
-    val second = Try(f.api.flush(LDFlushRequest.Empty, f.cache, f.selector))
+    val second = Try(f.api.flush(LDFlushRequest.Empty, f.cache))
     second.failed.get shouldBe a[LithosUnavailable]
     second.failed.get.getMessage should include("may not be answering")
 

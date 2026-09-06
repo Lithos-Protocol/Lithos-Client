@@ -5,6 +5,7 @@ import org.ergoplatform.{ErgoScriptPredef, ErgoTreePredef}
 import org.ergoplatform.appkit.{Address, BlockchainContext, Parameters, PreHeader, UnsignedTransaction, UnsignedTransactionBuilder}
 
 import scala.collection.JavaConverters.seqAsJavaListConverter
+import scala.collection.JavaConverters._
 
 class TxBuilder(ctx: BlockchainContext){
   val uTxB: UnsignedTransactionBuilder = ctx.newTxBuilder()
@@ -54,13 +55,18 @@ class TxBuilder(ctx: BlockchainContext){
   }
 
   def buildTx(fee: Long, changeAddress: Address, burntTokens: Seq[Token] = Seq.empty[Token]): UnsignedTransaction = {
-    val totalChange = inputs.map(_.value).sum - outputs.map(_.value).sum
+    val (adjustedOutputs, adjustedBurn) = Eip27Adjustment.adjust(inputs, outputs, burntTokens, fee, ctx.getNetworkType)
+    val totalIn = inputs.foldLeft(0L)((n, b) => Math.addExact(n, b.value))
+    val totalOut = adjustedOutputs.foldLeft(fee)((n, b) => Math.addExact(n, b.value))
+    val totalChange = Math.subtractExact(totalIn, totalOut)
+    require(totalChange >= 0, "inputs do not cover the completed output plan")
     val outputsToUse = {
       if(totalChange < Parameters.MinChangeValue && totalChange != 0){
-        val feeIdx = outputs.indexWhere(_.contract.ergoTreeHex == Contract(ErgoTreePredef.feeProposition(720)).ergoTreeHex)
-        outputs.patch(feeIdx, Seq(outputs(feeIdx).addValue(totalChange)), 1)
+        val feeIdx = adjustedOutputs.indexWhere(_.contract.ergoTreeHex == Contract(ErgoTreePredef.feeProposition(720)).ergoTreeHex)
+        require(feeIdx >= 0, "sub-minimum change requires an explicit fee output")
+        adjustedOutputs.patch(feeIdx, Seq(adjustedOutputs(feeIdx).addValue(totalChange)), 1)
       }else{
-        outputs
+        adjustedOutputs
       }
     }
 
@@ -73,10 +79,28 @@ class TxBuilder(ctx: BlockchainContext){
     if(fee > 0)
       uTx.fee(fee)
 
-    if(burntTokens.nonEmpty)
-      uTx.tokensToBurn(burntTokens.map(_.toErgo): _*)
+    if(adjustedBurn.nonEmpty)
+      uTx.tokensToBurn(adjustedBurn.map(_.toErgo): _*)
 
-    uTx.build()
+    val completed = uTx.build()
+    val actual = completed.getOutputs.asScala.toVector
+    require(actual.size >= outputsToUse.size, "completed transaction omitted a planned output")
+    outputsToUse.zip(actual).foreach { case (planned, output) =>
+      val expected = planned.toOutBox(ctx)
+      require(output.getValue == expected.getValue && output.getErgoTree == expected.getErgoTree &&
+        output.getTokens == expected.getTokens && output.getRegisters == expected.getRegisters &&
+        output.getCreationHeight == expected.getCreationHeight,
+        "completed transaction changed a planned output or protocol position")
+    }
+    val extra = actual.drop(outputsToUse.size)
+    val changeTree = changeAddress.toErgoContract.getErgoTree
+    val feeTree = ErgoTreePredef.feeProposition(720)
+    require(extra.forall(o => o.getErgoTree == changeTree || (fee > 0 && o.getErgoTree == feeTree)),
+      "completed transaction sent change to an unintended recipient")
+    require(extra.filter(_.getErgoTree == feeTree).foldLeft(0L)((n, b) => Math.addExact(n, b.getValue)) == fee,
+      "completed transaction changed the requested fee")
+    Eip27Adjustment.validate(completed, ctx.getNetworkType)
+    completed
   }
 
 }

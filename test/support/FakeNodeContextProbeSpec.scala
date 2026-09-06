@@ -1,4 +1,5 @@
 package support
+import transactions.engine.EngineWalletState
 
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
@@ -25,7 +26,7 @@ class FakeNodeContextProbeSpec extends AnyFlatSpec with Matchers {
 
   it should "derive one reward script per address, distinct from the P2PK trees" in {
     // A coinbase pays `pk && HEIGHT > creationHeight + 720`, not a plain key, which is the whole
-    // reason WalletManager tracks them separately.
+    // reason EngineWalletState tracks them separately.
     val (_, _, wallet) = FakeNodeContext(numAddresses = 3)
     wallet.rewardTrees should have size 3
     wallet.rewardTrees.keySet.intersect(wallet.signableTrees) shouldBe empty

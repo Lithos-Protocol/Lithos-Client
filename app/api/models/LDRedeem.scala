@@ -41,7 +41,7 @@ object LDRedeemQuote {
   implicit lazy val ldRedeemQuoteJsonFormat: Format[LDRedeemQuote] = Json.format[LDRedeemQuote]
 }
 
-case class LDRedeemResult(shares: String, amountX: String, amountY: String, txId: String)
+case class LDRedeemResult(shares: String, amountX: String, amountY: String, txId: String, outcome: String = "accepted")
 
 object LDRedeemResult {
   implicit lazy val ldRedeemResultJsonFormat: Format[LDRedeemResult] = Json.format[LDRedeemResult]

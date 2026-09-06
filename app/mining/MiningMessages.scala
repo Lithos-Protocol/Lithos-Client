@@ -50,7 +50,16 @@ object MiningMessages {
    */
   case class ProcessTemplate(candidate: MiningCandidate, tau: BigInteger,
                              usesCollateral: Boolean, reducedShareMessages: Boolean,
-                             mustPublish: Boolean = false)
+                             mustPublish: Boolean = false,
+                             publication: Option[CandidatePublication] = None)
+
+  case class CandidateIdentity(height: Int, parentId: String, genesisId: String, revision: Int)
+  case class CandidatePublication(identity: CandidateIdentity, attempt: java.util.UUID,
+                                  expiresAt: Option[Long] = None)
+  case class TemplateRejected(publication: CandidatePublication)
+
+  /** The node cache or chain no longer supports the currently served job. */
+  case object InvalidateTemplate
 
   /**
    * Sent by StratumConnection (via LithosPool.forward) when a miner subscribes.
@@ -97,7 +106,7 @@ object MiningMessages {
   // ═══════════════════════════════════════════════════════════════════════════
 
   /** A new block height has been detected; all connections should receive the new job. */
-  case class NewJobAvailable(template: BlockTemplate)
+  case class NewJobAvailable(template: BlockTemplate, publication: Option[CandidatePublication] = None)
 
   /** The same block height has a refreshed template (e.g. extra data changed). */
   case class JobUpdated(template: BlockTemplate)
@@ -140,10 +149,13 @@ object MiningMessages {
   // ═══════════════════════════════════════════════════════════════════════════
 
   /**
-   * The block now being mined is at `blockHeight`, one past the confirmed chain tip. Ignored when
-   * it is not ahead of what the builder already has.
+   * The block now being mined is one past the full-chain tip. A changed parent invalidates
+   * work even at the same or a lower height; an empty parent retains height-only legacy behavior.
    */
-  case class ChainAdvanced(blockHeight: Int)
+  case class ChainAdvanced(blockHeight: Int, parentId: String = "")
+
+  /** Actual genesis job publication permits the builder to start optional collection. */
+  case class GenesisPublished(identity: CandidateIdentity)
 
   /** Throw away the current package and build it again. */
   case object RebuildCandidate
@@ -161,7 +173,7 @@ object MiningMessages {
    * The node refused a candidate carrying this block's inserted transactions but accepted the
    * genesis transaction alone, so only the insertions are at fault. They are in the mempool too.
    */
-  case class BlockTxsRejected(blockHeight: Int)
+  case class BlockTxsRejected(blockHeight: Int, identity: Option[CandidateIdentity] = None)
 
   /**
    * Transactions are ready for the block at `pkg.blockHeight`. Sent once with the genesis
@@ -174,9 +186,8 @@ object MiningMessages {
   // ═══════════════════════════════════════════════════════════════════════════
 
   /**
-   * MiningStratumServer → LithosPool, once at startup: hand back the job manager so connections can
-   * send shares straight to it. LithosPool blocks its own mailbox on node HTTP, so routing shares
-   * through it would put those round trips in front of every miner's response.
+   * MiningStratumServer → LithosPool, once at startup: hand back the job manager so connections
+   * can send shares directly to the actor owning validation and avoid an extra mailbox hop.
    */
   case object GetJobManager
 

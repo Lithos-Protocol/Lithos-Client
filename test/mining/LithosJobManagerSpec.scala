@@ -80,6 +80,20 @@ class LithosJobManagerSpec extends TestKit(ActorSystem("job-manager-spec", Litho
 
   // ─── template handling ────────────────────────────────────────────────────
 
+  "An expired publication" should "be refused before a subscription can observe it" in {
+    val (parent, mgr) = managerWithParent()
+    val probe = TestProbe()
+    val publication = CandidatePublication(CandidateIdentity(479451, "ab" * 32, "cd" * 32, 1),
+      java.util.UUID.randomUUID(), Some(System.nanoTime() - 1L))
+    probe.send(mgr, ProcessTemplate(candidate(), BigInteger.TEN, usesCollateral = false,
+      reducedShareMessages = false, mustPublish = true, publication = Some(publication)))
+    probe.expectMsg(false)
+    probe.expectMsg(TemplateRejected(publication))
+    probe.send(mgr, RequestSubscription)
+    probe.expectMsgType[SubscriptionData].currentJob shouldBe None
+    parent.expectNoMessage()
+  }
+
   "A solo template carrying collateral data" should "be refused outright" in {
     val (parent, mgr) = managerWithParent()
     val probe = TestProbe()

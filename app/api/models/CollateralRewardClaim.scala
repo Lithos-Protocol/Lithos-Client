@@ -3,7 +3,7 @@ package api.models
 import play.api.libs.json._
 
 /** One broadcast batch of a reward sweep. */
-case class CollateralRewardClaimedChunk(txId: String, boxes: Int, nanoErgs: String)
+case class CollateralRewardClaimedChunk(txId: String, boxes: Int, nanoErgs: String, outcome: String = "accepted")
 
 object CollateralRewardClaimedChunk {
   implicit lazy val jsonFormat: Format[CollateralRewardClaimedChunk] =

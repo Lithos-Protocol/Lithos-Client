@@ -1,4 +1,5 @@
 package api
+import transactions.engine.EngineWalletState
 
 import akka.actor.{Actor, ActorRef, ActorSystem, Props}
 import akka.testkit.TestKit
@@ -18,7 +19,7 @@ import org.scalatestplus.mockito.MockitoSugar
 import play.api.Configuration
 import support.{CollateralNodeFixtures => Fx, FakeNodeContext}
 import transactions.ProtocolContracts.{hex, lenderEntry}
-import transactions.wallet.WalletMessages._
+import transactions.engine.EngineWalletMessages._
 
 import java.util.concurrent.atomic.AtomicInteger
 import scala.concurrent.duration._
@@ -50,7 +51,7 @@ class CollateralMarketApiImplSpec
   // ─── a wallet that answers ────────────────────────────────────────────────
 
   /**
-   * Stands in for `WalletManager`. `claimReply` is a function so a test can make the actor answer
+   * Stands in for `EngineWalletState`. `claimReply` is a function so a test can make the actor answer
    * `RewardClaimFailed`, which the manager really does send and which the API used to cast away.
    */
   private class StubWallet(spendable: Long,
@@ -84,7 +85,7 @@ class CollateralMarketApiImplSpec
     }
   }
 
-  private case class Fixture(api: CollateralMarketApiImpl,
+  private case class Fixture(api: transactions.engine.CollateralExecution,
                              nodeApi: NodeApi,
                              ctxOf: NodeContext,
                              addresses: Seq[Address],
@@ -119,7 +120,7 @@ class CollateralMarketApiImplSpec
     val walletRef: ActorRef =
       system.actorOf(Props(new StubWallet(spendable, rewards, claimReply)))
 
-    val api = new CollateralMarketApiImpl(nodeCtx, config, system, walletRef) {
+    val api = new transactions.engine.CollateralExecution(nodeCtx, config, system, walletRef) {
       override protected val snapshotTtlMs: Long = ttlMs
     }
     Fixture(api, nodeApi, nodeCtx, addresses, index)
@@ -303,7 +304,7 @@ class CollateralMarketApiImplSpec
   // ─── 5. a wallet reply the API did not expect ─────────────────────────────
 
   "A sweep that failed" should "become a status carrying the reason, not a 500" in {
-    // `WalletManager` really does answer `RewardClaimFailed` — `runRewardSweep` catches Throwable
+    // `EngineWalletState` really does answer `RewardClaimFailed` — `runRewardSweep` catches Throwable
     // and completes its promise with it. The API cast the reply to `RewardsClaimed`, so the one
     // message carrying WHY the sweep failed became a ClassCastException naming two class names.
     val f = fixture(

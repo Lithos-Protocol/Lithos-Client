@@ -370,7 +370,7 @@ class StateSnapshotStoreSpec extends AnyFlatSpec with Matchers with BeforeAndAft
       MaxEntry).toOption.get
     StateSnapshotCodec.decodeMetaForDeletion(encoded) shouldBe
       Right(plan(populatedSnapshot(100, 8L)).dictionaries.values.map(_.expectedDigest).toSet)
-    StateSnapshotCodec.decodeMetaForDeletion(withSchemaVersion(encoded, 4, opaqueBody = true))
+    StateSnapshotCodec.decodeMetaForDeletion(withSchemaVersion(encoded, 5, opaqueBody = true))
       .isLeft shouldBe true
     val corrupt = encoded.clone()
     corrupt(corrupt.length - 1) = (corrupt.last ^ 1).toByte

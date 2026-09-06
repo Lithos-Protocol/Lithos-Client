@@ -34,7 +34,7 @@ class StartMiningServer @Inject()(system: ActorSystem, config: Configuration,
                                   cs: CoordinatedShutdown,
                                   @Named("state-frame") stateFrame: ActorRef,
                                   @Named("transaction-processor") transactionProcessor: ActorRef,
-                                  @Named("emission-handler") emissionHandler: ActorRef) {
+                                  @Named("transaction-engine") emissionHandler: ActorRef) {
 
   val logger: Logger = LoggerFactory.getLogger("StartMiningServer")
 

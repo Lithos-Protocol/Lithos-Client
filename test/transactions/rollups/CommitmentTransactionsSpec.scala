@@ -1,4 +1,5 @@
 package transactions.rollups
+import transactions.engine.EngineWalletState
 
 import akka.actor.{ActorRef, ActorSystem, Props}
 import akka.testkit.{TestKit, TestProbe}
@@ -18,8 +19,8 @@ import org.scalatest.matchers.should.Matchers
 import org.scalatestplus.mockito.MockitoSugar
 import sigma.Colls
 import support.FakeNodeContext
-import transactions.wallet.WalletMessages._
-import transactions.wallet.{WalletManager, WalletSelector}
+import transactions.engine.EngineWalletMessages._
+import transactions.engine.EngineFunding
 import work.lithos.mutations.{Contract, InputUTXO, UTXO}
 
 import java.util.concurrent.atomic.AtomicLong
@@ -44,6 +45,7 @@ import scala.util.{Failure, Success, Try}
 object CommitmentTransactionsSpec {
   val config: com.typesafe.config.Config =
     com.typesafe.config.ConfigFactory.parseString("akka.test.single-expect-default = 20s")
+      .withFallback(com.typesafe.config.ConfigFactory.load())
 }
 
 class CommitmentTransactionsSpec
@@ -62,13 +64,18 @@ class CommitmentTransactionsSpec
   private def configuredScore: Long =
     LFSMHelpers.convertTauOrScore(BigInt(LFSMHelpers.parseDiffValueForStratum(diff).get)).toLong
 
-  private class TestableWalletManager(ctx: NodeContext, clock: () => Long) extends WalletManager(ctx) {
+  private class TestableEngineWalletState(ctx: NodeContext, clock: () => Long) extends EngineWalletState(ctx) {
     override protected def now(): Long = clock()
+    override def receive: Receive = ({
+      case state.synchronization.CompleteMempool.Refresh =>
+        sender() ! state.synchronization.CompleteMempool.Observation(1L,
+          Some(state.synchronization.CompleteMempool.Snapshot("aa" * 32, Set.empty, Set.empty, System.nanoTime())), None)
+    }: Receive).orElse(super.receive)
   }
 
   private def walletBox(wallet: NodeWallet, value: Long): WalletBox =
     WalletBox(
-      box = NodeBox(boxId = f"$value%064x", transactionId = "aa" * 32, value = value, index = 0,
+      box = support.CanonicalNodeBox(boxId = f"$value%064x", transactionId = "aa" * 32, value = value, index = 0,
         creationHeight = 100, ergoTree = wallet.contract.ergoTreeHex),
       address = wallet.p2pk.toString, confirmationsNum = Some(10), creationTransaction = "aa" * 32,
       creationOutIndex = 0, inclusionHeight = Some(100), spendingTransaction = None,
@@ -92,7 +99,7 @@ class CommitmentTransactionsSpec
       .toInput(ctx, ErgoId.create("ab" * 32), 0.toShort)
 
   private case class Fixture(commitments: CommitmentTransactions,
-                             selector: WalletSelector,
+                             selector: EngineFunding,
                              mgr: ActorRef,
                              probe: TestProbe,
                              clock: AtomicLong,
@@ -111,6 +118,8 @@ class CommitmentTransactionsSpec
     val readable = new java.util.concurrent.atomic.AtomicBoolean(true)
 
     when(api.indexerEnabled).thenReturn(true)
+    when(api.info()).thenReturn(Success(support.ChainFixtures.infoAt(100000).copy(bestFullHeaderId = Some("aa" * 32))))
+    when(api.sendTransaction(anyString())).thenReturn(Failure(new RuntimeException("response lost")))
     when(api.walletUnspentBoxes(any[ConfirmationRange], any[Paging])).thenAnswer { inv =>
       if (inv.getArgument[Paging](1).offset == 0) Success(Seq(walletBox(wallet, 5 * erg)))
       else Success(Seq.empty[WalletBox])
@@ -125,7 +134,7 @@ class CommitmentTransactionsSpec
         else Failure(new RuntimeException("reward lookup refused"))
       }
 
-    val mgr = system.actorOf(Props(new TestableWalletManager(nodeCtx, () => clock.get())))
+    val mgr = system.actorOf(Props(new TestableEngineWalletState(nodeCtx, () => clock.get())))
     mgr ! RefreshBoxes
     Thread.sleep(1200)
 
@@ -137,11 +146,11 @@ class CommitmentTransactionsSpec
       override protected def dataBox(ctx: BlockchainContext): Try[InputUTXO] = commits match {
         case None => Failure(new state.DataBoxRetrievalException("no stored data box"))
         case Some(cs) =>
-          val foreign = if (unsignable) Contract(sigma.ast.ErgoTree.fromHex("10010101d17300")) else null
+          val foreign = if (unsignable) Contract(sigma.ast.ErgoTree.fromHex("10010100d17300")) else null
           Success(dataBoxWith(ctx, wallet, cs, foreign))
       }
     }
-    Fixture(commitments, WalletSelector(mgr, 5.seconds, ec), mgr, TestProbe(), clock, readable)
+    Fixture(commitments, EngineFunding(mgr, 5.seconds, ec), mgr, TestProbe(), clock, readable)
   }
 
   private def offered(f: Fixture, need: Long): Seq[InputUTXO] = {
@@ -175,17 +184,18 @@ class CommitmentTransactionsSpec
     // handed straight back; under `uncertain()` it is not. The TTL sweep must not end it either,
     // which is the second half.
     val f = fixture(Some(inForce(configuredScore + 1)))
-    f.readable.set(false)
 
     f.commitments.commitScore(diff, f.selector).isFailure shouldBe true
+    f.probe.send(f.mgr, GetEngineHolds)
+    f.probe.expectMsgType[EngineHolds].holds should have size 1
 
     offered(f, erg) shouldBe empty
-    f.clock.addAndGet(WalletManager.ReservationTtlMs + 1L)
+    f.clock.addAndGet(EngineWalletState.ReservationTtlMs + 1L)
     f.probe.send(f.mgr, ResetUsedInputs)
     offered(f, erg) shouldBe empty
   }
 
-  it should "hand the input back once a complete read proves the send never landed" in {
+  it should "retain the input when a complete local read cannot prove the transaction invalid" in {
     // The other half, and what makes the hold above safe to have. Uncertain is resolved by a
     // complete mempool-aware read; Submitting is resolved by nothing at all. A lease left Submitting
     // would pass the test above and fail this one, which is the distinction that matters.
@@ -193,7 +203,7 @@ class CommitmentTransactionsSpec
     f.commitments.commitScore(diff, f.selector).isFailure shouldBe true
 
     f.mgr ! RefreshBoxes
-    f.probe.awaitAssert(offered(f, erg).map(_.value) shouldEqual Seq(5 * erg), 10.seconds, 200.millis)
+    f.probe.awaitAssert(offered(f, erg) shouldBe empty, 10.seconds, 200.millis)
   }
 
   "A commitment that fails before the node call" should "release its selection at once" in {

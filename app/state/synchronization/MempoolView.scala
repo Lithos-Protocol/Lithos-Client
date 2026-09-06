@@ -17,6 +17,7 @@ import scala.concurrent.duration._
 import scala.util.{Failure, Success, Try}
 
 object MempoolView {
+  private case class CompleteRead(id: java.util.UUID, result: Try[CompleteMempool.Snapshot])
   private case object Tick
   private final case class RefreshFinished(result: Try[BuiltSnapshot])
 
@@ -99,6 +100,13 @@ class MempoolView @Inject()(config: play.api.Configuration,
   private val pollingContext = context.system.dispatchers.lookup(Contexts.key(Contexts.Polling))
   private val logger: Logger = LoggerFactory.getLogger("MempoolView")
   private val nodeApi = nodeContext.getNodeApi
+  private lazy val completeNode = node.rest.RestNodeApi(node.rest.NodeHttpConfig(
+    nodeContext.getNodeUrl, Some(nodeContext.getNodeKey), maxResponseBytes = 2 * 1024 * 1024,
+    callTimeoutMs = 10000L))
+  private lazy val completeWorker = context.system.dispatchers.lookup("lithos-contexts.mempool-io-dispatcher")
+  private var completeAttempt: Option[java.util.UUID] = None
+  private var completeWaiters = Vector.empty[ActorRef]
+  private var completeObservation = CompleteMempool.Observation(0L, None, Some("not observed"))
   private val syncConfig = new configs.SyncConfig(config)
   private val maxTransactions = syncConfig.mempoolMaxTransactions
   // Relevant ErgoTrees to search mempool for
@@ -120,6 +128,27 @@ class MempoolView @Inject()(config: play.api.Configuration,
   override def postStop(): Unit = ticker.cancel()
 
   override def receive: Receive = {
+    case CompleteMempool.Refresh =>
+      if (completeWaiters.size >= 32) sender() ! completeObservation.copy(failure = Some("mempool reader capacity exhausted"))
+      else {
+        completeWaiters :+= sender()
+        if (completeAttempt.isEmpty) {
+          val id = java.util.UUID.randomUUID()
+          completeAttempt = Some(id)
+          Try(Future(CompleteMempool.collect(completeNode))(completeWorker)
+            .foreach(result => self ! CompleteRead(id, result)))
+            .failed.foreach(ex => self ! CompleteRead(id, Failure(ex)))
+        }
+      }
+    case CompleteRead(id, result) if completeAttempt.contains(id) =>
+      completeAttempt = None
+      completeObservation = result match {
+        case Success(snapshot) => CompleteMempool.Observation(completeObservation.revision + 1L, Some(snapshot), None)
+        case Failure(ex) => completeObservation.copy(failure = Some(ex.getMessage))
+      }
+      completeWaiters.foreach(_ ! completeObservation)
+      completeWaiters = Vector.empty
+    case _: CompleteRead => ()
     // Skip projections before readiness; no consumer can use them during catch-up.
     case Tick =>
       stateFrame ! AutoSubscribable.AutoSubscribe(self)

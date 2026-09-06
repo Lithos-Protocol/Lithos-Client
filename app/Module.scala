@@ -7,9 +7,7 @@ import play.libs.akka.AkkaGuiceSupport
 import state.synchronization._
 import state.persistence.StateSnapshotActor
 import tasks.{MDSyncTask, RollupSyncTask, StartMiningServer, StartupTasks}
-import transactions.emissions.EmissionHandler
-import transactions.rollups.{DataBoxSource, RollupEvaluator, SubmissionHandler, TransactionProcessor, TransactionPublisher}
-import transactions.wallet.WalletManager
+import transactions.rollups.{DataBoxSource, RollupEvaluator, TransactionProcessor, TransactionPublisher}
 import utils.Globals
 
 import java.lang.management.ManagementFactory
@@ -49,12 +47,10 @@ class Module(environment: Environment, configuration: Configuration) extends Abs
     bindActor(classOf[MempoolView], "mempool-view", p => p.withDispatcher("lithos-contexts.sync-dispatcher"))
     bindActor(classOf[SyncHandler], "sync-handler", p => p.withDispatcher("lithos-contexts.sync-dispatcher"))
 
-    bindActor(classOf[WalletManager],        "wallet-manager",        p => p.withDispatcher("lithos-contexts.tx-dispatcher"))
-    bindActor(classOf[SubmissionHandler],    "submission-handler",    p => p.withDispatcher("lithos-contexts.tx-dispatcher"))
+    bindActor(classOf[transactions.engine.TransactionEngine], "transaction-engine")
     bindActor(classOf[RollupEvaluator],      "rollup-evaluator",      p => p.withDispatcher("lithos-contexts.tx-dispatcher"))
     bindActor(classOf[TransactionProcessor], "transaction-processor", p => p.withDispatcher("lithos-contexts.tx-dispatcher"))
     bindActor(classOf[TransactionPublisher], "transaction-publisher", p => p.withDispatcher("lithos-contexts.tx-dispatcher"))
-    bindActor(classOf[EmissionHandler],      "emission-handler",      p => p.withDispatcher("lithos-contexts.tx-dispatcher"))
 
     bind(classOf[BlocksApi]).to(classOf[BlocksApiImpl])
     bind(classOf[CollateralMarketApi]).to(classOf[CollateralMarketApiImpl])

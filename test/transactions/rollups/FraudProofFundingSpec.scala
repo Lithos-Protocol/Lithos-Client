@@ -14,8 +14,8 @@ import org.scalatest.matchers.should.Matchers
 import org.scalatestplus.mockito.MockitoSugar
 import play.api.Configuration
 import support.{FakeCache, FakeNodeContext}
-import transactions.wallet.WalletManager
-import transactions.wallet.WalletMessages.{GetSpendableBalance, RefreshBoxes, SpendableBalance}
+import transactions.engine.EngineWalletState
+import transactions.engine.EngineWalletMessages.{GetSpendableBalance, RefreshBoxes, SpendableBalance}
 
 import scala.concurrent.duration._
 import scala.util.Success
@@ -30,7 +30,7 @@ import scala.util.Success
  */
 object FraudProofFundingSpec {
   val config: com.typesafe.config.Config =
-    com.typesafe.config.ConfigFactory.parseString("akka.test.single-expect-default = 20s")
+    com.typesafe.config.ConfigFactory.parseString("akka.test.single-expect-default = 20s").withFallback(com.typesafe.config.ConfigFactory.load())
 }
 
 class FraudProofFundingSpec extends TestKit(ActorSystem("fp-funding-spec", FraudProofFundingSpec.config))
@@ -58,7 +58,7 @@ class FraudProofFundingSpec extends TestKit(ActorSystem("fp-funding-spec", Fraud
 
   private def walletBox(wallet: NodeWallet, value: Long): WalletBox =
     WalletBox(
-      box = NodeBox(boxId = f"$value%064x", transactionId = "aa" * 32, value = value, index = 0,
+      box = support.CanonicalNodeBox(boxId = f"$value%064x", transactionId = "aa" * 32, value = value, index = 0,
         creationHeight = 100, ergoTree = wallet.contract.ergoTreeHex),
       address = wallet.p2pk.toString, confirmationsNum = Some(10), creationTransaction = "aa" * 32,
       creationOutIndex = 0, inclusionHeight = Some(100), spendingTransaction = None,
@@ -67,12 +67,12 @@ class FraudProofFundingSpec extends TestKit(ActorSystem("fp-funding-spec", Fraud
   /** Matured: the mocked chain sits at 123,413, far past the 720-block delay on height 1. */
   private def coinbase(wallet: NodeWallet, value: Long): IndexedBox =
     IndexedBox(
-      box = NodeBox(boxId = f"$value%064x", transactionId = "bb" * 32, value = value, index = 0,
+      box = support.CanonicalNodeBox(boxId = f"$value%064x", transactionId = "bb" * 32, value = value, index = 0,
         creationHeight = 1, ergoTree = wallet.rewardTrees.keys.head),
       address = "reward", inclusionHeight = 1, globalIndex = 1L)
 
-  /** A real `WalletManager` over a real `SubmissionHandler`, so selection is the production path. */
-  private def handlerOver(walletErg: Long, rewardErg: Long): (SubmissionHandler, NodeWallet) = {
+  /** A real `EngineWalletState` over a real `SubmissionHandler`, so selection is the production path. */
+  private def handlerOver(walletErg: Long, rewardErg: Long): (RollupEngineHarness, NodeWallet) = {
     val api = mock[NodeApi]
     val (ctx, _, wallet) = FakeNodeContext(api, numAddresses = 1)
     val boxes = Seq(walletBox(wallet, walletErg))
@@ -87,7 +87,7 @@ class FraudProofFundingSpec extends TestKit(ActorSystem("fp-funding-spec", Fraud
         Success(rewards.filter(_.box.ergoTree == inv.getArgument[String](0)))
       }
 
-    val mgr: ActorRef = system.actorOf(Props(new WalletManager(ctx)))
+    val mgr: ActorRef = system.actorOf(Props(new EngineWalletState(ctx)))
     mgr ! RefreshBoxes
 
     // The refresh runs off the mailbox, and the balance is both halves of one BoxesRefreshed, so it
@@ -99,7 +99,7 @@ class FraudProofFundingSpec extends TestKit(ActorSystem("fp-funding-spec", Fraud
       probe.expectMsgType[SpendableBalance](1.second).nanoErgs shouldEqual walletErg + rewardErg
     }, 15.seconds, 200.millis)
 
-    val handler = TestActorRef[SubmissionHandler](Props(new SubmissionHandler(
+    val handler = TestActorRef[RollupEngineHarness](Props(new RollupEngineHarness(
       quietConfig, ctx, new FakeCache, storedDataBox,
       TestProbe().ref, TestProbe().ref, mgr)))
     (handler.underlyingActor, wallet)

@@ -70,7 +70,7 @@ case class LDDepositResult(provisionBoxId: String,
                            shares: String,
                            amountX: String,
                            amountY: String,
-                           txId: String)
+                           txId: String, outcome: String = "accepted")
 
 object LDDepositResult {
   implicit lazy val ldDepositResultJsonFormat: Format[LDDepositResult] = Json.format[LDDepositResult]

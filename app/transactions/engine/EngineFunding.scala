@@ -1,10 +1,11 @@
-package transactions.wallet
+package transactions.engine
+import transactions.engine.EngineWalletState
 
 import akka.actor.ActorRef
 import akka.pattern.ask
 import akka.util.Timeout
 import mutations.NotEnoughInputsException
-import transactions.wallet.WalletMessages._
+import transactions.engine.EngineWalletMessages._
 import work.lithos.mutations.{InputUTXO, Token}
 
 import java.util.UUID
@@ -15,26 +16,28 @@ import scala.util.control.NonFatal
 /**
  * The one application-facing wallet selector.
  *
- * [[WalletManager]] remains the state owner; this class is the single adapter used by DEX,
+ * [[EngineWalletState]] remains the state owner; this class is the single adapter used by DEX,
  * emission, and rollup transactions for selection and reservation lifecycle messages.
  */
-case class WalletSelector(walletRef: ActorRef,
+case class EngineFunding(walletRef: ActorRef,
                           timeout: FiniteDuration,
-                          implicit val executionContext: ExecutionContext)
-  extends WalletSource {
+                          implicit val executionContext: ExecutionContext,
+                          critical: Boolean = false)
+  extends FundingSource {
 
   private implicit val askTimeout: Timeout = Timeout(timeout)
+  private def fundingRequest(request: Any): Any = if (critical) CriticalWalletRequest(request) else request
 
-  override def reserve(value: Long, tokens: Seq[Token]): WalletReservation = {
+  override def reserve(value: Long, tokens: Seq[Token]): FundingAllocation = {
     if (value < 0 || tokens.exists(_.amount < 0))
       throw new IllegalArgumentException("Wallet requirements cannot be negative")
     val reservationId = UUID.randomUUID().toString
     val deadline = System.currentTimeMillis() + timeout.toMillis
     val selected = awaitReservation(
       reservationId,
-      (walletRef ? RetrieveInputs(value, tokens, trackUsed = true, reservationId, deadline))
+      (walletRef ? fundingRequest(RetrieveInputs(value, tokens, trackUsed = true, reservationId, deadline)))
         .mapTo[WalletInputs])
-    val reservation = new WalletReservation(reservationId, selected, this)
+    val reservation = new FundingAllocation(reservationId, selected, this)
     if (!covers(selected, value, tokens)) {
       reservation.release()
       throw new NotEnoughInputsException(requirement(value, tokens))
@@ -42,107 +45,71 @@ case class WalletSelector(walletRef: ActorRef,
     reservation
   }
 
-  override def reserveCovering(value: Long): WalletReservation =
+  override def reserveCovering(value: Long): FundingAllocation =
     reserveOneBox(value, "one input")(RetrieveCoveringInput(_, trackUsed = true, _, _))
 
-  override def reserveCoveringP2PK(value: Long): WalletReservation =
+  override def reserveCoveringP2PK(value: Long): FundingAllocation =
     reserveOneBox(value, "one P2PK input")(RetrieveCoveringP2PKInput(_, trackUsed = true, _, _))
 
   /** Both single-box requests differ only in which set the manager draws from. */
   private def reserveOneBox(value: Long, what: String)
-                           (request: (Long, String, Long) => Any): WalletReservation = {
+                           (request: (Long, String, Long) => Any): FundingAllocation = {
     if (value < 0)
       throw new IllegalArgumentException("Wallet requirements cannot be negative")
     val reservationId = UUID.randomUUID().toString
     val deadline = System.currentTimeMillis() + timeout.toMillis
     val selected = awaitReservation(
       reservationId,
-      (walletRef ? request(value, reservationId, deadline)).mapTo[WalletInputs])
-    val reservation = new WalletReservation(reservationId, selected, this)
+      (walletRef ? fundingRequest(request(value, reservationId, deadline))).mapTo[WalletInputs])
+    val reservation = new FundingAllocation(reservationId, selected, this)
     if (selected.isEmpty) {
       reservation.release()
       throw new NotEnoughInputsException(
-        s"WalletManager could not reserve $what covering $value nanoERG")
+        s"EngineWalletState could not reserve $what covering $value nanoERG")
     }
     reservation
   }
 
-  override def reserveKnown(inputs: Seq[InputUTXO]): WalletReservation = {
+  override def reserveKnown(inputs: Seq[InputUTXO]): FundingAllocation = {
     if (inputs.isEmpty)
       throw new IllegalArgumentException("A known-output reservation cannot be empty")
     val expectedIds = inputs.map(_.id.toString)
     if (expectedIds.distinct.size != expectedIds.size)
       throw new IllegalArgumentException("A known-output reservation cannot contain duplicate box ids")
-    if (inputs.size > WalletManager.MAX_TX_INPUTS)
+    if (inputs.size > EngineWalletState.MAX_TX_INPUTS)
       throw new IllegalArgumentException(
-        s"A known-output reservation cannot exceed ${WalletManager.MAX_TX_INPUTS} inputs")
+        s"A known-output reservation cannot exceed ${EngineWalletState.MAX_TX_INPUTS} inputs")
 
     val reservationId = UUID.randomUUID().toString
     val deadline = System.currentTimeMillis() + timeout.toMillis
     val selected = awaitReservation(
       reservationId,
-      (walletRef ? ReserveKnownInputs(inputs, reservationId, deadline)).mapTo[WalletInputs])
-    val reservation = new WalletReservation(reservationId, selected, this)
+      (walletRef ? fundingRequest(ReserveKnownInputs(inputs, reservationId, deadline))).mapTo[WalletInputs])
+    val reservation = new FundingAllocation(reservationId, selected, this)
     if (selected.map(_.id.toString).toSet != expectedIds.toSet) {
       reservation.release()
-      throw new ReservationExpiredException(
-        s"WalletManager could not reserve ${inputs.size} exact known output(s)")
+      throw new FundingExpiredException(
+        s"EngineWalletState could not reserve ${inputs.size} exact known output(s)")
     }
     reservation
   }
 
   override def giveBack(boxes: Seq[InputUTXO]): Unit = walletRef ! ReturnInputs(boxes)
 
-  private[wallet] def releaseReservation(reservationId: String): Unit =
+  private[engine] def releaseReservation(reservationId: String): Unit =
     walletRef ! ReleaseInputs(reservationId)
 
-  private[wallet] def commitReservation(reservationId: String, outputs: Seq[InputUTXO]): Unit =
-    walletRef ! CommitReservation(reservationId, outputs)
-
-  private[wallet] def beginReservationSubmission(reservationId: String,
-                                                 expectedInputIds: Set[String]): Boolean = {
-    val deadline = System.currentTimeMillis() + timeout.toMillis
-    val reply = Await.result(
-      (walletRef ? BeginReservationSubmission(reservationId, expectedInputIds, deadline))
-        .mapTo[ReservationSubmissionStarted],
-      timeout)
-    if (reply.reservationId != reservationId)
-      throw new ReservationExpiredException(
-        s"WalletManager acknowledged reservation ${reply.reservationId}, expected $reservationId")
-    reply.accepted
-  }
-
-  private[wallet] def cancelReservationSubmission(reservationId: String,
-                                                   expectedInputIds: Set[String]): Boolean = {
-    val request = CancelReservationSubmission(reservationId, expectedInputIds)
-    try {
-      val reply = Await.result(
-        (walletRef ? request).mapTo[ReservationSubmissionCancelled],
-        timeout)
-      if (reply.reservationId != reservationId)
-        throw new ReservationExpiredException(
-          s"WalletManager cancelled reservation ${reply.reservationId}, expected $reservationId")
-      reply.accepted
-    } catch {
-      case NonFatal(ex) =>
-        // The cancel is exact-id validated and idempotent. Retrying without waiting prevents an
-        // acknowledged-but-never-sent lease from remaining Submitting if only its reply was lost.
-        walletRef ! request
-        throw ex
-    }
-  }
-
-  private[wallet] def holdReservationForCandidate(reservationId: String): Boolean = {
+  private[engine] def holdReservationForCandidate(reservationId: String): Boolean = {
     val reply = Await.result(
       (walletRef ? HoldReservationForCandidate(reservationId)).mapTo[ReservationHeldForCandidate],
       timeout)
     if (reply.reservationId != reservationId)
-      throw new ReservationExpiredException(
-        s"WalletManager held reservation ${reply.reservationId}, expected $reservationId")
+      throw new FundingExpiredException(
+        s"EngineWalletState held reservation ${reply.reservationId}, expected $reservationId")
     reply.accepted
   }
 
-  private[wallet] def markReservationUncertain(reservationId: String): Unit =
+  private[engine] def markReservationUncertain(reservationId: String): Unit =
     walletRef ! MarkReservationUncertain(reservationId)
 
   private def awaitReservation(reservationId: String,
@@ -150,8 +117,8 @@ case class WalletSelector(walletRef: ActorRef,
     try {
       val reply = Await.result(result, timeout)
       if (reply.reservationId != reservationId)
-        throw new ReservationExpiredException(
-          s"WalletManager replied for reservation ${reply.reservationId}, expected $reservationId")
+        throw new FundingExpiredException(
+          s"EngineWalletState replied for reservation ${reply.reservationId}, expected $reservationId")
       reply.inputs
     } catch {
       case NonFatal(ex) =>
@@ -174,11 +141,11 @@ case class WalletSelector(walletRef: ActorRef,
 
   private def requirement(value: Long, tokens: Seq[Token]): String = {
     val tokenText = tokens.map(t => s"${t.amount} of ${t.id}").mkString(", ")
-    s"WalletManager could not cover $value nanoERG" +
+    s"EngineWalletState could not cover $value nanoERG" +
       (if (tokenText.isEmpty) "" else s" and $tokenText")
   }
 }
 
-object WalletSelector {
+object EngineFunding {
   final val AskTimeout: FiniteDuration = 10.seconds
 }

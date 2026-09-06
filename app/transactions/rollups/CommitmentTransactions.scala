@@ -11,7 +11,7 @@ import org.ergoplatform.sdk.ErgoId
 import org.slf4j.{Logger, LoggerFactory}
 import sigma.{Coll, Colls}
 import state.DataBoxRetrievalException
-import transactions.wallet.{WalletReservation, WalletSelector}
+import transactions.engine.{FundingAllocation, EngineFunding}
 import utils.{Globals, Helpers}
 import work.lithos.mutations.{Contract, InputUTXO, Token, TxBuilder, UTXO}
 
@@ -36,11 +36,13 @@ import scala.util.{Failure, Success, Try}
  *  3. The reads return `Try` with a named exception rather than a logged default where the caller
  *     cannot tell the difference.
  */
-class CommitmentTransactions(nodeContext: NodeContext, dataBoxes: DataBoxSource) {
+class CommitmentTransactions(nodeContext: NodeContext, dataBoxes: DataBoxSource,
+                             alive: () => Boolean = () => true) {
 
   private val logger: Logger = LoggerFactory.getLogger("CommitmentTransactions")
 
   private val client: ErgoClient = nodeContext.getClient
+  protected def executionNode: node.NodeApi = nodeContext.getNodeApi
 
   /**
    * Height offset a new commitment is declared at, so it lands far enough ahead that everyone
@@ -145,7 +147,7 @@ class CommitmentTransactions(nodeContext: NodeContext, dataBoxes: DataBoxSource)
 
   def sendInitialCommitment(diff: String,
                             minerTree: MinerDictionary,
-                            walletSelector: WalletSelector): String = {
+                            walletSelector: EngineFunding): String = {
     client.execute{
       ctx =>
         val prover: NodeWallet = nodeContext.getNodeWallet
@@ -164,17 +166,11 @@ class CommitmentTransactions(nodeContext: NodeContext, dataBoxes: DataBoxSource)
         // Converted before submission begins
         val change = signableOutputs(signed, prover)
 
-        reservation.beginSubmission()
-        try {
-          val txId = ctx.sendTransaction(signed).replace("\"", "")
-          reservation.commit(change)
-          logger.info(s"Sent transaction $txId to create new commitment")
-          txId
-        } catch {
-          case NonFatal(ex) =>
-            reservation.uncertain()
-            throw ex
-        }
+        val txId = new transactions.engine.EngineBroadcast(walletSelector.walletRef, executionNode)(walletSelector.executionContext)
+          .send(signed, Seq(reservation), "miner-registration", alive).requireAccepted()
+        walletSelector.giveBack(change)
+        logger.info(s"Sent transaction $txId to create new commitment")
+        txId
     }
   }
 
@@ -230,7 +226,7 @@ class CommitmentTransactions(nodeContext: NodeContext, dataBoxes: DataBoxSource)
    *
    * @return the transaction id, or None when no change was needed
    */
-  def commitScore(diff: String, walletSelector: WalletSelector): Try[Option[String]] = Try {
+  def commitScore(diff: String, walletSelector: EngineFunding): Try[Option[String]] = Try {
     val score = LFSMHelpers.convertTauOrScore(BigInt(LFSMHelpers.parseDiffValueForStratum(diff).get)).toLong
     client.execute { ctx =>
       dataBox(ctx) match {
@@ -267,7 +263,7 @@ class CommitmentTransactions(nodeContext: NodeContext, dataBoxes: DataBoxSource)
                              input: InputUTXO,
                              current: (Int, Long),
                              score: Long,
-                             walletSelector: WalletSelector): String = {
+                             walletSelector: EngineFunding): String = {
     val prover: NodeWallet = nodeContext.getNodeWallet
     val newCommit = ctx.getHeight + DataBoxBuffer -> score
     logger.info(s"Committing $newCommit, replacing $current")
@@ -283,17 +279,11 @@ class CommitmentTransactions(nodeContext: NodeContext, dataBoxes: DataBoxSource)
     // Converted before submission begins
     val change = signableOutputs(signed, prover)
 
-    reservation.beginSubmission()
-    try {
-      val txId = ctx.sendTransaction(signed).replace("\"", "")
-      reservation.commit(change)
-      logger.info(s"Sent transaction $txId to commit $newCommit")
-      txId
-    } catch {
-      case NonFatal(ex) =>
-        reservation.uncertain()
-        throw ex
-    }
+    val txId = new transactions.engine.EngineBroadcast(walletSelector.walletRef, executionNode)(walletSelector.executionContext)
+      .send(signed, Seq(reservation), "commitment:" + input.id.toString, alive).requireAccepted()
+    walletSelector.giveBack(change)
+    logger.info(s"Sent transaction $txId to commit $newCommit")
+    txId
   }
 
   private def signCommitment(ctx: BlockchainContext,

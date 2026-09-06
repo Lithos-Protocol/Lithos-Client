@@ -1,4 +1,6 @@
 package transactions.wallet
+import transactions.engine.{EngineFunding, FundingAllocation, FundingSource, FundingExpiredException}
+import transactions.engine.EngineWalletState
 
 import akka.actor.{ActorRef, ActorSystem, Props}
 import akka.testkit.{TestKit, TestProbe}
@@ -15,7 +17,7 @@ import org.scalatest.flatspec.AnyFlatSpecLike
 import org.scalatest.matchers.should.Matchers
 import org.scalatestplus.mockito.MockitoSugar
 import support.FakeNodeContext
-import transactions.wallet.WalletMessages._
+import transactions.engine.EngineWalletMessages._
 import work.lithos.mutations.InputUTXO
 
 import java.util.concurrent.atomic.{AtomicLong, AtomicReference}
@@ -30,7 +32,7 @@ import scala.util.{Success, Try}
  * They exist because a chained run spends its own change. Before them, the emission queue excluded
  * those boxes by raw id inside its own funding source and the rollup batch excluded its fee
  * allocations the same way — two private exclusion sets, invisible to the actor that owns the
- * wallet. Anything else selecting through [[WalletManager]] in that window (a LithosDex request, a
+ * wallet. Anything else selecting through [[EngineWalletState]] in that window (a LithosDex request, a
  * second batch) could hand the same box to a second transaction.
  *
  * A Known hold differs from an ordinary reservation in the one way that matters to the refresh:
@@ -42,7 +44,7 @@ import scala.util.{Success, Try}
  */
 object KnownReservationSpec {
   val config: com.typesafe.config.Config =
-    com.typesafe.config.ConfigFactory.parseString("akka.test.single-expect-default = 20s")
+    com.typesafe.config.ConfigFactory.parseString("akka.test.single-expect-default = 20s").withFallback(com.typesafe.config.ConfigFactory.load())
 }
 
 class KnownReservationSpec
@@ -55,13 +57,13 @@ class KnownReservationSpec
 
   private val erg = 1000000000L
 
-  private class TestableWalletManager(ctx: NodeContext, clock: () => Long) extends WalletManager(ctx) {
+  private class TestableEngineWalletState(ctx: NodeContext, clock: () => Long) extends EngineWalletState(ctx) {
     override protected def now(): Long = clock()
   }
 
   private def walletBox(wallet: NodeWallet, value: Long): WalletBox =
     WalletBox(
-      box = NodeBox(boxId = f"$value%064x", transactionId = "aa" * 32, value = value, index = 0,
+      box = support.CanonicalNodeBox(boxId = f"$value%064x", transactionId = "aa" * 32, value = value, index = 0,
         creationHeight = 100, ergoTree = wallet.contract.ergoTreeHex),
       address = wallet.p2pk.toString, confirmationsNum = Some(10), creationTransaction = "aa" * 32,
       creationOutIndex = 0, inclusionHeight = Some(100), spendingTransaction = None,
@@ -69,7 +71,7 @@ class KnownReservationSpec
 
   /** A box under a tree the prover does NOT hold, standing in for anything not ours. */
   private def foreignBox(value: Long): NodeBox =
-    NodeBox(boxId = f"$value%064x", transactionId = "cc" * 32, value = value, index = 0,
+    support.CanonicalNodeBox(boxId = f"$value%064x", transactionId = "cc" * 32, value = value, index = 0,
       creationHeight = 100,
       // A trivially-true script this client has no secret for.
       ergoTree = "10010101d17300")
@@ -81,7 +83,7 @@ class KnownReservationSpec
                              reported: AtomicReference[Seq[WalletBox]])
 
   /**
-   * A started WalletManager whose reported wallet a test can change between refreshes, so a Known
+   * A started EngineWalletState whose reported wallet a test can change between refreshes, so a Known
    * output can be made to appear the way a mempool-aware read would show it.
    */
   private def fixture(initial: NodeWallet => Seq[WalletBox] = _ => Seq.empty,
@@ -98,7 +100,7 @@ class KnownReservationSpec
     when(api.unspentBoxesByErgoTree(anyString(), any[Paging], any[SortDirection], any[MempoolOptions]))
       .thenReturn(Success(Seq.empty[IndexedBox]))
 
-    val mgr = system.actorOf(Props(new TestableWalletManager(ctx, time)))
+    val mgr = system.actorOf(Props(new TestableEngineWalletState(ctx, time)))
     val probe = TestProbe()
     mgr ! RefreshBoxes
     Thread.sleep(1200)
@@ -206,9 +208,9 @@ class KnownReservationSpec
     // The ceiling is what stops a chain that never releases from growing the reservation map without
     // bound. Nothing else caps it: a Known hold is not collected by the refresh.
     val f = fixture()
-    val many = (1 to WalletManager.MAX_KNOWN_INPUTS).map(i => knownOutput(f, erg + i))
+    val many = (1 to EngineWalletState.MAX_OPTIONAL_INPUTS).map(i => knownOutput(f, erg + i))
     // Held in chunks, since one request is also capped at MAX_TX_INPUTS.
-    many.grouped(WalletManager.MAX_TX_INPUTS).zipWithIndex.foreach { case (chunk, idx) =>
+    many.grouped(EngineWalletState.MAX_TX_INPUTS).zipWithIndex.foreach { case (chunk, idx) =>
       reserveKnown(f, s"chunk-$idx", chunk) should have size chunk.size
     }
     reserveKnown(f, "one-too-many", Seq(knownOutput(f, erg - 1))) shouldBe empty
@@ -223,7 +225,7 @@ class KnownReservationSpec
     val child = knownOutput(f, 3 * erg)
     reserveKnown(f, "abandoned", Seq(child)) should have size 1
 
-    clock.addAndGet(WalletManager.ReservationTtlMs + 1L)
+    clock.addAndGet(EngineWalletState.ReservationTtlMs + 1L)
     f.probe.send(f.mgr, ResetUsedInputs)
     f.probe.awaitAssert(
       reserveKnown(f, "after-ttl", Seq(child)) should have size 1, 5.seconds, 100.millis)
@@ -240,81 +242,34 @@ class KnownReservationSpec
     val child = knownOutput(f, 3 * erg)
     reserveKnown(f, "ambiguous", Seq(child)) should have size 1
 
-    f.probe.send(f.mgr, BeginReservationSubmission(
-      "ambiguous", Set(child.id.toString), Long.MaxValue))
-    f.probe.expectMsg(ReservationSubmissionStarted("ambiguous", accepted = true))
-    f.probe.send(f.mgr, MarkReservationUncertain("ambiguous"))
+    f.probe.send(f.mgr, PinEngineInputs(EngineHold("child", "ambiguous", "ab" * 32,
+      Set(child.id.toString), Set(child.id.toString))))
+    f.probe.expectMsg(true)
+    f.probe.send(f.mgr, EngineSendFinished("ambiguous", "ab" * 32, accepted = false))
 
     // Cleanup at the end of a batch: a terminal handle must ignore it.
     f.probe.send(f.mgr, ReleaseInputs("ambiguous"))
-    clock.addAndGet(WalletManager.ReservationTtlMs + 1L)
+    clock.addAndGet(EngineWalletState.ReservationTtlMs + 1L)
     f.probe.send(f.mgr, ResetUsedInputs)
 
     // The node still reports nothing, so nothing is resolved and the box stays out of reach.
     reserveKnown(f, "opportunist", Seq(child)) shouldBe empty
   }
 
-  it should "release an uncertain child once a complete read shows the send never landed" in {
+  it should "retain an uncertain child when a complete local read still reports it unspent" in {
     val f = fixture()
     val child = knownOutput(f, 3 * erg)
     reserveKnown(f, "ambiguous", Seq(child)) should have size 1
-    f.probe.send(f.mgr, BeginReservationSubmission(
-      "ambiguous", Set(child.id.toString), Long.MaxValue))
-    f.probe.expectMsgType[ReservationSubmissionStarted]
-    f.probe.send(f.mgr, MarkReservationUncertain("ambiguous"))
+    f.probe.send(f.mgr, PinEngineInputs(EngineHold("child", "ambiguous", "ab" * 32,
+      Set(child.id.toString), Set(child.id.toString))))
+    f.probe.expectMsg(true)
+    f.probe.send(f.mgr, EngineSendFinished("ambiguous", "ab" * 32, accepted = false))
 
     // Present in a complete mempool-aware read means the spending transaction never took: safe again.
     f.reported.set(Seq(walletBox(f.wallet, 3 * erg)))
     refresh(f)
 
-    f.probe.awaitAssert(offered(f, erg).map(_.value) shouldEqual Seq(3 * erg), 5.seconds, 100.millis)
-  }
-
-  // ─── the multi-lease group a chained spend needs ──────────────────────────
-
-  "A grouped submission" should "cancel the acknowledged prefix when a later lease cannot begin" in {
-    // A queue spend owns both ordinary wallet funding and its parent's chained change. Both permits
-    // have to be in hand before the node is contacted, because a send that turns out to be missing
-    // one is a transaction built on a box something else may already have taken. When the group
-    // cannot be completed, nothing may be left Submitting — that state has no TTL.
-    val f = fixture(w => Seq(walletBox(w, 5 * erg)))
-    val selector = WalletSelector(f.mgr, 5.seconds, ec)
-
-    val funding = selector.reserve(erg)
-    funding.inputs should have size 1
-
-    val child = knownOutput(f, 3 * erg)
-    val chained = selector.reserveKnown(Seq(child))
-
-    // The child's lease is retired behind the group's back, exactly as an expiry would retire it.
-    f.probe.send(f.mgr, ReleaseInputs(chained.id))
-    f.probe.awaitAssert({
-      f.probe.send(f.mgr, ReserveKnownInputs(Seq(child), "probe-free", Long.MaxValue))
-      f.probe.expectMsgType[WalletInputs].inputs should have size 1
-    }, 5.seconds, 100.millis)
-    f.probe.send(f.mgr, ReleaseInputs("probe-free"))
-
-    Try(WalletReservation.beginAll(Seq(funding, chained))).isFailure shouldBe true
-
-    // The funding box is back in the pool rather than stranded in Submitting.
-    f.probe.awaitAssert(offered(f, erg).map(_.value) shouldEqual Seq(5 * erg), 5.seconds, 100.millis)
-  }
-
-  it should "leave nothing held when the whole group begins and commits" in {
-    val f = fixture(w => Seq(walletBox(w, 5 * erg)))
-    val selector = WalletSelector(f.mgr, 5.seconds, ec)
-
-    val funding = selector.reserve(erg)
-    val child = knownOutput(f, 3 * erg)
-    val chained = selector.reserveKnown(Seq(child))
-
-    WalletReservation.beginAll(Seq(funding, chained))
-    val settled = knownOutput(f, 4 * erg)
-    funding.commit(Seq(settled))
-    chained.commit()
-
-    // The parents are gone and only the committed output is selectable.
-    f.probe.awaitAssert(offered(f, erg).map(_.value) shouldEqual Seq(4 * erg), 5.seconds, 100.millis)
+    f.probe.awaitAssert(offered(f, erg) shouldBe empty, 5.seconds, 100.millis)
   }
 
   // ─── two selectors, one owner ─────────────────────────────────────────────
@@ -323,8 +278,8 @@ class KnownReservationSpec
     // The reason the exclusion sets had to move into the actor. These are the DEX controller's
     // selector and the rollup handler's selector: different objects, different timeouts, one owner.
     val f = fixture(w => Seq(walletBox(w, 5 * erg)))
-    val emissionSide = WalletSelector(f.mgr, 5.seconds, ec)
-    val dexSide = WalletSelector(f.mgr, 5.seconds, ec)
+    val emissionSide = EngineFunding(f.mgr, 5.seconds, ec)
+    val dexSide = EngineFunding(f.mgr, 5.seconds, ec)
 
     val child = knownOutput(f, 3 * erg)
     emissionSide.reserveKnown(Seq(child)).inputs should have size 1

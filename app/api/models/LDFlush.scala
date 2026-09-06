@@ -37,7 +37,7 @@ object LDFlushRequest {
   implicit lazy val ldFlushRequestJsonFormat: Format[LDFlushRequest] = Json.format[LDFlushRequest]
 }
 
-case class LDFlushResult(flushedX: String, flushedY: String, txId: String)
+case class LDFlushResult(flushedX: String, flushedY: String, txId: String, outcome: String = "accepted")
 
 object LDFlushResult {
   implicit lazy val ldFlushResultJsonFormat: Format[LDFlushResult] = Json.format[LDFlushResult]

@@ -13,7 +13,7 @@ import org.scalatest.flatspec.AnyFlatSpecLike
 import org.scalatest.matchers.should.Matchers
 import org.scalatestplus.mockito.MockitoSugar
 import stratum.{CollateralData, CollateralNotFoundException}
-import transactions.BlockTxMessages.{CandidateTxsDropped, RequestBlockTxs}
+import transactions.BlockTxMessages.{BlockTxsReady, CandidateTx, CandidateTxsDropped, RequestBlockTxs}
 import support.FakeNodeContext
 import work.lithos.mutations.InputUTXO
 
@@ -34,6 +34,7 @@ import scala.concurrent.duration._
 object CandidateBuilderSpec {
   val config: com.typesafe.config.Config =
     com.typesafe.config.ConfigFactory.parseString("akka.test.single-expect-default = 15s")
+      .withFallback(com.typesafe.config.ConfigFactory.parseResources("application.conf").resolve())
 }
 
 class CandidateBuilderSpec extends TestKit(ActorSystem("candidate-builder-spec", CandidateBuilderSpec.config))
@@ -100,9 +101,11 @@ class CandidateBuilderSpec extends TestKit(ActorSystem("candidate-builder-spec",
 
   private class TestableBuilder(client: org.ergoplatform.appkit.ErgoClient, prover: NodeWallet,
                                 api: NodeApi, c: CandidateConfig, stub: StubTxBuilder,
-                                sources: Seq[ActorRef] = Seq.empty)
+                                sources: Seq[ActorRef] = Seq.empty,
+                                clock: () => Long = () => System.nanoTime())
     extends CandidateBuilder(client, prover, api, c, sources) {
     override protected val txBuilder: CandidateTxBuilder = stub
+    override protected def nowNanos(): Long = clock()
   }
 
   private case class Fixture(builder: ActorRef, parent: TestProbe, stub: StubTxBuilder, ids: Seq[String])
@@ -113,6 +116,7 @@ class CandidateBuilderSpec extends TestKit(ActorSystem("candidate-builder-spec",
                       failing: Set[String] = Set.empty,
                       boxes: Option[Seq[CollateralCandidate]] = None,
                       sources: Seq[ActorRef] = Seq.empty,
+                      clock: () => Long = () => System.nanoTime(),
                       config: CandidateConfig = cfg): Fixture = {
     val api = mock[NodeApi]
     val (ctx, _, wallet) = FakeNodeContext(api, numAddresses = 1)
@@ -121,7 +125,7 @@ class CandidateBuilderSpec extends TestKit(ActorSystem("candidate-builder-spec",
     val stub = new StubTxBuilder(wallet, api, config, set, failing)
     val parent = TestProbe()
     val builder = parent.childActorOf(Props(
-      new TestableBuilder(ctx.getClient, wallet, api, config, stub, sources)))
+      new TestableBuilder(ctx.getClient, wallet, api, config, stub, sources, clock)))
     // preStart runs a refresh; let it land so the set is warm before the first block.
     Thread.sleep(600)
     Fixture(builder, parent, stub, set.map(_.id))
@@ -138,7 +142,13 @@ class CandidateBuilderSpec extends TestKit(ActorSystem("candidate-builder-spec",
 
   private def advanceTo(f: Fixture, height: Int): BlockPackage = {
     f.builder ! ChainAdvanced(height)
-    f.parent.expectMsgType[BlockPackageReady].pkg
+    published(f)
+  }
+
+  private def published(f: Fixture): BlockPackage = {
+    val pkg = f.parent.expectMsgType[BlockPackageReady].pkg
+    if (pkg.blockTxs.isEmpty) f.builder ! GenesisPublished(pkg.identity)
+    pkg
   }
 
   // ─── stickiness ───────────────────────────────────────────────────────────
@@ -150,7 +160,7 @@ class CandidateBuilderSpec extends TestKit(ActorSystem("candidate-builder-spec",
     val first = advanceTo(f, 100)
 
     f.builder ! RebuildCandidate
-    val second = f.parent.expectMsgType[BlockPackageReady].pkg
+    val second = published(f)
     // A rebuild is asked for BECAUSE the current box did not work, so it must move...
     second.collateral.collateralId should not equal first.collateral.collateralId
   }
@@ -188,7 +198,7 @@ class CandidateBuilderSpec extends TestKit(ActorSystem("candidate-builder-spec",
     f.builder ! ChainAdvanced(101)
     f.stub.release()
 
-    val pkg = f.parent.expectMsgType[BlockPackageReady].pkg
+    val pkg = published(f)
     pkg.blockHeight shouldEqual 101
     withClue("101 must re-rank rather than inherit the box 100 chose: ") {
       pkg.collateral.collateralId shouldEqual boxes.head.id
@@ -208,7 +218,7 @@ class CandidateBuilderSpec extends TestKit(ActorSystem("candidate-builder-spec",
     f.builder ! ChainAdvanced(101)
     f.stub.release()
 
-    val pkg = f.parent.expectMsgType[BlockPackageReady].pkg
+    val pkg = published(f)
     pkg.blockHeight shouldEqual 101
     withClue("100's failure must not exclude the highest bid from 101: ") {
       pkg.collateral.collateralId shouldEqual boxes(1).id
@@ -223,19 +233,143 @@ class CandidateBuilderSpec extends TestKit(ActorSystem("candidate-builder-spec",
     val f = fixture(sources = Seq(source.ref), config = withTxs)
 
     f.builder ! ChainAdvanced(100)
-    f.parent.expectMsgType[BlockPackageReady]
+    published(f)
     source.expectMsgType[RequestBlockTxs].blockHeight shouldEqual 100
 
     f.builder ! ChainAdvanced(101)
     // Every source is told the previous height is over before anything is asked of it again.
     source.expectMsgType[CandidateTxsDropped].blockHeight shouldEqual 100
-    f.parent.expectMsgType[BlockPackageReady]
+    published(f)
     withClue("101 has its own package, so it must get its own collection round: ") {
       source.expectMsgType[RequestBlockTxs](10.seconds).blockHeight shouldEqual 101
     }
   }
 
   // ─── ranking ──────────────────────────────────────────────────────────────
+
+  private val extras = Seq(CandidateTx("optional", "{}", CandidateTx.Payout))
+  private val collectingConfig = cfg.copy(blockTransactions = true, maxBlockTxs = 4, blockTxTimeout = 30000)
+
+  "Genesis publication" should "gate collection until the exact package reaches miners" in {
+    val source = TestProbe()
+    val f = fixture(sources = Seq(source.ref), config = collectingConfig)
+    f.builder ! ChainAdvanced(100, "ab" * 32)
+    val pkg = f.parent.expectMsgType[BlockPackageReady].pkg
+    source.expectNoMessage(200.millis)
+    f.builder ! GenesisPublished(pkg.identity.copy(parentId = "cd" * 32))
+    source.expectNoMessage(200.millis)
+    f.builder ! GenesisPublished(pkg.identity)
+    source.expectMsgType[RequestBlockTxs].blockHeight shouldBe 100
+  }
+
+  "A changed chain parent" should "replace same-height work and allow rollback to a lower height" in {
+    val f = fixture()
+    f.builder ! ChainAdvanced(100, "ab" * 32)
+    published(f).parentId shouldBe "ab" * 32
+    f.builder ! ChainAdvanced(100, "cd" * 32)
+    published(f).parentId shouldBe "cd" * 32
+    f.builder ! ChainAdvanced(99, "ef" * 32)
+    val rollback = published(f)
+    rollback.blockHeight shouldBe 99
+    rollback.parentId shouldBe "ef" * 32
+  }
+
+  "A stale package rejection" should "not invalidate a replacement at the same height" in {
+    val source = TestProbe()
+    val f = fixture(sources = Seq(source.ref), config = collectingConfig)
+    f.builder ! ChainAdvanced(100, "ab" * 32)
+    val old = published(f)
+    source.expectMsgType[RequestBlockTxs]
+    f.builder ! ChainAdvanced(100, "cd" * 32)
+    source.expectMsg(CandidateTxsDropped(100))
+    val replacement = published(f)
+    source.expectMsgType[RequestBlockTxs]
+    val replyTo = source.lastSender
+    f.builder ! BlockTxsRejected(100, Some(old.identity))
+    source.expectNoMessage(200.millis)
+    replyTo ! BlockTxsReady(100, extras)
+    val augmented = published(f)
+    augmented.parentId shouldBe replacement.parentId
+    augmented.blockTxs shouldBe extras
+  }
+
+  "Optional collection" should "publish genesis first and then admit a timely response" in {
+    val source = TestProbe()
+    val f = fixture(sources = Seq(source.ref), config = collectingConfig)
+    advanceTo(f, 100).blockTxs shouldBe empty
+    source.expectMsgType[RequestBlockTxs]
+    source.reply(BlockTxsReady(100, extras))
+    published(f).blockTxs shouldEqual extras
+  }
+
+  it should "discard a response after rejection even while its ask remains live" in {
+    val source = TestProbe()
+    val f = fixture(sources = Seq(source.ref), config = collectingConfig)
+    advanceTo(f, 100)
+    source.expectMsgType[RequestBlockTxs]
+    val replyTo = source.lastSender
+    f.builder ! BlockTxsRejected(100)
+    source.expectMsg(CandidateTxsDropped(100))
+    replyTo ! BlockTxsReady(100, extras)
+    f.parent.expectNoMessage(500.millis)
+  }
+
+  it should "enforce the deadline before a delayed timer reaches the mailbox" in {
+    val clock = new java.util.concurrent.atomic.AtomicLong(1L)
+    val source = TestProbe()
+    val f = fixture(sources = Seq(source.ref), config = collectingConfig, clock = () => clock.get())
+    advanceTo(f, 100)
+    source.expectMsgType[RequestBlockTxs]
+    clock.addAndGet(collectingConfig.blockTxTimeout.milliseconds.toNanos)
+    source.reply(BlockTxsReady(100, extras))
+    f.parent.expectNoMessage(500.millis)
+    source.expectMsg(CandidateTxsDropped(100))
+  }
+
+  it should "keep an old same-height response out of the replacement genesis" in {
+    val source = TestProbe()
+    val f = fixture(sources = Seq(source.ref), config = collectingConfig)
+    val first = advanceTo(f, 100)
+    source.expectMsgType[RequestBlockTxs]
+    val oldReply = source.lastSender
+    f.builder ! RebuildCandidate
+    source.expectMsg(CandidateTxsDropped(100))
+    val replacement = published(f)
+    replacement.collateral.collateralId should not equal first.collateral.collateralId
+    source.expectMsgType[RequestBlockTxs]
+    val newReply = source.lastSender
+    oldReply ! BlockTxsReady(100, extras)
+    f.parent.expectNoMessage(500.millis)
+    newReply ! BlockTxsReady(100, extras)
+    published(f).collateral.collateralId shouldEqual
+      replacement.collateral.collateralId
+  }
+
+  it should "ignore a stale rejection and reject a source response naming another height" in {
+    val source = TestProbe()
+    val f = fixture(sources = Seq(source.ref), config = collectingConfig)
+    advanceTo(f, 100)
+    source.expectMsgType[RequestBlockTxs]
+    source.reply(BlockTxsReady(99, extras))
+    f.parent.expectNoMessage(500.millis)
+    f.builder ! BlockTxsRejected(99)
+    source.expectNoMessage(500.millis)
+  }
+
+  "A superseded genesis build" should "not publish when a rebuild arrives at the same height" in {
+    val source = TestProbe()
+    val f = fixture(sources = Seq(source.ref))
+    f.stub.holdAt = Set(100)
+    f.builder ! ChainAdvanced(100)
+    awaitAssert(f.stub.builtFor should have size 1)
+    // Wait for the rebuild's source notification before releasing the old build.
+    f.builder ! RebuildCandidate
+    source.expectMsg(CandidateTxsDropped(100))
+    f.stub.release()
+    published(f).blockHeight shouldEqual 100
+    awaitAssert(f.stub.builtFor should have size 2)
+    f.parent.expectNoMessage(500.millis)
+  }
 
   "Ranking" should "prefer the highest bid while every box is young" in {
     val boxes = boxesWith(Seq((1000000L, 100, 10L), (2000000L, 100, 900L), (3000000L, 100, 400L)))

@@ -37,6 +37,7 @@ case class NodeWallet(prover: ErgoProver) {
         .ergoTreeHex -> a).toMap
 
   def sign(uTx: UnsignedTransaction): SignedTransaction = {
+    work.lithos.mutations.Eip27Adjustment.validate(uTx, p2pk.getNetworkType)
     prover.sign(uTx)
   }
 }

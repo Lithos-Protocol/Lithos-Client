@@ -1,4 +1,5 @@
 package transactions.wallet
+import transactions.engine.{EngineFunding, FundingAllocation, FundingSource, FundingExpiredException}
 
 import akka.actor.Props
 import akka.testkit.{TestKit, TestProbe}
@@ -14,8 +15,9 @@ import org.scalatest.BeforeAndAfterAll
 import org.scalatest.flatspec.AnyFlatSpecLike
 import org.scalatest.matchers.should.Matchers
 import support.FakeNodeContext
-import transactions.wallet.WalletManager.planRewardChunks
-import transactions.wallet.WalletMessages._
+import transactions.engine.EngineWalletState.planRewardChunks
+import transactions.engine.EngineWalletState
+import transactions.engine.EngineWalletMessages._
 import work.lithos.mutations.InputUTXO
 
 import scala.concurrent.duration._
@@ -37,7 +39,7 @@ import scala.util.Success
  */
 object RewardSweepSpec {
   val config: com.typesafe.config.Config =
-    com.typesafe.config.ConfigFactory.parseString("akka.test.single-expect-default = 20s")
+    com.typesafe.config.ConfigFactory.parseString("akka.test.single-expect-default = 20s").withFallback(com.typesafe.config.ConfigFactory.load())
 }
 
 class RewardSweepSpec extends TestKit(akka.actor.ActorSystem("reward-sweep-spec", RewardSweepSpec.config))
@@ -54,7 +56,7 @@ class RewardSweepSpec extends TestKit(akka.actor.ActorSystem("reward-sweep-spec"
   private def box(value: Long): InputUTXO = {
     val (_, _, wallet) = FakeNodeContext(mock(classOf[NodeApi]), numAddresses = 1)
     FakeNodeContext.offlineClient().execute { ctx =>
-      NodeBox(boxId = f"$value%064x", transactionId = "cc" * 32, value = value, index = 0,
+      support.CanonicalNodeBox(boxId = f"$value%064x", transactionId = "cc" * 32, value = value, index = 0,
         creationHeight = 1, ergoTree = wallet.contract.ergoTreeHex, assets = Seq.empty)
         .toInputUTXO(ctx)
     }
@@ -85,19 +87,28 @@ class RewardSweepSpec extends TestKit(akka.actor.ActorSystem("reward-sweep-spec"
 
   // ---- reservation lifecycle through the actor ----
 
-  private class TestableWalletManager(ctx: NodeContext) extends WalletManager(ctx)
+  private class TestableEngineWalletState(ctx: NodeContext) extends EngineWalletState(ctx) {
+    override def receive: Receive = ({
+      case state.synchronization.CompleteMempool.Refresh =>
+        sender() ! state.synchronization.CompleteMempool.Observation(1L,
+          Some(state.synchronization.CompleteMempool.Snapshot("aa" * 32, Set.empty, Set.empty, System.nanoTime())), None)
+    }: Receive).orElse(super.receive)
+  }
 
-  /** A started manager whose node reports exactly `rewards`, first refresh settled. Mirrors WalletManagerSpec's fixture. */
+  /** A started manager whose node reports exactly `rewards`, first refresh settled. Mirrors EngineWalletStateSpec's fixture. */
   private def fixtureWithRewards(rewards: Seq[Long]): (TestProbe, akka.actor.ActorRef) = {
     val api = mock(classOf[NodeApi])
     val (ctx, _, wallet) = FakeNodeContext(api, numAddresses = 1)
     val boxes = rewards.map { v =>
       IndexedBox(
-        box = NodeBox(boxId = f"$v%064x", transactionId = "bb" * 32, value = v, index = 0,
+        box = support.CanonicalNodeBox(boxId = f"$v%064x", transactionId = "bb" * 32, value = v, index = 0,
           creationHeight = 1, ergoTree = wallet.rewardTrees.keys.head),
         address = "reward", inclusionHeight = 1, globalIndex = v)
     }
     when(api.indexerEnabled).thenReturn(true)
+    when(api.info()).thenReturn(Success(support.ChainFixtures.infoAt(100000).copy(bestFullHeaderId = Some("aa" * 32))))
+    when(api.boxById(anyString())).thenAnswer(inv => Success(boxes.find(_.box.boxId == inv.getArgument[String](0)).map(_.box)))
+    when(api.sendTransaction(anyString())).thenReturn(scala.util.Failure(new RuntimeException("response lost")))
     when(api.walletUnspentBoxes(any[ConfirmationRange], any[Paging])).thenAnswer { inv =>
       if (inv.getArgument[Paging](1).offset == 0) Success(Seq.empty[WalletBox])
       else Success(Seq.empty[WalletBox])
@@ -110,9 +121,9 @@ class RewardSweepSpec extends TestKit(akka.actor.ActorSystem("reward-sweep-spec"
       }
 
     val probe = TestProbe()
-    val mgr = system.actorOf(Props(new TestableWalletManager(ctx)))
+    val mgr = system.actorOf(Props(new TestableEngineWalletState(ctx)))
     mgr ! RefreshBoxes
-    // The refresh runs off the mailbox; settle it before asserting, as WalletManagerSpec does.
+    // The refresh runs off the mailbox; settle it before asserting, as EngineWalletStateSpec does.
     Thread.sleep(1200)
     (probe, mgr)
   }
@@ -133,7 +144,10 @@ class RewardSweepSpec extends TestKit(akka.actor.ActorSystem("reward-sweep-spec"
     // no box came back selectable.
     probe.send(mgr, ClaimUnlockedRewards)
     probe.receiveOne(30.seconds) match {
-      case _: RewardsClaimed    => succeed
+      case RewardsClaimed(chunks) =>
+        chunks should have size 1
+        chunks.head.outcome shouldBe "uncertain"
+        chunks.head.txId should fullyMatch regex "[0-9a-f]{64}"
       case _: RewardClaimFailed => succeed
       case other                => fail(s"unexpected reply: $other")
     }

@@ -1,4 +1,6 @@
 package transactions.wallet
+import transactions.engine.{EngineFunding, FundingAllocation, FundingSource, FundingExpiredException}
+import transactions.engine.EngineWalletState
 
 import akka.actor.{ActorRef, ActorSystem, Props}
 import akka.testkit.{TestKit, TestProbe}
@@ -13,7 +15,7 @@ import org.scalatest.flatspec.AnyFlatSpecLike
 import org.scalatest.matchers.should.Matchers
 import org.scalatestplus.mockito.MockitoSugar
 import support.FakeNodeContext
-import transactions.wallet.WalletMessages._
+import transactions.engine.EngineWalletMessages._
 import work.lithos.mutations.InputUTXO
 
 import scala.concurrent.duration._
@@ -30,7 +32,7 @@ import scala.util.{Success, Try}
  */
 object CandidateHoldSpec {
   val config: com.typesafe.config.Config =
-    com.typesafe.config.ConfigFactory.parseString("akka.test.single-expect-default = 20s")
+    com.typesafe.config.ConfigFactory.parseString("akka.test.single-expect-default = 20s").withFallback(com.typesafe.config.ConfigFactory.load())
 }
 
 class CandidateHoldSpec extends TestKit(ActorSystem("candidate-hold-spec", CandidateHoldSpec.config))
@@ -44,13 +46,13 @@ class CandidateHoldSpec extends TestKit(ActorSystem("candidate-hold-spec", Candi
   private def anInput: InputUTXO = {
     val (ctx, _, wallet) = FakeNodeContext()
     ctx.getClient.execute { c =>
-      NodeBox("dd" * 32, "aa" * 32, 5 * erg, 0, 100, wallet.contract.ergoTreeHex).toInputUTXO(c)
+      support.CanonicalNodeBox("dd" * 32, "aa" * 32, 5 * erg, 0, 100, wallet.contract.ergoTreeHex).toInputUTXO(c)
     }
   }
 
   private def walletBox(wallet: NodeWallet, value: Long): WalletBox =
     WalletBox(
-      box = NodeBox(boxId = f"$value%064x", transactionId = "aa" * 32, value = value, index = 0,
+      box = support.CanonicalNodeBox(boxId = f"$value%064x", transactionId = "aa" * 32, value = value, index = 0,
         creationHeight = 100, ergoTree = wallet.contract.ergoTreeHex),
       address = wallet.p2pk.toString, confirmationsNum = Some(10), creationTransaction = "aa" * 32,
       creationOutIndex = 0, inclusionHeight = Some(100), spendingTransaction = None,
@@ -68,7 +70,7 @@ class CandidateHoldSpec extends TestKit(ActorSystem("candidate-hold-spec", Candi
     when(api.unspentBoxesByErgoTree(anyString(), any[Paging], any[SortDirection], any[MempoolOptions]))
       .thenReturn(Success(Seq.empty[IndexedBox]))
 
-    val mgr = system.actorOf(Props(new WalletManager(ctx)))
+    val mgr = system.actorOf(Props(new EngineWalletState(ctx)))
     mgr ! RefreshBoxes
 
     // Asked rather than slept on, and asked rather than selected: a selection would reserve the one
@@ -92,7 +94,7 @@ class CandidateHoldSpec extends TestKit(ActorSystem("candidate-hold-spec", Candi
     // Release is a no-op once the handle is Candidate, so without this the lease has no ending at
     // all. Uncertain is the only one that can be reconciled by an authoritative read.
     val probe = TestProbe()
-    val selector = WalletSelector(probe.ref, 3.seconds, ec)
+    val selector = EngineFunding(probe.ref, 3.seconds, ec)
 
     val pending = Future(selector.reserveCovering(erg))
     val ask = probe.expectMsgType[RetrieveCoveringInput](5.seconds)
@@ -150,7 +152,7 @@ class CandidateHoldSpec extends TestKit(ActorSystem("candidate-hold-spec", Candi
     // An answered `false` says the manager still owns the lease and did not move it, so there is
     // nothing for a refresh to reconcile.
     val probe = TestProbe()
-    val selector = WalletSelector(probe.ref, 2.seconds, ec)
+    val selector = EngineFunding(probe.ref, 2.seconds, ec)
 
     val pending = Future(selector.reserveCovering(erg))
     val ask = probe.expectMsgType[RetrieveCoveringInput](5.seconds)

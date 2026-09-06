@@ -12,8 +12,8 @@ import support.{FakeCache, FakeNodeContext, SyncFixtures}
 import node.MutationConversions._
 import node.model.NodeBox
 import transactions.BlockTxMessages.{BlockTxsReady, CandidateTxsDropped, RequestBlockTxs}
-import transactions.wallet.WalletMessages.{MarkReservationUncertain, RetrieveCoveringInput, WalletInputs}
-import transactions.wallet.{WalletReservation, WalletSelector}
+import transactions.engine.EngineWalletMessages.{MarkReservationUncertain, RetrieveCoveringInput, WalletInputs}
+import transactions.engine.{FundingAllocation, EngineFunding}
 import transactions.rollups.TransactionMessages.RollupTxType._
 import transactions.rollups.TransactionMessages._
 
@@ -34,7 +34,7 @@ import scala.concurrent.{Await, ExecutionContext, Future}
  */
 object SubmissionHandlerSpec {
   val config: com.typesafe.config.Config =
-    com.typesafe.config.ConfigFactory.parseString("akka.test.single-expect-default = 40s")
+    com.typesafe.config.ConfigFactory.parseString("akka.test.single-expect-default = 40s").withFallback(com.typesafe.config.ConfigFactory.load())
 }
 
 class SubmissionHandlerSpec extends TestKit(ActorSystem("submission-handler-spec", SubmissionHandlerSpec.config))
@@ -76,12 +76,12 @@ class SubmissionHandlerSpec extends TestKit(ActorSystem("submission-handler-spec
     val sync = TestProbe()
     val mempool = TestProbe()
     val wallet = TestProbe()
-    val handler = system.actorOf(Props(new SubmissionHandler(
+    val handler = system.actorOf(Props(new RollupEngineHarness(
       quietConfig, ctx, new FakeCache, dataBoxes, sync.ref, mempool.ref, wallet.ref)))
     Fixture(handler, sync, mempool, wallet, TestProbe())
   }
 
-  private def stub(rollup: String, txType: RollupTxType = HoldingTransform): RollupTxStub =
+  private def stub(rollup: String, txType: RollupTxType = EvalTransform): RollupTxStub =
     RollupTxStub(rollup, Some(100L), txType)
 
   private def refuseState(f: Fixture, count: Int = 1): Unit =
@@ -246,12 +246,12 @@ class SubmissionHandlerSpec extends TestKit(ActorSystem("submission-handler-spec
   // ─── candidate leases ─────────────────────────────────────────────────────
 
   /** A real reservation over `probe`, so its lifecycle messages land where the test can see them. */
-  private def leaseOver(probe: TestProbe): WalletReservation = {
+  private def leaseOver(probe: TestProbe): FundingAllocation = {
     val (ctx, _, wallet) = FakeNodeContext()
     val input = ctx.getClient.execute { c =>
       NodeBox("bb" * 32, "aa" * 32, 5000000L, 0, 100, wallet.contract.ergoTreeHex).toInputUTXO(c)
     }
-    val selector = WalletSelector(probe.ref, 5.seconds, ec)
+    val selector = EngineFunding(probe.ref, 5.seconds, ec)
     val pending = Future(selector.reserveCovering(1000000L))
     val ask = probe.expectMsgType[RetrieveCoveringInput](5.seconds)
     probe.reply(WalletInputs(Seq(input), ask.reservationId))
@@ -266,7 +266,7 @@ class SubmissionHandlerSpec extends TestKit(ActorSystem("submission-handler-spec
     val lease = leaseOver(f.wallet)
 
     f.probe.send(f.handler, CandidateTxsDropped(500))
-    f.probe.send(f.handler, SubmissionHandler.CandidateLeaseTaken(500, lease))
+    f.probe.send(f.handler, SubmissionHandler.CandidateLeaseTaken(500, lease.id))
 
     f.wallet.expectMsg(5.seconds, MarkReservationUncertain(lease.id))
   }
@@ -276,7 +276,7 @@ class SubmissionHandlerSpec extends TestKit(ActorSystem("submission-handler-spec
     val f = fixture()
     val lease = leaseOver(f.wallet)
 
-    f.probe.send(f.handler, SubmissionHandler.CandidateLeaseTaken(500, lease))
+    f.probe.send(f.handler, SubmissionHandler.CandidateLeaseTaken(500, lease.id))
     f.wallet.expectNoMessage(2.seconds)
   }
 
