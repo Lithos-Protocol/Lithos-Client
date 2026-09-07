@@ -46,9 +46,11 @@ object LithosDexTransactions {
   final val TX_FEE: Long = Parameters.MinFee * 2
   private final val FUNDING_HEADROOM: Long = Parameters.MinFee * 3
 
+  /** State the funding this operation needs and defer construction until the engine supplies it. */
   private def funded[A <: LDFundedTx](value: Long, tokens: Seq[Token] = Seq.empty)
-                                    (build: Seq[InputUTXO] => DexUnsigned[A]): DexPlan[A] =
+                                     (build: Seq[InputUTXO] => DexUnsigned[A]): DexPlan[A] =
     DexPlan(value, tokens, build)
+
   // ══════════════════════════════════════════════════════════════════════════
   //  SWAP — pool op 0
   // ══════════════════════════════════════════════════════════════════════════
@@ -614,7 +616,14 @@ case class LDResizeTx(tx: SignedTransaction,
 case class LDRefreshTx(tx: SignedTransaction,
                        boxId: String) extends LDFundedTx
 
-/** A worker-local funding requirement and pure unsigned builder; never queued in the engine mailbox. */
+/**
+ * What a DEX operation needs and how to build it, with no wallet or node access of its own. The
+ * engine reserves `value` and `tokens`, then calls `build` with the inputs it chose.
+ *
+ * Worker-local: these carry closures and hydrated boxes, so they are never queued in a mailbox.
+ */
 case class DexPlan[A <: LDFundedTx](value: Long, tokens: Seq[Token],
-                                  build: Seq[InputUTXO] => DexUnsigned[A])
+                                    build: Seq[InputUTXO] => DexUnsigned[A])
+
+/** An unsigned transaction plus how to describe it once the engine has signed it. */
 case class DexUnsigned[A <: LDFundedTx](tx: UnsignedTransaction, describe: SignedTransaction => A)

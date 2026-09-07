@@ -36,6 +36,7 @@ case class NodeWallet(prover: ErgoProver) {
       Contract(ErgoTreePredef.rewardOutputScript(NodeWallet.MINER_REWARD_DELAY, a.getPublicKey))
         .ergoTreeHex -> a).toMap
 
+  /** Last EIP-27 check before a signature: every builder passes through here, TxBuilder or not. */
   def sign(uTx: UnsignedTransaction): SignedTransaction = {
     work.lithos.mutations.Eip27Adjustment.validate(uTx, p2pk.getNetworkType)
     prover.sign(uTx)

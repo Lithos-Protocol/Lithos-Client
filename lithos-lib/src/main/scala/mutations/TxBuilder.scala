@@ -54,6 +54,14 @@ class TxBuilder(ctx: BlockchainContext){
     this
   }
 
+  /**
+   * Complete the output plan and build the unsigned transaction.
+   *
+   * The EIP-27 adjustment runs first, before change is computed, because on mainnet it appends the
+   * pay-to-re-emission output and moves the burned tokens out of change — both of which change what
+   * the inputs have left to give. The completed transaction is validated against the same invariant
+   * before it is returned, so a builder that reshaped the outputs cannot slip past it.
+   */
   def buildTx(fee: Long, changeAddress: Address, burntTokens: Seq[Token] = Seq.empty[Token]): UnsignedTransaction = {
     val (adjustedOutputs, adjustedBurn) = Eip27Adjustment.adjust(inputs, outputs, burntTokens, fee, ctx.getNetworkType)
     val totalIn = inputs.foldLeft(0L)((n, b) => Math.addExact(n, b.value))

@@ -35,9 +35,11 @@ import scala.util.{Failure, Success, Try}
 import scala.util.control.NonFatal
 
 /**
- * Actor responsible for submitting batched rollup transactions to the node.
- * Receives RollupBatch messages from TransactionProcessor and performs
- * on-chain submission for each stub in priority order.
+ * Rollup submission, mixed into the transaction engine. Builds and sends each stub of a batch in
+ * priority order, and supplies the fee-less transactions offered into this miner's own candidate.
+ *
+ * Batches run on the critical lane and select against the reserved input budget, because a missed
+ * NISP submission or fraud proof costs the miner a payout while optional work only costs a retry.
  */
 trait EngineRollups extends Actor with InjectedActorSupport {
   protected def config: Configuration
@@ -320,7 +322,7 @@ trait EngineRollups extends Actor with InjectedActorSupport {
                   built match {
                     case Success(tx) =>
                       reservation.holdForCandidate()
-                      self ! CandidateLeaseTaken(blockHeight, reservation.id)
+                      self ! CandidateLeaseTaken(blockHeight, reservation.reservationId)
                       tx
                     case Failure(ex) =>
                       reservation.release()

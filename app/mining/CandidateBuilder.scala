@@ -85,11 +85,18 @@ class CandidateBuilder(client: ErgoClient,
    */
   private var knownSpent: Map[String, Int] = Map.empty
 
+  /** The genesis build a worker currently owns. A result carrying any other id is discarded. */
   private var activeBuild: Option[UUID] = None
   private var refreshing: Boolean = false
 
   /** Identity and deadline of the only collection allowed to update the current genesis. */
   private var collectingFor: Option[CollectionAttempt] = None
+
+  /**
+   * Reissued whenever the genesis this builder is working towards is replaced — a new tip, or a
+   * rebuild after the node refused a package. A worker whose generation no longer matches has built
+   * for state that is gone, which height alone cannot detect across a same-height reorg.
+   */
   private var buildGeneration: UUID = UUID.randomUUID()
 
   /** Monotonic clock seam for testing result admission independently of scheduler delivery. */
@@ -192,8 +199,10 @@ class CandidateBuilder(client: ErgoClient,
         currentPackage = Some(pkg.copy(blockTxs = Seq.empty[CandidateTx]))
       }
 
+    // Optional transactions are only collected once THIS genesis is mining, and once per height.
+    // Starting earlier would put a mempool scan and a wallet selection in front of publication.
     case GenesisPublished(identity) =>
-      currentPackage.filter(p => p.identity == identity && p.blockTxs.isEmpty).foreach { _ =>
+      currentPackage.filter(pkg => pkg.identity == identity && pkg.blockTxs.isEmpty).foreach { _ =>
         if (!augmentationStarted && config.blockTransactions && !blockTxsBlockedAt.contains(blockHeight)) {
           augmentationStarted = true
           collectBlockTxs(blockHeight)

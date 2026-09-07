@@ -8,12 +8,21 @@ import sigma.ast.syntax._
 
 import scala.collection.JavaConverters._
 
+/**
+ * Mainnet re-emission constants. These are consensus values, not token metadata or configuration:
+ * they are compiled in, and a wrong one is caught by the pinned fixtures rather than at runtime.
+ */
 object MainnetEip27Constants {
   final val TokenId = "d9a2cc8a09abfaed87afacfbb7daee79a6b26f10c6613fc13d3f3953e5521d1a"
   final val ReemissionNft = "d3feeffa87f2df63a7a15b4905e618ae3ce4c69a7975f171bd314d0b877927b8"
   final val EmissionNft = "20fa2bf23962cdf51b07722d6237c0c7b8a44f78856c0f7ec308dc1ef1a92a51"
   final val ActivationHeight = 777217
 
+  /**
+   * The pay-to-re-emission proposition: the first output's first token must be the re-emission NFT.
+   * Consensus compares this exact ErgoTree, so its hex is pinned in the fixtures rather than trusted
+   * to reconstruct identically.
+   */
   val Proxy: Contract = {
     val tokens = OptionGet(ExtractRegisterAs(ByIndex(Outputs, IntConstant(0)), R2)(STokensRegType))
     val nft = SelectField(ByIndex(tokens, IntConstant(0)), 1.toByte)
@@ -24,6 +33,11 @@ object MainnetEip27Constants {
 
 /** Adjusts ordinary mainnet wallet spends; emission-box transitions have separate consensus rules. */
 object Eip27Adjustment {
+
+  /**
+   * NanoERG this input set must pay to the proxy: the total re-emission token amount it carries,
+   * which the transaction must also burn in full. Zero off mainnet and when no such token is present.
+   */
   def obligation(inputs: Seq[InputUTXO], network: NetworkType): Long = {
     if (network != NetworkType.MAINNET) return 0L
     val amount = inputs.flatMap(_.tokens).filter(_.id.toString == MainnetEip27Constants.TokenId)
@@ -33,6 +47,10 @@ object Eip27Adjustment {
     amount
   }
 
+  /**
+   * Append the proxy payment and the token burn when the selected inputs carry re-emission tokens.
+   * Runs before change is computed, since both reduce what the inputs have left to give.
+   */
   def adjust(inputs: Seq[InputUTXO], outputs: Seq[UTXO], burn: Seq[Token], fee: Long,
              network: NetworkType): (Seq[UTXO], Seq[Token]) = {
     val amount = obligation(inputs, network)
@@ -49,6 +67,10 @@ object Eip27Adjustment {
       (burn :+ Token(MainnetEip27Constants.TokenId, amount))
   }
 
+  /**
+   * Recheck the finished transaction: no output keeps a re-emission token, and exactly one pays the
+   * exact obligation to the proxy tree. Catches a builder that reshaped outputs after [[adjust]].
+   */
   def validate(tx: UnsignedTransaction, network: NetworkType): Unit = {
     if (network != NetworkType.MAINNET) return
     val amount = obligation(tx.getInputs.asScala.toSeq.map(InputUTXO(_)), network)

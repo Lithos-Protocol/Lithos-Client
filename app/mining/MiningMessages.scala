@@ -53,9 +53,18 @@ object MiningMessages {
                              mustPublish: Boolean = false,
                              publication: Option[CandidatePublication] = None)
 
+  /**
+   * Exactly which work a candidate request describes. Height alone cannot distinguish a same-height
+   * reorg or a replacement genesis, and `revision` separates successive packages over one genesis.
+   * An empty `genesisId` means a solo candidate carrying no collateral transaction.
+   */
   case class CandidateIdentity(height: Int, parentId: String, genesisId: String, revision: Int)
+
+  /** One publication attempt for that identity. `expiresAt` is set only for augmented packages. */
   case class CandidatePublication(identity: CandidateIdentity, attempt: java.util.UUID,
                                   expiresAt: Option[Long] = None)
+
+  /** The job manager refused this publication; its optional transactions do not reach miners. */
   case class TemplateRejected(publication: CandidatePublication)
 
   /** The node cache or chain no longer supports the currently served job. */

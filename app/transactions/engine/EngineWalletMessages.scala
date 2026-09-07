@@ -4,18 +4,35 @@ import transactions.engine.EngineWalletState
 import work.lithos.mutations.{InputUTXO, Token}
 
 object EngineWalletMessages {
+
+  /** Wraps a selection so it uses the reserved worker and input budget kept for time-sensitive work. */
   private[transactions] case class CriticalWalletRequest(request: Any)
-  // Exact signed-input ownership survives ambiguous node responses until reconciliation.
+
+  /**
+   * Ownership of one send, bound to the exact transaction it funds.
+   *
+   * @param operation      intent key, so a rebuild can find its own previous attempt
+   * @param signedInputIds every input of the signed transaction, protocol boxes included
+   * @param walletInputIds the subset this reservation supplied
+   * @param sendFinished   the node call returned or failed; until then nothing may resolve the hold
+   */
   private[transactions] final case class EngineHold(operation: String, reservationId: String,
     txId: String, signedInputIds: Set[String], walletInputIds: Set[String],
     sendFinished: Boolean = false, accepted: Boolean = false)
+
+  /** Bind a reservation to a signed transaction. `previousTxId` names the attempt being replaced. */
   private[transactions] case class PinEngineInputs(hold: EngineHold, previousTxId: Option[String] = None)
+
+  /** Undo a pin that never reached the node, restoring `previous` when this was a rebuild. */
   private[transactions] case class CancelEngineInputs(reservationId: String, txId: String,
                                                      previous: Option[EngineHold] = None)
+
   private[transactions] case class EngineSendFinished(reservationId: String, txId: String, accepted: Boolean)
   private[transactions] case object GetEngineHolds
   private[transactions] case object GetOwnedInputIds
   private[transactions] case class EngineHolds(holds: Vector[EngineHold])
+
+  /** Retire inputs proven consumed and free those proven to have survived. Never guesses. */
   private[transactions] case class ResolveEngineInputs(reservationId: String, txId: String,
     spent: Set[String], free: Set[String])
 

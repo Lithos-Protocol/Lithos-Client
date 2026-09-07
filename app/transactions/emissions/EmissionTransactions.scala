@@ -782,8 +782,8 @@ class EmissionTransactions(prover: NodeWallet,
     /** Hand ownership of the latest build's reservations to its EmissionSpend. */
     def transferPending(): Seq[FundingAllocation] = {
       val transferred = pending
-      val ids = transferred.map(_.id).toSet
-      reserved = reserved.filterNot(r => ids.contains(r.id))
+      val transferredIds = transferred.map(_.reservationId).toSet
+      reserved = reserved.filterNot(allocation => transferredIds.contains(allocation.reservationId))
       pending = Vector.empty
       transferred
     }

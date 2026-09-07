@@ -116,6 +116,10 @@ class CollateralMarketApiImplSpec
     when(nodeApi.unconfirmedInputByBoxId(anyString())).thenReturn(Success(None))
     when(nodeApi.walletAddresses()).thenReturn(Success(addresses.map(_.toString)))
     when(nodeApi.indexerEnabled).thenReturn(true)
+    // Lender-key exclusion brackets its scan with the chain anchor, so a fixture that never moves
+    // has to answer with the same header id both times.
+    when(nodeApi.info()).thenReturn(Success(
+      support.ChainFixtures.infoAt(100).copy(bestFullHeaderId = Some("ab" * 32))))
 
     val walletRef: ActorRef =
       system.actorOf(Props(new StubWallet(spendable, rewards, claimReply)))

@@ -59,7 +59,7 @@ class DexExecution(nodeContext: NodeContext, walletSelector: EngineFunding,
     val state = poolState(ctx, box)
     ldCache.setPool(state)
 
-    val p = state.pool
+    val liquidity = state.pool
     val token = tokenInfo(nodeApi, state.tokenY)
 
     LDPoolInfo(
@@ -77,29 +77,29 @@ class DexExecution(nodeContext: NodeContext, walletSelector: EngineFunding,
       accX = LDAmounts(state.accX),
       accY = LDAmounts(state.accY),
       provTokensLeft = LDAmounts(state.provTokensLeft),
-      canFlush = p.canFlush,
-      canDeposit = p.canDeposit,
+      canFlush = liquidity.canFlush,
+      canDeposit = liquidity.canDeposit,
       syncHeight = state.syncHeight)
   }
 
   /** @inheritdoc */
   override def getVault(ldCache: LDCache): LDVaultInfo = withDex { (ctx, nodeApi) =>
-    val v = vaultState(ctx, LDBoxes.vaultBox(ctx, nodeApi))
-    ldCache.observeVault(v, ctx.getHeight)
+    val vault = vaultState(ctx, LDBoxes.vaultBox(ctx, nodeApi))
+    ldCache.observeVault(vault, ctx.getHeight)
 
     LDVaultInfo(
-      vaultNFT = v.vaultNFT.toString,
-      utxoId = v.utxoId,
-      accX = LDAmounts(v.accX),
-      accY = LDAmounts(v.accY),
-      balanceX = LDAmounts(v.balanceX),
-      balanceY = LDAmounts(v.balanceY),
-      payableX = LDAmounts(v.payableX),
-      payableY = LDAmounts(v.payableY),
-      tokenY = v.tokenY.map(_.toString),
+      vaultNFT = vault.vaultNFT.toString,
+      utxoId = vault.utxoId,
+      accX = LDAmounts(vault.accX),
+      accY = LDAmounts(vault.accY),
+      balanceX = LDAmounts(vault.balanceX),
+      balanceY = LDAmounts(vault.balanceY),
+      payableX = LDAmounts(vault.payableX),
+      payableY = LDAmounts(vault.payableY),
+      tokenY = vault.tokenY.map(_.toString),
       vaultMin = LDAmounts(LDHelpers.VAULT_MIN),
       lastFlushHeight = ldCache.getLastFlushHeight,
-      syncHeight = v.syncHeight)
+      syncHeight = vault.syncHeight)
   }
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -116,15 +116,15 @@ class DexExecution(nodeContext: NodeContext, walletSelector: EngineFunding,
   override def checkSwapOutput(request: LDSwapOutputRequest, ldCache: LDCache): LDSwapQuote =
     withDex { (ctx, nodeApi) =>
       val amountOut = positive("amountOut", LDAmounts.parseLong("amountOut", request.amountOut))
-      val p = pool(ctx, nodeApi, ldCache)
+      val liquidity = pool(ctx, nodeApi, ldCache)
 
       // An output must stay strictly under the reserve it is drawn from — the curve only approaches it.
       // That is a property of the pool rather than of the request, which is why it is a 422.
-      p.simSwapForOutput(amountOut, request.ergIn).map(LDSwapQuote(_)).getOrElse(
+      liquidity.simSwapForOutput(amountOut, request.ergIn).map(LDSwapQuote(_)).getOrElse(
         throw LithosUnprocessable(
           s"the pool cannot produce $amountOut: it holds only " +
-            s"${if (request.ergIn) p.reservesY else p.reservesX} on that side, and an output has to stay " +
-            "strictly under the reserve it is drawn from"))
+            s"${if (request.ergIn) liquidity.reservesY else liquidity.reservesX} on that side, " +
+            "and an output has to stay strictly under the reserve it is drawn from"))
     }
 
   /** @inheritdoc */
@@ -154,18 +154,19 @@ class DexExecution(nodeContext: NodeContext, walletSelector: EngineFunding,
   /** @inheritdoc */
   override def checkDeposit(request: LDDepositRequest, ldCache: LDCache): LDDepositQuote =
     withDex { (ctx, nodeApi) =>
-      val p = pool(ctx, nodeApi, ldCache)
+      val liquidity = pool(ctx, nodeApi, ldCache)
       val shares = LDAmounts.parseLong("shares", request.shares)
       val availableX = LDAmounts.parseLong("availableX", request.availableX)
       val availableY = LDAmounts.parseLong("availableY", request.availableY)
 
       val quote = shares match {
-        case Some(s) => p.simDepositForShares(positive("shares", s))
+        case Some(requested) => liquidity.simDepositForShares(positive("shares", requested))
         case None =>
           // Both sides or neither: a deposit is balanced by construction, so one side alone says
           // nothing about how many shares the funds can buy.
           (availableX, availableY) match {
-            case (Some(x), Some(y)) => p.simDeposit(positive("availableX", x), positive("availableY", y))
+            case (Some(erg), Some(tokens)) =>
+              liquidity.simDeposit(positive("availableX", erg), positive("availableY", tokens))
             case _ => throw LithosBadRequest(
               "supply either 'shares', or both 'availableX' and 'availableY'")
           }
@@ -211,22 +212,22 @@ class DexExecution(nodeContext: NodeContext, walletSelector: EngineFunding,
   /** @inheritdoc */
   override def checkRedeem(request: LDRedeemRequest, ldCache: LDCache): LDRedeemQuote =
     withDex { (ctx, nodeApi) =>
-      val p = pool(ctx, nodeApi, ldCache)
-      val v = vaultState(ctx, LDBoxes.vaultBox(ctx, nodeApi))
+      val liquidity = pool(ctx, nodeApi, ldCache)
+      val vault = vaultState(ctx, LDBoxes.vaultBox(ctx, nodeApi))
       val prov = LDBoxes.provisionById(ctx, nodeApi, request.provisionBoxId)
 
-      val q = p.simRedeem(prov.shares)
+      val quote = liquidity.simRedeem(prov.shares)
       // Settled but unclaimed fees are forfeited when the box is spent. The contract permits that on
       // purpose, so it cannot be refused here — but a client that does not show it will lose someone
       // their money silently.
-      val (owedX, owedY) = v.owed(prov.shares, prov.entryX, prov.entryY)
+      val (owedX, owedY) = vault.owed(prov.shares, prov.entryX, prov.entryY)
       val (unclaimedX, unclaimedY) = (math.max(0L, owedX), math.max(0L, owedY))
 
       LDRedeemQuote(
-        shares = LDAmounts(q.shares),
-        amountX = LDAmounts(q.amountX),
-        amountY = LDAmounts(q.amountY),
-        withinMinSupply = q.withinMinSupply,
+        shares = LDAmounts(quote.shares),
+        amountX = LDAmounts(quote.amountX),
+        amountY = LDAmounts(quote.amountY),
+        withinMinSupply = quote.withinMinSupply,
         unclaimedX = LDAmounts(unclaimedX),
         unclaimedY = LDAmounts(unclaimedY))
     }
@@ -251,8 +252,8 @@ class DexExecution(nodeContext: NodeContext, walletSelector: EngineFunding,
         // Spending the provision box forfeits whatever the vault had already settled to it. The
         // contract allows it and this client must not refuse it, but it is not something a caller
         // does by leaving a field out — so it has to be asked for by name.
-        val v = vaultState(ctx, LDBoxes.vaultBox(ctx, nodeApi))
-        val (unclaimedX, unclaimedY) = v.owed(prov.shares, prov.entryX, prov.entryY)
+        val vault = vaultState(ctx, LDBoxes.vaultBox(ctx, nodeApi))
+        val (unclaimedX, unclaimedY) = vault.owed(prov.shares, prov.entryX, prov.entryY)
         if ((unclaimedX > 0 || unclaimedY > 0) && !request.acknowledgeUnclaimedFees.contains(true))
           throw LithosBadRequest(
             s"provision ${prov.boxId} has $unclaimedX nanoERG and $unclaimedY token(s) of settled " +
@@ -276,11 +277,11 @@ class DexExecution(nodeContext: NodeContext, walletSelector: EngineFunding,
 
   /** @inheritdoc */
   override def listProvisions(ldCache: LDCache): LDProvisionList = withDex { (ctx, nodeApi) =>
-    val p = pool(ctx, nodeApi, ldCache)
-    val v = vaultState(ctx, LDBoxes.vaultBox(ctx, nodeApi))
-    ldCache.observeVault(v, ctx.getHeight)
+    val liquidity = pool(ctx, nodeApi, ldCache)
+    val vault = vaultState(ctx, LDBoxes.vaultBox(ctx, nodeApi))
+    ldCache.observeVault(vault, ctx.getHeight)
 
-    LDProvisionList(LDBoxes.ownedProvisions(ctx, nodeApi).map(describe(p, v, _)))
+    LDProvisionList(LDBoxes.ownedProvisions(ctx, nodeApi).map(describe(liquidity, vault, _)))
   }
 
   /**
@@ -290,9 +291,9 @@ class DexExecution(nodeContext: NodeContext, walletSelector: EngineFunding,
    * what the vault can actually pay, which is smaller by whatever has not been flushed. Returning one
    * without the other misleads — the gap is precisely what a flush would release.
    */
-  private def describe(p: LDLiquidityPool, v: LDFeeValue, prov: Provision): LDProvision = {
-    val (accruedX, accruedY) = p.feesAccrued(prov.shares, prov.entryX, prov.entryY)
-    val (owedX, owedY) = v.owed(prov.shares, prov.entryX, prov.entryY)
+  private def describe(liquidity: LDLiquidityPool, vault: LDFeeValue, prov: Provision): LDProvision = {
+    val (accruedX, accruedY) = liquidity.feesAccrued(prov.shares, prov.entryX, prov.entryY)
+    val (owedX, owedY) = vault.owed(prov.shares, prov.entryX, prov.entryY)
 
     // A provision opened or resized while the pool held unflushed fees enters at an accumulator AHEAD
     // of the vault's, and the contract's own arithmetic is negative there. Execution already refuses
@@ -310,14 +311,14 @@ class DexExecution(nodeContext: NodeContext, walletSelector: EngineFunding,
       entryY = LDAmounts(prov.entryY),
       value = LDAmounts(prov.value),
       createdHeight = prov.createdHeight,
-      shareOfSupply = p.shareOfSupply(prov.shares),
+      shareOfSupply = liquidity.shareOfSupply(prov.shares),
       accruedX = LDAmounts(accruedX),
       accruedY = LDAmounts(accruedY),
       claimableX = LDAmounts(claimableX),
       claimableY = LDAmounts(claimableY),
       unflushedX = LDAmounts(math.max(0L, accruedX - claimableX)),
       unflushedY = LDAmounts(math.max(0L, accruedY - claimableY)),
-      canClaim = v.canClaim(prov.entryX, prov.entryY),
+      canClaim = vault.canClaim(prov.entryX, prov.entryY),
       awaitingFlush = awaitingFlush)
   }
 
@@ -330,17 +331,17 @@ class DexExecution(nodeContext: NodeContext, walletSelector: EngineFunding,
 
         val vaultBox = LDBoxes.vaultBox(ctx, nodeApi)
         expectVault(request.expectedVaultBoxId, vaultBox)
-        val v = vaultState(ctx, vaultBox)
-        ldCache.observeVault(v, ctx.getHeight)
+        val vault = vaultState(ctx, vaultBox)
+        ldCache.observeVault(vault, ctx.getHeight)
 
         val prov = LDBoxes.provisionById(ctx, nodeApi, boxId)
         expectProvision(request.expectedProvisionBoxId, prov)
-        if (!v.canClaim(prov.entryX, prov.entryY))
+        if (!vault.canClaim(prov.entryX, prov.entryY))
           throw LithosBadRequest(
             s"provision $boxId has nothing to settle: its entry is level with the vault's accumulator. " +
               "The pool has not been flushed since it last claimed; flush first, or wait for one.")
 
-        val (owedX, owedY) = v.owed(prov.shares, prov.entryX, prov.entryY)
+        val (owedX, owedY) = vault.owed(prov.shares, prov.entryX, prov.entryY)
         atLeast("minAmountX", minX, owedX, "the ERG this claim settles")
         atLeast("minAmountY", minY, owedY, "the token amount this claim settles")
 
@@ -363,9 +364,9 @@ class DexExecution(nodeContext: NodeContext, walletSelector: EngineFunding,
   /** @inheritdoc */
   override def checkResize(boxId: String, request: LDResizeRequest, ldCache: LDCache): LDResizeQuote =
     withDex { (ctx, nodeApi) =>
-      val p = pool(ctx, nodeApi, ldCache)
+      val liquidity = pool(ctx, nodeApi, ldCache)
       val prov = LDBoxes.provisionById(ctx, nodeApi, boxId)
-      LDResizeQuote(p.simResize(prov.shares, newShares(request, prov), prov.entryX, prov.entryY))
+      LDResizeQuote(liquidity.simResize(prov.shares, newShares(request, prov), prov.entryX, prov.entryY))
     }
 
   /** @inheritdoc */
@@ -428,20 +429,20 @@ class DexExecution(nodeContext: NodeContext, walletSelector: EngineFunding,
 
   /** @inheritdoc */
   override def checkFlush(ldCache: LDCache): LDFlushCheck = withDex { (ctx, nodeApi) =>
-    val p = pool(ctx, nodeApi, ldCache)
-    val v = vaultState(ctx, LDBoxes.vaultBox(ctx, nodeApi))
-    ldCache.observeVault(v, ctx.getHeight)
+    val liquidity = pool(ctx, nodeApi, ldCache)
+    val vault = vaultState(ctx, LDBoxes.vaultBox(ctx, nodeApi))
+    ldCache.observeVault(vault, ctx.getHeight)
 
     LDFlushCheck(
-      pendingX = LDAmounts(p.pendingX),
-      pendingY = LDAmounts(p.pendingY),
-      canFlush = p.canFlush,
-      poolAccX = LDAmounts(p.accX),
-      poolAccY = LDAmounts(p.accY),
-      vaultAccX = LDAmounts(v.accX),
-      vaultAccY = LDAmounts(v.accY),
-      vaultBalanceAfterX = LDAmounts(v.balanceX + p.pendingX),
-      vaultBalanceAfterY = LDAmounts(v.balanceY + p.pendingY),
+      pendingX = LDAmounts(liquidity.pendingX),
+      pendingY = LDAmounts(liquidity.pendingY),
+      canFlush = liquidity.canFlush,
+      poolAccX = LDAmounts(liquidity.accX),
+      poolAccY = LDAmounts(liquidity.accY),
+      vaultAccX = LDAmounts(vault.accX),
+      vaultAccY = LDAmounts(vault.accY),
+      vaultBalanceAfterX = LDAmounts(vault.balanceX + liquidity.pendingX),
+      vaultBalanceAfterY = LDAmounts(vault.balanceY + liquidity.pendingY),
       lastFlushHeight = ldCache.getLastFlushHeight,
       currentHeight = ctx.getHeight)
   }

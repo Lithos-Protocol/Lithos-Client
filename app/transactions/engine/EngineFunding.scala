@@ -14,10 +14,11 @@ import scala.concurrent.duration._
 import scala.util.control.NonFatal
 
 /**
- * The one application-facing wallet selector.
+ * The one application-facing wallet selector, used by DEX, emission and rollup builds.
  *
- * [[EngineWalletState]] remains the state owner; this class is the single adapter used by DEX,
- * emission, and rollup transactions for selection and reservation lifecycle messages.
+ * It owns no state: [[EngineWalletState]] does, and every method here is a blocking ask against it.
+ * `critical` routes the request to the reserved lane and higher input budget that NISP submissions
+ * and fraud proofs depend on, so it is never set for optional or revenue work.
  */
 case class EngineFunding(walletRef: ActorRef,
                           timeout: FiniteDuration,
@@ -51,8 +52,8 @@ case class EngineFunding(walletRef: ActorRef,
   override def reserveCoveringP2PK(value: Long): FundingAllocation =
     reserveOneBox(value, "one P2PK input")(RetrieveCoveringP2PKInput(_, trackUsed = true, _, _))
 
-  /** Both single-box requests differ only in which set the manager draws from. */
-  private def reserveOneBox(value: Long, what: String)
+  /** Both single-box requests differ only in which set the wallet draws from. */
+  private def reserveOneBox(value: Long, description: String)
                            (request: (Long, String, Long) => Any): FundingAllocation = {
     if (value < 0)
       throw new IllegalArgumentException("Wallet requirements cannot be negative")
@@ -65,7 +66,7 @@ case class EngineFunding(walletRef: ActorRef,
     if (selected.isEmpty) {
       reservation.release()
       throw new NotEnoughInputsException(
-        s"EngineWalletState could not reserve $what covering $value nanoERG")
+        s"EngineWalletState could not reserve $description covering $value nanoERG")
     }
     reservation
   }
@@ -128,15 +129,18 @@ case class EngineFunding(walletRef: ActorRef,
         throw ex
     }
 
+  /** Recheck what came back actually covers the request, since the wallet may reply with less. */
   private def covers(inputs: Seq[InputUTXO], value: Long, tokens: Seq[Token]): Boolean = {
     val ergCovered = inputs.foldLeft(BigInt(0))((sum, box) => sum + box.value) >= BigInt(value)
-    val required = tokens.groupBy(_.id).map { case (id, entries) =>
-      id -> entries.foldLeft(BigInt(0))((sum, token) => sum + token.amount)
+    val requiredTokens = tokens.groupBy(_.id).map { case (id, requested) =>
+      id -> requested.foldLeft(BigInt(0))((sum, token) => sum + token.amount)
     }
-    val held = inputs.flatMap(_.tokens).groupBy(_.id).map { case (id, entries) =>
-      id -> entries.foldLeft(BigInt(0))((sum, token) => sum + token.amount)
+    val heldTokens = inputs.flatMap(_.tokens).groupBy(_.id).map { case (id, held) =>
+      id -> held.foldLeft(BigInt(0))((sum, token) => sum + token.amount)
     }
-    ergCovered && required.forall { case (id, amount) => held.getOrElse(id, BigInt(0)) >= amount }
+    ergCovered && requiredTokens.forall {
+      case (id, amount) => heldTokens.getOrElse(id, BigInt(0)) >= amount
+    }
   }
 
   private def requirement(value: Long, tokens: Seq[Token]): String = {

@@ -30,6 +30,7 @@ import scala.util.{Failure, Success, Try}
  * [[RequestBlockTxs]] only guarantees the same work lands in a block this miner finds.
  */
 trait EngineEmissions extends Actor with InjectedActorSupport {
+  /** Config, node and wallet come from the engine this trait is mixed into. */
   protected def config: Configuration
   protected def emissionNodeContext: NodeContext
   protected def emissionWalletManager: ActorRef

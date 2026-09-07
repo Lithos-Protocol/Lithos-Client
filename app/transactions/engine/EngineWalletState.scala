@@ -25,7 +25,14 @@ import scala.concurrent.blocking
 import scala.language.postfixOps
 import scala.util.{Failure, Success, Try}
 
-/** Wallet ownership and compact inventory state mixed into the transaction engine actor. */
+/**
+ * Wallet ownership, mixed into the transaction engine actor so one mailbox serialises every change
+ * to it. Holds compact descriptors rather than hydrated boxes, and hands hydrated inputs out only
+ * for the duration of a build.
+ *
+ * The invariant everything here protects: an input owned by a nonterminal transaction is never
+ * offered to another request. Releasing early is a double spend, so every ambiguous case withholds.
+ */
 class EngineWalletState @Inject()(nodeContext: NodeContext) extends Actor with InjectedActorSupport {
 
   implicit val ec: ExecutionContext = context.dispatcher
@@ -50,69 +57,100 @@ class EngineWalletState @Inject()(nodeContext: NodeContext) extends Actor with I
   private val walletIncarnation = UUID.randomUUID()
   private val walletAlive = new java.util.concurrent.atomic.AtomicBoolean(true)
 
+  /**
+   * Record change from a just-built transaction so the next transaction in a chain can spend it
+   * before the node reports its parent. Newest wins, and the set is capped like any other cache.
+   */
   private def remember(outputs: Seq[InputUTXO]): Unit = {
-    val accepted = outputs.take(WalletInventory.MaxInputs).filter(_.bytes.length <= WalletInventory.MaxInputBytes)
+    val accepted = outputs.take(WalletInventory.MaxInputs)
+      .filter(_.bytes.length <= WalletInventory.MaxInputBytes)
       .map(WalletInventory.nodeBox)
     knownOutputs = (accepted ++ knownOutputs).groupBy(_.boxId).valuesIterator.map(_.head)
       .take(WalletInventory.MaxInputs).toVector
   }
 
+  /** Drop descriptors past the count or byte ceiling. Both sets share one budget. */
   private def trimInventory(): Unit = {
-    var bytes = 0L
+    var retainedBytes = 0L
     val kept = (walletBoxes.valuesIterator ++ rewardBoxes.valuesIterator)
       .take(WalletInventory.MaxDescriptors).filter { box =>
-        bytes += box.retainedBytes
-        bytes <= WalletInventory.MaxDescriptorBytes
+        retainedBytes += box.retainedBytes
+        retainedBytes <= WalletInventory.MaxDescriptorBytes
       }.map(_.id).toSet
     walletBoxes = walletBoxes.filter { case (id, _) => kept.contains(id) }
     rewardBoxes = rewardBoxes.filter { case (id, _) => kept.contains(id) }
   }
 
+  /**
+   * Value this descriptor can contribute, after the nanoERG that spending its re-emission tokens
+   * obliges the transaction to pay away. Reporting the gross value would overstate a mainnet reward
+   * box by exactly the token amount it carries.
+   */
   private def descriptorValue(box: WalletDescriptor): Long = {
-    val due = if (nodeContext.getNetwork != org.ergoplatform.appkit.NetworkType.MAINNET) 0L
+    val reemissionDue = if (nodeContext.getNetwork != org.ergoplatform.appkit.NetworkType.MAINNET) 0L
       else box.tokens.filter(_.id.toString == MainnetEip27Constants.TokenId)
-        .foldLeft(0L)((n, t) => Math.addExact(n, t.amount))
-    Math.subtractExact(box.value, due)
+        .foldLeft(0L)((sum, token) => Math.addExact(sum, token.amount))
+    Math.subtractExact(box.value, reemissionDue)
   }
 
-  private def valueOf(boxes: Seq[WalletDescriptor]): BigInt = boxes.map(b => BigInt(descriptorValue(b))).sum
+  private def valueOf(boxes: Seq[WalletDescriptor]): BigInt =
+    boxes.map(box => BigInt(descriptorValue(box))).sum
 
-  private def selectWallet(erg: Long, tokens: Seq[Token], track: Boolean, id: String,
+  /**
+   * Run one selection off the mailbox, or queue it behind the selection already running in its lane.
+   * Critical and optional selections have separate workers and separate input budgets, so a slow
+   * optional page walk cannot delay a NISP submission or leave it without funding.
+   *
+   * The reservation is taken when the result comes back, not here, so the actor never has to decide
+   * ownership from a snapshot taken before the walk finished.
+   */
+  private def selectWallet(erg: Long, tokens: Seq[Token], track: Boolean, reservationId: String,
                            deadline: Long, single: Boolean, p2pkOnly: Boolean,
                            reply: ActorRef = sender(), critical: Boolean = criticalMessage): Unit = {
     val busy = if (critical) criticalSelecting.nonEmpty else selecting.nonEmpty
-    val limit = if (critical) MAX_ENGINE_INPUTS else MAX_OPTIONAL_INPUTS
-    if (busy && now() < deadline && waitingSelections.count(_.critical == critical) < 8 && tokens.size <= 512)
-      waitingSelections :+= SelectionRequest(erg, tokens, track, id, deadline, single, p2pkOnly, reply, critical)
-    else if (busy || now() >= deadline || tokens.size > 512 ||
-      usedInputs.size + (if (single) 1 else WalletInventory.MaxInputs) > limit)
-      reply ! WalletInputs(Seq.empty, id)
+    val ownershipLimit = if (critical) MAX_ENGINE_INPUTS else MAX_OPTIONAL_INPUTS
+    // Worst-case ownership, not the eventual selection size: a request that could not be honoured
+    // within the budget is refused before it walks anything.
+    val worstCaseInputs = if (single) 1 else WalletInventory.MaxInputs
+    if (busy && now() < deadline && waitingSelections.count(_.critical == critical) < MaxQueuedSelections &&
+      tokens.size <= MaxRequestedTokens)
+      waitingSelections :+= SelectionRequest(erg, tokens, track, reservationId, deadline, single, p2pkOnly, reply, critical)
+    else if (busy || now() >= deadline || tokens.size > MaxRequestedTokens ||
+      usedInputs.size + worstCaseInputs > ownershipLimit)
+      reply ! WalletInputs(Seq.empty, reservationId)
     else {
       val attempt = UUID.randomUUID()
       if (critical) criticalSelecting = Some(attempt) else selecting = Some(attempt)
       val excluded = usedInputs.keySet
-      val known = knownOutputs
+      val chainedChange = knownOutputs
       Try(Future(client.execute { ctx =>
-        inventory.select(ctx, erg, tokens, excluded, single, p2pkOnly, rewardsOnly = false, known)
+        inventory.select(ctx, erg, tokens, excluded, single, p2pkOnly, rewardsOnly = false, chainedChange)
       })(if (critical) criticalWalletWorker else walletWorker)
-        .onComplete(r => self ! SelectionFinished(attempt, id, deadline, track, reply, r, critical)))
-        .failed.foreach(ex => self ! SelectionFinished(attempt, id, deadline, track, reply, Failure(ex), critical))
+        .onComplete(result => self ! SelectionFinished(attempt, reservationId, deadline, track, reply, result, critical)))
+        .failed.foreach(ex =>
+          self ! SelectionFinished(attempt, reservationId, deadline, track, reply, Failure(ex), critical))
     }
   }
 
+  /** Start whichever queued selections now have a free lane, oldest first. */
   private def drainSelections(): Unit = {
-    var ready = waitingSelections.indexWhere(r => if (r.critical) criticalSelecting.isEmpty else selecting.isEmpty)
+    def nextReady: Int = waitingSelections.indexWhere(request =>
+      if (request.critical) criticalSelecting.isEmpty else selecting.isEmpty)
+    var ready = nextReady
     while (ready >= 0) {
-      val r = waitingSelections(ready)
+      val request = waitingSelections(ready)
       waitingSelections = waitingSelections.patch(ready, Nil, 1)
-      selectWallet(r.erg, r.tokens, r.track, r.id, r.deadline, r.single, r.p2pkOnly, r.reply, r.critical)
-      ready = waitingSelections.indexWhere(r => if (r.critical) criticalSelecting.isEmpty else selecting.isEmpty)
+      selectWallet(request.erg, request.tokens, request.track, request.id, request.deadline,
+        request.single, request.p2pkOnly, request.reply, request.critical)
+      ready = nextReady
     }
   }
 
+  /** Load full boxes for reward descriptors, rechecking identity so a stale descriptor cannot sign. */
   private def hydrateRewards(boxes: Seq[WalletDescriptor]): Seq[InputUTXO] = client.execute { ctx =>
     boxes.map { descriptor =>
-      val box = nodeApi.boxById(descriptor.id).get.getOrElse(throw new IllegalStateException("reward input is unavailable"))
+      val box = nodeApi.boxById(descriptor.id).get.getOrElse(
+        throw new IllegalStateException("reward input is unavailable"))
       val input = box.toInputUTXO(ctx)
       require(input.id.toString == descriptor.id && input.bytes.length <= WalletInventory.MaxInputBytes,
         "reward identity or hydration budget changed")
@@ -222,30 +260,39 @@ class EngineWalletState @Inject()(nodeContext: NodeContext) extends Actor with I
     case TotalsRefreshed(revision, totals) if revision == walletRevision => summary = Some(revision -> totals)
     case _: TotalsRefreshed => ()
     case SweepFinished => sweeping = false
-    case SelectionFinished(attempt, id, deadline, track, reply, result, critical)
+    // The walk ran off the mailbox, so its result is only usable if nothing it assumed has changed:
+    // the request is still inside its deadline, no box it chose was reserved meanwhile, and taking
+    // them all still fits the lane's ownership budget. Any of those failing yields no inputs rather
+    // than a partial selection the caller cannot fund a transaction with.
+    case SelectionFinished(attempt, reservationId, deadline, track, reply, result, critical)
       if selecting.contains(attempt) || criticalSelecting.contains(attempt) =>
       if (critical) criticalSelecting = None else selecting = None
-      val selected = result.toOption.filter(_ => now() < deadline)
-        .filter(_.forall(b => !usedInputs.contains(b.id.toString))).getOrElse(Vector.empty)
-        .filter(_ => usedInputs.size + result.toOption.map(_.size).getOrElse(0) <=
-          (if (critical) MAX_ENGINE_INPUTS else MAX_OPTIONAL_INPUTS))
+      val ownershipLimit = if (critical) MAX_ENGINE_INPUTS else MAX_OPTIONAL_INPUTS
+      val selected = result.toOption.filter { boxes =>
+        now() < deadline &&
+          boxes.forall(box => !usedInputs.contains(box.id.toString)) &&
+          usedInputs.size + boxes.size <= ownershipLimit
+      }.getOrElse(Vector.empty)
       result.failed.foreach(ex => logger.warn(s"Wallet selection deferred: ${ex.getMessage}"))
-      if (track && selected.nonEmpty) reserve(selected.map(_.id.toString), id)
-      reply ! WalletInputs(selected, id)
+      if (track && selected.nonEmpty) reserve(selected.map(_.id.toString), reservationId)
+      reply ! WalletInputs(selected, reservationId)
       drainSelections()
     case _: SelectionFinished => ()
+    // Bind a reservation to the exact signed transaction about to be sent. A fresh pin requires an
+    // ordinary reservation; a rebuild requires the previous attempt to have finished its send and to
+    // have covered the same operation and inputs, so one attempt can never take over another's boxes.
     case PinEngineInputs(hold, previousTxId) =>
-      val matching = usedInputs.filter(_._2.id == hold.reservationId)
-      val heldCount = usedInputs.values.count(_.status.isInstanceOf[ReservationEngine])
-      val accepted = matching.nonEmpty && matching.keySet == hold.walletInputIds &&
-        matching.values.forall(_.status match {
+      val reserved = usedInputs.filter { case (_, state) => state.id == hold.reservationId }
+      val alreadyPinned = usedInputs.values.count(_.status.isInstanceOf[ReservationEngine])
+      val accepted = reserved.nonEmpty && reserved.keySet == hold.walletInputIds &&
+        reserved.values.forall(_.status match {
           case ReservationSelected | ReservationKnown => previousTxId.isEmpty
-          case ReservationEngine(old) => old.sendFinished && previousTxId.contains(old.txId) &&
-            old.operation == hold.operation && old.signedInputIds == hold.signedInputIds
+          case ReservationEngine(previous) => previous.sendFinished && previousTxId.contains(previous.txId) &&
+            previous.operation == hold.operation && previous.signedInputIds == hold.signedInputIds
           case _ => false
-        }) && heldCount + (if (previousTxId.isEmpty) matching.size else 0) <= MAX_ENGINE_INPUTS
+        }) && alreadyPinned + (if (previousTxId.isEmpty) reserved.size else 0) <= MAX_ENGINE_INPUTS
       if (accepted) {
-        usedInputs ++= matching.map { case (id, state) => id -> state.copy(status = ReservationEngine(hold)) }
+        usedInputs ++= reserved.map { case (boxId, state) => boxId -> state.copy(status = ReservationEngine(hold)) }
         walletRevision += 1L
       }
       sender() ! accepted
@@ -293,19 +340,24 @@ class EngineWalletState @Inject()(nodeContext: NodeContext) extends Actor with I
       }.toVector
       sender() ! EngineHolds(held)
 
-    case ResolveEngineInputs(id, txId, spent, free) =>
-      val allowed = usedInputs.collect {
-        case (boxId, ReservationState(`id`, _, ReservationEngine(hold)))
+    // Retire inputs the chain consumed and free those a reconciler proved survived. Only boxes this
+    // exact finished send still owns are touched, so a stale reconciliation cannot resolve a newer
+    // attempt's inputs. A lender key is let go only once none of its funding remains owned.
+    case ResolveEngineInputs(reservationId, txId, spent, free) =>
+      val ownedByThisSend = usedInputs.collect {
+        case (boxId, ReservationState(`reservationId`, _, ReservationEngine(hold)))
           if hold.txId == txId && hold.sendFinished => boxId
       }.toSet
-      val resolved = (spent ++ free).intersect(allowed)
+      val resolved = (spent ++ free).intersect(ownedByThisSend)
       usedInputs --= resolved
-      walletBoxes --= spent.intersect(allowed)
-      rewardBoxes --= spent.intersect(allowed)
-      if (resolved.nonEmpty) walletRevision += 1L
-      if (resolved.nonEmpty) joinKeys = joinKeys.filterNot { case (_, owned) =>
-        owned.txId.contains(txId) && owned.funding.contains(id) &&
-          !usedInputs.valuesIterator.exists(s => owned.funding.contains(s.id))
+      walletBoxes --= spent.intersect(ownedByThisSend)
+      rewardBoxes --= spent.intersect(ownedByThisSend)
+      if (resolved.nonEmpty) {
+        walletRevision += 1L
+        joinKeys = joinKeys.filterNot { case (_, owned) =>
+          owned.txId.contains(txId) && owned.funding.contains(reservationId) &&
+            !usedInputs.valuesIterator.exists(state => owned.funding.contains(state.id))
+        }
       }
       sender() ! (resolved == (spent ++ free))
 
@@ -336,8 +388,8 @@ class EngineWalletState @Inject()(nodeContext: NodeContext) extends Actor with I
         logger.warn("Node is not indexed (extraIndex = false), so mined coinbases cannot be found. " +
           "They accrue at addresses no wallet reports and stay unspendable until it is enabled")
       }
-      val fresh = boxes.map(b => b.id.toString -> b).toMap
-      val freshRewards = rewards.map(b => b.id.toString -> b).toMap
+      val freshWallet = boxes.map(box => box.id.toString -> box).toMap
+      val freshRewards = rewards.map(box => box.id.toString -> box).toMap
       if (complete) {
         // A reserved box neither read still reports as unspent HAS been spent, so the box and its
         // reservation go together. Keeping the reservation was what made a spent box selectable
@@ -347,37 +399,38 @@ class EngineWalletState @Inject()(nodeContext: NodeContext) extends Actor with I
         // BOTH sets, not just the wallet. Coinbases are tracked separately because no wallet reports
         // them, so comparing against the wallet alone declared every reserved coinbase spent on
         // sight — and `coveringReward` hands one out for most ordinary fees.
-        val reported = fresh.keySet ++ freshRewards.keySet
+        val reportedUnspent = freshWallet.keySet ++ freshRewards.keySet
         // An ambiguous broadcast is resolved in either direction by a complete mempool-aware read:
         // present means rejected/evicted and safe again; absent means accepted/spent and gone.
-        val resolvedUncertain = usedInputs.collect {
-          case (id, reservation) if reservation.status == ReservationUncertain => id
+        val settledUncertain = usedInputs.collect {
+          case (boxId, reservation) if reservation.status == ReservationUncertain => boxId
         }.toSet
-        usedInputs = usedInputs -- resolvedUncertain
-        // A send already in progress is not resolved by a snapshot: it may have been captured just
-        // before the node received the transaction. Keep its lease record so the known-accepted
-        // response can still commit, and so nobody can reselect its parents in the meantime.
-        val invalidReservations = usedInputs.collect {
-          case (id, reservation)
-            if reservation.status == ReservationSelected && !reported.contains(id) => reservation.id
+        usedInputs = usedInputs -- settledUncertain
+        // A reserved box no read still reports as unspent HAS been spent, so the whole lease goes.
+        // Only plain selections are judged this way: a send already in progress may have been
+        // captured just before the node received it, and its lease has to survive so the accepted
+        // response can still commit and nobody can reselect its parents meanwhile.
+        val spentReservationIds = usedInputs.collect {
+          case (boxId, reservation)
+            if reservation.status == ReservationSelected && !reportedUnspent.contains(boxId) => reservation.id
         }.toSet
-        if (invalidReservations.nonEmpty) {
-          val settled = usedInputs.count { case (_, reservation) =>
-            invalidReservations.contains(reservation.id)
+        if (spentReservationIds.nonEmpty) {
+          val retiredInputs = usedInputs.count {
+            case (_, reservation) => spentReservationIds.contains(reservation.id)
           }
-          logger.info(s"$settled reserved box(es) are no longer a complete unspent lease - collecting them")
-          usedInputs = usedInputs.filterNot { case (_, reservation) =>
-            invalidReservations.contains(reservation.id)
+          logger.info(s"$retiredInputs reserved box(es) are no longer a complete unspent lease - collecting them")
+          usedInputs = usedInputs.filterNot {
+            case (_, reservation) => spentReservationIds.contains(reservation.id)
           }
         }
-        walletBoxes = fresh
+        walletBoxes = freshWallet
         rewardBoxes = freshRewards
       } else {
         // A run that stopped part way cannot tell "spent" from "not fetched", and guessing wrong
         // there hands out a box sitting in an unconfirmed transaction. Collect nothing, and keep
         // reserved boxes of either kind alive as before.
-        walletBoxes = walletBoxes.filter { case (id, _) => usedInputs.contains(id) } ++ fresh
-        rewardBoxes = rewardBoxes.filter { case (id, _) => usedInputs.contains(id) } ++ freshRewards
+        walletBoxes = walletBoxes.filter { case (boxId, _) => usedInputs.contains(boxId) } ++ freshWallet
+        rewardBoxes = rewardBoxes.filter { case (boxId, _) => usedInputs.contains(boxId) } ++ freshRewards
       }
       chainHeight = height
       trimInventory()
@@ -494,24 +547,30 @@ class EngineWalletState @Inject()(nodeContext: NodeContext) extends Actor with I
 
     case ClaimUnlockedRewards =>
       val replyTo = sender()
-      val rewards = spendableRewards.sortBy(_.value).take(math.min(MAX_TX_INPUTS, MAX_OPTIONAL_INPUTS - usedInputs.size))
-      if (rewards.isEmpty) replyTo ! RewardsClaimed(Seq.empty)
+      // Smallest first, so dust consolidates into the early batches instead of stranding a tail of
+      // sub-fee boxes, and never more than the remaining optional ownership budget.
+      val matured = spendableRewards.sortBy(_.value)
+        .take(math.min(MAX_TX_INPUTS, MAX_OPTIONAL_INPUTS - usedInputs.size))
+      if (matured.isEmpty) replyTo ! RewardsClaimed(Seq.empty)
       else {
         sweeping = true
         // Reserved on the actor thread BEFORE anything leaves the mailbox, so no other selection
         // can take these boxes while the sweep runs. Each batch carries its own lease identity so
         // one failed batch never blocks committing the ones around it.
-        val chunks = rewards.grouped(MAX_TX_INPUTS).toVector
-        val leaseIds = chunks.map(_ => UUID.randomUUID().toString)
-        chunks.zip(leaseIds).foreach { case (chunk, id) =>
-          reserve(chunk.map(_.id.toString), id)
+        val batches = matured.grouped(MAX_TX_INPUTS).toVector
+        val leaseIds = batches.map(_ => UUID.randomUUID().toString)
+        batches.zip(leaseIds).foreach { case (batch, leaseId) =>
+          reserve(batch.map(_.id.toString), leaseId)
         }
-        val done = Promise[RewardsClaimed]()
-        Try(Future(runRewardSweep(chunks.iterator.map(hydrateRewards), leaseIds, done))(walletWorker))
-          .failed.foreach { ex => leaseIds.foreach(id => self ! ReleaseInputs(id)); done.tryFailure(ex) }
-        done.future.onComplete {
-          case Success(claimed) => replyTo ! claimed; self ! WalletWorkerResult(walletIncarnation, SweepFinished)
-          case Failure(ex) => replyTo ! RewardClaimFailed(ex.getMessage); self ! WalletWorkerResult(walletIncarnation, SweepFinished)
+        val sweep = Promise[RewardsClaimed]()
+        Try(Future(runRewardSweep(batches.iterator.map(hydrateRewards), leaseIds, sweep))(walletWorker))
+          .failed.foreach { ex =>
+            leaseIds.foreach(leaseId => self ! ReleaseInputs(leaseId))
+            sweep.tryFailure(ex)
+          }
+        sweep.future.onComplete { result =>
+          replyTo ! result.fold(ex => RewardClaimFailed(ex.getMessage), identity)
+          self ! WalletWorkerResult(walletIncarnation, SweepFinished)
         }(context.dispatcher)
       }
 
@@ -527,61 +586,66 @@ class EngineWalletState @Inject()(nodeContext: NodeContext) extends Actor with I
    * One whose SEND fails ambiguously stays withheld until a complete refresh reconciles it, exactly
    * like an external caller's uncertain broadcast.
    */
-  private def runRewardSweep(chunks: Iterator[Seq[InputUTXO]],
+  private def runRewardSweep(batches: Iterator[Seq[InputUTXO]],
                              leaseIds: Seq[String],
-                             done: Promise[RewardsClaimed]): Unit = {
+                             sweep: Promise[RewardsClaimed]): Unit = {
     var claimed = Vector.empty[RewardClaimChunk]
     try {
-      chunks.zip(leaseIds.iterator).foreach { case (chunk, id) =>
+      batches.zip(leaseIds.iterator).foreach { case (batch, leaseId) =>
         require(walletAlive.get(), "wallet engine attempt was superseded")
-        val inputIds = chunk.map(_.id.toString).toSet
-        val gross = chunk.foldLeft(0L)((n, b) => Math.addExact(n, b.value))
-        val obligation = Eip27Adjustment.obligation(chunk, nodeContext.getNetwork)
-        val net = Math.subtractExact(Math.subtractExact(gross, obligation), RewardSweepFee)
-        if (net < Parameters.MinChangeValue) self ! ReleaseInputs(id)
+        val inputIds = batch.map(_.id.toString).toSet
+        val grossValue = batch.foldLeft(0L)((sum, box) => Math.addExact(sum, box.value))
+        // On mainnet the batch's re-emission tokens must be burned and their nanoERG paid to the
+        // proxy, so that amount is not available to the payout. TxBuilder appends that output.
+        val reemissionObligation = Eip27Adjustment.obligation(batch, nodeContext.getNetwork)
+        val payoutValue = Math.subtractExact(
+          Math.subtractExact(grossValue, reemissionObligation), RewardSweepFee)
+        if (payoutValue < Parameters.MinChangeValue) self ! ReleaseInputs(leaseId)
         else {
-          val payoutTokens = chunk.flatMap(_.tokens)
-            .filterNot(t => obligation > 0 && t.id.toString == MainnetEip27Constants.TokenId)
-            .groupBy(_.id).toSeq.map { case (tokenId, entries) =>
-              Token(tokenId, entries.foldLeft(0L)((n, t) => Math.addExact(n, t.amount)))
+          // Everything except the re-emission tokens is forwarded; copying those into the payout
+          // would break the burn the same builder is about to enforce.
+          val payoutTokens = batch.flatMap(_.tokens)
+            .filterNot(token => reemissionObligation > 0 && token.id.toString == MainnetEip27Constants.TokenId)
+            .groupBy(_.id).toSeq.map { case (tokenId, tokens) =>
+              Token(tokenId, tokens.foldLeft(0L)((sum, token) => Math.addExact(sum, token.amount)))
             }
           val signed = client.execute { ctx =>
-            val unsigned = TxBuilder(ctx).setInputs(chunk: _*)
-              .setOutputs(UTXO(wallet.contract, net, payoutTokens), UTXO.feeBox(RewardSweepFee))
+            val unsigned = TxBuilder(ctx).setInputs(batch: _*)
+              .setOutputs(UTXO(wallet.contract, payoutValue, payoutTokens), UTXO.feeBox(RewardSweepFee))
               .buildTx(0, wallet.p2pk)
             require(walletAlive.get(), "wallet engine attempt was superseded before signing")
             wallet.sign(unsigned)
           }
           val payout = InputUTXO(signed.getOutputsToSpend.get(0))
-          val result = new EngineBroadcast(self, nodeApi)
-            .sendOwned(signed, Seq(EngineBroadcast.Funding(id, inputIds)), "rewards:" + id, () => walletAlive.get())
-          if (result.outcome == "accepted") self ! ReturnInputs(Seq(payout))
-          claimed :+= RewardClaimChunk(result.txId, chunk.size, net, result.outcome)
-          logger.info(s"Reward sweep ${result.txId}: ${result.outcome}, ${chunk.size} boxes, $net nanoERG")
+          val result = new EngineBroadcast(self, nodeApi).sendOwned(signed,
+            Seq(EngineBroadcast.Funding(leaseId, inputIds)), "rewards:" + leaseId, () => walletAlive.get())
+          // Hand the payout back only on acceptance, so a later batch can chain onto a box the node
+          // has actually taken rather than one that may never exist.
+          if (result.outcome == EngineBroadcast.Accepted) self ! ReturnInputs(Seq(payout))
+          claimed :+= RewardClaimChunk(result.txId, batch.size, payoutValue, result.outcome)
+          logger.info(s"Reward sweep ${result.txId}: ${result.outcome}, ${batch.size} boxes, $payoutValue nanoERG")
         }
       }
-      done.trySuccess(RewardsClaimed(claimed))
+      sweep.trySuccess(RewardsClaimed(claimed))
     } catch {
+      // Only reachable before a send: an ambiguous broadcast is caught inside EngineBroadcast and
+      // leaves its lease owned, so releasing every lease here cannot free an in-flight input.
       case scala.util.control.NonFatal(ex) =>
-        leaseIds.foreach(id => self ! ReleaseInputs(id))
-        done.tryFailure(ex)
+        leaseIds.foreach(leaseId => self ! ReleaseInputs(leaseId))
+        sweep.tryFailure(ex)
     }
   }
+
+  /** Clamp a wallet total to Long for reporting; balances are summed as BigInt. */
   private def saturate(amount: BigInt): Long =
     amount.min(BigInt(Long.MaxValue)).toLong
-
-  private def spendableValue(box: WalletDescriptor): Long = descriptorValue(box)
-
-  // ─── box selection ────────────────────────────────────────────────────────
-
-  /**
-   * Entry point. Prefers a reward box, then delegates to the ERG-only or mixed path, applies the
-   * change-box check and enforces the input cap.
-   */
 }
 
 object EngineWalletState {
+
+  /** Why an input is unavailable, which decides what may end that unavailability. */
   private sealed trait ReservationStatus
+  /** Chosen for a build that has not reached the node. A complete refresh or a release ends it. */
   private case object ReservationSelected extends ReservationStatus
   /** A locally built signable output whose parent may not be node-visible yet. */
   private case object ReservationKnown extends ReservationStatus
@@ -591,10 +655,29 @@ object EngineWalletState {
    * until the height it was built for is over and reconciliation says whether the block took it.
    */
   private case object ReservationCandidate extends ReservationStatus
+  /** Broadcast with an unknown outcome. Only fresh per-input evidence may end it. */
   private case object ReservationUncertain extends ReservationStatus
+  /** Bound to an exact signed transaction, which is the only thing that can resolve it. */
   private case class ReservationEngine(hold: EngineHold) extends ReservationStatus
+  /** Owned inputs across every transaction the engine has in flight. */
   private[transactions] final val MAX_ENGINE_INPUTS = 512
+
+  /**
+   * The ceiling optional work selects against. It stops short of the engine limit by two full
+   * transactions' worth of inputs, so a saturated optional queue always leaves a NISP submission
+   * or fraud proof room to fund itself.
+   */
   private[transactions] final val MAX_OPTIONAL_INPUTS = MAX_ENGINE_INPUTS - 2 * WalletInventory.MaxInputs
+
+  /** Selections that may wait per lane before further requests are refused outright. */
+  private final val MaxQueuedSelections = 8
+
+  /** Distinct tokens one request may ask for, bounding the work a single selection can create. */
+  private final val MaxRequestedTokens = 512
+  /**
+   * One reserved input. `id` is the lease shared by every box in the same selection, so a release
+   * or a resolution acts on the whole transaction's inputs rather than one box of it.
+   */
   private case class ReservationState(id: String,
                                       reservedAtMillis: Long,
                                       status: ReservationStatus)
@@ -602,18 +685,11 @@ object EngineWalletState {
   /** Maximum number of inputs returned in a single RetrieveInputs response. */
   final val MAX_TX_INPUTS: Int = 75
 
-
   /** Page size for the wallet refresh, which pages to exhaustion. */
   final val MAX_WALLET_BOXES: Int = WalletInventory.PageSize
 
-  /** Reward boxes pulled per address. One Lithos block pays one, so this is years of them. */
-  final val MAX_REWARD_BOXES: Int = WalletInventory.PageSize
-
   /** Fee on each reward-sweep broadcast. */
   final val RewardSweepFee: Long = Parameters.MinFee
-
-  /** How long a sweep batch's send-boundary lease stays valid, build through broadcast. */
-  final val RewardSweepLeaseMs: Long = 30000L
 
   /**
    * Batch the unlocked coinbases for sweeping, smallest first so dust consolidates into early
@@ -622,7 +698,6 @@ object EngineWalletState {
    * Batches are capped at `maxInputs`, so dust beyond that boundary waits for the next claim
    * rather than joining a fuller batch - the input cap is hard. A batch whose gross still cannot
    * cover one fee is cancelled by the sweep and becomes selectable again; nothing here drops it.
-   * Pure; unit-tested.
    */
   def planRewardChunks(rewards: Seq[InputUTXO], txFee: Long, maxInputs: Int): Seq[Seq[InputUTXO]] =
     rewards.sortBy(_.value).grouped(math.max(1, maxInputs)).filter(_.nonEmpty).toSeq

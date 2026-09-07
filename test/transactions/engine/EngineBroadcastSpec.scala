@@ -57,12 +57,12 @@ class EngineBroadcastSpec extends TestKit(ActorSystem("engine-broadcast-spec"))
     owner.reply(pin)
     if (pin) {
       Await.result(result, 5.seconds) shouldBe EngineBroadcast.Result(txId, outcome)
-      owner.expectMsg(EngineSendFinished(allocation.id, txId, outcome == "accepted"))
+      owner.expectMsg(EngineSendFinished(allocation.reservationId, txId, outcome == "accepted"))
       owner.expectMsg(RefreshBoxes)
     } else {
       intercept[IllegalArgumentException](Await.result(result, 5.seconds))
-      owner.expectMsg(CancelEngineInputs(allocation.id, txId))
-      owner.expectMsg(ReleaseInputs(allocation.id))
+      owner.expectMsg(CancelEngineInputs(allocation.reservationId, txId))
+      owner.expectMsg(ReleaseInputs(allocation.reservationId))
       verify(api, never()).sendTransaction(anyString())
     }
   }
@@ -88,7 +88,7 @@ class EngineBroadcastSpec extends TestKit(ActorSystem("engine-broadcast-spec"))
     val signed = mock[SignedTransaction]
     when(signed.getId).thenReturn(txId)
     when(signed.toJson(false)).thenReturn(NodeCodecs.encodeTransaction(NodeTransaction(txId,
-      (funding.flatMap(_.inputIds) :+ protocol).map(id => NodeInput(id, NodeSpendingProof.empty)),
+      (funding.flatMap(_.walletInputIds) :+ protocol).map(id => NodeInput(id, NodeSpendingProof.empty)),
       Seq.empty, Seq.empty)).toString)
     when(api.info()).thenReturn(Success(ChainFixtures.infoAt(100000).copy(bestFullHeaderId = Some(anchor))))
     val result = Future(new EngineBroadcast(owner.ref, api, 500.millis)
@@ -102,8 +102,8 @@ class EngineBroadcastSpec extends TestKit(ActorSystem("engine-broadcast-spec"))
     secondReply.foreach(owner.reply)
     intercept[Exception](Await.result(result, 5.seconds))
     funding.foreach { allocation =>
-      owner.expectMsg(CancelEngineInputs(allocation.id, txId))
-      owner.expectMsg(ReleaseInputs(allocation.id))
+      owner.expectMsg(CancelEngineInputs(allocation.reservationId, txId))
+      owner.expectMsg(ReleaseInputs(allocation.reservationId))
     }
     verify(api, never()).sendTransaction(anyString())
   }

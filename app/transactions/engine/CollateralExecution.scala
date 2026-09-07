@@ -128,6 +128,7 @@ class CollateralExecution(nodeContext: NodeContext,
     cachedMarket = None
   }
 
+  /** Cached lender-key view. A join invalidates it, so a quote never prices against a stale key set. */
   private def collateralView(ctx: BlockchainContext): CollateralView = {
     val (hit, generation) = synchronized {
       (cachedView.collect { case (at, g, v) if isFresh(at, g) => v }, viewGeneration)
@@ -145,6 +146,10 @@ class CollateralExecution(nodeContext: NodeContext,
     }
   }
 
+  /**
+   * Read every lender key the protocol has spoken for and index the queued and live boxes by key.
+   * Several seconds of node paging, which is why callers go through the cached [[collateralView]].
+   */
   private def readCollateralView(ctx: BlockchainContext): CollateralView = {
     val tx = txs
     val tip = tx.emissionTip(ctx)
@@ -180,16 +185,16 @@ class CollateralExecution(nodeContext: NodeContext,
     nodeContext.getClient.execute { ctx =>
       val tx = txs
       val tip = tx.emissionTip(ctx)
-      val st = tx.readEmission(tip.box)
+      val emission = tx.readEmission(tip.box)
       val cfg = tx.readConfig(tx.configBox(ctx))
       val height = ctx.getHeight
 
       val usableRetirements = tx.proofOfSpendBoxes(ctx, tx.liveOnly).count { b =>
         b.box.creationHeight < height &&
-          tx.retiringKey(b).exists(r => st.lenderSet.exists(_.sameElements(r)))
+          tx.retiringKey(b).exists(r => emission.lenderSet.exists(_.sameElements(r)))
       }
 
-      val litIdStr = st.lit.map(_.id).getOrElse(LFSMHelpers.LIT_ID).toString
+      val litIdStr = emission.lit.map(_.id).getOrElse(LFSMHelpers.LIT_ID).toString
       var permitLocked = BigInt(0)
       tx.scanByToken(ctx, LFSMHelpers.QUEUE_TOKEN, tx.withMempool) { page =>
         permitLocked += page
@@ -200,33 +205,33 @@ class CollateralExecution(nodeContext: NodeContext,
       val collatLocked = liveBoxes(ctx, tx, tx.contracts(ctx).gate.ergoTreeHex)
         .map(b => BigInt(b.value)).sum
 
-      val (emittedTotal, _, founders) = EmissionSchedule.emissionAt(st.currentBlock, st.litHeld)
-      val epoch = st.currentBlock / EmissionSchedule.EPOCH_LENGTH
+      val (emittedTotal, _, founders) = EmissionSchedule.emissionAt(emission.currentBlock, emission.litHeld)
+      val epoch = emission.currentBlock / EmissionSchedule.EPOCH_LENGTH
 
       CollateralMarketInfo(
         syncHeight = height,
-        activationCounter = st.currentBlock,
-        queueHead = st.head,
-        queueTail = st.tail,
-        queueLength = st.backlog,
-        activeSetSize = st.lenderSet.size,
+        activationCounter = emission.currentBlock,
+        queueHead = emission.head,
+        queueTail = emission.tail,
+        queueLength = emission.backlog,
+        activeSetSize = emission.lenderSet.size,
         activeSetMax = EmissionSchedule.MAX_ACTIVE,
-        bootstrapping = st.bootstrapping,
+        bootstrapping = emission.bootstrapping,
         proofsOfSpendAvailable = usableRetirements,
-        queuedNanoErgs = (BigInt(st.backlog) * BigInt(CollateralParams.PRINCIPAL_FLOOR)).toString,
+        queuedNanoErgs = (BigInt(emission.backlog) * BigInt(CollateralParams.PRINCIPAL_FLOOR)).toString,
         activeNanoErgs = collatLocked.toString,
         permitLitLocked = permitLocked.toString,
         principalNanoErgs = CollateralParams.PRINCIPAL_FLOOR.toString,
-        currentPermitLit = cfg.permitAt(st.backlog).toString,
+        currentPermitLit = cfg.permitAt(emission.backlog).toString,
         permitFloorLit = cfg.permitParams(0).toString,
         permitCeilingLit = cfg.permitParams(1).toString,
         permitSlopeLitPerBox = cfg.permitParams(2).toString,
-        emissionPhase = EmissionSchedule.phaseAt(st.currentBlock),
+        emissionPhase = EmissionSchedule.phaseAt(emission.currentBlock),
         foundersActive = founders.nonEmpty,
         currentEpoch = epoch,
-        nextPhaseChangeHeight = EmissionSchedule.nextChangeAt(st.currentBlock),
-        emissionRatePublicLit = EmissionSchedule.pubRateAt(st.currentBlock).toString,
-        emissionRatePrivateLit = EmissionSchedule.privRateAt(st.currentBlock).toString,
+        nextPhaseChangeHeight = EmissionSchedule.nextChangeAt(emission.currentBlock),
+        emissionRatePublicLit = EmissionSchedule.pubRateAt(emission.currentBlock).toString,
+        emissionRatePrivateLit = EmissionSchedule.privRateAt(emission.currentBlock).toString,
         emissionRateTotalLit = emittedTotal.toString,
         scheduleEndsAtHeight = EmissionSchedule.FINAL_BLOCK
       )
@@ -399,7 +404,7 @@ class CollateralExecution(nodeContext: NodeContext,
       val tx = txs
       val gateTree = tx.contracts(ctx).gate.ergoTreeHex
       val litIdStr = LFSMHelpers.LIT_ID.toString
-      val st = tx.readEmission(tx.emissionTip(ctx).box)
+      val emission = tx.readEmission(tx.emissionTip(ctx).box)
       val cap = math.max(1, math.min(2000, limit.getOrElse(500)))
       val joined =
         tx.queueBoxes(ctx, tx.withMempool)
@@ -417,7 +422,7 @@ class CollateralExecution(nodeContext: NodeContext,
           CollateralPermitHistoryPoint(position, height, permit.toString)
       }.toSeq
 
-      CollateralPermitHistory(points, st.head, st.tail, truncated = joined.size < st.backlog)
+      CollateralPermitHistory(points, emission.head, emission.tail, truncated = joined.size < emission.backlog)
     }
 
   // ─── joining ──────────────────────────────────────────────────────────────

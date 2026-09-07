@@ -76,6 +76,8 @@ class LithosJobManager(options: Options) extends Actor {
       sender() ! false
       publication.foreach(p => sender() ! TemplateRejected(p))
 
+    // Forget the served job outright. The sentinel identity cannot match any real one, so the next
+    // template always publishes rather than being mistaken for the job already out with miners.
     case InvalidateTemplate =>
       currentJob = None
       validJobs.clear()

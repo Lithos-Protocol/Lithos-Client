@@ -7,6 +7,13 @@ import okhttp3.{HttpUrl, MediaType, OkHttpClient, Request, RequestBody}
 import java.util.concurrent.TimeUnit
 import scala.util.{Failure, Success, Try}
 
+/**
+ * @param maxResponseBytes ceiling on one response body, so an oversized mempool or wallet page
+ *                         fails the call instead of being buffered into the heap. Unbounded by
+ *                         default; the engine and mempool readers set it.
+ * @param callTimeoutMs    whole-call deadline including retries and redirects, where the read
+ *                         timeout only bounds one stalled socket read. 0 disables it.
+ */
 case class NodeHttpConfig(baseUrl: String,
                           apiKey: Option[String] = None,
                           connectTimeoutMs: Long = 5000L,
@@ -51,10 +58,12 @@ class NodeHttp(config: NodeHttpConfig, client: OkHttpClient) {
     Try(client.newCall(req).execute()).transform({ response =>
       try {
         val code = response.code()
-        val body = Option(response.body()).map { body =>
-          if (config.maxResponseBytes == Int.MaxValue) body.string()
+        val body = Option(response.body()).map { responseBody =>
+          if (config.maxResponseBytes == Int.MaxValue) responseBody.string()
           else {
-            val source = body.source()
+            // Ask for one byte past the limit: `request` returns false once the stream ends, so a
+            // true answer means the body is over the limit and is refused before it is decoded.
+            val source = responseBody.source()
             require(!source.request(config.maxResponseBytes.toLong + 1L), "node response exceeds byte limit")
             source.readUtf8()
           }

@@ -106,7 +106,7 @@ class CandidateHoldSpec extends TestKit(ActorSystem("candidate-hold-spec", Candi
     Await.result(holding, 20.seconds).isFailure shouldBe true
 
     withClue("ReleaseInputs here would be a no-op and the box would never come back: ") {
-      probe.expectMsg(5.seconds, MarkReservationUncertain(reservation.id))
+      probe.expectMsg(5.seconds, MarkReservationUncertain(reservation.reservationId))
     }
   }
 

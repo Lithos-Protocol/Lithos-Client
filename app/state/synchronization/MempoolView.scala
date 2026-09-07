@@ -17,7 +17,11 @@ import scala.concurrent.duration._
 import scala.util.{Failure, Success, Try}
 
 object MempoolView {
+  /** One complete-mempool walk finishing. `id` fences results from a superseded attempt. */
   private case class CompleteRead(id: java.util.UUID, result: Try[CompleteMempool.Snapshot])
+
+  /** Askers that may queue behind one walk before further requests are refused. */
+  private final val MaxCompleteWaiters = 32
   private case object Tick
   private final case class RefreshFinished(result: Try[BuiltSnapshot])
 
@@ -106,6 +110,7 @@ class MempoolView @Inject()(config: play.api.Configuration,
   private lazy val completeWorker = context.system.dispatchers.lookup("lithos-contexts.mempool-io-dispatcher")
   private var completeAttempt: Option[java.util.UUID] = None
   private var completeWaiters = Vector.empty[ActorRef]
+  /** Starts unusable, so nothing can act on a complete view before one has ever been taken. */
   private var completeObservation = CompleteMempool.Observation(0L, None, Some("not observed"))
   private val syncConfig = new configs.SyncConfig(config)
   private val maxTransactions = syncConfig.mempoolMaxTransactions
@@ -128,22 +133,28 @@ class MempoolView @Inject()(config: play.api.Configuration,
   override def postStop(): Unit = ticker.cancel()
 
   override def receive: Receive = {
+    // Concurrent askers share one walk: the mempool is the same for all of them, and a walk each
+    // would multiply the node load without producing different answers.
     case CompleteMempool.Refresh =>
-      if (completeWaiters.size >= 32) sender() ! completeObservation.copy(failure = Some("mempool reader capacity exhausted"))
+      if (completeWaiters.size >= MaxCompleteWaiters)
+        sender() ! completeObservation.copy(failure = Some("mempool reader capacity exhausted"))
       else {
         completeWaiters :+= sender()
         if (completeAttempt.isEmpty) {
-          val id = java.util.UUID.randomUUID()
-          completeAttempt = Some(id)
+          val attempt = java.util.UUID.randomUUID()
+          completeAttempt = Some(attempt)
           Try(Future(CompleteMempool.collect(completeNode))(completeWorker)
-            .foreach(result => self ! CompleteRead(id, result)))
-            .failed.foreach(ex => self ! CompleteRead(id, Failure(ex)))
+            .foreach(result => self ! CompleteRead(attempt, result)))
+            .failed.foreach(ex => self ! CompleteRead(attempt, Failure(ex)))
         }
       }
-    case CompleteRead(id, result) if completeAttempt.contains(id) =>
+    // A failed walk keeps the last snapshot but records the failure, so `fresh` turns false and no
+    // consumer can treat it as evidence that an input or a lender key is free.
+    case CompleteRead(attempt, result) if completeAttempt.contains(attempt) =>
       completeAttempt = None
       completeObservation = result match {
-        case Success(snapshot) => CompleteMempool.Observation(completeObservation.revision + 1L, Some(snapshot), None)
+        case Success(snapshot) =>
+          CompleteMempool.Observation(completeObservation.revision + 1L, Some(snapshot), None)
         case Failure(ex) => completeObservation.copy(failure = Some(ex.getMessage))
       }
       completeWaiters.foreach(_ ! completeObservation)

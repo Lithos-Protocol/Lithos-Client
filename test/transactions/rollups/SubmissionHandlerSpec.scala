@@ -266,9 +266,9 @@ class SubmissionHandlerSpec extends TestKit(ActorSystem("submission-handler-spec
     val lease = leaseOver(f.wallet)
 
     f.probe.send(f.handler, CandidateTxsDropped(500))
-    f.probe.send(f.handler, SubmissionHandler.CandidateLeaseTaken(500, lease.id))
+    f.probe.send(f.handler, SubmissionHandler.CandidateLeaseTaken(500, lease.reservationId))
 
-    f.wallet.expectMsg(5.seconds, MarkReservationUncertain(lease.id))
+    f.wallet.expectMsg(5.seconds, MarkReservationUncertain(lease.reservationId))
   }
 
   it should "still be held while its own height is current" in {
@@ -276,7 +276,7 @@ class SubmissionHandlerSpec extends TestKit(ActorSystem("submission-handler-spec
     val f = fixture()
     val lease = leaseOver(f.wallet)
 
-    f.probe.send(f.handler, SubmissionHandler.CandidateLeaseTaken(500, lease.id))
+    f.probe.send(f.handler, SubmissionHandler.CandidateLeaseTaken(500, lease.reservationId))
     f.wallet.expectNoMessage(2.seconds)
   }
 

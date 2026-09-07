@@ -228,6 +228,10 @@ class LithosPool(options: Options,
     }(ChainObserved(id, _))
   }
 
+  /**
+   * Apply a chain observation. A new tip discards every package, publication record and rejection
+   * from the old height, because none of them describe work that can still be mined.
+   */
   private def acceptObservation(info: NodeInfo): Unit = {
     val observed = chainTip(info)
     protocolVersion = info.parameters.blockVersion
@@ -249,19 +253,30 @@ class LithosPool(options: Options,
     }
   }
 
-  /** Desired work is derived from current state, so superseding packages occupy one slot. */
+  /**
+   * The package that should be mined right now, derived from current state rather than queued, so
+   * a superseding package replaces its predecessor instead of occupying a second slot.
+   *
+   * Optional transactions are only carried once genesis has been published for this exact package
+   * and nothing has rejected them; otherwise the same package is offered genesis-only. None means
+   * wait, because a collateral genesis is still expected within its deadline.
+   */
   private def desired: Option[(CandidateIdentity, Option[BlockPackage])] = tip.flatMap { chain =>
-    blockPackage.filterNot(p => rejectedGenesis.contains(p.collateral.txId)) match {
+    blockPackage.filterNot(candidate => rejectedGenesis.contains(candidate.collateral.txId)) match {
       case Some(pkg) =>
-        val extras = pkg.blockTxs.nonEmpty && publishedGenesis.contains(chain -> pkg.collateral.txId) &&
+        val carriesExtras = pkg.blockTxs.nonEmpty && publishedGenesis.contains(chain -> pkg.collateral.txId) &&
           !extrasRejected.contains(chain -> pkg.collateral.txId) && !restoreGenesis
-        val selected = if (extras) pkg else pkg.copy(blockTxs = Seq.empty, revision = 0)
+        val selected = if (carriesExtras) pkg else pkg.copy(blockTxs = Seq.empty, revision = 0)
         Some(selected.identity -> Some(selected))
       case None if candidateBuilder.isDefined && nowNanos() < genesisDeadline => None
       case None => Some(CandidateIdentity(chain.height, chain.parentId, "", 0) -> None)
     }
   }
 
+  /**
+   * Issue at most one candidate request. Candidate calls mutate the node's cached mining work, so
+   * they are serialised here rather than overlapped, and a found block always takes precedence.
+   */
   private def driveCandidate(): Unit = {
     if (observationRequired || activeRequest.nonEmpty || publishing.nonEmpty || submitting.nonEmpty ||
       solutionQueue.nonEmpty) return
@@ -279,6 +294,10 @@ class LithosPool(options: Options,
     }
   }
 
+  /**
+   * Whether this request still describes work worth publishing. Height alone is not enough: a
+   * same-height reorg or a replacement genesis changes the identity while the number stays put.
+   */
   private def current(request: CandidateRequest): Boolean =
     tip.contains(request.chain) && request.version == protocolVersion && (request.pkg match {
       case None => desired.exists(_._1.genesisId.isEmpty)
@@ -290,6 +309,10 @@ class LithosPool(options: Options,
       }
     })
 
+  /**
+   * Decide what to do with a returned candidate. The deadline is enforced here as well as by the
+   * timer, so a collection that completes late cannot restore extras that were already rejected.
+   */
   private def admitCandidate(request: CandidateRequest, result: Try[Fetched]): Unit = {
     if (!current(request)) {
       invalidateCachedJob()
@@ -336,19 +359,25 @@ class LithosPool(options: Options,
     }
   }
 
-  private def rejectExtras(request: CandidateRequest, why: String): Unit = {
+  /** Fall back to genesis-only for this package. Mining continues; only the extras are dropped. */
+  private def rejectExtras(request: CandidateRequest, reason: String): Unit = {
     extrasRejected = Some(request.chain -> request.identity.genesisId)
     candidateBuilder.foreach(_ ! BlockTxsRejected(request.identity.height, Some(request.identity)))
-    logger.warn(s"Dropping optional candidate transactions: $why; mining genesis for this package")
+    logger.warn(s"Dropping optional candidate transactions: $reason; mining genesis for this package")
   }
 
   private def publicationFor(request: CandidateRequest): CandidatePublication =
     CandidatePublication(request.identity, request.id,
       if (request.hasExtras) Some(request.startedAt + candidateConfig.blockTxTimeout.milliseconds.toNanos) else None)
 
+  /** Only augmented requests have a publication deadline; a genesis-only request never expires. */
   private def expired(request: CandidateRequest): Boolean = request.hasExtras &&
     nowNanos() - request.startedAt >= candidateConfig.blockTxTimeout.milliseconds.toNanos
 
+  /**
+   * Forget the served job and the node's cached work. Called whenever a late or failed request may
+   * have left the node holding work this client can no longer identify.
+   */
   private def invalidateCachedJob(): Unit = {
     candidateTimer.foreach(_.cancel())
     candidateTimer = None
@@ -456,13 +485,13 @@ object LithosPool {
     * after checking whether this attempt still owns the package, never by a stale worker.
     */
   private[mining] def fetch(node: MiningNodeInterface, request: CandidateRequest, apiKey: String): Fetched = {
-    val json = request.pkg match {
+    val candidateJson = request.pkg match {
       case Some(pkg) => node.candidateWithTxs(pkg.allTxs, Some(apiKey), Some(pkg.collateral.pk))
       case None => node.soloCandidate()
     }
     val candidate = request.pkg match {
-      case Some(pkg) => MiningCandidate.fromJson(json, request.version, pkg.collateral)
-      case None => MiningCandidate.fromJson(json, request.version)
+      case Some(pkg) => MiningCandidate.fromJson(candidateJson, request.version, pkg.collateral)
+      case None => MiningCandidate.fromJson(candidateJson, request.version)
     }
     require(candidate.msg.length == 32 && candidate.height == request.identity.height,
       "candidate work message or height does not match the request")
@@ -478,9 +507,10 @@ object LithosPool {
       // At a voting boundary the upcoming header can activate a newer version than /info.
       // The bound preimage supplies that version before this fresh candidate leaves the worker.
       candidate.version = header.version
-      // Ordinary mining retains the known node leaf-mismatch compatibility. These proofs cannot
-      // qualify dependent revenue bundles; those require complete membership checks before launch.
-      candidate.proof.getJSONArray("txProofs")
+      // Presence only. Ordinary mining retains the known node leaf-mismatch compatibility, so the
+      // proofs are not verified here; they cannot qualify dependent revenue bundles, which need
+      // complete membership checks before launch.
+      require(candidate.proof.getJSONArray("txProofs") != null, "collateral candidate has no transaction proofs")
     }
     val observed = node.info()
     Fetched(candidate, chainTip(observed), observed.parameters.blockVersion)
