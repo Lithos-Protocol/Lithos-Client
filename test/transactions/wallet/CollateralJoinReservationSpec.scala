@@ -78,6 +78,10 @@ class CollateralJoinReservationSpec
       case state.synchronization.CompleteMempool.Refresh =>
         sender() ! state.synchronization.CompleteMempool.Observation(1L,
           Some(state.synchronization.CompleteMempool.Snapshot("aa" * 32, Set.empty, Set.empty, System.nanoTime())), None)
+      case transactions.engine.EngineJoinGuard.Keys => sender() ! Set.empty[String]
+      case _: transactions.engine.EngineJoinGuard.Acquire => sender() ! true
+      case _: transactions.engine.EngineJoinGuard.Pin => sender() ! true
+      case _: transactions.engine.EngineJoinGuard.Cancel => ()
       case m: EngineSendFinished => watcher ! m
       case m: CancelEngineInputs => watcher ! m
       case m: ReleaseInputs => watcher ! m

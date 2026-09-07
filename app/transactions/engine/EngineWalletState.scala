@@ -46,6 +46,7 @@ class EngineWalletState @Inject()(nodeContext: NodeContext) extends Actor with I
   private var knownOutputs = Vector.empty[node.model.NodeBox]
   private var summary: Option[(Long, WalletInventory.Snapshot)] = None
   private var sweeping = false
+  private var joinKeys = Map.empty[String, EngineJoinGuard.Ownership]
   private val walletIncarnation = UUID.randomUUID()
   private val walletAlive = new java.util.concurrent.atomic.AtomicBoolean(true)
 
@@ -265,6 +266,25 @@ class EngineWalletState @Inject()(nodeContext: NodeContext) extends Actor with I
         case entry => entry
       }
 
+    case EngineJoinGuard.Keys => sender() ! joinKeys.keySet
+    case EngineJoinGuard.Acquire(key, lease) =>
+      val allowed = key.matches("[0-9a-f]{64}") && !joinKeys.contains(key) && joinKeys.size < 512
+      if (allowed) joinKeys += key -> EngineJoinGuard.Ownership(lease)
+      sender() ! allowed
+    case EngineJoinGuard.Pin(key, lease, txId, funding) =>
+      val allowed = joinKeys.get(key).exists(o => o.lease == lease && o.txId.isEmpty) &&
+        funding.nonEmpty && funding.forall(id => usedInputs.valuesIterator.exists(_.id == id))
+      if (allowed) joinKeys += key -> EngineJoinGuard.Ownership(lease, Some(txId), funding)
+      sender() ! allowed
+    case EngineJoinGuard.Cancel(key, lease) =>
+      joinKeys.get(key).filter(_.lease == lease).foreach { owned =>
+        val pinned = usedInputs.valuesIterator.exists {
+          case ReservationState(id, _, ReservationEngine(hold)) => owned.funding.contains(id) && owned.txId.contains(hold.txId)
+          case _ => false
+        }
+        if (!pinned) joinKeys -= key
+      }
+    case GetOwnedInputIds => sender() ! usedInputs.keySet
     case GetEngineHolds =>
       val held = usedInputs.toVector.collect {
         case (boxId, ReservationState(_, _, ReservationEngine(hold))) => hold -> boxId
@@ -283,6 +303,10 @@ class EngineWalletState @Inject()(nodeContext: NodeContext) extends Actor with I
       walletBoxes --= spent.intersect(allowed)
       rewardBoxes --= spent.intersect(allowed)
       if (resolved.nonEmpty) walletRevision += 1L
+      if (resolved.nonEmpty) joinKeys = joinKeys.filterNot { case (_, owned) =>
+        owned.txId.contains(txId) && owned.funding.contains(id) &&
+          !usedInputs.valuesIterator.exists(s => owned.funding.contains(s.id))
+      }
       sender() ! (resolved == (spent ++ free))
 
     // Off the actor thread: this pages the wallet and then does one lookup per address, and callers

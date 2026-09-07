@@ -6,6 +6,7 @@ import akka.util.Timeout
 import node.NodeApi
 import node.rest.NodeCodecs
 import org.ergoplatform.appkit.SignedTransaction
+import org.slf4j.LoggerFactory
 import state.synchronization.CompleteMempool
 import transactions.engine.EngineWalletMessages._
 import transactions.engine.FundingAllocation
@@ -69,7 +70,9 @@ class EngineBroadcast(owner: ActorRef, node: NodeApi, requestTimeout: FiniteDura
       owner ! RefreshBoxes
       response match {
         case Success(_) if accepted => Result(txId, "accepted")
-        case Failure(_: _root_.node.NodeError.Rejected) => Result(txId, "rejected")
+        case Failure(ex: _root_.node.NodeError.Rejected) =>
+          LoggerFactory.getLogger("TransactionEngine").error(s"Got error during broadcast for $txId", ex)
+          Result(txId, "rejected")
         case _ => Result(txId, "uncertain")
       }
     } catch {

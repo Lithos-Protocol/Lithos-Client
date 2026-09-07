@@ -87,7 +87,8 @@ class EmissionTransactions(prover: NodeWallet,
                            nodeApi: NodeApi,
                            config: EmissionConfig,
                            walletSource: FundingSource,
-                           alive: () => Boolean = () => true) {
+                           alive: () => Boolean = () => true,
+                           joinGuard: Option[transactions.engine.EngineJoinGuard] = None) {
 
   private val logger: Logger = LoggerFactory.getLogger("EmissionTransactions")
 
@@ -259,6 +260,7 @@ class EmissionTransactions(prover: NodeWallet,
    * whoever clears it. Missing an unconfirmed join of our own would cost 2.915 ERG, not a fee.
    */
   def takenLenderKeys(ctx: BlockchainContext, tip: EmissionTip): Set[String] = {
+    val anchor = state.synchronization.CompleteMempool.anchor(nodeApi)
     val gate = contracts(ctx).gate.ergoTreeHex
     val keys = mutable.Set.empty[String]
 
@@ -278,20 +280,24 @@ class EmissionTransactions(prover: NodeWallet,
     scanByToken(ctx, LFSMHelpers.QUEUE_TOKEN, withMempool) { page =>
       keys ++= page
         .filter(b => carriesOne(b, LFSMHelpers.QUEUE_TOKEN) && b.ergoTree == gate)
-        .flatMap(lenderKeyOf).map(hex)
+        .map(b => hex(lenderKeyOf(b).getOrElse(throw new IllegalStateException("invalid queued lender key"))))
     }
 
     // One scan covers both box types the collateral token identifies: live collateral boxes are not
     // at the gate, proof-of-spend boxes are.
     scanByToken(ctx, LFSMHelpers.COLLAT_TOKEN, withMempool) { page =>
       val carrying = page.filter(carriesOne(_, LFSMHelpers.COLLAT_TOKEN))
-      keys ++= carrying.filter(_.ergoTree != gate).flatMap(lenderKeyOf).map(hex)
+      keys ++= carrying.filter(_.ergoTree != gate)
+        .map(b => hex(lenderKeyOf(b).getOrElse(throw new IllegalStateException("invalid collateral lender key"))))
       // Include proof of spend boxes with less than 50 confirmations, since a block re-org
       // could accidentally cause you to post to a lender-key which may no-longer be spent
       // after the re-org
-      keys ++= carrying.filter(c => c.ergoTree == gate && ctx.getHeight - c.inclusionHeight <= 50).flatMap(retiringKey).map(hex)
+      keys ++= carrying.filter(c => c.ergoTree == gate && ctx.getHeight - c.inclusionHeight <= 50)
+        .map(b => hex(retiringKey(b).getOrElse(throw new IllegalStateException("invalid retiring lender key"))))
     }
 
+    require(keys.forall(_.length == 64) && state.synchronization.CompleteMempool.anchor(nodeApi) == anchor,
+      "lender exclusion chain anchor changed or a key was invalid")
     keys.toSet
   }
 
@@ -612,7 +618,8 @@ class EmissionTransactions(prover: NodeWallet,
     val tip = emissionTip(ctx)
     val cfg = configBox(ctx)
     val cs = readConfig(cfg)
-    val taken = takenLenderKeys(ctx, tip)
+    val guard = joinGuard.getOrElse(throw new IllegalStateException("join execution requires engine key ownership"))
+    val taken = takenLenderKeys(ctx, tip) ++ guard.exclusions()
 
     val mine = walletAddresses(ctx)
     val ourLive = mine.count(a => taken.contains(hex(lenderEntry(a))))
@@ -653,7 +660,9 @@ class EmissionTransactions(prover: NodeWallet,
           } else {
             val cost = CollateralParams.PRINCIPAL_FLOOR + config.txFee * 2
             var attemptReservations = Seq.empty[FundingAllocation]
-            Try {
+            Try { guard.withKey(hex(lenderEntry(lender))) { lease =>
+              require(!takenLenderKeys(ctx, EmissionTip(em, Seq.empty)).contains(hex(lenderEntry(lender))),
+                "lender key became unavailable")
               val inputs = funding.take(cost, if (permit > 0) Some(Token(litId, permit)) else None)
               val sTx = genJoin(ctx, em, cfg, lender, inputs)
               // Hold signable change before crossing the node boundary. A mempool-aware wallet
@@ -661,12 +670,13 @@ class EmissionTransactions(prover: NodeWallet,
               // the next join, so post-send reservation is too late.
               val chained = chainOn(sTx, funding)
               attemptReservations = funding.pendingReservations
-              val txId = broadcast.send(sTx, attemptReservations, "join:" + em.id.toString, alive).requireAccepted()
+              val txId = guard.send(hex(lenderEntry(lender)), lease, sTx, attemptReservations,
+                "join:" + em.id.toString, alive).requireAccepted()
               funding.clearPending()
               chained.walletChange.foreach(funding.markAccepted)
               em = chained.emission
               txId
-            } match {
+            }} match {
               case Success(txId) =>
                 logger.info(s"Sent join $txId for lender $lender")
                 sent :+= txId
@@ -867,21 +877,22 @@ class EmissionTransactions(prover: NodeWallet,
     var seen = 0
     var paging = Paging(0, EmissionTransactions.ScanPageSize)
     var exhausted = false
+    val started = System.nanoTime()
     while (!exhausted && seen < EmissionTransactions.MaxScannedBoxes) {
+      require(System.nanoTime() - started < state.synchronization.CompleteMempool.MaxWalkNanos,
+        "lender exclusion scan exceeded its deadline")
       nodeApi.unspentBoxesByTokenId(tokenId.toString, paging, SortDirection.Asc, mempool) match {
         case Success(page) =>
+          require(page.size <= paging.limit, "lender exclusion page exceeded its limit")
           consume(page)
           seen += page.size
           exhausted = page.size < paging.limit
           paging = paging.next
         case Failure(ex) =>
-          logger.warn(s"Scan of $tokenId stopped after $seen box(es): ${ex.getMessage}")
-          exhausted = true
+          throw new IllegalStateException(s"Incomplete lender exclusion scan for $tokenId", ex)
       }
     }
-    if (seen >= EmissionTransactions.MaxScannedBoxes)
-      logger.warn(s"Scan of $tokenId hit the ${EmissionTransactions.MaxScannedBoxes}-box ceiling - " +
-        "the duplicate-key check may be incomplete")
+    require(exhausted, "lender exclusion scan reached its resource ceiling")
   }
 
   /** R5 of a queue or collateral box, as the hashed prop bytes the active set is keyed by. */

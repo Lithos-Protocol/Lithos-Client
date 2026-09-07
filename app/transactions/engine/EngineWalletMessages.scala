@@ -14,6 +14,7 @@ object EngineWalletMessages {
                                                      previous: Option[EngineHold] = None)
   private[transactions] case class EngineSendFinished(reservationId: String, txId: String, accepted: Boolean)
   private[transactions] case object GetEngineHolds
+  private[transactions] case object GetOwnedInputIds
   private[transactions] case class EngineHolds(holds: Vector[EngineHold])
   private[transactions] case class ResolveEngineInputs(reservationId: String, txId: String,
     spent: Set[String], free: Set[String])

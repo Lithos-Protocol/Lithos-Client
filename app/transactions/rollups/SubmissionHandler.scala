@@ -85,7 +85,26 @@ trait EngineRollups extends Actor with InjectedActorSupport {
   private var feeAllocationReservations: Map[String, FundingAllocation] = Map.empty
   private var initialReservation: Option[FundingAllocation] = None
   private var batchLock: Boolean = false
+  protected def executeRollupBatch(stubs: Seq[RollupTxStub]): Future[Unit] = {
+    require(!batchLock && stubs.nonEmpty && stubs.size <= 100, "rollup execution admission refused")
+    batchLock = true
+    criticalBatch = stubs.exists(s => s.txType == NISPSubmission || s.fpInfo.isDefined)
+    Future(runBatch(stubs))(rollupWorker).flatMap(identity)
+  }
+  protected def finishRollupBatch(): Unit = { releaseFeeAllocations(); batchLock = false }
   private var registering = false
+  protected def executeRegistration(): Future[String] = Future {
+    require(rollupAlive.get(), "registration attempt was superseded")
+    val view = Globals.syncView
+    require(view.canonical.available && view.minerDictionary.available &&
+      view.minerDictionaryMetadata.exists(!_.hasMiner) && dataBoxes.getDataBoxToken.isEmpty,
+      "registration requires a current unregistered dictionary view")
+    val dictionary = Await.result(syncHandler ? state.messages.SyncMessages.GetMinerDictionary, timeout.duration) match {
+      case state.messages.SyncMessages.CurrentMinerDictionary(value) => value
+      case _ => throw new IllegalStateException("Miner Dictionary became unavailable")
+    }
+    commitments.sendInitialCommitment(stratumConfig.diff, dictionary, optionalFunding)
+  }(context.system.dispatchers.lookup("lithos-contexts.engine-io-dispatcher"))
   private val rollupIncarnation = java.util.UUID.randomUUID()
   private val rollupAlive = new java.util.concurrent.atomic.AtomicBoolean(true)
 
@@ -236,12 +255,13 @@ trait EngineRollups extends Actor with InjectedActorSupport {
     }
 
     submitInitialTransaction(stubsReordered, initialTxInfo) match {
-      case Failure(_) =>
+      case Failure(ex) =>
         logger.warn("Failed to produce an initial transaction from the RollupBatch")
+        logger.warn(s"Got error: ${ex.getMessage}")
         // Nothing was sent, so the last attempt's inputs are still ours to give back. Leaving them
         // reserved would hold them until the reservation ages out.
         releaseInitialInputs()
-        Future.successful(())
+        Future.failed(ex)
 
       case Success(txId) =>
         logger.info(s"Successfully sent initial transaction with id $txId")
@@ -729,81 +749,18 @@ trait EngineRollups extends Actor with InjectedActorSupport {
     }
   }
 
-  // ─── retry logic ──────────────────────────────────────────────────────────
-
-  /**
-   * Attempts to execute txFunc up to MAX_TX_ATTEMPTS times.
-   *
-   * On each attempt it calls latestState to obtain a fresh InputUTXO, then
-   * passes it together with the stub into txFunc. A Failure wrapping an
-   * ErgoClientException triggers a sleep of ATTEMPT_INTERVAL milliseconds
-   * before the next attempt. Any other exception, or exhaustion of all
-   * attempts, causes the last Failure to be returned immediately.
-   * A Success is returned as soon as txFunc succeeds.
-   */
-  private def attemptTx[T <: TxStub, L <: LatestState](
-                                                        txFunc: (T, L) => Try[String],
-                                                        latestState: T => Try[L],
-                                                        stub: T): Try[String] = {
-    var attempts = 0
-    var lastResult: Try[String] = Failure(new RuntimeException("No attempts made"))
-
-    // Retries occupy the bounded transaction workers; wallet asks and actor callbacks use
-    // separate dispatchers so sleeping attempts cannot block ownership decisions.
-    def expectedFailure(): Unit = {
-      attempts += 1
-      if (attempts < MAX_TX_ATTEMPTS) blocking(Thread.sleep(ATTEMPT_INTERVAL))
+  /** One fresh-state attempt; the engine schedule owns retry delays and expiry. */
+  private def attemptTx[T <: TxStub, L <: LatestState](txFunc: (T, L) => Try[String],
+                                                      latestState: T => Try[L], stub: T): Try[String] = {
+    val result = latestState(stub).flatMap(state => txFunc(stub, state))
+    result.failed.foreach {
+      case _: ProjectionChangedException => mempoolView ! RebuildMempoolChains
+      case ex: ErgoClientException if Option(ex.getMessage).exists(_.contains("Double spending")) =>
+        mempoolView ! RebuildMempoolChains
+      case _ => ()
     }
-
-    while (attempts < MAX_TX_ATTEMPTS) {
-      val retrieveLastState = latestState(stub)
-      lastResult = retrieveLastState.map(lastState => txFunc(stub, lastState)).flatten
-      lastResult match {
-        case _: Success[String] =>
-          return lastResult
-        case Failure(ds: ErgoClientException) if ds.getMessage.contains("Double spending") =>
-          mempoolView ! RebuildMempoolChains
-          expectedFailure()
-        case Failure(_: ErgoClientException) =>
-          expectedFailure()
-        case Failure(_: DataBoxRetrievalException) =>
-          expectedFailure()
-        case Failure(changed: ProjectionChangedException) =>
-          logger.info(changed.getMessage)
-          mempoolView ! RebuildMempoolChains
-          expectedFailure()
-        case Failure(_: java.util.concurrent.TimeoutException) =>
-          // The first request for a large digest may still be reconstructing snapshot + journal state.
-          // Its completion warms the bounded cache, so retry rather than dropping otherwise valid work.
-          expectedFailure()
-        case Failure(nv: NoValidNISPException) =>
-          logger.warn(nv.getMessage)
-          return lastResult
-        case Failure(illegalState: IllegalStateException) =>
-          logger.warn(illegalState.getMessage)
-          return lastResult
-        case Failure(removed: RollupRemovedException) =>
-          logger.warn(removed.getMessage)
-          return lastResult
-        case Failure(invalidated: StubInvalidException) =>
-          logger.warn(invalidated.getMessage)
-          return lastResult
-        case Failure(newGen: NewlyGeneratedRollupException) =>
-          logger.warn(newGen.getMessage)
-          return lastResult
-        case Failure(_: NotEnoughInputsException) =>
-          // Can only happen if this is an initial tx candidate, so we can
-          // let real error handling happen there. However, it will not get solved
-          // by re-attempts so it's still best to just return out
-          return lastResult
-        case Failure(ex) =>
-          logger.error(s"Got uncommon error when attempting transaction $stub", ex)
-          return lastResult
-      }
-    }
-    lastResult
+    result
   }
-
   /**
    * End every bond lease taken for one height. Uncertain rather than released, because the block
    * being assembled may have carried the transaction: only an authoritative mempool-aware refresh
@@ -1007,7 +964,7 @@ object SubmissionHandler {
   private[rollups] case class CandidateLeaseTaken(blockHeight: Int, reservation: String)
 
   /** Maximum number of times attemptTx will retry on an ErgoClientException. */
-  final val MAX_TX_ATTEMPTS: Int = 5
+  final val MAX_TX_ATTEMPTS: Int = 1
 
   /** Milliseconds to wait between retry attempts in attemptTx. */
   final val ATTEMPT_INTERVAL: Int = 5000

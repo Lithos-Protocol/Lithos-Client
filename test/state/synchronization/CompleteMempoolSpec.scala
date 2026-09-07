@@ -48,4 +48,17 @@ class CompleteMempoolSpec extends AnyFlatSpec with Matchers with MockitoSugar {
     when(api.unconfirmedTransactionIds()).thenReturn(Success(Seq(id, id)))
     CompleteMempool.collect(api).isFailure shouldBe true
   }
+  it should "exclude lender keys from joins outside any selected emission chain" in {
+    val api = node()
+    val (_, _, wallet) = support.FakeNodeContext()
+    val prop = wallet.p2pk.getPublicKey
+    val key = transactions.ProtocolContracts.hex(transactions.ProtocolContracts.lenderEntry(wallet.p2pk))
+    val box = node.model.NodeBox("ef" * 32, id, 3000000L, 0, 100, "00",
+      Seq(node.model.NodeAsset(lfsm.LFSMHelpers.QUEUE_TOKEN.toString, 1)),
+      node.model.NodeRegisters(Map("R4" -> org.ergoplatform.appkit.ErgoValue.of(1L).toHex,
+        "R5" -> org.ergoplatform.appkit.ErgoValue.of(sigma.SigmaProp(prop)).toHex)))
+    when(api.unconfirmedTransactionById(id)).thenReturn(Success(Some(
+      NodeTransaction(id, Seq(NodeInput(input, NodeSpendingProof.empty)), Seq.empty, Seq(box)))))
+    CompleteMempool.collect(api).get.lenderKeys shouldBe Set(key)
+  }
 }

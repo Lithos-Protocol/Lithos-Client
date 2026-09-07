@@ -529,7 +529,8 @@ class CollateralExecution(nodeContext: NodeContext,
       // Read fresh, never from the snapshot: this decides which keys real money goes to, and a key
       // that stopped being free ten seconds ago produces a box that can only be cleared.
       val mine = tx.walletAddresses(ctx)
-      val taken = tx.takenLenderKeys(ctx, tip)
+      val guard = new EngineJoinGuard(walletManager, executionNode)
+      val taken = tx.takenLenderKeys(ctx, tip) ++ guard.exclusions()
       val ourLive = mine.count(a => taken.contains(hex(lenderEntry(a))))
       val room = math.max(0, emissionConfig.maxOwnCollateral - ourLive)
       val keys = tx.freeLenderKeys(ctx, taken, math.min(count, room))
@@ -556,14 +557,16 @@ class CollateralExecution(nodeContext: NodeContext,
           val permit = cs.permitAt(state.backlog)
           val position = state.tail
           var reservations = Seq.empty[FundingAllocation]
-          Try {
+          Try { guard.withKey(hex(lenderEntry(lender))) { lease =>
+            require(!tx.takenLenderKeys(ctx, transactions.emissions.EmissionTip(em, Seq.empty))
+              .contains(hex(lenderEntry(lender))), "lender key became unavailable")
             val inputs = funding.take(CollateralParams.PRINCIPAL_FLOOR + emissionConfig.txFee * 2,
               if (permit > 0) Some(Token(litId, permit)) else None)
             val sTx = tx.genJoin(ctx, em, cfgBox, lender, inputs)
             val chained = tx.chainOn(sTx, funding)
             reservations = funding.pendingReservations
-            val result = new EngineBroadcast(walletManager, executionNode)
-              .send(sTx, reservations, "collateral:" + em.id.toString, alive)
+            val result = guard.send(hex(lenderEntry(lender)), lease, sTx, reservations,
+              "collateral:" + em.id.toString, alive)
             if (result.outcome != "accepted") {
               sent :+= CollateralJoinEntry(result.txId, position, lender.toString,
                 CollateralParams.PRINCIPAL_FLOOR.toString, permit.toString, result.outcome)
@@ -573,7 +576,7 @@ class CollateralExecution(nodeContext: NodeContext,
             chained.walletChange.foreach(funding.markAccepted)
             em = chained.emission
             txId
-          } match {
+          }} match {
             case Success(txId) =>
               sent :+= CollateralJoinEntry(txId, position, lender.toString,
                 CollateralParams.PRINCIPAL_FLOOR.toString, permit.toString)

@@ -19,7 +19,7 @@ private[engine] object WalletInventory {
   final val MaxInputBytes = 4096
   final val MaxInputs = 75
   final val PageSize = 100
-  final val MaxWalkNanos = 30L * 1000000000L
+  final val MaxWalkNanos = 120L * 1000000000L
 
   case class Snapshot(boxes: Vector[WalletDescriptor], complete: Boolean, truncated: Boolean,
                       height: Int, spendable: BigInt, locked: BigInt, unlocked: BigInt,

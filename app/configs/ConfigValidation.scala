@@ -39,6 +39,9 @@ object Configs {
 
   def validateAll(config: Configuration): Unit = {
     val v = new ConfigValidator(config)
+    v.bool("transaction-engine.consolidation.enabled")
+    v.range("transaction-engine.consolidation.target-utxos", v.int("transaction-engine.consolidation.target-utxos"),
+      1, Int.MaxValue, "desired total wallet UTXO count")
 
     // ---- node ----
     v.url("node.url", v.string("node.url"))

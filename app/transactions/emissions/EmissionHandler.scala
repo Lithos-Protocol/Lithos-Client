@@ -54,7 +54,8 @@ trait EngineEmissions extends Actor with InjectedActorSupport {
 
   private val walletSelector = EngineFunding(emissionWalletManager, EngineFunding.AskTimeout, context.dispatcher)
   private lazy val txs = new EmissionTransactions(
-    nodeConfig.getNodeWallet, emissionNodeApi, emissionConfig, walletSelector, () => emissionAlive.get())
+    nodeConfig.getNodeWallet, emissionNodeApi, emissionConfig, walletSelector, () => emissionAlive.get(),
+    Some(new transactions.engine.EngineJoinGuard(emissionWalletManager, emissionNodeApi)))
 
   private var collateralizeTicker: Option[Cancellable] = None
   private var queueTicker: Option[Cancellable] = None
@@ -66,6 +67,27 @@ trait EngineEmissions extends Actor with InjectedActorSupport {
    * intervals make this collide on schedule: 120s and 600s coincide every 10 minutes.
    */
   private var spending: Boolean = false
+  protected def executeEmission(intent: transactions.engine.EngineIntent): Future[Any] = {
+    require(!spending, "an emission attempt is already running")
+    spending = true
+    Future {
+      require(emissionAlive.get(), "emission attempt was superseded")
+      intent match {
+        case transactions.engine.EngineIntent.Join(request, _) => collateral.join(request)
+        case transactions.engine.EngineIntent.Collateralize =>
+          client.execute(ctx => txs.selfCollateralize(ctx,
+            new transactions.engine.EngineBroadcast(emissionWalletManager, emissionNodeApi)))
+        case transactions.engine.EngineIntent.Queue => client.execute { ctx =>
+          val (_, spends) = txs.buildQueueSpends(ctx, ctx.getHeight + 1, funded = true, emissionConfig.maxQueueSpends)
+          val result = sendQueue(ctx, spends)
+          result.collectFirst { case (_, Failure(ex)) => ex }.foreach(throw _)
+          result
+        }
+        case _ => throw new IllegalArgumentException("unsupported emission intent")
+      }
+    }(emissionWorker)
+  }
+  protected def finishEmission(): Unit = { spending = false }
 
   // ─── lifecycle ────────────────────────────────────────────────────────────
 
