@@ -342,7 +342,7 @@ class MinerDataSpec extends AnyPropSpec with DictionarySpecBase {
       val commitments = Seq((height - 900, 100000L), (height - 6000, 90000L))
 
       val standIn = inputAt(UTXO(Contract.SIGMA_TRUE, Parameters.OneErg,
-        Seq(Token(mdToken, 1L))), ctx, 0)
+        Seq(Token(mdToken, 1L))), ctx, 0).setCtxVars(opVar(0.toByte, 2.toByte))
       val first = dataInput(ctx,
         dataUTXO(ctx, credentialId, minerHash, commitments), identity, 2.toByte, index = 1)
       val second = dataInput(ctx,

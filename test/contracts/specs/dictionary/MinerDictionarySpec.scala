@@ -109,6 +109,23 @@ class MinerDictionarySpec extends AnyPropSpec with DictionarySpecBase {
     }
   }
 
+  property("audit H-2: rejects a live credential escaping during another miner's registration") {
+    withCtx { ctx =>
+      val attacker = miner(ctx)
+      val identity = contractOf(attacker)
+      val liveEntry = entryBytes(priorCredential, ctx.getHeight.toLong + dataLifetime)
+      val r = registration(ctx, existing = Seq(identity.hashedPropBytes -> liveEntry),
+        identity = Contract.SIGMA_TRUE)
+      val oldData = dataInput(ctx, dataUTXO(ctx, priorCredential, identity.hashedPropBytes,
+        Seq((ctx.getHeight - 1000, 100000L))), identity, 2.toByte)
+      val escaped = dataUTXO(ctx, priorCredential, identity.hashedPropBytes,
+        Seq((ctx.getHeight - 1000, 1L)), contract = identity)
+      rejectsAtSigning(attacker, register(r,
+        inputs = Seq(r.dictIn, oldData, r.funding),
+        outputs = Seq(r.nextDict, r.dataBox, escaped)))
+    }
+  }
+
   property("register: accepts a miner joining a dictionary that already holds others") {
     withCtx { ctx =>
       val other = Blake2b256.hash("someone else")
@@ -445,6 +462,31 @@ class MinerDictionarySpec extends AnyPropSpec with DictionarySpecBase {
     withCtx { ctx =>
       val e = eviction(ctx)
       accepts(e.prover, evict(e))
+    }
+  }
+
+  property("audit H-2: rejects a live credential escaping during an unrelated eviction") {
+    withCtx { ctx =>
+      val height = 2000000
+      val attacker = miner(ctx)
+      val identity = contractOf(attacker)
+      val expiredKey = Blake2b256.hash("expired peer")
+      val tree = treeWith(Seq(
+        identity.hashedPropBytes -> entryBytes(priorCredential, height.toLong + dataLifetime),
+        expiredKey -> entryBytes(strangerNFT, height.toLong - evictDelay - 1L)))
+      val dictIn = inputAt(dictionaryUTXO(ctx, tree), ctx, 0)
+      val lookup = tree.lookUp(expiredKey)
+      val removal = tree.delete(expiredKey)
+      val withVars = dictIn.setCtxVars(opVar(0.toByte, 1.toByte),
+        bytesVar(5.toByte, expiredKey), ContextVar.of(6.toByte, lookup.proof.ergoValue),
+        ContextVar.of(7.toByte, removal.proof.ergoValue))
+      val oldData = dataInput(ctx, dataUTXO(ctx, priorCredential, identity.hashedPropBytes,
+        Seq((height - 1000, 100000L))), identity, 2.toByte)
+      val escaped = dataUTXO(ctx, priorCredential, identity.hashedPropBytes,
+        Seq((height - 1000, 1L)), contract = identity)
+      rejectsAtSigning(attacker, buildAt(ctx, height,
+        Seq(withVars, oldData, fundingInput(ctx, attacker)),
+        Seq(dictionaryUTXO(ctx, tree), escaped), attacker.getAddress))
     }
   }
 

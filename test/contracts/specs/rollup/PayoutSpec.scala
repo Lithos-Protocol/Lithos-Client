@@ -82,7 +82,11 @@ class PayoutSpec extends AnyPropSpec with RollupSpecBase {
 
     val keys = toPay.map(_.key)
     val lookup = tree.lookUp(keys: _*)
-    val removal = tree.delete(keys: _*)
+    // A duplicate lookup is valid; provide a real removal proof for each distinct key once.
+    val removalKeys = keys.foldLeft(Vector.empty[Array[Byte]]) { (acc, key) =>
+      if (acc.exists(_.sameElements(key))) acc else acc :+ key
+    }
+    val removal = tree.delete(removalKeys: _*)
     val outTree = tree.ergoValue
 
     val tokens = if (heldLit > 0L) Seq(nft, Token(fpTokenId, heldLit)) else Seq(nft)
@@ -415,6 +419,19 @@ class PayoutSpec extends AnyPropSpec with RollupSpecBase {
     withCtx { ctx =>
       val f = finalPayout(ctx)
       accepts(f.prover, finalTx(ctx, f))
+    }
+  }
+
+  property("audit H-1: rejects repeated keys stealing equal-bond peers' ERG and LIT") {
+    withCtx { ctx =>
+      val all = miners(ctx).map(_.copy(score = 3000L))
+      val attacker = all.head
+      val repeated = Seq.fill(all.size)(attacker)
+      val pot = payout(ctx, all, repeated, litSnapshot = 9000L)
+      bondsOf(repeated) shouldBe bondsOf(all)
+      val outs = repeated.map(m => minerBox(m, owed(m, pot.totalScore), Seq(Token(fpTokenId, 3000L))))
+      rejectsAtSigning(attacker.prover, build(ctx,
+        Seq(pot.in, fundingInput(ctx, attacker.prover)), outs, attacker.prover.getAddress, burn = Seq(nft)))
     }
   }
 
