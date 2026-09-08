@@ -204,6 +204,7 @@ class SyncHandler @Inject()(config: Configuration,
       respondCurrentRollup(blockId, sender(), MaterializationPriority.Normal)
     case GetCurrentRollupCritical(blockId) =>
       respondCurrentRollup(blockId, sender(), MaterializationPriority.Critical)
+    case GetRollupMetadata(blockId) => respondRollupMetadata(blockId, sender())
 
     case DictionaryLoaded(digest, requestToken, dictionary) =>
       finishDictionaryLoad(digest, requestToken, Right(dictionary))
@@ -744,6 +745,49 @@ class SyncHandler @Inject()(config: Configuration,
         } { failure =>
           logger.error(s"Could not materialize rollup $blockId: ${failure.reason}")
           requester ! RollupUnavailable(failure.reason)
+        }
+      case None => requester ! NoRollupFound()
+    }
+    case _ => requester ! RollupUnavailable(SyncHandler.describe(status))
+  }
+
+  /**
+   * Answer with the rollup's box and metadata, loading a dictionary only when one is unavoidable.
+   *
+   * Three cases, cheapest first: no unconfirmed chain on this rollup needs no projection at all; a
+   * cached projection still matching its stamp is reused as it is; only building a fresh projection
+   * runs the reducer, and only that needs authenticated state. The common case for a holding
+   * transform is the first, so it materializes nothing.
+   */
+  private def respondRollupMetadata(blockId: String, requester: ActorRef): Unit = committed match {
+    case Some(state) if status.isInstanceOf[Ready] => state.rollups.get(blockId) match {
+      case Some(rollup) =>
+        val confirmed = CurrentRollupMetadata(rollup.utxoId, rollup.metadata, None)
+        if (!mempool.chains.contains(rollup.utxoId)) requester ! confirmed
+        else unchangedProjection(state, blockId, rollup) match {
+          case Some(projected) => requester ! confirmed.copy(mempoolState = Some(
+            MempoolRollupMetadata(projected.asInput, projected.rollup.metadata, projected.toBeRemoved)))
+          case None =>
+            val epoch = stateEpoch
+            val key = keyFor(DictionaryId.Rollup(blockId), rollup.dictionary)
+            withMaterialized(epoch, Set(key), MaterializationPriority.Critical) { dictionaries =>
+              committed match {
+                case Some(current) if stateEpoch == epoch =>
+                  current.rollups.get(blockId) match {
+                    case Some(latest) if Hex.toHexString(latest.dictionary.digest) == key.digest =>
+                      val materialized = latest.copy(dictionary = dictionaries(key))
+                      requester ! CurrentRollupMetadata(materialized.utxoId, materialized.metadata,
+                        projectedRollup(installDictionaries(current, dictionaries), blockId, materialized)
+                          .map(projected => MempoolRollupMetadata(projected.asInput,
+                            projected.rollup.metadata, projected.toBeRemoved)))
+                    case _ => requester ! NoRollupFound()
+                  }
+                case _ => respondRollupMetadata(blockId, requester)
+              }
+            } { failure =>
+              logger.error(s"Could not project rollup $blockId: ${failure.reason}")
+              requester ! RollupUnavailable(failure.reason)
+            }
         }
       case None => requester ! NoRollupFound()
     }

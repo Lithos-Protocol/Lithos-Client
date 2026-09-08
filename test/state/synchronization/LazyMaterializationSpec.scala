@@ -17,7 +17,7 @@ import org.ergoplatform.appkit.ErgoValue
 import sigma.AvlTree
 import sigma.data.AvlTreeFlags
 import state.messages.MempoolMessages.{MempoolChain, MempoolSnapshot, MempoolTransform}
-import state.messages.RollupMessages.{CurrentRollup, GetCurrentRollup, RollupUnavailable}
+import state.messages.RollupMessages.{CurrentRollup, CurrentRollupMetadata, GetCurrentRollup, GetRollupMetadata, NoRollupFound, RollupUnavailable}
 import state.messages.SyncMessages._
 import state.messages.BlockInfo
 import state.persistence.StateSnapshotActor.{DictionaryLoadFailed, DictionaryLoaded,
@@ -156,7 +156,44 @@ class LazyMaterializationSpec extends TestKit(ActorSystem("lazy-materialization"
       "committed state changed during dictionary materialization")
   }
 
-  it should "load only the dictionary a block can touch" in {
+  /**
+   * A holding transform copies box state forward without touching authenticated state, so the
+   * lookup that feeds it must not load a dictionary. This is the whole point of the metadata
+   * request: projection cost follows the operations that need authenticated state, not the number
+   * of rollups anyone happens to ask about.
+   */
+  "A metadata request" should "answer a rollup with no unconfirmed chain without materializing" in {
+    val f = fixture()
+
+    f.requester.send(f.handler, GetRollupMetadata(f.first.blockId))
+    val reply = f.requester.expectMsgType[CurrentRollupMetadata]
+    reply.utxoId shouldEqual f.first.utxoId
+    reply.metadata.blockId shouldEqual f.first.blockId
+    reply.metadata.phase shouldEqual f.first.phase
+    reply.mempoolState shouldBe empty
+    f.snapshots.expectNoMessage(150.millis)
+  }
+
+  /** Repeating it stays free: nothing is loaded, so nothing can be loaded twice. */
+  it should "stay free across repeated requests for different rollups" in {
+    val f = fixture()
+
+    f.requester.send(f.handler, GetRollupMetadata(f.first.blockId))
+    f.requester.expectMsgType[CurrentRollupMetadata]
+    f.requester.send(f.handler, GetRollupMetadata(f.second.blockId))
+    f.requester.expectMsgType[CurrentRollupMetadata].metadata.blockId shouldEqual f.second.blockId
+    f.snapshots.expectNoMessage(150.millis)
+  }
+
+  it should "report a rollup this client does not hold as missing, still without materializing" in {
+    val f = fixture()
+
+    f.requester.send(f.handler, GetRollupMetadata(SyncFixtures.id(9999)))
+    f.requester.expectMsgType[NoRollupFound]
+    f.snapshots.expectNoMessage(150.millis)
+  }
+
+  "SyncHandler lazy materialization" should "load only the dictionary a block can touch" in {
     val f = fixture()
     val tx = SyncFixtures.rollupTransform(3, startHeight, f.first.utxoId, SyncFixtures.id(7401)).tx
     val block = BlockInfo(SyncFixtures.id(startHeight), startHeight, Seq(tx),

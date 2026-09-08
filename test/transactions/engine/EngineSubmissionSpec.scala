@@ -49,7 +49,8 @@ class EngineSubmissionSpec extends TestKit(ActorSystem("engine-submission-spec")
       def receive: Receive = {
         case CompleteMempool.Refresh => sender() ! CompleteMempool.Observation(1L,
           Some(CompleteMempool.Snapshot(anchor, Set.empty, Set.empty, System.nanoTime())), None)
-        case _: GetCurrentRollupCritical => sender() ! CurrentRollup(protocolId, rollup, None)
+        // Metadata, not the full rollup: a transform needs the box and its phase, never a dictionary.
+        case _: GetRollupMetadata => sender() ! CurrentRollupMetadata(protocolId, rollup.metadata, None)
       }
     }))
     val signed = mock[SignedTransaction]

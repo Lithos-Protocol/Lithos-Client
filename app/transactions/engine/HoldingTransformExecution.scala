@@ -53,14 +53,19 @@ class HoldingTransformExecution(nodeContext: NodeContext, wallet: ActorRef, sync
   /**
    * The rollup box this transform must spend and its state, preferring the projected tip so a
    * chain of unconfirmed transforms builds on the newest one. None means there is nothing to spend.
+   *
+   * Asks for metadata only: a holding transform copies box state forward without touching the
+   * authenticated dictionary, so loading one to answer this would be work no output depends on.
    */
-  private def currentRollup(intent: HoldingTransform): Option[(String, lfsm.states.Rollup)] =
-    Await.result((sync ? GetCurrentRollupCritical(intent.blockId)).mapTo[RollupInfo], timeout.duration) match {
-      case CurrentRollup(_, _, Some(projected), _) if projected.toBeRemoved => None
-      case CurrentRollup(_, _, Some(projected), _) => Some(projected.asInput.id.toString -> projected.rollup)
-      case CurrentRollup(id, rollup, None, _) => Some(id -> rollup)
+  private def currentRollup(intent: HoldingTransform): Option[(String, lfsm.states.RollupStateView)] =
+    Await.result((sync ? GetRollupMetadata(intent.blockId)).mapTo[RollupInfo], timeout.duration) match {
+      case CurrentRollupMetadata(_, _, Some(projected)) if projected.toBeRemoved => None
+      case CurrentRollupMetadata(_, _, Some(projected)) =>
+        Some(projected.asInput.id.toString -> projected.metadata)
+      case CurrentRollupMetadata(id, metadata, None) => Some(id -> metadata)
       case NoRollupFound() => None
       case RollupUnavailable(reason) => throw new IllegalStateException(reason)
+      case other => throw new IllegalStateException(s"unexpected rollup reply: $other")
     }
 
   /** Decide whether this transform still needs sending, then send it. */

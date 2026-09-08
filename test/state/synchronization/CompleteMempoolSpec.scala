@@ -51,6 +51,39 @@ class CompleteMempoolSpec extends AnyFlatSpec with Matchers with MockitoSugar {
     when(api.unconfirmedTransactionIds()).thenReturn(Success(Seq(id, id)))
     CompleteMempool.collect(api).isFailure shouldBe true
   }
+  /**
+   * A double spend in the mempool is ordinary. Failing the whole observation over one would leave
+   * every consumer without spend information, so both claimants are recorded and the box stays
+   * unavailable either way.
+   */
+  it should "record competing claims on one box instead of failing the observation" in {
+    val api = mempoolApi()
+    val rival = "ba" * 32
+    when(api.unconfirmedTransactionIds()).thenReturn(Success(Seq(id, rival)))
+    when(api.unconfirmedTransactionById(rival)).thenReturn(Success(Some(
+      NodeTransaction(rival, Seq(NodeInput(input, NodeSpendingProof.empty)), Seq.empty, Seq.empty))))
+
+    val snapshot = CompleteMempool.collect(api).get
+    snapshot.spent should contain(input)
+    snapshot.conflicts(input) shouldBe Set(id, rival)
+    snapshot.transactions.map(_.id).toSet shouldBe Set(id, rival)
+  }
+
+  /** Derived views read these rather than re-fetching, so the bodies have to survive collection. */
+  it should "retain one body per member for the views derived from it" in {
+    val snapshot = CompleteMempool.collect(mempoolApi()).get
+    snapshot.transactions.map(_.id) shouldBe Vector(id)
+    snapshot.transactions.head.body.inputs.map(_.boxId) shouldBe Seq(input)
+    snapshot.transactions.head.sizeBytes should be > 0
+  }
+
+  /** Churn is not a node fault: the caller keeps its previous observation and walks again. */
+  it should "report a membership change as raced rather than as a failure" in {
+    val api = mempoolApi()
+    when(api.unconfirmedTransactionIds()).thenReturn(Success(Seq(id)), Success(Seq.empty))
+    CompleteMempool.collect(api).failed.get shouldBe a[CompleteMempool.Raced]
+  }
+
   it should "exclude lender keys from joins outside any selected emission chain" in {
     val api = mempoolApi()
     val (_, _, wallet) = support.FakeNodeContext()

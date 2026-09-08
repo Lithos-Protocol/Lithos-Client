@@ -1,9 +1,7 @@
 package state.synchronization
 
 import akka.actor.{Actor, ActorRef, Cancellable}
-import akka.pattern.pipe
-import configs.{Contexts, NodeContext}
-import node.model.Paging
+import configs.NodeContext
 import org.slf4j.{Logger, LoggerFactory}
 import state.messages.MempoolMessages._
 import state.messages.StateFrameMessages.NewBlock
@@ -17,22 +15,19 @@ import scala.concurrent.duration._
 import scala.util.{Failure, Success, Try}
 
 object MempoolView {
-  /** One complete-mempool walk finishing. `id` fences results from a superseded attempt. */
-  private case class CompleteRead(id: java.util.UUID, result: Try[CompleteMempool.Snapshot])
+  /** One mempool walk finishing. `id` fences results from a superseded attempt. */
+  private case class WalkFinished(id: java.util.UUID, result: Try[Walk])
+
+  /**
+   * What one walk produced. `observation` is what engine and emission consumers read; `projection`
+   * is the rollup view derived from it, which can fail on its own without costing them the
+   * observation.
+   */
+  private final case class Walk(observation: CompleteMempool.Snapshot, projection: Try[BuiltSnapshot])
 
   /** Askers that may queue behind one walk before further requests are refused. */
   private final val MaxCompleteWaiters = 32
   private case object Tick
-  private final case class RefreshFinished(result: Try[BuiltSnapshot])
-
-  /**
-   * The page walk raced a change it could have skipped over, rather than the node failing.
-   *
-   * It means the previous revision is still the best answer and the next tick will do better.
-   */
-  final class MempoolRaced(detail: String) extends RuntimeException(detail)
-
-  private final val PageSize = 500
 
   final case class Graph(chains: Map[String, MempoolChain], blockedRoots: Set[String])
   private final case class BuiltSnapshot(fingerprint: Set[String],
@@ -101,14 +96,16 @@ class MempoolView @Inject()(config: play.api.Configuration,
   import MempoolView._
 
   private implicit val actorContext: ExecutionContext = context.dispatcher
-  private val pollingContext = context.system.dispatchers.lookup(Contexts.key(Contexts.Polling))
   private val logger: Logger = LoggerFactory.getLogger("MempoolView")
-  private val nodeApi = nodeContext.getNodeApi
-  private lazy val completeNode = node.rest.RestNodeApi(node.rest.NodeHttpConfig(
+  /**
+   * Its own client rather than the shared one: the walk pulls every mempool body, so it needs a
+   * response-byte ceiling and a whole-call deadline that ordinary reads do not want.
+   */
+  protected lazy val completeNode: node.NodeApi = node.rest.RestNodeApi(node.rest.NodeHttpConfig(
     nodeContext.getNodeUrl, Some(nodeContext.getNodeKey), maxResponseBytes = 2 * 1024 * 1024,
     callTimeoutMs = 10000L))
   private lazy val completeWorker = context.system.dispatchers.lookup("lithos-contexts.mempool-io-dispatcher")
-  private var completeAttempt: Option[java.util.UUID] = None
+  private var walkAttempt: Option[java.util.UUID] = None
   private var completeWaiters = Vector.empty[ActorRef]
   /** Starts unusable, so nothing can act on a complete view before one has ever been taken. */
   private var completeObservation = CompleteMempool.Observation(0L, None, Some("not observed"))
@@ -121,7 +118,6 @@ class MempoolView @Inject()(config: play.api.Configuration,
 
   private var lastFingerprint = Set.empty[String]
   private var revision = 0L
-  private var inFlight = false
   private var healthy = false
 
   private val ticker: Cancellable =
@@ -134,41 +130,42 @@ class MempoolView @Inject()(config: play.api.Configuration,
 
   override def receive: Receive = {
     // Concurrent askers share one walk: the mempool is the same for all of them, and a walk each
-    // would multiply the node load without producing different answers.
+    // would multiply node load without producing different answers. The periodic tick uses that
+    // same walk, so a rollup refresh and an engine request never read the mempool separately.
     case CompleteMempool.Refresh =>
       if (completeWaiters.size >= MaxCompleteWaiters)
         sender() ! completeObservation.copy(failure = Some("mempool reader capacity exhausted"))
       else {
         completeWaiters :+= sender()
-        if (completeAttempt.isEmpty) {
-          val attempt = java.util.UUID.randomUUID()
-          completeAttempt = Some(attempt)
-          Try(Future(CompleteMempool.collect(completeNode))(completeWorker)
-            .foreach(result => self ! CompleteRead(attempt, result)))
-            .failed.foreach(ex => self ! CompleteRead(attempt, Failure(ex)))
-        }
+        startWalk()
       }
-    // A failed walk keeps the last snapshot but records the failure, so `fresh` turns false and no
-    // consumer can treat it as evidence that an input or a lender key is free.
-    case CompleteRead(attempt, result) if completeAttempt.contains(attempt) =>
-      completeAttempt = None
+
+    // Skip projections before readiness; no consumer can use them during catch-up.
+    case Tick =>
+      stateFrame ! AutoSubscribable.AutoSubscribe(self)
+      if (ready) startWalk()
+    case NewBlock(_) => self ! Tick
+    case RebuildMempoolChains => self ! Tick
+
+    case WalkFinished(attempt, result) if walkAttempt.contains(attempt) =>
+      walkAttempt = None
+      // A failed walk keeps the last snapshot but records the failure, so `fresh` turns false and
+      // no consumer can treat it as evidence that an input or a lender key is free.
       completeObservation = result match {
-        case Success(snapshot) =>
-          CompleteMempool.Observation(completeObservation.revision + 1L, Some(snapshot), None)
+        case Success(walk) =>
+          CompleteMempool.Observation(completeObservation.revision + 1L, Some(walk.observation), None)
         case Failure(ex) => completeObservation.copy(failure = Some(ex.getMessage))
       }
       completeWaiters.foreach(_ ! completeObservation)
       completeWaiters = Vector.empty
-    case _: CompleteRead => ()
-    // Skip projections before readiness; no consumer can use them during catch-up.
-    case Tick =>
-      stateFrame ! AutoSubscribable.AutoSubscribe(self)
-      if (!inFlight && ready) refresh()
-    case NewBlock(_) => self ! Tick
-    case RebuildMempoolChains => self ! Tick
+      publishProjection(result.flatMap(_.projection))
 
-    case RefreshFinished(Success(snapshot)) =>
-      inFlight = false
+    case _: WalkFinished => ()
+  }
+
+  /** Publish the rollup view from one walk's derivation, or withdraw it when that derivation failed. */
+  private def publishProjection(projection: Try[BuiltSnapshot]): Unit = projection match {
+    case Success(snapshot) =>
       if (shouldPublish(lastFingerprint, healthy, snapshot.fingerprint)) {
         revision += 1L
         lastFingerprint = snapshot.fingerprint
@@ -178,14 +175,13 @@ class MempoolView @Inject()(config: play.api.Configuration,
       }
       healthy = true
 
-    // A raced page walk is expected traffic. The last revision stays published and the
-    // next tick re-reads
-    case RefreshFinished(Failure(raced: MempoolRaced)) =>
-      inFlight = false
+    // A raced walk is expected traffic: arrivals, confirmations and evictions all cause it. The last
+    // revision stays published and the next tick re-reads, because withdrawing projections on
+    // ordinary churn would drop them exactly when the mempool is busiest.
+    case Failure(raced: CompleteMempool.Raced) =>
       logger.debug(s"Retrying the mempool view: ${raced.getMessage}")
 
-    case RefreshFinished(Failure(ex)) =>
-      inFlight = false
+    case Failure(ex) =>
       healthy = false
       val detail = Option(ex.getMessage).getOrElse(ex.getClass.getSimpleName)
       val reason = s"Failed to refresh the complete mempool view: $detail"
@@ -193,74 +189,51 @@ class MempoolView @Inject()(config: play.api.Configuration,
       syncHandler ! MempoolUnavailable(reason)
   }
 
-  private def refresh(): Unit = {
-    inFlight = true
-    Future(buildSnapshot())(pollingContext)
-      .map(result => RefreshFinished(result))
-      .recover { case ex => RefreshFinished(Failure(ex)) }
-      .pipeTo(self)
+  /** One walk at a time. A request arriving while one runs waits for it rather than starting another. */
+  private def startWalk(): Unit = if (walkAttempt.isEmpty) {
+    val attempt = java.util.UUID.randomUUID()
+    walkAttempt = Some(attempt)
+    Try(Future(buildWalk())(completeWorker).foreach(result => self ! WalkFinished(attempt, result)))
+      .failed.foreach(ex => self ! WalkFinished(attempt, Failure(ex)))
   }
 
+  /** Collect once, then derive the rollup view from what that collection retained. */
+  private def buildWalk(): Try[Walk] =
+    CompleteMempool.collect(completeNode).map(observed => Walk(observed, Try(project(observed))))
+
   /**
-   * Reads the relevant mempool, re-reading only when a page walk could have skipped an entry.
-   * A single page cannot skip, so the second read is paid for only when one script actually paged.
+   * Derive the rollup chains from one complete observation, rather than paging the rollup scripts
+   * separately. The observation already holds every body, so this adds no node traffic, and both
+   * views describe the same mempool at the same chain anchor instead of two reads that can disagree.
    */
-  private def buildSnapshot(): Try[BuiltSnapshot] =
-    fetchAll().flatMap { case (first, paged) =>
-      if (!paged) Success(first)
-      else fetchAll().flatMap { case (second, _) =>
-        // Arrivals cannot cause a skip; only a disappearance shifts offsets under the walk.
-        val vanished = first.map(_.id).toSet -- second.map(_.id).toSet
-        if (vanished.isEmpty) Success(second)
-        else Failure(new MempoolRaced(
-          s"${vanished.size} unconfirmed rollup transaction(s) left the mempool while it was paged"))
+  private def project(observed: CompleteMempool.Snapshot): BuiltSnapshot = {
+    // A transaction matters to a rollup chain if it recreates a rollup box, or if it spends a root
+    // this client tracks. The second case is what surfaces a competing spend of a tracked root,
+    // which has to block that root rather than be followed.
+    val roots = trackedRoots
+    val relevant = observed.transactions.iterator
+      .map(entry => NodeSync.blockTx(entry.body))
+      .filter(tx => tx.outputs.exists(out => rollupTrees.contains(out.ergoTree)) ||
+        tx.inputs.headOption.exists(in => roots.contains(in.id)))
+      .toVector
+    // The bound stays on the rollup transactions, not the whole mempool: an unrelated flood must
+    // not withdraw this client's chains.
+    if (relevant.size > maxTransactions)
+      throw new IllegalStateException(
+        s"Unconfirmed rollup transactions exceed sync.mempool.maxTransactions ($maxTransactions); " +
+          "mempool chaining is unavailable, and transactions will build on confirmed state")
+    val graph = buildGraph(relevant, roots)
+    // Opening a context is two node calls, so it is only worth it when a chain needs converting.
+    val endInputs =
+      if (graph.chains.isEmpty) Map.empty[String, work.lithos.mutations.InputUTXO]
+      else nodeContext.getClient.execute { ctx =>
+        graph.chains.map { case (root, chain) => root -> chain.transforms.last.output.toInput(ctx) }
       }
-    }.map { transactions =>
-      val graph = buildGraph(transactions, trackedRoots)
-      // Opening a context is two node calls, so it is only worth it when a chain needs converting.
-      val endInputs =
-        if (graph.chains.isEmpty) Map.empty[String, work.lithos.mutations.InputUTXO]
-        else nodeContext.getClient.execute { ctx =>
-          graph.chains.map { case (root, chain) => root -> chain.transforms.last.output.toInput(ctx) }
-        }
-      BuiltSnapshot(transactions.map(_.id).toSet, graph.chains, endInputs, graph.blockedRoots)
-    }
+    BuiltSnapshot(relevant.map(_.id).toSet, graph.chains, endInputs, graph.blockedRoots)
+  }
 
   /** UTXOs this client tracks. Chains rooted anywhere else have no reader. */
   private def trackedRoots: Set[String] = utils.Globals.syncView.rollups.map(_._1).toSet
-
-  /** Every unconfirmed transaction at a rollup script, deduplicated, and whether any script paged. */
-  private def fetchAll(): Try[(Seq[BlockTx], Boolean)] =
-    rollupTrees.foldLeft(Try((Vector.empty[BlockTx], Set.empty[String], false))) {
-      case (accumulated, tree) =>
-      accumulated.flatMap { case (collected, seen, paged) =>
-        fetchByTree(tree, collected, seen).map { case (next, nextSeen, treePaged) =>
-          (next, nextSeen, paged || treePaged)
-        }
-      }
-    }.map { case (collected, _, paged) => (collected, paged) }
-
-  @tailrec
-  private def fetchByTree(ergoTree: String,
-                           collected: Vector[BlockTx],
-                           seen: Set[String],
-                           offset: Int = 0,
-                           paged: Boolean = false): Try[(Vector[BlockTx], Set[String], Boolean)] =
-    nodeApi.unconfirmedTransactionsByErgoTree(ergoTree, Paging(offset, PageSize)) match {
-      case Failure(ex) => Failure(ex)
-      case Success(page) =>
-        val (next, nextSeen) = page.iterator.map(NodeSync.blockTx)
-          .foldLeft((collected, seen)) { case ((kept, ids), tx) =>
-            if (ids.contains(tx.id)) (kept, ids) else (kept :+ tx, ids + tx.id)
-          }
-        if (next.size > maxTransactions)
-          Failure(new IllegalStateException(
-            s"Unconfirmed rollup transactions exceed sync.mempool.maxTransactions ($maxTransactions); " +
-              "mempool chaining is unavailable, and transactions will build on " +
-              "confirmed state"))
-        else if (page.size < PageSize) Success((next, nextSeen, paged))
-        else fetchByTree(ergoTree, next, nextSeen, offset + page.size, paged = true)
-    }
 
   /** Readiness is owned by SyncHandler and published, rather than asked for on every tick. */
   private def ready: Boolean = utils.Globals.syncView.canonical.available

@@ -8,13 +8,25 @@ import scala.util.Try
 
 /**
  * A complete observation of the local node's mempool, built from the transaction-id inventory rather
- * than page offsets so churn cannot silently drop a member. Bodies are decoded to extract spends and
- * lender keys and then discarded; nothing hydrated survives collection.
+ * than page offsets so churn cannot silently drop a member.
+ *
+ * Every consumer reads this one observation: the engine for which boxes are unavailable, emission
+ * joins for which lender keys are claimed, and rollup synchronisation for its unconfirmed chains.
+ * Each body is retained exactly once, and derived views reference it rather than re-fetching.
  */
 object CompleteMempool {
 
   /** Ask the owning actor for the newest observation, refreshing it if none is in flight. */
   case object Refresh
+
+  /**
+   * The mempool moved under the walk, rather than the node failing.
+   *
+   * Ordinary traffic: arrivals, confirmations and evictions all cause it. The observation is still
+   * unusable, but the previous one stands and the next walk retries, so consumers must not treat
+   * this as the node being unavailable.
+   */
+  final class Raced(detail: String) extends RuntimeException(detail)
 
   /**
    * The last observation and why it may be unusable. Consumers that decide whether an input or a
@@ -25,17 +37,30 @@ object CompleteMempool {
       failure.isEmpty && snapshot.exists(s => System.nanoTime() - s.observedAt < MaxAgeNanos)
   }
 
+  /** One retained mempool member. The body is the single representation every view refers to. */
+  final case class MempoolTx(id: String, body: node.model.NodeTransaction, sizeBytes: Int)
+
   /**
-   * @param anchor      best full header id when the walk started and finished; a change invalidates it
-   * @param ids         every transaction in the mempool at that anchor
-   * @param spent       every box consumed by those transactions
-   * @param lenderKeys  hashed lender keys claimed by unconfirmed queue and collateral boxes
+   * @param anchor       best full header id when the walk started and finished; a change invalidates it
+   * @param ids          every transaction in the mempool at that anchor
+   * @param spent        every box claimed by those transactions, conflicting claims included
+   * @param lenderKeys   hashed lender keys claimed by unconfirmed queue and collateral boxes
+   * @param transactions the retained bodies, in id order
+   * @param conflicts    box id to the transactions competing for it, for boxes claimed more than once
    */
   final case class Snapshot(anchor: String, ids: Set[String], spent: Set[String], observedAt: Long,
-                            lenderKeys: Set[String] = Set.empty)
+                            lenderKeys: Set[String] = Set.empty,
+                            transactions: Vector[MempoolTx] = Vector.empty,
+                            conflicts: Map[String, Set[String]] = Map.empty)
 
   final val MaxTransactions = 4096
+
+  /**
+   * Bound on the bodies one observation decodes and retains. Decode and retention are the same
+   * budget because nothing is discarded: a body read here is the copy every derived view uses.
+   */
   final val MaxBytes = 16 * 1024 * 1024L
+
   /** Shared ceiling for the spend index and the lender-key set. */
   final val MaxInputs = 65536
   /** Past this an observation cannot authorise a spend, however complete it was when taken. */
@@ -72,16 +97,21 @@ object CompleteMempool {
     val anchorAtStart = anchor(node)
     val memberIds = inventory()
     var decodedBytes = 0L
-    var spentBoxIds = Set.empty[String]
+    var retained = Vector.empty[MempoolTx]
+    // Box id to the first transaction seen claiming it, which is what turns a second claim into a
+    // recorded conflict. Its key set is the spend index, so the two are not tracked separately.
+    var claimant = Map.empty[String, String]
+    var conflicts = Map.empty[String, Set[String]]
     var lenderKeys = Set.empty[String]
 
     memberIds.toVector.sorted.foreach { txId =>
       requireWithinDeadline()
       // The byIds route on the supported node returns IDs, not transaction bodies.
       val tx = node.unconfirmedTransactionById(txId).get.getOrElse(
-        throw new IllegalStateException("mempool member disappeared during collection"))
+        throw new Raced("mempool member disappeared during collection"))
       require(tx.id == txId, "mempool body does not match requested id")
-      decodedBytes += NodeCodecs.encodeTransaction(tx).toString.getBytes(UTF_8).length
+      val sizeBytes = NodeCodecs.encodeTransaction(tx).toString.getBytes(UTF_8).length
+      decodedBytes += sizeBytes
       require(decodedBytes <= MaxBytes, "mempool body budget exceeded")
 
       tx.outputs.foreach(box => lenderKeyOf(box).foreach { key =>
@@ -92,17 +122,28 @@ object CompleteMempool {
       val inputIds = tx.inputs.map(_.boxId)
       require(inputIds.forall(_.matches("[0-9a-f]{64}")) && inputIds.distinct.size == inputIds.size,
         "invalid or duplicate mempool input")
-      require(!inputIds.exists(spentBoxIds.contains), "conflicting mempool input")
-      spentBoxIds ++= inputIds
-      require(spentBoxIds.size <= MaxInputs, "mempool spend index budget exceeded")
+      // A double spend in the mempool is ordinary — a reorg returns transactions, and peers relay
+      // competing spends. It is recorded rather than fatal, because failing the whole observation
+      // would leave every consumer without the spend information it needs. Both claimants keep the
+      // box in `spent`, which is the safe direction: a contested box is not free.
+      inputIds.foreach { boxId =>
+        claimant.get(boxId) match {
+          case None => claimant += boxId -> txId
+          case Some(first) => conflicts += boxId -> (conflicts.getOrElse(boxId, Set(first)) + txId)
+        }
+      }
+      require(claimant.size <= MaxInputs, "mempool spend index budget exceeded")
+      retained :+= MempoolTx(txId, tx, sizeBytes)
     }
 
     // Re-read both: a member that arrived or left during the walk, or a new parent, means the spend
-    // set above describes a mempool that no longer exists.
-    require(inventory() == memberIds && anchor(node) == anchorAtStart,
-      "mempool membership or chain anchor changed")
+    // set above describes a mempool that no longer exists. Churn, not a fault, so it is raised as
+    // Raced and the previous observation keeps standing.
+    if (inventory() != memberIds || anchor(node) != anchorAtStart)
+      throw new Raced("mempool membership or chain anchor changed")
     requireWithinDeadline()
-    Snapshot(anchorAtStart, memberIds, spentBoxIds, System.nanoTime(), lenderKeys)
+    Snapshot(anchorAtStart, memberIds, claimant.keySet, System.nanoTime(), lenderKeys,
+      retained, conflicts)
   }
 
   /**

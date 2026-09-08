@@ -18,7 +18,7 @@ import play.api.cache.SyncCacheApi
 import play.api.libs.concurrent.InjectedActorSupport
 import state.messages.MempoolMessages.{RebuildMempoolChains, ResetMempoolState}
 import state.messages.RollupMessages
-import state.messages.RollupMessages.{GetCurrentRollupCritical, RemoveRollup, RollupInfo}
+import state.messages.RollupMessages.{GetCurrentRollupCritical, GetRollupMetadata, RemoveRollup, RollupInfo}
 import state.DataBoxRetrievalException
 import transactions.BlockTxMessages.{BlockTxsReady, CandidateTx, CandidateTxsDropped}
 import transactions.rollups.RollupCore._
@@ -766,7 +766,7 @@ trait RollupCore extends Actor with InjectedActorSupport {
     // revision or confirmed block can land during transaction construction; sending the old input
     // would only create an avoidable double-spend and stale projection retry.
     val current = Await.result[RollupInfo](
-      (syncHandler ? GetCurrentRollupCritical(rollupId)).mapTo[RollupInfo], timeout.duration)
+      (syncHandler ? GetRollupMetadata(rollupId)).mapTo[RollupInfo], timeout.duration)
     RollupCore.sendIfCurrentInput(rollupId, expectedRollupInput, current) {
       require(rollupAlive.get(), "rollup engine attempt was superseded")
       try {
@@ -865,6 +865,11 @@ object RollupCore {
         projected.asInput.id.toString
       case RollupMessages.CurrentRollup(utxoId, _, None, _) => utxoId
       case RollupMessages.CurrentRollup(_, _, Some(_), _) =>
+        throw ProjectionChangedException(s"Rollup $rollupId is being removed before send")
+      case RollupMessages.CurrentRollupMetadata(_, _, Some(projected)) if !projected.toBeRemoved =>
+        projected.asInput.id.toString
+      case RollupMessages.CurrentRollupMetadata(utxoId, _, None) => utxoId
+      case RollupMessages.CurrentRollupMetadata(_, _, Some(_)) =>
         throw ProjectionChangedException(s"Rollup $rollupId is being removed before send")
       case RollupMessages.NoRollupFound() =>
         throw ProjectionChangedException(s"Rollup $rollupId disappeared before send")

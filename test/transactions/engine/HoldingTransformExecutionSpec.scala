@@ -38,7 +38,8 @@ class HoldingTransformExecutionSpec extends TestKit(ActorSystem("holding-engine-
       mempool.expectMsg(CompleteMempool.Refresh)
       mempool.reply(CompleteMempool.Observation(1L, Some(CompleteMempool.Snapshot(
         "cd" * 32, Set.empty, Set.empty, System.nanoTime())), None))
-      sync.expectMsg(GetCurrentRollupCritical(intent.blockId))
+      // Metadata, not the full rollup: a transform needs the box and its phase, never a dictionary.
+      sync.expectMsg(GetRollupMetadata(intent.blockId))
       sync.reply(NoRollupFound())
       Await.result(result, 3.seconds) shouldBe Completed(intent.key)
       wallet.expectNoMessage(100.millis)
