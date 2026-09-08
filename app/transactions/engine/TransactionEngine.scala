@@ -8,6 +8,8 @@ import java.util.concurrent.atomic.AtomicBoolean
 import scala.concurrent.Future
 import scala.concurrent.duration._
 import scala.util.{Failure, Success, Try}
+import transactions.engine.execution.{ConsolidationExecution, DexExecution, RollupExecution}
+import transactions.engine.wallet.{EngineFunding, EngineWalletState}
 
 object TransactionEngine {
   case object RegisterMiner

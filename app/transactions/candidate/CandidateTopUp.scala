@@ -1,11 +1,12 @@
-package transactions
+package transactions.candidate
 
 import mutations.NodeWallet
 import org.ergoplatform.appkit.BlockchainContext
 import org.slf4j.{Logger, LoggerFactory}
 import stratum.CollateralData
-import transactions.BlockTxMessages.CandidateTx
-import transactions.engine.RollupExecution
+import transactions.candidate.BlockTxMessages.CandidateTx
+import transactions.engine.execution.RollupExecution
+import transactions.engine.wallet.EngineWalletState
 import transactions.rollups.RollupTransactions
 import work.lithos.mutations.UTXO
 
@@ -31,7 +32,7 @@ object CandidateTopUp {
    * the holding box takes the first slot. Over the cap the most valuable entries are taken: every
    * input costs about the same bytes and execution, so that is the most ERG the block will carry.
    */
-  final val MaxRevenueInputs: Int = engine.EngineWalletState.MAX_TX_INPUTS - 1
+  final val MaxRevenueInputs: Int = EngineWalletState.MAX_TX_INPUTS - 1
 
   /**
    * Build the top-up for one package, or nothing when there is nothing to add.

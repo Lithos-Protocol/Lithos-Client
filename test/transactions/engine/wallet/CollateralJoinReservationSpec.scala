@@ -1,9 +1,8 @@
-package transactions.wallet
-import transactions.engine.{EngineFunding, FundingAllocation, FundingSource, FundingExpiredException}
+package transactions.engine.wallet
 
 import akka.actor.{Actor, ActorRef, ActorSystem, Props}
 import akka.testkit.{TestKit, TestProbe}
-import transactions.engine.CollateralExecution
+import transactions.engine.execution.CollateralExecution
 import api.models.CollateralJoinExecuteRequest
 import lfsm.{CollateralParams, LFSMHelpers}
 import node.NodeApi
@@ -19,7 +18,7 @@ import org.scalatest.matchers.should.Matchers
 import org.scalatestplus.mockito.MockitoSugar
 import play.api.Configuration
 import support.{CollateralNodeFixtures => Fx, FakeNodeContext}
-import transactions.engine.EngineWalletMessages._
+import transactions.engine.wallet.EngineWalletMessages._
 import work.lithos.mutations.{Contract, InputUTXO, Token, UTXO}
 
 import scala.concurrent.duration._

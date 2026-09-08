@@ -9,7 +9,8 @@ import javax.inject.{Inject, Named, Singleton}
 import play.api.Configuration
 import scala.concurrent.Await
 import scala.concurrent.duration._
-import transactions.engine.{CollateralExecution, TransactionEngine}
+import transactions.engine.TransactionEngine
+import transactions.engine.execution.CollateralExecution
 
 @Singleton
 class CollateralMarketApiImpl @Inject()(nodeContext: NodeContext, config: Configuration,

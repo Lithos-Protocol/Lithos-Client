@@ -1,5 +1,5 @@
 package api
-import transactions.engine.EngineWalletState
+import transactions.engine.wallet.EngineWalletState
 
 import akka.actor.{Actor, ActorRef, ActorSystem, Props}
 import akka.testkit.TestKit
@@ -19,7 +19,7 @@ import org.scalatestplus.mockito.MockitoSugar
 import play.api.Configuration
 import support.{CollateralNodeFixtures => Fx, FakeNodeContext}
 import transactions.ProtocolContracts.{hex, lenderEntry}
-import transactions.engine.EngineWalletMessages._
+import transactions.engine.wallet.EngineWalletMessages._
 
 import java.util.concurrent.atomic.AtomicInteger
 import scala.concurrent.duration._
@@ -85,7 +85,7 @@ class CollateralMarketApiImplSpec
     }
   }
 
-  private case class Fixture(api: transactions.engine.CollateralExecution,
+  private case class Fixture(api: transactions.engine.execution.CollateralExecution,
                              nodeApi: NodeApi,
                              ctxOf: NodeContext,
                              addresses: Seq[Address],
@@ -124,7 +124,7 @@ class CollateralMarketApiImplSpec
     val walletRef: ActorRef =
       system.actorOf(Props(new StubWallet(spendable, rewards, claimReply)))
 
-    val api = new transactions.engine.CollateralExecution(nodeCtx, config, system, walletRef) {
+    val api = new transactions.engine.execution.CollateralExecution(nodeCtx, config, system, walletRef) {
       override protected val snapshotTtlMs: Long = ttlMs
     }
     Fixture(api, nodeApi, nodeCtx, addresses, index)

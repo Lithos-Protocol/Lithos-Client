@@ -7,8 +7,9 @@ import api.models._
 import cache.LDCache
 import configs.NodeContext
 import javax.inject.{Inject, Named}
-import transactions.engine.{DexExecution, DexIntent}
-import transactions.engine.EngineFunding
+import transactions.engine.DexIntent
+import transactions.engine.execution.DexExecution
+import transactions.engine.wallet.EngineFunding
 import scala.concurrent.Await
 import scala.concurrent.duration._
 import scala.reflect.ClassTag

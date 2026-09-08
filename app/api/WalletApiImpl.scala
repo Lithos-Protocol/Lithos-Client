@@ -5,7 +5,7 @@ import akka.pattern.ask
 import akka.util.Timeout
 import api.models._
 import configs.NodeContext
-import transactions.engine.EngineWalletMessages.{GetSpendableBalance, SpendableBalance}
+import transactions.engine.wallet.EngineWalletMessages.{GetSpendableBalance, SpendableBalance}
 
 import javax.inject.{Inject, Named, Singleton}
 import scala.concurrent.Await

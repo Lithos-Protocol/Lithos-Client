@@ -1,11 +1,11 @@
-package transactions.engine
-import transactions.engine.EngineWalletState
+package transactions.engine.wallet
+import transactions.engine.wallet.EngineWalletState
 
 import akka.actor.ActorRef
 import akka.pattern.ask
 import akka.util.Timeout
 import mutations.NotEnoughInputsException
-import transactions.engine.EngineWalletMessages._
+import transactions.engine.wallet.EngineWalletMessages._
 import work.lithos.mutations.{InputUTXO, Token}
 
 import java.util.UUID

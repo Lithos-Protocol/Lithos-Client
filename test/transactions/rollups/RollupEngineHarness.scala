@@ -4,7 +4,8 @@ import akka.actor.{Actor, ActorRef}
 import configs.NodeContext
 import play.api.Configuration
 import play.api.cache.SyncCacheApi
-import transactions.engine.{EngineRollupCandidates, RollupExecution}
+import transactions.engine.EngineRollupCandidates
+import transactions.engine.execution.RollupExecution
 import transactions.rollups.TransactionMessages.{BatchAccepted, RollupBatch}
 import scala.concurrent.ExecutionContext
 
@@ -33,6 +34,6 @@ class RollupEngineHarness(config: Configuration, node: NodeContext, cacheApi: Sy
       execution().execute(stubs).onComplete(_ => self ! BatchDone)
     case _: RollupBatch => ()
     case BatchDone => busy = false
-    case message: transactions.engine.EngineWalletMessages.MarkReservationUncertain => wallet ! message
+    case message: transactions.engine.wallet.EngineWalletMessages.MarkReservationUncertain => wallet ! message
   }: Receive).orElse(super.receive)
 }

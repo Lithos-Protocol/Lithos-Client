@@ -1,5 +1,5 @@
 package transactions.rollups
-import transactions.engine.RollupExecution
+import transactions.engine.execution.RollupExecution
 
 import akka.actor.{ActorRef, ActorSystem, Props}
 import akka.testkit.{TestKit, TestProbe}
@@ -12,9 +12,9 @@ import state.messages.RollupMessages.{CurrentRollup, GetCurrentRollupCritical, G
 import support.{FakeCache, FakeNodeContext, SyncFixtures}
 import node.MutationConversions._
 import node.model.NodeBox
-import transactions.BlockTxMessages.{BlockTxsReady, CandidateTxsDropped, RequestBlockTxs}
-import transactions.engine.EngineWalletMessages.{MarkReservationUncertain, SelectInputs, WalletInputs}
-import transactions.engine.{FundingAllocation, EngineFunding}
+import transactions.candidate.BlockTxMessages.{BlockTxsReady, CandidateTxsDropped, RequestBlockTxs}
+import transactions.engine.wallet.EngineWalletMessages.{MarkReservationUncertain, SelectInputs, WalletInputs}
+import transactions.engine.wallet.{EngineFunding, FundingAllocation}
 import transactions.rollups.TransactionMessages.RollupTxType._
 import transactions.rollups.TransactionMessages._
 

@@ -8,10 +8,10 @@ import org.ergoplatform.appkit.{ErgoClient, SignedTransaction}
 import org.slf4j.{Logger, LoggerFactory}
 import play.api.Configuration
 import play.api.libs.concurrent.InjectedActorSupport
-import transactions.BlockTxMessages
-import transactions.BlockTxMessages.{BlockTxsReady, CandidateTx, CandidateTxsDropped, PrepareBlockTxs, RequestBlockTxs}
+import transactions.candidate.BlockTxMessages
+import transactions.candidate.BlockTxMessages.{BlockTxsReady, CandidateTx, CandidateTxsDropped, PrepareBlockTxs, RequestBlockTxs}
 import transactions.emissions.EmissionsCore._
-import transactions.engine.{FundingAllocation, EngineFunding}
+import transactions.engine.wallet.{EngineFunding, FundingAllocation}
 import work.lithos.mutations.InputUTXO
 
 import javax.inject.{Inject, Named}
@@ -49,7 +49,7 @@ trait EmissionsCore extends Actor with InjectedActorSupport {
   private val emissionIncarnation = java.util.UUID.randomUUID()
   private val emissionAlive = new java.util.concurrent.atomic.AtomicBoolean(true)
   private var candidateBusy = false
-  private lazy val collateral = new transactions.engine.CollateralExecution(
+  private lazy val collateral = new transactions.engine.execution.CollateralExecution(
     emissionNodeContext, config, context.system, emissionWalletManager, () => emissionAlive.get()) {
     override protected def executionNode: NodeApi = emissionNodeApi
   }
@@ -92,7 +92,7 @@ trait EmissionsCore extends Actor with InjectedActorSupport {
   protected def finishEmission(): Unit = { spending = false }
 
   /** The finished build for one height, held until that height is asked for or dropped. */
-  private var prepared = Option.empty[(Int, Seq[transactions.CandidateBundle])]
+  private var prepared = Option.empty[(Int, Seq[transactions.candidate.CandidateBundle])]
   /** The height being built for and which attempt is building it, so a superseded one is discarded. */
   private var buildingFor = Option.empty[(Int, java.util.UUID)]
   /** Requesters that arrived while the build for their height was still running. */
@@ -167,12 +167,12 @@ trait EmissionsCore extends Actor with InjectedActorSupport {
       // built for a package that will not be published.
       if (buildingFor.exists(_._2 == build)) {
         buildingFor = None
-        prepared = Some(height -> result.getOrElse(Seq.empty[transactions.CandidateBundle]))
+        prepared = Some(height -> result.getOrElse(Seq.empty[transactions.candidate.CandidateBundle]))
       }
       // Requesters waiting on a build that no longer exists would otherwise hang until their ask
       // expires; ones waiting on a replacement for the same height are left to it.
       if (!buildingFor.exists(_._1 == height)) {
-        val bundles = prepared.filter(_._1 == height).map(_._2).getOrElse(Seq.empty[transactions.CandidateBundle])
+        val bundles = prepared.filter(_._1 == height).map(_._2).getOrElse(Seq.empty[transactions.candidate.CandidateBundle])
         val (ready, rest) = waiting.partition(_._2 == height)
         waiting = rest
         ready.foreach { case (replyTo, _) => replyTo ! BlockTxsReady(height, bundles) }
@@ -207,7 +207,7 @@ trait EmissionsCore extends Actor with InjectedActorSupport {
       require(emissionAlive.get(), "emission engine attempt was superseded")
       client.execute { ctx =>
         val (tip, spends) = txs.buildQueueSpends(ctx, blockHeight, funded = false, limit)
-        if (spends.isEmpty) Seq.empty[transactions.CandidateBundle]
+        if (spends.isEmpty) Seq.empty[transactions.candidate.CandidateBundle]
         else {
           // Other lenders' unconfirmed joins, first because these spends chain off them.
           // Carrying them also avoids censoring work this client happened to build on top of.
@@ -221,12 +221,12 @@ trait EmissionsCore extends Actor with InjectedActorSupport {
           val own = spends.map(s => CandidateTx(
             s.tx.getId.replace("\"", ""), s.tx.toJson(false, false),
             if (s.kind == EmissionSpend.Clear) CandidateTx.Clear else CandidateTx.Activate,
-            transactions.engine.RollupExecution.signedInputIds(s.tx),
-            transactions.engine.RollupExecution.signedSizeBytes(s.tx), s.tx.getCost.toLong,
-            transactions.engine.RollupExecution.signedLeaf(s.tx)))
+            transactions.engine.execution.RollupExecution.signedInputIds(s.tx),
+            transactions.engine.execution.RollupExecution.signedSizeBytes(s.tx), s.tx.getCost.toLong,
+            transactions.engine.execution.RollupExecution.signedLeaf(s.tx)))
           // The queue spends chain off the last unconfirmed join in the emission chain, and
           // the whole chain travels with them.
-          Seq(transactions.CandidateBundle((ancestors ++ own).toVector,
+          Seq(transactions.candidate.CandidateBundle((ancestors ++ own).toVector,
             ancestors.lastOption.map(a => BlockTxMessages.ChainFromMempool(a.id)).toSeq ++
               ancestors.map(a => BlockTxMessages.IncludeExisting(a.id))))
         }
@@ -296,5 +296,5 @@ object EmissionsCore {
    * not answer the replacement.
    */
   private[emissions] case class CandidateBuilt(incarnation: java.util.UUID, build: java.util.UUID,
-    height: Int, result: Try[Seq[transactions.CandidateBundle]])
+    height: Int, result: Try[Seq[transactions.candidate.CandidateBundle]])
 }

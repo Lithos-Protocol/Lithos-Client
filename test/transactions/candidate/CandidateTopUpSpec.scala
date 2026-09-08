@@ -1,4 +1,4 @@
-package transactions
+package transactions.candidate
 
 import mutations.NodeWallet
 import org.ergoplatform.appkit.{BlockchainContext, Parameters}

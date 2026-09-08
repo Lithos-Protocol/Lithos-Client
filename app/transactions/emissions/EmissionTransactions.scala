@@ -14,7 +14,7 @@ import sigma.{Coll, Colls, SigmaProp}
 import stratum.CollateralNotFoundException
 import transactions.ProtocolContracts.{hex, lenderEntry}
 import transactions.{CompiledContracts, ProtocolContracts}
-import transactions.engine.{FundingAllocation, FundingSource}
+import transactions.engine.wallet.{FundingAllocation, FundingSource}
 import work.lithos.mutations.{Contract, InputUTXO, Token, TxBuilder, UTXO}
 
 import scala.collection.JavaConverters._

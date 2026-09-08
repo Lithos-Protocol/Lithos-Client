@@ -1,11 +1,13 @@
 package transactions.engine
 
 import akka.actor.{Actor, ActorRef}
-import transactions.BlockTxMessages.{BlockTxsReady, CandidateTx, CandidateTxsDropped}
+import transactions.candidate.BlockTxMessages.{BlockTxsReady, CandidateTx, CandidateTxsDropped}
 import transactions.rollups.TransactionMessages.BuildBlockTxs
-import transactions.engine.RollupExecution._
+import transactions.engine.execution.RollupExecution._
 import scala.concurrent.{ExecutionContext, Future}
 import scala.util.{Failure, Try}
+import transactions.engine.wallet.EngineWalletMessages
+import transactions.engine.execution.RollupExecution
 
 /** Candidate attempts and their funding holds are serialized by the engine mailbox. */
 trait EngineRollupCandidates extends Actor {
@@ -13,7 +15,7 @@ trait EngineRollupCandidates extends Actor {
   private implicit val candidateEc: ExecutionContext = context.dispatcher
   private val candidateWorker = context.system.dispatchers.lookup("lithos-contexts.engine-candidate-dispatcher")
   /** The finished build for one height, held until that height is asked for or dropped. */
-  private var prepared = Option.empty[(Int, Seq[transactions.CandidateBundle])]
+  private var prepared = Option.empty[(Int, Seq[transactions.candidate.CandidateBundle])]
   /** The height being built for and which attempt is building it, so a superseded one is discarded. */
   private var buildingFor = Option.empty[(Int, java.util.UUID)]
   /** Requesters that arrived while the build for their height was still running. */

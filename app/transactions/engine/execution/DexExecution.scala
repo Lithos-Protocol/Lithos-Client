@@ -1,4 +1,4 @@
-package transactions.engine
+package transactions.engine.execution
 import api.LithosDexApi
 
 import api.LithosApiErrors.{LithosBadRequest, LithosStateChanged, LithosUnavailable, LithosUnprocessable}
@@ -11,7 +11,7 @@ import node.NodeApi
 import org.ergoplatform.appkit.BlockchainContext
 import org.ergoplatform.sdk.ErgoId
 import configs.NodeContext
-import transactions.engine.EngineFunding
+import transactions.engine.wallet.EngineFunding
 import transactions.dex.LDBoxes.Provision
 import transactions.dex.{LDBoxes, LDFundedTx, LithosDexTransactions}
 import work.lithos.mutations.InputUTXO
@@ -29,7 +29,9 @@ import akka.util.Timeout
 import scala.concurrent.Await
 import scala.concurrent.duration._
 import state.synchronization.CompleteMempool
-import transactions.engine.EngineWalletMessages._
+import transactions.engine.wallet.EngineWalletMessages._
+import transactions.engine.DexIntent
+import transactions.engine.EngineBroadcast
 
 /**
  * Provides a default implementation for [[LithosDexApi]].
@@ -868,7 +870,7 @@ class DexExecution(nodeContext: NodeContext, walletSelector: EngineFunding,
     val submission = send(ctx, built)
     DexIntent.Refreshed(built.value.boxId, submission.txId, submission.outcome)
   }
-  private case class Funded[A <: LDFundedTx](value: A, reservation: transactions.engine.FundingAllocation)
+  private case class Funded[A <: LDFundedTx](value: A, reservation: transactions.engine.wallet.FundingAllocation)
 
   private def fund[A <: LDFundedTx](plan: transactions.dex.DexPlan[A]): Funded[A] = {
     require(alive(), "engine attempt was superseded")

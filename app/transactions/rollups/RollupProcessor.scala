@@ -12,7 +12,7 @@ import play.api.cache.SyncCacheApi
 import play.api.libs.concurrent.InjectedActorSupport
 import state.messages.MempoolMessages.MempoolRollupMetadata
 import state.messages.SyncMessages._
-import transactions.BlockTxMessages.{BlockTxsReady, CandidateTx, CandidateTxsDropped, PrepareBlockTxs, RequestBlockTxs}
+import transactions.candidate.BlockTxMessages.{BlockTxsReady, CandidateTx, CandidateTxsDropped, PrepareBlockTxs, RequestBlockTxs}
 import transactions.rollups.TransactionMessages.RollupTxType._
 import transactions.rollups.TransactionMessages.{BatchAccepted, BuildBlockTxs, EvaluationSet, FraudBatch, PublishedRollupMap, RollupBatch, RollupTxStub, RollupTxType}
 import transactions.rollups.RollupProcessor._

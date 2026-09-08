@@ -1,4 +1,4 @@
-package transactions.engine
+package transactions.engine.wallet
 
 import work.lithos.mutations.InputUTXO
 import java.util.concurrent.atomic.AtomicReference

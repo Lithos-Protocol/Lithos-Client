@@ -11,7 +11,7 @@ import org.scalatest.propspec.AnyPropSpec
 import org.scalatestplus.mockito.MockitoSugar
 import support.FakeNodeContext
 import transactions.ProtocolContracts
-import transactions.engine.{FundingAllocation, FundingSource}
+import transactions.engine.wallet.{FundingAllocation, FundingSource}
 import work.lithos.mutations.{Contract, InputUTXO, Token, UTXO}
 
 /**

@@ -18,7 +18,7 @@ import scorex.util.bytesToId
 import stratum.{BlockTemplate, CollateralData}
 import stratum.data.{Data, Options}
 import support.ChainFixtures
-import transactions.BlockTxMessages.CandidateTx
+import transactions.candidate.BlockTxMessages.CandidateTx
 
 import java.math.BigInteger
 import java.util.concurrent.{CompletableFuture, LinkedBlockingQueue, TimeUnit}

@@ -19,7 +19,7 @@ import state.messages.RollupMessages._
 import state.synchronization.CompleteMempool
 import support.{ChainFixtures, FakeNodeContext}
 import transactions.engine.TransactionEngine._
-import transactions.engine.EngineWalletMessages._
+import transactions.engine.wallet.EngineWalletMessages._
 import work.lithos.mutations.{InputUTXO, UTXO}
 import scala.concurrent.{Await, Future}
 import scala.concurrent.duration._

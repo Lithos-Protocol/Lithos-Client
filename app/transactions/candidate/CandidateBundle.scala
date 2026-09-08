@@ -1,6 +1,6 @@
-package transactions
+package transactions.candidate
 
-import transactions.BlockTxMessages.{CandidateTx, ChainFromMempool, MempoolInteraction}
+import transactions.candidate.BlockTxMessages.{CandidateTx, ChainFromMempool, MempoolInteraction}
 
 /**
  * Members are admitted together locally, in dependency order supplied by their builder.

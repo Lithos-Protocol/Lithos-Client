@@ -11,7 +11,7 @@ import org.scalatest.matchers.should.Matchers
 import org.scalatestplus.mockito.MockitoSugar
 import state.synchronization.CompleteMempool
 import support.{ChainFixtures, FakeNodeContext}
-import transactions.engine.EngineWalletMessages._
+import transactions.engine.wallet.EngineWalletMessages._
 import scala.concurrent.{Await, Future}
 import scala.concurrent.duration._
 import scala.util.Success

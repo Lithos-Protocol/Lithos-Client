@@ -1,5 +1,5 @@
 package transactions.rollups
-import transactions.engine.EngineWalletState
+import transactions.engine.wallet.EngineWalletState
 
 import akka.actor.{ActorRef, ActorSystem, Props}
 import akka.testkit.{TestKit, TestProbe}
@@ -19,8 +19,8 @@ import org.scalatest.matchers.should.Matchers
 import org.scalatestplus.mockito.MockitoSugar
 import sigma.Colls
 import support.FakeNodeContext
-import transactions.engine.EngineWalletMessages._
-import transactions.engine.EngineFunding
+import transactions.engine.wallet.EngineWalletMessages._
+import transactions.engine.wallet.EngineFunding
 import work.lithos.mutations.{Contract, InputUTXO, UTXO}
 
 import java.util.concurrent.atomic.AtomicLong

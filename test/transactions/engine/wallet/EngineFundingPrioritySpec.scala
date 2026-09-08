@@ -1,4 +1,4 @@
-package transactions.engine
+package transactions.engine.wallet
 
 import akka.actor.{ActorSystem, Props}
 import akka.testkit.{TestKit, TestProbe}
@@ -13,7 +13,7 @@ import org.scalatest.flatspec.AnyFlatSpecLike
 import org.scalatest.matchers.should.Matchers
 import org.scalatestplus.mockito.MockitoSugar
 import support.FakeNodeContext
-import transactions.engine.EngineWalletMessages._
+import transactions.engine.wallet.EngineWalletMessages._
 import work.lithos.mutations.UTXO
 import java.util.concurrent.{CompletableFuture, TimeUnit}
 import java.util.concurrent.atomic.AtomicInteger

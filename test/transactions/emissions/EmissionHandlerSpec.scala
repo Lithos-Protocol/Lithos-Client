@@ -12,7 +12,7 @@ import org.scalatest.matchers.should.Matchers
 import org.scalatestplus.mockito.MockitoSugar
 import play.api.Configuration
 import support.FakeNodeContext
-import transactions.BlockTxMessages.{BlockTxsReady, RequestBlockTxs}
+import transactions.candidate.BlockTxMessages.{BlockTxsReady, RequestBlockTxs}
 import transactions.emissions.EmissionsCore.{Collateralize, DriveQueue}
 
 import scala.concurrent.duration._

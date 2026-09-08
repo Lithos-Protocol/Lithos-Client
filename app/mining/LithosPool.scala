@@ -18,7 +18,7 @@ import scorex.utils.Ints
 import state.messages.StateFrameMessages.CheckBlock
 import stratum.BlockTemplate
 import stratum.data.{MiningCandidate, Options}
-import transactions.BlockTxMessages.CandidateTx
+import transactions.candidate.BlockTxMessages.CandidateTx
 import transactions.rollups.{CommitmentTransactions, DataBoxSource}
 import utils.Globals
 

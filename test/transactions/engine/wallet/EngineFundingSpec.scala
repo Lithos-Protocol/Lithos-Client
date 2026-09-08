@@ -1,5 +1,4 @@
-package transactions.wallet
-import transactions.engine.{EngineFunding, FundingAllocation, FundingSource, FundingExpiredException}
+package transactions.engine.wallet
 
 import akka.actor.ActorSystem
 import akka.testkit.{TestKit, TestProbe}
@@ -13,7 +12,7 @@ import org.scalatest.flatspec.AnyFlatSpecLike
 import org.scalatest.matchers.should.Matchers
 import org.scalatestplus.mockito.MockitoSugar
 import support.FakeNodeContext
-import transactions.engine.EngineWalletMessages._
+import transactions.engine.wallet.EngineWalletMessages._
 import work.lithos.mutations.{InputUTXO, Token}
 
 import scala.concurrent.duration._

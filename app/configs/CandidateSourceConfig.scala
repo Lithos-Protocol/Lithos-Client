@@ -15,7 +15,7 @@ import play.api.{ConfigLoader, Configuration}
  *                 of why the package as a whole claims only a share of the block
  */
 case class CandidateSourceConfig(enabled: Boolean, maxTxs: Int, maxBytes: Long, maxCost: Long) {
-  def budget: transactions.CandidateBudget = transactions.CandidateBudget(maxBytes, maxCost)
+  def budget: transactions.candidate.CandidateBudget = transactions.candidate.CandidateBudget(maxBytes, maxCost)
 }
 
 object CandidateSourceConfig {

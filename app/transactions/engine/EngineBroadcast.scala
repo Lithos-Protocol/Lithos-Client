@@ -8,12 +8,13 @@ import node.rest.NodeCodecs
 import org.ergoplatform.appkit.SignedTransaction
 import org.slf4j.LoggerFactory
 import state.synchronization.CompleteMempool
-import transactions.engine.EngineWalletMessages._
+import transactions.engine.wallet.EngineWalletMessages._
 
 import scala.concurrent.{Await, ExecutionContext}
 import scala.concurrent.duration._
 import scala.util.{Failure, Success}
 import scala.util.control.NonFatal
+import transactions.engine.wallet.{EngineWalletMessages, FundingAllocation}
 
 object EngineBroadcast {
   /** One reservation's wallet inputs, without the hydrated boxes the worker used to build. */

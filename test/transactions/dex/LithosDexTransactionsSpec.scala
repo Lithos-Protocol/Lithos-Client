@@ -1,5 +1,5 @@
 package transactions.dex
-import transactions.engine.EngineWalletState
+import transactions.engine.wallet.EngineWalletState
 
 import akka.actor.ActorSystem
 import akka.testkit.{TestKit, TestProbe}
@@ -12,8 +12,8 @@ import org.scalatest.BeforeAndAfterAll
 import org.scalatest.flatspec.AnyFlatSpecLike
 import support.FakeNodeContext
 import transactions.dex.LDBoxes.{Provision => LiveProvision}
-import transactions.engine.EngineWalletMessages.{ReleaseInputs, SelectInputs, WalletInputs}
-import transactions.engine.EngineFunding
+import transactions.engine.wallet.EngineWalletMessages.{ReleaseInputs, SelectInputs, WalletInputs}
+import transactions.engine.wallet.EngineFunding
 import work.lithos.mutations.{InputUTXO, Token, UTXO}
 
 import java.lang.reflect.{InvocationHandler, InvocationTargetException, Method, Proxy}

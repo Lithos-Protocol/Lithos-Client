@@ -1,4 +1,4 @@
-package transactions.engine
+package transactions.engine.execution
 
 import akka.actor.ActorRef
 import akka.pattern.ask
@@ -11,6 +11,8 @@ import state.synchronization.CompleteMempool
 import work.lithos.mutations.{TxBuilder, UTXO}
 import scala.concurrent.{Await, ExecutionContext}
 import scala.concurrent.duration._
+import transactions.engine.EngineBroadcast
+import transactions.engine.wallet.{EngineFunding, EngineWalletMessages, WalletInventory}
 
 object ConsolidationExecution {
 

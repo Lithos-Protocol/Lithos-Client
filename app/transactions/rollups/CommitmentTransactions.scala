@@ -11,7 +11,7 @@ import org.ergoplatform.sdk.ErgoId
 import org.slf4j.{Logger, LoggerFactory}
 import sigma.{Coll, Colls}
 import state.DataBoxRetrievalException
-import transactions.engine.{FundingAllocation, EngineFunding}
+import transactions.engine.wallet.{EngineFunding, FundingAllocation}
 import utils.{Globals, Helpers}
 import work.lithos.mutations.{Contract, InputUTXO, Token, TxBuilder, UTXO}
 

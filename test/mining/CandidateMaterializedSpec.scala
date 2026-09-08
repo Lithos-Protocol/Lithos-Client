@@ -4,7 +4,7 @@ import mining.MiningMessages.CandidateIdentity
 import org.json.{JSONArray, JSONObject}
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
-import transactions.BlockTxMessages.CandidateTx
+import transactions.candidate.BlockTxMessages.CandidateTx
 
 import java.util.UUID
 

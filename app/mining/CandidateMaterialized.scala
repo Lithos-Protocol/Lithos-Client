@@ -3,7 +3,7 @@ package mining
 import mining.MiningMessages.CandidateIdentity
 import node.model.{MerkleLevel, NodeMerkleProof}
 import org.json.JSONObject
-import transactions.BlockTxMessages.CandidateTx
+import transactions.candidate.BlockTxMessages.CandidateTx
 
 import java.util.UUID
 

@@ -1,5 +1,5 @@
 package transactions.rollups
-import transactions.engine.EngineWalletState
+import transactions.engine.wallet.EngineWalletState
 
 import akka.actor.{Actor, ActorRef, Cancellable}
 import akka.pattern.ask

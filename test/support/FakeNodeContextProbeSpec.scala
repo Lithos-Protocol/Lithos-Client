@@ -1,5 +1,5 @@
 package support
-import transactions.engine.EngineWalletState
+import transactions.engine.wallet.EngineWalletState
 
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers

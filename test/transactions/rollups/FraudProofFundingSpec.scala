@@ -1,5 +1,5 @@
 package transactions.rollups
-import transactions.engine.RollupExecution
+import transactions.engine.execution.RollupExecution
 
 import akka.actor.{ActorRef, ActorSystem, Props}
 import akka.testkit.{TestActorRef, TestKit, TestProbe}
@@ -15,8 +15,8 @@ import org.scalatest.matchers.should.Matchers
 import org.scalatestplus.mockito.MockitoSugar
 import play.api.Configuration
 import support.{FakeCache, FakeNodeContext}
-import transactions.engine.EngineWalletState
-import transactions.engine.EngineWalletMessages.{GetSpendableBalance, RefreshBoxes, SpendableBalance}
+import transactions.engine.wallet.EngineWalletState
+import transactions.engine.wallet.EngineWalletMessages.{GetSpendableBalance, RefreshBoxes, SpendableBalance}
 
 import scala.concurrent.duration._
 import scala.util.Success

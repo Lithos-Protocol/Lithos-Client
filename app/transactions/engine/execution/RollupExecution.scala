@@ -1,4 +1,4 @@
-package transactions.engine
+package transactions.engine.execution
 
 import akka.actor.ActorRef
 import akka.pattern.ask
@@ -17,9 +17,9 @@ import state.messages.MempoolMessages.{RebuildMempoolChains, ResetMempoolState}
 import state.messages.RollupMessages
 import state.messages.RollupMessages.{GetCurrentRollupCritical, GetRollupMetadata, RemoveRollup, RollupInfo}
 import state.DataBoxRetrievalException
-import transactions.BlockTxMessages
-import transactions.BlockTxMessages.{BlockTxsReady, CandidateTx, CandidateTxsDropped}
-import transactions.engine.RollupExecution._
+import transactions.candidate.BlockTxMessages
+import transactions.candidate.BlockTxMessages.{BlockTxsReady, CandidateTx, CandidateTxsDropped}
+import transactions.engine.execution.RollupExecution._
 import transactions.rollups.TransactionMessages.RollupTxType._
 import transactions.rollups.TransactionMessages._
 import utils.Globals
@@ -32,6 +32,8 @@ import scala.util.control.NonFatal
 
 
 import transactions.rollups._
+import transactions.engine.EngineBroadcast
+import transactions.engine.wallet.{EngineFunding, FundingAllocation}
 /** One engine attempt owns these build allocations; none survives completion of its worker. */
 class RollupExecution(nodeContext: NodeContext, walletManager: ActorRef, syncHandler: ActorRef,
                       mempoolView: ActorRef, config: Configuration, dataBoxes: DataBoxSource,
@@ -71,7 +73,7 @@ class RollupExecution(nodeContext: NodeContext, walletManager: ActorRef, syncHan
    * the mempool. That parent has to travel with it: a block carrying the child alone is invalid.
    * A chain whose bodies cannot all be fetched is dropped rather than offered incomplete.
    */
-  def candidates(stubs: Seq[RollupTxStub], height: Int): Seq[transactions.CandidateBundle] = {
+  def candidates(stubs: Seq[RollupTxStub], height: Int): Seq[transactions.candidate.CandidateBundle] = {
     require(alive() && stubs.size <= 100, "candidate attempt is obsolete or oversized")
     val built = stubs.flatMap(stub => buildFeeless(stub, height))
     val bodies = ancestorBodies(built.flatMap(_._2).distinct)
@@ -81,7 +83,7 @@ class RollupExecution(nodeContext: NodeContext, walletManager: ActorRef, syncHan
         logger.warn(s"Dropping candidate ${tx.id}: ${ancestorIds.size - ancestors.size} " +
           "unconfirmed ancestor(s) could not be read")
         None
-      } else Some(transactions.CandidateBundle((ancestors :+ tx).toVector,
+      } else Some(transactions.candidate.CandidateBundle((ancestors :+ tx).toVector,
         ancestorIds.lastOption.map(BlockTxMessages.ChainFromMempool(_)).toSeq ++
           ancestorIds.map(BlockTxMessages.IncludeExisting)))
     }
@@ -824,7 +826,7 @@ object RollupExecution {
    */
   private[transactions] case class RollupCandidateBuilt(incarnation: java.util.UUID,
                                                 build: java.util.UUID, height: Int,
-                                                result: Try[Seq[transactions.CandidateBundle]])
+                                                result: Try[Seq[transactions.candidate.CandidateBundle]])
 
   /**
    * Self-message: a fee-less submission built off the actor thread took a bond input.

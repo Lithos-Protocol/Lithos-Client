@@ -7,7 +7,7 @@ import configs.NodeContext
 import node.NodeApi
 import node.rest.{NodeHttpConfig, RestNodeApi}
 import state.synchronization.CompleteMempool
-import transactions.engine.EngineWalletMessages._
+import transactions.engine.wallet.EngineWalletMessages._
 
 import scala.concurrent.{Await, ExecutionContext}
 import scala.concurrent.duration._

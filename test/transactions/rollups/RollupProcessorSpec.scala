@@ -8,7 +8,7 @@ import org.scalatest.matchers.should.Matchers
 import org.scalatestplus.mockito.MockitoSugar
 import play.api.Configuration
 import support.{FakeCache, FakeNodeContext}
-import transactions.BlockTxMessages.{BlockTxsReady, RequestBlockTxs}
+import transactions.candidate.BlockTxMessages.{BlockTxsReady, RequestBlockTxs}
 import transactions.rollups.TransactionMessages.RollupTxType._
 import transactions.rollups.TransactionMessages._
 import transactions.rollups.RollupProcessor.ProcessTransactions

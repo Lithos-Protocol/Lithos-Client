@@ -1,4 +1,4 @@
-package transactions.engine
+package transactions.engine.execution
 
 import akka.actor.{ActorRef, ActorSystem}
 import akka.pattern.ask
@@ -17,8 +17,8 @@ import sigma.SigmaProp
 import sigma.ast.ErgoTree
 import transactions.ProtocolContracts.{hex, lenderEntry}
 import transactions.emissions.EmissionTransactions
-import transactions.engine.EngineWalletMessages._
-import transactions.engine.{FundingAllocation, EngineFunding}
+import transactions.engine.wallet.EngineWalletMessages._
+import transactions.engine.wallet.{EngineFunding, FundingAllocation}
 import work.lithos.mutations.Token
 
 import javax.inject.{Inject, Named, Singleton}
@@ -29,6 +29,7 @@ import scala.concurrent.{Await, ExecutionContext, blocking}
 import scala.language.postfixOps
 import scala.reflect.ClassTag
 import scala.util.{Failure, Success, Try}
+import transactions.engine.EngineJoinGuard
 
 /**
  * Read-side composition over EmissionTransactions box scans, plus the wallet-facing sweep and

@@ -1,5 +1,5 @@
 package transactions.rollups
-import transactions.engine.EngineWalletState
+import transactions.engine.wallet.EngineWalletState
 
 import akka.actor.{ActorRef, ActorSystem, Props}
 import akka.testkit.{TestKit, TestProbe}

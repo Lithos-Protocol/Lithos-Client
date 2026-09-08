@@ -9,7 +9,7 @@ import state.messages.SyncView
 import state.messages.SyncMessages.{CurrentMinerDictionary, GetMinerDictionary}
 import akka.pattern.ask
 import akka.util.Timeout
-import transactions.engine.FundingExpiredException
+import transactions.engine.wallet.FundingExpiredException
 import lfsm.LFSMHelpers
 import scorex.utils.Longs
 import utils.Globals

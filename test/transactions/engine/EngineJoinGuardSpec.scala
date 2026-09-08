@@ -9,6 +9,7 @@ import org.scalatest.matchers.should.Matchers
 import support.FakeNodeContext
 import work.lithos.mutations.UTXO
 import org.ergoplatform.sdk.ErgoId
+import transactions.engine.wallet.{EngineWalletMessages, EngineWalletState}
 
 class EngineJoinGuardSpec extends TestKit(ActorSystem("engine-join-guard-spec", ConfigFactory.load()))
   with AnyFlatSpecLike with Matchers with BeforeAndAfterAll {

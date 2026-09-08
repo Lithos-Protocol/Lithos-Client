@@ -14,9 +14,9 @@ import org.scalatest.flatspec.AnyFlatSpecLike
 import org.scalatest.matchers.should.Matchers
 import org.scalatestplus.mockito.MockitoSugar
 import stratum.{CollateralData, CollateralNotFoundException}
-import transactions.BlockTxMessages.{BlockTxsReady, CandidateTx, CandidateTxsDropped, PrepareBlockTxs, RequestBlockTxs}
+import transactions.candidate.BlockTxMessages.{BlockTxsReady, CandidateTx, CandidateTxsDropped, PrepareBlockTxs, RequestBlockTxs}
 import support.FakeNodeContext
-import transactions.{CandidateBundle, CapitalEntry, CapitalOrigin}
+import transactions.candidate.{CandidateBundle, CapitalEntry, CapitalOrigin}
 import work.lithos.mutations.{InputUTXO, UTXO}
 
 import scala.concurrent.duration._
@@ -337,7 +337,7 @@ class CandidateBuilderSpec extends TestKit(ActorSystem("candidate-builder-spec",
 
     source.reply(BlockTxsReady(height, Seq(declaring(entryOn(revenueBox(f))))))
     val pkg = published(f)
-    pkg.blockTxs.map(_.kind) shouldBe Seq(CandidateTx.Payout, transactions.CandidateTopUp.Kind)
+    pkg.blockTxs.map(_.kind) shouldBe Seq(CandidateTx.Payout, transactions.candidate.CandidateTopUp.Kind)
     withClue("the top-up spends the revenue output it was credited with: ") {
       pkg.blockTxs.last.inputIds should contain(revenueBox(f).id.toString)
     }
@@ -393,7 +393,7 @@ class CandidateBuilderSpec extends TestKit(ActorSystem("candidate-builder-spec",
     val replyTo = source.lastSender
     f.builder ! BlockTxsRejected(100, Some(old.identity))
     source.expectNoMessage(200.millis)
-    replyTo ! BlockTxsReady(100, Seq(transactions.CandidateBundle(extras.toVector)))
+    replyTo ! BlockTxsReady(100, Seq(transactions.candidate.CandidateBundle(extras.toVector)))
     val augmented = published(f)
     augmented.parentId shouldBe replacement.parentId
     augmented.blockTxs shouldBe extras
@@ -404,7 +404,7 @@ class CandidateBuilderSpec extends TestKit(ActorSystem("candidate-builder-spec",
     val f = fixture(sources = Seq(CandidateSource(configs.CandidateSourceConfig.Rollups, source.ref)), config = collectingConfig)
     advanceTo(f, 100).blockTxs shouldBe empty
     requested(source)
-    source.reply(BlockTxsReady(100, Seq(transactions.CandidateBundle(extras.toVector))))
+    source.reply(BlockTxsReady(100, Seq(transactions.candidate.CandidateBundle(extras.toVector))))
     published(f).blockTxs shouldEqual extras
   }
 
@@ -416,7 +416,7 @@ class CandidateBuilderSpec extends TestKit(ActorSystem("candidate-builder-spec",
     val replyTo = source.lastSender
     f.builder ! BlockTxsRejected(100)
     source.expectMsg(CandidateTxsDropped(100))
-    replyTo ! BlockTxsReady(100, Seq(transactions.CandidateBundle(extras.toVector)))
+    replyTo ! BlockTxsReady(100, Seq(transactions.candidate.CandidateBundle(extras.toVector)))
     f.parent.expectNoMessage(500.millis)
   }
 
@@ -427,7 +427,7 @@ class CandidateBuilderSpec extends TestKit(ActorSystem("candidate-builder-spec",
     advanceTo(f, 100)
     requested(source)
     clock.addAndGet(collectingConfig.blockTxTimeout.milliseconds.toNanos)
-    source.reply(BlockTxsReady(100, Seq(transactions.CandidateBundle(extras.toVector))))
+    source.reply(BlockTxsReady(100, Seq(transactions.candidate.CandidateBundle(extras.toVector))))
     f.parent.expectNoMessage(500.millis)
     source.expectMsg(CandidateTxsDropped(100))
   }
@@ -444,9 +444,9 @@ class CandidateBuilderSpec extends TestKit(ActorSystem("candidate-builder-spec",
     replacement.collateral.collateralId should not equal first.collateral.collateralId
     requested(source)
     val newReply = source.lastSender
-    oldReply ! BlockTxsReady(100, Seq(transactions.CandidateBundle(extras.toVector)))
+    oldReply ! BlockTxsReady(100, Seq(transactions.candidate.CandidateBundle(extras.toVector)))
     f.parent.expectNoMessage(500.millis)
-    newReply ! BlockTxsReady(100, Seq(transactions.CandidateBundle(extras.toVector)))
+    newReply ! BlockTxsReady(100, Seq(transactions.candidate.CandidateBundle(extras.toVector)))
     published(f).collateral.collateralId shouldEqual
       replacement.collateral.collateralId
   }
@@ -456,7 +456,7 @@ class CandidateBuilderSpec extends TestKit(ActorSystem("candidate-builder-spec",
     val f = fixture(sources = Seq(CandidateSource(configs.CandidateSourceConfig.Rollups, source.ref)), config = collectingConfig)
     advanceTo(f, 100)
     requested(source)
-    source.reply(BlockTxsReady(99, Seq(transactions.CandidateBundle(extras.toVector))))
+    source.reply(BlockTxsReady(99, Seq(transactions.candidate.CandidateBundle(extras.toVector))))
     f.parent.expectNoMessage(500.millis)
     f.builder ! BlockTxsRejected(99)
     source.expectNoMessage(500.millis)

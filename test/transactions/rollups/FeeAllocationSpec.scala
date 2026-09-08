@@ -1,5 +1,5 @@
 package transactions.rollups
-import transactions.engine.RollupExecution
+import transactions.engine.execution.RollupExecution
 
 import contracts.specs.rollup.RollupSpecBase
 import lfsm.LFSMPhase

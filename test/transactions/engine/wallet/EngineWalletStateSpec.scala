@@ -1,6 +1,5 @@
-package transactions.wallet
-import transactions.engine.{EngineFunding, FundingAllocation, FundingSource, FundingExpiredException}
-import transactions.engine.EngineWalletState
+package transactions.engine.wallet
+import transactions.engine.wallet.EngineWalletState
 
 import akka.actor.{ActorRef, ActorSystem, Props}
 import akka.testkit.{TestKit, TestProbe}
@@ -17,7 +16,7 @@ import org.scalatest.matchers.should.Matchers
 import org.scalatestplus.mockito.MockitoSugar
 import org.ergoplatform.sdk.ErgoId
 import support.FakeNodeContext
-import transactions.engine.EngineWalletMessages._
+import transactions.engine.wallet.EngineWalletMessages._
 import work.lithos.mutations.{InputUTXO, Token, UTXO}
 
 import java.util.concurrent.atomic.{AtomicBoolean, AtomicLong, AtomicReference}

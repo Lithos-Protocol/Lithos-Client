@@ -12,8 +12,8 @@ import node.NodeApi
 import org.ergoplatform.appkit.ErgoClient
 import org.slf4j.{Logger, LoggerFactory}
 import stratum.{CollateralData, CollateralNotFoundException}
-import transactions.BlockTxMessages.{BlockTxsReady, CandidateTx, CandidateTxsDropped, PrepareBlockTxs, RequestBlockTxs}
-import transactions.CandidateBundle
+import transactions.candidate.BlockTxMessages.{BlockTxsReady, CandidateTx, CandidateTxsDropped, PrepareBlockTxs, RequestBlockTxs}
+import transactions.candidate.CandidateBundle
 import java.util.UUID
 
 import scala.concurrent.duration._
@@ -467,9 +467,9 @@ class CandidateBuilder(client: ErgoClient,
       val genesisCost = genesis.map(_.cost).getOrElse(0L)
       val budget = Try(client.execute { ctx =>
         val parameters = ctx.getDataSource.getParameters
-        transactions.CandidateBudget.of(parameters.getMaxBlockSize, parameters.getMaxBlockCost,
+        transactions.candidate.CandidateBudget.of(parameters.getMaxBlockSize, parameters.getMaxBlockCost,
           config.blockShare).less(genesisBytes, genesisCost)
-      }).getOrElse(transactions.CandidateBudget.Unbounded)
+      }).getOrElse(transactions.candidate.CandidateBudget.Unbounded)
 
       Future.sequence(asks)
         .map { all =>
@@ -494,9 +494,9 @@ class CandidateBuilder(client: ErgoClient,
   private def topUpFor(height: Int,
                        kept: Seq[CandidateBundle],
                        selected: Seq[CandidateTx],
-                       budget: transactions.CandidateBudget,
+                       budget: transactions.candidate.CandidateBudget,
                        genesis: Option[CollateralData]): Option[CandidateTx] = {
-    val ledger = kept.flatMap(_.capital).foldLeft(transactions.CandidateCapital(height)) {
+    val ledger = kept.flatMap(_.capital).foldLeft(transactions.candidate.CandidateCapital(height)) {
       (ledger, entry) =>
         // Two sources naming one output is a defect in a source, and the box is spendable once
         // either way. Taking the first keeps the rest of the package rather than losing it here.
@@ -510,7 +510,7 @@ class CandidateBuilder(client: ErgoClient,
     else {
       val remaining = budget.less(selected.map(_.sizeBytes.toLong).sum, selected.map(_.cost).sum)
       val built = genesis.flatMap(data => Try(client.execute(ctx =>
-        transactions.CandidateTopUp.build(ctx, prover, data, ledger, height))).toOption.flatten)
+        transactions.candidate.CandidateTopUp.build(ctx, prover, data, ledger, height))).toOption.flatten)
       // Dropped rather than truncated: the transactions that earned this revenue are already
       // selected, and their outputs stay spendable in a later block.
       built.filter { tx =>

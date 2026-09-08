@@ -1,4 +1,4 @@
-package transactions
+package transactions.candidate
 
 import work.lithos.mutations.{InputUTXO, Token}
 

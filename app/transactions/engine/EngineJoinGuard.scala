@@ -8,6 +8,7 @@ import org.ergoplatform.appkit.SignedTransaction
 import state.synchronization.CompleteMempool
 import scala.concurrent.{Await, ExecutionContext}
 import scala.concurrent.duration._
+import transactions.engine.wallet.FundingAllocation
 
 private[transactions] object EngineJoinGuard {
   /** Ask the engine which lender keys local attempts already hold. */

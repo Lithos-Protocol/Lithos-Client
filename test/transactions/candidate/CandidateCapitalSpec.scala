@@ -1,4 +1,4 @@
-package transactions
+package transactions.candidate
 
 import org.ergoplatform.appkit.BlockchainContext
 import org.ergoplatform.sdk.ErgoId

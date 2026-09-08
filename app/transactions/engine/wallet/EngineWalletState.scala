@@ -1,4 +1,4 @@
-package transactions.engine
+package transactions.engine.wallet
 
 import akka.actor.{Actor, ActorRef, Cancellable}
 import akka.pattern.{ask, pipe}
@@ -11,8 +11,8 @@ import node.model.{ConfirmationRange, MempoolOptions, Paging, SortDirection}
 import org.ergoplatform.appkit.{BlockchainContext, ErgoClient, Parameters}
 import org.slf4j.{Logger, LoggerFactory}
 import play.api.libs.concurrent.InjectedActorSupport
-import transactions.engine.EngineWalletState._
-import transactions.engine.EngineWalletMessages._
+import transactions.engine.wallet.EngineWalletState._
+import transactions.engine.wallet.EngineWalletMessages._
 import work.lithos.mutations.{Eip27Adjustment, InputUTXO, MainnetEip27Constants, Token, TxBuilder, UTXO}
 
 import java.util.UUID
@@ -24,6 +24,7 @@ import scala.concurrent.duration._
 import scala.concurrent.blocking
 import scala.language.postfixOps
 import scala.util.{Failure, Success, Try}
+import transactions.engine.{EngineBroadcast, EngineJoinGuard}
 
 /**
  * Wallet ownership, mixed into the transaction engine actor so one mailbox serialises every change

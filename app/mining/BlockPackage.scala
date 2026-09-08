@@ -1,7 +1,7 @@
 package mining
 
 import stratum.CollateralData
-import transactions.BlockTxMessages.CandidateTx
+import transactions.candidate.BlockTxMessages.CandidateTx
 
 /**
  * Everything [[CandidateBuilder]] has ready for the block at `blockHeight`.

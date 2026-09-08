@@ -1,8 +1,8 @@
-package transactions
+package transactions.candidate
 
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
-import transactions.BlockTxMessages.{CandidateTx, ChainFromMempool, IncludeExisting, Supersede}
+import transactions.candidate.BlockTxMessages.{CandidateTx, ChainFromMempool, IncludeExisting, Supersede}
 
 class CandidateBundleSpec extends AnyFlatSpec with Matchers {
   private def tx(id: String) = CandidateTx(id, id, CandidateTx.Activate)

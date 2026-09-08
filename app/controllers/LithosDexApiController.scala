@@ -15,8 +15,8 @@ import play.api.mvc._
 import scorex.crypto.hash.Blake2b256
 import mutations.NotEnoughInputsException
 import transactions.dex.LDBoxes
-import transactions.engine.FundingExpiredException
-import transactions.engine.EngineWalletMessages.InsufficientWalletFundsException
+import transactions.engine.wallet.FundingExpiredException
+import transactions.engine.wallet.EngineWalletMessages.InsufficientWalletFundsException
 
 
 import java.nio.charset.StandardCharsets

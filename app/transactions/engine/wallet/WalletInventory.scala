@@ -1,4 +1,4 @@
-package transactions.engine
+package transactions.engine.wallet
 
 import configs.NodeContext
 import mutations.NodeWallet.MINER_REWARD_DELAY

@@ -1,4 +1,4 @@
-package transactions
+package transactions.candidate
 
 /**
  * The protocol between the mining path and the transaction actors for filling this miner's own block.

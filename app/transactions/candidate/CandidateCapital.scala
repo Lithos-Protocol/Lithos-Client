@@ -1,6 +1,7 @@
-package transactions
+package transactions.candidate
 
 import mutations.NodeWallet
+import transactions.rollups.RollupTransactions
 import work.lithos.mutations.{Contract, Token}
 
 /**
@@ -39,7 +40,7 @@ final case class CandidateCapital(height: Int, entries: Vector[CapitalEntry] = V
 
   /** Tokens left on unspent outputs, which cannot enter Holding and go to the miner's wallet. */
   def residualTokens: Seq[Token] =
-    rollups.RollupTransactions.mergeTokens(unspent.flatMap(_.tokens))
+    RollupTransactions.mergeTokens(unspent.flatMap(_.tokens))
 }
 
 object CandidateCapital {

@@ -1,5 +1,5 @@
 package transactions
-import transactions.engine.EngineWalletState
+import transactions.engine.wallet.EngineWalletState
 
 import akka.actor.{Actor, ActorRef, ActorSystem, Props}
 import configs.{CandidateConfig, EmissionConfig}
@@ -26,8 +26,8 @@ import transactions.dex.{DexContracts, LDBoxes, LDFundedTx, LithosDexTransaction
 import transactions.emissions.EmissionTransactions
 import transactions.rollups.RollupTransactions
 import transactions.rollups.TransactionMessages.LatestRollup
-import transactions.engine.EngineWalletMessages.{SelectInputs, WalletInputs}
-import transactions.engine.{FundingAllocation, EngineFunding, FundingSource}
+import transactions.engine.wallet.EngineWalletMessages.{SelectInputs, WalletInputs}
+import transactions.engine.wallet.{EngineFunding, FundingAllocation, FundingSource}
 import work.lithos.mutations.{Contract, InputUTXO, Token, UTXO}
 
 import scala.collection.mutable
