@@ -107,8 +107,10 @@
     // The dictionary constrains INPUTS(1) and nothing else. Without this a second data box at
     // INPUTS(2) satisfies its own copy of this path with no contract constraining its successor.
     val handledByDictionary = SELF.id == INPUTS(1).id
+    // OP on the dictionary must be the same, to prevent leaks
+    val correctDictionaryOp = getVarFromInput[Byte](0, 0).get == 2.toByte
 
-    sigmaProp(authenticDictionary && handledByDictionary)
+    sigmaProp(authenticDictionary && handledByDictionary && correctDictionaryOp)
 
   }else{
     sigmaProp(false)
