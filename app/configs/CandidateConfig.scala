@@ -27,6 +27,12 @@ import play.api.{ConfigLoader, Configuration}
  *                                  client's whole package may claim. Well under one on purpose: the
  *                                  node adds its own transactions and picks a remainder never seen
  *                                  here, and a carried unconfirmed ancestor reports no cost.
+ * @param useTruePropCollection     Guard the intermediate outputs a candidate creates for its own
+ *                                  later transactions with `TrueProp` instead of this miner's P2PK,
+ *                                  which costs no proof bytes and no signing. Anyone could spend
+ *                                  such an output, but only once its parent is back on the chain,
+ *                                  and a reorg does not put it there: the node keeps the returned
+ *                                  transaction to itself and it pays no fee. Off by default.
  * @param genesisWaitMs             How long a new block may pass with no job at all while the genesis
  *                                  transaction is built, in ms. Waiting means one job per block
  *                                  instead of a solo job followed by a collateral one; rigs lose more
@@ -51,6 +57,7 @@ case class CandidateConfig(collateralPoolSize: Int,
                            blockTransactions: Boolean,
                            sources: Map[String, CandidateSourceConfig],
                            blockShare: Double,
+                           useTruePropCollection: Boolean,
                            genesisWaitMs: Int,
                            mempoolRefreshMs: Int,
                            blockTxTimeout: Int,
@@ -67,6 +74,7 @@ object CandidateConfig {
       CandidateSourceConfig.Rollups -> CandidateSourceConfig.Default,
       CandidateSourceConfig.Emissions -> CandidateSourceConfig.Default),
     blockShare = 0.5,
+    useTruePropCollection = false,
     genesisWaitMs = 1500,
     mempoolRefreshMs = 10000,
     blockTxTimeout = 20000,
@@ -89,6 +97,7 @@ object CandidateConfig {
       blockTransactions = bool("blockTransactions", Default.blockTransactions),
       sources = Default.sources.keys.map(name => name -> CandidateSourceConfig(config, name)).toMap,
       blockShare = double("blockShare", Default.blockShare),
+      useTruePropCollection = bool("useTruePropCollection", Default.useTruePropCollection),
       genesisWaitMs = int("genesisWaitMs", Default.genesisWaitMs),
       mempoolRefreshMs = int("mempoolRefreshMs", Default.mempoolRefreshMs),
       blockTxTimeout = int("blockTxTimeout", Default.blockTxTimeout),

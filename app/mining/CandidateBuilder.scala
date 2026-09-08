@@ -472,8 +472,10 @@ class CandidateBuilder(client: ErgoClient,
       }).getOrElse(transactions.CandidateBudget.Unbounded)
 
       Future.sequence(asks)
-        .map(all => BlockTxsCollected(attempt,
-          CandidateBundle.select(all.flatten, totalTxLimit, budget)))
+        .map { all =>
+          val (kept, txs) = CandidateBundle.admit(all.flatten, totalTxLimit, budget)
+          BlockTxsCollected(attempt, txs ++ topUpFor(height, kept, txs, budget, genesis))
+        }
         .onComplete {
           case Success(msg) => self ! msg
           case Failure(ex) =>
@@ -481,6 +483,44 @@ class CandidateBuilder(client: ErgoClient,
             self ! BlockTxsCollected(attempt, Seq.empty[CandidateTx])
         }
     }
+
+  /**
+   * The holding top-up that closes a package, or nothing when no source declared any revenue.
+   *
+   * Built here rather than by a source: it spends the outputs the selected transactions created and
+   * the holding box genesis created, so neither the ledger nor the box it pays into exists until
+   * selection is done. Runs on the collection future, off the mailbox, like the selection above it.
+   */
+  private def topUpFor(height: Int,
+                       kept: Seq[CandidateBundle],
+                       selected: Seq[CandidateTx],
+                       budget: transactions.CandidateBudget,
+                       genesis: Option[CollateralData]): Option[CandidateTx] = {
+    val ledger = kept.flatMap(_.capital).foldLeft(transactions.CandidateCapital(height)) {
+      (ledger, entry) =>
+        // Two sources naming one output is a defect in a source, and the box is spendable once
+        // either way. Taking the first keeps the rest of the package rather than losing it here.
+        if (ledger.entries.exists(_.outputId == entry.outputId)) {
+          logger.warn(s"Candidate output ${entry.outputId} was declared twice for block $height; " +
+            "the later declaration is ignored")
+          ledger
+        } else ledger.credit(entry)
+    }
+    if (ledger.entries.isEmpty) None
+    else {
+      val remaining = budget.less(selected.map(_.sizeBytes.toLong).sum, selected.map(_.cost).sum)
+      val built = genesis.flatMap(data => Try(client.execute(ctx =>
+        transactions.CandidateTopUp.build(ctx, prover, data, ledger, height))).toOption.flatten)
+      // Dropped rather than truncated: the transactions that earned this revenue are already
+      // selected, and their outputs stay spendable in a later block.
+      built.filter { tx =>
+        val fits = tx.sizeBytes <= remaining.maxBytes && tx.cost <= remaining.maxCost
+        if (!fits) logger.info(s"Holding top-up for block $height does not fit what is left of the " +
+          s"package budget (${tx.sizeBytes}B, ${tx.cost} cost)")
+        fits
+      }
+    }
+  }
 
   private def startRefresh(): Unit =
     if (!refreshing) {

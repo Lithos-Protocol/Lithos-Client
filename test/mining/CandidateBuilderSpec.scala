@@ -7,7 +7,8 @@ import mining.MiningMessages._
 import mutations.NodeWallet
 import node.NodeApi
 import node.model.NodeBox
-import org.ergoplatform.appkit.BlockchainContext
+import org.ergoplatform.appkit.{BlockchainContext, Parameters}
+import org.ergoplatform.sdk.ErgoId
 import org.scalatest.BeforeAndAfterAll
 import org.scalatest.flatspec.AnyFlatSpecLike
 import org.scalatest.matchers.should.Matchers
@@ -15,7 +16,8 @@ import org.scalatestplus.mockito.MockitoSugar
 import stratum.{CollateralData, CollateralNotFoundException}
 import transactions.BlockTxMessages.{BlockTxsReady, CandidateTx, CandidateTxsDropped, PrepareBlockTxs, RequestBlockTxs}
 import support.FakeNodeContext
-import work.lithos.mutations.InputUTXO
+import transactions.{CandidateBundle, CapitalEntry, CapitalOrigin}
+import work.lithos.mutations.{InputUTXO, UTXO}
 
 import scala.concurrent.duration._
 
@@ -56,9 +58,9 @@ class CandidateBuilderSpec extends TestKit(ActorSystem("candidate-builder-spec",
     CollateralCandidate(input, inclusionHeight, finderFee)
   }
 
-  private def collateralData(boxId: String): CollateralData =
-    new CollateralData("tx-" + boxId.take(8), "{}", "pk-" + boxId.take(8), Array.emptyByteArray,
-      Array.emptyByteArray, boxId, "9address")
+  private def collateralData(boxId: String, holding: Option[InputUTXO] = None): CollateralData =
+    CollateralData("tx-" + boxId.take(8), "{}", "pk-" + boxId.take(8), Array.emptyByteArray,
+      Array.emptyByteArray, boxId, "9address", holdingOutput = holding)
 
   /**
    * A builder whose collateral set and build outcome the test controls.
@@ -95,7 +97,7 @@ class CandidateBuilderSpec extends TestKit(ActorSystem("candidate-builder-spec",
         throw new CollateralNotFoundException(s"stub refuses first build on $id")
       }
       if (failing.contains(id)) throw new CollateralNotFoundException(s"stub refuses $id")
-      collateralData(id)
+      collateralData(id, Some(support.GenesisHolding(ctx, blockHeight)))
     }
   }
 
@@ -108,7 +110,11 @@ class CandidateBuilderSpec extends TestKit(ActorSystem("candidate-builder-spec",
     override protected def nowNanos(): Long = clock()
   }
 
-  private case class Fixture(builder: ActorRef, parent: TestProbe, stub: StubTxBuilder, ids: Seq[String])
+  private case class Fixture(builder: ActorRef, parent: TestProbe, stub: StubTxBuilder,
+                             ids: Seq[String], node: configs.NodeContext, wallet: NodeWallet) {
+    /** One past the offline context's tip, which is the height a real build would be for. */
+    def nextHeight: Int = node.getClient.execute(_.getHeight) + 1
+  }
 
 
 
@@ -128,7 +134,7 @@ class CandidateBuilderSpec extends TestKit(ActorSystem("candidate-builder-spec",
       new TestableBuilder(ctx.getClient, wallet, api, config, stub, sources, clock)))
     // preStart runs a refresh; let it land so the set is warm before the first block.
     Thread.sleep(600)
-    Fixture(builder, parent, stub, set.map(_.id))
+    Fixture(builder, parent, stub, set.map(_.id), ctx, wallet)
   }
 
   /** A set built against the offline context, so a test can choose each box age and bid. */
@@ -301,6 +307,64 @@ class CandidateBuilderSpec extends TestKit(ActorSystem("candidate-builder-spec",
     advanceTo(f, 100).blockTxs shouldBe empty
     withClue("a disabled source costs no build and no node read: ") {
       source.expectNoMessage(1.second)
+    }
+  }
+
+  // ─── candidate revenue ────────────────────────────────────────────────────
+
+  /** A revenue output as an adapter's transaction would leave it, spendable by this miner. */
+  private def revenueBox(f: Fixture, value: Long = Parameters.OneErg): InputUTXO =
+    f.node.getClient.execute(ctx => UTXO(f.wallet.contract, value)
+      .toInput(ctx, ErgoId.create("cd" * 32), 0.toShort))
+
+  private def declaring(entry: CapitalEntry): CandidateBundle =
+    CandidateBundle(extras.toVector, capital = Seq(entry))
+
+  private def entryOn(box: InputUTXO): CapitalEntry =
+    CapitalEntry(CapitalOrigin.ExecutorReward, box, parentTxId = "optional")
+
+  /**
+   * The top-up is built here rather than by a source, because it spends what the selected
+   * transactions created and the holding box genesis created — neither exists until both are done.
+   */
+  "Revenue a source declares" should "leave the package as a holding top-up, last" in {
+    val source = TestProbe()
+    val f = fixture(sources = Seq(CandidateSource(configs.CandidateSourceConfig.Rollups, source.ref)),
+      config = collectingConfig)
+    val height = f.nextHeight
+    advanceTo(f, height)
+    requested(source)
+
+    source.reply(BlockTxsReady(height, Seq(declaring(entryOn(revenueBox(f))))))
+    val pkg = published(f)
+    pkg.blockTxs.map(_.kind) shouldBe Seq(CandidateTx.Payout, transactions.CandidateTopUp.Kind)
+    withClue("the top-up spends the revenue output it was credited with: ") {
+      pkg.blockTxs.last.inputIds should contain(revenueBox(f).id.toString)
+    }
+  }
+
+  /**
+   * A declaration is only worth as much as the bundle carrying it. One too large to be admitted
+   * never reaches a block, so the outputs it named were never created and nothing may spend them.
+   */
+  it should "be dropped along with the bundle that declared it" in {
+    val source = TestProbe()
+    val oneSlot = collectingConfig.copy(sources = sourceLimits(1))
+    val f = fixture(sources = Seq(CandidateSource(configs.CandidateSourceConfig.Rollups, source.ref)),
+      config = oneSlot)
+    val height = f.nextHeight
+    advanceTo(f, height)
+    requested(source)
+
+    // Two members against a one-slot allowance, so the bundle is refused whole.
+    val tooBig = CandidateBundle(
+      Vector(CandidateTx("first", "{}", CandidateTx.Payout),
+        CandidateTx("second", "{}", CandidateTx.Payout)),
+      capital = Seq(entryOn(revenueBox(f))))
+    source.reply(BlockTxsReady(height, Seq(tooBig)))
+
+    withClue("nothing was admitted, so there is no revenue and no top-up to publish: ") {
+      f.parent.expectNoMessage(2.seconds)
     }
   }
 

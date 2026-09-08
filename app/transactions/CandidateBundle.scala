@@ -7,9 +7,14 @@ import transactions.BlockTxMessages.{CandidateTx, ChainFromMempool, MempoolInter
  *
  * `interactions` states how the bundle means to meet the mempool. Admission checks the claim rather
  * than trusting it: a bundle that says it chains from a parent has to carry that parent.
+ *
+ * `capital` names the spendable outputs these members created, which a final holding top-up may
+ * aggregate. Declared by the builder because only it knows which of its outputs are revenue rather
+ * than protocol state; a bundle dropped during admission takes its entries with it.
  */
 final case class CandidateBundle(members: Vector[CandidateTx],
-                                 interactions: Seq[MempoolInteraction] = Seq.empty) {
+                                 interactions: Seq[MempoolInteraction] = Seq.empty,
+                                 capital: Seq[CapitalEntry] = Seq.empty) {
   require(members.nonEmpty && members.size <= 4096, "invalid candidate bundle size")
   require(members.map(_.id).distinct.size == members.size, "duplicate transaction inside candidate bundle")
 
@@ -72,6 +77,14 @@ object CandidateBundle {
   def fit(bundles: Seq[CandidateBundle], limit: Int,
           budget: CandidateBudget = CandidateBudget.Unbounded): Vector[CandidateBundle] =
     admitted(bundles, limit, budget)._1
+
+  /**
+   * The same choice, reported as both, for the caller that needs the transactions and what the
+   * admitted bundles declared alongside them.
+   */
+  def admit(bundles: Seq[CandidateBundle], limit: Int,
+            budget: CandidateBudget = CandidateBudget.Unbounded): (Vector[CandidateBundle], Vector[CandidateTx]) =
+    admitted(bundles, limit, budget)
 
   private def admitted(bundles: Seq[CandidateBundle], limit: Int,
                        budget: CandidateBudget): (Vector[CandidateBundle], Vector[CandidateTx]) = {

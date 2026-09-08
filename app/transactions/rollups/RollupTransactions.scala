@@ -125,6 +125,78 @@ object RollupTransactions {
     wallet.sign(uTx)
   }
 
+  /**
+   * What a top-up can add to a holding box, and the tokens it has to hand back.
+   *
+   * `added` is what is left of the revenue inputs once the fee and the residue output are paid for.
+   * The contract needs it strictly positive, so a plan holding zero or less is not buildable.
+   */
+  final case class TopUpPlan(added: Long, residue: Seq[Token]) {
+    def isViable: Boolean = added > 0
+  }
+
+  /** Tokens summed per id, since one id may arrive on several boxes. */
+  private[transactions] def mergeTokens(tokens: Seq[Token]): Seq[Token] =
+    tokens.foldLeft(Vector.empty[Token]) { (merged, token) =>
+      val idx = merged.indexWhere(_.id.toString == token.id.toString)
+      if (idx < 0) merged :+ token else merged.updated(idx, merged(idx) + token.amount)
+    }
+
+  def planTopUp(revenueInputs: Seq[InputUTXO], feeOutputs: Seq[UTXO]): TopUpPlan = {
+    val residue = mergeTokens(revenueInputs.flatMap(_.tokens))
+    // Holding conserves its own token vector exactly, so revenue tokens need an output of their own
+    // and that output needs the minimum ERG a box can hold.
+    val residueCost = if (residue.isEmpty) 0L else UTXO.MIN_CHANGE
+    TopUpPlan(revenueInputs.map(_.value).sum - feeOutputs.map(_.value).sum - residueCost, residue)
+  }
+
+  /**
+   * Holding op 1 inside the rollup's own block: raise the box's ERG and change nothing else.
+   *
+   * Tokens, all four registers and the script carry through untouched, so the box the block's
+   * genesis created is the box that ends the block, only larger. The contract allows this only while
+   * HEIGHT equals the rollup's own block height, which is what makes it a candidate-only spend.
+   *
+   * Holding is input 0 and output 0 because the contract identifies it by position. Any tokens the
+   * revenue inputs carried leave to the miner's own wallet.
+   *
+   * @param blockHeight the block being mined, which is one past the context's tip. It is what the
+   *                    contract compares against, so it is pinned into a pre-header rather than
+   *                    left to the height signing would otherwise assume.
+   */
+  def genHoldingTopUp(ctx: BlockchainContext,
+                      wallet: NodeWallet,
+                      holdingInput: InputUTXO,
+                      revenueInputs: Seq[InputUTXO],
+                      feeOutputs: Seq[UTXO],
+                      blockHeight: Int): SignedTransaction = {
+    val state = stateOf(holdingInput, LFSMPhase.HOLDING)
+    require(blockHeight.toLong == state.genesisBlockHeight,
+      s"a holding top-up is only valid in the rollup's own block (${state.genesisBlockHeight}), " +
+        s"not $blockHeight")
+
+    val plan = planTopUp(revenueInputs, feeOutputs)
+    require(plan.isViable,
+      s"holding top-up adds ${plan.added}, and the contract requires the value to increase")
+
+    val output = UTXO(holdingContract(ctx), holdingInput.value + plan.added, holdingInput.tokens,
+      registers = holdingInput.registers)
+    val residueOutput = if (plan.residue.isEmpty) Seq.empty[UTXO]
+      else Seq(UTXO(wallet.contract, UTXO.MIN_CHANGE, plan.residue))
+
+    val holdingLogic = logicVar(ctx)
+    val inputWithContext = DexContracts.attachCtxVars(holdingInput,
+      Seq((3.toByte, ErgoValue.of(TransformOp)),
+        (holdingLogic.getId, holdingLogic.getValue)))
+
+    val uTx = TxBuilder(ctx)
+      .setInputs((Seq(inputWithContext) ++ revenueInputs): _*)
+      .setOutputs((Seq(output) ++ residueOutput ++ feeOutputs): _*)
+      .setPreHeader(ctx.createPreHeader().height(blockHeight).build())
+      .buildTx(0, wallet.p2pk)
+    wallet.sign(uTx)
+  }
+
   def genEvalTransform(ctx: BlockchainContext,
                        wallet: NodeWallet,
                        evalInput: InputUTXO,
