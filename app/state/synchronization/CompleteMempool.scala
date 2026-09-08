@@ -61,6 +61,13 @@ object CompleteMempool {
    */
   final val MaxBytes = 16 * 1024 * 1024L
 
+  /**
+   * Bodies per paged read. Kept modest so one response stays inside the reader's response-byte
+   * ceiling even when the mempool holds large transactions; a page that exceeds it fails, and those
+   * members are then fetched by id instead.
+   */
+  final val BodyPageSize = 50
+
   /** Shared ceiling for the spend index and the lender-key set. */
   final val MaxInputs = 65536
   /** Past this an observation cannot authorise a spend, however complete it was when taken. */
@@ -96,6 +103,35 @@ object CompleteMempool {
 
     val anchorAtStart = anchor(node)
     val memberIds = inventory()
+
+    /**
+     * Bodies for the inventory, read in pages and completed by id.
+     *
+     * The inventory decides what the observation must contain; paging is only how most of it is
+     * fetched, because one request per member is a round trip per mempool transaction and puts the
+     * whole mempool on the latency path of every engine operation. Offsets can shift under churn,
+     * so whatever the pages did not supply is fetched directly, and a page read that fails at all
+     * simply leaves more for that pass.
+     */
+    var bodies = Map.empty[String, _root_.node.model.NodeTransaction]
+    Try {
+      var offset = 0
+      var exhausted = false
+      while (!exhausted && bodies.size < memberIds.size) {
+        requireWithinDeadline()
+        val page = node.unconfirmedTransactions(_root_.node.model.Paging(offset, BodyPageSize)).get
+        page.foreach(tx => if (memberIds.contains(tx.id)) bodies += tx.id -> tx)
+        exhausted = page.size < BodyPageSize
+        offset += page.size
+      }
+    }
+    (memberIds -- bodies.keySet).foreach { txId =>
+      requireWithinDeadline()
+      // The byIds route on the supported node returns IDs, not transaction bodies.
+      bodies += txId -> node.unconfirmedTransactionById(txId).get.getOrElse(
+        throw new Raced("mempool member disappeared during collection"))
+    }
+
     var decodedBytes = 0L
     var retained = Vector.empty[MempoolTx]
     // Box id to the first transaction seen claiming it, which is what turns a second claim into a
@@ -106,9 +142,7 @@ object CompleteMempool {
 
     memberIds.toVector.sorted.foreach { txId =>
       requireWithinDeadline()
-      // The byIds route on the supported node returns IDs, not transaction bodies.
-      val tx = node.unconfirmedTransactionById(txId).get.getOrElse(
-        throw new Raced("mempool member disappeared during collection"))
+      val tx = bodies(txId)
       require(tx.id == txId, "mempool body does not match requested id")
       val sizeBytes = NodeCodecs.encodeTransaction(tx).toString.getBytes(UTF_8).length
       decodedBytes += sizeBytes

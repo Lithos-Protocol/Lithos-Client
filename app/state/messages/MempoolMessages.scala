@@ -77,11 +77,19 @@ object MempoolMessages {
 
   case class MempoolRollupState(asInput: InputUTXO,
                                 rollup: Rollup,
-                                toBeRemoved: Boolean = false) extends MempoolState
+                                toBeRemoved: Boolean = false,
+                                ancestorIds: Seq[String] = Seq.empty) extends MempoolState
 
-  /** Metadata-only projection used to filter work before any authenticated dictionary is requested. */
+  /**
+   * Metadata-only projection used to filter work before any authenticated dictionary is requested.
+   *
+   * `ancestorIds` names the unconfirmed transactions that produced `asInput`, parent first. Anything
+   * built on this box is only valid in a block that carries them too, so a candidate has to offer
+   * them alongside its own transaction.
+   */
   case class MempoolRollupMetadata(asInput: InputUTXO,
                                    metadata: RollupMetadata,
-                                   toBeRemoved: Boolean = false) extends MempoolState
+                                   toBeRemoved: Boolean = false,
+                                   ancestorIds: Seq[String] = Seq.empty) extends MempoolState
 
 }

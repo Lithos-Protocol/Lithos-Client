@@ -151,5 +151,6 @@ case class EngineFunding(walletRef: ActorRef,
 }
 
 object EngineFunding {
-  final val AskTimeout: FiniteDuration = 10.seconds
+  // Funding can require context loading and several node reads before inputs can be reserved.
+  final val AskTimeout: FiniteDuration = 30.seconds
 }

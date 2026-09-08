@@ -45,9 +45,13 @@ class EngineReconciler(nodeContext: NodeContext, wallet: ActorRef, mempool: Acto
     val outstanding = engineHolds().filter(_.sendFinished)
     if (outstanding.isEmpty) return
     val startedAt = System.nanoTime()
+    // One observation for the whole pass. Every hold is being judged against the same mempool, and
+    // a walk each would put the entire mempool on the latency path once per outstanding send. Each
+    // hold still rechecks against a fresh observation before anything is released.
+    val observed = observation()
     outstanding.foreach { hold =>
       if (System.nanoTime() - startedAt < CompleteMempool.MaxWalkNanos) {
-        try reconcileHold(hold)
+        try reconcileHold(hold, observed)
         catch { case NonFatal(ex) => org.slf4j.LoggerFactory.getLogger("TransactionEngine")
           .warn(s"Keeping input ownership for ${hold.txId}: ${ex.getMessage}") }
       }
@@ -57,8 +61,7 @@ class EngineReconciler(nodeContext: NodeContext, wallet: ActorRef, mempool: Acto
   /** One owned input's status, as three separately checked facts rather than one guess. */
   private case class InputStatus(id: String, confirmedSpent: Boolean, currentlyUnspent: Boolean)
 
-  private def reconcileHold(hold: EngineHold): Unit = {
-    val observed = observation()
+  private def reconcileHold(hold: EngineHold, observed: CompleteMempool.Snapshot): Unit = {
     // Still in the mempool, so it may yet confirm and its inputs stay owned.
     if (observed.ids.contains(hold.txId)) return
 

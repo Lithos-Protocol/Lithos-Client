@@ -13,7 +13,7 @@ import org.scalatest.flatspec.AnyFlatSpecLike
 import org.scalatest.matchers.should.Matchers
 import org.scalatestplus.mockito.MockitoSugar
 import stratum.{CollateralData, CollateralNotFoundException}
-import transactions.BlockTxMessages.{BlockTxsReady, CandidateTx, CandidateTxsDropped, RequestBlockTxs}
+import transactions.BlockTxMessages.{BlockTxsReady, CandidateTx, CandidateTxsDropped, PrepareBlockTxs, RequestBlockTxs}
 import support.FakeNodeContext
 import work.lithos.mutations.InputUTXO
 
@@ -101,7 +101,7 @@ class CandidateBuilderSpec extends TestKit(ActorSystem("candidate-builder-spec",
 
   private class TestableBuilder(client: org.ergoplatform.appkit.ErgoClient, prover: NodeWallet,
                                 api: NodeApi, c: CandidateConfig, stub: StubTxBuilder,
-                                sources: Seq[ActorRef] = Seq.empty,
+                                sources: Seq[CandidateSource] = Seq.empty,
                                 clock: () => Long = () => System.nanoTime())
     extends CandidateBuilder(client, prover, api, c, sources) {
     override protected val txBuilder: CandidateTxBuilder = stub
@@ -115,7 +115,7 @@ class CandidateBuilderSpec extends TestKit(ActorSystem("candidate-builder-spec",
   private def fixture(boxCount: Int = 4,
                       failing: Set[String] = Set.empty,
                       boxes: Option[Seq[CollateralCandidate]] = None,
-                      sources: Seq[ActorRef] = Seq.empty,
+                      sources: Seq[CandidateSource] = Seq.empty,
                       clock: () => Long = () => System.nanoTime(),
                       config: CandidateConfig = cfg): Fixture = {
     val api = mock[NodeApi]
@@ -229,37 +229,79 @@ class CandidateBuilderSpec extends TestKit(ActorSystem("candidate-builder-spec",
     // The source never answers, so the flag for 100 is still set when 101's genesis is ready. Left
     // there, 101's request is a no-op that nothing restarts and the block mines on genesis alone.
     val source = TestProbe()
-    val withTxs = cfg.copy(blockTransactions = true, maxBlockTxs = 4, blockTxTimeout = 30000)
-    val f = fixture(sources = Seq(source.ref), config = withTxs)
+    val withTxs = cfg.copy(blockTransactions = true, blockTxTimeout = 30000, sources = sourceLimits(4))
+    val f = fixture(sources = Seq(CandidateSource(configs.CandidateSourceConfig.Rollups, source.ref)), config = withTxs)
 
     f.builder ! ChainAdvanced(100)
     published(f)
-    source.expectMsgType[RequestBlockTxs].blockHeight shouldEqual 100
+    requested(source).blockHeight shouldEqual 100
 
     f.builder ! ChainAdvanced(101)
     // Every source is told the previous height is over before anything is asked of it again.
     source.expectMsgType[CandidateTxsDropped].blockHeight shouldEqual 100
     published(f)
     withClue("101 has its own package, so it must get its own collection round: ") {
-      source.expectMsgType[RequestBlockTxs](10.seconds).blockHeight shouldEqual 101
+      requested(source, 10.seconds).blockHeight shouldEqual 101
     }
   }
 
   // ─── ranking ──────────────────────────────────────────────────────────────
 
   private val extras = Seq(CandidateTx("optional", "{}", CandidateTx.Payout))
-  private val collectingConfig = cfg.copy(blockTransactions = true, maxBlockTxs = 4, blockTxTimeout = 30000)
+
+  /**
+   * The collection request, skipping the preparation that now precedes it.
+   *
+   * Preparation is sent when the height advances and the request when genesis reaches miners, so a
+   * probe standing in for a source sees both. Only the second is what these tests are about.
+   */
+  private def requested(source: TestProbe, within: FiniteDuration = 3.seconds): RequestBlockTxs =
+    source.fishForSpecificMessage(within) { case request: RequestBlockTxs => request }
+
+  /** One named source's allowance, which replaces the old single package-wide transaction cap. */
+  private def sourceLimits(maxTxs: Int): Map[String, configs.CandidateSourceConfig] =
+    Map(configs.CandidateSourceConfig.Rollups ->
+      configs.CandidateSourceConfig.Default.copy(maxTxs = maxTxs))
+
+  private val collectingConfig = cfg.copy(blockTransactions = true, blockTxTimeout = 30000, sources = sourceLimits(4))
 
   "Genesis publication" should "gate collection until the exact package reaches miners" in {
     val source = TestProbe()
-    val f = fixture(sources = Seq(source.ref), config = collectingConfig)
+    val f = fixture(sources = Seq(CandidateSource(configs.CandidateSourceConfig.Rollups, source.ref)), config = collectingConfig)
     f.builder ! ChainAdvanced(100, "ab" * 32)
     val pkg = f.parent.expectMsgType[BlockPackageReady].pkg
+    // Building starts with the height, so the source is asked to prepare straight away. What is
+    // gated is the request that collects the result.
+    source.expectMsgType[PrepareBlockTxs].blockHeight shouldBe 100
     source.expectNoMessage(200.millis)
     f.builder ! GenesisPublished(pkg.identity.copy(parentId = "cd" * 32))
     source.expectNoMessage(200.millis)
     f.builder ! GenesisPublished(pkg.identity)
     source.expectMsgType[RequestBlockTxs].blockHeight shouldBe 100
+  }
+
+  /**
+   * Preparation is what makes the collection deadline affordable: a source that only starts building
+   * when asked spends the whole window on signing and node reads, and the block loses its extras.
+   */
+  "Preparation" should "reach a source with its own allowance as soon as the height is known" in {
+    val source = TestProbe()
+    val f = fixture(sources = Seq(CandidateSource(configs.CandidateSourceConfig.Rollups, source.ref)),
+      config = cfg.copy(blockTransactions = true, blockTxTimeout = 30000, sources = sourceLimits(7)))
+    f.builder ! ChainAdvanced(100)
+    source.expectMsg(PrepareBlockTxs(100, 7))
+  }
+
+  it should "not be sent to a source this client has turned off" in {
+    val source = TestProbe()
+    val off = Map(configs.CandidateSourceConfig.Rollups ->
+      configs.CandidateSourceConfig.Default.copy(enabled = false))
+    val f = fixture(sources = Seq(CandidateSource(configs.CandidateSourceConfig.Rollups, source.ref)),
+      config = cfg.copy(blockTransactions = true, blockTxTimeout = 30000, sources = off))
+    advanceTo(f, 100).blockTxs shouldBe empty
+    withClue("a disabled source costs no build and no node read: ") {
+      source.expectNoMessage(1.second)
+    }
   }
 
   "A changed chain parent" should "replace same-height work and allow rollback to a lower height" in {
@@ -276,18 +318,18 @@ class CandidateBuilderSpec extends TestKit(ActorSystem("candidate-builder-spec",
 
   "A stale package rejection" should "not invalidate a replacement at the same height" in {
     val source = TestProbe()
-    val f = fixture(sources = Seq(source.ref), config = collectingConfig)
+    val f = fixture(sources = Seq(CandidateSource(configs.CandidateSourceConfig.Rollups, source.ref)), config = collectingConfig)
     f.builder ! ChainAdvanced(100, "ab" * 32)
     val old = published(f)
-    source.expectMsgType[RequestBlockTxs]
+    requested(source)
     f.builder ! ChainAdvanced(100, "cd" * 32)
     source.expectMsg(CandidateTxsDropped(100))
     val replacement = published(f)
-    source.expectMsgType[RequestBlockTxs]
+    requested(source)
     val replyTo = source.lastSender
     f.builder ! BlockTxsRejected(100, Some(old.identity))
     source.expectNoMessage(200.millis)
-    replyTo ! BlockTxsReady(100, extras)
+    replyTo ! BlockTxsReady(100, Seq(transactions.CandidateBundle(extras.toVector)))
     val augmented = published(f)
     augmented.parentId shouldBe replacement.parentId
     augmented.blockTxs shouldBe extras
@@ -295,62 +337,62 @@ class CandidateBuilderSpec extends TestKit(ActorSystem("candidate-builder-spec",
 
   "Optional collection" should "publish genesis first and then admit a timely response" in {
     val source = TestProbe()
-    val f = fixture(sources = Seq(source.ref), config = collectingConfig)
+    val f = fixture(sources = Seq(CandidateSource(configs.CandidateSourceConfig.Rollups, source.ref)), config = collectingConfig)
     advanceTo(f, 100).blockTxs shouldBe empty
-    source.expectMsgType[RequestBlockTxs]
-    source.reply(BlockTxsReady(100, extras))
+    requested(source)
+    source.reply(BlockTxsReady(100, Seq(transactions.CandidateBundle(extras.toVector))))
     published(f).blockTxs shouldEqual extras
   }
 
   it should "discard a response after rejection even while its ask remains live" in {
     val source = TestProbe()
-    val f = fixture(sources = Seq(source.ref), config = collectingConfig)
+    val f = fixture(sources = Seq(CandidateSource(configs.CandidateSourceConfig.Rollups, source.ref)), config = collectingConfig)
     advanceTo(f, 100)
-    source.expectMsgType[RequestBlockTxs]
+    requested(source)
     val replyTo = source.lastSender
     f.builder ! BlockTxsRejected(100)
     source.expectMsg(CandidateTxsDropped(100))
-    replyTo ! BlockTxsReady(100, extras)
+    replyTo ! BlockTxsReady(100, Seq(transactions.CandidateBundle(extras.toVector)))
     f.parent.expectNoMessage(500.millis)
   }
 
   it should "enforce the deadline before a delayed timer reaches the mailbox" in {
     val clock = new java.util.concurrent.atomic.AtomicLong(1L)
     val source = TestProbe()
-    val f = fixture(sources = Seq(source.ref), config = collectingConfig, clock = () => clock.get())
+    val f = fixture(sources = Seq(CandidateSource(configs.CandidateSourceConfig.Rollups, source.ref)), config = collectingConfig, clock = () => clock.get())
     advanceTo(f, 100)
-    source.expectMsgType[RequestBlockTxs]
+    requested(source)
     clock.addAndGet(collectingConfig.blockTxTimeout.milliseconds.toNanos)
-    source.reply(BlockTxsReady(100, extras))
+    source.reply(BlockTxsReady(100, Seq(transactions.CandidateBundle(extras.toVector))))
     f.parent.expectNoMessage(500.millis)
     source.expectMsg(CandidateTxsDropped(100))
   }
 
   it should "keep an old same-height response out of the replacement genesis" in {
     val source = TestProbe()
-    val f = fixture(sources = Seq(source.ref), config = collectingConfig)
+    val f = fixture(sources = Seq(CandidateSource(configs.CandidateSourceConfig.Rollups, source.ref)), config = collectingConfig)
     val first = advanceTo(f, 100)
-    source.expectMsgType[RequestBlockTxs]
+    requested(source)
     val oldReply = source.lastSender
     f.builder ! RebuildCandidate
     source.expectMsg(CandidateTxsDropped(100))
     val replacement = published(f)
     replacement.collateral.collateralId should not equal first.collateral.collateralId
-    source.expectMsgType[RequestBlockTxs]
+    requested(source)
     val newReply = source.lastSender
-    oldReply ! BlockTxsReady(100, extras)
+    oldReply ! BlockTxsReady(100, Seq(transactions.CandidateBundle(extras.toVector)))
     f.parent.expectNoMessage(500.millis)
-    newReply ! BlockTxsReady(100, extras)
+    newReply ! BlockTxsReady(100, Seq(transactions.CandidateBundle(extras.toVector)))
     published(f).collateral.collateralId shouldEqual
       replacement.collateral.collateralId
   }
 
   it should "ignore a stale rejection and reject a source response naming another height" in {
     val source = TestProbe()
-    val f = fixture(sources = Seq(source.ref), config = collectingConfig)
+    val f = fixture(sources = Seq(CandidateSource(configs.CandidateSourceConfig.Rollups, source.ref)), config = collectingConfig)
     advanceTo(f, 100)
-    source.expectMsgType[RequestBlockTxs]
-    source.reply(BlockTxsReady(99, extras))
+    requested(source)
+    source.reply(BlockTxsReady(99, Seq(transactions.CandidateBundle(extras.toVector))))
     f.parent.expectNoMessage(500.millis)
     f.builder ! BlockTxsRejected(99)
     source.expectNoMessage(500.millis)
@@ -358,7 +400,7 @@ class CandidateBuilderSpec extends TestKit(ActorSystem("candidate-builder-spec",
 
   "A superseded genesis build" should "not publish when a rebuild arrives at the same height" in {
     val source = TestProbe()
-    val f = fixture(sources = Seq(source.ref))
+    val f = fixture(sources = Seq(CandidateSource(configs.CandidateSourceConfig.Rollups, source.ref)))
     f.stub.holdAt = Set(100)
     f.builder ! ChainAdvanced(100)
     awaitAssert(f.stub.builtFor should have size 1)

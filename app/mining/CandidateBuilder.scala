@@ -12,7 +12,8 @@ import node.NodeApi
 import org.ergoplatform.appkit.ErgoClient
 import org.slf4j.{Logger, LoggerFactory}
 import stratum.{CollateralData, CollateralNotFoundException}
-import transactions.BlockTxMessages.{BlockTxsReady, CandidateTx, CandidateTxsDropped, RequestBlockTxs}
+import transactions.BlockTxMessages.{BlockTxsReady, CandidateTx, CandidateTxsDropped, PrepareBlockTxs, RequestBlockTxs}
+import transactions.CandidateBundle
 import java.util.UUID
 
 import scala.concurrent.duration._
@@ -24,7 +25,7 @@ import scala.util.{Failure, Random, Success, Try}
  *
  * Builds exactly one transaction, the genesis transaction, and publishes it alone before asking the
  * transaction actors for anything else — the first candidate of a block should cost one signature.
- * Everything else is optional and capped at `maxBlockTxs`.
+ * Everything else is optional and bounded per source, then again as a whole package.
  *
  * Two things keep node calls off the critical path: the collateral set is pre-loaded and refreshed
  * in the background, and the box drawn from it is kept until it is gone, because the node caches one
@@ -34,7 +35,7 @@ class CandidateBuilder(client: ErgoClient,
                        prover: NodeWallet,
                        nodeApi: NodeApi,
                        config: CandidateConfig,
-                       txSources: Seq[ActorRef]) extends Actor {
+                       txSources: Seq[MiningMessages.CandidateSource]) extends Actor {
 
   private val logger: Logger = LoggerFactory.getLogger("CandidateBuilder")
 
@@ -46,6 +47,16 @@ class CandidateBuilder(client: ErgoClient,
     context.system.dispatchers.lookup(Contexts.key(Contexts.Polling))
 
   private implicit val askTimeout: Timeout = Timeout(config.blockTxTimeout.milliseconds)
+
+  private def limitsFor(name: String): configs.CandidateSourceConfig =
+    config.sources.getOrElse(name, configs.CandidateSourceConfig.Default)
+
+  /** Sources this client will actually ask. A disabled one costs no build and no node read. */
+  private val enabledSources: Seq[MiningMessages.CandidateSource] =
+    txSources.filter(source => limitsFor(source.name).enabled)
+
+  /** The package cannot hold more than every enabled source is allowed between them. */
+  private val totalTxLimit: Int = enabledSources.map(source => limitsFor(source.name).maxTxs).sum
 
   /** Overridable so a test can drive the actor's selection rules without signing real transactions. */
   protected val txBuilder: CandidateTxBuilder = new CandidateTxBuilder(prover, nodeApi, config)
@@ -122,8 +133,8 @@ class CandidateBuilder(client: ErgoClient,
 
   override def preStart(): Unit = {
     logger.info(s"CandidateBuilder started: collateralPoolSize=${config.collateralPoolSize}, " +
-      s"blockTransactions=${config.blockTransactions} (max ${config.maxBlockTxs} from " +
-      s"${txSources.size} source(s))")
+      s"blockTransactions=${config.blockTransactions}, sources=[" +
+      enabledSources.map(s => s"${s.name}:${limitsFor(s.name).maxTxs}").mkString(", ") + "]")
 
     // Warms both the collateral set and the compiled contract cache before the first block.
     startRefresh()
@@ -166,6 +177,7 @@ class CandidateBuilder(client: ErgoClient,
         collectingFor = None
         knownSpent = knownSpent.filter(e => height - e._2 < SpentMemoryBlocks)
         startBuild(height)
+        prepareBlockTxs(height)
         context.system.scheduler.scheduleOnce(
           PostBlockRefreshDelay, self, RefreshCollateralSet)(context.dispatcher)
       }
@@ -323,7 +335,7 @@ class CandidateBuilder(client: ErgoClient,
   }
 
   private def dropCandidates(height: Int): Unit =
-    txSources.foreach(_ ! CandidateTxsDropped(height))
+    txSources.foreach(_.ref ! CandidateTxsDropped(height))
 
   private def expireCollection(attempt: CollectionAttempt): Unit = {
     collectingFor = None
@@ -404,12 +416,24 @@ class CandidateBuilder(client: ErgoClient,
   }
 
   /**
+   * Tell every enabled source to start building for this height, alongside the genesis build.
+   *
+   * Genesis has its own worker, so this costs it nothing and buys the sources the whole genesis
+   * build and publication to work in. Without it their signing and node reads all land inside the
+   * collection deadline, where a slow source spends the window rather than having an answer ready.
+   */
+  private def prepareBlockTxs(height: Int): Unit =
+    if (config.blockTransactions)
+      enabledSources.foreach(source =>
+        source.ref ! PrepareBlockTxs(height, limitsFor(source.name).maxTxs))
+
+  /**
    * Ask every transaction source what it has for this block, once the genesis package is out.
    * Answers are concatenated in ask order, so earlier sources get the slots, and each source's own
    * ordering is preserved because only it knows which of its transactions chain off which.
    */
   private def collectBlockTxs(height: Int): Unit =
-    if (collectingFor.isEmpty && txSources.nonEmpty && config.maxBlockTxs > 0) {
+    if (collectingFor.isEmpty && enabledSources.nonEmpty && totalTxLimit > 0) {
       val attempt = CollectionAttempt(UUID.randomUUID(), height,
         currentPackage.get.collateral.txId, nowNanos())
       collectingFor = Some(attempt)
@@ -417,21 +441,39 @@ class CandidateBuilder(client: ErgoClient,
       context.system.scheduler.scheduleOnce(
         config.blockTxTimeout.milliseconds, self, CollectTimedOut(attempt))(context.dispatcher)
 
-      // Each source is asked for the whole budget and the cap applied afterwards, so an empty first
-      // source does not waste the block's slots.
-      val asks = txSources.map { source =>
-        (source ? RequestBlockTxs(height, config.maxBlockTxs))
+      // Each source is asked for its own allowance and bounded against it before anything is
+      // combined, so a busy source cannot take the space a quieter one was given.
+      val asks = enabledSources.map { source =>
+        val limits = limitsFor(source.name)
+        (source.ref ? RequestBlockTxs(height, limits.maxTxs))
           .mapTo[BlockTxsReady]
-          .map(reply => if (reply.blockHeight == height) reply.txs else Seq.empty[CandidateTx])
+          .map { reply =>
+            if (reply.blockHeight != height) Seq.empty[CandidateBundle]
+            else CandidateBundle.fit(reply.bundles, limits.maxTxs, limits.budget)
+          }
           .recover {
             case ex =>
-              logger.warn(s"A transaction source failed for block $height: ${ex.getMessage}")
-              Seq.empty[CandidateTx]
+              logger.warn(s"Transaction source ${source.name} failed for block $height: ${ex.getMessage}")
+              Seq.empty[CandidateBundle]
           }
       }
 
+      // Read once per collection: the active limits can move at a parameter boundary, and a package
+      // sized against stale ones is the case the node refuses outright.
+      // Genesis is charged first: it is part of the same supplied package and the node counts it
+      // against the same block. Both dimensions are exact, because it was measured where it was signed.
+      val genesis = currentPackage.map(_.collateral)
+      val genesisBytes = genesis.map(_.signedSizeBytes.toLong).getOrElse(0L)
+      val genesisCost = genesis.map(_.cost).getOrElse(0L)
+      val budget = Try(client.execute { ctx =>
+        val parameters = ctx.getDataSource.getParameters
+        transactions.CandidateBudget.of(parameters.getMaxBlockSize, parameters.getMaxBlockCost,
+          config.blockShare).less(genesisBytes, genesisCost)
+      }).getOrElse(transactions.CandidateBudget.Unbounded)
+
       Future.sequence(asks)
-        .map(all => BlockTxsCollected(attempt, all.flatten.take(config.maxBlockTxs)))
+        .map(all => BlockTxsCollected(attempt,
+          CandidateBundle.select(all.flatten, totalTxLimit, budget)))
         .onComplete {
           case Success(msg) => self ! msg
           case Failure(ex) =>

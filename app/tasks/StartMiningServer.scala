@@ -100,7 +100,11 @@ class StartMiningServer @Inject()(system: ActorSystem, config: Configuration,
           candidateConfig = stratumParams.candidate,
           // Asked in this order for this miner's own block, so rollup work — submissions and fraud
           // proofs first — gets the slots ahead of collateral-queue maintenance.
-          txSources       = Seq(transactionProcessor, emissionHandler),
+          txSources       = Seq(
+            mining.MiningMessages.CandidateSource(
+              configs.CandidateSourceConfig.Rollups, transactionProcessor),
+            mining.MiningMessages.CandidateSource(
+              configs.CandidateSourceConfig.Emissions, emissionHandler)),
           rotateExtraNonceInterval = stratumParams.rotateExtraNonceInterval
         )
 

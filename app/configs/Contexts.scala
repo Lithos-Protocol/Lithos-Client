@@ -41,13 +41,14 @@ object Contexts {
   final val EngineIo: String = "engine-io-dispatcher"
   final val MempoolIo: String = "mempool-io-dispatcher"
   final val WalletIo: String = "wallet-io-dispatcher"
+  final val WalletMaintenance: String = "wallet-maintenance-dispatcher"
   final val EngineCandidate: String = "engine-candidate-dispatcher"
   final val CriticalWallet: String = "critical-wallet-dispatcher"
   final val CriticalTx: String = "critical-tx-dispatcher"
 
   /** Dispatcher names shared with startup configuration validation. */
   final val Names: Seq[String] = Seq(Stratum, Polling, Sync, Tx, Dex, Database, SnapshotIo,
-    CandidateIo, MiningControlIo, Genesis, EngineIo, MempoolIo, WalletIo, EngineCandidate, CriticalWallet, CriticalTx)
+    CandidateIo, MiningControlIo, Genesis, EngineIo, MempoolIo, WalletIo, WalletMaintenance, EngineCandidate, CriticalWallet, CriticalTx)
 
   def key(name: String): String = s"lithos-contexts.$name"
 }

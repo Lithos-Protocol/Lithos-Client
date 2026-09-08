@@ -292,4 +292,28 @@ class KnownReservationSpec
     taken.isFailure shouldBe true
     dexSide.reserve(5 * erg).inputs.map(_.value) shouldEqual Seq(5 * erg)
   }
+
+  // ─── change that has since been spent ─────────────────────────────────────
+
+  /**
+   * Chained change is offered ahead of anything the node reports, so an entry left behind after its
+   * box is spent is handed to the next build — which then names inputs that no longer exist and is
+   * refused wholesale. A complete read reports unconfirmed outputs too, so a chained box that is
+   * still real comes back in it; one that does not has been spent.
+   */
+  "Chained change that has been spent" should "stop being offered after a complete refresh" in {
+    val f = fixture(w => Seq(walletBox(w, erg / 2)))
+    val child = knownOutput(f, 3 * erg)
+    f.mgr ! ReturnInputs(Seq(child))
+    Thread.sleep(200)
+
+    // Before any read: the wallet cannot cover this on its own, so answering at all proves the
+    // chained box came from the cache rather than the node.
+    offered(f, 2 * erg).map(_.id.toString) shouldEqual Seq(child.id.toString)
+
+    // Change is only remembered once its parent was accepted, so a mempool-aware read reports it
+    // while it is still real. One that omits it says it has been spent.
+    refresh(f)
+    offered(f, 2 * erg) shouldBe empty
+  }
 }

@@ -21,7 +21,7 @@ import scala.concurrent.duration._
  *
  * Two defects live here historically, and both are silent. Removal used to match on `txType` alone,
  * which deleted every fraud proof for a rollup once one was dispatched; and removal used to happen
- * on the SEND, which lost the whole batch whenever `RollupCore` refused it — and nothing but
+ * on the SEND, which lost the whole batch whenever `RollupExecution` refused it — and nothing but
  * a fresh evaluation cycle re-derives a fraud proof stub.
  *
  * `pendingRollupTxs` is private, so everything here is asserted through the messages the actor
@@ -51,7 +51,7 @@ class RollupProcessorSpec extends TestKit(ActorSystem("tx-processor-spec", Rollu
     val evaluator = TestProbe()
     val engine = TestProbe()
     val processor = system.actorOf(Props(new RollupProcessor(
-      quietConfig, ctx, new FakeCache, sync.ref, submission.ref, evaluator.ref, engine.ref)))
+      quietConfig, ctx, new FakeCache, sync.ref, evaluator.ref, submission.ref)))
     Fixture(processor, sync, submission, evaluator, TestProbe(), engine)
   }
 
@@ -69,26 +69,24 @@ class RollupProcessorSpec extends TestKit(ActorSystem("tx-processor-spec", Rollu
 
   private def tick(f: Fixture): Unit = f.processor ! ProcessTransactions
 
-  "A funded holding transform" should "use only the engine and remain queued until its outcome" in {
+  "A funded holding transform" should "share the batch and wait for batch admission" in {
     val f = fixture()
-    val stub = RollupTxStub("ab" * 32, Some(100L), HoldingTransform)
-    val intent = transactions.engine.TransactionEngine.HoldingTransform(stub.rollupBlockId, 100L, stub.fee)
-    seed(f, stub)
+    val holding = RollupTxStub("ab" * 32, Some(100L), HoldingTransform)
+    val evaluation = RollupTxStub("cd" * 32, Some(101L), EvalTransform)
+    seed(f, holding, evaluation)
     tick(f)
-    f.engine.expectMsg(transactions.engine.TransactionEngine.Submit(intent))
-    f.submission.expectNoMessage(100.millis)
-    f.engine.send(f.processor, transactions.engine.TransactionEngine.Deferred(intent.key, "not ready"))
+    f.submission.expectMsg(RollupBatch(Seq(holding, evaluation)))
     tick(f)
-    f.engine.expectMsg(transactions.engine.TransactionEngine.Submit(intent))
-    f.engine.send(f.processor, transactions.engine.TransactionEngine.Accepted(intent.key, "cd" * 32))
+    f.submission.expectMsg(RollupBatch(Seq(holding, evaluation)))
+    f.submission.send(f.processor, BatchAccepted(Seq(holding, evaluation)))
     tick(f)
-    f.engine.expectNoMessage(200.millis)
+    f.submission.expectNoMessage(200.millis)
+    f.engine.expectNoMessage(100.millis)
   }
-
   // ─── the §4b.2 regression ─────────────────────────────────────────────────
 
   "A dispatched batch" should "keep its stubs until they are acknowledged" in {
-    // Removal used to happen on the send. Making `batchLock` real made RollupCore's refusal
+    // Removal used to happen on the send. Making `batchLock` real made RollupExecution's refusal
     // branch reachable, and a refused batch then lost its stubs outright.
     val f = fixture()
     seed(f, fpStub("rollup-a", 1))
@@ -221,17 +219,17 @@ class RollupProcessorSpec extends TestKit(ActorSystem("tx-processor-spec", Rollu
     seed(f, fpStub("rollup-a", 1))
 
     f.probe.send(f.processor, RequestBlockTxs(500, 0))
-    f.probe.expectMsgType[BlockTxsReady].txs shouldBe empty
+    f.probe.expectMsgType[BlockTxsReady].bundles shouldBe empty
     f.submission.expectNoMessage(500.millis)
   }
 
   it should "answer empty immediately when nothing is queued" in {
     val f = fixture()
     f.probe.send(f.processor, RequestBlockTxs(500, 5))
-    f.probe.expectMsgType[BlockTxsReady].txs shouldBe empty
+    f.probe.expectMsgType[BlockTxsReady].bundles shouldBe empty
   }
 
-  it should "hand the build to RollupCore with the miner as the reply address" in {
+  it should "hand the build to RollupExecution with the miner as the reply address" in {
     // `tell(..., requester)` so the answer goes straight back to the builder rather than making a
     // second hop through this actor, which is on the block's critical path.
     val f = fixture()

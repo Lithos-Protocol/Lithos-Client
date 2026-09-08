@@ -70,7 +70,7 @@ class ConfigsSpec extends AnyFlatSpec with Matchers {
     // Keep runtime dispatcher lookups and validation names aligned.
     Contexts.Names should contain theSameElementsAs
       Seq(Contexts.Stratum, Contexts.Polling, Contexts.Sync, Contexts.Tx, Contexts.Dex,
-        Contexts.Database, Contexts.SnapshotIo, Contexts.CandidateIo, Contexts.MiningControlIo, Contexts.Genesis, Contexts.EngineIo, Contexts.MempoolIo, Contexts.WalletIo, Contexts.EngineCandidate, Contexts.CriticalWallet, Contexts.CriticalTx)
+        Contexts.Database, Contexts.SnapshotIo, Contexts.CandidateIo, Contexts.MiningControlIo, Contexts.Genesis, Contexts.EngineIo, Contexts.MempoolIo, Contexts.WalletIo, Contexts.WalletMaintenance, Contexts.EngineCandidate, Contexts.CriticalWallet, Contexts.CriticalTx)
   }
 
   it should "reject an apiKeyHash that is the key rather than its hash" in {

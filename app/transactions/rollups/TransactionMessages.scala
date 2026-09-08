@@ -114,12 +114,12 @@ object TransactionMessages {
   /**
    * A priority-ordered batch of up to TX_BATCH_SIZE non-evaluation stubs
    * (NISPSubmissions, then Transforms, then Payouts) sent from
-   * RollupProcessor to RollupCore for on-chain submission.
+   * RollupProcessor to RollupExecution for on-chain submission.
    */
   case class RollupBatch(stubs: Seq[RollupTxStub])
 
   /**
-   * RollupCore → RollupProcessor: this batch was taken, so its stubs may be dropped.
+   * RollupExecution → RollupProcessor: this batch was taken, so its stubs may be dropped.
    *
    * A batch refused by the submission lock is NOT acknowledged, and its stubs stay queued for the
    * next tick. Dropping them on the send instead lost them whenever the lock was held — and while
@@ -135,11 +135,15 @@ object TransactionMessages {
   case class EvaluationSet(stubs: Seq[RollupTxStub])
 
   /**
-   * RollupProcessor → RollupCore: build these stubs fee-less and reply to the original
+   * RollupProcessor → RollupExecution: build these stubs fee-less and reply to the original
    * requester WITHOUT sending them. The stubs stay queued, so the funded copies still reach the
    * mempool on the normal tick; whichever lands first wins and the other is a double spend.
    */
-  case class BuildBlockTxs(blockHeight: Int, stubs: Seq[RollupTxStub])
+  /**
+   * @param answer whether a requester is waiting on this build. False when it is preparation, which
+   *               caches its result for the request that follows.
+   */
+  case class BuildBlockTxs(blockHeight: Int, stubs: Seq[RollupTxStub], answer: Boolean = true)
 
   // Trait representing entire rollup evaluation state
   sealed trait RollupEvaluationResult
@@ -164,7 +168,12 @@ object TransactionMessages {
 
   // Latest States
   sealed trait LatestState
-  case class LatestRollup(inputUTXO: InputUTXO, rollup: Rollup) extends LatestState
+  /**
+   * @param ancestorIds unconfirmed transactions behind `inputUTXO`, parent first. Empty when it is
+   *                    a confirmed box; anything built on it into a block must carry these too.
+   */
+  case class LatestRollup(inputUTXO: InputUTXO, rollup: Rollup,
+                          ancestorIds: Seq[String] = Seq.empty) extends LatestState
   // Exceptions
   case class RollupRemovedException(msg: String) extends Exception(msg)
   case class NewlyGeneratedRollupException(msg: String) extends Exception(msg)

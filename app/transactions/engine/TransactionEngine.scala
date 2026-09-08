@@ -13,14 +13,7 @@ object TransactionEngine {
   case object RegisterMiner
   final case class JoinCollateral(request: api.models.CollateralJoinExecuteRequest)
 
-  /** Advance one rollup out of its holding period. Rebuildable, so it survives a restart. */
-  final case class HoldingTransform(blockId: String, period: Long, fee: Long) {
-    def key: String = s"holding:$blockId:$period"
-    def valid: Boolean = blockId.matches("[0-9a-f]{64}") && period >= 0 &&
-      fee == transactions.rollups.TransactionMessages.RollupTxStub.ROLLUP_FEE
-  }
-
-  final case class Submit(intent: HoldingTransform)
+  final case class Submit(intent: EngineIntent)
   /** Admit work that only becomes eligible later. Same lifecycle as an immediate request. */
   final case class Schedule(intent: EngineIntent, notBeforeMillis: Long, expiresAtMillis: Long)
   case object GetConsolidationStatus
@@ -43,9 +36,17 @@ object TransactionEngine {
 
   private[engine] case object Reconcile
 
-  /** Queue depth per lane. Critical work gets the larger share so a burst cannot crowd it out. */
-  private final val MaxCriticalQueued = 128
-  private final val MaxOptionalQueued = 32
+  /**
+   * Queue depth per lane.
+   *
+   * Optional depth has to exceed the number of rollups this client tracks: a processing tick offers
+   * one holding transform per rollup at once, each a distinct key, and admission refuses on queue
+   * size rather than on how fast the lane drains. Sized too small, the excess is rejected the moment
+   * it arrives however quickly work completes. Entries are a key and a small intent, so depth is
+   * cheap; per-key coalescing is what actually bounds the set.
+   */
+  private final val MaxCriticalQueued = 256
+  private final val MaxOptionalQueued = 256
   /** Callers that may wait on one key before duplicates are refused rather than queued. */
   private final val MaxWaitersPerKey = 8
   /** Longest an admitted intent may sit before it is dropped as stale. */
@@ -65,18 +66,13 @@ object TransactionEngine {
 class TransactionEngine @Inject()(node: NodeContext,
   @Named("sync-handler") sync: ActorRef,
   @Named("mempool-view") mempool: ActorRef,
-  override protected val cacheApi: play.api.cache.SyncCacheApi,
-  override protected val config: play.api.Configuration,
-  override protected val dataBoxes: transactions.rollups.DataBoxSource)
-  extends EngineWalletState(node) with transactions.rollups.RollupCore with transactions.emissions.EmissionsCore {
+  protected val cacheApi: play.api.cache.SyncCacheApi,
+  protected val config: play.api.Configuration,
+  protected val dataBoxes: transactions.rollups.DataBoxSource)
+  extends EngineWalletState(node) with EngineRollupCandidates with transactions.emissions.EmissionsCore {
   import TransactionEngine._
   import ExecutionSchedule._
 
-  override protected def rollupNodeContext: NodeContext = node
-  override protected def syncHandler: ActorRef = sync
-  override protected def mempoolView: ActorRef = mempool
-  override protected def walletManager: ActorRef = self
-  override protected def rollupNodeApi: _root_.node.NodeApi = nodeApi
   override protected def emissionNodeContext: NodeContext = node
   override protected def emissionWalletManager: ActorRef = self
   override protected def emissionNodeApi: _root_.node.NodeApi = nodeApi
@@ -84,16 +80,23 @@ class TransactionEngine @Inject()(node: NodeContext,
     _root_.node.rest.NodeHttpConfig(node.getNodeUrl, Some(node.getNodeKey),
       maxResponseBytes = 2 * 1024 * 1024, callTimeoutMs = 10000L))
 
+  private val rollupWorker = context.system.dispatchers.lookup("lithos-contexts.critical-tx-dispatcher")
+
+  private def newRollupExecution(eligible: () => Boolean): RollupExecution =
+    new RollupExecution(node, self, sync, mempool, config, dataBoxes, nodeApi, eligible, rollupWorker)
+
+  override protected def candidateExecution(eligible: () => Boolean): RollupExecution = newRollupExecution(eligible)
   private val worker = context.system.dispatchers.lookup("lithos-contexts.engine-io-dispatcher")
 
   /** Cleared on stop so an outstanding worker abandons its build instead of signing into a dead actor. */
   private val alive = new AtomicBoolean(true)
 
-  protected lazy val execution = new HoldingTransformExecution(node, self, sync, mempool)
+
   /** Engine-wide: resolves outstanding sends for every operation */
   protected lazy val reconciler = new EngineReconciler(node, self, mempool)
 
-  private val schedule = new ExecutionSchedule[EngineIntent]()
+  // Sized from the lane depths so neither lane can be refused by a smaller shared cap.
+  private val schedule = new ExecutionSchedule[EngineIntent](MaxCriticalQueued + MaxOptionalQueued)
   /** Callers waiting on an outcome, by intent key. Timer-driven work has none. */
   private var waiters = Map.empty[String, Vector[ActorRef]]
   /** Entries a worker currently owns, so a completion can be matched back to its intent kind. */
@@ -113,7 +116,7 @@ class TransactionEngine @Inject()(node: NodeContext,
     if (consolidationEnabled) ConsolidationExecution.OutcomeNotObserved else ConsolidationExecution.OutcomeDisabled)
 
   private lazy val consolidation = new ConsolidationExecution(node, nodeApi, self)
-  private lazy val dex = new DexExecution(node, EngineFunding(self, 5.seconds, ec), () => alive.get()) {
+  private lazy val dex = new DexExecution(node, EngineFunding(self, EngineFunding.AskTimeout, ec), () => alive.get()) {
     override protected def executionNode: _root_.node.NodeApi = TransactionEngine.this.nodeApi
   }
   private lazy val dexCache = new cache.LDCache(cacheApi)
@@ -133,8 +136,7 @@ class TransactionEngine @Inject()(node: NodeContext,
       mempool.forward(state.synchronization.CompleteMempool.Refresh)
     case GetConsolidationStatus => sender() ! consolidationStatus
 
-    case Submit(intent) if !intent.valid => sender() ! Rejected(intent.key, "invalid holding-transform intent")
-    case Submit(intent) => admit(EngineIntent.Holding(intent), sender())
+    case Submit(intent) => admit(intent, sender())
     case intent: DexIntent => admit(EngineIntent.Dex(intent), sender())
     case JoinCollateral(request) => admit(EngineIntent.Join(request), sender())
     case RegisterMiner => admit(EngineIntent.Register, sender())
@@ -175,7 +177,6 @@ class TransactionEngine @Inject()(node: NodeContext,
       val entry = running(key)
       // Release the per-kind lock the mixin took when the work started.
       entry.work match {
-        case _: EngineIntent.Rollups => finishRollupBatch()
         case _: EngineIntent.Join | EngineIntent.Queue | EngineIntent.Collateralize => finishEmission()
         case EngineIntent.Consolidate =>
           consolidationStatus = result.map(_.asInstanceOf[ConsolidationExecution.Status])
@@ -213,7 +214,6 @@ class TransactionEngine @Inject()(node: NodeContext,
   private def admit(work: EngineIntent, reply: ActorRef, timing: Option[Timing] = None): Boolean = {
     val now = System.currentTimeMillis()
     val valid = work match {
-      case EngineIntent.Holding(transform) => transform.valid
       case EngineIntent.Dex(request, requestId) => DexIntent.fitsBudget(request) && requestId.length <= 128
       case EngineIntent.Rollups(stubs) =>
         stubs.nonEmpty && stubs.size <= 100 && stubs.forall(_.rollupBlockId.matches("[0-9a-f]{64}"))
@@ -274,22 +274,23 @@ class TransactionEngine @Inject()(node: NodeContext,
     running += entry.key -> entry
     val stillEligible = () => alive.get() && System.currentTimeMillis() < entry.timing.expires
     val dispatched: Try[Future[Any]] = Try(entry.work match {
-      case EngineIntent.Rollups(stubs) => executeRollupBatch(stubs)
+      case EngineIntent.Rollups(stubs) => newRollupExecution(stillEligible).execute(stubs)
       case work @ (_: EngineIntent.Join | EngineIntent.Queue | EngineIntent.Collateralize) => executeEmission(work)
-      case EngineIntent.Register => executeRegistration()
+      case EngineIntent.Register => Future(newRollupExecution(stillEligible).register())(worker)
       case work => Future {
         require(stillEligible(), "engine attempt expired")
-        work match {
-          case EngineIntent.Holding(transform) => execution.execute(transform, stillEligible)
-          case EngineIntent.Dex(request, _) => request.execute(dex, dexCache)
-          case EngineIntent.Consolidate => consolidation.execute(consolidationTarget, stillEligible)
-          case _ => throw new IllegalArgumentException("unsupported engine intent")
-        }
+        executeOptional(work, stillEligible)
       }(worker)
     })
     dispatched match {
       case Success(future) => future.onComplete(result => self ! WorkFinished(entry.key, entry.attempt.get, result))
       case Failure(ex) => self ! WorkFinished(entry.key, entry.attempt.get, Failure(ex))
     }
+  }
+  /** Blocking optional operations run on the engine worker after admission and expiry checks. */
+  protected def executeOptional(work: EngineIntent, stillEligible: () => Boolean): Any = work match {
+    case EngineIntent.Dex(request, _) => request.execute(dex, dexCache)
+    case EngineIntent.Consolidate => consolidation.execute(consolidationTarget, stillEligible)
+    case _ => throw new IllegalArgumentException("unsupported engine intent")
   }
 }

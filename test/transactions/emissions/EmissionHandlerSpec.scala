@@ -135,7 +135,7 @@ class EmissionHandlerSpec extends TestKit(ActorSystem("emission-handler-spec", E
     // bookkeeping straight.
     val f = fixture()
     f.probe.send(f.handler, RequestBlockTxs(500, 5))
-    f.probe.expectMsgType[BlockTxsReady](15.seconds).txs shouldBe empty
+    f.probe.expectMsgType[BlockTxsReady](15.seconds).bundles shouldBe empty
   }
 
   it should "not be blocked by a pass that is already running" in {

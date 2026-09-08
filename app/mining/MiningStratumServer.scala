@@ -84,7 +84,7 @@ class MiningStratumServer(system: ActorSystem,
                           forceConfigDiff: Boolean,
                           diffRefreshInterval: Int,
                           candidateConfig: CandidateConfig = CandidateConfig.Default,
-                          txSources: Seq[ActorRef] = Seq.empty[ActorRef],
+                          txSources: Seq[MiningMessages.CandidateSource] = Seq.empty,
                           rotateExtraNonceInterval: Int = 0)
   extends StratumTcpServer {
 

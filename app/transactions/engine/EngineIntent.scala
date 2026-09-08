@@ -15,10 +15,6 @@ sealed trait EngineIntent {
 }
 
 object EngineIntent {
-  final case class Holding(transform: TransactionEngine.HoldingTransform) extends EngineIntent {
-    def key: String = transform.key
-  }
-
   /** A one-off API request, so its key is per-request and never rediscovered after a restart. */
   final case class Dex(request: DexIntent,
                        requestId: String = java.util.UUID.randomUUID().toString) extends EngineIntent {

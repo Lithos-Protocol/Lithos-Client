@@ -1,4 +1,5 @@
 package transactions.rollups
+import transactions.engine.RollupExecution
 
 import akka.actor.{ActorRef, ActorSystem, Props}
 import akka.testkit.{TestKit, TestProbe}
@@ -7,7 +8,7 @@ import org.scalatest.BeforeAndAfterAll
 import org.scalatest.flatspec.AnyFlatSpecLike
 import org.scalatest.matchers.should.Matchers
 import play.api.Configuration
-import state.messages.RollupMessages.{CurrentRollup, GetCurrentRollupCritical, RollupUnavailable}
+import state.messages.RollupMessages.{CurrentRollup, GetCurrentRollupCritical, GetRollupMetadata, RollupUnavailable}
 import support.{FakeCache, FakeNodeContext, SyncFixtures}
 import node.MutationConversions._
 import node.model.NodeBox
@@ -21,7 +22,7 @@ import scala.concurrent.duration._
 import scala.concurrent.{Await, ExecutionContext, Future}
 
 /**
- * `RollupCore`'s mailbox, and the lock over the fields a batch mutates.
+ * `RollupExecution`'s mailbox, and the lock over the fields a batch mutates.
  *
  * A batch is tens of seconds of selection asks, signing, node round trips and five-second retry
  * sleeps. It used to run inside `receive` — and this actor also answers `BuildBlockTxs`, which is a
@@ -32,12 +33,12 @@ import scala.concurrent.{Await, ExecutionContext, Future}
  * Individual tests hold a state ask open when they need slow work; all other asks are answered
  * explicitly so wall-clock timeouts are not being mistaken for concurrency coverage.
  */
-object RollupCoreSpec {
+object RollupExecutionSpec {
   val config: com.typesafe.config.Config =
     com.typesafe.config.ConfigFactory.parseString("akka.test.single-expect-default = 40s").withFallback(com.typesafe.config.ConfigFactory.load())
 }
 
-class RollupCoreSpec extends TestKit(ActorSystem("submission-handler-spec", RollupCoreSpec.config))
+class RollupExecutionSpec extends TestKit(ActorSystem("submission-handler-spec", RollupExecutionSpec.config))
   with AnyFlatSpecLike with Matchers with BeforeAndAfterAll {
 
   override def afterAll(): Unit = TestKit.shutdownActorSystem(system)
@@ -86,7 +87,7 @@ class RollupCoreSpec extends TestKit(ActorSystem("submission-handler-spec", Roll
 
   private def refuseState(f: Fixture, count: Int = 1): Unit =
     (1 to count).foreach { _ =>
-      f.sync.expectMsgType[GetCurrentRollupCritical](5.seconds)
+      f.sync.expectMsgType[GetRollupMetadata](5.seconds)
       f.sync.reply(RollupUnavailable("deliberately unavailable in mailbox test"))
     }
 
@@ -97,7 +98,7 @@ class RollupCoreSpec extends TestKit(ActorSystem("submission-handler-spec", Roll
     // answered until that ask timed out.
     val f = fixture()
     f.handler ! RollupBatch(Seq(stub("rollup-a")))
-    f.sync.expectMsgType[GetCurrentRollupCritical](10.seconds) // the batch is underway
+    f.sync.expectMsgType[GetRollupMetadata](10.seconds) // the batch is underway
 
     val start = System.currentTimeMillis()
     f.probe.send(f.handler, BuildBlockTxs(500, Seq.empty))
@@ -113,7 +114,7 @@ class RollupCoreSpec extends TestKit(ActorSystem("submission-handler-spec", Roll
   it should "be answered immediately when it asks for nothing" in {
     val f = fixture()
     f.probe.send(f.handler, BuildBlockTxs(500, Seq.empty))
-    f.probe.expectMsgType[BlockTxsReady](5.seconds).txs shouldBe empty
+    f.probe.expectMsgType[BlockTxsReady](5.seconds).bundles shouldBe empty
   }
 
   // ─── the lock ─────────────────────────────────────────────────────────────
@@ -135,7 +136,7 @@ class RollupCoreSpec extends TestKit(ActorSystem("submission-handler-spec", Roll
     val f = fixture()
     f.probe.send(f.handler, RollupBatch(Seq(stub("rollup-a"))))
     f.probe.expectMsgType[BatchAccepted](5.seconds)
-    f.sync.expectMsgType[GetCurrentRollupCritical](10.seconds) // underway
+    f.sync.expectMsgType[GetRollupMetadata](10.seconds) // underway
 
     f.probe.send(f.handler, RollupBatch(Seq(stub("rollup-late"))))
     withClue("a refused batch is not acknowledged, so its sender keeps the stubs: ") {
@@ -159,21 +160,17 @@ class RollupCoreSpec extends TestKit(ActorSystem("submission-handler-spec", Roll
     refuseState(f)
   }
 
-  "A batch with no data box" should "be refused before any rollup state is read, and free the lock" in {
-    // The guard in front of the whole batch: without a data box this client cannot commit a score,
-    // so no rollup transaction is attempted. Asserted positively — the sync handler is asked for
-    // nothing — and then at the moment the two behaviours differ, which is the NEXT batch: an
-    // exception thrown while choosing the warning to log would also end the batch here, so only the
-    // second acceptance separates "refused cleanly" from "died on the way to a log line".
+  "A transform batch with no data box" should "read metadata and release its lock on unavailable state" in {
     val f = fixture(new DataBoxSource { override def getDataBoxToken: Option[ErgoId] = None })
-    f.probe.send(f.handler, RollupBatch((1 to 4).map(i => stub(s"rollup-$i"))))
+    f.probe.send(f.handler, RollupBatch(Seq(stub("rollup-a", HoldingTransform))))
     f.probe.expectMsgType[BatchAccepted](5.seconds)
-    f.sync.expectNoMessage(3.seconds)
-
-    f.probe.send(f.handler, RollupBatch(Seq(stub("rollup-late"))))
-    f.probe.expectMsgType[BatchAccepted](10.seconds).stubs.map(_.rollupBlockId) shouldEqual Seq("rollup-late")
+    refuseState(f)
+    awaitAssert({
+      f.probe.send(f.handler, RollupBatch(Seq(stub("rollup-b"))))
+      f.probe.expectMsgType[BatchAccepted](500.millis)
+    }, 5.seconds, 100.millis)
+    refuseState(f)
   }
-
   // ─── fee-less builds ──────────────────────────────────────────────────────
 
   "A fee-less build" should "answer with an empty set rather than failing the block" in {
@@ -184,7 +181,76 @@ class RollupCoreSpec extends TestKit(ActorSystem("submission-handler-spec", Roll
     refuseState(f, count = 2)
     val ready = f.probe.expectMsgType[BlockTxsReady](25.seconds)
     ready.blockHeight shouldEqual 700
-    ready.txs shouldBe empty
+    ready.bundles shouldBe empty
+  }
+
+  // ─── prepare-ahead ────────────────────────────────────────────────────────
+  //
+  // A build is state asks, signing and node round trips, and it used to happen entirely inside the
+  // miner's collection deadline. Preparation starts it when the height is first known instead, so
+  // the request that follows genesis publication collects work already done. Each test below counts
+  // metadata asks, because one ask per stub is what a build costs.
+
+  "Preparation" should "build without answering, and answer the request that follows from it" in {
+    val f = fixture()
+    f.probe.send(f.handler, BuildBlockTxs(900, Seq(stub("rollup-a")), answer = false))
+    refuseState(f)
+    withClue("preparation is not itself a request, so nothing is sent back: ") {
+      f.probe.expectNoMessage(1.second)
+    }
+
+    awaitAssert({
+      f.probe.send(f.handler, BuildBlockTxs(900, Seq(stub("rollup-a"))))
+      f.probe.expectMsgType[BlockTxsReady](500.millis).blockHeight shouldEqual 900
+    }, 15.seconds, 200.millis)
+    withClue("the prepared build is what answers, so nothing is built a second time: ") {
+      f.sync.expectNoMessage(1.second)
+    }
+  }
+
+  "A request arriving mid-build" should "wait for that build rather than be told there is nothing" in {
+    // Answering empty here would waste the preparation entirely: the work is moments from ready and
+    // the block would mine on genesis alone.
+    val f = fixture()
+    f.probe.send(f.handler, BuildBlockTxs(901, Seq(stub("rollup-a")), answer = false))
+    f.sync.expectMsgType[GetRollupMetadata](10.seconds) // the build is underway
+
+    f.probe.send(f.handler, BuildBlockTxs(901, Seq(stub("rollup-a"))))
+    f.probe.expectNoMessage(1.second)
+    f.sync.reply(RollupUnavailable("release held build"))
+    f.probe.expectMsgType[BlockTxsReady](25.seconds).blockHeight shouldEqual 901
+  }
+
+  "Work prepared for a dropped height" should "not be handed to the request that follows it" in {
+    // The package was refused or the chain moved on, so those transactions can no longer land. Kept,
+    // they would be offered again against a block they are no longer valid for.
+    val f = fixture()
+    f.probe.send(f.handler, BuildBlockTxs(902, Seq(stub("rollup-a")), answer = false))
+    refuseState(f)
+    f.probe.send(f.handler, CandidateTxsDropped(902))
+
+    f.probe.send(f.handler, BuildBlockTxs(902, Seq(stub("rollup-a"))))
+    withClue("the dropped build cannot answer, so this one is built: ") {
+      refuseState(f)
+    }
+    f.probe.expectMsgType[BlockTxsReady](25.seconds).blockHeight shouldEqual 902
+  }
+
+  it should "not be kept when the drop lands while it is still running" in {
+    // A rebuild at the same height is exactly this: the node refused the package, the height is
+    // dropped, and the replacement asks again. Keeping the in-flight result would offer the node
+    // back the transactions it just refused.
+    val f = fixture()
+    f.probe.send(f.handler, BuildBlockTxs(903, Seq(stub("rollup-a")), answer = false))
+    f.sync.expectMsgType[GetRollupMetadata](10.seconds) // the build is underway
+    f.probe.send(f.handler, CandidateTxsDropped(903))
+    f.sync.reply(RollupUnavailable("release held build"))
+
+    f.probe.send(f.handler, BuildBlockTxs(903, Seq(stub("rollup-a"))))
+    withClue("the superseded build cannot answer, so the replacement is built: ") {
+      refuseState(f)
+    }
+    f.probe.expectMsgType[BlockTxsReady](25.seconds).blockHeight shouldEqual 903
   }
 
   "A fraud proof" should "never be offered to a block" in {
@@ -195,8 +261,9 @@ class RollupCoreSpec extends TestKit(ActorSystem("submission-handler-spec", Roll
     val fp = RollupTxStub("rollup-a", Some(100L), NISPEvaluation,
       fpInfo = Some(Array.fill[Byte](32)(1) -> "fp-hash"))
     f.probe.send(f.handler, BuildBlockTxs(800, Seq(fp)))
-    refuseState(f)
-    f.probe.expectMsgType[BlockTxsReady](25.seconds).txs shouldBe empty
+    f.sync.expectMsgType[GetCurrentRollupCritical]
+    f.sync.reply(RollupUnavailable("unavailable"))
+    f.probe.expectMsgType[BlockTxsReady](25.seconds).bundles shouldBe empty
   }
 
   // ─── candidate eligibility ────────────────────────────────────────────────
@@ -221,14 +288,14 @@ class RollupCoreSpec extends TestKit(ActorSystem("submission-handler-spec", Roll
     withClue("valid at the tip, which is what made the tip the wrong height to ask about: ") {
       submission.validate(boundaryTip, rollup) shouldBe true
     }
-    RollupCore.eligibleForCandidate(
+    RollupExecution.eligibleForCandidate(
       submission, rollup, boundaryTip, boundaryTip + 1) shouldBe false
   }
 
   it should "be offered while it is still valid one height later" in {
     val rollup = holdingRollup(9111, boundaryPeriod)
     val submission = RollupTxStub("rollup-a", Some(boundaryPeriod), NISPSubmission)
-    RollupCore.eligibleForCandidate(
+    RollupExecution.eligibleForCandidate(
       submission, rollup, boundaryTip - 1, boundaryTip) shouldBe true
   }
 
@@ -239,7 +306,7 @@ class RollupCoreSpec extends TestKit(ActorSystem("submission-handler-spec", Roll
     val transform = RollupTxStub("rollup-a", Some(boundaryPeriod), HoldingTransform)
 
     transform.validate(boundaryTip + 1, rollup) shouldBe true
-    RollupCore.eligibleForCandidate(
+    RollupExecution.eligibleForCandidate(
       transform, rollup, boundaryTip, boundaryTip + 1) shouldBe false
   }
 
@@ -266,7 +333,7 @@ class RollupCoreSpec extends TestKit(ActorSystem("submission-handler-spec", Roll
     val lease = leaseOver(f.wallet)
 
     f.probe.send(f.handler, CandidateTxsDropped(500))
-    f.probe.send(f.handler, RollupCore.CandidateLeaseTaken(500, lease.reservationId))
+    f.probe.send(f.handler, RollupExecution.CandidateLeaseTaken(500, lease.reservationId))
 
     f.wallet.expectMsg(5.seconds, MarkReservationUncertain(lease.reservationId))
   }
@@ -276,7 +343,7 @@ class RollupCoreSpec extends TestKit(ActorSystem("submission-handler-spec", Roll
     val f = fixture()
     val lease = leaseOver(f.wallet)
 
-    f.probe.send(f.handler, RollupCore.CandidateLeaseTaken(500, lease.reservationId))
+    f.probe.send(f.handler, RollupExecution.CandidateLeaseTaken(500, lease.reservationId))
     f.wallet.expectNoMessage(2.seconds)
   }
 
@@ -288,7 +355,7 @@ class RollupCoreSpec extends TestKit(ActorSystem("submission-handler-spec", Roll
     var sent = false
 
     val changed = intercept[ProjectionChangedException] {
-      RollupCore.sendIfCurrentInput(rollupId, oldInput,
+      RollupExecution.sendIfCurrentInput(rollupId, oldInput,
         CurrentRollup(newInput, rollup, None)) {
         sent = true
         "sent"
@@ -305,7 +372,7 @@ class RollupCoreSpec extends TestKit(ActorSystem("submission-handler-spec", Roll
     val rollup = SyncFixtures.emptyRollup(rollupId, input, 100)
     var sends = 0
 
-    val result = RollupCore.sendIfCurrentInput(rollupId, input,
+    val result = RollupExecution.sendIfCurrentInput(rollupId, input,
       CurrentRollup(input, rollup, None)) {
       sends += 1
       "tx-id"

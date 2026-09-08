@@ -255,8 +255,12 @@ class CandidateTxBuilder(prover: NodeWallet, nodeApi: NodeApi, config: Candidate
     val sTx = prover.sign(uTx)
     val utxBytes = uTx.asInstanceOf[UnsignedTransactionImpl].getTx.messageToSign
 
+    // Measured here because this is where the signed form exists: genesis is charged against the
+    // block's byte and cost limits like every other member of the package.
+    val signedBytes = org.ergoplatform.ErgoLikeTransactionSerializer.toBytes(
+      sTx.asInstanceOf[org.ergoplatform.appkit.impl.SignedTransactionImpl].getTx).length
     CollateralData(sTx.getId.replace("\"", ""), sTx.toJson(false, false), pkString, utxBytes,
-      collat.bytes, collat.id.toString, lenderAddress.toString)
+      collat.bytes, collat.id.toString, lenderAddress.toString, signedBytes, sTx.getCost.toLong)
   }
 
   /**

@@ -78,7 +78,7 @@ private[engine] class WalletInventory(node: NodeContext, api: _root_.node.NodeAp
    * only when the node is indexed, since they sit at ErgoTrees no wallet endpoint reports.
    * `consume` returns true to stop the walk, which is how selection avoids paging the whole wallet.
    */
-  private def walk(rewardsOnly: Boolean, p2pkOnly: Boolean)
+  private def walk(rewardsOnly: Boolean, p2pkOnly: Boolean, deadlineMillis: Long = Long.MaxValue)
                   (consume: (NodeBox, Boolean) => Boolean): Unit = {
     val startedAt = System.nanoTime()
     var stop = false
@@ -87,6 +87,7 @@ private[engine] class WalletInventory(node: NodeContext, api: _root_.node.NodeAp
       var exhausted = false
       while (!stop && !exhausted) {
         require(System.nanoTime() - startedAt < MaxWalkNanos, "wallet inventory walk exceeded its budget")
+        require(System.currentTimeMillis() < deadlineMillis, "wallet funding request expired during selection")
         val page = fetch(paging)
         require(page.size <= PageSize, "wallet page exceeded the requested limit")
         val boxes = page.iterator
@@ -100,6 +101,8 @@ private[engine] class WalletInventory(node: NodeContext, api: _root_.node.NodeAp
         paging = paging.next
       }
     }
+    // Rewards first, deliberately: spending a matured coinbase is the only thing that moves that ERG
+    // to an address an ordinary wallet reports, so a request one can cover should take it.
     if (!p2pkOnly && api.indexerEnabled) wallet.rewardTrees.keysIterator.foreach { tree =>
       if (!stop) pages(paging => api.unspentBoxesByErgoTree(tree, paging, SortDirection.Asc,
         MempoolOptions(includeUnconfirmed = false, excludeMempoolSpent = true)).get.map(_.box), reward = true)
@@ -150,7 +153,7 @@ private[engine] class WalletInventory(node: NodeContext, api: _root_.node.NodeAp
    */
   def select(ctx: BlockchainContext, erg: Long, required: Seq[Token], excluded: Set[String],
              single: Boolean, p2pkOnly: Boolean, rewardsOnly: Boolean,
-             known: Vector[NodeBox] = Vector.empty): Vector[InputUTXO] = {
+             known: Vector[NodeBox] = Vector.empty, deadlineMillis: Long = Long.MaxValue): Vector[InputUTXO] = {
     require(erg >= 0 && required.forall(_.amount > 0), "invalid wallet requirement")
     require(!mainnet || !required.exists(_.id.toString == MainnetEip27Constants.TokenId),
       "re-emission tokens cannot be transferred")
@@ -209,7 +212,7 @@ private[engine] class WalletInventory(node: NodeContext, api: _root_.node.NodeAp
     }
 
     known.iterator.takeWhile(_ => !covered).foreach(box => consume(box, reward = false))
-    if (!covered) walk(rewardsOnly, p2pkOnly)(consume)
+    if (!covered) walk(rewardsOnly, p2pkOnly, deadlineMillis)(consume)
     require(covered, "wallet cannot cover this request within the input budget")
 
     // Boxes added while the set was still short can turn out to be unnecessary once a later box

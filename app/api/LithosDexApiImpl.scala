@@ -16,7 +16,7 @@ import scala.reflect.ClassTag
 class LithosDexApiImpl @Inject()(node: NodeContext,
   @Named("transaction-engine") engine: ActorRef, system: ActorSystem) extends LithosDexApi {
   private implicit val timeout: Timeout = Timeout(45.seconds)
-  private val reads = new DexExecution(node, EngineFunding(engine, 5.seconds, system.dispatcher))
+  private val reads = new DexExecution(node, EngineFunding(engine, EngineFunding.AskTimeout, system.dispatcher))
   private def submit[A: ClassTag](intent: DexIntent): A =
     Await.result((engine ? intent).mapTo[A], timeout.duration)
   override def getPool(ldCache: LDCache): LDPoolInfo = reads.getPool(ldCache)

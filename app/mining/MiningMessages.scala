@@ -124,6 +124,12 @@ object MiningMessages {
   // Connection lifecycle  (MiningStratumServer / StratumConnection ↔ LithosPool)
   // ═══════════════════════════════════════════════════════════════════════════
 
+  /**
+   * A transaction source and the config key its limits live under. Named because each source is
+   * bounded separately, and one that is off is never asked at all.
+   */
+  case class CandidateSource(name: String, ref: ActorRef)
+
   /** MiningStratumServer → LithosPool: a miner TCP connection has been accepted. */
   case class MinerConnected(connectionId: String, connectionActor: ActorRef)
 

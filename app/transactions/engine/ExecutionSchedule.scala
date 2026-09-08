@@ -47,6 +47,7 @@ private[transactions] object ExecutionSchedule {
  * Admission queue for engine work, keyed by intent so duplicates coalesce. One entry per lane runs
  * at a time, which is what keeps optional work from consuming the critical lane's capacity.
  */
+/** @param limit entries across all lanes; callers size it from their per-lane depths. */
 private[transactions] final class ExecutionSchedule[A](limit: Int = 128) {
   import ExecutionSchedule._
   private var entries = Vector.empty[Entry[A]]

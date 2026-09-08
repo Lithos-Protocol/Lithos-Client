@@ -1,4 +1,5 @@
 package transactions.rollups
+import transactions.engine.RollupExecution
 
 import akka.actor.{ActorRef, ActorSystem, Props}
 import akka.testkit.{TestActorRef, TestKit, TestProbe}
@@ -71,15 +72,17 @@ class FraudProofFundingSpec extends TestKit(ActorSystem("fp-funding-spec", Fraud
         creationHeight = 1, ergoTree = wallet.rewardTrees.keys.head),
       address = "reward", inclusionHeight = 1, globalIndex = 1L)
 
-  /** A real `EngineWalletState` over a real `RollupCore`, so selection is the production path. */
-  private def handlerOver(walletErg: Long, rewardErg: Long): (RollupEngineHarness, NodeWallet) = {
+  /** A real `EngineWalletState` over a real `RollupExecution`, so selection is the production path. */
+  private def handlerOver(walletErg: Long, rewardErg: Long, selectionDelayMillis: Long = 0L): (RollupEngineHarness, NodeWallet) = {
     val api = mock[NodeApi]
     val (ctx, _, wallet) = FakeNodeContext(api, numAddresses = 1)
     val boxes = Seq(walletBox(wallet, walletErg))
     val rewards = Seq(coinbase(wallet, rewardErg))
+    val selecting = new java.util.concurrent.atomic.AtomicBoolean(false)
 
     when(api.indexerEnabled).thenReturn(true)
     when(api.walletUnspentBoxes(any[ConfirmationRange], any[Paging])).thenAnswer { inv =>
+      if (selecting.get() && selectionDelayMillis > 0) Thread.sleep(selectionDelayMillis)
       if (inv.getArgument[Paging](1).offset == 0) Success(boxes) else Success(Seq.empty[WalletBox])
     }
     when(api.unspentBoxesByErgoTree(anyString(), any[Paging], any[SortDirection], any[MempoolOptions]))
@@ -99,13 +102,20 @@ class FraudProofFundingSpec extends TestKit(ActorSystem("fp-funding-spec", Fraud
       probe.expectMsgType[SpendableBalance](1.second).nanoErgs shouldEqual walletErg + rewardErg
     }, 15.seconds, 200.millis)
 
+    selecting.set(true)
     val handler = TestActorRef[RollupEngineHarness](Props(new RollupEngineHarness(
       quietConfig, ctx, new FakeCache, storedDataBox,
       TestProbe().ref, TestProbe().ref, mgr)))
     (handler.underlyingActor, wallet)
   }
 
-  private val oneFee = RollupCore.InitialTxInfo(Map("rollup-a" -> (erg / 2)))
+  private val oneFee = RollupExecution.InitialTxInfo(Map("rollup-a" -> (erg / 2)))
+
+  "Initial batch funding" should "survive a node read longer than five seconds" in {
+    val (handler, _) = handlerOver(5 * erg, 2 * erg, selectionDelayMillis = 5500L)
+    val inputs = handler.initialTxInputs(oneFee, isFPTx = true)
+    inputs.map(_.value) shouldBe Seq(5 * erg)
+  }
 
   "A fraud proof's initial transaction" should "be funded from a plain P2PK box" in {
     // The coinbase is the cheaper covering box, which is exactly what the generic single-box request

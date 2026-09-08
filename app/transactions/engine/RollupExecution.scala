@@ -1,7 +1,6 @@
-package transactions.rollups
-import transactions.engine.EngineWalletState
+package transactions.engine
 
-import akka.actor.{Actor, ActorRef}
+import akka.actor.ActorRef
 import akka.pattern.ask
 import akka.util.Timeout
 import configs.{NodeContext, StateConfig, StratumConfig, TasksConfig}
@@ -12,91 +11,98 @@ import mutations.NotEnoughInputsException
 import org.bouncycastle.util.encoders.Hex
 import org.ergoplatform.appkit._
 import org.ergoplatform.sdk.JavaHelpers
-import org.slf4j.{Logger, LoggerFactory}
+import org.slf4j.LoggerFactory
 import play.api.Configuration
-import play.api.cache.SyncCacheApi
-import play.api.libs.concurrent.InjectedActorSupport
 import state.messages.MempoolMessages.{RebuildMempoolChains, ResetMempoolState}
 import state.messages.RollupMessages
 import state.messages.RollupMessages.{GetCurrentRollupCritical, GetRollupMetadata, RemoveRollup, RollupInfo}
 import state.DataBoxRetrievalException
+import transactions.BlockTxMessages
 import transactions.BlockTxMessages.{BlockTxsReady, CandidateTx, CandidateTxsDropped}
-import transactions.rollups.RollupCore._
+import transactions.engine.RollupExecution._
 import transactions.rollups.TransactionMessages.RollupTxType._
 import transactions.rollups.TransactionMessages._
-import transactions.engine.{FundingAllocation, EngineFunding}
 import utils.Globals
 import work.lithos.mutations.{Contract, InputUTXO, Token, UTXO}
 
-import javax.inject.{Inject, Named}
 import scala.concurrent.duration.DurationInt
 import scala.concurrent.{Await, ExecutionContext, Future, blocking}
 import scala.util.{Failure, Success, Try}
 import scala.util.control.NonFatal
 
-/**
- * Rollup submission, mixed into the transaction engine. Builds and sends each stub of a batch in
- * priority order, and supplies the fee-less transactions offered into this miner's own candidate.
- *
- * Batches run on the critical lane and select against the reserved input budget, because a missed
- * NISP submission or fraud proof costs the miner a payout while optional work only costs a retry.
- */
-trait RollupCore extends Actor with InjectedActorSupport {
-  protected def config: Configuration
-  protected def rollupNodeContext: NodeContext
-  protected def cacheApi: SyncCacheApi
-  protected def dataBoxes: DataBoxSource
-  protected def syncHandler: ActorRef
-  protected def mempoolView: ActorRef
-  protected def walletManager: ActorRef
-  protected def rollupNodeApi: node.NodeApi = rollupNodeContext.getNodeApi
-  private def nodeContext: NodeContext = rollupNodeContext
-  implicit val timeout: Timeout = Timeout(30.seconds)
-  private implicit val rollupEc: ExecutionContext = context.dispatcher
-  private val rollupWorker = context.system.dispatchers.lookup("lithos-contexts.critical-tx-dispatcher")
-  private val candidateWorker = context.system.dispatchers.lookup("lithos-contexts.engine-candidate-dispatcher")
-  private var candidateBusy = false
 
-  private val criticalFunding = EngineFunding(walletManager, 5.seconds, context.dispatcher, critical = true)
-  private val optionalFunding = EngineFunding(walletManager, 5.seconds, context.dispatcher)
+import transactions.rollups._
+/** One engine attempt owns these build allocations; none survives completion of its worker. */
+class RollupExecution(nodeContext: NodeContext, walletManager: ActorRef, syncHandler: ActorRef,
+                      mempoolView: ActorRef, config: Configuration, dataBoxes: DataBoxSource,
+                      rollupNodeApi: node.NodeApi, alive: () => Boolean,
+                      worker: ExecutionContext)(implicit ec: ExecutionContext) {
+  private implicit val timeout: Timeout = Timeout(30.seconds)
+  private val criticalFunding = EngineFunding(walletManager, EngineFunding.AskTimeout, ec, critical = true)
+  private val optionalFunding = EngineFunding(walletManager, EngineFunding.AskTimeout, ec)
   private var criticalBatch = false
   private def walletSelector: EngineFunding = if (criticalBatch) criticalFunding else optionalFunding
-  private val commitments = new CommitmentTransactions(nodeContext, dataBoxes, () => rollupAlive.get()) {
+  private val commitments = new CommitmentTransactions(nodeContext, dataBoxes, alive) {
     override protected def executionNode: node.NodeApi = rollupNodeApi
   }
-
-  private val logger: Logger = LoggerFactory.getLogger("RollupCore")
-  private val nodeConfig: NodeContext = nodeContext
+  private val logger = LoggerFactory.getLogger("RollupExecution")
+  private val nodeConfig = nodeContext
   private val stateConfig = new StateConfig(config)
   private val stratumConfig = new StratumConfig(config)
-  /**
-   * Whether MDSyncTask runs, read once and tolerantly.
-   *
-   * It only decides which of three warnings to print when no data box exists. Constructing a whole
-   * `TasksConfig` per batch to get it read nine keys with `get`, so a config missing the
-   * `lithos-tasks` block threw out of `runBatch` and took every stub in the batch with it — a log
-   * line costing the miner its NISP submissions.
-   */
-  private val dictionarySyncEnabled: Boolean =
-    TasksConfig.isEnabled(config, TasksConfig.DictionarySync)
-  private val client = nodeConfig.getClient
-  private val wallet = nodeConfig.getNodeWallet
-  // Map of pre-allocated UTXOs to be used for fee payments, enabling parallel tx attempts
-  private var feeAllocations: Map[String, InputUTXO] = Map.empty
-  /** Exact actor-owned holds for feeAllocations; one follows each allocation into its spend. */
-  private var feeAllocationReservations: Map[String, FundingAllocation] = Map.empty
-  private var initialReservation: Option[FundingAllocation] = None
-  private var batchLock: Boolean = false
-  protected def executeRollupBatch(stubs: Seq[RollupTxStub]): Future[Unit] = {
-    require(!batchLock && stubs.nonEmpty && stubs.size <= 100, "rollup execution admission refused")
-    batchLock = true
-    criticalBatch = stubs.exists(s => s.txType == NISPSubmission || s.fpInfo.isDefined)
-    Future(runBatch(stubs))(rollupWorker).flatMap(identity)
-  }
-  protected def finishRollupBatch(): Unit = { releaseFeeAllocations(); batchLock = false }
+  private val dictionarySyncEnabled = TasksConfig.isEnabled(config, TasksConfig.DictionarySync)
+  private val client = nodeContext.getClient
+  private val wallet = nodeContext.getNodeWallet
+  private var feeAllocations = Map.empty[String, InputUTXO]
+  private var feeAllocationReservations = Map.empty[String, FundingAllocation]
+  private var initialReservation = Option.empty[FundingAllocation]
 
-  protected def executeRegistration(): Future[String] = Future {
-    require(rollupAlive.get(), "registration attempt was superseded")
+  /** A single admitted batch funds its children, then disposes of every unused allocation. */
+  def execute(stubs: Seq[RollupTxStub]): Future[Unit] = {
+    require(stubs.nonEmpty && stubs.size <= 100, "invalid rollup batch")
+    criticalBatch = stubs.exists(s => s.txType == NISPSubmission || s.fpInfo.isDefined)
+    Future(runBatch(stubs))(worker).flatMap(identity).andThen { case _ => releaseInitialInputs() }
+  }
+
+  /**
+   * Fee-less copies for this miner's own block, each bundled with the unconfirmed transactions it
+   * chains off.
+   *
+   * A transform spends the projected rollup tip, which may be an output of a transaction still in
+   * the mempool. That parent has to travel with it: a block carrying the child alone is invalid.
+   * A chain whose bodies cannot all be fetched is dropped rather than offered incomplete.
+   */
+  def candidates(stubs: Seq[RollupTxStub], height: Int): Seq[transactions.CandidateBundle] = {
+    require(alive() && stubs.size <= 100, "candidate attempt is obsolete or oversized")
+    val built = stubs.flatMap(stub => buildFeeless(stub, height))
+    val bodies = ancestorBodies(built.flatMap(_._2).distinct)
+    built.flatMap { case (tx, ancestorIds) =>
+      val ancestors = ancestorIds.flatMap(bodies.get)
+      if (ancestors.size != ancestorIds.size) {
+        logger.warn(s"Dropping candidate ${tx.id}: ${ancestorIds.size - ancestors.size} " +
+          "unconfirmed ancestor(s) could not be read")
+        None
+      } else Some(transactions.CandidateBundle((ancestors :+ tx).toVector,
+        ancestorIds.lastOption.map(BlockTxMessages.ChainFromMempool(_)).toSeq ++
+          ancestorIds.map(BlockTxMessages.IncludeExisting)))
+    }
+  }
+
+  /**
+   * Bodies for the unconfirmed ancestors a candidate needs, fetched one at a time because a chain is
+   * a handful of transactions and the mining path cannot afford a whole-mempool read.
+   */
+  private def ancestorBodies(ids: Seq[String]): Map[String, CandidateTx] =
+    ids.flatMap { id =>
+      Try(rollupNodeApi.unconfirmedTransactionById(id).get).toOption.flatten.map { body =>
+        val encoded = node.rest.NodeCodecs.encodeTransaction(body).toString
+        // The node reports the serialized size it counts towards the block limit, so that is used
+        // rather than the encoded length. Execution cost it does not report, and stays unknown.
+        id -> CandidateTx(body.id, encoded, CandidateTx.MempoolAncestor,
+          body.inputs.map(_.boxId).toSet, body.size.getOrElse(encoded.length))
+      }
+    }.toMap
+  def register(): String = {
+    require(alive(), "registration attempt was superseded")
     val view = Globals.syncView
     require(view.canonical.available && view.minerDictionary.available &&
       view.minerDictionaryMetadata.exists(!_.hasMiner) && dataBoxes.getDataBoxToken.isEmpty,
@@ -106,76 +112,9 @@ trait RollupCore extends Actor with InjectedActorSupport {
       case _ => throw new IllegalStateException("Miner Dictionary became unavailable")
     }
     commitments.sendInitialCommitment(stratumConfig.diff, dictionary, optionalFunding)
-  }(context.system.dispatchers.lookup("lithos-contexts.engine-io-dispatcher"))
-  private val rollupIncarnation = java.util.UUID.randomUUID()
-  private val rollupAlive = new java.util.concurrent.atomic.AtomicBoolean(true)
-
-  /**
-   * Bond inputs withheld for fee-less submissions offered into this miner's own block, by the
-   * height they were built for. They are never broadcast, so only a terminal event for that height
-   * can end them, and it ends them as uncertain rather than free: the block may have taken them.
-   */
-  private var candidateLeases: Map[Int, Seq[String]] = Map.empty
-
-  /** The most recent height a candidate package was built for, so a late lease is not stranded. */
-  private var latestCandidateHeight: Int = 0
-
-  abstract override def postStop(): Unit = {
-    rollupAlive.set(false)
-    candidateLeases.keys.toSeq.foreach(reconcileCandidates)
-    super.postStop()
   }
-
-  abstract override def receive: Receive = rollupReceive.orElse(super.receive)
-
-  /**
-   * Only the candidate path is handled here. Registration and rollup batches are admitted by the
-   * engine as intents and reach this trait through [[executeRegistration]] and [[executeRollupBatch]].
-   */
-  private def rollupReceive: Receive = {
-    // Sent from the build Future, so the map is only ever written on this thread. A lease that
-    // arrives after its height has passed is reconciled at once rather than stored and forgotten.
-    case CandidateLeaseTaken(blockHeight, reservation) =>
-      if (blockHeight < latestCandidateHeight) walletManager ! transactions.engine.EngineWalletMessages.MarkReservationUncertain(reservation)
-      else candidateLeases += blockHeight ->
-        (candidateLeases.getOrElse(blockHeight, Seq.empty[String]) :+ reservation)
-
-    // Whatever was offered for that height can no longer land, so its bond inputs stop being
-    // candidate-held. Uncertain, not released: the block may have included the transaction.
-    case CandidateTxsDropped(blockHeight) =>
-      // The watermark moves past the dropped height, not just to it, so a lease still in flight when
-      // this arrives is reconciled on the way in.
-      latestCandidateHeight = math.max(latestCandidateHeight, blockHeight + 1)
-      reconcileCandidates(blockHeight)
-
-    // A block is being assembled: build the same work fee-less and hand it back without
-    // sending. The stubs stay queued so the funded copies still reach the mempool.
-    case BuildBlockTxs(blockHeight, stubs) if candidateBusy || stubs.size > 100 =>
-      sender() ! BlockTxsReady(blockHeight, Seq.empty[CandidateTx])
-    case BuildBlockTxs(blockHeight, stubs) =>
-      candidateBusy = true
-      val replyTo = sender()
-      // A height that never got its own drop signal is over the moment a later one starts.
-      latestCandidateHeight = math.max(latestCandidateHeight, blockHeight)
-      candidateLeases.keys.filter(_ < blockHeight).toSeq.foreach(reconcileCandidates)
-      Try(Future {
-        stubs.flatMap(buildFeeless(_, blockHeight))
-      }(candidateWorker).onComplete(result =>
-        self ! RollupCandidateBuilt(rollupIncarnation, replyTo, blockHeight, result)))
-        .failed.foreach(ex => self ! RollupCandidateBuilt(rollupIncarnation, replyTo, blockHeight, Failure(ex)))
-    case RollupCandidateBuilt(incarnation, replyTo, height, result) if incarnation == rollupIncarnation =>
-      candidateBusy = false
-      replyTo ! BlockTxsReady(height, result.getOrElse(Seq.empty))
-    case _: RollupCandidateBuilt => ()
-  }
-
-  /**
-   * One batch, start to finish. Runs in a single Future, so `feeAllocations` and `inputsUsed` are
-   * touched by one thread at a time for as long as `batchLock` is held — including by the parallel
-   * Futures `submitRemainingTxs` spawns, which are created after those fields are written.
-   */
   private def runBatch(stubs: Seq[RollupTxStub]): Future[Unit] = {
-    require(rollupAlive.get(), "rollup engine attempt was superseded")
+    require(alive(), "rollup engine attempt was superseded")
     val initialTxInfo = InitialTxInfo(stubs.map { s =>
       if (s.txType != Payout)
         s.rollupBlockId -> s.fee
@@ -183,9 +122,6 @@ trait RollupCore extends Actor with InjectedActorSupport {
         s.rollupBlockId -> (s.fee + UTXO.MIN_FEE)
     }.toMap)
     logger.info("Creating initial transaction to handle RollupBatch")
-    // No RefreshBoxes here: it is fire-and-forget, so its BoxesRefreshed lands behind the ask
-    // below and the selection would use the old set anyway. Freshness comes from the refresh
-    // ticker and from ReturnInputs handing change back.
     val stubsReordered = {
       if (stubs.exists(_.fpInfo.isDefined)) {
         // Avoid letting fp stubs be the initial tx, since max inputs on them is 2
@@ -234,12 +170,26 @@ trait RollupCore extends Actor with InjectedActorSupport {
    *
    * The transform and payout phases recreate their box at the same value, so those balance with no
    * wallet input at all. A NISP submission does not: it has to post a refundable bond, which comes
-   * from a wallet box held for the whole height under [[candidateLeases]] so the funded copy cannot
+   * from a wallet box held by the engine for the candidate height so the funded copy cannot
    * select it too. Built against the same mempool-aware state, so anything chaining off an
    * unconfirmed parent stays valid.
    */
-  private def buildFeeless(stub: RollupTxStub, blockHeight: Int): Option[CandidateTx] =
-    latestRollupState(stub).flatMap { latest =>
+  private def buildFeeless(stub: RollupTxStub, blockHeight: Int): Option[(CandidateTx, Seq[String])] = {
+    var ancestorIds = Seq.empty[String]
+    val built = if (stub.txType == HoldingTransform || stub.txType == EvalTransform) Try {
+      val (input, metadata, transformAncestors) = transformInput(stub)
+      ancestorIds = transformAncestors
+      client.execute { ctx =>
+        require(stub.currentPeriod == metadata.currentPeriod &&
+          stub.validate(ctx.getHeight, metadata) && stub.validate(blockHeight, metadata),
+          "transform is not eligible at both signing and candidate heights")
+        val signed = if (stub.txType == HoldingTransform)
+          RollupTransactions.genHoldingTransform(ctx, wallet, input, Seq.empty, Seq.empty)
+        else RollupTransactions.genEvalTransform(ctx, wallet, input, Seq.empty, Seq.empty)
+        candidateTx(signed, if (stub.txType == HoldingTransform) CandidateTx.HoldingTransform else CandidateTx.EvalTransform)
+      }
+    } else materializedRollupState(stub).flatMap { latest =>
+      ancestorIds = latest.ancestorIds
       Try {
         client.execute { ctx =>
           checkCandidateStubValidity(ctx, stub, latest, blockHeight)
@@ -264,7 +214,7 @@ trait RollupCore extends Actor with InjectedActorSupport {
                   built match {
                     case Success(tx) =>
                       reservation.holdForCandidate()
-                      self ! CandidateLeaseTaken(blockHeight, reservation.reservationId)
+                      walletManager ! CandidateLeaseTaken(blockHeight, reservation.reservationId)
                       tx
                     case Failure(ex) =>
                       reservation.release()
@@ -275,15 +225,7 @@ trait RollupCore extends Actor with InjectedActorSupport {
                     s"no valid NISP for rollup ${stub.rollupBlockId}")
               }
 
-            case HoldingTransform =>
-              candidateTx(
-                RollupTransactions.genHoldingTransform(ctx, wallet, latest.inputUTXO, none, noFee),
-                CandidateTx.HoldingTransform)
-
-            case EvalTransform =>
-              candidateTx(
-                RollupTransactions.genEvalTransform(ctx, wallet, latest.inputUTXO, none, noFee),
-                CandidateTx.EvalTransform)
+            case HoldingTransform | EvalTransform => throw new IllegalArgumentException("expected a dictionary operation")
 
             case Payout =>
               // Skipped here and left to the funded copy. A final payout with LIT left over needs
@@ -306,16 +248,20 @@ trait RollupCore extends Actor with InjectedActorSupport {
           }
         }
       }
-    } match {
-      case Success(tx) => Some(tx)
+    }
+    built match {
+      case Success(tx) => Some(tx -> ancestorIds)
       case Failure(ex) =>
         logger.info(s"Skipping [${stub.txType}] for rollup ${stub.rollupBlockId} " +
           s"in the block package: ${ex.getMessage}")
         None
     }
+  }
 
   private def candidateTx(sTx: SignedTransaction, kind: String): CandidateTx =
-    CandidateTx(sTx.getId.replace("\"", ""), sTx.toJson(false, false), kind)
+    CandidateTx(sTx.getId.replace("\"", ""), sTx.toJson(false, false), kind,
+      RollupExecution.signedInputIds(sTx), RollupExecution.signedSizeBytes(sTx), sTx.getCost.toLong,
+      RollupExecution.signedLeaf(sTx))
 
   // ─── submission ───────────────────────────────────────────────────────────
 
@@ -326,8 +272,8 @@ trait RollupCore extends Actor with InjectedActorSupport {
                                    initialTxInfo: Option[InitialTxInfo]): (RollupTxStub, LatestRollup) => Try[String] = {
     stub.txType match {
       case NISPSubmission => sendNISPSubmission(_, _, initialTxInfo)
-      case HoldingTransform => (_, _) => Failure(new IllegalArgumentException("Holding transforms are submitted by TransactionEngine"))
-      case EvalTransform => sendEvalTransform(_, _, initialTxInfo)
+      case HoldingTransform => (_, _) => Failure(new IllegalArgumentException("structural transforms require metadata"))
+      case EvalTransform => (_, _) => Failure(new IllegalArgumentException("structural transforms require metadata"))
       case NISPEvaluation =>
         stub.fpInfo match {
           case Some(_) =>
@@ -364,12 +310,12 @@ trait RollupCore extends Actor with InjectedActorSupport {
    * @param initialTxInfo Information required for initial transaction
    * @return Sequence of InputUTXOs used in the initial transaction
    */
-  private[rollups] def initialTxInputs(initialTxInfo: InitialTxInfo, isFPTx: Boolean = false): Seq[InputUTXO] = {
+  private[transactions] def initialTxInputs(initialTxInfo: InitialTxInfo, isFPTx: Boolean = false): Seq[InputUTXO] = {
     // Reaching here again means the previous attempt never sent, so give its inputs back before
     // reserving more — five attempts each holding a disjoint set would drain the wallet.
     releaseInitialInputs()
 
-    val ergForFees = initialTxInfo.feesToCreate.values.toSeq.sum
+    val ergForFees = initialTxInfo.feesToCreate.values.foldLeft(0L)(Math.addExact)
     // Reserved on selection, not after the send. EmissionsCore draws from the same EngineWalletState,
     // and the gap between selecting and sending spans retries and their sleeps.
     // P2PK-only for a fraud proof, which pays the slashed bond to input 1's own proposition. A
@@ -384,12 +330,6 @@ trait RollupCore extends Actor with InjectedActorSupport {
       initialReservation = Some(reservation)
       feeInputs
     }
-    //    // In case we get a single box that is the exact value, but has tokens on it, we should get one more box
-    //    // so we can create a change box without error or having to burn tokens.
-    //    if (feeInputs.size == 1 && feeInputs.head.value == ergForFees && feeInputs.head.tokens.nonEmpty) {
-    //      feeInputs ++ loader.getInputs(UTXO.MIN_FEE)
-    //    } else
-    //      feeInputs
   }
 
   /**
@@ -455,85 +395,34 @@ trait RollupCore extends Actor with InjectedActorSupport {
       Seq(UTXO.feeBox(stub.fee))
   }
 
-  /**
-   * Attempt submission of the initial transaction from the rollup batch
-   *
-   * @param stubs         Stubs received from the RollupBatch
-   * @param initialTxInfo Information required for the initial transaction
-   * @return Most recent initial transaction attempt, either holding the successful transaction id
-   *         or the exception associated with the attempt
-   */
-  private def submitInitialTransaction(stubs: Seq[RollupTxStub], initialTxInfo: InitialTxInfo) = {
-    val initTx: Try[String] = Failure.apply(new RuntimeException("InitTx never initialized"))
-    // We do not participate in rollup transactions if there is no data box created.
-    if(dataBoxes.getDataBoxToken.isEmpty){
-      logger.warn("No saved data box token was found")
-      val isEnabled = dictionarySyncEnabled
-      val dictionary = Globals.syncView.minerDictionary
-      if(isEnabled && !dictionary.available){
-        // Naming the reason matters: "still catching up" clears on its own, a bootstrap fault does not.
-        logger.warn(s"Cannot register in the MinerDictionary yet: ${dictionary.reason.getOrElse("unavailable")}")
-        Failure(new DataBoxRetrievalException("Could not find a stored data box"))
-      }else if(isEnabled){
-        logger.warn("The MinerDictionary is usable. Please wait for a data box to be created.")
-        logger.warn("If this message persists, there may be an issue with sending the MinerDictionary transaction.")
-        Failure(new DataBoxRetrievalException("Could not find a stored data box"))
-      }else{
-        logger.warn("Please enable MDSyncTask in your config to create or synchronize to your data box.")
-        Failure(new DataBoxRetrievalException("Could not find a stored data box"))
+  /** Try eligible roots in order; once a transaction reached the node, this batch cannot try another. */
+  private def submitInitialTransaction(stubs: Seq[RollupTxStub], initial: InitialTxInfo): Try[String] = {
+    var result: Try[String] = Failure(new IllegalStateException("no eligible rollup transaction"))
+    var funding = initial
+    var sent = false
+    stubs.iterator.takeWhile(_ => result.isFailure && !sent).foreach { stub =>
+      require(alive(), "rollup attempt expired")
+      result = if (stub.txType == NISPSubmission && dataBoxes.getDataBoxToken.isEmpty)
+        Failure(new DataBoxRetrievalException("NISP submission requires a registered MinerData box"))
+      else attemptRollup(stub, Some(funding))
+      result match {
+        case Failure(_: EngineBroadcast.SubmissionOutcomeException) => sent = true
+        case Failure(ex) =>
+          releaseInitialInputs()
+          funding = funding.copy(feesToCreate = funding.feesToCreate - stub.rollupBlockId)
+          logger.warn(s"Rollup ${stub.rollupBlockId} could not fund the batch: ${ex.getMessage}")
+        case Success(_) => ()
       }
-    }else {
-      stubs.foldLeft((initTx, initialTxInfo)) {
-        (z, s) =>
-          if (z._1.isFailure) {
-            val nextInit = attemptTx[RollupTxStub, LatestRollup](getRollupTransaction(s, Some(initialTxInfo)), latestRollupState, s)
-
-            val attemptFailure = (nextInit, z._2.copy(z._2.feesToCreate - s.rollupBlockId))
-            val attemptSuccess = (nextInit, z._2)
-
-            nextInit match {
-              case Failure(init) if init.getMessage == "InitTx never initialized" =>
-                attemptFailure
-              case Failure(mal: ErgoClientException) if mal.getMessage.contains("Every input of the transaction should be in UTXO") =>
-                syncHandler ! ResetMempoolState(s.rollupBlockId)
-                logger.warn(s"Got de-synced mempool state for rollup ${s.rollupBlockId} attempting ${s.txType}")
-                attemptFailure
-              case Failure(_: NoValidNISPException) =>
-                attemptFailure
-              case Failure(_: IllegalStateException) =>
-                attemptFailure
-              case Failure(_: RollupRemovedException) =>
-                attemptFailure
-              case Failure(_: StubInvalidException) =>
-                attemptFailure
-              case Failure(_: NotEnoughInputsException) =>
-                attemptFailure
-              case Failure(_: NewlyGeneratedRollupException) =>
-                attemptFailure
-              case Failure(ex) =>
-                logger.error(s"Got error while submitting initial transaction with rollup ${s.rollupBlockId}", ex)
-                attemptFailure
-              case Success(_) =>
-                attemptSuccess
-            }
-          } else {
-            z
-          }
-      }._1
     }
+    result
   }
 
-
-  /**
-   * The rest of the batch, in parallel. The returned Future completes only when every attempt has,
-   * which is what keeps `batchLock` covering the fields these read.
-   */
+  /** At most two children build concurrently against the attempt's immutable fee allocations. */
   private def submitRemainingTxs(remainingStubs: Seq[RollupTxStub]): Future[Unit] = {
     remainingStubs.grouped(2).foldLeft(Future.successful(())) { (previous, group) =>
       previous.flatMap { _ =>
         val attempts = group.map { s =>
-          val dispatched = Try(Future(attemptTx[RollupTxStub, LatestRollup](
-            getRollupTransaction(s, None), latestRollupState, s))(rollupWorker))
+          val dispatched = Try(Future(attemptRollup(s, None))(worker))
             .recover { case NonFatal(ex) => Future.failed(ex) }.get
           dispatched.map(reportAttempt(s, _)).recover {
             case NonFatal(ex) => logger.error(s"Got unexpected error in tx attempt thread for $s", ex)
@@ -623,26 +512,40 @@ trait RollupCore extends Actor with InjectedActorSupport {
     }
   }
 
-  private def sendEvalTransform(stub: RollupTxStub,
-                                latestState: LatestRollup,
-                                initialTxInfo: Option[InitialTxInfo]): Try[String] = {
-    Try {
-      client.execute {
-        ctx =>
-          checkRollupStubValidity(ctx, stub, latestState)
-          val initOutputs = initialTxInfo.map(initialTxOutputs(stub, _))
-          val feeOutputs = mkFeeOutputs(stub, initOutputs)
-          val sTx = RollupTransactions.genEvalTransform(ctx, wallet, latestState.inputUTXO,
-            rollupWalletInputs(stub, initialTxInfo), feeOutputs)
-          if (initOutputs.isDefined)
-            updateFeeMap(sTx, initOutputs.get._2)
-          val txId = submitSigned(ctx, sTx, initialTxInfo.isDefined, stub.rollupBlockId,
-            latestState.inputUTXO.id.toString)
-          logger.info(s"Sent transaction ${txId} to transform evaluation contract for rollup ${stub.rollupBlockId}")
-          txId
-      }
+  /** Transform builders only copy box state; their shared funding path needs no dictionary. */
+  private def transformInput(stub: RollupTxStub): (InputUTXO, lfsm.states.RollupMetadata, Seq[String]) = {
+    val reply = Await.result((syncHandler ? GetRollupMetadata(stub.rollupBlockId)).mapTo[RollupInfo],
+      timeout.duration)
+    reply match {
+      case RollupMessages.CurrentRollupMetadata(_, _, Some(projected)) if !projected.toBeRemoved =>
+        (projected.asInput, projected.metadata, projected.ancestorIds)
+      case RollupMessages.CurrentRollupMetadata(id, metadata, None) =>
+        (InputUTXO(client.execute(_.getBoxesById(id).head)), metadata, Seq.empty)
+      case RollupMessages.RollupUnavailable(reason) => throw new IllegalStateException(reason)
+      case _ => throw RollupRemovedException(s"Rollup ${stub.rollupBlockId} has no spendable state")
     }
   }
+
+  /** Both structural transforms use the same batch fee allocations and final input recheck. */
+  private def sendTransform(stub: RollupTxStub, initialTxInfo: Option[InitialTxInfo]): Try[String] = Try {
+    val (input, metadata, _) = transformInput(stub)
+    client.execute { ctx =>
+      require(stub.currentPeriod == metadata.currentPeriod && stub.validate(ctx.getHeight, metadata),
+        "transform is no longer eligible")
+      val initOutputs = initialTxInfo.map(initialTxOutputs(stub, _))
+      val fees = mkFeeOutputs(stub, initOutputs)
+      val funding = rollupWalletInputs(stub, initialTxInfo)
+      val signed = if (stub.txType == HoldingTransform)
+        RollupTransactions.genHoldingTransform(ctx, wallet, input, funding, fees)
+      else RollupTransactions.genEvalTransform(ctx, wallet, input, funding, fees)
+      initOutputs.foreach(outputs => updateFeeMap(signed, outputs._2))
+      submitSigned(ctx, signed, initialTxInfo.isDefined, stub.rollupBlockId, input.id.toString)
+    }
+  }
+
+  private def attemptRollup(stub: RollupTxStub, initialTxInfo: Option[InitialTxInfo]): Try[String] =
+    if (stub.txType == HoldingTransform || stub.txType == EvalTransform) sendTransform(stub, initialTxInfo)
+    else attemptTx[RollupTxStub, LatestRollup](getRollupTransaction(stub, initialTxInfo), materializedRollupState, stub)
 
   private def sendFraudProof(stub: RollupTxStub,
                              latestState: LatestRollup,
@@ -710,19 +613,6 @@ trait RollupCore extends Actor with InjectedActorSupport {
    * being assembled may have carried the transaction: only an authoritative mempool-aware refresh
    * can say whether the input was spent, and that is what marking it uncertain triggers.
    */
-  private def reconcileCandidates(blockHeight: Int): Unit =
-    candidateLeases.get(blockHeight).foreach { leases =>
-      candidateLeases -= blockHeight
-      leases.foreach { lease =>
-        try walletManager ! transactions.engine.EngineWalletMessages.MarkReservationUncertain(lease)
-        catch {
-          case NonFatal(ex) =>
-            logger.warn(s"Could not reconcile a candidate bond input for block $blockHeight: " +
-              s"${ex.getMessage}")
-        }
-      }
-    }
-
   /** Hand back inputs reserved for an initial transaction that was never sent. */
   private def releaseInitialInputs(): Unit =
     {
@@ -767,11 +657,11 @@ trait RollupCore extends Actor with InjectedActorSupport {
     // would only create an avoidable double-spend and stale projection retry.
     val current = Await.result[RollupInfo](
       (syncHandler ? GetRollupMetadata(rollupId)).mapTo[RollupInfo], timeout.duration)
-    RollupCore.sendIfCurrentInput(rollupId, expectedRollupInput, current) {
-      require(rollupAlive.get(), "rollup engine attempt was superseded")
+    RollupExecution.sendIfCurrentInput(rollupId, expectedRollupInput, current) {
+      require(alive(), "rollup engine attempt was superseded")
       try {
-        val txId = new transactions.engine.EngineBroadcast(walletManager, rollupNodeApi)(context.dispatcher)
-          .send(tx, allReservations, "rollup:" + rollupId, () => rollupAlive.get()).requireAccepted()
+        val txId = new transactions.engine.EngineBroadcast(walletManager, rollupNodeApi)(ec)
+          .send(tx, allReservations, "rollup:" + rollupId, () => alive()).requireAccepted()
         walletSelector.giveBack(change)
         if (usesInitialReservation) initialReservation = None
         txId
@@ -806,12 +696,12 @@ trait RollupCore extends Actor with InjectedActorSupport {
   /** The same check for work offered to a candidate, which executes one height past the tip. */
   private def checkCandidateStubValidity(ctx: BlockchainContext, stub: RollupTxStub,
                                          latestRollup: LatestRollup, blockHeight: Int): Unit = {
-    if (!RollupCore.eligibleForCandidate(stub, latestRollup.rollup, ctx.getHeight, blockHeight))
+    if (!RollupExecution.eligibleForCandidate(stub, latestRollup.rollup, ctx.getHeight, blockHeight))
       throw StubInvalidException(s"${stub.txType} stub for rollup ${stub.rollupBlockId} is not valid " +
         s"at candidate height $blockHeight")
   }
 
-  private def latestRollupState(rollupTxStub: RollupTxStub) = {
+  private def materializedRollupState(rollupTxStub: RollupTxStub) = {
     Try {
       val rollupInfo = Await.result[RollupInfo](
         (syncHandler ? GetCurrentRollupCritical(rollupTxStub.rollupBlockId)).mapTo[RollupInfo],
@@ -824,7 +714,8 @@ trait RollupCore extends Actor with InjectedActorSupport {
             if (!mempoolState.get.toBeRemoved) {
               logger.info(s"Using mempool state for rollup ${rollupTxStub.rollupBlockId}" +
                 s" with synced id $utxoId and mempool id ${mempoolState.get.asInput.id}")
-              Success(LatestRollup(mempoolState.get.asInput, mempoolState.get.rollup))
+              Success(LatestRollup(mempoolState.get.asInput, mempoolState.get.rollup,
+                mempoolState.get.ancestorIds))
             } else {
               Failure(RollupRemovedException(s"Cannot send transaction for rollup" +
                 s" ${rollupTxStub.rollupBlockId} with upcoming removal"))
@@ -842,22 +733,45 @@ trait RollupCore extends Actor with InjectedActorSupport {
   }
 }
 
-object RollupCore {
+object RollupExecution {
 
   /** The fee proposition every `UTXO.feeBox` sits at, derived once rather than per comparison. */
   private val FeeTreeHex: String = Contract.FEE_720.ergoTreeHex
+
+  /**
+   * The boxes a signed transaction spends, read from the transaction itself so candidate admission
+   * can find a conflict between two builders without decoding bodies of its own.
+   */
+  private[transactions] def signedInputIds(sTx: SignedTransaction): Set[String] = {
+    import scala.collection.JavaConverters._
+    sTx.getInputBoxesIds.asScala.map(_.replace("\"", "")).toSet
+  }
+
+  /** Serialized size as the node counts it towards the block limit, not the JSON length. */
+  private[transactions] def signedSizeBytes(sTx: SignedTransaction): Int = signedBytes(sTx).length
+
+  /**
+   * The merkle leaf a block's transaction tree would carry for this transaction, which is how an
+   * inclusion proof is matched back to what was requested.
+   */
+  private[transactions] def signedLeaf(sTx: SignedTransaction): String =
+    Hex.toHexString(scorex.crypto.hash.Blake2b256(signedBytes(sTx)))
+
+  private def signedBytes(sTx: SignedTransaction): Array[Byte] =
+    org.ergoplatform.ErgoLikeTransactionSerializer.toBytes(
+      sTx.asInstanceOf[org.ergoplatform.appkit.impl.SignedTransactionImpl].getTx)
 
   /**
    * Whether a stub may go into the candidate for `blockHeight`, built in a context at `tipHeight`.
    * Both are required: work valid at only one of the two cannot be both signed here and accepted
    * there, so it waits a block.
    */
-  private[rollups] def eligibleForCandidate(stub: RollupTxStub, rollup: Rollup,
+  private[transactions] def eligibleForCandidate(stub: RollupTxStub, rollup: Rollup,
                                             tipHeight: Int, blockHeight: Int): Boolean =
     stub.validate(blockHeight, rollup) && stub.validate(tipHeight, rollup)
 
   /** The final send gate, kept directly testable so stale state cannot accidentally execute `send`. */
-  private[rollups] def sendIfCurrentInput(rollupId: String,
+  private[transactions] def sendIfCurrentInput(rollupId: String,
                                           expectedRollupInput: String,
                                           current: RollupInfo)(send: => String): String = {
     val currentInput = current match {
@@ -901,19 +815,21 @@ object RollupCore {
     else outputs.slice(feeIdx + 1, feeIdx + 1 + count)
   }
 
-  private[rollups] case class RollupCandidateBuilt(incarnation: java.util.UUID, replyTo: ActorRef,
-                                                height: Int, result: Try[Seq[CandidateTx]])
+  /**
+   * Self-message: a fee-less candidate build finished off the actor thread.
+   *
+   * `build` names the attempt rather than the height, because a height can be built for twice —
+   * the first package was refused and a replacement is being assembled — and the superseded result
+   * must not answer the replacement.
+   */
+  private[transactions] case class RollupCandidateBuilt(incarnation: java.util.UUID,
+                                                build: java.util.UUID, height: Int,
+                                                result: Try[Seq[transactions.CandidateBundle]])
 
   /**
    * Self-message: a fee-less submission built off the actor thread took a bond input.
    */
-  private[rollups] case class CandidateLeaseTaken(blockHeight: Int, reservation: String)
-
-  /** Maximum number of times attemptTx will retry on an ErgoClientException. */
-  final val MAX_TX_ATTEMPTS: Int = 1
-
-  /** Milliseconds to wait between retry attempts in attemptTx. */
-  final val ATTEMPT_INTERVAL: Int = 5000
+  private[transactions] case class CandidateLeaseTaken(blockHeight: Int, reservation: String)
 
   case class InitialTxInfo(feesToCreate: Map[String, Long])
 }

@@ -18,6 +18,7 @@ import scorex.utils.Ints
 import state.messages.StateFrameMessages.CheckBlock
 import stratum.BlockTemplate
 import stratum.data.{MiningCandidate, Options}
+import transactions.BlockTxMessages.CandidateTx
 import transactions.rollups.{CommitmentTransactions, DataBoxSource}
 import utils.Globals
 
@@ -42,7 +43,7 @@ class LithosPool(options: Options,
                  forceConfigDiff: Boolean,
                  diffRefreshInterval: Int,
                  candidateConfig: CandidateConfig = CandidateConfig.Default,
-                 txSources: Seq[ActorRef] = Seq.empty) extends Actor {
+                 txSources: Seq[CandidateSource] = Seq.empty) extends Actor {
 
   private val logger = LoggerFactory.getLogger("LithosPool")
   private implicit val ec: ExecutionContext = context.dispatcher
@@ -331,6 +332,7 @@ class LithosPool(options: Options,
         driveCandidate()
       case Success(fetched) =>
         val candidate = fetched.candidate
+        fetched.materialized.foreach(recordMaterialization)
         if (!cacheDirty && servedWork.contains(work(candidate)) && servedCandidate.contains(request.identity)) {
           candidateTimer.foreach(_.cancel())
           candidateTimer = None
@@ -357,6 +359,28 @@ class LithosPool(options: Options,
         // A failed solo request waits for the next poll; it must not spin against an unavailable node.
         if (request.pkg.isDefined) driveCandidate()
     }
+  }
+
+  /**
+   * Keep what the node's proofs say about the package it was handed.
+   *
+   * Unproven correspondence is reported, not acted on: the supported node can return proofs that do
+   * not correspond to the transactions it was given, so a mismatch is not evidence the work is
+   * absent. `CandidateMaterialized.requireCorrespondence` is where that becomes a rejection once the
+   * node is fixed, and dependent revenue work is what will need it.
+   */
+  private def recordMaterialization(materialized: CandidateMaterialized): Unit = {
+    if (materialized.fullyProven)
+      logger.debug(s"Candidate ${materialized.identity.height} proved all " +
+        s"${materialized.included.size} requested transaction(s), " +
+        s"${materialized.knownBytes} byte(s) and ${materialized.knownCost} cost supplied")
+    else
+      logger.debug(s"Candidate ${materialized.identity.height} left " +
+        s"${materialized.unproven.size} of ${materialized.included.size + materialized.unproven.size} " +
+        "requested transaction(s) unproven; the node-selected remainder is not enumerated")
+    if (CandidateMaterialized.requireCorrespondence && !materialized.fullyProven)
+      logger.warn(s"Candidate ${materialized.identity.height} has unproven required membership: " +
+        materialized.unproven.map(_.take(8)).mkString(", "))
   }
 
   /** Fall back to genesis-only for this package. Mining continues; only the extras are dropped. */
@@ -461,7 +485,8 @@ object LithosPool {
     def chain: ChainTip = ChainTip(identity.height, identity.parentId)
     def hasExtras: Boolean = pkg.exists(_.blockTxs.nonEmpty)
   }
-  private[mining] case class Fetched(candidate: MiningCandidate, chain: ChainTip, version: Int)
+  private[mining] case class Fetched(candidate: MiningCandidate, chain: ChainTip, version: Int,
+                                     materialized: Option[CandidateMaterialized] = None)
   private case class ChainObserved(id: UUID, result: Try[NodeInfo])
   private case class CandidateFetched(id: UUID, result: Try[Fetched])
   private case class CandidateExpired(id: UUID)
@@ -507,12 +532,19 @@ object LithosPool {
       // At a voting boundary the upcoming header can activate a newer version than /info.
       // The bound preimage supplies that version before this fresh candidate leaves the worker.
       candidate.version = header.version
-      // Presence only. Ordinary mining retains the known node leaf-mismatch compatibility, so the
-      // proofs are not verified here; they cannot qualify dependent revenue bundles, which need
-      // complete membership checks before launch.
       require(candidate.proof.getJSONArray("txProofs") != null, "collateral candidate has no transaction proofs")
     }
+    // Retained for every collateral candidate, whether or not its correspondence checks out: the
+    // proofs are the only evidence of what the node did with the package, and a later consumer
+    // needs them as returned rather than as this client would have preferred them.
+    val materialized = request.pkg.map { pkg =>
+      val genesis = CandidateTx(pkg.collateral.txId, pkg.collateral.txJSON, "genesis",
+        sizeBytes = pkg.collateral.signedSizeBytes, cost = pkg.collateral.cost,
+        leaf = Hex.toHexString(Blake2b256(pkg.collateral.txBytes)))
+      CandidateMaterialized(request.identity, request.id, Hex.toHexString(candidate.msg),
+        candidate.proof, genesis +: pkg.blockTxs)
+    }
     val observed = node.info()
-    Fetched(candidate, chainTip(observed), observed.parameters.blockVersion)
+    Fetched(candidate, chainTip(observed), observed.parameters.blockVersion, materialized)
   }
 }

@@ -45,6 +45,8 @@ class EngineWalletState @Inject()(nodeContext: NodeContext) extends Actor with I
   private val wallet = nodeContext.getNodeWallet
   private lazy val inventory = new WalletInventory(nodeContext, nodeApi)
   private lazy val walletWorker = context.system.dispatchers.lookup("lithos-contexts.wallet-io-dispatcher")
+  // Inventory scans and reward sweeps cannot occupy the funding selection worker.
+  private lazy val maintenanceWorker = context.system.dispatchers.lookup("lithos-contexts.wallet-maintenance-dispatcher")
   private var selecting: Option[UUID] = None
   private var criticalSelecting: Option[UUID] = None
   private var criticalMessage = false
@@ -124,7 +126,8 @@ class EngineWalletState @Inject()(nodeContext: NodeContext) extends Actor with I
       val excluded = usedInputs.keySet
       val chainedChange = knownOutputs
       Try(Future(client.execute { ctx =>
-        inventory.select(ctx, erg, tokens, excluded, single, p2pkOnly, rewardsOnly = false, chainedChange)
+        inventory.select(ctx, erg, tokens, excluded, single, p2pkOnly, rewardsOnly = false, chainedChange,
+          deadlineMillis = deadline)
       })(if (critical) criticalWalletWorker else walletWorker)
         .onComplete(result => self ! SelectionFinished(attempt, reservationId, deadline, track, reply, result, critical)))
         .failed.foreach(ex =>
@@ -218,7 +221,7 @@ class EngineWalletState @Inject()(nodeContext: NodeContext) extends Actor with I
       val rewards = snapshot.boxes.filter(_.reward)
       BoxesRefreshed(generation, snapshotRevision, boxes, rewards, ctx.getHeight,
         snapshot.complete && !snapshot.truncated, indexed)
-    })(walletWorker).onComplete {
+    })(maintenanceWorker).onComplete {
       case Success(msg) => self ! WalletWorkerResult(walletIncarnation, msg)
       case Failure(ex) => self ! WalletWorkerResult(walletIncarnation, RefreshFailed(generation, ex))
     }).failed.foreach(ex => self ! WalletWorkerResult(walletIncarnation, RefreshFailed(generation, ex)))
@@ -349,9 +352,13 @@ class EngineWalletState @Inject()(nodeContext: NodeContext) extends Actor with I
           if hold.txId == txId && hold.sendFinished => boxId
       }.toSet
       val resolved = (spent ++ free).intersect(ownedByThisSend)
+      val consumed = spent.intersect(ownedByThisSend)
       usedInputs --= resolved
-      walletBoxes --= spent.intersect(ownedByThisSend)
-      rewardBoxes --= spent.intersect(ownedByThisSend)
+      walletBoxes --= consumed
+      rewardBoxes --= consumed
+      // Chained change goes too. It is offered ahead of anything the node reports, so a spent entry
+      // left here is handed to the next build and produces a transaction whose inputs do not exist.
+      knownOutputs = knownOutputs.filterNot(box => consumed.contains(box.boxId))
       if (resolved.nonEmpty) {
         walletRevision += 1L
         joinKeys = joinKeys.filterNot { case (_, owned) =>
@@ -423,6 +430,12 @@ class EngineWalletState @Inject()(nodeContext: NodeContext) extends Actor with I
             case (_, reservation) => spentReservationIds.contains(reservation.id)
           }
         }
+        // Chained change is kept only while it is still real. The read includes unconfirmed outputs,
+        // so a box whose parent is merely unsent-to-chain is still reported; one that is neither
+        // reported nor reserved has been spent, and offering it again builds on an input that is
+        // gone. Only a complete read can conclude this, which is why it is not done above.
+        knownOutputs = knownOutputs.filter(box =>
+          reportedUnspent.contains(box.boxId) || usedInputs.contains(box.boxId))
         walletBoxes = freshWallet
         rewardBoxes = freshRewards
       } else {
@@ -559,7 +572,7 @@ class EngineWalletState @Inject()(nodeContext: NodeContext) extends Actor with I
           reserve(batch.map(_.id.toString), leaseId)
         }
         val sweep = Promise[RewardsClaimed]()
-        Try(Future(runRewardSweep(batches.iterator.map(hydrateRewards), leaseIds, sweep))(walletWorker))
+        Try(Future(runRewardSweep(batches.iterator.map(hydrateRewards), leaseIds, sweep))(maintenanceWorker))
           .failed.foreach { ex =>
             leaseIds.foreach(leaseId => self ! ReleaseInputs(leaseId))
             sweep.tryFailure(ex)

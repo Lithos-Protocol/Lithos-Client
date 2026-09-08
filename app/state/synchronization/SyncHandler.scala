@@ -759,6 +759,10 @@ class SyncHandler @Inject()(config: Configuration,
    * runs the reducer, and only that needs authenticated state. The common case for a holding
    * transform is the first, so it materializes nothing.
    */
+  /** The unconfirmed transactions behind a rollup's projected tip, parent first. */
+  private def chainIds(utxoId: String): Seq[String] =
+    mempool.chains.get(utxoId).map(_.transforms.map(_.tx.id)).getOrElse(Seq.empty)
+
   private def respondRollupMetadata(blockId: String, requester: ActorRef): Unit = committed match {
     case Some(state) if status.isInstanceOf[Ready] => state.rollups.get(blockId) match {
       case Some(rollup) =>
@@ -766,7 +770,8 @@ class SyncHandler @Inject()(config: Configuration,
         if (!mempool.chains.contains(rollup.utxoId)) requester ! confirmed
         else unchangedProjection(state, blockId, rollup) match {
           case Some(projected) => requester ! confirmed.copy(mempoolState = Some(
-            MempoolRollupMetadata(projected.asInput, projected.rollup.metadata, projected.toBeRemoved)))
+            MempoolRollupMetadata(projected.asInput, projected.rollup.metadata, projected.toBeRemoved,
+              chainIds(rollup.utxoId))))
           case None =>
             val epoch = stateEpoch
             val key = keyFor(DictionaryId.Rollup(blockId), rollup.dictionary)
@@ -779,7 +784,7 @@ class SyncHandler @Inject()(config: Configuration,
                       requester ! CurrentRollupMetadata(materialized.utxoId, materialized.metadata,
                         projectedRollup(installDictionaries(current, dictionaries), blockId, materialized)
                           .map(projected => MempoolRollupMetadata(projected.asInput,
-                            projected.rollup.metadata, projected.toBeRemoved)))
+                            projected.rollup.metadata, projected.toBeRemoved, chainIds(latest.utxoId))))
                     case _ => requester ! NoRollupFound()
                   }
                 case _ => respondRollupMetadata(blockId, requester)
@@ -816,7 +821,7 @@ class SyncHandler @Inject()(config: Configuration,
                   .orElse(if (tree.dictionary.materialized)
                     projectedRollup(working, tree.blockId, tree) else None).map { projection =>
                   tree.blockId -> MempoolRollupMetadata(projection.asInput,
-                    projection.rollup.metadata, projection.toBeRemoved)
+                    projection.rollup.metadata, projection.toBeRemoved, chainIds(tree.utxoId))
                 }
               }
             }.toMap
@@ -1294,14 +1299,16 @@ class SyncHandler @Inject()(config: Configuration,
             mempool.endInputs.get(tree.utxoId).map { endInput =>
               val synthetic = BlockInfo(s"mempool-${mempool.revision}-$blockId", state.cursor.height + 1,
                 chain.transforms.map(_.tx), state.cursor.blockId)
+              // The chain that produced `endInput`, so anything built on it can carry its parents.
+              val ancestors = chain.transforms.map(_.tx.id)
               val projection = BlockReducer.applyBlock(state, synthetic, protocol) match {
                 case Right(result) => result.state.rollups.get(blockId) match {
-                  case Some(next) => MempoolRollupState(endInput, next)
-                  case None => MempoolRollupState(endInput, tree, toBeRemoved = true)
+                  case Some(next) => MempoolRollupState(endInput, next, ancestorIds = ancestors)
+                  case None => MempoolRollupState(endInput, tree, toBeRemoved = true, ancestorIds = ancestors)
                 }
                 case Left(error) =>
                   logger.warn(s"Rejected mempool projection for rollup $blockId: ${error.message}")
-                  MempoolRollupState(endInput, tree, toBeRemoved = true)
+                  MempoolRollupState(endInput, tree, toBeRemoved = true, ancestorIds = ancestors)
               }
               projections += blockId -> CachedProjection(stamp, projection)
               projection

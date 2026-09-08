@@ -1,9 +1,10 @@
 package state.synchronization
 
 import node.NodeApi
-import node.model.{NodeAsset, NodeBox, NodeInput, NodeRegisters, NodeSpendingProof, NodeTransaction}
+import node.model.{NodeAsset, NodeBox, NodeInput, NodeRegisters, NodeSpendingProof, NodeTransaction, Paging}
 import org.ergoplatform.appkit.ErgoValue
-import org.mockito.Mockito.when
+import org.mockito.ArgumentMatchers.{any, anyString}
+import org.mockito.Mockito.{never, times, verify, when}
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 import org.scalatestplus.mockito.MockitoSugar
@@ -19,6 +20,9 @@ class CompleteMempoolSpec extends AnyFlatSpec with Matchers with MockitoSugar {
     val api = mock[NodeApi]
     when(api.info()).thenReturn(Success(ChainFixtures.infoAt(100).copy(bestFullHeaderId = Some("aa" * 32))))
     when(api.unconfirmedTransactionIds()).thenReturn(Success(Seq(id)))
+    // Empty by default, so these cases take the by-id completion pass; the paging tests below
+    // override it.
+    when(api.unconfirmedTransactions(any[Paging])).thenReturn(Success(Seq.empty))
     when(api.unconfirmedTransactionById(id)).thenReturn(Success(Some(
       NodeTransaction(id, Seq(NodeInput(input, NodeSpendingProof.empty)), Seq.empty, Seq.empty))))
     api
@@ -67,6 +71,38 @@ class CompleteMempoolSpec extends AnyFlatSpec with Matchers with MockitoSugar {
     snapshot.spent should contain(input)
     snapshot.conflicts(input) shouldBe Set(id, rival)
     snapshot.transactions.map(_.id).toSet shouldBe Set(id, rival)
+  }
+
+  /**
+   * One request per member puts the whole mempool on the latency path of every engine operation,
+   * which starves wallet selection and saturates the engine's admission queue. Bodies come from
+   * paged reads; the inventory still decides what the observation must contain.
+   */
+  it should "read bodies in pages rather than one request per member" in {
+    val api = mempoolApi()
+    val members = (0 until 120).map(index => "%064x".format(index))
+    val bodies = members.map(memberId =>
+      NodeTransaction(memberId, Seq(NodeInput(memberId, NodeSpendingProof.empty)), Seq.empty, Seq.empty))
+    when(api.unconfirmedTransactionIds()).thenReturn(Success(members))
+    when(api.unconfirmedTransactions(any[Paging])).thenAnswer { invocation =>
+      val paging = invocation.getArgument[Paging](0)
+      Success(bodies.slice(paging.offset, paging.offset + paging.limit))
+    }
+
+    CompleteMempool.collect(api).get.transactions should have size 120
+    // Three pages of fifty, and nothing left for the by-id completion pass.
+    verify(api, times(3)).unconfirmedTransactions(any[Paging])
+    verify(api, never()).unconfirmedTransactionById(anyString())
+  }
+
+  /** Offsets shift under churn, so anything the pages missed is still fetched by id. */
+  it should "complete a member the paged reads did not supply" in {
+    val api = mempoolApi()
+    when(api.unconfirmedTransactions(any[Paging])).thenReturn(Success(Seq.empty))
+
+    val snapshot = CompleteMempool.collect(api).get
+    snapshot.transactions.map(_.id) shouldBe Vector(id)
+    verify(api, times(1)).unconfirmedTransactionById(id)
   }
 
   /** Derived views read these rather than re-fetching, so the bodies have to survive collection. */

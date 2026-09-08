@@ -49,6 +49,29 @@ class EngineWalletStateSpec extends TestKit(ActorSystem("wallet-manager-spec", E
 
   private val erg = 1000000000L
 
+  "Funding selection" should "finish while a full wallet refresh is stalled" in {
+    val api = mock[NodeApi]
+    val (ctx, _, wallet) = FakeNodeContext(api, numAddresses = 1)
+    val entered = new java.util.concurrent.CountDownLatch(1)
+    val release = new java.util.concurrent.CountDownLatch(1)
+    when(api.indexerEnabled).thenAnswer { _ =>
+      entered.countDown()
+      release.await(15, java.util.concurrent.TimeUnit.SECONDS)
+      false
+    }
+    when(api.walletUnspentBoxes(any[ConfirmationRange], any[Paging]))
+      .thenReturn(Success(Seq(walletBox(wallet, erg))))
+    val manager = system.actorOf(Props(new EngineWalletState(ctx)))
+    try {
+      manager ! RefreshBoxes
+      entered.await(5, java.util.concurrent.TimeUnit.SECONDS) shouldBe true
+      val funding = EngineFunding(manager, 2.seconds, system.dispatcher)
+      val allocation = funding.reserveCoveringP2PK(erg)
+      allocation.inputs.map(_.value) shouldBe Seq(erg)
+      allocation.release()
+    } finally { release.countDown(); system.stop(manager) }
+  }
+
   /** A EngineWalletState whose clock the test drives, so a reservation can age without waiting it out. */
   private class TestableEngineWalletState(ctx: NodeContext, clock: () => Long) extends EngineWalletState(ctx) {
     override protected def now(): Long = clock()

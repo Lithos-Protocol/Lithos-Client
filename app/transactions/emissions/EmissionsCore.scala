@@ -8,7 +8,8 @@ import org.ergoplatform.appkit.{ErgoClient, SignedTransaction}
 import org.slf4j.{Logger, LoggerFactory}
 import play.api.Configuration
 import play.api.libs.concurrent.InjectedActorSupport
-import transactions.BlockTxMessages.{BlockTxsReady, CandidateTx, CandidateTxsDropped, RequestBlockTxs}
+import transactions.BlockTxMessages
+import transactions.BlockTxMessages.{BlockTxsReady, CandidateTx, CandidateTxsDropped, PrepareBlockTxs, RequestBlockTxs}
 import transactions.emissions.EmissionsCore._
 import transactions.engine.{FundingAllocation, EngineFunding}
 import work.lithos.mutations.InputUTXO
@@ -90,6 +91,32 @@ trait EmissionsCore extends Actor with InjectedActorSupport {
   }
   protected def finishEmission(): Unit = { spending = false }
 
+  /** The finished build for one height, held until that height is asked for or dropped. */
+  private var prepared = Option.empty[(Int, Seq[transactions.CandidateBundle])]
+  /** The height being built for and which attempt is building it, so a superseded one is discarded. */
+  private var buildingFor = Option.empty[(Int, java.util.UUID)]
+  /** Requesters that arrived while the build for their height was still running. */
+  private var waiting = Vector.empty[(ActorRef, Int)]
+
+  /**
+   * Build the fee-less copies for one height, or join the build already running for it.
+   *
+   * A requester arriving mid-build waits for it rather than being told there is nothing: the point
+   * of preparing early is that this work is ready, or nearly so, by the time it is asked for.
+   */
+  private def startCandidateBuild(blockHeight: Int, limit: Int, replyTo: Option[ActorRef]): Unit = {
+    if (!emissionConfig.enabled || limit <= 0) replyTo.foreach(_ ! BlockTxsReady(blockHeight, Seq.empty))
+    else {
+      replyTo.foreach(r => waiting :+= (r -> blockHeight))
+      if (!buildingFor.exists(_._1 == blockHeight)) {
+        val build = java.util.UUID.randomUUID()
+        buildingFor = Some(blockHeight -> build)
+        prepared = None
+        dispatchCandidateBuild(blockHeight, build, limit)
+      }
+    }
+  }
+
   // ─── lifecycle ────────────────────────────────────────────────────────────
 
   abstract override def preStart(): Unit = {
@@ -135,9 +162,21 @@ trait EmissionsCore extends Actor with InjectedActorSupport {
    * below send the same messages the engine matches on.
    */
   private def emissionReceive: Receive = {
-    case CandidateBuilt(incarnation, reply, height, result) if incarnation == emissionIncarnation =>
-      candidateBusy = false
-      reply ! BlockTxsReady(height, result.getOrElse(Seq.empty))
+    case CandidateBuilt(incarnation, build, height, result) if incarnation == emissionIncarnation =>
+      // Kept only while this is still the build that is wanted. One whose height was dropped mid-run
+      // built for a package that will not be published.
+      if (buildingFor.exists(_._2 == build)) {
+        buildingFor = None
+        prepared = Some(height -> result.getOrElse(Seq.empty[transactions.CandidateBundle]))
+      }
+      // Requesters waiting on a build that no longer exists would otherwise hang until their ask
+      // expires; ones waiting on a replacement for the same height are left to it.
+      if (!buildingFor.exists(_._1 == height)) {
+        val bundles = prepared.filter(_._1 == height).map(_._2).getOrElse(Seq.empty[transactions.CandidateBundle])
+        val (ready, rest) = waiting.partition(_._2 == height)
+        waiting = rest
+        ready.foreach { case (replyTo, _) => replyTo ! BlockTxsReady(height, bundles) }
+      }
     case _: CandidateBuilt => ()
 
     // ------------------------------------------------------------------
@@ -147,32 +186,54 @@ trait EmissionsCore extends Actor with InjectedActorSupport {
     // Emission candidates reserve nothing that a dropped block has to reconcile, so there is
     // nothing to undo. Matched anyway, because every transaction source is told.
 
+    // Building for a height that can no longer land would offer it to a later one.
+    case CandidateTxsDropped(blockHeight) =>
+      if (prepared.exists(_._1 <= blockHeight)) prepared = None
+      if (buildingFor.exists(_._1 <= blockHeight)) buildingFor = None
+
+    case PrepareBlockTxs(blockHeight, limit) => startCandidateBuild(blockHeight, limit, None)
+
     case RequestBlockTxs(blockHeight, limit) =>
       val replyTo = sender()
-      if (!emissionConfig.enabled || limit <= 0 || candidateBusy) replyTo ! BlockTxsReady(blockHeight, Seq.empty[CandidateTx])
-      else {
-        candidateBusy = true
-        Try(Future {
-          require(emissionAlive.get(), "emission engine attempt was superseded")
-          client.execute { ctx =>
-            val (tip, spends) = txs.buildQueueSpends(ctx, blockHeight, funded = false, limit)
-            if (spends.isEmpty) Seq.empty[CandidateTx]
-            else {
-              // Other lenders' unconfirmed joins, first because these spends chain off them.
-              // Carrying them also avoids censoring work this client happened to build on top of.
-              val ancestors = tip.ancestors.map(t =>
-                CandidateTx(t.id, NodeCodecs.encodeTransaction(t).toString, CandidateTx.MempoolAncestor))
-              val own = spends.map(s => CandidateTx(
-                s.tx.getId.replace("\"", ""), s.tx.toJson(false, false),
-                if (s.kind == EmissionSpend.Clear) CandidateTx.Clear else CandidateTx.Activate))
-              (ancestors ++ own).take(limit)
-            }
-          }
-        }(candidateWorker).onComplete(result =>
-          self ! CandidateBuilt(emissionIncarnation, replyTo, blockHeight, result)))
-          .failed.foreach(ex => self ! CandidateBuilt(emissionIncarnation, replyTo, blockHeight, Failure(ex)))
-      }
+      // Already built for this height, so the request costs nothing but the reply.
+      if (prepared.exists(_._1 == blockHeight)) replyTo ! BlockTxsReady(blockHeight, prepared.get._2)
+      else startCandidateBuild(blockHeight, limit, Some(replyTo))
+
   }
+
+  /** One fee-less build, off the mailbox. Its result is cached and answers whoever is waiting. */
+  private def dispatchCandidateBuild(blockHeight: Int, build: java.util.UUID, limit: Int): Unit =
+    Try(Future {
+      require(emissionAlive.get(), "emission engine attempt was superseded")
+      client.execute { ctx =>
+        val (tip, spends) = txs.buildQueueSpends(ctx, blockHeight, funded = false, limit)
+        if (spends.isEmpty) Seq.empty[transactions.CandidateBundle]
+        else {
+          // Other lenders' unconfirmed joins, first because these spends chain off them.
+          // Carrying them also avoids censoring work this client happened to build on top of.
+          val ancestors = tip.ancestors.map { t =>
+            val encoded = NodeCodecs.encodeTransaction(t).toString
+            // The node reports the serialized size it charges to the block; only the execution
+            // cost is unknown, and the package's block share is what covers that.
+            CandidateTx(t.id, encoded, CandidateTx.MempoolAncestor,
+              t.inputs.map(_.boxId).toSet, t.size.getOrElse(encoded.length))
+          }
+          val own = spends.map(s => CandidateTx(
+            s.tx.getId.replace("\"", ""), s.tx.toJson(false, false),
+            if (s.kind == EmissionSpend.Clear) CandidateTx.Clear else CandidateTx.Activate,
+            transactions.engine.RollupExecution.signedInputIds(s.tx),
+            transactions.engine.RollupExecution.signedSizeBytes(s.tx), s.tx.getCost.toLong,
+            transactions.engine.RollupExecution.signedLeaf(s.tx)))
+          // The queue spends chain off the last unconfirmed join in the emission chain, and
+          // the whole chain travels with them.
+          Seq(transactions.CandidateBundle((ancestors ++ own).toVector,
+            ancestors.lastOption.map(a => BlockTxMessages.ChainFromMempool(a.id)).toSeq ++
+              ancestors.map(a => BlockTxMessages.IncludeExisting(a.id))))
+        }
+      }
+    }(candidateWorker).onComplete(result =>
+      self ! CandidateBuilt(emissionIncarnation, build, blockHeight, result)))
+      .failed.foreach(ex => self ! CandidateBuilt(emissionIncarnation, build, blockHeight, Failure(ex)))
 
   // ─── private helpers ──────────────────────────────────────────────────────
 
@@ -227,7 +288,13 @@ object EmissionsCore {
   private[transactions] case object Collateralize
   private[transactions] case object DriveQueue
 
-  /** Self-message: a fee-less candidate build finished off the actor thread. */
-  private[emissions] case class CandidateBuilt(incarnation: java.util.UUID, reply: ActorRef,
-    height: Int, result: Try[Seq[CandidateTx]])
+  /**
+   * Self-message: a fee-less candidate build finished off the actor thread.
+   *
+   * `build` names the attempt rather than the height, because a height can be built for twice — the
+   * first package was refused and a replacement is being assembled — and the superseded result must
+   * not answer the replacement.
+   */
+  private[emissions] case class CandidateBuilt(incarnation: java.util.UUID, build: java.util.UUID,
+    height: Int, result: Try[Seq[transactions.CandidateBundle]])
 }

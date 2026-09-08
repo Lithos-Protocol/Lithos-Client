@@ -12,7 +12,7 @@ import play.api.cache.SyncCacheApi
 import play.api.libs.concurrent.InjectedActorSupport
 import state.messages.MempoolMessages.MempoolRollupMetadata
 import state.messages.SyncMessages._
-import transactions.BlockTxMessages.{BlockTxsReady, CandidateTx, CandidateTxsDropped, RequestBlockTxs}
+import transactions.BlockTxMessages.{BlockTxsReady, CandidateTx, CandidateTxsDropped, PrepareBlockTxs, RequestBlockTxs}
 import transactions.rollups.TransactionMessages.RollupTxType._
 import transactions.rollups.TransactionMessages.{BatchAccepted, BuildBlockTxs, EvaluationSet, FraudBatch, PublishedRollupMap, RollupBatch, RollupTxStub, RollupTxType}
 import transactions.rollups.RollupProcessor._
@@ -27,7 +27,6 @@ import scala.util.{Failure, Success}
 class RollupProcessor @Inject()(config: Configuration, nodeContext: NodeContext,
                                 cacheApi: SyncCacheApi,
                                 @Named("sync-handler")        syncHandler:       ActorRef,
-                                @Named("transaction-engine")  submissionHandler: ActorRef,
                                 @Named("rollup-evaluator")    rollupEvaluator:   ActorRef,
                                 @Named("transaction-engine") transactionEngine: ActorRef)
   extends Actor with InjectedActorSupport {
@@ -80,10 +79,8 @@ class RollupProcessor @Inject()(config: Configuration, nodeContext: NodeContext,
         .flatMap(_.headOption).toSeq
       // Separate by type; timed types sorted oldest-first by currentPeriod
       val nispSubmissions = headStubs.filter(_.txType == NISPSubmission).sortBy(_.currentPeriod)
-      // Holding transforms leave the batch: they go to the engine one at a time as typed intents,
-      // which rediscover their own eligibility rather than relying on this queue surviving a restart.
-      val holdingTransforms = headStubs.filter(_.txType == HoldingTransform).sortBy(_.currentPeriod)
-      val transforms      = headStubs.filter(_.txType == EvalTransform).sortBy(_.currentPeriod)
+      val transforms = headStubs.filter(s => s.txType == HoldingTransform || s.txType == EvalTransform)
+        .sortBy(_.currentPeriod)
       val payouts         = headStubs.filter(_.txType == Payout)
       val evaluations     = headStubs.filter(e => e.txType == NISPEvaluation && e.fpInfo.isEmpty).sortBy(_.currentPeriod)
       val fraudProofs     = fpHeads.sortBy(_.currentPeriod)
@@ -94,37 +91,16 @@ class RollupProcessor @Inject()(config: Configuration, nodeContext: NodeContext,
       // Evaluation tx stubs are sent to RollupEvaluator
       val evalSet = EvaluationSet(evaluations.take(EVAL_SET_SIZE))
 
-      if (batch.stubs.nonEmpty)   submissionHandler ! batch
+      if (batch.stubs.nonEmpty)   transactionEngine ! batch
       if (evalSet.stubs.nonEmpty) rollupEvaluator   ! evalSet
-      holdingTransforms.take(TX_BATCH_SIZE).foreach { stub =>
-        stub.currentPeriod.foreach { period =>
-          transactionEngine ! transactions.engine.TransactionEngine.Submit(
-            transactions.engine.TransactionEngine.HoldingTransform(stub.rollupBlockId, period, stub.fee))
-        }
-      }
-
       // Evaluation stubs are consumed on the send, because RollupEvaluator takes every set it is
-      // given. The batch is not: RollupCore refuses one while a batch is already running, so
+      // given. The batch is not: RollupExecution refuses one while a batch is already running, so
       // its stubs are dropped only against a BatchAccepted. Dropping them here lost fraud proof
       // stubs outright, since nothing but a fresh evaluation cycle re-derives those.
       dropStubs(evalSet.stubs)
 
     case BatchAccepted(stubs) =>
       dropStubs(stubs)
-    // Sent means done: `Completed` is the engine finding the chain already past this transform.
-    // Anything else leaves the stub queued so the next pass retries it against fresher state.
-    case outcome: transactions.engine.TransactionEngine.Outcome if sender() == transactionEngine =>
-      import transactions.engine.TransactionEngine._
-      outcome match {
-        case _: Accepted | _: Completed =>
-          val settled = pendingRollupTxs.values.flatten.filter { stub =>
-            stub.txType == RollupTxType.HoldingTransform && stub.currentPeriod.exists(period =>
-              transactions.engine.TransactionEngine
-                .HoldingTransform(stub.rollupBlockId, period, stub.fee).key == outcome.key)
-          }.toSeq
-          dropStubs(settled)
-        case other => logger.warn(s"Holding transform remains queued: $other")
-      }
     // One stub per fraudulent miner, all for the SAME rollup. Keying them by rollupBlockId collapsed
     // every miner but one, so a rollup with three fraudulent miners only ever slashed one of them.
     // Merged directly rather than through PublishedRollupMap, which would also spend a full sync
@@ -133,22 +109,26 @@ class RollupProcessor @Inject()(config: Configuration, nodeContext: NodeContext,
       logger.info(s"Merging ${fpStubs.size} fraud proof stub(s) for rollup " +
         s"${fpStubs.headOption.map(_.rollupBlockId).getOrElse("?")}")
       fpStubs.foreach(s => addRollupStubs(Map(s.rollupBlockId -> s)))
-    // A block is being assembled. RollupCore builds the highest-priority queued
+    // A block is being assembled. RollupExecution builds the highest-priority queued
     // work fee-less and replies straight back to the requester. Nothing is dispatched or removed
     // here, so the funded copies still reach the mempool if no block is found.
+    // Start the same build the request would, before the request arrives. Nothing is dispatched or
+    // removed here either; the result is held by RollupExecution until it is asked for or dropped.
+    case PrepareBlockTxs(blockHeight, limit) =>
+      val chosen = chooseCandidateStubs(limit)
+      if (chosen.nonEmpty) transactionEngine ! BuildBlockTxs(blockHeight, chosen, answer = false)
+
     case RequestBlockTxs(blockHeight, limit) =>
       val requester = sender()
-      val chosen =
-        if (limit <= 0) Seq.empty[RollupTxStub]
-        else prioritise(pendingRollupTxs.values.flatMap(_.headOption).toSeq).take(limit)
+      val chosen = chooseCandidateStubs(limit)
 
-      if (chosen.isEmpty) requester ! BlockTxsReady(blockHeight, Seq.empty[CandidateTx])
-      else submissionHandler.tell(BuildBlockTxs(blockHeight, chosen), requester)
+      if (chosen.isEmpty) requester ! BlockTxsReady(blockHeight, Seq.empty)
+      else transactionEngine.tell(BuildBlockTxs(blockHeight, chosen), requester)
 
-    // Nothing queued here is affected — the stubs were never dispatched — but RollupCore may
+    // Nothing queued here is affected — the stubs were never dispatched — but RollupExecution may
     // be holding a wallet box for a submission it built into that package, so it has to be told.
     case dropped: CandidateTxsDropped =>
-      submissionHandler ! dropped
+      transactionEngine ! dropped
 
     // The height comes back with the sync state rather than being read in the handler. This actor
     // answers RequestBlockTxs, so a BlockchainContext opened on its own thread is a node round trip
@@ -200,6 +180,11 @@ class RollupProcessor @Inject()(config: Configuration, nodeContext: NodeContext,
       case (None, None) => true
       case _ => false
     }
+
+  /** The highest-priority queued work, which preparation and the request have to agree on. */
+  private def chooseCandidateStubs(limit: Int): Seq[RollupTxStub] =
+    if (limit <= 0) Seq.empty[RollupTxStub]
+    else prioritise(pendingRollupTxs.values.flatMap(_.headOption).toSeq).take(limit)
 
   private def prioritise(stubs: Seq[RollupTxStub]): Seq[RollupTxStub] = {
     val submissions = stubs.filter(_.txType == NISPSubmission).sortBy(_.currentPeriod)
@@ -291,7 +276,7 @@ class RollupProcessor @Inject()(config: Configuration, nodeContext: NodeContext,
 }
 
 object RollupProcessor {
-  /** Maximum number of non-evaluation stubs dispatched to RollupCore per tick. */
+  /** Maximum number of non-evaluation stubs dispatched to RollupExecution per tick. */
   private final val TX_BATCH_SIZE: Int  = 100
 
   /** Maximum number of NISPEvaluation stubs dispatched to RollupEvaluator per tick. */

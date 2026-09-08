@@ -4,48 +4,35 @@ import akka.actor.{Actor, ActorRef}
 import configs.NodeContext
 import play.api.Configuration
 import play.api.cache.SyncCacheApi
+import transactions.engine.{EngineRollupCandidates, RollupExecution}
 import transactions.rollups.TransactionMessages.{BatchAccepted, RollupBatch}
-
 import scala.concurrent.ExecutionContext
-import scala.util.{Failure, Success, Try}
 
 private[rollups] abstract class EmptyRollupActor extends Actor {
   override def receive: Receive = Actor.emptyBehavior
 }
 
-/**
- * Isolates the engine's rollup behavior from wallet and DEX admission in domain tests.
- *
- * Batch admission mirrors what TransactionEngine does with an `EngineIntent.Rollups`: dispatch
- * through `executeRollupBatch`, acknowledge only once it is accepted, and release the lock with
- * `finishRollupBatch` on completion. Reproduced here rather than shortcut, so these tests exercise
- * the same entry points production uses.
- */
-class RollupEngineHarness(override protected val config: Configuration,
-                         override protected val rollupNodeContext: NodeContext,
-                         override protected val cacheApi: SyncCacheApi,
-                         override protected val dataBoxes: DataBoxSource,
-                         override protected val syncHandler: ActorRef,
-                         override protected val mempoolView: ActorRef,
-                         override protected val walletManager: ActorRef)
-  extends EmptyRollupActor with RollupCore {
-
-  private implicit val harnessEc: ExecutionContext = context.dispatcher
-  private case class BatchDone()
-
-  override def receive: Receive = harnessReceive.orElse(super.receive)
-
-  private def harnessReceive: Receive = {
-    case RollupBatch(stubs) =>
-      val replyTo = sender()
-      // Admission refusal throws, and an unacknowledged batch is what tells its sender to keep the
-      // stubs and offer them again.
-      Try(executeRollupBatch(stubs)) match {
-        case Success(running) =>
-          replyTo ! BatchAccepted(stubs)
-          running.onComplete(_ => self ! BatchDone())
-        case Failure(_) => ()
-      }
-    case BatchDone() => finishRollupBatch()
-  }
+/** Exercises execution and candidate messages with deterministic wallet and synchronization probes. */
+class RollupEngineHarness(config: Configuration, node: NodeContext, cacheApi: SyncCacheApi,
+                         dataBoxes: DataBoxSource, sync: ActorRef, mempool: ActorRef, wallet: ActorRef)
+  extends EmptyRollupActor with EngineRollupCandidates {
+  private implicit val ec: ExecutionContext = context.dispatcher
+  private val worker = context.system.dispatchers.lookup("lithos-contexts.critical-tx-dispatcher")
+  private var busy = false
+  private case object BatchDone
+  private def execution() = new RollupExecution(node, wallet, sync, mempool, config, dataBoxes,
+    node.getNodeApi, () => true, worker)
+  private lazy val fundingFixture = execution()
+  def initialTxInputs(info: RollupExecution.InitialTxInfo, isFPTx: Boolean) =
+    fundingFixture.initialTxInputs(info, isFPTx)
+  override protected def candidateExecution(alive: () => Boolean): RollupExecution = execution()
+  override def receive: Receive = ({
+    case RollupBatch(stubs) if !busy =>
+      busy = true
+      sender() ! BatchAccepted(stubs)
+      execution().execute(stubs).onComplete(_ => self ! BatchDone)
+    case _: RollupBatch => ()
+    case BatchDone => busy = false
+    case message: transactions.engine.EngineWalletMessages.MarkReservationUncertain => wallet ! message
+  }: Receive).orElse(super.receive)
 }

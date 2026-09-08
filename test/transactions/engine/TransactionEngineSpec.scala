@@ -17,8 +17,7 @@ class TransactionEngineSpec extends TestKit(ActorSystem("transaction-engine-spec
   with AnyFlatSpecLike with Matchers with BeforeAndAfterAll {
   override def afterAll(): Unit = TestKit.shutdownActorSystem(system)
   private implicit val ec = system.dispatcher
-  private val intent = HoldingTransform("ab" * 32, 100L,
-    transactions.rollups.TransactionMessages.RollupTxStub.ROLLUP_FEE)
+  private val intent = EngineIntent.Dex(DexIntent.Swap(api.models.LDSwapExecuteRequest("1000000", true, "1")), "request")
 
   "DEX admission" should "bound strings nested inside typed request models" in {
     DexIntent.fitsBudget(DexIntent.Swap(api.models.LDSwapExecuteRequest("1000000", true, "1"))) shouldBe true
@@ -35,21 +34,19 @@ class TransactionEngineSpec extends TestKit(ActorSystem("transaction-engine-spec
       override protected lazy val reconciler = new EngineReconciler(ctx, replies.ref, replies.ref) {
         override def reconcile(): Unit = ()
       }
-      override protected lazy val execution = new HoldingTransformExecution(ctx, replies.ref, replies.ref, replies.ref) {
-        override def execute(work: HoldingTransform, alive: () => Boolean): Outcome = {
+      override protected def executeOptional(work: EngineIntent, alive: () => Boolean): Any = {
           calls.incrementAndGet()
           entered.ref ! "entered"
           gate.get(10, TimeUnit.SECONDS)
           Accepted(work.key, "cd" * 32)
-        }
       }
     }))
     try {
       replies.send(engine, Submit(intent))
       entered.expectMsg("entered")
       replies.send(engine, Submit(intent))
-      replies.send(engine, Submit(intent.copy(blockId = "invalid")))
-      replies.expectMsgType[Rejected](1.second)
+      replies.send(engine, Submit(intent.copy(requestId = "x" * 129)))
+      replies.expectMsgType[Deferred](1.second)
       gate.complete(())
       replies.expectMsg(Accepted(intent.key, "cd" * 32))
       replies.expectMsg(Accepted(intent.key, "cd" * 32))
@@ -68,19 +65,17 @@ class TransactionEngineSpec extends TestKit(ActorSystem("transaction-engine-spec
           gate.get(10, TimeUnit.SECONDS)
         }
       }
-      override protected lazy val execution = new HoldingTransformExecution(ctx, events.ref, events.ref, events.ref) {
-        override def execute(work: HoldingTransform, alive: () => Boolean): Outcome = {
+      override protected def executeOptional(work: EngineIntent, alive: () => Boolean): Any = {
           events.ref ! "execute"
           Completed(work.key)
-        }
       }
     }))
     try {
       events.expectMsg("reconcile")
       events.send(engine, Submit(intent))
       events.send(engine, Reconcile)
-      events.send(engine, Submit(intent.copy(blockId = "invalid")))
-      events.expectMsgType[Rejected]
+      events.send(engine, Submit(intent.copy(requestId = "x" * 129)))
+      events.expectMsgType[Deferred]
       gate.complete(())
       events.expectMsg("execute")
       events.expectMsg(Completed(intent.key))
@@ -103,15 +98,13 @@ class TransactionEngineSpec extends TestKit(ActorSystem("transaction-engine-spec
       override protected lazy val reconciler = new EngineReconciler(ctx, events.ref, events.ref) {
         override def reconcile(): Unit = ()
       }
-      override protected lazy val execution = new HoldingTransformExecution(ctx, events.ref, events.ref, events.ref) {
-        override def execute(work: HoldingTransform, alive: () => Boolean): Outcome = {
+      override protected def executeOptional(work: EngineIntent, alive: () => Boolean): Any = {
           if (incarnation == 1) {
             events.ref ! "old worker"
             gate.get(10, TimeUnit.SECONDS)
             events.ref ! alive()
           }
           Accepted(work.key, incarnation.toString)
-        }
       }
     }))
     try {

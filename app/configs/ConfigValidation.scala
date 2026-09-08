@@ -86,7 +86,17 @@ object Configs {
     v.range("stratum.candidate.collateralPoolSize", v.int("stratum.candidate.collateralPoolSize"), 1, 100,
       "collateral boxes pre-loaded; the active set never holds more than 100")
     v.range("stratum.candidate.collateralRefreshInterval", v.int("stratum.candidate.collateralRefreshInterval"), 100, 3600000, "ms")
-    v.range("stratum.candidate.maxBlockTxs", v.int("stratum.candidate.maxBlockTxs"), 0, 100, "transactions inserted per block")
+    v.doubleRange("stratum.candidate.blockShare", v.double("stratum.candidate.blockShare"), 0.0, 1.0,
+      "fraction of the block's byte and cost limits this client's package may claim")
+    Seq(configs.CandidateSourceConfig.Rollups, configs.CandidateSourceConfig.Emissions).foreach { source =>
+      v.bool(s"stratum.candidate.sources.$source.enabled")
+      v.range(s"stratum.candidate.sources.$source.maxTxs",
+        v.int(s"stratum.candidate.sources.$source.maxTxs"), 0, 100, "transactions inserted per block")
+      v.longRange(s"stratum.candidate.sources.$source.maxBytes",
+        v.long(s"stratum.candidate.sources.$source.maxBytes"), 0L, 8388608L, "serialized bytes per block")
+      v.longRange(s"stratum.candidate.sources.$source.maxCost",
+        v.long(s"stratum.candidate.sources.$source.maxCost"), 0L, 100000000L, "execution cost per block")
+    }
     v.range("stratum.candidate.genesisWaitMs", v.int("stratum.candidate.genesisWaitMs"), 0, 60000, "ms to wait for the genesis transaction before falling back to a solo candidate")
     v.range("stratum.candidate.mempoolRefreshMs", v.int("stratum.candidate.mempoolRefreshMs"), 0, 3600000, "ms between candidate refreshes within a block; 0 mines the block's initial transaction set")
     v.range("stratum.candidate.blockTxTimeout", v.int("stratum.candidate.blockTxTimeout"), 0, 600000, "ms")
@@ -223,6 +233,7 @@ final class ConfigValidator(config: Configuration) {
   def int(key: String): Option[Int]               = read(ConfigLoader.intLoader, key, "an integer")
   def long(key: String): Option[Long]             = read(ConfigLoader.longLoader, key, "an integer")
   def bool(key: String): Option[Boolean]          = read(ConfigLoader.booleanLoader, key, "true or false")
+  def double(key: String): Option[Double]         = read(ConfigLoader.doubleLoader, key, "a number")
   def duration(key: String): Option[FiniteDuration] =
     read(ConfigLoader.finiteDurationLoader, key, "a duration such as \"30 seconds\"")
 
@@ -244,6 +255,23 @@ final class ConfigValidator(config: Configuration) {
     }
 
   def range(key: String, value: Option[Int], min: Long, max: Long, unit: String): Option[Int] =
+    value match {
+      case Some(v) if v < min || v > max =>
+        problem(key, s"$v is outside $min..$max ($unit)")
+        None
+      case other => other
+    }
+
+  def longRange(key: String, value: Option[Long], min: Long, max: Long, unit: String): Option[Long] =
+    value match {
+      case Some(v) if v < min || v > max =>
+        problem(key, s"$v is outside $min..$max ($unit)")
+        None
+      case other => other
+    }
+
+  def doubleRange(key: String, value: Option[Double], min: Double, max: Double,
+                  unit: String): Option[Double] =
     value match {
       case Some(v) if v < min || v > max =>
         problem(key, s"$v is outside $min..$max ($unit)")

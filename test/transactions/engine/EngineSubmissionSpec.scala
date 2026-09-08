@@ -29,84 +29,66 @@ class EngineSubmissionSpec extends TestKit(ActorSystem("engine-submission-spec")
   with AnyFlatSpecLike with Matchers with BeforeAndAfterAll with MockitoSugar {
   override def afterAll(): Unit = TestKit.shutdownActorSystem(system)
   private implicit val ec = system.dispatcher
-  private val intent = HoldingTransform("ab" * 32, 100L, transactions.rollups.TransactionMessages.RollupTxStub.ROLLUP_FEE)
+  private val operation = "rollup:" + "ab" * 32
   private val protocolId = "cd" * 32
   private val txId = "ef" * 32
   private val anchor = "aa" * 32
 
-  private def exercise(result: Try[String], expected: Outcome, pin: Boolean = true, retry: Boolean = false): Unit = {
+  private def exercise(result: Try[String], expected: EngineBroadcast.Result, pin: Boolean = true, retry: Boolean = false): Unit = {
     val api = mock[NodeApi]
     val (ctx, _, prover) = FakeNodeContext(api)
     val input = ctx.getClient.execute(c => UTXO(prover.contract, 10000000L)
       .toInput(c, ErgoId.create("bb" * 32), 0.toShort))
     val inputId = input.id.toString
-    val rollup = support.SyncFixtures.emptyRollup(intent.blockId, protocolId, 100)
+
     when(api.info()).thenReturn(Success(ChainFixtures.infoAt(100000).copy(bestFullHeaderId = Some(anchor))))
     when(api.boxById(inputId)).thenReturn(Success(Some(NodeBox(inputId, "", 10000000L, 0, 1, ""))))
     when(api.sendTransaction(anyString())).thenReturn(result)
     val wallet = TestProbe()
-    val responder = system.actorOf(Props(new Actor {
-      def receive: Receive = {
-        case CompleteMempool.Refresh => sender() ! CompleteMempool.Observation(1L,
-          Some(CompleteMempool.Snapshot(anchor, Set.empty, Set.empty, System.nanoTime())), None)
-        // Metadata, not the full rollup: a transform needs the box and its phase, never a dictionary.
-        case _: GetRollupMetadata => sender() ! CurrentRollupMetadata(protocolId, rollup.metadata, None)
-      }
-    }))
     val signed = mock[SignedTransaction]
     when(signed.getId).thenReturn(txId)
     when(signed.toJson(false)).thenReturn(NodeCodecs.encodeTransaction(NodeTransaction(txId,
       Seq(NodeInput(protocolId, NodeSpendingProof.empty), NodeInput(inputId, NodeSpendingProof.empty)),
       Seq.empty, Seq.empty)).toString)
-    val execution = new HoldingTransformExecution(ctx, wallet.ref, responder, responder) {
-      override protected lazy val node: NodeApi = api
-      override protected def build(i: HoldingTransform, p: String, selected: Option[Seq[InputUTXO]],
-                                   retained: Option[Set[String]]): SignedTransaction = {
-        if (retry) { selected shouldBe None; retained shouldBe Some(Set(inputId)) }
-        else selected.get.map(_.id.toString) shouldBe Seq(inputId)
-        signed
-      }
-    }
-    val old = EngineHold(intent.key, "old-lease", "dd" * 32, Set(protocolId), Set(inputId), sendFinished = true)
+    val old = EngineHold(operation, "old-lease", "dd" * 32, Set(protocolId), Set(inputId), sendFinished = true)
     try {
-      val future = Future(execution.execute(intent, () => true))
-      wallet.expectMsg(GetEngineHolds)
-      wallet.reply(EngineHolds(if (retry) Vector(old) else Vector.empty))
-      if (!retry) {
-        val selection = wallet.expectMsgType[SelectInputs]
-        wallet.reply(WalletInputs(Seq(input), selection.reservationId))
-      }
+      val observation = CompleteMempool.Observation(1L,
+        Some(CompleteMempool.Snapshot(anchor, Set.empty, Set.empty, System.nanoTime())), None)
+      val future = Future(new EngineBroadcast(wallet.ref, api).sendOwned(signed,
+        Seq(EngineBroadcast.Funding("old-lease", Set(inputId))), operation, () => true,
+        if (retry) Some(old) else None, Some(observation)))
       val pinned = wallet.expectMsgType[PinEngineInputs]
       pinned.hold.walletInputIds shouldBe Set(inputId)
       pinned.previousTxId shouldBe (if (retry) Some(old.txId) else None)
       verify(api, never()).sendTransaction(anyString())
       wallet.reply(pin)
-      Await.result(future, 5.seconds) shouldBe expected
+      if (pin) Await.result(future, 5.seconds) shouldBe expected
+      else intercept[IllegalArgumentException](Await.result(future, 5.seconds))
       if (pin) wallet.expectMsg(EngineSendFinished(pinned.hold.reservationId, txId, result == Success(txId)))
       else {
         wallet.expectMsg(CancelEngineInputs(pinned.hold.reservationId, txId, if (retry) Some(old) else None))
-        if (!retry) wallet.expectMsg(ReleaseInputs(pinned.hold.reservationId))
+        wallet.expectMsg(ReleaseInputs(pinned.hold.reservationId))
         verify(api, never()).sendTransaction(anyString())
       }
-    } finally system.stop(responder)
+    } finally ()
   }
 
   "Engine submission" should "return the signed id on acceptance only after the input pin is acknowledged" in {
-    exercise(Success(txId), Accepted(intent.key, txId))
+    exercise(Success(txId), EngineBroadcast.Result(txId, EngineBroadcast.Accepted))
   }
   it should "retain the signed id and ownership after a lost node response" in {
     val error = NodeError.Transport("/transactions", new RuntimeException("response lost"))
-    exercise(Failure(error), Uncertain(intent.key, txId, error.getMessage))
+    exercise(Failure(error), EngineBroadcast.Result(txId, EngineBroadcast.Uncertain, Some(error.getMessage)))
   }
   it should "distinguish an explicit refusal without declaring its inputs free" in {
     val error = NodeError.Rejected("script refused")
-    exercise(Failure(error), Rejected(intent.key, error.getMessage, Some(txId)))
+    exercise(Failure(error), EngineBroadcast.Result(txId, EngineBroadcast.Rejected, Some(error.getMessage)))
   }
   it should "stop before the node when the exact input pin is refused" in {
     // Refused at the shared send boundary, which is what reports it now.
-    exercise(Success(txId), Deferred(intent.key, "requirement failed: engine funding ownership changed before send"), pin = false)
+    exercise(Success(txId), EngineBroadcast.Result(txId, EngineBroadcast.Rejected), pin = false)
   }
   it should "rebuild with retained inputs without selecting another wallet input" in {
-    exercise(Success(txId), Accepted(intent.key, txId), retry = true)
+    exercise(Success(txId), EngineBroadcast.Result(txId, EngineBroadcast.Accepted), retry = true)
   }
 }

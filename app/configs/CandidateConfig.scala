@@ -20,9 +20,13 @@ import play.api.{ConfigLoader, Configuration}
  *                                  gives the fastest possible candidate and leaves every transaction
  *                                  to the mempool. Never affects the genesis transaction, which is
  *                                  what makes the block a Lithos block and is always inserted.
- * @param maxBlockTxs               Ceiling on those insertions. They pay no fee, so every slot spent
- *                                  here is block space not earning from someone else's transaction —
- *                                  which is why the default is small.
+ * @param sources                   Per-source limits, keyed by source name. Each is bounded on its
+ *                                  own before the package is bounded as a whole, so one source
+ *                                  cannot crowd out another. A source that is off is never asked.
+ * @param blockShare                Fraction of the node's active block byte and cost limits this
+ *                                  client's whole package may claim. Well under one on purpose: the
+ *                                  node adds its own transactions and picks a remainder never seen
+ *                                  here, and a carried unconfirmed ancestor reports no cost.
  * @param genesisWaitMs             How long a new block may pass with no job at all while the genesis
  *                                  transaction is built, in ms. Waiting means one job per block
  *                                  instead of a solo job followed by a collateral one; rigs lose more
@@ -45,7 +49,8 @@ import play.api.{ConfigLoader, Configuration}
 case class CandidateConfig(collateralPoolSize: Int,
                            collateralRefreshInterval: Int,
                            blockTransactions: Boolean,
-                           maxBlockTxs: Int,
+                           sources: Map[String, CandidateSourceConfig],
+                           blockShare: Double,
                            genesisWaitMs: Int,
                            mempoolRefreshMs: Int,
                            blockTxTimeout: Int,
@@ -58,7 +63,10 @@ object CandidateConfig {
     collateralPoolSize = 100,
     collateralRefreshInterval = 60000,
     blockTransactions = false,
-    maxBlockTxs = 5,
+    sources = Map(
+      CandidateSourceConfig.Rollups -> CandidateSourceConfig.Default,
+      CandidateSourceConfig.Emissions -> CandidateSourceConfig.Default),
+    blockShare = 0.5,
     genesisWaitMs = 1500,
     mempoolRefreshMs = 10000,
     blockTxTimeout = 20000,
@@ -72,11 +80,15 @@ object CandidateConfig {
     def bool(key: String, fallback: Boolean): Boolean =
       config.getOptional(s"stratum.candidate.$key")(ConfigLoader.booleanLoader).getOrElse(fallback)
 
+    def double(key: String, fallback: Double): Double =
+      config.getOptional(s"stratum.candidate.$key")(ConfigLoader.doubleLoader).getOrElse(fallback)
+
     CandidateConfig(
       collateralPoolSize = int("collateralPoolSize", Default.collateralPoolSize),
       collateralRefreshInterval = int("collateralRefreshInterval", Default.collateralRefreshInterval),
       blockTransactions = bool("blockTransactions", Default.blockTransactions),
-      maxBlockTxs = int("maxBlockTxs", Default.maxBlockTxs),
+      sources = Default.sources.keys.map(name => name -> CandidateSourceConfig(config, name)).toMap,
+      blockShare = double("blockShare", Default.blockShare),
       genesisWaitMs = int("genesisWaitMs", Default.genesisWaitMs),
       mempoolRefreshMs = int("mempoolRefreshMs", Default.mempoolRefreshMs),
       blockTxTimeout = int("blockTxTimeout", Default.blockTxTimeout),
