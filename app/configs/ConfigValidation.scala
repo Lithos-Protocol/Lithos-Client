@@ -88,7 +88,8 @@ object Configs {
     v.range("stratum.candidate.collateralRefreshInterval", v.int("stratum.candidate.collateralRefreshInterval"), 100, 3600000, "ms")
     v.doubleRange("stratum.candidate.blockShare", v.double("stratum.candidate.blockShare"), 0.0, 1.0,
       "fraction of the block's byte and cost limits this client's package may claim")
-    Seq(configs.CandidateSourceConfig.Rollups, configs.CandidateSourceConfig.Emissions).foreach { source =>
+    Seq(configs.CandidateSourceConfig.Rollups, configs.CandidateSourceConfig.Emissions,
+      configs.CandidateSourceConfig.Rent).foreach { source =>
       v.bool(s"stratum.candidate.sources.$source.enabled")
       v.range(s"stratum.candidate.sources.$source.maxTxs",
         v.int(s"stratum.candidate.sources.$source.maxTxs"), 0, 100, "transactions inserted per block")
@@ -100,6 +101,13 @@ object Configs {
     v.range("stratum.candidate.genesisWaitMs", v.int("stratum.candidate.genesisWaitMs"), 0, 60000, "ms to wait for the genesis transaction before falling back to a solo candidate")
     v.range("stratum.candidate.mempoolRefreshMs", v.int("stratum.candidate.mempoolRefreshMs"), 0, 3600000, "ms between candidate refreshes within a block; 0 mines the block's initial transaction set")
     v.range("stratum.candidate.blockTxTimeout", v.int("stratum.candidate.blockTxTimeout"), 0, 600000, "ms")
+    v.range("stratum.candidate.sources.rent.startHeight",
+      v.int("stratum.candidate.sources.rent.startHeight"), 0, 100000000,
+      "inclusion height the storage-rent walk begins at")
+    v.range("stratum.candidate.sources.rent.scanIntervalMs",
+      v.int("stratum.candidate.sources.rent.scanIntervalMs"), 1000, 3600000, "ms")
+    v.range("stratum.candidate.sources.rent.blocksPerScan",
+      v.int("stratum.candidate.sources.rent.blocksPerScan"), 1, 10000, "blocks read per scan pass")
     v.bool("stratum.candidate.useTruePropCollection")
     v.bool("stratum.candidate.logTimings")
 

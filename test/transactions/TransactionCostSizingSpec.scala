@@ -703,6 +703,65 @@ class TransactionCostSizingSpec extends AnyPropSpec with BeforeAndAfterAll
   }
 
   // ══════════════════════════════════════════════════════════════════════════
+  //  storage rent
+  // ══════════════════════════════════════════════════════════════════════════
+
+  /**
+   * The one transaction here that is assembled rather than signed, and the cheapest per input by
+   * some way: a rent input carries an empty proof and runs no script, so the interpreter charges it
+   * a flat `StorageContractCost` where an ordinary input pays for a reduction as well.
+   *
+   * Cost is taken from `ErgoInterpreter` and the node's own pre-validation arithmetic rather than
+   * from `getCost`, which for an assembled transaction only echoes back what was put into it.
+   */
+  property("storage rent: sweeps of expired boxes, which carry no proofs at all") {
+    withCtx { ctx =>
+      val wallet = walletOf(ctx)
+      val params = support.RentRule.paramsFrom(ctx)
+      val height = transactions.rent.StorageRent.StoragePeriod + 1
+
+      def sweep(name: String, count: Int, value: Long, tokens: Seq[Token] = Seq.empty[Token]) = {
+        val boxes = (0 until count).map(i =>
+          UTXO(Contract.SIGMA_FALSE, value, tokens, Seq(ErgoValue.of(42))).setCreationHeight(0)
+            .toInput(ctx, ErgoId.create("ab" * 32), i.toShort))
+        val candidates = boxes.map(b => transactions.rent.RentCandidate(b,
+          transactions.rent.StorageRent.plan(b, 0, height, ctx.getDataSource.getParameters,
+            ctx.getNetworkType).get))
+        val tx = transactions.rent.StorageRent.assembled(ctx, wallet, candidates, height,
+          useTrueProp = false)
+        val spent = boxes.map(_.input.asInstanceOf[org.ergoplatform.appkit.impl.InputBoxImpl]
+          .getErgoBox).toIndexedSeq
+
+        withClue(s"$name must be a sweep the chain would take: ") {
+          support.RentRule.accepts(tx, spent, height, params) shouldBe true
+        }
+        measure("rent", name, new SignedTransactionImpl(
+          ctx.asInstanceOf[org.ergoplatform.appkit.impl.BlockchainContextBase], tx,
+          support.RentRule.blockCost(tx, spent, height, params).toInt))
+      }
+
+      val one = sweep("collect 1 expired box", 1, 100L * Parameters.OneErg)
+      val ten = sweep("collect 10 expired boxes", 10, 100L * Parameters.OneErg)
+      sweep("claim 10 boxes below their fee", 10, 1000000L)
+      sweep("claim 10 below fee, with tokens", 10, 1000000L,
+        Seq(Token(ErgoId.create("cd" * 32), 5L)))
+      val many = sweep("collect 200 expired boxes", 200, 100L * Parameters.OneErg)
+
+      // What one more box adds, which is the number that decides how wide a sweep is worth building.
+      val perBox = (many.cost - ten.cost).toDouble / (many.inputs - ten.inputs)
+      val perBoxBytes = (many.bytes - ten.bytes).toDouble / (many.inputs - ten.inputs)
+      println(f"[budget] rent marginal cost per box: $perBox%.0f units, $perBoxBytes%.0f bytes")
+      println(f"[budget] a whole block holds ${maxBlockCost / perBox}%.0f rent inputs by cost, " +
+        f"${maxBlockSize / perBoxBytes}%.0f by size")
+
+      withClue("a rent input must stay cheaper than an ordinary signed one: ") {
+        perBox should be < 3000.0
+      }
+      one.inputs shouldBe 1
+    }
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
   //  the table
   // ══════════════════════════════════════════════════════════════════════════
 

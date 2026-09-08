@@ -45,10 +45,9 @@ trait EmissionsCore extends Actor with InjectedActorSupport {
 
   private implicit val emissionEc: ExecutionContext = context.dispatcher
   private val emissionWorker = context.system.dispatchers.lookup("lithos-contexts.engine-io-dispatcher")
-  private val candidateWorker = context.system.dispatchers.lookup("lithos-contexts.engine-candidate-dispatcher")
-  private val emissionIncarnation = java.util.UUID.randomUUID()
+  private val emissionPreparation = new transactions.candidate.CandidatePreparation(
+    context.system.dispatchers.lookup("lithos-contexts.engine-candidate-dispatcher"), self)
   private val emissionAlive = new java.util.concurrent.atomic.AtomicBoolean(true)
-  private var candidateBusy = false
   private lazy val collateral = new transactions.engine.execution.CollateralExecution(
     emissionNodeContext, config, context.system, emissionWalletManager, () => emissionAlive.get()) {
     override protected def executionNode: NodeApi = emissionNodeApi
@@ -91,31 +90,10 @@ trait EmissionsCore extends Actor with InjectedActorSupport {
   }
   protected def finishEmission(): Unit = { spending = false }
 
-  /** The finished build for one height, held until that height is asked for or dropped. */
-  private var prepared = Option.empty[(Int, Seq[transactions.candidate.CandidateBundle])]
-  /** The height being built for and which attempt is building it, so a superseded one is discarded. */
-  private var buildingFor = Option.empty[(Int, java.util.UUID)]
-  /** Requesters that arrived while the build for their height was still running. */
-  private var waiting = Vector.empty[(ActorRef, Int)]
-
-  /**
-   * Build the fee-less copies for one height, or join the build already running for it.
-   *
-   * A requester arriving mid-build waits for it rather than being told there is nothing: the point
-   * of preparing early is that this work is ready, or nearly so, by the time it is asked for.
-   */
-  private def startCandidateBuild(blockHeight: Int, limit: Int, replyTo: Option[ActorRef]): Unit = {
-    if (!emissionConfig.enabled || limit <= 0) replyTo.foreach(_ ! BlockTxsReady(blockHeight, Seq.empty))
-    else {
-      replyTo.foreach(r => waiting :+= (r -> blockHeight))
-      if (!buildingFor.exists(_._1 == blockHeight)) {
-        val build = java.util.UUID.randomUUID()
-        buildingFor = Some(blockHeight -> build)
-        prepared = None
-        dispatchCandidateBuild(blockHeight, build, limit)
-      }
-    }
-  }
+  /** Build the fee-less copies for one height, unless this source has nothing to offer. */
+  private def startCandidateBuild(blockHeight: Int, limit: Int, replyTo: Option[ActorRef]): Unit =
+    if (!emissionConfig.enabled || limit <= 0) emissionPreparation.answerEmpty(blockHeight, replyTo)
+    else emissionPreparation.start(blockHeight, replyTo)(candidateBundles(blockHeight, limit))
 
   // ─── lifecycle ────────────────────────────────────────────────────────────
 
@@ -154,7 +132,8 @@ trait EmissionsCore extends Actor with InjectedActorSupport {
 
   // ─── receive ──────────────────────────────────────────────────────────────
 
-  abstract override def receive: Receive = emissionReceive.orElse(super.receive)
+  abstract override def receive: Receive =
+    emissionReceive.orElse(emissionPreparation.receive).orElse(super.receive)
 
   /**
    * Only the candidate path is handled here. Joins, queue passes and self-collateralization are
@@ -162,23 +141,6 @@ trait EmissionsCore extends Actor with InjectedActorSupport {
    * below send the same messages the engine matches on.
    */
   private def emissionReceive: Receive = {
-    case CandidateBuilt(incarnation, build, height, result) if incarnation == emissionIncarnation =>
-      // Kept only while this is still the build that is wanted. One whose height was dropped mid-run
-      // built for a package that will not be published.
-      if (buildingFor.exists(_._2 == build)) {
-        buildingFor = None
-        prepared = Some(height -> result.getOrElse(Seq.empty[transactions.candidate.CandidateBundle]))
-      }
-      // Requesters waiting on a build that no longer exists would otherwise hang until their ask
-      // expires; ones waiting on a replacement for the same height are left to it.
-      if (!buildingFor.exists(_._1 == height)) {
-        val bundles = prepared.filter(_._1 == height).map(_._2).getOrElse(Seq.empty[transactions.candidate.CandidateBundle])
-        val (ready, rest) = waiting.partition(_._2 == height)
-        waiting = rest
-        ready.foreach { case (replyTo, _) => replyTo ! BlockTxsReady(height, bundles) }
-      }
-    case _: CandidateBuilt => ()
-
     // ------------------------------------------------------------------
     // A block is being assembled — hand back fee-less copies
     // ------------------------------------------------------------------
@@ -187,25 +149,25 @@ trait EmissionsCore extends Actor with InjectedActorSupport {
     // nothing to undo. Matched anyway, because every transaction source is told.
 
     // Building for a height that can no longer land would offer it to a later one.
-    case CandidateTxsDropped(blockHeight) =>
-      if (prepared.exists(_._1 <= blockHeight)) prepared = None
-      if (buildingFor.exists(_._1 <= blockHeight)) buildingFor = None
+    case CandidateTxsDropped(blockHeight) => emissionPreparation.drop(blockHeight)
 
     case PrepareBlockTxs(blockHeight, limit) => startCandidateBuild(blockHeight, limit, None)
 
     case RequestBlockTxs(blockHeight, limit) =>
       val replyTo = sender()
       // Already built for this height, so the request costs nothing but the reply.
-      if (prepared.exists(_._1 == blockHeight)) replyTo ! BlockTxsReady(blockHeight, prepared.get._2)
-      else startCandidateBuild(blockHeight, limit, Some(replyTo))
+      emissionPreparation.preparedFor(blockHeight) match {
+        case Some(bundles) => replyTo ! BlockTxsReady(blockHeight, bundles)
+        case None => startCandidateBuild(blockHeight, limit, Some(replyTo))
+      }
 
   }
 
   /** One fee-less build, off the mailbox. Its result is cached and answers whoever is waiting. */
-  private def dispatchCandidateBuild(blockHeight: Int, build: java.util.UUID, limit: Int): Unit =
-    Try(Future {
-      require(emissionAlive.get(), "emission engine attempt was superseded")
-      client.execute { ctx =>
+  /** One fee-less build. Runs on the candidate worker, so it reads nothing this actor owns. */
+  private def candidateBundles(blockHeight: Int, limit: Int): Seq[transactions.candidate.CandidateBundle] = {
+    require(emissionAlive.get(), "emission engine attempt was superseded")
+    client.execute { ctx =>
         val (tip, spends) = txs.buildQueueSpends(ctx, blockHeight, funded = false, limit)
         if (spends.isEmpty) Seq.empty[transactions.candidate.CandidateBundle]
         else {
@@ -229,11 +191,9 @@ trait EmissionsCore extends Actor with InjectedActorSupport {
           Seq(transactions.candidate.CandidateBundle((ancestors ++ own).toVector,
             ancestors.lastOption.map(a => BlockTxMessages.ChainFromMempool(a.id)).toSeq ++
               ancestors.map(a => BlockTxMessages.IncludeExisting(a.id))))
-        }
       }
-    }(candidateWorker).onComplete(result =>
-      self ! CandidateBuilt(emissionIncarnation, build, blockHeight, result)))
-      .failed.foreach(ex => self ! CandidateBuilt(emissionIncarnation, build, blockHeight, Failure(ex)))
+    }
+  }
 
   // ─── private helpers ──────────────────────────────────────────────────────
 
@@ -288,13 +248,4 @@ object EmissionsCore {
   private[transactions] case object Collateralize
   private[transactions] case object DriveQueue
 
-  /**
-   * Self-message: a fee-less candidate build finished off the actor thread.
-   *
-   * `build` names the attempt rather than the height, because a height can be built for twice — the
-   * first package was refused and a replacement is being assembled — and the superseded result must
-   * not answer the replacement.
-   */
-  private[emissions] case class CandidateBuilt(incarnation: java.util.UUID, build: java.util.UUID,
-    height: Int, result: Try[Seq[transactions.candidate.CandidateBundle]])
 }

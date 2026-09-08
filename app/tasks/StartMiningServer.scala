@@ -85,6 +85,16 @@ class StartMiningServer @Inject()(system: ActorSystem, config: Configuration,
         }
         logger.info(s"Using tau $t (score: ${LFSMHelpers.convertTauOrScore(t)}) for NISPs")
 
+        // Started only when enabled: the walk is a standing timer against the node, and a source
+        // that is off is never asked for anything either.
+        val rentLimits = stratumParams.candidate.sources
+          .getOrElse(configs.CandidateSourceConfig.Rent, configs.CandidateSourceConfig.Default)
+        val rentSource = if (!rentLimits.enabled) None else Some(
+          mining.MiningMessages.CandidateSource(configs.CandidateSourceConfig.Rent,
+            system.actorOf(akka.actor.Props(new transactions.rent.StorageRentSource(
+              nodeConfig, configs.RentConfig(config), rentLimits,
+              stratumParams.candidate.useTruePropCollection)), "storage-rent-source")))
+
         val server = new MiningStratumServer(
           system          = system,
           options         = options,
@@ -104,7 +114,7 @@ class StartMiningServer @Inject()(system: ActorSystem, config: Configuration,
             mining.MiningMessages.CandidateSource(
               configs.CandidateSourceConfig.Rollups, transactionProcessor),
             mining.MiningMessages.CandidateSource(
-              configs.CandidateSourceConfig.Emissions, emissionHandler)),
+              configs.CandidateSourceConfig.Emissions, emissionHandler)) ++ rentSource,
           rotateExtraNonceInterval = stratumParams.rotateExtraNonceInterval
         )
 

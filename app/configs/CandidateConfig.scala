@@ -72,7 +72,10 @@ object CandidateConfig {
     blockTransactions = false,
     sources = Map(
       CandidateSourceConfig.Rollups -> CandidateSourceConfig.Default,
-      CandidateSourceConfig.Emissions -> CandidateSourceConfig.Default),
+      CandidateSourceConfig.Emissions -> CandidateSourceConfig.Default,
+      // Off until a miner points it at a start height and has watched a scan pass run. One
+      // transaction, because a rent collection sweeps every box it takes into a single sweep.
+      CandidateSourceConfig.Rent -> CandidateSourceConfig.Default.copy(enabled = false, maxTxs = 1)),
     blockShare = 0.5,
     useTruePropCollection = false,
     genesisWaitMs = 1500,

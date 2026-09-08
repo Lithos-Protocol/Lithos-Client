@@ -23,6 +23,7 @@ object CandidateSourceConfig {
   /** Names are the config keys under `stratum.candidate.sources`, and the wiring order in the pool. */
   final val Rollups = "rollups"
   final val Emissions = "emissions"
+  final val Rent = "rent"
 
   /**
    * Conservative on every axis. Fee-less insertions are block space not earning from someone else's
