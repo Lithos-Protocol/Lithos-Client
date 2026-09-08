@@ -113,7 +113,7 @@ class EngineWalletStateSpec extends TestKit(ActorSystem("wallet-manager-spec", E
 
   private def offered(f: Fixture, need: Long, tokens: Seq[Token] = Seq.empty,
                       track: Boolean = false): Seq[InputUTXO] = {
-    f.probe.send(f.mgr, RetrieveInputs(need, tokens, trackUsed = track))
+    f.probe.send(f.mgr, SelectInputs(need, tokens, trackUsed = track))
     f.probe.expectMsgType[WalletInputs].inputs
   }
 
@@ -123,7 +123,7 @@ class EngineWalletStateSpec extends TestKit(ActorSystem("wallet-manager-spec", E
 
   "Engine input ownership" should "survive ordinary refresh and refuse stale-attempt reconciliation" in {
     val f = fixture(w => Seq(walletBox(w, erg)))
-    f.probe.send(f.mgr, RetrieveInputs(erg / 2, Seq.empty, reservationId = "engine-lease"))
+    f.probe.send(f.mgr, SelectInputs(erg / 2, Seq.empty, reservationId = "engine-lease"))
     val ids = f.probe.expectMsgType[WalletInputs].inputs.map(_.id.toString).toSet
     val hold = EngineHold("holding-operation", "engine-lease", "ab" * 32, Set("cd" * 32), ids)
     f.probe.send(f.mgr, PinEngineInputs(hold))
@@ -170,7 +170,7 @@ class EngineWalletStateSpec extends TestKit(ActorSystem("wallet-manager-spec", E
     val clock = new AtomicLong(1000000L)
     val f = fixture(w => Seq(walletBox(w, erg)), time = () => clock.get())
     val firstId = "lease-one"
-    f.probe.send(f.mgr, RetrieveInputs(erg / 2, Seq.empty, trackUsed = true,
+    f.probe.send(f.mgr, SelectInputs(erg / 2, Seq.empty, trackUsed = true,
       reservationId = firstId))
     f.probe.expectMsgType[WalletInputs].inputs should have size 1
 
@@ -178,7 +178,7 @@ class EngineWalletStateSpec extends TestKit(ActorSystem("wallet-manager-spec", E
     f.mgr ! ResetUsedInputs
     val secondId = "lease-two"
     f.probe.awaitAssert {
-      f.probe.send(f.mgr, RetrieveInputs(erg / 2, Seq.empty, trackUsed = true,
+      f.probe.send(f.mgr, SelectInputs(erg / 2, Seq.empty, trackUsed = true,
         reservationId = secondId))
       f.probe.expectMsgType[WalletInputs].inputs should have size 1
     }
@@ -193,7 +193,7 @@ class EngineWalletStateSpec extends TestKit(ActorSystem("wallet-manager-spec", E
     val clock = new AtomicLong(1000000L)
     val f = fixture(w => Seq(walletBox(w, erg)), time = () => clock.get())
     val firstId = "expired-submission"
-    f.probe.send(f.mgr, RetrieveInputs(erg / 2, Seq.empty, trackUsed = true,
+    f.probe.send(f.mgr, SelectInputs(erg / 2, Seq.empty, trackUsed = true,
       reservationId = firstId))
     val first = f.probe.expectMsgType[WalletInputs].inputs
     first should have size 1
@@ -201,7 +201,7 @@ class EngineWalletStateSpec extends TestKit(ActorSystem("wallet-manager-spec", E
     clock.addAndGet(EngineWalletState.ReservationTtlMs + 1L)
     f.probe.send(f.mgr, ResetUsedInputs)
     val secondId = "replacement-submission"
-    f.probe.send(f.mgr, RetrieveInputs(erg / 2, Seq.empty, trackUsed = true,
+    f.probe.send(f.mgr, SelectInputs(erg / 2, Seq.empty, trackUsed = true,
       reservationId = secondId))
     f.probe.expectMsgType[WalletInputs].inputs should have size 1
 
@@ -217,7 +217,7 @@ class EngineWalletStateSpec extends TestKit(ActorSystem("wallet-manager-spec", E
   it should "reject an expired queued request without reserving anything" in {
     val clock = new AtomicLong(1000000L)
     val f = fixture(w => Seq(walletBox(w, erg)), time = () => clock.get())
-    f.probe.send(f.mgr, RetrieveInputs(erg / 2, Seq.empty, trackUsed = true,
+    f.probe.send(f.mgr, SelectInputs(erg / 2, Seq.empty, trackUsed = true,
       reservationId = "expired", deadlineMillis = clock.get()))
     f.probe.expectMsgType[WalletInputs].inputs shouldBe empty
     offered(f, erg / 2) should have size 1
@@ -227,7 +227,7 @@ class EngineWalletStateSpec extends TestKit(ActorSystem("wallet-manager-spec", E
     val clock = new AtomicLong(1000000L)
     val f = fixture(w => Seq(walletBox(w, erg)), time = () => clock.get())
     val id = "submitting"
-    f.probe.send(f.mgr, RetrieveInputs(erg / 2, Seq.empty, trackUsed = true,
+    f.probe.send(f.mgr, SelectInputs(erg / 2, Seq.empty, trackUsed = true,
       reservationId = id))
     val held = f.probe.expectMsgType[WalletInputs].inputs
     held should have size 1
@@ -243,7 +243,7 @@ class EngineWalletStateSpec extends TestKit(ActorSystem("wallet-manager-spec", E
   it should "cancel a pre-send lease only when every expected input id matches" in {
     val f = fixture(w => Seq(walletBox(w, erg)))
     val id = "cancel-before-send"
-    f.probe.send(f.mgr, RetrieveInputs(erg / 2, Seq.empty, trackUsed = true,
+    f.probe.send(f.mgr, SelectInputs(erg / 2, Seq.empty, trackUsed = true,
       reservationId = id))
     val held = f.probe.expectMsgType[WalletInputs].inputs
     val expectedIds = held.map(_.id.toString).toSet
@@ -263,7 +263,7 @@ class EngineWalletStateSpec extends TestKit(ActorSystem("wallet-manager-spec", E
 
     val f = fixture(w => Seq(walletBox(w, erg)))
     val id = "not-submitted"
-    f.probe.send(f.mgr, RetrieveInputs(erg / 2, Seq.empty, trackUsed = true,
+    f.probe.send(f.mgr, SelectInputs(erg / 2, Seq.empty, trackUsed = true,
       reservationId = id))
     f.probe.expectMsgType[WalletInputs].inputs should have size 1
 
@@ -295,7 +295,7 @@ class EngineWalletStateSpec extends TestKit(ActorSystem("wallet-manager-spec", E
   it should "come back once the caller releases it" in {
     val f = fixture(w => Seq(walletBox(w, erg)))
     val reservationId = "explicit-release"
-    f.probe.send(f.mgr, RetrieveInputs(erg / 2, Seq.empty, trackUsed = true,
+    f.probe.send(f.mgr, SelectInputs(erg / 2, Seq.empty, trackUsed = true,
       reservationId = reservationId))
     val held = f.probe.expectMsgType[WalletInputs].inputs
     held should have size 1
@@ -328,7 +328,7 @@ class EngineWalletStateSpec extends TestKit(ActorSystem("wallet-manager-spec", E
     mgr ! RefreshBoxes
     Thread.sleep(1200)
 
-    probe.send(mgr, RetrieveInputs(erg / 2, Seq.empty, trackUsed = true))
+    probe.send(mgr, SelectInputs(erg / 2, Seq.empty, trackUsed = true))
     val taken = probe.expectMsgType[WalletInputs].inputs
     taken.map(_.value) shouldEqual Seq(erg) // dust-first takes the small one
 
@@ -337,7 +337,7 @@ class EngineWalletStateSpec extends TestKit(ActorSystem("wallet-manager-spec", E
     mgr ! RefreshBoxes
     Thread.sleep(1200)
 
-    probe.send(mgr, RetrieveInputs(1000L, Seq.empty, trackUsed = false))
+    probe.send(mgr, SelectInputs(1000L, Seq.empty, trackUsed = false))
     val after = probe.expectMsgType[WalletInputs].inputs
     withClue("the spent box must be gone, and only the survivor offered: ") {
       after.map(_.value) shouldEqual Seq(5 * erg)
@@ -370,7 +370,7 @@ class EngineWalletStateSpec extends TestKit(ActorSystem("wallet-manager-spec", E
     Thread.sleep(300)
 
     val reservationId = "accepted-after-refresh"
-    probe.send(mgr, RetrieveInputs(erg / 2, Seq.empty, trackUsed = true,
+    probe.send(mgr, SelectInputs(erg / 2, Seq.empty, trackUsed = true,
       reservationId = reservationId))
     val selected = probe.expectMsgType[WalletInputs].inputs
     selected should have size 1
@@ -388,7 +388,7 @@ class EngineWalletStateSpec extends TestKit(ActorSystem("wallet-manager-spec", E
     val output = FakeNodeContext.offlineClient().execute(bctx => nodeOutput.toInputUTXO(bctx))
     probe.send(mgr, EngineSendFinished(reservationId, "ab" * 32, accepted = true))
     probe.send(mgr, ReturnInputs(Seq(output)))
-    probe.send(mgr, RetrieveInputs(erg, Seq.empty, trackUsed = false))
+    probe.send(mgr, SelectInputs(erg, Seq.empty, trackUsed = false))
     probe.expectMsgType[WalletInputs].inputs.map(_.value) shouldEqual Seq(7 * erg)
   }
 
@@ -423,12 +423,12 @@ class EngineWalletStateSpec extends TestKit(ActorSystem("wallet-manager-spec", E
   // from the new output's creation height — so the two requests must draw from different sets.
 
   private def covering(f: Fixture, need: Long): Seq[InputUTXO] = {
-    f.probe.send(f.mgr, RetrieveCoveringInput(need, trackUsed = false))
+    f.probe.send(f.mgr, SelectInputs(need, trackUsed = false, single = true))
     f.probe.expectMsgType[WalletInputs].inputs
   }
 
   private def coveringP2PK(f: Fixture, need: Long): Seq[InputUTXO] = {
-    f.probe.send(f.mgr, RetrieveCoveringP2PKInput(need, trackUsed = false))
+    f.probe.send(f.mgr, SelectInputs(need, trackUsed = false, single = true, p2pkOnly = true))
     f.probe.expectMsgType[WalletInputs].inputs
   }
 
@@ -451,7 +451,7 @@ class EngineWalletStateSpec extends TestKit(ActorSystem("wallet-manager-spec", E
     // Tracked on purpose. Asked with trackUsed = false there is no reservation either way, so the
     // follow-up below would hold whether or not the refused request had taken one.
     val f = fixture(mkRewards = w => Seq(coinbase(w, 3 * erg)))
-    f.probe.send(f.mgr, RetrieveCoveringP2PKInput(erg, trackUsed = true, reservationId = "refused-p2pk"))
+    f.probe.send(f.mgr, SelectInputs(erg, trackUsed = true, reservationId = "refused-p2pk", single = true, p2pkOnly = true))
     f.probe.expectMsgType[WalletInputs].inputs shouldBe empty
 
     withClue("nothing was reserved, so the generic request can still have it: ") {
@@ -461,8 +461,8 @@ class EngineWalletStateSpec extends TestKit(ActorSystem("wallet-manager-spec", E
 
   it should "answer empty once its deadline has passed" in {
     val f = fixture(w => Seq(walletBox(w, 5 * erg)))
-    f.probe.send(f.mgr, RetrieveCoveringP2PKInput(erg, trackUsed = true,
-      reservationId = "expired-p2pk", deadlineMillis = 1L))
+    f.probe.send(f.mgr, SelectInputs(erg, trackUsed = true,
+      reservationId = "expired-p2pk", deadlineMillis = 1L, single = true, p2pkOnly = true))
     f.probe.expectMsgType[WalletInputs].inputs shouldBe empty
 
     withClue("an expired request must not have reserved the box on its way out: ") {
@@ -472,7 +472,7 @@ class EngineWalletStateSpec extends TestKit(ActorSystem("wallet-manager-spec", E
 
   it should "release its reservation so the box comes back" in {
     val f = fixture(w => Seq(walletBox(w, 5 * erg)))
-    f.probe.send(f.mgr, RetrieveCoveringP2PKInput(erg, trackUsed = true, reservationId = "held-p2pk"))
+    f.probe.send(f.mgr, SelectInputs(erg, trackUsed = true, reservationId = "held-p2pk", single = true, p2pkOnly = true))
     f.probe.expectMsgType[WalletInputs].inputs.map(_.value) shouldEqual Seq(5 * erg)
     coveringP2PK(f, erg) shouldBe empty
 
@@ -524,7 +524,7 @@ class EngineWalletStateSpec extends TestKit(ActorSystem("wallet-manager-spec", E
     mgr ! RefreshBoxes
     Thread.sleep(1200)
 
-    probe.send(mgr, RetrieveInputs(erg, Seq.empty, trackUsed = true))
+    probe.send(mgr, SelectInputs(erg, Seq.empty, trackUsed = true))
     probe.expectMsgType[WalletInputs].inputs.map(_.value) shouldEqual Seq(3 * erg)
 
     failing.set(true)
@@ -538,7 +538,7 @@ class EngineWalletStateSpec extends TestKit(ActorSystem("wallet-manager-spec", E
     mgr ! RefreshBoxes
     Thread.sleep(1200)
 
-    probe.send(mgr, RetrieveInputs(erg, Seq.empty, trackUsed = false))
+    probe.send(mgr, SelectInputs(erg, Seq.empty, trackUsed = false))
     withClue("a lookup that failed says nothing about whether the box was spent: ") {
       probe.expectMsgType[WalletInputs].inputs shouldBe empty
     }
@@ -578,7 +578,7 @@ class EngineWalletStateSpec extends TestKit(ActorSystem("wallet-manager-spec", E
     mgr ! RefreshBoxes
     Thread.sleep(1200)
 
-    probe.send(mgr, RetrieveInputs(erg / 2, Seq.empty, trackUsed = true))
+    probe.send(mgr, SelectInputs(erg / 2, Seq.empty, trackUsed = true))
     probe.expectMsgType[WalletInputs].inputs.map(_.value) shouldEqual Seq(erg)
 
     blip.set(true)
@@ -589,7 +589,7 @@ class EngineWalletStateSpec extends TestKit(ActorSystem("wallet-manager-spec", E
     mgr ! RefreshBoxes
     Thread.sleep(1200)
 
-    probe.send(mgr, RetrieveInputs(erg / 2, Seq.empty, trackUsed = false))
+    probe.send(mgr, SelectInputs(erg / 2, Seq.empty, trackUsed = false))
     withClue("a page that never arrived says nothing about whether the box was spent: ") {
       probe.expectMsgType[WalletInputs].inputs shouldBe empty
     }
@@ -642,7 +642,7 @@ class EngineWalletStateSpec extends TestKit(ActorSystem("wallet-manager-spec", E
     mgr ! RefreshBoxes
     Thread.sleep(1200)
 
-    probe.send(mgr, RetrieveInputs(1000L, Seq.empty, trackUsed = false))
+    probe.send(mgr, SelectInputs(1000L, Seq.empty, trackUsed = false))
     withClue(s"creationHeight + $MINER_REWARD_DELAY == chainHeight is still locked: ") {
       probe.expectMsgType[WalletInputs].inputs shouldBe empty
     }
@@ -675,7 +675,7 @@ class EngineWalletStateSpec extends TestKit(ActorSystem("wallet-manager-spec", E
     mgr ! RefreshBoxes
     Thread.sleep(1200)
 
-    probe.send(mgr, RetrieveInputs(1000L, Seq.empty, trackUsed = false))
+    probe.send(mgr, SelectInputs(1000L, Seq.empty, trackUsed = false))
     probe.expectMsgType[WalletInputs].inputs shouldBe empty
     wallet.signableTrees should not contain foreign.box.ergoTree
   }

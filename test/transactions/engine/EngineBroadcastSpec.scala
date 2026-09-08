@@ -37,7 +37,7 @@ class EngineBroadcastSpec extends TestKit(ActorSystem("engine-broadcast-spec"))
       .toInput(c, ErgoId.create("dd" * 32), 0.toShort))
     val owner = TestProbe()
     val allocationFuture = Future(EngineFunding(owner.ref, 5.seconds, ec).reserveCovering(1000000L))
-    val request = owner.expectMsgType[RetrieveCoveringInput]
+    val request = owner.expectMsgType[SelectInputs]
     owner.reply(WalletInputs(Seq(input), request.reservationId))
     val allocation = Await.result(allocationFuture, 5.seconds)
     val signed = mock[SignedTransaction]
@@ -56,7 +56,10 @@ class EngineBroadcastSpec extends TestKit(ActorSystem("engine-broadcast-spec"))
     verify(api, never()).sendTransaction(anyString())
     owner.reply(pin)
     if (pin) {
-      Await.result(result, 5.seconds) shouldBe EngineBroadcast.Result(txId, outcome)
+      // Identity and outcome are the contract; `reason` is diagnostic text and is not asserted.
+      val broadcast = Await.result(result, 5.seconds)
+      broadcast.txId shouldBe txId
+      broadcast.outcome shouldBe outcome
       owner.expectMsg(EngineSendFinished(allocation.reservationId, txId, outcome == "accepted"))
       owner.expectMsg(RefreshBoxes)
     } else {

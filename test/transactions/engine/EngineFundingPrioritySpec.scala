@@ -44,9 +44,9 @@ class EngineFundingPrioritySpec extends TestKit(ActorSystem("engine-funding-prio
     val optional = TestProbe()
     val critical = TestProbe()
     try {
-      optional.send(engine, RetrieveInputs(1000000L, Seq.empty, reservationId = "optional"))
+      optional.send(engine, SelectInputs(1000000L, Seq.empty, reservationId = "optional"))
       entered.get(5, TimeUnit.SECONDS)
-      critical.send(engine, CriticalWalletRequest(RetrieveInputs(1000000L, Seq.empty, reservationId = "critical")))
+      critical.send(engine, CriticalWalletRequest(SelectInputs(1000000L, Seq.empty, reservationId = "critical")))
       critical.expectMsgType[WalletInputs](2.seconds).inputs.map(_.id) shouldBe Seq(input.id)
       optional.expectNoMessage(100.millis)
       gate.complete(())

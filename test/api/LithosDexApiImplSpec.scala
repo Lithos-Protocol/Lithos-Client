@@ -116,7 +116,7 @@ class LithosDexApiImplSpec
    */
   private def expectsSelection(f: Fixture): Unit =
     f.wallet.expectMsgPF(10.seconds, "a wallet selection request") {
-      case msg if msg.getClass.getSimpleName == "RetrieveInputs" => ()
+      case msg if msg.getClass.getSimpleName == "SelectInputs" => ()
     }
 
   // ══════════════════════════════════════════════════════════════════════════

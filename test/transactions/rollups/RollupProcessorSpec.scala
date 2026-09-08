@@ -11,29 +11,29 @@ import support.{FakeCache, FakeNodeContext}
 import transactions.BlockTxMessages.{BlockTxsReady, RequestBlockTxs}
 import transactions.rollups.TransactionMessages.RollupTxType._
 import transactions.rollups.TransactionMessages._
-import transactions.rollups.TransactionProcessor.ProcessTransactions
+import transactions.rollups.RollupProcessor.ProcessTransactions
 
 import scala.concurrent.duration._
 
 /**
- * `TransactionProcessor` owns the queue of stubs waiting to be sent, and the rule that decides when
+ * `RollupProcessor` owns the queue of stubs waiting to be sent, and the rule that decides when
  * one is forgotten.
  *
  * Two defects live here historically, and both are silent. Removal used to match on `txType` alone,
  * which deleted every fraud proof for a rollup once one was dispatched; and removal used to happen
- * on the SEND, which lost the whole batch whenever `SubmissionHandler` refused it — and nothing but
+ * on the SEND, which lost the whole batch whenever `RollupCore` refused it — and nothing but
  * a fresh evaluation cycle re-derives a fraud proof stub.
  *
  * `pendingRollupTxs` is private, so everything here is asserted through the messages the actor
  * sends. That is the right level anyway: what matters is whether a stub comes back, not where it was
  * stored.
  */
-object TransactionProcessorSpec {
+object RollupProcessorSpec {
   val config: com.typesafe.config.Config =
     com.typesafe.config.ConfigFactory.parseString("akka.test.single-expect-default = 15s")
 }
 
-class TransactionProcessorSpec extends TestKit(ActorSystem("tx-processor-spec", TransactionProcessorSpec.config))
+class RollupProcessorSpec extends TestKit(ActorSystem("tx-processor-spec", RollupProcessorSpec.config))
   with AnyFlatSpecLike with Matchers with BeforeAndAfterAll with MockitoSugar {
 
   override def afterAll(): Unit = TestKit.shutdownActorSystem(system)
@@ -50,7 +50,7 @@ class TransactionProcessorSpec extends TestKit(ActorSystem("tx-processor-spec", 
     val submission = TestProbe()
     val evaluator = TestProbe()
     val engine = TestProbe()
-    val processor = system.actorOf(Props(new TransactionProcessor(
+    val processor = system.actorOf(Props(new RollupProcessor(
       quietConfig, ctx, new FakeCache, sync.ref, submission.ref, evaluator.ref, engine.ref)))
     Fixture(processor, sync, submission, evaluator, TestProbe(), engine)
   }
@@ -88,7 +88,7 @@ class TransactionProcessorSpec extends TestKit(ActorSystem("tx-processor-spec", 
   // ─── the §4b.2 regression ─────────────────────────────────────────────────
 
   "A dispatched batch" should "keep its stubs until they are acknowledged" in {
-    // Removal used to happen on the send. Making `batchLock` real made SubmissionHandler's refusal
+    // Removal used to happen on the send. Making `batchLock` real made RollupCore's refusal
     // branch reachable, and a refused batch then lost its stubs outright.
     val f = fixture()
     seed(f, fpStub("rollup-a", 1))
@@ -231,7 +231,7 @@ class TransactionProcessorSpec extends TestKit(ActorSystem("tx-processor-spec", 
     f.probe.expectMsgType[BlockTxsReady].txs shouldBe empty
   }
 
-  it should "hand the build to SubmissionHandler with the miner as the reply address" in {
+  it should "hand the build to RollupCore with the miner as the reply address" in {
     // `tell(..., requester)` so the answer goes straight back to the builder rather than making a
     // second hop through this actor, which is on the block's critical path.
     val f = fixture()

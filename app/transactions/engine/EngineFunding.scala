@@ -36,8 +36,8 @@ case class EngineFunding(walletRef: ActorRef,
     val deadline = System.currentTimeMillis() + timeout.toMillis
     val selected = awaitReservation(
       reservationId,
-      (walletRef ? fundingRequest(RetrieveInputs(value, tokens, trackUsed = true, reservationId, deadline)))
-        .mapTo[WalletInputs])
+      (walletRef ? fundingRequest(SelectInputs(value, tokens, reservationId = reservationId,
+        deadlineMillis = deadline))).mapTo[WalletInputs])
     val reservation = new FundingAllocation(reservationId, selected, this)
     if (!covers(selected, value, tokens)) {
       reservation.release()
@@ -47,21 +47,21 @@ case class EngineFunding(walletRef: ActorRef,
   }
 
   override def reserveCovering(value: Long): FundingAllocation =
-    reserveOneBox(value, "one input")(RetrieveCoveringInput(_, trackUsed = true, _, _))
+    reserveOneBox(value, "one input", p2pkOnly = false)
 
   override def reserveCoveringP2PK(value: Long): FundingAllocation =
-    reserveOneBox(value, "one P2PK input")(RetrieveCoveringP2PKInput(_, trackUsed = true, _, _))
+    reserveOneBox(value, "one P2PK input", p2pkOnly = true)
 
   /** Both single-box requests differ only in which set the wallet draws from. */
-  private def reserveOneBox(value: Long, description: String)
-                           (request: (Long, String, Long) => Any): FundingAllocation = {
+  private def reserveOneBox(value: Long, description: String, p2pkOnly: Boolean): FundingAllocation = {
     if (value < 0)
       throw new IllegalArgumentException("Wallet requirements cannot be negative")
     val reservationId = UUID.randomUUID().toString
     val deadline = System.currentTimeMillis() + timeout.toMillis
     val selected = awaitReservation(
       reservationId,
-      (walletRef ? fundingRequest(request(value, reservationId, deadline))).mapTo[WalletInputs])
+      (walletRef ? fundingRequest(SelectInputs(value, reservationId = reservationId,
+        deadlineMillis = deadline, single = true, p2pkOnly = p2pkOnly))).mapTo[WalletInputs])
     val reservation = new FundingAllocation(reservationId, selected, this)
     if (selected.isEmpty) {
       reservation.release()

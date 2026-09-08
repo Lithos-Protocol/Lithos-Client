@@ -71,7 +71,7 @@ class FraudProofFundingSpec extends TestKit(ActorSystem("fp-funding-spec", Fraud
         creationHeight = 1, ergoTree = wallet.rewardTrees.keys.head),
       address = "reward", inclusionHeight = 1, globalIndex = 1L)
 
-  /** A real `EngineWalletState` over a real `SubmissionHandler`, so selection is the production path. */
+  /** A real `EngineWalletState` over a real `RollupCore`, so selection is the production path. */
   private def handlerOver(walletErg: Long, rewardErg: Long): (RollupEngineHarness, NodeWallet) = {
     val api = mock[NodeApi]
     val (ctx, _, wallet) = FakeNodeContext(api, numAddresses = 1)
@@ -105,7 +105,7 @@ class FraudProofFundingSpec extends TestKit(ActorSystem("fp-funding-spec", Fraud
     (handler.underlyingActor, wallet)
   }
 
-  private val oneFee = SubmissionHandler.InitialTxInfo(Map("rollup-a" -> (erg / 2)))
+  private val oneFee = RollupCore.InitialTxInfo(Map("rollup-a" -> (erg / 2)))
 
   "A fraud proof's initial transaction" should "be funded from a plain P2PK box" in {
     // The coinbase is the cheaper covering box, which is exactly what the generic single-box request

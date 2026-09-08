@@ -60,6 +60,19 @@ case class ConfigState(permitParams: Seq[Long],
  */
 case class EmissionTip(box: InputUTXO, ancestors: Seq[NodeTransaction])
 
+/** One join that reached the node, whatever the node then did with it. */
+case class JoinAttempt(lender: Address, position: Long, permit: Long, txId: String, outcome: String) {
+  def accepted: Boolean = outcome == transactions.engine.EngineBroadcast.Accepted
+}
+
+/**
+ * The result of one chain of joins. `stopped` carries the cause rather than its text, so a caller
+ * can classify it — a wallet shortfall and a defect in this client are not the same failure.
+ */
+case class JoinRun(attempts: Vector[JoinAttempt], stopped: Option[Throwable]) {
+  def accepted: Seq[String] = attempts.filter(_.accepted).map(_.txId)
+}
+
 /** One built emission transaction and which path produced it. */
 case class EmissionSpend(tx: SignedTransaction,
                          kind: String,
@@ -75,7 +88,7 @@ object EmissionSpend {
  * The three emission spending paths - Join, Activate and Clear - and the lookups they need.
  *
  * Structured as [[transactions.rollups.RollupTransactions]] is: pure builders taking the boxes they
- * need and returning a signed transaction, with [[EmissionHandler]] owning the timers and the
+ * need and returning a signed transaction, with [[EmissionsCore]] owning the timers and the
  * broadcasting.
  *
  * Two build modes share the code. FUNDED adds a fee output and wallet inputs, for the mempool.
@@ -535,7 +548,7 @@ class EmissionTransactions(prover: NodeWallet,
     /**
      * A Clear takes the head queue box's whole principal and gives nothing back, so it funds its own
      * fee out of that and leaves the rest as change - which is the forfeit. Drawing a wallet box as
-     * well added an input for nothing and held a reservation against `SubmissionHandler`, which
+     * well added an input for nothing and held a reservation against `RollupCore`, which
      * draws from the same wallet.
      *
      * The guard is the change floor rather than the fee, because a remainder below it is folded into
@@ -604,6 +617,70 @@ class EmissionTransactions(prover: NodeWallet,
   }
 
   /**
+   * Run one chain of joins over `keys`, one position per key, and report every attempt that reached
+   * the node. Used by both the timer pass and the API, which differ only in how they choose keys,
+   * when they stop for permit cost, and what they report.
+   *
+   * Each join spends the previous one's emission successor and its change, so the run stops at the
+   * first failure: everything after it would be built against state that does not exist.
+   *
+   * @param permitWithinBudget consulted before each attempt, so a run stops cleanly rather than
+   *                           sending a position that costs more permit than the caller allows
+   */
+  def runJoins(ctx: BlockchainContext, tip: EmissionTip, cfgBox: InputUTXO, cs: ConfigState,
+               keys: Seq[Address], operation: String, guard: transactions.engine.EngineJoinGuard,
+               permitWithinBudget: Long => Boolean = _ => true): JoinRun = {
+    val funding = new FundingSource
+    val litId = readEmission(tip.box).lit.map(_.id).getOrElse(LFSMHelpers.LIT_ID)
+    var em = tip.box
+    var attempts = Vector.empty[JoinAttempt]
+    var remaining = keys
+    var stopped = Option.empty[Throwable]
+    var withinBudget = true
+
+    try {
+      while (remaining.nonEmpty && stopped.isEmpty && withinBudget) {
+        val lender = remaining.head
+        remaining = remaining.tail
+        val state = readEmission(em)
+        val permit = cs.permitAt(state.backlog)
+        val position = state.tail
+        if (!permitWithinBudget(permit)) withinBudget = false
+        else {
+          val lenderKey = hex(lenderEntry(lender))
+          Try { guard.withKey(lenderKey) { lease =>
+            // Rechecked against the successor this attempt actually spends: the exclusion set was
+            // read before the run, and an earlier join in it has moved the queue since.
+            require(!takenLenderKeys(ctx, EmissionTip(em, Seq.empty)).contains(lenderKey),
+              "lender key became unavailable")
+            val inputs = funding.take(CollateralParams.PRINCIPAL_FLOOR + config.txFee * 2,
+              if (permit > 0) Some(Token(litId, permit)) else None)
+            val sTx = genJoin(ctx, em, cfgBox, lender, inputs)
+            // Hold signable change before crossing the node boundary. A mempool-aware wallet
+            // refresh may expose it immediately after acceptance, before this thread can chain
+            // the next join, so post-send reservation is too late.
+            val chained = chainOn(sTx, funding)
+            val result = guard.send(lenderKey, lease, sTx, funding.pendingReservations,
+              operation + em.id.toString, alive)
+            // Recorded before the outcome is enforced: a position that reached the node has spent
+            // principal and must be reported whether or not it was accepted.
+            attempts :+= JoinAttempt(lender, position, permit, result.txId, result.outcome)
+            val txId = result.requireAccepted()
+            funding.clearPending()
+            chained.walletChange.foreach(funding.markAccepted)
+            em = chained.emission
+            txId
+          }}.failed.foreach(ex => stopped = Some(ex))
+        }
+      }
+    } finally
+      // Every chained box came from a join the node accepted, so its change is real.
+      funding.finish(returnChange = attempts.exists(_.accepted))
+
+    JoinRun(attempts, stopped)
+  }
+
+  /**
    * Put this miner's own funds into the collateral queue, and broadcast the result. Always broadcast,
    * because a join that only went into this miner's own candidate would mostly never land.
    *
@@ -638,60 +715,20 @@ class EmissionTransactions(prover: NodeWallet,
         logger.info("No free lender keys available - raise maxLenderKeys to dedicate more addresses")
         Seq.empty[String]
       } else {
-        val funding = new FundingSource
-        val litId = readEmission(tip.box).lit.map(_.id).getOrElse(LFSMHelpers.LIT_ID)
-        var em = tip.box
-        var sent = Vector.empty[String]
-        var remaining = keys
-        var stop = false
-
-        // Stop-on-first-problem rather than best-effort: each join chains off the previous one's
-        // emission successor and its change, so after a failure the rest build on state that does
-        // not exist.
-        try while (!stop && remaining.nonEmpty) {
-          val lender = remaining.head
-          remaining = remaining.tail
-          val permit = cs.permitAt(readEmission(em).backlog)
-
-          if (permit > config.maxPermitPerJoin) {
+        val run = runJoins(ctx, tip, cfg, cs, keys, "join:", guard, permit => {
+          val affordable = permit <= config.maxPermitPerJoin
+          if (!affordable)
             logger.info(s"Permit has reached $permit LIT, past the ${config.maxPermitPerJoin} budget " +
-              s"- stopping after ${sent.size} join(s)")
-            stop = true
-          } else {
-            val cost = CollateralParams.PRINCIPAL_FLOOR + config.txFee * 2
-            var attemptReservations = Seq.empty[FundingAllocation]
-            Try { guard.withKey(hex(lenderEntry(lender))) { lease =>
-              require(!takenLenderKeys(ctx, EmissionTip(em, Seq.empty)).contains(hex(lenderEntry(lender))),
-                "lender key became unavailable")
-              val inputs = funding.take(cost, if (permit > 0) Some(Token(litId, permit)) else None)
-              val sTx = genJoin(ctx, em, cfg, lender, inputs)
-              // Hold signable change before crossing the node boundary. A mempool-aware wallet
-              // refresh may expose it immediately after acceptance, before this thread can chain
-              // the next join, so post-send reservation is too late.
-              val chained = chainOn(sTx, funding)
-              attemptReservations = funding.pendingReservations
-              val txId = guard.send(hex(lenderEntry(lender)), lease, sTx, attemptReservations,
-                "join:" + em.id.toString, alive).requireAccepted()
-              funding.clearPending()
-              chained.walletChange.foreach(funding.markAccepted)
-              em = chained.emission
-              txId
-            }} match {
-              case Success(txId) =>
-                logger.info(s"Sent join $txId for lender $lender")
-                sent :+= txId
-              case Failure(ex: NotEnoughInputsException) =>
-                logger.warn(s"Stopping self-collateralization after ${sent.size} join(s): ${ex.getMessage}")
-                stop = true
-              case Failure(ex) =>
-                logger.error(s"Join for lender $lender failed, stopping: ${ex.getMessage}", ex)
-                stop = true
-            }
-          }
-        } finally
-          // Every chained box here came from a join the node accepted, so its change is real.
-          funding.finish(returnChange = sent.nonEmpty)
-        sent
+              "- stopping this pass")
+          affordable
+        })
+        run.attempts.filter(_.accepted).foreach(a => logger.info(s"Sent join ${a.txId} for lender ${a.lender}"))
+        run.stopped.foreach {
+          case ex: NotEnoughInputsException =>
+            logger.warn(s"Stopping self-collateralization after ${run.accepted.size} join(s): ${ex.getMessage}")
+          case ex => logger.error(s"Join failed, stopping: ${ex.getMessage}", ex)
+        }
+        run.accepted
       }
     }
   }

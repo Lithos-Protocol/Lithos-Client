@@ -5,8 +5,8 @@ import play.api.{ConfigLoader, Configuration}
 /**
  * Tuning for [[mining.CandidateBuilder]] — the genesis transaction, the collateral boxes it is
  * built from, and how much of this miner's own block goes to transactions that pay no fee. Those
- * transactions are built by [[transactions.rollups.TransactionProcessor]] and
- * [[transactions.emissions.EmissionHandler]], not here.
+ * transactions are built by [[transactions.rollups.RollupProcessor]] and
+ * [[transactions.emissions.EmissionsCore]], not here.
  *
  * Every key is optional and falls back to [[CandidateConfig.Default]].
  *

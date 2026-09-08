@@ -15,7 +15,7 @@ import work.lithos.mutations.{Contract, InputUTXO, Token, UTXO}
 /**
  * Which outputs of a batch's initial transaction are the pre-created wallet boxes.
  *
- * `SubmissionHandler` builds one transaction that carries a fee output for itself plus one wallet
+ * `RollupCore` builds one transaction that carries a fee output for itself plus one wallet
  * output per remaining rollup, then hands each of those out as the input that pays that rollup's fee.
  * Finding them used to be `slice(2, …)` — right for four of the five builders, and wrong for a Payout
  * that pays a miner as well as recreating its box. The first rollup got the fee-proposition box,
@@ -91,7 +91,7 @@ class FeeAllocationSpec extends AnyPropSpec with RollupSpecBase {
     UTXO(owner, 20000000L).toInput(ctx, ErgoId.create(dummyTxId), 1.toShort)
 
   private def located(signed: SignedTransaction): Seq[Long] =
-    SubmissionHandler.walletOutputsAfterFee(
+    RollupCore.walletOutputsAfterFee(
       JavaHelpers.toIndexedSeq(signed.getOutputsToSpend).map(InputUTXO(_)),
       walletOutValues.size).map(_.value)
 
@@ -151,7 +151,7 @@ class FeeAllocationSpec extends AnyPropSpec with RollupSpecBase {
         UTXO(wallet.contract, v).toInput(ctx, ErgoId.create(dummyTxId), 0.toShort))
 
       withClue("mapping rollups onto arbitrary outputs is worse than mapping none: ") {
-        SubmissionHandler.walletOutputsAfterFee(outputs, 2) shouldBe empty
+        RollupCore.walletOutputsAfterFee(outputs, 2) shouldBe empty
       }
     }
   }

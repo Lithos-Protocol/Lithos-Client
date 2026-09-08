@@ -12,7 +12,7 @@ import org.scalatest.BeforeAndAfterAll
 import org.scalatest.flatspec.AnyFlatSpecLike
 import support.FakeNodeContext
 import transactions.dex.LDBoxes.{Provision => LiveProvision}
-import transactions.engine.EngineWalletMessages.{ReleaseInputs, RetrieveInputs, WalletInputs}
+import transactions.engine.EngineWalletMessages.{ReleaseInputs, SelectInputs, WalletInputs}
 import transactions.engine.EngineFunding
 import work.lithos.mutations.{InputUTXO, Token, UTXO}
 

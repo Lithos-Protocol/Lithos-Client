@@ -33,7 +33,7 @@ import scala.util.{Failure, Random, Success, Try}
 
 /**
  * Actor responsible for running fraud-proof checks on EVAL-phase rollups.
- * Receives EvaluationSet messages from TransactionProcessor and evaluates
+ * Receives EvaluationSet messages from RollupProcessor and evaluates
  * each NISPEvaluation stub in the set.
  */
 class RollupEvaluator @Inject()(config: Configuration, nodeContext: NodeContext,
@@ -175,7 +175,7 @@ class RollupEvaluator @Inject()(config: Configuration, nodeContext: NodeContext,
       } else {
         val updatedStubs = fpMap.map(fpm => rollupTxStub.copy(fpInfo = Some(fpm._1 -> fpm._2))).toSeq
 
-        logger.info(s"Sent FraudBatch of ${updatedStubs.size} stubs to TransactionProcessor" +
+        logger.info(s"Sent FraudBatch of ${updatedStubs.size} stubs to RollupProcessor" +
           s" for rollup ${rollupTxStub.rollupBlockId} ")
         // If we find fraud proofs, we send batch to tx processor. We can stop evaluating after,
         // but we should not update evaluation state until the txs make it onto the blockchain.

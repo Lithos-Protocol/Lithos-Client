@@ -41,7 +41,7 @@ class EngineFundingSpec extends TestKit(ActorSystem("wallet-selector-spec"))
     val selected = input(1000L)
 
     val result = Future(selector.reserve(1000L))
-    val request = manager.expectMsgType[RetrieveInputs]
+    val request = manager.expectMsgType[SelectInputs]
     request.erg shouldEqual 1000L
     request.tokens shouldBe empty
     request.trackUsed shouldBe true
@@ -54,7 +54,7 @@ class EngineFundingSpec extends TestKit(ActorSystem("wallet-selector-spec"))
     val manager = TestProbe()
     val funding = EngineFunding(manager.ref, 2.seconds, ec)
     val reserved = Future(funding.reserve(1000L))
-    val request = manager.expectMsgType[RetrieveInputs]
+    val request = manager.expectMsgType[SelectInputs]
     manager.reply(WalletInputs(Seq(input(1000L)), request.reservationId))
     val allocation = Await.result(reserved, 2.seconds)
     val held = Future(Try(allocation.holdForCandidate()))
@@ -69,7 +69,7 @@ class EngineFundingSpec extends TestKit(ActorSystem("wallet-selector-spec"))
     val funding = EngineFunding(manager.ref, 200.millis, ec)
     val selected = input(1000L)
     val reserved = Future(funding.reserve(1000L))
-    val request = manager.expectMsgType[RetrieveInputs]
+    val request = manager.expectMsgType[SelectInputs]
     manager.reply(WalletInputs(Seq(selected), request.reservationId))
     val allocation = Await.result(reserved, 2.seconds)
     val held = Future(Try(allocation.holdForCandidate()))
@@ -86,7 +86,7 @@ class EngineFundingSpec extends TestKit(ActorSystem("wallet-selector-spec"))
     val selected = input(1000L, Some(Token(tokenId, 1L)))
 
     val result = Future(selector.reserve(1000L, Seq(Token(tokenId, 2L))))
-    val request = manager.expectMsgType[RetrieveInputs]
+    val request = manager.expectMsgType[SelectInputs]
     request.tokens shouldEqual Seq(Token(tokenId, 2L))
     manager.reply(WalletInputs(Seq(selected), request.reservationId))
     manager.expectMsg(ReleaseInputs(request.reservationId))
@@ -100,7 +100,7 @@ class EngineFundingSpec extends TestKit(ActorSystem("wallet-selector-spec"))
     val selected = input(2000L)
 
     val covering = Future(selector.reserveCovering(1000L))
-    val request = manager.expectMsgType[RetrieveCoveringInput]
+    val request = manager.expectMsgType[SelectInputs]
     request.erg shouldEqual 1000L
     manager.reply(WalletInputs(Seq(selected), request.reservationId))
     val reservation = Await.result(covering, 2.seconds)

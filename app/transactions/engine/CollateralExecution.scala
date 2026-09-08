@@ -544,67 +544,24 @@ class CollateralExecution(nodeContext: NodeContext,
           s"only ${keys.size} of $count position(s) fit within the configured exposure budget " +
             s"(${emissionConfig.maxOwnCollateral}) and free lender keys")
 
-      val funding = new tx.FundingSource
-      val litId = tipState.lit.map(_.id).getOrElse(LFSMHelpers.LIT_ID)
-      var em = tip.box
-      var remaining = keys
-      var sent = Vector.empty[CollateralJoinEntry]
-      // The cause, not just its text: when nothing was sent it is rethrown as-is so the controller
-      // classifies it the way it would have without the run - a wallet shortfall stays a 422 and a
-      // defect in this client stays a 500, rather than every failure collapsing into one status.
-      var stopped = Option.empty[Throwable]
+      // The permit cap was enforced against the planned positions above, so nothing here needs to
+      // stop for cost: a breach sent nothing at all.
+      val run = tx.runJoins(ctx, tip, cfgBox, cs, keys, "collateral:", guard)
+      run.stopped.foreach(ex =>
+        logger.warn(s"Stopping join run after ${run.attempts.size} position(s): ${ex.getMessage}", ex))
 
-      try {
-        while (remaining.nonEmpty && stopped.isEmpty) {
-          val lender = remaining.head
-          remaining = remaining.tail
-          val state = tx.readEmission(em)
-          val permit = cs.permitAt(state.backlog)
-          val position = state.tail
-          var reservations = Seq.empty[FundingAllocation]
-          Try { guard.withKey(hex(lenderEntry(lender))) { lease =>
-            require(!tx.takenLenderKeys(ctx, transactions.emissions.EmissionTip(em, Seq.empty))
-              .contains(hex(lenderEntry(lender))), "lender key became unavailable")
-            val inputs = funding.take(CollateralParams.PRINCIPAL_FLOOR + emissionConfig.txFee * 2,
-              if (permit > 0) Some(Token(litId, permit)) else None)
-            val sTx = tx.genJoin(ctx, em, cfgBox, lender, inputs)
-            val chained = tx.chainOn(sTx, funding)
-            reservations = funding.pendingReservations
-            val result = guard.send(hex(lenderEntry(lender)), lease, sTx, reservations,
-              "collateral:" + em.id.toString, alive)
-            if (result.outcome != "accepted") {
-              sent :+= CollateralJoinEntry(result.txId, position, lender.toString,
-                CollateralParams.PRINCIPAL_FLOOR.toString, permit.toString, result.outcome)
-            }
-            val txId = result.requireAccepted()
-            funding.clearPending()
-            chained.walletChange.foreach(funding.markAccepted)
-            em = chained.emission
-            txId
-          }} match {
-            case Success(txId) =>
-              sent :+= CollateralJoinEntry(txId, position, lender.toString,
-                CollateralParams.PRINCIPAL_FLOOR.toString, permit.toString)
-            case Failure(ex) =>
-              // Stop rather than continue: each join chains off the previous one's emission
-              // successor, so everything after a failure would be built against state that does
-              // not exist.
-              stopped = Some(ex)
-              logger.warn(s"Stopping join run after ${sent.size} position(s): ${ex.getMessage}", ex)
-          }
-        }
-      } finally
-        // Every chained box came from a join the node accepted, so its change is real.
-        funding.finish(returnChange = sent.nonEmpty)
+      val sent = run.attempts.map(attempt => CollateralJoinEntry(attempt.txId, attempt.position,
+        attempt.lender.toString, CollateralParams.PRINCIPAL_FLOOR.toString, attempt.permit.toString,
+        attempt.outcome))
 
       // Nothing sent means the caller needs a status, not a 200 with an empty list - that reads the
-      // same as a deliberate no-op. Anything sent is spent principal and must be reported, with the
-      // reason the run stopped short.
-      if (sent.isEmpty) stopped.foreach(ex => throw asStatus(ex))
+      // same as a deliberate no-op. The cause is rethrown as-is so the controller classifies it the
+      // way it would have without the run: a wallet shortfall stays a 422, a defect stays a 500.
+      if (sent.isEmpty) run.stopped.foreach(ex => throw asStatus(ex))
 
       CollateralJoinResult(sent,
-        (sent.count(_.outcome == "accepted").toLong * (CollateralParams.PRINCIPAL_FLOOR + emissionConfig.txFee)).toString,
-        stopped.map(ex => Option(ex.getMessage).getOrElse(ex.getClass.getSimpleName)))
+        (run.accepted.size.toLong * (CollateralParams.PRINCIPAL_FLOOR + emissionConfig.txFee)).toString,
+        run.stopped.map(ex => Option(ex.getMessage).getOrElse(ex.getClass.getSimpleName)))
     } finally
       // Unconditional: a run that stopped part way still consumed keys and wallet boxes, and the
       // next read must not call those keys FREE.

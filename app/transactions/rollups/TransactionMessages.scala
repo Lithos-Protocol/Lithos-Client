@@ -100,13 +100,13 @@ object TransactionMessages {
   // ─── actor messages ───────────────────────────────────────────────────────
 
   /**
-   * Piped to TransactionPublisher from itself once buildRollupMap completes.
+   * Piped to RollupPublisher from itself once buildRollupMap completes.
    * Carries either the rebuilt map or a captured failure.
    */
   case class PublishRollupTxs(entries: Try[Map[String, RollupTxStub]])
 
   /**
-   * Sent from TransactionPublisher to TransactionProcessor on every successful
+   * Sent from RollupPublisher to RollupProcessor on every successful
    * map build, carrying the ready-to-process rollup stubs.
    */
   case class PublishedRollupMap(entries: Map[String, RollupTxStub])
@@ -114,28 +114,28 @@ object TransactionMessages {
   /**
    * A priority-ordered batch of up to TX_BATCH_SIZE non-evaluation stubs
    * (NISPSubmissions, then Transforms, then Payouts) sent from
-   * TransactionProcessor to SubmissionHandler for on-chain submission.
+   * RollupProcessor to RollupCore for on-chain submission.
    */
   case class RollupBatch(stubs: Seq[RollupTxStub])
 
   /**
-   * SubmissionHandler → TransactionProcessor: this batch was taken, so its stubs may be dropped.
+   * RollupCore → RollupProcessor: this batch was taken, so its stubs may be dropped.
    *
    * A batch refused by the submission lock is NOT acknowledged, and its stubs stay queued for the
    * next tick. Dropping them on the send instead lost them whenever the lock was held — and while
-   * `TransactionPublisher` rebuilds most stub types from chain state every two minutes, fraud proof
+   * `RollupPublisher` rebuilds most stub types from chain state every two minutes, fraud proof
    * stubs only ever arrive through `FraudBatch` and nothing else re-derives them.
    */
   case class BatchAccepted(stubs: Seq[RollupTxStub])
 
   /**
    * A batch of up to EVAL_SET_SIZE NISPEvaluation stubs sent from
-   * TransactionProcessor to RollupEvaluator for fraud-proof checking.
+   * RollupProcessor to RollupEvaluator for fraud-proof checking.
    */
   case class EvaluationSet(stubs: Seq[RollupTxStub])
 
   /**
-   * TransactionProcessor → SubmissionHandler: build these stubs fee-less and reply to the original
+   * RollupProcessor → RollupCore: build these stubs fee-less and reply to the original
    * requester WITHOUT sending them. The stubs stay queued, so the funded copies still reach the
    * mempool on the normal tick; whichever lands first wins and the other is a double spend.
    */
@@ -157,7 +157,7 @@ object TransactionMessages {
   case class StopEvaluating(rollupBlockId: String)
 
   // In a fraud batch, fpInfo for all stubs is defined
-  // To be sent from RollupEvaluator to TransactionProcessor
+  // To be sent from RollupEvaluator to RollupProcessor
   // and then stored in fraud map for use during rollup batch creation
   // NOTE: all stubs in a fraud batch belong to the same rollup
   case class FraudBatch(fpStubs: Seq[RollupTxStub])

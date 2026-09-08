@@ -117,7 +117,7 @@ class KnownReservationSpec
     withCtx(f)(ctx => walletBox(f.wallet, value).toInputUTXO(ctx))
 
   private def offered(f: Fixture, need: Long): Seq[InputUTXO] = {
-    f.probe.send(f.mgr, RetrieveInputs(need, Seq.empty, trackUsed = false))
+    f.probe.send(f.mgr, SelectInputs(need, Seq.empty, trackUsed = false))
     f.probe.expectMsgType[WalletInputs].inputs
   }
 

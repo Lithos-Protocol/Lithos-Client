@@ -9,7 +9,7 @@ import org.slf4j.{Logger, LoggerFactory}
 import play.api.Configuration
 import play.api.libs.concurrent.InjectedActorSupport
 import transactions.BlockTxMessages.{BlockTxsReady, CandidateTx, CandidateTxsDropped, RequestBlockTxs}
-import transactions.emissions.EmissionHandler._
+import transactions.emissions.EmissionsCore._
 import transactions.engine.{FundingAllocation, EngineFunding}
 import work.lithos.mutations.InputUTXO
 
@@ -29,13 +29,13 @@ import scala.util.{Failure, Success, Try}
  * would stall it and Activating the rest. Broadcasting is what actually moves the queue;
  * [[RequestBlockTxs]] only guarantees the same work lands in a block this miner finds.
  */
-trait EngineEmissions extends Actor with InjectedActorSupport {
+trait EmissionsCore extends Actor with InjectedActorSupport {
   /** Config, node and wallet come from the engine this trait is mixed into. */
   protected def config: Configuration
   protected def emissionNodeContext: NodeContext
   protected def emissionWalletManager: ActorRef
 
-  private val logger: Logger = LoggerFactory.getLogger("EmissionHandler")
+  private val logger: Logger = LoggerFactory.getLogger("EmissionsCore")
 
   private val nodeConfig: NodeContext = emissionNodeContext
   private val client: ErgoClient = nodeConfig.getClient
@@ -95,9 +95,9 @@ trait EngineEmissions extends Actor with InjectedActorSupport {
   abstract override def preStart(): Unit = {
     super.preStart()
     if (!emissionConfig.enabled) {
-      logger.info("EmissionHandler disabled via emission.enabled")
+      logger.info("EmissionsCore disabled via emission.enabled")
     } else {
-      logger.info(s"EmissionHandler starting - queue every ${emissionConfig.queueInterval}ms " +
+      logger.info(s"EmissionsCore starting - queue every ${emissionConfig.queueInterval}ms " +
         s"(max ${emissionConfig.maxQueueSpends} spends), autoCollateralize=" +
         s"${emissionConfig.autoCollateralize} every ${emissionConfig.collateralizeInterval}ms")
 
@@ -128,80 +128,17 @@ trait EngineEmissions extends Actor with InjectedActorSupport {
   // ─── receive ──────────────────────────────────────────────────────────────
 
   abstract override def receive: Receive = emissionReceive.orElse(super.receive)
+
+  /**
+   * Only the candidate path is handled here. Joins, queue passes and self-collateralization are
+   * admitted by the engine as intents and reach this trait through [[executeEmission]]; the timers
+   * below send the same messages the engine matches on.
+   */
   private def emissionReceive: Receive = {
-    case transactions.engine.TransactionEngine.JoinCollateral(_) if spending =>
-      sender() ! akka.actor.Status.Failure(api.LithosApiErrors.LithosUnavailable("an emission submission is already running"))
-    case transactions.engine.TransactionEngine.JoinCollateral(request) =>
-      val reply = sender()
-      spending = true
-      dispatchEmission(collateral.join(request))(result =>
-        self ! ManualJoined(emissionIncarnation, reply, result))
-    case ManualJoined(incarnation, reply, result) if incarnation == emissionIncarnation =>
-      spending = false
-      result match {
-        case Success(value) => reply ! value
-        case Failure(ex) => reply ! akka.actor.Status.Failure(ex)
-      }
-    case _: ManualJoined => ()
-    case EmissionResult(incarnation, result) if incarnation == emissionIncarnation => emissionReceive(result)
-    case _: EmissionResult => ()
     case CandidateBuilt(incarnation, reply, height, result) if incarnation == emissionIncarnation =>
       candidateBusy = false
       reply ! BlockTxsReady(height, result.getOrElse(Seq.empty))
     case _: CandidateBuilt => ()
-
-    // ------------------------------------------------------------------
-    // Timers — build funded transactions and broadcast them
-    // ------------------------------------------------------------------
-
-    case Collateralize =>
-      if (spending) logger.info("Skipping self-collateralization, an emission pass is already running")
-      else {
-        spending = true
-        dispatchEmission(client.execute(ctx => txs.selfCollateralize(ctx,
-          new transactions.engine.EngineBroadcast(emissionWalletManager, emissionNodeApi)))) {
-          case Success(txIds) => self ! EmissionResult(emissionIncarnation, Collateralized(txIds))
-          case Failure(ex) => self ! EmissionResult(emissionIncarnation, EmissionFailed("self-collateralization", ex))
-        }
-      }
-
-    case Collateralized(txIds) =>
-      spending = false
-      if (txIds.nonEmpty)
-        logger.info(s"Sent ${txIds.size} join transaction(s): ${txIds.map(_.take(8)).mkString(", ")}")
-
-    case DriveQueue =>
-      if (spending) logger.info("Skipping queue pass, an emission pass is already running")
-      else {
-        spending = true
-        dispatchEmission {
-          client.execute { ctx =>
-            val (_, spends) = txs.buildQueueSpends(
-              ctx, ctx.getHeight + 1, funded = true, emissionConfig.maxQueueSpends)
-            sendQueue(ctx, spends)
-          }
-        } {
-          case Success(sent) => self ! EmissionResult(emissionIncarnation, QueueDriven(sent))
-          case Failure(ex) => self ! EmissionResult(emissionIncarnation, EmissionFailed("queue maintenance", ex))
-        }
-      }
-
-    case QueueDriven(sent) =>
-      spending = false
-      sent.foreach {
-        case (kind, Success(txId)) => logger.info(s"Sent $kind transaction $txId")
-        case (kind, Failure(ex)) => logger.warn(s"Could not send $kind transaction: ${ex.getMessage}")
-      }
-
-    case EmissionFailed(what, ex) =>
-      spending = false
-      // The builders stop before building a spend the contracts reject, so this is state that moved
-      // between reading and sending - not a defect, and not worth a stack trace every pass.
-      if (Option(ex.getMessage).exists(_.contains("Script reduced to false")))
-        logger.warn(s"Emission $what stopped: the contracts rejected the built transaction " +
-          "- chain or active-set state moved under it. Retrying on the next pass")
-      else
-        logger.error(s"Emission $what failed: ${ex.getMessage}", ex)
 
     // ------------------------------------------------------------------
     // A block is being assembled — hand back fee-less copies
@@ -238,9 +175,6 @@ trait EngineEmissions extends Actor with InjectedActorSupport {
   }
 
   // ─── private helpers ──────────────────────────────────────────────────────
-  private def dispatchEmission[A](body: => A)(finished: Try[A] => Unit): Unit =
-    Try(Future { require(emissionAlive.get(), "emission engine attempt was superseded"); body }(emissionWorker)
-      .onComplete(finished)).failed.foreach(ex => finished(Failure(ex)))
 
   private def sendQueue(ctx: org.ergoplatform.appkit.BlockchainContext,
                         spends: Seq[EmissionSpend]): Seq[(String, Try[String])] = {
@@ -281,7 +215,7 @@ trait EngineEmissions extends Actor with InjectedActorSupport {
     math.min(interval.toLong, FirstPassDelayMs).milliseconds
 }
 
-object EmissionHandler {
+object EmissionsCore {
 
   /** Delay before the first pass of either timer, so the node wallet has time to unlock. */
   private[transactions] final val FirstPassDelayMs = 60000L
@@ -293,12 +227,7 @@ object EmissionHandler {
   private[transactions] case object Collateralize
   private[transactions] case object DriveQueue
 
-  private[emissions] case class Collateralized(txIds: Seq[String])
-  private[emissions] case class QueueDriven(sent: Seq[(String, Try[String])])
-  private[emissions] case class EmissionFailed(what: String, ex: Throwable)
-  private[emissions] case class EmissionResult(incarnation: java.util.UUID, result: Any)
-  private[emissions] case class ManualJoined(incarnation: java.util.UUID, reply: ActorRef,
-    result: Try[api.models.CollateralJoinResult])
+  /** Self-message: a fee-less candidate build finished off the actor thread. */
   private[emissions] case class CandidateBuilt(incarnation: java.util.UUID, reply: ActorRef,
     height: Int, result: Try[Seq[CandidateTx]])
 }

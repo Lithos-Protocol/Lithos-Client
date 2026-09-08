@@ -42,33 +42,21 @@ object EngineWalletMessages {
   case object RefreshBoxes
 
   /**
-   * Request a set of UTXOs covering erg nanoERG and the specified tokens.
-   * If trackUsed is true (default) the selected UTXOs are reserved, so nothing else can be handed
-   * them until they are seen spent, released, or the reservation ages out.
+   * Request UTXOs covering `erg` nanoERG and `tokens`.
+   *
+   * @param trackUsed      reserve what is selected, so nothing else can be handed the same boxes
+   *                       until they are seen spent, released, or the reservation ages out
+   * @param single         one box must cover the whole request by itself, rather than a set
+   * @param p2pkOnly       draw only from plain P2PK wallet boxes, excluding matured mining rewards
+   * @param deadlineMillis past this the request is answered empty rather than queued further
    */
-  private[transactions] case class RetrieveInputs(erg: Long,
-                                            tokens: Seq[Token],
-                                            trackUsed: Boolean = true,
-                                            reservationId: String = java.util.UUID.randomUUID().toString,
-                                            deadlineMillis: Long = Long.MaxValue)
-
-  /**
-   * Retrieve singular input which covers value of the entire requested ERG amount
-   * @param erg Amount to cover in one input
-   * @param trackUsed Record input as used after reply
-   */
-  private[transactions] case class RetrieveCoveringInput(erg: Long,
-                                                   trackUsed: Boolean = true,
-                                                   reservationId: String = java.util.UUID.randomUUID().toString,
-                                                   deadlineMillis: Long = Long.MaxValue)
-
-  /**
-   * The same single-box request, restricted to plain P2PK wallet boxes.
-   */
-  private[transactions] case class RetrieveCoveringP2PKInput(erg: Long,
-                                                   trackUsed: Boolean = true,
-                                                   reservationId: String = java.util.UUID.randomUUID().toString,
-                                                   deadlineMillis: Long = Long.MaxValue)
+  private[transactions] case class SelectInputs(erg: Long,
+                                          tokens: Seq[Token] = Seq.empty,
+                                          trackUsed: Boolean = true,
+                                          reservationId: String = java.util.UUID.randomUUID().toString,
+                                          deadlineMillis: Long = Long.MaxValue,
+                                          single: Boolean = false,
+                                          p2pkOnly: Boolean = false)
 
   /**
    * Reserve exact signable outputs whose parent transaction has been built but may not be visible to

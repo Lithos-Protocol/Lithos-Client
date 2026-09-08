@@ -163,7 +163,7 @@ class EngineWalletState @Inject()(nodeContext: NodeContext) extends Actor with I
   /** Known wallet UTXOs, including change handed back by ReturnInputs. */
   private var walletBoxes: Map[String, WalletDescriptor] = Map.empty
 
-  /** Reserved by RetrieveInputs and not yet known to be spent, with lease identity and age. */
+  /** Reserved by SelectInputs and not yet known to be spent, with lease identity and age. */
   private var usedInputs: Map[String, ReservationState] = Map.empty
 
   /** Coinbase boxes at this client's addresses, found by ergoTree since no wallet reports them. */
@@ -252,7 +252,7 @@ class EngineWalletState @Inject()(nodeContext: NodeContext) extends Actor with I
   // ─── receive ──────────────────────────────────────────────────────────────
 
   override def receive: Receive = {
-    case CriticalWalletRequest(request @ (_: RetrieveInputs | _: RetrieveCoveringInput | _: RetrieveCoveringP2PKInput | _: ReserveKnownInputs)) =>
+    case CriticalWalletRequest(request @ (_: SelectInputs | _: ReserveKnownInputs)) =>
       criticalMessage = true
       try receive(request) finally criticalMessage = false
     case WalletWorkerResult(incarnation, result) if incarnation == walletIncarnation => receive(result)
@@ -440,15 +440,11 @@ class EngineWalletState @Inject()(nodeContext: NodeContext) extends Actor with I
         s"($locked still locked)" + (if (complete) "" else ", PARTIAL"))
       finishRefresh()
 
-    case RetrieveInputs(_, _, _, reservationId, deadlineMillis) if now() >= deadlineMillis =>
+    case SelectInputs(_, _, _, reservationId, deadlineMillis, _, _) if now() >= deadlineMillis =>
       sender() ! WalletInputs(Seq.empty, reservationId)
 
-    case RetrieveInputs(erg, tokens, trackUsed, reservationId, deadline) =>
-      selectWallet(erg, tokens, trackUsed, reservationId, deadline, single = false, p2pkOnly = false)
-    case RetrieveCoveringInput(erg, trackUsed, reservationId, deadline) =>
-      selectWallet(erg, Seq.empty, trackUsed, reservationId, deadline, single = true, p2pkOnly = false)
-    case RetrieveCoveringP2PKInput(erg, trackUsed, reservationId, deadline) =>
-      selectWallet(erg, Seq.empty, trackUsed, reservationId, deadline, single = true, p2pkOnly = true)
+    case SelectInputs(erg, tokens, trackUsed, reservationId, deadline, single, p2pkOnly) =>
+      selectWallet(erg, tokens, trackUsed, reservationId, deadline, single, p2pkOnly)
     case ReserveKnownInputs(_, reservationId, deadlineMillis) if now() >= deadlineMillis =>
       sender() ! WalletInputs(Seq.empty, reservationId)
 
@@ -643,7 +639,21 @@ class EngineWalletState @Inject()(nodeContext: NodeContext) extends Actor with I
 
 object EngineWalletState {
 
-  /** Why an input is unavailable, which decides what may end that unavailability. */
+  /**
+   * Why an input is unavailable, which decides what may end that unavailability. One lifecycle in
+   * three stages, and the distinctions are what keep a spent box from being handed out twice:
+   *
+   *  - before a send, `ReservationSelected` and `ReservationKnown` differ only in whether absence
+   *    from a complete refresh proves the box was spent. It does for a selected box, and does not
+   *    for locally built change whose parent the node may not report yet;
+   *  - after a send, `ReservationEngine` is bound to an exact transaction and only per-input
+   *    evidence from [[EngineReconciler]] can end it;
+   *  - `ReservationCandidate` and `ReservationUncertain` cover the paths with no send outcome at
+   *    all: a transaction offered into this miner's own block, and an ambiguous broadcast.
+   *
+   * Only `ReservationSelected` and `ReservationKnown` can be released outright, and only
+   * `ReservationSelected` is collected by a complete refresh.
+   */
   private sealed trait ReservationStatus
   /** Chosen for a build that has not reached the node. A complete refresh or a release ends it. */
   private case object ReservationSelected extends ReservationStatus
@@ -682,7 +692,7 @@ object EngineWalletState {
                                       reservedAtMillis: Long,
                                       status: ReservationStatus)
 
-  /** Maximum number of inputs returned in a single RetrieveInputs response. */
+  /** Maximum number of inputs returned in a single SelectInputs response. */
   final val MAX_TX_INPUTS: Int = 75
 
   /** Page size for the wallet refresh, which pages to exhaustion. */

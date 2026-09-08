@@ -64,7 +64,7 @@ class CollateralJoinReservationSpec
       case GetSpendableBalance => sender() ! SpendableBalance(1000L * Parameters.OneErg)
       case GetUnlockedRewards => sender() ! RewardSummary(0, 0, 0L, 0L, None)
 
-      case m @ RetrieveInputs(_, _, _, id, _) =>
+      case m @ SelectInputs(_, _, _, id, _, _, _) =>
         watcher ! m
         sender() ! WalletInputs(funding, id)
 

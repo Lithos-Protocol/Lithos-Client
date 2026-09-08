@@ -68,7 +68,7 @@ class TransactionEngine @Inject()(node: NodeContext,
   override protected val cacheApi: play.api.cache.SyncCacheApi,
   override protected val config: play.api.Configuration,
   override protected val dataBoxes: transactions.rollups.DataBoxSource)
-  extends EngineWalletState(node) with transactions.rollups.EngineRollups with transactions.emissions.EngineEmissions {
+  extends EngineWalletState(node) with transactions.rollups.RollupCore with transactions.emissions.EmissionsCore {
   import TransactionEngine._
   import ExecutionSchedule._
 
@@ -90,6 +90,8 @@ class TransactionEngine @Inject()(node: NodeContext,
   private val alive = new AtomicBoolean(true)
 
   protected lazy val execution = new HoldingTransformExecution(node, self, sync, mempool)
+  /** Engine-wide: resolves outstanding sends for every operation */
+  protected lazy val reconciler = new EngineReconciler(node, self, mempool)
 
   private val schedule = new ExecutionSchedule[EngineIntent]()
   /** Callers waiting on an outcome, by intent key. Timer-driven work has none. */
@@ -143,9 +145,9 @@ class TransactionEngine @Inject()(node: NodeContext,
         sender() ! transactions.rollups.TransactionMessages.BatchAccepted(stubs)
     case _: transactions.rollups.TransactionMessages.RollupBatch => ()
 
-    case transactions.emissions.EmissionHandler.DriveQueue =>
+    case transactions.emissions.EmissionsCore.DriveQueue =>
       admit(EngineIntent.Queue, context.system.deadLetters)
-    case transactions.emissions.EmissionHandler.Collateralize =>
+    case transactions.emissions.EmissionsCore.Collateralize =>
       admit(EngineIntent.Collateralize, context.system.deadLetters)
     case Schedule(intent, notBefore, expiry) => admit(intent, sender(), Some(Scheduled(notBefore, expiry)))
 
@@ -257,7 +259,7 @@ class TransactionEngine @Inject()(node: NodeContext,
         reconcileDue = false
         val attempt = UUID.randomUUID()
         reconciling = Some(attempt)
-        Try(Future(execution.reconcile())(worker).onComplete(result => self ! Reconciled(attempt, result)))
+        Try(Future(reconciler.reconcile())(worker).onComplete(result => self ! Reconciled(attempt, result)))
           .failed.foreach(ex => self ! Reconciled(attempt, Failure(ex)))
       } else schedule.next(Lane.Optional, now).foreach(start)
     }

@@ -49,10 +49,10 @@ class EngineReconciliationSpec extends TestKit(ActorSystem("engine-reconciliatio
     when(api.chainSlice(Some(9), Some(11))).thenReturn(Success(Seq(ChainFixtures.header(10))))
     val wallet = TestProbe()
     val mempool = TestProbe()
-    val execution = new HoldingTransformExecution(ctx, wallet.ref, TestProbe().ref, mempool.ref) {
+    val reconciler = new EngineReconciler(ctx, wallet.ref, mempool.ref) {
       override protected lazy val node: NodeApi = api
     }
-    val result = Future(execution.reconcile())
+    val result = Future(reconciler.reconcile())
     wallet.expectMsg(GetEngineHolds)
     wallet.reply(EngineHolds(Vector(hold.copy(signedInputIds = Set(protocol, otherProtocol)))))
     mempool.expectMsg(CompleteMempool.Refresh)

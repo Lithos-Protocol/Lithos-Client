@@ -15,7 +15,7 @@ import state.messages.SyncMessages._
 import transactions.BlockTxMessages.{BlockTxsReady, CandidateTx, CandidateTxsDropped, RequestBlockTxs}
 import transactions.rollups.TransactionMessages.RollupTxType._
 import transactions.rollups.TransactionMessages.{BatchAccepted, BuildBlockTxs, EvaluationSet, FraudBatch, PublishedRollupMap, RollupBatch, RollupTxStub, RollupTxType}
-import transactions.rollups.TransactionProcessor._
+import transactions.rollups.RollupProcessor._
 
 import javax.inject.{Inject, Named}
 import scala.concurrent.ExecutionContext
@@ -24,18 +24,18 @@ import scala.language.postfixOps
 import scala.util.{Failure, Success}
 
 /** Owns pending rollup work, removes stale entries, and dispatches ready transaction stubs. */
-class TransactionProcessor @Inject()(config: Configuration, nodeContext: NodeContext,
-                                     cacheApi: SyncCacheApi,
-                                     @Named("sync-handler")        syncHandler:       ActorRef,
-                                     @Named("transaction-engine")  submissionHandler: ActorRef,
-                                     @Named("rollup-evaluator")    rollupEvaluator:   ActorRef,
-                                     @Named("transaction-engine") transactionEngine: ActorRef)
+class RollupProcessor @Inject()(config: Configuration, nodeContext: NodeContext,
+                                cacheApi: SyncCacheApi,
+                                @Named("sync-handler")        syncHandler:       ActorRef,
+                                @Named("transaction-engine")  submissionHandler: ActorRef,
+                                @Named("rollup-evaluator")    rollupEvaluator:   ActorRef,
+                                @Named("transaction-engine") transactionEngine: ActorRef)
   extends Actor with InjectedActorSupport {
 
   implicit val timeout: Timeout     = Timeout(30.seconds)
   implicit val ec: ExecutionContext = context.dispatcher
 
-  private val logger: Logger        = LoggerFactory.getLogger("TransactionProcessor")
+  private val logger: Logger        = LoggerFactory.getLogger("RollupProcessor")
 
   private val nodeConfig: NodeContext        = nodeContext
   private val client: ErgoClient            = nodeConfig.getClient
@@ -55,12 +55,12 @@ class TransactionProcessor @Inject()(config: Configuration, nodeContext: NodeCon
 
   override def preStart(): Unit = {
     if (!stateConfig.disableTransforms.getOrElse(false)) {
-      logger.info("TransactionProcessor starting - processing pending transactions every 3 minutes")
+      logger.info("RollupProcessor starting - processing pending transactions every 3 minutes")
       ticker = Some(
         context.system.scheduler.scheduleWithFixedDelay(35.seconds, 15.seconds, self, ProcessTransactions)(context.dispatcher)
       )
     } else {
-      logger.info("TransactionProcessor disabled via disableTransforms config")
+      logger.info("RollupProcessor disabled via disableTransforms config")
     }
   }
 
@@ -104,7 +104,7 @@ class TransactionProcessor @Inject()(config: Configuration, nodeContext: NodeCon
       }
 
       // Evaluation stubs are consumed on the send, because RollupEvaluator takes every set it is
-      // given. The batch is not: SubmissionHandler refuses one while a batch is already running, so
+      // given. The batch is not: RollupCore refuses one while a batch is already running, so
       // its stubs are dropped only against a BatchAccepted. Dropping them here lost fraud proof
       // stubs outright, since nothing but a fresh evaluation cycle re-derives those.
       dropStubs(evalSet.stubs)
@@ -133,7 +133,7 @@ class TransactionProcessor @Inject()(config: Configuration, nodeContext: NodeCon
       logger.info(s"Merging ${fpStubs.size} fraud proof stub(s) for rollup " +
         s"${fpStubs.headOption.map(_.rollupBlockId).getOrElse("?")}")
       fpStubs.foreach(s => addRollupStubs(Map(s.rollupBlockId -> s)))
-    // A block is being assembled. SubmissionHandler builds the highest-priority queued
+    // A block is being assembled. RollupCore builds the highest-priority queued
     // work fee-less and replies straight back to the requester. Nothing is dispatched or removed
     // here, so the funded copies still reach the mempool if no block is found.
     case RequestBlockTxs(blockHeight, limit) =>
@@ -145,7 +145,7 @@ class TransactionProcessor @Inject()(config: Configuration, nodeContext: NodeCon
       if (chosen.isEmpty) requester ! BlockTxsReady(blockHeight, Seq.empty[CandidateTx])
       else submissionHandler.tell(BuildBlockTxs(blockHeight, chosen), requester)
 
-    // Nothing queued here is affected — the stubs were never dispatched — but SubmissionHandler may
+    // Nothing queued here is affected — the stubs were never dispatched — but RollupCore may
     // be holding a wallet box for a submission it built into that package, so it has to be told.
     case dropped: CandidateTxsDropped =>
       submissionHandler ! dropped
@@ -158,7 +158,7 @@ class TransactionProcessor @Inject()(config: Configuration, nodeContext: NodeCon
         .map(syncMsg => ProcessPublishedMap(syncMsg, newEntries, client.execute(_.getHeight)))
         .onComplete {
           case Failure(ex) =>
-            logger.error(s"TransactionProcessor failed to query sync state: ${ex.getMessage}", ex)
+            logger.error(s"RollupProcessor failed to query sync state: ${ex.getMessage}", ex)
           case Success(msg) =>
             self ! msg
         }
@@ -290,8 +290,8 @@ class TransactionProcessor @Inject()(config: Configuration, nodeContext: NodeCon
   }
 }
 
-object TransactionProcessor {
-  /** Maximum number of non-evaluation stubs dispatched to SubmissionHandler per tick. */
+object RollupProcessor {
+  /** Maximum number of non-evaluation stubs dispatched to RollupCore per tick. */
   private final val TX_BATCH_SIZE: Int  = 100
 
   /** Maximum number of NISPEvaluation stubs dispatched to RollupEvaluator per tick. */

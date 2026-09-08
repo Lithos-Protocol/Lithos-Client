@@ -17,7 +17,7 @@ import state.messages.MempoolMessages.MempoolRollupMetadata
 import state.messages.SyncMessages._
 import transactions.rollups.TransactionMessages.RollupTxType._
 import transactions.rollups.TransactionMessages.{PublishRollupTxs, PublishedRollupMap, RollupTxStub, RollupTxType}
-import transactions.rollups.TransactionPublisher._
+import transactions.rollups.RollupPublisher._
 
 import javax.inject.{Inject, Named}
 import scala.collection.mutable
@@ -38,16 +38,16 @@ import scala.util.{Failure, Success, Try}
  *
  * Disabled entirely when `state.disableTransforms = true`.
  */
-class TransactionPublisher @Inject()(config: Configuration, nodeContext: NodeContext,
-                             cacheApi: SyncCacheApi,
-                             @Named("sync-handler") syncHandler: ActorRef,
-                             @Named("transaction-processor") transactionProcessor: ActorRef)
+class RollupPublisher @Inject()(config: Configuration, nodeContext: NodeContext,
+                                cacheApi: SyncCacheApi,
+                                @Named("sync-handler") syncHandler: ActorRef,
+                                @Named("transaction-processor") transactionProcessor: ActorRef)
   extends Actor with InjectedActorSupport {
 
   implicit val timeout: Timeout          = Timeout(30.seconds)
   implicit val ec: ExecutionContext      = context.dispatcher
 
-  private val logger: Logger             = LoggerFactory.getLogger("TransactionPublisher")
+  private val logger: Logger             = LoggerFactory.getLogger("RollupPublisher")
 
   val nodeConfig: NodeContext             = nodeContext
   val client: ErgoClient                 = nodeConfig.getClient
@@ -61,12 +61,12 @@ class TransactionPublisher @Inject()(config: Configuration, nodeContext: NodeCon
 
   override def preStart(): Unit = {
     if (!stateConfig.disableTransforms.getOrElse(false)) {
-      logger.info("TransactionPublisher starting - evaluating rollup transactions every 2 minutes")
+      logger.info("RollupPublisher starting - evaluating rollup transactions every 2 minutes")
       ticker = Some(
         context.system.scheduler.scheduleWithFixedDelay(25.seconds, 3.minutes, self, Tick)(context.dispatcher)
       )
     } else {
-      logger.info("TransactionPublisher disabled via disableTransforms config")
+      logger.info("RollupPublisher disabled via disableTransforms config")
     }
   }
 
@@ -79,7 +79,7 @@ class TransactionPublisher @Inject()(config: Configuration, nodeContext: NodeCon
     case Tick =>
       (syncHandler ? GetSynced).mapTo[SyncMessage].onComplete {
         case Failure(ex) =>
-          logger.error(s"TransactionPublisher failed to query sync state: ${ex.getMessage}", ex)
+          logger.error(s"RollupPublisher failed to query sync state: ${ex.getMessage}", ex)
 
         case Success(FullSync(rollups, projections)) =>
           logger.info(s"Publishing rollup transactions for FullSync with ${rollups.size} rollup(s)")
@@ -98,14 +98,14 @@ class TransactionPublisher @Inject()(config: Configuration, nodeContext: NodeCon
 
         case Success(entries) =>
           if (entries.nonEmpty) {
-            logger.debug(s"Publishing ${entries.size} transaction(s) to TransactionProcessor")
+            logger.debug(s"Publishing ${entries.size} transaction(s) to RollupProcessor")
             val txGroups = entries.groupBy(_._2.txType)
             txGroups.foreach{
               g =>
                 logger.info(s"Got ${g._2.size} ${g._1} transactions")
             }
           } else {
-            logger.debug("Publishing empty map to TransactionProcessor")
+            logger.debug("Publishing empty map to RollupProcessor")
           }
           transactionProcessor ! PublishedRollupMap(entries)
       }
@@ -200,6 +200,6 @@ class TransactionPublisher @Inject()(config: Configuration, nodeContext: NodeCon
     })
 }
 
-object TransactionPublisher {
+object RollupPublisher {
   private case object Tick
 }

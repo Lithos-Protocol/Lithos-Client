@@ -12,7 +12,7 @@ import support.{FakeCache, FakeNodeContext, SyncFixtures}
 import node.MutationConversions._
 import node.model.NodeBox
 import transactions.BlockTxMessages.{BlockTxsReady, CandidateTxsDropped, RequestBlockTxs}
-import transactions.engine.EngineWalletMessages.{MarkReservationUncertain, RetrieveCoveringInput, WalletInputs}
+import transactions.engine.EngineWalletMessages.{MarkReservationUncertain, SelectInputs, WalletInputs}
 import transactions.engine.{FundingAllocation, EngineFunding}
 import transactions.rollups.TransactionMessages.RollupTxType._
 import transactions.rollups.TransactionMessages._
@@ -21,7 +21,7 @@ import scala.concurrent.duration._
 import scala.concurrent.{Await, ExecutionContext, Future}
 
 /**
- * `SubmissionHandler`'s mailbox, and the lock over the fields a batch mutates.
+ * `RollupCore`'s mailbox, and the lock over the fields a batch mutates.
  *
  * A batch is tens of seconds of selection asks, signing, node round trips and five-second retry
  * sleeps. It used to run inside `receive` — and this actor also answers `BuildBlockTxs`, which is a
@@ -32,12 +32,12 @@ import scala.concurrent.{Await, ExecutionContext, Future}
  * Individual tests hold a state ask open when they need slow work; all other asks are answered
  * explicitly so wall-clock timeouts are not being mistaken for concurrency coverage.
  */
-object SubmissionHandlerSpec {
+object RollupCoreSpec {
   val config: com.typesafe.config.Config =
     com.typesafe.config.ConfigFactory.parseString("akka.test.single-expect-default = 40s").withFallback(com.typesafe.config.ConfigFactory.load())
 }
 
-class SubmissionHandlerSpec extends TestKit(ActorSystem("submission-handler-spec", SubmissionHandlerSpec.config))
+class RollupCoreSpec extends TestKit(ActorSystem("submission-handler-spec", RollupCoreSpec.config))
   with AnyFlatSpecLike with Matchers with BeforeAndAfterAll {
 
   override def afterAll(): Unit = TestKit.shutdownActorSystem(system)
@@ -221,14 +221,14 @@ class SubmissionHandlerSpec extends TestKit(ActorSystem("submission-handler-spec
     withClue("valid at the tip, which is what made the tip the wrong height to ask about: ") {
       submission.validate(boundaryTip, rollup) shouldBe true
     }
-    SubmissionHandler.eligibleForCandidate(
+    RollupCore.eligibleForCandidate(
       submission, rollup, boundaryTip, boundaryTip + 1) shouldBe false
   }
 
   it should "be offered while it is still valid one height later" in {
     val rollup = holdingRollup(9111, boundaryPeriod)
     val submission = RollupTxStub("rollup-a", Some(boundaryPeriod), NISPSubmission)
-    SubmissionHandler.eligibleForCandidate(
+    RollupCore.eligibleForCandidate(
       submission, rollup, boundaryTip - 1, boundaryTip) shouldBe true
   }
 
@@ -239,7 +239,7 @@ class SubmissionHandlerSpec extends TestKit(ActorSystem("submission-handler-spec
     val transform = RollupTxStub("rollup-a", Some(boundaryPeriod), HoldingTransform)
 
     transform.validate(boundaryTip + 1, rollup) shouldBe true
-    SubmissionHandler.eligibleForCandidate(
+    RollupCore.eligibleForCandidate(
       transform, rollup, boundaryTip, boundaryTip + 1) shouldBe false
   }
 
@@ -253,7 +253,7 @@ class SubmissionHandlerSpec extends TestKit(ActorSystem("submission-handler-spec
     }
     val selector = EngineFunding(probe.ref, 5.seconds, ec)
     val pending = Future(selector.reserveCovering(1000000L))
-    val ask = probe.expectMsgType[RetrieveCoveringInput](5.seconds)
+    val ask = probe.expectMsgType[SelectInputs](5.seconds)
     probe.reply(WalletInputs(Seq(input), ask.reservationId))
     Await.result(pending, 5.seconds)
   }
@@ -266,7 +266,7 @@ class SubmissionHandlerSpec extends TestKit(ActorSystem("submission-handler-spec
     val lease = leaseOver(f.wallet)
 
     f.probe.send(f.handler, CandidateTxsDropped(500))
-    f.probe.send(f.handler, SubmissionHandler.CandidateLeaseTaken(500, lease.reservationId))
+    f.probe.send(f.handler, RollupCore.CandidateLeaseTaken(500, lease.reservationId))
 
     f.wallet.expectMsg(5.seconds, MarkReservationUncertain(lease.reservationId))
   }
@@ -276,7 +276,7 @@ class SubmissionHandlerSpec extends TestKit(ActorSystem("submission-handler-spec
     val f = fixture()
     val lease = leaseOver(f.wallet)
 
-    f.probe.send(f.handler, SubmissionHandler.CandidateLeaseTaken(500, lease.reservationId))
+    f.probe.send(f.handler, RollupCore.CandidateLeaseTaken(500, lease.reservationId))
     f.wallet.expectNoMessage(2.seconds)
   }
 
@@ -288,7 +288,7 @@ class SubmissionHandlerSpec extends TestKit(ActorSystem("submission-handler-spec
     var sent = false
 
     val changed = intercept[ProjectionChangedException] {
-      SubmissionHandler.sendIfCurrentInput(rollupId, oldInput,
+      RollupCore.sendIfCurrentInput(rollupId, oldInput,
         CurrentRollup(newInput, rollup, None)) {
         sent = true
         "sent"
@@ -305,7 +305,7 @@ class SubmissionHandlerSpec extends TestKit(ActorSystem("submission-handler-spec
     val rollup = SyncFixtures.emptyRollup(rollupId, input, 100)
     var sends = 0
 
-    val result = SubmissionHandler.sendIfCurrentInput(rollupId, input,
+    val result = RollupCore.sendIfCurrentInput(rollupId, input,
       CurrentRollup(input, rollup, None)) {
       sends += 1
       "tx-id"

@@ -72,7 +72,7 @@ class EngineSubmissionSpec extends TestKit(ActorSystem("engine-submission-spec")
       wallet.expectMsg(GetEngineHolds)
       wallet.reply(EngineHolds(if (retry) Vector(old) else Vector.empty))
       if (!retry) {
-        val selection = wallet.expectMsgType[RetrieveCoveringP2PKInput]
+        val selection = wallet.expectMsgType[SelectInputs]
         wallet.reply(WalletInputs(Seq(input), selection.reservationId))
       }
       val pinned = wallet.expectMsgType[PinEngineInputs]
@@ -102,7 +102,8 @@ class EngineSubmissionSpec extends TestKit(ActorSystem("engine-submission-spec")
     exercise(Failure(error), Rejected(intent.key, error.getMessage, Some(txId)))
   }
   it should "stop before the node when the exact input pin is refused" in {
-    exercise(Success(txId), Deferred(intent.key, "requirement failed: wallet no longer owns the exact engine inputs"), pin = false)
+    // Refused at the shared send boundary, which is what reports it now.
+    exercise(Success(txId), Deferred(intent.key, "requirement failed: engine funding ownership changed before send"), pin = false)
   }
   it should "rebuild with retained inputs without selecting another wallet input" in {
     exercise(Success(txId), Accepted(intent.key, txId), retry = true)

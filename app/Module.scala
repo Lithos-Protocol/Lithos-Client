@@ -7,7 +7,7 @@ import play.libs.akka.AkkaGuiceSupport
 import state.synchronization._
 import state.persistence.StateSnapshotActor
 import tasks.{MDSyncTask, RollupSyncTask, StartMiningServer, StartupTasks}
-import transactions.rollups.{DataBoxSource, RollupEvaluator, TransactionProcessor, TransactionPublisher}
+import transactions.rollups.{DataBoxSource, RollupEvaluator, RollupProcessor, RollupPublisher}
 import utils.Globals
 
 import java.lang.management.ManagementFactory
@@ -49,8 +49,8 @@ class Module(environment: Environment, configuration: Configuration) extends Abs
 
     bindActor(classOf[transactions.engine.TransactionEngine], "transaction-engine")
     bindActor(classOf[RollupEvaluator],      "rollup-evaluator",      p => p.withDispatcher("lithos-contexts.tx-dispatcher"))
-    bindActor(classOf[TransactionProcessor], "transaction-processor", p => p.withDispatcher("lithos-contexts.tx-dispatcher"))
-    bindActor(classOf[TransactionPublisher], "transaction-publisher", p => p.withDispatcher("lithos-contexts.tx-dispatcher"))
+    bindActor(classOf[RollupProcessor], "transaction-processor", p => p.withDispatcher("lithos-contexts.tx-dispatcher"))
+    bindActor(classOf[RollupPublisher], "transaction-publisher", p => p.withDispatcher("lithos-contexts.tx-dispatcher"))
 
     bind(classOf[BlocksApi]).to(classOf[BlocksApiImpl])
     bind(classOf[CollateralMarketApi]).to(classOf[CollateralMarketApiImpl])

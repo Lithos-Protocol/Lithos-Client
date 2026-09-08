@@ -13,13 +13,13 @@ import org.scalatestplus.mockito.MockitoSugar
 import play.api.Configuration
 import support.FakeNodeContext
 import transactions.BlockTxMessages.{BlockTxsReady, RequestBlockTxs}
-import transactions.emissions.EmissionHandler.{Collateralize, DriveQueue}
+import transactions.emissions.EmissionsCore.{Collateralize, DriveQueue}
 
 import scala.concurrent.duration._
 import scala.util.Success
 
 /**
- * `EmissionHandler`'s two timers, and the one lock that covers both.
+ * `EmissionsCore`'s two timers, and the one lock that covers both.
  *
  * Join, Activate and Clear all spend the emission box and all chain off the same tip, so two passes
  * running at once build on that tip together and one is a guaranteed double spend — taking every
@@ -67,7 +67,7 @@ class EmissionHandlerSpec extends TestKit(ActorSystem("emission-handler-spec", E
       }
 
     val wallet = TestProbe()
-    val handler = system.actorOf(Props(new EmissionEngineHarness(configuration, ctx, wallet.ref)))
+    val handler = system.actorOf(Props(new EmissionsCoreHaress(configuration, ctx, wallet.ref)))
     Fixture(handler, api, wallet, TestProbe())
   }
 

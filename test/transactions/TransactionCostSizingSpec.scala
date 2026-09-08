@@ -26,7 +26,7 @@ import transactions.dex.{DexContracts, LDBoxes, LDFundedTx, LithosDexTransaction
 import transactions.emissions.EmissionTransactions
 import transactions.rollups.RollupTransactions
 import transactions.rollups.TransactionMessages.LatestRollup
-import transactions.engine.EngineWalletMessages.{RetrieveInputs, WalletInputs}
+import transactions.engine.EngineWalletMessages.{SelectInputs, WalletInputs}
 import transactions.engine.{FundingAllocation, EngineFunding, FundingSource}
 import work.lithos.mutations.{Contract, InputUTXO, Token, UTXO}
 
@@ -168,7 +168,7 @@ class TransactionCostSizingSpec extends AnyPropSpec with BeforeAndAfterAll
     inputAt(UTXO(wallet.contract, value, tokens), ctx, index)
 
   /**
-   * The fee output `SubmissionHandler` puts on every rollup transaction.
+   * The fee output `RollupCore` puts on every rollup transaction.
    *
    * One box here, where a real batch carries one more per rollup still to be built in the same tick,
    * so the first transaction of a batch runs a little wider than these rows.

@@ -21,7 +21,7 @@ import state.messages.RollupMessages
 import state.messages.RollupMessages.{GetCurrentRollupCritical, RemoveRollup, RollupInfo}
 import state.DataBoxRetrievalException
 import transactions.BlockTxMessages.{BlockTxsReady, CandidateTx, CandidateTxsDropped}
-import transactions.rollups.SubmissionHandler._
+import transactions.rollups.RollupCore._
 import transactions.rollups.TransactionMessages.RollupTxType._
 import transactions.rollups.TransactionMessages._
 import transactions.engine.{FundingAllocation, EngineFunding}
@@ -41,7 +41,7 @@ import scala.util.control.NonFatal
  * Batches run on the critical lane and select against the reserved input budget, because a missed
  * NISP submission or fraud proof costs the miner a payout while optional work only costs a retry.
  */
-trait EngineRollups extends Actor with InjectedActorSupport {
+trait RollupCore extends Actor with InjectedActorSupport {
   protected def config: Configuration
   protected def rollupNodeContext: NodeContext
   protected def cacheApi: SyncCacheApi
@@ -65,7 +65,7 @@ trait EngineRollups extends Actor with InjectedActorSupport {
     override protected def executionNode: node.NodeApi = rollupNodeApi
   }
 
-  private val logger: Logger = LoggerFactory.getLogger("SubmissionHandler")
+  private val logger: Logger = LoggerFactory.getLogger("RollupCore")
   private val nodeConfig: NodeContext = nodeContext
   private val stateConfig = new StateConfig(config)
   private val stratumConfig = new StratumConfig(config)
@@ -94,7 +94,7 @@ trait EngineRollups extends Actor with InjectedActorSupport {
     Future(runBatch(stubs))(rollupWorker).flatMap(identity)
   }
   protected def finishRollupBatch(): Unit = { releaseFeeAllocations(); batchLock = false }
-  private var registering = false
+
   protected def executeRegistration(): Future[String] = Future {
     require(rollupAlive.get(), "registration attempt was superseded")
     val view = Globals.syncView
@@ -128,69 +128,11 @@ trait EngineRollups extends Actor with InjectedActorSupport {
 
   abstract override def receive: Receive = rollupReceive.orElse(super.receive)
 
+  /**
+   * Only the candidate path is handled here. Registration and rollup batches are admitted by the
+   * engine as intents and reach this trait through [[executeRegistration]] and [[executeRollupBatch]].
+   */
   private def rollupReceive: Receive = {
-    case transactions.engine.TransactionEngine.RegisterMiner if registering =>
-      sender() ! akka.actor.Status.Failure(new IllegalStateException("miner registration is already running"))
-    case transactions.engine.TransactionEngine.RegisterMiner =>
-      registering = true
-      val reply = sender()
-      val worker = context.system.dispatchers.lookup("lithos-contexts.engine-io-dispatcher")
-      Try(Future {
-        require(rollupAlive.get(), "rollup engine attempt was superseded")
-        val view = Globals.syncView
-        require(view.canonical.available && view.minerDictionary.available &&
-          view.minerDictionaryMetadata.exists(!_.hasMiner) && dataBoxes.getDataBoxToken.isEmpty,
-          "miner registration requires a current unregistered dictionary view")
-        val dictionary = Await.result(syncHandler ? state.messages.SyncMessages.GetMinerDictionary, timeout.duration) match {
-          case state.messages.SyncMessages.CurrentMinerDictionary(value) => value
-          case other => throw new IllegalStateException(s"Miner Dictionary became unavailable: $other")
-        }
-        commitments.sendInitialCommitment(stratumConfig.diff, dictionary, optionalFunding)
-      }(worker).onComplete(result => self ! RegistrationFinished(rollupIncarnation, reply, result))(context.dispatcher))
-        .failed.foreach(ex => self ! RegistrationFinished(rollupIncarnation, reply, Failure(ex)))
-    case RegistrationFinished(incarnation, reply, result) if incarnation == rollupIncarnation =>
-      registering = false
-      result match {
-        case Success(txId) => reply ! txId
-        case Failure(ex) => reply ! akka.actor.Status.Failure(ex)
-      }
-    case _: RegistrationFinished => ()
-    // Off the mailbox. A batch is up to five attemptTx retries with five-second sleeps per stub,
-    // plus selection asks, signing and node round trips — tens of seconds. This actor also answers
-    // BuildBlockTxs, which is a miner assembling a block against a 20-second budget, so running the
-    // batch inline silently cost every block its inserted transactions.
-    //
-    // It also makes batchLock mean something. Inline, nothing else could be processed while the
-    // batch ran, so the lock guarded nothing — while submitRemainingTxs' Futures went on reading
-    // feeAllocations and inputsUsed after receive returned, where a second batch could overwrite
-    // both underneath them.
-    case RollupBatch(stubs) =>
-      if (batchLock || stubs.size > 100)
-        // Unacknowledged on purpose: the sender keeps these stubs and offers them again next tick.
-        logger.info("Ignored incoming RollupBatch due to submission lock")
-      else {
-        batchLock = true
-        criticalBatch = stubs.exists(s => s.txType == NISPSubmission || s.fpInfo.isDefined)
-        // Acknowledged on acceptance rather than on completion. A batch that fails part way has
-        // still consumed its stubs — the failures are per-stub and retried inside — whereas one that
-        // was never started must not lose them.
-        sender() ! BatchAccepted(stubs)
-        // flatMap, so the lock is held until the parallel attempts finish too. Releasing when the
-        // initial transaction is done would let the next batch overwrite feeAllocations while they
-        // are still reading it.
-        Try(Future(runBatch(stubs))(rollupWorker).flatMap(identity).onComplete {
-          case Success(_) => self ! BatchFinished(rollupIncarnation)
-          case Failure(ex) =>
-            logger.error("RollupBatch failed outside of transaction handling", ex)
-            self ! BatchFinished(rollupIncarnation)
-        }).failed.foreach(ex => self ! BatchFinished(rollupIncarnation))
-      }
-
-    case BatchFinished(incarnation) if incarnation == rollupIncarnation =>
-      releaseFeeAllocations()
-      batchLock = false
-    case _: BatchFinished => ()
-
     // Sent from the build Future, so the map is only ever written on this thread. A lease that
     // arrives after its height has passed is reconciled at once rather than stored and forgotten.
     case CandidateLeaseTaken(blockHeight, reservation) =>
@@ -428,7 +370,7 @@ trait EngineRollups extends Actor with InjectedActorSupport {
     releaseInitialInputs()
 
     val ergForFees = initialTxInfo.feesToCreate.values.toSeq.sum
-    // Reserved on selection, not after the send. EmissionHandler draws from the same EngineWalletState,
+    // Reserved on selection, not after the send. EmissionsCore draws from the same EngineWalletState,
     // and the gap between selecting and sending spans retries and their sleeps.
     // P2PK-only for a fraud proof, which pays the slashed bond to input 1's own proposition. A
     // matured reward box here is contract-valid and silently relocks the reward for 720 blocks.
@@ -825,7 +767,7 @@ trait EngineRollups extends Actor with InjectedActorSupport {
     // would only create an avoidable double-spend and stale projection retry.
     val current = Await.result[RollupInfo](
       (syncHandler ? GetCurrentRollupCritical(rollupId)).mapTo[RollupInfo], timeout.duration)
-    SubmissionHandler.sendIfCurrentInput(rollupId, expectedRollupInput, current) {
+    RollupCore.sendIfCurrentInput(rollupId, expectedRollupInput, current) {
       require(rollupAlive.get(), "rollup engine attempt was superseded")
       try {
         val txId = new transactions.engine.EngineBroadcast(walletManager, rollupNodeApi)(context.dispatcher)
@@ -864,7 +806,7 @@ trait EngineRollups extends Actor with InjectedActorSupport {
   /** The same check for work offered to a candidate, which executes one height past the tip. */
   private def checkCandidateStubValidity(ctx: BlockchainContext, stub: RollupTxStub,
                                          latestRollup: LatestRollup, blockHeight: Int): Unit = {
-    if (!SubmissionHandler.eligibleForCandidate(stub, latestRollup.rollup, ctx.getHeight, blockHeight))
+    if (!RollupCore.eligibleForCandidate(stub, latestRollup.rollup, ctx.getHeight, blockHeight))
       throw StubInvalidException(s"${stub.txType} stub for rollup ${stub.rollupBlockId} is not valid " +
         s"at candidate height $blockHeight")
   }
@@ -900,7 +842,7 @@ trait EngineRollups extends Actor with InjectedActorSupport {
   }
 }
 
-object SubmissionHandler {
+object RollupCore {
 
   /** The fee proposition every `UTXO.feeBox` sits at, derived once rather than per comparison. */
   private val FeeTreeHex: String = Contract.FEE_720.ergoTreeHex
@@ -954,11 +896,8 @@ object SubmissionHandler {
     else outputs.slice(feeIdx + 1, feeIdx + 1 + count)
   }
 
-  /** Self-message: the batch and every attempt in it are done, so the lock can come off. */
-  private[rollups] case class BatchFinished(incarnation: java.util.UUID)
   private[rollups] case class RollupCandidateBuilt(incarnation: java.util.UUID, replyTo: ActorRef,
                                                 height: Int, result: Try[Seq[CandidateTx]])
-  private[rollups] case class RegistrationFinished(incarnation: java.util.UUID, reply: ActorRef, result: Try[String])
 
   /**
    * Self-message: a fee-less submission built off the actor thread took a bond input.

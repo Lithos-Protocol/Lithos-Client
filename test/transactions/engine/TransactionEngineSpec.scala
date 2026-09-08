@@ -32,8 +32,10 @@ class TransactionEngineSpec extends TestKit(ActorSystem("transaction-engine-spec
     val gate = new CompletableFuture[Unit]()
     val calls = new AtomicInteger()
     val engine = system.actorOf(Props(new TransactionEngine(ctx, replies.ref, replies.ref, new support.FakeCache, play.api.Configuration(com.typesafe.config.ConfigFactory.load()), transactions.rollups.DataBoxSource.Stored) {
-      override protected lazy val execution = new HoldingTransformExecution(ctx, replies.ref, replies.ref, replies.ref) {
+      override protected lazy val reconciler = new EngineReconciler(ctx, replies.ref, replies.ref) {
         override def reconcile(): Unit = ()
+      }
+      override protected lazy val execution = new HoldingTransformExecution(ctx, replies.ref, replies.ref, replies.ref) {
         override def execute(work: HoldingTransform, alive: () => Boolean): Outcome = {
           calls.incrementAndGet()
           entered.ref ! "entered"
@@ -60,11 +62,13 @@ class TransactionEngineSpec extends TestKit(ActorSystem("transaction-engine-spec
     val events = TestProbe()
     val gate = new CompletableFuture[Unit]()
     val engine = system.actorOf(Props(new TransactionEngine(ctx, events.ref, events.ref, new support.FakeCache, play.api.Configuration(com.typesafe.config.ConfigFactory.load()), transactions.rollups.DataBoxSource.Stored) {
-      override protected lazy val execution = new HoldingTransformExecution(ctx, events.ref, events.ref, events.ref) {
+      override protected lazy val reconciler = new EngineReconciler(ctx, events.ref, events.ref) {
         override def reconcile(): Unit = {
           events.ref ! "reconcile"
           gate.get(10, TimeUnit.SECONDS)
         }
+      }
+      override protected lazy val execution = new HoldingTransformExecution(ctx, events.ref, events.ref, events.ref) {
         override def execute(work: HoldingTransform, alive: () => Boolean): Outcome = {
           events.ref ! "execute"
           Completed(work.key)
@@ -96,8 +100,10 @@ class TransactionEngineSpec extends TestKit(ActorSystem("transaction-engine-spec
       override def preStart(): Unit = { super.preStart(); events.ref ! incarnation }
       override def receive: Receive = ({ case "restart" => throw new RuntimeException("test restart") }: Receive)
         .orElse(super.receive)
-      override protected lazy val execution = new HoldingTransformExecution(ctx, events.ref, events.ref, events.ref) {
+      override protected lazy val reconciler = new EngineReconciler(ctx, events.ref, events.ref) {
         override def reconcile(): Unit = ()
+      }
+      override protected lazy val execution = new HoldingTransformExecution(ctx, events.ref, events.ref, events.ref) {
         override def execute(work: HoldingTransform, alive: () => Boolean): Outcome = {
           if (incarnation == 1) {
             events.ref ! "old worker"

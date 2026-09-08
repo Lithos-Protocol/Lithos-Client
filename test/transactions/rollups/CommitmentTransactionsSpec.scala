@@ -154,7 +154,7 @@ class CommitmentTransactionsSpec
   }
 
   private def offered(f: Fixture, need: Long): Seq[InputUTXO] = {
-    f.probe.send(f.mgr, RetrieveInputs(need, Seq.empty, trackUsed = false))
+    f.probe.send(f.mgr, SelectInputs(need, Seq.empty, trackUsed = false))
     f.probe.expectMsgType[WalletInputs].inputs
   }
 
@@ -208,7 +208,7 @@ class CommitmentTransactionsSpec
 
   "A commitment that fails before the node call" should "release its selection at once" in {
     // The other direction. Nothing left this process, so holding the input for fifteen minutes would
-    // be contention against SubmissionHandler and LithosDex for no reason.
+    // be contention against RollupCore and LithosDex for no reason.
     val f = fixture(Some(inForce(configuredScore + 1)), unsignable = true)
 
     f.commitments.commitScore(diff, f.selector).isFailure shouldBe true

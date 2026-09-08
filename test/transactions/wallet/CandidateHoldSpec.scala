@@ -84,7 +84,7 @@ class CandidateHoldSpec extends TestKit(ActorSystem("candidate-hold-spec", Candi
   }
 
   private def covering(mgr: ActorRef, probe: TestProbe, id: String): Seq[InputUTXO] = {
-    probe.send(mgr, RetrieveCoveringInput(erg, trackUsed = true, reservationId = id))
+    probe.send(mgr, SelectInputs(erg, trackUsed = true, reservationId = id, single = true))
     probe.expectMsgType[WalletInputs].inputs
   }
 
@@ -97,7 +97,7 @@ class CandidateHoldSpec extends TestKit(ActorSystem("candidate-hold-spec", Candi
     val selector = EngineFunding(probe.ref, 3.seconds, ec)
 
     val pending = Future(selector.reserveCovering(erg))
-    val ask = probe.expectMsgType[RetrieveCoveringInput](5.seconds)
+    val ask = probe.expectMsgType[SelectInputs](5.seconds)
     probe.reply(WalletInputs(Seq(anInput), ask.reservationId))
     val reservation = Await.result(pending, 5.seconds)
 
@@ -155,7 +155,7 @@ class CandidateHoldSpec extends TestKit(ActorSystem("candidate-hold-spec", Candi
     val selector = EngineFunding(probe.ref, 2.seconds, ec)
 
     val pending = Future(selector.reserveCovering(erg))
-    val ask = probe.expectMsgType[RetrieveCoveringInput](5.seconds)
+    val ask = probe.expectMsgType[SelectInputs](5.seconds)
     probe.reply(WalletInputs(Seq(anInput), ask.reservationId))
     val reservation = Await.result(pending, 5.seconds)
 
