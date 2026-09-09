@@ -93,6 +93,38 @@ class HoldingTopUpSpec extends AnyPropSpec with RollupSpecBase {
     }
   }
 
+  /**
+   * Consensus refuses an output created below the oldest of its inputs, and a top-up's inputs
+   * straddle the boundary: the holding box declares the tip it was built on, while revenue produced
+   * in this same block declares the block itself. Outputs left to default land on the tip and lose.
+   */
+  property("a top-up creates its outputs no lower than the newest input it spends") {
+    withCtx { ctx =>
+      val w = wallet(ctx)
+      // Production's two heights: the context sits on the tip, the block being mined is one past it.
+      val blockHeight = ctx.getHeight + 1
+      // Genesis leaves the holding box stamped with the tip while its R7 names the block, which is
+      // exactly how it comes off the chain.
+      val holding = rollupBox(Production.holdingContract(ctx),
+        emptyTreeWith(AvlTreeFlags.InsertOnly), miners = 0, totalScore = 0L,
+        periodOrReward = blockHeight.toLong, value = boxValue, tokens = Seq(nft),
+        blockOrLit = blockHeight.toLong, bond = 0L)
+        .toInput(ctx, ErgoId.create(dummyTxId), 0.toShort)
+      // What a rent collection leaves: an output stamped with the block being mined, not the tip.
+      val fresh = UTXO(w.contract, Parameters.OneErg).setCreationHeight(blockHeight)
+        .toInput(ctx, ErgoId.create("ef" * 32), 0.toShort)
+
+      val tx = RollupTransactions.genHoldingTopUp(ctx, w, holding, Seq(fresh), Seq.empty[UTXO],
+        blockHeight)
+      val newest = Seq(holding, fresh).map(_.input.getCreationHeight).max
+      newest shouldEqual blockHeight
+
+      withClue(s"consensus refuses an output below $newest, the newest input: ") {
+        outputs(tx).map(_.getCreationHeight).foreach(_ should be >= newest)
+      }
+    }
+  }
+
   // ─── tokens the revenue carried ───────────────────────────────────────────
 
   /**

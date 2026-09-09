@@ -397,7 +397,7 @@ class TransactionCostSizingSpec extends AnyPropSpec with BeforeAndAfterAll
         boxValue + bond, Seq.empty[Token], score, 1, tree)
       measure("rollup", "holding -> evaluation transform",
         RollupTransactions.genHoldingTransform(ctx, wallet, holdingIn,
-          Seq(walletInput(ctx, wallet)), feeOutputs))
+          Seq(walletInput(ctx, wallet)), feeOutputs, ctx.getHeight + 1))
 
       // Evaluation -> Payout. R7 stops holding heights here and starts holding the two reward pots.
       val evalStart = ctx.getHeight.toLong - LFSMHelpers.EVAL_PERIOD - 10L
@@ -718,7 +718,7 @@ class TransactionCostSizingSpec extends AnyPropSpec with BeforeAndAfterAll
     withCtx { ctx =>
       val wallet = walletOf(ctx)
       val params = support.RentRule.paramsFrom(ctx)
-      val height = transactions.rent.StorageRent.StoragePeriod + 1
+      val height = support.RentRule.dueHeight
 
       def sweep(name: String, count: Int, value: Long, tokens: Seq[Token] = Seq.empty[Token]) = {
         val boxes = (0 until count).map(i =>
@@ -726,7 +726,7 @@ class TransactionCostSizingSpec extends AnyPropSpec with BeforeAndAfterAll
             .toInput(ctx, ErgoId.create("ab" * 32), i.toShort))
         val candidates = boxes.map(b => transactions.rent.RentCandidate(b,
           transactions.rent.StorageRent.plan(b, 0, height, ctx.getDataSource.getParameters,
-            ctx.getNetworkType).get))
+            ctx.getNetworkType, transactions.rent.ProtocolBoxes(ctx)).get))
         val tx = transactions.rent.StorageRent.assembled(ctx, wallet, candidates, height,
           useTrueProp = false)
         val spent = boxes.map(_.input.asInstanceOf[org.ergoplatform.appkit.impl.InputBoxImpl]

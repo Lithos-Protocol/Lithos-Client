@@ -21,6 +21,19 @@ import sigmastate.interpreter.Interpreter
 object RentRule {
 
   /**
+   * A height at which a box created at zero is due under both rules at once.
+   *
+   * The client's own period is a constant a private network moves to whatever its node was built
+   * with, while the interpreter here comes from the published `ergo-wallet` and always uses Ergo's
+   * four years. Taking the later of the two keeps these specs about assembly rather than about
+   * which period a branch happens to carry.
+   */
+  val dueHeight: Int = math.max(
+    transactions.rent.StorageRent.StoragePeriod,
+    org.ergoplatform.wallet.protocol.Constants.StoragePeriod) + 1
+
+
+  /**
    * The node's own parameters, mirrored into the shape the interpreter takes.
    *
    * Read from the context rather than fixed, so the fee a builder charged and the fee the rule

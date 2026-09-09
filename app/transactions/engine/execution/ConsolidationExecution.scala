@@ -81,7 +81,7 @@ object ConsolidationExecution {
     val wanted = math.min(WalletInventory.MaxInputs.toLong, math.max(0L, total - target + 1)).toInt
     val oldestHeight = oldestEligible.headOption.map(_.creationHeight)
     val blocksUntilRent = oldestHeight.map(created => math.max(0L,
-      created.toLong + org.ergoplatform.wallet.protocol.Constants.StoragePeriod - height))
+      created.toLong + transactions.rent.StorageRent.StoragePeriod - height))
     // Even consolidating every eligible box leaves one output behind, so the excluded boxes alone
     // can put the target out of reach.
     val unreachable = total > target && total - math.max(0L, eligible - 1) > target

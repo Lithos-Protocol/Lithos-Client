@@ -47,7 +47,10 @@ object RollupTransactions {
                         nisp: NISP,
                         score: Long
                        ): SignedTransaction = {
-    val holding = holdingContract(ctx)
+    // A submission recreates the box under its own script rather than a freshly compiled one, which
+    // is what `validUTXO` compares. Only the two phase transitions below compile a target contract,
+    // because only they move the box to a different one.
+    val holding = holdingInput.contract
 
     val otherInputs = walletInputs
     val tree = latestState.rollup.dictionary
@@ -99,15 +102,20 @@ object RollupTransactions {
                           wallet: NodeWallet,
                           holdingInput: InputUTXO,
                           walletInputs: Seq[InputUTXO],
-                          feeOutputs: Seq[UTXO]): SignedTransaction = {
+                          feeOutputs: Seq[UTXO],
+                          blockHeight: Int): SignedTransaction = {
     val eval = evalContract(ctx)
 
     val otherInputs = walletInputs
     val state = stateOf(holdingInput, LFSMPhase.HOLDING)
     // Only the period start moves. The rollup's own block and the bond ledger carry through, the
     // latter because evaluation is where the bonds are slashed or handed on to payout.
+    //
+    // The period is the block this lands in, not the tip it was built on. Evaluation demands it a
+    // full period past the last one, so a transform offered at the first height that clears the
+    // bound would otherwise write a period one block short and be refused.
     val nextState = RollupInfoState.evaluation(
-      ctx.getHeight.toLong, state.genesisBlockHeight, state.totalBond)
+      blockHeight.toLong, state.genesisBlockHeight, state.totalBond)
 
     val output = UTXO(eval, holdingInput.value, holdingInput.tokens,
       registers = holdingInput.registers.updated(3, nextState.ergoValue))
@@ -121,6 +129,7 @@ object RollupTransactions {
     val uTx = TxBuilder(ctx)
       .setInputs((Seq(inputWithContext) ++ otherInputs): _*)
       .setOutputs(totalOutputs: _*)
+      .setPreHeader(ctx.createPreHeader().height(blockHeight).build())
       .buildTx(0, wallet.p2pk)
     wallet.sign(uTx)
   }
@@ -179,10 +188,17 @@ object RollupTransactions {
     require(plan.isViable,
       s"holding top-up adds ${plan.added}, and the contract requires the value to increase")
 
-    val output = UTXO(holdingContract(ctx), holdingInput.value + plan.added, holdingInput.tokens,
-      registers = holdingInput.registers)
+    // The box's own script, not a freshly compiled one. The contract compares its proposition bytes
+    // against the successor's, so a build whose constants have drifted from the deployed guard would
+    // put the successor under a different script and reduce the spend to false.
+    //
+    // Every output is stamped with the block being mined rather than left to the context's tip.
+    // Consensus refuses an output created below the newest input, and revenue earned in this same
+    // block already carries the block's own height.
+    val output = UTXO(holdingInput.contract, holdingInput.value + plan.added, holdingInput.tokens,
+      registers = holdingInput.registers).setCreationHeight(blockHeight)
     val residueOutput = if (plan.residue.isEmpty) Seq.empty[UTXO]
-      else Seq(UTXO(wallet.contract, UTXO.MIN_CHANGE, plan.residue))
+      else Seq(UTXO(wallet.contract, UTXO.MIN_CHANGE, plan.residue).setCreationHeight(blockHeight))
 
     val holdingLogic = logicVar(ctx)
     val inputWithContext = DexContracts.attachCtxVars(holdingInput,

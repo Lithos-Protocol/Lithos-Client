@@ -28,7 +28,7 @@ class StorageRentBuilderSpec extends AnyFlatSpec with Matchers with MockitoSugar
   /** A script this client holds no secret for, so only the rent rule can ever spend the box. */
   private val stranger: Contract = Contract.SIGMA_FALSE
 
-  private val dueAt: Int = StorageRent.StoragePeriod + 1
+  private val dueAt: Int = support.RentRule.dueHeight
 
   /** Ergo's own re-emission token, which is what makes a box uncollectable however old it is. */
   private val reEmissionToken: Token =
@@ -39,9 +39,11 @@ class StorageRentBuilderSpec extends AnyFlatSpec with Matchers with MockitoSugar
     UTXO(stranger, value, tokens, Seq(ErgoValue.of(42))).setCreationHeight(0)
       .toInput(ctx, ErgoId.create("ab" * 32), index.toShort)
 
+  private def protocol(ctx: BlockchainContext): ProtocolBoxes = ProtocolBoxes(ctx)
+
   private def candidate(ctx: BlockchainContext, box: InputUTXO): RentCandidate =
     RentCandidate(box, StorageRent.plan(box, 0, dueAt, ctx.getDataSource.getParameters,
-      ctx.getNetworkType).get)
+      ctx.getNetworkType, protocol(ctx)).get)
 
   private def ergoBoxOf(box: InputUTXO): ErgoBox =
     box.input.asInstanceOf[InputBoxImpl].getErgoBox
@@ -150,13 +152,54 @@ class StorageRentBuilderSpec extends AnyFlatSpec with Matchers with MockitoSugar
     }
   }
 
+  /**
+   * The shape a live sweep actually takes: a handful of recreations among a crowd of claims, with
+   * tokens among the claims so the residue output lands after the recreations. Index assignment is
+   * what this is about — a recreation naming the wrong output is checked against a box it has
+   * nothing to do with, and the node reports it only as a refusal at some input number.
+   */
+  "A sweep the shape a live one takes" should "be accepted for every input" in {
+    withCtx { ctx =>
+      val token = Token(ErgoId.create("cd" * 32), 9L)
+      val funded = (0 until 5).map(i => expired(ctx, (100L + i) * Parameters.OneErg, i))
+      val claimed = (5 until 12).map(i => expired(ctx, 1000000L, i))
+      val withTokens = (12 until 15).map(i => expired(ctx, 1000000L, i, Seq(token)))
+      val boxes = funded ++ claimed ++ withTokens
+
+      val candidates = boxes.map(candidate(ctx, _))
+      candidates.count(_.recreates) shouldEqual 5
+      val tx = StorageRent.assembled(ctx, wallet, candidates, dueAt, useTrueProp = false)
+      withClue("collection, five recreations, then the token residue: ") {
+        tx.outputs should have size 7
+      }
+      verifyAll(ctx, boxes) shouldBe true
+    }
+  }
+
+  /** Ordering is the builder's own choice, so it must hold whatever order the sweep arrives in. */
+  it should "be accepted whatever order the candidates arrive in" in {
+    withCtx { ctx =>
+      val token = Token(ErgoId.create("cd" * 32), 9L)
+      val boxes = Seq(
+        expired(ctx, 1000000L, 0, Seq(token)),
+        expired(ctx, 100L * Parameters.OneErg, 1),
+        expired(ctx, 1000000L, 2),
+        expired(ctx, 200L * Parameters.OneErg, 3),
+        expired(ctx, 1000000L, 4, Seq(token)),
+        expired(ctx, 300L * Parameters.OneErg, 5))
+
+      verifyAll(ctx, boxes) shouldBe true
+      verifyAll(ctx, boxes.reverse) shouldBe true
+    }
+  }
+
   // ─── what the plan refuses ────────────────────────────────────────────────
 
   "A box one block short of its period" should "not be planned at all" in {
     withCtx { ctx =>
       val box = expired(ctx, 100L * Parameters.OneErg, 0)
       StorageRent.plan(box, 0, StorageRent.StoragePeriod - 1,
-        ctx.getDataSource.getParameters, ctx.getNetworkType) shouldBe None
+        ctx.getDataSource.getParameters, ctx.getNetworkType, protocol(ctx)) shouldBe None
     }
   }
 
@@ -180,10 +223,10 @@ class StorageRentBuilderSpec extends AnyFlatSpec with Matchers with MockitoSugar
         under.bytes.length shouldEqual lowest.bytes.length
       }
 
-      StorageRent.plan(lowest, 0, dueAt, params, ctx.getNetworkType) shouldBe
+      StorageRent.plan(lowest, 0, dueAt, params, ctx.getNetworkType, protocol(ctx)) shouldBe
         Some(RentAction.Collect(StorageRent.storageFee(lowest, params)))
       // One nanoERG under, and the same box has no successor it could legally leave behind.
-      StorageRent.plan(under, 0, dueAt, params, ctx.getNetworkType) shouldBe None
+      StorageRent.plan(under, 0, dueAt, params, ctx.getNetworkType, protocol(ctx)) shouldBe None
     }
   }
 
@@ -200,7 +243,7 @@ class StorageRentBuilderSpec extends AnyFlatSpec with Matchers with MockitoSugar
 
       StorageRent.blockedByReEmission(box, ctx.getNetworkType) shouldBe true
       StorageRent.plan(box, 0, dueAt, ctx.getDataSource.getParameters,
-        ctx.getNetworkType) shouldBe None
+        ctx.getNetworkType, protocol(ctx)) shouldBe None
     }
   }
 
@@ -221,7 +264,37 @@ class StorageRentBuilderSpec extends AnyFlatSpec with Matchers with MockitoSugar
       val box = expired(ctx, 1000000L, 0, Seq(Token(ErgoId.create("cd" * 32), 4L)))
       StorageRent.blockedByReEmission(box, ctx.getNetworkType) shouldBe false
       StorageRent.plan(box, 0, dueAt, ctx.getDataSource.getParameters,
-        ctx.getNetworkType) shouldBe Some(RentAction.Claim)
+        ctx.getNetworkType, protocol(ctx)) shouldBe Some(RentAction.Claim)
+    }
+  }
+
+  // ─── the node's own arithmetic ────────────────────────────────────────────
+
+  /**
+   * `checkExpiredBox` computes the fee in `Int`, so a large enough box wraps it negative. The rule
+   * then reads the box as funded however little it holds and demands a successor richer than the
+   * box itself, which nothing can satisfy. Offering one costs the whole sweep.
+   */
+  "A box whose fee overflows the node's own arithmetic" should "not be planned" in {
+    withCtx { ctx =>
+      val params = ctx.getDataSource.getParameters
+      val boundary = Int.MaxValue / params.getStorageFeeFactor
+
+      StorageRent.overflowsNodeFee(boundary, params) shouldBe false
+      StorageRent.overflowsNodeFee(boundary + 1, params) shouldBe true
+      withClue("the box that broke a live sweep was 1742 bytes: ") {
+        StorageRent.overflowsNodeFee(1742, params) shouldBe true
+      }
+      // Underfunded on our arithmetic, and the node would still refuse it.
+      StorageRent.decide(10000000L, 1742, params) shouldBe None
+    }
+  }
+
+  it should "still be planned when it sits under the boundary" in {
+    withCtx { ctx =>
+      val params = ctx.getDataSource.getParameters
+      val boundary = Int.MaxValue / params.getStorageFeeFactor
+      StorageRent.decide(1000L, boundary, params) shouldBe Some(RentAction.Claim)
     }
   }
 

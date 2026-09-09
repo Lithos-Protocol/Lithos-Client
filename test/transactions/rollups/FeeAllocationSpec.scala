@@ -138,7 +138,7 @@ class FeeAllocationSpec extends AnyPropSpec with RollupSpecBase {
         holding = true)
 
       val signed = RollupTransactions.genHoldingTransform(ctx, wallet, in,
-        Seq(funding(ctx, wallet.contract)), feeOutputs(wallet.contract))
+        Seq(funding(ctx, wallet.contract)), feeOutputs(wallet.contract), ctx.getHeight + 1)
 
       located(signed) shouldEqual walletOutValues
     }

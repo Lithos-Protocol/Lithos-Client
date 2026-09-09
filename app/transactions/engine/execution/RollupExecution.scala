@@ -186,7 +186,7 @@ class RollupExecution(nodeContext: NodeContext, walletManager: ActorRef, syncHan
           stub.validate(ctx.getHeight, metadata) && stub.validate(blockHeight, metadata),
           "transform is not eligible at both signing and candidate heights")
         val signed = if (stub.txType == HoldingTransform)
-          RollupTransactions.genHoldingTransform(ctx, wallet, input, Seq.empty, Seq.empty)
+          RollupTransactions.genHoldingTransform(ctx, wallet, input, Seq.empty, Seq.empty, blockHeight)
         else RollupTransactions.genEvalTransform(ctx, wallet, input, Seq.empty, Seq.empty)
         candidateTx(signed, if (stub.txType == HoldingTransform) CandidateTx.HoldingTransform else CandidateTx.EvalTransform)
       }
@@ -538,7 +538,8 @@ class RollupExecution(nodeContext: NodeContext, walletManager: ActorRef, syncHan
       val fees = mkFeeOutputs(stub, initOutputs)
       val funding = rollupWalletInputs(stub, initialTxInfo)
       val signed = if (stub.txType == HoldingTransform)
-        RollupTransactions.genHoldingTransform(ctx, wallet, input, funding, fees)
+        // Broadcast rather than inserted, so the earliest block it can reach is the next one.
+        RollupTransactions.genHoldingTransform(ctx, wallet, input, funding, fees, ctx.getHeight + 1)
       else RollupTransactions.genEvalTransform(ctx, wallet, input, funding, fees)
       initOutputs.foreach(outputs => updateFeeMap(signed, outputs._2))
       submitSigned(ctx, signed, initialTxInfo.isDefined, stub.rollupBlockId, input.id.toString)
@@ -738,7 +739,7 @@ class RollupExecution(nodeContext: NodeContext, walletManager: ActorRef, syncHan
 object RollupExecution {
 
   /** The fee proposition every `UTXO.feeBox` sits at, derived once rather than per comparison. */
-  private val FeeTreeHex: String = Contract.FEE_720.ergoTreeHex
+  private val FeeTreeHex: String = Contract.FEE.ergoTreeHex
 
   /**
    * The boxes a signed transaction spends, read from the transaction itself so candidate admission

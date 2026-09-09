@@ -161,4 +161,60 @@ class CandidateBundleSpec extends AnyFlatSpec with Matchers {
     CandidateBundle.fit(bundles, 5).flatMap(_.members).map(_.id) shouldBe
       CandidateBundle.select(bundles, 5).map(_.id)
   }
+
+  // ─── reporting what was turned away ───────────────────────────────────────
+
+  /**
+   * A bundle that overruns the budget is otherwise invisible: it was built, costed and signed, then
+   * simply did not appear. This is the case a sweep priced above the package share lands in.
+   */
+  "A refusal" should "name the cost overrun and what was left" in {
+    val sweep = CandidateBundle(Vector(sized("sweep", 10, 700000)))
+    val refused = CandidateBundle.refusals(Seq(sweep), 5, CandidateBudget(Long.MaxValue, 500000))
+    refused.map(_.bundle) shouldBe Vector(sweep)
+    refused.head.reason should include("700000 cost over the 500000")
+  }
+
+  it should "charge the overrun against what earlier bundles already took" in {
+    val first = CandidateBundle(Vector(sized("first", 10, 400000)))
+    val second = CandidateBundle(Vector(sized("second", 10, 400000)))
+    val refused = CandidateBundle.refusals(Seq(first, second), 5,
+      CandidateBudget(Long.MaxValue, 500000))
+    refused.map(_.bundle) shouldBe Vector(second)
+    refused.head.reason should include("400000 cost over the 100000")
+  }
+
+  it should "report the byte overrun separately from the cost one" in {
+    val big = CandidateBundle(Vector(sized("big", 900, 0)))
+    CandidateBundle.refusals(Seq(big), 5, CandidateBudget(500, Long.MaxValue))
+      .head.reason should include("900 bytes over the 500")
+  }
+
+  /** One refusal per bundle, stating the first cause, so a conflict never reads as an overrun. */
+  it should "prefer the conflict to the budget when both would refuse" in {
+    val mine = CandidateBundle(Vector(sized("mine", 10, 10)))
+    val theirs = CandidateBundle(Vector(tx("theirs")
+      .copy(inputIds = Set("mine-in"), sizeBytes = 9000, cost = 9000)))
+    CandidateBundle.refusals(Seq(mine, theirs), 5, CandidateBudget(100, 100))
+      .head.reason shouldBe "an input is already claimed by this package"
+  }
+
+  it should "name a slot shortage rather than a budget" in {
+    val pair = CandidateBundle(Vector(sized("a", 10, 0), sized("b", 10, 0)))
+    CandidateBundle.refusals(Seq(pair), 1).head.reason shouldBe
+      "2 transactions into 1 free slot(s)"
+  }
+
+  it should "say nothing when everything offered fits" in {
+    CandidateBundle.refusals(Seq(CandidateBundle(Vector(sized("a", 10, 10)))), 5) shouldBe empty
+  }
+
+  /** The label is how the log line identifies a bundle, which has no id of its own. */
+  it should "label a bundle by its members" in {
+    val bundle = CandidateBundle(Vector(sized("aabbccddeeff0011", 10, 700000)))
+    val refusal = CandidateBundle.refusals(Seq(bundle), 5,
+      CandidateBudget(Long.MaxValue, 1)).head
+    refusal.label shouldBe s"${CandidateTx.Activate}:aabbccdd"
+    refusal.toString should startWith(s"[${refusal.label}] ")
+  }
 }

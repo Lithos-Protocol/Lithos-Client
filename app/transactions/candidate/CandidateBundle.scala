@@ -68,6 +68,11 @@ object CandidateBundle {
              budget: CandidateBudget = CandidateBudget.Unbounded): Vector[CandidateTx] =
     admitted(bundles, limit, budget)._2
 
+  /** Reported alone, for a caller that only wants to say what it turned away. */
+  def refusals(bundles: Seq[CandidateBundle], limit: Int,
+               budget: CandidateBudget = CandidateBudget.Unbounded): Vector[CandidateRefusal] =
+    admitted(bundles, limit, budget)._3
+
   /**
    * The same choice, reported as the bundles that fit rather than their flattened members.
    *
@@ -79,17 +84,19 @@ object CandidateBundle {
     admitted(bundles, limit, budget)._1
 
   /**
-   * The same choice, reported as both, for the caller that needs the transactions and what the
-   * admitted bundles declared alongside them.
+   * The same choice, reported in full: the bundles, their transactions, and why the rest were
+   * turned away. A refused bundle is otherwise indistinguishable from one never offered.
    */
   def admit(bundles: Seq[CandidateBundle], limit: Int,
-            budget: CandidateBudget = CandidateBudget.Unbounded): (Vector[CandidateBundle], Vector[CandidateTx]) =
+            budget: CandidateBudget = CandidateBudget.Unbounded)
+  : (Vector[CandidateBundle], Vector[CandidateTx], Vector[CandidateRefusal]) =
     admitted(bundles, limit, budget)
 
-  private def admitted(bundles: Seq[CandidateBundle], limit: Int,
-                       budget: CandidateBudget): (Vector[CandidateBundle], Vector[CandidateTx]) = {
+  private def admitted(bundles: Seq[CandidateBundle], limit: Int, budget: CandidateBudget)
+  : (Vector[CandidateBundle], Vector[CandidateTx], Vector[CandidateRefusal]) = {
     var keptBundles = Vector.empty[CandidateBundle]
     var selected = Vector.empty[CandidateTx]
+    var refused = Vector.empty[CandidateRefusal]
     var byId = Map.empty[String, CandidateTx]
     var claimed = Set.empty[String]
     var bytes = 0L
@@ -101,10 +108,11 @@ object CandidateBundle {
       val addedInputs = additions.flatMap(_.inputIds)
       val addedBytes = additions.map(_.sizeBytes.toLong).sum
       val addedCost = additions.map(_.cost).sum
+      val slots = math.max(0, limit - selected.size)
       val consistent = bundle.members.forall(tx => byId.get(tx.id).forall(_ == tx))
       val unconflicted = !addedInputs.exists(claimed.contains) &&
         addedInputs.distinct.size == addedInputs.size
-      val affordable = additions.size <= math.max(0, limit - selected.size) &&
+      val affordable = additions.size <= slots &&
         bytes + addedBytes <= budget.maxBytes && cost + addedCost <= budget.maxCost
       if (consistent && unconflicted && affordable && bundle.carriesItsParents) {
         keptBundles :+= bundle
@@ -113,8 +121,19 @@ object CandidateBundle {
         claimed ++= addedInputs
         bytes += addedBytes
         cost += addedCost
+      } else {
+        // First failing test in a fixed order, so one refusal reads as one cause.
+        val reason =
+          if (!consistent) "a member disagrees with a copy already selected"
+          else if (!unconflicted) "an input is already claimed by this package"
+          else if (!bundle.carriesItsParents) "a declared mempool parent does not travel with it"
+          else if (additions.size > slots) s"${additions.size} transactions into $slots free slot(s)"
+          else if (bytes + addedBytes > budget.maxBytes)
+            s"$addedBytes bytes over the ${budget.maxBytes - bytes} left in the package"
+          else s"$addedCost cost over the ${budget.maxCost - cost} left in the package"
+        refused :+= CandidateRefusal(bundle, reason)
       }
     }
-    keptBundles -> selected
+    (keptBundles, selected, refused)
   }
 }

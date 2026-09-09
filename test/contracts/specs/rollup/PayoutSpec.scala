@@ -564,7 +564,7 @@ class PayoutSpec extends AnyPropSpec with RollupSpecBase {
       .buildTx(fee, d.sweeper.getAddress, burn)
 
   /** An explicit fee-proposition output, so a negative can put it at a chosen index. */
-  private def feeBox: UTXO = UTXO(Contract.FEE_720, Parameters.MinFee)
+  private def feeBox: UTXO = UTXO(Contract.FEE, Parameters.MinFee)
 
   property("drain: an empty payout box is swept by a transaction that pays no miner fee") {
     withCtx { ctx =>
@@ -604,7 +604,7 @@ class PayoutSpec extends AnyPropSpec with RollupSpecBase {
 
   /**
    * The cross-check that matters for the constant itself: `CONST_FEE_HASH` is injected from
-   * `Contract.FEE_720`, and this is the one property that runs it against the fee output appkit
+   * `Contract.FEE`, and this is the one property that runs it against the fee output appkit
    * actually emits rather than one the spec built. If the two ever diverge, the drain silently stops
    * being gated and this is what says so.
    */

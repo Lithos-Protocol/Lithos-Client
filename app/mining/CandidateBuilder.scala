@@ -13,7 +13,7 @@ import org.ergoplatform.appkit.ErgoClient
 import org.slf4j.{Logger, LoggerFactory}
 import stratum.{CollateralData, CollateralNotFoundException}
 import transactions.candidate.BlockTxMessages.{BlockTxsReady, CandidateTx, CandidateTxsDropped, PrepareBlockTxs, RequestBlockTxs}
-import transactions.candidate.CandidateBundle
+import transactions.candidate.{CandidateBundle, CandidateRefusal}
 import java.util.UUID
 
 import scala.concurrent.duration._
@@ -428,6 +428,18 @@ class CandidateBuilder(client: ErgoClient,
         source.ref ! PrepareBlockTxs(height, limitsFor(source.name).maxTxs))
 
   /**
+   * Say what admission turned away, and where.
+   *
+   * A refused bundle leaves no other trace: it was built, costed and signed, then simply did not
+   * appear in the package. Silence here reads as a source having nothing to offer, which is the one
+   * thing it does not mean.
+   */
+  private def logRefusals(where: String, height: Int, refused: Seq[CandidateRefusal]): Unit =
+    if (refused.nonEmpty)
+      logger.info(s"Block $height $where refused ${refused.size} bundle(s): " +
+        refused.map(_.toString).mkString("; "))
+
+  /**
    * Ask every transaction source what it has for this block, once the genesis package is out.
    * Answers are concatenated in ask order, so earlier sources get the slots, and each source's own
    * ordering is preserved because only it knows which of its transactions chain off which.
@@ -449,7 +461,12 @@ class CandidateBuilder(client: ErgoClient,
           .mapTo[BlockTxsReady]
           .map { reply =>
             if (reply.blockHeight != height) Seq.empty[CandidateBundle]
-            else CandidateBundle.fit(reply.bundles, limits.maxTxs, limits.budget)
+            else {
+              val (fitted, _, refused) =
+                CandidateBundle.admit(reply.bundles, limits.maxTxs, limits.budget)
+              logRefusals(s"${source.name} allowance", height, refused)
+              fitted
+            }
           }
           .recover {
             case ex =>
@@ -473,7 +490,8 @@ class CandidateBuilder(client: ErgoClient,
 
       Future.sequence(asks)
         .map { all =>
-          val (kept, txs) = CandidateBundle.admit(all.flatten, totalTxLimit, budget)
+          val (kept, txs, refused) = CandidateBundle.admit(all.flatten, totalTxLimit, budget)
+          logRefusals("package", height, refused)
           BlockTxsCollected(attempt, txs ++ topUpFor(height, kept, txs, budget, genesis))
         }
         .onComplete {
