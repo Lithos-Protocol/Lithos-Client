@@ -7,6 +7,7 @@ import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 import org.scalatestplus.mockito.MockitoSugar
 import transactions.candidate.CandidateBudget
+import lfsm.LFSMHelpers
 import work.lithos.mutations.{Contract, MainnetEip27Constants}
 
 /**
@@ -21,6 +22,12 @@ class StorageRentSourceSpec extends AnyFlatSpec with Matchers with MockitoSugar 
 
   private def id(seed: String): String = (seed * 64).take(64)
 
+  /** Nothing excluded, so these properties are about age and re-emission alone. */
+  private val noProtocolBoxes = ProtocolBoxes(Set.empty, Set.empty)
+
+  private def protocolBoxes: ProtocolBoxes =
+    nodeContext.getClient.execute(ProtocolBoxes.apply)
+
   private def output(seed: String, creationHeight: Int,
                      assets: Seq[NodeAsset] = Seq.empty): NodeBox =
     NodeBox(id(seed), "ab" * 32, 100L * Parameters.OneErg, 0, creationHeight,
@@ -34,7 +41,7 @@ class StorageRentSourceSpec extends AnyFlatSpec with Matchers with MockitoSugar 
    */
   "The walk" should "keep boxes at or under the threshold and no others" in {
     val boxes = Seq(output("a", 500), output("b", 1000), output("c", 1001))
-    val (found, blocked) = StorageRent.sortByAge(boxes, 1000, NetworkType.MAINNET)
+    val (found, blocked) = StorageRent.sortByAge(boxes, 1000, NetworkType.MAINNET, noProtocolBoxes)
 
     found shouldBe Set(id("a"), id("b"))
     blocked shouldBe empty
@@ -44,7 +51,7 @@ class StorageRentSourceSpec extends AnyFlatSpec with Matchers with MockitoSugar 
   it should "set re-emission boxes apart rather than drop them" in {
     val reEmission = NodeAsset(MainnetEip27Constants.TokenId, 3L)
     val boxes = Seq(output("a", 500), output("b", 500, Seq(reEmission)))
-    val (found, blocked) = StorageRent.sortByAge(boxes, 1000, NetworkType.MAINNET)
+    val (found, blocked) = StorageRent.sortByAge(boxes, 1000, NetworkType.MAINNET, noProtocolBoxes)
 
     found shouldBe Set(id("a"))
     blocked shouldBe Set(id("b"))
@@ -54,14 +61,74 @@ class StorageRentSourceSpec extends AnyFlatSpec with Matchers with MockitoSugar 
   it should "not set anything apart off mainnet" in {
     val reEmission = NodeAsset(MainnetEip27Constants.TokenId, 3L)
     val (found, blocked) =
-      StorageRent.sortByAge(Seq(output("b", 500, Seq(reEmission))), 1000, NetworkType.TESTNET)
+      StorageRent.sortByAge(Seq(output("b", 500, Seq(reEmission))), 1000, NetworkType.TESTNET,
+        noProtocolBoxes)
 
     found shouldBe Set(id("b"))
     blocked shouldBe empty
   }
 
   it should "keep nothing from a block whose boxes are all too young" in {
-    StorageRent.sortByAge(Seq(output("a", 2000)), 1000, NetworkType.MAINNET)._1 shouldBe empty
+    StorageRent.sortByAge(Seq(output("a", 2000)), 1000, NetworkType.MAINNET,
+      noProtocolBoxes)._1 shouldBe empty
+  }
+
+  // ─── this protocol's own boxes ────────────────────────────────────────────
+  //
+  // Age is all Ergo's rule cares about, so a singleton that has sat still long enough is as
+  // collectable as anyone's forgotten change. Taking one costs protocol state rather than earning
+  // ERG, and on a network with a short period every one of them ages out.
+
+  "The walk" should "leave a box at one of this protocol's own scripts alone" in {
+    nodeContext.getClient.execute { ctx =>
+      val contracts = transactions.ProtocolContracts(ctx)
+      Seq("holding" -> contracts.holding, "minerDictionary" -> contracts.minerDictionary,
+        "collateral" -> contracts.collateral, "emission" -> contracts.emission,
+        "gate" -> contracts.gate).foreach { case (name, contract) =>
+        val box = NodeBox(id("a"), "ab" * 32, 100L * Parameters.OneErg, 0, 500,
+          contract.ergoTreeHex)
+        withClue(s"a $name box must never be collected: ") {
+          StorageRent.sortByAge(Seq(box), 1000, NetworkType.MAINNET, protocolBoxes)._1 shouldBe empty
+        }
+      }
+    }
+  }
+
+  /** A singleton resting at an ordinary key between spends is still the thing it names. */
+  it should "leave a box carrying a protocol singleton alone, wherever it sits" in {
+    nodeContext.getClient.execute { ctx =>
+      Seq("collateral token" -> LFSMHelpers.COLLAT_TOKEN,
+        "emission NFT" -> LFSMHelpers.EMISSION_NFT,
+        "dictionary token" -> LFSMHelpers.getMDToken(ctx.getNetworkType),
+        "fraud-proof token" -> LFSMHelpers.getFPToken(ctx.getNetworkType)).foreach {
+        case (name, token) =>
+          val box = output("a", 500, Seq(NodeAsset(token.toString, 1L)))
+          withClue(s"a box carrying the $name must never be collected: ") {
+            StorageRent.sortByAge(Seq(box), 1000, NetworkType.MAINNET, protocolBoxes)._1 shouldBe empty
+          }
+      }
+    }
+  }
+
+  /**
+   * LIT is the protocol's currency rather than one of its boxes, held by anyone who has been paid.
+   * Excluding it would put ordinary wallets out of reach for no protocol reason.
+   */
+  it should "still collect an ordinary box holding LIT" in {
+    val box = output("a", 500, Seq(NodeAsset(LFSMHelpers.LIT_ID.toString, 5L)))
+    StorageRent.sortByAge(Seq(box), 1000, NetworkType.MAINNET, protocolBoxes)._1 shouldBe Set(id("a"))
+  }
+
+  /** A protocol box is dropped outright rather than set aside, since it is never going to be due. */
+  it should "drop a protocol box rather than defer it" in {
+    nodeContext.getClient.execute { ctx =>
+      val box = NodeBox(id("a"), "ab" * 32, 100L * Parameters.OneErg, 0, 500,
+        transactions.ProtocolContracts(ctx).holding.ergoTreeHex,
+        Seq(NodeAsset(MainnetEip27Constants.TokenId, 3L)))
+      val (found, blocked) = StorageRent.sortByAge(Seq(box), 1000, NetworkType.MAINNET, protocolBoxes)
+      found shouldBe empty
+      blocked shouldBe empty
+    }
   }
 
   // ─── what a sweep takes ───────────────────────────────────────────────────

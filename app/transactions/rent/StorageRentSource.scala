@@ -136,9 +136,10 @@ class StorageRentSource(nodeContext: NodeContext,
       val gone = ids.toSet -- live.map(_.boxId).toSet
       if (gone.nonEmpty) self ! Spent(gone)
 
+      val protocol = ProtocolBoxes(ctx)
       val candidates = live.flatMap { box =>
         val input: InputUTXO = box.toInputUTXO(ctx)
-        StorageRent.plan(input, box.creationHeight, blockHeight, params, ctx.getNetworkType)
+        StorageRent.plan(input, box.creationHeight, blockHeight, params, ctx.getNetworkType, protocol)
           .map(RentCandidate(input, _))
       }
       val chosen = StorageRent.fitting(candidates, limits.budget, params)
@@ -154,6 +155,7 @@ class StorageRentSource(nodeContext: NodeContext,
    * chain ever made below the threshold.
    */
   private def scan(from: Int): Pass = {
+    val protocol = nodeContext.getClient.execute(ProtocolBoxes.apply)
     val tip = nodeApi.info().toOption.flatMap(_.fullHeight).getOrElse(
       throw new IllegalStateException("the node did not report a height"))
     val threshold = tip - StorageRent.StoragePeriod
@@ -166,7 +168,8 @@ class StorageRentSource(nodeContext: NodeContext,
     (from until until).foreach { height =>
       val outputs = nodeApi.blockAt(height).getOrElse(Seq.empty)
         .flatMap(_.blockTransactions.transactions.flatMap(_.outputs))
-      val (open, reEmission) = StorageRent.sortByAge(outputs, threshold, nodeContext.getNetwork)
+      val (open, reEmission) =
+        StorageRent.sortByAge(outputs, threshold, nodeContext.getNetwork, protocol)
       val unspent = if (open.isEmpty) Set.empty[String]
         else nodeApi.boxesWithPoolByIds(open.toSeq).getOrElse(Seq.empty).map(_.boxId).toSet
       found ++= unspent

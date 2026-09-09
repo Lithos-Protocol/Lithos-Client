@@ -16,11 +16,13 @@ import scala.collection.JavaConverters._
  *            four or fewer entries iterates in INSERTION order
  *   sending  `ScalaBridge.isoSpendingProof.from` copies them into a `java.util.HashMap[String, String]`
  *            keyed by the DECIMAL STRING of the id; Gson writes the JSON in that hash order
- *   node     `cursor.as[Map[Byte, EvaluatedValue[SType]]]` — circe folds in document order
+ *   node     rebuilds the extension in ASCENDING id order, whatever order the JSON listed
  *
- * Attach `[0, 64, 65, 2]` and appkit signs one byte string while the node verifies another. Anything
- * reducing to a constant `true` still passes, so a contract-only input looks fine; every real
- * signature on the same transaction fails with `Success((false, <cost>))`.
+ * So the only attachment order that survives is ascending, and it is the one to sign in. Attach
+ * `[64, 3]` — the order a `java.util.HashMap` yields for those two keys — and appkit signs one byte
+ * string while the node verifies another. Anything reducing to a constant `true` still passes, so a
+ * contract-only input looks fine; every real signature on the same transaction fails with
+ * `Success((false, <cost>))`, and the transaction takes an id neither side agrees on.
  *
  * These properties pin the orders so the trap cannot come back silently. Nothing here needs a node —
  * the mismatch is entirely in the serialization.
@@ -34,7 +36,7 @@ class ContextExtensionOrderSpec extends AnyPropSpec with ContractSpecBase {
     m.keys.toSeq
   }
 
-  /** The order appkit's `java.util.HashMap` will iterate — what lands in the JSON, and so in the node. */
+  /** The order appkit's `java.util.HashMap` will iterate — what lands in the JSON. */
   private def wireOrder(ids: Seq[Byte]): Seq[Byte] = {
     val m = new java.util.HashMap[String, String](ids.size)
     ids.foreach(id => m.put(id.toString, ""))
@@ -46,16 +48,16 @@ class ContextExtensionOrderSpec extends AnyPropSpec with ContractSpecBase {
     box.toFullInput.asInstanceOf[org.ergoplatform.appkit.impl.InputBoxImpl].getExtension
 
   /**
-   * The whole question, end to end: does the extension appkit signs serialize to the same bytes as the
-   * one the node reconstructs? Mirrors both hops — appkit's `HashMap` on the way out, circe's
-   * document-order fold on the way in.
+   * The whole question, end to end: does the extension appkit signs serialize to the same bytes as
+   * the one the node reconstructs? The node canonicalises to ascending id order, so that is what the
+   * signing map has to iterate in.
    */
   private def survivesRoundTrip(ids: Seq[Byte]): Boolean = {
     var signing = Map.empty[Byte, String]
     ids.foreach(id => signing += (id -> s"v$id"))
 
     var node = Map.empty[Byte, String]
-    wireOrder(ids).foreach(id => node += (id -> s"v$id"))
+    ids.sorted.foreach(id => node += (id -> s"v$id"))
 
     signing.toSeq == node.toSeq
   }
@@ -77,11 +79,25 @@ class ContextExtensionOrderSpec extends AnyPropSpec with ContractSpecBase {
     signingOrder(activateIds) should not be wireOrder(activateIds)
   }
 
-  property("attaching in wire order makes the signing and node maps agree") {
-    Seq(joinIds, activateIds).foreach { ids =>
-      val ordered = wireOrder(ids)
-      signingOrder(ordered) shouldBe wireOrder(ordered)
-      signingOrder(ordered) shouldBe ordered
+  property("attaching in ascending order makes the signing and node maps agree") {
+    Seq(joinIds, activateIds, Seq[Byte](3, 64), Seq[Byte](64, 3)).foreach { ids =>
+      signingOrder(ids.sorted) shouldBe ids.sorted
+    }
+  }
+
+  /** What every builder here goes through, so the ordering rule has one place to live. */
+  property("attachCtxVars attaches ascending whatever order it is handed") {
+    withCtx { ctx =>
+      val vars: Seq[(Byte, ErgoValue[_])] = Seq(
+        64.toByte -> ErgoValue.of(64L), 3.toByte -> ErgoValue.of(3.toByte))
+      val box = inputAt(UTXO(contractOf(miner(ctx)), Parameters.OneErg), ctx, 0)
+      val attached = transactions.dex.DexContracts.attachCtxVars(box, vars)
+
+      extensionOf(attached).values.keys.toSeq shouldBe Seq[Byte](3, 64)
+      withClue("the order handed in must not change what is signed: ") {
+        serialized(extensionOf(transactions.dex.DexContracts.attachCtxVars(box, vars.reverse))) shouldBe
+          serialized(extensionOf(attached))
+      }
     }
   }
 
@@ -99,8 +115,8 @@ class ContextExtensionOrderSpec extends AnyPropSpec with ContractSpecBase {
       }
 
       // Same four variables, two attachment orders, two different signed messages.
-      serialized(attach(joinIds)) should not equal serialized(attach(wireOrder(joinIds)))
-      serialized(attach(wireOrder(joinIds))) shouldBe serialized(attach(Seq[Byte](0, 2, 64, 65)))
+      serialized(attach(joinIds)) should not equal serialized(attach(joinIds.sorted))
+      serialized(attach(joinIds.sorted)) shouldBe serialized(attach(Seq[Byte](0, 2, 64, 65)))
     }
   }
 
@@ -110,14 +126,15 @@ class ContextExtensionOrderSpec extends AnyPropSpec with ContractSpecBase {
    * made to sign correctly this way at all.
    */
   property("the round trip is what actually decides it, and only 2-4 vars are at risk") {
-    // Broken: attached in an order that is not the wire order.
+    // Broken: attached in any order that is not ascending. The middle one is the holding transform
+    // and the holding top-up, which is how this was found.
     survivesRoundTrip(Seq[Byte](0, 64, 65, 2)) shouldBe false
-    survivesRoundTrip(Seq[Byte](0, 64, 65, 1)) shouldBe false
+    survivesRoundTrip(Seq[Byte](64, 3)) shouldBe false
     survivesRoundTrip(Seq[Byte](1, 0)) shouldBe false
 
-    // Fixed: attached in wire order.
+    // Fixed: attached ascending.
     survivesRoundTrip(Seq[Byte](0, 2, 64, 65)) shouldBe true
-    survivesRoundTrip(Seq[Byte](0, 1, 64, 65)) shouldBe true
+    survivesRoundTrip(Seq[Byte](3, 64)) shouldBe true
 
     // One var has no order to get wrong.
     survivesRoundTrip(Seq[Byte](0)) shouldBe true

@@ -50,8 +50,8 @@ object LFSMHelpers {
   final val COLLAT_MAX_FEE   = Parameters.MinFee * 100
 
   // FP_Control Params
-  final val FP_TOKEN_MAINNET        = ErgoId.create("5a3f8a958178fc6e3b37aeea8fb94d8e6d33a7e4d2c7e70aa7db4e13c08a9903")
-  final val FP_TOKEN_TESTNET        = ErgoId.create("a6d4fa307b654dcf31ce07e2462c1be5ca7c5dcc35c1363a0eff62d0b3b9ed37")
+  final val FP_TOKEN_MAINNET        = ErgoId.create("33753d4a3e1a424a7449436a380b4cb4608c697681aee47727a2cd5d1848b8e1")
+  final val FP_TOKEN_TESTNET        = ErgoId.create("33753d4a3e1a424a7449436a380b4cb4608c697681aee47727a2cd5d1848b8e1")
   final val FP_CONTROL_TESTNET      = Address.create("ShDJAh75M4bDZbCowYGqtmHi4iiBMqWJcbQRYLaxx8tZZHtj23c7qEcEvUiXYvSdnjdWE6R328rSazggEzz7UWRqXGZWc6L28bo96jMNK8NZs1bQBHAxkb9rLFW8Gf3HFQRPUm26CX8LZeqF1iJvftCYHTp2KC2LisbheejGeoXkv")
 
   // How long a rollup stays challengeable. MinerData_Logic spaces commitment changes by NISP_WINDOW
@@ -75,26 +75,26 @@ object LFSMHelpers {
   // into the dictionary tree by the builder, so this band is how long a registration may wait in the
   // mempool before it has to be rebuilt.
   final val REGISTER_SLACK    = 10L // one day at 2-minute blocks
-  final val MD_TOKEN_MAINNET = ErgoId.create("7f9609b232d3e2f0638d60a03a26831bf80155ed1e87a1b914e2623dfbd05518")
-  final val MD_TOKEN_TESTNET = ErgoId.create("2aee4d20d743e19042b68b99045e7c482d3580fe2797c39de4235989f788021b")
-  final val MD_GENESIS_HEIGHT = 526394
+  final val MD_TOKEN_MAINNET = ErgoId.create("40bb3a3f03ea4e4f49f53b5bca643ef54dab467432c2eaa163ec54fcbd225551")
+  final val MD_TOKEN_TESTNET = ErgoId.create("40bb3a3f03ea4e4f49f53b5bca643ef54dab467432c2eaa163ec54fcbd225551")
+  final val MD_GENESIS_HEIGHT = 1848
 
   // Genesis Tx: 152145747776ee9e41b61fcf153ecc7dd0818044e2956277e40f8c9ff9386e59
   // UTXO id of initial MD box
-  final val MD_GENESIS_ID = "5c58ef843bda73373ff093e06f7bc48db713ccb0dd0cf3f17eb7e9bfabe409cd"
+  final val MD_GENESIS_ID = "e9bc452f09f7bd127d56ab1447ab2057bece14276eada310e1d7b7bf8993064e"
 
   // Lithos token & emission parameters
   final val INIT_MINT = Parameters.OneErg * 1000000000 // 1 billion LIT
-  final val LIT_ID = ErgoId.create("7b728ca02a23085f1f7093e949535938c55307ab1b61e848008201c5109bd18b")
+  final val LIT_ID = ErgoId.create("ed75c8813698efe9038e7eb3e9161c14d0013e77f191e230aa04e97ac70e91fd")
   // CONFIRMED MAINNET ID
-  final val LIT_ID_MAINNET = ErgoId.create("c1980d829988229516430a47a5eca376060b6ce859616db0936e78ab25cb6de7")
-  final val EMISSION_NFT = ErgoId.create("4169fcef923f8cb791f238103b900792427b79148a6ef709134d5c196212ae88")
+  final val LIT_ID_MAINNET = ErgoId.create("ed75c8813698efe9038e7eb3e9161c14d0013e77f191e230aa04e97ac70e91fd")
+  final val EMISSION_NFT = ErgoId.create("3f0d34f40173a33bbeba060292260138d40daedf152c498e1cab774a1eb94d81")
   // TODO: Change before launch
   // Emission Config NFT
-  final val EMCONFIG_NFT = ErgoId.create("fd8752a46a68340ff33805db57d0ff4d8bd1680c533c4313dc4e9cb71b260725")
+  final val EMCONFIG_NFT = ErgoId.create("30caceaef7228ce78199a386641a73335c5e51be6749b0c8aa7db8bdf141e2c7")
   // Ids and amount of proposition tokens on Emission contract
-  final val COLLAT_TOKEN = ErgoId.create("09e991239e5544a6996216440d42e6ec636aea718c8c7cbc2e54f90e832f2e1e")
-  final val QUEUE_TOKEN  = ErgoId.create("0c3b6465e865278e80fba1fc903d4d390daf5d87c097936c181cd8d7b753f4dd")
+  final val COLLAT_TOKEN = ErgoId.create("c113a2ef9d151ea3385f4c69b697ad6731d5fc892024b1568713b62854aaacf3")
+  final val QUEUE_TOKEN  = ErgoId.create("ee271d871929e193219bb94fc918789c6484c7feb5e4443942fea9da9acae430")
   final val PROP_TOKEN_AMNT = Long.MaxValue
 
   final val PERMIT_FLOOR = 2000L * Parameters.OneErg

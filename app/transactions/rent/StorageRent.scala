@@ -88,7 +88,20 @@ object StorageRent {
    */
   def blockedByReEmission(box: InputUTXO, network: NetworkType): Boolean =
     network == NetworkType.MAINNET &&
-      box.tokens.exists(_.id.toString == MainnetEip27Constants.TokenId)
+      isReEmission(box.contract.ergoTreeHex, box.tokens.map(_.id.toString))
+
+  /**
+   * Ergo's own emission and re-emission boxes, which a rent collection has no business touching.
+   *
+   * Wider than the token alone: the boxes EIP-27 pays into sit at the proxy script and hold no
+   * re-emission tokens at all, so a token-only test walks straight past them. They accumulate ERG
+   * and are never spent, which is exactly the shape a rent scan is looking for.
+   */
+  private def isReEmission(ergoTree: String, tokenIds: Seq[String]): Boolean =
+    ergoTree == MainnetEip27Constants.Proxy.ergoTreeHex ||
+      tokenIds.exists(id => id == MainnetEip27Constants.TokenId ||
+        id == MainnetEip27Constants.ReemissionNft ||
+        id == MainnetEip27Constants.EmissionNft)
 
   def storageFee(box: InputUTXO, params: BlockchainParameters): Long =
     params.getStorageFeeFactor.toLong * box.bytes.length
@@ -101,10 +114,22 @@ object StorageRent {
    */
   def decide(value: Long, sizeBytes: Int, params: BlockchainParameters): Option[RentAction] = {
     val fee = params.getStorageFeeFactor.toLong * sizeBytes
-    if (value <= fee) Some(RentAction.Claim)
+    if (overflowsNodeFee(sizeBytes, params)) None
+    else if (value <= fee) Some(RentAction.Claim)
     else if (value - fee >= params.getMinValuePerByte.toLong * sizeBytes) Some(RentAction.Collect(fee))
     else None
   }
+
+  /**
+   * Whether the fee for a box this size overflows the arithmetic the rule itself uses.
+   *
+   * `checkExpiredBox` computes `storageFeeFactor * box.bytes.length` in `Int`, so past
+   * `Int.MaxValue / factor` bytes the product wraps negative. A negative fee makes the box look
+   * funded however little it holds, and then demands a successor richer than the box itself — which
+   * nothing can satisfy. Such a box is uncollectable by either branch, so it is never offered.
+   */
+  def overflowsNodeFee(sizeBytes: Int, params: BlockchainParameters): Boolean =
+    params.getStorageFeeFactor.toLong * sizeBytes > Int.MaxValue.toLong
 
   /**
    * Which branch this box falls on at `blockHeight`, or nothing when it cannot be collected.
@@ -112,9 +137,10 @@ object StorageRent {
    * `creationHeight` comes from the indexer rather than the box, because discovery is what knows the
    * box's age.
    */
-  def plan(box: InputUTXO, creationHeight: Int, blockHeight: Int,
-           params: BlockchainParameters, network: NetworkType): Option[RentAction] = {
+  def plan(box: InputUTXO, creationHeight: Int, blockHeight: Int, params: BlockchainParameters,
+           network: NetworkType, protocol: ProtocolBoxes): Option[RentAction] = {
     if (blockHeight.toLong - creationHeight < StoragePeriod.toLong) None
+    else if (protocol.owns(box)) None
     else if (blockedByReEmission(box, network)) None
     else decide(box.value, box.bytes.length, params)
   }
@@ -129,11 +155,13 @@ object StorageRent {
    * Says nothing about whether a box is still unspent — that is one batch read, made against the
    * ids this returns.
    */
-  def sortByAge(boxes: Seq[node.model.NodeBox], threshold: Int,
-                network: NetworkType): (Set[String], Set[String]) = {
-    val due = boxes.filter(_.creationHeight <= threshold)
+  def sortByAge(boxes: Seq[node.model.NodeBox], threshold: Int, network: NetworkType,
+                protocol: ProtocolBoxes): (Set[String], Set[String]) = {
+    // Dropped before anything else looks at them: this protocol's own boxes are not revenue, and
+    // taking one costs state rather than earning ERG.
+    val due = boxes.filter(box => box.creationHeight <= threshold && !protocol.owns(box))
     val (blocked, open) = due.partition(box => network == NetworkType.MAINNET &&
-      box.assets.exists(_.tokenId == MainnetEip27Constants.TokenId))
+      isReEmission(box.ergoTree, box.assets.map(_.tokenId)))
     open.map(_.boxId).toSet -> blocked.map(_.boxId).toSet
   }
 
@@ -230,10 +258,13 @@ object StorageRent {
                                       candidates: Seq[RentCandidate],
                                       blockHeight: Int,
                                       useTrueProp: Boolean): ErgoLikeTransaction = {
-    // Defended here as well as in the plan: one such box refuses the whole sweep, and a candidate
-    // can be constructed without going through the plan at all.
+    // Defended here as well as in the plan: a candidate can be constructed without going through
+    // the plan at all, and either of these costs more than the sweep is worth.
     require(!candidates.exists(c => blockedByReEmission(c.box, ctx.getNetworkType)),
       "a re-emission box cannot be spent through the storage-rent rule")
+    val protocol = ProtocolBoxes(ctx)
+    require(!candidates.exists(c => protocol.owns(c.box)),
+      "a rent collection cannot take one of this protocol's own boxes")
 
     val tokens = mergeTokens(candidates.flatMap(_.proceedsTokens))
     val tokenCost = if (tokens.isEmpty) 0L else UTXO.MIN_CHANGE
@@ -265,6 +296,27 @@ object StorageRent {
       Input(candidate.box.input.asInstanceOf[InputBoxImpl].getErgoBox.id,
         ProverResult(Array.emptyByteArray,
           ContextExtension(Map(Constants.StorageIndexVarId -> ShortConstant(named.toShort)))))
+    }
+
+    // One line per input, because the node reports a refusal by input index and says nothing about
+    // which box it was or which branch it took. Without this, `#6 => false` cannot be read at all.
+    if (logger.isDebugEnabled) {
+      val params = ctx.getDataSource.getParameters
+      var recreation = 1
+      candidates.zipWithIndex.foreach { case (candidate, i) =>
+        val named = if (candidate.recreates) { val n = recreation; recreation += 1; n } else 0
+        // Full id and creation height, so a refusal can be taken straight to the node and asked
+        // about: the two things that decide the branch are the box's size and its age.
+        logger.debug(f"rent sweep #$i%-3d ${candidate.box.id.toString} " +
+          f"value=${candidate.box.value}%16d bytes=${candidate.box.bytes.length}%5d " +
+          f"fee=${storageFee(candidate.box, params)}%14d " +
+          f"created=${candidate.box.input.asInstanceOf[InputBoxImpl].getCreationHeight}%8d " +
+          f"age=${blockHeight - candidate.box.input.asInstanceOf[InputBoxImpl].getCreationHeight}%8d " +
+          f"${if (candidate.recreates) "collect" else "claim  "} names=$named " +
+          f"tokens=${candidate.box.tokens.size}")
+      }
+      logger.debug(s"rent sweep: ${candidates.size} inputs, ${outputs.size} outputs, " +
+        s"${recreation - 1} recreation(s), tokenBox=${tokenBox.nonEmpty}, proceeds=$proceeds")
     }
 
     new ErgoLikeTransaction(inputs.toIndexedSeq, IndexedSeq.empty, outputs.toIndexedSeq)
