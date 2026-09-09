@@ -17,10 +17,10 @@ object LFSMHelpers {
   // Target max used in contracts, 2^256 - 1
   final val TARGET_MAX_LITHOS = BigInt("115792089237316195423570985008687907853269984665640564039457584007913129639935")
 
-  final val HOLDING_PERIOD = 360L // 360 Blocks, or 12 hours
-  final val EVAL_PERIOD    = 360L
+  final val HOLDING_PERIOD = 30L // 360 Blocks, or 12 hours
+  final val EVAL_PERIOD    = 30L
   // TODO: Change to 60 before mainnet
-  final val NISP_WINDOW    = 60 // 2 hours on mainnet (less on testnet but its ok)
+  final val NISP_WINDOW    = 10 // 2 hours on mainnet (less on testnet but its ok)
   final val NISP_COEFFICIENT = 10000 // Coefficient which separates normal shares from super-shares, used in evaluation
   // NISP size envelope, mirrored in Holding_Logic and injected into FP_InvalidFormat.
   // share = [N: 4][header][txProofSize: 2][numLevels: 1][txProof][levels: 33n][yCoord: 32]
@@ -65,8 +65,8 @@ object LFSMHelpers {
   final val MIN_DATA_BOX_AMNT = 1000000L // 0.001 ERG
   // How long a registration lasts, in the 365-day, 720-blocks-per-day units Ergo uses for its own
   // storage period. A miner registers again rather than renewing.
-  final val DATA_LIFETIME     = 919800L // 3.5 years at 2-minute blocks
-  final val STORAGE_PERIOD    = 1051200L // Ergo's own
+  final val DATA_LIFETIME     = 120L // 3.5 years at 2-minute blocks
+  final val STORAGE_PERIOD    = 240L // Ergo's own
   // The gap between a registration expiring and its box becoming collectible. An entry may only be
   // evicted this long after expiry, so eviction can never retire a registration a live rollup was
   // judged against, and a data box's creation height may be backdated at most this far.
@@ -74,7 +74,7 @@ object LFSMHelpers {
   // How far below the full lifetime a registration's supplied expiry may sit. The expiry is written
   // into the dictionary tree by the builder, so this band is how long a registration may wait in the
   // mempool before it has to be rebuilt.
-  final val REGISTER_SLACK    = 720L // one day at 2-minute blocks
+  final val REGISTER_SLACK    = 10L // one day at 2-minute blocks
   final val MD_TOKEN_MAINNET = ErgoId.create("7f9609b232d3e2f0638d60a03a26831bf80155ed1e87a1b914e2623dfbd05518")
   final val MD_TOKEN_TESTNET = ErgoId.create("2aee4d20d743e19042b68b99045e7c482d3580fe2797c39de4235989f788021b")
   final val MD_GENESIS_HEIGHT = 526394

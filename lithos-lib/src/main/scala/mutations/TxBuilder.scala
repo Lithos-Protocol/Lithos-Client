@@ -70,7 +70,7 @@ class TxBuilder(ctx: BlockchainContext){
     require(totalChange >= 0, "inputs do not cover the completed output plan")
     val outputsToUse = {
       if(totalChange < Parameters.MinChangeValue && totalChange != 0){
-        val feeIdx = adjustedOutputs.indexWhere(_.contract.ergoTreeHex == Contract(ErgoTreePredef.feeProposition(720)).ergoTreeHex)
+        val feeIdx = adjustedOutputs.indexWhere(_.contract.ergoTreeHex == Contract(ErgoTreePredef.feeProposition(_root_.mutations.NodeWallet.MINER_REWARD_DELAY)).ergoTreeHex)
         require(feeIdx >= 0, "sub-minimum change requires an explicit fee output")
         adjustedOutputs.patch(feeIdx, Seq(adjustedOutputs(feeIdx).addValue(totalChange)), 1)
       }else{
@@ -81,11 +81,9 @@ class TxBuilder(ctx: BlockchainContext){
     val uTx = uTxB
       .addInputs(inputs.map(_.toFullInput):_*)
       .addDataInputs(dataInputs.map(_.input):_*)
-      .addOutputs(outputsToUse.map(_.toOutBox(ctx)): _*)
+      .addOutputs((outputsToUse ++ (if (fee > 0) Seq(UTXO.feeBox(fee)) else Seq.empty)).map(_.toOutBox(ctx)): _*)
       .sendChangeTo(changeAddress)
 
-    if(fee > 0)
-      uTx.fee(fee)
 
     if(adjustedBurn.nonEmpty)
       uTx.tokensToBurn(adjustedBurn.map(_.toErgo): _*)
@@ -102,7 +100,7 @@ class TxBuilder(ctx: BlockchainContext){
     }
     val extra = actual.drop(outputsToUse.size)
     val changeTree = changeAddress.toErgoContract.getErgoTree
-    val feeTree = ErgoTreePredef.feeProposition(720)
+    val feeTree = ErgoTreePredef.feeProposition(_root_.mutations.NodeWallet.MINER_REWARD_DELAY)
     require(extra.forall(o => o.getErgoTree == changeTree || (fee > 0 && o.getErgoTree == feeTree)),
       "completed transaction sent change to an unintended recipient")
     require(extra.filter(_.getErgoTree == feeTree).foldLeft(0L)((n, b) => Math.addExact(n, b.getValue)) == fee,

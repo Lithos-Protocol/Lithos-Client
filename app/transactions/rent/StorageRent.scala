@@ -80,7 +80,7 @@ object StorageRent {
   /**
    * Blocks a box must live before its rent can be collected, which is four years of them.
    */
-  final val StoragePeriod: Int = Constants.StoragePeriod
+  final val StoragePeriod: Int = 240
 
   /**
    * Whether this box is eligible by age but unspendable while EIP-27 and the rent rule contradict

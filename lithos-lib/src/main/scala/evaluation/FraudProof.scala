@@ -136,7 +136,7 @@ abstract class FraudProof(contract: Contract, miner: Array[Byte],
 
   protected def createFraudProof(ctx: BlockchainContext, prover: ErgoProver, loader: BoxLoader): SignedTransaction = {
     val fpUtxo = UTXO(contract, Parameters.MinFee)
-    val feeOutput = UTXO(Contract(ErgoTreePredef.feeProposition(720)), Parameters.MinFee)
+    val feeOutput = UTXO(Contract(ErgoTreePredef.feeProposition(_root_.mutations.NodeWallet.MINER_REWARD_DELAY)), Parameters.MinFee)
     val inputs = loader.getInputs(Parameters.MinFee * 2)
     val txB = TxBuilder(ctx)
     prover.sign(txB
@@ -202,7 +202,7 @@ object FraudProof {
       // what the evaluation contract compares against.
       val rewardOutput = UTXO(tCtx.inputs(1).contract, slashed)
       if(includeFee){
-        val feeProp = Contract(ErgoTreePredef.feeProposition(720))
+        val feeProp = Contract(ErgoTreePredef.feeProposition(_root_.mutations.NodeWallet.MINER_REWARD_DELAY))
         val feeOutput = UTXO(feeProp, Parameters.MinFee)
         Seq(nextEval, rewardOutput, feeOutput)
       }else{

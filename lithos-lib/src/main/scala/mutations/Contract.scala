@@ -56,7 +56,7 @@ case class Contract(ergoTree: ErgoTree, mutators: Seq[Mutator] = Seq.empty[Mutat
 object Contract {
   final val SIGMA_TRUE: Contract = new Contract(ErgoTree.fromProposition(TrueSigmaProp))
   final val SIGMA_FALSE: Contract = new Contract(ErgoTree.fromProposition(FalseSigmaProp))
-  final val FEE_720: Contract = new Contract(ErgoTreePredef.feeProposition(720))
+  final val FEE: Contract = new Contract(ErgoTreePredef.feeProposition(_root_.mutations.NodeWallet.MINER_REWARD_DELAY))
   def apply(ergoTree: ErgoTree, mutators: Seq[Mutator] = Seq.empty[Mutator]): Contract = {
     new Contract(ergoTree, mutators)
   }

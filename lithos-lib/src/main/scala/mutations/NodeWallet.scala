@@ -46,5 +46,5 @@ case class NodeWallet(prover: ErgoProver) {
 object NodeWallet {
 
   /** Blocks a coinbase stays locked. Ergo consensus, not a Lithos parameter. */
-  final val MINER_REWARD_DELAY: Int = 720
+  final val MINER_REWARD_DELAY: Int = 10
 }

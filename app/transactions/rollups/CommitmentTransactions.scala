@@ -208,7 +208,7 @@ class CommitmentTransactions(nodeContext: NodeContext, dataBoxes: DataBoxSource,
       .withCtxVar(ContextVar.of(8.toByte, ErgoValue.of(validUntil)))
     val dictOutput = dictInput.toUTXO.copy(registers = Seq(insertionTree.ergoValue))
     val output = makeMinerDataBox(ctx, proverContract, dictInput.id, commitHeight, score)
-    val feeOutput = UTXO(Contract(ErgoTreePredef.feeProposition(720)), Parameters.MinFee)
+    val feeOutput = UTXO(Contract(ErgoTreePredef.feeProposition(_root_.mutations.NodeWallet.MINER_REWARD_DELAY)), Parameters.MinFee)
     val uTx = TxBuilder(ctx)
       .setInputs((Seq(ctxDictInput) ++ funding): _*)
       .setOutputs(dictOutput, output, feeOutput)
@@ -309,7 +309,7 @@ class CommitmentTransactions(nodeContext: NodeContext, dataBoxes: DataBoxSource,
       .withCtxVar(ContextVar.of(64.toByte,
         ErgoValue.of(Colls.fromArray(Helpers.dataBoxLogic(ctx).valueBytes), scalaByteType)))
 
-    val fee = UTXO(Contract(ErgoTreePredef.feeProposition(720)), Parameters.MinFee)
+    val fee = UTXO(Contract(ErgoTreePredef.feeProposition(_root_.mutations.NodeWallet.MINER_REWARD_DELAY)), Parameters.MinFee)
     val uTx = TxBuilder(ctx)
       .setInputs((inputWithCtx +: funding): _*)
       .setOutputs(nextDataBox, fee)

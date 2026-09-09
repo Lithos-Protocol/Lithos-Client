@@ -114,7 +114,7 @@ object UTXO {
     new UTXO(contract, value, tokens, registers, creationHeight)
   }
 
-  def feeBox(amnt: Long = MIN_FEE) = UTXO(Contract.FEE_720, amnt)
+  def feeBox(amnt: Long = MIN_FEE) = UTXO(Contract.FEE, amnt)
 
 
 

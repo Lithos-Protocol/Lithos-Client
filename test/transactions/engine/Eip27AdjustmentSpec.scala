@@ -10,7 +10,7 @@ import work.lithos.mutations._
 import scala.collection.JavaConverters._
 
 class Eip27AdjustmentSpec extends AnyFlatSpec with Matchers {
-  private val token = "d9a2cc8a09abfaed87afacfbb7daee79a6b26f10c6613fc13d3f3953e5521d1a"
+  private val token = "a6f99adfd627fefe23dbd022af1b03f0433eea96856b1c79f4cdb8952ea45a31"
   private lazy val fake = FakeNodeContext()
 
   "EIP-27" should "burn aggregate reward tokens and pay the exact proxy obligation while preserving other assets" in {
@@ -33,7 +33,7 @@ class Eip27AdjustmentSpec extends AnyFlatSpec with Matchers {
       outputs(2).getValue shouldBe 24000000000L
       // The proxy permits only the first output's first token to identify the re-emission NFT.
       MainnetEip27Constants.Proxy.ergoTreeHex shouldBe
-        "193c03040004000e20d3feeffa87f2df63a7a15b4905e618ae3ce4c69a7975f171bd314d0b877927b8d1938cb2e4c6b2a5730000020c4d0e730100017302"
+        "193c03040004000e20606f01a9634f5848ed22eef74b1ba9041673a9a1fb7f357cef80947d01dc43ced1938cb2e4c6b2a5730000020c4d0e730100017302"
       outputs(2).getErgoTree shouldBe MainnetEip27Constants.Proxy.ergoTree
     }
   }

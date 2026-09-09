@@ -1,7 +1,7 @@
 
-name := """lithos-lib"""
+name := """lithos-lib1"""
 organization := "work.lithos"
-version := "1.0-SNAPSHOT"
+version := "1.1-SNAPSHOT"
 scalaVersion := "2.12.10"
 lazy val scriptClasspath = Seq("*")
 libraryDependencies ++= Seq(

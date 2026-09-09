@@ -9,14 +9,14 @@ import sigma.ast.syntax._
 import scala.collection.JavaConverters._
 
 /**
- * Mainnet re-emission constants. These are consensus values, not token metadata or configuration:
+ * Local devnet re-emission constants for the mainnet-compatible client. These are consensus values, not token metadata or configuration:
  * they are compiled in, and a wrong one is caught by the pinned fixtures rather than at runtime.
  */
 object MainnetEip27Constants {
-  final val TokenId = "d9a2cc8a09abfaed87afacfbb7daee79a6b26f10c6613fc13d3f3953e5521d1a"
-  final val ReemissionNft = "d3feeffa87f2df63a7a15b4905e618ae3ce4c69a7975f171bd314d0b877927b8"
-  final val EmissionNft = "20fa2bf23962cdf51b07722d6237c0c7b8a44f78856c0f7ec308dc1ef1a92a51"
-  final val ActivationHeight = 777217
+  final val TokenId = "a6f99adfd627fefe23dbd022af1b03f0433eea96856b1c79f4cdb8952ea45a31"
+  final val ReemissionNft = "606f01a9634f5848ed22eef74b1ba9041673a9a1fb7f357cef80947d01dc43ce"
+  final val EmissionNft = "8be30bafab107fee3400ff25dde892f39f0149364e2c33a3ee12a66d1a64d36f"
+  final val ActivationHeight = 10
 
   /**
    * The pay-to-re-emission proposition: the first output's first token must be the re-emission NFT.

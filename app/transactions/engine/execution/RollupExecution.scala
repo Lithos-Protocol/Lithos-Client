@@ -738,7 +738,7 @@ class RollupExecution(nodeContext: NodeContext, walletManager: ActorRef, syncHan
 object RollupExecution {
 
   /** The fee proposition every `UTXO.feeBox` sits at, derived once rather than per comparison. */
-  private val FeeTreeHex: String = Contract.FEE_720.ergoTreeHex
+  private val FeeTreeHex: String = Contract.FEE.ergoTreeHex
 
   /**
    * The boxes a signed transaction spends, read from the transaction itself so candidate admission

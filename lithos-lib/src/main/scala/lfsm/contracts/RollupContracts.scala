@@ -35,7 +35,7 @@ object RollupContracts {
     .item("CONST_BOND_DIVISOR", LFSMHelpers.BOND_DIVISOR)
 
   private def payoutConstants: Constants = bondConstants(ConstantsBuilder.create())
-    .item("CONST_FEE_HASH", Colls.fromArray(Contract.FEE_720.hashedPropBytes))
+    .item("CONST_FEE_HASH", Colls.fromArray(Contract.FEE.hashedPropBytes))
     .build()
 
   def mkPayoutContract(ctx: BlockchainContext): Contract = {
