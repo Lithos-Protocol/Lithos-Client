@@ -117,7 +117,7 @@ object ConsolidationExecution {
         val box = entry.box
         total = Math.addExact(total, 1L)
         val safe = entry.onchain && !entry.spent && entry.confirmationsNum.exists(_ > 0) &&
-          trees.contains(box.ergoTree) && box.additionalRegisters.ordered.isEmpty &&
+          trees.contains(box.ergoTree) &&
           !excluded.contains(box.boxId) && box.creationHeight <= height
         if (safe) {
           eligible = Math.addExact(eligible, 1L)
