@@ -146,7 +146,7 @@ class NodeCodecSpec extends AnyFlatSpec with Matchers {
     // Collateral, queue, and emission lookups identify boxes by a leading amount-one NFT.
     val first = indexedBoxes.head.assets.head
     first.amount shouldEqual 1L
-    LFSMHelpers.COLLAT_TOKEN.toString.length shouldEqual first.tokenId.length
+    LFSMHelpers.COLLAT_TOKEN_MAINNET.toString.length shouldEqual first.tokenId.length
   }
 
   // /blockchain/block/byHeaderIds

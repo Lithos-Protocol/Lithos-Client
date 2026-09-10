@@ -39,17 +39,17 @@ class GenesisLayoutSpec extends AnyPropSpec with EmissionSpecBase with RollupSpe
     val founderBoxes = split.map { case (key, amount) =>
       val recipient = Seq(LFSMHelpers.FOUNDER_1, LFSMHelpers.FOUNDER_2, LFSMHelpers.FOUNDER_3)
         .find(c => java.util.Arrays.equals(c.hashedPropBytes, key)).get
-      UTXO(recipient, 1000000L, Seq(Token(LFSMHelpers.LIT_ID, amount)))
+      UTXO(recipient, 1000000L, Seq(Token(LFSMHelpers.LIT_ID_MAINNET, amount)))
     }
-    val permitBox = UTXO(contractOf(lenderProver), 1000000L, Seq(Token(LFSMHelpers.LIT_ID, permit)))
-    val pos = UTXO(gateContract(ctx), 200000L, Seq(Token(LFSMHelpers.COLLAT_TOKEN, 1L)),
+    val permitBox = UTXO(contractOf(lenderProver), 1000000L, Seq(Token(LFSMHelpers.LIT_ID_MAINNET, permit)))
+    val pos = UTXO(gateContract(ctx), 200000L, Seq(Token(LFSMHelpers.COLLAT_TOKEN_MAINNET, 1L)),
       Seq(bytesValue(setEntry(lenderProver)))).setCreationHeight(height)
-    val finderBox = UTXO(contractOf(finderProver), 200000L, Seq(Token(LFSMHelpers.LIT_ID, finderLIT)))
+    val finderBox = UTXO(contractOf(finderProver), 200000L, Seq(Token(LFSMHelpers.LIT_ID_MAINNET, finderLIT)))
 
     val trailing = founderBoxes ++ Seq(permitBox, pos, finderBox)
     val minerHash = contractOf(finderProver).hashedPropBytes
     val holding = UTXO(rollup, collatBox.value - trailing.map(_.value).sum,
-      Seq(Token(collatIn.id, 1L), Token(LFSMHelpers.LIT_ID, poolLIT)),
+      Seq(Token(collatIn.id, 1L), Token(LFSMHelpers.LIT_ID_MAINNET, poolLIT)),
       Seq(emptyTree.ergoValue, ErgoValue.of(0), ErgoValue.of(BigInt(0).bigInteger),
         stateReg(height.toLong, height.toLong, 0L), bytesValue(minerHash)))
 
@@ -127,7 +127,7 @@ class GenesisLayoutSpec extends AnyPropSpec with EmissionSpecBase with RollupSpe
       val tokenCount = bytes(afterTree + heightLen)
       tokenCount should be >= 1.toByte
       hex(bytes.slice(afterTree + heightLen + 1, afterTree + heightLen + 33)) shouldBe
-        hex(LFSMHelpers.COLLAT_TOKEN.getBytes)
+        hex(LFSMHelpers.COLLAT_TOKEN_MAINNET.getBytes)
 
       println(s"[collateral] valueVLQ=$valueLen tree=${tree.length} heightVLQ=$heightLen tokens=$tokenCount")
     }

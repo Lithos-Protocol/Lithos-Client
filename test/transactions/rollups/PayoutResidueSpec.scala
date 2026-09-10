@@ -31,7 +31,7 @@ class PayoutResidueSpec extends AnyPropSpec with RollupSpecBase {
   private val scoreB = 6L
   private val totalScore = scoreA + scoreB
   private val bond = LFSMHelpers.MIN_ENTRY_BOND
-  private val litId = LFSMHelpers.LIT_ID
+  private val litId = LFSMHelpers.LIT_ID_MAINNET
   private val nft = Token(ErgoId.create("cc" * 32), 1L)
 
   private def shareOf(score: Long, total: Long): Long =

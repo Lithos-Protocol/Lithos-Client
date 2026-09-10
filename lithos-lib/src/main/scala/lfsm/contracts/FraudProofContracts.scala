@@ -82,7 +82,7 @@ object FraudProofContracts {
     val constants = ConstantsBuilder.create()
       .item("CONST_COLLAT_ERGOTREE", Colls.fromArray(collateral.ergoTree.bytes))
       .item("CONST_HOLDING_ERGOTREE", Colls.fromArray(holding.ergoTree.bytes))
-      .item("CONST_COLLAT_TOKEN", Colls.fromArray(LFSMHelpers.COLLAT_TOKEN.getBytes))
+      .item("CONST_COLLAT_TOKEN", Colls.fromArray(LFSMHelpers.getCollatToken(network).getBytes))
       .build()
     Contract.fromErgoScript(network, constants, ScriptGenerator.mkFraudProofScript("FP_MalformedGenesis"), Seq.empty)
   }

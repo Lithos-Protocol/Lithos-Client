@@ -45,8 +45,8 @@ object ProtocolBoxes {
       c.fraudProofs.ordered).map(_.ergoTreeHex).toSet
 
     val singletons = Set(
-      LFSMHelpers.COLLAT_TOKEN,
-      LFSMHelpers.EMISSION_NFT,
+      LFSMHelpers.getCollatToken(ctx.getNetworkType),
+      LFSMHelpers.getEmissionNft(ctx.getNetworkType),
       LFSMHelpers.getMDToken(ctx.getNetworkType),
       LFSMHelpers.getFPToken(ctx.getNetworkType)).map(_.toString)
 

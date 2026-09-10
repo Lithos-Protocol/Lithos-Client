@@ -63,13 +63,13 @@ object ProtocolContracts {
 
       val gate = CollateralContract.mkEmissionGateContract(network)
       val collateral = CollateralContract.mkMainnetCollatContract(
-        network, LFSMHelpers.EMCONFIG_NFT, gate.hashedPropBytes, LFSMHelpers.LIT_ID)
+        network, LFSMHelpers.getEmConfigNft(network), gate.hashedPropBytes, LFSMHelpers.getLitId(network))
       val emission = CollateralContract.mkEmissionsContract(
-        network, collateral.hashedPropBytes, gate.hashedPropBytes, LFSMHelpers.LIT_ID)
+        network, collateral.hashedPropBytes, gate.hashedPropBytes, LFSMHelpers.getLitId(network))
       val guard = CollateralContract.mkEmissionsGuardContract(
-        network, LFSMHelpers.EMISSION_NFT, LFSMHelpers.EMCONFIG_NFT,
-        collateral.hashedPropBytes, gate.hashedPropBytes, LFSMHelpers.LIT_ID)
-      val enforcer = CollateralContract.mkCollateralEnforcerContract(network, LFSMHelpers.LIT_ID)
+        network, LFSMHelpers.getEmissionNft(network), LFSMHelpers.getEmConfigNft(network),
+        collateral.hashedPropBytes, gate.hashedPropBytes, LFSMHelpers.getLitId(network))
+      val enforcer = CollateralContract.mkCollateralEnforcerContract(network, LFSMHelpers.getLitId(network))
 
       // MinerData's guard and logic, compiled once and passed on by hash. The dictionary and
       // FP_NonMatchingCommitment both inject that hash, and each would otherwise compile its own.

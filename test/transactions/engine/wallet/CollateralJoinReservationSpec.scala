@@ -92,7 +92,7 @@ class CollateralJoinReservationSpec
   private def fundingBox(ctx: BlockchainContext, own: Contract, permit: Long): InputUTXO =
     UTXO(own,
       CollateralParams.PRINCIPAL_FLOOR + Parameters.MinFee * 4,
-      Seq(Token(LFSMHelpers.LIT_ID, permit * 2)))
+      Seq(Token(LFSMHelpers.LIT_ID_MAINNET, permit * 2)))
       .toInput(ctx, ErgoId.create("ef" * 32), 0.toShort)
 
   private case class Fixture(api: CollateralExecution, watcher: TestProbe)
@@ -107,9 +107,9 @@ class CollateralJoinReservationSpec
 
     val (byToken, funding) = nodeCtx.getClient.execute { ctx =>
       val boxes = Map(
-        LFSMHelpers.EMISSION_NFT.toString ->
+        LFSMHelpers.EMISSION_NFT_MAINNET.toString ->
           Seq(Fx.indexed(Fx.emissionBox(ctx, head = 0L, tail = 0L))),
-        LFSMHelpers.EMCONFIG_NFT.toString -> Seq(Fx.indexed(Fx.configBox(ctx))))
+        LFSMHelpers.EMCONFIG_NFT_MAINNET.toString -> Seq(Fx.indexed(Fx.configBox(ctx))))
       (boxes, fundingBox(ctx, wallet.contract, permit))
     }
 

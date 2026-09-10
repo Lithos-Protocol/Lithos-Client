@@ -51,7 +51,7 @@ object LFSMHelpers {
 
   // FP_Control Params
   final val FP_TOKEN_MAINNET        = ErgoId.create("5a3f8a958178fc6e3b37aeea8fb94d8e6d33a7e4d2c7e70aa7db4e13c08a9903")
-  final val FP_TOKEN_TESTNET        = ErgoId.create("a6d4fa307b654dcf31ce07e2462c1be5ca7c5dcc35c1363a0eff62d0b3b9ed37")
+  final val FP_TOKEN_TESTNET        = ErgoId.create("c7532afceafc7a4ee9b8a55f3d19dc605069298ee4c04f8ebbb07a7f97ebebea")
   final val FP_CONTROL_TESTNET      = Address.create("ShDJAh75M4bDZbCowYGqtmHi4iiBMqWJcbQRYLaxx8tZZHtj23c7qEcEvUiXYvSdnjdWE6R328rSazggEzz7UWRqXGZWc6L28bo96jMNK8NZs1bQBHAxkb9rLFW8Gf3HFQRPUm26CX8LZeqF1iJvftCYHTp2KC2LisbheejGeoXkv")
 
   // How long a rollup stays challengeable. MinerData_Logic spaces commitment changes by NISP_WINDOW
@@ -76,25 +76,46 @@ object LFSMHelpers {
   // mempool before it has to be rebuilt.
   final val REGISTER_SLACK    = 720L // one day at 2-minute blocks
   final val MD_TOKEN_MAINNET = ErgoId.create("7f9609b232d3e2f0638d60a03a26831bf80155ed1e87a1b914e2623dfbd05518")
-  final val MD_TOKEN_TESTNET = ErgoId.create("2aee4d20d743e19042b68b99045e7c482d3580fe2797c39de4235989f788021b")
-  final val MD_GENESIS_HEIGHT = 526394
+  final val MD_TOKEN_TESTNET = ErgoId.create("38e5f7b0814b2841525b4ed5d375de21eefb27347c3ec2c850542ba52ceccf18")
+  final val MD_GENESIS_HEIGHT = 534053
 
-  // Genesis Tx: 152145747776ee9e41b61fcf153ecc7dd0818044e2956277e40f8c9ff9386e59
+  // Genesis Tx: e9f9a7c4d2a9f2577527fe6c45fd75e4142d63f308812f56f0928f344527da9f
   // UTXO id of initial MD box
-  final val MD_GENESIS_ID = "5c58ef843bda73373ff093e06f7bc48db713ccb0dd0cf3f17eb7e9bfabe409cd"
+  final val MD_GENESIS_ID = "a89dfe24861c310e09f7593bdd5a847f6564ac9b3d49b9ff24b084252d5c1dd5"
 
   // Lithos token & emission parameters
   final val INIT_MINT = Parameters.OneErg * 1000000000 // 1 billion LIT
-  final val LIT_ID = ErgoId.create("7b728ca02a23085f1f7093e949535938c55307ab1b61e848008201c5109bd18b")
+
+  /**
+   * Every protocol singleton is declared per network, because these are compiled into contracts.
+   *
+   * A single shared value means re-minting one network moves the other network's contract hashes,
+   * and those hashes are what `FP_CONTROL`, the emission box and its config are minted against. The
+   * mainnet entries below are placeholder copies of testnet except `LIT_ID_MAINNET`, which is real.
+   * Read them through the accessors, never directly.
+   */
+  final val LIT_ID_TESTNET = ErgoId.create("7b728ca02a23085f1f7093e949535938c55307ab1b61e848008201c5109bd18b")
   // CONFIRMED MAINNET ID
   final val LIT_ID_MAINNET = ErgoId.create("c1980d829988229516430a47a5eca376060b6ce859616db0936e78ab25cb6de7")
-  final val EMISSION_NFT = ErgoId.create("4169fcef923f8cb791f238103b900792427b79148a6ef709134d5c196212ae88")
+
+  final val EMISSION_NFT_TESTNET = ErgoId.create("66f432da1cb637e8395b8d557b7aa10bbcc192fbf7bd979c9d7face85e89be63")
   // TODO: Change before launch
+  final val EMISSION_NFT_MAINNET = ErgoId.create("66f432da1cb637e8395b8d557b7aa10bbcc192fbf7bd979c9d7face85e89be63")
+
   // Emission Config NFT
-  final val EMCONFIG_NFT = ErgoId.create("fd8752a46a68340ff33805db57d0ff4d8bd1680c533c4313dc4e9cb71b260725")
+  final val EMCONFIG_NFT_TESTNET = ErgoId.create("5413ebe452ccfc4e1838607f0ca6177e803ea3b6dc6832edc0360476b7b3b6a0")
+  // TODO: Change before launch
+  final val EMCONFIG_NFT_MAINNET = ErgoId.create("5413ebe452ccfc4e1838607f0ca6177e803ea3b6dc6832edc0360476b7b3b6a0")
+
   // Ids and amount of proposition tokens on Emission contract
-  final val COLLAT_TOKEN = ErgoId.create("09e991239e5544a6996216440d42e6ec636aea718c8c7cbc2e54f90e832f2e1e")
-  final val QUEUE_TOKEN  = ErgoId.create("0c3b6465e865278e80fba1fc903d4d390daf5d87c097936c181cd8d7b753f4dd")
+  final val COLLAT_TOKEN_TESTNET = ErgoId.create("04e0d566a96a2575fbd0893fbc1dd64d8ae8bdb49dbd58b5588479d2e5c09ed4")
+  // TODO: Change before launch
+  final val COLLAT_TOKEN_MAINNET = ErgoId.create("04e0d566a96a2575fbd0893fbc1dd64d8ae8bdb49dbd58b5588479d2e5c09ed4")
+
+  final val QUEUE_TOKEN_TESTNET = ErgoId.create("22c379500b31c1fa1b20b24eb0ca8f29a0bdfe6090400ae2e5d7cb27f7817573")
+  // TODO: Change before launch
+  final val QUEUE_TOKEN_MAINNET = ErgoId.create("22c379500b31c1fa1b20b24eb0ca8f29a0bdfe6090400ae2e5d7cb27f7817573")
+
   final val PROP_TOKEN_AMNT = Long.MaxValue
 
   final val PERMIT_FLOOR = 2000L * Parameters.OneErg
@@ -207,6 +228,31 @@ object LFSMHelpers {
       case NetworkType.MAINNET => MD_TOKEN_MAINNET
       case NetworkType.TESTNET => MD_TOKEN_TESTNET
     }
+  }
+
+  def getLitId(networkType: NetworkType): ErgoId = networkType match {
+    case NetworkType.MAINNET => LIT_ID_MAINNET
+    case NetworkType.TESTNET => LIT_ID_TESTNET
+  }
+
+  def getEmissionNft(networkType: NetworkType): ErgoId = networkType match {
+    case NetworkType.MAINNET => EMISSION_NFT_MAINNET
+    case NetworkType.TESTNET => EMISSION_NFT_TESTNET
+  }
+
+  def getEmConfigNft(networkType: NetworkType): ErgoId = networkType match {
+    case NetworkType.MAINNET => EMCONFIG_NFT_MAINNET
+    case NetworkType.TESTNET => EMCONFIG_NFT_TESTNET
+  }
+
+  def getCollatToken(networkType: NetworkType): ErgoId = networkType match {
+    case NetworkType.MAINNET => COLLAT_TOKEN_MAINNET
+    case NetworkType.TESTNET => COLLAT_TOKEN_TESTNET
+  }
+
+  def getQueueToken(networkType: NetworkType): ErgoId = networkType match {
+    case NetworkType.MAINNET => QUEUE_TOKEN_MAINNET
+    case NetworkType.TESTNET => QUEUE_TOKEN_TESTNET
   }
 
   def getMDToken(client: ErgoClient): ErgoId = {

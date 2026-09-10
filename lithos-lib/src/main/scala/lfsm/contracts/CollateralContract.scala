@@ -67,7 +67,7 @@ object CollateralContract {
   def mkEmissionGateContract(ctx: BlockchainContext): Contract = {
     val constants = ConstantsBuilder
       .create()
-      .item("CONST_EMISSION_NFT", Colls.fromArray(LFSMHelpers.EMISSION_NFT.getBytes))
+      .item("CONST_EMISSION_NFT", Colls.fromArray(LFSMHelpers.getEmissionNft(ctx.getNetworkType).getBytes))
       .build()
 
     Contract.fromErgoScript(ctx, constants, ScriptGenerator.mkCollatScript("Emission_Gate"))
@@ -75,7 +75,7 @@ object CollateralContract {
   def mkEmissionGateContract(networkType: NetworkType): Contract = {
     val constants = ConstantsBuilder
       .create()
-      .item("CONST_EMISSION_NFT", Colls.fromArray(LFSMHelpers.EMISSION_NFT.getBytes))
+      .item("CONST_EMISSION_NFT", Colls.fromArray(LFSMHelpers.getEmissionNft(networkType).getBytes))
       .build()
     Contract.fromErgoScript(networkType, constants, ScriptGenerator.mkCollatScript("Emission_Gate"), Seq.empty)
   }

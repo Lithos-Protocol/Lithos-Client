@@ -259,6 +259,22 @@ class CommitmentTransactionsSpec
     f.commitments.commitmentForNISP(height).isFailure shouldBe true
   }
 
+  /**
+   * The two failures mean opposite things to the caller, so the type is the contract.
+   *
+   * A rollup's start height and the commitment it is judged against are both fixed, so nothing this
+   * rollup can wait for changes the answer and it is dropped. A missing data box is registration or
+   * synchronisation state, resolves on its own, and must never drop anything.
+   */
+  it should "report a commitment that cannot take effect distinctly from a missing data box" in {
+    val notInEffect = fixture(Some(Seq(height -> 999L))).commitments.commitmentForNISP(height)
+    notInEffect.failed.get shouldBe a[CommitmentNotInEffectException]
+
+    val noBox = fixture(None).commitments.commitmentForNISP(height)
+    noBox.failed.get shouldBe a[state.DataBoxRetrievalException]
+    noBox.failed.get should not be a[CommitmentNotInEffectException]
+  }
+
   it should "fail rather than default when there is no data box" in {
     fixture(None).commitments.commitmentForNISP(height).isFailure shouldBe true
   }

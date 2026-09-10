@@ -154,7 +154,19 @@ class MempoolView @Inject()(config: play.api.Configuration,
       completeObservation = result match {
         case Success(walk) =>
           CompleteMempool.Observation(completeObservation.revision + 1L, Some(walk.observation), None)
-        case Failure(ex) => completeObservation.copy(failure = Some(ex.getMessage))
+        case Failure(ex) =>
+          // Say why. Every consumer that refuses a spend downstream reports only that it lacked a
+          // fresh observation, which names the symptom and not the cause. Churn is ordinary and the
+          // previous observation still stands, so it is separated from a genuine reader fault.
+          val waiting = completeWaiters.size
+          ex match {
+            case raced: CompleteMempool.Raced =>
+              logger.info(s"Mempool walk raced and will retry, $waiting waiter(s): ${raced.getMessage}")
+            case _ =>
+              logger.warn(s"Mempool walk failed, $waiting waiter(s) refused a spend this round: " +
+                s"${ex.getMessage}", ex)
+          }
+          completeObservation.copy(failure = Some(ex.getMessage))
       }
       completeWaiters.foreach(_ ! completeObservation)
       completeWaiters = Vector.empty
@@ -199,7 +211,7 @@ class MempoolView @Inject()(config: play.api.Configuration,
 
   /** Collect once, then derive the rollup view from what that collection retained. */
   private def buildWalk(): Try[Walk] =
-    CompleteMempool.collect(completeNode).map(observed => Walk(observed, Try(project(observed))))
+    CompleteMempool.collect(completeNode, nodeContext.getNetwork).map(observed => Walk(observed, Try(project(observed))))
 
   /**
    * Derive the rollup chains from one complete observation, rather than paging the rollup scripts

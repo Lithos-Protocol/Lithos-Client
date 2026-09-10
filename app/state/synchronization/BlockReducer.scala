@@ -37,7 +37,7 @@ final case class SyncProtocolContext(networkType: NetworkType,
                                      minerDictionaryToken: ErgoId,
                                      minerDictionaryGenesisId: String = LFSMHelpers.MD_GENESIS_ID,
                                      minerDictionaryStartHeight: Int = LFSMHelpers.MD_GENESIS_HEIGHT,
-                                     collateralToken: ErgoId = LFSMHelpers.COLLAT_TOKEN)
+                                     collateralToken: ErgoId)
 
 object SyncProtocolContext {
   def apply(networkType: NetworkType, rollupStartHeight: Int, localMinerHash: Array[Byte]): SyncProtocolContext = {
@@ -46,7 +46,8 @@ object SyncProtocolContext {
     val contracts = ProtocolContracts.forNetwork(networkType)
     SyncProtocolContext(networkType, rollupStartHeight, localMinerHash.clone(),
       contracts.holding.ergoTreeHex, contracts.eval.ergoTreeHex, contracts.payout.ergoTreeHex,
-      contracts.collateral.ergoTreeHex, LFSMHelpers.getMDToken(networkType))
+      contracts.collateral.ergoTreeHex, LFSMHelpers.getMDToken(networkType),
+      collateralToken = LFSMHelpers.getCollatToken(networkType))
   }
 }
 

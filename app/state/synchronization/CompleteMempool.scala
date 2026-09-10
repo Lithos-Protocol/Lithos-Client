@@ -1,6 +1,7 @@
 package state.synchronization
 
 import node.NodeApi
+import org.ergoplatform.appkit.NetworkType
 import node.rest.NodeCodecs
 
 import java.nio.charset.StandardCharsets.UTF_8
@@ -87,7 +88,7 @@ object CompleteMempool {
    * Walk the whole mempool once. Fails rather than returning a partial view: an incomplete walk
    * cannot tell an absent transaction from an unfetched one, and callers treat absence as "unspent".
    */
-  def collect(node: NodeApi): Try[Snapshot] = Try {
+  def collect(node: NodeApi, network: NetworkType): Try[Snapshot] = Try {
     val startedAt = System.nanoTime()
     def requireWithinDeadline(): Unit =
       require(System.nanoTime() - startedAt < MaxWalkNanos, "mempool refresh deadline exceeded")
@@ -148,7 +149,7 @@ object CompleteMempool {
       decodedBytes += sizeBytes
       require(decodedBytes <= MaxBytes, "mempool body budget exceeded")
 
-      tx.outputs.foreach(box => lenderKeyOf(box).foreach { key =>
+      tx.outputs.foreach(box => lenderKeyOf(box, network).foreach { key =>
         lenderKeys += key
         require(lenderKeys.size <= MaxInputs, "mempool lender key budget exceeded")
       })
@@ -188,11 +189,11 @@ object CompleteMempool {
    * A protocol-token box whose registers do not match its contract makes the whole observation
    * unavailable, which is the safe direction: it can never imply that a key is free.
    */
-  private def lenderKeyOf(box: node.model.NodeBox): Option[String] = {
+  private def lenderKeyOf(box: node.model.NodeBox, network: NetworkType): Option[String] = {
     import _root_.node.MutationConversions._
     val singleton = box.assets.headOption.filter(_.amount == 1L).map(_.tokenId)
-    val queueToken = lfsm.LFSMHelpers.QUEUE_TOKEN.toString
-    val collateralToken = lfsm.LFSMHelpers.COLLAT_TOKEN.toString
+    val queueToken = lfsm.LFSMHelpers.getQueueToken(network).toString
+    val collateralToken = lfsm.LFSMHelpers.getCollatToken(network).toString
     singleton.filter(id => id == queueToken || id == collateralToken).map { token =>
       val registers = box.registerValues
       // A live collateral box stores the key directly; a queue position stores the lender's

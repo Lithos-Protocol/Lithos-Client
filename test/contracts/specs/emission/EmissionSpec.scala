@@ -84,9 +84,9 @@ class EmissionSpec extends AnyPropSpec with EmissionSpecBase {
     withCtx { ctx =>
       val j = joinScenario(ctx)
       val extraNft = funding(ctx, j.lenderProver,
-        Seq(Token(LFSMHelpers.LIT_ID, j.permit), Token(LFSMHelpers.EMISSION_NFT, 1L)))
+        Seq(Token(LFSMHelpers.LIT_ID_MAINNET, j.permit), Token(LFSMHelpers.EMISSION_NFT_MAINNET, 1L)))
       val out = j.emissionOut.setTokens(
-        Token(LFSMHelpers.EMISSION_NFT, 2L) +: j.emissionOut.tokens.tail: _*)
+        Token(LFSMHelpers.EMISSION_NFT_MAINNET, 2L) +: j.emissionOut.tokens.tail: _*)
       rejectsAtSigning(j.prover, joinTx(j)(emissionOut = out, inputs = Seq(j.emissionIn, extraNft)))
     }
   }
@@ -131,11 +131,11 @@ class EmissionSpec extends AnyPropSpec with EmissionSpecBase {
     withCtx { ctx =>
       val j = joinScenario(ctx)
       val queueOut = queueUTXO(ctx, j.lenderProver, position = 0L, permit = j.permit,
-        queueTokenId = LFSMHelpers.COLLAT_TOKEN)
+        queueTokenId = LFSMHelpers.COLLAT_TOKEN_MAINNET)
       val out = emissionUTXO(ctx, tail = 1L, queueTokens = queueSupply - 1L,
         collatTokens = collatSupply - 1L)
       rejectsAtSigning(j.prover, joinTx(j)(emissionOut = out, queueOut = queueOut,
-        burn = Seq(Token(LFSMHelpers.QUEUE_TOKEN, 1L))))
+        burn = Seq(Token(LFSMHelpers.QUEUE_TOKEN_MAINNET, 1L))))
     }
   }
 
@@ -144,7 +144,7 @@ class EmissionSpec extends AnyPropSpec with EmissionSpecBase {
     withCtx { ctx =>
       val j = joinScenario(ctx)
       val queueOut = j.queueOut.setTokens(
-        Token(LFSMHelpers.QUEUE_TOKEN, 2L) +: j.queueOut.tokens.tail: _*)
+        Token(LFSMHelpers.QUEUE_TOKEN_MAINNET, 2L) +: j.queueOut.tokens.tail: _*)
       val out = emissionUTXO(ctx, tail = 1L, queueTokens = queueSupply - 2L)
       rejectsAtSigning(j.prover, joinTx(j)(emissionOut = out, queueOut = queueOut))
     }
@@ -153,7 +153,7 @@ class EmissionSpec extends AnyPropSpec with EmissionSpecBase {
   property("join: rejects a queue box carrying a third token (tokens.size)") {
     withCtx { ctx =>
       val j = joinScenario(ctx)
-      val in = funding(ctx, j.lenderProver, Seq(Token(LFSMHelpers.LIT_ID, j.permit), otherToken()))
+      val in = funding(ctx, j.lenderProver, Seq(Token(LFSMHelpers.LIT_ID_MAINNET, j.permit), otherToken()))
       rejectsAtSigning(j.prover, joinTx(j)(queueOut = j.queueOut.addToken(otherToken()),
         inputs = Seq(j.emissionIn, in)))
     }
@@ -211,9 +211,9 @@ class EmissionSpec extends AnyPropSpec with EmissionSpecBase {
     withCtx { ctx =>
       val j = joinScenario(ctx, propSupply = belowCeiling)
       val in = funding(ctx, j.lenderProver,
-        Seq(Token(LFSMHelpers.LIT_ID, j.permit), Token(LFSMHelpers.QUEUE_TOKEN, 1L)))
+        Seq(Token(LFSMHelpers.LIT_ID_MAINNET, j.permit), Token(LFSMHelpers.QUEUE_TOKEN_MAINNET, 1L)))
       rejectsAtSigning(j.prover, joinTx(j)(inputs = Seq(j.emissionIn, in),
-        burn = Seq(Token(LFSMHelpers.QUEUE_TOKEN, 1L))))
+        burn = Seq(Token(LFSMHelpers.QUEUE_TOKEN_MAINNET, 1L))))
     }
   }
 
@@ -221,9 +221,9 @@ class EmissionSpec extends AnyPropSpec with EmissionSpecBase {
     withCtx { ctx =>
       val j = joinScenario(ctx, propSupply = belowCeiling)
       val in = funding(ctx, j.lenderProver,
-        Seq(Token(LFSMHelpers.LIT_ID, j.permit), Token(LFSMHelpers.COLLAT_TOKEN, 1L)))
+        Seq(Token(LFSMHelpers.LIT_ID_MAINNET, j.permit), Token(LFSMHelpers.COLLAT_TOKEN_MAINNET, 1L)))
       rejectsAtSigning(j.prover, joinTx(j)(inputs = Seq(j.emissionIn, in),
-        burn = Seq(Token(LFSMHelpers.COLLAT_TOKEN, 1L))))
+        burn = Seq(Token(LFSMHelpers.COLLAT_TOKEN_MAINNET, 1L))))
     }
   }
 
@@ -232,7 +232,7 @@ class EmissionSpec extends AnyPropSpec with EmissionSpecBase {
       val j = joinScenario(ctx)
       val out = emissionUTXO(ctx, tail = 1L, queueTokens = queueSupply - 2L)
       rejectsAtSigning(j.prover, joinTx(j)(emissionOut = out,
-        burn = Seq(Token(LFSMHelpers.QUEUE_TOKEN, 1L))))
+        burn = Seq(Token(LFSMHelpers.QUEUE_TOKEN_MAINNET, 1L))))
     }
   }
 
@@ -242,7 +242,7 @@ class EmissionSpec extends AnyPropSpec with EmissionSpecBase {
       val out = emissionUTXO(ctx, tail = 1L, queueTokens = queueSupply - 1L,
         collatTokens = collatSupply - 1L)
       rejectsAtSigning(j.prover, joinTx(j)(emissionOut = out,
-        burn = Seq(Token(LFSMHelpers.COLLAT_TOKEN, 1L))))
+        burn = Seq(Token(LFSMHelpers.COLLAT_TOKEN_MAINNET, 1L))))
     }
   }
 
@@ -280,14 +280,14 @@ class EmissionSpec extends AnyPropSpec with EmissionSpecBase {
       val out = j.emissionOut.setTokens(
         j.emissionOut.tokens.take(3) :+ otherToken(litSupply): _*)
       rejectsAtSigning(j.prover, joinTx(j)(emissionOut = out, inputs = Seq(j.emissionIn, in),
-        burn = Seq(Token(LFSMHelpers.LIT_ID, litSupply))))
+        burn = Seq(Token(LFSMHelpers.LIT_ID_MAINNET, litSupply))))
     }
   }
 
   property("join: rejects a successor carrying an extra token (tokens.size)") {
     withCtx { ctx =>
       val j = joinScenario(ctx)
-      val in = funding(ctx, j.lenderProver, Seq(Token(LFSMHelpers.LIT_ID, j.permit), otherToken()))
+      val in = funding(ctx, j.lenderProver, Seq(Token(LFSMHelpers.LIT_ID_MAINNET, j.permit), otherToken()))
       rejectsAtSigning(j.prover, joinTx(j)(emissionOut = j.emissionOut.addToken(otherToken()),
         inputs = Seq(j.emissionIn, in)))
     }
@@ -395,7 +395,7 @@ class EmissionSpec extends AnyPropSpec with EmissionSpecBase {
     withCtx { ctx =>
       val a = activateScenario(ctx, currentBlock = 2 * EPOCH_LENGTH)
       a.emitted shouldBe 590L * LIT
-      val in = funding(ctx, a.lenderProver, Seq(Token(LFSMHelpers.LIT_ID, 50L * LIT)), 3)
+      val in = funding(ctx, a.lenderProver, Seq(Token(LFSMHelpers.LIT_ID_MAINNET, 50L * LIT)), 3)
       val wrong = collateralUTXO(ctx, a.lenderProver, lit = 640L * LIT + a.permit,
         pub = 500L * LIT, founderSplit = founders)
       rejectsAtSigning(a.prover, activateTx(a)(collatOut = wrong,
@@ -433,8 +433,8 @@ class EmissionSpec extends AnyPropSpec with EmissionSpecBase {
   property("activate: rejects a successor still listing LIT once the supply is exhausted (litEmitted)") {
     withCtx { ctx =>
       val a = activateScenario(ctx, lit = 640L * LIT)
-      val in = funding(ctx, a.lenderProver, Seq(Token(LFSMHelpers.LIT_ID, LIT)), 3)
-      val out = a.emissionOut.addToken(Token(LFSMHelpers.LIT_ID, LIT))
+      val in = funding(ctx, a.lenderProver, Seq(Token(LFSMHelpers.LIT_ID_MAINNET, LIT)), 3)
+      val out = a.emissionOut.addToken(Token(LFSMHelpers.LIT_ID_MAINNET, LIT))
       rejectsAtSigning(a.prover, activateTx(a)(emissionOut = out,
         inputs = Seq(a.emissionIn, a.queueIn, in)))
     }
@@ -491,7 +491,7 @@ class EmissionSpec extends AnyPropSpec with EmissionSpecBase {
     withCtx { ctx =>
       val a = activateScenario(ctx, lenderSet = fullSet(retiringLender, 42),
         retiring = Some((retiringLender, 42)))
-      val notAProof = funding(ctx, a.lenderProver, Seq(Token(LFSMHelpers.COLLAT_TOKEN, 1L)), 2)
+      val notAProof = funding(ctx, a.lenderProver, Seq(Token(LFSMHelpers.COLLAT_TOKEN_MAINNET, 1L)), 2)
       rejectsAtSigning(a.prover, activateTx(a)(inputs = Seq(a.emissionIn, a.queueIn, notAProof)))
     }
   }
@@ -510,7 +510,7 @@ class EmissionSpec extends AnyPropSpec with EmissionSpecBase {
       val a = activateScenario(ctx, lenderSet = fullSet(retiringLender, 42),
         retiring = Some((retiringLender, 42)))
       val fake = inputAt(proofOfSpendUTXO(ctx, retiringLender)
-        .setTokens(otherToken(), Token(LFSMHelpers.COLLAT_TOKEN, 1L)), ctx, 2)
+        .setTokens(otherToken(), Token(LFSMHelpers.COLLAT_TOKEN_MAINNET, 1L)), ctx, 2)
       rejectsAtSigning(a.prover, activateTx(a)(inputs = Seq(a.emissionIn, a.queueIn, fake, a.funding),
         burn = Seq(otherToken())))
     }
@@ -568,7 +568,7 @@ class EmissionSpec extends AnyPropSpec with EmissionSpecBase {
   property("activate: rejects a collateral box carrying more LIT than was emitted (collatLIT amount)") {
     withCtx { ctx =>
       val a = activateScenario(ctx)
-      val in = funding(ctx, a.lenderProver, Seq(Token(LFSMHelpers.LIT_ID, LIT)), 3)
+      val in = funding(ctx, a.lenderProver, Seq(Token(LFSMHelpers.LIT_ID_MAINNET, LIT)), 3)
       val greedy = collateralUTXO(ctx, a.lenderProver, lit = a.emitted + a.permit + LIT,
         pub = 500L * LIT, founderSplit = founders)
       rejectsAtSigning(a.prover, activateTx(a)(collatOut = greedy,
@@ -660,9 +660,9 @@ class EmissionSpec extends AnyPropSpec with EmissionSpecBase {
   property("activate: rejects an extra queue token entering the transaction (totalInInputs)") {
     withCtx { ctx =>
       val a = activateScenario(ctx, propSupply = belowCeiling)
-      val in = funding(ctx, a.lenderProver, Seq(Token(LFSMHelpers.QUEUE_TOKEN, 1L)), 3)
+      val in = funding(ctx, a.lenderProver, Seq(Token(LFSMHelpers.QUEUE_TOKEN_MAINNET, 1L)), 3)
       rejectsAtSigning(a.prover, activateTx(a)(inputs = Seq(a.emissionIn, a.queueIn, in),
-        burn = Seq(Token(LFSMHelpers.QUEUE_TOKEN, 1L))))
+        burn = Seq(Token(LFSMHelpers.QUEUE_TOKEN_MAINNET, 1L))))
     }
   }
 
@@ -670,9 +670,9 @@ class EmissionSpec extends AnyPropSpec with EmissionSpecBase {
     withCtx { ctx =>
       val a = activateScenario(ctx)
       val out = a.emissionOut.setTokens(
-        a.emissionOut.tokens.updated(1, Token(LFSMHelpers.QUEUE_TOKEN, queueSupply - 1L)): _*)
+        a.emissionOut.tokens.updated(1, Token(LFSMHelpers.QUEUE_TOKEN_MAINNET, queueSupply - 1L)): _*)
       rejectsAtSigning(a.prover, activateTx(a)(emissionOut = out,
-        burn = Seq(Token(LFSMHelpers.QUEUE_TOKEN, 1L))))
+        burn = Seq(Token(LFSMHelpers.QUEUE_TOKEN_MAINNET, 1L))))
     }
   }
 
@@ -680,9 +680,9 @@ class EmissionSpec extends AnyPropSpec with EmissionSpecBase {
     withCtx { ctx =>
       val a = activateScenario(ctx)
       val out = a.emissionOut.setTokens(
-        a.emissionOut.tokens.updated(2, Token(LFSMHelpers.COLLAT_TOKEN, collatSupply - 2L)): _*)
+        a.emissionOut.tokens.updated(2, Token(LFSMHelpers.COLLAT_TOKEN_MAINNET, collatSupply - 2L)): _*)
       rejectsAtSigning(a.prover, activateTx(a)(emissionOut = out,
-        burn = Seq(Token(LFSMHelpers.COLLAT_TOKEN, 1L))))
+        burn = Seq(Token(LFSMHelpers.COLLAT_TOKEN_MAINNET, 1L))))
     }
   }
 
@@ -734,7 +734,7 @@ class EmissionSpec extends AnyPropSpec with EmissionSpecBase {
     withCtx { ctx =>
       val c = clearScenario(ctx)
       val out = c.emissionOut.setTokens(
-        c.emissionOut.tokens.updated(1, Token(LFSMHelpers.QUEUE_TOKEN, queueSupply - 1L)): _*)
+        c.emissionOut.tokens.updated(1, Token(LFSMHelpers.QUEUE_TOKEN_MAINNET, queueSupply - 1L)): _*)
       rejectsAtSigning(c.prover, clearTx(c)(emissionOut = out))
     }
   }
@@ -743,7 +743,7 @@ class EmissionSpec extends AnyPropSpec with EmissionSpecBase {
     withCtx { ctx =>
       val c = clearScenario(ctx)
       val out = c.emissionOut.setTokens(
-        c.emissionOut.tokens.updated(2, Token(LFSMHelpers.COLLAT_TOKEN, collatSupply - 1L)): _*)
+        c.emissionOut.tokens.updated(2, Token(LFSMHelpers.COLLAT_TOKEN_MAINNET, collatSupply - 1L)): _*)
       rejectsAtSigning(c.prover, clearTx(c)(emissionOut = out))
     }
   }
@@ -752,7 +752,7 @@ class EmissionSpec extends AnyPropSpec with EmissionSpecBase {
     withCtx { ctx =>
       val c = clearScenario(ctx)
       val out = c.emissionOut.setTokens(
-        c.emissionOut.tokens.updated(3, Token(LFSMHelpers.LIT_ID, litSupply - LIT)): _*)
+        c.emissionOut.tokens.updated(3, Token(LFSMHelpers.LIT_ID_MAINNET, litSupply - LIT)): _*)
       rejectsAtSigning(c.prover, clearTx(c)(emissionOut = out))
     }
   }

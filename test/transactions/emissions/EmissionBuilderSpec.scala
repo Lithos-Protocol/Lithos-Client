@@ -92,7 +92,7 @@ class EmissionBuilderSpec extends AnyPropSpec with EmissionSpecBase with Mockito
 
   private def funding(ctx: BlockchainContext, wallet: NodeWallet, permit: Long,
                       value: Long = 10L * Parameters.OneErg): InputUTXO = {
-    val tokens = if (permit > 0) Seq(Token(LFSMHelpers.LIT_ID, permit)) else Seq.empty[Token]
+    val tokens = if (permit > 0) Seq(Token(LFSMHelpers.LIT_ID_MAINNET, permit)) else Seq.empty[Token]
     inputAt(UTXO(wallet.contract, value, tokens), ctx, 1)
   }
 

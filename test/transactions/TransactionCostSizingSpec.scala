@@ -494,7 +494,7 @@ class TransactionCostSizingSpec extends AnyPropSpec with BeforeAndAfterAll
         txs.genJoin(ctx, emissionInputAt(ctx, Seq.empty, 0L, 0L), emissionConfigInput(ctx),
           wallet.p2pk,
           Seq(inputAt(UTXO(wallet.contract, 10L * Parameters.OneErg,
-            Seq(Token(LFSMHelpers.LIT_ID, permitAt(0L)))), ctx, 1))))
+            Seq(Token(LFSMHelpers.LIT_ID_MAINNET, permitAt(0L)))), ctx, 1))))
 
       // Bootstrapping: the active set has room, so a slot is appended rather than rotated.
       measure("emission", "activate (bootstrap, appends a slot)",

@@ -71,18 +71,18 @@ class HarnessProbeSpec extends AnyPropSpec with ContractSpecBase {
         "lithosdex/LD_FeeVault"           -> Try(LDContracts(ctx).feeVault),
         "lithosdex/LD_LiquidityPool"      -> Try(LDContracts(ctx).liquidityPool),
         "collateral/Collateral_Mainnet"   -> Try(CollateralContract.mkMainnetCollatContract(
-                                               ctx, LFSMHelpers.EMISSION_NFT, dummyHash, LFSMHelpers.LIT_ID)),
+                                               ctx, LFSMHelpers.EMISSION_NFT_MAINNET, dummyHash, LFSMHelpers.LIT_ID_MAINNET)),
         "collateral/Collateral_Testnet"   -> Try(CollateralContract.mkTestnetCollatContract(ctx, dummyHash)),
         "collateral/LIT_Emissions"        -> Try(CollateralContract.mkEmissionsContract(
-                                               ctx, dummyHash, dummyHash, LFSMHelpers.LIT_ID)),
+                                               ctx, dummyHash, dummyHash, LFSMHelpers.LIT_ID_MAINNET)),
         "collateral/Emission_Gate"        -> Try(CollateralContract.mkEmissionGateContract(ctx)),
         "collateral/Emission_Guard"       -> Try(CollateralContract.mkEmissionsGuardContract(
-                                               ctx, LFSMHelpers.EMISSION_NFT, LFSMHelpers.EMISSION_NFT,
-                                               dummyHash, dummyHash, LFSMHelpers.LIT_ID)),
+                                               ctx, LFSMHelpers.EMISSION_NFT_MAINNET, LFSMHelpers.EMISSION_NFT_MAINNET,
+                                               dummyHash, dummyHash, LFSMHelpers.LIT_ID_MAINNET)),
         "collateral/Emission_Config"      -> Try(CollateralContract.mkEmConfigContract(
                                                ctx, ContractProbe.dummyOwner(ctx))),
         "collateral/Collateral_Enforcer"  -> Try(CollateralContract.mkCollateralEnforcerContract(
-                                               ctx, LFSMHelpers.LIT_ID))
+                                               ctx, LFSMHelpers.LIT_ID_MAINNET))
       )
 
       println("\n[inventory] production contract builders")

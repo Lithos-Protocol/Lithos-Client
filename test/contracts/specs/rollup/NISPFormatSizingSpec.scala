@@ -135,17 +135,17 @@ class NISPFormatSizingSpec extends AnyPropSpec with EmissionSpecBase with Rollup
     val founderBoxes = split.map { case (key, amount) =>
       val recipient = Seq(LFSMHelpers.FOUNDER_1, LFSMHelpers.FOUNDER_2, LFSMHelpers.FOUNDER_3)
         .find(c => java.util.Arrays.equals(c.hashedPropBytes, key)).get
-      UTXO(recipient, 1000000L, Seq(Token(LFSMHelpers.LIT_ID, amount)))
+      UTXO(recipient, 1000000L, Seq(Token(LFSMHelpers.LIT_ID_MAINNET, amount)))
     }
-    val permitBox = UTXO(contractOf(lenderProver), 1000000L, Seq(Token(LFSMHelpers.LIT_ID, permit)))
-    val pos = UTXO(gateContract(ctx), 200000L, Seq(Token(LFSMHelpers.COLLAT_TOKEN, 1L)),
+    val permitBox = UTXO(contractOf(lenderProver), 1000000L, Seq(Token(LFSMHelpers.LIT_ID_MAINNET, permit)))
+    val pos = UTXO(gateContract(ctx), 200000L, Seq(Token(LFSMHelpers.COLLAT_TOKEN_MAINNET, 1L)),
       Seq(bytesValue(setEntry(lenderProver)))).setCreationHeight(height)
-    val finderBox = UTXO(contractOf(finderProver), 200000L, Seq(Token(LFSMHelpers.LIT_ID, finderLIT)))
+    val finderBox = UTXO(contractOf(finderProver), 200000L, Seq(Token(LFSMHelpers.LIT_ID_MAINNET, finderLIT)))
 
     val trailing = founderBoxes ++ Seq(permitBox, pos, finderBox)
     // Token 0 is the rollup NFT, minted from the collateral box's own id; LIT sits behind it.
     val holding = UTXO(rollup, collatBox.value - trailing.map(_.value).sum,
-      Seq(Token(collatIn.id, 1L), Token(LFSMHelpers.LIT_ID, poolLIT)),
+      Seq(Token(collatIn.id, 1L), Token(LFSMHelpers.LIT_ID_MAINNET, poolLIT)),
       Seq(emptyTree.ergoValue, ErgoValue.of(0), ErgoValue.of(BigInt(0).bigInteger),
         stateReg(height.toLong, height.toLong, 0L),
         bytesValue(contractOf(finderProver).hashedPropBytes)))
@@ -387,21 +387,21 @@ class NISPFormatSizingSpec extends AnyPropSpec with EmissionSpecBase with Rollup
         val founderBoxes = split.map { case (key, amount) =>
           val recipient = Seq(LFSMHelpers.FOUNDER_1, LFSMHelpers.FOUNDER_2, LFSMHelpers.FOUNDER_3)
             .find(c => java.util.Arrays.equals(c.hashedPropBytes, key)).get
-          UTXO(recipient, 1000000L, Seq(Token(LFSMHelpers.LIT_ID, amount)))
+          UTXO(recipient, 1000000L, Seq(Token(LFSMHelpers.LIT_ID_MAINNET, amount)))
         }
         val permitBox =
-          if (permit > 0) Seq(UTXO(contractOf(lenderProver), 1000000L, Seq(Token(LFSMHelpers.LIT_ID, permit))))
+          if (permit > 0) Seq(UTXO(contractOf(lenderProver), 1000000L, Seq(Token(LFSMHelpers.LIT_ID_MAINNET, permit))))
           else Seq.empty[UTXO]
-        val pos = UTXO(gateContract(ctx), 200000L, Seq(Token(LFSMHelpers.COLLAT_TOKEN, 1L)),
+        val pos = UTXO(gateContract(ctx), 200000L, Seq(Token(LFSMHelpers.COLLAT_TOKEN_MAINNET, 1L)),
           Seq(bytesValue(setEntry(lenderProver)))).setCreationHeight(height)
         val finderBox =
-          if (finderLIT > 0) Seq(UTXO(contractOf(finderProver), 200000L, Seq(Token(LFSMHelpers.LIT_ID, finderLIT))))
+          if (finderLIT > 0) Seq(UTXO(contractOf(finderProver), 200000L, Seq(Token(LFSMHelpers.LIT_ID_MAINNET, finderLIT))))
           else Seq.empty[UTXO]
 
         val trailing = founderBoxes ++ permitBox ++ Seq(pos) ++ finderBox
         val holding = UTXO(rollup, collatBox.value - trailing.map(_.value).sum,
           Seq(Token(collatIn.id, 1L)) ++
-            (if (poolLIT > 0) Seq(Token(LFSMHelpers.LIT_ID, poolLIT)) else Seq.empty[Token]),
+            (if (poolLIT > 0) Seq(Token(LFSMHelpers.LIT_ID_MAINNET, poolLIT)) else Seq.empty[Token]),
           Seq(emptyTree.ergoValue, ErgoValue.of(0), ErgoValue.of(BigInt(0).bigInteger),
             stateReg(height.toLong, height.toLong, 0L),
             bytesValue(contractOf(finderProver).hashedPropBytes)))

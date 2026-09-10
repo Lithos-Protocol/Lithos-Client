@@ -170,7 +170,7 @@ class CandidateTxBuilderSpec extends AnyFlatSpec with Matchers with EmissionSpec
       val tokens = outputsOf(data).head.getJSONArray("assets")
       tokens.getJSONObject(0).getString("tokenId") shouldEqual collat.id.toString
       tokens.getJSONObject(0).getLong("amount") shouldEqual 1L
-      tokens.getJSONObject(1).getString("tokenId") shouldEqual LFSMHelpers.LIT_ID.toString
+      tokens.getJSONObject(1).getString("tokenId") shouldEqual LFSMHelpers.LIT_ID_MAINNET.toString
     }
   }
 

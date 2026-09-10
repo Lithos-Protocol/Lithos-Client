@@ -86,7 +86,7 @@ class CollateralSpec extends AnyPropSpec with EmissionSpecBase with RollupSpecBa
                       extensionFlag: Byte = 0x00,
                       extScript: Contract = Contract.SIGMA_TRUE,
                       configExtHash: Array[Byte] = null,
-                      configNft: ErgoId = LFSMHelpers.EMCONFIG_NFT,
+                      configNft: ErgoId = LFSMHelpers.EMCONFIG_NFT_MAINNET,
                       rollupContract: Contract = null): Genesis = {
     val lenderProver = lender(ctx)
     val finderProver = miner(ctx)
@@ -110,25 +110,25 @@ class CollateralSpec extends AnyPropSpec with EmissionSpecBase with RollupSpecBa
     }
 
     val founderBoxes = split.map { case (key, amount) =>
-      UTXO(founderContract(key), founderBoxValue, Seq(Token(LFSMHelpers.LIT_ID, amount)))
+      UTXO(founderContract(key), founderBoxValue, Seq(Token(LFSMHelpers.LIT_ID_MAINNET, amount)))
     }
 
     val permitBox =
       if (permitChange > 0)
-        Some(UTXO(contractOf(lenderProver), permitBoxValue, Seq(Token(LFSMHelpers.LIT_ID, permitChange))))
+        Some(UTXO(contractOf(lenderProver), permitBoxValue, Seq(Token(LFSMHelpers.LIT_ID_MAINNET, permitChange))))
       else None
 
-    val pos = UTXO(gateContract(ctx), posBoxValue, Seq(Token(LFSMHelpers.COLLAT_TOKEN, 1L)),
+    val pos = UTXO(gateContract(ctx), posBoxValue, Seq(Token(LFSMHelpers.COLLAT_TOKEN_MAINNET, 1L)),
       Seq(bytesValue(setEntry(lenderProver)))).setCreationHeight(height)
 
     val finder = UTXO(contractOf(finderProver), finderBoxValue,
-      if (finderLIT > 0) Seq(Token(LFSMHelpers.LIT_ID, finderLIT)) else Seq.empty[Token])
+      if (finderLIT > 0) Seq(Token(LFSMHelpers.LIT_ID_MAINNET, finderLIT)) else Seq.empty[Token])
 
     val dust = founderBoxes.map(_.value).sum + permitBox.map(_.value).getOrElse(0L) + posBoxValue + finderBoxValue
     // Token 0 is the rollup NFT, taking the collateral box's id since that box is INPUTS(0).
     val holding = UTXO(holdingScript, collatBox.value - dust,
       Seq(Token(collatIn.id, 1L)) ++
-        (if (poolLIT > 0) Seq(Token(LFSMHelpers.LIT_ID, poolLIT)) else Seq.empty[Token]),
+        (if (poolLIT > 0) Seq(Token(LFSMHelpers.LIT_ID_MAINNET, poolLIT)) else Seq.empty[Token]),
       Seq(
         emptyTree.ergoValue,
         ErgoValue.of(0),
@@ -163,7 +163,7 @@ class CollateralSpec extends AnyPropSpec with EmissionSpecBase with RollupSpecBa
    */
   private def slack(g: Genesis): InputUTXO =
     inputAt(UTXO(contractOf(g.finderProver), 2L * Parameters.OneErg,
-      Seq(Token(LFSMHelpers.LIT_ID, 100L * LIT))), g.ctx, 5)
+      Seq(Token(LFSMHelpers.LIT_ID_MAINNET, 100L * LIT))), g.ctx, 5)
 
   private def genesisTx(g: Genesis)(outputs: Seq[UTXO] = outputsOf(g),
                                     inputs: Seq[InputUTXO] = Seq(g.collatIn),
@@ -313,7 +313,7 @@ class CollateralSpec extends AnyPropSpec with EmissionSpecBase with RollupSpecBa
   property("holding: rejects a holding box shorting the pool's LIT (tokensTransferred)") {
     withCtx { ctx =>
       val g = genesis(ctx)
-      val short = g.holding.setTokens(Token(LFSMHelpers.LIT_ID, g.poolLIT - 1L))
+      val short = g.holding.setTokens(Token(LFSMHelpers.LIT_ID_MAINNET, g.poolLIT - 1L))
       rejectsAtSigning(g.finderProver, genesisTx(g)(
         outputs = replacing(g, g.holding, short), inputs = Seq(g.collatIn, slack(g))))
     }
@@ -323,7 +323,7 @@ class CollateralSpec extends AnyPropSpec with EmissionSpecBase with RollupSpecBa
   property("holding: rejects a holding box taking the finder's share as well (tokensTransferred)") {
     withCtx { ctx =>
       val g = genesis(ctx)
-      val greedy = g.holding.setTokens(Token(LFSMHelpers.LIT_ID, g.poolLIT + g.finderLIT))
+      val greedy = g.holding.setTokens(Token(LFSMHelpers.LIT_ID_MAINNET, g.poolLIT + g.finderLIT))
       rejectsAtSigning(g.finderProver, genesisTx(g)(
         outputs = replacing(g, g.holding, greedy), inputs = Seq(g.collatIn, slack(g))))
     }
@@ -557,7 +557,7 @@ class CollateralSpec extends AnyPropSpec with EmissionSpecBase with RollupSpecBa
   property("permit: rejects a short permit return (permitChange)") {
     withCtx { ctx =>
       val g = genesis(ctx)
-      val short = g.permitBox.get.setTokens(Token(LFSMHelpers.LIT_ID, g.permitChange - 1L))
+      val short = g.permitBox.get.setTokens(Token(LFSMHelpers.LIT_ID_MAINNET, g.permitChange - 1L))
       rejectsAtSigning(g.finderProver, genesisTx(g)(
         outputs = replacing(g, g.permitBox.get, short), inputs = Seq(g.collatIn, slack(g))))
     }
@@ -585,7 +585,7 @@ class CollateralSpec extends AnyPropSpec with EmissionSpecBase with RollupSpecBa
   property("founders: rejects a short founder payment") {
     withCtx { ctx =>
       val g = genesis(ctx)
-      val short = g.founderBoxes.head.setTokens(Token(LFSMHelpers.LIT_ID, F1_RATE - 1L))
+      val short = g.founderBoxes.head.setTokens(Token(LFSMHelpers.LIT_ID_MAINNET, F1_RATE - 1L))
       rejectsAtSigning(g.finderProver, genesisTx(g)(
         outputs = replacing(g, g.founderBoxes.head, short), inputs = Seq(g.collatIn, slack(g))))
     }
@@ -714,7 +714,7 @@ class CollateralSpec extends AnyPropSpec with EmissionSpecBase with RollupSpecBa
   property("nft: rejects a holding box with no NFT at all (holdingNFT)") {
     withCtx { ctx =>
       val g = genesis(ctx)
-      val bare = g.holding.setTokens(Token(LFSMHelpers.LIT_ID, g.poolLIT))
+      val bare = g.holding.setTokens(Token(LFSMHelpers.LIT_ID_MAINNET, g.poolLIT))
       rejectsAtSigning(g.finderProver, genesisTx(g)(
         outputs = replacing(g, g.holding, bare), inputs = Seq(g.collatIn, slack(g))))
     }
@@ -730,8 +730,8 @@ class CollateralSpec extends AnyPropSpec with EmissionSpecBase with RollupSpecBa
       val g = genesis(ctx)
       val stranger = ErgoId.create("11" * 32)
       val funded = inputAt(UTXO(contractOf(g.finderProver), 2L * Parameters.OneErg,
-        Seq(Token(stranger, 1L), Token(LFSMHelpers.LIT_ID, 100L * LIT))), ctx, 5)
-      val wrong = g.holding.setTokens(Token(stranger, 1L), Token(LFSMHelpers.LIT_ID, g.poolLIT))
+        Seq(Token(stranger, 1L), Token(LFSMHelpers.LIT_ID_MAINNET, 100L * LIT))), ctx, 5)
+      val wrong = g.holding.setTokens(Token(stranger, 1L), Token(LFSMHelpers.LIT_ID_MAINNET, g.poolLIT))
       rejectsAtSigning(g.finderProver, genesisTx(g)(
         outputs = replacing(g, g.holding, wrong), inputs = Seq(g.collatIn, funded)))
     }
@@ -741,7 +741,7 @@ class CollateralSpec extends AnyPropSpec with EmissionSpecBase with RollupSpecBa
     withCtx { ctx =>
       val g = genesis(ctx)
       val two = g.holding.setTokens(
-        Token(g.collatIn.id, 2L), Token(LFSMHelpers.LIT_ID, g.poolLIT))
+        Token(g.collatIn.id, 2L), Token(LFSMHelpers.LIT_ID_MAINNET, g.poolLIT))
       rejectsAtSigning(g.finderProver, genesisTx(g)(
         outputs = replacing(g, g.holding, two), inputs = Seq(g.collatIn, slack(g))))
     }
@@ -767,7 +767,7 @@ class CollateralSpec extends AnyPropSpec with EmissionSpecBase with RollupSpecBa
       val g = genesis(ctx)
       g.poolLIT should be > 0L
       val swapped = g.holding.setTokens(
-        Token(LFSMHelpers.LIT_ID, g.poolLIT), Token(g.collatIn.id, 1L))
+        Token(LFSMHelpers.LIT_ID_MAINNET, g.poolLIT), Token(g.collatIn.id, 1L))
       rejectsAtSigning(g.finderProver, genesisTx(g)(
         outputs = replacing(g, g.holding, swapped), inputs = Seq(g.collatIn, slack(g))))
     }

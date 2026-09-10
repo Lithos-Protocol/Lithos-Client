@@ -75,10 +75,10 @@ object CollateralNodeFixtures {
     nodeBox(ctx, UTXO(
       ProtocolContracts(ctx).guard,
       Parameters.OneErg / 100,
-      Seq(Token(LFSMHelpers.EMISSION_NFT, 1L),
-        Token(LFSMHelpers.QUEUE_TOKEN, queueTokens),
-        Token(LFSMHelpers.COLLAT_TOKEN, collatTokens)) ++
-        (if (lit > 0) Seq(Token(LFSMHelpers.LIT_ID, lit)) else Seq.empty[Token]),
+      Seq(Token(LFSMHelpers.EMISSION_NFT_MAINNET, 1L),
+        Token(LFSMHelpers.QUEUE_TOKEN_MAINNET, queueTokens),
+        Token(LFSMHelpers.COLLAT_TOKEN_MAINNET, collatTokens)) ++
+        (if (lit > 0) Seq(Token(LFSMHelpers.LIT_ID_MAINNET, lit)) else Seq.empty[Token]),
       Seq(ErgoValue.of(currentBlock), lenderSetValue(lenderSet),
         ErgoValue.of(head), ErgoValue.of(tail))), index, txId)
 
@@ -96,7 +96,7 @@ object CollateralNodeFixtures {
     nodeBox(ctx, UTXO(
       Contract.SIGMA_TRUE,
       Parameters.MinFee,
-      Seq(Token(LFSMHelpers.EMCONFIG_NFT, 1L)),
+      Seq(Token(LFSMHelpers.EMCONFIG_NFT_MAINNET, 1L)),
       Seq(longs(params),
         bytes(c.enforcer.hashedValueBytes),
         bytes(Contract.SIGMA_TRUE.hashedValueBytes),
@@ -113,8 +113,8 @@ object CollateralNodeFixtures {
     nodeBox(ctx, UTXO(
       ProtocolContracts(ctx).gate,
       CollateralParams.PRINCIPAL_FLOOR,
-      Seq(Token(LFSMHelpers.QUEUE_TOKEN, 1L)) ++
-        (if (permit > 0) Seq(Token(LFSMHelpers.LIT_ID, permit)) else Seq.empty[Token]),
+      Seq(Token(LFSMHelpers.QUEUE_TOKEN_MAINNET, 1L)) ++
+        (if (permit > 0) Seq(Token(LFSMHelpers.LIT_ID_MAINNET, permit)) else Seq.empty[Token]),
       Seq(ErgoValue.of(CollateralParams.DUST_BUDGET),
         ErgoValue.of(Contract.fromAddress(lender).sigmaBoolean.get),
         ErgoValue.of(CollateralParams.EXTENSION_FLAG),
@@ -135,8 +135,8 @@ object CollateralNodeFixtures {
     nodeBox(ctx, UTXO(
       ProtocolContracts(ctx).collateral,
       value,
-      Seq(Token(LFSMHelpers.COLLAT_TOKEN, 1L)) ++
-        (if (carriedLit > 0) Seq(Token(LFSMHelpers.LIT_ID, carriedLit)) else Seq.empty[Token]),
+      Seq(Token(LFSMHelpers.COLLAT_TOKEN_MAINNET, 1L)) ++
+        (if (carriedLit > 0) Seq(Token(LFSMHelpers.LIT_ID_MAINNET, carriedLit)) else Seq.empty[Token]),
       Seq(ErgoValue.of(feeValue),
         ErgoValue.of(Contract.fromAddress(lender).sigmaBoolean.get),
         ErgoValue.pairOf(ErgoValue.of(0L),
@@ -161,6 +161,6 @@ object CollateralNodeFixtures {
     nodeBox(ctx, UTXO(
       ProtocolContracts(ctx).gate,
       Parameters.MinFee,
-      Seq(Token(LFSMHelpers.COLLAT_TOKEN, 1L)),
+      Seq(Token(LFSMHelpers.COLLAT_TOKEN_MAINNET, 1L)),
       Seq(bytes(retiring))).setCreationHeight(createdAt), index, txId)
 }

@@ -135,12 +135,12 @@ class EmissionTransactions(prover: NodeWallet,
    * belong to other lenders and are chained onto, never displaced.
    */
   def emissionTip(ctx: BlockchainContext): EmissionTip = {
-    val nft = LFSMHelpers.EMISSION_NFT.toString
+    val nft = LFSMHelpers.getEmissionNft(ctx.getNetworkType).toString
     val guardTree = contracts(ctx).guard.ergoTreeHex
     val confirmed = nodeApi
       .unspentBoxesByTokenId(nft, Paging.all(8), SortDirection.Desc, withMempool)
       .getOrElse(Seq.empty[IndexedBox])
-      .find(b => carriesOne(b, LFSMHelpers.EMISSION_NFT) && b.ergoTree == guardTree)
+      .find(b => carriesOne(b, LFSMHelpers.getEmissionNft(ctx.getNetworkType)) && b.ergoTree == guardTree)
       .map(_.toInputUTXO(ctx))
       .getOrElse(throw new CollateralNotFoundException(
         s"no unspent emission box carrying $nft - is the node indexed, and has emission launched?"))
@@ -178,13 +178,13 @@ class EmissionTransactions(prover: NodeWallet,
    */
   def configBox(ctx: BlockchainContext): InputUTXO =
     nodeApi
-      .unspentBoxesByTokenId(LFSMHelpers.EMCONFIG_NFT.toString, Paging.all(8), SortDirection.Desc,
+      .unspentBoxesByTokenId(LFSMHelpers.getEmConfigNft(ctx.getNetworkType).toString, Paging.all(8), SortDirection.Desc,
         MempoolOptions.ConfirmedOnly)
       .getOrElse(Seq.empty[IndexedBox])
-      .find(b => carriesOne(b, LFSMHelpers.EMCONFIG_NFT) && b.box.additionalRegisters.ordered.size >= 4)
+      .find(b => carriesOne(b, LFSMHelpers.getEmConfigNft(ctx.getNetworkType)) && b.box.additionalRegisters.ordered.size >= 4)
       .map(_.toInputUTXO(ctx))
       .getOrElse(throw new CollateralNotFoundException(
-        s"no unspent emission config box carrying ${LFSMHelpers.EMCONFIG_NFT}"))
+        s"no unspent emission config box carrying ${LFSMHelpers.getEmConfigNft(ctx.getNetworkType)}"))
 
   def readEmission(box: InputUTXO): EmissionState = EmissionState(
     currentBlock = box.parseReg[Int](0),
@@ -212,7 +212,7 @@ class EmissionTransactions(prover: NodeWallet,
   def queueBoxAt(ctx: BlockchainContext,
                  position: Long,
                  ancestors: Seq[NodeTransaction]): Option[InputUTXO] = {
-    val queueTok = LFSMHelpers.QUEUE_TOKEN.toString
+    val queueTok = LFSMHelpers.getQueueToken(ctx.getNetworkType).toString
     val gateTree = contracts(ctx).gate.ergoTreeHex
     val spentInChain: Set[String] = ancestors.flatMap(_.inputs.map(_.boxId)).toSet
 
@@ -283,23 +283,23 @@ class EmissionTransactions(prover: NodeWallet,
     // chain we walked.
     keys ++= tip.ancestors.flatMap(_.outputs)
       .filter(o => o.ergoTree == gate &&
-        o.assets.headOption.exists(_.tokenId == LFSMHelpers.QUEUE_TOKEN.toString))
+        o.assets.headOption.exists(_.tokenId == LFSMHelpers.getQueueToken(ctx.getNetworkType).toString))
       .flatMap(o => Try(lenderEntry(o.registerValues(1).getValue.asInstanceOf[SigmaProp])).toOption)
       .map(hex)
 
     // Paged rather than capped at queueScanLimit: our most recent joins sit at the TAIL, which is
     // exactly what a single ascending page would drop. Only the keys are kept - the queue runs to
     // thousands of boxes and holding them all is the difference between kilobytes and tens of MB.
-    scanByToken(ctx, LFSMHelpers.QUEUE_TOKEN, withMempool) { page =>
+    scanByToken(ctx, LFSMHelpers.getQueueToken(ctx.getNetworkType), withMempool) { page =>
       keys ++= page
-        .filter(b => carriesOne(b, LFSMHelpers.QUEUE_TOKEN) && b.ergoTree == gate)
+        .filter(b => carriesOne(b, LFSMHelpers.getQueueToken(ctx.getNetworkType)) && b.ergoTree == gate)
         .map(b => hex(lenderKeyOf(b).getOrElse(throw new IllegalStateException("invalid queued lender key"))))
     }
 
     // One scan covers both box types the collateral token identifies: live collateral boxes are not
     // at the gate, proof-of-spend boxes are.
-    scanByToken(ctx, LFSMHelpers.COLLAT_TOKEN, withMempool) { page =>
-      val carrying = page.filter(carriesOne(_, LFSMHelpers.COLLAT_TOKEN))
+    scanByToken(ctx, LFSMHelpers.getCollatToken(ctx.getNetworkType), withMempool) { page =>
+      val carrying = page.filter(carriesOne(_, LFSMHelpers.getCollatToken(ctx.getNetworkType)))
       keys ++= carrying.filter(_.ergoTree != gate)
         .map(b => hex(lenderKeyOf(b).getOrElse(throw new IllegalStateException("invalid collateral lender key"))))
       // Include proof of spend boxes with less than 50 confirmations, since a block re-org
@@ -372,7 +372,7 @@ class EmissionTransactions(prover: NodeWallet,
     val c = contracts(ctx)
     val st = readEmission(em)
     val permit = readConfig(cfg).permitAt(st.backlog)
-    val litId = st.lit.map(_.id).getOrElse(LFSMHelpers.LIT_ID)
+    val litId = st.lit.map(_.id).getOrElse(LFSMHelpers.getLitId(ctx.getNetworkType))
 
     val emIn = withEmissionVars(ctx, em, 0.toByte,
       lenderGE = Some(ErgoValue.of(lender.getPublicKeyGE)))
@@ -426,7 +426,7 @@ class EmissionTransactions(prover: NodeWallet,
     val (emitted, pub, split) = EmissionSchedule.emissionAt(st.currentBlock, st.litHeld)
     val litId = st.lit.map(_.id)
       .orElse(queueIn.tokens.lift(1).map(_.id))
-      .getOrElse(LFSMHelpers.LIT_ID)
+      .getOrElse(LFSMHelpers.getLitId(ctx.getNetworkType))
 
     val nextSet = retiring match {
       case Some((_, idx)) => st.lenderSet.updated(idx, newEntry)
@@ -631,7 +631,7 @@ class EmissionTransactions(prover: NodeWallet,
                keys: Seq[Address], operation: String, guard: transactions.engine.EngineJoinGuard,
                permitWithinBudget: Long => Boolean = _ => true): JoinRun = {
     val funding = new FundingSource
-    val litId = readEmission(tip.box).lit.map(_.id).getOrElse(LFSMHelpers.LIT_ID)
+    val litId = readEmission(tip.box).lit.map(_.id).getOrElse(LFSMHelpers.getLitId(ctx.getNetworkType))
     var em = tip.box
     var attempts = Vector.empty[JoinAttempt]
     var remaining = keys
@@ -885,19 +885,19 @@ class EmissionTransactions(prover: NodeWallet,
   def queueBoxes(ctx: BlockchainContext, mempool: MempoolOptions): Seq[IndexedBox] = {
     val gateTree = contracts(ctx).gate.ergoTreeHex
     nodeApi
-      .unspentBoxesByTokenId(LFSMHelpers.QUEUE_TOKEN.toString, Paging.all(config.queueScanLimit),
+      .unspentBoxesByTokenId(LFSMHelpers.getQueueToken(ctx.getNetworkType).toString, Paging.all(config.queueScanLimit),
         SortDirection.Asc, mempool)
       .getOrElse(Seq.empty[IndexedBox])
-      .filter(b => carriesOne(b, LFSMHelpers.QUEUE_TOKEN) && b.ergoTree == gateTree)
+      .filter(b => carriesOne(b, LFSMHelpers.getQueueToken(ctx.getNetworkType)) && b.ergoTree == gateTree)
   }
 
   def proofOfSpendBoxes(ctx: BlockchainContext, mempool: MempoolOptions): Seq[IndexedBox] = {
     val gateTree = contracts(ctx).gate.ergoTreeHex
     nodeApi
-      .unspentBoxesByTokenId(LFSMHelpers.COLLAT_TOKEN.toString, Paging.all(config.queueScanLimit),
+      .unspentBoxesByTokenId(LFSMHelpers.getCollatToken(ctx.getNetworkType).toString, Paging.all(config.queueScanLimit),
         SortDirection.Asc, mempool)
       .getOrElse(Seq.empty[IndexedBox])
-      .filter(b => carriesOne(b, LFSMHelpers.COLLAT_TOKEN) &&
+      .filter(b => carriesOne(b, LFSMHelpers.getCollatToken(ctx.getNetworkType)) &&
         b.ergoTree == gateTree &&
         b.box.additionalRegisters.ordered.size == 1)
   }

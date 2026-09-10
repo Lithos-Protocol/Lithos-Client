@@ -72,7 +72,7 @@ class CommitmentTransactions(nodeContext: NodeContext, dataBoxes: DataBoxSource,
       Failure(new DataBoxRetrievalException("The data box carries no commitments"))
     else if (height - commits.head._1 >= LFSMHelpers.NISP_WINDOW) Success(commits.head._2)
     else if (commits.length == 1)
-      Failure(new IllegalStateException(
+      Failure(new CommitmentNotInEffectException(
         s"Cannot submit NISPs until commit ${commits.head} is in effect"))
     else Success(commits(1)._2)
 

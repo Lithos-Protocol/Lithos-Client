@@ -79,7 +79,7 @@ class CollateralEnforcerSpec extends AnyPropSpec with EmissionSpecBase {
       val j = joinScenario(ctx, enfScript = enforced(ctx))
       val over = queueUTXO(ctx, j.lenderProver, position = 0L, permit = j.permit + LIT)
       val in = inputAt(work.lithos.mutations.UTXO(contractOf(j.lenderProver), 10L * Parameters.OneErg,
-        Seq(Token(LFSMHelpers.LIT_ID, j.permit + LIT))), ctx, 1)
+        Seq(Token(LFSMHelpers.LIT_ID_MAINNET, j.permit + LIT))), ctx, 1)
       rejectsAtSigning(j.prover, joinTx(j)(queueOut = over, inputs = Seq(j.emissionIn, in)))
     }
   }

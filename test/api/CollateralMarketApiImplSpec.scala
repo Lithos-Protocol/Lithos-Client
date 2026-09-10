@@ -136,9 +136,9 @@ class CollateralMarketApiImplSpec
                         head: Long = 0L,
                         tail: Long = 0L): Map[String, Seq[IndexedBox]] =
     Map(
-      LFSMHelpers.EMISSION_NFT.toString ->
+      LFSMHelpers.EMISSION_NFT_MAINNET.toString ->
         Seq(Fx.indexed(Fx.emissionBox(ctx, lenderSet = lenderSet, head = head, tail = tail))),
-      LFSMHelpers.EMCONFIG_NFT.toString -> Seq(Fx.indexed(Fx.configBox(ctx))))
+      LFSMHelpers.EMCONFIG_NFT_MAINNET.toString -> Seq(Fx.indexed(Fx.configBox(ctx))))
 
   private def quoteFor(f: Fixture, count: Int): CollateralJoinQuote =
     f.api.checkJoin(CollateralJoinCheckRequest(Some(count)))
@@ -193,7 +193,7 @@ class CollateralMarketApiImplSpec
     // filters on `takenLenderKeys`, which holds it for 50 confirmations because a reorg could make
     // that collateral box live again — so the panel offered a join the endpoint then refused.
     val f = fixture(numAddresses = 4, boxes = (ctx, addrs) =>
-      baseBoxes(ctx) + (LFSMHelpers.COLLAT_TOKEN.toString ->
+      baseBoxes(ctx) + (LFSMHelpers.COLLAT_TOKEN_MAINNET.toString ->
         Seq(recentProofOfSpend(ctx, Fx.entryOf(addrs.head)))))
 
     val status = f.api.getWalletStatus
@@ -211,7 +211,7 @@ class CollateralMarketApiImplSpec
     // something different: a live box carries its block's emission AND the lender's permit
     // together, indistinguishable on-chain, so it reports `carriedLit` and no permit.
     val f = fixture(numAddresses = 4, boxes = (ctx, addrs) =>
-      baseBoxes(ctx) + (LFSMHelpers.COLLAT_TOKEN.toString ->
+      baseBoxes(ctx) + (LFSMHelpers.COLLAT_TOKEN_MAINNET.toString ->
         Seq(Fx.indexed(Fx.collateralBox(ctx, addrs.head, carriedLit = 4200L,
           createdAt = ctx.getHeight - 5), height = ctx.getHeight - 5))))
 
@@ -233,7 +233,7 @@ class CollateralMarketApiImplSpec
     // The other half, and the one that names the moment the two behaviours differ: the count alone
     // could be right while the quote still hands the key out.
     val f = fixture(numAddresses = 4, boxes = (ctx, addrs) =>
-      baseBoxes(ctx) + (LFSMHelpers.COLLAT_TOKEN.toString ->
+      baseBoxes(ctx) + (LFSMHelpers.COLLAT_TOKEN_MAINNET.toString ->
         Seq(recentProofOfSpend(ctx, Fx.entryOf(addrs.head)))))
 
     val quote = quoteFor(f, 3)
@@ -338,7 +338,7 @@ class CollateralMarketApiImplSpec
 
   "The market snapshot" should "sum the permits on queue boxes rather than the emission box's LIT" in {
     val f = fixture(numAddresses = 2, boxes = (ctx, addrs) =>
-      baseBoxes(ctx, head = 0L, tail = 2L) + (LFSMHelpers.QUEUE_TOKEN.toString -> Seq(
+      baseBoxes(ctx, head = 0L, tail = 2L) + (LFSMHelpers.QUEUE_TOKEN_MAINNET.toString -> Seq(
         Fx.indexed(Fx.queueBox(ctx, addrs.head, position = 0L, permit = 1000L, txId = "d1" * 32)),
         Fx.indexed(Fx.queueBox(ctx, addrs(1), position = 1L, permit = 2500L, txId = "d2" * 32)))))
 
@@ -382,7 +382,7 @@ class CollateralMarketApiImplSpec
     val emission = Fx.indexed(Fx.emissionBox(ctx, lenderSet = Seq(Fx.entryOf(lender))))
     val spent = Fx.indexed(Fx.proofOfSpendBox(ctx, Fx.entryOf(lender)))
     baseBoxes(ctx, lenderSet = Seq(Fx.entryOf(lender))) ++ Map(
-      LFSMHelpers.COLLAT_TOKEN.toString -> ((emission +: live) :+ spent))
+      LFSMHelpers.COLLAT_TOKEN_MAINNET.toString -> ((emission +: live) :+ spent))
   }
 
   "activeNanoErgs" should "count the live collateral boxes and nothing else" in {

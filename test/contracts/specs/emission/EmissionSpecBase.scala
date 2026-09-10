@@ -34,14 +34,14 @@ object EmissionSpecBase {
     cache.getOrElse {
       val gate = CollateralContract.mkEmissionGateContract(ctx)
       val guard = CollateralContract.mkEmissionsGuardContract(
-        ctx, LFSMHelpers.EMISSION_NFT, LFSMHelpers.EMCONFIG_NFT,
-        collateralStandIn.hashedPropBytes, gate.hashedPropBytes, LFSMHelpers.LIT_ID)
+        ctx, LFSMHelpers.EMISSION_NFT_MAINNET, LFSMHelpers.EMCONFIG_NFT_MAINNET,
+        collateralStandIn.hashedPropBytes, gate.hashedPropBytes, LFSMHelpers.LIT_ID_MAINNET)
       val emission = CollateralContract.mkEmissionsContract(
-        ctx, collateralStandIn.hashedPropBytes, gate.hashedPropBytes, LFSMHelpers.LIT_ID)
-      val enforcer = CollateralContract.mkCollateralEnforcerContract(ctx, LFSMHelpers.LIT_ID)
+        ctx, collateralStandIn.hashedPropBytes, gate.hashedPropBytes, LFSMHelpers.LIT_ID_MAINNET)
+      val enforcer = CollateralContract.mkCollateralEnforcerContract(ctx, LFSMHelpers.LIT_ID_MAINNET)
       val config = CollateralContract.mkEmConfigContract(ctx, owner)
       val collateral = CollateralContract.mkMainnetCollatContract(
-        ctx, LFSMHelpers.EMCONFIG_NFT, gate.hashedPropBytes, LFSMHelpers.LIT_ID)
+        ctx, LFSMHelpers.EMCONFIG_NFT_MAINNET, gate.hashedPropBytes, LFSMHelpers.LIT_ID_MAINNET)
       val all = EmissionContracts(gate, guard, emission, enforcer, config, collateral)
       cache = Some(all)
       all
@@ -196,7 +196,7 @@ trait EmissionSpecBase extends ContractSpecBase {
                           rollupHash: Array[Byte] = Contract.SIGMA_TRUE.hashedPropBytes,
                           params: Array[Long] = permitParams,
                           extensionHash: Array[Byte] = Contract.SIGMA_TRUE.hashedValueBytes,
-                          nft: ErgoId = LFSMHelpers.EMCONFIG_NFT,
+                          nft: ErgoId = LFSMHelpers.EMCONFIG_NFT_MAINNET,
                           value: Long = Parameters.MinFee): UTXO =
     UTXO(configContract(ctx), value, Seq(Token(nft, 1L)), Seq(
       ErgoValue.of(Colls.fromArray(params), scalaLongType),
@@ -237,12 +237,12 @@ trait EmissionSpecBase extends ContractSpecBase {
                              queueTokens: Long = queueSupply,
                              collatTokens: Long = collatSupply,
                              lit: Long = litSupply,
-                             nft: ErgoId = LFSMHelpers.EMISSION_NFT,
+                             nft: ErgoId = LFSMHelpers.EMISSION_NFT_MAINNET,
                              contract: Contract = null,
                              value: Long = 0L): UTXO = {
     val tokens =
-      Seq(Token(nft, 1L), Token(LFSMHelpers.QUEUE_TOKEN, queueTokens), Token(LFSMHelpers.COLLAT_TOKEN, collatTokens)) ++
-        (if (lit > 0) Seq(Token(LFSMHelpers.LIT_ID, lit)) else Seq.empty[Token])
+      Seq(Token(nft, 1L), Token(LFSMHelpers.QUEUE_TOKEN_MAINNET, queueTokens), Token(LFSMHelpers.COLLAT_TOKEN_MAINNET, collatTokens)) ++
+        (if (lit > 0) Seq(Token(LFSMHelpers.LIT_ID_MAINNET, lit)) else Seq.empty[Token])
     UTXO(
       if (contract == null) guardContract(ctx) else contract,
       if (value == 0L) emissionValue else value,
@@ -306,8 +306,8 @@ trait EmissionSpecBase extends ContractSpecBase {
                           feeValue: Long = DUST_BUDGET,
                           extensionFlag: Byte = 0x00,
                           value: Long = 0L,
-                          queueTokenId: ErgoId = LFSMHelpers.QUEUE_TOKEN,
-                          permitTokenId: ErgoId = LFSMHelpers.LIT_ID,
+                          queueTokenId: ErgoId = LFSMHelpers.QUEUE_TOKEN_MAINNET,
+                          permitTokenId: ErgoId = LFSMHelpers.LIT_ID_MAINNET,
                           contract: Contract = null): UTXO = {
     val tokens = Seq(Token(queueTokenId, 1L)) ++
       (if (permit > 0) Seq(Token(permitTokenId, permit)) else Seq.empty[Token])
@@ -331,7 +331,7 @@ trait EmissionSpecBase extends ContractSpecBase {
   protected def proofOfSpendUTXO(ctx: BlockchainContext,
                                  retiring: Array[Byte],
                                  createdAt: Int = 0,
-                                 collatTokenId: ErgoId = LFSMHelpers.COLLAT_TOKEN,
+                                 collatTokenId: ErgoId = LFSMHelpers.COLLAT_TOKEN_MAINNET,
                                  contract: Contract = null): UTXO =
     UTXO(
       if (contract == null) gateContract(ctx) else contract,
@@ -353,8 +353,8 @@ trait EmissionSpecBase extends ContractSpecBase {
                                feeValue: Long = DUST_BUDGET,
                                extensionFlag: Byte = 0x00,
                                value: Long = 0L,
-                               collatTokenId: ErgoId = LFSMHelpers.COLLAT_TOKEN,
-                               litTokenId: ErgoId = LFSMHelpers.LIT_ID,
+                               collatTokenId: ErgoId = LFSMHelpers.COLLAT_TOKEN_MAINNET,
+                               litTokenId: ErgoId = LFSMHelpers.LIT_ID_MAINNET,
                                contract: Contract = null): UTXO = {
     val tokens = Seq(Token(collatTokenId, 1L)) ++
       (if (lit > 0) Seq(Token(litTokenId, lit)) else Seq.empty[Token])
@@ -376,7 +376,7 @@ trait EmissionSpecBase extends ContractSpecBase {
                               prover: ErgoProver,
                               permit: Long,
                               value: Long = 10L * Parameters.OneErg): InputUTXO = {
-    val tokens = if (permit > 0) Seq(Token(LFSMHelpers.LIT_ID, permit)) else Seq.empty[Token]
+    val tokens = if (permit > 0) Seq(Token(LFSMHelpers.LIT_ID_MAINNET, permit)) else Seq.empty[Token]
     inputAt(UTXO(contractOf(prover), value, tokens), ctx, 1)
   }
 

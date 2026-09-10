@@ -62,6 +62,7 @@ object MDDatabase {
   private final val DATA_BOX_TOKEN = Blake2b256.hash("DATA_BOX_TOKEN")
   private final val SCHEMA_VERSION = Blake2b256.hash("SCHEMA_VERSION")
 
-  /** Bump whenever a key's meaning or encoding changes. Anything below it is discarded, not read. */
-  final val Schema: Int = 2
+  /** Bump whenever a key's meaning or encoding changes or when the MinerDictionary is reset
+   *  Anything below it is discarded, not read. */
+  final val Schema: Int = 3
 }

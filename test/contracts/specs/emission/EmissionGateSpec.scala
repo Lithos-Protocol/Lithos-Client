@@ -22,7 +22,7 @@ class EmissionGateSpec extends AnyPropSpec with EmissionSpecBase {
 
   /** Stands in for the emission box. The gate reads nothing but token 0 of INPUTS(0). */
   private def nftHolder(ctx: BlockchainContext,
-                        nft: ErgoId = LFSMHelpers.EMISSION_NFT,
+                        nft: ErgoId = LFSMHelpers.EMISSION_NFT_MAINNET,
                         index: Int = 0): InputUTXO =
     inputAt(UTXO(Contract.SIGMA_TRUE, Parameters.OneErg, Seq(Token(nft, 1L))), ctx, index)
 
@@ -54,7 +54,7 @@ class EmissionGateSpec extends AnyPropSpec with EmissionSpecBase {
     withCtx { ctx =>
       val prover = miner(ctx)
       val box = queueBox(ctx)
-      val impostor = nftHolder(ctx, LFSMHelpers.COLLAT_TOKEN)
+      val impostor = nftHolder(ctx, LFSMHelpers.COLLAT_TOKEN_MAINNET)
       rejects(prover, build(ctx, Seq(impostor, inputAt(box, ctx, 1)),
         Seq(sink(box)), prover.getAddress))
     }

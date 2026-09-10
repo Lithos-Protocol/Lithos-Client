@@ -97,8 +97,8 @@ class StorageRentSourceSpec extends AnyFlatSpec with Matchers with MockitoSugar 
   /** A singleton resting at an ordinary key between spends is still the thing it names. */
   it should "leave a box carrying a protocol singleton alone, wherever it sits" in {
     nodeContext.getClient.execute { ctx =>
-      Seq("collateral token" -> LFSMHelpers.COLLAT_TOKEN,
-        "emission NFT" -> LFSMHelpers.EMISSION_NFT,
+      Seq("collateral token" -> LFSMHelpers.COLLAT_TOKEN_MAINNET,
+        "emission NFT" -> LFSMHelpers.EMISSION_NFT_MAINNET,
         "dictionary token" -> LFSMHelpers.getMDToken(ctx.getNetworkType),
         "fraud-proof token" -> LFSMHelpers.getFPToken(ctx.getNetworkType)).foreach {
         case (name, token) =>
@@ -115,7 +115,7 @@ class StorageRentSourceSpec extends AnyFlatSpec with Matchers with MockitoSugar 
    * Excluding it would put ordinary wallets out of reach for no protocol reason.
    */
   it should "still collect an ordinary box holding LIT" in {
-    val box = output("a", 500, Seq(NodeAsset(LFSMHelpers.LIT_ID.toString, 5L)))
+    val box = output("a", 500, Seq(NodeAsset(LFSMHelpers.LIT_ID_MAINNET.toString, 5L)))
     StorageRent.sortByAge(Seq(box), 1000, NetworkType.MAINNET, protocolBoxes)._1 shouldBe Set(id("a"))
   }
 

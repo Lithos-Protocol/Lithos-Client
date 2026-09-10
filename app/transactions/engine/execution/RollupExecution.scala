@@ -413,6 +413,12 @@ class RollupExecution(nodeContext: NodeContext, walletManager: ActorRef, syncHan
           releaseInitialInputs()
           funding = funding.copy(feesToCreate = funding.feesToCreate - stub.rollupBlockId)
           logger.warn(s"Rollup ${stub.rollupBlockId} could not fund the batch: ${ex.getMessage}")
+          // Nothing about this rollup can change the answer, so stop tracking it here too: the
+          // initial-transaction path never reaches `reportAttempt`.
+          if (ex.isInstanceOf[CommitmentNotInEffectException]) {
+            syncHandler ! RemoveRollup(stub.rollupBlockId, ex.getMessage)
+            logger.warn(s"Dropping rollup ${stub.rollupBlockId}: ${ex.getMessage}")
+          }
         case Success(_) => ()
       }
     }
@@ -442,16 +448,23 @@ class RollupExecution(nodeContext: NodeContext, walletManager: ActorRef, syncHan
         logger.warn(s"Got de-synced mempool state for rollup ${stub.rollupBlockId} attempting ${stub.txType}")
       case Failure(ds: ErgoClientException) if ds.getMessage.contains("Double spending") =>
         logger.warn(s"Got double spend for rollup ${stub.rollupBlockId} attempting ${stub.txType}")
-      case Failure(_: NoValidNISPException) =>
-        ()
-      case Failure(_: IllegalStateException) =>
-        ()
-      case Failure(_: RollupRemovedException) =>
-        ()
-      case Failure(_: StubInvalidException) =>
-        ()
-      case Failure(_: NewlyGeneratedRollupException) =>
-        ()
+      // No commitment can ever be in force for this rollup: both its start height and the
+      // commitment it would be judged against are fixed, so every retry asks the same question.
+      // Stop tracking it rather than re-offering it for the rest of its life.
+      case Failure(notInEffect: CommitmentNotInEffectException) =>
+        syncHandler ! RemoveRollup(stub.rollupBlockId, notInEffect.getMessage)
+        logger.warn(s"Dropping rollup ${stub.rollupBlockId}: ${notInEffect.getMessage}")
+      // The rest are terminal for this attempt but not for the rollup, so they say why and stop.
+      case Failure(nv: NoValidNISPException) =>
+        logger.warn(nv.getMessage)
+      case Failure(illegalState: IllegalStateException) =>
+        logger.warn(illegalState.getMessage)
+      case Failure(removed: RollupRemovedException) =>
+        logger.warn(removed.getMessage)
+      case Failure(invalidated: StubInvalidException) =>
+        logger.warn(invalidated.getMessage)
+      case Failure(newGen: NewlyGeneratedRollupException) =>
+        logger.warn(newGen.getMessage)
       case Failure(exception) =>
         logger.error(s"Got failure for rollup ${stub.rollupBlockId} attempting ${stub.txType}", exception)
       case Success(_) =>

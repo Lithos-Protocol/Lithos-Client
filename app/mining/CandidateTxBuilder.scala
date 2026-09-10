@@ -90,6 +90,10 @@ object CandidateTxBuilder {
  */
 class CandidateTxBuilder(prover: NodeWallet, nodeApi: NodeApi, config: CandidateConfig) {
 
+  /** Protocol singletons are per network; the prover's own address is the network handle here. */
+  private val network: org.ergoplatform.appkit.NetworkType = prover.p2pk.getNetworkType
+
+
   private val logger: Logger = LoggerFactory.getLogger("CandidateTxBuilder")
 
   /**
@@ -172,7 +176,7 @@ class CandidateTxBuilder(prover: NodeWallet, nodeApi: NodeApi, config: Candidate
 
     // LIT identity comes off the box rather than off a constant, so a box minted under a different
     // LIT id is carried faithfully instead of being rewritten into an id it never held.
-    val litId = collat.tokens.lift(1).map(_.id).getOrElse(LFSMHelpers.LIT_ID)
+    val litId = collat.tokens.lift(1).map(_.id).getOrElse(LFSMHelpers.getLitId(ctx.getNetworkType))
     val heldLIT = collat.tokens.lift(1).map(_.amount).getOrElse(0L)
     val privRewards = founderSplit.map(_._2).sum
     val permitChange = heldLIT - (litBlockReward + privRewards)
@@ -282,7 +286,7 @@ class CandidateTxBuilder(prover: NodeWallet, nodeApi: NodeApi, config: Candidate
 
     while (!exhausted && live < EmissionSchedule.MAX_ACTIVE &&
       seen < CandidateTxBuilder.MaxCollateralCarriers) {
-      val page = nodeApi.unspentBoxesByTokenId(LFSMHelpers.COLLAT_TOKEN.toString, paging,
+      val page = nodeApi.unspentBoxesByTokenId(LFSMHelpers.getCollatToken(network).toString, paging,
         SortDirection.Asc, MempoolOptions.ConfirmedOnly) match {
         case Success(boxes) => boxes
         // Ranking an incomplete prefix silently picks a different lender's box. Failing the load
@@ -309,7 +313,7 @@ class CandidateTxBuilder(prover: NodeWallet, nodeApi: NodeApi, config: Candidate
 
   /** One collateral token and the five registers a live box carries; says nothing about the script. */
   private def collateralShaped(b: IndexedBox): Boolean =
-    carriesOne(b, LFSMHelpers.COLLAT_TOKEN) && b.box.additionalRegisters.ordered.size >= 5
+    carriesOne(b, LFSMHelpers.getCollatToken(network)) && b.box.additionalRegisters.ordered.size >= 5
 
   /** The one test the ranked set is filtered by, so the scan's early exit counts what it will keep. */
   private def usableCollateral(b: IndexedBox, collateralTree: String): Boolean =

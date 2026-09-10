@@ -40,7 +40,7 @@ class EmissionGuardSpec extends AnyPropSpec with EmissionSpecBase {
   property("guard: rejects a data input that is not the emission config (authenticConfig)") {
     withCtx { ctx =>
       val j = joinScenario(ctx)
-      val impostor = configInput(ctx, configBox(ctx, Contract.SIGMA_TRUE, nft = LFSMHelpers.LIT_ID))
+      val impostor = configInput(ctx, configBox(ctx, Contract.SIGMA_TRUE, nft = LFSMHelpers.LIT_ID_MAINNET))
       rejects(j.prover, joinTx(j)(dataInputs = Seq(impostor)))
     }
   }
@@ -72,9 +72,9 @@ class EmissionGuardSpec extends AnyPropSpec with EmissionSpecBase {
   property("guard: rejects a box that does not carry the emission NFT (authenticGuard)") {
     withCtx { ctx =>
       val j = joinScenario(ctx)
-      val counterfeit = emissionUTXO(ctx, nft = LFSMHelpers.LIT_ID)
+      val counterfeit = emissionUTXO(ctx, nft = LFSMHelpers.LIT_ID_MAINNET)
       val in = emissionInput(ctx, counterfeit, 0.toByte, lenderGE = Some(lenderGEValue(ctx, j.lenderProver)))
-      val out = emissionUTXO(ctx, nft = LFSMHelpers.LIT_ID, tail = 1L, queueTokens = queueSupply - 1L)
+      val out = emissionUTXO(ctx, nft = LFSMHelpers.LIT_ID_MAINNET, tail = 1L, queueTokens = queueSupply - 1L)
       rejects(j.prover, joinTx(j)(emissionOut = out, inputs = Seq(in, j.funding)))
     }
   }

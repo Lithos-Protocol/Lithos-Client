@@ -96,7 +96,7 @@ object LDHelpers {
   private final val PROV_TOKEN_TESTNET = ErgoId.create("a4fea435f759fcb5fecb052dba466c63553411640265ba0076b861be1337e43b")
   private final val PROV_TOKEN_MAINNET = ErgoId.create("3333333333333333333333333333333333333333333333333333333333333333")
   // LIT token ids
-  private final val TOKEN_Y_TESTNET   = LFSMHelpers.LIT_ID
+  private final val TOKEN_Y_TESTNET   = LFSMHelpers.LIT_ID_TESTNET
   private final val TOKEN_Y_MAINNET   = LFSMHelpers.LIT_ID_MAINNET
 
   /**

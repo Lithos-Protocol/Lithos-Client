@@ -195,9 +195,9 @@ class CollateralExecution(nodeContext: NodeContext,
           tx.retiringKey(b).exists(r => emission.lenderSet.exists(_.sameElements(r)))
       }
 
-      val litIdStr = emission.lit.map(_.id).getOrElse(LFSMHelpers.LIT_ID).toString
+      val litIdStr = emission.lit.map(_.id).getOrElse(LFSMHelpers.getLitId(ctx.getNetworkType)).toString
       var permitLocked = BigInt(0)
-      tx.scanByToken(ctx, LFSMHelpers.QUEUE_TOKEN, tx.withMempool) { page =>
+      tx.scanByToken(ctx, LFSMHelpers.getQueueToken(ctx.getNetworkType), tx.withMempool) { page =>
         permitLocked += page
           .map(b => BigInt(permitOf(b, litIdStr))).sum
       }
@@ -245,7 +245,7 @@ class CollateralExecution(nodeContext: NodeContext,
       val tx = txs
       val gateTree = tx.contracts(ctx).gate.ergoTreeHex
       val (from, count) = paged(limit, offset)
-      val litIdStr = LFSMHelpers.LIT_ID.toString
+      val litIdStr = LFSMHelpers.getLitId(ctx.getNetworkType).toString
       tx.queueBoxes(ctx, tx.withMempool)
         .filter(b => b.ergoTree == gateTree && tx.queuePosition(b.box.registerValues).isDefined)
         .sortBy(b => tx.queuePosition(b.box.registerValues).get)
@@ -268,7 +268,7 @@ class CollateralExecution(nodeContext: NodeContext,
       val tx = txs
       val gateTree = tx.contracts(ctx).gate.ergoTreeHex
       val (from, count) = paged(limit, offset)
-      val litIdStr = LFSMHelpers.LIT_ID.toString
+      val litIdStr = LFSMHelpers.getLitId(ctx.getNetworkType).toString
       liveBoxes(ctx, tx, gateTree)
         .sortBy(-_.box.creationHeight)
         .slice(from, from + count)
@@ -290,8 +290,8 @@ class CollateralExecution(nodeContext: NodeContext,
                         tx: EmissionTransactions,
                         gateTree: String): Seq[IndexedBox] = {
     val all = mutable.ArrayBuffer.empty[IndexedBox]
-    tx.scanByToken(ctx, LFSMHelpers.COLLAT_TOKEN, tx.withMempool)(all ++= _)
-    all.filter(b => tx.carriesOne(b, LFSMHelpers.COLLAT_TOKEN) &&
+    tx.scanByToken(ctx, LFSMHelpers.getCollatToken(ctx.getNetworkType), tx.withMempool)(all ++= _)
+    all.filter(b => tx.carriesOne(b, LFSMHelpers.getCollatToken(ctx.getNetworkType)) &&
       b.ergoTree != gateTree &&
       b.box.additionalRegisters.ordered.size >= 5).toSeq
   }
@@ -305,7 +305,7 @@ class CollateralExecution(nodeContext: NodeContext,
       val tx = txs
       val view = collateralView(ctx)
       val mineEntries = view.mine.map(a => hex(lenderEntry(a))).toSet
-      val litIdStr = LFSMHelpers.LIT_ID.toString
+      val litIdStr = LFSMHelpers.getLitId(ctx.getNetworkType).toString
 
       val keyStates = view.mine.map { a =>
         val entry = hex(lenderEntry(a))
@@ -404,7 +404,7 @@ class CollateralExecution(nodeContext: NodeContext,
     nodeContext.getClient.execute { ctx =>
       val tx = txs
       val gateTree = tx.contracts(ctx).gate.ergoTreeHex
-      val litIdStr = LFSMHelpers.LIT_ID.toString
+      val litIdStr = LFSMHelpers.getLitId(ctx.getNetworkType).toString
       val emission = tx.readEmission(tx.emissionTip(ctx).box)
       val cap = math.max(1, math.min(2000, limit.getOrElse(500)))
       val joined =
