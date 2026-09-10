@@ -156,4 +156,92 @@ class FeeAllocationSpec extends AnyPropSpec with RollupSpecBase {
       }
     }
   }
+
+  // ─── what the node will actually verify ───────────────────────────────────
+
+  /**
+   * A holding transform carries context variables on input 0, and the extension is part of
+   * `messageToSign`. Get its order wrong and input 0 still passes, because a contract reduces to a
+   * constant — it is the ORDINARY signature on input 1 that fails, against a message never signed.
+   *
+   * So the symptom of a context-variable fault appears on the funding input, not the one carrying
+   * the variables. These two properties pin the order and then check every input the way the node
+   * does, which is the only thing that settles it.
+   */
+  property("a transform signs its context variables in the order the node rebuilds") {
+    withWallet { (ctx, wallet) =>
+      val tree = nispTree(ctx, wallet.contract.hashedPropBytes, totalScore = 4000L, reward = 0L)
+      val in = rollupInput(ctx, wallet.contract, tree, value = 60000000L, reward = 0L, holding = true)
+
+      val signed = RollupTransactions.genHoldingTransform(ctx, wallet, in,
+        Seq(funding(ctx, wallet.contract)), feeOutputs(wallet.contract), ctx.getHeight + 1)
+
+      val order = signed.asInstanceOf[org.ergoplatform.appkit.impl.SignedTransactionImpl]
+        .getTx.inputs.head.spendingProof.extension.values.keys.toSeq
+      val codecs = new org.ergoplatform.sdk.JsonCodecs {}
+      import codecs._
+      val rebuilt = io.circe.parser.parse(signed.toJson(false)).toTry.get
+        .as[org.ergoplatform.ErgoLikeTransaction].toTry.get
+        .inputs.head.spendingProof.extension.values.keys.toSeq
+      withClue("what we signed has to be what the node rebuilds, whatever order that is: ") {
+        order shouldBe rebuilt
+      }
+      withClue("and for this id set that order is not ascending: ") {
+        order shouldBe Seq[Byte](64, 3)
+      }
+    }
+  }
+
+  property("every input of a transform verifies, the funding input included") {
+    withWallet { (ctx, wallet) =>
+      val tree = nispTree(ctx, wallet.contract.hashedPropBytes, totalScore = 4000L, reward = 0L)
+      val in = rollupInput(ctx, wallet.contract, tree, value = 60000000L, reward = 0L, holding = true)
+      val fund = funding(ctx, wallet.contract)
+      val height = ctx.getHeight + 1
+
+      val signed = RollupTransactions.genHoldingTransform(ctx, wallet, in, Seq(fund),
+        feeOutputs(wallet.contract), height)
+
+      val tx = signed.asInstanceOf[org.ergoplatform.appkit.impl.SignedTransactionImpl].getTx
+      val boxes = Seq(in, fund)
+        .map(_.input.asInstanceOf[org.ergoplatform.appkit.impl.InputBoxImpl].getErgoBox).toIndexedSeq
+      val params = support.RentRule.paramsFrom(ctx)
+      boxes.indices.foreach { i =>
+        val (ok, cost) = support.RentRule.verifyInput(tx, boxes, i, height, params)
+        withClue(s"input #$i cost $cost: ") { ok shouldBe true }
+      }
+    }
+  }
+
+  /**
+   * Whether the node computes the same id we do, from the JSON we actually POST.
+   *
+   * The id is the hash of the transaction's bytes, and `messageToSign` is taken over those bytes.
+   * A node that rebuilds different bytes therefore verifies every ordinary signature against a
+   * message that was never signed, and reports it as `Success((false, <cost>))` on the first P2PK
+   * input — nowhere near the real cause.
+   *
+   * Our own pre-send guard cannot catch this. `NodeCodecs.transaction` reads `id` straight out of
+   * the JSON instead of recomputing it, so it compares appkit's id to appkit's own claim about it.
+   * This decodes with `org.ergoplatform.sdk.JsonCodecs`, which is what the node's own
+   * `transactionDecoder` delegates to, so agreement here is agreement with the node.
+   */
+  property("the node computes the same id we do for a holding transform") {
+    withWallet { (ctx, wallet) =>
+      val tree = nispTree(ctx, wallet.contract.hashedPropBytes, totalScore = 4000L, reward = 0L)
+      val in = rollupInput(ctx, wallet.contract, tree, value = 60000000L, reward = 0L, holding = true)
+
+      val signed = RollupTransactions.genHoldingTransform(ctx, wallet, in,
+        Seq(funding(ctx, wallet.contract)), feeOutputs(wallet.contract), ctx.getHeight + 1)
+
+      val codecs = new org.ergoplatform.sdk.JsonCodecs {}
+      import codecs._
+      val asNodeSeesIt = io.circe.parser.parse(signed.toJson(false)).toTry.get
+        .as[org.ergoplatform.ErgoLikeTransaction].toTry.get.id
+
+      withClue("a different id here is the node rebuilding different bytes from our own JSON: ") {
+        asNodeSeesIt shouldBe signed.getId
+      }
+    }
+  }
 }

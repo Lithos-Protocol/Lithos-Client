@@ -9,10 +9,13 @@ import node.MutationConversions._
 import node.model._
 import state.synchronization.CompleteMempool
 import work.lithos.mutations.{TxBuilder, UTXO}
+
 import scala.concurrent.{Await, ExecutionContext}
 import scala.concurrent.duration._
+import scala.util.Try
 import transactions.engine.EngineBroadcast
-import transactions.engine.wallet.{EngineFunding, EngineWalletMessages, WalletInventory}
+import transactions.engine.wallet.{EngineFunding, EngineWalletMessages, EngineWalletState, WalletInventory}
+import transactions.rent.StorageRent
 
 object ConsolidationExecution {
 
@@ -46,16 +49,22 @@ object ConsolidationExecution {
    * are excluded outright: merging them would need per-token preservation this path does not do.
    */
   private[engine] def select(api: NodeApi, trees: Set[String], excluded: Set[String],
-                             height: Int, target: Int): Selection = {
+                             height: Int, target: Int, minInputs: Int = 2,
+                             limits: configs.WalletConfig = configs.WalletConfig.Default,
+                             transactions: Int = 1): Selection = {
     require(target > 0, "consolidation target must be positive")
+    require(minInputs >= 2, "consolidation needs at least two inputs to remove a box")
+    require(transactions >= 1, "a pass builds at least one consolidation")
+    // Enough boxes for every transaction this pass may build; `execute` cuts them into batches.
+    val ceiling = Math.multiplyExact(limits.maxInputs.toLong, transactions.toLong)
     var total, eligible = 0L
     var oldestExcluded = Option.empty[Int]
     var oldestEligible = Vector.empty[NodeBox]
-    var paging = Paging(0, WalletInventory.PageSize)
+    var paging = Paging(0, limits.pageSize)
     var exhausted = false
     val startedAt = System.nanoTime()
     while (!exhausted) {
-      require(System.nanoTime() - startedAt < WalletInventory.MaxWalkNanos,
+      require(System.nanoTime() - startedAt < limits.inventoryTimeoutMs * 1000000L,
         "consolidation inventory deadline exceeded")
       val page = api.walletUnspentBoxes(ConfirmationRange.IncludeMempool, paging).get
       require(page.size <= paging.limit, "oversized consolidation inventory page")
@@ -70,7 +79,7 @@ object ConsolidationExecution {
           // Box id breaks height ties so the same wallet always yields the same selection.
           oldestEligible = (oldestEligible :+ box)
             .sortBy(candidate => (candidate.creationHeight, candidate.boxId))
-            .take(WalletInventory.MaxInputs)
+            .take(ceiling.toInt)
         } else oldestExcluded = Some(oldestExcluded.fold(box.creationHeight)(math.min(_, box.creationHeight)))
       }
       exhausted = page.size < paging.limit
@@ -78,16 +87,21 @@ object ConsolidationExecution {
     }
     // Merging n inputs into one output removes n - 1 boxes, so overshooting the target by one input
     // is what lands exactly on it.
-    val wanted = math.min(WalletInventory.MaxInputs.toLong, math.max(0L, total - target + 1)).toInt
+    // N transactions leave N outputs behind, so landing on the target needs N more inputs than one
+    // transaction would.
+    val wanted = math.min(ceiling, math.max(0L, total - target + transactions.toLong)).toInt
     val oldestHeight = oldestEligible.headOption.map(_.creationHeight)
     val blocksUntilRent = oldestHeight.map(created => math.max(0L,
-      created.toLong + transactions.rent.StorageRent.StoragePeriod - height))
+      created.toLong + StorageRent.StoragePeriod - height))
     // Even consolidating every eligible box leaves one output behind, so the excluded boxes alone
     // can put the target out of reach.
     val unreachable = total > target && total - math.max(0L, eligible - 1) > target
-    Selection(if (total > target) oldestEligible.take(wanted) else Vector.empty,
+    // A pass below the floor pays a fee to remove fewer boxes than it is worth, so it is no work
+    // rather than a small win.
+    val worthwhile = total > target && wanted >= minInputs
+    Selection(if (worthwhile) oldestEligible.take(wanted) else Vector.empty,
       Status(total, target, eligible, oldestHeight, blocksUntilRent, oldestExcluded,
-        unreachable, OutcomeEligible))
+        unreachable, if (worthwhile) OutcomeEligible else OutcomeNoWork))
   }
 }
 
@@ -96,10 +110,14 @@ object ConsolidationExecution {
  * UTXO count using the ordinary selection, signing, broadcast and reconciliation path, and never
  * runs while higher-priority work is queued.
  */
-private[engine] class ConsolidationExecution(node: NodeContext, api: NodeApi, owner: ActorRef)
+private[engine] class ConsolidationExecution(node: NodeContext, api: NodeApi, owner: ActorRef,
+                                             limits: configs.WalletConfig = configs.WalletConfig.Default)
                                             (implicit ec: ExecutionContext) {
   import ConsolidationExecution._
   import EngineWalletMessages._
+
+  private val logger: org.slf4j.Logger =
+    org.slf4j.LoggerFactory.getLogger("ConsolidationExecution")
   private implicit val timeout: Timeout = Timeout(40.seconds)
 
   private def observation(): CompleteMempool.Observation = {
@@ -109,7 +127,44 @@ private[engine] class ConsolidationExecution(node: NodeContext, api: NodeApi, ow
     observed
   }
 
-  def execute(target: Int, alive: () => Boolean): Status = {
+  /**
+   * Build, sign and send one batch. Every bound is checked per transaction rather than per pass,
+   * because each is submitted on its own and a batch that breaches one must not stop the others.
+   */
+  private def sendOne(ctx: org.ergoplatform.appkit.BlockchainContext,
+                      batch: Vector[NodeBox], alive: () => Boolean): String = {
+    val inputs = batch.map { box =>
+      val input = box.toInputUTXO(ctx)
+      require(input.id.toString == box.boxId && input.bytes.length <= limits.maxInputBytes,
+        "consolidation input identity or byte budget is invalid")
+      input
+    }
+    val fee = transactions.rollups.TransactionMessages.RollupTxStub.ROLLUP_FEE
+    val outputValue = inputs.foldLeft(0L)((sum, input) => Math.addExact(sum, input.value)) - fee
+    require(outputValue >= UTXO.MIN_CHANGE, "consolidation cannot cover fee and minimum output")
+    val allocation = EngineFunding(owner, 10.seconds, ec).reserveKnown(inputs)
+    try {
+      val unsigned = TxBuilder(ctx).setInputs(inputs: _*)
+        .setOutputs(UTXO(node.getNodeWallet.contract, outputValue), UTXO.feeBox(fee))
+        .buildTx(0, node.getNodeWallet.p2pk)
+      require(alive(), "consolidation attempt expired")
+      val signed = node.getNodeWallet.sign(unsigned)
+      require(signed.getCost > 0 && signed.getCost <= ctx.getDataSource.getParameters.getMaxBlockCost,
+        "consolidation exceeds transaction cost budget")
+      val signedBytes = org.ergoplatform.ErgoLikeTransactionSerializer.toBytes(
+        signed.asInstanceOf[org.ergoplatform.appkit.impl.SignedTransactionImpl].getTx).length
+      require(signedBytes <= math.min(MaxSignedBytes, ctx.getDataSource.getParameters.getMaxBlockSize),
+        "consolidation exceeds transaction byte budget")
+      val result = new EngineBroadcast(owner, api).send(signed, Seq(allocation), "consolidation", alive)
+      logger.info(s"Sent transaction ${result.txId} to consolidate ${inputs.size} wallet box(es) " +
+        s"into one worth $outputValue: ${result.outcome}")
+      result.outcome
+      // Release only clears a reservation that never crossed the send boundary; a broadcast
+      // transaction's inputs stay owned until reconciliation resolves them.
+    } finally allocation.release()
+  }
+
+  def execute(target: Int, alive: () => Boolean, minInputs: Int = 2, transactions: Int = 1): Status = {
     // One consolidation at a time. Chaining a second onto an unconfirmed first would build a run of
     // unconfirmed spends that a single rejection invalidates end to end.
     val holds = Await.result((owner ? GetEngineHolds).mapTo[EngineHolds], timeout.duration)
@@ -120,42 +175,45 @@ private[engine] class ConsolidationExecution(node: NodeContext, api: NodeApi, ow
     val ownedInputIds = Await.result((owner ? GetOwnedInputIds).mapTo[Set[String]], timeout.duration)
     node.getClient.execute { ctx =>
       val plan = select(api, node.getNodeWallet.signableTrees,
-        ownedInputIds ++ observed.snapshot.get.spent, ctx.getHeight, target)
+        ownedInputIds ++ observed.snapshot.get.spent, ctx.getHeight, target, minInputs, limits,
+        transactions)
       // The scan pages the whole wallet, so recheck that neither the parent nor the mempool moved
       // while it ran before committing to the boxes it chose.
       val latest = observation()
       require(latest.snapshot.get.anchor == observed.snapshot.get.anchor &&
         latest.snapshot.get.ids == observed.snapshot.get.ids && alive(),
         "consolidation observation changed")
-      if (plan.boxes.size < 2) plan.status.copy(outcome = OutcomeNoWork)
+      // Disjoint batches, each its own transaction. They are deliberately not chained: a rejection
+      // then costs only its own batch rather than invalidating everything behind it. A trailing
+      // batch of one box is dropped, since merging one box removes nothing.
+      val cut = plan.boxes.grouped(limits.maxInputs).filter(_.size >= 2).toVector
+      // Every batch's inputs stay owned until its send resolves, so the pass cannot ask for more
+      // than optional work is allowed to hold at once. Capping is right rather than failing: the
+      // batches that fit are still worth sending, and the rest are picked up next pass.
+      val headroom = EngineWalletState.MAX_OPTIONAL_INPUTS - ownedInputIds.size
+      val affordable = cut.foldLeft((Vector.empty[Vector[NodeBox]], 0)) {
+        case ((kept, held), batch) =>
+          if (held + batch.size <= headroom) (kept :+ batch, held + batch.size) else (kept, held)
+      }._1
+      if (affordable.size < cut.size)
+        logger.info(s"Consolidation capped at ${affordable.size} of ${cut.size} transaction(s): " +
+          s"optional work may hold ${EngineWalletState.MAX_OPTIONAL_INPUTS} inputs and " +
+          s"${ownedInputIds.size} are already owned")
+      if (affordable.isEmpty) plan.status.copy(outcome = OutcomeNoWork)
       else {
-        val inputs = plan.boxes.map { box =>
-          val input = box.toInputUTXO(ctx)
-          require(input.id.toString == box.boxId && input.bytes.length <= WalletInventory.MaxInputBytes,
-            "consolidation input identity or byte budget is invalid")
-          input
-        }
-        val fee = transactions.rollups.TransactionMessages.RollupTxStub.ROLLUP_FEE
-        val outputValue = inputs.foldLeft(0L)((sum, input) => Math.addExact(sum, input.value)) - fee
-        require(outputValue >= UTXO.MIN_CHANGE, "consolidation cannot cover fee and minimum output")
-        val allocation = EngineFunding(owner, 10.seconds, ec).reserveKnown(inputs)
-        try {
-          val unsigned = TxBuilder(ctx).setInputs(inputs: _*)
-            .setOutputs(UTXO(node.getNodeWallet.contract, outputValue), UTXO.feeBox(fee))
-            .buildTx(0, node.getNodeWallet.p2pk)
-          require(alive(), "consolidation attempt expired")
-          val signed = node.getNodeWallet.sign(unsigned)
-          require(signed.getCost > 0 && signed.getCost <= ctx.getDataSource.getParameters.getMaxBlockCost,
-            "consolidation exceeds transaction cost budget")
-          val signedBytes = org.ergoplatform.ErgoLikeTransactionSerializer.toBytes(
-            signed.asInstanceOf[org.ergoplatform.appkit.impl.SignedTransactionImpl].getTx).length
-          require(signedBytes <= math.min(MaxSignedBytes, ctx.getDataSource.getParameters.getMaxBlockSize),
-            "consolidation exceeds transaction byte budget")
-          val result = new EngineBroadcast(owner, api).send(signed, Seq(allocation), "consolidation", alive)
-          plan.status.copy(outcome = result.outcome)
-          // Release only clears a reservation that never crossed the send boundary; a broadcast
-          // transaction's inputs stay owned until reconciliation resolves them.
-        } finally allocation.release()
+        // Per batch, so one that cannot be built or sent does not discard the ones already away.
+        val outcomes = affordable.map(batch => Try(sendOne(ctx, batch, alive)))
+        outcomes.foreach(_.failed.foreach(ex =>
+          logger.warn(s"One consolidation transaction failed: ${ex.getMessage}")))
+        val sent = outcomes.flatMap(_.toOption)
+        logger.info(s"Consolidation sent ${sent.size} of ${affordable.size} transaction(s) merging " +
+          s"${affordable.map(_.size).sum} box(es)" +
+          (if (sent.nonEmpty) s": ${sent.mkString(", ")}" else ""))
+        // The pass is only as good as its transactions, so a send that did not simply succeed is
+        // the outcome worth surfacing.
+        val outcome = sent.find(_ != OutcomeEligible).orElse(sent.headOption)
+          .getOrElse(OutcomeAwaitingReconciliation)
+        plan.status.copy(outcome = outcome)
       }
     }
   }

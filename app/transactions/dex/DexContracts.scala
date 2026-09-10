@@ -27,17 +27,18 @@ object DexContracts {
   }
 
   /**
-   * Attaches context vars correctly to deal with HashMap issue.
-   *
-   * Check `ContextExtensionOrderSpec` for explanation.
+   * Attach context vars in the order the node will rebuild them, which is not numeric order.
+   * TODO: Change when SigmaMap is added to Node
    */
   def attachCtxVars(box: InputUTXO, vars: Seq[(Byte, ErgoValue[_])]): InputUTXO = {
     require(vars.map(_._1).distinct.size == vars.size, s"duplicate context var id in ${vars.map(_._1)}")
 
-    // Ascending by id, which is the order the node rebuilds the extension in. Signing in any other
-    // order signs a different byte string than the one the node verifies: contract-only inputs still
-    // pass, because they reduce to a constant, while every real signature on the same transaction
-    // fails with `Success((false, <cost>))` and the transaction takes a different id.
-    vars.sortBy(_._1).foldLeft(box) { case (acc, (id, value)) => acc.withCtxVar(id, value) }
+    val probe = new java.util.HashMap[String, String](vars.size)
+    vars.foreach { case (id, _) => probe.put(id.toString, "") }
+    val wireOrder = probe.keySet().asScala.toSeq.map(_.toByte)
+
+    wireOrder.foldLeft(box) { (acc, id) =>
+      acc.withCtxVar(id, vars.find(_._1 == id).get._2)
+    }
   }
 }

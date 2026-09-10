@@ -38,10 +38,11 @@ import transactions.engine.wallet.{EngineFunding, FundingAllocation}
 class RollupExecution(nodeContext: NodeContext, walletManager: ActorRef, syncHandler: ActorRef,
                       mempoolView: ActorRef, config: Configuration, dataBoxes: DataBoxSource,
                       rollupNodeApi: node.NodeApi, alive: () => Boolean,
-                      worker: ExecutionContext)(implicit ec: ExecutionContext) {
+                      worker: ExecutionContext,
+                      discardStubs: (String, String) => Unit = (_, _) => ())(implicit ec: ExecutionContext) {
   private implicit val timeout: Timeout = Timeout(30.seconds)
-  private val criticalFunding = EngineFunding(walletManager, EngineFunding.AskTimeout, ec, critical = true)
-  private val optionalFunding = EngineFunding(walletManager, EngineFunding.AskTimeout, ec)
+  private val criticalFunding = EngineFunding(walletManager, EngineFunding.askTimeout(config), ec, critical = true)
+  private val optionalFunding = EngineFunding(walletManager, EngineFunding.askTimeout(config), ec)
   private var criticalBatch = false
   private def walletSelector: EngineFunding = if (criticalBatch) criticalFunding else optionalFunding
   private val commitments = new CommitmentTransactions(nodeContext, dataBoxes, alive) {
@@ -417,6 +418,7 @@ class RollupExecution(nodeContext: NodeContext, walletManager: ActorRef, syncHan
           // initial-transaction path never reaches `reportAttempt`.
           if (ex.isInstanceOf[CommitmentNotInEffectException]) {
             syncHandler ! RemoveRollup(stub.rollupBlockId, ex.getMessage)
+            discardStubs(stub.rollupBlockId, ex.getMessage)
             logger.warn(s"Dropping rollup ${stub.rollupBlockId}: ${ex.getMessage}")
           }
         case Success(_) => ()
@@ -453,6 +455,7 @@ class RollupExecution(nodeContext: NodeContext, walletManager: ActorRef, syncHan
       // Stop tracking it rather than re-offering it for the rest of its life.
       case Failure(notInEffect: CommitmentNotInEffectException) =>
         syncHandler ! RemoveRollup(stub.rollupBlockId, notInEffect.getMessage)
+        discardStubs(stub.rollupBlockId, notInEffect.getMessage)
         logger.warn(s"Dropping rollup ${stub.rollupBlockId}: ${notInEffect.getMessage}")
       // The rest are terminal for this attempt but not for the rollup, so they say why and stop.
       case Failure(nv: NoValidNISPException) =>

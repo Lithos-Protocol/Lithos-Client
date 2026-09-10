@@ -53,7 +53,7 @@ trait EmissionsCore extends Actor with InjectedActorSupport {
     override protected def executionNode: NodeApi = emissionNodeApi
   }
 
-  private val walletSelector = EngineFunding(emissionWalletManager, EngineFunding.AskTimeout, context.dispatcher)
+  private val walletSelector = EngineFunding(emissionWalletManager, EngineFunding.askTimeout(config), context.dispatcher)
   private lazy val txs = new EmissionTransactions(
     nodeConfig.getNodeWallet, emissionNodeApi, emissionConfig, walletSelector, () => emissionAlive.get(),
     Some(new transactions.engine.EngineJoinGuard(emissionWalletManager, emissionNodeApi)))

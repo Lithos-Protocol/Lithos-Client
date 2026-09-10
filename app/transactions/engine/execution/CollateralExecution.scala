@@ -49,7 +49,7 @@ class CollateralExecution(nodeContext: NodeContext,
   private implicit val ec: ExecutionContext = system.dispatcher
 
   private val walletSelector =
-    EngineFunding(walletManager, EngineFunding.AskTimeout, ec)
+    EngineFunding(walletManager, EngineFunding.askTimeout(config), ec)
 
   /** Ask timeout for the fast wallet replies; the claim covers a multi-broadcast sweep. */
   private val QuickAsk = Timeout(5 seconds)

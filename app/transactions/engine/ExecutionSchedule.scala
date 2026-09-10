@@ -58,6 +58,9 @@ private[transactions] final class ExecutionSchedule[A](limit: Int = 128) {
   def busy(lane: String): Boolean = entries.exists(entry => entry.lane == lane && entry.attempt.nonEmpty)
   def nonEmpty: Boolean = entries.nonEmpty
 
+  /** Whether one lane holds anything at all, queued or running. */
+  def occupied(lane: String): Boolean = entries.exists(_.lane == lane)
+
   /** Admit new work. A key already queued or running is left alone rather than duplicated. */
   def register(entry: Entry[A]): Boolean = {
     if (contains(entry.key)) false

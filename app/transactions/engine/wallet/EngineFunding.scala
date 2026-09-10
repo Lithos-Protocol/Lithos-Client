@@ -153,4 +153,13 @@ case class EngineFunding(walletRef: ActorRef,
 object EngineFunding {
   // Funding can require context loading and several node reads before inputs can be reserved.
   final val AskTimeout: FiniteDuration = 30.seconds
+
+  /**
+   * The configured wait, for a caller that has the configuration to hand.
+   *
+   * Funding is serialised, so this bounds the queue behind a slow node read rather than the read
+   * itself: a join asking per position is the case that reaches it first.
+   */
+  def askTimeout(config: play.api.Configuration): FiniteDuration =
+    FiniteDuration(configs.WalletConfig(config).reservationTimeoutMs, MILLISECONDS)
 }

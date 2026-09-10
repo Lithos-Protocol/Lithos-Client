@@ -61,9 +61,9 @@ class RollupPublisher @Inject()(config: Configuration, nodeContext: NodeContext,
 
   override def preStart(): Unit = {
     if (!stateConfig.disableTransforms.getOrElse(false)) {
-      logger.info("RollupPublisher starting - evaluating rollup transactions every 2 minutes")
+      logger.info("RollupPublisher starting - evaluating rollup transactions every 1 minute")
       ticker = Some(
-        context.system.scheduler.scheduleWithFixedDelay(25.seconds, 3.minutes, self, Tick)(context.dispatcher)
+        context.system.scheduler.scheduleWithFixedDelay(25.seconds, 1.minutes, self, Tick)(context.dispatcher)
       )
     } else {
       logger.info("RollupPublisher disabled via disableTransforms config")

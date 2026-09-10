@@ -71,7 +71,7 @@ class TransactionEngine @Inject()(node: NodeContext,
   protected val cacheApi: play.api.cache.SyncCacheApi,
   protected val config: play.api.Configuration,
   protected val dataBoxes: transactions.rollups.DataBoxSource)
-  extends EngineWalletState(node) with EngineRollupCandidates with transactions.emissions.EmissionsCore {
+  extends EngineWalletState(node, configs.WalletConfig(config)) with EngineRollupCandidates with transactions.emissions.EmissionsCore {
   import TransactionEngine._
   import ExecutionSchedule._
 
@@ -82,10 +82,21 @@ class TransactionEngine @Inject()(node: NodeContext,
     _root_.node.rest.NodeHttpConfig(node.getNodeUrl, Some(node.getNodeKey),
       maxResponseBytes = 2 * 1024 * 1024, callTimeoutMs = 10000L))
 
+  private val logger: org.slf4j.Logger = org.slf4j.LoggerFactory.getLogger("TransactionEngine")
+
   private val rollupWorker = context.system.dispatchers.lookup("lithos-contexts.critical-tx-dispatcher")
 
+  /**
+   * By selection rather than injection: `RollupProcessor` already injects this engine by name, so
+   * naming it back would be a construction cycle.
+   */
+  private def discardRollupStubs(blockId: String, reason: String): Unit =
+    context.actorSelection("/user/transaction-processor") !
+      transactions.rollups.TransactionMessages.DropRollupStubs(blockId, reason)
+
   private def newRollupExecution(eligible: () => Boolean): RollupExecution =
-    new RollupExecution(node, self, sync, mempool, config, dataBoxes, nodeApi, eligible, rollupWorker)
+    new RollupExecution(node, self, sync, mempool, config, dataBoxes, nodeApi, eligible, rollupWorker,
+      discardRollupStubs)
 
   override protected def candidateExecution(eligible: () => Boolean): RollupExecution = newRollupExecution(eligible)
   private val worker = context.system.dispatchers.lookup("lithos-contexts.engine-io-dispatcher")
@@ -108,23 +119,35 @@ class TransactionEngine @Inject()(node: NodeContext,
   private var nextMaintenance = 0L
   private var ticker: Option[Cancellable] = None
 
-  private val consolidationEnabled =
-    config.getOptional[Boolean]("transaction-engine.consolidation.enabled").getOrElse(false)
-  private val consolidationTarget =
-    config.getOptional[Int]("transaction-engine.consolidation.target-utxos").getOrElse(100)
+  protected val walletConfig: configs.WalletConfig = configs.WalletConfig(config)
+  private val consolidationEnabled = walletConfig.consolidation.enabled
+  private val consolidationTarget = walletConfig.consolidation.targetUtxos
   require(consolidationTarget > 0, "consolidation target must be positive")
+  /** A floor between passes, not a schedule: a pass also needs the critical lane clear. */
+  private var nextConsolidation = 0L
   private var consolidationStatus = ConsolidationExecution.Status(0, consolidationTarget, 0, None, None, None,
     targetUnreachable = false,
     if (consolidationEnabled) ConsolidationExecution.OutcomeNotObserved else ConsolidationExecution.OutcomeDisabled)
 
-  private lazy val consolidation = new ConsolidationExecution(node, nodeApi, self)
-  private lazy val dex = new DexExecution(node, EngineFunding(self, EngineFunding.AskTimeout, ec), () => alive.get()) {
+  private lazy val consolidation = new ConsolidationExecution(node, nodeApi, self, walletConfig)
+  private lazy val dex = new DexExecution(node, EngineFunding(self, EngineFunding.askTimeout(config), ec), () => alive.get()) {
     override protected def executionNode: _root_.node.NodeApi = TransactionEngine.this.nodeApi
   }
   private lazy val dexCache = new cache.LDCache(cacheApi)
 
   override def preStart(): Unit = {
     super.preStart()
+    // Consolidation is invisible otherwise: it has no log of its own, and its status is only
+    // readable over the API, so "nothing happened" and "it is switched off" look identical.
+    if (consolidationEnabled)
+      logger.info(s"Consolidation ON: target ${consolidationTarget} UTXOs, at most every " +
+        s"${walletConfig.consolidation.intervalMs}ms, at least ${walletConfig.consolidation.minInputs} " +
+        "inputs per pass. Deferred while critical work is queued.")
+    else
+      logger.info("Consolidation OFF (wallet.consolidation.enabled)")
+    logger.info(s"Wallet limits: maxInputs=${walletConfig.maxInputs} pageSize=${walletConfig.pageSize} " +
+      s"maxDescriptors=${walletConfig.maxDescriptors} " +
+      s"reservationTimeout=${walletConfig.reservationTimeoutMs}ms")
     ticker = Some(context.system.scheduler.scheduleWithFixedDelay(1.second, 1.second, self, Maintenance))
     self ! Reconcile
   }
@@ -162,9 +185,15 @@ class TransactionEngine @Inject()(node: NodeContext,
       if (now >= nextMaintenance) {
         nextMaintenance = now + MaintenanceInterval
         reconcileDue = true
-        // Only when the engine is otherwise idle: consolidation is the lowest-priority work there is.
-        if (consolidationEnabled && !schedule.nonEmpty && reconciling.isEmpty)
+        // Blocked by critical work only. Requiring the whole schedule to be empty meant a client
+        // tracking rollups never consolidated at all, because the optional lane is rarely idle.
+        // Consolidation still runs in the optional lane, so it cannot delay a NISP or a fraud proof.
+        if (consolidationEnabled && now >= nextConsolidation &&
+          !schedule.occupied(Lane.Critical) && reconciling.isEmpty) {
+          nextConsolidation = now + walletConfig.consolidation.intervalMs
+          logger.info(s"Consolidation pass starting: target $consolidationTarget UTXOs")
           admit(EngineIntent.Consolidate, context.system.deadLetters)
+        }
       }
       drive()
 
@@ -172,7 +201,7 @@ class TransactionEngine @Inject()(node: NodeContext,
 
     case Reconciled(attempt, result) if reconciling.contains(attempt) =>
       reconciling = None
-      result.failed.foreach(ex => context.system.log.warning("Engine reconciliation deferred: {}", ex.getMessage))
+      result.failed.foreach(ex => logger.warn(s"Engine reconciliation deferred: ${ex.getMessage}"))
       drive(preferReconciliation = false)
 
     case WorkFinished(key, attempt, result) if running.get(key).exists(_.attempt.contains(attempt)) =>
@@ -183,6 +212,17 @@ class TransactionEngine @Inject()(node: NodeContext,
         case EngineIntent.Consolidate =>
           consolidationStatus = result.map(_.asInstanceOf[ConsolidationExecution.Status])
             .getOrElse(consolidationStatus.copy(outcome = ConsolidationExecution.OutcomeDeferred))
+          // Say what the pass concluded. The status was previously readable only over the API, so a
+          // wallet that never shrank gave no clue whether it was refused, empty, or never observed.
+          result match {
+            case Success(_) =>
+              val s = consolidationStatus
+              logger.info(s"Consolidation pass ${s.outcome}: ${s.total} wallet UTXO(s), " +
+                s"${s.eligible} eligible, target ${s.target}" +
+                (if (s.targetUnreachable) ", target unreachable from eligible boxes alone" else ""))
+            case Failure(ex) =>
+              logger.warn(s"Consolidation pass failed: ${ex.getMessage}")
+          }
         case _ => ()
       }
       running -= key
@@ -292,7 +332,9 @@ class TransactionEngine @Inject()(node: NodeContext,
   /** Blocking optional operations run on the engine worker after admission and expiry checks. */
   protected def executeOptional(work: EngineIntent, stillEligible: () => Boolean): Any = work match {
     case EngineIntent.Dex(request, _) => request.execute(dex, dexCache)
-    case EngineIntent.Consolidate => consolidation.execute(consolidationTarget, stillEligible)
+    case EngineIntent.Consolidate =>
+      consolidation.execute(consolidationTarget, stillEligible,
+        walletConfig.consolidation.minInputs, walletConfig.consolidation.transactions)
     case _ => throw new IllegalArgumentException("unsupported engine intent")
   }
 }

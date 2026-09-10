@@ -174,6 +174,15 @@ object TransactionMessages {
    */
   case class LatestRollup(inputUTXO: InputUTXO, rollup: Rollup,
                           ancestorIds: Seq[String] = Seq.empty) extends LatestState
+  /**
+   * Forget every queued stub for a rollup that has been dropped deliberately.
+   *
+   * Synchronisation stops tracking the rollup at once, but stubs already queued here keep being
+   * offered until a later published map reaps them — each one a node round trip for work that cannot
+   * succeed. This closes that window.
+   */
+  case class DropRollupStubs(blockId: String, reason: String)
+
   // Exceptions
   case class RollupRemovedException(msg: String) extends Exception(msg)
   case class NewlyGeneratedRollupException(msg: String) extends Exception(msg)

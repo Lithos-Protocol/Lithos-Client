@@ -34,7 +34,9 @@ import transactions.engine.{EngineBroadcast, EngineJoinGuard}
  * The invariant everything here protects: an input owned by a nonterminal transaction is never
  * offered to another request. Releasing early is a double spend, so every ambiguous case withholds.
  */
-class EngineWalletState @Inject()(nodeContext: NodeContext) extends Actor with InjectedActorSupport {
+class EngineWalletState @Inject()(nodeContext: NodeContext,
+                                  walletLimits: configs.WalletConfig = configs.WalletConfig.Default)
+  extends Actor with InjectedActorSupport {
 
   implicit val ec: ExecutionContext = context.dispatcher
 
@@ -44,12 +46,20 @@ class EngineWalletState @Inject()(nodeContext: NodeContext) extends Actor with I
   def nodeApi: NodeApi = nodeContext.getNodeApi
 
   private val wallet = nodeContext.getNodeWallet
-  private lazy val inventory = new WalletInventory(nodeContext, nodeApi)
+
+  // The engine passes the operator's `wallet` block. On a wallet of thousands of boxes the page
+  // size decides how many node reads one selection costs, so it must not fall back to a default.
+  private lazy val inventory = new WalletInventory(nodeContext, nodeApi, walletLimits)
   private lazy val walletWorker = context.system.dispatchers.lookup("lithos-contexts.wallet-io-dispatcher")
   // Inventory scans and reward sweeps cannot occupy the funding selection worker.
   private lazy val maintenanceWorker = context.system.dispatchers.lookup("lithos-contexts.wallet-maintenance-dispatcher")
   private var selecting: Option[UUID] = None
   private var criticalSelecting: Option[UUID] = None
+  /** When the in-flight selection began, so a slow one is reported as a measurement. */
+  private var selectingSince = 0L
+  private var criticalSelectingSince = 0L
+  /** Above this a selection is worth a line: it is the queue every other caller waits behind. */
+  private final val SlowSelectionMillis = 5000L
   private var criticalMessage = false
   private lazy val criticalWalletWorker = context.system.dispatchers.lookup("lithos-contexts.critical-wallet-dispatcher")
   private var waitingSelections = Vector.empty[SelectionRequest]
@@ -123,7 +133,8 @@ class EngineWalletState @Inject()(nodeContext: NodeContext) extends Actor with I
       reply ! WalletInputs(Seq.empty, reservationId)
     else {
       val attempt = UUID.randomUUID()
-      if (critical) criticalSelecting = Some(attempt) else selecting = Some(attempt)
+      if (critical) { criticalSelecting = Some(attempt); criticalSelectingSince = now() }
+      else { selecting = Some(attempt); selectingSince = now() }
       val excluded = usedInputs.keySet
       val chainedChange = knownOutputs
       Try(Future(client.execute { ctx =>
@@ -270,14 +281,22 @@ class EngineWalletState @Inject()(nodeContext: NodeContext) extends Actor with I
     // than a partial selection the caller cannot fund a transaction with.
     case SelectionFinished(attempt, reservationId, deadline, track, reply, result, critical)
       if selecting.contains(attempt) || criticalSelecting.contains(attempt) =>
+      val startedAt = if (critical) criticalSelectingSince else selectingSince
       if (critical) criticalSelecting = None else selecting = None
+      val elapsed = now() - startedAt
       val ownershipLimit = if (critical) MAX_ENGINE_INPUTS else MAX_OPTIONAL_INPUTS
       val selected = result.toOption.filter { boxes =>
         now() < deadline &&
           boxes.forall(box => !usedInputs.contains(box.id.toString)) &&
           usedInputs.size + boxes.size <= ownershipLimit
       }.getOrElse(Vector.empty)
-      result.failed.foreach(ex => logger.warn(s"Wallet selection deferred: ${ex.getMessage}"))
+      result.failed.foreach(ex => logger.warn(s"Wallet selection deferred after ${elapsed}ms: ${ex.getMessage}"))
+      // A selection pages the wallet from the node, so on a large wallet this is the cost every
+      // other caller queues behind. Naming the page size makes the lever obvious.
+      if (elapsed >= SlowSelectionMillis)
+        logger.warn(s"Wallet selection took ${elapsed}ms and returned ${selected.size} input(s) " +
+          s"(critical=$critical, wallet.page-size=${walletLimits.pageSize}); every other funding " +
+          "request waits behind this one")
       if (track && selected.nonEmpty) reserve(selected.map(_.id.toString), reservationId)
       reply ! WalletInputs(selected, reservationId)
       drainSelections()

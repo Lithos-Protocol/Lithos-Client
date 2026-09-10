@@ -144,14 +144,19 @@ class GenesisTopUpSpec extends AnyPropSpec with EmissionSpecBase with MockitoSug
         Seq(revenue(ctx, wallet, Parameters.OneErg)), Seq.empty[UTXO], height)
 
       val raw = signed.toJson(false, false)
-      // The node rebuilds the extension in ascending id order whatever order the JSON listed, so
-      // that is the order the bytes have to be signed in. What the JSON text happens to say is
-      // appkit's own hash order and is not ours to choose.
+      // The order the bytes are signed in has to be the one the node's decoder produces from this
+      // same JSON. It is not numeric order and not the order the JSON text lists; it is whatever
+      // that decoder lands on, which for this id set is (64, 3).
       val signedOrder = signed.asInstanceOf[org.ergoplatform.appkit.impl.SignedTransactionImpl]
         .getTx.inputs.head.spendingProof.extension.values.keys.toSeq
+      val codecs = new org.ergoplatform.sdk.JsonCodecs {}
+      import codecs._
+      val rebuilt = io.circe.parser.parse(raw).toTry.get
+        .as[org.ergoplatform.ErgoLikeTransaction].toTry.get
+        .inputs.head.spendingProof.extension.values.keys.toSeq
       withClue("a transaction signed in any other order takes an id the node will not agree on: ") {
-        signedOrder shouldBe signedOrder.sorted
-        signedOrder shouldBe Seq[Byte](3, 64)
+        signedOrder shouldBe rebuilt
+        signedOrder shouldBe Seq[Byte](64, 3)
       }
 
       val ins = new org.json.JSONObject(raw).getJSONArray("inputs")
@@ -160,10 +165,9 @@ class GenesisTopUpSpec extends AnyPropSpec with EmissionSpecBase with MockitoSug
           .keySet().asScala.toSet shouldBe Set("3", "64")
       }
 
-      // Deliberately not a round trip through appkit. Its decoder folds the extension in the order
-      // the JSON text happens to list, which is its own Gson hash order, while the node rebuilds
-      // ascending — so appkit agreeing with itself would say nothing about the node agreeing with
-      // us. Ascending is the only order both can reach, and asserting it above is the real check.
+      // The round trip above goes through sigma's own codec rather than appkit's, because that is
+      // the one the node's `transactionDecoder` delegates to. appkit agreeing with itself would say
+      // nothing about the node agreeing with us.
       ins.length() shouldBe 2
     }
   }
@@ -186,6 +190,28 @@ class GenesisTopUpSpec extends AnyPropSpec with EmissionSpecBase with MockitoSug
       successor.getRegisters.asScala.toVector shouldEqual holding.registers
       successor.getTokens.asScala.map(t => t.getId.toString -> t.getValue.toLong) shouldEqual
         holding.tokens.map(t => t.id.toString -> t.amount)
+    }
+  }
+
+  /** The same question for the top-up: does the node rebuild the bytes we signed? */
+  property("the node computes the same id we do for a top-up") {
+    withCtx { ctx =>
+      val wallet = walletOf(ctx)
+      val height = ctx.getHeight + 1
+      val builder = new CandidateTxBuilder(wallet, mock[NodeApi], CandidateConfig.Default)
+      val data = builder.buildGenesis(ctx, collateralInput(ctx), height)
+      val holding = data.holdingOutput.get
+
+      val signed = transactions.rollups.RollupTransactions.genHoldingTopUp(ctx, wallet, holding,
+        Seq(revenue(ctx, wallet, Parameters.OneErg)), Seq.empty[UTXO], height)
+
+      val codecs = new org.ergoplatform.sdk.JsonCodecs {}
+      import codecs._
+      val theirs = io.circe.parser.parse(signed.toJson(false)).toTry.get
+        .as[org.ergoplatform.ErgoLikeTransaction].toTry.get
+      withClue("a different id here is the node rebuilding different bytes from our own JSON: ") {
+        theirs.id shouldBe signed.getId
+      }
     }
   }
 }

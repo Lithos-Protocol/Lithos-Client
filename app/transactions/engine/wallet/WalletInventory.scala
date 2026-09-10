@@ -25,7 +25,7 @@ private[engine] object WalletInventory {
   /** Inputs one selection may return, which also caps a consolidation transaction. */
   final val MaxInputs = 75
   final val PageSize = 100
-  final val MaxWalkNanos = 120L * 1000000000L
+  final val MaxWalkNanos = 240L * 1000000000L
 
   /**
    * @param complete   the walk reached the end of every page
@@ -53,7 +53,16 @@ private[engine] object WalletInventory {
  * Streams wallet pages from the node and hydrates only the boxes a selection actually returns, so
  * idle memory holds descriptors rather than a full AppKit object per wallet box.
  */
-private[engine] class WalletInventory(node: NodeContext, api: _root_.node.NodeApi) {
+private[engine] class WalletInventory(node: NodeContext, api: _root_.node.NodeApi,
+                                      limits: configs.WalletConfig = configs.WalletConfig.Default) {
+  import limits._
+  private val PageSize = limits.pageSize
+  private val MaxDescriptors = limits.maxDescriptors
+  private val MaxDescriptorBytes = limits.maxDescriptorBytes
+  private val MaxInputs = limits.maxInputs
+  private val MaxInputBytes = limits.maxInputBytes
+  private val MaxWalkNanos = limits.inventoryTimeoutMs * 1000000L
+
   import WalletInventory._
   private val wallet = node.getNodeWallet
   private val mainnet = node.getNetwork == org.ergoplatform.appkit.NetworkType.MAINNET

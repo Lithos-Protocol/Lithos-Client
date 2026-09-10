@@ -44,4 +44,59 @@ class ConsolidationExecutionSpec extends AnyFlatSpec with Matchers with MockitoS
       Success(Vector.tabulate(100)(i => entry(i + 1, i))), Failure(new RuntimeException("unavailable")))
     intercept[RuntimeException](ConsolidationExecution.select(api, Set("wallet"), Set.empty, 1000, 1))
   }
+
+  // ─── the floor below which a pass is not worth its fee ─────────────────────
+
+  /** Merging n boxes into one removes n - 1, so a pass that can only merge two buys one box. */
+  "The minimum-inputs floor" should "report no work rather than paying a fee for one box" in {
+    val api = mock[NodeApi]
+    serve(api, Vector(entry(1, 1), entry(2, 2), entry(3, 3)))
+    val plan = ConsolidationExecution.select(api, Set("wallet"), Set.empty, 100, 2, minInputs = 3)
+    plan.boxes shouldBe empty
+    plan.status.outcome shouldBe ConsolidationExecution.OutcomeNoWork
+    withClue("the totals are still observed, so the refusal is informed rather than blind: ") {
+      plan.status.total shouldBe 3
+      plan.status.eligible shouldBe 3
+    }
+  }
+
+  it should "admit the same wallet once the floor is met" in {
+    val api = mock[NodeApi]
+    serve(api, Vector(entry(1, 1), entry(2, 2), entry(3, 3)))
+    val plan = ConsolidationExecution.select(api, Set("wallet"), Set.empty, 100, 2, minInputs = 2)
+    plan.boxes.map(_.creationHeight) shouldBe Vector(1, 2)
+    plan.status.outcome shouldBe ConsolidationExecution.OutcomeEligible
+  }
+
+  it should "refuse a floor that cannot remove a box at all" in {
+    val api = mock[NodeApi]
+    serve(api, Vector(entry(1, 1)))
+    intercept[IllegalArgumentException](
+      ConsolidationExecution.select(api, Set("wallet"), Set.empty, 100, 1, minInputs = 1))
+  }
+
+  /**
+   * The walk is paged from configuration, so a large wallet costs fewer node reads.
+   *
+   * A short page ends the walk, so 250 boxes at a page of 300 is one read where the default page of
+   * 100 would be three. That ratio is the whole point on a wallet of thousands.
+   */
+  "The scan" should "page at the configured size" in {
+    val api = mock[NodeApi]
+    val wallet = Vector.tabulate(250)(i => entry(i + 1, i + 1))
+
+    serve(api, wallet)
+    val wide = ConsolidationExecution.select(api, Set("wallet"), Set.empty, 1000, 249,
+      minInputs = 2, limits = configs.WalletConfig.Default.copy(pageSize = 300))
+    wide.status.total shouldBe 250
+    org.mockito.Mockito.verify(api, org.mockito.Mockito.times(1))
+      .walletUnspentBoxes(any[ConfirmationRange], any[Paging])
+
+    val narrow = mock[NodeApi]
+    serve(narrow, wallet)
+    ConsolidationExecution.select(narrow, Set("wallet"), Set.empty, 1000, 249,
+      minInputs = 2, limits = configs.WalletConfig.Default.copy(pageSize = 100))
+    org.mockito.Mockito.verify(narrow, org.mockito.Mockito.times(3))
+      .walletUnspentBoxes(any[ConfirmationRange], any[Paging])
+  }
 }

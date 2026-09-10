@@ -14,7 +14,7 @@ import state.messages.MempoolMessages.MempoolRollupMetadata
 import state.messages.SyncMessages._
 import transactions.candidate.BlockTxMessages.{BlockTxsReady, CandidateTx, CandidateTxsDropped, PrepareBlockTxs, RequestBlockTxs}
 import transactions.rollups.TransactionMessages.RollupTxType._
-import transactions.rollups.TransactionMessages.{BatchAccepted, BuildBlockTxs, EvaluationSet, FraudBatch, PublishedRollupMap, RollupBatch, RollupTxStub, RollupTxType}
+import transactions.rollups.TransactionMessages.{BatchAccepted, BuildBlockTxs, DropRollupStubs, EvaluationSet, FraudBatch, PublishedRollupMap, RollupBatch, RollupTxStub, RollupTxType}
 import transactions.rollups.RollupProcessor._
 
 import javax.inject.{Inject, Named}
@@ -129,6 +129,12 @@ class RollupProcessor @Inject()(config: Configuration, nodeContext: NodeContext,
     // be holding a wallet box for a submission it built into that package, so it has to be told.
     case dropped: CandidateTxsDropped =>
       transactionEngine ! dropped
+
+    case DropRollupStubs(blockId, reason) =>
+      pendingRollupTxs.get(blockId).foreach { stubs =>
+        logger.warn(s"Discarding ${stubs.size} pending stub(s) for dropped rollup $blockId: $reason")
+        pendingRollupTxs = pendingRollupTxs - blockId
+      }
 
     // The height comes back with the sync state rather than being read in the handler. This actor
     // answers RequestBlockTxs, so a BlockchainContext opened on its own thread is a node round trip

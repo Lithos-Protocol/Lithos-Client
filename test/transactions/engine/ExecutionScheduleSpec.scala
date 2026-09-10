@@ -42,4 +42,38 @@ class ExecutionScheduleSpec extends AnyFlatSpec with Matchers {
     schedule.finish("api", entry.attempt.get, retry = true, 1)
     schedule.contains("api") shouldBe false
   }
+
+  // ─── lane occupancy ───────────────────────────────────────────────────────
+
+  /**
+   * What admits consolidation. It used to wait for the whole schedule to empty, which on a client
+   * tracking rollups never happened, so it never ran at all. Asking about one lane is what lets
+   * optional work proceed while still standing aside for a NISP or a fraud proof.
+   */
+  "Lane occupancy" should "see queued work in its own lane and not another's" in {
+    val schedule = new ExecutionSchedule[String]()
+    schedule.occupied("critical") shouldBe false
+    schedule.register(Entry("work", "work", "optional", Immediate(1000), Automatic))
+    schedule.occupied("optional") shouldBe true
+    withClue("optional work must not defer consolidation: ") {
+      schedule.occupied("critical") shouldBe false
+    }
+  }
+
+  it should "stay true while an entry is running, not only while it waits" in {
+    val schedule = new ExecutionSchedule[String]()
+    schedule.register(Entry("proof", "proof", "critical", Immediate(1000), Critical))
+    schedule.next("critical", 0) should not be empty
+    withClue("a dispatched entry is still occupying its lane: ") {
+      schedule.occupied("critical") shouldBe true
+    }
+  }
+
+  it should "clear once the lane's work finishes" in {
+    val schedule = new ExecutionSchedule[String]()
+    schedule.register(Entry("proof", "proof", "critical", Immediate(1000), Critical))
+    val entry = schedule.next("critical", 0).get
+    schedule.finish("proof", entry.attempt.get, retry = false, 1)
+    schedule.occupied("critical") shouldBe false
+  }
 }

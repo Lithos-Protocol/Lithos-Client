@@ -39,9 +39,27 @@ object Configs {
 
   def validateAll(config: Configuration): Unit = {
     val v = new ConfigValidator(config)
-    v.bool("transaction-engine.consolidation.enabled")
-    v.range("transaction-engine.consolidation.target-utxos", v.int("transaction-engine.consolidation.target-utxos"),
+    // ---- wallet ----
+    // Absent keys fall back to WalletConfig.Default, so these bound what is supplied rather than
+    // requiring it. The upper bounds are what the engine can actually honour, not taste.
+    v.range("wallet.max-inputs", v.int("wallet.max-inputs"), 1, 4096, "inputs per selection")
+    v.range("wallet.max-descriptors", v.int("wallet.max-descriptors"), 1, 1000000, "cached descriptors")
+    v.longRange("wallet.max-descriptor-bytes", v.long("wallet.max-descriptor-bytes"),
+      1024L, 1024L * 1024L * 1024L, "descriptor cache bytes")
+    v.range("wallet.max-input-bytes", v.int("wallet.max-input-bytes"), 512, 1024 * 1024, "bytes per box")
+    v.range("wallet.page-size", v.int("wallet.page-size"), 1, 10000, "boxes per node read")
+    v.longRange("wallet.inventory-walk-timeout-ms", v.long("wallet.inventory-walk-timeout-ms"),
+      1000L, 3600000L, "milliseconds")
+    v.longRange("wallet.reservation-timeout-ms", v.long("wallet.reservation-timeout-ms"),
+      1000L, 600000L, "milliseconds")
+
+    v.bool("wallet.consolidation.enabled")
+    v.range("wallet.consolidation.target-utxos", v.int("wallet.consolidation.target-utxos"),
       1, Int.MaxValue, "desired total wallet UTXO count")
+    v.longRange("wallet.consolidation.interval-ms", v.long("wallet.consolidation.interval-ms"),
+      1000L, 86400000L, "milliseconds")
+    v.range("wallet.consolidation.min-inputs", v.int("wallet.consolidation.min-inputs"),
+      2, 4096, "inputs worth one consolidation")
 
     // ---- node ----
     v.url("node.url", v.string("node.url"))
