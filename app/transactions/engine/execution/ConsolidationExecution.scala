@@ -8,7 +8,7 @@ import node.NodeApi
 import node.MutationConversions._
 import node.model._
 import state.synchronization.CompleteMempool
-import work.lithos.mutations.{TxBuilder, UTXO}
+import work.lithos.mutations.{Eip27Adjustment, InputUTXO, MainnetEip27Constants, Token, TxBuilder, UTXO}
 
 import scala.concurrent.{Await, ExecutionContext}
 import scala.concurrent.duration._
@@ -30,6 +30,40 @@ object ConsolidationExecution {
 
   private[engine] final case class Selection(boxes: Vector[NodeBox], status: Status)
 
+  /**
+   * How one batch's value and tokens are laid out across its outputs.
+   *
+   * Tokens are summed per id and cut into groups of at most [[MaxTokensPerBox]], one output each,
+   * with a single plain output when the batch holds none. Re-emission tokens are left out entirely:
+   * the build burns them and pays the proxy instead, so they are never carried and their obligation
+   * is not available to spend.
+   *
+   * Fails rather than trimming. Dropping a token group to fit the value would leave those tokens
+   * unaccounted for and the transaction would not balance, so a batch that cannot fund one minimum
+   * output per group is cancelled and its boxes are picked up by a later pass.
+   */
+  private[engine] def outputPlan(inputs: Seq[InputUTXO], fee: Long,
+                                    obligation: Long): Seq[(Seq[Token], Long)] = {
+    val carried = inputs.flatMap(_.tokens)
+      .filterNot(t => obligation > 0L && t.id.toString == MainnetEip27Constants.TokenId)
+    // Ordered by id so the same batch always produces the same transaction.
+    val merged: Seq[Token] = carried.groupBy(_.id.toString).toSeq.sortBy(_._1).map {
+      case (_, held) => Token(held.head.id, held.foldLeft(0L)((n, t) => Math.addExact(n, t.amount)))
+    }
+    val groups: Seq[Seq[Token]] =
+      if (merged.isEmpty) Vector(Seq.empty[Token]) else merged.grouped(MaxTokensPerBox).toVector
+    val valueIn = inputs.foldLeft(0L)((sum, input) => Math.addExact(sum, input.value))
+    val spendable = Math.subtractExact(Math.subtractExact(valueIn, fee), obligation)
+    require(spendable >= Math.multiplyExact(groups.size.toLong, UTXO.MIN_CHANGE),
+      s"consolidation of ${groups.size} output(s) cannot cover fee, obligation and minimum values")
+    // The first output takes the remainder so the rest sit exactly at the minimum.
+    val values = Math.subtractExact(spendable,
+      Math.multiplyExact(groups.size.toLong - 1L, UTXO.MIN_CHANGE)) +:
+      Seq.fill(groups.size - 1)(UTXO.MIN_CHANGE)
+    groups.zip(values)
+  }
+
+
   final val OutcomeEligible = "eligible"
   final val OutcomeNoWork = "no-work"
   final val OutcomeDisabled = "disabled"
@@ -42,11 +76,22 @@ object ConsolidationExecution {
   private final val MaxSignedBytes = 98304
 
   /**
+   * Distinct token ids one consolidated output may carry.
+   *
+   * Deliberately far below the protocol's own ceiling. Boxes with very large token sets have caused
+   * trouble before, around 255, so this leaves an order of magnitude of headroom. A batch holding
+   * more than this many distinct ids is split across several outputs rather than refused.
+   */
+  private final val MaxTokensPerBox = 50
+
+  /**
    * Count the whole wallet but retain only the oldest input-budget worth of candidates, so a
    * fragmented wallet costs a bounded amount of memory rather than a sorted copy of itself.
    *
-   * Eligible means confirmed, on-chain, signable, ERG-only, register-free and unowned. Token boxes
-   * are excluded outright: merging them would need per-token preservation this path does not do.
+   * Eligible means confirmed, on-chain, signable, register-free and unowned. Token boxes are
+   * included: emission pays LIT in amounts that leave dust behind, and those boxes are most of what
+   * a fragmented wallet accumulates. Registers still exclude a box, because they carry meaning this
+   * path would destroy.
    */
   private[engine] def select(api: NodeApi, trees: Set[String], excluded: Set[String],
                              height: Int, target: Int, minInputs: Int = 2,
@@ -72,7 +117,7 @@ object ConsolidationExecution {
         val box = entry.box
         total = Math.addExact(total, 1L)
         val safe = entry.onchain && !entry.spent && entry.confirmationsNum.exists(_ > 0) &&
-          trees.contains(box.ergoTree) && box.assets.isEmpty && box.additionalRegisters.ordered.isEmpty &&
+          trees.contains(box.ergoTree) && box.additionalRegisters.ordered.isEmpty &&
           !excluded.contains(box.boxId) && box.creationHeight <= height
         if (safe) {
           eligible = Math.addExact(eligible, 1L)
@@ -140,12 +185,16 @@ private[engine] class ConsolidationExecution(node: NodeContext, api: NodeApi, ow
       input
     }
     val fee = transactions.rollups.TransactionMessages.RollupTxStub.ROLLUP_FEE
-    val outputValue = inputs.foldLeft(0L)((sum, input) => Math.addExact(sum, input.value)) - fee
-    require(outputValue >= UTXO.MIN_CHANGE, "consolidation cannot cover fee and minimum output")
+    val obligation = Eip27Adjustment.obligation(inputs, node.getNetwork)
+    val plan = outputPlan(inputs, fee, obligation)
+    val merged = plan.flatMap(_._1)
+    val outputs = plan.map {
+      case (tokens, value) => UTXO(node.getNodeWallet.contract, value, tokens)
+    }
     val allocation = EngineFunding(owner, 10.seconds, ec).reserveKnown(inputs)
     try {
       val unsigned = TxBuilder(ctx).setInputs(inputs: _*)
-        .setOutputs(UTXO(node.getNodeWallet.contract, outputValue), UTXO.feeBox(fee))
+        .setOutputs((outputs :+ UTXO.feeBox(fee)): _*)
         .buildTx(0, node.getNodeWallet.p2pk)
       require(alive(), "consolidation attempt expired")
       val signed = node.getNodeWallet.sign(unsigned)
@@ -157,7 +206,7 @@ private[engine] class ConsolidationExecution(node: NodeContext, api: NodeApi, ow
         "consolidation exceeds transaction byte budget")
       val result = new EngineBroadcast(owner, api).send(signed, Seq(allocation), "consolidation", alive)
       logger.info(s"Sent transaction ${result.txId} to consolidate ${inputs.size} wallet box(es) " +
-        s"into one worth $outputValue: ${result.outcome}")
+        s"into ${outputs.size} holding ${merged.size} token id(s): ${result.outcome}")
       result.outcome
       // Release only clears a reservation that never crossed the send boundary; a broadcast
       // transaction's inputs stay owned until reconciliation resolves them.

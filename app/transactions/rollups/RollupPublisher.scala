@@ -156,8 +156,8 @@ class RollupPublisher @Inject()(config: Configuration, nodeContext: NodeContext,
           // Holding period elapsed → ready to transform to EVAL
           entries(tree.blockId) = RollupTxStub(tree.blockId, tree.currentPeriod, HoldingTransform)
 
-        } else if (!tree.hasMiner) {
-          // Still within holding period and no miner yet → submit a NISP
+        } else if (!tree.hasMiner && tree.startHeight != currentHeight) {
+          // Still within holding period, no miner yet, and the rollup is not newly generated → submit a NISP
           entries(tree.blockId) = RollupTxStub(tree.blockId, tree.currentPeriod, NISPSubmission)
         }
       }
