@@ -52,6 +52,22 @@ object Configs {
       1000L, 3600000L, "milliseconds")
     v.longRange("wallet.reservation-timeout-ms", v.long("wallet.reservation-timeout-ms"),
       1000L, 600000L, "milliseconds")
+    v.longRange("wallet.node-call-timeout-ms", v.long("wallet.node-call-timeout-ms"),
+      1000L, 600000L, "milliseconds")
+    v.longRange("wallet.node-read-timeout-ms", v.long("wallet.node-read-timeout-ms"),
+      1000L, 600000L, "milliseconds")
+    v.range("wallet.node-max-response-bytes", v.int("wallet.node-max-response-bytes"),
+      65536, 268435456, "bytes in one node response")
+    val walletInputs = v.range("wallet.max-wallet-inputs", v.int("wallet.max-wallet-inputs"),
+      1, 100000, "wallet inputs the engine may own at once")
+    val optionalInputs = v.range("wallet.max-optional-inputs", v.int("wallet.max-optional-inputs"),
+      1, 100000, "wallet inputs optional work may own at once")
+    // Optional work must leave the engine room for a critical one. Above the engine ceiling the
+    // reserve is negative and a fraud proof can be starved by a saturated consolidation queue.
+    for (ceiling <- walletInputs; optional <- optionalInputs if optional > ceiling)
+      v.problem("wallet.max-optional-inputs",
+        s"$optional exceeds wallet.max-wallet-inputs ($ceiling), which leaves nothing for a NISP " +
+          "submission or fraud proof to fund itself with")
 
     v.bool("wallet.consolidation.enabled")
     v.range("wallet.consolidation.target-utxos", v.int("wallet.consolidation.target-utxos"),

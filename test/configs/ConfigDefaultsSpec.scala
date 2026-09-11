@@ -19,6 +19,32 @@ class ConfigDefaultsSpec extends AnyFlatSpec with Matchers {
     EmissionConfig(shipped) shouldEqual EmissionConfig.Default
   }
 
+  /**
+   * Catches a renamed key, which is otherwise silent: the reader falls back to its default and the
+   * client starts with a value the operator did not choose. A comparison against the shipped block
+   * is the only thing that notices, since every key here is optional by design.
+   */
+  "WalletConfig.Default" should "equal what the shipped application.conf parses" in {
+    WalletConfig(shipped) shouldEqual WalletConfig.Default
+  }
+
+  /**
+   * And that validation is looking at keys that exist. A rule naming a key nothing ships is not a
+   * loose rule, it is no rule at all, so the value it was meant to bound goes unchecked.
+   */
+  "Every wallet key validation names" should "be present in the shipped application.conf" in {
+    val validated = Seq("max-inputs", "max-descriptors", "max-descriptor-bytes", "max-input-bytes",
+      "page-size", "inventory-walk-timeout-ms", "reservation-timeout-ms", "node-call-timeout-ms",
+      "node-read-timeout-ms", "node-max-response-bytes", "max-wallet-inputs", "max-optional-inputs",
+      "consolidation.enabled", "consolidation.target-utxos", "consolidation.interval-ms",
+      "consolidation.min-inputs")
+    validated.foreach { key =>
+      withClue(s"wallet.$key is validated but not shipped: ") {
+        shipped.underlying.hasPath(s"wallet.$key") shouldBe true
+      }
+    }
+  }
+
   /** Compares optional sync defaults field by field so failures identify the divergent key. */
   "SyncConfig defaults" should "equal what the shipped application.conf parses" in {
     val shippedSync = new SyncConfig(shipped)

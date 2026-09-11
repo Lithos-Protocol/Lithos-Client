@@ -239,14 +239,14 @@ private[engine] class ConsolidationExecution(node: NodeContext, api: NodeApi, ow
       // Every batch's inputs stay owned until its send resolves, so the pass cannot ask for more
       // than optional work is allowed to hold at once. Capping is right rather than failing: the
       // batches that fit are still worth sending, and the rest are picked up next pass.
-      val headroom = EngineWalletState.MAX_OPTIONAL_INPUTS - ownedInputIds.size
+      val headroom = limits.maxOptionalInputs - ownedInputIds.size
       val affordable = cut.foldLeft((Vector.empty[Vector[NodeBox]], 0)) {
         case ((kept, held), batch) =>
           if (held + batch.size <= headroom) (kept :+ batch, held + batch.size) else (kept, held)
       }._1
       if (affordable.size < cut.size)
         logger.info(s"Consolidation capped at ${affordable.size} of ${cut.size} transaction(s): " +
-          s"optional work may hold ${EngineWalletState.MAX_OPTIONAL_INPUTS} inputs and " +
+          s"optional work may hold ${limits.maxOptionalInputs} inputs and " +
           s"${ownedInputIds.size} are already owned")
       if (affordable.isEmpty) plan.status.copy(outcome = OutcomeNoWork)
       else {

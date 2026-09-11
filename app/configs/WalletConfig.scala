@@ -24,6 +24,21 @@ import play.api.{ConfigLoader, Configuration}
  * @param reservationTimeoutMs how long a caller waits for funding before giving up. Funding is
  *                            serialised, so this bounds the queue behind a slow node read rather
  *                            than the read itself.
+ * @param nodeCallTimeoutMs   whole-call deadline on the engine's own node client, retries included.
+ *                            This is the one that bites a large wallet: a page of `/wallet/boxes/unspent`
+ *                            that takes longer than this fails outright, and no caller-side timeout
+ *                            can rescue it. It is coupled to `pageSize` in the direction people do
+ *                            not expect — a bigger page means fewer calls but more work per call.
+ * @param nodeReadTimeoutMs   idle-read deadline on the same client, per socket read rather than per
+ *                            call. Raise it alongside the call timeout on a slow node.
+ * @param nodeMaxResponseBytes ceiling on one node response. A page large enough to approach it fails
+ *                            on size rather than time, so it moves with `pageSize` too.
+ * @param maxWalletInputs     wallet inputs the engine may own at once across everything in flight.
+ * @param maxOptionalInputs   the share of that optional work may take. It stops short of the engine
+ *                            ceiling on purpose, so a saturated optional queue always leaves a NISP
+ *                            submission or a fraud proof room to fund itself. Raising it is what
+ *                            lets a big consolidation pass hold more boxes at once; raise
+ *                            `maxWalletInputs` with it, or the reserve for critical work shrinks.
  */
 case class WalletConfig(maxInputs: Int,
                         maxDescriptors: Int,
@@ -32,6 +47,11 @@ case class WalletConfig(maxInputs: Int,
                         pageSize: Int,
                         inventoryTimeoutMs: Long,
                         reservationTimeoutMs: Long,
+                        nodeCallTimeoutMs: Long,
+                        nodeReadTimeoutMs: Long,
+                        nodeMaxResponseBytes: Int,
+                        maxWalletInputs: Int,
+                        maxOptionalInputs: Int,
                         consolidation: ConsolidationConfig)
 
 /**
@@ -65,11 +85,18 @@ object WalletConfig {
     pageSize = 100,
     inventoryTimeoutMs = 240000L,
     reservationTimeoutMs = 30000L,
+    nodeCallTimeoutMs = 30000L,
+    nodeReadTimeoutMs = 30000L,
+    nodeMaxResponseBytes = 2 * 1024 * 1024,
+    maxWalletInputs = 512,
+    // Two full transactions' worth below the engine ceiling, which is the reserve critical work
+    // needs to fund itself while the optional queue is saturated.
+    maxOptionalInputs = 512 - 2 * 75,
     consolidation = ConsolidationConfig(
       enabled = false,
-      targetUtxos = 100,
+      targetUtxos = 500,
       intervalMs = 300000L,
-      minInputs = 2,
+      minInputs = 100,
       transactions = 1))
 
   def apply(config: Configuration): WalletConfig = {
@@ -89,6 +116,11 @@ object WalletConfig {
       pageSize = int("page-size", d.pageSize),
       inventoryTimeoutMs = long("inventory-walk-timeout-ms", d.inventoryTimeoutMs),
       reservationTimeoutMs = long("reservation-timeout-ms", d.reservationTimeoutMs),
+      nodeCallTimeoutMs = long("node-call-timeout-ms", d.nodeCallTimeoutMs),
+      nodeReadTimeoutMs = long("node-read-timeout-ms", d.nodeReadTimeoutMs),
+      nodeMaxResponseBytes = int("node-max-response-bytes", d.nodeMaxResponseBytes),
+      maxWalletInputs = int("max-wallet-inputs", d.maxWalletInputs),
+      maxOptionalInputs = int("max-optional-inputs", d.maxOptionalInputs),
       consolidation = ConsolidationConfig(
         enabled = bool("consolidation.enabled", d.consolidation.enabled),
         targetUtxos = int("consolidation.target-utxos", d.consolidation.targetUtxos),

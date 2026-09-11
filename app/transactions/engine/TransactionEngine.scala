@@ -78,9 +78,22 @@ class TransactionEngine @Inject()(node: NodeContext,
   override protected def emissionNodeContext: NodeContext = node
   override protected def emissionWalletManager: ActorRef = self
   override protected def emissionNodeApi: _root_.node.NodeApi = nodeApi
-  override lazy val nodeApi: _root_.node.NodeApi = _root_.node.rest.RestNodeApi(
-    _root_.node.rest.NodeHttpConfig(node.getNodeUrl, Some(node.getNodeKey),
-      maxResponseBytes = 2 * 1024 * 1024, callTimeoutMs = 10000L))
+  /**
+   * The engine's own node client, separate from mining's, so raising these cannot slow a block.
+   *
+   * Read from configuration rather than fixed: the call deadline is what a whole-wallet page has to
+   * finish inside, and on a wallet of tens of thousands of boxes no caller-side timeout can rescue
+   * a page that overruns it. Built from `config` directly because this is forced before the class
+   * body's own fields are initialised.
+   */
+  override lazy val nodeApi: _root_.node.NodeApi = {
+    val limits = configs.WalletConfig(config)
+    _root_.node.rest.RestNodeApi(
+      _root_.node.rest.NodeHttpConfig(node.getNodeUrl, Some(node.getNodeKey),
+        readTimeoutMs = limits.nodeReadTimeoutMs,
+        maxResponseBytes = limits.nodeMaxResponseBytes,
+        callTimeoutMs = limits.nodeCallTimeoutMs))
+  }
 
   private val logger: org.slf4j.Logger = org.slf4j.LoggerFactory.getLogger("TransactionEngine")
 
@@ -147,7 +160,9 @@ class TransactionEngine @Inject()(node: NodeContext,
       logger.info("Consolidation OFF (wallet.consolidation.enabled)")
     logger.info(s"Wallet limits: maxInputs=${walletConfig.maxInputs} pageSize=${walletConfig.pageSize} " +
       s"maxDescriptors=${walletConfig.maxDescriptors} " +
-      s"reservationTimeout=${walletConfig.reservationTimeoutMs}ms")
+      s"reservationTimeout=${walletConfig.reservationTimeoutMs}ms " +
+      s"nodeCallTimeout=${walletConfig.nodeCallTimeoutMs}ms " +
+      s"nodeMaxResponse=${walletConfig.nodeMaxResponseBytes}B")
     ticker = Some(context.system.scheduler.scheduleWithFixedDelay(1.second, 1.second, self, Maintenance))
     self ! Reconcile
   }

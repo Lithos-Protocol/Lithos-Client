@@ -114,8 +114,14 @@ class ConsolidationExecutionSpec extends AnyFlatSpec with Matchers with MockitoS
     plan.boxes.map(_.creationHeight) shouldBe Vector(1, 2, 3)
   }
 
-  /** A register carries meaning this path would destroy, so it still excludes a box. */
-  it should "still exclude a box carrying registers" in {
+  /**
+   * Registers do not exclude a box either.
+   *
+   * The consolidated output carries value and tokens only, so a register on a spent box is dropped.
+   * That is the intent: registers on a box at this miner's own key are data someone attached, not
+   * protocol state, and leaving those boxes behind would strand part of a fragmented wallet.
+   */
+  it should "be eligible even when carrying registers" in {
     val api = mock[NodeApi]
     val withRegister = {
       val e = entry(1, 1)
@@ -123,8 +129,8 @@ class ConsolidationExecutionSpec extends AnyFlatSpec with Matchers with MockitoS
     }
     serve(api, Vector(withRegister, entry(2, 2), entry(3, 3)))
     val plan = ConsolidationExecution.select(api, Set("wallet"), Set.empty, 100, 1)
-    plan.status.eligible shouldBe 2
-    plan.status.oldestExcluded shouldBe Some(1)
+    plan.status.eligible shouldBe 3
+    plan.boxes.map(_.creationHeight) shouldBe Vector(1, 2, 3)
   }
 
   // ─── laying tokens out across outputs ─────────────────────────────────────

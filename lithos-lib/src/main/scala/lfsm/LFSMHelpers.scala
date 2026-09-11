@@ -126,7 +126,9 @@ object LFSMHelpers {
   final val FOUNDER_2 = Contract.fromAddress(Address.create("3WyZJc1pWf8P2o6AT2Ewq7yb5ThBHdk8SLSNyUyoGbSBXXpY3w8F"))
   final val FOUNDER_3 = Contract.fromAddress(Address.create("3Wx1MUteyRXC15mor65vt7VTPvJLZvnJ2dzd4sczi49wvuS78vE1"))
 
-
+  final val FOUNDER_1_MAINNET = Contract.fromAddress(Address.create("3WwcyDX8iQjPR6H2VSGDp22SaJ3c8bo1RWWvHhZy19JXJzrxWFbu"))
+  final val FOUNDER_2_MAINNET = Contract.fromAddress(Address.create("3WyZJc1pWf8P2o6AT2Ewq7yb5ThBHdk8SLSNyUyoGbSBXXpY3w8F"))
+  final val FOUNDER_3_MAINNET = Contract.fromAddress(Address.create("9i6Pq3M5VG95BUTAP1AVroizTBqc21K2Mx5Kh2jGeAADpBEskQd"))
   /**
    * Parse diff string and return its tau value
    * @param diffValue String such as "4.0G", "2.411T". Supports up to Petahash difficulty

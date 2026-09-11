@@ -50,6 +50,10 @@ class EngineWalletState @Inject()(nodeContext: NodeContext,
   // The engine passes the operator's `wallet` block. On a wallet of thousands of boxes the page
   // size decides how many node reads one selection costs, so it must not fall back to a default.
   private lazy val inventory = new WalletInventory(nodeContext, nodeApi, walletLimits)
+  // Shadow the object defaults with what the operator configured. Every ownership decision below
+  // reads these, so a wallet tuned for tens of thousands of boxes is not held to the shipped ceiling.
+  private val MAX_ENGINE_INPUTS = walletLimits.maxWalletInputs
+  private val MAX_OPTIONAL_INPUTS = walletLimits.maxOptionalInputs
   private lazy val walletWorker = context.system.dispatchers.lookup("lithos-contexts.wallet-io-dispatcher")
   // Inventory scans and reward sweeps cannot occupy the funding selection worker.
   private lazy val maintenanceWorker = context.system.dispatchers.lookup("lithos-contexts.wallet-maintenance-dispatcher")
@@ -75,20 +79,20 @@ class EngineWalletState @Inject()(nodeContext: NodeContext,
    * before the node reports its parent. Newest wins, and the set is capped like any other cache.
    */
   private def remember(outputs: Seq[InputUTXO]): Unit = {
-    val accepted = outputs.take(WalletInventory.MaxInputs)
-      .filter(_.bytes.length <= WalletInventory.MaxInputBytes)
+    val accepted = outputs.take(walletLimits.maxInputs)
+      .filter(_.bytes.length <= walletLimits.maxInputBytes)
       .map(WalletInventory.nodeBox)
     knownOutputs = (accepted ++ knownOutputs).groupBy(_.boxId).valuesIterator.map(_.head)
-      .take(WalletInventory.MaxInputs).toVector
+      .take(walletLimits.maxInputs).toVector
   }
 
   /** Drop descriptors past the count or byte ceiling. Both sets share one budget. */
   private def trimInventory(): Unit = {
     var retainedBytes = 0L
     val kept = (walletBoxes.valuesIterator ++ rewardBoxes.valuesIterator)
-      .take(WalletInventory.MaxDescriptors).filter { box =>
+      .take(walletLimits.maxDescriptors).filter { box =>
         retainedBytes += box.retainedBytes
-        retainedBytes <= WalletInventory.MaxDescriptorBytes
+        retainedBytes <= walletLimits.maxDescriptorBytes
       }.map(_.id).toSet
     walletBoxes = walletBoxes.filter { case (id, _) => kept.contains(id) }
     rewardBoxes = rewardBoxes.filter { case (id, _) => kept.contains(id) }
@@ -124,7 +128,7 @@ class EngineWalletState @Inject()(nodeContext: NodeContext,
     val ownershipLimit = if (critical) MAX_ENGINE_INPUTS else MAX_OPTIONAL_INPUTS
     // Worst-case ownership, not the eventual selection size: a request that could not be honoured
     // within the budget is refused before it walks anything.
-    val worstCaseInputs = if (single) 1 else WalletInventory.MaxInputs
+    val worstCaseInputs = if (single) 1 else walletLimits.maxInputs
     if (busy && now() < deadline && waitingSelections.count(_.critical == critical) < MaxQueuedSelections &&
       tokens.size <= MaxRequestedTokens)
       waitingSelections :+= SelectionRequest(erg, tokens, track, reservationId, deadline, single, p2pkOnly, reply, critical)
@@ -167,7 +171,7 @@ class EngineWalletState @Inject()(nodeContext: NodeContext,
       val box = nodeApi.boxById(descriptor.id).get.getOrElse(
         throw new IllegalStateException("reward input is unavailable"))
       val input = box.toInputUTXO(ctx)
-      require(input.id.toString == descriptor.id && input.bytes.length <= WalletInventory.MaxInputBytes,
+      require(input.id.toString == descriptor.id && input.bytes.length <= walletLimits.maxInputBytes,
         "reward identity or hydration budget changed")
       input
     }
@@ -485,7 +489,7 @@ class EngineWalletState @Inject()(nodeContext: NodeContext,
       val ids = inputs.map(_.id.toString)
       val accepted = inputs.nonEmpty && inputs.size <= MAX_TX_INPUTS &&
         ids.distinct.size == ids.size &&
-        inputs.forall(box => box.bytes.length <= WalletInventory.MaxInputBytes && wallet.signableTrees.contains(box.contract.ergoTreeHex)) &&
+        inputs.forall(box => box.bytes.length <= walletLimits.maxInputBytes && wallet.signableTrees.contains(box.contract.ergoTreeHex)) &&
         ids.forall(id => !usedInputs.contains(id)) &&
         !usedInputs.valuesIterator.exists(_.id == reservationId) &&
         usedInputs.size + ids.size <=
@@ -703,14 +707,14 @@ object EngineWalletState {
   /** Bound to an exact signed transaction, which is the only thing that can resolve it. */
   private case class ReservationEngine(hold: EngineHold) extends ReservationStatus
   /** Owned inputs across every transaction the engine has in flight. */
-  private[transactions] final val MAX_ENGINE_INPUTS = 512
+  private[transactions] final val MAX_ENGINE_INPUTS = configs.WalletConfig.Default.maxWalletInputs
 
   /**
    * The ceiling optional work selects against. It stops short of the engine limit by two full
    * transactions' worth of inputs, so a saturated optional queue always leaves a NISP submission
    * or fraud proof room to fund itself.
    */
-  private[transactions] final val MAX_OPTIONAL_INPUTS = MAX_ENGINE_INPUTS - 2 * WalletInventory.MaxInputs
+  private[transactions] final val MAX_OPTIONAL_INPUTS = configs.WalletConfig.Default.maxOptionalInputs
 
   /** Selections that may wait per lane before further requests are refused outright. */
   private final val MaxQueuedSelections = 8
