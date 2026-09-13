@@ -24,6 +24,7 @@ object CandidateSourceConfig {
   final val Rollups = "rollups"
   final val Emissions = "emissions"
   final val Rent = "rent"
+  final val ErgoDex = "ergodex"
 
   /**
    * Conservative on every axis. Fee-less insertions are block space not earning from someone else's
@@ -32,7 +33,12 @@ object CandidateSourceConfig {
   val Default: CandidateSourceConfig =
     CandidateSourceConfig(enabled = true, maxTxs = 5, maxBytes = 262144L, maxCost = 1000000L)
 
-  def apply(config: Configuration, name: String): CandidateSourceConfig = {
+  /**
+   * @param fallback what a missing key reads as. Each source passes its own default, so a config
+   *                 without a source's block leaves an off-by-default source off.
+   */
+  def apply(config: Configuration, name: String,
+            fallback: CandidateSourceConfig = Default): CandidateSourceConfig = {
     def path(key: String): String = s"stratum.candidate.sources.$name.$key"
     def int(key: String, fallback: Int): Int =
       config.getOptional(path(key))(ConfigLoader.intLoader).getOrElse(fallback)
@@ -40,9 +46,9 @@ object CandidateSourceConfig {
       config.getOptional(path(key))(ConfigLoader.longLoader).getOrElse(fallback)
 
     CandidateSourceConfig(
-      enabled = config.getOptional(path("enabled"))(ConfigLoader.booleanLoader).getOrElse(Default.enabled),
-      maxTxs = int("maxTxs", Default.maxTxs),
-      maxBytes = long("maxBytes", Default.maxBytes),
-      maxCost = long("maxCost", Default.maxCost))
+      enabled = config.getOptional(path("enabled"))(ConfigLoader.booleanLoader).getOrElse(fallback.enabled),
+      maxTxs = int("maxTxs", fallback.maxTxs),
+      maxBytes = long("maxBytes", fallback.maxBytes),
+      maxCost = long("maxCost", fallback.maxCost))
   }
 }

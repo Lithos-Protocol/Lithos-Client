@@ -761,6 +761,57 @@ class TransactionCostSizingSpec extends AnyPropSpec with BeforeAndAfterAll
     }
   }
 
+  /** Measures signed swap executions and verifies every input with Ergo's interpreter. */
+  property("ergodex: batching other people's swap orders") {
+    withCtx { ctx =>
+      val wallet = walletOf(ctx)
+      val params = support.RentRule.paramsFrom(ctx)
+      val height = support.ErgoDexFixtures.poolBox.creationHeight + 1
+
+      val pool = transactions.batching.ergodex.ErgoDexPool
+        .native(support.ErgoDexFixtures.poolBox).getOrElse(fail("pool fixture did not parse"))
+      val order = transactions.batching.ergodex.ErgoDexOrder
+        .parse(support.ErgoDexFixtures.orderBox).getOrElse(fail("order fixture did not parse"))
+      val poolInput = {
+        import node.MutationConversions._
+        support.ErgoDexFixtures.poolBox.toInputUTXO(ctx)
+      }
+
+      def execution(name: String, minerFee: Long) = {
+        val fill = transactions.batching.ergodex.ErgoDexExecution
+          .price(order, pool, minRevenue = 0L).getOrElse(fail("fixture fill was refused"))
+        val signed = transactions.batching.ergodex.ErgoDexExecution.assembled(
+          ctx, wallet, poolInput, fill, height, minerFee, useTrueProp = false)
+        val spent = IndexedSeq(poolInput, order.boxAsInput(ctx))
+          .map(_.input.asInstanceOf[org.ergoplatform.appkit.impl.InputBoxImpl].getErgoBox)
+        val ergoLike = signed.asInstanceOf[org.ergoplatform.appkit.impl.SignedTransactionImpl].getTx
+
+        withClue(s"$name must be an execution the chain would take: ") {
+          support.RentRule.accepts(ergoLike, spent, height, params) shouldBe true
+        }
+        measure("ergodex", name, signed)
+      }
+
+      val inBlock = execution("swap, fee-less for a block you mine", 0L)
+      val broadcast = execution("swap, broadcast at the order's fee cap", 2000000L)
+
+      println(f"[budget] ergodex execution: ${inBlock.cost}%d cost, ${inBlock.bytes}%d bytes")
+      println(f"[budget] a whole block holds ${maxBlockCost / inBlock.cost}%d executions by cost, " +
+        f"${maxBlockSize / inBlock.bytes}%d by size")
+
+      // What the source's own cost allowance has to cover for a full chain of orders.
+      val perBlock = 8
+      println(f"[budget] $perBlock%d executions cost ${inBlock.cost.toLong * perBlock}%d, " +
+        f"${inBlock.bytes.toLong * perBlock}%d bytes")
+
+      // Paying a miner fee adds an output and nothing else, so the two must not diverge by much.
+      withClue("a broadcast execution must not cost meaningfully more than a fee-less one: ") {
+        (broadcast.cost - inBlock.cost) should be < 10000
+      }
+
+    }
+  }
+
   // ══════════════════════════════════════════════════════════════════════════
   //  the table
   // ══════════════════════════════════════════════════════════════════════════

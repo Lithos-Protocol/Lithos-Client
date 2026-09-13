@@ -43,7 +43,7 @@ class LithosPoolSpec extends TestKit(ActorSystem("lithos-pool-spec", LithosPoolS
   private val soloKey = "03" + "22" * 32
   private val fixtures = ArrayBuffer.empty[Fixture]
   private val cfg = CandidateConfig.Default.copy(genesisWaitMs = 30000, blockTxTimeout = 30000,
-    mempoolRefreshMs = 0, logTimings = true)
+    mempoolRefreshMs = 0, logTimings = true, waitForBlockPackage = false)
 
   override def beforeAll(): Unit = evaluation.NTable.lookUp(1)
   override def afterAll(): Unit = TestKit.shutdownActorSystem(system)
@@ -112,7 +112,8 @@ class LithosPoolSpec extends TestKit(ActorSystem("lithos-pool-spec", LithosPoolS
     val options = new Options(2, 1L, 60000L, 3600000L, "http://127.0.0.1:1/",
       BigInteger.valueOf(4000000000L), new Data)
     val pool = system.actorOf(Props(new LithosPool(options, true, null, null, "test-key", false,
-      null, state.ref, true, 3600000, config) {
+      null, state.ref, true, 3600000, config,
+      Seq(CandidateSource(configs.CandidateSourceConfig.Rollups, builder.ref))) {
       override protected lazy val nodeInterface: MiningNodeInterface = node
       override protected def createCandidateBuilder(): Option[ActorRef] = Some(builder.ref)
       override protected def createJobManager(): ActorRef = manager.map(_.ref).getOrElse(super.createJobManager())
@@ -325,6 +326,115 @@ class LithosPoolSpec extends TestKit(ActorSystem("lithos-pool-spec", LithosPoolS
       call.response.complete(response(call, revision + 1))
       f.miner.expectMsgType[BroadcastJob]
     }
+  }
+
+  it should "publish additions in the first job when they finish within the genesis wait" in {
+    val f = fixture(cfg.copy(waitForBlockPackage = true))
+    f.pool ! BlockPackageReady(pkg(), collecting = true)
+    f.node.calls.poll(200, TimeUnit.MILLISECONDS) shouldBe null
+    f.pool ! BlockPackageReady(pkg(revision = 1))
+    val call = nextCall(f)
+    call.txs should have size 2
+    call.response.complete(response(call))
+    f.miner.expectMsgType[BroadcastJob]
+    f.node.calls.poll(200, TimeUnit.MILLISECONDS) shouldBe null
+  }
+
+  it should "publish genesis at the deadline if additions are still building" in {
+    val f = fixture(cfg.copy(waitForBlockPackage = true))
+    f.pool ! BlockPackageReady(pkg(), collecting = true)
+    f.node.calls.poll(200, TimeUnit.MILLISECONDS) shouldBe null
+    f.clock.addAndGet(cfg.genesisWaitMs.milliseconds.toNanos)
+    f.pool ! PollBlockTemplate
+    val call = nextCall(f)
+    call.txs should have size 1
+    call.response.complete(response(call))
+    f.miner.expectMsgType[BroadcastJob]
+    f.builder.expectMsg(GenesisPublished(pkg().identity))
+  }
+
+  it should "publish genesis immediately when the package wait is disabled" in {
+    val f = fixture()
+    f.pool ! BlockPackageReady(pkg(), collecting = true)
+    val call = nextCall(f)
+    call.txs should have size 1
+    call.response.complete(response(call))
+    f.miner.expectMsgType[BroadcastJob]
+  }
+
+  "Mempool refresh" should "rebuild the package before changing the node's cached work" in {
+    val f = fixture(cfg.copy(blockTransactions = true, mempoolRefreshMs = 1000))
+    genesis(f)
+    f.clock.addAndGet(1.second.toNanos)
+    f.pool ! PollBlockTemplate
+    f.builder.expectMsg(RefreshBlockPackage(pkg().identity))
+    f.node.calls.poll(200, TimeUnit.MILLISECONDS) shouldBe null
+    f.pool ! BlockPackageReady(pkg(revision = 1).copy(revenue = 1000000L), refreshed = true)
+    val call = nextCall(f)
+    call.txs.last should include("extra-1")
+    call.response.complete(response(call, 2))
+    f.miner.expectMsgType[BroadcastJob]
+  }
+
+  it should "accumulate revenue gains against the published package without invalidating skipped work" in {
+    val f = fixture(cfg.copy(blockTransactions = true))
+    val job = genesis(f)
+    Seq(400000L, 999999L).zipWithIndex.foreach { case (revenue, i) =>
+      f.pool ! BlockPackageReady(pkg(revision = i + 1).copy(revenue = revenue), refreshed = true)
+      f.node.calls.poll(200, TimeUnit.MILLISECONDS) shouldBe null
+    }
+    val subscriber = TestProbe()
+    subscriber.send(f.pool, RequestSubscription)
+    subscriber.expectMsgType[SubscriptionData].currentJob.map(_.jobId) shouldBe Some(job.jobId)
+    f.pool ! BlockPackageReady(pkg(revision = 3).copy(revenue = 1000000L), refreshed = true)
+    val call = nextCall(f)
+    call.response.complete(response(call, 2))
+    f.miner.expectMsgType[BroadcastJob]
+    f.pool ! BlockPackageReady(pkg(revision = 4).copy(revenue = 1999999L), refreshed = true)
+    f.node.calls.poll(200, TimeUnit.MILLISECONDS) shouldBe null
+    f.pool ! BlockPackageReady(pkg(revision = 5).copy(revenue = 2000000L), refreshed = true)
+    val next = nextCall(f)
+    next.response.complete(response(next, 3))
+    f.miner.expectMsgType[BroadcastJob]
+  }
+
+  it should "permit zero-revenue refreshes when the threshold is zero" in {
+    val f = fixture(cfg.copy(minCandidateChangeRevenue = 0L))
+    genesis(f)
+    f.pool ! BlockPackageReady(pkg(revision = 1), refreshed = true)
+    val call = nextCall(f)
+    call.response.complete(response(call, 2))
+    f.miner.expectMsgType[BroadcastJob]
+  }
+
+  it should "refresh mempool transactions with an empty package when the threshold is zero" in {
+    val f = fixture(cfg.copy(blockTransactions = true, mempoolRefreshMs = 1000, minCandidateChangeRevenue = 0L))
+    genesis(f)
+    f.clock.addAndGet(1.second.toNanos)
+    f.pool ! PollBlockTemplate
+    f.builder.expectMsg(RefreshBlockPackage(pkg().identity))
+    f.pool ! BlockPackageReady(pkg(), refreshed = true)
+    val call = nextCall(f)
+    call.txs should have size 1
+    call.response.complete(response(call, 2))
+    f.miner.expectMsgType[BroadcastJob]
+  }
+
+  it should "restore the latest package directly when the package wait is enabled" in {
+    val f = fixture(cfg.copy(waitForBlockPackage = true))
+    genesis(f)
+    f.pool ! BlockPackageReady(pkg(revision = 1))
+    val old = nextCall(f)
+    f.pool ! BlockPackageReady(pkg(revision = 2))
+    f.pool ! BlockPackageReady(pkg(revision = 3))
+    f.node.calls.poll(200, TimeUnit.MILLISECONDS) shouldBe null
+    old.response.complete(response(old, 2))
+    val latest = nextCall(f)
+    latest.txs.last should include("extra-3")
+    latest.response.complete(response(latest, 3))
+    f.miner.expectMsgType[BroadcastJob]
+    f.node.calls.poll(200, TimeUnit.MILLISECONDS) shouldBe null
+    f.node.maximumConcurrent.get() shouldBe 1
   }
 
   "A rejected genesis" should "fall back to solo without marking the failed package served" in {

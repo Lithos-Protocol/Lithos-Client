@@ -18,6 +18,13 @@ class ConfigsSpec extends AnyFlatSpec with Matchers {
     }
   }
 
+  it should "reject negative candidate revenue thresholds" in {
+    val configured = Configuration(ConfigFactory.parseString("stratum.candidate.minCandidateChangeRevenue = -1")
+      .withFallback(shipped.underlying).resolve())
+    val thrown = the[ConfigValidationException] thrownBy Configs.validateAll(configured)
+    thrown.getMessage should include("stratum.candidate.minCandidateChangeRevenue")
+  }
+
   it should "allow a maintenance checkpoint after every committed catch-up block" in {
     val configured = Configuration(ConfigFactory.parseString(
       "sync.quarantine.checkpointIntervalBlocks = 1")
@@ -70,7 +77,7 @@ class ConfigsSpec extends AnyFlatSpec with Matchers {
     // Keep runtime dispatcher lookups and validation names aligned.
     Contexts.Names should contain theSameElementsAs
       Seq(Contexts.Stratum, Contexts.Polling, Contexts.Sync, Contexts.Tx, Contexts.Dex,
-        Contexts.Database, Contexts.SnapshotIo, Contexts.CandidateIo, Contexts.MiningControlIo, Contexts.Genesis, Contexts.EngineIo, Contexts.MempoolIo, Contexts.WalletIo, Contexts.WalletMaintenance, Contexts.EngineCandidate, Contexts.CriticalWallet, Contexts.CriticalTx)
+        Contexts.Database, Contexts.SnapshotIo, Contexts.CandidateIo, Contexts.MiningControlIo, Contexts.Genesis, Contexts.EngineIo, Contexts.MempoolIo, Contexts.WalletIo, Contexts.WalletMaintenance, Contexts.EngineCandidate, Contexts.CriticalWallet, Contexts.CriticalTx, Contexts.BatchingIo)
   }
 
   it should "reject an apiKeyHash that is the key rather than its hash" in {

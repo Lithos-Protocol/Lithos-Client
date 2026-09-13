@@ -109,16 +109,13 @@ class RollupProcessor @Inject()(config: Configuration, nodeContext: NodeContext,
       logger.info(s"Merging ${fpStubs.size} fraud proof stub(s) for rollup " +
         s"${fpStubs.headOption.map(_.rollupBlockId).getOrElse("?")}")
       fpStubs.foreach(s => addRollupStubs(Map(s.rollupBlockId -> s)))
-    // A block is being assembled. RollupExecution builds the highest-priority queued
-    // work fee-less and replies straight back to the requester. Nothing is dispatched or removed
-    // here, so the funded copies still reach the mempool if no block is found.
-    // Start the same build the request would, before the request arrives. Nothing is dispatched or
-    // removed here either; the result is held by RollupExecution until it is asked for or dropped.
+    // Prepare selected rollup work without dispatching its funded copies.
     case PrepareBlockTxs(blockHeight, limit) =>
       val chosen = chooseCandidateStubs(limit)
       if (chosen.nonEmpty) transactionEngine ! BuildBlockTxs(blockHeight, chosen, answer = false)
 
-    case RequestBlockTxs(blockHeight, limit) =>
+    // Reuse the engine's bond reservations for this height when collecting rollup work.
+    case RequestBlockTxs(blockHeight, limit, _) =>
       val requester = sender()
       val chosen = chooseCandidateStubs(limit)
 

@@ -153,18 +153,17 @@ trait EmissionsCore extends Actor with InjectedActorSupport {
 
     case PrepareBlockTxs(blockHeight, limit) => startCandidateBuild(blockHeight, limit, None)
 
-    case RequestBlockTxs(blockHeight, limit) =>
+    case RequestBlockTxs(blockHeight, limit, refresh) =>
       val replyTo = sender()
-      // Already built for this height, so the request costs nothing but the reply.
-      emissionPreparation.preparedFor(blockHeight) match {
+      // Refresh requests rebuild the queue spends from the current emission tip.
+      emissionPreparation.preparedFor(blockHeight).filterNot(_ => refresh) match {
         case Some(bundles) => replyTo ! BlockTxsReady(blockHeight, bundles)
         case None => startCandidateBuild(blockHeight, limit, Some(replyTo))
       }
 
   }
 
-  /** One fee-less build, off the mailbox. Its result is cached and answers whoever is waiting. */
-  /** One fee-less build. Runs on the candidate worker, so it reads nothing this actor owns. */
+  /** Builds fee-less queue spends on the candidate worker without reading actor state. */
   private def candidateBundles(blockHeight: Int, limit: Int): Seq[transactions.candidate.CandidateBundle] = {
     require(emissionAlive.get(), "emission engine attempt was superseded")
     client.execute { ctx =>
@@ -173,13 +172,7 @@ trait EmissionsCore extends Actor with InjectedActorSupport {
         else {
           // Other lenders' unconfirmed joins, first because these spends chain off them.
           // Carrying them also avoids censoring work this client happened to build on top of.
-          val ancestors = tip.ancestors.map { t =>
-            val encoded = NodeCodecs.encodeTransaction(t).toString
-            // The node reports the serialized size it charges to the block; only the execution
-            // cost is unknown, and the package's block share is what covers that.
-            CandidateTx(t.id, encoded, CandidateTx.MempoolAncestor,
-              t.inputs.map(_.boxId).toSet, t.size.getOrElse(encoded.length))
-          }
+          val ancestors = tip.ancestors.map(CandidateTx.ancestor)
           val own = spends.map(s => CandidateTx(
             s.tx.getId.replace("\"", ""), s.tx.toJson(false, false),
             if (s.kind == EmissionSpend.Clear) CandidateTx.Clear else CandidateTx.Activate,

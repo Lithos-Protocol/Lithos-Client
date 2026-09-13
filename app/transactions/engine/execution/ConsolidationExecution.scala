@@ -85,6 +85,19 @@ object ConsolidationExecution {
   private final val MaxTokensPerBox = 50
 
   /**
+   * Checks that selected inputs still exist and have no mempool claimant.
+   * The with-pool read retains claimed boxes, so both sets are needed.
+   */
+  private[engine] def unspendable(selected: Seq[String], live: Set[String],
+                                  claimed: Set[String]): Option[String] =
+    if (selected.isEmpty) None
+    else if (!selected.forall(live.contains))
+      Some("a selected input was spent while the wallet was being scanned")
+    else if (selected.exists(claimed.contains))
+      Some("a selected input is already claimed by an unconfirmed transaction")
+    else None
+
+  /**
    * Count the whole wallet but retain only the oldest input-budget worth of candidates, so a
    * fragmented wallet costs a bounded amount of memory rather than a sorted copy of itself.
    *
@@ -213,6 +226,14 @@ private[engine] class ConsolidationExecution(node: NodeContext, api: NodeApi, ow
     } finally allocation.release()
   }
 
+  /** Read back exactly the chosen boxes and refuse the pass if any is no longer spendable. */
+  private def requireStillSpendable(selected: Seq[String]): Unit =
+    if (selected.nonEmpty) {
+      val live = api.boxesWithPoolByIds(selected).getOrElse(Seq.empty).map(_.boxId).toSet
+      val problem = unspendable(selected, live, observation().snapshot.get.spent)
+      require(problem.isEmpty, problem.getOrElse(""))
+    }
+
   def execute(target: Int, alive: () => Boolean, minInputs: Int = 2, transactions: Int = 1): Status = {
     // One consolidation at a time. Chaining a second onto an unconfirmed first would build a run of
     // unconfirmed spends that a single rejection invalidates end to end.
@@ -226,12 +247,8 @@ private[engine] class ConsolidationExecution(node: NodeContext, api: NodeApi, ow
       val plan = select(api, node.getNodeWallet.signableTrees,
         ownedInputIds ++ observed.snapshot.get.spent, ctx.getHeight, target, minInputs, limits,
         transactions)
-      // The scan pages the whole wallet, so recheck that neither the parent nor the mempool moved
-      // while it ran before committing to the boxes it chose.
-      val latest = observation()
-      require(latest.snapshot.get.anchor == observed.snapshot.get.anchor &&
-        latest.snapshot.get.ids == observed.snapshot.get.ids && alive(),
-        "consolidation observation changed")
+      require(alive(), "consolidation attempt expired")
+      requireStillSpendable(plan.boxes.map(_.boxId))
       // Disjoint batches, each its own transaction. They are deliberately not chained: a rejection
       // then costs only its own batch rather than invalidating everything behind it. A trailing
       // batch of one box is dropped, since merging one box removes nothing.

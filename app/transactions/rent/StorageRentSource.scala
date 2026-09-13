@@ -102,9 +102,9 @@ class StorageRentSource(nodeContext: NodeContext,
 
     case PrepareBlockTxs(blockHeight, _) => startBuild(blockHeight, None)
 
-    case RequestBlockTxs(blockHeight, _) =>
+    case RequestBlockTxs(blockHeight, _, refresh) =>
       val replyTo = sender()
-      preparation.preparedFor(blockHeight) match {
+      preparation.preparedFor(blockHeight).filterNot(_ => refresh) match {
         case Some(bundles) => replyTo ! BlockTxsReady(blockHeight, bundles)
         case None => startBuild(blockHeight, Some(replyTo))
       }

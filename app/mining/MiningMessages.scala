@@ -7,47 +7,10 @@ import stratum.data.MiningCandidate
 import java.math.BigInteger
 import scala.util.Try
 
-/**
- * All Akka messages used by the actor-based mining system.
- *
- * Message flow overview:
- *
- *   Task / MiningStratumServer
- *       │
- *       ├─ MinerConnected ──────────────────────────────► LithosPool
- *       │                                                     │
- *       │                                                     │ (child)
- *       │                                                 LithosJobManager
- *       │
- *   StratumConnection ──── RequestSubscription / ProcessShare ──► LithosPool
- *                                                                  │  forward
- *                                                             LithosJobManager
- *                                                                  │  reply
- *                         SubscriptionData / ShareResult ◄─────────┘
- *
- *   LithosPool ──── BroadcastJob ──────────────────────── ► StratumConnection
- *   StratumConnection ──── ShareAccepted (block/supershare) ► LithosPool
- *
- *   LithosPool ──── ChainAdvanced ─────────────────────── ► CandidateBuilder
- *                   BlockPackageReady ◄─────────────────────┘
- */
+/** Messages shared by mining actors and stratum connections. */
 object MiningMessages {
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // LithosJobManager ↔ LithosPool / StratumConnection
-  // ═══════════════════════════════════════════════════════════════════════════
-
-  /**
-   * Sent by LithosPool to LithosJobManager whenever a new block template is fetched.
-   * LithosJobManager replies with true if the template produced a NEW block job,
-   * false if it was a duplicate of the current job.
-   *
-   * `mustPublish` says the candidate has already been taken from the node. The node keeps one
-   * candidate per key and validates solutions against that copy, so one it has handed out and had
-   * replaced is worthless — dropping such a template leaves miners hashing a header no solution can
-   * be submitted against. Set it whenever the fetch has happened; leave it false only for templates
-   * that can still be thrown away for free.
-   */
+  /** Installs fetched work. mustPublish prevents deduplication from retaining work replaced in the node cache. */
   case class ProcessTemplate(candidate: MiningCandidate, tau: BigInteger,
                              usesCollateral: Boolean, reducedShareMessages: Boolean,
                              mustPublish: Boolean = false,
@@ -58,7 +21,10 @@ object MiningMessages {
    * reorg or a replacement genesis, and `revision` separates successive packages over one genesis.
    * An empty `genesisId` means a solo candidate carrying no collateral transaction.
    */
-  case class CandidateIdentity(height: Int, parentId: String, genesisId: String, revision: Int)
+  case class CandidateIdentity(height: Int, parentId: String, genesisId: String, revision: Int) {
+    def sameGenesis(other: CandidateIdentity): Boolean =
+      height == other.height && parentId == other.parentId && genesisId == other.genesisId
+  }
 
   /** One publication attempt for that identity. `expiresAt` is set only for augmented packages. */
   case class CandidatePublication(identity: CandidateIdentity, attempt: java.util.UUID,
@@ -110,19 +76,11 @@ object MiningMessages {
    */
   case class ShareRejected(id: Int, message: String, extraNonce1: Array[Byte]) extends ShareResult
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // LithosJobManager → LithosPool events
-  // ═══════════════════════════════════════════════════════════════════════════
-
   /** A new block height has been detected; all connections should receive the new job. */
   case class NewJobAvailable(template: BlockTemplate, publication: Option[CandidatePublication] = None)
 
   /** The same block height has a refreshed template (e.g. extra data changed). */
   case class JobUpdated(template: BlockTemplate)
-
-  // ═══════════════════════════════════════════════════════════════════════════
-  // Connection lifecycle  (MiningStratumServer / StratumConnection ↔ LithosPool)
-  // ═══════════════════════════════════════════════════════════════════════════
 
   /**
    * A transaction source and the config key its limits live under. Named because each source is
@@ -139,10 +97,6 @@ object MiningMessages {
   /** LithosPool → every StratumConnection: push a new or refreshed mining job. */
   case class BroadcastJob(template: BlockTemplate)
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // Stratum protocol messages  (JStratum bridge → StratumConnection)
-  // ═══════════════════════════════════════════════════════════════════════════
-
   /** JStratum input thread forwarded a mining.subscribe request. */
   case class MinerSubscribe(requestId: String)
 
@@ -153,35 +107,22 @@ object MiningMessages {
   case class MinerSubmit(requestId: String, workerName: String, jobId: String,
                          extraNonce2Hex: String, nTime: String, extraNonce1Hex: String)
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // LithosPool ↔ CandidateBuilder
-  //
-  //   LithosPool ──── ChainAdvanced / RebuildCandidate / BlockTxsRejected ─► CandidateBuilder
-  //   CandidateBuilder ──── BlockPackageReady ─────────────────────────────► LithosPool
-  //
-  // Only LithosPool watches the node's height, so it decides when to build. The builder pushes
-  // finished packages back rather than being asked, so nothing on the mining path waits on it.
-  // ═══════════════════════════════════════════════════════════════════════════
-
   /**
    * The block now being mined is one past the full-chain tip. A changed parent invalidates
    * work even at the same or a lower height; an empty parent retains height-only legacy behavior.
    */
   case class ChainAdvanced(blockHeight: Int, parentId: String = "")
 
-  /** Actual genesis job publication permits the builder to start optional collection. */
+  /** Acknowledges genesis publication so collection can start when the package wait is disabled. */
   case class GenesisPublished(identity: CandidateIdentity)
+
+  /** Rebuild source offers for the current genesis using fresh mempool observations. */
+  case class RefreshBlockPackage(identity: CandidateIdentity)
 
   /** Throw away the current package and build it again. */
   case object RebuildCandidate
 
-  /**
-   * This collateral box has just been consumed by a block we mined.
-   *
-   * The builder cannot wait for a refresh to notice. A found block is exactly the case where the
-   * active set changes, and the next block's genesis transaction is built from the in-memory set
-   * moments later — so without this it spends the box it just spent.
-   */
+  /** Removes consumed collateral from the builder cache before another genesis can use it. */
   case class CollateralSpent(boxId: String)
 
   /**
@@ -190,15 +131,8 @@ object MiningMessages {
    */
   case class BlockTxsRejected(blockHeight: Int, identity: Option[CandidateIdentity] = None)
 
-  /**
-   * Transactions are ready for the block at `pkg.blockHeight`. Sent once with the genesis
-   * transaction alone and again for each later revision.
-   */
-  case class BlockPackageReady(pkg: BlockPackage)
-
-  // ═══════════════════════════════════════════════════════════════════════════
-  // LithosPool internal
-  // ═══════════════════════════════════════════════════════════════════════════
+  /** Offers a package, marks pending additions, and identifies refreshes subject to the revenue threshold. */
+  case class BlockPackageReady(pkg: BlockPackage, collecting: Boolean = false, refreshed: Boolean = false)
 
   /**
    * MiningStratumServer → LithosPool, once at startup: hand back the job manager so connections

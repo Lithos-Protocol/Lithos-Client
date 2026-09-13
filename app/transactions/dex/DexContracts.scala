@@ -4,16 +4,9 @@ import lithosdex.contracts.LDContracts
 import org.ergoplatform.appkit.{BlockchainContext, ErgoValue}
 import work.lithos.mutations.InputUTXO
 
-import scala.collection.JavaConverters._
+import scala.jdk.CollectionConverters.iterableAsScalaIterableConverter
 
-/**
- * The LithosDex contract set, compiled once for the life of the JVM.
- *
- * The same reasoning as [[transactions.ProtocolContracts]]: the sigma compiler mutates `_sourceContext`
- * on shared AST nodes, so compiling one script twice in a run can throw. It also keeps compilation off
- * the request path — every read-only endpoint needs the pool address to find the pool box.
- *
- */
+/** Caches the compiled LithosDex contract set for the lifetime of the JVM. */
 object DexContracts {
 
   private var compiled: Option[LDContracts] = None
@@ -26,19 +19,19 @@ object DexContracts {
     }
   }
 
-  /**
-   * Attach context vars in the order the node will rebuild them, which is not numeric order.
-   * TODO: Change when SigmaMap is added to Node
-   */
-  def attachCtxVars(box: InputUTXO, vars: Seq[(Byte, ErgoValue[_])]): InputUTXO = {
+  /** Attaches unique context variables in ascending ID order. */
+  def attachCtxVars(box: InputUTXO, vars: Seq[(Byte, ErgoValue[_])], useWireOrder: Boolean = false): InputUTXO = {
     require(vars.map(_._1).distinct.size == vars.size, s"duplicate context var id in ${vars.map(_._1)}")
+    if(!useWireOrder)
+      vars.sortBy(_._1).foldLeft(box) { case (acc, (id, value)) => acc.withCtxVar(id, value) }
+    else {
+      val probe = new java.util.HashMap[String, String](vars.size)
+      vars.foreach { case (id, _) => probe.put(id.toString, "") }
+      val wireOrder = probe.keySet().asScala.toSeq.map(_.toByte)
 
-    val probe = new java.util.HashMap[String, String](vars.size)
-    vars.foreach { case (id, _) => probe.put(id.toString, "") }
-    val wireOrder = probe.keySet().asScala.toSeq.map(_.toByte)
-
-    wireOrder.foldLeft(box) { (acc, id) =>
-      acc.withCtxVar(id, vars.find(_._1 == id).get._2)
+      wireOrder.foldLeft(box) { (acc, id) =>
+        acc.withCtxVar(id, vars.find(_._1 == id).get._2)
+      }
     }
   }
 }

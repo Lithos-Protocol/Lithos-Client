@@ -123,7 +123,7 @@ object RollupTransactions {
     val holdingLogic = logicVar(ctx)
     val inputWithContext = DexContracts.attachCtxVars (holdingInput,
       Seq((3.toByte, ErgoValue.of(TransformOp)),
-        (holdingLogic.getId, holdingLogic.getValue)))
+        (holdingLogic.getId, holdingLogic.getValue)), useWireOrder = true)
 
     val totalOutputs = Seq(output) ++ feeOutputs
     val uTx = TxBuilder(ctx)

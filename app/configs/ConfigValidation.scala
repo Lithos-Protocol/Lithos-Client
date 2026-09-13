@@ -123,7 +123,7 @@ object Configs {
     v.doubleRange("stratum.candidate.blockShare", v.double("stratum.candidate.blockShare"), 0.0, 1.0,
       "fraction of the block's byte and cost limits this client's package may claim")
     Seq(configs.CandidateSourceConfig.Rollups, configs.CandidateSourceConfig.Emissions,
-      configs.CandidateSourceConfig.Rent).foreach { source =>
+      configs.CandidateSourceConfig.Rent, configs.CandidateSourceConfig.ErgoDex).foreach { source =>
       v.bool(s"stratum.candidate.sources.$source.enabled")
       v.range(s"stratum.candidate.sources.$source.maxTxs",
         v.int(s"stratum.candidate.sources.$source.maxTxs"), 0, 100, "transactions inserted per block")
@@ -144,6 +144,29 @@ object Configs {
       v.int("stratum.candidate.sources.rent.blocksPerScan"), 1, 10000, "blocks read per scan pass")
     v.bool("stratum.candidate.useTruePropCollection")
     v.bool("stratum.candidate.logTimings")
+    v.bool("stratum.candidate.waitForBlockPackage")
+    v.bool("stratum.candidate.logBudgets")
+    v.longRange("stratum.candidate.minCandidateChangeRevenue",
+      v.long("stratum.candidate.minCandidateChangeRevenue"), 0L, Long.MaxValue, "additional package revenue in nanoERG")
+
+    // ---- batching.ergodex ----
+    v.longRange("batching.ergodex.scanIntervalMs", v.long("batching.ergodex.scanIntervalMs"),
+      5000L, 3600000L, "ms between order scans; each pages the node's indexer")
+    v.range("batching.ergodex.maxTrackedOrders", v.int("batching.ergodex.maxTrackedOrders"), 1, 4096,
+      "order ids held between scans")
+    v.range("batching.ergodex.maxTrackedPools", v.int("batching.ergodex.maxTrackedPools"), 1, 1024,
+      "pools held between scans")
+    v.range("batching.ergodex.maxOrdersPerBlock", v.int("batching.ergodex.maxOrdersPerBlock"), 0, 100,
+      "orders executed per block or broadcast pass")
+    v.longRange("batching.ergodex.minRevenueNanoErg", v.long("batching.ergodex.minRevenueNanoErg"),
+      0L, 1000000000000L, "nanoERG")
+    v.longRange("batching.ergodex.broadcastMinRevenueNanoErg",
+      v.long("batching.ergodex.broadcastMinRevenueNanoErg"), 0L, 1000000000000L, "nanoERG")
+    v.longRange("batching.ergodex.broadcastMinerFeeCeiling",
+      v.long("batching.ergodex.broadcastMinerFeeCeiling"), 0L, 100000000L, "nanoERG per execution")
+    v.range("batching.ergodex.maxPoolAgeBlocks", v.int("batching.ergodex.maxPoolAgeBlocks"), 1, 10000000,
+      "blocks since a pool last traded")
+    v.bool("batching.ergodex.broadcast")
 
     // ---- emission ----
     v.bool("emission.enabled")

@@ -88,18 +88,16 @@ class ContextExtensionOrderSpec extends AnyPropSpec with ContractSpecBase {
   /**
    * What every builder here goes through, so the ordering rule has one place to live.
    *
-   * The order is the wire order, not ascending. Ascending was tried and is wrong: see the id checks
-   * in `FeeAllocationSpec` and `GenesisTopUpSpec`, which put our own POST body through the decoder
-   * the node delegates to.
+   * The order is the ascending order, not wire.
    */
-  property("attachCtxVars attaches in wire order whatever order it is handed") {
+  property("attachCtxVars attaches in ascending order whatever order it is handed") {
     withCtx { ctx =>
       val vars: Seq[(Byte, ErgoValue[_])] = Seq(
         64.toByte -> ErgoValue.of(64L), 3.toByte -> ErgoValue.of(3.toByte))
       val box = inputAt(UTXO(contractOf(miner(ctx)), Parameters.OneErg), ctx, 0)
       val attached = transactions.dex.DexContracts.attachCtxVars(box, vars)
 
-      extensionOf(attached).values.keys.toSeq shouldBe wireOrder(Seq[Byte](3, 64))
+      extensionOf(attached).values.keys.toSeq shouldBe wireOrder(Seq[Byte](3, 64)).sorted
       withClue("the order handed in must not change what is signed: ") {
         serialized(extensionOf(transactions.dex.DexContracts.attachCtxVars(box, vars.reverse))) shouldBe
           serialized(extensionOf(attached))

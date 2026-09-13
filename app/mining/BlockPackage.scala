@@ -3,21 +3,14 @@ package mining
 import stratum.CollateralData
 import transactions.candidate.BlockTxMessages.CandidateTx
 
-/**
- * Everything [[CandidateBuilder]] has ready for the block at `blockHeight`.
- *
- * The genesis transaction is the only mandatory member and is published alone as soon as it is
- * signed; the rest arrive later as a higher-`revision` package.
- *
- * Order is load bearing. The node validates transactions in the order it is handed them, and one
- * that arrives before its unconfirmed parent is invalid, so each source's ordering is preserved.
- * Genesis leads because it is the only one whose loss costs the block its Lithos status.
- */
+/** Genesis and ordered additions for one candidate. Revenue counts admitted source ERG outputs once. */
 case class BlockPackage(blockHeight: Int,
                         collateral: CollateralData,
                         blockTxs: Seq[CandidateTx] = Seq.empty[CandidateTx],
                         revision: Int = 0,
-                        parentId: String = "") {
+                        parentId: String = "",
+                        revenue: Long = 0L,
+                        elapsedTime: Option[String] = None) {
 
   def identity: MiningMessages.CandidateIdentity =
     MiningMessages.CandidateIdentity(blockHeight, parentId, collateral.txId, revision)
@@ -28,8 +21,8 @@ case class BlockPackage(blockHeight: Int,
   /** What to fall back to when the node will not accept the rest. */
   def genesisOnly: Seq[String] = Seq(collateral.txJSON)
 
-  def withBlockTxs(built: Seq[CandidateTx]): BlockPackage =
-    copy(blockTxs = built, revision = revision + 1)
+  def withBlockTxs(built: Seq[CandidateTx], ergRevenue: Long = 0L): BlockPackage =
+    copy(blockTxs = built, revision = revision + 1, revenue = ergRevenue)
 
   def describe: String =
     s"BlockPackage(height=$blockHeight, rev=$revision, collateral=${collateral.collateralId}, " +

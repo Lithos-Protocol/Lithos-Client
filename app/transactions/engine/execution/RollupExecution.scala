@@ -97,11 +97,7 @@ class RollupExecution(nodeContext: NodeContext, walletManager: ActorRef, syncHan
   private def ancestorBodies(ids: Seq[String]): Map[String, CandidateTx] =
     ids.flatMap { id =>
       Try(rollupNodeApi.unconfirmedTransactionById(id).get).toOption.flatten.map { body =>
-        val encoded = node.rest.NodeCodecs.encodeTransaction(body).toString
-        // The node reports the serialized size it counts towards the block limit, so that is used
-        // rather than the encoded length. Execution cost it does not report, and stays unknown.
-        id -> CandidateTx(body.id, encoded, CandidateTx.MempoolAncestor,
-          body.inputs.map(_.boxId).toSet, body.size.getOrElse(encoded.length))
+        id -> CandidateTx.ancestor(body)
       }
     }.toMap
   def register(): String = {

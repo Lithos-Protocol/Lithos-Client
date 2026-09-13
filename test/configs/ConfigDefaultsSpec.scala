@@ -15,6 +15,31 @@ class ConfigDefaultsSpec extends AnyFlatSpec with Matchers {
     CandidateConfig(shipped) shouldEqual CandidateConfig.Default
   }
 
+  it should "load optional package refresh controls and their fallbacks" in {
+    val defaults = CandidateConfig(Configuration.empty)
+    defaults.minCandidateChangeRevenue shouldBe 1000000L
+    defaults.waitForBlockPackage shouldBe true
+    defaults.logBudgets shouldBe false
+    val configured = CandidateConfig(Configuration(ConfigFactory.parseString("""
+      stratum.candidate.minCandidateChangeRevenue = 0
+      stratum.candidate.waitForBlockPackage = false
+      stratum.candidate.logBudgets = true
+    """)))
+    configured.minCandidateChangeRevenue shouldBe 0L
+    configured.waitForBlockPackage shouldBe false
+    configured.logBudgets shouldBe true
+  }
+
+  "A config without a source's block" should "leave an off-by-default source off" in {
+    val sources = CandidateConfig(Configuration.empty).sources
+    sources(CandidateSourceConfig.ErgoDex).enabled shouldBe false
+    sources(CandidateSourceConfig.Rent).enabled shouldBe false
+  }
+
+  "BatchingConfig.Default" should "equal what the shipped application.conf parses" in {
+    BatchingConfig(shipped, "ergodex") shouldEqual BatchingConfig.Default
+  }
+
   "EmissionConfig.Default" should "equal what the shipped application.conf parses" in {
     EmissionConfig(shipped) shouldEqual EmissionConfig.Default
   }

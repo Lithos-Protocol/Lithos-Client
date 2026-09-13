@@ -113,10 +113,10 @@ object LDHelpers {
    */
   final val PROV_TOKEN_SUPPLY: Long = 1000000000000000L
 
-  /** Supply issued at genesis. The remainder up to [[LOCKED_LP]] is the locked share. Filler. */
+  /** Supply issued at genesis. The remainder up to [[LOCKED_LP]] is the locked share.  */
   final val GENESIS_SUPPLY: Long = 1000000000000L
 
-  /** feeParams as minted at genesis: [dexFee, ergFee, tokenFee] over [[FEE_DENOM]]. Filler. */
+  /** feeParams as minted at genesis: [dexFee, ergFee, tokenFee] over [[FEE_DENOM]]. */
   final val GENESIS_FEE_PARAMS: Array[Long] = Array(9985L, 15L, 15L)
 
   /** Height of the genesis transaction. */

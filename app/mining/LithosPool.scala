@@ -28,10 +28,7 @@ import scala.concurrent.{ExecutionContext, Future}
 import scala.concurrent.duration._
 import scala.util.{Failure, Success, Try}
 
-/** Coordinates this miner's jobs. Candidate cache mutations are serialized off-mailbox;
-  * chain observations and solved blocks retain independent capacity during slow candidate HTTP.
-  * Only a qualified, acknowledged job permits optional transaction collection.
-  */
+/** Coordinates mining jobs with separate workers for candidate requests, chain polling and solved blocks. */
 class LithosPool(options: Options,
                  useCollateral: Boolean,
                  client: ErgoClient,
@@ -76,6 +73,7 @@ class LithosPool(options: Options,
   private var observing: Option[UUID] = None
   private var observationRequired = true
   private var blockPackage: Option[BlockPackage] = None
+  private var collectingAdditions = false
   private var activeRequest: Option[CandidateRequest] = None
   private var publishing: Option[(CandidateRequest, MiningCandidate)] = None
   private var servedCandidate: Option[CandidateIdentity] = None
@@ -85,7 +83,12 @@ class LithosPool(options: Options,
   private var rejectedGenesis = Set.empty[String]
   private var rebuilds = 0
   private var genesisDeadline = 0L
-  private var lastJobAt = 0L
+  private var lastRefreshAt = 0L
+  private var servedRevenue = 0L
+  private val hasPackageSources = candidateConfig.blockTransactions && txSources.exists { source =>
+    val limits = candidateConfig.sources.getOrElse(source.name, configs.CandidateSourceConfig.Default)
+    limits.enabled && limits.maxTxs > 0
+  }
   private var cacheDirty = true
   private var restoreGenesis = false
 
@@ -125,13 +128,32 @@ class LithosPool(options: Options,
           logger.warn(s"Cannot refresh mining chain state: ${ex.getMessage}; retaining existing work")
       }
 
-    case BlockPackageReady(pkg) =>
+    case BlockPackageReady(pkg, collecting, refreshed) =>
       if (tip.contains(ChainTip(pkg.blockHeight, pkg.parentId)) &&
         rejectedGenesis.size <= MaxRebuildsPerBlock &&
         !rejectedGenesis.contains(pkg.collateral.txId) &&
         blockPackage.forall(p => p.collateral.txId != pkg.collateral.txId || pkg.revision >= p.revision)) {
-        blockPackage = Some(pkg)
-        driveCandidate()
+        val sameGenesis = servedCandidate.exists(_.sameGenesis(pkg.identity))
+        val gain = pkg.revenue - servedRevenue
+        if (!refreshed || cacheDirty || !sameGenesis || candidateConfig.minCandidateChangeRevenue == 0L ||
+          gain >= candidateConfig.minCandidateChangeRevenue) {
+          blockPackage = Some(pkg)
+          collectingAdditions = collecting
+          logger.info(s"Ready: ${pkg.describe} with" +
+            s" txSize: ${pkg.collateral.txBytes.length} and collatBytes: " +
+            s"${pkg.collateral.collateralBoxBytes.length}${if(candidateConfig.logTimings) pkg.elapsedTime.get else ""}")
+          driveCandidate(refreshMempool = refreshed && candidateConfig.minCandidateChangeRevenue == 0L)
+        } else {
+          // If logBudgets is on, we can log every candidate package. Otherwise we'll only log
+          // when they are relevant.
+          if(candidateConfig.logBudgets) {
+            logger.info(s"Ready: ${pkg.describe} with" +
+              s" txSize: ${pkg.collateral.txBytes.length} and collatBytes: " +
+              s"${pkg.collateral.collateralBoxBytes.length}${if(candidateConfig.logTimings) pkg.elapsedTime.get else ""}")
+          }
+          logger.info(s"Keeping published package for block ${pkg.blockHeight}: " +
+            s"Not enough additional revenue $gain/${candidateConfig.minCandidateChangeRevenue} nanoERG")
+        }
       }
 
     case CandidateFetched(id, result) if activeRequest.exists(_.id == id) =>
@@ -243,31 +265,30 @@ class LithosPool(options: Options,
     if (!tip.contains(observed)) {
       tip = Some(observed)
       blockPackage = None
+      collectingAdditions = false
       publishedGenesis = None
       extrasRejected = None
       rejectedGenesis = Set.empty
       rebuilds = 0
       genesisDeadline = nowNanos() + candidateConfig.genesisWaitMs.milliseconds.toNanos
+      lastRefreshAt = nowNanos()
+      servedRevenue = 0L
       invalidateCachedJob()
       candidateBuilder.foreach(_ ! ChainAdvanced(observed.height, observed.parentId))
       stateFrame ! CheckBlock
     }
   }
 
-  /**
-   * The package that should be mined right now, derived from current state rather than queued, so
-   * a superseding package replaces its predecessor instead of occupying a second slot.
-   *
-   * Optional transactions are only carried once genesis has been published for this exact package
-   * and nothing has rejected them; otherwise the same package is offered genesis-only. None means
-   * wait, because a collateral genesis is still expected within its deadline.
-   */
+  /** Selects current work or waits within the genesis deadline. Rejected additions fall back to genesis. */
   private def desired: Option[(CandidateIdentity, Option[BlockPackage])] = tip.flatMap { chain =>
     blockPackage.filterNot(candidate => rejectedGenesis.contains(candidate.collateral.txId)) match {
+      case Some(pkg) if candidateConfig.waitForBlockPackage && collectingAdditions &&
+        !publishedGenesis.contains(chain -> pkg.collateral.txId) && nowNanos() < genesisDeadline => None
       case Some(pkg) =>
-        val carriesExtras = pkg.blockTxs.nonEmpty && publishedGenesis.contains(chain -> pkg.collateral.txId) &&
+        val carriesExtras = pkg.blockTxs.nonEmpty &&
+          (candidateConfig.waitForBlockPackage || publishedGenesis.contains(chain -> pkg.collateral.txId)) &&
           !extrasRejected.contains(chain -> pkg.collateral.txId) && !restoreGenesis
-        val selected = if (carriesExtras) pkg else pkg.copy(blockTxs = Seq.empty, revision = 0)
+        val selected = if (carriesExtras) pkg else pkg.copy(blockTxs = Seq.empty, revision = 0, revenue = 0L)
         Some(selected.identity -> Some(selected))
       case None if candidateBuilder.isDefined && nowNanos() < genesisDeadline => None
       case None => Some(CandidateIdentity(chain.height, chain.parentId, "", 0) -> None)
@@ -278,13 +299,19 @@ class LithosPool(options: Options,
    * Issue at most one candidate request. Candidate calls mutate the node's cached mining work, so
    * they are serialised here rather than overlapped, and a found block always takes precedence.
    */
-  private def driveCandidate(): Unit = {
+  private def driveCandidate(refreshMempool: Boolean = false): Unit = {
     if (observationRequired || activeRequest.nonEmpty || publishing.nonEmpty || submitting.nonEmpty ||
       solutionQueue.nonEmpty) return
     desired.foreach { case (identity, pkg) =>
-      val refresh = candidateConfig.mempoolRefreshMs > 0 &&
-        nowNanos() - lastJobAt >= candidateConfig.mempoolRefreshMs.milliseconds.toNanos
-      if (cacheDirty || !servedCandidate.contains(identity) || refresh) {
+      val refresh = refreshMempool || (candidateConfig.mempoolRefreshMs > 0 &&
+        nowNanos() - lastRefreshAt >= candidateConfig.mempoolRefreshMs.milliseconds.toNanos)
+      val refreshPackage = refresh && !refreshMempool && hasPackageSources && pkg.nonEmpty &&
+        !extrasRejected.contains(ChainTip(identity.height, identity.parentId) -> identity.genesisId)
+      if (!cacheDirty && servedCandidate.contains(identity) && refreshPackage) {
+        lastRefreshAt = nowNanos()
+        candidateBuilder.foreach(_ ! RefreshBlockPackage(identity))
+      } else if (cacheDirty || !servedCandidate.contains(identity) || (refresh && !refreshPackage)) {
+        lastRefreshAt = nowNanos()
         val request = CandidateRequest(UUID.randomUUID(), identity, pkg, protocolVersion, nowNanos())
         activeRequest = Some(request)
         if (request.hasExtras) candidateTimer = Some(context.system.scheduler.scheduleOnce(
@@ -317,7 +344,7 @@ class LithosPool(options: Options,
   private def admitCandidate(request: CandidateRequest, result: Try[Fetched]): Unit = {
     if (!current(request)) {
       invalidateCachedJob()
-      restoreGenesis = true
+      restoreGenesis = !candidateConfig.waitForBlockPackage
       driveCandidate()
       return
     }
@@ -336,7 +363,7 @@ class LithosPool(options: Options,
         if (!cacheDirty && servedWork.contains(work(candidate)) && servedCandidate.contains(request.identity)) {
           candidateTimer.foreach(_.cancel())
           candidateTimer = None
-          lastJobAt = nowNanos()
+          lastRefreshAt = nowNanos()
         } else {
           publishing = Some(request -> candidate)
           jobManagerActor ! ProcessTemplate(candidate, tau.bigInteger, request.pkg.isDefined,
@@ -361,14 +388,7 @@ class LithosPool(options: Options,
     }
   }
 
-  /**
-   * Keep what the node's proofs say about the package it was handed.
-   *
-   * Unproven correspondence is reported, not acted on: the supported node can return proofs that do
-   * not correspond to the transactions it was given, so a mismatch is not evidence the work is
-   * absent. `CandidateMaterialized.requireCorrespondence` is where that becomes a rejection once the
-   * node is fixed, and dependent revenue work is what will need it.
-   */
+  /** Logs proven package membership and any required transaction proofs that could not be verified. */
   private def recordMaterialization(materialized: CandidateMaterialized): Unit = {
     if (materialized.fullyProven)
       logger.debug(s"Candidate ${materialized.identity.height} proved all " +
@@ -416,7 +436,8 @@ class LithosPool(options: Options,
     servedWork = Some(work(template.candidate))
     cacheDirty = false
     restoreGenesis = false
-    lastJobAt = nowNanos()
+    lastRefreshAt = nowNanos()
+    servedRevenue = request.pkg.map(_.revenue).getOrElse(0L)
     connections.values.foreach(_ ! BroadcastJob(template))
     logger.info(s"Broadcasting job ${template.jobId} to ${connections.size} miner(s); " +
       s"candidateStage=${if (request.hasExtras) "augmented" else if (request.pkg.isDefined) "genesis" else "solo"}" +
@@ -534,9 +555,7 @@ object LithosPool {
       candidate.version = header.version
       require(candidate.proof.getJSONArray("txProofs") != null, "collateral candidate has no transaction proofs")
     }
-    // Retained for every collateral candidate, whether or not its correspondence checks out: the
-    // proofs are the only evidence of what the node did with the package, and a later consumer
-    // needs them as returned rather than as this client would have preferred them.
+    // Retain the supplied transaction proofs for package membership checks.
     val materialized = request.pkg.map { pkg =>
       val genesis = CandidateTx(pkg.collateral.txId, pkg.collateral.txJSON, "genesis",
         sizeBytes = pkg.collateral.signedSizeBytes, cost = pkg.collateral.cost,

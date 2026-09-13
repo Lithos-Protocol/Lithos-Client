@@ -21,18 +21,7 @@ import work.lithos.mutations.{InputUTXO, UTXO}
 
 import scala.concurrent.duration._
 
-/**
- * `CandidateBuilder`'s selection rules — which collateral box a block is built on, and when a box
- * stops being offered.
- *
- * Every defect this covers cost real blocks and none of them produced an error a user could act on.
- * A sticky choice with no release path ended collateral mining permanently and silently; a box the
- * block just spent was handed straight back to the next build; and a spent box produces a genesis
- * transaction the node drops before validation, with a 200 and nothing in the log.
- *
- * The transaction builder is stubbed. What is under test is the actor's bookkeeping, not signing —
- * and stubbing it is also what lets a build "fail" on demand.
- */
+/** Offline actor tests for collateral selection, package collection and stale-result fencing. */
 object CandidateBuilderSpec {
   val config: com.typesafe.config.Config =
     com.typesafe.config.ConfigFactory.parseString("akka.test.single-expect-default = 15s")
@@ -44,7 +33,8 @@ class CandidateBuilderSpec extends TestKit(ActorSystem("candidate-builder-spec",
 
   override def afterAll(): Unit = TestKit.shutdownActorSystem(system)
 
-  private val cfg = CandidateConfig.Default.copy(blockTransactions = false, collateralRefreshInterval = 600000)
+  private val cfg = CandidateConfig.Default.copy(blockTransactions = false, collateralRefreshInterval = 600000,
+    waitForBlockPackage = false)
 
   /** A collateral box stand-in. Only its id, age and bid are ever read by the code under test. */
   private def box(ctx: BlockchainContext,
@@ -62,12 +52,6 @@ class CandidateBuilderSpec extends TestKit(ActorSystem("candidate-builder-spec",
     CollateralData("tx-" + boxId.take(8), "{}", "pk-" + boxId.take(8), Array.emptyByteArray,
       Array.emptyByteArray, boxId, "9address", holdingOutput = holding)
 
-  /**
-   * A builder whose collateral set and build outcome the test controls.
-   *
-   * `loadCollateral` answers from `available`, so a refresh can be made to put a box back — which is
-   * how a lagging indexer looks from here. `buildGenesis` fails for any id in `failing`.
-   */
   private class StubTxBuilder(prover: NodeWallet, api: NodeApi, c: CandidateConfig,
                               @volatile var available: Seq[CollateralCandidate],
                               @volatile var failing: Set[String])
@@ -116,8 +100,6 @@ class CandidateBuilderSpec extends TestKit(ActorSystem("candidate-builder-spec",
     def nextHeight: Int = node.getClient.execute(_.getHeight) + 1
   }
 
-
-
   private def fixture(boxCount: Int = 4,
                       failing: Set[String] = Set.empty,
                       boxes: Option[Seq[CollateralCandidate]] = None,
@@ -157,8 +139,6 @@ class CandidateBuilderSpec extends TestKit(ActorSystem("candidate-builder-spec",
     pkg
   }
 
-  // ─── stickiness ───────────────────────────────────────────────────────────
-
   "The chosen box" should "stay the same across rebuilds at one height" in {
     // The node caches one candidate per miner key and the collateral box decides that key, so
     // changing box between polls evicts that cache and forces a full regeneration.
@@ -180,13 +160,6 @@ class CandidateBuilderSpec extends TestKit(ActorSystem("candidate-builder-spec",
     // The higher bid is still the higher bid, so a re-rank must land on it again.
     advanceTo(f, 102).collateral.collateralId shouldEqual boxes(1).id
   }
-
-  // ─── generations ──────────────────────────────────────────────────────────
-  //
-  // A build runs off the actor thread, so its result can arrive after the block it was started for
-  // is over. Everything it writes — the chosen box, the skip set, the retry budget, the collection
-  // flag — belongs to that block, and a late result that writes them decides the next block's
-  // economics on the previous block's information. The gate forces that ordering rather than racing.
 
   /** Two boxes whose ranking flips between one height and the next, purely on age. */
   private def flipAt101: Seq[CollateralCandidate] =
@@ -251,16 +224,8 @@ class CandidateBuilderSpec extends TestKit(ActorSystem("candidate-builder-spec",
     }
   }
 
-  // ─── ranking ──────────────────────────────────────────────────────────────
-
   private val extras = Seq(CandidateTx("optional", "{}", CandidateTx.Payout))
 
-  /**
-   * The collection request, skipping the preparation that now precedes it.
-   *
-   * Preparation is sent when the height advances and the request when genesis reaches miners, so a
-   * probe standing in for a source sees both. Only the second is what these tests are about.
-   */
   private def requested(source: TestProbe, within: FiniteDuration = 3.seconds): RequestBlockTxs =
     source.fishForSpecificMessage(within) { case request: RequestBlockTxs => request }
 
@@ -309,8 +274,6 @@ class CandidateBuilderSpec extends TestKit(ActorSystem("candidate-builder-spec",
       source.expectNoMessage(1.second)
     }
   }
-
-  // ─── candidate revenue ────────────────────────────────────────────────────
 
   /** A revenue output as an adapter's transaction would leave it, spendable by this miner. */
   private def revenueBox(f: Fixture, value: Long = Parameters.OneErg): InputUTXO =
@@ -368,6 +331,48 @@ class CandidateBuilderSpec extends TestKit(ActorSystem("candidate-builder-spec",
     }
   }
 
+  "Budget logging" should "account for shared ancestors and report final source contributions" in {
+    val messages = new java.util.concurrent.ConcurrentLinkedQueue[String]()
+    val appender = new ch.qos.logback.core.AppenderBase[ch.qos.logback.classic.spi.ILoggingEvent] {
+      override def append(event: ch.qos.logback.classic.spi.ILoggingEvent): Unit = {
+        messages.add(event.getFormattedMessage)
+        ()
+      }
+    }
+    val logger = org.slf4j.LoggerFactory.getLogger("CandidateBuilder").asInstanceOf[ch.qos.logback.classic.Logger]
+    appender.start()
+    logger.addAppender(appender)
+    val first = TestProbe()
+    val second = TestProbe()
+    val limits = configs.CandidateSourceConfig.Default.copy(maxBytes = 200L, maxCost = 100L)
+    val config = collectingConfig.copy(logBudgets = true,
+      sources = Map("rollups" -> limits, "emissions" -> limits))
+    val f = fixture(sources = Seq(CandidateSource("rollups", first.ref), CandidateSource("emissions", second.ref)),
+      config = config)
+    try {
+      advanceTo(f, 100)
+      requested(first)
+      requested(second)
+      val ancestor = CandidateTx("shared", "{}", CandidateTx.MempoolAncestor, sizeBytes = 100, cost = 10L)
+      val a = CandidateTx("a", "{}", CandidateTx.Payout, sizeBytes = 50, cost = 20L)
+      val b = CandidateTx("b", "{}", CandidateTx.Clear, sizeBytes = 70, cost = 30L)
+      val oversized = CandidateTx("large", "{}", CandidateTx.Payout, sizeBytes = 201, cost = 101L)
+      first.reply(BlockTxsReady(100, Seq(CandidateBundle(Vector(ancestor, a)), CandidateBundle(Vector(oversized)))))
+      second.reply(BlockTxsReady(100, Seq(CandidateBundle(Vector(ancestor, b)))))
+      published(f).blockTxs.map(_.id) shouldBe Seq("shared", "a", "b")
+      val logged = messages.toArray.mkString("\n")
+      logged should include("source=rollups budgets: txs=2/5, bytes=150/200, cost=30/100; package contribution: txs=2, bytes=150, cost=30")
+      logged should include("source=emissions budgets: txs=2/5, bytes=170/200, cost=40/100; package contribution: txs=1, bytes=70, cost=30")
+      logged should include("package budgets: bytes=220/")
+      logged should include("; block limits: bytes=")
+      logged should include("; genesis: bytes=0, cost=0; top-up: bytes=0, cost=0")
+    } finally {
+      system.stop(f.builder)
+      logger.detachAppender(appender)
+      appender.stop()
+    }
+  }
+
   "A changed chain parent" should "replace same-height work and allow rollback to a lower height" in {
     val f = fixture()
     f.builder ! ChainAdvanced(100, "ab" * 32)
@@ -406,6 +411,64 @@ class CandidateBuilderSpec extends TestKit(ActorSystem("candidate-builder-spec",
     requested(source)
     source.reply(BlockTxsReady(100, Seq(transactions.candidate.CandidateBundle(extras.toVector))))
     published(f).blockTxs shouldEqual extras
+  }
+
+  it should "collect before genesis publication when the package wait is enabled" in {
+    val source = TestProbe()
+    val f = fixture(sources = Seq(CandidateSource(configs.CandidateSourceConfig.Rollups, source.ref)),
+      config = collectingConfig.copy(waitForBlockPackage = true))
+    f.builder ! ChainAdvanced(100)
+    val waiting = f.parent.expectMsgType[BlockPackageReady]
+    waiting.collecting shouldBe true
+    requested(source).refresh shouldBe false
+    source.reply(BlockTxsReady(100, Seq.empty))
+    val ready = f.parent.expectMsgType[BlockPackageReady]
+    ready.collecting shouldBe false
+    ready.pkg.blockTxs shouldBe empty
+  }
+
+  it should "refresh one package at a time and carry the admitted ERG revenue" in {
+    val source = TestProbe()
+    val f = fixture(sources = Seq(CandidateSource(configs.CandidateSourceConfig.Rollups, source.ref)),
+      config = collectingConfig)
+    val height = f.nextHeight
+    val base = advanceTo(f, height)
+    requested(source)
+    source.reply(BlockTxsReady(height, Seq(declaring(entryOn(revenueBox(f))))))
+    val first = published(f)
+    first.revenue shouldBe Parameters.OneErg
+    f.builder ! RefreshBlockPackage(base.identity)
+    requested(source).refresh shouldBe true
+    val replyTo = source.lastSender
+    f.builder ! RefreshBlockPackage(first.identity)
+    source.expectNoMessage(200.millis)
+    replyTo ! BlockTxsReady(height, Seq(declaring(entryOn(revenueBox(f, 2 * Parameters.OneErg)))))
+    val refreshed = f.parent.expectMsgType[BlockPackageReady]
+    refreshed.refreshed shouldBe true
+    refreshed.pkg.revenue shouldBe 2 * Parameters.OneErg
+    refreshed.pkg.revision shouldBe first.revision + 1
+    refreshed.pkg.collateral shouldBe first.collateral
+  }
+
+  it should "keep the published package usable after a refresh times out" in {
+    val clock = new java.util.concurrent.atomic.AtomicLong(1L)
+    val source = TestProbe()
+    val f = fixture(sources = Seq(CandidateSource(configs.CandidateSourceConfig.Rollups, source.ref)),
+      config = collectingConfig, clock = () => clock.get())
+    val base = advanceTo(f, 100)
+    requested(source)
+    source.reply(BlockTxsReady(100, Seq(CandidateBundle(extras.toVector))))
+    val first = published(f)
+    f.builder ! RefreshBlockPackage(base.identity)
+    requested(source)
+    clock.addAndGet(collectingConfig.blockTxTimeout.milliseconds.toNanos)
+    source.reply(BlockTxsReady(100, Seq.empty))
+    f.parent.expectNoMessage(200.millis)
+    source.expectNoMessage(200.millis)
+    f.builder ! RefreshBlockPackage(first.identity)
+    requested(source).refresh shouldBe true
+    source.reply(BlockTxsReady(100, Seq.empty))
+    f.parent.expectMsgType[BlockPackageReady].pkg.blockTxs shouldBe empty
   }
 
   it should "discard a response after rejection even while its ask remains live" in {
@@ -497,13 +560,8 @@ class CandidateBuilderSpec extends TestKit(ActorSystem("candidate-builder-spec",
     advanceTo(f, 199).collateral.collateralId shouldEqual boxes(1).id
   }
 
-  // ─── the §3.25 / §3.2 regression: a spent box must not come back ──────────
-
   "A box the block just spent" should "not be offered again on the next block" in {
-    // Mining a Lithos block consumes the collateral box. The set is refreshed two seconds later
-    // against an indexer that has not necessarily applied the block yet, so without a memory that
-    // survives the block boundary the next genesis transaction spends an already-spent box — which
-    // the node drops before validation, silently, with a 200.
+    // Keep the spent collateral excluded while the indexer still reports it.
     val f = fixture()
     val first = advanceTo(f, 100)
     val spent = first.collateral.collateralId
@@ -515,10 +573,7 @@ class CandidateBuilderSpec extends TestKit(ActorSystem("candidate-builder-spec",
   }
 
   it should "stay out even when a lagging refresh reports it as unspent" in {
-    // The exact shape of the defect: `skipped` was cleared on every ChainAdvanced, so a refresh that
-    // still listed the box put it straight back into the draw.
-    // One box, so the draw cannot accidentally avoid it: either the memory holds it out and there
-    // is no package at all, or the refresh puts it back and the block is built on a spent box.
+    // The sole collateral box must remain excluded when a later refresh still reports it.
     val f = fixture(boxCount = 1)
     val spent = f.ids.head
     advanceTo(f, 100).collateral.collateralId shouldEqual spent
@@ -552,15 +607,8 @@ class CandidateBuilderSpec extends TestKit(ActorSystem("candidate-builder-spec",
     recovered.collateral.collateralId shouldEqual only
   }
 
-  // ─── failures ─────────────────────────────────────────────────────────────
-
   "A box that cannot build" should "be skipped so the next attempt draws another" in {
-    // Sticky selection had no release path: a box that stayed in the set but could not produce a
-    // valid genesis transaction re-picked itself on every retry and every later block, forever. One
-    // such box would have ended collateral mining permanently and silently.
-    // Fail whichever box the random draw chooses first. The retry must select the other box; naming
-    // one fixed box as bad made this test pass without exercising the failure path whenever the
-    // random draw happened to choose the good box first.
+    // Fail the first draw so the retry must select the remaining collateral box.
     val f = fixture(boxCount = 2)
     f.stub.failNextBuilds = 1
 
@@ -578,8 +626,6 @@ class CandidateBuilderSpec extends TestKit(ActorSystem("candidate-builder-spec",
     f.parent.expectNoMessage(3.seconds)
   }
 
-  // ─── height discipline ────────────────────────────────────────────────────
-
   "A package" should "name the height it was built for" in {
     val f = fixture()
     advanceTo(f, 4242).blockHeight shouldEqual 4242
@@ -593,8 +639,6 @@ class CandidateBuilderSpec extends TestKit(ActorSystem("candidate-builder-spec",
     f.builder ! ChainAdvanced(99)
     f.parent.expectNoMessage(1.second)
   }
-
-  // ─── the property the whole subsystem rests on ────────────────────────────
 
   "No message" should "be able to restart the actor" in {
     // Every failure path here is supposed to degrade rather than stop. An exception in `receive`

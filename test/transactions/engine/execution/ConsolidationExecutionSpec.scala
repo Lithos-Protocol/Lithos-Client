@@ -208,4 +208,26 @@ class ConsolidationExecutionSpec extends AnyFlatSpec with Matchers with MockitoS
       plan.map(_._2).sum shouldBe (min * 10 - fee - min)
     }
   }
+
+  private val chosen = Seq("aa" * 32, "bb" * 32)
+
+  "The recheck after a scan" should "ignore mempool traffic that does not touch the selection" in {
+    val unrelated = Set("cc" * 32, "dd" * 32, "ee" * 32)
+    ConsolidationExecution.unspendable(chosen, chosen.toSet, unrelated) shouldBe None
+  }
+
+  it should "refuse when a chosen box no longer exists" in {
+    ConsolidationExecution.unspendable(chosen, Set(chosen.head), Set.empty)
+      .getOrElse(fail("expected a refusal")) should include("spent")
+  }
+
+  it should "refuse when a chosen box is claimed by an unconfirmed transaction" in {
+    // The node's with-pool read still returns it, so this case is invisible without the spend index.
+    ConsolidationExecution.unspendable(chosen, chosen.toSet, Set(chosen.last))
+      .getOrElse(fail("expected a refusal")) should include("claimed")
+  }
+
+  it should "have nothing to check when the scan chose nothing" in {
+    ConsolidationExecution.unspendable(Seq.empty, Set.empty, Set("aa" * 32)) shouldBe None
+  }
 }
