@@ -10,8 +10,8 @@ import org.scalatest.propspec.AnyPropSpec
  * straight to `deserializeTo[Header]`.
  *
  * So this proof carries an obligation the others do not: a NISP it calls well-formed has to be a NISP
- * they can all parse. Where that fails the miner is unslashable, because a proof that throws is
- * indistinguishable to `Evaluator` from one that has not been reached.
+ * they can all parse. Where that fails, a throw is not a verdict: `Evaluator` records it and runs
+ * on, and unless some other proof fires the evaluation ends incomplete, with the miner unslashed.
  *
  * Each of the three sections below poses a header that parses far enough for the size arithmetic to
  * work out, and then breaks `deserializeTo[Header]`. They are paired: the proof must catch it, and
@@ -97,8 +97,9 @@ class FPInvalidFormatSpec extends AnyPropSpec with FraudProofSpecBase {
 
   /**
    * Why the catch above has to exist. The same NISP hands a header-parsing proof a height it cannot
-   * narrow to an Int, so that proof throws rather than returning a verdict. Reorder the set and this
-   * miner becomes unslashable, because one throw skips every proof after it.
+   * narrow to an Int, so that proof throws rather than returning a verdict. Without the catch, a
+   * miner whose NISP is otherwise honest gets throws from the header-parsing proofs and declines
+   * from the rest, and an evaluation with throws and no fraud ends incomplete rather than in a slash.
    */
   property("height overflow: a header-parsing proof still cannot evaluate it") {
     withCtx { ctx =>
