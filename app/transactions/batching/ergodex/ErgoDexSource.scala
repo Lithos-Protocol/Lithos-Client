@@ -57,11 +57,14 @@ class ErgoDexSource(nodeContext: NodeContext,
   private var ticker: Option[Cancellable] = None
 
   override def preStart(): Unit = {
-    logger.info(s"ErgoDexSource started: scanIntervalMs=${batching.scanIntervalMs}, " +
-      s"maxTrackedOrders=${batching.maxTrackedOrders}, maxOrdersPerBlock=${batching.maxOrdersPerBlock}, " +
-      s"broadcast=${batching.broadcast}")
-    ticker = Some(context.system.scheduler.scheduleWithFixedDelay(
-      1.second, batching.scanIntervalMs.milliseconds, self, ScanTick)(context.dispatcher))
+    if(batching.enabled) {
+      logger.info(s"ErgoDexSource started: scanIntervalMs=${batching.scanIntervalMs}, " +
+        s"maxTrackedOrders=${batching.maxTrackedOrders}, maxOrdersPerBlock=${batching.maxOrdersPerBlock}, " +
+        s"broadcast=${batching.broadcast}")
+      ticker = Some(context.system.scheduler.scheduleWithFixedDelay(
+        1.second, batching.scanIntervalMs.milliseconds, self, ScanTick)(context.dispatcher))
+    } else
+      logger.info("ErgoDexSource was disabled")
   }
 
   override def postStop(): Unit = { alive.set(false); ticker.foreach(_.cancel()) }

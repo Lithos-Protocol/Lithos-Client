@@ -18,7 +18,8 @@ object MempoolSorting {
 }
 
 /** Order discovery limits and revenue floors. Candidate transaction budgets are configured per source. */
-case class BatchingConfig(scanIntervalMs: Long,
+case class BatchingConfig(enabled: Boolean,
+                          scanIntervalMs: Long,
                           maxTrackedOrders: Int,
                           maxTrackedPools: Int,
                           maxOrdersPerBlock: Int,
@@ -33,6 +34,7 @@ object BatchingConfig {
 
   /** Default discovery and revenue limits; broadcasting requires an explicit opt-in. */
   val Default: BatchingConfig = BatchingConfig(
+    enabled = true,
     scanIntervalMs = 8000,
     maxTrackedOrders = 512,
     maxTrackedPools = 256,
@@ -50,8 +52,11 @@ object BatchingConfig {
       config.getOptional(path(key))(ConfigLoader.intLoader).getOrElse(fallback)
     def long(key: String, fallback: Long): Long =
       config.getOptional(path(key))(ConfigLoader.longLoader).getOrElse(fallback)
+    def bool(key: String, fallback: Boolean): Boolean =
+      config.getOptional(s"stratum.candidate.$key")(ConfigLoader.booleanLoader).getOrElse(fallback)
 
     BatchingConfig(
+      enabled = bool("enabled", Default.enabled),
       scanIntervalMs = long("scanIntervalMs", Default.scanIntervalMs),
       maxTrackedOrders = int("maxTrackedOrders", Default.maxTrackedOrders),
       maxTrackedPools = int("maxTrackedPools", Default.maxTrackedPools),

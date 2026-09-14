@@ -150,6 +150,7 @@ object Configs {
       v.long("stratum.candidate.minCandidateChangeRevenue"), 0L, Long.MaxValue, "additional package revenue in nanoERG")
 
     // ---- batching.ergodex ----
+    v.bool(s"batching.ergodex.enabled")
     v.longRange("batching.ergodex.scanIntervalMs", v.long("batching.ergodex.scanIntervalMs"),
       5000L, 3600000L, "ms between order scans; each pages the node's indexer")
     v.range("batching.ergodex.maxTrackedOrders", v.int("batching.ergodex.maxTrackedOrders"), 1, 4096,
