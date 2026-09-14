@@ -1,5 +1,6 @@
 package transactions.engine.execution
 
+import configs.WalletConfig
 import node.NodeApi
 import node.model._
 import org.mockito.ArgumentMatchers.any
@@ -7,6 +8,7 @@ import org.mockito.Mockito.when
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 import org.scalatestplus.mockito.MockitoSugar
+
 import scala.util.{Failure, Success}
 
 class ConsolidationExecutionSpec extends AnyFlatSpec with Matchers with MockitoSugar {
@@ -41,7 +43,7 @@ class ConsolidationExecutionSpec extends AnyFlatSpec with Matchers with MockitoS
   it should "discard a partial scan when a later page fails" in {
     val api = mock[NodeApi]
     when(api.walletUnspentBoxes(any[ConfirmationRange], any[Paging])).thenReturn(
-      Success(Vector.tabulate(100)(i => entry(i + 1, i))), Failure(new RuntimeException("unavailable")))
+      Success(Vector.tabulate(WalletConfig.Default.pageSize)(i => entry(i + 1, i))), Failure(new RuntimeException("unavailable")))
     intercept[RuntimeException](ConsolidationExecution.select(api, Set("wallet"), Set.empty, 1000, 1))
   }
 

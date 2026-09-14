@@ -141,7 +141,7 @@ class LithosPool(options: Options,
           collectingAdditions = collecting
           logger.info(s"Ready: ${pkg.describe} with" +
             s" txSize: ${pkg.collateral.txBytes.length} and collatBytes: " +
-            s"${pkg.collateral.collateralBoxBytes.length}${if(candidateConfig.logTimings) pkg.elapsedTime.get else ""}")
+            s"${pkg.collateral.collateralBoxBytes.length}${pkg.elapsedTime.getOrElse("")}")
           driveCandidate(refreshMempool = refreshed && candidateConfig.minCandidateChangeRevenue == 0L)
         } else {
           // If logBudgets is on, we can log every candidate package. Otherwise we'll only log

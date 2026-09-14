@@ -82,7 +82,7 @@ object WalletConfig {
     maxDescriptors = 2048,
     maxDescriptorBytes = 1024L * 1024L,
     maxInputBytes = 4096,
-    pageSize = 100,
+    pageSize = 500,
     inventoryTimeoutMs = 240000L,
     reservationTimeoutMs = 30000L,
     nodeCallTimeoutMs = 30000L,

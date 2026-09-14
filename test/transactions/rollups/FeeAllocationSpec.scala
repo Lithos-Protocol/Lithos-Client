@@ -185,10 +185,10 @@ class FeeAllocationSpec extends AnyPropSpec with RollupSpecBase {
         .inputs.head.spendingProof.extension.values.keys.toSeq
       // TODO: Fix these tests when SigmaMap is added
       withClue("what we signed has to be what the node rebuilds, whatever order that is: ") {
-        order shouldBe rebuilt.sorted
+        order shouldBe rebuilt
       }
       withClue("and for this id set that order is not ascending: ") {
-        order shouldBe Seq[Byte](3, 64)
+        order shouldBe Seq[Byte](64, 3)
       }
     }
   }

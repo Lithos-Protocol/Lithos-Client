@@ -19,12 +19,13 @@ private[engine] case class WalletDescriptor(id: String, value: Long, creationHei
 }
 
 private[engine] object WalletInventory {
+  // TODO: Fix this and rewire from config only
   final val MaxDescriptors = 2048
   final val MaxDescriptorBytes = 1024L * 1024L
   final val MaxInputBytes = 4096
   /** Inputs one selection may return, which also caps a consolidation transaction. */
   final val MaxInputs = 75
-  final val PageSize = 100
+  final val PageSize = 500
   final val MaxWalkNanos = 240L * 1000000000L
 
   /**

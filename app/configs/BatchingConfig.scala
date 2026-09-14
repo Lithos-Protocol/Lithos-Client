@@ -33,10 +33,10 @@ object BatchingConfig {
 
   /** Default discovery and revenue limits; broadcasting requires an explicit opt-in. */
   val Default: BatchingConfig = BatchingConfig(
-    scanIntervalMs = 30000L,
+    scanIntervalMs = 8000,
     maxTrackedOrders = 512,
     maxTrackedPools = 256,
-    maxOrdersPerBlock = 8,
+    maxOrdersPerBlock = 20,
     minRevenueNanoErg = 1000000L,
     broadcastMinRevenueNanoErg = 2500000L,
     broadcastMinerFeeCeiling = 2000000L,

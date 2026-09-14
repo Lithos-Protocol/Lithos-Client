@@ -31,11 +31,11 @@ object CandidateConfig {
       // transaction, because a rent collection sweeps every box it takes into a single sweep.
       CandidateSourceConfig.Rent -> CandidateSourceConfig.Default.copy(enabled = false, maxTxs = 1),
       // Disabled by default; the eight slots include placement ancestors and executions.
-      CandidateSourceConfig.ErgoDex -> CandidateSourceConfig.Default.copy(enabled = false, maxTxs = 8)),
+      CandidateSourceConfig.ErgoDex -> CandidateSourceConfig.Default.copy(enabled = false, maxTxs = 20)),
     blockShare = 0.5,
     useTruePropCollection = false,
     genesisWaitMs = 1500,
-    mempoolRefreshMs = 10000,
+    mempoolRefreshMs = 20000,
     blockTxTimeout = 20000,
     logTimings = false,
     minCandidateChangeRevenue = 1000000L,
