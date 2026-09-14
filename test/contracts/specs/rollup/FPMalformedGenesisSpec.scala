@@ -5,12 +5,11 @@ import lfsm.LFSMHelpers
 import lfsm.contracts.FraudProofContracts
 import nisp.{SuperShare, TransactionProof}
 import org.ergoplatform.appkit._
-import org.ergoplatform.appkit.impl.UnsignedTransactionImpl
 import org.ergoplatform.sdk.ErgoId
 import org.scalatest.propspec.AnyPropSpec
 import scorex.crypto.hash.Blake2b256
 import sigma.Colls
-import work.lithos.mutations.{Contract, InputUTXO, Token, TxBuilder, UTXO}
+import work.lithos.mutations.{Contract, Token, UTXO}
 
 /**
  * `FP_MalformedGenesis.ergo` — the proof that makes a NISP non-transferable.
@@ -28,72 +27,13 @@ import work.lithos.mutations.{Contract, InputUTXO, Token, TxBuilder, UTXO}
  * rubbish and demands a verdict rather than an exception.
  */
 class FPMalformedGenesisSpec extends AnyPropSpec with EmissionSpecBase with FraudProofSpecBase
-  with FraudProofTransitionChecks {
+  with FraudProofTransitionChecks with GenesisFixtures {
 
   private val score = 100000L
 
   /** Compiled once: the sigma compiler mutates shared AST nodes, so one script twice can throw. */
   private def malformedGenesis(ctx: BlockchainContext): Contract =
     FPMalformedGenesisSpec.compiled(ctx, collateralContract(ctx), holdingContract(ctx))
-
-  /** One built genesis transaction, and the pieces a super-share carries from it. */
-  private case class Genesis(tx: Array[Byte], collat: InputUTXO, lenderKey: Array[Byte])
-
-  /**
-   * A genesis transaction exactly as `CandidateTxBuilder` assembles it, for `minerHash`.
-   *
-   * `lenderSecret` decides both the collateral box's key and the block's coinbase recipient, so two
-   * calls with different secrets are two different rollups.
-   */
-  private def genesisFor(ctx: BlockchainContext,
-                         minerHash: Array[Byte],
-                         lenderSecret: java.math.BigInteger = null,
-                         wide: Boolean = false,
-                         r9: Option[ErgoValue[_]] = None): Genesis = {
-    val lenderProver =
-      if (lenderSecret == null) lender(ctx) else proverWith(ctx, lenderSecret)
-    val height = ctx.getHeight + 1
-    val rollup = holdingContract(ctx)
-    val permit = if (wide) LFSMHelpers.PERMIT_CEIL else LFSMHelpers.PERMIT_FLOOR
-    val (emitted, pub, split) = emissionAt(0, litSupply)
-    val finderLIT = pub / 25L
-    val poolLIT = pub - finderLIT
-    val fat = Long.MaxValue / 8L
-
-    val collatBox = collateralUTXO(ctx, lenderProver, lit = emitted + permit, pub = pub,
-      founderSplit = split, rollupHash = rollup.hashedPropBytes,
-      feeValue = if (wide) fat / 2L else DUST_BUDGET, value = if (wide) fat else 0L,
-      contract = collateralContract(ctx))
-    val collatIn = inputAt(collatBox, ctx, 0)
-
-    val founderBoxes = split.map { case (key, amount) =>
-      val recipient = Seq(LFSMHelpers.FOUNDER_1, LFSMHelpers.FOUNDER_2, LFSMHelpers.FOUNDER_3)
-        .find(c => java.util.Arrays.equals(c.hashedPropBytes, key)).get
-      UTXO(recipient, 1000000L, Seq(Token(LFSMHelpers.LIT_ID_MAINNET, amount)))
-    }
-    val permitBox = UTXO(contractOf(lenderProver), 1000000L, Seq(Token(LFSMHelpers.LIT_ID_MAINNET, permit)))
-    val pos = UTXO(gateContract(ctx), 200000L, Seq(Token(LFSMHelpers.COLLAT_TOKEN_MAINNET, 1L)),
-      Seq(bytesValue(setEntry(lenderProver)))).setCreationHeight(height)
-    val finderBox = UTXO(contractOf(miner(ctx)), 200000L, Seq(Token(LFSMHelpers.LIT_ID_MAINNET, finderLIT)))
-
-    val trailing = founderBoxes ++ Seq(permitBox, pos, finderBox)
-    val holdingRegs = Seq(emptyTree.ergoValue, ErgoValue.of(0), ErgoValue.of(BigInt(0).bigInteger),
-      stateReg(height.toLong, height.toLong, 0L), bytesValue(minerHash)) ++ r9.toSeq
-    val holding = UTXO(rollup, collatBox.value - trailing.map(_.value).sum,
-      Seq(Token(collatIn.id, 1L), Token(LFSMHelpers.LIT_ID_MAINNET, poolLIT)),
-      holdingRegs
-      )
-
-    val uTx = TxBuilder(ctx)
-      .setInputs(collatIn)
-      .setOutputs((holding +: trailing): _*)
-      .setPreHeader(ctx.createPreHeader().height(height)
-        .minerPk(lenderProver.getAddress.getPublicKeyGE).build())
-      .buildTx(0, lenderProver.getAddress)
-
-    Genesis(uTx.asInstanceOf[UnsignedTransactionImpl].getTx.messageToSign, collatIn,
-      lenderProver.getAddress.getPublicKeyGE.getEncoded.toArray)
-  }
 
   /** Ten shares carrying `tx` and `collat`, mined under `key` — the shape a real NISP has. */
   private def sharesFrom(ctx: BlockchainContext,

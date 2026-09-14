@@ -9,10 +9,10 @@ import work.lithos.mutations.Contract
  * `FP_MalformedGE.ergo` — the second gate, and the reason the proofs are ordered.
  *
  * `deserializeTo[Header]` decompresses the header's miner key, and a key that is not a point on
- * secp256k1 makes it throw. A throw is not a verdict: `Evaluator` cannot tell it from a proof that was
- * never reached, so a miner whose NISP throws in every proof is a miner nobody can slash. This proof
- * is what closes that, and it works on raw bytes for exactly that reason — it is the last proof that
- * may not parse a header.
+ * secp256k1 makes it throw. A throw is not a verdict: `Evaluator` records it and runs the rest, and
+ * with no fraud among them the evaluation ends incomplete, so a miner whose NISP throws in every
+ * proof is a miner nobody can slash. This proof is what closes that, and it works on raw bytes for
+ * exactly that reason — it is the last proof that may not parse a header.
  *
  * What it actually checks is the pair `(compressed key, stored y)`: prefix in {2, 3}, both coordinates
  * below the field prime, the prefix matching y's parity, and `y² == x³ + 7`. Together those say the

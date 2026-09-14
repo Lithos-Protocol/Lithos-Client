@@ -11,9 +11,9 @@ import work.lithos.mutations.{Contract, Token}
  * The order the proofs run in, asserted as a property rather than left as a comment.
  *
  * A fraud proof has two acceptable answers, fires or declines. A third thing can happen — it throws
- * while evaluating — and that is not an answer: `Evaluator` cannot tell a throw from a proof it never
- * reached, so a NISP that throws in every proof is a miner nobody can slash. Since the accused writes
- * the NISP, that is a fraud that pays.
+ * while evaluating — and that is not an answer: `Evaluator` records it and runs the rest, and unless
+ * one of them fires the evaluation ends incomplete, so a NISP that throws in every proof is a miner
+ * nobody can slash. Since the accused writes the NISP, that is a fraud that pays.
  *
  * The set avoids it by ordering rather than by defending every proof separately. Each proof assumes
  * the ones before it declined, and reads bytes on that assumption:
@@ -28,7 +28,9 @@ import work.lithos.mutations.{Contract, Token}
  *                               `FP_InvalidDiff`, which feeds the share's `N` into `powHit`.
  *
  * Two properties hold the whole thing: a NISP the gates decline is one every later proof can read,
- * and each shape that breaks a later proof is caught by the gate that claims it.
+ * in the order they run — neither gate reads the declared N, and `powHit` requires N >= 16, so a
+ * tampered N would make `FP_InvalidDiff` throw, and it is `FP_IncorrectN` firing first that keeps it
+ * from getting there — and each shape that breaks a later proof is caught by the gate that claims it.
  */
 class FraudProofOrderingSpec extends AnyPropSpec with FraudProofSpecBase {
 
@@ -81,7 +83,9 @@ class FraudProofOrderingSpec extends AnyPropSpec with FraudProofSpecBase {
     withCtx { ctx =>
       val verdicts = verdictsOn(ctx, cleanNisp(ctx))
       verdicts.foreach { case (name, v) => println(f"[order] $name%-24s $v") }
-      verdicts.map(_._1) should contain("InvalidDiff")
+      // The fixture is neither mined nor carries a genesis, so these two fire; the property is that
+      // every proof answered.
+      verdicts should contain allOf ("InvalidDiff" -> "fires", "MalformedGenesis" -> "fires")
     }
   }
 
