@@ -21,9 +21,9 @@ import play.api.{ConfigLoader, Configuration}
  * @param pageSize            boxes per node read while walking the wallet.
  * @param inventoryTimeoutMs  budget for one whole-inventory walk, after which it fails rather than
  *                            returning a prefix that would misreport what the wallet holds.
- * @param reservationTimeoutMs how long a caller waits for funding before giving up. Funding is
- *                            serialised, so this bounds the queue behind a slow node read rather
- *                            than the read itself.
+ * @param reservationTimeoutMs how long a caller waits for funding before giving up, a consolidation
+ *                            reserving the boxes it chose included. Funding is serialised, so this
+ *                            bounds the queue behind a slow node read rather than the read itself.
  * @param nodeCallTimeoutMs   whole-call deadline on the engine's own node client, retries included.
  *                            This is the one that bites a large wallet: a page of `/wallet/boxes/unspent`
  *                            that takes longer than this fails outright, and no caller-side timeout
@@ -70,9 +70,15 @@ case class WalletConfig(maxInputs: Int,
  *                    pays its own fee, so raising this is how a wallet of thousands is reduced in
  *                    reasonable time: one transaction removes at most `maxInputs - 1` boxes. They do
  *                    not chain, so a rejection costs only its own transaction.
+ * @param attemptTimeoutMs how long one pass may take from being queued, the wallet walk, signing and
+ *                    every send included. A pass past it stops with "consolidation attempt expired".
+ *                    The walk alone may take `inventoryTimeoutMs`, so this has to be longer.
+ * @param requestTimeoutMs how long a pass waits on the engine: for the inputs already in flight, for a
+ *                    complete mempool observation, and to pin a transaction's inputs before its send.
+ *                    Reserving the boxes it chose waits `reservationTimeoutMs`, like any other funding.
  */
 case class ConsolidationConfig(enabled: Boolean, targetUtxos: Int, intervalMs: Long, minInputs: Int,
-                               transactions: Int)
+                               transactions: Int, attemptTimeoutMs: Long, requestTimeoutMs: Long)
 
 object WalletConfig {
 
@@ -97,7 +103,9 @@ object WalletConfig {
       targetUtxos = 500,
       intervalMs = 300000L,
       minInputs = 100,
-      transactions = 1))
+      transactions = 1,
+      attemptTimeoutMs = 300000L,
+      requestTimeoutMs = 40000L))
 
   def apply(config: Configuration): WalletConfig = {
     def int(key: String, fallback: Int): Int =
@@ -126,6 +134,8 @@ object WalletConfig {
         targetUtxos = int("consolidation.target-utxos", d.consolidation.targetUtxos),
         intervalMs = long("consolidation.interval-ms", d.consolidation.intervalMs),
         minInputs = int("consolidation.min-inputs", d.consolidation.minInputs),
-        transactions = int("consolidation.num-transactions", d.consolidation.transactions)))
+        transactions = int("consolidation.num-transactions", d.consolidation.transactions),
+        attemptTimeoutMs = long("consolidation.attempt-timeout-ms", d.consolidation.attemptTimeoutMs),
+        requestTimeoutMs = long("consolidation.request-timeout-ms", d.consolidation.requestTimeoutMs)))
   }
 }

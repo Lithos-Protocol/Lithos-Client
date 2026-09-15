@@ -176,7 +176,7 @@ private[engine] class ConsolidationExecution(node: NodeContext, api: NodeApi, ow
 
   private val logger: org.slf4j.Logger =
     org.slf4j.LoggerFactory.getLogger("ConsolidationExecution")
-  private implicit val timeout: Timeout = Timeout(40.seconds)
+  private implicit val timeout: Timeout = Timeout(limits.consolidation.requestTimeoutMs.milliseconds)
 
   private def observation(): CompleteMempool.Observation = {
     val observed = Await.result(
@@ -204,7 +204,7 @@ private[engine] class ConsolidationExecution(node: NodeContext, api: NodeApi, ow
     val outputs = plan.map {
       case (tokens, value) => UTXO(node.getNodeWallet.contract, value, tokens)
     }
-    val allocation = EngineFunding(owner, 10.seconds, ec).reserveKnown(inputs)
+    val allocation = EngineFunding(owner, limits.reservationTimeoutMs.milliseconds, ec).reserveKnown(inputs)
     try {
       val unsigned = TxBuilder(ctx).setInputs(inputs: _*)
         .setOutputs((outputs :+ UTXO.feeBox(fee)): _*)
@@ -217,7 +217,7 @@ private[engine] class ConsolidationExecution(node: NodeContext, api: NodeApi, ow
         signed.asInstanceOf[org.ergoplatform.appkit.impl.SignedTransactionImpl].getTx).length
       require(signedBytes <= math.min(MaxSignedBytes, ctx.getDataSource.getParameters.getMaxBlockSize),
         "consolidation exceeds transaction byte budget")
-      val result = new EngineBroadcast(owner, api).send(signed, Seq(allocation), "consolidation", alive)
+      val result = new EngineBroadcast(owner, api, timeout.duration).send(signed, Seq(allocation), "consolidation", alive)
       logger.info(s"Sent transaction ${result.txId} to consolidate ${inputs.size} wallet box(es) " +
         s"into ${outputs.size} holding ${merged.size} token id(s): ${result.outcome}")
       result.outcome

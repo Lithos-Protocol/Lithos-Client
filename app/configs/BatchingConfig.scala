@@ -22,6 +22,8 @@ object MempoolSorting {
  *
  * @param skippedOrderTtlMs how long an order that priced but could not be built is left out of scans and builds
  * @param maxSkippedOrders  most such orders remembered at once, oldest forgotten first; 0 remembers none
+ * @param maxAncestorTxs    unconfirmed transactions one order may need carried ahead of it: its placement and
+ *                          every unconfirmed ancestor of that placement. 0 executes confirmed orders only
  */
 case class BatchingConfig(enabled: Boolean,
                           scanIntervalMs: Long,
@@ -35,7 +37,8 @@ case class BatchingConfig(enabled: Boolean,
                           broadcast: Boolean,
                           deniedPools: Set[String],
                           skippedOrderTtlMs: Long,
-                          maxSkippedOrders: Int)
+                          maxSkippedOrders: Int,
+                          maxAncestorTxs: Int)
 
 object BatchingConfig {
 
@@ -53,7 +56,8 @@ object BatchingConfig {
     broadcast = false,
     deniedPools = Set.empty,
     skippedOrderTtlMs = 3600000L,
-    maxSkippedOrders = 4096)
+    maxSkippedOrders = 4096,
+    maxAncestorTxs = 2)
 
   def apply(config: Configuration, name: String): BatchingConfig = {
     def path(key: String): String = s"batching.$name.$key"
@@ -79,6 +83,7 @@ object BatchingConfig {
       deniedPools = config.getOptional(path("deniedPools"))(ConfigLoader.seqStringLoader)
         .map(_.map(_.trim.toLowerCase).toSet).getOrElse(Default.deniedPools),
       skippedOrderTtlMs = long("skippedOrderTtlMs", Default.skippedOrderTtlMs),
-      maxSkippedOrders = int("maxSkippedOrders", Default.maxSkippedOrders))
+      maxSkippedOrders = int("maxSkippedOrders", Default.maxSkippedOrders),
+      maxAncestorTxs = int("maxAncestorTxs", Default.maxAncestorTxs))
   }
 }

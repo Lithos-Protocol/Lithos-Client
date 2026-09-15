@@ -156,7 +156,7 @@ class TransactionEngine @Inject()(node: NodeContext,
     if (consolidationEnabled)
       logger.info(s"Consolidation ON: target ${consolidationTarget} UTXOs, at most every " +
         s"${walletConfig.consolidation.intervalMs}ms, at least ${walletConfig.consolidation.minInputs} " +
-        "inputs per pass. Deferred while critical work is queued.")
+        s"inputs and at most ${walletConfig.consolidation.attemptTimeoutMs}ms per pass. Deferred while critical work is queued.")
     else
       logger.info("Consolidation OFF (wallet.consolidation.enabled)")
     logger.info(s"Wallet limits: maxInputs=${walletConfig.maxInputs} pageSize=${walletConfig.pageSize} " +
@@ -208,7 +208,8 @@ class TransactionEngine @Inject()(node: NodeContext,
           !schedule.occupied(Lane.Critical) && reconciling.isEmpty) {
           nextConsolidation = now + walletConfig.consolidation.intervalMs
           logger.info(s"Consolidation pass starting: target $consolidationTarget UTXOs")
-          admit(EngineIntent.Consolidate, context.system.deadLetters)
+          admit(EngineIntent.Consolidate, context.system.deadLetters,
+            Some(Immediate(now + walletConfig.consolidation.attemptTimeoutMs)))
         }
       }
       drive()

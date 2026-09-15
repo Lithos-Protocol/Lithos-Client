@@ -75,7 +75,7 @@ class ErgoDexBatcher(nodeContext: NodeContext,
     live.flatMap(ErgoDexOrder.parse).filter(order => orders.get(order.boxId).contains(order.poolNft))
   }
 
-  /** Builds fee-less runs against confirmed pools, carrying verified P2PK ancestry for mempool orders. */
+  /** Builds fee-less runs against confirmed pools, carrying verified wallet ancestry for mempool orders. */
   override protected def executions(orders: Tracked, blockHeight: Int, slots: Int,
                                     deadline: Deadline): Seq[CandidateBundle] = {
     val observed = observation(Some(deadline))
@@ -101,7 +101,7 @@ class ErgoDexBatcher(nodeContext: NodeContext,
       val priceable = candidates.filter(order => pools.get(order.poolNft).flatMap(ErgoDexPool.native)
         .exists(pool => ErgoDexExecution.price(order, pool, batching.minRevenueNanoErg, fundsItsOwnBox = false).nonEmpty))
       val placed = walletPlacements(priceable.flatMap(order => creators.get(order.boxId)), creators, spenders,
-        slots - 1, ErgoDexBatching.isPool)
+        math.min(slots - 1, batching.maxAncestorTxs), ErgoDexBatching.placedByWallet(_, _, spenders))
       val byPool = priceable
         .filter(order => creators.get(order.boxId).forall(tx => placed.contains(tx.id)))
         .groupBy(_.poolNft)

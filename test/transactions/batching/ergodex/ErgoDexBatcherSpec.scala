@@ -54,7 +54,8 @@ class ErgoDexBatcherSpec extends TestKit(ActorSystem("ergodex-batcher-spec", Erg
   private class Fixture(broadcast: Boolean = false, discoverable: Boolean = true,
                         initialOrder: NodeBox = orderBox, initialPool: NodeBox = poolBox,
                         servesCandidates: Boolean = true, observes: Boolean = true,
-                        buildBudgetMs: Long = Batcher.DefaultBuildBudgetMs, extraPool: Option[NodeBox] = None) {
+                        buildBudgetMs: Long = Batcher.DefaultBuildBudgetMs, extraPool: Option[NodeBox] = None,
+                        maxAncestorTxs: Int = BatchingConfig.Default.maxAncestorTxs) {
     val api: NodeApi = mock[NodeApi]
     val (nodeContext, _, _) = FakeNodeContext(api, numAddresses = 1)
 
@@ -101,7 +102,7 @@ class ErgoDexBatcherSpec extends TestKit(ActorSystem("ergodex-batcher-spec", Erg
     when(api.sendTransaction(anyString())).thenReturn(Failure(NodeError.Rejected("refused by the test")))
 
     val source: ActorRef = system.actorOf(Props(new ErgoDexBatcher(nodeContext,
-      BatchingConfig.Default.copy(scanIntervalMs = 3600000L, broadcast = broadcast),
+      BatchingConfig.Default.copy(scanIntervalMs = 3600000L, broadcast = broadcast, maxAncestorTxs = maxAncestorTxs),
       servesCandidates, engine.ref, useTrueProp = false, buildBudgetMs)))
 
     def offered(): Seq[CandidateBundle] = {
@@ -264,6 +265,21 @@ class ErgoDexBatcherSpec extends TestKit(ActorSystem("ergodex-batcher-spec", Erg
       carried.flatMap(_.members.last.inputIds) should contain allOf(orderBox.boxId, Sell.orderBox.boxId)
     }
     f.stop()
+  }
+
+  it should "carry an order's unconfirmed ancestry only when all of it fits within maxAncestorTxs" in {
+    val change = walletBox.copy(boxId = id("7"), transactionId = id("b"), value = 900000000L, index = 1)
+    val parent = mempoolTx(id("b"), Seq(walletBox.boxId), Seq(change))
+    val placement = mempoolTx(id("c"), Seq(change.boxId), Seq(orderBox))
+    val shallow = new Fixture(discoverable = false, maxAncestorTxs = 1)
+    shallow.mempool = Vector(parent, placement)
+    shallow.offered() shouldBe empty
+    shallow.stop()
+
+    val deep = new Fixture(discoverable = false, maxAncestorTxs = 2)
+    deep.mempool = Vector(parent, placement)
+    deep.offered().head.members.take(2).map(_.id) shouldBe Seq(parent.id, placement.id)
+    deep.stop()
   }
 
   it should "not execute an order whose placement spends a pool or another order" in {

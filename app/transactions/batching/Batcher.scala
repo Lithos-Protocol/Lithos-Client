@@ -254,14 +254,15 @@ abstract class Batcher(nodeContext: NodeContext,
   }
 
   /**
-   * The placement chains whose every transaction is a wallet placement, keyed by the placing
-   * transaction's id. Confirmed inputs load in one call; `createsPool` names this adapter's pool boxes.
+   * The placement chains whose every transaction `accepts`, keyed by the placing transaction's id.
+   * Confirmed inputs load in one call, and `accepts` is given every input box of the chain.
    */
   protected def walletPlacements(txs: Seq[CompleteMempool.MempoolTx],
                                  creators: Map[String, CompleteMempool.MempoolTx],
                                  spenders: BatchingMempool.Spenders,
                                  limit: Int,
-                                 createsPool: NodeBox => Boolean): Map[String, Vector[CompleteMempool.MempoolTx]] = {
+                                 accepts: (CompleteMempool.MempoolTx, Map[String, NodeBox]) => Boolean)
+  : Map[String, Vector[CompleteMempool.MempoolTx]] = {
     val chains = txs.groupBy(_.id).values.map(_.head).toSeq.flatMap(tx =>
       BatchingMempool.placementChain(tx, creators, limit).map(tx.id -> _))
     val distinct = chains.flatMap(_._2).groupBy(_.id).values.map(_.head).toSeq
@@ -270,7 +271,7 @@ abstract class Batcher(nodeContext: NodeContext,
       if (inputIds.isEmpty) Map.empty[String, NodeBox]
       else nodeApi.boxesWithPoolByIds(inputIds).get.map(box => box.boxId -> box).toMap
     val inputBoxes = confirmed ++ distinct.flatMap(_.body.outputs.map(box => box.boxId -> box))
-    val valid = distinct.filter(BatchingMempool.placedByWallet(_, inputBoxes, spenders, createsPool)).map(_.id).toSet
+    val valid = distinct.filter(accepts(_, inputBoxes)).map(_.id).toSet
     chains.filter { case (_, chain) => chain.forall(tx => valid.contains(tx.id)) }.toMap
   }
 

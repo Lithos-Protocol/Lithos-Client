@@ -1,7 +1,14 @@
 package transactions.batching
 
+import mutations.NodeWallet
 import node.model.NodeBox
+import org.bouncycastle.util.encoders.Hex
+import org.ergoplatform.ErgoTreePredef
+import sigma.crypto.CryptoConstants
+import sigma.data.ProveDlog
+import sigma.serialization.GroupElementSerializer
 import state.synchronization.CompleteMempool
+import work.lithos.mutations.Contract
 
 import scala.annotation.tailrec
 
@@ -28,19 +35,39 @@ object BatchingMempool {
   private val P2PK = "0008cd[0-9a-f]{66}".r
 
   /**
-   * Requires uncontested P2PK inputs, no data inputs and no output `createsPool` recognises.
-   * Missing input boxes fail the check.
+   * The script a block reward pays, with its key left free, so a coinbase differs from it only in the key.
+   * Its height guard only ever opens, so a coinbase the mempool accepted stays spendable.
    */
-  def placedByWallet(tx: CompleteMempool.MempoolTx, inputBoxes: Map[String, NodeBox],
-                     spenders: Spenders, createsPool: NodeBox => Boolean): Boolean = {
+  private val Coinbase = {
+    val key = CryptoConstants.dlogGroup.generator
+    val keyHex = Hex.toHexString(GroupElementSerializer.toBytes(key))
+    val tree = Contract(ErgoTreePredef.rewardOutputScript(NodeWallet.MINER_REWARD_DELAY, ProveDlog(key))).ergoTreeHex
+    val at = tree.indexOf(keyHex)
+    (tree.take(at) + "[0-9a-f]{66}" + tree.drop(at + keyHex.length)).r
+  }
+
+  /** A box one key spends on its own: P2PK, or a coinbase paid to one key. */
+  def spentByKey(box: NodeBox): Boolean =
+    P2PK.pattern.matcher(box.ergoTree).matches() || Coinbase.pattern.matcher(box.ergoTree).matches()
+
+  /** Distinct inputs within [[MaxPlacementInputs]], no data inputs, and no other unconfirmed spend of any input. */
+  def uncontested(tx: CompleteMempool.MempoolTx, spenders: Spenders): Boolean = {
     val inputs = tx.body.inputs.map(_.boxId)
     inputs.nonEmpty && inputs.size <= MaxPlacementInputs && tx.body.dataInputs.isEmpty &&
       inputs.distinct.size == inputs.size &&
       // A competing spend may cancel the placement or one of its ancestors.
-      inputs.forall(id => spenders.get(id).exists(claims => claims.size == 1 && claims.head.id == tx.id) &&
-        inputBoxes.get(id).exists(box => P2PK.pattern.matcher(box.ergoTree).matches())) &&
-      !tx.body.outputs.exists(createsPool)
+      inputs.forall(id => spenders.get(id).exists(claims => claims.size == 1 && claims.head.id == tx.id))
   }
+
+  /**
+   * Requires [[uncontested]] inputs that are all [[spentByKey]], and no output `createsPool` recognises.
+   * Missing input boxes fail the check.
+   */
+  def placedByWallet(tx: CompleteMempool.MempoolTx, inputBoxes: Map[String, NodeBox],
+                     spenders: Spenders, createsPool: NodeBox => Boolean): Boolean =
+    uncontested(tx, spenders) &&
+      tx.body.inputs.forall(input => inputBoxes.get(input.boxId).exists(spentByKey)) &&
+      !tx.body.outputs.exists(createsPool)
 
   /** Collect a placement and all its parents in spend order, within the available transaction slots. */
   def placementChain(tx: CompleteMempool.MempoolTx,

@@ -64,6 +64,10 @@ class LithosDexBatcher(nodeContext: NodeContext,
 
   private def vaultTree: String = DexContracts(nodeContext.getNetwork).feeVault.ergoTreeHex
 
+  private lazy val claims = new LDClaimPlacement(poolNft, vaultNft, vaultTree,
+    DexContracts(nodeContext.getNetwork).provisionGuard.ergoTreeHex,
+    LDHelpers.getProvToken(nodeContext.getNetwork).toString)
+
   /** Scans every order template and prices what names this pool against its confirmed box. */
   override protected def discover(): Tracked = nodeContext.getClient.execute { ctx =>
     val pool = confirmedSingleton(poolNft, poolTree).map(box => LDLiquidityPool(box.toInputUTXO(ctx)))
@@ -109,14 +113,16 @@ class LithosDexBatcher(nodeContext: NodeContext,
           val poolBox = poolNode.toInputUTXO(ctx)
           val pool = LDLiquidityPool(poolBox)
           // Confirmed provisions, including one a refresh is spending, since this block supersedes the refresh
-          val provisions = provisionsFor(ctx, candidates, MempoolOptions.ConfirmedOnly)
+          val provisions = claimedProvisions(ctx, provisionsFor(ctx, candidates, MempoolOptions.ConfirmedOnly),
+            candidates, creators)
           within(deadline, "reading the pool and provisions")
           // The flush takes one slot of its own
           val runSlots = slots - (if (settings.autoFlush) 1 else 0)
           val priceable = candidates.filter(order =>
             LithosDexExecution.price(order, pool, batching.minRevenueNanoErg, provisions, fundsItsOwnBox = false).nonEmpty)
           val placed = walletPlacements(priceable.flatMap(order => creators.get(order.boxId)), creators, spenders,
-            runSlots - 1, createsPool)
+            math.min(runSlots - 1, batching.maxAncestorTxs), (tx, boxes) =>
+              BatchingMempool.placedByWallet(tx, boxes, spenders, createsPool) || claims.accepts(tx, boxes, spenders))
           val usable = priceable.filter(order => creators.get(order.boxId).forall(tx => placed.contains(tx.id)))
           val placementOf = (order: LithosDexOrder) =>
             creators.get(order.boxId).flatMap(tx => placed.get(tx.id)).getOrElse(Vector.empty[CompleteMempool.MempoolTx])
@@ -137,6 +143,24 @@ class LithosDexBatcher(nodeContext: NodeContext,
           }
       }
     }
+  }
+
+  /**
+   * `confirmed`, except for a redeem order placed by the claim that settled its provision: that claim
+   * spends the confirmed provision, so the only one the order can close is the claim's own output. Whether
+   * the claim may be carried is decided with the other placements.
+   */
+  private def claimedProvisions(ctx: BlockchainContext, confirmed: LithosDexExecution.Provisions,
+                                candidates: Seq[LithosDexOrder],
+                                creators: Map[String, CompleteMempool.MempoolTx]): LithosDexExecution.Provisions = {
+    val claimed = candidates
+      .collect { case redeem: LithosDexOrder.Redeem => redeem }
+      // An output that will not read as a provision costs its own order, never the run
+      .flatMap(redeem => creators.get(redeem.boxId).flatMap(claims.provisionFor(_, redeem))
+        .flatMap(box => Try(LDBoxes.readProvision(box.toInputUTXO(ctx))).toOption)
+        .map(redeem.ownerNft -> _))
+      .toMap
+    if (claimed.isEmpty) confirmed else nft => claimed.get(nft).orElse(confirmed(nft))
   }
 
   /** Leaves this run's unbuildable orders out from now on, and says when the run stopped with orders left. */

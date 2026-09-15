@@ -91,7 +91,8 @@ class ConfigDefaultsSpec extends AnyFlatSpec with Matchers {
       "page-size", "inventory-walk-timeout-ms", "reservation-timeout-ms", "node-call-timeout-ms",
       "node-read-timeout-ms", "node-max-response-bytes", "max-wallet-inputs", "max-optional-inputs",
       "consolidation.enabled", "consolidation.target-utxos", "consolidation.interval-ms",
-      "consolidation.min-inputs")
+      "consolidation.min-inputs", "consolidation.num-transactions", "consolidation.attempt-timeout-ms",
+      "consolidation.request-timeout-ms")
     validated.foreach { key =>
       withClue(s"wallet.$key is validated but not shipped: ") {
         shipped.underlying.hasPath(s"wallet.$key") shouldBe true

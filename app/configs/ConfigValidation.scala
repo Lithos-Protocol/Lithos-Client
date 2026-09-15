@@ -76,6 +76,17 @@ object Configs {
       1000L, 86400000L, "milliseconds")
     v.range("wallet.consolidation.min-inputs", v.int("wallet.consolidation.min-inputs"),
       2, 4096, "inputs worth one consolidation")
+    v.range("wallet.consolidation.num-transactions", v.int("wallet.consolidation.num-transactions"),
+      1, 1000, "consolidations per pass")
+    val attemptTimeout = v.longRange("wallet.consolidation.attempt-timeout-ms",
+      v.long("wallet.consolidation.attempt-timeout-ms"), 10000L, 86400000L, "milliseconds")
+    v.longRange("wallet.consolidation.request-timeout-ms", v.long("wallet.consolidation.request-timeout-ms"),
+      1000L, 600000L, "milliseconds")
+    // A walk that runs to its own limit would leave the pass nothing to sign and send in
+    for (attempt <- attemptTimeout; walk <- v.long("wallet.inventory-walk-timeout-ms") if attempt <= walk)
+      v.problem("wallet.consolidation.attempt-timeout-ms",
+        s"$attempt is not longer than wallet.inventory-walk-timeout-ms ($walk), so a pass whose wallet walk " +
+          "takes that long expires before it can send")
 
     // ---- node ----
     v.url("node.url", v.string("node.url"))
@@ -173,6 +184,8 @@ object Configs {
       60000L, 86400000L, "ms an unbuildable order is left out")
     v.range("batching.ergodex.maxSkippedOrders", v.int("batching.ergodex.maxSkippedOrders"), 0, 100000,
       "unbuildable orders remembered; about 200 bytes each")
+    v.range("batching.ergodex.maxAncestorTxs", v.int("batching.ergodex.maxAncestorTxs"), 0, 100,
+      "unconfirmed transactions carried ahead of one order")
 
     // ---- batching.lithosdex ----
     v.bool("batching.lithosdex.enabled")
@@ -194,6 +207,8 @@ object Configs {
       60000L, 86400000L, "ms an unbuildable order is left out")
     v.range("batching.lithosdex.maxSkippedOrders", v.int("batching.lithosdex.maxSkippedOrders"), 0, 100000,
       "unbuildable orders remembered; about 200 bytes each")
+    v.range("batching.lithosdex.maxAncestorTxs", v.int("batching.lithosdex.maxAncestorTxs"), 0, 100,
+      "unconfirmed transactions carried ahead of one order")
 
     // ---- emission ----
     v.bool("emission.enabled")

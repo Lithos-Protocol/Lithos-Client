@@ -68,13 +68,16 @@ class LithosDexBatcherSpec extends TestKit(ActorSystem("lithosdex-batcher-spec",
    * @param undersized      adds a higher-fee sell whose reward box is under the node's minimum
    * @param observes        whether the engine answers a mempool observation at all
    * @param placed          the order is created by `placement`, a wallet's unconfirmed transaction, rather than confirmed
+   * @param claimed         the order is created by `claim`, which settles the provision against the vault in the
+   *                        same transaction, as the order API places a redemption with fees owed
    */
   private class Fixture(kind: Kind = Sell, broadcast: Boolean = false, autoFlush: Boolean = true,
                         indexProvisions: Boolean = true, utxoProvisions: Boolean = true,
                         undersized: Boolean = false, scanIntervalMs: Long = 3600000L,
                         maxSkippedOrders: Int = BatchingConfig.Default.maxSkippedOrders,
                         observes: Boolean = true, buildBudgetMs: Long = Batcher.DefaultBuildBudgetMs,
-                        placed: Boolean = false) {
+                        placed: Boolean = false, claimed: Boolean = false,
+                        maxAncestorTxs: Int = BatchingConfig.Default.maxAncestorTxs) {
     val api: NodeApi = mock[NodeApi]
     private val placementId = id("e")
     val walletBox: NodeBox = NodeBox(id("9"), id("8"), 2000000000L, 0, 100, "0008cd02" + "11" * 32)
@@ -102,12 +105,22 @@ class LithosDexBatcherSpec extends TestKit(ActorSystem("lithosdex-batcher-spec",
         Seq(LDNodeFixtures.nodeBox(ctx, UTXO(LDOrderContracts.swapSell(terms.copy(redeemer = manyKeys, executorFee = badFee),
           Parameters.OneErg, 1L), Parameters.OneErg + badFee + UTXO.MIN_CHANGE), index = 6, txId = "cd" * 32))
       }
-      (poolBox, vaultBox, LDNodeFixtures.nodeBox(ctx, orderUtxo, index = if (placed) 0 else 5,
-        txId = if (placed) placementId else "cd" * 32), provs, bad)
+      (poolBox, vaultBox, LDNodeFixtures.nodeBox(ctx, orderUtxo, index = if (claimed) 2 else if (placed) 0 else 5,
+        txId = if (placed || claimed) placementId else "cd" * 32), provs, bad)
     }
 
     @volatile var mempool: Vector[CompleteMempool.MempoolTx] = Vector.empty
     val placement: CompleteMempool.MempoolTx = mempoolTx(placementId, Seq(walletBox.boxId), Seq(order))
+
+    /** The provision `claim` leaves for the order, and the claim: vault, provision, wallet in; vault, provision, order, change, fee out. */
+    val (claimedProvision, claim) = nodeContext.getClient.execute { ctx: BlockchainContext =>
+      val successor = LDNodeFixtures.provisionBox(ctx, 10000000000L, ownerNft, index = 1, txId = placementId)
+      val change = NodeBox(id("7"), placementId, 1000000000L, 3, 100, walletBox.ergoTree)
+      val fee = NodeBox(id("6"), placementId, 2000000L, 4, 100, Contract.FEE.ergoTreeHex)
+      successor -> mempoolTx(placementId, Seq(vault.boxId) ++ provisions.map(_.boxId) :+ walletBox.boxId,
+        Seq(LDNodeFixtures.vaultBox(ctx, balanceX = LDHelpers.VAULT_MIN, index = 0, txId = placementId),
+          successor, order, change, fee))
+    }
 
     val engine = TestProbe()
     engine.setAutoPilot(new TestActor.AutoPilot {
@@ -161,7 +174,7 @@ class LithosDexBatcherSpec extends TestKit(ActorSystem("lithosdex-batcher-spec",
 
     val batcher: ActorRef = system.actorOf(Props(new LithosDexBatcher(nodeContext,
       LithosDexBatchingConfig(BatchingConfig.Default.copy(scanIntervalMs = scanIntervalMs, broadcast = broadcast,
-        maxSkippedOrders = maxSkippedOrders), autoFlush),
+        maxSkippedOrders = maxSkippedOrders, maxAncestorTxs = maxAncestorTxs), autoFlush),
       servesCandidates = true, engine.ref, useTrueProp = false, buildBudgetMs)))
 
     /** Box ids of the last read of tracked orders, which is the read naming this fixture's own order. */
@@ -223,6 +236,13 @@ class LithosDexBatcherSpec extends TestKit(ActorSystem("lithosdex-batcher-spec",
     f.stop()
   }
 
+  it should "execute no order a wallet has not yet confirmed when maxAncestorTxs is 0" in {
+    val f = new Fixture(placed = true, maxAncestorTxs = 0)
+    f.mempool = Vector(f.placement)
+    f.offered() shouldBe empty
+    f.stop()
+  }
+
   it should "offer the run without a flush when autoFlush is off" in {
     val f = new Fixture(autoFlush = false)
     f.offeredOnceTracked().head.members.map(_.kind) shouldBe Vector(LithosDexExecution.Kind)
@@ -254,6 +274,19 @@ class LithosDexBatcherSpec extends TestKit(ActorSystem("lithosdex-batcher-spec",
     bundle.members.head.inputIds should contain allOf(f.pool.boxId, f.provisions.head.boxId, f.order.boxId)
     bundle.interactions shouldBe Seq(Supersede(Set(refresh)))
     bundle.members.map(_.kind) shouldBe Vector(LithosDexExecution.Kind, LithosDexExecution.FlushKind)
+    f.stop()
+  }
+
+  it should "redeem an order placed by the claim that settled its provision, against the provision the claim leaves" in {
+    val f = new Fixture(kind = Redemption, claimed = true)
+    f.mempool = Vector(f.claim)
+    val bundle = f.offered().head
+    withClue("the claim spends the vault, so the run carries it and goes without a flush: ") {
+      bundle.members.map(_.kind) shouldBe Vector(CandidateTx.MempoolAncestor, LithosDexExecution.Kind)
+    }
+    bundle.members.head.id shouldBe f.claim.id
+    bundle.members(1).inputIds should contain allOf(f.pool.boxId, f.claimedProvision.boxId, f.order.boxId)
+    bundle.interactions.collect { case s: Supersede => s } shouldBe empty
     f.stop()
   }
 

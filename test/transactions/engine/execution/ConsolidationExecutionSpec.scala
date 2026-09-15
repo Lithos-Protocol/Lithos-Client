@@ -12,6 +12,22 @@ import org.scalatestplus.mockito.MockitoSugar
 import scala.util.{Failure, Success}
 
 class ConsolidationExecutionSpec extends AnyFlatSpec with Matchers with MockitoSugar {
+
+  /** A busy engine answers late. The pass gives up after the configured wait, not a fixed one. */
+  "A consolidation pass" should "stop waiting on an engine that does not answer after request-timeout-ms" in {
+    val system = akka.actor.ActorSystem("consolidation-request-timeout")
+    try {
+      val silent = akka.testkit.TestProbe()(system)
+      val limits = WalletConfig.Default.copy(
+        consolidation = WalletConfig.Default.consolidation.copy(requestTimeoutMs = 300L))
+      val (nodeContext, api, _) = support.FakeNodeContext(numAddresses = 1)
+      val pass = new ConsolidationExecution(nodeContext, api, silent.ref, limits)(system.dispatcher)
+      val started = System.nanoTime()
+      a[java.util.concurrent.TimeoutException] should be thrownBy pass.execute(500, () => true)
+      (System.nanoTime() - started) should be < 5000000000L
+    } finally akka.testkit.TestKit.shutdownActorSystem(system)
+  }
+
   private def entry(i: Int, height: Int, token: Boolean = false): WalletBox = {
     val b = NodeBox(f"$i%064x", "ab" * 32, 2000000L, 0, height, "wallet",
       if (token) Seq(NodeAsset("cd" * 32, 1)) else Seq.empty)

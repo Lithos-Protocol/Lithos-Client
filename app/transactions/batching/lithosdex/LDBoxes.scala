@@ -146,7 +146,7 @@ object LDBoxes {
   }
 
   /** How the node serializes a 32-byte `Coll[Byte]` register ahead of its bytes: type 0x0e, length 0x20. */
-  private final val OwnerRegisterPrefix = "0e20"
+  private[lithosdex] final val OwnerRegisterPrefix = "0e20"
 
   /** R4 entryX, R5 entryY, R6 ownerNFT, R7 shares. */
   def readProvision(box: InputUTXO): Provision = Provision(

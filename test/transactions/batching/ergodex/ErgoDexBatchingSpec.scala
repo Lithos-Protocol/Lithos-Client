@@ -158,6 +158,18 @@ class ErgoDexBatchingSpec extends AnyFlatSpec with Matchers with MockitoSugar {
     walletPlaced(mempoolTx(id("b"), Seq(wallet1.boxId), Seq(orderBox))) shouldBe true
   }
 
+  /** A miner's wallet pays with its coinbases too, and they sit under the reward script, not P2PK. */
+  it should "be carried when it spends a coinbase paid to one key, and not under any other reward delay" in {
+    def carried(input: NodeBox): Boolean = {
+      val placement = mempoolTx(id("b"), Seq(input.boxId), Seq(orderBox))
+      ErgoDexBatching.placedByWallet(placement, Map(input.boxId -> input), spenders(placement))
+    }
+    wallet.rewardTrees.keys.foreach(tree => carried(wallet1.copy(ergoTree = tree)) shouldBe true)
+    val unlocked = work.lithos.mutations.Contract(
+      org.ergoplatform.ErgoTreePredef.rewardOutputScript(0, wallet.p2pk.getPublicKey)).ergoTreeHex
+    carried(wallet1.copy(ergoTree = unlocked)) shouldBe false
+  }
+
   it should "not be carried when it spends a pool, which is a bot's execution" in {
     walletPlaced(mempoolTx(id("b"), Seq(poolBox.boxId, wallet1.boxId), Seq(orderBox))) shouldBe false
   }

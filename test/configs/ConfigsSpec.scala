@@ -31,21 +31,45 @@ class ConfigsSpec extends AnyFlatSpec with Matchers {
       """batching.lithosdex.scanIntervalMs = 0
         |batching.lithosdex.autoFlush = "sometimes"
         |batching.lithosdex.skippedOrderTtlMs = 0
-        |batching.lithosdex.maxSkippedOrders = -1""".stripMargin)
+        |batching.lithosdex.maxSkippedOrders = -1
+        |batching.lithosdex.maxAncestorTxs = -1""".stripMargin)
       .withFallback(shipped.underlying).resolve())
     val thrown = the[ConfigValidationException] thrownBy Configs.validateAll(configured)
-    Seq("scanIntervalMs", "autoFlush", "skippedOrderTtlMs", "maxSkippedOrders")
+    Seq("scanIntervalMs", "autoFlush", "skippedOrderTtlMs", "maxSkippedOrders", "maxAncestorTxs")
       .foreach(key => thrown.getMessage should include(s"batching.lithosdex.$key"))
   }
 
   it should "reject ErgoDEX skip-list values out of range" in {
     val configured = Configuration(ConfigFactory.parseString(
       """batching.ergodex.skippedOrderTtlMs = 0
-        |batching.ergodex.maxSkippedOrders = -1""".stripMargin)
+        |batching.ergodex.maxSkippedOrders = -1
+        |batching.ergodex.maxAncestorTxs = 101""".stripMargin)
       .withFallback(shipped.underlying).resolve())
     val thrown = the[ConfigValidationException] thrownBy Configs.validateAll(configured)
-    Seq("skippedOrderTtlMs", "maxSkippedOrders")
+    Seq("skippedOrderTtlMs", "maxSkippedOrders", "maxAncestorTxs")
       .foreach(key => thrown.getMessage should include(s"batching.ergodex.$key"))
+  }
+
+  it should "reject consolidation timeouts out of range" in {
+    val configured = Configuration(ConfigFactory.parseString(
+      """wallet.consolidation.attempt-timeout-ms = 0
+        |wallet.consolidation.request-timeout-ms = 0
+        |wallet.consolidation.num-transactions = 0""".stripMargin)
+      .withFallback(shipped.underlying).resolve())
+    val thrown = the[ConfigValidationException] thrownBy Configs.validateAll(configured)
+    Seq("attempt-timeout-ms", "request-timeout-ms", "num-transactions")
+      .foreach(key => thrown.getMessage should include(s"wallet.consolidation.$key"))
+  }
+
+  /** The attempt deadline covers the wallet walk, so one no longer than the walk's own limit can expire every pass. */
+  it should "reject a consolidation attempt timeout no longer than the wallet walk" in {
+    val configured = Configuration(ConfigFactory.parseString(
+      """wallet.inventory-walk-timeout-ms = 600000
+        |wallet.consolidation.attempt-timeout-ms = 600000""".stripMargin)
+      .withFallback(shipped.underlying).resolve())
+    val thrown = the[ConfigValidationException] thrownBy Configs.validateAll(configured)
+    thrown.getMessage should include("wallet.consolidation.attempt-timeout-ms")
+    thrown.getMessage should include("wallet.inventory-walk-timeout-ms")
   }
 
   it should "allow a maintenance checkpoint after every committed catch-up block" in {
