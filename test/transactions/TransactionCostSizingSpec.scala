@@ -22,7 +22,7 @@ import org.scalatest.propspec.AnyPropSpec
 import org.scalatestplus.mockito.MockitoSugar
 import scorex.crypto.hash.Blake2b256
 import scorex.utils.Ints
-import transactions.dex.{DexContracts, LDBoxes, LDFundedTx, LithosDexTransactions}
+import transactions.batching.lithosdex.{DexContracts, LDBoxes, LDFundedTx, LithosDexTransactions}
 import transactions.emissions.EmissionTransactions
 import transactions.rollups.RollupTransactions
 import transactions.rollups.TransactionMessages.LatestRollup
@@ -541,7 +541,7 @@ class TransactionCostSizingSpec extends AnyPropSpec with BeforeAndAfterAll
   }
 
   private def funded[A <: LDFundedTx](funding: InputUTXO, signer: NodeWallet)
-                                    (build: => transactions.dex.DexPlan[A]): A = {
+                                    (build: => transactions.batching.lithosdex.DexPlan[A]): A = {
     val unsigned = build.build(Seq(funding))
     unsigned.describe(signer.sign(unsigned.tx))
   }

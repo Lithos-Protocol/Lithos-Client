@@ -1,4 +1,4 @@
-package transactions.dex
+package transactions.batching.lithosdex
 
 import lithosdex.LDHelpers
 import node.NodeApi

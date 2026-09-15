@@ -25,6 +25,7 @@ object CandidateSourceConfig {
   final val Emissions = "emissions"
   final val Rent = "rent"
   final val ErgoDex = "ergodex"
+  final val LithosDex = "lithosdex"
 
   /**
    * Conservative on every axis. Fee-less insertions are block space not earning from someone else's

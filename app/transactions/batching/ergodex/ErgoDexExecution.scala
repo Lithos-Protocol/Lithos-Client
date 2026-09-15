@@ -6,11 +6,14 @@ import node.MutationConversions._
 import org.ergoplatform.appkit.{BlockchainContext, SignedTransaction}
 import org.ergoplatform.sdk.ErgoId
 import org.slf4j.{Logger, LoggerFactory}
+import state.synchronization.CompleteMempool
+import transactions.batching.{BatchRun, Batcher}
 import transactions.candidate.BlockTxMessages.{CandidateTx, ChainFromMempool, IncludeExisting, Supersede}
 import transactions.candidate.{CandidateBundle, CandidateCapital, CapitalEntry, CapitalOrigin}
 import transactions.engine.execution.RollupExecution
 import work.lithos.mutations.{Contract, InputUTXO, Token, TxBuilder, UTXO}
 
+import scala.concurrent.duration.Deadline
 import scala.util.{Failure, Success, Try}
 
 /**
@@ -20,9 +23,19 @@ import scala.util.{Failure, Success, Try}
 final case class ErgoDexFill(order: ErgoDexOrder, pool: ErgoDexPool, quote: Long, revenue: Long,
                              poolAfter: ErgoDexPool, rewardValue: Long, rewardTokens: Seq[NodeAsset])
 
-/** Signed executions in spend order, with the final unspent box holding their combined takings. */
+/**
+ * Signed executions in spend order, with the final unspent box holding their combined takings.
+ *
+ * @param poolIds the pool box each execution spends, in order
+ */
 final case class ErgoDexChain(transactions: Vector[SignedTransaction], fills: Vector[ErgoDexFill],
-                              takings: InputUTXO) {
+                              poolIds: Vector[String], takings: InputUTXO) extends BatchRun {
+
+  override def orderIdAt(index: Int): String = fills(index).order.boxId
+
+  override def poolIdAt(index: Int): String = poolIds(index)
+
+  override def kind: String = ErgoDexExecution.Kind
 
   def members: Vector[CandidateTx] = transactions.map { signed =>
     CandidateTx(signed.getId, signed.toJson(false, false), ErgoDexExecution.Kind,
@@ -37,6 +50,19 @@ final case class ErgoDexChain(transactions: Vector[SignedTransaction], fills: Ve
         (if (competitors.isEmpty) Seq.empty else Seq(Supersede(competitors))),
       Seq(CapitalEntry(CapitalOrigin.ExecutorReward, takings, transactions.last.getId)))
 }
+
+/**
+ * What one pass over a pool's orders produced.
+ *
+ * @param chain       the executions that signed, or None when none did
+ * @param placements  the unconfirmed placements those executions spend, in spend order
+ * @param unbuildable box ids of orders that priced but could not be built, in the order they were tried
+ * @param cutShort    whether the pass stopped at its deadline or its unbuildable limit with orders left
+ */
+final case class ErgoDexRun(chain: Option[ErgoDexChain],
+                            placements: Vector[CompleteMempool.MempoolTx],
+                            unbuildable: Vector[String],
+                            cutShort: Boolean)
 
 /** Signs one order per transaction, with the pool at input/output 0 and the owner's reward at output 1. */
 object ErgoDexExecution {
@@ -87,7 +113,7 @@ object ErgoDexExecution {
     }
   }
 
-  /** Ranks orders by revenue, then reprices each against the preceding fill's pool balances. */
+  /** Ranks orders by revenue, then reprices each against the preceding fill's pool balances. Ranks pools; builds nothing. */
   def priceChain(orders: Seq[ErgoDexOrder], pool: ErgoDexPool, minRevenue: Long,
                  limit: Int, minerFeeCeiling: Long = 0L): Vector[ErgoDexFill] = {
     // Rank by revenue so the opening fill can fund the takings box.
@@ -110,38 +136,67 @@ object ErgoDexExecution {
     fills
   }
 
-  /** Builds the entire run or returns None; later executions depend on earlier pool and takings outputs. */
-  def build(ctx: BlockchainContext, wallet: NodeWallet, poolBox: InputUTXO,
-            fills: Seq[ErgoDexFill], blockHeight: Int, minerFeeCeiling: Long,
-            useTrueProp: Boolean): Option[ErgoDexChain] =
-    if (fills.isEmpty) None
-    else Try(chain(ctx, wallet, poolBox, fills, blockHeight, minerFeeCeiling, useTrueProp)) match {
-      case Success(built) => Some(built)
-      case Failure(ex) =>
-        logger.warn(s"Could not build ${fills.size} ErgoDEX execution(s) against pool " +
-          s"${fills.head.pool.nft.take(12)}: ${ex.getMessage}")
-        None
-    }
+  /**
+   * Signs the highest-revenue orders against `poolBox` one at a time, each priced against the pool the last
+   * execution left. An order that prices but cannot be signed is named and passed over, and the next is
+   * priced against the same pool. Stops at `limit` transactions, counting placements not in
+   * `alreadyCarried`, at `deadline`, or after [[Batcher.MaxUnbuildablePerRun]] unbuildable orders.
+   *
+   * @param placementOf    the unconfirmed placements an order's box needs carried ahead of it
+   * @param alreadyCarried placement ids an earlier run in the same package already carries
+   */
+  def run(ctx: BlockchainContext, wallet: NodeWallet, poolBox: InputUTXO, pool: ErgoDexPool,
+          orders: Seq[ErgoDexOrder], limit: Int, minRevenue: Long, blockHeight: Int, minerFeeCeiling: Long,
+          useTrueProp: Boolean, deadline: Deadline,
+          placementOf: ErgoDexOrder => Vector[CompleteMempool.MempoolTx] = _ => Vector.empty,
+          alreadyCarried: Set[String] = Set.empty): ErgoDexRun = {
+    require(poolBox.id.toString == pool.boxId, "a run must open on the pool it is priced against")
+    val ranked = orders
+      .flatMap(order => price(order, pool, minRevenue, fundsItsOwnBox = false, minerFeeCeiling)
+        .map(fill => order -> fill.revenue))
+      .sortBy { case (order, revenue) => (-revenue, order.boxId) }
+      .map(_._1)
 
-  private def chain(ctx: BlockchainContext, wallet: NodeWallet, poolBox: InputUTXO,
-                    fills: Seq[ErgoDexFill], blockHeight: Int, minerFeeCeiling: Long,
-                    useTrueProp: Boolean): ErgoDexChain = {
-    require(fills.forall(_.pool.nft == fills.head.pool.nft), "a chain executes against one pool")
-    require(poolBox.id.toString == fills.head.pool.boxId, "the chain must open on the pool it was priced against")
-
-    // Each execution spends the previous pool and accumulates its takings.
-    var pool = poolBox
+    var box = poolBox
+    var state = pool
     var carried = Option.empty[InputUTXO]
     var built = Vector.empty[SignedTransaction]
-    fills.foreach { fill =>
-      val signed = assembled(ctx, wallet, pool, fill, blockHeight, minerFeeCeiling, useTrueProp, carried)
-      built :+= signed
-      // The next order spends the pool this one just produced, which does not exist on chain yet,
-      // and adds its takings to the same box rather than opening another.
-      pool = InputUTXO(signed.getOutputsToSpend.get(0))
-      carried = Some(InputUTXO(signed.getOutputsToSpend.get(2)))
+    var fills = Vector.empty[ErgoDexFill]
+    var poolIds = Vector.empty[String]
+    var placements = Vector.empty[CompleteMempool.MempoolTx]
+    var unbuildable = Vector.empty[String]
+    val remaining = ranked.iterator
+    def slotsUsed(txs: Vector[CompleteMempool.MempoolTx]) = built.size + txs.count(tx => !alreadyCarried.contains(tx.id))
+    def full = slotsUsed(placements) >= limit
+    def stopped = deadline.isOverdue() || unbuildable.size >= Batcher.MaxUnbuildablePerRun
+
+    while (remaining.hasNext && !full && !stopped) {
+      val order = remaining.next()
+      // Only the opening fill has to fund a box by itself; the rest add to the one it made
+      price(order, state, minRevenue, fundsItsOwnBox = built.isEmpty, minerFeeCeiling).foreach { fill =>
+        val added = placementOf(order).filterNot(tx => placements.exists(_.id == tx.id))
+        if (slotsUsed(placements ++ added) < limit) Try {
+          val signed = assembled(ctx, wallet, box, fill, blockHeight, minerFeeCeiling, useTrueProp, carried)
+          val outputs = signed.getOutputsToSpend
+          (signed, InputUTXO(outputs.get(0)), InputUTXO(outputs.get(2)))
+        } match {
+          case Success((signed, nextPool, takings)) =>
+            built :+= signed
+            fills :+= fill
+            poolIds :+= box.id.toString
+            placements ++= added
+            box = nextPool
+            state = fill.poolAfter
+            carried = Some(takings)
+          case Failure(ex) =>
+            logger.warn(s"Could not build ErgoDEX order ${order.boxId} against pool ${pool.nft.take(12)}, " +
+              s"passing over it: ${ex.getMessage}")
+            unbuildable :+= order.boxId
+        }
+      }
     }
-    ErgoDexChain(built, fills.toVector, carried.get)
+    ErgoDexRun(carried.map(ErgoDexChain(built, fills, poolIds, _)), placements, unbuildable,
+      cutShort = remaining.hasNext && !full)
   }
 
   /** Builds pool, reward and takings outputs in contract order, followed by an optional miner fee. */
@@ -189,7 +244,7 @@ object ErgoDexExecution {
       .setOutputs((Seq(poolOut, rewardOut, takingsOut) ++ feeOut): _*)
       .buildTx(0L, wallet.p2pk)
     // Signing validates the scripts and supplies the measured execution cost.
-    wallet.sign(unsigned)
+    Batcher.withNodeMinimums(ctx, wallet.sign(unsigned))
   }
 
 }

@@ -52,6 +52,11 @@ class Module(environment: Environment, configuration: Configuration) extends Abs
     bindActor(classOf[RollupProcessor], "transaction-processor", p => p.withDispatcher("lithos-contexts.tx-dispatcher"))
     bindActor(classOf[RollupPublisher], "transaction-publisher", p => p.withDispatcher("lithos-contexts.tx-dispatcher"))
 
+    // Batchers run whether or not this node mines: broadcasts need no stratum, and the stratum asks them
+    // for block transactions only when it is running.
+    bindActor(classOf[transactions.batching.ergodex.ErgoDexBatcher], "ergodex-batcher")
+    bindActor(classOf[transactions.batching.lithosdex.LithosDexBatcher], "lithosdex-batcher")
+
     bind(classOf[BlocksApi]).to(classOf[BlocksApiImpl])
     bind(classOf[CollateralMarketApi]).to(classOf[CollateralMarketApiImpl])
     bind(classOf[InfoApi]).to(classOf[InfoApiImpl])

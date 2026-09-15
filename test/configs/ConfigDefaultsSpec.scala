@@ -36,8 +36,32 @@ class ConfigDefaultsSpec extends AnyFlatSpec with Matchers {
     sources(CandidateSourceConfig.Rent).enabled shouldBe false
   }
 
+  it should "leave the LithosDex source on, since LithosDex launches first" in {
+    CandidateConfig(Configuration.empty).sources(CandidateSourceConfig.LithosDex).enabled shouldBe true
+  }
+
   "BatchingConfig.Default" should "equal what the shipped application.conf parses" in {
     BatchingConfig(shipped, "ergodex") shouldEqual BatchingConfig.Default
+  }
+
+  "LithosDexBatchingConfig.Default" should "equal what the shipped application.conf parses" in {
+    LithosDexBatchingConfig(shipped) shouldEqual LithosDexBatchingConfig.Default
+  }
+
+  it should "read autoFlush from the LithosDex block, on when absent" in {
+    LithosDexBatchingConfig(Configuration.empty).autoFlush shouldBe true
+    LithosDexBatchingConfig(Configuration(ConfigFactory.parseString("batching.lithosdex.autoFlush = false")))
+      .autoFlush shouldBe false
+  }
+
+  /** The flag has to come from the adapter's own block, or turning one adapter off turns nothing off. */
+  "BatchingConfig" should "read each adapter's enabled flag from that adapter's block" in {
+    val configured = Configuration(ConfigFactory.parseString("""
+      batching.ergodex.enabled = false
+      stratum.candidate.enabled = true
+    """))
+    BatchingConfig(configured, "ergodex").enabled shouldBe false
+    BatchingConfig(configured, "lithosdex").enabled shouldBe BatchingConfig.Default.enabled
   }
 
   "EmissionConfig.Default" should "equal what the shipped application.conf parses" in {

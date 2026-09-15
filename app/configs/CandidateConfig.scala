@@ -31,7 +31,9 @@ object CandidateConfig {
       // transaction, because a rent collection sweeps every box it takes into a single sweep.
       CandidateSourceConfig.Rent -> CandidateSourceConfig.Default.copy(enabled = false, maxTxs = 1),
       // Disabled by default; the eight slots include placement ancestors and executions.
-      CandidateSourceConfig.ErgoDex -> CandidateSourceConfig.Default.copy(enabled = false, maxTxs = 20)),
+      CandidateSourceConfig.ErgoDex -> CandidateSourceConfig.Default.copy(enabled = false, maxTxs = 20),
+      // On by default: LithosDex is the protocol's own DEX. Slots include placements and the flush.
+      CandidateSourceConfig.LithosDex -> CandidateSourceConfig.Default.copy(enabled = true, maxTxs = 20)),
     blockShare = 0.5,
     useTruePropCollection = false,
     genesisWaitMs = 1500,

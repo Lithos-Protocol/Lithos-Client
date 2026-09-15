@@ -95,11 +95,11 @@ class ContextExtensionOrderSpec extends AnyPropSpec with ContractSpecBase {
       val vars: Seq[(Byte, ErgoValue[_])] = Seq(
         64.toByte -> ErgoValue.of(64L), 3.toByte -> ErgoValue.of(3.toByte))
       val box = inputAt(UTXO(contractOf(miner(ctx)), Parameters.OneErg), ctx, 0)
-      val attached = transactions.dex.DexContracts.attachCtxVars(box, vars)
+      val attached = transactions.batching.lithosdex.DexContracts.attachCtxVars(box, vars)
 
       extensionOf(attached).values.keys.toSeq shouldBe wireOrder(Seq[Byte](3, 64)).sorted
       withClue("the order handed in must not change what is signed: ") {
-        serialized(extensionOf(transactions.dex.DexContracts.attachCtxVars(box, vars.reverse))) shouldBe
+        serialized(extensionOf(transactions.batching.lithosdex.DexContracts.attachCtxVars(box, vars.reverse))) shouldBe
           serialized(extensionOf(attached))
       }
     }

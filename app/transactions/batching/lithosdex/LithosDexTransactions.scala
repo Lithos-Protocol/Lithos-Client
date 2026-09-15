@@ -1,4 +1,4 @@
-package transactions.dex
+package transactions.batching.lithosdex
 
 import lithosdex.states.LDFeeValue
 import lithosdex.{LDHelpers, LDLiquidityPool}
@@ -8,7 +8,7 @@ import org.ergoplatform.appkit.scalaapi._
 import org.ergoplatform.sdk.ErgoId
 import sigma.Colls
 
-import transactions.dex.LDBoxes.Provision
+import transactions.batching.lithosdex.LDBoxes.Provision
 import work.lithos.mutations.{InputUTXO, Token, TxBuilder, UTXO}
 
 import scala.util.control.NonFatal
@@ -81,28 +81,7 @@ object LithosDexTransactions {
     require(q.amountOut >= minOutput,
       s"the pool has moved since the quote: it would return ${q.amountOut}, below the ${minOutput} floor")
 
-    val advance = (BigInt(q.protocolFee) * LDHelpers.SCALE) / BigInt(p.supply)
-    val out =
-      if (ergIn)
-        poolUTXO(ctx, p,
-          reservesX = p.reservesX + q.tradedIn,
-          reservesY = p.reservesY - q.amountOut,
-          pendingX = p.pendingX + q.protocolFee,
-          pendingY = p.pendingY,
-          supply = p.supply,
-          provTokens = p.provTokensLeft,
-          accX = p.accX + advance,
-          accY = p.accY)
-      else
-        poolUTXO(ctx, p,
-          reservesX = p.reservesX - q.amountOut,
-          reservesY = p.reservesY + q.tradedIn,
-          pendingX = p.pendingX,
-          pendingY = p.pendingY + q.protocolFee,
-          supply = p.supply,
-          provTokens = p.provTokensLeft,
-          accX = p.accX,
-          accY = p.accY + advance)
+    val out = poolUTXO(ctx, p, p.afterSwap(q))
 
     val fundingValue = if (ergIn) amountIn + FUNDING_HEADROOM else FUNDING_HEADROOM
     val fundingTokens = if (ergIn) Seq.empty else Seq(Token(p.tokenY, amountIn))
@@ -136,15 +115,7 @@ object LithosDexTransactions {
     // unmintable anywhere else, and it is why this cannot be quoted ahead of the box it will spend.
     val ownerNFT = poolBox.id
 
-    val poolOut = poolUTXO(ctx, p,
-      reservesX = p.reservesX + q.amountX,
-      reservesY = p.reservesY + q.amountY,
-      pendingX = p.pendingX,
-      pendingY = p.pendingY,
-      supply = p.supply + q.shares,
-      provTokens = p.provTokensLeft - 1L,
-      accX = p.accX,
-      accY = p.accY)
+    val poolOut = poolUTXO(ctx, p, p.afterDeposit(q.amountX, q.amountY, q.shares))
 
     val provisionOut = provisionUTXO(ctx, p.provToken, q.entryX, q.entryY, ownerNFT, q.shares,
       LDHelpers.PROVISION_MIN)
@@ -181,15 +152,7 @@ object LithosDexTransactions {
     require(q.withinMinSupply,
       s"closing this provision would take supply under ${LDHelpers.MIN_SUPPLY}, which the pool refuses")
 
-    val poolOut = poolUTXO(ctx, p,
-      reservesX = p.reservesX - q.amountX,
-      reservesY = p.reservesY - q.amountY,
-      pendingX = p.pendingX,
-      pendingY = p.pendingY,
-      supply = p.supply - provision.shares,
-      provTokens = p.provTokensLeft + 1L,
-      accX = p.accX,
-      accY = p.accY)
+    val poolOut = poolUTXO(ctx, p, p.afterRedeem(q))
 
     // OUTPUTS(1) has to exist: the provision sits at INPUTS(1) and reads OUTPUTS(selfBoxIndex).
     val payout = UTXO(wallet.contract, q.amountX + provision.value,
@@ -408,7 +371,7 @@ object LithosDexTransactions {
    * Ids and fee params come from the pool being spent rather than from `LDHelpers`, so a successor is
    * built against what the box actually holds.
    */
-  private def poolUTXO(ctx: BlockchainContext,
+  private[lithosdex] def poolUTXO(ctx: BlockchainContext,
                        p: LDLiquidityPool,
                        reservesX: Long,
                        reservesY: Long,
@@ -429,6 +392,11 @@ object LithosDexTransactions {
         bigIntValue(accX),
         bigIntValue(accY)))
 
+  /** The pool box holding `next`, with ids and fee params taken from `p`, the box being spent. */
+  private[lithosdex] def poolUTXO(ctx: BlockchainContext, p: LDLiquidityPool, next: LDLiquidityPool): UTXO =
+    poolUTXO(ctx, p, next.reservesX, next.reservesY, next.pendingX, next.pendingY, next.supply,
+      next.provTokensLeft, next.accX, next.accY)
+
   /**
    * R4 accX, R5 accY. Tokens: 0 vault NFT, 1 tokenY once a flush has carried any.
    *
@@ -437,7 +405,7 @@ object LithosDexTransactions {
    *                 the pool; afterwards the vault's own entry is the authority. A claim brings nothing
    *                 in and passes None.
    */
-  private def vaultUTXO(ctx: BlockchainContext,
+  private[lithosdex] def vaultUTXO(ctx: BlockchainContext,
                         v: LDFeeValue,
                         arriving: Option[ErgoId],
                         balanceX: Long,
@@ -455,7 +423,7 @@ object LithosDexTransactions {
   }
 
   /** R4 entryX, R5 entryY, R6 ownerNFT, R7 shares. One provision token, under the guard. */
-  private def provisionUTXO(ctx: BlockchainContext,
+  private[lithosdex] def provisionUTXO(ctx: BlockchainContext,
                             provToken: ErgoId,
                             entryX: BigInt,
                             entryY: BigInt,
@@ -521,16 +489,16 @@ object LithosDexTransactions {
   //
   // Always through DexContracts.attachCtxVars until ContextVar fix is made.
 
-  private def poolInput(box: InputUTXO, op: Byte): InputUTXO =
+  private[lithosdex] def poolInput(box: InputUTXO, op: Byte): InputUTXO =
     DexContracts.attachCtxVars(box, Seq(0.toByte -> ErgoValue.of(op)))
 
-  private def vaultInput(box: InputUTXO, op: Byte, count: Int = -1): InputUTXO =
+  private[lithosdex] def vaultInput(box: InputUTXO, op: Byte, count: Int = -1): InputUTXO =
     DexContracts.attachCtxVars(box,
       Seq[(Byte, ErgoValue[_])](0.toByte -> ErgoValue.of(op)) ++
         (if (count >= 0) Seq[(Byte, ErgoValue[_])](1.toByte -> ErgoValue.of(count)) else Seq.empty))
 
   /** Every provision input needs its op AND the provision logic the guard executes from var 64. */
-  private def provisionInput(ctx: BlockchainContext, box: InputUTXO, op: Byte): InputUTXO =
+  private[lithosdex] def provisionInput(ctx: BlockchainContext, box: InputUTXO, op: Byte): InputUTXO =
     DexContracts.attachCtxVars(box, Seq[(Byte, ErgoValue[_])](
       0.toByte -> ErgoValue.of(op),
       LDHelpers.PROVISION_LOGIC_VAR -> bytesValue(DexContracts(ctx).provisionLogic.valueBytes)))
@@ -575,7 +543,7 @@ object LithosDexTransactions {
   private def bytesValue(bytes: Array[Byte]): ErgoValue[_] =
     ErgoValue.of(Colls.fromArray(bytes), scalaByteType)
 
-  private def utf8(s: String): ErgoValue[_] =
+  private[lithosdex] def utf8(s: String): ErgoValue[_] =
     ErgoValue.of(s.getBytes(java.nio.charset.StandardCharsets.UTF_8))
 }
 

@@ -12,8 +12,8 @@ import org.ergoplatform.appkit.BlockchainContext
 import org.ergoplatform.sdk.ErgoId
 import configs.NodeContext
 import transactions.engine.wallet.EngineFunding
-import transactions.dex.LDBoxes.Provision
-import transactions.dex.{LDBoxes, LDFundedTx, LithosDexTransactions}
+import transactions.batching.lithosdex.LDBoxes.Provision
+import transactions.batching.lithosdex.{LDBoxes, LDFundedTx, LithosDexTransactions}
 import work.lithos.mutations.InputUTXO
 
 import javax.inject.Inject
@@ -44,8 +44,8 @@ import transactions.engine.EngineBroadcast
  * Box discovery, wallet balances and broadcasting all go through the node — the indexer endpoints for
  * boxes, the wallet endpoints for what this client owns. No explorer is involved.
  */
-class DexExecution(nodeContext: NodeContext, walletSelector: EngineFunding,
-                   alive: () => Boolean = () => true) extends LithosDexApi {
+class DexAPIExecution(nodeContext: NodeContext, walletSelector: EngineFunding,
+                      alive: () => Boolean = () => true) extends LithosDexApi {
   protected def executionNode: NodeApi = nodeContext.getNodeApi
 
   /** Default history bucket: a day of blocks at two minutes each */
@@ -777,14 +777,14 @@ class DexExecution(nodeContext: NodeContext, walletSelector: EngineFunding,
    * whatever it was quoted against is by then a box another mutation has spent.
    */
   private def mutating[A](what: String)(f: => A): A = {
-    if (!DexExecution.dexMutationLock.tryLock(mutationWaitMs, TimeUnit.MILLISECONDS)) {
+    if (!DexAPIExecution.dexMutationLock.tryLock(mutationWaitMs, TimeUnit.MILLISECONDS)) {
       // Which status this is depends on WHY the lock could not be taken, and the two want opposite
       // things from the caller. A mutation that is merely ahead in the queue finishes in well under
       // a second, so a 409 telling them to re-quote and resend is right. One that has been holding
       // for longer than a node round trip should take is stuck on the node — and a 409 there invites
       // an immediate retry, so a queue of callers hammers a node that is already not answering.
-      val heldFor = DexExecution.heldForMillis()
-      if (heldFor > DexExecution.StuckHolderMs)
+      val heldFor = DexAPIExecution.heldForMillis()
+      if (heldFor > DexAPIExecution.StuckHolderMs)
         throw LithosUnavailable(
           s"a LithosDex mutation has held the lock for ${heldFor}ms, which is longer than a node " +
             s"round trip should take, so $what was not attempted: the node may not be answering")
@@ -792,10 +792,10 @@ class DexExecution(nodeContext: NodeContext, walletSelector: EngineFunding,
         s"another LithosDex mutation is still running, so $what was not attempted: re-read the pool " +
           "and vault and quote again")
     }
-    DexExecution.markAcquired()
+    DexAPIExecution.markAcquired()
     try f finally {
-      DexExecution.markReleased()
-      DexExecution.dexMutationLock.unlock()
+      DexAPIExecution.markReleased()
+      DexAPIExecution.dexMutationLock.unlock()
     }
   }
 
@@ -872,7 +872,7 @@ class DexExecution(nodeContext: NodeContext, walletSelector: EngineFunding,
   }
   private case class Funded[A <: LDFundedTx](value: A, reservation: transactions.engine.wallet.FundingAllocation)
 
-  private def fund[A <: LDFundedTx](plan: transactions.dex.DexPlan[A]): Funded[A] = {
+  private def fund[A <: LDFundedTx](plan: transactions.batching.lithosdex.DexPlan[A]): Funded[A] = {
     require(alive(), "engine attempt was superseded")
     val reservation = walletSelector.reserve(plan.value, plan.tokens)
     try {
@@ -904,7 +904,7 @@ class DexExecution(nodeContext: NodeContext, walletSelector: EngineFunding,
   protected def mutationWaitMs: Long = 15000L
 }
 
-object DexExecution {
+object DexAPIExecution {
 
   /**
    * Process-wide, not per-instance: it guards chain singletons, so it has to hold across however many

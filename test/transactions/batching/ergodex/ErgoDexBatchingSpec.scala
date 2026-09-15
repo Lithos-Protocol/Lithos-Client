@@ -7,9 +7,12 @@ import org.scalatest.matchers.should.Matchers
 import org.scalatestplus.mockito.MockitoSugar
 import state.synchronization.CompleteMempool
 import support.ErgoDexFixtures._
+import transactions.batching.BatchingMempool
 import transactions.candidate.BlockTxMessages.Supersede
 import transactions.candidate.CapitalOrigin
 import work.lithos.mutations.UTXO
+
+import scala.concurrent.duration._
 
 class ErgoDexBatchingSpec extends AnyFlatSpec with Matchers with MockitoSugar {
 
@@ -26,8 +29,8 @@ class ErgoDexBatchingSpec extends AnyFlatSpec with Matchers with MockitoSugar {
     CompleteMempool.MempoolTx(txId,
       NodeTransaction(txId, spends.map(NodeInput(_, NodeSpendingProof.empty)), Seq.empty, outputs), 100)
 
-  private def spenders(txs: CompleteMempool.MempoolTx*): ErgoDexBatching.Spenders =
-    ErgoDexBatching.spenders(CompleteMempool.Snapshot(id("a"), txs.map(_.id).toSet,
+  private def spenders(txs: CompleteMempool.MempoolTx*): BatchingMempool.Spenders =
+    BatchingMempool.spenders(CompleteMempool.Snapshot(id("a"), txs.map(_.id).toSet,
       txs.flatMap(_.body.inputs.map(_.boxId)).toSet, System.nanoTime(), transactions = txs.toVector))
 
   private def poolOutput(boxId: String): NodeBox = poolBox.copy(boxId = boxId, transactionId = id("f"))
@@ -96,38 +99,38 @@ class ErgoDexBatchingSpec extends AnyFlatSpec with Matchers with MockitoSugar {
 
   "An unconfirmed spend" should "name every transaction claiming a box the run spends, and nothing else" in {
     val claims = spenders(mempoolTx(id("b"), Seq(poolBox.boxId)), mempoolTx(id("c"), Seq(id("9"))))
-    ErgoDexBatching.competitors(claims, Seq(poolBox.boxId, order.boxId)) shouldBe Set(id("b"))
+    BatchingMempool.competitors(claims, Seq(poolBox.boxId, order.boxId)) shouldBe Set(id("b"))
   }
 
   it should "mark an order withdrawn only when its claimant recreates no pool" in {
-    ErgoDexBatching.withdrawn(order, spenders()) shouldBe false
-    ErgoDexBatching.withdrawn(order,
+    BatchingMempool.withdrawn(order.boxId, order.poolNft, spenders()) shouldBe false
+    BatchingMempool.withdrawn(order.boxId, order.poolNft,
       spenders(mempoolTx(id("b"), Seq(poolBox.boxId, order.boxId), Seq(poolOutput(id("d")))))) shouldBe false
-    ErgoDexBatching.withdrawn(order, spenders(mempoolTx(id("b"), Seq(order.boxId)))) shouldBe true
+    BatchingMempool.withdrawn(order.boxId, order.poolNft, spenders(mempoolTx(id("b"), Seq(order.boxId)))) shouldBe true
   }
 
   "The pool tip" should "be the confirmed box when nothing spends it" in {
-    ErgoDexBatching.poolTip(poolBox, pool.nft, spenders()) shouldBe Some(poolBox)
+    BatchingMempool.poolTip(poolBox, pool.nft, spenders()) shouldBe Some(poolBox)
   }
 
   it should "follow a run of unconfirmed executions to its last pool output" in {
     val claims = spenders(
       mempoolTx(id("b"), Seq(poolBox.boxId, id("1")), Seq(poolOutput(id("d")))),
       mempoolTx(id("c"), Seq(id("d"), id("2")), Seq(poolOutput(id("e")))))
-    ErgoDexBatching.poolTip(poolBox, pool.nft, claims).map(_.boxId) shouldBe Some(id("e"))
+    BatchingMempool.poolTip(poolBox, pool.nft, claims).map(_.boxId) shouldBe Some(id("e"))
   }
 
   it should "have no tip when two transactions contest the same pool box" in {
     val claims = spenders(
       mempoolTx(id("b"), Seq(poolBox.boxId), Seq(poolOutput(id("d")))),
       mempoolTx(id("c"), Seq(poolBox.boxId), Seq(poolOutput(id("e")))))
-    ErgoDexBatching.poolTip(poolBox, pool.nft, claims) shouldBe None
+    BatchingMempool.poolTip(poolBox, pool.nft, claims) shouldBe None
   }
 
   it should "have no tip when the pool box's spender recreates no pool" in {
     val claims = spenders(mempoolTx(id("b"), Seq(poolBox.boxId),
       Seq(poolBox.copy(boxId = id("d"), assets = Seq(NodeAsset(id("7"), 1L))))))
-    ErgoDexBatching.poolTip(poolBox, pool.nft, claims) shouldBe None
+    BatchingMempool.poolTip(poolBox, pool.nft, claims) shouldBe None
   }
 
   private val wallet1 = NodeBox(id("9"), id("8"), 2000000000L, 0, 100, "0008cd02" + "11" * 32)
@@ -147,8 +150,8 @@ class ErgoDexBatchingSpec extends AnyFlatSpec with Matchers with MockitoSugar {
     val snapshot = snapshotOf(placement +: others: _*)
     val boxes = Map(wallet1.boxId -> wallet1, poolBox.boxId -> poolBox) ++
       snapshot.transactions.flatMap(_.body.outputs.map(box => box.boxId -> box))
-    ErgoDexBatching.placementChain(placement, ErgoDexBatching.creators(snapshot), 8)
-      .exists(_.forall(ErgoDexBatching.placedByWallet(_, boxes, ErgoDexBatching.spenders(snapshot))))
+    BatchingMempool.placementChain(placement, BatchingMempool.creators(snapshot), 8)
+      .exists(_.forall(ErgoDexBatching.placedByWallet(_, boxes, BatchingMempool.spenders(snapshot))))
   }
 
   "A placement" should "be carried when it spends only a confirmed wallet box" in {
@@ -174,9 +177,9 @@ class ErgoDexBatchingSpec extends AnyFlatSpec with Matchers with MockitoSugar {
     val root = mempoolTx(id("c"), Seq(wallet1.boxId), Seq(left, right))
     val branch = mempoolTx(id("d"), Seq(left.boxId), Seq(wallet1.copy(boxId = id("6"))))
     val placed = mempoolTx(id("b"), Seq(id("6"), right.boxId), Seq(orderBox))
-    val creators = ErgoDexBatching.creators(snapshotOf(placed, branch, root))
-    ErgoDexBatching.placementChain(placed, creators, 3).get.map(_.id) shouldBe Vector(root.id, branch.id, placed.id)
-    ErgoDexBatching.placementChain(placed, creators, 2) shouldBe None
+    val creators = BatchingMempool.creators(snapshotOf(placed, branch, root))
+    BatchingMempool.placementChain(placed, creators, 3).get.map(_.id) shouldBe Vector(root.id, branch.id, placed.id)
+    BatchingMempool.placementChain(placed, creators, 2) shouldBe None
     walletPlaced(placed, branch, root) shouldBe true
     walletPlaced(placed, branch, root, mempoolTx(id("e"), Seq(wallet1.boxId))) shouldBe false
   }
@@ -212,11 +215,11 @@ class ErgoDexBatchingSpec extends AnyFlatSpec with Matchers with MockitoSugar {
   }
 
   it should "not be carried past the input limit" in {
-    val many = (0 to ErgoDexBatching.MaxPlacementInputs).map(i => f"$i%064x")
+    val many = (0 to BatchingMempool.MaxPlacementInputs).map(i => f"$i%064x")
     val placement = mempoolTx(id("b"), many, Seq(orderBox))
     val snapshot = snapshotOf(placement)
     ErgoDexBatching.placedByWallet(placement, many.map(i => i -> wallet1.copy(boxId = i)).toMap,
-      ErgoDexBatching.spenders(snapshot)) shouldBe false
+      BatchingMempool.spenders(snapshot)) shouldBe false
   }
 
   "Fitting a run" should "count placements against the slots, once each" in {
@@ -226,22 +229,28 @@ class ErgoDexBatchingSpec extends AnyFlatSpec with Matchers with MockitoSugar {
     val shared = mempoolTx(id("b"), Seq(wallet1.boxId))
     val placementOf: ErgoDexOrder => Vector[CompleteMempool.MempoolTx] =
       o => if (o.boxId == orderBox.boxId) Vector.empty else Vector(shared)
+    val fillPlacementOf: ErgoDexFill => Vector[CompleteMempool.MempoolTx] = f => placementOf(f.order)
 
-    val (taken, carried) = ErgoDexBatching.fitting(Vector(fill, second, third), 4, placementOf)
+    val (taken, carried) = BatchingMempool.fitting(Vector(fill, second, third), 4, fillPlacementOf)
     taken should have size 3
     carried.map(_.id) shouldBe Vector(id("b"))
-    ErgoDexBatching.fitting(Vector(fill, second, third), 2, placementOf)._1 should have size 1
-    ErgoDexBatching.fitting(Vector(second, third), 2, placementOf, Set(shared.id))._1 should have size 2
+    BatchingMempool.fitting(Vector(fill, second, third), 2, fillPlacementOf)._1 should have size 1
+    BatchingMempool.fitting(Vector(second, third), 2, fillPlacementOf, Set(shared.id))._1 should have size 2
   }
 
   private val height = poolBox.creationHeight + 1
 
+  private def runOf(ctx: org.ergoplatform.appkit.BlockchainContext, orders: Seq[ErgoDexOrder], limit: Int = 10,
+                    deadline: Deadline = 1.minute.fromNow): ErgoDexRun = {
+    import node.MutationConversions._
+    ErgoDexExecution.run(ctx, wallet, poolBox.toInputUTXO(ctx), pool, orders, limit, 0L, height, 0L,
+      useTrueProp = false, deadline)
+  }
+
   "A built run" should "supersede its competitors and declare its takings as executor revenue" in {
     nodeContext.getClient.execute { ctx =>
-      import node.MutationConversions._
-      val fill = ErgoDexExecution.price(order, pool, 0L).get
-      val chain = ErgoDexExecution.build(ctx, wallet, poolBox.toInputUTXO(ctx), Seq(fill), height, 0L,
-        useTrueProp = false).getOrElse(fail("the fixture run did not build"))
+      val chain = runOf(ctx, Seq(order)).chain.getOrElse(fail("the fixture run did not build"))
+      val fill = chain.fills.head
       val bundle = chain.bundle(Set(id("b")))
 
       bundle.members.map(_.id) shouldBe chain.transactions.map(_.getId)
@@ -258,10 +267,7 @@ class ErgoDexBatchingSpec extends AnyFlatSpec with Matchers with MockitoSugar {
 
   it should "put placements first and declare the chain it makes from them" in {
     nodeContext.getClient.execute { ctx =>
-      import node.MutationConversions._
-      val fill = ErgoDexExecution.price(order, pool, 0L).get
-      val chain = ErgoDexExecution.build(ctx, wallet, poolBox.toInputUTXO(ctx), Seq(fill), height, 0L,
-        useTrueProp = false).get
+      val chain = runOf(ctx, Seq(order)).chain.get
       val placement = transactions.candidate.BlockTxMessages.CandidateTx.ancestor(
         mempoolTx(id("b"), Seq(wallet1.boxId), Seq(orderBox)).body)
       val bundle = chain.bundle(Set.empty, Vector(placement))
@@ -274,35 +280,48 @@ class ErgoDexBatchingSpec extends AnyFlatSpec with Matchers with MockitoSugar {
     }
   }
 
-  it should "refuse to build an order whose fields do not hash to its id" in {
+  it should "name an order whose fields do not hash to its id, and build nothing for it" in {
     nodeContext.getClient.execute { ctx =>
-      import node.MutationConversions._
       val misreported = order.copy(box = orderBox.copy(index = 1))
-      val fill = ErgoDexExecution.price(misreported, pool, 0L).get
-      ErgoDexExecution.build(ctx, wallet, poolBox.toInputUTXO(ctx), Seq(fill), height, 0L,
-        useTrueProp = false) shouldBe None
+      ErgoDexExecution.price(misreported, pool, 0L) should not be empty
+      runOf(ctx, Seq(misreported)) shouldBe ErgoDexRun(None, Vector.empty, Vector(misreported.boxId), cutShort = false)
+    }
+  }
+
+  it should "pass over an order that cannot be built and execute the next against the same pool" in {
+    nodeContext.getClient.execute { ctx =>
+      // Twice the fee ranks it first; a box id its fields do not hash to makes it unbuildable
+      val unbuildable = order.copy(dexFeePerTokenNum = order.dexFeePerTokenNum * 2,
+        box = orderBox.copy(boxId = id("e"), index = 3))
+      val run = runOf(ctx, Seq(order, unbuildable))
+      run.unbuildable shouldBe Vector(unbuildable.boxId)
+      run.chain.map(_.fills.map(_.order.boxId)) shouldBe Some(Vector(order.boxId))
+      run.chain.get.poolIdAt(0) shouldBe poolBox.boxId
+    }
+  }
+
+  it should "build nothing past its deadline, and say it stopped with orders left" in {
+    nodeContext.getClient.execute { ctx =>
+      val run = runOf(ctx, Seq(order), deadline = Deadline.now - 1.second)
+      run.chain shouldBe None
+      run.cutShort shouldBe true
     }
   }
 
   it should "declare nothing to supersede when nothing competes" in {
     nodeContext.getClient.execute { ctx =>
-      import node.MutationConversions._
-      val fill = ErgoDexExecution.price(order, pool, 0L).get
-      ErgoDexExecution.build(ctx, wallet, poolBox.toInputUTXO(ctx), Seq(fill), height, 0L,
-        useTrueProp = false).get.bundle(Set.empty).interactions shouldBe empty
+      runOf(ctx, Seq(order)).chain.get.bundle(Set.empty).interactions shouldBe empty
     }
   }
 
-  it should "declare only the last takings box of a run, holding everything the run earned" in {
+  it should "declare only the last takings box of a run, and name the pool box each execution spends" in {
     nodeContext.getClient.execute { ctx =>
       import node.MutationConversions._
       val larger = orderBox.copy(value = orderBox.value + UTXO.MIN_CHANGE)
       val second = ErgoDexOrder.parse(larger.copy(boxId = larger.toInputUTXO(ctx).id.toString()))
         .getOrElse(fail("second order did not parse"))
-      val fills = ErgoDexExecution.priceChain(Seq(order, second), pool, 0L, limit = 2)
-      withClue("both orders must price, or this test exercises one execution: ") { fills should have size 2 }
-      val chain = ErgoDexExecution.build(ctx, wallet, poolBox.toInputUTXO(ctx), fills, height, 0L,
-        useTrueProp = false).getOrElse(fail("the two-order run did not build"))
+      val chain = runOf(ctx, Seq(order, second), limit = 2).chain.getOrElse(fail("the two-order run did not build"))
+      withClue("both orders must build, or this test exercises one execution: ") { chain.fills should have size 2 }
       val bundle = chain.bundle(Set.empty)
 
       bundle.members should have size 2
@@ -310,8 +329,9 @@ class ErgoDexBatchingSpec extends AnyFlatSpec with Matchers with MockitoSugar {
       withClue("the second execution must spend the first one's pool and takings: ") {
         bundle.members(1).inputIds should contain allOf(first.get(0).getId.toString(), first.get(2).getId.toString())
       }
+      chain.poolIdAt(1) shouldBe first.get(0).getId.toString()
       bundle.capital should have size 1
-      bundle.capital.head.value shouldBe fills.map(_.revenue).sum
+      bundle.capital.head.value shouldBe chain.fills.map(_.revenue).sum
       bundle.capital.head.parentTxId shouldBe chain.transactions.last.getId
     }
   }

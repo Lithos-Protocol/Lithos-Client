@@ -3,14 +3,19 @@ package mining
 import stratum.CollateralData
 import transactions.candidate.BlockTxMessages.CandidateTx
 
-/** Genesis and ordered additions for one candidate. Revenue counts admitted source ERG outputs once. */
+/**
+ * Genesis and ordered additions for one candidate. Revenue counts admitted source ERG outputs once.
+ *
+ * @param sources names of the candidate sources whose transactions `blockTxs` carries
+ */
 case class BlockPackage(blockHeight: Int,
                         collateral: CollateralData,
                         blockTxs: Seq[CandidateTx] = Seq.empty[CandidateTx],
                         revision: Int = 0,
                         parentId: String = "",
                         revenue: Long = 0L,
-                        elapsedTime: Option[String] = None) {
+                        elapsedTime: Option[String] = None,
+                        sources: Set[String] = Set.empty) {
 
   def identity: MiningMessages.CandidateIdentity =
     MiningMessages.CandidateIdentity(blockHeight, parentId, collateral.txId, revision)
@@ -21,8 +26,8 @@ case class BlockPackage(blockHeight: Int,
   /** What to fall back to when the node will not accept the rest. */
   def genesisOnly: Seq[String] = Seq(collateral.txJSON)
 
-  def withBlockTxs(built: Seq[CandidateTx], ergRevenue: Long = 0L): BlockPackage =
-    copy(blockTxs = built, revision = revision + 1, revenue = ergRevenue)
+  def withBlockTxs(built: Seq[CandidateTx], ergRevenue: Long = 0L, from: Set[String] = Set.empty): BlockPackage =
+    copy(blockTxs = built, revision = revision + 1, revenue = ergRevenue, sources = from)
 
   def describe: String =
     s"BlockPackage(height=$blockHeight, rev=$revision, collateral=${collateral.collateralId}, " +

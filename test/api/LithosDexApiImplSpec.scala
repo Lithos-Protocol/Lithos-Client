@@ -19,7 +19,7 @@ import org.scalatest.flatspec.AnyFlatSpecLike
 import org.scalatest.matchers.should.Matchers
 import org.scalatestplus.mockito.MockitoSugar
 import support.{FakeCache, FakeNodeContext, LDNodeFixtures}
-import transactions.dex.{DexContracts, LDBoxes}
+import transactions.batching.lithosdex.{DexContracts, LDBoxes}
 import transactions.engine.wallet.EngineWalletMessages._
 import transactions.engine.wallet.EngineFunding
 
@@ -62,7 +62,7 @@ class LithosDexApiImplSpec
   private val ReservesX = 10L * erg
   private val ReservesY = 10000L * 1000000L
 
-  private case class Fixture(api: transactions.engine.execution.DexExecution,
+  private case class Fixture(api: transactions.engine.execution.DexAPIExecution,
                              nodeApi: NodeApi,
                              ctxOf: NodeContext,
                              selector: EngineFunding,
@@ -77,7 +77,7 @@ class LithosDexApiImplSpec
     val nodeApi = mock[NodeApi]
     val (nodeCtx, _, _) = FakeNodeContext(nodeApi, numAddresses = 1)
     val wallet = TestProbe()
-    val impl = new transactions.engine.execution.DexExecution(nodeCtx, EngineFunding(wallet.ref, 2.seconds, ec)) {
+    val impl = new transactions.engine.execution.DexAPIExecution(nodeCtx, EngineFunding(wallet.ref, 2.seconds, ec)) {
       override protected def mutationWaitMs: Long = mutationWait
     }
     Fixture(impl, nodeApi, nodeCtx, EngineFunding(wallet.ref, 2.seconds, ec), wallet,

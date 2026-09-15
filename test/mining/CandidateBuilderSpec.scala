@@ -525,6 +525,88 @@ class CandidateBuilderSpec extends TestKit(ActorSystem("candidate-builder-spec",
     source.expectNoMessage(500.millis)
   }
 
+  /** Two sources with room for everything, and a deadline short enough to wait out: sources stop at 3 s. */
+  private def twoSources(first: TestProbe, second: TestProbe): Fixture = {
+    val limits = configs.CandidateSourceConfig.Default.copy(maxTxs = 4)
+    fixture(sources = Seq(CandidateSource("rollups", first.ref), CandidateSource("emissions", second.ref)),
+      config = collectingConfig.copy(blockTxTimeout = 4000, sources = Map("rollups" -> limits, "emissions" -> limits)))
+  }
+
+  private def payout(id: String): CandidateBundle = CandidateBundle(Vector(CandidateTx(id, "{}", CandidateTx.Payout)))
+
+  "A late source" should "cost only its own transactions, never those of the sources that answered" in {
+    val answers = TestProbe()
+    val silent = TestProbe()
+    val f = twoSources(answers, silent)
+    advanceTo(f, 100)
+    requested(answers)
+    requested(silent)
+    answers.reply(BlockTxsReady(100, Seq(payout("on-time"))))
+
+    val pkg = f.parent.expectMsgType[BlockPackageReady](6.seconds).pkg
+    pkg.blockTxs.map(_.id) shouldBe Seq("on-time")
+    pkg.sources shouldBe Set("rollups")
+    withClue("a round that published is not expired, so no source is told to drop the height: ") {
+      answers.expectNoMessage(1500.millis)
+    }
+    silent.reply(BlockTxsReady(100, Seq(payout("too-late"))))
+    f.parent.expectNoMessage(500.millis)
+  }
+
+  it should "not hold back a package whose sources have all answered" in {
+    val first = TestProbe()
+    val second = TestProbe()
+    val f = twoSources(first, second)
+    advanceTo(f, 100)
+    requested(first)
+    requested(second)
+    first.reply(BlockTxsReady(100, Seq(payout("a"))))
+    second.reply(BlockTxsReady(100, Seq(payout("b"))))
+    val pkg = f.parent.expectMsgType[BlockPackageReady](1.second).pkg
+    pkg.blockTxs.map(_.id) shouldBe Seq("a", "b")
+    pkg.sources shouldBe Set("rollups", "emissions")
+  }
+
+  it should "leave a refresh unpublished when the published package carries its work" in {
+    val first = TestProbe()
+    val second = TestProbe()
+    val f = twoSources(first, second)
+    val base = advanceTo(f, 100)
+    requested(first)
+    requested(second)
+    first.reply(BlockTxsReady(100, Seq(payout("a"))))
+    second.reply(BlockTxsReady(100, Seq(payout("b"))))
+    published(f).sources shouldBe Set("rollups", "emissions")
+
+    f.builder ! RefreshBlockPackage(base.identity)
+    requested(first).refresh shouldBe true
+    requested(second)
+    first.reply(BlockTxsReady(100, Seq(payout("a2"))))
+    withClue("publishing without the late source would drop its transactions from the block: ") {
+      f.parent.expectNoMessage(4.seconds)
+    }
+  }
+
+  it should "still let a refresh through when the late source carried nothing" in {
+    val first = TestProbe()
+    val second = TestProbe()
+    val f = twoSources(first, second)
+    val base = advanceTo(f, 100)
+    requested(first)
+    requested(second)
+    first.reply(BlockTxsReady(100, Seq(payout("a"))))
+    second.reply(BlockTxsReady(100, Seq.empty))
+    published(f).sources shouldBe Set("rollups")
+
+    f.builder ! RefreshBlockPackage(base.identity)
+    requested(first)
+    requested(second)
+    first.reply(BlockTxsReady(100, Seq(payout("a"), payout("a2"))))
+    val refreshed = f.parent.expectMsgType[BlockPackageReady](6.seconds)
+    refreshed.refreshed shouldBe true
+    refreshed.pkg.blockTxs.map(_.id) shouldBe Seq("a", "a2")
+  }
+
   "A superseded genesis build" should "not publish when a rebuild arrives at the same height" in {
     val source = TestProbe()
     val f = fixture(sources = Seq(CandidateSource(configs.CandidateSourceConfig.Rollups, source.ref)))

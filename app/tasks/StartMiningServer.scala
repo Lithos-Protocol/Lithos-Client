@@ -34,7 +34,9 @@ class StartMiningServer @Inject()(system: ActorSystem, config: Configuration,
                                   cs: CoordinatedShutdown,
                                   @Named("state-frame") stateFrame: ActorRef,
                                   @Named("transaction-processor") transactionProcessor: ActorRef,
-                                  @Named("transaction-engine") emissionHandler: ActorRef) {
+                                  @Named("transaction-engine") emissionHandler: ActorRef,
+                                  @Named("ergodex-batcher") ergoDexBatcher: ActorRef,
+                                  @Named("lithosdex-batcher") lithosDexBatcher: ActorRef) {
 
   val logger: Logger = LoggerFactory.getLogger("StartMiningServer")
 
@@ -96,13 +98,12 @@ class StartMiningServer @Inject()(system: ActorSystem, config: Configuration,
               nodeConfig, configs.RentConfig(config), rentLimits,
               stratumParams.candidate.useTruePropCollection)), "storage-rent-source")))
 
-        // Start discovery only when enabled; broadcasts use the engine's send boundary.
-        val ergoDexLimits = limitsFor(configs.CandidateSourceConfig.ErgoDex)
-        val ergoDexSource = if (!ergoDexLimits.enabled) None else Some(
-          mining.MiningMessages.CandidateSource(configs.CandidateSourceConfig.ErgoDex,
-            system.actorOf(akka.actor.Props(new transactions.batching.ergodex.ErgoDexSource(
-              nodeConfig, configs.BatchingConfig(config, "ergodex"), ergoDexLimits, emissionHandler,
-              stratumParams.candidate.useTruePropCollection)), "ergodex-source")))
+        // Batchers run from Module either way; this only decides whether the stratum asks them.
+        def batcherSource(name: String, batcher: ActorRef): Option[mining.MiningMessages.CandidateSource] =
+          if (!transactions.batching.Batcher.servesCandidates(config, name)) None
+          else Some(mining.MiningMessages.CandidateSource(name, batcher))
+        val lithosDexSource = batcherSource(configs.CandidateSourceConfig.LithosDex, lithosDexBatcher)
+        val ergoDexSource = batcherSource(configs.CandidateSourceConfig.ErgoDex, ergoDexBatcher)
 
         val server = new MiningStratumServer(
           system          = system,
@@ -123,7 +124,7 @@ class StartMiningServer @Inject()(system: ActorSystem, config: Configuration,
             mining.MiningMessages.CandidateSource(
               configs.CandidateSourceConfig.Rollups, transactionProcessor),
             mining.MiningMessages.CandidateSource(
-              configs.CandidateSourceConfig.Emissions, emissionHandler)) ++ rentSource ++ ergoDexSource,
+              configs.CandidateSourceConfig.Emissions, emissionHandler)) ++ rentSource ++ lithosDexSource ++ ergoDexSource,
           rotateExtraNonceInterval = stratumParams.rotateExtraNonceInterval
         )
 

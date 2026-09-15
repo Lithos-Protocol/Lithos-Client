@@ -3,7 +3,7 @@ package transactions.candidate
 /** Messages shared by the mining path and transaction sources when preparing candidate bundles. */
 object BlockTxMessages {
 
-  /** Signed transaction with input IDs, serialized bytes and execution cost. Carried ancestors have unknown cost. */
+  /** Signed transaction with input IDs, serialized bytes and execution cost. A carried ancestor's cost is 0 when the node did not report one. */
   case class CandidateTx(id: String, json: String, kind: String, inputIds: Set[String] = Set.empty,
                         sizeBytes: Int = 0, cost: Long = 0L, leaf: String = "")
 
@@ -38,12 +38,13 @@ object BlockTxMessages {
 
     /**
      * An unconfirmed transaction carried ahead of a member that spends its outputs. Sized at the
-     * serialized size the node reports, falling back to the encoded length; its cost stays unknown.
+     * serialized size the node reports, falling back to the encoded length, and at the cost the node
+     * measured on mempool admission, or 0 when it reported none.
      */
     def ancestor(body: _root_.node.model.NodeTransaction): CandidateTx = {
       val encoded = _root_.node.rest.NodeCodecs.encodeTransaction(body).toString
       CandidateTx(body.id, encoded, MempoolAncestor, body.inputs.map(_.boxId).toSet,
-        body.size.getOrElse(encoded.length))
+        body.size.getOrElse(encoded.length), body.cost.getOrElse(0L))
     }
   }
 

@@ -25,6 +25,29 @@ class ConfigsSpec extends AnyFlatSpec with Matchers {
     thrown.getMessage should include("stratum.candidate.minCandidateChangeRevenue")
   }
 
+  /** A value the LithosDex batcher's constructor cannot read stops that actor, and the stratum then waits it out every block. */
+  it should "reject LithosDex batching values before the batcher is built" in {
+    val configured = Configuration(ConfigFactory.parseString(
+      """batching.lithosdex.scanIntervalMs = 0
+        |batching.lithosdex.autoFlush = "sometimes"
+        |batching.lithosdex.skippedOrderTtlMs = 0
+        |batching.lithosdex.maxSkippedOrders = -1""".stripMargin)
+      .withFallback(shipped.underlying).resolve())
+    val thrown = the[ConfigValidationException] thrownBy Configs.validateAll(configured)
+    Seq("scanIntervalMs", "autoFlush", "skippedOrderTtlMs", "maxSkippedOrders")
+      .foreach(key => thrown.getMessage should include(s"batching.lithosdex.$key"))
+  }
+
+  it should "reject ErgoDEX skip-list values out of range" in {
+    val configured = Configuration(ConfigFactory.parseString(
+      """batching.ergodex.skippedOrderTtlMs = 0
+        |batching.ergodex.maxSkippedOrders = -1""".stripMargin)
+      .withFallback(shipped.underlying).resolve())
+    val thrown = the[ConfigValidationException] thrownBy Configs.validateAll(configured)
+    Seq("skippedOrderTtlMs", "maxSkippedOrders")
+      .foreach(key => thrown.getMessage should include(s"batching.ergodex.$key"))
+  }
+
   it should "allow a maintenance checkpoint after every committed catch-up block" in {
     val configured = Configuration(ConfigFactory.parseString(
       "sync.quarantine.checkpointIntervalBlocks = 1")
@@ -77,7 +100,8 @@ class ConfigsSpec extends AnyFlatSpec with Matchers {
     // Keep runtime dispatcher lookups and validation names aligned.
     Contexts.Names should contain theSameElementsAs
       Seq(Contexts.Stratum, Contexts.Polling, Contexts.Sync, Contexts.Tx, Contexts.Dex,
-        Contexts.Database, Contexts.SnapshotIo, Contexts.CandidateIo, Contexts.MiningControlIo, Contexts.Genesis, Contexts.EngineIo, Contexts.MempoolIo, Contexts.WalletIo, Contexts.WalletMaintenance, Contexts.EngineCandidate, Contexts.CriticalWallet, Contexts.CriticalTx, Contexts.BatchingIo)
+        Contexts.Database, Contexts.SnapshotIo, Contexts.CandidateIo, Contexts.MiningControlIo, Contexts.Genesis, Contexts.EngineIo, Contexts.MempoolIo, Contexts.WalletIo, Contexts.WalletMaintenance, Contexts.EngineCandidate, Contexts.CriticalWallet, Contexts.CriticalTx, Contexts.BatchingIo,
+        Contexts.LithosDexBatchingIo)
   }
 
   it should "reject an apiKeyHash that is the key rather than its hash" in {

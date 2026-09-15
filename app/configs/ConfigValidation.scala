@@ -123,7 +123,8 @@ object Configs {
     v.doubleRange("stratum.candidate.blockShare", v.double("stratum.candidate.blockShare"), 0.0, 1.0,
       "fraction of the block's byte and cost limits this client's package may claim")
     Seq(configs.CandidateSourceConfig.Rollups, configs.CandidateSourceConfig.Emissions,
-      configs.CandidateSourceConfig.Rent, configs.CandidateSourceConfig.ErgoDex).foreach { source =>
+      configs.CandidateSourceConfig.Rent, configs.CandidateSourceConfig.ErgoDex,
+      configs.CandidateSourceConfig.LithosDex).foreach { source =>
       v.bool(s"stratum.candidate.sources.$source.enabled")
       v.range(s"stratum.candidate.sources.$source.maxTxs",
         v.int(s"stratum.candidate.sources.$source.maxTxs"), 0, 100, "transactions inserted per block")
@@ -168,6 +169,31 @@ object Configs {
     v.range("batching.ergodex.maxPoolAgeBlocks", v.int("batching.ergodex.maxPoolAgeBlocks"), 1, 10000000,
       "blocks since a pool last traded")
     v.bool("batching.ergodex.broadcast")
+    v.longRange("batching.ergodex.skippedOrderTtlMs", v.long("batching.ergodex.skippedOrderTtlMs"),
+      60000L, 86400000L, "ms an unbuildable order is left out")
+    v.range("batching.ergodex.maxSkippedOrders", v.int("batching.ergodex.maxSkippedOrders"), 0, 100000,
+      "unbuildable orders remembered; about 200 bytes each")
+
+    // ---- batching.lithosdex ----
+    v.bool("batching.lithosdex.enabled")
+    v.longRange("batching.lithosdex.scanIntervalMs", v.long("batching.lithosdex.scanIntervalMs"),
+      5000L, 3600000L, "ms between order scans; each pages the node's indexer")
+    v.range("batching.lithosdex.maxTrackedOrders", v.int("batching.lithosdex.maxTrackedOrders"), 1, 4096,
+      "order ids held between scans")
+    v.range("batching.lithosdex.maxOrdersPerBlock", v.int("batching.lithosdex.maxOrdersPerBlock"), 0, 100,
+      "orders executed per block or broadcast pass")
+    v.longRange("batching.lithosdex.minRevenueNanoErg", v.long("batching.lithosdex.minRevenueNanoErg"),
+      0L, 1000000000000L, "nanoERG")
+    v.longRange("batching.lithosdex.broadcastMinRevenueNanoErg",
+      v.long("batching.lithosdex.broadcastMinRevenueNanoErg"), 0L, 1000000000000L, "nanoERG")
+    v.longRange("batching.lithosdex.broadcastMinerFeeCeiling",
+      v.long("batching.lithosdex.broadcastMinerFeeCeiling"), 0L, 100000000L, "nanoERG per execution")
+    v.bool("batching.lithosdex.broadcast")
+    v.bool("batching.lithosdex.autoFlush")
+    v.longRange("batching.lithosdex.skippedOrderTtlMs", v.long("batching.lithosdex.skippedOrderTtlMs"),
+      60000L, 86400000L, "ms an unbuildable order is left out")
+    v.range("batching.lithosdex.maxSkippedOrders", v.int("batching.lithosdex.maxSkippedOrders"), 0, 100000,
+      "unbuildable orders remembered; about 200 bytes each")
 
     // ---- emission ----
     v.bool("emission.enabled")

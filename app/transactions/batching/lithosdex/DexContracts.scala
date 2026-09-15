@@ -1,7 +1,7 @@
-package transactions.dex
+package transactions.batching.lithosdex
 
 import lithosdex.contracts.LDContracts
-import org.ergoplatform.appkit.{BlockchainContext, ErgoValue}
+import org.ergoplatform.appkit.{BlockchainContext, ErgoValue, NetworkType}
 import work.lithos.mutations.InputUTXO
 
 import scala.jdk.CollectionConverters.iterableAsScalaIterableConverter
@@ -11,9 +11,11 @@ object DexContracts {
 
   private var compiled: Option[LDContracts] = None
 
-  def apply(ctx: BlockchainContext): LDContracts = synchronized {
+  def apply(ctx: BlockchainContext): LDContracts = apply(ctx.getNetworkType)
+
+  def apply(networkType: NetworkType): LDContracts = synchronized {
     compiled.getOrElse {
-      val all = LDContracts(ctx)
+      val all = LDContracts(networkType)
       compiled = Some(all)
       all
     }

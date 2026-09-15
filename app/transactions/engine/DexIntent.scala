@@ -2,14 +2,14 @@ package transactions.engine
 
 import api.models._
 import cache.LDCache
-import transactions.engine.execution.DexExecution
+import transactions.engine.execution.DexAPIExecution
 
 /**
  * One mutating LithosDex operation, carried to the engine as an ordinary intent. Read-only queries
  * do not appear here: they never touch the wallet and are served without queuing.
  */
 sealed trait DexIntent {
-  def execute(execution: DexExecution, cache: LDCache): Any
+  def execute(execution: DexAPIExecution, cache: LDCache): Any
 }
 
 object DexIntent {
@@ -32,25 +32,25 @@ object DexIntent {
     visit(intent)
   }
   final case class Swap(request: LDSwapExecuteRequest) extends DexIntent {
-    def execute(e: DexExecution, c: LDCache): LDSwapResult = e.swap(request, c)
+    def execute(e: DexAPIExecution, c: LDCache): LDSwapResult = e.swap(request, c)
   }
   final case class Deposit(request: LDDepositExecuteRequest) extends DexIntent {
-    def execute(e: DexExecution, c: LDCache): LDDepositResult = e.deposit(request, c)
+    def execute(e: DexAPIExecution, c: LDCache): LDDepositResult = e.deposit(request, c)
   }
   final case class Redeem(request: LDRedeemRequest) extends DexIntent {
-    def execute(e: DexExecution, c: LDCache): LDRedeemResult = e.redeem(request, c)
+    def execute(e: DexAPIExecution, c: LDCache): LDRedeemResult = e.redeem(request, c)
   }
   final case class Claim(boxId: String, request: LDClaimRequest) extends DexIntent {
-    def execute(e: DexExecution, c: LDCache): LDClaimResult = e.claimProvision(boxId, request, c)
+    def execute(e: DexAPIExecution, c: LDCache): LDClaimResult = e.claimProvision(boxId, request, c)
   }
   final case class Resize(boxId: String, request: LDResizeRequest) extends DexIntent {
-    def execute(e: DexExecution, c: LDCache): LDResizeResult = e.resize(boxId, request, c)
+    def execute(e: DexAPIExecution, c: LDCache): LDResizeResult = e.resize(boxId, request, c)
   }
   final case class Flush(request: LDFlushRequest) extends DexIntent {
-    def execute(e: DexExecution, c: LDCache): LDFlushResult = e.flush(request, c)
+    def execute(e: DexAPIExecution, c: LDCache): LDFlushResult = e.flush(request, c)
   }
   final case class Refresh(boxId: String) extends DexIntent {
-    def execute(e: DexExecution, c: LDCache): Refreshed = e.refreshProvision(boxId)
+    def execute(e: DexAPIExecution, c: LDCache): Refreshed = e.refreshProvision(boxId)
   }
   final case class Refreshed(boxId: String, txId: String, outcome: String)
 }

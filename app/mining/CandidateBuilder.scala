@@ -1,7 +1,7 @@
 package mining
 
 import akka.actor.{Actor, ActorRef, Cancellable}
-import akka.pattern.ask
+import akka.pattern.{AskTimeoutException, ask}
 import akka.util.Timeout
 import configs.CandidateConfig
 import configs.Contexts
@@ -38,7 +38,15 @@ class CandidateBuilder(client: ErgoClient,
   private val collectionEc: ExecutionContext =
     context.system.dispatchers.lookup(Contexts.key(Contexts.EngineCandidate))
 
-  private implicit val askTimeout: Timeout = Timeout(config.blockTxTimeout.milliseconds)
+  /**
+   * How long a collection round waits for sources. The rest of `blockTxTimeout` is left for admission and
+   * the holding top-up, so a round that stops waiting can still publish inside the deadline.
+   */
+  private val sourceDeadlineMs: Int =
+    math.max(1, config.blockTxTimeout - math.min(MaxAssemblyReserveMs, config.blockTxTimeout / 4))
+  private val sourceDeadlineNanos: Long = sourceDeadlineMs.milliseconds.toNanos
+
+  private implicit val askTimeout: Timeout = Timeout(sourceDeadlineMs.milliseconds)
 
   private def limitsFor(name: String): configs.CandidateSourceConfig =
     config.sources.getOrElse(name, configs.CandidateSourceConfig.Default)
@@ -77,8 +85,23 @@ class CandidateBuilder(client: ErgoClient,
   private var activeBuild: Option[UUID] = None
   private var refreshing: Boolean = false
 
-  /** Identity and deadline of the only collection allowed to update the current genesis. */
-  private var collectingFor: Option[CollectionAttempt] = None
+  /**
+   * The only collection round allowed to update the current genesis: its identity and deadline, each
+   * source's admitted bundles at that source's index in `enabledSources`, and whether it has stopped
+   * waiting on sources.
+   */
+  private final class Collection(val attempt: CollectionAttempt,
+                                 val budgets: Future[(CandidateBudget, CandidateBudget)]) {
+    val answers: Array[Option[Seq[CandidateBundle]]] = Array.fill(enabledSources.size)(None)
+    var waitingOn: Int = enabledSources.size
+    var assembling: Boolean = false
+  }
+
+  private var collectingFor: Option[Collection] = None
+
+  /** The round `attempt` names, while it is still waiting on sources. */
+  private def waitingRound(attempt: CollectionAttempt): Option[Collection] =
+    collectingFor.filter(round => round.attempt == attempt && !round.assembling)
 
   /** Fences build results across chain changes and replacement genesis transactions. */
   private var buildGeneration: UUID = UUID.randomUUID()
@@ -238,8 +261,24 @@ class CandidateBuilder(client: ErgoClient,
       }
       drainPending()
 
-    case BlockTxsCollected(attempt, txs, revenue) =>
-      if (collectingFor.contains(attempt)) {
+    // A timer can reach the mailbox late, so an answer at or past the source deadline is not taken.
+    case SourceAnswered(attempt, index, bundles) =>
+      waitingRound(attempt).foreach { round =>
+        if (nowNanos() - attempt.startedAt >= sourceDeadlineNanos) stopWaiting(round)
+        else {
+          if (round.answers(index).isEmpty) {
+            round.answers(index) = Some(bundles)
+            round.waitingOn -= 1
+          }
+          if (round.waitingOn == 0) assemble(round)
+        }
+      }
+
+    case SourcesDue(attempt) =>
+      waitingRound(attempt).foreach(stopWaiting)
+
+    case BlockTxsCollected(attempt, txs, revenue, from) =>
+      if (collectingFor.exists(_.attempt == attempt)) {
         if (nowNanos() - attempt.startedAt >= config.blockTxTimeout.milliseconds.toNanos) {
           expireCollection(attempt)
         } else {
@@ -247,7 +286,7 @@ class CandidateBuilder(client: ErgoClient,
           currentPackage.filter(p => p.blockHeight == attempt.height &&
             p.collateral.txId == attempt.genesisId && !blockTxsBlockedAt.contains(attempt.height))
             .filter(_ => txs.nonEmpty || attempt.refresh || config.waitForBlockPackage).foreach { pkg =>
-              val updated = pkg.withBlockTxs(txs, revenue)
+              val updated = pkg.withBlockTxs(txs, revenue, from)
               currentPackage = Some(updated)
               publish(updated, "augmentedBuildMs", collectStartedAt, refreshed = attempt.refresh)
             }
@@ -255,7 +294,7 @@ class CandidateBuilder(client: ErgoClient,
       }
 
     case CollectTimedOut(attempt) =>
-      if (collectingFor.contains(attempt)) expireCollection(attempt)
+      if (collectingFor.exists(_.attempt == attempt)) expireCollection(attempt)
 
     case CollateralSetLoaded(boxes) =>
       refreshing = false
@@ -404,19 +443,25 @@ class CandidateBuilder(client: ErgoClient,
       logger.info(s"Block $height $where refused ${refused.size} bundle(s): " +
         refused.map(_.toString).mkString("; "))
 
-  /** Collects one bounded round in source order; refresh requests rebuild mempool-dependent offers. */
+  /**
+   * Asks every enabled source for its allowance. Each answer reaches the mailbox on its own, and the
+   * round assembles once all have answered or the source deadline passes, whichever is first.
+   */
   private def collectBlockTxs(height: Int, refresh: Boolean = false): Unit =
     if (collectingFor.isEmpty && enabledSources.nonEmpty && totalTxLimit > 0) {
       val attempt = CollectionAttempt(UUID.randomUUID(), height,
         currentPackage.get.collateral.txId, nowNanos(), refresh)
-      collectingFor = Some(attempt)
+      // Started with the round so assembly does not wait on it
+      collectingFor = Some(new Collection(attempt, readBudgets(height)))
       collectStartedAt = System.nanoTime()
+      context.system.scheduler.scheduleOnce(
+        sourceDeadlineMs.milliseconds, self, SourcesDue(attempt))(context.dispatcher)
       context.system.scheduler.scheduleOnce(
         config.blockTxTimeout.milliseconds, self, CollectTimedOut(attempt))(context.dispatcher)
 
-      // Each source is asked for its own allowance and bounded against it before anything is
-      // combined, so a busy source cannot take the space a quieter one was given.
-      val asks = enabledSources.map { source =>
+      // Each source is bounded against its own allowance before anything is combined, so a busy
+      // source cannot take the space a quieter one was given.
+      enabledSources.zipWithIndex.foreach { case (source, index) =>
         val limits = limitsFor(source.name)
         (source.ref ? RequestBlockTxs(height, limits.maxTxs, refresh))
           .mapTo[BlockTxsReady]
@@ -430,34 +475,70 @@ class CandidateBuilder(client: ErgoClient,
             }
           }
           .recover {
+            // A source that missed the deadline is named by the round itself
+            case _: AskTimeoutException => Seq.empty[CandidateBundle]
             case ex =>
               logger.warn(s"Transaction source ${source.name} failed for block $height: ${ex.getMessage}")
               Seq.empty[CandidateBundle]
-          }.map(source.name -> _)
+          }
+          .foreach(bundles => self ! SourceAnswered(attempt, index, bundles))
       }
-
-      // Charge the signed genesis bytes and cost before admitting source bundles.
-      val genesis = currentPackage.map(_.collateral)
-      val genesisBytes = genesis.map(_.signedSizeBytes.toLong).getOrElse(0L)
-      val genesisCost = genesis.map(_.cost).getOrElse(0L)
-      Future.sequence(asks).zip(readBudgets(height))
-        .map { case (all, (blockBudget, packageBudget)) =>
-          val budget = packageBudget.less(genesisBytes, genesisCost)
-          val (kept, txs, refused) = CandidateBundle.admit(all.flatMap(_._2), totalTxLimit, budget)
-          logRefusals("package", height, refused)
-          val ledger = capitalFor(height, kept)
-          val topUp = topUpFor(height, ledger, txs, budget, genesis)
-          if (config.logBudgets)
-            logBudgets(height, all, kept, txs, topUp, genesisBytes, genesisCost, blockBudget, packageBudget)
-          BlockTxsCollected(attempt, txs ++ topUp, ledger.availableErg)
-        }(collectionEc)
-        .onComplete {
-          case Success(msg) => self ! msg
-          case Failure(ex) =>
-            logger.warn(s"Could not collect block transactions for $height: ${ex.getMessage}")
-            self ! BlockTxsCollected(attempt, Seq.empty[CandidateTx])
-        }
     }
+
+  /**
+   * Stops waiting on sources that have not answered. A refresh keeps the published package when a late
+   * source carries work in it, since publishing without that source would drop the work; anything else
+   * is assembled from the sources that answered.
+   */
+  private def stopWaiting(round: Collection): Unit = {
+    val attempt = round.attempt
+    val (answered, late) = enabledSources.indices.partition(i => round.answers(i).nonEmpty)
+    val lateNames = late.map(i => enabledSources(i).name)
+    val summary = s"${lateNames.mkString(", ")} did not answer within ${sourceDeadlineMs}ms (answered: " +
+      s"${if (answered.isEmpty) "none" else answered.map(i => enabledSources(i).name).mkString(", ")})"
+    if (attempt.refresh && currentPackage.exists(pkg => lateNames.exists(pkg.sources.contains))) {
+      collectingFor = None
+      logger.warn(s"Package refresh for block ${attempt.height}: $summary; retaining the published " +
+        "package, which carries work from a late source")
+    } else {
+      if (attempt.refresh) logger.warn(s"Package refresh for block ${attempt.height}: $summary")
+      else logger.error(s"Block ${attempt.height}: $summary; building the package without them")
+      assemble(round)
+    }
+  }
+
+  /** Admits what the round's sources offered, in source order, and builds the top-up off the mailbox. */
+  private def assemble(round: Collection): Unit = {
+    round.assembling = true
+    val attempt = round.attempt
+    val height = attempt.height
+    val offered = enabledSources.indices.flatMap(i => round.answers(i).map(enabledSources(i).name -> _))
+    // Charge the signed genesis bytes and cost before admitting source bundles.
+    val genesis = currentPackage.map(_.collateral)
+    val genesisBytes = genesis.map(_.signedSizeBytes.toLong).getOrElse(0L)
+    val genesisCost = genesis.map(_.cost).getOrElse(0L)
+    round.budgets
+      .map { case (blockBudget, packageBudget) =>
+        val budget = packageBudget.less(genesisBytes, genesisCost)
+        val (kept, txs, refused) = CandidateBundle.admit(offered.flatMap(_._2), totalTxLimit, budget)
+        logRefusals("package", height, refused)
+        val ledger = capitalFor(height, kept)
+        val topUp = topUpFor(height, ledger, txs, budget, genesis)
+        if (config.logBudgets)
+          logBudgets(height, offered, kept, txs, topUp, genesisBytes, genesisCost, blockBudget, packageBudget)
+        val selected = txs.iterator.map(_.id).toSet
+        val from = offered.collect {
+          case (name, bundles) if bundles.exists(_.members.exists(tx => selected.contains(tx.id))) => name
+        }.toSet
+        BlockTxsCollected(attempt, txs ++ topUp, ledger.availableErg, from)
+      }(collectionEc)
+      .onComplete {
+        case Success(msg) => self ! msg
+        case Failure(ex) =>
+          logger.warn(s"Could not collect block transactions for $height: ${ex.getMessage}")
+          self ! BlockTxsCollected(attempt, Seq.empty[CandidateTx])
+      }
+  }
 
   /** Credits each admitted revenue output once. */
   private def capitalFor(height: Int, kept: Seq[CandidateBundle]): CandidateCapital =
@@ -530,7 +611,7 @@ class CandidateBuilder(client: ErgoClient,
       s"block limits: bytes=${block.maxBytes}, cost=${block.maxCost}; " +
       s"genesis: bytes=$genesisBytes, cost=$genesisCost; " +
       s"top-up: bytes=${topUp.map(_.sizeBytes).getOrElse(0)}, cost=${topUp.map(_.cost).getOrElse(0L)}; " +
-      "carried ancestor cost is unknown")
+      "carried ancestors count only the cost the node reported")
   }
 
   private def startRefresh(): Unit =
@@ -553,6 +634,9 @@ object CandidateBuilder {
   /** How long after a block to run the collateral refresh, so it is not competing with the build. */
   private[mining] final val PostBlockRefreshDelay: FiniteDuration = 2.seconds
 
+  /** Most of `blockTxTimeout` held back from sources for admission and the top-up; never over a quarter of it. */
+  private[mining] final val MaxAssemblyReserveMs = 2000
+
   /** Number of blocks to exclude a spent collateral box still reported by the indexer. */
   private[mining] final val SpentMemoryBlocks: Int = 3
 
@@ -571,7 +655,15 @@ object CandidateBuilder {
   private[mining] case class CollectionAttempt(id: UUID, height: Int, genesisId: String, startedAt: Long,
                                               refresh: Boolean = false)
 
-  private[mining] case class BlockTxsCollected(attempt: CollectionAttempt, txs: Seq[CandidateTx], revenue: Long = 0L)
+  /** One source's admitted bundles for a round; empty when it failed. `index` is its place among enabled sources. */
+  private[mining] case class SourceAnswered(attempt: CollectionAttempt, index: Int, bundles: Seq[CandidateBundle])
+
+  /** A round's source deadline: stop waiting on sources that have not answered. */
+  private[mining] case class SourcesDue(attempt: CollectionAttempt)
+
+  /** @param from names of the sources whose transactions `txs` carries */
+  private[mining] case class BlockTxsCollected(attempt: CollectionAttempt, txs: Seq[CandidateTx], revenue: Long = 0L,
+                                               from: Set[String] = Set.empty)
 
   private[mining] case class CollectTimedOut(attempt: CollectionAttempt)
 

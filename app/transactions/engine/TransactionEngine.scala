@@ -8,7 +8,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 import scala.concurrent.Future
 import scala.concurrent.duration._
 import scala.util.{Failure, Success, Try}
-import transactions.engine.execution.{ConsolidationExecution, DexExecution, RollupExecution}
+import transactions.engine.execution.{ConsolidationExecution, DexAPIExecution, RollupExecution}
 import transactions.engine.wallet.{EngineFunding, EngineWalletState}
 
 object TransactionEngine {
@@ -143,7 +143,7 @@ class TransactionEngine @Inject()(node: NodeContext,
     if (consolidationEnabled) ConsolidationExecution.OutcomeNotObserved else ConsolidationExecution.OutcomeDisabled)
 
   private lazy val consolidation = new ConsolidationExecution(node, nodeApi, self, walletConfig)
-  private lazy val dex = new DexExecution(node, EngineFunding(self, EngineFunding.askTimeout(config), ec), () => alive.get()) {
+  private lazy val dex = new DexAPIExecution(node, EngineFunding(self, EngineFunding.askTimeout(config), ec), () => alive.get()) {
     override protected def executionNode: _root_.node.NodeApi = TransactionEngine.this.nodeApi
   }
   private lazy val dexCache = new cache.LDCache(cacheApi)

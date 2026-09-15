@@ -33,7 +33,7 @@ final case class CandidateBundle(members: Vector[CandidateTx],
  *
  * Deliberately a share rather than the whole limit. The node adds its own emission and
  * fee-collection transactions and selects a remainder this client never sees, and an unconfirmed
- * ancestor carried into the package reports no execution cost at all. Leaving the rest of the block
+ * ancestor carried into the package counts no cost unless the node reported one. Leaving the rest of the block
  * unclaimed is what keeps those unknowns from turning into a rejected candidate.
  */
 final case class CandidateBudget(maxBytes: Long, maxCost: Long) {

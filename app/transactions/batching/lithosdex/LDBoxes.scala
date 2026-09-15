@@ -1,4 +1,4 @@
-package transactions.dex
+package transactions.batching.lithosdex
 
 import lithosdex.LDHelpers
 import node.MutationConversions._
@@ -94,19 +94,58 @@ object LDBoxes {
   /**
    * Every live provision box: locked under the guard and holding exactly one provision token.
    *
-   * Mempool-aware, matching pool and vault discovery.
+   * Mempool-aware by default, matching pool and vault discovery. `ConfirmedOnly` instead returns
+   * confirmed boxes including those an unconfirmed transaction spends, which is what a block builder
+   * superseding that transaction needs.
    */
-  def provisionBoxes(ctx: BlockchainContext, nodeApi: NodeApi): Seq[Provision] = {
+  def provisionBoxes(ctx: BlockchainContext, nodeApi: NodeApi,
+                     mempool: MempoolOptions = MempoolOptions.WithMempool): Seq[Provision] = {
     // Hoisted, both of them. `ErgoId.toString` hex-encodes 32 bytes on every call, so leaving it in
     // the predicate throws away one string per box scanned.
     val provTokenId = LDHelpers.getProvToken(ctx.getNetworkType).toString
     val guard = DexContracts(ctx).provisionGuard.ergoTreeHex
 
     pagedIndex("provisions")(page =>
-      nodeApi.unspentBoxesByErgoTree(guard, page, Asc, MempoolOptions.WithMempool))
+      nodeApi.unspentBoxesByErgoTree(guard, page, Asc, mempool))
       .filter(b => isProvision(b.ergoTree, b.assets.map(a => a.tokenId -> a.amount), guard, provTokenId))
       .map(b => readProvision(b.toInputUTXO(ctx)))
   }
+
+  /**
+   * Live provisions whose R6 names one of `owners`, and whether the listing was read to its end.
+   *
+   * R6 is matched as the node reports it, a serialized 32-byte `Coll[Byte]`, so only matching boxes are
+   * decoded. At the scan ceiling this returns what it read rather than throwing: a provision found is
+   * still the provision its owner holds.
+   */
+  def provisionsOwnedBy(ctx: BlockchainContext, nodeApi: NodeApi, owners: Set[String],
+                        mempool: MempoolOptions): (Seq[Provision], Boolean) = {
+    val provTokenId = LDHelpers.getProvToken(ctx.getNetworkType).toString
+    val guard = DexContracts(ctx).provisionGuard.ergoTreeHex
+    val wanted = owners.map(owner => OwnerRegisterPrefix + owner.toLowerCase)
+
+    var found = Vector.empty[Provision]
+    var paging = Paging(0, PageSize)
+    var pages = 0
+    var exhausted = false
+    while (!exhausted && pages < MaxPages) {
+      val page = nodeApi.unspentBoxesByErgoTree(guard, paging, Asc, mempool) match {
+        case Success(boxes) => boxes
+        case Failure(ex) => throw indexUnavailable(s"the node index reading provisions (stopped after $pages page(s))", ex)
+      }
+      found ++= page
+        .filter(b => b.box.additionalRegisters.get(6).exists(r => wanted.contains(r.toLowerCase)) &&
+          isProvision(b.ergoTree, b.assets.map(a => a.tokenId -> a.amount), guard, provTokenId))
+        .map(b => readProvision(b.toInputUTXO(ctx)))
+      exhausted = page.size < paging.limit
+      paging = paging.next
+      pages += 1
+    }
+    (found, exhausted)
+  }
+
+  /** How the node serializes a 32-byte `Coll[Byte]` register ahead of its bytes: type 0x0e, length 0x20. */
+  private final val OwnerRegisterPrefix = "0e20"
 
   /** R4 entryX, R5 entryY, R6 ownerNFT, R7 shares. */
   def readProvision(box: InputUTXO): Provision = Provision(

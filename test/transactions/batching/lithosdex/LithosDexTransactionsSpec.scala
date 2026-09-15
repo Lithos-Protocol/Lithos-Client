@@ -1,4 +1,4 @@
-package transactions.dex
+package transactions.batching.lithosdex
 import transactions.engine.wallet.EngineWalletState
 
 import akka.actor.ActorSystem
@@ -11,7 +11,7 @@ import org.ergoplatform.sdk.ErgoId
 import org.scalatest.BeforeAndAfterAll
 import org.scalatest.flatspec.AnyFlatSpecLike
 import support.FakeNodeContext
-import transactions.dex.LDBoxes.{Provision => LiveProvision}
+import transactions.batching.lithosdex.LDBoxes.{Provision => LiveProvision}
 import transactions.engine.wallet.EngineWalletMessages.{ReleaseInputs, SelectInputs, WalletInputs}
 import transactions.engine.wallet.EngineFunding
 import work.lithos.mutations.{InputUTXO, Token, UTXO}

@@ -3,7 +3,7 @@ package transactions.batching.ergodex
 import akka.actor.{ActorRef, ActorSystem, Props}
 import akka.testkit.{TestActor, TestKit, TestProbe}
 import com.typesafe.config.ConfigFactory
-import configs.{BatchingConfig, CandidateSourceConfig}
+import configs.BatchingConfig
 import node.model._
 import node.{NodeApi, NodeError}
 import org.mockito.ArgumentMatchers.{any, anyString}
@@ -15,6 +15,7 @@ import org.scalatestplus.mockito.MockitoSugar
 import state.synchronization.CompleteMempool
 import support.ErgoDexFixtures._
 import support.{ChainFixtures, FakeNodeContext}
+import transactions.batching.Batcher
 import transactions.candidate.BlockTxMessages.{BlockTxsReady, CandidateTx, ChainFromMempool, IncludeExisting, RequestBlockTxs, Supersede}
 import transactions.candidate.CandidateBundle
 
@@ -22,12 +23,12 @@ import java.util.concurrent.atomic.AtomicInteger
 import scala.concurrent.duration._
 import scala.util.{Failure, Success}
 
-object ErgoDexSourceSpec {
+object ErgoDexBatcherSpec {
   val config: com.typesafe.config.Config = ConfigFactory.parseString("akka.test.single-expect-default = 20s")
     .withFallback(ConfigFactory.parseResources("application.conf").resolve())
 }
 
-class ErgoDexSourceSpec extends TestKit(ActorSystem("ergodex-source-spec", ErgoDexSourceSpec.config))
+class ErgoDexBatcherSpec extends TestKit(ActorSystem("ergodex-batcher-spec", ErgoDexBatcherSpec.config))
   with AnyFlatSpecLike with Matchers with BeforeAndAfterAll with MockitoSugar {
 
   override def afterAll(): Unit = TestKit.shutdownActorSystem(system)
@@ -51,7 +52,9 @@ class ErgoDexSourceSpec extends TestKit(ActorSystem("ergodex-source-spec", ErgoD
     "0008cd02" + "11" * 32)
 
   private class Fixture(broadcast: Boolean = false, discoverable: Boolean = true,
-                        initialOrder: NodeBox = orderBox, initialPool: NodeBox = poolBox) {
+                        initialOrder: NodeBox = orderBox, initialPool: NodeBox = poolBox,
+                        servesCandidates: Boolean = true, observes: Boolean = true,
+                        buildBudgetMs: Long = Batcher.DefaultBuildBudgetMs) {
     val api: NodeApi = mock[NodeApi]
     val (nodeContext, _, _) = FakeNodeContext(api, numAddresses = 1)
 
@@ -60,12 +63,13 @@ class ErgoDexSourceSpec extends TestKit(ActorSystem("ergodex-source-spec", ErgoD
     @volatile var orders: Seq[NodeBox] = Seq(initialOrder)
     @volatile var pool: NodeBox = initialPool
     @volatile var poolUnspent: Boolean = true
+    @volatile var walletUnspent: Boolean = true
     val observations = new AtomicInteger(0)
 
     val engine = TestProbe()
     engine.setAutoPilot(new TestActor.AutoPilot {
       def run(sender: ActorRef, msg: Any): TestActor.AutoPilot = {
-        if (msg == CompleteMempool.Refresh) {
+        if (msg == CompleteMempool.Refresh && observes) {
           observations.incrementAndGet()
           sender ! CompleteMempool.Observation(1L, Some(CompleteMempool.Snapshot(anchor,
             mempool.map(_.id).toSet, mempool.flatMap(_.body.inputs.map(_.boxId)).toSet, System.nanoTime(),
@@ -89,13 +93,14 @@ class ErgoDexSourceSpec extends TestKit(ActorSystem("ergodex-source-spec", ErgoD
       }
     when(api.boxesWithPoolByIds(any[Seq[String]])).thenAnswer { inv =>
       val wanted = inv.getArgument[Seq[String]](0).toSet
-      Success((orders ++ Seq(pool).filter(_ => poolUnspent) :+ walletBox).filter(box => wanted.contains(box.boxId)))
+      Success((orders ++ Seq(pool).filter(_ => poolUnspent) ++ Seq(walletBox).filter(_ => walletUnspent))
+        .filter(box => wanted.contains(box.boxId)))
     }
     when(api.sendTransaction(anyString())).thenReturn(Failure(NodeError.Rejected("refused by the test")))
 
-    val source: ActorRef = system.actorOf(Props(new ErgoDexSource(nodeContext,
+    val source: ActorRef = system.actorOf(Props(new ErgoDexBatcher(nodeContext,
       BatchingConfig.Default.copy(scanIntervalMs = 3600000L, broadcast = broadcast),
-      CandidateSourceConfig.Default.copy(maxTxs = 8), engine.ref, useTrueProp = false)))
+      servesCandidates, engine.ref, useTrueProp = false, buildBudgetMs)))
 
     def offered(): Seq[CandidateBundle] = {
       val height = heights.incrementAndGet()
@@ -139,6 +144,14 @@ class ErgoDexSourceSpec extends TestKit(ActorSystem("ergodex-source-spec", ErgoD
       verify(f.api, timeout(30000).times(1)).sendTransaction(anyString())
       f.stop()
     }
+  }
+
+  it should "answer within its build budget when a mempool observation never arrives" in {
+    val f = new Fixture(observes = false, buildBudgetMs = 500L)
+    val asked = Deadline.now
+    f.offered() shouldBe empty
+    (Deadline.now - asked).toMillis should be < 5000L
+    f.stop()
   }
 
   it should "leave alone an order its owner is taking back" in {
@@ -211,6 +224,29 @@ class ErgoDexSourceSpec extends TestKit(ActorSystem("ergodex-source-spec", ErgoD
     f.stop()
   }
 
+  /** A candidate request carrying the placement makes the node evict it; every request here is a new height. */
+  it should "keep executing a wallet-placed order after the node evicts its placement, until its input is spent" in {
+    val f = new Fixture(discoverable = false)
+    val placement = mempoolTx(id("b"), Seq(walletBox.boxId), Seq(orderBox))
+    f.mempool = Vector(placement)
+    f.offered().head.members.head.id shouldBe placement.id
+
+    f.mempool = Vector.empty
+    val carried = f.offered()
+    carried should have size 1
+    carried.head.members.head.id shouldBe placement.id
+    carried.head.members.last.inputIds should contain(orderBox.boxId)
+    f.offered().head.members.head.id shouldBe placement.id
+
+    f.walletUnspent = false
+    f.offered() shouldBe empty
+    withClue("a placement whose input was spent is forgotten, not held for when a read passes again: ") {
+      f.walletUnspent = true
+      f.offered() shouldBe empty
+    }
+    f.stop()
+  }
+
   it should "not execute an order whose placement spends a pool or another order" in {
     val f = new Fixture(discoverable = false)
     f.mempool = Vector(mempoolTx(id("b"), Seq(poolBox.boxId, walletBox.boxId),
@@ -274,8 +310,71 @@ class ErgoDexSourceSpec extends TestKit(ActorSystem("ergodex-source-spec", ErgoD
     f.orders = Seq(orderBox)
     f.offered() shouldBe empty
 
-    f.source ! ErgoDexSource.ScanTick
+    f.source ! Batcher.ScanTick
     f.offeredOnceTracked() should not be empty
+    f.stop()
+  }
+
+  /**
+   * Module builds the batcher through Guice, so a constructor Guice cannot satisfy stops the client
+   * from starting at all. Guice's own analysis names the constructor it will use and the keys that
+   * constructor needs, each of which Module binds; the actor is then started through that constructor
+   * against the shipped configuration. Guice's instantiation itself is not run: its bytecode
+   * generation needs `--add-opens` on JDK 17, which this build does not set.
+   */
+  "Module" should "be able to build and start the batcher from configuration alone" in {
+    import scala.collection.JavaConverters._
+    val point = com.google.inject.spi.InjectionPoint.forConstructorOf(classOf[ErgoDexBatcher])
+    point.getDependencies.asScala.map(_.getKey) shouldBe Seq(
+      com.google.inject.Key.get(classOf[configs.NodeContext]),
+      com.google.inject.Key.get(classOf[play.api.Configuration]),
+      com.google.inject.Key.get(classOf[ActorRef], com.google.inject.name.Names.named("transaction-engine")))
+
+    val (nodeContext, _, _) = FakeNodeContext(mock[NodeApi], numAddresses = 1)
+    val engine = TestProbe()
+    val batcher = system.actorOf(Props(classOf[ErgoDexBatcher], nodeContext,
+      play.api.Configuration(ErgoDexBatcherSpec.config), engine.ref))
+
+    // The shipped configuration leaves the ErgoDEX candidate source off, so it answers with nothing
+    val requester = TestProbe()
+    requester.send(batcher, RequestBlockTxs(heights.incrementAndGet(), 8))
+    requester.expectMsgType[BlockTxsReady].bundles shouldBe empty
+    system.stop(batcher)
+  }
+
+  "A batcher" should "not scan when neither a broadcast nor a stratum would use what it finds" in {
+    // The first scan fires a second after start. Both fixtures are given the same settle, so the only
+    // difference between them is whether anything consumes the scan.
+    val used = new Fixture(servesCandidates = true)
+    val idle = new Fixture(servesCandidates = false)
+    Thread.sleep(4000)
+    verify(used.api, org.mockito.Mockito.atLeastOnce())
+      .unspentBoxesByTemplateHash(anyString(), any[Paging], any[SortDirection], any[MempoolOptions])
+    verify(idle.api, org.mockito.Mockito.never())
+      .unspentBoxesByTemplateHash(anyString(), any[Paging], any[SortDirection], any[MempoolOptions])
+    used.stop()
+    idle.stop()
+  }
+
+  it should "broadcast without a stratum, and offer a stratum nothing" in {
+    val f = new Fixture(broadcast = true, servesCandidates = false)
+    verify(f.api, timeout(30000).times(1)).sendTransaction(anyString())
+    f.offered() shouldBe empty
+    f.stop()
+  }
+
+  it should "answer every candidate request with nothing when its stratum does not use it" in {
+    val serving = new Fixture()
+    serving.offeredOnceTracked() should not be empty
+    serving.stop()
+
+    // Tracked the same order, since a scan is forced; the difference is the flag alone
+    val f = new Fixture(servesCandidates = false)
+    f.source ! Batcher.ScanTick
+    awaitAssert(verify(f.api, org.mockito.Mockito.atLeastOnce())
+      .unspentBoxesByTemplateHash(anyString(), any[Paging], any[SortDirection], any[MempoolOptions]), 30.seconds, 250.millis)
+    Thread.sleep(2000)
+    f.offered() shouldBe empty
     f.stop()
   }
 
@@ -284,7 +383,7 @@ class ErgoDexSourceSpec extends TestKit(ActorSystem("ergodex-source-spec", ErgoD
     verify(f.api, timeout(30000).times(1)).sendTransaction(anyString())
 
     val before = f.observations.get
-    awaitAssert({ f.source ! ErgoDexSource.ScanTick; f.observations.get should be > before },
+    awaitAssert({ f.source ! Batcher.ScanTick; f.observations.get should be > before },
       30.seconds, 250.millis)
     Thread.sleep(3000)
     verify(f.api, times(1)).sendTransaction(anyString())
@@ -295,7 +394,7 @@ class ErgoDexSourceSpec extends TestKit(ActorSystem("ergodex-source-spec", ErgoD
       moved.copy(boxId = moved.toInputUTXO(ctx).id.toString())
     }
     val settled = f.observations.get
-    awaitAssert({ f.source ! ErgoDexSource.ScanTick; f.observations.get should be > settled },
+    awaitAssert({ f.source ! Batcher.ScanTick; f.observations.get should be > settled },
       30.seconds, 250.millis)
     verify(f.api, timeout(30000).times(2)).sendTransaction(anyString())
     f.stop()
@@ -310,7 +409,7 @@ class ErgoDexSourceSpec extends TestKit(ActorSystem("ergodex-source-spec", ErgoD
     verify(f.api, times(0)).sendTransaction(anyString())
 
     f.mempool = Vector.empty
-    awaitAssert({ f.source ! ErgoDexSource.ScanTick; f.observations.get should be > 1 }, 30.seconds, 250.millis)
+    awaitAssert({ f.source ! Batcher.ScanTick; f.observations.get should be > 1 }, 30.seconds, 250.millis)
     verify(f.api, timeout(30000).times(1)).sendTransaction(anyString())
     f.stop()
   }

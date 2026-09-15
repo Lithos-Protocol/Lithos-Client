@@ -17,7 +17,12 @@ object MempoolSorting {
     }
 }
 
-/** Order discovery limits and revenue floors. Candidate transaction budgets are configured per source. */
+/**
+ * Order discovery limits and revenue floors. Candidate transaction budgets are configured per source.
+ *
+ * @param skippedOrderTtlMs how long an order that priced but could not be built is left out of scans and builds
+ * @param maxSkippedOrders  most such orders remembered at once, oldest forgotten first; 0 remembers none
+ */
 case class BatchingConfig(enabled: Boolean,
                           scanIntervalMs: Long,
                           maxTrackedOrders: Int,
@@ -28,7 +33,9 @@ case class BatchingConfig(enabled: Boolean,
                           broadcastMinerFeeCeiling: Long,
                           maxPoolAgeBlocks: Int,
                           broadcast: Boolean,
-                          deniedPools: Set[String])
+                          deniedPools: Set[String],
+                          skippedOrderTtlMs: Long,
+                          maxSkippedOrders: Int)
 
 object BatchingConfig {
 
@@ -44,7 +51,9 @@ object BatchingConfig {
     broadcastMinerFeeCeiling = 2000000L,
     maxPoolAgeBlocks = 20160,
     broadcast = false,
-    deniedPools = Set.empty)
+    deniedPools = Set.empty,
+    skippedOrderTtlMs = 3600000L,
+    maxSkippedOrders = 4096)
 
   def apply(config: Configuration, name: String): BatchingConfig = {
     def path(key: String): String = s"batching.$name.$key"
@@ -53,7 +62,7 @@ object BatchingConfig {
     def long(key: String, fallback: Long): Long =
       config.getOptional(path(key))(ConfigLoader.longLoader).getOrElse(fallback)
     def bool(key: String, fallback: Boolean): Boolean =
-      config.getOptional(s"stratum.candidate.$key")(ConfigLoader.booleanLoader).getOrElse(fallback)
+      config.getOptional(path(key))(ConfigLoader.booleanLoader).getOrElse(fallback)
 
     BatchingConfig(
       enabled = bool("enabled", Default.enabled),
@@ -65,10 +74,11 @@ object BatchingConfig {
       broadcastMinRevenueNanoErg = long("broadcastMinRevenueNanoErg", Default.broadcastMinRevenueNanoErg),
       broadcastMinerFeeCeiling = long("broadcastMinerFeeCeiling", Default.broadcastMinerFeeCeiling),
       maxPoolAgeBlocks = int("maxPoolAgeBlocks", Default.maxPoolAgeBlocks),
-      broadcast = config.getOptional(path("broadcast"))(ConfigLoader.booleanLoader)
-        .getOrElse(Default.broadcast),
+      broadcast = bool("broadcast", Default.broadcast),
       // Lowercased because token ids are compared as the node reports them.
       deniedPools = config.getOptional(path("deniedPools"))(ConfigLoader.seqStringLoader)
-        .map(_.map(_.trim.toLowerCase).toSet).getOrElse(Default.deniedPools))
+        .map(_.map(_.trim.toLowerCase).toSet).getOrElse(Default.deniedPools),
+      skippedOrderTtlMs = long("skippedOrderTtlMs", Default.skippedOrderTtlMs),
+      maxSkippedOrders = int("maxSkippedOrders", Default.maxSkippedOrders))
   }
 }

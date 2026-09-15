@@ -11,7 +11,7 @@ import scorex.utils.Longs
 import sigma.Colls
 import sigma.data.CBigInt
 import transactions.ProtocolContracts
-import transactions.dex.DexContracts
+import transactions.batching.lithosdex.DexContracts
 import transactions.rollups.TransactionMessages.LatestRollup
 import utils.Globals
 import utils.Helpers.{evalContract, holdingContract, holdingLogicContract, payoutContract}

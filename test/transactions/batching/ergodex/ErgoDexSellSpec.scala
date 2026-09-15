@@ -76,4 +76,32 @@ class ErgoDexSellSpec extends AnyFlatSpec with Matchers with MockitoSugar {
       }
     }
   }
+
+  /**
+   * The same live sell, owned by a 95-key OR. Its reward box is then about 3,300 bytes, so the 1,080,679
+   * nanoERG the order funds is under the node's 360 per byte. Signing accepts it; the node would not.
+   */
+  it should "not be built when its reward box is under the node's minimum for its size" in {
+    nodeContext.getClient.execute { ctx =>
+      import node.MutationConversions._
+      val g = sigma.crypto.CryptoConstants.dlogGroup
+      val manyKeys = sigma.data.COR((1 to 95).map(i =>
+        sigma.data.ProveDlog(g.exponentiate(g.generator, java.math.BigInteger.valueOf(2000L + i)))))
+      val tree = sigma.VersionContext.withVersions(sigma.VersionContext.V6SoftForkVersion, sigma.VersionContext.V6SoftForkVersion) {
+        sigma.serialization.ErgoTreeSerializer.DefaultSerializer.substituteConstants(
+          org.bouncycastle.util.encoders.Hex.decode(orderBox.ergoTree), Array(0),
+          Array(sigma.ast.SigmaPropConstant(manyKeys).asInstanceOf[sigma.ast.Constant[sigma.ast.SType]]))._1
+      }
+      val placed = orderBox.copy(ergoTree = org.bouncycastle.util.encoders.Hex.toHexString(tree))
+      val owned = ErgoDexOrder.parse(placed.copy(boxId = placed.toInputUTXO(ctx).id.toString))
+        .getOrElse(fail("the re-owned sell did not parse"))
+      val fill = ErgoDexExecution.price(owned, pool, 0L).getOrElse(fail("the re-owned sell did not price"))
+      fill.rewardValue shouldBe rewardValue
+
+      val run = ErgoDexExecution.run(ctx, wallet, poolBox.toInputUTXO(ctx), pool, Seq(owned), 10, 0L, height, 0L,
+        useTrueProp = false, scala.concurrent.duration.Deadline.now + scala.concurrent.duration.Duration(1, "minute"))
+      run.unbuildable shouldBe Vector(owned.boxId)
+      run.chain shouldBe None
+    }
+  }
 }
