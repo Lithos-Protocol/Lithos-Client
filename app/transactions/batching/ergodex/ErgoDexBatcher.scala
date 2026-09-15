@@ -7,7 +7,7 @@ import node.model.{IndexedBox, MempoolOptions, NodeBox, Paging, SortDirection}
 import org.ergoplatform.appkit.BlockchainContext
 import play.api.Configuration
 import state.synchronization.CompleteMempool
-import transactions.batching.Batcher.{MaxMempoolOrders, Tracked}
+import transactions.batching.Batcher.{BroadcastResult, Tracked}
 import transactions.batching.{Batcher, BatchingMempool}
 import transactions.candidate.BlockTxMessages.CandidateTx
 import transactions.candidate.CandidateBundle
@@ -89,7 +89,8 @@ class ErgoDexBatcher(nodeContext: NodeContext,
       val creators = BatchingMempool.creators(snapshot)
       val skipped = skippedOrders()
       val candidates = (liveOrders(orders) ++
-        ErgoDexBatching.unconfirmedOrders(snapshot, batching.deniedPools, MaxMempoolOrders))
+        ErgoDexBatching.unconfirmedOrders(snapshot, batching.deniedPools, batching.maxMempoolOrders,
+          batching.maxMempoolOrdersPerTx))
         .groupBy(_.boxId).values.map(_.head).toSeq
         .filterNot(order => skipped.contains(order.boxId) ||
           BatchingMempool.withdrawn(order.boxId, order.poolNft, spenders))
@@ -119,7 +120,7 @@ class ErgoDexBatcher(nodeContext: NodeContext,
   }
 
   /** Builds unclaimed orders against the mempool pool tip and records rejected executions. */
-  override protected def broadcastPass(orders: Tracked, refused: Map[String, String]): Map[String, String] = {
+  override protected def broadcastPass(orders: Tracked, refused: Map[String, String]): BroadcastResult = {
     val observed = observation()
     require(observed.fresh, s"no fresh mempool observation: ${observed.failure.getOrElse("too old")}")
     val snapshot = observed.snapshot.get
@@ -127,7 +128,12 @@ class ErgoDexBatcher(nodeContext: NodeContext,
     val sender = broadcaster()
     nodeContext.getClient.execute { ctx =>
       val skipped = skippedOrders()
-      val byPool = liveOrders(orders)
+      val unconfirmed =
+        if (batching.broadcastMempoolOrders)
+          ErgoDexBatching.unconfirmedOrders(snapshot, batching.deniedPools, batching.maxMempoolOrders,
+            batching.maxMempoolOrdersPerTx)
+        else Vector.empty
+      val byPool = (liveOrders(orders) ++ unconfirmed).groupBy(_.boxId).values.map(_.head).toSeq
         .filterNot(order => snapshot.spent.contains(order.boxId) || skipped.contains(order.boxId))
         .groupBy(_.poolNft)
       val pools = currentPools(byPool.keys.toSeq).toSeq.flatMap { case (nft, current) =>
@@ -137,9 +143,10 @@ class ErgoDexBatcher(nodeContext: NodeContext,
           if open.nonEmpty
         } yield tip -> open
       }
-      runs(ctx, pools, batching.maxOrdersPerBlock, ctx.getHeight + 1, batching.broadcastMinRevenueNanoErg,
+      val refusedNow = runs(ctx, pools, batching.maxOrdersPerBlock, ctx.getHeight + 1, batching.broadcastMinRevenueNanoErg,
         batching.broadcastMinerFeeCeiling, useTrueProp = false, BroadcastBudget.fromNow)
         .flatMap { case (chain, _) => send(sender, chain, observed) }.toMap
+      BroadcastResult(refusedNow, unconfirmed.map(_.boxId).toSet)
     }
   }
 
@@ -165,7 +172,8 @@ class ErgoDexBatcher(nodeContext: NodeContext,
       else {
         // A pool box that cannot be read back costs that pool's run, never the others
         Try(ErgoDexExecution.run(ctx, nodeContext.getNodeWallet, box.toInputUTXO(ctx), pool, poolOrders, left,
-          minRevenue, blockHeight, minerFeeCeiling, useTrueProp, deadline, placementOf, carried)) match {
+          minRevenue, blockHeight, minerFeeCeiling, useTrueProp, deadline, placementOf, carried,
+          Batcher.UnbuildableLimits(batching))) match {
           case Failure(ex) =>
             logger.warn(s"Could not run ErgoDEX pool ${pool.nft.take(12)} for block $blockHeight: ${ex.getMessage}")
             None

@@ -141,9 +141,10 @@ class ErgoDexBatchingSpec extends AnyFlatSpec with Matchers with MockitoSugar {
 
   "Mempool discovery" should "find orders among unconfirmed outputs and nothing else" in {
     val snapshot = snapshotOf(mempoolTx(id("b"), Seq(wallet1.boxId), Seq(poolBox, orderBox, wallet1)))
-    ErgoDexBatching.unconfirmedOrders(snapshot, Set.empty, 10).map(_.boxId) shouldBe Vector(orderBox.boxId)
-    ErgoDexBatching.unconfirmedOrders(snapshot, Set(order.poolNft), 10) shouldBe empty
-    ErgoDexBatching.unconfirmedOrders(snapshot, Set.empty, 0) shouldBe empty
+    ErgoDexBatching.unconfirmedOrders(snapshot, Set.empty, 10, 4).map(_.boxId) shouldBe Vector(orderBox.boxId)
+    ErgoDexBatching.unconfirmedOrders(snapshot, Set(order.poolNft), 10, 4) shouldBe empty
+    ErgoDexBatching.unconfirmedOrders(snapshot, Set.empty, 0, 4) shouldBe empty
+    ErgoDexBatching.unconfirmedOrders(snapshot, Set.empty, 10, 0) shouldBe empty
   }
 
   private def walletPlaced(placement: CompleteMempool.MempoolTx, others: CompleteMempool.MempoolTx*): Boolean = {

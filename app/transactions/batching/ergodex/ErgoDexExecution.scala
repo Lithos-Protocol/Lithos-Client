@@ -140,7 +140,8 @@ object ErgoDexExecution {
    * Signs the highest-revenue orders against `poolBox` one at a time, each priced against the pool the last
    * execution left. An order that prices but cannot be signed is named and passed over, and the next is
    * priced against the same pool. Stops at `limit` transactions, counting placements not in
-   * `alreadyCarried`, at `deadline`, or after [[Batcher.MaxUnbuildablePerRun]] unbuildable orders.
+   * `alreadyCarried`, at `deadline`, or after `unbuildableLimits.perRun` unbuildable orders. Once
+   * `unbuildableLimits.perTx` orders one transaction created have failed, its other orders are passed over untried.
    *
    * @param placementOf    the unconfirmed placements an order's box needs carried ahead of it
    * @param alreadyCarried placement ids an earlier run in the same package already carries
@@ -149,7 +150,8 @@ object ErgoDexExecution {
           orders: Seq[ErgoDexOrder], limit: Int, minRevenue: Long, blockHeight: Int, minerFeeCeiling: Long,
           useTrueProp: Boolean, deadline: Deadline,
           placementOf: ErgoDexOrder => Vector[CompleteMempool.MempoolTx] = _ => Vector.empty,
-          alreadyCarried: Set[String] = Set.empty): ErgoDexRun = {
+          alreadyCarried: Set[String] = Set.empty,
+          unbuildableLimits: Batcher.UnbuildableLimits = Batcher.UnbuildableLimits.Default): ErgoDexRun = {
     require(poolBox.id.toString == pool.boxId, "a run must open on the pool it is priced against")
     val ranked = orders
       .flatMap(order => price(order, pool, minRevenue, fundsItsOwnBox = false, minerFeeCeiling)
@@ -165,15 +167,21 @@ object ErgoDexExecution {
     var poolIds = Vector.empty[String]
     var placements = Vector.empty[CompleteMempool.MempoolTx]
     var unbuildable = Vector.empty[String]
+    var failedByTx = Map.empty[String, Int]
     val remaining = ranked.iterator
     def slotsUsed(txs: Vector[CompleteMempool.MempoolTx]) = built.size + txs.count(tx => !alreadyCarried.contains(tx.id))
     def full = slotsUsed(placements) >= limit
-    def stopped = deadline.isOverdue() || unbuildable.size >= Batcher.MaxUnbuildablePerRun
+    def stopped = deadline.isOverdue() || unbuildable.size >= unbuildableLimits.perRun
 
     while (remaining.hasNext && !full && !stopped) {
       val order = remaining.next()
-      // Only the opening fill has to fund a box by itself; the rest add to the one it made
-      price(order, state, minRevenue, fundsItsOwnBox = built.isEmpty, minerFeeCeiling).foreach { fill =>
+      val createdBy = order.box.transactionId
+      // Only the opening fill has to fund a box by itself; the rest add to the one it made. An order whose
+      // transaction has already failed perTx times is passed over untried
+      val priced =
+        if (failedByTx.getOrElse(createdBy, 0) >= unbuildableLimits.perTx) None
+        else price(order, state, minRevenue, fundsItsOwnBox = built.isEmpty, minerFeeCeiling)
+      priced.foreach { fill =>
         val added = placementOf(order).filterNot(tx => placements.exists(_.id == tx.id))
         if (slotsUsed(placements ++ added) < limit) Try {
           val signed = assembled(ctx, wallet, box, fill, blockHeight, minerFeeCeiling, useTrueProp, carried)
@@ -192,6 +200,7 @@ object ErgoDexExecution {
             logger.warn(s"Could not build ErgoDEX order ${order.boxId} against pool ${pool.nft.take(12)}, " +
               s"passing over it: ${ex.getMessage}")
             unbuildable :+= order.boxId
+            failedByTx = failedByTx.updated(createdBy, failedByTx.getOrElse(createdBy, 0) + 1)
         }
       }
     }

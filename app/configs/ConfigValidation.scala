@@ -180,6 +180,15 @@ object Configs {
     v.range("batching.ergodex.maxPoolAgeBlocks", v.int("batching.ergodex.maxPoolAgeBlocks"), 1, 10000000,
       "blocks since a pool last traded")
     v.bool("batching.ergodex.broadcast")
+    v.bool("batching.ergodex.broadcastMempoolOrders")
+    v.range("batching.ergodex.maxMempoolOrders", v.int("batching.ergodex.maxMempoolOrders"), 0, 4096,
+      "unconfirmed orders kept per build or broadcast pass")
+    v.range("batching.ergodex.maxMempoolOrdersPerTx", v.int("batching.ergodex.maxMempoolOrdersPerTx"), 1, 4096,
+      "unconfirmed orders one transaction may contribute")
+    v.range("batching.ergodex.maxUnbuildablePerRun", v.int("batching.ergodex.maxUnbuildablePerRun"), 1, 1000,
+      "unbuildable orders before a run stops trying")
+    v.range("batching.ergodex.maxUnbuildablePerTx", v.int("batching.ergodex.maxUnbuildablePerTx"), 1, 1000,
+      "unbuildable orders from one transaction before its others are passed over")
     v.longRange("batching.ergodex.skippedOrderTtlMs", v.long("batching.ergodex.skippedOrderTtlMs"),
       60000L, 86400000L, "ms an unbuildable order is left out")
     v.range("batching.ergodex.maxSkippedOrders", v.int("batching.ergodex.maxSkippedOrders"), 0, 100000,
@@ -202,6 +211,15 @@ object Configs {
     v.longRange("batching.lithosdex.broadcastMinerFeeCeiling",
       v.long("batching.lithosdex.broadcastMinerFeeCeiling"), 0L, 100000000L, "nanoERG per execution")
     v.bool("batching.lithosdex.broadcast")
+    v.bool("batching.lithosdex.broadcastMempoolOrders")
+    v.range("batching.lithosdex.maxMempoolOrders", v.int("batching.lithosdex.maxMempoolOrders"), 0, 4096,
+      "unconfirmed orders kept per build or broadcast pass")
+    v.range("batching.lithosdex.maxMempoolOrdersPerTx", v.int("batching.lithosdex.maxMempoolOrdersPerTx"), 1, 4096,
+      "unconfirmed orders one transaction may contribute")
+    v.range("batching.lithosdex.maxUnbuildablePerRun", v.int("batching.lithosdex.maxUnbuildablePerRun"), 1, 1000,
+      "unbuildable orders before a run stops trying")
+    v.range("batching.lithosdex.maxUnbuildablePerTx", v.int("batching.lithosdex.maxUnbuildablePerTx"), 1, 1000,
+      "unbuildable orders from one transaction before its others are passed over")
     v.bool("batching.lithosdex.autoFlush")
     v.longRange("batching.lithosdex.skippedOrderTtlMs", v.long("batching.lithosdex.skippedOrderTtlMs"),
       60000L, 86400000L, "ms an unbuildable order is left out")

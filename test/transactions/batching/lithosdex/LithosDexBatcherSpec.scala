@@ -77,7 +77,8 @@ class LithosDexBatcherSpec extends TestKit(ActorSystem("lithosdex-batcher-spec",
                         maxSkippedOrders: Int = BatchingConfig.Default.maxSkippedOrders,
                         observes: Boolean = true, buildBudgetMs: Long = Batcher.DefaultBuildBudgetMs,
                         placed: Boolean = false, claimed: Boolean = false,
-                        maxAncestorTxs: Int = BatchingConfig.Default.maxAncestorTxs) {
+                        maxAncestorTxs: Int = BatchingConfig.Default.maxAncestorTxs,
+                        broadcastMempoolOrders: Boolean = BatchingConfig.Default.broadcastMempoolOrders) {
     val api: NodeApi = mock[NodeApi]
     private val placementId = id("e")
     val walletBox: NodeBox = NodeBox(id("9"), id("8"), 2000000000L, 0, 100, "0008cd02" + "11" * 32)
@@ -122,13 +123,17 @@ class LithosDexBatcherSpec extends TestKit(ActorSystem("lithosdex-batcher-spec",
           successor, order, change, fee))
     }
 
+    /** Mempool observations answered. A broadcast pass takes exactly one. */
+    val observations = new AtomicInteger(0)
     val engine = TestProbe()
     engine.setAutoPilot(new TestActor.AutoPilot {
       def run(sender: ActorRef, msg: Any): TestActor.AutoPilot = {
-        if (msg == CompleteMempool.Refresh && observes)
+        if (msg == CompleteMempool.Refresh && observes) {
+          observations.incrementAndGet()
           sender ! CompleteMempool.Observation(1L, Some(CompleteMempool.Snapshot(anchor,
             mempool.map(_.id).toSet, mempool.flatMap(_.body.inputs.map(_.boxId)).toSet, System.nanoTime(),
             transactions = mempool)), None)
+        }
         this
       }
     })
@@ -174,7 +179,8 @@ class LithosDexBatcherSpec extends TestKit(ActorSystem("lithosdex-batcher-spec",
 
     val batcher: ActorRef = system.actorOf(Props(new LithosDexBatcher(nodeContext,
       LithosDexBatchingConfig(BatchingConfig.Default.copy(scanIntervalMs = scanIntervalMs, broadcast = broadcast,
-        maxSkippedOrders = maxSkippedOrders, maxAncestorTxs = maxAncestorTxs), autoFlush),
+        maxSkippedOrders = maxSkippedOrders, maxAncestorTxs = maxAncestorTxs,
+        broadcastMempoolOrders = broadcastMempoolOrders), autoFlush),
       servesCandidates = true, engine.ref, useTrueProp = false, buildBudgetMs)))
 
     /** Box ids of the last read of tracked orders, which is the read naming this fixture's own order. */
@@ -240,6 +246,27 @@ class LithosDexBatcherSpec extends TestKit(ActorSystem("lithosdex-batcher-spec",
     val f = new Fixture(placed = true, maxAncestorTxs = 0)
     f.mempool = Vector(f.placement)
     f.offered() shouldBe empty
+    f.stop()
+  }
+
+  /** 64 order boxes in one transaction used to take every mempool place, real orders included. */
+  it should "execute a wallet's order while one transaction floods the mempool with order boxes" in {
+    val f = new Fixture(placed = true)
+    val spam = f.nodeContext.getClient.execute { ctx: BlockchainContext =>
+      val owner = ctx.newProverBuilder().withDLogSecret(BigInteger.valueOf(9009L)).build().getAddress
+      val terms = LDOrderTerms(owner.getPublicKey, LDHelpers.getPoolNFT(ctx.getNetworkType), Fee, 2000000L)
+      // Priced against no pool this client can fill: the minimum quote is beyond any reserves
+      val unfillable = LDOrderContracts.swapSell(terms, Parameters.OneErg, Long.MaxValue)
+      mempoolTx(id("a"), Seq(id("3")),
+        (0 to BatchingConfig.Default.maxMempoolOrders).map(i =>
+          LDNodeFixtures.nodeBox(ctx, UTXO(unfillable, Parameters.OneErg + Fee + Parameters.MinFee),
+            index = i, txId = id("a"))))
+    }
+    f.mempool = Vector(spam, f.placement)
+
+    val bundle = f.offered().head
+    bundle.members.head.id shouldBe f.placement.id
+    bundle.members(1).inputIds should contain(f.order.boxId)
     f.stop()
   }
 
@@ -357,6 +384,27 @@ class LithosDexBatcherSpec extends TestKit(ActorSystem("lithosdex-batcher-spec",
     verify(f.api, timeout(30000).times(1)).sendTransaction(anyString())
     Thread.sleep(3000)
     verify(f.api, times(1)).sendTransaction(anyString())
+    f.stop()
+  }
+
+  it should "broadcast an order still in the mempool once, and not resend it against the pool box that refused it" in {
+    val f = new Fixture(broadcast = true, placed = true, scanIntervalMs = 1500L)
+    f.mempool = Vector(f.placement)
+    verify(f.api, timeout(30000).times(1)).sendTransaction(anyString())
+    val passes = f.observations.get()
+    awaitAssert(f.observations.get() should be >= passes + 2, 30.seconds, 250.millis)
+    withClue("the refusal is kept for an order no scan tracks: ") {
+      verify(f.api, times(1)).sendTransaction(anyString())
+    }
+    f.stop()
+  }
+
+  it should "run no broadcast pass for an order only the mempool holds when broadcastMempoolOrders is off" in {
+    val f = new Fixture(broadcast = true, placed = true, scanIntervalMs = 1500L, broadcastMempoolOrders = false)
+    f.mempool = Vector(f.placement)
+    f.awaitScanned()
+    verify(f.api, org.mockito.Mockito.after(3000).never()).sendTransaction(anyString())
+    f.observations.get() shouldBe 0
     f.stop()
   }
 

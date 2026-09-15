@@ -55,7 +55,8 @@ class ErgoDexBatcherSpec extends TestKit(ActorSystem("ergodex-batcher-spec", Erg
                         initialOrder: NodeBox = orderBox, initialPool: NodeBox = poolBox,
                         servesCandidates: Boolean = true, observes: Boolean = true,
                         buildBudgetMs: Long = Batcher.DefaultBuildBudgetMs, extraPool: Option[NodeBox] = None,
-                        maxAncestorTxs: Int = BatchingConfig.Default.maxAncestorTxs) {
+                        maxAncestorTxs: Int = BatchingConfig.Default.maxAncestorTxs, scanIntervalMs: Long = 3600000L,
+                        broadcastMempoolOrders: Boolean = BatchingConfig.Default.broadcastMempoolOrders) {
     val api: NodeApi = mock[NodeApi]
     val (nodeContext, _, _) = FakeNodeContext(api, numAddresses = 1)
 
@@ -102,7 +103,8 @@ class ErgoDexBatcherSpec extends TestKit(ActorSystem("ergodex-batcher-spec", Erg
     when(api.sendTransaction(anyString())).thenReturn(Failure(NodeError.Rejected("refused by the test")))
 
     val source: ActorRef = system.actorOf(Props(new ErgoDexBatcher(nodeContext,
-      BatchingConfig.Default.copy(scanIntervalMs = 3600000L, broadcast = broadcast, maxAncestorTxs = maxAncestorTxs),
+      BatchingConfig.Default.copy(scanIntervalMs = scanIntervalMs, broadcast = broadcast, maxAncestorTxs = maxAncestorTxs,
+        broadcastMempoolOrders = broadcastMempoolOrders),
       servesCandidates, engine.ref, useTrueProp = false, buildBudgetMs)))
 
     def offered(): Seq[CandidateBundle] = {
@@ -280,6 +282,32 @@ class ErgoDexBatcherSpec extends TestKit(ActorSystem("ergodex-batcher-spec", Erg
     deep.mempool = Vector(parent, placement)
     deep.offered().head.members.take(2).map(_.id) shouldBe Seq(parent.id, placement.id)
     deep.stop()
+  }
+
+  /** Every broadcast pass takes one observation, so counting them counts passes. */
+  it should "broadcast an order still in the mempool once, and not resend it against the pool box that refused it" in {
+    val f = new Fixture(broadcast = true, discoverable = false, scanIntervalMs = 1500L)
+    f.mempool = Vector(mempoolTx(id("b"), Seq(walletBox.boxId), Seq(orderBox)))
+    verify(f.api, timeout(30000).times(1)).sendTransaction(anyString())
+    val passes = f.observations.get()
+    awaitAssert(f.observations.get() should be >= passes + 2, 30.seconds, 250.millis)
+    withClue("the refusal is kept for an order no scan tracks: ") {
+      verify(f.api, times(1)).sendTransaction(anyString())
+    }
+    f.stop()
+  }
+
+  it should "broadcast only confirmed orders when broadcastMempoolOrders is off" in {
+    val f = new Fixture(broadcast = true, extraPool = Some(Sell.poolBox), scanIntervalMs = 1500L,
+      broadcastMempoolOrders = false)
+    f.mempool = Vector(mempoolTx(id("c"), Seq(walletBox.boxId), Seq(Sell.orderBox)))
+    verify(f.api, timeout(30000).times(1)).sendTransaction(anyString())
+    val passes = f.observations.get()
+    awaitAssert(f.observations.get() should be >= passes + 2, 30.seconds, 250.millis)
+    withClue("the confirmed order was sent and refused; the sell on the other pool is still in the mempool: ") {
+      verify(f.api, times(1)).sendTransaction(anyString())
+    }
+    f.stop()
   }
 
   it should "not execute an order whose placement spends a pool or another order" in {

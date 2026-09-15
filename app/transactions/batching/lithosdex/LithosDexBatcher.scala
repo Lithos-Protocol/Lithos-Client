@@ -10,7 +10,7 @@ import org.bouncycastle.util.encoders.Hex
 import org.ergoplatform.appkit.BlockchainContext
 import play.api.Configuration
 import state.synchronization.CompleteMempool
-import transactions.batching.Batcher.{MaxMempoolOrders, Tracked}
+import transactions.batching.Batcher.{BroadcastResult, Tracked}
 import transactions.batching.{Batcher, BatchingMempool}
 import transactions.candidate.BlockTxMessages.CandidateTx
 import transactions.candidate.CandidateBundle
@@ -129,7 +129,8 @@ class LithosDexBatcher(nodeContext: NodeContext,
           within(deadline, "reading placements")
 
           val run = LithosDexExecution.run(ctx, nodeContext.getNodeWallet, poolBox, usable, runSlots,
-            batching.minRevenueNanoErg, provisions, blockHeight, 0L, useTrueProp, deadline, placementOf)
+            batching.minRevenueNanoErg, provisions, blockHeight, 0L, useTrueProp, deadline, placementOf,
+            Batcher.UnbuildableLimits(batching))
           settle(run, blockHeight)
           evictedPlacements.remember(run.placements, blockHeight)
           run.chain.toSeq.map { chain =>
@@ -187,7 +188,7 @@ class LithosDexBatcher(nodeContext: NodeContext,
       .getOrElse(chain)
 
   /** Builds unclaimed orders against the mempool's pool tip, at the fee ceiling, and records refusals. */
-  override protected def broadcastPass(orders: Tracked, refused: Map[String, String]): Map[String, String] = {
+  override protected def broadcastPass(orders: Tracked, refused: Map[String, String]): BroadcastResult = {
     val observed = observation()
     require(observed.fresh, s"no fresh mempool observation: ${observed.failure.getOrElse("too old")}")
     val snapshot = observed.snapshot.get
@@ -195,19 +196,22 @@ class LithosDexBatcher(nodeContext: NodeContext,
     val sender = broadcaster()
     nodeContext.getClient.execute { ctx =>
       val skipped = skippedOrders()
-      val open = liveOrders(orders).filterNot(order => snapshot.spent.contains(order.boxId) || skipped.contains(order.boxId))
+      val unconfirmed = if (batching.broadcastMempoolOrders) unconfirmedOrders(snapshot) else Vector.empty
+      val open = (liveOrders(orders) ++ unconfirmed).groupBy(_.boxId).values.map(_.head).toSeq
+        .filterNot(order => snapshot.spent.contains(order.boxId) || skipped.contains(order.boxId))
       val tip = if (open.isEmpty) None
       else currentSingleton(poolNft, poolTree).flatMap(BatchingMempool.poolTip(_, poolNft, spenders))
-      tip.toSeq.flatMap { tipBox =>
+      val refusedNow = tip.toSeq.flatMap { tipBox =>
         val poolBox = tipBox.toInputUTXO(ctx)
         val provisions = provisionsFor(ctx, open, MempoolOptions.WithMempool)
         val run = LithosDexExecution.run(ctx, nodeContext.getNodeWallet, poolBox,
           open.filterNot(order => refused.get(order.boxId).contains(tipBox.boxId)), batching.maxOrdersPerBlock,
           batching.broadcastMinRevenueNanoErg, provisions, ctx.getHeight + 1, batching.broadcastMinerFeeCeiling,
-          useTrueProp = false, BroadcastBudget.fromNow)
+          useTrueProp = false, BroadcastBudget.fromNow, unbuildableLimits = Batcher.UnbuildableLimits(batching))
         settle(run, ctx.getHeight + 1)
         run.chain.flatMap(chain => send(sender, chain, observed))
       }.toMap
+      BroadcastResult(refusedNow, unconfirmed.map(_.boxId).toSet)
     }
   }
 
@@ -232,15 +236,12 @@ class LithosDexBatcher(nodeContext: NodeContext,
     live.flatMap(LithosDexOrder.parse).filter(order => orders.get(order.boxId).contains(order.poolNft))
   }
 
-  /** Orders created by unconfirmed transactions that name this pool, up to [[Batcher.MaxMempoolOrders]]. */
+  /** Orders created by unconfirmed transactions that name this pool, selected by [[Batcher.mempoolOrderBoxes]]. */
   private def unconfirmedOrders(snapshot: CompleteMempool.Snapshot): Vector[LithosDexOrder] =
-    snapshot.transactions.iterator
-      .flatMap(_.body.outputs)
-      .filter(box => templatesHex.exists(box.ergoTree.endsWith))
-      .flatMap(box => LithosDexOrder.parse(box))
+    Batcher.mempoolOrderBoxes(snapshot, box => templatesHex.exists(box.ergoTree.endsWith),
+      batching.maxMempoolOrders, batching.maxMempoolOrdersPerTx)
+      .flatMap(LithosDexOrder.parse)
       .filter(_.poolNft == poolNft)
-      .take(MaxMempoolOrders)
-      .toVector
 
   /**
    * The provision each redemption among `orders` closes. Scans the guard address only when there is a

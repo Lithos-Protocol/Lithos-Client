@@ -24,6 +24,14 @@ object MempoolSorting {
  * @param maxSkippedOrders  most such orders remembered at once, oldest forgotten first; 0 remembers none
  * @param maxAncestorTxs    unconfirmed transactions one order may need carried ahead of it: its placement and
  *                          every unconfirmed ancestor of that placement. 0 executes confirmed orders only
+ * @param broadcastMempoolOrders with `broadcast`, also broadcast orders still unconfirmed, spending their
+ *                          unconfirmed box, rather than waiting for them to confirm and be indexed
+ * @param maxMempoolOrders  unconfirmed orders one build or broadcast pass takes, in rounds across the
+ *                          transactions that created them, so no one transaction fills the list
+ * @param maxMempoolOrdersPerTx unconfirmed orders one transaction may contribute to that list
+ * @param maxUnbuildablePerRun orders a run fails to build before it stops trying more
+ * @param maxUnbuildablePerTx orders created by one transaction a run fails to build before it passes over that
+ *                          transaction's other orders untried, so one transaction cannot use up a run's attempts
  */
 case class BatchingConfig(enabled: Boolean,
                           scanIntervalMs: Long,
@@ -38,7 +46,12 @@ case class BatchingConfig(enabled: Boolean,
                           deniedPools: Set[String],
                           skippedOrderTtlMs: Long,
                           maxSkippedOrders: Int,
-                          maxAncestorTxs: Int)
+                          maxAncestorTxs: Int,
+                          broadcastMempoolOrders: Boolean,
+                          maxMempoolOrders: Int,
+                          maxMempoolOrdersPerTx: Int,
+                          maxUnbuildablePerRun: Int,
+                          maxUnbuildablePerTx: Int)
 
 object BatchingConfig {
 
@@ -57,7 +70,12 @@ object BatchingConfig {
     deniedPools = Set.empty,
     skippedOrderTtlMs = 3600000L,
     maxSkippedOrders = 4096,
-    maxAncestorTxs = 2)
+    maxAncestorTxs = 2,
+    broadcastMempoolOrders = true,
+    maxMempoolOrders = 64,
+    maxMempoolOrdersPerTx = 4,
+    maxUnbuildablePerRun = 32,
+    maxUnbuildablePerTx = 2)
 
   def apply(config: Configuration, name: String): BatchingConfig = {
     def path(key: String): String = s"batching.$name.$key"
@@ -84,6 +102,11 @@ object BatchingConfig {
         .map(_.map(_.trim.toLowerCase).toSet).getOrElse(Default.deniedPools),
       skippedOrderTtlMs = long("skippedOrderTtlMs", Default.skippedOrderTtlMs),
       maxSkippedOrders = int("maxSkippedOrders", Default.maxSkippedOrders),
-      maxAncestorTxs = int("maxAncestorTxs", Default.maxAncestorTxs))
+      maxAncestorTxs = int("maxAncestorTxs", Default.maxAncestorTxs),
+      broadcastMempoolOrders = bool("broadcastMempoolOrders", Default.broadcastMempoolOrders),
+      maxMempoolOrders = int("maxMempoolOrders", Default.maxMempoolOrders),
+      maxMempoolOrdersPerTx = int("maxMempoolOrdersPerTx", Default.maxMempoolOrdersPerTx),
+      maxUnbuildablePerRun = int("maxUnbuildablePerRun", Default.maxUnbuildablePerRun),
+      maxUnbuildablePerTx = int("maxUnbuildablePerTx", Default.maxUnbuildablePerTx))
   }
 }

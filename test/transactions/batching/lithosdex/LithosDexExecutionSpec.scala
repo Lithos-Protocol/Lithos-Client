@@ -60,7 +60,11 @@ class LithosDexExecutionSpec extends AnyFlatSpec with Matchers {
       pendingX = pendingX, pendingY = pendingY, accX = BigInt(5), accY = BigInt(7))
 
   private def orderNode(ctx: BlockchainContext, contract: Contract, value: Long, index: Int, tokens: Token*): NodeBox =
-    LDNodeFixtures.nodeBox(ctx, UTXO(contract, value, tokens), index = index, txId = "cd" * 32)
+    placedBy(ctx, "cd" * 32, contract, value, index, tokens: _*)
+
+  private def placedBy(ctx: BlockchainContext, txId: String, contract: Contract, value: Long, index: Int,
+                       tokens: Token*): NodeBox =
+    LDNodeFixtures.nodeBox(ctx, UTXO(contract, value, tokens), index = index, txId = txId)
 
   private def sell(ctx: BlockchainContext, index: Int = 10, fee: Long = Fee, minQuote: Long = 1L): LithosDexOrder =
     LithosDexOrder.parse(orderNode(ctx, LDOrderContracts.swapSell(terms(ctx, fee), erg, minQuote),
@@ -219,8 +223,9 @@ class LithosDexExecutionSpec extends AnyFlatSpec with Matchers {
   }
 
   /** A sell whose owner is an 80-key OR: its reward box is 2,802 bytes, so 1,000,000 nanoERG is under 360 per byte. */
-  private def undersizedSell(ctx: BlockchainContext, fee: Long, index: Int): LithosDexOrder =
-    LithosDexOrder.parse(orderNode(ctx, LDOrderContracts.swapSell(terms(ctx, fee).copy(redeemer = manyKeys), erg, 1L),
+  /** An order that prices but cannot be built, created by transaction `txId`. */
+  private def undersizedSell(ctx: BlockchainContext, fee: Long, index: Int, txId: String = "cd" * 32): LithosDexOrder =
+    LithosDexOrder.parse(placedBy(ctx, txId, LDOrderContracts.swapSell(terms(ctx, fee).copy(redeemer = manyKeys), erg, 1L),
       erg + fee + UTXO.MIN_CHANGE, index)).get
 
   it should "pass over an order whose reward box is under the node's minimum, and price the next against the same pool" in withCtx { ctx =>
@@ -264,11 +269,23 @@ class LithosDexExecutionSpec extends AnyFlatSpec with Matchers {
   }
 
   it should "stop passing over orders at the unbuildable limit" in withCtx { ctx =>
-    val bad = (1 to Batcher.MaxUnbuildablePerRun).map(i => undersizedSell(ctx, 8000000L + i, 40 + i))
+    val limit = Batcher.UnbuildableLimits.Default.perRun
+    // Each from its own transaction, so only the run's limit applies
+    val bad = (1 to limit).map(i => undersizedSell(ctx, 8000000L + i, 40 + i, txId = f"$i%064x"))
     val run = runOf(ctx, poolNode(ctx).toInputUTXO(ctx), bad :+ sell(ctx, fee = 2000000L), limit = 20)
-    run.unbuildable should have size Batcher.MaxUnbuildablePerRun
+    run.unbuildable should have size limit
     run.chain shouldBe None
     run.cutShort shouldBe true
+  }
+
+  it should "try only maxUnbuildablePerTx of one transaction's orders, and build the rest of the run" in withCtx { ctx =>
+    val perTx = Batcher.UnbuildableLimits.Default.perTx
+    val spam = (1 to perTx + 3).map(i => undersizedSell(ctx, 8000000L + i, 40 + i, txId = "ee" * 32))
+    val run = runOf(ctx, poolNode(ctx).toInputUTXO(ctx), spam :+ sell(ctx, fee = 2000000L), limit = 20)
+    withClue("the transaction's later orders are passed over untried: ") {
+      run.unbuildable should have size perTx
+    }
+    run.chain.map(_.fills.map(_.order.boxId)) shouldBe Some(Vector(sell(ctx, fee = 2000000L).boxId))
   }
 
   // ─── refusals ─────────────────────────────────────────────────────────────

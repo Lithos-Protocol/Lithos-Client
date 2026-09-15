@@ -32,10 +32,16 @@ class ConfigsSpec extends AnyFlatSpec with Matchers {
         |batching.lithosdex.autoFlush = "sometimes"
         |batching.lithosdex.skippedOrderTtlMs = 0
         |batching.lithosdex.maxSkippedOrders = -1
-        |batching.lithosdex.maxAncestorTxs = -1""".stripMargin)
+        |batching.lithosdex.maxAncestorTxs = -1
+        |batching.lithosdex.broadcastMempoolOrders = "sometimes"
+        |batching.lithosdex.maxMempoolOrders = -1
+        |batching.lithosdex.maxMempoolOrdersPerTx = -1
+        |batching.lithosdex.maxUnbuildablePerRun = -1
+        |batching.lithosdex.maxUnbuildablePerTx = -1""".stripMargin)
       .withFallback(shipped.underlying).resolve())
     val thrown = the[ConfigValidationException] thrownBy Configs.validateAll(configured)
-    Seq("scanIntervalMs", "autoFlush", "skippedOrderTtlMs", "maxSkippedOrders", "maxAncestorTxs")
+    Seq("scanIntervalMs", "autoFlush", "skippedOrderTtlMs", "maxSkippedOrders", "maxAncestorTxs",
+      "broadcastMempoolOrders", "maxMempoolOrders", "maxMempoolOrdersPerTx", "maxUnbuildablePerRun", "maxUnbuildablePerTx")
       .foreach(key => thrown.getMessage should include(s"batching.lithosdex.$key"))
   }
 
@@ -43,10 +49,15 @@ class ConfigsSpec extends AnyFlatSpec with Matchers {
     val configured = Configuration(ConfigFactory.parseString(
       """batching.ergodex.skippedOrderTtlMs = 0
         |batching.ergodex.maxSkippedOrders = -1
-        |batching.ergodex.maxAncestorTxs = 101""".stripMargin)
+        |batching.ergodex.maxAncestorTxs = 101
+        |batching.ergodex.broadcastMempoolOrders = "sometimes"
+        |batching.ergodex.maxMempoolOrdersPerTx = 0
+        |batching.ergodex.maxUnbuildablePerRun = 0
+        |batching.ergodex.maxUnbuildablePerTx = 0""".stripMargin)
       .withFallback(shipped.underlying).resolve())
     val thrown = the[ConfigValidationException] thrownBy Configs.validateAll(configured)
-    Seq("skippedOrderTtlMs", "maxSkippedOrders", "maxAncestorTxs")
+    Seq("skippedOrderTtlMs", "maxSkippedOrders", "maxAncestorTxs", "broadcastMempoolOrders",
+      "maxMempoolOrdersPerTx", "maxUnbuildablePerRun", "maxUnbuildablePerTx")
       .foreach(key => thrown.getMessage should include(s"batching.ergodex.$key"))
   }
 

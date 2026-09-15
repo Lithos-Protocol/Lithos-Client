@@ -87,6 +87,9 @@ abstract class Batcher(nodeContext: NodeContext,
   /** Rejected orders mapped to the pool box used; retries resume when that box changes. */
   private var rejected: Map[String, String] = Map.empty
 
+  /** Unconfirmed orders the last broadcast pass considered, whose refusals are kept like a tracked order's. */
+  private var broadcastUnconfirmed: Set[String] = Set.empty
+
   /** A scan, or the broadcast that follows it, is running. */
   private var busy: Boolean = false
   private var ticker: Option[Cancellable] = None
@@ -106,8 +109,8 @@ abstract class Batcher(nodeContext: NodeContext,
   /** The bundles offered for one block, built before `deadline`. Runs on the worker; a failure offers nothing. */
   protected def executions(orders: Tracked, blockHeight: Int, slots: Int, deadline: Deadline): Seq[CandidateBundle]
 
-  /** Sends runs to the mempool. Returns order id to pool box id for each refused execution. */
-  protected def broadcastPass(orders: Tracked, refused: Map[String, String]): Map[String, String]
+  /** Sends runs to the mempool: `orders`, and with `broadcastMempoolOrders` the unconfirmed orders too. */
+  protected def broadcastPass(orders: Tracked, refused: Map[String, String]): BroadcastResult
 
   override def preStart(): Unit = {
     val name = getClass.getSimpleName
@@ -142,8 +145,9 @@ abstract class Batcher(nodeContext: NodeContext,
         logger.info(s"$label scan holds ${found.size} executable order(s) across " +
           s"${found.values.toSet.size} pool(s)")
       tracked = found
-      rejected = rejected.filter { case (orderId, _) => tracked.contains(orderId) }
-      if (batching.broadcast && tracked.nonEmpty) {
+      rejected = rejected.filter { case (orderId, _) => stillOffered(orderId) }
+      // The mempool can hold orders the scan never sees
+      if (batching.broadcast && (tracked.nonEmpty || batching.broadcastMempoolOrders)) {
         val (orders, refused) = (tracked, rejected)
         offMailbox(broadcastPass(orders, refused))(Broadcasted)
       } else busy = false
@@ -156,8 +160,9 @@ abstract class Batcher(nodeContext: NodeContext,
     case Broadcasted(result) =>
       busy = false
       result match {
-        case Success(refused) =>
-          rejected = (rejected ++ refused).filter { case (orderId, _) => tracked.contains(orderId) }
+        case Success(pass) =>
+          broadcastUnconfirmed = pass.unconfirmed
+          rejected = (rejected ++ pass.refused).filter { case (orderId, _) => stillOffered(orderId) }
         case Failure(ex) => logger.warn(s"$label broadcast pass failed: ${ex.getMessage}")
       }
 
@@ -180,6 +185,9 @@ abstract class Batcher(nodeContext: NodeContext,
 
     case HeldPlacements => sender() ! Held(evictedPlacements.placements)
   }
+
+  private def stillOffered(orderId: String): Boolean =
+    tracked.contains(orderId) || broadcastUnconfirmed.contains(orderId)
 
   /** Stops reading back orders a build found spent. Safe to call from the worker. */
   protected def forget(ids: Set[String]): Unit = if (ids.nonEmpty) self ! Spent(ids)
@@ -337,7 +345,13 @@ object Batcher {
 
   private[batching] final case class Scanned(result: Try[Tracked])
 
-  private[batching] final case class Broadcasted(result: Try[Map[String, String]])
+  private[batching] final case class Broadcasted(result: Try[BroadcastResult])
+
+  /**
+   * @param refused     order id to the pool box id each refused execution spent
+   * @param unconfirmed the unconfirmed orders the pass considered
+   */
+  final case class BroadcastResult(refused: Map[String, String], unconfirmed: Set[String] = Set.empty)
 
   /** Orders a build found already spent, so they stop being read back. */
   private[batching] final case class Spent(ids: Set[String])
@@ -360,11 +374,54 @@ object Batcher {
   /** Together with one scan, these builds fit a worker of two threads and four queued tasks. */
   final val MaxBuildsRunning = 3
 
-  /** Maximum unconfirmed orders examined during one build. */
-  final val MaxMempoolOrders = 64
+  /**
+   * Order-shaped boxes from `snapshot`, at most `perTx` from any one transaction and `limit` in all.
+   *
+   * Taken in rounds across the transactions that created them, so a transaction carrying hundreds of order
+   * outputs takes `perTx` places rather than the whole list. A transaction is what spam cannot make for
+   * free: it pays a fee and is mined, while an order box inside one costs almost nothing.
+   *
+   * `shaped` must be a cheap test on the box's script; parsing the boxes this returns is the caller's, and
+   * is what the limits bound.
+   */
+  def mempoolOrderBoxes(snapshot: CompleteMempool.Snapshot, shaped: NodeBox => Boolean,
+                        limit: Int, perTx: Int): Vector[NodeBox] = {
+    if (limit <= 0 || perTx <= 0) Vector.empty
+    else {
+      val perTransaction = snapshot.transactions.iterator
+        .map(_.body.outputs.filter(shaped))
+        .filter(_.nonEmpty)
+        .toVector
+      val taken = Vector.newBuilder[NodeBox]
+      var count = 0
+      var round = 0
+      while (round < perTx && count < limit) {
+        perTransaction.foreach { outputs =>
+          if (count < limit && round < outputs.size) {
+            taken += outputs(round)
+            count += 1
+          }
+        }
+        round += 1
+      }
+      taken.result()
+    }
+  }
 
-  /** Orders one run passes over as unbuildable before it stops trying: about 0.25 s of failed signing. */
-  final val MaxUnbuildablePerRun = 32
+  /**
+   * How far a run goes with orders it prices but cannot build.
+   *
+   * @param perRun unbuildable orders before the run stops trying more
+   * @param perTx  unbuildable orders from one creating transaction before its other orders are passed over untried
+   */
+  final case class UnbuildableLimits(perRun: Int, perTx: Int)
+
+  object UnbuildableLimits {
+    def apply(batching: BatchingConfig): UnbuildableLimits =
+      UnbuildableLimits(batching.maxUnbuildablePerRun, batching.maxUnbuildablePerTx)
+
+    val Default: UnbuildableLimits = apply(BatchingConfig.Default)
+  }
 
   /**
    * A candidate build's budget: three quarters of the stratum's collection deadline, leaving the rest for

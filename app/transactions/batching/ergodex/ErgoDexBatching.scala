@@ -28,18 +28,18 @@ object ErgoDexBatching {
       .toMap
   }
 
-  /** Parses executable orders from unconfirmed outputs, excluding denied pools and limiting the result. */
+  /** Executable order templates, hoisted: the mempool scan tests every unconfirmed output against them. */
+  private lazy val executableTemplates: Seq[String] = ErgoDexContracts.orders.filter(_.executable).map(_.templateHex)
+
+  /** Whether a box's script ends with an executable order template. Cheap: no deserialization. */
+  def orderShaped(box: NodeBox): Boolean = executableTemplates.exists(box.ergoTree.endsWith)
+
+  /** Parses executable orders from the unconfirmed outputs [[Batcher.mempoolOrderBoxes]] selects, less denied pools. */
   def unconfirmedOrders(snapshot: CompleteMempool.Snapshot, deniedPools: Set[String],
-                        limit: Int): Vector[ErgoDexOrder] = {
-    val templates = ErgoDexContracts.orders.filter(_.executable).map(_.templateHex)
-    snapshot.transactions.iterator
-      .flatMap(_.body.outputs)
-      .filter(box => templates.exists(box.ergoTree.endsWith))
-      .flatMap(box => ErgoDexOrder.parse(box))
+                        limit: Int, perTx: Int): Vector[ErgoDexOrder] =
+    Batcher.mempoolOrderBoxes(snapshot, orderShaped, limit, perTx)
+      .flatMap(ErgoDexOrder.parse)
       .filterNot(order => deniedPools.contains(order.poolNft))
-      .take(math.max(0, limit))
-      .toVector
-  }
 
   /** Whether a box sits at either ErgoDEX pool script. */
   def isPool(box: NodeBox): Boolean =
