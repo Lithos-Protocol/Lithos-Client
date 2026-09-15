@@ -134,6 +134,21 @@ case class LDLiquidityPool(reservesX: Long,
     Some(simSwap(amountIn, ergIn))
   }
 
+  /**
+   * The pool after `q` lands: the traded amount onto the curve, the protocol fee into pending, and that
+   * fee divided by the live supply added to the matching accumulator, truncated as the contract does.
+   * `box` is cleared, since no box holds this state yet.
+   */
+  def afterSwap(q: LDSwapQuote): LDLiquidityPool = {
+    val advance = (BigInt(q.protocolFee) * LDHelpers.SCALE) / BigInt(supply)
+    if (q.ergIn)
+      copy(reservesX = Math.addExact(reservesX, q.tradedIn), reservesY = reservesY - q.amountOut,
+        pendingX = Math.addExact(pendingX, q.protocolFee), accX = accX + advance, box = None)
+    else
+      copy(reservesX = reservesX - q.amountOut, reservesY = Math.addExact(reservesY, q.tradedIn),
+        pendingY = Math.addExact(pendingY, q.protocolFee), accY = accY + advance, box = None)
+  }
+
   // -----------------------------------------------------------------------------------------------
   // Deposits
   // -----------------------------------------------------------------------------------------------
@@ -164,6 +179,14 @@ case class LDLiquidityPool(reservesX: Long,
       entryX = accX, entryY = accY)
   }
 
+  /**
+   * The pool after a deposit taking `amountX` and `amountY` into the reserves for `shares`, handing out
+   * one provision token. Pending and both accumulators are untouched. `box` is cleared.
+   */
+  def afterDeposit(amountX: Long, amountY: Long, shares: Long): LDLiquidityPool =
+    copy(reservesX = Math.addExact(reservesX, amountX), reservesY = Math.addExact(reservesY, amountY),
+      supply = Math.addExact(supply, shares), provTokensLeft = provTokensLeft - 1L, box = None)
+
   // -----------------------------------------------------------------------------------------------
   // Redemptions
   // -----------------------------------------------------------------------------------------------
@@ -182,6 +205,14 @@ case class LDLiquidityPool(reservesX: Long,
 
     LDRedeemQuote(shares, amountX, amountY, withinMinSupply = supply - shares >= LDHelpers.MIN_SUPPLY)
   }
+
+  /**
+   * The pool after `q` closes a provision: its share of both reserves out, its shares off supply, its
+   * provision token home. Pending and both accumulators are untouched. `box` is cleared.
+   */
+  def afterRedeem(q: LDRedeemQuote): LDLiquidityPool =
+    copy(reservesX = reservesX - q.amountX, reservesY = reservesY - q.amountY,
+      supply = supply - q.shares, provTokensLeft = provTokensLeft + 1L, box = None)
 
   // -----------------------------------------------------------------------------------------------
   // Resizes

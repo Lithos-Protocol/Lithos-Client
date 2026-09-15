@@ -10,11 +10,17 @@ case class NodeInput(boxId: String, spendingProof: NodeSpendingProof)
 
 case class NodeDataInput(boxId: String)
 
+/**
+ * @param size serialized bytes, when the node reports them
+ * @param cost validation cost the node measured when the transaction entered its mempool; absent when
+ *             the node does not report it or never measured it
+ */
 case class NodeTransaction(id: String,
                            inputs: Seq[NodeInput],
                            dataInputs: Seq[NodeDataInput],
                            outputs: Seq[NodeBox],
-                           size: Option[Int] = None)
+                           size: Option[Int] = None,
+                           cost: Option[Long] = None)
 
 case class IndexedTransaction(id: String,
                               inputs: Seq[IndexedBox],

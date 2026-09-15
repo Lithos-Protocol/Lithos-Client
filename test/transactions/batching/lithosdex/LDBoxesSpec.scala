@@ -1,4 +1,4 @@
-package transactions.dex
+package transactions.batching.lithosdex
 
 import lithosdex.LDHelpers
 import node.NodeApi
@@ -196,6 +196,20 @@ class LDBoxesSpec extends AnyFlatSpec with Matchers with MockitoSugar {
       }
 
     intercept[LDBoxes.IndexUnavailableException](LDBoxes.provisionBoxes(ctx, api))
+  }
+
+  "provisionsOwnedBy" should "return only the named owners' provisions, and what it read past the scan ceiling" in withCtx { ctx =>
+    val api = mock[NodeApi]
+    val owner = ErgoId.create("ab" * 32)
+    val others = (1 to 200).map(i => indexed(provisionNodeBox(ctx, f"$i%064x")))
+    val first = indexed(provisionNodeBox(ctx, "fe" * 32, shares = 777L, owner = owner)) +: others.tail
+    // Every page is full, so the walk reaches the ceiling rather than the end
+    when(api.unspentBoxesByErgoTree(anyString(), any[Paging], any[SortDirection], any[MempoolOptions]))
+      .thenAnswer(inv => Success(if (inv.getArgument[Paging](1).offset == 0) first else others))
+
+    val (found, complete) = LDBoxes.provisionsOwnedBy(ctx, api, Set(owner.toString), MempoolOptions.ConfirmedOnly)
+    complete shouldBe false
+    found.map(p => p.ownerNFT -> p.shares) shouldEqual Seq(owner -> 777L)
   }
 
   "poolHistory" should "order same-height transitions by their global index" in withCtx { ctx =>

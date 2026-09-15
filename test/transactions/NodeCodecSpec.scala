@@ -177,4 +177,24 @@ class NodeCodecSpec extends AnyFlatSpec with Matchers {
     spent should not be empty
     spent.foreach(id => block.inputBox(id) should be(defined))
   }
+
+  // /transactions/unconfirmed
+
+  /** A mempool transaction as the node returns it, with `cost` as a number, a JSON null, or absent. */
+  private def mempoolTransaction(cost: Option[String]): JsonObject = new JsonParser().parse(
+    s"""{"id": "${"ab" * 32}", "inputs": [{"boxId": "${"01" * 32}", "spendingProof": {"proofBytes": "", "extension": {}}}],
+       |"dataInputs": [], "outputs": [], "size": 212${cost.map(c => s""", "cost": $c""").getOrElse("")}}""".stripMargin
+  ).getAsJsonObject
+
+  "transaction" should "read the cost a node measured on admission, and none when it reports null or nothing" in {
+    NodeCodecs.transaction(mempoolTransaction(Some("20510"))).cost shouldBe Some(20510L)
+    NodeCodecs.transaction(mempoolTransaction(Some("null"))).cost shouldBe None
+    NodeCodecs.transaction(mempoolTransaction(None)).cost shouldBe None
+  }
+
+  it should "carry that cost into a mempool ancestor, and 0 without it" in {
+    import transactions.candidate.BlockTxMessages.CandidateTx
+    CandidateTx.ancestor(NodeCodecs.transaction(mempoolTransaction(Some("20510")))).cost shouldBe 20510L
+    CandidateTx.ancestor(NodeCodecs.transaction(mempoolTransaction(None))).cost shouldBe 0L
+  }
 }

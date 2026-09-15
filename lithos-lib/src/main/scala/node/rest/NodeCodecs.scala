@@ -53,7 +53,8 @@ object NodeCodecs {
     inputs = o.objects("inputs").map(input),
     dataInputs = o.objects("dataInputs").map(dataInput),
     outputs = o.objects("outputs").map(box),
-    size = o.optInt("size")
+    size = o.optInt("size"),
+    cost = o.optLong("cost")
   )
 
   def indexedTransaction(o: JsonObject): IndexedTransaction = IndexedTransaction(

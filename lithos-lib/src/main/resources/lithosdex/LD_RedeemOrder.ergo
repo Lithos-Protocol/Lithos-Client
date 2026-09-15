@@ -1,0 +1,99 @@
+{
+  // LD_RedeemOrder
+  // Value: the ERG the reward box and miner fee need, plus the executor's ERG fee
+  // A standing order to close a provision in LD_LiquidityPool. Holds the provision's ownership NFT, so it
+  // is the order that authorises the redemption. Anyone may execute it; this checks the provision
+  // redeemed is the one the NFT owns and that the owner received its full share of both reserves. The
+  // owner may take it back at any time.
+  // Adapted from ErgoDex's n2t Redeem, with a fixed executor fee in ERG.
+
+  // TOKENS
+  // 0: the ownership NFT of the provision to close. Burned by the redemption. Read inside the execution
+  // path, so a malformed box can still be refunded.
+
+  // CONSTANTS
+  // Amounts are BigInt and never cast. The compiler turns a cast constant into a second constant, and
+  // every term has to be exactly one constant for orders to be built from a template.
+  // CONST_REDEEMER: SigmaProp - the owner. Receives the proceeds, and is the only key that can refund.
+  // CONST_POOL_NFT: Coll[Byte] - singleton NFT of the pool the provision belongs to
+  // CONST_EXECUTOR_FEE: BigInt - nanoERG the executor keeps out of the proceeds, miner fee included
+  // CONST_MAX_MINER_FEE: BigInt - most nanoERG the execution may pay to the miner fee script
+  // CONST_MINER_FEE_PROP: Coll[Byte] - prop bytes of the miner fee script
+  val CONST_LOCKED_LP = 0x7fffffffffffffffL
+
+  // CONTEXT VARS
+  // None of its own. POOL_OP is the pool's CTX_OP(0), read from input 0.
+
+  // ASSUMPTIONS - statements which can be assumed to be true due to other contracts enforcing them
+  // during creation of this UTXO
+  // The pool NFT exists in exactly one box, under LD_LiquidityPool, which keeps it there on every path.
+  // So a box at input 0 holding it is the pool, and its registers and tokens have the pool's layout.
+  // Under its redeem operation the pool requires input 1 to be a guard-locked box holding a provision
+  // token, removes exactly its R7 shares from supply, and takes the token home. The provision logic then
+  // burns the NFT. Both are only true under that operation, which is why it is checked: a provision's
+  // claim and resize paths also accept the NFT as authorisation, and resize can shrink the provision and
+  // hand the released reserves to whoever builds the transaction.
+  //
+  // DELIBERATE OMISSIONS - conditions left out on purpose
+  // Fees the provision has earned are not claimed. A claim spends the vault at input 0, so it cannot share
+  // a transaction with a redemption, and whatever is unclaimed when this executes stays in the vault.
+  // Anything else held in this box is not carried to the reward and belongs to the executor.
+
+  val poolIn = INPUTS(0)
+
+  // An execution puts the pool at input 0, the provision at input 1 and this box at input 2. That
+  // position is also the double-satisfaction guard, since no other order can share input 2. Nothing is
+  // read from a register or an output before this holds, so a refund can never fail on a read an
+  // execution needs.
+  val executing = if (CONTEXT.selfBoxIndex == 2 && poolIn.tokens.size > 0) {
+    poolIn.tokens(0)._1 == CONST_POOL_NFT
+  } else {
+    false
+  }
+
+  // Spending Path 1: Execute against the pool
+  if (executing) {
+    val poolOp    = getVarFromInput[Byte](0, 0).getOrElse(-1.toByte)
+    val liquidity = poolIn.R4[Long].get
+    val pending   = poolIn.R6[Coll[Long]].get
+    val tokenY    = poolIn.tokens(1)
+    val reservesX = poolIn.value - pending(0)
+    val reservesY = tokenY._2 - pending(1)
+    val supplyLP  = CONST_LOCKED_LP - liquidity
+
+    val ownerNFT     = SELF.tokens(0)._1
+    val provisionBox = INPUTS(1)
+    val provision    = provisionBox.R7[Long].get
+
+    // The pool releases no more than this, so this is exactly what an honest execution hands over
+    val minReturnX = provision.toBigInt * reservesX / supplyLP
+    val minReturnY = provision.toBigInt * reservesY / supplyLP
+
+    val rewardBox = OUTPUTS(1)
+    val rewardY   = rewardBox.tokens.getOrElse(0, (tokenY._1, 0L))
+
+    // This box's ERG and the provision box's storage buffer both come back alongside the reserves
+    val releasedX = SELF.value + provisionBox.value
+
+    val minerFeePaid = OUTPUTS.fold(0L, { (total: Long, o: Box) =>
+      if (o.propositionBytes == CONST_MINER_FEE_PROP) total + o.value else total
+    })
+
+    val statements = allOf(Coll(
+      poolOp == 2.toByte,
+      // Without this the NFT could ride along while some other provision is redeemed, and leave in
+      // whatever output the executor chooses while its own provision stays open
+      provisionBox.R6[Coll[Byte]].get == ownerNFT,
+      rewardBox.propositionBytes == CONST_REDEEMER.propBytes,
+      rewardBox.value.toBigInt >= releasedX.toBigInt + minReturnX - CONST_EXECUTOR_FEE,
+      rewardY._1 == tokenY._1,
+      rewardY._2.toBigInt >= minReturnY,
+      minerFeePaid.toBigInt <= CONST_MAX_MINER_FEE
+    ))
+
+    sigmaProp(statements)
+  } else {
+    // Spending Path 2: Refund
+    CONST_REDEEMER
+  }
+}

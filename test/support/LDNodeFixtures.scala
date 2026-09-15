@@ -6,7 +6,7 @@ import org.ergoplatform.appkit.scalaapi._
 import org.ergoplatform.appkit.{BlockchainContext, ErgoValue}
 import org.ergoplatform.sdk.ErgoId
 import sigma.Colls
-import transactions.dex.DexContracts
+import transactions.batching.lithosdex.DexContracts
 import work.lithos.mutations.{Contract, Token, UTXO}
 
 /**
@@ -41,7 +41,7 @@ object LDNodeFixtures {
    * than one chosen here — `toInputUTXO` derives it from contents, transaction id and index, so a
    * made-up id does not survive.
    */
-  private def nodeBox(ctx: BlockchainContext, utxo: UTXO, index: Int, txId: String): NodeBox = {
+  def nodeBox(ctx: BlockchainContext, utxo: UTXO, index: Int = 0, txId: String = defaultTxId): NodeBox = {
     val input = utxo.toInput(ctx, ErgoId.create(txId), index.toShort)
     NodeBox(
       boxId = input.id.toString,

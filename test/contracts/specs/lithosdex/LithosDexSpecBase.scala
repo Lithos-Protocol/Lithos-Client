@@ -174,16 +174,18 @@ trait LithosDexSpecBase extends ContractSpecBase {
     accX = BigInt(0),
     accY = BigInt(0))
 
-  /** Applies a swap the way LD_LiquidityPool requires it: fee into pending, the rest onto the curve. */
+  /** The harness's view of a pool the client computed. */
+  protected def stateOf(p: LDLiquidityPool): PoolState =
+    PoolState(p.reservesX, p.reservesY, p.pendingX, p.pendingY, p.supply, p.provTokensLeft, p.accX, p.accY,
+      p.feeParams)
+
+  /**
+   * Applies a swap through the client's own `LDLiquidityPool.afterSwap`, so every property signing the
+   * successor also checks that function against the contract.
+   */
   protected def afterSwap(s: PoolState, amountIn: Long, ergIn: Boolean): PoolState = {
-    val q = s.view.simSwap(amountIn, ergIn)
-    val advance = (BigInt(q.protocolFee) * SCALE) / BigInt(s.supply)
-    if (ergIn)
-      s.copy(reservesX = s.reservesX + q.tradedIn, reservesY = s.reservesY - q.amountOut,
-        pendingX = s.pendingX + q.protocolFee, accX = s.accX + advance)
-    else
-      s.copy(reservesX = s.reservesX - q.amountOut, reservesY = s.reservesY + q.tradedIn,
-        pendingY = s.pendingY + q.protocolFee, accY = s.accY + advance)
+    val view = s.view
+    stateOf(view.afterSwap(view.simSwap(amountIn, ergIn)))
   }
 
   /** Both sides traded, so both accumulators and both pending balances are non-zero. */
@@ -402,11 +404,7 @@ trait LithosDexSpecBase extends ContractSpecBase {
     // The ownership NFT's id can only be this pool box's id, which is what makes it unmintable anywhere
     // else — appkit treats an output token keyed to INPUTS(0) as a mint.
     val ownerId = poolIn.id
-    val next = state.copy(
-      reservesX = state.reservesX + q.amountX,
-      reservesY = state.reservesY + q.amountY,
-      supply = state.supply + shares,
-      provTokens = state.provTokens - 1L)
+    val next = stateOf(state.view.afterDeposit(q.amountX, q.amountY, shares))
     val fund = funding(ctx, 1, q.amountX + PROVISION_MIN + NFT_BOX_VALUE + SLACK, Seq(Token(tokenY, q.amountY)))
     Deposit(ctx, state, next, q, ownerId, poolIn, fund,
       poolUTXO(ctx, next),
@@ -448,11 +446,7 @@ trait LithosDexSpecBase extends ContractSpecBase {
     val p = user(ctx)
     val prov = provisionOf(ctx, shares, entryX, entryY, ownerId)
     val q = state.view.simRedeem(shares)
-    val next = state.copy(
-      reservesX = state.reservesX - q.amountX,
-      reservesY = state.reservesY - q.amountY,
-      supply = state.supply - shares,
-      provTokens = state.provTokens + 1L)
+    val next = stateOf(state.view.afterRedeem(q))
     // OUTPUTS(1) has to exist whatever it holds: the provision sits at INPUTS(1) and every path of its
     // logic reads OUTPUTS(selfBoxIndex) before it branches.
     val payout = UTXO(userContract(ctx), q.amountX + prov.utxo.value,
