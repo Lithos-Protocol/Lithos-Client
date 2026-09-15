@@ -150,6 +150,11 @@ class LithosPool(options: Options,
             s"${dropped.mkString(", ")}, which did not answer the refresh")
         } else if (!judged || recovered.nonEmpty || candidateConfig.minCandidateChangeRevenue == 0L ||
           gain >= candidateConfig.minCandidateChangeRevenue) {
+          // NOTE: Rollups and emissions have 0 revenue and will only cause refreshes in the following conditions:
+          // First package for a height (the first augmentation after genesis)
+          // New genesis, or the node's cached job was dirty after a failure
+          // Refresh where revenue from other txs rose by >= 0.001 ERG
+          // Refresh where rollups or emissions answered after being late for the served package
           blockPackage = Some(pkg)
           collectingAdditions = collecting
           logger.info(s"Ready: ${pkg.describe} with" +
