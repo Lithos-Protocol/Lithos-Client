@@ -28,7 +28,7 @@ import scala.language.postfixOps
 import scala.util.{Failure, Success, Try}
 
 /**
- * The 18 `lithosdex` endpoints, and the whole of `/dex` since PlasmaDex was removed.
+ * The `lithosdex` endpoints: the whole of `/dex`.
  */
 @Singleton
 class LithosDexApiController @Inject()(cc: ControllerComponents,
@@ -157,9 +157,58 @@ class LithosDexApiController @Inject()(cc: ControllerComponents,
   def getPriceHistory(range: Option[String], bucket: Option[Int]): Action[AnyContent] =
     Action.async { _ => offPool(respond(api.getPriceHistory(range, bucket, ldCache))) }
 
-  /** GET /dex/swaps/recent */
-  def getRecentSwaps(limit: Option[Int]): Action[AnyContent] =
-    Action.async { _ => offPool(respond(api.getRecentSwaps(limit))) }
+  /** GET /dex/activity/recent */
+  def getRecentActivity(limit: Option[Int]): Action[AnyContent] =
+    Action.async { _ => offPool(respond(api.getRecentActivity(limit))) }
+
+  // ── orders ───────────────────────────────────────────────────────────────
+
+  /** GET /dex/orders */
+  def listOrders(): Action[AnyContent] = withApiKey {
+    Action.async { _ => offPool(respond(api.listOrders(ldCache))) }
+  }
+
+  /** POST /dex/orders/swap/check */
+  def checkSwapOrder(): Action[AnyContent] = Action.async { request =>
+    offPool(respond(api.checkSwapOrder(body[LDSwapOrderRequest](request, "swapOrderRequest"), ldCache)))
+  }
+
+  /** POST /dex/orders/swap */
+  def placeSwapOrder(): Action[AnyContent] = withApiKey {
+    Action.async { request =>
+      offPool(respond(api.placeSwapOrder(body[LDSwapOrderExecuteRequest](request, "swapOrderExecuteRequest"), ldCache)))
+    }
+  }
+
+  /** POST /dex/orders/deposit/check */
+  def checkDepositOrder(): Action[AnyContent] = Action.async { request =>
+    offPool(respond(api.checkDepositOrder(body[LDDepositOrderRequest](request, "depositOrderRequest"), ldCache)))
+  }
+
+  /** POST /dex/orders/deposit */
+  def placeDepositOrder(): Action[AnyContent] = withApiKey {
+    Action.async { request =>
+      offPool(respond(api.placeDepositOrder(
+        body[LDDepositOrderExecuteRequest](request, "depositOrderExecuteRequest"), ldCache)))
+    }
+  }
+
+  /** POST /dex/orders/redeem/check */
+  def checkRedeemOrder(): Action[AnyContent] = Action.async { request =>
+    offPool(respond(api.checkRedeemOrder(body[LDRedeemOrderRequest](request, "redeemOrderRequest"), ldCache)))
+  }
+
+  /** POST /dex/orders/redeem */
+  def placeRedeemOrder(): Action[AnyContent] = withApiKey {
+    Action.async { request =>
+      offPool(respond(api.placeRedeemOrder(body[LDRedeemOrderRequest](request, "redeemOrderRequest"), ldCache)))
+    }
+  }
+
+  /** POST /dex/orders/:boxId/cancel */
+  def cancelOrder(boxId: String): Action[AnyContent] = withApiKey {
+    Action.async { _ => offPool(respond(api.cancelOrder(boxId, ldCache))) }
+  }
 
   /** GET /dex/provisions/:boxId/fees/history */
   def getProvisionFeeHistory(boxId: String,

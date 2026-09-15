@@ -118,6 +118,28 @@ object LithosDexExecution {
         fill.poolAfter.boxValue > LDHelpers.MIN_RENT && fill.poolAfter.reservesX > 0 && fill.poolAfter.reservesY > 0
     }
 
+  /**
+   * How an offer of `offeredX` nanoERG and `offeredY` tokens meets `pool`: shares from the scarcer side,
+   * and whatever the other side cannot match returned, truncated as the deposit order truncates.
+   *
+   * @param unlocked the most shares the pool grants for what it takes; the order's rounding keeps a
+   *                 valid fill at or under it
+   */
+  final case class DepositSplit(shares: BigInt, takenX: BigInt, takenY: BigInt,
+                                excessX: BigInt, excessY: BigInt, unlocked: BigInt)
+
+  def depositSplit(pool: LDLiquidityPool, offeredX: Long, offeredY: Long): DepositSplit = {
+    val supply = BigInt(pool.supply)
+    val byX = BigInt(offeredX) * supply / pool.reservesX
+    val byY = BigInt(offeredY) * supply / pool.reservesY
+    val excessX = if (byX > byY) (byX - byY) * pool.reservesX / supply else BigInt(0)
+    val excessY = if (byY > byX) (byY - byX) * pool.reservesY / supply else BigInt(0)
+    val takenX = BigInt(offeredX) - excessX
+    val takenY = BigInt(offeredY) - excessY
+    DepositSplit(byX min byY, takenX, takenY, excessX, excessY,
+      (takenX * supply / pool.reservesX) min (takenY * supply / pool.reservesY))
+  }
+
   /** The arithmetic each order contract checks, applied through the pool's own quoting functions. */
   private def movement(order: LithosDexOrder, pool: LDLiquidityPool, provisions: Provisions): Option[LithosDexFill] = {
     val fee = order.terms.executorFee
@@ -140,17 +162,8 @@ object LithosDexExecution {
       case deposit: LithosDexOrder.Deposit =>
         if (deposit.tokenId != pool.tokenY.toString || !pool.canDeposit) None
         else {
-          val supply = BigInt(pool.supply)
-          val byX = BigInt(deposit.depositX) * supply / pool.reservesX
-          val byY = BigInt(deposit.amount) * supply / pool.reservesY
-          val shares = byX min byY
-          // Whatever the smaller side cannot match comes back to the owner, truncated as the order truncates
-          val excessX = if (byX > byY) (byX - byY) * pool.reservesX / supply else BigInt(0)
-          val excessY = if (byY > byX) (byY - byX) * pool.reservesY / supply else BigInt(0)
-          val takenX = BigInt(deposit.depositX) - excessX
-          val takenY = BigInt(deposit.amount) - excessY
-          // The pool grants at most this for what it takes; the order's rounding keeps it above `shares`
-          val unlocked = (takenX * supply / pool.reservesX) min (takenY * supply / pool.reservesY)
+          val split = depositSplit(pool, deposit.depositX, deposit.amount)
+          import split._
           val rewardValue = BigInt(deposit.box.value) - takenX - LDHelpers.PROVISION_MIN - fee
           if (shares <= 0 || shares < deposit.minShares || shares > unlocked || !shares.isValidLong ||
             !rewardValue.isValidLong) None

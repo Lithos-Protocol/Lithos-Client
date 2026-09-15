@@ -5,21 +5,44 @@ import akka.pattern.ask
 import akka.util.Timeout
 import api.models._
 import cache.LDCache
-import configs.NodeContext
+import configs.{LithosDexOrdersConfig, NodeContext}
 import javax.inject.{Inject, Named}
+import org.slf4j.LoggerFactory
+import play.api.Configuration
+import state.synchronization.CompleteMempool
+import transactions.batching.Batcher
 import transactions.engine.DexIntent
 import transactions.engine.execution.DexAPIExecution
 import transactions.engine.wallet.EngineFunding
 import scala.concurrent.Await
 import scala.concurrent.duration._
 import scala.reflect.ClassTag
+import scala.util.{Failure, Success, Try}
 
 class LithosDexApiImpl @Inject()(node: NodeContext,
-  @Named("transaction-engine") engine: ActorRef, system: ActorSystem) extends LithosDexApi {
+  @Named("transaction-engine") engine: ActorRef,
+  @Named("lithosdex-batcher") batcher: ActorRef,
+  config: Configuration,
+  system: ActorSystem) extends LithosDexApi {
   private implicit val timeout: Timeout = Timeout(45.seconds)
-  private val reads = new DexAPIExecution(node, EngineFunding(engine, EngineFunding.AskTimeout, system.dispatcher))
+  private val logger = LoggerFactory.getLogger("LithosDexApi")
+  private val reads = new DexAPIExecution(node, EngineFunding(engine, EngineFunding.AskTimeout, system.dispatcher),
+    orderDefaults = LithosDexOrdersConfig(config), heldPlacements = () => heldPlacements())
   private def submit[A: ClassTag](intent: DexIntent): A =
     Await.result((engine ? intent).mapTo[A], timeout.duration)
+
+  /**
+   * Placements the LithosDex batcher carried into candidates, which the node evicts from its own mempool.
+   * An unanswered ask lists orders without them, so a miner's own carried order is missing until it confirms.
+   */
+  private def heldPlacements(): Seq[CompleteMempool.MempoolTx] =
+    Try(Await.result((batcher ? Batcher.HeldPlacements)(Timeout(5.seconds)).mapTo[Batcher.Held], 5.seconds)) match {
+      case Success(held) => held.placements
+      case Failure(ex) =>
+        logger.warn(s"The LithosDEX batcher did not report its held placements, listing orders without them: ${ex.getMessage}")
+        Seq.empty
+    }
+
   override def getPool(ldCache: LDCache): LDPoolInfo = reads.getPool(ldCache)
 
   override def getVault(ldCache: LDCache): LDVaultInfo = reads.getVault(ldCache)
@@ -62,6 +85,25 @@ class LithosDexApiImpl @Inject()(node: NodeContext,
 
   override def getPriceHistory(range: Option[String], bucket: Option[Int], ldCache: LDCache): LDPriceHistory = reads.getPriceHistory(range, bucket, ldCache)
 
-  override def getRecentSwaps(limit: Option[Int]): LDRecentSwaps = reads.getRecentSwaps(limit)
+  override def getRecentActivity(limit: Option[Int]): LDRecentActivity = reads.getRecentActivity(limit)
 
+  override def listOrders(ldCache: LDCache): LDOrderList = reads.listOrders(ldCache)
+
+  override def checkSwapOrder(request: LDSwapOrderRequest, ldCache: LDCache): LDSwapOrderQuote = reads.checkSwapOrder(request, ldCache)
+
+  override def placeSwapOrder(request: LDSwapOrderExecuteRequest, ldCache: LDCache): LDOrderPlacementResult =
+    submit[LDOrderPlacementResult](DexIntent.PlaceSwapOrder(request))
+
+  override def checkDepositOrder(request: LDDepositOrderRequest, ldCache: LDCache): LDDepositOrderQuote = reads.checkDepositOrder(request, ldCache)
+
+  override def placeDepositOrder(request: LDDepositOrderExecuteRequest, ldCache: LDCache): LDOrderPlacementResult =
+    submit[LDOrderPlacementResult](DexIntent.PlaceDepositOrder(request))
+
+  override def checkRedeemOrder(request: LDRedeemOrderRequest, ldCache: LDCache): LDRedeemOrderQuote = reads.checkRedeemOrder(request, ldCache)
+
+  override def placeRedeemOrder(request: LDRedeemOrderRequest, ldCache: LDCache): LDOrderPlacementResult =
+    submit[LDOrderPlacementResult](DexIntent.PlaceRedeemOrder(request))
+
+  override def cancelOrder(boxId: String, ldCache: LDCache): LDOrderCancelResult =
+    submit[LDOrderCancelResult](DexIntent.CancelOrder(boxId))
 }

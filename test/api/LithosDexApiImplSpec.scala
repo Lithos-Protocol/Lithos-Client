@@ -405,38 +405,76 @@ class LithosDexApiImplSpec
   }
 
   // ══════════════════════════════════════════════════════════════════════════
-  //  RECENT SWAPS
+  //  RECENT ACTIVITY
   // ══════════════════════════════════════════════════════════════════════════
 
-  "Recent swaps" should "return the newest first and cap the list" in {
-    val f = fixture()
+  /**
+   * A lineage of three swaps, a deposit and a flush, oldest first, with no transaction readable.
+   *
+   * @param mempool the unconfirmed pool transactions, given the confirmed tip
+   */
+  private def serveActivity(f: Fixture, mempool: IndexedBox => Seq[NodeTransaction] = _ => Seq.empty): Unit = {
     val boxes = withCtx(f) { ctx =>
-      // Three swaps: each takes 1 ERG in and gives tokens out, so reserves march one way.
-      (0 to 3).map { i =>
+      val swaps = (0 to 3).map { i =>
         LDNodeFixtures.indexed(
-          LDNodeFixtures.poolBox(ctx, ReservesX + i * erg, ReservesY - i * 30000000L,
-            pendingX = i * 1500000L, index = i),
+          LDNodeFixtures.poolBox(ctx, ReservesX + i * erg, ReservesY - i * 30000000L, pendingX = i * 1500000L, index = i),
           height = 500 + i, globalIndex = i.toLong)
       }
+      val deposit = LDNodeFixtures.indexed(LDNodeFixtures.poolBox(ctx, ReservesX + 5 * erg, ReservesY + 60000000L,
+        pendingX = 4500000L, supply = LDHelpers.GENESIS_SUPPLY + 1000000L, provTokens = 999999L, index = 4),
+        height = 504, globalIndex = 4L)
+      val flush = LDNodeFixtures.indexed(LDNodeFixtures.poolBox(ctx, ReservesX + 5 * erg, ReservesY + 60000000L,
+        supply = LDHelpers.GENESIS_SUPPLY + 1000000L, provTokens = 999999L, index = 5), height = 505, globalIndex = 5L)
+      swaps ++ Seq(deposit, flush)
     }
-    serve(f, Some(boxes.head.box), None)
+    serve(f, Some(boxes.last.box), None)
     when(f.nodeApi.boxesByTokenId(anyString(), any[Paging])).thenAnswer { inv =>
       if (inv.getArgument[Paging](1).offset == 0) Success(Paged(boxes, boxes.size))
       else Success(Paged(Seq.empty[IndexedBox], boxes.size))
     }
-    when(f.nodeApi.unconfirmedTransactionsByErgoTree(anyString(), any[Paging]))
-      .thenReturn(Success(Seq.empty[NodeTransaction]))
+    when(f.nodeApi.unconfirmedTransactionsByErgoTree(anyString(), any[Paging])).thenReturn(Success(mempool(boxes.last)))
+    when(f.nodeApi.boxesWithPoolByIds(any[Seq[String]])).thenReturn(Success(Seq.empty[NodeBox]))
+    when(f.nodeApi.indexedTransactionById(anyString())).thenReturn(Success(None))
     when(f.nodeApi.chainSlice(any[Option[Int]], any[Option[Int]])).thenReturn(Success(Seq.empty[NodeHeader]))
+  }
 
-    val all = f.api.getRecentSwaps(None)
-    all.swaps.map(_.height) shouldEqual Seq(Some(503), Some(502), Some(501))
-    all.swaps.foreach(_.ergIn shouldBe true)
+  "Recent activity" should "list every kind of transition newest first, with only its kind's fields" in {
+    val f = fixture()
+    serveActivity(f)
 
-    f.api.getRecentSwaps(Some(2)).swaps should have size 2
+    val activity = f.api.getRecentActivity(None).activity
+    activity.map(_.`type`) shouldEqual Seq("FLUSH", "DEPOSIT", "SWAP", "SWAP", "SWAP")
+    activity.map(_.height) shouldEqual Seq(Some(505), Some(504), Some(503), Some(502), Some(501))
+    activity.foreach(_.status shouldBe "CONFIRMED")
+    activity.foreach(_.via shouldBe "DIRECT")
+
+    val (flush, deposit, swap) = (activity.head, activity(1), activity(2))
+    flush.amountX shouldEqual Some("4500000")
+    flush.shares shouldBe None
+    deposit.shares shouldEqual Some("1000000")
+    deposit.ergIn shouldBe None
+    swap.ergIn shouldEqual Some(true)
+    swap.amountX shouldBe None
+
+    f.api.getRecentActivity(Some(2)).activity should have size 2
+  }
+
+  it should "put unconfirmed transitions first, marked as in the mempool" in {
+    val f = fixture()
+    val out = withCtx(f)(ctx => LDNodeFixtures.poolBox(ctx, ReservesX + 6 * erg, ReservesY + 30000000L,
+      pendingX = 1500000L, supply = LDHelpers.GENESIS_SUPPLY + 1000000L, provTokens = 999999L, index = 6, txId = "ee" * 32))
+    serveActivity(f, tip =>
+      Seq(NodeTransaction("ee" * 32, Seq(NodeInput(tip.boxId, NodeSpendingProof.empty)), Seq.empty, Seq(out))))
+
+    val first = f.api.getRecentActivity(None).activity.head
+    first.txId shouldEqual "ee" * 32
+    first.status shouldEqual "MEMPOOL"
+    first.height shouldBe None
+    first.timestamp shouldBe None
   }
 
   it should "refuse a non-positive limit" in {
-    intercept[LithosBadRequest](fixture().api.getRecentSwaps(Some(0)))
+    intercept[LithosBadRequest](fixture().api.getRecentActivity(Some(0)))
       .getMessage should include("limit")
   }
 

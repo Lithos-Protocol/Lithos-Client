@@ -7,8 +7,8 @@ import api.models._
 /**
  * The LithosDex API — the `lithosdex` tag of the spec, one method per endpoint.
  *
- * Read-only endpoints and every `check` are pure functions over the current boxes and need no key. The
- * six that sign and broadcast — swap, deposit, redeem, claim, resize, flush — are behind `api_key`.
+ * Read-only endpoints and every `check` are pure functions over the current boxes and need no key. Every
+ * endpoint that signs and broadcasts is behind `api_key`, and so is the list of this wallet's orders.
  *
  * There is no `sync` endpoint here and no `LPSyncStatus`: LithosDex has no plasma tree, so following
  * the pool is following one box and there is nothing to be out of sync with.
@@ -130,8 +130,56 @@ trait LithosDexApi {
   def getPriceHistory(range: Option[String], bucket: Option[Int], ldCache: LDCache): LDPriceHistory
 
   /**
-   * GET /dex/swaps/recent
-   * Swaps against the pool, newest first, including unconfirmed ones.
+   * GET /dex/activity/recent
+   * Transactions that moved the pool, newest first, including unconfirmed ones.
    */
-  def getRecentSwaps(limit: Option[Int]): LDRecentSwaps
+  def getRecentActivity(limit: Option[Int]): LDRecentActivity
+
+  /**
+   * GET /dex/orders
+   * Outstanding orders owned by this wallet, including unconfirmed placements.
+   */
+  def listOrders(ldCache: LDCache): LDOrderList
+
+  /**
+   * POST /dex/orders/swap/check
+   * Quote a swap order against the current pool.
+   */
+  def checkSwapOrder(request: LDSwapOrderRequest, ldCache: LDCache): LDSwapOrderQuote
+
+  /**
+   * POST /dex/orders/swap
+   * Place a swap order that any miner can fill for its executor fee.
+   */
+  def placeSwapOrder(request: LDSwapOrderExecuteRequest, ldCache: LDCache): LDOrderPlacementResult
+
+  /**
+   * POST /dex/orders/deposit/check
+   * Quote a deposit order against the current pool.
+   */
+  def checkDepositOrder(request: LDDepositOrderRequest, ldCache: LDCache): LDDepositOrderQuote
+
+  /**
+   * POST /dex/orders/deposit
+   * Place a deposit order that fills only for at least `minShares`.
+   */
+  def placeDepositOrder(request: LDDepositOrderExecuteRequest, ldCache: LDCache): LDOrderPlacementResult
+
+  /**
+   * POST /dex/orders/redeem/check
+   * Quote a redeem order, including the fees its placement claims and the fees its fill forfeits.
+   */
+  def checkRedeemOrder(request: LDRedeemOrderRequest, ldCache: LDCache): LDRedeemOrderQuote
+
+  /**
+   * POST /dex/orders/redeem
+   * Place a redeem order, claiming the provision's settled fees in the same transaction.
+   */
+  def placeRedeemOrder(request: LDRedeemOrderRequest, ldCache: LDCache): LDOrderPlacementResult
+
+  /**
+   * POST /dex/orders/:boxId/cancel
+   * Refund an outstanding order to this wallet.
+   */
+  def cancelOrder(boxId: String, ldCache: LDCache): LDOrderCancelResult
 }

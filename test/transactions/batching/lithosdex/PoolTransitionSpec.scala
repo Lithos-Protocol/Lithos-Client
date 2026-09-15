@@ -1,9 +1,12 @@
 package transactions.batching.lithosdex
 
 import lithosdex.LDHelpers
+import lithosdex.contracts.{LDOrderContracts, LDOrderTerms}
 import node.NodeApi
 import node.model._
 import org.ergoplatform.appkit.BlockchainContext
+import org.ergoplatform.sdk.ErgoId
+import work.lithos.mutations.{Token, UTXO}
 import org.mockito.ArgumentMatchers.{any, anyString}
 import org.mockito.Mockito.when
 import org.scalatest.flatspec.AnyFlatSpec
@@ -161,6 +164,11 @@ class PoolTransitionSpec extends AnyFlatSpec with Matchers with MockitoSugar {
       outputs = Seq(LDNodeFixtures.poolBox(ctx, reservesX, reservesY, pendingX = pendingX,
         index = index, txId = id)))
 
+  /** The mempool transitions that classify as swaps, each carrying the id `mempoolTransitions` gave it. */
+  private def mempoolSwaps(ctx: BlockchainContext, api: NodeApi, snaps: Seq[LDBoxes.PoolSnapshot]) =
+    LDBoxes.mempoolTransitions(ctx, api, snaps.map(s => s.boxId -> s).toMap)
+      .flatMap { case (_, prev, next) => LDBoxes.classifySwap(prev, next, None) }
+
   private def mempool(ctx: BlockchainContext, confirmed: IndexedBox, txs: Seq[NodeTransaction]) = {
     val api = mock[NodeApi]
     when(api.boxesByTokenId(anyString(), any[Paging])).thenAnswer { inv =>
@@ -180,7 +188,7 @@ class PoolTransitionSpec extends AnyFlatSpec with Matchers with MockitoSugar {
       ReservesX + 998500000L, ReservesY - 30124883L, 1500000L, index = 1)
     val (api, snaps) = mempool(ctx, confirmed, Seq(tx))
 
-    val swaps = LDBoxes.mempoolSwaps(ctx, api, snaps.map(s => s.boxId -> s).toMap)
+    val swaps = mempoolSwaps(ctx, api, snaps)
     swaps should have size 1
     swaps.head.height shouldBe None
     swaps.head.txId shouldEqual "ab" * 32
@@ -202,7 +210,7 @@ class PoolTransitionSpec extends AnyFlatSpec with Matchers with MockitoSugar {
 
     // Deliberately reversed: the newer transaction is returned first.
     val (api, snaps) = mempool(ctx, confirmed, Seq(txB, txA))
-    val swaps = LDBoxes.mempoolSwaps(ctx, api, snaps.map(s => s.boxId -> s).toMap)
+    val swaps = mempoolSwaps(ctx, api, snaps)
 
     swaps.map(_.txId) shouldEqual Seq("bb" * 32, "aa" * 32)
   }
@@ -218,7 +226,7 @@ class PoolTransitionSpec extends AnyFlatSpec with Matchers with MockitoSugar {
       Seq(NodeInput(confirmed.boxId, NodeSpendingProof.empty)), Seq.empty, Seq(out))
     val (api, snaps) = mempool(ctx, confirmed, Seq(tx))
 
-    val swaps = LDBoxes.mempoolSwaps(ctx, api, snaps.map(s => s.boxId -> s).toMap)
+    val swaps = mempoolSwaps(ctx, api, snaps)
     swaps.map(_.txId) shouldEqual Seq("dd" * 32)
   }
 
@@ -229,7 +237,7 @@ class PoolTransitionSpec extends AnyFlatSpec with Matchers with MockitoSugar {
       ReservesX + 998500000L, ReservesY - 30124883L, 1500000L, index = 1)
     val (api, snaps) = mempool(ctx, confirmed, Seq(orphan))
 
-    LDBoxes.mempoolSwaps(ctx, api, snaps.map(s => s.boxId -> s).toMap) shouldBe empty
+    mempoolSwaps(ctx, api, snaps) shouldBe empty
   }
 
   it should "report an unreachable mempool rather than an empty list" in withCtx { ctx =>
@@ -244,7 +252,88 @@ class PoolTransitionSpec extends AnyFlatSpec with Matchers with MockitoSugar {
     val (snaps, _) = LDBoxes.poolHistory(ctx, api)
 
     intercept[LDBoxes.IndexUnavailableException](
-      LDBoxes.mempoolSwaps(ctx, api, snaps.map(s => s.boxId -> s).toMap))
+      mempoolSwaps(ctx, api, snaps))
+  }
+
+  // ─── classifying every transition, and telling an order fill from a direct spend ────
+
+  private def snap(reservesX: Long, reservesY: Long, pendingX: Long = 0L, pendingY: Long = 0L,
+                   supply: Long = LDHelpers.GENESIS_SUPPLY): LDBoxes.PoolSnapshot =
+    LDBoxes.PoolSnapshot(500, 1L, "aa" * 32, "bb" * 32, reservesX, reservesY, pendingX, pendingY,
+      BigInt(0), BigInt(0), supply)
+
+  private def ownerTerms(ctx: BlockchainContext, pool: String = null) = LDOrderTerms(
+    ctx.newProverBuilder().withDLogSecret(java.math.BigInteger.valueOf(7007L)).build().getAddress.getPublicKey,
+    if (pool == null) LDHelpers.getPoolNFT(ctx.getNetworkType) else ErgoId.create(pool), 3000000L, 1000000L)
+
+  private def poolNft(ctx: BlockchainContext) = LDHelpers.getPoolNFT(ctx.getNetworkType).toString
+
+  private def vaultNft(ctx: BlockchainContext) = LDHelpers.getVaultNFT(ctx.getNetworkType).toString
+
+  private def classify(ctx: BlockchainContext, prev: LDBoxes.PoolSnapshot, next: LDBoxes.PoolSnapshot,
+                       inputs: Map[Int, NodeBox] = Map.empty) =
+    LDBoxes.classifyTransition(prev, next, "cc" * 32, Some(501), inputs.get, poolNft(ctx), vaultNft(ctx))
+
+  private def depositOrder(ctx: BlockchainContext, pool: String = null): NodeBox =
+    LDNodeFixtures.nodeBox(ctx, UTXO(LDOrderContracts.deposit(ownerTerms(ctx, pool), erg, 1L),
+      erg + LDHelpers.PROVISION_MIN + 4000000L, Seq(Token(LDHelpers.getTokenY(ctx.getNetworkType), 300000000L))),
+      index = 1, txId = "dd" * 32)
+
+  "A deposit" should "be classified with what the pool took and the shares it issued" in withCtx { ctx =>
+    val t = classify(ctx, snap(ReservesX, ReservesY),
+      snap(ReservesX + erg, ReservesY + 300000000L, supply = LDHelpers.GENESIS_SUPPLY + 1000000L))
+    t.map(_.kind) shouldEqual Some(LDBoxes.TransitionKind.Deposit)
+    t.map(x => (x.amountX, x.amountY, x.shares)) shouldEqual Some((erg, 300000000L, 1000000L))
+    t.flatMap(_.orderBoxId) shouldBe None
+  }
+
+  it should "name the order it filled when input 1 is a deposit order on this pool" in withCtx { ctx =>
+    val order = depositOrder(ctx)
+    classify(ctx, snap(ReservesX, ReservesY),
+      snap(ReservesX + erg, ReservesY + 300000000L, supply = LDHelpers.GENESIS_SUPPLY + 1000000L),
+      Map(1 -> order)).flatMap(_.orderBoxId) shouldEqual Some(order.boxId)
+  }
+
+  it should "not name an order that trades against another pool" in withCtx { ctx =>
+    // Nothing stops a stranger's transaction carrying some other pool's order beside this pool
+    classify(ctx, snap(ReservesX, ReservesY),
+      snap(ReservesX + erg, ReservesY + 300000000L, supply = LDHelpers.GENESIS_SUPPLY + 1000000L),
+      Map(1 -> depositOrder(ctx, pool = "5d" * 32))).flatMap(_.orderBoxId) shouldBe None
+  }
+
+  "A redemption" should "read its order at input 2, where the redeem order's contract pins it" in withCtx { ctx =>
+    val nft = ErgoId.create("f0" * 32)
+    val order = LDNodeFixtures.nodeBox(ctx, UTXO(LDOrderContracts.redeem(ownerTerms(ctx)), 4000000L, Seq(Token(nft, 1L))),
+      index = 2, txId = "dd" * 32)
+    val prev = snap(ReservesX, ReservesY)
+    val next = snap(ReservesX - erg, ReservesY - 300000000L, supply = LDHelpers.GENESIS_SUPPLY - 1000000L)
+
+    val t = classify(ctx, prev, next, Map(2 -> order))
+    t.map(_.kind) shouldEqual Some(LDBoxes.TransitionKind.Redeem)
+    t.map(x => (x.amountX, x.amountY, x.shares)) shouldEqual Some((erg, 300000000L, 1000000L))
+    t.flatMap(_.orderBoxId) shouldEqual Some(order.boxId)
+    // At input 1 the contract refuses to execute, so it cannot be what this transaction filled
+    classify(ctx, prev, next, Map(1 -> order)).flatMap(_.orderBoxId) shouldBe None
+  }
+
+  "A resize" should "be told from a deposit by the vault at input 2, with a signed share change" in withCtx { ctx =>
+    val vault = LDNodeFixtures.vaultBox(ctx, LDHelpers.VAULT_MIN)
+    val t = classify(ctx, snap(ReservesX, ReservesY, pendingX = 5000000L),
+      snap(ReservesX - erg, ReservesY - 300000000L, supply = LDHelpers.GENESIS_SUPPLY - 1000000L), Map(2 -> vault))
+    t.map(_.kind) shouldEqual Some(LDBoxes.TransitionKind.Resize)
+    t.map(x => (x.amountX, x.amountY, x.shares)) shouldEqual Some((erg, 300000000L, -1000000L))
+  }
+
+  "A flush" should "be classified with the pending fees it moved" in withCtx { ctx =>
+    val t = classify(ctx, snap(ReservesX, ReservesY, pendingX = 5000000L, pendingY = 200000L), snap(ReservesX, ReservesY))
+    t.map(_.kind) shouldEqual Some(LDBoxes.TransitionKind.Flush)
+    t.map(x => (x.amountX, x.amountY)) shouldEqual Some((5000000L, 200000L))
+  }
+
+  "A supply change the reserves do not follow" should "not be classified at all" in withCtx { ctx =>
+    // No pool operation issues shares while paying reserves out, so this can only be a box read off chain
+    classify(ctx, snap(ReservesX, ReservesY),
+      snap(ReservesX - erg, ReservesY - 300000000L, supply = LDHelpers.GENESIS_SUPPLY + 1000000L)) shouldBe None
   }
 
   // ─── reserves are decoded net of pending ──────────────────────────────────

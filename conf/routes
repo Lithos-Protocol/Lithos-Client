@@ -46,8 +46,23 @@ GET  /dex/vault                                 controllers.LithosDexApiControll
 GET  /dex/provisions                            controllers.LithosDexApiController.listProvisions()
 GET  /dex/fees/history                          controllers.LithosDexApiController.getFeeHistory(from: Option[Int], to: Option[Int], bucket: Option[Int])
 GET  /dex/price/history                         controllers.LithosDexApiController.getPriceHistory(range: Option[String], bucket: Option[Int])
-GET  /dex/swaps/recent                          controllers.LithosDexApiController.getRecentSwaps(limit: Option[Int])
+GET  /dex/activity/recent                       controllers.LithosDexApiController.getRecentActivity(limit: Option[Int])
 GET  /dex/provisions/:boxId/fees/history        controllers.LithosDexApiController.getProvisionFeeHistory(boxId: String, from: Option[Int], to: Option[Int], bucket: Option[Int])
+GET  /dex/orders                                controllers.LithosDexApiController.listOrders()
++ nocsrf
+POST /dex/orders/swap/check                     controllers.LithosDexApiController.checkSwapOrder()
++ nocsrf
+POST /dex/orders/swap                           controllers.LithosDexApiController.placeSwapOrder()
++ nocsrf
+POST /dex/orders/deposit/check                  controllers.LithosDexApiController.checkDepositOrder()
++ nocsrf
+POST /dex/orders/deposit                        controllers.LithosDexApiController.placeDepositOrder()
++ nocsrf
+POST /dex/orders/redeem/check                   controllers.LithosDexApiController.checkRedeemOrder()
++ nocsrf
+POST /dex/orders/redeem                         controllers.LithosDexApiController.placeRedeemOrder()
++ nocsrf
+POST /dex/orders/:boxId/cancel                  controllers.LithosDexApiController.cancelOrder(boxId: String)
 + nocsrf
 POST /dex/swap/check                            controllers.LithosDexApiController.checkSwap()
 + nocsrf

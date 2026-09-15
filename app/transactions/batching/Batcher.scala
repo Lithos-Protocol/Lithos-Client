@@ -177,6 +177,8 @@ abstract class Batcher(nodeContext: NodeContext,
 
     // Nothing to reconcile: a candidate execution holds no wallet input and was never broadcast.
     case CandidateTxsDropped(blockHeight) => preparation.drop(blockHeight)
+
+    case HeldPlacements => sender() ! Held(evictedPlacements.placements)
   }
 
   /** Stops reading back orders a build found spent. Safe to call from the worker. */
@@ -338,6 +340,12 @@ object Batcher {
 
   /** Orders a build found already spent, so they stop being read back. */
   private[batching] final case class Spent(ids: Set[String])
+
+  /** Asks for the wallet placements this batcher carried into candidates, answered with [[Held]]. */
+  case object HeldPlacements
+
+  /** Placements the node may have evicted from its mempool after a candidate carried them. */
+  final case class Held(placements: Vector[CompleteMempool.MempoolTx])
 
   /** Boxes per indexer page. */
   final val PageSize = 100

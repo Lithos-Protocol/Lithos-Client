@@ -574,6 +574,8 @@ paths:
         whose placement is unconfirmed. An order leaves the list once the transaction filling or
         cancelling it confirms. Unconfirmed placements first, then newest first.
       operationId: listLDOrders
+      security:
+        - ApiKeyAuth: [api_key]
       tags:
         - lithosdex
       responses:
@@ -583,6 +585,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/LDOrderList'
+        '403':
+          description: Missing or wrong api_key
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
         '503':
           description: Node or mempool unavailable. Never returns a partial list.
           content:
@@ -883,8 +891,9 @@ paths:
                 $ref: '#/components/schemas/LDStateChangedResponse'
         '422':
           description: >
-            Closing the provision would take supply under the pool's minimum, this wallet does not
-            hold its `ownerNFT`, or the wallet cannot cover the network fee.
+            Closing the provision would take supply under the pool's minimum, the vault cannot pay the
+            fees the placement claims, this wallet does not hold its `ownerNFT`, or the wallet cannot
+            cover the network fee.
           content:
             application/json:
               schema:
@@ -4666,6 +4675,7 @@ components:
           description: >
             Whether the order would fill against the current pool. False when the pool cannot meet the
             order's minimum or refuses it; the order waits until that changes or it is cancelled.
+            Always true while `FILLING` and false while `CANCELLING`.
           example: true
 
     LDOrderList:

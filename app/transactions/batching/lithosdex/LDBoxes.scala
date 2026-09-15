@@ -1,10 +1,11 @@
 package transactions.batching.lithosdex
 
 import lithosdex.LDHelpers
+import lithosdex.contracts.LDOrderKind
 import node.MutationConversions._
 import node.NodeApi
 import node.model.SortDirection.Asc
-import node.model.{IndexedBox, MempoolOptions, NodeBox, Paging}
+import node.model.{IndexedBox, MempoolOptions, NodeBox, NodeTransaction, Paging}
 import org.ergoplatform.appkit.{BlockchainContext, ErgoValue}
 import org.ergoplatform.sdk.ErgoId
 import org.bouncycastle.util.encoders.Hex
@@ -159,10 +160,11 @@ object LDBoxes {
     BigInt(box.registers(idx).getValue.asInstanceOf[sigma.data.CBigInt].wrappedValue)
 
   /**
-   * Provisions this wallet can act on, the ones whose ownership NFT it holds.
+   * Provisions this wallet owns: the ones whose ownership NFT it holds, plus those whose NFT is one of
+   * `alsoOwned`, such as the NFTs sitting in this wallet's redeem orders.
    */
-  def ownedProvisions(ctx: BlockchainContext, nodeApi: NodeApi): Seq[Provision] = {
-    val held = walletTokenIds(nodeApi)
+  def ownedProvisions(ctx: BlockchainContext, nodeApi: NodeApi, alsoOwned: Set[String] = Set.empty): Seq[Provision] = {
+    val held = walletTokenIds(nodeApi) ++ alsoOwned
     provisionBoxes(ctx, nodeApi).filter(p => held.contains(p.ownerNFT.toString))
   }
 
@@ -370,8 +372,116 @@ object LDBoxes {
   private def readMempoolSnapshot(b: NodeBox): Option[PoolSnapshot] =
     readSnapshot(IndexedBox(box = b, address = "", inclusionHeight = -1, globalIndex = -1L))
 
+  /** What one pool transition did, as the recent activity list reports it. */
+  sealed abstract class TransitionKind(val name: String)
+
+  object TransitionKind {
+    case object Swap extends TransitionKind("SWAP")
+    case object Deposit extends TransitionKind("DEPOSIT")
+    case object Redeem extends TransitionKind("REDEEM")
+    case object Resize extends TransitionKind("RESIZE")
+    case object Flush extends TransitionKind("FLUSH")
+  }
+
   /**
-   * Swaps sitting in the mempool, each with the pool box it spends.
+   * One classified pool transition.
+   *
+   * @param orderBoxId the order the transaction filled, when it filled one
+   * @param swap       the traded amounts, for a swap
+   * @param amountX    nanoERG added to or returned from the reserves, or moved to the vault by a flush
+   * @param shares     shares issued or closed, signed for a resize; 0 for a swap or a flush
+   */
+  case class PoolTransition(txId: String,
+                            height: Option[Int],
+                            kind: TransitionKind,
+                            orderBoxId: Option[String],
+                            swap: Option[SwapTransition],
+                            amountX: Long,
+                            amountY: Long,
+                            shares: Long)
+
+  /**
+   * What moved between `prev` and `next`, or None for a shape no pool operation produces.
+   *
+   * The pool box does not record its operation, so the kind comes from the deltas and, where they
+   * cannot tell, from the transaction's inputs: a resize carries the vault at input 2, and an order fill
+   * carries a parseable order at the index its contract pins.
+   *
+   * @param inputs the creating transaction's input at an index, when known
+   */
+  def classifyTransition(prev: PoolSnapshot, next: PoolSnapshot, txId: String, height: Option[Int],
+                         inputs: Int => Option[NodeBox], poolNft: String, vaultNft: String): Option[PoolTransition] = {
+    val dX = next.reservesX - prev.reservesX
+    val dY = next.reservesY - prev.reservesY
+    val dSupply = next.supply - prev.supply
+    def filled(index: Int, kinds: Set[LDOrderKind]): Option[String] =
+      inputs(index).flatMap(LithosDexOrder.parse)
+        .filter(order => kinds.contains(order.kind) && order.poolNft == poolNft).map(_.boxId)
+
+    if (dSupply == 0)
+      classifySwap(prev, next, height).map(swap => PoolTransition(txId, height, TransitionKind.Swap,
+        filled(1, Set(LDOrderKind.SwapSell, LDOrderKind.SwapBuy)), Some(swap), 0L, 0L, 0L))
+        .orElse {
+          // A flush moves pending into the vault and nothing else; the pool refuses one that moves nothing
+          val flushed = dX == 0 && dY == 0 && next.pendingX == 0 && next.pendingY == 0 &&
+            (prev.pendingX > 0 || prev.pendingY > 0)
+          if (flushed) Some(PoolTransition(txId, height, TransitionKind.Flush, None, None, prev.pendingX, prev.pendingY, 0L))
+          else None
+        }
+    // Liquidity moves both reserves the way supply moves
+    else if (dX.signum != dSupply.signum || dY.signum != dSupply.signum) None
+    else if (inputs(2).exists(_.assets.headOption.exists(_.tokenId == vaultNft)))
+      Some(PoolTransition(txId, height, TransitionKind.Resize, None, None, dX.abs, dY.abs, dSupply))
+    else if (dSupply > 0)
+      Some(PoolTransition(txId, height, TransitionKind.Deposit, filled(1, Set(LDOrderKind.Deposit)), None, dX, dY, dSupply))
+    else
+      Some(PoolTransition(txId, height, TransitionKind.Redeem, filled(2, Set(LDOrderKind.Redeem)), None, -dX, -dY, -dSupply))
+  }
+
+  /**
+   * The newest `limit` pool transitions, unconfirmed ones first.
+   *
+   * A confirmed transition's creating transaction is read only when its kind or its order depends on the
+   * inputs, and only until the list is full. A read that fails fails the whole list, since an entry with
+   * its inputs unread would report an order fill as a direct spend.
+   *
+   * @param snapshots the confirmed lineage, oldest first
+   */
+  def recentTransitions(ctx: BlockchainContext, nodeApi: NodeApi, snapshots: Seq[PoolSnapshot],
+                        limit: Int): Vector[PoolTransition] = {
+    val n = ctx.getNetworkType
+    val poolNft = LDHelpers.getPoolNFT(n).toString
+    val vaultNft = LDHelpers.getVaultNFT(n).toString
+
+    val pending = mempoolTransitions(ctx, nodeApi, snapshots.map(s => s.boxId -> s).toMap)
+    // Inputs 1 and 2 are where an order or the vault can sit
+    val inputIds = pending.flatMap { case (tx, _, _) => tx.inputs.slice(1, 3).map(_.boxId) }.distinct
+    val pendingInputs =
+      if (inputIds.isEmpty) Map.empty[String, NodeBox]
+      else nodeApi.boxesWithPoolByIds(inputIds) match {
+        case Success(boxes) => boxes.map(b => b.boxId -> b).toMap
+        case Failure(ex) => throw indexUnavailable("the node reading mempool pool transaction inputs", ex)
+      }
+    val unconfirmed = pending.iterator.flatMap { case (tx, prev, next) =>
+      classifyTransition(prev, next, tx.id, None,
+        i => tx.inputs.lift(i).flatMap(input => pendingInputs.get(input.boxId)), poolNft, vaultNft)
+    }
+
+    val confirmed = snapshots.iterator.sliding(2).collect { case Seq(prev, next) => (prev, next) }
+      .toVector.reverseIterator.flatMap { case (prev, next) =>
+        lazy val inputs = nodeApi.indexedTransactionById(next.txId) match {
+          case Success(tx) => tx.map(_.inputs.map(_.box)).getOrElse(Seq.empty)
+          case Failure(ex) => throw indexUnavailable(s"the node index reading pool transaction ${next.txId}", ex)
+        }
+        classifyTransition(prev, next, next.txId, Some(next.height), i => inputs.lift(i), poolNft, vaultNft)
+      }
+
+    (unconfirmed ++ confirmed).take(limit).toVector
+  }
+
+  /**
+   * Pool transitions sitting in the mempool, newest first, each with the pool box it spends and the
+   * one it creates.
    *
    * A mempool pool box has no height, so its predecessor cannot be found by ordering — it is found
    * by id: whichever known pool box this transaction spends. That resolves a chain of any depth
@@ -380,9 +490,9 @@ object LDBoxes {
    *
    * @param known the confirmed pool boxes to chain onto, keyed by box id
    */
-  def mempoolSwaps(ctx: BlockchainContext,
-                   nodeApi: NodeApi,
-                   known: Map[String, PoolSnapshot]): Seq[SwapTransition] = {
+  def mempoolTransitions(ctx: BlockchainContext,
+                         nodeApi: NodeApi,
+                         known: Map[String, PoolSnapshot]): Seq[(NodeTransaction, PoolSnapshot, PoolSnapshot)] = {
     val nft = LDHelpers.getPoolNFT(ctx.getNetworkType).toString
     val ergoTreeHex = DexContracts(ctx).liquidityPool.ergoTreeHex
 
@@ -412,11 +522,9 @@ object LDBoxes {
 
     produced.flatMap { case (tx, out) =>
       tx.inputs.iterator.map(_.boxId).find(byId.contains)
-        .flatMap(prevId => classifySwap(byId(prevId), out, None))
-        // `tx.id`, not the output's own `transactionId`. The transaction being iterated IS the one
-        // that created this box, so taking the id from anywhere else is an indirection that can only
-        // be wrong — and a mempool response is not obliged to populate that field on its outputs.
-        .map(swap => depth(out, Set(out.boxId)) -> swap.copy(txId = tx.id))
+        // The transaction being iterated is the one that created `out`, so its id is `tx.id`: a mempool
+        // response is not obliged to fill in `transactionId` on its outputs.
+        .map(prevId => depth(out, Set(out.boxId)) -> ((tx, byId(prevId), out.copy(txId = tx.id))))
     }.sortBy(-_._1).map(_._2)
   }
 

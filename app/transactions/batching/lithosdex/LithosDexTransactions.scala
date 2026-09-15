@@ -44,10 +44,10 @@ object LithosDexTransactions {
 
   /** Network fee on every LithosDex transaction, and the headroom asked of the wallet on top of it. */
   final val TX_FEE: Long = Parameters.MinFee * 2
-  private final val FUNDING_HEADROOM: Long = Parameters.MinFee * 3
+  private[lithosdex] final val FUNDING_HEADROOM: Long = Parameters.MinFee * 3
 
   /** State the funding this operation needs and defer construction until the engine supplies it. */
-  private def funded[A <: LDFundedTx](value: Long, tokens: Seq[Token] = Seq.empty)
+  private[lithosdex] def funded[A <: LDFundedTx](value: Long, tokens: Seq[Token] = Seq.empty)
                                      (build: Seq[InputUTXO] => DexUnsigned[A]): DexPlan[A] =
     DexPlan(value, tokens, build)
 
@@ -514,7 +514,7 @@ object LithosDexTransactions {
    * Inputs are deduplicated by box id, first occurrence winning. The selector normally makes every
    * wallet input unique, while this remains a final structural guard against an invalid transaction.
    */
-  private def build(ctx: BlockchainContext,
+  private[lithosdex] def build(ctx: BlockchainContext,
                     inputs: Seq[InputUTXO],
                     outputs: Seq[UTXO],
                     wallet: NodeWallet,
@@ -583,6 +583,26 @@ case class LDResizeTx(tx: SignedTransaction,
 
 case class LDRefreshTx(tx: SignedTransaction,
                        boxId: String) extends LDFundedTx
+
+/**
+ * @param order               the order box the placement creates
+ * @param claimedX            settled ERG fees a redeem placement claimed in the same transaction
+ * @param provisionSuccessor  the provision box that claim created
+ */
+case class LDOrderTx(tx: SignedTransaction,
+                     order: InputUTXO,
+                     claimedX: Long = 0L,
+                     claimedY: Long = 0L,
+                     provisionSuccessor: Option[String] = None) extends LDFundedTx
+
+/**
+ * @param returnedValue nanoERG the order box held
+ * @param feeFromOrder  whether the network fee came out of the order box rather than the wallet
+ */
+case class LDCancelTx(tx: SignedTransaction,
+                      returnedValue: Long,
+                      returnedTokens: Seq[Token],
+                      feeFromOrder: Boolean) extends LDFundedTx
 
 /**
  * What a DEX operation needs and how to build it, with no wallet or node access of its own. The

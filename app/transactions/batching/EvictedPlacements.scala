@@ -17,7 +17,8 @@ import scala.util.{Failure, Success, Try}
  * adapter's own placement checks then run on them like on any other.
  *
  * Removable once nodes no longer evict requested transactions: delete this file, `Batcher.evictedPlacements`,
- * and the `restore` and `remember` calls in each adapter's `executions`.
+ * `Batcher.HeldPlacements`, the `restore` and `remember` calls in each adapter's `executions`, and the held
+ * placements `LithosDexApiImpl` passes to the order list.
  */
 final class EvictedPlacements {
 
@@ -46,13 +47,7 @@ final class EvictedPlacements {
         logger.warn(s"Could not read the inputs of ${missing.size} evicted placement(s), not restoring them: ${ex.getMessage}")
         snapshot
       case Success(available) =>
-        // A child's input may be the output of a parent restored just before it
-        val restored = missing.foldLeft(Vector.empty[CompleteMempool.MempoolTx]) { (kept, tx) =>
-          val created = kept.iterator.flatMap(_.body.outputs.map(_.boxId)).toSet
-          val carryable = tx.body.inputs.forall(input =>
-            (available.contains(input.boxId) || created.contains(input.boxId)) && !snapshot.spent.contains(input.boxId))
-          if (carryable) kept :+ tx else kept
-        }
+        val restored = carryable(missing, snapshot, available)
         val forgotten = missing.map(_.id).toSet -- restored.map(_.id)
         if (forgotten.nonEmpty) held.updateAndGet(current => current.filterNot(h => forgotten.contains(h.tx.id)))
         if (restored.isEmpty) snapshot
@@ -81,9 +76,25 @@ final class EvictedPlacements {
 
   /** Ids of the placements held now. Package-private so a spec can see what is held without restoring it. */
   private[batching] def heldIds: Set[String] = held.get.map(_.tx.id).toSet
+
+  /** The placements held now, first carried first. Reading them forgets nothing. */
+  def placements: Vector[CompleteMempool.MempoolTx] = held.get.map(_.tx)
 }
 
 object EvictedPlacements {
+
+  /**
+   * The members of `missing` that can still be carried, in order: every input is in `available` or created
+   * by a member kept before it, and no transaction in `snapshot` claims one.
+   */
+  def carryable(missing: Vector[CompleteMempool.MempoolTx], snapshot: CompleteMempool.Snapshot,
+                available: Set[String]): Vector[CompleteMempool.MempoolTx] =
+    missing.foldLeft(Vector.empty[CompleteMempool.MempoolTx]) { (kept, tx) =>
+      val created = kept.iterator.flatMap(_.body.outputs.map(_.boxId)).toSet
+      val spendable = tx.body.inputs.forall(input =>
+        (available.contains(input.boxId) || created.contains(input.boxId)) && !snapshot.spent.contains(input.boxId))
+      if (spendable) kept :+ tx else kept
+    }
 
   /** Placements held at once. */
   final val Capacity = 10

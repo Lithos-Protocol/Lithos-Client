@@ -48,7 +48,12 @@ class ConfigDefaultsSpec extends AnyFlatSpec with Matchers {
     LithosDexBatchingConfig(shipped) shouldEqual LithosDexBatchingConfig.Default
   }
 
-  it should "read autoFlush from the LithosDex block, on when absent" in {
+  "LithosDexOrdersConfig.Default" should "equal what the shipped application.conf parses" in {
+    LithosDexOrdersConfig(shipped) shouldEqual LithosDexOrdersConfig.Default
+    LithosDexOrdersConfig(Configuration.empty) shouldEqual LithosDexOrdersConfig.Default
+  }
+
+  "LithosDexBatchingConfig" should "read autoFlush from the LithosDex block, on when absent" in {
     LithosDexBatchingConfig(Configuration.empty).autoFlush shouldBe true
     LithosDexBatchingConfig(Configuration(ConfigFactory.parseString("batching.lithosdex.autoFlush = false")))
       .autoFlush shouldBe false

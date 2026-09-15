@@ -1,19 +1,23 @@
 package transactions.engine.execution
 import api.LithosDexApi
 
-import api.LithosApiErrors.{LithosBadRequest, LithosStateChanged, LithosUnavailable, LithosUnprocessable}
+import api.LithosApiErrors.{LithosBadRequest, LithosNotFound, LithosStateChanged, LithosUnavailable, LithosUnprocessable}
 import api.models._
 import cache.LDCache
 import lithosdex.states.{LDFeeValue, LDLiquidityState}
 import lithosdex.{LDHelpers, LDLiquidityPool}
 import mutations.NodeWallet
+import node.MutationConversions._
 import node.NodeApi
-import org.ergoplatform.appkit.BlockchainContext
+import node.model.MempoolOptions
+import org.ergoplatform.appkit.{Address, BlockchainContext}
 import org.ergoplatform.sdk.ErgoId
 import configs.NodeContext
+import sigma.ast.ErgoTree
+import transactions.batching.BatchingMempool
 import transactions.engine.wallet.EngineFunding
 import transactions.batching.lithosdex.LDBoxes.Provision
-import transactions.batching.lithosdex.{LDBoxes, LDFundedTx, LithosDexTransactions}
+import transactions.batching.lithosdex.{LDBoxes, LDFundedTx, LDOrderBook, LDOrderTransactions, LDOrderTx, LithosDexExecution, LithosDexOrder, LithosDexTransactions}
 import work.lithos.mutations.InputUTXO
 
 import javax.inject.Inject
@@ -22,7 +26,7 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.locks.ReentrantLock
 import scala.collection.JavaConverters._
-import scala.util.Try
+import scala.util.{Failure, Success, Try}
 import scala.util.control.NonFatal
 import akka.pattern.ask
 import akka.util.Timeout
@@ -45,7 +49,9 @@ import transactions.engine.EngineBroadcast
  * boxes, the wallet endpoints for what this client owns. No explorer is involved.
  */
 class DexAPIExecution(nodeContext: NodeContext, walletSelector: EngineFunding,
-                      alive: () => Boolean = () => true) extends LithosDexApi {
+                      alive: () => Boolean = () => true,
+                      orderDefaults: configs.LithosDexOrdersConfig = configs.LithosDexOrdersConfig.Default,
+                      heldPlacements: () => Seq[CompleteMempool.MempoolTx] = () => Seq.empty) extends LithosDexApi {
   protected def executionNode: NodeApi = nodeContext.getNodeApi
 
   /** Default history bucket: a day of blocks at two minutes each */
@@ -283,7 +289,14 @@ class DexAPIExecution(nodeContext: NodeContext, walletSelector: EngineFunding,
     val vault = vaultState(ctx, LDBoxes.vaultBox(ctx, nodeApi))
     ldCache.observeVault(vault, ctx.getHeight)
 
-    LDProvisionList(LDBoxes.ownedProvisions(ctx, nodeApi).map(describe(liquidity, vault, _)))
+    // A provision whose NFT waits in one of this wallet's redeem orders is still this wallet's, and the
+    // wallet cannot claim it until the order fills or is cancelled
+    val inOrders = LDOrderBook.redeemOrders(ctx, nodeApi, wallet.signableTrees)
+    LDProvisionList(LDBoxes.ownedProvisions(ctx, nodeApi, inOrders.keySet).map { prov =>
+      val order = inOrders.get(prov.ownerNFT.toString)
+      val described = describe(liquidity, vault, prov)
+      described.copy(canClaim = described.canClaim && order.isEmpty, redeemOrderBoxId = order)
+    })
   }
 
   /**
@@ -714,38 +727,320 @@ class DexAPIExecution(nodeContext: NodeContext, walletSelector: EngineFunding,
     }
 
   // ══════════════════════════════════════════════════════════════════════════
-  //  RECENT SWAPS
+  //  RECENT ACTIVITY
   // ══════════════════════════════════════════════════════════════════════════
 
   /** @inheritdoc */
-  override def getRecentSwaps(limit: Option[Int]): LDRecentSwaps =
+  override def getRecentActivity(limit: Option[Int]): LDRecentActivity =
     withDex { (ctx, nodeApi) =>
-      val want = limit.getOrElse(LDRecentSwaps.DefaultLimit)
+      val want = limit.getOrElse(LDRecentActivity.DefaultLimit)
       if (want <= 0) throw LithosBadRequest(s"'limit' must be positive, got $want")
-      val take = math.min(want, LDRecentSwaps.MaxLimit)
-
-      val (snapshots, _) = lineage(nodeApi, ctx)
-      val confirmed = snapshots.sliding(2).collect {
-        case Seq(prev, next) => LDBoxes.classifySwap(prev, next, Some(next.height))
-      }.flatten.toSeq
 
       // Every confirmed box, not just the newest: a mempool transaction can spend a box the index
       // has not caught up to being the tip, and chaining by id resolves that without ordering.
-      val pending = LDBoxes.mempoolSwaps(ctx, nodeApi, snapshots.map(s => s.boxId -> s).toMap)
-      // Unconfirmed first — they are the newest, and the caller badges them rather than sorting.
-      val newest = (pending ++ confirmed.reverse).take(take)
-
+      val (snapshots, _) = lineage(nodeApi, ctx)
+      val newest = LDBoxes.recentTransitions(ctx, nodeApi, snapshots, math.min(want, LDRecentActivity.MaxLimit))
       val timestamps = LDBoxes.timestampsAt(nodeApi, newest.flatMap(_.height))
-      LDRecentSwaps(newest.map { s =>
-        LDSwapEntry(
-          txId = s.txId,
-          ergIn = s.ergIn,
-          amountIn = LDAmounts(s.amountIn),
-          amountOut = LDAmounts(s.amountOut),
-          height = s.height,
-          timestamp = s.height.flatMap(timestamps.get))
-      })
+      LDRecentActivity(newest.map(activityEntry(_, timestamps)))
     }
+
+  private def activityEntry(t: LDBoxes.PoolTransition, timestamps: Map[Int, Long]): LDActivityEntry = {
+    val liquidity = t.kind != LDBoxes.TransitionKind.Swap
+    LDActivityEntry(
+      txId = t.txId,
+      `type` = t.kind.name,
+      via = if (t.orderBoxId.isDefined) "ORDER" else "DIRECT",
+      orderBoxId = t.orderBoxId,
+      status = if (t.height.isDefined) "CONFIRMED" else "MEMPOOL",
+      height = t.height,
+      timestamp = t.height.flatMap(timestamps.get),
+      ergIn = t.swap.map(_.ergIn),
+      amountIn = t.swap.map(s => LDAmounts(s.amountIn)),
+      amountOut = t.swap.map(s => LDAmounts(s.amountOut)),
+      amountX = if (liquidity) Some(LDAmounts(t.amountX)) else None,
+      amountY = if (liquidity) Some(LDAmounts(t.amountY)) else None,
+      shares = if (liquidity && t.kind != LDBoxes.TransitionKind.Flush) Some(LDAmounts(t.shares)) else None)
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  //  ORDERS
+  // ══════════════════════════════════════════════════════════════════════════
+
+  /** @inheritdoc */
+  override def listOrders(ldCache: LDCache): LDOrderList = withDex { (ctx, nodeApi) =>
+    val owned = LDOrderBook.owned(ctx, nodeApi, wallet.signableTrees, mempoolSnapshot(), heldPlacements())
+    if (owned.isEmpty) LDOrderList(Seq.empty)
+    else {
+      val liquidity = pool(ctx, nodeApi, ldCache)
+      val provisions = redeemProvisions(ctx, nodeApi, owned.map(_.order))
+      LDOrderList(owned.map(o => describeOrder(ctx, o, liquidity, provisions)))
+    }
+  }
+
+  /** @inheritdoc */
+  override def checkSwapOrder(request: LDSwapOrderRequest, ldCache: LDCache): LDSwapOrderQuote =
+    withDex { (ctx, nodeApi) =>
+      val amountIn = positive("amountIn", LDAmounts.parseLong("amountIn", request.amountIn))
+      val fees = orderFees(request.executorFee, request.maxMinerFee)
+      val q = pool(ctx, nodeApi, ldCache).simSwap(amountIn, request.ergIn)
+      LDSwapOrderQuote(
+        swap = LDSwapQuote(q),
+        executorFee = LDAmounts(fees.executorFee),
+        maxMinerFee = LDAmounts(fees.maxMinerFee),
+        // The executor fee comes out of the ERG a token sale releases, and on top of an ERG sale
+        netOutput = LDAmounts(if (request.ergIn) q.amountOut else q.amountOut - fees.executorFee),
+        totalErgRequired = LDAmounts(exact(LDOrderTransactions.swapValue(amountIn, request.ergIn, fees.executorFee))),
+        ergReturned = LDAmounts(LDOrderTransactions.RETURNED),
+        networkFee = LDAmounts(LithosDexTransactions.TX_FEE))
+    }
+
+  /** @inheritdoc */
+  override def placeSwapOrder(request: LDSwapOrderExecuteRequest, ldCache: LDCache): LDOrderPlacementResult =
+    withDex { (ctx, nodeApi) =>
+      val amountIn = positive("amountIn", LDAmounts.parseLong("amountIn", request.amountIn))
+      // A zero floor fills at whatever price the pool offers when the order executes
+      val minOutput = positive("minOutput", LDAmounts.parseLong("minOutput", request.minOutput))
+      val fees = orderFees(request.executorFee, request.maxMinerFee)
+      val liquidity = pool(ctx, nodeApi, ldCache)
+      placed(ctx, liquidity, LithosDexExecution.NoProvisions, exact(LDOrderTransactions.swap(
+        ctx, wallet, liquidity, amountIn, request.ergIn, minOutput, fees.executorFee, fees.maxMinerFee)))
+    }
+
+  /** @inheritdoc */
+  override def checkDepositOrder(request: LDDepositOrderRequest, ldCache: LDCache): LDDepositOrderQuote =
+    withDex { (ctx, nodeApi) =>
+      val amountX = positive("amountX", LDAmounts.parseLong("amountX", request.amountX))
+      val amountY = positive("amountY", LDAmounts.parseLong("amountY", request.amountY))
+      val fees = orderFees(request.executorFee, request.maxMinerFee)
+      val liquidity = pool(ctx, nodeApi, ldCache)
+      // The same split the executor applies, so the quote is the fill the pool would give right now
+      val split = LithosDexExecution.depositSplit(liquidity, amountX, amountY)
+      val shares = split.shares.max(0)
+      LDDepositOrderQuote(
+        shares = LDAmounts(shares),
+        amountX = LDAmounts(split.takenX),
+        amountY = LDAmounts(split.takenY),
+        excessX = LDAmounts(split.excessX),
+        excessY = LDAmounts(split.excessY),
+        shareOfSupply = if (shares <= 0) 0.0 else (shares.toDouble / (BigInt(liquidity.supply) + shares).toDouble),
+        provisionBoxValue = LDAmounts(LDHelpers.PROVISION_MIN),
+        executorFee = LDAmounts(fees.executorFee),
+        maxMinerFee = LDAmounts(fees.maxMinerFee),
+        totalErgRequired = LDAmounts(exact(LDOrderTransactions.depositValue(amountX, fees.executorFee))),
+        ergReturned = LDAmounts(LDOrderTransactions.RETURNED),
+        networkFee = LDAmounts(LithosDexTransactions.TX_FEE))
+    }
+
+  /** @inheritdoc */
+  override def placeDepositOrder(request: LDDepositOrderExecuteRequest, ldCache: LDCache): LDOrderPlacementResult =
+    withDex { (ctx, nodeApi) =>
+      val amountX = positive("amountX", LDAmounts.parseLong("amountX", request.amountX))
+      val amountY = positive("amountY", LDAmounts.parseLong("amountY", request.amountY))
+      // The only protection a deposit order has against a pool moved earlier in the same block
+      val minShares = positive("minShares", LDAmounts.parseLong("minShares", request.minShares))
+      val fees = orderFees(request.executorFee, request.maxMinerFee)
+      val liquidity = pool(ctx, nodeApi, ldCache)
+      if (!liquidity.canDeposit)
+        throw LithosUnprocessable("the pool has no provision tokens left, so no deposit can fill")
+      placed(ctx, liquidity, LithosDexExecution.NoProvisions, exact(LDOrderTransactions.deposit(
+        ctx, wallet, liquidity, amountX, amountY, minShares, fees.executorFee, fees.maxMinerFee)))
+    }
+
+  /** @inheritdoc */
+  override def checkRedeemOrder(request: LDRedeemOrderRequest, ldCache: LDCache): LDRedeemOrderQuote =
+    withDex { (ctx, nodeApi) =>
+      val fees = orderFees(request.executorFee, request.maxMinerFee)
+      val liquidity = pool(ctx, nodeApi, ldCache)
+      val vault = vaultState(ctx, LDBoxes.vaultBox(ctx, nodeApi))
+      val prov = LDBoxes.provisionById(ctx, nodeApi, request.provisionBoxId)
+      redeemOrderQuote(liquidity, vault, prov, fees)
+    }
+
+  /** @inheritdoc */
+  override def placeRedeemOrder(request: LDRedeemOrderRequest, ldCache: LDCache): LDOrderPlacementResult =
+    // A placement that claims spends the vault, a singleton every claim and flush also spends
+    mutating("this redeem order") {
+      withDex { (ctx, nodeApi) =>
+        val fees = orderFees(request.executorFee, request.maxMinerFee)
+        val liquidity = pool(ctx, nodeApi, ldCache)
+        val vaultBox = LDBoxes.vaultBox(ctx, nodeApi)
+        val vault = vaultState(ctx, vaultBox)
+        ldCache.observeVault(vault, ctx.getHeight)
+        val prov = LDBoxes.provisionById(ctx, nodeApi, request.provisionBoxId)
+        if (!liquidity.simRedeem(prov.shares).withinMinSupply)
+          throw LithosUnprocessable(
+            s"closing provision ${prov.boxId} would take supply under ${LDHelpers.MIN_SUPPLY}, which the pool refuses")
+
+        val claim = vault.canClaim(prov.entryX, prov.entryY)
+        val (owedX, owedY) = vault.owed(prov.shares, prov.entryX, prov.entryY)
+        // Placing without the claim would forfeit these fees, so a vault that cannot pay them refuses the order
+        if (claim && (vault.payableX < owedX || vault.payableY < owedY))
+          throw LithosUnprocessable(
+            s"the vault can pay ${vault.payableX} nanoERG and ${vault.payableY} tokens of the $owedX and $owedY " +
+              s"provision ${prov.boxId} is owed, which this order's placement would claim")
+        val provisions: LithosDexExecution.Provisions = nft => if (nft == prov.ownerNFT.toString) Some(prov) else None
+        placed(ctx, liquidity, provisions, LDOrderTransactions.redeem(
+          ctx, wallet, liquidity, prov, if (claim) Some(vaultBox) else None, fees.executorFee, fees.maxMinerFee))
+      }
+    }
+
+  /** @inheritdoc */
+  override def cancelOrder(boxId: String, ldCache: LDCache): LDOrderCancelResult = withDex { (ctx, nodeApi) =>
+    val snapshot = mempoolSnapshot()
+    val box = nodeApi.boxesWithPoolByIds(Seq(boxId)) match {
+      case Success(found) => found.find(_.boxId == boxId)
+      case Failure(ex) => throw LithosUnavailable(s"could not read order $boxId from the node: ${ex.getMessage}")
+    }
+    val order = box.flatMap(LithosDexOrder.parse)
+      .filter(o => wallet.signableTrees.contains(o.terms.redeemerTree))
+      .getOrElse(throw LithosNotFound(s"no outstanding order owned by this wallet has id $boxId"))
+    BatchingMempool.spenders(snapshot).get(boxId).flatMap(_.headOption).foreach { tx =>
+      throw LithosStateChanged(
+        s"order $boxId is already being filled or cancelled by unconfirmed transaction ${tx.id}: re-read the order list")
+    }
+
+    val built = fund(LDOrderTransactions.cancel(ctx, wallet, order.box.toInputUTXO(ctx)))
+    val submission = send(ctx, built)
+    LDOrderCancelResult(
+      outcome = submission.outcome,
+      txId = submission.txId,
+      returnedNanoErgs = LDAmounts(built.value.returnedValue),
+      returnedTokens = built.value.returnedTokens.map(t => LDTokenAmount(t.id.toString, LDAmounts(t.amount))),
+      networkFee = LDAmounts(LithosDexTransactions.TX_FEE))
+  }
+
+  /** Fees a request names, or the configured defaults, refused unless the cap sits under the fee. */
+  private case class OrderFees(executorFee: Long, maxMinerFee: Long)
+
+  private def orderFees(executorFee: Option[String], maxMinerFee: Option[String]): OrderFees = {
+    val fee = LDAmounts.parseLong("executorFee", executorFee).getOrElse(orderDefaults.executorFeeNanoErg)
+    val cap = LDAmounts.parseLong("maxMinerFee", maxMinerFee).getOrElse(orderDefaults.maxMinerFeeNanoErg)
+    if (cap < 0) throw LithosBadRequest(s"'maxMinerFee' cannot be negative, got $cap")
+    // A cap at or above the fee lets a broadcast fill spend all of it, so no executor would take the order
+    if (cap >= fee) throw LithosBadRequest(
+      s"'maxMinerFee' ($cap) must be below 'executorFee' ($fee); omitted fields come from lithosdex.orders")
+    OrderFees(fee, cap)
+  }
+
+  /** A request whose amounts overflow a 64-bit total is refused rather than failing as a defect. */
+  private def exact[A](build: => A): A =
+    try build catch {
+      case _: ArithmeticException =>
+        throw LithosBadRequest("the amounts in this request overflow a 64-bit nanoERG total")
+    }
+
+  private def redeemOrderQuote(liquidity: LDLiquidityPool, vault: LDFeeValue, prov: Provision,
+                               fees: OrderFees): LDRedeemOrderQuote = {
+    val q = liquidity.simRedeem(prov.shares)
+    // Claimed by the placement only when the vault accepts a claim; otherwise nothing settles and every
+    // earned fee is lost to the fill
+    val (claimableX, claimableY) =
+      if (vault.canClaim(prov.entryX, prov.entryY)) vault.owed(prov.shares, prov.entryX, prov.entryY) else (0L, 0L)
+    val (accruedX, accruedY) = liquidity.feesAccrued(prov.shares, prov.entryX, prov.entryY)
+    LDRedeemOrderQuote(
+      shares = LDAmounts(q.shares),
+      amountX = LDAmounts(q.amountX),
+      amountY = LDAmounts(q.amountY),
+      provisionValue = LDAmounts(prov.value),
+      receivedX = LDAmounts(BigInt(q.amountX) + prov.value + LDOrderTransactions.RETURNED - fees.executorFee),
+      claimableX = LDAmounts(claimableX),
+      claimableY = LDAmounts(claimableY),
+      unflushedX = LDAmounts(math.max(0L, accruedX - claimableX)),
+      unflushedY = LDAmounts(math.max(0L, accruedY - claimableY)),
+      withinMinSupply = q.withinMinSupply,
+      executorFee = LDAmounts(fees.executorFee),
+      maxMinerFee = LDAmounts(fees.maxMinerFee),
+      totalErgRequired = LDAmounts(LDOrderTransactions.RETURNED),
+      networkFee = LDAmounts(LithosDexTransactions.TX_FEE))
+  }
+
+  /**
+   * Signs a placement, refusing before the send an order box that does not read back as this wallet's
+   * order on this pool: no executor would ever find it, and its funds would wait for a cancel.
+   */
+  private def placed(ctx: BlockchainContext, liquidity: LDLiquidityPool, provisions: LithosDexExecution.Provisions,
+                     plan: transactions.batching.lithosdex.DexPlan[LDOrderTx]): LDOrderPlacementResult = {
+    var parsed = Option.empty[LithosDexOrder]
+    val built = fund(plan, (tx: LDOrderTx) => {
+      parsed = LithosDexOrder.parse(transactions.engine.wallet.WalletInventory.nodeBox(tx.order))
+        .filter(o => o.poolNft == liquidity.poolNFT.toString && wallet.signableTrees.contains(o.terms.redeemerTree))
+      // A defect in this client rather than in the request, so it must not surface as a 400
+      if (parsed.isEmpty)
+        throw new IllegalStateException(s"the order box ${tx.order.id} does not read back as this wallet's order on this pool")
+    })
+    val submission = send(ctx, built)
+    val owned = LDOrderBook.Owned(parsed.get, None, LDOrderBook.Status.Pending, None, submission.txId)
+    val described = describeOrder(ctx, owned, liquidity, provisions)
+    LDOrderPlacementResult(
+      outcome = submission.outcome,
+      txId = submission.txId,
+      order = built.value.provisionSuccessor.fold(described)(id => described.copy(provisionBoxId = Some(id))),
+      claimedX = parsed.collect { case _: LithosDexOrder.Redeem => LDAmounts(built.value.claimedX) },
+      claimedY = parsed.collect { case _: LithosDexOrder.Redeem => LDAmounts(built.value.claimedY) })
+  }
+
+  private def describeOrder(ctx: BlockchainContext, owned: LDOrderBook.Owned, liquidity: LDLiquidityPool,
+                            provisions: LithosDexExecution.Provisions): LDOrder = {
+    val order = owned.order
+    val base = LDOrder(
+      boxId = order.boxId,
+      `type` = "",
+      status = owned.status.name,
+      placementTxId = owned.placementTxId,
+      placedHeight = owned.placedHeight,
+      spendingTxId = owned.spendingTxId,
+      owner = Try(Address.fromErgoTree(ErgoTree.fromHex(order.terms.redeemerTree), ctx.getNetworkType).toString)
+        .getOrElse(order.terms.redeemerTree),
+      value = LDAmounts(order.box.value),
+      executorFee = LDAmounts(order.terms.executorFee),
+      maxMinerFee = LDAmounts(order.terms.maxMinerFee),
+      fillableNow = owned.status match {
+        // The pool is read at its mempool tip, which is what a filling order's own fill leaves, so pricing it
+        // there would call it unfillable. The node accepted that fill, so the order met its terms.
+        case LDOrderBook.Status.Filling => true
+        case LDOrderBook.Status.Cancelling => false
+        case _ => LithosDexExecution.price(order, liquidity, 0L, provisions, fundsItsOwnBox = false).nonEmpty
+      })
+    order match {
+      case sell: LithosDexOrder.SwapSell =>
+        base.copy(`type` = "SWAP", ergIn = Some(true), amountIn = Some(LDAmounts(sell.baseAmount)),
+          minOutput = Some(LDAmounts(sell.minQuote)))
+      case buy: LithosDexOrder.SwapBuy =>
+        base.copy(`type` = "SWAP", ergIn = Some(false), amountIn = Some(LDAmounts(buy.amount)),
+          minOutput = Some(LDAmounts(buy.minQuote)))
+      case deposit: LithosDexOrder.Deposit =>
+        base.copy(`type` = "DEPOSIT", amountX = Some(LDAmounts(deposit.depositX)),
+          amountY = Some(LDAmounts(deposit.amount)), minShares = Some(LDAmounts(deposit.minShares)))
+      case redeem: LithosDexOrder.Redeem =>
+        base.copy(`type` = "REDEEM", ownerNFT = Some(redeem.ownerNft),
+          provisionBoxId = provisions(redeem.ownerNft).map(_.boxId))
+    }
+  }
+
+  /** The current provision each redeem order among `orders` closes, found by its ownership NFT. */
+  private def redeemProvisions(ctx: BlockchainContext, nodeApi: NodeApi,
+                               orders: Seq[LithosDexOrder]): LithosDexExecution.Provisions = {
+    val nfts = orders.collect { case redeem: LithosDexOrder.Redeem => redeem.ownerNft }.toSet
+    if (nfts.isEmpty) LithosDexExecution.NoProvisions
+    else {
+      val (found, _) = LDBoxes.provisionsOwnedBy(ctx, nodeApi, nfts, MempoolOptions.WithMempool)
+      found.map(p => p.ownerNFT.toString -> p).toMap.get
+    }
+  }
+
+  /**
+   * A complete, fresh mempool observation from the engine. Order statuses are read from it, so a stale or
+   * partial one would report a filling order as open.
+   */
+  protected def mempoolSnapshot(): CompleteMempool.Snapshot = {
+    val wait = transactions.batching.Batcher.ObservationTimeout
+    val observed = Try(Await.result((walletSelector.walletRef ? CompleteMempool.Refresh)(Timeout(wait))
+      .mapTo[CompleteMempool.Observation], wait)).getOrElse(throw LithosUnavailable(
+      "no mempool observation arrived from the transaction engine"))
+    if (!observed.fresh) throw LithosUnavailable(
+      s"no fresh mempool observation: ${observed.failure.getOrElse("the last one is too old")}")
+    observed.snapshot.get
+  }
 
   // Wallet balances moved to `WalletApiImpl`. LithosDex grew its own read for the swap card and the
   // collateral market grew a second one, and the two disagreed whenever a join landed between them.
@@ -870,25 +1165,34 @@ class DexAPIExecution(nodeContext: NodeContext, walletSelector: EngineFunding,
     val submission = send(ctx, built)
     DexIntent.Refreshed(built.value.boxId, submission.txId, submission.outcome)
   }
-  private case class Funded[A <: LDFundedTx](value: A, reservation: transactions.engine.wallet.FundingAllocation)
+  /** @param reservation the wallet inputs funding the transaction, or None when it spends none */
+  private case class Funded[A <: LDFundedTx](value: A, reservation: Option[transactions.engine.wallet.FundingAllocation])
 
-  private def fund[A <: LDFundedTx](plan: transactions.batching.lithosdex.DexPlan[A]): Funded[A] = {
+  /**
+   * Reserves what `plan` needs, builds, signs and runs `verify` on the result, releasing the reservation
+   * if any step throws. A plan asking for nothing reserves nothing.
+   */
+  private def fund[A <: LDFundedTx](plan: transactions.batching.lithosdex.DexPlan[A],
+                                    verify: A => Unit = (_: A) => ()): Funded[A] = {
     require(alive(), "engine attempt was superseded")
-    val reservation = walletSelector.reserve(plan.value, plan.tokens)
+    val reservation =
+      if (plan.value == 0L && plan.tokens.isEmpty) None else Some(walletSelector.reserve(plan.value, plan.tokens))
     try {
-      val unsigned = plan.build(reservation.inputs)
+      val unsigned = plan.build(reservation.map(_.inputs).getOrElse(Seq.empty))
       work.lithos.mutations.Eip27Adjustment.validate(unsigned.tx, nodeContext.getNetwork)
       require(alive(), "engine attempt was superseded before signing")
       val signed = wallet.sign(unsigned.tx)
-      Funded(unsigned.describe(signed), reservation)
+      val described = unsigned.describe(signed)
+      verify(described)
+      Funded(described, reservation)
     } catch {
-      case NonFatal(ex) => reservation.release(); throw ex
+      case NonFatal(ex) => reservation.foreach(_.release()); throw ex
     }
   }
 
   private def send(ctx: BlockchainContext, built: Funded[_ <: LDFundedTx]): Submission = {
     val result = new EngineBroadcast(walletSelector.walletRef, executionNode)(walletSelector.executionContext)
-      .send(built.value.tx, Seq(built.reservation), "dex:" + built.value.tx.getId, alive)
+      .send(built.value.tx, built.reservation.toSeq, "dex:" + built.value.tx.getId, alive)
     Submission(result.txId, result.outcome)
   }
   private def positive(field: String, value: Long): Long =

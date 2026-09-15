@@ -12,6 +12,8 @@ import play.api.libs.json._
  * `awaitingFlush` is set when the provision's entry has run AHEAD of the vault's accumulator, which
  * a deposit or a resize does routinely on a pool with unflushed fees. The contract's own arithmetic
  * yields a negative figure there;
+ *
+ * `redeemOrderBoxId` names the outstanding redeem order holding the ownership NFT, while there is one.
  */
 case class LDProvision(boxId: String,
                        ownerNFT: String,
@@ -28,7 +30,8 @@ case class LDProvision(boxId: String,
                        unflushedX: String,
                        unflushedY: String,
                        canClaim: Boolean,
-                       awaitingFlush: Boolean)
+                       awaitingFlush: Boolean,
+                       redeemOrderBoxId: Option[String] = None)
 
 object LDProvision {
   implicit lazy val ldProvisionJsonFormat: Format[LDProvision] = Json.format[LDProvision]

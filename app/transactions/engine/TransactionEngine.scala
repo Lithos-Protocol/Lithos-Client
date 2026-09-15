@@ -143,7 +143,8 @@ class TransactionEngine @Inject()(node: NodeContext,
     if (consolidationEnabled) ConsolidationExecution.OutcomeNotObserved else ConsolidationExecution.OutcomeDisabled)
 
   private lazy val consolidation = new ConsolidationExecution(node, nodeApi, self, walletConfig)
-  private lazy val dex = new DexAPIExecution(node, EngineFunding(self, EngineFunding.askTimeout(config), ec), () => alive.get()) {
+  private lazy val dex = new DexAPIExecution(node, EngineFunding(self, EngineFunding.askTimeout(config), ec),
+    () => alive.get(), configs.LithosDexOrdersConfig(config)) {
     override protected def executionNode: _root_.node.NodeApi = TransactionEngine.this.nodeApi
   }
   private lazy val dexCache = new cache.LDCache(cacheApi)

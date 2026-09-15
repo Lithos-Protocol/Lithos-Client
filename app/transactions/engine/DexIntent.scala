@@ -49,6 +49,18 @@ object DexIntent {
   final case class Flush(request: LDFlushRequest) extends DexIntent {
     def execute(e: DexAPIExecution, c: LDCache): LDFlushResult = e.flush(request, c)
   }
+  final case class PlaceSwapOrder(request: LDSwapOrderExecuteRequest) extends DexIntent {
+    def execute(e: DexAPIExecution, c: LDCache): LDOrderPlacementResult = e.placeSwapOrder(request, c)
+  }
+  final case class PlaceDepositOrder(request: LDDepositOrderExecuteRequest) extends DexIntent {
+    def execute(e: DexAPIExecution, c: LDCache): LDOrderPlacementResult = e.placeDepositOrder(request, c)
+  }
+  final case class PlaceRedeemOrder(request: LDRedeemOrderRequest) extends DexIntent {
+    def execute(e: DexAPIExecution, c: LDCache): LDOrderPlacementResult = e.placeRedeemOrder(request, c)
+  }
+  final case class CancelOrder(boxId: String) extends DexIntent {
+    def execute(e: DexAPIExecution, c: LDCache): LDOrderCancelResult = e.cancelOrder(boxId, c)
+  }
   final case class Refresh(boxId: String) extends DexIntent {
     def execute(e: DexAPIExecution, c: LDCache): Refreshed = e.refreshProvision(boxId)
   }
