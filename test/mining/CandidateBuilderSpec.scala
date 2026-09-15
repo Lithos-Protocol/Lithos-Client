@@ -546,6 +546,7 @@ class CandidateBuilderSpec extends TestKit(ActorSystem("candidate-builder-spec",
     val pkg = f.parent.expectMsgType[BlockPackageReady](6.seconds).pkg
     pkg.blockTxs.map(_.id) shouldBe Seq("on-time")
     pkg.sources shouldBe Set("rollups")
+    pkg.late shouldBe Set("emissions")
     withClue("a round that published is not expired, so no source is told to drop the height: ") {
       answers.expectNoMessage(1500.millis)
     }
@@ -565,9 +566,10 @@ class CandidateBuilderSpec extends TestKit(ActorSystem("candidate-builder-spec",
     val pkg = f.parent.expectMsgType[BlockPackageReady](1.second).pkg
     pkg.blockTxs.map(_.id) shouldBe Seq("a", "b")
     pkg.sources shouldBe Set("rollups", "emissions")
+    pkg.late shouldBe empty
   }
 
-  it should "leave a refresh unpublished when the published package carries its work" in {
+  it should "publish a refresh without its work, naming it late so the pool can keep the served package" in {
     val first = TestProbe()
     val second = TestProbe()
     val f = twoSources(first, second)
@@ -582,29 +584,25 @@ class CandidateBuilderSpec extends TestKit(ActorSystem("candidate-builder-spec",
     requested(first).refresh shouldBe true
     requested(second)
     first.reply(BlockTxsReady(100, Seq(payout("a2"))))
-    withClue("publishing without the late source would drop its transactions from the block: ") {
-      f.parent.expectNoMessage(4.seconds)
-    }
+    val refreshed = f.parent.expectMsgType[BlockPackageReady](6.seconds)
+    refreshed.refreshed shouldBe true
+    refreshed.pkg.blockTxs.map(_.id) shouldBe Seq("a2")
+    refreshed.pkg.sources shouldBe Set("rollups")
+    refreshed.pkg.late shouldBe Set("emissions")
   }
 
-  it should "still let a refresh through when the late source carried nothing" in {
+  it should "count a source that answered with nothing as answered, not late" in {
     val first = TestProbe()
     val second = TestProbe()
     val f = twoSources(first, second)
-    val base = advanceTo(f, 100)
+    advanceTo(f, 100)
     requested(first)
     requested(second)
     first.reply(BlockTxsReady(100, Seq(payout("a"))))
     second.reply(BlockTxsReady(100, Seq.empty))
-    published(f).sources shouldBe Set("rollups")
-
-    f.builder ! RefreshBlockPackage(base.identity)
-    requested(first)
-    requested(second)
-    first.reply(BlockTxsReady(100, Seq(payout("a"), payout("a2"))))
-    val refreshed = f.parent.expectMsgType[BlockPackageReady](6.seconds)
-    refreshed.refreshed shouldBe true
-    refreshed.pkg.blockTxs.map(_.id) shouldBe Seq("a", "a2")
+    val pkg = f.parent.expectMsgType[BlockPackageReady](1.second).pkg
+    pkg.sources shouldBe Set("rollups")
+    pkg.late shouldBe empty
   }
 
   "A superseded genesis build" should "not publish when a rebuild arrives at the same height" in {

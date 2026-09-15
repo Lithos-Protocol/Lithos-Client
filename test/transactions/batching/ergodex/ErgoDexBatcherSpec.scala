@@ -54,7 +54,7 @@ class ErgoDexBatcherSpec extends TestKit(ActorSystem("ergodex-batcher-spec", Erg
   private class Fixture(broadcast: Boolean = false, discoverable: Boolean = true,
                         initialOrder: NodeBox = orderBox, initialPool: NodeBox = poolBox,
                         servesCandidates: Boolean = true, observes: Boolean = true,
-                        buildBudgetMs: Long = Batcher.DefaultBuildBudgetMs) {
+                        buildBudgetMs: Long = Batcher.DefaultBuildBudgetMs, extraPool: Option[NodeBox] = None) {
     val api: NodeApi = mock[NodeApi]
     val (nodeContext, _, _) = FakeNodeContext(api, numAddresses = 1)
 
@@ -88,12 +88,14 @@ class ErgoDexBatcherSpec extends TestKit(ActorSystem("ergodex-batcher-spec", Erg
       }
     when(api.unspentBoxesByTokenId(anyString(), any[Paging], any[SortDirection], any[MempoolOptions]))
       .thenAnswer { inv =>
-        if (inv.getArgument[String](0) == poolNft) Success(Seq(IndexedBox(pool, "", tip - 1, 2L)))
-        else Success(Seq.empty[IndexedBox])
+        val nft = inv.getArgument[String](0)
+        if (nft == poolNft) Success(Seq(IndexedBox(pool, "", tip - 1, 2L)))
+        else Success(extraPool.filter(box => ErgoDexPool.native(box).exists(_.nft == nft))
+          .map(IndexedBox(_, "", tip - 1, 3L)).toSeq)
       }
     when(api.boxesWithPoolByIds(any[Seq[String]])).thenAnswer { inv =>
       val wanted = inv.getArgument[Seq[String]](0).toSet
-      Success((orders ++ Seq(pool).filter(_ => poolUnspent) ++ Seq(walletBox).filter(_ => walletUnspent))
+      Success((orders ++ Seq(pool).filter(_ => poolUnspent) ++ extraPool ++ Seq(walletBox).filter(_ => walletUnspent))
         .filter(box => wanted.contains(box.boxId)))
     }
     when(api.sendTransaction(anyString())).thenReturn(Failure(NodeError.Rejected("refused by the test")))
@@ -243,6 +245,23 @@ class ErgoDexBatcherSpec extends TestKit(ActorSystem("ergodex-batcher-spec", Erg
     withClue("a placement whose input was spent is forgotten, not held for when a read passes again: ") {
       f.walletUnspent = true
       f.offered() shouldBe empty
+    }
+    f.stop()
+  }
+
+  it should "keep executing orders on two pools whose evicted placements share a wallet parent" in {
+    val f = new Fixture(discoverable = false, extraPool = Some(Sell.poolBox))
+    val change = walletBox.copy(boxId = id("7"), transactionId = id("b"), value = 900000000L, index = 1)
+    val parent = mempoolTx(id("b"), Seq(walletBox.boxId), Seq(orderBox, change))
+    val child = mempoolTx(id("c"), Seq(change.boxId), Seq(Sell.orderBox))
+    f.mempool = Vector(parent, child)
+    f.offered() should have size 2
+
+    f.mempool = Vector.empty
+    withClue("both runs carry the parent, and it must come back as one claim on the wallet box: ") {
+      val carried = f.offered()
+      carried should have size 2
+      carried.flatMap(_.members.last.inputIds) should contain allOf(orderBox.boxId, Sell.orderBox.boxId)
     }
     f.stop()
   }

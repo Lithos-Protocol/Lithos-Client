@@ -63,19 +63,24 @@ final class EvictedPlacements {
     }
   }
 
-  /** Holds the placements a build carried for `blockHeight`. A full store takes no new ones. */
+  /**
+   * Holds the placements a build carried for `blockHeight`, each once: runs on different pools can carry
+   * the same ancestor, and two copies restored would read as two claims on its inputs. A full store takes
+   * no new ones.
+   */
   def remember(placements: Seq[CompleteMempool.MempoolTx], blockHeight: Int): Unit =
     if (placements.nonEmpty) held.updateAndGet { current =>
       val carried = placements.map(_.id).toSet
       val refreshed = current.map(h =>
         if (carried.contains(h.tx.id)) h.copy(carriedAt = math.max(h.carriedAt, blockHeight)) else h)
-      val added = placements.filterNot(tx => current.exists(_.tx.id == tx.id))
-        .take(math.max(0, Capacity - current.size))
+      val added = placements.foldLeft(Vector.empty[CompleteMempool.MempoolTx]) { (kept, tx) =>
+        if (kept.exists(_.id == tx.id) || current.exists(_.tx.id == tx.id)) kept else kept :+ tx
+      }.take(math.max(0, Capacity - current.size))
       refreshed ++ added.map(Held(_, blockHeight))
     }
 
-  /** Ids of the placements held now. */
-  def heldIds: Set[String] = held.get.map(_.tx.id).toSet
+  /** Ids of the placements held now. Package-private so a spec can see what is held without restoring it. */
+  private[batching] def heldIds: Set[String] = held.get.map(_.tx.id).toSet
 }
 
 object EvictedPlacements {

@@ -72,6 +72,8 @@ class LithosPool(options: Options,
   private var protocolVersion = options.data.protocolVersion
   private var observing: Option[UUID] = None
   private var observationRequired = true
+  /** The last chain a candidate request was overtaken on. */
+  private var overtakenOn: Option[ChainTip] = None
   private var blockPackage: Option[BlockPackage] = None
   private var collectingAdditions = false
   private var activeRequest: Option[CandidateRequest] = None
@@ -85,6 +87,9 @@ class LithosPool(options: Options,
   private var genesisDeadline = 0L
   private var lastRefreshAt = 0L
   private var servedRevenue = 0L
+  /** The served package's contributing sources, and those that had not answered when it was assembled. */
+  private var servedSources = Set.empty[String]
+  private var servedLate = Set.empty[String]
   private val hasPackageSources = candidateConfig.blockTransactions && txSources.exists { source =>
     val limits = candidateConfig.sources.getOrElse(source.name, configs.CandidateSourceConfig.Default)
     limits.enabled && limits.maxTxs > 0
@@ -135,7 +140,15 @@ class LithosPool(options: Options,
         blockPackage.forall(p => p.collateral.txId != pkg.collateral.txId || pkg.revision >= p.revision)) {
         val sameGenesis = servedCandidate.exists(_.sameGenesis(pkg.identity))
         val gain = pkg.revenue - servedRevenue
-        if (!refreshed || cacheDirty || !sameGenesis || candidateConfig.minCandidateChangeRevenue == 0L ||
+        val judged = refreshed && !cacheDirty && sameGenesis
+        // A source late for this refresh whose transactions the served job carries would lose them, and a
+        // source late for the served job that this refresh brings back is worth more than its ERG says
+        val dropped = pkg.late.intersect(servedSources)
+        val recovered = servedLate.intersect(pkg.sources)
+        if (judged && dropped.nonEmpty) {
+          logger.warn(s"Keeping published package for block ${pkg.blockHeight}: it carries work from " +
+            s"${dropped.mkString(", ")}, which did not answer the refresh")
+        } else if (!judged || recovered.nonEmpty || candidateConfig.minCandidateChangeRevenue == 0L ||
           gain >= candidateConfig.minCandidateChangeRevenue) {
           blockPackage = Some(pkg)
           collectingAdditions = collecting
@@ -273,6 +286,8 @@ class LithosPool(options: Options,
       genesisDeadline = nowNanos() + candidateConfig.genesisWaitMs.milliseconds.toNanos
       lastRefreshAt = nowNanos()
       servedRevenue = 0L
+      servedSources = Set.empty
+      servedLate = Set.empty
       invalidateCachedJob()
       candidateBuilder.foreach(_ ! ChainAdvanced(observed.height, observed.parentId))
       stateFrame ! CheckBlock
@@ -288,7 +303,7 @@ class LithosPool(options: Options,
         val carriesExtras = pkg.blockTxs.nonEmpty &&
           (candidateConfig.waitForBlockPackage || publishedGenesis.contains(chain -> pkg.collateral.txId)) &&
           !extrasRejected.contains(chain -> pkg.collateral.txId) && !restoreGenesis
-        val selected = if (carriesExtras) pkg else pkg.copy(blockTxs = Seq.empty, revision = 0, revenue = 0L)
+        val selected = if (carriesExtras) pkg else pkg.withoutBlockTxs.copy(revision = 0)
         Some(selected.identity -> Some(selected))
       case None if candidateBuilder.isDefined && nowNanos() < genesisDeadline => None
       case None => Some(CandidateIdentity(chain.height, chain.parentId, "", 0) -> None)
@@ -370,6 +385,16 @@ class LithosPool(options: Options,
             reducedShareMessages, mustPublish = true,
             publication = Some(publicationFor(request)))
         }
+      case Failure(overtaken: ChainMoved) =>
+        // The node refused nothing, so neither the additions nor the genesis are rejected
+        invalidateCachedJob()
+        observationRequired = true
+        logger.info(s"Candidate request overtaken by a new block: ${overtaken.getMessage}; reading the chain before asking again")
+        // Once per chain: a node whose /info trails its own candidate is read again on the next poll, not in a loop
+        if (!overtakenOn.contains(request.chain)) {
+          overtakenOn = Some(request.chain)
+          observeChain()
+        }
       case Failure(ex) =>
         invalidateCachedJob()
         if (request.hasExtras) rejectExtras(request, ex.getMessage)
@@ -438,6 +463,8 @@ class LithosPool(options: Options,
     restoreGenesis = false
     lastRefreshAt = nowNanos()
     servedRevenue = request.pkg.map(_.revenue).getOrElse(0L)
+    servedSources = request.pkg.map(_.sources).getOrElse(Set.empty)
+    servedLate = request.pkg.map(_.late).getOrElse(Set.empty)
     connections.values.foreach(_ ! BroadcastJob(template))
     logger.info(s"Broadcasting job ${template.jobId} to ${connections.size} miner(s); " +
       s"candidateStage=${if (request.hasExtras) "augmented" else if (request.pkg.isDefined) "genesis" else "solo"}" +
@@ -501,6 +528,9 @@ object LithosPool {
   private val MaxRebuildsPerBlock = 3
   private val MaxQueuedSolutions = 6
   private[mining] case class ChainTip(height: Int, parentId: String)
+
+  /** The node built its candidate on another chain than the request names. Nothing in the request was refused. */
+  private[mining] final class ChainMoved(message: String) extends RuntimeException(message)
   private[mining] case class CandidateRequest(id: UUID, identity: CandidateIdentity,
                                              pkg: Option[BlockPackage], version: Int, startedAt: Long) {
     def chain: ChainTip = ChainTip(identity.height, identity.parentId)
@@ -539,8 +569,9 @@ object LithosPool {
       case Some(pkg) => MiningCandidate.fromJson(candidateJson, request.version, pkg.collateral)
       case None => MiningCandidate.fromJson(candidateJson, request.version)
     }
-    require(candidate.msg.length == 32 && candidate.height == request.identity.height,
-      "candidate work message or height does not match the request")
+    require(candidate.msg.length == 32, "candidate work message is not 32 bytes")
+    if (candidate.height != request.identity.height)
+      throw new ChainMoved(s"node built height ${candidate.height} for a request at ${request.identity.height}")
     require(candidate.b != null && candidate.b.signum() > 0, "candidate has no positive target")
     request.pkg.foreach { pkg =>
       require(candidate.pk.equalsIgnoreCase(pkg.collateral.pk), "candidate uses a different miner key")
@@ -548,8 +579,10 @@ object LithosPool {
       val preimage = Hex.decode(candidate.proof.getString("msgPreimage"))
       val header = HeaderWithoutPowSerializer.fromBytes(preimage)
       require(Blake2b256(preimage).sameElements(candidate.msg), "candidate preimage does not bind its work message")
-      require(header.parentId == request.identity.parentId && header.height == request.identity.height &&
-        header.version >= 2, "candidate preimage names another chain or unsupported PoW version")
+      if (header.parentId != request.identity.parentId || header.height != request.identity.height)
+        throw new ChainMoved(s"node built on parent ${header.parentId.take(12)} at height ${header.height} " +
+          s"for a request on ${request.identity.parentId.take(12)} at ${request.identity.height}")
+      require(header.version >= 2, "candidate preimage uses an unsupported PoW version")
       // At a voting boundary the upcoming header can activate a newer version than /info.
       // The bound preimage supplies that version before this fresh candidate leaves the worker.
       candidate.version = header.version

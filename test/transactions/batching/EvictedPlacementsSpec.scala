@@ -60,6 +60,15 @@ class EvictedPlacementsSpec extends AnyFlatSpec with Matchers with MockitoSugar 
     org.mockito.Mockito.verifyNoInteractions(api)
   }
 
+  it should "hold a placement once when one build carries it twice, so its input shows one claim" in {
+    val held = new EvictedPlacements
+    held.remember(Seq(placement, placement), 100)
+    val restored = held.restore(snapshot(), 101, node(id("1")))
+    restored.transactions.map(_.id) shouldBe Vector(placement.id)
+    BatchingMempool.placedByWallet(placement, Map(id("1") -> box(id("1"))), BatchingMempool.spenders(restored),
+      _ => false) shouldBe true
+  }
+
   it should "forget a placement whose input the chain has spent, even once the read would pass again" in {
     val held = new EvictedPlacements
     held.remember(Seq(placement), 100)

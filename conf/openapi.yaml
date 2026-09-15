@@ -50,6 +50,12 @@ tags:
       Swap, provide liquidity and collect fees on the LithosDex pool.
 
 
+      Swaps, deposits and redemptions can be placed as **orders** under `/dex/orders`, which any
+      miner fills for the order's executor fee, or sent **directly**, spending the pool at once.
+      Prefer orders: a miner filling orders may replace an unconfirmed direct spend of the pool, which
+      then has to be resent.
+
+
       **All amounts are decimal strings, not JSON numbers.** A 409 means a box you quoted against
       has moved: re-read, re-quote and resend.
     x-displayName: Lithos Dex
@@ -560,6 +566,399 @@ paths:
               schema:
                 $ref: '#/components/schemas/ApiError'
 
+  /dex/orders:
+    get:
+      summary: List your outstanding orders
+      description: >
+        Every order owned by this wallet that has not yet filled or been cancelled, including orders
+        whose placement is unconfirmed. An order leaves the list once the transaction filling or
+        cancelling it confirms. Unconfirmed placements first, then newest first.
+      operationId: listLDOrders
+      tags:
+        - lithosdex
+      responses:
+        '200':
+          description: Outstanding orders owned by this wallet
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LDOrderList'
+        '503':
+          description: Node or mempool unavailable. Never returns a partial list.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /dex/orders/swap/check:
+    post:
+      summary: Quote a swap order
+      description: >
+        Quote a swap order against the current pool without placing it. The executor fee is paid on
+        top of `amountIn` when selling ERG, and out of the ERG received when selling the token.
+      operationId: checkLDSwapOrder
+      tags:
+        - lithosdex
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LDSwapOrderRequest'
+      responses:
+        '200':
+          description: Quote for the requested swap order
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LDSwapOrderQuote'
+        '400':
+          description: Malformed body, a non-positive `amountIn`, or a `maxMinerFee` not below `executorFee`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '503':
+          description: Node unavailable. Retry.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /dex/orders/swap:
+    post:
+      summary: Place a swap order
+      description: >
+        Lock `amountIn` in an order that any miner can fill for `executorFee`. It fills only if the
+        owner receives at least `minOutput`, measured against the pool when it executes, and waits
+        otherwise. Cancel it with `POST /dex/orders/{boxId}/cancel`.
+      operationId: placeLDSwapOrder
+      security:
+        - ApiKeyAuth: [api_key]
+      tags:
+        - lithosdex
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LDSwapOrderExecuteRequest'
+      responses:
+        '200':
+          description: The placement transaction and the order it created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LDOrderPlacementResult'
+        '400':
+          description: >
+            Malformed body, a non-positive `amountIn` or `minOutput`, or a `maxMinerFee` not below
+            `executorFee`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '422':
+          description: The wallet cannot cover the order.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '503':
+          description: Node or wallet unavailable. Retry.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /dex/orders/deposit/check:
+    post:
+      summary: Quote a deposit order
+      description: >
+        Quote a deposit order offering `amountX` and `amountY` against the current pool. Shares are
+        bought with the scarcer side, and the rest of the other side is returned when the order
+        fills. `/dex/deposit/check` finds a balanced pair.
+      operationId: checkLDDepositOrder
+      tags:
+        - lithosdex
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LDDepositOrderRequest'
+      responses:
+        '200':
+          description: Quote for the requested deposit order
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LDDepositOrderQuote'
+        '400':
+          description: Malformed body, a non-positive amount, or a `maxMinerFee` not below `executorFee`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '503':
+          description: Node unavailable. Retry.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /dex/orders/deposit:
+    post:
+      summary: Place a deposit order
+      description: >
+        Lock a deposit in an order that any miner can fill for `executorFee`. It fills only if the
+        offer buys at least `minShares` against the pool when it executes, and waits otherwise. The
+        fill sends the owner the new provision's `ownerNFT` and whatever the pool did not take.
+      operationId: placeLDDepositOrder
+      security:
+        - ApiKeyAuth: [api_key]
+      tags:
+        - lithosdex
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LDDepositOrderExecuteRequest'
+      responses:
+        '200':
+          description: The placement transaction and the order it created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LDOrderPlacementResult'
+        '400':
+          description: >
+            Malformed body, a non-positive amount or `minShares`, or a `maxMinerFee` not below
+            `executorFee`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '422':
+          description: The pool has no provision tokens left, or the wallet cannot cover the order.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '503':
+          description: Node or wallet unavailable. Retry.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /dex/orders/redeem/check:
+    post:
+      summary: Quote a redeem order
+      description: >
+        Quote an order closing a provision. `claimableX` / `claimableY` are claimed by the transaction
+        placing the order. `unflushedX` / `unflushedY`, and any fees earned while the order waits,
+        are lost when it fills.
+      operationId: checkLDRedeemOrder
+      tags:
+        - lithosdex
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LDRedeemOrderRequest'
+      responses:
+        '200':
+          description: Quote for the requested redeem order
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LDRedeemOrderQuote'
+        '400':
+          description: Malformed body, or a `maxMinerFee` not below `executorFee`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '404':
+          description: No live provision with that id.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '409':
+          description: The provision moved. Re-read to find its current box id.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LDStateChangedResponse'
+        '503':
+          description: Node unavailable. Retry.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /dex/orders/redeem:
+    post:
+      summary: Place a redeem order
+      description: >
+        Move a provision's `ownerNFT` into an order that any miner can fill for `executorFee`, closing
+        the provision and paying the owner its share of the reserves. Settled fees are claimed in the
+        same transaction; fees not yet flushed, and any earned while the order waits, are lost when it
+        fills. Until then the provision cannot be claimed, resized or redeemed directly.
+      operationId: placeLDRedeemOrder
+      security:
+        - ApiKeyAuth: [api_key]
+      tags:
+        - lithosdex
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LDRedeemOrderRequest'
+      responses:
+        '200':
+          description: The placement transaction and the order it created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LDOrderPlacementResult'
+        '400':
+          description: Malformed body, or a `maxMinerFee` not below `executorFee`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '404':
+          description: No live provision with that id.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '409':
+          description: The vault or provision moved. Re-read and try again.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LDStateChangedResponse'
+        '422':
+          description: >
+            Closing the provision would take supply under the pool's minimum, this wallet does not
+            hold its `ownerNFT`, or the wallet cannot cover the network fee.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '503':
+          description: Node or wallet unavailable. Retry.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /dex/orders/{boxId}/cancel:
+    post:
+      summary: Cancel an order
+      description: >
+        Return an outstanding order's ERG and tokens to this wallet. Accepted while the order is
+        `PENDING` or `OPEN`. A fill sent before the cancel can still confirm first, and the cancel is
+        then dropped. No body.
+      operationId: cancelLDOrder
+      security:
+        - ApiKeyAuth: [api_key]
+      tags:
+        - lithosdex
+      parameters:
+        - in: path
+          name: boxId
+          required: true
+          description: Order box id, as listed by `GET /dex/orders`
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Result of the cancel transaction
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LDOrderCancelResult'
+        '404':
+          description: No outstanding order owned by this wallet with that id.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '409':
+          description: An unconfirmed transaction is already filling or cancelling the order. Re-read `GET /dex/orders`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '422':
+          description: Neither the order nor the wallet can cover the network fee.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '503':
+          description: Node or wallet unavailable. Retry.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
   /dex/swap/check:
     post:
       summary: Quote a swap
@@ -652,8 +1051,9 @@ paths:
     post:
       summary: Execute a swap
       description: >
-        Sign and submit a swap. `minOutput` is required and rejects the trade if the pool has
-        moved against you; send `expectedPoolBoxId` from the quote to get a 409 instead of a re-quote.
+        Sign and submit a swap that spends the pool directly. `minOutput` is required and rejects the
+        trade if the pool has moved against you; send `expectedPoolBoxId` from the quote to get a 409
+        instead of a re-quote. `POST /dex/orders/swap` places the same swap as an order.
       operationId: ldSwap
       security:
         - ApiKeyAuth: [api_key]
@@ -748,9 +1148,9 @@ paths:
     post:
       summary: Deposit liquidity
       description: >
-        Deposit a balanced pair and mint a provision. Send `maxAmountX` / `maxAmountY` from the quote
-        to cap what it costs if the pool moves. Keep the returned `ownerNFT` — it is what owns the
-        provision.
+        Deposit a balanced pair directly and mint a provision. Send `maxAmountX` / `maxAmountY` from
+        the quote to cap what it costs if the pool moves. Keep the returned `ownerNFT` — it is what
+        owns the provision. `POST /dex/orders/deposit` places a deposit as an order.
       operationId: ldDeposit
       security:
         - ApiKeyAuth: [api_key]
@@ -857,8 +1257,9 @@ paths:
     post:
       summary: Redeem liquidity
       description: >
-        Close a provision and return its share of the reserves. **Unclaimed fees are lost when the
-        provision is spent** — claim them first, or set `acknowledgeUnclaimedFees` to accept that.
+        Close a provision directly and return its share of the reserves. **Unclaimed fees are lost
+        when the provision is spent** — claim them first, or set `acknowledgeUnclaimedFees` to accept
+        that. `POST /dex/orders/redeem` places a redemption as an order.
       operationId: ldRedeem
       security:
         - ApiKeyAuth: [api_key]
@@ -920,8 +1321,9 @@ paths:
     get:
       summary: List liquidity provisions
       description: >
-        Every provision held by this wallet. `accrued*` is what it has earned, `claimable*` is what
-        can be paid now, and `unflushed*` is the difference a flush would release.
+        Every provision held by this wallet, including those whose `ownerNFT` sits in one of its
+        redeem orders. `accrued*` is what it has earned, `claimable*` is what can be paid now, and
+        `unflushed*` is the difference a flush would release.
       operationId: listLDProvisions
       tags:
         - lithosdex
@@ -1340,13 +1742,14 @@ paths:
               schema:
                 $ref: '#/components/schemas/ApiError'
 
-  /dex/swaps/recent:
+  /dex/activity/recent:
     get:
-      summary: Recent swaps
+      summary: Recent pool activity
       description: >
-        Swaps against the pool, newest first, including unconfirmed ones. An entry with no `height`
-        is still in the mempool and can still roll back.
-      operationId: getLDRecentSwaps
+        Transactions that moved the pool, newest first, unconfirmed ones included: swaps, deposits,
+        redemptions, resizes and flushes, each marked as an order fill or a direct spend. A `MEMPOOL`
+        entry can still be dropped or replaced.
+      operationId: getLDRecentActivity
       tags:
         - lithosdex
       parameters:
@@ -1360,11 +1763,11 @@ paths:
             default: 10
       responses:
         '200':
-          description: Swaps against the pool, newest first
+          description: Transactions that moved the pool, newest first
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/LDRecentSwaps'
+                $ref: '#/components/schemas/LDRecentActivity'
         '400':
           description: A non-positive `limit`.
           content:
@@ -3507,6 +3910,12 @@ components:
             True when nothing can be claimed until the next flush. Normal after a deposit or
             resize; not an error.
           example: false
+        redeemOrderBoxId:
+          type: string
+          description: >
+            Present when an outstanding redeem order holds this provision's `ownerNFT`. The provision
+            cannot be claimed, resized or redeemed directly until that order fills or is cancelled.
+          example: '9b41d2f07ce83a5164e2d09fb7a3c1586e04d9b2f71ac8356e0b4d1c7f29a3e5'
 
     LDProvisionList:
       description: Liquidity provisions held by this wallet
@@ -3797,6 +4206,557 @@ components:
           type: string
           example: '40b7d045a858d537cdbf072e46ffbb86c0c9f6b0e93c369c1ffcba76797636d7'
 
+    LDSwapOrderRequest:
+      description: A swap order to quote
+      type: object
+      x-tags: lithosdex
+      required:
+        - amountIn
+        - ergIn
+      properties:
+        amountIn:
+          type: string
+          description: >
+            Total handed to the pool, pool fees included. The executor fee is separate. Decimal string.
+          example: '1000000000'
+        ergIn:
+          type: boolean
+          description: True to sell ERG for the token, false to sell the token for ERG
+          example: true
+        executorFee:
+          type: string
+          description: >
+            nanoERG paid to whoever fills the order. A fill broadcast to the mempool pays its miner
+            fee out of this. Miners skip orders paying less than they accept. Omit for the client's
+            default. Decimal string.
+          example: '3000000'
+        maxMinerFee:
+          type: string
+          description: >
+            Most nanoERG a fill may pay as a miner fee, out of `executorFee`. Must be below
+            `executorFee`. Omit for the client's default. Decimal string.
+          example: '1000000'
+
+    LDSwapOrderExecuteRequest:
+      description: A swap order to sign and place
+      type: object
+      x-tags: lithosdex
+      required:
+        - amountIn
+        - ergIn
+        - minOutput
+      properties:
+        amountIn:
+          type: string
+          description: >
+            Total handed to the pool, pool fees included. The executor fee is separate. Decimal string.
+          example: '1000000000'
+        ergIn:
+          type: boolean
+          example: true
+        minOutput:
+          type: string
+          description: >
+            Least the owner receives: tokens when selling ERG, or nanoERG after `executorFee` when
+            selling the token. Checked against the pool when the order fills. Required and must be
+            positive. Decimal string.
+          example: '29974258'
+        executorFee:
+          type: string
+          description: nanoERG paid to whoever fills the order. Omit for the client's default. Decimal string.
+          example: '3000000'
+        maxMinerFee:
+          type: string
+          description: >
+            Most nanoERG a fill may pay as a miner fee, out of `executorFee`. Must be below
+            `executorFee`. Omit for the client's default. Decimal string.
+          example: '1000000'
+
+    LDSwapOrderQuote:
+      description: Quote for a LithosDex swap order against the current pool
+      type: object
+      x-tags: lithosdex
+      required:
+        - swap
+        - executorFee
+        - maxMinerFee
+        - netOutput
+        - totalErgRequired
+        - ergReturned
+        - networkFee
+      properties:
+        swap:
+          $ref: '#/components/schemas/LDSwapQuote'
+        executorFee:
+          type: string
+          description: The executor fee applied, the request's or the client's default. Decimal string.
+          example: '3000000'
+        maxMinerFee:
+          type: string
+          description: The miner fee cap applied. Decimal string.
+          example: '1000000'
+        netOutput:
+          type: string
+          description: >
+            What the owner receives if the order fills against the current pool: `swap.amountOut`, less
+            `executorFee` when selling the token. Negative when the fee exceeds the output, and such an
+            order cannot fill. Decimal string.
+          example: '30124883'
+        totalErgRequired:
+          type: string
+          description: >
+            nanoERG locked in the order box: `ergReturned`, plus `amountIn` and `executorFee` when
+            selling ERG. Decimal string.
+          example: '1004000000'
+        ergReturned:
+          type: string
+          description: nanoERG of `totalErgRequired` returned to the owner with the fill. Decimal string.
+          example: '1000000'
+        networkFee:
+          type: string
+          description: nanoERG paid to place the order. Decimal string.
+          example: '2000000'
+
+    LDDepositOrderRequest:
+      description: A deposit order to quote
+      type: object
+      x-tags: lithosdex
+      required:
+        - amountX
+        - amountY
+      properties:
+        amountX:
+          type: string
+          description: >
+            Most nanoERG the order offers to the reserves, not counting the provision box. Decimal
+            string.
+          example: '5000000000'
+        amountY:
+          type: string
+          description: Raw token units the order offers. Decimal string.
+          example: '152000000'
+        executorFee:
+          type: string
+          description: >
+            nanoERG paid to whoever fills the order. A fill broadcast to the mempool pays its miner
+            fee out of this. Miners skip orders paying less than they accept. Omit for the client's
+            default. Decimal string.
+          example: '3000000'
+        maxMinerFee:
+          type: string
+          description: >
+            Most nanoERG a fill may pay as a miner fee, out of `executorFee`. Must be below
+            `executorFee`. Omit for the client's default. Decimal string.
+          example: '1000000'
+
+    LDDepositOrderExecuteRequest:
+      description: A deposit order to sign and place
+      type: object
+      x-tags: lithosdex
+      required:
+        - amountX
+        - amountY
+        - minShares
+      properties:
+        amountX:
+          type: string
+          description: >
+            Most nanoERG the order offers to the reserves, not counting the provision box. Decimal
+            string.
+          example: '5000000000'
+        amountY:
+          type: string
+          description: Raw token units the order offers. Decimal string.
+          example: '152000000'
+        minShares:
+          type: string
+          description: >
+            Fewest shares the order accepts, checked against the pool when it fills. Required and must
+            be positive. A floor far under the quote's `shares` lets a pool moved earlier in the same
+            block take the difference. Decimal string.
+          example: '1170587'
+        executorFee:
+          type: string
+          description: nanoERG paid to whoever fills the order. Omit for the client's default. Decimal string.
+          example: '3000000'
+        maxMinerFee:
+          type: string
+          description: >
+            Most nanoERG a fill may pay as a miner fee, out of `executorFee`. Must be below
+            `executorFee`. Omit for the client's default. Decimal string.
+          example: '1000000'
+
+    LDDepositOrderQuote:
+      description: Quote for a LithosDex deposit order against the current pool
+      type: object
+      x-tags: lithosdex
+      required:
+        - shares
+        - amountX
+        - amountY
+        - excessX
+        - excessY
+        - shareOfSupply
+        - provisionBoxValue
+        - executorFee
+        - maxMinerFee
+        - totalErgRequired
+        - ergReturned
+        - networkFee
+      properties:
+        shares:
+          type: string
+          description: Shares the offer buys against the current pool. Decimal string.
+          example: '1176470'
+        amountX:
+          type: string
+          description: nanoERG the pool would take. Decimal string.
+          example: '5000000000'
+        amountY:
+          type: string
+          description: Raw token units the pool would take. Decimal string.
+          example: '151058823'
+        excessX:
+          type: string
+          description: nanoERG offered beyond what the pool would take, returned with the fill. Decimal string.
+          example: '0'
+        excessY:
+          type: string
+          description: Token side of `excessX`. Decimal string.
+          example: '941177'
+        shareOfSupply:
+          type: number
+          format: double
+          description: Fraction of the pool the provision would represent once it lands
+          example: 0.00117
+        provisionBoxValue:
+          type: string
+          description: nanoERG that funds the new provision box, on top of `amountX`. Decimal string.
+          example: '600000000'
+        executorFee:
+          type: string
+          description: The executor fee applied, the request's or the client's default. Decimal string.
+          example: '3000000'
+        maxMinerFee:
+          type: string
+          description: The miner fee cap applied. Decimal string.
+          example: '1000000'
+        totalErgRequired:
+          type: string
+          description: >
+            nanoERG locked in the order box: `amountX`, `excessX`, `provisionBoxValue`, `executorFee`
+            and `ergReturned`. Decimal string.
+          example: '5604000000'
+        ergReturned:
+          type: string
+          description: >
+            nanoERG returned to the owner with the fill, beside the `ownerNFT`, not counting `excessX`.
+            Decimal string.
+          example: '1000000'
+        networkFee:
+          type: string
+          description: nanoERG paid to place the order. Decimal string.
+          example: '2000000'
+
+    LDRedeemOrderRequest:
+      description: The provision a redeem order closes, and its fees
+      type: object
+      x-tags: lithosdex
+      required:
+        - provisionBoxId
+      properties:
+        provisionBoxId:
+          type: string
+          example: 'ce00d6e0f4fd3390c0519bb0d24824e1e6b06978163f4845a7cf2c1c7d8f1b65'
+        executorFee:
+          type: string
+          description: >
+            nanoERG paid to whoever fills the order, out of the ERG it releases. A fill broadcast to the
+            mempool pays its miner fee out of this. Miners skip orders paying less than they accept.
+            Omit for the client's default. Decimal string.
+          example: '3000000'
+        maxMinerFee:
+          type: string
+          description: >
+            Most nanoERG a fill may pay as a miner fee, out of `executorFee`. Must be below
+            `executorFee`. Omit for the client's default. Decimal string.
+          example: '1000000'
+
+    LDRedeemOrderQuote:
+      description: Quote for a LithosDex redeem order against the current pool
+      type: object
+      x-tags: lithosdex
+      required:
+        - shares
+        - amountX
+        - amountY
+        - provisionValue
+        - receivedX
+        - claimableX
+        - claimableY
+        - unflushedX
+        - unflushedY
+        - withinMinSupply
+        - executorFee
+        - maxMinerFee
+        - totalErgRequired
+        - networkFee
+      properties:
+        shares:
+          type: string
+          description: LP shares the order would close. Decimal string.
+          example: '12500000000'
+        amountX:
+          type: string
+          description: nanoERG share of the reserves at the current pool. Decimal string.
+          example: '53125000000'
+        amountY:
+          type: string
+          description: Raw token units share of the reserves at the current pool. Decimal string.
+          example: '1605000000'
+        provisionValue:
+          type: string
+          description: nanoERG held by the provision box, returned with the fill. Decimal string.
+          example: '600000000'
+        receivedX:
+          type: string
+          description: >
+            nanoERG paid to the owner if the order fills against the current pool: `amountX`,
+            `provisionValue` and `totalErgRequired`, less `executorFee`. Decimal string.
+          example: '53723000000'
+        claimableX:
+          type: string
+          description: Settled ERG fees claimed by the transaction placing the order. Decimal string.
+          example: '253000000'
+        claimableY:
+          type: string
+          description: Token side of `claimableX`. Decimal string.
+          example: '7690000'
+        unflushedX:
+          type: string
+          description: >
+            ERG fees earned but not yet flushed. They cannot be claimed at placement and are **lost**
+            when the order fills. Decimal string.
+          example: '39750000'
+        unflushedY:
+          type: string
+          description: Token side of `unflushedX`. Decimal string.
+          example: '1210000'
+        withinMinSupply:
+          type: boolean
+          description: >
+            False when closing this provision would take supply under the contract's minimum. Such an
+            order is refused.
+          example: true
+        executorFee:
+          type: string
+          description: The executor fee applied, the request's or the client's default. Decimal string.
+          example: '3000000'
+        maxMinerFee:
+          type: string
+          description: The miner fee cap applied. Decimal string.
+          example: '1000000'
+        totalErgRequired:
+          type: string
+          description: nanoERG locked in the order box beside the `ownerNFT`, returned with the fill. Decimal string.
+          example: '1000000'
+        networkFee:
+          type: string
+          description: nanoERG paid to place the order. Decimal string.
+          example: '2000000'
+
+    LDOrder:
+      description: >
+        An outstanding LithosDex order owned by this wallet. Which term fields are present depends on
+        `type`.
+      type: object
+      x-tags: lithosdex
+      required:
+        - boxId
+        - type
+        - status
+        - placementTxId
+        - owner
+        - value
+        - executorFee
+        - maxMinerFee
+        - fillableNow
+      properties:
+        boxId:
+          type: string
+          description: Order box id. Pass it to `POST /dex/orders/{boxId}/cancel`.
+          example: '5035b2e112b4f5b873dd3444c01df1e7e697807fd84fe96790eacb128e46428d'
+        type:
+          type: string
+          enum: ['SWAP', 'DEPOSIT', 'REDEEM']
+          example: 'SWAP'
+        status:
+          type: string
+          enum: ['PENDING', 'OPEN', 'FILLING', 'CANCELLING']
+          description: >
+            PENDING: the placement is unconfirmed. OPEN: placed and waiting for a fill. FILLING: an
+            unconfirmed transaction fills it. CANCELLING: an unconfirmed transaction cancels it. Only
+            PENDING and OPEN orders can be cancelled.
+          example: 'OPEN'
+        placementTxId:
+          type: string
+          description: Transaction that created the order box
+          example: '40b7d045a858d537cdbf072e46ffbb86c0c9f6b0e93c369c1ffcba76797636d7'
+        placedHeight:
+          type: integer
+          format: int32
+          description: Height the placement confirmed at. Absent while it is unconfirmed.
+          example: 484719
+        spendingTxId:
+          type: string
+          description: The unconfirmed transaction filling or cancelling the order. Present when FILLING or CANCELLING.
+          example: '9f3c1ab7d2e45806c91f7b3ad4e2091856cbf740e3a92d5178cc0b46e21f5d38'
+        owner:
+          type: string
+          description: Address that receives the fill, and the only key that can cancel
+          example: '3WwbzR34YmLRy3Z6WLON5hBBkX8Zm1gUHmC7tEXDNRJfHBqhsZr'
+        value:
+          type: string
+          description: nanoERG held by the order box. Decimal string.
+          example: '1004000000'
+        executorFee:
+          type: string
+          description: nanoERG the order pays whoever fills it. Decimal string.
+          example: '3000000'
+        maxMinerFee:
+          type: string
+          description: Most nanoERG a fill may pay as a miner fee, out of `executorFee`. Decimal string.
+          example: '1000000'
+        ergIn:
+          type: boolean
+          description: SWAP only. True when selling ERG for the token.
+          example: true
+        amountIn:
+          type: string
+          description: SWAP only. nanoERG or raw token units sold into the pool. Decimal string.
+          example: '1000000000'
+        minOutput:
+          type: string
+          description: >
+            SWAP only. Least the owner receives: tokens when selling ERG, or nanoERG after
+            `executorFee` when selling the token. Decimal string.
+          example: '29974258'
+        amountX:
+          type: string
+          description: DEPOSIT only. Most nanoERG offered to the reserves. Decimal string.
+          example: '5000000000'
+        amountY:
+          type: string
+          description: DEPOSIT only. Raw token units offered. Decimal string.
+          example: '152000000'
+        minShares:
+          type: string
+          description: DEPOSIT only. Fewest shares the order accepts. Decimal string.
+          example: '1170587'
+        ownerNFT:
+          type: string
+          description: REDEEM only. Ownership NFT of the provision the order closes.
+          example: 'a1f4c2e8b7d93052416fbc8e07d21935a8c4f60b2e91d7385c06a4b1f2e83d97'
+        provisionBoxId:
+          type: string
+          description: REDEEM only. Current box of that provision. Absent when it cannot be found.
+          example: 'ce00d6e0f4fd3390c0519bb0d24824e1e6b06978163f4845a7cf2c1c7d8f1b65'
+        fillableNow:
+          type: boolean
+          description: >
+            Whether the order would fill against the current pool. False when the pool cannot meet the
+            order's minimum or refuses it; the order waits until that changes or it is cancelled.
+          example: true
+
+    LDOrderList:
+      description: Outstanding orders owned by this wallet
+      type: object
+      x-tags: lithosdex
+      required:
+        - orders
+      properties:
+        orders:
+          type: array
+          items:
+            $ref: '#/components/schemas/LDOrder'
+
+    LDOrderPlacementResult:
+      description: Result of placing a LithosDex order
+      type: object
+      x-tags: lithosdex
+      required:
+        - outcome
+        - txId
+        - order
+      properties:
+        outcome:
+          type: string
+          enum: [accepted, rejected, uncertain]
+          description: Node submission outcome; uncertain retains the known transaction ID and input ownership.
+        txId:
+          type: string
+          example: '40b7d045a858d537cdbf072e46ffbb86c0c9f6b0e93c369c1ffcba76797636d7'
+        order:
+          $ref: '#/components/schemas/LDOrder'
+        claimedX:
+          type: string
+          description: REDEEM only. Settled ERG fees the placement claimed. Decimal string.
+          example: '253000000'
+        claimedY:
+          type: string
+          description: REDEEM only. Token side of `claimedX`. Decimal string.
+          example: '7690000'
+
+    LDTokenAmount:
+      description: An amount of one token
+      type: object
+      x-tags: lithosdex
+      required:
+        - tokenId
+        - amount
+      properties:
+        tokenId:
+          type: string
+          example: '86e272f770aa4ef48ad7e6d6dbe98b5069edd8383a403a8edb3ceed8a3d5cea3'
+        amount:
+          type: string
+          description: Raw token units. Decimal string.
+          example: '152000000'
+
+    LDOrderCancelResult:
+      description: Result of cancelling a LithosDex order
+      type: object
+      x-tags: lithosdex
+      required:
+        - outcome
+        - txId
+        - returnedNanoErgs
+        - returnedTokens
+        - networkFee
+      properties:
+        outcome:
+          type: string
+          enum: [accepted, rejected, uncertain]
+          description: Node submission outcome; uncertain retains the known transaction ID and input ownership.
+        txId:
+          type: string
+          example: '40b7d045a858d537cdbf072e46ffbb86c0c9f6b0e93c369c1ffcba76797636d7'
+        returnedNanoErgs:
+          type: string
+          description: nanoERG the order box held, returned to this wallet. Decimal string.
+          example: '5604000000'
+        returnedTokens:
+          type: array
+          description: Tokens the order box held, returned to this wallet
+          items:
+            $ref: '#/components/schemas/LDTokenAmount'
+        networkFee:
+          type: string
+          description: >
+            nanoERG paid for the cancel, taken from the order box when it holds enough and from the
+            wallet otherwise. Decimal string.
+          example: '2000000'
+
     LDFeeHistoryPoint:
       description: One bucket of fee history
       type: object
@@ -3936,54 +4896,96 @@ components:
           items:
             $ref: '#/components/schemas/LDPricePoint'
 
-    LDSwapEntry:
-      description: One swap against the pool
+    LDActivityEntry:
+      description: >
+        One transaction that moved the pool. Which amount fields are present depends on `type`.
       type: object
       x-tags: lithosdex
       required:
         - txId
-        - ergIn
-        - amountIn
-        - amountOut
+        - type
+        - via
+        - status
       properties:
         txId:
           type: string
           example: '9f3c1ab7d2e45806c91f7b3ad4e2091856cbf740e3a92d5178cc0b46e21f5d38'
-        ergIn:
-          type: boolean
-          description: True when ERG was sold for the token
-          example: true
-        amountIn:
+        type:
           type: string
-          description: Raw units handed to the pool, fees included. Decimal string.
-          example: '12400000000'
-        amountOut:
+          enum: ['SWAP', 'DEPOSIT', 'REDEEM', 'RESIZE', 'FLUSH']
+          description: >
+            SWAP trades against the reserves. DEPOSIT opens a provision and REDEEM closes one. RESIZE
+            changes a provision's size and flushes. FLUSH moves pending fees to the vault.
+          example: 'SWAP'
+        via:
           type: string
-          description: Raw units received. Decimal string.
-          example: '441820000'
+          enum: ['ORDER', 'DIRECT']
+          description: >
+            ORDER when the transaction fills a LithosDex order, DIRECT otherwise. RESIZE and FLUSH are
+            always DIRECT.
+          example: 'ORDER'
+        orderBoxId:
+          type: string
+          description: The order this transaction filled. Present when `via` is ORDER.
+          example: '5035b2e112b4f5b873dd3444c01df1e7e697807fd84fe96790eacb128e46428d'
+        status:
+          type: string
+          enum: ['MEMPOOL', 'CONFIRMED']
+          description: >
+            MEMPOOL entries are unconfirmed and can still be dropped or replaced. They are listed ahead
+            of every confirmed entry.
+          example: 'CONFIRMED'
         height:
           type: integer
           format: int32
-          description: >
-            Block height. Absent while the swap is still in the mempool, where it can still roll back.
+          description: Block height. Present when CONFIRMED.
           example: 484719
         timestamp:
           type: integer
           format: int64
-          description: Unix milliseconds. Absent for mempool entries.
+          description: Unix milliseconds. Present when CONFIRMED and resolved.
           example: 1765432100000
+        ergIn:
+          type: boolean
+          description: SWAP only. True when ERG was sold for the token.
+          example: true
+        amountIn:
+          type: string
+          description: SWAP only. Raw units handed to the pool, pool fees included. Decimal string.
+          example: '12400000000'
+        amountOut:
+          type: string
+          description: SWAP only. Raw units received. Decimal string.
+          example: '441820000'
+        amountX:
+          type: string
+          description: >
+            Not present for SWAP. nanoERG added to the reserves by a DEPOSIT or a growing RESIZE,
+            returned from them by a REDEEM or a shrinking RESIZE, or moved to the vault by a FLUSH.
+            Decimal string.
+          example: '5000000000'
+        amountY:
+          type: string
+          description: Not present for SWAP. Token side of `amountX`. Decimal string.
+          example: '151058823'
+        shares:
+          type: string
+          description: >
+            DEPOSIT, REDEEM and RESIZE only. Shares issued or closed; for RESIZE, the signed change.
+            Decimal string.
+          example: '1176470'
 
-    LDRecentSwaps:
-      description: Swaps against the pool, newest first
+    LDRecentActivity:
+      description: Transactions that moved the pool, newest first
       type: object
       x-tags: lithosdex
       required:
-        - swaps
+        - activity
       properties:
-        swaps:
+        activity:
           type: array
           items:
-            $ref: '#/components/schemas/LDSwapEntry'
+            $ref: '#/components/schemas/LDActivityEntry'
 
     WalletToken:
       description: A token balance held by the wallet

@@ -277,6 +277,40 @@ class LithosPoolSpec extends TestKit(ActorSystem("lithos-pool-spec", LithosPoolS
     f.node.calls.poll(200, TimeUnit.MILLISECONDS) shouldBe null
   }
 
+  /** The node answers on the chain it holds; `f.node.observed` is what its /info reports. */
+  it should "read the chain when a block overtakes a request, rejecting neither its additions nor its genesis" in {
+    val f = fixture()
+    genesis(f)
+    f.pool ! BlockPackageReady(pkg(revision = 1))
+    val overtaken = nextCall(f)
+    f.node.observed = nodeInfo(parentB, 101)
+    overtaken.response.complete(response(overtaken.copy(observed = f.node.observed), 2))
+    f.builder.expectMsg(ChainAdvanced(101, parentB))
+    f.node.calls.poll(200, TimeUnit.MILLISECONDS) shouldBe null
+    f.miner.expectNoMessage(200.millis)
+  }
+
+  it should "read the chain again on the next poll, not in a loop, while /info trails the node's candidate" in {
+    val f = fixture()
+    genesis(f)
+    f.pool ! BlockPackageReady(pkg(revision = 1))
+    val reorged = nodeInfo(parentB)
+    val first = nextCall(f)
+    first.response.complete(response(first.copy(observed = reorged), 2))
+    withClue("the read right after still shows the old tip, so the package is asked for once more, additions kept: ") {
+      val again = nextCall(f)
+      again.txs should have size 2
+      again.response.complete(response(again.copy(observed = reorged), 3))
+    }
+    f.node.calls.poll(300, TimeUnit.MILLISECONDS) shouldBe null
+    withClue("a candidate on another parent never reaches miners: ") {
+      f.miner.expectNoMessage(200.millis)
+    }
+    f.node.observed = reorged
+    f.pool ! PollBlockTemplate
+    f.builder.expectMsg(ChainAdvanced(100, parentB))
+  }
+
   "Job publication" should "acknowledge genesis before optional HTTP and reject delayed augmentation acknowledgements" in {
     val f = fixture(controlledManager = true)
     f.pool ! BlockPackageReady(pkg())
@@ -398,6 +432,55 @@ class LithosPoolSpec extends TestKit(ActorSystem("lithos-pool-spec", LithosPoolS
     f.miner.expectMsgType[BroadcastJob]
   }
 
+  it should "keep the served package when a source late for the refresh carries work in it, whatever the refresh gains" in {
+    val f = fixture(cfg.copy(blockTransactions = true))
+    genesis(f)
+    f.pool ! BlockPackageReady(pkg(revision = 1).copy(revenue = 1000000L, sources = Set("rollups", "emissions")),
+      refreshed = true)
+    val served = nextCall(f)
+    served.response.complete(response(served, 2))
+    f.miner.expectMsgType[BroadcastJob]
+
+    // Emissions answers empty and the gain is too small: kept, so the served package still carries emissions work
+    f.pool ! BlockPackageReady(pkg(revision = 2).copy(revenue = 1500000L, sources = Set("rollups")), refreshed = true)
+    f.node.calls.poll(200, TimeUnit.MILLISECONDS) shouldBe null
+    withClue("judged against the served package, not the last one offered: ") {
+      f.pool ! BlockPackageReady(pkg(revision = 3).copy(revenue = 5000000L, sources = Set("rollups"),
+        late = Set("emissions")), refreshed = true)
+      f.node.calls.poll(200, TimeUnit.MILLISECONDS) shouldBe null
+    }
+
+    withClue("a source late for the refresh that carried nothing in the served package holds nothing back: ") {
+      f.pool ! BlockPackageReady(pkg(revision = 4).copy(revenue = 5000000L, sources = Set("rollups", "emissions"),
+        late = Set("payouts")), refreshed = true)
+      val next = nextCall(f)
+      next.txs.last should include("extra-4")
+      next.response.complete(response(next, 3))
+      f.miner.expectMsgType[BroadcastJob]
+    }
+  }
+
+  it should "take a refresh that brings back a source late for the served package, without a revenue gain" in {
+    val f = fixture(cfg.copy(blockTransactions = true))
+    genesis(f)
+    f.pool ! BlockPackageReady(pkg(revision = 1).copy(revenue = 1000000L, sources = Set("rollups"),
+      late = Set("emissions")), refreshed = true)
+    val served = nextCall(f)
+    served.response.complete(response(served, 2))
+    f.miner.expectMsgType[BroadcastJob]
+
+    withClue("a source that answers with nothing brings nothing back, so the revenue gate still holds: ") {
+      f.pool ! BlockPackageReady(pkg(revision = 2).copy(revenue = 1000000L, sources = Set("rollups")), refreshed = true)
+      f.node.calls.poll(200, TimeUnit.MILLISECONDS) shouldBe null
+    }
+    f.pool ! BlockPackageReady(pkg(revision = 3).copy(revenue = 1000000L, sources = Set("rollups", "emissions")),
+      refreshed = true)
+    val next = nextCall(f)
+    next.txs.last should include("extra-3")
+    next.response.complete(response(next, 3))
+    f.miner.expectMsgType[BroadcastJob]
+  }
+
   it should "permit zero-revenue refreshes when the threshold is zero" in {
     val f = fixture(cfg.copy(minCandidateChangeRevenue = 0L))
     genesis(f)
@@ -456,11 +539,10 @@ class LithosPoolSpec extends TestKit(ActorSystem("lithos-pool-spec", LithosPoolS
     genesis(f).candidate.version shouldBe 4
   }
 
-  it should "reject a mismatched key, chain preimage or work message" in {
+  it should "reject a mismatched key or work message" in {
     val mutations: Seq[Call => JSONObject] = Seq(
       call => response(call).put("pk", soloKey),
-      call => response(call).put("msg", "00" * 32),
-      call => response(call.copy(observed = nodeInfo(parentB))))
+      call => response(call).put("msg", "00" * 32))
     mutations.foreach { mutate =>
       val f = fixture()
       f.pool ! BlockPackageReady(pkg())

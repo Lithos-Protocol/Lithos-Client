@@ -199,7 +199,7 @@ class CandidateBuilder(client: ErgoClient,
         dropCandidates(height)
       }
       currentPackage.filter(p => p.blockHeight == height && p.blockTxs.nonEmpty).foreach { pkg =>
-        currentPackage = Some(pkg.copy(blockTxs = Seq.empty[CandidateTx], revenue = 0L))
+        currentPackage = Some(pkg.withoutBlockTxs)
       }
 
     // Without the package wait, collection starts after this genesis reaches miners.
@@ -277,7 +277,7 @@ class CandidateBuilder(client: ErgoClient,
     case SourcesDue(attempt) =>
       waitingRound(attempt).foreach(stopWaiting)
 
-    case BlockTxsCollected(attempt, txs, revenue, from) =>
+    case BlockTxsCollected(attempt, txs, revenue, from, late) =>
       if (collectingFor.exists(_.attempt == attempt)) {
         if (nowNanos() - attempt.startedAt >= config.blockTxTimeout.milliseconds.toNanos) {
           expireCollection(attempt)
@@ -286,7 +286,7 @@ class CandidateBuilder(client: ErgoClient,
           currentPackage.filter(p => p.blockHeight == attempt.height &&
             p.collateral.txId == attempt.genesisId && !blockTxsBlockedAt.contains(attempt.height))
             .filter(_ => txs.nonEmpty || attempt.refresh || config.waitForBlockPackage).foreach { pkg =>
-              val updated = pkg.withBlockTxs(txs, revenue, from)
+              val updated = pkg.withBlockTxs(txs, revenue, from, late)
               currentPackage = Some(updated)
               publish(updated, "augmentedBuildMs", collectStartedAt, refreshed = attempt.refresh)
             }
@@ -486,25 +486,18 @@ class CandidateBuilder(client: ErgoClient,
     }
 
   /**
-   * Stops waiting on sources that have not answered. A refresh keeps the published package when a late
-   * source carries work in it, since publishing without that source would drop the work; anything else
-   * is assembled from the sources that answered.
+   * Stops waiting on sources that have not answered and assembles what the others offered. The package
+   * names the late sources, so the pool can keep the job it serves rather than drop their work from it.
    */
   private def stopWaiting(round: Collection): Unit = {
     val attempt = round.attempt
     val (answered, late) = enabledSources.indices.partition(i => round.answers(i).nonEmpty)
-    val lateNames = late.map(i => enabledSources(i).name)
-    val summary = s"${lateNames.mkString(", ")} did not answer within ${sourceDeadlineMs}ms (answered: " +
+    val summary = s"${late.map(i => enabledSources(i).name).mkString(", ")} did not answer within " +
+      s"${sourceDeadlineMs}ms (answered: " +
       s"${if (answered.isEmpty) "none" else answered.map(i => enabledSources(i).name).mkString(", ")})"
-    if (attempt.refresh && currentPackage.exists(pkg => lateNames.exists(pkg.sources.contains))) {
-      collectingFor = None
-      logger.warn(s"Package refresh for block ${attempt.height}: $summary; retaining the published " +
-        "package, which carries work from a late source")
-    } else {
-      if (attempt.refresh) logger.warn(s"Package refresh for block ${attempt.height}: $summary")
-      else logger.error(s"Block ${attempt.height}: $summary; building the package without them")
-      assemble(round)
-    }
+    if (attempt.refresh) logger.warn(s"Package refresh for block ${attempt.height}: $summary")
+    else logger.error(s"Block ${attempt.height}: $summary; building the package without them")
+    assemble(round)
   }
 
   /** Admits what the round's sources offered, in source order, and builds the top-up off the mailbox. */
@@ -513,6 +506,7 @@ class CandidateBuilder(client: ErgoClient,
     val attempt = round.attempt
     val height = attempt.height
     val offered = enabledSources.indices.flatMap(i => round.answers(i).map(enabledSources(i).name -> _))
+    val late = enabledSources.indices.filter(i => round.answers(i).isEmpty).map(i => enabledSources(i).name).toSet
     // Charge the signed genesis bytes and cost before admitting source bundles.
     val genesis = currentPackage.map(_.collateral)
     val genesisBytes = genesis.map(_.signedSizeBytes.toLong).getOrElse(0L)
@@ -530,13 +524,13 @@ class CandidateBuilder(client: ErgoClient,
         val from = offered.collect {
           case (name, bundles) if bundles.exists(_.members.exists(tx => selected.contains(tx.id))) => name
         }.toSet
-        BlockTxsCollected(attempt, txs ++ topUp, ledger.availableErg, from)
+        BlockTxsCollected(attempt, txs ++ topUp, ledger.availableErg, from, late)
       }(collectionEc)
       .onComplete {
         case Success(msg) => self ! msg
         case Failure(ex) =>
           logger.warn(s"Could not collect block transactions for $height: ${ex.getMessage}")
-          self ! BlockTxsCollected(attempt, Seq.empty[CandidateTx])
+          self ! BlockTxsCollected(attempt, Seq.empty[CandidateTx], late = late)
       }
   }
 
@@ -661,9 +655,12 @@ object CandidateBuilder {
   /** A round's source deadline: stop waiting on sources that have not answered. */
   private[mining] case class SourcesDue(attempt: CollectionAttempt)
 
-  /** @param from names of the sources whose transactions `txs` carries */
+  /**
+   * @param from names of the sources whose transactions `txs` carries
+   * @param late names of the sources that had not answered when `txs` was assembled
+   */
   private[mining] case class BlockTxsCollected(attempt: CollectionAttempt, txs: Seq[CandidateTx], revenue: Long = 0L,
-                                               from: Set[String] = Set.empty)
+                                               from: Set[String] = Set.empty, late: Set[String] = Set.empty)
 
   private[mining] case class CollectTimedOut(attempt: CollectionAttempt)
 
