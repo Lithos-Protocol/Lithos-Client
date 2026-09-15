@@ -149,7 +149,7 @@ class LithosPool(options: Options,
           if(candidateConfig.logBudgets) {
             logger.info(s"Ready: ${pkg.describe} with" +
               s" txSize: ${pkg.collateral.txBytes.length} and collatBytes: " +
-              s"${pkg.collateral.collateralBoxBytes.length}${if(candidateConfig.logTimings) pkg.elapsedTime.get else ""}")
+              s"${pkg.collateral.collateralBoxBytes.length}${pkg.elapsedTime.getOrElse("")}")
           }
           logger.info(s"Keeping published package for block ${pkg.blockHeight}: " +
             s"Not enough additional revenue $gain/${candidateConfig.minCandidateChangeRevenue} nanoERG")
