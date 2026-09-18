@@ -471,10 +471,13 @@ class EngineWalletState @Inject()(nodeContext: NodeContext,
       }
       chainHeight = height
       trimInventory()
-      val locked = rewardBoxes.size - spendableRewards.size
+      // TODO: Ugly fix, change this when reward boxes are reworked
+      //val locked = rewardBoxes.size - spendableRewards.size
+//      logger.info(s"Wallet refreshed - ${available.size} available, ${usedInputs.size} reserved, " +
+//        s"${spendableRewards.size} reward box(es) spendable " +
+//        s"($locked still locked)" + (if (complete) "" else ", PARTIAL"))
       logger.info(s"Wallet refreshed - ${available.size} available, ${usedInputs.size} reserved, " +
-        s"${spendableRewards.size} reward box(es) spendable " +
-        s"($locked still locked)" + (if (complete) "" else ", PARTIAL"))
+        (if (complete) "" else ", PARTIAL"))
       finishRefresh()
 
     case SelectInputs(_, _, _, reservationId, deadlineMillis, _, _) if now() >= deadlineMillis =>

@@ -32,7 +32,7 @@ case class NodeWallet(prover: ErgoProver) {
    * the guard is a height check, not a second key.
    */
   lazy val rewardTrees: Map[String, Address] =
-    addresses.map(a =>
+    (prover.getAddress +: addresses).map(a =>
       Contract(ErgoTreePredef.rewardOutputScript(NodeWallet.MINER_REWARD_DELAY, a.getPublicKey))
         .ergoTreeHex -> a).toMap
 
