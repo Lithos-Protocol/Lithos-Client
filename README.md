@@ -7,6 +7,15 @@ accordingly. Lithos uses Non-Interactive Share Proofs (NISPs) to efficiently pro
 In order to run Lithos, you must have a working Ergo node. To mine on the Lithos pool, you may use any mining software which
  supports Ergo's Autolykos 2 algorithm. We recommend using [SOAT Miner](https://github.com/blindrun/soat-miner), as it is open-source
 with 0 dev fee and built-in Lithos support. Lithos releases require a working Java 11 installation.
+
+### Overall System Requirements:
+- 6-8GB of RAM
+- ~30GB of storage (for the Ergo node)
+- Java 11
+
+The GPU you use to mine does not need to be on the same machine as the client.
+Whichever GPU you use, make sure its compatible with Autolykos 2 VRAM requirements.
+
 ## Instructions
 Before running the Lithos client, you will need a fully synced, indexed node.\
 For setting up a node, follow the node guide, which gives instructions for testnet and mainnet
