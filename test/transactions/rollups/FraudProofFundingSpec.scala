@@ -33,7 +33,7 @@ object FraudProofFundingSpec {
   val config: com.typesafe.config.Config =
     com.typesafe.config.ConfigFactory.parseString("akka.test.single-expect-default = 20s").withFallback(com.typesafe.config.ConfigFactory.load())
 }
-
+// TODO: Tests are left failing for right now until rewards are fixed
 class FraudProofFundingSpec extends TestKit(ActorSystem("fp-funding-spec", FraudProofFundingSpec.config))
   with AnyFlatSpecLike with Matchers with BeforeAndAfterAll with MockitoSugar {
 

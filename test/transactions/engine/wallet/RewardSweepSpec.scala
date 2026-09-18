@@ -126,7 +126,7 @@ class RewardSweepSpec extends TestKit(akka.actor.ActorSystem("reward-sweep-spec"
     Thread.sleep(1200)
     (probe, mgr)
   }
-
+  // TODO: Test is left failing until we can fix rewards
   "An unlocked coinbase set" should "be reported by GetUnlockedRewards and held by a claim's leases" in {
     val (probe, mgr) = fixtureWithRewards(Seq(3000000000L, 3100000000L))
 

@@ -28,7 +28,7 @@ class FakeNodeContextProbeSpec extends AnyFlatSpec with Matchers {
     // A coinbase pays `pk && HEIGHT > creationHeight + 720`, not a plain key, which is the whole
     // reason EngineWalletState tracks them separately.
     val (_, _, wallet) = FakeNodeContext(numAddresses = 3)
-    wallet.rewardTrees should have size 3
+    wallet.rewardTrees should have size 4
     wallet.rewardTrees.keySet.intersect(wallet.signableTrees) shouldBe empty
   }
 
