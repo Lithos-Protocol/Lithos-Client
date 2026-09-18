@@ -16,7 +16,7 @@ with 0 dev fee and built-in Lithos support. Lithos releases require a working Ja
 The GPU you use to mine does not need to be on the same machine as the client.
 Whichever GPU you use, make sure its compatible with Autolykos 2 VRAM requirements.
 
-## Instructions
+## Instructions (Mainnet Pre-Release)
 Before running the Lithos client, you will need a fully synced, indexed node.\
 For setting up a node, follow the node guide, which gives instructions for testnet and mainnet
 nodes: [Node Tutorial](https://github.com/Lithos-Protocol/Lithos-Client/blob/master/TestnetNode.md)
@@ -24,7 +24,7 @@ nodes: [Node Tutorial](https://github.com/Lithos-Protocol/Lithos-Client/blob/mas
 To run the client, download a release `.zip` file. Unzip the file,
 and navigate to `lithos-client/bin`. Create a new file called `lithos.conf` and input the following
 into it:
-```
+```hocon
 {
   include file("../conf/application.conf")
   node {
@@ -32,31 +32,144 @@ into it:
     key = "NODE_API_KEY_HERE"
     storagePath = "path/to/nodefolder/.ergo/wallet/keystore/keyfile.json"
     pass        = "NODE_WALLET_PASS_HERE"
-    networkType = "TESTNET"
-    explorerURL = "https://api-testnet.ergoplatform.com"
-    # Number of addresses managed by Lithos. Used for 
+    networkType = "MAINNET"
+    explorerURL = "default"
     numAddresses = 32
   }
   # Change this value to a secret key
   play.http.secret.key="changethissecret"
   # Hash of "hello"
   lithos.apiKeyHash="324dcf027dd4a30a932c441f365a25e86b173defa4b8e58948253471b81b72cf"
-  stratum {
-    diff = "140M" # Format diff as (value)(powTen), e.g "4.0G", "1.52M", "300.1K", etc.
-    stratumPort = 4444
-    
-    # Reduces shares sent between mining software and Lithos client
-    reduceShareMessages = true
-    # Used for testing different difficulties
-    forceConfigDiff = false
-  }
-  state.autoCommit = true
+  
 }
 ```
 
 
 After setting up your config file, ensure that your node is running before executing the start script in
 `lithos-client/bin`. This script will start the Lithos Client.
+
+## Batching (Mainnet Pre-Release)
+The Mainnet Pre-release does not support features outside LithosDex and order batching. To
+control parameters regarding these features, use the following config settings:
+```hocon
+  # Order discovery and execution settings for batching adapters.
+  batching {
+    ergodex {
+      enabled = true
+      # Milliseconds between confirmed-order scans.
+      scanIntervalMs = 8000
+      # Maximum order ids retained between scans; boxes are reloaded before execution.
+      maxTrackedOrders = 512
+      # Maximum pools tracked, newest first.
+      maxTrackedPools = 256
+      # Transaction slots per candidate build or broadcast pass, including carried ancestors.
+      maxOrdersPerBlock = 20
+      # Minimum gross revenue per fill, in nanoERG. An opening fill must also fund a takings box.
+      minRevenueNanoErg = 1000000
+      # Minimum gross revenue for broadcasts; net takings must remain positive after the miner fee.
+      broadcastMinRevenueNanoErg = 2500000
+      # Broadcast miner fee ceiling in nanoERG, further limited by the order's own cap.
+      broadcastMinerFeeCeiling = 2000000
+      # Skip pools whose current box was included more than this many blocks ago.
+      maxPoolAgeBlocks = 20160
+      # Broadcast orders using executor revenue for fees. Requires the ErgoDEX source enabled.
+      broadcast = true
+
+      # With broadcast on, also broadcast orders still in the mempool, spending the unconfirmed order box.
+      # Off, a broadcast waits for an order to confirm and be indexed. Your own block reads them either way.
+      broadcastMempoolOrders = true
+
+      # Pool NFTs never to execute against.
+      deniedPools = []
+      # Milliseconds an order that priced but could not be built is left out of scans and builds.
+      skippedOrderTtlMs = 3600000
+      # Most such orders remembered at once, oldest forgotten first. Each costs about 200 bytes of memory,
+      # so the default holds under 1 MB. 0 remembers none, and a bad order is retried on every build.
+      maxSkippedOrders = 4096
+      # Unconfirmed transactions one order may need carried into your block ahead of it: the transaction
+      # that placed it and every unconfirmed ancestor of that one. An order needing more waits for them to
+      # confirm. Each carried transaction is one more that can fail your run. 0 executes confirmed orders only.
+      maxAncestorTxs = 2
+
+      # Unconfirmed orders one build or broadcast pass takes, and how many of them any single transaction
+      # may contribute. They are taken in rounds across the transactions that created them, so a
+      # transaction carrying hundreds of order boxes takes maxMempoolOrdersPerTx places, not all of them.
+      # Only the orders taken are parsed, which is what this bounds.
+      maxMempoolOrders = 64
+      maxMempoolOrdersPerTx = 4
+      # Orders a run prices but fails to build before it stops trying more. Each failure is one wasted signature.
+      maxUnbuildablePerRun = 32
+      # Orders from one creating transaction a run fails to build before it passes over that transaction's
+      # other orders untried. Keeps one spam transaction from using up maxUnbuildablePerRun on its own.
+      maxUnbuildablePerTx = 2
+    }
+    # LithosDex orders against the single ERG:LIT pool. Runs whether or not this node mines:
+    # broadcasting needs no stratum, and candidates additionally need stratum.candidate.sources.lithosdex.
+    lithosdex {
+      enabled = true
+      # Milliseconds between confirmed-order scans.
+      scanIntervalMs = 8000
+      # Maximum order ids retained between scans; boxes are reloaded before execution.
+      maxTrackedOrders = 512
+      # Transaction slots per candidate build or broadcast pass, including carried ancestors.
+      maxOrdersPerBlock = 20
+      # Minimum executor fee per order, in nanoERG. An opening fill must also fund a takings box.
+      minRevenueNanoErg = 1000000
+      # Minimum executor fee for broadcasts; net takings must remain positive after the miner fee.
+      broadcastMinRevenueNanoErg = 2500000
+      # Broadcast miner fee ceiling in nanoERG, further limited by the order's own cap.
+      broadcastMinerFeeCeiling = 2000000
+      # Broadcast orders, paying miner fees out of executor fees. Your ERG is never spent.
+      broadcast = true
+
+      # With broadcast on, also broadcast orders still in the mempool, spending the unconfirmed order box.
+      # Off, a broadcast waits for an order to confirm and be indexed. Your own block reads them either way.
+      broadcastMempoolOrders = true
+      # Close each candidate run with a flush, moving the pool's pending fees to the vault so providers
+      # can claim them. It pays nothing and costs nothing in your own block. Never broadcast.
+      autoFlush = true
+      # Milliseconds an order that priced but could not be built is left out of scans and builds.
+      skippedOrderTtlMs = 3600000
+      # Most such orders remembered at once, oldest forgotten first. Each costs about 200 bytes of memory,
+      # so the default holds under 1 MB. 0 remembers none, and a bad order is retried on every build.
+      maxSkippedOrders = 4096
+      # Unconfirmed transactions one order may need carried into your block ahead of it: the transaction
+      # that placed it and every unconfirmed ancestor of that one. An order needing more waits for them to
+      # confirm. Each carried transaction is one more that can fail your run. 0 executes confirmed orders only.
+      maxAncestorTxs = 2
+
+      # Unconfirmed orders one build or broadcast pass takes, and how many of them any single transaction
+      # may contribute. They are taken in rounds across the transactions that created them, so a
+      # transaction carrying hundreds of order boxes takes maxMempoolOrdersPerTx places, not all of them.
+      # Only the orders taken are parsed, which is what this bounds.
+      maxMempoolOrders = 64
+      maxMempoolOrdersPerTx = 4
+      # Orders a run prices but fails to build before it stops trying more. Each failure is one wasted signature.
+      maxUnbuildablePerRun = 32
+      # Orders from one creating transaction a run fails to build before it passes over that transaction's
+      # other orders untried. Keeps one spam transaction from using up maxUnbuildablePerRun on its own.
+      maxUnbuildablePerTx = 2
+    }
+  }
+  # Fees on LithosDex orders you place through the API or web panel, when the request does not set its
+  # own. Both are paid only when a miner fills the order; a cancelled order pays neither.
+  lithosdex {
+    orders {
+      # nanoERG you pay whoever fills each order. Miners skip orders paying less than they accept, so an
+      # order under that waits. The default clears the shipped settings of every miner running this client.
+      executorFeeNanoErg = 3000000
+      # Most of the executor fee a miner may spend as a network fee when it broadcasts the fill. Must be
+      # below executorFeeNanoErg. It comes out of the executor fee, never out of your funds.
+      maxMinerFeeNanoErg = 1000000
+    }
+  }
+```
+Make sure to add them before the final closing bracket `}` in your config file.
+
+
+---
+# Testnet Settings
+The following information applies only to testnet users, where Lithos is fully operational.
 
 ## Synchronization & Mining
 Once your Lithos Client starts, you will likely want to wait before mining. The Lithos Client will start
