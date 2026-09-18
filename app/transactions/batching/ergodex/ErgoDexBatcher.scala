@@ -143,7 +143,9 @@ class ErgoDexBatcher(nodeContext: NodeContext,
           if open.nonEmpty
         } yield tip -> open
       }
-      val refusedNow = runs(ctx, pools, batching.maxOrdersPerBlock, ctx.getHeight + 1, batching.broadcastMinRevenueNanoErg,
+      // The tip, not the block a broadcast might reach: a pool box stamped above the tip can only be
+      // chained onto by a transaction that leaves no change, and other executors chain onto these pools.
+      val refusedNow = runs(ctx, pools, batching.maxOrdersPerBlock, ctx.getHeight, batching.broadcastMinRevenueNanoErg,
         batching.broadcastMinerFeeCeiling, useTrueProp = false, BroadcastBudget.fromNow)
         .flatMap { case (chain, _) => send(sender, chain, observed) }.toMap
       BroadcastResult(refusedNow, unconfirmed.map(_.boxId).toSet)

@@ -225,29 +225,34 @@ object ErgoDexExecution {
     val after = fill.poolAfter
     require(after.reservesX > 0 && after.reservesY > 0, "an execution cannot empty the pool")
 
+    // Verify the reported order id before spending the reconstructed input.
+    val orderInput = order.boxAsInput(ctx)
+    require(orderInput.id.toString == order.boxId, "the order box's fields do not match its id")
+    val spent = Seq(poolBox, orderInput) ++ carriedTakings.toSeq
+
+    // The block this execution is built for, unless a box it chains onto was itself built for a later
+    // one: consensus refuses an output created below the newest input.
+    val height = math.max(blockHeight, TxBuilder.newestInput(spent))
+
     // Preserve pool identity, script and registers while updating reserves and LP balance.
     val poolOut = UTXO(poolBox.contract, after.reservesX,
       Seq(Token(ErgoId.create(pool.nft), 1L),
         Token(ErgoId.create(pool.lpId), after.lpSupply),
         Token(ErgoId.create(pool.yId), after.reservesY)),
-      poolBox.registers).setCreationHeight(blockHeight)
+      poolBox.registers).setCreationHeight(height)
 
     // The reward is the user's, and its proposition is the order's own constant rather than
     // anything this client chooses.
     val redeemer = Contract(sigma.ast.ErgoTree.fromBytes(order.redeemerPropBytes))
     val rewardOut = UTXO(redeemer, fill.rewardValue,
       fill.rewardTokens.map(asset => Token(ErgoId.create(asset.tokenId), asset.amount)))
-      .setCreationHeight(blockHeight)
+      .setCreationHeight(height)
 
     val takingsOut = UTXO(CandidateCapital.collectionContract(wallet, useTrueProp), takings)
-      .setCreationHeight(blockHeight)
+      .setCreationHeight(height)
     val feeOut =
-      if (minerFee > 0) Seq(UTXO.feeBox(minerFee).setCreationHeight(blockHeight)) else Seq.empty
+      if (minerFee > 0) Seq(UTXO.feeBox(minerFee).setCreationHeight(height)) else Seq.empty
 
-    // Verify the reported order id before spending the reconstructed input.
-    val orderInput = order.boxAsInput(ctx)
-    require(orderInput.id.toString == order.boxId, "the order box's fields do not match its id")
-    val spent = Seq(poolBox, orderInput) ++ carriedTakings.toSeq
     val unsigned = TxBuilder(ctx)
       .setInputs(spent: _*)
       .setOutputs((Seq(poolOut, rewardOut, takingsOut) ++ feeOut): _*)

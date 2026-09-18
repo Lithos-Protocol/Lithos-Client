@@ -282,28 +282,34 @@ object LithosDexExecution {
     val takings = Math.addExact(carriedTakings.map(_.value).getOrElse(0L), fill.revenue - minerFee)
     require(takings >= UTXO.MIN_CHANGE, "the takings cannot fund an output of their own")
 
-    val poolOut = LithosDexTransactions.poolUTXO(ctx, p, fill.poolAfter).setCreationHeight(blockHeight)
+    val orderIn = order.box.toInputUTXO(ctx)
+    require(orderIn.id.toString == order.boxId, "the order box's fields do not match its id")
+
+    // The block this execution is built for, unless a box it chains onto was itself built for a later
+    // one: consensus refuses an output created below the newest input.
+    val height = math.max(blockHeight, TxBuilder.newestInput(
+      Seq(poolBox, orderIn) ++ carriedTakings.toSeq ++ fill.provision.map(_.box)))
+
+    val poolOut = LithosDexTransactions.poolUTXO(ctx, p, fill.poolAfter).setCreationHeight(height)
     // The reward's script is the order's own constant, never anything this client chooses
     val redeemer = Contract(sigma.ast.ErgoTree.fromHex(order.terms.redeemerTree))
     val takingsOut = UTXO(CandidateCapital.collectionContract(wallet, useTrueProp), takings)
-      .setCreationHeight(blockHeight)
-    val feeOut = if (minerFee > 0) Seq(UTXO.feeBox(minerFee).setCreationHeight(blockHeight)) else Seq.empty
+      .setCreationHeight(height)
+    val feeOut = if (minerFee > 0) Seq(UTXO.feeBox(minerFee).setCreationHeight(height)) else Seq.empty
 
-    val orderIn = order.box.toInputUTXO(ctx)
-    require(orderIn.id.toString == order.boxId, "the order box's fields do not match its id")
     def tokensY(amount: Long): Seq[Token] = if (amount > 0) Seq(Token(p.tokenY, amount)) else Seq.empty
 
     val (inputs, outputs, burn) = order match {
       case _: LithosDexOrder.SwapSell | _: LithosDexOrder.SwapBuy =>
         (Seq(LithosDexTransactions.poolInput(poolBox, LDHelpers.POOL_SWAP), orderIn),
-          Seq(poolOut, UTXO(redeemer, fill.rewardValue, tokensY(fill.rewardY)).setCreationHeight(blockHeight), takingsOut),
+          Seq(poolOut, UTXO(redeemer, fill.rewardValue, tokensY(fill.rewardY)).setCreationHeight(height), takingsOut),
           Seq.empty[Token])
 
       case _: LithosDexOrder.Deposit =>
         // The ownership NFT can only take the id of the pool box, the transaction's first input
         val nft = poolBox.id
         val provisionOut = LithosDexTransactions.provisionUTXO(ctx, p.provToken, p.accX, p.accY, nft, fill.shares,
-          LDHelpers.PROVISION_MIN).setCreationHeight(blockHeight)
+          LDHelpers.PROVISION_MIN).setCreationHeight(height)
         val takenX = fill.poolAfter.reservesX - p.reservesX
         val takenY = fill.poolAfter.reservesY - p.reservesY
         // EIP-4 registers so a wallet shows the NFT as the provision it owns
@@ -312,7 +318,7 @@ object LithosDexExecution {
           .withReg(1, LithosDexTransactions.utf8(LithosDexTransactions.provisionNftDescription(ctx, p, nft,
             p.accX, p.accY, fill.shares, takenX, takenY)))
           .withReg(2, LithosDexTransactions.utf8("0"))
-          .setCreationHeight(blockHeight)
+          .setCreationHeight(height)
         (Seq(LithosDexTransactions.poolInput(poolBox, LDHelpers.POOL_DEPOSIT), orderIn),
           Seq(poolOut, provisionOut, reward, takingsOut),
           Seq.empty[Token])
@@ -321,7 +327,7 @@ object LithosDexExecution {
         val provision = fill.provision.getOrElse(throw new IllegalStateException("a redemption needs its provision"))
         (Seq(LithosDexTransactions.poolInput(poolBox, LDHelpers.POOL_REDEEM),
           LithosDexTransactions.provisionInput(ctx, provision.box, LDHelpers.PROV_REDEEM), orderIn),
-          Seq(poolOut, UTXO(redeemer, fill.rewardValue, tokensY(fill.rewardY)).setCreationHeight(blockHeight), takingsOut),
+          Seq(poolOut, UTXO(redeemer, fill.rewardValue, tokensY(fill.rewardY)).setCreationHeight(height), takingsOut),
           Seq(Token(provision.ownerNFT, 1L)))
     }
 
@@ -339,10 +345,12 @@ object LithosDexExecution {
     val p = LDLiquidityPool(poolBox)
     require(p.canFlush, "nothing is pending: the pool refuses a flush that moves nothing")
     val v = LDFeeValue.fromBox(vaultBox, 0, blockHeight)
+    // A flush closes a chain, so the pool it spends is normally the last execution's own output
+    val height = math.max(blockHeight, TxBuilder.newestInput(Seq(poolBox, vaultBox)))
     val poolOut = LithosDexTransactions.poolUTXO(ctx, p, p.reservesX, p.reservesY, 0L, 0L, p.supply,
-      p.provTokensLeft, p.accX, p.accY).setCreationHeight(blockHeight)
+      p.provTokensLeft, p.accX, p.accY).setCreationHeight(height)
     val vaultOut = LithosDexTransactions.vaultUTXO(ctx, v, Some(p.tokenY), v.balanceX + p.pendingX,
-      v.balanceY + p.pendingY, p.accX, p.accY).setCreationHeight(blockHeight)
+      v.balanceY + p.pendingY, p.accX, p.accY).setCreationHeight(height)
     val unsigned = TxBuilder(ctx)
       .setInputs(LithosDexTransactions.poolInput(poolBox, LDHelpers.POOL_FLUSH),
         LithosDexTransactions.vaultInput(vaultBox, LDHelpers.VAULT_FLUSH))

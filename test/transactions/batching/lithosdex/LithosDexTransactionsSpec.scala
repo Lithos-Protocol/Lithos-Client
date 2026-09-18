@@ -224,8 +224,10 @@ class LithosDexTransactionsSpec extends TestKit(ActorSystem("lithosdex-transacti
     (baseCtx, wallet) =>
       val ctx = contextAtHeight(baseCtx, refreshHeight)
       val owner = LithosDexSpecBase.ownerNFT
+      // Under the delegate's own tip as well as the refresh age: the change box is created at that
+      // tip, and no output may be created below an input.
       val provision = liveProvision(ctx, Shares, traded.accX, traded.accY,
-        owner, 0, createdHeight = Some(500000))
+        owner, 0, createdHeight = Some(100000))
       val funding = walletInput(ctx, wallet, Headroom, Seq.empty, 10)
 
       val built = buildFunded(Headroom, Seq.empty, funding) { _ =>

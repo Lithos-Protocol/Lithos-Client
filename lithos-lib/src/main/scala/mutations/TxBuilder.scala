@@ -78,27 +78,41 @@ class TxBuilder(ctx: BlockchainContext){
       }
     }
 
-    val uTx = uTxB
-      .addInputs(inputs.map(_.toFullInput):_*)
-      .addDataInputs(dataInputs.map(_.input):_*)
-      .addOutputs((outputsToUse ++ (if (fee > 0) Seq(UTXO.feeBox(fee)) else Seq.empty)).map(_.toOutBox(ctx)): _*)
-      .sendChangeTo(changeAddress)
+    // Consensus refuses an output created below the newest input, which a spend of an unconfirmed box
+    // built for a later block produces. An output with no height of its own takes that height instead
+    // of the tip, so chaining onto such a box needs no height passed down to every builder.
+    val newest = TxBuilder.newestInput(inputs)
+    val stamp = math.max(ctx.getHeight, newest)
+    val stamped = outputsToUse.map(out => if (out.creationHeight.isEmpty) out.setCreationHeight(stamp) else out)
+    val feeOut = if (fee > 0) Seq(UTXO.feeBox(fee).setCreationHeight(stamp)) else Seq.empty[UTXO]
 
+    // The builder creates change at the tip and takes no height for it. When an input sits above the
+    // tip, a probe build on a fresh builder finds that change, and it is planned here as outputs at
+    // `stamp`: the real build then balances exactly and adds no change of its own.
+    val change =
+      if (newest <= ctx.getHeight) Seq.empty[UTXO]
+      else complete(ctx.newTxBuilder(), stamped ++ feeOut, changeAddress, adjustedBurn)
+        .getOutputs.asScala.toVector.drop(stamped.size + feeOut.size)
+        .map(out => UTXO(Contract(out.getErgoTree), out.getValue, out.getTokens.asScala.toSeq.map(Token.ergo))
+          .setCreationHeight(stamp))
 
-    if(adjustedBurn.nonEmpty)
-      uTx.tokensToBurn(adjustedBurn.map(_.toErgo): _*)
-
-    val completed = uTx.build()
+    val completed = complete(uTxB, stamped ++ feeOut ++ change, changeAddress, adjustedBurn)
     val actual = completed.getOutputs.asScala.toVector
-    require(actual.size >= outputsToUse.size, "completed transaction omitted a planned output")
-    outputsToUse.zip(actual).foreach { case (planned, output) =>
+    require(actual.size >= stamped.size, "completed transaction omitted a planned output")
+    stamped.zip(actual).foreach { case (planned, output) =>
       val expected = planned.toOutBox(ctx)
       require(output.getValue == expected.getValue && output.getErgoTree == expected.getErgoTree &&
         output.getTokens == expected.getTokens && output.getRegisters == expected.getRegisters &&
         output.getCreationHeight == expected.getCreationHeight,
         "completed transaction changed a planned output or protocol position")
     }
-    val extra = actual.drop(outputsToUse.size)
+    // An output its builder pinned keeps that height, so one pinned below the newest input is refused
+    // here rather than by the node.
+    val lowest = actual.map(_.getCreationHeight).min
+    require(lowest >= newest,
+      s"an output is created at $lowest, below the newest input's $newest, which consensus refuses " +
+        s"(tip ${ctx.getHeight})")
+    val extra = actual.drop(stamped.size)
     val changeTree = changeAddress.toErgoContract.getErgoTree
     val feeTree = ErgoTreePredef.feeProposition(_root_.mutations.NodeWallet.MINER_REWARD_DELAY)
     require(extra.forall(o => o.getErgoTree == changeTree || (fee > 0 && o.getErgoTree == feeTree)),
@@ -109,10 +123,30 @@ class TxBuilder(ctx: BlockchainContext){
     completed
   }
 
+  /** One build on `builder`, which cannot be reused: it takes its change address and burn only once. */
+  private def complete(builder: UnsignedTransactionBuilder, planned: Seq[UTXO], changeAddress: Address,
+                       burn: Seq[Token]): UnsignedTransaction = {
+    val uTx = builder
+      .addInputs(inputs.map(_.toFullInput): _*)
+      .addDataInputs(dataInputs.map(_.input): _*)
+      .addOutputs(planned.map(_.toOutBox(ctx)): _*)
+      .sendChangeTo(changeAddress)
+    if (burn.nonEmpty)
+      uTx.tokensToBurn(burn.map(_.toErgo): _*)
+    uTx.build()
+  }
+
 }
 
 object TxBuilder {
   def apply(ctx: BlockchainContext): TxBuilder = {
     new TxBuilder(ctx)
   }
+
+  /**
+   * The newest creation height among `inputs`, and so the lowest height any output of a spend of them
+   * may carry. Zero when there are none.
+   */
+  def newestInput(inputs: Seq[InputUTXO]): Int =
+    inputs.foldLeft(0)((height, input) => math.max(height, input.input.getCreationHeight))
 }

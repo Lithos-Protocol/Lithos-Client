@@ -41,7 +41,8 @@ class MinerDataSpec extends AnyPropSpec with DictionarySpecBase {
                      signer: Contract = null,
                      logic: Contract = null,
                      startWithOne: Boolean = false,
-                     at: Int = -1): Change = {
+                     at: Int = -1,
+                     inputAge: Long = 900L): Change = {
     val height = if (at < 0) ctx.getHeight + 1 else at
     val prover = miner(ctx)
     val identity = contractOf(prover)
@@ -51,7 +52,7 @@ class MinerDataSpec extends AnyPropSpec with DictionarySpecBase {
     val older = (previous._1 - 5000, 90000L)
     val current = if (startWithOne) Seq(previous) else Seq(previous, older)
 
-    val box = dataUTXO(ctx, credentialId, minerHash, current, creationHeight = Some(height - 900))
+    val box = dataUTXO(ctx, credentialId, minerHash, current, creationHeight = Some((height - inputAge).toInt))
     val vars = Seq(
       bytesVar(0.toByte, (if (signer == null) identity else signer).valueBytes),
       opVar(1.toByte, op),
@@ -273,11 +274,12 @@ class MinerDataSpec extends AnyPropSpec with DictionarySpecBase {
   /**
    * The same bound MinerDictionary puts on the box it creates. A successor declaring an old creation
    * height is collectible sooner, which puts the credential in a box that is never guarded. Run at a
-   * high pinned HEIGHT, since the eviction delay exceeds the mocked context's own height.
+   * high pinned HEIGHT, since the eviction delay exceeds the mocked context's own height. The data box
+   * is aged to the bound: consensus already refuses a successor created below its input.
    */
   property("changeDiff: rejects a successor backdated past the collection gap (notCollectibleEarly)") {
     withCtx { ctx =>
-      val c = change(ctx, at = 2000000)
+      val c = change(ctx, at = 2000000, inputAge = evictDelay)
       rejectsAtSigning(c.prover, commit(c,
         out = c.out.setCreationHeight((c.height - evictDelay).toInt)))
     }
@@ -285,7 +287,7 @@ class MinerDataSpec extends AnyPropSpec with DictionarySpecBase {
 
   property("changeDiff: accepts a successor one block inside the bound (notCollectibleEarly)") {
     withCtx { ctx =>
-      val c = change(ctx, at = 2000000)
+      val c = change(ctx, at = 2000000, inputAge = evictDelay)
       accepts(c.prover, commit(c,
         out = c.out.setCreationHeight((c.height - evictDelay + 1L).toInt)))
     }

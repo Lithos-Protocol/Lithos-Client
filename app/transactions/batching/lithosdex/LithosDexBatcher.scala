@@ -201,14 +201,16 @@ class LithosDexBatcher(nodeContext: NodeContext,
         .filterNot(order => snapshot.spent.contains(order.boxId) || skipped.contains(order.boxId))
       val tip = if (open.isEmpty) None
       else currentSingleton(poolNft, poolTree).flatMap(BatchingMempool.poolTip(_, poolNft, spenders))
+
+      val height = ctx.getHeight
       val refusedNow = tip.toSeq.flatMap { tipBox =>
         val poolBox = tipBox.toInputUTXO(ctx)
         val provisions = provisionsFor(ctx, open, MempoolOptions.WithMempool)
         val run = LithosDexExecution.run(ctx, nodeContext.getNodeWallet, poolBox,
           open.filterNot(order => refused.get(order.boxId).contains(tipBox.boxId)), batching.maxOrdersPerBlock,
-          batching.broadcastMinRevenueNanoErg, provisions, ctx.getHeight + 1, batching.broadcastMinerFeeCeiling,
+          batching.broadcastMinRevenueNanoErg, provisions, height, batching.broadcastMinerFeeCeiling,
           useTrueProp = false, BroadcastBudget.fromNow, unbuildableLimits = Batcher.UnbuildableLimits(batching))
-        settle(run, ctx.getHeight + 1)
+        settle(run, height)
         run.chain.flatMap(chain => send(sender, chain, observed))
       }.toMap
       BroadcastResult(refusedNow, unconfirmed.map(_.boxId).toSet)
