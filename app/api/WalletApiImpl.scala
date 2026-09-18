@@ -67,6 +67,7 @@ class WalletApiImpl @Inject()(nodeContext: NodeContext,
         name = info.get(a.tokenId).map(_.name),
         decimals = info.get(a.tokenId).map(_.decimals),
         amount = a.amount.toString)),
-      collateral = collateral.getWalletStatus)
+      // TODO: Remove collateral fix when emissions is live
+      collateral = WalletCollateralStatus(false, 0, 0, 0, "", 0, 0, 0, 0, 0, Seq.empty, Seq.empty, CollateralRewardSummary(0, 0, "", "", None)))
   }
 }
