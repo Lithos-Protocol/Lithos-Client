@@ -1,13 +1,13 @@
-# Setting Up an Ergo Testnet Node for Lithos
+# Setting Up an Ergo Node for Lithos
 
-Lithos requires a fully synced Ergo Testnet node with mining enabled.  
+Lithos requires a fully synced and indexed Ergo node with mining enabled.  
 This document explains how to install, configure, and run the node on both Windows and Linux.
 
 ---
 
 ## 1. Overview
 
-Lithos relies on your local Ergo Testnet node to:
+Lithos relies on your local Ergo node to:
 
 - Sync the blockchain  
 - Sign transactions using the node wallet keystore  
@@ -20,7 +20,7 @@ The node must be running and fully synced before Lithos can operate.
 
 ## 2. Download the Ergo Testnet Node
 
-You can download the Ergo Testnet Jar from the releases page on the Ergo github.
+You can download the Ergo Jar from the releases page on the Ergo github.
 
 https://github.com/ergoplatform/ergo/releases
 
@@ -56,7 +56,7 @@ Inside the node directory, create `ergo.conf` with the following contents:
 
 ```hocon
 ergo { 
-  networkType = "testnet"
+  networkType = "testnet" # or "mainnet"
   node {
     useExternalMiner = true
     offlineGeneration = false
@@ -107,12 +107,16 @@ java -version
 If the version is not 11, install a JDK 11 distribution such as Temurin or Zulu.
 
 2. Start the node:
-
+For testnet:
 ```powershell
 cd C:\ergo-testnet
 java -jar ergo-testnet.jar --testnet -c ergo.conf
 ```
-
+For mainnet:
+```powershell
+cd C:\ergo
+java -jar ergo.jar --mainnet -c ergo.conf
+```
 Adjust the JAR filename if necessary.
 
 ---
@@ -128,15 +132,17 @@ sudo apt install openjdk-11-jdk -y
 
 2. Start the node:
 
+For testnet:
 ```bash
 cd /opt/ergo-testnet
 java -jar ./ergo-testnet.jar --testnet -c ergo.conf
 ```
-Example with testnet jar (For easy copy / pasta)
 
+For mainnet:
 ```bash
-cd /opt/ergo-testnet
-java -jar ergo-6.0.1-1-91aa8056-SNAPSHOT.jar --testnet -c ergo.conf
+cd /opt/ergo
+java -jar ./ergo.jar --mainnet -c ergo.conf
+```
 ---
 
 ## 6. Accessing the Node Panel and Swagger
@@ -146,6 +152,10 @@ Once the node is running, you can access:
 ### Node Panel (Web UI)
 ```
 http://127.0.0.1:9052/panel
+```
+Or for mainnet:
+```
+http://127.0.0.1:9053/panel
 ```
 
 ### Swagger API Explorer
