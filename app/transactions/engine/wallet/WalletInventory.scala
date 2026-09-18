@@ -5,6 +5,7 @@ import mutations.NodeWallet.MINER_REWARD_DELAY
 import node.MutationConversions._
 import node.model._
 import org.ergoplatform.appkit.BlockchainContext
+import org.slf4j.LoggerFactory
 import work.lithos.mutations.{InputUTXO, MainnetEip27Constants, Token, UTXO}
 
 /**
@@ -111,9 +112,10 @@ private[engine] class WalletInventory(node: NodeContext, api: _root_.node.NodeAp
         paging = paging.next
       }
     }
-    // Rewards first, deliberately: spending a matured coinbase is the only thing that moves that ERG
-    // to an address an ordinary wallet reports, so a request one can cover should take it.
-    if (!p2pkOnly && api.indexerEnabled) wallet.rewardTrees.keysIterator.foreach { tree =>
+    // TODO: Rework selection for rewards. For large amounts, selection of a single box can take up to 12 secs!!!
+    // Its changed to only happen on rewardSweeps for right now which affects both refreshes and normal inventory
+    // selection.
+    if (rewardsOnly && api.indexerEnabled) wallet.rewardTrees.keysIterator.foreach { tree =>
       if (!stop) pages(paging => api.unspentBoxesByErgoTree(tree, paging, SortDirection.Asc,
         MempoolOptions(includeUnconfirmed = false, excludeMempoolSpent = true)).get.map(_.box), reward = true)
     }
