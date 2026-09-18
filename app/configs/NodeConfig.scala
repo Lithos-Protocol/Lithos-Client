@@ -50,7 +50,7 @@ class NodeConfig(config: Configuration) extends NodeContext {
   }
 
 
-  private val ergoClient: ErgoClient = RestApiErgoClient.create(getNodeUrl, networkType, nodeKey, "https://api-testnet.ergoplatform.com")
+  private val ergoClient: ErgoClient = RestApiErgoClient.create(getNodeUrl, networkType, nodeKey, getExplorerURL)
 
 
   private val nodeApi: NodeApi = RestNodeApi(getNodeUrl, Some(nodeKey))

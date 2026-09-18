@@ -2,12 +2,15 @@
 Lithos Protocol is a decentralized mining pool protocol which uses smart contracts to evaluate miner's work and pay them
 accordingly. Lithos uses Non-Interactive Share Proofs (NISPs) to efficiently prove a miner's work.
 
+
 ## Requirements
 In order to run Lithos, you must have a working Ergo node. To mine on the Lithos pool, you may use any mining software which
  supports Ergo's Autolykos 2 algorithm. We recommend using [SOAT Miner](https://github.com/blindrun/soat-miner), as it is open-source
 with 0 dev fee and built-in Lithos support. Lithos releases require a working Java 11 installation.
 ## Instructions
-Before running the Lithos client, you will need a fully synced node.  For testnet purposes follow this guide to set-up a testnet node: [Testnet Node Tutorial](https://github.com/Lithos-Protocol/Lithos-Client/blob/master/TestnetNode.md)
+Before running the Lithos client, you will need a fully synced, indexed node.\
+For setting up a node, follow the node guide, which gives instructions for testnet and mainnet
+nodes: [Node Tutorial](https://github.com/Lithos-Protocol/Lithos-Client/blob/master/TestnetNode.md)
 
 To run the client, download a release `.zip` file. Unzip the file,
 and navigate to `lithos-client/bin`. Create a new file called `lithos.conf` and input the following
