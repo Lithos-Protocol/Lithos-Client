@@ -90,11 +90,11 @@ object LDHelpers {
   // TODO: replace with the real ids once the genesis transaction is built. Nothing derived from these
   // is meaningful until then — every contract address below changes when they do.
   private final val POOL_NFT_TESTNET  = ErgoId.create("feecf867f715dc6539401736a02bd7145648b4ebe70d23205165a38e792b32a1")
-  private final val POOL_NFT_MAINNET  = ErgoId.create("1111111111111111111111111111111111111111111111111111111111111111")
+  private final val POOL_NFT_MAINNET  = ErgoId.create("c0b21ac51481a5d242809d9b1e189a8baf3803fe347ca01833c1aeb380e6eb29")
   private final val VAULT_NFT_TESTNET = ErgoId.create("b4c6fa23e9e14c577fe4f776e769d737857bd0794b960e90cff36b3573fff026")
-  private final val VAULT_NFT_MAINNET = ErgoId.create("2222222222222222222222222222222222222222222222222222222222222222")
+  private final val VAULT_NFT_MAINNET = ErgoId.create("7f45bcbf13b9925c3eef35ff247ae46b80db2e2703ce2a8bfddf294e1e60c2d7")
   private final val PROV_TOKEN_TESTNET = ErgoId.create("a4fea435f759fcb5fecb052dba466c63553411640265ba0076b861be1337e43b")
-  private final val PROV_TOKEN_MAINNET = ErgoId.create("3333333333333333333333333333333333333333333333333333333333333333")
+  private final val PROV_TOKEN_MAINNET = ErgoId.create("b279187c993465c666cb17646fb87325dd7d03de6ac16dfac9c50eaea71f2fc6")
   // LIT token ids
   private final val TOKEN_Y_TESTNET   = LFSMHelpers.LIT_ID_TESTNET
   private final val TOKEN_Y_MAINNET   = LFSMHelpers.LIT_ID_MAINNET
@@ -123,10 +123,10 @@ object LDHelpers {
   final val GENESIS_HEIGHT: Int = 0
 
   /** Box id of the pool at genesis. */
-  final val POOL_GENESIS_ID: String = "0000000000000000000000000000000000000000000000000000000000000000"
+  final val POOL_GENESIS_ID: String = "2df755ca39515c06d76189d793566e69a791cb7efa423bff03f2553e029d42e7"
 
   /** Box id of the fee vault at genesis. */
-  final val VAULT_GENESIS_ID: String = "0000000000000000000000000000000000000000000000000000000000000000"
+  final val VAULT_GENESIS_ID: String = "a05635509490e11dbd871995a91d3a535c55dd3098a9c7350c4f9aa2bd95743e"
 
   /** LD_LiquidityPool / LD_FeeVault / LD_Provision CONST_POOL_NFT. */
   def getPoolNFT(networkType: NetworkType): ErgoId = mainnetOr(networkType, POOL_NFT_MAINNET, POOL_NFT_TESTNET)
