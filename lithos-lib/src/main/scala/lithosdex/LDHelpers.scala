@@ -89,12 +89,12 @@ object LDHelpers {
 
   // TODO: replace with the real ids once the genesis transaction is built. Nothing derived from these
   // is meaningful until then — every contract address below changes when they do.
-  private final val POOL_NFT_TESTNET  = ErgoId.create("cd2dcc9e9f52e759367b944ef9ce45368defbc080664355cb1e066bc7615d646")
-  private final val POOL_NFT_MAINNET  = ErgoId.create("1111111111111111111111111111111111111111111111111111111111111111")
-  private final val VAULT_NFT_TESTNET = ErgoId.create("b316df91aaf86358578ae4ff96cf5bc107ff483e6655d07becd3cb77cf36a90e")
-  private final val VAULT_NFT_MAINNET = ErgoId.create("2222222222222222222222222222222222222222222222222222222222222222")
-  private final val PROV_TOKEN_TESTNET = ErgoId.create("5d037e08799f3d79a8cf477f52c2c216451457da658cb3b39b556f5922e1ed23")
-  private final val PROV_TOKEN_MAINNET = ErgoId.create("3333333333333333333333333333333333333333333333333333333333333333")
+  private final val POOL_NFT_TESTNET  = ErgoId.create("c31440bc296b568b3a5a951ec43b59da7be97612cce4562f2a8022d131e4aff6")
+  private final val POOL_NFT_MAINNET  = ErgoId.create("c0b21ac51481a5d242809d9b1e189a8baf3803fe347ca01833c1aeb380e6eb29")
+  private final val VAULT_NFT_TESTNET = ErgoId.create("a608a3a285cb69925bf97669a6add00efdd606145c1508a21415e199e18fa04c")
+  private final val VAULT_NFT_MAINNET = ErgoId.create("7f45bcbf13b9925c3eef35ff247ae46b80db2e2703ce2a8bfddf294e1e60c2d7")
+  private final val PROV_TOKEN_TESTNET = ErgoId.create("22922f615c08823700c3908b9a39aca505c6e1a8e477b4be1e4793ec165d0f4a")
+  private final val PROV_TOKEN_MAINNET = ErgoId.create("b279187c993465c666cb17646fb87325dd7d03de6ac16dfac9c50eaea71f2fc6")
   // LIT token ids
   private final val TOKEN_Y_TESTNET   = LFSMHelpers.LIT_ID_TESTNET
   private final val TOKEN_Y_MAINNET   = LFSMHelpers.LIT_ID_MAINNET
@@ -123,10 +123,10 @@ object LDHelpers {
   final val GENESIS_HEIGHT: Int = 0
 
   /** Box id of the pool at genesis. */
-  final val POOL_GENESIS_ID: String = "0000000000000000000000000000000000000000000000000000000000000000"
+  final val POOL_GENESIS_ID: String = "2df755ca39515c06d76189d793566e69a791cb7efa423bff03f2553e029d42e7"
 
   /** Box id of the fee vault at genesis. */
-  final val VAULT_GENESIS_ID: String = "0000000000000000000000000000000000000000000000000000000000000000"
+  final val VAULT_GENESIS_ID: String = "a05635509490e11dbd871995a91d3a535c55dd3098a9c7350c4f9aa2bd95743e"
 
   /** LD_LiquidityPool / LD_FeeVault / LD_Provision CONST_POOL_NFT. */
   def getPoolNFT(networkType: NetworkType): ErgoId = mainnetOr(networkType, POOL_NFT_MAINNET, POOL_NFT_TESTNET)
