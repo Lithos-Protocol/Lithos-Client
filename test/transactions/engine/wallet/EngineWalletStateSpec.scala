@@ -8,6 +8,7 @@ import mutations.NodeWallet
 import mutations.NodeWallet.MINER_REWARD_DELAY
 import node.NodeApi
 import node.model._
+import node.MutationConversions._
 import org.mockito.ArgumentMatchers.{any, anyString}
 import org.mockito.Mockito.when
 import org.scalatest.BeforeAndAfterAll
@@ -40,7 +41,6 @@ object EngineWalletStateSpec {
   val config: com.typesafe.config.Config =
     com.typesafe.config.ConfigFactory.parseString("akka.test.single-expect-default = 20s").withFallback(com.typesafe.config.ConfigFactory.load())
 }
-// TODO: Tests are left failing for right now until rewards are fixed
 class EngineWalletStateSpec extends TestKit(ActorSystem("wallet-manager-spec", EngineWalletStateSpec.config))
   with AnyFlatSpecLike with Matchers with BeforeAndAfterAll with MockitoSugar {
 
@@ -454,11 +454,13 @@ class EngineWalletStateSpec extends TestKit(ActorSystem("wallet-manager-spec", E
     f.probe.expectMsgType[WalletInputs].inputs
   }
 
-  "The generic one-box request" should "still sweep a matured coinbase when it is the cheapest fit" in {
-    // Deliberate and unchanged: spending a coinbase here is the only thing that moves that ERG to an
-    // address an ordinary wallet can see.
+  "The generic one-box request" should "leave matured coinbases for maintenance" in {
     val f = fixture(w => Seq(walletBox(w, 5 * erg)), w => Seq(coinbase(w, 2 * erg)))
-    covering(f, erg).map(_.value) shouldEqual Seq(2 * erg)
+    covering(f, erg).map(_.value) shouldEqual Seq(5 * erg)
+    f.probe.send(f.mgr, GetSpendableBalance)
+    f.probe.expectMsgType[SpendableBalance].nanoErgs shouldBe 5 * erg
+    f.probe.send(f.mgr, GetUnlockedRewards)
+    f.probe.expectMsgType[RewardSummary].unlockedNanoErgs shouldBe 2 * erg
   }
 
   "The P2PK-only request" should "take the larger plain box over the cheaper coinbase" in {
@@ -476,9 +478,9 @@ class EngineWalletStateSpec extends TestKit(ActorSystem("wallet-manager-spec", E
     f.probe.send(f.mgr, SelectInputs(erg, trackUsed = true, reservationId = "refused-p2pk", single = true, p2pkOnly = true))
     f.probe.expectMsgType[WalletInputs].inputs shouldBe empty
 
-    withClue("nothing was reserved, so the generic request can still have it: ") {
-      covering(f, erg).map(_.value) shouldEqual Seq(3 * erg)
-    }
+    covering(f, erg) shouldBe empty
+    f.probe.send(f.mgr, GetUnlockedRewards)
+    f.probe.expectMsgType[RewardSummary].unlockedBoxes shouldBe 1
   }
 
   it should "answer empty once its deadline has passed" in {
@@ -509,13 +511,18 @@ class EngineWalletStateSpec extends TestKit(ActorSystem("wallet-manager-spec", E
     // against the wallet boxes alone, and coinbases live in a separate map — so every reserved
     // coinbase was declared spent on sight and released while its transaction was still in flight.
     val f = fixture(mkRewards = w => Seq(coinbase(w, 3 * erg)))
-    offered(f, erg, track = true).map(_.value) shouldEqual Seq(3 * erg)
+    val input = FakeNodeContext.offlineClient().execute(ctx => coinbase(f.wallet, 3 * erg).box.toInputUTXO(ctx))
+    f.probe.send(f.mgr, ReserveKnownInputs(Seq(input), "consolidation-reward", Long.MaxValue))
+    f.probe.expectMsgType[WalletInputs].inputs.map(_.value) shouldEqual Seq(3 * erg)
 
     f.mgr ! RefreshBoxes
     Thread.sleep(1200)
 
     withClue("still reported by the node, so still reserved: ") {
-      offered(f, erg) shouldBe empty
+      f.probe.send(f.mgr, GetOwnedInputIds)
+      f.probe.expectMsgType[Set[String]] should contain(input.id.toString)
+      f.probe.send(f.mgr, GetUnlockedRewards)
+      f.probe.expectMsgType[RewardSummary].unlockedBoxes shouldBe 0
     }
   }
 
@@ -546,7 +553,8 @@ class EngineWalletStateSpec extends TestKit(ActorSystem("wallet-manager-spec", E
     mgr ! RefreshBoxes
     Thread.sleep(1200)
 
-    probe.send(mgr, SelectInputs(erg, Seq.empty, trackUsed = true))
+    val input = ctx.getClient.execute(c => reward.box.toInputUTXO(c))
+    probe.send(mgr, ReserveKnownInputs(Seq(input), "consolidation-reward", Long.MaxValue))
     probe.expectMsgType[WalletInputs].inputs.map(_.value) shouldEqual Seq(3 * erg)
 
     failing.set(true)
@@ -560,9 +568,9 @@ class EngineWalletStateSpec extends TestKit(ActorSystem("wallet-manager-spec", E
     mgr ! RefreshBoxes
     Thread.sleep(1200)
 
-    probe.send(mgr, SelectInputs(erg, Seq.empty, trackUsed = false))
+    probe.send(mgr, GetOwnedInputIds)
     withClue("a lookup that failed says nothing about whether the box was spent: ") {
-      probe.expectMsgType[WalletInputs].inputs shouldBe empty
+      probe.expectMsgType[Set[String]] should contain(input.id.toString)
     }
   }
 
@@ -617,14 +625,12 @@ class EngineWalletStateSpec extends TestKit(ActorSystem("wallet-manager-spec", E
     }
   }
 
-  "A coinbase" should "be preferred when one covers the request outright" in {
-    // Spending them here is the only thing that returns that ERG to an address ordinary wallets can
-    // see, so a small fee should take the coinbase rather than a wallet box.
+  "A coinbase" should "be excluded even when one covers the request outright" in {
     val f = fixture(w => Seq(walletBox(w, erg)), w => Seq(coinbase(w, 3 * erg)))
-    offered(f, 1000L).map(_.value) shouldEqual Seq(3 * erg)
+    offered(f, 1000L).map(_.value) shouldEqual Seq(erg)
   }
 
-  it should "be taken alone, so the selection stays irredundant" in {
+  it should "leave an irredundant plain-wallet selection" in {
     val f = fixture(w => Seq(walletBox(w, erg)), w => Seq(coinbase(w, 3 * erg)))
     offered(f, 1000L) should have size 1
   }
@@ -668,6 +674,16 @@ class EngineWalletStateSpec extends TestKit(ActorSystem("wallet-manager-spec", E
     withClue(s"creationHeight + $MINER_REWARD_DELAY == chainHeight is still locked: ") {
       probe.expectMsgType[WalletInputs].inputs shouldBe empty
     }
+    probe.send(mgr, GetUnlockedRewards)
+    val locked = probe.expectMsgType[RewardSummary]
+    locked.lockedBoxes shouldBe 1
+    locked.unlockedBoxes shouldBe 0
+    locked.blocksUntilFirstUnlock shouldBe Some(1)
+    val input = ctx.getClient.execute(c => exactlyAtBoundary.box.toInputUTXO(c))
+    probe.send(mgr, ReserveKnownInputs(Seq(input), "locked-consolidation", Long.MaxValue))
+    probe.expectMsgType[WalletInputs].inputs shouldBe empty
+    probe.send(mgr, ClaimUnlockedRewards)
+    probe.expectMsgType[RewardsClaimed].chunks shouldBe empty
   }
 
   // ─── signable filter ──────────────────────────────────────────────────────

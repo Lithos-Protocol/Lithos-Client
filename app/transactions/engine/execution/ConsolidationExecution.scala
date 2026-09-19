@@ -101,15 +101,13 @@ object ConsolidationExecution {
    * Count the whole wallet but retain only the oldest input-budget worth of candidates, so a
    * fragmented wallet costs a bounded amount of memory rather than a sorted copy of itself.
    *
-   * Eligible means confirmed, on-chain, signable, register-free and unowned. Token boxes are
-   * included: emission pays LIT in amounts that leave dust behind, and those boxes are most of what
-   * a fragmented wallet accumulates. Registers still exclude a box, because they carry meaning this
-   * path would destroy.
+   * Eligible means confirmed, on-chain, signable and unowned. Mining rewards must also have passed
+   * their timelock. Token boxes are included, with their assets preserved by the output plan.
    */
   private[engine] def select(api: NodeApi, trees: Set[String], excluded: Set[String],
                              height: Int, target: Int, minInputs: Int = 2,
                              limits: configs.WalletConfig = configs.WalletConfig.Default,
-                             transactions: Int = 1): Selection = {
+                             transactions: Int = 1, rewardTrees: Set[String] = Set.empty): Selection = {
     require(target > 0, "consolidation target must be positive")
     require(minInputs >= 2, "consolidation needs at least two inputs to remove a box")
     require(transactions >= 1, "a pass builds at least one consolidation")
@@ -118,30 +116,46 @@ object ConsolidationExecution {
     var total, eligible = 0L
     var oldestExcluded = Option.empty[Int]
     var oldestEligible = Vector.empty[NodeBox]
-    var paging = Paging(0, limits.pageSize)
-    var exhausted = false
     val startedAt = System.nanoTime()
-    while (!exhausted) {
-      require(System.nanoTime() - startedAt < limits.inventoryTimeoutMs * 1000000L,
-        "consolidation inventory deadline exceeded")
-      val page = api.walletUnspentBoxes(ConfirmationRange.IncludeMempool, paging).get
-      require(page.size <= paging.limit, "oversized consolidation inventory page")
-      page.foreach { entry =>
-        val box = entry.box
-        total = Math.addExact(total, 1L)
-        val safe = entry.onchain && !entry.spent && entry.confirmationsNum.exists(_ > 0) &&
-          trees.contains(box.ergoTree) &&
-          !excluded.contains(box.boxId) && box.creationHeight <= height
-        if (safe) {
-          eligible = Math.addExact(eligible, 1L)
-          // Box id breaks height ties so the same wallet always yields the same selection.
-          oldestEligible = (oldestEligible :+ box)
-            .sortBy(candidate => (candidate.creationHeight, candidate.boxId))
-            .take(ceiling.toInt)
-        } else oldestExcluded = Some(oldestExcluded.fold(box.creationHeight)(math.min(_, box.creationHeight)))
+    val seenRewards = scala.collection.mutable.HashSet.empty[String]
+    def scan(fetch: Paging => Seq[WalletBox]): Unit = {
+      var paging = Paging(0, limits.pageSize)
+      var exhausted = false
+      while (!exhausted) {
+        require(System.nanoTime() - startedAt < limits.inventoryTimeoutMs * 1000000L,
+          "consolidation inventory deadline exceeded")
+        val page = fetch(paging)
+        require(page.size <= paging.limit, "oversized consolidation inventory page")
+        page.foreach { entry =>
+          val box = entry.box
+          val reward = rewardTrees.contains(box.ergoTree)
+          if (!reward || seenRewards.add(box.boxId)) {
+            total = Math.addExact(total, 1L)
+            val safe = entry.onchain && !entry.spent && entry.confirmationsNum.exists(_ > 0) &&
+              (trees.contains(box.ergoTree) || reward) &&
+              (!reward || height.toLong > box.creationHeight.toLong + mutations.NodeWallet.MINER_REWARD_DELAY) &&
+              !excluded.contains(box.boxId) && box.creationHeight <= height
+            if (safe) {
+              eligible = Math.addExact(eligible, 1L)
+              // Box id breaks height ties so the same wallet always yields the same selection.
+              oldestEligible = (oldestEligible :+ box)
+                .sortBy(candidate => (candidate.creationHeight, candidate.boxId))
+                .take(ceiling.toInt)
+            } else oldestExcluded = Some(oldestExcluded.fold(box.creationHeight)(math.min(_, box.creationHeight)))
+          }
+        }
+        exhausted = page.size < paging.limit
+        paging = paging.next
       }
-      exhausted = page.size < paging.limit
-      paging = paging.next
+    }
+    scan(paging => api.walletUnspentBoxes(ConfirmationRange.IncludeMempool, paging).get)
+    if (rewardTrees.nonEmpty && api.indexerEnabled) rewardTrees.foreach { tree =>
+      scan(paging => api.unspentBoxesByErgoTree(tree, paging, SortDirection.Asc,
+        MempoolOptions(includeUnconfirmed = false, excludeMempoolSpent = true)).get.map { entry =>
+        val box = entry.box
+        WalletBox(box, entry.address, Some(height - entry.inclusionHeight + 1), box.transactionId,
+          box.index, Some(entry.inclusionHeight), None, None, spent = false, onchain = true, Seq.empty)
+      })
     }
     // Merging n inputs into one output removes n - 1 boxes, so overshooting the target by one input
     // is what lands exactly on it.
@@ -164,7 +178,7 @@ object ConsolidationExecution {
 }
 
 /**
- * Optional wallet maintenance. It merges the oldest safe ERG-only boxes towards a configured total
+ * Optional wallet maintenance. It merges the oldest safe wallet boxes towards a configured total
  * UTXO count using the ordinary selection, signing, broadcast and reconciliation path, and never
  * runs while higher-priority work is queued.
  */
@@ -246,7 +260,7 @@ private[engine] class ConsolidationExecution(node: NodeContext, api: NodeApi, ow
     node.getClient.execute { ctx =>
       val plan = select(api, node.getNodeWallet.signableTrees,
         ownedInputIds ++ observed.snapshot.get.spent, ctx.getHeight, target, minInputs, limits,
-        transactions)
+        transactions, node.getNodeWallet.rewardTrees.keySet)
       require(alive(), "consolidation attempt expired")
       requireStillSpendable(plan.boxes.map(_.boxId))
       // Disjoint batches, each its own transaction. They are deliberately not chained: a rejection

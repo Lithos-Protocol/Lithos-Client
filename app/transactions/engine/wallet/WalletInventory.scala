@@ -10,8 +10,8 @@ import work.lithos.mutations.{InputUTXO, MainnetEip27Constants, Token, UTXO}
 
 /**
  * One wallet box as the engine retains it: identifiers and amounts only, no registers, hydrated
- * ErgoTree or AppKit object. `reward` marks a coinbase box, which is timelocked and is found by
- * ErgoTree because no wallet reports it.
+ * ErgoTree or AppKit object. `reward` marks a timelocked coinbase, including master-key rewards
+ * reported by the wallet API and derived-key rewards discovered through the indexer.
  */
 private[engine] case class WalletDescriptor(id: String, value: Long, creationHeight: Int,
                                             tree: String, tokens: Vector[Token], reward: Boolean) {
@@ -32,7 +32,7 @@ private[engine] object WalletInventory {
   /**
    * @param complete   the walk reached the end of every page
    * @param truncated  boxes were counted in the totals but dropped from `boxes` at a cache ceiling
-   * @param spendable  unreserved value, excluding timelocked rewards and EIP-27 obligations
+   * @param spendable  unreserved plain wallet value, excluding rewards and EIP-27 obligations
    */
   case class Snapshot(boxes: Vector[WalletDescriptor], complete: Boolean, truncated: Boolean,
                       height: Int, spendable: BigInt, locked: BigInt, unlocked: BigInt,
@@ -85,14 +85,16 @@ private[engine] class WalletInventory(node: NodeContext, api: _root_.node.NodeAp
     height.toLong > box.creationHeight.toLong + MINER_REWARD_DELAY
 
   /**
-   * Page through the wallet's boxes, offering each signable one to `consume`. Rewards come first and
-   * only when the node is indexed, since they sit at ErgoTrees no wallet endpoint reports.
+   * Page through signable boxes. Only maintenance scans query reward trees; ordinary funding
+   * filters wallet-reported coinbases without querying the indexer.
    * `consume` returns true to stop the walk, which is how selection avoids paging the whole wallet.
    */
-  private def walk(rewardsOnly: Boolean, p2pkOnly: Boolean, deadlineMillis: Long = Long.MaxValue)
+  private def walk(rewardsOnly: Boolean, p2pkOnly: Boolean, deadlineMillis: Long = Long.MaxValue,
+                   includeRewards: Boolean = false)
                   (consume: (NodeBox, Boolean) => Boolean): Unit = {
     val startedAt = System.nanoTime()
     var stop = false
+    val seenRewards = scala.collection.mutable.HashSet.empty[String]
     def pages(fetch: Paging => Seq[NodeBox], reward: Boolean): Unit = {
       var paging = Paging(0, PageSize)
       var exhausted = false
@@ -104,22 +106,20 @@ private[engine] class WalletInventory(node: NodeContext, api: _root_.node.NodeAp
         val boxes = page.iterator
         while (boxes.hasNext && !stop) {
           val box = boxes.next()
-          val signable = if (reward) wallet.rewardTrees.contains(box.ergoTree)
-            else wallet.signableTrees.contains(box.ergoTree)
-          if (signable) stop = consume(box, reward)
+          val isReward = wallet.rewardTrees.contains(box.ergoTree)
+          val signable = if (isReward) !p2pkOnly && (includeRewards || rewardsOnly)
+            else !reward && !rewardsOnly && wallet.signableTrees.contains(box.ergoTree)
+          if (signable && (!isReward || seenRewards.add(box.boxId))) stop = consume(box, isReward)
         }
         exhausted = page.size < PageSize
         paging = paging.next
       }
     }
-    // TODO: Rework selection for rewards. For large amounts, selection of a single box can take up to 12 secs!!!
-    // Its changed to only happen on rewardSweeps for right now which affects both refreshes and normal inventory
-    // selection.
-    if (rewardsOnly && api.indexerEnabled) wallet.rewardTrees.keysIterator.foreach { tree =>
+    if ((includeRewards || rewardsOnly) && !p2pkOnly && api.indexerEnabled) wallet.rewardTrees.keysIterator.foreach { tree =>
       if (!stop) pages(paging => api.unspentBoxesByErgoTree(tree, paging, SortDirection.Asc,
         MempoolOptions(includeUnconfirmed = false, excludeMempoolSpent = true)).get.map(_.box), reward = true)
     }
-    if (!rewardsOnly && !stop)
+    if (!stop)
       pages(paging => api.walletUnspentBoxes(ConfirmationRange.IncludeMempool, paging).get.map(_.box),
         reward = false)
   }
@@ -135,7 +135,7 @@ private[engine] class WalletInventory(node: NodeContext, api: _root_.node.NodeAp
     var spendable, locked, unlocked = BigInt(0)
     var lockedCount, unlockedCount = 0
     var nextUnlock = Option.empty[Int]
-    walk(rewardsOnly = false, p2pkOnly = false) { (box, reward) =>
+    walk(rewardsOnly = false, p2pkOnly = false, includeRewards = true) { (box, reward) =>
       val entry = descriptor(box, reward)
       if (boxes.size < MaxDescriptors && retainedBytes + entry.retainedBytes <= MaxDescriptorBytes) {
         boxes :+= entry
@@ -143,7 +143,7 @@ private[engine] class WalletInventory(node: NodeContext, api: _root_.node.NodeAp
       } else truncated = true
       if (!excluded.contains(box.boxId)) {
         val value = BigInt(spendableValue(box)).max(BigInt(0))
-        if (!reward || matured(box, height)) spendable += value
+        if (!reward) spendable += value
         if (reward && matured(box, height)) { unlocked += value; unlockedCount += 1 }
         else if (reward) {
           locked += value
@@ -223,7 +223,8 @@ private[engine] class WalletInventory(node: NodeContext, api: _root_.node.NodeAp
       covered
     }
 
-    known.iterator.takeWhile(_ => !covered).foreach(box => consume(box, reward = false))
+    known.iterator.filter(box => !rewardsOnly && wallet.signableTrees.contains(box.ergoTree))
+      .takeWhile(_ => !covered).foreach(box => consume(box, reward = false))
     if (!covered) walk(rewardsOnly, p2pkOnly, deadlineMillis)(consume)
     require(covered, "wallet cannot cover this request within the input budget")
 

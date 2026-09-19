@@ -42,12 +42,12 @@ object EngineWalletMessages {
   case object RefreshBoxes
 
   /**
-   * Request UTXOs covering `erg` nanoERG and `tokens`.
+   * Request plain wallet UTXOs covering `erg` nanoERG and `tokens`. Rewards are maintenance-only.
    *
    * @param trackUsed      reserve what is selected, so nothing else can be handed the same boxes
    *                       until they are seen spent, released, or the reservation ages out
    * @param single         one box must cover the whole request by itself, rather than a set
-   * @param p2pkOnly       draw only from plain P2PK wallet boxes, excluding matured mining rewards
+   * @param p2pkOnly       retained for callers explicitly requiring P2PK; all funding now requires it
    * @param deadlineMillis past this the request is answered empty rather than queued further
    */
   private[transactions] case class SelectInputs(erg: Long,
@@ -59,7 +59,8 @@ object EngineWalletMessages {
                                           p2pkOnly: Boolean = false)
 
   /**
-   * Reserve exact signable outputs whose parent transaction has been built but may not be visible to
+   * Reserve exact plain wallet outputs or matured rewards selected for consolidation.
+   * A parent transaction may have been built but may not be visible to
    * the node yet. This keeps intermediate change owned by its transaction chain across wallet
    * refreshes; unlike an ordinary selection, absence from a complete refresh is expected.
    */
@@ -118,8 +119,8 @@ object EngineWalletMessages {
                                  blocksUntilFirstUnlock: Option[Int])
 
   /**
-   * Ask how much ERG is selectable right now — unreserved wallet boxes plus matured reward boxes.
-   * A dry-run figure: nothing is reserved by asking.
+   * Ask for unreserved plain wallet value, net of EIP-27 obligations.
+   * Rewards must be claimed or consolidated before they can fund ordinary transactions.
    */
   case object GetSpendableBalance
 

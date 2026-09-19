@@ -99,7 +99,7 @@ class FraudProofFundingSpec extends TestKit(ActorSystem("fp-funding-spec", Fraud
     val probe = TestProbe()
     awaitAssert({
       probe.send(mgr, GetSpendableBalance)
-      probe.expectMsgType[SpendableBalance](1.second).nanoErgs shouldEqual walletErg + rewardErg
+      probe.expectMsgType[SpendableBalance](1.second).nanoErgs shouldEqual walletErg
     }, 15.seconds, 200.millis)
 
     selecting.set(true)
@@ -118,8 +118,7 @@ class FraudProofFundingSpec extends TestKit(ActorSystem("fp-funding-spec", Fraud
   }
 
   "A fraud proof's initial transaction" should "be funded from a plain P2PK box" in {
-    // The coinbase is the cheaper covering box, which is exactly what the generic single-box request
-    // is built to prefer.
+    // A cheaper coinbase must stay available for claiming or consolidation.
     val (handler, wallet) = handlerOver(walletErg = 5 * erg, rewardErg = 2 * erg)
     val inputs = handler.initialTxInputs(oneFee, isFPTx = true)
 
@@ -137,12 +136,7 @@ class FraudProofFundingSpec extends TestKit(ActorSystem("fp-funding-spec", Fraud
     // the same exception an uncoverable request has always raised, so the caller needs no new branch.
     val (handler, wallet) = handlerOver(walletErg = erg / 10, rewardErg = 5 * erg)
 
-    // The generic request first, on this same wallet. Its message says "P2PK" whatever went wrong,
-    // so a refusal alone cannot tell "only a reward covers this" from "this wallet is empty" — and
-    // an empty wallet is what an unfinished refresh looks like. Taking the coinbase here is what
-    // says the reward box is present and selectable at the moment the P2PK request is refused.
-    val generic = handler.initialTxInputs(oneFee, isFPTx = false)
-    wallet.rewardTrees.keys should contain(generic.maxBy(_.value).contract.ergoTreeHex)
+    intercept[NotEnoughInputsException](handler.initialTxInputs(oneFee, isFPTx = false))
 
     val refused = intercept[NotEnoughInputsException] {
       handler.initialTxInputs(oneFee, isFPTx = true)
@@ -150,13 +144,8 @@ class FraudProofFundingSpec extends TestKit(ActorSystem("fp-funding-spec", Fraud
     refused.getMessage should include("P2PK")
   }
 
-  "A non-fraud-proof initial transaction" should "still be free to sweep a coinbase" in {
-    // Unchanged on purpose: its outputs do not copy an input's proposition, and spending a coinbase
-    // is the only thing that moves that ERG somewhere an ordinary wallet can see.
+  "A non-fraud-proof initial transaction" should "also leave coinbases for maintenance" in {
     val (handler, wallet) = handlerOver(walletErg = erg / 10, rewardErg = 5 * erg)
-    val inputs = handler.initialTxInputs(oneFee, isFPTx = false)
-
-    inputs.map(_.value).sum should be >= (erg / 2)
-    wallet.rewardTrees.keys should contain(inputs.maxBy(_.value).contract.ergoTreeHex)
+    intercept[NotEnoughInputsException](handler.initialTxInputs(oneFee, isFPTx = false))
   }
 }
