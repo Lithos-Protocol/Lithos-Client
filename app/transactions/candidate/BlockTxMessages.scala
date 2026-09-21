@@ -3,7 +3,11 @@ package transactions.candidate
 /** Messages shared by the mining path and transaction sources when preparing candidate bundles. */
 object BlockTxMessages {
 
-  /** Signed transaction with input IDs, serialized bytes and execution cost. A carried ancestor's cost is 0 when the node did not report one. */
+  /**
+   * Signed transaction with input IDs, serialized bytes and execution cost. A carried ancestor's
+   * cost is 0 when the node did not report one. `leaf` is the digest a block's transaction tree
+   * carries for this transaction, which an inclusion proof is matched against.
+   */
   case class CandidateTx(id: String, json: String, kind: String, inputIds: Set[String] = Set.empty,
                         sizeBytes: Int = 0, cost: Long = 0L, leaf: String = "")
 
@@ -27,6 +31,7 @@ object BlockTxMessages {
   final case class Supersede(conflicting: Set[String]) extends MempoolInteraction
 
   object CandidateTx {
+    final val Genesis = "genesis"
     final val NispSubmission = "nisp-submission"
     final val FraudProof = "fraud-proof"
     final val HoldingTransform = "holding-transform"
@@ -44,7 +49,7 @@ object BlockTxMessages {
     def ancestor(body: _root_.node.model.NodeTransaction): CandidateTx = {
       val encoded = _root_.node.rest.NodeCodecs.encodeTransaction(body).toString
       CandidateTx(body.id, encoded, MempoolAncestor, body.inputs.map(_.boxId).toSet,
-        body.size.getOrElse(encoded.length), body.cost.getOrElse(0L))
+        body.size.getOrElse(encoded.length), body.cost.getOrElse(0L), body.id)
     }
   }
 

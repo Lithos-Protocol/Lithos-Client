@@ -36,10 +36,21 @@ import scala.util.{Failure, Random, Success, Try}
  * Receives EvaluationSet messages from RollupProcessor and evaluates
  * each NISPEvaluation stub in the set.
  */
-class RollupEvaluator @Inject()(config: Configuration, nodeContext: NodeContext,
-                                @Named("sync-handler") syncHandler: ActorRef,
-                                @Named("transaction-processor") txProcessor: ActorRef)
+class RollupEvaluator(config: Configuration, nodeContext: NodeContext,
+                       syncHandler: ActorRef, txProcessor: ActorRef, statsCollector: Option[ActorRef])
   extends Actor with InjectedActorSupport {
+  @Inject def this(config: Configuration, nodeContext: NodeContext,
+                    @Named("sync-handler") syncHandler: ActorRef,
+                    @Named("transaction-processor") txProcessor: ActorRef,
+                    @Named("stats-collector") statsCollector: ActorRef) =
+    this(config, nodeContext, syncHandler, txProcessor,
+      if (configs.StatsConfig(config).enabled) Some(statsCollector) else None)
+  def this(config: Configuration, nodeContext: NodeContext, syncHandler: ActorRef, txProcessor: ActorRef) =
+    this(config, nodeContext, syncHandler, txProcessor, None)
+
+  private val statistics = new stats.LocalMiningStats("fraud")
+  private var statsTicker: Option[Cancellable] = None
+  private case object PublishFraudStats
 
   implicit val timeout: Timeout = Timeout(30.seconds)
   implicit val ec: ExecutionContext = context.dispatcher
@@ -80,6 +91,10 @@ class RollupEvaluator @Inject()(config: Configuration, nodeContext: NodeContext,
   // ─── lifecycle ────────────────────────────────────────────────────────────
 
   override def preStart(): Unit = {
+    statsCollector.foreach { _ =>
+      statsTicker = Some(context.system.scheduler.scheduleWithFixedDelay(5.seconds, 5.seconds,
+        self, PublishFraudStats)(context.dispatcher))
+    }
     if (!stateConfig.disableTransforms.getOrElse(false)) {
       logger.info("RollupEvaluator starting - evaluating rollups every 4 minutes")
       ticker = Some(
@@ -90,9 +105,16 @@ class RollupEvaluator @Inject()(config: Configuration, nodeContext: NodeContext,
     }
   }
 
-  override def postStop(): Unit = ticker.foreach(_.cancel())
+  override def postStop(): Unit = {
+    ticker.foreach(_.cancel())
+    statsTicker.foreach(_.cancel())
+    statsCollector.foreach(_ ! statistics.snapshot(stopped = true))
+  }
 
   override def receive: Receive = {
+    case event: stats.FraudSubmissionObserved if statsCollector.isDefined => statistics.submitted(event)
+    case _: stats.FraudSubmissionObserved => ()
+    case PublishFraudStats => statsCollector.foreach(_ ! statistics.snapshot())
     case EvaluationSet(stubs) =>
       logger.info(s"Got ${stubs.size} stubs to evaluate")
       val stubsToAdd = stubs
@@ -174,6 +196,9 @@ class RollupEvaluator @Inject()(config: Configuration, nodeContext: NodeContext,
         }
       } else {
         val updatedStubs = fpMap.map(fpm => rollupTxStub.copy(fpInfo = Some(fpm._1 -> fpm._2))).toSeq
+        if (statsCollector.isDefined) fpMap.foreach { case (miner, proof) =>
+          statistics.found(rollupTxStub.rollupBlockId, Hex.toHexString(miner), proof)
+        }
 
         logger.info(s"Sent FraudBatch of ${updatedStubs.size} stubs to RollupProcessor" +
           s" for rollup ${rollupTxStub.rollupBlockId} ")

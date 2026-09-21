@@ -5,7 +5,7 @@ import akka.actor.{Actor, ActorRef, ActorSystem, Props}
 import akka.testkit.TestKit
 import api.models._
 import configs.NodeContext
-import lfsm.{CollateralParams, LFSMHelpers}
+import lfsm.{CollateralParams, LFSMHelpers, RollupProtocol}
 import node.NodeApi
 import node.model._
 import org.ergoplatform.appkit.{Address, BlockchainContext}
@@ -140,8 +140,8 @@ class CollateralMarketApiImplSpec
         Seq(Fx.indexed(Fx.emissionBox(ctx, lenderSet = lenderSet, head = head, tail = tail))),
       LFSMHelpers.EMCONFIG_NFT_MAINNET.toString -> Seq(Fx.indexed(Fx.configBox(ctx))))
 
-  private def quoteFor(f: Fixture, count: Int): CollateralJoinQuote =
-    f.api.checkJoin(CollateralJoinCheckRequest(Some(count)))
+  private def quoteFor(f: Fixture, count: Int, finderFee: Option[String] = None): CollateralJoinQuote =
+    f.api.checkJoin(CollateralJoinCheckRequest(Some(count), finderFee))
 
   /**
    * A proof of spend recent enough to still hold its key, against the MOCKED chain height.
@@ -277,6 +277,68 @@ class CollateralMarketApiImplSpec
       quote.lenderAddresses shouldEqual f.addresses.take(2).map(_.toString)
     }
     quote.permitsLit should have size 2
+  }
+
+  // ─── 3b. what a priority bid costs ────────────────────────────────────────
+
+  /**
+   * The lender pays the bid FIVE times over: once to the finder, four times into the pool, exactly
+   * as `Collateral_Enforcer.ergo` computes its Join floor. A quote that reported only the bid would
+   * understate what the wallet is about to spend, which is the number the send control is priced on.
+   */
+  "A quote with a priority bid" should "charge the bid and its four-fold pool premium" in {
+    val f = fixture(numAddresses = 4, boxes = (ctx, _) => baseBoxes(ctx))
+    val bid = 2000000L
+    val quote = quoteFor(f, 3, Some(bid.toString))
+
+    quote.finderFeeEachNanoErgs shouldBe bid.toString
+    quote.poolPremiumEachNanoErgs shouldBe (bid * CollateralParams.POOL_MULTIPLE).toString
+    quote.principalEachNanoErgs shouldBe (CollateralParams.PRINCIPAL_FLOOR + bid * 5).toString
+
+    withClue("the total is per-position principal plus fee, times the count: ") {
+      quote.totalNanoErgs shouldBe
+        (3L * (CollateralParams.PRINCIPAL_FLOOR + bid * 5 +
+          org.ergoplatform.appkit.Parameters.MinFee)).toString
+    }
+  }
+
+  it should "price an omitted bid exactly as the floor, unchanged" in {
+    val f = fixture(numAddresses = 4, boxes = (ctx, _) => baseBoxes(ctx))
+    val quote = quoteFor(f, 1)
+
+    quote.finderFeeEachNanoErgs shouldBe "0"
+    quote.poolPremiumEachNanoErgs shouldBe "0"
+    quote.principalEachNanoErgs shouldBe CollateralParams.PRINCIPAL_FLOOR.toString
+    withClue("with no bid the coinbase covers the principal and leaves the lender ahead: ") {
+      quote.netAtCoinbaseEachNanoErgs.toLong should be > 0L
+    }
+  }
+
+  /**
+   * Accepted on purpose, not by omission: past break-even the coinbase stops covering the principal,
+   * but the fees of the block the box is mined against still can. The quote has to say so with a
+   * negative net rather than refuse, which is what the panel's warning is driven from.
+   */
+  it should "accept a bid past break-even and report the shortfall as a negative net" in {
+    val f = fixture(numAddresses = 4, boxes = (ctx, _) => baseBoxes(ctx))
+    val over = RollupProtocol.breakEvenFinderFee + 1000000L
+    val quote = quoteFor(f, 1, Some(over.toString))
+
+    quote.breakEvenFinderFeeNanoErgs shouldBe RollupProtocol.breakEvenFinderFee.toString
+    quote.netAtCoinbaseEachNanoErgs.toLong shouldBe -5000000L
+    withClue("break-even itself leaves the lender exactly square: ") {
+      quoteFor(f, 1, Some(RollupProtocol.breakEvenFinderFee.toString))
+        .netAtCoinbaseEachNanoErgs shouldBe "0"
+    }
+  }
+
+  it should "refuse a bid that is not a non-negative integer" in {
+    val f = fixture(numAddresses = 2)
+    for (bad <- Seq("-1", "1.5", "abc", "99999999999999999999")) {
+      withClue(s"finderFeeEachNanoErgs '$bad': ") {
+        an[IllegalArgumentException] should be thrownBy quoteFor(f, 1, Some(bad))
+      }
+    }
   }
 
   // ─── 4. a join that cannot go ahead ───────────────────────────────────────

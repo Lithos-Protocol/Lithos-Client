@@ -71,6 +71,35 @@ object RollupProtocol {
     Math.multiplyExact(finderFee, CollateralParams.POOL_MULTIPLE)
   }
 
+  /** The fee channel a queue box posts to offer the finder `f`. This is the box's R4. */
+  def feeChannel(finderFee: Long): Long = {
+    require(finderFee >= 0L, s"a finder fee is never negative; found $finderFee")
+    Math.addExact(CollateralParams.DUST_BUDGET, finderFee)
+  }
+
+  /**
+   * The value a queue box must carry to offer the finder `f`, which is the enforcer's Join floor:
+   * `BLOCK_REWARD - FEE_CAP + feeChannel(f) + poolBonus(f)`, or `PRINCIPAL_FLOOR + 5f`.
+   */
+  def queuePrincipal(finderFee: Long): Long =
+    Math.addExact(CollateralParams.PRINCIPAL_FLOOR,
+      Math.addExact(finderFee, poolBonus(finderFee)))
+
+  /**
+   * The largest bid the coinbase alone repays. A lender posts `queuePrincipal(f)` and is paid the
+   * block reward, so `BLOCK_REWARD - queuePrincipal(f) >= 0` bounds `f` at
+   * `(FEE_CAP - DUST_BUDGET) / (1 + POOL_MULTIPLE)`.
+   *
+   * Not a contract rule — the enforcer accepts any non-negative fee. A lender bidding above this
+   * recovers the difference only from the transaction fees of the block they are mined against.
+   */
+  val breakEvenFinderFee: Long =
+    (CollateralParams.FEE_CAP - CollateralParams.DUST_BUDGET) / (1L + CollateralParams.POOL_MULTIPLE)
+
+  /** What the coinbase leaves the lender at this bid, before the mined block's own fees. Signed. */
+  def netAtCoinbase(finderFee: Long): Long =
+    Math.subtractExact(CollateralParams.BLOCK_REWARD, queuePrincipal(finderFee))
+
   /** The rollup's own NFT. Its id is the box id of the collateral box the rollup was created from. */
   def rollupNFT(tokens: Seq[Token]): Token = {
     val nft = tokens.lift(NFTIndex).getOrElse(

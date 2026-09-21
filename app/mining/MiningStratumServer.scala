@@ -85,7 +85,9 @@ class MiningStratumServer(system: ActorSystem,
                           diffRefreshInterval: Int,
                           candidateConfig: CandidateConfig = CandidateConfig.Default,
                           txSources: Seq[MiningMessages.CandidateSource] = Seq.empty,
-                          rotateExtraNonceInterval: Int = 0)
+                          rotateExtraNonceInterval: Int = 0,
+                          statsCollector: Option[ActorRef] = None,
+                          statsRefreshIntervalMs: Int = configs.StatsConfig.Default.refreshIntervalMs)
   extends StratumTcpServer {
 
   private val logger: Logger = LoggerFactory.getLogger("MiningStratumServer")
@@ -95,7 +97,7 @@ class MiningStratumServer(system: ActorSystem,
   val poolActor: ActorRef = system.actorOf(
     Props(new LithosPool(options, useCollateral, client, prover, apiKey,
       reducedShareMessages, nispDB, stateFrame, forceConfigDiff, diffRefreshInterval,
-      candidateConfig, txSources)),
+      candidateConfig, txSources, statsCollector, statsRefreshIntervalMs)),
     "mining-pool"
   )
 

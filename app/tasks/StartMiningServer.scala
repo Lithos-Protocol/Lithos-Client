@@ -36,7 +36,8 @@ class StartMiningServer @Inject()(system: ActorSystem, config: Configuration,
                                   @Named("transaction-processor") transactionProcessor: ActorRef,
                                   @Named("transaction-engine") emissionHandler: ActorRef,
                                   @Named("ergodex-batcher") ergoDexBatcher: ActorRef,
-                                  @Named("lithosdex-batcher") lithosDexBatcher: ActorRef) {
+                                  @Named("lithosdex-batcher") lithosDexBatcher: ActorRef,
+                                  @Named("stats-collector") statsCollector: ActorRef) {
 
   val logger: Logger = LoggerFactory.getLogger("StartMiningServer")
 
@@ -45,6 +46,7 @@ class StartMiningServer @Inject()(system: ActorSystem, config: Configuration,
   val nodeConfig: NodeConfig        = Globals.getNodeConfig
   val commitments                   = new CommitmentTransactions(nodeConfig, DataBoxSource.Stored)
   val contexts: Contexts            = new Contexts(system)
+  private val statsConfig = StatsConfig(config)
 
   if (taskConfig.enabled) {
     logger.info("Starting actor-based Mining Server")
@@ -125,7 +127,9 @@ class StartMiningServer @Inject()(system: ActorSystem, config: Configuration,
               configs.CandidateSourceConfig.Rollups, transactionProcessor),
             mining.MiningMessages.CandidateSource(
               configs.CandidateSourceConfig.Emissions, emissionHandler)) ++ rentSource ++ lithosDexSource ++ ergoDexSource,
-          rotateExtraNonceInterval = stratumParams.rotateExtraNonceInterval
+          rotateExtraNonceInterval = stratumParams.rotateExtraNonceInterval,
+          statsCollector = if (statsConfig.enabled) Some(statsCollector) else None,
+          statsRefreshIntervalMs = statsConfig.refreshIntervalMs
         )
 
         // ── shutdown hooks ───────────────────────────────────────────────────

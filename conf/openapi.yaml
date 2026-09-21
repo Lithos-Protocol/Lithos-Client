@@ -24,6 +24,20 @@ tags:
   - name: mining
     description: Information about the local stratum and mining process
     x-displayName: Mining
+  - name: stats
+    description: |
+      Mining, payment, collateral and client activity numbers for dashboards and graphs.
+      Collection runs in the background, so a request never makes the client scan the node.
+      Only `/stats/local` needs an `api_key`; the rest are open reads. Nothing here is cached.
+
+      Every response carries a `status`. Only `ready` means the numbers have caught up to the
+      chain tip — show anything else as loading or stale.
+
+
+      **All amounts and work totals are exact decimal strings, not JSON numbers.** ERG amounts
+      are nanoERG (1 ERG = 1,000,000,000); LIT amounts are base units (9 decimals); timestamps
+      are Unix milliseconds. History is kept for a configured number of days, not forever.
+    x-displayName: Statistics
   - name: collateral-market
     description: >
       Stats and participation for the collateral market: the queue, the active set, emission
@@ -65,6 +79,7 @@ x-tagGroups:
       - info
       - blocks
       - payments
+      - stats
       - collateral-market
       - lithosdex
       - wallet
@@ -248,7 +263,7 @@ paths:
         Get the confirmed miner proposition hashes for this pool block. This protected operation may
         materialize the rollup's authenticated dictionary.
       security:
-        - ApiKeyAuth: [api_key]
+        - ApiKeyAuth: []
       operationId: getBlockMinersById
       tags:
         - blocks
@@ -339,7 +354,7 @@ paths:
         is independent of the synchronization cache.
       summary: Get Lithos payouts
       security:
-        - ApiKeyAuth: [api_key]
+        - ApiKeyAuth: []
       operationId: getPayments
       tags:
         - payments
@@ -430,6 +445,171 @@ paths:
               schema:
                 $ref: '#/components/schemas/ApiError'
 
+  /stats:
+    get:
+      summary: Statistics overview
+      operationId: getStats
+      tags: [stats]
+      description: |
+        One snapshot of everything the collector tracks: the Stratum job being mined right now,
+        DEX and storage collection status, and a short summary of recent mining and payment history.
+
+        Each section carries its own `status` and observation time. The active job is the last
+        publication this client broadcast, which is not proof every worker received it. Payment
+        totals here are gross — reward plus refunded bond — so use `/stats/mining/totals` when
+        rewards and refunds have to be shown apart.
+      responses:
+        '200':
+          description: The current snapshot, or the last one with a stale status.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatsView'
+  /stats/mining/totals:
+    get:
+      summary: Mining and payment totals
+      operationId: getMiningTotals
+      tags: [stats]
+      description: |
+        Running totals over the retained history: Lithos blocks, payout rewards, bond refunds,
+        transaction fees, batching revenue, participation and confirmed fraud proofs. Keys under
+        `local.` belong to this client's primary mining address; `network.` keys cover the whole
+        configured protocol.
+
+        Label the period with the height and timestamp fields. Retention holds a rollback buffer
+        and can run behind on pruning, so the period is often longer than the configured number
+        of days. Only `ready` means collection reached the last checked chain tip — a loading or
+        disabled response can return an empty `totals` map, which is not evidence that nothing
+        happened. Reorgs and pruning can lower a total between two requests.
+      responses:
+        '200':
+          description: The last published totals, with collection status and coverage.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MiningTotalsResponse'
+  /stats/mining/buckets:
+    get:
+      summary: Mining statistics by hour or day
+      operationId: getMiningBuckets
+      tags: [stats]
+      description: |
+        The totals from `/stats/mining/totals` split into UTC hour or day buckets — the shape a
+        graph wants, for block counts, payments, fees, participation and difficulty. Buckets hold
+        exact sums and counts, so averages are yours to compute: `chain.difficultySum / chain.blocks`
+        for mean network difficulty, or `batching.lithosdex.grossNanoErg / batching.lithosdex.orders`
+        for the mean LithosDex executor fee. A zero denominator has no average.
+
+        `from` is inclusive, `until` is exclusive, both must sit on a boundary of the chosen
+        interval, and the range can cover at most 500 buckets. Buckets come oldest first, and a
+        missing one means nothing was retained for it. Past the reported coverage a gap means the
+        history is not available, not that nothing happened — check `partial`, `retainedFrom` and
+        `source.timestamp`, since the first and last bucket may also be incomplete.
+
+        The query reads collected history and never contacts the node. A busy or unavailable
+        history worker returns `503`; retry after the delay it gives.
+      parameters:
+        - $ref: '#/components/parameters/StatsFrom'
+        - $ref: '#/components/parameters/StatsUntil'
+        - $ref: '#/components/parameters/StatsInterval'
+      responses:
+        '200':
+          description: Graph data for the requested range, with source status and coverage.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MiningBucketHistory'
+        '400':
+          $ref: '#/components/responses/StatsInvalidRange'
+        '503':
+          $ref: '#/components/responses/StatsHistoryUnavailable'
+  /stats/mining/hashrate:
+    get:
+      summary: Estimate Lithos hashrate
+      operationId: getMiningHashrate
+      tags: [stats]
+      description: |
+        Estimates the hashrate behind Lithos blocks: the network difficulty of every confirmed block
+        carrying a configured Lithos genesis, added up and divided by the seconds covered. A chain
+        block counts once however many genesis transactions it holds. This measures the miners
+        producing those blocks — not this client's workers, and not all of Ergo. Claimed NISP scores
+        are never used.
+
+        Range and interval rules match `/stats/mining/buckets`. The returned `from` and `until` are
+        the period actually covered once clipped to retained history and the processed tip, and
+        `partial` says the request reached past it. With no work or no usable time the status is
+        `insufficient-data` and `hashesPerSecond` is left out rather than reported as zero; fewer
+        than 20 sampled blocks is `sparse`. Read both `status` and `sourceStatus` — sampling quality
+        and data freshness are different things.
+
+        `relativeSamplingError` is 1 / sqrt(sampleCount), which assumes blocks arrive as a Poisson
+        process. It is a rough relative error, not a confidence interval, and it says nothing about
+        whether miner participation held steady. Compare short or sparse windows carefully.
+      parameters:
+        - $ref: '#/components/parameters/StatsFrom'
+        - $ref: '#/components/parameters/StatsUntil'
+        - $ref: '#/components/parameters/StatsInterval'
+      responses:
+        '200':
+          description: An estimate, or an explicit insufficient-data result, with coverage and sample count.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LithosHashrateEstimate'
+        '400':
+          $ref: '#/components/responses/StatsInvalidRange'
+        '503':
+          $ref: '#/components/responses/StatsHistoryUnavailable'
+  /stats/collateral:
+    get:
+      summary: Collateral inventory
+      operationId: getCollateralStats
+      tags: [stats]
+      description: |
+        How many unspent boxes match the configured collateral script and token, and what they hold
+        in total. This is protocol-wide inventory — not this client's spendable balance, not mining
+        income, and no promise that the local miner can use any given box.
+
+        Each background read looks at up to 1,000 boxes; hitting that cap sets `partial` and reports
+        only what was scanned. Check `status` and `observedAt` before showing the numbers as current:
+        loading and disabled responses hold placeholders, and a failed refresh keeps the previous
+        inventory under an `unavailable` status. The request never refreshes the inventory itself.
+      responses:
+        '200':
+          description: The cached inventory, with freshness and completeness.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CollateralStats'
+  /stats/local:
+    get:
+      summary: Local mining activity
+      operationId: getLocalMiningStats
+      tags: [stats]
+      security:
+        - ApiKeyAuth: []
+      description: |
+        Cumulative counters from this client's own share validator, solution submitter and
+        fraud-proof evaluator — local activity and health, not chain facts. A producer is missing
+        until it publishes its first observation, and each carries its own freshness status,
+        session id and sequence number.
+
+        Counters restart whenever a producer starts a new session, so only compare observations
+        sharing a `session`. A missing or stopped producer is not zero activity, and reduced share
+        reporting drops work, so accepted share work is not a full local hashrate. Node-accepted
+        solutions and fraud transactions are submissions, not chain confirmations.
+
+        Fraud observations keep at most 100 recent targets. Once older ones are evicted
+        `deduplicationComplete` turns false, and a repeat target may then be counted twice.
+      responses:
+        '200':
+          description: The latest observation per producer; the map may be empty.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LocalMiningResponse'
+        '403':
+          $ref: '#/components/responses/StatsForbidden'
   /mining:
     get:
       description: Information about the Lithos stratum
@@ -456,7 +636,7 @@ paths:
       summary: Get best NISP at height
       operationId: getBestNISPAtHeight
       security:
-        - ApiKeyAuth: [api_key]
+        - ApiKeyAuth: []
       tags:
         - mining
       parameters:
@@ -575,7 +755,7 @@ paths:
         cancelling it confirms. Unconfirmed placements first, then newest first.
       operationId: listLDOrders
       security:
-        - ApiKeyAuth: [api_key]
+        - ApiKeyAuth: []
       tags:
         - lithosdex
       responses:
@@ -654,7 +834,7 @@ paths:
         otherwise. Cancel it with `POST /dex/orders/{boxId}/cancel`.
       operationId: placeLDSwapOrder
       security:
-        - ApiKeyAuth: [api_key]
+        - ApiKeyAuth: []
       tags:
         - lithosdex
       requestBody:
@@ -748,7 +928,7 @@ paths:
         fill sends the owner the new provision's `ownerNFT` and whatever the pool did not take.
       operationId: placeLDDepositOrder
       security:
-        - ApiKeyAuth: [api_key]
+        - ApiKeyAuth: []
       tags:
         - lithosdex
       requestBody:
@@ -855,7 +1035,7 @@ paths:
         fills. Until then the provision cannot be claimed, resized or redeemed directly.
       operationId: placeLDRedeemOrder
       security:
-        - ApiKeyAuth: [api_key]
+        - ApiKeyAuth: []
       tags:
         - lithosdex
       requestBody:
@@ -920,7 +1100,7 @@ paths:
         then dropped. No body.
       operationId: cancelLDOrder
       security:
-        - ApiKeyAuth: [api_key]
+        - ApiKeyAuth: []
       tags:
         - lithosdex
       parameters:
@@ -1065,7 +1245,7 @@ paths:
         instead of a re-quote. `POST /dex/orders/swap` places the same swap as an order.
       operationId: ldSwap
       security:
-        - ApiKeyAuth: [api_key]
+        - ApiKeyAuth: []
       tags:
         - lithosdex
       requestBody:
@@ -1162,7 +1342,7 @@ paths:
         owns the provision. `POST /dex/orders/deposit` places a deposit as an order.
       operationId: ldDeposit
       security:
-        - ApiKeyAuth: [api_key]
+        - ApiKeyAuth: []
       tags:
         - lithosdex
       requestBody:
@@ -1271,7 +1451,7 @@ paths:
         that. `POST /dex/orders/redeem` places a redemption as an order.
       operationId: ldRedeem
       security:
-        - ApiKeyAuth: [api_key]
+        - ApiKeyAuth: []
       tags:
         - lithosdex
       requestBody:
@@ -1364,7 +1544,7 @@ paths:
         — use `successorBoxId` from the response next. The body is optional.
       operationId: claimLDProvision
       security:
-        - ApiKeyAuth: [api_key]
+        - ApiKeyAuth: []
       tags:
         - lithosdex
       parameters:
@@ -1492,7 +1672,7 @@ paths:
         returned as `boxId`.
       operationId: ldResize
       security:
-        - ApiKeyAuth: [api_key]
+        - ApiKeyAuth: []
       tags:
         - lithosdex
       parameters:
@@ -1589,7 +1769,7 @@ paths:
         pays the caller nothing. Returns 400 when nothing is pending. The body is optional.
       operationId: ldFlush
       security:
-        - ApiKeyAuth: [api_key]
+        - ApiKeyAuth: []
       tags:
         - lithosdex
       requestBody:
@@ -1640,8 +1820,11 @@ paths:
     get:
       summary: Pool-wide fee history
       description: >
-        Cumulative fees taken by the pool, bucketed by height. The default bucket of 720 blocks is
-        roughly a day. Check `partial` — the series may not reach back to the pool's start.
+        Accumulator-derived pool fees from a background snapshot, bucketed by height. Defaults to
+        the cached last 21600 blocks (approximately 30 days), with 720-block buckets. Cumulative
+        values start at the requested window, not pool genesis, and retain accumulator integer
+        rounding. Check `partial` and `stats` for coverage and freshness. Stale data remains
+        available with `partial: true`; requests never perform node reads.
       operationId: getLDFeeHistory
       tags:
         - lithosdex
@@ -1649,21 +1832,21 @@ paths:
         - in: query
           name: from
           required: false
-          description: First block height to include
+          description: First block height to include; defaults to stats.windowStartHeight and cannot precede it.
           schema:
             type: integer
             format: int32
         - in: query
           name: to
           required: false
-          description: Last block height to include
+          description: Last block height to include; defaults to stats.sourceHeight and cannot exceed it.
           schema:
             type: integer
             format: int32
         - in: query
           name: bucket
           required: false
-          description: Bucket size in blocks
+          description: Positive bucket size in blocks, limited to at most 500 points.
           schema:
             type: integer
             format: int32
@@ -1676,17 +1859,17 @@ paths:
               schema:
                 $ref: '#/components/schemas/LDFeeHistory'
         '400':
-          description: No pool history indexed, or an invalid range or bucket size.
+          description: Invalid range or bucket size, or a range outside the cached height window.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiError'
         '503':
-          description: Node unavailable. Retry.
+          description: No cached snapshot; statistics are loading, unavailable, or disabled. Retry-After is 5 seconds.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ApiError'
+                $ref: '#/components/schemas/DexStatsUnavailable'
         default:
           description: Error
           content:
@@ -1698,8 +1881,11 @@ paths:
     get:
       summary: Pool price history
       description: >
-        Spot price over a range, for a chart. The series always ends at the current price, so it
-        agrees with `/dex/pool`. Check `partial` — it may not span the whole range.
+        Reserve-ratio price over a range from a background snapshot. The series ends at the live
+        pool price observed during the refresh, which may differ from a later `/dex/pool` request
+        and may include mempool state. Ranges use two-minute target block times. Check `partial`
+        and `stats` for coverage and freshness. Stale data remains available with `partial: true`;
+        requests never perform node reads.
       operationId: getLDPriceHistory
       tags:
         - lithosdex
@@ -1715,7 +1901,7 @@ paths:
         - in: query
           name: bucket
           required: false
-          description: Bucket size in blocks. Defaults to about 60 points across the range.
+          description: Positive bucket size in blocks. Defaults to about 60 buckets; at most 500 points including range boundaries.
           schema:
             type: integer
             format: int32
@@ -1732,18 +1918,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiError'
-        '404':
-          description: No pool box found on this network.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiError'
         '503':
-          description: Node unavailable. Retry.
+          description: No cached snapshot; statistics are loading, unavailable, or disabled. Retry-After is 5 seconds.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ApiError'
+                $ref: '#/components/schemas/DexStatsUnavailable'
         default:
           description: Error
           content:
@@ -1757,7 +1937,9 @@ paths:
       description: >
         Transactions that moved the pool, newest first, unconfirmed ones included: swaps, deposits,
         redemptions, resizes and flushes, each marked as an order fill or a direct spend. A `MEMPOOL`
-        entry can still be dropped or replaced.
+        entry can still be dropped or replaced. Served from a background snapshot of the bounded
+        30D history window. Check `stats` for freshness and history coverage; stale responses also
+        carry `partial: true`. Requests never perform node reads.
       operationId: getLDRecentActivity
       tags:
         - lithosdex
@@ -1784,11 +1966,11 @@ paths:
               schema:
                 $ref: '#/components/schemas/ApiError'
         '503':
-          description: Node or mempool unavailable. Retry.
+          description: No cached snapshot; statistics are loading, unavailable, or disabled. Retry-After is 5 seconds.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ApiError'
+                $ref: '#/components/schemas/DexStatsUnavailable'
         default:
           description: Error
           content:
@@ -1875,7 +2057,7 @@ paths:
   /wallet/balances:
     get:
       security:
-        - ApiKeyAuth: [api_key]
+        - ApiKeyAuth: []
       summary: Wallet balances and lending status
       description: >
         Spendable ERG, token balances, and — under `collateral` — lender keys, queued and live
@@ -2087,7 +2269,7 @@ paths:
     get:
       summary: Your locked block rewards
       security:
-        - ApiKeyAuth: [api_key]
+        - ApiKeyAuth: []
       description: >
         Coinbase reward boxes held by this wallet — how many are still behind the 720-block
         timelock, how many are spendable now, and the ERG totals.
@@ -2118,7 +2300,7 @@ paths:
     post:
       summary: Claim unlocked block rewards
       security:
-        - ApiKeyAuth: [api_key]
+        - ApiKeyAuth: []
       description: >
         Sweep every unlocked reward box to this wallet's primary address (EIP-3 index 0), batching
         boxes into as few transactions as possible. Dust is consolidated, never dropped.
@@ -2167,12 +2349,20 @@ paths:
   /collateral/join/check:
     post:
       security:
-        - ApiKeyAuth: [api_key]
+        - ApiKeyAuth: []
       summary: Quote joining the queue
       description: >
         What creating `count` positions costs right now: principal per position, network fee per
         join, and the permit for each. Permits escalate because each join lengthens the queue the
         next one is priced from.
+
+
+        `finderFeeEachNanoErgs` bids for priority. A miner picks whichever collateral box pays it
+        most, so a bid buys a place ahead of the boxes posting nothing. The contract charges four
+        times the bid into the pool as well, so raising it by `f` raises `principalEachNanoErgs`
+        by `5f`. Past `breakEvenFinderFeeNanoErgs` the 3 ERG coinbase no longer covers the
+        principal and `netAtCoinbaseEachNanoErgs` goes negative — the rest then has to come from
+        the transaction fees of the block the box is mined against.
 
 
         Also reports whether the join would be accepted: check `manualJoinAllowed` and
@@ -2216,13 +2406,18 @@ paths:
   /collateral/join:
     post:
       security:
-        - ApiKeyAuth: [api_key]
+        - ApiKeyAuth: []
       summary: Join the collateral queue
       description: >
         Post principal and permit for `count` new positions, each under its own lender key.
         Positions cannot be withdrawn once queued, so `acknowledgeNoWithdrawal` must be true.
         Send `expectedEmissionBoxId` from the quote to get a 409 instead of a join priced against
         stale state.
+
+
+        Send `finderFeeEachNanoErgs` as the quote was taken at, since it decides what each position
+        locks up. It is not capped at the quote's break-even: a higher bid is accepted, because the
+        mined block's own transaction fees can still cover it.
 
 
         **Refused with 409 while the client has `autoCollateralize` on.** The automated pass owns
@@ -2289,7 +2484,759 @@ paths:
                 $ref: '#/components/schemas/ApiError'
 
 components:
+  parameters:
+    StatsFrom:
+      name: from
+      in: query
+      required: true
+      description: Inclusive start in Unix milliseconds, on a UTC hour or day boundary to match `interval`.
+      schema:
+        type: integer
+        format: int64
+        minimum: 0
+      example: 1789948800000
+    StatsUntil:
+      name: until
+      in: query
+      required: true
+      description: Exclusive end in Unix milliseconds. On the same boundary, later than `from`, and at most 500 intervals after it.
+      schema:
+        type: integer
+        format: int64
+        minimum: 1
+      example: 1790035200000
+    StatsInterval:
+      name: interval
+      in: query
+      required: false
+      description: Bucket size. Both range boundaries must be a whole number of these since the Unix epoch.
+      schema:
+        type: string
+        enum: [hour, day]
+        default: hour
+  responses:
+    StatsForbidden:
+      description: The api_key header is missing or wrong.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+    StatsInvalidRange:
+      description: A timestamp is missing, malformed, off a bucket boundary, or the range is too long; or `interval` is not hour or day.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+    StatsHistoryUnavailable:
+      description: History is loading, disabled, busy, or unreadable. Check `mining.status` in /stats before retrying.
+      headers:
+        Retry-After:
+          description: Seconds to wait before retrying. Disabled collection has to be turned on before any history exists.
+          schema:
+            type: integer
+            example: 1
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
   schemas:
+    StatsInteger:
+      type: string
+      pattern: '^[0-9]+$'
+      description: An exact nonnegative integer as a decimal string. Parse it without going through a float.
+      example: '1000000000'
+    MiningCollectionStatus:
+      type: string
+      enum: [disabled, loading, ready, stale, unavailable, catching-up, recovering]
+      description: >-
+        How far collection has got. `ready` means it reached the last checked chain tip. `catching-up`
+        and `recovering` mean replay or reorg work is still running, `stale` means the last successful
+        check is too old, and `unavailable` means collection failed. On `disabled` or `loading` the
+        numbers are not evidence that the period was quiet.
+    MiningAccountingMetrics:
+      type: object
+      additionalProperties:
+        $ref: '#/components/schemas/StatsInteger'
+      description: |
+        Exact sums and counts for the period, as decimal strings. A missing key means nothing was
+        collected for it, which is not evidence that nothing happened outside the coverage. Amounts
+        ending in `NanoErg` are nanoERG and LIT amounts are base units. New keys get added over
+        time, so ignore ones you do not recognise.
+
+        | Key | Meaning |
+        | --- | --- |
+        | `chain.blocks`, `chain.difficultySum` | Ergo blocks processed, and the sum of their network difficulty. |
+        | `chain.transactionFeeNanoErg` | Miner-fee outputs from every transaction in those blocks. |
+        | `lithos.blocks`, `lithos.difficultySum` | Blocks carrying a configured Lithos genesis — counted once each — and their difficulty. |
+        | `lithos.transactionFeeNanoErg` | Miner-fee outputs from the transactions inside those Lithos blocks. |
+        | `local.payout.*` | Confirmed payouts to this client's primary mining address. |
+        | `network.payout.*` | Every payout seen for the configured protocol, local ones included. |
+        | `collateral.consumedNanoErg` | Collateral spent by genesis transactions. Not income. |
+        | `holding.genesisNanoErg` | Value placed in holding boxes at genesis. |
+        | `batching.<protocol>.*` | Executor fees earned filling `ergodex` or `lithosdex` orders. |
+        | `lithos.batching.<protocol>.*` | The same, counting only blocks that carried a Lithos genesis. |
+        | `rollup.<kind>.*` | Confirmed rollup transitions: `topUp`, `submission`, `evaluation`, `fraudProof`, `payoutReady`. |
+        | `transaction.<kind>.count`, `.feeNanoErg` | Recognised transactions and the fees they paid. |
+        | `registration.<kind>.count`, `.localCount` | Miner Dictionary `add`, `remove` and `evict` events. |
+
+        **Payout families** hold `outputs`, `grossNanoErg`, `rewardNanoErg`, `bondNanoErg`,
+        `surplusNanoErg`, `rewardLit` and `receivedLit`. Gross ERG is reward plus refunded bond plus
+        any surplus. `rewardLit` is what the protocol owes; `receivedLit` is what the outputs actually
+        carried. Network totals already contain the local ones — never add the two together.
+
+        **Batching families** hold `orders`, `grossNanoErg`, `transactionFeeNanoErg` and
+        `afterTransactionFeesNanoErg`, counting recognised execution layouts only, not all pool
+        activity. Gross is newly earned executor fees and excludes takings carried in from earlier.
+        Liquidity-provider fees are a different thing and live on the DEX API.
+
+        **Rollup families** hold `count`, `miners`, `claimedScore`, `bondNanoErg` and `valueNanoErg`,
+        plus `localCount` and `localValueNanoErg` where the local miner is identifiable — the
+        submitting miner for submissions, the prover input for fraud proofs. `miners` counts entries
+        at that transition, not unique people. `valueNanoErg` means a different thing per kind:
+        added holding value for a top-up, zero for a submission, the full box value at evaluation,
+        the slashed bond for a fraud proof, and distributable ERG excluding bonds at payout readiness.
+        These are stages of the same funds, so summing them is not income.
+
+        `transaction.<kind>` covers `genesis`, the rollup kinds above, `payout`, `registration`,
+        `ergodex`, `lithosdex`, `ergodexOtherPoolSpend` and `lithosdexOtherPoolSpend`. Those fees
+        overlap the block fee totals.
+
+        Divide a sum by its matching count for an average. `claimedScore` is protocol accounting,
+        not measured hashrate. A transaction fee is a transaction's cost and not automatically this
+        client's expense, holding top-ups and executor fees can describe the same proceeds, and no
+        key here is a net-income figure.
+      example:
+        chain.blocks: '720'
+        lithos.blocks: '12'
+        local.payout.outputs: '3'
+        local.payout.rewardNanoErg: '1500000000'
+        local.payout.bondNanoErg: '3000000'
+        batching.lithosdex.orders: '20'
+        batching.lithosdex.grossNanoErg: '40000000'
+    MiningTotalsResponse:
+      type: object
+      required: [status, persistent, totals]
+      properties:
+        status:
+          $ref: '#/components/schemas/MiningCollectionStatus'
+        persistent:
+          type: boolean
+          description: Whether history survives a client restart.
+        observedAt:
+          type: integer
+          format: int64
+          description: When the last replay cycle started, in Unix milliseconds. Absent until the first check after a restart.
+        sourceHeight:
+          type: integer
+          description: Last processed height, or the starting anchor if nothing has been collected yet.
+        sourceBlockId:
+          type: string
+          description: The block id at `sourceHeight`.
+        targetHeight:
+          type: integer
+          description: Last checked chain height. Collection can lag behind it.
+        fromHeight:
+          type: integer
+          description: First retained height. Higher than `sourceHeight` means the history is empty.
+        fromTimestamp:
+          type: integer
+          format: int64
+          description: Timestamp of the first retained block, in Unix milliseconds. Absent when there are no block records.
+        totals:
+          $ref: '#/components/schemas/MiningAccountingMetrics'
+    MiningCursor:
+      type: object
+      required: [height, blockId, parentId, timestamp]
+      description: The processed chain point a statistics result was read from.
+      properties:
+        height:
+          type: integer
+        blockId:
+          type: string
+        parentId:
+          type: string
+        timestamp:
+          type: integer
+          format: int64
+          description: The block's own timestamp in Unix milliseconds, not the time the client read it.
+    MiningBucket:
+      type: object
+      required: [start, widthMs, totals]
+      properties:
+        start:
+          type: integer
+          format: int64
+          description: Inclusive UTC bucket start in Unix milliseconds.
+        widthMs:
+          type: integer
+          format: int64
+          enum: [3600000, 86400000]
+          description: Bucket duration in milliseconds.
+        totals:
+          $ref: '#/components/schemas/MiningAccountingMetrics'
+    MiningBucketHistory:
+      type: object
+      required: [source, from, until, widthMs, buckets, partial, status]
+      properties:
+        source:
+          $ref: '#/components/schemas/MiningCursor'
+        retainedFrom:
+          type: integer
+          format: int64
+          description: Timestamp of the block before the first retained one. Absent when no block records remain.
+        from:
+          type: integer
+          format: int64
+          description: The inclusive start you asked for, in Unix milliseconds.
+        until:
+          type: integer
+          format: int64
+          description: The exclusive end you asked for, in Unix milliseconds.
+        widthMs:
+          type: integer
+          format: int64
+          enum: [3600000, 86400000]
+        buckets:
+          type: array
+          maxItems: 500
+          description: Buckets with retained activity, oldest first. Use the coverage fields to tell a gap in history from a quiet hour.
+          items:
+            $ref: '#/components/schemas/MiningBucket'
+        partial:
+          type: boolean
+          description: True when retained coverage does not span the whole requested range, including when the history is empty.
+        status:
+          $ref: '#/components/schemas/MiningCollectionStatus'
+    LithosHashrateEstimate:
+      type: object
+      required: [status, sourceStatus, source, from, until, sampleCount, difficultySum, partial, population, formula]
+      properties:
+        status:
+          type: string
+          enum: [insufficient-data, sparse, estimated]
+          description: Sampling quality, separate from source freshness. `sparse` means fewer than 20 sampled blocks.
+        sourceStatus:
+          $ref: '#/components/schemas/MiningCollectionStatus'
+        source:
+          $ref: '#/components/schemas/MiningCursor'
+        from:
+          type: integer
+          format: int64
+          description: Start of the covered period in Unix milliseconds, clipped to retained history.
+        until:
+          type: integer
+          format: int64
+          description: End of the covered period in Unix milliseconds, clipped to the processed tip. Equals `from` when no usable time is left.
+        sampleCount:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Distinct chain blocks in the selected buckets that carried a configured Lithos genesis.
+        difficultySum:
+          $ref: '#/components/schemas/StatsInteger'
+        hashesPerSecond:
+          type: string
+          description: The estimate, as a decimal string. Left out rather than reported as zero when there is not enough data.
+        relativeSamplingError:
+          type: number
+          format: double
+          description: Rough relative standard error, 1 / sqrt(sampleCount). 0.2 means about 20%. Omitted with zero samples.
+        partial:
+          type: boolean
+          description: Whether the requested range reaches past retained coverage.
+        population:
+          type: string
+          enum: [miners-producing-configured-lithos-genesis]
+        formula:
+          type: string
+          enum: [sum-confirmed-lithos-block-difficulty/covered-seconds]
+    CollateralStats:
+      type: object
+      required: [status, boxes, nanoErg, partial]
+      properties:
+        status:
+          type: string
+          enum: [loading, disabled, ready, stale, unavailable]
+          description: Freshness of the inventory. Only `ready` is current as of the last successful check.
+        observedAt:
+          type: integer
+          format: int64
+          description: When the inventory was read, in Unix milliseconds. Absent before the first successful read.
+        source:
+          $ref: '#/components/schemas/MiningCursor'
+        boxes:
+          type: integer
+          minimum: 0
+          maximum: 1000
+          description: Unspent collateral boxes seen. A partial result counts only what was scanned.
+        nanoErg:
+          type: string
+          pattern: '^[0-9]+$'
+          description: Exact total nanoERG in those boxes. Not a wallet balance and not mining income.
+        partial:
+          type: boolean
+          description: True when the scan hit its cap, or no complete observation exists yet.
+        error:
+          type: string
+          description: Short failure summary. Details stay in the client log.
+    LocalMiningResponse:
+      type: object
+      required: [enabled, producers]
+      properties:
+        enabled:
+          type: boolean
+          description: Whether statistics collection is on at all. Local observations do not need persisted mining history.
+        producers:
+          type: object
+          description: The latest observation per producer. A missing key means that producer has not reported.
+          additionalProperties: false
+          properties:
+            shares:
+              $ref: '#/components/schemas/LocalMiningActivityView'
+            solutions:
+              $ref: '#/components/schemas/LocalMiningActivityView'
+            fraud:
+              $ref: '#/components/schemas/LocalMiningActivityView'
+    LocalMiningActivityView:
+      type: object
+      required: [status, observation, deduplicationComplete]
+      properties:
+        status:
+          type: string
+          enum: [ready, stale, stopped]
+          description: Freshness of this producer's latest observation. `stopped` is its final snapshot.
+        observation:
+          $ref: '#/components/schemas/LocalMiningObservation'
+        deduplicationComplete:
+          type: boolean
+          description: False once fraud targets have been evicted, after which a repeat discovery or submission may be counted twice.
+    LocalMiningObservation:
+      type: object
+      required: [kind, session, sequence, startedAt, observedAt, counters, fraud, stopped]
+      properties:
+        kind:
+          type: string
+          enum: [shares, solutions, fraud]
+        session:
+          type: string
+          description: Session id. A new one means the counters reset.
+        sequence:
+          type: integer
+          format: int64
+          description: Snapshot number within the session. It only increases, but can skip values.
+        startedAt:
+          type: integer
+          format: int64
+          description: When the session started, in Unix milliseconds.
+        observedAt:
+          type: integer
+          format: int64
+          description: Snapshot time in Unix milliseconds.
+        counters:
+          type: object
+          additionalProperties:
+            $ref: '#/components/schemas/StatsInteger'
+          description: |
+            Cumulative counters for this session, as exact decimal strings. A missing counter means
+            nothing of that kind was seen in the session.
+
+            **shares** — `accepted`, `acceptedAssignedWork`, `blockCandidates`, `superShares`,
+            `acceptedWithReducedReporting`, and a `rejected<code>` per rejection code seen.
+            Assigned work adds up each accepted share's validation threshold; it is not a hashrate,
+            and it undercounts while reporting is reduced. Candidates and super shares overlap and
+            are both subsets of `accepted`.
+
+            **solutions** — `nodeAccepted` and `nodeRejectedOrFailed`.
+
+            **fraud** — `discoveriesWithinSession`, `nodeAcceptedProofsWithinSession` and
+            `discoveryEvictions`.
+
+            Accepted means the node took the submission, not that the chain confirmed it.
+        fraud:
+          type: array
+          maxItems: 100
+          description: Recent fraud targets, capped at 100. Always empty for the share and solution producers.
+          items:
+            $ref: '#/components/schemas/FraudObservation'
+        stopped:
+          type: boolean
+          description: Whether this is the producer's last observation before it stopped.
+    FraudObservation:
+      type: object
+      required: [rollupBlockId, minerHash, proofContractHash, observedAt]
+      properties:
+        rollupBlockId:
+          type: string
+          description: The Lithos block whose rollup holds the target miner entry.
+        minerHash:
+          type: string
+          description: Hash identifying the target miner entry. Not a miner address.
+        proofContractHash:
+          type: string
+          description: Hash of the compiled proof contract. Encoded differently from the proof value recorded on chain.
+        observedAt:
+          type: integer
+          format: int64
+          description: When the target was discovered, or last submitted, in Unix milliseconds.
+        transactionId:
+          type: string
+          description: The fraud transaction the node accepted, if one was seen. Not proof of chain confirmation.
+    StatsView:
+      type: object
+      required: [enabled, local, dex, storage, mining]
+      properties:
+        enabled:
+          type: boolean
+        local:
+          type: object
+          required: [stratum]
+          properties:
+            stratum:
+              $ref: '#/components/schemas/StratumStatsView'
+        dex:
+          $ref: '#/components/schemas/DexStatsView'
+        storage:
+          $ref: '#/components/schemas/StatsStorageView'
+        mining:
+          $ref: '#/components/schemas/MiningStatsView'
+    MiningStatsView:
+      type: object
+      required: [status, persistent, totals, blocks, payments, difficulty, totalsScope, blockScope, paymentScope, paymentAmountScope]
+      description: >-
+        A summary of canonical mining history, held in memory. Counts cover retained history, not
+        everything that ever happened. Only `ready` has caught up to the checked chain tip; other
+        statuses can hold older or partial data. A reorg removes the displaced contributions before
+        the status goes back to `ready`.
+      properties:
+        status:
+          type: string
+          enum: [disabled, loading, ready, stale, unavailable, catching-up, recovering]
+        observedAt:
+          type: integer
+          format: int64
+          description: When the last replay cycle started, in Unix milliseconds. Absent after a disk restore with no replay yet.
+        persistent:
+          type: boolean
+          description: False when storage is off, in which case history lives only in process memory.
+        sourceHeight:
+          type: integer
+          description: Last processed height, or the starting anchor if nothing has been collected yet.
+        sourceBlockId:
+          type: string
+        targetHeight:
+          type: integer
+          description: Last checked chain height. It can run ahead of what is indexed and readable.
+        fromHeight:
+          type: integer
+          description: First retained height. Higher than `sourceHeight` while the history is empty.
+        fromTimestamp:
+          type: integer
+          format: int64
+          description: Timestamp of the first retained block. Retention keeps a 256-block rollback buffer.
+        recentFromHeight:
+          type: integer
+          description: The recent lists below cover the latest 120 retained chain blocks, capped at 50 records each.
+        totalsScope:
+          type: string
+          enum: [retained-history]
+        blockScope:
+          type: string
+          enum: [configured-protocol]
+          description: Genesis transactions under this client's configured protocol contracts.
+        paymentScope:
+          type: string
+          enum: [primary-mining-address]
+        paymentAmountScope:
+          type: string
+          enum: [gross-output-including-bond-refund]
+          description: Payout amounts are gross — reward plus refunded bond plus any surplus. Not net earnings.
+        totals:
+          $ref: '#/components/schemas/MiningTotals'
+        blocks:
+          type: array
+          maxItems: 50
+          description: Recent Lithos genesis records, newest first.
+          items:
+            $ref: '#/components/schemas/LithosBlockRecord'
+        payments:
+          type: array
+          maxItems: 50
+          description: Recent confirmed payouts to this client, newest first. Wallet change and empty-tree drains are left out.
+          items:
+            $ref: '#/components/schemas/MiningPaymentRecord'
+        difficulty:
+          type: array
+          maxItems: 120
+          description: Ergo network difficulty samples, oldest first. Not a hashrate estimate.
+          items:
+            $ref: '#/components/schemas/MiningDifficultyPoint'
+        error:
+          type: string
+          description: Short failure message. Details stay in the client log.
+    MiningTotals:
+      type: object
+      required: [blocks, payments, grossPaidNanoErg]
+      properties:
+        blocks:
+          type: integer
+          format: int64
+          description: Distinct chain blocks in retained history that carried a Lithos genesis transaction.
+        payments:
+          type: integer
+          format: int64
+          description: Payout outputs to the primary mining address in retained history.
+        grossPaidNanoErg:
+          type: string
+          description: Exact decimal integer. Includes bond refunds and any surplus, so it is not net earnings.
+    LithosBlockRecord:
+      type: object
+      required: [blockId, height, timestamp, transactionId, holdingBoxId, collateralBoxId, collateralNanoErg, initialHoldingNanoErg]
+      properties:
+        blockId:
+          type: string
+        height:
+          type: integer
+        timestamp:
+          type: integer
+          format: int64
+        transactionId:
+          type: string
+        holdingBoxId:
+          type: string
+        collateralBoxId:
+          type: string
+        collateralNanoErg:
+          type: string
+          description: Exact value of the collateral box that was spent.
+        initialHoldingNanoErg:
+          type: string
+          description: Exact value of genesis output zero, before any top-ups. Not the block's final revenue.
+    MiningPaymentRecord:
+      type: object
+      required: [transactionId, outputId, payoutBoxId, rollupNft, minedBlockId, minedHeight, blockId, height, timestamp, grossNanoErg]
+      properties:
+        transactionId:
+          type: string
+        outputId:
+          type: string
+        payoutBoxId:
+          type: string
+        rollupNft:
+          type: string
+          description: NFT minted from the original collateral box id.
+        minedBlockId:
+          type: string
+          description: The block holding the rollup genesis, even when that block is older than retained history.
+        minedHeight:
+          type: integer
+        blockId:
+          type: string
+          description: The block holding this payout transaction.
+        height:
+          type: integer
+        timestamp:
+          type: integer
+          format: int64
+        grossNanoErg:
+          type: string
+          description: Exact output value, including the refunded bond and any surplus.
+    MiningDifficultyPoint:
+      type: object
+      required: [height, timestamp, difficulty]
+      properties:
+        height:
+          type: integer
+        timestamp:
+          type: integer
+          format: int64
+        difficulty:
+          type: string
+          description: Network difficulty from the Ergo header, as an exact decimal integer.
+    StatsStorageView:
+      type: object
+      required: [status, busy, pending, coalescedSnapshots]
+      description: Whether DEX snapshots are being saved. Mining history reports its own storage failures through `mining.status`.
+      properties:
+        status:
+          type: string
+          enum: [disabled, loading, ready, error]
+        busy:
+          type: boolean
+          description: A write is running. No second writer starts until it finishes.
+        pending:
+          type: boolean
+          description: One newer snapshot is queued behind the running write.
+        lastSavedObservationAt:
+          type: integer
+          format: int64
+          description: Observation time of the last snapshot saved or restored, in Unix milliseconds.
+        lastPrunedAt:
+          type: integer
+          format: int64
+          description: Last successful pruning pass, in Unix milliseconds. A backlog can remain after one.
+        coalescedSnapshots:
+          type: integer
+          format: int64
+          description: Queued snapshots dropped in favour of a newer one since the client started.
+        error:
+          type: string
+          description: Short storage failure message. Details stay in the client log.
+    DexStatsView:
+      type: object
+      required: [status, refreshing, restored]
+      properties:
+        status:
+          type: string
+          enum: [disabled, loading, ready, stale, unavailable]
+          description: Freshness only. Coverage is a separate question — read `historyComplete` and a graph's `partial`.
+        updatedAt:
+          type: integer
+          format: int64
+          description: When the last successful refresh began, in Unix milliseconds, before it read the node.
+        sourceHeight:
+          type: integer
+          format: int32
+        sourceBlockId:
+          type: string
+          description: The chain tip checked before and after the read. Current price and activity can also include the mempool.
+        windowStartHeight:
+          type: integer
+          format: int32
+          description: Earliest height you can ask for, max(0, `sourceHeight` - 21600).
+        coverageStartHeight:
+          type: integer
+          format: int32
+          description: Oldest retained pool snapshot, including a predecessor where one exists.
+        historyComplete:
+          type: boolean
+          description: Whether the history read reached the start of the index, or a predecessor, before the requested window.
+        refreshing:
+          type: boolean
+        restored:
+          type: boolean
+          description: Loaded from disk. Stale until a node read succeeds, and never overwrites newer live data.
+        error:
+          type: string
+          description: Short refresh failure message. Details stay in the client log.
+    DexStatsUnavailable:
+      allOf:
+        - $ref: '#/components/schemas/ApiError'
+        - type: object
+          required: [stats]
+          properties:
+            stats:
+              $ref: '#/components/schemas/DexStatsView'
+    StratumStatsView:
+      type: object
+      required: [status, connectedConnections]
+      properties:
+        status:
+          type: string
+          enum: [disabled, waiting, active, stale, stopped]
+          description: A stale snapshot can still show its last job. That job is not known to be live.
+        observedAt:
+          type: integer
+          format: int64
+          description: When the producer last reported, in Unix milliseconds. Periodic refreshes count.
+        connectedConnections:
+          type: integer
+          description: Open Stratum connections, not unique miners.
+        activeJob:
+          $ref: '#/components/schemas/ActiveStratumJob'
+    ActiveStratumJob:
+      type: object
+      required: [jobId, height, parentId, workMessage, publicationId, publishedAt, mode]
+      properties:
+        jobId:
+          type: string
+        height:
+          type: integer
+        parentId:
+          type: string
+        workMessage:
+          type: string
+          description: Hex-encoded work message identifying the candidate.
+        publicationId:
+          type: string
+          format: uuid
+        publishedAt:
+          type: integer
+          format: int64
+          description: When the job was published, in Unix milliseconds. Periodic observations do not move it.
+        mode:
+          type: string
+          enum: [solo, genesis, augmented]
+        blockPackage:
+          $ref: '#/components/schemas/BlockPackageView'
+    BlockPackageView:
+      type: object
+      description: >
+        The transactions this client put into the job being served. The node can add mempool
+        transactions on top that the client cannot see, so this is not the whole block. Expected
+        revenue is what the package proposes to earn, not confirmed income, and the totals cover
+        only the transactions whose size and cost are known — the rest report null.
+      required: [genesisId, collateralBoxId, revision, expectedRevenueNanoErg, sources,
+                 lateSources, transactions, transactionScope, knownSizeBytes, knownCost,
+                 allSizesKnown, allCostsKnown]
+      properties:
+        genesisId:
+          type: string
+        collateralBoxId:
+          type: string
+        revision:
+          type: integer
+        expectedRevenueNanoErg:
+          type: string
+          description: nanoERG as a decimal string.
+        sources:
+          type: array
+          description: Names of the subsystems that got at least one transaction into this package.
+          items:
+            type: string
+        lateSources:
+          type: array
+          description: Subsystems that missed the collection deadline, so nothing of theirs is in this package.
+          items:
+            type: string
+        transactions:
+          type: array
+          description: The genesis first, then the client's additions in order.
+          items:
+            $ref: '#/components/schemas/PackageTransactionView'
+        transactionScope:
+          type: string
+          enum: [client-supplied]
+        knownSizeBytes:
+          type: string
+        knownCost:
+          type: string
+        allSizesKnown:
+          type: boolean
+        allCostsKnown:
+          type: boolean
+    PackageTransactionView:
+      type: object
+      required: [id, kind, sizeBytes, cost, proofLeafMatched]
+      properties:
+        id:
+          type: string
+        kind:
+          type: string
+        sizeBytes:
+          type: integer
+          nullable: true
+        cost:
+          type: string
+          nullable: true
+          description: Execution cost as a decimal string, when it is known.
+        proofLeafMatched:
+          type: boolean
+          description: >
+            Whether this transaction's leaf matched one the node returned. It is a
+            correspondence check, not full Merkle-proof validation. False on an ordinary
+            member only means the match is unproven, not that the node dropped the
+            transaction. False on the genesis or the holding top-up drops the package's
+            extras, since everything else hangs off those two.
     ApiError:
       description: Error response from API
       type: object
@@ -2489,7 +3436,8 @@ components:
           description: Whether the stratum server has the `reduceShareMessages` setting enabled
           example: false
         superSharesPerHour:
-          type: double
+          type: number
+          format: double
           description: Number of super shares produced by the mining client within the last hour
           example: 2.5
     CollateralMarketInfo:
@@ -3000,7 +3948,7 @@ components:
           $ref: '#/components/schemas/CollateralRewardSummary'
 
     CollateralJoinCheckRequest:
-      description: How many positions to price. Omitted fields default.
+      description: How many positions to price, and what each bids for priority. Omitted fields default.
       type: object
       x-tags: collateral-market
       properties:
@@ -3012,6 +3960,14 @@ components:
           minimum: 1
           maximum: 25
           example: 3
+        finderFeeEachNanoErgs:
+          type: string
+          pattern: '^[0-9]+$'
+          description: >-
+            nanoERG each position bids to the miner that spends its collateral box. Omitted or '0'
+            posts at the floor and bids nothing. The contract charges 4x this into the pool as well.
+          default: '0'
+          example: '5000000'
 
     CollateralJoinQuote:
       description: What creating `count` positions costs right now
@@ -3020,6 +3976,10 @@ components:
       required:
         - count
         - principalEachNanoErgs
+        - finderFeeEachNanoErgs
+        - poolPremiumEachNanoErgs
+        - breakEvenFinderFeeNanoErgs
+        - netAtCoinbaseEachNanoErgs
         - txFeeEachNanoErgs
         - permitsLit
         - permitTotalLit
@@ -3040,8 +4000,32 @@ components:
           example: 3
         principalEachNanoErgs:
           type: string
-          description: Fixed by contract, identical for every position. Decimal string.
-          example: '2915000000'
+          description: >-
+            What one position locks up: the 2915000000 floor plus the bid and its pool premium.
+            Identical for every position in the quote. Decimal string.
+          example: '2940000000'
+        finderFeeEachNanoErgs:
+          type: string
+          description: The bid this quote was priced at, echoed back. Decimal string.
+          example: '5000000'
+        poolPremiumEachNanoErgs:
+          type: string
+          description: >-
+            What the contract charges into the pool alongside the bid, always 4x it. Included in
+            principalEachNanoErgs. Decimal string.
+          example: '20000000'
+        breakEvenFinderFeeNanoErgs:
+          type: string
+          description: >-
+            The largest bid the 3 ERG coinbase repays on its own. Fixed at 17000000. A bid above it
+            is accepted; the difference then has to come from the mined block's transaction fees.
+          example: '17000000'
+        netAtCoinbaseEachNanoErgs:
+          type: string
+          description: >-
+            Block reward minus principal, per position, before the mined block's own fees.
+            **Signed** — negative above breakEvenFinderFeeNanoErgs. Decimal string.
+          example: '60000000'
         txFeeEachNanoErgs:
           type: string
           description: Network fee per join transaction. Decimal string.
@@ -3156,6 +4140,15 @@ components:
           type: string
           description: Emission box the quote was made against
           example: '88c297f99da7172f6aa20efbead69aa40e2b7734a1873d66ca1db6b19d214db6'
+        finderFeeEachNanoErgs:
+          type: string
+          pattern: '^[0-9]+$'
+          description: >-
+            The bid, as the quote was taken at. Omitted or '0' posts at the floor. Not capped at the
+            quote's break-even — a higher bid is accepted and can still be repaid by the mined
+            block's transaction fees. Decimal string.
+          default: '0'
+          example: '5000000'
 
     CollateralJoinEntry:
       description: One join transaction that was sent
@@ -3189,8 +4182,12 @@ components:
           example: '3WwbQFz3vgi8ChY9dM1haQLGDeQYe5U9z98bwWW4TqxxEAvyYu5y'
         principalNanoErgs:
           type: string
-          description: Decimal string.
-          example: '2915000000'
+          description: What this position locked up, bid and pool premium included. Decimal string.
+          example: '2940000000'
+        finderFeeNanoErgs:
+          type: string
+          description: The bid this position posted. '0' when it posted at the floor. Decimal string.
+          example: '5000000'
         permitLit:
           type: string
           description: Decimal string.
@@ -4818,9 +5815,11 @@ components:
         partial:
           type: boolean
           description: >
-            True when the series does not reach back to the pool's start. The points returned are
-            still exact.
+            True when the history scan could not cover the requested window or the snapshot is stale.
+            Values are derived from accumulator differences with integer rounding, not payment receipts.
           example: false
+        stats:
+          $ref: '#/components/schemas/DexStatsView'
 
     LDProvisionFeeHistory:
       description: Bucketed fee history for a single provision
@@ -4899,12 +5898,14 @@ components:
           example: 0.018
         partial:
           type: boolean
-          description: True when the series does not span the whole range.
+          description: True when the series does not span the whole range or the snapshot is stale.
           example: false
         history:
           type: array
           items:
             $ref: '#/components/schemas/LDPricePoint'
+        stats:
+          $ref: '#/components/schemas/DexStatsView'
 
     LDActivityEntry:
       description: >
@@ -4996,6 +5997,11 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/LDActivityEntry'
+        stats:
+          $ref: '#/components/schemas/DexStatsView'
+        partial:
+          type: boolean
+          description: Present and true for stale snapshots; inspect stats.historyComplete for history coverage.
 
     WalletToken:
       description: A token balance held by the wallet

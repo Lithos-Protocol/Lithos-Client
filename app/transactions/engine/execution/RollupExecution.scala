@@ -39,7 +39,8 @@ class RollupExecution(nodeContext: NodeContext, walletManager: ActorRef, syncHan
                       mempoolView: ActorRef, config: Configuration, dataBoxes: DataBoxSource,
                       rollupNodeApi: node.NodeApi, alive: () => Boolean,
                       worker: ExecutionContext,
-                      discardStubs: (String, String) => Unit = (_, _) => ())(implicit ec: ExecutionContext) {
+                      discardStubs: (String, String) => Unit = (_, _) => (),
+                      fraudSubmitted: (RollupTxStub, String) => Unit = (_, _) => ())(implicit ec: ExecutionContext) {
   private implicit val timeout: Timeout = Timeout(30.seconds)
   private val criticalFunding = EngineFunding(walletManager, EngineFunding.askTimeout(config), ec, critical = true)
   private val optionalFunding = EngineFunding(walletManager, EngineFunding.askTimeout(config), ec)
@@ -586,6 +587,7 @@ class RollupExecution(nodeContext: NodeContext, walletManager: ActorRef, syncHan
             latestState.inputUTXO.id.toString)
           logger.info(s"Sent transaction ${txId} to submit fraud proof for miner ${Hex.toHexString(stub.fpInfo.get._1)}" +
             s" for rollup ${stub.rollupBlockId}")
+          fraudSubmitted(stub, txId)
           txId
       }
     }
@@ -768,9 +770,13 @@ object RollupExecution {
   /**
    * The merkle leaf a block's transaction tree would carry for this transaction, which is how an
    * inclusion proof is matched back to what was requested.
+   *
+   * A block's transaction tree is built over transaction ids, not over the signed bytes: the id is
+   * the hash of the message to sign, so hashing the serialized form — proofs included — would
+   * produce a digest no returned proof can ever carry.
    */
   private[transactions] def signedLeaf(sTx: SignedTransaction): String =
-    Hex.toHexString(scorex.crypto.hash.Blake2b256(signedBytes(sTx)))
+    sTx.getId.replace("\"", "")
 
   private def signedBytes(sTx: SignedTransaction): Array[Byte] =
     org.ergoplatform.ErgoLikeTransactionSerializer.toBytes(

@@ -42,7 +42,8 @@ class LithosDexOrdersControllerSpec
     "1000000", ergIn = Some(true), amountIn = Some("1000000000"), minOutput = Some("29974258"), fillableNow = true)
 
   private def controller(api: LithosDexApi) =
-    new LithosDexApiController(Helpers.stubControllerComponents(), api, config, new FakeCache, TestProbe().ref, system)
+    new LithosDexApiController(Helpers.stubControllerComponents(), api, config, new FakeCache, TestProbe().ref, system,
+      new stats.StatsCache(configs.StatsConfig.Default))
 
   private def keyed[A](request: FakeRequest[A]) = request.withHeaders("api_key" -> apiKey)
 

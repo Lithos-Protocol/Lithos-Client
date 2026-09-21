@@ -37,6 +37,12 @@ import play.api.{ConfigLoader, Configuration}
  * @param maxPermitPerJoin      The most LIT, in base units, to post as a permit on one box. The
  *                              permit rises with the backlog, so this is the price at which this miner
  *                              stops queueing rather than a fee.
+ * @param priorityFeeNanoErgs   What each automatically created position bids for priority, in nanoERG,
+ *                              paid to whichever miner spends the resulting collateral box. The
+ *                              enforcer charges its pool premium alongside, so a bid of `f` puts up
+ *                              `2.915 ERG + 5f` instead of the floor. 0 posts at the floor. Above
+ *                              `RollupProtocol.breakEvenFinderFee` the coinbase no longer repays the
+ *                              principal and the difference has to come from the mined block's fees.
  */
 case class EmissionConfig(enabled: Boolean,
                           queueInterval: Int,
@@ -50,7 +56,8 @@ case class EmissionConfig(enabled: Boolean,
                           maxJoinsPerRun: Int,
                           maxOwnCollateral: Int,
                           maxLenderKeys: Int,
-                          maxPermitPerJoin: Long)
+                          maxPermitPerJoin: Long,
+                          priorityFeeNanoErgs: Long)
 
 object EmissionConfig {
 
@@ -71,7 +78,9 @@ object EmissionConfig {
     // last index receive permit returns and coinbases that nothing can spend.
     maxLenderKeys = 32,
     // The thermostat's own ceiling, so the default never blocks a join on price alone.
-    maxPermitPerJoin = LFSMHelpers.PERMIT_CEIL
+    maxPermitPerJoin = LFSMHelpers.PERMIT_CEIL,
+    // Post at the floor. Bidding is opt-in: it raises what every position locks up.
+    priorityFeeNanoErgs = 0L
   )
 
   def apply(config: Configuration): EmissionConfig = {
@@ -97,7 +106,8 @@ object EmissionConfig {
       maxJoinsPerRun = int("maxJoinsPerRun", Default.maxJoinsPerRun),
       maxOwnCollateral = int("maxOwnCollateral", Default.maxOwnCollateral),
       maxLenderKeys = int("maxLenderKeys", Default.maxLenderKeys),
-      maxPermitPerJoin = long("maxPermitPerJoin", Default.maxPermitPerJoin)
+      maxPermitPerJoin = long("maxPermitPerJoin", Default.maxPermitPerJoin),
+      priorityFeeNanoErgs = long("priorityFeeNanoErgs", Default.priorityFeeNanoErgs)
     )
   }
 }

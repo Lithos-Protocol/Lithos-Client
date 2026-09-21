@@ -501,15 +501,7 @@ class DexAPIExecution(nodeContext: NodeContext, walletSelector: EngineFunding,
     val (snapshots, complete) = lineage(nodeApi, ctx)
     val (lo, hi, size) = range(snapshots, from, to, bucket)
 
-    // A swap advances an accumulator by its fee over the supply live to earn it, so running that
-    // backwards over each step recovers the fee exactly: delta * supply / SCALE, with the supply from
-    // BEFORE the step, since a swap never changes it.
-    val cumulative = runningTotals(snapshots, lo, hi) { (prev, next) =>
-      (feeFromAccumulator(next.accX - prev.accX, prev.supply),
-        feeFromAccumulator(next.accY - prev.accY, prev.supply))
-    }
-
-    LDFeeHistory(bucketed(nodeApi, cumulative, lo, hi, size), partial = !complete)
+    api.DexHistory.fees(snapshots, complete, lo, hi, size, heights => LDBoxes.timestampsAt(nodeApi, heights))
   }
 
   /** @inheritdoc */
@@ -623,10 +615,6 @@ class DexAPIExecution(nodeContext: NodeContext, walletSelector: EngineFunding,
     }
   }
 
-  /** Invert one step of the pool's accumulator: `delta * supply / SCALE` is the fee that moved it. */
-  private def feeFromAccumulator(delta: BigInt, supply: Long): Long =
-    if (delta <= 0 || supply <= 0) 0L else (delta * BigInt(supply) / LDHelpers.SCALE).toLong
-
   /**
    * How much of one accumulator step a provision was actually present for.
    *
@@ -648,83 +636,18 @@ class DexAPIExecution(nodeContext: NodeContext, walletSelector: EngineFunding,
   override def getPriceHistory(range: Option[String],
                                bucket: Option[Int],
                                ldCache: LDCache): LDPriceHistory = withDex { (ctx, nodeApi) =>
-    val name = range.map(_.trim.toUpperCase).getOrElse(LDPriceHistory.Default)
-    val blocks = LDPriceHistory.Ranges.getOrElse(name, throw LithosBadRequest(
-      s"'range' must be one of ${LDPriceHistory.Ranges.keys.toSeq.sorted.mkString(", ")}, got '$name'"))
-    val size = bucket.getOrElse(math.max(1, blocks / LDPriceHistory.TargetPoints))
-    if (size <= 0) throw LithosBadRequest(s"'bucket' must be positive, got $size")
-    // A bucket small enough to make thousands of points is refused rather than served. Nothing
-    // renders that many, only the first 250 could carry a timestamp, and the response would be
-    // megabytes — the caller asked for something specific, so say what would work instead.
-    if (blocks / size > LDPriceHistory.MaxPoints)
-      throw LithosBadRequest(
-        s"'bucket' of $size over $name would return more than ${LDPriceHistory.MaxPoints} points; " +
-          s"use at least ${blocks / LDPriceHistory.MaxPoints + 1}")
-
-    // The live box, not the newest indexed one. The chart is drawn beside a stat strip fed from the
-    // same live read, and the index lags the mempool — ending the series on a stale point makes the
-    // two visibly disagree about the current price.
+    api.DexHistory.priceRange(range, bucket)
     val livePool = LDBoxes.poolBox(ctx, nodeApi)
-    val liveState = poolState(ctx, livePool)
-    ldCache.setPool(liveState)
-    val live = liveState.pool
-
-    val decimals = tokenInfo(nodeApi, live.tokenY).map(_.decimals).getOrElse(0)
+    val state = poolState(ctx, livePool)
+    ldCache.setPool(state)
+    val decimals = tokenInfo(nodeApi, state.pool.tokenY).map(_.decimals).getOrElse(0)
     val (snapshots, complete) = lineage(nodeApi, ctx)
-
-    val lo = math.max(0, ctx.getHeight - blocks)
-    val inRange = snapshots.filter(_.height >= lo)
-    // `partial` covers both ways the window can be short: a lineage the walk could not reach the
-    // start of, and one whose earliest point is already inside the range because the pool is younger
-    // than the range asked for.
-    val reachedBack = snapshots.headOption.exists(_.height <= lo)
-
-    // One point per bucket, the last reading in it, so a bucket holding several transitions reports
-    // the price it ended at rather than the first one it saw.
-    val bucketed = inRange
-      .groupBy(s => (s.height - lo) / size)
-      .toSeq.sortBy(_._1)
-      .map { case (_, points) => points.maxBy(s => (s.height, s.globalIndex)) }
-
-    val current = LDPricePoint(
-      height = ctx.getHeight,
-      timestamp = None,
-      price = spotPrice(live.reservesX, live.reservesY, decimals),
-      reservesX = LDAmounts(live.reservesX),
-      reservesY = LDAmounts(live.reservesY))
-
-    val timestamps = LDBoxes.timestampsAt(nodeApi, bucketed.map(_.height))
-    val points = bucketed.map { s =>
-      LDPricePoint(
-        height = s.height,
-        timestamp = timestamps.get(s.height),
-        price = spotPrice(s.reservesX, s.reservesY, decimals),
-        reservesX = LDAmounts(s.reservesX),
-        reservesY = LDAmounts(s.reservesY))
-    }
-    // Replace rather than append when the last bucket is already at the current height, so the
-    // series never carries two points for one height.
-    val series = (if (points.lastOption.exists(_.height >= current.height)) points.init else points) :+ current
-
-    val first = series.headOption.map(_.price).getOrElse(0.0)
-    val changePct = if (first <= 0) 0.0 else (current.price - first) / first
-
-    LDPriceHistory(name, changePct, partial = !complete || !reachedBack, history = series)
+    val current = LDPricePoint(ctx.getHeight, None,
+      api.DexHistory.spotPrice(state.reservesX, state.reservesY, decimals),
+      state.reservesX.toString, state.reservesY.toString)
+    api.DexHistory.price(snapshots, complete, current, decimals, range, bucket,
+      heights => LDBoxes.timestampsAt(nodeApi, heights))
   }
-
-  /**
-   * Token per ERG with the token's decimals applied, for display.
-   *
-   * A double is right here and nowhere else in this tag: it is a number to draw, not one to spend.
-   * The raw reserves travel with every point so a client can redo this exactly.
-   */
-  private def spotPrice(reservesX: Long, reservesY: Long, decimals: Int): Double =
-    if (reservesX <= 0 || reservesY <= 0) 0.0
-    else {
-      val tokens = BigDecimal(reservesY) / BigDecimal(10).pow(decimals)
-      val ergs = BigDecimal(reservesX) / BigDecimal(10).pow(9)
-      (tokens / ergs).toDouble
-    }
 
   // ══════════════════════════════════════════════════════════════════════════
   //  RECENT ACTIVITY
@@ -741,26 +664,8 @@ class DexAPIExecution(nodeContext: NodeContext, walletSelector: EngineFunding,
       val (snapshots, _) = lineage(nodeApi, ctx)
       val newest = LDBoxes.recentTransitions(ctx, nodeApi, snapshots, math.min(want, LDRecentActivity.MaxLimit))
       val timestamps = LDBoxes.timestampsAt(nodeApi, newest.flatMap(_.height))
-      LDRecentActivity(newest.map(activityEntry(_, timestamps)))
+      api.DexHistory.activity(newest, timestamps)
     }
-
-  private def activityEntry(t: LDBoxes.PoolTransition, timestamps: Map[Int, Long]): LDActivityEntry = {
-    val liquidity = t.kind != LDBoxes.TransitionKind.Swap
-    LDActivityEntry(
-      txId = t.txId,
-      `type` = t.kind.name,
-      via = if (t.orderBoxId.isDefined) "ORDER" else "DIRECT",
-      orderBoxId = t.orderBoxId,
-      status = if (t.height.isDefined) "CONFIRMED" else "MEMPOOL",
-      height = t.height,
-      timestamp = t.height.flatMap(timestamps.get),
-      ergIn = t.swap.map(_.ergIn),
-      amountIn = t.swap.map(s => LDAmounts(s.amountIn)),
-      amountOut = t.swap.map(s => LDAmounts(s.amountOut)),
-      amountX = if (liquidity) Some(LDAmounts(t.amountX)) else None,
-      amountY = if (liquidity) Some(LDAmounts(t.amountY)) else None,
-      shares = if (liquidity && t.kind != LDBoxes.TransitionKind.Flush) Some(LDAmounts(t.shares)) else None)
-  }
 
   // ══════════════════════════════════════════════════════════════════════════
   //  ORDERS

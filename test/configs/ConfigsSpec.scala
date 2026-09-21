@@ -25,6 +25,51 @@ class ConfigsSpec extends AnyFlatSpec with Matchers {
     thrown.getMessage should include("stratum.candidate.minCandidateChangeRevenue")
   }
 
+  it should "reject statistics intervals that would always label fresh observations stale" in {
+    val configured = Configuration(ConfigFactory.parseString(
+      "stats.refreshIntervalMs = 15000\nstats.staleAfterMs = 1000")
+      .withFallback(shipped.underlying).resolve())
+    val thrown = the[ConfigValidationException] thrownBy Configs.validateAll(configured)
+    thrown.getMessage should include("stats.staleAfterMs")
+    an[ConfigValidationException] should be thrownBy StatsConfig(configured)
+    StatsConfig(shipped) shouldBe StatsConfig.Default
+  }
+
+  it should "reject DEX collection settings that remove bounds or always produce stale results" in {
+    val configured = Configuration(ConfigFactory.parseString(
+      """stats.dex.refreshIntervalMs = 30000
+        |stats.dex.staleAfterMs = 10000
+        |stats.dex.readTimeoutMs = 0
+        |stats.dex.refreshBudgetMs = 0
+        |stats.dex.historyPages = 0
+        |stats.dex.timestampLookups = 251""".stripMargin)
+      .withFallback(shipped.underlying).resolve())
+    val thrown = the[ConfigValidationException] thrownBy Configs.validateAll(configured)
+    Seq("staleAfterMs", "readTimeoutMs", "refreshBudgetMs", "historyPages", "timestampLookups")
+      .foreach(key => thrown.getMessage should include(s"stats.dex.$key"))
+    an[ConfigValidationException] should be thrownBy StatsConfig(configured)
+  }
+
+  it should "validate stats storage bounds while allowing pruning to be disabled" in {
+    val configured = Configuration(ConfigFactory.parseString(
+      """stats.storage.backend = "unknown"
+        |stats.storage.path = ""
+        |stats.storage.flushIntervalMs = 0
+        |stats.storage.sampleIntervalMinutes = 0
+        |stats.storage.pruning.retentionDays = 0
+        |stats.storage.pruning.intervalMs = 0
+        |stats.storage.pruning.batchSize = 1441""".stripMargin)
+      .withFallback(shipped.underlying).resolve())
+    val thrown = the[ConfigValidationException] thrownBy Configs.validateAll(configured)
+    Seq("backend", "path", "flushIntervalMs", "sampleIntervalMinutes", "pruning.retentionDays",
+      "pruning.intervalMs", "pruning.batchSize").foreach(key => thrown.getMessage should include(s"stats.storage.$key"))
+    an[ConfigValidationException] should be thrownBy StatsConfig(configured)
+    val noPruning = Configuration(ConfigFactory.parseString("stats.storage.pruning.enabled = false")
+      .withFallback(shipped.underlying).resolve())
+    noException should be thrownBy Configs.validateAll(noPruning)
+    StatsConfig(noPruning).storage.pruningEnabled shouldBe false
+  }
+
   /** A value the LithosDex batcher's constructor cannot read stops that actor, and the stratum then waits it out every block. */
   it should "reject LithosDex batching values before the batcher is built" in {
     val configured = Configuration(ConfigFactory.parseString(
@@ -136,7 +181,7 @@ class ConfigsSpec extends AnyFlatSpec with Matchers {
     Contexts.Names should contain theSameElementsAs
       Seq(Contexts.Stratum, Contexts.Polling, Contexts.Sync, Contexts.Tx, Contexts.Dex,
         Contexts.Database, Contexts.SnapshotIo, Contexts.CandidateIo, Contexts.MiningControlIo, Contexts.Genesis, Contexts.EngineIo, Contexts.MempoolIo, Contexts.WalletIo, Contexts.WalletMaintenance, Contexts.EngineCandidate, Contexts.CriticalWallet, Contexts.CriticalTx, Contexts.BatchingIo,
-        Contexts.LithosDexBatchingIo)
+        Contexts.LithosDexBatchingIo, Contexts.Stats, Contexts.StatsRead, Contexts.StatsStore, Contexts.MiningStats)
   }
 
   it should "reject an apiKeyHash that is the key rather than its hash" in {

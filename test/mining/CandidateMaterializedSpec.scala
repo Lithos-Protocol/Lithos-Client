@@ -4,6 +4,7 @@ import mining.MiningMessages.CandidateIdentity
 import org.json.{JSONArray, JSONObject}
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
+import transactions.candidate.CandidateTopUp
 import transactions.candidate.BlockTxMessages.CandidateTx
 
 import java.util.UUID
@@ -11,8 +12,8 @@ import java.util.UUID
 /**
  * What the node said about the package it was handed, kept as returned.
  *
- * Correspondence is worked out but never enforced here: the supported node can answer with proofs
- * that do not match the transactions it was given, so a mismatch is not evidence of absence.
+ * Correspondence is worked out here and acted on by the caller, which reads it through the
+ * load-bearing members rather than through every extra.
  */
 class CandidateMaterializedSpec extends AnyFlatSpec with Matchers {
   private val identity = CandidateIdentity(500, "aa" * 32, "bb" * 32, 1)
@@ -29,8 +30,9 @@ class CandidateMaterializedSpec extends AnyFlatSpec with Matchers {
     new JSONObject().put("txProofs", entries)
   }
 
-  private def tx(id: String, leaf: String, bytes: Int = 10, cost: Long = 5L) =
-    CandidateTx(id, "{}", CandidateTx.Payout, sizeBytes = bytes, cost = cost, leaf = leaf)
+  private def tx(id: String, leaf: String, bytes: Int = 10, cost: Long = 5L,
+                 kind: String = CandidateTx.Payout) =
+    CandidateTx(id, "{}", kind, sizeBytes = bytes, cost = cost, leaf = leaf)
 
   "Materialization" should "match a requested transaction to its proof leaf" in {
     val result = CandidateMaterialized(identity, attempt, work,
@@ -96,11 +98,37 @@ class CandidateMaterializedSpec extends AnyFlatSpec with Matchers {
     result.workMessage shouldBe work
   }
 
+  it should "enforce correspondence" in {
+    CandidateMaterialized.requireCorrespondence shouldBe true
+  }
+
   /**
-   * Off while the supported node can return proofs that do not correspond to what it was given
-   * (ergoplatform/ergo#2463). Turning it on is what a dependent revenue bundle will require.
+   * The top-up folds every unspent candidate output into the holding box the genesis created, so a
+   * block that proves it has to carry what fed it. An extra the node declined does not.
    */
-  it should "not enforce correspondence yet" in {
-    CandidateMaterialized.requireCorrespondence shouldBe false
+  it should "not count an unproven extra as load-bearing" in {
+    val result = CandidateMaterialized(identity, attempt, work, proofOf(Seq("ab" * 32)),
+      Seq(tx("genesis", "ab" * 32, kind = CandidateTx.Genesis), tx("payout", "ef" * 32)))
+
+    result.unproven shouldBe Set("payout")
+    result.unprovenInclusions shouldBe empty
+    result.inclusionProven shouldBe true
+  }
+
+  it should "count an unproven genesis as load-bearing" in {
+    val result = CandidateMaterialized(identity, attempt, work, proofOf(Seq("ef" * 32)),
+      Seq(tx("genesis", "ab" * 32, kind = CandidateTx.Genesis), tx("payout", "ef" * 32)))
+
+    result.unprovenInclusions shouldBe Set("genesis")
+    result.inclusionProven shouldBe false
+  }
+
+  it should "count an unproven top-up as load-bearing" in {
+    val result = CandidateMaterialized(identity, attempt, work, proofOf(Seq("ab" * 32)),
+      Seq(tx("genesis", "ab" * 32, kind = CandidateTx.Genesis),
+        tx("topup", "cd" * 32, kind = CandidateTopUp.Kind)))
+
+    result.unprovenInclusions shouldBe Set("topup")
+    result.inclusionProven shouldBe false
   }
 }

@@ -17,6 +17,7 @@ import scorex.crypto.hash.Blake2b256
 import scorex.util.bytesToId
 import stratum.{BlockTemplate, CollateralData}
 import stratum.data.{Data, Options}
+import stats.StatsCollector.StratumObserved
 import support.ChainFixtures
 import transactions.candidate.BlockTxMessages.CandidateTx
 
@@ -101,7 +102,7 @@ class LithosPoolSpec extends TestKit(ActorSystem("lithos-pool-spec", LithosPoolS
                              node: StubNode, clock: AtomicLong, manager: Option[TestProbe])
 
   private def fixture(config: CandidateConfig = cfg, controlledManager: Boolean = false,
-                      nodeVersion: Int = 4): Fixture = {
+                      nodeVersion: Int = 4, stats: Option[ActorRef] = None): Fixture = {
     val node = new StubNode
     node.observed = node.observed.copy(parameters = node.observed.parameters.copy(blockVersion = nodeVersion))
     val builder = TestProbe()
@@ -113,7 +114,7 @@ class LithosPoolSpec extends TestKit(ActorSystem("lithos-pool-spec", LithosPoolS
       BigInteger.valueOf(4000000000L), new Data)
     val pool = system.actorOf(Props(new LithosPool(options, true, null, null, "test-key", false,
       null, state.ref, true, 3600000, config,
-      Seq(CandidateSource(configs.CandidateSourceConfig.Rollups, builder.ref))) {
+      Seq(CandidateSource(configs.CandidateSourceConfig.Rollups, builder.ref)), stats, 3600000) {
       override protected lazy val nodeInterface: MiningNodeInterface = node
       override protected def createCandidateBuilder(): Option[ActorRef] = Some(builder.ref)
       override protected def createJobManager(): ActorRef = manager.map(_.ref).getOrElse(super.createJobManager())
@@ -172,6 +173,106 @@ class LithosPoolSpec extends TestKit(ActorSystem("lithos-pool-spec", LithosPoolS
 
   private def template(f: Fixture): ProcessTemplate =
     f.manager.get.fishForMessage() { case _: ProcessTemplate => true; case _ => false }.asInstanceOf[ProcessTemplate]
+
+  private def observation(probe: TestProbe)(accept: StratumObserved => Boolean): StratumObserved =
+    probe.fishForMessage() { case event: StratumObserved => accept(event); case _ => false }
+      .asInstanceOf[StratumObserved]
+
+  "Stratum statistics" should "show only an acknowledged publication and repeat it while a replacement waits" in {
+    val stats = TestProbe()
+    val f = fixture(controlledManager = true, stats = Some(stats.ref))
+    observation(stats)(_.activeJob.isEmpty)
+    f.pool ! BlockPackageReady(pkg())
+    val first = nextCall(f)
+    first.response.complete(response(first))
+    val gen = template(f)
+    f.pool ! LithosPool.PublishStats
+    observation(stats)(e => e.connectedConnections == 1 && e.activeJob.isEmpty)
+    acknowledge(f, gen.copy(publication = gen.publication.map(_.copy(attempt = java.util.UUID.randomUUID()))))
+    f.pool ! LithosPool.PublishStats
+    observation(stats)(e => e.connectedConnections == 1 && e.activeJob.isEmpty)
+    acknowledge(f, gen)
+    f.miner.expectMsgType[BroadcastJob]
+    val served = observation(stats)(_.activeJob.isDefined).activeJob.get
+    served.mode shouldBe "genesis"
+    served.publicationId shouldBe gen.publication.get.attempt.toString
+    served.blockPackage.get.transactions.map(_.id) shouldBe Vector(pkg().collateral.txId)
+    f.builder.expectMsg(GenesisPublished(pkg().identity))
+
+    f.pool ! BlockPackageReady(pkg(revision = 1))
+    val pending = nextCall(f)
+    f.pool ! LithosPool.PublishStats
+    observation(stats)(_.activeJob.contains(served)).activeJob shouldBe Some(served)
+    pending.response.complete(response(pending, 2))
+    val extra = template(f)
+    f.pool ! LithosPool.PublishStats
+    observation(stats)(_.activeJob.contains(served))
+    acknowledge(f, extra)
+    val augmented = observation(stats)(_.activeJob.exists(_.mode == "augmented")).activeJob.get
+    augmented.blockPackage.get.revision shouldBe 1
+    augmented.blockPackage.get.transactions.map(_.id) shouldBe Vector(pkg().collateral.txId, "extra-1")
+  }
+
+  it should "clear failed augmentation, then publish the genesis fallback without its removed revenue" in {
+    val stats = TestProbe()
+    val f = fixture(stats = Some(stats.ref))
+    genesis(f)
+    observation(stats)(_.activeJob.isDefined)
+    f.pool ! BlockPackageReady(pkg(revision = 1).copy(revenue = 3000000L, sources = Set("rollups")))
+    nextCall(f).response.completeExceptionally(new IllegalStateException("optional transactions refused"))
+    observation(stats)(_.activeJob.isEmpty)
+    val fallback = nextCall(f)
+    fallback.response.complete(response(fallback, 2))
+    val next = observation(stats)(_.activeJob.isDefined).activeJob.get
+    next.mode shouldBe "genesis"
+    next.blockPackage.get.expectedRevenueNanoErg shouldBe 0L
+    next.blockPackage.get.sources shouldBe empty
+    next.blockPackage.get.transactions should have size 1
+  }
+
+  it should "retain revenue-gated work and clear it on a same-height reorg and shutdown" in {
+    val stats = TestProbe()
+    val f = fixture(config = cfg.copy(minCandidateChangeRevenue = 1000000L), stats = Some(stats.ref))
+    genesis(f)
+    val served = observation(stats)(_.activeJob.isDefined).activeJob
+    f.pool ! BlockPackageReady(pkg(revision = 1).copy(revenue = 999999L), refreshed = true)
+    f.pool ! LithosPool.PublishStats
+    observation(stats)(_.activeJob == served)
+    f.node.calls.poll(100, TimeUnit.MILLISECONDS) shouldBe null
+    f.node.observed = nodeInfo(parentB)
+    f.pool ! PollBlockTemplate
+    f.builder.expectMsg(ChainAdvanced(100, parentB))
+    observation(stats)(_.activeJob.isEmpty)
+    system.stop(f.pool)
+    observation(stats)(_.stopped).activeJob shouldBe None
+  }
+
+  it should "describe a solo fallback as an active job with no block package" in {
+    val stats = TestProbe()
+    val f = fixture(stats = Some(stats.ref))
+    f.pool ! BlockPackageReady(pkg())
+    nextCall(f).response.completeExceptionally(new IllegalArgumentException("genesis refused"))
+    f.builder.expectMsg(RebuildCandidate)
+    val solo = nextCall(f)
+    solo.response.complete(response(solo))
+    val current = observation(stats)(_.activeJob.exists(_.mode == "solo")).activeJob.get
+    current.parentId shouldBe parentA
+    current.blockPackage shouldBe None
+  }
+
+  it should "stop reporting active work if the job manager stops while the pool remains alive" in {
+    val stats = TestProbe()
+    val f = fixture(stats = Some(stats.ref))
+    genesis(f)
+    observation(stats)(_.activeJob.isDefined)
+    val probe = TestProbe()
+    probe.send(f.pool, GetJobManager)
+    val manager = probe.expectMsgType[ActorRef]
+    system.stop(manager)
+    observation(stats)(_.activeJob.isEmpty)
+    f.pool ! LithosPool.PublishStats
+    observation(stats)(_.activeJob.isEmpty).stopped shouldBe false
+  }
 
   "Candidate HTTP" should "leave the mailbox, chain polling and solved blocks responsive while stalled" in {
     val f = fixture()

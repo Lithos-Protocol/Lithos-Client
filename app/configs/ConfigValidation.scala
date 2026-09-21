@@ -1,6 +1,6 @@
 package configs
 
-import lfsm.LFSMHelpers
+import lfsm.{CollateralParams, LFSMHelpers}
 import org.ergoplatform.appkit.Parameters
 import play.api.{ConfigLoader, Configuration}
 
@@ -39,6 +39,25 @@ object Configs {
 
   def validateAll(config: Configuration): Unit = {
     val v = new ConfigValidator(config)
+    v.bool("stats.enabled")
+    val statsRefresh = v.range("stats.refreshIntervalMs", v.int("stats.refreshIntervalMs"),
+      100, 60000, "milliseconds").getOrElse(StatsConfig.Default.refreshIntervalMs)
+    val statsStale = v.range("stats.staleAfterMs", v.int("stats.staleAfterMs"),
+      101, 3600000, "milliseconds").getOrElse(StatsConfig.Default.staleAfterMs)
+    if (statsStale <= statsRefresh)
+      v.problem("stats.staleAfterMs", "must exceed stats.refreshIntervalMs")
+    v.bool("stats.dex.enabled")
+    val dexRefresh = v.range("stats.dex.refreshIntervalMs", v.int("stats.dex.refreshIntervalMs"),
+      1000, 3600000, "milliseconds").getOrElse(StatsConfig.Default.dex.refreshIntervalMs)
+    val dexStale = v.range("stats.dex.staleAfterMs", v.int("stats.dex.staleAfterMs"),
+      1001, 86400000, "milliseconds").getOrElse(StatsConfig.Default.dex.staleAfterMs)
+    if (dexStale <= dexRefresh) v.problem("stats.dex.staleAfterMs", "must exceed stats.dex.refreshIntervalMs")
+    v.range("stats.dex.readTimeoutMs", v.int("stats.dex.readTimeoutMs"), 100, 30000, "milliseconds")
+    v.range("stats.dex.refreshBudgetMs", v.int("stats.dex.refreshBudgetMs"), 100, 120000, "milliseconds")
+    v.range("stats.dex.historyPages", v.int("stats.dex.historyPages"), 1, 50, "pages of 200 pool boxes")
+    v.range("stats.dex.timestampLookups", v.int("stats.dex.timestampLookups"), 0, 250, "header timestamps")
+    StatsStorageConfig.validate(v)
+    MiningStatsConfig.validate(v)
     // ---- wallet ----
     // Absent keys fall back to WalletConfig.Default, so these bound what is supplied rather than
     // requiring it. The upper bounds are what the engine can actually honour, not taste.
@@ -251,6 +270,11 @@ object Configs {
       if (permit <= 0)
         v.problem("emission.maxPermitPerJoin", s"$permit must be positive (LIT base units); joins stop once the thermostat passes this price")
     }
+    // Only the sign and an overflowing bid are fatal. A bid merely past break-even is a deliberate
+    // bet on the mined block's fees, so `selfCollateralize` warns about it per pass instead.
+    v.longRange("emission.priorityFeeNanoErgs", v.long("emission.priorityFeeNanoErgs"),
+      0L, CollateralParams.BLOCK_REWARD,
+      "nanoERG bid to the block's finder; 0 posts at the floor, and the contract charges 4x more into the pool")
 
     // Every lender key must have a wallet secret capable of spending returned funds.
     for {

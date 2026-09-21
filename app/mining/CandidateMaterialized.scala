@@ -3,6 +3,7 @@ package mining
 import mining.MiningMessages.CandidateIdentity
 import node.model.{MerkleLevel, NodeMerkleProof}
 import org.json.JSONObject
+import transactions.candidate.CandidateTopUp
 import transactions.candidate.BlockTxMessages.CandidateTx
 
 import java.util.UUID
@@ -20,11 +21,15 @@ final case class CandidateMaterialized(identity: CandidateIdentity,
                                        proofs: Seq[NodeMerkleProof],
                                        included: Set[String],
                                        unproven: Set[String],
+                                       unprovenInclusions: Set[String],
                                        knownBytes: Long,
                                        knownCost: Long) {
 
   /** Whether every requested transaction was matched to a proof leaf. */
   def fullyProven: Boolean = unproven.isEmpty
+
+  /** Whether the members the rest of the package hangs off were matched. */
+  def inclusionProven: Boolean = unprovenInclusions.isEmpty
 }
 
 object CandidateMaterialized {
@@ -32,15 +37,12 @@ object CandidateMaterialized {
   /**
    * Read the returned proofs and work out which requested transactions they account for.
    *
-   * A leaf is the Blake2b256 of a transaction's serialized bytes, which is what the builders record
-   * on each `CandidateTx`. A member with no recorded leaf — an unconfirmed ancestor arrives as a
-   * node body, not something this client signed — can never be matched and is reported unproven
-   * rather than treated as absent.
+   * A leaf is the digest a block's transaction tree carries for a transaction, which is its id, and
+   * that is what the builders record on each `CandidateTx`. A member with no recorded leaf can
+   * never be matched and is reported unproven rather than treated as absent.
    *
-   * Correspondence is computed, never enforced here. The supported node can return proofs that do
-   * not correspond to the transactions it was given (ergoplatform/ergo#2463), so acting on a
-   * mismatch would reject candidates that are in fact fine. [[requireCorrespondence]] is the single
-   * place that changes once the node is fixed.
+   * Correspondence is computed here and acted on by the caller; [[requireCorrespondence]] says
+   * whether a mismatch rejects the candidate.
    */
   def apply(identity: CandidateIdentity, attempt: UUID, workMessage: String,
             proof: JSONObject, requested: Seq[CandidateTx]): CandidateMaterialized = {
@@ -50,8 +52,19 @@ object CandidateMaterialized {
       tx.leaf.nonEmpty && leaves.contains(tx.leaf.toLowerCase))
     CandidateMaterialized(identity, attempt, workMessage, proofs,
       proven.map(_.id).toSet, missing.map(_.id).toSet,
+      missing.filter(tx => LoadBearing.contains(tx.kind)).map(_.id).toSet,
       requested.map(_.sizeBytes.toLong).sum, requested.map(_.cost).sum)
   }
+
+  /**
+   * The members the rest of the package hangs off.
+   *
+   * The genesis creates the holding box, and the top-up folds every unspent candidate output into
+   * it, so a block proving the top-up has to carry both the genesis and whatever produced the
+   * outputs it spends. An extra that is unproven on its own is a transaction the node chose not to
+   * take; these two unproven mean the package did not land.
+   */
+  private val LoadBearing: Set[String] = Set(CandidateTx.Genesis, CandidateTopUp.Kind)
 
   /**
    * Every entry of `proof.txProofs`, in response order, with `leaf` and `levels` preserved as
@@ -71,10 +84,9 @@ object CandidateMaterialized {
   /**
    * Whether unproven correspondence should reject an augmented candidate.
    *
-   * Off while the supported node can return proofs that do not correspond to the transactions it was
-   * given (ergoplatform/ergo#2463): enforcing it today would drop good candidates. Ordinary mining
-   * keeps its existing compatibility behaviour either way; this switch is what a dependent revenue
-   * bundle will need before it can be published, and turning it on is the whole change.
+   * On: a proof that does not account for the load-bearing members is taken at face value, so the
+   * extras are dropped and the package is mined as genesis. This was off while the supported node
+   * could answer with proofs that did not correspond to what it was given (ergoplatform/ergo#2463).
    */
-  final val requireCorrespondence: Boolean = false
+  final val requireCorrespondence: Boolean = true
 }

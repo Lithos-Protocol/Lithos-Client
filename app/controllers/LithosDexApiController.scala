@@ -17,6 +17,7 @@ import mutations.NotEnoughInputsException
 import transactions.batching.lithosdex.LDBoxes
 import transactions.engine.wallet.FundingExpiredException
 import transactions.engine.wallet.EngineWalletMessages.InsufficientWalletFundsException
+import stats.{DexStatsData, StatsCache}
 
 
 import java.nio.charset.StandardCharsets
@@ -36,16 +37,17 @@ class LithosDexApiController @Inject()(cc: ControllerComponents,
                                        config: Configuration,
                                        cache: SyncCacheApi,
                                        @Named("transaction-engine")  walletManager: ActorRef,
-                                       system: ActorSystem
+                                       system: ActorSystem,
+                                       statsCache: StatsCache
                                       ) extends AbstractController(cc) {
 
 
 
   /**
-   * Every endpoint here does blocking node IO — box scans, signing, broadcasting — and the execute
+   * Live endpoints do blocking node IO — box scans, signing, broadcasting — and the execute
    * paths also Await on the wallet manager. On Play's own request pool a slow node holds request
-   * threads for the length of its read timeout, and a history scan can hold one for minutes on an
-   * endpoint that needs no API key. Moved to a dedicated fixed pool so that can only exhaust itself.
+   * threads for the length of its read timeout. The graph endpoints below read prepared statistics
+   * directly; their requests never launch node history scans.
    *
    * Not a mining concern: the stratum, polling, sync and tx dispatchers are all separate, so nothing
    * here can take the miner off Lithos. It can make the local site stop answering.
@@ -151,15 +153,29 @@ class LithosDexApiController @Inject()(cc: ControllerComponents,
 
   /** GET /dex/fees/history */
   def getFeeHistory(from: Option[Int], to: Option[Int], bucket: Option[Int]): Action[AnyContent] =
-    Action.async { _ => offPool(respond(api.getFeeHistory(from, to, bucket, ldCache))) }
+    Action { _ => graph(_.fees(from, to, bucket)) }
 
   /** GET /dex/price/history */
   def getPriceHistory(range: Option[String], bucket: Option[Int]): Action[AnyContent] =
-    Action.async { _ => offPool(respond(api.getPriceHistory(range, bucket, ldCache))) }
+    Action { _ => graph(_.price(range, bucket)) }
 
   /** GET /dex/activity/recent */
   def getRecentActivity(limit: Option[Int]): Action[AnyContent] =
-    Action.async { _ => offPool(respond(api.getRecentActivity(limit))) }
+    Action { _ => graph(_.activity(limit)) }
+
+  private def graph[A: Writes](select: DexStatsData => A): Result = {
+    val snapshot = statsCache.dexSnapshot()
+    val result = snapshot.data match {
+      case Some(data) => respond {
+        val fields = Json.toJson(select(data)).as[JsObject] ++ Json.obj("stats" -> snapshot.view)
+        if (snapshot.view.status == "stale") fields + ("partial" -> JsBoolean(true)) else fields
+      }
+      case None => ServiceUnavailable(ApiHelper.makeError(503, "DEX statistics unavailable",
+        s"Background collection is ${snapshot.view.status}; no graph snapshot is available")
+        .as[JsObject] ++ Json.obj("stats" -> snapshot.view)).withHeaders("Retry-After" -> "5")
+    }
+    result.withHeaders("Cache-Control" -> "no-store")
+  }
 
   // ── orders ───────────────────────────────────────────────────────────────
 

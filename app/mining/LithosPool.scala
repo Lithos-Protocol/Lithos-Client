@@ -17,6 +17,8 @@ import scorex.crypto.hash.Blake2b256
 import scorex.utils.Ints
 import state.messages.StateFrameMessages.CheckBlock
 import stratum.BlockTemplate
+import stats.{ActiveStratumJob, BlockPackageView}
+import stats.StatsCollector.StratumObserved
 import stratum.data.{MiningCandidate, Options}
 import transactions.candidate.BlockTxMessages.CandidateTx
 import transactions.rollups.{CommitmentTransactions, DataBoxSource}
@@ -40,7 +42,9 @@ class LithosPool(options: Options,
                  forceConfigDiff: Boolean,
                  diffRefreshInterval: Int,
                  candidateConfig: CandidateConfig = CandidateConfig.Default,
-                 txSources: Seq[CandidateSource] = Seq.empty) extends Actor {
+                 txSources: Seq[CandidateSource] = Seq.empty,
+                 statsCollector: Option[ActorRef] = None,
+                 statsRefreshIntervalMs: Int = configs.StatsConfig.Default.refreshIntervalMs) extends Actor {
 
   private val logger = LoggerFactory.getLogger("LithosPool")
   private implicit val ec: ExecutionContext = context.dispatcher
@@ -49,7 +53,8 @@ class LithosPool(options: Options,
   private val backgroundEc = context.system.dispatchers.lookup(Contexts.key(Contexts.Database))
   private val incarnation = UUID.randomUUID()
 
-  protected def createJobManager(): ActorRef = context.actorOf(Props(new LithosJobManager(options)), "job-manager")
+  protected def createJobManager(): ActorRef = context.actorOf(Props(new LithosJobManager(options, statsCollector)), "job-manager")
+  private val solutionStatistics = new stats.LocalMiningStats("solutions")
   lazy val jobManagerActor: ActorRef = createJobManager()
 
   /** Dependency seams keep the production handshake testable without Globals or live HTTP. */
@@ -77,7 +82,10 @@ class LithosPool(options: Options,
   private var blockPackage: Option[BlockPackage] = None
   private var collectingAdditions = false
   private var activeRequest: Option[CandidateRequest] = None
-  private var publishing: Option[(CandidateRequest, MiningCandidate)] = None
+  private var publishing: Option[(CandidateRequest, MiningCandidate, Option[CandidateMaterialized])] = None
+  private var statsTicker: Option[Cancellable] = None
+  private var statsSequence = 0L
+  private var activeStatsJob: Option[ActiveStratumJob] = None
   private var servedCandidate: Option[CandidateIdentity] = None
   private var servedWork: Option[(String, String)] = None
   private var publishedGenesis: Option[(ChainTip, String)] = None
@@ -112,15 +120,26 @@ class LithosPool(options: Options,
       self, PollBlockTemplate))
     diffTicker = Some(context.system.scheduler.scheduleWithFixedDelay(
       diffRefreshInterval.milliseconds, diffRefreshInterval.milliseconds, self, RefreshDifficulty))
+    statsCollector.foreach { _ =>
+      publishStats()
+      statsTicker = Some(context.system.scheduler.scheduleWithFixedDelay(
+        statsRefreshIntervalMs.milliseconds, statsRefreshIntervalMs.milliseconds, self, PublishStats))
+    }
   }
 
   override def postStop(): Unit = {
     pollTicker.foreach(_.cancel())
     diffTicker.foreach(_.cancel())
     candidateTimer.foreach(_.cancel())
+    statsTicker.foreach(_.cancel())
+    publishStats(stopped = true)
   }
 
   override def receive: Receive = {
+    case PublishStats => publishStats()
+    case JobManagerStopped if sender() == jobManagerActor =>
+      activeStatsJob = None
+      publishStats()
     case PollBlockTemplate => observeChain()
     case ChainObserved(id, result) if observing.contains(id) =>
       observing = None
@@ -188,14 +207,14 @@ class LithosPool(options: Options,
       }
 
     case NewJobAvailable(template, publication) if sender() == jobManagerActor =>
-      publishing.filter { case (request, candidate) =>
+      publishing.filter { case (request, candidate, _) =>
         publication.contains(publicationFor(request)) &&
           work(candidate) == work(template.candidate)
-      }.foreach { case (request, _) =>
+      }.foreach { case (request, _, materialized) =>
         candidateTimer.foreach(_.cancel())
         candidateTimer = None
         publishing = None
-        if (current(request) && !expired(request)) recordPublication(request, template)
+        if (current(request) && !expired(request)) recordPublication(request, template, materialized)
         else {
           if (current(request) && expired(request)) rejectExtras(request, "job publication missed its deadline")
           invalidateCachedJob()
@@ -203,10 +222,10 @@ class LithosPool(options: Options,
         driveCandidate()
       }
 
-    case TemplateRejected(publication) if publishing.exists { case (request, _) =>
+    case TemplateRejected(publication) if publishing.exists { case (request, _, _) =>
       publication == publicationFor(request)
     } =>
-      publishing.foreach { case (request, _) =>
+      publishing.foreach { case (request, _, _) =>
         if (request.hasExtras && current(request)) rejectExtras(request, "job manager refused augmentation")
       }
       publishing = None
@@ -228,6 +247,7 @@ class LithosPool(options: Options,
     case SolutionSubmitted(id, result) if submitting.exists(_.id == id) =>
       val submitted = submitting.get
       submitting = None
+      if (statsCollector.isDefined) solutionStatistics.add(if (result.getOrElse(false)) "nodeAccepted" else "nodeRejectedOrFailed")
       if (result.getOrElse(false)) {
         submitted.collateralId.foreach(id => candidateBuilder.foreach(_ ! CollateralSpent(id)))
         logger.info(s"Block solution submitted for ${submitted.key._1}${timing("solutionMs", submitted.startedAt)}")
@@ -377,6 +397,13 @@ class LithosPool(options: Options,
         rejectExtras(request, "candidate completed after its publication deadline")
         invalidateCachedJob()
         driveCandidate()
+      case Success(fetched) if request.hasExtras && CandidateMaterialized.requireCorrespondence &&
+        fetched.materialized.exists(!_.inclusionProven) =>
+        fetched.materialized.foreach(recordMaterialization)
+        rejectExtras(request, "the returned proof did not account for " +
+          fetched.materialized.map(_.unprovenInclusions.map(_.take(8)).mkString(", ")).getOrElse(""))
+        invalidateCachedJob()
+        driveCandidate()
       case Success(fetched) =>
         val candidate = fetched.candidate
         fetched.materialized.foreach(recordMaterialization)
@@ -385,7 +412,7 @@ class LithosPool(options: Options,
           candidateTimer = None
           lastRefreshAt = nowNanos()
         } else {
-          publishing = Some(request -> candidate)
+          publishing = Some((request, candidate, fetched.materialized))
           jobManagerActor ! ProcessTemplate(candidate, tau.bigInteger, request.pkg.isDefined,
             reducedShareMessages, mustPublish = true,
             publication = Some(publicationFor(request)))
@@ -428,9 +455,9 @@ class LithosPool(options: Options,
       logger.debug(s"Candidate ${materialized.identity.height} left " +
         s"${materialized.unproven.size} of ${materialized.included.size + materialized.unproven.size} " +
         "requested transaction(s) unproven; the node-selected remainder is not enumerated")
-    if (CandidateMaterialized.requireCorrespondence && !materialized.fullyProven)
-      logger.warn(s"Candidate ${materialized.identity.height} has unproven required membership: " +
-        materialized.unproven.map(_.take(8)).mkString(", "))
+    if (CandidateMaterialized.requireCorrespondence && !materialized.inclusionProven)
+      logger.warn(s"Candidate ${materialized.identity.height} has unproven tx membership: " +
+        materialized.unprovenInclusions.map(_.take(8)).mkString(", "))
   }
 
   /** Fall back to genesis-only for this package. Mining continues; only the extras are dropped. */
@@ -459,9 +486,12 @@ class LithosPool(options: Options,
     servedCandidate = None
     publishing = None
     jobManagerActor ! InvalidateTemplate
+    activeStatsJob = None
+    publishStats()
   }
 
-  private def recordPublication(request: CandidateRequest, template: BlockTemplate): Unit = {
+  private def recordPublication(request: CandidateRequest, template: BlockTemplate,
+                                materialized: Option[CandidateMaterialized]): Unit = {
     servedCandidate = Some(request.identity)
     servedWork = Some(work(template.candidate))
     cacheDirty = false
@@ -471,6 +501,13 @@ class LithosPool(options: Options,
     servedSources = request.pkg.map(_.sources).getOrElse(Set.empty)
     servedLate = request.pkg.map(_.late).getOrElse(Set.empty)
     connections.values.foreach(_ ! BroadcastJob(template))
+    statsCollector.foreach { _ =>
+      activeStatsJob = Some(ActiveStratumJob(template.jobId, request.identity.height, request.identity.parentId,
+        work(template.candidate)._1, request.id.toString, System.currentTimeMillis(),
+        if (request.hasExtras) "augmented" else if (request.pkg.isDefined) "genesis" else "solo",
+        request.pkg.map(pkg => BlockPackageView.from(pkg, materialized))))
+      publishStats()
+    }
     logger.info(s"Broadcasting job ${template.jobId} to ${connections.size} miner(s); " +
       s"candidateStage=${if (request.hasExtras) "augmented" else if (request.pkg.isDefined) "genesis" else "solo"}" +
       timing("publicationMs", request.startedAt))
@@ -479,6 +516,14 @@ class LithosPool(options: Options,
       candidateBuilder.foreach(_ ! GenesisPublished(request.identity))
     }
     stateFrame ! CheckBlock
+  }
+
+  /** Repeating the immutable view repairs dropped telemetry without waiting for the collector. */
+  private def publishStats(stopped: Boolean = false): Unit = statsCollector.foreach { collector =>
+    collector.tell(solutionStatistics.snapshot(stopped), self)
+    statsSequence += 1L
+    collector.tell(StratumObserved(incarnation, statsSequence, System.currentTimeMillis(), System.nanoTime(),
+      if (stopped) 0 else connections.size, if (stopped) None else activeStatsJob, stopped), self)
   }
 
   private def enqueueSolution(accepted: ShareAccepted): Unit = {
@@ -517,11 +562,11 @@ class LithosPool(options: Options,
     } catch {
       case ex: Exception =>
         val msg = Option(ex.getMessage).getOrElse("")
-        if (msg.contains("merkle leaf for collateral"))
-          logger.warn("Skipped super share: non-matching merkle leaf")
-        else if (msg.contains("Cannot store non-distinct NISP"))
+        if (msg.contains("Cannot store non-distinct NISP"))
           logger.warn("Got duplicate nonce on super-share submission")
         else
+          // A share the collateral's inclusion proof does not cover is unpayable, so it is an error
+          // here rather than something to carry on past.
           logger.error("Error while saving super-share", ex)
     }
 
@@ -530,6 +575,7 @@ class LithosPool(options: Options,
 }
 
 object LithosPool {
+  private[mining] case object PublishStats
   private val MaxRebuildsPerBlock = 3
   private val MaxQueuedSolutions = 6
   private[mining] case class ChainTip(height: Int, parentId: String)
@@ -595,9 +641,9 @@ object LithosPool {
     }
     // Retain the supplied transaction proofs for package membership checks.
     val materialized = request.pkg.map { pkg =>
-      val genesis = CandidateTx(pkg.collateral.txId, pkg.collateral.txJSON, "genesis",
+      val genesis = CandidateTx(pkg.collateral.txId, pkg.collateral.txJSON, CandidateTx.Genesis,
         sizeBytes = pkg.collateral.signedSizeBytes, cost = pkg.collateral.cost,
-        leaf = Hex.toHexString(Blake2b256(pkg.collateral.txBytes)))
+        leaf = pkg.collateral.txId)
       CandidateMaterialized(request.identity, request.id, Hex.toHexString(candidate.msg),
         candidate.proof, genesis +: pkg.blockTxs)
     }

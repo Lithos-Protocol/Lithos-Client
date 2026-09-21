@@ -6,7 +6,7 @@ import akka.util.Timeout
 import api.models._
 import api.{CollateralMarketApi, LithosApiErrors}
 import configs.{EmissionConfig, NodeContext}
-import lfsm.{CollateralParams, EmissionSchedule, LFSMHelpers}
+import lfsm.{CollateralParams, EmissionSchedule, LFSMHelpers, RollupProtocol}
 import node.MutationConversions._
 import node.model.IndexedBox
 import org.ergoplatform.appkit.{Address, BlockchainContext, ErgoClientException}
@@ -434,6 +434,8 @@ class CollateralExecution(nodeContext: NodeContext,
     nodeContext.getClient.execute { ctx =>
       val tx = txs
       val count = joinCount(request.count)
+      val finderFee = joinFinderFee(request.finderFeeEachNanoErgs)
+      val principal = RollupProtocol.queuePrincipal(finderFee)
       val tip = tx.emissionTip(ctx)
       val cs = tx.readConfig(tx.configBox(ctx))
       // Read once. Parsing R5 rebuilds up to a hundred hashed lender keys, and this was doing it
@@ -442,7 +444,7 @@ class CollateralExecution(nodeContext: NodeContext,
       val permits = (0 until count).map(i => cs.permitAt(em.backlog + i))
 
       val spendable = blocking(askWallet[SpendableBalance](GetSpendableBalance, QuickAsk).nanoErgs)
-      val total = count.toLong * (CollateralParams.PRINCIPAL_FLOOR + emissionConfig.txFee)
+      val total = count.toLong * (principal + emissionConfig.txFee)
 
       // `takenLenderKeys` used to sit INSIDE this count, so it ran once per wallet address: with
       // the shipped 32 keys, sixty-four exhaustive paged token scans for one unauthenticated
@@ -465,7 +467,11 @@ class CollateralExecution(nodeContext: NodeContext,
 
       CollateralJoinQuote(
         count = count,
-        principalEachNanoErgs = CollateralParams.PRINCIPAL_FLOOR.toString,
+        principalEachNanoErgs = principal.toString,
+        finderFeeEachNanoErgs = finderFee.toString,
+        poolPremiumEachNanoErgs = RollupProtocol.poolBonus(finderFee).toString,
+        breakEvenFinderFeeNanoErgs = RollupProtocol.breakEvenFinderFee.toString,
+        netAtCoinbaseEachNanoErgs = RollupProtocol.netAtCoinbase(finderFee).toString,
         txFeeEachNanoErgs = emissionConfig.txFee.toString,
         permitsLit = permits.map(_.toString),
         permitTotalLit = permits.sum.toString,
@@ -489,6 +495,8 @@ class CollateralExecution(nodeContext: NodeContext,
 
   override def join(request: CollateralJoinExecuteRequest): CollateralJoinResult = {
     val count = joinCount(Some(request.count))
+    val finderFee = joinFinderFee(request.finderFeeEachNanoErgs)
+    val principal = RollupProtocol.queuePrincipal(finderFee)
 
     // Queued principal and permit come back only when a block spends the box. There is no early
     // exit, so the acknowledgement is carried in the request rather than inferred from one arriving
@@ -547,13 +555,13 @@ class CollateralExecution(nodeContext: NodeContext,
 
       // The permit cap was enforced against the planned positions above, so nothing here needs to
       // stop for cost: a breach sent nothing at all.
-      val run = tx.runJoins(ctx, tip, cfgBox, cs, keys, "collateral:", guard)
+      val run = tx.runJoins(ctx, tip, cfgBox, cs, keys, "collateral:", guard, finderFee = finderFee)
       run.stopped.foreach(ex =>
         logger.warn(s"Stopping join run after ${run.attempts.size} position(s): ${ex.getMessage}", ex))
 
       val sent = run.attempts.map(attempt => CollateralJoinEntry(attempt.txId, attempt.position,
-        attempt.lender.toString, CollateralParams.PRINCIPAL_FLOOR.toString, attempt.permit.toString,
-        attempt.outcome))
+        attempt.lender.toString, attempt.principal.toString, attempt.permit.toString,
+        attempt.outcome, attempt.finderFee.toString))
 
       // Nothing sent means the caller needs a status, not a 200 with an empty list - that reads the
       // same as a deliberate no-op. The cause is rethrown as-is so the controller classifies it the
@@ -561,7 +569,7 @@ class CollateralExecution(nodeContext: NodeContext,
       if (sent.isEmpty) run.stopped.foreach(ex => throw asStatus(ex))
 
       CollateralJoinResult(sent,
-        (run.accepted.size.toLong * (CollateralParams.PRINCIPAL_FLOOR + emissionConfig.txFee)).toString,
+        (run.accepted.size.toLong * (principal + emissionConfig.txFee)).toString,
         run.stopped.map(ex => Option(ex.getMessage).getOrElse(ex.getClass.getSimpleName)))
     } finally
       // Unconditional: a run that stopped part way still consumed keys and wallet boxes, and the
@@ -594,6 +602,25 @@ class CollateralExecution(nodeContext: NodeContext,
     if (count < 1 || count > MaxJoinCount)
       throw new IllegalArgumentException(s"count must be between 1 and $MaxJoinCount")
     count
+  }
+
+  /**
+   * The priority bid a join posts, in nanoERG. Absent means the floor.
+   *
+   * Deliberately NOT capped at [[RollupProtocol.breakEvenFinderFee]]. Past that the coinbase stops
+   * covering the principal, but the transaction fees of the block the box is mined against still
+   * can, so the ceiling is a judgement the caller makes with the quote's numbers in front of them.
+   * The bound here only keeps one position's principal inside a Long and below a whole block reward.
+   */
+  private def joinFinderFee(raw: Option[String]): Long = {
+    val fee = raw.map(_.trim).filter(_.nonEmpty).map(s =>
+      Try(s.toLong).getOrElse(throw new IllegalArgumentException(
+        s"finderFeeEachNanoErgs '$s' is not an integer number of nanoERG"))).getOrElse(0L)
+    if (fee < 0 || fee > CollateralParams.BLOCK_REWARD)
+      throw new IllegalArgumentException(
+        s"finderFeeEachNanoErgs must be between 0 and ${CollateralParams.BLOCK_REWARD} nanoERG; " +
+          s"the contract charges ${CollateralParams.POOL_MULTIPLE}x the bid into the pool on top of it")
+    fee
   }
 
   private def paged(limit: Option[Int], offset: Option[Int]): (Int, Int) =

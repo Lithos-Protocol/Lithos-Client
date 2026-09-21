@@ -36,6 +36,14 @@ GET /info                     controllers.InfoApiController.getLithosInfo()
 GET /mining/bestNISP          controllers.MiningApiController.getBestNISPAtHeight()
 GET /mining                   controllers.MiningApiController.getStratumInfo()
 
+# Routes for Statistics API (only /stats/local requires api_key)
+GET /stats                    controllers.StatsApiController.getStats()
+GET /stats/mining/totals       controllers.StatsApiController.getMiningTotals()
+GET /stats/mining/buckets      controllers.StatsApiController.getMiningBuckets()
+GET /stats/mining/hashrate     controllers.StatsApiController.getMiningHashrate()
+GET /stats/collateral          controllers.StatsApiController.getCollateralStats()
+GET /stats/local               controllers.StatsApiController.getLocalMiningStats()
+
 # Routes for LithosDex API
 #
 # `/dex` is now LithosDex alone; the PlasmaDex routes that shared this prefix were removed with the

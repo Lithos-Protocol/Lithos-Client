@@ -36,6 +36,9 @@ object MiningMessages {
   /** The node cache or chain no longer supports the currently served job. */
   case object InvalidateTemplate
 
+  /** The job manager discarded its served jobs during stop or restart. */
+  case object JobManagerStopped
+
   /**
    * Sent by StratumConnection (via LithosPool.forward) when a miner subscribes.
    * LithosJobManager replies with SubscriptionData.

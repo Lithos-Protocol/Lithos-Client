@@ -42,6 +42,9 @@ class Module(environment: Environment, configuration: Configuration) extends Abs
     bind(classOf[DataBoxSource]).toInstance(DataBoxSource.Stored)
 
     // Bindings
+    bind(classOf[stats.DexStatsSource]).to(classOf[stats.NodeDexStatsSource])
+    bindActor(classOf[stats.StatsCollector], "stats-collector", p =>
+      p.withDispatcher("lithos-contexts.stats-dispatcher").withMailbox("stats-mailbox"))
     bindActor(classOf[StateSnapshotActor], "state-snapshot", p => p.withDispatcher("lithos-contexts.database-dispatcher"))
     bindActor(classOf[StateFrame], "state-frame", p => p.withDispatcher("lithos-contexts.sync-dispatcher"))
     bindActor(classOf[MempoolView], "mempool-view", p => p.withDispatcher("lithos-contexts.sync-dispatcher"))

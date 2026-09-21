@@ -123,11 +123,10 @@ class EmissionBuilderSpec extends AnyPropSpec with EmissionSpecBase with Mockito
   }
 
   /**
-   * A lender may bid for priority by naming a fee channel above the dust budget and posting five
-   * times the offer, and the mining path ranks such a box. This client does not create one: there
-   * is no way to choose a bid, so every position it opens must offer the finder nothing.
+   * Bidding is opt-in. An omitted fee has to keep producing exactly the box this client made before
+   * bidding existed, since that is what every caller that does not pass one still expects.
    */
-  property("genJoin creates only zero-priority positions") {
+  property("genJoin without a bid posts at the floor and offers the finder nothing") {
     withBuilder { (ctx, wallet, txs) =>
       val signed = signs(txs.genJoin(
         ctx,
@@ -141,6 +140,48 @@ class EmissionBuilderSpec extends AnyPropSpec with EmissionSpecBase with Mockito
       feeChannel shouldEqual CollateralParams.DUST_BUDGET
       RollupProtocol.finderFee(feeChannel) shouldEqual 0L
       queueOut.getValue shouldEqual CollateralParams.PRINCIPAL_FLOOR
+    }
+  }
+
+  /**
+   * A bid names a fee channel above the dust budget, and the enforcer demands the pool's four-fold
+   * premium alongside it. Both halves are checked against the arithmetic the contract does, not
+   * against a number restated here: a box short by one nanoERG is rejected at the head of the queue.
+   */
+  property("genJoin with a bid posts the fee channel and the pool's premium") {
+    withBuilder { (ctx, wallet, txs) =>
+      val bid = 2000000L
+      val signed = signs(txs.genJoin(
+        ctx,
+        emissionAt(ctx, currentBlock = 0, lenderSet = Seq.empty, head = 0L, tail = 0L, lit = litSupply),
+        config(ctx),
+        wallet.p2pk,
+        Seq(funding(ctx, wallet, permitAt(0L))),
+        bid))
+
+      val queueOut = signed.getOutputsToSpend.get(1)
+      val feeChannel = queueOut.getRegisters.get(0).getValue.asInstanceOf[Long]
+      withClue("the fee channel carries the dust budget plus the bid: ") {
+        feeChannel shouldEqual CollateralParams.DUST_BUDGET + bid
+        RollupProtocol.finderFee(feeChannel) shouldEqual bid
+      }
+      withClue("the box posts the bid and four times it on top of the floor: ") {
+        queueOut.getValue shouldEqual CollateralParams.PRINCIPAL_FLOOR + bid * 5
+        queueOut.getValue shouldEqual
+          CollateralParams.BLOCK_REWARD - CollateralParams.FEE_CAP + feeChannel +
+            RollupProtocol.poolBonus(bid)
+      }
+    }
+  }
+
+  /** The bid the coinbase exactly repays, which the quote shows a lender as the top of the range. */
+  property("break-even leaves the lender square against the block reward") {
+    RollupProtocol.breakEvenFinderFee shouldEqual 17000000L
+    RollupProtocol.netAtCoinbase(RollupProtocol.breakEvenFinderFee) shouldEqual 0L
+    RollupProtocol.netAtCoinbase(0L) shouldEqual
+      CollateralParams.BLOCK_REWARD - CollateralParams.PRINCIPAL_FLOOR
+    withClue("one nanoERG past it the coinbase no longer covers the principal: ") {
+      RollupProtocol.netAtCoinbase(RollupProtocol.breakEvenFinderFee + 1L) should be < 0L
     }
   }
 

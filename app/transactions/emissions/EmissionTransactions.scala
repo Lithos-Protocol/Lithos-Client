@@ -1,7 +1,7 @@
 package transactions.emissions
 
 import configs.EmissionConfig
-import lfsm.{CollateralParams, EmissionSchedule, LFSMHelpers}
+import lfsm.{CollateralParams, EmissionSchedule, LFSMHelpers, RollupProtocol}
 import mutations.{NodeWallet, NotEnoughInputsException}
 import node.MutationConversions._
 import node.NodeApi
@@ -61,8 +61,12 @@ case class ConfigState(permitParams: Seq[Long],
 case class EmissionTip(box: InputUTXO, ancestors: Seq[NodeTransaction])
 
 /** One join that reached the node, whatever the node then did with it. */
-case class JoinAttempt(lender: Address, position: Long, permit: Long, txId: String, outcome: String) {
+case class JoinAttempt(lender: Address, position: Long, permit: Long, txId: String, outcome: String,
+                       finderFee: Long = 0L) {
   def accepted: Boolean = outcome == transactions.engine.EngineBroadcast.Accepted
+
+  /** What this position actually put up, floor plus the bid and its pool premium. */
+  def principal: Long = RollupProtocol.queuePrincipal(finderFee)
 }
 
 /**
@@ -363,12 +367,18 @@ class EmissionTransactions(prover: NodeWallet,
    * The lender key is fixed here in R5 and Activate only carries it through, so callers must source
    * the address from [[freeLenderKeys]]: a key already in the active set produces a box that can
    * only be Cleared, forfeiting 2.915 ERG. Always funded, since it puts the principal up.
+   *
+   * `finderFee` is the lender's bid for priority, in nanoERG, paid to whichever miner spends the
+   * resulting collateral box. The enforcer demands its pool premium alongside it, so the box posts
+   * `PRINCIPAL_FLOOR + 5 * finderFee`. Zero posts at the floor, which is what this client did before
+   * bidding existed.
    */
   def genJoin(ctx: BlockchainContext,
               em: InputUTXO,
               cfg: InputUTXO,
               lender: Address,
-              funding: Seq[InputUTXO]): SignedTransaction = {
+              funding: Seq[InputUTXO],
+              finderFee: Long = 0L): SignedTransaction = {
     val c = contracts(ctx)
     val st = readEmission(em)
     val permit = readConfig(cfg).permitAt(st.backlog)
@@ -381,17 +391,20 @@ class EmissionTransactions(prover: NodeWallet,
       .removeToken(st.queueToken.id, 1L)
       .withReg(3, ErgoValue.of(st.tail + 1L))
 
-    val queueOut = UTXO(c.gate, CollateralParams.PRINCIPAL_FLOOR,
+    val principal = RollupProtocol.queuePrincipal(finderFee)
+
+    val queueOut = UTXO(c.gate, principal,
       Seq(Token(st.queueToken.id, 1L)) ++
         (if (permit > 0) Seq(Token(litId, permit)) else Seq.empty[Token]),
       Seq(
-        ErgoValue.of(CollateralParams.DUST_BUDGET),                     // R4 feeValue
+        ErgoValue.of(RollupProtocol.feeChannel(finderFee)),             // R4 feeValue
         ErgoValue.of(Contract.fromAddress(lender).sigmaBoolean.get),    // R5 lenderPk
         ErgoValue.of(CollateralParams.EXTENSION_FLAG),                  // R6 extensionFlag
         ErgoValue.of(st.tail)))                                         // R7 queue position
 
     logger.info(s"Join at position ${st.tail} (backlog ${st.backlog}): " +
-      s"${CollateralParams.PRINCIPAL_FLOOR} nanoERG principal, $permit LIT permit, lender $lender")
+      s"$principal nanoERG principal, $permit LIT permit, " +
+      s"${if (finderFee > 0) s"$finderFee nanoERG finder fee, " else "no finder fee, "}lender $lender")
 
     prover.sign(TxBuilder(ctx)
       .setInputs((emIn +: funding): _*)
@@ -626,10 +639,12 @@ class EmissionTransactions(prover: NodeWallet,
    *
    * @param permitWithinBudget consulted before each attempt, so a run stops cleanly rather than
    *                           sending a position that costs more permit than the caller allows
+   * @param finderFee          the priority bid every position in this run posts, in nanoERG
    */
   def runJoins(ctx: BlockchainContext, tip: EmissionTip, cfgBox: InputUTXO, cs: ConfigState,
                keys: Seq[Address], operation: String, guard: transactions.engine.EngineJoinGuard,
-               permitWithinBudget: Long => Boolean = _ => true): JoinRun = {
+               permitWithinBudget: Long => Boolean = _ => true,
+               finderFee: Long = 0L): JoinRun = {
     val funding = new FundingSource
     val litId = readEmission(tip.box).lit.map(_.id).getOrElse(LFSMHelpers.getLitId(ctx.getNetworkType))
     var em = tip.box
@@ -653,9 +668,9 @@ class EmissionTransactions(prover: NodeWallet,
             // read before the run, and an earlier join in it has moved the queue since.
             require(!takenLenderKeys(ctx, EmissionTip(em, Seq.empty)).contains(lenderKey),
               "lender key became unavailable")
-            val inputs = funding.take(CollateralParams.PRINCIPAL_FLOOR + config.txFee * 2,
+            val inputs = funding.take(RollupProtocol.queuePrincipal(finderFee) + config.txFee * 2,
               if (permit > 0) Some(Token(litId, permit)) else None)
-            val sTx = genJoin(ctx, em, cfgBox, lender, inputs)
+            val sTx = genJoin(ctx, em, cfgBox, lender, inputs, finderFee)
             // Hold signable change before crossing the node boundary. A mempool-aware wallet
             // refresh may expose it immediately after acceptance, before this thread can chain
             // the next join, so post-send reservation is too late.
@@ -664,7 +679,7 @@ class EmissionTransactions(prover: NodeWallet,
               operation + em.id.toString, alive)
             // Recorded before the outcome is enforced: a position that reached the node has spent
             // principal and must be reported whether or not it was accepted.
-            attempts :+= JoinAttempt(lender, position, permit, result.txId, result.outcome)
+            attempts :+= JoinAttempt(lender, position, permit, result.txId, result.outcome, finderFee)
             val txId = result.requireAccepted()
             funding.clearPending()
             chained.walletChange.foreach(funding.markAccepted)
@@ -685,7 +700,8 @@ class EmissionTransactions(prover: NodeWallet,
    * because a join that only went into this miner's own candidate would mostly never land.
    *
    * Bounded on three configured axes: how many boxes may be live at once, how many to add per pass,
-   * and the most to pay in permit for one of them.
+   * and the most to pay in permit for one of them. Every position posts `emission.priorityFeeNanoErgs`
+   * as its bid for priority, which is 0 by default and so posts at the floor.
    *
    * @return the ids of the transactions sent
    */
@@ -703,7 +719,18 @@ class EmissionTransactions(prover: NodeWallet,
     val room = config.maxOwnCollateral - ourLive
 
     logger.info(s"Self-collateralization: ${mine.size} wallet key(s), $ourLive already committed, " +
-      s"budget ${config.maxOwnCollateral}, ${taken.size} key(s) taken protocol-wide")
+      s"budget ${config.maxOwnCollateral}, ${taken.size} key(s) taken protocol-wide" +
+      (if (config.priorityFeeNanoErgs > 0)
+        s", bidding ${config.priorityFeeNanoErgs} nanoERG per position" else ""))
+
+    // Every pass, not once at startup: the bid is what each position locks up, and a config reload
+    // can raise it under a miner who set it while block fees were high.
+    if (config.priorityFeeNanoErgs > RollupProtocol.breakEvenFinderFee)
+      logger.warn(s"emission.priorityFeeNanoErgs is ${config.priorityFeeNanoErgs} nanoERG, above the " +
+        s"${RollupProtocol.breakEvenFinderFee} break-even: each position locks " +
+        s"${RollupProtocol.queuePrincipal(config.priorityFeeNanoErgs)} nanoERG and the 3 ERG coinbase " +
+        s"returns ${-RollupProtocol.netAtCoinbase(config.priorityFeeNanoErgs)} nanoERG less than that. " +
+        "The rest has to come from the fees of the block each box is mined against")
 
     if (room <= 0) {
       logger.info(s"Already holding $ourLive collateral position(s) - nothing to add")
@@ -721,7 +748,7 @@ class EmissionTransactions(prover: NodeWallet,
             logger.info(s"Permit has reached $permit LIT, past the ${config.maxPermitPerJoin} budget " +
               "- stopping this pass")
           affordable
-        })
+        }, config.priorityFeeNanoErgs)
         run.attempts.filter(_.accepted).foreach(a => logger.info(s"Sent join ${a.txId} for lender ${a.lender}"))
         run.stopped.foreach {
           case ex: NotEnoughInputsException =>

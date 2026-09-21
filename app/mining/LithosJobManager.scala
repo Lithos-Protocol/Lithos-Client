@@ -1,6 +1,6 @@
 package mining
 
-import akka.actor.Actor
+import akka.actor.{Actor, ActorRef, Cancellable}
 import evaluation.NTable
 import lfsm.LFSMHelpers
 import mining.MiningMessages._
@@ -13,6 +13,7 @@ import stratum.data.{MiningCandidate, Options}
 
 import scala.collection.mutable
 import scala.util.Try
+import scala.concurrent.duration._
 
 /**
  * Actor that owns all job-management and share-validation state.
@@ -29,11 +30,20 @@ import scala.util.Try
  *  RequestSubscription → SubscriptionData
  *  ProcessShare      → ShareResult
  */
-class LithosJobManager(options: Options) extends Actor {
+class LithosJobManager(options: Options, statsCollector: Option[ActorRef] = None) extends Actor {
 
   import LithosJobManager._
 
   private val logger: Logger = LoggerFactory.getLogger("LithosJobManager")
+  private val statistics = new stats.LocalMiningStats("shares")
+  private var statsTimer: Option[Cancellable] = None
+  private var assignedWork = Map.empty[String, BigInt]
+  private case object PublishShareStats
+
+  override def preStart(): Unit = statsCollector.foreach { _ =>
+    statsTimer = Some(context.system.scheduler.scheduleWithFixedDelay(1.second, 1.second,
+      self, PublishShareStats)(context.dispatcher))
+  }
 
   // ─── state ────────────────────────────────────────────────────────────────
 
@@ -50,9 +60,16 @@ class LithosJobManager(options: Options) extends Actor {
   /** Templates ignored since the last real job, logged so the suppression is visible. */
   private var suppressed: Int = 0
 
+  override def postStop(): Unit = {
+    statsTimer.foreach(_.cancel())
+    statsCollector.foreach(_ ! statistics.snapshot(stopped = true))
+    context.parent ! JobManagerStopped
+  }
+
   // ─── receive ──────────────────────────────────────────────────────────────
 
   override def receive: Receive = {
+    case PublishShareStats => statsCollector.foreach(_ ! statistics.snapshot())
 
     // Check admission before installing the job: subscriptions can observe it before the
     // parent processes its publication acknowledgement.
@@ -81,6 +98,7 @@ class LithosJobManager(options: Options) extends Actor {
     case InvalidateTemplate =>
       currentJob = None
       validJobs.clear()
+      assignedWork = Map.empty
       currentIdentity = (-1L, false, "")
 
     case ProcessTemplate(candidate, tau, usesCollateral, reducedShareMessages, mustPublish, publication) =>
@@ -101,6 +119,11 @@ class LithosJobManager(options: Options) extends Actor {
         currentIdentity = identity
         validJobs.put(jobId, template)
         pruneOldJobs(jobId)
+        if (statsCollector.isDefined) {
+          val target = BigInt(template.tau).max(BigInt(template.target)).max(BigInt(template.superShareThreshold))
+          assignedWork = assignedWork.filter { case (id, _) => validJobs.contains(id) }
+            .updated(jobId, if (target > 0) LFSMHelpers.TARGET_MAX_LITHOS / target else BigInt(0))
+        }
         // The header is logged because it is the only way to tell a freshly assembled candidate from
         // the one the node had cached — two jobs with the same header mean the node did no work.
         logger.info(s"New job $jobId at height ${candidate.height} usesCollateral=$usesCollateral " +
@@ -136,10 +159,20 @@ class LithosJobManager(options: Options) extends Actor {
     // empties validJobs, so every connected miner is told "old block" until the next poll builds a
     // job. The inputs are miner-supplied, so this must never be reachable.
     case msg: ProcessShare =>
-      sender() ! Try(validateShare(msg)).recover { case ex =>
+      val result = Try(validateShare(msg)).recover { case ex =>
         logger.error(s"Share validation threw for job ${msg.jobId} from ${msg.ipAddress}", ex)
         ShareRejected(20, "malformed share", msg.extraNonce1)
       }.get
+      sender() ! result
+      if (statsCollector.isDefined) result match {
+        case accepted: ShareAccepted =>
+          statistics.add("accepted")
+          statistics.add("acceptedAssignedWork", assignedWork.getOrElse(msg.jobId, BigInt(0)))
+          if (accepted.isBlock) statistics.add("blockCandidates")
+          if (accepted.isSuperShare) statistics.add("superShares")
+          if (validJobs.get(msg.jobId).exists(_.reducedShareMessages)) statistics.add("acceptedWithReducedReporting")
+        case rejected: ShareRejected => statistics.add(s"rejected${rejected.id}")
+      }
   }
 
   // ─── private helpers ──────────────────────────────────────────────────────

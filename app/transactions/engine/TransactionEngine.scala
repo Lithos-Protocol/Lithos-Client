@@ -107,9 +107,16 @@ class TransactionEngine @Inject()(node: NodeContext,
     context.actorSelection("/user/transaction-processor") !
       transactions.rollups.TransactionMessages.DropRollupStubs(blockId, reason)
 
+  private val fraudObserver = context.actorSelection("/user/rollup-evaluator")
+  private val statisticsEnabled = config.getOptional[Boolean]("stats.enabled").getOrElse(true)
   private def newRollupExecution(eligible: () => Boolean): RollupExecution =
     new RollupExecution(node, self, sync, mempool, config, dataBoxes, nodeApi, eligible, rollupWorker,
-      discardRollupStubs)
+      discardRollupStubs, (stub, txId) => {
+        if (statisticsEnabled) stub.fpInfo.foreach { case (miner, proof) =>
+          fraudObserver ! stats.FraudSubmissionObserved(stub.rollupBlockId,
+            org.bouncycastle.util.encoders.Hex.toHexString(miner), proof, txId)
+        }
+      })
 
   override protected def candidateExecution(eligible: () => Boolean): RollupExecution = newRollupExecution(eligible)
   private val worker = context.system.dispatchers.lookup("lithos-contexts.engine-io-dispatcher")

@@ -343,11 +343,10 @@ object LDBoxes {
    * itself reads them: the value covers `reservesX + pendingX` and the token entry
    * `reservesY + pendingY`.
    *
-   * `None` rather than a throw for a box that does not decode: the lineage is filtered by ErgoTree,
-   * so anything reaching here should be a pool box, but a history request is not the place to fail
-   * a whole series over one unreadable entry.
+   * Returns `None` for a box that does not decode. Callers requiring continuous history must reject
+   * that read rather than silently joining the snapshots on either side of the unreadable box.
    */
-  private def readSnapshot(b: IndexedBox): Option[PoolSnapshot] =
+  def readSnapshot(b: IndexedBox): Option[PoolSnapshot] =
     Try {
       def reg(i: Int): ErgoValue[_] =
         ErgoValue.fromHex(b.box.additionalRegisters.get(i).getOrElse(
@@ -448,12 +447,15 @@ object LDBoxes {
    * @param snapshots the confirmed lineage, oldest first
    */
   def recentTransitions(ctx: BlockchainContext, nodeApi: NodeApi, snapshots: Seq[PoolSnapshot],
-                        limit: Int): Vector[PoolTransition] = {
-    val n = ctx.getNetworkType
+                        limit: Int): Vector[PoolTransition] =
+    recentTransitions(ctx.getNetworkType, nodeApi, snapshots, limit)
+
+  def recentTransitions(n: org.ergoplatform.appkit.NetworkType, nodeApi: NodeApi,
+                        snapshots: Seq[PoolSnapshot], limit: Int): Vector[PoolTransition] = {
     val poolNft = LDHelpers.getPoolNFT(n).toString
     val vaultNft = LDHelpers.getVaultNFT(n).toString
 
-    val pending = mempoolTransitions(ctx, nodeApi, snapshots.map(s => s.boxId -> s).toMap)
+    val pending = mempoolTransitions(n, nodeApi, snapshots.map(s => s.boxId -> s).toMap)
     // Inputs 1 and 2 are where an order or the vault can sit
     val inputIds = pending.flatMap { case (tx, _, _) => tx.inputs.slice(1, 3).map(_.boxId) }.distinct
     val pendingInputs =
@@ -492,9 +494,13 @@ object LDBoxes {
    */
   def mempoolTransitions(ctx: BlockchainContext,
                          nodeApi: NodeApi,
+                         known: Map[String, PoolSnapshot]): Seq[(NodeTransaction, PoolSnapshot, PoolSnapshot)] =
+    mempoolTransitions(ctx.getNetworkType, nodeApi, known)
+
+  def mempoolTransitions(network: org.ergoplatform.appkit.NetworkType, nodeApi: NodeApi,
                          known: Map[String, PoolSnapshot]): Seq[(NodeTransaction, PoolSnapshot, PoolSnapshot)] = {
-    val nft = LDHelpers.getPoolNFT(ctx.getNetworkType).toString
-    val ergoTreeHex = DexContracts(ctx).liquidityPool.ergoTreeHex
+    val nft = LDHelpers.getPoolNFT(network).toString
+    val ergoTreeHex = DexContracts(network).liquidityPool.ergoTreeHex
 
     val txs = nodeApi.unconfirmedTransactionsByErgoTree(ergoTreeHex, Paging(0, PageSize)) match {
       case Success(found) => found
