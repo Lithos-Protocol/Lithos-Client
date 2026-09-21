@@ -23,7 +23,7 @@ class MiningAccountingSpec extends AnyFlatSpec with Matchers {
     other.hashedPropBytes -> NispCommitment(200, "11" * 32).bytes)
   private val proof = dictionary.lookUp(local.hashedPropBytes, other.hashedPropBytes)
   private val at = MiningStatsStoreSpec.cursor(100)
-  private val mined = LithosBlockRecord("mined", 50, 50000, "genesis", "holding", nft.toString, "1", "1")
+  private val mined = LithosBlockRecord("mined", 50, 50000, "genesis", "holding", nft.toString, "1", "1", "0")
   private val input = TxOutput("payout", 14000001L, "payout-tree",
     ReducerFixtures.rollupRegisters(dictionary, 2, BigInt(300), RollupInfoState.payout(10000001L, 101, 4000000)),
     Seq(Token(nft, 1), Token(lit, 101)), "previous", 99, 0)

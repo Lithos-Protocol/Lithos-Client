@@ -32,8 +32,13 @@ class NodeMiningStatsSourceSpec extends AnyFlatSpec with Matchers with MockitoSu
     "", out.creationHeight, 1L)
   private def transaction(id: String, height: Int, inputs: Seq[IndexedBox], outputs: Seq[IndexedBox]): IndexedTransaction =
     IndexedTransaction(id, inputs, Seq.empty, outputs, height, 1, header(height).id, header(height).timestamp, 0, 1L, 100)
-  private val collateral = indexed(ReducerFixtures.resolvedInput(origin, Some(protocol.collateralToken), 100))
-    .copy(spentTransactionId = Some(genesisTx.id))
+  /** Every box the enforcer accepted names its fee channel in R4; the shared fixture leaves it out. */
+  private def feeChannel(finderFee: Long): String =
+    ErgoValue.of(lfsm.CollateralParams.DUST_BUDGET + finderFee).toHex
+  private def collateralBidding(finderFee: Long): IndexedBox =
+    indexed(ReducerFixtures.resolvedInput(origin, Some(protocol.collateralToken), 100)
+      .copy(registers = Seq(feeChannel(finderFee)))).copy(spentTransactionId = Some(genesisTx.id))
+  private val collateral = collateralBidding(0L)
   private val genesis = transaction(genesisTx.id, 100, Seq(collateral), genesisTx.outputs.map(indexed))
 
   private def payout(finalSpend: Boolean = false, keys: Array[Array[Byte]] = Array(protocol.localMinerHash),
@@ -157,6 +162,87 @@ class NodeMiningStatsSourceSpec extends AnyFlatSpec with Matchers with MockitoSu
     capped.partial shouldBe true
     when(api.info()).thenReturn(Success(ChainFixtures.infoAt(121)))
     intercept[IllegalArgumentException](source.collateral(NodeMiningStatsSource.cursor(header(120))))
+  }
+
+  /**
+   * The bids are read on the pass that already has every box. Percentiles cover the floor boxes too,
+   * because a lender is competing against the whole inventory rather than the bidders alone.
+   */
+  it should "summarise the bids carried by the observed boxes" in {
+    val (api, source) = fixture(Seq.empty)
+    val bids = Seq(0L, 0L, 0L, 1000000L, 4000000L, 9000000L, 20000000L)
+    when(api.unspentBoxesByTokenId(anyString(), any[Paging], any[SortDirection], any[MempoolOptions]))
+      .thenReturn(Success(bids.zipWithIndex.map { case (bid, i) =>
+        collateralBidding(bid).copy(box = collateralBidding(bid).box.copy(boxId = s"bid-$i")) }))
+
+    val fees = source.collateral(NodeMiningStatsSource.cursor(header(120))).get.fees
+    fees.atFloor shouldBe 3
+    fees.bidding shouldBe 4
+    fees.unreadable shouldBe 0
+    fees.totalNanoErg shouldBe "34000000"
+    fees.bestNanoErg shouldBe "20000000"
+    withClue("nearest-rank over all seven, so the median is a bid a box really carries: ") {
+      fees.medianNanoErg shouldBe "1000000"
+      fees.p90NanoErg shouldBe "20000000"
+    }
+    withClue("every box lands in exactly one band: ") {
+      fees.buckets.map(_.boxes).sum shouldBe 7
+      fees.buckets.head.boxes shouldBe 3
+      fees.buckets.last.boxes shouldBe 1
+    }
+  }
+
+  it should "count a box with no readable fee channel instead of failing the whole inventory" in {
+    val (api, source) = fixture(Seq.empty)
+    val broken = collateral.copy(box = collateral.box.copy(boxId = "broken",
+      additionalRegisters = NodeRegisters(Map("R4" -> "not-a-register"))))
+    val belowFloor = collateral.copy(box = collateral.box.copy(boxId = "below",
+      additionalRegisters = NodeRegisters(Map("R4" -> ErgoValue.of(1L).toHex))))
+    when(api.unspentBoxesByTokenId(anyString(), any[Paging], any[SortDirection], any[MempoolOptions]))
+      .thenReturn(Success(Seq(collateral, broken, belowFloor)))
+
+    val inventory = source.collateral(NodeMiningStatsSource.cursor(header(120))).get
+    withClue("the inventory still counts and values all three: ") {
+      inventory.boxes shouldBe 3
+      inventory.status shouldBe "ready"
+    }
+    inventory.fees.unreadable shouldBe 2
+    inventory.fees.atFloor shouldBe 1
+    inventory.fees.bidding shouldBe 0
+  }
+
+  /**
+   * A collateral box with no R4 is refused outright rather than recorded as having bid nothing,
+   * which would understate realized fees forever. Genesis authentication rejects it first — the fee
+   * read has its own guard behind that, so this pins the refusal, not which layer produced it.
+   */
+  it should "refuse a genesis whose collateral names no readable fee channel" in {
+    val stripped = collateral.copy(box = collateral.box.copy(additionalRegisters = NodeRegisters.empty))
+    intercept[IllegalArgumentException](read(fixture(Seq(genesis.copy(inputs = Seq(stripped))), 100)._2, 100))
+  }
+
+  it should "record the bid the spent collateral box carried" in {
+    val bidding = collateralBidding(3000000L)
+    val (_, source) = fixture(Seq(genesis.copy(inputs = Seq(bidding))), 100)
+    val record = read(source, 100)
+
+    record.blocks.map(_.finderFeeNanoErg) shouldBe Vector("3000000")
+    val totals = MiningAccounting.contribution(record)
+    totals.amount("lithos.finderFeeNanoErg") shouldBe BigInt(3000000)
+    totals.amount("lithos.blocksWithFinderFee") shouldBe BigInt(1)
+    withClue("the pool's premium is inside the holding value, never a key of its own: ") {
+      totals.values.keys.exists(_.contains("poolBonus")) shouldBe false
+    }
+  }
+
+  it should "leave a floor-priced block out of the bidding count while still recording a zero" in {
+    val record = read(fixture(Seq(genesis), 100)._2, 100)
+    record.blocks.map(_.finderFeeNanoErg) shouldBe Vector("0")
+    val totals = MiningAccounting.contribution(record)
+    totals.amount("lithos.finderFeeNanoErg") shouldBe BigInt(0)
+    withClue("a zero contribution is dropped from the map rather than stored: ") {
+      totals.values.contains("lithos.blocksWithFinderFee") shouldBe false
+    }
   }
 
   "Registration statistics" should "use the authenticated data-box identity rather than hashing executable context bytes" in {

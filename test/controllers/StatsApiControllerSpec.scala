@@ -184,6 +184,28 @@ class StatsApiControllerSpec extends AnyFlatSpec with Matchers with MockitoSugar
     (json \ "source" \ "blockId").as[String] shouldBe source.blockId
   }
 
+  /** The bid book rides on the inventory response, so its shape is part of that endpoint's contract. */
+  it should "serialise the bid distribution as exact strings beside the inventory" in {
+    val mining = mock[MiningStatsRefresh]
+    when(mining.collateral).thenReturn(CollateralStats("ready", Some(1000L), Some(source), 4,
+      "11660000000", partial = false,
+      fees = CollateralFeeStats.of(Vector(0L, 0L, 2000000L, 9223372036854775807L), unreadable = 1)))
+    val fees = contentAsJson(call(withMining(mining).getCollateralStats())) \ "fees"
+
+    (fees \ "atFloor").as[Int] shouldBe 2
+    (fees \ "bidding").as[Int] shouldBe 2
+    (fees \ "unreadable").as[Int] shouldBe 1
+    withClue("a total past Long must not have been summed into one: ") {
+      (fees \ "totalNanoErg").as[String] shouldBe "9223372036856775807"
+      (fees \ "bestNanoErg").as[String] shouldBe "9223372036854775807"
+    }
+    (fees \ "buckets").as[Seq[play.api.libs.json.JsObject]].map(b => (b \ "boxes").as[Int]).sum shouldBe 4
+    withClue("only the open-ended top band omits its upper bound: ") {
+      (fees \ "buckets").as[Seq[play.api.libs.json.JsObject]]
+        .count(b => (b \ "toNanoErg").toOption.isEmpty) shouldBe 1
+    }
+  }
+
   it should "keep local producer sessions, stopped state and fraud deduplication limits visible" in {
     val cache = mock[StatsCache]
     when(cache.settings).thenReturn(StatsConfig.Default)

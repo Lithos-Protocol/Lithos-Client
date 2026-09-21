@@ -11,7 +11,9 @@ import java.nio.charset.StandardCharsets.UTF_8
 import java.nio.file.Paths
 
 object MiningStatsStore {
-  val SchemaVersion: Int = 3
+  // 4 adds the per-block finder fee. The version is part of the database path, so an older store is
+  // left alone rather than migrated: its records predate the field and would not parse.
+  val SchemaVersion: Int = 4
   def open(settings: StatsStorageConfig, node: NodeContext, protocol: SyncProtocolContext): MiningStatsStore = {
     val identity = Json.obj("schema" -> SchemaVersion, "network" -> protocol.networkType.toString,
       "startHeight" -> protocol.rollupStartHeight, "holding" -> protocol.holdingErgoTree,

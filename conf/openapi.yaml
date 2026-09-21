@@ -566,9 +566,14 @@ paths:
       operationId: getCollateralStats
       tags: [stats]
       description: |
-        How many unspent boxes match the configured collateral script and token, and what they hold
-        in total. This is protocol-wide inventory — not this client's spendable balance, not mining
-        income, and no promise that the local miner can use any given box.
+        How many unspent boxes match the configured collateral script and token, what they hold in
+        total, and what they bid. This is protocol-wide inventory — not this client's spendable
+        balance, not mining income, and no promise that the local miner can use any given box.
+
+
+        `fees` is the live bid book. A miner spends whichever collateral box pays it most, so the
+        distribution there is what a lender is bidding against and `fees.bestNanoErg` is the bid to
+        beat. Read it with `/collateral/active`, which names the individual boxes behind it.
 
         Each background read looks at up to 1,000 boxes; hitting that cap sets `partial` and reports
         only what was scanned. Check `status` and `observedAt` before showing the numbers as current:
@@ -2572,7 +2577,9 @@ components:
         | `local.payout.*` | Confirmed payouts to this client's primary mining address. |
         | `network.payout.*` | Every payout seen for the configured protocol, local ones included. |
         | `collateral.consumedNanoErg` | Collateral spent by genesis transactions. Not income. |
-        | `holding.genesisNanoErg` | Value placed in holding boxes at genesis. |
+        | `holding.genesisNanoErg` | Value placed in holding boxes at genesis. Contains the pool's share of any priority bid. |
+        | `lithos.finderFeeNanoErg` | Priority bids paid to the miners that spent those collateral boxes. |
+        | `lithos.blocksWithFinderFee` | How many of those blocks carried a bid at all. |
         | `batching.<protocol>.*` | Executor fees earned filling `ergodex` or `lithosdex` orders. |
         | `lithos.batching.<protocol>.*` | The same, counting only blocks that carried a Lithos genesis. |
         | `rollup.<kind>.*` | Confirmed rollup transitions: `topUp`, `submission`, `evaluation`, `fraudProof`, `payoutReady`. |
@@ -2600,6 +2607,12 @@ components:
         `transaction.<kind>` covers `genesis`, the rollup kinds above, `payout`, `registration`,
         `ergodex`, `lithosdex`, `ergodexOtherPoolSpend` and `lithosdexOtherPoolSpend`. Those fees
         overlap the block fee totals.
+
+        **Priority bids.** `lithos.finderFeeNanoErg / lithos.blocks` is the mean bid across every
+        Lithos block; divide by `lithos.blocksWithFinderFee` instead for the mean across the blocks
+        that carried one. The contract charges the pool four times each bid, but that went into the
+        holding box and is already inside `holding.genesisNanoErg` — there is deliberately no
+        separate key for it, because adding one to the finder's take would count it twice.
 
         Divide a sum by its matching count for an average. `claimedScore` is protocol accounting,
         not measured hashrate. A transaction fee is a transaction's cost and not automatically this
@@ -2750,9 +2763,61 @@ components:
         formula:
           type: string
           enum: [sum-confirmed-lithos-block-difficulty/covered-seconds]
+    CollateralFeeBucket:
+      type: object
+      required: [fromNanoErg, boxes]
+      description: One band of the bid distribution. Both bounds are inclusive.
+      properties:
+        fromNanoErg:
+          $ref: '#/components/schemas/StatsInteger'
+        toNanoErg:
+          type: string
+          pattern: '^[0-9]+$'
+          description: Absent on the open-ended top band, which holds every bid above break-even.
+        boxes:
+          type: integer
+          minimum: 0
+    CollateralFeeStats:
+      type: object
+      required: [atFloor, bidding, unreadable, totalNanoErg, bestNanoErg, medianNanoErg, p90NanoErg, buckets]
+      description: |
+        The priority bids carried by the observed boxes — the book a miner picks from, since a miner
+        spends whichever box pays it most.
+
+        Percentiles cover every observed box, floor and bid alike, because that is the distribution a
+        lender competes against. While most boxes sit at the floor the median is `0`, which is the
+        honest answer rather than a gap in the data. `bestNanoErg` is the bid to beat.
+      properties:
+        atFloor:
+          type: integer
+          minimum: 0
+          description: Boxes bidding nothing.
+        bidding:
+          type: integer
+          minimum: 0
+          description: Boxes offering the finder something.
+        unreadable:
+          type: integer
+          minimum: 0
+          description: >-
+            Boxes whose R4 could not be read. Always 0 in practice — the contract writes it — and a
+            non-zero value means the inventory counts more boxes than the distribution does.
+        totalNanoErg:
+          $ref: '#/components/schemas/StatsInteger'
+        bestNanoErg:
+          $ref: '#/components/schemas/StatsInteger'
+        medianNanoErg:
+          $ref: '#/components/schemas/StatsInteger'
+        p90NanoErg:
+          $ref: '#/components/schemas/StatsInteger'
+        buckets:
+          type: array
+          description: The floor band first, then quarters of break-even, then everything above it.
+          items:
+            $ref: '#/components/schemas/CollateralFeeBucket'
     CollateralStats:
       type: object
-      required: [status, boxes, nanoErg, partial]
+      required: [status, boxes, nanoErg, partial, fees]
       properties:
         status:
           type: string
@@ -2776,6 +2841,8 @@ components:
         partial:
           type: boolean
           description: True when the scan hit its cap, or no complete observation exists yet.
+        fees:
+          $ref: '#/components/schemas/CollateralFeeStats'
         error:
           type: string
           description: Short failure summary. Details stay in the client log.
@@ -3590,7 +3657,9 @@ components:
           example: 2825000
 
     CollateralQueueEntry:
-      description: A position waiting in the collateral queue
+      description: >-
+        A position waiting in the collateral queue. Sorted by `finderFeeNanoErgs` the queue is the
+        forward book: bids that become spendable as it drains.
       type: object
       x-tags: collateral-market
       required:
@@ -3598,6 +3667,7 @@ components:
         - position
         - lenderAddress
         - principalNanoErgs
+        - finderFeeNanoErgs
         - permitLit
         - creationHeight
       properties:
@@ -3616,8 +3686,16 @@ components:
           example: '3WwbQFz3vgi8ChY9dM1haQLGDeQYe5U9z98bwWW4TqxxEAvyYu5y'
         principalNanoErgs:
           type: string
-          description: ERG committed to the block that consumes this box. Decimal string.
+          description: >-
+            ERG committed to the block that consumes this box, bid and pool premium included.
+            Decimal string.
           example: '2915000000'
+        finderFeeNanoErgs:
+          type: string
+          description: >-
+            What this position bids the miner that spends it. '0' means it posted at the floor and
+            bids nothing. Decimal string.
+          example: '0'
         permitLit:
           type: string
           description: LIT locked alongside it, returned on use. Zero when no permit applies. Decimal string.
@@ -3629,13 +3707,16 @@ components:
           example: 484102
 
     CollateralActiveEntry:
-      description: A live collateral box waiting to be spent by whichever miner finds the next block
+      description: >-
+        A live collateral box waiting to be spent by whichever miner finds the next block. Sorted by
+        `finderFeeNanoErgs` the active set is the spot book: the bids a miner can take right now.
       type: object
       x-tags: collateral-market
       required:
         - boxId
         - lenderAddress
         - valueNanoErgs
+        - finderFeeNanoErgs
         - carriedLit
         - creationHeight
       properties:
@@ -3648,8 +3729,16 @@ components:
           example: '3WwbQFz3vgi8ChY9dM1haQLGDeQYe5U9z98bwWW4TqxxEAvyYu5y'
         valueNanoErgs:
           type: string
-          description: ERG that becomes the pool's payout for the block spending it. Decimal string.
+          description: >-
+            ERG that becomes the pool's payout for the block spending it, bid and pool premium
+            included. Decimal string.
           example: '2915000000'
+        finderFeeNanoErgs:
+          type: string
+          description: >-
+            What this box pays the miner that spends it, on top of its share of the payout. '0'
+            means it bids nothing. Decimal string.
+          example: '0'
         carriedLit:
           type: string
           description: >

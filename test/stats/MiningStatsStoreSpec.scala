@@ -13,10 +13,11 @@ object MiningStatsStoreSpec {
   val identity = Json.obj("schema" -> 1, "miner" -> "local")
   def cursor(height: Int, branch: String = "a", time: Long = 0L): MiningCursor =
     MiningCursor(height, s"$branch-$height", s"$branch-${height - 1}", time + height.toLong * 1000)
-  def record(at: MiningCursor, previous: MiningCursor, amount: Long = Long.MaxValue): MiningBlockRecord =
+  def record(at: MiningCursor, previous: MiningCursor, amount: Long = Long.MaxValue,
+             finderFee: Long = 0L): MiningBlockRecord =
     MiningBlockRecord(at, previous, (BigInt(1) << 100).toString,
       Vector(LithosBlockRecord(at.blockId, at.height, at.timestamp, s"genesis-${at.blockId}",
-        "holding", "collateral", "1000000", "2000000")),
+        "holding", "collateral", "1000000", "2000000", finderFee.toString)),
       Vector(MiningPaymentRecord(s"pay-${at.blockId}", s"output-${at.blockId}", "payout", "nft", "mined", 1,
         at.blockId, at.height, at.timestamp, amount.toString)))
 }

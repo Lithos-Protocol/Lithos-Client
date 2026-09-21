@@ -124,6 +124,11 @@ object MiningAccounting {
     record.blocks.foreach { b =>
       add("collateral.consumedNanoErg", BigInt(b.collateralNanoErg))
       add("holding.genesisNanoErg", BigInt(b.initialHoldingNanoErg))
+      // The finder's own take. The pool's premium is deliberately absent: it is inside the holding
+      // value above, and a second key for it would be summed into revenue twice.
+      val finderFee = BigInt(b.finderFeeNanoErg)
+      add("lithos.finderFeeNanoErg", finderFee)
+      if (finderFee > 0) add("lithos.blocksWithFinderFee", 1)
     }
     def payment(p: MiningPaymentRecord, prefix: String): Unit = {
       add(s"$prefix.outputs", 1)

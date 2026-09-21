@@ -3,9 +3,15 @@ package stats
 import play.api.libs.json._
 
 final case class MiningCursor(height: Int, blockId: String, parentId: String, timestamp: Long)
+/**
+ * `finderFeeNanoErg` is the priority bid this block's collateral box carried, paid to the miner that
+ * spent it. The pool's four-fold premium is not a field here: it went into the holding box and is
+ * already inside `initialHoldingNanoErg`.
+ */
 final case class LithosBlockRecord(blockId: String, height: Int, timestamp: Long, transactionId: String,
                                     holdingBoxId: String, collateralBoxId: String,
-                                    collateralNanoErg: String, initialHoldingNanoErg: String)
+                                    collateralNanoErg: String, initialHoldingNanoErg: String,
+                                    finderFeeNanoErg: String)
 /** Gross designated payout output, including the refunded submission bond. This is not net earnings. */
 final case class MiningPaymentRecord(transactionId: String, outputId: String, payoutBoxId: String,
                                       rollupNft: String, minedBlockId: String, minedHeight: Int,

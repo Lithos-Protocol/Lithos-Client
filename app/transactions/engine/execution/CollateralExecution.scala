@@ -259,7 +259,8 @@ class CollateralExecution(nodeContext: NodeContext,
           lenderAddress = lender,
           principalNanoErgs = b.value.toString,
           permitLit = permitOf(b, litIdStr).toString,
-          creationHeight = b.inclusionHeight
+          creationHeight = b.inclusionHeight,
+          finderFeeNanoErgs = finderFeeOf(b).toString
         ))
     }
 
@@ -277,13 +278,22 @@ class CollateralExecution(nodeContext: NodeContext,
           lenderAddress = a,
           valueNanoErgs = b.value.toString,
           carriedLit = litOnBox(b).toString,
-          creationHeight = b.box.creationHeight
+          creationHeight = b.box.creationHeight,
+          finderFeeNanoErgs = finderFeeOf(b).toString
         )))
     }
 
   /** A live collateral box carries its block's emission LIT and the lender's permit together. */
   private def litOnBox(b: IndexedBox): Long =
     b.box.tokens.lift(1).map(_.amount).getOrElse(0L)
+
+  /**
+   * The bid in R4. Zero when the register cannot be read: a listing describes boxes the caller can
+   * already see on chain, so one anomalous box must not drop the whole page, and a bid that cannot
+   * be read is worth nothing to the miner reading it either.
+   */
+  private def finderFeeOf(b: IndexedBox): Long =
+    RollupProtocol.finderFeeOf(b.box.additionalRegisters.get(4)).getOrElse(0L)
 
   /** Live collateral boxes only - the same scan also returns proof-of-spend boxes at the gate, which carry one register. */
   private def liveBoxes(ctx: BlockchainContext,

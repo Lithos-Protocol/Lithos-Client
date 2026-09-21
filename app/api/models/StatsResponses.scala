@@ -19,6 +19,8 @@ object StatsResponses {
   implicit val bucketWrites: OWrites[MiningBucket] = Json.writes[MiningBucket]
   implicit val bucketsWrites: OWrites[MiningBucketHistory] = Json.writes[MiningBucketHistory]
   implicit val hashrateWrites: OWrites[LithosHashrateEstimate] = Json.writes[LithosHashrateEstimate]
+  implicit val feeBucketWrites: OWrites[CollateralFeeBucket] = Json.writes[CollateralFeeBucket]
+  implicit val feeStatsWrites: OWrites[CollateralFeeStats] = Json.writes[CollateralFeeStats]
   implicit val collateralWrites: OWrites[CollateralStats] = Json.writes[CollateralStats]
   implicit val activityWrites: OWrites[LocalMiningActivityView] = Json.writes[LocalMiningActivityView]
   implicit val localWrites: OWrites[LocalMiningResponse] = Json.writes[LocalMiningResponse]

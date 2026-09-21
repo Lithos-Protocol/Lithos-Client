@@ -100,6 +100,20 @@ object RollupProtocol {
   def netAtCoinbase(finderFee: Long): Long =
     Math.subtractExact(CollateralParams.BLOCK_REWARD, queuePrincipal(finderFee))
 
+  /**
+   * The bid named by a queue or collateral box's R4, read from its serialized register.
+   *
+   * `None` for an absent, malformed, or below-floor register. Every box the enforcer accepted has a
+   * well-formed one, so a `None` here is a box that should not exist — readers reporting a
+   * distribution count it as unreadable rather than throwing, since one anomalous box must not blank
+   * an entire inventory.
+   */
+  def finderFeeOf(register: Option[String]): Option[Long] =
+    register.flatMap(hex => scala.util.Try(org.ergoplatform.appkit.ErgoValue.fromHex(hex).getValue).toOption)
+      .collect { case channel: java.lang.Long => channel.longValue() }
+      .filter(_ >= CollateralParams.DUST_BUDGET)
+      .map(_ - CollateralParams.DUST_BUDGET)
+
   /** The rollup's own NFT. Its id is the box id of the collateral box the rollup was created from. */
   def rollupNFT(tokens: Seq[Token]): Token = {
     val nft = tokens.lift(NFTIndex).getOrElse(

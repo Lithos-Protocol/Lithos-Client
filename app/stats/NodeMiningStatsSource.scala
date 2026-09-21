@@ -2,6 +2,7 @@ package stats
 
 import com.google.gson.JsonElement
 import configs.{MiningStatsConfig, NodeContext}
+import lfsm.RollupProtocol
 import node.NodeApi
 import node.model.{NodeHeader, Paging}
 import node.rest.{NodeHttp, NodeHttpConfig, RestNodeApi}
@@ -61,6 +62,10 @@ class NodeMiningStatsSource(api: NodeApi, protocol: SyncProtocolContext, minerTr
     var value = BigInt(0)
     var complete = false
     var page = 0
+    // The bid each box carries in R4. Collected here because the same pass already has every box,
+    // and a second scan for it would double what an inventory read costs the miner's own node.
+    val fees = Vector.newBuilder[Long]
+    var unreadable = 0
     while (!complete && page < 5) {
       val boxes = api.unspentBoxesByTokenId(protocol.collateralToken.toString, Paging(page * 200, 200)).get
       require(boxes.size <= 200, "collateral page exceeds its limit")
@@ -70,6 +75,10 @@ class NodeMiningStatsSource(api: NodeApi, protocol: SyncProtocolContext, minerTr
           box.assets.exists(t => t.tokenId == protocol.collateralToken.toString && t.amount == 1L)) {
           count += 1
           value += box.value
+          RollupProtocol.finderFeeOf(box.box.additionalRegisters.get(4)) match {
+            case Some(fee) => fees += fee
+            case None => unreadable += 1
+          }
         }
       }
       complete = boxes.size < 200
@@ -78,7 +87,8 @@ class NodeMiningStatsSource(api: NodeApi, protocol: SyncProtocolContext, minerTr
     val current = heights
     require(current.chain == at.height && current.usable == at.height && header(at.height) == at,
       "chain changed while reading collateral statistics")
-    Some(CollateralStats("ready", Some(observed), Some(at), count, value.toString, partial = !complete))
+    Some(CollateralStats("ready", Some(observed), Some(at), count, value.toString, partial = !complete,
+      fees = CollateralFeeStats.of(fees.result(), unreadable)))
   }
 
   override def read(at: MiningCursor, previous: MiningCursor): MiningBlockRecord = {
@@ -156,8 +166,15 @@ class NodeMiningStatsSource(api: NodeApi, protocol: SyncProtocolContext, minerTr
       val replay = new BlockReducer.RollupReplay(protocol)
       replay.apply(block, tx).fold(e => throw new IllegalArgumentException(e.message), identity)
       require(replay.rollup(block.id).isDefined, s"collateral spend ${tx.id} did not create an authenticated genesis")
+      // A box the enforcer accepted always names a well-formed fee channel, so an unreadable one
+      // means the genesis authentication above passed on something malformed: fail rather than
+      // silently record the block as having bid nothing.
+      val finderFee = RollupProtocol.finderFeeOf(collateral.get.registers.headOption).getOrElse(
+        throw new IllegalArgumentException(
+          s"collateral box ${collateral.get.id} spent by ${tx.id} has no readable fee channel in R4"))
       Some(LithosBlockRecord(at.blockId, at.height, at.timestamp, tx.id, tx.outputs.head.id,
-        collateral.get.id, collateral.get.value.toString, tx.outputs.head.value.toString))
+        collateral.get.id, collateral.get.value.toString, tx.outputs.head.value.toString,
+        finderFee.toString))
     }
   }
 
