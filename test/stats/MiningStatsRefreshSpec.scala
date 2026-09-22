@@ -13,7 +13,7 @@ import stats.StatsCollector.{RefreshStatistics, StratumObserved}
 import java.io.IOException
 import java.util.UUID
 import java.util.concurrent.{CountDownLatch, TimeUnit}
-import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger}
 import scala.concurrent.Await
 import scala.concurrent.duration._
 
@@ -119,13 +119,18 @@ class MiningStatsRefreshSpec extends TestKit(ActorSystem("mining-stats-spec",
       producer.send(second.get, StratumObserved(UUID.randomUUID(), 1, System.currentTimeMillis(), System.nanoTime(), 7, None))
       awaitAssert(cache.snapshot().local.stratum.connectedConnections shouldBe 7)
       reads.get() shouldBe 1
-      intercept[IllegalStateException](Await.result(refresh.history(1, 10), 1.second)).getMessage should include("busy")
+      // A read arriving mid-refresh waits for the slot instead of being refused.
+      val queued = refresh.history(1, 10)
+      Thread.sleep(200)
+      queued.isCompleted shouldBe false
       val local = LocalMiningObservation("shares", "session", 1, 1, System.currentTimeMillis(), Map("accepted" -> "42"))
       producer.send(second.get, local)
       awaitAssert(cache.localMiningViews("shares").observation.counters("accepted") shouldBe "42")
       val shutdown = refresh.shutdown()
       shutdown.isCompleted shouldBe false
       release.countDown()
+      // Admitted before the shutdown, so it is answered before the store closes under it.
+      noException should be thrownBy Await.result(queued, 3.seconds)
       Await.result(shutdown, 3.seconds)
       closes.get() shouldBe 1
     } finally {
@@ -134,7 +139,9 @@ class MiningStatsRefreshSpec extends TestKit(ActorSystem("mining-stats-spec",
     }
   }
 
-  it should "keep a restored view unavailable on node failure and recover without duplicate totals" in {
+  it should "keep a restored view as stale on node failure and recover without duplicate totals" in {
+    // History already collected is still true when the node drops out, so it is reported as behind
+    // rather than gone.
     val chain = new Chain(3)
     val db = new MiningStatsStore(None, identity)
     db.initialize(chain.header(1))
@@ -142,11 +149,12 @@ class MiningStatsRefreshSpec extends TestKit(ActorSystem("mining-stats-spec",
     chain.failed = true
     val refresh = new MiningStatsRefresh(settings, true, 2, () => db, () => chain, executor)
     try {
-      awaitAssert({ refresh.tick(); refresh.view.status shouldBe "unavailable" })
+      awaitAssert({ refresh.tick(); refresh.view.error shouldBe defined })
+      refresh.view.status shouldBe "stale"
       refresh.view.totals.payments shouldBe 1
       awaitAssert(refresh.busy shouldBe false)
       val stored = Await.result(refresh.history(0, 10), 1.second)
-      stored.status shouldBe "unavailable"
+      stored.status shouldBe "stale"
       stored.records.map(_.cursor.height) shouldBe Vector(2) // no node read on this path
       chain.failed = false
       caughtUp(refresh, 3)
@@ -167,23 +175,52 @@ class MiningStatsRefreshSpec extends TestKit(ActorSystem("mining-stats-spec",
   }
 
   it should "reject a branch change during a read before committing its contribution" in {
+    val changed = new AtomicBoolean(false)
     val chain = new Chain(3) {
-      @volatile var changed = false
       override def read(at: MiningCursor, previous: MiningCursor): MiningBlockRecord = {
         val result = super.read(at, previous)
-        if (!changed) { changed = true; fork(2) }
+        if (changed.compareAndSet(false, true)) fork(2)
         result
       }
     }
     val db = new MiningStatsStore(None, identity)
     val refresh = new MiningStatsRefresh(settings, false, 2, () => db, () => chain, executor)
     try {
-      awaitAssert({ refresh.tick(); refresh.view.status shouldBe "unavailable" })
+      awaitAssert({ refresh.tick(); changed.get() shouldBe true; refresh.busy shouldBe false })
       db.state.get.cursor.height shouldBe 1
       db.state.get.totals shouldBe MiningTotals()
+      // A tip that moved mid-read is an ordinary race, not a fault: nothing is reported as failed.
+      refresh.view.status should not be "unavailable"
+      refresh.view.error shouldBe None
       caughtUp(refresh, 3)
       refresh.view.payments.map(_.blockId).toSet shouldBe Set("b-2", "b-3")
     } finally Await.result(refresh.shutdown(), 3.seconds)
+  }
+
+  it should "queue concurrent reads behind a refresh and answer each, up to the bound" in {
+    // A dashboard asks for several series at once. Refusing every read that lost the race for the
+    // one worker slot blanked those charts on every poll.
+    val entered = new CountDownLatch(1)
+    val release = new CountDownLatch(1)
+    val chain = new Chain(3) {
+      override def read(at: MiningCursor, previous: MiningCursor): MiningBlockRecord = {
+        entered.countDown(); release.await(10, TimeUnit.SECONDS)
+        super.read(at, previous)
+      }
+    }
+    val db = new MiningStatsStore(None, identity)
+    val refresh = new MiningStatsRefresh(settings, false, 2, () => db, () => chain, executor)
+    try {
+      refresh.tick()
+      entered.await(3, TimeUnit.SECONDS) shouldBe true
+      val admitted = (1 to MiningStatsRefresh.MaxQueuedReads).map(_ => refresh.history(1, 10))
+      // One past the bound is refused at once, so a stalled worker cannot hold requests without limit.
+      val overflow = refresh.history(1, 10)
+      intercept[IllegalStateException](Await.result(overflow, 1.second)).getMessage should include("busy")
+      admitted.exists(_.isCompleted) shouldBe false
+      release.countDown()
+      admitted.foreach(read => noException should be thrownBy Await.result(read, 3.seconds))
+    } finally { release.countDown(); Await.result(refresh.shutdown(), 3.seconds) }
   }
 
   it should "apply the timestamp lower bound and leave pruning disabled when requested" in {

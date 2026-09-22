@@ -636,15 +636,18 @@ paths:
         worker together. Narrower than `/stats/local`: no session identifiers, no fraud targets and
         no per-worker breakdown, so it carries nothing the Stratum connection count does not.
 
-        `hashesPerSecond` divides accumulated assigned work by the session's elapsed time. Assigned
-        work is the expected hash count for each accepted share's validation threshold, which puts
-        it in the same units as network difficulty — this rate and the ones from
-        `/stats/mining/difficulty` are directly comparable.
+        Each accepted share is credited the expected hashes behind the difficulty its job advertised.
+        With reduced reporting on, miners are sent the super-share threshold, so every share they
+        send is a super share and carries that threshold's work. Either way the rates are in the
+        same units as network difficulty and compare directly with `/stats/mining/difficulty`.
 
-        **When `workComplete` is false the rate is a lower bound.** Reduced share reporting drops
-        accepted shares before they are ever counted, so the real hashrate is higher by an unknown
-        amount. Counters restart whenever the producer does, and `sessionStartedAt` is when that
-        happened — the totals here are not lifetime figures.
+        `hashesPerSecond` is the rate over the last 15 minutes — show this as current hashrate.
+        `windowShares` is how many shares it rests on: fewer shares, noisier reading.
+        `sessionHashesPerSecond` averages the whole session instead, so it reads low if the workers
+        started after the client did.
+
+        Counters restart whenever the producer does, and `sessionStartedAt` is when that happened —
+        the totals here are not lifetime figures.
       responses:
         '200':
           description: Current rates and totals; empty of values until a producer reports.
@@ -664,8 +667,7 @@ paths:
 
         Only observations from one producer session can be differenced — a restart resets the
         counters — so intervals spanning a restart are left out rather than clamped. A gap therefore
-        means the interval was not measured, not that nothing was mined. `workComplete` is false for
-        any interval in which reduced reporting dropped shares.
+        means the interval was not measured, not that nothing was mined.
 
         Range and interval rules match `/stats/mining/buckets`.
       parameters:
@@ -3031,11 +3033,13 @@ components:
             Cumulative counters for this session, as exact decimal strings. A missing counter means
             nothing of that kind was seen in the session.
 
-            **shares** — `accepted`, `acceptedAssignedWork`, `blockCandidates`, `superShares`,
-            `acceptedWithReducedReporting`, and a `rejected<code>` per rejection code seen.
-            Assigned work adds up each accepted share's validation threshold; it is not a hashrate,
-            and it undercounts while reporting is reduced. Candidates and super shares overlap and
-            are both subsets of `accepted`.
+            **shares** — `accepted`, `acceptedAssignedWork`, `acceptedBelowAdvertised`,
+            `blockCandidates`, `superShares`, `acceptedWithReducedReporting`, and a `rejected<code>`
+            per rejection code seen. Assigned work adds up the expected hashes behind each share that
+            met its job's advertised difficulty. `acceptedBelowAdvertised` counts shares that passed
+            validation but missed that difficulty; they carry no work, and a count that keeps pace
+            with `accepted` means a miner is not using the difficulty it was sent. Candidates and
+            super shares overlap and are both subsets of `accepted`.
 
             **solutions** — `nodeAccepted` and `nodeRejectedOrFailed`.
 
@@ -3304,8 +3308,9 @@ components:
           $ref: '#/components/schemas/MiningCollectionStatus'
     LocalMiningSummary:
       type: object
-      required: [status, enabled, acceptedShares, rejectedShares, blockCandidates, superShares,
-                 assignedWork, solutionsAccepted, solutionsRejected, workComplete, rejections]
+      required: [status, enabled, windowMs, windowShares, acceptedShares, rejectedShares,
+                 blockCandidates, superShares, assignedWork, solutionsAccepted, solutionsRejected,
+                 reducedReporting, rejections]
       properties:
         status:
           type: string
@@ -3326,8 +3331,25 @@ components:
           type: string
           pattern: '^[0-9]+$'
           description: >-
-            Assigned work over the session's elapsed time, in the same units as network difficulty.
-            A lower bound when `workComplete` is false. Omitted before there is any work or elapsed time.
+            Current hashrate: assigned work gained over the last 15 minutes, divided by that time.
+            Zero when no share arrived in that span. Falls back to the session rate until a second
+            sample exists, and is omitted before there is any work.
+        sessionHashesPerSecond:
+          type: string
+          pattern: '^[0-9]+$'
+          description: >-
+            Assigned work over the whole session. Reads low when workers joined after the client
+            started. Omitted before there is any work or elapsed time.
+        windowMs:
+          type: integer
+          format: int64
+          description: The span `hashesPerSecond` was measured over. Zero when it fell back to the session rate.
+        windowShares:
+          type: integer
+          format: int64
+          description: >-
+            Shares accepted inside that span. The estimate's noise shrinks with this count, so a
+            handful of shares makes a jumpy reading.
         acceptedShares:
           type: integer
           format: int64
@@ -3358,11 +3380,11 @@ components:
         solutionsRejected:
           type: integer
           format: int64
-        workComplete:
+        reducedReporting:
           type: boolean
           description: >-
-            False when reduced share reporting dropped accepted shares, which makes every rate here
-            an underestimate.
+            True when miners are sent the super-share threshold, so they only send super shares.
+            The rates already account for it; expect fewer, larger samples and a noisier reading.
         rejections:
           type: object
           additionalProperties:
@@ -3370,7 +3392,7 @@ components:
           description: Count per rejection code, keyed as `rejected<code>`.
     LocalHashratePoint:
       type: object
-      required: [start, widthMs, hashesPerSecond, acceptedShares, superShares, workComplete]
+      required: [start, widthMs, hashesPerSecond, acceptedShares, superShares, reducedReporting]
       properties:
         start:
           type: integer
@@ -3390,9 +3412,9 @@ components:
         superShares:
           type: integer
           format: int64
-        workComplete:
+        reducedReporting:
           type: boolean
-          description: False when reduced reporting dropped shares during the interval.
+          description: True when the interval's shares arrived under reduced reporting.
     LocalHashrateHistory:
       type: object
       required: [from, until, widthMs, points, status]

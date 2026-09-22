@@ -73,14 +73,26 @@ class BlockTemplateSpec extends AnyFlatSpec with Matchers {
   }
 
   "getJobParams" should "report the reduced difficulty only when reducedShareMessages is on" in {
-    // Larger tau is an EASIER target, so dividing by 1000 hands the miner a thousand-times harder
-    // one and a thousandth of the shares. Getting this backwards floods the client instead.
+    // Larger tau is an EASIER target, so dividing by the NISP coefficient hands the miner a
+    // ten-thousand-times harder one and a ten-thousandth of the shares. Backwards floods the client.
     val full = template(reduced = false).getJobParams.getString(6)
     val reduced = template(reduced = true).getJobParams.getString(6)
 
     full shouldEqual shippedTau.toString
     reduced shouldEqual shippedTau.divide(BigInteger.valueOf(10000L)).toString
     BigInt(reduced) should be < BigInt(full)
+  }
+
+  "assignedThreshold" should "be exactly the difficulty the notify advertises" in {
+    // Hashrate accounting credits each share TARGET_MAX over this field. If it ever drifted from the
+    // notify, the rate would be off by whatever factor separates the two.
+    Seq(false, true).foreach { reduced =>
+      val t = template(reduced = reduced)
+      t.getJobParams.getString(6) shouldEqual t.assignedThreshold.toString
+    }
+    template(reduced = false).assignedThreshold shouldEqual shippedTau
+    template(reduced = true).assignedThreshold shouldEqual
+      shippedTau.divide(BigInteger.valueOf(LFSMHelpers.NISP_COEFFICIENT))
   }
 
   it should "carry the job id, height and message the miner needs" in {

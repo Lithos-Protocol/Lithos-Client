@@ -120,15 +120,20 @@ class StatsApiControllerSpec extends AnyFlatSpec with Matchers with MockitoSugar
         "rejected20" -> "2"))
     when(cache.localMiningViews).thenReturn(
       Map("shares" -> LocalMiningActivityView("ready", observation, deduplicationComplete = true)))
+    when(cache.recentWork).thenReturn(Vector(
+      WorkSample("session-7", 30000L, BigInt(300000), 30L), WorkSample("session-7", 60000L, BigInt(1200000), 90L)))
     val result = withMining(mock[MiningStatsRefresh], cache).getLocalMiningSummary()
       .apply(FakeRequest(GET, "/stats"))
     status(result) shouldBe OK
     val json = contentAsJson(result)
-    (json \ "hashesPerSecond").as[String] shouldBe "20000"
+    // The window's last 30 seconds, not the whole minute of session.
+    (json \ "hashesPerSecond").as[String] shouldBe "30000"
+    (json \ "sessionHashesPerSecond").as[String] shouldBe "20000"
+    (json \ "windowShares").as[Long] shouldBe 60L
     (json \ "acceptedShares").as[Long] shouldBe 90L
     (json \ "rejectedShares").as[Long] shouldBe 2L
     (json \ "superShares").as[Long] shouldBe 6L
-    (json \ "workComplete").as[Boolean] shouldBe true
+    (json \ "reducedReporting").as[Boolean] shouldBe false
     // The session identifier and the fraud list stay behind the api key.
     (json \ "session").toOption shouldBe None
     (json \ "fraud").toOption shouldBe None

@@ -6,7 +6,8 @@ import configs.{Contexts, MiningStatsConfig, NodeContext}
 import org.slf4j.LoggerFactory
 import state.synchronization.SyncProtocolContext
 
-import java.util.concurrent.atomic.{AtomicBoolean, AtomicReference}
+import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger, AtomicReference}
 import javax.inject.{Inject, Singleton}
 import scala.concurrent.{ExecutionContext, Future, Promise}
 import scala.concurrent.duration._
@@ -30,6 +31,8 @@ class MiningStatsRefresh(settings: MiningStatsConfig, persistent: Boolean, start
   }
   private val logger = LoggerFactory.getLogger("MiningStatsRefresh")
   private val active = new AtomicBoolean(false)
+  private val reads = new ConcurrentLinkedQueue[PendingRead[_]]()
+  private val queuedReads = new AtomicInteger(0)
   private val closing = new AtomicBoolean(false)
   private val closed = Promise[Done]()
   private val pendingLocal = new AtomicReference(Map.empty[String, LocalMiningObservation])
@@ -91,26 +94,57 @@ class MiningStatsRefresh(settings: MiningStatsConfig, persistent: Boolean, start
       bounds.map(_._1), bounds.map(_._2), backfilled, view.status)
   }
 
-  /** No unbounded request queue: a busy worker reports busy and the future API can retry later. */
+  /** A queued read: `answer` runs it on the worker, `fail` settles it when the worker cannot. */
+  private final class PendingRead[A](read: MiningStatsStore => A, result: Promise[A]) {
+    def answer(): Unit = try {
+      val db = store.getOrElse(throw new IllegalStateException("mining statistics loading"))
+      db.reloadCheckpoint()
+      result.success(read(db))
+    } catch { case NonFatal(error) => result.failure(error) }
+    def fail(error: Throwable): Unit = result.tryFailure(error)
+  }
+
+  /**
+   * Reads wait for the one worker slot instead of being refused. A dashboard asks for several
+   * series at once, and refusing every one that lost the race blanked those charts on every poll.
+   * The queue is bounded, so a stalled worker still answers busy rather than holding requests
+   * without limit.
+   */
   private def query[A](read: MiningStatsStore => A): Future[A] = {
     val result = Promise[A]()
     if (!settings.enabled || closing.get()) result.failure(new IllegalStateException("mining statistics disabled or closing"))
-    else if (!active.compareAndSet(false, true)) result.failure(new IllegalStateException("mining statistics worker busy"))
-    else {
-      def release(): Unit = {
-        active.set(false)
-        if (closing.get()) start()
-      }
-      try worker.execute(new Runnable {
-        override def run(): Unit = try {
-          val db = store.getOrElse(throw new IllegalStateException("mining statistics loading"))
-          db.reloadCheckpoint()
-          result.success(read(db))
-        } catch { case NonFatal(error) => result.failure(error) }
-        finally release()
-      }) catch { case NonFatal(error) => release(); result.failure(error) }
+    else if (queuedReads.incrementAndGet() > MiningStatsRefresh.MaxQueuedReads) {
+      queuedReads.decrementAndGet()
+      result.failure(new IllegalStateException("mining statistics worker busy"))
+    } else {
+      reads.add(new PendingRead(read, result))
+      drain()
     }
     result.future
+  }
+
+  /** Answers everything queued in one worker task. Only the holder of `active` ever submits work. */
+  private def drain(): Unit = if (!reads.isEmpty && active.compareAndSet(false, true)) {
+    def next(): Option[PendingRead[_]] = Option(reads.poll()).map { r => queuedReads.decrementAndGet(); r }
+    try worker.execute(new Runnable {
+      override def run(): Unit = try Iterator.continually(next()).takeWhile(_.isDefined).foreach(_.get.answer())
+        finally release()
+    }) catch {
+      case NonFatal(error) =>
+        Iterator.continually(next()).takeWhile(_.isDefined).foreach(_.get.fail(error))
+        release()
+    }
+  }
+
+  /**
+   * Frees the slot and passes it on. Checked after clearing `active`, so a read queued while the
+   * slot was held is never stranded: either its own `drain` wins the slot or this one does.
+   * Queued reads go before a pending close, since `query` stops admitting them once closing starts.
+   */
+  private def release(): Unit = {
+    active.set(false)
+    if (!reads.isEmpty) drain()
+    else if (closing.get() && !closed.isCompleted) start()
   }
   def tick(): Unit = if (settings.enabled && !closing.get() && System.nanoTime() - nextRunNanos >= 0) start()
   def shutdown(): Future[Done] = {
@@ -122,6 +156,7 @@ class MiningStatsRefresh(settings: MiningStatsConfig, persistent: Boolean, start
   private def start(): Unit = if (!closed.isCompleted && active.compareAndSet(false, true)) {
     try worker.execute(new Runnable {
       override def run(): Unit = {
+        var raced = false
         try {
           if (closing.get()) {
             if (store.isEmpty && pendingLocal.get().nonEmpty) store = Some(openStore())
@@ -131,25 +166,32 @@ class MiningStatsRefresh(settings: MiningStatsConfig, persistent: Boolean, start
             closed.trySuccess(Done)
           } else cycle()
         } catch {
+          // Blocks already appended stay appended; the next cycle resumes from them.
+          case moved: MiningStatsRefresh.ChainMoved =>
+            raced = true
+            logger.debug("Mining statistics read raced a new block; retrying", moved)
           case NonFatal(error) =>
             logger.warn("Mining statistics refresh failed", error)
-            published.set(published.get().copy(status = "unavailable",
+            // History already collected is still true. Report it as behind, not as gone.
+            val previous = published.get()
+            published.set(previous.copy(status = if (previous.sourceHeight.isDefined) "stale" else "unavailable",
               error = Some("Mining history refresh failed; see the client log")))
             if (closing.get() && store.isEmpty) closed.tryFailure(error)
         } finally {
-          val delay = if (Set("catching-up", "recovering").contains(published.get().status)) 1000 else settings.refreshIntervalMs
+          val delay = if (raced || Set("catching-up", "recovering").contains(published.get().status)) 1000
+            else settings.refreshIntervalMs
           nextRunNanos = System.nanoTime() + delay.milliseconds.toNanos
-          active.set(false)
-          if (closing.get() && !closed.isCompleted) start()
+          release()
         }
       }
     }) catch {
       case NonFatal(error) =>
-        active.set(false)
         nextRunNanos = System.nanoTime() + settings.refreshIntervalMs.milliseconds.toNanos
         logger.warn("Could not schedule mining statistics", error)
         published.set(published.get().copy(status = "unavailable", error = Some("Mining history worker unavailable")))
+        // Completed before releasing, so a shutdown that cannot schedule does not retry itself forever.
         if (closing.get()) closed.tryFailure(error)
+        release()
     }
   }
 
@@ -199,9 +241,11 @@ class MiningStatsRefresh(settings: MiningStatsConfig, persistent: Boolean, start
     while (matches && db.state.get.cursor.height < heights.usable && work < settings.blocksPerRefresh && !closing.get()) {
       val previous = db.state.get.cursor
       val at = source.header(previous.height + 1)
-      require(at.parentId == previous.blockId, "chain changed while replaying mining statistics")
+      MiningStatsRefresh.requireSameChain(at.parentId == previous.blockId,
+        "chain changed while replaying mining statistics")
       val record = source.read(at, previous)
-      require(source.header(at.height) == at, "chain changed during mining statistics read")
+      MiningStatsRefresh.requireSameChain(source.header(at.height) == at,
+        "chain changed during mining statistics read")
       db.append(record)
       work += 1
     }
@@ -219,9 +263,15 @@ class MiningStatsRefresh(settings: MiningStatsConfig, persistent: Boolean, start
         inventoryObservedNanos = began
         inventory.set(value)
       }
-      catch { case NonFatal(error) =>
-        logger.warn("Collateral statistics refresh failed", error)
-        inventory.set(inventory.get().copy(status = "unavailable", error = Some("Collateral index read failed")))
+      catch {
+        case moved: MiningStatsRefresh.ChainMoved =>
+          logger.debug("Collateral statistics read raced a new block", moved)
+        case NonFatal(error) =>
+          logger.warn("Collateral statistics refresh failed", error)
+          // An earlier inventory is still a real observation; mark it behind rather than discard it.
+          val previous = inventory.get()
+          inventory.set(previous.copy(status = if (previous.observedAt.isDefined) "stale" else "unavailable",
+            error = Some("Collateral index read failed")))
       }
     } else inventory.set(inventory.get().copy(status = "stale"))
     if (!closing.get()) try updateEpochs(db, source, currentHeights.chain)
@@ -273,4 +323,15 @@ class MiningStatsRefresh(settings: MiningStatsConfig, persistent: Boolean, start
       source.sample(math.max(DifficultyEpochs.startHeight(index), tip)), complete = false)
     epochs.updateAndGet(state => (Some(live), state._2))
   }
+}
+
+object MiningStatsRefresh {
+  /** Reads allowed to wait for the worker. Past this a request is answered busy at once. */
+  val MaxQueuedReads: Int = 16
+
+  /** The tip moved while a read was in flight. An ordinary race, not a fault, so it is retried at once. */
+  final class ChainMoved(message: String) extends IllegalStateException(message)
+
+  def requireSameChain(condition: Boolean, message: => String): Unit =
+    if (!condition) throw new ChainMoved(message)
 }

@@ -93,7 +93,8 @@ class NodeMiningStatsSource(api: NodeApi, protocol: SyncProtocolContext, minerTr
       page += 1
     }
     val current = heights
-    require(current.chain == at.height && current.usable == at.height && header(at.height) == at,
+    MiningStatsRefresh.requireSameChain(
+      current.chain == at.height && current.usable == at.height && header(at.height) == at,
       "chain changed while reading collateral statistics")
     Some(CollateralStats("ready", Some(observed), Some(at), count, value.toString, partial = !complete,
       fees = CollateralFeeStats.of(fees.result(), unreadable)))
@@ -101,7 +102,7 @@ class NodeMiningStatsSource(api: NodeApi, protocol: SyncProtocolContext, minerTr
 
   override def read(at: MiningCursor, previous: MiningCursor): MiningBlockRecord = {
     val fullHeader = chain.headerAt(at.height).get
-    require(cursor(fullHeader) == at, "chain changed before reading mining statistics")
+    MiningStatsRefresh.requireSameChain(cursor(fullHeader) == at, "chain changed before reading mining statistics")
     val block = chain.blocksFor(Seq(fullHeader)).get.head
     val blocks = block.txs.flatMap(tx => genesis(block, tx, at)).toVector
     blocks.foreach(b => origins.update(b.collateralBoxId, Some(b)))
@@ -143,23 +144,27 @@ class NodeMiningStatsSource(api: NodeApi, protocol: SyncProtocolContext, minerTr
       block.txs.map(BatchingStatistics.transactionFee).sum.toString)
   }
 
+  /**
+   * A dictionary spend that carries no operation is not a registration. Throwing on one instead
+   * wedges history at that block, because every refresh cycle retries the block that failed.
+   */
   private def registrationActivity(tx: BlockTx): Option[MinerRegistrationActivity] = {
     import lfsm.states.MinerDictionary
-    val ext = tx.inputs.head.spendingProof.getOrElse(throw new IllegalArgumentException("dictionary extension absent")).ext
-    val op = ErgoValue.fromHex(ext("0")).getValue.asInstanceOf[Byte]
-    val kind = op match {
-      case MinerDictionary.ADD_MINER_OP => Some("add")
-      case MinerDictionary.REMOVE_MINER_OP => Some("remove")
-      case MinerDictionary.EVICT_MINER_OP => Some("evict")
-      case _ => None
+    val ext = tx.inputs.head.spendingProof.map(_.ext).getOrElse(Map.empty[String, String])
+    val kind = ext.get("0").map(ErgoValue.fromHex(_).getValue.asInstanceOf[Byte]).collect {
+      case MinerDictionary.ADD_MINER_OP => "add"
+      case MinerDictionary.REMOVE_MINER_OP => "remove"
+      case MinerDictionary.EVICT_MINER_OP => "evict"
     }
-    kind.map { action =>
+    kind.flatMap { action =>
       // Match synchronization: R5 of the new data box contains the authenticated miner hash.
       // Registration context slot 1 is an executable value, not serialized proposition bytes.
-      val encoded = if (action == "add") tx.outputs(1).registers(1) else ext("5")
-      val key = ErgoValue.fromHex(encoded).getValue.asInstanceOf[Coll[Byte]].toArray
-      require(key.length == 32, "invalid registration miner hash")
-      MinerRegistrationActivity(tx.id, action, Hex.toHexString(key), java.util.Arrays.equals(key, protocol.localMinerHash))
+      val encoded = if (action == "add") Some(tx.outputs(1).registers(1)) else ext.get("5")
+      encoded.map { hex =>
+        val key = ErgoValue.fromHex(hex).getValue.asInstanceOf[Coll[Byte]].toArray
+        require(key.length == 32, "invalid registration miner hash")
+        MinerRegistrationActivity(tx.id, action, Hex.toHexString(key), java.util.Arrays.equals(key, protocol.localMinerHash))
+      }
     }
   }
 

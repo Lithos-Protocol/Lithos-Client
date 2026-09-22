@@ -63,7 +63,7 @@ class StatsApiController @Inject()(cc: ControllerComponents, cache: StatsCache, 
     })
 
   def getLocalMiningSummary(): Action[AnyContent] = noStore(Action {
-    Ok(Json.toJson(LocalMiningSummary.of(cache.settings.enabled, cache.localMiningViews)))
+    Ok(Json.toJson(LocalMiningSummary.of(cache.settings.enabled, cache.localMiningViews, cache.recentWork)))
   })
 
   def getLocalMiningHistory(): Action[AnyContent] = history { (from, until, width) =>

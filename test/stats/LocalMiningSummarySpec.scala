@@ -1,5 +1,6 @@
 package stats
 
+import configs.StatsConfig
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
@@ -22,7 +23,10 @@ class LocalMiningSummarySpec extends AnyFlatSpec with Matchers {
         Map("nodeAccepted" -> "2", "nodeRejectedOrFailed" -> "1")))))
 
     // 600000 hashes of assigned work over 60 seconds of session.
+    summary.sessionHashesPerSecond shouldBe Some("10000")
+    // With no window samples yet, the current rate falls back to the session's.
     summary.hashesPerSecond shouldBe Some("10000")
+    summary.windowShares shouldBe 0L
     summary.acceptedShares shouldBe 120L
     summary.rejectedShares shouldBe 5L
     summary.rejections shouldBe Map("rejected20" -> "4", "rejected23" -> "1")
@@ -31,16 +35,57 @@ class LocalMiningSummarySpec extends AnyFlatSpec with Matchers {
     summary.blockCandidates shouldBe 1L
     summary.solutionsAccepted shouldBe 2L
     summary.solutionsRejected shouldBe 1L
-    summary.workComplete shouldBe true
+    summary.reducedReporting shouldBe false
     summary.status shouldBe "ready"
   }
 
-  it should "mark the rate incomplete when reduced reporting dropped accepted shares" in {
+  it should "flag reduced reporting without discounting the work it measured" in {
+    // Reduced reporting sends only super shares, each already credited the super-share threshold's
+    // work upstream. The rate is as complete as any other; it is just built from fewer samples.
     val summary = LocalMiningSummary.of(enabled = true, Map("shares" -> view(
       shares("s1", 2L, 0L, 1000L, "acceptedAssignedWork" -> "50",
         "acceptedWithReducedReporting" -> "7"))))
-    summary.workComplete shouldBe false
+    summary.reducedReporting shouldBe true
     summary.hashesPerSecond shouldBe Some("50")
+  }
+
+  it should "report the current rate over the window rather than the whole session" in {
+    // Workers idle for the first ten minutes, then hash at 1000/s. The session average is dragged
+    // down by the idle stretch; the window describes what the workers are doing now.
+    val observation = shares("s1", 900L, 0L, 900000L, "accepted" -> "30", "acceptedAssignedWork" -> "300000")
+    val window = Vector(
+      WorkSample("s1", 600000L, BigInt(0), 0L),
+      WorkSample("s1", 750000L, BigInt(150000), 15L),
+      WorkSample("s1", 900000L, BigInt(300000), 30L))
+    val summary = LocalMiningSummary.of(enabled = true, Map("shares" -> view(observation)), window)
+    summary.hashesPerSecond shouldBe Some("1000")
+    summary.sessionHashesPerSecond shouldBe Some("333")
+    summary.windowMs shouldBe 300000L
+    summary.windowShares shouldBe 30L
+  }
+
+  it should "read zero once the workers stop, not the session average" in {
+    val observation = shares("s1", 900L, 0L, 1800000L, "accepted" -> "30", "acceptedAssignedWork" -> "300000")
+    val window = Vector(
+      WorkSample("s1", 900000L, BigInt(300000), 30L),
+      WorkSample("s1", 1800000L, BigInt(300000), 30L))
+    val summary = LocalMiningSummary.of(enabled = true, Map("shares" -> view(observation)), window)
+    summary.hashesPerSecond shouldBe Some("0")
+    summary.windowShares shouldBe 0L
+    summary.sessionHashesPerSecond shouldBe Some("166")
+  }
+
+  it should "anchor the window inside the newest session" in {
+    // A restart resets the counters; differencing across it would read a new session's small total
+    // against the old one's large total and report nothing, or something negative.
+    val observation = shares("s2", 60L, 700000L, 760000L, "accepted" -> "6", "acceptedAssignedWork" -> "6000")
+    val window = Vector(
+      WorkSample("s1", 640000L, BigInt(9000000), 900L),
+      WorkSample("s2", 700000L, BigInt(0), 0L),
+      WorkSample("s2", 760000L, BigInt(6000), 6L))
+    val summary = LocalMiningSummary.of(enabled = true, Map("shares" -> view(observation)), window)
+    summary.hashesPerSecond shouldBe Some("100")
+    summary.windowShares shouldBe 6L
   }
 
   it should "report no producers without inventing a rate" in {
@@ -52,6 +97,20 @@ class LocalMiningSummarySpec extends AnyFlatSpec with Matchers {
     // A producer that has reported nothing yet still has no elapsed time to divide by.
     LocalMiningSummary.of(enabled = true, Map("shares" -> view(shares("s1", 1L, 5000L, 5000L))))
       .hashesPerSecond shouldBe None
+  }
+
+  "The work window" should "keep one sample past its far edge as the anchor and drop older ones" in {
+    val cache = new StatsCache(StatsConfig.Default)
+    val window = StatsCache.WorkWindowMs
+    Seq(0L, 1000L, window, window + 2000L).zipWithIndex.foreach { case (at, i) =>
+      cache.publishLocal(shares("s1", i + 1L, 0L, at, "acceptedAssignedWork" -> (i * 10).toString))
+    }
+    // The newest sample puts the edge at 2000. The sample at 1000 is the last one before it and is
+    // kept, so the rate can still be measured across the full window; the one at 0 is not needed.
+    cache.recentWork.map(_.observedAt) shouldBe Vector(1000L, window, window + 2000L)
+    // Only share observations describe hashrate.
+    cache.publishLocal(LocalMiningObservation("fraud", "s1", 9L, 0L, window + 3000L, Map.empty))
+    cache.recentWork.map(_.observedAt).last shouldBe window + 2000L
   }
 
   "Worker history" should "measure only within one producer session" in {
@@ -70,6 +129,7 @@ class LocalMiningSummarySpec extends AnyFlatSpec with Matchers {
     history.points.head.superShares shouldBe 2L
     history.points.last.hashesPerSecond shouldBe "2"
     history.points.last.acceptedShares shouldBe 3L
+    history.points.map(_.reducedReporting) shouldBe Vector(false, false)
     history.status shouldBe "ready"
     history.widthMs shouldBe hour
   }

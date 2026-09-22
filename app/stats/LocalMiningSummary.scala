@@ -74,9 +74,12 @@ object LocalMiningSummary {
    */
   private def windowed(samples: Vector[WorkSample]): Option[(String, Long, Long)] =
     samples.lastOption.flatMap { latest =>
-      samples.find(_.session == latest.session).filter(_.observedAt < latest.observedAt).flatMap { anchor =>
+      samples.find(_.session == latest.session).filter(_.observedAt < latest.observedAt).map { anchor =>
         val elapsed = latest.observedAt - anchor.observedAt
-        rate(latest.work - anchor.work, elapsed).map((_, elapsed, latest.accepted - anchor.accepted))
+        // A measurable window with no work in it is a real zero: the workers stopped. Falling back
+        // to the session average there would keep showing the old rate as current.
+        val work = (latest.work - anchor.work).max(BigInt(0))
+        ((work * 1000 / elapsed).toString, elapsed, latest.accepted - anchor.accepted)
       }
     }
 
@@ -94,7 +97,7 @@ object LocalMiningSummary {
       val rejected = o.counters.filter(_._1.startsWith("rejected"))
       val window = windowed(samples)
       LocalMiningSummary(status, enabled, Some(o.startedAt), Some(o.observedAt),
-        hashesPerSecond = window.map(_._1).orElse(rate(work, elapsed)),
+        hashesPerSecond = if (work > 0) window.map(_._1).orElse(rate(work, elapsed)) else None,
         sessionHashesPerSecond = rate(work, elapsed),
         windowMs = window.map(_._2).getOrElse(0L), windowShares = window.map(_._3).getOrElse(0L),
         acceptedShares = counter(o, "accepted").toLong,
@@ -136,7 +139,7 @@ object LocalMiningSummary {
         if (work >= 0 && accepted >= 0 && supers >= 0)
           Some(LocalHashratePoint(MiningHistory.bucketStart(after.observedAt, widthMs), widthMs,
             rate(work, after.observedAt - before.observedAt).getOrElse("0"),
-            accepted.toLong, supers.toLong, reduced == 0))
+            accepted.toLong, supers.toLong, reduced > 0))
         else None
     }.flatten.toVector
     LocalHashrateHistory(from, until, widthMs, points, status)

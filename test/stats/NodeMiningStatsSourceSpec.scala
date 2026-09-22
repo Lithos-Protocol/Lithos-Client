@@ -165,7 +165,8 @@ class NodeMiningStatsSourceSpec extends AnyFlatSpec with Matchers with MockitoSu
     capped.boxes shouldBe 1000
     capped.partial shouldBe true
     when(api.info()).thenReturn(Success(ChainFixtures.infoAt(121)))
-    intercept[IllegalArgumentException](source.collateral(NodeMiningStatsSource.cursor(header(120))))
+    // Typed, so the refresh can retry a moved tip at once instead of reporting a failure.
+    intercept[MiningStatsRefresh.ChainMoved](source.collateral(NodeMiningStatsSource.cursor(header(120))))
   }
 
   /**
@@ -265,5 +266,16 @@ class NodeMiningStatsSourceSpec extends AnyFlatSpec with Matchers with MockitoSu
     records.map(_.minerHash) shouldBe Vector(miner.hashedPropBytesHex)
     records.head.local shouldBe true
     records.head.kind shouldBe "add"
+  }
+
+  it should "pass over a dictionary spend that carries no operation instead of failing the block" in {
+    // Replay retries the block that failed, so throwing here would wedge mining history on it.
+    val tree = lfsm.states.MinerDictionary.initialState
+    val add = ReducerFixtures.minerAdd(tree, work.lithos.mutations.Contract.SIGMA_TRUE,
+      protocol.minerDictionaryToken, SyncFixtures.id(720), SyncFixtures.id(721), 120)
+    val input = indexed(ReducerFixtures.dictionaryOutput(tree.utxoId, "previous", 119, tree.dictionary,
+      protocol.minerDictionaryToken)).copy(spendingProof = Some(NodeSpendingProof("", Map.empty[String, String])))
+    val tx = transaction(add.id, 120, Seq(input), add.outputs.map(indexed))
+    read(fixture(Seq(tx))._2).activity.registrations shouldBe empty
   }
 }

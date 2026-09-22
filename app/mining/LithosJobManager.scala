@@ -170,7 +170,12 @@ class LithosJobManager(options: Options, statsCollector: Option[ActorRef] = None
       if (statsCollector.isDefined) result match {
         case accepted: ShareAccepted =>
           statistics.add("accepted")
-          statistics.add("acceptedAssignedWork", assignedWork.getOrElse(msg.jobId, BigInt(0)))
+          // Acceptance only needs tau, but the work figure is for the advertised threshold. A share
+          // that missed it is not a sample of that threshold, and crediting it anyway would read a
+          // miner that ignores its notify difficulty as thousands of times faster than it is.
+          if (validJobs.get(msg.jobId).exists(_.assignedThreshold.compareTo(accepted.shareDiff) >= 0))
+            statistics.add("acceptedAssignedWork", assignedWork.getOrElse(msg.jobId, BigInt(0)))
+          else statistics.add("acceptedBelowAdvertised")
           if (accepted.isBlock) statistics.add("blockCandidates")
           if (accepted.isSuperShare) statistics.add("superShares")
           if (validJobs.get(msg.jobId).exists(_.reducedShareMessages)) statistics.add("acceptedWithReducedReporting")
