@@ -2,7 +2,7 @@ package controllers
 
 import configs.StatsConfig
 import org.bouncycastle.util.encoders.Hex
-import org.mockito.Mockito.{verify, verifyNoInteractions, when}
+import org.mockito.Mockito.{never, verify, verifyNoInteractions, when}
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 import org.scalatestplus.mockito.MockitoSugar
@@ -64,14 +64,74 @@ class StatsApiControllerSpec extends AnyFlatSpec with Matchers with MockitoSugar
       MiningBucketHistory(source, None, 0L, hour, hour, Vector.empty, partial = true)))
     when(mining.hashrate(0L, hour, hour)).thenReturn(Future.successful(
       LithosHashrateEstimate("insufficient-data", "disabled", source, 0L, 0L, 0L, "0", None, None, partial = true)))
+    when(mining.localHistory("shares", 0L, hour)).thenReturn(Future.successful(Vector.empty))
+    when(mining.difficulty(None, None, 256)).thenReturn(Future.successful(
+      DifficultyEpochHistory(source, DifficultyEpochs.EpochLength, Vector.empty, None, None, None,
+        backfillComplete = false)))
     val c = withMining(mining)
     val range = s"?from=0&until=$hour"
     Seq(c.getStats() -> "", c.getMiningTotals() -> "", c.getCollateralStats() -> "",
-      c.getMiningBuckets() -> range, c.getMiningHashrate() -> range).foreach { case (action, query) =>
+      c.getMiningBuckets() -> range, c.getMiningHashrate() -> range,
+      c.getLocalMiningSummary() -> "", c.getLocalMiningHistory() -> range,
+      c.getDifficultyEpochs(None, None, None) -> "").foreach { case (action, query) =>
       val result = action.apply(FakeRequest(GET, "/stats" + query))
       status(result) shouldBe OK
       header("Cache-Control", result) shouldBe Some("no-store")
     }
+  }
+
+  it should "serve the difficulty curve by epoch and reject a window no page could satisfy" in {
+    val mining = mock[MiningStatsRefresh]
+    val epoch = DifficultyEpoch.of(6599, DifficultySample(844673, 1000L, (BigInt(1) << 70).toString),
+      DifficultySample(844800, 128000L, (BigInt(1) << 70).toString), complete = true)
+    when(mining.difficulty(Some(6599), Some(6599), 8)).thenReturn(Future.successful(
+      DifficultyEpochHistory(source, 128, Vector(epoch), Some(epoch.copy(index = 6600, complete = false)),
+        Some(6599), Some(6599), backfillComplete = true, status = "ready")))
+    val c = withMining(mining)
+    val result = c.getDifficultyEpochs(Some(6599), Some(6599), Some(8)).apply(FakeRequest(GET, "/stats"))
+    status(result) shouldBe OK
+    val json = contentAsJson(result)
+    (json \ "epochLength").as[Int] shouldBe 128
+    (json \ "backfillComplete").as[Boolean] shouldBe true
+    (json \ "epochs")(0).as[play.api.libs.json.JsObject].value("difficulty") shouldBe
+      play.api.libs.json.JsString((BigInt(1) << 70).toString)
+    (json \ "epochs")(0).as[play.api.libs.json.JsObject].value("hashesPerSecond") shouldBe
+      play.api.libs.json.JsString((BigInt(1) << 70).toString)
+    (json \ "current" \ "complete").as[Boolean] shouldBe false
+
+    // A rejected window never reaches the worker, so none of these need a stub.
+    Seq(c.getDifficultyEpochs(Some(9), Some(4), None),
+      c.getDifficultyEpochs(Some(-1), None, None),
+      c.getDifficultyEpochs(None, None, Some(0)),
+      c.getDifficultyEpochs(None, None, Some(DifficultyEpochs.MaxPage + 1))).foreach { action =>
+      val denied = action.apply(FakeRequest(GET, "/stats"))
+      status(denied) shouldBe BAD_REQUEST
+      (contentAsJson(denied) \ "error").as[Int] shouldBe BAD_REQUEST
+      header("Cache-Control", denied) shouldBe Some("no-store")
+    }
+    verify(mining, never()).difficulty(Some(9), Some(4), 256)
+  }
+
+  it should "derive an aggregate worker hashrate without exposing session detail" in {
+    val cache = mock[StatsCache]
+    when(cache.settings).thenReturn(StatsConfig.Default)
+    val observation = LocalMiningObservation("shares", "session-7", 3L, 0L, 60000L,
+      Map("accepted" -> "90", "acceptedAssignedWork" -> "1200000", "superShares" -> "6",
+        "rejected20" -> "2"))
+    when(cache.localMiningViews).thenReturn(
+      Map("shares" -> LocalMiningActivityView("ready", observation, deduplicationComplete = true)))
+    val result = withMining(mock[MiningStatsRefresh], cache).getLocalMiningSummary()
+      .apply(FakeRequest(GET, "/stats"))
+    status(result) shouldBe OK
+    val json = contentAsJson(result)
+    (json \ "hashesPerSecond").as[String] shouldBe "20000"
+    (json \ "acceptedShares").as[Long] shouldBe 90L
+    (json \ "rejectedShares").as[Long] shouldBe 2L
+    (json \ "superShares").as[Long] shouldBe 6L
+    (json \ "workComplete").as[Boolean] shouldBe true
+    // The session identifier and the fraud list stay behind the api key.
+    (json \ "session").toOption shouldBe None
+    (json \ "fraud").toOption shouldBe None
   }
 
   it should "expose exact retained totals and their coverage without changing the existing snapshot" in {

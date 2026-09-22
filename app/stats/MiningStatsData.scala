@@ -34,7 +34,11 @@ final case class MiningTotals(blocks: Long = 0L, payments: Long = 0L, grossPaidN
   }
 }
 final case class MiningLedgerState(firstHeight: Int, cursor: MiningCursor, totals: MiningTotals)
-final case class MiningDifficultyPoint(height: Int, timestamp: Long, difficulty: String)
+/**
+ * The per-block difficulty series this view used to carry was 120 copies of one number, since
+ * difficulty only moves on epoch boundaries. `/stats/mining/difficulty` serves the epoch table
+ * instead, which covers years rather than the retention window.
+ */
 final case class MiningStatsView(status: String = "loading", observedAt: Option[Long] = None,
                                   persistent: Boolean = true, sourceHeight: Option[Int] = None,
                                   sourceBlockId: Option[String] = None, targetHeight: Option[Int] = None,
@@ -42,7 +46,7 @@ final case class MiningStatsView(status: String = "loading", observedAt: Option[
                                   recentFromHeight: Option[Int] = None, totals: MiningTotals = MiningTotals(),
                                   blocks: Vector[LithosBlockRecord] = Vector.empty,
                                   payments: Vector[MiningPaymentRecord] = Vector.empty,
-                                  difficulty: Vector[MiningDifficultyPoint] = Vector.empty,
+                                  difficulty: Option[String] = None,
                                   error: Option[String] = None)
 
 object MiningStatsData {
@@ -62,7 +66,6 @@ object MiningStatsData {
   implicit val recordFormat: OFormat[MiningBlockRecord] = Json.format[MiningBlockRecord]
   implicit val totalsFormat: OFormat[MiningTotals] = Json.format[MiningTotals]
   implicit val stateFormat: OFormat[MiningLedgerState] = Json.format[MiningLedgerState]
-  implicit val difficultyWrites: OWrites[MiningDifficultyPoint] = Json.writes[MiningDifficultyPoint]
   private val viewFields = Json.writes[MiningStatsView]
   implicit val viewWrites: OWrites[MiningStatsView] = OWrites { view =>
     // Preserve the existing /stats response; expanded statistics use dedicated API responses.

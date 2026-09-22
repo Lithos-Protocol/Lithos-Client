@@ -77,6 +77,12 @@ public class BlockTemplate {
             this.realTau = BigInteger.ZERO;
             this.superShareThreshold = BigInteger.ZERO;
         }
+        // Reduced reporting hands miners the super-share cut of tau, so every share they then send is
+        // a super-share. Both the notify and the work accounting read this one field, because a miner
+        // submits at whatever it was told and nothing else describes the rate shares arrive at.
+        this.assignedThreshold = reducedShareMessages
+                ? tau.divide(BigInteger.valueOf(LFSMHelpers.NISP_COEFFICIENT()))
+                : tau;
         // Built here, not on first read. It used to be a lazily-populated non-final field that every
         // connection actor reads from its own thread when serialising a mining.notify, so a miner
         // could be handed a half-constructed array.
@@ -94,6 +100,12 @@ public class BlockTemplate {
     /** The miner's assigned difficulty as a score, and the super-share cut of it. */
     public final BigInteger realTau;
     public final BigInteger superShareThreshold;
+
+    /**
+     * The threshold this job actually advertises. One accepted share is worth TARGET_MAX divided by
+     * this, which is the only correct per-share work: a miner submits what it was told to submit.
+     */
+    public final BigInteger assignedThreshold;
 
 	public byte[] serializeCoinbase(byte[] extraNonce1, byte[] extraNonce2) {
 		return Utils.concat(msg, extraNonce1, extraNonce2);
@@ -117,7 +129,7 @@ public class BlockTemplate {
 				"",
 				"",
 				Integer.toHexString(candidate.version),
-                reducedShareMessages ? tau.divide(new BigInteger("10000")).toString() : tau.toString(),
+                assignedThreshold.toString(),
 				"",
 				true
 		);

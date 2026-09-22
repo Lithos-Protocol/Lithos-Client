@@ -35,6 +35,10 @@ class MiningStatsRefreshSpec extends TestKit(ActorSystem("mining-stats-spec",
     }
     override def header(height: Int): MiningCursor = chain(height - 1)
     override def read(at: MiningCursor, previous: MiningCursor): MiningBlockRecord = record(at, previous, 10)
+    override def sample(height: Int): DifficultySample = {
+      val at = chain(height - 1)
+      DifficultySample(at.height, at.timestamp, (BigInt(1) << 100).toString)
+    }
     def fork(from: Int): Unit = {
       chain = chain.take(from - 1) ++ chain.drop(from - 1).map(h => h.copy(blockId = s"b-${h.height}",
         parentId = if (h.height == from) chain(from - 2).blockId else s"b-${h.height - 1}"))

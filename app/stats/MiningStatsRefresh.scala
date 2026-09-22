@@ -16,13 +16,14 @@ import scala.util.control.NonFatal
 @Singleton
 class MiningStatsRefresh(settings: MiningStatsConfig, persistent: Boolean, startHeight: Int,
                            openStore: () => MiningStatsStore, openSource: () => MiningStatsSource,
-                           worker: ExecutionContext) {
+                           worker: ExecutionContext, mainnet: Boolean = true) {
   @Inject def this(cache: StatsCache, node: NodeContext, protocol: SyncProtocolContext, system: ActorSystem) = {
     this(cache.settings.mining.copy(enabled = cache.settings.enabled && cache.settings.mining.enabled),
       cache.settings.storage.enabled, math.max(1, protocol.rollupStartHeight),
       () => MiningStatsStore.open(cache.settings.storage, node, protocol),
       () => NodeMiningStatsSource.open(node, cache.settings.mining, protocol),
-      system.dispatchers.lookup(Contexts.key(Contexts.MiningStats)))
+      system.dispatchers.lookup(Contexts.key(Contexts.MiningStats)),
+      protocol.networkType == org.ergoplatform.appkit.NetworkType.MAINNET)
     CoordinatedShutdown(system).addTask(CoordinatedShutdown.PhaseBeforeActorSystemTerminate, "close-mining-stats") {
       () => shutdown()
     }
@@ -33,6 +34,8 @@ class MiningStatsRefresh(settings: MiningStatsConfig, persistent: Boolean, start
   private val closed = Promise[Done]()
   private val pendingLocal = new AtomicReference(Map.empty[String, LocalMiningObservation])
   private val inventory = new AtomicReference(CollateralStats(status = if (settings.enabled) "loading" else "disabled"))
+  /** The epoch in progress and whether the table has reached its floor; both recomputed per cycle. */
+  private val epochs = new AtomicReference((Option.empty[DifficultyEpoch], false))
   private val published = new AtomicReference(MiningStatsView(
     status = if (settings.enabled) "loading" else "disabled", persistent = persistent))
   @volatile private var nextRunNanos = System.nanoTime()
@@ -66,6 +69,26 @@ class MiningStatsRefresh(settings: MiningStatsConfig, persistent: Boolean, start
   }
   def hashrate(from: Long, until: Long, widthMs: Long): Future[LithosHashrateEstimate] = query { db =>
     MiningHistory.hashrate(db.buckets(from, until, widthMs).copy(status = view.status))
+  }
+
+  /**
+   * A page of the epoch table, newest-anchored by default so a graph gets the recent curve without
+   * having to know what the table holds.
+   */
+  def difficulty(from: Option[Int], to: Option[Int], limit: Int): Future[DifficultyEpochHistory] = query { db =>
+    require(limit > 0 && limit <= DifficultyEpochs.MaxPage, "invalid difficulty epoch limit")
+    require(from.forall(_ >= 0) && to.forall(_ >= 0), "difficulty epoch indices are nonnegative")
+    val (current, backfilled) = epochs.get()
+    val bounds = db.epochBounds
+    val rows = bounds match {
+      case Some((oldest, newest)) =>
+        val last = math.min(to.getOrElse(newest), newest)
+        val first = math.max(from.getOrElse(last - limit + 1), oldest)
+        if (last >= first) db.epochRange(first, math.min(last, first + limit - 1)) else Vector.empty
+      case None => Vector.empty
+    }
+    DifficultyEpochHistory(db.state.get.cursor, DifficultyEpochs.EpochLength, rows, current,
+      bounds.map(_._1), bounds.map(_._2), backfilled, view.status)
   }
 
   /** No unbounded request queue: a busy worker reports busy and the future API can retry later. */
@@ -201,5 +224,53 @@ class MiningStatsRefresh(settings: MiningStatsConfig, persistent: Boolean, start
         inventory.set(inventory.get().copy(status = "unavailable", error = Some("Collateral index read failed")))
       }
     } else inventory.set(inventory.get().copy(status = "stale"))
+    if (!closing.get()) try updateEpochs(db, source, currentHeights.chain)
+    catch { case NonFatal(error) => logger.debug("Difficulty epoch refresh failed", error) }
+  }
+
+  /**
+   * Extends the epoch table towards the tip, then backfills towards its floor.
+   *
+   * Two header reads describe a whole epoch, because difficulty is constant inside one. Runs last
+   * in the cycle and on its own budget, so a slow node costs the table a cycle rather than costing
+   * the canonical replay its progress.
+   */
+  private def updateEpochs(db: MiningStatsStore, source: MiningStatsSource, tip: Int): Unit = {
+    def read(index: Int): DifficultyEpoch = DifficultyEpoch.of(index,
+      source.sample(DifficultyEpochs.startHeight(index)),
+      source.sample(DifficultyEpochs.endHeight(index)), complete = true)
+
+    var budget = settings.blocksPerRefresh
+    DifficultyEpochs.finalizableIndex(tip).foreach { finalizable =>
+      val floor = DifficultyEpochs.floorIndex(finalizable, mainnet)
+      if (finalizable >= floor) {
+        // Forward first: an empty table starts at the newest safe epoch, so the recent curve — the
+        // part anyone is looking at — appears on the first cycle rather than after a full backfill.
+        val forward = Vector.newBuilder[DifficultyEpoch]
+        var up = math.max(db.epochBounds.map(_._2 + 1).getOrElse(finalizable), floor)
+        while (up <= finalizable && budget > 0) {
+          forward += read(up)
+          up += 1
+          budget -= 1
+        }
+        db.saveEpochs(forward.result())
+
+        val back = Vector.newBuilder[DifficultyEpoch]
+        var down = db.epochBounds.map(_._1 - 1).getOrElse(-1)
+        while (down >= floor && budget > 0) {
+          back += read(down)
+          down -= 1
+          budget -= 1
+        }
+        db.saveEpochs(back.result())
+        if (settings.pruningEnabled) db.pruneEpochs(floor)
+      }
+      epochs.updateAndGet(state => (state._1, db.epochBounds.exists(_._1 <= floor)))
+    }
+    // The epoch in progress ends at the tip, so it is recomputed rather than stored.
+    val index = DifficultyEpochs.indexOf(math.max(1, tip))
+    val live = DifficultyEpoch.of(index, source.sample(DifficultyEpochs.startHeight(index)),
+      source.sample(math.max(DifficultyEpochs.startHeight(index), tip)), complete = false)
+    epochs.updateAndGet(state => (Some(live), state._2))
   }
 }

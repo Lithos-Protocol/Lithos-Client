@@ -42,6 +42,7 @@ class MiningStatsStore(database: Option[KeyValueStore], identity: JsObject) {
   private def key(value: String): Array[Byte] = value.getBytes(UTF_8)
   private def blockKey(height: Int): String = f"block/$height%010d"
   private def bucketKey(start: Long, width: Long): String = s"bucket/$width/" + f"$start%016d"
+  private def epochKey(index: Int): String = f"epoch/$index%010d"
   private def get(name: String): Option[Array[Byte]] = database match {
     case Some(db) => KeyValueStore.orThrow(db.get(key(name)))
     case None => memory.get(name)
@@ -177,6 +178,64 @@ class MiningStatsStore(database: Option[KeyValueStore], identity: JsObject) {
       first.forall(_ > from) || base.cursor.timestamp < until)
   }
 
+  /* ---- Difficulty epochs ----
+     Header-derived and independent of the block records: an epoch is only written once its last
+     block is a full epoch behind the tip, so nothing here is ever rolled back or pruned with a
+     block record. The table therefore outlives the retention window, which is the point of it. */
+
+  def epochBounds: Option[(Int, Int)] = for {
+    oldest <- get("epoch/oldest").map(decode[Int])
+    newest <- get("epoch/newest").map(decode[Int])
+    if oldest <= newest
+  } yield (oldest, newest)
+
+  def epoch(index: Int): Option[DifficultyEpoch] = get(epochKey(index)).map { bytes =>
+    val record = decode[DifficultyEpoch](bytes)
+    require(record.index == index, "difficulty epoch record has the wrong index")
+    record
+  }
+
+  /**
+   * Writes epochs and moves whichever marker they extend. Backfill walks downwards and forward
+   * collection upwards, so a batch touches one end or the other but never both.
+   */
+  def saveEpochs(epochs: Seq[DifficultyEpoch]): Unit = if (epochs.nonEmpty) {
+    epochs.foreach(validateEpoch)
+    val indices = epochs.map(_.index)
+    val bounds = epochBounds
+    val oldest = math.min(indices.min, bounds.map(_._1).getOrElse(indices.min))
+    val newest = math.max(indices.max, bounds.map(_._2).getOrElse(indices.max))
+    write(epochs.toVector.map(e => Put(key(epochKey(e.index)), encode(e))) ++
+      Vector(Put(key("epoch/oldest"), encode(oldest)), Put(key("epoch/newest"), encode(newest))))
+  }
+
+  /**
+   * Drops the oldest epochs beyond the cap, at most `limit` per call. Steady state removes one at
+   * a time; the batch bound only matters for a table that has been idle across many epochs.
+   */
+  def pruneEpochs(floor: Int, limit: Int = 64): Int = epochBounds match {
+    case Some((oldest, newest)) if oldest < floor =>
+      val end = math.min(math.min(floor, oldest + limit), newest + 1)
+      write((oldest until end).toVector.map(i => Delete(key(epochKey(i)))) :+
+        Put(key("epoch/oldest"), encode(end)))
+      end - oldest
+    case _ => 0
+  }
+
+  def epochRange(fromIndex: Int, toIndex: Int): Vector[DifficultyEpoch] = {
+    require(fromIndex >= 0 && toIndex >= fromIndex, "invalid difficulty epoch range")
+    require(toIndex - fromIndex < DifficultyEpochs.MaxEpochs, "difficulty epoch range exceeds the table")
+    (fromIndex to toIndex).toVector.flatMap(epoch)
+  }
+
+  private def validateEpoch(record: DifficultyEpoch): Unit = {
+    require(record.index >= 0 && record.startHeight == DifficultyEpochs.startHeight(record.index) &&
+      record.endHeight >= record.startHeight && record.endHeight <= DifficultyEpochs.endHeight(record.index),
+      "difficulty epoch does not match its index")
+    require(record.endTimestamp >= record.startTimestamp && BigInt(record.difficulty) >= 0,
+      "invalid difficulty epoch record")
+  }
+
   /** Sampled local observations are not canonical contributions and are never rolled back with a block. */
   def saveLocal(observations: Iterable[LocalMiningObservation]): Unit = observations.foreach { observation =>
     require(LocalMiningStats.Kinds.contains(observation.kind) && observation.counters.size <= 32 &&
@@ -221,7 +280,7 @@ class MiningStatsStore(database: Option[KeyValueStore], identity: JsObject) {
       Some(target), Some(base.firstHeight), block(base.firstHeight).map(_.cursor.timestamp), Some(recentStart),
       base.totals, recent.flatMap(_.blocks).takeRight(50).reverse,
       recent.flatMap(_.payments).takeRight(50).reverse,
-      recent.map(r => MiningDifficultyPoint(r.cursor.height, r.cursor.timestamp, r.difficulty)))
+      recent.lastOption.map(_.difficulty))
   }
 
   private def requiredBlock(height: Int): MiningBlockRecord = block(height).getOrElse(

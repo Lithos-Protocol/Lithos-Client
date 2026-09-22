@@ -22,6 +22,8 @@ trait MiningStatsSource {
   def header(height: Int): MiningCursor
   def read(header: MiningCursor, previous: MiningCursor): MiningBlockRecord
   def collateral(at: MiningCursor): Option[CollateralStats] = None
+  /** One header's difficulty, which the epoch table reads at boundaries instead of every block. */
+  def sample(height: Int): DifficultySample
 }
 
 object NodeMiningStatsSource {
@@ -54,6 +56,11 @@ class NodeMiningStatsSource(api: NodeApi, protocol: SyncProtocolContext, minerTr
   private val origins = mutable.Map.empty[String, Option[LithosBlockRecord]]
   override def heights: NodeHeights = chain.heights.get
   override def header(height: Int): MiningCursor = cursor(chain.headerAt(height).get)
+
+  override def sample(height: Int): DifficultySample = {
+    val header = chain.headerAt(height).get
+    DifficultySample(header.height, header.timestamp, header.difficulty.toString)
+  }
 
   override def collateral(at: MiningCursor): Option[CollateralStats] = {
     val observed = System.currentTimeMillis()

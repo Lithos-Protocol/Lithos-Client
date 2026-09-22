@@ -120,9 +120,12 @@ class LithosJobManager(options: Options, statsCollector: Option[ActorRef] = None
         validJobs.put(jobId, template)
         pruneOldJobs(jobId)
         if (statsCollector.isDefined) {
-          val target = BigInt(template.tau).max(BigInt(template.target)).max(BigInt(template.superShareThreshold))
+          // The expected hashes behind one accepted share is TARGET_MAX over the threshold the job
+          // advertised — under reduced reporting that is the super-share cut, which is 10000x the
+          // work of a plain share. Anything else here misreports hashrate by that whole factor.
+          val advertised = BigInt(template.assignedThreshold)
           assignedWork = assignedWork.filter { case (id, _) => validJobs.contains(id) }
-            .updated(jobId, if (target > 0) LFSMHelpers.TARGET_MAX_LITHOS / target else BigInt(0))
+            .updated(jobId, if (advertised > 0) LFSMHelpers.TARGET_MAX_LITHOS / advertised else BigInt(0))
         }
         // The header is logged because it is the only way to tell a freshly assembled candidate from
         // the one the node had cached — two jobs with the same header mean the node did no work.

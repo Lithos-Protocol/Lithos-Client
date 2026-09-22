@@ -8,7 +8,7 @@ import play.api.Configuration
 import play.api.libs.json.Json
 import play.api.mvc._
 import scorex.crypto.hash.Blake2b256
-import stats.{MiningHistory, MiningStatsRefresh, StatsCache, StatsView}
+import stats.{DifficultyEpochs, LocalMiningSummary, MiningHistory, MiningStatsRefresh, StatsCache, StatsView}
 
 import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
@@ -47,6 +47,30 @@ class StatsApiController @Inject()(cc: ControllerComponents, cache: StatsCache, 
     mining.hashrate(from, until, width).map(value => Ok(Json.toJson(value)))
   }
 
+  /**
+   * Epoch indices, not timestamps: the table's unit is a difficulty epoch, and a caller graphing
+   * the curve wants "the last N epochs" without first having to learn which heights those are.
+   */
+  def getDifficultyEpochs(from: Option[Int], to: Option[Int], limit: Option[Int]): Action[AnyContent] =
+    noStore(Action.async {
+      Try(DifficultyEpochs.resolve(from, to, limit.getOrElse(256))) match {
+        case Failure(error: IllegalArgumentException) =>
+          Future.successful(BadRequest(ApiHelper.makeError(400, "Invalid difficulty epoch range", error.getMessage)))
+        case Failure(error) => Future.failed(error)
+        case Success((first, last, count)) =>
+          mining.difficulty(first, last, count).map(value => Ok(Json.toJson(value))).recover(unavailable)
+      }
+    })
+
+  def getLocalMiningSummary(): Action[AnyContent] = noStore(Action {
+    Ok(Json.toJson(LocalMiningSummary.of(cache.settings.enabled, cache.localMiningViews)))
+  })
+
+  def getLocalMiningHistory(): Action[AnyContent] = history { (from, until, width) =>
+    mining.localHistory("shares", from, until)
+      .map(rows => Ok(Json.toJson(LocalMiningSummary.history(rows, from, until, width, mining.view.status))))
+  }
+
   def getCollateralStats(): Action[AnyContent] = noStore(Action {
     Ok(Json.toJson(mining.collateral))
   })
@@ -60,15 +84,18 @@ class StatsApiController @Inject()(cc: ControllerComponents, cache: StatsCache, 
       case Failure(error: IllegalArgumentException) =>
         Future.successful(BadRequest(ApiHelper.makeError(400, "Invalid statistics range", error.getMessage)))
       case Failure(error) => Future.failed(error)
-      case Success((from, until, width)) => read(from, until, width).recover {
-        case NonFatal(error) =>
-          logger.debug("Statistics history query failed", error)
-          ServiceUnavailable(ApiHelper.makeError(503, "Statistics history unavailable",
-            "History may be loading, disabled, or busy. Check /stats for collection status and retry later."))
-            .withHeaders("Retry-After" -> "1")
-      }
+      case Success((from, until, width)) => read(from, until, width).recover(unavailable)
     }
   })
+
+  /** A busy or loading worker is the same answer whichever series was asked for. */
+  private def unavailable: PartialFunction[Throwable, Result] = {
+    case NonFatal(error) =>
+      logger.debug("Statistics history query failed", error)
+      ServiceUnavailable(ApiHelper.makeError(503, "Statistics history unavailable",
+        "History may be loading, disabled, or busy. Check /stats for collection status and retry later."))
+        .withHeaders("Retry-After" -> "1")
+  }
 
   private def historyRange(request: RequestHeader): (Long, Long, Long) = {
     def timestamp(name: String): Long = {

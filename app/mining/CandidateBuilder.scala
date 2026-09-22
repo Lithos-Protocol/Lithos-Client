@@ -277,7 +277,7 @@ class CandidateBuilder(client: ErgoClient,
     case SourcesDue(attempt) =>
       waitingRound(attempt).foreach(stopWaiting)
 
-    case BlockTxsCollected(attempt, txs, revenue, from, late) =>
+    case BlockTxsCollected(attempt, txs, revenue, from, late, limits, share, revenueByTx) =>
       if (collectingFor.exists(_.attempt == attempt)) {
         if (nowNanos() - attempt.startedAt >= config.blockTxTimeout.milliseconds.toNanos) {
           expireCollection(attempt)
@@ -286,7 +286,7 @@ class CandidateBuilder(client: ErgoClient,
           currentPackage.filter(p => p.blockHeight == attempt.height &&
             p.collateral.txId == attempt.genesisId && !blockTxsBlockedAt.contains(attempt.height))
             .filter(_ => txs.nonEmpty || attempt.refresh || config.waitForBlockPackage).foreach { pkg =>
-              val updated = pkg.withBlockTxs(txs, revenue, from, late)
+              val updated = pkg.withBlockTxs(txs, revenue, from, late, limits, share, revenueByTx)
               currentPackage = Some(updated)
               publish(updated, "augmentedBuildMs", collectStartedAt, refreshed = attempt.refresh)
             }
@@ -524,7 +524,16 @@ class CandidateBuilder(client: ErgoClient,
         val from = offered.collect {
           case (name, bundles) if bundles.exists(_.members.exists(tx => selected.contains(tx.id))) => name
         }.toSet
-        BlockTxsCollected(attempt, txs ++ topUp, ledger.availableErg, from, late)
+        // Revenue per member, credited to whichever transaction created the output. Only unspent
+        // entries count: one a later member consumed was carried forward, not earned twice, so
+        // these sum to exactly the package revenue reported alongside them.
+        val revenue = ledger.unspent.groupBy(_.parentTxId)
+          .map { case (txId, entries) => txId -> entries.map(_.value).sum }
+        // Carried so the served job can report what the packing was actually measured against.
+        // Unbounded means the node's parameters could not be read, which is not a limit to publish.
+        BlockTxsCollected(attempt, txs ++ topUp, ledger.availableErg, from, late,
+          Some(blockBudget).filterNot(_ == CandidateBudget.Unbounded),
+          Some(packageBudget).filterNot(_ == CandidateBudget.Unbounded), revenue)
       }(collectionEc)
       .onComplete {
         case Success(msg) => self ! msg
@@ -660,7 +669,10 @@ object CandidateBuilder {
    * @param late names of the sources that had not answered when `txs` was assembled
    */
   private[mining] case class BlockTxsCollected(attempt: CollectionAttempt, txs: Seq[CandidateTx], revenue: Long = 0L,
-                                               from: Set[String] = Set.empty, late: Set[String] = Set.empty)
+                                               from: Set[String] = Set.empty, late: Set[String] = Set.empty,
+                                               limits: Option[CandidateBudget] = None,
+                                               share: Option[CandidateBudget] = None,
+                                               revenueByTx: Map[String, Long] = Map.empty)
 
   private[mining] case class CollectTimedOut(attempt: CollectionAttempt)
 

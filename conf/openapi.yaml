@@ -560,6 +560,129 @@ paths:
           $ref: '#/components/responses/StatsInvalidRange'
         '503':
           $ref: '#/components/responses/StatsHistoryUnavailable'
+  /stats/mining/difficulty:
+    get:
+      summary: Network difficulty by epoch
+      operationId: getDifficultyEpochs
+      tags: [stats]
+      description: |
+        The network difficulty curve, one point per difficulty epoch. Ergo only readjusts difficulty
+        on epoch boundaries, so every block inside an epoch carries the same value and one record
+        describes all 128 of them. That makes the table cheap enough to keep for years — it is not
+        bounded by the history retention window the other statistics use.
+
+        Each epoch carries its height range, its first and last block timestamps, and
+        `hashesPerSecond`: the work of the epoch's block intervals divided by the time those same
+        intervals took. Use it for network hashrate as well as difficulty; the two differ only by
+        how long the blocks took.
+
+        `current` is the epoch in progress. It is recomputed on every collection cycle rather than
+        stored, so it is the only entry that can still change, and its `complete` is false. Stored
+        epochs stay a full epoch behind the tip so a reorg cannot rewrite one.
+
+        Indices count epochs from height 1. With no range the newest `limit` epochs are returned.
+        `oldestIndex` and `newestIndex` report what the table actually holds, and `backfillComplete`
+        says whether it has finished walking back to its floor — on mainnet that floor is the EIP-37
+        activation, below which epochs were 1024 blocks long and are not described here.
+      parameters:
+        - in: query
+          name: from
+          required: false
+          description: First epoch index to include. Clamped to `oldestIndex`.
+          schema:
+            type: integer
+            format: int32
+            minimum: 0
+        - in: query
+          name: to
+          required: false
+          description: Last epoch index to include; defaults to `newestIndex` and cannot exceed it.
+          schema:
+            type: integer
+            format: int32
+            minimum: 0
+        - in: query
+          name: limit
+          required: false
+          description: How many epochs to return, counted back from `to`.
+          schema:
+            type: integer
+            format: int32
+            minimum: 1
+            maximum: 512
+            default: 256
+      responses:
+        '200':
+          description: The requested epochs, oldest first, plus the epoch in progress.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DifficultyEpochHistory'
+        '400':
+          description: A negative index, a reversed range, or a limit outside 1–512.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '503':
+          $ref: '#/components/responses/StatsHistoryUnavailable'
+  /stats/mining/workers:
+    get:
+      summary: This client's own hashrate
+      operationId: getLocalMiningSummary
+      tags: [stats]
+      description: |
+        What the workers connected to this client are doing, as rates and totals across every
+        worker together. Narrower than `/stats/local`: no session identifiers, no fraud targets and
+        no per-worker breakdown, so it carries nothing the Stratum connection count does not.
+
+        `hashesPerSecond` divides accumulated assigned work by the session's elapsed time. Assigned
+        work is the expected hash count for each accepted share's validation threshold, which puts
+        it in the same units as network difficulty — this rate and the ones from
+        `/stats/mining/difficulty` are directly comparable.
+
+        **When `workComplete` is false the rate is a lower bound.** Reduced share reporting drops
+        accepted shares before they are ever counted, so the real hashrate is higher by an unknown
+        amount. Counters restart whenever the producer does, and `sessionStartedAt` is when that
+        happened — the totals here are not lifetime figures.
+      responses:
+        '200':
+          description: Current rates and totals; empty of values until a producer reports.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LocalMiningSummary'
+  /stats/mining/workers/history:
+    get:
+      summary: This client's hashrate over time
+      operationId: getLocalMiningHistory
+      tags: [stats]
+      description: |
+        The same worker hashrate as `/stats/mining/workers`, measured per UTC hour or day so it can
+        be graphed. Each point is the difference between two stored observations, divided by the
+        time between them.
+
+        Only observations from one producer session can be differenced — a restart resets the
+        counters — so intervals spanning a restart are left out rather than clamped. A gap therefore
+        means the interval was not measured, not that nothing was mined. `workComplete` is false for
+        any interval in which reduced reporting dropped shares.
+
+        Range and interval rules match `/stats/mining/buckets`.
+      parameters:
+        - $ref: '#/components/parameters/StatsFrom'
+        - $ref: '#/components/parameters/StatsUntil'
+        - $ref: '#/components/parameters/StatsInterval'
+      responses:
+        '200':
+          description: Measured intervals, oldest first. The list may be empty.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LocalHashrateHistory'
+        '400':
+          $ref: '#/components/responses/StatsInvalidRange'
+        '503':
+          $ref: '#/components/responses/StatsHistoryUnavailable'
   /stats/collateral:
     get:
       summary: Collateral inventory
@@ -3033,11 +3156,10 @@ components:
           items:
             $ref: '#/components/schemas/MiningPaymentRecord'
         difficulty:
-          type: array
-          maxItems: 120
-          description: Ergo network difficulty samples, oldest first. Not a hashrate estimate.
-          items:
-            $ref: '#/components/schemas/MiningDifficultyPoint'
+          type: string
+          description: >-
+            Network difficulty at `sourceHeight`, as an exact decimal integer. For the curve over
+            time use /stats/mining/difficulty.
         error:
           type: string
           description: Short failure message. Details stay in the client log.
@@ -3108,18 +3230,194 @@ components:
         grossNanoErg:
           type: string
           description: Exact output value, including the refunded bond and any surplus.
-    MiningDifficultyPoint:
+    DifficultyEpoch:
       type: object
-      required: [height, timestamp, difficulty]
+      required: [index, startHeight, endHeight, startTimestamp, endTimestamp, difficulty, complete]
+      description: >-
+        One difficulty epoch. Every block from `startHeight` to `endHeight` carries `difficulty`,
+        because Ergo only readjusts on epoch boundaries.
       properties:
-        height:
+        index:
           type: integer
-        timestamp:
+          format: int32
+          minimum: 0
+          description: Epoch number, counting from height 1. Epoch `n` spans heights `128n + 1` to `128n + 128`.
+        startHeight:
+          type: integer
+          description: First block of the epoch, and the one whose header supplied `difficulty`.
+        endHeight:
+          type: integer
+          description: Last block of the epoch, or the current tip while the epoch is still in progress.
+        startTimestamp:
           type: integer
           format: int64
+          description: Timestamp of `startHeight`, in Unix milliseconds.
+        endTimestamp:
+          type: integer
+          format: int64
+          description: Timestamp of `endHeight`, in Unix milliseconds.
         difficulty:
           type: string
-          description: Network difficulty from the Ergo header, as an exact decimal integer.
+          pattern: '^[0-9]+$'
+          description: Required difficulty for every block in the range, as an exact decimal integer.
+        complete:
+          type: boolean
+          description: False only for the epoch in progress, whose `endHeight` still moves with the tip.
+        hashesPerSecond:
+          type: string
+          pattern: '^[0-9]+$'
+          description: >-
+            Network hashrate across the epoch: `difficulty × (endHeight − startHeight)` divided by
+            the seconds between the two timestamps, so both sides count the same block intervals.
+            Omitted when the range covers no interval or no elapsed time.
+    DifficultyEpochHistory:
+      type: object
+      required: [source, epochLength, epochs, backfillComplete, status]
+      properties:
+        source:
+          $ref: '#/components/schemas/MiningCursor'
+        epochLength:
+          type: integer
+          description: Blocks per epoch. 128 on mainnet since EIP-37, and on testnet throughout.
+        epochs:
+          type: array
+          maxItems: 512
+          description: Stored epochs in the requested window, oldest first. A gap means that epoch is not held.
+          items:
+            $ref: '#/components/schemas/DifficultyEpoch'
+        current:
+          $ref: '#/components/schemas/DifficultyEpoch'
+        oldestIndex:
+          type: integer
+          format: int32
+          description: Oldest epoch the table holds; absent while it is empty.
+        newestIndex:
+          type: integer
+          format: int32
+          description: Newest stored epoch, which stays a full epoch behind the tip. Absent while the table is empty.
+        backfillComplete:
+          type: boolean
+          description: >-
+            Whether the table has reached its floor. While false it is still walking backwards and
+            older epochs will appear.
+        status:
+          $ref: '#/components/schemas/MiningCollectionStatus'
+    LocalMiningSummary:
+      type: object
+      required: [status, enabled, acceptedShares, rejectedShares, blockCandidates, superShares,
+                 assignedWork, solutionsAccepted, solutionsRejected, workComplete, rejections]
+      properties:
+        status:
+          type: string
+          enum: [disabled, loading, ready, stale, stopped]
+          description: Freshness of the underlying producer observation.
+        enabled:
+          type: boolean
+          description: Whether statistics collection is on at all.
+        sessionStartedAt:
+          type: integer
+          format: int64
+          description: When the share producer last started, in Unix milliseconds. Every total below is since then.
+        observedAt:
+          type: integer
+          format: int64
+          description: When these counters were last sampled, in Unix milliseconds.
+        hashesPerSecond:
+          type: string
+          pattern: '^[0-9]+$'
+          description: >-
+            Assigned work over the session's elapsed time, in the same units as network difficulty.
+            A lower bound when `workComplete` is false. Omitted before there is any work or elapsed time.
+        acceptedShares:
+          type: integer
+          format: int64
+        rejectedShares:
+          type: integer
+          format: int64
+          description: Every rejection code added together. See `rejections` for the split.
+        blockCandidates:
+          type: integer
+          format: int64
+          description: Accepted shares that also solved a block. A subset of `acceptedShares`.
+        superShares:
+          type: integer
+          format: int64
+          description: >-
+            Accepted shares that met the super-share threshold on a job using collateral. These are
+            the proofs a NISP is built from, so they are what earns a payout score.
+        superSharesPerHour:
+          type: number
+          format: double
+          description: Super shares averaged over the session. Absent until the session has elapsed time.
+        assignedWork:
+          $ref: '#/components/schemas/StatsInteger'
+        solutionsAccepted:
+          type: integer
+          format: int64
+          description: Block solutions the node accepted. Acceptance is not chain confirmation.
+        solutionsRejected:
+          type: integer
+          format: int64
+        workComplete:
+          type: boolean
+          description: >-
+            False when reduced share reporting dropped accepted shares, which makes every rate here
+            an underestimate.
+        rejections:
+          type: object
+          additionalProperties:
+            $ref: '#/components/schemas/StatsInteger'
+          description: Count per rejection code, keyed as `rejected<code>`.
+    LocalHashratePoint:
+      type: object
+      required: [start, widthMs, hashesPerSecond, acceptedShares, superShares, workComplete]
+      properties:
+        start:
+          type: integer
+          format: int64
+          description: Inclusive UTC interval start in Unix milliseconds.
+        widthMs:
+          type: integer
+          format: int64
+          enum: [3600000, 86400000]
+        hashesPerSecond:
+          type: string
+          pattern: '^[0-9]+$'
+          description: Assigned work gained over this interval, divided by its elapsed time.
+        acceptedShares:
+          type: integer
+          format: int64
+        superShares:
+          type: integer
+          format: int64
+        workComplete:
+          type: boolean
+          description: False when reduced reporting dropped shares during the interval.
+    LocalHashrateHistory:
+      type: object
+      required: [from, until, widthMs, points, status]
+      properties:
+        from:
+          type: integer
+          format: int64
+          description: The inclusive start you asked for, in Unix milliseconds.
+        until:
+          type: integer
+          format: int64
+          description: The exclusive end you asked for, in Unix milliseconds.
+        widthMs:
+          type: integer
+          format: int64
+          enum: [3600000, 86400000]
+        points:
+          type: array
+          description: >-
+            Measured intervals, oldest first. Intervals spanning a producer restart are absent,
+            since resetting counters makes them unmeasurable.
+          items:
+            $ref: '#/components/schemas/LocalHashratePoint'
+        status:
+          $ref: '#/components/schemas/MiningCollectionStatus'
     StatsStorageView:
       type: object
       required: [status, busy, pending, coalescedSnapshots]
@@ -3276,15 +3574,38 @@ components:
           enum: [client-supplied]
         knownSizeBytes:
           type: string
+          description: Bytes across the transactions above, as an exact decimal integer.
         knownCost:
           type: string
+          description: Validation cost across the transactions above, as an exact decimal integer.
         allSizesKnown:
           type: boolean
         allCostsKnown:
           type: boolean
+        blockMaxSizeBytes:
+          type: string
+          pattern: '^[0-9]+$'
+          description: >-
+            The node's active block size limit. Absent when its parameters could not be read, in
+            which case the packing ran unbounded and there is no denominator to compare against.
+        blockMaxCost:
+          type: string
+          pattern: '^[0-9]+$'
+          description: The node's active block cost limit. Absent on the same terms as blockMaxSizeBytes.
+        packageMaxSizeBytes:
+          type: string
+          pattern: '^[0-9]+$'
+          description: >-
+            The share of the block's size limit one Lithos package may occupy, which is the budget
+            admission actually measured against. Space under the block limit but over this is left
+            for the node to fill from its own mempool.
+        packageMaxCost:
+          type: string
+          pattern: '^[0-9]+$'
+          description: The same share of the block's cost limit.
     PackageTransactionView:
       type: object
-      required: [id, kind, sizeBytes, cost, proofLeafMatched]
+      required: [id, kind, sizeBytes, cost, proofLeafMatched, revenueNanoErg]
       properties:
         id:
           type: string
@@ -3297,6 +3618,15 @@ components:
           type: string
           nullable: true
           description: Execution cost as a decimal string, when it is known.
+        revenueNanoErg:
+          type: string
+          pattern: '^[0-9]+$'
+          description: >-
+            Unspent nanoERG this transaction left for the holding top-up to collect. An output a
+            later member of the package spent was carried forward rather than earned twice, so it
+            is credited to neither and these sum to `expectedRevenueNanoErg`. Members that create
+            no spendable output — the genesis, a carried mempool ancestor, the top-up itself — are
+            zero, which is a fact about them rather than a missing value.
         proofLeafMatched:
           type: boolean
           description: >

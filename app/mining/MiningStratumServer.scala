@@ -67,7 +67,8 @@ import scala.concurrent.duration.{Duration, DurationInt, FiniteDuration}
  * @param client              Ergo client for collateral retrieval
  * @param prover              Node wallet used to sign collateral transactions
  * @param apiKey              Node API key for /mining/candidateWithTxs
- * @param reducedShareMessages Whether to divide the displayed tau by 1000
+ * @param reducedShareMessages Whether to advertise the super-share threshold instead of tau, so every
+ *                            share a miner sends is a super-share
  * @param nispDB              NISP database for super-share persistence
  * @param candidateConfig     Tuning for CandidateBuilder, which builds the transactions inserted
  *                            into every Lithos block

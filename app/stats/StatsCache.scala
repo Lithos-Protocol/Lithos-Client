@@ -10,6 +10,12 @@ import scala.concurrent.duration._
 object StatsCache {
   private final case class Published(view: StatsView, observedNanos: Long)
   private final case class DexPublished(snapshot: DexStatsSnapshot, observedNanos: Long)
+
+  /**
+   * How far back a current-hashrate reading looks. Long enough that a handful of shares does not
+   * swing it, short enough that it still describes now rather than the whole session.
+   */
+  val WorkWindowMs: Long = 900000L
 }
 
 /** The collector is the only writer. HTTP reads never wait for its mailbox. */
@@ -28,6 +34,7 @@ class StatsCache(val settings: StatsConfig) {
     status = if (settings.enabled && settings.mining.enabled) "loading" else "disabled",
     persistent = settings.storage.enabled) -> 0L)
   private val activity = new AtomicReference(Map.empty[String, (LocalMiningObservation, Long)])
+  private val samples = new AtomicReference(Vector.empty[WorkSample])
 
   /** A session change marks a counter reset, never negative activity. */
   def localMiningActivity: Map[String, LocalMiningObservation] = activity.get().map { case (kind, (observed, _)) => kind -> observed }
@@ -40,6 +47,20 @@ class StatsCache(val settings: StatsConfig) {
   private[stats] def publishLocal(observation: LocalMiningObservation): Unit = {
     val ageMs = math.min(math.max(0L, System.currentTimeMillis() - observation.observedAt), settings.staleAfterMs.toLong + 1)
     activity.set(activity.get().updated(observation.kind, observation -> (System.nanoTime() - ageMs.milliseconds.toNanos)))
+    if (observation.kind == "shares") retainSample(WorkSample.of(observation))
+  }
+
+  /** One window's worth of share samples, oldest first, for the current-rate reading. */
+  def recentWork: Vector[WorkSample] = samples.get()
+
+  private def retainSample(sample: WorkSample): Unit = samples.updateAndGet { current =>
+    // Keep one sample beyond the window so a rate is still measurable at its far edge.
+    val cutoff = sample.observedAt - StatsCache.WorkWindowMs
+    val kept = current.lastIndexWhere(_.observedAt <= cutoff) match {
+      case -1 => current
+      case index => current.drop(index)
+    }
+    kept :+ sample
   }
 
   private[stats] def publishMining(view: MiningStatsView): Unit = {
