@@ -5,9 +5,9 @@ import play.api.libs.json._
 /**
  * A position waiting in the collateral queue, head first.
  *
- * `finderFeeNanoErgs` is what this position bids the miner that will eventually spend it, and
- * `principalNanoErgs` already contains that bid and its four-fold pool premium. Together the queue
- * is the forward book: bids that become spendable as the queue drains.
+ * `priorityFeeNanoErgs` is the ERG this position added above the floor, and `principalNanoErgs` is
+ * the floor plus that fee. Together the queue is the forward book: fees that become spendable as
+ * the queue drains.
  */
 case class CollateralQueueEntry(boxId: String,
                                 position: Long,
@@ -15,7 +15,7 @@ case class CollateralQueueEntry(boxId: String,
                                 principalNanoErgs: String,
                                 permitLit: String,
                                 creationHeight: Int,
-                                finderFeeNanoErgs: String = "0")
+                                priorityFeeNanoErgs: String = "0")
 
 object CollateralQueueEntry {
   implicit lazy val jsonFormat: Format[CollateralQueueEntry] = Json.format[CollateralQueueEntry]
@@ -24,15 +24,15 @@ object CollateralQueueEntry {
 /**
  * A live collateral box waiting to be spent by whichever miner finds the next block.
  *
- * `finderFeeNanoErgs` is what this box pays that miner. The active set sorted by it is the spot
- * book: the bids a miner can take right now.
+ * `priorityFeeNanoErgs` is the fee this box carries, a share of which goes to that miner. The
+ * active set sorted by it is the spot book: what a miner can take right now.
  */
 case class CollateralActiveEntry(boxId: String,
                                  lenderAddress: String,
                                  valueNanoErgs: String,
                                  carriedLit: String,
                                  creationHeight: Int,
-                                 finderFeeNanoErgs: String = "0")
+                                 priorityFeeNanoErgs: String = "0")
 
 object CollateralActiveEntry {
   implicit lazy val jsonFormat: Format[CollateralActiveEntry] = Json.format[CollateralActiveEntry]

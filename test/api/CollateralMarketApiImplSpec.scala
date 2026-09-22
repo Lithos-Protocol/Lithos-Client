@@ -140,8 +140,8 @@ class CollateralMarketApiImplSpec
         Seq(Fx.indexed(Fx.emissionBox(ctx, lenderSet = lenderSet, head = head, tail = tail))),
       LFSMHelpers.EMCONFIG_NFT_MAINNET.toString -> Seq(Fx.indexed(Fx.configBox(ctx))))
 
-  private def quoteFor(f: Fixture, count: Int, finderFee: Option[String] = None): CollateralJoinQuote =
-    f.api.checkJoin(CollateralJoinCheckRequest(Some(count), finderFee))
+  private def quoteFor(f: Fixture, count: Int, priorityFee: Option[String] = None): CollateralJoinQuote =
+    f.api.checkJoin(CollateralJoinCheckRequest(Some(count), priorityFee))
 
   /**
    * A proof of spend recent enough to still hold its key, against the MOCKED chain height.
@@ -282,34 +282,33 @@ class CollateralMarketApiImplSpec
   // ─── 3b. what a priority bid costs ────────────────────────────────────────
 
   /**
-   * The lender pays the bid FIVE times over: once to the finder, four times into the pool, exactly
-   * as `Collateral_Enforcer.ergo` computes its Join floor. A quote that reported only the bid would
-   * understate what the wallet is about to spend, which is the number the send control is priced on.
+   * The lender names one number and it is charged one for one. The split between the finder and the
+   * pool is the contract's business; a quote that reported anything but the total would misstate
+   * what the wallet is about to spend, which is the number the send control is priced on.
    */
-  "A quote with a priority bid" should "charge the bid and its four-fold pool premium" in {
+  "A quote with a priority fee" should "charge the whole fee, one for one" in {
     val f = fixture(numAddresses = 4, boxes = (ctx, _) => baseBoxes(ctx))
-    val bid = 2000000L
-    val quote = quoteFor(f, 3, Some(bid.toString))
+    val fee = 10000000L
+    val quote = quoteFor(f, 3, Some(fee.toString))
 
-    quote.finderFeeEachNanoErgs shouldBe bid.toString
-    quote.poolPremiumEachNanoErgs shouldBe (bid * CollateralParams.POOL_MULTIPLE).toString
-    quote.principalEachNanoErgs shouldBe (CollateralParams.PRINCIPAL_FLOOR + bid * 5).toString
+    quote.priorityFeeEachNanoErgs shouldBe fee.toString
+    quote.principalEachNanoErgs shouldBe (CollateralParams.PRINCIPAL_FLOOR + fee).toString
+    quote.minPriorityFeeNanoErgs shouldBe RollupProtocol.MinPriorityFee.toString
 
     withClue("the total is per-position principal plus fee, times the count: ") {
       quote.totalNanoErgs shouldBe
-        (3L * (CollateralParams.PRINCIPAL_FLOOR + bid * 5 +
+        (3L * (CollateralParams.PRINCIPAL_FLOOR + fee +
           org.ergoplatform.appkit.Parameters.MinFee)).toString
     }
   }
 
-  it should "price an omitted bid exactly as the floor, unchanged" in {
+  it should "price an omitted fee exactly as the floor, unchanged" in {
     val f = fixture(numAddresses = 4, boxes = (ctx, _) => baseBoxes(ctx))
     val quote = quoteFor(f, 1)
 
-    quote.finderFeeEachNanoErgs shouldBe "0"
-    quote.poolPremiumEachNanoErgs shouldBe "0"
+    quote.priorityFeeEachNanoErgs shouldBe "0"
     quote.principalEachNanoErgs shouldBe CollateralParams.PRINCIPAL_FLOOR.toString
-    withClue("with no bid the coinbase covers the principal and leaves the lender ahead: ") {
+    withClue("with no fee the coinbase covers the principal and leaves the lender ahead: ") {
       quote.netAtCoinbaseEachNanoErgs.toLong should be > 0L
     }
   }
@@ -319,26 +318,41 @@ class CollateralMarketApiImplSpec
    * but the fees of the block the box is mined against still can. The quote has to say so with a
    * negative net rather than refuse, which is what the panel's warning is driven from.
    */
-  it should "accept a bid past break-even and report the shortfall as a negative net" in {
+  it should "accept a fee past break-even and report the shortfall as a negative net" in {
     val f = fixture(numAddresses = 4, boxes = (ctx, _) => baseBoxes(ctx))
-    val over = RollupProtocol.breakEvenFinderFee + 1000000L
+    val over = RollupProtocol.breakEvenPriorityFee + 1000000L
     val quote = quoteFor(f, 1, Some(over.toString))
 
-    quote.breakEvenFinderFeeNanoErgs shouldBe RollupProtocol.breakEvenFinderFee.toString
-    quote.netAtCoinbaseEachNanoErgs.toLong shouldBe -5000000L
+    quote.breakEvenPriorityFeeNanoErgs shouldBe RollupProtocol.breakEvenPriorityFee.toString
+    quote.netAtCoinbaseEachNanoErgs.toLong shouldBe -1000000L
     withClue("break-even itself leaves the lender exactly square: ") {
-      quoteFor(f, 1, Some(RollupProtocol.breakEvenFinderFee.toString))
+      quoteFor(f, 1, Some(RollupProtocol.breakEvenPriorityFee.toString))
         .netAtCoinbaseEachNanoErgs shouldBe "0"
     }
   }
 
-  it should "refuse a bid that is not a non-negative integer" in {
+  it should "refuse a fee that is not a non-negative integer" in {
     val f = fixture(numAddresses = 2)
     for (bad <- Seq("-1", "1.5", "abc", "99999999999999999999")) {
-      withClue(s"finderFeeEachNanoErgs '$bad': ") {
+      withClue(s"priorityFeeEachNanoErgs '$bad': ") {
         an[IllegalArgumentException] should be thrownBy quoteFor(f, 1, Some(bad))
       }
     }
+  }
+
+  /**
+   * Zero is the floor and anything else clears the minimum. Between them is a fee whose finder share
+   * would be worth less than the output it arrives in, which is refused rather than silently rounded
+   * up into a charge the lender did not ask for.
+   */
+  it should "refuse a non-zero fee below the minimum but allow zero" in {
+    val f = fixture(numAddresses = 4, boxes = (ctx, _) => baseBoxes(ctx))
+    quoteFor(f, 1, Some("0")).priorityFeeEachNanoErgs shouldBe "0"
+    quoteFor(f, 1, Some(RollupProtocol.MinPriorityFee.toString))
+      .priorityFeeEachNanoErgs shouldBe RollupProtocol.MinPriorityFee.toString
+    val thrown = the[IllegalArgumentException] thrownBy
+      quoteFor(f, 1, Some((RollupProtocol.MinPriorityFee - 1L).toString))
+    thrown.getMessage should include(RollupProtocol.MinPriorityFee.toString)
   }
 
   // ─── 4. a join that cannot go ahead ───────────────────────────────────────

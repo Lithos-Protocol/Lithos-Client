@@ -63,42 +63,59 @@ object RollupProtocol {
   }
 
   /**
-   * The premium a bidding lender must add to the holding box on top of the finder's own fee. The
-   * enforcer demands both at Join, so a box offering `f` to the finder carries `5f` in total.
-   */
-  def poolBonus(finderFee: Long): Long = {
-    require(finderFee >= 0L, s"a finder fee is never negative; found $finderFee")
-    Math.multiplyExact(finderFee, CollateralParams.POOL_MULTIPLE)
-  }
-
-  /** The fee channel a queue box posts to offer the finder `f`. This is the box's R4. */
-  def feeChannel(finderFee: Long): Long = {
-    require(finderFee >= 0L, s"a finder fee is never negative; found $finderFee")
-    Math.addExact(CollateralParams.DUST_BUDGET, finderFee)
-  }
-
-  /**
-   * The value a queue box must carry to offer the finder `f`, which is the enforcer's Join floor:
-   * `BLOCK_REWARD - FEE_CAP + feeChannel(f) + poolBonus(f)`, or `PRINCIPAL_FLOOR + 5f`.
-   */
-  def queuePrincipal(finderFee: Long): Long =
-    Math.addExact(CollateralParams.PRINCIPAL_FLOOR,
-      Math.addExact(finderFee, poolBonus(finderFee)))
-
-  /**
-   * The largest bid the coinbase alone repays. A lender posts `queuePrincipal(f)` and is paid the
-   * block reward, so `BLOCK_REWARD - queuePrincipal(f) >= 0` bounds `f` at
-   * `(FEE_CAP - DUST_BUDGET) / (1 + POOL_MULTIPLE)`.
+   * ===The priority fee===
    *
-   * Not a contract rule — the enforcer accepts any non-negative fee. A lender bidding above this
-   * recovers the difference only from the transaction fees of the block they are mined against.
+   * A lender names ONE number: the ERG added to their collateral box above the floor. The contract
+   * splits it — a fifth to whichever miner spends the box, the rest into the pool's holding box —
+   * but that split is the protocol's business, not the lender's. Everything a lender sets, is
+   * quoted, or is charged is denominated in this total.
+   *
+   * The helpers below are the only place the split is computed. Anything building or pricing a Join
+   * uses them; [[finderFee]] above is the inverse, for reading what a box on chain already offers.
    */
-  val breakEvenFinderFee: Long =
-    (CollateralParams.FEE_CAP - CollateralParams.DUST_BUDGET) / (1L + CollateralParams.POOL_MULTIPLE)
 
-  /** What the coinbase leaves the lender at this bid, before the mined block's own fees. Signed. */
-  def netAtCoinbase(finderFee: Long): Long =
-    Math.subtractExact(CollateralParams.BLOCK_REWARD, queuePrincipal(finderFee))
+  /** The least a priority fee may be, so the finder's fifth is worth more than the dust it costs. */
+  val MinPriorityFee: Long = 1000000L
+
+  /** The finder's share of a priority fee. The remainder is added to the pool. */
+  def finderShare(priorityFee: Long): Long = {
+    require(priorityFee >= 0L, s"a priority fee is never negative; found $priorityFee")
+    priorityFee / (1L + CollateralParams.POOL_MULTIPLE)
+  }
+
+  /** The fee channel a queue box posts for this priority fee. This is the box's R4. */
+  def feeChannel(priorityFee: Long): Long =
+    Math.addExact(CollateralParams.DUST_BUDGET, finderShare(priorityFee))
+
+  /**
+   * The value a queue box carries for this priority fee: the floor plus the whole fee.
+   *
+   * The enforcer's own floor is `BLOCK_REWARD - FEE_CAP + R4 + 4 * finderShare`, which this always
+   * clears — a fee that is not a multiple of five leaves its remainder in the holding box rather
+   * than short-changing the check.
+   */
+  def queuePrincipal(priorityFee: Long): Long = {
+    require(priorityFee >= 0L, s"a priority fee is never negative; found $priorityFee")
+    Math.addExact(CollateralParams.PRINCIPAL_FLOOR, priorityFee)
+  }
+
+  /**
+   * The largest priority fee the coinbase alone repays, which is the whole spread a lender earns:
+   * `BLOCK_REWARD - PRINCIPAL_FLOOR`, or 0.085 ERG.
+   *
+   * Not a contract rule — the enforcer accepts any non-negative fee. Past this a lender recovers
+   * the difference only from the transaction fees of the block they are mined against.
+   */
+  val breakEvenPriorityFee: Long =
+    CollateralParams.BLOCK_REWARD - CollateralParams.PRINCIPAL_FLOOR
+
+  /** What the coinbase leaves the lender at this fee, before the mined block's own fees. Signed. */
+  def netAtCoinbase(priorityFee: Long): Long =
+    Math.subtractExact(CollateralParams.BLOCK_REWARD, queuePrincipal(priorityFee))
+
+  /** The priority fee a box on chain is offering, inferred from the finder's share it names. */
+  def priorityFeeOf(finderShare: Long): Long =
+    Math.multiplyExact(finderShare, 1L + CollateralParams.POOL_MULTIPLE)
 
   /**
    * The bid named by a queue or collateral box's R4, read from its serialized register.

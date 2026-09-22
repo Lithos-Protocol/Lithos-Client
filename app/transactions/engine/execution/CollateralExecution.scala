@@ -260,7 +260,7 @@ class CollateralExecution(nodeContext: NodeContext,
           principalNanoErgs = b.value.toString,
           permitLit = permitOf(b, litIdStr).toString,
           creationHeight = b.inclusionHeight,
-          finderFeeNanoErgs = finderFeeOf(b).toString
+          priorityFeeNanoErgs = priorityFeeOf(b).toString
         ))
     }
 
@@ -279,7 +279,7 @@ class CollateralExecution(nodeContext: NodeContext,
           valueNanoErgs = b.value.toString,
           carriedLit = litOnBox(b).toString,
           creationHeight = b.box.creationHeight,
-          finderFeeNanoErgs = finderFeeOf(b).toString
+          priorityFeeNanoErgs = priorityFeeOf(b).toString
         )))
     }
 
@@ -288,12 +288,15 @@ class CollateralExecution(nodeContext: NodeContext,
     b.box.tokens.lift(1).map(_.amount).getOrElse(0L)
 
   /**
-   * The bid in R4. Zero when the register cannot be read: a listing describes boxes the caller can
-   * already see on chain, so one anomalous box must not drop the whole page, and a bid that cannot
-   * be read is worth nothing to the miner reading it either.
+   * The priority fee this box is offering, recovered from the finder's share it names in R4.
+   *
+   * Zero when the register cannot be read: a listing describes boxes the caller can already see on
+   * chain, so one anomalous box must not drop the whole page, and a fee that cannot be read is worth
+   * nothing to the miner reading it either.
    */
-  private def finderFeeOf(b: IndexedBox): Long =
-    RollupProtocol.finderFeeOf(b.box.additionalRegisters.get(4)).getOrElse(0L)
+  private def priorityFeeOf(b: IndexedBox): Long =
+    RollupProtocol.finderFeeOf(b.box.additionalRegisters.get(4))
+      .map(RollupProtocol.priorityFeeOf).getOrElse(0L)
 
   /** Live collateral boxes only - the same scan also returns proof-of-spend boxes at the gate, which carry one register. */
   private def liveBoxes(ctx: BlockchainContext,
@@ -444,8 +447,8 @@ class CollateralExecution(nodeContext: NodeContext,
     nodeContext.getClient.execute { ctx =>
       val tx = txs
       val count = joinCount(request.count)
-      val finderFee = joinFinderFee(request.finderFeeEachNanoErgs)
-      val principal = RollupProtocol.queuePrincipal(finderFee)
+      val priorityFee = joinPriorityFee(request.priorityFeeEachNanoErgs)
+      val principal = RollupProtocol.queuePrincipal(priorityFee)
       val tip = tx.emissionTip(ctx)
       val cs = tx.readConfig(tx.configBox(ctx))
       // Read once. Parsing R5 rebuilds up to a hundred hashed lender keys, and this was doing it
@@ -478,10 +481,10 @@ class CollateralExecution(nodeContext: NodeContext,
       CollateralJoinQuote(
         count = count,
         principalEachNanoErgs = principal.toString,
-        finderFeeEachNanoErgs = finderFee.toString,
-        poolPremiumEachNanoErgs = RollupProtocol.poolBonus(finderFee).toString,
-        breakEvenFinderFeeNanoErgs = RollupProtocol.breakEvenFinderFee.toString,
-        netAtCoinbaseEachNanoErgs = RollupProtocol.netAtCoinbase(finderFee).toString,
+        priorityFeeEachNanoErgs = priorityFee.toString,
+        minPriorityFeeNanoErgs = RollupProtocol.MinPriorityFee.toString,
+        breakEvenPriorityFeeNanoErgs = RollupProtocol.breakEvenPriorityFee.toString,
+        netAtCoinbaseEachNanoErgs = RollupProtocol.netAtCoinbase(priorityFee).toString,
         txFeeEachNanoErgs = emissionConfig.txFee.toString,
         permitsLit = permits.map(_.toString),
         permitTotalLit = permits.sum.toString,
@@ -505,8 +508,8 @@ class CollateralExecution(nodeContext: NodeContext,
 
   override def join(request: CollateralJoinExecuteRequest): CollateralJoinResult = {
     val count = joinCount(Some(request.count))
-    val finderFee = joinFinderFee(request.finderFeeEachNanoErgs)
-    val principal = RollupProtocol.queuePrincipal(finderFee)
+    val priorityFee = joinPriorityFee(request.priorityFeeEachNanoErgs)
+    val principal = RollupProtocol.queuePrincipal(priorityFee)
 
     // Queued principal and permit come back only when a block spends the box. There is no early
     // exit, so the acknowledgement is carried in the request rather than inferred from one arriving
@@ -565,13 +568,13 @@ class CollateralExecution(nodeContext: NodeContext,
 
       // The permit cap was enforced against the planned positions above, so nothing here needs to
       // stop for cost: a breach sent nothing at all.
-      val run = tx.runJoins(ctx, tip, cfgBox, cs, keys, "collateral:", guard, finderFee = finderFee)
+      val run = tx.runJoins(ctx, tip, cfgBox, cs, keys, "collateral:", guard, priorityFee = priorityFee)
       run.stopped.foreach(ex =>
         logger.warn(s"Stopping join run after ${run.attempts.size} position(s): ${ex.getMessage}", ex))
 
       val sent = run.attempts.map(attempt => CollateralJoinEntry(attempt.txId, attempt.position,
         attempt.lender.toString, attempt.principal.toString, attempt.permit.toString,
-        attempt.outcome, attempt.finderFee.toString))
+        attempt.outcome, attempt.priorityFee.toString))
 
       // Nothing sent means the caller needs a status, not a 200 with an empty list - that reads the
       // same as a deliberate no-op. The cause is rethrown as-is so the controller classifies it the
@@ -615,21 +618,26 @@ class CollateralExecution(nodeContext: NodeContext,
   }
 
   /**
-   * The priority bid a join posts, in nanoERG. Absent means the floor.
+   * The priority fee a join posts, in nanoERG: the whole amount added above the floor. Absent or
+   * zero posts at the floor and bids nothing.
    *
-   * Deliberately NOT capped at [[RollupProtocol.breakEvenFinderFee]]. Past that the coinbase stops
-   * covering the principal, but the transaction fees of the block the box is mined against still
-   * can, so the ceiling is a judgement the caller makes with the quote's numbers in front of them.
-   * The bound here only keeps one position's principal inside a Long and below a whole block reward.
+   * A non-zero fee has a minimum, so the finder's fifth of it is worth more than the dust the extra
+   * output costs. There is deliberately NO cap at [[RollupProtocol.breakEvenPriorityFee]]: past that
+   * the coinbase stops covering the principal, but the transaction fees of the block the box is
+   * mined against still can, so the ceiling is a judgement the caller makes with the quote in front
+   * of them. The upper bound here only keeps one position's principal inside a Long.
    */
-  private def joinFinderFee(raw: Option[String]): Long = {
+  private def joinPriorityFee(raw: Option[String]): Long = {
     val fee = raw.map(_.trim).filter(_.nonEmpty).map(s =>
       Try(s.toLong).getOrElse(throw new IllegalArgumentException(
-        s"finderFeeEachNanoErgs '$s' is not an integer number of nanoERG"))).getOrElse(0L)
+        s"priorityFeeEachNanoErgs '$s' is not an integer number of nanoERG"))).getOrElse(0L)
     if (fee < 0 || fee > CollateralParams.BLOCK_REWARD)
       throw new IllegalArgumentException(
-        s"finderFeeEachNanoErgs must be between 0 and ${CollateralParams.BLOCK_REWARD} nanoERG; " +
-          s"the contract charges ${CollateralParams.POOL_MULTIPLE}x the bid into the pool on top of it")
+        s"priorityFeeEachNanoErgs must be between 0 and ${CollateralParams.BLOCK_REWARD} nanoERG")
+    if (fee > 0 && fee < RollupProtocol.MinPriorityFee)
+      throw new IllegalArgumentException(
+        s"priorityFeeEachNanoErgs must be 0 or at least ${RollupProtocol.MinPriorityFee} nanoERG; " +
+          s"$fee leaves the block's finder too little to be worth the output it is paid in")
     fee
   }
 

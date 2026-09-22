@@ -32,12 +32,16 @@ class NodeMiningStatsSourceSpec extends AnyFlatSpec with Matchers with MockitoSu
     "", out.creationHeight, 1L)
   private def transaction(id: String, height: Int, inputs: Seq[IndexedBox], outputs: Seq[IndexedBox]): IndexedTransaction =
     IndexedTransaction(id, inputs, Seq.empty, outputs, height, 1, header(height).id, header(height).timestamp, 0, 1L, 100)
-  /** Every box the enforcer accepted names its fee channel in R4; the shared fixture leaves it out. */
-  private def feeChannel(finderFee: Long): String =
-    ErgoValue.of(lfsm.CollateralParams.DUST_BUDGET + finderFee).toHex
-  private def collateralBidding(finderFee: Long): IndexedBox =
+  /**
+   * Every box the enforcer accepted names its fee channel in R4; the shared fixture leaves it out.
+   * The argument is the WHOLE priority fee, as a lender would name it — R4 carries only the fifth
+   * of it the finder keeps, which is exactly the conversion under test.
+   */
+  private def feeChannel(priorityFee: Long): String =
+    ErgoValue.of(lfsm.CollateralParams.DUST_BUDGET + priorityFee / 5).toHex
+  private def collateralBidding(priorityFee: Long): IndexedBox =
     indexed(ReducerFixtures.resolvedInput(origin, Some(protocol.collateralToken), 100)
-      .copy(registers = Seq(feeChannel(finderFee)))).copy(spentTransactionId = Some(genesisTx.id))
+      .copy(registers = Seq(feeChannel(priorityFee)))).copy(spentTransactionId = Some(genesisTx.id))
   private val collateral = collateralBidding(0L)
   private val genesis = transaction(genesisTx.id, 100, Seq(collateral), genesisTx.outputs.map(indexed))
 
@@ -170,7 +174,7 @@ class NodeMiningStatsSourceSpec extends AnyFlatSpec with Matchers with MockitoSu
    */
   it should "summarise the bids carried by the observed boxes" in {
     val (api, source) = fixture(Seq.empty)
-    val bids = Seq(0L, 0L, 0L, 1000000L, 4000000L, 9000000L, 20000000L)
+    val bids = Seq(0L, 0L, 0L, 5000000L, 20000000L, 45000000L, 100000000L)
     when(api.unspentBoxesByTokenId(anyString(), any[Paging], any[SortDirection], any[MempoolOptions]))
       .thenReturn(Success(bids.zipWithIndex.map { case (bid, i) =>
         collateralBidding(bid).copy(box = collateralBidding(bid).box.copy(boxId = s"bid-$i")) }))
@@ -179,11 +183,11 @@ class NodeMiningStatsSourceSpec extends AnyFlatSpec with Matchers with MockitoSu
     fees.atFloor shouldBe 3
     fees.bidding shouldBe 4
     fees.unreadable shouldBe 0
-    fees.totalNanoErg shouldBe "34000000"
-    fees.bestNanoErg shouldBe "20000000"
+    fees.totalNanoErg shouldBe "170000000"
+    fees.bestNanoErg shouldBe "100000000"
     withClue("nearest-rank over all seven, so the median is a bid a box really carries: ") {
-      fees.medianNanoErg shouldBe "1000000"
-      fees.p90NanoErg shouldBe "20000000"
+      fees.medianNanoErg shouldBe "5000000"
+      fees.p90NanoErg shouldBe "100000000"
     }
     withClue("every box lands in exactly one band: ") {
       fees.buckets.map(_.boxes).sum shouldBe 7
@@ -221,27 +225,31 @@ class NodeMiningStatsSourceSpec extends AnyFlatSpec with Matchers with MockitoSu
     intercept[IllegalArgumentException](read(fixture(Seq(genesis.copy(inputs = Seq(stripped))), 100)._2, 100))
   }
 
-  it should "record the bid the spent collateral box carried" in {
-    val bidding = collateralBidding(3000000L)
+  /**
+   * Recorded as the whole fee the lender posted, not the fifth of it R4 names. A record of the
+   * finder's share would make the settled series a fifth of the book it is compared against.
+   */
+  it should "record the whole priority fee the spent collateral box carried" in {
+    val bidding = collateralBidding(10000000L)
     val (_, source) = fixture(Seq(genesis.copy(inputs = Seq(bidding))), 100)
     val record = read(source, 100)
 
-    record.blocks.map(_.finderFeeNanoErg) shouldBe Vector("3000000")
+    record.blocks.map(_.priorityFeeNanoErg) shouldBe Vector("10000000")
     val totals = MiningAccounting.contribution(record)
-    totals.amount("lithos.finderFeeNanoErg") shouldBe BigInt(3000000)
-    totals.amount("lithos.blocksWithFinderFee") shouldBe BigInt(1)
-    withClue("the pool's premium is inside the holding value, never a key of its own: ") {
-      totals.values.keys.exists(_.contains("poolBonus")) shouldBe false
+    totals.amount("lithos.priorityFeeNanoErg") shouldBe BigInt(10000000)
+    totals.amount("lithos.blocksWithPriorityFee") shouldBe BigInt(1)
+    withClue("the pool's share is inside the holding value, never a key of its own: ") {
+      totals.values.keys.exists(_.toLowerCase.contains("pool")) shouldBe false
     }
   }
 
-  it should "leave a floor-priced block out of the bidding count while still recording a zero" in {
+  it should "leave a floor-priced block out of the paying count while still recording a zero" in {
     val record = read(fixture(Seq(genesis), 100)._2, 100)
-    record.blocks.map(_.finderFeeNanoErg) shouldBe Vector("0")
+    record.blocks.map(_.priorityFeeNanoErg) shouldBe Vector("0")
     val totals = MiningAccounting.contribution(record)
-    totals.amount("lithos.finderFeeNanoErg") shouldBe BigInt(0)
+    totals.amount("lithos.priorityFeeNanoErg") shouldBe BigInt(0)
     withClue("a zero contribution is dropped from the map rather than stored: ") {
-      totals.values.contains("lithos.blocksWithFinderFee") shouldBe false
+      totals.values.contains("lithos.blocksWithPriorityFee") shouldBe false
     }
   }
 

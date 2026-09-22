@@ -62,8 +62,9 @@ class NodeMiningStatsSource(api: NodeApi, protocol: SyncProtocolContext, minerTr
     var value = BigInt(0)
     var complete = false
     var page = 0
-    // The bid each box carries in R4. Collected here because the same pass already has every box,
-    // and a second scan for it would double what an inventory read costs the miner's own node.
+    // The priority fee each box carries, recovered from the finder's share named in R4. Collected
+    // here because the same pass already has every box, and a second scan for it would double what
+    // an inventory read costs the miner's own node.
     val fees = Vector.newBuilder[Long]
     var unreadable = 0
     while (!complete && page < 5) {
@@ -76,7 +77,7 @@ class NodeMiningStatsSource(api: NodeApi, protocol: SyncProtocolContext, minerTr
           count += 1
           value += box.value
           RollupProtocol.finderFeeOf(box.box.additionalRegisters.get(4)) match {
-            case Some(fee) => fees += fee
+            case Some(share) => fees += RollupProtocol.priorityFeeOf(share)
             case None => unreadable += 1
           }
         }
@@ -169,12 +170,13 @@ class NodeMiningStatsSource(api: NodeApi, protocol: SyncProtocolContext, minerTr
       // A box the enforcer accepted always names a well-formed fee channel, so an unreadable one
       // means the genesis authentication above passed on something malformed: fail rather than
       // silently record the block as having bid nothing.
-      val finderFee = RollupProtocol.finderFeeOf(collateral.get.registers.headOption).getOrElse(
-        throw new IllegalArgumentException(
-          s"collateral box ${collateral.get.id} spent by ${tx.id} has no readable fee channel in R4"))
+      val priorityFee = RollupProtocol.priorityFeeOf(
+        RollupProtocol.finderFeeOf(collateral.get.registers.headOption).getOrElse(
+          throw new IllegalArgumentException(
+            s"collateral box ${collateral.get.id} spent by ${tx.id} has no readable fee channel in R4")))
       Some(LithosBlockRecord(at.blockId, at.height, at.timestamp, tx.id, tx.outputs.head.id,
         collateral.get.id, collateral.get.value.toString, tx.outputs.head.value.toString,
-        finderFee.toString))
+        priorityFee.toString))
     }
   }
 

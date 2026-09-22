@@ -3,15 +3,15 @@ package api.models
 import play.api.libs.json._
 
 /**
- * How many positions to price, and what each one bids for priority.
+ * How many positions to price, and what each one adds as a priority fee.
  *
- * `finderFeeEachNanoErgs` is paid to whichever miner spends the resulting collateral box, so a
- * higher bid is chosen sooner. The contract charges four times it into the pool as well, which is
- * why raising it moves `principalEachNanoErgs` by five times as much. Omitted or "0" posts at the
- * floor and bids nothing.
+ * `priorityFeeEachNanoErgs` is the ERG added to the collateral box above the floor, so it moves
+ * `principalEachNanoErgs` one for one. A share of it goes to whichever miner spends the box, which
+ * is why a higher fee is taken sooner; the rest is added to the pool. Omitted or "0" posts at the
+ * floor and offers nothing.
  */
 case class CollateralJoinCheckRequest(count: Option[Int],
-                                      finderFeeEachNanoErgs: Option[String] = None)
+                                      priorityFeeEachNanoErgs: Option[String] = None)
 
 object CollateralJoinCheckRequest {
   implicit lazy val jsonFormat: Format[CollateralJoinCheckRequest] =
@@ -42,16 +42,15 @@ object CollateralJoinBlock {
  * index with `permitsLit`. It is SHORTER than `count` when some keys would be derived at send time,
  * because a derivation is a node-wallet mutation and a quote must not make one.
  *
- * The four fee fields price the priority bid. `principalEachNanoErgs` already contains the bid and
- * its pool premium, so it is the whole per-position cost; the other three break it down and say
- * what the coinbase gives back. `netAtCoinbaseEachNanoErgs` is SIGNED and goes negative above
- * `breakEvenFinderFeeNanoErgs`, where the bid is only recovered from the mined block's own fees.
+ * The fee fields price the priority fee. `principalEachNanoErgs` is the floor plus that fee, so it
+ * is the whole per-position cost. `netAtCoinbaseEachNanoErgs` is SIGNED and goes negative above
+ * `breakEvenPriorityFeeNanoErgs`, where the fee is only recovered from the mined block's own fees.
  */
 case class CollateralJoinQuote(count: Int,
                                principalEachNanoErgs: String,
-                               finderFeeEachNanoErgs: String,
-                               poolPremiumEachNanoErgs: String,
-                               breakEvenFinderFeeNanoErgs: String,
+                               priorityFeeEachNanoErgs: String,
+                               minPriorityFeeNanoErgs: String,
+                               breakEvenPriorityFeeNanoErgs: String,
                                netAtCoinbaseEachNanoErgs: String,
                                txFeeEachNanoErgs: String,
                                permitsLit: Seq[String],
@@ -80,29 +79,30 @@ object CollateralJoinQuote {
  * request rather than inferred from one arriving, which is the same guard `/dex/redeem` puts on its
  * own irreversible spend.
  *
- * `finderFeeEachNanoErgs` must match what the quote was taken at. It is not capped: a bid above the
- * quote's `breakEvenFinderFeeNanoErgs` is accepted, because the transaction fees of the block the
- * box is mined against can still cover it.
+ * `priorityFeeEachNanoErgs` must match what the quote was taken at. A non-zero fee has a minimum,
+ * reported as `minPriorityFeeNanoErgs`, but no maximum: a fee above the quote's
+ * `breakEvenPriorityFeeNanoErgs` is accepted, because the transaction fees of the block the box is
+ * mined against can still cover it.
  */
 case class CollateralJoinExecuteRequest(count: Int,
                                         acknowledgeNoWithdrawal: Option[Boolean],
                                         maxPermitEachLit: Option[String],
                                         expectedEmissionBoxId: Option[String],
-                                        finderFeeEachNanoErgs: Option[String] = None)
+                                        priorityFeeEachNanoErgs: Option[String] = None)
 
 object CollateralJoinExecuteRequest {
   implicit lazy val jsonFormat: Format[CollateralJoinExecuteRequest] =
     Json.format[CollateralJoinExecuteRequest]
 }
 
-/** One join transaction that was sent. `principalNanoErgs` includes the bid and its pool premium. */
+/** One join transaction that was sent. `principalNanoErgs` is the floor plus the priority fee. */
 case class CollateralJoinEntry(txId: String,
                                position: Long,
                                lenderAddress: String,
                                principalNanoErgs: String,
                                permitLit: String,
                                outcome: String = "accepted",
-                               finderFeeNanoErgs: String = "0")
+                               priorityFeeNanoErgs: String = "0")
 
 object CollateralJoinEntry {
   implicit lazy val jsonFormat: Format[CollateralJoinEntry] = Json.format[CollateralJoinEntry]

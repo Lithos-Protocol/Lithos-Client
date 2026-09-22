@@ -134,10 +134,50 @@ class RollupProtocolSpec extends AnyFlatSpec with Matchers {
     an[ArithmeticException] should be thrownBy RollupProtocol.finderFee(Long.MinValue)
   }
 
-  "The pool premium" should "be four times the finder fee" in {
-    RollupProtocol.poolBonus(700000L) shouldEqual 2800000L
-    RollupProtocol.poolBonus(0L) shouldEqual 0L
-    an[ArithmeticException] should be thrownBy RollupProtocol.poolBonus(Long.MaxValue)
+  /**
+   * A lender names one number — the whole fee added above the floor — and the split is derived from
+   * it. These two are inverses, so a fee that round-trips through the chain and back comes out the
+   * same number the lender typed.
+   */
+  "A priority fee" should "split a fifth to the finder and recover from that share" in {
+    RollupProtocol.finderShare(3500000L) shouldEqual 700000L
+    RollupProtocol.finderShare(0L) shouldEqual 0L
+    RollupProtocol.priorityFeeOf(700000L) shouldEqual 3500000L
+    RollupProtocol.priorityFeeOf(RollupProtocol.finderShare(3500000L)) shouldEqual 3500000L
+    an[IllegalArgumentException] should be thrownBy RollupProtocol.finderShare(-1L)
+    an[ArithmeticException] should be thrownBy RollupProtocol.priorityFeeOf(Long.MaxValue)
+  }
+
+  it should "put the whole fee on the box and clear the enforcer's own floor" in {
+    val fee = 3500000L
+    RollupProtocol.queuePrincipal(fee) shouldEqual CollateralParams.PRINCIPAL_FLOOR + fee
+    RollupProtocol.feeChannel(fee) shouldEqual CollateralParams.DUST_BUDGET + 700000L
+    withClue("the enforcer asks for floor + R4 + 4x the finder's share: ") {
+      RollupProtocol.queuePrincipal(fee) should be >=
+        (CollateralParams.BLOCK_REWARD - CollateralParams.FEE_CAP + RollupProtocol.feeChannel(fee) +
+          RollupProtocol.finderShare(fee) * CollateralParams.POOL_MULTIPLE)
+    }
+  }
+
+  /**
+   * A fee that is not a multiple of five cannot pay the finder a whole fifth, so the remainder stays
+   * with the pool. The box must still clear the enforcer's floor, which is what this pins.
+   */
+  it should "leave an indivisible remainder with the pool rather than short the enforcer" in {
+    val fee = 1000003L
+    RollupProtocol.finderShare(fee) shouldEqual 200000L
+    RollupProtocol.queuePrincipal(fee) shouldEqual CollateralParams.PRINCIPAL_FLOOR + fee
+    RollupProtocol.queuePrincipal(fee) should be >
+      (CollateralParams.BLOCK_REWARD - CollateralParams.FEE_CAP + RollupProtocol.feeChannel(fee) +
+        RollupProtocol.finderShare(fee) * CollateralParams.POOL_MULTIPLE)
+  }
+
+  it should "break even where the coinbase exactly repays the principal" in {
+    RollupProtocol.breakEvenPriorityFee shouldEqual 85000000L
+    RollupProtocol.netAtCoinbase(RollupProtocol.breakEvenPriorityFee) shouldEqual 0L
+    RollupProtocol.netAtCoinbase(0L) shouldEqual
+      CollateralParams.BLOCK_REWARD - CollateralParams.PRINCIPAL_FLOOR
+    RollupProtocol.netAtCoinbase(RollupProtocol.breakEvenPriorityFee + 1L) should be < 0L
   }
 
   // ─── tokens ───────────────────────────────────────────────────────────────

@@ -1,6 +1,6 @@
 package configs
 
-import lfsm.{CollateralParams, LFSMHelpers}
+import lfsm.{CollateralParams, LFSMHelpers, RollupProtocol}
 import org.ergoplatform.appkit.Parameters
 import play.api.{ConfigLoader, Configuration}
 
@@ -270,11 +270,19 @@ object Configs {
       if (permit <= 0)
         v.problem("emission.maxPermitPerJoin", s"$permit must be positive (LIT base units); joins stop once the thermostat passes this price")
     }
-    // Only the sign and an overflowing bid are fatal. A bid merely past break-even is a deliberate
-    // bet on the mined block's fees, so `selfCollateralize` warns about it per pass instead.
+    // A fee past break-even is a deliberate bet on the mined block's fees, so `selfCollateralize`
+    // warns about it per pass rather than refusing to start. What IS fatal is a fee too small for
+    // the finder's share of it to be worth the output it arrives in.
     v.longRange("emission.priorityFeeNanoErgs", v.long("emission.priorityFeeNanoErgs"),
       0L, CollateralParams.BLOCK_REWARD,
-      "nanoERG bid to the block's finder; 0 posts at the floor, and the contract charges 4x more into the pool")
+      "nanoERG added to each position above the 2.915 ERG floor; 0 posts at the floor")
+      .foreach { fee =>
+        if (fee > 0 && fee < RollupProtocol.MinPriorityFee)
+          v.problem("emission.priorityFeeNanoErgs",
+            s"$fee must be 0 or at least ${RollupProtocol.MinPriorityFee} nanoERG " +
+              s"(${RollupProtocol.MinPriorityFee / 1000000} mERG); below that the block's finder is " +
+              "left too little to be worth the output it is paid in")
+      }
 
     // Every lender key must have a wallet secret capable of spending returned funds.
     for {

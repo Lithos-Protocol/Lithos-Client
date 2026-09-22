@@ -6,11 +6,12 @@ import lfsm.RollupProtocol
 final case class CollateralFeeBucket(fromNanoErg: String, toNanoErg: Option[String], boxes: Int)
 
 /**
- * The priority bids carried by the observed collateral boxes — the book a miner picks from.
+ * The priority fees carried by the observed collateral boxes — the book a miner picks from.
  *
- * Percentiles cover every observed box, bids and floor alike, so they describe the distribution a
- * lender is actually competing against rather than the bidders alone. With most boxes at the floor
- * the median is 0, which is the honest answer. `best` is the bid to beat.
+ * Amounts are the WHOLE fee a box adds above the floor, not the share the finder keeps out of it.
+ * Percentiles cover every observed box, fee and floor alike, so they describe the distribution a
+ * lender is actually competing against rather than the paying boxes alone. With most boxes at the
+ * floor the median is 0, which is the honest answer. `best` is the fee to beat.
  */
 final case class CollateralFeeStats(atFloor: Int = 0, bidding: Int = 0, unreadable: Int = 0,
                                       totalNanoErg: String = "0", bestNanoErg: String = "0",
@@ -18,13 +19,16 @@ final case class CollateralFeeStats(atFloor: Int = 0, bidding: Int = 0, unreadab
                                       buckets: Seq[CollateralFeeBucket] = Seq.empty)
 
 object CollateralFeeStats {
-  /** Floor, then quarters of break-even, then everything above it. Derived so the bands track the constants. */
+  /**
+   * The smallest fee anyone may post, then quarters of break-even, then everything above it.
+   * Derived rather than written out, so the bands track the constants they describe.
+   */
   private val edges: Seq[Long] = {
-    val breakEven = RollupProtocol.breakEvenFinderFee
-    Seq(1L, breakEven / 4, breakEven / 2, breakEven * 3 / 4, breakEven)
+    val breakEven = RollupProtocol.breakEvenPriorityFee
+    Seq(RollupProtocol.MinPriorityFee, breakEven / 4, breakEven / 2, breakEven * 3 / 4, breakEven)
   }
 
-  /** Nearest-rank percentile over the sorted bids, which avoids inventing a value no box carries. */
+  /** Nearest-rank percentile over the sorted fees, which avoids inventing a value no box carries. */
   private def percentile(sorted: Vector[Long], fraction: Double): Long =
     if (sorted.isEmpty) 0L
     else sorted(math.min(sorted.size - 1, math.max(0, math.ceil(fraction * sorted.size).toInt - 1)))

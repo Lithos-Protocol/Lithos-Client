@@ -37,12 +37,13 @@ import play.api.{ConfigLoader, Configuration}
  * @param maxPermitPerJoin      The most LIT, in base units, to post as a permit on one box. The
  *                              permit rises with the backlog, so this is the price at which this miner
  *                              stops queueing rather than a fee.
- * @param priorityFeeNanoErgs   What each automatically created position bids for priority, in nanoERG,
- *                              paid to whichever miner spends the resulting collateral box. The
- *                              enforcer charges its pool premium alongside, so a bid of `f` puts up
- *                              `2.915 ERG + 5f` instead of the floor. 0 posts at the floor. Above
- *                              `RollupProtocol.breakEvenFinderFee` the coinbase no longer repays the
- *                              principal and the difference has to come from the mined block's fees.
+ * @param priorityFeeNanoErgs   What each automatically created position adds above the floor, in
+ *                              nanoERG, so a position locks `2.915 ERG + this`. A share goes to
+ *                              whichever miner spends the box, which is what buys it priority; the
+ *                              rest is added to the pool. 0 posts at the floor and offers nothing,
+ *                              and anything else is at least `RollupProtocol.MinPriorityFee`. Above
+ *                              `RollupProtocol.breakEvenPriorityFee` the coinbase no longer repays
+ *                              the principal and the difference has to come from the block's fees.
  */
 case class EmissionConfig(enabled: Boolean,
                           queueInterval: Int,
@@ -79,7 +80,7 @@ object EmissionConfig {
     maxLenderKeys = 32,
     // The thermostat's own ceiling, so the default never blocks a join on price alone.
     maxPermitPerJoin = LFSMHelpers.PERMIT_CEIL,
-    // Post at the floor. Bidding is opt-in: it raises what every position locks up.
+    // Post at the floor. A priority fee is opt-in: it raises what every position locks up.
     priorityFeeNanoErgs = 0L
   )
 

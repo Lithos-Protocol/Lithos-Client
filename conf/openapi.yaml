@@ -2362,12 +2362,12 @@ paths:
         next one is priced from.
 
 
-        `finderFeeEachNanoErgs` bids for priority. A miner picks whichever collateral box pays it
-        most, so a bid buys a place ahead of the boxes posting nothing. The contract charges four
-        times the bid into the pool as well, so raising it by `f` raises `principalEachNanoErgs`
-        by `5f`. Past `breakEvenFinderFeeNanoErgs` the 3 ERG coinbase no longer covers the
-        principal and `netAtCoinbaseEachNanoErgs` goes negative — the rest then has to come from
-        the transaction fees of the block the box is mined against.
+        `priorityFeeEachNanoErgs` is the ERG added to the box above the floor, so it raises
+        `principalEachNanoErgs` one for one. A miner spends whichever collateral box pays it most,
+        so a fee buys a place ahead of the boxes offering nothing. Past
+        `breakEvenPriorityFeeNanoErgs` the 3 ERG coinbase no longer covers the principal and
+        `netAtCoinbaseEachNanoErgs` goes negative — the rest then has to come from the transaction
+        fees of the block the box is mined against.
 
 
         Also reports whether the join would be accepted: check `manualJoinAllowed` and
@@ -2420,9 +2420,10 @@ paths:
         stale state.
 
 
-        Send `finderFeeEachNanoErgs` as the quote was taken at, since it decides what each position
-        locks up. It is not capped at the quote's break-even: a higher bid is accepted, because the
-        mined block's own transaction fees can still cover it.
+        Send `priorityFeeEachNanoErgs` as the quote was taken at, since it decides what each
+        position locks up. A non-zero fee is at least `minPriorityFeeNanoErgs`, but there is no
+        maximum: a fee above the quote's break-even is accepted, because the mined block's own
+        transaction fees can still cover it.
 
 
         **Refused with 409 while the client has `autoCollateralize` on.** The automated pass owns
@@ -2578,8 +2579,8 @@ components:
         | `network.payout.*` | Every payout seen for the configured protocol, local ones included. |
         | `collateral.consumedNanoErg` | Collateral spent by genesis transactions. Not income. |
         | `holding.genesisNanoErg` | Value placed in holding boxes at genesis. Contains the pool's share of any priority bid. |
-        | `lithos.finderFeeNanoErg` | Priority bids paid to the miners that spent those collateral boxes. |
-        | `lithos.blocksWithFinderFee` | How many of those blocks carried a bid at all. |
+        | `lithos.priorityFeeNanoErg` | Priority fees carried by the collateral boxes those blocks spent. |
+        | `lithos.blocksWithPriorityFee` | How many of those blocks carried a fee at all. |
         | `batching.<protocol>.*` | Executor fees earned filling `ergodex` or `lithosdex` orders. |
         | `lithos.batching.<protocol>.*` | The same, counting only blocks that carried a Lithos genesis. |
         | `rollup.<kind>.*` | Confirmed rollup transitions: `topUp`, `submission`, `evaluation`, `fraudProof`, `payoutReady`. |
@@ -2608,11 +2609,11 @@ components:
         `ergodex`, `lithosdex`, `ergodexOtherPoolSpend` and `lithosdexOtherPoolSpend`. Those fees
         overlap the block fee totals.
 
-        **Priority bids.** `lithos.finderFeeNanoErg / lithos.blocks` is the mean bid across every
-        Lithos block; divide by `lithos.blocksWithFinderFee` instead for the mean across the blocks
-        that carried one. The contract charges the pool four times each bid, but that went into the
-        holding box and is already inside `holding.genesisNanoErg` — there is deliberately no
-        separate key for it, because adding one to the finder's take would count it twice.
+        **Priority fees.** `lithos.priorityFeeNanoErg / lithos.blocks` is the mean fee across every
+        Lithos block; divide by `lithos.blocksWithPriorityFee` instead for the mean across the blocks
+        that carried one. The amount is the WHOLE fee the lender posted, not the share the block's
+        finder keeps out of it. The pool's share went into the holding box and is already inside
+        `holding.genesisNanoErg`, so there is deliberately no separate key for it.
 
         Divide a sum by its matching count for an average. `claimedScore` is protocol accounting,
         not measured hashrate. A transaction fee is a transaction's cost and not automatically this
@@ -3658,8 +3659,8 @@ components:
 
     CollateralQueueEntry:
       description: >-
-        A position waiting in the collateral queue. Sorted by `finderFeeNanoErgs` the queue is the
-        forward book: bids that become spendable as it drains.
+        A position waiting in the collateral queue. Sorted by `priorityFeeNanoErgs` the queue is the
+        forward book: fees that become spendable as it drains.
       type: object
       x-tags: collateral-market
       required:
@@ -3667,7 +3668,7 @@ components:
         - position
         - lenderAddress
         - principalNanoErgs
-        - finderFeeNanoErgs
+        - priorityFeeNanoErgs
         - permitLit
         - creationHeight
       properties:
@@ -3690,11 +3691,11 @@ components:
             ERG committed to the block that consumes this box, bid and pool premium included.
             Decimal string.
           example: '2915000000'
-        finderFeeNanoErgs:
+        priorityFeeNanoErgs:
           type: string
           description: >-
-            What this position bids the miner that spends it. '0' means it posted at the floor and
-            bids nothing. Decimal string.
+            The ERG this position added above the floor. '0' means it posted at the floor and offers
+            nothing. Decimal string.
           example: '0'
         permitLit:
           type: string
@@ -3709,14 +3710,14 @@ components:
     CollateralActiveEntry:
       description: >-
         A live collateral box waiting to be spent by whichever miner finds the next block. Sorted by
-        `finderFeeNanoErgs` the active set is the spot book: the bids a miner can take right now.
+        `priorityFeeNanoErgs` the active set is the spot book: what a miner can take right now.
       type: object
       x-tags: collateral-market
       required:
         - boxId
         - lenderAddress
         - valueNanoErgs
-        - finderFeeNanoErgs
+        - priorityFeeNanoErgs
         - carriedLit
         - creationHeight
       properties:
@@ -3733,11 +3734,11 @@ components:
             ERG that becomes the pool's payout for the block spending it, bid and pool premium
             included. Decimal string.
           example: '2915000000'
-        finderFeeNanoErgs:
+        priorityFeeNanoErgs:
           type: string
           description: >-
-            What this box pays the miner that spends it, on top of its share of the payout. '0'
-            means it bids nothing. Decimal string.
+            The fee this box carries, a share of which goes to the miner that spends it. '0' means
+            it offers nothing. Decimal string.
           example: '0'
         carriedLit:
           type: string
@@ -4049,14 +4050,15 @@ components:
           minimum: 1
           maximum: 25
           example: 3
-        finderFeeEachNanoErgs:
+        priorityFeeEachNanoErgs:
           type: string
           pattern: '^[0-9]+$'
           description: >-
-            nanoERG each position bids to the miner that spends its collateral box. Omitted or '0'
-            posts at the floor and bids nothing. The contract charges 4x this into the pool as well.
+            nanoERG each position adds above the 2.915 ERG floor. Part of it goes to whichever miner
+            spends the collateral box, which is what buys the position priority. Omitted or '0' posts
+            at the floor; anything else is at least minPriorityFeeNanoErgs.
           default: '0'
-          example: '5000000'
+          example: '10000000'
 
     CollateralJoinQuote:
       description: What creating `count` positions costs right now
@@ -4065,9 +4067,9 @@ components:
       required:
         - count
         - principalEachNanoErgs
-        - finderFeeEachNanoErgs
-        - poolPremiumEachNanoErgs
-        - breakEvenFinderFeeNanoErgs
+        - priorityFeeEachNanoErgs
+        - minPriorityFeeNanoErgs
+        - breakEvenPriorityFeeNanoErgs
         - netAtCoinbaseEachNanoErgs
         - txFeeEachNanoErgs
         - permitsLit
@@ -4090,30 +4092,31 @@ components:
         principalEachNanoErgs:
           type: string
           description: >-
-            What one position locks up: the 2915000000 floor plus the bid and its pool premium.
-            Identical for every position in the quote. Decimal string.
-          example: '2940000000'
-        finderFeeEachNanoErgs:
+            What one position locks up: the 2915000000 floor plus the whole priority fee. Identical
+            for every position in the quote. Decimal string.
+          example: '2925000000'
+        priorityFeeEachNanoErgs:
           type: string
-          description: The bid this quote was priced at, echoed back. Decimal string.
-          example: '5000000'
-        poolPremiumEachNanoErgs:
-          type: string
-          description: >-
-            What the contract charges into the pool alongside the bid, always 4x it. Included in
-            principalEachNanoErgs. Decimal string.
-          example: '20000000'
-        breakEvenFinderFeeNanoErgs:
+          description: The fee this quote was priced at, echoed back. Decimal string.
+          example: '10000000'
+        minPriorityFeeNanoErgs:
           type: string
           description: >-
-            The largest bid the 3 ERG coinbase repays on its own. Fixed at 17000000. A bid above it
-            is accepted; the difference then has to come from the mined block's transaction fees.
-          example: '17000000'
+            The smallest non-zero fee that may be posted. Fixed at 1000000 (0.001 ERG); below it the
+            block's finder is left too little to be worth the output it is paid in.
+          example: '1000000'
+        breakEvenPriorityFeeNanoErgs:
+          type: string
+          description: >-
+            The largest fee the 3 ERG coinbase repays on its own, which is the whole spread a lender
+            earns. Fixed at 85000000. A fee above it is accepted; the difference then has to come
+            from the mined block's transaction fees.
+          example: '85000000'
         netAtCoinbaseEachNanoErgs:
           type: string
           description: >-
             Block reward minus principal, per position, before the mined block's own fees.
-            **Signed** — negative above breakEvenFinderFeeNanoErgs. Decimal string.
+            **Signed** — negative above breakEvenPriorityFeeNanoErgs. Decimal string.
           example: '60000000'
         txFeeEachNanoErgs:
           type: string
@@ -4229,15 +4232,15 @@ components:
           type: string
           description: Emission box the quote was made against
           example: '88c297f99da7172f6aa20efbead69aa40e2b7734a1873d66ca1db6b19d214db6'
-        finderFeeEachNanoErgs:
+        priorityFeeEachNanoErgs:
           type: string
           pattern: '^[0-9]+$'
           description: >-
-            The bid, as the quote was taken at. Omitted or '0' posts at the floor. Not capped at the
-            quote's break-even — a higher bid is accepted and can still be repaid by the mined
-            block's transaction fees. Decimal string.
+            The fee, as the quote was taken at. Omitted or '0' posts at the floor; anything else is
+            at least minPriorityFeeNanoErgs. Not capped at the quote's break-even — a higher fee is
+            accepted and can still be repaid by the mined block's transaction fees. Decimal string.
           default: '0'
-          example: '5000000'
+          example: '10000000'
 
     CollateralJoinEntry:
       description: One join transaction that was sent
@@ -4271,12 +4274,12 @@ components:
           example: '3WwbQFz3vgi8ChY9dM1haQLGDeQYe5U9z98bwWW4TqxxEAvyYu5y'
         principalNanoErgs:
           type: string
-          description: What this position locked up, bid and pool premium included. Decimal string.
-          example: '2940000000'
-        finderFeeNanoErgs:
+          description: What this position locked up, the whole priority fee included. Decimal string.
+          example: '2925000000'
+        priorityFeeNanoErgs:
           type: string
-          description: The bid this position posted. '0' when it posted at the floor. Decimal string.
-          example: '5000000'
+          description: The fee this position posted. '0' when it posted at the floor. Decimal string.
+          example: '10000000'
         permitLit:
           type: string
           description: Decimal string.
