@@ -15,6 +15,14 @@ libraryDependencies ++= Seq(
   guice,
   caffeine
 )
+
+// Play 2.8.15 pulls in Guice 4.2.3, which predates newer JDKs. Keep its
+// assistedinject extension on the same version as Guice itself.
+dependencyOverrides ++= Seq(
+  "com.google.inject" % "guice" % "6.0.0",
+  "com.google.inject.extensions" % "guice-assistedinject" % "6.0.0"
+)
+
 // Reads lithos.conf from bin by default
 Universal / javaOptions ++= Seq(
   "-Dconfig.file=lithos.conf"
