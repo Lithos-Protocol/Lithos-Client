@@ -27,8 +27,8 @@ import java.math.BigInteger
 import scala.util.{Failure, Success}
 
 /**
- * The batcher serving a deployment other than the canonical one, against a mocked node: ERG:BBC, compiled
- * from its real mainnet ids, found at the pool template, and a sell order naming it.
+ * The batcher serving a deployment other than the canonical one, against a mocked node: a second mainnet
+ * deployment, compiled from its real ids, found at the pool template, and a sell order naming it.
  */
 class LithosDexMultiPoolSpec extends TestKit(ActorSystem("lithosdex-multi-pool-spec", LithosDexBatcherSpec.config))
   with AnyFlatSpecLike with Matchers with BeforeAndAfterAll with MockitoSugar {
@@ -38,12 +38,12 @@ class LithosDexMultiPoolSpec extends TestKit(ActorSystem("lithosdex-multi-pool-s
   private val Fee = 6000000L
   private val anchor = "cc" * 32
 
-  private val bbc = LDContracts(
+  private val second = LDContracts(
     ErgoId.create("77ebb7ac1a9386d6cc5b64fffa52602bea574b0bb454fb856188ae54acb84894"),
     ErgoId.create("9cec4df2183f6047edf61ec9bb60649c22362e17c074fac7c41d75c5229129f0"),
     ErgoId.create("27bc91eaf7e72d2a17cf6e73de349262c87bea7894121963b4100a644a08da25"),
     NetworkType.MAINNET)
-  private val bbcToken = ErgoId.create("fffe6122886e3b0ab9b72b401b39bf8d3f13580c1335a41d91d19deb8038ccd4")
+  private val secondToken = ErgoId.create("fffe6122886e3b0ab9b72b401b39bf8d3f13580c1335a41d91d19deb8038ccd4")
 
   private def longs(v: Array[Long]): ErgoValue[_] = ErgoValue.of(Colls.fromArray(v), scalaLongType)
 
@@ -57,17 +57,17 @@ class LithosDexMultiPoolSpec extends TestKit(ActorSystem("lithosdex-multi-pool-s
 
     val (pool, vault, order) = nodeContext.getClient.execute { ctx: BlockchainContext =>
       val owner = ctx.newProverBuilder().withDLogSecret(BigInteger.valueOf(7007L)).build().getAddress
-      val terms = LDOrderTerms(owner.getPublicKey, bbc.poolNFT, Fee, 2000000L)
-      val genuine = LDNodeFixtures.nodeBox(ctx, UTXO(bbc.liquidityPool, 10L * Parameters.OneErg,
-        Seq(Token(bbc.poolNFT, 1L), Token(bbcToken, 1000000000L), Token(bbc.provToken, 1000000000000000L)),
+      val terms = LDOrderTerms(owner.getPublicKey, second.poolNFT, Fee, 2000000L)
+      val genuine = LDNodeFixtures.nodeBox(ctx, UTXO(second.liquidityPool, 10L * Parameters.OneErg,
+        Seq(Token(second.poolNFT, 1L), Token(secondToken, 1000000000L), Token(second.provToken, 1000000000000000L)),
         Seq(ErgoValue.of(LDHelpers.LOCKED_LP - LDHelpers.GENESIS_SUPPLY), longs(LDHelpers.GENESIS_FEE_PARAMS),
           longs(Array(0L, 0L)), ErgoValue.of(BigInt(0).bigInteger), ErgoValue.of(BigInt(0).bigInteger))))
       val poolBox =
         if (!forgeGuard) genuine
-        else genuine.copy(ergoTree = genuine.ergoTree.replace(bbc.provisionGuard.hashedPropBytesHex,
+        else genuine.copy(ergoTree = genuine.ergoTree.replace(second.provisionGuard.hashedPropBytesHex,
           DexContracts(ctx).provisionGuard.hashedPropBytesHex))
-      val vaultBox = LDNodeFixtures.nodeBox(ctx, UTXO(bbc.feeVault, LDHelpers.VAULT_MIN,
-        Seq(Token(bbc.vaultNFT, 1L)), Seq(ErgoValue.of(BigInt(0).bigInteger), ErgoValue.of(BigInt(0).bigInteger))),
+      val vaultBox = LDNodeFixtures.nodeBox(ctx, UTXO(second.feeVault, LDHelpers.VAULT_MIN,
+        Seq(Token(second.vaultNFT, 1L)), Seq(ErgoValue.of(BigInt(0).bigInteger), ErgoValue.of(BigInt(0).bigInteger))),
         index = 1)
       val orderBox = LDNodeFixtures.nodeBox(ctx,
         UTXO(LDOrderContracts.swapSell(terms, Parameters.OneErg, 1L), Parameters.OneErg + Fee + Parameters.MinFee),
@@ -99,8 +99,8 @@ class LithosDexMultiPoolSpec extends TestKit(ActorSystem("lithosdex-multi-pool-s
     when(api.unspentBoxesByTokenId(anyString(), any[Paging], any[SortDirection], any[MempoolOptions]))
       .thenAnswer { inv =>
         inv.getArgument[String](0) match {
-          case nft if nft == bbc.poolNFT.toString => Success(Seq(IndexedBox(pool, "", 100, 2L)))
-          case nft if nft == bbc.vaultNFT.toString => Success(Seq(IndexedBox(vault, "", 100, 3L)))
+          case nft if nft == second.poolNFT.toString => Success(Seq(IndexedBox(pool, "", 100, 2L)))
+          case nft if nft == second.vaultNFT.toString => Success(Seq(IndexedBox(vault, "", 100, 3L)))
           case _ => Success(Seq.empty[IndexedBox])
         }
       }
@@ -130,7 +130,7 @@ class LithosDexMultiPoolSpec extends TestKit(ActorSystem("lithosdex-multi-pool-s
     val inputs = tx.hcursor.downField("inputs").values.getOrElse(fail("no inputs")).toSeq
     inputs.flatMap(_.hcursor.get[String]("boxId").toOption) should contain inOrder (f.pool.boxId, f.order.boxId)
     val successor = tx.hcursor.downField("outputs").downArray
-    successor.get[String]("ergoTree") shouldBe Right(bbc.liquidityPool.ergoTreeHex)
+    successor.get[String]("ergoTree") shouldBe Right(second.liquidityPool.ergoTreeHex)
     f.stop()
   }
 
