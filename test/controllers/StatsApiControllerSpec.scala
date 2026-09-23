@@ -306,4 +306,45 @@ class StatsApiControllerSpec extends AnyFlatSpec with Matchers with MockitoSugar
     (contentAsJson(call(c.getMiningTotals())) \ "status").as[String] shouldBe "disabled"
     (contentAsJson(call(c.getCollateralStats())) \ "status").as[String] shouldBe "disabled"
   }
+
+  it should "serve the payout ledger anonymously with each payout's composition inlined" in {
+    val mining = mock[MiningStatsRefresh]
+    val payout = MiningPaymentRecord("tx", "out", "box", "nft", "mined", 10, 5000L, "block", 20, 9000L, "5000005",
+      Some(PayoutAmounts("100", "3000000", "2000000", "5", Some("lit"), "33", "33", "300", 2, "9000000", "99")),
+      Some("miner-hash"))
+    val claim = PaymentClaim("nft-2", "mined-2", 15, "payout", 16, 6000L, "sub", "100", "2000000", 18, 8000L,
+      Some(2), Some("300"), Some("3000000"), Some("33"), Some("exact"))
+    when(mining.payments(20, 1, "mined", true)).thenReturn(Future.successful(PaymentLedgerPage("ready", source, 5,
+      Vector(payout), 20, 57, "mined", ascending = true, Vector(claim), Vector.empty)))
+    val result = withMining(mining).getMiningPayments(Some(20), Some(1), Some("mined"), Some("asc"))
+      .apply(FakeRequest(GET, "/stats/mining/payments"))
+    status(result) shouldBe OK
+    header("Cache-Control", result) shouldBe Some("no-store")
+    val json = contentAsJson(result)
+    val row = (json \ "payments")(0)
+    (row \ "rewardNanoErg").as[String] shouldBe "3000000"
+    (row \ "rollupScore").as[String] shouldBe "300"
+    (row \ "minedTimestamp").as[Long] shouldBe 5000L
+    (row \ "amounts").toOption shouldBe None
+    (row \ "minerHash").toOption shouldBe None
+    (json \ "offset").as[Int] shouldBe 20
+    (json \ "total").as[Int] shouldBe 57
+    (json \ "sort").as[String] shouldBe "mined"
+    (json \ "order").as[String] shouldBe "asc"
+    ((json \ "claims")(0) \ "rewardBasis").as[String] shouldBe "exact"
+  }
+
+  it should "reject an impossible payout page before asking the worker, and say so when the worker is busy" in {
+    val mining = mock[MiningStatsRefresh]
+    val c = withMining(mining)
+    Seq(c.getMiningPayments(None, Some(0), None, None), c.getMiningPayments(None, Some(501), None, None),
+      c.getMiningPayments(Some(-1), None, None, None), c.getMiningPayments(None, None, Some("reward"), None),
+      c.getMiningPayments(None, None, None, Some("up")))
+      .foreach(action => status(action.apply(FakeRequest(GET, "/stats/mining/payments"))) shouldBe BAD_REQUEST)
+    verifyNoInteractions(mining)
+    when(mining.payments(0, PaymentLedger.DefaultLimit, "paid", false)).thenReturn(Future.failed(new IllegalStateException("busy")))
+    val busy = c.getMiningPayments(None, None, None, None).apply(FakeRequest(GET, "/stats/mining/payments"))
+    status(busy) shouldBe SERVICE_UNAVAILABLE
+    header("Retry-After", busy) shouldBe Some("1")
+  }
 }

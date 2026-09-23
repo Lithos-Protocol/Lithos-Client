@@ -167,14 +167,20 @@ class RollupPublisher @Inject()(config: Configuration, nodeContext: NodeContext,
       // Eval transforms use mempool-adjusted trees
       val updatedEvalTrees = transformableTrees.filter(_._2.phase == EVAL)
 
+
+      val closedUnevaluated = mutable.ArrayBuffer.empty[String]
       updatedEvalTrees.foreach { case (_, tree) =>
         val age = currentHeight - tree.currentPeriod.get
 
-        if (age >= LFSMHelpers.EVAL_PERIOD && tree.evaluated) {
-          // Eval period elapsed → ready to transform to PAYOUT
+        if (age >= LFSMHelpers.EVAL_PERIOD) {
+          if (!tree.evaluated) closedUnevaluated += tree.blockId
           entries(tree.blockId) = RollupTxStub(tree.blockId, tree.currentPeriod, EvalTransform)
         }
       }
+      if (closedUnevaluated.nonEmpty)
+        logger.warn(s"Evaluation window closed before ${closedUnevaluated.size} rollup(s) were evaluated; " +
+          s"transforming them to payout, since fraud proofs may no longer be posted for them: " +
+          s"${closedUnevaluated.take(5).mkString(", ")}${if (closedUnevaluated.size > 5) ", ..." else ""}")
 
       // Evaluation (fraud-proof checks) uses the raw trees — onSync comment:
       // "We do not use mempool states for evaluation"

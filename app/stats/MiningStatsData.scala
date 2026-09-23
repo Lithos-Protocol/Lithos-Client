@@ -15,9 +15,9 @@ final case class LithosBlockRecord(blockId: String, height: Int, timestamp: Long
 /** Gross designated payout output, including the refunded submission bond. This is not net earnings. */
 final case class MiningPaymentRecord(transactionId: String, outputId: String, payoutBoxId: String,
                                       rollupNft: String, minedBlockId: String, minedHeight: Int,
-                                      blockId: String, height: Int, timestamp: Long, grossNanoErg: String,
-                                      amounts: Option[PayoutAmounts] = None, minerHash: Option[String] = None,
-                                      local: Boolean = true)
+                                      minedTimestamp: Long, blockId: String, height: Int, timestamp: Long,
+                                      grossNanoErg: String, amounts: Option[PayoutAmounts] = None,
+                                      minerHash: Option[String] = None, local: Boolean = true)
 final case class MiningBlockRecord(cursor: MiningCursor, previous: MiningCursor, difficulty: String,
                                     blocks: Vector[LithosBlockRecord], payments: Vector[MiningPaymentRecord],
                                     activity: MiningActivity = MiningActivity(), transactionFeesNanoErg: String = "0")
@@ -57,6 +57,7 @@ object MiningStatsData {
   implicit val rollupActivityFormat: OFormat[RollupActivity] = Json.format[RollupActivity]
   implicit val transactionFeeFormat: OFormat[MiningTransactionFee] = Json.format[MiningTransactionFee]
   implicit val batchingFeeFormat: OFormat[BatchingFee] = Json.format[BatchingFee]
+  implicit val ledgerEventFormat: OFormat[LedgerEvent] = Json.format[LedgerEvent]
   implicit val registrationFormat: OFormat[MinerRegistrationActivity] = Json.format[MinerRegistrationActivity]
   implicit val activityFormat: OFormat[MiningActivity] = Json.format[MiningActivity]
   implicit val accountingFormat: OFormat[MiningAccountingTotals] = Json.format[MiningAccountingTotals]

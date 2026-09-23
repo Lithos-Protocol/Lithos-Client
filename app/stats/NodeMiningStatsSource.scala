@@ -130,7 +130,7 @@ class NodeMiningStatsSource(api: NodeApi, protocol: SyncProtocolContext, minerTr
           tx.inputs.lift(1).flatMap(in => block.inputBox(in.id)).map(_.ergoTree), minerTree)
       }
       rollups ++= activity
-      val batch = BatchingStatistics.read(block, tx, protocol.networkType)
+      val batch = BatchingStatistics.read(block, tx, protocol.networkType, minerTree)
       batches ++= batch
       val kind = if (blocks.exists(_.transactionId == tx.id)) Some("genesis")
         else activity.map(_.kind).orElse(rollup.map(_ => "payout")).orElse(batch.headOption.map(_.protocol))

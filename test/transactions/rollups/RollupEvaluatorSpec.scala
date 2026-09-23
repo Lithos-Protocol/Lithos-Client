@@ -201,12 +201,23 @@ class RollupEvaluatorSpec extends TestKit(ActorSystem("rollup-evaluator-spec", R
     f.sync.expectNoMessage(500.millis)
   }
 
-  "An evaluation transform" should "require a complete evaluation even after the challenge period" in {
+  "An evaluation transform" should "wait out the challenge period, then go ahead whether or not evaluation finished" in {
     val rollup = NispHistoryFixtures.chain().target
     val transform = RollupTxStub(rollup.blockId, rollup.currentPeriod, EvalTransform)
     val height = (rollup.currentPeriod.get + LFSMHelpers.EVAL_PERIOD).toInt
 
-    transform.validate(height, rollup) shouldBe false
+    // Inside the period a fraud proof can still land, so even a finished evaluation waits.
+    transform.validate(height - 1, rollup.copy(evaluated = true)) shouldBe false
+    // Past it only the transform can spend the box. Holding back an unevaluated rollup stranded it.
+    transform.validate(height, rollup) shouldBe true
     transform.validate(height, rollup.copy(evaluated = true)) shouldBe true
+  }
+
+  it should "still leave fraud checks to the period itself" in {
+    val rollup = NispHistoryFixtures.chain().target
+    val evaluation = RollupTxStub(rollup.blockId, rollup.currentPeriod, NISPEvaluation)
+    val height = (rollup.currentPeriod.get + LFSMHelpers.EVAL_PERIOD).toInt
+    evaluation.validate(height - 1, rollup) shouldBe true
+    evaluation.validate(height, rollup) shouldBe false
   }
 }

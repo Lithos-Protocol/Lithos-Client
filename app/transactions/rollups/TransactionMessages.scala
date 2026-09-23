@@ -28,7 +28,8 @@ object TransactionMessages {
    *  HoldingTransform  — HOLDING phase rollup whose holding period has elapsed;
    *                      advances the rollup to the EVAL contract.
    *  EvalTransform     — EVAL phase rollup whose eval period has elapsed;
-   *                      advances the rollup to the PAYOUT contract.
+   *                      advances the rollup to the PAYOUT contract, whether
+   *                      or not this client finished evaluating it.
    *  Payout            — PAYOUT phase rollup; pays out ERG (and tokens) to the
    *                      local miner.
    *  NISPSubmission    — HOLDING phase rollup still within its holding period
@@ -79,9 +80,9 @@ object TransactionMessages {
           rollup.phase == HOLDING && (height - rollup.currentPeriod.get) >= LFSMHelpers.HOLDING_PERIOD
         case NISPSubmission =>
           rollup.phase == HOLDING && (height - rollup.currentPeriod.get) < LFSMHelpers.HOLDING_PERIOD && !rollup.hasMiner
+        // Past the period no fraud proof can land, so an unfinished evaluation no longer holds it back.
         case EvalTransform =>
-          rollup.phase == EVAL && rollup.evaluated &&
-            (height - rollup.currentPeriod.get) >= LFSMHelpers.EVAL_PERIOD
+          rollup.phase == EVAL && (height - rollup.currentPeriod.get) >= LFSMHelpers.EVAL_PERIOD
         case NISPEvaluation =>
           rollup.phase == EVAL && (height - rollup.currentPeriod.get) < LFSMHelpers.EVAL_PERIOD && !rollup.evaluated
         case Payout =>

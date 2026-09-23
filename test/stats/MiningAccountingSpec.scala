@@ -44,6 +44,10 @@ class MiningAccountingSpec extends AnyFlatSpec with Matchers {
     amounts.map(_.surplusNanoErg) shouldBe Vector("0", "5")
     amounts.map(_.rewardLit) shouldBe Vector("33", "67")
     amounts.map(_.receivedLit) shouldBe Vector("33", "70")
+    // Every share carries the whole payout it was cut from, and when the rollup was mined.
+    amounts.map(a => (a.rollupScore, a.rollupMiners, a.rollupRewardNanoErg, a.rollupRewardLit)).distinct shouldBe
+      Vector(("300", 2, "10000001", "101"))
+    payments.map(_.minedTimestamp).distinct shouldBe Vector(mined.timestamp)
     val record = MiningBlockRecord(at, MiningStatsStoreSpec.cursor(99), "123", Vector.empty,
       payments.filter(_.local), MiningActivity(networkPayments = payments))
     val totals = MiningTotals().include(record, 1)
@@ -94,6 +98,30 @@ class MiningAccountingSpec extends AnyFlatSpec with Matchers {
     result.local shouldBe true
     result.proofValueHash shouldBe Some(Hex.toHexString(local.hashedValueBytes))
     result.proofValueHash should not be Some(local.hashedPropBytesHex)
+    // The removed entry is this client's own, so the slash is booked against it as well.
+    result.localTarget shouldBe true
+    val slashed = MiningAccounting.contribution(MiningBlockRecord(at, MiningStatsStoreSpec.cursor(99), "1",
+      Vector.empty, Vector.empty, MiningActivity(rollups = Vector(result))))
+    slashed.amount("local.slashed.count") shouldBe BigInt(1)
+    slashed.amount("local.slashed.bondNanoErg") shouldBe BigInt(2000000)
+    slashed.amount("rollup.fraudProof.localBondNanoErg") shouldBe BigInt(2000000)
+    val proverOnly = RollupStatistics.read(fraud.copy(inputs = fraud.inputs.updated(1,
+      TxInput("prover", Some(InputSpendingProof(Map("0" -> ErgoValue.of(other.hashedPropBytes).toHex)))))),
+      before, mined, protocol, Some(local.ergoTreeHex), local.ergoTreeHex).get
+    proverOnly.local shouldBe true
+    proverOnly.localTarget shouldBe false
+  }
+
+  "Payout readiness" should "carry the LIT the whole rollup distributes" in {
+    val protocol = ReducerFixtures.protocol()
+    val evaluation = input.copy(ergoTree = protocol.evaluationErgoTree, registers =
+      ReducerFixtures.rollupRegisters(dictionary, 2, BigInt(300), RollupInfoState.evaluation(60, 50, 4000000)))
+    val ready = tx.copy(outputs = Seq(input.copy(ergoTree = protocol.payoutErgoTree)))
+    val event = RollupStatistics.read(ready, evaluation, mined, protocol, None, local.ergoTreeHex).get
+    event.kind shouldBe "payoutReady"
+    event.valueNanoErg shouldBe "10000001"
+    event.rewardLit shouldBe Some("101")
+    event.minedHeight shouldBe mined.height
   }
 
   "Block accounting" should "keep whole-network fees separate from Lithos-block fees and count work once per block" in {
@@ -112,5 +140,28 @@ class MiningAccountingSpec extends AnyFlatSpec with Matchers {
     totals.amount("lithos.blocks") shouldBe BigInt(1)
     totals.amount("lithos.difficultySum") shouldBe BigInt(999)
     MiningTotals().include(lithos, 1).blocks shouldBe 1
+  }
+
+  it should "pool fee-less executions in Lithos blocks and keep only this client's fee-paying ones as its own" in {
+    val genesis = mined.copy(blockId = at.blockId, height = at.height, timestamp = at.timestamp)
+    def totals(inLithos: Boolean, fees: BatchingFee*) = MiningAccounting.contribution(MiningBlockRecord(at,
+      MiningStatsStoreSpec.cursor(99), "1", if (inLithos) Vector(genesis) else Vector.empty, Vector.empty,
+      MiningActivity(batchingFees = fees.toVector)))
+    val candidate = BatchingFee("c", "o1", "lithosdex", "6000000", "0", local = true)
+    val broadcast = BatchingFee("b", "o2", "lithosdex", "6000000", "1000000", local = true)
+    val stranger = BatchingFee("s", "o3", "ergodex", "4000000", "1100000")
+
+    val lithos = totals(inLithos = true, candidate, broadcast, stranger)
+    lithos.amount("pool.batching.lithosdex.orders") shouldBe BigInt(1)
+    lithos.amount("pool.batching.lithosdex.grossNanoErg") shouldBe BigInt(6000000)
+    // Mined into someone's Lithos block from the mempool, it paid a fee and its takings stayed ours.
+    lithos.amount("local.batching.lithosdex.afterTransactionFeesNanoErg") shouldBe BigInt(5000000)
+    lithos.amount("local.batching.ergodex.orders") shouldBe BigInt(0)
+    lithos.amount("pool.batching.ergodex.orders") shouldBe BigInt(0)
+
+    // Outside a Lithos block nothing is pooled, including a fee-less execution in a block of our own.
+    val plain = totals(inLithos = false, candidate, stranger)
+    plain.amount("pool.batching.lithosdex.orders") shouldBe BigInt(0)
+    plain.amount("local.batching.lithosdex.afterTransactionFeesNanoErg") shouldBe BigInt(6000000)
   }
 }

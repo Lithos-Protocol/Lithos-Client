@@ -18,7 +18,7 @@ object MiningStatsStoreSpec {
     MiningBlockRecord(at, previous, (BigInt(1) << 100).toString,
       Vector(LithosBlockRecord(at.blockId, at.height, at.timestamp, s"genesis-${at.blockId}",
         "holding", "collateral", "1000000", "2000000", finderFee.toString)),
-      Vector(MiningPaymentRecord(s"pay-${at.blockId}", s"output-${at.blockId}", "payout", "nft", "mined", 1,
+      Vector(MiningPaymentRecord(s"pay-${at.blockId}", s"output-${at.blockId}", "payout", "nft", "mined", 1, 1000L,
         at.blockId, at.height, at.timestamp, amount.toString)))
 }
 
@@ -91,7 +91,7 @@ class MiningStatsStoreSpec extends AnyFlatSpec with Matchers {
     db.block(2) shouldBe None
     failWrites = false
     db.append(record(cursor(2), cursor(1)))
-    memory.recordedBatches.map(_.size) shouldBe Vector(4) // record, two buckets and checkpoint
+    memory.recordedBatches.map(_.size) shouldBe Vector(5) // record, two buckets, ledger payout and checkpoint
     failWrites = true
     intercept[StoreException](db.rollback())
     db.state.get.cursor shouldBe cursor(2)
@@ -185,6 +185,43 @@ class MiningStatsStoreSpec extends AnyFlatSpec with Matchers {
     db.localHistory("shares", hour, hour * 2) should have size 1
     db.pruneLocal(hour * 2, 1)
     db.localHistory("shares", hour, hour * 2) shouldBe empty
+  }
+
+  "The payout ledger" should "follow a claim to its payout and undo every step on rollback and pruning" in {
+    val db = new MiningStatsStore(None, identity)
+    def rollup(kind: String, claimed: Long = 100, value: Long = 0, miners: Int = 1, local: Boolean = false,
+               lit: Option[String] = None, nft: String = "nft-a") =
+      RollupActivity(s"$kind-$nft", nft, "mined", 1, kind, miners, claimed.toString, "2000000", value.toString,
+        local = local, rewardLit = lit)
+    def block(h: Int, rollups: Vector[RollupActivity], payments: Vector[MiningPaymentRecord] = Vector.empty) =
+      MiningBlockRecord(cursor(h), cursor(h - 1), "1", Vector.empty, payments, MiningActivity(rollups = rollups))
+    db.initialize(cursor(1))
+    db.append(block(2, Vector(rollup("submission", local = true))))
+    db.append(block(3, Vector(rollup("payoutReady", claimed = 300, value = 9000000, miners = 3, lit = Some("30")),
+      rollup("fraudProof", local = true, nft = "nft-b"))))
+    val ready = db.ledger(0, 10)
+    ready.claims.map(c => (c.phase, c.rewardNanoErg, c.rewardLit)) shouldBe Vector(("payout", Some("3000000"), Some("10")))
+    ready.bounties.map(_.rollupNft) shouldBe Vector("nft-b")
+    ready.payments shouldBe empty
+
+    val payout = MiningPaymentRecord("pay", "out", "box", "nft-a", "mined", 1, 1000L, cursor(4).blockId, 4,
+      cursor(4).timestamp, "5000000")
+    db.append(block(4, Vector.empty, Vector(payout)))
+    val paid = db.ledger(0, 10)
+    paid.claims shouldBe empty
+    paid.payments.map(_.outputId) shouldBe Vector("out")
+    paid.total shouldBe 1
+    db.ledger(1, 10).payments shouldBe empty
+    paid.retainedFromHeight shouldBe 2
+
+    db.rollback()
+    db.ledger(0, 10).claims.map(_.phase) shouldBe Vector("payout")
+    db.ledger(0, 10).payments shouldBe empty
+    db.rollback()
+    db.ledger(0, 10).claims.map(_.phase) shouldBe Vector("holding")
+    db.ledger(0, 10).bounties shouldBe empty
+    db.prune(Long.MaxValue, 1, rollbackBlocks = 0) shouldBe 1
+    db.ledger(0, 10).claims shouldBe empty
   }
 
   "Hashrate estimates" should "use confirmed difficulty sums, covered time and explicit sampling uncertainty" in {

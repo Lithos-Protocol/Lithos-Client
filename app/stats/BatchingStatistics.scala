@@ -24,7 +24,8 @@ private[stats] object BatchingStatistics {
     out.creationHeight, out.ergoTree, out.assets.map(t => NodeAsset(t.id.toString, t.amount)),
     NodeRegisters(out.registers.zipWithIndex.map { case (value, index) => s"R${index + 4}" -> value }.toMap))
 
-  def read(block: BlockInfo, tx: BlockTx, network: NetworkType): Vector[BatchingFee] = {
+  /** `minerTree` is this client's own script; an execution whose takings went to it is this client's. */
+  def read(block: BlockInfo, tx: BlockTx, network: NetworkType, minerTree: String): Vector[BatchingFee] = {
     val inputs = tx.inputs.map(in => block.inputBox(in.id))
     if (inputs.size < 2 || inputs.head.isEmpty || tx.outputs.size < 2) return Vector.empty
     val pool = inputs.head.get
@@ -40,8 +41,11 @@ private[stats] object BatchingStatistics {
         // amount left for execution, independently of any takings carried from earlier transactions.
         val gross = BigInt(pool.value) + order.value + provisionIn - next.value - provisionOut - reward.value
         val fee = transactionFee(tx)
+        // Past the pool and the owner's reward, the takings box is what the executor keeps. The reward
+        // is skipped so filling this client's own order is not mistaken for executing it.
+        val local = tx.outputs.zipWithIndex.exists { case (out, i) => i != 0 && i != rewardIndex && out.ergoTree == minerTree }
         if (gross < 0 || expected.exists(BigInt(_) != gross) || fee > gross) Vector.empty
-        else Vector(BatchingFee(tx.id, order.id, protocol, gross.toString, fee.toString))
+        else Vector(BatchingFee(tx.id, order.id, protocol, gross.toString, fee.toString, local))
       }
     }
     ErgoDexPool.native(box(pool)) match {

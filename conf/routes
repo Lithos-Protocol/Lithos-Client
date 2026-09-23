@@ -44,6 +44,7 @@ GET /stats/mining/hashrate     controllers.StatsApiController.getMiningHashrate(
 GET /stats/mining/difficulty   controllers.StatsApiController.getDifficultyEpochs(from: Option[Int], to: Option[Int], limit: Option[Int])
 GET /stats/mining/workers      controllers.StatsApiController.getLocalMiningSummary()
 GET /stats/mining/workers/history controllers.StatsApiController.getLocalMiningHistory()
+GET /stats/mining/payments     controllers.StatsApiController.getMiningPayments(offset: Option[Int], limit: Option[Int], sort: Option[String], order: Option[String])
 GET /stats/collateral          controllers.StatsApiController.getCollateralStats()
 GET /stats/local               controllers.StatsApiController.getLocalMiningStats()
 

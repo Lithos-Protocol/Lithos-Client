@@ -73,6 +73,8 @@ class MiningStatsRefresh(settings: MiningStatsConfig, persistent: Boolean, start
   def hashrate(from: Long, until: Long, widthMs: Long): Future[LithosHashrateEstimate] = query { db =>
     MiningHistory.hashrate(db.buckets(from, until, widthMs).copy(status = view.status))
   }
+  def payments(offset: Int, limit: Int, sort: String = "paid", ascending: Boolean = false): Future[PaymentLedgerPage] =
+    query { db => db.ledger(offset, limit, sort, ascending).copy(status = view.status) }
 
   /**
    * A page of the epoch table, newest-anchored by default so a graph gets the recent curve without

@@ -8,7 +8,7 @@ import play.api.Configuration
 import play.api.libs.json.Json
 import play.api.mvc._
 import scorex.crypto.hash.Blake2b256
-import stats.{DifficultyEpochs, LocalMiningSummary, MiningHistory, MiningStatsRefresh, StatsCache, StatsView}
+import stats.{DifficultyEpochs, LocalMiningSummary, MiningHistory, MiningStatsRefresh, PaymentLedger, StatsCache, StatsView}
 
 import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
@@ -61,6 +61,20 @@ class StatsApiController @Inject()(cc: ControllerComponents, cache: StatsCache, 
           mining.difficulty(first, last, count).map(value => Ok(Json.toJson(value))).recover(unavailable)
       }
     })
+
+  def getMiningPayments(offset: Option[Int], limit: Option[Int], sort: Option[String],
+                        order: Option[String]): Action[AnyContent] = noStore(Action.async {
+    val size = limit.getOrElse(PaymentLedger.DefaultLimit)
+    val skip = offset.getOrElse(0)
+    val by = sort.getOrElse("paid")
+    val direction = order.getOrElse("desc")
+    def invalid(reason: String) = Future.successful(BadRequest(ApiHelper.makeError(400, "Invalid payments page", reason)))
+    if (size < 1 || size > PaymentLedger.MaxLimit) invalid(s"'limit' must be between 1 and ${PaymentLedger.MaxLimit}")
+    else if (skip < 0) invalid("'offset' must be nonnegative")
+    else if (!PaymentLedger.Sorts.contains(by)) invalid("'sort' must be 'paid' or 'mined'")
+    else if (direction != "asc" && direction != "desc") invalid("'order' must be 'asc' or 'desc'")
+    else mining.payments(skip, size, by, direction == "asc").map(value => Ok(Json.toJson(value))).recover(unavailable)
+  })
 
   def getLocalMiningSummary(): Action[AnyContent] = noStore(Action {
     val height = cache.snapshot().local.stratum.activeJob.map(_.height)

@@ -687,6 +687,84 @@ paths:
           $ref: '#/components/responses/StatsInvalidRange'
         '503':
           $ref: '#/components/responses/StatsHistoryUnavailable'
+  /stats/mining/payments:
+    get:
+      summary: This client's payouts and claims
+      operationId: getMiningPayments
+      tags: [stats]
+      description: |
+        Every payout to this client's primary mining address in retained history, newest first, each
+        with what it was made of and the rollup it came from. Alongside them, the rollups this client
+        has a claim in that have not paid yet, and the fraud proofs it was paid for.
+
+        **Payouts** break the output into reward, refunded bond and surplus. Only reward and surplus
+        are earnings — the bond is this client's own deposit coming back. `score / rollupScore` is the
+        share of the block this client earned, out of `rollupMiners` miners.
+
+        **Claims** follow each unpaid rollup through `holding`, `evaluation` and `payout`. The expected
+        reward is exact once the payout is ready and projected during evaluation, where a fraud proof
+        against another miner can still raise it. Holding has no projection. A `slashed` claim lost its
+        bond to a fraud proof and will never pay.
+
+        **Bounties** are fraud proofs this client submitted. Each pays the slashed miner's bond.
+
+        Payouts are paged by `offset` and `limit` in the order `sort` and `order` choose, and `total`
+        counts every retained payout. A payout confirmed between two requests shifts later pages by
+        one. Claims and bounties always come in full.
+      parameters:
+        - in: query
+          name: offset
+          required: false
+          description: Payouts to skip, counting from the newest.
+          schema:
+            type: integer
+            format: int32
+            minimum: 0
+            default: 0
+        - in: query
+          name: limit
+          required: false
+          description: Payouts per page.
+          schema:
+            type: integer
+            format: int32
+            minimum: 1
+            maximum: 500
+            default: 100
+        - in: query
+          name: sort
+          required: false
+          description: |
+            `paid` orders by the block that paid each payout, `mined` by the block its rollup was mined
+            in. Paid time needs no option of its own: block timestamps rise with height, so it always
+            agrees with `paid`.
+          schema:
+            type: string
+            enum: [paid, mined]
+            default: paid
+        - in: query
+          name: order
+          required: false
+          description: '`desc` puts the highest first.'
+          schema:
+            type: string
+            enum: [desc, asc]
+            default: desc
+      responses:
+        '200':
+          description: One page of payouts, with every open claim and bounty.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaymentLedgerPage'
+        '400':
+          description: '`limit` is outside 1–500, `offset` is negative, or `sort` or `order` is not one of its values.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '503':
+          $ref: '#/components/responses/StatsHistoryUnavailable'
   /stats/collateral:
     get:
       summary: Collateral inventory
@@ -2703,6 +2781,7 @@ components:
         | `lithos.blocks`, `lithos.difficultySum` | Blocks carrying a configured Lithos genesis — counted once each — and their difficulty. |
         | `lithos.transactionFeeNanoErg` | Miner-fee outputs from the transactions inside those Lithos blocks. |
         | `local.payout.*` | Confirmed payouts to this client's primary mining address. |
+        | `local.slashed.count`, `.bondNanoErg` | Fraud proofs that removed this client's own entry, and the bonds it lost. |
         | `network.payout.*` | Every payout seen for the configured protocol, local ones included. |
         | `collateral.consumedNanoErg` | Collateral spent by genesis transactions. Not income. |
         | `holding.genesisNanoErg` | Value placed in holding boxes at genesis. Contains the pool's share of any priority bid. |
@@ -2710,6 +2789,8 @@ components:
         | `lithos.blocksWithPriorityFee` | How many of those blocks carried a fee at all. |
         | `batching.<protocol>.*` | Executor fees earned filling `ergodex` or `lithosdex` orders. |
         | `lithos.batching.<protocol>.*` | The same, counting only blocks that carried a Lithos genesis. |
+        | `pool.batching.<protocol>.orders`, `.grossNanoErg` | Fee-less executions inside Lithos blocks. Their takings top up the rollup, so they reach miners through payouts. |
+        | `local.batching.<protocol>.*` | Executions whose takings went to this client, outside the pool. Paid straight to its wallet, less the transaction fee. |
         | `rollup.<kind>.*` | Confirmed rollup transitions: `topUp`, `submission`, `evaluation`, `fraudProof`, `payoutReady`. |
         | `transaction.<kind>.count`, `.feeNanoErg` | Recognised transactions and the fees they paid. |
         | `registration.<kind>.count`, `.localCount` | Miner Dictionary `add`, `remove` and `evict` events. |
@@ -2722,11 +2803,15 @@ components:
         **Batching families** hold `orders`, `grossNanoErg`, `transactionFeeNanoErg` and
         `afterTransactionFeesNanoErg`, counting recognised execution layouts only, not all pool
         activity. Gross is newly earned executor fees and excludes takings carried in from earlier.
-        Liquidity-provider fees are a different thing and live on the DEX API.
+        Liquidity-provider fees are a different thing and live on the DEX API. `pool.batching` pays
+        no transaction fee, so it holds only `orders` and `grossNanoErg`. It and `local.batching`
+        never count the same execution.
 
         **Rollup families** hold `count`, `miners`, `claimedScore`, `bondNanoErg` and `valueNanoErg`,
-        plus `localCount` and `localValueNanoErg` where the local miner is identifiable — the
-        submitting miner for submissions, the prover input for fraud proofs. `miners` counts entries
+        plus `localCount`, `localValueNanoErg`, `localBondNanoErg` and `localClaimedScore` where the
+        local miner is identifiable — the submitting miner for submissions, the prover input for fraud
+        proofs. So `rollup.submission.localBondNanoErg` is the bond this client posted, and
+        `rollup.fraudProof.localValueNanoErg` is the slashed bonds it was paid for proving fraud. `miners` counts entries
         at that transition, not unique people. `valueNanoErg` means a different thing per kind:
         added holding value for a top-up, zero for a submission, the full box value at evaluation,
         the slashed bond for a fraud proof, and distributable ERG excluding bonds at payout readiness.
@@ -3216,7 +3301,7 @@ components:
           description: Exact value of genesis output zero, before any top-ups. Not the block's final revenue.
     MiningPaymentRecord:
       type: object
-      required: [transactionId, outputId, payoutBoxId, rollupNft, minedBlockId, minedHeight, blockId, height, timestamp, grossNanoErg]
+      required: [transactionId, outputId, payoutBoxId, rollupNft, minedBlockId, minedHeight, minedTimestamp, blockId, height, timestamp, grossNanoErg]
       properties:
         transactionId:
           type: string
@@ -3232,6 +3317,10 @@ components:
           description: The block holding the rollup genesis, even when that block is older than retained history.
         minedHeight:
           type: integer
+        minedTimestamp:
+          type: integer
+          format: int64
+          description: Timestamp of `minedBlockId`, in Unix milliseconds. With `timestamp`, how long the payout took.
         blockId:
           type: string
           description: The block holding this payout transaction.
@@ -3243,6 +3332,177 @@ components:
         grossNanoErg:
           type: string
           description: Exact output value, including the refunded bond and any surplus.
+    LocalPayment:
+      description: One payout to this client, with its composition and the rollup it was cut from.
+      allOf:
+        - $ref: '#/components/schemas/MiningPaymentRecord'
+        - type: object
+          required: [score, rewardNanoErg, bondNanoErg, surplusNanoErg, rewardLit, receivedLit,
+                     rollupScore, rollupMiners, rollupRewardNanoErg, rollupRewardLit]
+          properties:
+            score:
+              $ref: '#/components/schemas/StatsInteger'
+            rewardNanoErg:
+              type: string
+              description: This client's share of the rollup's ERG reward. Earnings.
+            bondNanoErg:
+              type: string
+              description: The submission bond coming back. Not earnings.
+            surplusNanoErg:
+              type: string
+              description: Anything the output carried beyond reward and bond. Earnings; usually zero.
+            litTokenId:
+              type: string
+            rewardLit:
+              type: string
+              description: LIT the protocol owed this share.
+            receivedLit:
+              type: string
+              description: LIT the output actually carried. Never less than `rewardLit`.
+            rollupScore:
+              type: string
+              description: The whole rollup's score. `score / rollupScore` is this client's share.
+            rollupMiners:
+              type: integer
+              description: Miners the rollup paid.
+            rollupRewardNanoErg:
+              type: string
+              description: The ERG reward the whole rollup distributed, bonds excluded.
+            rollupRewardLit:
+              type: string
+              description: The LIT the whole rollup distributed.
+    PaymentClaim:
+      type: object
+      description: A rollup this client submitted to that has not paid it yet.
+      required: [rollupNft, minedBlockId, minedHeight, phase, submittedHeight, submittedTimestamp,
+                 submissionTransactionId, score, bondNanoErg, phaseHeight, phaseTimestamp]
+      properties:
+        rollupNft:
+          type: string
+        minedBlockId:
+          type: string
+        minedHeight:
+          type: integer
+        phase:
+          type: string
+          enum: [holding, evaluation, payout, slashed]
+          description: |
+            The furthest transition seen. `holding` still takes submissions, `evaluation` is open to
+            fraud proofs, `payout` has a fixed reward waiting to be sent. `slashed` will never pay.
+        submittedHeight:
+          type: integer
+        submittedTimestamp:
+          type: integer
+          format: int64
+        submissionTransactionId:
+          type: string
+        score:
+          $ref: '#/components/schemas/StatsInteger'
+        bondNanoErg:
+          type: string
+          description: The bond this client posted. Comes back with the payout, or is lost if slashed.
+        phaseHeight:
+          type: integer
+          description: Height of the transition that set `phase`.
+        phaseTimestamp:
+          type: integer
+          format: int64
+        rollupMiners:
+          type: integer
+          description: Miners still in the rollup. Absent while holding.
+        rollupScore:
+          type: string
+          description: The rollup's total score. Absent while holding.
+        rewardNanoErg:
+          type: string
+          description: Expected ERG reward, bond excluded. Absent while holding or slashed.
+        rewardLit:
+          type: string
+          description: Expected LIT. Only known once the payout is ready.
+        rewardBasis:
+          type: string
+          enum: [exact, projected]
+          description: '`exact` once the payout is ready; `projected` during evaluation.'
+        slashedTransactionId:
+          type: string
+          description: The fraud proof that removed this client's entry.
+        payoutReadyFrom:
+          type: integer
+          description: |
+            First height the payout can become ready. Exact during evaluation; during holding it
+            assumes evaluation starts the moment holding ends, so it is the earliest possible.
+            Absent once the payout is ready, and when slashed.
+    FraudBounty:
+      type: object
+      description: A fraud proof this client submitted, which paid it the slashed miner's bond.
+      required: [transactionId, rollupNft, minedHeight, height, timestamp, bondNanoErg, claimedScore]
+      properties:
+        transactionId:
+          type: string
+        rollupNft:
+          type: string
+        minedHeight:
+          type: integer
+        height:
+          type: integer
+        timestamp:
+          type: integer
+          format: int64
+        bondNanoErg:
+          type: string
+          description: The slashed bond, paid to this client.
+        claimedScore:
+          type: string
+          description: The score the slashed miner had claimed.
+        minerHash:
+          type: string
+          description: Hash identifying the slashed entry. Not a miner address.
+    PaymentLedgerPage:
+      type: object
+      required: [status, source, retainedFromHeight, offset, total, sort, order, payments, claims, bounties, holdingBlocks, evaluationBlocks]
+      properties:
+        holdingBlocks:
+          type: integer
+          description: Blocks a rollup takes submissions for, counted from the block that mined it.
+        evaluationBlocks:
+          type: integer
+          description: Blocks a rollup stays open to fraud proofs, counted from the block evaluation started in.
+        status:
+          $ref: '#/components/schemas/MiningCollectionStatus'
+        source:
+          $ref: '#/components/schemas/MiningCursor'
+        retainedFromHeight:
+          type: integer
+          description: First retained height. Nothing older is listed.
+        payments:
+          type: array
+          maxItems: 500
+          description: In the order `sort` and `order` give.
+          items:
+            $ref: '#/components/schemas/LocalPayment'
+        offset:
+          type: integer
+          description: The offset this page starts at.
+        total:
+          type: integer
+          description: Every payout in retained history. Pages end at `offset + limit >= total`.
+        sort:
+          type: string
+          enum: [paid, mined]
+          description: The ordering this page is in.
+        order:
+          type: string
+          enum: [desc, asc]
+        claims:
+          type: array
+          description: Unpaid claims, newest submission first.
+          items:
+            $ref: '#/components/schemas/PaymentClaim'
+        bounties:
+          type: array
+          description: Newest first.
+          items:
+            $ref: '#/components/schemas/FraudBounty'
     DifficultyEpoch:
       type: object
       required: [index, startHeight, endHeight, startTimestamp, endTimestamp, difficulty, complete]

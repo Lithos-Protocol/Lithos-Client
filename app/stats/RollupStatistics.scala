@@ -27,10 +27,14 @@ private[stats] object RollupStatistics {
     val next = tx.outputs.headOption.filter(out => out.assets.headOption.exists(t => t.id.toString == nft && t.amount == 1L))
     next.flatMap { out =>
       def event(kind: String, count: Int, claimed: BigInt, bond: BigInt, value: BigInt,
-                   key: Option[String] = None, proof: Option[String] = None, local: Boolean = false) = {
-        require(count >= 0 && claimed >= 0 && bond >= 0 && value >= 0, "invalid rollup contribution")
-        Some(RollupActivity(tx.id, nft, mined.blockId, kind, count, claimed.toString, bond.toString,
-          value.toString, key, proof, local))
+                   key: Option[String] = None, proof: Option[String] = None, local: Boolean = false,
+                   lit: Option[BigInt] = None) = {
+        require(count >= 0 && claimed >= 0 && bond >= 0 && value >= 0 && lit.forall(_ >= 0),
+          "invalid rollup contribution")
+        Some(RollupActivity(tx.id, nft, mined.blockId, mined.height, kind, count, claimed.toString, bond.toString,
+          value.toString, key, proof, local,
+          localTarget = kind == "fraudProof" && key.contains(Hex.toHexString(protocol.localMinerHash)),
+          rewardLit = lit.map(_.toString)))
       }
       val before = state(input)
       if (input.ergoTree == protocol.holdingErgoTree && out.ergoTree == protocol.holdingErgoTree) {
@@ -65,7 +69,7 @@ private[stats] object RollupStatistics {
       } else if (input.ergoTree == protocol.evaluationErgoTree && out.ergoTree == protocol.payoutErgoTree) {
         val after = state(out)
         require(BigInt(out.value) == BigInt(after(0)) + after(2), "payout reward includes its bonds")
-        event("payoutReady", miners(out), score(out), BigInt(after(2)), BigInt(after(0)))
+        event("payoutReady", miners(out), score(out), BigInt(after(2)), BigInt(after(0)), lit = Some(BigInt(after(1))))
       } else None
     }
   }

@@ -11,20 +11,34 @@ import scorex.crypto.hash.{Blake2b256, Digest32}
 import sigma.{AvlTree, Coll}
 import state.messages.{BlockTx, TxOutput}
 
-/** Amounts owed by the protocol and the actual designated output are deliberately separate. */
+/**
+ * Amounts owed by the protocol and the actual designated output are deliberately separate. The
+ * `rollup*` fields are the whole payout this share was cut from, so `score / rollupScore` is the
+ * fraction of the block this miner earned.
+ */
 final case class PayoutAmounts(score: String, rewardNanoErg: String, bondNanoErg: String,
                                  surplusNanoErg: String, litTokenId: Option[String],
-                                 rewardLit: String, receivedLit: String)
+                                 rewardLit: String, receivedLit: String,
+                                 rollupScore: String, rollupMiners: Int,
+                                 rollupRewardNanoErg: String, rollupRewardLit: String)
 
-/** One confirmed change to an authenticated rollup. Counts refer to entries, not unique people. */
+/**
+ * One confirmed change to an authenticated rollup. Counts refer to entries, not unique people.
+ *
+ * `local` is the submitting miner for a submission and the prover for a fraud proof; `localTarget`
+ * marks a fraud proof that slashed this client's own entry. `rewardLit` is only known once a payout
+ * is ready, where it is the LIT the whole rollup distributes.
+ */
 final case class RollupActivity(transactionId: String, rollupNft: String, minedBlockId: String,
-                                 kind: String, miners: Int, claimedScore: String, bondNanoErg: String,
+                                 minedHeight: Int, kind: String, miners: Int, claimedScore: String, bondNanoErg: String,
                                  valueNanoErg: String, minerHash: Option[String] = None,
-                                 proofValueHash: Option[String] = None, local: Boolean = false)
+                                 proofValueHash: Option[String] = None, local: Boolean = false,
+                                 localTarget: Boolean = false, rewardLit: Option[String] = None)
 
 final case class MiningTransactionFee(transactionId: String, kind: String, nanoErg: String)
+/** `local` means the execution's takings landed at this client's own address rather than another executor's. */
 final case class BatchingFee(transactionId: String, orderId: String, protocol: String,
-                               grossNanoErg: String, transactionFeeNanoErg: String)
+                               grossNanoErg: String, transactionFeeNanoErg: String, local: Boolean = false)
 final case class MinerRegistrationActivity(transactionId: String, kind: String, minerHash: String, local: Boolean)
 final case class MiningActivity(networkPayments: Vector[MiningPaymentRecord] = Vector.empty,
                                   rollups: Vector[RollupActivity] = Vector.empty,
@@ -102,10 +116,11 @@ object MiningAccounting {
       val receivedLit = output.assets.filter(t => lit.contains(t.id.toString)).map(t => BigInt(t.amount)).sum
       require(surplus >= 0 && (!successor || surplus == 0) && receivedLit >= litReward,
         "designated output does not cover the payout")
-      MiningPaymentRecord(tx.id, output.id, payout.id, nft, mined.blockId, mined.height,
+      MiningPaymentRecord(tx.id, output.id, payout.id, nft, mined.blockId, mined.height, mined.timestamp,
         at.blockId, at.height, at.timestamp, output.value.toString,
         Some(PayoutAmounts(score.toString, reward.toString, bond.toString, surplus.toString, lit,
-          litReward.toString, receivedLit.toString)), Some(hash), local)
+          litReward.toString, receivedLit.toString, totalScore.toString, miners,
+          state.totalErgReward.toString, state.totalLitReward.toString)), Some(hash), local)
     }
   }
 
@@ -153,6 +168,12 @@ object MiningAccounting {
       if (e.local) {
         add(s"$prefix.localCount", 1)
         add(s"$prefix.localValueNanoErg", BigInt(e.valueNanoErg))
+        add(s"$prefix.localBondNanoErg", BigInt(e.bondNanoErg))
+        add(s"$prefix.localClaimedScore", BigInt(e.claimedScore))
+      }
+      if (e.localTarget) {
+        add("local.slashed.count", 1)
+        add("local.slashed.bondNanoErg", BigInt(e.bondNanoErg))
       }
     }
     record.activity.transactionFees.foreach { fee =>
@@ -170,6 +191,12 @@ object MiningAccounting {
     record.activity.batchingFees.foreach { fee =>
       batching(fee, "batching")
       if (record.blocks.nonEmpty) batching(fee, "lithos.batching")
+      // A fee-less execution in a Lithos block is its miner's candidate execution, whose takings top
+      // up the rollup. Anything else this client executed paid its own fee and kept the takings.
+      if (record.blocks.nonEmpty && BigInt(fee.transactionFeeNanoErg) == 0) {
+        add(s"pool.batching.${fee.protocol}.orders", 1)
+        add(s"pool.batching.${fee.protocol}.grossNanoErg", BigInt(fee.grossNanoErg))
+      } else if (fee.local) batching(fee, "local.batching")
     }
     record.activity.registrations.foreach { event =>
       add(s"registration.${event.kind}.count", 1)

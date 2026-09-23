@@ -28,14 +28,18 @@ class BatchingStatisticsSpec extends AnyFlatSpec with Matchers {
     val tx = BlockTx("executed", Seq(pool, orderBox, carry).map(b => TxInput(b.boxId, None)), Seq.empty,
       Seq(after, owner, takings, fee).map(NodeSync.txOutput))
     val block = BlockInfo("block", 120, Seq(tx), resolvedInputs = Seq(pool, orderBox, carry).map(b => b.boxId -> NodeSync.txOutput(b)).toMap)
-    val result = BatchingStatistics.read(block, tx, NetworkType.TESTNET)
+    val other = Contract.SIGMA_FALSE.ergoTreeHex
+    val result = BatchingStatistics.read(block, tx, NetworkType.TESTNET, other)
     result should have size 1
     result.head.grossNanoErg shouldBe (ErgoDexFixtures.Sell.executorOutput + ErgoDexFixtures.Sell.minerFee).toString
     result.head.transactionFeeNanoErg shouldBe ErgoDexFixtures.Sell.minerFee.toString
+    result.head.local shouldBe false
+    // The takings box went to this client's script, so the execution was this client's.
+    BatchingStatistics.read(block, tx, NetworkType.TESTNET, Contract.SIGMA_TRUE.ergoTreeHex).head.local shouldBe true
     val cancelled = tx.copy(outputs = tx.outputs.updated(0, NodeSync.txOutput(pool)))
-    BatchingStatistics.read(block, cancelled, NetworkType.TESTNET) shouldBe empty
+    BatchingStatistics.read(block, cancelled, NetworkType.TESTNET, other) shouldBe empty
     val wrongOwner = tx.copy(outputs = tx.outputs.updated(1, tx.outputs(1).copy(ergoTree = Contract.SIGMA_FALSE.ergoTreeHex)))
-    BatchingStatistics.read(block, wrongOwner, NetworkType.TESTNET) shouldBe empty
+    BatchingStatistics.read(block, wrongOwner, NetworkType.TESTNET, other) shouldBe empty
   }
 
   it should "measure the configured LithosDex executor fee separately from the pool's own fees" in {
@@ -53,11 +57,14 @@ class BatchingStatisticsSpec extends AnyFlatSpec with Matchers {
       val tx = BlockTx("ld-executed", Seq(TxInput(pool.boxId, None), TxInput(order.boxId, None)), Seq.empty,
         Seq(after, reward).map(NodeSync.txOutput))
       val block = BlockInfo("block", 120, Seq(tx), resolvedInputs = Seq(pool, order).map(b => b.boxId -> NodeSync.txOutput(b)).toMap)
-      val result = BatchingStatistics.read(block, tx, ctx.getNetworkType)
+      // The order belongs to this client, so its reward pays this client — which is not executing it.
+      val mine = fake._3.contract.ergoTreeHex
+      val result = BatchingStatistics.read(block, tx, ctx.getNetworkType, mine)
       result.map(_.grossNanoErg) shouldBe Vector("6000000")
       result.head.transactionFeeNanoErg shouldBe "0"
+      result.head.local shouldBe false
       val refunded = tx.copy(outputs = tx.outputs.updated(1, tx.outputs(1).copy(value = 7000000L)))
-      BatchingStatistics.read(block, refunded, ctx.getNetworkType) shouldBe empty
+      BatchingStatistics.read(block, refunded, ctx.getNetworkType, mine) shouldBe empty
     }
   }
 }

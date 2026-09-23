@@ -1,6 +1,6 @@
 package api.models
 
-import play.api.libs.json.{Json, OWrites}
+import play.api.libs.json.{JsArray, Json, OWrites}
 import stats._
 
 final case class MiningTotalsResponse(status: String, persistent: Boolean, observedAt: Option[Long],
@@ -24,6 +24,23 @@ object StatsResponses {
   implicit val collateralWrites: OWrites[CollateralStats] = Json.writes[CollateralStats]
   implicit val activityWrites: OWrites[LocalMiningActivityView] = Json.writes[LocalMiningActivityView]
   implicit val localWrites: OWrites[LocalMiningResponse] = Json.writes[LocalMiningResponse]
+  implicit val claimWrites: OWrites[PaymentClaim] = Json.writes[PaymentClaim]
+  implicit val bountyWrites: OWrites[FraudBounty] = Json.writes[FraudBounty]
+
+  /** Composition inlined. `minerHash` and `local` say nothing here: every row is this client's own. */
+  private val ledgerPaymentWrites: OWrites[MiningPaymentRecord] = OWrites { p =>
+    val row = MiningStatsData.paymentFormat.writes(p) - "amounts" - "minerHash" - "local"
+    p.amounts.fold(row)(a => row ++ MiningStatsData.payoutAmountsFormat.writes(a))
+  }
+
+  implicit val ledgerWrites: OWrites[PaymentLedgerPage] = OWrites { page =>
+    Json.obj("status" -> page.status, "source" -> page.source, "retainedFromHeight" -> page.retainedFromHeight,
+      "offset" -> page.offset, "total" -> page.total,
+      "sort" -> page.sort, "order" -> (if (page.ascending) "asc" else "desc"),
+      "payments" -> JsArray(page.payments.map(ledgerPaymentWrites.writes)),
+      "claims" -> page.claims, "bounties" -> page.bounties,
+      "holdingBlocks" -> page.holdingBlocks, "evaluationBlocks" -> page.evaluationBlocks)
+  }
 
   def totals(view: MiningStatsView): MiningTotalsResponse =
     MiningTotalsResponse(view.status, view.persistent, view.observedAt, view.sourceHeight, view.sourceBlockId,

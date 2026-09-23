@@ -11,10 +11,10 @@ import java.nio.charset.StandardCharsets.UTF_8
 import java.nio.file.Paths
 
 object MiningStatsStore {
-  // 5 renames the per-block fee to the whole priority fee a box offered, rather than the finder's
-  // share of it. The version is part of the database path, so an older store is left alone rather
-  // than migrated: its records name the old field and would not parse.
-  val SchemaVersion: Int = 5
+  // 7 adds the mined height to ledger payout keys so payouts can be ordered by rollup. The version is
+  // part of the database path, so an older store is left alone rather than migrated: its keys and
+  // records would not parse.
+  val SchemaVersion: Int = 7
   def open(settings: StatsStorageConfig, node: NodeContext, protocol: SyncProtocolContext): MiningStatsStore = {
     val identity = Json.obj("schema" -> SchemaVersion, "network" -> protocol.networkType.toString,
       "startHeight" -> protocol.rollupStartHeight, "holding" -> protocol.holdingErgoTree,
@@ -47,6 +47,11 @@ class MiningStatsStore(database: Option[KeyValueStore], identity: JsObject) {
     case Some(db) => KeyValueStore.orThrow(db.get(key(name)))
     case None => memory.get(name)
   }
+  /** Keys under a prefix in byte order, which the zero-padded heights make height order. */
+  private def keysWithPrefix(prefix: String): Vector[String] = (database match {
+    case Some(db) => KeyValueStore.orThrow(db.scanKeys(key(prefix))).map(new String(_, UTF_8))
+    case None => memory.keysIterator.filter(_.startsWith(prefix)).toVector
+  }).sorted
   private def write(changes: Seq[KeyValueMutation]): Unit = database match {
     case Some(db) => KeyValueStore.orThrow(db.write(changes, WriteDurability.Synchronous))
     case None => memory = changes.foldLeft(memory) {
@@ -103,7 +108,8 @@ class MiningStatsStore(database: Option[KeyValueStore], identity: JsObject) {
       record.cursor.parentId == base.cursor.blockId, "mining block is not contiguous")
     require(record.cursor.timestamp > base.cursor.timestamp, "mining block timestamp did not increase")
     saveState(base.copy(cursor = record.cursor, totals = base.totals.include(record, 1)),
-      Vector(Put(key(blockKey(record.cursor.height)), encode(record))) ++ bucketChanges(record, 1))
+      Vector(Put(key(blockKey(record.cursor.height)), encode(record))) ++ bucketChanges(record, 1) ++
+        ledgerAdditions(record))
   }
 
   /** Removes one displaced block. The previous cursor remains valid even at the retention boundary. */
@@ -111,7 +117,7 @@ class MiningStatsStore(database: Option[KeyValueStore], identity: JsObject) {
     val base = current.get
     val record = requiredBlock(base.cursor.height)
     saveState(base.copy(cursor = record.previous, totals = base.totals.include(record, -1)),
-      Vector(Delete(key(blockKey(record.cursor.height)))) ++ bucketChanges(record, -1))
+      Vector(Delete(key(blockKey(record.cursor.height)))) ++ bucketChanges(record, -1) ++ ledgerRemovals(record))
   }
 
   /** Keep a rollback buffer even on a quiet/old chain; totals describe all retained records. */
@@ -122,7 +128,7 @@ class MiningStatsStore(database: Option[KeyValueStore], identity: JsObject) {
       val base = current.get
       val record = requiredBlock(base.firstHeight)
       saveState(base.copy(firstHeight = base.firstHeight + 1, totals = base.totals.include(record, -1)),
-        Vector(Delete(key(blockKey(base.firstHeight)))) ++ bucketChanges(record, -1))
+        Vector(Delete(key(blockKey(base.firstHeight)))) ++ bucketChanges(record, -1) ++ ledgerRemovals(record))
       removed += 1
     }
     removed
@@ -138,6 +144,46 @@ class MiningStatsStore(database: Option[KeyValueStore], identity: JsObject) {
       if (totals.amount("chain.blocks") == 0) Delete(key(name))
       else Put(key(name), encode(MiningBucket(start, width, totals)))
     }
+  }
+
+  /* ---- Local payout ledger ----
+     Indexes the block records by what a payments view asks of them: this client's payouts by
+     height, the rollups it has a claim in, and the fraud proofs it won. Each entry is written and
+     removed with the block that confirmed it, so rollback and pruning keep it exact. */
+
+  private def ledgerAdditions(record: MiningBlockRecord): Vector[KeyValueMutation] = {
+    val at = record.cursor
+    val rollups = record.activity.rollups
+    val submitted = rollups.filter(a => a.kind == "submission" && a.local).map(_.rollupNft).toSet
+    def isTracked(nft: String) = submitted.contains(nft) || keysWithPrefix(s"ledger/claim/$nft/").nonEmpty
+    record.payments.map(p => Put(key(PaymentLedger.paymentKey(p)), encode(p))) ++
+      rollups.filter(PaymentLedger.tracked(_, isTracked)).map(a =>
+        Put(key(PaymentLedger.claimKey(at.height, a)), encode(LedgerEvent(at.height, at.timestamp, a)))) ++
+      rollups.filter(a => a.kind == "fraudProof" && a.local).map(a =>
+        Put(key(PaymentLedger.bountyKey(at.height, a)), encode(LedgerEvent(at.height, at.timestamp, a))))
+  }
+
+  /** Every key the record could have written. Deleting one that was never written is harmless. */
+  private def ledgerRemovals(record: MiningBlockRecord): Vector[KeyValueMutation] = {
+    val height = record.cursor.height
+    record.payments.map(p => Delete(key(PaymentLedger.paymentKey(p)))) ++
+      record.activity.rollups.flatMap(a =>
+        Vector(Delete(key(PaymentLedger.claimKey(height, a))), Delete(key(PaymentLedger.bountyKey(height, a)))))
+  }
+
+  /** A page of payouts, newest first, with every open claim and bounty in the retained window. */
+  def ledger(offset: Int, limit: Int, sort: String = "paid", ascending: Boolean = false): PaymentLedgerPage = {
+    val base = current.getOrElse(throw new IllegalStateException("mining history is loading"))
+    val paymentKeys = keysWithPrefix("ledger/payment/")
+    val pageKeys = PaymentLedger.page(paymentKeys, offset, limit, sort, ascending)
+    val paid = paymentKeys.map(k => PaymentLedger.paymentKeyParts(k).nft).toSet
+    val openKeys = keysWithPrefix("ledger/claim/").filterNot(k => paid.contains(PaymentLedger.claimKeyNft(k)))
+    def read[A: Reads](name: String): A = decode[A](get(name).getOrElse(
+      throw new IllegalStateException(s"ledger entry $name disappeared during the read")))
+    PaymentLedgerPage("unverified", base.cursor, base.firstHeight,
+      pageKeys.map(read[MiningPaymentRecord]), offset, paymentKeys.size, sort, ascending,
+      PaymentLedger.claims(openKeys.map(read[LedgerEvent])),
+      keysWithPrefix("ledger/bounty/").reverse.map(k => PaymentLedger.bounty(read[LedgerEvent](k))))
   }
 
   /** Worker-only queries: explicit page/range caps, with a cursor identifying the consistent snapshot. */
