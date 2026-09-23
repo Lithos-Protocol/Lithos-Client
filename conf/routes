@@ -107,11 +107,8 @@ GET  /wallet/balances                           controllers.WalletApiController.
 
 GET /payments                 controllers.PaymentsApiController.getPayments()
 
-# An example controller showing a sample home page
-GET     /assets                                   controllers.Assets.at(path="/public", file="index.html")
+# Web panel and docs, a Docusaurus build in /public served at /assets. Page URLs resolve to their
+# index.html, so a refresh or a pasted link works as well as following one.
+GET     /assets                                   controllers.WebPanelController.page(file = "")
 GET     /                                         controllers.Default.redirect(to = "/assets")
-
-
-# Map static resources from the /public folder to the /assets URL path
-GET /assets/*file controllers.Assets.versioned(path="/public", file: Asset)
-GET /assets/docs/intro/*file controllers.Assets.versioned(path="/public", file: Asset)
+GET     /assets/*file                             controllers.WebPanelController.page(file: String)
