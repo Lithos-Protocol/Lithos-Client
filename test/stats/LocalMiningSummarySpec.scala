@@ -99,6 +99,48 @@ class LocalMiningSummarySpec extends AnyFlatSpec with Matchers {
       .hashesPerSecond shouldBe None
   }
 
+  "NISP status" should "hold with ten super shares in the window, until the tenth-newest ages out" in {
+    // The window is inclusive at both ends, so a share exactly `window` blocks back still counts.
+    val heights = Seq(1000, 998, 995, 990, 985, 980, 970, 960, 950, 940)
+    val status = NispStatus.of(heights, atHeight = 1000, window = 60)
+    status.held shouldBe true
+    status.superSharesInWindow shouldBe 10
+    status.validThroughHeight shouldBe Some(1000)
+    status.blocksRemaining shouldBe Some(0)
+    // One more block and the share at 940 falls out.
+    NispStatus.of(heights, atHeight = 1001, window = 60).held shouldBe false
+    NispStatus.of(heights, atHeight = 1001, window = 60).superSharesInWindow shouldBe 9
+  }
+
+  it should "measure how long a NISP lasts from the tenth-newest share, not the oldest" in {
+    val heights = Seq(1020, 1018, 1015, 1012, 1010, 1008, 1005, 1003, 1001, 1000)
+    val status = NispStatus.of(heights, atHeight = 1025, window = 60)
+    status.validThroughHeight shouldBe Some(1060)
+    status.blocksRemaining shouldBe Some(35)
+  }
+
+  it should "count what is in the window when there are not yet ten" in {
+    val status = NispStatus.of(Seq(1000, 950, 900), atHeight = 1000, window = 60)
+    status.held shouldBe false
+    status.superSharesInWindow shouldBe 2
+    status.validThroughHeight shouldBe None
+    status.required shouldBe 10
+  }
+
+  it should "measure from a share above a served job that has fallen behind" in {
+    NispStatus.of(Seq(1005), atHeight = 1000, window = 60).atHeight shouldBe 1005
+  }
+
+  it should "reach the summary only when a job gives it a height to measure from" in {
+    val observation = shares("s1", 2L, 0L, 1000L, "accepted" -> "1")
+      .copy(superShareHeights = Vector(1000, 999, 998, 997, 996, 995, 994, 993, 992, 991))
+    val producers = Map("shares" -> view(observation))
+    LocalMiningSummary.of(enabled = true, producers).nisp shouldBe None
+    val summary = LocalMiningSummary.of(enabled = true, producers, height = Some(1001))
+    summary.nisp.map(_.held) shouldBe Some(true)
+    summary.nisp.flatMap(_.validThroughHeight) shouldBe Some(1051)
+  }
+
   "The work window" should "keep one sample past its far edge as the anchor and drop older ones" in {
     val cache = new StatsCache(StatsConfig.Default)
     val window = StatsCache.WorkWindowMs

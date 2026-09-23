@@ -204,4 +204,13 @@ class MiningStatsStoreSpec extends AnyFlatSpec with Matchers {
     shortened.from shouldBe hour / 2
     MiningHistory.hashrate(history.copy(buckets = Vector.empty)).hashesPerSecond shouldBe None
   }
+
+  it should "report whole hashes per second when the work does not divide evenly" in {
+    // A fractional string read by an integer parser comes out as nothing, which blanked the rate.
+    val hour = MiningHistory.HourMs
+    val totals = MiningAccountingTotals(Map("lithos.blocks" -> "89", "lithos.difficultySum" -> "990588108800"))
+    val history = MiningBucketHistory(cursor(20).copy(timestamp = hour), Some(0), 0, hour, hour,
+      Vector(MiningBucket(0, hour, totals)), partial = false, status = "ready")
+    MiningHistory.hashrate(history).hashesPerSecond shouldBe Some("275163363")
+  }
 }

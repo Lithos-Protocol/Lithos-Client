@@ -177,7 +177,10 @@ class LithosJobManager(options: Options, statsCollector: Option[ActorRef] = None
             statistics.add("acceptedAssignedWork", assignedWork.getOrElse(msg.jobId, BigInt(0)))
           else statistics.add("acceptedBelowAdvertised")
           if (accepted.isBlock) statistics.add("blockCandidates")
-          if (accepted.isSuperShare) statistics.add("superShares")
+          if (accepted.isSuperShare) {
+            statistics.add("superShares")
+            statistics.superShare(accepted.height.toInt)
+          }
           if (validJobs.get(msg.jobId).exists(_.reducedShareMessages)) statistics.add("acceptedWithReducedReporting")
         case rejected: ShareRejected => statistics.add(s"rejected${rejected.id}")
       }

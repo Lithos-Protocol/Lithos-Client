@@ -13,7 +13,7 @@ object StatsCollector {
   /** Ordered snapshots recover missed notifications without acknowledgements on the mining path. */
   final case class StratumObserved(session: UUID, sequence: Long, observedAt: Long, observedNanos: Long,
                                     connectedConnections: Int, activeJob: Option[ActiveStratumJob],
-                                    stopped: Boolean = false)
+                                    stopped: Boolean = false, difficulty: Option[StratumDifficulty] = None)
 }
 
 class StatsCollector(cache: StatsCache, dexRefresh: Option[DexStatsRefresh], persistence: Option[StatsPersistence],
@@ -98,7 +98,8 @@ class StatsCollector(cache: StatsCache, dexRefresh: Option[DexStatsRefresh], per
       cache.publish(StratumStatsView(
         status = if (event.stopped) "stopped" else if (event.activeJob.isDefined) "active" else "waiting",
         observedAt = Some(event.observedAt), connectedConnections = event.connectedConnections,
-        activeJob = if (event.stopped) None else event.activeJob), event.observedNanos)
+        activeJob = if (event.stopped) None else event.activeJob,
+        difficulty = if (event.stopped) None else event.difficulty), event.observedNanos)
     }
   }
 }

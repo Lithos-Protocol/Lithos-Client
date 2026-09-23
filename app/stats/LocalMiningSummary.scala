@@ -2,6 +2,32 @@ package stats
 
 import play.api.libs.json.{Json, OWrites}
 
+/**
+ * Whether this client's recent super shares would make a NISP, and for how long.
+ *
+ * A NISP for a rollup whose period starts at height P takes `RequiredShares` distinct super shares
+ * from heights P - window through P. So with the tenth-newest at height h, one exists for every
+ * period start up to h + window, and none after it unless more are found.
+ */
+final case class NispStatus(held: Boolean, superSharesInWindow: Int, required: Int, windowBlocks: Int,
+                            atHeight: Int, validThroughHeight: Option[Int], blocksRemaining: Option[Int])
+
+object NispStatus {
+  /** Super shares a NISP carries. The contracts and the NISP store both fix it at ten. */
+  val RequiredShares: Int = 10
+
+  implicit val writes: OWrites[NispStatus] = Json.writes[NispStatus]
+
+  /** `heights` are super-share heights; `atHeight` is the height a rollup would start at now. */
+  def of(heights: Seq[Int], atHeight: Int, window: Int = lfsm.LFSMHelpers.NISP_WINDOW): NispStatus = {
+    // A share above the served job means that job is already behind; measure from the share.
+    val at = (atHeight +: heights).max
+    val inWindow = heights.filter(_ >= at - window).sorted(Ordering[Int].reverse).take(RequiredShares)
+    val through = inWindow.lift(RequiredShares - 1).map(_ + window)
+    NispStatus(through.isDefined, inWindow.size, RequiredShares, window, at, through, through.map(_ - at))
+  }
+}
+
 /** A single reading of cumulative share work, kept so a current rate can be differenced from it. */
 final case class WorkSample(session: String, observedAt: Long, work: BigInt, accepted: Long)
 
@@ -40,7 +66,8 @@ final case class LocalMiningSummary(status: String, enabled: Boolean,
                                     assignedWork: String = "0",
                                     solutionsAccepted: Long = 0L, solutionsRejected: Long = 0L,
                                     reducedReporting: Boolean = false,
-                                    rejections: Map[String, String] = Map.empty)
+                                    rejections: Map[String, String] = Map.empty,
+                                    nisp: Option[NispStatus] = None)
 
 /** One interval of local work, measured between two observations of the same producer session. */
 final case class LocalHashratePoint(start: Long, widthMs: Long, hashesPerSecond: String,
@@ -83,8 +110,9 @@ object LocalMiningSummary {
       }
     }
 
+  /** `height` is the height a rollup would start at now, when a job is being served. */
   def of(enabled: Boolean, producers: Map[String, LocalMiningActivityView],
-         samples: Vector[WorkSample] = Vector.empty): LocalMiningSummary = {
+         samples: Vector[WorkSample] = Vector.empty, height: Option[Int] = None): LocalMiningSummary = {
     val shares = producers.get("shares")
     val solutions = producers.get("solutions")
     if (shares.isEmpty && solutions.isEmpty)
@@ -108,7 +136,8 @@ object LocalMiningSummary {
           if (elapsed > 0) Some(counter(o, "superShares").toDouble * 3600000 / elapsed) else None,
         assignedWork = work.toString,
         reducedReporting = counter(o, "acceptedWithReducedReporting") > 0,
-        rejections = rejected)
+        rejections = rejected,
+        nisp = height.map(NispStatus.of(o.superShareHeights, _)))
     }.getOrElse(LocalMiningSummary(status, enabled))
 
     solutions.map(_.observation).fold(summary) { o =>

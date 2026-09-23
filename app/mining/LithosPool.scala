@@ -17,11 +17,11 @@ import scorex.crypto.hash.Blake2b256
 import scorex.utils.Ints
 import state.messages.StateFrameMessages.CheckBlock
 import stratum.BlockTemplate
-import stats.{ActiveStratumJob, BlockPackageView}
+import stats.{ActiveStratumJob, BlockPackageView, StratumDifficulty}
 import stats.StatsCollector.StratumObserved
 import stratum.data.{MiningCandidate, Options}
 import transactions.candidate.BlockTxMessages.CandidateTx
-import transactions.rollups.{CommitmentTransactions, DataBoxSource}
+import transactions.rollups.{CommitmentSchedule, CommitmentTransactions, DataBoxSource}
 import utils.Globals
 
 import java.util.UUID
@@ -73,6 +73,9 @@ class LithosPool(options: Options,
   private var candidateTimer: Option[Cancellable] = None
   private var tau = BigInt(options.tau)
   private var refreshingDifficulty = false
+  /** The commitment list as last read, for display; never consulted when choosing `tau`. */
+  private var schedule: Option[CommitmentSchedule] = None
+  private var readingCommitments = false
   private var tip: Option[ChainTip] = None
   private var protocolVersion = options.data.protocolVersion
   private var observing: Option[UUID] = None
@@ -121,6 +124,7 @@ class LithosPool(options: Options,
     diffTicker = Some(context.system.scheduler.scheduleWithFixedDelay(
       diffRefreshInterval.milliseconds, diffRefreshInterval.milliseconds, self, RefreshDifficulty))
     statsCollector.foreach { _ =>
+      readCommitments()
       publishStats()
       statsTicker = Some(context.system.scheduler.scheduleWithFixedDelay(
         statsRefreshIntervalMs.milliseconds, statsRefreshIntervalMs.milliseconds, self, PublishStats))
@@ -260,6 +264,13 @@ class LithosPool(options: Options,
       refreshingDifficulty = true
       val currentTau = tau
       run(backgroundEc)(commitments.committedTau(currentTau).get)(DifficultyRead(incarnation, _))
+      readCommitments()
+    case CommitmentsRead(id, result) if id == incarnation =>
+      readingCommitments = false
+      result match {
+        case Success(read) => schedule = Some(read)
+        case Failure(ex) => logger.debug(s"Could not read the commitment list for statistics: ${ex.getMessage}")
+      }
     case DifficultyRead(id, result) if id == incarnation =>
       refreshingDifficulty = false
       result match {
@@ -269,7 +280,7 @@ class LithosPool(options: Options,
       }
     case BackgroundDone(Failure(ex)) => logger.warn(s"Super-share worker unavailable: ${ex.getMessage}")
     case _: ChainObserved | _: CandidateFetched | _: CandidateExpired | _: SolutionSubmitted |
-         _: DifficultyRead | RefreshDifficulty | _: BackgroundDone => ()
+         _: DifficultyRead | _: CommitmentsRead | RefreshDifficulty | _: BackgroundDone => ()
   }
 
   /** Dispatch rejection is an ordinary completion, so saturation cannot restart the mailbox. */
@@ -522,8 +533,19 @@ class LithosPool(options: Options,
   private def publishStats(stopped: Boolean = false): Unit = statsCollector.foreach { collector =>
     collector.tell(solutionStatistics.snapshot(stopped), self)
     statsSequence += 1L
+    val difficulty = if (stopped) None else StratumDifficulty.of(tau, reducedShareMessages, forceConfigDiff,
+      schedule.flatMap(_.inForce), schedule.flatMap(_.pending), schedule.map(_.height))
     collector.tell(StratumObserved(incarnation, statsSequence, System.currentTimeMillis(), System.nanoTime(),
-      if (stopped) 0 else connections.size, if (stopped) None else activeStatsJob, stopped), self)
+      if (stopped) 0 else connections.size, if (stopped) None else activeStatsJob, stopped, difficulty), self)
+  }
+
+  /**
+   * Reads the commitment list for display. A separate read from the one that sets `tau`, so nothing
+   * about showing the commitments can move the difficulty the stratum serves.
+   */
+  private def readCommitments(): Unit = if (statsCollector.isDefined && !readingCommitments) {
+    readingCommitments = true
+    run(backgroundEc)(commitments.commitmentSchedule.get)(CommitmentsRead(incarnation, _))
   }
 
   private def enqueueSolution(accepted: ShareAccepted): Unit = {
@@ -596,6 +618,7 @@ object LithosPool {
                                  collateralId: Option[String], startedAt: Long)
   private case class SolutionSubmitted(id: UUID, result: Try[Boolean])
   private case class DifficultyRead(incarnation: UUID, result: Try[BigInt])
+  private case class CommitmentsRead(incarnation: UUID, result: Try[CommitmentSchedule])
   private case class BackgroundDone(result: Try[Unit])
 
   private def work(candidate: MiningCandidate): (String, String) = (Hex.toHexString(candidate.msg), candidate.pk)

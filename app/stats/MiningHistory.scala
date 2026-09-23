@@ -33,8 +33,9 @@ object MiningHistory {
     val samples = history.buckets.map(_.totals.amount("lithos.blocks")).sum
     val work = history.buckets.map(_.totals.amount("lithos.difficultySum")).sum
     require(samples.isValidLong, "hashrate sample count exceeds Long range")
-    val rate = if (until > from && samples > 0 && work > 0)
-      Some((BigDecimal(work) * 1000 / BigDecimal(until - from)).bigDecimal.stripTrailingZeros.toPlainString) else None
+    // Whole hashes per second, like every other rate the API serves. A fraction is meaningless on an
+    // estimate this noisy, and an integer parser reading one gets nothing at all.
+    val rate = if (until > from && samples > 0 && work > 0) Some((work * 1000 / (until - from)).toString) else None
     val status = if (rate.isEmpty) "insufficient-data" else if (samples < 20) "sparse" else "estimated"
     LithosHashrateEstimate(status, history.status, history.source, from, math.max(from, until), samples.toLong,
       work.toString, rate, if (samples > 0) Some(1.0 / math.sqrt(samples.toDouble)) else None, history.partial)

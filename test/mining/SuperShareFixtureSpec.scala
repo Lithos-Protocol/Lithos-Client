@@ -151,9 +151,9 @@ class SuperShareFixtureSpec extends TestKit(ActorSystem("super-share-fixture", S
 
   // ─── work accounting ──────────────────────────────────────────────────────
 
-  /** One job on a manager that reports statistics; submits the shares and returns its counters. */
-  private def countedWork(jobTau: BigInteger, reduced: Boolean, jobB: BigInteger,
-                          shares: Seq[(Array[Byte], Array[Byte])]): Map[String, String] = {
+  /** One job on a manager that reports statistics; submits the shares and returns its observation. */
+  private def observed(jobTau: BigInteger, reduced: Boolean, jobB: BigInteger,
+                       shares: Seq[(Array[Byte], Array[Byte])]): LocalMiningObservation = {
     val data = new Data
     data.protocolVersion = 3
     val opts = new Options(2, 1L, 60000L, 1000L, "http://127.0.0.1:9052/", jobTau, data)
@@ -173,8 +173,12 @@ class SuperShareFixtureSpec extends TestKit(ActorSystem("super-share-fixture", S
     collector.fishForMessage() {
       case o: LocalMiningObservation => o.counters.get("accepted").contains(shares.size.toString)
       case _ => false
-    }.asInstanceOf[LocalMiningObservation].counters
+    }.asInstanceOf[LocalMiningObservation]
   }
+
+  private def countedWork(jobTau: BigInteger, reduced: Boolean, jobB: BigInteger,
+                          shares: Seq[(Array[Byte], Array[Byte])]): Map[String, String] =
+    observed(jobTau, reduced, jobB, shares).counters
 
   "Reduced reporting" should "credit a share with the super-share threshold's work, not tau's" in {
     // The miner is only ever sent tau / NISP_COEFFICIENT, so each share it returns stands for that
@@ -189,6 +193,11 @@ class SuperShareFixtureSpec extends TestKit(ActorSystem("super-share-fixture", S
     credited should be >= (LFSMHelpers.TARGET_MAX_LITHOS / BigInt(tau)) * (LFSMHelpers.NISP_COEFFICIENT - 1)
     counters.get("acceptedBelowAdvertised") shouldBe None
     counters("acceptedWithReducedReporting") shouldEqual "1"
+  }
+
+  it should "record the super share's height for the NISP window" in {
+    // The NISP store keys a super share by its header height, which is the job's; so must this.
+    observed(tau, reduced = true, b, Seq(extraNonce1 -> extraNonce2)).superShareHeights shouldBe Vector(height.toInt)
   }
 
   it should "leave the same share at tau's work when the job advertises tau" in {

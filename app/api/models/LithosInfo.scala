@@ -15,6 +15,7 @@ import play.api.libs.json._
   * @param minerDictionaryReason Why the Miner Dictionary is unusable, when it is not
   * @param mempoolAvailable Whether unconfirmed projections are available
   * @param mempoolReason Why unconfirmed projections are unavailable, when they are not
+  * @param network The Ergo network this client is configured for, MAINNET or TESTNET
   */
 case class LithosInfo(
   numPoolBlocks: Int,
@@ -26,7 +27,8 @@ case class LithosInfo(
   minerDictionaryAvailable: Boolean,
   minerDictionaryReason: Option[String],
   mempoolAvailable: Boolean,
-  mempoolReason: Option[String]
+  mempoolReason: Option[String],
+  network: String
 )
 
 object LithosInfo {

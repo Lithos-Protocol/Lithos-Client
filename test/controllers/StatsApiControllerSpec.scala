@@ -2,6 +2,7 @@ package controllers
 
 import configs.StatsConfig
 import org.bouncycastle.util.encoders.Hex
+import org.mockito.ArgumentMatchers.anyLong
 import org.mockito.Mockito.{never, verify, verifyNoInteractions, when}
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
@@ -122,6 +123,10 @@ class StatsApiControllerSpec extends AnyFlatSpec with Matchers with MockitoSugar
       Map("shares" -> LocalMiningActivityView("ready", observation, deduplicationComplete = true)))
     when(cache.recentWork).thenReturn(Vector(
       WorkSample("session-7", 30000L, BigInt(300000), 30L), WorkSample("session-7", 60000L, BigInt(1200000), 90L)))
+    // The job being served is the height a rollup would start at, which the NISP window counts back from.
+    val job = ActiveStratumJob("7", 1000, "aa" * 32, "bb" * 32, "publication", 0L, "genesis", None)
+    when(cache.snapshot(anyLong())).thenReturn(
+      StatsView(enabled = true, LocalStatsView(StratumStatsView("active", activeJob = Some(job)))))
     val result = withMining(mock[MiningStatsRefresh], cache).getLocalMiningSummary()
       .apply(FakeRequest(GET, "/stats"))
     status(result) shouldBe OK
@@ -134,6 +139,8 @@ class StatsApiControllerSpec extends AnyFlatSpec with Matchers with MockitoSugar
     (json \ "rejectedShares").as[Long] shouldBe 2L
     (json \ "superShares").as[Long] shouldBe 6L
     (json \ "reducedReporting").as[Boolean] shouldBe false
+    (json \ "nisp" \ "atHeight").as[Int] shouldBe 1000
+    (json \ "nisp" \ "held").as[Boolean] shouldBe false
     // The session identifier and the fraud list stay behind the api key.
     (json \ "session").toOption shouldBe None
     (json \ "fraud").toOption shouldBe None
@@ -182,7 +189,7 @@ class StatsApiControllerSpec extends AnyFlatSpec with Matchers with MockitoSugar
     val mining = mock[MiningStatsRefresh]
     val day = MiningHistory.DayMs
     val estimate = LithosHashrateEstimate("sparse", "ready", source, 120000L, hour, 2L,
-      "100000000000000000000", Some("28735632183908045.977"), Some(1 / math.sqrt(2)), partial = true)
+      "100000000000000000000", Some("28735632183908045"), Some(1 / math.sqrt(2)), partial = true)
     when(mining.hashrate(0L, day, day)).thenReturn(Future.successful(estimate))
     val result = call(withMining(mining).getMiningHashrate(), s"?from=0&until=$day&interval=day")
     status(result) shouldBe OK

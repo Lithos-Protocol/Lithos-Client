@@ -47,8 +47,37 @@ final case class ActiveStratumJob(jobId: String, height: Int, parentId: String, 
                                   publicationId: String, publishedAt: Long, mode: String,
                                   blockPackage: Option[BlockPackageView])
 
+/**
+ * The difficulties this stratum works with, as scores: the number a `diff` setting names.
+ *
+ * `served` is what jobs are built on — the commitment in force, or the config when it is forced.
+ * `advertised` is what miners are sent, which under reduced reporting is `superShare`. `committed`
+ * is the score NISPs are judged against now; `pending` is a newer commitment still waiting out the
+ * window, in force from `pendingFromHeight`.
+ */
+final case class StratumDifficulty(served: String, advertised: String, superShare: String,
+                                   reducedReporting: Boolean, forcedConfig: Boolean,
+                                   committed: Option[String] = None, pending: Option[String] = None,
+                                   pendingFromHeight: Option[Int] = None, checkedHeight: Option[Int] = None)
+
+object StratumDifficulty {
+  import lfsm.LFSMHelpers.{NISP_COEFFICIENT, TARGET_MAX_LITHOS, convertTauOrScore}
+
+  /** Scores derived from the served tau exactly as a job derives its thresholds from it. */
+  def of(tau: BigInt, reduced: Boolean, forced: Boolean, committed: Option[Long] = None,
+         pending: Option[(Long, Int)] = None, checkedHeight: Option[Int] = None): Option[StratumDifficulty] =
+    if (tau <= 0) None
+    else {
+      def score(threshold: BigInt): String = (TARGET_MAX_LITHOS / threshold.max(BigInt(1))).toString
+      val superShare = convertTauOrScore(convertTauOrScore(tau)) / NISP_COEFFICIENT
+      Some(StratumDifficulty(score(tau), score(if (reduced) tau / NISP_COEFFICIENT else tau), score(superShare),
+        reduced, forced, committed.map(_.toString), pending.map(_._1.toString), pending.map(_._2), checkedHeight))
+    }
+}
+
 final case class StratumStatsView(status: String = "waiting", observedAt: Option[Long] = None,
-                                  connectedConnections: Int = 0, activeJob: Option[ActiveStratumJob] = None)
+                                  connectedConnections: Int = 0, activeJob: Option[ActiveStratumJob] = None,
+                                  difficulty: Option[StratumDifficulty] = None)
 final case class LocalStatsView(stratum: StratumStatsView)
 final case class StatsView(enabled: Boolean, local: LocalStatsView, dex: DexStatsView = DexStatsView(),
                             storage: StatsStorageView = StatsStorageView(), mining: MiningStatsView = MiningStatsView())
@@ -78,6 +107,7 @@ object StatsView {
       "packageMaxCost" -> pkg.packageMaxCost.map(_.toString))
   }
   implicit val jobWrites: OWrites[ActiveStratumJob] = Json.writes[ActiveStratumJob]
+  implicit val difficultyWrites: OWrites[StratumDifficulty] = Json.writes[StratumDifficulty]
   implicit val stratumWrites: OWrites[StratumStatsView] = Json.writes[StratumStatsView]
   implicit val localWrites: OWrites[LocalStatsView] = Json.writes[LocalStatsView]
   implicit val writes: OWrites[StatsView] = Json.writes[StatsView]

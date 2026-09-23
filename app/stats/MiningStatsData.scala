@@ -62,7 +62,9 @@ object MiningStatsData {
   implicit val accountingFormat: OFormat[MiningAccountingTotals] = Json.format[MiningAccountingTotals]
   implicit val bucketFormat: OFormat[MiningBucket] = Json.format[MiningBucket]
   implicit val fraudObservationFormat: OFormat[FraudObservation] = Json.format[FraudObservation]
-  implicit val localObservationFormat: OFormat[LocalMiningObservation] = Json.format[LocalMiningObservation]
+  // Defaults fill fields absent from observations persisted before they existed.
+  implicit val localObservationFormat: OFormat[LocalMiningObservation] =
+    Json.using[Json.WithDefaultValues].format[LocalMiningObservation]
   implicit val recordFormat: OFormat[MiningBlockRecord] = Json.format[MiningBlockRecord]
   implicit val totalsFormat: OFormat[MiningTotals] = Json.format[MiningTotals]
   implicit val stateFormat: OFormat[MiningLedgerState] = Json.format[MiningLedgerState]

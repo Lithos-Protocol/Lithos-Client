@@ -646,6 +646,8 @@ paths:
         `sessionHashesPerSecond` averages the whole session instead, so it reads low if the workers
         started after the client did.
 
+        `nisp` says whether the recent super shares make a NISP, and until which height.
+
         Counters restart whenever the producer does, and `sessionStartedAt` is when that happened —
         the totals here are not lifetime figures.
       responses:
@@ -2875,7 +2877,8 @@ components:
           $ref: '#/components/schemas/StatsInteger'
         hashesPerSecond:
           type: string
-          description: The estimate, as a decimal string. Left out rather than reported as zero when there is not enough data.
+          pattern: '^[0-9]+$'
+          description: The estimate in whole hashes per second. Left out rather than reported as zero when there is not enough data.
         relativeSamplingError:
           type: number
           format: double
@@ -3053,6 +3056,12 @@ components:
           description: Recent fraud targets, capped at 100. Always empty for the share and solution producers.
           items:
             $ref: '#/components/schemas/FraudObservation'
+        superShareHeights:
+          type: array
+          maxItems: 10
+          description: Heights of the ten highest super shares this session, highest first. Only the share producer fills it.
+          items:
+            type: integer
         stopped:
           type: boolean
           description: Whether this is the producer's last observation before it stopped.
@@ -3390,6 +3399,39 @@ components:
           additionalProperties:
             $ref: '#/components/schemas/StatsInteger'
           description: Count per rejection code, keyed as `rejected<code>`.
+        nisp:
+          $ref: '#/components/schemas/NispStatus'
+    NispStatus:
+      type: object
+      description: >-
+        Whether this client's recent super shares make a NISP. A NISP for a rollup starting at height P
+        takes 10 super shares from heights P - `windowBlocks` through P, so one holds until the
+        tenth-newest super share is `windowBlocks` behind. Counted from super shares found since the
+        share producer last started; ones from before a client restart are not included here. Absent
+        while no Stratum job is being served.
+      required: [held, superSharesInWindow, required, windowBlocks, atHeight]
+      properties:
+        held:
+          type: boolean
+          description: Whether a NISP could be submitted for a rollup starting at `atHeight`.
+        superSharesInWindow:
+          type: integer
+          description: Super shares inside the window, counted up to `required`.
+        required:
+          type: integer
+          description: Super shares a NISP carries.
+        windowBlocks:
+          type: integer
+          description: How many blocks back from a rollup's start its super shares may come from.
+        atHeight:
+          type: integer
+          description: The height a rollup would start at now, which the window is measured from.
+        validThroughHeight:
+          type: integer
+          description: The last rollup start height this NISP covers. Absent when none is held.
+        blocksRemaining:
+          type: integer
+          description: Blocks from `atHeight` until `validThroughHeight`. Absent when none is held.
     LocalHashratePoint:
       type: object
       required: [start, widthMs, hashesPerSecond, acceptedShares, superShares, reducedReporting]
@@ -3531,6 +3573,47 @@ components:
           description: Open Stratum connections, not unique miners.
         activeJob:
           $ref: '#/components/schemas/ActiveStratumJob'
+        difficulty:
+          $ref: '#/components/schemas/StratumDifficulty'
+    StratumDifficulty:
+      type: object
+      description: >-
+        The difficulties this stratum works with, each as a score — the number a `diff` setting names,
+        as an exact decimal string. The configured `diff` is on `/mining`.
+      required: [served, advertised, superShare, reducedReporting, forcedConfig]
+      properties:
+        served:
+          type: string
+          pattern: '^[0-9]+$'
+          description: What jobs are built on. The commitment in force, or the config diff when `forcedConfig` is true.
+        advertised:
+          type: string
+          pattern: '^[0-9]+$'
+          description: What mining software is sent. Equals `superShare` under reduced reporting, otherwise `served`.
+        superShare:
+          type: string
+          pattern: '^[0-9]+$'
+          description: The difficulty a share must clear to count toward a NISP, 10,000 times `served`.
+        reducedReporting:
+          type: boolean
+          description: Whether miners are sent the super-share difficulty and so send only super shares.
+        forcedConfig:
+          type: boolean
+          description: Whether `forceConfigDiff` makes the stratum serve the config diff instead of the commitment.
+        committed:
+          type: string
+          pattern: '^[0-9]+$'
+          description: The committed score NISPs are judged against now. Absent until a commitment is in force or before the first read.
+        pending:
+          type: string
+          pattern: '^[0-9]+$'
+          description: A newer commitment still waiting out the NISP window. Absent when there is none.
+        pendingFromHeight:
+          type: integer
+          description: The height `pending` takes effect at.
+        checkedHeight:
+          type: integer
+          description: The chain height the commitments were last read at.
     ActiveStratumJob:
       type: object
       required: [jobId, height, parentId, workMessage, publicationId, publishedAt, mode]
@@ -3776,7 +3859,13 @@ components:
         - status
         - minerDictionaryAvailable
         - mempoolAvailable
+        - network
       properties:
+        network:
+          type: string
+          enum: [MAINNET, TESTNET]
+          description: The Ergo network this client is configured for.
+          example: MAINNET
         numPoolBlocks:
           type: integer
           format: int32

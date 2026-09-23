@@ -1,14 +1,17 @@
 package api
 
+import configs.NodeContext
 import models.ApiError
 import models.LithosInfo
 import play.api.cache.SyncCacheApi
 import utils.Globals
 
+import javax.inject.Inject
+
 /**
   * Provides a default implementation for [[InfoApi]].
   */
-class InfoApiImpl extends InfoApi {
+class InfoApiImpl @Inject()(node: NodeContext) extends InfoApi {
   /**
     * @inheritdoc
     */
@@ -24,6 +27,7 @@ class InfoApiImpl extends InfoApi {
       minerDictionaryAvailable = view.minerDictionary.available,
       minerDictionaryReason = view.minerDictionary.reason,
       mempoolAvailable = view.mempool.available,
-      mempoolReason = view.mempool.reason)
+      mempoolReason = view.mempool.reason,
+      network = node.getNetwork.name())
   }
 }

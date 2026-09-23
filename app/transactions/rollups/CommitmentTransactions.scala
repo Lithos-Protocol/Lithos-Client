@@ -89,6 +89,10 @@ class CommitmentTransactions(nodeContext: NodeContext, dataBoxes: DataBoxSource,
   def commitmentForNISP(height: Int): Try[Long] =
     Try(client.execute(ctx => dataBox(ctx).flatMap(box => inForceAt(commitments(box), height)))).flatten
 
+  /** The whole commitment list and the height it was read at, for display. */
+  def commitmentSchedule: Try[CommitmentSchedule] =
+    Try(client.execute(ctx => dataBox(ctx).map(box => CommitmentSchedule(ctx.getHeight, commitments(box).toVector)))).flatten
+
   /**
    * The tau this miner should hand its rigs, given the commitment in force.
    *
@@ -346,4 +350,19 @@ object DataBoxSource {
   val Stored: DataBoxSource = new DataBoxSource {
     override def getDataBoxToken: Option[ErgoId] = Globals.mdDB.getDataBoxToken
   }
+}
+
+/**
+ * This miner's commitments as read at one height, newest first. Mirrors the rule the NISP readers
+ * above apply, as values rather than failures, because a display wants "none yet" to show as such.
+ */
+final case class CommitmentSchedule(height: Int, entries: Vector[(Int, Long)]) {
+  private def aged: Boolean = entries.headOption.exists(e => height - e._1 >= LFSMHelpers.NISP_WINDOW)
+
+  /** The score NISPs are judged against now. None until any commitment has aged past the window. */
+  def inForce: Option[Long] = if (aged) entries.headOption.map(_._2) else entries.lift(1).map(_._2)
+
+  /** A newer commitment still waiting out the window, with the height it takes effect at. */
+  def pending: Option[(Long, Int)] =
+    entries.headOption.filterNot(_ => aged).map(e => (e._2, e._1 + LFSMHelpers.NISP_WINDOW))
 }

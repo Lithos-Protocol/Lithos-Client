@@ -239,7 +239,8 @@ class MiningStatsStore(database: Option[KeyValueStore], identity: JsObject) {
   /** Sampled local observations are not canonical contributions and are never rolled back with a block. */
   def saveLocal(observations: Iterable[LocalMiningObservation]): Unit = observations.foreach { observation =>
     require(LocalMiningStats.Kinds.contains(observation.kind) && observation.counters.size <= 32 &&
-      observation.fraud.size <= 100 && observation.counters.values.forall(v => BigInt(v) >= 0),
+      observation.fraud.size <= 100 && observation.superShareHeights.size <= NispStatus.RequiredShares &&
+      observation.counters.values.forall(v => BigInt(v) >= 0),
       "invalid local statistics observation")
     val latestKey = s"local/latest/${observation.kind}"
     val previous = get(latestKey).map(decode[LocalMiningObservation])

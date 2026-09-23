@@ -247,6 +247,8 @@ class MiningStatsRefresh(settings: MiningStatsConfig, persistent: Boolean, start
       MiningStatsRefresh.requireSameChain(source.header(at.height) == at,
         "chain changed during mining statistics read")
       db.append(record)
+      if(record.cursor.height % 1000 == 0)
+        logger.info(s"Chain stats index caught up to block [${record.cursor.height} / ${heights.usable}]")
       work += 1
     }
     if (matches && settings.pruningEnabled) db.prune(cutoff, settings.blocksPerRefresh, rollbackBlocks = 256)

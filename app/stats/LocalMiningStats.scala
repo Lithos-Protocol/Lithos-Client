@@ -7,7 +7,8 @@ final case class FraudObservation(rollupBlockId: String, minerHash: String, proo
 final case class FraudSubmissionObserved(rollupBlockId: String, minerHash: String, proofContractHash: String, transactionId: String)
 final case class LocalMiningObservation(kind: String, session: String, sequence: Long,
                                            startedAt: Long, observedAt: Long, counters: Map[String, String],
-                                           fraud: Vector[FraudObservation] = Vector.empty, stopped: Boolean = false)
+                                           fraud: Vector[FraudObservation] = Vector.empty, stopped: Boolean = false,
+                                           superShareHeights: Vector[Int] = Vector.empty)
 final case class LocalMiningActivityView(status: String, observation: LocalMiningObservation,
                                             deduplicationComplete: Boolean)
 
@@ -19,9 +20,14 @@ final class LocalMiningStats(val kind: String) {
   private var sequence = 0L
   private var counters = Map.empty[String, BigInt]
   private var discoveries = Vector.empty[FraudObservation]
+  private var superShareHeights = Vector.empty[Int]
 
   def add(name: String, amount: BigInt = BigInt(1)): Unit =
     counters += name -> (counters.getOrElse(name, BigInt(0)) + amount)
+
+  /** Keeps the highest super-share heights, newest first. A NISP never uses more than these. */
+  def superShare(height: Int): Unit =
+    superShareHeights = (height +: superShareHeights).sorted(Ordering[Int].reverse).take(NispStatus.RequiredShares)
 
   def found(rollup: String, miner: String, proof: String): Unit = {
     if (!discoveries.exists(f => f.rollupBlockId == rollup && f.minerHash == miner && f.proofContractHash == proof)) {
@@ -49,7 +55,7 @@ final class LocalMiningStats(val kind: String) {
   def snapshot(stopped: Boolean = false): LocalMiningObservation = {
     sequence += 1
     LocalMiningObservation(kind, session, sequence, started, System.currentTimeMillis(),
-      counters.map { case (name, value) => name -> value.toString }, discoveries, stopped)
+      counters.map { case (name, value) => name -> value.toString }, discoveries, stopped, superShareHeights)
   }
 }
 
