@@ -51,12 +51,12 @@ final case class ActiveStratumJob(jobId: String, height: Int, parentId: String, 
  * The difficulties this stratum works with, as scores: the number a `diff` setting names.
  *
  * `served` is what jobs are built on — the commitment in force, or the config when it is forced.
- * `advertised` is what miners are sent, which under reduced reporting is `superShare`. `committed`
- * is the score NISPs are judged against now; `pending` is a newer commitment still waiting out the
- * window, in force from `pendingFromHeight`.
+ * `advertised` is what miners are sent: `served` times `reductionMultiplier` under reduced reporting,
+ * which is `superShare` at a multiplier of 10000. `committed` is the score NISPs are judged against
+ * now; `pending` is a newer commitment still waiting out the window, in force from `pendingFromHeight`.
  */
 final case class StratumDifficulty(served: String, advertised: String, superShare: String,
-                                   reducedReporting: Boolean, forcedConfig: Boolean,
+                                   reducedReporting: Boolean, reductionMultiplier: Int, forcedConfig: Boolean,
                                    committed: Option[String] = None, pending: Option[String] = None,
                                    pendingFromHeight: Option[Int] = None, checkedHeight: Option[Int] = None)
 
@@ -64,14 +64,15 @@ object StratumDifficulty {
   import lfsm.LFSMHelpers.{NISP_COEFFICIENT, TARGET_MAX_LITHOS, convertTauOrScore}
 
   /** Scores derived from the served tau exactly as a job derives its thresholds from it. */
-  def of(tau: BigInt, reduced: Boolean, forced: Boolean, committed: Option[Long] = None,
+  def of(tau: BigInt, reduced: Boolean, multiplier: Int, forced: Boolean, committed: Option[Long] = None,
          pending: Option[(Long, Int)] = None, checkedHeight: Option[Int] = None): Option[StratumDifficulty] =
     if (tau <= 0) None
     else {
       def score(threshold: BigInt): String = (TARGET_MAX_LITHOS / threshold.max(BigInt(1))).toString
       val superShare = convertTauOrScore(convertTauOrScore(tau)) / NISP_COEFFICIENT
-      Some(StratumDifficulty(score(tau), score(if (reduced) tau / NISP_COEFFICIENT else tau), score(superShare),
-        reduced, forced, committed.map(_.toString), pending.map(_._1.toString), pending.map(_._2), checkedHeight))
+      Some(StratumDifficulty(score(tau), score(if (reduced) tau / multiplier else tau), score(superShare),
+        reduced, multiplier, forced, committed.map(_.toString), pending.map(_._1.toString), pending.map(_._2),
+        checkedHeight))
     }
 }
 

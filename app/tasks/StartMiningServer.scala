@@ -83,11 +83,11 @@ class StartMiningServer @Inject()(system: ActorSystem, config: Configuration,
 
 
         if (stratumParams.reduceShareMessages) {
-          // Must be the coefficient the job itself advertises, or this banner reports a difficulty
+          // Must be the multiplier the job itself advertises, or this banner reports a difficulty
           // no miner is ever served.
-          val coefficient = LFSMHelpers.NISP_COEFFICIENT
-          val displayTau = t.divide(BigInteger.valueOf(coefficient))
-          logger.info(s"Reduced share messages enabled: stratum diff is ${coefficient}x real diff")
+          val multiplier = stratumParams.reductionMultiplier
+          val displayTau = t.divide(BigInteger.valueOf(multiplier))
+          logger.info(s"Reduced share messages enabled: stratum diff is ${multiplier}x real diff")
           logger.info(s"Stratum tau: $displayTau (score: ${LFSMHelpers.convertTauOrScore(displayTau)})")
         }
         logger.info(s"Using tau $t (score: ${LFSMHelpers.convertTauOrScore(t)}) for NISPs")
@@ -118,6 +118,7 @@ class StartMiningServer @Inject()(system: ActorSystem, config: Configuration,
           prover          = nodeConfig.getNodeWallet,
           apiKey          = nodeConfig.getNodeKey,
           reducedShareMessages = stratumParams.reduceShareMessages,
+          reductionMultiplier = stratumParams.reductionMultiplier,
           nispDB          = Globals.nispDB,
           stateFrame      = stateFrame,
           forceConfigDiff = stratumParams.forceConfigDifficulty,

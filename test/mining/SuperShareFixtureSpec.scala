@@ -153,7 +153,8 @@ class SuperShareFixtureSpec extends TestKit(ActorSystem("super-share-fixture", S
 
   /** One job on a manager that reports statistics; submits the shares and returns its observation. */
   private def observed(jobTau: BigInteger, reduced: Boolean, jobB: BigInteger,
-                       shares: Seq[(Array[Byte], Array[Byte])]): LocalMiningObservation = {
+                       shares: Seq[(Array[Byte], Array[Byte])],
+                       multiplier: Int = LFSMHelpers.NISP_COEFFICIENT): LocalMiningObservation = {
     val data = new Data
     data.protocolVersion = 3
     val opts = new Options(2, 1L, 60000L, 1000L, "http://127.0.0.1:9052/", jobTau, data)
@@ -163,7 +164,7 @@ class SuperShareFixtureSpec extends TestKit(ActorSystem("super-share-fixture", S
     val probe = TestProbe()
 
     probe.send(mgr, ProcessTemplate(new MiningCandidate(msg, height, 3, jobB, "02" * 33, null, collateralData),
-      jobTau, true, reducedShareMessages = reduced, mustPublish = true))
+      jobTau, true, reducedShareMessages = reduced, reductionMultiplier = multiplier, mustPublish = true))
     probe.expectMsg(true)
     val jobId = parent.expectMsgType[NewJobAvailable].template.jobId
     shares.foreach { case (en1, en2) =>
@@ -177,8 +178,13 @@ class SuperShareFixtureSpec extends TestKit(ActorSystem("super-share-fixture", S
   }
 
   private def countedWork(jobTau: BigInteger, reduced: Boolean, jobB: BigInteger,
-                          shares: Seq[(Array[Byte], Array[Byte])]): Map[String, String] =
-    observed(jobTau, reduced, jobB, shares).counters
+                          shares: Seq[(Array[Byte], Array[Byte])],
+                          multiplier: Int = LFSMHelpers.NISP_COEFFICIENT): Map[String, String] =
+    observed(jobTau, reduced, jobB, shares, multiplier).counters
+
+  private def hit(en1: Array[Byte], en2: Array[Byte]): BigInteger =
+    Autolykos2PowValidation
+      .hitForVersion2ForMessageWithChecks(32, msg, en1 ++ en2, intBytes(height.toInt), n).bigInteger
 
   "Reduced reporting" should "credit a share with the super-share threshold's work, not tau's" in {
     // The miner is only ever sent tau / NISP_COEFFICIENT, so each share it returns stands for that
@@ -212,14 +218,45 @@ class SuperShareFixtureSpec extends TestKit(ActorSystem("super-share-fixture", S
     val advertised = wide.divide(BigInteger.valueOf(LFSMHelpers.NISP_COEFFICIENT))
     val shares = (1 to 4).map(i => extraNonce1 -> Array[Byte](0, 0, 0, 0, 0, i.toByte))
     shares.foreach { case (en1, en2) =>
-      val hit = Autolykos2PowValidation
-        .hitForVersion2ForMessageWithChecks(32, msg, en1 ++ en2, intBytes(height.toInt), n).bigInteger
       withClue(s"nonce ${Hex.toHexString(en1 ++ en2)} must miss the advertised threshold: ") {
-        hit.compareTo(advertised) should be > 0
+        hit(en1, en2).compareTo(advertised) should be > 0
       }
     }
     val counters = countedWork(wide, reduced = true, BigInteger.ONE, shares)
     counters("acceptedBelowAdvertised") shouldEqual "4"
     counters.get("acceptedAssignedWork") shouldBe None
+  }
+
+  "An intermediate reduction multiplier" should "credit the super share at the reduced threshold's work" in {
+    // Below 10000 the miner is sent an easier threshold than a super share, so the captured share
+    // still clears it, is credited that threshold's work, and still reaches the NISP window.
+    val advertised = BigInt(tau) / 100
+    val observation = observed(tau, reduced = true, b, Seq(extraNonce1 -> extraNonce2), multiplier = 100)
+    BigInt(observation.counters("acceptedAssignedWork")) shouldEqual LFSMHelpers.TARGET_MAX_LITHOS / advertised
+    observation.counters.get("acceptedBelowAdvertised") shouldBe None
+    observation.counters("superShares") shouldEqual "1"
+    observation.superShareHeights shouldBe Vector(height.toInt)
+  }
+
+  it should "credit a share between its threshold and the super-share one as ordinary work" in {
+    // The share traffic a multiplier under 10000 adds: accepted and credited in full, never a NISP share.
+    val wide = new BigInteger("f" * 64, 16)
+    val job = new BlockTemplate("1a", new MiningCandidate(msg, height, 3, BigInteger.ONE, "02" * 33, null,
+      collateralData), wide, true, true, 10)
+    val between = (1 to 2000).iterator
+      .map(i => extraNonce1 -> java.nio.ByteBuffer.allocate(8).putLong(i.toLong).array().drop(2))
+      .filter { case (en1, en2) =>
+        val h = hit(en1, en2)
+        h.compareTo(job.assignedThreshold) <= 0 && h.compareTo(job.superShareThreshold) > 0
+      }
+      .take(2).toSeq
+    withClue("about one nonce in ten lands between the two thresholds: ") { between should have size 2 }
+
+    val observation = observed(wide, reduced = true, BigInteger.ONE, between, multiplier = 10)
+    BigInt(observation.counters("acceptedAssignedWork")) shouldEqual
+      (LFSMHelpers.TARGET_MAX_LITHOS / BigInt(job.assignedThreshold)) * 2
+    observation.counters.get("acceptedBelowAdvertised") shouldBe None
+    observation.counters.get("superShares") shouldBe None
+    observation.superShareHeights shouldBe empty
   }
 }

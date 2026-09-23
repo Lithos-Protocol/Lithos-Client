@@ -141,6 +141,11 @@ object Configs {
     v.range("stratum.connectionTimeout", v.intReq("stratum.connectionTimeout"), 1000, 3600000, "ms")
     v.range("stratum.blockRefreshInterval", v.intReq("stratum.blockRefreshInterval"), 100, 600000, "ms")
     v.boolReq("stratum.reduceShareMessages")
+    v.int("stratum.reductionMultiplier").foreach { m =>
+      if (!StratumConfig.ReductionMultipliers.contains(m))
+        v.problem("stratum.reductionMultiplier",
+          s"$m is not one of ${StratumConfig.ReductionMultipliers.mkString(", ")}")
+    }
     v.range("stratum.diffRefreshInterval", v.intReq("stratum.diffRefreshInterval"), 1000, 3600000, "ms")
     v.range("stratum.rotateExtraNonceInterval", v.int("stratum.rotateExtraNonceInterval"), 0, 3600000,
       "ms without work before extraNonce rotation; 0 disables it")

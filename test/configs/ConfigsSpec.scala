@@ -25,6 +25,25 @@ class ConfigsSpec extends AnyFlatSpec with Matchers {
     thrown.getMessage should include("stratum.candidate.minCandidateChangeRevenue")
   }
 
+  it should "accept only the listed reduction multipliers" in {
+    def withMultiplier(m: Int): Configuration = Configuration(
+      ConfigFactory.parseString(s"stratum.reductionMultiplier = $m").withFallback(shipped.underlying).resolve())
+    StratumConfig.ReductionMultipliers.foreach { m =>
+      withClue(s"multiplier $m: ")(noException should be thrownBy Configs.validateAll(withMultiplier(m)))
+    }
+    Seq(0, 1, 50, 100000).foreach { m =>
+      val thrown = the[ConfigValidationException] thrownBy Configs.validateAll(withMultiplier(m))
+      thrown.getMessage should include("stratum.reductionMultiplier")
+    }
+  }
+
+  it should "never allow a reduction multiplier above the super-share coefficient" in {
+    // Above it the advertised threshold is harder than a super share, and the miner never submits
+    // the shares a NISP is built from.
+    all(StratumConfig.ReductionMultipliers) should be <= lfsm.LFSMHelpers.NISP_COEFFICIENT
+    StratumConfig.ReductionMultipliers should contain(StratumConfig.DefaultReductionMultiplier)
+  }
+
   it should "reject statistics intervals that would always label fresh observations stale" in {
     val configured = Configuration(ConfigFactory.parseString(
       "stats.refreshIntervalMs = 15000\nstats.staleAfterMs = 1000")

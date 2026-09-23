@@ -33,7 +33,8 @@ class MiningApiImpl extends MiningApi {
     val stratumConfig = new StratumConfig(config)
     val stratumTau = LFSMHelpers.parseDiffValueForStratum(stratumConfig.diff).get
     val realTau = LFSMHelpers.convertTauOrScore(LFSMHelpers.convertTauOrScore(stratumTau))
-    StratumInfo(stratumConfig.diff, realTau, stratumConfig.reduceShareMessages, -1.0)
+    StratumInfo(stratumConfig.diff, realTau, stratumConfig.reduceShareMessages,
+      stratumConfig.reductionMultiplier, -1.0)
   }
 
 }

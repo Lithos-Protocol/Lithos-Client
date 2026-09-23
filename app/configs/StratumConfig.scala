@@ -15,6 +15,10 @@ class StratumConfig(config: Configuration){
   val connectionTimeout: Int = config.get[Int]("stratum.connectionTimeout")
   val blockRefreshInterval: Int = config.get[Int]("stratum.blockRefreshInterval")
   val reduceShareMessages: Boolean = config.get[Boolean]("stratum.reduceShareMessages")
+
+  /** How many times the committed diff miners are sent while `reduceShareMessages` is on. */
+  val reductionMultiplier: Int = config.getOptional[Int]("stratum.reductionMultiplier")
+    .getOrElse(StratumConfig.DefaultReductionMultiplier)
   val forceConfigDifficulty: Boolean = config.getOptional[Boolean]("stratum.forceConfigDiff").getOrElse(false)
   val diffRefreshInterval: Int = config.get[Int]("stratum.diffRefreshInterval")
 
@@ -24,4 +28,15 @@ class StratumConfig(config: Configuration){
 
   /** Everything under `stratum.candidate`, all optional — see [[CandidateConfig]]. */
   val candidate: CandidateConfig = CandidateConfig(config)
+}
+
+object StratumConfig {
+  /**
+   * The values `stratum.reductionMultiplier` may take. None exceeds the super-share coefficient: above
+   * it, miners would stop submitting the super shares a NISP is built from.
+   */
+  val ReductionMultipliers: Seq[Int] = Seq(10, 100, 1000, 10000)
+
+  /** Sends miners the super-share diff itself, so every share they submit is a super share. */
+  val DefaultReductionMultiplier: Int = 10000
 }

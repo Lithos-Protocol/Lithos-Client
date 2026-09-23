@@ -67,8 +67,8 @@ import scala.concurrent.duration.{Duration, DurationInt, FiniteDuration}
  * @param client              Ergo client for collateral retrieval
  * @param prover              Node wallet used to sign collateral transactions
  * @param apiKey              Node API key for /mining/candidateWithTxs
- * @param reducedShareMessages Whether to advertise the super-share threshold instead of tau, so every
- *                            share a miner sends is a super-share
+ * @param reducedShareMessages Whether to advertise a threshold `reductionMultiplier` times harder than tau
+ * @param reductionMultiplier How much harder; at the NISP coefficient every share sent is a super-share
  * @param nispDB              NISP database for super-share persistence
  * @param candidateConfig     Tuning for CandidateBuilder, which builds the transactions inserted
  *                            into every Lithos block
@@ -80,6 +80,7 @@ class MiningStratumServer(system: ActorSystem,
                           prover: NodeWallet,
                           apiKey: String,
                           reducedShareMessages: Boolean,
+                          reductionMultiplier: Int,
                           nispDB: NISPDatabase,
                           stateFrame: ActorRef,
                           forceConfigDiff: Boolean,
@@ -97,7 +98,7 @@ class MiningStratumServer(system: ActorSystem,
 
   val poolActor: ActorRef = system.actorOf(
     Props(new LithosPool(options, useCollateral, client, prover, apiKey,
-      reducedShareMessages, nispDB, stateFrame, forceConfigDiff, diffRefreshInterval,
+      reducedShareMessages, reductionMultiplier, nispDB, stateFrame, forceConfigDiff, diffRefreshInterval,
       candidateConfig, txSources, statsCollector, statsRefreshIntervalMs)),
     "mining-pool"
   )

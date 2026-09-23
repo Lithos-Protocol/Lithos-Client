@@ -637,9 +637,11 @@ paths:
         no per-worker breakdown, so it carries nothing the Stratum connection count does not.
 
         Each accepted share is credited the expected hashes behind the difficulty its job advertised.
-        With reduced reporting on, miners are sent the super-share threshold, so every share they
-        send is a super share and carries that threshold's work. Either way the rates are in the
-        same units as network difficulty and compare directly with `/stats/mining/difficulty`.
+        With reduced reporting on, miners are sent `reductionMultiplier` times the served difficulty
+        (see `StratumDifficulty`), and each share they send carries that difficulty's work. At a
+        multiplier of 10000 that is the super-share threshold, so every share is a super share.
+        Either way the rates are in the same units as network difficulty and compare directly with
+        `/stats/mining/difficulty`.
 
         `hashesPerSecond` is the rate over the last 15 minutes — show this as current hashrate.
         `windowShares` is how many shares it rests on: fewer shares, noisier reading.
@@ -3652,8 +3654,8 @@ components:
         reducedReporting:
           type: boolean
           description: >-
-            True when miners are sent the super-share threshold, so they only send super shares.
-            The rates already account for it; expect fewer, larger samples and a noisier reading.
+            True when miners are sent a difficulty raised by the stratum's reduction multiplier. The
+            rates already account for it; expect fewer, larger samples and a noisier reading.
         rejections:
           type: object
           additionalProperties:
@@ -3840,7 +3842,7 @@ components:
       description: >-
         The difficulties this stratum works with, each as a score — the number a `diff` setting names,
         as an exact decimal string. The configured `diff` is on `/mining`.
-      required: [served, advertised, superShare, reducedReporting, forcedConfig]
+      required: [served, advertised, superShare, reducedReporting, reductionMultiplier, forcedConfig]
       properties:
         served:
           type: string
@@ -3849,14 +3851,22 @@ components:
         advertised:
           type: string
           pattern: '^[0-9]+$'
-          description: What mining software is sent. Equals `superShare` under reduced reporting, otherwise `served`.
+          description: >-
+            What mining software is sent. `served` times `reductionMultiplier` under reduced reporting,
+            otherwise `served`. Equals `superShare` at a multiplier of 10000.
         superShare:
           type: string
           pattern: '^[0-9]+$'
           description: The difficulty a share must clear to count toward a NISP, 10,000 times `served`.
         reducedReporting:
           type: boolean
-          description: Whether miners are sent the super-share difficulty and so send only super shares.
+          description: Whether miners are sent `advertised` instead of `served`.
+        reductionMultiplier:
+          type: integer
+          enum: [10, 100, 1000, 10000]
+          description: >-
+            The factor `advertised` sits above `served` while `reducedReporting` is true. Only a
+            multiplier of 10000 makes every share a miner sends a super share.
         forcedConfig:
           type: boolean
           description: Whether `forceConfigDiff` makes the stratum serve the config diff instead of the commitment.
@@ -4190,6 +4200,7 @@ components:
         - diff
         - tau
         - reducedMessaging
+        - reductionMultiplier
         - superSharesPerHour
       properties:
         diff:
@@ -4204,6 +4215,13 @@ components:
           type: boolean
           description: Whether the stratum server has the `reduceShareMessages` setting enabled
           example: false
+        reductionMultiplier:
+          type: integer
+          enum: [10, 100, 1000, 10000]
+          description: >-
+            The `reductionMultiplier` setting. While `reducedMessaging` is true, miners are sent this
+            many times `diff`.
+          example: 10000
         superSharesPerHour:
           type: number
           format: double

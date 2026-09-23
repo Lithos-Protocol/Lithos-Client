@@ -37,6 +37,7 @@ class LithosPool(options: Options,
                  prover: NodeWallet,
                  apiKey: String,
                  reducedShareMessages: Boolean,
+                 reductionMultiplier: Int,
                  nispDB: NISPDatabase,
                  stateFrame: ActorRef,
                  forceConfigDiff: Boolean,
@@ -425,7 +426,7 @@ class LithosPool(options: Options,
         } else {
           publishing = Some((request, candidate, fetched.materialized))
           jobManagerActor ! ProcessTemplate(candidate, tau.bigInteger, request.pkg.isDefined,
-            reducedShareMessages, mustPublish = true,
+            reducedShareMessages, reductionMultiplier, mustPublish = true,
             publication = Some(publicationFor(request)))
         }
       case Failure(overtaken: ChainMoved) =>
@@ -533,8 +534,8 @@ class LithosPool(options: Options,
   private def publishStats(stopped: Boolean = false): Unit = statsCollector.foreach { collector =>
     collector.tell(solutionStatistics.snapshot(stopped), self)
     statsSequence += 1L
-    val difficulty = if (stopped) None else StratumDifficulty.of(tau, reducedShareMessages, forceConfigDiff,
-      schedule.flatMap(_.inForce), schedule.flatMap(_.pending), schedule.map(_.height))
+    val difficulty = if (stopped) None else StratumDifficulty.of(tau, reducedShareMessages, reductionMultiplier,
+      forceConfigDiff, schedule.flatMap(_.inForce), schedule.flatMap(_.pending), schedule.map(_.height))
     collector.tell(StratumObserved(incarnation, statsSequence, System.currentTimeMillis(), System.nanoTime(),
       if (stopped) 0 else connections.size, if (stopped) None else activeStatsJob, stopped, difficulty), self)
   }

@@ -40,6 +40,16 @@ class ConfigDefaultsSpec extends AnyFlatSpec with Matchers {
     CandidateConfig(Configuration.empty).sources(CandidateSourceConfig.LithosDex).enabled shouldBe true
   }
 
+  "StratumConfig.DefaultReductionMultiplier" should "equal what the shipped application.conf parses" in {
+    new StratumConfig(shipped).reductionMultiplier shouldEqual StratumConfig.DefaultReductionMultiplier
+  }
+
+  it should "apply when the key is absent, keeping the super-share diff for older configs" in {
+    val absent = Configuration(shipped.underlying.withoutPath("stratum.reductionMultiplier"))
+    new StratumConfig(absent).reductionMultiplier shouldEqual StratumConfig.DefaultReductionMultiplier
+    StratumConfig.DefaultReductionMultiplier shouldEqual lfsm.LFSMHelpers.NISP_COEFFICIENT
+  }
+
   "BatchingConfig.Default" should "equal what the shipped application.conf parses" in {
     BatchingConfig(shipped, "ergodex") shouldEqual BatchingConfig.Default
   }

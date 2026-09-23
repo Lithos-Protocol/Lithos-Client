@@ -102,7 +102,8 @@ class LithosPoolSpec extends TestKit(ActorSystem("lithos-pool-spec", LithosPoolS
                              node: StubNode, clock: AtomicLong, manager: Option[TestProbe])
 
   private def fixture(config: CandidateConfig = cfg, controlledManager: Boolean = false,
-                      nodeVersion: Int = 4, stats: Option[ActorRef] = None): Fixture = {
+                      nodeVersion: Int = 4, stats: Option[ActorRef] = None, reduced: Boolean = false,
+                      multiplier: Int = configs.StratumConfig.DefaultReductionMultiplier): Fixture = {
     val node = new StubNode
     node.observed = node.observed.copy(parameters = node.observed.parameters.copy(blockVersion = nodeVersion))
     val builder = TestProbe()
@@ -112,7 +113,7 @@ class LithosPoolSpec extends TestKit(ActorSystem("lithos-pool-spec", LithosPoolS
     val clock = new AtomicLong(System.nanoTime())
     val options = new Options(2, 1L, 60000L, 3600000L, "http://127.0.0.1:1/",
       BigInteger.valueOf(4000000000L), new Data)
-    val pool = system.actorOf(Props(new LithosPool(options, true, null, null, "test-key", false,
+    val pool = system.actorOf(Props(new LithosPool(options, true, null, null, "test-key", reduced, multiplier,
       null, state.ref, true, 3600000, config,
       Seq(CandidateSource(configs.CandidateSourceConfig.Rollups, builder.ref)), stats, 3600000) {
       override protected lazy val nodeInterface: MiningNodeInterface = node
@@ -167,7 +168,8 @@ class LithosPoolSpec extends TestKit(ActorSystem("lithos-pool-spec", LithosPoolS
   }
 
   private def acknowledge(f: Fixture, msg: ProcessTemplate): Unit = {
-    val template = new BlockTemplate("1", msg.candidate, msg.tau, msg.usesCollateral, msg.reducedShareMessages)
+    val template = new BlockTemplate("1", msg.candidate, msg.tau, msg.usesCollateral, msg.reducedShareMessages,
+      msg.reductionMultiplier)
     f.manager.get.send(f.pool, NewJobAvailable(template, msg.publication))
   }
 
@@ -211,6 +213,25 @@ class LithosPoolSpec extends TestKit(ActorSystem("lithos-pool-spec", LithosPoolS
     val augmented = observation(stats)(_.activeJob.exists(_.mode == "augmented")).activeJob.get
     augmented.blockPackage.get.revision shouldBe 1
     augmented.blockPackage.get.transactions.map(_.id) shouldBe Vector(pkg().collateral.txId, "extra-1")
+  }
+
+  it should "carry the configured reduction multiplier into jobs and reported difficulties" in {
+    // The pool is the only sender of templates, so a multiplier it drops falls back to the message
+    // default of 10000 and miners get the super-share diff whatever the config says.
+    val stats = TestProbe()
+    val f = fixture(controlledManager = true, stats = Some(stats.ref), reduced = true, multiplier = 100)
+    f.pool ! BlockPackageReady(pkg())
+    val call = nextCall(f)
+    call.response.complete(response(call))
+    val gen = template(f)
+    gen.reducedShareMessages shouldBe true
+    gen.reductionMultiplier shouldBe 100
+
+    f.pool ! LithosPool.PublishStats
+    val difficulty = observation(stats)(_.difficulty.isDefined).difficulty.get
+    difficulty.reductionMultiplier shouldBe 100
+    difficulty.advertised shouldBe
+      (lfsm.LFSMHelpers.TARGET_MAX_LITHOS / (BigInt(4000000000L) / 100)).toString
   }
 
   it should "clear failed augmentation, then publish the genesis fallback without its removed revenue" in {

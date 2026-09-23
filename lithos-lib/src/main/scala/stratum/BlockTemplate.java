@@ -58,8 +58,14 @@ public class BlockTemplate {
 		this(jobId, miningCandidate, BigInteger.valueOf(0), usedCollateral, false);
 	}
 
+	/** Reduces by the NISP coefficient, so reduced reporting sends miners the super-share threshold. */
 	public BlockTemplate(String jobId, MiningCandidate miningCandidate, BigInteger tau,
                          boolean usedCollateral, boolean reducedShareMessages) {
+		this(jobId, miningCandidate, tau, usedCollateral, reducedShareMessages, LFSMHelpers.NISP_COEFFICIENT());
+	}
+
+	public BlockTemplate(String jobId, MiningCandidate miningCandidate, BigInteger tau,
+                         boolean usedCollateral, boolean reducedShareMessages, int reductionMultiplier) {
 		this.jobId = jobId;
 		this.candidate = miningCandidate;
 		this.target = miningCandidate.b;
@@ -77,11 +83,11 @@ public class BlockTemplate {
             this.realTau = BigInteger.ZERO;
             this.superShareThreshold = BigInteger.ZERO;
         }
-        // Reduced reporting hands miners the super-share cut of tau, so every share they then send is
-        // a super-share. Both the notify and the work accounting read this one field, because a miner
-        // submits at whatever it was told and nothing else describes the rate shares arrive at.
+        // Reduced reporting hands miners tau cut by the reduction multiplier; at the NISP coefficient
+        // every share they then send is a super-share. Both the notify and the work accounting read
+        // this one field, because a miner submits at whatever it was told.
         this.assignedThreshold = reducedShareMessages
-                ? tau.divide(BigInteger.valueOf(LFSMHelpers.NISP_COEFFICIENT()))
+                ? tau.divide(BigInteger.valueOf(reductionMultiplier))
                 : tau;
         // Built here, not on first read. It used to be a lazily-populated non-final field that every
         // connection actor reads from its own thread when serialising a mining.notify, so a miner

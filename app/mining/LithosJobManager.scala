@@ -85,7 +85,7 @@ class LithosJobManager(options: Options, statsCollector: Option[ActorRef] = None
     // candidate requested for a lender's key keeps that key even when the genesis transaction is not
     // in it — mining that pays the lender for a block that spends no collateral, and costs this
     // miner the reward. Refused outright rather than mined, because there is no safe way to use it.
-    case ProcessTemplate(candidate, _, usesCollateral, _, _, publication)
+    case ProcessTemplate(candidate, _, usesCollateral, _, _, _, publication)
       if !usesCollateral && candidate.collateralData != null =>
       logger.error(s"Refusing a solo template carrying collateral data for pk ${candidate.pk} at " +
         s"height ${candidate.height}: this would pay a lender for a block with no genesis " +
@@ -101,7 +101,8 @@ class LithosJobManager(options: Options, statsCollector: Option[ActorRef] = None
       assignedWork = Map.empty
       currentIdentity = (-1L, false, "")
 
-    case ProcessTemplate(candidate, tau, usesCollateral, reducedShareMessages, mustPublish, publication) =>
+    case ProcessTemplate(candidate, tau, usesCollateral, reducedShareMessages, reductionMultiplier, mustPublish,
+                         publication) =>
       val identity = jobIdentity(candidate, usesCollateral)
       val isNew = currentJob.isEmpty || identity != currentIdentity
 
@@ -114,15 +115,16 @@ class LithosJobManager(options: Options, statsCollector: Option[ActorRef] = None
       // Pacing is applied by whoever fetches, before fetching.
       if (notBehind && (mustPublish || isNew)) {
         val jobId    = jobCounter.next()
-        val template = new BlockTemplate(jobId, candidate, tau, usesCollateral, reducedShareMessages)
+        val template = new BlockTemplate(jobId, candidate, tau, usesCollateral, reducedShareMessages,
+          reductionMultiplier)
         currentJob   = Some(template)
         currentIdentity = identity
         validJobs.put(jobId, template)
         pruneOldJobs(jobId)
         if (statsCollector.isDefined) {
           // The expected hashes behind one accepted share is TARGET_MAX over the threshold the job
-          // advertised — under reduced reporting that is the super-share cut, which is 10000x the
-          // work of a plain share. Anything else here misreports hashrate by that whole factor.
+          // advertised — under reduced reporting that is tau cut by the reduction multiplier, up to
+          // 10000x the work of a plain share. Anything else misreports hashrate by that whole factor.
           val advertised = BigInt(template.assignedThreshold)
           assignedWork = assignedWork.filter { case (id, _) => validJobs.contains(id) }
             .updated(jobId, if (advertised > 0) LFSMHelpers.TARGET_MAX_LITHOS / advertised else BigInt(0))

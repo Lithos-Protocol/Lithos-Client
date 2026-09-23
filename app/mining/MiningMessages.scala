@@ -10,9 +10,13 @@ import scala.util.Try
 /** Messages shared by mining actors and stratum connections. */
 object MiningMessages {
 
-  /** Installs fetched work. mustPublish prevents deduplication from retaining work replaced in the node cache. */
+  /**
+   * Installs fetched work. mustPublish prevents deduplication from retaining work replaced in the node
+   * cache. reductionMultiplier is how much harder than tau miners are sent under reduced reporting.
+   */
   case class ProcessTemplate(candidate: MiningCandidate, tau: BigInteger,
                              usesCollateral: Boolean, reducedShareMessages: Boolean,
+                             reductionMultiplier: Int = configs.StratumConfig.DefaultReductionMultiplier,
                              mustPublish: Boolean = false,
                              publication: Option[CandidatePublication] = None)
 

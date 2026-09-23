@@ -95,6 +95,30 @@ class BlockTemplateSpec extends AnyFlatSpec with Matchers {
       shippedTau.divide(BigInteger.valueOf(LFSMHelpers.NISP_COEFFICIENT))
   }
 
+  it should "be tau cut by each configured reduction multiplier" in {
+    // The notify and the work credit both read this field, so the multiplier has to reach it rather
+    // than the NISP coefficient the five-argument constructor uses.
+    configs.StratumConfig.ReductionMultipliers.foreach { m =>
+      val t = new BlockTemplate("1a", candidate(), shippedTau, true, true, m)
+      withClue(s"multiplier $m: ") {
+        t.assignedThreshold shouldEqual shippedTau.divide(BigInteger.valueOf(m))
+        t.getJobParams.getString(6) shouldEqual t.assignedThreshold.toString
+      }
+    }
+  }
+
+  it should "ignore the multiplier while reduced reporting is off" in {
+    new BlockTemplate("1a", candidate(), shippedTau, true, false, 10).assignedThreshold shouldEqual shippedTau
+  }
+
+  it should "leave the super-share threshold at the NISP coefficient whatever the multiplier" in {
+    // A super share is what a NISP is built from. Reporting less often must not change what counts.
+    configs.StratumConfig.ReductionMultipliers.foreach { m =>
+      new BlockTemplate("1a", candidate(), shippedTau, true, true, m).superShareThreshold shouldEqual
+        template().superShareThreshold
+    }
+  }
+
   it should "carry the job id, height and message the miner needs" in {
     val params = template().getJobParams
     params.getString(0) shouldEqual "1a"
