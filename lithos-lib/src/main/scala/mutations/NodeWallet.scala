@@ -27,9 +27,8 @@ case class NodeWallet(prover: ErgoProver) {
   /**
    * Miner reward scripts for every address, keyed by ergoTree hex.
    *
-   * A coinbase pays `pk && HEIGHT > creationHeight + MINER_REWARD_DELAY`, not a plain key, so no
-   * wallet reports these boxes and they have to be looked up by ergoTree. This prover can sign them —
-   * the guard is a height check, not a second key.
+   * A coinbase pays `pk && HEIGHT > creationHeight + MINER_REWARD_DELAY`. The wallet API reports
+   * master-key rewards; derived-key rewards require an ErgoTree lookup. Both use this prover's keys.
    */
   lazy val rewardTrees: Map[String, Address] =
     (prover.getAddress +: addresses).map(a =>

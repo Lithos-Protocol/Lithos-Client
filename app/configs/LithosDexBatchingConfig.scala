@@ -7,8 +7,11 @@ import play.api.{ConfigLoader, Configuration}
  *
  * @param autoFlush close each candidate run with a flush moving the pool's pending fees into the vault,
  *                  so providers can claim them. Never broadcast, since a broadcast flush pays a fee.
+ * @param discoverPools also broadcast orders for pools other than the canonical one, each served only when the
+ *                  contracts built from its own ids reproduce its pool and vault exactly. Block candidates keep
+ *                  executing the canonical pool alone.
  */
-case class LithosDexBatchingConfig(batching: BatchingConfig, autoFlush: Boolean)
+case class LithosDexBatchingConfig(batching: BatchingConfig, autoFlush: Boolean, discoverPools: Boolean = true)
 
 object LithosDexBatchingConfig {
 
@@ -21,5 +24,7 @@ object LithosDexBatchingConfig {
   def apply(config: Configuration): LithosDexBatchingConfig =
     LithosDexBatchingConfig(
       BatchingConfig(config, Name),
-      config.getOptional(s"batching.$Name.autoFlush")(ConfigLoader.booleanLoader).getOrElse(Default.autoFlush))
+      config.getOptional(s"batching.$Name.autoFlush")(ConfigLoader.booleanLoader).getOrElse(Default.autoFlush),
+      config.getOptional(s"batching.$Name.discoverPools")(ConfigLoader.booleanLoader)
+        .getOrElse(Default.discoverPools))
 }

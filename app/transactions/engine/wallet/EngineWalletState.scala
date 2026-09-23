@@ -210,7 +210,7 @@ class EngineWalletState @Inject()(nodeContext: NodeContext,
 
   /** Reward boxes past their timelock. Uses the last refresh's height, so it errs to holding back. */
   private def spendableRewards: Seq[WalletDescriptor] =
-    unreserved(rewardBoxes).filter(b => chainHeight > b.creationHeight + MINER_REWARD_DELAY)
+    unreserved(rewardBoxes).filter(b => chainHeight.toLong > b.creationHeight.toLong + MINER_REWARD_DELAY)
 
   private var warnedNoIndexer: Boolean = false
 
@@ -416,8 +416,7 @@ class EngineWalletState @Inject()(nodeContext: NodeContext,
       lastAppliedRefreshGeneration = generation
       if (!indexed && !warnedNoIndexer) {
         warnedNoIndexer = true
-        logger.warn("Node is not indexed (extraIndex = false), so mined coinbases cannot be found. " +
-          "They accrue at addresses no wallet reports and stay unspendable until it is enabled")
+        logger.warn("Node is not indexed (extraIndex = false); only wallet-reported mining rewards can be found")
       }
       val freshWallet = boxes.map(box => box.id.toString -> box).toMap
       val freshRewards = rewards.map(box => box.id.toString -> box).toMap
@@ -427,9 +426,7 @@ class EngineWalletState @Inject()(nodeContext: NodeContext,
         // again: it is retained here BECAUSE it is reserved, so it survived every refresh and came
         // back the moment the reservation was cleared.
         //
-        // BOTH sets, not just the wallet. Coinbases are tracked separately because no wallet reports
-        // them, so comparing against the wallet alone declared every reserved coinbase spent on
-        // sight — and `coveringReward` hands one out for most ordinary fees.
+        // Reward claims and consolidations own coinbases too, so reconciliation needs both sets.
         val reportedUnspent = freshWallet.keySet ++ freshRewards.keySet
         // An ambiguous broadcast is resolved in either direction by a complete mempool-aware read:
         // present means rejected/evicted and safe again; absent means accepted/spent and gone.
@@ -471,12 +468,8 @@ class EngineWalletState @Inject()(nodeContext: NodeContext,
       }
       chainHeight = height
       trimInventory()
-      // TODO: Ugly fix, change this when reward boxes are reworked
-      //val locked = rewardBoxes.size - spendableRewards.size
-//      logger.info(s"Wallet refreshed - ${available.size} available, ${usedInputs.size} reserved, " +
-//        s"${spendableRewards.size} reward box(es) spendable " +
-//        s"($locked still locked)" + (if (complete) "" else ", PARTIAL"))
       logger.info(s"Wallet refreshed - ${available.size} available, ${usedInputs.size} reserved, " +
+        s"${spendableRewards.size} reward box(es) spendable" +
         (if (complete) "" else ", PARTIAL"))
       finishRefresh()
 
@@ -492,7 +485,10 @@ class EngineWalletState @Inject()(nodeContext: NodeContext,
       val ids = inputs.map(_.id.toString)
       val accepted = inputs.nonEmpty && inputs.size <= MAX_TX_INPUTS &&
         ids.distinct.size == ids.size &&
-        inputs.forall(box => box.bytes.length <= walletLimits.maxInputBytes && wallet.signableTrees.contains(box.contract.ergoTreeHex)) &&
+        inputs.forall(box => box.bytes.length <= walletLimits.maxInputBytes &&
+          (wallet.signableTrees.contains(box.contract.ergoTreeHex) ||
+            (wallet.rewardTrees.contains(box.contract.ergoTreeHex) &&
+              chainHeight.toLong > box.input.getCreationHeight.toLong + MINER_REWARD_DELAY))) &&
         ids.forall(id => !usedInputs.contains(id)) &&
         !usedInputs.valuesIterator.exists(_.id == reservationId) &&
         usedInputs.size + ids.size <=
@@ -562,12 +558,12 @@ class EngineWalletState @Inject()(nodeContext: NodeContext,
 
     case GetUnlockedRewards =>
       val unlocked = spendableRewards
-      val unlockedIds = unlocked.map(_.id.toString).toSet
-      val locked = rewardBoxes.values.toSeq.filterNot(b => unlockedIds.contains(b.id.toString))
+      val locked = unreserved(rewardBoxes).filter(b =>
+        chainHeight.toLong <= b.creationHeight.toLong + MINER_REWARD_DELAY)
       val blocksUntilFirstUnlock =
         if (locked.isEmpty) None
         else Some(locked.map(b => math.max(0,
-          b.creationHeight + MINER_REWARD_DELAY - chainHeight)).min)
+          b.creationHeight + MINER_REWARD_DELAY + 1 - chainHeight)).min)
       sender() ! RewardSummary(
         lockedBoxes = locked.size,
         unlockedBoxes = unlocked.size,
@@ -577,7 +573,7 @@ class EngineWalletState @Inject()(nodeContext: NodeContext,
 
     case GetSpendableBalance =>
       sender() ! SpendableBalance(saturate(summary.filter(_._1 == walletRevision)
-        .map(_._2.spendable).getOrElse(valueOf(available ++ spendableRewards))))
+        .map(_._2.spendable).getOrElse(valueOf(available))))
 
     case ClaimUnlockedRewards if sweeping => sender() ! RewardClaimFailed("a reward sweep is already running")
 

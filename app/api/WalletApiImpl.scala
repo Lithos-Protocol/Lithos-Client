@@ -45,7 +45,7 @@ class WalletApiImpl @Inject()(nodeContext: NodeContext,
         .getOrElse(Seq.empty)
         .map(t => t.id -> t).toMap
 
-    // SPENDABLE rather than the node's total: unreserved wallet boxes plus matured coinbases. This
+    // Spendable means unreserved plain wallet boxes; rewards need claiming or consolidation. This
     // is the figure a join quote's `affordNow` is decided against, so a reader comparing the two is
     // comparing like with like. The node's total counts boxes a transaction in flight already owns.
     //

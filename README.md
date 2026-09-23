@@ -21,6 +21,8 @@ Before running the Lithos client, you will need a fully synced, indexed node.\
 For setting up a node, follow the node guide, which gives instructions for testnet and mainnet
 nodes: [Node Tutorial](https://github.com/Lithos-Protocol/Lithos-Client/blob/master/TestnetNode.md)
 
+Once your node is set up, you can download the release `.zip` file here:
+[Lithos Mainnet 1.0.0-PRERELEASE](https://github.com/Lithos-Protocol/Lithos-Client/releases/tag/v1.0.0-prerelease)
 To run the client, download a release `.zip` file. Unzip the file,
 and navigate to `lithos-client/bin`. Create a new file called `lithos.conf` and input the following
 into it:

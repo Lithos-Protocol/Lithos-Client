@@ -95,22 +95,28 @@ class RewardSweepSpec extends TestKit(akka.actor.ActorSystem("reward-sweep-spec"
   }
 
   /** A started manager whose node reports exactly `rewards`, first refresh settled. Mirrors EngineWalletStateSpec's fixture. */
-  private def fixtureWithRewards(rewards: Seq[Long]): (TestProbe, akka.actor.ActorRef) = {
+  private def fixtureWithRewards(rewards: Seq[Long], indexed: Boolean = true): (TestProbe, akka.actor.ActorRef) = {
     val api = mock(classOf[NodeApi])
     val (ctx, _, wallet) = FakeNodeContext(api, numAddresses = 1)
-    val boxes = rewards.map { v =>
+    val master = wallet.rewardTrees.find(_._2 == wallet.prover.getAddress).get._1
+    val derived = wallet.rewardTrees.find(_._2 == wallet.p2pk).get._1
+    val boxes = rewards.zipWithIndex.map { case (v, i) =>
       IndexedBox(
         box = support.CanonicalNodeBox(boxId = f"$v%064x", transactionId = "bb" * 32, value = v, index = 0,
-          creationHeight = 1, ergoTree = wallet.rewardTrees.keys.head),
+          creationHeight = 1, ergoTree = if (indexed && i % 2 == 1) derived else master),
         address = "reward", inclusionHeight = 1, globalIndex = v)
     }
-    when(api.indexerEnabled).thenReturn(true)
+    when(api.indexerEnabled).thenReturn(indexed)
     when(api.info()).thenReturn(Success(support.ChainFixtures.infoAt(100000).copy(bestFullHeaderId = Some("aa" * 32))))
     when(api.boxById(anyString())).thenAnswer(inv => Success(boxes.find(_.box.boxId == inv.getArgument[String](0)).map(_.box)))
     when(api.sendTransaction(anyString())).thenReturn(scala.util.Failure(new RuntimeException("response lost")))
     when(api.walletUnspentBoxes(any[ConfirmationRange], any[Paging])).thenAnswer { inv =>
-      if (inv.getArgument[Paging](1).offset == 0) Success(Seq.empty[WalletBox])
-      else Success(Seq.empty[WalletBox])
+      val p = inv.getArgument[Paging](1)
+      Success(boxes.filter(_.box.ergoTree == master).slice(p.offset, p.offset + p.limit).map { entry =>
+        val box = entry.box
+        WalletBox(box, "reward", Some(1000), box.transactionId, box.index, Some(1),
+          None, None, spent = false, onchain = true, Seq.empty)
+      })
     }
     when(api.unspentBoxesByErgoTree(anyString(), any[Paging], any[SortDirection], any[MempoolOptions]))
       .thenAnswer { inv =>
@@ -126,7 +132,6 @@ class RewardSweepSpec extends TestKit(akka.actor.ActorSystem("reward-sweep-spec"
     Thread.sleep(1200)
     (probe, mgr)
   }
-  // TODO: Test is left failing until we can fix rewards
   "An unlocked coinbase set" should "be reported by GetUnlockedRewards and held by a claim's leases" in {
     val (probe, mgr) = fixtureWithRewards(Seq(3000000000L, 3100000000L))
 
@@ -136,22 +141,32 @@ class RewardSweepSpec extends TestKit(akka.actor.ActorSystem("reward-sweep-spec"
     summary.lockedBoxes shouldEqual 0
     summary.unlockedNanoErgs shouldEqual 6100000000L
 
-    // Claiming reserves every batch on the actor thread BEFORE anything leaves the mailbox. The
-    // broadcast itself cannot succeed against the mocked client, so offline an empty RewardsClaimed
-    // (sends failed into Uncertain) and a RewardClaimFailed are both legitimate shapes - what is
-    // NOT legitimate is anything else. The assertion after this block is the load-bearing one:
-    // no box came back selectable.
+    // Both reward scripts must sign. A lost broadcast response keeps their leases owned.
     probe.send(mgr, ClaimUnlockedRewards)
     probe.receiveOne(30.seconds) match {
       case RewardsClaimed(chunks) =>
         chunks should have size 1
         chunks.head.outcome shouldBe "uncertain"
         chunks.head.txId should fullyMatch regex "[0-9a-f]{64}"
-      case _: RewardClaimFailed => succeed
       case other                => fail(s"unexpected reply: $other")
     }
 
     probe.send(mgr, GetUnlockedRewards)
-    probe.expectMsgType[RewardSummary](20.seconds).unlockedBoxes shouldEqual 0
+    val held = probe.expectMsgType[RewardSummary](20.seconds)
+    held.unlockedBoxes shouldEqual 0
+    held.lockedBoxes shouldEqual 0
+  }
+
+  it should "claim wallet-reported master rewards without an indexer" in {
+    val (probe, mgr) = fixtureWithRewards(Seq(3000000000L), indexed = false)
+    probe.send(mgr, GetUnlockedRewards)
+    probe.expectMsgType[RewardSummary](20.seconds).unlockedBoxes shouldBe 1
+    probe.send(mgr, ClaimUnlockedRewards)
+    val result = probe.expectMsgType[RewardsClaimed](30.seconds)
+    result.chunks should have size 1
+    result.chunks.head.boxes shouldBe 1
+    result.chunks.head.outcome shouldBe "uncertain"
+    probe.send(mgr, GetUnlockedRewards)
+    probe.expectMsgType[RewardSummary](20.seconds).unlockedBoxes shouldBe 0
   }
 }

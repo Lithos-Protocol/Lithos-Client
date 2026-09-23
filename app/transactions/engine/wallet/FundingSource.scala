@@ -8,7 +8,7 @@ trait FundingSource {
   /** Reserve inputs covering the requested ERG and tokens, or throw when the wallet cannot cover it. */
   def reserve(value: Long, tokens: Seq[Token] = Seq.empty): FundingAllocation
 
-  /** Reserve one input that can cover the ERG request by itself. May be a matured mining reward. */
+  /** Reserve one plain wallet input that can cover the ERG request by itself. */
   def reserveCovering(value: Long): FundingAllocation
 
   /**

@@ -5039,7 +5039,7 @@ components:
         nanoErgs:
           type: string
           description: >
-            Unreserved ERG available to spend right now, matured coinbases included — the figure a
+            Unreserved ERG available to spend right now, unclaimed coinbases excluded — the figure a
             join quote's `affordNow` is decided against. Decimal string.
           example: '182400000000'
         tokens:

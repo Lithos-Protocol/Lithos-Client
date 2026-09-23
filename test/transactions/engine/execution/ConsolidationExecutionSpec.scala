@@ -3,7 +3,7 @@ package transactions.engine.execution
 import configs.WalletConfig
 import node.NodeApi
 import node.model._
-import org.mockito.ArgumentMatchers.any
+import org.mockito.ArgumentMatchers.{any, anyString}
 import org.mockito.Mockito.when
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
@@ -61,6 +61,33 @@ class ConsolidationExecutionSpec extends AnyFlatSpec with Matchers with MockitoS
     when(api.walletUnspentBoxes(any[ConfirmationRange], any[Paging])).thenReturn(
       Success(Vector.tabulate(WalletConfig.Default.pageSize)(i => entry(i + 1, i))), Failure(new RuntimeException("unavailable")))
     intercept[RuntimeException](ConsolidationExecution.select(api, Set("wallet"), Set.empty, 1000, 1))
+  }
+
+  it should "merge both reward sources once and exclude locked and owned coinbases" in {
+    val api = mock[NodeApi]
+    val master = entry(1, 1).copy(box = entry(1, 1).box.copy(ergoTree = "master-reward"))
+    val locked = entry(2, 280).copy(box = entry(2, 280).box.copy(ergoTree = "master-reward"))
+    val derived = entry(3, 2).copy(box = entry(3, 2).box.copy(ergoTree = "derived-reward"))
+    val owned = entry(4, 3).copy(box = entry(4, 3).box.copy(ergoTree = "derived-reward"))
+    serve(api, Vector(master, locked, entry(5, 4)))
+    val trees = Set("master-reward", "derived-reward")
+    // The master reward remains usable when the node has no indexer.
+    val unindexed = ConsolidationExecution.select(api, Set("wallet"), Set.empty, 1000, 1, rewardTrees = trees)
+    unindexed.boxes.map(_.boxId) shouldBe Vector(master.box.boxId, entry(5, 4).box.boxId)
+    when(api.indexerEnabled).thenReturn(true)
+    when(api.unspentBoxesByErgoTree(anyString(), any[Paging], any[SortDirection], any[MempoolOptions]))
+      .thenAnswer { inv =>
+        val p = inv.getArgument[Paging](1)
+        Success(Vector(master, locked, derived, owned).filter(_.box.ergoTree == inv.getArgument[String](0))
+          .slice(p.offset, p.offset + p.limit).map(e => IndexedBox(e.box, "reward", e.box.creationHeight, 1L)))
+      }
+    val selected = ConsolidationExecution.select(api, Set("wallet"), Set(owned.box.boxId), 1000, 1,
+      rewardTrees = trees)
+    selected.status.total shouldBe 5
+    selected.status.eligible shouldBe 3
+    selected.boxes.map(_.boxId) shouldBe Vector(master.box.boxId, derived.box.boxId, entry(5, 4).box.boxId)
+    ConsolidationExecution.select(api, Set("wallet"), Set.empty, 1001, 1, rewardTrees = trees)
+      .boxes.map(_.boxId) should contain(locked.box.boxId)
   }
 
   // ─── the floor below which a pass is not worth its fee ─────────────────────

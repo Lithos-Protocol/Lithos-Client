@@ -16,8 +16,8 @@ object WalletToken {
  * fetched at different moments, and a join landing between them showed a balance that had already
  * paid for a position the other half did not yet report. One call is one instant.
  *
- * `nanoErgs` is the SPENDABLE balance — unreserved wallet boxes plus matured coinbases — not the
- * node's total. It is the figure a join quote's `affordNow` is decided against, so the two agree.
+ * `nanoErgs` is unreserved plain wallet value. Rewards must be claimed or consolidated first.
+ * It is the figure a join quote's `affordNow` is decided against, so the two agree.
  * LIT appears in `tokens` like any other holding; the collateral half carries no balance of its own.
  */
 case class WalletBalances(primaryAddress: String,

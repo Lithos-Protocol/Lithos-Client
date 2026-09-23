@@ -2,10 +2,10 @@ package transactions.batching.lithosdex
 
 import akka.actor.ActorRef
 import configs.{CandidateConfig, LithosDexBatchingConfig, NodeContext}
-import lithosdex.contracts.{LDOrderKind, LDOrderContracts}
+import lithosdex.contracts.{LDContracts, LDOrderKind, LDOrderContracts}
 import lithosdex.{LDHelpers, LDLiquidityPool}
 import node.MutationConversions._
-import node.model.{MempoolOptions, NodeBox, Paging, SortDirection}
+import node.model.{IndexedBox, MempoolOptions, NodeBox, Paging, SortDirection}
 import org.bouncycastle.util.encoders.Hex
 import org.ergoplatform.appkit.BlockchainContext
 import play.api.Configuration
@@ -20,7 +20,9 @@ import scala.concurrent.duration._
 import scala.util.{Failure, Success, Try}
 
 /**
- * Executes LithosDex orders against the single ERG:LIT pool, for this miner's block or by broadcast.
+ * Executes LithosDex orders against the ERG:LIT pool, for this miner's block or by broadcast. With
+ * `discoverPools`, broadcasts also serve every other deployment [[LDDeployments]] verifies on chain; block
+ * candidates keep serving the canonical pool alone.
  *
  * In this miner's own block every unconfirmed spend of the pool, of an order it fills and of a
  * provision it closes is superseded: the pool is meant to be used through orders, and whatever else
@@ -56,6 +58,9 @@ class LithosDexBatcher(nodeContext: NodeContext,
   private val poolNft: String = LDHelpers.getPoolNFT(nodeContext.getNetwork).toString
   private val vaultNft: String = LDHelpers.getVaultNFT(nodeContext.getNetwork).toString
 
+  /** Deployments besides the canonical one the last scan served, by pool NFT, so their vaults need no second read. */
+  @volatile private var served: Map[String, LDContracts] = Map.empty
+
   /** Every order template's bytes as hex. A tree ends with its template, so this finds candidate outputs cheaply. */
   private val templatesHex: Seq[String] =
     LDOrderKind.all.map(kind => Hex.toHexString(LDOrderContracts.template(kind).templateBytes))
@@ -68,20 +73,67 @@ class LithosDexBatcher(nodeContext: NodeContext,
     DexContracts(nodeContext.getNetwork).provisionGuard.ergoTreeHex,
     LDHelpers.getProvToken(nodeContext.getNetwork).toString)
 
-  /** Scans every order template and prices what names this pool against its confirmed box. */
+  /** Pools this batcher may execute against: the canonical one, and with `discoverPools` any other, less denied. */
+  private def eligible(nft: String): Boolean =
+    !batching.deniedPools.contains(nft.toLowerCase) && (nft == poolNft || settings.discoverPools)
+
+  /**
+   * The deployment `box` is the pool of: the canonical one when the box sits at its tree, otherwise one
+   * [[LDDeployments.verify]] accepts whose vault stands. A deployment in `known` with the same ids already
+   * had its vault read, so it costs no node read; any other costs one.
+   */
+  private def deploymentOf(box: NodeBox, known: Map[String, LDContracts]): Option[LDContracts] =
+    box.assets.headOption.map(_.tokenId).filter(eligible).flatMap { nft =>
+      if (nft == poolNft) Some(DexContracts(nodeContext.getNetwork)).filter(_.liquidityPool.ergoTreeHex == box.ergoTree)
+      else LDDeployments.verify(nodeContext.getNetwork, box.ergoTree, box.assets.map(asset => asset.tokenId -> asset.amount))
+        .filter(found => known.get(nft).exists(sameIds(_, found)) || LDDeployments.vaultStands(nodeApi, found))
+    }
+
+  private def sameIds(a: LDContracts, b: LDContracts): Boolean =
+    a.poolNFT.toString == b.poolNFT.toString && a.vaultNFT.toString == b.vaultNFT.toString &&
+      a.provToken.toString == b.provToken.toString
+
+  /**
+   * Scans every order template, reads the pool each distinct pool NFT names, and prices the orders against
+   * it. As for ErgoDEX, the pools come from the orders and a node read that fails fails the scan, which
+   * keeps the previous set; a pool box that is not a served deployment's, or will not read, costs its own orders.
+   */
   override protected def discover(): Tracked = nodeContext.getClient.execute { ctx =>
-    val pool = confirmedSingleton(poolNft, poolTree).map(box => LDLiquidityPool(box.toInputUTXO(ctx)))
-      .getOrElse(throw new IllegalStateException(
-        s"no confirmed LithosDEX pool box carries $poolNft: is the pool launched on this network?"))
     // Left out before ranking, so an order declaring a fee it can never pay holds no tracked slot
     val skipped = skippedOrders()
     val orders = LDOrderKind.all
       .flatMap(kind => scanTemplate(LDOrderContracts.template(kind).templateHash, kind.scriptName)(LithosDexOrder.parse))
-      .filter(order => order.poolNft == poolNft && !skipped.contains(order.boxId))
+      .filter(order => eligible(order.poolNft) && !skipped.contains(order.boxId))
       .groupBy(_.boxId).values.map(_.head).toSeq
-    val provisions = provisionsFor(ctx, orders, MempoolOptions.ConfirmedOnly)
-    orders
-      .flatMap(order => LithosDexExecution.price(order, pool, batching.minRevenueNanoErg, provisions, fundsItsOwnBox = false))
+    // The canonical pool is read first, so no number of other pools can push it out
+    val nfts = orders.map(_.poolNft).distinct.sortBy(nft => (nft != poolNft, nft))
+    if (nfts.size > MaxPoolReads)
+      logger.warn(s"LithosDEX orders name ${nfts.size} pools; reading the first $MaxPoolReads this pass")
+    val known = served
+    val read = nfts.take(MaxPoolReads).flatMap { nft =>
+      val found = confirmedPool(nft).flatMap(indexed => deploymentOf(indexed.box, known).flatMap(contracts =>
+        Try(LDLiquidityPool(indexed.box.toInputUTXO(ctx))).toOption.map(pool => (contracts, pool, indexed.inclusionHeight))))
+      if (found.isEmpty && nft == poolNft)
+        logger.warn(s"No confirmed box carrying $nft reads as the LithosDEX pool; its orders are not tracked this scan")
+      found
+    }
+    // As for ErgoDEX, the newest maxTrackedPools, with the canonical pool always kept
+    val (canonical, others) = read.partition(_._1.poolNFT.toString == poolNft)
+    val pools = canonical ++ others
+      .sortBy { case (contracts, _, included) => (-included, contracts.poolNFT.toString) }
+      .take(math.max(0, batching.maxTrackedPools - canonical.size))
+    if (others.map(_._1.poolNFT.toString).toSet != served.keySet)
+      logger.info(s"LithosDEX serves ${others.size} pool(s) besides the canonical one")
+    served = others.map { case (contracts, _, _) => contracts.poolNFT.toString -> contracts }.toMap
+
+    val byPool = orders.groupBy(_.poolNft)
+    pools
+      .flatMap { case (contracts, pool, _) =>
+        val poolOrders = byPool.getOrElse(contracts.poolNFT.toString, Seq.empty)
+        val provisions = provisionsFor(ctx, contracts, poolOrders, MempoolOptions.ConfirmedOnly)
+        poolOrders.flatMap(order =>
+          LithosDexExecution.price(order, pool, batching.minRevenueNanoErg, provisions, fundsItsOwnBox = false))
+      }
       .sortBy(fill => (-fill.revenue, fill.order.boxId))
       .take(batching.maxTrackedOrders)
       .map(fill => fill.order.boxId -> fill.order.poolNft)
@@ -101,9 +153,10 @@ class LithosDexBatcher(nodeContext: NodeContext,
       val spenders = BatchingMempool.spenders(snapshot)
       val creators = BatchingMempool.creators(snapshot)
       val skipped = skippedOrders()
-      val candidates = (liveOrders(orders) ++ unconfirmedOrders(snapshot))
+      // A block candidate executes the canonical pool alone; other deployments are served by broadcast
+      val candidates = (liveOrders(orders) ++ unconfirmedOrders(snapshot, _ == poolNft))
         .groupBy(_.boxId).values.map(_.head).toSeq
-        .filterNot(order => skipped.contains(order.boxId) ||
+        .filterNot(order => order.poolNft != poolNft || !eligible(order.poolNft) || skipped.contains(order.boxId) ||
           BatchingMempool.withdrawn(order.boxId, order.poolNft, spenders))
 
       within(deadline, "reading tracked orders")
@@ -113,8 +166,8 @@ class LithosDexBatcher(nodeContext: NodeContext,
           val poolBox = poolNode.toInputUTXO(ctx)
           val pool = LDLiquidityPool(poolBox)
           // Confirmed provisions, including one a refresh is spending, since this block supersedes the refresh
-          val provisions = claimedProvisions(ctx, provisionsFor(ctx, candidates, MempoolOptions.ConfirmedOnly),
-            candidates, creators)
+          val provisions = claimedProvisions(ctx, provisionsFor(ctx, DexContracts(nodeContext.getNetwork), candidates,
+            MempoolOptions.ConfirmedOnly), candidates, creators)
           within(deadline, "reading the pool and provisions")
           // The flush takes one slot of its own
           val runSlots = slots - (if (settings.autoFlush) 1 else 0)
@@ -187,31 +240,59 @@ class LithosDexBatcher(nodeContext: NodeContext,
       .map(box => LithosDexExecution.withFlush(ctx, nodeContext.getNodeWallet, chain, box.toInputUTXO(ctx), blockHeight))
       .getOrElse(chain)
 
-  /** Builds unclaimed orders against the mempool's pool tip, at the fee ceiling, and records refusals. */
+  /**
+   * Builds unclaimed orders against each pool's mempool tip, at the fee ceiling, and records refusals. As for
+   * ErgoDEX, a pool only a mempool order names is read and checked here. Each pool is its own run with its
+   * own takings box, and a pool that fails, in its read or its run, costs that pool alone.
+   */
   override protected def broadcastPass(orders: Tracked, refused: Map[String, String]): BroadcastResult = {
     val observed = observation()
     require(observed.fresh, s"no fresh mempool observation: ${observed.failure.getOrElse("too old")}")
     val snapshot = observed.snapshot.get
     val spenders = BatchingMempool.spenders(snapshot)
     val sender = broadcaster()
+    val known = served
     nodeContext.getClient.execute { ctx =>
       val skipped = skippedOrders()
-      val unconfirmed = if (batching.broadcastMempoolOrders) unconfirmedOrders(snapshot) else Vector.empty
-      val open = (liveOrders(orders) ++ unconfirmed).groupBy(_.boxId).values.map(_.head).toSeq
+      val unconfirmed =
+        if (batching.broadcastMempoolOrders) unconfirmedOrders(snapshot, eligible) else Vector.empty
+      val byPool = (liveOrders(orders) ++ unconfirmed).groupBy(_.boxId).values.map(_.head).toSeq
         .filterNot(order => snapshot.spent.contains(order.boxId) || skipped.contains(order.boxId))
-      val tip = if (open.isEmpty) None
-      else currentSingleton(poolNft, poolTree).flatMap(BatchingMempool.poolTip(_, poolNft, spenders))
+        .groupBy(_.poolNft)
+
+      val pools = byPool.keys.toSeq.sorted.flatMap { nft =>
+        Try(currentPool(nft, known)) match {
+          case Success(found) => found.map(nft -> _)
+          case Failure(ex) =>
+            logger.warn(s"Could not read LithosDEX pool $nft for a broadcast, the other pools go on: ${ex.getMessage}")
+            None
+        }
+      }
+      // The builders find each deployment's contracts through DexContracts, which serves exactly these
+      val servable = DexContracts.serve(nodeContext.getNetwork,
+        pools.map(_._2._2).filterNot(_.poolNFT.toString == poolNft)).map(_.poolNFT.toString).toSet + poolNft
 
       val height = ctx.getHeight
-      val refusedNow = tip.toSeq.flatMap { tipBox =>
-        val poolBox = tipBox.toInputUTXO(ctx)
-        val provisions = provisionsFor(ctx, open, MempoolOptions.WithMempool)
-        val run = LithosDexExecution.run(ctx, nodeContext.getNodeWallet, poolBox,
-          open.filterNot(order => refused.get(order.boxId).contains(tipBox.boxId)), batching.maxOrdersPerBlock,
-          batching.broadcastMinRevenueNanoErg, provisions, height, batching.broadcastMinerFeeCeiling,
-          useTrueProp = false, BroadcastBudget.fromNow, unbuildableLimits = Batcher.UnbuildableLimits(batching))
-        settle(run, height)
-        run.chain.flatMap(chain => send(sender, chain, observed))
+      val refusedNow = pools.filter { case (nft, _) => servable.contains(nft) }.flatMap { case (nft, (current, contracts)) =>
+        Try {
+          BatchingMempool.poolTip(current, nft, spenders).toSeq.flatMap { tipBox =>
+            val poolOrders = byPool(nft)
+            val poolBox = tipBox.toInputUTXO(ctx)
+            val provisions = provisionsFor(ctx, contracts, poolOrders, MempoolOptions.WithMempool)
+            val run = LithosDexExecution.run(ctx, nodeContext.getNodeWallet, poolBox,
+              poolOrders.filterNot(order => refused.get(order.boxId).contains(tipBox.boxId)),
+              batching.maxOrdersPerBlock, batching.broadcastMinRevenueNanoErg, provisions, height,
+              batching.broadcastMinerFeeCeiling, useTrueProp = false, BroadcastBudget.fromNow,
+              unbuildableLimits = Batcher.UnbuildableLimits(batching))
+            settle(run, height)
+            run.chain.flatMap(chain => send(sender, chain, observed))
+          }
+        } match {
+          case Success(refusals) => refusals
+          case Failure(ex) =>
+            logger.warn(s"LithosDEX broadcast for pool $nft failed, the other pools go on: ${ex.getMessage}")
+            Seq.empty
+        }
       }.toMap
       BroadcastResult(refusedNow, unconfirmed.map(_.boxId).toSet)
     }
@@ -220,11 +301,22 @@ class LithosDexBatcher(nodeContext: NodeContext,
   /** A box carrying this pool's NFT, so a placement creating one is not a wallet placement. */
   private def createsPool(box: NodeBox): Boolean = box.assets.exists(_.tokenId == poolNft)
 
-  /** The one confirmed box carrying `nft` under `tree`, from the index. */
-  private def confirmedSingleton(nft: String, tree: String): Option[NodeBox] = {
+  /** The one confirmed box carrying `nft`, from the index, whatever its script. */
+  private def confirmedPool(nft: String): Option[IndexedBox] = {
     val boxes = nodeApi.unspentBoxesByTokenId(nft, Paging(0, 2), SortDirection.Desc, MempoolOptions.ConfirmedOnly).get
-    boxes.headOption.map(_.box).filter(box => boxes.size == 1 && box.ergoTree == tree)
+    if (boxes.size == 1) boxes.headOption else None
   }
+
+  /** The confirmed pool box `nft` names and the deployment it belongs to, rechecked against the UTXO set. */
+  private def currentPool(nft: String, known: Map[String, LDContracts]): Option[(NodeBox, LDContracts)] =
+    confirmedPool(nft).flatMap(indexed => deploymentOf(indexed.box, known).map(indexed.box -> _))
+      .flatMap { case (listed, contracts) =>
+        nodeApi.boxesWithPoolByIds(Seq(listed.boxId)).get.find(_.boxId == listed.boxId).map(_ -> contracts)
+      }
+
+  /** The one confirmed box carrying `nft` under `tree`, from the index. */
+  private def confirmedSingleton(nft: String, tree: String): Option[NodeBox] =
+    confirmedPool(nft).map(_.box).filter(_.ergoTree == tree)
 
   /** The confirmed singleton, rechecked against the UTXO set so a box the chain has spent is not offered. */
   private def currentSingleton(nft: String, tree: String): Option[NodeBox] =
@@ -238,12 +330,12 @@ class LithosDexBatcher(nodeContext: NodeContext,
     live.flatMap(LithosDexOrder.parse).filter(order => orders.get(order.boxId).contains(order.poolNft))
   }
 
-  /** Orders created by unconfirmed transactions that name this pool, selected by [[Batcher.mempoolOrderBoxes]]. */
-  private def unconfirmedOrders(snapshot: CompleteMempool.Snapshot): Vector[LithosDexOrder] =
+  /** Orders created by unconfirmed transactions naming a pool `keep` accepts, selected by [[Batcher.mempoolOrderBoxes]]. */
+  private def unconfirmedOrders(snapshot: CompleteMempool.Snapshot, keep: String => Boolean): Vector[LithosDexOrder] =
     Batcher.mempoolOrderBoxes(snapshot, box => templatesHex.exists(box.ergoTree.endsWith),
       batching.maxMempoolOrders, batching.maxMempoolOrdersPerTx)
       .flatMap(LithosDexOrder.parse)
-      .filter(_.poolNft == poolNft)
+      .filter(order => keep(order.poolNft))
 
   /**
    * The provision each redemption among `orders` closes. Scans the guard address only when there is a
@@ -251,12 +343,12 @@ class LithosDexBatcher(nodeContext: NodeContext,
    * that supersedes it; `WithMempool` drops it and adds unconfirmed ones, for a broadcast that chains.
    * Every provision found is rechecked against the UTXO set, since the index can list a spent box.
    */
-  private def provisionsFor(ctx: BlockchainContext, orders: Seq[LithosDexOrder],
+  private def provisionsFor(ctx: BlockchainContext, contracts: LDContracts, orders: Seq[LithosDexOrder],
                             mempool: MempoolOptions): LithosDexExecution.Provisions = {
     val wanted = orders.collect { case redeem: LithosDexOrder.Redeem => redeem.ownerNft }.toSet
     if (wanted.isEmpty) LithosDexExecution.NoProvisions
     else Try {
-      val (listed, complete) = LDBoxes.provisionsOwnedBy(ctx, nodeApi, wanted, mempool)
+      val (listed, complete) = LDBoxes.provisionsOwnedBy(ctx, nodeApi, contracts, wanted, mempool)
       if (!complete)
         logger.warn(s"LithosDEX provisions exceed the scan ceiling; redemptions whose provision was not reached are skipped")
       val current =
@@ -279,4 +371,7 @@ object LithosDexBatcher {
 
   /** A broadcast pass is not bound by the stratum's deadline; this only ends a run that would not. */
   private final val BroadcastBudget = 60.seconds
+
+  /** Most pools one scan reads, as for ErgoDEX; each costs a node read, and a new deployment one more for its vault. */
+  private final val MaxPoolReads = 512
 }
