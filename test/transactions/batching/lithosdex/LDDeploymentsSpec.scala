@@ -1,5 +1,6 @@
 package transactions.batching.lithosdex
 
+import lithosdex.contracts.LDContracts
 import org.ergoplatform.appkit.NetworkType
 import org.ergoplatform.sdk.ErgoId
 import org.scalatest.flatspec.AnyFlatSpec
@@ -10,7 +11,7 @@ import scala.io.Source
 /**
  * Deployment verification against two real mainnet deployments: the canonical ERG:LIT pool, and a second pool
  * minted by someone else through the same genesis. The trees are the live boxes' ErgoTrees, saved from
- * the chain rather than rebuilt here, so a compile that drifted from what the chain holds fails.
+ * the chain rather than rebuilt here, so a template that drifted from what the chain holds fails.
  */
 class LDDeploymentsSpec extends AnyFlatSpec with Matchers {
 
@@ -44,13 +45,15 @@ class LDDeploymentsSpec extends AnyFlatSpec with Matchers {
   private val litAssets = Seq(LitPoolNft -> 1L, Lit -> 145230319426812L, LitProvToken -> 999999999999994L)
   private val secondAssets = Seq(SecondPoolNft -> 1L, SecondToken -> 100000000L, SecondProvToken -> 1000000000000000L)
 
-  "LDDeployments" should "scan the template under the hash the node's indexer keys it by" in {
-    // The hash a public indexed node answered with both live pools
-    LDDeployments.poolTemplateHash(Mainnet) shouldBe
-      "76fb608217788427bc0ee0c4f7319982b618d98857ba5c1c8753b2c12ee4c139"
+  private def id(hex: String): ErgoId = ErgoId.create(hex)
+
+  "LDContracts" should "build the live ERG:LIT pool and vault from the canonical ids" in {
+    val canonical = LDContracts(Mainnet)
+    canonical.liquidityPool.ergoTreeHex shouldBe litPool
+    canonical.feeVault.ergoTreeHex shouldBe litVault
   }
 
-  it should "accept the canonical pool and compile its vault to the live vault's tree" in {
+  "LDDeployments" should "accept the canonical pool and build its vault to the live vault's tree" in {
     val contracts = LDDeployments.verify(Mainnet, litPool, litAssets).getOrElse(fail("ERG:LIT was refused"))
     contracts.vaultNFT.toString shouldBe LitVaultNft
     contracts.provToken.toString shouldBe LitProvToken
@@ -58,7 +61,8 @@ class LDDeploymentsSpec extends AnyFlatSpec with Matchers {
   }
 
   it should "accept a deployment someone else minted, down to its guard" in {
-    val contracts = LDDeployments.verify(Mainnet, secondPool, secondAssets).getOrElse(fail("the second deployment was refused"))
+    val contracts = LDDeployments.verify(Mainnet, secondPool, secondAssets)
+      .getOrElse(fail("the second deployment was refused"))
     contracts.poolNFT.toString shouldBe SecondPoolNft
     contracts.vaultNFT.toString shouldBe SecondVaultNft
     contracts.feeVault.ergoTreeHex shouldBe secondVault
@@ -77,9 +81,15 @@ class LDDeploymentsSpec extends AnyFlatSpec with Matchers {
     LDDeployments.verify(Mainnet, secondPool, (SecondPoolNft -> 2L) +: secondAssets.tail) shouldBe None
   }
 
+  it should "refuse a pool box holding anything but three distinct tokens" in {
+    LDDeployments.verify(Mainnet, secondPool, secondAssets :+ ("33" * 32 -> 1L)) shouldBe None
+    LDDeployments.verify(Mainnet, secondPool, secondAssets.take(2)) shouldBe None
+    LDDeployments.verify(Mainnet, secondPool, secondAssets.take(2) :+ (SecondToken -> 1L)) shouldBe None
+  }
+
   it should "leave the provision token to the vault check, which the live vault fails" in {
-    // The pool's tree never names its provision token, so another token in slot 2 compiles the same pool
-    // tree. Only the vault is compiled with it, which is why discover() also requires the vault to stand.
+    // The pool's tree never names its provision token, so another token in slot 2 builds the same pool
+    // tree. Only the vault is built with it, which is why a deployment is served only once its vault stands.
     val other = "11" * 32
     val contracts = LDDeployments.verify(Mainnet, secondPool, Seq(SecondPoolNft -> 1L, SecondToken -> 1L, other -> 1L))
       .getOrElse(fail("the pool tree alone does not depend on the provision token"))
@@ -88,16 +98,36 @@ class LDDeploymentsSpec extends AnyFlatSpec with Matchers {
 
   "DexContracts" should "hand each builder the deployment its box's own ids belong to" in {
     val second = LDDeployments.verify(Mainnet, secondPool, secondAssets).get
-    DexContracts.register(second)
+    DexContracts.serve(Mainnet, Seq(second)) shouldBe Seq(second)
 
-    DexContracts.forPool(Mainnet, ErgoId.create(SecondPoolNft)).liquidityPool.ergoTreeHex shouldBe secondPool
-    DexContracts.forVault(Mainnet, ErgoId.create(SecondVaultNft)).feeVault.ergoTreeHex shouldBe secondVault
-    DexContracts.forProvToken(Mainnet, ErgoId.create(SecondProvToken)).provisionGuard.ergoTreeHex shouldBe SecondGuardTree
-    DexContracts.forPool(Mainnet, ErgoId.create(LitPoolNft)).liquidityPool.ergoTreeHex shouldBe litPool
+    DexContracts.forPool(Mainnet, id(SecondPoolNft)).liquidityPool.ergoTreeHex shouldBe secondPool
+    DexContracts.forVault(Mainnet, id(SecondVaultNft)).feeVault.ergoTreeHex shouldBe secondVault
+    DexContracts.forProvToken(Mainnet, id(SecondProvToken)).provisionGuard.ergoTreeHex shouldBe SecondGuardTree
+    DexContracts.forPool(Mainnet, id(LitPoolNft)).liquidityPool.ergoTreeHex shouldBe litPool
   }
 
-  it should "refuse an id no verified deployment holds, rather than lend it the canonical contracts" in {
-    an[IllegalStateException] should be thrownBy DexContracts.forPool(Mainnet, ErgoId.create("22" * 32))
-    an[IllegalStateException] should be thrownBy DexContracts.forProvToken(Mainnet, ErgoId.create("22" * 32))
+  it should "refuse an id no served deployment holds, rather than lend it the canonical contracts" in {
+    an[IllegalStateException] should be thrownBy DexContracts.forPool(Mainnet, id("22" * 32))
+    an[IllegalStateException] should be thrownBy DexContracts.forProvToken(Mainnet, id("22" * 32))
+  }
+
+  it should "forget a deployment the next serve leaves out" in {
+    val second = LDDeployments.verify(Mainnet, secondPool, secondAssets).get
+    DexContracts.serve(Mainnet, Seq(second))
+    DexContracts.forPool(Mainnet, id(SecondPoolNft)).poolNFT.toString shouldBe SecondPoolNft
+
+    DexContracts.serve(Mainnet, Seq.empty)
+    an[IllegalStateException] should be thrownBy DexContracts.forPool(Mainnet, id(SecondPoolNft))
+  }
+
+  it should "serve neither of two deployments sharing a provision token, nor one sharing the canonical's" in {
+    val second = LDDeployments.verify(Mainnet, secondPool, secondAssets).get
+    val twin = LDContracts(id("44" * 32), id("55" * 32), id(SecondProvToken), Mainnet)
+    val shadow = LDContracts(id("66" * 32), id("77" * 32), id(LitProvToken), Mainnet)
+
+    DexContracts.serve(Mainnet, Seq(second, twin, shadow)) shouldBe empty
+    an[IllegalStateException] should be thrownBy DexContracts.forProvToken(Mainnet, id(SecondProvToken))
+    an[IllegalStateException] should be thrownBy DexContracts.forPool(Mainnet, id("66" * 32))
+    DexContracts.serve(Mainnet, Seq.empty)
   }
 }

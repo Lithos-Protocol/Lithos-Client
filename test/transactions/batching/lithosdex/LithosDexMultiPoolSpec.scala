@@ -28,7 +28,7 @@ import scala.util.{Failure, Success}
 
 /**
  * The batcher serving a deployment other than the canonical one, against a mocked node: a second mainnet
- * deployment, compiled from its real ids, found at the pool template, and a sell order naming it.
+ * deployment, built from its real ids, and a sell order naming it, from which the batcher finds the pool.
  */
 class LithosDexMultiPoolSpec extends TestKit(ActorSystem("lithosdex-multi-pool-spec", LithosDexBatcherSpec.config))
   with AnyFlatSpecLike with Matchers with BeforeAndAfterAll with MockitoSugar {
@@ -45,15 +45,32 @@ class LithosDexMultiPoolSpec extends TestKit(ActorSystem("lithosdex-multi-pool-s
     NetworkType.MAINNET)
   private val secondToken = ErgoId.create("fffe6122886e3b0ab9b72b401b39bf8d3f13580c1335a41d91d19deb8038ccd4")
 
+  /** A deployment whose pool and vault check out, but whose pool box carries no registers. */
+  private val broken = LDContracts(ErgoId.create("ab" * 32), ErgoId.create("ac" * 32), ErgoId.create("ad" * 32),
+    NetworkType.MAINNET)
+
   private def longs(v: Array[Long]): ErgoValue[_] = ErgoValue.of(Colls.fromArray(v), scalaLongType)
 
   /**
    * @param discoverPools whether the batcher looks past the canonical pool
-   * @param forgeGuard    the pool at the template names ERG:LIT's guard instead of its own
+   * @param forgeGuard    the pool names ERG:LIT's guard instead of its own
+   * @param withBroken    an order also names [[broken]], whose vault stands but whose pool box will not read
    */
-  private class Fixture(discoverPools: Boolean, forgeGuard: Boolean = false) {
+  private class Fixture(discoverPools: Boolean, forgeGuard: Boolean = false, withBroken: Boolean = false) {
     val api: NodeApi = mock[NodeApi]
     val (nodeContext, _, _) = FakeNodeContext(api, numAddresses = 1)
+
+    val (brokenPool, brokenVault, brokenOrder) = nodeContext.getClient.execute { ctx: BlockchainContext =>
+      val owner = ctx.newProverBuilder().withDLogSecret(BigInteger.valueOf(7008L)).build().getAddress
+      val terms = LDOrderTerms(owner.getPublicKey, broken.poolNFT, Fee, 2000000L)
+      (LDNodeFixtures.nodeBox(ctx, UTXO(broken.liquidityPool, 20L * Parameters.OneErg,
+        Seq(Token(broken.poolNFT, 1L), Token(secondToken, 1000000000L), Token(broken.provToken, 1000L)), Seq.empty),
+        index = 2),
+        LDNodeFixtures.nodeBox(ctx, UTXO(broken.feeVault, LDHelpers.VAULT_MIN, Seq(Token(broken.vaultNFT, 1L)),
+          Seq(ErgoValue.of(BigInt(0).bigInteger), ErgoValue.of(BigInt(0).bigInteger))), index = 3),
+        LDNodeFixtures.nodeBox(ctx, UTXO(LDOrderContracts.swapSell(terms, 2L * Parameters.OneErg, 1L),
+          2L * Parameters.OneErg + Fee + Parameters.MinFee), index = 6, txId = "ce" * 32))
+    }
 
     val (pool, vault, order) = nodeContext.getClient.execute { ctx: BlockchainContext =>
       val owner = ctx.newProverBuilder().withDLogSecret(BigInteger.valueOf(7007L)).build().getAddress
@@ -86,13 +103,13 @@ class LithosDexMultiPoolSpec extends TestKit(ActorSystem("lithosdex-multi-pool-s
     })
 
     private val orderTemplate = LDOrderContracts.template(LithosDexOrder.parse(order).get.kind).templateHash
-    private val poolTemplate = LDDeployments.poolTemplateHash(NetworkType.MAINNET)
+    private val orders = Seq(IndexedBox(order, "", 100, 1L)) ++
+      (if (withBroken) Seq(IndexedBox(brokenOrder, "", 100, 4L)) else Seq.empty)
 
     when(api.unspentBoxesByTemplateHash(anyString(), any[Paging], any[SortDirection], any[MempoolOptions]))
       .thenAnswer { inv =>
         inv.getArgument[String](0) match {
-          case `orderTemplate` => Success(Seq(IndexedBox(order, "", 100, 1L)))
-          case `poolTemplate` => Success(Seq(IndexedBox(pool, "", 100, 2L)))
+          case `orderTemplate` => Success(orders)
           case _ => Success(Seq.empty[IndexedBox])
         }
       }
@@ -101,6 +118,8 @@ class LithosDexMultiPoolSpec extends TestKit(ActorSystem("lithosdex-multi-pool-s
         inv.getArgument[String](0) match {
           case nft if nft == second.poolNFT.toString => Success(Seq(IndexedBox(pool, "", 100, 2L)))
           case nft if nft == second.vaultNFT.toString => Success(Seq(IndexedBox(vault, "", 100, 3L)))
+          case nft if nft == broken.poolNFT.toString => Success(Seq(IndexedBox(brokenPool, "", 100, 5L)))
+          case nft if nft == broken.vaultNFT.toString => Success(Seq(IndexedBox(brokenVault, "", 100, 6L)))
           case _ => Success(Seq.empty[IndexedBox])
         }
       }
@@ -108,7 +127,7 @@ class LithosDexMultiPoolSpec extends TestKit(ActorSystem("lithosdex-multi-pool-s
       .thenReturn(Success(Seq.empty[IndexedBox]))
     when(api.boxesWithPoolByIds(any[Seq[String]])).thenAnswer { inv =>
       val wanted = inv.getArgument[Seq[String]](0).toSet
-      Success(Seq(order, pool, vault).filter(box => wanted.contains(box.boxId)))
+      Success(Seq(order, pool, vault, brokenOrder, brokenPool, brokenVault).filter(box => wanted.contains(box.boxId)))
     }
     when(api.sendTransaction(anyString())).thenReturn(Failure(NodeError.Rejected("refused by the test")))
     when(api.info()).thenReturn(Success(support.ChainFixtures.infoAt(200000).copy(bestFullHeaderId = Some(anchor))))
@@ -140,9 +159,19 @@ class LithosDexMultiPoolSpec extends TestKit(ActorSystem("lithosdex-multi-pool-s
     f.stop()
   }
 
-  it should "never serve a pool at the template whose contracts do not compile back to its tree" in {
+  it should "never serve a pool whose tree the contracts built from its own ids do not reproduce" in {
     val f = new Fixture(discoverPools = true, forgeGuard = true)
     verify(f.api, org.mockito.Mockito.after(5000).never()).sendTransaction(anyString())
+    f.stop()
+  }
+
+  it should "keep serving the other pools when a verified pool's box will not read" in {
+    // The broken pool costs its own order alone, so the scan still succeeds and the broadcast after it goes out
+    val f = new Fixture(discoverPools = true, withBroken = true)
+    val sent = ArgumentCaptor.forClass(classOf[String])
+    verify(f.api, timeout(30000).times(1)).sendTransaction(sent.capture())
+    sent.getValue should include(f.order.boxId)
+    sent.getValue should not include f.brokenOrder.boxId
     f.stop()
   }
 }

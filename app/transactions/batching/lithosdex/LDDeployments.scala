@@ -1,123 +1,56 @@
 package transactions.batching.lithosdex
 
-import lithosdex.contracts.LDContracts
+import lithosdex.contracts.{LDContractKind, LDContracts, LithosDexContracts}
 import node.NodeApi
-import node.model.{MempoolOptions, NodeBox, Paging, SortDirection}
-import org.bouncycastle.util.encoders.Hex
+import node.model.{MempoolOptions, Paging, SortDirection}
 import org.ergoplatform.appkit.NetworkType
 import org.ergoplatform.sdk.ErgoId
-import org.slf4j.{Logger, LoggerFactory}
-import scorex.crypto.hash.Blake2b256
 import sigma.ast.SCollection.SByteArray
 import sigma.ast.{Constant, ErgoTree, SType}
 
-import scala.collection.concurrent.TrieMap
 import scala.util.Try
 
 /**
- * LithosDex deployments other than the canonical one, found on chain and checked before anything is built
- * against them.
+ * Checks that a pool box belongs to a LithosDex deployment before anything is built against it.
  *
- * Every deployment's pool has the same ErgoTree template; only its two constants differ. So a template scan
- * lists every pool, genuine or not. A box found there is served only when the contracts compiled from its own
- * ids (pool NFT at tokens(0), provision token at tokens(2), vault NFT from the tree's CONST_VAULT_NFT) give
- * back exactly its tree, and its vault box sits alone at the compiled vault tree. That rules out a pool
- * pointing at some other guard or vault.
+ * Every deployment's contracts are the same four templates with its own ids put in. A pool box is one
+ * deployment's only when the contracts built from its own ids (pool NFT at tokens(0), provision token at
+ * tokens(2), vault NFT from its tree's CONST_VAULT_NFT) reproduce its tree exactly, and its vault is the
+ * only box holding the vault NFT, at the vault tree built from the same ids. The pool tree never names
+ * the provision token, so only the vault check ties it to the deployment.
  *
  * It cannot tell how a pool was minted: provision tokens kept back at genesis can be forged into provisions.
  * That matters to whoever lists a pool, not to an executor, which only builds what the contracts accept.
  */
 object LDDeployments {
 
-  private val logger: Logger = LoggerFactory.getLogger("LDDeployments")
-
-  private final val PageSize = 100
-
-  /** New compiles per refresh, so boxes spammed at the template cannot stall a scan. */
-  private final val MaxCompilesPerRefresh = 8
-
-  /** Compiled deployments by (pool NFT, vault NFT, provision token); None where the compile failed. */
-  private val compiled = TrieMap.empty[(String, String, String), Option[LDContracts]]
-
-  private val vaultConstantIndices = TrieMap.empty[NetworkType, Int]
-
-  /** Node indexer hash of the pool template: Blake2b256 over its bytes. The public explorer uses SHA-256. */
-  def poolTemplateHash(networkType: NetworkType): String =
-    Hex.toHexString(Blake2b256.hash(DexContracts(networkType).liquidityPool.ergoTree.template))
-
   /**
-   * The deployment a pool box at the template belongs to, if its contracts compile back to exactly its tree.
-   * No node reads. With `mayCompile` false, a deployment not compiled before is None.
+   * The deployment a pool box belongs to, if the contracts built from its own ids reproduce its tree and
+   * it holds exactly three distinct tokens, the first a single unit. No node reads and no compiling.
    */
-  def verify(networkType: NetworkType, ergoTreeHex: String, assets: Seq[(String, Long)],
-             mayCompile: Boolean = true): Option[LDContracts] = {
+  def verify(networkType: NetworkType, ergoTreeHex: String, assets: Seq[(String, Long)]): Option[LDContracts] = {
     val tree = ergoTreeHex.toLowerCase
     for {
-      (poolNft, poolAmount) <- assets.headOption if poolAmount == 1L && assets.size >= 3
-      provToken = assets(2)._1
+      (poolNft, poolAmount) <- assets.headOption
+      if poolAmount == 1L && assets.size == 3 && assets.map(_._1.toLowerCase).distinct.size == 3
       parsed <- Try(ErgoTree.fromHex(tree)).toOption
-      vault <- parsed.constants.lift(vaultConstantIndex(networkType)).flatMap(bytesOf) if vault.length == 32
-      key = (poolNft, Hex.toHexString(vault), provToken)
-      contracts <- compiled.get(key) match {
-        case Some(known) => known
-        case None if mayCompile =>
-          val result = Try(DexContracts.compile(networkType, ErgoId.create(key._1), ErgoId.create(key._2),
-            ErgoId.create(key._3))).toOption
-          compiled.put(key, result)
-          if (!result.exists(_.liquidityPool.ergoTreeHex == tree))
-            logger.info(s"Not serving pool $poolNft: its contracts, compiled from its own ids, do not match its tree")
-          result
-        case None => None
-      }
+      vault <- parsed.constants.lift(VaultNftIndex).flatMap(bytesOf) if vault.length == 32
+      contracts <- Try(LDContracts(ErgoId.create(poolNft), new ErgoId(vault), ErgoId.create(assets(2)._1),
+        networkType)).toOption
       if contracts.liquidityPool.ergoTreeHex == tree
     } yield contracts
   }
 
-  /** Every deployment at the template that passes [[verify]] and whose vault stands, less `denied` pool NFTs. */
-  def discover(networkType: NetworkType, nodeApi: NodeApi, maxPools: Int, denied: Set[String]): Vector[LDContracts] = {
-    val hash = poolTemplateHash(networkType)
-    var boxes = Vector.empty[NodeBox]
-    var exhausted = false
-    while (!exhausted && boxes.size < maxPools) {
-      val page = nodeApi.unspentBoxesByTemplateHash(hash, Paging(boxes.size, PageSize), SortDirection.Desc,
-        MempoolOptions.ConfirmedOnly).get
-      boxes ++= page.map(_.box)
-      exhausted = page.size < PageSize
-    }
-
-    var compiles = 0
-    boxes.take(maxPools)
-      .filterNot(box => box.assets.headOption.exists(asset => denied.contains(asset.tokenId.toLowerCase)))
-      .flatMap { box =>
-        val assets = box.assets.map(asset => asset.tokenId -> asset.amount)
-        verify(networkType, box.ergoTree, assets, mayCompile = false).orElse {
-          // Left for the next refresh once the budget is spent, not refused
-          if (compiles >= MaxCompilesPerRefresh) None
-          else { compiles += 1; verify(networkType, box.ergoTree, assets) }
-        }
-      }
-      .filter(vaultStands(nodeApi, _))
-      .groupBy(_.poolNFT.toString).values.map(_.head).toVector
+  /** The deployment's vault: the only unspent box carrying its NFT, at the vault tree built from its ids. */
+  def vaultStands(nodeApi: NodeApi, contracts: LDContracts): Boolean = {
+    val boxes = nodeApi.unspentBoxesByTokenId(contracts.vaultNFT.toString, Paging(0, 2), SortDirection.Desc,
+      MempoolOptions.ConfirmedOnly).get
+    boxes.size == 1 && boxes.head.box.ergoTree.equalsIgnoreCase(contracts.feeVault.ergoTreeHex)
   }
 
-  /** The deployment's vault: the only unspent box carrying its NFT, at its compiled tree. */
-  private def vaultStands(nodeApi: NodeApi, contracts: LDContracts): Boolean =
-    nodeApi.unspentBoxesByTokenId(contracts.vaultNFT.toString, Paging(0, 2), SortDirection.Desc,
-      MempoolOptions.ConfirmedOnly).toOption.exists(boxes =>
-      boxes.size == 1 && boxes.head.box.ergoTree.equalsIgnoreCase(contracts.feeVault.ergoTreeHex))
-
-  /** Where CONST_VAULT_NFT sits among the pool tree's constants; the same in every deployment. */
-  private def vaultConstantIndex(networkType: NetworkType): Int =
-    vaultConstantIndices.getOrElseUpdate(networkType, locateVaultConstant(networkType))
-
-  private def locateVaultConstant(networkType: NetworkType): Int = {
-    val canonical = DexContracts(networkType)
-    val vault = canonical.vaultNFT.getBytes
-    val found = canonical.liquidityPool.ergoTree.constants.indices
-      .filter(i => bytesOf(canonical.liquidityPool.ergoTree.constants(i)).exists(java.util.Arrays.equals(_, vault)))
-    require(found.size == 1, s"the canonical pool tree holds its vault NFT ${found.size} times, expected once")
-    found.head
-  }
+  /** Where CONST_VAULT_NFT sits among a pool tree's constants; the same in every deployment. */
+  private lazy val VaultNftIndex: Int =
+    LithosDexContracts.indexOf(LDContractKind.LiquidityPool, LithosDexContracts.VAULT_NFT)
 
   private def bytesOf(constant: Constant[SType]): Option[Array[Byte]] =
     if (constant.tpe != SByteArray) None

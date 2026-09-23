@@ -7,11 +7,11 @@ import play.api.{ConfigLoader, Configuration}
  *
  * @param autoFlush close each candidate run with a flush moving the pool's pending fees into the vault,
  *                  so providers can claim them. Never broadcast, since a broadcast flush pays a fee.
- * @param discoverPools also broadcast for every other deployment found at the pool contract's template,
- *                  served only once its contracts, compiled from its own ids, reproduce its pool and vault
- *                  trees exactly. Block candidates keep executing the canonical pool alone.
+ * @param discoverPools also broadcast orders for pools other than the canonical one, each served only when the
+ *                  contracts built from its own ids reproduce its pool and vault exactly. Block candidates keep
+ *                  executing the canonical pool alone.
  */
-case class LithosDexBatchingConfig(batching: BatchingConfig, autoFlush: Boolean, discoverPools: Boolean = false)
+case class LithosDexBatchingConfig(batching: BatchingConfig, autoFlush: Boolean, discoverPools: Boolean = true)
 
 object LithosDexBatchingConfig {
 
