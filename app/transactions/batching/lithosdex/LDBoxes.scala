@@ -1,7 +1,7 @@
 package transactions.batching.lithosdex
 
 import lithosdex.LDHelpers
-import lithosdex.contracts.LDOrderKind
+import lithosdex.contracts.{LDContracts, LDOrderKind}
 import node.MutationConversions._
 import node.NodeApi
 import node.model.SortDirection.Asc
@@ -120,9 +120,14 @@ object LDBoxes {
    * still the provision its owner holds.
    */
   def provisionsOwnedBy(ctx: BlockchainContext, nodeApi: NodeApi, owners: Set[String],
+                        mempool: MempoolOptions): (Seq[Provision], Boolean) =
+    provisionsOwnedBy(ctx, nodeApi, DexContracts(ctx), owners, mempool)
+
+  /** The same, for the deployment `contracts` describes: its own guard address and provision token. */
+  def provisionsOwnedBy(ctx: BlockchainContext, nodeApi: NodeApi, contracts: LDContracts, owners: Set[String],
                         mempool: MempoolOptions): (Seq[Provision], Boolean) = {
-    val provTokenId = LDHelpers.getProvToken(ctx.getNetworkType).toString
-    val guard = DexContracts(ctx).provisionGuard.ergoTreeHex
+    val provTokenId = contracts.provToken.toString
+    val guard = contracts.provisionGuard.ergoTreeHex
     val wanted = owners.map(owner => OwnerRegisterPrefix + owner.toLowerCase)
 
     var found = Vector.empty[Provision]

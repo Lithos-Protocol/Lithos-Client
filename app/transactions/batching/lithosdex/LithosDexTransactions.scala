@@ -381,7 +381,7 @@ object LithosDexTransactions {
                        provTokens: Long,
                        accX: BigInt,
                        accY: BigInt): UTXO =
-    UTXO(DexContracts(ctx).liquidityPool, reservesX + pendingX,
+    UTXO(DexContracts.forPool(ctx.getNetworkType, p.poolNFT).liquidityPool, reservesX + pendingX,
       Seq(Token(p.poolNFT, 1L),
         Token(p.tokenY, reservesY + pendingY),
         Token(p.provToken, provTokens)),
@@ -417,7 +417,7 @@ object LithosDexTransactions {
       else Seq(Token(v.tokenY.orElse(arriving).getOrElse(throw new IllegalStateException(
         s"the vault would hold $balanceY tokens but neither it nor the flush names which token")), balanceY))
 
-    UTXO(DexContracts(ctx).feeVault, balanceX,
+    UTXO(DexContracts.forVault(ctx.getNetworkType, v.vaultNFT).feeVault, balanceX,
       Seq(Token(v.vaultNFT, 1L)) ++ tokenEntry,
       Seq(bigIntValue(accX), bigIntValue(accY)))
   }
@@ -430,7 +430,7 @@ object LithosDexTransactions {
                             ownerNFT: ErgoId,
                             shares: Long,
                             value: Long): UTXO =
-    UTXO(DexContracts(ctx).provisionGuard, value, Seq(Token(provToken, 1L)),
+    UTXO(DexContracts.forProvToken(ctx.getNetworkType, provToken).provisionGuard, value, Seq(Token(provToken, 1L)),
       Seq(bigIntValue(entryX), bigIntValue(entryY), bytesValue(ownerNFT.getBytes), ErgoValue.of(shares)))
 
   /**
@@ -497,11 +497,18 @@ object LithosDexTransactions {
       Seq[(Byte, ErgoValue[_])](0.toByte -> ErgoValue.of(op)) ++
         (if (count >= 0) Seq[(Byte, ErgoValue[_])](1.toByte -> ErgoValue.of(count)) else Seq.empty))
 
-  /** Every provision input needs its op AND the provision logic the guard executes from var 64. */
-  private[lithosdex] def provisionInput(ctx: BlockchainContext, box: InputUTXO, op: Byte): InputUTXO =
+  /**
+   * Every provision input needs its op AND the provision logic the guard executes from var 64. The logic
+   * is the deployment's whose provision token the box holds, so a provision of any pool unlocks.
+   */
+  private[lithosdex] def provisionInput(ctx: BlockchainContext, box: InputUTXO, op: Byte): InputUTXO = {
+    val provToken = box.tokens.headOption.map(_.id).getOrElse(
+      throw new IllegalStateException(s"provision ${box.id} holds no provision token"))
     DexContracts.attachCtxVars(box, Seq[(Byte, ErgoValue[_])](
       0.toByte -> ErgoValue.of(op),
-      LDHelpers.PROVISION_LOGIC_VAR -> bytesValue(DexContracts(ctx).provisionLogic.valueBytes)))
+      LDHelpers.PROVISION_LOGIC_VAR ->
+        bytesValue(DexContracts.forProvToken(ctx.getNetworkType, provToken).provisionLogic.valueBytes)))
+  }
 
   // ══════════════════════════════════════════════════════════════════════════
   //  TRANSACTION SHAPE
