@@ -1,5 +1,6 @@
 package transactions.batching.lithosdex
 
+import lithosdex.contracts.LDContracts
 import lithosdex.states.LDFeeValue
 import lithosdex.{LDHelpers, LDLiquidityPool}
 import mutations.NodeWallet
@@ -189,13 +190,17 @@ object LithosDexExecution {
    * or after `unbuildableLimits.perRun` unbuildable orders. Once `unbuildableLimits.perTx` orders one
    * transaction created have failed, that transaction's other orders are passed over untried.
    *
-   * @param placementOf the unconfirmed placements an order's box needs carried ahead of it
+   * @param contracts      the deployment `poolBox` belongs to, which every output is built under
+   * @param placementOf    the unconfirmed placements an order's box needs carried ahead of it
+   * @param alreadyCarried placements another run in the same block carries, which take no slot here
    */
-  def run(ctx: BlockchainContext, wallet: NodeWallet, poolBox: InputUTXO, orders: Seq[LithosDexOrder], limit: Int,
+  def run(ctx: BlockchainContext, wallet: NodeWallet, contracts: LDContracts, poolBox: InputUTXO,
+          orders: Seq[LithosDexOrder], limit: Int,
           minRevenue: Long, provisions: Provisions, blockHeight: Int, minerFeeCeiling: Long, useTrueProp: Boolean,
           deadline: Deadline,
           placementOf: LithosDexOrder => Vector[CompleteMempool.MempoolTx] = _ => Vector.empty,
-          unbuildableLimits: Batcher.UnbuildableLimits = Batcher.UnbuildableLimits.Default): LithosDexRun = {
+          unbuildableLimits: Batcher.UnbuildableLimits = Batcher.UnbuildableLimits.Default,
+          alreadyCarried: Set[String] = Set.empty): LithosDexRun = {
     val opening = LDLiquidityPool(poolBox)
     val ranked = orders
       .flatMap(order => price(order, opening, minRevenue, provisions, fundsItsOwnBox = false, minerFeeCeiling)
@@ -212,7 +217,8 @@ object LithosDexExecution {
     var unbuildable = Vector.empty[String]
     var failedByTx = Map.empty[String, Int]
     val remaining = ranked.iterator
-    def full = built.size + placements.size >= limit
+    def slotsUsed(txs: Vector[CompleteMempool.MempoolTx]) = built.size + txs.count(tx => !alreadyCarried.contains(tx.id))
+    def full = slotsUsed(placements) >= limit
     def stopped = deadline.isOverdue() || unbuildable.size >= unbuildableLimits.perRun
 
     while (remaining.hasNext && !full && !stopped) {
@@ -225,8 +231,8 @@ object LithosDexExecution {
         else price(order, LDLiquidityPool(pool), minRevenue, provisions, fundsItsOwnBox = built.isEmpty, minerFeeCeiling)
       priced.foreach { fill =>
         val added = placementOf(order).filterNot(tx => placements.exists(_.id == tx.id))
-        if (built.size + placements.size + added.size < limit) Try {
-          val signed = assembled(ctx, wallet, pool, fill, blockHeight, minerFeeCeiling, useTrueProp, carried)
+        if (slotsUsed(placements ++ added) < limit) Try {
+          val signed = assembled(ctx, wallet, contracts, pool, fill, blockHeight, minerFeeCeiling, useTrueProp, carried)
           val outputs = signed.getOutputsToSpend
           (signed, InputUTXO(outputs.get(0)), InputUTXO(outputs.get(takingsIndex(order))))
         } match {
@@ -253,11 +259,11 @@ object LithosDexExecution {
    * `chain` closed with a flush of the pending fees its last pool box holds, or `chain` unchanged when
    * nothing is pending or the flush cannot be built. A flush is optional, so failing one never costs the run.
    */
-  def withFlush(ctx: BlockchainContext, wallet: NodeWallet, chain: LithosDexChain, vaultBox: InputUTXO,
-                blockHeight: Int): LithosDexChain = {
+  def withFlush(ctx: BlockchainContext, wallet: NodeWallet, contracts: LDContracts, chain: LithosDexChain,
+                vaultBox: InputUTXO, blockHeight: Int): LithosDexChain = {
     val poolBox = InputUTXO(chain.transactions.last.getOutputsToSpend.get(0))
     if (!LDLiquidityPool(poolBox).canFlush) chain
-    else Try(flush(ctx, wallet, poolBox, vaultBox, blockHeight)) match {
+    else Try(flush(ctx, wallet, contracts, poolBox, vaultBox, blockHeight)) match {
       case Success(signed) => chain.copy(flush = Some(signed))
       case Failure(ex) =>
         logger.warn(s"Could not close a LithosDEX run with a flush, offering it without one: ${ex.getMessage}")
@@ -272,7 +278,8 @@ object LithosDexExecution {
   }
 
   /** One execution in the positions its order contract reads, followed by an optional miner fee. */
-  private[lithosdex] def assembled(ctx: BlockchainContext, wallet: NodeWallet, poolBox: InputUTXO, fill: LithosDexFill,
+  private[lithosdex] def assembled(ctx: BlockchainContext, wallet: NodeWallet, contracts: LDContracts,
+                                   poolBox: InputUTXO, fill: LithosDexFill,
                                    blockHeight: Int, minerFeeCeiling: Long, useTrueProp: Boolean,
                                    carriedTakings: Option[InputUTXO] = None): SignedTransaction = {
     val order = fill.order
@@ -290,7 +297,7 @@ object LithosDexExecution {
     val height = math.max(blockHeight, TxBuilder.newestInput(
       Seq(poolBox, orderIn) ++ carriedTakings.toSeq ++ fill.provision.map(_.box)))
 
-    val poolOut = LithosDexTransactions.poolUTXO(ctx, p, fill.poolAfter).setCreationHeight(height)
+    val poolOut = LithosDexTransactions.poolUTXO(contracts, p, fill.poolAfter).setCreationHeight(height)
     // The reward's script is the order's own constant, never anything this client chooses
     val redeemer = Contract(sigma.ast.ErgoTree.fromHex(order.terms.redeemerTree))
     val takingsOut = UTXO(CandidateCapital.collectionContract(wallet, useTrueProp), takings)
@@ -308,7 +315,7 @@ object LithosDexExecution {
       case _: LithosDexOrder.Deposit =>
         // The ownership NFT can only take the id of the pool box, the transaction's first input
         val nft = poolBox.id
-        val provisionOut = LithosDexTransactions.provisionUTXO(ctx, p.provToken, p.accX, p.accY, nft, fill.shares,
+        val provisionOut = LithosDexTransactions.provisionUTXO(contracts, p.provToken, p.accX, p.accY, nft, fill.shares,
           LDHelpers.PROVISION_MIN).setCreationHeight(height)
         val takenX = fill.poolAfter.reservesX - p.reservesX
         val takenY = fill.poolAfter.reservesY - p.reservesY
@@ -326,7 +333,7 @@ object LithosDexExecution {
       case _: LithosDexOrder.Redeem =>
         val provision = fill.provision.getOrElse(throw new IllegalStateException("a redemption needs its provision"))
         (Seq(LithosDexTransactions.poolInput(poolBox, LDHelpers.POOL_REDEEM),
-          LithosDexTransactions.provisionInput(ctx, provision.box, LDHelpers.PROV_REDEEM), orderIn),
+          LithosDexTransactions.provisionInput(contracts, provision.box, LDHelpers.PROV_REDEEM), orderIn),
           Seq(poolOut, UTXO(redeemer, fill.rewardValue, tokensY(fill.rewardY)).setCreationHeight(height), takingsOut),
           Seq(Token(provision.ownerNFT, 1L)))
     }
@@ -340,16 +347,17 @@ object LithosDexExecution {
   }
 
   /** Moves the pool's pending fees and the accumulators they paid for into the vault. Fee-less. */
-  private[lithosdex] def flush(ctx: BlockchainContext, wallet: NodeWallet, poolBox: InputUTXO, vaultBox: InputUTXO,
+  private[lithosdex] def flush(ctx: BlockchainContext, wallet: NodeWallet, contracts: LDContracts, poolBox: InputUTXO,
+                               vaultBox: InputUTXO,
                                blockHeight: Int): SignedTransaction = {
     val p = LDLiquidityPool(poolBox)
     require(p.canFlush, "nothing is pending: the pool refuses a flush that moves nothing")
     val v = LDFeeValue.fromBox(vaultBox, 0, blockHeight)
     // A flush closes a chain, so the pool it spends is normally the last execution's own output
     val height = math.max(blockHeight, TxBuilder.newestInput(Seq(poolBox, vaultBox)))
-    val poolOut = LithosDexTransactions.poolUTXO(ctx, p, p.reservesX, p.reservesY, 0L, 0L, p.supply,
+    val poolOut = LithosDexTransactions.poolUTXO(contracts, p, p.reservesX, p.reservesY, 0L, 0L, p.supply,
       p.provTokensLeft, p.accX, p.accY).setCreationHeight(height)
-    val vaultOut = LithosDexTransactions.vaultUTXO(ctx, v, Some(p.tokenY), v.balanceX + p.pendingX,
+    val vaultOut = LithosDexTransactions.vaultUTXO(contracts, v, Some(p.tokenY), v.balanceX + p.pendingX,
       v.balanceY + p.pendingY, p.accX, p.accY).setCreationHeight(height)
     val unsigned = TxBuilder(ctx)
       .setInputs(LithosDexTransactions.poolInput(poolBox, LDHelpers.POOL_FLUSH),

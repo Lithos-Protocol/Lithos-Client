@@ -1,22 +1,34 @@
 package stats
 
-import lithosdex.LDHelpers
 import node.model.{NodeAsset, NodeBox, NodeRegisters}
 import org.bouncycastle.util.encoders.Hex
 import org.ergoplatform.appkit.NetworkType
 import state.messages.{BlockInfo, BlockTx, TxOutput}
 import transactions.batching.ergodex.{ErgoDexOrder, ErgoDexPool, OrderKind}
-import transactions.batching.lithosdex.{DexContracts, LithosDexOrder}
+import transactions.batching.lithosdex.{DexContracts, LDDeployments, LithosDexOrder}
 import work.lithos.mutations.Contract
+
+import scala.collection.concurrent.TrieMap
 
 /** Recognizes the executed pool/order/output layout. Carried executor boxes are never counted again. */
 private[stats] object BatchingStatistics {
   def poolProtocol(input: TxOutput, network: NetworkType): Option[String] = {
     if (input.ergoTree == transactions.batching.ergodex.ErgoDexContracts.NativePoolErgoTree) Some("ergodex")
-    else if (input.assets.headOption.exists(t => t.id == LDHelpers.getPoolNFT(network) && t.amount == 1L) &&
-      input.ergoTree == DexContracts(network).liquidityPool.ergoTreeHex) Some("lithosdex")
+    else if (lithosDexPool(input, network)) Some("lithosdex")
     else None
   }
+
+  /** The pool contract's template as hex, which every LithosDex deployment's pool tree ends with. */
+  private val poolTemplates = TrieMap.empty[NetworkType, String]
+
+  /**
+   * Any LithosDex deployment's pool, ERG:LIT included: a box whose contracts, built from its own ids,
+   * reproduce its tree. The template suffix is checked first, so most boxes cost no build at all.
+   */
+  private def lithosDexPool(box: TxOutput, network: NetworkType): Boolean =
+    box.ergoTree.endsWith(poolTemplates.getOrElseUpdate(network,
+      Hex.toHexString(DexContracts(network).liquidityPool.ergoTree.template))) &&
+      LDDeployments.verify(network, box.ergoTree, box.assets.map(t => t.id.toString -> t.amount)).isDefined
   def transactionFee(tx: BlockTx): BigInt = tx.outputs.filter(_.ergoTree == Contract.FEE.ergoTreeHex)
     .map(out => BigInt(out.value)).sum
 
@@ -70,8 +82,7 @@ private[stats] object BatchingStatistics {
             }
           }
         }
-      case None if nft.contains(LDHelpers.getPoolNFT(network).toString) &&
-        pool.ergoTree == DexContracts(network).liquidityPool.ergoTreeHex =>
+      case None if lithosDexPool(pool, network) =>
         inputs.slice(1, 3).flatten.toVector.flatMap { input =>
           LithosDexOrder.parse(box(input)).filter(o => nft.contains(o.poolNft)).toVector.flatMap { order =>
             order match {

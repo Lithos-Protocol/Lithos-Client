@@ -93,7 +93,8 @@ class LithosDexExecutionSpec extends AnyFlatSpec with Matchers {
   private def runOf(ctx: BlockchainContext, poolBox: InputUTXO, orders: Seq[LithosDexOrder], limit: Int = 10,
                     provs: LithosDexExecution.Provisions = LithosDexExecution.NoProvisions, ceiling: Long = 0L,
                     deadline: Deadline = 1.minute.fromNow): LithosDexRun =
-    LithosDexExecution.run(ctx, wallet, poolBox, orders, limit, 0L, provs, Height, ceiling, useTrueProp = false, deadline)
+    LithosDexExecution.run(ctx, wallet, DexContracts(ctx), poolBox, orders, limit, 0L, provs, Height, ceiling,
+      useTrueProp = false, deadline)
 
   private def buildOne(ctx: BlockchainContext, order: LithosDexOrder, ceiling: Long = 0L,
                        provs: LithosDexExecution.Provisions = LithosDexExecution.NoProvisions): (LithosDexFill, LithosDexChain) = {
@@ -190,7 +191,7 @@ class LithosDexExecutionSpec extends AnyFlatSpec with Matchers {
   it should "close with a flush that moves the pending fees into the vault" in withCtx { ctx =>
     val (_, chain) = buildOne(ctx, sell(ctx))
     val vault = LDNodeFixtures.vaultBox(ctx, balanceX = LDHelpers.VAULT_MIN).toInputUTXO(ctx)
-    val closed = LithosDexExecution.withFlush(ctx, wallet, chain, vault, Height)
+    val closed = LithosDexExecution.withFlush(ctx, wallet, DexContracts(ctx), chain, vault, Height)
     val flush = closed.flush.getOrElse(fail("no flush was built"))
     val poolIn = InputUTXO(chain.transactions.last.getOutputsToSpend.get(0))
     val before = LDLiquidityPool(poolIn)
@@ -205,7 +206,7 @@ class LithosDexExecutionSpec extends AnyFlatSpec with Matchers {
     val poolBox = poolNode(ctx, pendingX = 0L, pendingY = 0L).toInputUTXO(ctx)
     val chain = runOf(ctx, poolBox, Seq(deposit(ctx))).chain.get
     val vault = LDNodeFixtures.vaultBox(ctx, balanceX = LDHelpers.VAULT_MIN).toInputUTXO(ctx)
-    LithosDexExecution.withFlush(ctx, wallet, chain, vault, Height).flush shouldBe None
+    LithosDexExecution.withFlush(ctx, wallet, DexContracts(ctx), chain, vault, Height).flush shouldBe None
   }
 
   it should "pay a broadcast's miner fee out of the executor fee, within the order's cap" in withCtx { ctx =>

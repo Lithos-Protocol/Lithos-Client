@@ -8,6 +8,7 @@ import org.scalatest.matchers.should.Matchers
 import state.messages.{BlockInfo, BlockTx, NodeSync, TxInput}
 import support.{ErgoDexFixtures, FakeNodeContext, LDNodeFixtures, SyncFixtures}
 import transactions.batching.ergodex.{ErgoDexOrder, ErgoDexPool}
+import transactions.batching.lithosdex.DexContracts
 import work.lithos.mutations.Contract
 
 class BatchingStatisticsSpec extends AnyFlatSpec with Matchers {
@@ -65,6 +66,43 @@ class BatchingStatisticsSpec extends AnyFlatSpec with Matchers {
       result.head.local shouldBe false
       val refunded = tx.copy(outputs = tx.outputs.updated(1, tx.outputs(1).copy(value = 7000000L)))
       BatchingStatistics.read(block, refunded, ctx.getNetworkType, mine) shouldBe empty
+    }
+  }
+
+  it should "count an execution on a LithosDex pool other than ERG:LIT, and not on a pool with a forged guard" in {
+    val fake = FakeNodeContext()
+    fake._1.getClient.execute { ctx =>
+      import lithosdex.contracts.{LDContracts, LDOrderContracts, LDOrderTerms}
+      import org.ergoplatform.sdk.ErgoId
+      val second = LDContracts(
+        ErgoId.create("77ebb7ac1a9386d6cc5b64fffa52602bea574b0bb454fb856188ae54acb84894"),
+        ErgoId.create("9cec4df2183f6047edf61ec9bb60649c22362e17c074fac7c41d75c5229129f0"),
+        ErgoId.create("27bc91eaf7e72d2a17cf6e73de349262c87bea7894121963b4100a644a08da25"),
+        ctx.getNetworkType)
+      val canonical = LDNodeFixtures.poolBox(ctx, 10000000000L, 10000000000L)
+      val pool = canonical.copy(ergoTree = second.liquidityPool.ergoTreeHex, assets = Seq(
+        NodeAsset(second.poolNFT.toString, 1L), canonical.assets(1), NodeAsset(second.provToken.toString, 1000000L)))
+      val terms = LDOrderTerms(fake._3.contract.sigmaBoolean.get, second.poolNFT, 6000000, 2000000)
+      val order = NodeBox(SyncFixtures.id(21), "placed", 1007000000L, 0, 100,
+        LDOrderContracts.swapSell(terms, 1000000000L, 1L).ergoTreeHex, Seq.empty, NodeRegisters(Map.empty))
+      val after = pool.copy(boxId = SyncFixtures.id(22), value = pool.value + 1000000000L)
+      val reward = order.copy(boxId = SyncFixtures.id(23), ergoTree = fake._3.contract.ergoTreeHex, value = 1000000L)
+      def executed(poolIn: NodeBox, poolOut: NodeBox): (BlockInfo, BlockTx) = {
+        val tx = BlockTx("ld-other-pool", Seq(TxInput(poolIn.boxId, None), TxInput(order.boxId, None)), Seq.empty,
+          Seq(poolOut, reward).map(NodeSync.txOutput))
+        BlockInfo("block", 120, Seq(tx),
+          resolvedInputs = Seq(poolIn, order).map(b => b.boxId -> NodeSync.txOutput(b)).toMap) -> tx
+      }
+
+      val (block, tx) = executed(pool, after)
+      BatchingStatistics.read(block, tx, ctx.getNetworkType, "00").map(_.grossNanoErg) shouldBe Vector("6000000")
+      BatchingStatistics.poolProtocol(NodeSync.txOutput(pool), ctx.getNetworkType) shouldBe Some("lithosdex")
+
+      // Same template, but provisions would be checked against ERG:LIT's guard: not a deployment's pool
+      val forgedTree = pool.ergoTree.replace(second.provisionGuard.hashedPropBytesHex,
+        DexContracts(ctx).provisionGuard.hashedPropBytesHex)
+      val (forgedBlock, forgedTx) = executed(pool.copy(ergoTree = forgedTree), after.copy(ergoTree = forgedTree))
+      BatchingStatistics.read(forgedBlock, forgedTx, ctx.getNetworkType, "00") shouldBe empty
     }
   }
 }

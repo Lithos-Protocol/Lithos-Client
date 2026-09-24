@@ -1,5 +1,6 @@
 package transactions.batching.lithosdex
 
+import lithosdex.contracts.LDContracts
 import lithosdex.states.LDFeeValue
 import lithosdex.{LDHelpers, LDLiquidityPool}
 import mutations.NodeWallet
@@ -81,7 +82,7 @@ object LithosDexTransactions {
     require(q.amountOut >= minOutput,
       s"the pool has moved since the quote: it would return ${q.amountOut}, below the ${minOutput} floor")
 
-    val out = poolUTXO(ctx, p, p.afterSwap(q))
+    val out = poolUTXO(DexContracts(ctx), p, p.afterSwap(q))
 
     val fundingValue = if (ergIn) amountIn + FUNDING_HEADROOM else FUNDING_HEADROOM
     val fundingTokens = if (ergIn) Seq.empty else Seq(Token(p.tokenY, amountIn))
@@ -115,9 +116,9 @@ object LithosDexTransactions {
     // unmintable anywhere else, and it is why this cannot be quoted ahead of the box it will spend.
     val ownerNFT = poolBox.id
 
-    val poolOut = poolUTXO(ctx, p, p.afterDeposit(q.amountX, q.amountY, q.shares))
+    val poolOut = poolUTXO(DexContracts(ctx), p, p.afterDeposit(q.amountX, q.amountY, q.shares))
 
-    val provisionOut = provisionUTXO(ctx, p.provToken, q.entryX, q.entryY, ownerNFT, q.shares,
+    val provisionOut = provisionUTXO(DexContracts(ctx), p.provToken, q.entryX, q.entryY, ownerNFT, q.shares,
       LDHelpers.PROVISION_MIN)
     val ownerOut = ownerNftUTXO(ctx, wallet, p, ownerNFT, q.entryX, q.entryY, q.shares, q.amountX, q.amountY)
 
@@ -152,7 +153,7 @@ object LithosDexTransactions {
     require(q.withinMinSupply,
       s"closing this provision would take supply under ${LDHelpers.MIN_SUPPLY}, which the pool refuses")
 
-    val poolOut = poolUTXO(ctx, p, p.afterRedeem(q))
+    val poolOut = poolUTXO(DexContracts(ctx), p, p.afterRedeem(q))
 
     // OUTPUTS(1) has to exist: the provision sits at INPUTS(1) and reads OUTPUTS(selfBoxIndex).
     val payout = UTXO(wallet.contract, q.amountX + provision.value,
@@ -164,7 +165,7 @@ object LithosDexTransactions {
       val walletInputs = funding
       val inputs = Seq(
         poolInput(poolBox, LDHelpers.POOL_REDEEM),
-        provisionInput(ctx, provision.box, LDHelpers.PROV_REDEEM)) ++ walletInputs
+        provisionInput(DexContracts(ctx), provision.box, LDHelpers.PROV_REDEEM)) ++ walletInputs
 
       val uTx = build(ctx, inputs, Seq(poolOut, payout), wallet,
         burn = Seq(Token(provision.ownerNFT, 1L)))
@@ -190,13 +191,13 @@ object LithosDexTransactions {
     val v = LDFeeValue.fromBox(vaultBox, 0, ctx.getHeight)
     require(p.canFlush, "nothing is pending: the pool refuses a flush that moves nothing")
 
-    val poolOut = poolUTXO(ctx, p,
+    val poolOut = poolUTXO(DexContracts(ctx), p,
       reservesX = p.reservesX, reservesY = p.reservesY,
       pendingX = 0L, pendingY = 0L,
       supply = p.supply, provTokens = p.provTokensLeft,
       accX = p.accX, accY = p.accY)
 
-    val vaultOut = vaultUTXO(ctx, v, Some(p.tokenY),
+    val vaultOut = vaultUTXO(DexContracts(ctx), v, Some(p.tokenY),
       balanceX = v.balanceX + p.pendingX,
       balanceY = v.balanceY + p.pendingY,
       accX = p.accX, accY = p.accY)
@@ -244,7 +245,7 @@ object LithosDexTransactions {
         s"${LDHelpers.VAULT_MIN} is held back for storage rent and is never payable")
     require(v.payableY >= owedY, s"the vault holds only ${v.payableY} tokens of the $owedY owed")
 
-    val vaultOut = vaultUTXO(ctx, v, None,
+    val vaultOut = vaultUTXO(DexContracts(ctx), v, None,
       balanceX = v.balanceX - owedX,
       balanceY = v.balanceY - owedY,
       accX = v.accX, accY = v.accY)
@@ -252,14 +253,14 @@ object LithosDexTransactions {
     // Each successor must sit at its own input index and carry the vault's accumulator forward exactly.
     // Leaving one short would let the same stretch be settled twice.
     val provOuts = provisions.map(p =>
-      provisionUTXO(ctx, p.box.tokens.head.id, v.accX, v.accY, p.ownerNFT, p.shares, p.value))
+      provisionUTXO(DexContracts(ctx), p.box.tokens.head.id, v.accX, v.accY, p.ownerNFT, p.shares, p.value))
 
     val ownerRequirements = provisions.map(p => Token(p.ownerNFT, 1L))
     funded(FUNDING_HEADROOM, ownerRequirements) { funding =>
       val walletInputs = funding
       val inputs =
         Seq(vaultInput(vaultBox, LDHelpers.VAULT_CLAIM, provisions.size)) ++
-          provisions.map(p => provisionInput(ctx, p.box, LDHelpers.PROV_CLAIM)) ++
+          provisions.map(p => provisionInput(DexContracts(ctx), p.box, LDHelpers.PROV_CLAIM)) ++
           walletInputs
 
       val uTx = build(ctx, inputs, vaultOut +: provOuts, wallet)
@@ -295,17 +296,17 @@ object LithosDexTransactions {
       if (q.increasing) (p.reservesX + q.amountX, p.reservesY + q.amountY)
       else (p.reservesX - q.amountX, p.reservesY - q.amountY)
 
-    val poolOut = poolUTXO(ctx, p,
+    val poolOut = poolUTXO(DexContracts(ctx), p,
       reservesX = nextReservesX, reservesY = nextReservesY,
       pendingX = 0L, pendingY = 0L,
       supply = p.supply + q.delta,
       provTokens = p.provTokensLeft,
       accX = p.accX, accY = p.accY)
 
-    val provOut = provisionUTXO(ctx, p.provToken, q.nextEntryX, q.nextEntryY, provision.ownerNFT,
+    val provOut = provisionUTXO(DexContracts(ctx), p.provToken, q.nextEntryX, q.nextEntryY, provision.ownerNFT,
       newShares, provision.value)
 
-    val vaultOut = vaultUTXO(ctx, v, Some(p.tokenY),
+    val vaultOut = vaultUTXO(DexContracts(ctx), v, Some(p.tokenY),
       balanceX = v.balanceX + p.pendingX,
       balanceY = v.balanceY + p.pendingY,
       accX = p.accX, accY = p.accY)
@@ -319,7 +320,7 @@ object LithosDexTransactions {
 
       val inputs = Seq(
         poolInput(poolBox, LDHelpers.POOL_RESIZE),
-        provisionInput(ctx, provision.box, LDHelpers.PROV_RESIZE),
+        provisionInput(DexContracts(ctx), provision.box, LDHelpers.PROV_RESIZE),
         vaultInput(vaultBox, LDHelpers.VAULT_FLUSH)) ++ funding
 
       val uTx = build(ctx, inputs, Seq(poolOut, provOut, vaultOut), wallet)
@@ -348,12 +349,12 @@ object LithosDexTransactions {
 
     // The successor must be genuinely young, not merely younger: monotonicity alone would let a
     // refresher hand back something instantly refreshable and spend it on repeat.
-    val out = provisionUTXO(ctx, provision.box.tokens.head.id, provision.entryX, provision.entryY,
+    val out = provisionUTXO(DexContracts(ctx), provision.box.tokens.head.id, provision.entryX, provision.entryY,
       provision.ownerNFT, provision.shares, provision.value).setCreationHeight(height)
 
     funded(FUNDING_HEADROOM) { funding =>
 
-      val inputs = provisionInput(ctx, provision.box, LDHelpers.PROV_REFRESH) +: funding
+      val inputs = provisionInput(DexContracts(ctx), provision.box, LDHelpers.PROV_REFRESH) +: funding
 
       val uTx = build(ctx, inputs, Seq(out), wallet)
       DexUnsigned(uTx, signed => LDRefreshTx(signed, signed.getOutputsToSpend.get(0).getId.toString))
@@ -369,9 +370,9 @@ object LithosDexTransactions {
    * Tokens: 0 pool NFT, 1 tokenY, 2 provision token.
    *
    * Ids and fee params come from the pool being spent rather than from `LDHelpers`, so a successor is
-   * built against what the box actually holds.
+   * built against what the box actually holds, under `contracts`, the deployment that pool belongs to.
    */
-  private[lithosdex] def poolUTXO(ctx: BlockchainContext,
+  private[lithosdex] def poolUTXO(contracts: LDContracts,
                        p: LDLiquidityPool,
                        reservesX: Long,
                        reservesY: Long,
@@ -380,8 +381,10 @@ object LithosDexTransactions {
                        supply: Long,
                        provTokens: Long,
                        accX: BigInt,
-                       accY: BigInt): UTXO =
-    UTXO(DexContracts.forPool(ctx.getNetworkType, p.poolNFT).liquidityPool, reservesX + pendingX,
+                       accY: BigInt): UTXO = {
+    require(p.poolNFT.toString == contracts.poolNFT.toString && p.provToken.toString == contracts.provToken.toString,
+      s"pool ${p.poolNFT} is not the deployment of pool ${contracts.poolNFT}")
+    UTXO(contracts.liquidityPool, reservesX + pendingX,
       Seq(Token(p.poolNFT, 1L),
         Token(p.tokenY, reservesY + pendingY),
         Token(p.provToken, provTokens)),
@@ -391,10 +394,11 @@ object LithosDexTransactions {
         longsValue(Array(pendingX, pendingY)),
         bigIntValue(accX),
         bigIntValue(accY)))
+  }
 
   /** The pool box holding `next`, with ids and fee params taken from `p`, the box being spent. */
-  private[lithosdex] def poolUTXO(ctx: BlockchainContext, p: LDLiquidityPool, next: LDLiquidityPool): UTXO =
-    poolUTXO(ctx, p, next.reservesX, next.reservesY, next.pendingX, next.pendingY, next.supply,
+  private[lithosdex] def poolUTXO(contracts: LDContracts, p: LDLiquidityPool, next: LDLiquidityPool): UTXO =
+    poolUTXO(contracts, p, next.reservesX, next.reservesY, next.pendingX, next.pendingY, next.supply,
       next.provTokensLeft, next.accX, next.accY)
 
   /**
@@ -405,7 +409,7 @@ object LithosDexTransactions {
    *                 the pool; afterwards the vault's own entry is the authority. A claim brings nothing
    *                 in and passes None.
    */
-  private[lithosdex] def vaultUTXO(ctx: BlockchainContext,
+  private[lithosdex] def vaultUTXO(contracts: LDContracts,
                         v: LDFeeValue,
                         arriving: Option[ErgoId],
                         balanceX: Long,
@@ -417,21 +421,26 @@ object LithosDexTransactions {
       else Seq(Token(v.tokenY.orElse(arriving).getOrElse(throw new IllegalStateException(
         s"the vault would hold $balanceY tokens but neither it nor the flush names which token")), balanceY))
 
-    UTXO(DexContracts.forVault(ctx.getNetworkType, v.vaultNFT).feeVault, balanceX,
+    require(v.vaultNFT.toString == contracts.vaultNFT.toString,
+      s"vault ${v.vaultNFT} is not the deployment of pool ${contracts.poolNFT}")
+    UTXO(contracts.feeVault, balanceX,
       Seq(Token(v.vaultNFT, 1L)) ++ tokenEntry,
       Seq(bigIntValue(accX), bigIntValue(accY)))
   }
 
-  /** R4 entryX, R5 entryY, R6 ownerNFT, R7 shares. One provision token, under the guard. */
-  private[lithosdex] def provisionUTXO(ctx: BlockchainContext,
+  /** R4 entryX, R5 entryY, R6 ownerNFT, R7 shares. One provision token, under `contracts`' guard. */
+  private[lithosdex] def provisionUTXO(contracts: LDContracts,
                             provToken: ErgoId,
                             entryX: BigInt,
                             entryY: BigInt,
                             ownerNFT: ErgoId,
                             shares: Long,
-                            value: Long): UTXO =
-    UTXO(DexContracts.forProvToken(ctx.getNetworkType, provToken).provisionGuard, value, Seq(Token(provToken, 1L)),
+                            value: Long): UTXO = {
+    require(provToken.toString == contracts.provToken.toString,
+      s"provision token $provToken is not the deployment of pool ${contracts.poolNFT}")
+    UTXO(contracts.provisionGuard, value, Seq(Token(provToken, 1L)),
       Seq(bigIntValue(entryX), bigIntValue(entryY), bytesValue(ownerNFT.getBytes), ErgoValue.of(shares)))
+  }
 
   /**
    * The ownership NFT, carrying EIP-4 registers so a wallet or explorer shows it as something legible
@@ -498,16 +507,17 @@ object LithosDexTransactions {
         (if (count >= 0) Seq[(Byte, ErgoValue[_])](1.toByte -> ErgoValue.of(count)) else Seq.empty))
 
   /**
-   * Every provision input needs its op AND the provision logic the guard executes from var 64. The logic
-   * is the deployment's whose provision token the box holds, so a provision of any pool unlocks.
+   * Every provision input needs its op AND the provision logic the guard executes from var 64: that of
+   * `contracts`, the deployment whose provision token the box holds.
    */
-  private[lithosdex] def provisionInput(ctx: BlockchainContext, box: InputUTXO, op: Byte): InputUTXO = {
+  private[lithosdex] def provisionInput(contracts: LDContracts, box: InputUTXO, op: Byte): InputUTXO = {
     val provToken = box.tokens.headOption.map(_.id).getOrElse(
       throw new IllegalStateException(s"provision ${box.id} holds no provision token"))
+    require(provToken.toString == contracts.provToken.toString,
+      s"provision ${box.id} is not the deployment of pool ${contracts.poolNFT}")
     DexContracts.attachCtxVars(box, Seq[(Byte, ErgoValue[_])](
       0.toByte -> ErgoValue.of(op),
-      LDHelpers.PROVISION_LOGIC_VAR ->
-        bytesValue(DexContracts.forProvToken(ctx.getNetworkType, provToken).provisionLogic.valueBytes)))
+      LDHelpers.PROVISION_LOGIC_VAR -> bytesValue(contracts.provisionLogic.valueBytes)))
   }
 
   // ══════════════════════════════════════════════════════════════════════════

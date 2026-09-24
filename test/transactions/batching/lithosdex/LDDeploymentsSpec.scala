@@ -1,5 +1,6 @@
 package transactions.batching.lithosdex
 
+import lithosdex.LDLiquidityPool
 import lithosdex.contracts.LDContracts
 import org.ergoplatform.appkit.NetworkType
 import org.ergoplatform.sdk.ErgoId
@@ -96,38 +97,19 @@ class LDDeploymentsSpec extends AnyFlatSpec with Matchers {
     contracts.feeVault.ergoTreeHex should not be secondVault
   }
 
-  "DexContracts" should "hand each builder the deployment its box's own ids belong to" in {
+  "LithosDexTransactions" should "build each box under the deployment it is handed, and refuse another's" in {
     val second = LDDeployments.verify(Mainnet, secondPool, secondAssets).get
-    DexContracts.serve(Mainnet, Seq(second)) shouldBe Seq(second)
+    val lit = LDContracts(Mainnet)
+    val pool = LDLiquidityPool(reservesX = 1000000000L, reservesY = 1000000L, pendingX = 0L, pendingY = 0L,
+      supply = 1000000L, feeParams = Array(9985L, 15L, 15L), accX = BigInt(0), accY = BigInt(0),
+      poolNFT = id(SecondPoolNft), tokenY = id(SecondToken), provToken = id(SecondProvToken), provTokensLeft = 10L)
 
-    DexContracts.forPool(Mainnet, id(SecondPoolNft)).liquidityPool.ergoTreeHex shouldBe secondPool
-    DexContracts.forVault(Mainnet, id(SecondVaultNft)).feeVault.ergoTreeHex shouldBe secondVault
-    DexContracts.forProvToken(Mainnet, id(SecondProvToken)).provisionGuard.ergoTreeHex shouldBe SecondGuardTree
-    DexContracts.forPool(Mainnet, id(LitPoolNft)).liquidityPool.ergoTreeHex shouldBe litPool
-  }
+    LithosDexTransactions.poolUTXO(second, pool, pool).contract.ergoTreeHex shouldBe secondPool
+    LithosDexTransactions.provisionUTXO(second, id(SecondProvToken), BigInt(0), BigInt(0), id("88" * 32), 1L, 1L)
+      .contract.ergoTreeHex shouldBe SecondGuardTree
 
-  it should "refuse an id no served deployment holds, rather than lend it the canonical contracts" in {
-    an[IllegalStateException] should be thrownBy DexContracts.forPool(Mainnet, id("22" * 32))
-    an[IllegalStateException] should be thrownBy DexContracts.forProvToken(Mainnet, id("22" * 32))
-  }
-
-  it should "forget a deployment the next serve leaves out" in {
-    val second = LDDeployments.verify(Mainnet, secondPool, secondAssets).get
-    DexContracts.serve(Mainnet, Seq(second))
-    DexContracts.forPool(Mainnet, id(SecondPoolNft)).poolNFT.toString shouldBe SecondPoolNft
-
-    DexContracts.serve(Mainnet, Seq.empty)
-    an[IllegalStateException] should be thrownBy DexContracts.forPool(Mainnet, id(SecondPoolNft))
-  }
-
-  it should "serve neither of two deployments sharing a provision token, nor one sharing the canonical's" in {
-    val second = LDDeployments.verify(Mainnet, secondPool, secondAssets).get
-    val twin = LDContracts(id("44" * 32), id("55" * 32), id(SecondProvToken), Mainnet)
-    val shadow = LDContracts(id("66" * 32), id("77" * 32), id(LitProvToken), Mainnet)
-
-    DexContracts.serve(Mainnet, Seq(second, twin, shadow)) shouldBe empty
-    an[IllegalStateException] should be thrownBy DexContracts.forProvToken(Mainnet, id(SecondProvToken))
-    an[IllegalStateException] should be thrownBy DexContracts.forPool(Mainnet, id("66" * 32))
-    DexContracts.serve(Mainnet, Seq.empty)
+    an[IllegalArgumentException] should be thrownBy LithosDexTransactions.poolUTXO(lit, pool, pool)
+    an[IllegalArgumentException] should be thrownBy
+      LithosDexTransactions.provisionUTXO(lit, id(SecondProvToken), BigInt(0), BigInt(0), id("88" * 32), 1L, 1L)
   }
 }

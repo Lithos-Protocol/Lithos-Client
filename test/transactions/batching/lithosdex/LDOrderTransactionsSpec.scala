@@ -64,7 +64,7 @@ class LDOrderTransactionsSpec extends AnyFlatSpec with Matchers {
   private def fill(ctx: BlockchainContext, order: LithosDexOrder,
                    provisions: LithosDexExecution.Provisions = LithosDexExecution.NoProvisions,
                    poolBox: NodeBox = null): LithosDexChain =
-    LithosDexExecution.run(ctx, wallet, Option(poolBox).getOrElse(poolNode(ctx)).toInputUTXO(ctx), Seq(order), 10, 0L,
+    LithosDexExecution.run(ctx, wallet, DexContracts(ctx), Option(poolBox).getOrElse(poolNode(ctx)).toInputUTXO(ctx), Seq(order), 10, 0L,
       provisions, Height, 0L,
       useTrueProp = false, 1.minute.fromNow).chain.getOrElse(fail(s"the placed ${order.kind} did not fill"))
 

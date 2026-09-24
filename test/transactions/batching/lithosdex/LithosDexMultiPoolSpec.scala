@@ -21,9 +21,12 @@ import org.scalatestplus.mockito.MockitoSugar
 import sigma.Colls
 import state.synchronization.CompleteMempool
 import support.{FakeNodeContext, LDNodeFixtures}
+import transactions.candidate.BlockTxMessages.{BlockTxsReady, RequestBlockTxs}
+import transactions.candidate.CandidateBundle
 import work.lithos.mutations.{Token, UTXO}
 
 import java.math.BigInteger
+import scala.concurrent.duration._
 import scala.util.{Failure, Success}
 
 /**
@@ -49,14 +52,20 @@ class LithosDexMultiPoolSpec extends TestKit(ActorSystem("lithosdex-multi-pool-s
   private val broken = LDContracts(ErgoId.create("ab" * 32), ErgoId.create("ac" * 32), ErgoId.create("ad" * 32),
     NetworkType.MAINNET)
 
+  /** The canonical ERG:LIT deployment, from the mainnet ids this client ships with. */
+  private val lit = LDContracts(NetworkType.MAINNET)
+
   private def longs(v: Array[Long]): ErgoValue[_] = ErgoValue.of(Colls.fromArray(v), scalaLongType)
 
   /**
    * @param discoverPools whether the batcher looks past the canonical pool
    * @param forgeGuard    the pool names ERG:LIT's guard instead of its own
    * @param withBroken    an order also names [[broken]], whose vault stands but whose pool box will not read
+   * @param candidates    the batcher builds this miner's blocks, flushing each run, and broadcasts nothing
+   * @param withCanonical an order also names ERG:LIT, whose pool and vault stand too
    */
-  private class Fixture(discoverPools: Boolean, forgeGuard: Boolean = false, withBroken: Boolean = false) {
+  private class Fixture(discoverPools: Boolean, forgeGuard: Boolean = false, withBroken: Boolean = false,
+                        candidates: Boolean = false, withCanonical: Boolean = false) {
     val api: NodeApi = mock[NodeApi]
     val (nodeContext, _, _) = FakeNodeContext(api, numAddresses = 1)
 
@@ -92,6 +101,19 @@ class LithosDexMultiPoolSpec extends TestKit(ActorSystem("lithosdex-multi-pool-s
       (poolBox, vaultBox, orderBox)
     }
 
+    val (litPool, litVault, litOrder) = nodeContext.getClient.execute { ctx: BlockchainContext =>
+      val owner = ctx.newProverBuilder().withDLogSecret(BigInteger.valueOf(7009L)).build().getAddress
+      val terms = LDOrderTerms(owner.getPublicKey, lit.poolNFT, Fee, 2000000L)
+      (LDNodeFixtures.nodeBox(ctx, UTXO(lit.liquidityPool, 30L * Parameters.OneErg,
+        Seq(Token(lit.poolNFT, 1L), Token(ErgoId.create("ee" * 32), 3000000000L), Token(lit.provToken, 1000000000000000L)),
+        Seq(ErgoValue.of(LDHelpers.LOCKED_LP - LDHelpers.GENESIS_SUPPLY), longs(LDHelpers.GENESIS_FEE_PARAMS),
+          longs(Array(0L, 0L)), ErgoValue.of(BigInt(0).bigInteger), ErgoValue.of(BigInt(0).bigInteger))), index = 8),
+        LDNodeFixtures.nodeBox(ctx, UTXO(lit.feeVault, LDHelpers.VAULT_MIN, Seq(Token(lit.vaultNFT, 1L)),
+          Seq(ErgoValue.of(BigInt(0).bigInteger), ErgoValue.of(BigInt(0).bigInteger))), index = 9),
+        LDNodeFixtures.nodeBox(ctx, UTXO(LDOrderContracts.swapSell(terms, 3L * Parameters.OneErg, 1L),
+          3L * Parameters.OneErg + Fee + Parameters.MinFee), index = 7, txId = "cf" * 32))
+    }
+
     val engine = TestProbe()
     engine.setAutoPilot(new TestActor.AutoPilot {
       def run(sender: ActorRef, msg: Any): TestActor.AutoPilot = {
@@ -104,7 +126,8 @@ class LithosDexMultiPoolSpec extends TestKit(ActorSystem("lithosdex-multi-pool-s
 
     private val orderTemplate = LDOrderContracts.template(LithosDexOrder.parse(order).get.kind).templateHash
     private val orders = Seq(IndexedBox(order, "", 100, 1L)) ++
-      (if (withBroken) Seq(IndexedBox(brokenOrder, "", 100, 4L)) else Seq.empty)
+      (if (withBroken) Seq(IndexedBox(brokenOrder, "", 100, 4L)) else Seq.empty) ++
+      (if (withCanonical) Seq(IndexedBox(litOrder, "", 100, 7L)) else Seq.empty)
 
     when(api.unspentBoxesByTemplateHash(anyString(), any[Paging], any[SortDirection], any[MempoolOptions]))
       .thenAnswer { inv =>
@@ -120,6 +143,8 @@ class LithosDexMultiPoolSpec extends TestKit(ActorSystem("lithosdex-multi-pool-s
           case nft if nft == second.vaultNFT.toString => Success(Seq(IndexedBox(vault, "", 100, 3L)))
           case nft if nft == broken.poolNFT.toString => Success(Seq(IndexedBox(brokenPool, "", 100, 5L)))
           case nft if nft == broken.vaultNFT.toString => Success(Seq(IndexedBox(brokenVault, "", 100, 6L)))
+          case nft if nft == lit.poolNFT.toString => Success(Seq(IndexedBox(litPool, "", 100, 8L)))
+          case nft if nft == lit.vaultNFT.toString => Success(Seq(IndexedBox(litVault, "", 100, 9L)))
           case _ => Success(Seq.empty[IndexedBox])
         }
       }
@@ -127,18 +152,37 @@ class LithosDexMultiPoolSpec extends TestKit(ActorSystem("lithosdex-multi-pool-s
       .thenReturn(Success(Seq.empty[IndexedBox]))
     when(api.boxesWithPoolByIds(any[Seq[String]])).thenAnswer { inv =>
       val wanted = inv.getArgument[Seq[String]](0).toSet
-      Success(Seq(order, pool, vault, brokenOrder, brokenPool, brokenVault).filter(box => wanted.contains(box.boxId)))
+      Success(Seq(order, pool, vault, brokenOrder, brokenPool, brokenVault, litOrder, litPool, litVault)
+        .filter(box => wanted.contains(box.boxId)))
     }
     when(api.sendTransaction(anyString())).thenReturn(Failure(NodeError.Rejected("refused by the test")))
     when(api.info()).thenReturn(Success(support.ChainFixtures.infoAt(200000).copy(bestFullHeaderId = Some(anchor))))
 
     val batcher: ActorRef = system.actorOf(Props(new LithosDexBatcher(nodeContext,
-      LithosDexBatchingConfig(BatchingConfig.Default.copy(scanIntervalMs = 3600000L, broadcast = true),
-        autoFlush = false, discoverPools = discoverPools),
-      servesCandidates = false, engine.ref, useTrueProp = false)))
+      LithosDexBatchingConfig(BatchingConfig.Default.copy(scanIntervalMs = 3600000L, broadcast = !candidates),
+        autoFlush = candidates, discoverPools = discoverPools),
+      servesCandidates = candidates, engine.ref, useTrueProp = false)))
+
+    @volatile private var height = 200000
+
+    /** This miner's bundles for the next block, once a scan has tracked the orders. */
+    def offeredOnceTracked(): Seq[CandidateBundle] =
+      awaitAssert({
+        val requester = TestProbe()
+        height += 1
+        requester.send(batcher, RequestBlockTxs(height, 8))
+        val bundles = requester.expectMsgType[BlockTxsReady].bundles
+        bundles should not be empty
+        bundles
+      }, 30.seconds, 250.millis)
 
     def stop(): Unit = system.stop(batcher)
   }
+
+  /** The output trees of a candidate member, in order. */
+  private def outputTrees(json: String): Seq[String] =
+    parse(json).getOrElse(fail("the member was not JSON")).hcursor.downField("outputs").values
+      .getOrElse(fail("no outputs")).toSeq.flatMap(_.hcursor.get[String]("ergoTree").toOption)
 
   "The LithosDex batcher" should "broadcast an order against a verified deployment other than the canonical one" in {
     val f = new Fixture(discoverPools = true)
@@ -172,6 +216,34 @@ class LithosDexMultiPoolSpec extends TestKit(ActorSystem("lithosdex-multi-pool-s
     verify(f.api, timeout(30000).times(1)).sendTransaction(sent.capture())
     sent.getValue should include(f.order.boxId)
     sent.getValue should not include f.brokenOrder.boxId
+    f.stop()
+  }
+
+  it should "execute another deployment's order in this miner's own block, flushed into that deployment's vault" in {
+    val f = new Fixture(discoverPools = true, candidates = true)
+    val bundle = f.offeredOnceTracked().head
+    bundle.members.map(_.kind) shouldBe Seq(LithosDexExecution.Kind, LithosDexExecution.FlushKind)
+    // Signing ran every script, so these are outputs the second deployment's contracts accept
+    outputTrees(bundle.members.head.json).head shouldBe second.liquidityPool.ergoTreeHex
+    outputTrees(bundle.members(1).json).take(2) shouldBe Seq(second.liquidityPool.ergoTreeHex, second.feeVault.ergoTreeHex)
+    f.stop()
+  }
+
+  it should "run ERG:LIT and another deployment in the same block, one bundle each" in {
+    val f = new Fixture(discoverPools = true, candidates = true, withCanonical = true)
+    val bundles = awaitAssert({ val found = f.offeredOnceTracked(); found should have size 2; found },
+      30.seconds, 250.millis)
+    bundles.map(bundle => outputTrees(bundle.members.head.json).head).toSet shouldBe
+      Set(second.liquidityPool.ergoTreeHex, lit.liquidityPool.ergoTreeHex)
+    bundles.foreach(_.members.map(_.kind) shouldBe Seq(LithosDexExecution.Kind, LithosDexExecution.FlushKind))
+    f.stop()
+  }
+
+  it should "keep this miner's own block to ERG:LIT unless discoverPools is on" in {
+    val f = new Fixture(discoverPools = false, candidates = true, withCanonical = true)
+    val bundles = f.offeredOnceTracked()
+    bundles should have size 1
+    outputTrees(bundles.head.members.head.json).head shouldBe lit.liquidityPool.ergoTreeHex
     f.stop()
   }
 }

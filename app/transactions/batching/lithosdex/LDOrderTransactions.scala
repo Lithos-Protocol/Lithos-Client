@@ -80,13 +80,14 @@ object LDOrderTransactions {
         val (owedX, owedY) = v.owed(provision.shares, provision.entryX, provision.entryY)
         require(v.payableX >= owedX && v.payableY >= owedY,
           s"the vault can pay ${v.payableX} nanoERG and ${v.payableY} tokens of the $owedX and $owedY this provision is owed")
-        val vaultOut = LithosDexTransactions.vaultUTXO(ctx, v, None, v.balanceX - owedX, v.balanceY - owedY, v.accX, v.accY)
-        val provisionOut = LithosDexTransactions.provisionUTXO(ctx, provision.box.tokens.head.id, v.accX, v.accY,
+        val vaultOut = LithosDexTransactions.vaultUTXO(DexContracts(ctx), v, None, v.balanceX - owedX,
+          v.balanceY - owedY, v.accX, v.accY)
+        val provisionOut = LithosDexTransactions.provisionUTXO(DexContracts(ctx), provision.box.tokens.head.id, v.accX, v.accY,
           provision.ownerNFT, provision.shares, provision.value)
         funded(Math.addExact(RETURNED, FUNDING_HEADROOM), Seq(nft)) { funding =>
           val inputs = Seq(
             LithosDexTransactions.vaultInput(box, LDHelpers.VAULT_CLAIM, 1),
-            LithosDexTransactions.provisionInput(ctx, provision.box, LDHelpers.PROV_CLAIM)) ++ funding
+            LithosDexTransactions.provisionInput(DexContracts(ctx), provision.box, LDHelpers.PROV_CLAIM)) ++ funding
           val uTx = build(ctx, inputs, Seq(vaultOut, provisionOut, orderOut), wallet)
           DexUnsigned(uTx, signed => LDOrderTx(signed, InputUTXO(signed.getOutputsToSpend.get(2)), owedX, owedY,
             Some(signed.getOutputsToSpend.get(1).getId.toString)))
