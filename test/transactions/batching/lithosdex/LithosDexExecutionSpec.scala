@@ -17,7 +17,7 @@ import sigma.data.{COR, ProveDlog}
 import sigma.serialization.ValueSerializer
 import sigma.{Colls, VersionContext}
 import support.{FakeNodeContext, LDNodeFixtures}
-import transactions.batching.Batcher
+import transactions.batching.{Batcher, RunStrategy}
 import transactions.candidate.BlockTxMessages.Supersede
 import transactions.candidate.CapitalOrigin
 import work.lithos.mutations.{Contract, InputUTXO, Token, UTXO}
@@ -69,6 +69,10 @@ class LithosDexExecutionSpec extends AnyFlatSpec with Matchers {
   private def sell(ctx: BlockchainContext, index: Int = 10, fee: Long = Fee, minQuote: Long = 1L): LithosDexOrder =
     LithosDexOrder.parse(orderNode(ctx, LDOrderContracts.swapSell(terms(ctx, fee), erg, minQuote),
       erg + fee + Parameters.MinFee, index)).get
+
+  private def sellOf(ctx: BlockchainContext, index: Int, amount: Long, fee: Long, minQuote: Long): LithosDexOrder =
+    LithosDexOrder.parse(orderNode(ctx, LDOrderContracts.swapSell(terms(ctx, fee), amount, minQuote),
+      amount + fee + Parameters.MinFee, index)).get
 
   private def buy(ctx: BlockchainContext, index: Int = 11, fee: Long = Fee, amount: Long = 500L * 1000000L): LithosDexOrder =
     LithosDexOrder.parse(orderNode(ctx, LDOrderContracts.swapBuy(terms(ctx, fee), 1L), Parameters.MinFee, index,
@@ -350,5 +354,51 @@ class LithosDexExecutionSpec extends AnyFlatSpec with Matchers {
     val elsewhere = LithosDexOrder.parse(orderNode(ctx, LDOrderContracts.swapSell(
       terms(ctx).copy(poolNFT = ErgoId.create("99" * 32)), erg, 1L), 2L * erg, 23)).get
     LithosDexExecution.price(elsewhere, pool, 0L, LithosDexExecution.NoProvisions) shouldBe None
+  }
+
+  "The maxFees strategy" should "sign small sells before a big one that would push them under their minimums" in
+    withCtx { ctx =>
+      val poolBox = poolNode(ctx).toInputUTXO(ctx)
+      val smallIn = erg / 10
+      // Each small sell takes 5% under what the opening pool returns; after the big sell it would get about half
+      val floor = LDLiquidityPool(poolBox).simSwap(smallIn, ergIn = true).amountOut * 95 / 100
+      val small = (0 until 3).map(i => sellOf(ctx, index = 20 + i, amount = smallIn, fee = Fee, minQuote = floor))
+      val big = sellOf(ctx, index = 30, amount = 5L * erg, fee = 2 * Fee, minQuote = 1L)
+
+      val chain = runOf(ctx, poolBox, big +: small).chain.getOrElse(fail("nothing was signed"))
+      chain.fills.map(_.order.boxId).toSet shouldBe (small :+ big).map(_.boxId).toSet
+      chain.fills.last.order.boxId shouldBe big.boxId
+      chain.fills.map(_.revenue).sum shouldBe 5 * Fee
+    }
+
+  it should "plan 64 orders into 20 slots within its search budget, earning at least the greedy plan" in withCtx { ctx =>
+    val opening = LDLiquidityPool(poolNode(ctx).toInputUTXO(ctx))
+    val random = new scala.util.Random(7)
+    val sells = (0 until 40).map { i =>
+      val amount = erg / 100 * (1 + random.nextInt(50))
+      val floor = opening.simSwap(amount, ergIn = true).amountOut * (80 + random.nextInt(20)) / 100
+      sellOf(ctx, index = 100 + i, amount = amount, fee = Fee + random.nextInt(5) * 1000000L, minQuote = floor)
+    }
+    val buys = (0 until 24).map(i =>
+      buy(ctx, index = 200 + i, fee = Fee + random.nextInt(5) * 1000000L, amount = (1L + random.nextInt(500)) * 1000000L))
+    val orders = sells ++ buys
+
+    def planned(deadline: Deadline): (Long, Double) = {
+      val start = System.nanoTime()
+      val value = LithosDexExecution.priceChain(orders, opening, 0L, LithosDexExecution.NoProvisions, 20,
+        deadline = deadline).map(_.revenue).sum
+      value -> (System.nanoTime() - start) / 1e6
+    }
+    planned(10.seconds.fromNow)
+    val (greedy, greedyMs) = planned(Deadline.now)
+    val (searched, searchMs) = planned(10.seconds.fromNow)
+    val priceStart = System.nanoTime()
+    (0 until 1000).foreach(i => LithosDexExecution.price(orders(i % orders.size), opening, 0L,
+      LithosDexExecution.NoProvisions))
+    val priceUs = (System.nanoTime() - priceStart) / 1000.0 / 1000
+    println(f"[lithosdex] plan 64 orders into 20 slots: greedy $greedy%d in $greedyMs%.1f ms, " +
+      f"searched $searched%d in $searchMs%.1f ms, one price $priceUs%.1f us")
+    searched should be >= greedy
+    searchMs should be < (RunStrategy.SearchBudget.toMillis * 2).toDouble
   }
 }

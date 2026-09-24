@@ -7,7 +7,7 @@ import org.ergoplatform.appkit.{BlockchainContext, SignedTransaction}
 import org.ergoplatform.sdk.ErgoId
 import org.slf4j.{Logger, LoggerFactory}
 import state.synchronization.CompleteMempool
-import transactions.batching.{BatchRun, Batcher}
+import transactions.batching.{BatchRun, Batcher, Planned, Priced, RunProblem, RunStrategy}
 import transactions.candidate.BlockTxMessages.{CandidateTx, ChainFromMempool, IncludeExisting, Supersede}
 import transactions.candidate.{CandidateBundle, CandidateCapital, CapitalEntry, CapitalOrigin}
 import transactions.engine.execution.RollupExecution
@@ -113,51 +113,46 @@ object ErgoDexExecution {
     }
   }
 
-  /** Ranks orders by revenue, then reprices each against the preceding fill's pool balances. Ranks pools; builds nothing. */
+  /**
+   * What `strategy` would execute against `pool`, ignoring placements. Ranks pools; builds nothing. With no
+   * time to search by default it plans greedily, so ranking many pools costs little.
+   */
   def priceChain(orders: Seq[ErgoDexOrder], pool: ErgoDexPool, minRevenue: Long,
-                 limit: Int, minerFeeCeiling: Long = 0L): Vector[ErgoDexFill] = {
-    // Rank by revenue so the opening fill can fund the takings box.
-    val ranked = orders.flatMap(order =>
-      price(order, pool, minRevenue, fundsItsOwnBox = false, minerFeeCeiling)
-        .map(fill => order -> fill.revenue)).sortBy { case (order, revenue) => (-revenue, order.boxId) }
-      .map(_._1)
+                 limit: Int, minerFeeCeiling: Long = 0L, strategy: RunStrategy = RunStrategy.Default,
+                 deadline: Deadline = Deadline.now): Vector[ErgoDexFill] =
+    strategy.plan(problem(orders, pool, limit, minRevenue, minerFeeCeiling, fundsFirst = true, _ => Seq.empty,
+      Set.empty, deadline)).map(_.priced.fill)
 
-    var state = pool
-    var fills = Vector.empty[ErgoDexFill]
-    ranked.foreach { order =>
-      if (fills.size < limit) {
-        // Only the opening fill has to fund a box by itself; the rest add to the one it made.
-        price(order, state, minRevenue, fundsItsOwnBox = fills.isEmpty, minerFeeCeiling).foreach { fill =>
-          fills :+= fill
-          state = fill.poolAfter
-        }
-      }
-    }
-    fills
-  }
+  /** `orders` against `pool` as a strategy sees them, the first fill funding its own box when `fundsFirst`. */
+  private def problem(orders: Seq[ErgoDexOrder], pool: ErgoDexPool, limit: Int, minRevenue: Long,
+                      minerFeeCeiling: Long, fundsFirst: Boolean, placements: ErgoDexOrder => Seq[String],
+                      alreadyCarried: Set[String], deadline: Deadline): RunProblem[ErgoDexOrder, ErgoDexFill, ErgoDexPool] =
+    RunProblem[ErgoDexOrder, ErgoDexFill, ErgoDexPool](orders, pool, limit, _.boxId,
+      (order, state, first) => price(order, state, minRevenue, fundsItsOwnBox = first && fundsFirst, minerFeeCeiling)
+        .map(fill => Priced(fill, fill.revenue - math.min(order.maxMinerFee, math.max(0L, minerFeeCeiling)),
+          fill.poolAfter)),
+      placements, alreadyCarried, state => state.reservesY.toDouble / state.reservesX.toDouble,
+      RunStrategy.searchUntil(deadline))
 
   /**
-   * Signs the highest-revenue orders against `poolBox` one at a time, each priced against the pool the last
-   * execution left. An order that prices but cannot be signed is named and passed over, and the next is
-   * priced against the same pool. Stops at `limit` transactions, counting placements not in
-   * `alreadyCarried`, at `deadline`, or after `unbuildableLimits.perRun` unbuildable orders. Once
-   * `unbuildableLimits.perTx` orders one transaction created have failed, its other orders are passed over untried.
+   * Signs the orders `strategy` plans against `poolBox`, one at a time, each against the pool the last
+   * execution left. An order that plans but cannot be signed is named and passed over, and the rest are planned
+   * again from the same pool. Stops at `limit` transactions, counting placements not in `alreadyCarried`, at
+   * `deadline`, or after `unbuildableLimits.perRun` unbuildable orders. Once `unbuildableLimits.perTx` orders
+   * one transaction created have failed, its other orders are left out of every later plan.
    *
    * @param placementOf    the unconfirmed placements an order's box needs carried ahead of it
    * @param alreadyCarried placement ids an earlier run in the same package already carries
+   * @param strategy       chooses which orders to execute and in what order
    */
   def run(ctx: BlockchainContext, wallet: NodeWallet, poolBox: InputUTXO, pool: ErgoDexPool,
           orders: Seq[ErgoDexOrder], limit: Int, minRevenue: Long, blockHeight: Int, minerFeeCeiling: Long,
           useTrueProp: Boolean, deadline: Deadline,
           placementOf: ErgoDexOrder => Vector[CompleteMempool.MempoolTx] = _ => Vector.empty,
           alreadyCarried: Set[String] = Set.empty,
-          unbuildableLimits: Batcher.UnbuildableLimits = Batcher.UnbuildableLimits.Default): ErgoDexRun = {
+          unbuildableLimits: Batcher.UnbuildableLimits = Batcher.UnbuildableLimits.Default,
+          strategy: RunStrategy = RunStrategy.Default): ErgoDexRun = {
     require(poolBox.id.toString == pool.boxId, "a run must open on the pool it is priced against")
-    val ranked = orders
-      .flatMap(order => price(order, pool, minRevenue, fundsItsOwnBox = false, minerFeeCeiling)
-        .map(fill => order -> fill.revenue))
-      .sortBy { case (order, revenue) => (-revenue, order.boxId) }
-      .map(_._1)
 
     var box = poolBox
     var state = pool
@@ -168,27 +163,45 @@ object ErgoDexExecution {
     var placements = Vector.empty[CompleteMempool.MempoolTx]
     var unbuildable = Vector.empty[String]
     var failedByTx = Map.empty[String, Int]
-    val remaining = ranked.iterator
+    var passedOver = Set.empty[String]
+    var plan = Vector.empty[Planned[ErgoDexOrder, ErgoDexFill, ErgoDexPool]]
+    var replan = true
     def slotsUsed(txs: Vector[CompleteMempool.MempoolTx]) = built.size + txs.count(tx => !alreadyCarried.contains(tx.id))
     def full = slotsUsed(placements) >= limit
     def stopped = deadline.isOverdue() || unbuildable.size >= unbuildableLimits.perRun
 
-    while (remaining.hasNext && !full && !stopped) {
-      val order = remaining.next()
-      val createdBy = order.box.transactionId
-      // Only the opening fill has to fund a box by itself; the rest add to the one it made. An order whose
-      // transaction has already failed perTx times is passed over untried
-      val priced =
-        if (failedByTx.getOrElse(createdBy, 0) >= unbuildableLimits.perTx) None
-        else price(order, state, minRevenue, fundsItsOwnBox = built.isEmpty, minerFeeCeiling)
-      priced.foreach { fill =>
+    while (!full && !stopped && (replan || plan.nonEmpty)) {
+      if (replan) {
+        // Everything not yet signed or refused, planned from the pool the last execution left. Only the run's
+        // first fill has to fund a box by itself; the rest add to the one it made
+        val open = orders.filterNot(order => fills.exists(_.order.boxId == order.boxId) ||
+          unbuildable.contains(order.boxId) || passedOver.contains(order.boxId) ||
+          failedByTx.getOrElse(order.box.transactionId, 0) >= unbuildableLimits.perTx)
+        plan = strategy.plan(problem(open, state, limit - slotsUsed(placements), minRevenue, minerFeeCeiling,
+          fundsFirst = built.isEmpty, order => placementOf(order).map(_.id), alreadyCarried ++ placements.map(_.id),
+          deadline))
+        replan = false
+      } else {
+        val step = plan.head
+        plan = plan.tail
+        val order = step.order
+        val createdBy = order.box.transactionId
         val added = placementOf(order).filterNot(tx => placements.exists(_.id == tx.id))
-        if (slotsUsed(placements ++ added) < limit) Try {
+        // Priced again against the pool the chain actually left, which the plan's own pool should equal. A step
+        // that no longer fits or fills is left out of this run and the rest planned again, since every later
+        // step was priced against the pool this one would have left
+        val repriced =
+          if (slotsUsed(placements ++ added) >= limit) None
+          else price(order, state, minRevenue, fundsItsOwnBox = built.isEmpty, minerFeeCeiling)
+        repriced.map(fill => fill -> Try {
           val signed = assembled(ctx, wallet, box, fill, blockHeight, minerFeeCeiling, useTrueProp, carried)
           val outputs = signed.getOutputsToSpend
           (signed, InputUTXO(outputs.get(0)), InputUTXO(outputs.get(2)))
-        } match {
-          case Success((signed, nextPool, takings)) =>
+        }) match {
+          case None =>
+            passedOver += order.boxId
+            replan = true
+          case Some((fill, Success((signed, nextPool, takings)))) =>
             built :+= signed
             fills :+= fill
             poolIds :+= box.id.toString
@@ -196,16 +209,17 @@ object ErgoDexExecution {
             box = nextPool
             state = fill.poolAfter
             carried = Some(takings)
-          case Failure(ex) =>
+          case Some((_, Failure(ex))) =>
             logger.warn(s"Could not build ErgoDEX order ${order.boxId} against pool ${pool.nft.take(12)}, " +
               s"passing over it: ${ex.getMessage}")
             unbuildable :+= order.boxId
             failedByTx = failedByTx.updated(createdBy, failedByTx.getOrElse(createdBy, 0) + 1)
+            replan = true
         }
       }
     }
     ErgoDexRun(carried.map(ErgoDexChain(built, fills, poolIds, _)), placements, unbuildable,
-      cutShort = remaining.hasNext && !full)
+      cutShort = (replan || plan.nonEmpty) && !full)
   }
 
   /** Builds pool, reward and takings outputs in contract order, followed by an optional miner fee. */

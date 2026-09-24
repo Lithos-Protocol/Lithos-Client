@@ -8,7 +8,7 @@ import node.MutationConversions._
 import org.ergoplatform.appkit.{BlockchainContext, SignedTransaction}
 import org.slf4j.{Logger, LoggerFactory}
 import state.synchronization.CompleteMempool
-import transactions.batching.{BatchRun, Batcher}
+import transactions.batching.{BatchRun, Batcher, Planned, Priced, RunProblem, RunStrategy}
 import transactions.candidate.BlockTxMessages.{CandidateTx, ChainFromMempool, IncludeExisting, Supersede}
 import transactions.candidate.{CandidateBundle, CandidateCapital, CapitalEntry, CapitalOrigin}
 import transactions.engine.execution.RollupExecution
@@ -184,15 +184,36 @@ object LithosDexExecution {
   }
 
   /**
-   * Signs the highest-fee orders against `poolBox` one at a time, each priced against the pool box the last
-   * execution left. An order that prices but cannot be signed is named and passed over, and the next is
-   * priced against the same pool box. Stops at `limit` transactions, placements included, at `deadline`,
+   * What `strategy` would execute against `pool`, ignoring placements. Ranks pools; builds nothing. With no
+   * time to search by default it plans greedily, so ranking many pools costs little.
+   */
+  def priceChain(orders: Seq[LithosDexOrder], pool: LDLiquidityPool, minRevenue: Long, provisions: Provisions,
+                 limit: Int, minerFeeCeiling: Long = 0L, strategy: RunStrategy = RunStrategy.Default,
+                 deadline: Deadline = Deadline.now): Vector[LithosDexFill] =
+    strategy.plan(problem(orders, pool, limit, minRevenue, provisions, minerFeeCeiling, fundsFirst = true,
+      _ => Seq.empty, Set.empty, deadline)).map(_.priced.fill)
+
+  /** `orders` against `pool` as a strategy sees them, the first fill funding its own box when `fundsFirst`. */
+  private def problem(orders: Seq[LithosDexOrder], pool: LDLiquidityPool, limit: Int, minRevenue: Long,
+                      provisions: Provisions, minerFeeCeiling: Long, fundsFirst: Boolean,
+                      placements: LithosDexOrder => Seq[String], alreadyCarried: Set[String],
+                      deadline: Deadline): RunProblem[LithosDexOrder, LithosDexFill, LDLiquidityPool] =
+    RunProblem[LithosDexOrder, LithosDexFill, LDLiquidityPool](orders, pool, limit, _.boxId,
+      (order, state, first) => price(order, state, minRevenue, provisions, fundsItsOwnBox = first && fundsFirst,
+        minerFeeCeiling).map(fill => Priced(fill, kept(fill, minerFeeCeiling), fill.poolAfter)),
+      placements, alreadyCarried, spot, RunStrategy.searchUntil(deadline))
+
+  /**
+   * Signs the orders `strategy` plans against `poolBox`, one at a time, each against the pool box the last
+   * execution left. An order that plans but cannot be signed is named and passed over, and the rest are
+   * planned again from the same pool box. Stops at `limit` transactions, placements included, at `deadline`,
    * or after `unbuildableLimits.perRun` unbuildable orders. Once `unbuildableLimits.perTx` orders one
-   * transaction created have failed, that transaction's other orders are passed over untried.
+   * transaction created have failed, that transaction's other orders are left out of every later plan.
    *
    * @param contracts      the deployment `poolBox` belongs to, which every output is built under
    * @param placementOf    the unconfirmed placements an order's box needs carried ahead of it
    * @param alreadyCarried placements another run in the same block carries, which take no slot here
+   * @param strategy       chooses which orders to execute and in what order
    */
   def run(ctx: BlockchainContext, wallet: NodeWallet, contracts: LDContracts, poolBox: InputUTXO,
           orders: Seq[LithosDexOrder], limit: Int,
@@ -200,14 +221,8 @@ object LithosDexExecution {
           deadline: Deadline,
           placementOf: LithosDexOrder => Vector[CompleteMempool.MempoolTx] = _ => Vector.empty,
           unbuildableLimits: Batcher.UnbuildableLimits = Batcher.UnbuildableLimits.Default,
-          alreadyCarried: Set[String] = Set.empty): LithosDexRun = {
-    val opening = LDLiquidityPool(poolBox)
-    val ranked = orders
-      .flatMap(order => price(order, opening, minRevenue, provisions, fundsItsOwnBox = false, minerFeeCeiling)
-        .map(fill => order -> fill.revenue))
-      .sortBy { case (order, revenue) => (-revenue, order.boxId) }
-      .map(_._1)
-
+          alreadyCarried: Set[String] = Set.empty,
+          strategy: RunStrategy = RunStrategy.Default): LithosDexRun = {
     var pool = poolBox
     var carried = Option.empty[InputUTXO]
     var built = Vector.empty[SignedTransaction]
@@ -216,44 +231,72 @@ object LithosDexExecution {
     var placements = Vector.empty[CompleteMempool.MempoolTx]
     var unbuildable = Vector.empty[String]
     var failedByTx = Map.empty[String, Int]
-    val remaining = ranked.iterator
+    var passedOver = Set.empty[String]
+    var plan = Vector.empty[Planned[LithosDexOrder, LithosDexFill, LDLiquidityPool]]
+    var replan = true
     def slotsUsed(txs: Vector[CompleteMempool.MempoolTx]) = built.size + txs.count(tx => !alreadyCarried.contains(tx.id))
     def full = slotsUsed(placements) >= limit
     def stopped = deadline.isOverdue() || unbuildable.size >= unbuildableLimits.perRun
 
-    while (remaining.hasNext && !full && !stopped) {
-      val order = remaining.next()
-      val createdBy = order.box.transactionId
-      // Only the opening fill has to fund a takings box by itself; the rest add to the one it made. An order
-      // whose transaction has already failed perTx times is passed over untried
-      val priced =
-        if (failedByTx.getOrElse(createdBy, 0) >= unbuildableLimits.perTx) None
-        else price(order, LDLiquidityPool(pool), minRevenue, provisions, fundsItsOwnBox = built.isEmpty, minerFeeCeiling)
-      priced.foreach { fill =>
+    // Everything not yet signed or refused, planned from the pool box the last execution left
+    def open: Seq[LithosDexOrder] = orders.filterNot(order => fills.exists(_.order.boxId == order.boxId) ||
+      unbuildable.contains(order.boxId) || passedOver.contains(order.boxId) ||
+      failedByTx.getOrElse(order.box.transactionId, 0) >= unbuildableLimits.perTx)
+
+    while (!full && !stopped && (replan || plan.nonEmpty)) {
+      if (replan) {
+        // Only the run's first fill has to fund a takings box by itself; the rest add to the one it made
+        plan = strategy.plan(problem(open, LDLiquidityPool(pool), limit - slotsUsed(placements), minRevenue,
+          provisions, minerFeeCeiling, fundsFirst = built.isEmpty, order => placementOf(order).map(_.id),
+          alreadyCarried ++ placements.map(_.id), deadline))
+        replan = false
+      } else {
+        val step = plan.head
+        plan = plan.tail
+        val order = step.order
+        val createdBy = order.box.transactionId
         val added = placementOf(order).filterNot(tx => placements.exists(_.id == tx.id))
-        if (slotsUsed(placements ++ added) < limit) Try {
+        // Priced again against the box the chain actually left, which the plan's own pool should equal. A step
+        // that no longer fits or fills is left out of this run and the rest planned again, since every later
+        // step was priced against the pool this one would have left
+        val repriced =
+          if (slotsUsed(placements ++ added) >= limit) None
+          else price(order, LDLiquidityPool(pool), minRevenue, provisions, fundsItsOwnBox = built.isEmpty,
+            minerFeeCeiling)
+        repriced.map(fill => fill -> Try {
           val signed = assembled(ctx, wallet, contracts, pool, fill, blockHeight, minerFeeCeiling, useTrueProp, carried)
           val outputs = signed.getOutputsToSpend
           (signed, InputUTXO(outputs.get(0)), InputUTXO(outputs.get(takingsIndex(order))))
-        } match {
-          case Success((signed, nextPool, takings)) =>
+        }) match {
+          case None =>
+            passedOver += order.boxId
+            replan = true
+          case Some((fill, Success((signed, nextPool, takings)))) =>
             built :+= signed
             fills :+= fill
             poolIds :+= pool.id.toString
             placements ++= added
             pool = nextPool
             carried = Some(takings)
-          case Failure(ex) =>
+          case Some((_, Failure(ex))) =>
             logger.warn(s"Could not build LithosDEX order ${order.boxId} against pool ${pool.id}, " +
               s"passing over it: ${ex.getMessage}")
             unbuildable :+= order.boxId
             failedByTx = failedByTx.updated(createdBy, failedByTx.getOrElse(createdBy, 0) + 1)
+            replan = true
         }
       }
     }
     LithosDexRun(carried.map(LithosDexChain(built, fills, poolIds, _)), placements, unbuildable,
-      cutShort = remaining.hasNext && !full)
+      cutShort = (replan || plan.nonEmpty) && !full)
   }
+
+  /** What this miner keeps of `fill`: the executor fee, less the miner fee a broadcast pays out of it. */
+  private def kept(fill: LithosDexFill, minerFeeCeiling: Long): Long =
+    fill.revenue - math.min(fill.order.terms.maxMinerFee, math.max(0L, minerFeeCeiling))
+
+  /** Tokens per nanoERG, which the strategy measures a fill's price impact by. */
+  private def spot(pool: LDLiquidityPool): Double = pool.reservesY.toDouble / pool.reservesX.toDouble
 
   /**
    * `chain` closed with a flush of the pending fees its last pool box holds, or `chain` unchanged when

@@ -191,7 +191,12 @@ class LithosDexBatcher(nodeContext: NodeContext,
 
       var left = slots
       var carried = Vector.empty[CompleteMempool.MempoolTx]
-      val bundles = plans.sortBy(plan => (-plan.fills.map(_.revenue).sum, plan.contracts.poolNFT.toString)).flatMap { plan =>
+      // Ranked by what the strategy would take from each pool on its own
+      val ranked = plans.map(plan => plan -> LithosDexExecution.priceChain(plan.fills.map(_.order),
+        LDLiquidityPool(plan.poolBox), batching.minRevenueNanoErg, plan.provisions, slots, strategy = strategy)
+        .map(_.revenue).sum)
+        .sortBy { case (plan, value) => (-value, plan.contracts.poolNFT.toString) }.map(_._1)
+      val bundles = ranked.flatMap { plan =>
         val runSlots = left - flushSlot
         if (runSlots <= 0 || deadline.isOverdue()) None
         else Try(runPlan(ctx, plan, runSlots, blockHeight, deadline, spenders, creators, placed, placementOf,
@@ -249,7 +254,7 @@ class LithosDexBatcher(nodeContext: NodeContext,
     val usable = plan.fills.map(_.order).filter(order => creators.get(order.boxId).forall(tx => placed.contains(tx.id)))
     val run = LithosDexExecution.run(ctx, nodeContext.getNodeWallet, plan.contracts, plan.poolBox, usable, runSlots,
       batching.minRevenueNanoErg, plan.provisions, blockHeight, 0L, useTrueProp, deadline, placementOf,
-      Batcher.UnbuildableLimits(batching), alreadyCarried)
+      Batcher.UnbuildableLimits(batching), alreadyCarried, strategy)
     settle(run, blockHeight)
     run.chain.map { chain =>
       val claimed = plan.poolBox.id.toString +: (chain.fills.map(_.order.boxId) ++
@@ -346,7 +351,7 @@ class LithosDexBatcher(nodeContext: NodeContext,
                 poolOrders.filterNot(order => refused.get(order.boxId).contains(tipBox.boxId)),
                 batching.maxOrdersPerBlock, batching.broadcastMinRevenueNanoErg, provisions, height,
                 batching.broadcastMinerFeeCeiling, useTrueProp = false, BroadcastBudget.fromNow,
-                unbuildableLimits = Batcher.UnbuildableLimits(batching))
+                unbuildableLimits = Batcher.UnbuildableLimits(batching), strategy = strategy)
               settle(run, height)
               run.chain.flatMap(chain => send(sender, chain, observed))
             }

@@ -32,6 +32,7 @@ object MempoolSorting {
  * @param maxUnbuildablePerRun orders a run fails to build before it stops trying more
  * @param maxUnbuildablePerTx orders created by one transaction a run fails to build before it passes over that
  *                          transaction's other orders untried, so one transaction cannot use up a run's attempts
+ * @param strategy          names the strategy choosing which orders a run executes and in what order
  */
 case class BatchingConfig(enabled: Boolean,
                           scanIntervalMs: Long,
@@ -51,7 +52,8 @@ case class BatchingConfig(enabled: Boolean,
                           maxMempoolOrders: Int,
                           maxMempoolOrdersPerTx: Int,
                           maxUnbuildablePerRun: Int,
-                          maxUnbuildablePerTx: Int)
+                          maxUnbuildablePerTx: Int,
+                          strategy: String = "maxFees")
 
 object BatchingConfig {
 
@@ -75,7 +77,8 @@ object BatchingConfig {
     maxMempoolOrders = 64,
     maxMempoolOrdersPerTx = 4,
     maxUnbuildablePerRun = 32,
-    maxUnbuildablePerTx = 2)
+    maxUnbuildablePerTx = 2,
+    strategy = "maxFees")
 
   def apply(config: Configuration, name: String): BatchingConfig = {
     def path(key: String): String = s"batching.$name.$key"
@@ -107,6 +110,7 @@ object BatchingConfig {
       maxMempoolOrders = int("maxMempoolOrders", Default.maxMempoolOrders),
       maxMempoolOrdersPerTx = int("maxMempoolOrdersPerTx", Default.maxMempoolOrdersPerTx),
       maxUnbuildablePerRun = int("maxUnbuildablePerRun", Default.maxUnbuildablePerRun),
-      maxUnbuildablePerTx = int("maxUnbuildablePerTx", Default.maxUnbuildablePerTx))
+      maxUnbuildablePerTx = int("maxUnbuildablePerTx", Default.maxUnbuildablePerTx),
+      strategy = config.getOptional[String](path("strategy")).map(_.trim).getOrElse(Default.strategy))
   }
 }
