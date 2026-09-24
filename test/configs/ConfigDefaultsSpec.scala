@@ -69,6 +69,12 @@ class ConfigDefaultsSpec extends AnyFlatSpec with Matchers {
       .autoFlush shouldBe false
   }
 
+  it should "read discoverPools from the LithosDex block, on when absent" in {
+    LithosDexBatchingConfig(Configuration.empty).discoverPools shouldBe true
+    LithosDexBatchingConfig(Configuration(ConfigFactory.parseString("batching.lithosdex.discoverPools = false")))
+      .discoverPools shouldBe false
+  }
+
   /** The flag has to come from the adapter's own block, or turning one adapter off turns nothing off. */
   "BatchingConfig" should "read each adapter's enabled flag from that adapter's block" in {
     val configured = Configuration(ConfigFactory.parseString("""
