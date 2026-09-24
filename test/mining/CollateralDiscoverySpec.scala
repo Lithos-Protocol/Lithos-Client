@@ -112,9 +112,9 @@ class CollateralDiscoverySpec extends AnyFlatSpec with Matchers with MockitoSuga
       val loaded = builderOver(wallet, api, batch = 100).loadCollateral(c)
       loaded.size shouldBe 51
 
-      val best = CandidateTxBuilder.bestCandidates(loaded, blockHeight = 520)
+      val best = CandidateTxBuilder.bestCandidates(loaded, blockHeight = 520, clearanceAge = 100)
       best.size shouldBe 1
-      withClue("age 220 is past the overdue line, so it outranks every bid on page one: ") {
+      withClue("age 220 is past a clearance age of 100, so it outranks every bid on page one: ") {
         best.head.inclusionHeight shouldEqual 300
       }
     }

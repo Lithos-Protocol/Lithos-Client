@@ -25,6 +25,18 @@ class ConfigsSpec extends AnyFlatSpec with Matchers {
     thrown.getMessage should include("stratum.candidate.minCandidateChangeRevenue")
   }
 
+  it should "bound the collateral clearance age to 100 through 14400 blocks" in {
+    def withAge(age: Int): Configuration = Configuration(
+      ConfigFactory.parseString(s"stratum.candidate.clearanceAge = $age").withFallback(shipped.underlying).resolve())
+    Seq(100, 7200, 14400).foreach { age =>
+      withClue(s"clearanceAge $age: ")(noException should be thrownBy Configs.validateAll(withAge(age)))
+    }
+    Seq(0, 99, 14401).foreach { age =>
+      val thrown = the[ConfigValidationException] thrownBy Configs.validateAll(withAge(age))
+      thrown.getMessage should include("stratum.candidate.clearanceAge")
+    }
+  }
+
   it should "accept only the listed reduction multipliers" in {
     def withMultiplier(m: Int): Configuration = Configuration(
       ConfigFactory.parseString(s"stratum.reductionMultiplier = $m").withFallback(shipped.underlying).resolve())

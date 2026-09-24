@@ -32,7 +32,7 @@
   // CONST_PERIOD_LENGTH: Length of submission period, helps determine current spending path
   // CONST_EVAL_PROPBYTES: Hashed proposition bytes of evaluation contract
   // CONST_MIN_ENTRY_BOND: Floor on the refundable bond a submission posts, 0.002 ERG at launch
-  // CONST_BOND_DIVISOR: Score units per nanoERG of proportional bond, 100 at launch
+  // CONST_BOND_DIVISOR: Score units per nanoERG of proportional bond, 25 at launch
 
   // Max allowable size for NISP, with CONST_NUM_LVLS_MAX levels in the super share's merkle proof.
   // The same formula as the minimum below, run on the max side:
@@ -43,7 +43,8 @@
   val CONST_NISP_MAX          = 29629
   // Minimum allowable NISP size, with one level in super share's merkle proof
   // Important so that iterating 10 times over nispBytes does not cause index out of bounds in other fp contracts
-  // CONST_SCORE_SIZE + 10 * (CONST_N_SIZE + headerSize + 2 + 1 + CONST_TX_MIN_SIZE + CONST_LEVEL_SIZE + CONST_Y_COORD)
+  // CONST_SCORE_SIZE + 10 * (CONST_N_SIZE + headerSize + 2 + 1 + CONST_TX_PROOF_MIN + CONST_LEVEL_SIZE + CONST_Y_COORD)
+  // 8 + 10 * (4 + 220 + 3 + 502 + 33 + 32) = 7948
   // NOTE: headerSize is assuming minimum of 3 bytes for height and 6 for timestamp
   val CONST_NISP_MIN          = 7948
 

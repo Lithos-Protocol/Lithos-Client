@@ -15,9 +15,17 @@ case class CandidateConfig(collateralPoolSize: Int,
                            logTimings: Boolean,
                            minCandidateChangeRevenue: Long = 1000000L,
                            waitForBlockPackage: Boolean = true,
-                           logBudgets: Boolean = false)
+                           logBudgets: Boolean = false,
+                           clearanceAge: Int = 7200)
 
 object CandidateConfig {
+
+  /**
+   * Bounds on `clearanceAge`. Below 100 a box that bids nothing overtakes the bids almost at once, and
+   * above 14400 blocks, about 20 days on mainnet, a box can sit in the active set for weeks.
+   */
+  final val MinClearanceAge: Int = 100
+  final val MaxClearanceAge: Int = 14400
 
   /** Mirrors the `stratum.candidate` block in `application.conf`; keep the two in step. */
   val Default: CandidateConfig = CandidateConfig(
@@ -42,7 +50,8 @@ object CandidateConfig {
     logTimings = false,
     minCandidateChangeRevenue = 1000000L,
     waitForBlockPackage = true,
-    logBudgets = false
+    logBudgets = false,
+    clearanceAge = 7200
   )
 
   def apply(config: Configuration): CandidateConfig = {
@@ -70,7 +79,8 @@ object CandidateConfig {
       minCandidateChangeRevenue = config.getOptional[Long]("stratum.candidate.minCandidateChangeRevenue")
         .getOrElse(Default.minCandidateChangeRevenue),
       waitForBlockPackage = bool("waitForBlockPackage", Default.waitForBlockPackage),
-      logBudgets = bool("logBudgets", Default.logBudgets)
+      logBudgets = bool("logBudgets", Default.logBudgets),
+      clearanceAge = int("clearanceAge", Default.clearanceAge)
     )
   }
 }

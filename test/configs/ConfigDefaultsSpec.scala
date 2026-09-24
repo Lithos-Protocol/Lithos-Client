@@ -20,6 +20,7 @@ class ConfigDefaultsSpec extends AnyFlatSpec with Matchers {
     defaults.minCandidateChangeRevenue shouldBe 1000000L
     defaults.waitForBlockPackage shouldBe true
     defaults.logBudgets shouldBe false
+    defaults.clearanceAge shouldBe 7200
     val configured = CandidateConfig(Configuration(ConfigFactory.parseString("""
       stratum.candidate.minCandidateChangeRevenue = 0
       stratum.candidate.waitForBlockPackage = false

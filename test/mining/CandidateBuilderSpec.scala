@@ -33,8 +33,9 @@ class CandidateBuilderSpec extends TestKit(ActorSystem("candidate-builder-spec",
 
   override def afterAll(): Unit = TestKit.shutdownActorSystem(system)
 
+  // Clearance at its minimum, so the ranking tests below can cross it within a few hundred blocks.
   private val cfg = CandidateConfig.Default.copy(blockTransactions = false, collateralRefreshInterval = 600000,
-    waitForBlockPackage = false)
+    waitForBlockPackage = false, clearanceAge = CandidateConfig.MinClearanceAge)
 
   /** A collateral box stand-in. Only its id, age and bid are ever read by the code under test. */
   private def box(ctx: BlockchainContext,
@@ -638,6 +639,20 @@ class CandidateBuilderSpec extends TestKit(ActorSystem("candidate-builder-spec",
     val f = fixture(boxes = Some(boxes))
     // One block earlier the same box is only 99 old, so the bid still decides.
     advanceTo(f, 199).collateral.collateralId shouldEqual boxes(1).id
+  }
+
+  it should "draw by the configured clearance age, not the minimum" in {
+    // The same pair as above: 100 blocks old is overdue at the minimum, and nowhere near 7200.
+    val boxes = boxesWith(Seq((1000000L, 100, 0L), (2000000L, 180, 900000L)))
+    val f = fixture(boxes = Some(boxes), config = cfg.copy(clearanceAge = 7200))
+    advanceTo(f, 200).collateral.collateralId shouldEqual boxes(1).id
+  }
+
+  "The default clearance age" should "let the bid decide until a box is 7200 blocks old" in {
+    val boxes = boxesWith(Seq((1000000L, 100, 0L), (2000000L, 7000, 900000L)))
+    CandidateTxBuilder.bestCandidates(boxes, 7299).map(_.id) shouldEqual Seq(boxes(1).id)
+    CandidateTxBuilder.bestCandidates(boxes, 7300).map(_.id) shouldEqual Seq(boxes.head.id)
+    CandidateConfig.Default.clearanceAge shouldEqual 7200
   }
 
   "A box the block just spent" should "not be offered again on the next block" in {

@@ -50,19 +50,14 @@ object CandidateTxBuilder {
   private[mining] final val MaxCollateralCarriers: Int = 2 * EmissionSchedule.MAX_ACTIVE + 1
 
   /**
-   * Confirmed age at which a box stops competing on its bid and starts competing on age alone.
-   * The active set is bounded, so draining the overdue cohort oldest-first turns it over rather
-   * than starving it, and a lender who bids nothing still gets mined eventually.
+   * The boxes that tie for best, for the caller to draw from. A box whose confirmed age has reached
+   * `clearanceAge` stops competing on its bid: those boxes win outright, oldest first, so no bid can
+   * hold a stale box out of the set indefinitely. Among the rest the highest bid wins and age breaks
+   * the tie.
    */
-  final val OverdueAge: Int = 100
-
-  /**
-   * The boxes that tie for best, for the caller to draw from. Overdue boxes win outright, oldest
-   * first, so no bid can hold a stale box out of the set indefinitely; among the rest the highest
-   * bid wins and age breaks the tie.
-   */
-  def bestCandidates(candidates: Seq[CollateralCandidate], blockHeight: Int): Seq[CollateralCandidate] = {
-    val overdue = candidates.filter(_.age(blockHeight) >= OverdueAge)
+  def bestCandidates(candidates: Seq[CollateralCandidate], blockHeight: Int,
+                     clearanceAge: Int = CandidateConfig.Default.clearanceAge): Seq[CollateralCandidate] = {
+    val overdue = candidates.filter(_.age(blockHeight) >= clearanceAge)
     if (overdue.nonEmpty) {
       val oldest = overdue.map(_.inclusionHeight).min
       val sameAge = overdue.filter(_.inclusionHeight == oldest)

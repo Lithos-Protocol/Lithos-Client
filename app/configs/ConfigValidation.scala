@@ -155,6 +155,9 @@ object Configs {
     v.range("stratum.candidate.collateralPoolSize", v.int("stratum.candidate.collateralPoolSize"), 1, 100,
       "collateral boxes pre-loaded; the active set never holds more than 100")
     v.range("stratum.candidate.collateralRefreshInterval", v.int("stratum.candidate.collateralRefreshInterval"), 100, 3600000, "ms")
+    v.range("stratum.candidate.clearanceAge", v.int("stratum.candidate.clearanceAge"),
+      CandidateConfig.MinClearanceAge, CandidateConfig.MaxClearanceAge,
+      "blocks a collateral box may stay live before it is drawn ahead of every bid")
     v.doubleRange("stratum.candidate.blockShare", v.double("stratum.candidate.blockShare"), 0.0, 1.0,
       "fraction of the block's byte and cost limits this client's package may claim")
     Seq(configs.CandidateSourceConfig.Rollups, configs.CandidateSourceConfig.Emissions,

@@ -414,7 +414,7 @@ class CandidateBuilder(client: ErgoClient,
           val chosen = sticky
             .flatMap(id => boxes.find(_.id == id))
             .getOrElse {
-              val best = CandidateTxBuilder.bestCandidates(boxes, height)
+              val best = CandidateTxBuilder.bestCandidates(boxes, height, config.clearanceAge)
               best(random.nextInt(best.size))
             }
 
