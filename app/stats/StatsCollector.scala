@@ -76,7 +76,7 @@ class StatsCollector(cache: StatsCache, dexRefresh: Option[DexStatsRefresh], per
               cache.publishDex(data, flight.startedAt, flight.startedNanos)
               persistence.foreach(_.offer(StoredDexStats(flight.startedAt, data)))
             case Failure(ex) =>
-              logger.warn("DEX statistics refresh failed", ex)
+              logger.warn(s"DEX statistics refresh failed: ${ex.getMessage}")
               cache.dexFailed()
           }
           nextDexRead = System.nanoTime() + cache.settings.dex.refreshIntervalMs.milliseconds.toNanos
