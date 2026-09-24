@@ -50,6 +50,20 @@ class ConfigDefaultsSpec extends AnyFlatSpec with Matchers {
     StratumConfig.DefaultReductionMultiplier shouldEqual lfsm.LFSMHelpers.NISP_COEFFICIENT
   }
 
+  "BatchingConfig" should "search each plan for 250 ms when searchBudgetMs is absent" in {
+    BatchingConfig(Configuration.empty, "lithosdex").searchBudgetMs shouldBe 250L
+    BatchingConfig(Configuration(ConfigFactory.parseString("batching.ergodex.searchBudgetMs = 0")), "ergodex")
+      .searchBudgetMs shouldBe 0L
+  }
+
+  "StateConfig.DefaultAutoCommit" should "equal what the shipped application.conf parses" in {
+    new StateConfig(shipped).autoCommit shouldEqual StateConfig.DefaultAutoCommit
+  }
+
+  it should "leave auto-commit off when the key is absent" in {
+    new StateConfig(Configuration.empty).autoCommit shouldBe false
+  }
+
   "BatchingConfig.Default" should "equal what the shipped application.conf parses" in {
     BatchingConfig(shipped, "ergodex") shouldEqual BatchingConfig.Default
   }

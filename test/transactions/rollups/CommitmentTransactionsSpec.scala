@@ -92,11 +92,12 @@ class CommitmentTransactionsSpec
   private def dataBoxWith(ctx: BlockchainContext,
                           wallet: NodeWallet,
                           commits: Seq[(Int, Long)],
-                          contract: Contract = null): InputUTXO =
+                          contract: Contract = null,
+                          parentTx: String = "ab" * 32): InputUTXO =
     UTXO(if (contract == null) wallet.contract else contract, Parameters.MinFee,
       Seq(work.lithos.mutations.Token(ErgoId.create("dc" * 32), 1L)),
       Seq(ErgoValue.of(Colls.fromArray(commits.toArray), ErgoType.pairType(scalaIntType, scalaLongType))))
-      .toInput(ctx, ErgoId.create("ab" * 32), 0.toShort)
+      .toInput(ctx, ErgoId.create(parentTx), 0.toShort)
 
   private case class Fixture(commitments: CommitmentTransactions,
                              selector: EngineFunding,
@@ -109,9 +110,12 @@ class CommitmentTransactionsSpec
    * @param commits what R4 holds, or None for "this miner has no data box"
    * @param unsignable lock the data box under a script the prover has no secret for, so the build
    *                   fails before anything reaches the node
+   * @param successor an unconfirmed transaction already spends the data box, so a mempool-aware
+   *                  read returns its output rather than the confirmed box
    */
   private def fixture(commits: Option[Seq[(Int, Long)]],
-                      unsignable: Boolean = false): Fixture = {
+                      unsignable: Boolean = false,
+                      successor: Boolean = false): Fixture = {
     val api = mock[NodeApi]
     val (nodeCtx, _, wallet) = FakeNodeContext(api, numAddresses = 1)
     val clock = new AtomicLong(1000000L)
@@ -143,11 +147,12 @@ class CommitmentTransactionsSpec
         if (commits.isDefined) Some(ErgoId.create("dc" * 32)) else None
     }
     val commitments = new CommitmentTransactions(nodeCtx, source) {
-      override protected def dataBox(ctx: BlockchainContext): Try[InputUTXO] = commits match {
+      override protected def dataBox(ctx: BlockchainContext, mempool: MempoolOptions): Try[InputUTXO] = commits match {
         case None => Failure(new state.DataBoxRetrievalException("no stored data box"))
         case Some(cs) =>
           val foreign = if (unsignable) Contract(sigma.ast.ErgoTree.fromHex("10010100d17300")) else null
-          Success(dataBoxWith(ctx, wallet, cs, foreign))
+          val parent = if (successor && mempool.includeUnconfirmed) "cd" * 32 else "ab" * 32
+          Success(dataBoxWith(ctx, wallet, cs, foreign, parent))
       }
     }
     Fixture(commitments, EngineFunding(mgr, 5.seconds, ec), mgr, TestProbe(), clock, readable)
@@ -217,23 +222,48 @@ class CommitmentTransactionsSpec
 
   // ─── when not to move at all ──────────────────────────────────────────────
 
-  "commitScore" should "do nothing while the current commitment has not taken effect" in {
+  "commitScore" should "wait while the current commitment has not taken effect" in {
     // Replacing an entry that is not yet in force would leave the window with no agreed score in it.
     val f = fixture(Some(pending(configuredScore + 1, configuredScore + 2)))
-    f.commitments.commitScore(diff, f.selector) shouldEqual Success(None)
+    f.commitments.commitScore(diff, f.selector).get shouldBe a[CommitmentProgress.Waiting]
     offered(f, erg).map(_.value) shouldEqual Seq(5 * erg)
   }
 
-  it should "do nothing when the commitment already matches the configured score" in {
+  it should "be settled when the commitment already matches the configured score" in {
     val f = fixture(Some(inForce(configuredScore)))
-    f.commitments.commitScore(diff, f.selector) shouldEqual Success(None)
+    f.commitments.commitScore(diff, f.selector) shouldEqual Success(CommitmentProgress.Settled)
     offered(f, erg).map(_.value) shouldEqual Seq(5 * erg)
   }
 
-  it should "do nothing, and reserve nothing, when this miner has no data box" in {
+  it should "be settled by a newest entry that has not yet taken effect" in {
+    // The loop stops once the chain holds the configured score, not once it binds: nothing it could
+    // send would make the pending entry bind any sooner.
+    val f = fixture(Some(pending(configuredScore, configuredScore + 2)))
+    f.commitments.commitScore(diff, f.selector) shouldEqual Success(CommitmentProgress.Settled)
+  }
+
+  it should "wait, and reserve nothing, when this miner has no data box" in {
     val f = fixture(None)
-    f.commitments.commitScore(diff, f.selector) shouldEqual Success(None)
+    f.commitments.commitScore(diff, f.selector).get shouldBe a[CommitmentProgress.Waiting]
     offered(f, erg).map(_.value) shouldEqual Seq(5 * erg)
+  }
+
+  it should "wait rather than double spend a data box an unconfirmed transaction already spends" in {
+    // The loop's own previous change, still in the mempool, reads as a successor. Sending another
+    // would conflict with it and be refused, or evict it where replacement is allowed.
+    val f = fixture(Some(inForce(configuredScore + 1)), successor = true)
+    f.commitments.commitScore(diff, f.selector).get shouldBe a[CommitmentProgress.Waiting]
+    offered(f, erg).map(_.value) shouldEqual Seq(5 * erg)
+  }
+
+  "A new commitment's declared height" should "leave the transaction at least one block to be included" in {
+    // The contract wants the declared height NISP_WINDOW past the including block, and the earliest
+    // block is one past the tip the build reads. With no slack every change would be invalid on arrival.
+    CommitmentTransactions.InclusionSlack should be >= 1
+  }
+
+  it should "bind 125 blocks after it is sent, the figure the shipped config and docs state" in {
+    2 * LFSMHelpers.NISP_WINDOW + CommitmentTransactions.InclusionSlack shouldEqual 125
   }
 
   // ─── which entry is in force ──────────────────────────────────────────────

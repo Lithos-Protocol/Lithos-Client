@@ -13,7 +13,7 @@ import transactions.candidate.{CandidateBundle, CandidateCapital, CapitalEntry, 
 import transactions.engine.execution.RollupExecution
 import work.lithos.mutations.{Contract, InputUTXO, Token, TxBuilder, UTXO}
 
-import scala.concurrent.duration.Deadline
+import scala.concurrent.duration.{Deadline, FiniteDuration}
 import scala.util.{Failure, Success, Try}
 
 /**
@@ -126,13 +126,14 @@ object ErgoDexExecution {
   /** `orders` against `pool` as a strategy sees them, the first fill funding its own box when `fundsFirst`. */
   private def problem(orders: Seq[ErgoDexOrder], pool: ErgoDexPool, limit: Int, minRevenue: Long,
                       minerFeeCeiling: Long, fundsFirst: Boolean, placements: ErgoDexOrder => Seq[String],
-                      alreadyCarried: Set[String], deadline: Deadline): RunProblem[ErgoDexOrder, ErgoDexFill, ErgoDexPool] =
+                      alreadyCarried: Set[String], deadline: Deadline,
+                      searchBudget: FiniteDuration = RunStrategy.SearchBudget): RunProblem[ErgoDexOrder, ErgoDexFill, ErgoDexPool] =
     RunProblem[ErgoDexOrder, ErgoDexFill, ErgoDexPool](orders, pool, limit, _.boxId,
       (order, state, first) => price(order, state, minRevenue, fundsItsOwnBox = first && fundsFirst, minerFeeCeiling)
         .map(fill => Priced(fill, fill.revenue - math.min(order.maxMinerFee, math.max(0L, minerFeeCeiling)),
           fill.poolAfter)),
       placements, alreadyCarried, state => state.reservesY.toDouble / state.reservesX.toDouble,
-      RunStrategy.searchUntil(deadline))
+      RunStrategy.searchUntil(deadline, searchBudget))
 
   /**
    * Signs the orders `strategy` plans against `poolBox`, one at a time, each against the pool the last
@@ -144,6 +145,7 @@ object ErgoDexExecution {
    * @param placementOf    the unconfirmed placements an order's box needs carried ahead of it
    * @param alreadyCarried placement ids an earlier run in the same package already carries
    * @param strategy       chooses which orders to execute and in what order
+   * @param searchBudget   most time `strategy` may spend on each plan
    */
   def run(ctx: BlockchainContext, wallet: NodeWallet, poolBox: InputUTXO, pool: ErgoDexPool,
           orders: Seq[ErgoDexOrder], limit: Int, minRevenue: Long, blockHeight: Int, minerFeeCeiling: Long,
@@ -151,7 +153,8 @@ object ErgoDexExecution {
           placementOf: ErgoDexOrder => Vector[CompleteMempool.MempoolTx] = _ => Vector.empty,
           alreadyCarried: Set[String] = Set.empty,
           unbuildableLimits: Batcher.UnbuildableLimits = Batcher.UnbuildableLimits.Default,
-          strategy: RunStrategy = RunStrategy.Default): ErgoDexRun = {
+          strategy: RunStrategy = RunStrategy.Default,
+          searchBudget: FiniteDuration = RunStrategy.SearchBudget): ErgoDexRun = {
     require(poolBox.id.toString == pool.boxId, "a run must open on the pool it is priced against")
 
     var box = poolBox
@@ -179,7 +182,7 @@ object ErgoDexExecution {
           failedByTx.getOrElse(order.box.transactionId, 0) >= unbuildableLimits.perTx)
         plan = strategy.plan(problem(open, state, limit - slotsUsed(placements), minRevenue, minerFeeCeiling,
           fundsFirst = built.isEmpty, order => placementOf(order).map(_.id), alreadyCarried ++ placements.map(_.id),
-          deadline))
+          deadline, searchBudget))
         replan = false
       } else {
         val step = plan.head

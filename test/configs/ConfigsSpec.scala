@@ -101,12 +101,25 @@ class ConfigsSpec extends AnyFlatSpec with Matchers {
         |batching.lithosdex.maxMempoolOrders = -1
         |batching.lithosdex.maxMempoolOrdersPerTx = -1
         |batching.lithosdex.maxUnbuildablePerRun = -1
-        |batching.lithosdex.maxUnbuildablePerTx = -1""".stripMargin)
+        |batching.lithosdex.maxUnbuildablePerTx = -1
+        |batching.lithosdex.discoverPools = "sometimes"
+        |batching.lithosdex.maxTrackedPools = 0
+        |batching.lithosdex.strategy = "maxFee"
+        |batching.lithosdex.searchBudgetMs = -1""".stripMargin)
       .withFallback(shipped.underlying).resolve())
     val thrown = the[ConfigValidationException] thrownBy Configs.validateAll(configured)
     Seq("scanIntervalMs", "autoFlush", "skippedOrderTtlMs", "maxSkippedOrders", "maxAncestorTxs",
-      "broadcastMempoolOrders", "maxMempoolOrders", "maxMempoolOrdersPerTx", "maxUnbuildablePerRun", "maxUnbuildablePerTx")
+      "broadcastMempoolOrders", "maxMempoolOrders", "maxMempoolOrdersPerTx", "maxUnbuildablePerRun", "maxUnbuildablePerTx",
+      "discoverPools", "maxTrackedPools", "strategy", "searchBudgetMs")
       .foreach(key => thrown.getMessage should include(s"batching.lithosdex.$key"))
+  }
+
+  it should "name the known strategies when a batching strategy is misspelled" in {
+    val configured = Configuration(ConfigFactory.parseString("batching.ergodex.strategy = \"maxfees\"")
+      .withFallback(shipped.underlying).resolve())
+    val thrown = the[ConfigValidationException] thrownBy Configs.validateAll(configured)
+    thrown.getMessage should include("batching.ergodex.strategy")
+    thrown.getMessage should include(transactions.batching.RunStrategy.Default.name)
   }
 
   it should "reject ErgoDEX skip-list values out of range" in {
@@ -117,11 +130,12 @@ class ConfigsSpec extends AnyFlatSpec with Matchers {
         |batching.ergodex.broadcastMempoolOrders = "sometimes"
         |batching.ergodex.maxMempoolOrdersPerTx = 0
         |batching.ergodex.maxUnbuildablePerRun = 0
-        |batching.ergodex.maxUnbuildablePerTx = 0""".stripMargin)
+        |batching.ergodex.maxUnbuildablePerTx = 0
+        |batching.ergodex.searchBudgetMs = 10001""".stripMargin)
       .withFallback(shipped.underlying).resolve())
     val thrown = the[ConfigValidationException] thrownBy Configs.validateAll(configured)
     Seq("skippedOrderTtlMs", "maxSkippedOrders", "maxAncestorTxs", "broadcastMempoolOrders",
-      "maxMempoolOrdersPerTx", "maxUnbuildablePerRun", "maxUnbuildablePerTx")
+      "maxMempoolOrdersPerTx", "maxUnbuildablePerRun", "maxUnbuildablePerTx", "searchBudgetMs")
       .foreach(key => thrown.getMessage should include(s"batching.ergodex.$key"))
   }
 

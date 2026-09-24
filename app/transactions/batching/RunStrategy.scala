@@ -52,12 +52,12 @@ object RunStrategy {
   /** The strategy `name` selects, if any does. */
   def named(name: String): Option[RunStrategy] = all.find(_.name == name.trim)
 
-  /** Most time one plan may search, so a deep order book cannot hold up a build. */
+  /** Most time one plan may search unless `batching.<adapter>.searchBudgetMs` says otherwise. */
   final val SearchBudget: FiniteDuration = 250.millis
 
-  /** When a plan made now stops searching: after [[SearchBudget]], or a quarter of what `deadline` leaves. */
-  def searchUntil(deadline: Deadline): Deadline =
-    Deadline.now + (deadline.timeLeft / 4).max(Duration.Zero).min(SearchBudget)
+  /** When a plan made now stops searching: after `budget`, or a quarter of what `deadline` leaves. */
+  def searchUntil(deadline: Deadline, budget: FiniteDuration = SearchBudget): Deadline =
+    Deadline.now + (deadline.timeLeft / 4).max(Duration.Zero).min(budget)
 }
 
 /**

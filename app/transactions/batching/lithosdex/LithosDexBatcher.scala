@@ -254,7 +254,7 @@ class LithosDexBatcher(nodeContext: NodeContext,
     val usable = plan.fills.map(_.order).filter(order => creators.get(order.boxId).forall(tx => placed.contains(tx.id)))
     val run = LithosDexExecution.run(ctx, nodeContext.getNodeWallet, plan.contracts, plan.poolBox, usable, runSlots,
       batching.minRevenueNanoErg, plan.provisions, blockHeight, 0L, useTrueProp, deadline, placementOf,
-      Batcher.UnbuildableLimits(batching), alreadyCarried, strategy)
+      Batcher.UnbuildableLimits(batching), alreadyCarried, strategy, searchBudget)
     settle(run, blockHeight)
     run.chain.map { chain =>
       val claimed = plan.poolBox.id.toString +: (chain.fills.map(_.order.boxId) ++
@@ -351,7 +351,8 @@ class LithosDexBatcher(nodeContext: NodeContext,
                 poolOrders.filterNot(order => refused.get(order.boxId).contains(tipBox.boxId)),
                 batching.maxOrdersPerBlock, batching.broadcastMinRevenueNanoErg, provisions, height,
                 batching.broadcastMinerFeeCeiling, useTrueProp = false, BroadcastBudget.fromNow,
-                unbuildableLimits = Batcher.UnbuildableLimits(batching), strategy = strategy)
+                unbuildableLimits = Batcher.UnbuildableLimits(batching), strategy = strategy,
+                searchBudget = searchBudget)
               settle(run, height)
               run.chain.flatMap(chain => send(sender, chain, observed))
             }

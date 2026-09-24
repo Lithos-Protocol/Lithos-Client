@@ -4,6 +4,7 @@ import configs.NodeContext
 import lfsm.LFSMHelpers
 import lfsm.states.MinerDictionary
 import mutations.NodeWallet
+import node.model.MempoolOptions
 import org.ergoplatform.ErgoTreePredef
 import org.ergoplatform.appkit._
 import org.ergoplatform.appkit.scalaapi.{scalaByteType, scalaIntType, scalaLongType}
@@ -45,16 +46,21 @@ class CommitmentTransactions(nodeContext: NodeContext, dataBoxes: DataBoxSource,
   protected def executionNode: node.NodeApi = nodeContext.getNodeApi
 
   /**
-   * Height offset a new commitment is declared at, so it lands far enough ahead that everyone
-   * currently mining against the old one has finished before it takes effect.
+   * Height offset a new commitment is declared at: the contracts' `NISP_WINDOW` notice, plus
+   * [[CommitmentTransactions.InclusionSlack]] blocks for the transaction to be included. Past those it
+   * is invalid, and the commitment loop sends a fresh one once the node drops it.
    */
-  private final val DataBoxBuffer: Int = (LFSMHelpers.NISP_WINDOW + 50).toInt
+  private final val DataBoxBuffer: Int = LFSMHelpers.NISP_WINDOW + CommitmentTransactions.InclusionSlack
 
-  /** The data box this miner's commitments live in. Overridable so a test can supply one. */
-  protected def dataBox(ctx: BlockchainContext): Try[InputUTXO] =
+  /**
+   * The data box this miner's commitments live in, confirmed unless `mempool` asks for its unconfirmed
+   * successor. Overridable so a test can supply one.
+   */
+  protected def dataBox(ctx: BlockchainContext,
+                        mempool: MempoolOptions = MempoolOptions.ConfirmedOnly): Try[InputUTXO] =
     dataBoxes.getDataBoxToken match {
       case None => Failure(new DataBoxRetrievalException("Could not find a stored data box"))
-      case Some(nft) => LFSMHelpers.getLocalDataBox(ctx, nft, Helpers.dataBoxContract(ctx))
+      case Some(nft) => LFSMHelpers.getLocalDataBox(ctx, executionNode, nft, Helpers.dataBoxContract(ctx), mempool)
     }
 
   private def commitments(box: InputUTXO): Array[(Int, Long)] =
@@ -222,34 +228,35 @@ class CommitmentTransactions(nodeContext: NodeContext, dataBoxes: DataBoxSource,
   }
 
   /**
-   * Move this miner's commitment to the configured difficulty, if it has to move.
+   * Move this miner's commitment to the configured difficulty, if it has to move and may.
    *
-   * Nothing happens unless the current commitment has taken effect AND the configured score differs
-   * from it. Both conditions matter: replacing an entry that is not yet in force would leave the
-   * window with no agreed score in it at all.
-   *
-   * @return the transaction id, or None when no change was needed
+   * Settled once the confirmed box's newest entry is the configured score. Otherwise a change is sent
+   * only when no unconfirmed transaction is already spending the data box and the newest entry is old
+   * enough to replace; anything else is reported as what the change is waiting for.
    */
-  def commitScore(diff: String, walletSelector: EngineFunding): Try[Option[String]] = Try {
+  def commitScore(diff: String, walletSelector: EngineFunding): Try[CommitmentProgress] = Try {
     val score = LFSMHelpers.convertTauOrScore(BigInt(LFSMHelpers.parseDiffValueForStratum(diff).get)).toLong
     client.execute { ctx =>
       dataBox(ctx) match {
-        case Failure(ex) =>
-          logger.info(s"Not auto-committing: ${ex.getMessage}")
-          None
-        case Success(input) =>
-          val commits = commitments(input)
-          val current = commits.head
-          // Only two commitments are kept, so the contract spaces changes by a full rollup lifetime
-          // past the window as well: any less and a change could evict the commitment a NISP still in
-          // evaluation was submitted under.
-          if (ctx.getHeight - current._1 < LFSMHelpers.NISP_WINDOW + LFSMHelpers.ROLLUP_LIFETIME) {
-            logger.info(s"Not changing commits until $current has aged out (height ${ctx.getHeight})")
-            None
-          } else if (current._2 == score) {
-            logger.info("No commitment change needed")
-            None
-          } else Some(sendCommitment(ctx, input, current, score, walletSelector))
+        case Failure(ex) => CommitmentProgress.Waiting(s"no data box to commit in: ${ex.getMessage}")
+        case Success(confirmed) =>
+          val current = commitments(confirmed).head
+          if (current._2 == score) CommitmentProgress.Settled
+          else dataBox(ctx, MempoolOptions.WithMempool) match {
+            case Success(tip) if tip.id == confirmed.id =>
+              // Only two commitments are kept, so the contract spaces changes by a full rollup lifetime
+              // past the window as well: any less and a change could evict the commitment a NISP still
+              // in evaluation was submitted under.
+              val replaceableAt = current._1 + LFSMHelpers.NISP_WINDOW + LFSMHelpers.ROLLUP_LIFETIME
+              if (ctx.getHeight < replaceableAt)
+                CommitmentProgress.Waiting(s"commitment ${current._2} declared at height ${current._1} " +
+                  s"cannot be replaced before height $replaceableAt")
+              else CommitmentProgress.Sent(sendCommitment(ctx, confirmed, current, score, walletSelector))
+            case Success(tip) =>
+              CommitmentProgress.Waiting(s"data box ${confirmed.id} already has an unconfirmed successor ${tip.id}")
+            case Failure(ex) =>
+              CommitmentProgress.Waiting(s"could not read the data box's unconfirmed state: ${ex.getMessage}")
+          }
       }
     }
   }
@@ -335,6 +342,14 @@ class CommitmentTransactions(nodeContext: NodeContext, dataBoxes: DataBoxSource,
     }.getOrElse(Seq.empty[InputUTXO])
 }
 
+object CommitmentTransactions {
+  /**
+   * Blocks a registration or commitment change may wait for inclusion. A commitment declared this
+   * many blocks past the notice binds `2 * NISP_WINDOW + InclusionSlack` blocks after it is sent.
+   */
+  final val InclusionSlack: Int = 5
+}
+
 /**
  * Where the data box's own token id comes from.
  *
@@ -350,6 +365,20 @@ object DataBoxSource {
   val Stored: DataBoxSource = new DataBoxSource {
     override def getDataBoxToken: Option[ErgoId] = Globals.mdDB.getDataBoxToken
   }
+}
+
+/** What one pass of the auto-commit loop found or did. */
+sealed trait CommitmentProgress
+
+object CommitmentProgress {
+  /** The confirmed data box's newest entry is the configured score, so nothing is left to send. */
+  case object Settled extends CommitmentProgress
+
+  /** A commitment change was broadcast as this transaction. */
+  final case class Sent(txId: String) extends CommitmentProgress
+
+  /** No change can be sent yet, for `reason`. The loop asks again on its next pass. */
+  final case class Waiting(reason: String) extends CommitmentProgress
 }
 
 /**

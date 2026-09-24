@@ -384,7 +384,7 @@ object RollupTransactions {
     // Compiled once for the JVM's life. This runs inside `attemptTx`, which retries up to five
     // times, so compiling the nine proofs per attempt was 45 compilations for one slash.
     val fpSet = ProtocolContracts(ctx).fraudProofs
-    val fpControl = LFSMHelpers.getFPControlBox(ctx)
+    val fpControl = LFSMHelpers.getFPControlBox(ctx, Globals.getNodeConfig.getNodeApi)
     val evaluator = Evaluator(ctx, wallet, evalInput, latestState.rollup, Seq.empty,
       fpControl, new BoxLoader(ctx, Globals.getNodeConfig.getNodeApi), fpSet,
       commitment = commitment, resolved = resolved)

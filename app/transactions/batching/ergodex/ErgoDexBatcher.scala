@@ -175,7 +175,7 @@ class ErgoDexBatcher(nodeContext: NodeContext,
         // A pool box that cannot be read back costs that pool's run, never the others
         Try(ErgoDexExecution.run(ctx, nodeContext.getNodeWallet, box.toInputUTXO(ctx), pool, poolOrders, left,
           minRevenue, blockHeight, minerFeeCeiling, useTrueProp, deadline, placementOf, carried,
-          Batcher.UnbuildableLimits(batching), strategy)) match {
+          Batcher.UnbuildableLimits(batching), strategy, searchBudget)) match {
           case Failure(ex) =>
             logger.warn(s"Could not run ErgoDEX pool ${pool.nft.take(12)} for block $blockHeight: ${ex.getMessage}")
             None

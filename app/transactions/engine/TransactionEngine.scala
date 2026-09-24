@@ -8,11 +8,13 @@ import java.util.concurrent.atomic.AtomicBoolean
 import scala.concurrent.Future
 import scala.concurrent.duration._
 import scala.util.{Failure, Success, Try}
-import transactions.engine.execution.{ConsolidationExecution, DexAPIExecution, RollupExecution}
+import transactions.engine.execution.{CommitmentExecution, ConsolidationExecution, DexAPIExecution, RollupExecution}
 import transactions.engine.wallet.{EngineFunding, EngineWalletState}
 
 object TransactionEngine {
   case object RegisterMiner
+  /** Move this miner's difficulty commitment to the configured one. Answered with a `CommitmentProgress`. */
+  case object CommitDifficulty
   final case class JoinCollateral(request: api.models.CollateralJoinExecuteRequest)
 
   final case class Submit(intent: EngineIntent)
@@ -119,6 +121,9 @@ class TransactionEngine @Inject()(node: NodeContext,
       })
 
   override protected def candidateExecution(eligible: () => Boolean): RollupExecution = newRollupExecution(eligible)
+  private def newCommitmentExecution(eligible: () => Boolean): CommitmentExecution =
+    new CommitmentExecution(node, sync, config, dataBoxes, nodeApi,
+      EngineFunding(self, EngineFunding.askTimeout(config), ec), eligible)
   private val worker = context.system.dispatchers.lookup("lithos-contexts.engine-io-dispatcher")
 
   /** Cleared on stop so an outstanding worker abandons its build instead of signing into a dead actor. */
@@ -188,6 +193,7 @@ class TransactionEngine @Inject()(node: NodeContext,
     case intent: DexIntent => admit(EngineIntent.Dex(intent), sender())
     case JoinCollateral(request) => admit(EngineIntent.Join(request), sender())
     case RegisterMiner => admit(EngineIntent.Register, sender())
+    case CommitDifficulty => admit(EngineIntent.Commit, sender())
 
     // A batch is acknowledged as soon as it is admitted; the submitter does not wait for the sends.
     case transactions.rollups.TransactionMessages.RollupBatch(stubs) if stubs.nonEmpty && stubs.size <= 100 =>
@@ -288,9 +294,10 @@ class TransactionEngine @Inject()(node: NodeContext,
       case _ => true
     }
     val key = work.key
-    // A one-off API request is never retried: the caller has already been answered by then.
+    // A one-off API request is never retried: the caller has already been answered by then. The
+    // commitment loop asks again every pass, so its own work is not retried here either.
     val policy = work match {
-      case _: EngineIntent.Dex | _: EngineIntent.Join => OneOff
+      case _: EngineIntent.Dex | _: EngineIntent.Join | EngineIntent.Register | EngineIntent.Commit => OneOff
       case _: EngineIntent.Rollups => Critical
       case _ => Automatic
     }
@@ -332,7 +339,7 @@ class TransactionEngine @Inject()(node: NodeContext,
   }
 
   /**
-   * Hand one entry to a worker. Rollup, emission and registration work already returns a Future on
+   * Hand one entry to a worker. Rollup, emission and commitment work already returns a Future on
    * its own dispatcher; the rest is wrapped here. Dispatch failure is reported as an ordinary
    * completion so a saturated pool cannot leave the entry stuck in `running`.
    */
@@ -342,7 +349,8 @@ class TransactionEngine @Inject()(node: NodeContext,
     val dispatched: Try[Future[Any]] = Try(entry.work match {
       case EngineIntent.Rollups(stubs) => newRollupExecution(stillEligible).execute(stubs)
       case work @ (_: EngineIntent.Join | EngineIntent.Queue | EngineIntent.Collateralize) => executeEmission(work)
-      case EngineIntent.Register => Future(newRollupExecution(stillEligible).register())(worker)
+      case EngineIntent.Register => Future(newCommitmentExecution(stillEligible).register())(worker)
+      case EngineIntent.Commit => Future(newCommitmentExecution(stillEligible).commit())(worker)
       case work => Future {
         require(stillEligible(), "engine attempt expired")
         executeOptional(work, stillEligible)

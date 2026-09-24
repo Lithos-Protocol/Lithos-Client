@@ -33,6 +33,7 @@ object MempoolSorting {
  * @param maxUnbuildablePerTx orders created by one transaction a run fails to build before it passes over that
  *                          transaction's other orders untried, so one transaction cannot use up a run's attempts
  * @param strategy          names the strategy choosing which orders a run executes and in what order
+ * @param searchBudgetMs    most milliseconds the strategy may search each plan for; 0 plans greedily
  */
 case class BatchingConfig(enabled: Boolean,
                           scanIntervalMs: Long,
@@ -53,7 +54,8 @@ case class BatchingConfig(enabled: Boolean,
                           maxMempoolOrdersPerTx: Int,
                           maxUnbuildablePerRun: Int,
                           maxUnbuildablePerTx: Int,
-                          strategy: String = "maxFees")
+                          strategy: String = "maxFees",
+                          searchBudgetMs: Long = 250L)
 
 object BatchingConfig {
 
@@ -78,7 +80,8 @@ object BatchingConfig {
     maxMempoolOrdersPerTx = 4,
     maxUnbuildablePerRun = 32,
     maxUnbuildablePerTx = 2,
-    strategy = "maxFees")
+    strategy = "maxFees",
+    searchBudgetMs = 250L)
 
   def apply(config: Configuration, name: String): BatchingConfig = {
     def path(key: String): String = s"batching.$name.$key"
@@ -111,6 +114,7 @@ object BatchingConfig {
       maxMempoolOrdersPerTx = int("maxMempoolOrdersPerTx", Default.maxMempoolOrdersPerTx),
       maxUnbuildablePerRun = int("maxUnbuildablePerRun", Default.maxUnbuildablePerRun),
       maxUnbuildablePerTx = int("maxUnbuildablePerTx", Default.maxUnbuildablePerTx),
-      strategy = config.getOptional[String](path("strategy")).map(_.trim).getOrElse(Default.strategy))
+      strategy = config.getOptional[String](path("strategy")).map(_.trim).getOrElse(Default.strategy),
+      searchBudgetMs = long("searchBudgetMs", Default.searchBudgetMs))
   }
 }

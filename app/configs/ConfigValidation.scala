@@ -219,6 +219,9 @@ object Configs {
       "unbuildable orders remembered; about 200 bytes each")
     v.range("batching.ergodex.maxAncestorTxs", v.int("batching.ergodex.maxAncestorTxs"), 0, 100,
       "unconfirmed transactions carried ahead of one order")
+    v.strategy("batching.ergodex.strategy")
+    v.longRange("batching.ergodex.searchBudgetMs", v.long("batching.ergodex.searchBudgetMs"), 0L, 10000L,
+      "ms one plan may search; 0 plans greedily")
 
     // ---- batching.lithosdex ----
     v.bool("batching.lithosdex.enabled")
@@ -251,6 +254,12 @@ object Configs {
       "unbuildable orders remembered; about 200 bytes each")
     v.range("batching.lithosdex.maxAncestorTxs", v.int("batching.lithosdex.maxAncestorTxs"), 0, 100,
       "unconfirmed transactions carried ahead of one order")
+    v.bool("batching.lithosdex.discoverPools")
+    v.range("batching.lithosdex.maxTrackedPools", v.int("batching.lithosdex.maxTrackedPools"), 1, 1024,
+      "pools held between scans besides ERG:LIT")
+    v.strategy("batching.lithosdex.strategy")
+    v.longRange("batching.lithosdex.searchBudgetMs", v.long("batching.lithosdex.searchBudgetMs"), 0L, 10000L,
+      "ms one plan may search; 0 plans greedily")
 
     // ---- emission ----
     v.bool("emission.enabled")
@@ -444,6 +453,13 @@ final class ConfigValidator(config: Configuration) {
 
   def port(key: String, value: Option[Int]): Option[Int] =
     range(key, value, 1, 65535, "a TCP port")
+
+  /** A batching strategy name, which must be one the client knows. */
+  def strategy(key: String): Unit =
+    string(key).foreach { name =>
+      if (transactions.batching.RunStrategy.named(name).isEmpty)
+        problem(key, s""""$name" is not a batching strategy. Known: ${transactions.batching.RunStrategy.all.map(_.name).mkString(", ")}""")
+    }
 
   /** Validates a required task duration and reports one error for a malformed value. */
   def durationRangeReq(key: String, minMs: Long, maxMs: Long): Unit =

@@ -43,7 +43,6 @@ class FraudProofFundingSpec extends TestKit(ActorSystem("fp-funding-spec", Fraud
 
   private val quietConfig = Configuration.from(Map(
     "state.disableTransforms" -> true,
-    "state.autoCommit" -> false,
     "stratum.diff" -> "4.0G",
     "stratum.stratumPort" -> 4444,
     "stratum.extraNonce1Size" -> 2,

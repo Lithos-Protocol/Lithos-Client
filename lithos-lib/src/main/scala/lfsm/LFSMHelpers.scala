@@ -1,13 +1,16 @@
 package lfsm
 
 import lfsm.contracts.RollupContracts
+import node.MutationConversions._
+import node.NodeApi
+import node.model.{MempoolOptions, Paging, SortDirection}
 import org.ergoplatform.ErgoTreePredef
 import org.ergoplatform.appkit.{Address, BlockchainContext, ErgoClient, NetworkType, Parameters}
-import org.ergoplatform.sdk.{ErgoId, JavaHelpers}
+import org.ergoplatform.sdk.ErgoId
 import work.lithos.mutations.{Contract, InputUTXO}
 
 import java.math.{BigDecimal, BigInteger, RoundingMode}
-import scala.util.Try
+import scala.util.{Failure, Success, Try}
 
 /**
  * Helpers for Lithos Finite State Machine
@@ -266,21 +269,38 @@ object LFSMHelpers {
         }
     }
   }
-  // TODO: Change for mainnet
-  def getFPControlBox(ctx: BlockchainContext): InputUTXO = {
+  /**
+   * The FP_Control box, found by the token every evaluation checks at its first data input. Confirmed
+   * only, since a data input has to be in the UTXO set already.
+   */
+  def getFPControlBox(ctx: BlockchainContext, nodeApi: NodeApi): InputUTXO =
+    unspentByToken(ctx, nodeApi, getFPToken(ctx), MempoolOptions.ConfirmedOnly).get
+      .getOrElse(throw new RuntimeException("Could not find fpControl UTXO"))
 
-    val fpControlBoxes = JavaHelpers.toIndexedSeq(ctx.getUnspentBoxesFor(FP_CONTROL_TESTNET, 0, 100)).map(InputUTXO(_))
-    val optFPControl = fpControlBoxes.find(i => i.tokens.exists(_.id == getFPToken(ctx)))
-    optFPControl match {
-      case Some(fpControl) => fpControl
-      case None => throw new RuntimeException("Could not find fpControl UTXO")
+  /**
+   * This miner's data box, found by its credential token and required to sit under `dataContract`.
+   * `mempool` decides whether an unconfirmed successor is returned in place of the confirmed box.
+   */
+  def getLocalDataBox(ctx: BlockchainContext, nodeApi: NodeApi, dataId: ErgoId, dataContract: Contract,
+                      mempool: MempoolOptions = MempoolOptions.ConfirmedOnly): Try[InputUTXO] =
+    unspentByToken(ctx, nodeApi, dataId, mempool, Some(dataContract.ergoTreeHex)).flatMap {
+      case Some(box) => Success(box)
+      case None => Failure(new NoSuchElementException(s"No unspent data box carries token $dataId"))
     }
-  }
 
-  def getLocalDataBox(ctx: BlockchainContext, dataId: ErgoId, dataContract: Contract): Try[InputUTXO] = {
-    Try {
-      val allDataBoxes = JavaHelpers.toIndexedSeq(ctx.getUnspentBoxesFor(dataContract.address(ctx), 0, 100)).map(InputUTXO(_))
-      allDataBoxes.find(i => i.tokens.exists(_.id == dataId)).get
+  /**
+   * The unspent box whose first token is `tokenId`, read from the node's index, optionally required to
+   * sit under `tree`. The box is rebuilt from the node's JSON, so its rebuilt id is checked against the
+   * node's: a box spent or read under the wrong id makes the whole transaction invalid.
+   */
+  private def unspentByToken(ctx: BlockchainContext, nodeApi: NodeApi, tokenId: ErgoId,
+                             mempool: MempoolOptions, tree: Option[String] = None): Try[Option[InputUTXO]] =
+    nodeApi.unspentBoxesByTokenId(tokenId.toString, Paging(0, 8), SortDirection.Desc, mempool).map { boxes =>
+      boxes.find(b => b.assets.headOption.exists(_.tokenId == tokenId.toString) && tree.forall(_ == b.ergoTree))
+        .map { b =>
+          val input = b.toInputUTXO(ctx)
+          require(input.id.toString == b.boxId, s"Box ${b.boxId} rebuilt as ${input.id}; its registers did not round-trip")
+          input
+        }
     }
-  }
 }

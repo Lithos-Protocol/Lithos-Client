@@ -103,6 +103,9 @@ abstract class Batcher(nodeContext: NodeContext,
   /** Wallet placements this adapter carried into candidates, added back to observations after the node evicts them. */
   protected val evictedPlacements = new EvictedPlacements
 
+  /** Most time the strategy may spend searching each plan, from `batching.searchBudgetMs`. */
+  protected lazy val searchBudget: FiniteDuration = batching.searchBudgetMs.millis
+
   /** The strategy `batching.strategy` names, or the default, said loudly, when it names none. */
   protected lazy val strategy: RunStrategy = RunStrategy.named(batching.strategy).getOrElse {
     logger.warn(s"No batching strategy is named '${batching.strategy}', using ${RunStrategy.Default.name}. Known: " +

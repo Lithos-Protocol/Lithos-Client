@@ -47,7 +47,6 @@ class RollupExecutionSpec extends TestKit(ActorSystem("submission-handler-spec",
 
   private val quietConfig = Configuration.from(Map(
     "state.disableTransforms" -> true,
-    "state.autoCommit" -> false,          // keeps the batch off the difficulty-commit path
     "stratum.diff" -> "4.0G",
     "stratum.stratumPort" -> 4444,
     "stratum.extraNonce1Size" -> 2,

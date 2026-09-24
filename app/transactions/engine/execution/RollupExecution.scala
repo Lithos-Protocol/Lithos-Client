@@ -3,7 +3,7 @@ package transactions.engine.execution
 import akka.actor.ActorRef
 import akka.pattern.ask
 import akka.util.Timeout
-import configs.{NodeContext, StateConfig, StratumConfig, TasksConfig}
+import configs.NodeContext
 import lfsm.LFSMPhase.HOLDING
 import lfsm.contracts.FraudProofContracts
 import lfsm.states.Rollup
@@ -51,9 +51,6 @@ class RollupExecution(nodeContext: NodeContext, walletManager: ActorRef, syncHan
   }
   private val logger = LoggerFactory.getLogger("RollupExecution")
   private val nodeConfig = nodeContext
-  private val stateConfig = new StateConfig(config)
-  private val stratumConfig = new StratumConfig(config)
-  private val dictionarySyncEnabled = TasksConfig.isEnabled(config, TasksConfig.DictionarySync)
   private val client = nodeContext.getClient
   private val wallet = nodeContext.getNodeWallet
   private var feeAllocations = Map.empty[String, InputUTXO]
@@ -101,18 +98,7 @@ class RollupExecution(nodeContext: NodeContext, walletManager: ActorRef, syncHan
         id -> CandidateTx.ancestor(body)
       }
     }.toMap
-  def register(): String = {
-    require(alive(), "registration attempt was superseded")
-    val view = Globals.syncView
-    require(view.canonical.available && view.minerDictionary.available &&
-      view.minerDictionaryMetadata.exists(!_.hasMiner) && dataBoxes.getDataBoxToken.isEmpty,
-      "registration requires a current unregistered dictionary view")
-    val dictionary = Await.result(syncHandler ? state.messages.SyncMessages.GetMinerDictionary, timeout.duration) match {
-      case state.messages.SyncMessages.CurrentMinerDictionary(value) => value
-      case _ => throw new IllegalStateException("Miner Dictionary became unavailable")
-    }
-    commitments.sendInitialCommitment(stratumConfig.diff, dictionary, optionalFunding)
-  }
+
   private def runBatch(stubs: Seq[RollupTxStub]): Future[Unit] = {
     require(alive(), "rollup engine attempt was superseded")
     val initialTxInfo = InitialTxInfo(stubs.map { s =>
@@ -148,18 +134,7 @@ class RollupExecution(nodeContext: NodeContext, walletManager: ActorRef, syncHan
         logger.info(s"Now attempting ${feeAllocations.size} remaining  transactions")
 
         val remainingStubs = stubs.filter(s => feeAllocations.contains(s.rollupBlockId))
-        val remaining = submitRemainingTxs(remainingStubs)
-
-        if (stateConfig.autoCommit.getOrElse(true)) {
-          logger.info("Auto-commits were enabled, now checking difficulty commitment state")
-          // Send auto commitment transaction
-          commitments.commitScore(stratumConfig.diff, optionalFunding) match {
-            case Success(_) => ()
-            case Failure(ex) => logger.error("Got exception during end of submission", ex)
-          }
-        }
-
-        remaining
+        submitRemainingTxs(remainingStubs)
     }
   }
 

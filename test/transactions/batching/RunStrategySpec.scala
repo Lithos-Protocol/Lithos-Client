@@ -85,6 +85,21 @@ class RunStrategySpec extends AnyFlatSpec with Matchers {
     planned(big +: small, until = Deadline.now - 1.second) shouldBe Seq("big")
   }
 
+  "RunStrategy.searchUntil" should "stop at the configured budget when the build has time to spare" in {
+    val until = RunStrategy.searchUntil(10.seconds.fromNow, 40.millis)
+    until.timeLeft should be <= 40.millis
+    until.timeLeft should be > 20.millis
+  }
+
+  it should "stop at a quarter of the build's time left when that is shorter than the budget" in {
+    // The budget is a ceiling, never a reason to overrun the build: 400 ms left allows about 100 ms.
+    RunStrategy.searchUntil(400.millis.fromNow, 10.seconds).timeLeft should be <= 100.millis
+  }
+
+  it should "not search at all with a budget of zero" in {
+    RunStrategy.searchUntil(10.seconds.fromNow, Duration.Zero).isOverdue() shouldBe true
+  }
+
   "RunStrategy.named" should "find maxFees, and nothing for an unknown name" in {
     RunStrategy.named(" maxFees ") shouldBe Some(MaxFees)
     RunStrategy.named("greedy") shouldBe None

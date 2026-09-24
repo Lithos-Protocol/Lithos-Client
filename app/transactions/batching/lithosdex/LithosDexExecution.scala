@@ -15,7 +15,7 @@ import transactions.engine.execution.RollupExecution
 import work.lithos.mutations.{Contract, InputUTXO, Token, TxBuilder, UTXO}
 
 import scala.collection.JavaConverters._
-import scala.concurrent.duration.Deadline
+import scala.concurrent.duration.{Deadline, FiniteDuration}
 import scala.util.{Failure, Success, Try}
 
 /**
@@ -197,11 +197,12 @@ object LithosDexExecution {
   private def problem(orders: Seq[LithosDexOrder], pool: LDLiquidityPool, limit: Int, minRevenue: Long,
                       provisions: Provisions, minerFeeCeiling: Long, fundsFirst: Boolean,
                       placements: LithosDexOrder => Seq[String], alreadyCarried: Set[String],
-                      deadline: Deadline): RunProblem[LithosDexOrder, LithosDexFill, LDLiquidityPool] =
+                      deadline: Deadline,
+                      searchBudget: FiniteDuration = RunStrategy.SearchBudget): RunProblem[LithosDexOrder, LithosDexFill, LDLiquidityPool] =
     RunProblem[LithosDexOrder, LithosDexFill, LDLiquidityPool](orders, pool, limit, _.boxId,
       (order, state, first) => price(order, state, minRevenue, provisions, fundsItsOwnBox = first && fundsFirst,
         minerFeeCeiling).map(fill => Priced(fill, kept(fill, minerFeeCeiling), fill.poolAfter)),
-      placements, alreadyCarried, spot, RunStrategy.searchUntil(deadline))
+      placements, alreadyCarried, spot, RunStrategy.searchUntil(deadline, searchBudget))
 
   /**
    * Signs the orders `strategy` plans against `poolBox`, one at a time, each against the pool box the last
@@ -214,6 +215,7 @@ object LithosDexExecution {
    * @param placementOf    the unconfirmed placements an order's box needs carried ahead of it
    * @param alreadyCarried placements another run in the same block carries, which take no slot here
    * @param strategy       chooses which orders to execute and in what order
+   * @param searchBudget   most time `strategy` may spend on each plan
    */
   def run(ctx: BlockchainContext, wallet: NodeWallet, contracts: LDContracts, poolBox: InputUTXO,
           orders: Seq[LithosDexOrder], limit: Int,
@@ -222,7 +224,8 @@ object LithosDexExecution {
           placementOf: LithosDexOrder => Vector[CompleteMempool.MempoolTx] = _ => Vector.empty,
           unbuildableLimits: Batcher.UnbuildableLimits = Batcher.UnbuildableLimits.Default,
           alreadyCarried: Set[String] = Set.empty,
-          strategy: RunStrategy = RunStrategy.Default): LithosDexRun = {
+          strategy: RunStrategy = RunStrategy.Default,
+          searchBudget: FiniteDuration = RunStrategy.SearchBudget): LithosDexRun = {
     var pool = poolBox
     var carried = Option.empty[InputUTXO]
     var built = Vector.empty[SignedTransaction]
@@ -248,7 +251,7 @@ object LithosDexExecution {
         // Only the run's first fill has to fund a takings box by itself; the rest add to the one it made
         plan = strategy.plan(problem(open, LDLiquidityPool(pool), limit - slotsUsed(placements), minRevenue,
           provisions, minerFeeCeiling, fundsFirst = built.isEmpty, order => placementOf(order).map(_.id),
-          alreadyCarried ++ placements.map(_.id), deadline))
+          alreadyCarried ++ placements.map(_.id), deadline, searchBudget))
         replan = false
       } else {
         val step = plan.head

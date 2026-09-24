@@ -244,7 +244,7 @@ class RollupEvaluator(config: Configuration, nodeContext: NodeContext,
               currentMiners(swap) = miner
               index -= 1
             }
-            val fpControl = LFSMHelpers.getFPControlBox(ctx)
+            val fpControl = LFSMHelpers.getFPControlBox(ctx, nodeContext.getNodeApi)
             // Only FP_NonMatchingCommitment reads this, and only for miners it finds registered.
             // None leaves that one proof unbuildable and the other eight unaffected.
             val commitment = CommitmentSources.load(ctx, nodeContext.getNodeApi, syncHandler,

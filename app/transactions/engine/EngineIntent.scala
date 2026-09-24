@@ -42,5 +42,6 @@ object EngineIntent {
   case object Queue extends EngineIntent { val key = "emission-queue" }
   case object Collateralize extends EngineIntent { val key = "self-collateralize" }
   case object Register extends EngineIntent { val key = "register-miner" }
+  case object Commit extends EngineIntent { val key = "difficulty-commitment" }
   case object Consolidate extends EngineIntent { val key = "consolidation" }
 }
