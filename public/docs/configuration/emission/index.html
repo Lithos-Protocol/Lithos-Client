@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="generator" content="Docusaurus v3.7.0">
 <title data-rh="true">Collateral and emission | Lithos Client</title><meta data-rh="true" name="viewport" content="width=device-width,initial-scale=1"><meta data-rh="true" name="twitter:card" content="summary_large_image"><meta data-rh="true" property="og:url" content="http://localhost:9000/assets/docs/configuration/emission"><meta data-rh="true" property="og:locale" content="en"><meta data-rh="true" name="docusaurus_locale" content="en"><meta data-rh="true" name="docsearch:language" content="en"><meta data-rh="true" name="docusaurus_version" content="current"><meta data-rh="true" name="docusaurus_tag" content="docs-default-current"><meta data-rh="true" name="docsearch:version" content="current"><meta data-rh="true" name="docsearch:docusaurus_tag" content="docs-default-current"><meta data-rh="true" property="og:title" content="Collateral and emission | Lithos Client"><meta data-rh="true" name="description" content="Driving the collateral queue, and putting your own ERG and LIT into it."><meta data-rh="true" property="og:description" content="Driving the collateral queue, and putting your own ERG and LIT into it."><link data-rh="true" rel="icon" href="/assets/img/favicon.ico"><link data-rh="true" rel="canonical" href="http://localhost:9000/assets/docs/configuration/emission"><link data-rh="true" rel="alternate" href="http://localhost:9000/assets/docs/configuration/emission" hreflang="en"><link data-rh="true" rel="alternate" href="http://localhost:9000/assets/docs/configuration/emission" hreflang="x-default"><link rel="stylesheet" href="/assets/css/styles.f3661c4a.css">
-<script src="/assets/js/runtime~main.80080cc6.js" defer="defer"></script>
+<script src="/assets/js/runtime~main.257186e5.js" defer="defer"></script>
 <script src="/assets/js/main.01724524.js" defer="defer"></script>
 </head>
 <body class="navigation-with-keyboard">
@@ -45,10 +45,16 @@ never blocks a join.</p>
 <h3 class="anchor anchorWithStickyNavbar_LWe7" id="paying-for-priority">Paying for priority<a href="#paying-for-priority" class="hash-link" aria-label="Direct link to Paying for priority" title="Direct link to Paying for priority">​</a></h3>
 <p>A miner who finds a block spends the collateral box that pays them most, so a position that offers
 more is spent ahead of the ones that offer nothing. <code>priorityFeeNanoErgs</code> is that offer, for the
-positions <code>autoCollateralize</code> creates. A join from the web panel sets its own. Each position then locks <code>2.915 ERG + priorityFeeNanoErgs</code>, and when a miner spends it the fee divides as follows:</p>
+positions <code>autoCollateralize</code> creates. A join from the web panel sets its own. Each position then locks
+<code>2.915 ERG + priorityFeeNanoErgs</code>, and when a miner spends it the fee divides as follows:</p>
 <table><thead><tr><th>Share</th><th>Goes to</th></tr></thead><tbody><tr><td>One fifth</td><td>The miner who spends the box</td></tr><tr><td>Four fifths</td><td>The rollup that block opens, paid to every miner who submits to it</td></tr></tbody></table>
 <p>Because transaction fees in a Lithos block go to the lender, paying for priority works like a fee
 future: you pay to be spent sooner, for example when you expect the blocks ahead to carry high fees.</p>
+<p><strong>A position that offers nothing is still spent eventually.</strong> Miners running this client draw any box
+that has been live for 7200 blocks, about 10 days on mainnet, ahead of every priority fee. Each miner
+can change that age with
+<a href="/assets/docs/configuration/candidate#which-box-your-block-spends"><code>stratum.candidate.clearanceAge</code></a>, so treat it as
+typical rather than guaranteed.</p>
 <p><code>0</code> posts at the floor and offers nothing. Any other value must be at least <code>1000000</code> (0.001 ERG), so
 the miner&#x27;s fifth is worth more than the output it arrives in.</p>
 <div class="theme-admonition theme-admonition-warning admonition_xJq3 alert alert--warning"><div class="admonitionHeading_Gvgb"><span class="admonitionIcon_Rf37"><svg viewBox="0 0 16 16"><path fill-rule="evenodd" d="M8.893 1.5c-.183-.31-.52-.5-.887-.5s-.703.19-.886.5L.138 13.499a.98.98 0 0 0 0 1.001c.193.31.53.501.886.501h13.964c.367 0 .704-.19.877-.5a1.03 1.03 0 0 0 .01-1.002L8.893 1.5zm.133 11.497H6.987v-2.003h2.039v2.003zm0-3.004H6.987V5.987h2.039v4.006z"></path></svg></span>Past 0.085 ERG the block reward no longer covers your principal</div><div class="admonitionContent_BuS1"><p>The lender receives the 3 ERG block reward plus the block&#x27;s transaction fees. Above <code>85000000</code>

@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="generator" content="Docusaurus v3.7.0">
 <title data-rh="true">Candidate building | Lithos Client</title><meta data-rh="true" name="viewport" content="width=device-width,initial-scale=1"><meta data-rh="true" name="twitter:card" content="summary_large_image"><meta data-rh="true" property="og:url" content="http://localhost:9000/assets/docs/tutorial-basics/candidate-building"><meta data-rh="true" property="og:locale" content="en"><meta data-rh="true" name="docusaurus_locale" content="en"><meta data-rh="true" name="docsearch:language" content="en"><meta data-rh="true" name="docusaurus_version" content="current"><meta data-rh="true" name="docusaurus_tag" content="docs-default-current"><meta data-rh="true" name="docsearch:version" content="current"><meta data-rh="true" name="docsearch:docusaurus_tag" content="docs-default-current"><meta data-rh="true" property="og:title" content="Candidate building | Lithos Client"><meta data-rh="true" name="description" content="How the Lithos client builds each block you mine, where the revenue from its extra transactions goes, and what happens when part of it fails."><meta data-rh="true" property="og:description" content="How the Lithos client builds each block you mine, where the revenue from its extra transactions goes, and what happens when part of it fails."><link data-rh="true" rel="icon" href="/assets/img/favicon.ico"><link data-rh="true" rel="canonical" href="http://localhost:9000/assets/docs/tutorial-basics/candidate-building"><link data-rh="true" rel="alternate" href="http://localhost:9000/assets/docs/tutorial-basics/candidate-building" hreflang="en"><link data-rh="true" rel="alternate" href="http://localhost:9000/assets/docs/tutorial-basics/candidate-building" hreflang="x-default"><link rel="stylesheet" href="/assets/css/styles.f3661c4a.css">
-<script src="/assets/js/runtime~main.80080cc6.js" defer="defer"></script>
+<script src="/assets/js/runtime~main.257186e5.js" defer="defer"></script>
 <script src="/assets/js/main.01724524.js" defer="defer"></script>
 </head>
 <body class="navigation-with-keyboard">
@@ -38,9 +38,9 @@ candidate on the critical path. The client prepares for it in advance:</p>
 <ul>
 <li><strong>The collateral set is held in memory.</strong> The client keeps the live collateral boxes, up to 100,
 loaded ahead of time and refreshes them after every block. Nothing is fetched while a block waits.</li>
-<li><strong>A box is chosen per block.</strong> A box that has waited 100 blocks or more is taken first, oldest first,
-so no box waits forever. Otherwise the box offering the finder the largest priority fee wins, and the
-oldest breaks a tie.</li>
+<li><strong>A box is chosen per block.</strong> The box offering the finder the largest priority fee wins, and the
+oldest breaks a tie. A box that has been live for <code>clearanceAge</code> blocks, 7200 by default, is taken
+ahead of every bid, oldest first, so no box waits forever.</li>
 <li><strong>The coinbase goes to the lender.</strong> The client asks the node for a candidate paying the block reward
 to the chosen box&#x27;s lender, which is what the collateral box paid for.</li>
 </ul>
