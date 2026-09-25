@@ -77,6 +77,8 @@ scorex {
     ]
     nodeName = "lithos-testnet-node"
   }
+ergo.chain.voting.version2ActivationHeight = 2147483647
+ergo.chain.voting.version2ActivationDifficultyHex = "20"
 }
 ```
 
