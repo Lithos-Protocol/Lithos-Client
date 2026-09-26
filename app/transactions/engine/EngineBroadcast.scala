@@ -28,12 +28,12 @@ object EngineBroadcast {
   /** `reason` carries the node's own words when it refused, for callers that report them. */
   final case class Result(txId: String, outcome: String, reason: Option[String] = None) {
     def requireAccepted(): String = {
-      if (outcome != Accepted) throw new SubmissionOutcomeException(txId, outcome)
+      if (outcome != Accepted) throw new SubmissionOutcomeException(txId, outcome, reason)
       txId
     }
   }
-  final class SubmissionOutcomeException(val txId: String, val outcome: String)
-    extends RuntimeException(s"Transaction $txId submission outcome is $outcome")
+  final class SubmissionOutcomeException(val txId: String, val outcome: String, val reason: Option[String] = None)
+    extends RuntimeException(s"Transaction $txId submission outcome is $outcome" + reason.map(": " + _).getOrElse(""))
 
   /** Signed body accepted for submission. Anything larger is a build defect, not a node limit. */
   private final val MaxSignedBodyBytes = 1024 * 1024
@@ -106,8 +106,10 @@ class EngineBroadcast(owner: ActorRef, node: NodeApi, requestTimeout: FiniteDura
       owner ! RefreshBoxes
       response match {
         case Success(_) if accepted => Result(txId, Accepted)
+        // The node's own answer, not a fault here: usually the chain or mempool moved since the
+        // transaction was built, so its reason is the whole story and a stack trace adds nothing
         case Failure(ex: _root_.node.NodeError.Rejected) =>
-          LoggerFactory.getLogger("TransactionEngine").error(s"Got error during broadcast for $txId", ex)
+          LoggerFactory.getLogger("TransactionEngine").warn(s"Node refused $txId ($operation): ${ex.getMessage}")
           Result(txId, Rejected, Option(ex.getMessage))
         // A success carrying another transaction id is as ambiguous as no answer at all.
         case Success(_) => Result(txId, Uncertain, Some("node returned another transaction id"))

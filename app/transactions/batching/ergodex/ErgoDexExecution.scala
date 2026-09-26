@@ -38,7 +38,7 @@ final case class ErgoDexChain(transactions: Vector[SignedTransaction], fills: Ve
   override def kind: String = ErgoDexExecution.Kind
 
   def members: Vector[CandidateTx] = transactions.map { signed =>
-    CandidateTx(signed.getId, signed.toJson(false, false), ErgoDexExecution.Kind,
+    CandidateTx(signed.getId, _root_.transactions.candidate.BlockTxMessages.CandidateTx.signedJson(signed), ErgoDexExecution.Kind,
       RollupExecution.signedInputIds(signed), RollupExecution.signedSizeBytes(signed),
       signed.getCost.toLong, RollupExecution.signedLeaf(signed))
   }

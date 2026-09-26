@@ -241,7 +241,7 @@ object StorageRent {
     val entry = CapitalEntry(CapitalOrigin.StorageRent,
       InputUTXO(new InputBoxImpl(tx.outputs.head)), parentTxId = signed.getId)
     CandidateBundle(
-      Vector(CandidateTx(signed.getId, signed.toJson(false, false), Kind,
+      Vector(CandidateTx(signed.getId, _root_.transactions.candidate.BlockTxMessages.CandidateTx.signedJson(signed), Kind,
         RollupExecution.signedInputIds(signed), RollupExecution.signedSizeBytes(signed),
         signed.getCost.toLong, RollupExecution.signedLeaf(signed))),
       capital = Seq(entry))

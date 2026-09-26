@@ -612,6 +612,56 @@ class LithosPoolSpec extends TestKit(ActorSystem("lithos-pool-spec", LithosPoolS
     f.miner.expectMsgType[BroadcastJob]
   }
 
+  it should "take a refresh that adds rollup or emission work, which no revenue gain can reflect" in {
+    val f = fixture(cfg.copy(blockTransactions = true))
+    genesis(f)
+    f.pool ! BlockPackageReady(pkg(revision = 1).copy(protocolTxs = Set("extra-1")), refreshed = true)
+    val call = nextCall(f)
+    call.txs.last should include("extra-1")
+    call.response.complete(response(call, 2))
+    f.miner.expectMsgType[BroadcastJob]
+
+    withClue("judged against the served package, so work it already carries changes nothing: ") {
+      f.pool ! BlockPackageReady(pkg(revision = 2).copy(protocolTxs = Set("extra-1")), refreshed = true)
+      f.node.calls.poll(200, TimeUnit.MILLISECONDS) shouldBe null
+    }
+  }
+
+  it should "hold protocol work to the configured count" in {
+    val f = fixture(cfg.copy(blockTransactions = true, minNewProtocolTxs = 2))
+    genesis(f)
+    f.pool ! BlockPackageReady(pkg(revision = 1).copy(protocolTxs = Set("a")), refreshed = true)
+    f.node.calls.poll(200, TimeUnit.MILLISECONDS) shouldBe null
+    f.pool ! BlockPackageReady(pkg(revision = 2).copy(protocolTxs = Set("a", "b")), refreshed = true)
+    val call = nextCall(f)
+    call.txs.last should include("extra-2")
+    call.response.complete(response(call, 2))
+    f.miner.expectMsgType[BroadcastJob]
+  }
+
+  it should "keep the served package when rollups were late for the refresh, whatever protocol work it adds" in {
+    // The refresh cannot carry the served rollup work if rollups did not answer it, and new emission
+    // work does not make up for losing that.
+    val f = fixture(cfg.copy(blockTransactions = true))
+    genesis(f)
+    f.pool ! BlockPackageReady(pkg(revision = 1).copy(sources = Set("rollups"), protocolTxs = Set("r")),
+      refreshed = true)
+    val served = nextCall(f)
+    served.response.complete(response(served, 2))
+    f.miner.expectMsgType[BroadcastJob]
+
+    f.pool ! BlockPackageReady(pkg(revision = 2).copy(sources = Set("emissions"), late = Set("rollups"),
+      protocolTxs = Set("e1", "e2")), refreshed = true)
+    f.node.calls.poll(200, TimeUnit.MILLISECONDS) shouldBe null
+  }
+
+  it should "leave protocol work to the revenue gate when switched off" in {
+    val f = fixture(cfg.copy(blockTransactions = true, refreshForProtocolTxs = false))
+    genesis(f)
+    f.pool ! BlockPackageReady(pkg(revision = 1).copy(protocolTxs = Set("a", "b")), refreshed = true)
+    f.node.calls.poll(200, TimeUnit.MILLISECONDS) shouldBe null
+  }
+
   it should "refresh mempool transactions with an empty package when the threshold is zero" in {
     val f = fixture(cfg.copy(blockTransactions = true, mempoolRefreshMs = 1000, minCandidateChangeRevenue = 0L))
     genesis(f)

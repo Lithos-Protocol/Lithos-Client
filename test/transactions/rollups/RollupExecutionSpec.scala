@@ -13,7 +13,7 @@ import support.{FakeCache, FakeNodeContext, SyncFixtures}
 import node.MutationConversions._
 import node.model.NodeBox
 import transactions.candidate.BlockTxMessages.{BlockTxsReady, CandidateTxsDropped, RequestBlockTxs}
-import transactions.engine.wallet.EngineWalletMessages.{MarkReservationUncertain, SelectInputs, WalletInputs}
+import transactions.engine.wallet.EngineWalletMessages.{GetPinnedInputs, MarkReservationUncertain, PinnedInputs, SelectInputs, UnpinInput, WalletInputs}
 import transactions.engine.wallet.{EngineFunding, FundingAllocation}
 import transactions.rollups.TransactionMessages.RollupTxType._
 import transactions.rollups.TransactionMessages._
@@ -69,16 +69,23 @@ class RollupExecutionSpec extends TestKit(ActorSystem("submission-handler-spec",
   }
 
   private case class Fixture(handler: ActorRef, sync: TestProbe, mempool: TestProbe,
-                             wallet: TestProbe, probe: TestProbe)
+                             wallet: TestProbe, probe: TestProbe, api: node.NodeApi)
 
-  private def fixture(dataBoxes: DataBoxSource = storedDataBox): Fixture = {
-    val (ctx, _, _) = FakeNodeContext()
+  private def fixture(dataBoxes: DataBoxSource = storedDataBox,
+                      config: Configuration = quietConfig): Fixture = {
+    val (ctx, api, _) = FakeNodeContext()
     val sync = TestProbe()
     val mempool = TestProbe()
     val wallet = TestProbe()
     val handler = system.actorOf(Props(new RollupEngineHarness(
-      quietConfig, ctx, new FakeCache, dataBoxes, sync.ref, mempool.ref, wallet.ref)))
-    Fixture(handler, sync, mempool, wallet, TestProbe())
+      config, ctx, new FakeCache, dataBoxes, sync.ref, mempool.ref, wallet.ref)))
+    Fixture(handler, sync, mempool, wallet, TestProbe(), api)
+  }
+
+  /** Answer the build's pin query, which it asks the wallet once and only when a fraud proof is offered. */
+  private def pins(f: Fixture, ids: String*): Unit = {
+    f.wallet.expectMsg(10.seconds, GetPinnedInputs)
+    f.wallet.reply(PinnedInputs(ids))
   }
 
   private def stub(rollup: String, txType: RollupTxType = EvalTransform): RollupTxStub =
@@ -183,6 +190,16 @@ class RollupExecutionSpec extends TestKit(ActorSystem("submission-handler-spec",
     ready.bundles shouldBe empty
   }
 
+  it should "report every stub it was given and the ones it built, for the funded path to hold" in {
+    val f = fixture()
+    val processor = TestProbe()
+    val stubs = Seq(stub("rollup-a"), stub("rollup-b"))
+    f.probe.send(f.handler, BuildBlockTxs(705, stubs, reportTo = Some(processor.ref)))
+    refuseState(f, count = 2)
+    processor.expectMsg(25.seconds, CandidateStubsBuilt(705, stubs, Seq.empty))
+    f.probe.expectMsgType[BlockTxsReady](25.seconds).blockHeight shouldEqual 705
+  }
+
   // ─── prepare-ahead ────────────────────────────────────────────────────────
   //
   // A build is state asks, signing and node round trips, and it used to happen entirely inside the
@@ -252,17 +269,82 @@ class RollupExecutionSpec extends TestKit(ActorSystem("submission-handler-spec",
     f.probe.expectMsgType[BlockTxsReady](25.seconds).blockHeight shouldEqual 903
   }
 
-  "A fraud proof" should "never be offered to a block" in {
-    // `buildFeeless` throws for NISPEvaluation rather than falling through: a fraud proof's context
-    // variables ride on a wallet input, so unlike the three rollup phases it cannot balance on the
-    // rollup box alone.
+  private val fraudProof = RollupTxStub("rollup-a", Some(100L), NISPEvaluation,
+    fpInfo = Some(Array.fill[Byte](32)(1) -> "fp-hash"))
+
+  "A fraud proof" should "not be offered to a block without a free pinned input, nor read any state trying" in {
+    // Its context variables ride on a wallet input, so unlike the three rollup phases it cannot
+    // balance on the rollup box alone. Refused before the state ask, so it costs the stubs queued
+    // behind it nothing.
     val f = fixture()
-    val fp = RollupTxStub("rollup-a", Some(100L), NISPEvaluation,
-      fpInfo = Some(Array.fill[Byte](32)(1) -> "fp-hash"))
-    f.probe.send(f.handler, BuildBlockTxs(800, Seq(fp)))
-    f.sync.expectMsgType[GetCurrentRollupCritical]
-    f.sync.reply(RollupUnavailable("unavailable"))
+    f.probe.send(f.handler, BuildBlockTxs(800, Seq(fraudProof)))
+    pins(f)
     f.probe.expectMsgType[BlockTxsReady](25.seconds).bundles shouldBe empty
+    f.sync.expectNoMessage(500.millis)
+  }
+
+  it should "not ask the wallet at all when pinning is off" in {
+    val f = fixture(config = quietConfig ++ Configuration.from(Map("stratum.candidate.pinnedInputs" -> 0)))
+    f.probe.send(f.handler, BuildBlockTxs(802, Seq(fraudProof)))
+    f.probe.expectMsgType[BlockTxsReady](25.seconds).bundles shouldBe empty
+    f.wallet.expectNoMessage(500.millis)
+    f.sync.expectNoMessage(500.millis)
+  }
+
+  "A pinned input no longer unspent" should "be reported to the wallet, and the proof left out" in {
+    // Nothing broadcasts a pinned box, so absence from the confirmed UTXO set means a block spent it.
+    // Reported so the wallet pins a replacement instead of offering the same dead box every build.
+    import org.mockito.Mockito.when
+    val f = fixture()
+    val gone = "cd" * 32
+    when(f.api.boxById(gone)).thenReturn(scala.util.Success(None))
+    f.probe.send(f.handler, BuildBlockTxs(803, Seq(fraudProof)))
+    pins(f, gone)
+    f.wallet.expectMsg(10.seconds, UnpinInput(gone))
+    f.probe.expectMsgType[BlockTxsReady](25.seconds).bundles shouldBe empty
+    f.sync.expectNoMessage(500.millis)
+  }
+
+  it should "stay pinned when the read itself failed" in {
+    import org.mockito.Mockito.when
+    val f = fixture()
+    val unread = "ef" * 32
+    when(f.api.boxById(unread)).thenReturn(scala.util.Failure(new RuntimeException("node unreachable")))
+    f.probe.send(f.handler, BuildBlockTxs(804, Seq(fraudProof)))
+    pins(f, unread)
+    f.probe.expectMsgType[BlockTxsReady](25.seconds).bundles shouldBe empty
+    f.wallet.expectNoMessage(500.millis)
+  }
+
+  "A candidate build" should "try the stubs behind one it cannot build" in {
+    // The engine is handed every candidate in priority order and builds until its limit. Taking the
+    // first `limit` stubs instead let a head that could never be built hold the slot empty.
+    val f = fixture()
+    f.probe.send(f.handler, BuildBlockTxs(801, Seq(fraudProof, stub("rollup-b", HoldingTransform)), limit = 1))
+    pins(f)
+    withClue("the transform behind the refused fraud proof is still attempted: ") {
+      f.sync.expectMsgType[GetRollupMetadata](10.seconds).blockId shouldEqual "rollup-b"
+    }
+    f.sync.reply(RollupUnavailable("unavailable"))
+    f.probe.expectMsgType[BlockTxsReady](25.seconds).blockHeight shouldEqual 801
+  }
+
+  "A refresh" should "rebuild rather than answer with what the height already prepared" in {
+    // Prepared the instant the block lands, while sync is still applying it and before the stubs for
+    // the new height exist, so the prepared set is the least informed build of the height.
+    val f = fixture()
+    f.probe.send(f.handler, BuildBlockTxs(904, Seq(stub("rollup-a")), answer = false))
+    refuseState(f)
+    awaitAssert({
+      f.probe.send(f.handler, BuildBlockTxs(904, Seq(stub("rollup-a"))))
+      f.probe.expectMsgType[BlockTxsReady](500.millis)
+    }, 15.seconds, 200.millis)
+
+    f.probe.send(f.handler, BuildBlockTxs(904, Seq(stub("rollup-a")), refresh = true))
+    withClue("the refresh reads state again: ") {
+      refuseState(f)
+    }
+    f.probe.expectMsgType[BlockTxsReady](25.seconds).blockHeight shouldEqual 904
   }
 
   // ─── candidate eligibility ────────────────────────────────────────────────
@@ -270,6 +352,9 @@ class RollupExecutionSpec extends TestKit(ActorSystem("submission-handler-spec",
   // Asserted on the decision rather than through `BuildBlockTxs`: a NISP submission that gets past
   // eligibility still fails at the NISP lookup in this fixture, so "no transaction was offered" is
   // true either way and would pass with the defect present.
+  //
+  // Every builder signs with its pre-header pinned to the block it executes in, which is also the
+  // height the node validates at, pooled or in a block. So that height is the only one asked about.
 
   /** Holding age 359 at the tip, 360 at the block it would be mined in. */
   private val boundaryPeriod = 123054L
@@ -279,34 +364,77 @@ class RollupExecutionSpec extends TestKit(ActorSystem("submission-handler-spec",
     SyncFixtures.emptyRollup(SyncFixtures.id(seed), SyncFixtures.id(seed + 1), periodStart.toInt)
 
   "A NISP submission valid only at the tip" should "be refused for the next block's candidate" in {
-    // The node validates the package at the height it is mined at, and one rejection makes it refuse
-    // every optional transaction for that height — so a stale stub suppresses unrelated valid work.
+    // The node validates the package at the height it is mined at, so work valid only at the tip is
+    // dropped from the block the candidate becomes.
     val rollup = holdingRollup(9101, boundaryPeriod)
     val submission = RollupTxStub("rollup-a", Some(boundaryPeriod), NISPSubmission)
 
     withClue("valid at the tip, which is what made the tip the wrong height to ask about: ") {
       submission.validate(boundaryTip, rollup) shouldBe true
     }
-    RollupExecution.eligibleForCandidate(
-      submission, rollup, boundaryTip, boundaryTip + 1) shouldBe false
+    RollupExecution.eligibleForCandidate(submission, rollup, boundaryTip + 1) shouldBe false
   }
 
-  it should "be offered while it is still valid one height later" in {
+  it should "be offered while it is still valid at the block it is mined in" in {
     val rollup = holdingRollup(9111, boundaryPeriod)
     val submission = RollupTxStub("rollup-a", Some(boundaryPeriod), NISPSubmission)
-    RollupExecution.eligibleForCandidate(
-      submission, rollup, boundaryTip - 1, boundaryTip) shouldBe true
+    RollupExecution.eligibleForCandidate(submission, rollup, boundaryTip) shouldBe true
   }
 
-  "A transform that only becomes valid at the candidate height" should "wait for the next block" in {
-    // Deliberately conservative. It is built and signed in a tip-height context where the contract's
-    // height condition does not hold yet, so offering it produces a build that cannot be signed.
+  "A NISP submission to a rollup mined at the tip" should "be valid in the very next block" in {
+    // Holding_Logic refuses a submission only inside the rollup's own block. Signing at the tip made
+    // the next block look like that block, so these waited one block for nothing.
+    val rollup = holdingRollup(9131, boundaryPeriod)
+    val submission = RollupTxStub("rollup-a", Some(boundaryPeriod), NISPSubmission)
+
+    submission.validate(boundaryPeriod.toInt, rollup) shouldBe false
+    submission.validate(boundaryPeriod.toInt + 1, rollup) shouldBe true
+  }
+
+  "A transform that becomes valid at the candidate height" should "be offered to that block" in {
+    // Signed with a pre-header at the candidate height, so the contract condition holds at signing.
     val rollup = holdingRollup(9121, boundaryPeriod)
     val transform = RollupTxStub("rollup-a", Some(boundaryPeriod), HoldingTransform)
 
-    transform.validate(boundaryTip + 1, rollup) shouldBe true
-    RollupExecution.eligibleForCandidate(
-      transform, rollup, boundaryTip, boundaryTip + 1) shouldBe false
+    RollupExecution.eligibleForCandidate(transform, rollup, boundaryTip) shouldBe false
+    RollupExecution.eligibleForCandidate(transform, rollup, boundaryTip + 1) shouldBe true
+  }
+
+  // ─── what a transform spends ──────────────────────────────────────────────
+
+  private def projected(rollup: lfsm.states.Rollup,
+                        ancestors: Seq[String]): state.messages.MempoolMessages.MempoolRollupMetadata = {
+    val (node, _, wallet) = FakeNodeContext()
+    val input = node.getClient.execute { c =>
+      NodeBox("cc" * 32, "dd" * 32, 5000000L, 0, 100, wallet.contract.ergoTreeHex).toInputUTXO(c)
+    }
+    state.messages.MempoolMessages.MempoolRollupMetadata(input, rollup.metadata, ancestorIds = ancestors)
+  }
+
+  "A holding transform" should "spend the confirmed box when unconfirmed submissions sit on top of it" in {
+    // Submissions land only before the period ends and the transform only after it, so a transform
+    // chained onto one is refused wherever it goes: the parent lapses the moment the child is valid.
+    val rollup = holdingRollup(9141, boundaryPeriod)
+    val confirmed = SyncFixtures.id(9142)
+    val reply = state.messages.RollupMessages.CurrentRollupMetadata(confirmed, rollup.metadata,
+      Some(projected(rollup, Seq("ab" * 32))))
+
+    RollupExecution.spendTarget(reply, Some(lfsm.LFSMPhase.HOLDING)) shouldEqual Some(Left(confirmed))
+    withClue("a submission chains onto the same projection, which is still valid for it: ") {
+      RollupExecution.spendTarget(reply, None).flatMap(_.toOption).map(_.ancestorIds) shouldEqual
+        Some(Seq("ab" * 32))
+    }
+    withClue("the send gate agrees, so the transform built on the confirmed box is not refused: ") {
+      RollupExecution.sendIfCurrentInput(rollup.blockId, confirmed, reply,
+        Some(lfsm.LFSMPhase.HOLDING))("sent") shouldEqual "sent"
+    }
+  }
+
+  it should "chain onto a projection that has no unconfirmed ancestors" in {
+    val rollup = holdingRollup(9151, boundaryPeriod)
+    val reply = state.messages.RollupMessages.CurrentRollupMetadata(SyncFixtures.id(9152), rollup.metadata,
+      Some(projected(rollup, Seq.empty)))
+    RollupExecution.spendTarget(reply, Some(lfsm.LFSMPhase.HOLDING)).exists(_.isRight) shouldBe true
   }
 
   // ─── candidate leases ─────────────────────────────────────────────────────
@@ -344,6 +472,33 @@ class RollupExecutionSpec extends TestKit(ActorSystem("submission-handler-spec",
 
     f.probe.send(f.handler, RollupExecution.CandidateLeaseTaken(500, lease.reservationId))
     f.wallet.expectNoMessage(2.seconds)
+  }
+
+  "A funded payout" should "be refused before any funding when the state it reads is not in payout" in {
+    // The node can drop a pending transform from its own mempool when a candidate replaces or
+    // carries it, and the read then shows the evaluation box. Signing a payout against that box
+    // fails inside the interpreter, as an index error, after the wallet has been asked for inputs.
+    val f = fixture()
+    val evalRollup = SyncFixtures.emptyRollup(SyncFixtures.id(9201), SyncFixtures.id(9202), 100)
+      .copy(state = lfsm.states.RollupInfoState.evaluation(100L, 100L, 0L))
+    f.probe.send(f.handler, RollupBatch(Seq(stub("rollup-a", Payout))))
+    f.probe.expectMsgType[BatchAccepted](5.seconds)
+    f.sync.expectMsgType[GetCurrentRollupCritical](10.seconds)
+    f.sync.reply(CurrentRollup(evalRollup.utxoId, evalRollup,
+      Some(state.messages.MempoolMessages.MempoolRollupState(projected(evalRollup, Seq.empty).asInput, evalRollup))))
+    withClue("no funding is asked for work that cannot be signed: ") {
+      f.wallet.expectNoMessage(2.seconds)
+    }
+  }
+
+  "A rollup box gone at the node" should "read as a one-line state change, not the node's error body" in {
+    val ctx = org.mockito.Mockito.mock(classOf[org.ergoplatform.appkit.BlockchainContext])
+    org.mockito.Mockito.when(ctx.getBoxesById("ab" * 32)).thenThrow(new org.ergoplatform.appkit.ErgoClientException(
+      "Error executing API request to http://127.0.0.1:9052/utxo/byId/" + "ab" * 32 +
+        ": 404: {\n  \"error\" : 404,\n  \"reason\" : \"not-found\",\n  \"detail\" : null\n}", null))
+    val changed = intercept[StateChangedException](RollupExecution.unspentBox(ctx, "ab" * 32))
+    changed.getMessage should not include "\n"
+    changed.getMessage should include("ab" * 32)
   }
 
   "The final send gate" should "not execute the node send after the confirmed input changes" in {

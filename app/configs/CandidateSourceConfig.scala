@@ -27,6 +27,9 @@ object CandidateSourceConfig {
   final val ErgoDex = "ergodex"
   final val LithosDex = "lithosdex"
 
+  /** Sources whose transactions are pool work that earns no ERG, so no revenue gain reflects them. */
+  final val Protocol: Set[String] = Set(Rollups, Emissions)
+
   /**
    * Conservative on every axis. Fee-less insertions are block space not earning from someone else's
    * transaction, so a source has to be turned up deliberately rather than discovered to be large.

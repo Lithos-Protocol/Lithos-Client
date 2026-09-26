@@ -179,6 +179,9 @@ object Configs {
       "inclusion height the storage-rent walk begins at")
     v.range("stratum.candidate.sources.rent.scanIntervalMs",
       v.int("stratum.candidate.sources.rent.scanIntervalMs"), 1000, 3600000, "ms")
+    v.range("stratum.candidate.sources.rollups.maxAncestorTxs",
+      v.int("stratum.candidate.sources.rollups.maxAncestorTxs"), 0, 64,
+      "unconfirmed transactions one rollup transaction may carry into the block")
     v.range("stratum.candidate.sources.rent.blocksPerScan",
       v.int("stratum.candidate.sources.rent.blocksPerScan"), 1, 10000, "blocks read per scan pass")
     v.bool("stratum.candidate.useTruePropCollection")
@@ -187,6 +190,12 @@ object Configs {
     v.bool("stratum.candidate.logBudgets")
     v.longRange("stratum.candidate.minCandidateChangeRevenue",
       v.long("stratum.candidate.minCandidateChangeRevenue"), 0L, Long.MaxValue, "additional package revenue in nanoERG")
+    v.bool("stratum.candidate.refreshForProtocolTxs")
+    // Zero would take every refresh, which is what minCandidateChangeRevenue = 0 already does
+    v.range("stratum.candidate.minNewProtocolTxs", v.int("stratum.candidate.minNewProtocolTxs"), 1, 1000,
+      "rollup or emission transactions a refresh must add")
+    v.range("stratum.candidate.pinnedInputs", v.int("stratum.candidate.pinnedInputs"), 0, 16,
+      "wallet boxes set aside for transactions in this miner's own blocks")
 
     // ---- batching.ergodex ----
     v.bool(s"batching.ergodex.enabled")

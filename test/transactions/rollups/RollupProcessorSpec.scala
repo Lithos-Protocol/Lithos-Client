@@ -242,6 +242,48 @@ class RollupProcessorSpec extends TestKit(ActorSystem("tx-processor-spec", Rollu
     f.submission.lastSender shouldEqual f.probe.ref
   }
 
+  it should "pass a refresh through, so the engine rebuilds instead of answering with the prepared set" in {
+    val f = fixture()
+    seed(f, fpStub("rollup-a", 1))
+
+    f.probe.send(f.processor, RequestBlockTxs(500, 5, refresh = true))
+    val build = f.submission.expectMsgType[BuildBlockTxs]
+    build.refresh shouldBe true
+    build.limit shouldEqual 5
+  }
+
+  it should "offer more stubs than the limit, since most cannot be built at any given moment" in {
+    val f = fixture()
+    seed(f, fpStub("rollup-a", 1))
+    seed(f, fpStub("rollup-b", 1))
+    seed(f, fpStub("rollup-c", 1))
+
+    f.probe.send(f.processor, RequestBlockTxs(500, 1))
+    val build = f.submission.expectMsgType[BuildBlockTxs]
+    build.stubs should have size 3
+    build.limit shouldEqual 1
+  }
+
+  it should "offer a rollup's fraud proof when its first stub belongs to the evaluator" in {
+    // The same substitution the funded tick makes. Heads alone hid every fraud proof queued behind
+    // an evaluation stub, and those are the highest-value work a block can carry.
+    val f = fixture()
+    seed(f, evalStub("rollup-a"))
+    seed(f, fpStub("rollup-a", 1))
+
+    f.probe.send(f.processor, RequestBlockTxs(500, 5))
+    val build = f.submission.expectMsgType[BuildBlockTxs]
+    build.stubs.map(_.fpInfo.isDefined) shouldEqual Seq(true)
+  }
+
+  it should "ask the engine to report back what each build carries" in {
+    val f = fixture()
+    seed(f, fpStub("rollup-a", 1))
+
+    f.probe.send(f.processor, RequestBlockTxs(500, 5))
+    f.submission.expectMsgType[BuildBlockTxs].reportTo shouldEqual Some(f.processor)
+  }
+
   it should "not consume the stubs it offers to a block" in {
     // Nothing is dispatched or removed there, so the funded copies still reach the mempool if no
     // block is found.
@@ -253,5 +295,103 @@ class RollupProcessorSpec extends TestKit(ActorSystem("tx-processor-spec", Rollu
 
     tick(f)
     f.submission.expectMsgType[RollupBatch].stubs should have size 1
+  }
+
+  // ─── candidate first, funded later ────────────────────────────────────────
+  //
+  // Periods are chosen against block 500: a fraud proof opened at 400 has 260 blocks left, one
+  // opened at 145 has 5, inside the ten-block margin that always sends at once.
+
+  "A stub its candidate built" should "be left out of the funded batch while that block is mined" in {
+    val f = fixture()
+    val carried = fpStub("rollup-a", 1, period = 400L)
+    val other = fpStub("rollup-b", 1, period = 400L)
+    seed(f, carried, other)
+    f.probe.send(f.processor, RequestBlockTxs(500, 5))
+    f.submission.expectMsgType[BuildBlockTxs]
+
+    f.processor ! CandidateStubsBuilt(500, Seq(carried, other), Seq(carried))
+    tick(f)
+    f.submission.expectMsgType[RollupBatch].stubs.map(_.rollupBlockId) shouldEqual Seq("rollup-b")
+  }
+
+  it should "go out at once when its window is within ten blocks of closing" in {
+    val f = fixture()
+    val closing = fpStub("rollup-a", 1, period = 145L)
+    seed(f, closing)
+    f.probe.send(f.processor, RequestBlockTxs(500, 5))
+    f.submission.expectMsgType[BuildBlockTxs]
+
+    f.processor ! CandidateStubsBuilt(500, Seq(closing), Seq(closing))
+    tick(f)
+    f.submission.expectMsgType[RollupBatch].stubs.map(_.rollupBlockId) shouldEqual Seq("rollup-a")
+  }
+
+  it should "not be offered to the next block's candidate" in {
+    // Whether it landed is for the chain check to say, and the funded copy follows
+    val f = fixture()
+    val carried = fpStub("rollup-a", 1, period = 400L)
+    seed(f, carried)
+    f.probe.send(f.processor, RequestBlockTxs(500, 5))
+    f.submission.expectMsgType[BuildBlockTxs]
+    f.processor ! CandidateStubsBuilt(500, Seq(carried), Seq(carried))
+
+    f.probe.send(f.processor, RequestBlockTxs(501, 5))
+    f.probe.expectMsgType[BlockTxsReady].bundles shouldBe empty
+    f.submission.expectNoMessage(300.millis)
+  }
+
+  "A stub arriving while candidates are built" should "wait for a build to try it" in {
+    val f = fixture()
+    f.probe.send(f.processor, RequestBlockTxs(500, 5)) // nothing queued yet
+    f.probe.expectMsgType[BlockTxsReady]
+    val arriving = fpStub("rollup-a", 1, period = 400L)
+    seed(f, arriving)
+
+    tick(f)
+    f.submission.expectNoMessage(500.millis)
+
+    // Tried and not built: this block will not carry it, so the funded path takes it
+    f.processor ! CandidateStubsBuilt(500, Seq(arriving), Seq.empty)
+    tick(f)
+    f.submission.expectMsgType[RollupBatch].stubs.map(_.rollupBlockId) shouldEqual Seq("rollup-a")
+  }
+
+  it should "go to the funded path once its block ends untried" in {
+    val f = fixture()
+    f.probe.send(f.processor, RequestBlockTxs(500, 5))
+    f.probe.expectMsgType[BlockTxsReady]
+    seed(f, fpStub("rollup-a", 1, period = 400L))
+
+    f.processor ! RequestBlockTxs(501, 0)
+    tick(f)
+    f.submission.expectMsgType[RollupBatch].stubs.map(_.rollupBlockId) shouldEqual Seq("rollup-a")
+  }
+
+  "A chain check past the carried block" should "release what it still finds undone and drop what the block took" in {
+    // Both carried for block 400. The fixture node reports a height far past it, where a holding
+    // rollup opened at block 1 still needs its transform and one already in evaluation does not.
+    val f = fixture()
+    val undone = RollupTxStub("ab" * 32, Some(1L), HoldingTransform)
+    val taken = RollupTxStub("cd" * 32, Some(1L), HoldingTransform)
+    seed(f, undone, taken)
+    f.probe.send(f.processor, RequestBlockTxs(400, 5))
+    f.submission.expectMsgType[BuildBlockTxs]
+    f.processor ! CandidateStubsBuilt(400, Seq(undone, taken), Seq(undone, taken))
+    tick(f)
+    f.submission.expectNoMessage(300.millis)
+
+    val holding = support.SyncFixtures.emptyRollup(undone.rollupBlockId, "01" * 32, startHeight = 1)
+    val evaluating = support.SyncFixtures.emptyRollup(taken.rollupBlockId, "02" * 32, startHeight = 1)
+      .copy(state = lfsm.states.RollupInfoState.evaluation(401L, 1L, 0L))
+    f.processor ! PublishedRollupMap(Map.empty)
+    f.sync.expectMsg(state.messages.SyncMessages.GetSynced)
+    f.sync.reply(state.messages.SyncMessages.FullSync(
+      Seq(holding.blockId -> holding.metadata, evaluating.blockId -> evaluating.metadata), Map.empty))
+
+    awaitAssert({
+      tick(f)
+      f.submission.expectMsgType[RollupBatch](500.millis).stubs shouldEqual Seq(undone)
+    }, 15.seconds, 200.millis)
   }
 }

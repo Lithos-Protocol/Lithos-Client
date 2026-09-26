@@ -38,6 +38,15 @@ object RollupTransactions {
   /** The refundable ERG a submission of this score has to add to the holding box. */
   def submissionBond(score: Long): Long = RollupProtocol.bondForScore(score)
 
+  /**
+   * Signing context for the block a transaction executes in. Left unset, signing evaluates HEIGHT
+   * at the tip, one below where the node validates it, so a spend at either edge of its period
+   * reduces to false or passes here and is refused there.
+   */
+  private def executingAt(ctx: BlockchainContext, blockHeight: Int): PreHeader =
+    ctx.createPreHeader().height(blockHeight).build()
+
+  /** @param blockHeight the block this executes in; Holding_Logic checks HEIGHT against its period */
   def genNISPSubmission(ctx: BlockchainContext,
                         wallet: NodeWallet,
                         holdingInput: InputUTXO,
@@ -45,7 +54,8 @@ object RollupTransactions {
                         latestState: LatestRollup,
                         feeOutputs: Seq[UTXO],
                         nisp: NISP,
-                        score: Long
+                        score: Long,
+                        blockHeight: Int
                        ): SignedTransaction = {
     // A submission recreates the box under its own script rather than a freshly compiled one, which
     // is what `validUTXO` compares. Only the two phase transitions below compile a target contract,
@@ -94,6 +104,7 @@ object RollupTransactions {
     val uTx = TxBuilder(ctx)
       .setInputs((Seq(inputWithContext) ++ otherInputs): _*)
       .setOutputs(totalOutputs: _*)
+      .setPreHeader(executingAt(ctx, blockHeight))
       .buildTx(0, wallet.p2pk)
     wallet.sign(uTx)
   }
@@ -129,7 +140,7 @@ object RollupTransactions {
     val uTx = TxBuilder(ctx)
       .setInputs((Seq(inputWithContext) ++ otherInputs): _*)
       .setOutputs(totalOutputs: _*)
-      .setPreHeader(ctx.createPreHeader().height(blockHeight).build())
+      .setPreHeader(executingAt(ctx, blockHeight))
       .buildTx(0, wallet.p2pk)
     wallet.sign(uTx)
   }
@@ -200,10 +211,12 @@ object RollupTransactions {
     val residueOutput = if (plan.residue.isEmpty) Seq.empty[UTXO]
       else Seq(UTXO(wallet.contract, UTXO.MIN_CHANGE, plan.residue).setCreationHeight(blockHeight))
 
+    // In the order appkit writes them to JSON, which is the order the node rebuilds; the candidate
+    // body carries that JSON unchanged, so signing in any other order gives the node another tx.
     val holdingLogic = logicVar(ctx)
     val inputWithContext = DexContracts.attachCtxVars(holdingInput,
       Seq((3.toByte, ErgoValue.of(TransformOp)),
-        (holdingLogic.getId, holdingLogic.getValue)))
+        (holdingLogic.getId, holdingLogic.getValue)), useWireOrder = true)
 
     val uTx = TxBuilder(ctx)
       .setInputs((Seq(inputWithContext) ++ revenueInputs): _*)
@@ -213,11 +226,13 @@ object RollupTransactions {
     wallet.sign(uTx)
   }
 
+  /** @param blockHeight the block this executes in; Evaluation only transforms once its period is over */
   def genEvalTransform(ctx: BlockchainContext,
                        wallet: NodeWallet,
                        evalInput: InputUTXO,
                        walletInputs: Seq[InputUTXO],
-                       feeOutputs: Seq[UTXO]): SignedTransaction = {
+                       feeOutputs: Seq[UTXO],
+                       blockHeight: Int): SignedTransaction = {
     val payout = payoutContract(ctx)
 
     val otherInputs = walletInputs
@@ -234,6 +249,7 @@ object RollupTransactions {
     val uTx = TxBuilder(ctx)
       .setInputs((Seq(evalInput) ++ otherInputs): _*)
       .setOutputs(totalOutputs: _*)
+      .setPreHeader(executingAt(ctx, blockHeight))
       .buildTx(0, wallet.p2pk)
     wallet.sign(uTx)
   }

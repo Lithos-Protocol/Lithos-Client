@@ -70,6 +70,15 @@ class EngineBroadcastSpec extends TestKit(ActorSystem("engine-broadcast-spec"))
     }
   }
 
+  "A refused send" should "carry the node's reason, so the caller can say why in one line" in {
+    val refused = intercept[EngineBroadcast.SubmissionOutcomeException] {
+      EngineBroadcast.Result("t1", EngineBroadcast.Rejected,
+        Some("Malformed transaction: Every input of the transaction should be in UTXO")).requireAccepted()
+    }
+    refused.reason shouldBe Some("Malformed transaction: Every input of the transaction should be in UTXO")
+    refused.getMessage should include("Every input of the transaction should be in UTXO")
+  }
+
   "The engine broadcast boundary" should "report acceptance only for the signed transaction ID" in {
     exercise(Success(txId), "accepted")
   }

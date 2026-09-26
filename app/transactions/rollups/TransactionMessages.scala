@@ -70,16 +70,20 @@ object TransactionMessages {
     }
 
     /**
-     * Check if this stub is valid against a given height and Rollup
-     * @param height Height to validate against
+     * Whether this stub's transaction is valid in a block at `height`. That is the tip plus one for
+     * anything sent to the mempool, since the node validates pooled transactions against the next
+     * block. Each case is its contract's own height condition.
+     * @param height Height the transaction executes at
      * @param rollup Rollup to validate against
      */
     def validate(height: Int, rollup: RollupMetadata): Boolean = {
       txType match {
         case HoldingTransform =>
           rollup.phase == HOLDING && (height - rollup.currentPeriod.get) >= LFSMHelpers.HOLDING_PERIOD
+        // Holding_Logic also refuses a submission inside the rollup's own block
         case NISPSubmission =>
-          rollup.phase == HOLDING && (height - rollup.currentPeriod.get) < LFSMHelpers.HOLDING_PERIOD && !rollup.hasMiner
+          rollup.phase == HOLDING && (height - rollup.currentPeriod.get) < LFSMHelpers.HOLDING_PERIOD &&
+            !rollup.hasMiner && height.toLong != rollup.state.genesisBlockHeight
         // Past the period no fraud proof can land, so an unfinished evaluation no longer holds it back.
         case EvalTransform =>
           rollup.phase == EVAL && (height - rollup.currentPeriod.get) >= LFSMHelpers.EVAL_PERIOD
@@ -137,14 +141,26 @@ object TransactionMessages {
 
   /**
    * RollupProcessor → RollupExecution: build these stubs fee-less and reply to the original
-   * requester WITHOUT sending them. The stubs stay queued, so the funded copies still reach the
-   * mempool on the normal tick; whichever lands first wins and the other is a double spend.
+   * requester WITHOUT sending them. The stubs stay queued; what the build carries is held back from
+   * the funded path until its block passes without it.
+   *
+   * @param answer  whether a requester is waiting on this build. False when it is preparation, which
+   *                caches its result for the request that follows.
+   * @param refresh rebuild from current state rather than answer with what this height already built
+   * @param limit   transactions to build; `stubs` is every candidate in priority order, so a stub that
+   *                cannot be built leaves its slot to the next
+   * @param reportTo told which stubs a finished build turned into transactions
    */
+  case class BuildBlockTxs(blockHeight: Int, stubs: Seq[RollupTxStub], answer: Boolean = true,
+                           refresh: Boolean = false, limit: Int = 100,
+                           reportTo: Option[akka.actor.ActorRef] = None)
+
   /**
-   * @param answer whether a requester is waiting on this build. False when it is preparation, which
-   *               caches its result for the request that follows.
+   * The engine → RollupProcessor: one candidate build for `blockHeight` finished. `built` are the
+   * stubs it made fee-less transactions for; the rest of `tried` failed or went unreached once the
+   * limit was filled.
    */
-  case class BuildBlockTxs(blockHeight: Int, stubs: Seq[RollupTxStub], answer: Boolean = true)
+  case class CandidateStubsBuilt(blockHeight: Int, tried: Seq[RollupTxStub], built: Seq[RollupTxStub])
 
   // Trait representing entire rollup evaluation state
   sealed trait RollupEvaluationResult
@@ -186,7 +202,8 @@ object TransactionMessages {
 
   // Exceptions
   case class RollupRemovedException(msg: String) extends Exception(msg)
-  case class NewlyGeneratedRollupException(msg: String) extends Exception(msg)
   case class StubInvalidException(msg: String) extends Exception(msg)
+  /** A box the synchronized state still names as unspent is gone at the node: a block moved first. */
+  case class StateChangedException(msg: String) extends Exception(msg)
   case class ProjectionChangedException(msg: String) extends Exception(msg)
 }

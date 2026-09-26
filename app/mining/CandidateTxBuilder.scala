@@ -260,7 +260,7 @@ class CandidateTxBuilder(prover: NodeWallet, nodeApi: NodeApi, config: Candidate
       sTx.asInstanceOf[org.ergoplatform.appkit.impl.SignedTransactionImpl].getTx).length
     // Output 0 is the holding box, carried so a same-height top-up can spend it without re-reading
     // the transaction it came from.
-    CollateralData(sTx.getId.replace("\"", ""), sTx.toJson(false, false), pkString, utxBytes,
+    CollateralData(sTx.getId.replace("\"", ""), _root_.transactions.candidate.BlockTxMessages.CandidateTx.signedJson(sTx), pkString, utxBytes,
       collat.bytes, collat.id.toString, lenderAddress.toString, signedBytes, sTx.getCost.toLong,
       Some(InputUTXO(sTx.getOutputsToSpend.get(0))))
   }

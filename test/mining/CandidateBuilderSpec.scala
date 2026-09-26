@@ -606,6 +606,28 @@ class CandidateBuilderSpec extends TestKit(ActorSystem("candidate-builder-spec",
     pkg.late shouldBe empty
   }
 
+  "Protocol work" should "be named by id, without the ancestors it carries or another source's work" in {
+    // The pool compares these ids against the served job to decide whether a refresh adds rollup or
+    // emission work. An ancestor is someone else's transaction, and a DEX execution has revenue.
+    val rollups = TestProbe()
+    val dex = TestProbe()
+    val limits = configs.CandidateSourceConfig.Default.copy(maxTxs = 4)
+    val f = fixture(sources = Seq(CandidateSource("rollups", rollups.ref), CandidateSource("lithosdex", dex.ref)),
+      config = collectingConfig.copy(blockTxTimeout = 4000, sources = Map("rollups" -> limits, "lithosdex" -> limits)))
+    advanceTo(f, 100)
+    requested(rollups)
+    requested(dex)
+    val parent = CandidateTx("parent", "{}", CandidateTx.MempoolAncestor)
+    val transform = CandidateTx("transform", "{}", CandidateTx.HoldingTransform)
+    rollups.reply(BlockTxsReady(100, Seq(CandidateBundle(Vector(parent, transform),
+      Seq(transactions.candidate.BlockTxMessages.ChainFromMempool("parent"))))))
+    dex.reply(BlockTxsReady(100, Seq(payout("swap"))))
+
+    val pkg = f.parent.expectMsgType[BlockPackageReady](1.second).pkg
+    pkg.blockTxs.map(_.id) shouldBe Seq("parent", "transform", "swap")
+    pkg.protocolTxs shouldBe Set("transform")
+  }
+
   "A superseded genesis build" should "not publish when a rebuild arrives at the same height" in {
     val source = TestProbe()
     val f = fixture(sources = Seq(CandidateSource(configs.CandidateSourceConfig.Rollups, source.ref)))

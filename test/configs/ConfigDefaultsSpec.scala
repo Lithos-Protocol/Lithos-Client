@@ -21,14 +21,43 @@ class ConfigDefaultsSpec extends AnyFlatSpec with Matchers {
     defaults.waitForBlockPackage shouldBe true
     defaults.logBudgets shouldBe false
     defaults.clearanceAge shouldBe 7200
+    defaults.refreshForProtocolTxs shouldBe true
+    defaults.minNewProtocolTxs shouldBe 1
     val configured = CandidateConfig(Configuration(ConfigFactory.parseString("""
       stratum.candidate.minCandidateChangeRevenue = 0
       stratum.candidate.waitForBlockPackage = false
       stratum.candidate.logBudgets = true
+      stratum.candidate.refreshForProtocolTxs = false
+      stratum.candidate.minNewProtocolTxs = 3
     """)))
     configured.minCandidateChangeRevenue shouldBe 0L
     configured.waitForBlockPackage shouldBe false
     configured.logBudgets shouldBe true
+    configured.refreshForProtocolTxs shouldBe false
+    configured.minNewProtocolTxs shouldBe 3
+  }
+
+  "CandidateConfig.pinTarget" should "pin only when this miner builds candidates with rollup work" in {
+    def target(overrides: String): Int = CandidateConfig.pinTarget(Configuration(
+      ConfigFactory.parseString(overrides).withFallback(shipped.underlying).resolve()))
+    val building = """
+      lithos-tasks.stratum-server.enabled = true
+      stratum.candidate.blockTransactions = true
+    """
+    target(building) shouldBe 1
+    target(building + "\nstratum.candidate.pinnedInputs = 3") shouldBe 3
+    withClue("a pin nothing uses only withholds a box: ") {
+      target(building + "\nstratum.candidate.blockTransactions = false") shouldBe 0
+      target(building + "\nlithos-tasks.stratum-server.enabled = false") shouldBe 0
+      target(building + "\nstratum.candidate.sources.rollups.enabled = false") shouldBe 0
+      target(building + "\nstate.disableTransforms = true") shouldBe 0
+    }
+    CandidateConfig.pinTarget(Configuration.empty) shouldBe 0
+  }
+
+  "RollupSourceConfig.Default" should "equal what the shipped application.conf parses" in {
+    RollupSourceConfig(shipped) shouldEqual RollupSourceConfig.Default
+    RollupSourceConfig(Configuration.empty) shouldEqual RollupSourceConfig.Default
   }
 
   "A config without a source's block" should "leave an off-by-default source off" in {

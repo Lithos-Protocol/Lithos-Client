@@ -12,14 +12,36 @@ import work.lithos.mutations.UTXO
 import scala.util.Success
 
 class WalletInventorySpec extends AnyFlatSpec with Matchers with MockitoSugar {
-  private def serve(api: NodeApi, boxes: Vector[NodeBox]): Unit = {
+  /** @param unconfirmed ids the node reports as still in the mempool */
+  private def serve(api: NodeApi, boxes: Vector[NodeBox], unconfirmed: Set[String] = Set.empty): Unit = {
     when(api.indexerEnabled).thenReturn(false)
     when(api.walletUnspentBoxes(any[ConfirmationRange], any[Paging])).thenAnswer { invocation =>
       val p = invocation.getArgument[Paging](1)
       Success(boxes.slice(p.offset, p.offset + p.limit).map { b =>
         WalletBox(b, "", Some(10), b.transactionId, b.index, Some(b.creationHeight),
-          None, None, spent = false, onchain = true, Seq.empty)
+          None, None, spent = false, onchain = !unconfirmed.contains(b.boxId), Seq.empty)
       })
+    }
+  }
+
+  "A confirmed-only selection" should "take neither a box still in the mempool nor locally built change" in {
+    // A fee-less candidate transaction carries no parent for its wallet input, and the node skips a
+    // spend of a box that is not yet in a block
+    val (node, api, wallet) = FakeNodeContext(numAddresses = 1)
+    node.getClient.execute { ctx =>
+      val pending = UTXO(wallet.contract, 3000000000L).toDummyInput(ctx)
+      val confirmed = UTXO(wallet.contract, 2000000000L).toDummyInput(ctx)
+      val change = UTXO(wallet.contract, 4000000000L).toDummyInput(ctx)
+      serve(api, Vector(WalletInventory.nodeBox(pending), WalletInventory.nodeBox(confirmed)),
+        unconfirmed = Set(pending.id.toString))
+      val inventory = new WalletInventory(node, api)
+      def pick(confirmedOnly: Boolean, known: Vector[NodeBox]) = inventory.select(ctx, 1000000000L,
+        Seq.empty, Set.empty, single = true, p2pkOnly = false, rewardsOnly = false, known = known,
+        confirmedOnly = confirmedOnly).map(_.id)
+
+      pick(confirmedOnly = false, Vector(WalletInventory.nodeBox(change))) shouldBe Vector(change.id)
+      pick(confirmedOnly = false, Vector.empty) shouldBe Vector(pending.id)
+      pick(confirmedOnly = true, Vector(WalletInventory.nodeBox(change))) shouldBe Vector(confirmed.id)
     }
   }
 

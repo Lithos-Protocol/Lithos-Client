@@ -51,6 +51,41 @@ object BlockTxMessages {
       CandidateTx(body.id, encoded, MempoolAncestor, body.inputs.map(_.boxId).toSet,
         body.size.getOrElse(encoded.length), body.cost.getOrElse(0L), body.id)
     }
+
+    /**
+     * The most context variables on one input that the node rebuilds in the order the JSON lists
+     * them. Its decoder builds a Scala map, which keeps insertion order up to four entries and hashes
+     * past that, landing on the order this client's own map signed with.
+     */
+    private final val JsonOrderedVariables = 4
+
+    /**
+     * The JSON a candidate carries for a transaction this client signed.
+     *
+     * The id and every signature cover each input's context variables in signed order. An input with
+     * two to four of them is rebuilt in the order this JSON lists, so JSON listing another order is a
+     * different transaction to the node and is refused here, loudly.
+     */
+    def signedJson(tx: org.ergoplatform.appkit.SignedTransaction): String = {
+      import scala.collection.JavaConverters._
+      val json = tx.toJson(false, false)
+      val signed = tx.asInstanceOf[org.ergoplatform.appkit.impl.SignedTransactionImpl].getTx.inputs
+        .map(_.spendingProof.extension.values.keys.map(_.toString).toVector).toVector
+      val ordered = signed.map(keys => keys.size >= 2 && keys.size <= JsonOrderedVariables)
+      // Most transactions have no input whose order the node takes from the JSON, so skip the parse
+      if (!ordered.contains(true)) return json
+      val inputs = new com.google.gson.JsonParser().parse(json).getAsJsonObject.getAsJsonArray("inputs")
+      val listed = (0 until inputs.size).map { i =>
+        Option(inputs.get(i).getAsJsonObject.getAsJsonObject("spendingProof"))
+          .flatMap(proof => Option(proof.getAsJsonObject("extension")))
+          .map(_.keySet().asScala.toVector).getOrElse(Vector.empty[String])
+      }.toVector
+      require(listed.size == signed.size && signed.indices.forall(i => !ordered(i) || signed(i) == listed(i)),
+        s"transaction ${tx.getId} was signed with context variables " +
+        s"${signed.map(_.mkString("(", ",", ")")).mkString(" ")} but its JSON lists " +
+        s"${listed.map(_.mkString("(", ",", ")")).mkString(" ")}")
+      json
+    }
   }
 
   /** Starts source construction for a height and caches the result for collection. */

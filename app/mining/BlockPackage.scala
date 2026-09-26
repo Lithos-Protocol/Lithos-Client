@@ -13,6 +13,8 @@ import transactions.candidate.CandidateBudget
  * @param share   the slice of those limits this package was allowed, which is what admission used
  * @param revenueByTx unspent ERG each member left for the top-up, keyed by the transaction that
  *                    created it; sums to `revenue`
+ * @param protocolTxs ids of the rollup and emission transactions carried, not counting the
+ *                    unconfirmed ancestors they chain off. They earn nothing, so `revenue` omits them.
  */
 case class BlockPackage(blockHeight: Int,
                         collateral: CollateralData,
@@ -25,7 +27,8 @@ case class BlockPackage(blockHeight: Int,
                         late: Set[String] = Set.empty,
                         limits: Option[CandidateBudget] = None,
                         share: Option[CandidateBudget] = None,
-                        revenueByTx: Map[String, Long] = Map.empty) {
+                        revenueByTx: Map[String, Long] = Map.empty,
+                        protocolTxs: Set[String] = Set.empty) {
 
   def identity: MiningMessages.CandidateIdentity =
     MiningMessages.CandidateIdentity(blockHeight, parentId, collateral.txId, revision)
@@ -39,13 +42,16 @@ case class BlockPackage(blockHeight: Int,
   def withBlockTxs(built: Seq[CandidateTx], ergRevenue: Long = 0L, from: Set[String] = Set.empty,
                    lateSources: Set[String] = Set.empty, blockLimits: Option[CandidateBudget] = None,
                    packageShare: Option[CandidateBudget] = None,
-                   perTxRevenue: Map[String, Long] = Map.empty): BlockPackage =
+                   perTxRevenue: Map[String, Long] = Map.empty,
+                   protocol: Set[String] = Set.empty): BlockPackage =
     copy(blockTxs = built, revision = revision + 1, revenue = ergRevenue, sources = from, late = lateSources,
-      limits = blockLimits.orElse(limits), share = packageShare.orElse(share), revenueByTx = perTxRevenue)
+      limits = blockLimits.orElse(limits), share = packageShare.orElse(share), revenueByTx = perTxRevenue,
+      protocolTxs = protocol)
 
   /** Genesis alone: no additions, and so no sources and no late ones. */
   def withoutBlockTxs: BlockPackage =
-    copy(blockTxs = Seq.empty, revenue = 0L, sources = Set.empty, late = Set.empty, revenueByTx = Map.empty)
+    copy(blockTxs = Seq.empty, revenue = 0L, sources = Set.empty, late = Set.empty, revenueByTx = Map.empty,
+      protocolTxs = Set.empty)
 
   def describe: String =
     s"BlockPackage(height=$blockHeight, rev=$revision, collateral=${collateral.collateralId}, " +

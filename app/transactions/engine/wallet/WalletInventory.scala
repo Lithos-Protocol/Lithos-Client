@@ -90,12 +90,14 @@ private[engine] class WalletInventory(node: NodeContext, api: _root_.node.NodeAp
    * `consume` returns true to stop the walk, which is how selection avoids paging the whole wallet.
    */
   private def walk(rewardsOnly: Boolean, p2pkOnly: Boolean, deadlineMillis: Long = Long.MaxValue,
-                   includeRewards: Boolean = false)
+                   includeRewards: Boolean = false, confirmedOnly: Boolean = false)
                   (consume: (NodeBox, Boolean) => Boolean): Unit = {
     val startedAt = System.nanoTime()
     var stop = false
     val seenRewards = scala.collection.mutable.HashSet.empty[String]
-    def pages(fetch: Paging => Seq[NodeBox], reward: Boolean): Unit = {
+    // Each box comes with whether it is in a block, which `confirmedOnly` filters on after the fetch
+    // so a filtered page is not mistaken for the last one
+    def pages(fetch: Paging => Seq[(NodeBox, Boolean)], reward: Boolean): Unit = {
       var paging = Paging(0, PageSize)
       var exhausted = false
       while (!stop && !exhausted) {
@@ -105,11 +107,12 @@ private[engine] class WalletInventory(node: NodeContext, api: _root_.node.NodeAp
         require(page.size <= PageSize, "wallet page exceeded the requested limit")
         val boxes = page.iterator
         while (boxes.hasNext && !stop) {
-          val box = boxes.next()
+          val (box, onchain) = boxes.next()
           val isReward = wallet.rewardTrees.contains(box.ergoTree)
           val signable = if (isReward) !p2pkOnly && (includeRewards || rewardsOnly)
             else !reward && !rewardsOnly && wallet.signableTrees.contains(box.ergoTree)
-          if (signable && (!isReward || seenRewards.add(box.boxId))) stop = consume(box, isReward)
+          if (signable && (onchain || !confirmedOnly) && (!isReward || seenRewards.add(box.boxId)))
+            stop = consume(box, isReward)
         }
         exhausted = page.size < PageSize
         paging = paging.next
@@ -117,11 +120,12 @@ private[engine] class WalletInventory(node: NodeContext, api: _root_.node.NodeAp
     }
     if ((includeRewards || rewardsOnly) && !p2pkOnly && api.indexerEnabled) wallet.rewardTrees.keysIterator.foreach { tree =>
       if (!stop) pages(paging => api.unspentBoxesByErgoTree(tree, paging, SortDirection.Asc,
-        MempoolOptions(includeUnconfirmed = false, excludeMempoolSpent = true)).get.map(_.box), reward = true)
+        MempoolOptions(includeUnconfirmed = false, excludeMempoolSpent = true)).get.map(_.box -> true), reward = true)
     }
+    // Mempool-aware either way, so a confirmed box already spent by a pooled transaction is left out
     if (!stop)
-      pages(paging => api.walletUnspentBoxes(ConfirmationRange.IncludeMempool, paging).get.map(_.box),
-        reward = false)
+      pages(paging => api.walletUnspentBoxes(ConfirmationRange.IncludeMempool, paging).get
+        .map(boxed => boxed.box -> boxed.onchain), reward = false)
   }
 
   /**
@@ -165,7 +169,8 @@ private[engine] class WalletInventory(node: NodeContext, api: _root_.node.NodeAp
    */
   def select(ctx: BlockchainContext, erg: Long, required: Seq[Token], excluded: Set[String],
              single: Boolean, p2pkOnly: Boolean, rewardsOnly: Boolean,
-             known: Vector[NodeBox] = Vector.empty, deadlineMillis: Long = Long.MaxValue): Vector[InputUTXO] = {
+             known: Vector[NodeBox] = Vector.empty, deadlineMillis: Long = Long.MaxValue,
+             confirmedOnly: Boolean = false): Vector[InputUTXO] = {
     require(erg >= 0 && required.forall(_.amount > 0), "invalid wallet requirement")
     require(!mainnet || !required.exists(_.id.toString == MainnetEip27Constants.TokenId),
       "re-emission tokens cannot be transferred")
@@ -223,9 +228,10 @@ private[engine] class WalletInventory(node: NodeContext, api: _root_.node.NodeAp
       covered
     }
 
-    known.iterator.filter(box => !rewardsOnly && wallet.signableTrees.contains(box.ergoTree))
+    // Locally built change is unconfirmed by definition
+    known.iterator.filter(box => !rewardsOnly && !confirmedOnly && wallet.signableTrees.contains(box.ergoTree))
       .takeWhile(_ => !covered).foreach(box => consume(box, reward = false))
-    if (!covered) walk(rewardsOnly, p2pkOnly, deadlineMillis)(consume)
+    if (!covered) walk(rewardsOnly, p2pkOnly, deadlineMillis, confirmedOnly = confirmedOnly)(consume)
     require(covered, "wallet cannot cover this request within the input budget")
 
     // Boxes added while the set was still short can turn out to be unnecessary once a later box

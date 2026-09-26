@@ -174,7 +174,7 @@ trait EmissionsCore extends Actor with InjectedActorSupport {
           // Carrying them also avoids censoring work this client happened to build on top of.
           val ancestors = tip.ancestors.map(CandidateTx.ancestor)
           val own = spends.map(s => CandidateTx(
-            s.tx.getId.replace("\"", ""), s.tx.toJson(false, false),
+            s.tx.getId.replace("\"", ""), _root_.transactions.candidate.BlockTxMessages.CandidateTx.signedJson(s.tx),
             if (s.kind == EmissionSpend.Clear) CandidateTx.Clear else CandidateTx.Activate,
             transactions.engine.execution.RollupExecution.signedInputIds(s.tx),
             transactions.engine.execution.RollupExecution.signedSizeBytes(s.tx), s.tx.getCost.toLong,

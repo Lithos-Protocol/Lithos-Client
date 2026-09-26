@@ -34,8 +34,13 @@ import transactions.engine.{EngineBroadcast, EngineJoinGuard}
  * The invariant everything here protects: an input owned by a nonterminal transaction is never
  * offered to another request. Releasing early is a double spend, so every ambiguous case withholds.
  */
+/**
+ * @param pinnedInputs boxes to hold for transactions in this miner's own block, which need a wallet
+ *                     input but are never broadcast. Zero pins nothing.
+ */
 class EngineWalletState @Inject()(nodeContext: NodeContext,
-                                  walletLimits: configs.WalletConfig = configs.WalletConfig.Default)
+                                  walletLimits: configs.WalletConfig = configs.WalletConfig.Default,
+                                  pinnedInputs: Int = 0)
   extends Actor with InjectedActorSupport {
 
   implicit val ec: ExecutionContext = context.dispatcher
@@ -122,7 +127,7 @@ class EngineWalletState @Inject()(nodeContext: NodeContext,
    * ownership from a snapshot taken before the walk finished.
    */
   private def selectWallet(erg: Long, tokens: Seq[Token], track: Boolean, reservationId: String,
-                           deadline: Long, single: Boolean, p2pkOnly: Boolean,
+                           deadline: Long, single: Boolean, p2pkOnly: Boolean, confirmedOnly: Boolean,
                            reply: ActorRef = sender(), critical: Boolean = criticalMessage): Unit = {
     val busy = if (critical) criticalSelecting.nonEmpty else selecting.nonEmpty
     val ownershipLimit = if (critical) MAX_ENGINE_INPUTS else MAX_OPTIONAL_INPUTS
@@ -131,7 +136,8 @@ class EngineWalletState @Inject()(nodeContext: NodeContext,
     val worstCaseInputs = if (single) 1 else walletLimits.maxInputs
     if (busy && now() < deadline && waitingSelections.count(_.critical == critical) < MaxQueuedSelections &&
       tokens.size <= MaxRequestedTokens)
-      waitingSelections :+= SelectionRequest(erg, tokens, track, reservationId, deadline, single, p2pkOnly, reply, critical)
+      waitingSelections :+= SelectionRequest(erg, tokens, track, reservationId, deadline, single, p2pkOnly, reply,
+        critical, confirmedOnly)
     else if (busy || now() >= deadline || tokens.size > MaxRequestedTokens ||
       usedInputs.size + worstCaseInputs > ownershipLimit)
       reply ! WalletInputs(Seq.empty, reservationId)
@@ -143,7 +149,7 @@ class EngineWalletState @Inject()(nodeContext: NodeContext,
       val chainedChange = knownOutputs
       Try(Future(client.execute { ctx =>
         inventory.select(ctx, erg, tokens, excluded, single, p2pkOnly, rewardsOnly = false, chainedChange,
-          deadlineMillis = deadline)
+          deadlineMillis = deadline, confirmedOnly = confirmedOnly)
       })(if (critical) criticalWalletWorker else walletWorker)
         .onComplete(result => self ! SelectionFinished(attempt, reservationId, deadline, track, reply, result, critical)))
         .failed.foreach(ex =>
@@ -160,7 +166,7 @@ class EngineWalletState @Inject()(nodeContext: NodeContext,
       val request = waitingSelections(ready)
       waitingSelections = waitingSelections.patch(ready, Nil, 1)
       selectWallet(request.erg, request.tokens, request.track, request.id, request.deadline,
-        request.single, request.p2pkOnly, request.reply, request.critical)
+        request.single, request.p2pkOnly, request.confirmedOnly, request.reply, request.critical)
       ready = nextReady
     }
   }
@@ -211,6 +217,51 @@ class EngineWalletState @Inject()(nodeContext: NodeContext,
   /** Reward boxes past their timelock. Uses the last refresh's height, so it errs to holding back. */
   private def spendableRewards: Seq[WalletDescriptor] =
     unreserved(rewardBoxes).filter(b => chainHeight.toLong > b.creationHeight.toLong + MINER_REWARD_DELAY)
+
+  // ─── pinned inputs ────────────────────────────────────────────────────────
+
+  /** A pin verification is out; one at a time, so two cannot propose the same boxes. */
+  private var pinning = false
+  private var warnedPinShortfall = false
+
+  private def pinnedIds: Seq[String] = usedInputs.collect {
+    case (boxId, reservation) if reservation.status == ReservationPinned => boxId
+  }.toSeq
+
+  /**
+   * A fraud proof pays its reward to its wallet input's own script, so only a plain P2PK box will do,
+   * and one without tokens leaves the build nothing to route.
+   */
+  private def pinnable(box: WalletDescriptor): Boolean =
+    !box.reward && box.tokens.isEmpty && wallet.signableTrees.contains(box.tree) &&
+      box.value >= PinnedInputMinValue
+
+  /**
+   * Propose boxes to top the pins up to target, smallest first so the least value is withheld. The
+   * last pinnable box is never proposed, because the funded fraud proof needs one as well. Proposals
+   * are checked against the confirmed UTXO set off the mailbox, since a candidate transaction cannot
+   * carry the unconfirmed parent of its input; a few spares keep one unconfirmed box from stalling it.
+   */
+  private def replenishPins(): Unit = {
+    val missing = pinnedInputs - pinnedIds.size
+    if (missing > 0 && !pinning) {
+      val eligible = available.filter(pinnable).sortBy(_.value)
+      val proposed = eligible.take(math.min(missing + PinSpares, eligible.size - 1)).map(_.id)
+      if (proposed.size < missing && !warnedPinShortfall) {
+        warnedPinShortfall = true
+        logger.warn(s"Only ${pinnedIds.size + proposed.size} of $pinnedInputs pinned input(s) can be set aside: " +
+          s"it takes a plain wallet box of at least $PinnedInputMinValue nanoERG, and one is always left " +
+          "for the mempool. Fraud proofs without one reach the chain through the mempool alone")
+      }
+      if (proposed.nonEmpty) {
+        pinning = true
+        Try(Future(proposed.filter(id => nodeApi.boxById(id).toOption.flatten.nonEmpty))(maintenanceWorker)
+          .onComplete(result => self ! WalletWorkerResult(walletIncarnation,
+            PinsVerified(result.getOrElse(Seq.empty[String])))))
+          .failed.foreach(_ => self ! WalletWorkerResult(walletIncarnation, PinsVerified(Seq.empty)))
+      }
+    }
+  }
 
   private var warnedNoIndexer: Boolean = false
 
@@ -358,6 +409,30 @@ class EngineWalletState @Inject()(nodeContext: NodeContext,
         }
         if (!pinned) joinKeys -= key
       }
+    case GetPinnedInputs =>
+      sender() ! PinnedInputs(pinnedIds.sortBy(id => walletBoxes.get(id).map(_.value).getOrElse(Long.MaxValue)))
+
+    case UnpinInput(boxId) =>
+      if (usedInputs.get(boxId).exists(_.status == ReservationPinned)) {
+        usedInputs -= boxId
+        walletBoxes -= boxId
+        walletRevision += 1L
+        logger.info(s"Pinned input $boxId is no longer unspent; proposing a replacement")
+        replenishPins()
+      }
+
+    // Checked off the mailbox, so a box reserved or dropped meanwhile is left out here.
+    case PinsVerified(ids) =>
+      pinning = false
+      val taking = ids.filter(id => walletBoxes.get(id).exists(pinnable) && !usedInputs.contains(id))
+        .take(math.max(0, pinnedInputs - pinnedIds.size))
+      if (taking.nonEmpty) {
+        reserve(taking, PinnedReservationId, ReservationPinned)
+        if (pinnedIds.size >= pinnedInputs) warnedPinShortfall = false
+        logger.info(s"Pinned ${taking.mkString(", ")} for transactions in this miner's own blocks; " +
+          s"${pinnedIds.size} of $pinnedInputs held")
+      }
+
     case GetOwnedInputIds => sender() ! usedInputs.keySet
     case GetEngineHolds =>
       val held = usedInputs.toVector.collect {
@@ -457,6 +532,12 @@ class EngineWalletState @Inject()(nodeContext: NodeContext,
         // gone. Only a complete read can conclude this, which is why it is not done above.
         knownOutputs = knownOutputs.filter(box =>
           reportedUnspent.contains(box.boxId) || usedInputs.contains(box.boxId))
+        // Nothing broadcasts a pinned box, so one no complete read reports was spent by a block
+        val lostPins = pinnedIds.filterNot(reportedUnspent.contains)
+        if (lostPins.nonEmpty) {
+          usedInputs --= lostPins
+          logger.info(s"${lostPins.size} pinned input(s) no longer unspent; proposing replacements")
+        }
         walletBoxes = freshWallet
         rewardBoxes = freshRewards
       } else {
@@ -471,13 +552,14 @@ class EngineWalletState @Inject()(nodeContext: NodeContext,
       logger.info(s"Wallet refreshed - ${available.size} available, ${usedInputs.size} reserved, " +
         s"${spendableRewards.size} reward box(es) spendable" +
         (if (complete) "" else ", PARTIAL"))
+      replenishPins()
       finishRefresh()
 
-    case SelectInputs(_, _, _, reservationId, deadlineMillis, _, _) if now() >= deadlineMillis =>
+    case SelectInputs(_, _, _, reservationId, deadlineMillis, _, _, _) if now() >= deadlineMillis =>
       sender() ! WalletInputs(Seq.empty, reservationId)
 
-    case SelectInputs(erg, tokens, trackUsed, reservationId, deadline, single, p2pkOnly) =>
-      selectWallet(erg, tokens, trackUsed, reservationId, deadline, single, p2pkOnly)
+    case SelectInputs(erg, tokens, trackUsed, reservationId, deadline, single, p2pkOnly, confirmedOnly) =>
+      selectWallet(erg, tokens, trackUsed, reservationId, deadline, single, p2pkOnly, confirmedOnly)
     case ReserveKnownInputs(_, reservationId, deadlineMillis) if now() >= deadlineMillis =>
       sender() ! WalletInputs(Seq.empty, reservationId)
 
@@ -685,10 +767,11 @@ object EngineWalletState {
    *  - after a send, `ReservationEngine` is bound to an exact transaction and only per-input
    *    evidence from [[EngineReconciler]] can end it;
    *  - `ReservationCandidate` and `ReservationUncertain` cover the paths with no send outcome at
-   *    all: a transaction offered into this miner's own block, and an ambiguous broadcast.
+   *    all: a transaction offered into this miner's own block, and an ambiguous broadcast;
+   *  - `ReservationPinned` is standing funding for transactions in this miner's own blocks.
    *
-   * Only `ReservationSelected` and `ReservationKnown` can be released outright, and only
-   * `ReservationSelected` is collected by a complete refresh.
+   * Only `ReservationSelected` and `ReservationKnown` can be released outright. A complete refresh
+   * collects `ReservationSelected` and drops a `ReservationPinned` box it no longer reports.
    */
   private sealed trait ReservationStatus
   /** Chosen for a build that has not reached the node. A complete refresh or a release ends it. */
@@ -705,6 +788,22 @@ object EngineWalletState {
   private case object ReservationUncertain extends ReservationStatus
   /** Bound to an exact signed transaction, which is the only thing that can resolve it. */
   private case class ReservationEngine(hold: EngineHold) extends ReservationStatus
+  /**
+   * Held for the life of the process to fund transactions in this miner's own blocks. Never
+   * broadcast, never selected and never aged out; it ends when the box is found spent.
+   */
+  private case object ReservationPinned extends ReservationStatus
+
+  /** The lease every pinned box shares. Nothing releases by it: pins end one box at a time. */
+  private final val PinnedReservationId = "pinned-candidate-inputs"
+
+  /** Smallest box worth pinning: a fee-less spend returns it whole as change, which cannot be dust. */
+  private[transactions] final val PinnedInputMinValue: Long = Parameters.MinChangeValue
+
+  /** Extra boxes checked with each pin proposal, in case the smallest are not confirmed yet. */
+  private final val PinSpares = 4
+
+  private case class PinsVerified(boxIds: Seq[String])
   /** Owned inputs across every transaction the engine has in flight. */
   private[transactions] final val MAX_ENGINE_INPUTS = configs.WalletConfig.Default.maxWalletInputs
 
@@ -769,5 +868,6 @@ object EngineWalletState {
   private case class TotalsRefreshed(revision: Long, snapshot: WalletInventory.Snapshot)
   private case object SweepFinished
   private case class SelectionRequest(erg: Long, tokens: Seq[Token], track: Boolean, id: String,
-                                      deadline: Long, single: Boolean, p2pkOnly: Boolean, reply: ActorRef, critical: Boolean)
+                                      deadline: Long, single: Boolean, p2pkOnly: Boolean, reply: ActorRef, critical: Boolean,
+                                      confirmedOnly: Boolean)
 }

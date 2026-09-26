@@ -16,7 +16,10 @@ case class CandidateConfig(collateralPoolSize: Int,
                            minCandidateChangeRevenue: Long = 1000000L,
                            waitForBlockPackage: Boolean = true,
                            logBudgets: Boolean = false,
-                           clearanceAge: Int = 7200)
+                           clearanceAge: Int = 7200,
+                           refreshForProtocolTxs: Boolean = true,
+                           minNewProtocolTxs: Int = 1,
+                           pinnedInputs: Int = 1)
 
 object CandidateConfig {
 
@@ -51,8 +54,25 @@ object CandidateConfig {
     minCandidateChangeRevenue = 1000000L,
     waitForBlockPackage = true,
     logBudgets = false,
-    clearanceAge = 7200
+    clearanceAge = 7200,
+    refreshForProtocolTxs = true,
+    minNewProtocolTxs = 1,
+    pinnedInputs = 1
   )
+
+  /**
+   * Wallet boxes the engine pins for candidate funding. Zero unless candidates are actually built
+   * with rollup work, since a pin nothing uses only withholds a box.
+   */
+  def pinTarget(config: Configuration): Int = {
+    val candidate = CandidateConfig(config)
+    val rollups = candidate.sources.getOrElse(CandidateSourceConfig.Rollups, CandidateSourceConfig.Default)
+    val mining = scala.util.Try(new TasksConfig(config).stratumServerTaskConfig.enabled).getOrElse(false)
+    val transforming = !new StateConfig(config).disableTransforms.getOrElse(false)
+    if (mining && transforming && candidate.blockTransactions && rollups.enabled && rollups.maxTxs > 0)
+      candidate.pinnedInputs
+    else 0
+  }
 
   def apply(config: Configuration): CandidateConfig = {
     def int(key: String, fallback: Int): Int =
@@ -80,7 +100,10 @@ object CandidateConfig {
         .getOrElse(Default.minCandidateChangeRevenue),
       waitForBlockPackage = bool("waitForBlockPackage", Default.waitForBlockPackage),
       logBudgets = bool("logBudgets", Default.logBudgets),
-      clearanceAge = int("clearanceAge", Default.clearanceAge)
+      clearanceAge = int("clearanceAge", Default.clearanceAge),
+      refreshForProtocolTxs = bool("refreshForProtocolTxs", Default.refreshForProtocolTxs),
+      minNewProtocolTxs = int("minNewProtocolTxs", Default.minNewProtocolTxs),
+      pinnedInputs = int("pinnedInputs", Default.pinnedInputs)
     )
   }
 }

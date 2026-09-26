@@ -2,8 +2,8 @@ package transactions.engine
 
 import akka.actor.Actor
 import transactions.candidate.BlockTxMessages.{BlockTxsReady, CandidateTxsDropped}
-import transactions.candidate.CandidatePreparation
-import transactions.rollups.TransactionMessages.BuildBlockTxs
+import transactions.candidate.{CandidateBundle, CandidatePreparation}
+import transactions.rollups.TransactionMessages.{BuildBlockTxs, CandidateStubsBuilt}
 import transactions.engine.execution.RollupExecution._
 import transactions.engine.wallet.EngineWalletMessages
 import transactions.engine.execution.RollupExecution
@@ -33,6 +33,12 @@ trait EngineRollupCandidates extends Actor {
   /** The most recent height a candidate package was built for, so a late lease is not stranded. */
   private var latestCandidateHeight: Int = 0
 
+  /**
+   * Fee-less submissions built for each height, by rollup. A refresh at that height reuses one still
+   * spending the rollup's tip rather than reserving another bond box; they end with their height.
+   */
+  private var heldSubmissions: Map[Int, Map[String, CandidateBundle]] = Map.empty
+
   abstract override def postStop(): Unit = {
     rollupAlive.set(false)
     candidateLeases.keys.toSeq.foreach(reconcileCandidates)
@@ -59,19 +65,30 @@ trait EngineRollupCandidates extends Actor {
       latestCandidateHeight = math.max(latestCandidateHeight, blockHeight + 1)
       reconcileCandidates(blockHeight)
 
+    case CandidateSubmissionHeld(blockHeight, rollupId, bundle) =>
+      if (blockHeight >= latestCandidateHeight) heldSubmissions += blockHeight ->
+        (heldSubmissions.getOrElse(blockHeight, Map.empty[String, CandidateBundle]) + (rollupId -> bundle))
+
     // A block is being assembled: build the same work fee-less and hand it back without
-    // sending. The stubs stay queued so the funded copies still reach the mempool.
-    case BuildBlockTxs(blockHeight, stubs, answer) if stubs.size > 100 =>
+    // sending. The stubs stay queued; the requester's report says which ones the build carries.
+    case BuildBlockTxs(blockHeight, stubs, answer, _, _, _) if stubs.size > 100 =>
       if (answer) sender() ! BlockTxsReady(blockHeight, Seq.empty)
 
-    // Already built for this height, so the request costs nothing but the reply.
-    case BuildBlockTxs(blockHeight, _, true) if rollupPreparation.preparedFor(blockHeight).isDefined =>
+    // Already built for this height, so the request costs nothing but the reply. A refresh rebuilds,
+    // because the work worth offering changes within a height as stubs arrive and sync catches up.
+    case BuildBlockTxs(blockHeight, _, true, false, _, _) if rollupPreparation.preparedFor(blockHeight).isDefined =>
       sender() ! BlockTxsReady(blockHeight, rollupPreparation.preparedFor(blockHeight).get)
 
-    case BuildBlockTxs(blockHeight, stubs, answer) =>
+    // The report goes out before the bundles reach the package, so the stubs are held before any
+    // job can carry them
+    case BuildBlockTxs(blockHeight, stubs, answer, _, limit, reportTo) =>
       val alive = () => rollupAlive.get()
-      rollupPreparation.start(blockHeight, if (answer) Some(sender()) else None)(
-        candidateExecution(alive).candidates(stubs, blockHeight))
+      val held = heldSubmissions.getOrElse(blockHeight, Map.empty[String, CandidateBundle])
+      rollupPreparation.start(blockHeight, if (answer) Some(sender()) else None) {
+        val build = candidateExecution(alive).candidates(stubs, blockHeight, limit, held)
+        reportTo.foreach(_ ! CandidateStubsBuilt(blockHeight, stubs, build.built))
+        build.bundles
+      }
   }
 
   /**
@@ -81,6 +98,7 @@ trait EngineRollupCandidates extends Actor {
    */
   private def reconcileCandidates(blockHeight: Int): Unit = {
     rollupPreparation.drop(blockHeight)
+    heldSubmissions = heldSubmissions.filter(_._1 > blockHeight)
     candidateLeases.get(blockHeight).foreach { leases =>
       candidateLeases -= blockHeight
       leases.foreach(lease => self ! EngineWalletMessages.MarkReservationUncertain(lease))
