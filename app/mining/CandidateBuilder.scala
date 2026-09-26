@@ -410,12 +410,13 @@ class CandidateBuilder(client: ErgoClient,
             throw new CollateralNotFoundException(
               s"no usable collateral boxes: ${all.size} live, ${avoid.size} skipped this block")
 
-          // Keep the selected miner key at this height; draw uniformly among equally ranked collateral boxes.
+          // Keep the selected miner key at this height; draw from the configured selection pool.
           val chosen = sticky
             .flatMap(id => boxes.find(_.id == id))
             .getOrElse {
-              val best = CandidateTxBuilder.bestCandidates(boxes, height, config.clearanceAge)
-              best(random.nextInt(best.size))
+              val eligible = CandidateTxBuilder.selectionPool(boxes, height, config.clearanceAge,
+                config.collateralStrategy)
+              eligible(random.nextInt(eligible.size))
             }
 
           val chosenId = chosen.id

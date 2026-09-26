@@ -649,6 +649,15 @@ class CandidateBuilderSpec extends TestKit(ActorSystem("candidate-builder-spec",
     advanceTo(f, 150).collateral.collateralId shouldEqual boxes(1).id
   }
 
+  it should "offer every usable box for random selection, regardless of age or bid" in {
+    val boxes = boxesWith(Seq((1000000L, 100, 0L), (2000000L, 180, 900000L),
+      (3000000L, 190, 100L)))
+    CandidateTxBuilder.selectionPool(boxes, 200, cfg.clearanceAge, CandidateConfig.HighestFee)
+      .map(_.id) shouldBe Seq(boxes.head.id)
+    CandidateTxBuilder.selectionPool(boxes, 200, cfg.clearanceAge, CandidateConfig.Random)
+      .map(_.id) shouldBe boxes.map(_.id)
+  }
+
   it should "take the oldest overdue box even when a younger one bids more" in {
     val boxes = boxesWith(Seq((1000000L, 100, 0L), (2000000L, 180, 900000L)))
     val f = fixture(boxes = Some(boxes))

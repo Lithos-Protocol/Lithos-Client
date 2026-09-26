@@ -155,6 +155,11 @@ object Configs {
     v.range("stratum.candidate.collateralPoolSize", v.int("stratum.candidate.collateralPoolSize"), 1, 100,
       "collateral boxes pre-loaded; the active set never holds more than 100")
     v.range("stratum.candidate.collateralRefreshInterval", v.int("stratum.candidate.collateralRefreshInterval"), 100, 3600000, "ms")
+    v.string("stratum.candidate.collateralStrategy").foreach { strategy =>
+      if (!CandidateConfig.CollateralStrategies.contains(strategy))
+        v.problem("stratum.candidate.collateralStrategy",
+          s"must be one of ${CandidateConfig.CollateralStrategies.mkString(", ")}")
+    }
     v.range("stratum.candidate.clearanceAge", v.int("stratum.candidate.clearanceAge"),
       CandidateConfig.MinClearanceAge, CandidateConfig.MaxClearanceAge,
       "blocks a collateral box may stay live before it is drawn ahead of every bid")

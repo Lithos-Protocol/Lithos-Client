@@ -19,9 +19,14 @@ case class CandidateConfig(collateralPoolSize: Int,
                            clearanceAge: Int = 7200,
                            refreshForProtocolTxs: Boolean = true,
                            minNewProtocolTxs: Int = 1,
-                           pinnedInputs: Int = 1)
+                           pinnedInputs: Int = 1,
+                           collateralStrategy: String = CandidateConfig.HighestFee)
 
 object CandidateConfig {
+
+  final val HighestFee = "highestFee"
+  final val Random = "random"
+  final val CollateralStrategies: Seq[String] = Seq(HighestFee, Random)
 
   /**
    * Bounds on `clearanceAge`. Below 100 a box that bids nothing overtakes the bids almost at once, and
@@ -57,7 +62,8 @@ object CandidateConfig {
     clearanceAge = 7200,
     refreshForProtocolTxs = true,
     minNewProtocolTxs = 1,
-    pinnedInputs = 1
+    pinnedInputs = 1,
+    collateralStrategy = HighestFee
   )
 
   /**
@@ -103,7 +109,9 @@ object CandidateConfig {
       clearanceAge = int("clearanceAge", Default.clearanceAge),
       refreshForProtocolTxs = bool("refreshForProtocolTxs", Default.refreshForProtocolTxs),
       minNewProtocolTxs = int("minNewProtocolTxs", Default.minNewProtocolTxs),
-      pinnedInputs = int("pinnedInputs", Default.pinnedInputs)
+      pinnedInputs = int("pinnedInputs", Default.pinnedInputs),
+      collateralStrategy = config.getOptional[String]("stratum.candidate.collateralStrategy")
+        .getOrElse(Default.collateralStrategy)
     )
   }
 }

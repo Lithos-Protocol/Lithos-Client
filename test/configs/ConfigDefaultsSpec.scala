@@ -21,18 +21,21 @@ class ConfigDefaultsSpec extends AnyFlatSpec with Matchers {
     defaults.waitForBlockPackage shouldBe true
     defaults.logBudgets shouldBe false
     defaults.clearanceAge shouldBe 7200
+    defaults.collateralStrategy shouldBe CandidateConfig.HighestFee
     defaults.refreshForProtocolTxs shouldBe true
     defaults.minNewProtocolTxs shouldBe 1
     val configured = CandidateConfig(Configuration(ConfigFactory.parseString("""
       stratum.candidate.minCandidateChangeRevenue = 0
       stratum.candidate.waitForBlockPackage = false
       stratum.candidate.logBudgets = true
+      stratum.candidate.collateralStrategy = "random"
       stratum.candidate.refreshForProtocolTxs = false
       stratum.candidate.minNewProtocolTxs = 3
     """)))
     configured.minCandidateChangeRevenue shouldBe 0L
     configured.waitForBlockPackage shouldBe false
     configured.logBudgets shouldBe true
+    configured.collateralStrategy shouldBe CandidateConfig.Random
     configured.refreshForProtocolTxs shouldBe false
     configured.minNewProtocolTxs shouldBe 3
   }

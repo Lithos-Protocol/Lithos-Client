@@ -40,6 +40,14 @@ final case class CollateralCandidate(input: InputUTXO, inclusionHeight: Int, fin
 
 object CandidateTxBuilder {
 
+  /** The pool from which the builder draws one box after filtering spent and skipped boxes. */
+  def selectionPool(candidates: Seq[CollateralCandidate], blockHeight: Int,
+                    clearanceAge: Int, strategy: String): Seq[CollateralCandidate] = strategy match {
+    case CandidateConfig.HighestFee => bestCandidates(candidates, blockHeight, clearanceAge)
+    case CandidateConfig.Random => candidates
+    case other => throw new IllegalArgumentException(s"Unknown collateral strategy: $other")
+  }
+
   /**
    * Boxes carrying the collateral token that a single load will read: `MAX_ACTIVE` live boxes, one
    * unrecycled retirement proof behind each, and the emission singleton.

@@ -132,7 +132,8 @@ class LithosPoolSpec extends TestKit(ActorSystem("lithos-pool-spec", LithosPoolS
     val collateral = CollateralData(genesis, new JSONObject().put("id", genesis).toString, lender,
       Array.emptyByteArray, Array.emptyByteArray, "02" * 32, "address")
     val extra = if (revision == 0) Seq.empty else
-      Seq(CandidateTx(s"extra-$revision", new JSONObject().put("id", s"extra-$revision").toString, CandidateTx.Payout))
+      Seq(CandidateTx(s"extra-$revision", new JSONObject().put("id", s"extra-$revision").toString,
+        CandidateTx.Payout, leaf = s"extra-$revision"))
     BlockPackage(100, collateral, extra, revision, parent)
   }
 
@@ -625,6 +626,45 @@ class LithosPoolSpec extends TestKit(ActorSystem("lithos-pool-spec", LithosPoolS
       f.pool ! BlockPackageReady(pkg(revision = 2).copy(protocolTxs = Set("extra-1")), refreshed = true)
       f.node.calls.poll(200, TimeUnit.MILLISECONDS) shouldBe null
     }
+  }
+
+  it should "retry protocol work omitted by the node while keeping the partial job" in {
+    val f = fixture(cfg.copy(blockTransactions = true))
+    genesis(f)
+    val offered = pkg(revision = 1).copy(protocolTxs = Set("extra-1"))
+    f.pool ! BlockPackageReady(offered)
+    val partial = nextCall(f)
+    val answer = response(partial, 2)
+    answer.getJSONObject("proof").getJSONArray("txProofs").remove(1)
+    partial.response.complete(answer)
+    f.miner.expectMsgType[BroadcastJob]
+
+    f.pool ! BlockPackageReady(offered.copy(revision = 2), refreshed = true)
+    val retry = nextCall(f)
+    retry.txs.last should include("extra-1")
+    retry.response.complete(response(retry, 3))
+    f.miner.expectMsgType[BroadcastJob]
+  }
+
+  it should "replace spent collateral directly when a candidate omits genesis" in {
+    val f = fixture(cfg.copy(blockTransactions = true))
+    val offered = pkg(revision = 1)
+    f.pool ! BlockPackageReady(offered)
+    val rejected = nextCall(f)
+    val answer = response(rejected)
+    answer.getJSONObject("proof").getJSONArray("txProofs").remove(0)
+    rejected.response.complete(answer)
+    f.builder.expectMsg(CollateralSpent(offered.collateral.collateralId))
+    f.builder.expectMsg(RebuildCandidate)
+    f.miner.expectNoMessage(100.millis)
+
+    val replacement = pkg(genesis = "03" * 32)
+    f.pool ! BlockPackageReady(replacement)
+    val retry = nextCall(f)
+    retry.txs should have size 1
+    retry.txs.head should include(replacement.collateral.txId)
+    retry.response.complete(response(retry, 2))
+    f.miner.expectMsgType[BroadcastJob]
   }
 
   it should "hold protocol work to the configured count" in {

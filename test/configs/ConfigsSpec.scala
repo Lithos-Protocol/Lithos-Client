@@ -68,6 +68,17 @@ class ConfigsSpec extends AnyFlatSpec with Matchers {
     }
   }
 
+  it should "accept only the two collateral selection strategies" in {
+    def withStrategy(strategy: String): Configuration = Configuration(
+      ConfigFactory.parseString(s"""stratum.candidate.collateralStrategy = "$strategy"""")
+        .withFallback(shipped.underlying).resolve())
+    CandidateConfig.CollateralStrategies.foreach { strategy =>
+      withClue(s"strategy $strategy: ")(noException should be thrownBy Configs.validateAll(withStrategy(strategy)))
+    }
+    val thrown = the[ConfigValidationException] thrownBy Configs.validateAll(withStrategy("oldest"))
+    thrown.getMessage should include("stratum.candidate.collateralStrategy")
+  }
+
   it should "accept only the listed reduction multipliers" in {
     def withMultiplier(m: Int): Configuration = Configuration(
       ConfigFactory.parseString(s"stratum.reductionMultiplier = $m").withFallback(shipped.underlying).resolve())

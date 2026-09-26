@@ -415,6 +415,24 @@ class LithosPool(options: Options,
         rejectExtras(request, "candidate completed after its publication deadline")
         invalidateCachedJob()
         driveCandidate()
+      case Success(fetched) if request.pkg.exists(pkg =>
+        fetched.materialized.exists(_.unproven.contains(pkg.collateral.txId))) =>
+        val pkg = request.pkg.get
+        fetched.materialized.foreach(recordMaterialization(_, request.pkg))
+        logger.warn(s"Node omitted genesis ${pkg.collateral.txId.take(8)} at block ${pkg.blockHeight}; " +
+          s"skipping collateral ${pkg.collateral.collateralId.take(8)} and rebuilding")
+        rejectedGenesis += pkg.collateral.txId
+        blockPackage = None
+        if (rebuilds < MaxRebuildsPerBlock) {
+          rebuilds += 1
+          genesisDeadline = nowNanos() + candidateConfig.genesisWaitMs.milliseconds.toNanos
+          candidateBuilder.foreach { builder =>
+            builder ! CollateralSpent(pkg.collateral.collateralId)
+            builder ! RebuildCandidate
+          }
+        } else genesisDeadline = 0L
+        invalidateCachedJob()
+        driveCandidate()
       case Success(fetched) if request.hasExtras && CandidateMaterialized.requireCorrespondence &&
         fetched.materialized.exists(!_.inclusionProven) =>
         fetched.materialized.foreach(recordMaterialization(_, request.pkg))
@@ -525,7 +543,8 @@ class LithosPool(options: Options,
     servedRevenue = request.pkg.map(_.revenue).getOrElse(0L)
     servedSources = request.pkg.map(_.sources).getOrElse(Set.empty)
     servedLate = request.pkg.map(_.late).getOrElse(Set.empty)
-    servedProtocol = request.pkg.map(_.protocolTxs).getOrElse(Set.empty)
+    servedProtocol = request.pkg.map(_.protocolTxs).getOrElse(Set.empty) intersect
+      materialized.map(_.included).getOrElse(Set.empty)
     connections.values.foreach(_ ! BroadcastJob(template))
     statsCollector.foreach { _ =>
       activeStatsJob = Some(ActiveStratumJob(template.jobId, request.identity.height, request.identity.parentId,
