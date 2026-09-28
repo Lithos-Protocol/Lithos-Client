@@ -128,7 +128,7 @@ class CheckpointIsolationSpec extends TestKit(ActorSystem("checkpoint-isolation"
   private def blockingDictionary(nodeApi: NodeApi,
                                  entered: CountDownLatch,
                                  release: CountDownLatch): Unit = {
-    val empty = MinerDictionary.initialState.dictionary
+    val empty = MinerDictionary.initialState(org.ergoplatform.appkit.NetworkType.TESTNET).dictionary
     val token = ReducerFixtures.protocol().minerDictionaryToken
     val box = IndexedBox(
       NodeBox(genesisId, SyncFixtures.id(790001), 1000000L, 0, 1, "miner-dictionary",

@@ -99,6 +99,7 @@ class StorageRentSourceSpec extends AnyFlatSpec with Matchers with MockitoSugar 
     nodeContext.getClient.execute { ctx =>
       Seq("collateral token" -> LFSMHelpers.COLLAT_TOKEN_MAINNET,
         "emission NFT" -> LFSMHelpers.EMISSION_NFT_MAINNET,
+        "emission config NFT" -> LFSMHelpers.getEmConfigNft(ctx.getNetworkType),
         "dictionary token" -> LFSMHelpers.getMDToken(ctx.getNetworkType),
         "fraud-proof token" -> LFSMHelpers.getFPToken(ctx.getNetworkType)).foreach {
         case (name, token) =>

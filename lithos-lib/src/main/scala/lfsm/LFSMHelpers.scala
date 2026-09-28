@@ -22,9 +22,10 @@ object LFSMHelpers {
 
   final val HOLDING_PERIOD = 360L // 360 Blocks, or 12 hours
   final val EVAL_PERIOD    = 360L
-  // TODO: Change to 60 before mainnet
+
   final val NISP_WINDOW    = 60 // 2 hours on mainnet (less on testnet but its ok)
   final val NISP_COEFFICIENT = 10000 // Coefficient which separates normal shares from super-shares, used in evaluation
+
   // NISP size envelope, mirrored in Holding_Logic and injected into FP_InvalidFormat.
   // share = [N: 4][header][txProofSize: 2][numLevels: 1][txProof][levels: 33n][yCoord: 32]
   // NISP  = [score: 8][10 shares], header 220 bytes (221 once height passes 2^21).
@@ -48,13 +49,10 @@ object LFSMHelpers {
   // out as a box of its own.
   final val MIN_ENTRY_BOND     = 2000000L // 0.002 ERG
   final val BOND_DIVISOR       = 25L
-  // score units per nanoERG of proportional bond
-
-  final val COLLAT_MAX_FEE   = Parameters.MinFee * 100
 
   // FP_Control Params
   final val FP_TOKEN_MAINNET        = ErgoId.create("5a3f8a958178fc6e3b37aeea8fb94d8e6d33a7e4d2c7e70aa7db4e13c08a9903")
-  final val FP_TOKEN_TESTNET        = ErgoId.create("c7532afceafc7a4ee9b8a55f3d19dc605069298ee4c04f8ebbb07a7f97ebebea")
+
   final val FP_CONTROL_TESTNET      = Address.create("ShDJAh75M4bDZbCowYGqtmHi4iiBMqWJcbQRYLaxx8tZZHtj23c7qEcEvUiXYvSdnjdWE6R328rSazggEzz7UWRqXGZWc6L28bo96jMNK8NZs1bQBHAxkb9rLFW8Gf3HFQRPUm26CX8LZeqF1iJvftCYHTp2KC2LisbheejGeoXkv")
 
   // How long a rollup stays challengeable. MinerData_Logic spaces commitment changes by NISP_WINDOW
@@ -78,13 +76,11 @@ object LFSMHelpers {
   // into the dictionary tree by the builder, so this band is how long a registration may wait in the
   // mempool before it has to be rebuilt.
   final val REGISTER_SLACK    = 720L // one day at 2-minute blocks
-  final val MD_TOKEN_MAINNET = ErgoId.create("7f9609b232d3e2f0638d60a03a26831bf80155ed1e87a1b914e2623dfbd05518")
-  final val MD_TOKEN_TESTNET = ErgoId.create("38e5f7b0814b2841525b4ed5d375de21eefb27347c3ec2c850542ba52ceccf18")
-  final val MD_GENESIS_HEIGHT = 534053
 
-  // Genesis Tx: e9f9a7c4d2a9f2577527fe6c45fd75e4142d63f308812f56f0928f344527da9f
-  // UTXO id of initial MD box
-  final val MD_GENESIS_ID = "a89dfe24861c310e09f7593bdd5a847f6564ac9b3d49b9ff24b084252d5c1dd5"
+
+
+
+
 
   // Lithos token & emission parameters
   final val INIT_MINT = Parameters.OneErg * 1000000000 // 1 billion LIT
@@ -101,23 +97,38 @@ object LFSMHelpers {
   // CONFIRMED MAINNET ID
   final val LIT_ID_MAINNET = ErgoId.create("c1980d829988229516430a47a5eca376060b6ce859616db0936e78ab25cb6de7")
 
-  final val EMISSION_NFT_TESTNET = ErgoId.create("66f432da1cb637e8395b8d557b7aa10bbcc192fbf7bd979c9d7face85e89be63")
-  // TODO: Change before launch
-  final val EMISSION_NFT_MAINNET = ErgoId.create("66f432da1cb637e8395b8d557b7aa10bbcc192fbf7bd979c9d7face85e89be63")
 
-  // Emission Config NFT
-  final val EMCONFIG_NFT_TESTNET = ErgoId.create("5413ebe452ccfc4e1838607f0ca6177e803ea3b6dc6832edc0360476b7b3b6a0")
-  // TODO: Change before launch
-  final val EMCONFIG_NFT_MAINNET = ErgoId.create("5413ebe452ccfc4e1838607f0ca6177e803ea3b6dc6832edc0360476b7b3b6a0")
+  // =========== Testnet token params ===========
+  final val EMISSION_NFT_TESTNET = ErgoId.create("1850d0f59e3cb9b450e56ec74416ed0b9dcbd0a058b99b8df3e93a5d0f34c5ad")
+  final val EMCONFIG_NFT_TESTNET = ErgoId.create("3c0a153ce995f1a89bfc3293fd9356b80e0dd65721f75ea8435f50818471588b")
+  final val QUEUE_TOKEN_TESTNET = ErgoId.create("07956fbd1db32606fa60687c64d4e5c6e8aff00ff34a8ca2c6ba074b5a9d5192")
+  final val COLLAT_TOKEN_TESTNET = ErgoId.create("0fd01935440fc42fc64ad79a6b27afbd6e295d7cb6d77064996b6b188fa373eb")
+  final val FP_TOKEN_TESTNET = ErgoId.create("c2f5773457aade5b7332b48c7f561ee72ffe92069f20f7665a7d68f21f9fe5e3")
+  final val MD_TOKEN_TESTNET = ErgoId.create("a1f2e4f82440808bf88ea303c2f86d4ce30514947a839c7fb6fb12d6486dc3dc")
+  final val VOTE_TOKEN_TESTNET = ErgoId.create("87d6eccf5d1e413cff1d19690f14c6c7ff041103e74389b48392ee8abbb0d331")
 
-  // Ids and amount of proposition tokens on Emission contract
-  final val COLLAT_TOKEN_TESTNET = ErgoId.create("04e0d566a96a2575fbd0893fbc1dd64d8ae8bdb49dbd58b5588479d2e5c09ed4")
-  // TODO: Change before launch
-  final val COLLAT_TOKEN_MAINNET = ErgoId.create("04e0d566a96a2575fbd0893fbc1dd64d8ae8bdb49dbd58b5588479d2e5c09ed4")
+  final val MD_GENESIS_ID_TESTNET = "14b798cf49d7818d8a4a049d59bb8773bd90184800fdcc9d8430dab9178712ad"
+  final val MD_GENESIS_HEIGHT_TESTNET = 568119
 
-  final val QUEUE_TOKEN_TESTNET = ErgoId.create("22c379500b31c1fa1b20b24eb0ca8f29a0bdfe6090400ae2e5d7cb27f7817573")
+
+  // ===========  Mainnet token params ===========
   // TODO: Change before launch
-  final val QUEUE_TOKEN_MAINNET = ErgoId.create("22c379500b31c1fa1b20b24eb0ca8f29a0bdfe6090400ae2e5d7cb27f7817573")
+  final val EMISSION_NFT_MAINNET = ErgoId.create("0000000000000000000000000000000000000000000000000000000000000000")
+  // TODO: Change before launch
+  final val EMCONFIG_NFT_MAINNET = ErgoId.create("0000000000000000000000000000000000000000000000000000000000000000")
+  // TODO: Change before launch
+  final val QUEUE_TOKEN_MAINNET = ErgoId.create("0000000000000000000000000000000000000000000000000000000000000000")
+  // TODO: Change before launch
+  final val COLLAT_TOKEN_MAINNET = ErgoId.create("0000000000000000000000000000000000000000000000000000000000000000")
+  // TODO: Change before launch
+  final val MD_TOKEN_MAINNET = ErgoId.create("0000000000000000000000000000000000000000000000000000000000000000")
+  // TODO: Change before launch
+  final val VOTE_TOKEN_MAINNET = ErgoId.create("0000000000000000000000000000000000000000000000000000000000000000")
+  // TODO: Change before launch
+
+  final val MD_GENESIS_ID_MAINNET = "0000000000000000000000000000000000000000000000000000000000000000"
+  final val MD_GENESIS_HEIGHT_MAINNET = 100
+
 
   final val PROP_TOKEN_AMNT = Long.MaxValue
 
@@ -125,13 +136,10 @@ object LFSMHelpers {
   final val PERMIT_CEIL  = 40000L * Parameters.OneErg
   final val PERMIT_SLOPE = 20 * Parameters.OneErg
   final val PERMIT_PARAMS = Array(PERMIT_FLOOR, PERMIT_CEIL, PERMIT_SLOPE)
-  final val FOUNDER_1 = Contract.fromAddress(Address.create("3WwcyDX8iQjPR6H2VSGDp22SaJ3c8bo1RWWvHhZy19JXJzrxWFbu"))
-  final val FOUNDER_2 = Contract.fromAddress(Address.create("3WyZJc1pWf8P2o6AT2Ewq7yb5ThBHdk8SLSNyUyoGbSBXXpY3w8F"))
-  final val FOUNDER_3 = Contract.fromAddress(Address.create("3Wx1MUteyRXC15mor65vt7VTPvJLZvnJ2dzd4sczi49wvuS78vE1"))
+  final val FOUNDER_1 = Contract.fromAddress(Address.create("9hwUwt7TGGXBVfpm73Ym9TG2mGwDhN6Ni4DFatwKER2pivQcWY5"))
+  final val FOUNDER_2 = Contract.fromAddress(Address.create("9hBEAVZ9MHLf7mwVrvP3nqptdqYVdYGu1byPH8XFzC7KDuzrb8W"))
+  final val FOUNDER_3 = Contract.fromAddress(Address.create("9i6Pq3M5VG95BUTAP1AVroizTBqc21K2Mx5Kh2jGeAADpBEskQd"))
 
-  final val FOUNDER_1_MAINNET = Contract.fromAddress(Address.create("3WwcyDX8iQjPR6H2VSGDp22SaJ3c8bo1RWWvHhZy19JXJzrxWFbu"))
-  final val FOUNDER_2_MAINNET = Contract.fromAddress(Address.create("3WyZJc1pWf8P2o6AT2Ewq7yb5ThBHdk8SLSNyUyoGbSBXXpY3w8F"))
-  final val FOUNDER_3_MAINNET = Contract.fromAddress(Address.create("9i6Pq3M5VG95BUTAP1AVroizTBqc21K2Mx5Kh2jGeAADpBEskQd"))
   /**
    * Parse diff string and return its tau value
    * @param diffValue String such as "4.0G", "2.411T". Supports up to Petahash difficulty
@@ -248,6 +256,22 @@ object LFSMHelpers {
   def getEmConfigNft(networkType: NetworkType): ErgoId = networkType match {
     case NetworkType.MAINNET => EMCONFIG_NFT_MAINNET
     case NetworkType.TESTNET => EMCONFIG_NFT_TESTNET
+  }
+
+  def getVoteToken(networkType: NetworkType): ErgoId = networkType match {
+    case NetworkType.MAINNET => VOTE_TOKEN_MAINNET
+    case NetworkType.TESTNET => VOTE_TOKEN_TESTNET
+  }
+
+  def getMDGenesisId(networkType: NetworkType): String = networkType match {
+    case NetworkType.MAINNET => MD_GENESIS_ID_MAINNET
+    case NetworkType.TESTNET => MD_GENESIS_ID_TESTNET
+  }
+
+  /** The inclusion height of the genesis box, not its creation height. */
+  def getMDGenesisHeight(networkType: NetworkType): Int = networkType match {
+    case NetworkType.MAINNET => MD_GENESIS_HEIGHT_MAINNET
+    case NetworkType.TESTNET => MD_GENESIS_HEIGHT_TESTNET
   }
 
   def getCollatToken(networkType: NetworkType): ErgoId = networkType match {

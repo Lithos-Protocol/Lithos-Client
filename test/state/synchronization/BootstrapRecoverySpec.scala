@@ -128,7 +128,7 @@ class BootstrapRecoverySpec extends TestKit(ActorSystem("bootstrap-recovery"))
 
   /** An unspent genesis box with an empty dictionary: a chain with no registrations yet. */
   private def workingDictionary(nodeApi: NodeApi): Unit = {
-    val empty = MinerDictionary.initialState.dictionary
+    val empty = MinerDictionary.initialState(org.ergoplatform.appkit.NetworkType.TESTNET).dictionary
     val token = ReducerFixtures.protocol().minerDictionaryToken
     val box = IndexedBox(
       NodeBox(genesisId, SyncFixtures.id(72000), 1000000L, 0, 1, "miner-dictionary",

@@ -77,7 +77,7 @@ class SnapshotReadConsistencySpec extends AnyFlatSpec with Matchers {
     val cursor = SyncCursor(height, SyncFixtures.id(height), SyncFixtures.id(height - 1))
     PersistedSyncState(
       CommittedSyncState(cursor, height.toLong, Map(rollupId -> tree), Map(utxoId -> rollupId),
-        Map(rollupId -> origin), MinerDictionary.initialState, None),
+        Map(rollupId -> origin), MinerDictionary.initialState(org.ergoplatform.appkit.NetworkType.TESTNET), None),
       Vector(cursor))
   }
 

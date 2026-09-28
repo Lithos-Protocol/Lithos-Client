@@ -131,7 +131,7 @@ class SnapshotStoreOpenSpec extends TestKit(ActorSystem("snapshot-store-open"))
     val digest = Hex.toHexString(dictionary.digest)
 
     val state = ReducerFixtures.emptyState(height = startHeight, blockId = SyncFixtures.id(startHeight))
-      .copy(minerTree = MinerDictionary.initialState.copy(dictionary = dictionary, numMiners = 1,
+      .copy(minerTree = MinerDictionary.initialState(org.ergoplatform.appkit.NetworkType.TESTNET).copy(dictionary = dictionary, numMiners = 1,
         syncHeight = startHeight, savedHeight = startHeight))
     val checkpoint = SnapshotCheckpoint(CommittedSyncMetadata.from(state), Vector(state.cursor),
       Map(DictionaryId.Miner -> SnapshotDictionarySource(digest, dictionary.flags,

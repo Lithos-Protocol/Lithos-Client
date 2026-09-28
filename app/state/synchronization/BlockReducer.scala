@@ -35,8 +35,8 @@ final case class SyncProtocolContext(networkType: NetworkType,
                                      payoutErgoTree: String,
                                      collateralErgoTree: String,
                                      minerDictionaryToken: ErgoId,
-                                     minerDictionaryGenesisId: String = LFSMHelpers.MD_GENESIS_ID,
-                                     minerDictionaryStartHeight: Int = LFSMHelpers.MD_GENESIS_HEIGHT,
+                                     minerDictionaryGenesisId: String,
+                                     minerDictionaryStartHeight: Int,
                                      collateralToken: ErgoId)
 
 object SyncProtocolContext {
@@ -47,7 +47,8 @@ object SyncProtocolContext {
     SyncProtocolContext(networkType, rollupStartHeight, localMinerHash.clone(),
       contracts.holding.ergoTreeHex, contracts.eval.ergoTreeHex, contracts.payout.ergoTreeHex,
       contracts.collateral.ergoTreeHex, LFSMHelpers.getMDToken(networkType),
-      collateralToken = LFSMHelpers.getCollatToken(networkType))
+      LFSMHelpers.getMDGenesisId(networkType), LFSMHelpers.getMDGenesisHeight(networkType),
+      LFSMHelpers.getCollatToken(networkType))
   }
 }
 
@@ -175,7 +176,7 @@ object BlockReducer {
    */
   final class RollupReplay(protocol: SyncProtocolContext, retainUnownedRollups: Boolean = false) {
     private var state = CommittedSyncState(SyncCursor(0, "", ""), 0L, Map.empty, Map.empty, Map.empty,
-      MinerDictionary.initialState, None)
+      MinerDictionary.initialState(protocol.networkType), None)
 
     /** Applies one transaction, reporting whether it changed rollup state. */
     def apply(block: BlockInfo, tx: BlockTx): Either[SyncApplyError, Boolean] = {
@@ -425,8 +426,8 @@ object BlockReducer {
       isMinerDictionaryTransform(height, tx)
 
     /**
-     * A spend of the dictionary singleton, which can only happen above the height its genesis box was
-     * created at.
+     * A spend of the dictionary singleton, which can only happen above the height of the block that
+     * included its genesis box.
      *
      * The token is minted before that, into an ordinary P2PK box the deployment then spends into the
      * genesis box.

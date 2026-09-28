@@ -115,7 +115,7 @@ class SnapshotFallbackSpec extends TestKit(ActorSystem("snapshot-fallback"))
     val cursor = SyncCursor(600, header.id, header.parentId)
     val contradictory = CommittedSyncState(cursor, 600L, Map.empty, Map.empty, Map.empty,
       // A stored data-box token says this miner registered; the dictionary says it holds nobody.
-      MinerDictionary.initialState, Some(org.ergoplatform.sdk.ErgoId.create(SyncFixtures.id(7))))
+      MinerDictionary.initialState(org.ergoplatform.appkit.NetworkType.TESTNET), Some(org.ergoplatform.sdk.ErgoId.create(SyncFixtures.id(7))))
 
     val (actor, requester, identity) = actorOver(saved = Seq.empty, headerAnswer = h =>
       Success(ChainFixtures.header(h)))
@@ -158,7 +158,7 @@ class SnapshotFallbackSpec extends TestKit(ActorSystem("snapshot-fallback"))
   private def stateAt(height: Int): CommittedSyncState = {
     val header = ChainFixtures.header(height)
     CommittedSyncState(SyncCursor(height, header.id, header.parentId), height.toLong,
-      Map.empty, Map.empty, Map.empty, MinerDictionary.initialState, None)
+      Map.empty, Map.empty, Map.empty, MinerDictionary.initialState(org.ergoplatform.appkit.NetworkType.TESTNET), None)
   }
 
   private def actorOver(saved: Seq[Int],

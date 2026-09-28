@@ -36,7 +36,7 @@ class RepairInstallSpec extends TestKit(ActorSystem("repair-install"))
     requester.send(handler, RestoreCommittedState(seeded, Vector(seeded.cursor)))
     requester.expectMsgType[BlockCommitted]
 
-    val rebuilt = MinerDictionary.initialState.copy(syncHeight = seeded.cursor.height)
+    val rebuilt = MinerDictionary.initialState(org.ergoplatform.appkit.NetworkType.TESTNET).copy(syncHeight = seeded.cursor.height)
     requester.send(handler, RepairMinerDictionary(seeded.cursor, rebuilt, None,
       minerPermit(requester, handler)))
     requester.expectMsgType[BlockCommitted]
@@ -71,7 +71,7 @@ class RepairInstallSpec extends TestKit(ActorSystem("repair-install"))
     val moved = requester.expectMsgType[BlockCommitted].cursor
     moved.height shouldEqual startHeight
 
-    val rebuilt = MinerDictionary.initialState.copy(syncHeight = seeded.cursor.height)
+    val rebuilt = MinerDictionary.initialState(org.ergoplatform.appkit.NetworkType.TESTNET).copy(syncHeight = seeded.cursor.height)
     requester.send(handler, RepairMinerDictionary(seeded.cursor, rebuilt, None, permit))
     requester.expectMsgType[BlockCommitted]
 
@@ -95,7 +95,7 @@ class RepairInstallSpec extends TestKit(ActorSystem("repair-install"))
 
     val stalePermit = minerPermit(requester, handler)
     val currentPermit = minerPermit(requester, handler)
-    val rebuilt = MinerDictionary.initialState.copy(syncHeight = seeded.cursor.height)
+    val rebuilt = MinerDictionary.initialState(org.ergoplatform.appkit.NetworkType.TESTNET).copy(syncHeight = seeded.cursor.height)
 
     requester.send(handler, RepairMinerDictionary(seeded.cursor, rebuilt, None, currentPermit))
     requester.expectMsgType[BlockCommitted]
@@ -132,7 +132,7 @@ class RepairInstallSpec extends TestKit(ActorSystem("repair-install"))
       Seq(moved), seeded.cursor.blockId)))
     requester.expectMsgType[BlockCommitted]
 
-    val rebuilt = MinerDictionary.initialState.copy(syncHeight = seeded.cursor.height)
+    val rebuilt = MinerDictionary.initialState(org.ergoplatform.appkit.NetworkType.TESTNET).copy(syncHeight = seeded.cursor.height)
     requester.send(handler, RepairMinerDictionary(seeded.cursor, rebuilt, None, permit))
     requester.expectMsgType[BlockRejected].reason should
       include("no longer names the exact committed state")
@@ -245,7 +245,7 @@ class RepairInstallSpec extends TestKit(ActorSystem("repair-install"))
     // A distinct digest, or the repaired and pre-repair dictionaries would be indistinguishable.
     val populated = PlasmaDictionary.empty()
     populated.insert(SyncFixtures.plasmaEntries(1, 32): _*)
-    val rebuilt = MinerDictionary.initialState.copy(dictionary = populated, numMiners = 1)
+    val rebuilt = MinerDictionary.initialState(org.ergoplatform.appkit.NetworkType.TESTNET).copy(dictionary = populated, numMiners = 1)
 
     requester.send(handler, RepairMinerDictionary(builtAt, rebuilt, None, permit.repairPermit))
     requester.expectMsgType[BlockCommitted].cursor shouldEqual installedAt
@@ -280,7 +280,7 @@ class RepairInstallSpec extends TestKit(ActorSystem("repair-install"))
     requester.expectMsgType[BlockCommitted]
 
     val stale = seeded.cursor.copy(blockId = SyncFixtures.id(799998), parentId = SyncFixtures.id(799997))
-    requester.send(handler, RepairMinerDictionary(stale, MinerDictionary.initialState, None,
+    requester.send(handler, RepairMinerDictionary(stale, MinerDictionary.initialState(org.ergoplatform.appkit.NetworkType.TESTNET), None,
       minerPermit(requester, handler)))
     val rejected = requester.expectMsgType[BlockRejected]
     rejected.reason should include("no longer names the exact committed state")
@@ -298,7 +298,7 @@ class RepairInstallSpec extends TestKit(ActorSystem("repair-install"))
     requester.send(handler, RestoreCommittedState(seeded, Vector(seeded.cursor)))
     requester.expectMsgType[BlockCommitted]
 
-    val rebuilt = MinerDictionary.initialState.copy(syncHeight = seeded.cursor.height)
+    val rebuilt = MinerDictionary.initialState(org.ergoplatform.appkit.NetworkType.TESTNET).copy(syncHeight = seeded.cursor.height)
     requester.send(handler, RepairMinerDictionary(seeded.cursor, rebuilt, None,
       minerPermit(requester, handler)))
     requester.expectMsgType[BlockRejected].reason should include("volatile synchronization bytes")
@@ -463,7 +463,7 @@ class RepairInstallSpec extends TestKit(ActorSystem("repair-install"))
   private def faultedSeed: CommittedSyncState =
     ReducerFixtures.emptyState(height = startHeight - 1,
       blockId = SyncFixtures.id(startHeight - 1)).copy(
-      minerTree = MinerDictionary.initialState.copy(dictionary = PlasmaDictionary.empty()),
+      minerTree = MinerDictionary.initialState(org.ergoplatform.appkit.NetworkType.TESTNET).copy(dictionary = PlasmaDictionary.empty()),
       minerDictionaryFault = Some("dictionary advanced during bootstrap"))
 
   private val quarantinedUtxo = SyncFixtures.id(700100)

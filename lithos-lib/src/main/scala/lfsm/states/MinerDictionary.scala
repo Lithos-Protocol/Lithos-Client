@@ -2,6 +2,7 @@ package lfsm.states
 
 import lfsm.LFSMHelpers
 import org.bouncycastle.util.encoders.Hex
+import org.ergoplatform.appkit.NetworkType
 
 /** Small, always-resident metadata for the protocol-wide Miner Dictionary. */
 final case class MinerDictionaryMetadata(numMiners: Int,
@@ -40,9 +41,10 @@ object MinerDictionary {
   final val EVICT_MINER_OP = 1.toByte
   final val REMOVE_MINER_OP = 2.toByte
 
-  def initialState: MinerDictionary = {
+  /** The empty dictionary, anchored to this network's genesis box. */
+  def initialState(networkType: NetworkType): MinerDictionary = {
     val dictionary = PlasmaDictionary.empty()
-    MinerDictionary(dictionary, 0, LFSMHelpers.MD_GENESIS_HEIGHT, hasMiner = false,
-      LFSMHelpers.MD_GENESIS_ID, synced = false, 0, 0)
+    MinerDictionary(dictionary, 0, LFSMHelpers.getMDGenesisHeight(networkType), hasMiner = false,
+      LFSMHelpers.getMDGenesisId(networkType), synced = false, 0, 0)
   }
 }

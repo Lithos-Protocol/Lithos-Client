@@ -128,9 +128,19 @@ class CandidateTxBuilder(prover: NodeWallet, nodeApi: NodeApi, config: Candidate
         s"collateral script this build compiles (${collateralTree.take(16)}...) and were " +
         "skipped. This should be impossible: check the injected constants against the deployment")
 
+    // R8 names the rollup chain a box pays into, stamped from the emission config at activation. A
+    // chain this build does not compile cannot be paid into, so its boxes never enter the set, and a
+    // set with none left leaves the block to solo mining.
+    val holdingR8 = RollupHashRegisterPrefix + hex(c.holding.hashedPropBytes)
+    val known = usable.filter(_.box.additionalRegisters.get(8).exists(_.equalsIgnoreCase(holdingR8)))
+    if (known.size < usable.size)
+      logger.warn(s"${usable.size - known.size} of ${usable.size} collateral boxes pay into a rollup " +
+        "chain this build does not compile and were skipped" +
+        (if (known.isEmpty) ". None are left, so blocks are mined solo until this client is updated" else ""))
+
     // A box whose fee channel does not price is unusable rather than fatal: it is one lender's box,
     // and refusing to rank it leaves collateral mining running on every other box in the set.
-    usable.flatMap { box =>
+    known.flatMap { box =>
       Try {
         val input = box.toInputUTXO(ctx)
         CollateralCandidate(input, box.inclusionHeight, RollupProtocol.finderFee(input.parseReg[Long](0)))
@@ -321,6 +331,9 @@ class CandidateTxBuilder(prover: NodeWallet, nodeApi: NodeApi, config: Candidate
   /** The one test the ranked set is filtered by, so the scan's early exit counts what it will keep. */
   private def usableCollateral(b: IndexedBox, collateralTree: String): Boolean =
     b.ergoTree == collateralTree && collateralShaped(b)
+
+  /** How the node serializes a 32-byte `Coll[Byte]` register ahead of its bytes: type 0x0e, length 0x20. */
+  private val RollupHashRegisterPrefix = "0e20"
 
   /** What the finder's LIT box has always been worth, and the floor a bare fee box has to clear. */
   private val FinderBoxValue: Long = 100000L

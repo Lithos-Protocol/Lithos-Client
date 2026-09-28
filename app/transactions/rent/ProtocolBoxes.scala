@@ -11,7 +11,7 @@ import work.lithos.mutations.InputUTXO
  * Age is the only thing Ergo's rule cares about, so a singleton that has sat still long enough is
  * as collectable as anyone's forgotten change — including this client's own. Taking one is not a
  * loss of ERG but a loss of protocol state: the dictionary, the fraud-proof whitelist, the emission
- * singleton and every live lender position are identified by exactly these scripts and tokens.
+ * singleton, its config and every live lender position are identified by exactly these scripts and tokens.
  *
  * Identified two ways because either alone leaves a gap. A box under a protocol script is protocol
  * state whatever it carries, and a box carrying a protocol singleton is protocol state wherever it
@@ -47,6 +47,7 @@ object ProtocolBoxes {
     val singletons = Set(
       LFSMHelpers.getCollatToken(ctx.getNetworkType),
       LFSMHelpers.getEmissionNft(ctx.getNetworkType),
+      LFSMHelpers.getEmConfigNft(ctx.getNetworkType),
       LFSMHelpers.getMDToken(ctx.getNetworkType),
       LFSMHelpers.getFPToken(ctx.getNetworkType)).map(_.toString)
 

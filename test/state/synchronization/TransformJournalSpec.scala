@@ -61,7 +61,7 @@ class TransformJournalSpec extends AnyFlatSpec with Matchers {
     val base = SyncCursor(99, SyncFixtures.id(99), SyncFixtures.id(98))
     val nextCursor = SyncCursor(100, SyncFixtures.id(100), SyncFixtures.id(777))
     val state = CommittedSyncState(nextCursor, 1L, Map.empty, Map.empty, Map.empty,
-      lfsm.states.MinerDictionary.initialState, None)
+      lfsm.states.MinerDictionary.initialState(org.ergoplatform.appkit.NetworkType.TESTNET), None)
     val entry = TransformJournalEntry(nextCursor, CommittedSyncMetadata.from(state), Vector.empty)
 
     val error = intercept[IllegalArgumentException](TransformJournal(base, Vector(entry)))
@@ -71,7 +71,7 @@ class TransformJournalSpec extends AnyFlatSpec with Matchers {
   it should "account for retained metadata even when a block has no dictionary payload" in {
     val cursor = SyncCursor(100, SyncFixtures.id(100), SyncFixtures.id(99))
     val state = CommittedSyncState(cursor, 1L, Map.empty, Map.empty, Map.empty,
-      lfsm.states.MinerDictionary.initialState, None,
+      lfsm.states.MinerDictionary.initialState(org.ergoplatform.appkit.NetworkType.TESTNET), None,
       minerDictionaryFault = Some("x"), quarantined = Map.empty)
     val short = TransformJournalEntry(cursor, CommittedSyncMetadata.from(state), Vector.empty)
     val longerState = state.copy(minerDictionaryFault = Some("x" * 1000))

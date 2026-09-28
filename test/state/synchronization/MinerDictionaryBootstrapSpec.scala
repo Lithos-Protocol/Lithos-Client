@@ -92,7 +92,7 @@ class MinerDictionaryBootstrapSpec extends AnyFlatSpec with Matchers with Mockit
   // A reconstructed tip must match the live dictionary digest before publication.
   it should "refuse a walk whose digest does not match the live dictionary box" in {
     val chain = registrationChain(count = 2, firstHeight = 200)
-    val nodeApi = indexerFor(chain, liveDigestOverride = Some(MinerDictionary.initialState.dictionary))
+    val nodeApi = indexerFor(chain, liveDigestOverride = Some(MinerDictionary.initialState(org.ergoplatform.appkit.NetworkType.TESTNET).dictionary))
 
     new MinerDictionaryBootstrap(nodeApi, protocol, maxTransforms = 100).run(500)
       .left.value should include("does not match the live dictionary box")
@@ -229,7 +229,7 @@ class MinerDictionaryBootstrapSpec extends AnyFlatSpec with Matchers with Mockit
       if (miners.nonEmpty) miners
       else (0 until count).map(i => Contract.fromAddress(wallet.addresses(i)))
 
-    val start = MinerDictionary.initialState.copy(utxoId = genesisId)
+    val start = MinerDictionary.initialState(org.ergoplatform.appkit.NetworkType.TESTNET).copy(utxoId = genesisId)
     (0 until count).foldLeft((start, Vector.empty[Step])) {
       case ((tree, steps), index) =>
         val height = firstHeight + index
