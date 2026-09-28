@@ -5,7 +5,7 @@ import lfsm.{CollateralParams, EmissionSchedule, LFSMHelpers, RollupProtocol}
 import mutations.{NodeWallet, NotEnoughInputsException}
 import node.MutationConversions._
 import node.NodeApi
-import node.model.{IndexedBox, MempoolOptions, NodeTransaction, Paging, SortDirection}
+import node.model.{IndexedBox, MempoolOptions, NodeBox, NodeTransaction, Paging, SortDirection}
 import org.ergoplatform.appkit.scalaapi._
 import org.ergoplatform.appkit.{Address, BlockchainContext, ErgoType, ErgoValue, SignedTransaction}
 import org.ergoplatform.sdk.ErgoId
@@ -59,6 +59,48 @@ case class ConfigState(permitParams: Seq[Long],
  * is only valid in a block that also carries the parent.
  */
 case class EmissionTip(box: InputUTXO, ancestors: Seq[NodeTransaction])
+
+/**
+ * The confirmed emission box and the unconfirmed spends chained onto it, oldest first, ending at
+ * `tip`. `complete` is false when the walk stopped before reaching a box nothing spends, at its depth
+ * limit or on a node error, so `tip` may itself already be spent.
+ */
+case class EmissionChain(confirmed: InputUTXO, spends: Vector[NodeTransaction], tip: InputUTXO,
+                         complete: Boolean) {
+  /** Whether an unconfirmed spend exists or might: an unfinished walk cannot rule one out. */
+  def pending: Boolean = spends.nonEmpty || !complete
+}
+
+/** One planned spend of the head of the queue. */
+sealed trait QueueStep {
+  def queueBox: InputUTXO
+}
+
+/** The head's lender already holds a slot, so the box can only be Cleared. */
+case class ClearStep(queueBox: InputUTXO) extends QueueStep
+
+/** The head becomes a collateral box, rotating out `retiring` once the active set is full. */
+case class ActivateStep(queueBox: InputUTXO, retiring: Option[(InputUTXO, Int)]) extends QueueStep
+
+/**
+ * The queue and proof-of-spend boxes one pass reads, fetched once rather than per step. `unconfirmed`
+ * holds queue boxes created by unconfirmed joins, which no index returns yet.
+ */
+case class QueueView(unconfirmed: Seq[NodeBox], confirmed: Seq[IndexedBox], proofs: Seq[IndexedBox])
+
+/**
+ * Activates at queue position `head` that this miner's own candidate first carried for block `since`.
+ * The funded pass leaves them to the candidate for that block and takes them over from the next.
+ */
+case class QueueHold(head: Long, since: Int)
+
+/**
+ * What this miner's own block carries from the queue: the steps to build fee-less, the unconfirmed
+ * spends those steps replace, whether the funded pass should take the head's Activates now, and the
+ * hold to keep after this build.
+ */
+case class CandidateQueue(steps: Vector[QueueStep], supersedes: Set[String], driveFunded: Boolean,
+                          hold: Option[QueueHold])
 
 /** One join that reached the node, whatever the node then did with it. */
 case class JoinAttempt(lender: Address, position: Long, permit: Long, txId: String, outcome: String,
@@ -130,50 +172,77 @@ class EmissionTransactions(prover: NodeWallet,
   //  Reading live state
   // ══════════════════════════════════════════════════════════════════════════
 
-  /**
-   * The emission box as it will be when the next block is assembled.
-   *
-   * Walked forward one spend at a time rather than asked for with `includeUnconfirmed`, because the
-   * tip alone is not enough: a transaction chaining off an unconfirmed parent is only valid in a
-   * block that carries the parent too, so a candidate has to be built parents-first. Those spends
-   * belong to other lenders and are chained onto, never displaced.
-   */
-  def emissionTip(ctx: BlockchainContext): EmissionTip = {
-    val nft = LFSMHelpers.getEmissionNft(ctx.getNetworkType).toString
+  /** The emission box as the index reports it, from confirmed boxes alone or with the mempool's. */
+  private def emissionBox(ctx: BlockchainContext, mempool: MempoolOptions): InputUTXO = {
+    val nft = LFSMHelpers.getEmissionNft(ctx.getNetworkType)
     val guardTree = contracts(ctx).guard.ergoTreeHex
-    val confirmed = nodeApi
-      .unspentBoxesByTokenId(nft, Paging.all(8), SortDirection.Desc, withMempool)
+    nodeApi
+      .unspentBoxesByTokenId(nft.toString, Paging.all(8), SortDirection.Desc, mempool)
       .getOrElse(Seq.empty[IndexedBox])
-      .find(b => carriesOne(b, LFSMHelpers.getEmissionNft(ctx.getNetworkType)) && b.ergoTree == guardTree)
+      .find(b => carriesOne(b, nft) && b.ergoTree == guardTree)
       .map(_.toInputUTXO(ctx))
       .getOrElse(throw new CollateralNotFoundException(
         s"no unspent emission box carrying $nft - is the node indexed, and has emission launched?"))
+  }
 
-    if (!config.mempoolChaining) EmissionTip(confirmed, Seq.empty[NodeTransaction])
+  /**
+   * The confirmed emission box and up to `maxDepth` unconfirmed spends chained onto it.
+   *
+   * `ConfirmedOnly` keeps the box even while the mempool spends it. Every emission spend recreates
+   * the box under the guard, the only script it lives under, so one read of the mempool by that
+   * script returns the whole chain; it is ordered here by which box each transaction spends.
+   */
+  def emissionChain(ctx: BlockchainContext, maxDepth: Int): EmissionChain = {
+    val nft = LFSMHelpers.getEmissionNft(ctx.getNetworkType).toString
+    val confirmed = emissionBox(ctx, MempoolOptions.ConfirmedOnly)
+    if (maxDepth <= 0) EmissionChain(confirmed, Vector.empty, confirmed, complete = false)
     else {
-      var tip = confirmed
-      var chain = Vector.empty[NodeTransaction]
-      var walking = true
-      while (walking && chain.size < config.maxChainDepth) {
-        nodeApi.unconfirmedInputByBoxId(tip.id.toString) match {
-          case Success(Some(tx)) =>
-            tx.outputs.find(o => o.assets.headOption.exists(_.tokenId == nft)) match {
-              case Some(next) =>
-                chain :+= tx
-                tip = next.toInputUTXO(ctx)
+      val page = Paging(0, maxDepth + 1)
+      nodeApi.unconfirmedTransactionsByErgoTree(contracts(ctx).guard.ergoTreeHex, page) match {
+        case Success(txs) =>
+          // The node pages an unordered set, so a full page may have left out the next spend.
+          val whole = txs.size < page.limit
+          val bySpentBox = txs.flatMap(tx => tx.inputs.map(_.boxId -> tx)).toMap
+          var tip = confirmed
+          var chain = Vector.empty[NodeTransaction]
+          var complete = false
+          var walking = true
+          while (walking && chain.size < maxDepth) {
+            bySpentBox.get(tip.id.toString) match {
+              case Some(tx) =>
+                tx.outputs.find(o => o.assets.headOption.exists(_.tokenId == nft)) match {
+                  case Some(next) =>
+                    chain :+= tx
+                    tip = next.toInputUTXO(ctx)
+                  case None =>
+                    // The emission contract makes this impossible, so stop rather than guess.
+                    logger.warn(s"Mempool transaction ${tx.id} spends the emission box without recreating it")
+                    walking = false
+                }
               case None =>
-                // The NFT left the box the chain was following, which the emission contract makes
-                // impossible. Stop rather than guess.
-                logger.warn(s"Mempool transaction ${tx.id} spends the emission box without recreating it")
+                complete = whole
                 walking = false
             }
-          case _ => walking = false
-        }
+          }
+          EmissionChain(confirmed, chain, tip, complete)
+        case Failure(ex) =>
+          logger.warn(s"Could not read the emission box's unconfirmed spends: ${ex.getMessage}")
+          EmissionChain(confirmed, Vector.empty, confirmed, complete = false)
       }
-      if (chain.nonEmpty)
-        logger.info(s"Emission box is ${chain.size} unconfirmed spend(s) ahead, tip ${tip.id}")
-      EmissionTip(tip, chain)
     }
+  }
+
+  /**
+   * The emission box at the end of the mempool chain, and the unconfirmed spends that led there, for
+   * transactions broadcast on top of other lenders' work. When the walk cannot finish, the index's
+   * own tip is used with only the ancestors that were walked.
+   */
+  def emissionTip(ctx: BlockchainContext): EmissionTip = {
+    val chain = emissionChain(ctx, config.maxChainDepth)
+    if (chain.spends.nonEmpty)
+      logger.info(s"Emission box is ${chain.spends.size} unconfirmed spend(s) ahead, tip ${chain.tip.id}")
+    if (chain.complete) EmissionTip(chain.tip, chain.spends)
+    else EmissionTip(emissionBox(ctx, withMempool), chain.spends)
   }
 
   /**
@@ -210,28 +279,87 @@ class EmissionTransactions(prover: NodeWallet,
   )
 
   /**
-   * The queue box at `position`, looked for in the unconfirmed chain first - during a join burst the
-   * head is often a box that has not been confirmed yet - and then in confirmed state.
+   * The queue and proof-of-spend boxes a pass reads, with `mempool` deciding whether boxes the
+   * mempool already spends are kept. Queue boxes the `ancestors` created and did not spend come
+   * from those transactions, since no index holds them yet.
    */
-  def queueBoxAt(ctx: BlockchainContext,
-                 position: Long,
-                 ancestors: Seq[NodeTransaction]): Option[InputUTXO] = {
+  def queueView(ctx: BlockchainContext, ancestors: Seq[NodeTransaction], mempool: MempoolOptions): QueueView = {
     val queueTok = LFSMHelpers.getQueueToken(ctx.getNetworkType).toString
     val gateTree = contracts(ctx).gate.ergoTreeHex
     val spentInChain: Set[String] = ancestors.flatMap(_.inputs.map(_.boxId)).toSet
-
-    val fromMempool = ancestors.reverse.flatMap(_.outputs)
+    val unconfirmed = ancestors.flatMap(_.outputs)
       .filter(o => !spentInChain.contains(o.boxId) &&
         o.assets.headOption.exists(a => a.tokenId == queueTok && a.amount == 1L) &&
         o.ergoTree == gateTree)
-      .find(o => queuePosition(o.registerValues).contains(position))
-      .map(_.toInputUTXO(ctx))
+    QueueView(unconfirmed, queueBoxes(ctx, mempool), proofOfSpendBoxes(ctx, mempool))
+  }
 
-    fromMempool.orElse {
-      queueBoxes(ctx, liveOnly)
-        .find(b => queuePosition(b.box.registerValues).contains(position))
-        .map(_.toInputUTXO(ctx))
+  /**
+   * The queue box at `position`, looked for among unconfirmed joins' outputs first - during a join
+   * burst the head is often a box that has not been confirmed yet - and then in the index's page.
+   */
+  def queueBoxAt(ctx: BlockchainContext, view: QueueView, position: Long): Option[InputUTXO] =
+    view.unconfirmed.find(o => queuePosition(o.registerValues).contains(position)).map(_.toInputUTXO(ctx))
+      .orElse(view.confirmed.find(b => queuePosition(b.box.registerValues).contains(position))
+        .map(_.toInputUTXO(ctx)))
+
+  /**
+   * The spends that advance the queue from `start`, up to `limit`: a head whose lender already holds
+   * a slot is Cleared, anything else is Activated. The active set is tracked step by step, so a
+   * duplicate that an earlier Activate in the same run created is Cleared rather than Activated.
+   */
+  def planQueue(ctx: BlockchainContext,
+                start: InputUTXO,
+                view: QueueView,
+                blockHeight: Int,
+                limit: Int): Vector[QueueStep] = {
+    val st = readEmission(start)
+    var lenderSet = st.lenderSet
+    var head = st.head
+    var steps = Vector.empty[QueueStep]
+    val usedProofs = mutable.Set.empty[String]
+    var stop = false
+
+    while (!stop && steps.size < limit) {
+      if (head >= st.tail) {
+        if (steps.isEmpty) logger.info(s"Collateral queue is empty at head $head - nothing to spend")
+        stop = true
+      } else queueBoxAt(ctx, view, head) match {
+        case None =>
+          if (steps.isEmpty) logger.warn(s"No queue box found at head $head")
+          stop = true
+
+        case Some(queueIn) =>
+          Try(lenderEntry(queueIn.registers(1).getValue.asInstanceOf[SigmaProp])).toOption match {
+            case None =>
+              logger.warn(s"Queue box ${queueIn.id} has no readable lender key - stopping")
+              stop = true
+
+            case Some(entry) if lenderSet.exists(_.sameElements(entry)) =>
+              steps :+= ClearStep(queueIn)
+              head += 1
+
+            case Some(entry) if lenderSet.size < EmissionSchedule.MAX_ACTIVE =>
+              steps :+= ActivateStep(queueIn, None)
+              lenderSet :+= entry
+              head += 1
+
+            case Some(entry) =>
+              findProofOfSpend(ctx, view.proofs, lenderSet, blockHeight, usedProofs.toSet) match {
+                case Some(retiring @ (proof, idx)) =>
+                  usedProofs += proof.id.toString
+                  steps :+= ActivateStep(queueIn, Some(retiring))
+                  lenderSet = lenderSet.updated(idx, entry)
+                  head += 1
+                case None =>
+//                  logger.debug(s"Active set is full at ${lenderSet.size} and no proof-of-spend box " +
+//                    s"usable at height ${blockHeight - 1} frees a slot - cannot activate")
+                  stop = true
+              }
+          }
+      }
     }
+    steps
   }
 
   /**
@@ -248,14 +376,15 @@ class EmissionTransactions(prover: NodeWallet,
    * the same lender's next queue box on the retirement, and spending that too in one block.
    */
   def findProofOfSpend(ctx: BlockchainContext,
+                       proofs: Seq[IndexedBox],
                        lenderSet: Seq[Array[Byte]],
                        blockHeight: Int,
                        exclude: Set[String] = Set.empty[String]): Option[(InputUTXO, Int)] = {
-    val candidates = proofOfSpendBoxes(ctx, liveOnly).filterNot(b => exclude.contains(b.boxId))
+    val candidates = proofs.filterNot(b => exclude.contains(b.boxId))
     val (mintedThisBlock, usable) = candidates.partition(_.box.creationHeight >= blockHeight - 1)
-    if (mintedThisBlock.nonEmpty && usable.isEmpty)
-      logger.info(s"${mintedThisBlock.size} proof-of-spend box(es) only validate from block " +
-        s"$blockHeight - waiting rather than building an Activate that cannot sign")
+//    if (mintedThisBlock.nonEmpty && usable.isEmpty)
+//      logger.info(s"${mintedThisBlock.size} proof-of-spend box(es) only validate from block " +
+//        s"$blockHeight - waiting rather than building an Activate that cannot sign")
     usable
       .flatMap { b =>
         retiringKey(b).flatMap { r =>
@@ -535,26 +664,20 @@ class EmissionTransactions(prover: NodeWallet,
   // ══════════════════════════════════════════════════════════════════════════
 
   /**
-   * Walk the queue from its head, chaining one emission spend onto the next. A head whose lender
-   * already holds a slot is Cleared, anything else is Activated, and each transaction respends the
-   * previous one's emission successor - so one pass can unstick a run of duplicates and still mint
-   * a collateral box behind them.
+   * Sign `steps` in order, each respending the previous one's emission successor, so one pass can
+   * unstick a run of duplicates and still mint a collateral box behind them.
    *
    * @param funded true pays a fee and can be broadcast; false is the fee-less form for this
    *               miner's own block, which needs no wallet input at all.
    */
   def buildQueueSpends(ctx: BlockchainContext,
-                       blockHeight: Int,
-                       funded: Boolean,
-                       limit: Int): (EmissionTip, Seq[EmissionSpend]) = {
-    val tip = emissionTip(ctx)
-    val cfg = configBox(ctx)
+                       start: InputUTXO,
+                       cfg: InputUTXO,
+                       steps: Seq[QueueStep],
+                       funded: Boolean): Seq[EmissionSpend] = {
     val funding = new FundingSource
-
-    var em = tip.box
+    var em = start
     var built = Vector.empty[EmissionSpend]
-    val usedProofs = mutable.Set.empty[String]
-    var stop = false
     var completed = false
 
     def fee: Option[UTXO] = if (funded) Some(UTXO.feeBox(config.txFee)) else None
@@ -573,46 +696,21 @@ class EmissionTransactions(prover: NodeWallet,
       else Seq.empty
 
     try {
-      while (!stop && built.size < limit) {
-        val st = readEmission(em)
-        if (st.head >= st.tail) {
-          if (built.isEmpty) logger.info(s"Collateral queue is empty at head ${st.head} - nothing to spend")
-          stop = true
-        } else queueBoxAt(ctx, st.head, tip.ancestors) match {
-          case None =>
-            if (built.isEmpty) logger.warn(s"No queue box found at head ${st.head}")
-            stop = true
+      steps.foreach {
+        case ClearStep(queueIn) =>
+          // The head box's lender loses its whole principal and permit to this client: the key
+          // already holds a slot, and the contract refunds nothing.
+          val sTx = genClear(ctx, em, cfg, queueIn, clearInputs(queueIn), fee)
+          em = chainOn(sTx, funding, holdWalletChange = funded).emission
+          built :+= EmissionSpend(sTx, EmissionSpend.Clear, funding.transferPending())
 
-          case Some(queueIn) =>
-            Try(lenderEntry(queueIn.registers(1).getValue.asInstanceOf[SigmaProp])).toOption match {
-              case None =>
-                logger.warn(s"Queue box ${queueIn.id} has no readable lender key - stopping")
-                stop = true
-
-              case Some(newEntry) if st.holds(newEntry) =>
-                val sTx = genClear(ctx, em, cfg, queueIn, clearInputs(queueIn), fee)
-                em = chainOn(sTx, funding, holdWalletChange = funded).emission
-                built :+= EmissionSpend(sTx, EmissionSpend.Clear, funding.transferPending())
-
-              case Some(_) =>
-                val retiring =
-                  if (st.bootstrapping) None
-                  else findProofOfSpend(ctx, st.lenderSet, blockHeight, usedProofs.toSet)
-                if (!st.bootstrapping && retiring.isEmpty) {
-                  logger.info(s"Active set is full at ${st.lenderSet.size} and no proof-of-spend box " +
-                    s"usable at height ${blockHeight - 1} frees a slot - cannot activate")
-                  stop = true
-                } else {
-                  retiring.foreach(r => usedProofs += r._1.id.toString)
-                  // The collateral box carries the queue box's whole principal straight back out, so
-                  // a funded Activate has nothing of its own to pay the fee with.
-                  val extra = if (funded) funding.take(config.txFee * 2) else Seq.empty[InputUTXO]
-                  val sTx = genActivate(ctx, em, cfg, queueIn, retiring, extra, fee)
-                  em = chainOn(sTx, funding, holdWalletChange = funded).emission
-                  built :+= EmissionSpend(sTx, EmissionSpend.Activate, funding.transferPending())
-                }
-            }
-        }
+        case ActivateStep(queueIn, retiring) =>
+          // The collateral box carries the queue box's whole principal straight back out, so a
+          // funded Activate has nothing of its own to pay the fee with.
+          val extra = if (funded) funding.take(config.txFee * 2) else Seq.empty[InputUTXO]
+          val sTx = genActivate(ctx, em, cfg, queueIn, retiring, extra, fee)
+          em = chainOn(sTx, funding, holdWalletChange = funded).emission
+          built :+= EmissionSpend(sTx, EmissionSpend.Activate, funding.transferPending())
       }
       // After the loop, not inside it. Set per iteration, one bad spend part way through a run left
       // the earlier iterations' inputs reserved even though the throw means the caller never gets
@@ -627,7 +725,56 @@ class EmissionTransactions(prover: NodeWallet,
         funding.finish(returnChange = false)
       }
 
-    (tip, built)
+    built
+  }
+
+  /**
+   * A funded pass for the mempool, chained onto the unconfirmed tip so it never competes with other
+   * lenders' spends there. Without `activates` it stops at the first Activate, which this miner's own
+   * candidate is holding for the block.
+   */
+  def fundedQueueSpends(ctx: BlockchainContext, blockHeight: Int, limit: Int,
+                        activates: Boolean = true): Seq[EmissionSpend] = {
+    val tip = emissionTip(ctx)
+    val planned = planQueue(ctx, tip.box, queueView(ctx, tip.ancestors, liveOnly), blockHeight, limit)
+    val steps = if (activates) planned else planned.takeWhile(_.isInstanceOf[ClearStep])
+    if (steps.size < planned.size)
+      logger.info(s"Leaving ${planned.size - steps.size} Activate(s) at the queue head to this miner's " +
+        s"own candidate for block $blockHeight")
+    if (steps.isEmpty) Seq.empty[EmissionSpend]
+    else buildQueueSpends(ctx, tip.box, configBox(ctx), steps, funded = true)
+  }
+
+  /**
+   * The fee-less queue spends for this miner's own block, planned from CONFIRMED state so the block
+   * never depends on a transaction it does not carry. [[EmissionTransactions.chooseCandidate]] decides
+   * what happens to unconfirmed emission spends.
+   */
+  def candidateQueueSpends(ctx: BlockchainContext,
+                           blockHeight: Int,
+                           limit: Int,
+                           hold: Option[QueueHold] = None,
+                           fundedOwns: Boolean = false): (CandidateQueue, Seq[EmissionSpend]) = {
+    // At least one step even when broadcasts follow none: this path must know whether a spend exists.
+    val chain = emissionChain(ctx, math.max(1, config.maxChainDepth))
+    val steps = planQueue(ctx, chain.confirmed, queueView(ctx, Seq.empty, MempoolOptions.ConfirmedOnly),
+      blockHeight, limit)
+    val confirmedHead = readEmission(chain.confirmed).head
+    val headAdvanced = readEmission(chain.tip).head > confirmedHead
+    val choice = EmissionTransactions.chooseCandidate(steps, chain.pending, chain.spends.map(_.id),
+      headAdvanced, config.candidateActivates, confirmedHead, blockHeight, hold, fundedOwns)
+
+    if (choice.supersedes.nonEmpty)
+      logger.info(s"Replacing ${choice.supersedes.size} unconfirmed emission spend(s) in this block's " +
+        s"candidate with ${choice.steps.size} of its own, since the queue walk reaches a Clear")
+    else if (chain.pending && steps.nonEmpty && choice.steps.isEmpty)
+      logger.debug(s"Leaving ${steps.size} queue spend(s) to the mempool: the emission box has " +
+        s"${chain.spends.size} unconfirmed spend(s) and no Clear is in reach")
+
+    val spends =
+      if (choice.steps.isEmpty) Seq.empty[EmissionSpend]
+      else buildQueueSpends(ctx, chain.confirmed, configBox(ctx), choice.steps, funded = false)
+    (choice, spends)
   }
 
   /**
@@ -1029,4 +1176,40 @@ object EmissionTransactions {
 
   /** Hard ceiling on those scans, so a pathological queue cannot stall a pass indefinitely. */
   private[transactions] final val MaxScannedBoxes = 10000
+
+  /**
+   * What this miner's own block does with a queue walk planned from confirmed state.
+   *
+   * A Clear in reach takes the whole walk and replaces every pending emission spend, since it pays
+   * this miner the forfeited box and nothing else can move a duplicate; any Activates in that walk
+   * are held for the block, so the funded pass sends only Clears. A pending spend leaves the queue
+   * to the mempool, asking for the funded pass when the chain is joins alone. Otherwise the
+   * candidate holds the head's Activates, up to `activateCap`, for the first block it carries them
+   * in, and hands them to the funded pass if the same head is still there a block later.
+   *
+   * @param fundedOwns a funded pass is broadcasting Activates, or this block's were handed over
+   */
+  def chooseCandidate(steps: Vector[QueueStep],
+                      pending: Boolean,
+                      pendingIds: Seq[String],
+                      headAdvanced: Boolean,
+                      activateCap: Int,
+                      confirmedHead: Long,
+                      blockHeight: Int,
+                      hold: Option[QueueHold],
+                      fundedOwns: Boolean): CandidateQueue = {
+    def none(driveFunded: Boolean) = CandidateQueue(Vector.empty, Set.empty, driveFunded, hold)
+    if (steps.exists(_.isInstanceOf[ClearStep]))
+      CandidateQueue(steps, pendingIds.toSet, driveFunded = false,
+        if (steps.exists(_.isInstanceOf[ActivateStep])) Some(QueueHold(confirmedHead, blockHeight)) else hold)
+    else if (pending) none(driveFunded = steps.nonEmpty && !headAdvanced)
+    else if (fundedOwns) none(driveFunded = false)
+    else if (hold.exists(h => h.head == confirmedHead && h.since < blockHeight)) none(driveFunded = steps.nonEmpty)
+    else {
+      val carried = steps.take(activateCap)
+      if (carried.isEmpty) none(driveFunded = false)
+      else CandidateQueue(carried, Set.empty, driveFunded = false,
+        Some(hold.filter(_.head == confirmedHead).getOrElse(QueueHold(confirmedHead, blockHeight))))
+    }
+  }
 }

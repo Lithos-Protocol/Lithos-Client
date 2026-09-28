@@ -197,4 +197,21 @@ class NodeCodecSpec extends AnyFlatSpec with Matchers {
     CandidateTx.ancestor(NodeCodecs.transaction(mempoolTransaction(Some("20510")))).cost shouldBe 20510L
     CandidateTx.ancestor(NodeCodecs.transaction(mempoolTransaction(None))).cost shouldBe 0L
   }
+
+  it should "re-encode an ancestor's context extension in the order the node listed it" in {
+    // The node rebuilds an extension in the order its JSON lists, and the id and every signature
+    // cover that order. Five variables is a NISP submission's shape, and past four a plain Scala
+    // map iterates by hash, so a carried submission came back as a different transaction.
+    import transactions.candidate.BlockTxMessages.CandidateTx
+    val order = Seq("64", "3", "0", "2", "1")
+    val extension = order.map(k => s""""$k": "0e0100"""").mkString("{", ", ", "}")
+    val raw = new JsonParser().parse(
+      s"""{"id": "${"ab" * 32}", "inputs": [{"boxId": "${"01" * 32}", "spendingProof": {"proofBytes": "", "extension": $extension}}],
+         |"dataInputs": [], "outputs": [], "size": 212}""".stripMargin).getAsJsonObject
+    val carried = new JsonParser().parse(CandidateTx.ancestor(NodeCodecs.transaction(raw)).json).getAsJsonObject
+    val keys = carried.getAsJsonArray("inputs").get(0).getAsJsonObject.getAsJsonObject("spendingProof")
+      .getAsJsonObject("extension").keySet()
+    import scala.collection.JavaConverters._
+    keys.asScala.toSeq shouldBe order
+  }
 }

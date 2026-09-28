@@ -7,24 +7,30 @@ import play.api.libs.json.{Json, OWrites}
  *
  * A NISP for a rollup whose period starts at height P takes `RequiredShares` distinct super shares
  * from heights P - window through P. So with the tenth-newest at height h, one exists for every
- * period start up to h + window, and none after it unless more are found.
+ * period start up to h + window, and none after it unless more are found. `source` is `store` when
+ * the heights came from the NISP store, and `session` when only this session's shares were counted.
  */
 final case class NispStatus(held: Boolean, superSharesInWindow: Int, required: Int, windowBlocks: Int,
-                            atHeight: Int, validThroughHeight: Option[Int], blocksRemaining: Option[Int])
+                            atHeight: Int, validThroughHeight: Option[Int], blocksRemaining: Option[Int],
+                            source: String = NispStatus.Session)
 
 object NispStatus {
   /** Super shares a NISP carries. The contracts and the NISP store both fix it at ten. */
   val RequiredShares: Int = 10
 
+  final val Store = "store"
+  final val Session = "session"
+
   implicit val writes: OWrites[NispStatus] = Json.writes[NispStatus]
 
   /** `heights` are super-share heights; `atHeight` is the height a rollup would start at now. */
-  def of(heights: Seq[Int], atHeight: Int, window: Int = lfsm.LFSMHelpers.NISP_WINDOW): NispStatus = {
+  def of(heights: Seq[Int], atHeight: Int, window: Int = lfsm.LFSMHelpers.NISP_WINDOW,
+         source: String = Session): NispStatus = {
     // A share above the served job means that job is already behind; measure from the share.
     val at = (atHeight +: heights).max
     val inWindow = heights.filter(_ >= at - window).sorted(Ordering[Int].reverse).take(RequiredShares)
     val through = inWindow.lift(RequiredShares - 1).map(_ + window)
-    NispStatus(through.isDefined, inWindow.size, RequiredShares, window, at, through, through.map(_ - at))
+    NispStatus(through.isDefined, inWindow.size, RequiredShares, window, at, through, through.map(_ - at), source)
   }
 }
 
@@ -69,9 +75,13 @@ final case class LocalMiningSummary(status: String, enabled: Boolean,
                                     rejections: Map[String, String] = Map.empty,
                                     nisp: Option[NispStatus] = None)
 
-/** One interval of local work, measured between two observations of the same producer session. */
+/**
+ * One interval of local work, summed over the observation pairs of one producer session that end
+ * in it. `measuredMs` is the time those pairs cover, which `hashesPerSecond` is rated over.
+ */
 final case class LocalHashratePoint(start: Long, widthMs: Long, hashesPerSecond: String,
-                                    acceptedShares: Long, superShares: Long, reducedReporting: Boolean)
+                                    acceptedShares: Long, superShares: Long, reducedReporting: Boolean,
+                                    measuredMs: Long = 0L)
 
 object LocalHashratePoint {
   implicit val writes: OWrites[LocalHashratePoint] = Json.writes[LocalHashratePoint]
@@ -110,13 +120,21 @@ object LocalMiningSummary {
       }
     }
 
-  /** `height` is the height a rollup would start at now, when a job is being served. */
+  /**
+   * `height` is the height a rollup would start at now, when a job is being served. `stored` is the
+   * super-share heights read from the NISP store; without it the NISP status counts only the
+   * shares this session has seen.
+   */
   def of(enabled: Boolean, producers: Map[String, LocalMiningActivityView],
-         samples: Vector[WorkSample] = Vector.empty, height: Option[Int] = None): LocalMiningSummary = {
+         samples: Vector[WorkSample] = Vector.empty, height: Option[Int] = None,
+         stored: Option[Seq[Int]] = None): LocalMiningSummary = {
     val shares = producers.get("shares")
     val solutions = producers.get("solutions")
+    val nisp = height.map(NispStatus.of(
+      stored.getOrElse(shares.map(_.observation.superShareHeights).getOrElse(Vector.empty)), _,
+      source = if (stored.isDefined) NispStatus.Store else NispStatus.Session))
     if (shares.isEmpty && solutions.isEmpty)
-      return LocalMiningSummary(if (enabled) "loading" else "disabled", enabled)
+      return LocalMiningSummary(if (enabled) "loading" else "disabled", enabled, nisp = nisp)
 
     val status = shares.orElse(solutions).map(_.status).getOrElse("loading")
     val summary = shares.map(_.observation).map { o =>
@@ -137,8 +155,8 @@ object LocalMiningSummary {
         assignedWork = work.toString,
         reducedReporting = counter(o, "acceptedWithReducedReporting") > 0,
         rejections = rejected,
-        nisp = height.map(NispStatus.of(o.superShareHeights, _)))
-    }.getOrElse(LocalMiningSummary(status, enabled))
+        nisp = nisp)
+    }.getOrElse(LocalMiningSummary(status, enabled, nisp = nisp))
 
     solutions.map(_.observation).fold(summary) { o =>
       summary.copy(solutionsAccepted = counter(o, "nodeAccepted").toLong,
@@ -147,17 +165,17 @@ object LocalMiningSummary {
   }
 
   /**
-   * Turns stored share observations into per-interval rates.
+   * Turns stored share observations into one rate per interval.
    *
    * Only consecutive observations of the same session describe a measurable interval: a restart
    * resets the counters, so a delta across that boundary would read as a negative or absurd rate.
-   * Those pairs are dropped rather than clamped, leaving a gap that honestly says the interval was
-   * not measured.
+   * Those pairs are dropped rather than clamped. The pairs ending in one interval are summed, so a
+   * day is rated over all of its hours rather than its last one.
    */
   def history(observations: Vector[LocalMiningObservation], from: Long, until: Long,
               widthMs: Long, status: String): LocalHashrateHistory = {
     val ordered = observations.filter(_.kind == "shares").sortBy(o => (o.observedAt, o.sequence))
-    val points = ordered.sliding(2).collect {
+    val deltas = ordered.sliding(2).collect {
       case Vector(before, after) if before.session == after.session &&
         after.sequence > before.sequence && after.observedAt > before.observedAt =>
         val work = counter(after, "acceptedAssignedWork") - counter(before, "acceptedAssignedWork")
@@ -166,11 +184,16 @@ object LocalMiningSummary {
         val reduced = counter(after, "acceptedWithReducedReporting") -
           counter(before, "acceptedWithReducedReporting")
         if (work >= 0 && accepted >= 0 && supers >= 0)
-          Some(LocalHashratePoint(MiningHistory.bucketStart(after.observedAt, widthMs), widthMs,
-            rate(work, after.observedAt - before.observedAt).getOrElse("0"),
-            accepted.toLong, supers.toLong, reduced > 0))
+          Some((MiningHistory.bucketStart(after.observedAt, widthMs), work,
+            after.observedAt - before.observedAt, accepted, supers, reduced > 0))
         else None
     }.flatten.toVector
+    val points = deltas.groupBy(_._1).toVector.sortBy(_._1).map { case (start, group) =>
+      val work = group.map(_._2).sum
+      val measured = group.map(_._3).sum
+      LocalHashratePoint(start, widthMs, rate(work, measured).getOrElse("0"),
+        group.map(_._4).sum.toLong, group.map(_._5).sum.toLong, group.exists(_._6), measured)
+    }
     LocalHashrateHistory(from, until, widthMs, points, status)
   }
 }

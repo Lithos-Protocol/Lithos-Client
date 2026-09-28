@@ -155,6 +155,11 @@ object Configs {
     v.range("stratum.candidate.collateralPoolSize", v.int("stratum.candidate.collateralPoolSize"), 1, 100,
       "collateral boxes pre-loaded; the active set never holds more than 100")
     v.range("stratum.candidate.collateralRefreshInterval", v.int("stratum.candidate.collateralRefreshInterval"), 100, 3600000, "ms")
+    v.string("stratum.candidate.collateralStrategy").foreach { strategy =>
+      if (!CandidateConfig.CollateralStrategies.contains(strategy))
+        v.problem("stratum.candidate.collateralStrategy",
+          s"must be one of ${CandidateConfig.CollateralStrategies.mkString(", ")}")
+    }
     v.range("stratum.candidate.clearanceAge", v.int("stratum.candidate.clearanceAge"),
       CandidateConfig.MinClearanceAge, CandidateConfig.MaxClearanceAge,
       "blocks a collateral box may stay live before it is drawn ahead of every bid")
@@ -179,6 +184,9 @@ object Configs {
       "inclusion height the storage-rent walk begins at")
     v.range("stratum.candidate.sources.rent.scanIntervalMs",
       v.int("stratum.candidate.sources.rent.scanIntervalMs"), 1000, 3600000, "ms")
+    v.range("stratum.candidate.sources.rollups.maxAncestorTxs",
+      v.int("stratum.candidate.sources.rollups.maxAncestorTxs"), 0, 64,
+      "unconfirmed transactions one rollup transaction may carry into the block")
     v.range("stratum.candidate.sources.rent.blocksPerScan",
       v.int("stratum.candidate.sources.rent.blocksPerScan"), 1, 10000, "blocks read per scan pass")
     v.bool("stratum.candidate.useTruePropCollection")
@@ -187,6 +195,12 @@ object Configs {
     v.bool("stratum.candidate.logBudgets")
     v.longRange("stratum.candidate.minCandidateChangeRevenue",
       v.long("stratum.candidate.minCandidateChangeRevenue"), 0L, Long.MaxValue, "additional package revenue in nanoERG")
+    v.bool("stratum.candidate.refreshForProtocolTxs")
+    // Zero would take every refresh, which is what minCandidateChangeRevenue = 0 already does
+    v.range("stratum.candidate.minNewProtocolTxs", v.int("stratum.candidate.minNewProtocolTxs"), 1, 1000,
+      "rollup or emission transactions a refresh must add")
+    v.range("stratum.candidate.pinnedInputs", v.int("stratum.candidate.pinnedInputs"), 0, 16,
+      "wallet boxes set aside for transactions in this miner's own blocks")
 
     // ---- batching.ergodex ----
     v.bool(s"batching.ergodex.enabled")
@@ -268,8 +282,9 @@ object Configs {
     v.bool("emission.enabled")
     v.range("emission.queueInterval", v.int("emission.queueInterval"), 1000, 3600000, "ms")
     v.range("emission.maxQueueSpends", v.int("emission.maxQueueSpends"), 1, 128, "chained emission spends per pass")
-    v.bool("emission.mempoolChaining")
-    v.range("emission.maxChainDepth", v.int("emission.maxChainDepth"), 0, 4096, "unconfirmed spends followed before falling back to confirmed state")
+    v.range("emission.candidateActivates", v.int("emission.candidateActivates"), 0, 100,
+      "Activates in this miner's own block when no Clear is in reach")
+    v.range("emission.maxChainDepth", v.int("emission.maxChainDepth"), 0, 4096, "unconfirmed emission spends followed")
     v.range("emission.queueScanLimit", v.int("emission.queueScanLimit"), 1, 100000, "queue boxes paged through per head search")
     v.long("emission.txFee").foreach { fee =>
       if (fee < Parameters.MinFee || fee > 1000000000L)

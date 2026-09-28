@@ -16,9 +16,17 @@ case class CandidateConfig(collateralPoolSize: Int,
                            minCandidateChangeRevenue: Long = 1000000L,
                            waitForBlockPackage: Boolean = true,
                            logBudgets: Boolean = false,
-                           clearanceAge: Int = 7200)
+                           clearanceAge: Int = 7200,
+                           refreshForProtocolTxs: Boolean = true,
+                           minNewProtocolTxs: Int = 1,
+                           pinnedInputs: Int = 1,
+                           collateralStrategy: String = CandidateConfig.HighestFee)
 
 object CandidateConfig {
+
+  final val HighestFee = "highestFee"
+  final val Random = "random"
+  final val CollateralStrategies: Seq[String] = Seq(HighestFee, Random)
 
   /**
    * Bounds on `clearanceAge`. Below 100 a box that bids nothing overtakes the bids almost at once, and
@@ -31,15 +39,16 @@ object CandidateConfig {
   val Default: CandidateConfig = CandidateConfig(
     collateralPoolSize = 100,
     collateralRefreshInterval = 60000,
-    blockTransactions = false,
+    blockTransactions = true,
     sources = Map(
       CandidateSourceConfig.Rollups -> CandidateSourceConfig.Default,
-      CandidateSourceConfig.Emissions -> CandidateSourceConfig.Default,
+      // Room for a run of Clears; Activates alone stop at `emission.candidateActivates`.
+      CandidateSourceConfig.Emissions -> CandidateSourceConfig.Default.copy(maxTxs = 20),
       // Off until a miner points it at a start height and has watched a scan pass run. One
       // transaction, because a rent collection sweeps every box it takes into a single sweep.
       CandidateSourceConfig.Rent -> CandidateSourceConfig.Default.copy(enabled = false, maxTxs = 1),
-      // Disabled by default; the eight slots include placement ancestors and executions.
-      CandidateSourceConfig.ErgoDex -> CandidateSourceConfig.Default.copy(enabled = false, maxTxs = 20),
+      // The slots include placement ancestors and executions.
+      CandidateSourceConfig.ErgoDex -> CandidateSourceConfig.Default.copy(maxTxs = 20),
       // On by default: LithosDex is the protocol's own DEX. Slots include placements and the flush.
       CandidateSourceConfig.LithosDex -> CandidateSourceConfig.Default.copy(enabled = true, maxTxs = 20)),
     blockShare = 0.5,
@@ -51,8 +60,26 @@ object CandidateConfig {
     minCandidateChangeRevenue = 1000000L,
     waitForBlockPackage = true,
     logBudgets = false,
-    clearanceAge = 7200
+    clearanceAge = 7200,
+    refreshForProtocolTxs = true,
+    minNewProtocolTxs = 1,
+    pinnedInputs = 1,
+    collateralStrategy = HighestFee
   )
+
+  /**
+   * Wallet boxes the engine pins for candidate funding. Zero unless candidates are actually built
+   * with rollup work, since a pin nothing uses only withholds a box.
+   */
+  def pinTarget(config: Configuration): Int = {
+    val candidate = CandidateConfig(config)
+    val rollups = candidate.sources.getOrElse(CandidateSourceConfig.Rollups, CandidateSourceConfig.Default)
+    val mining = scala.util.Try(new TasksConfig(config).stratumServerTaskConfig.enabled).getOrElse(false)
+    val transforming = !new StateConfig(config).disableTransforms.getOrElse(false)
+    if (mining && transforming && candidate.blockTransactions && rollups.enabled && rollups.maxTxs > 0)
+      candidate.pinnedInputs
+    else 0
+  }
 
   def apply(config: Configuration): CandidateConfig = {
     def int(key: String, fallback: Int): Int =
@@ -80,7 +107,12 @@ object CandidateConfig {
         .getOrElse(Default.minCandidateChangeRevenue),
       waitForBlockPackage = bool("waitForBlockPackage", Default.waitForBlockPackage),
       logBudgets = bool("logBudgets", Default.logBudgets),
-      clearanceAge = int("clearanceAge", Default.clearanceAge)
+      clearanceAge = int("clearanceAge", Default.clearanceAge),
+      refreshForProtocolTxs = bool("refreshForProtocolTxs", Default.refreshForProtocolTxs),
+      minNewProtocolTxs = int("minNewProtocolTxs", Default.minNewProtocolTxs),
+      pinnedInputs = int("pinnedInputs", Default.pinnedInputs),
+      collateralStrategy = config.getOptional[String]("stratum.candidate.collateralStrategy")
+        .getOrElse(Default.collateralStrategy)
     )
   }
 }

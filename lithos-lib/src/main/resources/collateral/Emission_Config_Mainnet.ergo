@@ -1,0 +1,50 @@
+{
+  // Emission_Config_Mainnet
+  // Value: 5 ERG, so storage rent can never take the box (see assumptions)
+  // Holds the emission parameters. Any spend needs 3 of the 5 voting tokens in the inputs.
+
+  // REGISTERS - never read here. Consumers read them with this box as a data input, so a vote can
+  // write anything and a bad value lands unchecked.
+  // R4: permitParams (Coll[Long]) - [permitFloor, permitCeiling, permitSlope], at least 3 elements.
+  // Read by Collateral_Enforcer on Join; a short or mistyped R4 halts every Join until fixed
+  // R5: enforcerHash (Coll[Byte]) - blake2b256 of the collateral enforcer's VALUE bytes. Read by
+  // Emission_Guard; a wrong hash halts every emission spend until fixed
+  // R6: extensionHash (Coll[Byte]) - blake2b256 of the collateral extension script's VALUE bytes. Read
+  // by Collateral_Mainnet only for boxes with the extension flag set; a wrong hash blocks those until fixed
+  // R7: rollupHoldingHash (Coll[Byte]) - blake2b256 of the rollup holding contract's PROP bytes, copied
+  // into each collateral box's R8 at activation. A wrong 32-byte value is permanent: every box activated
+  // under it can never be spent
+
+  // TOKENS
+  // 0: the config NFT, which consumers authenticate this box by at index 0
+
+  // CONSTANTS
+  // CONST_VOTE_TOKEN_ID: id of the voting token, 5 minted in total
+
+  // ASSUMPTIONS - statements which can be assumed to be true due to other contracts enforcing them
+  // during creation of this UTXO
+  // - Exactly 5 voting tokens exist. A token id can only be minted in the transaction spending the box
+  //   of that id, so the supply can never grow.
+  // - A vote is authenticated by the box holding it. Votes normally sit in a verifier contract that
+  //   checks one specific change and refunds them after, so every path of such a contract is a path
+  //   to spend this box.
+  // - Votes must be spent, not referenced. Data inputs are not counted.
+  // - Consumers find this box by its NFT, never by its script, so a vote may move the NFT to any
+  //   script (a DAO) and rewrite any register.
+  // - There is no permissionless refresh. Storage rent is survived by value alone: a collection must
+  //   preserve the box while its value covers the fee.
+
+  val votes = INPUTS.fold(0L, {
+    (acc: Long, input: Box) =>
+      val heldInBox = input.tokens.fold(0L, {
+        (z: Long, t: (Coll[Byte], Long)) => if(t._1 == CONST_VOTE_TOKEN_ID) z + t._2 else z
+      })
+      acc + heldInBox
+  })
+
+  val quorum  = votes >= 3L
+  // The NFT survives every spend and stays first in its box, where consumers look for it
+  val nftKept = OUTPUTS(0).tokens(0) == SELF.tokens(0)
+
+  sigmaProp(allOf(Coll(quorum, nftKept)))
+}

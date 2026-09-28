@@ -98,7 +98,8 @@ final class MinerDictionaryBootstrap(nodeApi: NodeApi,
 
   /** Anchors the empty dictionary to the configured genesis box. */
   private def startState: MinerDictionary =
-    MinerDictionary.initialState.copy(utxoId = protocol.minerDictionaryGenesisId)
+    MinerDictionary.initialState(protocol.networkType).copy(utxoId = protocol.minerDictionaryGenesisId,
+      startHeight = protocol.minerDictionaryStartHeight)
 
   /**
    * `seed` stays unresolved between segments. Resolving it per segment would both take a full

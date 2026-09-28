@@ -20,12 +20,16 @@ final case class PackageTransactionView(id: String, kind: String, sizeBytes: Int
  * `blockMax*` are the node's active block limits and `packageMax*` the slice of them this client
  * allows one Lithos package. Both are absent when the node's parameters could not be read, which
  * is the only honest answer — the packing then ran unbounded and there is no denominator to give.
+ * `collateralPriorityFeeNanoErg` is what the spent collateral box carries above the principal
+ * floor, and `collateralFinderFeeNanoErg` the part of it the genesis pays this miner.
  */
 final case class BlockPackageView(genesisId: String, collateralBoxId: String, revision: Int,
                                   expectedRevenueNanoErg: Long, sources: Vector[String],
                                   lateSources: Vector[String], transactions: Vector[PackageTransactionView],
                                   blockMaxSizeBytes: Option[Long] = None, blockMaxCost: Option[Long] = None,
-                                  packageMaxSizeBytes: Option[Long] = None, packageMaxCost: Option[Long] = None)
+                                  packageMaxSizeBytes: Option[Long] = None, packageMaxCost: Option[Long] = None,
+                                  lenderAddress: String = "", collateralPriorityFeeNanoErg: Long = 0L,
+                                  collateralFinderFeeNanoErg: Long = 0L)
 
 object BlockPackageView {
   def from(pkg: BlockPackage, materialized: Option[CandidateMaterialized]): BlockPackageView = {
@@ -39,7 +43,8 @@ object BlockPackageView {
         PackageTransactionView(tx.id, tx.kind, tx.sizeBytes, tx.cost, matched.contains(tx.id),
           pkg.revenueByTx.getOrElse(tx.id, 0L))).toVector,
       pkg.limits.map(_.maxBytes), pkg.limits.map(_.maxCost),
-      pkg.share.map(_.maxBytes), pkg.share.map(_.maxCost))
+      pkg.share.map(_.maxBytes), pkg.share.map(_.maxCost),
+      pkg.collateral.lenderAddress, pkg.collateral.priorityFee, pkg.collateral.finderFee)
   }
 }
 
@@ -50,7 +55,8 @@ final case class ActiveStratumJob(jobId: String, height: Int, parentId: String, 
 /**
  * The difficulties this stratum works with, as scores: the number a `diff` setting names.
  *
- * `served` is what jobs are built on — the commitment in force, or the config when it is forced.
+ * `served` is what jobs are built on — the commitment in force, or the config when it is forced. A
+ * higher pending commitment is served from its declared height, a window before it binds.
  * `advertised` is what miners are sent: `served` times `reductionMultiplier` under reduced reporting,
  * which is `superShare` at a multiplier of 10000. `committed` is the score NISPs are judged against
  * now; `pending` is a newer commitment still waiting out the window, in force from `pendingFromHeight`.
@@ -95,6 +101,9 @@ object StatsView {
   }
   implicit val packageWrites: OWrites[BlockPackageView] = OWrites { pkg =>
     Json.obj("genesisId" -> pkg.genesisId, "collateralBoxId" -> pkg.collateralBoxId,
+      "lenderAddress" -> pkg.lenderAddress,
+      "collateralPriorityFeeNanoErg" -> pkg.collateralPriorityFeeNanoErg.toString,
+      "collateralFinderFeeNanoErg" -> pkg.collateralFinderFeeNanoErg.toString,
       "revision" -> pkg.revision, "expectedRevenueNanoErg" -> pkg.expectedRevenueNanoErg.toString,
       "sources" -> pkg.sources, "lateSources" -> pkg.lateSources, "transactions" -> pkg.transactions,
       "transactionScope" -> "client-supplied",

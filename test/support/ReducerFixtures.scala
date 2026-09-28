@@ -1,7 +1,7 @@
 package support
 
 import lfsm.states.{AuthenticatedDictionaryView, MinerDictionary, PlasmaDictionary, Rollup, RollupInfoState}
-import lfsm.{LFSMPhase, RollupProtocol}
+import lfsm.{LFSMHelpers, LFSMPhase, RollupProtocol}
 import scorex.utils.Longs
 import org.ergoplatform.appkit.scalaapi.scalaByteType
 import org.ergoplatform.appkit.{ErgoValue, NetworkType}
@@ -27,7 +27,7 @@ object ReducerFixtures {
   val RollupValue: Long = 1000000L
 
   /**
-   * @param minerDictionaryStartHeight height its genesis box was created at. Defaults below the
+   * @param minerDictionaryStartHeight height of the block that included its genesis box. Defaults below the
    *                                   first block these fixtures replay, since a dictionary spend is
    *                                   only recognized above it.
    */
@@ -42,6 +42,7 @@ object ReducerFixtures {
       payoutErgoTree = PayoutTree,
       collateralErgoTree = CollateralTree,
       minerDictionaryToken = MinerDictionaryToken,
+      minerDictionaryGenesisId = LFSMHelpers.getMDGenesisId(NetworkType.TESTNET),
       minerDictionaryStartHeight = minerDictionaryStartHeight,
       collateralToken = CollateralToken)
 
@@ -54,7 +55,7 @@ object ReducerFixtures {
       rollups = Map.empty,
       routes = Map.empty,
       rollupOrigins = Map.empty,
-      minerTree = MinerDictionary.initialState,
+      minerTree = MinerDictionary.initialState(org.ergoplatform.appkit.NetworkType.TESTNET),
       dataBoxToken = None)
 
   def stateWithRollup(height: Int,
@@ -79,7 +80,7 @@ object ReducerFixtures {
       rollups = Map(rollupId -> tree),
       routes = Map(utxoId -> rollupId),
       rollupOrigins = Map(rollupId -> DefaultOrigin),
-      minerTree = MinerDictionary.initialState,
+      minerTree = MinerDictionary.initialState(org.ergoplatform.appkit.NetworkType.TESTNET),
       dataBoxToken = None)
   }
 

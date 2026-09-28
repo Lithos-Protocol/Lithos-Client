@@ -178,6 +178,37 @@ class CollateralDiscoverySpec extends AnyFlatSpec with Matchers with MockitoSuga
     }
   }
 
+  // ─── a rollup chain this build does not compile ───────────────────────────
+
+  /** A live box whose R8 names some other rollup holding contract, as after the config's R7 moves. */
+  private def foreignBox(ctx: BlockchainContext, i: Int, fee: Long, at: Int): IndexedBox =
+    CollateralNodeFixtures.indexed(
+      CollateralNodeFixtures.collateralBox(ctx, lenderAt(ctx, i), carriedLit = 0L,
+        index = i % 8, txId = f"${500000 + i}%064x", feeValue = fee,
+        rollupHash = Array.fill[Byte](32)(0x7f)),
+      height = at)
+
+  "A box naming a rollup chain this build does not compile" should "be left out of the set" in {
+    withNode { (c, wallet) =>
+      // The foreign boxes bid highest, so if they were loaded they would be drawn first and fail.
+      val known = (0 until 5).map(i => liveBox(c, i, baseFee, at = 500))
+      val foreign = (5 until 10).map(i => foreignBox(c, i, topFee, at = 500))
+      val (api, _) = nodeOver(Seq(foreign ++ known), batch = 100)
+
+      val loaded = builderOver(wallet, api, batch = 100).loadCollateral(c)
+      loaded.map(_.id) should contain theSameElementsAs known.map(_.toInputUTXO(c).id.toString)
+    }
+  }
+
+  "A set where every box names a foreign rollup chain" should "load empty, leaving the block to solo mining" in {
+    withNode { (c, wallet) =>
+      val foreign = (0 until 10).map(i => foreignBox(c, i, topFee, at = 500))
+      val (api, _) = nodeOver(Seq(foreign), batch = 100)
+
+      builderOver(wallet, api, batch = 100).loadCollateral(c) shouldBe empty
+    }
+  }
+
   "A scan that finds the whole active set" should "stop asking the node" in {
     withNode { (c, wallet) =>
       // 100 live boxes is the protocol's cap, so nothing on a later page can outrank what is held.

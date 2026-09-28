@@ -114,6 +114,7 @@ class CollateralMarketApiImplSpec
     when(nodeApi.unspentBoxesByTokenId(anyString(), any[Paging], any[SortDirection], any[MempoolOptions]))
       .thenAnswer((inv: InvocationOnMock) => index.answer(inv))
     when(nodeApi.unconfirmedInputByBoxId(anyString())).thenReturn(Success(None))
+    when(nodeApi.unconfirmedTransactionsByErgoTree(anyString(), any[Paging])).thenReturn(Success(Seq.empty))
     when(nodeApi.walletAddresses()).thenReturn(Success(addresses.map(_.toString)))
     when(nodeApi.indexerEnabled).thenReturn(true)
     // Lender-key exclusion brackets its scan with the chain anchor, so a fixture that never moves

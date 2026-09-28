@@ -142,7 +142,8 @@ class RollupPublisher @Inject()(config: Configuration, nodeContext: NodeContext,
       val transformableTrees: Seq[(String, RollupMetadata)] =
         updatedTrees.filterNot(u => statesToRemove.contains(u._1))
 
-      val currentHeight = ctx.getHeight
+      // The block anything sent now is validated in, which is what each contract's HEIGHT will be
+      val currentHeight = ctx.getHeight + 1
       val entries       = mutable.Map.empty[String, RollupTxStub]
 
       // ── HOLDING phase ─────────────────────────────────────────────────────
@@ -151,14 +152,15 @@ class RollupPublisher @Inject()(config: Configuration, nodeContext: NodeContext,
 
       holdingTrees.foreach { case (_, tree) =>
         val age = currentHeight - tree.currentPeriod.get
+        val submission = RollupTxStub(tree.blockId, tree.currentPeriod, NISPSubmission)
 
         if (age >= LFSMHelpers.HOLDING_PERIOD) {
           // Holding period elapsed → ready to transform to EVAL
           entries(tree.blockId) = RollupTxStub(tree.blockId, tree.currentPeriod, HoldingTransform)
 
-        } else if (!tree.hasMiner && tree.startHeight != currentHeight) {
-          // Still within holding period, no miner yet, and the rollup is not newly generated → submit a NISP
-          entries(tree.blockId) = RollupTxStub(tree.blockId, tree.currentPeriod, NISPSubmission)
+        } else if (submission.validate(currentHeight, tree)) {
+          // Still within holding period and no miner yet → submit a NISP
+          entries(tree.blockId) = submission
         }
       }
 

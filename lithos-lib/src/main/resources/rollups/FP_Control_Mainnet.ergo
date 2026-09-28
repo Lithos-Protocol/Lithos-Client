@@ -1,0 +1,52 @@
+{
+  // FP_Control_Mainnet
+  // Value: 5 ERG, held forever so storage rent can never take the box
+  // Holds the fraud proof scripts an evaluation box accepts. Immutable: the only spend recreates it
+  // unchanged.
+
+  // REGISTERS
+  // R4: fpSet (Coll[Coll[Byte]]) - blake2b256 of the VALUE bytes of every valid fraud proof script.
+  // Evaluation hashes the script it is handed and looks for it here
+  val fpSet = SELF.R4[Coll[Coll[Byte]]].get
+
+  // TOKENS
+  // 0: the FP_CONTROL NFT, which Evaluation authenticates this box by at index 0
+
+  // CONSTANTS
+  // Age a box must reach before it may be refreshed, half of Ergo's storage period. Every refresh
+  // changes this box's id and so invalidates any fraud proof in flight that reads it as a data input.
+  val CONST_REFRESH_AGE  = 525600
+  // How far below HEIGHT the successor's declared creation height may sit
+  val CONST_HEIGHT_SLACK = 1000
+
+  // NEXT VALUES
+  val nextUTXO = OUTPUTS(0)
+
+  // ASSUMPTIONS - statements which can be assumed to be true due to other contracts enforcing them
+  // during creation of this UTXO
+  // - The fraud proof set never changes. A new set means a new FP_CONTROL box with a new NFT, a new
+  //   Evaluation compiled against that NFT, and a new rollup chain named by the emission config's R7,
+  //   so a client only runs fraud proofs it has opted in to.
+  // - Refreshing is permissionless, since it can only keep this box alive. No client builds one; it is
+  //   needed once every storage period at most.
+
+  // Spending Path 1: Re-create the box unchanged so its age resets
+  val onlyOne   = SELF.id == INPUTS(0).id
+  val oldEnough = SELF.creationInfo._1 < HEIGHT - CONST_REFRESH_AGE
+  // A backdated successor would be collectable for rent straight away
+  val successorYoung = nextUTXO.creationInfo._1 > HEIGHT - CONST_HEIGHT_SLACK
+  // Padding registers would raise the rent this box owes without raising its value
+  val noExtraRegisters = nextUTXO.R5[Coll[Byte]].isDefined == false
+
+  val unchanged = allOf(
+    Coll(
+      nextUTXO.propositionBytes == SELF.propositionBytes,
+      nextUTXO.value >= SELF.value,
+      nextUTXO.tokens == SELF.tokens,
+      nextUTXO.R4[Coll[Coll[Byte]]].get == fpSet,
+      noExtraRegisters
+    )
+  )
+
+  sigmaProp(allOf(Coll(onlyOne, oldEnough, successorYoung, unchanged)))
+}

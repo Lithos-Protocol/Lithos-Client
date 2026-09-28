@@ -188,9 +188,13 @@ object JsonOps {
       .map(e => jsonArrayToSeq(e).map(_.getAsInt))
       .getOrElse(Seq.empty[Int])
 
+    /**
+     * In the order the JSON lists them. A context extension re-encoded in any other order is a
+     * different transaction to the node, so a carried unconfirmed ancestor would lose its id.
+     */
     def stringMap(k: String): Map[String, String] = field(k).map { e =>
       val entries = e.getAsJsonObject.entrySet().iterator()
-      val builder = Map.newBuilder[String, String]
+      val builder = scala.collection.immutable.ListMap.newBuilder[String, String]
       while (entries.hasNext) {
         val entry = entries.next()
         if (!entry.getValue.isJsonNull) builder += entry.getKey -> entry.getValue.getAsString

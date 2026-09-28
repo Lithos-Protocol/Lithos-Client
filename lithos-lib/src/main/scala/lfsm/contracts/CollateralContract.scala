@@ -139,6 +139,14 @@ object CollateralContract {
       .build()
     Contract.fromErgoScript(ctx, constants, ScriptGenerator.mkCollatScript("Emission_Config"))
   }
+  // Governed by voting tokens rather than a key: any 3 of the 5 in a transaction's inputs may spend it
+  def mkMainnetEmConfigContract(networkType: NetworkType, voteTokenId: ErgoId): Contract = {
+    val constants = ConstantsBuilder
+      .create()
+      .item("CONST_VOTE_TOKEN_ID", Colls.fromArray(voteTokenId.getBytes))
+      .build()
+    Contract.fromErgoScript(networkType, constants, ScriptGenerator.mkCollatScript("Emission_Config_Mainnet"), Seq.empty)
+  }
   // NOTE: The contract is never actually used in a box, its serialized value bytes are instead attached
   // as a context var to emissions.
   def mkCollateralEnforcerContract(ctx: BlockchainContext, litID: ErgoId): Contract =

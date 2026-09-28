@@ -1,8 +1,10 @@
 package controllers
 
 import configs.StatsConfig
+import contracts.specs.rollup.NispFixtures
+import nisp.{NISPDatabase, NISPStorage}
 import org.bouncycastle.util.encoders.Hex
-import org.mockito.ArgumentMatchers.anyLong
+import org.mockito.ArgumentMatchers.{anyInt, anyLong}
 import org.mockito.Mockito.{never, verify, verifyNoInteractions, when}
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
@@ -13,6 +15,7 @@ import play.api.test.FakeRequest
 import play.api.test.Helpers._
 import scorex.crypto.hash.Blake2b256
 import stats._
+import storage.InMemoryKeyValueStore
 
 import scala.concurrent.{Future, Promise}
 
@@ -20,15 +23,18 @@ class StatsApiControllerSpec extends AnyFlatSpec with Matchers with MockitoSugar
   private val apiKey = "stats-test-key"
   private val config = Configuration("lithos.apiKeyHash" -> Hex.toHexString(Blake2b256.hash(apiKey)))
   private val controller = new StatsApiController(stubControllerComponents(), new StatsCache(StatsConfig.Default), config,
-    mock[MiningStatsRefresh])
+    mock[MiningStatsRefresh], emptyNisps)
   private val hour = MiningHistory.HourMs
   private val source = MiningCursor(25, "aa" * 32, "bb" * 32, hour)
+
+  private def emptyNisps: NISPStorage = new NISPDatabase(new InMemoryKeyValueStore)
 
   private def call(action: Action[AnyContent], query: String = "") =
     action.apply(FakeRequest(GET, "/stats" + query).withHeaders("api_key" -> apiKey))
 
-  private def withMining(mining: MiningStatsRefresh, cache: StatsCache = new StatsCache(StatsConfig.Default)) =
-    new StatsApiController(stubControllerComponents(), cache, config, mining)
+  private def withMining(mining: MiningStatsRefresh, cache: StatsCache = new StatsCache(StatsConfig.Default),
+                         nisps: NISPStorage = emptyNisps) =
+    new StatsApiController(stubControllerComponents(), cache, config, mining, nisps)
 
   "Statistics" should "serve the overview without an API key and forbid HTTP caching" in {
     val result = controller.getStats().apply(FakeRequest(GET, "/stats"))
@@ -144,6 +150,47 @@ class StatsApiControllerSpec extends AnyFlatSpec with Matchers with MockitoSugar
     // The session identifier and the fraud list stay behind the api key.
     (json \ "session").toOption shouldBe None
     (json \ "fraud").toOption shouldBe None
+  }
+
+  /** A cache serving a job at height 1000 on the given difficulty, with no share producer yet. */
+  private def servingAt1000(difficulty: StratumDifficulty): StatsCache = {
+    val cache = mock[StatsCache]
+    when(cache.settings).thenReturn(StatsConfig.Default)
+    when(cache.localMiningViews).thenReturn(Map.empty[String, LocalMiningActivityView])
+    when(cache.recentWork).thenReturn(Vector.empty)
+    val job = ActiveStratumJob("7", 1000, "aa" * 32, "bb" * 32, "publication", 0L, "genesis", None)
+    when(cache.snapshot(anyLong())).thenReturn(StatsView(enabled = true,
+      LocalStatsView(StratumStatsView("active", activeJob = Some(job), difficulty = Some(difficulty)))))
+    cache
+  }
+
+  it should "count the NISP from the store at the committed score, including earlier sessions" in {
+    val pk = sigma.crypto.CryptoConstants.dlogGroup.generator
+    val store = new NISPDatabase(new InMemoryKeyValueStore)
+    // Ten shares a previous session saved at the committed score, and a newer one under a score the
+    // rollup would refuse. Counting it would push the oldest out and move validThrough to 1051.
+    (990 until 1000).foreach(h => store.addNISP(500L, NispFixtures.superShare(h, pk)))
+    store.addNISP(100L, NispFixtures.superShare(1000, pk))
+    val difficulty = StratumDifficulty("100", "100", "0", reducedReporting = false, 10000, forcedConfig = false,
+      committed = Some("500"))
+
+    val json = contentAsJson(withMining(mock[MiningStatsRefresh], servingAt1000(difficulty), store)
+      .getLocalMiningSummary().apply(FakeRequest(GET, "/stats")))
+    (json \ "nisp" \ "source").as[String] shouldBe "store"
+    (json \ "nisp" \ "superSharesInWindow").as[Int] shouldBe 10
+    (json \ "nisp" \ "held").as[Boolean] shouldBe true
+    (json \ "nisp" \ "validThroughHeight").as[Int] shouldBe 1050
+  }
+
+  it should "fall back to this session's super shares when the store cannot be read" in {
+    val broken = mock[NISPStorage]
+    when(broken.superShareHeights(anyInt(), anyInt(), anyLong())).thenThrow(new IllegalStateException("closed"))
+    val difficulty = StratumDifficulty("500", "500", "0", reducedReporting = false, 10000, forcedConfig = false)
+
+    val json = contentAsJson(withMining(mock[MiningStatsRefresh], servingAt1000(difficulty), broken)
+      .getLocalMiningSummary().apply(FakeRequest(GET, "/stats")))
+    (json \ "nisp" \ "source").as[String] shouldBe "session"
+    (json \ "nisp" \ "superSharesInWindow").as[Int] shouldBe 0
   }
 
   it should "expose exact retained totals and their coverage without changing the existing snapshot" in {

@@ -99,6 +99,13 @@ class CandidateBuilder(client: ErgoClient,
 
   private var collectingFor: Option[Collection] = None
 
+  /** The round the current package was assembled from, kept so it can be assembled again. */
+  private var lastAssembled: Option[Collection] = None
+
+  /** Transactions the node left out of a candidate at `leftOutAt`; bundles holding them are not offered again. */
+  private var leftOut: Set[String] = Set.empty
+  private var leftOutAt: Int = 0
+
   /** The round `attempt` names, while it is still waiting on sources. */
   private def waitingRound(attempt: CollectionAttempt): Option[Collection] =
     collectingFor.filter(round => round.attempt == attempt && !round.assembling)
@@ -167,6 +174,7 @@ class CandidateBuilder(client: ErgoClient,
         selectedId = None
         // Retires the previous height's collection round. Its answer can no longer reach a package
         collectingFor = None
+        lastAssembled = None
         knownSpent = knownSpent.filter(e => height - e._2 < SpentMemoryBlocks)
         startBuild(height)
         prepareBlockTxs(height)
@@ -187,6 +195,19 @@ class CandidateBuilder(client: ErgoClient,
         selectedId = None
         startBuild(blockHeight)
       }
+
+    // One source's transaction cost the top-up; the rest of the package need not go with it.
+    case BlockTxsLeftOut(height, identity, txIds) if height == blockHeight &&
+      currentPackage.exists(_.identity.sameGenesis(identity)) && !blockTxsBlockedAt.contains(height) =>
+      if (leftOutAt != height) {
+        leftOut = Set.empty
+        leftOutAt = height
+      }
+      leftOut ++= txIds
+      // A round already collecting applies the exclusion itself when it assembles
+      if (collectingFor.isEmpty)
+        lastAssembled.filter(round => round.attempt.height == height && round.attempt.genesisId == identity.genesisId)
+          .foreach(reassemble)
 
     // Stop offering additions for the rejected genesis.
     case BlockTxsRejected(height, identity) if height == blockHeight &&
@@ -277,7 +298,7 @@ class CandidateBuilder(client: ErgoClient,
     case SourcesDue(attempt) =>
       waitingRound(attempt).foreach(stopWaiting)
 
-    case BlockTxsCollected(attempt, txs, revenue, from, late, limits, share, revenueByTx) =>
+    case BlockTxsCollected(attempt, txs, revenue, from, late, limits, share, revenueByTx, protocol) =>
       if (collectingFor.exists(_.attempt == attempt)) {
         if (nowNanos() - attempt.startedAt >= config.blockTxTimeout.milliseconds.toNanos) {
           expireCollection(attempt)
@@ -286,7 +307,7 @@ class CandidateBuilder(client: ErgoClient,
           currentPackage.filter(p => p.blockHeight == attempt.height &&
             p.collateral.txId == attempt.genesisId && !blockTxsBlockedAt.contains(attempt.height))
             .filter(_ => txs.nonEmpty || attempt.refresh || config.waitForBlockPackage).foreach { pkg =>
-              val updated = pkg.withBlockTxs(txs, revenue, from, late, limits, share, revenueByTx)
+              val updated = pkg.withBlockTxs(txs, revenue, from, late, limits, share, revenueByTx, protocol)
               currentPackage = Some(updated)
               publish(updated, "augmentedBuildMs", collectStartedAt, refreshed = attempt.refresh)
             }
@@ -410,12 +431,13 @@ class CandidateBuilder(client: ErgoClient,
             throw new CollateralNotFoundException(
               s"no usable collateral boxes: ${all.size} live, ${avoid.size} skipped this block")
 
-          // Keep the selected miner key at this height; draw uniformly among equally ranked collateral boxes.
+          // Keep the selected miner key at this height; draw from the configured selection pool.
           val chosen = sticky
             .flatMap(id => boxes.find(_.id == id))
             .getOrElse {
-              val best = CandidateTxBuilder.bestCandidates(boxes, height, config.clearanceAge)
-              best(random.nextInt(best.size))
+              val eligible = CandidateTxBuilder.selectionPool(boxes, height, config.clearanceAge,
+                config.collateralStrategy)
+              eligible(random.nextInt(eligible.size))
             }
 
           val chosenId = chosen.id
@@ -500,12 +522,37 @@ class CandidateBuilder(client: ErgoClient,
     assemble(round)
   }
 
+  /**
+   * Assembles `round`'s answers again under a fresh attempt, published as a new package rather than
+   * a refresh, so the bundles left out since it was assembled are dropped without the revenue gate.
+   */
+  private def reassemble(round: Collection): Unit = {
+    val attempt = round.attempt.copy(id = UUID.randomUUID(), startedAt = nowNanos(), refresh = false)
+    val retry = new Collection(attempt, round.budgets)
+    round.answers.indices.foreach(i => retry.answers(i) = round.answers(i))
+    retry.waitingOn = 0
+    collectingFor = Some(retry)
+    collectStartedAt = System.nanoTime()
+    context.system.scheduler.scheduleOnce(
+      config.blockTxTimeout.milliseconds, self, CollectTimedOut(attempt))(context.dispatcher)
+    assemble(retry)
+  }
+
   /** Admits what the round's sources offered, in source order, and builds the top-up off the mailbox. */
   private def assemble(round: Collection): Unit = {
     round.assembling = true
+    lastAssembled = Some(round)
     val attempt = round.attempt
     val height = attempt.height
-    val offered = enabledSources.indices.flatMap(i => round.answers(i).map(enabledSources(i).name -> _))
+    // A bundle goes whole, since its later members spend its earlier ones' outputs.
+    val excluded = if (leftOutAt == height) leftOut else Set.empty[String]
+    val offered = enabledSources.indices.flatMap(i => round.answers(i).map { bundles =>
+      val (dropped, kept) = bundles.partition(_.members.exists(tx => excluded.contains(tx.id)))
+      if (dropped.nonEmpty)
+        logger.info(s"Leaving ${dropped.size} ${enabledSources(i).name} bundle(s) out of block $height: " +
+          "the node left one of their transactions out")
+      enabledSources(i).name -> kept
+    })
     val late = enabledSources.indices.filter(i => round.answers(i).isEmpty).map(i => enabledSources(i).name).toSet
     // Charge the signed genesis bytes and cost before admitting source bundles.
     val genesis = currentPackage.map(_.collateral)
@@ -529,11 +576,16 @@ class CandidateBuilder(client: ErgoClient,
         // these sum to exactly the package revenue reported alongside them.
         val revenue = ledger.unspent.groupBy(_.parentTxId)
           .map { case (txId, entries) => txId -> entries.map(_.value).sum }
+        val protocol = offered.collect {
+          case (name, bundles) if configs.CandidateSourceConfig.Protocol.contains(name) =>
+            bundles.flatMap(_.members).filter(tx =>
+              tx.kind != CandidateTx.MempoolAncestor && selected.contains(tx.id)).map(_.id)
+        }.flatten.toSet
         // Carried so the served job can report what the packing was actually measured against.
         // Unbounded means the node's parameters could not be read, which is not a limit to publish.
         BlockTxsCollected(attempt, txs ++ topUp, ledger.availableErg, from, late,
           Some(blockBudget).filterNot(_ == CandidateBudget.Unbounded),
-          Some(packageBudget).filterNot(_ == CandidateBudget.Unbounded), revenue)
+          Some(packageBudget).filterNot(_ == CandidateBudget.Unbounded), revenue, protocol)
       }(collectionEc)
       .onComplete {
         case Success(msg) => self ! msg
@@ -665,14 +717,16 @@ object CandidateBuilder {
   private[mining] case class SourcesDue(attempt: CollectionAttempt)
 
   /**
-   * @param from names of the sources whose transactions `txs` carries
-   * @param late names of the sources that had not answered when `txs` was assembled
+   * @param from     names of the sources whose transactions `txs` carries
+   * @param late     names of the sources that had not answered when `txs` was assembled
+   * @param protocol ids of the admitted rollup and emission transactions, ancestors excluded
    */
   private[mining] case class BlockTxsCollected(attempt: CollectionAttempt, txs: Seq[CandidateTx], revenue: Long = 0L,
                                                from: Set[String] = Set.empty, late: Set[String] = Set.empty,
                                                limits: Option[CandidateBudget] = None,
                                                share: Option[CandidateBudget] = None,
-                                               revenueByTx: Map[String, Long] = Map.empty)
+                                               revenueByTx: Map[String, Long] = Map.empty,
+                                               protocol: Set[String] = Set.empty)
 
   private[mining] case class CollectTimedOut(attempt: CollectionAttempt)
 

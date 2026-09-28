@@ -3,6 +3,7 @@ package api
 import configs.StratumConfig
 import lfsm.LFSMHelpers
 import models.ApiError
+import models.CandidateSettings
 import models.NISPRepresentation
 import models.StratumInfo
 import org.bouncycastle.util.encoders.Hex
@@ -36,5 +37,11 @@ class MiningApiImpl extends MiningApi {
     StratumInfo(stratumConfig.diff, realTau, stratumConfig.reduceShareMessages,
       stratumConfig.reductionMultiplier, -1.0)
   }
+
+  /**
+    * @inheritdoc
+    */
+  override def getCandidateSettings(config: Configuration): CandidateSettings =
+    CandidateSettings.from(config)
 
 }

@@ -141,6 +141,20 @@ class LocalMiningSummarySpec extends AnyFlatSpec with Matchers {
     summary.nisp.flatMap(_.validThroughHeight) shouldBe Some(1051)
   }
 
+  it should "count stored heights over the session's, and without any producer yet" in {
+    val stored = (991 to 1000).toVector
+    // The session saw one share; the store holds the ten a previous session found.
+    val observation = shares("s2", 2L, 0L, 1000L).copy(superShareHeights = Vector(1000))
+    val summary = LocalMiningSummary.of(enabled = true, Map("shares" -> view(observation)),
+      height = Some(1001), stored = Some(stored))
+    summary.nisp.map(_.held) shouldBe Some(true)
+    summary.nisp.map(_.source) shouldBe Some(NispStatus.Store)
+    LocalMiningSummary.of(enabled = true, Map.empty, height = Some(1001), stored = Some(stored))
+      .nisp.flatMap(_.validThroughHeight) shouldBe Some(1051)
+    LocalMiningSummary.of(enabled = true, Map("shares" -> view(observation)), height = Some(1001))
+      .nisp.map(n => (n.source, n.superSharesInWindow)) shouldBe Some((NispStatus.Session, 1))
+  }
+
   "The work window" should "keep one sample past its far edge as the anchor and drop older ones" in {
     val cache = new StatsCache(StatsConfig.Default)
     val window = StatsCache.WorkWindowMs
@@ -174,6 +188,21 @@ class LocalMiningSummarySpec extends AnyFlatSpec with Matchers {
     history.points.map(_.reducedReporting) shouldBe Vector(false, false)
     history.status shouldBe "ready"
     history.widthMs shouldBe hour
+  }
+
+  it should "rate a day over every hour that ends in it, not only its last" in {
+    val day = MiningHistory.DayMs
+    // Hourly observations: 3600000 hashes in the first hour, none in the second, 7200000 in the third.
+    val observations = Vector(0L -> "0", 1L -> "3600000", 2L -> "3600000", 3L -> "10800000").map {
+      case (h, work) => shares("s1", h + 1, 0L, h * hour + 1000, "acceptedAssignedWork" -> work, "accepted" -> h.toString)
+    }
+    val history = LocalMiningSummary.history(observations, 0L, day, day, "ready")
+    history.points should have size 1
+    // 10800000 hashes over three measured hours.
+    history.points.head.hashesPerSecond shouldBe "1000"
+    history.points.head.measuredMs shouldBe 3 * hour
+    history.points.head.acceptedShares shouldBe 3L
+    history.points.head.start shouldBe 0L
   }
 
   it should "drop a pair whose counters went backwards rather than report a negative rate" in {

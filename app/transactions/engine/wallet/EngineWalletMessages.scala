@@ -49,6 +49,8 @@ object EngineWalletMessages {
    * @param single         one box must cover the whole request by itself, rather than a set
    * @param p2pkOnly       retained for callers explicitly requiring P2PK; all funding now requires it
    * @param deadlineMillis past this the request is answered empty rather than queued further
+   * @param confirmedOnly  only boxes already in a block, for a transaction offered to this miner's
+   *                       own candidate, which cannot carry an unconfirmed parent it was not told of
    */
   private[transactions] case class SelectInputs(erg: Long,
                                           tokens: Seq[Token] = Seq.empty,
@@ -56,7 +58,8 @@ object EngineWalletMessages {
                                           reservationId: String = java.util.UUID.randomUUID().toString,
                                           deadlineMillis: Long = Long.MaxValue,
                                           single: Boolean = false,
-                                          p2pkOnly: Boolean = false)
+                                          p2pkOnly: Boolean = false,
+                                          confirmedOnly: Boolean = false)
 
   /**
    * Reserve exact plain wallet outputs or matured rewards selected for consolidation.
@@ -95,6 +98,21 @@ object EngineWalletMessages {
 
   /** Send outcome is ambiguous; never age this reservation out without a complete node refresh. */
   private[transactions] case class MarkReservationUncertain(reservationId: String)
+
+  /**
+   * Ask for the boxes pinned to fund transactions in this miner's own block. Each is a plain P2PK
+   * box holding only ERG, confirmed when pinned, never broadcast and never offered to any selection.
+   */
+  private[transactions] case object GetPinnedInputs
+
+  /** Reply to [[GetPinnedInputs]], smallest first. */
+  private[transactions] case class PinnedInputs(boxIds: Seq[String])
+
+  /**
+   * A pinned box is no longer in the confirmed UTXO set, which for a box nothing broadcasts means a
+   * block spent it. The pin is dropped and a replacement proposed.
+   */
+  private[transactions] case class UnpinInput(boxId: String)
 
   /** Reply sent back to the requester with the selected UTXOs and matching lease identity. */
   private[transactions] case class WalletInputs(inputs: Seq[InputUTXO], reservationId: String = "")

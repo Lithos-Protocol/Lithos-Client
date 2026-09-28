@@ -414,7 +414,7 @@ object LithosDexExecution {
   }
 
   private[lithosdex] def member(signed: SignedTransaction, kind: String): CandidateTx =
-    CandidateTx(signed.getId, signed.toJson(false, false), kind,
+    CandidateTx(signed.getId, _root_.transactions.candidate.BlockTxMessages.CandidateTx.signedJson(signed), kind,
       RollupExecution.signedInputIds(signed), RollupExecution.signedSizeBytes(signed),
       signed.getCost.toLong, RollupExecution.signedLeaf(signed))
 }

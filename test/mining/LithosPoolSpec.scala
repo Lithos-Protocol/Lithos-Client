@@ -132,7 +132,8 @@ class LithosPoolSpec extends TestKit(ActorSystem("lithos-pool-spec", LithosPoolS
     val collateral = CollateralData(genesis, new JSONObject().put("id", genesis).toString, lender,
       Array.emptyByteArray, Array.emptyByteArray, "02" * 32, "address")
     val extra = if (revision == 0) Seq.empty else
-      Seq(CandidateTx(s"extra-$revision", new JSONObject().put("id", s"extra-$revision").toString, CandidateTx.Payout))
+      Seq(CandidateTx(s"extra-$revision", new JSONObject().put("id", s"extra-$revision").toString,
+        CandidateTx.Payout, leaf = s"extra-$revision"))
     BlockPackage(100, collateral, extra, revision, parent)
   }
 
@@ -610,6 +611,155 @@ class LithosPoolSpec extends TestKit(ActorSystem("lithos-pool-spec", LithosPoolS
     val call = nextCall(f)
     call.response.complete(response(call, 2))
     f.miner.expectMsgType[BroadcastJob]
+  }
+
+  it should "take a refresh that adds rollup or emission work, which no revenue gain can reflect" in {
+    val f = fixture(cfg.copy(blockTransactions = true))
+    genesis(f)
+    f.pool ! BlockPackageReady(pkg(revision = 1).copy(protocolTxs = Set("extra-1")), refreshed = true)
+    val call = nextCall(f)
+    call.txs.last should include("extra-1")
+    call.response.complete(response(call, 2))
+    f.miner.expectMsgType[BroadcastJob]
+
+    withClue("judged against the served package, so work it already carries changes nothing: ") {
+      f.pool ! BlockPackageReady(pkg(revision = 2).copy(protocolTxs = Set("extra-1")), refreshed = true)
+      f.node.calls.poll(200, TimeUnit.MILLISECONDS) shouldBe null
+    }
+  }
+
+  it should "retry protocol work omitted by the node while keeping the partial job" in {
+    val f = fixture(cfg.copy(blockTransactions = true))
+    genesis(f)
+    val offered = pkg(revision = 1).copy(protocolTxs = Set("extra-1"))
+    f.pool ! BlockPackageReady(offered)
+    val partial = nextCall(f)
+    val answer = response(partial, 2)
+    answer.getJSONObject("proof").getJSONArray("txProofs").remove(1)
+    partial.response.complete(answer)
+    f.miner.expectMsgType[BroadcastJob]
+
+    f.pool ! BlockPackageReady(offered.copy(revision = 2), refreshed = true)
+    val retry = nextCall(f)
+    retry.txs.last should include("extra-1")
+    retry.response.complete(response(retry, 3))
+    f.miner.expectMsgType[BroadcastJob]
+  }
+
+  /** A node answer with no proof for `ids`, which is how the node reports transactions it left out. */
+  private def leaving(answer: JSONObject, ids: String*): JSONObject = {
+    val proofs = answer.getJSONObject("proof").getJSONArray("txProofs")
+    (proofs.length() - 1 to 0 by -1).foreach { i =>
+      if (ids.contains(proofs.getJSONObject(i).getString("leaf"))) proofs.remove(i)
+    }
+    answer
+  }
+
+  private def member(id: String, kind: String): CandidateTx =
+    CandidateTx(id, new JSONObject().put("id", id).toString, kind, leaf = id)
+
+  private val transform = member("transform", CandidateTx.Payout)
+  private val execution = member("execution", "ergodex-batch")
+  private val topUp = member("topup", transactions.candidate.CandidateTopUp.Kind)
+
+  it should "rebuild without what the node left out, mining genesis meanwhile, instead of dropping every extra" in {
+    val f = fixture(cfg.copy(blockTransactions = true))
+    genesis(f)
+    // The top-up spends the execution's takings, so leaving the execution out takes the top-up too
+    val offered = pkg().withBlockTxs(Seq(transform, execution, topUp))
+    f.pool ! BlockPackageReady(offered)
+    val call = nextCall(f)
+    call.response.complete(leaving(response(call, 2), "execution", "topup"))
+    f.builder.expectMsg(BlockTxsLeftOut(100, offered.identity, Set("execution")))
+    val fallback = nextCall(f)
+    fallback.txs should have size 1
+    fallback.response.complete(response(fallback, 3))
+    f.miner.expectMsgType[BroadcastJob]
+
+    // The builder's rebuild is a new package, so no revenue gate stands between it and the miners
+    val rebuilt = offered.copy(blockTxs = Seq(transform, member("topup-2", transactions.candidate.CandidateTopUp.Kind)),
+      revision = offered.revision + 1)
+    f.pool ! BlockPackageReady(rebuilt)
+    val retry = nextCall(f)
+    retry.txs.mkString should (include("transform") and not include "execution")
+    retry.response.complete(response(retry, 4))
+    f.miner.expectMsgType[BroadcastJob]
+  }
+
+  it should "drop every extra for the block once the rebuilds are spent" in {
+    val f = fixture(cfg.copy(blockTransactions = true))
+    genesis(f)
+    (1 to LithosPool.MaxLeftOutRebuildsPerBlock + 1).foreach { attempt =>
+      val offered = pkg().withBlockTxs(Seq(transform, execution, topUp)).copy(revision = attempt)
+      f.pool ! BlockPackageReady(offered)
+      val call = nextCall(f)
+      call.response.complete(leaving(response(call, 2 * attempt), "execution", "topup"))
+      if (attempt <= LithosPool.MaxLeftOutRebuildsPerBlock)
+        f.builder.fishForSpecificMessage() { case msg: BlockTxsLeftOut => msg } shouldBe
+          BlockTxsLeftOut(100, offered.identity, Set("execution"))
+      else f.builder.fishForSpecificMessage() { case msg: BlockTxsRejected => msg } shouldBe
+        BlockTxsRejected(100, Some(offered.identity))
+      val fallback = nextCall(f)
+      fallback.txs should have size 1
+      fallback.response.complete(response(fallback, 2 * attempt + 1))
+      f.miner.expectMsgType[BroadcastJob]
+    }
+  }
+
+  it should "replace spent collateral directly when a candidate omits genesis" in {
+    val f = fixture(cfg.copy(blockTransactions = true))
+    val offered = pkg(revision = 1)
+    f.pool ! BlockPackageReady(offered)
+    val rejected = nextCall(f)
+    val answer = response(rejected)
+    answer.getJSONObject("proof").getJSONArray("txProofs").remove(0)
+    rejected.response.complete(answer)
+    f.builder.expectMsg(CollateralSpent(offered.collateral.collateralId))
+    f.builder.expectMsg(RebuildCandidate)
+    f.miner.expectNoMessage(100.millis)
+
+    val replacement = pkg(genesis = "03" * 32)
+    f.pool ! BlockPackageReady(replacement)
+    val retry = nextCall(f)
+    retry.txs should have size 1
+    retry.txs.head should include(replacement.collateral.txId)
+    retry.response.complete(response(retry, 2))
+    f.miner.expectMsgType[BroadcastJob]
+  }
+
+  it should "hold protocol work to the configured count" in {
+    val f = fixture(cfg.copy(blockTransactions = true, minNewProtocolTxs = 2))
+    genesis(f)
+    f.pool ! BlockPackageReady(pkg(revision = 1).copy(protocolTxs = Set("a")), refreshed = true)
+    f.node.calls.poll(200, TimeUnit.MILLISECONDS) shouldBe null
+    f.pool ! BlockPackageReady(pkg(revision = 2).copy(protocolTxs = Set("a", "b")), refreshed = true)
+    val call = nextCall(f)
+    call.txs.last should include("extra-2")
+    call.response.complete(response(call, 2))
+    f.miner.expectMsgType[BroadcastJob]
+  }
+
+  it should "keep the served package when rollups were late for the refresh, whatever protocol work it adds" in {
+    // The refresh cannot carry the served rollup work if rollups did not answer it, and new emission
+    // work does not make up for losing that.
+    val f = fixture(cfg.copy(blockTransactions = true))
+    genesis(f)
+    f.pool ! BlockPackageReady(pkg(revision = 1).copy(sources = Set("rollups"), protocolTxs = Set("r")),
+      refreshed = true)
+    val served = nextCall(f)
+    served.response.complete(response(served, 2))
+    f.miner.expectMsgType[BroadcastJob]
+
+    f.pool ! BlockPackageReady(pkg(revision = 2).copy(sources = Set("emissions"), late = Set("rollups"),
+      protocolTxs = Set("e1", "e2")), refreshed = true)
+    f.node.calls.poll(200, TimeUnit.MILLISECONDS) shouldBe null
+  }
+
+  it should "leave protocol work to the revenue gate when switched off" in {
+    val f = fixture(cfg.copy(blockTransactions = true, refreshForProtocolTxs = false))
+    genesis(f)
+    f.pool ! BlockPackageReady(pkg(revision = 1).copy(protocolTxs = Set("a", "b")), refreshed = true)
+    f.node.calls.poll(200, TimeUnit.MILLISECONDS) shouldBe null
   }
 
   it should "refresh mempool transactions with an empty package when the threshold is zero" in {

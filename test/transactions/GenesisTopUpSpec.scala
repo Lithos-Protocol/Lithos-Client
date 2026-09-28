@@ -143,21 +143,19 @@ class GenesisTopUpSpec extends AnyPropSpec with EmissionSpecBase with MockitoSug
       val signed = transactions.rollups.RollupTransactions.genHoldingTopUp(ctx, wallet, holding,
         Seq(revenue(ctx, wallet, Parameters.OneErg)), Seq.empty[UTXO], height)
 
-      val raw = signed.toJson(false, false)
-      // The order the bytes are signed in has to be the one the node's decoder produces from this
-      // same JSON. It is not numeric order and not the order the JSON text lists; it is whatever
-      // that decoder lands on, which for this id set is (64, 3).
+      val raw = transactions.candidate.BlockTxMessages.CandidateTx.signedJson(signed)
+      // The node rebuilds the extension in the order this JSON lists it: block 564574 carried a
+      // fee-less holding transform whose (64, 3) had been rewritten to (3, 64) on the way, and it
+      // landed under the id that order gives. So the JSON order has to be the signed order, and
+      // appkit writes (64, 3) for this id set.
       val signedOrder = signed.asInstanceOf[org.ergoplatform.appkit.impl.SignedTransactionImpl]
         .getTx.inputs.head.spendingProof.extension.values.keys.toSeq
-      val codecs = new org.ergoplatform.sdk.JsonCodecs {}
-      import codecs._
-      val rebuilt = io.circe.parser.parse(raw).toTry.get
-        .as[org.ergoplatform.ErgoLikeTransaction].toTry.get
-        .inputs.head.spendingProof.extension.values.keys.toSeq
-      // TODO: Fix these tests properly when SigmaMap is added
+      val listed = new com.google.gson.JsonParser().parse(raw).getAsJsonObject.getAsJsonArray("inputs")
+        .get(0).getAsJsonObject.getAsJsonObject("spendingProof").getAsJsonObject("extension")
+        .keySet().asScala.toSeq.map(_.toByte)
       withClue("a transaction signed in any other order takes an id the node will not agree on: ") {
-        signedOrder shouldBe rebuilt.sorted
-        signedOrder shouldBe Seq[Byte](3, 64)
+        signedOrder shouldBe listed
+        signedOrder shouldBe Seq[Byte](64, 3)
       }
 
       val ins = new org.json.JSONObject(raw).getJSONArray("inputs")
@@ -170,6 +168,69 @@ class GenesisTopUpSpec extends AnyPropSpec with EmissionSpecBase with MockitoSug
       // the one the node's `transactionDecoder` delegates to. appkit agreeing with itself would say
       // nothing about the node agreeing with us.
       ins.length() shouldBe 2
+    }
+  }
+
+  /**
+   * The guard every candidate transaction's JSON passes through. This is the top-up as it was built
+   * before: signed in ascending order, which appkit writes out as (64, 3).
+   */
+  property("a candidate signed in another order than its JSON lists is refused") {
+    withCtx { ctx =>
+      val wallet = walletOf(ctx)
+      val height = ctx.getHeight + 1
+      val builder = new CandidateTxBuilder(wallet, mock[NodeApi], CandidateConfig.Default)
+      val data = builder.buildGenesis(ctx, collateralInput(ctx), height)
+      val holding = data.holdingOutput.get
+      val paid = revenue(ctx, wallet, Parameters.OneErg)
+      val logic = utils.Helpers.holdingLogicContract(ctx)
+      val ascending = transactions.batching.lithosdex.DexContracts.attachCtxVars(holding, Seq(
+        (3.toByte, org.ergoplatform.appkit.ErgoValue.of(1.toByte)),
+        (64.toByte, org.ergoplatform.appkit.ErgoValue.of(sigma.Colls.fromArray(logic.valueBytes),
+          org.ergoplatform.appkit.scalaapi.scalaByteType))))
+      val signed = wallet.sign(work.lithos.mutations.TxBuilder(ctx)
+        .setInputs(ascending, paid)
+        .setOutputs(UTXO(holding.contract, holding.value + Parameters.OneErg, holding.tokens,
+          registers = holding.registers).setCreationHeight(height))
+        .setPreHeader(ctx.createPreHeader().height(height).build())
+        .buildTx(0, wallet.p2pk))
+
+      val refused = intercept[IllegalArgumentException] {
+        transactions.candidate.BlockTxMessages.CandidateTx.signedJson(signed)
+      }
+      refused.getMessage should include("(3,64)")
+      refused.getMessage should include("(64,3)")
+    }
+  }
+
+  /**
+   * Past four variables the node rebuilds an input's extension as a hash map, in the order this
+   * client signed with, whatever the JSON lists. Block 565107 carries submission `b0b51d1d…`, sent
+   * as JSON listing (0,1,2,3,64) and signed (1,64,0,2,3), under the id this client computed.
+   */
+  property("a candidate with five variables on one input passes whatever order its JSON lists") {
+    withCtx { ctx =>
+      val wallet = walletOf(ctx)
+      val height = ctx.getHeight + 1
+      val paid = transactions.batching.lithosdex.DexContracts.attachCtxVars(
+        revenue(ctx, wallet, Parameters.OneErg),
+        Seq[Byte](0, 1, 2, 3, 64).map(id => id -> org.ergoplatform.appkit.ErgoValue.of(id)))
+      val signed = wallet.sign(work.lithos.mutations.TxBuilder(ctx)
+        .setInputs(paid)
+        .setOutputs(UTXO(wallet.contract, Parameters.OneErg - Parameters.MinFee).setCreationHeight(height))
+        .setPreHeader(ctx.createPreHeader().height(height).build())
+        .buildTx(Parameters.MinFee, wallet.p2pk))
+
+      val raw = transactions.candidate.BlockTxMessages.CandidateTx.signedJson(signed)
+      val signedOrder = signed.asInstanceOf[org.ergoplatform.appkit.impl.SignedTransactionImpl]
+        .getTx.inputs.head.spendingProof.extension.values.keys.toSeq
+      val listed = new com.google.gson.JsonParser().parse(raw).getAsJsonObject.getAsJsonArray("inputs")
+        .get(0).getAsJsonObject.getAsJsonObject("spendingProof").getAsJsonObject("extension")
+        .keySet().asScala.toSeq.map(_.toByte)
+      withClue("the orders differ, so this is the case the guard must let through: ") {
+        signedOrder should not equal listed
+        signedOrder.toSet shouldBe listed.toSet
+      }
     }
   }
 

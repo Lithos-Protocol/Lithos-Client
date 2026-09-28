@@ -180,6 +180,26 @@ class NISPDatabase(private val kvstore: KeyValueStore) extends NISPStorage {
     bestNisp.filter(_.shares.size >= 10).map(nisp => nisp.copy(shares = nisp.shares.take(10)))
   }
 
+  /** Each NISP is keyed by the height its shares were found at, so a share's height is its key. */
+  def superShareHeights(from: Int, to: Int, score: Long): Seq[Int] = {
+    val (start, stored) = KeyValueStore.orThrow {
+      kvstore.readSnapshot { view =>
+        view.get(LAST_HEIGHT).flatMap {
+          case Some(last) =>
+            val start = Math.max(from, Ints.fromByteArray(last))
+            readNispRange(view, start, to).map(values => (start, values))
+          case None => Right((from, Vector.empty[Option[Array[Byte]]]))
+        }
+      }
+    }
+    stored.zipWithIndex.flatMap {
+      case (Some(bytes), offset) =>
+        val nisp = NISP.deserialize(bytes)
+        if (nisp.score >= score) Seq.fill(makeUnique(nisp.shares).size)(start + offset) else Seq.empty
+      case (None, _) => Seq.empty
+    }
+  }
+
   def makeUnique(shares: Seq[SuperShare]): Seq[SuperShare] = {
     shares.foldLeft(Seq.empty[SuperShare]) {
       (unique, share) =>

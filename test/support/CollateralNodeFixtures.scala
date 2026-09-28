@@ -122,7 +122,8 @@ object CollateralNodeFixtures {
 
   /**
    * A live collateral box: five registers, the collateral token, and NOT at the gate — which is
-   * exactly how `liveBoxes` tells it apart from a proof of spend carrying the same token.
+   * exactly how `liveBoxes` tells it apart from a proof of spend carrying the same token. R8 names
+   * the rollup holding contract this build compiles unless `rollupHash` says otherwise.
    */
   def collateralBox(ctx: BlockchainContext,
                     lender: Address,
@@ -131,7 +132,8 @@ object CollateralNodeFixtures {
                     index: Int = 0,
                     txId: String = "c2" * 32,
                     feeValue: Long = CollateralParams.DUST_BUDGET,
-                    value: Long = CollateralParams.PRINCIPAL_FLOOR): NodeBox =
+                    value: Long = CollateralParams.PRINCIPAL_FLOOR,
+                    rollupHash: Array[Byte] = null): NodeBox =
     nodeBox(ctx, UTXO(
       ProtocolContracts(ctx).collateral,
       value,
@@ -144,7 +146,7 @@ object CollateralNodeFixtures {
             org.ergoplatform.appkit.ErgoType.pairType(
               org.ergoplatform.appkit.ErgoType.collType(scalaByteType), scalaLongType))),
         ErgoValue.of(CollateralParams.EXTENSION_FLAG),
-        bytes(Contract.SIGMA_TRUE.hashedPropBytes))
+        bytes(if (rollupHash == null) ProtocolContracts(ctx).holding.hashedPropBytes else rollupHash))
     ).setCreationHeight(createdAt), index, txId)
 
   /**

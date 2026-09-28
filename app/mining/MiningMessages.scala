@@ -138,6 +138,12 @@ object MiningMessages {
    */
   case class BlockTxsRejected(blockHeight: Int, identity: Option[CandidateIdentity] = None)
 
+  /**
+   * The node took this package's genesis but left `txIds` out, and with them the top-up spending
+   * their outputs. The package is rebuilt without the bundles holding them, for the rest of the block.
+   */
+  case class BlockTxsLeftOut(blockHeight: Int, identity: CandidateIdentity, txIds: Set[String])
+
   /** Offers a package, marks pending additions, and identifies refreshes subject to the revenue threshold. */
   case class BlockPackageReady(pkg: BlockPackage, collecting: Boolean = false, refreshed: Boolean = false)
 

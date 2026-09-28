@@ -14,7 +14,7 @@ import state.messages.MempoolMessages.MempoolRollupMetadata
 import state.messages.SyncMessages._
 import transactions.candidate.BlockTxMessages.{BlockTxsReady, CandidateTx, CandidateTxsDropped, PrepareBlockTxs, RequestBlockTxs}
 import transactions.rollups.TransactionMessages.RollupTxType._
-import transactions.rollups.TransactionMessages.{BatchAccepted, BuildBlockTxs, DropRollupStubs, EvaluationSet, FraudBatch, PublishedRollupMap, RollupBatch, RollupTxStub, RollupTxType}
+import transactions.rollups.TransactionMessages.{BatchAccepted, BuildBlockTxs, CandidateStubsBuilt, DropRollupStubs, EvaluationSet, FraudBatch, PublishedRollupMap, RollupBatch, RollupTxStub, RollupTxType}
 import transactions.rollups.RollupProcessor._
 
 import javax.inject.{Inject, Named}
@@ -47,6 +47,18 @@ class RollupProcessor @Inject()(config: Configuration, nodeContext: NodeContext,
    * transactions. Cleaned and extended on every PublishedRollupMap received.
    */
   private var pendingRollupTxs: Map[String, Seq[RollupTxStub]] = Map.empty
+
+  /**
+   * Whether a refresh within a block can bring rollup work into the served job: refreshes run, and
+   * the pool adopts one for protocol work alone.
+   */
+  private val refreshesCarryRollups: Boolean = {
+    val candidate = configs.CandidateConfig(config)
+    candidate.mempoolRefreshMs > 0 && (candidate.refreshForProtocolTxs || candidate.minCandidateChangeRevenue == 0L)
+  }
+
+  /** Which queued stubs the funded path leaves to this miner's own block for now. */
+  private val candidateFirst = new CandidateFirst(logger, holdArrivals = refreshesCarryRollups)
 
   private var ticker: Option[Cancellable] = None
 
@@ -86,7 +98,9 @@ class RollupProcessor @Inject()(config: Configuration, nodeContext: NodeContext,
       val fraudProofs     = fpHeads.sortBy(_.currentPeriod)
       // Priority order for the batch: NISPSubmissions -> Transforms -> Payouts
 
-      val batch   = RollupBatch((nispSubmissions ++ fraudProofs ++ transforms ++ payouts).take(TX_BATCH_SIZE))
+      // Filtered after heads are chosen: a held head holds its rollup, since what follows spends its output
+      val batch   = RollupBatch((nispSubmissions ++ fraudProofs ++ transforms ++ payouts)
+        .filter(candidateFirst.fundable).take(TX_BATCH_SIZE))
 
       // Evaluation tx stubs are sent to RollupEvaluator
       val evalSet = EvaluationSet(evaluations.take(EVAL_SET_SIZE))
@@ -111,16 +125,24 @@ class RollupProcessor @Inject()(config: Configuration, nodeContext: NodeContext,
       fpStubs.foreach(s => addRollupStubs(Map(s.rollupBlockId -> s)))
     // Prepare selected rollup work without dispatching its funded copies.
     case PrepareBlockTxs(blockHeight, limit) =>
-      val chosen = chooseCandidateStubs(limit)
-      if (chosen.nonEmpty) transactionEngine ! BuildBlockTxs(blockHeight, chosen, answer = false)
+      candidateFirst.candidateAsked(blockHeight)
+      val chosen = chooseCandidateStubs(blockHeight, limit)
+      if (chosen.nonEmpty) transactionEngine ! BuildBlockTxs(blockHeight, chosen, answer = false, limit = limit,
+        reportTo = Some(self))
 
-    // Reuse the engine's bond reservations for this height when collecting rollup work.
-    case RequestBlockTxs(blockHeight, limit, _) =>
+    // A refresh rebuilds from what is queued now; the engine reuses this height's bond reservations.
+    case RequestBlockTxs(blockHeight, limit, refresh) =>
       val requester = sender()
-      val chosen = chooseCandidateStubs(limit)
+      candidateFirst.candidateAsked(blockHeight)
+      val chosen = chooseCandidateStubs(blockHeight, limit)
 
+      // A refresh the pool will not adopt for rollup work alone carries nothing worth holding for
       if (chosen.isEmpty) requester ! BlockTxsReady(blockHeight, Seq.empty)
-      else transactionEngine.tell(BuildBlockTxs(blockHeight, chosen), requester)
+      else transactionEngine.tell(BuildBlockTxs(blockHeight, chosen, refresh = refresh, limit = limit,
+        reportTo = Some(self).filter(_ => !refresh || refreshesCarryRollups)), requester)
+
+    case CandidateStubsBuilt(blockHeight, tried, built) =>
+      candidateFirst.built(blockHeight, tried, built, queued)
 
     // Nothing queued here is affected — the stubs were never dispatched — but RollupExecution may
     // be holding a wallet box for a submission it built into that package, so it has to be told.
@@ -132,13 +154,15 @@ class RollupProcessor @Inject()(config: Configuration, nodeContext: NodeContext,
         logger.warn(s"Discarding ${stubs.size} pending stub(s) for dropped rollup $blockId: $reason")
         pendingRollupTxs = pendingRollupTxs - blockId
       }
+      candidateFirst.forgetRollup(blockId)
 
     // The height comes back with the sync state rather than being read in the handler. This actor
     // answers RequestBlockTxs, so a BlockchainContext opened on its own thread is a node round trip
-    // in front of a miner assembling a block.
+    // in front of a miner assembling a block. Stubs are judged at the next block, where the node
+    // validates anything sent now.
     case PublishedRollupMap(newEntries) =>
       (syncHandler ? GetSynced).mapTo[SyncMessage]
-        .map(syncMsg => ProcessPublishedMap(syncMsg, newEntries, client.execute(_.getHeight)))
+        .map(syncMsg => ProcessPublishedMap(syncMsg, newEntries, client.execute(_.getHeight) + 1))
         .onComplete {
           case Failure(ex) =>
             logger.error(s"RollupProcessor failed to query sync state: ${ex.getMessage}", ex)
@@ -151,8 +175,11 @@ class RollupProcessor @Inject()(config: Configuration, nodeContext: NodeContext,
       logger.warn(s"Keeping ${pendingRollupTxs.values.map(_.size).sum} pending stub(s) while " +
         s"synchronization is ${unavailable.status}")
 
+    // Checked before the new entries arrive, so a stub carried by an earlier block is released only
+    // once state past that block still shows it undone
     case ProcessPublishedMap(FullSync(rollups, projections), newEntries, height) =>
       cleanupRollupTxs(rollups, projections, height)
+      candidateFirst.checked(height, queued)
       addRollupStubs(newEntries)
   }
 
@@ -164,6 +191,7 @@ class RollupProcessor @Inject()(config: Configuration, nodeContext: NodeContext,
   /** Removes dispatched stubs by both transaction type and fraud target. */
   private def dropStubs(dispatched: Seq[RollupTxStub]): Unit =
     dispatched.foreach { stub =>
+      candidateFirst.forget(stub)
       pendingRollupTxs.get(stub.rollupBlockId).foreach { stubs =>
         val remaining = stubs.filterNot(s => s.txType == stub.txType && sameFraudTarget(s, stub))
         if (remaining.isEmpty)
@@ -184,10 +212,29 @@ class RollupProcessor @Inject()(config: Configuration, nodeContext: NodeContext,
       case _ => false
     }
 
-  /** The highest-priority queued work, which preparation and the request have to agree on. */
-  private def chooseCandidateStubs(limit: Int): Seq[RollupTxStub] =
+  /**
+   * Queued work in priority order, which preparation and the request have to agree on. More than
+   * `limit`, because the engine builds until `limit` succeed and most stubs cannot be built at any
+   * given moment; bounded so a long queue cannot hold up the block.
+   */
+  private def chooseCandidateStubs(blockHeight: Int, limit: Int): Seq[RollupTxStub] =
     if (limit <= 0) Seq.empty[RollupTxStub]
-    else prioritise(pendingRollupTxs.values.flatMap(_.headOption).toSeq).take(limit)
+    else prioritise(pendingRollupTxs.values.flatMap(candidateHead).toSeq)
+      .filter(candidateFirst.offerable(_, blockHeight))
+      .take(math.min(TX_BATCH_SIZE, limit * CANDIDATE_ATTEMPTS_PER_SLOT))
+
+  /** Whether a stub with this identity is still waiting to be sent. */
+  private def queued(key: CandidateFirst.StubKey): Boolean =
+    pendingRollupTxs.get(key.rollupBlockId).exists(_.exists(CandidateFirst.StubKey.of(_) == key))
+
+  /**
+   * A rollup's next spend: its first stub, or its first fraud proof when that stub belongs to the
+   * evaluator. The same substitution the funded tick makes.
+   */
+  private def candidateHead(stubs: Seq[RollupTxStub]): Option[RollupTxStub] = stubs.headOption match {
+    case Some(head) if head.txType == NISPEvaluation && head.fpInfo.isEmpty => stubs.find(_.fpInfo.isDefined)
+    case head => head
+  }
 
   private def prioritise(stubs: Seq[RollupTxStub]): Seq[RollupTxStub] = {
     val submissions = stubs.filter(_.txType == NISPSubmission).sortBy(_.currentPeriod)
@@ -204,7 +251,7 @@ class RollupProcessor @Inject()(config: Configuration, nodeContext: NodeContext,
    */
   private def cleanupRollupTxs(rollups: Seq[(String, RollupMetadata)],
                                projections: Map[String, MempoolRollupMetadata],
-                               currentHeight: Int): Unit = {
+                               executionHeight: Int): Unit = {
     val rawTrees = rollups
 
     // Projections arrive with the trees they belong to, so no second read can disagree with them.
@@ -240,7 +287,7 @@ class RollupProcessor @Inject()(config: Configuration, nodeContext: NodeContext,
       val stubs = pendingRollupTxs(blockId)
 
       val validStubs = stubs.filter { stub =>
-        val isValid = stub.validate(currentHeight, tree)
+        val isValid = stub.validate(executionHeight, tree)
         if (!isValid)
           logger.warn(s"Removing stale [${stub.txType}] stub for rollup $blockId - criteria no longer met")
         isValid
@@ -258,21 +305,17 @@ class RollupProcessor @Inject()(config: Configuration, nodeContext: NodeContext,
   /** Merges new stubs by rollup while suppressing duplicate transaction types. */
   private def addRollupStubs(newEntries: Map[String, RollupTxStub]): Unit = {
     newEntries.foreach { case (blockId, stub) =>
-      pendingRollupTxs.get(blockId) match {
+      val added = pendingRollupTxs.get(blockId) match {
         case Some(existing) =>
-          if (!existing.exists(_.txType == stub.txType)){
-            pendingRollupTxs = pendingRollupTxs + (blockId -> (existing :+ stub))
-          }else if(stub.txType == RollupTxType.NISPEvaluation){
-            if(stub.fpInfo.isDefined) {
-              if (!existing.exists(_.fpInfo.isDefined)) {
-                pendingRollupTxs = pendingRollupTxs + (blockId -> (existing :+ stub))
-              } else if (!existing.exists(_.fpInfo.exists(_._1 sameElements stub.fpInfo.get._1))){
-                pendingRollupTxs = pendingRollupTxs + (blockId -> (existing :+ stub))
-              }
-            }
-          }
-        case None =>
-          pendingRollupTxs = pendingRollupTxs + (blockId -> Seq(stub))
+          !existing.exists(_.txType == stub.txType) ||
+            // A fraud proof is new when no queued proof names the same miner
+            (stub.txType == RollupTxType.NISPEvaluation && stub.fpInfo.isDefined &&
+              !existing.exists(_.fpInfo.exists(_._1 sameElements stub.fpInfo.get._1)))
+        case None => true
+      }
+      if (added) {
+        pendingRollupTxs = pendingRollupTxs + (blockId -> (pendingRollupTxs.getOrElse(blockId, Seq.empty) :+ stub))
+        candidateFirst.arrived(stub)
       }
     }
   }
@@ -285,8 +328,12 @@ object RollupProcessor {
   /** Maximum number of NISPEvaluation stubs dispatched to RollupEvaluator per tick. */
   private final val EVAL_SET_SIZE: Int  = 20
 
+  /** Stubs a candidate build may try for each transaction it is allowed to offer. */
+  private final val CANDIDATE_ATTEMPTS_PER_SLOT: Int = 4
+
   /** Widened from `private` so the package's tests can drive a tick instead of waiting 3 minutes. */
   private[transactions] case object ProcessTransactions
+  /** @param executionHeight the block a transaction sent now would be validated in */
   private case class  ProcessPublishedMap(syncMsg: SyncMessage, entries: Map[String, RollupTxStub],
-                                          currentHeight: Int)
+                                          executionHeight: Int)
 }

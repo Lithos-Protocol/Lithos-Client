@@ -3,7 +3,7 @@ package mining
 import node.NodeApi
 import node.model.{MiningSolution, NodeInfo}
 import node.rest.{NodeHttpConfig, RestNodeApi}
-import org.json.{JSONArray, JSONObject}
+import org.json.JSONObject
 import org.slf4j.{Logger, LoggerFactory}
 
 import java.net.URI
@@ -25,6 +25,20 @@ object MiningNodeInterface {
   /** Bound stalled HTTP so serialized candidate work can recover and restore the node cache. */
   private final val ConnectTimeout: Duration = Duration.ofSeconds(3)
   private final val RequestTimeout: Duration = Duration.ofSeconds(10)
+
+  /**
+   * The candidateWithTxsAndPk body, with every transaction's JSON exactly as it was signed.
+   *
+   * The node keeps a context extension in the order its JSON lists, and that order is part of the
+   * bytes the id and every signature cover. Re-serializing through a map reorders the keys, so the
+   * node would build a different transaction than the one signed; the mempool path sends the signed
+   * JSON untouched, and this sends the same text.
+   */
+  private[mining] def candidateBody(txsJson: Seq[String], minerPk: String): String = {
+    txsJson.foreach(tx => require(tx.trim.startsWith("{") && tx.trim.endsWith("}"),
+      "candidate transaction is not a JSON object"))
+    txsJson.mkString("{\"txs\":[", ",", "],\"pk\":") + JSONObject.quote(minerPk) + "}"
+  }
 }
 
 class MiningNodeInterface(nodeApiUrl: String) {
@@ -100,15 +114,11 @@ class MiningNodeInterface(nodeApiUrl: String) {
                        apiKey: Option[String],
                        minerPk: Option[String]): JSONObject =
     try {
-      val txs = new JSONArray()
-      txsJson.foreach(tx => txs.put(new JSONObject(tx)))
-      val body = new JSONObject()
-        .put("txs", txs)
-        .put("pk", minerPk.getOrElse(""))
+      val body = MiningNodeInterface.candidateBody(txsJson, minerPk.getOrElse(""))
       val httpReq = req("/mining/candidateWithTxsAndPk")
         .header("Content-Type", "application/json")
         .header("api_key", apiKey.getOrElse(""))
-        .POST(HttpRequest.BodyPublishers.ofString(body.toString))
+        .POST(HttpRequest.BodyPublishers.ofString(body))
         .build()
       val json = new JSONObject(http.send(httpReq, HttpResponse.BodyHandlers.ofString()).body())
       if (json.has("error")) {

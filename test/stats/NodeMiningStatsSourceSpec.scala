@@ -255,7 +255,7 @@ class NodeMiningStatsSourceSpec extends AnyFlatSpec with Matchers with MockitoSu
   }
 
   "Registration statistics" should "use the authenticated data-box identity rather than hashing executable context bytes" in {
-    val tree = lfsm.states.MinerDictionary.initialState
+    val tree = lfsm.states.MinerDictionary.initialState(org.ergoplatform.appkit.NetworkType.TESTNET)
     val miner = work.lithos.mutations.Contract.SIGMA_TRUE
     val add = ReducerFixtures.minerAdd(tree, miner, protocol.minerDictionaryToken,
       SyncFixtures.id(710), SyncFixtures.id(711), 120)
@@ -270,7 +270,7 @@ class NodeMiningStatsSourceSpec extends AnyFlatSpec with Matchers with MockitoSu
 
   it should "pass over a dictionary spend that carries no operation instead of failing the block" in {
     // Replay retries the block that failed, so throwing here would wedge mining history on it.
-    val tree = lfsm.states.MinerDictionary.initialState
+    val tree = lfsm.states.MinerDictionary.initialState(org.ergoplatform.appkit.NetworkType.TESTNET)
     val add = ReducerFixtures.minerAdd(tree, work.lithos.mutations.Contract.SIGMA_TRUE,
       protocol.minerDictionaryToken, SyncFixtures.id(720), SyncFixtures.id(721), 120)
     val input = indexed(ReducerFixtures.dictionaryOutput(tree.utxoId, "previous", 119, tree.dictionary,

@@ -82,6 +82,22 @@ class CommitmentTransactions(nodeContext: NodeContext, dataBoxes: DataBoxSource,
         s"Cannot submit NISPs until commit ${commits.head} is in effect"))
     else Success(commits(1)._2)
 
+  /**
+   * The score to mine at when the tip is `height`: the one in force, or the newest commitment once
+   * the block being mined reaches its declared height and it is the higher of the two. Rollups under
+   * it draw super shares from that height on, and a share found at the higher score meets the lower
+   * one too. A lower newest commitment waits until it binds, so the old score's shares keep counting.
+   */
+  private def servedAt(commits: Array[(Int, Long)], height: Int): Try[Long] = {
+    // Two blocks early, so a stratum reading this once a minute is already on it at the declared height.
+    val reached = commits.headOption.filter(_._1 <= height + 1 + CommitmentTransactions.ServeLead)
+    inForceAt(commits, height) match {
+      case Success(score) => Success(reached.map(_._2).filter(_ > score).getOrElse(score))
+      case Failure(_: CommitmentNotInEffectException) if reached.isDefined => Success(reached.get._2)
+      case failure => failure
+    }
+  }
+
   // ══════════════════════════════════════════════════════════════════════════
   //  READS
   // ══════════════════════════════════════════════════════════════════════════
@@ -100,13 +116,14 @@ class CommitmentTransactions(nodeContext: NodeContext, dataBoxes: DataBoxSource,
     Try(client.execute(ctx => dataBox(ctx).map(box => CommitmentSchedule(ctx.getHeight, commitments(box).toVector)))).flatten
 
   /**
-   * The tau this miner should hand its rigs, given the commitment in force.
+   * The tau this miner should hand its rigs: the committed score it is served at, which runs ahead
+   * of the one in force while a higher commitment is about to bind.
    *
    * Falls back to the configured tau with a warning, because the alternative is refusing to mine.
    */
   def committedTau(tau: BigInt): Try[BigInt] = Try {
     client.execute { ctx =>
-      dataBox(ctx).flatMap(box => inForceAt(commitments(box), ctx.getHeight)) match {
+      dataBox(ctx).flatMap(box => servedAt(commitments(box), ctx.getHeight)) match {
         case Success(score) =>
           val next = LFSMHelpers.convertTauOrScore(score)
           logger.info(s"Using committed score $score, tau $next")
@@ -121,11 +138,12 @@ class CommitmentTransactions(nodeContext: NodeContext, dataBoxes: DataBoxSource,
   }
 
   /**
-   * The score in force, for a caller that already holds a context.
+   * The committed score to mine at, as [[committedTau]] serves it, for a caller that already holds
+   * a context.
    */
   def committedScore(ctx: BlockchainContext, diff: String, reason: String): Try[Long] = Try {
     val configured = LFSMHelpers.convertTauOrScore(BigInt(LFSMHelpers.parseDiffValueForStratum(diff).get)).toLong
-    dataBox(ctx).flatMap(box => inForceAt(commitments(box), ctx.getHeight)) match {
+    dataBox(ctx).flatMap(box => servedAt(commitments(box), ctx.getHeight)) match {
       case Success(score) =>
         logger.info(s"Using committed score $score for $reason")
         score
@@ -348,6 +366,9 @@ object CommitmentTransactions {
    * many blocks past the notice binds `2 * NISP_WINDOW + InclusionSlack` blocks after it is sent.
    */
   final val InclusionSlack: Int = 5
+
+  /** Blocks before a higher commitment's declared height that the stratum starts serving it. */
+  final val ServeLead: Int = 2
 }
 
 /**

@@ -96,12 +96,15 @@ class LithosPool(options: Options,
   private var extrasRejected: Option[(ChainTip, String)] = None
   private var rejectedGenesis = Set.empty[String]
   private var rebuilds = 0
+  private var leftOutRebuilds = 0
   private var genesisDeadline = 0L
   private var lastRefreshAt = 0L
   private var servedRevenue = 0L
   /** The served package's contributing sources, and those that had not answered when it was assembled. */
   private var servedSources = Set.empty[String]
   private var servedLate = Set.empty[String]
+  /** The served package's rollup and emission transaction ids. */
+  private var servedProtocol = Set.empty[String]
   private val hasPackageSources = candidateConfig.blockTransactions && txSources.exists { source =>
     val limits = candidateConfig.sources.getOrElse(source.name, configs.CandidateSourceConfig.Default)
     limits.enabled && limits.maxTxs > 0
@@ -169,16 +172,17 @@ class LithosPool(options: Options,
         // source late for the served job that this refresh brings back is worth more than its ERG says
         val dropped = pkg.late.intersect(servedSources)
         val recovered = servedLate.intersect(pkg.sources)
+        // Rollup and emission work earns nothing, so no revenue gain can reflect it
+        val newProtocol = (pkg.protocolTxs -- servedProtocol).size
+        val protocolGain = candidateConfig.refreshForProtocolTxs && newProtocol >= candidateConfig.minNewProtocolTxs
         if (judged && dropped.nonEmpty) {
           logger.warn(s"Keeping published package for block ${pkg.blockHeight}: it carries work from " +
             s"${dropped.mkString(", ")}, which did not answer the refresh")
         } else if (!judged || recovered.nonEmpty || candidateConfig.minCandidateChangeRevenue == 0L ||
-          gain >= candidateConfig.minCandidateChangeRevenue) {
-          // NOTE: Rollups and emissions have 0 revenue and will only cause refreshes in the following conditions:
-          // First package for a height (the first augmentation after genesis)
-          // New genesis, or the node's cached job was dirty after a failure
-          // Refresh where revenue from other txs rose by >= 0.001 ERG
-          // Refresh where rollups or emissions answered after being late for the served package
+          gain >= candidateConfig.minCandidateChangeRevenue || protocolGain) {
+          // Taken when it is the first package for a height, a new genesis or a dirty node cache, or
+          // when the refresh gains enough revenue, enough rollup or emission transactions, or brings
+          // back a source that was late for the served package.
           blockPackage = Some(pkg)
           collectingAdditions = collecting
           logger.info(s"Ready: ${pkg.describe} with" +
@@ -194,7 +198,9 @@ class LithosPool(options: Options,
               s"${pkg.collateral.collateralBoxBytes.length}${pkg.elapsedTime.getOrElse("")}")
           }
           logger.info(s"Keeping published package for block ${pkg.blockHeight}: " +
-            s"Not enough additional revenue $gain/${candidateConfig.minCandidateChangeRevenue} nanoERG")
+            s"Not enough additional revenue $gain/${candidateConfig.minCandidateChangeRevenue} nanoERG" +
+            (if (candidateConfig.refreshForProtocolTxs)
+              s" or new protocol transactions $newProtocol/${candidateConfig.minNewProtocolTxs}" else ""))
         }
       }
 
@@ -320,11 +326,13 @@ class LithosPool(options: Options,
       extrasRejected = None
       rejectedGenesis = Set.empty
       rebuilds = 0
+      leftOutRebuilds = 0
       genesisDeadline = nowNanos() + candidateConfig.genesisWaitMs.milliseconds.toNanos
       lastRefreshAt = nowNanos()
       servedRevenue = 0L
       servedSources = Set.empty
       servedLate = Set.empty
+      servedProtocol = Set.empty
       invalidateCachedJob()
       candidateBuilder.foreach(_ ! ChainAdvanced(observed.height, observed.parentId))
       stateFrame ! CheckBlock
@@ -409,16 +417,38 @@ class LithosPool(options: Options,
         rejectExtras(request, "candidate completed after its publication deadline")
         invalidateCachedJob()
         driveCandidate()
+      case Success(fetched) if request.pkg.exists(pkg =>
+        fetched.materialized.exists(_.unproven.contains(pkg.collateral.txId))) =>
+        val pkg = request.pkg.get
+        fetched.materialized.foreach(recordMaterialization(_, request.pkg))
+        logger.warn(s"Node omitted genesis ${pkg.collateral.txId.take(8)} at block ${pkg.blockHeight}; " +
+          s"skipping collateral ${pkg.collateral.collateralId.take(8)} and rebuilding")
+        rejectedGenesis += pkg.collateral.txId
+        blockPackage = None
+        if (rebuilds < MaxRebuildsPerBlock) {
+          rebuilds += 1
+          genesisDeadline = nowNanos() + candidateConfig.genesisWaitMs.milliseconds.toNanos
+          candidateBuilder.foreach { builder =>
+            builder ! CollateralSpent(pkg.collateral.collateralId)
+            builder ! RebuildCandidate
+          }
+        } else genesisDeadline = 0L
+        invalidateCachedJob()
+        driveCandidate()
       case Success(fetched) if request.hasExtras && CandidateMaterialized.requireCorrespondence &&
         fetched.materialized.exists(!_.inclusionProven) =>
-        fetched.materialized.foreach(recordMaterialization)
-        rejectExtras(request, "the returned proof did not account for " +
-          fetched.materialized.map(_.unprovenInclusions.map(_.take(8)).mkString(", ")).getOrElse(""))
+        val materialized = fetched.materialized.get
+        recordMaterialization(materialized, request.pkg)
+        // Members left out besides the top-up are what took it with them
+        val leftOut = materialized.unproven -- materialized.unprovenInclusions
+        if (leftOut.nonEmpty && leftOutRebuilds < MaxLeftOutRebuildsPerBlock) leaveOut(request, leftOut)
+        else rejectExtras(request, "the returned proof did not account for " +
+          materialized.unprovenInclusions.map(_.take(8)).mkString(", "))
         invalidateCachedJob()
         driveCandidate()
       case Success(fetched) =>
         val candidate = fetched.candidate
-        fetched.materialized.foreach(recordMaterialization)
+        fetched.materialized.foreach(recordMaterialization(_, request.pkg))
         if (!cacheDirty && servedWork.contains(work(candidate)) && servedCandidate.contains(request.identity)) {
           candidateTimer.foreach(_.cancel())
           candidateTimer = None
@@ -457,22 +487,42 @@ class LithosPool(options: Options,
     }
   }
 
-  /** Logs proven package membership and any required transaction proofs that could not be verified. */
-  private def recordMaterialization(materialized: CandidateMaterialized): Unit = {
+  /**
+   * Logs proven package membership and any required transaction proofs that could not be verified.
+   * An unproven member is one the node refused while assembling; its own log says why.
+   */
+  private def recordMaterialization(materialized: CandidateMaterialized, pkg: Option[BlockPackage]): Unit = {
     if (materialized.fullyProven)
       logger.debug(s"Candidate ${materialized.identity.height} proved all " +
         s"${materialized.included.size} requested transaction(s), " +
         s"${materialized.knownBytes} byte(s) and ${materialized.knownCost} cost supplied")
-    else
-      logger.debug(s"Candidate ${materialized.identity.height} left " +
-        s"${materialized.unproven.size} of ${materialized.included.size + materialized.unproven.size} " +
-        "requested transaction(s) unproven; the node-selected remainder is not enumerated")
+    else {
+      val kinds = pkg.map(_.blockTxs.map(tx => tx.id -> tx.kind).toMap).getOrElse(Map.empty[String, String])
+      logger.info(s"Node left ${materialized.unproven.size} of " +
+        s"${materialized.included.size + materialized.unproven.size} requested transaction(s) out of " +
+        s"candidate ${materialized.identity.height}: " + materialized.unproven.toSeq.sorted
+        .map(id => s"${kinds.getOrElse(id, "genesis")}:${id.take(8)}").mkString(", ") +
+        "; the node log may log them as 'Not included transaction'")
+    }
     if (CandidateMaterialized.requireCorrespondence && !materialized.inclusionProven)
       logger.warn(s"Candidate ${materialized.identity.height} has unproven tx membership: " +
         materialized.unprovenInclusions.map(_.take(8)).mkString(", "))
   }
 
   /** Fall back to genesis-only for this package. Mining continues; only the extras are dropped. */
+  /**
+   * Serves genesis alone while the builder rebuilds the package without `txIds`. The top-up spent
+   * their outputs, so it went with them; everything else in the package still stands.
+   */
+  private def leaveOut(request: CandidateRequest, txIds: Set[String]): Unit = {
+    leftOutRebuilds += 1
+    blockPackage = blockPackage.map(pkg => if (pkg.identity == request.identity) pkg.withoutBlockTxs else pkg)
+    candidateBuilder.foreach(_ ! BlockTxsLeftOut(request.identity.height, request.identity, txIds))
+    logger.warn(s"Node left ${txIds.size} transaction(s) out of block ${request.identity.height}, and the " +
+      s"top-up spending their outputs with them (${txIds.map(_.take(8)).mkString(", ")}); mining genesis " +
+      "while the package is rebuilt without them")
+  }
+
   private def rejectExtras(request: CandidateRequest, reason: String): Unit = {
     extrasRejected = Some(request.chain -> request.identity.genesisId)
     candidateBuilder.foreach(_ ! BlockTxsRejected(request.identity.height, Some(request.identity)))
@@ -512,6 +562,8 @@ class LithosPool(options: Options,
     servedRevenue = request.pkg.map(_.revenue).getOrElse(0L)
     servedSources = request.pkg.map(_.sources).getOrElse(Set.empty)
     servedLate = request.pkg.map(_.late).getOrElse(Set.empty)
+    servedProtocol = request.pkg.map(_.protocolTxs).getOrElse(Set.empty) intersect
+      materialized.map(_.included).getOrElse(Set.empty)
     connections.values.foreach(_ ! BroadcastJob(template))
     statsCollector.foreach { _ =>
       activeStatsJob = Some(ActiveStratumJob(template.jobId, request.identity.height, request.identity.parentId,
@@ -600,6 +652,8 @@ class LithosPool(options: Options,
 object LithosPool {
   private[mining] case object PublishStats
   private val MaxRebuildsPerBlock = 3
+  /** Packages rebuilt per block without what the node left out, before the extras are dropped. */
+  private[mining] val MaxLeftOutRebuildsPerBlock = 2
   private val MaxQueuedSolutions = 6
   private[mining] case class ChainTip(height: Int, parentId: String)
 

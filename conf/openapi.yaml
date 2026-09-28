@@ -666,8 +666,8 @@ paths:
       tags: [stats]
       description: |
         The same worker hashrate as `/stats/mining/workers`, measured per UTC hour or day so it can
-        be graphed. Each point is the difference between two stored observations, divided by the
-        time between them.
+        be graphed. Each point sums the differences between consecutive stored observations that end
+        in its interval, divided by the time they cover. One point per interval.
 
         Only observations from one producer session can be differenced — a restart resets the
         counters — so intervals spanning a restart are left out rather than clamped. A gap therefore
@@ -836,6 +836,29 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/StratumInfo'
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+  /mining/candidate:
+    get:
+      description: >-
+        The `stratum.candidate` settings that decide what this client's blocks carry besides the
+        genesis transaction, which collateral box funds them, and when a served job is replaced
+        mid-block. Values are the ones the client started with.
+      summary: Get candidate settings
+      operationId: getCandidateSettings
+      tags:
+        - mining
+      responses:
+        '200':
+          description: The candidate settings in force
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CandidateSettings'
         default:
           description: Error
           content:
@@ -3668,10 +3691,10 @@ components:
       description: >-
         Whether this client's recent super shares make a NISP. A NISP for a rollup starting at height P
         takes 10 super shares from heights P - `windowBlocks` through P, so one holds until the
-        tenth-newest super share is `windowBlocks` behind. Counted from super shares found since the
-        share producer last started; ones from before a client restart are not included here. Absent
-        while no Stratum job is being served.
-      required: [held, superSharesInWindow, required, windowBlocks, atHeight]
+        tenth-newest super share is `windowBlocks` behind. Counted from the NISP store at the
+        committed score, so super shares from before a client restart are included. Absent while
+        no Stratum job is being served.
+      required: [held, superSharesInWindow, required, windowBlocks, atHeight, source]
       properties:
         held:
           type: boolean
@@ -3694,9 +3717,19 @@ components:
         blocksRemaining:
           type: integer
           description: Blocks from `atHeight` until `validThroughHeight`. Absent when none is held.
+        source:
+          type: string
+          enum: [store, session]
+          description: >-
+            `store` when counted from the NISP store. `session` when the store could not be read or
+            no score is known yet, so only super shares found since the client started are counted.
     LocalHashratePoint:
       type: object
-      required: [start, widthMs, hashesPerSecond, acceptedShares, superShares, reducedReporting]
+      description: >-
+        One interval of this client's share work. Every measured stretch ending inside the interval
+        is summed, so a day is rated over all of its hours.
+      required: [start, widthMs, hashesPerSecond, acceptedShares, superShares, reducedReporting,
+                 measuredMs]
       properties:
         start:
           type: integer
@@ -3719,6 +3752,12 @@ components:
         reducedReporting:
           type: boolean
           description: True when the interval's shares arrived under reduced reporting.
+        measuredMs:
+          type: integer
+          format: int64
+          description: >-
+            Milliseconds of work measured for this interval, which `hashesPerSecond` is rated over.
+            Can exceed `widthMs` when the stretch began in an earlier interval.
     LocalHashrateHistory:
       type: object
       required: [from, until, widthMs, points, status]
@@ -3847,7 +3886,11 @@ components:
         served:
           type: string
           pattern: '^[0-9]+$'
-          description: What jobs are built on. The commitment in force, or the config diff when `forcedConfig` is true.
+          description: >-
+            What jobs are built on: the commitment in force, or the config diff when `forcedConfig`
+            is true. A `pending` score higher than `committed` is served from two blocks before its
+            declared height, 62 blocks before it binds, so the super shares its first rollups draw on
+            are found at it.
         advertised:
           type: string
           pattern: '^[0-9]+$'
@@ -3916,7 +3959,8 @@ components:
         transactions on top that the client cannot see, so this is not the whole block. Expected
         revenue is what the package proposes to earn, not confirmed income, and the totals cover
         only the transactions whose size and cost are known — the rest report null.
-      required: [genesisId, collateralBoxId, revision, expectedRevenueNanoErg, sources,
+      required: [genesisId, collateralBoxId, lenderAddress, collateralPriorityFeeNanoErg,
+                 collateralFinderFeeNanoErg, revision, expectedRevenueNanoErg, sources,
                  lateSources, transactions, transactionScope, knownSizeBytes, knownCost,
                  allSizesKnown, allCostsKnown]
       properties:
@@ -3924,6 +3968,23 @@ components:
           type: string
         collateralBoxId:
           type: string
+          description: The collateral box the genesis transaction spends.
+        lenderAddress:
+          type: string
+          description: The collateral box's lender, who receives this block's coinbase.
+        collateralPriorityFeeNanoErg:
+          type: string
+          pattern: '^[0-9]+$'
+          description: >-
+            nanoERG the collateral box carries above the principal floor. '0' means it was posted
+            at the floor.
+        collateralFinderFeeNanoErg:
+          type: string
+          pattern: '^[0-9]+$'
+          description: >-
+            The part of `collateralPriorityFeeNanoErg` the genesis transaction pays to this client's
+            wallet: a fifth of it, or '0' when the genesis transaction has no finder output to
+            carry it and it stays with the pool.
         revision:
           type: integer
         expectedRevenueNanoErg:
@@ -4192,6 +4253,103 @@ components:
           nullable: true
           description: Why mempool processing is unavailable, when it is unavailable
           example: 'mempool transaction scan exceeded its configured bound'
+    CandidateSourceSettings:
+      description: One `stratum.candidate.sources` entry.
+      type: object
+      x-tags: mining
+      required: [name, enabled, active, maxTxs, maxBytes, maxCost]
+      properties:
+        name:
+          type: string
+          enum: [rollups, emissions, rent, lithosdex, ergodex]
+        enabled:
+          type: boolean
+          description: The source's own `enabled` setting.
+        active:
+          type: boolean
+          description: >-
+            Whether candidates ask this source for transactions: `blockTransactions` is on, the
+            source is enabled with `maxTxs` above 0 and, for `lithosdex` and `ergodex`, the
+            matching `batching` block is enabled.
+        maxTxs:
+          type: integer
+          description: Transactions this source may place in one block, carried ancestors included.
+        maxBytes:
+          type: integer
+          format: int64
+          description: Serialized bytes this source may claim.
+        maxCost:
+          type: integer
+          format: int64
+          description: Validation cost this source may claim.
+    CandidateSettings:
+      description: The `stratum.candidate` settings in force.
+      type: object
+      x-tags: mining
+      required: [blockTransactions, sources, blockShare, waitForBlockPackage, genesisWaitMs,
+                 blockTxTimeout, mempoolRefreshMs, minCandidateChangeRevenue, refreshForProtocolTxs,
+                 minNewProtocolTxs, collateralStrategy, clearanceAge, pinnedInputs]
+      properties:
+        blockTransactions:
+          type: boolean
+          description: >-
+            Whether this client's blocks carry transactions besides the genesis transaction. When
+            false, no source is asked.
+        sources:
+          type: array
+          description: Every transaction source, in the order candidates ask them.
+          items:
+            $ref: '#/components/schemas/CandidateSourceSettings'
+        blockShare:
+          type: number
+          format: double
+          description: Fraction of the node's block size and cost limits the whole package may claim.
+        waitForBlockPackage:
+          type: boolean
+          description: >-
+            Whether the first job for a height waits, up to `genesisWaitMs`, for the sources before
+            it is sent.
+        genesisWaitMs:
+          type: integer
+          description: >-
+            Milliseconds to wait for the genesis transaction before a solo job is sent instead.
+        blockTxTimeout:
+          type: integer
+          description: Milliseconds the sources have to build their transactions.
+        mempoolRefreshMs:
+          type: integer
+          description: Milliseconds between mid-block package rebuilds. 0 turns them off.
+        minCandidateChangeRevenue:
+          type: integer
+          format: int64
+          description: >-
+            nanoERG a rebuilt package must add over the served one before the job changes mid-block.
+        refreshForProtocolTxs:
+          type: boolean
+          description: >-
+            Whether a rebuilt package that adds rollup or emission transactions also changes the job
+            mid-block.
+        minNewProtocolTxs:
+          type: integer
+          description: >-
+            Rollup or emission transactions the rebuilt package must add before
+            `refreshForProtocolTxs` changes the job.
+        collateralStrategy:
+          type: string
+          enum: [highestFee, random]
+          description: >-
+            How the collateral box is picked. `highestFee` takes the highest priority fee until a box
+            reaches `clearanceAge`; `random` draws from every usable box.
+        clearanceAge:
+          type: integer
+          description: >-
+            With `highestFee`, blocks a collateral box may stay live before the oldest is taken
+            regardless of fee. Ignored by `random`.
+        pinnedInputs:
+          type: integer
+          description: >-
+            Wallet boxes set aside to fund transactions that need a wallet input inside this
+            client's own block.
     StratumInfo:
       description: Information about the Stratum server
       type: object

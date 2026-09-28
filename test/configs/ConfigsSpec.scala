@@ -25,6 +25,37 @@ class ConfigsSpec extends AnyFlatSpec with Matchers {
     thrown.getMessage should include("stratum.candidate.minCandidateChangeRevenue")
   }
 
+  it should "reject a protocol refresh count of zero, which would take every refresh" in {
+    val configured = Configuration(ConfigFactory.parseString("stratum.candidate.minNewProtocolTxs = 0")
+      .withFallback(shipped.underlying).resolve())
+    val thrown = the[ConfigValidationException] thrownBy Configs.validateAll(configured)
+    thrown.getMessage should include("stratum.candidate.minNewProtocolTxs")
+  }
+
+  it should "bound pinned inputs to 0 through 16" in {
+    def withPins(pins: Int): Configuration = Configuration(ConfigFactory.parseString(
+      s"stratum.candidate.pinnedInputs = $pins").withFallback(shipped.underlying).resolve())
+    Seq(0, 1, 16).foreach { pins =>
+      withClue(s"pinnedInputs $pins: ")(noException should be thrownBy Configs.validateAll(withPins(pins)))
+    }
+    Seq(-1, 17).foreach { pins =>
+      val thrown = the[ConfigValidationException] thrownBy Configs.validateAll(withPins(pins))
+      thrown.getMessage should include("stratum.candidate.pinnedInputs")
+    }
+  }
+
+  it should "bound the rollup ancestor count to 0 through 64" in {
+    def withCap(cap: Int): Configuration = Configuration(ConfigFactory.parseString(
+      s"stratum.candidate.sources.rollups.maxAncestorTxs = $cap").withFallback(shipped.underlying).resolve())
+    Seq(0, 4, 64).foreach { cap =>
+      withClue(s"maxAncestorTxs $cap: ")(noException should be thrownBy Configs.validateAll(withCap(cap)))
+    }
+    Seq(-1, 65).foreach { cap =>
+      val thrown = the[ConfigValidationException] thrownBy Configs.validateAll(withCap(cap))
+      thrown.getMessage should include("stratum.candidate.sources.rollups.maxAncestorTxs")
+    }
+  }
+
   it should "bound the collateral clearance age to 100 through 14400 blocks" in {
     def withAge(age: Int): Configuration = Configuration(
       ConfigFactory.parseString(s"stratum.candidate.clearanceAge = $age").withFallback(shipped.underlying).resolve())
@@ -35,6 +66,17 @@ class ConfigsSpec extends AnyFlatSpec with Matchers {
       val thrown = the[ConfigValidationException] thrownBy Configs.validateAll(withAge(age))
       thrown.getMessage should include("stratum.candidate.clearanceAge")
     }
+  }
+
+  it should "accept only the two collateral selection strategies" in {
+    def withStrategy(strategy: String): Configuration = Configuration(
+      ConfigFactory.parseString(s"""stratum.candidate.collateralStrategy = "$strategy"""")
+        .withFallback(shipped.underlying).resolve())
+    CandidateConfig.CollateralStrategies.foreach { strategy =>
+      withClue(s"strategy $strategy: ")(noException should be thrownBy Configs.validateAll(withStrategy(strategy)))
+    }
+    val thrown = the[ConfigValidationException] thrownBy Configs.validateAll(withStrategy("oldest"))
+    thrown.getMessage should include("stratum.candidate.collateralStrategy")
   }
 
   it should "accept only the listed reduction multipliers" in {

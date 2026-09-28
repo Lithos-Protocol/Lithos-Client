@@ -12,16 +12,14 @@ import play.api.{ConfigLoader, Configuration}
  *
  * @param enabled               Drive the collateral queue at all.
  * @param queueInterval         How often to look at the head of the queue, in ms.
- * @param maxQueueSpends        How many emission spends to chain in one pass. Each respends the
- *                              previous one's successor, so this is how deep into the queue one pass
- *                              reaches.
- * @param mempoolChaining       Chain off unconfirmed spends of the emission box rather than waiting
- *                              for confirmation. During a join burst the confirmed box is several
- *                              spends behind, so without this the queue can barely be driven at all.
- *                              These unconfirmed spends belong to OTHER lenders, so they are chained
- *                              onto and never displaced.
- * @param maxChainDepth         How many unconfirmed spends to follow before falling back to
- *                              confirmed state.
+ * @param maxQueueSpends        How many emission spends to chain in one funded pass. Each respends
+ *                              the previous one's successor, so this is how deep into the queue one
+ *                              pass reaches.
+ * @param candidateActivates    How many Activates this miner's own block carries when no Clear is in
+ *                              reach. A reachable Clear lifts this to the emissions source's maxTxs.
+ * @param maxChainDepth         How many unconfirmed spends of the emission box to follow. Broadcasts
+ *                              always build on the newest box; following the spends is what lets a
+ *                              queue pass activate queue boxes that joins still in the mempool made.
  * @param queueScanLimit        How many queue boxes to page through when looking for the head.
  * @param txFee                 Fee on emission transactions, in nanoERG.
  * @param autoCollateralize     Put this miner's own ERG and LIT into the queue.
@@ -48,7 +46,7 @@ import play.api.{ConfigLoader, Configuration}
 case class EmissionConfig(enabled: Boolean,
                           queueInterval: Int,
                           maxQueueSpends: Int,
-                          mempoolChaining: Boolean,
+                          candidateActivates: Int,
                           maxChainDepth: Int,
                           queueScanLimit: Int,
                           txFee: Long,
@@ -67,7 +65,7 @@ object EmissionConfig {
     enabled = true,
     queueInterval = 240000,
     maxQueueSpends = 4,
-    mempoolChaining = true,
+    candidateActivates = 5,
     maxChainDepth = 16,
     queueScanLimit = 500,
     txFee = Parameters.MinFee,
@@ -98,7 +96,7 @@ object EmissionConfig {
       enabled = bool("enabled", Default.enabled),
       queueInterval = int("queueInterval", Default.queueInterval),
       maxQueueSpends = int("maxQueueSpends", Default.maxQueueSpends),
-      mempoolChaining = bool("mempoolChaining", Default.mempoolChaining),
+      candidateActivates = int("candidateActivates", Default.candidateActivates),
       maxChainDepth = int("maxChainDepth", Default.maxChainDepth),
       queueScanLimit = int("queueScanLimit", Default.queueScanLimit),
       txFee = long("txFee", Default.txFee),

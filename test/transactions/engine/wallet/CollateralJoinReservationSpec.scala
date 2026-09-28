@@ -63,7 +63,7 @@ class CollateralJoinReservationSpec
       case GetSpendableBalance => sender() ! SpendableBalance(1000L * Parameters.OneErg)
       case GetUnlockedRewards => sender() ! RewardSummary(0, 0, 0L, 0L, None)
 
-      case m @ SelectInputs(_, _, _, id, _, _, _) =>
+      case m @ SelectInputs(_, _, _, id, _, _, _, _) =>
         watcher ! m
         sender() ! WalletInputs(funding, id)
 
@@ -121,6 +121,7 @@ class CollateralJoinReservationSpec
                  else Seq.empty[IndexedBox]): Try[Seq[IndexedBox]])
       })
     when(nodeApi.unconfirmedInputByBoxId(anyString())).thenReturn(Success(None))
+    when(nodeApi.unconfirmedTransactionsByErgoTree(anyString(), any[Paging])).thenReturn(Success(Seq.empty))
     when(nodeApi.walletAddresses()).thenReturn(Success(addresses.map(_.toString)))
     when(nodeApi.indexerEnabled).thenReturn(true)
     when(nodeApi.info()).thenReturn(Success(support.ChainFixtures.infoAt(100000).copy(bestFullHeaderId = Some("aa" * 32))))

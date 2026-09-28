@@ -191,9 +191,9 @@ object LDBoxes {
     // has no endpoint that reads a box and its mempool status atomically. Narrowing it is all this
     // does; the builder still has to survive losing the race.
     nodeApi.unconfirmedInputByBoxId(boxId) match {
-      case Success(Some(tx)) =>
+      case Success(Some(_)) =>
         throw new BoxBeingSpentException(
-          s"provision $boxId is already being spent by unconfirmed transaction ${tx.id}: " +
+          s"provision $boxId is already being spent by an unconfirmed transaction: " +
             "read it again to find its successor")
       case Failure(ex) => throw indexUnavailable("the mempool", ex)
       case Success(None) => ()

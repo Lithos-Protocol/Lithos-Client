@@ -549,7 +549,7 @@ class StateSnapshotStoreSpec extends AnyFlatSpec with Matchers with BeforeAndAft
       rollupId -> Rollup(dictionary, 1, BigInt(50), RollupInfoState.holding(90L, 90L, 0L),
         1000000L, 90, hasMiner = true, evaluated = true, blockId = rollupId, utxoId = utxoId)
     }
-    val minerTree = MinerDictionary.initialState.copy(dictionary = minerDictionary, numMiners = 1,
+    val minerTree = MinerDictionary.initialState(org.ergoplatform.appkit.NetworkType.TESTNET).copy(dictionary = minerDictionary, numMiners = 1,
       hasMiner = true, syncHeight = height, savedHeight = height)
     CommittedSyncState(SyncCursor(height, SyncFixtures.id(height), SyncFixtures.id(height - 1)),
       version, tracked.toMap, tracked.map { case (id, tree) => tree.utxoId -> id }.toMap,

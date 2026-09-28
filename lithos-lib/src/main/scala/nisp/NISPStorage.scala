@@ -49,6 +49,13 @@ trait NISPStorage {
    * @return `Some(NISP)` with 10 super-shares below the given height and above the given score, or `None`
    */
   def getBestValidNISP(height: Int, score: Long): Option[NISP]
+
+  /**
+   * One height per distinct super share stored at heights `from` through `to` under a score of at
+   * least `score`: the shares [[getBestValidNISP]] may draw on for those heights. Empty when the
+   * store holds nothing in range.
+   */
+  def superShareHeights(from: Int, to: Int, score: Long): Seq[Int]
   def makeUnique(shares: Seq[SuperShare]): Seq[SuperShare]
   def updateLastHeight(newLastHeight: Array[Byte], storedLastHeight: Option[Array[Byte]]): Boolean
 

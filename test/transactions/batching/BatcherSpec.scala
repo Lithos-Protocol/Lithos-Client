@@ -33,18 +33,24 @@ class BatcherSpec extends AnyFlatSpec with Matchers {
     Batcher.servesCandidates(config(None, Some(true), Some(true)), "ergodex") shouldBe false
   }
 
-  it should "be false when the stratum inserts no block transactions, which is its default" in {
+  it should "be false when the stratum inserts no block transactions" in {
     Batcher.servesCandidates(config(Some(true), Some(true), Some(true), blockTransactions = Some(false)), "ergodex") shouldBe false
-    Batcher.servesCandidates(config(Some(true), Some(true), Some(true), blockTransactions = None), "ergodex") shouldBe false
+  }
+
+  it should "follow the default, which inserts them" in {
+    Batcher.servesCandidates(config(Some(true), Some(true), Some(true), blockTransactions = None), "ergodex") shouldBe true
   }
 
   it should "be false when the batcher is disabled" in {
     Batcher.servesCandidates(config(Some(true), Some(false), Some(true)), "ergodex") shouldBe false
   }
 
-  it should "be false when the candidate source is off, which is its default" in {
+  it should "be false when the candidate source is off" in {
     Batcher.servesCandidates(config(Some(true), Some(true), Some(false)), "ergodex") shouldBe false
-    Batcher.servesCandidates(config(Some(true), Some(true), None), "ergodex") shouldBe false
+  }
+
+  it should "be true when the candidate source is left at its default, which is on" in {
+    Batcher.servesCandidates(config(Some(true), Some(true), None), "ergodex") shouldBe true
   }
 
   it should "be false for a name with no candidate source" in {

@@ -697,7 +697,7 @@ class StateFrame @Inject()(config: Configuration,
       }
       seedCursor().flatMap { cursor =>
         val seed = CommittedSyncState(cursor, 0L, Map.empty, Map.empty, Map.empty,
-          rebuilt.map(_.minerTree).getOrElse(lfsm.states.MinerDictionary.initialState),
+          rebuilt.map(_.minerTree).getOrElse(lfsm.states.MinerDictionary.initialState(protocol.networkType)),
           rebuilt.toOption.flatMap(_.dataBoxToken), rebuilt.left.toOption)
         (syncHandler ? RestoreCommittedState(seed, Vector(cursor))).map {
           case _: BlockCommitted => RestoreOutcome.Restored(seed)

@@ -126,4 +126,10 @@ object RollupContracts {
     Contract.fromErgoScript(ctx, constants, ScriptGenerator.mkRollupScript("FP_Control_Testnet"))
   }
 
+  // Immutable and constant-free: the fraud proof set and the NFT live in the box, so every set shares
+  // this one script
+  def mkFPControlMainnetContract(networkType: NetworkType): Contract =
+    Contract.fromErgoScript(networkType, ConstantsBuilder.create().build(),
+      ScriptGenerator.mkRollupScript("FP_Control_Mainnet"), Seq.empty[Mutator])
+
 }

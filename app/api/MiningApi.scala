@@ -2,6 +2,7 @@ package api
 
 import play.api.libs.json._
 import models.ApiError
+import models.CandidateSettings
 import models.NISPRepresentation
 import models.StratumInfo
 import play.api.Configuration
@@ -20,4 +21,11 @@ trait MiningApi {
     * Information about the Lithos stratum
     */
   def getStratumInfo(config: Configuration): StratumInfo
+
+  /**
+    * Get candidate settings
+    * The `stratum.candidate` settings that decide what this client's blocks carry besides the
+    * genesis transaction
+    */
+  def getCandidateSettings(config: Configuration): CandidateSettings
 }

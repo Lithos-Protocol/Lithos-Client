@@ -302,29 +302,32 @@ class TransactionCostSizingSpec extends AnyPropSpec with BeforeAndAfterAll
                          wallet: RecordingWallet,
                          proof: TransactionProof,
                          levels: Int,
-                         otherMiners: Int): (SignedTransaction, Int) = {
+                         otherMiners: Int,
+                         periodStart: Long = -1L,
+                         blockHeight: Int = -1): (SignedTransaction, Int) = {
     val score = 100000L
     val nisp = NISP(score, sharesWith(ctx, wallet, proof, levels))
     val nispSize = nisp.serialize.length
 
     val tree = commitmentTree((0 until otherMiners).map(i => keyFor(i) -> nispBytes(score, nispSize)))
     val heldBond = otherMiners.toLong * RollupProtocol.bondForScore(score)
-    val periodStart = ctx.getHeight.toLong - 100L
+    val start = if (periodStart >= 0) periodStart else ctx.getHeight.toLong - 100L
+    val executesAt = if (blockHeight >= 0) blockHeight else ctx.getHeight + 1
     val value = boxValue + heldBond
 
     val in = UTXO(liveHolding(ctx), value, Seq.empty[Token], Seq(
       tree.ergoValue, ErgoValue.of(otherMiners),
       ErgoValue.of(BigInt(otherMiners.toLong * score).bigInteger),
-      stateReg(periodStart, periodStart, heldBond)))
+      stateReg(start, start, heldBond)))
       .toInput(ctx, ErgoId.create(dummyTxId), 0.toShort)
 
     val state = Rollup(tree, numMiners = otherMiners,
       totalScore = BigInt(otherMiners.toLong * score),
-      state = RollupInfoState.holding(periodStart, periodStart, heldBond), value = value,
-      startHeight = periodStart.toInt, hasMiner = true, blockId = "bb" * 32, utxoId = dummyTxId)
+      state = RollupInfoState.holding(start, start, heldBond), value = value,
+      startHeight = start.toInt, hasMiner = true, blockId = "bb" * 32, utxoId = dummyTxId)
 
     val signed = RollupTransactions.genNISPSubmission(ctx, wallet, in,
-      Seq(walletInput(ctx, wallet)), LatestRollup(in, state), feeOutputs, nisp, score)
+      Seq(walletInput(ctx, wallet)), LatestRollup(in, state), feeOutputs, nisp, score, executesAt)
     (signed, nispSize)
   }
 
@@ -361,6 +364,48 @@ class TransactionCostSizingSpec extends AnyPropSpec with BeforeAndAfterAll
       // accepts, or these are measurements of a transaction that could never be made.
       shallow._2 should be >= LFSMHelpers.NISP_MIN
       deep._2 should be < LFSMHelpers.NISP_MAX
+    }
+  }
+
+  /**
+   * Each phase signs with its pre-header at the block it executes in. Left at appkit's default,
+   * signing evaluated HEIGHT at the tip, one below where the node validates, so each of these was
+   * unsignable at the first block its contract accepts.
+   */
+  property("rollup: each phase signs at the first block its contract accepts") {
+    withCtx { ctx =>
+      val wallet = walletOf(ctx)
+      val next = ctx.getHeight + 1
+      val score = 100000L
+      val bond = RollupProtocol.bondForScore(score)
+      val tree = commitmentTree(Seq(wallet.contract.hashedPropBytes -> nispBytes(score, 24000)))
+
+      val holdingStart = next - LFSMHelpers.HOLDING_PERIOD
+      val holdingIn = chainBox(ctx, liveHolding(ctx), RollupInfoState.holding(holdingStart, holdingStart, bond),
+        boxValue + bond, Seq.empty[Token], score, 1, tree)
+      noException should be thrownBy RollupTransactions.genHoldingTransform(ctx, wallet, holdingIn,
+        Seq(walletInput(ctx, wallet)), feeOutputs, next)
+
+      val evalStart = next - LFSMHelpers.EVAL_PERIOD
+      val evalIn = chainBox(ctx, liveEval(ctx),
+        RollupInfoState.evaluation(evalStart, evalStart - LFSMHelpers.HOLDING_PERIOD, bond),
+        boxValue + bond, Seq.empty[Token], score, 1, tree)
+      noException should be thrownBy RollupTransactions.genEvalTransform(ctx, wallet, evalIn,
+        Seq(walletInput(ctx, wallet)), feeOutputs, next)
+      withClue("at the tip the evaluation period is still open, so the transform cannot sign: ") {
+        an[Exception] should be thrownBy RollupTransactions.genEvalTransform(ctx, wallet, evalIn,
+          Seq(walletInput(ctx, wallet)), feeOutputs, ctx.getHeight)
+      }
+
+      // A rollup mined at the tip: Holding_Logic refuses only its own block
+      val (_, txBytes, collatBytes) = genesis(ctx, wallet)
+      val proof = TransactionProof(txBytes, collatBytes)
+      noException should be thrownBy submission(ctx, wallet, proof, levels = 2, otherMiners = 0,
+        periodStart = ctx.getHeight.toLong, blockHeight = next)
+      withClue("inside the rollup's own block the submission cannot sign: ") {
+        an[Exception] should be thrownBy submission(ctx, wallet, proof, levels = 2, otherMiners = 0,
+          periodStart = ctx.getHeight.toLong, blockHeight = ctx.getHeight)
+      }
     }
   }
 
@@ -406,7 +451,7 @@ class TransactionCostSizingSpec extends AnyPropSpec with BeforeAndAfterAll
         boxValue + bond, Seq.empty[Token], score, 1, tree)
       measure("rollup", "evaluation -> payout transform",
         RollupTransactions.genEvalTransform(ctx, wallet, evalIn,
-          Seq(walletInput(ctx, wallet)), feeOutputs))
+          Seq(walletInput(ctx, wallet)), feeOutputs, ctx.getHeight + 1))
     }
   }
 
