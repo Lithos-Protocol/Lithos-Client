@@ -61,6 +61,13 @@ class MiningApiController @Inject()(cc: ControllerComponents, api: MiningApi, co
     Ok(json)
   }
 
+  /**
+    * GET /mining/candidate
+    */
+  def getCandidateSettings(): Action[AnyContent] = Action {
+    Ok(Json.toJson(api.getCandidateSettings(config)))
+  }
+
   private def splitCollectionParam(paramValues: String, collectionFormat: String): List[String] = {
     val splitBy =
       collectionFormat match {

@@ -41,6 +41,9 @@ class Module(environment: Environment, configuration: Configuration) extends Abs
     // Bind the disk-backed data-box source so consumers can substitute it in tests.
     bind(classOf[DataBoxSource]).toInstance(DataBoxSource.Stored)
 
+    // The one NISP store the stratum writes super shares into, for readers outside the mining path.
+    bind(classOf[nisp.NISPStorage]).toInstance(Globals.nispDB)
+
     // Bindings
     bind(classOf[stats.DexStatsSource]).to(classOf[stats.NodeDexStatsSource])
     bindActor(classOf[stats.StatsCollector], "stats-collector", p =>

@@ -81,6 +81,21 @@ class DatabaseBoundarySpec extends AnyFlatSpec with Matchers {
     database.currentHeight shouldBe None
   }
 
+  it should "list one height per stored super share at or above a score" in {
+    val database = new NISPDatabase(new InMemoryKeyValueStore)
+    val pk = CryptoConstants.dlogGroup.generator
+    database.superShareHeights(0, 1000, 0L) shouldBe empty
+    database.addNISP(50L, NispFixtures.superShare(100, pk))
+    database.addNISP(50L, NispFixtures.superShare(100, pk, nonce = Array.fill(8)(1.toByte)))
+    database.addNISP(50L, NispFixtures.superShare(104, pk))
+    database.addNISP(20L, NispFixtures.superShare(106, pk))
+
+    database.superShareHeights(90, 110, 50L) shouldBe Seq(100, 100, 104)
+    database.superShareHeights(90, 110, 20L) shouldBe Seq(100, 100, 104, 106)
+    database.superShareHeights(101, 105, 20L) shouldBe Seq(104)
+    database.superShareHeights(107, 200, 0L) shouldBe empty
+  }
+
   "MDDatabase" should "use an injected store without changing its synchronous API" in {
     val store = new InMemoryKeyValueStore
     val database = new MDDatabase(store)

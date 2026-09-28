@@ -64,13 +64,14 @@ class ConfigDefaultsSpec extends AnyFlatSpec with Matchers {
   }
 
   "A config without a source's block" should "leave an off-by-default source off" in {
-    val sources = CandidateConfig(Configuration.empty).sources
-    sources(CandidateSourceConfig.ErgoDex).enabled shouldBe false
-    sources(CandidateSourceConfig.Rent).enabled shouldBe false
+    CandidateConfig(Configuration.empty).sources(CandidateSourceConfig.Rent).enabled shouldBe false
   }
 
-  it should "leave the LithosDex source on, since LithosDex launches first" in {
-    CandidateConfig(Configuration.empty).sources(CandidateSourceConfig.LithosDex).enabled shouldBe true
+  it should "leave the DEX sources on, and block transactions with them" in {
+    val defaults = CandidateConfig(Configuration.empty)
+    defaults.blockTransactions shouldBe true
+    defaults.sources(CandidateSourceConfig.LithosDex).enabled shouldBe true
+    defaults.sources(CandidateSourceConfig.ErgoDex).enabled shouldBe true
   }
 
   "StratumConfig.DefaultReductionMultiplier" should "equal what the shipped application.conf parses" in {

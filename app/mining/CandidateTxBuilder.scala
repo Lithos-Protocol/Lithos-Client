@@ -280,7 +280,8 @@ class CandidateTxBuilder(prover: NodeWallet, nodeApi: NodeApi, config: Candidate
     // the transaction it came from.
     CollateralData(sTx.getId.replace("\"", ""), _root_.transactions.candidate.BlockTxMessages.CandidateTx.signedJson(sTx), pkString, utxBytes,
       collat.bytes, collat.id.toString, lenderAddress.toString, signedBytes, sTx.getCost.toLong,
-      Some(InputUTXO(sTx.getOutputsToSpend.get(0))))
+      Some(InputUTXO(sTx.getOutputsToSpend.get(0))), RollupProtocol.priorityFeeOf(finderFee),
+      if (finderValue > 0) finderFee else 0L)
   }
 
   /**

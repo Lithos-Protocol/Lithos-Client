@@ -2,13 +2,15 @@ package controllers
 
 import api.ApiHelper
 import api.models.{LocalMiningResponse, StatsResponses}
+import nisp.NISPStorage
 import org.bouncycastle.util.encoders.Hex
 import org.slf4j.LoggerFactory
 import play.api.Configuration
 import play.api.libs.json.Json
 import play.api.mvc._
 import scorex.crypto.hash.Blake2b256
-import stats.{DifficultyEpochs, LocalMiningSummary, MiningHistory, MiningStatsRefresh, PaymentLedger, StatsCache, StatsView}
+import stats.{DifficultyEpochs, LocalMiningSummary, MiningHistory, MiningStatsRefresh, PaymentLedger, StatsCache, StatsView,
+  StratumDifficulty}
 
 import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
@@ -24,7 +26,7 @@ import scala.util.control.NonFatal
  */
 @Singleton
 class StatsApiController @Inject()(cc: ControllerComponents, cache: StatsCache, config: Configuration,
-                                  mining: MiningStatsRefresh)
+                                  mining: MiningStatsRefresh, nisps: NISPStorage)
   extends AbstractController(cc) {
   import StatsResponses._
 
@@ -77,9 +79,27 @@ class StatsApiController @Inject()(cc: ControllerComponents, cache: StatsCache, 
   })
 
   def getLocalMiningSummary(): Action[AnyContent] = noStore(Action {
-    val height = cache.snapshot().local.stratum.activeJob.map(_.height)
-    Ok(Json.toJson(LocalMiningSummary.of(cache.settings.enabled, cache.localMiningViews, cache.recentWork, height)))
+    val stratum = cache.snapshot().local.stratum
+    val height = stratum.activeJob.map(_.height)
+    Ok(Json.toJson(LocalMiningSummary.of(cache.settings.enabled, cache.localMiningViews, cache.recentWork, height,
+      height.flatMap(storedSuperShares(_, stratum.difficulty)))))
   })
+
+  /**
+   * Super-share heights the NISP store holds around `height` at the committed score, the one a
+   * rollup's NISP is judged against. None when there is no score yet or the store cannot be read,
+   * which leaves the summary counting this session's shares instead.
+   */
+  private def storedSuperShares(height: Int, difficulty: Option[StratumDifficulty]): Option[Seq[Int]] =
+    difficulty.flatMap(d => Try(BigInt(d.committed.getOrElse(d.served)).toLong).toOption).flatMap { score =>
+      val window = lfsm.LFSMHelpers.NISP_WINDOW
+      Try(nisps.superShareHeights(height - window, height + window, score)) match {
+        case Success(heights) => Some(heights)
+        case Failure(error) =>
+          logger.debug("Could not read super shares from the NISP store", error)
+          None
+      }
+    }
 
   def getLocalMiningHistory(): Action[AnyContent] = history { (from, until, width) =>
     mining.localHistory("shares", from, until)

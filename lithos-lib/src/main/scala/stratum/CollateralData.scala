@@ -5,12 +5,16 @@ package stratum
  *
  * @param holdingOutput the holding box this transaction created, which a same-height top-up spends.
  *                      Present only where the genesis was built here rather than read back.
+ * @param priorityFee   nanoERG the collateral box carries above the principal floor.
+ * @param finderFee     the part of `priorityFee` this transaction pays the finder; 0 when it stays
+ *                      with the pool.
  */
 case class CollateralData(txId: String, txJSON: String, pk: String,
                           txBytes: Array[Byte], collateralBoxBytes: Array[Byte],
                           collateralId: String, lenderAddress: String,
                           signedSizeBytes: Int = 0, cost: Long = 0L,
-                          holdingOutput: Option[work.lithos.mutations.InputUTXO] = None) {
+                          holdingOutput: Option[work.lithos.mutations.InputUTXO] = None,
+                          priorityFee: Long = 0L, finderFee: Long = 0L) {
 
   /** Identity, not contents: two reads of the same genesis differ in nothing that matters here. */
   override def equals(obj: Any): Boolean = {

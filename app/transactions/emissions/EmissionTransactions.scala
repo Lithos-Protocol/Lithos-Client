@@ -382,9 +382,9 @@ class EmissionTransactions(prover: NodeWallet,
                        exclude: Set[String] = Set.empty[String]): Option[(InputUTXO, Int)] = {
     val candidates = proofs.filterNot(b => exclude.contains(b.boxId))
     val (mintedThisBlock, usable) = candidates.partition(_.box.creationHeight >= blockHeight - 1)
-    if (mintedThisBlock.nonEmpty && usable.isEmpty)
-      logger.info(s"${mintedThisBlock.size} proof-of-spend box(es) only validate from block " +
-        s"$blockHeight - waiting rather than building an Activate that cannot sign")
+//    if (mintedThisBlock.nonEmpty && usable.isEmpty)
+//      logger.info(s"${mintedThisBlock.size} proof-of-spend box(es) only validate from block " +
+//        s"$blockHeight - waiting rather than building an Activate that cannot sign")
     usable
       .flatMap { b =>
         retiringKey(b).flatMap { r =>

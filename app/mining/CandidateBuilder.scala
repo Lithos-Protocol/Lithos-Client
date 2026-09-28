@@ -99,6 +99,13 @@ class CandidateBuilder(client: ErgoClient,
 
   private var collectingFor: Option[Collection] = None
 
+  /** The round the current package was assembled from, kept so it can be assembled again. */
+  private var lastAssembled: Option[Collection] = None
+
+  /** Transactions the node left out of a candidate at `leftOutAt`; bundles holding them are not offered again. */
+  private var leftOut: Set[String] = Set.empty
+  private var leftOutAt: Int = 0
+
   /** The round `attempt` names, while it is still waiting on sources. */
   private def waitingRound(attempt: CollectionAttempt): Option[Collection] =
     collectingFor.filter(round => round.attempt == attempt && !round.assembling)
@@ -167,6 +174,7 @@ class CandidateBuilder(client: ErgoClient,
         selectedId = None
         // Retires the previous height's collection round. Its answer can no longer reach a package
         collectingFor = None
+        lastAssembled = None
         knownSpent = knownSpent.filter(e => height - e._2 < SpentMemoryBlocks)
         startBuild(height)
         prepareBlockTxs(height)
@@ -187,6 +195,19 @@ class CandidateBuilder(client: ErgoClient,
         selectedId = None
         startBuild(blockHeight)
       }
+
+    // One source's transaction cost the top-up; the rest of the package need not go with it.
+    case BlockTxsLeftOut(height, identity, txIds) if height == blockHeight &&
+      currentPackage.exists(_.identity.sameGenesis(identity)) && !blockTxsBlockedAt.contains(height) =>
+      if (leftOutAt != height) {
+        leftOut = Set.empty
+        leftOutAt = height
+      }
+      leftOut ++= txIds
+      // A round already collecting applies the exclusion itself when it assembles
+      if (collectingFor.isEmpty)
+        lastAssembled.filter(round => round.attempt.height == height && round.attempt.genesisId == identity.genesisId)
+          .foreach(reassemble)
 
     // Stop offering additions for the rejected genesis.
     case BlockTxsRejected(height, identity) if height == blockHeight &&
@@ -501,12 +522,37 @@ class CandidateBuilder(client: ErgoClient,
     assemble(round)
   }
 
+  /**
+   * Assembles `round`'s answers again under a fresh attempt, published as a new package rather than
+   * a refresh, so the bundles left out since it was assembled are dropped without the revenue gate.
+   */
+  private def reassemble(round: Collection): Unit = {
+    val attempt = round.attempt.copy(id = UUID.randomUUID(), startedAt = nowNanos(), refresh = false)
+    val retry = new Collection(attempt, round.budgets)
+    round.answers.indices.foreach(i => retry.answers(i) = round.answers(i))
+    retry.waitingOn = 0
+    collectingFor = Some(retry)
+    collectStartedAt = System.nanoTime()
+    context.system.scheduler.scheduleOnce(
+      config.blockTxTimeout.milliseconds, self, CollectTimedOut(attempt))(context.dispatcher)
+    assemble(retry)
+  }
+
   /** Admits what the round's sources offered, in source order, and builds the top-up off the mailbox. */
   private def assemble(round: Collection): Unit = {
     round.assembling = true
+    lastAssembled = Some(round)
     val attempt = round.attempt
     val height = attempt.height
-    val offered = enabledSources.indices.flatMap(i => round.answers(i).map(enabledSources(i).name -> _))
+    // A bundle goes whole, since its later members spend its earlier ones' outputs.
+    val excluded = if (leftOutAt == height) leftOut else Set.empty[String]
+    val offered = enabledSources.indices.flatMap(i => round.answers(i).map { bundles =>
+      val (dropped, kept) = bundles.partition(_.members.exists(tx => excluded.contains(tx.id)))
+      if (dropped.nonEmpty)
+        logger.info(s"Leaving ${dropped.size} ${enabledSources(i).name} bundle(s) out of block $height: " +
+          "the node left one of their transactions out")
+      enabledSources(i).name -> kept
+    })
     val late = enabledSources.indices.filter(i => round.answers(i).isEmpty).map(i => enabledSources(i).name).toSet
     // Charge the signed genesis bytes and cost before admitting source bundles.
     val genesis = currentPackage.map(_.collateral)

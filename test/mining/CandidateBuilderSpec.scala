@@ -332,6 +332,50 @@ class CandidateBuilderSpec extends TestKit(ActorSystem("candidate-builder-spec",
     }
   }
 
+  /**
+   * A transaction the node leaves out takes the top-up spending its output with it, but nothing else
+   * in the package depends on it. Only its bundle goes, and the top-up is rebuilt without it.
+   */
+  "A transaction the node left out" should "cost only its own bundle, for the rest of the block" in {
+    val source = TestProbe()
+    val f = fixture(sources = Seq(CandidateSource(configs.CandidateSourceConfig.Rollups, source.ref)),
+      config = collectingConfig)
+    val height = f.nextHeight
+    advanceTo(f, height)
+    requested(source)
+
+    def revenueAt(index: Int): InputUTXO =
+      f.node.getClient.execute(ctx => UTXO(f.wallet.contract, Parameters.OneErg)
+        .toInput(ctx, ErgoId.create("cd" * 32), index.toShort))
+    def bundle(id: String, index: Int): CandidateBundle =
+      CandidateBundle(Vector(CandidateTx(id, "{}", CandidateTx.Payout)),
+        capital = Seq(CapitalEntry(CapitalOrigin.ExecutorReward, revenueAt(index), parentTxId = id)))
+    val offered = Seq(bundle("standing", 0), bundle("refused", 1))
+    source.reply(BlockTxsReady(height, offered))
+    val first = published(f)
+    first.blockTxs.map(_.id) should contain allOf ("standing", "refused")
+
+    f.builder ! BlockTxsLeftOut(height, first.identity, Set("refused"))
+    val rebuilt = f.parent.expectMsgType[BlockPackageReady]
+    withClue("a new package rather than a refresh, so the pool takes it without the revenue gate: ") {
+      rebuilt.refreshed shouldBe false
+    }
+    rebuilt.pkg.revision shouldBe first.revision + 1
+    rebuilt.pkg.blockTxs.map(_.id) should not contain "refused"
+    rebuilt.pkg.blockTxs.map(_.kind) shouldBe Seq(CandidateTx.Payout, transactions.candidate.CandidateTopUp.Kind)
+    withClue("the rebuilt top-up spends only what the remaining bundle created: ") {
+      rebuilt.pkg.blockTxs.last.inputIds should contain(revenueAt(0).id.toString)
+      rebuilt.pkg.blockTxs.last.inputIds should not contain revenueAt(1).id.toString
+    }
+
+    withClue("a later round at this height leaves the same bundle out when a source offers it again: ") {
+      f.builder ! RefreshBlockPackage(rebuilt.pkg.identity)
+      requested(source)
+      source.reply(BlockTxsReady(height, offered))
+      f.parent.expectMsgType[BlockPackageReady].pkg.blockTxs.map(_.id) should not contain "refused"
+    }
+  }
+
   "Budget logging" should "account for shared ancestors and report final source contributions" in {
     val messages = new java.util.concurrent.ConcurrentLinkedQueue[String]()
     val appender = new ch.qos.logback.core.AppenderBase[ch.qos.logback.classic.spi.ILoggingEvent] {

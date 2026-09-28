@@ -646,6 +646,66 @@ class LithosPoolSpec extends TestKit(ActorSystem("lithos-pool-spec", LithosPoolS
     f.miner.expectMsgType[BroadcastJob]
   }
 
+  /** A node answer with no proof for `ids`, which is how the node reports transactions it left out. */
+  private def leaving(answer: JSONObject, ids: String*): JSONObject = {
+    val proofs = answer.getJSONObject("proof").getJSONArray("txProofs")
+    (proofs.length() - 1 to 0 by -1).foreach { i =>
+      if (ids.contains(proofs.getJSONObject(i).getString("leaf"))) proofs.remove(i)
+    }
+    answer
+  }
+
+  private def member(id: String, kind: String): CandidateTx =
+    CandidateTx(id, new JSONObject().put("id", id).toString, kind, leaf = id)
+
+  private val transform = member("transform", CandidateTx.Payout)
+  private val execution = member("execution", "ergodex-batch")
+  private val topUp = member("topup", transactions.candidate.CandidateTopUp.Kind)
+
+  it should "rebuild without what the node left out, mining genesis meanwhile, instead of dropping every extra" in {
+    val f = fixture(cfg.copy(blockTransactions = true))
+    genesis(f)
+    // The top-up spends the execution's takings, so leaving the execution out takes the top-up too
+    val offered = pkg().withBlockTxs(Seq(transform, execution, topUp))
+    f.pool ! BlockPackageReady(offered)
+    val call = nextCall(f)
+    call.response.complete(leaving(response(call, 2), "execution", "topup"))
+    f.builder.expectMsg(BlockTxsLeftOut(100, offered.identity, Set("execution")))
+    val fallback = nextCall(f)
+    fallback.txs should have size 1
+    fallback.response.complete(response(fallback, 3))
+    f.miner.expectMsgType[BroadcastJob]
+
+    // The builder's rebuild is a new package, so no revenue gate stands between it and the miners
+    val rebuilt = offered.copy(blockTxs = Seq(transform, member("topup-2", transactions.candidate.CandidateTopUp.Kind)),
+      revision = offered.revision + 1)
+    f.pool ! BlockPackageReady(rebuilt)
+    val retry = nextCall(f)
+    retry.txs.mkString should (include("transform") and not include "execution")
+    retry.response.complete(response(retry, 4))
+    f.miner.expectMsgType[BroadcastJob]
+  }
+
+  it should "drop every extra for the block once the rebuilds are spent" in {
+    val f = fixture(cfg.copy(blockTransactions = true))
+    genesis(f)
+    (1 to LithosPool.MaxLeftOutRebuildsPerBlock + 1).foreach { attempt =>
+      val offered = pkg().withBlockTxs(Seq(transform, execution, topUp)).copy(revision = attempt)
+      f.pool ! BlockPackageReady(offered)
+      val call = nextCall(f)
+      call.response.complete(leaving(response(call, 2 * attempt), "execution", "topup"))
+      if (attempt <= LithosPool.MaxLeftOutRebuildsPerBlock)
+        f.builder.fishForSpecificMessage() { case msg: BlockTxsLeftOut => msg } shouldBe
+          BlockTxsLeftOut(100, offered.identity, Set("execution"))
+      else f.builder.fishForSpecificMessage() { case msg: BlockTxsRejected => msg } shouldBe
+        BlockTxsRejected(100, Some(offered.identity))
+      val fallback = nextCall(f)
+      fallback.txs should have size 1
+      fallback.response.complete(response(fallback, 2 * attempt + 1))
+      f.miner.expectMsgType[BroadcastJob]
+    }
+  }
+
   it should "replace spent collateral directly when a candidate omits genesis" in {
     val f = fixture(cfg.copy(blockTransactions = true))
     val offered = pkg(revision = 1)

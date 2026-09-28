@@ -417,10 +417,13 @@ class LithosDexBatcherSpec extends TestKit(ActorSystem("lithosdex-batcher-spec",
       com.google.inject.Key.get(classOf[play.api.Configuration]),
       com.google.inject.Key.get(classOf[ActorRef], com.google.inject.name.Names.named("transaction-engine")))
 
-    // Shipped with block transactions off, so the stratum never asks and the batcher stays idle. Turned
-    // on, the shipped LithosDex source serves this miner's block, so a request really builds.
+    // Shipped with block transactions on, so the shipped LithosDex source serves this miner's block and a
+    // request really builds. Turned off, the stratum never asks and the batcher stays idle.
     val shipped = play.api.Configuration(LithosDexBatcherSpec.config)
-    transactions.batching.Batcher.servesCandidates(shipped, LithosDexBatchingConfig.Name) shouldBe false
+    transactions.batching.Batcher.servesCandidates(shipped, LithosDexBatchingConfig.Name) shouldBe true
+    val idle = play.api.Configuration(ConfigFactory.parseString("stratum.candidate.blockTransactions = false")
+      .withFallback(LithosDexBatcherSpec.config))
+    transactions.batching.Batcher.servesCandidates(idle, LithosDexBatchingConfig.Name) shouldBe false
     val mining = play.api.Configuration(ConfigFactory.parseString("stratum.candidate.blockTransactions = true")
       .withFallback(LithosDexBatcherSpec.config))
     transactions.batching.Batcher.servesCandidates(mining, LithosDexBatchingConfig.Name) shouldBe true

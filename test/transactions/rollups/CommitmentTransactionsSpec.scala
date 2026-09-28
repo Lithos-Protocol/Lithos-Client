@@ -324,11 +324,48 @@ class CommitmentTransactionsSpec
       Success(LFSMHelpers.convertTauOrScore(BigInt(4242L)))
   }
 
+  it should "serve a raised commitment from its declared height, a window before it binds" in {
+    // The first rollup judged under 9999 draws super shares from its declared height on. Mining those
+    // at 4242 would leave that window empty; a share at 9999 still meets 4242 in the meantime.
+    val f = fixture(Some(Seq((height + 1) -> 9999L, (height - 1000) -> 4242L)))
+    f.commitments.committedTau(BigInt(12345)) shouldEqual Success(LFSMHelpers.convertTauOrScore(BigInt(9999L)))
+    // NISPs are still built against the score in force.
+    f.commitments.commitmentForNISP(height) shouldEqual Success(4242L)
+  }
+
+  it should "serve the raise a couple of blocks early, but not before that" in {
+    val lead = CommitmentTransactions.ServeLead
+    fixture(Some(Seq((height + 1 + lead) -> 9999L, (height - 1000) -> 4242L))).commitments
+      .committedTau(BigInt(12345)) shouldEqual Success(LFSMHelpers.convertTauOrScore(BigInt(9999L)))
+    fixture(Some(Seq((height + 2 + lead) -> 9999L, (height - 1000) -> 4242L))).commitments
+      .committedTau(BigInt(12345)) shouldEqual Success(LFSMHelpers.convertTauOrScore(BigInt(4242L)))
+  }
+
+  it should "keep the higher score in force until a lowered commitment binds" in {
+    // Shares found at 4242 also meet 999, so nothing is gained by switching down early.
+    val f = fixture(Some(pending(nextScore = 999L, oldScore = 4242L)))
+    f.commitments.committedTau(BigInt(12345)) shouldEqual Success(LFSMHelpers.convertTauOrScore(BigInt(4242L)))
+  }
+
+  it should "serve a first registration from its declared height, and the fallback before it" in {
+    fixture(Some(Seq(height -> 999L))).commitments.committedTau(BigInt(12345)) shouldEqual
+      Success(LFSMHelpers.convertTauOrScore(BigInt(999L)))
+    fixture(Some(Seq((height + 10) -> 999L))).commitments.committedTau(BigInt(12345)) shouldEqual
+      Success(BigInt(12345))
+  }
+
   "committedScore" should "fall back to the configured diff rather than refuse to start" in {
     val f = fixture(None)
     val ctx = FakeNodeContext()._1
     ctx.getClient.execute { c =>
       f.commitments.committedScore(c, diff, "stratum mining") shouldEqual Success(configuredScore)
+    }
+  }
+
+  it should "start the stratum on a raised commitment that has reached its declared height" in {
+    val f = fixture(Some(Seq(height -> 9999L, (height - 1000) -> 4242L)))
+    FakeNodeContext()._1.getClient.execute { c =>
+      f.commitments.committedScore(c, diff, "stratum mining") shouldEqual Success(9999L)
     }
   }
 }

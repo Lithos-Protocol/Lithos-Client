@@ -39,7 +39,7 @@ object CandidateConfig {
   val Default: CandidateConfig = CandidateConfig(
     collateralPoolSize = 100,
     collateralRefreshInterval = 60000,
-    blockTransactions = false,
+    blockTransactions = true,
     sources = Map(
       CandidateSourceConfig.Rollups -> CandidateSourceConfig.Default,
       // Room for a run of Clears; Activates alone stop at `emission.candidateActivates`.
@@ -47,8 +47,8 @@ object CandidateConfig {
       // Off until a miner points it at a start height and has watched a scan pass run. One
       // transaction, because a rent collection sweeps every box it takes into a single sweep.
       CandidateSourceConfig.Rent -> CandidateSourceConfig.Default.copy(enabled = false, maxTxs = 1),
-      // Disabled by default; the eight slots include placement ancestors and executions.
-      CandidateSourceConfig.ErgoDex -> CandidateSourceConfig.Default.copy(enabled = false, maxTxs = 20),
+      // The slots include placement ancestors and executions.
+      CandidateSourceConfig.ErgoDex -> CandidateSourceConfig.Default.copy(maxTxs = 20),
       // On by default: LithosDex is the protocol's own DEX. Slots include placements and the flush.
       CandidateSourceConfig.LithosDex -> CandidateSourceConfig.Default.copy(enabled = true, maxTxs = 20)),
     blockShare = 0.5,

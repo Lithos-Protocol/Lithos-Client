@@ -96,6 +96,7 @@ class LithosPool(options: Options,
   private var extrasRejected: Option[(ChainTip, String)] = None
   private var rejectedGenesis = Set.empty[String]
   private var rebuilds = 0
+  private var leftOutRebuilds = 0
   private var genesisDeadline = 0L
   private var lastRefreshAt = 0L
   private var servedRevenue = 0L
@@ -325,6 +326,7 @@ class LithosPool(options: Options,
       extrasRejected = None
       rejectedGenesis = Set.empty
       rebuilds = 0
+      leftOutRebuilds = 0
       genesisDeadline = nowNanos() + candidateConfig.genesisWaitMs.milliseconds.toNanos
       lastRefreshAt = nowNanos()
       servedRevenue = 0L
@@ -435,9 +437,13 @@ class LithosPool(options: Options,
         driveCandidate()
       case Success(fetched) if request.hasExtras && CandidateMaterialized.requireCorrespondence &&
         fetched.materialized.exists(!_.inclusionProven) =>
-        fetched.materialized.foreach(recordMaterialization(_, request.pkg))
-        rejectExtras(request, "the returned proof did not account for " +
-          fetched.materialized.map(_.unprovenInclusions.map(_.take(8)).mkString(", ")).getOrElse(""))
+        val materialized = fetched.materialized.get
+        recordMaterialization(materialized, request.pkg)
+        // Members left out besides the top-up are what took it with them
+        val leftOut = materialized.unproven -- materialized.unprovenInclusions
+        if (leftOut.nonEmpty && leftOutRebuilds < MaxLeftOutRebuildsPerBlock) leaveOut(request, leftOut)
+        else rejectExtras(request, "the returned proof did not account for " +
+          materialized.unprovenInclusions.map(_.take(8)).mkString(", "))
         invalidateCachedJob()
         driveCandidate()
       case Success(fetched) =>
@@ -504,6 +510,19 @@ class LithosPool(options: Options,
   }
 
   /** Fall back to genesis-only for this package. Mining continues; only the extras are dropped. */
+  /**
+   * Serves genesis alone while the builder rebuilds the package without `txIds`. The top-up spent
+   * their outputs, so it went with them; everything else in the package still stands.
+   */
+  private def leaveOut(request: CandidateRequest, txIds: Set[String]): Unit = {
+    leftOutRebuilds += 1
+    blockPackage = blockPackage.map(pkg => if (pkg.identity == request.identity) pkg.withoutBlockTxs else pkg)
+    candidateBuilder.foreach(_ ! BlockTxsLeftOut(request.identity.height, request.identity, txIds))
+    logger.warn(s"Node left ${txIds.size} transaction(s) out of block ${request.identity.height}, and the " +
+      s"top-up spending their outputs with them (${txIds.map(_.take(8)).mkString(", ")}); mining genesis " +
+      "while the package is rebuilt without them")
+  }
+
   private def rejectExtras(request: CandidateRequest, reason: String): Unit = {
     extrasRejected = Some(request.chain -> request.identity.genesisId)
     candidateBuilder.foreach(_ ! BlockTxsRejected(request.identity.height, Some(request.identity)))
@@ -633,6 +652,8 @@ class LithosPool(options: Options,
 object LithosPool {
   private[mining] case object PublishStats
   private val MaxRebuildsPerBlock = 3
+  /** Packages rebuilt per block without what the node left out, before the extras are dropped. */
+  private[mining] val MaxLeftOutRebuildsPerBlock = 2
   private val MaxQueuedSolutions = 6
   private[mining] case class ChainTip(height: Int, parentId: String)
 
