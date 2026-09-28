@@ -84,6 +84,11 @@ trait NodeTransactionsApi {
 
   def unconfirmedTransactionsByErgoTree(ergoTree: String, paging: Paging = Paging.Default): Try[Seq[NodeTransaction]]
 
+  /**
+   * Whether the mempool spends `boxId`, for a CONFIRMED box only: the node resolves the input against
+   * its UTXO set, so a spend of an unconfirmed box always reads as absent. The node answers with the
+   * input, not the spending transaction, so nothing but presence can be read from the result.
+   */
   def unconfirmedInputByBoxId(boxId: String): Try[Option[NodeTransaction]]
 
   def unconfirmedOutputByBoxId(boxId: String): Try[Option[NodeBox]]

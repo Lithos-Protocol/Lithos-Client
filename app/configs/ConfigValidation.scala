@@ -282,8 +282,9 @@ object Configs {
     v.bool("emission.enabled")
     v.range("emission.queueInterval", v.int("emission.queueInterval"), 1000, 3600000, "ms")
     v.range("emission.maxQueueSpends", v.int("emission.maxQueueSpends"), 1, 128, "chained emission spends per pass")
-    v.bool("emission.mempoolChaining")
-    v.range("emission.maxChainDepth", v.int("emission.maxChainDepth"), 0, 4096, "unconfirmed spends followed before falling back to confirmed state")
+    v.range("emission.candidateActivates", v.int("emission.candidateActivates"), 0, 100,
+      "Activates in this miner's own block when no Clear is in reach")
+    v.range("emission.maxChainDepth", v.int("emission.maxChainDepth"), 0, 4096, "unconfirmed emission spends followed")
     v.range("emission.queueScanLimit", v.int("emission.queueScanLimit"), 1, 100000, "queue boxes paged through per head search")
     v.long("emission.txFee").foreach { fee =>
       if (fee < Parameters.MinFee || fee > 1000000000L)

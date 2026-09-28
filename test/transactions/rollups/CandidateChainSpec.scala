@@ -5,6 +5,7 @@ import org.ergoplatform.appkit.{BlockchainContext, Parameters}
 import org.ergoplatform.sdk.ErgoId
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
+import state.synchronization.CompleteMempool
 import support.FakeNodeContext
 import transactions.candidate.BlockTxMessages.{CandidateTx, ChainFromMempool, IncludeExisting}
 import transactions.candidate.CandidateBundle
@@ -46,6 +47,30 @@ class CandidateChainSpec extends AnyFlatSpec with Matchers {
 
   it should "be carried when more is chained behind it" in {
     RollupExecution.replaceableTransform(LFSMPhase.EVAL, LFSMPhase.PAYOUT, 2, _ => true, outputsSpent = false) shouldBe None
+  }
+
+  // ─── whether anything builds on a pending transform ─────────────────────
+
+  private def observed(spent: Set[String], ageNanos: Long = 0L, failure: Option[String] = None) =
+    Some(CompleteMempool.Observation(1L,
+      Some(CompleteMempool.Snapshot("ab" * 32, Set.empty, spent, System.nanoTime() - ageNanos)), failure))
+
+  "A pending transform's outputs" should "count as built on when the mempool spends one" in {
+    // Regression: this was asked of the node's input lookup, which resolves only confirmed boxes, so
+    // a child of the unconfirmed transform always read as absent and the transform was replaced.
+    RollupExecution.childInMempool(Seq("out0", "out1"), observed(Set("out1", "elsewhere"))) shouldBe true
+  }
+
+  it should "count as free when the mempool spends none of them" in {
+    RollupExecution.childInMempool(Seq("out0", "out1"), observed(Set("elsewhere"))) shouldBe false
+  }
+
+  it should "count as built on when no fresh observation can rule a child out" in {
+    // Carrying costs a fee-less rebuild; replacing drops someone's work, so doubt carries.
+    RollupExecution.childInMempool(Seq("out0"), None) shouldBe true
+    RollupExecution.childInMempool(Seq("out0"), observed(Set.empty, failure = Some("walk raced"))) shouldBe true
+    RollupExecution.childInMempool(Seq("out0"),
+      observed(Set.empty, ageNanos = CompleteMempool.MaxAgeNanos + 1000000000L)) shouldBe true
   }
 
   "A pending spend that stays in its phase" should "never be replaced, nor the mempool read to decide" in {

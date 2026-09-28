@@ -42,7 +42,8 @@ object CandidateConfig {
     blockTransactions = false,
     sources = Map(
       CandidateSourceConfig.Rollups -> CandidateSourceConfig.Default,
-      CandidateSourceConfig.Emissions -> CandidateSourceConfig.Default,
+      // Room for a run of Clears; Activates alone stop at `emission.candidateActivates`.
+      CandidateSourceConfig.Emissions -> CandidateSourceConfig.Default.copy(maxTxs = 20),
       // Off until a miner points it at a start height and has watched a scan pass run. One
       // transaction, because a rent collection sweeps every box it takes into a single sweep.
       CandidateSourceConfig.Rent -> CandidateSourceConfig.Default.copy(enabled = false, maxTxs = 1),

@@ -43,10 +43,18 @@ trait EmissionsCore extends Actor with InjectedActorSupport {
   protected def emissionNodeApi: NodeApi = nodeConfig.getNodeApi
   private val emissionConfig: EmissionConfig = EmissionConfig(config)
 
+  /** The emissions source's byte and cost allowance, which a bundle has to fit whole to be admitted. */
+  private val emissionBudget: transactions.candidate.CandidateBudget =
+    configs.CandidateConfig(config).sources(configs.CandidateSourceConfig.Emissions).budget
+
   private implicit val emissionEc: ExecutionContext = context.dispatcher
   private val emissionWorker = context.system.dispatchers.lookup("lithos-contexts.engine-io-dispatcher")
+
+  /** Which side builds the queue head's Activates each block: the candidate first, then the funded pass. */
+  private val queueOwnership = new QueueOwnership
   private val emissionPreparation = new transactions.candidate.CandidatePreparation(
-    context.system.dispatchers.lookup("lithos-contexts.engine-candidate-dispatcher"), self)
+    context.system.dispatchers.lookup("lithos-contexts.engine-candidate-dispatcher"), self,
+    queueOwnership.candidateStarted)
   private val emissionAlive = new java.util.concurrent.atomic.AtomicBoolean(true)
   private lazy val collateral = new transactions.engine.execution.CollateralExecution(
     emissionNodeContext, config, context.system, emissionWalletManager, () => emissionAlive.get()) {
@@ -79,10 +87,16 @@ trait EmissionsCore extends Actor with InjectedActorSupport {
           client.execute(ctx => txs.selfCollateralize(ctx,
             new transactions.engine.EngineBroadcast(emissionWalletManager, emissionNodeApi)))
         case transactions.engine.EngineIntent.Queue => client.execute { ctx =>
-          val (_, spends) = txs.buildQueueSpends(ctx, ctx.getHeight + 1, funded = true, emissionConfig.maxQueueSpends)
-          val result = sendQueue(ctx, spends)
-          result.collectFirst { case (_, Failure(ex)) => ex }.foreach(throw _)
-          result
+          val height = ctx.getHeight + 1
+          // Activates this miner's own candidate holds for the block stay with it until they are
+          // handed over; Clears are never held, so ordinary blocks still get this client's Clears.
+          val activates = queueOwnership.fundedStarts(height)
+          try {
+            val spends = txs.fundedQueueSpends(ctx, height, emissionConfig.maxQueueSpends, activates)
+            val result = sendQueue(ctx, spends)
+            result.collectFirst { case (_, Failure(ex)) => ex }.foreach(throw _)
+            result
+          } finally queueOwnership.fundedFinished()
         }
         case _ => throw new IllegalArgumentException("unsupported emission intent")
       }
@@ -163,28 +177,49 @@ trait EmissionsCore extends Actor with InjectedActorSupport {
 
   }
 
-  /** Builds fee-less queue spends on the candidate worker without reading actor state. */
-  private def candidateBundles(blockHeight: Int, limit: Int): Seq[transactions.candidate.CandidateBundle] = {
-    require(emissionAlive.get(), "emission engine attempt was superseded")
-    client.execute { ctx =>
-        val (tip, spends) = txs.buildQueueSpends(ctx, blockHeight, funded = false, limit)
-        if (spends.isEmpty) Seq.empty[transactions.candidate.CandidateBundle]
-        else {
-          // Other lenders' unconfirmed joins, first because these spends chain off them.
-          // Carrying them also avoids censoring work this client happened to build on top of.
-          val ancestors = tip.ancestors.map(CandidateTx.ancestor)
-          val own = spends.map(s => CandidateTx(
-            s.tx.getId.replace("\"", ""), _root_.transactions.candidate.BlockTxMessages.CandidateTx.signedJson(s.tx),
-            if (s.kind == EmissionSpend.Clear) CandidateTx.Clear else CandidateTx.Activate,
-            transactions.engine.execution.RollupExecution.signedInputIds(s.tx),
-            transactions.engine.execution.RollupExecution.signedSizeBytes(s.tx), s.tx.getCost.toLong,
-            transactions.engine.execution.RollupExecution.signedLeaf(s.tx)))
-          // The queue spends chain off the last unconfirmed join in the emission chain, and
-          // the whole chain travels with them.
-          Seq(transactions.candidate.CandidateBundle((ancestors ++ own).toVector,
-            ancestors.lastOption.map(a => BlockTxMessages.ChainFromMempool(a.id)).toSeq ++
-              ancestors.map(a => BlockTxMessages.IncludeExisting(a.id))))
-      }
+  /**
+   * Builds fee-less queue spends from confirmed state on the candidate worker, reading no actor
+   * state beyond the atomics in `queueOwnership`. The bundle carries no mempool ancestor: its spends
+   * either stand alone or supersede the pending chain.
+   */
+  private def candidateBundles(blockHeight: Int, limit: Int): Seq[transactions.candidate.CandidateBundle] =
+    try {
+      require(emissionAlive.get(), "emission engine attempt was superseded")
+      client.execute(ctx => candidateBundlesAt(ctx, blockHeight, limit))
+    } finally queueOwnership.candidateFinished(blockHeight)
+
+  private def candidateBundlesAt(ctx: org.ergoplatform.appkit.BlockchainContext,
+                                 blockHeight: Int, limit: Int): Seq[transactions.candidate.CandidateBundle] = {
+    val (hold, fundedOwns) = queueOwnership.candidateView(blockHeight)
+    val (choice, spends) = txs.candidateQueueSpends(ctx, blockHeight, limit, hold, fundedOwns)
+    queueOwnership.candidateDecided(blockHeight, choice.hold)
+    // Refreshes repeat every few seconds, so only the first handover at a height runs a pass: a
+    // failing funded pass then retries once a block rather than on every refresh.
+    if (choice.driveFunded && queueOwnership.release(blockHeight)) {
+      logger.info(s"Block $blockHeight hands the Activates at the queue head to the funded pass")
+      self ! DriveQueue
+    }
+    if (spends.isEmpty) Seq.empty[transactions.candidate.CandidateBundle]
+    else {
+      val own = spends.map(s => CandidateTx(
+        s.tx.getId.replace("\"", ""), _root_.transactions.candidate.BlockTxMessages.CandidateTx.signedJson(s.tx),
+        if (s.kind == EmissionSpend.Clear) CandidateTx.Clear else CandidateTx.Activate,
+        transactions.engine.execution.RollupExecution.signedInputIds(s.tx),
+        transactions.engine.execution.RollupExecution.signedSizeBytes(s.tx), s.tx.getCost.toLong,
+        transactions.engine.execution.RollupExecution.signedLeaf(s.tx)))
+      // Each spend depends only on those before it, so the longest prefix within the allowance is
+      // still a valid chain, where the whole walk over it would be refused, Clears and all.
+      val fits = own.scanLeft((0L, 0L)) { case ((bytes, cost), tx) => (bytes + tx.sizeBytes, cost + tx.cost) }
+        .tail.takeWhile { case (bytes, cost) => bytes <= emissionBudget.maxBytes && cost <= emissionBudget.maxCost }
+        .size
+      if (fits < own.size)
+        logger.warn(s"The emissions source's ${emissionBudget.maxBytes}-byte, ${emissionBudget.maxCost}-cost " +
+          s"allowance holds $fits of ${own.size} queue spends for block $blockHeight; raise its maxBytes " +
+          "or maxCost, or lower its maxTxs or emission.candidateActivates")
+      if (fits == 0) Seq.empty[transactions.candidate.CandidateBundle]
+      else Seq(transactions.candidate.CandidateBundle(own.take(fits).toVector,
+        if (choice.supersedes.isEmpty) Seq.empty
+        else Seq(BlockTxMessages.Supersede(choice.supersedes))))
     }
   }
 

@@ -17,6 +17,7 @@ import state.messages.MempoolMessages.{MempoolRollupMetadata, RebuildMempoolChai
 import state.messages.RollupMessages
 import state.messages.RollupMessages.{GetCurrentRollupCritical, GetRollupMetadata, RemoveRollup, RollupInfo}
 import state.DataBoxRetrievalException
+import state.synchronization.CompleteMempool
 import transactions.candidate.{BlockTxMessages, CandidateBundle}
 import transactions.candidate.BlockTxMessages.{BlockTxsReady, CandidateTx, CandidateTxsDropped}
 import transactions.engine.execution.RollupExecution._
@@ -363,9 +364,14 @@ class RollupExecution(nodeContext: NodeContext, walletManager: ActorRef, syncHan
                                blockHeight: Int): Option[(Superseding, LatestRollup)] = {
     val confirmed = current.rollup
     val pending = projected.ancestorIds.head
-    def outputsSpent: Boolean = rollupNodeApi.unconfirmedTransactionById(pending).get
-      .getOrElse(throw new IllegalStateException(s"pending transform $pending left the mempool"))
-      .outputs.exists(out => rollupNodeApi.unconfirmedInputByBoxId(out.boxId).get.nonEmpty)
+    def outputsSpent: Boolean = {
+      val outputs = rollupNodeApi.unconfirmedTransactionById(pending).get
+        .getOrElse(throw new IllegalStateException(s"pending transform $pending left the mempool"))
+        .outputs.map(_.boxId)
+      val observed = Try(Await.result(akka.pattern.ask(mempoolView, CompleteMempool.Refresh)(Timeout(DescendantCheckWait))
+        .mapTo[CompleteMempool.Observation], DescendantCheckWait)).toOption
+      RollupExecution.childInMempool(outputs, observed)
+    }
     RollupExecution.replaceableTransform(confirmed.phase, projected.rollup.phase, projected.ancestorIds.size,
       t => RollupTxStub(stub.rollupBlockId, confirmed.currentPeriod, t).validate(blockHeight, confirmed),
       outputsSpent).map { t =>
@@ -1010,6 +1016,18 @@ object RollupExecution {
   /** The wallet is the engine's own mailbox, so the pin list answers at once or not at all. */
   private val PinnedAskTimeout: Timeout = Timeout(5.seconds)
 
+  /** How long a candidate build waits for a mempool observation before counting a transform as built on. */
+  private[transactions] val DescendantCheckWait: scala.concurrent.duration.FiniteDuration = 5.seconds
+
+  /**
+   * Whether anything in the mempool spends one of `outputs`. The node's input lookup resolves only
+   * confirmed boxes, so a pending transform's children are read from the complete mempool's spent
+   * set; an observation that is missing, stale or failed cannot rule a child out, and counts as one.
+   */
+  private[transactions] def childInMempool(outputs: Seq[String],
+                                           observed: Option[CompleteMempool.Observation]): Boolean =
+    observed.filter(_.fresh).flatMap(_.snapshot).forall(snapshot => outputs.exists(snapshot.spent.contains))
+
   /**
    * A rollup box the synchronized state names as unspent, read from the node. A 404 means a block
    * spent it after that state was read, which is reported in one line rather than the node's body.
@@ -1026,7 +1044,7 @@ object RollupExecution {
    * The transform a candidate may rebuild in place of the pending one, if any. Only the transform
    * into the projected phase qualifies, only as the rollup's sole unconfirmed spend, only if it is
    * valid in this block, and only while nothing in the mempool spends any of its outputs.
-   * `outputsSpent` is asked last, since it reads the node.
+   * `outputsSpent` is asked last, since it waits on a mempool observation.
    */
   private[transactions] def replaceableTransform(confirmed: LFSMPhase, projected: LFSMPhase,
                                                  pendingSpends: Int, eligible: RollupTxType => Boolean,

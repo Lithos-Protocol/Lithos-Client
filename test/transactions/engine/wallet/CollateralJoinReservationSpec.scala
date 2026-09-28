@@ -121,6 +121,7 @@ class CollateralJoinReservationSpec
                  else Seq.empty[IndexedBox]): Try[Seq[IndexedBox]])
       })
     when(nodeApi.unconfirmedInputByBoxId(anyString())).thenReturn(Success(None))
+    when(nodeApi.unconfirmedTransactionsByErgoTree(anyString(), any[Paging])).thenReturn(Success(Seq.empty))
     when(nodeApi.walletAddresses()).thenReturn(Success(addresses.map(_.toString)))
     when(nodeApi.indexerEnabled).thenReturn(true)
     when(nodeApi.info()).thenReturn(Success(support.ChainFixtures.infoAt(100000).copy(bestFullHeaderId = Some("aa" * 32))))
