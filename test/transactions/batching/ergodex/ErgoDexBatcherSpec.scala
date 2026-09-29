@@ -398,7 +398,7 @@ class ErgoDexBatcherSpec extends TestKit(ActorSystem("ergodex-batcher-spec", Erg
     val batcher = system.actorOf(Props(classOf[ErgoDexBatcher], nodeContext,
       play.api.Configuration(ErgoDexBatcherSpec.config), engine.ref))
 
-    // The shipped configuration leaves the ErgoDEX candidate source off, so it answers with nothing
+    // No scan has run yet, so the first request is answered with nothing
     val requester = TestProbe()
     requester.send(batcher, RequestBlockTxs(heights.incrementAndGet(), 8))
     requester.expectMsgType[BlockTxsReady].bundles shouldBe empty

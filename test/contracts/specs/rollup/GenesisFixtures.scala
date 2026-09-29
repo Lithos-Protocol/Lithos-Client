@@ -113,9 +113,12 @@ object GenesisFixtures {
   /** The honest NISP, and the shares it was assembled from, for a spec that patches its bytes. */
   case class HonestNisp(shares: Seq[SuperShare], nisp: Array[Byte])
 
-  /** Found by walking from zero, one per share, against the fixture genesis. See `honestNisp`. */
+  /**
+   * One per share, against the fixture genesis. See `honestNisp`. The genesis is built from the
+   * mainnet ids, so pasting real ones moves every pin; paste the values the spec prints.
+   */
   val PinnedNonces: Seq[Long] =
-    Seq(2736L, 14968L, 36819L, 3044L, 5792L, 6739L, 2409L, 19043L, 3500L, 540L)
+    Seq(9385L, 33457L, 40170L, 17890L, 5872L, 9955L, 8288L, 30436L, 22894L, 7283L)
 
   /** As `NispFixtures.minedShare`, for a share carrying its own proof, levels and root. */
   def mine(height: Int,

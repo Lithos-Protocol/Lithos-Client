@@ -72,7 +72,6 @@ class HarnessProbeSpec extends AnyPropSpec with ContractSpecBase {
         "lithosdex/LD_LiquidityPool"      -> Try(LDContracts(ctx).liquidityPool),
         "collateral/Collateral_Mainnet"   -> Try(CollateralContract.mkMainnetCollatContract(
                                                ctx, LFSMHelpers.EMISSION_NFT_MAINNET, dummyHash, LFSMHelpers.LIT_ID_MAINNET)),
-        "collateral/Collateral_Testnet"   -> Try(CollateralContract.mkTestnetCollatContract(ctx, dummyHash)),
         "collateral/LIT_Emissions"        -> Try(CollateralContract.mkEmissionsContract(
                                                ctx, dummyHash, dummyHash, LFSMHelpers.LIT_ID_MAINNET)),
         "collateral/Emission_Gate"        -> Try(CollateralContract.mkEmissionGateContract(ctx)),

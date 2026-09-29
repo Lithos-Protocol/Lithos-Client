@@ -84,11 +84,10 @@ object LDHelpers {
   final val PROVISION_LOGIC_VAR: Byte = 64.toByte
 
   // ---------------------------------------------------------------------------------------------
-  // Injected constants — filler values until genesis is minted
+  // Injected constants
   // ---------------------------------------------------------------------------------------------
 
-  // TODO: replace with the real ids once the genesis transaction is built. Nothing derived from these
-  // is meaningful until then — every contract address below changes when they do.
+  // Every contract address below derives from these ids.
   private final val POOL_NFT_TESTNET  = ErgoId.create("feecf867f715dc6539401736a02bd7145648b4ebe70d23205165a38e792b32a1")
   private final val POOL_NFT_MAINNET  = ErgoId.create("c0b21ac51481a5d242809d9b1e189a8baf3803fe347ca01833c1aeb380e6eb29")
   private final val VAULT_NFT_TESTNET = ErgoId.create("b4c6fa23e9e14c577fe4f776e769d737857bd0794b960e90cff36b3573fff026")

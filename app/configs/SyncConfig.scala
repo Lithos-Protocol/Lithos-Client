@@ -10,10 +10,11 @@ class SyncConfig(config: Configuration){
   val startHeight: Int = config.get[Int]("sync.startHeight")
 
   /**
-   * Canonical cursors retained for locating a fork. Cursors are ~100 bytes, so this is sized for
-   * reach rather than for memory, and deeper forks recover from a snapshot instead.
+   * Canonical cursors retained for locating a fork; deeper forks recover from a snapshot instead.
+   * Rollback only reaches the transform journal, and the node itself rolls back at most its
+   * keepVersions (200 by default), so more cursors add reach nothing can use.
    */
-  val cursorWindow: Int = config.getOptional[Int]("sync.cursorWindow").getOrElse(720)
+  val cursorWindow: Int = config.getOptional[Int]("sync.cursorWindow").getOrElse(200)
 
   /** Materialized AVL provers retained after a request; everything else stays digest-only. */
   val materializedDictionaryCacheEntries: Int =

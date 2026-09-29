@@ -59,7 +59,7 @@ case class BatchingConfig(enabled: Boolean,
 
 object BatchingConfig {
 
-  /** Default discovery and revenue limits; broadcasting requires an explicit opt-in. */
+  /** Default discovery, revenue and broadcast settings, shared by every batcher. */
   val Default: BatchingConfig = BatchingConfig(
     enabled = true,
     scanIntervalMs = 8000,
@@ -70,7 +70,7 @@ object BatchingConfig {
     broadcastMinRevenueNanoErg = 2500000L,
     broadcastMinerFeeCeiling = 2000000L,
     maxPoolAgeBlocks = 20160,
-    broadcast = false,
+    broadcast = true,
     deniedPools = Set.empty,
     skippedOrderTtlMs = 3600000L,
     maxSkippedOrders = 4096,
