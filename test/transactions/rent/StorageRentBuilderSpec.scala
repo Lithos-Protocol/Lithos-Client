@@ -7,7 +7,7 @@ import org.ergoplatform.sdk.ErgoId
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 import org.scalatestplus.mockito.MockitoSugar
-import transactions.candidate.CapitalOrigin
+import transactions.candidate.{CandidateBudget, CapitalOrigin}
 import work.lithos.mutations.{Contract, InputUTXO, MainnetEip27Constants, Token, UTXO}
 
 import scala.collection.JavaConverters._
@@ -169,10 +169,179 @@ class StorageRentBuilderSpec extends AnyFlatSpec with Matchers with MockitoSugar
       val candidates = boxes.map(candidate(ctx, _))
       candidates.count(_.recreates) shouldEqual 5
       val tx = StorageRent.assembled(ctx, wallet, candidates, dueAt, useTrueProp = false)
-      withClue("collection, five recreations, then the token residue: ") {
-        tx.outputs should have size 7
+      withClue("ten claims, one of them naming the residue: nine proceeds, five recreations, the residue: ") {
+        tx.outputs should have size 15
       }
       verifyAll(ctx, boxes) shouldBe true
+    }
+  }
+
+  // ─── the node's own rule, run before a sweep goes out ─────────────────────
+
+  /** A Collect taking one nanoERG past its fee: the shape any mis-modelled box has to the node. */
+  private def misplanned(ctx: BlockchainContext, index: Int): RentCandidate = {
+    val box = expired(ctx, (500L + index) * Parameters.OneErg, index)
+    RentCandidate(box, RentAction.Collect(StorageRent.storageFee(box, ctx.getDataSource.getParameters) + 1L))
+  }
+
+  "The node's rent rule" should "accept every input of a correct sweep" in {
+    withCtx { ctx =>
+      val boxes = Seq(expired(ctx, 100L * Parameters.OneErg, 0), expired(ctx, 1000000L, 1),
+        expired(ctx, 1000001L, 2, Seq(Token(ErgoId.create("cd" * 32), 5L))))
+      val tx = StorageRent.assembled(ctx, wallet, boxes.map(candidate(ctx, _)), dueAt, useTrueProp = false)
+      RentVerifier.verdicts(tx, boxes.map(ergoBoxOf).toIndexedSeq, dueAt,
+        ctx.getDataSource.getParameters).toSet shouldEqual Set(RentVerdict.Accepted)
+    }
+  }
+
+  /** The node refuses a whole sweep for one bad input, so the bad one has to come out first. */
+  "A collection holding a box the client mis-planned" should "leave it out, report it and send the rest" in {
+    withCtx { ctx =>
+      val good = Seq(expired(ctx, 100L * Parameters.OneErg, 0), expired(ctx, 200L * Parameters.OneErg, 1),
+        expired(ctx, 1000000L, 2), expired(ctx, 1000001L, 3))
+      val bad = misplanned(ctx, 4)
+      val collection = StorageRent.collect(ctx, wallet, good.map(candidate(ctx, _)) :+ bad, dueAt,
+        useTrueProp = false)
+
+      collection.refused.map(_.box.id) shouldEqual Seq(bad.box.id)
+      val sweep = collection.bundle.getOrElse(fail("the four good boxes were not offered")).members.head
+      sweep.inputIds should have size 4
+      sweep.inputIds should not contain bad.box.id.toString
+      verifyAll(ctx, good) shouldBe true
+    }
+  }
+
+  /** Every input refused points at this builder rather than at the boxes, so none are evicted. */
+  "A collection the rule refuses whole" should "offer nothing and report nothing" in {
+    withCtx { ctx =>
+      val collection = StorageRent.collect(ctx, wallet, (0 until 3).map(misplanned(ctx, _)), dueAt,
+        useTrueProp = false)
+      collection.bundle shouldBe None
+      collection.refused shouldBe empty
+    }
+  }
+
+  // ─── one output per input ─────────────────────────────────────────────────
+
+  /**
+   * The node refuses a transaction in which two inputs carry the same variable 127. Claims never
+   * have their named output checked, so nothing but this rule stops them sharing one.
+   */
+  "A sweep with several claims" should "name a distinct output for every input" in {
+    withCtx { ctx =>
+      val boxes = (0 until 4).map(i => expired(ctx, 1000000L + i, i)) ++
+        (4 until 6).map(i => expired(ctx, 100L * Parameters.OneErg, i))
+      val tx = StorageRent.assembled(ctx, wallet, boxes.map(candidate(ctx, _)), dueAt, useTrueProp = false)
+      val named = tx.inputs.map(_.spendingProof.extension
+        .values(org.ergoplatform.wallet.protocol.Constants.StorageIndexVarId).value.asInstanceOf[Short].toInt)
+
+      named.distinct should have size boxes.size.toLong
+      named.foreach(i => i should (be >= 0 and be < tx.outputs.size))
+      support.RentRule.namesDistinctOutputs(tx) shouldBe true
+      verifyAll(ctx, boxes) shouldBe true
+    }
+  }
+
+  /** The proceeds outputs exist only to be named, so the second transaction folds them back. */
+  it should "fold its proceeds outputs into one box that is the capital" in {
+    withCtx { ctx =>
+      val boxes = (0 until 5).map(i => expired(ctx, 1000000L + i, i))
+      val (bundle, candidates) = swept(ctx, boxes)
+      val tx = StorageRent.assembled(ctx, wallet, candidates, dueAt, useTrueProp = false)
+      val proceedsIds = tx.outputs.take(5).map(o => org.bouncycastle.util.encoders.Hex.toHexString(o.id)).toSet
+
+      bundle.members should have size 2
+      bundle.members(1).inputIds shouldEqual proceedsIds
+      bundle.capital should have size 1
+      bundle.capital.head.parentTxId shouldEqual bundle.members(1).id
+      bundle.capital.head.value shouldEqual boxes.map(_.value).sum
+      bundle.capital.head.box.contract.ergoTreeHex shouldEqual wallet.contract.ergoTreeHex
+    }
+  }
+
+  it should "fold them at TrueProp when that setting is on" in {
+    withCtx { ctx =>
+      val boxes = (0 until 3).map(i => expired(ctx, 1000000L + i, i))
+      val bundle = StorageRent.build(ctx, wallet, boxes.map(candidate(ctx, _)), dueAt, useTrueProp = true).get
+
+      bundle.members should have size 2
+      bundle.capital.head.box.contract.ergoTreeHex shouldEqual Contract.SIGMA_TRUE.ergoTreeHex
+      bundle.capital.head.value shouldEqual boxes.map(_.value).sum
+    }
+  }
+
+  /**
+   * One residue output used to carry every token the claims brought in, and past about 85 distinct
+   * ids it held less than the dust minimum for its own size, which lost the whole sweep.
+   */
+  "A sweep claiming many distinct tokens" should "split them across residues the node accepts" in {
+    withCtx { ctx =>
+      val tokens = (0 until 90).map(i => Token(ErgoId.create(f"$i%064x"), 1L + i))
+      val boxes = tokens.zipWithIndex.map { case (token, i) => expired(ctx, 1000000L, i, Seq(token)) }
+      val tx = StorageRent.assembled(ctx, wallet, boxes.map(candidate(ctx, _)), dueAt, useTrueProp = false)
+      val residues = tx.outputs.filter(_.additionalTokens.length > 0)
+
+      residues should have size 5
+      residues.foreach(_.additionalTokens.length should be <= StorageRent.TokensPerResidue)
+      residues.flatMap(_.additionalTokens.toArray).map(_._2).sum shouldEqual tokens.map(_.amount).sum
+      verifyAll(ctx, boxes) shouldBe true
+    }
+  }
+
+  /**
+   * A 0.001 ERG claim bringing a new token nets nothing on its own, because the residue holding the
+   * token costs as much. Twenty share one residue, so the set pays even though no box alone does.
+   */
+  "A sweep of token-carrying dust" should "be fitted as a set rather than stopping at its first box" in {
+    withCtx { ctx =>
+      val params = ctx.getDataSource.getParameters
+      val floor = StorageRent.proceedsFloor(wallet.contract, dueAt, params)
+      val boxes = (0 until 30).map(i => expired(ctx, UTXO.MIN_CHANGE, i, Seq(Token(ErgoId.create(f"$i%064x"), 1L))))
+      val all = boxes.map(candidate(ctx, _))
+
+      StorageRent.fitting(all.take(1), CandidateBudget.Unbounded, params, floor) shouldBe empty
+      val fitted = StorageRent.fitting(all, CandidateBudget.Unbounded, params, floor)
+      fitted should have size 30
+      StorageRent.build(ctx, wallet, fitted, dueAt, useTrueProp = false) should not be empty
+      verifyAll(ctx, boxes) shouldBe true
+    }
+  }
+
+  /**
+   * The source admits a bundle against its budget using what the built members report, so a
+   * fitting that underestimates loses the whole collection rather than its last few boxes.
+   */
+  "A fitted sweep" should "never build larger than the budget it was fitted to" in {
+    withCtx { ctx =>
+      val params = ctx.getDataSource.getParameters
+      val floor = StorageRent.proceedsFloor(wallet.contract, dueAt, params)
+      val token = Token(ErgoId.create("cd" * 32), 3L)
+      val boxes = (0 until 40).map(i => expired(ctx, 1000000L + i, i)) ++
+        (40 until 50).map(i => expired(ctx, 1000000L, i, Seq(token))) ++
+        (50 until 60).map(i => expired(ctx, (100L + i) * Parameters.OneErg, i))
+      val all = boxes.map(candidate(ctx, _))
+
+      Seq(CandidateBudget(Long.MaxValue, Long.MaxValue), CandidateBudget(4000L, Long.MaxValue),
+        CandidateBudget(Long.MaxValue, 120000L), CandidateBudget(6000L, 150000L)).foreach { budget =>
+        val fitted = StorageRent.fitting(all, budget, params, floor)
+        fitted should not be empty
+        val bundle = StorageRent.build(ctx, wallet, fitted, dueAt, useTrueProp = false).get
+        val bytes = bundle.members.map(_.sizeBytes.toLong).sum
+        val cost = bundle.members.map(_.cost).sum
+        withClue(s"${fitted.size} boxes in $budget built to $bytes bytes and $cost cost: ") {
+          bytes should be <= budget.maxBytes
+          cost should be <= budget.maxCost
+        }
+        if (bundle.members.size == 2) {
+          val merge = bundle.members(1)
+          val perInput = (merge.cost - 10000L - params.getOutputCost) / merge.inputIds.size
+          println(f"[rent] merge of ${merge.inputIds.size}%3d inputs: ${merge.cost}%7d cost, " +
+            f"$perInput%5d per input, ${merge.sizeBytes}%6d bytes")
+          withClue("the per-input merge estimate has to cover what one really costs: ") {
+            perInput should be <= params.getInputCost.toLong + StorageRent.MergeInputCost
+          }
+        }
+      }
     }
   }
 
@@ -204,29 +373,34 @@ class StorageRentBuilderSpec extends AnyFlatSpec with Matchers with MockitoSugar
   }
 
   /**
-   * The fee is payable but the successor could not legally hold what is left, so there is no
-   * recreation to name and the collection cannot be built.
+   * Just over its fee, `value - fee` is under the consensus minimum, but the rule only asks the
+   * recreation for at least `value - fee`. So it is recreated at the minimum and the rest is taken.
    */
-  "A box whose recreation would fall below the consensus minimum" should "not be planned" in {
+  "A box whose fee would leave it under the consensus minimum" should "be collected down to it" in {
     withCtx { ctx =>
       val params = ctx.getDataSource.getParameters
       // A box's value is VLQ-encoded, so its length — and with it its fee — depends on the value
       // being measured. Two passes settle on the size the assertion is actually about.
-      def leastCollectable(guess: Long): Long = {
-        val probe = expired(ctx, guess, 0)
-        StorageRent.storageFee(probe, params) + params.getMinValuePerByte.toLong * probe.bytes.length
-      }
-      val exact = leastCollectable(leastCollectable(100L * Parameters.OneErg))
-      val lowest = expired(ctx, exact, 0)
-      val under = expired(ctx, exact - 1L, 0)
-      withClue("the two boxes must serialize to one length for the boundary to mean anything: ") {
-        under.bytes.length shouldEqual lowest.bytes.length
+      def justOverFee(guess: Long): Long = StorageRent.storageFee(expired(ctx, guess, 0), params) + 1000L
+      val value = justOverFee(justOverFee(100L * Parameters.OneErg))
+      val box = expired(ctx, value, 0)
+      val minimum = params.getMinValuePerByte.toLong * StorageRent.successorBytes(box, dueAt)
+      withClue("the box has to sit inside the gap for this to mean anything: ") {
+        (value - StorageRent.storageFee(box, params)) should be < minimum
       }
 
-      StorageRent.plan(lowest, 0, dueAt, params, ctx.getNetworkType, protocol(ctx)) shouldBe
-        Some(RentAction.Collect(StorageRent.storageFee(lowest, params)))
-      // One nanoERG under, and the same box has no successor it could legally leave behind.
-      StorageRent.plan(under, 0, dueAt, params, ctx.getNetworkType, protocol(ctx)) shouldBe None
+      StorageRent.plan(box, 0, dueAt, params, ctx.getNetworkType, protocol(ctx)) shouldBe
+        Some(RentAction.Collect(value - minimum))
+      verifyAll(ctx, Seq(box, expired(ctx, 1000000L, 1), expired(ctx, 1000001L, 2))) shouldBe true
+    }
+  }
+
+  it should "still give up its whole fee when that leaves it over the minimum" in {
+    withCtx { ctx =>
+      val params = ctx.getDataSource.getParameters
+      val box = expired(ctx, 100L * Parameters.OneErg, 0)
+      StorageRent.plan(box, 0, dueAt, params, ctx.getNetworkType, protocol(ctx)) shouldBe
+        Some(RentAction.Collect(StorageRent.storageFee(box, params)))
     }
   }
 
@@ -273,20 +447,20 @@ class StorageRentBuilderSpec extends AnyFlatSpec with Matchers with MockitoSugar
   /**
    * `checkExpiredBox` computes the fee in `Int`, so a large enough box wraps it negative. The rule
    * then reads the box as funded however little it holds and demands a successor richer than the
-   * box itself, which nothing can satisfy. Offering one costs the whole sweep.
+   * box itself, which only a collector paying the difference could build.
    */
-  "A box whose fee overflows the node's own arithmetic" should "not be planned" in {
+  "A box whose fee wraps negative in the node's arithmetic" should "not be planned" in {
     withCtx { ctx =>
       val params = ctx.getDataSource.getParameters
       val boundary = Int.MaxValue / params.getStorageFeeFactor
 
-      StorageRent.overflowsNodeFee(boundary, params) shouldBe false
-      StorageRent.overflowsNodeFee(boundary + 1, params) shouldBe true
+      StorageRent.storageFee(boundary, params) should be > 0L
+      StorageRent.storageFee(boundary + 1, params) should be < 0L
       withClue("the box that broke a live sweep was 1742 bytes: ") {
-        StorageRent.overflowsNodeFee(1742, params) shouldBe true
+        StorageRent.storageFee(1742, params) should be < 0L
       }
-      // Underfunded on our arithmetic, and the node would still refuse it.
-      StorageRent.decide(10000000L, 1742, params) shouldBe None
+      // Underfunded on unwrapped arithmetic, and the node would still refuse it.
+      StorageRent.decide(10000000L, 1742, 1745, params) shouldBe None
     }
   }
 
@@ -294,7 +468,34 @@ class StorageRentBuilderSpec extends AnyFlatSpec with Matchers with MockitoSugar
     withCtx { ctx =>
       val params = ctx.getDataSource.getParameters
       val boundary = Int.MaxValue / params.getStorageFeeFactor
-      StorageRent.decide(1000L, boundary, params) shouldBe Some(RentAction.Claim)
+      StorageRent.decide(1000L, boundary, boundary + 3, params) shouldBe Some(RentAction.Claim)
+    }
+  }
+
+  /**
+   * Past `2^32` the product wraps positive again, so a box that large has a small fee the node
+   * really charges. Both branches have to be priced on that wrapped fee to be accepted.
+   */
+  "A box whose fee wraps back positive" should "be collected on the node's own fee" in {
+    withCtx { ctx =>
+      val params = ctx.getDataSource.getParameters
+      val secondWrap = ((1L << 32) / params.getStorageFeeFactor + 1).toInt
+      assume(secondWrap + 100 < org.ergoplatform.ErgoBox.MaxBoxSize,
+        s"no box under the size ceiling wraps positive at factor ${params.getStorageFeeFactor}")
+
+      def large(value: Long, index: Int): InputUTXO =
+        UTXO(stranger, value, Seq.empty[Token], Seq(ErgoValue.of(Array.fill[Byte](secondWrap)(7))))
+          .setCreationHeight(0).toInput(ctx, ErgoId.create("ab" * 32), index.toShort)
+      val claimed = large(1500000L, 0)
+      val funded = large(10L * Parameters.OneErg, 1)
+      val fee = StorageRent.storageFee(funded, params)
+      withClue(s"a ${funded.bytes.length} byte box has to land past the second wrap: ") {
+        fee should (be > 0L and be < params.getStorageFeeFactor.toLong * funded.bytes.length)
+      }
+
+      candidate(ctx, claimed).action shouldBe RentAction.Claim
+      candidate(ctx, funded).action shouldBe RentAction.Collect(fee)
+      verifyAll(ctx, Seq(claimed, funded)) shouldBe true
     }
   }
 

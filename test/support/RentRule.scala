@@ -90,10 +90,26 @@ object RentRule {
                    height: Int, params: BlockchainParameters): Boolean =
     verifyInput(tx, boxes, index, height, params)._1
 
-  /** Whether every input of a sweep is accepted, which is what a block would require. */
+  /**
+   * Whether a block would take the sweep: every input passes the interpreter, no two inputs name
+   * the same output in variable 127, and every output meets the dust minimum. The last two are
+   * `ErgoTransaction` rules the interpreter never sees.
+   */
   def accepts(tx: ErgoLikeTransaction, boxes: IndexedSeq[ErgoBox], height: Int,
               params: BlockchainParameters): Boolean =
-    boxes.indices.forall(i => acceptsInput(tx, boxes, i, height, params))
+    boxes.indices.forall(i => acceptsInput(tx, boxes, i, height, params)) &&
+      namesDistinctOutputs(tx) && meetsDust(tx, params)
+
+  /** The node's `txRentDistinctOutputs`: variable 127 values are pairwise distinct across inputs. */
+  def namesDistinctOutputs(tx: ErgoLikeTransaction): Boolean = {
+    val named = tx.inputs.flatMap(_.spendingProof.extension.values
+      .get(org.ergoplatform.wallet.protocol.Constants.StorageIndexVarId).map(_.value))
+    named.distinct.size == named.size
+  }
+
+  /** The node's `txDust`: every output holds at least `minValuePerByte` per serialized byte. */
+  def meetsDust(tx: ErgoLikeTransaction, params: BlockchainParameters): Boolean =
+    tx.outputs.forall(out => out.value >= out.bytes.length.toLong * params.minValuePerByte)
 
   /**
    * What a block is charged for this transaction, on the node's own accounting.

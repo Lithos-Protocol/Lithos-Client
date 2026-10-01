@@ -168,9 +168,15 @@ object Configs {
     Seq(configs.CandidateSourceConfig.Rollups, configs.CandidateSourceConfig.Emissions,
       configs.CandidateSourceConfig.Rent, configs.CandidateSourceConfig.ErgoDex,
       configs.CandidateSourceConfig.LithosDex).foreach { source =>
-      v.bool(s"stratum.candidate.sources.$source.enabled")
-      v.range(s"stratum.candidate.sources.$source.maxTxs",
+      val enabled = v.bool(s"stratum.candidate.sources.$source.enabled")
+      val maxTxs = v.range(s"stratum.candidate.sources.$source.maxTxs",
         v.int(s"stratum.candidate.sources.$source.maxTxs"), 0, 100, "transactions inserted per block")
+      // A rent collection with several claims is a sweep plus the merge of its proceeds, so one slot
+      // would refuse every such collection while the source kept building them.
+      if (source == configs.CandidateSourceConfig.Rent && enabled.contains(true) && maxTxs.contains(1))
+        v.problem(s"stratum.candidate.sources.$source.maxTxs",
+          "must be at least 2 while rent is enabled: a collection is a sweep plus the transaction " +
+            "folding its proceeds")
       v.longRange(s"stratum.candidate.sources.$source.maxBytes",
         v.long(s"stratum.candidate.sources.$source.maxBytes"), 0L, 8388608L, "serialized bytes per block")
       v.longRange(s"stratum.candidate.sources.$source.maxCost",

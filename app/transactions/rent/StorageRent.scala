@@ -2,7 +2,7 @@ package transactions.rent
 
 import mutations.NodeWallet
 import org.ergoplatform.appkit.impl.{BlockchainContextBase, InputBoxImpl, SignedTransactionImpl}
-import org.ergoplatform.appkit.{BlockchainContext, BlockchainParameters, NetworkType}
+import org.ergoplatform.appkit.{BlockchainContext, BlockchainParameters, NetworkType, SignedTransaction}
 import org.ergoplatform.wallet.protocol.Constants
 import org.ergoplatform.{ErgoBox, ErgoBoxCandidate, ErgoLikeTransaction, Input}
 import org.slf4j.{Logger, LoggerFactory}
@@ -11,7 +11,7 @@ import sigma.interpreter.{ContextExtension, ProverResult}
 import transactions.candidate.BlockTxMessages.CandidateTx
 import transactions.candidate.{CandidateBundle, CandidateCapital, CapitalEntry, CapitalOrigin}
 import transactions.engine.execution.RollupExecution
-import work.lithos.mutations.{InputUTXO, MainnetEip27Constants, Token, UTXO}
+import work.lithos.mutations.{Contract, InputUTXO, MainnetEip27Constants, Token, TxBuilder, UTXO}
 
 import scala.util.{Failure, Success, Try}
 
@@ -25,8 +25,11 @@ import scala.util.{Failure, Success, Try}
 sealed trait RentAction
 
 object RentAction {
-  /** The box pays its fee and is recreated one fee lighter. Only the fee is ours. */
-  final case class Collect(fee: Long) extends RentAction
+  /**
+   * The box is recreated `taken` lighter, and only `taken` is ours. That is the whole storage fee,
+   * or less when the fee would leave the recreation under the minimum a box of its size may hold.
+   */
+  final case class Collect(taken: Long) extends RentAction
 
   /** The box cannot cover its fee, so the rule short-circuits and it is taken whole. */
   case object Claim extends RentAction
@@ -35,13 +38,13 @@ object RentAction {
 /**
  * One expired box and the branch it falls on.
  *
- * `proceedsErg` is what a collection actually realizes: the fee on the funded branch, the whole box
- * on the underfunded one. Tokens only ever come from the underfunded branch, because a recreation
- * has to preserve the token register exactly.
+ * `proceedsErg` is what a collection actually realizes: what the recreation gives up on the funded
+ * branch, the whole box on the underfunded one. Tokens only ever come from the underfunded branch,
+ * because a recreation has to preserve the token register exactly.
  */
 final case class RentCandidate(box: InputUTXO, action: RentAction) {
   def proceedsErg: Long = action match {
-    case RentAction.Collect(fee) => fee
+    case RentAction.Collect(taken) => taken
     case RentAction.Claim => box.value
   }
 
@@ -59,11 +62,10 @@ final case class RentCandidate(box: InputUTXO, action: RentAction) {
  * Past `StoragePeriod` blocks an input carrying an empty proof and context variable 127 is accepted
  * if the output that variable names recreates the box — same script, same tokens, same registers,
  * a new creation height, and at most the storage fee removed. A box that cannot cover its own fee
- * is taken outright instead, tokens included.
+ * is taken outright instead, tokens included. No two inputs may name the same output.
  *
- * Assembled rather than signed. A prover would have to satisfy the box's own script, which is the
- * one thing this client cannot do for a stranger's box, so the empty proof is placed directly and
- * the result is wrapped to give the same surface every other candidate transaction has.
+ * The sweep is assembled rather than signed: a prover would have to satisfy each box's own script.
+ * When its claims need more than one proceeds output, a second, signed transaction folds them back.
  */
 object StorageRent {
 
@@ -81,6 +83,12 @@ object StorageRent {
    * Blocks a box must live before its rent can be collected, which is four years of them.
    */
   final val StoragePeriod: Int = Constants.StoragePeriod
+
+  /**
+   * Distinct tokens one residue output carries. Twenty keep it near 900 bytes, well inside both the
+   * box size ceiling and what `UTXO.MIN_CHANGE` pays for, whatever the token amounts.
+   */
+  final val TokensPerResidue: Int = 20
 
   /**
    * Whether this box is eligible by age but unspendable while EIP-27 and the rent rule contradict
@@ -103,46 +111,59 @@ object StorageRent {
         id == MainnetEip27Constants.ReemissionNft ||
         id == MainnetEip27Constants.EmissionNft)
 
+  /**
+   * The fee exactly as `checkExpiredBox` computes it: `storageFeeFactor * box.bytes.length` in
+   * `Int`, which wraps. At mainnet's factor it is negative from 1,718 to 3,435 bytes, and small but
+   * positive again from 3,436 bytes up to the 4,096-byte box ceiling.
+   */
+  def storageFee(sizeBytes: Int, params: BlockchainParameters): Long =
+    (params.getStorageFeeFactor * sizeBytes).toLong
+
   def storageFee(box: InputUTXO, params: BlockchainParameters): Long =
-    params.getStorageFeeFactor.toLong * box.bytes.length
+    storageFee(box.bytes.length, params)
 
   /**
-   * Which branch a box of this value and size falls on, ignoring its age.
-   *
-   * Nothing is collectable when the recreation would hold less than consensus allows a box of that
-   * size to hold: the fee is payable, but there is no legal successor to pay it out of.
+   * Serialized size of `box` recreated for `blockHeight`, at the widest output index a sweep can
+   * give it. Only the value and creation height change and the value only shrinks, so the node
+   * never prices the real recreation at more than this.
    */
-  def decide(value: Long, sizeBytes: Int, params: BlockchainParameters): Option[RentAction] = {
-    val fee = params.getStorageFeeFactor.toLong * sizeBytes
-    if (overflowsNodeFee(sizeBytes, params)) None
-    else if (value <= fee) Some(RentAction.Claim)
-    else if (value - fee >= params.getMinValuePerByte.toLong * sizeBytes) Some(RentAction.Collect(fee))
-    else None
+  def successorBytes(box: InputUTXO, blockHeight: Int): Int = {
+    val b = box.input.asInstanceOf[InputBoxImpl].getErgoBox
+    new ErgoBoxCandidate(b.value, b.ergoTree, blockHeight, b.additionalTokens, b.additionalRegisters)
+      .toBox(b.transactionId, Short.MaxValue).bytes.length
   }
 
   /**
-   * Whether the fee for a box this size overflows the arithmetic the rule itself uses.
+   * Which branch a box falls on, ignoring its age, or nothing when collecting it cannot earn.
    *
-   * `checkExpiredBox` computes `storageFeeFactor * box.bytes.length` in `Int`, so past
-   * `Int.MaxValue / factor` bytes the product wraps negative. A negative fee makes the box look
-   * funded however little it holds, and then demands a successor richer than the box itself — which
-   * nothing can satisfy. Such a box is uncollectable by either branch, so it is never offered.
+   * A recreation keeps the larger of `value - fee` and the consensus minimum for its own size, and
+   * the rest is taken. A fee the node wraps negative demands a recreation richer than the box, so
+   * collecting it would only cost this miner.
    */
-  def overflowsNodeFee(sizeBytes: Int, params: BlockchainParameters): Boolean =
-    params.getStorageFeeFactor.toLong * sizeBytes > Int.MaxValue.toLong
+  def decide(value: Long, sizeBytes: Int, successorBytes: Int,
+             params: BlockchainParameters): Option[RentAction] = {
+    val fee = storageFee(sizeBytes, params)
+    if (fee <= 0L) None
+    else if (value <= fee) Some(RentAction.Claim)
+    else if (successorBytes > ErgoBox.MaxBoxSize) None
+    else {
+      val kept = math.max(value - fee, params.getMinValuePerByte.toLong * successorBytes)
+      if (kept < value) Some(RentAction.Collect(value - kept)) else None
+    }
+  }
 
   /**
    * Which branch this box falls on at `blockHeight`, or nothing when it cannot be collected.
    *
-   * `creationHeight` comes from the indexer rather than the box, because discovery is what knows the
-   * box's age.
+   * `creationHeight` is the box's own declared height (R3) as the node reports it, which is what the
+   * rule measures age from, not the height the box was included at.
    */
   def plan(box: InputUTXO, creationHeight: Int, blockHeight: Int, params: BlockchainParameters,
            network: NetworkType, protocol: ProtocolBoxes): Option[RentAction] = {
     if (blockHeight.toLong - creationHeight < StoragePeriod.toLong) None
     else if (protocol.owns(box)) None
     else if (blockedByReEmission(box, network)) None
-    else decide(box.value, box.bytes.length, params)
+    else decide(box.value, box.bytes.length, successorBytes(box, blockHeight), params)
   }
 
   /**
@@ -165,90 +186,252 @@ object StorageRent {
     open.map(_.boxId).toSet -> blocked.map(_.boxId).toSet
   }
 
+  // ─── layout ───────────────────────────────────────────────────────────────
+
+  /** Outputs holding the tokens the claimed boxes carried, `TokensPerResidue` distinct ids each. */
+  private[rent] def residueOutputs(distinctTokens: Int): Int =
+    (distinctTokens + TokensPerResidue - 1) / TokensPerResidue
+
+  /**
+   * Proceeds outputs a sweep carries. Every input names an output of its own: a recreation names
+   * itself, and a claim names a residue output or a proceeds output, so there is one proceeds
+   * output per claim the residues cannot absorb, and always at least one.
+   */
+  private[rent] def proceedsOutputs(claims: Int, residues: Int): Int =
+    math.max(1, claims - residues)
+
+  /** The proceeds output count and the token groups, one residue output each, for these boxes. */
+  private def layout(candidates: Seq[RentCandidate]): (Int, Seq[Seq[Token]]) = {
+    val residues = mergeTokens(candidates.flatMap(_.proceedsTokens)).grouped(TokensPerResidue).toSeq
+    proceedsOutputs(candidates.count(!_.recreates), residues.size) -> residues
+  }
+
+  /** Whether these boxes realize enough to fund every proceeds output and residue they need. */
+  private def funded(candidates: Seq[RentCandidate], floor: Long): Boolean = {
+    val (parts, residues) = layout(candidates)
+    candidates.map(_.proceedsErg).sum - residues.size * UTXO.MIN_CHANGE >= parts * floor
+  }
+
+  /**
+   * What each proceeds output past the first holds: the consensus minimum for a box at `contract`,
+   * sized at the widest value and index it could serialize with. The merge spends it straight back.
+   */
+  def proceedsFloor(contract: Contract, blockHeight: Int, params: BlockchainParameters): Long = {
+    val probe = new ErgoBoxCandidate(Long.MaxValue, contract.ergoTree, blockHeight)
+      .toBox(scorex.util.bytesToId(Array.fill[Byte](32)(0)), Short.MaxValue)
+    params.getMinValuePerByte.toLong * probe.bytes.length
+  }
+
+  // ─── sizing ───────────────────────────────────────────────────────────────
+
+  /**
+   * An input with no proof: thirty-two bytes of box id, an empty proof length, and one context
+   * variable naming an output.
+   */
+  private final val InputBytes = 40L
+
+  /** One output at a P2PK or TrueProp script with no tokens: at most 52 bytes inside a transaction. */
+  private final val ProceedsBytes = 52L
+
+  /** A merge input: box id, proof length, a 56-byte Schnorr proof, and an empty extension. */
+  private final val MergeInputBytes = 90L
+
+  /**
+   * Verifying one P2PK merge input, on top of the per-input cost the node charges every input.
+   * Measured at 403; the margin keeps a fitted sweep from building over its budget.
+   */
+  private[rent] final val MergeInputCost = 500L
+
   /** Serialized bytes one box adds to a sweep: its input, and its successor when it has one. */
   private def sweptBytes(candidate: RentCandidate): Long =
     InputBytes + (if (candidate.recreates) candidate.box.bytes.length.toLong else 0L)
 
-  /** What one box adds to the block's cost, on the same accounting as [[estimatedCost]]. */
+  /**
+   * What one box adds to the sweep's cost, on the same accounting as [[estimatedCost]]: its input,
+   * its successor, and its tokens read once going in and once coming out, each counted twice.
+   */
   private def sweptCost(candidate: RentCandidate, params: BlockchainParameters): Long =
     params.getInputCost.toLong + Constants.StorageContractCost +
-      (if (candidate.recreates) params.getOutputCost.toLong else 0L)
+      (if (candidate.recreates) params.getOutputCost.toLong else 0L) +
+      4L * candidate.box.tokens.size * params.getTokenAccessCost
+
+  /** A residue token: its 32-byte id, listed once per transaction, and its index and amount. */
+  private final val ResidueTokenBytes = 42L
+
+  /** Bytes and cost of everything a layout adds beyond the boxes themselves, merge included. */
+  private def layoutBytes(parts: Int, residues: Int, distinctTokens: Int): Long =
+    InputBytes + (parts + residues) * ProceedsBytes + distinctTokens * ResidueTokenBytes +
+      (if (parts > 1) InputBytes + parts * MergeInputBytes + ProceedsBytes else 0L)
+
+  private def layoutCost(parts: Int, residues: Int, params: BlockchainParameters): Long =
+    10000L + (parts + residues) * params.getOutputCost.toLong +
+      (if (parts > 1)
+        10000L + parts * (params.getInputCost.toLong + MergeInputCost) + params.getOutputCost.toLong
+      else 0L)
 
   /**
-   * An input with no proof: thirty-two bytes of box id, an empty proof length, and one context
-   * variable naming an output. Measured at fifty-four bytes a box including a successor.
-   */
-  private final val InputBytes = 40L
-
-  /**
-   * As many boxes as the budget affords, richest first.
+   * As many boxes as the budget affords, richest first, merge included, then trimmed from the
+   * poorest end until what they realize funds every output they need.
    *
    * Sized here rather than built and then dropped: a sweep over its share of the block would cost a
-   * whole assembly to discover, and the boxes it leaves behind stay collectable next block.
+   * whole assembly to discover, and the boxes it leaves behind stay collectable next block. Funding
+   * is decided over the whole set because a token-carrying claim pays its share of a residue only
+   * alongside others. `floor` is [[proceedsFloor]] for the script the proceeds will sit at.
    */
   def fitting(candidates: Seq[RentCandidate], budget: transactions.candidate.CandidateBudget,
-              params: BlockchainParameters): Seq[RentCandidate] = {
-    var bytes = InputBytes * 2
-    var cost = 10000L + params.getOutputCost.toLong
-    candidates.sortBy(candidate => (-candidate.proceedsErg, candidate.box.id.toString))
+              params: BlockchainParameters, floor: Long): Seq[RentCandidate] = {
+    var bytes = 0L
+    var cost = 0L
+    var claims = 0
+    var tokenIds = Set.empty[String]
+    val chosen = candidates.sortBy(candidate => (-candidate.proceedsErg, candidate.box.id.toString))
       .take(MaxBoxes)
       .takeWhile { candidate =>
-        val fits = bytes + sweptBytes(candidate) <= budget.maxBytes &&
-          cost + sweptCost(candidate, params) <= budget.maxCost
+        val nextClaims = claims + (if (candidate.recreates) 0 else 1)
+        val nextTokens = tokenIds ++ candidate.proceedsTokens.map(_.id.toString)
+        val residues = residueOutputs(nextTokens.size)
+        val parts = proceedsOutputs(nextClaims, residues)
+        val nextBytes = bytes + sweptBytes(candidate)
+        val nextCost = cost + sweptCost(candidate, params)
+        val fits = nextBytes + layoutBytes(parts, residues, nextTokens.size) <= budget.maxBytes &&
+          nextCost + layoutCost(parts, residues, params) <= budget.maxCost
         if (fits) {
-          bytes += sweptBytes(candidate)
-          cost += sweptCost(candidate, params)
+          bytes = nextBytes
+          cost = nextCost
+          claims = nextClaims
+          tokenIds = nextTokens
         }
         fits
-      }
+      }.toVector
+    trimmed(chosen, floor)
   }
 
+  /** The longest richest-first prefix of `chosen` that funds its own outputs. */
+  private def trimmed(chosen: Seq[RentCandidate], floor: Long): Seq[RentCandidate] = {
+    var kept = chosen.toVector
+    while (kept.nonEmpty && !funded(kept, floor)) kept = kept.init
+    kept
+  }
+
+  // ─── building ─────────────────────────────────────────────────────────────
+
+  /** A collection for one block, and the boxes the node's own rule refused while building it. */
+  final case class Collection(bundle: Option[CandidateBundle], refused: Seq[RentCandidate])
+
+  private val NoCollection = Collection(None, Seq.empty)
+
   /**
-   * Sweep several expired boxes into one fee-less transaction for this miner's own block.
-   *
-   * Outputs are laid out collection first, then one recreation per funded box, then the tokens the
-   * underfunded ones carried. A funded input names its own recreation in variable 127; an
-   * underfunded one may name any output, because its branch never looks at what it names.
+   * Sweep several expired boxes into this miner's own block, as a fee-less sweep and, when its claims
+   * needed several proceeds outputs, a merge folding them into one box. That box is the capital.
+   * Every input is put through the node's own rule first; see [[verifiedCollection]].
    */
+  def collect(ctx: BlockchainContext,
+              wallet: NodeWallet,
+              candidates: Seq[RentCandidate],
+              blockHeight: Int,
+              useTrueProp: Boolean): Collection = {
+    if (candidates.isEmpty) NoCollection
+    else if (candidates.size > MaxBoxes) {
+      logger.warn(s"Refusing a rent collection of ${candidates.size} boxes, over the $MaxBoxes limit")
+      NoCollection
+    } else Try(verifiedCollection(ctx, wallet, candidates, blockHeight, useTrueProp)) match {
+      case Success(collection) => collection
+      case Failure(ex) =>
+        logger.warn(s"Could not build a rent collection of ${candidates.size} boxes: ${ex.getMessage}")
+        NoCollection
+    }
+  }
+
+  /** [[collect]] without the refusals, for callers that only want the bundle. */
   def build(ctx: BlockchainContext,
             wallet: NodeWallet,
             candidates: Seq[RentCandidate],
             blockHeight: Int,
-            useTrueProp: Boolean): Option[CandidateBundle] = {
-    if (candidates.isEmpty) None
-    else if (candidates.size > MaxBoxes) {
-      logger.warn(s"Refusing a rent collection of ${candidates.size} boxes, over the $MaxBoxes limit")
-      None
-    } else Try(bundled(ctx, wallet, candidates, blockHeight, useTrueProp)) match {
-      case Success(bundle) => Some(bundle)
-      case Failure(ex) =>
-        logger.warn(s"Could not build a rent collection of ${candidates.size} boxes: ${ex.getMessage}")
-        None
+            useTrueProp: Boolean): Option[CandidateBundle] =
+    collect(ctx, wallet, candidates, blockHeight, useTrueProp).bundle
+
+  /**
+   * Assemble, put every input through [[RentVerifier]], and when some are refused assemble once more
+   * without them. The node refuses a whole transaction for one bad input, so this is what keeps one
+   * box from costing the rest of the sweep every block.
+   *
+   * Refused boxes are reported for eviction only when another input in the same sweep passed: a sweep
+   * refused whole points at this builder rather than at its boxes. An input the check cannot run on
+   * is offered as it is, leaving the node to judge it.
+   */
+  private def verifiedCollection(ctx: BlockchainContext,
+                                 wallet: NodeWallet,
+                                 candidates: Seq[RentCandidate],
+                                 blockHeight: Int,
+                                 useTrueProp: Boolean): Collection = {
+    val params = ctx.getDataSource.getParameters
+    val floor = proceedsFloor(CandidateCapital.collectionContract(wallet, useTrueProp), blockHeight, params)
+
+    def attempt(chosen: Seq[RentCandidate]): (ErgoLikeTransaction, IndexedSeq[RentVerdict]) = {
+      val tx = assembled(ctx, wallet, chosen, blockHeight, useTrueProp)
+      val verdicts = RentVerifier.verdicts(tx, chosen.map(ergoBoxOf).toIndexedSeq, blockHeight, params)
+      verdicts.collectFirst { case RentVerdict.Unverifiable(reason) => reason }.foreach { reason =>
+        logger.error(s"Could not run the node's rent rule on a sweep of ${chosen.size} boxes, so it " +
+          s"goes out unchecked: $reason")
+      }
+      tx -> verdicts
+    }
+
+    val (tx, verdicts) = attempt(candidates)
+    val refusedAt = verdicts.indices.filter(i => verdicts(i) == RentVerdict.Refused)
+    if (refusedAt.isEmpty) Collection(Some(bundled(ctx, wallet, candidates, tx, blockHeight, useTrueProp)), Seq.empty)
+    else if (!verdicts.contains(RentVerdict.Accepted)) {
+      logger.error(s"The node's rent rule refuses all ${refusedAt.size} checked inputs of a sweep at " +
+        s"$blockHeight. Nothing is offered and nothing evicted: this points at the builder, not the boxes")
+      NoCollection
+    } else {
+      val refused = refusedAt.map(candidates)
+      refused.foreach(candidate => logger.warn(s"Node's rent rule refuses ${candidate.box.id.toString} " +
+        s"(value=${candidate.box.value}, bytes=${candidate.box.bytes.length}, " +
+        s"created=${ergoBoxOf(candidate).creationHeight}, action=${candidate.action}); it is no longer offered"))
+      val refusedSet = refusedAt.toSet
+      val rest = trimmed(candidates.indices.filterNot(refusedSet.contains).map(candidates), floor)
+      if (rest.isEmpty) Collection(None, refused)
+      else {
+        val (retryTx, again) = attempt(rest)
+        if (again.contains(RentVerdict.Refused)) {
+          logger.warn(s"A rent sweep rebuilt without ${refused.size} refused boxes was refused again; " +
+            "nothing is offered this block")
+          Collection(None, refused)
+        } else Collection(Some(bundled(ctx, wallet, rest, retryTx, blockHeight, useTrueProp)), refused)
+      }
     }
   }
+
+  private def ergoBoxOf(candidate: RentCandidate): ErgoBox =
+    candidate.box.input.asInstanceOf[InputBoxImpl].getErgoBox
 
   private def bundled(ctx: BlockchainContext,
                       wallet: NodeWallet,
                       candidates: Seq[RentCandidate],
+                      tx: ErgoLikeTransaction,
                       blockHeight: Int,
                       useTrueProp: Boolean): CandidateBundle = {
-    val tx = assembled(ctx, wallet, candidates, blockHeight, useTrueProp)
-    val signed = new SignedTransactionImpl(ctx.asInstanceOf[BlockchainContextBase], tx,
+    val sweep = new SignedTransactionImpl(ctx.asInstanceOf[BlockchainContextBase], tx,
       estimatedCost(candidates.size, tx.outputCandidates.size,
         candidates.map(_.box.tokens.size).sum + tx.outputCandidates.map(_.additionalTokens.length).sum,
         ctx))
 
-    val entry = CapitalEntry(CapitalOrigin.StorageRent,
-      InputUTXO(new InputBoxImpl(tx.outputs.head)), parentTxId = signed.getId)
-    CandidateBundle(
-      Vector(CandidateTx(signed.getId, _root_.transactions.candidate.BlockTxMessages.CandidateTx.signedJson(signed), Kind,
-        RollupExecution.signedInputIds(signed), RollupExecution.signedSizeBytes(signed),
-        signed.getCost.toLong, RollupExecution.signedLeaf(signed))),
-      capital = Seq(entry))
+    val (parts, _) = layout(candidates)
+    if (parts == 1) {
+      val entry = CapitalEntry(CapitalOrigin.StorageRent,
+        InputUTXO(new InputBoxImpl(tx.outputs.head)), parentTxId = sweep.getId)
+      CandidateBundle(Vector(member(sweep)), capital = Seq(entry))
+    } else {
+      val merge = merged(ctx, wallet, tx, parts, blockHeight, useTrueProp)
+      val entry = CapitalEntry(CapitalOrigin.StorageRent,
+        InputUTXO(merge.getOutputsToSpend.get(0)), parentTxId = merge.getId)
+      CandidateBundle(Vector(member(sweep), member(merge)), capital = Seq(entry))
+    }
   }
 
   /**
-   * The transaction itself, before it is wrapped for the candidate path.
+   * The sweep itself, before it is wrapped for the candidate path.
    *
    * Separate so a spec can put every input through Ergo's own rule: nothing rejects a malformed
    * rent collection on the way out, because nothing signs it.
@@ -266,64 +449,104 @@ object StorageRent {
     require(!candidates.exists(c => protocol.owns(c.box)),
       "a rent collection cannot take one of this protocol's own boxes")
 
-    val tokens = mergeTokens(candidates.flatMap(_.proceedsTokens))
-    val tokenCost = if (tokens.isEmpty) 0L else UTXO.MIN_CHANGE
-    val proceeds = candidates.map(_.proceedsErg).sum - tokenCost
-    require(proceeds > 0L, s"a rent collection realizing $proceeds nanoERG is not worth building")
+    val params = ctx.getDataSource.getParameters
+    val contract = CandidateCapital.collectionContract(wallet, useTrueProp)
+    val floor = proceedsFloor(contract, blockHeight, params)
+    val (parts, residueTokens) = layout(candidates)
+    val proceeds = candidates.map(_.proceedsErg).sum - residueTokens.size * UTXO.MIN_CHANGE
+    require(proceeds >= parts * floor,
+      s"a rent collection realizing $proceeds nanoERG cannot fund $parts proceeds outputs of $floor")
 
-    // Collection first so an underfunded input has a stable output to name; recreations follow in
-    // the order their boxes are swept, which is how each one finds its own index.
-    val collection = UTXO(CandidateCapital.collectionContract(wallet, useTrueProp), proceeds)
-      .setCreationHeight(blockHeight)
+    // Proceeds first, the first holding everything the others do not; then recreations, in the
+    // order their boxes are swept; then the token residue at this miner's own key.
+    val proceedsOuts = (0 until parts).map { i =>
+      UTXO(contract, if (i == 0) proceeds - (parts - 1) * floor else floor).setCreationHeight(blockHeight)
+    }
     val recreations = candidates.filter(_.recreates).map { candidate =>
-      val fee = candidate.action.asInstanceOf[RentAction.Collect].fee
+      val taken = candidate.action.asInstanceOf[RentAction.Collect].taken
       // Everything but value and creation height carries through, which is what the rule compares.
-      UTXO(candidate.box.contract, candidate.box.value - fee, candidate.box.tokens,
+      UTXO(candidate.box.contract, candidate.box.value - taken, candidate.box.tokens,
         candidate.box.registers).setCreationHeight(blockHeight)
     }
-    val tokenBox =
-      if (tokens.isEmpty) Seq.empty[UTXO]
-      else Seq(UTXO(wallet.contract, tokenCost, tokens).setCreationHeight(blockHeight))
+    val residues = residueTokens.map(tokens =>
+      UTXO(wallet.contract, UTXO.MIN_CHANGE, tokens).setCreationHeight(blockHeight))
+    val outputs = (proceedsOuts ++ recreations ++ residues).map(candidateOf(ctx, _))
 
-    val outputs = (Seq(collection) ++ recreations ++ tokenBox).map(candidateOf(ctx, _))
-    var nextRecreation = 1
-    val inputs = candidates.map { candidate =>
-      val named = if (candidate.recreates) {
-        val idx = nextRecreation
-        nextRecreation += 1
-        idx
-      } else 0
+    // A recreation names itself; claims take the proceeds outputs, then the residues, one each.
+    val claimSlots = (0 until parts) ++ residues.indices.map(parts + recreations.size + _)
+    var nextRecreation = parts
+    var nextClaim = 0
+    val named = candidates.map { candidate =>
+      if (candidate.recreates) { nextRecreation += 1; nextRecreation - 1 }
+      else { nextClaim += 1; claimSlots(nextClaim - 1) }
+    }
+    // The node refuses two inputs naming one output, and an index past the outputs falls through
+    // to the box's own script, which an empty proof cannot satisfy.
+    require(named.distinct.size == named.size && named.forall(i => i >= 0 && i < outputs.size),
+      "every rent input has to name an output of its own")
+
+    val inputs = candidates.zip(named).map { case (candidate, i) =>
       Input(candidate.box.input.asInstanceOf[InputBoxImpl].getErgoBox.id,
         ProverResult(Array.emptyByteArray,
-          ContextExtension(Map(Constants.StorageIndexVarId -> ShortConstant(named.toShort)))))
+          ContextExtension(Map(Constants.StorageIndexVarId -> ShortConstant(i.toShort)))))
     }
 
     // One line per input, because the node reports a refusal by input index and says nothing about
     // which box it was or which branch it took. Without this, `#6 => false` cannot be read at all.
     if (logger.isDebugEnabled) {
-      val params = ctx.getDataSource.getParameters
-      var recreation = 1
-      candidates.zipWithIndex.foreach { case (candidate, i) =>
-        val named = if (candidate.recreates) { val n = recreation; recreation += 1; n } else 0
+      candidates.zip(named).zipWithIndex.foreach { case ((candidate, n), i) =>
         // Full id and creation height, so a refusal can be taken straight to the node and asked
         // about: the two things that decide the branch are the box's size and its age.
         logger.debug(f"rent sweep #$i%-3d ${candidate.box.id.toString} " +
           f"value=${candidate.box.value}%16d bytes=${candidate.box.bytes.length}%5d " +
-          f"fee=${storageFee(candidate.box, params)}%14d " +
+          f"fee=${storageFee(candidate.box, params)}%14d taken=${candidate.proceedsErg}%14d " +
           f"created=${candidate.box.input.asInstanceOf[InputBoxImpl].getCreationHeight}%8d " +
           f"age=${blockHeight - candidate.box.input.asInstanceOf[InputBoxImpl].getCreationHeight}%8d " +
-          f"${if (candidate.recreates) "collect" else "claim  "} names=$named " +
+          f"${if (candidate.recreates) "collect" else "claim  "} names=$n " +
           f"tokens=${candidate.box.tokens.size}")
       }
       logger.debug(s"rent sweep: ${candidates.size} inputs, ${outputs.size} outputs, " +
-        s"${recreation - 1} recreation(s), tokenBox=${tokenBox.nonEmpty}, proceeds=$proceeds")
+        s"$parts proceeds, ${recreations.size} recreation(s), ${residues.size} residue(s), proceeds=$proceeds")
     }
 
-    new ErgoLikeTransaction(inputs.toIndexedSeq, IndexedSeq.empty, outputs.toIndexedSeq)
+    val tx = new ErgoLikeTransaction(inputs.toIndexedSeq, IndexedSeq.empty, outputs.toIndexedSeq)
+    // Nothing signs this, so the node's dust rule is checked here against the real serialization.
+    val perByte = params.getMinValuePerByte.toLong
+    tx.outputs.zipWithIndex.foreach { case (out, i) =>
+      require(out.value >= out.bytes.length * perByte,
+        s"rent output $i holds ${out.value} nanoERG, under the ${out.bytes.length * perByte} minimum")
+    }
+    tx
   }
 
   /**
-   * What the block will be charged for this transaction, on the node's own accounting.
+   * Folds the sweep's proceeds outputs into one box at the same script, so the package's capital
+   * is one input to the holding top-up however many claims the sweep carried. Fee-less, and it
+   * balances to zero change.
+   */
+  private def merged(ctx: BlockchainContext, wallet: NodeWallet, sweep: ErgoLikeTransaction,
+                     parts: Int, blockHeight: Int, useTrueProp: Boolean): SignedTransaction = {
+    val contract = CandidateCapital.collectionContract(wallet, useTrueProp)
+    val pieces = (0 until parts).map(i => InputUTXO(new InputBoxImpl(sweep.outputs(i))))
+    // Proceeds outputs sit at this script and carry no tokens, which rules out every residue and a
+    // recreation of anyone else's box.
+    require(pieces.forall(p => p.contract.ergoTreeHex == contract.ergoTreeHex && p.tokens.isEmpty),
+      "a rent merge may only spend the sweep's proceeds outputs")
+    val total = pieces.foldLeft(0L)((n, piece) => Math.addExact(n, piece.value))
+    val unsigned = TxBuilder(ctx)
+      .setInputs(pieces: _*)
+      .setOutputs(UTXO(contract, total).setCreationHeight(blockHeight))
+      .buildTx(0L, wallet.p2pk)
+    wallet.sign(unsigned)
+  }
+
+  private def member(signed: SignedTransaction): CandidateTx =
+    CandidateTx(signed.getId, CandidateTx.signedJson(signed), Kind,
+      RollupExecution.signedInputIds(signed), RollupExecution.signedSizeBytes(signed),
+      signed.getCost.toLong, RollupExecution.signedLeaf(signed))
+
+  /**
+   * What the block will be charged for the sweep, on the node's own accounting.
    *
    * Computed rather than measured: nothing here runs a script, so there is no reduction to read a
    * cost off, and the interpreter charges a flat `StorageContractCost` for an input it accepts this

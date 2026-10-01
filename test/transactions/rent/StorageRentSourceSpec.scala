@@ -141,15 +141,19 @@ class StorageRentSourceSpec extends AnyFlatSpec with Matchers with MockitoSugar 
         val box = work.lithos.mutations.UTXO(Contract.SIGMA_FALSE, value + i * Parameters.OneErg)
           .setCreationHeight(0)
           .toInput(ctx, org.ergoplatform.sdk.ErgoId.create("ab" * 32), i.toShort)
-        RentCandidate(box, StorageRent.decide(box.value, box.bytes.length, params).get)
+        RentCandidate(box, StorageRent.decide(box.value, box.bytes.length,
+          StorageRent.successorBytes(box, support.RentRule.dueHeight), params).get)
       }
     }
 
   private def params = nodeContext.getClient.execute(_.getDataSource.getParameters)
 
+  /** What a proceeds output at this miner's key has to hold, as the source computes it. */
+  private def floor: Long = StorageRent.proceedsFloor(wallet.contract, support.RentRule.dueHeight, params)
+
   "A sweep" should "take everything when the budget affords it" in {
     val all = candidates(10, 100L * Parameters.OneErg)
-    StorageRent.fitting(all, CandidateBudget(Long.MaxValue, Long.MaxValue), params) should have size 10
+    StorageRent.fitting(all, CandidateBudget(Long.MaxValue, Long.MaxValue), params, floor) should have size 10
   }
 
   /**
@@ -158,7 +162,7 @@ class StorageRentSourceSpec extends AnyFlatSpec with Matchers with MockitoSugar 
    */
   it should "stop at the cost it is allowed" in {
     val all = candidates(50, 100L * Parameters.OneErg)
-    val fitted = StorageRent.fitting(all, CandidateBudget(Long.MaxValue, 30000L), params)
+    val fitted = StorageRent.fitting(all, CandidateBudget(Long.MaxValue, 30000L), params, floor)
 
     fitted.size should (be > 0 and be < 50)
     withClue("one more box would have to fit inside the same budget: ") {
@@ -169,14 +173,14 @@ class StorageRentSourceSpec extends AnyFlatSpec with Matchers with MockitoSugar 
 
   it should "stop at the bytes it is allowed" in {
     val all = candidates(50, 100L * Parameters.OneErg)
-    StorageRent.fitting(all, CandidateBudget(300L, Long.MaxValue), params).size should
+    StorageRent.fitting(all, CandidateBudget(300L, Long.MaxValue), params, floor).size should
       (be > 0 and be < 50)
   }
 
   /** The point of ranking: a truncated sweep should carry the boxes that pay most. */
   it should "take the boxes that yield the most when it cannot take them all" in {
     val all = candidates(20, 100L * Parameters.OneErg)
-    val fitted = StorageRent.fitting(all, CandidateBudget(Long.MaxValue, 20000L), params)
+    val fitted = StorageRent.fitting(all, CandidateBudget(Long.MaxValue, 20000L), params, floor)
 
     fitted should not be empty
     val taken = fitted.map(_.proceedsErg).min
@@ -188,12 +192,12 @@ class StorageRentSourceSpec extends AnyFlatSpec with Matchers with MockitoSugar 
 
   it should "take nothing when the budget cannot afford one box" in {
     StorageRent.fitting(candidates(5, 100L * Parameters.OneErg),
-      CandidateBudget(10L, 10L), params) shouldBe empty
+      CandidateBudget(10L, 10L), params, floor) shouldBe empty
   }
 
   it should "never exceed the transaction ceiling" in {
     val all = candidates(3, 100L * Parameters.OneErg)
-    StorageRent.fitting(all, CandidateBudget(Long.MaxValue, Long.MaxValue), params).size should
+    StorageRent.fitting(all, CandidateBudget(Long.MaxValue, Long.MaxValue), params, floor).size should
       be <= StorageRent.MaxBoxes
   }
 

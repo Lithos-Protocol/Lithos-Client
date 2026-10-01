@@ -98,6 +98,12 @@ class StorageRentSource(nodeContext: NodeContext,
       eligible --= ids
       deferred --= ids
 
+    // Refused by the node's own rent rule while a sweep was being built. Dropped until restart, when
+    // the walk starts over and finds them again; offered every block, each would cost its sweep.
+    case Refused(ids) =>
+      eligible --= ids
+      logger.warn(s"Dropped ${ids.size} boxes the node's rent rule refuses; holding ${eligible.size}")
+
     // ── the candidate path ──────────────────────────────────────────────────
 
     case PrepareBlockTxs(blockHeight, _) => startBuild(blockHeight, None)
@@ -142,9 +148,16 @@ class StorageRentSource(nodeContext: NodeContext,
         StorageRent.plan(input, box.creationHeight, blockHeight, params, ctx.getNetworkType, protocol)
           .map(RentCandidate(input, _))
       }
-      val chosen = StorageRent.fitting(candidates, limits.budget, params)
+      val wallet = nodeContext.getNodeWallet
+      val floor = StorageRent.proceedsFloor(
+        transactions.candidate.CandidateCapital.collectionContract(wallet, useTrueProp), blockHeight, params)
+      val chosen = StorageRent.fitting(candidates, limits.budget, params, floor)
       if (chosen.isEmpty) Seq.empty[CandidateBundle]
-      else StorageRent.build(ctx, nodeContext.getNodeWallet, chosen, blockHeight, useTrueProp).toSeq
+      else {
+        val collection = StorageRent.collect(ctx, wallet, chosen, blockHeight, useTrueProp)
+        if (collection.refused.nonEmpty) self ! Refused(collection.refused.map(_.box.id.toString).toSet)
+        collection.bundle.toSeq
+      }
     }
 
   /**
@@ -191,5 +204,8 @@ object StorageRentSource {
 
   /** Boxes a build found already spent, so they stop being offered. */
   private[rent] final case class Spent(ids: Set[String])
+
+  /** Boxes the node's rent rule refused during a build, so they stop being offered. */
+  private[rent] final case class Refused(ids: Set[String])
 
 }

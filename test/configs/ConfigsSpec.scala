@@ -56,6 +56,18 @@ class ConfigsSpec extends AnyFlatSpec with Matchers {
     }
   }
 
+  it should "refuse an enabled rent source with room for the sweep but not its merge" in {
+    def withRent(enabled: Boolean, maxTxs: Int): Configuration = Configuration(ConfigFactory.parseString(
+      s"stratum.candidate.sources.rent { enabled = $enabled, maxTxs = $maxTxs }")
+      .withFallback(shipped.underlying).resolve())
+    Seq(true -> 0, true -> 2, true -> 5, false -> 1).foreach { case (enabled, maxTxs) =>
+      withClue(s"rent enabled=$enabled maxTxs=$maxTxs: ")(
+        noException should be thrownBy Configs.validateAll(withRent(enabled, maxTxs)))
+    }
+    val thrown = the[ConfigValidationException] thrownBy Configs.validateAll(withRent(enabled = true, 1))
+    thrown.getMessage should include("stratum.candidate.sources.rent.maxTxs")
+  }
+
   it should "bound the collateral clearance age to 100 through 14400 blocks" in {
     def withAge(age: Int): Configuration = Configuration(
       ConfigFactory.parseString(s"stratum.candidate.clearanceAge = $age").withFallback(shipped.underlying).resolve())
