@@ -50,10 +50,6 @@ object LFSMHelpers {
   final val MIN_ENTRY_BOND     = 2000000L // 0.002 ERG
   final val BOND_DIVISOR       = 25L
 
-  // FP_Control Params
-  // TODO: Change before launch
-  final val FP_TOKEN_MAINNET        = ErgoId.create("5a3f8a958178fc6e3b37aeea8fb94d8e6d33a7e4d2c7e70aa7db4e13c08a9903")
-
   final val FP_CONTROL_TESTNET      = Address.create("ShDJAh75M4bDZbCowYGqtmHi4iiBMqWJcbQRYLaxx8tZZHtj23c7qEcEvUiXYvSdnjdWE6R328rSazggEzz7UWRqXGZWc6L28bo96jMNK8NZs1bQBHAxkb9rLFW8Gf3HFQRPUm26CX8LZeqF1iJvftCYHTp2KC2LisbheejGeoXkv")
 
   // How long a rollup stays challengeable. MinerData_Logic spaces commitment changes by NISP_WINDOW
@@ -100,35 +96,29 @@ object LFSMHelpers {
 
 
   // =========== Testnet token params ===========
-  final val EMISSION_NFT_TESTNET = ErgoId.create("1850d0f59e3cb9b450e56ec74416ed0b9dcbd0a058b99b8df3e93a5d0f34c5ad")
-  final val EMCONFIG_NFT_TESTNET = ErgoId.create("3c0a153ce995f1a89bfc3293fd9356b80e0dd65721f75ea8435f50818471588b")
-  final val QUEUE_TOKEN_TESTNET = ErgoId.create("07956fbd1db32606fa60687c64d4e5c6e8aff00ff34a8ca2c6ba074b5a9d5192")
-  final val COLLAT_TOKEN_TESTNET = ErgoId.create("0fd01935440fc42fc64ad79a6b27afbd6e295d7cb6d77064996b6b188fa373eb")
-  final val FP_TOKEN_TESTNET = ErgoId.create("c2f5773457aade5b7332b48c7f561ee72ffe92069f20f7665a7d68f21f9fe5e3")
-  final val MD_TOKEN_TESTNET = ErgoId.create("a1f2e4f82440808bf88ea303c2f86d4ce30514947a839c7fb6fb12d6486dc3dc")
-  final val VOTE_TOKEN_TESTNET = ErgoId.create("87d6eccf5d1e413cff1d19690f14c6c7ff041103e74389b48392ee8abbb0d331")
+  final val EMISSION_NFT_TESTNET = ErgoId.create("eaae7b3a355c4453c99ced3d3f4d4e07b132e513dbbf1825c7ec933990152f8f")
+  final val EMCONFIG_NFT_TESTNET = ErgoId.create("09cd15f985aaf2dbb9e151424c6f80f033c28257036851297a28bdb076e517eb")
+  final val QUEUE_TOKEN_TESTNET = ErgoId.create("98f3efe2d2e024d553b235b3102ab28dafa5e39db75e1776ff8c565aa19d4fe0")
+  final val COLLAT_TOKEN_TESTNET = ErgoId.create("5fd5639a29673b0b24ba1ae3a8e7cc4c5183879c6f6dec88c245e867c5984507")
+  final val FP_TOKEN_TESTNET = ErgoId.create("e3107e4e42799637ea53429a3fa4e455323f1e7e3164a632a79950bdd9920b81")
+  final val MD_TOKEN_TESTNET = ErgoId.create("b153c23c94ee1eb083b1903de38435c0de8b000cf94d920087fc3f1b0140116d")
+  final val VOTE_TOKEN_TESTNET = ErgoId.create("6dacfaee8b82163f99cbbfd9dca67917b7206e9e55d4e3bca99dce3daf9e9170")
 
-  final val MD_GENESIS_ID_TESTNET = "14b798cf49d7818d8a4a049d59bb8773bd90184800fdcc9d8430dab9178712ad"
-  final val MD_GENESIS_HEIGHT_TESTNET = 568119
+  final val MD_GENESIS_ID_TESTNET = "40cbcea6f8d2d48ad3f9a3407483c5e9efed7b970e8696fdff640d795ce53e76"
+  final val MD_GENESIS_HEIGHT_TESTNET = 583094
 
 
   // ===========  Mainnet token params ===========
-  // TODO: Change before launch
-  final val EMISSION_NFT_MAINNET = ErgoId.create("1e30d0f59e3cb9b450e56ec74416ed0b9dcbd0a058b99b8df3e93a5d0f34c5ad")
-  // TODO: Change before launch
-  final val EMCONFIG_NFT_MAINNET = ErgoId.create("1fd01935441fc42fc64ad79a6b27afbd6e295d7cb6d77064996b6b188fa373eb")
-  // TODO: Change before launch
-  final val QUEUE_TOKEN_MAINNET = ErgoId.create("a1f1e4f82440808bf88ea308c2f86d4ce30514947a839c7fb6fb12d6486dc3dc")
-  // TODO: Change before launch
-  final val COLLAT_TOKEN_MAINNET = ErgoId.create("a1f234f82440808bf88ea303c2f86d4ce30514947a839c7fb6fb12d6486dc3dc")
-  // TODO: Change before launch
-  final val MD_TOKEN_MAINNET = ErgoId.create("0195d6fbd1b32606fa60687c64d4e5c6e8aff00ff34a8ca2c6ba074b5a9d5192")
-  // TODO: Change before launch
-  final val VOTE_TOKEN_MAINNET = ErgoId.create("0135d6f3d1b32606fa60687c64d4e9c6e8aff00ff34a8ca2c6ba074b5a9d5192")
-  // TODO: Change before launch
+  final val EMISSION_NFT_MAINNET = ErgoId.create("1ddb641b785e9ac9baf455f64932295e48cbbf4aadc9645f74065d58d09cdc47")
+  final val EMCONFIG_NFT_MAINNET = ErgoId.create("34a44f069c15ff92038803c6c21194f2c9a194f3a610c40ee1ef2773bdfc5c35")
+  final val QUEUE_TOKEN_MAINNET = ErgoId.create("3508c83c692de0ac9dabe1ed6a57a36abe5fed40fba5e497967a848ee423bc08")
+  final val COLLAT_TOKEN_MAINNET = ErgoId.create("a8a790e784e93ac0e68649181ae3d251e84fb5c741624100e7e945ae1e82dc98")
+  final val FP_TOKEN_MAINNET = ErgoId.create("0001bb75d59f66c3d563576c51bfaa8ea316ee23b4d52f3f139a4f00df19fe62")
+  final val MD_TOKEN_MAINNET = ErgoId.create("ff9b0d78e6705b3d55936b22b668761f484524a99fa1a7c6e9f7cd75119a1bbd")
+  final val VOTE_TOKEN_MAINNET = ErgoId.create("519b9fdeaa91cb5b5b8cca649599534748ee724f07952b2b2f2ba04c399b81b4")
 
-  final val MD_GENESIS_ID_MAINNET = "01356f3d1d332606fa60687c6444e9c6e8aff004f34a8ca2c6ba074b5a9d5192"
-  final val MD_GENESIS_HEIGHT_MAINNET = 100
+  final val MD_GENESIS_ID_MAINNET = "bab16af4899caf2c4edbf0da1d7de87dac12835a6126df91f6fa99e31952ec5d"
+  final val MD_GENESIS_HEIGHT_MAINNET = 1888247
 
 
   final val PROP_TOKEN_AMNT = Long.MaxValue
@@ -137,7 +127,7 @@ object LFSMHelpers {
   final val PERMIT_CEIL  = 40000L * Parameters.OneErg
   final val PERMIT_SLOPE = 20 * Parameters.OneErg
   final val PERMIT_PARAMS = Array(PERMIT_FLOOR, PERMIT_CEIL, PERMIT_SLOPE)
-  final val FOUNDER_1 = Contract.fromAddress(Address.create("9hwUwt7TGGXBVfpm73Ym9TG2mGwDhN6Ni4DFatwKER2pivQcWY5"))
+  final val FOUNDER_1 = Contract.fromAddress(Address.create("9hXpB6dye4gTZhV6ZBakoy934dRFW93qHjBTYVnBHCfvQiXuURr"))
   final val FOUNDER_2 = Contract.fromAddress(Address.create("9hBEAVZ9MHLf7mwVrvP3nqptdqYVdYGu1byPH8XFzC7KDuzrb8W"))
   final val FOUNDER_3 = Contract.fromAddress(Address.create("9i6Pq3M5VG95BUTAP1AVroizTBqc21K2Mx5Kh2jGeAADpBEskQd"))
 

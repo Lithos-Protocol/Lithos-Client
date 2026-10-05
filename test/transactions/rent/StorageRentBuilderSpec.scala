@@ -118,6 +118,46 @@ class StorageRentBuilderSpec extends AnyFlatSpec with Matchers with MockitoSugar
     }
   }
 
+  /**
+   * Claimed tokens stay at this miner's key: the capital the holding top-up spends is ERG only, and
+   * a funded box keeps its own tokens on its recreation. Three claims and one residue also force
+   * the merge, so the folded capital is covered too.
+   */
+  it should "keep their tokens out of the capital the top-up spends" in {
+    withCtx { ctx =>
+      val claimed = Token(ErgoId.create("cd" * 32), 500L)
+      val kept = Token(ErgoId.create("ce" * 32), 9L)
+      val boxes = Seq(
+        expired(ctx, 100L * Parameters.OneErg, 0, Seq(kept)),
+        expired(ctx, 1000000L, 1, Seq(claimed)),
+        expired(ctx, 1000000L, 2, Seq(claimed)),
+        expired(ctx, 1000000L, 3, Seq(claimed)))
+      verifyAll(ctx, boxes) shouldBe true
+
+      val (bundle, candidates) = swept(ctx, boxes)
+      val tx = StorageRent.assembled(ctx, wallet, candidates, dueAt, useTrueProp = false)
+      def hex(bytes: Array[Byte]): String = org.bouncycastle.util.encoders.Hex.toHexString(bytes)
+      def totals(tokens: Seq[(String, Long)]): Map[String, Long] =
+        tokens.groupBy(_._1).map { case (id, ts) => id -> ts.map(_._2).sum }
+
+      withClue("nothing burned: ") {
+        totals(tx.outputs.flatMap(_.additionalTokens.toArray.map(t => hex(t._1.toArray) -> t._2))) shouldEqual
+          totals(boxes.flatMap(_.tokens.map(t => t.id.toString -> t.amount)))
+      }
+      val recreation = tx.outputs.find(_.ergoTree.bytesHex == stranger.ergoTreeHex).get
+      recreation.additionalTokens.toArray.map(t => hex(t._1.toArray) -> t._2).toSeq shouldEqual
+        Seq(kept.id.toString -> kept.amount)
+      val residue = tx.outputs.find(o => o.additionalTokens.toArray.exists(t => hex(t._1.toArray) == claimed.id.toString)).get
+      residue.ergoTree.bytesHex shouldEqual wallet.contract.ergoTreeHex
+
+      bundle.members should have size 2
+      bundle.members(1).inputIds should not contain hex(residue.id)
+      bundle.capital should have size 1
+      bundle.capital.head.tokens shouldBe empty
+      bundle.capital.head.value shouldEqual candidates.map(_.proceedsErg).sum - UTXO.MIN_CHANGE
+    }
+  }
+
   // ─── both at once ─────────────────────────────────────────────────────────
 
   /**
