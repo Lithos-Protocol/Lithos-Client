@@ -24,7 +24,7 @@ object RentConfig {
 
   /** Mirrors the `stratum.candidate.sources.rent` block in `application.conf`; keep them in step. */
   val Default: RentConfig = RentConfig(
-    startHeight = 800000,
+    startHeight = 837000,
     scanIntervalMs = 30000,
     blocksPerScan = 200)
 

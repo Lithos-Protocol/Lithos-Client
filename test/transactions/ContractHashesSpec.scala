@@ -52,18 +52,18 @@ class ContractHashesSpec extends AnyFlatSpec with Matchers {
 
   private val testnet: Map[String, String] = Map(
     "payout" -> "f5c2fd04b3a95d2767c137389359be6854972126d9f0e53104e3684778655f51",
-    "eval" -> "07469e45dfc9b7dd030aac1d5f757d31ac25c17e7a9624207d3ad0d5f40cd789",
-    "holding" -> "42d023e08cc52fa8206485358e6f397db94b9f2ca39ea42884c5ec955e73a382",
-    "holdingLogic" -> "f214b5d08e367f38fd822ee6a427e94b150e8686790c9928e803db1f2987f43e",
-    "gate" -> "8ae4e8effb3d830a6ddb766a46702da7a4216bc065d263c413e58ebfed564cdf",
-    "collateral" -> "8b64fb465140108e6a54f872486a6c52cacd923a014332de87a7b688f4a93f48",
-    "emission" -> "ce0a4e2736170fe94481903295bfda8e98e729003ec026adb8a0c92e50b91a45",
-    "emissionGuard" -> "6961c280448afca211f3719f9cdef64da7c1d3c4e7e7ab6dd6e8646986dc0a8b",
+    "eval" -> "082a34d4b781a686e5aeb2af2b88d8e5ef2d3253c143dcac2c1b0a3cbeae972a",
+    "holding" -> "60e8e611ea08c1927efa535e637c7a6b15ce24a6701a7888e79889c2b075db61",
+    "holdingLogic" -> "d12396a9bf87b82f9ff62fd0d73d18738d4d1f6fc25b51103a811cba9b0d340a",
+    "gate" -> "806c5508e54398504bc1952f4162405d5cc55a8b46743150418d6cdd3d260e98",
+    "collateral" -> "62817f1c20f3bca3a79c93a6a3954fefd7fef808fa58483a8b125f679e8db6ce",
+    "emission" -> "96c18431499e25dbdfaec808a93cc0565a262a2607c248c760005670c75d7970",
+    "emissionGuard" -> "abdb737514b05ce73a6252f323ede02e33c6cc35e6067980a2864bb53e15b195",
     "enforcer" -> "0c4473b46f52bb122f33ec1d25e1e963cd7ddada0559f970f93a2401b0f94d52",
-    "minerDictionary" -> "f73a8788c08e4d432d6510957de0909f38f5f0bf6e842d72ed81c839e7cb0088",
-    "minerData" -> "1f6b9b73891ed53215945226ac677e86b70a7d6e4f6b9b8c9e2cd33ac5b22eb0",
-    "minerDataLogic" -> "c4cb616c90dad53d6969ea8ad84f6590e7e79031647c3177e6de1584ccadb5f6",
-    "fpNonMatchingCommitment" -> "305fa4c7939cdcd0af73eabfe6d0a81f64c711ae0edd9810fbd3de09ae968a58",
+    "minerDictionary" -> "1bfa1547c4457b05ec7b6a8aef64e6046b3268ca8c5d743ea4acb926bfc0b29c",
+    "minerData" -> "05f291b5381faf855efd4c4c3cd4113d1513cc12a3f9a8c6973d59f6899274cb",
+    "minerDataLogic" -> "a1bfe7bd44c019b82554dd5a2481d912e1d16e78cfcb643b226196c00afd827d",
+    "fpNonMatchingCommitment" -> "4ea3d6ebe342e006158f4f7620da7d4a4ecf9eaa3981551c98fd84cf73e100f6",
     "fpInvalidFormat" -> "bde8f71188d50558628b1a85e7075dfa592f9bf1b4ec996195aed6a33e1a9022",
     "fpMalformedGE" -> "a431231abf1c26b2d1821cf20abe10565fe7543c24de83a59598b9da047032f1",
     "fpNotInWindow" -> "078c9b1c1e81b0fe83cc4aa8df21efe935948bc12f825e8b8c066e24865ce845",
@@ -71,26 +71,22 @@ class ContractHashesSpec extends AnyFlatSpec with Matchers {
     "fpIncorrectN" -> "a5e75aa4c35403def6f8939788e5127f54825f5de36ea993efccfbab4f476ede",
     "fpInvalidDiff" -> "012f277f15829047125d8d5bcd5393fcea35b1a3c4bad321974a2183e0f81f0b",
     "fpTransactionNotIncluded" -> "1b998bb51bad5f4d5d4eba2bb8a6de02013d80ff4139602cec542cc0c103c0bb",
-    "fpMalformedGenesis" -> "cd93a814df198897351f1837ae525081f761858467f7fff180fd41e8cfeeca6f")
+    "fpMalformedGenesis" -> "ede1e0b08e44c39618c9e413b0ade3e8ba1aba6c2b3734910a8f3a05bf9769b5")
 
-  /**
-   * Mainnet ids are still placeholders, so these move once the real token ids are set. That is the
-   * change this spec exists to make visible.
-   */
   private val mainnet: Map[String, String] = Map(
     "payout" -> "f5c2fd04b3a95d2767c137389359be6854972126d9f0e53104e3684778655f51",
-    "eval" -> "e1c90aca561b83b57d113564a82407c9853256c35e51ded1bd5e6dcec13fedb1",
-    "holding" -> "6af1839c5959a98edf4cb9a6dc58dc881ffb3b6392adfc6763750426c6ca0158",
-    "holdingLogic" -> "c4d94317e20eba53f32704adb87906115f03fbafcbf646c92a5307c1189327d1",
-    "gate" -> "bc1ba023a45d5fe7f21d9863cd1127c9c7033f995710b14dd25be93abeea19bf",
-    "collateral" -> "e3c39138b463332d3d7b51c26ea67eb11e129840d4678dc11ccc6b74ff4ee075",
-    "emission" -> "399df073003b306a077c8a4cb965308f3a67c8acb7b0830ae59850fa39c1d27f",
-    "emissionGuard" -> "6a5be64c9d0f614f96660cffab60196aba6d81e99a2fb5d5867cf5c47c05b4d6",
+    "eval" -> "6170156717e706f6b3cd53d4ed908e9b9b4736aa09103eadc4dcddceb9108d27",
+    "holding" -> "33687e21eecf755211e104b7346b594ccb171c149a501116efc5af9effae0a55",
+    "holdingLogic" -> "28f8083002a1bb352b0a1b843d0f890da168a8e70d278af230ba1ef6d1ae5eff",
+    "gate" -> "b4c11d0e04ff78de8d302c19cbc740ff7e88068aaf6db6c85a0d9769468057d8",
+    "collateral" -> "8b46196f81955540d84d8900c428cdeb86046f845893611ede69e80a6fb42dcd",
+    "emission" -> "587e3f8eaf2234dd9c9efd5bedf08c771e4e796fdad30ca11e25c3209f2d9490",
+    "emissionGuard" -> "dc602a1c259f6399fb07296e9a26b368fd89d30e3f4cc71ce6e15af63a566eea",
     "enforcer" -> "e0c4bbd53e5f1ca793f55a0f695a8b9ca3299ddc57980eb16903848fd8f2df1f",
-    "minerDictionary" -> "cc05b77156604c434dac30b8d6a2fed9800f52afa00f9423761e4efe888ef75e",
-    "minerData" -> "86235fde1c23b2b96d9c955a1d343b64aaffcaf82edc76dabe0470536573e751",
-    "minerDataLogic" -> "0da4a7d9ee46ae820a758305edda5c32b021d4b905f460f64576e00773c3eb61",
-    "fpNonMatchingCommitment" -> "75752dd436b678acbb388af5d97fce98e4101dbf59df355069ca049f01917ef3",
+    "minerDictionary" -> "710e3d3cb043bafb67e87cd1498a4ad04c7281b252e39e941bae987cf30d24b3",
+    "minerData" -> "c12bb70eb55435182861614223ec023a6cf1a7bda6dc7ce017184bd3c8997c1e",
+    "minerDataLogic" -> "f4a96a6a7619641f4cb49fc06c1b3b70bf023234e9c56750b78e342dcfe1a96e",
+    "fpNonMatchingCommitment" -> "38e1a375b096c8bd22c2c75d9ab4919a96b213cd601896f4a5ac53e7d05009fd",
     "fpInvalidFormat" -> "bde8f71188d50558628b1a85e7075dfa592f9bf1b4ec996195aed6a33e1a9022",
     "fpMalformedGE" -> "a431231abf1c26b2d1821cf20abe10565fe7543c24de83a59598b9da047032f1",
     "fpNotInWindow" -> "078c9b1c1e81b0fe83cc4aa8df21efe935948bc12f825e8b8c066e24865ce845",
@@ -98,7 +94,7 @@ class ContractHashesSpec extends AnyFlatSpec with Matchers {
     "fpIncorrectN" -> "a5e75aa4c35403def6f8939788e5127f54825f5de36ea993efccfbab4f476ede",
     "fpInvalidDiff" -> "012f277f15829047125d8d5bcd5393fcea35b1a3c4bad321974a2183e0f81f0b",
     "fpTransactionNotIncluded" -> "1b998bb51bad5f4d5d4eba2bb8a6de02013d80ff4139602cec542cc0c103c0bb",
-    "fpMalformedGenesis" -> "04be61a7acfc50126e6689d28485bc9d12d5165025ba7ef3aa347efc50e9a9d6")
+    "fpMalformedGenesis" -> "1fc1db29651fc27d88659cf3c4aacbfe89b8e7e725dc17d6aaaa1c3879bfb8b8")
 
   private def check(network: NetworkType, expected: Map[String, String]): Unit = {
     val contracts = ProtocolContracts.forNetwork(network)

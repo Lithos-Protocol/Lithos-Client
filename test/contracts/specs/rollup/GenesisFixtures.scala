@@ -115,10 +115,10 @@ object GenesisFixtures {
 
   /**
    * One per share, against the fixture genesis. See `honestNisp`. The genesis is built from the
-   * mainnet ids, so pasting real ones moves every pin; paste the values the spec prints.
+   * mainnet ids, so changing them moves every pin; paste the values the spec prints.
    */
   val PinnedNonces: Seq[Long] =
-    Seq(9385L, 33457L, 40170L, 17890L, 5872L, 9955L, 8288L, 30436L, 22894L, 7283L)
+    Seq(21568L, 312L, 35029L, 19493L, 193L, 590L, 10251L, 5486L, 3871L, 25271L)
 
   /** As `NispFixtures.minedShare`, for a share carrying its own proof, levels and root. */
   def mine(height: Int,
