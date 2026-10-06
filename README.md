@@ -104,7 +104,7 @@ In the image below, it is `4.8M`. Input that value into `stratum.diff` and then 
 
 ### Monitoring Super Shares
 A good way to check if things are working properly is to view the Super Shares panel.
-You can view this panel at `localhost:9000/assets/mining/hashrate`
+You can view this panel at `localhost:9000/assets/mining`
 
 When you first start mining, the panel will look like this:
 ![NoSuperShares](/docs/NoSuperShares.png)
