@@ -71,6 +71,9 @@ state of the blockchain. Once a commitment is made, you should wait **65 blocks*
 You will get paid for any blocks found **125 blocks** after your commitment (4 hours on mainnet). It is recommended
 to start mining at 65 blocks so that you can build up your super shares.
 
+Once your difficulty is committed, it can take up to 28 hours for subsequent changes to take effect.
+Make sure you have the right value before committing!
+
 ### Super Shares
 When mining, you will get messages relating to super shares. Super shares are used to evaluate how much
 work you performed. As a Lithos miner, your goal is to create **10 super shares within
