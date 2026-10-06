@@ -99,7 +99,7 @@ Lithos Client as `localhost:9000/assets/mining/difficulty`
 Input your hashrate, and select the **start** difficulty.
 ![DiffCalc](/docs/DiffCalc.png)
 
-In the image below, it is `4.8M`. Input that value into `stratum.diff` and then turn on
+In the image above, it is `4.8M`. Input that value into `stratum.diff` and then turn on
 `state.autoCommit` to make your commitment.
 
 ### Monitoring Super Shares
