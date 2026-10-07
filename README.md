@@ -93,18 +93,27 @@ high, you may not create enough super-shares within the window. Your goal as a m
 these two variables, and find the right proportion of risk and reward.
 
 ## Making Your Diff Commitment
-To make your difficulty commitment, set `stratum.diff` to the appropriate value,
-and then set `state.autoCommit = true`. The wallet associated with your node and Lithos Client
-must have at least 0.05 ERG to make the commitment on-chain.
-
-In order to find the right difficulty, you can use the difficulty calculator hosted by the
-Lithos Client as `localhost:9000/assets/mining/difficulty`
+To calculate the right difficulty, the webpanel provides a difficulty calculator you can
+use to find the right value for your hashrate. The calculator is found at `localhost:9000/assets/mining/difficulty`
 
 Input your hashrate, and select the **start** difficulty.
 ![DiffCalc](/docs/DiffCalc.png)
 
-In the image above, it is `4.8M`. Input that value into `stratum.diff` and then turn on
-`state.autoCommit` to make your commitment.
+In the image above, it is `4.8M`. Once you've obtained your starting difficulty,
+you have two options to commit it onto the blockchain.
+
+### WebPanel
+Go to `localhost:9000/assets/mining/difficulty/commitment`. There you can see the commitment
+page, which lets you set your difficulty commitment via the API. Input your diff and Lithos API Key
+in order send a transaction which commits your difficulty onto the blockchain.
+![CommitmentPage](/docs/Commitments.png)
+### AutoCommit
+To make your difficulty commitment, set `stratum.diff` to the appropriate value,
+and then set `state.autoCommit = true`. 
+
+For both options the wallet associated with your node and Lithos Client must have some ERG to send the
+commitment transaction. We recommend a minimum of **0.05 ERG** to start. This should cover commitments and NISP bonds which
+are needed for submissions. Miners with higher hashrate amounts may need a bit more ERG.
 
 ### Monitoring Super Shares
 A good way to check if things are working properly is to view the Super Shares panel.
