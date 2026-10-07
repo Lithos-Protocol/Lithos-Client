@@ -38,7 +38,8 @@ import scala.util.{Failure, Success, Try}
  *     cannot tell the difference.
  */
 class CommitmentTransactions(nodeContext: NodeContext, dataBoxes: DataBoxSource,
-                             alive: () => Boolean = () => true) {
+                             alive: () => Boolean = () => true,
+                             sends: CommitmentSends = CommitmentSends.Shared) {
 
   private val logger: Logger = LoggerFactory.getLogger("CommitmentTransactions")
 
@@ -116,6 +117,22 @@ class CommitmentTransactions(nodeContext: NodeContext, dataBoxes: DataBoxSource,
     Try(client.execute(ctx => dataBox(ctx).map(box => CommitmentSchedule(ctx.getHeight, commitments(box).toVector)))).flatten
 
   /**
+   * The confirmed commitment list, and the list an unconfirmed transaction is writing over it, read
+   * at one tip. A miner with no stored data box reads as no schedule at all rather than a failure.
+   */
+  def commitmentState: Try[CommitmentState] = Try(client.execute { ctx =>
+    val height = ctx.getHeight
+    if (dataBoxes.getDataBoxToken.isEmpty) CommitmentState(height, None, None)
+    else {
+      val confirmed = dataBox(ctx).get
+      val tip = dataBox(ctx, MempoolOptions.WithMempool).get
+      val successor = if (tip.id == confirmed.id) None
+        else Some(UnconfirmedCommitments(tip.input.getTransactionId, commitments(tip).toVector))
+      CommitmentState(height, Some(CommitmentSchedule(height, commitments(confirmed).toVector)), successor)
+    }
+  })
+
+  /**
    * The tau this miner should hand its rigs: the committed score it is served at, which runs ahead
    * of the one in force while a higher commitment is about to bind.
    *
@@ -175,30 +192,27 @@ class CommitmentTransactions(nodeContext: NodeContext, dataBoxes: DataBoxSource,
 
   def sendInitialCommitment(diff: String,
                             minerTree: MinerDictionary,
-                            walletSelector: EngineFunding): String = {
+                            walletSelector: EngineFunding): CommitmentProgress.Sent = {
     client.execute{
       ctx =>
         val prover: NodeWallet = nodeContext.getNodeWallet
         val tau = LFSMHelpers.parseDiffValueForStratum(diff)
         val score = LFSMHelpers.convertTauOrScore(tau.get).toLong
+        val commitHeight = ctx.getHeight + DataBoxBuffer
         logger.info(s"Creating new commitment for local miner with hash ${prover.contract.hashedPropBytesHex}")
 
         val reservation = walletSelector.reserve(Parameters.MinFee * 2)
         val signed =
-          try signInitialCommitment(ctx, minerTree, prover, score, reservation.inputs)
+          try signInitialCommitment(ctx, minerTree, prover, commitHeight, score, reservation.inputs)
           catch {
             // Nothing has left this process, so the exact selection is ours to hand straight back.
             case NonFatal(ex) => reservation.release(); throw ex
           }
 
-        // Converted before submission begins
-        val change = signableOutputs(signed, prover)
-
-        val txId = new transactions.engine.EngineBroadcast(walletSelector.walletRef, executionNode)(walletSelector.executionContext)
-          .send(signed, Seq(reservation), "miner-registration", alive).requireAccepted()
-        walletSelector.giveBack(change)
-        logger.info(s"Sent transaction $txId to create new commitment")
-        txId
+        val sent = broadcast(signed, reservation, prover, walletSelector, "miner-registration",
+          CommitmentSends.Registration, commitHeight -> score)
+        logger.info(s"Sent transaction ${sent.txId} to create new commitment")
+        sent
     }
   }
 
@@ -210,13 +224,13 @@ class CommitmentTransactions(nodeContext: NodeContext, dataBoxes: DataBoxSource,
   private def signInitialCommitment(ctx: BlockchainContext,
                                     minerTree: MinerDictionary,
                                     prover: NodeWallet,
+                                    commitHeight: Int,
                                     score: Long,
                                     funding: Seq[InputUTXO]): SignedTransaction = {
     val proverContract = prover.contract
 
     val insertionTree = minerTree.dictionary.copy()
     val dictInput = InputUTXO(ctx.getBoxesById(minerTree.utxoId).head)
-    val commitHeight = ctx.getHeight + DataBoxBuffer
 
     // The credential this transaction mints takes the dictionary box's id, and the entry is that id
     // with the expiry appended. The contract bounds the expiry rather than deriving it, so a
@@ -246,9 +260,9 @@ class CommitmentTransactions(nodeContext: NodeContext, dataBoxes: DataBoxSource,
   }
 
   /**
-   * Move this miner's commitment to the configured difficulty, if it has to move and may.
+   * Move this miner's commitment to `diff`, if it has to move and may.
    *
-   * Settled once the confirmed box's newest entry is the configured score. Otherwise a change is sent
+   * Settled once the confirmed box's newest entry is `diff`'s score. Otherwise a change is sent
    * only when no unconfirmed transaction is already spending the data box and the newest entry is old
    * enough to replace; anything else is reported as what the change is waiting for.
    */
@@ -265,11 +279,11 @@ class CommitmentTransactions(nodeContext: NodeContext, dataBoxes: DataBoxSource,
               // Only two commitments are kept, so the contract spaces changes by a full rollup lifetime
               // past the window as well: any less and a change could evict the commitment a NISP still
               // in evaluation was submitted under.
-              val replaceableAt = current._1 + LFSMHelpers.NISP_WINDOW + LFSMHelpers.ROLLUP_LIFETIME
+              val replaceableAt = CommitmentTransactions.replaceableFrom(current._1)
               if (ctx.getHeight < replaceableAt)
                 CommitmentProgress.Waiting(s"commitment ${current._2} declared at height ${current._1} " +
                   s"cannot be replaced before height $replaceableAt")
-              else CommitmentProgress.Sent(sendCommitment(ctx, confirmed, current, score, walletSelector))
+              else sendCommitment(ctx, confirmed, current, score, walletSelector)
             case Success(tip) =>
               CommitmentProgress.Waiting(s"data box ${confirmed.id} already has an unconfirmed successor ${tip.id}")
             case Failure(ex) =>
@@ -292,7 +306,7 @@ class CommitmentTransactions(nodeContext: NodeContext, dataBoxes: DataBoxSource,
                              input: InputUTXO,
                              current: (Int, Long),
                              score: Long,
-                             walletSelector: EngineFunding): String = {
+                             walletSelector: EngineFunding): CommitmentProgress.Sent = {
     val prover: NodeWallet = nodeContext.getNodeWallet
     val newCommit = ctx.getHeight + DataBoxBuffer -> score
     logger.info(s"Committing $newCommit, replacing $current")
@@ -305,14 +319,35 @@ class CommitmentTransactions(nodeContext: NodeContext, dataBoxes: DataBoxSource,
         case NonFatal(ex) => reservation.release(); throw ex
       }
 
+    val sent = broadcast(signed, reservation, prover, walletSelector, "commitment:" + input.id.toString,
+      CommitmentSends.Change, newCommit)
+    logger.info(s"Sent transaction ${sent.txId} to commit $newCommit")
+    sent
+  }
+
+  /**
+   * Sends a signed registration or change and records it in `sends` before returning. An accepted one
+   * hands its change back for reuse. An uncertain one is returned rather than thrown, since it may
+   * still confirm and has to be watched; a refusal throws.
+   */
+  private def broadcast(signed: SignedTransaction,
+                        reservation: FundingAllocation,
+                        prover: NodeWallet,
+                        walletSelector: EngineFunding,
+                        operation: String,
+                        kind: String,
+                        commit: (Int, Long)): CommitmentProgress.Sent = {
     // Converted before submission begins
     val change = signableOutputs(signed, prover)
 
-    val txId = new transactions.engine.EngineBroadcast(walletSelector.walletRef, executionNode)(walletSelector.executionContext)
-      .send(signed, Seq(reservation), "commitment:" + input.id.toString, alive).requireAccepted()
-    walletSelector.giveBack(change)
-    logger.info(s"Sent transaction $txId to commit $newCommit")
-    txId
+    val result = new transactions.engine.EngineBroadcast(walletSelector.walletRef, executionNode)(walletSelector.executionContext)
+      .send(signed, Seq(reservation), operation, alive)
+    val uncertain = result.outcome == transactions.engine.EngineBroadcast.Uncertain
+    if (!uncertain) result.requireAccepted()
+    sends.record(CommitmentSends.Sent(result.txId, kind, commit._2, commit._1))
+    if (uncertain) logger.warn(s"The node's answer to $operation ${result.txId} was lost; it may still confirm")
+    else walletSelector.giveBack(change)
+    CommitmentProgress.Sent(result.txId, commit._2, commit._1, result.outcome)
   }
 
   private def signCommitment(ctx: BlockchainContext,
@@ -369,6 +404,28 @@ object CommitmentTransactions {
 
   /** Blocks before a higher commitment's declared height that the stratum starts serving it. */
   final val ServeLead: Int = 2
+
+  /** Blocks from the tip a commitment is sent at to the height it declares. */
+  final val DeclareAfter: Int = LFSMHelpers.NISP_WINDOW + InclusionSlack
+
+  /** The first height whose rollups judge NISPs against a commitment declared at `declared`. */
+  def inForceFrom(declared: Int): Int = declared + LFSMHelpers.NISP_WINDOW
+
+  /**
+   * The first tip a commitment declared at `declared` may be replaced from. The contract spaces
+   * changes by a rollup lifetime past the window, so the governing commitment of every live rollup
+   * stays in one of the data box's two slots.
+   */
+  def replaceableFrom(declared: Int): Int =
+    declared + LFSMHelpers.NISP_WINDOW + LFSMHelpers.ROLLUP_LIFETIME.toInt
+
+  /**
+   * The first block the stratum mines at `score` declared at `declared`, over `previous`, the score in
+   * force before it. A first commitment or a raise is served just before its declared height; a cut
+   * waits until it binds, so super shares found at the old score keep counting.
+   */
+  def servedFrom(declared: Int, score: Long, previous: Option[Long]): Int =
+    if (previous.forall(score > _)) declared - ServeLead else inForceFrom(declared)
 }
 
 /**
@@ -388,15 +445,19 @@ object DataBoxSource {
   }
 }
 
-/** What one pass of the auto-commit loop found or did. */
+/** What one commitment request, from the auto-commit loop or the API, found or did. */
 sealed trait CommitmentProgress
 
 object CommitmentProgress {
-  /** The confirmed data box's newest entry is the configured score, so nothing is left to send. */
+  /** The confirmed data box's newest entry is the requested score, so nothing is left to send. */
   case object Settled extends CommitmentProgress
 
-  /** A commitment change was broadcast as this transaction. */
-  final case class Sent(txId: String) extends CommitmentProgress
+  /**
+   * A registration or commitment change was broadcast as this transaction, declaring `score` at
+   * `declaredHeight`. `outcome` is the node's answer: accepted, or uncertain when it was lost.
+   */
+  final case class Sent(txId: String, score: Long, declaredHeight: Int,
+                        outcome: String = transactions.engine.EngineBroadcast.Accepted) extends CommitmentProgress
 
   /** No change can be sent yet, for `reason`. The loop asks again on its next pass. */
   final case class Waiting(reason: String) extends CommitmentProgress
@@ -416,3 +477,13 @@ final case class CommitmentSchedule(height: Int, entries: Vector[(Int, Long)]) {
   def pending: Option[(Long, Int)] =
     entries.headOption.filterNot(_ => aged).map(e => (e._2, e._1 + LFSMHelpers.NISP_WINDOW))
 }
+
+/** The commitment list an unconfirmed transaction `txId` writes, newest first. */
+final case class UnconfirmedCommitments(txId: String, entries: Vector[(Int, Long)])
+
+/**
+ * This miner's commitments read at tip `height`: the confirmed list, None when no data box is stored,
+ * and the list an unconfirmed transaction is replacing it with.
+ */
+final case class CommitmentState(height: Int, confirmed: Option[CommitmentSchedule],
+                                 unconfirmed: Option[UnconfirmedCommitments])

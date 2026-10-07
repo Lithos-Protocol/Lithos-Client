@@ -204,12 +204,11 @@ class StorageRentSourceSpec extends AnyFlatSpec with Matchers with MockitoSugar 
   // ─── config ───────────────────────────────────────────────────────────────
 
   /**
-   * Off, and starting well past genesis. The early chain was swept years ago, so walking it costs
+   * On, and starting well past genesis. The early chain was swept years ago, so walking it costs
    * node reads for nothing.
    */
-  "The default" should "leave the source off and the walk short of the chain start" in {
+  "The default" should "leave the source on and the walk short of the chain start" in {
     RentConfig.Default.startHeight should be > 0
-    CandidateSourceConfig.Default.copy(enabled = false).enabled shouldBe false
-    configs.CandidateConfig.Default.sources(CandidateSourceConfig.Rent).enabled shouldBe false
+    configs.CandidateConfig.Default.sources(CandidateSourceConfig.Rent).enabled shouldBe true
   }
 }

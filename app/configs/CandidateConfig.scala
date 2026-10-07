@@ -44,11 +44,10 @@ object CandidateConfig {
       CandidateSourceConfig.Rollups -> CandidateSourceConfig.Default,
       // Room for a run of Clears; Activates alone stop at `emission.candidateActivates`.
       CandidateSourceConfig.Emissions -> CandidateSourceConfig.Default.copy(maxTxs = 20),
-      // Off until a miner points it at a start height and has watched a scan pass run. Two
-      // transactions: one sweep, and the merge folding its proceeds outputs into one box. Twice the
+      // Two transactions: one sweep, and the merge folding its proceeds outputs into one box. Twice the
       // usual cost, because a claim with its own proceeds output also pays for a signed merge input.
       CandidateSourceConfig.Rent ->
-        CandidateSourceConfig.Default.copy(enabled = false, maxTxs = 2, maxCost = 2000000L),
+        CandidateSourceConfig.Default.copy(enabled = true, maxTxs = 2, maxCost = 2000000L),
       // The slots include placement ancestors and executions.
       CandidateSourceConfig.ErgoDex -> CandidateSourceConfig.Default.copy(maxTxs = 20),
       // On by default: LithosDex is the protocol's own DEX. Slots include placements and the flush.

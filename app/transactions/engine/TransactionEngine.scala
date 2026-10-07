@@ -12,9 +12,10 @@ import transactions.engine.execution.{CommitmentExecution, ConsolidationExecutio
 import transactions.engine.wallet.{EngineFunding, EngineWalletState}
 
 object TransactionEngine {
-  case object RegisterMiner
-  /** Move this miner's difficulty commitment to the configured one. Answered with a `CommitmentProgress`. */
-  case object CommitDifficulty
+  /** Register this miner with `diff` as its first commitment. Answered with a `CommitmentProgress.Sent`. */
+  final case class RegisterMiner(diff: String)
+  /** Move this miner's difficulty commitment to `diff`. Answered with a `CommitmentProgress`. */
+  final case class CommitDifficulty(diff: String)
   final case class JoinCollateral(request: api.models.CollateralJoinExecuteRequest)
 
   final case class Submit(intent: EngineIntent)
@@ -123,7 +124,7 @@ class TransactionEngine @Inject()(node: NodeContext,
 
   override protected def candidateExecution(eligible: () => Boolean): RollupExecution = newRollupExecution(eligible)
   private def newCommitmentExecution(eligible: () => Boolean): CommitmentExecution =
-    new CommitmentExecution(node, sync, config, dataBoxes, nodeApi,
+    new CommitmentExecution(node, sync, dataBoxes, nodeApi,
       EngineFunding(self, EngineFunding.askTimeout(config), ec), eligible)
   private val worker = context.system.dispatchers.lookup("lithos-contexts.engine-io-dispatcher")
 
@@ -193,8 +194,8 @@ class TransactionEngine @Inject()(node: NodeContext,
     case Submit(intent) => admit(intent, sender())
     case intent: DexIntent => admit(EngineIntent.Dex(intent), sender())
     case JoinCollateral(request) => admit(EngineIntent.Join(request), sender())
-    case RegisterMiner => admit(EngineIntent.Register, sender())
-    case CommitDifficulty => admit(EngineIntent.Commit, sender())
+    case RegisterMiner(diff) => admit(EngineIntent.Register(diff), sender())
+    case CommitDifficulty(diff) => admit(EngineIntent.Commit(diff), sender())
 
     // A batch is acknowledged as soon as it is admitted; the submitter does not wait for the sends.
     case transactions.rollups.TransactionMessages.RollupBatch(stubs) if stubs.nonEmpty && stubs.size <= 100 =>
@@ -292,13 +293,15 @@ class TransactionEngine @Inject()(node: NodeContext,
         stubs.nonEmpty && stubs.size <= 100 && stubs.forall(_.rollupBlockId.matches("[0-9a-f]{64}"))
       case EngineIntent.Join(request, requestId) =>
         request.count > 0 && request.count <= 10 && requestId.length <= 128
+      case EngineIntent.Register(diff) => diff.length <= 32
+      case EngineIntent.Commit(diff) => diff.length <= 32
       case _ => true
     }
     val key = work.key
     // A one-off API request is never retried: the caller has already been answered by then. The
     // commitment loop asks again every pass, so its own work is not retried here either.
     val policy = work match {
-      case _: EngineIntent.Dex | _: EngineIntent.Join | EngineIntent.Register | EngineIntent.Commit => OneOff
+      case _: EngineIntent.Dex | _: EngineIntent.Join | _: EngineIntent.Register | _: EngineIntent.Commit => OneOff
       case _: EngineIntent.Rollups => Critical
       case _ => Automatic
     }
@@ -350,8 +353,8 @@ class TransactionEngine @Inject()(node: NodeContext,
     val dispatched: Try[Future[Any]] = Try(entry.work match {
       case EngineIntent.Rollups(stubs) => newRollupExecution(stillEligible).execute(stubs)
       case work @ (_: EngineIntent.Join | EngineIntent.Queue | EngineIntent.Collateralize) => executeEmission(work)
-      case EngineIntent.Register => Future(newCommitmentExecution(stillEligible).register())(worker)
-      case EngineIntent.Commit => Future(newCommitmentExecution(stillEligible).commit())(worker)
+      case EngineIntent.Register(diff) => Future(newCommitmentExecution(stillEligible).register(diff))(worker)
+      case EngineIntent.Commit(diff) => Future(newCommitmentExecution(stillEligible).commit(diff))(worker)
       case work => Future {
         require(stillEligible(), "engine attempt expired")
         executeOptional(work, stillEligible)

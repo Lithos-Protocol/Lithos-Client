@@ -7,7 +7,7 @@ import play.libs.akka.AkkaGuiceSupport
 import state.synchronization._
 import state.persistence.StateSnapshotActor
 import tasks.{MDSyncTask, RollupSyncTask, StartMiningServer, StartupTasks}
-import transactions.rollups.{DataBoxSource, RollupEvaluator, RollupProcessor, RollupPublisher}
+import transactions.rollups.{CommitmentSends, DataBoxSource, RollupEvaluator, RollupProcessor, RollupPublisher}
 import utils.Globals
 
 import java.lang.management.ManagementFactory
@@ -40,6 +40,8 @@ class Module(environment: Environment, configuration: Configuration) extends Abs
 
     // Bind the disk-backed data-box source so consumers can substitute it in tests.
     bind(classOf[DataBoxSource]).toInstance(DataBoxSource.Stored)
+    // The engine records every registration and commitment change here; the loop and the API read it.
+    bind(classOf[CommitmentSends]).toInstance(CommitmentSends.Shared)
 
     // The one NISP store the stratum writes super shares into, for readers outside the mining path.
     bind(classOf[nisp.NISPStorage]).toInstance(Globals.nispDB)

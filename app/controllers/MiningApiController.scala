@@ -1,19 +1,32 @@
 package controllers
 
-import api.models.{NISPRepresentation, StratumInfo}
+import akka.actor.ActorSystem
+import api.models.{CommitmentRequest, DifficultyCommitment, NISPRepresentation, StratumInfo}
 import api.openapitools.OpenApiExceptions
-import api.{ApiHelper, MiningApi}
+import api.{ApiHelper, LithosApiErrors, MiningApi}
+import configs.Contexts
+import mutations.NotEnoughInputsException
 import org.bouncycastle.util.encoders.Hex
 import play.api.Configuration
 import play.api.libs.json._
 import play.api.mvc._
 import scorex.crypto.hash.Blake2b256
+import transactions.engine.wallet.EngineWalletMessages.InsufficientWalletFundsException
+import transactions.engine.wallet.FundingExpiredException
 
 import javax.inject.{Inject, Singleton}
 import scala.concurrent.Future
+import scala.util.{Failure, Success, Try}
 
 @Singleton
-class MiningApiController @Inject()(cc: ControllerComponents, api: MiningApi, config: Configuration) extends AbstractController(cc) {
+class MiningApiController @Inject()(cc: ControllerComponents, api: MiningApi, config: Configuration,
+                                    system: ActorSystem) extends AbstractController(cc) {
+  import DifficultyCommitment._
+
+  // The commitment endpoints make blocking node calls, so they run off Play's request threads.
+  // TODO: Make separate context for this?
+  private val ioContext = new Contexts(system).dexContext
+
   /**
     * GET /mining/bestNISP?height=[value]&score=[value]
     */
@@ -67,6 +80,54 @@ class MiningApiController @Inject()(cc: ControllerComponents, api: MiningApi, co
   def getCandidateSettings(): Action[AnyContent] = Action {
     Ok(Json.toJson(api.getCandidateSettings(config)))
   }
+
+  /**
+    * GET /mining/commitment
+    *
+    * Open, like the statistics reads: the commitment is public on chain, and a page shows it on load.
+    */
+  def getCommitment(): Action[AnyContent] = Action.async {
+    Future(respond(api.getCommitment))(ioContext)
+  }
+
+  /**
+    * POST /mining/commitment
+    */
+  def commit(): Action[AnyContent] = withApiKey {
+    Action.async { request =>
+      Future(respond(api.commit(body[CommitmentRequest](request))))(ioContext)
+    }
+  }
+
+  private def body[A](request: Request[AnyContent])(implicit reads: Reads[A]): A =
+    request.body.asJson match {
+      case None => throw new OpenApiExceptions.MissingRequiredParameterException("body", "request")
+      case Some(json) => json.validate[A] match {
+        case JsSuccess(value, _) => value
+        case JsError(_) => throw LithosApiErrors.LithosBadRequest("request body must be {\"diff\": \"<diff>\"}")
+      }
+    }
+
+  /**
+    * 400 the request is wrong; 409 something it depends on is held or moved, read the status and
+    * retry; 422 it cannot be done yet or the wallet cannot pay; 503 the chain could not be read.
+    */
+  private def respond[A](result: => A)(implicit writes: Writes[A]): Result =
+    Try(result) match {
+      case Success(value) => Ok(Json.toJson(value))
+      case Failure(e: LithosApiErrors.LithosBadRequest) => BadRequest(ApiHelper.makeError(400, "Bad request", e.getMessage))
+      case Failure(e: OpenApiExceptions.MissingRequiredParameterException) =>
+        BadRequest(ApiHelper.makeError(400, "Bad request", e.getMessage))
+      case Failure(e: LithosApiErrors.LithosStateChanged) => Conflict(ApiHelper.makeError(409, "State changed", e.getMessage))
+      case Failure(e: LithosApiErrors.LithosUnprocessable) =>
+        UnprocessableEntity(ApiHelper.makeError(422, "Cannot be executed", e.getMessage))
+      case Failure(e: NotEnoughInputsException) => UnprocessableEntity(ApiHelper.makeError(422, "Cannot be executed", e.getMessage))
+      case Failure(e: InsufficientWalletFundsException) =>
+        UnprocessableEntity(ApiHelper.makeError(422, "Cannot be executed", e.getMessage))
+      case Failure(e: LithosApiErrors.LithosUnavailable) => ServiceUnavailable(ApiHelper.makeError(503, "Unavailable", e.getMessage))
+      case Failure(e: FundingExpiredException) => ServiceUnavailable(ApiHelper.makeError(503, "Wallet busy", e.getMessage))
+      case Failure(e) => InternalServerError(ApiHelper.makeError(500, "Internal error occurred", e.getMessage))
+    }
 
   private def splitCollectionParam(paramValues: String, collectionFormat: String): List[String] = {
     val splitBy =

@@ -104,7 +104,9 @@ class CommitmentTransactionsSpec
                              mgr: ActorRef,
                              probe: TestProbe,
                              clock: AtomicLong,
-                             readable: java.util.concurrent.atomic.AtomicBoolean)
+                             readable: java.util.concurrent.atomic.AtomicBoolean,
+                             sends: CommitmentSends,
+                             api: NodeApi)
 
   /**
    * @param commits what R4 holds, or None for "this miner has no data box"
@@ -146,7 +148,8 @@ class CommitmentTransactionsSpec
       override def getDataBoxToken: Option[ErgoId] =
         if (commits.isDefined) Some(ErgoId.create("dc" * 32)) else None
     }
-    val commitments = new CommitmentTransactions(nodeCtx, source) {
+    val sends = new CommitmentSends
+    val commitments = new CommitmentTransactions(nodeCtx, source, sends = sends) {
       override protected def dataBox(ctx: BlockchainContext, mempool: MempoolOptions): Try[InputUTXO] = commits match {
         case None => Failure(new state.DataBoxRetrievalException("no stored data box"))
         case Some(cs) =>
@@ -155,7 +158,7 @@ class CommitmentTransactionsSpec
           Success(dataBoxWith(ctx, wallet, cs, foreign, parent))
       }
     }
-    Fixture(commitments, EngineFunding(mgr, 5.seconds, ec), mgr, TestProbe(), clock, readable)
+    Fixture(commitments, EngineFunding(mgr, 5.seconds, ec), mgr, TestProbe(), clock, readable, sends, api)
   }
 
   private def offered(f: Fixture, need: Long): Seq[InputUTXO] = {
@@ -179,9 +182,9 @@ class CommitmentTransactionsSpec
   // ─── the obligation ───────────────────────────────────────────────────────
 
   "An ambiguous commitment send" should "hold its wallet input until a COMPLETE read resolves it" in {
-    // The regression for the leak this class was extracted to remove. The send throws — there is no
-    // node behind the offline client — which is indistinguishable from a node that accepted the
-    // transaction and then dropped the connection. Releasing on that would be a double spend.
+    // The regression for the leak this class was extracted to remove. The send's answer is lost —
+    // there is no node behind the offline client — which is indistinguishable from a node that
+    // accepted the transaction and then dropped the connection. Releasing on that would be a double spend.
     //
     // The reward lookup is made to fail from here on, so no refresh can be COMPLETE and nothing can
     // resolve the reservation in either direction — while the wallet box itself stays in the
@@ -190,7 +193,10 @@ class CommitmentTransactionsSpec
     // which is the second half.
     val f = fixture(Some(inForce(configuredScore + 1)))
 
-    f.commitments.commitScore(diff, f.selector).isFailure shouldBe true
+    f.commitments.commitScore(diff, f.selector).get match {
+      case sent: CommitmentProgress.Sent => sent.outcome shouldEqual transactions.engine.EngineBroadcast.Uncertain
+      case other => fail(s"expected an uncertain send, got $other")
+    }
     f.probe.send(f.mgr, GetEngineHolds)
     f.probe.expectMsgType[EngineHolds].holds should have size 1
 
@@ -205,10 +211,22 @@ class CommitmentTransactionsSpec
     // complete mempool-aware read; Submitting is resolved by nothing at all. A lease left Submitting
     // would pass the test above and fail this one, which is the distinction that matters.
     val f = fixture(Some(inForce(configuredScore + 1)))
-    f.commitments.commitScore(diff, f.selector).isFailure shouldBe true
+    f.commitments.commitScore(diff, f.selector).get shouldBe a[CommitmentProgress.Sent]
 
     f.mgr ! RefreshBoxes
     f.probe.awaitAssert(offered(f, erg) shouldBe empty, 10.seconds, 200.millis)
+  }
+
+  it should "be recorded, so the next request waits on it instead of spending the data box again" in {
+    // Neither the loop nor the API sees the engine's answer when its ask times out, so the send has
+    // to be recorded where it is made.
+    val f = fixture(Some(inForce(configuredScore + 1)))
+    when(f.api.unconfirmedTransactionById(anyString())).thenReturn(Failure(new RuntimeException("node offline")))
+    val sent = f.commitments.commitScore(diff, f.selector).get.asInstanceOf[CommitmentProgress.Sent]
+
+    val held = f.sends.outstanding(f.api, state.messages.SyncView.initial)
+    held.map(_.sent) shouldEqual Some(CommitmentSends.Sent(sent.txId, CommitmentSends.Change, configuredScore,
+      height + CommitmentTransactions.DeclareAfter))
   }
 
   "A commitment that fails before the node call" should "release its selection at once" in {
@@ -352,6 +370,30 @@ class CommitmentTransactionsSpec
       Success(LFSMHelpers.convertTauOrScore(BigInt(999L)))
     fixture(Some(Seq((height + 10) -> 999L))).commitments.committedTau(BigInt(12345)) shouldEqual
       Success(BigInt(12345))
+  }
+
+  "servedFrom" should "name the block committedTau switches at, so the status agrees with the stratum" in {
+    // The tip is `height`, so the block being mined is height + 1.
+    val lead = CommitmentTransactions.ServeLead
+    for (declared <- Seq(height + lead, height + 1 + lead, height + 2 + lead, height + 10)) {
+      val served = fixture(Some(Seq(declared -> 9999L, (height - 1000) -> 4242L))).commitments
+        .committedTau(BigInt(12345)) == Success(LFSMHelpers.convertTauOrScore(BigInt(9999L)))
+      withClue(s"raise declared at $declared: ") {
+        served shouldEqual CommitmentTransactions.servedFrom(declared, 9999L, Some(4242L)) <= height + 1
+      }
+    }
+    // A cut waits until it binds.
+    CommitmentTransactions.servedFrom(height, 999L, Some(4242L)) shouldEqual height + LFSMHelpers.NISP_WINDOW
+    // A first commitment is served like a raise.
+    CommitmentTransactions.servedFrom(height + 10, 999L, None) shouldEqual height + 10 - lead
+  }
+
+  "Commitment timing" should "be the 63, 125 and 845 blocks the config and docs state" in {
+    val sentAt = 1000
+    val declared = sentAt + CommitmentTransactions.DeclareAfter
+    CommitmentTransactions.servedFrom(declared, 2L, Some(1L)) - sentAt shouldEqual 63
+    CommitmentTransactions.inForceFrom(declared) - sentAt shouldEqual 125
+    CommitmentTransactions.replaceableFrom(declared) - sentAt shouldEqual 845
   }
 
   "committedScore" should "fall back to the configured diff rather than refuse to start" in {

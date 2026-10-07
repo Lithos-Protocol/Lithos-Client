@@ -63,8 +63,8 @@ class ConfigDefaultsSpec extends AnyFlatSpec with Matchers {
     RollupSourceConfig(Configuration.empty) shouldEqual RollupSourceConfig.Default
   }
 
-  "A config without a source's block" should "leave an off-by-default source off" in {
-    CandidateConfig(Configuration.empty).sources(CandidateSourceConfig.Rent).enabled shouldBe false
+  "A config without a source's block" should "leave storage rent on" in {
+    CandidateConfig(Configuration.empty).sources(CandidateSourceConfig.Rent).enabled shouldBe true
   }
 
   it should "leave the DEX sources on, and block transactions with them" in {

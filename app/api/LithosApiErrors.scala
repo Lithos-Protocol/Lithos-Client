@@ -28,8 +28,9 @@ object LithosApiErrors {
    *
    * Raised when a caller supplied an `expected...BoxId` that no longer matches; when a DEX mutation
    * cannot take its lock in time, since a request that waited out another mutation was quoted
-   * against a box that mutation has since spent; and when a collateral join is refused because the
-   * client's own automated pass owns lender-key selection.
+   * against a box that mutation has since spent; when a collateral join is refused because the
+   * client's own automated pass owns lender-key selection; and when a commitment request is refused
+   * because auto-commit owns the commitment or an earlier one has not settled.
    *
    * The three box ids are the DEX's, carried so a caller can re-quote against them rather than
    * guess. They are absent everywhere else, and only the DEX controller renders them — the other

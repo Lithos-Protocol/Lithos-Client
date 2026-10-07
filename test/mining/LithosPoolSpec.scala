@@ -2,6 +2,9 @@ package mining
 
 import akka.actor.{ActorRef, ActorSystem, Props}
 import akka.testkit.{TestKit, TestProbe}
+import ch.qos.logback.classic.{Level, Logger => LogbackLogger}
+import ch.qos.logback.classic.spi.ILoggingEvent
+import ch.qos.logback.core.read.ListAppender
 import com.typesafe.config.ConfigFactory
 import configs.CandidateConfig
 import mining.MiningMessages._
@@ -12,6 +15,7 @@ import org.json.{JSONArray, JSONObject}
 import org.scalatest.{BeforeAndAfterAll, BeforeAndAfterEach}
 import org.scalatest.flatspec.AnyFlatSpecLike
 import org.scalatest.matchers.should.Matchers
+import org.slf4j.LoggerFactory
 import scorex.crypto.authds.ADDigest
 import scorex.crypto.hash.Blake2b256
 import scorex.util.bytesToId
@@ -24,6 +28,7 @@ import transactions.candidate.BlockTxMessages.CandidateTx
 import java.math.BigInteger
 import java.util.concurrent.{CompletableFuture, LinkedBlockingQueue, TimeUnit}
 import java.util.concurrent.atomic.{AtomicInteger, AtomicLong}
+import scala.collection.JavaConverters._
 import scala.collection.mutable.ArrayBuffer
 import scala.concurrent.duration._
 
@@ -58,7 +63,7 @@ class LithosPoolSpec extends TestKit(ActorSystem("lithos-pool-spec", LithosPoolS
 
   private def nodeInfo(parent: String = parentA, height: Int = 100): NodeInfo = {
     val base = ChainFixtures.infoAt(height - 1)
-    base.copy(bestFullHeaderId = Some(parent), parameters = base.parameters.copy(blockVersion = 4))
+    base.copy(bestFullHeaderId = Some(parent), isMining = true, parameters = base.parameters.copy(blockVersion = 4))
   }
 
   private case class Call(txs: Seq[String], pk: String, observed: NodeInfo,
@@ -103,9 +108,11 @@ class LithosPoolSpec extends TestKit(ActorSystem("lithos-pool-spec", LithosPoolS
 
   private def fixture(config: CandidateConfig = cfg, controlledManager: Boolean = false,
                       nodeVersion: Int = 4, stats: Option[ActorRef] = None, reduced: Boolean = false,
-                      multiplier: Int = configs.StratumConfig.DefaultReductionMultiplier): Fixture = {
+                      multiplier: Int = configs.StratumConfig.DefaultReductionMultiplier,
+                      mining: Boolean = true): Fixture = {
     val node = new StubNode
-    node.observed = node.observed.copy(parameters = node.observed.parameters.copy(blockVersion = nodeVersion))
+    node.observed = node.observed.copy(isMining = mining,
+      parameters = node.observed.parameters.copy(blockVersion = nodeVersion))
     val builder = TestProbe()
     val miner = TestProbe()
     val state = TestProbe()
@@ -123,7 +130,7 @@ class LithosPoolSpec extends TestKit(ActorSystem("lithos-pool-spec", LithosPoolS
     }))
     val f = Fixture(pool, builder, miner, node, clock, manager)
     fixtures += f
-    builder.expectMsg(ChainAdvanced(100, parentA))
+    if (mining) builder.expectMsg(ChainAdvanced(100, parentA))
     miner.send(pool, MinerConnected("miner", miner.ref))
     f
   }
@@ -432,6 +439,39 @@ class LithosPoolSpec extends TestKit(ActorSystem("lithos-pool-spec", LithosPoolS
     f.node.observed = reorged
     f.pool ! PollBlockTemplate
     f.builder.expectMsg(ChainAdvanced(100, parentB))
+  }
+
+  "Chain observation" should "log a node with mining disabled as an error once a minute, ask it for no work, and resume once enabled" in {
+    val appender = new ListAppender[ILoggingEvent]
+    appender.start()
+    val logger = LoggerFactory.getLogger("LithosPool").asInstanceOf[LogbackLogger]
+    logger.addAppender(appender)
+    // The appender appends under its own lock, so reading under it is safe while the pool logs
+    def errors: Seq[String] = appender.synchronized(appender.list.asScala.toList).collect {
+      case event if event.getLevel == Level.ERROR => event.getFormattedMessage
+    }
+    try {
+      val f = fixture(mining = false)
+      awaitCond(errors.size == 1)
+      errors.head should (include("NOT mining") and include("mining = true") and include("restart the node"))
+      f.pool ! BlockPackageReady(pkg())
+      f.pool ! PollBlockTemplate
+      withClue("a node with mining disabled serves no candidate route, so nothing is asked of it: ") {
+        f.node.calls.poll(200, TimeUnit.MILLISECONDS) shouldBe null
+        f.builder.expectNoMessage(200.millis)
+      }
+      withClue("polls inside the minute stay quiet: ") { errors should have size 1 }
+      f.clock.addAndGet(1.minute.toNanos)
+      f.pool ! PollBlockTemplate
+      awaitCond(errors.size == 2)
+
+      f.node.observed = f.node.observed.copy(isMining = true)
+      f.pool ! PollBlockTemplate
+      f.builder.expectMsg(ChainAdvanced(100, parentA))
+      f.pool ! BlockPackageReady(pkg())
+      nextCall(f).txs should have size 1
+      errors should have size 2
+    } finally logger.detachAppender(appender)
   }
 
   "Job publication" should "acknowledge genesis before optional HTTP and reject delayed augmentation acknowledgements" in {

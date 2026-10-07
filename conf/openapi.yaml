@@ -865,6 +865,113 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiError'
+  /mining/commitment:
+    get:
+      summary: Get difficulty commitment
+      description: >-
+        This miner's difficulty commitment, read from the chain on every call. NISPs are judged
+        against `inForce`; with none in force this miner cannot submit NISPs and is not paid from
+        rollups.
+
+
+        A commitment sent at tip `h` is served by the stratum from `h + timing.servedAfterBlocks`
+        when it is a first commitment or a raise, and from `h + timing.inForceAfterBlocks` when it is
+        a cut. It is in force from `h + timing.inForceAfterBlocks`, and the next change can be sent
+        from `h + timing.replaceableAfterBlocks`. Each rollup pays `timing.rollupLifetimeBlocks` after
+        it opens.
+
+
+        Check `canCommit` and `blockedReason` before offering a change.
+      operationId: getCommitment
+      tags:
+        - mining
+      responses:
+        '200':
+          description: The commitment as read now
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DifficultyCommitment'
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+    post:
+      summary: Commit a difficulty
+      description: >-
+        Registers this miner with `diff` as its first commitment, or replaces its commitment with
+        `diff`. The response gives the heights the new commitment acts at.
+
+
+        A registration locks 0.001 ERG in this miner's data box and pays a 0.001 ERG network fee.
+        A change pays the network fee.
+
+
+        **Refused with 409 while `state.autoCommit` is on**, since it keeps the commitment at
+        `stratum.diff`.
+      operationId: commitDifficulty
+      security:
+        - ApiKeyAuth: []
+      tags:
+        - mining
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CommitmentRequest'
+      responses:
+        '200':
+          description: >-
+            The transaction was sent. With `outcome` uncertain the node's answer was lost and it may
+            still confirm: read `GET /mining/commitment` before sending again.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CommitmentResult'
+        '400':
+          description: Malformed body, a `diff` that does not parse, or a `diff` that is already the newest commitment.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '403':
+          description: The api_key header is missing or wrong.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '409':
+          description: >-
+            `state.autoCommit` is on, an earlier registration or change has not settled, another
+            request is being sent, or the chain moved between the read and the send. Read
+            `GET /mining/commitment` and retry.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '422':
+          description: >-
+            The newest commitment cannot be replaced yet, `state.disableTransforms` is on, the
+            wallet cannot pay, or the node refused the transaction.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '503':
+          description: The commitment or the Miner Dictionary could not be read, or the transaction engine did not answer.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
   /mining/bestNISP:
     get:
       description: Returns the best NISP produced for a given height and score, with exactly 10 super-shares
@@ -4385,6 +4492,176 @@ components:
           format: double
           description: Number of super shares produced by the mining client within the last hour
           example: 2.5
+    DifficultyCommitment:
+      description: This miner's difficulty commitment.
+      type: object
+      x-tags: mining
+      required: [state, canCommit, autoCommit, configDiff, timing]
+      properties:
+        state:
+          type: string
+          enum: [unregistered, registering, waiting, active, unknown]
+          description: |-
+            - `unregistered`: no Miner Dictionary entry; send a commitment to register.
+            - `registering`: a registration was sent and is not yet confirmed and synced.
+            - `waiting`: registered, and the first commitment is not in force yet.
+            - `active`: a commitment is in force.
+            - `unknown`: the commitment could not be read; see `reason`.
+        reason:
+          type: string
+          description: Why `state` is `unknown` or `registering`.
+        height:
+          type: integer
+          description: The chain tip the commitment was read at. Absent when it could not be read.
+        inForce:
+          $ref: '#/components/schemas/CommitmentEntry'
+        pending:
+          $ref: '#/components/schemas/CommitmentEntry'
+        inFlight:
+          $ref: '#/components/schemas/CommitmentInFlight'
+        replaceableFromHeight:
+          type: integer
+          description: The first tip a change to the newest commitment can be sent from. Absent while unregistered.
+        canCommit:
+          type: boolean
+          description: Whether `POST /mining/commitment` would send now.
+        blockedReason:
+          type: string
+          enum: [TRANSFORMS_DISABLED, AUTO_COMMIT, UNAVAILABLE, IN_FLIGHT, SYNCING, LOCKED]
+          description: |-
+            Why `canCommit` is false.
+
+            - `TRANSFORMS_DISABLED`: `state.disableTransforms` is on.
+            - `AUTO_COMMIT`: `state.autoCommit` keeps the commitment at `configDiff`.
+            - `UNAVAILABLE`: the commitment could not be read.
+            - `IN_FLIGHT`: an earlier registration or change has not settled; see `inFlight`.
+            - `SYNCING`: the Miner Dictionary is not synced, or the registration is not recorded yet.
+            - `LOCKED`: the newest commitment cannot be replaced before `replaceableFromHeight`.
+        autoCommit:
+          type: boolean
+          description: Whether `state.autoCommit` is running and keeps the commitment at `configDiff`.
+        configDiff:
+          type: string
+          description: >-
+            The `stratum.diff` setting. The stratum serves it until a commitment takes effect, and
+            auto-commit commits it.
+          example: '4.0G'
+        timing:
+          $ref: '#/components/schemas/CommitmentTiming'
+    CommitmentEntry:
+      description: One commitment. Absent when there is none in that slot.
+      type: object
+      x-tags: mining
+      required: [score, diff, declaredHeight, inForceFromHeight]
+      properties:
+        score:
+          type: string
+          pattern: '^[0-9]+$'
+          description: The committed score, as an exact decimal string. Payouts are proportional to it.
+        diff:
+          type: string
+          description: '`score` written the way `stratum.diff` is.'
+          example: '1.50M'
+        declaredHeight:
+          type: integer
+          description: The height the commitment declares. Super shares count toward it from here.
+        inForceFromHeight:
+          type: integer
+          description: The first height whose rollups judge NISPs against this commitment.
+        servedFromHeight:
+          type: integer
+          description: >-
+            The first block the stratum mines at this score. Present only on a commitment not yet in
+            force.
+    CommitmentInFlight:
+      description: A registration or change that is sent but not yet part of `inForce` or `pending`.
+      type: object
+      x-tags: mining
+      required: [txId, kind, commitment]
+      properties:
+        txId:
+          type: string
+        kind:
+          type: string
+          enum: [registration, change]
+        confirmedHeight:
+          type: integer
+          description: >-
+            Present once the transaction confirmed, while this client has not yet synced to this
+            height.
+        commitment:
+          $ref: '#/components/schemas/CommitmentEntry'
+    CommitmentTiming:
+      description: Blocks from the tip a commitment is sent at.
+      type: object
+      x-tags: mining
+      required: [servedAfterBlocks, inForceAfterBlocks, replaceableAfterBlocks, windowBlocks, rollupLifetimeBlocks]
+      properties:
+        servedAfterBlocks:
+          type: integer
+          description: Until the stratum mines at a first commitment or a raise. A cut is served once it is in force.
+          example: 63
+        inForceAfterBlocks:
+          type: integer
+          description: Until rollups judge NISPs against it, and this miner can be paid at it.
+          example: 125
+        replaceableAfterBlocks:
+          type: integer
+          description: Until the next change can be sent.
+          example: 845
+        windowBlocks:
+          type: integer
+          description: The blocks a NISP's super shares are drawn from.
+          example: 60
+        rollupLifetimeBlocks:
+          type: integer
+          description: From a rollup opening to its payout.
+          example: 720
+    CommitmentRequest:
+      type: object
+      x-tags: mining
+      required: [diff]
+      properties:
+        diff:
+          type: string
+          description: A number and one of K, M, G, T or P, as `stratum.diff` is written.
+          example: '1.5M'
+    CommitmentResult:
+      description: A sent registration or change.
+      type: object
+      x-tags: mining
+      required: [txId, kind, outcome, score, diff, sentAtHeight, declaredHeight, servedFromHeight,
+                 inForceFromHeight, replaceableFromHeight]
+      properties:
+        txId:
+          type: string
+        kind:
+          type: string
+          enum: [registration, change]
+        outcome:
+          type: string
+          enum: [accepted, uncertain]
+          description: The node's answer. `uncertain` means it was lost and the transaction may still confirm.
+        score:
+          type: string
+          pattern: '^[0-9]+$'
+        diff:
+          type: string
+          example: '1.50M'
+        sentAtHeight:
+          type: integer
+          description: The tip the transaction was built at.
+        declaredHeight:
+          type: integer
+        servedFromHeight:
+          type: integer
+          description: The first block the stratum mines at this score.
+        inForceFromHeight:
+          type: integer
+          description: The first height whose rollups judge NISPs against this commitment.
+        replaceableFromHeight:
+          type: integer
+          description: The first tip the next change can be sent from.
     CollateralMarketInfo:
       description: >
         One snapshot of the collateral market. ERG amounts are nanoERG decimal strings; permit and

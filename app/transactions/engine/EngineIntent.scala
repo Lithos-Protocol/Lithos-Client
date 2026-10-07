@@ -41,7 +41,11 @@ object EngineIntent {
 
   case object Queue extends EngineIntent { val key = "emission-queue" }
   case object Collateralize extends EngineIntent { val key = "self-collateralize" }
-  case object Register extends EngineIntent { val key = "register-miner" }
-  case object Commit extends EngineIntent { val key = "difficulty-commitment" }
+  /**
+   * Keyed by kind alone, so a second request coalesces onto the first rather than building a second
+   * spend of the same box. A waiter compares the score it gets back with the one it asked for.
+   */
+  final case class Register(diff: String) extends EngineIntent { def key: String = "register-miner" }
+  final case class Commit(diff: String) extends EngineIntent { def key: String = "difficulty-commitment" }
   case object Consolidate extends EngineIntent { val key = "consolidation" }
 }

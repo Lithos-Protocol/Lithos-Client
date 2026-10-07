@@ -17,7 +17,7 @@ class CandidateSettingsSpec extends AnyFlatSpec with Matchers {
     val settings = CandidateSettings.from(shipped)
     settings.blockTransactions shouldBe true
     settings.sources.map(_.name) shouldBe Seq("rollups", "emissions", "rent", "lithosdex", "ergodex")
-    settings.sources.filter(_.active).map(_.name) shouldBe Seq("rollups", "emissions", "lithosdex", "ergodex")
+    settings.sources.filter(_.active).map(_.name) shouldBe Seq("rollups", "emissions", "rent", "lithosdex", "ergodex")
     settings.mempoolRefreshMs shouldBe 20000
     settings.minCandidateChangeRevenue shouldBe 1000000L
     settings.collateralStrategy shouldBe "highestFee"
@@ -28,7 +28,7 @@ class CandidateSettingsSpec extends AnyFlatSpec with Matchers {
     val settings = CandidateSettings.from(withOverrides("stratum.candidate.blockTransactions = false"))
     settings.sources.exists(_.active) shouldBe false
     // Enabled is the source's own setting, reported even while nothing asks it.
-    settings.sources.filter(_.enabled).map(_.name) shouldBe Seq("rollups", "emissions", "lithosdex", "ergodex")
+    settings.sources.filter(_.enabled).map(_.name) shouldBe Seq("rollups", "emissions", "rent", "lithosdex", "ergodex")
   }
 
   it should "mark a source active only when it would be asked" in {
@@ -42,7 +42,7 @@ class CandidateSettingsSpec extends AnyFlatSpec with Matchers {
       "rollups" -> true,
       // No slots is the same as off: the stratum never asks a source it cannot place.
       "emissions" -> false,
-      "rent" -> false,
+      "rent" -> true,
       "lithosdex" -> true,
       // Enabled as a source, but its batcher is off, so nothing would answer.
       "ergodex" -> false)

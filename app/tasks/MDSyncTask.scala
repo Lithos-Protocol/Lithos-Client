@@ -11,7 +11,7 @@ import akka.pattern.ask
 import akka.util.Timeout
 import transactions.engine.{EngineBroadcast, TransactionEngine}
 import transactions.engine.wallet.FundingExpiredException
-import transactions.rollups.CommitmentProgress
+import transactions.rollups.{CommitmentProgress, CommitmentSends}
 import lfsm.LFSMHelpers
 import scorex.utils.Longs
 import utils.Globals
@@ -35,7 +35,8 @@ class MDSyncTask @Inject()(system: ActorSystem,
                            config: Configuration,
                            nodeContext: NodeContext,
                            @Named("sync-handler") syncHandler: ActorRef,
-                           @Named("transaction-engine") walletManager: ActorRef) {
+                           @Named("transaction-engine") walletManager: ActorRef,
+                           sends: CommitmentSends) {
 
   private val logger: Logger = LoggerFactory.getLogger("MDSyncTask")
   private val taskConfig = new TasksConfig(config).dictionarySyncTask
@@ -52,8 +53,6 @@ class MDSyncTask @Inject()(system: ActorSystem,
   private val autoCommit = stateConfig.autoCommit && !stateConfig.disableTransforms.getOrElse(false)
 
   // Touched only inside a pass, and `running` keeps passes from overlapping.
-  /** The registration or commitment last sent, until it has confirmed and been synced. */
-  private var inFlight: Option[String] = None
   /** Set once the confirmed commitment is the configured one; nothing is left to do after that. */
   private var settled = false
   /** The last reason logged for waiting, so an unchanged wait is reported once rather than each pass. */
@@ -92,8 +91,8 @@ class MDSyncTask @Inject()(system: ActorSystem,
   /** Says once, at startup, whether this client registers and commits on its own and what that means. */
   private def logAutoCommit(): Unit =
     if (!stateConfig.autoCommit)
-      logger.warn("Auto-commit is off (state.autoCommit): this client will not register this miner or change " +
-        "its difficulty commitment. An unregistered miner cannot submit NISPs, so it is not paid from rollups")
+      logger.warn("Auto-commit is off (state.autoCommit): commit from the web panel's Mining > Difficulty > " +
+        "Commitment tab or POST /mining/commitment. An unregistered miner cannot submit NISPs, so it is not paid from rollups")
     else if (!autoCommit)
       logger.warn("Auto-commit is on, but state.disableTransforms is true, so nothing will be registered or committed")
     else
@@ -105,10 +104,11 @@ class MDSyncTask @Inject()(system: ActorSystem,
    * moving the commitment needs only the data box the registration created.
    */
   private def autoCommitPass(view: SyncView, trusted: Boolean): Unit =
-    stillInFlight(view) match {
-      case Some(reason) => waiting(reason)
+    sends.outstanding(nodeApi, view) match {
+      case Some(held) => waiting(held.reason)
       case None =>
-        if (Globals.mdDB.getDataBoxToken.nonEmpty) request(TransactionEngine.CommitDifficulty, "difficulty commitment")
+        if (Globals.mdDB.getDataBoxToken.nonEmpty)
+          request(TransactionEngine.CommitDifficulty(stratumConfig.diff), "difficulty commitment")
         else if (!view.canonical.available)
           waiting(s"synchronization: ${view.canonical.reason.getOrElse("not ready")}")
         else if (!trusted)
@@ -117,23 +117,18 @@ class MDSyncTask @Inject()(system: ActorSystem,
         // cleared store would otherwise read as never having registered.
         else if (view.minerDictionaryMetadata.exists(_.hasMiner))
           waiting("synchronization to record this miner's data box")
-        else request(TransactionEngine.RegisterMiner, "Miner Dictionary registration")
+        else request(TransactionEngine.RegisterMiner(stratumConfig.diff), "Miner Dictionary registration")
     }
 
   private def request(message: Any, what: String): Unit =
     Try(scala.concurrent.Await.result(walletManager ? message, timeout.duration)) match {
-      case Success(txId: String) => sent(txId, what)
-      case Success(CommitmentProgress.Sent(txId)) => sent(txId, what)
+      case Success(sent: CommitmentProgress.Sent) => this.sent(sent, what)
       case Success(CommitmentProgress.Settled) =>
         settled = true
         logger.info(s"Difficulty commitment ${stratumConfig.diff} is on chain; auto-commit has nothing left to do")
       case Success(CommitmentProgress.Waiting(reason)) => waiting(reason)
       case Success(TransactionEngine.Deferred(_, reason)) => waiting(s"the transaction engine: $reason")
       case Success(other) => logger.warn(s"Unexpected answer to the $what request: $other")
-      // The node may hold it, so it is watched exactly like one that was accepted.
-      case Failure(lost: EngineBroadcast.SubmissionOutcomeException) if lost.outcome == EngineBroadcast.Uncertain =>
-        logger.warn(s"The node's answer to $what ${lost.txId} was lost; waiting to see whether it confirms")
-        inFlight = Some(lost.txId)
       // Still queued behind other engine work. The next pass joins the same request rather than adding one.
       case Failure(_: akka.pattern.AskTimeoutException) => waiting(s"the transaction engine to run the $what")
       case Failure(noInputs: NotEnoughInputsException) =>
@@ -143,9 +138,11 @@ class MDSyncTask @Inject()(system: ActorSystem,
       case Failure(ex) => logger.error(s"Unexpected $what failure", ex)
     }
 
-  private def sent(txId: String, what: String): Unit = {
-    logger.info(s"Sent $what $txId; waiting for it to confirm")
-    inFlight = Some(txId)
+  /** The send is already recorded in `sends`, which holds the next pass until it confirms and syncs. */
+  private def sent(sent: CommitmentProgress.Sent, what: String): Unit = {
+    if (sent.outcome == EngineBroadcast.Uncertain)
+      logger.warn(s"The node's answer to $what ${sent.txId} was lost; waiting to see whether it confirms")
+    else logger.info(s"Sent $what ${sent.txId}; waiting for it to confirm")
     lastWait = None
   }
 
@@ -154,27 +151,6 @@ class MDSyncTask @Inject()(system: ActorSystem,
       lastWait = Some(reason)
       logger.info(s"Auto-commit waiting on $reason")
     }
-
-  /**
-   * What the transaction last sent is still waiting for, or None once it confirmed and was synced, or
-   * left the mempool without confirming. Until then the dictionary and the data box read as they did
-   * before it, and acting on them would build a double spend of it.
-   */
-  private def stillInFlight(view: SyncView): Option[String] = inFlight.flatMap { txId =>
-    val status = for {
-      pending <- nodeApi.unconfirmedTransactionById(txId).map(_.isDefined)
-      included <- if (pending) Success(None) else nodeApi.indexedTransactionById(txId).map(_.map(_.inclusionHeight))
-    } yield (pending, included)
-    status match {
-      case Success((true, _)) => Some(s"transaction $txId to confirm")
-      case Success((false, included)) if MDSyncTask.awaitingSync(included, view.cursor.map(_.height)) =>
-        Some(s"synchronization to reach height ${included.get}, where $txId confirmed")
-      case Success(_) =>
-        inFlight = None
-        None
-      case Failure(ex) => Some(s"the node to report on transaction $txId: ${ex.getMessage}")
-    }
-  }
 
   /**
    * Warns while removing this registration would strike one of this miner's own honest NISPs.
@@ -228,13 +204,6 @@ class MDSyncTask @Inject()(system: ActorSystem,
 }
 
 object MDSyncTask {
-
-  /**
-   * Whether a transaction confirmed at `includedAt` is still ahead of this client's synced height, so
-   * its effect is not yet visible locally. A transaction the node never confirmed holds nothing back.
-   */
-  private[tasks] def awaitingSync(includedAt: Option[Int], syncedTo: Option[Int]): Boolean =
-    includedAt.exists(height => syncedTo.forall(_ < height))
 
   /**
    * Where the removal danger window opens. A rollup opened this close to expiry is still live at it,

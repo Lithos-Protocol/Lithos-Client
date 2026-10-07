@@ -3,6 +3,7 @@ package api
 import play.api.libs.json._
 import models.ApiError
 import models.CandidateSettings
+import models.{CommitmentRequest, CommitmentResult, DifficultyCommitment}
 import models.NISPRepresentation
 import models.StratumInfo
 import play.api.Configuration
@@ -28,4 +29,10 @@ trait MiningApi {
     * genesis transaction
     */
   def getCandidateSettings(config: Configuration): CandidateSettings
+
+  /** This miner's difficulty commitment as read from the chain now. */
+  def getCommitment: DifficultyCommitment
+
+  /** Registers this miner with `request.diff`, or changes its commitment to it. */
+  def commit(request: CommitmentRequest): CommitmentResult
 }

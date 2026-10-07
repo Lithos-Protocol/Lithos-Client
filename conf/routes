@@ -36,6 +36,9 @@ GET /info                     controllers.InfoApiController.getLithosInfo()
 GET /mining/bestNISP          controllers.MiningApiController.getBestNISPAtHeight()
 GET /mining                   controllers.MiningApiController.getStratumInfo()
 GET /mining/candidate         controllers.MiningApiController.getCandidateSettings()
+GET /mining/commitment        controllers.MiningApiController.getCommitment()
++ nocsrf
+POST /mining/commitment       controllers.MiningApiController.commit()
 
 # Routes for Statistics API (only /stats/local requires api_key)
 GET /stats                    controllers.StatsApiController.getStats()

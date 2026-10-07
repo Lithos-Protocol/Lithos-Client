@@ -81,6 +81,8 @@ class LithosPool(options: Options,
   private var protocolVersion = options.data.protocolVersion
   private var observing: Option[UUID] = None
   private var observationRequired = true
+  /** Set while the node reports mining disabled: when that error was last logged. */
+  private var notMiningReportedAt: Option[Long] = None
   /** The last chain a candidate request was overtaken on. */
   private var overtakenOn: Option[ChainTip] = None
   private var blockPackage: Option[BlockPackage] = None
@@ -153,8 +155,16 @@ class LithosPool(options: Options,
       observing = None
       result match {
         case Success(info) =>
+          if (notMiningReportedAt.nonEmpty) logger.info("The node now reports mining enabled; resuming work")
+          notMiningReportedAt = None
           acceptObservation(info)
           driveCandidate()
+        case Failure(ex: NodeNotMining) =>
+          observationRequired = true
+          if (notMiningReportedAt.forall(nowNanos() - _ >= NotMiningReportInterval.toNanos)) {
+            notMiningReportedAt = Some(nowNanos())
+            logger.error(ex.getMessage)
+          }
         case Failure(ex) =>
           observationRequired = true
           logger.warn(s"Cannot refresh mining chain state: ${ex.getMessage}; retaining existing work")
@@ -299,8 +309,10 @@ class LithosPool(options: Options,
     val id = UUID.randomUUID()
     observing = Some(id)
     val node = nodeInterface
+    val nodeUrl = options.nodeApiUrl
     run(controlEc) {
       val info = node.info()
+      if (!info.isMining) throw new NodeNotMining(nodeUrl)
       chainTip(info)
       require(info.parameters != null && info.parameters.blockVersion > 0, "node has no mining parameters")
       info
@@ -659,6 +671,19 @@ object LithosPool {
 
   /** The node built its candidate on another chain than the request names. Nothing in the request was refused. */
   private[mining] final class ChainMoved(message: String) extends RuntimeException(message)
+
+  /**
+   * The node's /info reports `isMining = false`, which mirrors `ergo.node.mining` in its config. Such a
+   * node registers no /mining routes, so no candidate of any kind (Lithos or solo) can be served.
+   */
+  private[mining] final class NodeNotMining(nodeUrl: String) extends RuntimeException(
+    s"The Ergo node at $nodeUrl is NOT mining: its /info reports isMining = false. A node only serves " +
+      "mining candidates and accepts block solutions when mining is enabled, so this client can neither " +
+      "hand out work (Lithos or solo) nor submit a solved block. Set mining = true and " +
+      "useExternalMiner = true under ergo.node in the node's config file, then restart the node. " +
+      "This client keeps polling and resumes on its own once the node reports mining.")
+  /** How often the not-mining error repeats while it lasts; chain polls are too frequent to log each one. */
+  private val NotMiningReportInterval = 1.minute
   private[mining] case class CandidateRequest(id: UUID, identity: CandidateIdentity,
                                              pkg: Option[BlockPackage], version: Int, startedAt: Long) {
     def chain: ChainTip = ChainTip(identity.height, identity.parentId)

@@ -1,5 +1,7 @@
 package tasks
 
+import transactions.rollups.CommitmentSends
+
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
@@ -12,18 +14,18 @@ import org.scalatest.matchers.should.Matchers
 class AutoCommitLoopSpec extends AnyFlatSpec with Matchers {
 
   "A confirmed transaction" should "hold the loop until synchronization reaches its block" in {
-    MDSyncTask.awaitingSync(includedAt = Some(1000), syncedTo = Some(999)) shouldBe true
-    MDSyncTask.awaitingSync(includedAt = Some(1000), syncedTo = Some(1000)) shouldBe false
-    MDSyncTask.awaitingSync(includedAt = Some(1000), syncedTo = Some(1200)) shouldBe false
+    CommitmentSends.awaitingSync(includedAt = Some(1000), syncedTo = Some(999)) shouldBe true
+    CommitmentSends.awaitingSync(includedAt = Some(1000), syncedTo = Some(1000)) shouldBe false
+    CommitmentSends.awaitingSync(includedAt = Some(1000), syncedTo = Some(1200)) shouldBe false
   }
 
   it should "hold the loop while synchronization has no cursor at all" in {
-    MDSyncTask.awaitingSync(includedAt = Some(1000), syncedTo = None) shouldBe true
+    CommitmentSends.awaitingSync(includedAt = Some(1000), syncedTo = None) shouldBe true
   }
 
   "A transaction the node never confirmed" should "not hold the loop" in {
     // It left the mempool without landing, so the next pass has to be free to build a replacement.
-    MDSyncTask.awaitingSync(includedAt = None, syncedTo = Some(999)) shouldBe false
-    MDSyncTask.awaitingSync(includedAt = None, syncedTo = None) shouldBe false
+    CommitmentSends.awaitingSync(includedAt = None, syncedTo = Some(999)) shouldBe false
+    CommitmentSends.awaitingSync(includedAt = None, syncedTo = None) shouldBe false
   }
 }
