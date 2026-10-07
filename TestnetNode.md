@@ -24,8 +24,7 @@ You can download the Ergo Jar from the releases page on the Ergo github.
 
 https://github.com/ergoplatform/ergo/releases
 
-You must use versions 6.0.6 or above, as only these node versions contain support for API requests used specifically by the Lithos Client.
-
+You must use versions 6.0.7 or above
 ## 3. Create the Node Directory
 
 Choose a directory for the node files.

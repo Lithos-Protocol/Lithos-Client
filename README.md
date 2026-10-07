@@ -10,6 +10,7 @@ with 0 dev fee and built-in Lithos support. Lithos releases require a working Ja
 
 ### Overall System Requirements:
 - 6-8GB of RAM
+- An Ergo node (versions 6.0.7/6.1.7 and above)
 - ~30GB of storage (for the Ergo node)
 - Java 11
 
