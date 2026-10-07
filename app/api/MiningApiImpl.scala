@@ -41,8 +41,10 @@ class MiningApiImpl @Inject()(nodeContext: NodeContext,
     new TasksConfig(config).dictionarySyncTask.enabled
   /** Held while one request decides and sends, so two cannot build spends of the same box. */
   private val committing = new AtomicBoolean(false)
+  /** The last status read and when it was read, in ms. Every panel polls it, and each read is several node calls. */
+  @volatile private var cached: Option[(Long, DifficultyCommitment)] = None
   // Below Play's 75 s idle timeout. A send that lands later is still recorded in `sends`.
-  private implicit val timeout: Timeout = Timeout(60.seconds)
+  protected def engineTimeout: Timeout = Timeout(60.seconds)
 
   /**
     * @inheritdoc
@@ -74,7 +76,18 @@ class MiningApiImpl @Inject()(nodeContext: NodeContext,
   override def getCandidateSettings(config: Configuration): CandidateSettings =
     CandidateSettings.from(config)
 
+  /** The status as read within the last [[MiningApiImpl.StatusTtlMs]], or a fresh read. */
   override def getCommitment: DifficultyCommitment = {
+    val now = System.currentTimeMillis()
+    cached.filter(c => now - c._1 < MiningApiImpl.StatusTtlMs).map(_._2).getOrElse {
+      val status = readCommitment()
+      cached = Some(now -> status)
+      status
+    }
+  }
+
+  /** A fresh read of the chain, the synced Miner Dictionary and this client's own unsettled send. */
+  protected def readCommitment(): DifficultyCommitment = {
     val view = Globals.syncView
     DifficultyCommitment.of(commitments.commitmentState, registration(view), sends.outstanding(nodeApi, view),
       autoCommit, transformsDisabled, configDiff)
@@ -91,7 +104,8 @@ class MiningApiImpl @Inject()(nodeContext: NodeContext,
     if (!committing.compareAndSet(false, true))
       throw LithosApiErrors.LithosStateChanged("another commitment request is being sent; read GET /mining/commitment and try again")
     try {
-      val status = getCommitment
+      // Decided on a fresh read, never the cached one, and the cache is dropped whatever happens.
+      val status = readCommitment()
       refuse(status)
       val newest = status.pending.orElse(status.inForce)
       if (newest.exists(_.score == score.toString))
@@ -100,7 +114,8 @@ class MiningApiImpl @Inject()(nodeContext: NodeContext,
       val registering = status.state == DifficultyCommitment.Unregistered
       val message = if (registering) TransactionEngine.RegisterMiner(diff) else TransactionEngine.CommitDifficulty(diff)
       val kind = if (registering) CommitmentSends.Registration else CommitmentSends.Change
-      Try(Await.result(engine ? message, timeout.duration)) match {
+      val wait = engineTimeout
+      Try(Await.result(engine.ask(message)(wait), wait.duration)) match {
         case Success(sent: CommitmentProgress.Sent) if sent.score == score =>
           result(sent, kind, newest.map(_.score.toLong))
         // Coalesced onto a request for another diff that reached the engine first.
@@ -118,7 +133,8 @@ class MiningApiImpl @Inject()(nodeContext: NodeContext,
         case Failure(refused: EngineBroadcast.SubmissionOutcomeException) =>
           throw LithosApiErrors.LithosUnprocessable(s"the node refused ${refused.txId}" +
             refused.reason.map(": " + _).getOrElse(""))
-        case Failure(_: AskTimeoutException) =>
+        // Await gives up at the same deadline as the ask, so either exception can arrive first.
+        case Failure(_: AskTimeoutException | _: java.util.concurrent.TimeoutException) =>
           throw LithosApiErrors.LithosUnavailable("the transaction engine has not answered and may still send. " +
             "Read GET /mining/commitment before trying again")
         // The dictionary or the engine attempt moved between the read above and the build.
@@ -126,7 +142,10 @@ class MiningApiImpl @Inject()(nodeContext: NodeContext,
         case Failure(gone: IllegalStateException) => throw LithosApiErrors.LithosUnavailable(gone.getMessage)
         case Failure(ex) => throw ex
       }
-    } finally committing.set(false)
+    } finally {
+      cached = None
+      committing.set(false)
+    }
   }
 
   /** Whether the synced Miner Dictionary holds this miner, or why it cannot say. */
@@ -161,4 +180,9 @@ class MiningApiImpl @Inject()(nodeContext: NodeContext,
       servedFromHeight = CommitmentTransactions.servedFrom(sent.declaredHeight, sent.score, previous),
       inForceFromHeight = CommitmentTransactions.inForceFrom(sent.declaredHeight),
       replaceableFromHeight = CommitmentTransactions.replaceableFrom(sent.declaredHeight))
+}
+
+object MiningApiImpl {
+  /** How long a status read serves later callers. A block is 45 s on testnet and 120 s on mainnet. */
+  final val StatusTtlMs: Long = 3000L
 }

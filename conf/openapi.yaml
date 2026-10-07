@@ -869,9 +869,9 @@ paths:
     get:
       summary: Get difficulty commitment
       description: >-
-        This miner's difficulty commitment, read from the chain on every call. NISPs are judged
-        against `inForce`; with none in force this miner cannot submit NISPs and is not paid from
-        rollups.
+        This miner's difficulty commitment, read from the chain. Calls within three seconds of each
+        other share one read, and a `POST /mining/commitment` clears it. NISPs are judged against
+        `inForce`; with none in force this miner cannot submit NISPs and is not paid from rollups.
 
 
         A commitment sent at tip `h` is served by the stratum from `h + timing.servedAfterBlocks`

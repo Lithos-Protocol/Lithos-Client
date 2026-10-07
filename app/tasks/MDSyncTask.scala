@@ -130,7 +130,9 @@ class MDSyncTask @Inject()(system: ActorSystem,
       case Success(TransactionEngine.Deferred(_, reason)) => waiting(s"the transaction engine: $reason")
       case Success(other) => logger.warn(s"Unexpected answer to the $what request: $other")
       // Still queued behind other engine work. The next pass joins the same request rather than adding one.
-      case Failure(_: akka.pattern.AskTimeoutException) => waiting(s"the transaction engine to run the $what")
+      // Await shares the ask's deadline, so either timeout can arrive first.
+      case Failure(_: akka.pattern.AskTimeoutException | _: java.util.concurrent.TimeoutException) =>
+        waiting(s"the transaction engine to run the $what")
       case Failure(noInputs: NotEnoughInputsException) =>
         logger.error(s"Could not fund the $what: ${noInputs.getMessage}")
       case Failure(badReservation: FundingExpiredException) =>

@@ -14,6 +14,8 @@ import scorex.crypto.hash.Blake2b256
 import transactions.engine.wallet.EngineWalletMessages.InsufficientWalletFundsException
 import transactions.engine.wallet.FundingExpiredException
 
+import java.nio.charset.StandardCharsets
+import java.security.MessageDigest
 import javax.inject.{Inject, Singleton}
 import scala.concurrent.Future
 import scala.util.{Failure, Success, Try}
@@ -141,12 +143,14 @@ class MiningApiController @Inject()(cc: ControllerComponents, api: MiningApi, co
     paramValues.split(splitBy).toList
   }
 
+  private val apiKeyHash: String = config.get[String]("lithos.apiKeyHash")
+
   private def withApiKey[A](action: Action[A]) = Action.async(action.parser) { request =>
-    val secretKey = config.get[String]("lithos.apiKeyHash")
     request.headers
       .get("api_key")
       .collect {
-        case key if Hex.toHexString(Blake2b256.hash(key)) == secretKey => action(request)
+        case key if MessageDigest.isEqual(Hex.toHexString(Blake2b256.hash(key)).getBytes(StandardCharsets.UTF_8),
+          apiKeyHash.getBytes(StandardCharsets.UTF_8)) => action(request)
       }
       .getOrElse {
         Future.successful(Forbidden(ApiHelper.makeError(403, "Forbidden request", "Could not authenticate request with given api key")))

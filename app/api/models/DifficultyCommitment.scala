@@ -88,6 +88,9 @@ object DifficultyCommitment {
   final val Active = "active"
   final val Unknown = "unknown"
 
+  /** The longest diff string the transaction engine admits for a registration or change. */
+  final val MaxDiffLength = 32
+
   val Timing: CommitmentTiming = {
     val declare = CommitmentTransactions.DeclareAfter
     CommitmentTiming(
@@ -100,9 +103,11 @@ object DifficultyCommitment {
 
   /**
    * The score a `stratum.diff`-style string commits to, by the same conversion the commitment
-   * transaction uses. Fails on anything without a K, M, G, T or P suffix, or outside a positive Long.
+   * transaction uses. Fails on anything without a K, M, G, T or P suffix, outside a positive Long, or
+   * longer than the transaction engine admits.
    */
   def scoreOf(diff: String): Try[Long] = Try {
+    require(diff.trim.length <= MaxDiffLength, s"diff '$diff' is longer than $MaxDiffLength characters")
     val tau = BigInt(LFSMHelpers.parseDiffValueForStratum(diff.trim).get)
     require(tau > 0, s"diff '$diff' is not positive")
     val score = LFSMHelpers.convertTauOrScore(tau)

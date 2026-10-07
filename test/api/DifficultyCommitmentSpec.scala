@@ -154,7 +154,7 @@ class DifficultyCommitmentSpec extends AnyFlatSpec with Matchers {
   }
 
   it should "refuse anything stratum.diff would not parse, or that cannot be committed" in {
-    for (bad <- Seq("", "1.5", "1.5m", "abc", "0M", "-1M", "NaNM", "99999999P"))
+    for (bad <- Seq("", "1.5", "1.5m", "abc", "0M", "-1M", "NaNM", "99999999P", "1." + "0" * 31 + "M"))
       withClue(s"'$bad': ") { DifficultyCommitment.scoreOf(bad).isFailure shouldBe true }
   }
 
