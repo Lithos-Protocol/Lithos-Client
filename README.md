@@ -96,10 +96,11 @@ these two variables, and find the right proportion of risk and reward.
 To calculate the right difficulty, the webpanel provides a difficulty calculator you can
 use to find the right value for your hashrate. The calculator is found at `localhost:9000/assets/mining/difficulty`
 
-Input your hashrate, and select the **start** difficulty.
+Input your hashrate, and select the **start** difficulty. Leave **Account for network difficulty** ticked:
+it sizes the recommendations to how long windows actually last on the network, rather than a flat 2 hours.
 ![DiffCalc](/docs/DiffCalc.png)
 
-In the image above, it is `4.8M`. Once you've obtained your starting difficulty,
+In the image above, at 100 MH/s, it is `4.24M`. Once you've obtained your starting difficulty,
 you have two options to commit it onto the blockchain.
 
 ### WebPanel

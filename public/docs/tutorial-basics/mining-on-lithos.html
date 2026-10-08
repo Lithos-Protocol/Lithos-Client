@@ -3,8 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="generator" content="Docusaurus v3.7.0">
-<title data-rh="true">Mining on Lithos | Lithos Client</title><meta data-rh="true" name="viewport" content="width=device-width,initial-scale=1"><meta data-rh="true" name="twitter:card" content="summary_large_image"><meta data-rh="true" property="og:url" content="http://localhost:9000/assets/docs/tutorial-basics/mining-on-lithos"><meta data-rh="true" property="og:locale" content="en"><meta data-rh="true" name="docusaurus_locale" content="en"><meta data-rh="true" name="docsearch:language" content="en"><meta data-rh="true" name="docusaurus_version" content="current"><meta data-rh="true" name="docusaurus_tag" content="docs-default-current"><meta data-rh="true" name="docsearch:version" content="current"><meta data-rh="true" name="docsearch:docusaurus_tag" content="docs-default-current"><meta data-rh="true" property="og:title" content="Mining on Lithos | Lithos Client"><meta data-rh="true" name="description" content="How Lithos measures your work, and how the difficulty you choose trades payout size against how often you are paid."><meta data-rh="true" property="og:description" content="How Lithos measures your work, and how the difficulty you choose trades payout size against how often you are paid."><link data-rh="true" rel="icon" href="/assets/img/favicon.ico"><link data-rh="true" rel="canonical" href="http://localhost:9000/assets/docs/tutorial-basics/mining-on-lithos"><link data-rh="true" rel="alternate" href="http://localhost:9000/assets/docs/tutorial-basics/mining-on-lithos" hreflang="en"><link data-rh="true" rel="alternate" href="http://localhost:9000/assets/docs/tutorial-basics/mining-on-lithos" hreflang="x-default"><link rel="stylesheet" href="/assets/css/styles.d00ff24d.css">
-<script src="/assets/js/runtime~main.ff6e89ca.js" defer="defer"></script>
+<title data-rh="true">Mining on Lithos | Lithos Client</title><meta data-rh="true" name="viewport" content="width=device-width,initial-scale=1"><meta data-rh="true" name="twitter:card" content="summary_large_image"><meta data-rh="true" property="og:url" content="http://localhost:9000/assets/docs/tutorial-basics/mining-on-lithos"><meta data-rh="true" property="og:locale" content="en"><meta data-rh="true" name="docusaurus_locale" content="en"><meta data-rh="true" name="docsearch:language" content="en"><meta data-rh="true" name="docusaurus_version" content="current"><meta data-rh="true" name="docusaurus_tag" content="docs-default-current"><meta data-rh="true" name="docsearch:version" content="current"><meta data-rh="true" name="docsearch:docusaurus_tag" content="docs-default-current"><meta data-rh="true" property="og:title" content="Mining on Lithos | Lithos Client"><meta data-rh="true" name="description" content="How Lithos measures your work, and how the difficulty you choose trades payout size against how often you are paid."><meta data-rh="true" property="og:description" content="How Lithos measures your work, and how the difficulty you choose trades payout size against how often you are paid."><link data-rh="true" rel="icon" href="/assets/img/favicon.ico"><link data-rh="true" rel="canonical" href="http://localhost:9000/assets/docs/tutorial-basics/mining-on-lithos"><link data-rh="true" rel="alternate" href="http://localhost:9000/assets/docs/tutorial-basics/mining-on-lithos" hreflang="en"><link data-rh="true" rel="alternate" href="http://localhost:9000/assets/docs/tutorial-basics/mining-on-lithos" hreflang="x-default"><link rel="stylesheet" href="/assets/css/styles.c8d32c21.css">
+<script src="/assets/js/runtime~main.f3645fe5.js" defer="defer"></script>
 <script src="/assets/js/main.05311736.js" defer="defer"></script>
 </head>
 <body class="navigation-with-keyboard">
@@ -44,37 +44,49 @@ for. That is about <strong>45 minutes on testnet</strong> and about <strong>2 ho
 arrive roughly every 45 seconds against mainnet&#x27;s 2 minutes.</p>
 <p>The block count is the same on both networks, so <strong>testnet gives you less real time</strong> than mainnet
 will. A <code>diff</code> that works on testnet is conservative for mainnet at the same hardware.</p>
+<p><strong>Sixty blocks is an average length, not a fixed one.</strong> Blocks arrive early or late around Ergo&#x27;s
+target time, so some windows give you far less time than others. The following shows how long windows
+lasted from August to October 2026:</p>
+<table><thead><tr><th>Network</th><th>Target length</th><th>9 windows in 10 lasted</th></tr></thead><tbody><tr><td>Mainnet</td><td>2 hours</td><td>97 to 154 minutes</td></tr><tr><td>Testnet</td><td>45 minutes</td><td>31 to 63 minutes</td></tr></tbody></table>
+<p>A short window cuts the super shares of every miner at the same time. The numbers on this page count
+both sides of that. You are paid less often in short windows. But when other miners fall short in the
+same window, the miners still paid take a larger share of it.</p>
 <h2 class="anchor anchorWithStickyNavbar_LWe7" id="the-trade">The trade<a href="#the-trade" class="hash-link" aria-label="Direct link to The trade" title="Direct link to The trade">​</a></h2>
 <p>Everything about choosing <code>diff</code> is one trade: <strong>how much you are paid, against how often you are paid
 at all</strong>.</p>
 <p>The clearest way to see it is in terms of how many super shares your <code>diff</code> makes you average per
 window. You need ten to be paid, so the question is how far above ten you want your average to sit.
-The following shows the trade at a range of averages, so you can find the row that matches your own
-appetite for risk:</p>
-<table><thead><tr><th>Super shares you average</th><th>Chance a window pays you</th><th>Your score</th><th>Expected earnings</th></tr></thead><tbody><tr><td>5</td><td>3.2%</td><td>200%</td><td>12%</td></tr><tr><td>7</td><td>17.0%</td><td>143%</td><td>45%</td></tr><tr><td>10</td><td>54.2%</td><td>100%</td><td>100%</td></tr><tr><td>11</td><td>65.9%</td><td>91%</td><td>111%</td></tr><tr><td>12</td><td>75.8%</td><td>83%</td><td>116%</td></tr><tr><td>13</td><td>83.4%</td><td>77%</td><td>118%</td></tr><tr><td>14</td><td>89.1%</td><td>71%</td><td>117%</td></tr><tr><td>15</td><td>93.0%</td><td>67%</td><td>114%</td></tr><tr><td>16</td><td>95.7%</td><td>63%</td><td>110%</td></tr><tr><td>18</td><td>98.5%</td><td>56%</td><td>101%</td></tr><tr><td>20</td><td>99.5%</td><td>50%</td><td>92%</td></tr></tbody></table>
+The following shows the trade on mainnet at a range of averages, so you can find the row that matches
+your own appetite for risk:</p>
+<table><thead><tr><th>Super shares you average</th><th>Chance a window pays you</th><th>Your score</th><th>Expected earnings</th></tr></thead><tbody><tr><td>5</td><td>4.4%</td><td>200%</td><td>12%</td></tr><tr><td>7</td><td>19.9%</td><td>143%</td><td>45%</td></tr><tr><td>10</td><td>55.7%</td><td>100%</td><td>100%</td></tr><tr><td>11</td><td>66.3%</td><td>91%</td><td>112%</td></tr><tr><td>12</td><td>75.2%</td><td>83%</td><td>120%</td></tr><tr><td>13</td><td>82.3%</td><td>77%</td><td>124%</td></tr><tr><td>14</td><td>87.6%</td><td>71%</td><td>125%</td></tr><tr><td>15</td><td>91.5%</td><td>67%</td><td>125%</td></tr><tr><td>16</td><td>94.3%</td><td>63%</td><td>122%</td></tr><tr><td>17</td><td>96.2%</td><td>59%</td><td>119%</td></tr><tr><td>18</td><td>97.5%</td><td>56%</td><td>116%</td></tr><tr><td>20</td><td>99.0%</td><td>50%</td><td>108%</td></tr></tbody></table>
 <p>Score and expected earnings are both relative to averaging 10. Expected earnings is your score
-multiplied by the chance of being paid, and assumes your score is a small part of each block&#x27;s total.</p>
+multiplied by the chance of being paid, plus the larger share you take when a short window stops other
+miners. It assumes 5 miners of similar size submit to each rollup, as on mainnet in October 2026.</p>
 <h3 class="anchor anchorWithStickyNavbar_LWe7" id="the-ideal-diff">The ideal <code>diff</code><a href="#the-ideal-diff" class="hash-link" aria-label="Direct link to the-ideal-diff" title="Direct link to the-ideal-diff">​</a></h3>
-<p><strong>Your ideal <code>diff</code> is one that averages between 10 and 16 super shares per window.</strong> It is not a single
+<p><strong>Your ideal <code>diff</code> is one that averages between 12 and 17 super shares per window.</strong> It is not a single
 number a formula hands you. It is the range where miners converge, because it is where consistency and
 pay balance out.</p>
-<p>The expected earnings column shows why. It peaks at an average of 13 and stays within about 7% of that
-peak from 11 to 16, so across most of the range you give up very little expected income whichever point
-you choose. The choice comes down to how steady you want your payouts:</p>
+<p>The expected earnings column shows why. It peaks at averages of 14 and 15, which differ by less than
+1%, and stays within about 7% of that peak from 12 to 17. Across most of the range you give up very
+little expected income whichever point you choose. The choice comes down to how steady you want your
+payouts:</p>
 <ul>
-<li><strong>Toward 10</strong>: a higher score, paid about half the time. Larger payouts with more gaps between them,
-at roughly 15% below the peak in expected earnings.</li>
-<li><strong>Toward 16</strong>: a lower score, paid about 96% of the time. Smaller payouts, almost never a gap.</li>
+<li><strong>Toward 12</strong>: a higher score, paid about 75% of the time. Larger payouts with more gaps between them,
+at roughly 5% below the peak in expected earnings.</li>
+<li><strong>Toward 17</strong>: a lower score, paid about 96% of the time. Smaller payouts, rarely a gap.</li>
 </ul>
-<p>Ten is the floor of the range, not a target to push past.</p>
+<p><strong>Between 14 and 15, choose 15.</strong> The two earn the same, and averaging 15 pays in about 92% of windows
+against 88% at 14. The web panel marks 15 as the peak for that reason.</p>
+<p>Twelve is the floor of the range, not a target to push past.</p>
 <h3 class="anchor anchorWithStickyNavbar_LWe7" id="outside-the-range">Outside the range<a href="#outside-the-range" class="hash-link" aria-label="Direct link to Outside the range" title="Direct link to Outside the range">​</a></h3>
 <p>Leaving the range costs you in both directions, and the two directions are not equally forgiving.</p>
-<p><strong>Below 10, your earnings collapse.</strong> Averaging 7 gives you 43% more score, and you are paid less than a
-fifth of the time, so you earn less than half as much. At 5 you double your score and earn about an
-eighth. This is the direction that looks tempting and is not.</p>
-<p><strong>Above 16, your earnings fade slowly.</strong> Averaging 20 halves your score and pays you almost every
-window, and you still earn over 90% of what you would at 10. Nothing is lost by staying there briefly,
-but it earns less than the range once you know your hashrate.</p>
+<p><strong>Below 12, your earnings fall quickly.</strong> Averaging 10 pays you in only about 56% of windows. Averaging 7
+gives you 43% more score than 10, and you are paid about a fifth of the time, so you earn less than half
+as much. At 5 you double your score and earn about an eighth. This is the direction that looks
+tempting and is not.</p>
+<p><strong>Above 17, your earnings fade slowly.</strong> Averaging 20 halves your score and pays you almost every
+window, and you still earn 8% more than you would at 10. Nothing is lost by staying there briefly, but
+it earns less than the range once you know your hashrate.</p>
 <div class="theme-admonition theme-admonition-note admonition_xJq3 alert alert--secondary"><div class="admonitionHeading_Gvgb"><span class="admonitionIcon_Rf37"><svg viewBox="0 0 14 16"><path fill-rule="evenodd" d="M6.3 5.69a.942.942 0 0 1-.28-.7c0-.28.09-.52.28-.7.19-.18.42-.28.7-.28.28 0 .52.09.7.28.18.19.28.42.28.7 0 .28-.09.52-.28.7a1 1 0 0 1-.7.3c-.28 0-.52-.11-.7-.3zM8 7.99c-.02-.25-.11-.48-.31-.69-.2-.19-.42-.3-.69-.31H6c-.27.02-.48.13-.69.31-.2.2-.3.44-.31.69h1v3c.02.27.11.5.31.69.2.2.42.31.69.31h1c.27 0 .48-.11.69-.31.2-.19.3-.42.31-.69H8V7.98v.01zM7 2.3c-3.14 0-5.7 2.54-5.7 5.68 0 3.14 2.56 5.7 5.7 5.7s5.7-2.55 5.7-5.7c0-3.15-2.56-5.69-5.7-5.69v.01zM7 .98c3.86 0 7 3.14 7 7s-3.14 7-7 7-7-3.12-7-7 3.14-7 7-7z"></path></svg></span>Steady payouts are the reason to pool at all</div><div class="admonitionContent_BuS1"><p>You joined a pool so your income would be predictable. Pushing <code>diff</code> up until most of your windows
 fail reintroduces exactly the variance you were trying to escape, and it lowers what you earn on
 average rather than raising it.</p></div></div>
@@ -82,19 +94,20 @@ average rather than raising it.</p></div></div>
 <p>To find the <code>diff</code> that averages a given number of super shares:</p>
 <div class="language-text codeBlockContainer_Ckt0 theme-code-block" style="--prism-color:#bfc7d5;--prism-background-color:#292d3e"><div class="codeBlockContent_biex"><pre tabindex="0" class="prism-code language-text codeBlock_bY9V thin-scrollbar" style="color:#bfc7d5;background-color:#292d3e"><code class="codeBlockLines_e6Vv"><span class="token-line" style="color:#bfc7d5"><span class="token plain">diff = (hashrate in H/s × window in seconds) ÷ (10,000 × super shares you want to average)</span><br></span></code></pre><div class="buttonGroup__atx"><button type="button" aria-label="Copy code to clipboard" title="Copy" class="clean-btn"><span class="copyButtonIcons_eSgA" aria-hidden="true"><svg viewBox="0 0 24 24" class="copyButtonIcon_y97N"><path fill="currentColor" d="M19,21H8V7H19M19,5H8A2,2 0 0,0 6,7V21A2,2 0 0,0 8,23H19A2,2 0 0,0 21,21V7A2,2 0 0,0 19,5M16,1H4A2,2 0 0,0 2,3V17H4V3H16V1Z"></path></svg><svg viewBox="0 0 24 24" class="copyButtonSuccessIcon_LjdS"><path fill="currentColor" d="M21,7L9,19L3.5,13.5L4.91,12.09L9,16.17L19.59,5.59L21,7Z"></path></svg></span></button></div></div></div>
 <p>The window is 60 blocks: <strong>2,700 seconds on testnet</strong> and <strong>7,200 seconds on mainnet</strong>. The following
-gives the floor of the ideal range at averaging 10, the peak at averaging 13, and the recommended start
-at averaging 15:</p>
-<table><thead><tr><th>Hashrate</th><th>Testnet, 10</th><th>Testnet, 13</th><th>Testnet, 15</th><th>Mainnet, 10</th><th>Mainnet, 13</th><th>Mainnet, 15</th></tr></thead><tbody><tr><td>100 MH/s</td><td>2.7M</td><td>2.08M</td><td>1.8M</td><td>7.2M</td><td>5.54M</td><td>4.8M</td></tr><tr><td>250 MH/s</td><td>6.75M</td><td>5.19M</td><td>4.5M</td><td>18M</td><td>13.8M</td><td>12M</td></tr><tr><td>500 MH/s</td><td>13.5M</td><td>10.4M</td><td>9M</td><td>36M</td><td>27.7M</td><td>24M</td></tr><tr><td>1 GH/s</td><td>27M</td><td>20.8M</td><td>18M</td><td>72M</td><td>55.4M</td><td>48M</td></tr><tr><td>4 GH/s</td><td>108M</td><td>83.1M</td><td>72M</td><td>288M</td><td>222M</td><td>192M</td></tr></tbody></table>
-<p><strong>A lower <code>diff</code> averages more super shares</strong>, so the averaging-15 column is always the smaller number.</p>
-<p><strong>Start at the averaging-15 value, then raise <code>diff</code> slowly.</strong> Averaging 15 pays in about 93% of
-windows, and a hashrate up to a third lower than you estimated still averages 10. Follow these steps:</p>
+gives the floor of the ideal range at averaging 12, the peak at averaging 15, and the recommended start
+at averaging 17:</p>
+<table><thead><tr><th>Hashrate</th><th>Testnet, 12</th><th>Testnet, 15</th><th>Testnet, 17</th><th>Mainnet, 12</th><th>Mainnet, 15</th><th>Mainnet, 17</th></tr></thead><tbody><tr><td>100 MH/s</td><td>2.25M</td><td>1.8M</td><td>1.59M</td><td>6M</td><td>4.8M</td><td>4.24M</td></tr><tr><td>250 MH/s</td><td>5.63M</td><td>4.5M</td><td>3.97M</td><td>15M</td><td>12M</td><td>10.6M</td></tr><tr><td>500 MH/s</td><td>11.3M</td><td>9M</td><td>7.94M</td><td>30M</td><td>24M</td><td>21.2M</td></tr><tr><td>1 GH/s</td><td>22.5M</td><td>18M</td><td>15.9M</td><td>60M</td><td>48M</td><td>42.4M</td></tr><tr><td>4 GH/s</td><td>90M</td><td>72M</td><td>63.5M</td><td>240M</td><td>192M</td><td>169M</td></tr></tbody></table>
+<p><strong>A lower <code>diff</code> averages more super shares</strong>, so the averaging-17 column is always the smaller number.</p>
+<p><strong>Start at the averaging-17 value, then raise <code>diff</code> slowly.</strong> Averaging 17 pays in about 96% of
+mainnet windows and about 93% of testnet windows, and a hashrate up to 29% lower than you estimated
+still averages 12. Follow these steps:</p>
 <ol>
-<li>Commit the averaging-15 <code>diff</code> for your hashrate.</li>
+<li>Commit the averaging-17 <code>diff</code> for your hashrate.</li>
 <li>Watch how many super shares you produce per window until the commitment may be replaced, 845 blocks
 after the client sent it.</li>
 <li>If your windows pay reliably, raise <code>diff</code> so it averages one super share fewer, for example from
-averaging 15 to averaging 14.</li>
-<li>Repeat, and stop at averaging 13 or wherever payouts start to skip windows.</li>
+averaging 17 to averaging 16.</li>
+<li>Repeat, and stop at averaging 15 or wherever payouts start to skip windows.</li>
 </ol>
 <p>Each step is a new difficulty commitment. It binds 125 blocks after the client sends it, and the next
 step can follow 845 blocks after that send, about 10 hours 30 minutes on testnet and about 28 hours on

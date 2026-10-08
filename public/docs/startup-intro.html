@@ -3,8 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="generator" content="Docusaurus v3.7.0">
-<title data-rh="true">Startup guide | Lithos Client</title><meta data-rh="true" name="viewport" content="width=device-width,initial-scale=1"><meta data-rh="true" name="twitter:card" content="summary_large_image"><meta data-rh="true" property="og:url" content="http://localhost:9000/assets/docs/startup-intro"><meta data-rh="true" property="og:locale" content="en"><meta data-rh="true" name="docusaurus_locale" content="en"><meta data-rh="true" name="docsearch:language" content="en"><meta data-rh="true" name="docusaurus_version" content="current"><meta data-rh="true" name="docusaurus_tag" content="docs-default-current"><meta data-rh="true" name="docsearch:version" content="current"><meta data-rh="true" name="docsearch:docusaurus_tag" content="docs-default-current"><meta data-rh="true" property="og:title" content="Startup guide | Lithos Client"><meta data-rh="true" name="description" content="Install, configure and run the Lithos client, from nothing to mining."><meta data-rh="true" property="og:description" content="Install, configure and run the Lithos client, from nothing to mining."><link data-rh="true" rel="icon" href="/assets/img/favicon.ico"><link data-rh="true" rel="canonical" href="http://localhost:9000/assets/docs/startup-intro"><link data-rh="true" rel="alternate" href="http://localhost:9000/assets/docs/startup-intro" hreflang="en"><link data-rh="true" rel="alternate" href="http://localhost:9000/assets/docs/startup-intro" hreflang="x-default"><link rel="stylesheet" href="/assets/css/styles.d00ff24d.css">
-<script src="/assets/js/runtime~main.ff6e89ca.js" defer="defer"></script>
+<title data-rh="true">Startup guide | Lithos Client</title><meta data-rh="true" name="viewport" content="width=device-width,initial-scale=1"><meta data-rh="true" name="twitter:card" content="summary_large_image"><meta data-rh="true" property="og:url" content="http://localhost:9000/assets/docs/startup-intro"><meta data-rh="true" property="og:locale" content="en"><meta data-rh="true" name="docusaurus_locale" content="en"><meta data-rh="true" name="docsearch:language" content="en"><meta data-rh="true" name="docusaurus_version" content="current"><meta data-rh="true" name="docusaurus_tag" content="docs-default-current"><meta data-rh="true" name="docsearch:version" content="current"><meta data-rh="true" name="docsearch:docusaurus_tag" content="docs-default-current"><meta data-rh="true" property="og:title" content="Startup guide | Lithos Client"><meta data-rh="true" name="description" content="Install, configure and run the Lithos client, from nothing to mining."><meta data-rh="true" property="og:description" content="Install, configure and run the Lithos client, from nothing to mining."><link data-rh="true" rel="icon" href="/assets/img/favicon.ico"><link data-rh="true" rel="canonical" href="http://localhost:9000/assets/docs/startup-intro"><link data-rh="true" rel="alternate" href="http://localhost:9000/assets/docs/startup-intro" hreflang="en"><link data-rh="true" rel="alternate" href="http://localhost:9000/assets/docs/startup-intro" hreflang="x-default"><link rel="stylesheet" href="/assets/css/styles.c8d32c21.css">
+<script src="/assets/js/runtime~main.f3645fe5.js" defer="defer"></script>
 <script src="/assets/js/main.05311736.js" defer="defer"></script>
 </head>
 <body class="navigation-with-keyboard">
@@ -140,6 +140,9 @@ the client submits for you.</p>
 <p>Sixty blocks is about <strong>45 minutes on testnet</strong> and about <strong>2 hours on mainnet</strong>, because testnet
 blocks arrive roughly every 45 seconds against mainnet&#x27;s 2 minutes. The window is the same 60 blocks on
 both networks, so testnet gives you less wall-clock time to reach 10 super shares than mainnet will.</p>
+<p>Those times are averages. Blocks arrive early or late, so on mainnet about 1 window in 13 lasts under
+100 minutes. A short window costs every miner super shares at the same time, and the recommendations
+below allow for it.</p>
 <p>How many super shares you produce depends on your hashrate and your <code>diff</code>:</p>
 <ul>
 <li><strong>Raising <code>diff</code></strong> increases your payout per block, and produces fewer super shares.</li>
@@ -147,19 +150,20 @@ both networks, so testnet gives you less wall-clock time to reach 10 super share
 </ul>
 <div class="theme-admonition theme-admonition-warning admonition_xJq3 alert alert--warning"><div class="admonitionHeading_Gvgb"><span class="admonitionIcon_Rf37"><svg viewBox="0 0 16 16"><path fill-rule="evenodd" d="M8.893 1.5c-.183-.31-.52-.5-.887-.5s-.703.19-.886.5L.138 13.499a.98.98 0 0 0 0 1.001c.193.31.53.501.886.501h13.964c.367 0 .704-.19.877-.5a1.03 1.03 0 0 0 .01-1.002L8.893 1.5zm.133 11.497H6.987v-2.003h2.039v2.003zm0-3.004H6.987V5.987h2.039v4.006z"></path></svg></span>More super shares does not mean a bigger payout</div><div class="admonitionContent_BuS1"><p>Your payout is set entirely by your committed difficulty. Super shares only determine whether you
 qualify. Ten is enough; a thousand pays exactly the same as ten.</p></div></div>
-<p><strong>Aim for a <code>diff</code> that averages between 10 and 16 super shares per window.</strong> That range is where
-expected earnings peak. Averaging 10 pays you about half the time at the highest score in the range;
-averaging 16 pays you about 96% of the time at a lower one. Below 10 your earnings collapse, because
-most windows fall short.</p>
-<p><strong>Start at averaging 15, then raise <code>diff</code> slowly.</strong> Averaging 15 pays you about 93% of the time,
-and still averages 10 if your hashrate turns out to be a third lower than you estimated. Once your
-payouts arrive steadily, raise <code>diff</code> a little at a time toward averaging 13, where expected earnings
-peak. Each change is a new commitment, so steps are at least 845 blocks apart, as
+<p><strong>Aim for a <code>diff</code> that averages between 12 and 17 super shares per window.</strong> That range is where
+expected earnings peak. On mainnet, averaging 12 pays you about 75% of the time at the highest score
+in the range. Averaging 17 pays you about 96% of the time at a lower one. Below 12 your earnings fall
+quickly, because short windows leave you under 10.</p>
+<p><strong>Start at averaging 17, then raise <code>diff</code> slowly.</strong> Averaging 17 pays you about 96% of the time on
+mainnet and about 93% on testnet. It still lands inside the range if your hashrate turns out to be
+29% lower than you estimated. Once your payouts arrive steadily, raise <code>diff</code> a little at a time
+toward averaging 15, where expected earnings peak. Each change is a new commitment, so steps are at
+least 845 blocks apart, as
 <a href="#changing-your-difficulty-later-costs-a-day-not-an-hour">Changing your difficulty later</a> explains.</p>
 <p>To find a starting value for your hardware:</p>
 <div class="language-text codeBlockContainer_Ckt0 theme-code-block" style="--prism-color:#bfc7d5;--prism-background-color:#292d3e"><div class="codeBlockContent_biex"><pre tabindex="0" class="prism-code language-text codeBlock_bY9V thin-scrollbar" style="color:#bfc7d5;background-color:#292d3e"><code class="codeBlockLines_e6Vv"><span class="token-line" style="color:#bfc7d5"><span class="token plain">diff = (hashrate in H/s × window in seconds) ÷ (10,000 × super shares you want to average)</span><br></span></code></pre><div class="buttonGroup__atx"><button type="button" aria-label="Copy code to clipboard" title="Copy" class="clean-btn"><span class="copyButtonIcons_eSgA" aria-hidden="true"><svg viewBox="0 0 24 24" class="copyButtonIcon_y97N"><path fill="currentColor" d="M19,21H8V7H19M19,5H8A2,2 0 0,0 6,7V21A2,2 0 0,0 8,23H19A2,2 0 0,0 21,21V7A2,2 0 0,0 19,5M16,1H4A2,2 0 0,0 2,3V17H4V3H16V1Z"></path></svg><svg viewBox="0 0 24 24" class="copyButtonSuccessIcon_LjdS"><path fill="currentColor" d="M21,7L9,19L3.5,13.5L4.91,12.09L9,16.17L19.59,5.59L21,7Z"></path></svg></span></button></div></div></div>
 <p>The window is 2,700 seconds on testnet and 7,200 seconds on mainnet. So a 1 GH/s rig on testnet
-averages 15 super shares at a <code>diff</code> of 18M, and 10 at 27M.</p>
+averages 17 super shares at a <code>diff</code> of 15.9M, and 12 at 22.5M.</p>
 <p><a href="/assets/docs/tutorial-basics/mining-on-lithos">Mining on Lithos</a> has the full table of payout chances at
 each average, and starting values for common hashrates. On testnet, try several values and watch how
 many super shares your hardware actually produces.</p>
