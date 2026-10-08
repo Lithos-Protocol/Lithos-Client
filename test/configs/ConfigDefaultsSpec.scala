@@ -84,6 +84,15 @@ class ConfigDefaultsSpec extends AnyFlatSpec with Matchers {
     StratumConfig.DefaultReductionMultiplier shouldEqual lfsm.LFSMHelpers.NISP_COEFFICIENT
   }
 
+  "StratumConfig.DefaultBindAddress" should "equal what the shipped application.conf parses" in {
+    new StratumConfig(shipped).bindAddress shouldEqual StratumConfig.DefaultBindAddress
+  }
+
+  it should "apply when the key is absent, so older configs keep listening on every interface" in {
+    val absent = Configuration(shipped.underlying.withoutPath("stratum.bindAddress"))
+    new StratumConfig(absent).bindAddress shouldEqual StratumConfig.DefaultBindAddress
+  }
+
   "BatchingConfig" should "search each plan for 250 ms when searchBudgetMs is absent" in {
     BatchingConfig(Configuration.empty, "lithosdex").searchBudgetMs shouldBe 250L
     BatchingConfig(Configuration(ConfigFactory.parseString("batching.ergodex.searchBudgetMs = 0")), "ergodex")

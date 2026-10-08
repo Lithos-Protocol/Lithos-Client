@@ -4,7 +4,7 @@ import lfsm.{CollateralParams, LFSMHelpers, RollupProtocol}
 import org.ergoplatform.appkit.Parameters
 import play.api.{ConfigLoader, Configuration}
 
-import java.net.URI
+import java.net.{InetAddress, URI}
 import scala.collection.mutable
 import scala.collection.mutable.ListBuffer
 import scala.concurrent.duration.FiniteDuration
@@ -136,6 +136,13 @@ object Configs {
     }
     // Require keys that StratumConfig reads without defaults.
     v.port("stratum.stratumPort", v.intReq("stratum.stratumPort"))
+    // Checks only that the value resolves. An address this machine does not hold fails at bind,
+    // which stops the stratum alone rather than the whole client.
+    v.string("stratum.bindAddress").foreach { raw =>
+      if (raw.trim.isEmpty || Try(InetAddress.getByName(raw.trim)).isFailure)
+        v.problem("stratum.bindAddress",
+          s""""$raw" is not an IP address or host name. Write the address alone, without a port: "0.0.0.0" for every interface, or one of this machine's addresses""")
+    }
     v.range("stratum.extraNonce1Size", v.intReq("stratum.extraNonce1Size"), 1, 8,
       "hex bytes of extraNonce1; 2 is recommended, higher invites duplicate shares")
     v.range("stratum.connectionTimeout", v.intReq("stratum.connectionTimeout"), 1000, 3600000, "ms")

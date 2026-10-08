@@ -5,7 +5,7 @@ import akka.pattern.ask
 import com.redbottledesign.bitcoin.rpc.stratum.MalformedStratumMessageException
 import configs.CandidateConfig
 import com.redbottledesign.bitcoin.rpc.stratum.transport.{AbstractConnectionState, ConnectionState, StatefulMessageTransport}
-import com.redbottledesign.bitcoin.rpc.stratum.transport.tcp.{StratumTcpServer, StratumTcpServerConnection}
+import com.redbottledesign.bitcoin.rpc.stratum.transport.tcp.StratumTcpServerConnection
 import mining.StratumConnection.ConnectionEstablished
 import mining.MiningMessages._
 import mutations.NodeWallet
@@ -30,8 +30,8 @@ import scala.concurrent.duration.{Duration, DurationInt, FiniteDuration}
  * Actor-based Stratum TCP server.
  *
  * This class replaces stratum.ErgoStratumServer with an implementation that
- * uses Akka actors for all stateful logic.  It extends JStratum's
- * StratumTcpServer purely to inherit the socket-accept loop; every protocol
+ * uses Akka actors for all stateful logic.  It extends BoundStratumTcpServer
+ * purely to inherit the socket-accept loop; every protocol
  * concern is delegated to the actor hierarchy rooted at LithosPool.
  *
  * Actor hierarchy
@@ -52,7 +52,7 @@ import scala.concurrent.duration.{Duration, DurationInt, FiniteDuration}
  *
  * Startup
  * ───────
- * Construct this class, then call startListening(port).  The LithosPool is
+ * Construct this class, then call startListening(port, bindAddress).  The LithosPool is
  * created and the initial block template is fetched inside LithosPool.preStart,
  * so no additional initialisation is required.
  *
@@ -90,7 +90,7 @@ class MiningStratumServer(system: ActorSystem,
                           rotateExtraNonceInterval: Int = 0,
                           statsCollector: Option[ActorRef] = None,
                           statsRefreshIntervalMs: Int = configs.StatsConfig.Default.refreshIntervalMs)
-  extends StratumTcpServer {
+  extends BoundStratumTcpServer {
 
   private val logger: Logger = LoggerFactory.getLogger("MiningStratumServer")
 

@@ -11,6 +11,10 @@ class StratumConfig(config: Configuration){
 
   val diff: String = config.get[String]("stratum.diff")
   val stratumPort: Int = config.get[Int]("stratum.stratumPort")
+
+  /** The local address the stratum listens on; the default accepts rigs on every interface. */
+  val bindAddress: String = config.getOptional[String]("stratum.bindAddress").map(_.trim)
+    .getOrElse(StratumConfig.DefaultBindAddress)
   val extraNonce1Size: Int = config.get[Int]("stratum.extraNonce1Size")
   val connectionTimeout: Int = config.get[Int]("stratum.connectionTimeout")
   val blockRefreshInterval: Int = config.get[Int]("stratum.blockRefreshInterval")
@@ -39,4 +43,7 @@ object StratumConfig {
 
   /** Sends miners the super-share diff itself, so every share they submit is a super share. */
   val DefaultReductionMultiplier: Int = 10000
+
+  /** Every interface, IPv6 included: the JDK binds 0.0.0.0 as its dual-stack wildcard. */
+  val DefaultBindAddress: String = "0.0.0.0"
 }

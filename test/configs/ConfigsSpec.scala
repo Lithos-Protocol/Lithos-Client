@@ -242,6 +242,28 @@ class ConfigsSpec extends AnyFlatSpec with Matchers {
     thrown.getMessage should include("sync.quarantine.repairTimeout")
   }
 
+  it should "reject a blank stratum.bindAddress, which the JDK would resolve to loopback" in {
+    val configured = Configuration(ConfigFactory.parseString("""stratum.bindAddress = " """")
+      .withFallback(shipped.underlying).resolve())
+    val thrown = the[ConfigValidationException] thrownBy Configs.validateAll(configured)
+    thrown.getMessage should include("stratum.bindAddress")
+  }
+
+  it should "reject a stratum.bindAddress written with its port" in {
+    val configured = Configuration(ConfigFactory.parseString("""stratum.bindAddress = "127.0.0.1:4444"""")
+      .withFallback(shipped.underlying).resolve())
+    val thrown = the[ConfigValidationException] thrownBy Configs.validateAll(configured)
+    thrown.getMessage should include("stratum.bindAddress")
+  }
+
+  it should "accept IPv4 and IPv6 stratum bind addresses" in {
+    Seq("127.0.0.1", "::1", "::").foreach { address =>
+      val configured = Configuration(ConfigFactory.parseString(s"""stratum.bindAddress = "$address"""")
+        .withFallback(shipped.underlying).resolve())
+      withClue(address)(noException should be thrownBy Configs.validateAll(configured))
+    }
+  }
+
   it should "name every required key missing from an empty configuration" in {
     // Required keys are those read without an application default.
     val thrown = the[ConfigValidationException] thrownBy

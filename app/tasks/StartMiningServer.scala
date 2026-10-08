@@ -149,9 +149,15 @@ class StartMiningServer @Inject()(system: ActorSystem, config: Configuration,
 
         // ── start TCP listener ───────────────────────────────────────────────
         // LithosPool.preStart handles node connectivity checks and the initial
-        // block template fetch, so startListening is all that is needed here.
-        logger.info(s"Mining server listening on port ${stratumParams.stratumPort}")
-        Future(server.startListening(stratumParams.stratumPort))(contexts.stratumContext)
+        // block template fetch, so startListening is all that is needed here. A failed bind or accept
+        // loop leaves rigs unable to connect, so it is logged rather than lost with the Future.
+        val bindAddress = stratumParams.bindAddress
+        val port        = stratumParams.stratumPort
+        Future(server.startListening(port, bindAddress))(contexts.stratumContext)
+          .failed.foreach { e =>
+            logger.error(s"Stratum is not accepting rigs on $bindAddress, port $port: ${e.getMessage}. " +
+              "Rigs cannot connect until the client restarts; check stratum.bindAddress and stratum.stratumPort", e)
+          }(contexts.stratumContext)
 
       case Failure(e) =>
         logger.error("Failed to start mining server: could not retrieve on-chain difficulty", e)

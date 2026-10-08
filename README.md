@@ -131,6 +131,8 @@ is not showing "ready" often or at all, you should consider lowering your diffic
 
 ## Stratum
 The Lithos Client will run a local stratum server at `stratum.stratumPort` (`4444` by default).
+It listens on every network interface unless `stratum.bindAddress` names one address, e.g. `127.0.0.1`
+for rigs on the same machine.
 If you are using SOAT Miner, you can use the `--lithos` option to set up your miner to mine to your Lithos Client.
 
 
