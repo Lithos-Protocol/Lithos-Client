@@ -58,7 +58,7 @@ ergo {
   networkType = "testnet" # or "mainnet"
   node {
     useExternalMiner = true
-    offlineGeneration = false
+    offlineGeneration = true
     mining = true
     extraIndex = true
   }
