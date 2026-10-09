@@ -110,6 +110,26 @@ class StartMiningServer @Inject()(system: ActorSystem, config: Configuration,
         val lithosDexSource = batcherSource(configs.CandidateSourceConfig.LithosDex, lithosDexBatcher)
         val ergoDexSource = batcherSource(configs.CandidateSourceConfig.ErgoDex, ergoDexBatcher)
 
+        // Upkeep: keyless maintenance of other protocols' boxes, off by default and never spending
+        // this wallet. No actor exists unless the source is enabled with `maxTxs` above 0, config turns on a
+        // job, and the stratum builds block transactions at all, so nothing scans a node for a source
+        // that is never asked.
+        val upkeepLimits = limitsFor(configs.CandidateSourceConfig.Upkeep)
+        val upkeepConfig = configs.UpkeepConfig(config)
+        val upkeepJobs =
+          if (upkeepLimits.enabled && upkeepLimits.maxTxs > 0 && stratumParams.candidate.blockTransactions)
+            transactions.upkeep.UpkeepRegistry.enabled(upkeepConfig)
+          else Seq.empty[transactions.upkeep.UpkeepJob]
+        val upkeepSource = if (!transactions.upkeep.UpkeepSource.runs(upkeepLimits, upkeepJobs)) None else {
+          // Built here rather than inside the actor, so every incarnation after a restart shares it
+          // and a refused box is not offered to the node again.
+          val memory = new transactions.upkeep.UpkeepSource.Memory(upkeepConfig.retryAfterScans)
+          Some(mining.MiningMessages.CandidateSource(configs.CandidateSourceConfig.Upkeep,
+            system.actorOf(akka.actor.Props(new transactions.upkeep.UpkeepSource(
+              nodeConfig, upkeepConfig, upkeepLimits, upkeepJobs, memory,
+              stratumParams.candidate.useTruePropCollection)), "upkeep-source")))
+        }
+
         val server = new MiningStratumServer(
           system          = system,
           options         = options,
@@ -130,7 +150,8 @@ class StartMiningServer @Inject()(system: ActorSystem, config: Configuration,
             mining.MiningMessages.CandidateSource(
               configs.CandidateSourceConfig.Rollups, transactionProcessor),
             mining.MiningMessages.CandidateSource(
-              configs.CandidateSourceConfig.Emissions, emissionHandler)) ++ rentSource ++ lithosDexSource ++ ergoDexSource,
+              configs.CandidateSourceConfig.Emissions, emissionHandler)) ++ rentSource ++ lithosDexSource ++
+            ergoDexSource ++ upkeepSource, // last: it earns the least of the fee-less sources
           rotateExtraNonceInterval = stratumParams.rotateExtraNonceInterval,
           statsCollector = if (statsConfig.enabled) Some(statsCollector) else None,
           statsRefreshIntervalMs = statsConfig.refreshIntervalMs
