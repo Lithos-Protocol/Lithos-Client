@@ -145,6 +145,57 @@ rigel.exe -a autolykos2 -o stratum+tcp://127.0.0.1:4444 -u YOUR_ERG_WALLET -w my
 ```
 Keep in mind that the `ERG_WALLET` and Worker name have no effect on Lithos, and can be set to any valid String.
 
+## Block Transactions
+A block you find also carries fee-less transactions the client builds for itself, configured per source under
+`stratum.candidate.sources` in `application.conf`.
+
+### Upkeep
+Upkeep is maintenance of other protocols' boxes carried in your own block: boxes whose script says when one is
+due and what its successor is, so that anyone may advance them with no key. Storage rent is the same idea applied
+to Ergo's own four-year rule; upkeep applies it to a registry of reviewed jobs, one per protocol, each advancing
+only the boxes it maintains.
+
+It is **off by default**, and so is every job. To run it, enable the source and then the jobs you want:
+```hocon
+stratum.candidate.sources.upkeep.enabled = true
+stratum.candidate.sources.upkeep.jobs.heartbeat.enabled = true
+```
+The first job, `heartbeat`, advances due-job boxes (`DueJob.ergo`, kept with the tests; the client carries only its
+tree) and pays their tip to your collection output. By default a beat must pay at least a thousandth of an ERG
+(`minTip`); set it to 0 to maintain boxes that cannot pay. Finding them by script needs a node started with `ergo.node.extraIndex = true`. Any node also
+reads the boxes listed in `jobs.heartbeat.boxIds` (every job takes `boxIds` the same way); on a plain node that
+list is all the job sees, and it goes stale after each beat, because a beat gives the box a new id. A job name
+that is enabled and unknown is refused at startup.
+
+Before each successor is offered, your node checks it (`verifyWithNode = true`), and one the node refuses is left
+out. Until your miner finds a block there is nothing to see upkeep do, so it has an observe mode:
+```hocon
+stratum.candidate.sources.upkeep.mode = "observe"
+```
+Upkeep then answers every block request empty and, in the background, builds what it would have offered, asks
+your node to check each transaction (up to `maxTxs` checks per block) and logs the verdict. Observe mode keeps no
+memory; it runs only while the stratum builds block transactions, with the source enabled, `maxTxs` above 0 and a job
+enabled, and a height that arrives while the previous check is still running is skipped. The
+heartbeat has boxes to observe on testnet (see below), none on mainnet yet.
+
+**Creating a due-job box.** A due-job box is any box at the heartbeat's script holding three registers: R4 the
+height of the last beat (`Int`), R5 the period in blocks (`Int`, positive), R6 the tip per beat in nanoERG (`Long`,
+not negative). The script's address is `BLeBj4M5DTjaKjyEUwPF8JE7b6E4haYuHXwms5Rhf7mCThPdAnTdwPBHVTugWGXSgRzyt156JiWMSp31zuw3J3Vagvw1XGHQf1K7AUULYm64u8yWm6qVNpBQ3vBUWZS3tBkAExSYVFWz54M38YaZbVPLnPUx9HMNpnPiqzTz6Si1AQCPKUXUJS14aCTFc4TfF6RiqeEn2jUfH`
+on testnet and `2gXTNpGs3kytbjbWSS8G5uhdZCm9CkBBFKVz1jQ5uosE3S4JmWuQmoCHuxvTEP8ybf8syM8z17h5oe26FkKcMUDgFH1tE2Ru8QwAfrG1qp94rwr2CcB7pz79M6WYhTeRzW36LcA5QX7zGZvqPREduzSoX1NL7Zn2JLusiPyUreTvwpC5iyBEAcaP9tfLF4rLVMz5SvFfV68FG`
+on mainnet (the tree `HeartbeatJob.TreeHex`, the same on both). Fund it with the tips you want paid plus the box's
+own minimum. Once it is paid down to its minimum it is beaten for free, or declined by miners that keep the default
+`minTip`; each beat restamps its creation height, so storage rent takes it only if nobody beats it for four years.
+Registers of other types, a zero period, a negative tip, an R4 + R5 beyond 2,147,483,647, a box funded at exactly its
+minimum with a small R4 (its successor's R4 takes more bytes), or a box within a few bytes of the 4,096-byte limit lock the box until
+storage rent: there is no owner and no exit, so check the registers before sending. On testnet, box
+`e5d9d2c29f7be9914c604c8102c6f08839cdd01c006c312c1596c144fe6d8fe1` (period 720, tip 0.01 ERG) is live.
+
+The shipped `heartbeat` job never spends your ERG: it spends only boxes at its own script, signs with a prover that
+holds no key, and pays no fee. The client also refuses any job's transaction that spends a box the job did not report
+and read back, or one at your wallet's keys (its P2PK and miner-reward scripts). Upkeep's only use of the mempool is to skip a box a pending transaction already
+spends; it never reads what pending transactions do, and it never builds on unconfirmed outputs. A box whose build fails is set aside and tried again after
+`retryAfterScans` discovery passes; a box that cannot pay its successor is set aside until it changes.
+
 ## KYA
 The Lithos Testnet release accesses your node's secret keys via it's keystore in order to sign and generate transactions.
 We **heavily** recommend that you generate a new secret key for testnet which is not related to any mainnet wallets you

@@ -175,7 +175,7 @@ object Configs {
       "fraction of the block's byte and cost limits this client's package may claim")
     Seq(configs.CandidateSourceConfig.Rollups, configs.CandidateSourceConfig.Emissions,
       configs.CandidateSourceConfig.Rent, configs.CandidateSourceConfig.ErgoDex,
-      configs.CandidateSourceConfig.LithosDex).foreach { source =>
+      configs.CandidateSourceConfig.LithosDex, configs.CandidateSourceConfig.Upkeep).foreach { source =>
       val enabled = v.bool(s"stratum.candidate.sources.$source.enabled")
       val maxTxs = v.range(s"stratum.candidate.sources.$source.maxTxs",
         v.int(s"stratum.candidate.sources.$source.maxTxs"), 0, 100, "transactions inserted per block")
@@ -203,6 +203,7 @@ object Configs {
       "unconfirmed transactions one rollup transaction may carry into the block")
     v.range("stratum.candidate.sources.rent.blocksPerScan",
       v.int("stratum.candidate.sources.rent.blocksPerScan"), 1, 10000, "blocks read per scan pass")
+    UpkeepConfig.validate(v, config, transactions.upkeep.UpkeepRegistry.checks)
     v.bool("stratum.candidate.useTruePropCollection")
     v.bool("stratum.candidate.logTimings")
     v.bool("stratum.candidate.waitForBlockPackage")
