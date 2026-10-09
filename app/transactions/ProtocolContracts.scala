@@ -1,6 +1,6 @@
 package transactions
 
-import lfsm.LFSMHelpers
+import lfsm.{Deployment, LFSMHelpers}
 import lfsm.contracts.FraudProofContracts.FraudProofSet
 import lfsm.contracts.{CollateralContract, DictionaryContracts, FraudProofContracts, HoldingScripts, RollupContracts}
 import org.ergoplatform.appkit.{Address, BlockchainContext, NetworkType}
@@ -46,15 +46,20 @@ case class CompiledContracts(payout: Contract,
  * Keyed by network rather than by context, because synchronization builds its constants before any
  * context exists. Both `Contract.fromErgoScript` overloads are one code path, so either caller gets
  * the same contracts.
+ *
+ * Also keyed by the deployment override's fingerprint (`lfsm.Deployment`), because the ids compiled in
+ * come from it: a cache keyed by network alone would keep serving the trees of whichever deployment
+ * was active first, and every box found under the new one would be skipped as foreign.
  */
 object ProtocolContracts {
 
-  private var compiled: Map[NetworkType, CompiledContracts] = Map.empty
+  private var compiled: Map[(NetworkType, Option[String]), CompiledContracts] = Map.empty
 
   def apply(ctx: BlockchainContext): CompiledContracts = forNetwork(ctx.getNetworkType)
 
   def forNetwork(network: NetworkType): CompiledContracts = synchronized {
-    compiled.getOrElse(network, {
+    val key = network -> Deployment.overrideFor(network).map(_.fingerprint)
+    compiled.getOrElse(key, {
       val payout = RollupContracts.mkPayoutContract(network)
       val eval = RollupContracts.mkEvalContract(
         network, LFSMHelpers.EVAL_PERIOD, payout.hashedPropBytes, LFSMHelpers.getFPToken(network))
@@ -84,7 +89,11 @@ object ProtocolContracts {
         minerData,
         minerDataLogic,
         FraudProofContracts.fraudProofSet(network, collateral, holdingScripts.guard, minerDataHash))
-      compiled += network -> all
+      // The getters read the override afresh at every call, so one changed mid-compile would leave a
+      // set whose halves name different deployments. Refuse it rather than cache it.
+      require(Deployment.overrideFor(network).map(_.fingerprint) == key._2,
+        s"the deployment override for $network changed while its contracts were compiling")
+      compiled += key -> all
       all
     })
   }
