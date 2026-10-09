@@ -122,6 +122,7 @@ object Configs {
     val numAddresses =
       v.range("node.numAddresses", v.intReq("node.numAddresses"), 1, 1000,
         "how many EIP-3 addresses the prover holds keys for")
+    DeploymentConfig.validate(v)
 
     // ---- stratum ----
     v.requireExisting("stratum.diff", v.string("stratum.diff")).foreach { d =>
