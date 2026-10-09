@@ -1,0 +1,75 @@
+{
+  // DueJob
+  // A self-describing maintenance box. The box itself states when it is next due and what it pays,
+  // so any executor — a Lithos miner inside its own block, or anyone else — can advance it with no
+  // knowledge of any protocol beyond this script. It is the reference job of the client's upkeep
+  // source.
+
+  // THE RULE, IN WORDS
+  // The box is due once HEIGHT reaches the last beat (R4) plus the period (R5); the sum is taken in
+  // Long, so a period near the Int maximum makes a box that is never due rather than one that fails
+  // to evaluate; either way such a box never advances. A spend of a due box must
+  // recreate it as OUTPUTS(0): the same script, the same tokens, R4 set to this block's height, R5
+  // and R6 unchanged, a creation height of this block, and a value of at least the box's value less
+  // the tip (R6). The box must be INPUTS(0), so one transaction advances at most one due-job box
+  // (its other inputs are unconstrained): two boxes with the same terms cannot share one successor
+  // while the spender keeps the second whole. The period must
+  // be positive and the tip not negative, or the box never advances. Whatever the successor does not
+  // keep, which is at most the tip, is unconstrained: whoever builds the spend directs it.
+  // The fresh creation height is what makes a beat reset the storage-rent clock: a successor stamped
+  // with an old height would be as close to rent as the box it replaced. Because R4 and the creation
+  // height must both equal HEIGHT, a beat transaction is valid at exactly one height and can never be
+  // included later; and a late beat moves the schedule, since the next due height counts from the
+  // beat, not from when the box was due.
+
+  // REGISTERS
+  // R4 Int   height of the last beat; the box is due at R4 + R5, computed in Long
+  // R5 Int   period, in blocks; must be positive
+  // R6 Long  tip per beat, in nanoERG; must not be negative
+  // A box whose registers are missing or of other types cannot be spent under this script at all
+  // (`R4[Int].get` on a Long fails), so it is locked until storage rent takes it. So is a box funded
+  // at exactly its own minimum with a small R4 or creation height: the successor's R4 and creation
+  // height take more bytes at today's height, so it needs more value than the box holds and no
+  // keyless executor can add any; and a box within a few bytes of the 4,096-byte box limit, whose
+  // successor would grow past it.
+
+  // HOW THE BOX ENDS
+  // There is no owner and no exit path; the box is keyless end to end. The successor must keep at
+  // least value - R6, and `>=` lets it keep more: an executor may take a smaller tip, or none, and a
+  // beat for free is valid. So a box lives as long as anyone beats it, whether or not it can still
+  // pay, and ages out through storage rent only when it is left alone. A creator funds it for the
+  // tips wanted and walks away. Tokens stay with the box through every beat and leave it only with
+  // storage rent. A tip at or above the box's value means the creator offered the whole box: the
+  // successor need keep nothing the script asks for, only what consensus asks of any box.
+  //
+  // WHAT THE SCRIPT LEAVES FREE
+  // Only OUTPUTS(0)'s script, tokens, R4 to R6, creation height and value are constrained. Its R7 to
+  // R9, every other output, the other inputs and the data inputs are free: an executor may attach
+  // registers to the successor, raising its minimum value (a later beat may drop them, as the
+  // reference job does, or keep them), and may put the tip anywhere, including a fee. The standing
+  // box's own R4 is not checked either: a creator's R4 above the current height delays the first
+  // beat until R4 + R5. `onlyOne` binds only boxes at this exact tree.
+
+  // ASSUMPTIONS
+  // None. The contract takes no compile-time constants; it reads SELF, OUTPUTS(0) and INPUTS(0)'s
+  // id, and no data input.
+
+  val successor = OUTPUTS(0)
+  val lastBeat  = SELF.R4[Int].get
+  val period    = SELF.R5[Int].get
+  val tip       = SELF.R6[Long].get
+
+  val sane        = period > 0 && tip >= 0L
+  val onlyOne     = INPUTS(0).id == SELF.id
+  val due         = HEIGHT.toLong >= lastBeat.toLong + period.toLong
+  val sameScript  = successor.propositionBytes == SELF.propositionBytes
+  val sameTokens  = successor.tokens == SELF.tokens
+  val beatStamped = successor.R4[Int].get == HEIGHT
+  val freshStamp  = successor.creationInfo._1 == HEIGHT
+  val periodKept  = successor.R5[Int].get == period
+  val tipKept     = successor.R6[Long].get == tip
+  val valueKept   = successor.value >= SELF.value - min(tip, SELF.value)
+
+  sigmaProp(sane && onlyOne && due && sameScript && sameTokens && beatStamped && freshStamp &&
+    periodKept && tipKept && valueKept)
+}

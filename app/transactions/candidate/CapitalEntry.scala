@@ -11,7 +11,10 @@ import work.lithos.mutations.{InputUTXO, Token}
 sealed trait CapitalOrigin
 
 object CapitalOrigin {
-  /** A batching or order-execution fee this client earned by executing someone else's order. */
+  /**
+   * A fee this client earned by doing someone else's work: executing an order in a batch, or
+   * advancing a protocol box whose script pays a tip to whoever does it (an upkeep job).
+   */
   case object ExecutorReward extends CapitalOrigin
 
   /** Value legally removed from a box that is past its storage-rent deadline. */
