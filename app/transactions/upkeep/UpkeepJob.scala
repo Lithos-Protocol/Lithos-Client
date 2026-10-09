@@ -48,6 +48,19 @@ trait UpkeepJob {
   def due(box: InputUTXO, height: Int): Boolean
 
   /**
+   * What advancing `box` would pay this miner, in nanoERG, before anything is built. With
+   * `order = value` the source tries the due box it saw first, of those that fit the share, then
+   * the rest of the due boxes in order of this figure per floor byte, then per unit of floor cost,
+   * so a share that runs out runs out on the work worth least after that head box. It must be what [[build]] would actually pay, computed the same way
+   * from the box and `bc`, and never more than the box can pay, whatever the box declares: anyone
+   * can create a box at a public script, and a payment the box cannot make would otherwise buy it
+   * an early slot for nothing. Return 0 when advancing the box pays nothing. With `order = value`, asked of
+   * every due box in every build, so keep it pure and cheap. With the default of 0, the job's boxes
+   * go after every paying box of any job, in rotation order, except the head box.
+   */
+  def expectedRevenue(box: InputUTXO, bc: BuildContext): Long = 0L
+
+  /**
    * The signed successor for one due box, or nothing when the box cannot pay for it. Signed by the
    * job because only the job knows what satisfies its script. Outputs are created at `bc.height`
    * and revenue sits at `bc.payTo`. The preHeader at signing carries only that height: a script

@@ -127,8 +127,15 @@ class StartMiningServer @Inject()(system: ActorSystem, config: Configuration,
           Some(mining.MiningMessages.CandidateSource(configs.CandidateSourceConfig.Upkeep,
             system.actorOf(akka.actor.Props(new transactions.upkeep.UpkeepSource(
               nodeConfig, upkeepConfig, upkeepLimits, upkeepJobs, memory,
-              stratumParams.candidate.useTruePropCollection)), "upkeep-source")))
+              stratumParams.candidate.useTruePropCollection,
+              blockShare = stratumParams.candidate.blockShare)), "upkeep-source")))
         }
+        // The builder bounds each source's answer by its limits again, so an opportunistic upkeep
+        // share is let through here; with space = "fixed" this is the configured block unchanged.
+        val candidateConfig = stratumParams.candidate.copy(sources = stratumParams.candidate.sources.map {
+          case (name, limits) if name == configs.CandidateSourceConfig.Upkeep => name -> upkeepConfig.allowance(limits)
+          case other => other
+        })
 
         val server = new MiningStratumServer(
           system          = system,
@@ -143,7 +150,7 @@ class StartMiningServer @Inject()(system: ActorSystem, config: Configuration,
           stateFrame      = stateFrame,
           forceConfigDiff = stratumParams.forceConfigDifficulty,
           diffRefreshInterval = stratumParams.diffRefreshInterval,
-          candidateConfig = stratumParams.candidate,
+          candidateConfig = candidateConfig,
           // Asked in this order for this miner's own block, so rollup work — submissions and fraud
           // proofs first — gets the slots ahead of collateral-queue maintenance.
           txSources       = Seq(

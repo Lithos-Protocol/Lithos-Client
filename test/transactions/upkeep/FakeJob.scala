@@ -27,6 +27,8 @@ final class FakeJob(wallet: NodeWallet, val name: String = "fake") extends Upkee
   @volatile var discoverFails: Boolean = false
   @volatile var isDue: Boolean = true
   @volatile var behaviour: Behaviour = Advance
+  /** What each box says it pays, by id, for the source's ordering; absent is the default 0. */
+  @volatile var declaredTips: Map[String, Long] = Map.empty
 
   val discoveries = new AtomicInteger(0)
   val dueChecks = new AtomicInteger(0)
@@ -44,6 +46,9 @@ final class FakeJob(wallet: NodeWallet, val name: String = "fake") extends Upkee
     dueChecks.incrementAndGet()
     isDue
   }
+
+  /** Declared only: what a build actually pays stays [[FakeJob.Tip]], since only the order is under test. */
+  override def expectedRevenue(box: InputUTXO, bc: BuildContext): Long = declaredTips.getOrElse(box.id.toString, 0L)
 
   override def build(box: InputUTXO, bc: BuildContext): Option[UpkeepJob.Built] = {
     builds.incrementAndGet()

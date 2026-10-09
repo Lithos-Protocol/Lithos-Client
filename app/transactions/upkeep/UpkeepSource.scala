@@ -7,7 +7,7 @@ import node.NodeApi
 import node.model.NodeBox
 import org.slf4j.{Logger, LoggerFactory}
 import transactions.candidate.BlockTxMessages.{BlockTxsReady, CandidateTxsDropped, PrepareBlockTxs, RequestBlockTxs}
-import transactions.candidate.{CandidateBundle, CandidateCapital}
+import transactions.candidate.{CandidateBudget, CandidateBundle, CandidateCapital}
 import work.lithos.mutations.InputUTXO
 
 import java.util.concurrent.atomic.AtomicReference
@@ -28,7 +28,8 @@ import scala.util.{Failure, Success, Try}
  * transaction, and is dropped until a later scan finds it again. The build closes over values it
  * is handed and reports back by message, so no actor field is read off the mailbox.
  *
- * Never extractive. Nothing here looks at what pending transactions do; the read-back only skips a
+ * Never extractive. Nothing here looks at what pending transactions do (opportunistic mode counts
+ * their bytes and cost, nothing more); the read-back only skips a
  * box one of them already spends, and a spend that reaches the mempool after the read-back loses
  * to this miner's own block, as with any block producer. A job's transaction may only spend the
  * boxes that job reported from discovery, which holds a job to its own word; the shipped job
@@ -42,6 +43,12 @@ import scala.util.{Failure, Success, Try}
  * height, normally the candidate's but later when blocks come fast, and a refusal for that reason
  * is not remembered. In observe mode a request is answered empty at once and the build runs as a
  * task no request waits for, holding nothing back and forgetting nothing.
+ *
+ * With `space = opportunistic` the build also reads the mempool once, when there are more due boxes
+ * than slots. When the transactions waiting there fit in the block beside this client's whole
+ * package share (`blockShare` of the node's block limits) and the node's reserve, the count rises to
+ * the larger of `maxTxs` and `opportunisticMaxTxs`; bytes and cost stay as configured. See
+ * [[Upkeep.opportunistic]].
  */
 class UpkeepSource(nodeContext: NodeContext,
                    upkeepConfig: UpkeepConfig,
@@ -49,7 +56,8 @@ class UpkeepSource(nodeContext: NodeContext,
                    jobs: Seq[UpkeepJob],
                    memory: UpkeepSource.Memory,
                    useTrueProp: Boolean,
-                   firstScanDelay: FiniteDuration = UpkeepSource.FirstScanDelay) extends Actor {
+                   firstScanDelay: FiniteDuration = UpkeepSource.FirstScanDelay,
+                   blockShare: Double = CandidateBudget.DefaultShare) extends Actor {
 
   import UpkeepSource._
 
@@ -95,7 +103,8 @@ class UpkeepSource(nodeContext: NodeContext,
     logger.info(s"UpkeepSource started: mode=${upkeepConfig.mode}, verifyWithNode=${upkeepConfig.verifyWithNode}, " +
       s"jobs=${jobs.map(_.name).mkString(", ")}, scanIntervalMs=${upkeepConfig.scanIntervalMs}, " +
       s"maxBoxesPerJob=${upkeepConfig.maxBoxesPerJob}, retryAfterScans=${memory.retryAfterScans}, " +
-      s"share: txs=${limits.maxTxs}, bytes=${limits.maxBytes}, cost=${limits.maxCost}; " +
+      s"share: txs=${limits.maxTxs}, bytes=${limits.maxBytes}, cost=${limits.maxCost}, space=${upkeepConfig.space}" +
+      (if (upkeepConfig.opportunistic) s" (up to ${upkeepConfig.opportunisticMaxTxs} txs), blockShare=$blockShare" else "") + "; " +
       s"refusedHeld=${memory.refusedIds.size}, exhaustedHeld=${memory.exhaustedIds.size}")
     ticker = Some(context.system.scheduler.scheduleWithFixedDelay(
       firstScanDelay, upkeepConfig.scanIntervalMs.milliseconds, self, ScanTick)(context.dispatcher))
@@ -116,10 +125,11 @@ class UpkeepSource(nodeContext: NodeContext,
     // A job whose discovery failed is absent from the pass and keeps what it had: stale ids cost
     // one read each and are forgotten by it, while dropping them would lose the boxes until the
     // node recovers.
-    case Scanned(Success(pass)) =>
+    case Scanned(Success((height, pass))) =>
       scanning = false
       tracked ++= pass.map { case (job, found) => job -> found.kept }
       lastFound ++= pass.map { case (job, found) => job -> found.found }
+      memory.seen(pass.values.flatMap(_.found).toSet, height)
       // Holds are kept for every box a pass found, kept under the cap or not: a box the cap left out
       // because it is held must stay held, or it would win the cap again next pass. A job whose
       // discovery failed this pass keeps what it last found, so its holds survive the failure too.
@@ -231,8 +241,13 @@ class UpkeepSource(nodeContext: NodeContext,
    * nothing. A box is sized before it is signed, and building stops at a full share, after
    * [[MaxRefusedPerBuild]] refusals, or after [[MaxDeferredPerBuild]] successors were signed and
    * then found not to fit, so a block whose share is nearly spent does not sign every due box for
-   * nothing. The order starts at `blockHeight` modulo the number of boxes, so a box deferred at the
-   * head does not starve the ones behind it. With `remember` off (observe mode) refusals and
+   * nothing. With `order = rotation` the boxes go in id order (each job's boxes in turn) started at
+   * `blockHeight` modulo their number, as before `order` existed; with `order = value` the due box this
+   * client saw first, of those whose floor fits the share, goes first, then the rest of the due
+   * boxes in order of what their successors would pay per byte, then per unit of cost, so the share
+   * is spent on the best-paying work first and a lower-paying due box waits while higher-paying due
+   * boxes fill the share, at most as many builds as there are due boxes seen before it. Among boxes worth
+   * the same the rotation's order is kept. With `remember` off (observe mode) refusals and
    * exhaustion are logged and not held, so every box stays watched.
    */
   private def advance(work: Seq[JobWork], blockHeight: Int, remember: Boolean = true): Vector[Upkeep.Prepared] =
@@ -253,18 +268,42 @@ class UpkeepSource(nodeContext: NodeContext,
       // Read once for the block: every job builds against the same parameters, height and payTo.
       val bc = BuildContext(ctx, blockHeight,
         CandidateCapital.collectionContract(nodeContext.getNodeWallet, useTrueProp))
-      var share = Upkeep.Share.of(limits.maxTxs, limits.budget)
+      val configured = Upkeep.Share.of(limits.maxTxs, limits.budget)
+      // Parsed once, here, because the order and the read gate need the box as much as building
+      // does; each job's configured ids plus up to maxBoxesPerJob others, each a small parse.
+      val ordered = work.flatMap(item => item.offered.toSeq.sorted.flatMap(byId.get)
+        .map(box => (item, box, Try(box.toInputUTXO(ctx)))))
+      val inTurn = rotated(ordered, blockHeight)
+      // Which boxes are due is asked up front only when something needs it before the loop: the
+      // value order and the read gate. With neither option on, the loop asks as it goes, as before.
+      def isDue(entry: (JobWork, NodeBox, Try[InputUTXO])): Boolean =
+        entry._3.toOption.exists(input => Try(entry._1.job.due(input, bc.height)).getOrElse(false))
+      lazy val dueNow = inTurn.filter(isDue)
+      // The mempool is read only when the extra count could be used: more due boxes than slots.
+      val start =
+        if (upkeepConfig.opportunistic && dueNow.size > configured.slots) opportunisticShare(bc, configured, blockHeight)
+        else configured
+      val startBudget = CandidateBudget(start.bytes, start.cost)
+      var share = start
       var refused = Set.empty[String]
       var exhausted = Set.empty[String]
       var due = 0
       var deferred = 0
       var signedForNothing = 0
-      val ordered = work.flatMap(item => item.offered.toSeq.sorted.flatMap(byId.get).map(item -> _))
-      val queue = rotated(ordered, blockHeight).iterator
+      // By value: of the due boxes whose floor fits the share, the one this client saw first goes
+      // first (a waiting box keeps its id, and a new box cannot backdate when it was seen, so a due
+      // box that fits waits at most as many builds as there are due boxes seen before it), then the
+      // rest of the due boxes by what their successors would pay. Otherwise the plain rotation.
+      val queue = (if (!upkeepConfig.byValue) inTurn else {
+        val worths = dueNow.map(entry => entry -> worth(bc, entry._1.job, entry._3)).toMap
+        val first = Upkeep.headByAge(dueNow)(entry => memory.firstSeenAt(entry._2.boxId),
+          entry => start.affords(worths(entry).bytes, worths(entry).cost)).toSeq
+        first ++ Upkeep.byWorth(dueNow.filterNot(first.contains))(worths)
+      }).iterator
       while (!share.full && refused.size < MaxRefusedPerBuild && signedForNothing < MaxDeferredPerBuild &&
         queue.hasNext) {
-        val (item, box) = queue.next()
-        attempt(bc, item, box, share, treeOf) match {
+        val (item, box, parsed) = queue.next()
+        attempt(bc, item, box, parsed, share, treeOf) match {
           case Attempt.Ready(successor, admitted) =>
             due += 1
             share = admitted
@@ -306,8 +345,9 @@ class UpkeepSource(nodeContext: NodeContext,
           (if (deferred > 0) s", $deferred left for a later block" else "") +
           (if (share.full && queue.hasNext) ", share full before every box was tried" else "") +
           s": ${chosen.map(_.label).mkString(", ")}; share used " +
-          s"txs=${chosen.size}/${limits.maxTxs}, bytes=${share.usedBytes(limits.budget)}/${limits.maxBytes}, " +
-          s"cost=${share.usedCost(limits.budget)}/${limits.maxCost}")
+          s"txs=${chosen.size}/${start.slots}, bytes=${share.usedBytes(startBudget)}/${start.bytes}, " +
+          s"cost=${share.usedCost(startBudget)}/${start.cost}" +
+          (if (start != configured) " (opportunistic)" else ""))
       chosen
     }) match {
       case Success(chosen) => chosen
@@ -338,14 +378,54 @@ class UpkeepSource(nodeContext: NodeContext,
   }
 
   /**
+   * The share for one block in opportunistic mode: the configured one, or the configured bytes and
+   * cost with the count raised to the cap, when the mempool's demand fits in the rest of the block
+   * beside this client's whole package share. The package share is worked out as the candidate
+   * builder works it, from the node's parameters for this block and `blockShare`; the mempool is
+   * read only up to that rest, since nothing past it changes the answer, and not at all when there
+   * is no rest. A mempool that cannot be read or weighed leaves the configured share, which is what
+   * fixed mode takes anyway.
+   */
+  private def opportunisticShare(bc: BuildContext, configured: Upkeep.Share, blockHeight: Int): Upkeep.Share = {
+    val block = CandidateBudget(bc.params.getMaxBlockSize.toLong, bc.params.getMaxBlockCost.toLong)
+    val pkg = CandidateBudget.of(block.maxBytes, block.maxCost, math.min(1.0, math.max(0.0, blockShare)))
+    val rest = block.less(pkg.maxBytes + Upkeep.NodeReserve.maxBytes, pkg.maxCost + Upkeep.NodeReserve.maxCost)
+    if (rest.maxBytes <= 0L || rest.maxCost <= 0L) configured
+    else Upkeep.demand(nodeApi, rest, System.currentTimeMillis() + Upkeep.ReadTimeoutMs) match {
+      case Failure(ex) =>
+        logger.warn(s"Upkeep could not read the mempool at $blockHeight, keeping the configured share: ${ex.getMessage}")
+        configured
+      case Success((bytes, cost)) =>
+        val share = Upkeep.opportunistic(configured, rest, bytes, cost, upkeepConfig.opportunisticMaxTxs)
+        logger.debug(s"Upkeep at $blockHeight: the mempool claims ${bytes}B and $cost cost of the ${rest.maxBytes}B " +
+          s"and ${rest.maxCost} the block has beside the package; share txs=${share.slots}, bytes=${share.bytes}, " +
+          s"cost=${share.cost}")
+        share
+    }
+  }
+
+  /**
+   * What one box's successor earns the block for its [[Upkeep.floor]], for the order boxes are built
+   * in. A box that cannot be read, or whose job throws, is worth nothing here and goes last; the
+   * build is where it is refused, so ranking it cannot cost it more than its place.
+   */
+  private def worth(bc: BuildContext, job: UpkeepJob, parsed: Try[InputUTXO]): Upkeep.Worth =
+    parsed.flatMap { input =>
+      Try {
+        val (bytes, cost) = Upkeep.floor(input, bc.params)
+        Upkeep.Worth(job.expectedRevenue(input, bc), bytes, cost)
+      }
+    }.getOrElse(Upkeep.Worth.Unknown)
+
+  /**
    * One box through its job: due, worth building against the share, and admitted, or why not. Every
    * call into the job is caught, so a throw on one box costs only that box. A box whose bytes do not
    * hash to the id the node gave is refused, since a transaction from it would spend nothing real.
    */
-  private def attempt(bc: BuildContext, item: JobWork, box: NodeBox, share: Upkeep.Share,
-                      treeOf: Map[String, String]): Attempt = {
+  private def attempt(bc: BuildContext, item: JobWork, box: NodeBox, parsed: Try[InputUTXO],
+                      share: Upkeep.Share, treeOf: Map[String, String]): Attempt = {
     val job = item.job
-    Try(box.toInputUTXO(bc.ctx)) match {
+    parsed match {
       case Failure(ex) => Attempt.Refused(s"the box cannot be read: ${ex.getMessage}")
       case Success(input) if input.id.toString != box.boxId =>
         Attempt.Refused(s"the box serializes to ${input.id.toString}, not the id the node reports")
@@ -434,11 +514,11 @@ class UpkeepSource(nodeContext: NodeContext,
    * as found, so their holds survive the pass. A refused box stays tracked: it sits out a bounded
    * number of passes and is then tried again from where it is.
    */
-  private def scan(): Map[String, Pass] =
+  private def scan(): (Int, Map[String, Pass]) =
     nodeContext.getClient.execute { ctx =>
       val height = ctx.getHeight
       val held = memory.exhaustedIds
-      jobs.flatMap { job =>
+      height -> jobs.flatMap { job =>
         Try(job.discover(ctx, nodeApi, height)) match {
           // The ids the operator listed are kept whatever their number; the cap cuts only the
           // rest, which a job returns in its own priority order.
@@ -507,8 +587,20 @@ object UpkeepSource {
 
     private val refused = new AtomicReference[Map[String, Int]](Map.empty[String, Int])
     private val exhausted = new AtomicReference[Set[String]](Set.empty[String])
+    private val firstSeen = new AtomicReference[Map[String, Int]](Map.empty[String, Int])
 
     def refusedIds: Set[String] = refused.get().keySet
+
+    /**
+     * The height at which this client's scan first saw `id`, or the largest height for one it never
+     * saw. The age the value order ranks on: a waiting box keeps its id, and a new box cannot
+     * backdate what this client saw, unlike the creation height a creator writes into a box.
+     */
+    def firstSeenAt(id: String): Int = firstSeen.get().getOrElse(id, Int.MaxValue)
+
+    /** A pass at `height` found `ids`: the ones not seen before are recorded as first seen now. */
+    def seen(ids: Set[String], height: Int): Unit =
+      firstSeen.set(firstSeen.get() ++ (ids -- firstSeen.get().keySet).map(_ -> height))
 
     def exhaustedIds: Set[String] = exhausted.get()
 
@@ -533,6 +625,7 @@ object UpkeepSource {
     def forget(ids: Set[String]): Unit = {
       refused.set(refused.get() -- ids)
       exhausted.set(exhausted.get() -- ids)
+      firstSeen.set(firstSeen.get() -- ids)
     }
 
     /**
@@ -541,6 +634,7 @@ object UpkeepSource {
      */
     def passed(known: Set[String]): Set[String] = {
       exhausted.set(exhausted.get().intersect(known))
+      firstSeen.set(firstSeen.get().filter { case (id, _) => known.contains(id) })
       val kept = refused.get().filter { case (id, _) => known.contains(id) }
       val (expired, remaining) = kept.partition { case (_, left) => left <= 1 }
       refused.set(remaining.map { case (id, left) => id -> (left - 1) })
@@ -552,7 +646,7 @@ object UpkeepSource {
   private[upkeep] case object ScanTick
 
   /** What one pass found per job; a job whose discovery failed is absent. */
-  private[upkeep] final case class Scanned(result: Try[Map[String, Pass]])
+  private[upkeep] final case class Scanned(result: Try[(Int, Map[String, Pass])])
 
   /** Boxes a build found already spent, so they stop being offered. */
   private[upkeep] final case class Spent(ids: Set[String])

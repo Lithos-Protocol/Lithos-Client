@@ -51,24 +51,53 @@ final class HeartbeatJob(boxIds: Seq[String], minTip: Long = HeartbeatJob.Defaul
   /** The height the box is due at, so the source's cap keeps the soonest due. */
   override def priority(box: InputUTXO): Long = Beat.of(box).map(_.dueHeight).getOrElse(Long.MaxValue)
 
+  /**
+   * What a beat of `box` would pay, worked out exactly as [[plan]] works it out: the tip, or what
+   * the box can spare above its successor's floor, or nothing when that is too small for a box of
+   * its own or below `minTip`, and nothing for a box below its successor's floor or whose registers
+   * are not a beat. Never more than the box can pay, whatever R6 declares.
+   */
+  override def expectedRevenue(box: InputUTXO, bc: BuildContext): Long =
+    Beat.of(box).map(beat => terms(box, beat, bc)).collect { case Terms.Paying(paid) => paid }.getOrElse(0L)
+
   override def plan(box: InputUTXO, bc: BuildContext): Option[Successor] =
     Beat.of(box).flatMap { beat =>
-      // Sized at the full value, the most a successor could carry, so the floor is never understated.
-      val successorFloor = ScriptJob.minimumValue(successor(box, beat, bc.height, box.value), bc)
-      // Below its own successor's minimum the box cannot be recreated at all: declined, not built.
-      if (box.value < successorFloor) None
-      else {
-        val paid = math.max(0L, math.min(beat.tip, box.value - successorFloor))
-        val tipOut = UTXO(bc.payTo, paid).setCreationHeight(bc.height)
-        val paysItsOwnBox = paid > 0L && paid >= ScriptJob.minimumValue(tipOut, bc)
-        // With minTip set, a beat that would pay less than that is declined, free beats included;
-        // the box is then held until it changes, as any box that cannot pay is.
-        if (minTip > 0L && (!paysItsOwnBox || paid < minTip)) None
-        else if (paysItsOwnBox)
+      terms(box, beat, bc) match {
+        case Terms.Declined => None
+        case Terms.Paying(paid) =>
+          val tipOut = UTXO(bc.payTo, paid).setCreationHeight(bc.height)
           Some(Successor(Seq(successor(box, beat, bc.height, box.value - paid), tipOut), revenue = Seq(1)))
-        else Some(Successor(Seq(successor(box, beat, bc.height, box.value))))
+        case Terms.Free => Some(Successor(Seq(successor(box, beat, bc.height, box.value))))
       }
     }
+
+  /**
+   * The one place a beat's terms are decided, for [[plan]] and [[expectedRevenue]] alike. A box
+   * below its own successor's minimum cannot be recreated at all: declined, and held by the source.
+   * Otherwise the beat pays the tip, or what the box can spare above the floor; a payment too small
+   * for a box of its own makes the beat free. With `minTip` set, a beat that would pay less than
+   * that is declined too, free beats included, so the box is held until it changes.
+   */
+  private def terms(box: InputUTXO, beat: Beat, bc: BuildContext): Terms = {
+    // Sized at the full value, the most a successor could carry, so the floor is never understated.
+    val successorFloor = ScriptJob.minimumValue(successor(box, beat, bc.height, box.value), bc)
+    if (box.value < successorFloor) Terms.Declined
+    else {
+      val paid = math.max(0L, math.min(beat.tip, box.value - successorFloor))
+      val tipOut = UTXO(bc.payTo, paid).setCreationHeight(bc.height)
+      val paysItsOwnBox = paid > 0L && paid >= ScriptJob.minimumValue(tipOut, bc)
+      if (minTip > 0L && (!paysItsOwnBox || paid < minTip)) Terms.Declined
+      else if (paysItsOwnBox) Terms.Paying(paid)
+      else Terms.Free
+    }
+  }
+
+  private sealed trait Terms
+  private object Terms {
+    case object Declined extends Terms
+    case object Free extends Terms
+    final case class Paying(paid: Long) extends Terms
+  }
 
   /** The box as its script demands it back: same script and tokens, R4 at `height`, R5 and R6 kept. */
   private def successor(box: InputUTXO, beat: Beat, height: Int, value: Long): UTXO =

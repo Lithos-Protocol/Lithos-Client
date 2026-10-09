@@ -129,6 +129,26 @@ class HeartbeatJobSpec extends AnyFlatSpec with Matchers with MockitoSugar {
     }
   }
 
+  "Expected revenue" should "be what the beat would pay, and nothing for a box whose registers are not a beat" in {
+    val f = new Fixture()
+    val malformed = f.dueBox("b", registers = Seq(ErgoValue.of(1000), ErgoValue.of(period.toLong), ErgoValue.of(tip)))
+    f.client.execute { ctx =>
+      val bc = BuildContext(ctx, ctx.getHeight + 1, f.wallet.contract)
+      f.job.expectedRevenue(f.dueBox("a", tip = 3 * tip).toInputUTXO(ctx), bc) shouldBe 3 * tip
+      f.job.expectedRevenue(malformed.toInputUTXO(ctx), bc) shouldBe 0L
+      // A declared tip the box cannot pay counts for nothing: the beat would be free, or declined.
+      val floor = floorOf(f, 1000000L, bc.height, bc)
+      f.job.expectedRevenue(f.dueBox("c", tip = Long.MaxValue / 2, value = floor + 1000L).toInputUTXO(ctx), bc) shouldBe 0L
+      f.job.expectedRevenue(f.dueBox("d", tip = Long.MaxValue / 2, value = floor - 1L).toInputUTXO(ctx), bc) shouldBe 0L
+      // and a box that can spare only part of its tip is worth exactly what its beat pays
+      val partial = f.dueBox("e", tip = 3 * tip, value = floor + tip).toInputUTXO(ctx)
+      val paid = f.job.build(partial, bc).getOrElse(fail("the partial beat was declined")).capital.map(_.value).sum
+      paid should (be > 0L and be <= tip)
+      f.job.expectedRevenue(partial, bc) shouldBe paid
+      new HeartbeatJob(Seq.empty, minTip = 2 * tip).expectedRevenue(partial, bc) shouldBe 0L
+    }
+  }
+
   "A beat" should "read R4, R5 and R6 and nothing past them" in {
     val annotated: Seq[ErgoValue[_]] = Seq(ErgoValue.of(1000), ErgoValue.of(period), ErgoValue.of(tip), ErgoValue.of(42L))
     val short: Seq[ErgoValue[_]] = Seq(ErgoValue.of(1000), ErgoValue.of(period))

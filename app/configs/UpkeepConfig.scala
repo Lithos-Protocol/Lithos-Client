@@ -40,14 +40,50 @@ import scala.util.{Failure, Success, Try}
  *                        box again. A package the node rejects loses every inserted transaction
  *                        with it, so one bad successor would otherwise cost the block the work of
  *                        every source.
+ * @param space           `fixed` holds the source to its configured share; `opportunistic` lets it
+ *                        take, block by block, more transactions within its configured bytes and
+ *                        cost when the mempool's own demand fits in the rest of the block beside
+ *                        this client's package share. Fixed by default, because whether fee-less
+ *                        work should take space at all beyond what the operator set is a policy
+ *                        choice.
+ * @param opportunisticMaxTxs the most successors an opportunistic share admits however empty the
+ *                        block, so a runaway job cannot fill one; the configured count wins if it
+ *                        is larger.
+ * @param order           `rotation` builds due boxes in id order started at the block height, as
+ *                        before this setting existed; `value` builds the due box unspent the
+ *                        longest first, then the rest by what their successors would pay per byte.
+ *                        Rotation by default, so an operator already running a job sees no new
+ *                        order without asking for it.
  */
 case class UpkeepConfig(scanIntervalMs: Int, maxBoxesPerJob: Int, retryAfterScans: Int,
                         jobs: Map[String, UpkeepConfig.Job],
                         mode: String,
-                        verifyWithNode: Boolean) {
+                        verifyWithNode: Boolean,
+                        space: String,
+                        opportunisticMaxTxs: Int,
+                        order: String) {
+
+  def byValue: Boolean = order == UpkeepConfig.Value
   def jobEnabled(name: String): Boolean = jobs.get(name).exists(_.enabled)
 
   def observing: Boolean = mode == UpkeepConfig.Observe
+
+  def opportunistic: Boolean = space == UpkeepConfig.Opportunistic
+
+  /**
+   * What the candidate builder lets this source contribute, given its configured `limits`. The
+   * builder bounds every source's answer by its limits again, so an opportunistic count it did not
+   * know of would be cut back to the configured one there. Opportunistic, the count may reach the
+   * larger of `maxTxs` and [[opportunisticMaxTxs]]; the bytes and cost stay as configured, so the
+   * builder's bounds on them stand. The package-wide count, the sum of every source's `maxTxs`, rises
+   * with it, and the widened count applies to every block: in opportunistic mode the builder no
+   * longer holds upkeep to `maxTxs`, only the source's own mempool check does. Fixed, the limits are
+   * returned unchanged. A configured `maxTxs` of 0 is the builder's
+   * sign never to ask the source, so it is kept too.
+   */
+  def allowance(limits: CandidateSourceConfig): CandidateSourceConfig =
+    if (!opportunistic || limits.maxTxs <= 0) limits
+    else limits.copy(maxTxs = math.max(limits.maxTxs, opportunisticMaxTxs))
 }
 
 object UpkeepConfig {
@@ -71,6 +107,25 @@ object UpkeepConfig {
   final val Observe = "observe"
 
   final val Modes: Seq[String] = Seq(Candidate, Observe)
+
+  /** The configured share, every block: the default, and the share before `space` existed. */
+  final val Fixed = "fixed"
+
+  /**
+   * The configured share, with the count raised to the cap when the mempool's demand fits in the rest
+   * of the block beside this client's package share.
+   */
+  final val Opportunistic = "opportunistic"
+
+  final val Spaces: Seq[String] = Seq(Fixed, Opportunistic)
+
+  /** Due boxes in id order started at the block height: the default, and the order before `order` existed. */
+  final val Rotation = "rotation"
+
+  /** The due box unspent the longest first, then the rest by expected revenue per byte, then per cost. */
+  final val Value = "value"
+
+  final val Orders: Seq[String] = Seq(Rotation, Value)
 
   /**
    * One job's block under `jobs.<name>`: the keys every job may carry, read here once for all of
@@ -105,7 +160,10 @@ object UpkeepConfig {
     retryAfterScans = 10,
     jobs = Map.empty,
     mode = Candidate,
-    verifyWithNode = true)
+    verifyWithNode = true,
+    space = Fixed,
+    opportunisticMaxTxs = 20,
+    order = Rotation)
 
   def apply(config: Configuration): UpkeepConfig = {
     def int(key: String, fallback: Int): Int =
@@ -126,7 +184,10 @@ object UpkeepConfig {
       jobs = jobs,
       mode = config.getOptional(s"$Path.mode")(ConfigLoader.stringLoader).getOrElse(Default.mode),
       verifyWithNode = config.getOptional(s"$Path.verifyWithNode")(ConfigLoader.booleanLoader)
-        .getOrElse(Default.verifyWithNode))
+        .getOrElse(Default.verifyWithNode),
+      space = config.getOptional(s"$Path.space")(ConfigLoader.stringLoader).getOrElse(Default.space),
+      opportunisticMaxTxs = int("opportunisticMaxTxs", Default.opportunisticMaxTxs),
+      order = config.getOptional(s"$Path.order")(ConfigLoader.stringLoader).getOrElse(Default.order))
   }
 
   def validate(v: ConfigValidator, config: Configuration, jobChecks: Seq[UpkeepConfig.JobCheck]): Unit = {
@@ -137,6 +198,15 @@ object UpkeepConfig {
       if (!Modes.contains(mode)) v.problem(s"$Path.mode", s"must be one of ${Modes.mkString(", ")}")
     }
     v.bool(s"$Path.verifyWithNode")
+    v.string(s"$Path.space").foreach { space =>
+      if (!Spaces.contains(space)) v.problem(s"$Path.space", s"must be one of ${Spaces.mkString(", ")}")
+    }
+    v.string(s"$Path.order").foreach { order =>
+      if (!Orders.contains(order)) v.problem(s"$Path.order", s"must be one of ${Orders.mkString(", ")}")
+    }
+    // The same ceiling as any source's maxTxs: past it the cap no longer stops a runaway job.
+    v.range(s"$Path.opportunisticMaxTxs", v.int(s"$Path.opportunisticMaxTxs"), 1, 100,
+      "upkeep successors an opportunistic share admits in one block")
     v.range(s"$Path.retryAfterScans", v.int(s"$Path.retryAfterScans"), 1, 100000,
       "discovery passes a refused upkeep box sits out before it is offered again")
     // Jobs are read generically, so this is the one place a misspelt or unknown job name is caught:

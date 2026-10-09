@@ -6,10 +6,10 @@ import com.typesafe.config.ConfigFactory
 import configs.{CandidateSourceConfig, UpkeepConfig}
 import node.MutationConversions._
 import node.NodeApi
-import node.model.NodeBox
+import node.model.{NodeBox, NodeTransaction, Paging}
 import org.ergoplatform.appkit.Parameters
 import org.mockito.ArgumentMatchers.any
-import org.mockito.Mockito.when
+import org.mockito.Mockito.{never, verify, when}
 import org.scalatest.BeforeAndAfterAll
 import org.scalatest.flatspec.AnyFlatSpecLike
 import org.scalatest.matchers.should.Matchers
@@ -23,7 +23,7 @@ import transactions.upkeep.UpkeepSource.ScanTick
 import java.util.concurrent.atomic.AtomicInteger
 import scala.collection.mutable.ArrayBuffer
 import scala.concurrent.duration._
-import scala.util.{Failure, Success}
+import scala.util.{Failure, Success, Try}
 
 object UpkeepSourceSpec {
   val config: com.typesafe.config.Config = ConfigFactory.parseString("""
@@ -64,6 +64,10 @@ class UpkeepSourceSpec extends TestKit(ActorSystem("upkeep-source-spec", UpkeepS
    * @param retryAfterScans passes a refused box sits out; large unless a spec is about the retry
    * @param supervised      under a restarting parent, for the incarnation test
    * @param firstScanDelay  long unless a spec is about the timer, so only the spec's ticks scan
+   * @param space           fixed unless a spec is about the opportunistic share
+   * @param order           the order due boxes are built in; the value specs set it
+   * @param blockShare      the package's fraction of the block; the opportunistic specs use 0.5 so
+   *                        an empty mempool leaves more than any configured share
    */
   private class Fixture(jobs: Int = 1,
                         maxBoxes: Int = UpkeepConfig.Default.maxBoxesPerJob,
@@ -72,7 +76,11 @@ class UpkeepSourceSpec extends TestKit(ActorSystem("upkeep-source-spec", UpkeepS
                         supervised: Boolean = false,
                         mode: String = UpkeepConfig.Candidate,
                         verifyWithNode: Boolean = true,
-                        firstScanDelay: FiniteDuration = 1.hour) {
+                        firstScanDelay: FiniteDuration = 1.hour,
+                        space: String = UpkeepConfig.Fixed,
+                        opportunisticMaxTxs: Int = UpkeepConfig.Default.opportunisticMaxTxs,
+                        order: String = UpkeepConfig.Rotation,
+                        blockShare: Double = 1.0) {
     val api: NodeApi = mock[NodeApi]
     val (nodeContext, _, wallet) = FakeNodeContext(api, numAddresses = 1)
 
@@ -95,17 +103,27 @@ class UpkeepSourceSpec extends TestKit(ActorSystem("upkeep-source-spec", UpkeepS
 
     def checkCount: Int = checked.synchronized(checked.size)
 
+    /** The mempool the node reports, served a page at a time; a failure fails every page. */
+    @volatile var mempool: Try[Seq[NodeTransaction]] = Success(Seq.empty)
+    val mempoolReads = new AtomicInteger(0)
+    when(api.unconfirmedTransactions(any[Paging])).thenAnswer { inv =>
+      val paging = inv.getArgument[Paging](0)
+      mempoolReads.incrementAndGet()
+      mempool.map(_.slice(paging.offset, paging.offset + paging.limit))
+    }
+
     val job = new FakeJob(wallet)
     val other = new FakeJob(wallet, "other")
     val upkeepConfig: UpkeepConfig = UpkeepConfig.Default.copy(maxBoxesPerJob = maxBoxes,
       retryAfterScans = retryAfterScans, jobs = Map(
         job.name -> UpkeepConfig.Job(enabled = true), other.name -> UpkeepConfig.Job(enabled = true)),
-      mode = mode, verifyWithNode = verifyWithNode)
+      mode = mode, verifyWithNode = verifyWithNode, space = space, opportunisticMaxTxs = opportunisticMaxTxs,
+      order = order)
     val enabledJobs: Seq[UpkeepJob] = UpkeepRegistry.enabled(upkeepConfig,
       Seq(job, other).take(jobs).map(fake => JobFactory(fake.name, _ => fake)))
     val memory = new UpkeepSource.Memory(retryAfterScans)
     val props: Props = Props(new UpkeepSource(nodeContext, upkeepConfig, limits.copy(enabled = true),
-      enabledJobs, memory, useTrueProp = false, firstScanDelay = firstScanDelay))
+      enabledJobs, memory, useTrueProp = false, firstScanDelay = firstScanDelay, blockShare = blockShare))
     val probe = TestProbe()
     val source: ActorRef =
       if (!supervised) system.actorOf(props)
@@ -599,6 +617,48 @@ class UpkeepSourceSpec extends TestKit(ActorSystem("upkeep-source-spec", UpkeepS
     UpkeepSource.rotated(Seq.empty[Int], 7) shouldBe empty
   }
 
+  /**
+   * Boxes of one shape, so tip per byte orders as the tip does. The box at the head of the height
+   * rotation goes first whatever it pays, then the highest tip per byte of the rest, so with two
+   * slots the cheapest box is built only at the height that puts it at the head.
+   */
+  it should "admit the longest-unspent due box and then the highest tips per byte, by value, and build only those" in {
+    val f = new Fixture(limits = defaultLimits.copy(maxTxs = 2), order = UpkeepConfig.Value)
+    val Seq(low, high, middle) = Seq("a", "b", "c").map(f.box)
+    f.job.discovered = Seq(low, high, middle).map(_.boxId)
+    f.live = Seq(low, high, middle)
+    val tips = Map(low.boxId -> 1000L, high.boxId -> 3000L, middle.boxId -> 2000L)
+    f.job.declaredTips = tips
+    f.scanUntil(f.readCount > 0)
+
+    // all three boxes share a creation height, so the longest-unspent one is the rotation's head
+    val inIdOrder = Seq(low, high, middle).map(_.boxId).sorted
+    Seq(700, 701, 702).foreach { height =>
+      val head = inIdOrder(Math.floorMod(height, 3))
+      val best = (tips - head).maxBy(_._2)._1
+      val before = f.job.builds.get
+      val bundles = f.request(height)
+      bundles.flatMap(_.members.flatMap(_.inputIds)).toSet shouldBe Set(head, best)
+      withClue("a box was built though the share was full: ") { f.job.builds.get - before shouldBe 2 }
+    }
+  }
+
+  /** The default order ignores what boxes pay: an operator sees no new order without asking for it. */
+  it should "build in rotation order by default, whatever the boxes declare" in {
+    val f = new Fixture(limits = defaultLimits.copy(maxTxs = 2))
+    val Seq(low, high, middle) = Seq("a", "b", "c").map(f.box)
+    f.job.discovered = Seq(low, high, middle).map(_.boxId)
+    f.live = Seq(low, high, middle)
+    f.job.declaredTips = Map(low.boxId -> 1000L, high.boxId -> 3000L, middle.boxId -> 2000L)
+    f.scanUntil(f.readCount > 0)
+    val inIdOrder = Seq(low, high, middle).map(_.boxId).sorted
+    Seq(700, 701, 702).foreach { height =>
+      val start = Math.floorMod(height, 3)
+      val expected = Set(inIdOrder(start), inIdOrder((start + 1) % 3))
+      f.request(height).flatMap(_.members.flatMap(_.inputIds)).toSet shouldBe expected
+    }
+  }
+
   it should "stop building once maxTxs successors are ready, and leave the rest for a later block" in {
     val f = new Fixture(limits = defaultLimits.copy(maxTxs = 1))
     val boxes = Seq("a", "b", "c").map(f.box)
@@ -611,6 +671,72 @@ class UpkeepSourceSpec extends TestKit(ActorSystem("upkeep-source-spec", UpkeepS
     f.memory.refusedIds shouldBe empty
     f.request() should have size 1
     f.job.builds.get shouldBe 2
+  }
+
+  // ─── the opportunistic share ──────────────────────────────────────────────
+
+  /**
+   * One slot configured, room for three opportunistic ones, and four due boxes to fill them; the
+   * package is half the block, so the mempool has the other half to fit in.
+   */
+  private class Space(space: String = UpkeepConfig.Opportunistic)
+    extends Fixture(limits = defaultLimits.copy(maxTxs = 1, maxBytes = 4096L, maxCost = 200000L),
+      space = space, opportunisticMaxTxs = 3, blockShare = 0.5) {
+    val boxes: Seq[NodeBox] = Seq("a", "b", "c", "d").map(box)
+    job.discovered = boxes.map(_.boxId)
+    live = boxes
+  }
+
+  /** A waiting transaction larger than any block, so the mempool alone fills the package. */
+  private val crowd = NodeTransaction(id("crowd"), Seq.empty, Seq.empty, Seq.empty,
+    size = Some(Int.MaxValue / 2), cost = Some(Long.MaxValue / 4))
+
+  "The opportunistic share" should "take up to opportunisticMaxTxs transactions when the mempool is empty" in {
+    val f = new Space()
+    val bundles = f.scanUntil(f.readCount > 0)
+    bundles should have size 3
+    f.mempoolReads.get should be > 0
+  }
+
+  it should "take up to the cap when what is waiting fits in the block beside the package" in {
+    val f = new Space()
+    f.mempool = Success(Seq(NodeTransaction(id("small"), Seq.empty, Seq.empty, Seq.empty, size = Some(1000), cost = Some(10000L))))
+    val bundles = f.scanUntil(f.readCount > 0)
+    bundles should have size 3
+  }
+
+  it should "keep the configured share when the waiting transactions do not fit beside a full package" in {
+    val f = new Space()
+    f.mempool = Success(Seq(crowd))
+    val bundles = f.scanUntil(f.readCount > 0)
+    bundles should have size 1
+    f.mempoolReads.get should be > 0
+  }
+
+  it should "keep the configured share when the mempool cannot be read" in {
+    val f = new Space()
+    f.mempool = Failure(new RuntimeException("the node is busy"))
+    val bundles = f.scanUntil(f.readCount > 0)
+    bundles should have size 1
+    f.memory.refusedIds shouldBe empty
+  }
+
+  it should "not read the mempool when it has no more due boxes than slots" in {
+    val f = new Fixture(limits = defaultLimits.copy(maxTxs = 2), space = UpkeepConfig.Opportunistic, blockShare = 0.5)
+    val a = f.box("a")
+    f.job.discovered = Seq(a.boxId)
+    f.live = Seq(a)
+    f.scanUntil(f.readCount > 0) should have size 1
+    verify(f.api, never()).unconfirmedTransactions(any[Paging])
+  }
+
+  "The fixed share" should "never read the mempool" in {
+    val f = new Space(UpkeepConfig.Fixed)
+    val bundles = f.scanUntil(f.readCount > 0)
+    bundles should have size 1
+    f.request() should have size 1
+    verify(f.api, never()).unconfirmedTransactions(any[Paging])
+    verify(f.api, never()).poolHistogram()
   }
 
   // ─── observe mode ─────────────────────────────────────────────────────────

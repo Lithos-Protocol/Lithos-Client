@@ -1,5 +1,7 @@
 package transactions.upkeep
 
+import node.NodeApi
+import node.model.{NodeTransaction, Paging}
 import org.ergoplatform.appkit.impl.SignedTransactionImpl
 import org.ergoplatform.appkit.{BlockchainParameters, SignedTransaction}
 import org.ergoplatform.wallet.interpreter.ErgoInterpreter
@@ -7,6 +9,8 @@ import transactions.candidate.BlockTxMessages.CandidateTx
 import transactions.candidate.{CandidateBudget, CandidateBundle, CapitalEntry}
 import transactions.engine.execution.RollupExecution
 import work.lithos.mutations.InputUTXO
+
+import scala.util.Try
 
 /**
  * The pure half of the upkeep source: what a successor costs the block, what a signed successor
@@ -52,6 +56,40 @@ object Upkeep {
   def floor(box: InputUTXO, params: BlockchainParameters): (Long, Long) =
     (box.bytes.length.toLong,
       accountedCost(inputs = 1, dataInputs = 0, outputs = 1, assets = box.tokens.size + box.tokens.size, params))
+
+  // ─── ordering ─────────────────────────────────────────────────────────────
+
+  /**
+   * What a successor earns the block for the space it takes, known before it is built: the job's
+   * expected revenue against the box's [[floor]]. Ranked per byte first, because bytes are what a
+   * fee-paying transaction would otherwise have used, then per unit of cost.
+   */
+  final case class Worth(revenue: Long, bytes: Long, cost: Long) {
+    def perByte: Double = math.max(0L, revenue).toDouble / math.max(1L, bytes)
+
+    def perCost: Double = math.max(0L, revenue).toDouble / math.max(1L, cost)
+  }
+
+  object Worth {
+    /** A box that cannot be valued: nothing earned, so it goes after every paying one. */
+    val Unknown: Worth = Worth(0L, 1L, 1L)
+  }
+
+  /**
+   * `xs` with the most valuable first. Stable, so boxes worth the same keep the order they came in,
+   * which is the rotation's order. Each worth is computed once, since it may parse a box.
+   */
+  /**
+   * Of `xs`, the entries `fits` accepts, the one `seen` says was seen first; the first of them in
+   * `xs` on a tie, which keeps the rotation's order. None when nothing fits.
+   */
+  def headByAge[A](xs: Seq[A])(seen: A => Int, fits: A => Boolean): Option[A] =
+    xs.filter(fits).reduceOption((a, b) => if (seen(b) < seen(a)) b else a)
+
+  def byWorth[A](xs: Seq[A])(worth: A => Worth): Seq[A] = {
+    val descending = Ordering.Tuple2(Ordering.Double.reverse, Ordering.Double.reverse)
+    xs.map { x => val w = worth(x); x -> (w.perByte, w.perCost) }.sortBy(_._2)(descending).map(_._1)
+  }
 
   // ─── the candidate path ───────────────────────────────────────────────────
 
@@ -144,5 +182,106 @@ object Upkeep {
   object Share {
     def of(maxTxs: Int, budget: CandidateBudget): Share = Share(maxTxs, budget.maxBytes, budget.maxCost)
   }
+
+  // ─── space ────────────────────────────────────────────────────────────────
+
+  /** Transactions per page when the mempool's demand is read. */
+  final val MempoolPage = 100
+
+  /** Milliseconds after which a mempool read fails at its next page boundary or at its end; a single slow call is not cut short. */
+  final val ReadTimeoutMs = 2000L
+
+  /**
+   * Bytes and cost kept free beside the package for the node's own emission and fee transactions,
+   * which no mempool read counts: the waiting transactions must fit in the rest of the block less
+   * this, or the count does not grow. A reward transaction and a fee transaction are a few hundred
+   * bytes each; this reserve is generous.
+   */
+  final val NodeReserve: CandidateBudget = CandidateBudget(maxBytes = 4096L, maxCost = 200000L)
+
+  /**
+   * Pages read before the mempool is taken as full. A mempool this deep is not one that leaves a
+   * block empty, and reading it all would put the whole mempool on the path of every build.
+   */
+  final val MaxMempoolPages = 20
+
+  /**
+   * The bytes and cost the transactions waiting in the mempool would claim, read once per build so
+   * upkeep can grow only when they fit beside it. Reading stops as soon as the demand reaches
+   * `budget` on either dimension, since nothing past that changes the answer, and a mempool deeper
+   * fills [[MaxMempoolPages]] pages is charged as `budget` in full. Sums saturate at `budget`, so
+   * no reported figure can wrap them. Every waiting transaction is counted, fee or not, which
+   * overstates the demand: overstated, upkeep grows less often; understated, it would take space a
+   * paying transaction wanted. The read can still understate: offset paging over a mempool that
+   * changes between pages can skip a transaction, and a page shorter than [[MempoolPage]] is taken
+   * as the end. A transaction the node reports without a size or a cost fails the read, as does a
+   * page that cannot be read, or a read found past `deadlineMs` (wall clock) before a page is
+   * asked for or when the read ends, so the caller falls back to the configured count rather than
+   * act on a guess, on part of the mempool, or past the time a build can spare. A single call that
+   * hangs is bounded by the node client's own timeout, not by this.
+   */
+  def demand(api: NodeApi, budget: CandidateBudget, deadlineMs: Long = Long.MaxValue): Try[(Long, Long)] = Try {
+    var bytes = 0L
+    var cost = 0L
+    var paging = Paging(0, MempoolPage)
+    var pages = 0
+    var ended = false
+    def saturating(sum: Long, add: Long, cap: Long): Long = if (add >= cap - sum) cap else sum + add
+    def pastDeadline(): Unit =
+      if (System.currentTimeMillis() > deadlineMs)
+        throw new IllegalStateException(s"the mempool read passed its ${ReadTimeoutMs} ms budget after $pages page(s)")
+    while (!ended && bytes < budget.maxBytes && cost < budget.maxCost) {
+      pastDeadline()
+      if (pages >= MaxMempoolPages) {
+        bytes = math.max(bytes, budget.maxBytes)
+        cost = math.max(cost, budget.maxCost)
+      } else {
+        val page = api.unconfirmedTransactions(paging).get
+        page.foreach { tx =>
+          val (b, c) = weight(tx)
+          bytes = saturating(bytes, b, budget.maxBytes)
+          cost = saturating(cost, c, budget.maxCost)
+        }
+        ended = page.size < paging.limit
+        paging = paging.next
+        pages += 1
+      }
+    }
+    pastDeadline()
+    (bytes, cost)
+  }
+
+  /**
+   * What one waiting transaction claims: the size and the cost the node reports. A transaction
+   * reported without either cannot be weighed (an estimate from its bytes would understate a
+   * script-heavy one, and understating is the one direction this read must not err in), so it
+   * fails the read.
+   */
+  private[upkeep] def weight(tx: NodeTransaction): (Long, Long) = (tx.size, tx.cost) match {
+    case (Some(bytes), Some(cost)) if bytes > 0 && cost > 0L => (bytes.toLong, cost)
+    case _ => throw new IllegalStateException(s"the node reports no size or cost for ${tx.id}, so the mempool " +
+      "cannot be weighed")
+  }
+
+  /**
+   * The source's share in opportunistic mode. The block holds this client's package share and,
+   * beside it, `rest`, which the node fills from the mempool, less [[NodeReserve]] for the node's
+   * own transactions. When the mempool's demand fits in `rest` on both bytes and cost, by the
+   * node's figures at the read, the share keeps its configured bytes and cost and takes up to the
+   * larger of the configured count and `maxTxs` (the opportunistic cap) transactions in them;
+   * otherwise the configured share stands. A demand that reaches `rest` exactly does not fit:
+   * [[demand]] saturates there, so that figure means "at least this". The growth is in the count
+   * only, so the bytes and cost the operator set bound upkeep as in fixed mode, and the candidate
+   * builder's bytes and cost passes stand unchanged; its count for upkeep is the cap in every block
+   * (see `UpkeepConfig.allowance`), so only this check ties the larger count to the mempool. A
+   * configured count of 0 never grows:
+   * it is the operator's sign that the source is not to be asked, and the builder would refuse
+   * every successor anyway.
+   */
+  def opportunistic(configured: Share, rest: CandidateBudget, demandBytes: Long, demandCost: Long,
+                    maxTxs: Int): Share =
+    if (configured.slots > 0 && demandBytes < rest.maxBytes && demandCost < rest.maxCost)
+      configured.copy(slots = math.max(configured.slots, maxTxs))
+    else configured
 
 }
