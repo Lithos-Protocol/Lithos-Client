@@ -270,6 +270,19 @@ class ForwardsBatcherSpec extends TestKit(ActorSystem("forwards-batcher-spec", F
     f.stop()
   }
 
+  it should "broadcast a due settlement past broadcastAfterBlocks, its fee paid by the position, not the wallet" in {
+    // The epoch is already recorded, so the settlement is the whole chain and nothing needs a wallet box
+    val f = new Fixture(lastBlock = LateLastBlock, broadcast = true, accEpoch = fixtureEpoch,
+      windows = Seq(terms(fixtureEpoch - 20, 8)))
+    verify(f.api, timeout(30000).times(1)).sendTransaction(anyString())
+    val sent = f.sent.asScala.loneElement
+    sent should include(f.accBox.boxId)
+    sent should include(f.positions.head.boxId)
+    f.selections.isEmpty shouldBe true
+    f.pins.isEmpty shouldBe true
+    f.stop()
+  }
+
   it should "not broadcast onto a mempool recording of an epoch already over, until the node drops it" in {
     val f = new Fixture(lastBlock = LateLastBlock, broadcast = true, accEpoch = fixtureEpoch - 2, scanIntervalMs = 2000L)
     val stale = "b3" * 32

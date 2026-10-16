@@ -259,20 +259,44 @@ class ForwardsTransactionsSpec extends AnyPropSpec with ForwardsFixtures {
     }
   }
 
+  /** An 80-key OR: as a position key, its payout box is about 2,800 bytes, more than 0.001 ERG covers. */
+  private def manyKeys = {
+    val g = CryptoConstants.dlogGroup
+    COR((1 to 80).map(i => ProveDlog(g.exponentiate(g.generator, BigInteger.valueOf(1000L + i)))))
+  }
+
+  property("settle: a payout to a large key holds the node's minimum for its size, fee-less and in a broadcast") {
+    atLastBlock() { (ctx, wallet) =>
+      val acc = accHolding(ctx, fixtureEpoch, 8, ended)
+      val bigBox = nodeBox(ctx, UTXO(contracts.position, POSITION_ERG, Seq(lit(DFMath.positionLit(NOTIONAL))),
+        DifficultyForwardContracts.positionRegisters(manyKeys, keyOf(taker(ctx)), ended)), 1, "cd" * 32)
+      val position = DFBoxes.position(bigBox, contracts).get
+      val perByte = ctx.getDataSource.getParameters.getMinValuePerByte.toLong
+      Seq(0L, Parameters.MinFee).foreach { fee =>
+        val step = ForwardsTransactions.settle(ctx, wallet, contracts, acc, position, DFBoxes.input(bigBox, ctx).get,
+          None, fee)
+        val longPayout = outputs(step)(1)
+        withClue(s"fee $fee: ") {
+          longPayout.getValue should be > ForwardsTransactions.PayoutErg
+          longPayout.getValue should be >= longPayout.getBytes.length * perByte
+          outputs(step)(2).getValue shouldBe ForwardsTransactions.PayoutErg
+        }
+      }
+    }
+  }
+
   property("settleAll: an unbuildable position is passed over, and the next settles on the same accumulator") {
     atLastBlock() { (ctx, wallet) =>
-      // An 80-key OR as the long key makes its payout box 2,800 bytes, more than 0.001 ERG covers
-      val g = CryptoConstants.dlogGroup
-      val manyKeys = COR((1 to 80).map(i => ProveDlog(g.exponentiate(g.generator, BigInteger.valueOf(1000L + i)))))
+      // A position read from one box but spent as another the wallet cannot sign for, so signing fails
       val acc = accHolding(ctx, fixtureEpoch, 8, ended)
-      val badBox = nodeBox(ctx, UTXO(contracts.position, POSITION_ERG, Seq(lit(DFMath.positionLit(NOTIONAL))),
-        DifficultyForwardContracts.positionRegisters(manyKeys, keyOf(taker(ctx)), ended)), 1, "cd" * 32)
-      val bad = DFBoxes.position(badBox, contracts).get -> DFBoxes.input(badBox, ctx).get
+      val (position, _) = positionAt(ctx, maker(ctx), taker(ctx), ended, 1)
+      val unsignable = inputAt(UTXO(contractOf(maker(ctx)), POSITION_ERG, Seq(lit(DFMath.positionLit(NOTIONAL)))),
+        ctx, 1, "cd" * 32)
       val good = positionAt(ctx, maker(ctx), taker(ctx), terms(fixtureEpoch - 19, 8), 2)
-      val run = ForwardsTransactions.settleAll(ctx, wallet, contracts, acc, Seq(bad, good), None, 0L, 10,
-        1.minute.fromNow)
+      val run = ForwardsTransactions.settleAll(ctx, wallet, contracts, acc, Seq(position -> unsignable, good), None,
+        0L, 10, 1.minute.fromNow)
 
-      run.unbuildable shouldBe Vector(badBox.boxId)
+      run.unbuildable shouldBe Vector(position.boxId)
       run.steps.map(_.position.get.boxId) shouldBe Vector(good._1.boxId)
       run.steps.head.spent.box.id.toString shouldBe acc.box.id.toString
     }

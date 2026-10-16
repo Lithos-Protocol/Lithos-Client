@@ -299,4 +299,16 @@ class DFPositionSpec extends AnyPropSpec with DFSpecBase {
       rejectsAtSigning(s.prover, s.input(0, fakeIn).output(0, fakeOut).tx)
     }
   }
+
+  property("shape: a decoy at input 0 cannot let a settlement skip the deposit while the real accumulator sits elsewhere") {
+    settle(8) { s =>
+      // The real accumulator does not pin its own input, so it spends from input 2 to an unchanged successor at
+      // OUTPUTS(0). The decoy claims an empty balance, which the successor's untouched one would clear by 2 LIT.
+      val decoy = inputAt(accUTXO(s.before.copy(lit = 0L), contract = Contract.SIGMA_TRUE, nft = unrelatedToken), s.ctx, 0)
+      val realAt2 = inputAt(accUTXO(s.before), s.ctx, 2)
+      val fund = funding(s.ctx, settler(s.ctx), 3)
+      val withDecoy = s.copy(inputs = Seq(decoy, s.inputs(1), realAt2, fund)).output(0, accUTXO(s.before))
+      rejectsAtSigning(s.prover, withDecoy.tx)
+    }
+  }
 }

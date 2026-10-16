@@ -69,8 +69,15 @@ object ForwardsTransactions {
   /** Names the builder, so a refused candidate says where the transaction came from. */
   final val Kind = "difficulty-forward"
 
-  /** nanoERG each payout box holds. A genuine position's 0.004 ERG covers two of these and the fee. */
+  /**
+   * nanoERG each payout box holds, or the node's minimum for its size when a large key needs more. At 360
+   * nanoERG a byte a genuine position's 0.004 ERG covers both payouts, the fee and the reward box whatever its
+   * keys, since both have to fit in one 4,096-byte position.
+   */
   final val PayoutErg: Long = UTXO.MIN_CHANGE
+
+  /** What a box gains when it becomes an output and counts toward the node's minimum: a transaction id and index. */
+  private final val RefBytes = 34
 
   /**
    * The recording a spend signed in `ctx` can make, valid in the block after the tip.
@@ -142,14 +149,17 @@ object ForwardsTransactions {
     require(rewardLit >= 0, s"position ${position.boxId} holds ${position.lit} LIT, short of what it owes")
 
     val litId = contracts.litId
+    // Measured at the position's whole value, which no output here exceeds, so the length is an upper bound
+    def atLeastMinimum(box: UTXO, floor: Long): UTXO =
+      box.setValue(math.max(floor, nodeMinimum(ctx, box.setValue(positionBox.value))))
     def payout(owed: Long, to: Contract): Option[UTXO] =
-      if (owed > 0) Some(UTXO(to, PayoutErg, Seq(Token(litId, owed)))) else None
+      if (owed > 0) Some(atLeastMinimum(UTXO(to, PayoutErg, Seq(Token(litId, owed))), PayoutErg)) else None
     val longOut = payout(longOwed, position.long)
     val shortOut = payout(shortOwed, position.short)
-    val rewardErg = positionBox.value - fee - PayoutErg * (longOut.size + shortOut.size)
-    require(rewardErg >= UTXO.MIN_CHANGE,
-      s"position ${position.boxId} holds ${positionBox.value} nanoERG, short of its payouts, the fee and a reward box")
+    val rewardErg = positionBox.value - fee - longOut.map(_.value).sum - shortOut.map(_.value).sum
     val reward = UTXO(wallet.contract, rewardErg, if (rewardLit > 0) Seq(Token(litId, rewardLit)) else Seq.empty)
+    require(rewardErg >= atLeastMinimum(reward, 0L).value,
+      s"position ${position.boxId} holds ${positionBox.value} nanoERG, short of its payouts, the fee and a reward box")
     val paid = if (longOut.isDefined) longOut.toSeq ++ shortOut.toSeq :+ reward else reward +: shortOut.toSeq
 
     val unsigned = TxBuilder(ctx)
@@ -197,6 +207,10 @@ object ForwardsTransactions {
     }
     DFRun(steps, unbuildable, pending, cutShort = left.hasNext)
   }
+
+  /** The node's minimum value for `box` as an output, from its serialized length. */
+  private def nodeMinimum(ctx: BlockchainContext, box: UTXO): Long =
+    (box.toOutBox(ctx).getBytesWithNoRef.length + RefBytes) * ctx.getDataSource.getParameters.getMinValuePerByte.toLong
 
   /** The accumulator after a spend: its own script, value and NFT, with the new registers and balance. */
   private def successor(contracts: DFContracts, acc: DFAccState, lastEpoch: Int, ring: IndexedSeq[Long],

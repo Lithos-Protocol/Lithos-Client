@@ -151,6 +151,23 @@ class DFAccumulatorSpec extends AnyPropSpec with DFSpecBase {
     }
   }
 
+  property("record: rejects a successor naming a later epoch than the ring it writes") {
+    recording() { s =>
+      rejectsAtSigning(s.prover, s.tx(accUTXO(s.after.copy(lastEpoch = fixtureEpoch + 1))))
+    }
+  }
+
+  property("record: rejects moving lastEpoch backwards, even with the ring the contract would write") {
+    // An accumulator ahead of the chain: only reachable through a genesis that named a future epoch
+    recording(gap = 0, taken = 0L) { s =>
+      val ahead = s.before.copy(lastEpoch = fixtureEpoch + 3)
+      val back = AccState(fixtureEpoch,
+        ahead.ring.updated(fixtureEpoch % RING_SIZE, difficultyOf(fixtureNBits)), ahead.lit - RECORD_REWARD)
+      val inputs = s.inputs.updated(0, inputAt(accUTXO(ahead), s.ctx, 0))
+      rejectsAtSigning(s.prover, s.copy(before = ahead, inputs = inputs).tx(accUTXO(back)))
+    }
+  }
+
   property("record: rejects a second recording in the same epoch") {
     recording(gap = 0, taken = 0L) { s =>
       // lastEpoch is already the current epoch, so only the unchanged form is left and it pays nothing
@@ -230,9 +247,10 @@ class DFAccumulatorSpec extends AnyPropSpec with DFSpecBase {
     recording() { s => rejectsAtSigning(s.prover, s.tx(s.successor.setContract(Contract.SIGMA_TRUE))) }
   }
 
-  property("identity: rejects a successor without the NFT") {
-    recording() { s =>
-      rejectsAtSigning(s.prover, s.tx(s.successor.setTokens(Token(litId, s.after.lit))))
+  property("identity: rejects a successor holding another token where the NFT was") {
+    // An empty balance, so the swapped token sits alone at token 0 and the balance check has nothing to refuse
+    recording(balance = 0L, taken = 0L, fundingTokens = Seq(Token(unrelatedToken, 1L))) { s =>
+      rejectsAtSigning(s.prover, s.tx(s.successor.setTokens(Token(unrelatedToken, 1L))))
     }
   }
 

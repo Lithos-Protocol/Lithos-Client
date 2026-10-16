@@ -386,11 +386,16 @@ class ForwardsBatcher(nodeContext: NodeContext,
         .flatMap(box => DFBoxes.accumulator(box, contracts).flatMap(acc => DFBoxes.input(box, ctx).map(acc -> _)))
     }
 
-  /** Tracked positions reloaded and read, reporting ids the node no longer holds as spent. */
+  /**
+   * Tracked positions reloaded and read, reporting ids the node no longer holds as spent. One a build refused
+   * since the last scan is left out here too, rather than tried again on every build until the next scan.
+   */
   private def livePositions(contracts: DFContracts, ctx: BlockchainContext,
                             orders: Tracked): Seq[(DFPosition, InputUTXO)] = {
-    val live: Seq[NodeBox] = if (orders.isEmpty) Seq.empty else nodeApi.boxesWithPoolByIds(orders.keys.toSeq).get
-    forget(orders.keySet -- live.map(_.boxId))
+    val skipped = skippedOrders()
+    val wanted = orders.keySet -- skipped
+    val live: Seq[NodeBox] = if (wanted.isEmpty) Seq.empty else nodeApi.boxesWithPoolByIds(wanted.toSeq).get
+    forget(wanted -- live.map(_.boxId))
     live.flatMap(box => DFBoxes.position(box, contracts).flatMap(p => DFBoxes.input(box, ctx).map(p -> _)))
   }
 }
