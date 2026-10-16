@@ -37,6 +37,7 @@ class StartMiningServer @Inject()(system: ActorSystem, config: Configuration,
                                   @Named("transaction-engine") emissionHandler: ActorRef,
                                   @Named("ergodex-batcher") ergoDexBatcher: ActorRef,
                                   @Named("lithosdex-batcher") lithosDexBatcher: ActorRef,
+                                  @Named("forwards-batcher") forwardsBatcher: ActorRef,
                                   @Named("stats-collector") statsCollector: ActorRef) {
 
   val logger: Logger = LoggerFactory.getLogger("StartMiningServer")
@@ -109,6 +110,7 @@ class StartMiningServer @Inject()(system: ActorSystem, config: Configuration,
           else Some(mining.MiningMessages.CandidateSource(name, batcher))
         val lithosDexSource = batcherSource(configs.CandidateSourceConfig.LithosDex, lithosDexBatcher)
         val ergoDexSource = batcherSource(configs.CandidateSourceConfig.ErgoDex, ergoDexBatcher)
+        val forwardsSource = batcherSource(configs.CandidateSourceConfig.Forwards, forwardsBatcher)
 
         val server = new MiningStratumServer(
           system          = system,
@@ -130,7 +132,8 @@ class StartMiningServer @Inject()(system: ActorSystem, config: Configuration,
             mining.MiningMessages.CandidateSource(
               configs.CandidateSourceConfig.Rollups, transactionProcessor),
             mining.MiningMessages.CandidateSource(
-              configs.CandidateSourceConfig.Emissions, emissionHandler)) ++ rentSource ++ lithosDexSource ++ ergoDexSource,
+              configs.CandidateSourceConfig.Emissions, emissionHandler)) ++ rentSource ++ forwardsSource ++
+            lithosDexSource ++ ergoDexSource,
           rotateExtraNonceInterval = stratumParams.rotateExtraNonceInterval,
           statsCollector = if (statsConfig.enabled) Some(statsCollector) else None,
           statsRefreshIntervalMs = statsConfig.refreshIntervalMs

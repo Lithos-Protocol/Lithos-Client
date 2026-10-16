@@ -115,6 +115,15 @@ class ConfigDefaultsSpec extends AnyFlatSpec with Matchers {
     LithosDexBatchingConfig(shipped) shouldEqual LithosDexBatchingConfig.Default
   }
 
+  "ForwardsBatchingConfig.Default" should "equal what the shipped application.conf parses, and what an empty one does" in {
+    ForwardsBatchingConfig(shipped) shouldEqual ForwardsBatchingConfig.Default
+    ForwardsBatchingConfig(Configuration.empty) shouldEqual ForwardsBatchingConfig.Default
+  }
+
+  it should "leave the forwards candidate source on, so this miner's blocks record difficulty" in {
+    CandidateConfig(Configuration.empty).sources(CandidateSourceConfig.Forwards).enabled shouldBe true
+  }
+
   "LithosDexOrdersConfig.Default" should "equal what the shipped application.conf parses" in {
     LithosDexOrdersConfig(shipped) shouldEqual LithosDexOrdersConfig.Default
     LithosDexOrdersConfig(Configuration.empty) shouldEqual LithosDexOrdersConfig.Default

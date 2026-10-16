@@ -1,0 +1,140 @@
+{
+  // DF_Position
+  // Value: both sides' ERG, for the settlement fee and the payout boxes
+  // A filled difficulty forward. Once DF_Accumulator has recorded its window, anyone settles it: the long
+  // side is paid notional * clamp(mean / strike - 1, -20%, +20%) out of the short side's margin. If the
+  // window has already left the accumulator's ring, each side gets its own margin back instead.
+
+  // REGISTERS
+  // R4: longPk (SigmaProp) - paid when the window's mean difficulty is above the strike
+  // R5: shortPk (SigmaProp) - paid when it is below
+  // R6: strike (Long) - the difficulty the window's mean is measured against
+  // R7: notional (Long) - in LIT base units. Each side's margin is a fifth of it.
+  // R8: window ((Int, Int)) - the window's first epoch, and its length in epochs
+  val longPk   = SELF.R4[SigmaProp].get
+  val shortPk  = SELF.R5[SigmaProp].get
+  val strike   = SELF.R6[Long].get
+  val notional = SELF.R7[Long].get
+  val window   = SELF.R8[(Int, Int)].get
+
+  // TOKENS
+  // 0: LIT, both margins plus 1.5 LIT of rewards from each side
+
+  // CONSTANTS
+  // CONST_ACC_NFT: Coll[Byte] - singleton NFT of DF_Accumulator
+  // CONST_LIT_ID: Coll[Byte] - id of the LIT token
+
+  // Epochs DF_Accumulator's ring holds
+  val CONST_RING_SIZE = 128
+  // 2 LIT into the accumulator's balance, 1 LIT from each side
+  val CONST_ACC_DEPOSIT = 2000000000L
+  // What DF_Accumulator lets a builder take from its balance in a spend that records a new epoch
+  val CONST_RECORD_REWARD = 1000000000L
+
+  // CONTEXT VARS
+  // None.
+
+  // NEXT VALUES
+  // A settlement spends the accumulator at input 0 and this box at input 1. The accumulator's successor
+  // is OUTPUTS(0), the long side's payout OUTPUTS(1) and the short side's OUTPUTS(2).
+  val accIn  = INPUTS(0)
+  val accOut = OUTPUTS(0)
+
+  // ASSUMPTIONS - statements which can be assumed to be true due to other contracts enforcing them
+  // during creation of this UTXO
+  // DF_Offer created this box and checked every term: a window of 1 to 120 epochs starting at least two
+  // epochs after the fill, a positive strike and margin, both keys SigmaProps, and exactly twice the
+  // margin plus 1.5 LIT in LIT.
+  // DF_Accumulator keeps its NFT on its own script at OUTPUTS(0), and lets its ring and last epoch only
+  // stay as they were or advance by one recording of the current epoch. Its ring therefore holds the
+  // final difficulty of every epoch from lastEpoch - 127 to lastEpoch.
+  //
+  // DELIBERATE OMISSIONS - conditions left out on purpose
+  // The last 1 LIT, and whatever ERG the payout boxes and fee leave over, go to no named output. Whoever
+  // builds the settlement takes them.
+  // Nothing proves a box at this address came from an offer. One that did not holds only its creator's
+  // funds, and pays out only those.
+  // No timeout. Recording is open to anyone, so either side can record the window themselves.
+
+  // The window is read from the successor, so a settlement may record the window's last epoch in the
+  // same spend. Its values are final either way: an epoch's difficulty is fixed from its first block.
+  val lastEpoch = accOut.R4[Int].get
+  val ring      = accOut.R5[Coll[Long]].get
+
+  val windowStart  = window._1
+  val windowLength = window._2
+  val margin       = notional / 5
+
+  // The ring holds lastEpoch - 127 to lastEpoch, so a window starting before that is partly overwritten
+  val overwritten = lastEpoch - windowStart >= CONST_RING_SIZE
+
+  // LIT owed to (long, short). Every outcome sums to both margins, so each side can lose at most its own.
+  val owed = if (overwritten) {
+    (margin, margin)
+  } else {
+    val total = ring.indices.slice(0, windowLength).fold(0.toBigInt, { (acc: BigInt, j: Int) =>
+      val epochDifficulty = ring((windowStart + j) % CONST_RING_SIZE)
+      acc + epochDifficulty.toBigInt
+    })
+
+    // notional * (total / (length * strike) - 1), with a single division so nothing truncates early.
+    // Division truncates toward zero, and both sides move by the same amount, so nothing is left over.
+    val base     = windowLength.toBigInt * strike.toBigInt
+    val raw      = notional.toBigInt * (total - base) / base
+    val cap      = margin.toBigInt
+    val floorCap = 0.toBigInt - cap
+    val clamped  = if (raw > cap) cap else if (raw < floorCap) floorCap else raw
+    val payout   = clamped.toLong
+
+    (margin + payout, margin - payout)
+  }
+
+  val longOwed  = owed._1
+  val shortOwed = owed._2
+
+  // A side owed nothing needs no output, and a box cannot carry a token amount of zero
+  val longPaid = if (longOwed == 0L) true else {
+    val longBox = OUTPUTS(1)
+    allOf(
+      Coll(
+        longBox.propositionBytes == longPk.propBytes,
+        longBox.tokens(0)._1 == CONST_LIT_ID,
+        longBox.tokens(0)._2 >= longOwed
+      )
+    )
+  }
+
+  val shortPaid = if (shortOwed == 0L) true else {
+    val shortBox = OUTPUTS(2)
+    allOf(
+      Coll(
+        shortBox.propositionBytes == shortPk.propBytes,
+        shortBox.tokens(0)._1 == CONST_LIT_ID,
+        shortBox.tokens(0)._2 >= shortOwed
+      )
+    )
+  }
+
+  // 2 LIT reach the accumulator's balance. A spend that also records may take the recording reward out
+  // of the same balance, which leaves the builder with both rewards and the balance up by 1 LIT.
+  val accLit      = if (accIn.tokens.size > 1) accIn.tokens(1)._2 else 0L
+  val nextAccLit  = if (accOut.tokens.size > 1) accOut.tokens(1)._2 else 0L
+  val recorded    = lastEpoch != accIn.R4[Int].get
+  val rewardTaken = if (recorded) CONST_RECORD_REWARD else 0L
+  val deposited   = nextAccLit >= accLit + CONST_ACC_DEPOSIT - rewardTaken
+
+  val statements = allOf(
+    Coll(
+      // Input 1 is the double-satisfaction guard: no second position can share it
+      CONTEXT.selfBoxIndex == 1,
+      accIn.tokens(0)._1 == CONST_ACC_NFT,
+      accOut.tokens(0)._1 == CONST_ACC_NFT,
+      lastEpoch >= windowStart + windowLength - 1,
+      deposited,
+      longPaid,
+      shortPaid
+    )
+  )
+
+  sigmaProp(statements)
+}

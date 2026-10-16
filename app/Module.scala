@@ -64,6 +64,7 @@ class Module(environment: Environment, configuration: Configuration) extends Abs
     // for block transactions only when it is running.
     bindActor(classOf[transactions.batching.ergodex.ErgoDexBatcher], "ergodex-batcher")
     bindActor(classOf[transactions.batching.lithosdex.LithosDexBatcher], "lithosdex-batcher")
+    bindActor(classOf[transactions.batching.forwards.ForwardsBatcher], "forwards-batcher")
 
     bind(classOf[BlocksApi]).to(classOf[BlocksApiImpl])
     bind(classOf[CollateralMarketApi]).to(classOf[CollateralMarketApiImpl])

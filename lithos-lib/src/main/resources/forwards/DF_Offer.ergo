@@ -1,0 +1,109 @@
+{
+  // DF_Offer
+  // Value: the maker's half of the ERG a position needs
+  // One side of a difficulty forward, waiting for a taker. Filling it creates a DF_Position holding both
+  // margins and both sides' rewards. The maker can cancel at any time by signing.
+
+  // REGISTERS
+  // R4: makerPk (SigmaProp) - receives the maker's payout, and is the only key that can cancel
+  // R5: makerLong (Boolean) - true if the maker is long, which is paid when difficulty rises
+  // R6: strike (Long) - the difficulty the window's mean is measured against
+  // R7: notional (Long) - in LIT base units. Each side's margin is a fifth of it.
+  // R8: window ((Int, Int)) - the window's first epoch, and its length in epochs
+  // R9: expiry (Int) - the last height at which the offer can be filled
+  val makerPk   = SELF.R4[SigmaProp].get
+  val makerLong = SELF.R5[Boolean].get
+  val strike    = SELF.R6[Long].get
+  val notional  = SELF.R7[Long].get
+  val window    = SELF.R8[(Int, Int)].get
+  val expiry    = SELF.R9[Int].get
+
+  // TOKENS
+  // 0: LIT, the maker's margin plus 1.5 LIT of rewards
+
+  // CONSTANTS
+  // CONST_LIT_ID: Coll[Byte] - id of the LIT token
+  // CONST_POSITION_HASH: Coll[Byte] - blake2b256 of DF_Position's prop bytes
+
+  // Blocks per difficulty epoch. Ergo retargets only at heights where (height - 1) % 128 == 0.
+  val CONST_EPOCH_LENGTH = 128
+  // The next epoch's difficulty can already be computed from the chain, so a window starts after it
+  val CONST_MIN_LEAD = 2
+  // A window starts at most this many epochs after the fill, about three weeks, so every position ends
+  // within 239 epochs of its fill, far inside the storage rent period
+  val CONST_MAX_LEAD = 120
+  val CONST_MAX_WINDOW = 120
+  // 1.5 LIT from each side: 0.5 LIT for whoever settles, 1 LIT for the accumulator's balance
+  val CONST_SIDE_REWARD = 1500000000L
+  // 0.002 ERG from each side, for the settlement fee and the payout boxes
+  val CONST_POSITION_ERG = 4000000L
+
+  // CONTEXT VARS
+  // None.
+
+  // NEXT VALUES
+  val position = OUTPUTS(0)
+
+  // ASSUMPTIONS - statements which can be assumed to be true due to other contracts enforcing them
+  // during creation of this UTXO
+  // None. Anyone can create a box at this address with any registers, so every term is checked at the
+  // fill, which is the only point a genuine position is created.
+  //
+  // DELIBERATE OMISSIONS - conditions left out on purpose
+  // This box's own contents are not checked. The position must hold both sides' full amounts, so a
+  // shortfall here is made up by the taker, and anything held beyond the maker's share goes to the taker.
+  // The taker's key can be any SigmaProp. A key nobody holds loses only the taker's own payout.
+
+  // Filling is decided by OUTPUTS(0)'s script alone, so a cancel never fails on a read a fill needs
+  val filling = blake2b256(position.propositionBytes) == CONST_POSITION_HASH
+
+  // Spending Path 1: Fill
+  if (filling) {
+    // One offer per position. A second offer at another input could otherwise point at the same output.
+    val onlyOne = SELF.id == INPUTS(0).id
+
+    val windowStart  = window._1
+    val windowLength = window._2
+    val margin       = notional / 5
+    // Epoch of the block before the one this fill is mined in
+    val fillEpoch    = (CONTEXT.headers(0).height - 1) / CONST_EPOCH_LENGTH
+
+    val longPk      = position.R4[SigmaProp].get
+    val shortPk     = position.R5[SigmaProp].get
+    val makerSide   = if (makerLong) longPk else shortPk
+    val takerSide   = if (makerLong) shortPk else longPk
+    val positionLit = position.tokens(0)
+
+    // A register read whose value goes unused is compiled away, type check and all. The taker's key is
+    // used here so that a register the position could not read as a SigmaProp fails the fill, rather
+    // than locking the maker's margin in a position nobody can settle.
+    val takerKeyRead = takerSide.propBytes.size > 0
+
+    val statements = allOf(
+      Coll(
+        onlyOne,
+        HEIGHT <= expiry,
+        windowStart >= fillEpoch + CONST_MIN_LEAD,
+        windowStart <= fillEpoch + CONST_MAX_LEAD,
+        windowLength >= 1,
+        windowLength <= CONST_MAX_WINDOW,
+        // Settlement divides by the strike, and a zero margin would be a bet with nothing behind it
+        strike > 0L,
+        margin > 0L,
+        makerSide.propBytes == makerPk.propBytes,
+        takerKeyRead,
+        position.R6[Long].get == strike,
+        position.R7[Long].get == notional,
+        position.R8[(Int, Int)].get == window,
+        positionLit._1 == CONST_LIT_ID,
+        positionLit._2 == 2L * (margin + CONST_SIDE_REWARD),
+        position.value >= CONST_POSITION_ERG
+      )
+    )
+
+    sigmaProp(statements)
+  } else {
+    // Spending Path 2: Cancel
+    makerPk
+  }
+}

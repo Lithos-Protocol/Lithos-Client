@@ -174,7 +174,7 @@ object Configs {
       "fraction of the block's byte and cost limits this client's package may claim")
     Seq(configs.CandidateSourceConfig.Rollups, configs.CandidateSourceConfig.Emissions,
       configs.CandidateSourceConfig.Rent, configs.CandidateSourceConfig.ErgoDex,
-      configs.CandidateSourceConfig.LithosDex).foreach { source =>
+      configs.CandidateSourceConfig.LithosDex, configs.CandidateSourceConfig.Forwards).foreach { source =>
       val enabled = v.bool(s"stratum.candidate.sources.$source.enabled")
       val maxTxs = v.range(s"stratum.candidate.sources.$source.maxTxs",
         v.int(s"stratum.candidate.sources.$source.maxTxs"), 0, 100, "transactions inserted per block")
@@ -290,6 +290,24 @@ object Configs {
     v.strategy("batching.lithosdex.strategy")
     v.longRange("batching.lithosdex.searchBudgetMs", v.long("batching.lithosdex.searchBudgetMs"), 0L, 10000L,
       "ms one plan may search; 0 plans greedily")
+
+    // ---- batching.forwards ----
+    v.bool("batching.forwards.enabled")
+    v.longRange("batching.forwards.scanIntervalMs", v.long("batching.forwards.scanIntervalMs"),
+      5000L, 3600000L, "ms between scans; each reads the accumulator and pages the positions")
+    v.range("batching.forwards.maxTrackedOrders", v.int("batching.forwards.maxTrackedOrders"), 1, 4096,
+      "due positions held between scans")
+    v.range("batching.forwards.maxOrdersPerBlock", v.int("batching.forwards.maxOrdersPerBlock"), 1, 100,
+      "transactions per broadcast pass, the recording included")
+    v.bool("batching.forwards.broadcast")
+    // At 0 a recording can wait a block, since none signs at an epoch's first block; past 120 a broadcast
+    // has under 8 blocks to be mined before its epoch ends and it becomes invalid
+    v.range("batching.forwards.broadcastAfterBlocks", v.int("batching.forwards.broadcastAfterBlocks"), 0, 120,
+      "blocks into each difficulty epoch before accumulator work is broadcast")
+    v.longRange("batching.forwards.skippedOrderTtlMs", v.long("batching.forwards.skippedOrderTtlMs"),
+      60000L, 86400000L, "ms an unbuildable position is left out")
+    v.range("batching.forwards.maxSkippedOrders", v.int("batching.forwards.maxSkippedOrders"), 0, 100000,
+      "unbuildable positions remembered; about 200 bytes each")
 
     // ---- emission ----
     v.bool("emission.enabled")

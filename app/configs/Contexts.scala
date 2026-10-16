@@ -47,6 +47,7 @@ object Contexts {
   final val CriticalTx: String = "critical-tx-dispatcher"
   final val BatchingIo: String = "batching-io-dispatcher"
   final val LithosDexBatchingIo: String = "lithosdex-batching-io-dispatcher"
+  final val ForwardsBatchingIo: String = "forwards-batching-io-dispatcher"
   final val Stats: String = "stats-dispatcher"
   final val StatsRead: String = "stats-read-dispatcher"
   final val StatsStore: String = "stats-store-dispatcher"
@@ -55,7 +56,7 @@ object Contexts {
   /** Dispatcher names shared with startup configuration validation. */
   final val Names: Seq[String] = Seq(Stratum, Polling, Sync, Tx, Dex, Database, SnapshotIo,
     CandidateIo, MiningControlIo, Genesis, EngineIo, MempoolIo, WalletIo, WalletMaintenance, EngineCandidate, CriticalWallet, CriticalTx,
-    BatchingIo, LithosDexBatchingIo, Stats, StatsRead, StatsStore, MiningStats)
+    BatchingIo, LithosDexBatchingIo, ForwardsBatchingIo, Stats, StatsRead, StatsStore, MiningStats)
 
   def key(name: String): String = s"lithos-contexts.$name"
 }

@@ -83,7 +83,10 @@ object BatchingConfig {
     strategy = "maxFees",
     searchBudgetMs = 250L)
 
-  def apply(config: Configuration, name: String): BatchingConfig = {
+  def apply(config: Configuration, name: String): BatchingConfig = apply(config, name, Default)
+
+  /** The `batching.<name>` block, reading `defaults` for any key it leaves out. */
+  def apply(config: Configuration, name: String, defaults: BatchingConfig): BatchingConfig = {
     def path(key: String): String = s"batching.$name.$key"
     def int(key: String, fallback: Int): Int =
       config.getOptional(path(key))(ConfigLoader.intLoader).getOrElse(fallback)
@@ -93,28 +96,28 @@ object BatchingConfig {
       config.getOptional(path(key))(ConfigLoader.booleanLoader).getOrElse(fallback)
 
     BatchingConfig(
-      enabled = bool("enabled", Default.enabled),
-      scanIntervalMs = long("scanIntervalMs", Default.scanIntervalMs),
-      maxTrackedOrders = int("maxTrackedOrders", Default.maxTrackedOrders),
-      maxTrackedPools = int("maxTrackedPools", Default.maxTrackedPools),
-      maxOrdersPerBlock = int("maxOrdersPerBlock", Default.maxOrdersPerBlock),
-      minRevenueNanoErg = long("minRevenueNanoErg", Default.minRevenueNanoErg),
-      broadcastMinRevenueNanoErg = long("broadcastMinRevenueNanoErg", Default.broadcastMinRevenueNanoErg),
-      broadcastMinerFeeCeiling = long("broadcastMinerFeeCeiling", Default.broadcastMinerFeeCeiling),
-      maxPoolAgeBlocks = int("maxPoolAgeBlocks", Default.maxPoolAgeBlocks),
-      broadcast = bool("broadcast", Default.broadcast),
+      enabled = bool("enabled", defaults.enabled),
+      scanIntervalMs = long("scanIntervalMs", defaults.scanIntervalMs),
+      maxTrackedOrders = int("maxTrackedOrders", defaults.maxTrackedOrders),
+      maxTrackedPools = int("maxTrackedPools", defaults.maxTrackedPools),
+      maxOrdersPerBlock = int("maxOrdersPerBlock", defaults.maxOrdersPerBlock),
+      minRevenueNanoErg = long("minRevenueNanoErg", defaults.minRevenueNanoErg),
+      broadcastMinRevenueNanoErg = long("broadcastMinRevenueNanoErg", defaults.broadcastMinRevenueNanoErg),
+      broadcastMinerFeeCeiling = long("broadcastMinerFeeCeiling", defaults.broadcastMinerFeeCeiling),
+      maxPoolAgeBlocks = int("maxPoolAgeBlocks", defaults.maxPoolAgeBlocks),
+      broadcast = bool("broadcast", defaults.broadcast),
       // Lowercased because token ids are compared as the node reports them.
       deniedPools = config.getOptional(path("deniedPools"))(ConfigLoader.seqStringLoader)
-        .map(_.map(_.trim.toLowerCase).toSet).getOrElse(Default.deniedPools),
-      skippedOrderTtlMs = long("skippedOrderTtlMs", Default.skippedOrderTtlMs),
-      maxSkippedOrders = int("maxSkippedOrders", Default.maxSkippedOrders),
-      maxAncestorTxs = int("maxAncestorTxs", Default.maxAncestorTxs),
-      broadcastMempoolOrders = bool("broadcastMempoolOrders", Default.broadcastMempoolOrders),
-      maxMempoolOrders = int("maxMempoolOrders", Default.maxMempoolOrders),
-      maxMempoolOrdersPerTx = int("maxMempoolOrdersPerTx", Default.maxMempoolOrdersPerTx),
-      maxUnbuildablePerRun = int("maxUnbuildablePerRun", Default.maxUnbuildablePerRun),
-      maxUnbuildablePerTx = int("maxUnbuildablePerTx", Default.maxUnbuildablePerTx),
-      strategy = config.getOptional[String](path("strategy")).map(_.trim).getOrElse(Default.strategy),
-      searchBudgetMs = long("searchBudgetMs", Default.searchBudgetMs))
+        .map(_.map(_.trim.toLowerCase).toSet).getOrElse(defaults.deniedPools),
+      skippedOrderTtlMs = long("skippedOrderTtlMs", defaults.skippedOrderTtlMs),
+      maxSkippedOrders = int("maxSkippedOrders", defaults.maxSkippedOrders),
+      maxAncestorTxs = int("maxAncestorTxs", defaults.maxAncestorTxs),
+      broadcastMempoolOrders = bool("broadcastMempoolOrders", defaults.broadcastMempoolOrders),
+      maxMempoolOrders = int("maxMempoolOrders", defaults.maxMempoolOrders),
+      maxMempoolOrdersPerTx = int("maxMempoolOrdersPerTx", defaults.maxMempoolOrdersPerTx),
+      maxUnbuildablePerRun = int("maxUnbuildablePerRun", defaults.maxUnbuildablePerRun),
+      maxUnbuildablePerTx = int("maxUnbuildablePerTx", defaults.maxUnbuildablePerTx),
+      strategy = config.getOptional[String](path("strategy")).map(_.trim).getOrElse(defaults.strategy),
+      searchBudgetMs = long("searchBudgetMs", defaults.searchBudgetMs))
   }
 }

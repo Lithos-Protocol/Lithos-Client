@@ -1,0 +1,102 @@
+{
+  // DF_Accumulator
+  // Value: fixed at genesis and carried unchanged
+  // Singleton record of Ergo's difficulty over the last 128 epochs, which DF_Position settles against.
+  // Anyone records the current epoch once it has started, and takes 1 LIT from the balance for doing so.
+
+  // REGISTERS
+  // R4: lastEpoch (Int) - the newest epoch recorded. A recording sets it to the current epoch.
+  // R5: ring (Coll[Long]) - 128 difficulties, epoch e at index e % 128. A recording writes the current
+  // epoch's difficulty, and the last recorded value into every epoch skipped since.
+  val lastEpoch = SELF.R4[Int].get
+  val ring      = SELF.R5[Coll[Long]].get
+
+  // TOKENS
+  // 0: accumulator NFT
+  // 1: LIT, the balance recordings are paid from. Absent while the balance is zero.
+  val accNFT = SELF.tokens(0)
+  val lit    = if (SELF.tokens.size > 1) SELF.tokens(1)._2 else 0L
+
+  // CONSTANTS
+  // CONST_LIT_ID: Coll[Byte] - id of the LIT token
+
+  // Blocks per difficulty epoch. Ergo retargets only at heights where (height - 1) % 128 == 0.
+  val CONST_EPOCH_LENGTH = 128
+  // Epochs the ring holds, so a window can still be read 127 epochs after it starts
+  val CONST_RING_SIZE = 128
+  // 1 LIT, for whoever records a new epoch
+  val CONST_RECORD_REWARD = 1000000000L
+
+  // CONTEXT VARS
+  // None.
+
+  // NEXT VALUES
+  val successor     = OUTPUTS(0)
+  val nextLastEpoch = successor.R4[Int].get
+  val nextRing      = successor.R5[Coll[Long]].get
+  val nextLit       = if (successor.tokens.size > 1) successor.tokens(1)._2 else 0L
+
+  // ASSUMPTIONS - statements which can be assumed to be true due to other contracts enforcing them
+  // during creation of this UTXO
+  // Created at genesis holding the NFT, with R4 set to the epoch of the block before it and every ring
+  // entry set to that epoch's difficulty. Recording only rewrites entries in place, so the ring keeps 128
+  // entries, and an epoch skipped straight after genesis carries a real difficulty rather than a filler.
+  // The NFT exists in this box alone, and this script keeps it here on every path, so there is never a
+  // second accumulator to claim the same successor and no input position needs pinning.
+  //
+  // DELIBERATE OMISSIONS - conditions left out on purpose
+  // A spend that records nothing is always allowed, provided it leaves the ring alone and does not lower
+  // the balance: a settlement has to spend this box to deposit into it whether or not an epoch is due.
+  // The reward goes to no named output. Whoever builds the transaction takes it.
+  // Registers past R5 are not refused. This box is spent every epoch, so padding lasts one spend.
+
+  // The block before the one this is mined in, not the pre-header: its difficulty is already on chain,
+  // while a pre-header's at an epoch boundary is a retarget the signer would have to compute.
+  val lastHeader   = CONTEXT.headers(0)
+  val currentEpoch = (lastHeader.height - 1) / CONST_EPOCH_LENGTH
+
+  val litHeld = if (successor.tokens.size > 1) successor.tokens(1)._1 == CONST_LIT_ID else true
+
+  val identityHeld = allOf(
+    Coll(
+      successor.propositionBytes == SELF.propositionBytes,
+      successor.value == SELF.value,
+      successor.tokens(0) == accNFT,
+      successor.tokens.size <= 2,
+      litHeld
+    )
+  )
+
+  val recorded = nextLastEpoch != lastEpoch
+
+  // Either the ring is untouched, or it advances by exactly one recording of the current epoch
+  val ringAdvanced = if (recorded) {
+    // Fits a Long with five orders of magnitude to spare at today's network hashrate
+    val difficulty = Global.decodeNbits(lastHeader.nBits).toLong
+    val carried    = ring(lastEpoch % CONST_RING_SIZE)
+
+    // After this recording, slot i holds the newest epoch up to currentEpoch that maps to it. Slots whose
+    // epoch is newer than lastEpoch are rewritten: the current epoch with its difficulty, skipped ones
+    // with the carried value. Every other slot keeps what it had.
+    val recordedRing = ring.indices.map({ (i: Int) =>
+      val slotEpoch = currentEpoch - (currentEpoch - i) % CONST_RING_SIZE
+      if (slotEpoch == currentEpoch) difficulty else if (slotEpoch > lastEpoch) carried else ring(i)
+    })
+
+    allOf(
+      Coll(
+        currentEpoch > lastEpoch,
+        nextLastEpoch == currentEpoch,
+        nextRing == recordedRing
+      )
+    )
+  } else {
+    nextRing == ring
+  }
+
+  // The balance may fall by the reward only in a spend that records, and may rise by any amount
+  val maxTaken    = if (recorded) CONST_RECORD_REWARD else 0L
+  val balanceHeld = nextLit >= lit - maxTaken
+
+  sigmaProp(identityHeld && ringAdvanced && balanceHeld)
+}

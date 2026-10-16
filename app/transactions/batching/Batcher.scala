@@ -122,6 +122,13 @@ abstract class Batcher(nodeContext: NodeContext,
   /** Sends runs to the mempool: `orders`, and with `broadcastMempoolOrders` the unconfirmed orders too. */
   protected def broadcastPass(orders: Tracked, refused: Map[String, String]): BroadcastResult
 
+  /**
+   * Whether a scan that found `tracked` is followed by a broadcast pass, with `broadcast` on. Runs on the
+   * mailbox. By default whenever orders are tracked, or always with `broadcastMempoolOrders`, since the
+   * mempool can hold orders the scan never sees.
+   */
+  protected def broadcastDue(tracked: Tracked): Boolean = tracked.nonEmpty || batching.broadcastMempoolOrders
+
   override def preStart(): Unit = {
     val name = getClass.getSimpleName
     if (!batching.enabled)
@@ -156,8 +163,7 @@ abstract class Batcher(nodeContext: NodeContext,
           s"${found.values.toSet.size} pool(s)")
       tracked = found
       rejected = rejected.filter { case (orderId, _) => stillOffered(orderId) }
-      // The mempool can hold orders the scan never sees
-      if (batching.broadcast && (tracked.nonEmpty || batching.broadcastMempoolOrders)) {
+      if (batching.broadcast && broadcastDue(tracked)) {
         val (orders, refused) = (tracked, rejected)
         offMailbox(broadcastPass(orders, refused))(Broadcasted)
       } else busy = false

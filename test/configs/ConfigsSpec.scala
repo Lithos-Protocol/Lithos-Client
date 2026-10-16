@@ -302,7 +302,8 @@ class ConfigsSpec extends AnyFlatSpec with Matchers {
     Contexts.Names should contain theSameElementsAs
       Seq(Contexts.Stratum, Contexts.Polling, Contexts.Sync, Contexts.Tx, Contexts.Dex,
         Contexts.Database, Contexts.SnapshotIo, Contexts.CandidateIo, Contexts.MiningControlIo, Contexts.Genesis, Contexts.EngineIo, Contexts.MempoolIo, Contexts.WalletIo, Contexts.WalletMaintenance, Contexts.EngineCandidate, Contexts.CriticalWallet, Contexts.CriticalTx, Contexts.BatchingIo,
-        Contexts.LithosDexBatchingIo, Contexts.Stats, Contexts.StatsRead, Contexts.StatsStore, Contexts.MiningStats)
+        Contexts.LithosDexBatchingIo, Contexts.ForwardsBatchingIo, Contexts.Stats, Contexts.StatsRead,
+        Contexts.StatsStore, Contexts.MiningStats)
   }
 
   it should "reject an apiKeyHash that is the key rather than its hash" in {
