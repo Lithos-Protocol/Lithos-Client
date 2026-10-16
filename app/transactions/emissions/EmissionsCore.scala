@@ -146,24 +146,28 @@ trait EmissionsCore extends Actor with InjectedActorSupport {
 
   // ─── receive ──────────────────────────────────────────────────────────────
 
-  abstract override def receive: Receive =
-    emissionReceive.orElse(emissionPreparation.receive).orElse(super.receive)
+  abstract override def receive: Receive = {
+    val rest = super.receive
+    emissionReceive(rest).orElse(emissionPreparation.receive).orElse(rest)
+  }
 
   /**
    * Only the candidate path is handled here. Joins, queue passes and self-collateralization are
    * admitted by the engine as intents and reach this trait through [[executeEmission]]; the timers
-   * below send the same messages the engine matches on.
+   * below send the same messages the engine matches on. `rest` is the receive this trait is
+   * stacked on, which a drop is passed on to.
    */
-  private def emissionReceive: Receive = {
+  private def emissionReceive(rest: Receive): Receive = {
     // ------------------------------------------------------------------
     // A block is being assembled — hand back fee-less copies
     // ------------------------------------------------------------------
 
-    // Emission candidates reserve nothing that a dropped block has to reconcile, so there is
-    // nothing to undo. Matched anyway, because every transaction source is told.
-
-    // Building for a height that can no longer land would offer it to a later one.
-    case CandidateTxsDropped(blockHeight) => emissionPreparation.drop(blockHeight)
+    // The build for a height that can no longer land is forgotten, or it would be offered to a
+    // later one. The drop is then passed on: the rollup candidates stacked beneath share this
+    // mailbox and end their bond leases for that height on the same message.
+    case dropped @ CandidateTxsDropped(blockHeight) =>
+      emissionPreparation.drop(blockHeight)
+      rest.applyOrElse(dropped, (_: Any) => ())
 
     case PrepareBlockTxs(blockHeight, limit) => startCandidateBuild(blockHeight, limit, None)
 
