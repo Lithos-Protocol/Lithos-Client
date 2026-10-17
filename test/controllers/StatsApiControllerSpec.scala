@@ -62,6 +62,30 @@ class StatsApiControllerSpec extends AnyFlatSpec with Matchers with MockitoSugar
     verifyNoInteractions(mining, cache)
   }
 
+  it should "serve this wallet's lending only with the API key, with each row's received and net" in {
+    val mining = mock[MiningStatsRefresh]
+    val c = withMining(mining)
+    Seq(FakeRequest(GET, "/stats/collateral/earnings"),
+      FakeRequest(GET, "/stats/collateral/earnings").withHeaders("api_key" -> "wrong")).foreach { request =>
+      status(c.getLendingEarnings(None, None).apply(request)) shouldBe FORBIDDEN
+    }
+    verifyNoInteractions(mining)
+
+    val row = LendingRecord("bb" * 32, 25, hour, "cc" * 32, "9lender", "2920000000", "5000000", "3000000000",
+      "2000000", Some(20))
+    when(mining.lending(0, Lending.DefaultLimit)).thenReturn(Future.successful(
+      LendingPage("ready", source, 1, Some(0L), Vector(row), 0, 1, LendingTotals.of(Seq(row)))))
+    val result = call(c.getLendingEarnings(None, None))
+    status(result) shouldBe OK
+    header("Cache-Control", result) shouldBe Some("no-store")
+    val json = contentAsJson(result)
+    (json \ "positions")(0).as[play.api.libs.json.JsObject].value("receivedNanoErg").as[String] shouldBe "3002000000"
+    (json \ "positions")(0).as[play.api.libs.json.JsObject].value("netNanoErg").as[String] shouldBe "82000000"
+    (json \ "totals" \ "netNanoErg").as[String] shouldBe "82000000"
+    (json \ "rewardLockBlocks").as[Int] shouldBe 720
+    status(call(c.getLendingEarnings(None, Some(Lending.MaxLimit + 1)))) shouldBe BAD_REQUEST
+  }
+
   /** Everything but the local producer detail is chain-derived, so a dashboard reads it unattended. */
   it should "serve every chain-derived endpoint anonymously, still without HTTP caching" in {
     val mining = mock[MiningStatsRefresh]

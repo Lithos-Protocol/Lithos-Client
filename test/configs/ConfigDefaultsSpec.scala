@@ -124,6 +124,21 @@ class ConfigDefaultsSpec extends AnyFlatSpec with Matchers {
     CandidateConfig(Configuration.empty).sources(CandidateSourceConfig.Forwards).enabled shouldBe true
   }
 
+  "ForwardsOffersConfig.Default" should "equal what the shipped application.conf parses, and what an empty one does" in {
+    ForwardsOffersConfig(shipped) shouldEqual ForwardsOffersConfig.Default
+    ForwardsOffersConfig(Configuration.empty) shouldEqual ForwardsOffersConfig.Default
+    ForwardsOffersConfig.Default.invalid shouldBe None
+  }
+
+  it should "limit only windows shorter than shortWindowEpochs, in LIT base units" in {
+    val limits = ForwardsOffersConfig.Default
+    limits.maxNotional(7) shouldBe Some(1000L * 1000000000L)
+    limits.maxNotional(8) shouldBe None
+    ForwardsOffersConfig(1, 0L).maxNotional(120) shouldBe None
+    ForwardsOffersConfig(0, 5L).invalid should not be empty
+    ForwardsOffersConfig(8, -1L).invalid should not be empty
+  }
+
   "LithosDexOrdersConfig.Default" should "equal what the shipped application.conf parses" in {
     LithosDexOrdersConfig(shipped) shouldEqual LithosDexOrdersConfig.Default
     LithosDexOrdersConfig(Configuration.empty) shouldEqual LithosDexOrdersConfig.Default

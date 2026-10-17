@@ -6,6 +6,7 @@ import node.MutationConversions._
 import node.model.NodeBox
 import org.ergoplatform.appkit.{BlockchainContext, ErgoType, ErgoValue}
 import sigma.ast.ErgoTree
+import sigma.data.{CSigmaProp, SigmaBoolean}
 import work.lithos.mutations.{Contract, InputUTXO}
 
 import scala.util.Try
@@ -37,9 +38,30 @@ final case class DFPosition(box: NodeBox, long: Contract, short: Contract, terms
 }
 
 /**
- * Reads accumulator and position boxes the node reports. Anyone can create a box at either address with any
- * registers, so each read checks the script against this deployment's, every register's type, and every
- * amount a settlement depends on, and returns None for anything a spend would fail on.
+ * A difficulty forward offer, read from its box.
+ *
+ * @param maker     the script the maker is paid to: the prop bytes of R4's key
+ * @param makerKey  R4, which a fill writes into the position on the maker's side
+ * @param makerLong R5
+ * @param terms     R6 to R8
+ * @param expiry    R9, the last height a fill can be mined at
+ * @param lit       LIT the box holds, 0 when it holds none
+ */
+final case class DFOffer(box: NodeBox, maker: Contract, makerKey: SigmaBoolean, makerLong: Boolean, terms: DFTerms,
+                         expiry: Int, lit: Long) {
+  def boxId: String = box.boxId
+
+  /** Whether the box holds the maker's whole side, so a fill costs the taker no more than their own. */
+  def funded: Boolean = lit >= DFMath.sideLit(terms.notional)
+
+  /** The window's last epoch. */
+  def windowEnd: Int = terms.windowStart + terms.windowLength - 1
+}
+
+/**
+ * Reads accumulator, offer and position boxes the node reports. Anyone can create a box at any of these
+ * addresses with any registers, so each read checks the script against this deployment's, every register's
+ * type, and every amount a spend depends on, and returns None for anything a spend would fail on.
  */
 object DFBoxes {
 
@@ -48,6 +70,7 @@ object DFBoxes {
   private val RingType = ErgoType.collType(ErgoType.longType())
   private val WindowType = ErgoType.pairType(ErgoType.integerType(), ErgoType.integerType())
   private val KeyType = ErgoType.sigmaPropType()
+  private val BoolType = ErgoType.booleanType()
 
   /** `box` as the accumulator of `contracts`, or None. */
   def accumulator(box: NodeBox, contracts: DFContracts): Option[DFAccumulator] =
@@ -92,6 +115,31 @@ object DFBoxes {
         if length >= 1 && length <= DFHelpers.MAX_WINDOW && start >= 0 && start <= Int.MaxValue - length
         if BigInt(lit) >= BigInt(DFMath.margin(notional)) * 2 + DFHelpers.ACC_DEPOSIT
       } yield DFPosition(box, long, short, DFTerms(strike, notional, start, length), lit)
+    }.toOption.flatten
+
+  /**
+   * `box` as an offer of `contracts`, or None. Refused when its terms are outside what a fill accepts, or its
+   * maker key could not be paid. An offer holding too little LIT still reads, with [[DFOffer.funded]] false,
+   * so its maker can see and cancel it.
+   */
+  def offer(box: NodeBox, contracts: DFContracts): Option[DFOffer] =
+    if (!box.ergoTree.equalsIgnoreCase(contracts.offer.ergoTreeHex)) None
+    else Try {
+      val litId = contracts.litId.toString
+      for {
+        lit <- Some(box.assets.filter(_.tokenId == litId).map(a => BigInt(a.amount)).sum).filter(_.isValidLong)
+        key <- register(box, 4, KeyType)
+        makerKey <- Some(key).collect { case CSigmaProp(tree) => tree }
+        maker <- payoutContract(key)
+        makerLong <- register(box, 5, BoolType).collect { case v: java.lang.Boolean => v.booleanValue }
+        strike <- register(box, 6, LongType).collect { case v: java.lang.Long => v.longValue }
+        notional <- register(box, 7, LongType).collect { case v: java.lang.Long => v.longValue }
+        window <- register(box, 8, WindowType).collect { case (s: Integer, l: Integer) => (s.intValue, l.intValue) }
+        (start, length) = window
+        expiry <- register(box, 9, IntType).collect { case v: Integer => v.intValue }
+        if strike > 0 && DFMath.margin(notional) > 0
+        if length >= 1 && length <= DFHelpers.MAX_WINDOW && start >= 0 && start <= Int.MaxValue - length
+      } yield DFOffer(box, maker, makerKey, makerLong, DFTerms(strike, notional, start, length), expiry, lit.toLong)
     }.toOption.flatten
 
   /** `box` rebuilt for spending, or None when its id does not come back the same, so its fields are not the box's. */

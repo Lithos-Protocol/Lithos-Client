@@ -15,6 +15,7 @@ import org.scalatestplus.mockito.MockitoSugar
 import sigma.Colls
 import state.messages.TxOutput
 import support.{ChainFixtures, FakeNodeContext, ReducerFixtures, SyncFixtures}
+import work.lithos.mutations.{Contract, MainnetEip27Constants}
 
 import java.util.concurrent.TimeUnit
 import scala.util.{Success, Try}
@@ -129,6 +130,54 @@ class NodeMiningStatsSourceSpec extends AnyFlatSpec with Matchers with MockitoSu
     val tx = payout()
     val broken = tx.copy(inputs = tx.inputs.map(_.copy(spendingProof = None)))
     intercept[IllegalArgumentException](read(fixture(Seq(broken))._2)).getMessage should include("extension")
+  }
+
+  it should "record what the block paid this wallet for its collateral: the coinbase net of re-emission, and the fees" in {
+    val wallet = FakeNodeContext(mock[NodeApi], numAddresses = 2)._3
+    val lenders = NodeMiningStatsSource.lenders(wallet)
+    val key = wallet.addresses(1)
+    val lenderRegister = ErgoValue.of(key.getPublicKey).toHex
+    val rewardTree = lenders(Contract.fromAddress(key).ergoTreeHex).rewardTree
+    val feeTree = Contract.FEE.ergoTreeHex
+    def box(id: Int, tree: String, value: Long, height: Int = 100, tokens: Seq[NodeAsset] = Seq.empty,
+            registers: Map[String, String] = Map.empty) =
+      IndexedBox(NodeBox(SyncFixtures.id(id), SyncFixtures.id(id + 1), value, 0, height - 1, tree, tokens,
+        NodeRegisters(registers)), "", height, 1L)
+    val lent = collateral.copy(box = collateral.box.copy(additionalRegisters =
+      NodeRegisters(collateral.box.additionalRegisters.values + ("R5" -> lenderRegister))))
+    val lentGenesis = genesis.copy(inputs = Seq(lent))
+    // 15 ERG paid out, 12 of it owed to re-emission on any spend
+    val coinbase = transaction(SyncFixtures.id(901), 100, Seq(box(910, minerTree, 1L)), Seq(box(911, rewardTree,
+      15000000000L, tokens = Seq(NodeAsset(MainnetEip27Constants.TokenId, 12000000000L)))))
+    val user = transaction(SyncFixtures.id(902), 100, Seq(box(920, minerTree, 9000000L)),
+      Seq(box(921, minerTree, 7000000L), box(922, feeTree, 2000000L)))
+    val fees = transaction(SyncFixtures.id(903), 100, Seq(box(922, feeTree, 2000000L)), Seq(box(931, rewardTree, 2000000L)))
+    val queued = box(940, Contract.SIGMA_TRUE.ergoTreeHex, collateral.value, height = 60, registers = Map("R5" -> lenderRegister))
+    val activation = transaction(lent.box.transactionId, 80, Seq(queued), Seq(lent))
+
+    val (api, _) = fixture(Seq(lentGenesis, coinbase, user, fees), 100)
+    when(api.indexedTransactionById(lent.box.transactionId)).thenReturn(Success(Some(activation)))
+    val record = read(new NodeMiningStatsSource(api, protocol, minerTree, lenders), 100).lending.get
+    record.lenderAddress shouldBe key.toString
+    record.collateralBoxId shouldBe lent.boxId
+    record.postedNanoErg shouldBe collateral.value.toString
+    record.priorityFeeNanoErg shouldBe "0"
+    record.coinbaseNanoErg shouldBe "3000000000"
+    record.feesNanoErg shouldBe "2000000"
+    record.netNanoErg shouldBe BigInt(3000000000L + 2000000L - collateral.value)
+    record.joinedHeight shouldBe Some(60)
+
+    withClue("a box no queue box became, as at bootstrap: ") {
+      val (bootApi, _) = fixture(Seq(lentGenesis, coinbase, user, fees), 100)
+      val seeded = activation.copy(inputs = Seq(box(941, Contract.SIGMA_TRUE.ergoTreeHex, 1L, height = 60)))
+      when(bootApi.indexedTransactionById(lent.box.transactionId)).thenReturn(Success(Some(seeded)))
+      read(new NodeMiningStatsSource(bootApi, protocol, minerTree, lenders), 100).lending.get.joinedHeight shouldBe None
+    }
+
+    withClue("another lender's box: ") {
+      val (otherApi, _) = fixture(Seq(genesis, coinbase, user, fees), 100)
+      read(new NodeMiningStatsSource(otherApi, protocol, minerTree, lenders), 100).lending shouldBe None
+    }
   }
 
   it should "bound an unresponsive node request without invoking an Appkit context" in {

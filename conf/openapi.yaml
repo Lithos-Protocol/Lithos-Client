@@ -73,6 +73,18 @@ tags:
       **All amounts are decimal strings, not JSON numbers.** A 409 means a box you quoted against
       has moved: re-read, re-quote and resend.
     x-displayName: Lithos Dex
+  - name: forwards
+    description: >
+      Difficulty forwards: peer-to-peer bets on Ergo's mean difficulty over a window of 1 to 120
+      epochs of 128 blocks, margined in LIT. A maker posts an offer, a taker fills it, and once the
+      window is recorded anyone settles it. The long side is paid when the window's mean is above the
+      strike, the short side when it is below, up to each side's margin of a fifth of the notional.
+
+
+      Reads and every `check` are open; your positions and everything that signs need an `api_key`.
+      **All amounts and difficulties are decimal strings, not JSON numbers.** LIT amounts are base
+      units (9 decimals). A 409 means a box you named is already being spent: re-read and resend.
+    x-displayName: Difficulty Forwards
 x-tagGroups:
   - name: Lithos
     tags:
@@ -82,6 +94,7 @@ x-tagGroups:
       - stats
       - collateral-market
       - lithosdex
+      - forwards
       - wallet
   - name: Stratum
     tags:
@@ -793,6 +806,71 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/CollateralStats'
+  /stats/collateral/earnings:
+    get:
+      summary: This wallet's lending earnings
+      operationId: getLendingEarnings
+      tags: [stats]
+      security:
+        - ApiKeyAuth: []
+      description: |
+        Every collateral box of this wallet's that a Lithos block spent in retained history, newest
+        first, with what the lender posted and what came back.
+
+        A lender posts the box's whole value: the fixed principal plus any priority fee bid on top. The
+        block that spends it pays the lender twice, both locked to the lender's key for
+        `rewardLockBlocks` blocks: the **coinbase**, the block reward, and the block's **fees**, every
+        transaction fee in it. On mainnet the coinbase is reported less its re-emission tokens, which
+        a spend of it must pay. `netNanoErg` is what came back less what was posted. The network fee
+        each join paid is not in it, and neither is the LIT permit, which comes back in full.
+
+        `joinedHeight` is the block that included the queue box, so `height - joinedHeight` is how
+        long the principal waited before it was used, and the reward stays locked
+        `rewardLockBlocks` after that.
+
+        History is kept for `stats.mining.historyDays`; positions spent before `retainedFromHeight`
+        have been pruned and are in neither the list nor `totals`.
+      parameters:
+        - in: query
+          name: offset
+          required: false
+          description: Positions to skip, counting from the newest.
+          schema:
+            type: integer
+            format: int32
+            minimum: 0
+            default: 0
+        - in: query
+          name: limit
+          required: false
+          description: Positions per page.
+          schema:
+            type: integer
+            format: int32
+            minimum: 1
+            maximum: 500
+            default: 50
+      responses:
+        '200':
+          description: One page of spent positions, with totals over all of retained history.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LendingPage'
+        '400':
+          description: '`limit` is outside 1–500 or `offset` is negative.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '403':
+          description: Missing or wrong `api_key`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '503':
+          $ref: '#/components/responses/StatsHistoryUnavailable'
   /stats/local:
     get:
       summary: Local mining activity
@@ -2396,6 +2474,619 @@ paths:
               schema:
                 $ref: '#/components/schemas/ApiError'
 
+  /forwards/accumulator:
+    get:
+      summary: Difficulty accumulator and the next epoch's difficulty
+      description: >
+        The chain's current epoch and difficulty, the next epoch's difficulty computed from block
+        timestamps, the accumulator's recorded epochs and balance, and the limits an offer must meet
+        right now. Answers on every network; `deployed` is false where no accumulator exists, and then
+        nothing can be offered, filled or settled.
+      operationId: getDFAccumulator
+      tags:
+        - forwards
+      responses:
+        '200':
+          description: The accumulator and the chain around it
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DFAccumulatorInfo'
+        '503':
+          description: Node unavailable. Retry.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /forwards/offers:
+    get:
+      summary: List open offers
+      description: >
+        Offers a fill in a coming block could still take: holding the maker's whole side, unexpired,
+        and with a window that starts 2 to 120 epochs after the current one. Unconfirmed offers are
+        included and offers already being spent are not. Ordered by window start, then length, then
+        strike.
+      operationId: listDFOffers
+      tags:
+        - forwards
+      parameters:
+        - in: query
+          name: offset
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+        - in: query
+          name: limit
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 50
+      responses:
+        '200':
+          description: One page of open offers
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DFOfferBook'
+        '400':
+          description: '`offset` is negative or `limit` is outside 1 to 200.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '503':
+          description: Node or index unavailable. Never returns a partial list.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+    post:
+      summary: Create an offer
+      description: >
+        Lock this wallet's side of a forward, its margin plus 1.5 LIT of rewards, in an offer any taker
+        can fill. Cancel it with `POST /forwards/offers/{boxId}/cancel` while it is unfilled.
+      operationId: createDFOffer
+      security:
+        - ApiKeyAuth: []
+      tags:
+        - forwards
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DFOfferRequest'
+      responses:
+        '200':
+          description: Result of the transaction creating the offer
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DFOfferResult'
+        '400':
+          description: Malformed body, or terms no fill accepts.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '403':
+          description: Missing or wrong api_key
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '422':
+          description: >-
+            No fill could reach the window, the notional is over the short-window limit, no accumulator
+            is deployed, or the wallet cannot cover the LIT and ERG.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '503':
+          description: >-
+            Node, wallet or transaction engine unavailable, or the request ran out of time. The message says
+            whether anything was sent. When it says the outcome is unknown, check this wallet's offers and
+            positions before retrying.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /forwards/offers/check:
+    post:
+      summary: Quote an offer
+      description: >
+        What creating an offer would lock and when it would expire, without sending anything. The same
+        checks as `POST /forwards/offers`, and the conditions worth reading first as `warnings`.
+      operationId: checkDFOffer
+      tags:
+        - forwards
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DFOfferRequest'
+      responses:
+        '200':
+          description: Quote for the offer
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DFOfferQuote'
+        '400':
+          description: Malformed body, or terms no fill accepts.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '422':
+          description: No fill could reach the window, the notional is over the short-window limit, or no accumulator is deployed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '503':
+          description: Node unavailable. Retry.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /forwards/offers/{boxId}/fill/check:
+    post:
+      summary: Quote filling an offer
+      description: >
+        What filling an offer takes from this wallet and the side it would hold. `offer.fillable` says
+        whether a fill sent now would be accepted, and `offer.refusal` why not. No body.
+      operationId: checkDFFill
+      tags:
+        - forwards
+      parameters:
+        - $ref: '#/components/parameters/DFOfferBoxId'
+      responses:
+        '200':
+          description: Quote for the fill
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DFFillQuote'
+        '400':
+          description: '`boxId` is not a box id.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '404':
+          description: No unspent offer has that id.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '422':
+          description: No accumulator is deployed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '503':
+          description: Node unavailable. Retry.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /forwards/offers/{boxId}/fill:
+    post:
+      summary: Fill an offer
+      description: >
+        Take the other side of an offer: this wallet adds its margin plus 1.5 LIT and the position's ERG,
+        and a position holding both sides is created. Refused when the fill would not be accepted in
+        the next block. No body.
+      operationId: fillDFOffer
+      security:
+        - ApiKeyAuth: []
+      tags:
+        - forwards
+      parameters:
+        - $ref: '#/components/parameters/DFOfferBoxId'
+      responses:
+        '200':
+          description: Result of the fill transaction
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DFFillResult'
+        '400':
+          description: '`boxId` is not a box id.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '403':
+          description: Missing or wrong api_key
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '404':
+          description: No unspent offer has that id.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '409':
+          description: An unconfirmed transaction already spends the offer. Re-read `GET /forwards/offers`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '422':
+          description: >-
+            The offer is this wallet's own, short of the maker's side, expired, outside its window's lead
+            for the next block, over the short-window limit, or the wallet cannot cover the fill.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '503':
+          description: >-
+            Node, wallet or transaction engine unavailable, or the request ran out of time. The message says
+            whether anything was sent. When it says the outcome is unknown, check this wallet's offers and
+            positions before retrying.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /forwards/offers/{boxId}/cancel/check:
+    post:
+      summary: Quote cancelling an offer
+      description: What cancelling one of this wallet's offers returns. No body.
+      operationId: checkDFCancel
+      tags:
+        - forwards
+      parameters:
+        - $ref: '#/components/parameters/DFOfferBoxId'
+      responses:
+        '200':
+          description: Quote for the cancel
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DFCancelQuote'
+        '404':
+          description: No unspent offer made by this wallet has that id.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '503':
+          description: Node unavailable. Retry.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /forwards/offers/{boxId}/cancel:
+    post:
+      summary: Cancel an offer
+      description: >
+        Return one of this wallet's offers, its LIT and ERG, to its maker address. A fill sent before the
+        cancel can still confirm first, and the cancel is then dropped. No body.
+      operationId: cancelDFOffer
+      security:
+        - ApiKeyAuth: []
+      tags:
+        - forwards
+      parameters:
+        - $ref: '#/components/parameters/DFOfferBoxId'
+      responses:
+        '200':
+          description: Result of the cancel transaction
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DFCancelResult'
+        '403':
+          description: Missing or wrong api_key
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '404':
+          description: No unspent offer made by this wallet has that id.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '409':
+          description: An unconfirmed transaction already spends the offer.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '422':
+          description: Neither the offer nor the wallet can cover the network fee.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '503':
+          description: >-
+            Node, wallet or transaction engine unavailable, or the request ran out of time. The message says
+            whether anything was sent. When it says the outcome is unknown, check this wallet's offers and
+            positions before retrying.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /forwards/market:
+    get:
+      summary: The whole market
+      description: >
+        Both sides of the order book and every unsettled position, by status, with their total
+        notional. Counts are lower bounds when `truncated` is true.
+      operationId: getDFMarket
+      tags:
+        - forwards
+      responses:
+        '200':
+          description: The order book's sides and the open positions
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DFMarket'
+        '503':
+          description: Node or index unavailable. Retry.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /forwards/history:
+    get:
+      summary: Your settled positions and closed offers
+      description: >
+        Every position this wallet held a side of that has been settled or refunded, with what it
+        received and its net after margins and rewards, and every offer it made that was filled or
+        cancelled. Newest first, at most 200 of each. A settlement still unconfirmed appears once it
+        confirms.
+      operationId: getDFHistory
+      security:
+        - ApiKeyAuth: []
+      tags:
+        - forwards
+      responses:
+        '200':
+          description: This wallet's history
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DFHistory'
+        '403':
+          description: Missing or wrong api_key
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '503':
+          description: Node or index unavailable. Never returns a partial list.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /forwards/positions:
+    get:
+      summary: List your positions and offers
+      description: >
+        Every position this wallet holds a side of, by window end, with its status and a mark against the
+        strike; and every unspent offer it made, open or not, so expired ones can be cancelled.
+      operationId: listDFPositions
+      security:
+        - ApiKeyAuth: []
+      tags:
+        - forwards
+      responses:
+        '200':
+          description: This wallet's positions and offers
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DFPositionList'
+        '403':
+          description: Missing or wrong api_key
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '503':
+          description: Node or index unavailable. Never returns a partial list.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /forwards/positions/{boxId}/settle/check:
+    post:
+      summary: Quote settling a position
+      description: >
+        What settling a position now pays each side and the builder. Any position can be settled by
+        anyone once its window's last epoch is recorded. No body.
+      operationId: checkDFSettle
+      tags:
+        - forwards
+      parameters:
+        - $ref: '#/components/parameters/DFPositionBoxId'
+      responses:
+        '200':
+          description: Quote for the settlement
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DFSettleQuote'
+        '404':
+          description: No unspent position has that id.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '422':
+          description: The window's last epoch is not recorded yet, or no accumulator is deployed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '503':
+          description: Node unavailable, or the accumulator could not be read. Retry.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /forwards/positions/{boxId}/settle:
+    post:
+      summary: Settle a position
+      description: >
+        Pay both sides of a position whose window has been recorded, recording the current epoch in the
+        same transaction when it is due. The network fee comes out of the position; this wallet keeps the
+        rewards, 1 LIT, or 2 LIT when the settlement also records. No body.
+      operationId: settleDFPosition
+      security:
+        - ApiKeyAuth: []
+      tags:
+        - forwards
+      parameters:
+        - $ref: '#/components/parameters/DFPositionBoxId'
+      responses:
+        '200':
+          description: Result of the settlement
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DFSettleResult'
+        '403':
+          description: Missing or wrong api_key
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '404':
+          description: No unspent position has that id.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '409':
+          description: >-
+            An unconfirmed transaction already spends the position, or the accumulator's unconfirmed spends
+            are contested or record an epoch that is over. Retry after the next block.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '422':
+          description: The window's last epoch is not recorded yet, or no accumulator is deployed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '503':
+          description: >-
+            Node, wallet or transaction engine unavailable, or the request ran out of time. The message says
+            whether anything was sent. When it says the outcome is unknown, check this wallet's offers and
+            positions before retrying.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
   /wallet/balances:
     get:
       security:
@@ -2857,6 +3548,22 @@ components:
         type: string
         enum: [hour, day]
         default: hour
+    DFOfferBoxId:
+      name: boxId
+      in: path
+      required: true
+      description: Offer box id, as listed by `GET /forwards/offers` or `GET /forwards/positions`.
+      schema:
+        type: string
+        pattern: '^[0-9a-fA-F]{64}$'
+    DFPositionBoxId:
+      name: boxId
+      in: path
+      required: true
+      description: Position box id, as listed by `GET /forwards/positions`.
+      schema:
+        type: string
+        pattern: '^[0-9a-fA-F]{64}$'
   responses:
     StatsForbidden:
       description: The api_key header is missing or wrong.
@@ -3589,6 +4296,95 @@ components:
         minerHash:
           type: string
           description: Hash identifying the slashed entry. Not a miner address.
+    LendingPage:
+      type: object
+      required: [status, source, retainedFromHeight, offset, total, positions, totals, rewardLockBlocks]
+      properties:
+        status:
+          $ref: '#/components/schemas/MiningCollectionStatus'
+        source:
+          $ref: '#/components/schemas/MiningCursor'
+        retainedFromHeight:
+          type: integer
+          description: First retained height. Nothing spent before it is listed or totalled.
+        retainedFromTimestamp:
+          type: integer
+          format: int64
+          description: Timestamp of the first retained block, in milliseconds. Absent while nothing is retained.
+        offset:
+          type: integer
+          description: The offset this page starts at.
+        total:
+          type: integer
+          description: Every spent position in retained history. Pages end at `offset + limit >= total`.
+        positions:
+          type: array
+          maxItems: 500
+          description: Newest first.
+          items:
+            $ref: '#/components/schemas/LendingPosition'
+        totals:
+          $ref: '#/components/schemas/LendingTotals'
+        rewardLockBlocks:
+          type: integer
+          description: Blocks a coinbase or fee reward stays locked to the lender's key after its block.
+    LendingPosition:
+      type: object
+      required: [blockId, height, timestamp, collateralBoxId, lenderAddress, postedNanoErg, priorityFeeNanoErg,
+        coinbaseNanoErg, feesNanoErg, receivedNanoErg, netNanoErg]
+      properties:
+        blockId:
+          type: string
+          description: The Lithos block that spent the box.
+        height:
+          type: integer
+        timestamp:
+          type: integer
+          format: int64
+          description: The block's timestamp, in milliseconds.
+        collateralBoxId:
+          type: string
+        lenderAddress:
+          type: string
+          description: The wallet key the box named as its lender, which the block paid.
+        postedNanoErg:
+          type: string
+          description: The box's whole value, principal and priority fee together.
+        priorityFeeNanoErg:
+          type: string
+          description: The bid on top of the principal, which went to the miners.
+        coinbaseNanoErg:
+          type: string
+          description: The block reward paid to the lender, less its re-emission tokens on mainnet.
+        feesNanoErg:
+          type: string
+          description: The block's transaction fees, paid to the lender.
+        receivedNanoErg:
+          type: string
+          description: '`coinbaseNanoErg + feesNanoErg`.'
+        netNanoErg:
+          type: string
+          description: '`receivedNanoErg - postedNanoErg`, before the join''s network fee.'
+        joinedHeight:
+          type: integer
+          description: The block that included the queue box. Absent when the node's index does not show it.
+    LendingTotals:
+      type: object
+      required: [positions, postedNanoErg, priorityFeesNanoErg, coinbaseNanoErg, feesNanoErg, netNanoErg]
+      properties:
+        positions:
+          type: integer
+        postedNanoErg:
+          type: string
+        priorityFeesNanoErg:
+          type: string
+        coinbaseNanoErg:
+          type: string
+        feesNanoErg:
+          type: string
+        netNanoErg:
+          type: string
+          description: Received less posted, over every retained position.
     PaymentLedgerPage:
       type: object
       required: [status, source, retainedFromHeight, offset, total, sort, order, payments, claims, bounties, holdingBlocks, evaluationBlocks]
@@ -3691,6 +4487,8 @@ components:
           items:
             $ref: '#/components/schemas/DifficultyEpoch'
         current:
+          $ref: '#/components/schemas/DifficultyEpoch'
+        previous:
           $ref: '#/components/schemas/DifficultyEpoch'
         oldestIndex:
           type: integer
@@ -4368,7 +5166,7 @@ components:
       properties:
         name:
           type: string
-          enum: [rollups, emissions, rent, lithosdex, ergodex]
+          enum: [rollups, emissions, rent, forwards, lithosdex, ergodex]
         enabled:
           type: boolean
           description: The source's own `enabled` setting.
@@ -4376,7 +5174,7 @@ components:
           type: boolean
           description: >-
             Whether candidates ask this source for transactions: `blockTransactions` is on, the
-            source is enabled with `maxTxs` above 0 and, for `lithosdex` and `ergodex`, the
+            source is enabled with `maxTxs` above 0 and, for `forwards`, `lithosdex` and `ergodex`, the
             matching `batching` block is enabled.
         maxTxs:
           type: integer
@@ -4395,7 +5193,8 @@ components:
       x-tags: mining
       required: [blockTransactions, sources, blockShare, waitForBlockPackage, genesisWaitMs,
                  blockTxTimeout, mempoolRefreshMs, minCandidateChangeRevenue, refreshForProtocolTxs,
-                 minNewProtocolTxs, collateralStrategy, clearanceAge, pinnedInputs]
+                 minNewProtocolTxs, collateralStrategy, clearanceAge, pinnedInputs, defaultClearanceAge,
+                 maxClearanceAge]
       properties:
         blockTransactions:
           type: boolean
@@ -4457,6 +5256,16 @@ components:
           description: >-
             Wallet boxes set aside to fund transactions that need a wallet input inside this
             client's own block.
+        defaultClearanceAge:
+          type: integer
+          description: The shipped `clearanceAge`, which most clients run.
+          example: 7200
+        maxClearanceAge:
+          type: integer
+          description: >-
+            The largest `clearanceAge` any client accepts. A collateral box this old is drawn first by
+            every client using `highestFee`.
+          example: 14400
     StratumInfo:
       description: Information about the Stratum server
       type: object
@@ -4905,6 +5714,14 @@ components:
           format: int32
           description: Height this box was activated at
           example: 484650
+        inclusionHeight:
+          type: integer
+          format: int32
+          description: >-
+            The block that confirmed this box. Absent while unconfirmed. Miners using `highestFee` draw a
+            box ahead of every bid once this many blocks old: `clearanceAge`, 7,200 by default and at
+            most 14,400 (see `GET /mining/candidate`).
+          example: 484652
 
     CollateralPermitHistoryPoint:
       description: What one waiting position paid to join
@@ -7335,6 +8152,680 @@ components:
           type: string
           description: Serialized (hex-encoded) bytes of this NISP
           example: '00f6318aa84791d0...a0bdc8045a70f931'
+    DFEpochDifficulty:
+      type: object
+      x-tags: forwards
+      required: [epoch, difficulty]
+      properties:
+        epoch:
+          type: integer
+          format: int32
+        difficulty:
+          type: string
+          example: '64267743133696'
+    DFNextDifficulty:
+      type: object
+      x-tags: forwards
+      description: The next epoch's difficulty, computed with Ergo's retarget rule from the last 9 epochs' final block timestamps.
+      required: [epoch, difficulty, exact, fromHeight, change]
+      properties:
+        epoch:
+          type: integer
+          format: int32
+          description: The epoch it applies to, the one after the current epoch.
+        difficulty:
+          type: string
+          example: '63980371640320'
+        exact:
+          type: boolean
+          description: >-
+            True once the current epoch has ended, so this is the value the next blocks carry. Otherwise
+            the current epoch's end is projected at its pace so far, which is close only late in the epoch.
+        fromHeight:
+          type: integer
+          format: int32
+          description: The newest block it was computed from.
+        change:
+          type: number
+          format: double
+          description: Move from the current difficulty, as a fraction.
+          example: -0.0045
+    DFOfferLimits:
+      type: object
+      x-tags: forwards
+      description: What an offer must satisfy to be created or filled by this client now.
+      required: [minWindowStart, maxWindowStart, maxWindowLength, defaultExpiry, shortWindowEpochs, shortWindowMaxNotional]
+      properties:
+        minWindowStart:
+          type: integer
+          format: int32
+          description: Earliest window start a fill in the next block accepts, 2 epochs after the current one.
+        maxWindowStart:
+          type: integer
+          format: int32
+          description: Latest, 120 epochs after the current one.
+        maxWindowLength:
+          type: integer
+          format: int32
+          example: 120
+        defaultExpiry:
+          type: integer
+          format: int32
+          description: The expiry an offer takes when none is given, the last block of the current epoch.
+        shortWindowEpochs:
+          type: integer
+          format: int32
+          description: Windows shorter than this are size-limited (`forwards.offers.shortWindowEpochs`).
+          example: 8
+        shortWindowMaxNotional:
+          type: string
+          description: Largest notional for such a window, in LIT base units (`forwards.offers.shortWindowMaxNotionalLit`).
+          example: '1000000000000'
+    DFAccumulatorInfo:
+      type: object
+      x-tags: forwards
+      required: [deployed, height, currentEpoch, blocksLeftInEpoch, currentDifficulty, recent, limits]
+      properties:
+        deployed:
+          type: boolean
+          description: Whether this network has an accumulator. Without one, nothing can be offered, filled or settled.
+        height:
+          type: integer
+          format: int32
+          description: The newest block.
+        currentEpoch:
+          type: integer
+          format: int32
+          description: The newest block's epoch, `(height - 1) / 128`.
+        blocksLeftInEpoch:
+          type: integer
+          format: int32
+          description: Blocks after the newest one before the epoch ends.
+        currentDifficulty:
+          type: string
+          description: The newest block's difficulty, which the whole epoch keeps.
+          example: '64267743133696'
+        nextDifficulty:
+          $ref: '#/components/schemas/DFNextDifficulty'
+        nextDifficultyUnavailable:
+          type: string
+          description: Why `nextDifficulty` is absent, such as the difficulty table still loading.
+        accumulatorNFT:
+          type: string
+        boxId:
+          type: string
+          description: The accumulator box, its newest one including unconfirmed spends.
+        lastEpoch:
+          type: integer
+          format: int32
+          description: The newest epoch the accumulator has recorded.
+        balance:
+          type: string
+          description: LIT base units left to pay 1 LIT for each recorded epoch.
+        recent:
+          type: array
+          description: The 128 epochs the accumulator holds, oldest first. Empty without an accumulator.
+          items:
+            $ref: '#/components/schemas/DFEpochDifficulty'
+        accumulatorUnavailable:
+          type: string
+          description: Why the accumulator could not be read, when one is deployed.
+        limits:
+          $ref: '#/components/schemas/DFOfferLimits'
+    DFOfferView:
+      type: object
+      x-tags: forwards
+      required: [boxId, maker, makerSide, strike, notional, margin, windowStart, windowLength, windowEnd, expiry,
+                 lastFillHeight, lit, nanoErgs, takerLit, takerNanoErgs, mine, fillable]
+      properties:
+        boxId:
+          type: string
+        maker:
+          type: string
+          description: Address the maker is paid to.
+        makerSide:
+          type: string
+          enum: [long, short]
+          description: '`long` is paid when the window''s mean difficulty is above the strike, `short` when below.'
+        strike:
+          type: string
+          description: Difficulty the window's mean is measured against.
+        notional:
+          type: string
+          description: LIT base units.
+        margin:
+          type: string
+          description: Each side's margin, a fifth of the notional, and the most either side can lose of it.
+        windowStart:
+          type: integer
+          format: int32
+        windowLength:
+          type: integer
+          format: int32
+        windowEnd:
+          type: integer
+          format: int32
+          description: The window's last epoch.
+        expiry:
+          type: integer
+          format: int32
+          description: The last height a fill can be mined at.
+        lastFillHeight:
+          type: integer
+          format: int32
+          description: >-
+            The last height a fill can actually be mined at: the expiry, or earlier when the window would
+            start less than 2 epochs after the fill.
+        lit:
+          type: string
+          description: LIT base units the offer holds.
+        nanoErgs:
+          type: string
+        takerLit:
+          type: string
+          description: LIT base units a fill takes from the taker.
+        takerNanoErgs:
+          type: string
+          description: nanoERG a fill takes from the taker, network fee included.
+        impliedMove:
+          type: number
+          format: double
+          description: The strike against the current difficulty, as a fraction.
+        impliedMoveNext:
+          type: number
+          format: double
+          description: The strike against `nextDifficulty`, when known.
+        mine:
+          type: boolean
+          description: Whether this wallet made the offer.
+        fillable:
+          type: boolean
+          description: Whether this wallet's fill sent now would be accepted.
+        refusal:
+          type: string
+          description: Why not, when `fillable` is false.
+    DFOfferBook:
+      type: object
+      x-tags: forwards
+      required: [height, currentEpoch, offers, total, truncated]
+      properties:
+        height:
+          type: integer
+          format: int32
+        currentEpoch:
+          type: integer
+          format: int32
+        offers:
+          type: array
+          items:
+            $ref: '#/components/schemas/DFOfferView'
+        total:
+          type: integer
+          description: Open offers in all, before `offset` and `limit`.
+        truncated:
+          type: boolean
+          description: Whether the scan stopped at 2,000 boxes, so older offers may be missing.
+    DFOfferRequest:
+      type: object
+      x-tags: forwards
+      required: [makerSide, strike, notional, windowStart, windowLength]
+      properties:
+        makerSide:
+          type: string
+          enum: [long, short]
+          description: The side this wallet takes.
+        strike:
+          type: string
+          description: Difficulty the window's mean is measured against.
+          example: '64000000000000'
+        notional:
+          type: string
+          description: LIT base units. Each side's margin is a fifth of it.
+          example: '10000000000000'
+        windowStart:
+          type: integer
+          format: int32
+          description: First epoch of the window, 2 to 120 epochs after the current one.
+        windowLength:
+          type: integer
+          format: int32
+          minimum: 1
+          maximum: 120
+        expiry:
+          type: integer
+          format: int32
+          description: Last height a fill can be mined at. Defaults to the last block of the current epoch.
+    DFOfferQuote:
+      type: object
+      x-tags: forwards
+      required: [makerSide, strike, notional, margin, windowStart, windowLength, windowEnd, expiry, expiresInBlocks,
+                 lastFillHeight, lit, nanoErgs, networkFee, maxLoss, warnings]
+      properties:
+        makerSide:
+          type: string
+          enum: [long, short]
+        strike:
+          type: string
+        notional:
+          type: string
+        margin:
+          type: string
+        windowStart:
+          type: integer
+          format: int32
+        windowLength:
+          type: integer
+          format: int32
+        windowEnd:
+          type: integer
+          format: int32
+        expiry:
+          type: integer
+          format: int32
+        expiresInBlocks:
+          type: integer
+          format: int32
+          description: Blocks after the next one until the offer expires.
+        lastFillHeight:
+          type: integer
+          format: int32
+        lit:
+          type: string
+          description: LIT base units locked in the offer, the margin plus 1.5 LIT of rewards.
+        nanoErgs:
+          type: string
+          description: nanoERG locked in the offer.
+        networkFee:
+          type: string
+        maxLoss:
+          type: string
+          description: The most this wallet can lose once the offer is filled, its margin plus 1.5 LIT.
+        impliedMove:
+          type: number
+          format: double
+        impliedMoveNext:
+          type: number
+          format: double
+        warnings:
+          type: array
+          items:
+            type: string
+    DFOfferResult:
+      type: object
+      x-tags: forwards
+      required: [txId, outcome, offerBoxId]
+      properties:
+        txId:
+          type: string
+        outcome:
+          type: string
+          enum: [accepted, rejected, uncertain]
+        offerBoxId:
+          type: string
+    DFFillQuote:
+      type: object
+      x-tags: forwards
+      required: [offer, takerSide, takerLit, takerNanoErgs, networkFee, maxLoss, warnings]
+      properties:
+        offer:
+          $ref: '#/components/schemas/DFOfferView'
+        takerSide:
+          type: string
+          enum: [long, short]
+          description: The side this wallet takes, opposite the maker's.
+        takerLit:
+          type: string
+        takerNanoErgs:
+          type: string
+          description: Network fee included.
+        networkFee:
+          type: string
+        maxLoss:
+          type: string
+          description: The most this wallet can lose, its margin plus 1.5 LIT.
+        warnings:
+          type: array
+          items:
+            type: string
+    DFFillResult:
+      type: object
+      x-tags: forwards
+      required: [txId, outcome, positionBoxId]
+      properties:
+        txId:
+          type: string
+        outcome:
+          type: string
+          enum: [accepted, rejected, uncertain]
+        positionBoxId:
+          type: string
+    DFCancelQuote:
+      type: object
+      x-tags: forwards
+      required: [boxId, returnedLit, returnedNanoErgs, networkFee, feeFromOffer]
+      properties:
+        boxId:
+          type: string
+        returnedLit:
+          type: string
+        returnedNanoErgs:
+          type: string
+        networkFee:
+          type: string
+        feeFromOffer:
+          type: boolean
+          description: Whether the fee comes out of the offer's own ERG rather than the wallet.
+    DFCancelResult:
+      type: object
+      x-tags: forwards
+      required: [txId, outcome, returnedLit, returnedNanoErgs, networkFee]
+      properties:
+        txId:
+          type: string
+        outcome:
+          type: string
+          enum: [accepted, rejected, uncertain]
+        returnedLit:
+          type: string
+        returnedNanoErgs:
+          type: string
+        networkFee:
+          type: string
+    DFPositionView:
+      type: object
+      x-tags: forwards
+      required: [boxId, side, long, short, strike, notional, margin, windowStart, windowLength, windowEnd, status,
+                 epochsKnown]
+      properties:
+        boxId:
+          type: string
+        side:
+          type: string
+          enum: [long, short, both]
+          description: This wallet's side; `both` when it holds both keys.
+        long:
+          type: string
+          description: Address the long side is paid to.
+        short:
+          type: string
+        strike:
+          type: string
+        notional:
+          type: string
+        margin:
+          type: string
+        windowStart:
+          type: integer
+          format: int32
+        windowLength:
+          type: integer
+          format: int32
+        windowEnd:
+          type: integer
+          format: int32
+        status:
+          type: string
+          enum: [waiting, in_window, settleable, refundable]
+          description: >-
+            `waiting` before the window starts, `in_window` until its last epoch is recorded,
+            `settleable` once it is, and `refundable` once its first epoch has left the accumulator,
+            when each side gets its margin back.
+        epochsKnown:
+          type: integer
+          format: int32
+          description: Window epochs whose difficulty is known, recorded or current.
+        markDifficulty:
+          type: string
+          description: The window's mean with every unknown epoch at the newest difficulty known. Absent when refundable.
+        markMove:
+          type: number
+          format: double
+          description: '`markDifficulty` against the strike, as a fraction.'
+        markPayout:
+          type: string
+          description: >-
+            LIT base units the long side would receive on top of its margin at the mark, negative when
+            the short side is paid; at most the margin either way. Exact once settleable.
+        pnl:
+          type: string
+          description: '`markPayout` from this wallet''s side; zero when it holds both.'
+        owedLong:
+          type: string
+          description: LIT base units a settlement now pays the long side, margin included. Present once settleable or refundable.
+        owedShort:
+          type: string
+    DFPositionList:
+      type: object
+      x-tags: forwards
+      required: [height, currentEpoch, positions, offers, truncated]
+      properties:
+        height:
+          type: integer
+          format: int32
+        currentEpoch:
+          type: integer
+          format: int32
+        positions:
+          type: array
+          items:
+            $ref: '#/components/schemas/DFPositionView'
+        offers:
+          type: array
+          description: Every unspent offer this wallet made, open, expired or unfillable.
+          items:
+            $ref: '#/components/schemas/DFOfferView'
+        truncated:
+          type: boolean
+          description: Whether a scan stopped at 2,000 boxes, so older boxes may be missing.
+    DFSettleQuote:
+      type: object
+      x-tags: forwards
+      required: [boxId, refund, records, owedLong, owedShort, rewardLit, networkFee]
+      properties:
+        boxId:
+          type: string
+        refund:
+          type: boolean
+          description: Whether the window has left the accumulator, so each side gets its margin back.
+        records:
+          type: boolean
+          description: Whether the settlement also records the current epoch, which adds 1 LIT to the reward.
+        owedLong:
+          type: string
+        owedShort:
+          type: string
+        rewardLit:
+          type: string
+          description: LIT base units this wallet receives for building the settlement.
+        networkFee:
+          type: string
+    DFBookSide:
+      type: object
+      x-tags: forwards
+      required: [offers, notional]
+      properties:
+        offers:
+          type: integer
+        notional:
+          type: string
+          description: LIT base units across those offers.
+    DFMarket:
+      type: object
+      x-tags: forwards
+      required: [height, currentEpoch, longs, shorts, positions, openInterest, waiting, inWindow, settleable,
+                 refundable, truncated]
+      properties:
+        height:
+          type: integer
+          format: int32
+        currentEpoch:
+          type: integer
+          format: int32
+        longs:
+          description: Open offers whose maker is long, so a taker goes short.
+          allOf:
+            - $ref: '#/components/schemas/DFBookSide'
+        shorts:
+          description: Open offers whose maker is short, so a taker goes long.
+          allOf:
+            - $ref: '#/components/schemas/DFBookSide'
+        positions:
+          type: integer
+          description: Unsettled positions.
+        openInterest:
+          type: string
+          description: Notional of every unsettled position, in LIT base units.
+        waiting:
+          type: integer
+        inWindow:
+          type: integer
+        settleable:
+          type: integer
+        refundable:
+          type: integer
+        epochsFunded:
+          type: integer
+          format: int64
+          description: Epochs the accumulator's balance pays a recording for, at 1 LIT each.
+        truncated:
+          type: boolean
+          description: Whether a scan stopped at 2,000 boxes, so the counts are lower bounds.
+    DFSettledView:
+      type: object
+      x-tags: forwards
+      required: [boxId, side, strike, notional, margin, windowStart, windowLength, windowEnd, txId, settledHeight,
+                 settledAt, refund, payout, received, net]
+      properties:
+        boxId:
+          type: string
+        side:
+          type: string
+          enum: [long, short, both]
+        strike:
+          type: string
+        notional:
+          type: string
+        margin:
+          type: string
+        windowStart:
+          type: integer
+          format: int32
+        windowLength:
+          type: integer
+          format: int32
+        windowEnd:
+          type: integer
+          format: int32
+        txId:
+          type: string
+          description: The settlement transaction.
+        settledHeight:
+          type: integer
+          format: int32
+        settledAt:
+          type: integer
+          format: int64
+          description: Unix milliseconds of the block that confirmed the settlement.
+        refund:
+          type: boolean
+          description: Whether each side got its margin back because the window had left the accumulator.
+        windowMean:
+          type: string
+          description: The window's mean difficulty as the settlement read it. Absent for a refund.
+        payout:
+          type: string
+          description: LIT base units the long side received on top of its margin, negative when the short side was paid.
+        received:
+          type: string
+          description: LIT base units this wallet's side or sides received, margins included.
+        net:
+          type: string
+          description: '`received` less what this wallet put in: each side''s margin and its 1.5 LIT of rewards.'
+    DFPastOffer:
+      type: object
+      x-tags: forwards
+      required: [boxId, makerSide, strike, notional, windowStart, windowLength, expiry, outcome, txId, height,
+                 timestamp]
+      properties:
+        boxId:
+          type: string
+        makerSide:
+          type: string
+          enum: [long, short]
+        strike:
+          type: string
+        notional:
+          type: string
+        windowStart:
+          type: integer
+          format: int32
+        windowLength:
+          type: integer
+          format: int32
+        expiry:
+          type: integer
+          format: int32
+        outcome:
+          type: string
+          enum: [filled, cancelled]
+        txId:
+          type: string
+          description: The transaction that filled or cancelled it.
+        height:
+          type: integer
+          format: int32
+        timestamp:
+          type: integer
+          format: int64
+        positionBoxId:
+          type: string
+          description: The position a fill created.
+    DFHistory:
+      type: object
+      x-tags: forwards
+      required: [height, settled, offers, realizedNet, wins, losses, truncated]
+      properties:
+        height:
+          type: integer
+          format: int32
+        settled:
+          type: array
+          items:
+            $ref: '#/components/schemas/DFSettledView'
+        offers:
+          type: array
+          items:
+            $ref: '#/components/schemas/DFPastOffer'
+        realizedNet:
+          type: string
+          description: The sum of every settled position's `net`, in LIT base units.
+        wins:
+          type: integer
+          description: Settled positions with a positive `net`.
+        losses:
+          type: integer
+          description: Settled positions with a negative `net`.
+        truncated:
+          type: boolean
+          description: Whether a scan stopped at its cap, so older history may be missing.
+    DFSettleResult:
+      type: object
+      x-tags: forwards
+      required: [txId, outcome, refund, owedLong, owedShort, rewardLit]
+      properties:
+        txId:
+          type: string
+        outcome:
+          type: string
+          enum: [accepted, rejected, uncertain]
+        refund:
+          type: boolean
+        owedLong:
+          type: string
+        owedShort:
+          type: string
+        rewardLit:
+          type: string
   securitySchemes:
     ApiKeyAuth:
       description: >

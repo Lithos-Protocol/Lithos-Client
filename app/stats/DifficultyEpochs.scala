@@ -44,14 +44,16 @@ object DifficultySample {
 }
 
 /**
- * A page of the epoch table. `current` is the epoch in progress, which is recomputed every cycle
- * rather than stored, so it is the only entry that can still change.
+ * A page of the epoch table. `current` is the epoch in progress and `previous` the complete epoch
+ * before it, which is still inside the reorg margin. Both are recomputed every cycle rather than
+ * stored, so they are the only entries that can still change.
  */
 final case class DifficultyEpochHistory(source: MiningCursor, epochLength: Int,
                                         epochs: Vector[DifficultyEpoch],
                                         current: Option[DifficultyEpoch],
                                         oldestIndex: Option[Int], newestIndex: Option[Int],
-                                        backfillComplete: Boolean, status: String = "unverified")
+                                        backfillComplete: Boolean, status: String = "unverified",
+                                        previous: Option[DifficultyEpoch] = None)
 
 object DifficultyEpochHistory {
   import MiningStatsData.cursorFormat

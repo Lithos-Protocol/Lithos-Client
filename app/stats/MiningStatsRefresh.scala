@@ -39,6 +39,8 @@ class MiningStatsRefresh(settings: MiningStatsConfig, persistent: Boolean, start
   private val inventory = new AtomicReference(CollateralStats(status = if (settings.enabled) "loading" else "disabled"))
   /** The epoch in progress and whether the table has reached its floor; both recomputed per cycle. */
   private val epochs = new AtomicReference((Option.empty[DifficultyEpoch], false))
+  /** The complete epoch before the one in progress, recomputed per cycle until it is old enough to store. */
+  private val previousEpoch = new AtomicReference(Option.empty[DifficultyEpoch])
   private val published = new AtomicReference(MiningStatsView(
     status = if (settings.enabled) "loading" else "disabled", persistent = persistent))
   @volatile private var nextRunNanos = System.nanoTime()
@@ -75,6 +77,8 @@ class MiningStatsRefresh(settings: MiningStatsConfig, persistent: Boolean, start
   }
   def payments(offset: Int, limit: Int, sort: String = "paid", ascending: Boolean = false): Future[PaymentLedgerPage] =
     query { db => db.ledger(offset, limit, sort, ascending).copy(status = view.status) }
+  def lending(offset: Int, limit: Int): Future[LendingPage] =
+    query { db => db.lending(offset, limit).copy(status = view.status) }
 
   /**
    * A page of the epoch table, newest-anchored by default so a graph gets the recent curve without
@@ -93,7 +97,8 @@ class MiningStatsRefresh(settings: MiningStatsConfig, persistent: Boolean, start
       case None => Vector.empty
     }
     DifficultyEpochHistory(db.state.get.cursor, DifficultyEpochs.EpochLength, rows, current,
-      bounds.map(_._1), bounds.map(_._2), backfilled, view.status)
+      bounds.map(_._1), bounds.map(_._2), backfilled, view.status,
+      previousEpoch.get().filter(p => current.exists(_.index == p.index + 1)))
   }
 
   /** A queued read: `answer` runs it on the worker, `fail` settles it when the worker cannot. */
@@ -325,6 +330,9 @@ class MiningStatsRefresh(settings: MiningStatsConfig, persistent: Boolean, start
     val index = DifficultyEpochs.indexOf(math.max(1, tip))
     val live = DifficultyEpoch.of(index, source.sample(DifficultyEpochs.startHeight(index)),
       source.sample(math.max(DifficultyEpochs.startHeight(index), tip)), complete = false)
+    // The table stops a reorg margin behind the tip, so the epoch before this one is never stored yet
+    val previous = if (index < 1) None else Some(read(index - 1))
+    previousEpoch.set(previous)
     epochs.updateAndGet(state => (Some(live), state._2))
   }
 }

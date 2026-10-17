@@ -19,7 +19,8 @@ final case class StatsStorageConfig(enabled: Boolean = true,
                                     backend: String = "leveldb", path: String = ".lithos/stats",
                                     flushIntervalMs: Int = 5000, sampleIntervalMinutes: Int = 5,
                                     pruningEnabled: Boolean = true, retentionDays: Int = 30,
-                                    pruneIntervalMs: Int = 60000, pruneBatchSize: Int = 256)
+                                    pruneIntervalMs: Int = 60000, pruneBatchSize: Int = 256,
+                                    pruneOldSchemas: Boolean = true)
 
 object StatsStorageConfig {
   def apply(config: Configuration): StatsStorageConfig = {
@@ -33,12 +34,14 @@ object StatsStorageConfig {
       pruningEnabled = config.getOptional[Boolean]("stats.storage.pruning.enabled").getOrElse(defaults.pruningEnabled),
       retentionDays = config.getOptional[Int]("stats.storage.pruning.retentionDays").getOrElse(defaults.retentionDays),
       pruneIntervalMs = config.getOptional[Int]("stats.storage.pruning.intervalMs").getOrElse(defaults.pruneIntervalMs),
-      pruneBatchSize = config.getOptional[Int]("stats.storage.pruning.batchSize").getOrElse(defaults.pruneBatchSize))
+      pruneBatchSize = config.getOptional[Int]("stats.storage.pruning.batchSize").getOrElse(defaults.pruneBatchSize),
+      pruneOldSchemas = config.getOptional[Boolean]("stats.storage.pruneOldSchemas").getOrElse(defaults.pruneOldSchemas))
   }
 
   def validate(validator: ConfigValidator): Unit = {
     validator.bool("stats.storage.enabled")
     validator.bool("stats.storage.pruning.enabled")
+    validator.bool("stats.storage.pruneOldSchemas")
     validator.string("stats.storage.backend").foreach { backend =>
       storage.KeyValueStore.factoryFor(backend).left.foreach(error =>
         validator.problem("stats.storage.backend", error.message))

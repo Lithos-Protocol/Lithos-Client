@@ -279,7 +279,8 @@ class CollateralExecution(nodeContext: NodeContext,
           valueNanoErgs = b.value.toString,
           carriedLit = litOnBox(b).toString,
           creationHeight = b.box.creationHeight,
-          priorityFeeNanoErgs = priorityFeeOf(b).toString
+          priorityFeeNanoErgs = priorityFeeOf(b).toString,
+          inclusionHeight = Some(b.inclusionHeight).filter(_ > 0)
         )))
     }
 

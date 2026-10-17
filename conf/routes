@@ -40,7 +40,7 @@ GET /mining/commitment        controllers.MiningApiController.getCommitment()
 + nocsrf
 POST /mining/commitment       controllers.MiningApiController.commit()
 
-# Routes for Statistics API (only /stats/local requires api_key)
+# Routes for Statistics API (only /stats/local and /stats/collateral/earnings require api_key)
 GET /stats                    controllers.StatsApiController.getStats()
 GET /stats/mining/totals       controllers.StatsApiController.getMiningTotals()
 GET /stats/mining/buckets      controllers.StatsApiController.getMiningBuckets()
@@ -50,6 +50,7 @@ GET /stats/mining/workers      controllers.StatsApiController.getLocalMiningSumm
 GET /stats/mining/workers/history controllers.StatsApiController.getLocalMiningHistory()
 GET /stats/mining/payments     controllers.StatsApiController.getMiningPayments(offset: Option[Int], limit: Option[Int], sort: Option[String], order: Option[String])
 GET /stats/collateral          controllers.StatsApiController.getCollateralStats()
+GET /stats/collateral/earnings controllers.StatsApiController.getLendingEarnings(offset: Option[Int], limit: Option[Int])
 GET /stats/local               controllers.StatsApiController.getLocalMiningStats()
 
 # Routes for LithosDex API
@@ -103,6 +104,29 @@ POST /dex/provisions/:boxId/resize              controllers.LithosDexApiControll
 POST /dex/flush/check                           controllers.LithosDexApiController.checkFlush()
 + nocsrf
 POST /dex/flush                                 controllers.LithosDexApiController.flush()
+
+# Routes for Difficulty Forwards API (positions and everything that signs require api_key)
+GET  /forwards/accumulator                      controllers.ForwardsApiController.getAccumulator()
+GET  /forwards/offers                           controllers.ForwardsApiController.listOffers(offset: Option[Int], limit: Option[Int])
+GET  /forwards/market                           controllers.ForwardsApiController.getMarket()
+GET  /forwards/positions                        controllers.ForwardsApiController.listPositions()
+GET  /forwards/history                          controllers.ForwardsApiController.getHistory()
++ nocsrf
+POST /forwards/offers/check                     controllers.ForwardsApiController.checkOffer()
++ nocsrf
+POST /forwards/offers                           controllers.ForwardsApiController.createOffer()
++ nocsrf
+POST /forwards/offers/:boxId/fill/check         controllers.ForwardsApiController.checkFill(boxId: String)
++ nocsrf
+POST /forwards/offers/:boxId/fill               controllers.ForwardsApiController.fill(boxId: String)
++ nocsrf
+POST /forwards/offers/:boxId/cancel/check       controllers.ForwardsApiController.checkCancel(boxId: String)
++ nocsrf
+POST /forwards/offers/:boxId/cancel             controllers.ForwardsApiController.cancel(boxId: String)
++ nocsrf
+POST /forwards/positions/:boxId/settle/check    controllers.ForwardsApiController.checkSettle(boxId: String)
++ nocsrf
+POST /forwards/positions/:boxId/settle          controllers.ForwardsApiController.settle(boxId: String)
 
 # Routes for Wallet API
 GET  /wallet/balances                           controllers.WalletApiController.getWalletBalances()

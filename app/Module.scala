@@ -72,6 +72,7 @@ class Module(environment: Environment, configuration: Configuration) extends Abs
     bind(classOf[MiningApi]).to(classOf[MiningApiImpl])
     bind(classOf[PaymentsApi]).to(classOf[PaymentsApiImpl])
     bind(classOf[LithosDexApi]).to(classOf[LithosDexApiImpl])
+    bind(classOf[ForwardsApi]).to(classOf[ForwardsApiImpl])
     bind(classOf[WalletApi]).to(classOf[WalletApiImpl])
     bind[StartupTasks](classOf[StartupTasks]).asEagerSingleton()
     //bind[StartStratumServer](classOf[StartStratumServer]).asEagerSingleton()
