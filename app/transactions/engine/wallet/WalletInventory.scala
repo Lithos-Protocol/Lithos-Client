@@ -2,6 +2,7 @@ package transactions.engine.wallet
 
 import configs.NodeContext
 import mutations.NodeWallet.MINER_REWARD_DELAY
+import mutations.NotEnoughInputsException
 import node.MutationConversions._
 import node.model._
 import org.ergoplatform.appkit.BlockchainContext
@@ -30,11 +31,13 @@ private[engine] object WalletInventory {
   final val MaxWalkNanos = 240L * 1000000000L
 
   /**
-   * @param complete   the walk reached the end of every page
+   * Every page was read: a walk that stops part way throws instead of returning a snapshot.
+   *
    * @param truncated  boxes were counted in the totals but dropped from `boxes` at a cache ceiling
+   * @param seen       the watched ids the walk reported unspent, exact even when `boxes` is truncated
    * @param spendable  unreserved plain wallet value, excluding rewards and EIP-27 obligations
    */
-  case class Snapshot(boxes: Vector[WalletDescriptor], complete: Boolean, truncated: Boolean,
+  case class Snapshot(boxes: Vector[WalletDescriptor], truncated: Boolean, seen: Set[String],
                       height: Int, spendable: BigInt, locked: BigInt, unlocked: BigInt,
                       lockedCount: Int, unlockedCount: Int, nextUnlock: Option[Int])
 
@@ -130,16 +133,19 @@ private[engine] class WalletInventory(node: NodeContext, api: _root_.node.NodeAp
 
   /**
    * Count and total the whole wallet while retaining only as many descriptors as the cache ceilings
-   * allow. Totals stay accurate past that point; `truncated` says the descriptor list does not.
+   * allow. Totals and `seen` stay accurate past that point; `truncated` says the descriptor list does
+   * not. `watched` is the ids whose presence the caller must know however large the wallet is.
    */
-  def snapshot(height: Int, excluded: Set[String]): Snapshot = {
+  def snapshot(height: Int, excluded: Set[String], watched: Set[String] = Set.empty): Snapshot = {
     var boxes = Vector.empty[WalletDescriptor]
     var retainedBytes = 0L
     var truncated = false
+    var seen = Set.empty[String]
     var spendable, locked, unlocked = BigInt(0)
     var lockedCount, unlockedCount = 0
     var nextUnlock = Option.empty[Int]
     walk(rewardsOnly = false, p2pkOnly = false, includeRewards = true) { (box, reward) =>
+      if (watched.contains(box.boxId)) seen += box.boxId
       val entry = descriptor(box, reward)
       if (boxes.size < MaxDescriptors && retainedBytes + entry.retainedBytes <= MaxDescriptorBytes) {
         boxes :+= entry
@@ -158,7 +164,7 @@ private[engine] class WalletInventory(node: NodeContext, api: _root_.node.NodeAp
       }
       false
     }
-    Snapshot(boxes, complete = true, truncated, height, spendable, locked, unlocked,
+    Snapshot(boxes, truncated, seen, height, spendable, locked, unlocked,
       lockedCount, unlockedCount, nextUnlock)
   }
 
@@ -166,6 +172,10 @@ private[engine] class WalletInventory(node: NodeContext, api: _root_.node.NodeAp
    * Find inputs covering `erg` and `required`, stopping at the first sufficient set rather than
    * materialising the address's whole box population. `known` holds locally built change whose
    * parent the node may not report yet, so it is offered before any page is fetched.
+   *
+   * A `single` request takes the smallest covering box, tokenless first, so a small requirement
+   * never holds a large box. It reads on past the first match unless one is within twice the request.
+   * Throws `NotEnoughInputsException` when the wallet cannot cover the request.
    */
   def select(ctx: BlockchainContext, erg: Long, required: Seq[Token], excluded: Set[String],
              single: Boolean, p2pkOnly: Boolean, rewardsOnly: Boolean,
@@ -178,6 +188,7 @@ private[engine] class WalletInventory(node: NodeContext, api: _root_.node.NodeAp
       .map { case (id, tokens) => id -> tokens.map(token => BigInt(token.amount)).sum }
     var selected = Vector.empty[NodeBox]
     var covered = false
+    var smallest = Option.empty[NodeBox]
 
     // Re-emission tokens are excluded everywhere: they are burned by the build, never delivered, so
     // counting them as held would let a request for them appear satisfiable.
@@ -197,10 +208,18 @@ private[engine] class WalletInventory(node: NodeContext, api: _root_.node.NodeAp
         requiredTokens.forall { case (id, amount) => heldTokens.getOrElse(id, BigInt(0)) >= amount }
     }
 
+    // Tokenless before token-bearing, then by value: the order a single-box request prefers.
+    def rank(box: NodeBox): (Boolean, Long) = (box.assets.nonEmpty, spendableValue(box))
+
     def consume(box: NodeBox, reward: Boolean): Boolean = {
       if (!excluded.contains(box.boxId) && !selected.exists(_.boxId == box.boxId) &&
         (!reward || matured(box, ctx.getHeight)) && spendableValue(box) > 0) {
-        if (single) { if (covers(Vector(box))) { selected = Vector(box); covered = true } }
+        if (single) {
+          if (covers(Vector(box)) && smallest.forall(best => Ordering[(Boolean, Long)].lt(rank(box), rank(best)))) {
+            smallest = Some(box)
+            covered = box.assets.isEmpty && spendableValue(box) - erg <= erg
+          }
+        }
         else {
           val heldTokens = tokenTotals(selected)
           val advancesTokens = box.assets.exists(asset =>
@@ -232,7 +251,8 @@ private[engine] class WalletInventory(node: NodeContext, api: _root_.node.NodeAp
     known.iterator.filter(box => !rewardsOnly && !confirmedOnly && wallet.signableTrees.contains(box.ergoTree))
       .takeWhile(_ => !covered).foreach(box => consume(box, reward = false))
     if (!covered) walk(rewardsOnly, p2pkOnly, deadlineMillis, confirmedOnly = confirmedOnly)(consume)
-    require(covered, "wallet cannot cover this request within the input budget")
+    if (single) { selected = smallest.toVector; covered = smallest.nonEmpty }
+    if (!covered) throw new NotEnoughInputsException("wallet cannot cover this request within the input budget")
 
     // Boxes added while the set was still short can turn out to be unnecessary once a later box
     // completed the requirement. Dropping them keeps the transaction small and the wallet unfragmented.

@@ -7,6 +7,7 @@ import configs.NodeContext
 import node.MutationConversions._
 import node.NodeApi
 import mutations.NodeWallet.MINER_REWARD_DELAY
+import mutations.NotEnoughInputsException
 import node.model.{ConfirmationRange, MempoolOptions, Paging, SortDirection}
 import org.ergoplatform.appkit.{BlockchainContext, ErgoClient, Parameters}
 import org.slf4j.{Logger, LoggerFactory}
@@ -139,9 +140,14 @@ class EngineWalletState @Inject()(nodeContext: NodeContext,
       waitingSelections :+= SelectionRequest(erg, tokens, track, reservationId, deadline, single, p2pkOnly, reply,
         critical, confirmedOnly)
     else if (busy || now() >= deadline || tokens.size > MaxRequestedTokens ||
-      usedInputs.size + worstCaseInputs > ownershipLimit)
-      reply ! WalletInputs(Seq.empty, reservationId)
-    else {
+      usedInputs.size + worstCaseInputs > ownershipLimit) {
+      val unavailable =
+        if (busy) Some("the wallet's selection queue is full")
+        else if (now() >= deadline) Some(SelectionExpired)
+        else if (tokens.size > MaxRequestedTokens) None
+        else Some(ownershipFull(ownershipLimit))
+      reply ! WalletInputs(Seq.empty, reservationId, unavailable)
+    } else {
       val attempt = UUID.randomUUID()
       if (critical) { criticalSelecting = Some(attempt); criticalSelectingSince = now() }
       else { selecting = Some(attempt); selectingSince = now() }
@@ -156,6 +162,10 @@ class EngineWalletState @Inject()(nodeContext: NodeContext,
           self ! SelectionFinished(attempt, reservationId, deadline, track, reply, Failure(ex), critical))
     }
   }
+
+  /** Why a request was refused for input ownership rather than for funds. */
+  private def ownershipFull(limit: Int): String =
+    s"${usedInputs.size} wallet inputs are already reserved, and this request could pass the $limit limit"
 
   /** Start whichever queued selections now have a free lane, oldest first. */
   private def drainSelections(): Unit = {
@@ -280,14 +290,17 @@ class EngineWalletState @Inject()(nodeContext: NodeContext,
     val generation = nextRefreshGeneration
     val snapshotRevision = walletRevision
     val excluded = usedInputs.keySet
+    // Reserved boxes and chained change: the refresh decides their fate, so it must see them even
+    // when the descriptor list stops at the cache ceiling.
+    val watched = excluded ++ knownOutputs.map(_.boxId)
     Try(Future(client.execute { ctx =>
       val indexed = nodeApi.indexerEnabled
-      val snapshot = inventory.snapshot(ctx.getHeight, excluded)
+      val snapshot = inventory.snapshot(ctx.getHeight, excluded, watched)
       self ! WalletWorkerResult(walletIncarnation, TotalsRefreshed(snapshotRevision, snapshot.copy(boxes = Vector.empty)))
       val boxes = snapshot.boxes.filterNot(_.reward)
       val rewards = snapshot.boxes.filter(_.reward)
       BoxesRefreshed(generation, snapshotRevision, boxes, rewards, ctx.getHeight,
-        snapshot.complete && !snapshot.truncated, indexed)
+        snapshot.truncated, snapshot.seen, indexed)
     })(maintenanceWorker).onComplete {
       case Success(msg) => self ! WalletWorkerResult(walletIncarnation, msg)
       case Failure(ex) => self ! WalletWorkerResult(walletIncarnation, RefreshFailed(generation, ex))
@@ -340,11 +353,17 @@ class EngineWalletState @Inject()(nodeContext: NodeContext,
       if (critical) criticalSelecting = None else selecting = None
       val elapsed = now() - startedAt
       val ownershipLimit = if (critical) MAX_ENGINE_INPUTS else MAX_OPTIONAL_INPUTS
-      val selected = result.toOption.filter { boxes =>
-        now() < deadline &&
-          boxes.forall(box => !usedInputs.contains(box.id.toString)) &&
-          usedInputs.size + boxes.size <= ownershipLimit
-      }.getOrElse(Vector.empty)
+      // Only a walk that found too little is a shortfall; every other empty answer says why.
+      val unavailable = result match {
+        case Failure(_: NotEnoughInputsException) => None
+        case Failure(ex) => Some(s"the wallet read failed: ${ex.getMessage}")
+        case Success(_) if now() >= deadline => Some(SelectionExpired)
+        case Success(boxes) if boxes.exists(box => usedInputs.contains(box.id.toString)) =>
+          Some("another request reserved a chosen box during selection")
+        case Success(boxes) if usedInputs.size + boxes.size > ownershipLimit => Some(ownershipFull(ownershipLimit))
+        case Success(_) => None
+      }
+      val selected = result.toOption.filter(_ => unavailable.isEmpty).getOrElse(Vector.empty)
       result.failed.foreach(ex => logger.warn(s"Wallet selection deferred after ${elapsed}ms: ${ex.getMessage}"))
       // A selection pages the wallet from the node, so on a large wallet this is the cost every
       // other caller queues behind. Naming the page size makes the lever obvious.
@@ -353,7 +372,7 @@ class EngineWalletState @Inject()(nodeContext: NodeContext,
           s"(critical=$critical, wallet.page-size=${walletLimits.pageSize}); every other funding " +
           "request waits behind this one")
       if (track && selected.nonEmpty) reserve(selected.map(_.id.toString), reservationId)
-      reply ! WalletInputs(selected, reservationId)
+      reply ! WalletInputs(selected, reservationId, unavailable)
       drainSelections()
     case _: SelectionFinished => ()
     // Bind a reservation to the exact signed transaction about to be sent. A fresh pin requires an
@@ -389,6 +408,24 @@ class EngineWalletState @Inject()(nodeContext: NodeContext,
         case (boxId, state @ ReservationState(`id`, _, ReservationEngine(hold))) if hold.txId == txId =>
           boxId -> state.copy(status = ReservationEngine(hold.copy(sendFinished = true, accepted = accepted)))
         case entry => entry
+      }
+
+    // No input of a refused transaction was spent, and reconciliation only frees inputs once one is,
+    // so without this a refused wallet-only send would hold its boxes until restart. A lender key
+    // pinned to it is let go with its funding, since no queue box was created under it.
+    case EngineSendRefused(id, txId, previous) =>
+      val before = usedInputs
+      usedInputs = usedInputs.flatMap {
+        case (boxId, state @ ReservationState(`id`, _, ReservationEngine(hold))) if hold.txId == txId =>
+          previous.map(old => boxId -> state.copy(status = ReservationEngine(old)))
+        case entry => Some(entry)
+      }
+      if (usedInputs != before) {
+        walletRevision += 1L
+        joinKeys = joinKeys.filterNot { case (_, owned) =>
+          owned.txId.contains(txId) && owned.funding.contains(id) &&
+            !usedInputs.valuesIterator.exists(state => owned.funding.contains(state.id))
+        }
       }
 
     case EngineJoinGuard.Keys => sender() ! joinKeys.keySet
@@ -477,17 +514,20 @@ class EngineWalletState @Inject()(nodeContext: NodeContext,
       logger.error(s"Failed to refresh wallet boxes: ${ex.getMessage}", ex)
       finishRefresh()
 
-    case BoxesRefreshed(generation, _, _, _, _, _, _) if generation < lastAppliedRefreshGeneration =>
+    case BoxesRefreshed(generation, _, _, _, _, _, _, _) if generation < lastAppliedRefreshGeneration =>
       logger.debug(s"Ignoring stale wallet refresh $generation; $lastAppliedRefreshGeneration already applied")
       finishRefresh()
 
-    case BoxesRefreshed(_, snapshotRevision, _, _, _, _, _) if snapshotRevision != walletRevision =>
+    case BoxesRefreshed(_, snapshotRevision, _, _, _, _, _, _) if snapshotRevision != walletRevision =>
       // A commit/returned output/ambiguous transition happened after this read began. Applying its
       // older box set could resurrect an accepted parent or erase accepted change.
       refreshAgain = true
       finishRefresh()
 
-    case BoxesRefreshed(generation, _, boxes, rewards, height, complete, indexed) =>
+    // Every page was read, since a walk that stops part way fails the refresh instead. So a watched
+    // box that is neither in the descriptors nor in `seen` has been spent, even on a wallet whose
+    // descriptor list stopped at the cache ceiling.
+    case BoxesRefreshed(generation, _, boxes, rewards, height, truncated, seen, indexed) =>
       lastAppliedRefreshGeneration = generation
       if (!indexed && !warnedNoIndexer) {
         warnedNoIndexer = true
@@ -495,73 +535,62 @@ class EngineWalletState @Inject()(nodeContext: NodeContext,
       }
       val freshWallet = boxes.map(box => box.id.toString -> box).toMap
       val freshRewards = rewards.map(box => box.id.toString -> box).toMap
-      if (complete) {
-        // A reserved box neither read still reports as unspent HAS been spent, so the box and its
-        // reservation go together. Keeping the reservation was what made a spent box selectable
-        // again: it is retained here BECAUSE it is reserved, so it survived every refresh and came
-        // back the moment the reservation was cleared.
-        //
-        // Reward claims and consolidations own coinbases too, so reconciliation needs both sets.
-        val reportedUnspent = freshWallet.keySet ++ freshRewards.keySet
-        // An ambiguous broadcast is resolved in either direction by a complete mempool-aware read:
-        // present means rejected/evicted and safe again; absent means accepted/spent and gone.
-        val settledUncertain = usedInputs.collect {
-          case (boxId, reservation) if reservation.status == ReservationUncertain => boxId
-        }.toSet
-        usedInputs = usedInputs -- settledUncertain
-        // A reserved box no read still reports as unspent HAS been spent, so the whole lease goes.
-        // Only plain selections are judged this way: a send already in progress may have been
-        // captured just before the node received it, and its lease has to survive so the accepted
-        // response can still commit and nobody can reselect its parents meanwhile.
-        val spentReservationIds = usedInputs.collect {
-          case (boxId, reservation)
-            if reservation.status == ReservationSelected && !reportedUnspent.contains(boxId) => reservation.id
-        }.toSet
-        if (spentReservationIds.nonEmpty) {
-          val retiredInputs = usedInputs.count {
-            case (_, reservation) => spentReservationIds.contains(reservation.id)
-          }
-          logger.info(s"$retiredInputs reserved box(es) are no longer a complete unspent lease - collecting them")
-          usedInputs = usedInputs.filterNot {
-            case (_, reservation) => spentReservationIds.contains(reservation.id)
-          }
+      // Reward claims and consolidations own coinbases too, so reconciliation needs both sets.
+      val reportedUnspent = freshWallet.keySet ++ freshRewards.keySet ++ seen
+      // An ambiguous broadcast is resolved in either direction by a mempool-aware read: present
+      // means rejected/evicted and safe again; absent means accepted/spent and gone.
+      val settledUncertain = usedInputs.collect {
+        case (boxId, reservation) if reservation.status == ReservationUncertain => boxId
+      }.toSet
+      usedInputs = usedInputs -- settledUncertain
+      // A reserved box no read still reports as unspent HAS been spent, so the whole lease goes.
+      // Only plain selections are judged this way: a send already in progress may have been
+      // captured just before the node received it, and its lease has to survive so the accepted
+      // response can still commit and nobody can reselect its parents meanwhile.
+      val spentReservationIds = usedInputs.collect {
+        case (boxId, reservation)
+          if reservation.status == ReservationSelected && !reportedUnspent.contains(boxId) => reservation.id
+      }.toSet
+      if (spentReservationIds.nonEmpty) {
+        val retiredInputs = usedInputs.count {
+          case (_, reservation) => spentReservationIds.contains(reservation.id)
         }
-        // Chained change is kept only while it is still real. The read includes unconfirmed outputs,
-        // so a box whose parent is merely unsent-to-chain is still reported; one that is neither
-        // reported nor reserved has been spent, and offering it again builds on an input that is
-        // gone. Only a complete read can conclude this, which is why it is not done above.
-        knownOutputs = knownOutputs.filter(box =>
-          reportedUnspent.contains(box.boxId) || usedInputs.contains(box.boxId))
-        // Nothing broadcasts a pinned box, so one no complete read reports was spent by a block
-        val lostPins = pinnedIds.filterNot(reportedUnspent.contains)
-        if (lostPins.nonEmpty) {
-          usedInputs --= lostPins
-          logger.info(s"${lostPins.size} pinned input(s) no longer unspent; proposing replacements")
+        logger.info(s"$retiredInputs reserved box(es) are no longer a complete unspent lease - collecting them")
+        usedInputs = usedInputs.filterNot {
+          case (_, reservation) => spentReservationIds.contains(reservation.id)
         }
-        walletBoxes = freshWallet
-        rewardBoxes = freshRewards
-      } else {
-        // A run that stopped part way cannot tell "spent" from "not fetched", and guessing wrong
-        // there hands out a box sitting in an unconfirmed transaction. Collect nothing, and keep
-        // reserved boxes of either kind alive as before.
-        walletBoxes = walletBoxes.filter { case (boxId, _) => usedInputs.contains(boxId) } ++ freshWallet
-        rewardBoxes = rewardBoxes.filter { case (boxId, _) => usedInputs.contains(boxId) } ++ freshRewards
       }
+      // Chained change is kept only while it is still real. The read includes unconfirmed outputs,
+      // so a box whose parent is merely unsent-to-chain is still reported; one that is neither
+      // reported nor reserved has been spent, and offering it again builds on an input that is gone.
+      knownOutputs = knownOutputs.filter(box =>
+        reportedUnspent.contains(box.boxId) || usedInputs.contains(box.boxId))
+      // Nothing broadcasts a pinned box, so one the read no longer reports was spent by a block
+      val lostPins = pinnedIds.filterNot(reportedUnspent.contains)
+      if (lostPins.nonEmpty) {
+        usedInputs --= lostPins
+        logger.info(s"${lostPins.size} pinned input(s) no longer unspent; proposing replacements")
+      }
+      // Past the cache ceiling the descriptors are a prefix of the wallet, so a reserved box they
+      // left out keeps its old descriptor while the read still reports it.
+      def stillHeld(boxId: String): Boolean = usedInputs.contains(boxId) && reportedUnspent.contains(boxId)
+      walletBoxes = walletBoxes.filter { case (boxId, _) => stillHeld(boxId) } ++ freshWallet
+      rewardBoxes = rewardBoxes.filter { case (boxId, _) => stillHeld(boxId) } ++ freshRewards
       chainHeight = height
       trimInventory()
       logger.info(s"Wallet refreshed - ${available.size} available, ${usedInputs.size} reserved, " +
         s"${spendableRewards.size} reward box(es) spendable" +
-        (if (complete) "" else ", PARTIAL"))
+        (if (truncated) ", more boxes than the descriptor cache holds (wallet.max-descriptors, max-descriptor-bytes)" else ""))
       replenishPins()
       finishRefresh()
 
     case SelectInputs(_, _, _, reservationId, deadlineMillis, _, _, _) if now() >= deadlineMillis =>
-      sender() ! WalletInputs(Seq.empty, reservationId)
+      sender() ! WalletInputs(Seq.empty, reservationId, Some(SelectionExpired))
 
     case SelectInputs(erg, tokens, trackUsed, reservationId, deadline, single, p2pkOnly, confirmedOnly) =>
       selectWallet(erg, tokens, trackUsed, reservationId, deadline, single, p2pkOnly, confirmedOnly)
     case ReserveKnownInputs(_, reservationId, deadlineMillis) if now() >= deadlineMillis =>
-      sender() ! WalletInputs(Seq.empty, reservationId)
+      sender() ! WalletInputs(Seq.empty, reservationId, Some(SelectionExpired))
 
     case ReserveKnownInputs(inputs, reservationId, _) =>
       val ids = inputs.map(_.id.toString)
@@ -585,11 +614,15 @@ class EngineWalletState @Inject()(nodeContext: NodeContext,
       trimInventory()
       walletRevision += 1L
 
+    // Each ownership change below bumps the revision, so the balance summary taken while the boxes
+    // were held is no longer served.
     case ReleaseInputs(reservationId) =>
+      val held = usedInputs.size
       usedInputs = usedInputs.filterNot { case (_, reservation) =>
         reservation.id == reservationId &&
           (reservation.status == ReservationSelected || reservation.status == ReservationKnown)
       }
+      if (usedInputs.size != held) walletRevision += 1L
 
     case HoldReservationForCandidate(reservationId) =>
       val replyTo = sender()
@@ -604,6 +637,7 @@ class EngineWalletState @Inject()(nodeContext: NodeContext,
             boxId -> reservation.copy(status = ReservationCandidate)
           else boxId -> reservation
         }
+        walletRevision += 1L
       }
       replyTo ! ReservationHeldForCandidate(reservationId, accepted)
 
@@ -634,6 +668,7 @@ class EngineWalletState @Inject()(nodeContext: NodeContext,
         logger.warn(s"Releasing ${stale.size} reservation(s) never spent or released within " +
           s"${ReservationTtlMs / 60000} minutes; ${usedInputs.size - stale.size} still held")
         usedInputs = usedInputs -- stale
+        walletRevision += 1L
       }
 
     // ─── reward-box sweep ──────────────────────────────────────────────────
@@ -764,8 +799,8 @@ object EngineWalletState {
    *  - before a send, `ReservationSelected` and `ReservationKnown` differ only in whether absence
    *    from a complete refresh proves the box was spent. It does for a selected box, and does not
    *    for locally built change whose parent the node may not report yet;
-   *  - after a send, `ReservationEngine` is bound to an exact transaction and only per-input
-   *    evidence from [[EngineReconciler]] can end it;
+   *  - after a send, `ReservationEngine` is bound to an exact transaction, and only the node
+   *    refusing it or per-input evidence from [[EngineReconciler]] can end it;
    *  - `ReservationCandidate` and `ReservationUncertain` cover the paths with no send outcome at
    *    all: a transaction offered into this miner's own block, and an ambiguous broadcast;
    *  - `ReservationPinned` is standing funding for transactions in this miner's own blocks.
@@ -817,6 +852,9 @@ object EngineWalletState {
   /** Selections that may wait per lane before further requests are refused outright. */
   private final val MaxQueuedSelections = 8
 
+  /** Why a request answered after its deadline carries no inputs. */
+  private final val SelectionExpired = "the funding request expired before the wallet could select"
+
   /** Distinct tokens one request may ask for, bounding the work a single selection can create. */
   private final val MaxRequestedTokens = 512
   /**
@@ -854,12 +892,14 @@ object EngineWalletState {
    */
   final val ReservationTtlMs: Long = 15 * 60 * 1000L
 
+  /** @param seen the watched ids the read reported, which `boxes` and `rewards` may not all carry */
   private case class BoxesRefreshed(generation: Long,
                                     snapshotRevision: Long,
                                     boxes: Seq[WalletDescriptor],
                                     rewards: Seq[WalletDescriptor],
                                     height: Int,
-                                    complete: Boolean,
+                                    truncated: Boolean,
+                                    seen: Set[String],
                                     indexed: Boolean)
   private case class RefreshFailed(generation: Long, cause: Throwable)
   private case class WalletWorkerResult(incarnation: UUID, result: Any)

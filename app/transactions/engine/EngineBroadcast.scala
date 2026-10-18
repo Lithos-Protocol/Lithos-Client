@@ -107,9 +107,11 @@ class EngineBroadcast(owner: ActorRef, node: NodeApi, requestTimeout: FiniteDura
       response match {
         case Success(_) if accepted => Result(txId, Accepted)
         // The node's own answer, not a fault here: usually the chain or mempool moved since the
-        // transaction was built, so its reason is the whole story and a stack trace adds nothing
+        // transaction was built, so its reason is the whole story and a stack trace adds nothing.
+        // A refused transaction spent nothing, so its inputs go back.
         case Failure(ex: _root_.node.NodeError.Rejected) =>
           LoggerFactory.getLogger("TransactionEngine").warn(s"Node refused $txId ($operation): ${ex.getMessage}")
+          allocations.foreach(a => owner ! EngineSendRefused(a.reservationId, txId, replaces))
           Result(txId, Rejected, Option(ex.getMessage))
         // A success carrying another transaction id is as ambiguous as no answer at all.
         case Success(_) => Result(txId, Uncertain, Some("node returned another transaction id"))

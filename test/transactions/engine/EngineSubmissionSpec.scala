@@ -64,8 +64,12 @@ class EngineSubmissionSpec extends TestKit(ActorSystem("engine-submission-spec")
       wallet.reply(pin)
       if (pin) Await.result(future, 5.seconds) shouldBe expected
       else intercept[IllegalArgumentException](Await.result(future, 5.seconds))
-      if (pin) wallet.expectMsg(EngineSendFinished(pinned.hold.reservationId, txId, result == Success(txId)))
-      else {
+      if (pin) {
+        wallet.expectMsg(EngineSendFinished(pinned.hold.reservationId, txId, result == Success(txId)))
+        wallet.expectMsg(RefreshBoxes)
+        if (expected.outcome == EngineBroadcast.Rejected)
+          wallet.expectMsg(EngineSendRefused(pinned.hold.reservationId, txId, if (retry) Some(old) else None))
+      } else {
         wallet.expectMsg(CancelEngineInputs(pinned.hold.reservationId, txId, if (retry) Some(old) else None))
         wallet.expectMsg(ReleaseInputs(pinned.hold.reservationId))
         verify(api, never()).sendTransaction(anyString())
@@ -80,9 +84,14 @@ class EngineSubmissionSpec extends TestKit(ActorSystem("engine-submission-spec")
     val error = NodeError.Transport("/transactions", new RuntimeException("response lost"))
     exercise(Failure(error), EngineBroadcast.Result(txId, EngineBroadcast.Uncertain, Some(error.getMessage)))
   }
-  it should "distinguish an explicit refusal without declaring its inputs free" in {
+  it should "hand an explicit refusal's inputs back" in {
     val error = NodeError.Rejected("script refused")
     exercise(Failure(error), EngineBroadcast.Result(txId, EngineBroadcast.Rejected, Some(error.getMessage)))
+  }
+  it should "fall back to the replaced attempt when a rebuild is refused" in {
+    val error = NodeError.Rejected("script refused")
+    exercise(Failure(error), EngineBroadcast.Result(txId, EngineBroadcast.Rejected, Some(error.getMessage)),
+      retry = true)
   }
   it should "stop before the node when the exact input pin is refused" in {
     // Refused at the shared send boundary, which is what reports it now.

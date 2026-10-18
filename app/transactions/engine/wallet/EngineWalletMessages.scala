@@ -28,6 +28,13 @@ object EngineWalletMessages {
                                                      previous: Option[EngineHold] = None)
 
   private[transactions] case class EngineSendFinished(reservationId: String, txId: String, accepted: Boolean)
+
+  /**
+   * The node refused the send outright, so it spent nothing. A first attempt's inputs are free again;
+   * a rebuild falls back to `previous`, the attempt it replaced, which may still be pending.
+   */
+  private[transactions] case class EngineSendRefused(reservationId: String, txId: String,
+                                                     previous: Option[EngineHold] = None)
   private[transactions] case object GetEngineHolds
   private[transactions] case object GetOwnedInputIds
   private[transactions] case class EngineHolds(holds: Vector[EngineHold])
@@ -46,7 +53,8 @@ object EngineWalletMessages {
    *
    * @param trackUsed      reserve what is selected, so nothing else can be handed the same boxes
    *                       until they are seen spent, released, or the reservation ages out
-   * @param single         one box must cover the whole request by itself, rather than a set
+   * @param single         one box must cover the whole request by itself, rather than a set; the
+   *                       smallest such box, tokenless first
    * @param p2pkOnly       retained for callers explicitly requiring P2PK; all funding now requires it
    * @param deadlineMillis past this the request is answered empty rather than queued further
    * @param confirmedOnly  only boxes already in a block, for a transaction offered to this miner's
@@ -114,8 +122,14 @@ object EngineWalletMessages {
    */
   private[transactions] case class UnpinInput(boxId: String)
 
-  /** Reply sent back to the requester with the selected UTXOs and matching lease identity. */
-  private[transactions] case class WalletInputs(inputs: Seq[InputUTXO], reservationId: String = "")
+  /**
+   * Reply sent back to the requester with the selected UTXOs and matching lease identity.
+   *
+   * @param unavailable why the request was not served, when the cause is not a funds shortfall: it
+   *                    expired, the selection queue or input budget was full, or the wallet read failed
+   */
+  private[transactions] case class WalletInputs(inputs: Seq[InputUTXO], reservationId: String = "",
+                                                unavailable: Option[String] = None)
 
   /**
    * Sweep tick: release reservations that have gone stale, meaning the box was never seen spent and

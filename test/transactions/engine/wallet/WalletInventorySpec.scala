@@ -29,9 +29,10 @@ class WalletInventorySpec extends AnyFlatSpec with Matchers with MockitoSugar {
     // spend of a box that is not yet in a block
     val (node, api, wallet) = FakeNodeContext(numAddresses = 1)
     node.getClient.execute { ctx =>
-      val pending = UTXO(wallet.contract, 3000000000L).toDummyInput(ctx)
-      val confirmed = UTXO(wallet.contract, 2000000000L).toDummyInput(ctx)
-      val change = UTXO(wallet.contract, 4000000000L).toDummyInput(ctx)
+      // Smallest is change, then pending, so each pick below is the smallest box it may take.
+      val pending = UTXO(wallet.contract, 2000000000L).toDummyInput(ctx)
+      val confirmed = UTXO(wallet.contract, 3000000000L).toDummyInput(ctx)
+      val change = UTXO(wallet.contract, 1500000000L).toDummyInput(ctx)
       serve(api, Vector(WalletInventory.nodeBox(pending), WalletInventory.nodeBox(confirmed)),
         unconfirmed = Set(pending.id.toString))
       val inventory = new WalletInventory(node, api)
@@ -51,9 +52,12 @@ class WalletInventorySpec extends AnyFlatSpec with Matchers with MockitoSugar {
       NodeBox(f"${i + 1}%064x", "ab" * 32, 1000000L, 0, 1, wallet.contract.ergoTreeHex)
     }
     serve(api, boxes)
-    val snapshot = new WalletInventory(ctx, api).snapshot(1000, Set.empty)
-    snapshot.complete shouldBe true
+    // The last box is far past the descriptor ceiling; the absent id stands for one already spent.
+    val snapshot = new WalletInventory(ctx, api).snapshot(1000, Set.empty,
+      watched = Set(boxes.last.boxId, "ff" * 32))
     snapshot.truncated shouldBe true
+    snapshot.boxes.map(_.id) should not contain boxes.last.boxId
+    snapshot.seen shouldBe Set(boxes.last.boxId)
     snapshot.spendable shouldBe BigInt(5000000000L)
     snapshot.boxes.size should be <= WalletInventory.MaxDescriptors
     snapshot.boxes.map(_.retainedBytes).sum should be <= WalletInventory.MaxDescriptorBytes
@@ -76,7 +80,60 @@ class WalletInventorySpec extends AnyFlatSpec with Matchers with MockitoSugar {
     }
   }
 
-  it should "skip wallet-reported rewards without indexer calls even with many derived addresses" in {
+  "A single-box request" should "take the smallest covering box, not the first" in {
+    // A 0.003 ERG bond took the reporter's 1,874 ERG box, and box after box like it, because the
+    // walk stopped at the first box in node order that covered it.
+    val (node, api, wallet) = FakeNodeContext(numAddresses = 1)
+    node.getClient.execute { ctx =>
+      val large = UTXO(wallet.contract, 1874000000000L).toDummyInput(ctx)
+      val nine = UTXO(wallet.contract, 9000000000L).toDummyInput(ctx)
+      val dust = UTXO(wallet.contract, 1000000L).toDummyInput(ctx)
+      val small = UTXO(wallet.contract, 50000000L).toDummyInput(ctx)
+      serve(api, Vector(large, nine, dust, small).map(WalletInventory.nodeBox))
+      new WalletInventory(node, api).select(ctx, 3000000L, Seq.empty, Set.empty, single = true,
+        p2pkOnly = false, rewardsOnly = false).map(_.id) shouldBe Vector(small.id)
+    }
+  }
+
+  it should "prefer a tokenless box to a smaller one carrying tokens" in {
+    val (node, api, wallet) = FakeNodeContext(numAddresses = 1)
+    node.getClient.execute { ctx =>
+      val withLit = UTXO(wallet.contract, 10000000L, Seq(work.lithos.mutations.Token(
+        org.ergoplatform.sdk.ErgoId.create("ab" * 32), 5L))).toDummyInput(ctx)
+      val plain = UTXO(wallet.contract, 900000000L).toDummyInput(ctx)
+      serve(api, Vector(withLit, plain).map(WalletInventory.nodeBox))
+      new WalletInventory(node, api).select(ctx, 3000000L, Seq.empty, Set.empty, single = true,
+        p2pkOnly = false, rewardsOnly = false).map(_.id) shouldBe Vector(plain.id)
+    }
+  }
+
+  it should "stop reading once a box within twice the request covers it" in {
+    val (node, api, wallet) = FakeNodeContext(numAddresses = 1)
+    node.getClient.execute { ctx =>
+      val close = UTXO(wallet.contract, 5000000L).toDummyInput(ctx)
+      // A full first page ending in a close box, so a second request would only come from reading on.
+      val boxes = Vector.tabulate(WalletInventory.PageSize - 1)(i =>
+        NodeBox(f"${i + 1}%064x", "ab" * 32, 1000000000L + i, 0, 1, wallet.contract.ergoTreeHex)) :+
+        WalletInventory.nodeBox(close)
+      serve(api, boxes)
+      new WalletInventory(node, api).select(ctx, 3000000L, Seq.empty, Set.empty, single = true,
+        p2pkOnly = false, rewardsOnly = false).map(_.id) shouldBe Vector(close.id)
+      verify(api, never()).walletUnspentBoxes(any[ConfirmationRange],
+        org.mockito.ArgumentMatchers.eq(Paging(WalletInventory.PageSize, WalletInventory.PageSize)))
+    }
+  }
+
+  "A request the wallet cannot cover" should "fail as a shortfall, not as a broken read" in {
+    val (node, api, wallet) = FakeNodeContext(numAddresses = 1)
+    node.getClient.execute { ctx =>
+      serve(api, Vector(WalletInventory.nodeBox(UTXO(wallet.contract, 1000000L).toDummyInput(ctx))))
+      for (single <- Seq(false, true))
+        intercept[mutations.NotEnoughInputsException](new WalletInventory(node, api).select(ctx, 3000000L,
+          Seq.empty, Set.empty, single, p2pkOnly = false, rewardsOnly = false))
+    }
+  }
+
+  "Wallet inventory" should "skip wallet-reported rewards without indexer calls even with many derived addresses" in {
     val (node, api, wallet) = FakeNodeContext(numAddresses = 100)
     node.getClient.execute { ctx =>
       val masterTree = wallet.rewardTrees.find(_._2 == wallet.prover.getAddress).get._1

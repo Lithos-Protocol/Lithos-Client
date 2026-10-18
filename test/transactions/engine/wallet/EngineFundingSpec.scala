@@ -110,4 +110,25 @@ class EngineFundingSpec extends TestKit(ActorSystem("wallet-selector-spec"))
     selector.giveBack(Seq(selected))
     manager.expectMsg(ReturnInputs(Seq(selected)))
   }
+
+  "A request the wallet did not get to" should "not read as a shortfall" in {
+    // An expired or crowded-out selection used to throw "could not cover", which a join reported as
+    // insufficient funds while the wallet held plenty.
+    val manager = TestProbe()
+    val funding = EngineFunding(manager.ref, 2.seconds, ec)
+    for (single <- Seq(false, true)) {
+      val expired = Future(if (single) funding.reserveCovering(1000L) else funding.reserve(1000L))
+      val request = manager.expectMsgType[SelectInputs]
+      manager.reply(WalletInputs(Seq.empty, request.reservationId, Some("the funding request expired")))
+      val busy = intercept[FundingExpiredException](Await.result(expired, 2.seconds))
+      busy.getMessage should include("expired")
+      manager.expectMsg(ReleaseInputs(request.reservationId))
+
+      val short = Future(if (single) funding.reserveCovering(1000L) else funding.reserve(1000L))
+      val next = manager.expectMsgType[SelectInputs]
+      manager.reply(WalletInputs(Seq.empty, next.reservationId))
+      intercept[NotEnoughInputsException](Await.result(short, 2.seconds))
+      manager.expectMsg(ReleaseInputs(next.reservationId))
+    }
+  }
 }

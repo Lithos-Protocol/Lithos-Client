@@ -129,6 +129,8 @@ case class EngineFunding(walletRef: ActorRef,
       if (reply.reservationId != reservationId)
         throw new FundingExpiredException(
           s"EngineWalletState replied for reservation ${reply.reservationId}, expected $reservationId")
+      // Not a shortfall, so it must not read as one: callers report this as the wallet being busy.
+      reply.unavailable.foreach(reason => throw new FundingExpiredException(s"the wallet did not select inputs: $reason"))
       reply.inputs
     } catch {
       case NonFatal(ex) =>

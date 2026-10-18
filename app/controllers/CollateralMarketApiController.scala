@@ -10,6 +10,7 @@ import play.api.libs.json._
 import play.api.mvc._
 import stratum.CollateralNotFoundException
 import transactions.engine.wallet.EngineWalletMessages.InsufficientWalletFundsException
+import transactions.engine.wallet.FundingExpiredException
 import mutations.NotEnoughInputsException
 
 import java.nio.charset.StandardCharsets
@@ -134,6 +135,9 @@ class CollateralMarketApiController @Inject()(cc: ControllerComponents,
         UnprocessableEntity(ApiHelper.makeError(422, "Cannot be executed", e.getMessage))
       case Failure(e: InsufficientWalletFundsException) =>
         UnprocessableEntity(ApiHelper.makeError(422, "Cannot be executed", e.getMessage))
+      // The wallet did not get to select: expired, queue or input budget full. Not a shortfall.
+      case Failure(e: FundingExpiredException) =>
+        ServiceUnavailable(ApiHelper.makeError(503, "Wallet busy", e.getMessage))
       case Failure(e: java.util.concurrent.TimeoutException) =>
         ServiceUnavailable(ApiHelper.makeError(503, "Wallet busy", e.getMessage))
       case Failure(e: IllegalArgumentException) =>

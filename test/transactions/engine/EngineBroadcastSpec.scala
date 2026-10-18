@@ -62,6 +62,8 @@ class EngineBroadcastSpec extends TestKit(ActorSystem("engine-broadcast-spec"))
       broadcast.outcome shouldBe outcome
       owner.expectMsg(EngineSendFinished(allocation.reservationId, txId, outcome == "accepted"))
       owner.expectMsg(RefreshBoxes)
+      if (outcome == "rejected") owner.expectMsg(EngineSendRefused(allocation.reservationId, txId))
+      else owner.expectNoMessage(200.millis)
     } else {
       intercept[IllegalArgumentException](Await.result(result, 5.seconds))
       owner.expectMsg(CancelEngineInputs(allocation.reservationId, txId))
@@ -87,6 +89,9 @@ class EngineBroadcastSpec extends TestKit(ActorSystem("engine-broadcast-spec"))
   }
   it should "retain the known ID when the node response is lost" in {
     exercise(Failure(new RuntimeException("connection reset")), "uncertain")
+  }
+  it should "hand back the inputs of a send the node refused" in {
+    exercise(Failure(NodeError.Rejected("Malformed transaction: script reduced to false")), "rejected")
   }
   it should "never send after ownership pinning is refused" in {
     exercise(Success(txId), "accepted", pin = false)

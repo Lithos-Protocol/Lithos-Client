@@ -17,6 +17,7 @@ import org.scalatest.matchers.should.Matchers
 import org.scalatestplus.mockito.MockitoSugar
 import org.ergoplatform.sdk.ErgoId
 import support.FakeNodeContext
+import transactions.engine.EngineJoinGuard
 import transactions.engine.wallet.EngineWalletMessages._
 import work.lithos.mutations.{InputUTXO, Token, UTXO}
 
@@ -890,5 +891,117 @@ class EngineWalletStateSpec extends TestKit(ActorSystem("wallet-manager-spec", E
     f.mgr ! ReturnInputs(Seq(converted))
     Thread.sleep(300)
     offered(f, 1000L) shouldBe empty
+  }
+
+  // ─── a wallet larger than the descriptor cache ────────────────────────────
+
+  "A wallet past the descriptor cache" should "settle uncertain and spent reservations like any other" in {
+    // The descriptor list stops at the ceiling, but the walk still reads every page. Treating that
+    // read as partial left uncertain boxes withheld for good and spent selections for the TTL.
+    val api = mock[NodeApi]
+    val (ctx, _, wallet) = FakeNodeContext(api, numAddresses = 1)
+    val (a, b, c) = (walletBox(wallet, erg), walletBox(wallet, 2 * erg), walletBox(wallet, 3 * erg))
+    // The cache holds one descriptor, always `first`'s, so every read here is truncated and the
+    // boxes under test sit past what the cache keeps.
+    val (first, last) = (walletBox(wallet, 10 * erg), walletBox(wallet, 20 * erg))
+    val reported = new AtomicReference[Seq[WalletBox]](Seq(first, a, b, c, last))
+    when(api.indexerEnabled).thenReturn(false)
+    when(api.walletUnspentBoxes(any[ConfirmationRange], any[Paging])).thenAnswer { inv =>
+      if (inv.getArgument[Paging](1).offset == 0) Success(reported.get()) else Success(Seq.empty[WalletBox])
+    }
+    val limits = configs.WalletConfig.Default.copy(maxDescriptors = 1)
+    val mgr = system.actorOf(Props(new EngineWalletState(ctx, limits)))
+    val probe = TestProbe()
+    try {
+      mgr ! RefreshBoxes
+      Thread.sleep(1200)
+      val (inputB, inputC) = ctx.getClient.execute(cx => (b.box.toInputUTXO(cx), c.box.toInputUTXO(cx)))
+      probe.send(mgr, ReserveKnownInputs(Seq(inputB, inputC), "ambiguous", Long.MaxValue))
+      probe.expectMsgType[WalletInputs].inputs should have size 2
+      probe.send(mgr, SelectInputs(erg / 2, Seq.empty, reservationId = "selected", single = true))
+      probe.expectMsgType[WalletInputs].inputs.map(_.value) shouldBe Seq(erg)
+      probe.send(mgr, MarkReservationUncertain("ambiguous"))
+
+      // a was spent by the selection's transaction and c by the ambiguous send; b survived.
+      reported.set(Seq(first, b, last))
+      mgr ! RefreshBoxes
+      Thread.sleep(1200)
+
+      probe.send(mgr, GetOwnedInputIds)
+      probe.expectMsgType[Set[String]] shouldBe empty
+      probe.send(mgr, SelectInputs(erg, Seq.empty, trackUsed = false, single = true))
+      probe.expectMsgType[WalletInputs].inputs.map(_.value) shouldBe Seq(2 * erg)
+    } finally system.stop(mgr)
+  }
+
+  // ─── a send the node refused ──────────────────────────────────────────────
+
+  "A send the node refused" should "free its inputs and the lender key pinned to it" in {
+    val f = fixture(w => Seq(walletBox(w, erg)))
+    val key = "ab" * 32
+    val txId = "cd" * 32
+    f.probe.send(f.mgr, SelectInputs(erg / 2, Seq.empty, reservationId = "refused"))
+    val ids = f.probe.expectMsgType[WalletInputs].inputs.map(_.id.toString).toSet
+    f.probe.send(f.mgr, EngineJoinGuard.Acquire(key, "join")); f.probe.expectMsg(true)
+    f.probe.send(f.mgr, EngineJoinGuard.Pin(key, "join", txId, Set("refused"))); f.probe.expectMsg(true)
+    f.probe.send(f.mgr, PinEngineInputs(EngineHold("join", "refused", txId, ids, ids)))
+    f.probe.expectMsg(true)
+    f.probe.send(f.mgr, EngineSendFinished("refused", txId, accepted = false))
+    offered(f, erg / 2) shouldBe empty
+
+    f.probe.send(f.mgr, EngineSendRefused("refused", txId))
+    offered(f, erg / 2) should have size 1
+    f.probe.send(f.mgr, EngineJoinGuard.Keys)
+    f.probe.expectMsg(Set.empty[String])
+  }
+
+  it should "fall back to the attempt a refused rebuild replaced" in {
+    // The replaced attempt may still be pending, so its inputs stay held under its own hold.
+    val f = fixture(w => Seq(walletBox(w, erg)))
+    f.probe.send(f.mgr, SelectInputs(erg / 2, Seq.empty, reservationId = "rebuilt"))
+    val ids = f.probe.expectMsgType[WalletInputs].inputs.map(_.id.toString).toSet
+    val first = EngineHold("rollup", "rebuilt", "01" * 32, ids, ids)
+    f.probe.send(f.mgr, PinEngineInputs(first)); f.probe.expectMsg(true)
+    f.probe.send(f.mgr, EngineSendFinished("rebuilt", first.txId, accepted = true))
+    val finished = first.copy(sendFinished = true, accepted = true)
+    val second = EngineHold("rollup", "rebuilt", "02" * 32, ids, ids)
+    f.probe.send(f.mgr, PinEngineInputs(second, Some(first.txId))); f.probe.expectMsg(true)
+    f.probe.send(f.mgr, EngineSendFinished("rebuilt", second.txId, accepted = false))
+
+    f.probe.send(f.mgr, EngineSendRefused("rebuilt", second.txId, Some(finished)))
+    f.probe.send(f.mgr, GetEngineHolds)
+    f.probe.expectMsgType[EngineHolds].holds shouldBe Vector(finished)
+    offered(f, erg / 2) shouldBe empty
+  }
+
+  // ─── why an empty answer is empty ─────────────────────────────────────────
+
+  "An empty selection" should "say why unless the wallet is simply short" in {
+    val clock = new AtomicLong(1000000L)
+    val f = fixture(w => Seq(walletBox(w, erg)), time = () => clock.get())
+    f.probe.send(f.mgr, SelectInputs(erg / 2, Seq.empty, deadlineMillis = clock.get()))
+    f.probe.expectMsgType[WalletInputs].unavailable.get should include("expired")
+    f.probe.send(f.mgr, SelectInputs(5 * erg, Seq.empty))
+    val short = f.probe.expectMsgType[WalletInputs]
+    short.inputs shouldBe empty
+    short.unavailable shouldBe None
+  }
+
+  // ─── the balance summary after a release ──────────────────────────────────
+
+  "A released box" should "count toward the spendable balance before the next refresh" in {
+    // The refresh's summary excluded the box while it was held. Served after the release, it made a
+    // join quote short of funds the wallet had just got back.
+    val f = fixture(w => Seq(walletBox(w, erg), walletBox(w, 2 * erg)))
+    f.probe.send(f.mgr, SelectInputs(erg / 2, Seq.empty, reservationId = "held"))
+    f.probe.expectMsgType[WalletInputs].inputs.map(_.value) shouldBe Seq(erg)
+    f.mgr ! RefreshBoxes
+    Thread.sleep(1200)
+    f.probe.send(f.mgr, GetSpendableBalance)
+    f.probe.expectMsgType[SpendableBalance].nanoErgs shouldBe 2 * erg
+
+    f.probe.send(f.mgr, ReleaseInputs("held"))
+    f.probe.send(f.mgr, GetSpendableBalance)
+    f.probe.expectMsgType[SpendableBalance].nanoErgs shouldBe 3 * erg
   }
 }

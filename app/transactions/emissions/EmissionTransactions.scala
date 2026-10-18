@@ -899,7 +899,7 @@ class EmissionTransactions(prover: NodeWallet,
         }, config.priorityFeeNanoErgs)
         run.attempts.filter(_.accepted).foreach(a => logger.info(s"Sent join ${a.txId} for lender ${a.lender}"))
         run.stopped.foreach {
-          case ex: NotEnoughInputsException =>
+          case ex @ (_: NotEnoughInputsException | _: transactions.engine.wallet.FundingExpiredException) =>
             logger.warn(s"Stopping self-collateralization after ${run.accepted.size} join(s): ${ex.getMessage}")
           case ex => logger.error(s"Join failed, stopping: ${ex.getMessage}", ex)
         }
