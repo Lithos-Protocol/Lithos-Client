@@ -7,7 +7,11 @@ import org.scalatest.BeforeAndAfterAll
 import org.scalatest.flatspec.AnyFlatSpecLike
 import org.scalatest.matchers.should.Matchers
 import support.FakeNodeContext
+import transactions.candidate.BlockTxMessages.CandidateTxsDropped
 import transactions.engine.TransactionEngine._
+import transactions.engine.execution.{ForwardsAPIExecution, RollupExecution}
+import transactions.engine.wallet.EngineFunding
+import transactions.engine.wallet.EngineWalletMessages.MarkReservationUncertain
 import java.util.concurrent.{CompletableFuture, TimeUnit}
 import java.util.concurrent.atomic.AtomicInteger
 import scala.concurrent.duration._
@@ -82,6 +86,41 @@ class TransactionEngineSpec extends TestKit(ActorSystem("transaction-engine-spec
     } finally { gate.complete(()); system.stop(engine) }
   }
 
+  "A scheduled forwards request" should "hand its execution the schedule's deadline, so nothing is sent once it passes" in {
+    val (ctx, _, _) = FakeNodeContext()
+    val entered = TestProbe()
+    val replies = TestProbe()
+    val gate = new CompletableFuture[Unit]()
+    @volatile var eligible: () => Boolean = () => true
+    val engine = system.actorOf(Props(new TransactionEngine(ctx, replies.ref, replies.ref, new support.FakeCache, play.api.Configuration(com.typesafe.config.ConfigFactory.load()), transactions.rollups.DataBoxSource.Stored) {
+      override protected lazy val reconciler = new EngineReconciler(ctx, replies.ref, replies.ref) {
+        override def reconcile(): Unit = ()
+      }
+      override protected def newForwardsExecution(stillEligible: () => Boolean): ForwardsAPIExecution = {
+        eligible = stillEligible
+        new ForwardsAPIExecution(ctx, EngineFunding(replies.ref, 1.second, ec), None) {
+          override def cancel(boxId: String): api.models.DFCancelResult = {
+            entered.ref ! "entered"
+            gate.get(10, TimeUnit.SECONDS)
+            api.models.DFCancelResult("cd" * 32, "accepted", "0", "0", "0")
+          }
+        }
+      }
+    }))
+    try {
+      val now = System.currentTimeMillis()
+      replies.send(engine, Schedule(EngineIntent.Forwards(ForwardsIntent.Cancel("ab" * 32)), now, now + 2000))
+      entered.expectMsg(5.seconds, "entered")
+      eligible() shouldBe true
+      awaitCond(!eligible(), 5.seconds)
+      gate.complete(())
+      replies.fishForMessage(5.seconds) {
+        case _: api.models.DFCancelResult => true
+        case _ => false
+      }
+    } finally { gate.complete(()); system.stop(engine) }
+  }
+
   "An engine restart" should "invalidate an outstanding worker and ignore its obsolete completion" in {
     val (ctx, _, _) = FakeNodeContext()
     val events = TestProbe()
@@ -119,5 +158,27 @@ class TransactionEngineSpec extends TestKit(ActorSystem("transaction-engine-spec
       freshReply.expectMsg(Accepted(intent.key, "2"))
       oldReply.expectNoMessage(200.millis)
     } finally { gate.complete(()); system.stop(engine) }
+  }
+
+  "A dropped candidate height" should "end the bond leases the engine holds for it" in {
+    // The engine answers for emissions and rollups in one mailbox, and emissions matches first. A
+    // drop it does not pass on leaves the bond box withheld until a later rollup build starts.
+    val (ctx, _, _) = FakeNodeContext()
+    val events = TestProbe()
+    val wallet = TestProbe()
+    val engine = system.actorOf(Props(new TransactionEngine(ctx, events.ref, events.ref, new support.FakeCache, play.api.Configuration(com.typesafe.config.ConfigFactory.load()), transactions.rollups.DataBoxSource.Stored) {
+      override protected lazy val reconciler = new EngineReconciler(ctx, events.ref, events.ref) {
+        override def reconcile(): Unit = ()
+      }
+      // The wallet side is this same actor, so its messages are seen on the way in.
+      override def receive: Receive = ({
+        case uncertain: MarkReservationUncertain => wallet.ref ! uncertain
+      }: Receive).orElse(super.receive)
+    }))
+    try {
+      events.send(engine, RollupExecution.CandidateLeaseTaken(500, "bond"))
+      events.send(engine, CandidateTxsDropped(500))
+      wallet.expectMsg(5.seconds, MarkReservationUncertain("bond"))
+    } finally system.stop(engine)
   }
 }

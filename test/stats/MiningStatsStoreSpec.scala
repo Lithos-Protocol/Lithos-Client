@@ -250,4 +250,109 @@ class MiningStatsStoreSpec extends AnyFlatSpec with Matchers {
       Vector(MiningBucket(0, hour, totals)), partial = false, status = "ready")
     MiningHistory.hashrate(history).hashesPerSecond shouldBe Some("275163363")
   }
+
+  "Lending" should "be listed newest first with its block, and leave with it on a rollback or a prune" in {
+    def lent(h: Int): MiningBlockRecord = {
+      val at = cursor(h)
+      record(at, cursor(h - 1)).copy(lending = Some(LendingRecord(at.blockId, h, at.timestamp, "collateral",
+        "9lender", "2920000000", "5000000", "3000000000", "2000000", Some(h - 1))))
+    }
+    val db = new MiningStatsStore(None, identity)
+    db.initialize(cursor(0))
+    (1 to 3).foreach(h => db.append(lent(h)))
+    val page = db.lending(0, 2)
+    page.positions.map(_.height) shouldBe Vector(3, 2)
+    page.total shouldBe 3
+    page.totals.positions shouldBe 3
+    page.totals.netNanoErg shouldBe (3 * (3000000000L + 2000000L - 2920000000L)).toString
+    page.totals.priorityFeesNanoErg shouldBe "15000000"
+    db.rollback()
+    db.lending(0, 10).positions.map(_.height) shouldBe Vector(2, 1)
+    db.lending(0, 10).totals shouldBe LendingTotals.of(Seq(lent(2), lent(1)).flatMap(_.lending))
+    db.prune(cursor(1).timestamp + 1, limit = 10, rollbackBlocks = 0) shouldBe 1
+    val left = db.lending(0, 10)
+    left.positions.map(_.height) shouldBe Vector(2)
+    left.retainedFromHeight shouldBe 2
+    withClue("the stored totals follow every append, rollback and prune: ") {
+      left.totals shouldBe LendingTotals.of(lent(2).lending.toSeq)
+    }
+    an[IllegalArgumentException] should be thrownBy db.lending(0, Lending.MaxLimit + 1)
+    an[IllegalArgumentException] should be thrownBy db.append(lent(3).copy(lending = lent(3).lending.map(_.copy(height = 9))))
+  }
+
+  "A new schema" should "carry local observations and the epoch table over from an older store of the same identity" in {
+    val older = new InMemoryKeyValueStore
+    val previous = new MiningStatsStore(Some(older), identity)
+    val observation = LocalMiningObservation("shares", "s1", 3L, 1000L, 2 * MiningHistory.HourMs + 5, Map("accepted" -> "7"))
+    previous.saveLocal(Seq(observation))
+    val epoch = DifficultyEpoch(4, DifficultyEpochs.startHeight(4), DifficultyEpochs.endHeight(4), 10L, 20L, "99",
+      complete = true, None)
+    previous.saveEpochs(Seq(epoch))
+    previous.initialize(cursor(1))
+    previous.append(record(cursor(2), cursor(1)))
+
+    val next = new MiningStatsStore(None, identity ++ Json.obj("schema" -> 2))
+    next.fresh shouldBe true
+    // A record the new store already holds, from a carry-over that stopped part way, is not overwritten
+    val newer = observation.copy(sequence = 9L, counters = Map("accepted" -> "9"))
+    next.saveLocal(Seq(newer))
+    next.fresh shouldBe true
+    next.carryOver(older, 1) should be > 0
+    next.fresh shouldBe false
+    next.localHistory("shares", 0L, 3 * MiningHistory.HourMs) shouldBe Vector(newer)
+    next.epoch(4) shouldBe Some(epoch)
+    next.epochBounds shouldBe Some((4, 4))
+    withClue("block records are rebuilt from the chain, not copied: ") {
+      next.state shouldBe None
+      next.block(2) shouldBe None
+    }
+
+    val elsewhere = new MiningStatsStore(None, identity ++ Json.obj("schema" -> 2, "miner" -> "other"))
+    an[IllegalArgumentException] should be thrownBy elsewhere.carryOver(older, 1)
+    elsewhere.fresh shouldBe true
+  }
+
+  it should "open over a real older store: carry it over, then delete it unless told to keep it" in {
+    Seq(true, false).foreach { prune =>
+      val root = Files.createTempDirectory("mining-stats-open-")
+      val (node, _, _) = support.FakeNodeContext()
+      val protocol = support.ReducerFixtures.protocol()
+      val older = root.resolve(s"mining-v${MiningStatsStore.SchemaVersion - 1}")
+      val observation = LocalMiningObservation("shares", "s1", 1L, 0L, MiningHistory.HourMs + 1, Map("accepted" -> "3"))
+      val previous = new MiningStatsStore(Some(LevelDbKeyValueStore.openOrThrow(older)),
+        MiningStatsStore.identityOf(node, protocol, MiningStatsStore.SchemaVersion - 1))
+      previous.saveLocal(Seq(observation))
+      previous.close()
+
+      val settings = configs.StatsStorageConfig(path = root.toString, pruneOldSchemas = prune)
+      val opened = MiningStatsStore.open(settings, node, protocol)
+      try {
+        withClue(s"pruneOldSchemas = $prune: ") {
+          opened.localHistory("shares", 0L, 2 * MiningHistory.HourMs) shouldBe Vector(observation)
+          opened.fresh shouldBe false
+          Files.exists(older) shouldBe !prune
+          Files.exists(root.resolve(s"mining-v${MiningStatsStore.SchemaVersion}")) shouldBe true
+        }
+      } finally opened.close()
+    }
+  }
+
+  it should "find only older schemas' directories, and remove one whole" in {
+    val root = Files.createTempDirectory("mining-stats-root-")
+    val current = MiningStatsStore.SchemaVersion
+    Seq(current - 5, current - 1, current, current + 1).foreach(v => Files.createDirectories(root.resolve(s"mining-v$v")))
+    Files.createDirectories(root.resolve("mining-vx"))
+    Files.write(root.resolve(s"mining-v${current - 2}"), Array[Byte](1))
+    Files.write(root.resolve(s"mining-v${current - 1}").resolve("000005.ldb"), Array.fill[Byte](10)(1))
+    Files.createDirectories(root.resolve(s"mining-v${current - 1}").resolve("nested"))
+    Files.write(root.resolve(s"mining-v${current - 1}").resolve("nested").resolve("LOG"), Array[Byte](2))
+
+    MiningStatsStore.olderSchemas(root).map(_._1) shouldBe Vector(current - 5, current - 1)
+    MiningStatsStore.remove(current - 1, root.resolve(s"mining-v${current - 1}"))
+    Files.exists(root.resolve(s"mining-v${current - 1}")) shouldBe false
+    MiningStatsStore.olderSchemas(root).map(_._1) shouldBe Vector(current - 5)
+    Seq(s"mining-v$current", s"mining-v${current + 1}", "mining-vx", s"mining-v${current - 2}")
+      .foreach(name => Files.exists(root.resolve(name)) shouldBe true)
+    MiningStatsStore.olderSchemas(root.resolve("missing")) shouldBe empty
+  }
 }

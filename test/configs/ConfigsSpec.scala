@@ -155,6 +155,18 @@ class ConfigsSpec extends AnyFlatSpec with Matchers {
     StatsConfig(noPruning).storage.pruningEnabled shouldBe false
   }
 
+  it should "prune older statistics schemas by default, unless told to keep them" in {
+    StatsConfig(shipped).storage.pruneOldSchemas shouldBe true
+    StatsStorageConfig().pruneOldSchemas shouldBe true
+    val keep = Configuration(ConfigFactory.parseString("stats.storage.pruneOldSchemas = false")
+      .withFallback(shipped.underlying).resolve())
+    noException should be thrownBy Configs.validateAll(keep)
+    StatsConfig(keep).storage.pruneOldSchemas shouldBe false
+    val wrong = Configuration(ConfigFactory.parseString("stats.storage.pruneOldSchemas = sometimes")
+      .withFallback(shipped.underlying).resolve())
+    (the[ConfigValidationException] thrownBy Configs.validateAll(wrong)).getMessage should include("stats.storage.pruneOldSchemas")
+  }
+
   /** A value the LithosDex batcher's constructor cannot read stops that actor, and the stratum then waits it out every block. */
   it should "reject LithosDex batching values before the batcher is built" in {
     val configured = Configuration(ConfigFactory.parseString(
@@ -302,7 +314,8 @@ class ConfigsSpec extends AnyFlatSpec with Matchers {
     Contexts.Names should contain theSameElementsAs
       Seq(Contexts.Stratum, Contexts.Polling, Contexts.Sync, Contexts.Tx, Contexts.Dex,
         Contexts.Database, Contexts.SnapshotIo, Contexts.CandidateIo, Contexts.MiningControlIo, Contexts.Genesis, Contexts.EngineIo, Contexts.MempoolIo, Contexts.WalletIo, Contexts.WalletMaintenance, Contexts.EngineCandidate, Contexts.CriticalWallet, Contexts.CriticalTx, Contexts.BatchingIo,
-        Contexts.LithosDexBatchingIo, Contexts.Stats, Contexts.StatsRead, Contexts.StatsStore, Contexts.MiningStats)
+        Contexts.LithosDexBatchingIo, Contexts.ForwardsBatchingIo, Contexts.Stats, Contexts.StatsRead,
+        Contexts.StatsStore, Contexts.MiningStats)
   }
 
   it should "reject an apiKeyHash that is the key rather than its hash" in {

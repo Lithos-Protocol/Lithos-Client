@@ -485,4 +485,12 @@ class CollateralMarketApiImplSpec
     f.api.getMarketInfo.activeNanoErgs shouldEqual
       (2L * CollateralParams.PRINCIPAL_FLOOR + premium).toString
   }
+
+  "The active set" should "report each box's confirmed inclusion height, and none for an unconfirmed box" in {
+    val f = fixture(numAddresses = 2, boxes = (ctx, addrs) =>
+      marketBoxes(ctx, addrs.head, Seq(
+        Fx.indexed(Fx.collateralBox(ctx, addrs.head, carriedLit = 0L, txId = "d1" * 32), height = 120000),
+        Fx.indexed(Fx.collateralBox(ctx, addrs(1), carriedLit = 0L, txId = "d2" * 32), height = 0))))
+    f.api.getActiveSet(None, None).map(_.inclusionHeight).sortBy(_.getOrElse(0)) shouldBe Seq(None, Some(120000))
+  }
 }

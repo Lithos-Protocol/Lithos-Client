@@ -139,6 +139,25 @@ class MiningStatsRefreshSpec extends TestKit(ActorSystem("mining-stats-spec",
     }
   }
 
+  it should "report the complete epoch before the current one, which the reorg margin keeps out of the table" in {
+    // 394 blocks: epoch 3 is under way, epoch 2 ended at 384, and only epochs up to 1 are a margin behind the tip
+    val chain = new Chain(3 * DifficultyEpochs.EpochLength + 10)
+    val db = new MiningStatsStore(None, identity)
+    // Not mainnet, whose table starts at the EIP-37 activation, far above this chain
+    val refresh = new MiningStatsRefresh(settings.copy(blocksPerRefresh = 500), false, 2, () => db, () => chain,
+      executor, mainnet = false)
+    try {
+      caughtUp(refresh, chain.chain.size)
+      awaitAssert({
+        refresh.tick()
+        val history = Await.result(refresh.difficulty(None, None, 9), 3.seconds)
+        history.current.map(_.index) shouldBe Some(3)
+        history.epochs.map(_.index) shouldBe Vector(0, 1)
+        history.previous.map(e => (e.index, e.endHeight, e.complete)) shouldBe Some((2, 384, true))
+      }, 8.seconds)
+    } finally Await.result(refresh.shutdown(), 3.seconds)
+  }
+
   it should "keep a restored view as stale on node failure and recover without duplicate totals" in {
     // History already collected is still true when the node drops out, so it is reported as behind
     // rather than gone.

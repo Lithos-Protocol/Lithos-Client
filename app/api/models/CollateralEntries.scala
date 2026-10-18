@@ -25,14 +25,17 @@ object CollateralQueueEntry {
  * A live collateral box waiting to be spent by whichever miner finds the next block.
  *
  * `priorityFeeNanoErgs` is the fee this box carries, a share of which goes to that miner. The
- * active set sorted by it is the spot book: what a miner can take right now.
+ * active set sorted by it is the spot book: what a miner can take right now. `inclusionHeight` is
+ * the block that confirmed it, absent while unconfirmed; its age from there decides when miners
+ * draw it ahead of every bid.
  */
 case class CollateralActiveEntry(boxId: String,
                                  lenderAddress: String,
                                  valueNanoErgs: String,
                                  carriedLit: String,
                                  creationHeight: Int,
-                                 priorityFeeNanoErgs: String = "0")
+                                 priorityFeeNanoErgs: String = "0",
+                                 inclusionHeight: Option[Int] = None)
 
 object CollateralActiveEntry {
   implicit lazy val jsonFormat: Format[CollateralActiveEntry] = Json.format[CollateralActiveEntry]

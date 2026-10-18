@@ -12,6 +12,7 @@ import org.ergoplatform.appkit.ErgoValue
 import sigma.Coll
 import state.messages.{BlockInfo, BlockTx, NodeSync, TxOutput}
 import state.synchronization.{BlockReducer, CanonicalBlockSource, NodeHeights, SyncProtocolContext}
+import work.lithos.mutations.{Contract, MainnetEip27Constants}
 
 import java.util.concurrent.{TimeUnit, TimeoutException}
 import scala.collection.mutable
@@ -44,13 +45,31 @@ object NodeMiningStatsSource {
       override def getJsonOpt(path: String, params: Seq[(String, String)]): Try[Option[JsonElement]] = bounded(super.getJsonOpt(path, params))
       override def postJson(path: String, body: String, params: Seq[(String, String)]): Try[JsonElement] = bounded(super.postJson(path, body, params))
     })
-    new NodeMiningStatsSource(api, protocol, node.getNodeWallet.contract.ergoTreeHex)
+    new NodeMiningStatsSource(api, protocol, node.getNodeWallet.contract.ergoTreeHex, lenders(node.getNodeWallet))
   }
   def cursor(header: NodeHeader): MiningCursor = MiningCursor(header.height, header.id, header.parentId, header.timestamp)
+
+  /** This wallet's keys, by the P2PK tree a collateral box names its lender with. */
+  def lenders(wallet: mutations.NodeWallet): Map[String, LenderKey] =
+    wallet.rewardTrees.map { case (rewardTree, address) =>
+      Contract.fromAddress(address).ergoTreeHex -> LenderKey(address.toString, rewardTree)
+    }
 }
 
-/** Uses indexed inputs and the canonical header chain, independently of live synchronization state. */
-class NodeMiningStatsSource(api: NodeApi, protocol: SyncProtocolContext, minerTree: String) extends MiningStatsSource {
+/**
+ * One of this wallet's keys as a lender.
+ *
+ * @param rewardTree where a block reward to it is locked: the key, after 720 blocks
+ */
+final case class LenderKey(address: String, rewardTree: String)
+
+/**
+ * Uses indexed inputs and the canonical header chain, independently of live synchronization state.
+ *
+ * @param lenders this wallet's keys, by P2PK tree, whose collateral this source records the earnings of
+ */
+class NodeMiningStatsSource(api: NodeApi, protocol: SyncProtocolContext, minerTree: String,
+                            lenders: Map[String, LenderKey] = Map.empty) extends MiningStatsSource {
   import NodeMiningStatsSource.cursor
   private val chain = new CanonicalBlockSource(api)
   private val origins = mutable.Map.empty[String, Option[LithosBlockRecord]]
@@ -141,8 +160,50 @@ class NodeMiningStatsSource(api: NodeApi, protocol: SyncProtocolContext, minerTr
     val networkPayments = payments.result()
     MiningBlockRecord(at, previous, fullHeader.difficulty.toString, blocks, networkPayments.filter(_.local),
       MiningActivity(networkPayments, rollups.result(), fees.result(), batches.result(), registrations.result()),
-      block.txs.map(BatchingStatistics.transactionFee).sum.toString)
+      block.txs.map(BatchingStatistics.transactionFee).sum.toString,
+      blocks.headOption.flatMap(lending(block, _, at)))
   }
+
+  /**
+   * What this wallet received for the collateral `genesis` spent, or None when the box was another lender's.
+   * The collateral contract makes the block's coinbase pay the box's lender, and the fee transaction pays the
+   * same key, so both are outputs at that key's reward script in this block.
+   */
+  private def lending(block: BlockInfo, genesis: LithosBlockRecord, at: MiningCursor): Option[LendingRecord] = for {
+    tx <- block.txs.find(_.id == genesis.transactionId)
+    collateral <- tx.inputs.headOption.flatMap(in => block.inputBox(in.id))
+    lenderRegister <- collateral.registers.lift(1)
+    lender <- lenderTree(lenderRegister).flatMap(lenders.get)
+  } yield {
+    val feeTree = Contract.FEE.ergoTreeHex
+    val feeBoxes = block.txs.flatMap(_.outputs).filter(_.ergoTree == feeTree).map(_.id).toSet
+    def collectsFees(t: BlockTx): Boolean = t.inputs.nonEmpty &&
+      t.inputs.forall(in => feeBoxes(in.id) || block.inputBox(in.id).exists(_.ergoTree == feeTree))
+    val (fees, coinbase) = block.txs.flatMap(t => t.outputs.filter(_.ergoTree == lender.rewardTree).map(t -> _))
+      .partition { case (t, _) => collectsFees(t) }
+    LendingRecord(at.blockId, at.height, at.timestamp, collateral.id, lender.address, collateral.value.toString,
+      genesis.priorityFeeNanoErg, coinbase.map { case (_, out) => out.value - reemission(out) }.sum.toString,
+      fees.map(_._2.value).sum.toString, joinedHeight(collateral, lenderRegister))
+  }
+
+  /** The P2PK tree a lender register names, which is the key's own proposition bytes. */
+  private def lenderTree(register: String): Option[String] =
+    Try(ErgoValue.fromHex(register).getValue).toOption.collect {
+      case key: sigma.SigmaProp => Hex.toHexString(key.propBytes.toArray)
+    }
+
+  /** NanoERG a spend of `out` must pay to re-emission: one per re-emission token it carries, mainnet only. */
+  private def reemission(out: TxOutput): Long =
+    out.assets.filter(_.id.toString == MainnetEip27Constants.TokenId).map(_.amount).sum
+
+  /**
+   * When the lender joined: the queue box the activation spent, which names the same lender. A failed read fails
+   * the block, to be read again, rather than record a position without its start.
+   */
+  private def joinedHeight(collateral: TxOutput, lenderRegister: String): Option[Int] =
+    api.indexedTransactionById(collateral.txId).get.flatMap(_.inputs
+      .find(in => in.boxId != collateral.id && in.box.additionalRegisters.get(5).contains(lenderRegister))
+      .map(_.inclusionHeight))
 
   /**
    * A dictionary spend that carries no operation is not a registration. Throwing on one instead

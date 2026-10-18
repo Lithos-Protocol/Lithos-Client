@@ -18,9 +18,25 @@ final case class MiningPaymentRecord(transactionId: String, outputId: String, pa
                                       minedTimestamp: Long, blockId: String, height: Int, timestamp: Long,
                                       grossNanoErg: String, amounts: Option[PayoutAmounts] = None,
                                       minerHash: Option[String] = None, local: Boolean = true)
+/**
+ * What this wallet got back for one of its collateral boxes, which this block spent.
+ *
+ * @param postedNanoErg   the box's whole value: the principal and the priority fee bid on top of it
+ * @param coinbaseNanoErg the block reward paid to the lender's key, less the re-emission tokens a spend of it
+ *                        must pay on mainnet
+ * @param feesNanoErg     the block's transaction fees, which the fee transaction pays to the same key
+ * @param joinedHeight    the block that included the queue box, or None when the index does not show it
+ */
+final case class LendingRecord(blockId: String, height: Int, timestamp: Long, collateralBoxId: String,
+                               lenderAddress: String, postedNanoErg: String, priorityFeeNanoErg: String,
+                               coinbaseNanoErg: String, feesNanoErg: String, joinedHeight: Option[Int]) {
+  def receivedNanoErg: BigInt = BigInt(coinbaseNanoErg) + BigInt(feesNanoErg)
+  def netNanoErg: BigInt = receivedNanoErg - BigInt(postedNanoErg)
+}
 final case class MiningBlockRecord(cursor: MiningCursor, previous: MiningCursor, difficulty: String,
                                     blocks: Vector[LithosBlockRecord], payments: Vector[MiningPaymentRecord],
-                                    activity: MiningActivity = MiningActivity(), transactionFeesNanoErg: String = "0")
+                                    activity: MiningActivity = MiningActivity(), transactionFeesNanoErg: String = "0",
+                                    lending: Option[LendingRecord] = None)
 final case class MiningTotals(blocks: Long = 0L, payments: Long = 0L, grossPaidNanoErg: String = "0",
                                 accounting: MiningAccountingTotals = MiningAccountingTotals()) {
   def include(record: MiningBlockRecord, sign: Int): MiningTotals = {
@@ -54,6 +70,8 @@ object MiningStatsData {
   implicit val blockFormat: OFormat[LithosBlockRecord] = Json.format[LithosBlockRecord]
   implicit val payoutAmountsFormat: OFormat[PayoutAmounts] = Json.format[PayoutAmounts]
   implicit val paymentFormat: OFormat[MiningPaymentRecord] = Json.format[MiningPaymentRecord]
+  implicit val lendingFormat: OFormat[LendingRecord] = Json.format[LendingRecord]
+  implicit val lendingTotalsFormat: OFormat[LendingTotals] = Json.format[LendingTotals]
   implicit val rollupActivityFormat: OFormat[RollupActivity] = Json.format[RollupActivity]
   implicit val transactionFeeFormat: OFormat[MiningTransactionFee] = Json.format[MiningTransactionFee]
   implicit val batchingFeeFormat: OFormat[BatchingFee] = Json.format[BatchingFee]

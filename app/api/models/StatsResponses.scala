@@ -42,6 +42,19 @@ object StatsResponses {
       "holdingBlocks" -> page.holdingBlocks, "evaluationBlocks" -> page.evaluationBlocks)
   }
 
+  /** Each row adds what came back and the net, so a caller does not have to sum strings. */
+  private val lendingRowWrites: OWrites[LendingRecord] = OWrites { l =>
+    MiningStatsData.lendingFormat.writes(l) ++
+      Json.obj("receivedNanoErg" -> l.receivedNanoErg.toString, "netNanoErg" -> l.netNanoErg.toString)
+  }
+  implicit val lendingTotalsWrites: OWrites[LendingTotals] = Json.writes[LendingTotals]
+  implicit val lendingWrites: OWrites[LendingPage] = OWrites { page =>
+    Json.obj("status" -> page.status, "source" -> page.source, "retainedFromHeight" -> page.retainedFromHeight,
+      "retainedFromTimestamp" -> page.retainedFromTimestamp, "offset" -> page.offset, "total" -> page.total,
+      "positions" -> JsArray(page.positions.map(lendingRowWrites.writes)), "totals" -> page.totals,
+      "rewardLockBlocks" -> page.rewardLockBlocks)
+  }
+
   def totals(view: MiningStatsView): MiningTotalsResponse =
     MiningTotalsResponse(view.status, view.persistent, view.observedAt, view.sourceHeight, view.sourceBlockId,
       view.targetHeight, view.fromHeight, view.fromTimestamp, view.totals.accounting.values)

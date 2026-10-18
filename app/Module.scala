@@ -64,6 +64,7 @@ class Module(environment: Environment, configuration: Configuration) extends Abs
     // for block transactions only when it is running.
     bindActor(classOf[transactions.batching.ergodex.ErgoDexBatcher], "ergodex-batcher")
     bindActor(classOf[transactions.batching.lithosdex.LithosDexBatcher], "lithosdex-batcher")
+    bindActor(classOf[transactions.batching.forwards.ForwardsBatcher], "forwards-batcher")
 
     bind(classOf[BlocksApi]).to(classOf[BlocksApiImpl])
     bind(classOf[CollateralMarketApi]).to(classOf[CollateralMarketApiImpl])
@@ -71,6 +72,7 @@ class Module(environment: Environment, configuration: Configuration) extends Abs
     bind(classOf[MiningApi]).to(classOf[MiningApiImpl])
     bind(classOf[PaymentsApi]).to(classOf[PaymentsApiImpl])
     bind(classOf[LithosDexApi]).to(classOf[LithosDexApiImpl])
+    bind(classOf[ForwardsApi]).to(classOf[ForwardsApiImpl])
     bind(classOf[WalletApi]).to(classOf[WalletApiImpl])
     bind[StartupTasks](classOf[StartupTasks]).asEagerSingleton()
     //bind[StartStratumServer](classOf[StartStratumServer]).asEagerSingleton()

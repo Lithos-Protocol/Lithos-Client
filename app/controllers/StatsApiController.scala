@@ -9,8 +9,8 @@ import play.api.Configuration
 import play.api.libs.json.Json
 import play.api.mvc._
 import scorex.crypto.hash.Blake2b256
-import stats.{DifficultyEpochs, LocalMiningSummary, MiningHistory, MiningStatsRefresh, PaymentLedger, StatsCache, StatsView,
-  StratumDifficulty}
+import stats.{DifficultyEpochs, Lending, LocalMiningSummary, MiningHistory, MiningStatsRefresh, PaymentLedger, StatsCache,
+  StatsView, StratumDifficulty}
 
 import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
@@ -76,6 +76,16 @@ class StatsApiController @Inject()(cc: ControllerComponents, cache: StatsCache, 
     else if (!PaymentLedger.Sorts.contains(by)) invalid("'sort' must be 'paid' or 'mined'")
     else if (direction != "asc" && direction != "desc") invalid("'order' must be 'asc' or 'desc'")
     else mining.payments(skip, size, by, direction == "asc").map(value => Ok(Json.toJson(value))).recover(unavailable)
+  })
+
+  /** Keyed: it names this wallet's lender addresses and what each position earned. */
+  def getLendingEarnings(offset: Option[Int], limit: Option[Int]): Action[AnyContent] = withApiKey(Action.async {
+    val size = limit.getOrElse(Lending.DefaultLimit)
+    val skip = offset.getOrElse(0)
+    def invalid(reason: String) = Future.successful(BadRequest(ApiHelper.makeError(400, "Invalid lending page", reason)))
+    if (size < 1 || size > Lending.MaxLimit) invalid(s"'limit' must be between 1 and ${Lending.MaxLimit}")
+    else if (skip < 0) invalid("'offset' must be nonnegative")
+    else mining.lending(skip, size).map(value => Ok(Json.toJson(value))).recover(unavailable)
   })
 
   def getLocalMiningSummary(): Action[AnyContent] = noStore(Action {

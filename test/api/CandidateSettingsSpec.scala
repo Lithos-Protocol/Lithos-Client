@@ -16,8 +16,8 @@ class CandidateSettingsSpec extends AnyFlatSpec with Matchers {
   "Candidate settings" should "report the shipped config, with every enabled source active" in {
     val settings = CandidateSettings.from(shipped)
     settings.blockTransactions shouldBe true
-    settings.sources.map(_.name) shouldBe Seq("rollups", "emissions", "rent", "lithosdex", "ergodex")
-    settings.sources.filter(_.active).map(_.name) shouldBe Seq("emissions", "rent", "lithosdex", "ergodex")
+    settings.sources.map(_.name) shouldBe Seq("rollups", "emissions", "rent", "forwards", "lithosdex", "ergodex")
+    settings.sources.filter(_.active).map(_.name) shouldBe Seq("emissions", "rent", "forwards", "lithosdex", "ergodex")
     settings.mempoolRefreshMs shouldBe 20000
     settings.minCandidateChangeRevenue shouldBe 1000000L
     settings.collateralStrategy shouldBe "highestFee"
@@ -28,7 +28,7 @@ class CandidateSettingsSpec extends AnyFlatSpec with Matchers {
     val settings = CandidateSettings.from(withOverrides("stratum.candidate.blockTransactions = false"))
     settings.sources.exists(_.active) shouldBe false
     // Enabled is the source's own setting, reported even while nothing asks it.
-    settings.sources.filter(_.enabled).map(_.name) shouldBe Seq("emissions", "rent", "lithosdex", "ergodex")
+    settings.sources.filter(_.enabled).map(_.name) shouldBe Seq("emissions", "rent", "forwards", "lithosdex", "ergodex")
   }
 
   it should "mark a source active only when it would be asked" in {
@@ -38,12 +38,15 @@ class CandidateSettingsSpec extends AnyFlatSpec with Matchers {
         |stratum.candidate.sources.ergodex.enabled = true
         |batching.ergodex.enabled = false
         |stratum.candidate.sources.emissions.maxTxs = 0
+        |batching.forwards.enabled = false
         |""".stripMargin))
     settings.sources.map(s => s.name -> s.active).toMap shouldBe Map(
       "rollups" -> true,
       // No slots is the same as off: the stratum never asks a source it cannot place.
       "emissions" -> false,
       "rent" -> true,
+      // The forwards batcher serves its source, so the source is idle with it off.
+      "forwards" -> false,
       "lithosdex" -> true,
       // Enabled as a source, but its batcher is off, so nothing would answer.
       "ergodex" -> false)
@@ -55,5 +58,12 @@ class CandidateSettingsSpec extends AnyFlatSpec with Matchers {
     (json \ "refreshForProtocolTxs").as[Boolean] shouldBe true
     (json \ "minNewProtocolTxs").as[Int] shouldBe 1
     (json \ "sources" \ 0 \ "maxBytes").as[Long] shouldBe 262144L
+  }
+
+  it should "carry the shipped and largest clearance ages beside this client's own" in {
+    val json = Json.toJson(CandidateSettings.from(withOverrides("stratum.candidate.clearanceAge = 300")))
+    (json \ "clearanceAge").as[Int] shouldBe 300
+    (json \ "defaultClearanceAge").as[Int] shouldBe 7200
+    (json \ "maxClearanceAge").as[Int] shouldBe 14400
   }
 }

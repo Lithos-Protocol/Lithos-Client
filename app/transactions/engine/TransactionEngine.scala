@@ -8,7 +8,8 @@ import java.util.concurrent.atomic.AtomicBoolean
 import scala.concurrent.Future
 import scala.concurrent.duration._
 import scala.util.{Failure, Success, Try}
-import transactions.engine.execution.{CommitmentExecution, ConsolidationExecution, DexAPIExecution, RollupExecution}
+import transactions.engine.execution.{CommitmentExecution, ConsolidationExecution, DexAPIExecution,
+  ForwardsAPIExecution, RollupExecution}
 import transactions.engine.wallet.{EngineFunding, EngineWalletState}
 
 object TransactionEngine {
@@ -162,6 +163,18 @@ class TransactionEngine @Inject()(node: NodeContext,
     override protected def executionNode: _root_.node.NodeApi = TransactionEngine.this.nodeApi
   }
   private lazy val dexCache = new cache.LDCache(cacheApi)
+  private lazy val forwardsDeployment = transactions.batching.forwards.ForwardsBatcher.deployment(node.getNetwork)
+  private lazy val forwardsOffers = configs.ForwardsOffersConfig(config)
+
+  /**
+   * One attempt's forwards execution, which signs and sends nothing once `stillEligible` turns false. A caller
+   * that scheduled the request is told nothing was sent, so it never finds the request sent after giving up.
+   */
+  protected def newForwardsExecution(stillEligible: () => Boolean): ForwardsAPIExecution =
+    new ForwardsAPIExecution(node, EngineFunding(self, EngineFunding.askTimeout(config), ec), forwardsDeployment,
+      forwardsOffers, stillEligible) {
+      override protected def executionNode: _root_.node.NodeApi = TransactionEngine.this.nodeApi
+    }
 
   override def preStart(): Unit = {
     super.preStart()
@@ -193,6 +206,7 @@ class TransactionEngine @Inject()(node: NodeContext,
 
     case Submit(intent) => admit(intent, sender())
     case intent: DexIntent => admit(EngineIntent.Dex(intent), sender())
+    case intent: ForwardsIntent => admit(EngineIntent.Forwards(intent), sender())
     case JoinCollateral(request) => admit(EngineIntent.Join(request), sender())
     case RegisterMiner(diff) => admit(EngineIntent.Register(diff), sender())
     case CommitDifficulty(diff) => admit(EngineIntent.Commit(diff), sender())
@@ -289,6 +303,7 @@ class TransactionEngine @Inject()(node: NodeContext,
     val now = System.currentTimeMillis()
     val valid = work match {
       case EngineIntent.Dex(request, requestId) => DexIntent.fitsBudget(request) && requestId.length <= 128
+      case EngineIntent.Forwards(request, requestId) => ForwardsIntent.admissible(request) && requestId.length <= 128
       case EngineIntent.Rollups(stubs) =>
         stubs.nonEmpty && stubs.size <= 100 && stubs.forall(_.rollupBlockId.matches("[0-9a-f]{64}"))
       case EngineIntent.Join(request, requestId) =>
@@ -301,7 +316,8 @@ class TransactionEngine @Inject()(node: NodeContext,
     // A one-off API request is never retried: the caller has already been answered by then. The
     // commitment loop asks again every pass, so its own work is not retried here either.
     val policy = work match {
-      case _: EngineIntent.Dex | _: EngineIntent.Join | _: EngineIntent.Register | _: EngineIntent.Commit => OneOff
+      case _: EngineIntent.Dex | _: EngineIntent.Forwards | _: EngineIntent.Join | _: EngineIntent.Register |
+           _: EngineIntent.Commit => OneOff
       case _: EngineIntent.Rollups => Critical
       case _ => Automatic
     }
@@ -368,6 +384,7 @@ class TransactionEngine @Inject()(node: NodeContext,
   /** Blocking optional operations run on the engine worker after admission and expiry checks. */
   protected def executeOptional(work: EngineIntent, stillEligible: () => Boolean): Any = work match {
     case EngineIntent.Dex(request, _) => request.execute(dex, dexCache)
+    case EngineIntent.Forwards(request, _) => request.execute(newForwardsExecution(stillEligible))
     case EngineIntent.Consolidate =>
       consolidation.execute(consolidationTarget, stillEligible,
         walletConfig.consolidation.minInputs, walletConfig.consolidation.transactions)

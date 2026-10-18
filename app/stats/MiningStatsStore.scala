@@ -2,21 +2,29 @@ package stats
 
 import configs.{NodeContext, StatsStorageConfig}
 import org.bouncycastle.util.encoders.Hex
+import org.slf4j.LoggerFactory
 import play.api.libs.json._
 import scorex.crypto.hash.Blake2b256
 import state.synchronization.SyncProtocolContext
-import storage.{KeyValueMutation, KeyValueStore, WriteDurability}
+import storage.{KeyValueMutation, KeyValueReadView, KeyValueStore, WriteDurability}
 
 import java.nio.charset.StandardCharsets.UTF_8
-import java.nio.file.Paths
+import java.nio.file.{Files, Path, Paths}
+import scala.collection.JavaConverters._
+import scala.util.control.NonFatal
+import scala.util.{Failure, Success, Try}
 
 object MiningStatsStore {
-  // 7 adds the mined height to ledger payout keys so payouts can be ordered by rollup. The version is
-  // part of the database path, so an older store is left alone rather than migrated: its keys and
-  // records would not parse.
-  val SchemaVersion: Int = 7
-  def open(settings: StatsStorageConfig, node: NodeContext, protocol: SyncProtocolContext): MiningStatsStore = {
-    val identity = Json.obj("schema" -> SchemaVersion, "network" -> protocol.networkType.toString,
+  // 8 records what this wallet earned lending collateral in each block record. The version is part of
+  // the database path, so an older store is not migrated in place: its block records would not parse.
+  // A new store rebuilds them from the chain, and carries over what the chain cannot rebuild.
+  val SchemaVersion: Int = 8
+  private val logger = LoggerFactory.getLogger("MiningStatistics")
+  private val VersionedDirectory = """mining-v(\d+)""".r
+
+  /** What a store records it was written for. A store only opens for the same identity. */
+  private[stats] def identityOf(node: NodeContext, protocol: SyncProtocolContext, schema: Int = SchemaVersion): JsObject =
+    Json.obj("schema" -> schema, "network" -> protocol.networkType.toString,
       "startHeight" -> protocol.rollupStartHeight, "holding" -> protocol.holdingErgoTree,
       "collateral" -> protocol.collateralErgoTree, "collateralToken" -> protocol.collateralToken.toString,
       "evaluation" -> protocol.evaluationErgoTree, "payout" -> protocol.payoutErgoTree,
@@ -26,11 +34,57 @@ object MiningStatsStore {
       "ergoDexPoolTree" -> transactions.batching.ergodex.ErgoDexContracts.NativePoolErgoTree,
       "feeTree" -> work.lithos.mutations.Contract.FEE.ergoTreeHex,
       "miner" -> node.getNodeWallet.contract.ergoTreeHex)
+
+  def open(settings: StatsStorageConfig, node: NodeContext, protocol: SyncProtocolContext): MiningStatsStore = {
+    val identity = identityOf(node, protocol)
     // A separate database lets canonical replay and DEX observations make progress independently.
+    val root = Paths.get(settings.path)
     val database = if (settings.enabled)
-      Some(KeyValueStore.openOrThrow(settings.backend, Paths.get(settings.path).resolve(s"mining-v$SchemaVersion"))) else None
-    try new MiningStatsStore(database, identity)
-    catch { case scala.util.control.NonFatal(error) => database.foreach(_.close()); throw error }
+      Some(KeyValueStore.openOrThrow(settings.backend, root.resolve(s"mining-v$SchemaVersion"))) else None
+    val store = try new MiningStatsStore(database, identity)
+    catch { case NonFatal(error) => database.foreach(_.close()); throw error }
+    if (settings.enabled) olderSchemas(root).lastOption.foreach { case (version, path) =>
+      carryOver(store, settings.backend, version, path)
+    }
+    if (settings.pruneOldSchemas) olderSchemas(root).foreach { case (version, path) => remove(version, path) }
+    store
+  }
+
+  /** Mining statistics directories under `root` written by an older schema, oldest first. */
+  private[stats] def olderSchemas(root: Path): Vector[(Int, Path)] =
+    if (!Files.isDirectory(root)) Vector.empty
+    else {
+      val listing = Files.list(root)
+      try listing.iterator().asScala.toVector.flatMap { path =>
+        path.getFileName.toString match {
+          case VersionedDirectory(version) if Files.isDirectory(path) && Try(version.toInt).toOption.exists(_ < SchemaVersion) =>
+            Some(version.toInt -> path)
+          case _ => None
+        }
+      }.sortBy(_._1)
+      finally listing.close()
+    }
+
+  /** Once, into a store this version has not written yet. A failure leaves the new store to rebuild alone. */
+  private def carryOver(store: MiningStatsStore, backend: String, version: Int, path: Path): Unit =
+    if (store.fresh) Try {
+      val older = KeyValueStore.openOrThrow(backend, path)
+      try store.carryOver(older, version) finally older.close()
+    } match {
+      case Success(copied) => logger.info(s"Carried $copied local and difficulty records over from mining statistics v$version")
+      case Failure(error) => logger.warn(s"Did not carry mining statistics over from v$version: ${error.getMessage}")
+    }
+
+  /** Deletes an older schema's directory. Statistics never stop the client, so a failure is only logged. */
+  private[stats] def remove(version: Int, path: Path): Unit = Try {
+    val walk = Files.walk(path)
+    val files = try walk.iterator().asScala.toVector finally walk.close()
+    val bytes = files.filter(Files.isRegularFile(_)).map(Files.size).sum
+    files.sortBy(-_.getNameCount).foreach(Files.delete)
+    bytes
+  } match {
+    case Success(bytes) => logger.info(s"Removed mining statistics v$version (${bytes / (1024 * 1024)} MiB) at $path")
+    case Failure(error) => logger.warn(s"Could not remove mining statistics v$version at $path: ${error.getMessage}")
   }
 }
 
@@ -109,7 +163,7 @@ class MiningStatsStore(database: Option[KeyValueStore], identity: JsObject) {
     require(record.cursor.timestamp > base.cursor.timestamp, "mining block timestamp did not increase")
     saveState(base.copy(cursor = record.cursor, totals = base.totals.include(record, 1)),
       Vector(Put(key(blockKey(record.cursor.height)), encode(record))) ++ bucketChanges(record, 1) ++
-        ledgerAdditions(record))
+        ledgerAdditions(record) ++ lendingTotalsChange(record, 1))
   }
 
   /** Removes one displaced block. The previous cursor remains valid even at the retention boundary. */
@@ -117,7 +171,8 @@ class MiningStatsStore(database: Option[KeyValueStore], identity: JsObject) {
     val base = current.get
     val record = requiredBlock(base.cursor.height)
     saveState(base.copy(cursor = record.previous, totals = base.totals.include(record, -1)),
-      Vector(Delete(key(blockKey(record.cursor.height)))) ++ bucketChanges(record, -1) ++ ledgerRemovals(record))
+      Vector(Delete(key(blockKey(record.cursor.height)))) ++ bucketChanges(record, -1) ++ ledgerRemovals(record) ++
+        lendingTotalsChange(record, -1))
   }
 
   /** Keep a rollback buffer even on a quiet/old chain; totals describe all retained records. */
@@ -128,7 +183,8 @@ class MiningStatsStore(database: Option[KeyValueStore], identity: JsObject) {
       val base = current.get
       val record = requiredBlock(base.firstHeight)
       saveState(base.copy(firstHeight = base.firstHeight + 1, totals = base.totals.include(record, -1)),
-        Vector(Delete(key(blockKey(base.firstHeight)))) ++ bucketChanges(record, -1) ++ ledgerRemovals(record))
+        Vector(Delete(key(blockKey(base.firstHeight)))) ++ bucketChanges(record, -1) ++ ledgerRemovals(record) ++
+          lendingTotalsChange(record, -1))
       removed += 1
     }
     removed
@@ -160,7 +216,8 @@ class MiningStatsStore(database: Option[KeyValueStore], identity: JsObject) {
       rollups.filter(PaymentLedger.tracked(_, isTracked)).map(a =>
         Put(key(PaymentLedger.claimKey(at.height, a)), encode(LedgerEvent(at.height, at.timestamp, a)))) ++
       rollups.filter(a => a.kind == "fraudProof" && a.local).map(a =>
-        Put(key(PaymentLedger.bountyKey(at.height, a)), encode(LedgerEvent(at.height, at.timestamp, a))))
+        Put(key(PaymentLedger.bountyKey(at.height, a)), encode(LedgerEvent(at.height, at.timestamp, a)))) ++
+      record.lending.map(l => Put(key(Lending.key(at.height)), encode(l)))
   }
 
   /** Every key the record could have written. Deleting one that was never written is harmless. */
@@ -168,7 +225,28 @@ class MiningStatsStore(database: Option[KeyValueStore], identity: JsObject) {
     val height = record.cursor.height
     record.payments.map(p => Delete(key(PaymentLedger.paymentKey(p)))) ++
       record.activity.rollups.flatMap(a =>
-        Vector(Delete(key(PaymentLedger.claimKey(height, a))), Delete(key(PaymentLedger.bountyKey(height, a)))))
+        Vector(Delete(key(PaymentLedger.claimKey(height, a))), Delete(key(PaymentLedger.bountyKey(height, a))))) :+
+      Delete(key(Lending.key(height)))
+  }
+
+  /** The retained window's lending totals, written with the records so a page reads only its own rows. */
+  private def lendingTotalsChange(record: MiningBlockRecord, sign: Int): Vector[KeyValueMutation] =
+    record.lending.toVector.map { l =>
+      val previous = get("lending/totals").map(decode[LendingTotals]).getOrElse(LendingTotals.Zero)
+      Put(key("lending/totals"), encode(previous.add(l, sign)))
+    }
+
+  /** A page of this wallet's spent positions, newest first, with totals over the whole retained window. */
+  def lending(offset: Int, limit: Int): LendingPage = {
+    require(offset >= 0 && limit > 0 && limit <= Lending.MaxLimit, "invalid lending page")
+    val base = current.getOrElse(throw new IllegalStateException("mining history is loading"))
+    val keys = keysWithPrefix("ledger/lending/").reverse
+    val page = keys.slice(offset, offset + limit).map(name => decode[LendingRecord](get(name).getOrElse(
+      throw new IllegalStateException(s"ledger entry $name disappeared during the read"))))
+    val totals = get("lending/totals").map(decode[LendingTotals]).getOrElse(LendingTotals.Zero)
+    require(totals.positions == keys.size, "lending totals disagree with the records")
+    LendingPage("unverified", base.cursor, base.firstHeight, block(base.firstHeight).map(_.cursor.timestamp),
+      page, offset, keys.size, totals)
   }
 
   /** A page of payouts, newest first, with every open claim and bounty in the retained window. */
@@ -342,6 +420,50 @@ class MiningStatsStore(database: Option[KeyValueStore], identity: JsObject) {
       p.minedHeight <= at.height && BigInt(p.grossNanoErg) >= 0), "invalid mining payment record")
     require(record.blocks.map(_.transactionId).distinct.size == record.blocks.size &&
       record.payments.map(_.outputId).distinct.size == record.payments.size, "duplicate mining records")
+    require(record.lending.forall(l => l.blockId == at.blockId && l.height == at.height && l.timestamp == at.timestamp &&
+      record.blocks.exists(_.collateralBoxId == l.collateralBoxId) && BigInt(l.postedNanoErg) >= 0 &&
+      BigInt(l.coinbaseNanoErg) >= 0 && BigInt(l.feesNanoErg) >= 0 && l.joinedHeight.forall(_ <= at.height)),
+      "invalid lending record")
+  }
+
+  /**
+   * Whether this store still wants a carry-over: it has not started its history, and no carry-over has finished.
+   * One that stopped part way runs again, skipping what it already copied.
+   */
+  private[stats] def fresh: Boolean = current.isEmpty && get("carried").isEmpty
+
+  /**
+   * Copies what the chain cannot rebuild from a store an older schema wrote: local observations, and the
+   * difficulty epoch table, which would otherwise cost a header read per epoch to backfill. Only from a store of
+   * the same network, contracts and miner, and only records that parse here. The epoch table comes over whole or
+   * not at all, since a gap in it would never be backfilled.
+   *
+   * @return how many records were copied
+   */
+  private[stats] def carryOver(older: KeyValueReadView, version: Int): Int = {
+    val theirs = KeyValueStore.orThrow(older.get(key("identity"))).map(decode[JsObject])
+    require(theirs.exists(_ - "schema" == identity - "schema"),
+      "it was written for another network, contract set or miner")
+    def names(prefix: String) = KeyValueStore.orThrow(older.scanKeys(key(prefix))).map(new String(_, UTF_8))
+    def read(name: String) = KeyValueStore.orThrow(older.get(key(name)))
+    def parses(name: String, bytes: Array[Byte]): Boolean = Try(name match {
+      case "local/oldest-hour" => decode[Long](bytes)
+      case "epoch/oldest" | "epoch/newest" => decode[Int](bytes)
+      case n if n.startsWith("epoch/") => validateEpoch(decode[DifficultyEpoch](bytes))
+      case _ => decode[LocalMiningObservation](bytes)
+    }).isSuccess
+    val epochs = names("epoch/")
+    val epochsParse = epochs.forall(name => read(name).exists(parses(name, _)))
+    var copied = 0
+    // Read and written a batch at a time, so a long history never sits in memory whole
+    (names("local/") ++ (if (epochsParse) epochs else Vector.empty)).grouped(512).foreach { batch =>
+      val puts = batch.filter(name => get(name).isEmpty)
+        .flatMap(name => read(name).filter(parses(name, _)).map(bytes => Put(key(name), bytes)))
+      if (puts.nonEmpty) write(puts)
+      copied += puts.size
+    }
+    write(Seq(Put(key("carried"), encode(version))))
+    copied
   }
   private def saveState(next: MiningLedgerState, changes: Vector[KeyValueMutation]): Unit = {
     write(changes :+ Put(key("state"), encode(next)))

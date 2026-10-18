@@ -21,6 +21,12 @@ object EngineIntent {
     def key: String = "dex:" + requestId
   }
 
+  /** A one-off difficulty forward request, keyed per request like [[Dex]]. */
+  final case class Forwards(request: ForwardsIntent,
+                            requestId: String = java.util.UUID.randomUUID().toString) extends EngineIntent {
+    def key: String = "forwards:" + requestId
+  }
+
   final case class Rollups(stubs: Vector[RollupTxStub]) extends EngineIntent {
     override val lane = Lane.Critical
 
