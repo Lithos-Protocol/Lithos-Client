@@ -32,7 +32,13 @@ import scala.util.{Failure, Success, Try}
  * Collapsing the two discards recoverable state whenever the node is starting, behind, or still
  * indexing — and the caller then falls through to a full rescan from the configured start height.
  */
-class SnapshotFallbackSpec extends TestKit(ActorSystem("snapshot-fallback"))
+/**
+ * The actor opens a LevelDB in a fresh temp directory on its first save, which under a loaded host (the whole suite
+ * running, other JVMs on the box) can take longer than TestKit's default 3-second expectation; the spec then times
+ * out before the actor answers. 20 s is what the other actor specs here allow.
+ */
+class SnapshotFallbackSpec extends TestKit(ActorSystem("snapshot-fallback",
+  ConfigFactory.parseString("akka.test.single-expect-default = 20s").withFallback(ConfigFactory.load())))
   with AnyFlatSpecLike with Matchers with BeforeAndAfterAll with MockitoSugar {
 
   override def afterAll(): Unit = TestKit.shutdownActorSystem(system)
