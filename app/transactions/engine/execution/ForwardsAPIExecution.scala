@@ -675,7 +675,7 @@ class ForwardsAPIExecution(nodeContext: NodeContext,
    */
   private def broadcast(signed: SignedTransaction, funding: Seq[FundingAllocation]): EngineBroadcast.Result =
     try new EngineBroadcast(walletSelector.walletRef, executionNode)(walletSelector.executionContext)
-      .send(signed, funding, "forwards:" + signed.getId, alive)
+      .send(signed, funding, ForwardsAPIExecution.operation(signed), alive)
     catch { case _: IllegalArgumentException if !alive() => throw stopped }
 
   /** Goes no further once the engine has stopped this attempt, because its time ran out or the engine restarted. */
@@ -690,6 +690,10 @@ class ForwardsAPIExecution(nodeContext: NodeContext,
 }
 
 object ForwardsAPIExecution {
+
+  /** The engine operation a forwards mutation is sent under, keyed by its transaction id. */
+  def operation(signed: SignedTransaction): String =
+    "forwards:" + _root_.transactions.candidate.BlockTxMessages.CandidateTx.txId(signed)
 
   final val NotComputed: () => Either[String, NextDifficultyEstimate] =
     () => Left("the next epoch's difficulty is not computed for this request")

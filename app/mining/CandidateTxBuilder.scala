@@ -274,11 +274,11 @@ class CandidateTxBuilder(prover: NodeWallet, nodeApi: NodeApi, config: Candidate
 
     // Measured here because this is where the signed form exists: genesis is charged against the
     // block's byte and cost limits like every other member of the package.
-    val signedBytes = org.ergoplatform.ErgoLikeTransactionSerializer.toBytes(
-      sTx.asInstanceOf[org.ergoplatform.appkit.impl.SignedTransactionImpl].getTx).length
+    val signedBytes = _root_.transactions.candidate.BlockTxMessages.CandidateTx.signedSize(sTx)
     // Output 0 is the holding box, carried so a same-height top-up can spend it without re-reading
     // the transaction it came from.
-    CollateralData(sTx.getId.replace("\"", ""), _root_.transactions.candidate.BlockTxMessages.CandidateTx.signedJson(sTx), pkString, utxBytes,
+    CollateralData(_root_.transactions.candidate.BlockTxMessages.CandidateTx.txId(sTx),
+      _root_.transactions.candidate.BlockTxMessages.CandidateTx.signedJson(sTx), pkString, utxBytes,
       collat.bytes, collat.id.toString, lenderAddress.toString, signedBytes, sTx.getCost.toLong,
       Some(InputUTXO(sTx.getOutputsToSpend.get(0))), RollupProtocol.priorityFeeOf(finderFee),
       if (finderValue > 0) finderFee else 0L)

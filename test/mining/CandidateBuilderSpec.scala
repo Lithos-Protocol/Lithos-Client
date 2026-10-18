@@ -225,6 +225,25 @@ class CandidateBuilderSpec extends TestKit(ActorSystem("candidate-builder-spec",
     }
   }
 
+  "A dropped height" should "be told only to the sources this client asks, and say whether it is rebuilt" in {
+    val asked = TestProbe()
+    val disabled = TestProbe()
+    val limits = sourceLimits(4) + (configs.CandidateSourceConfig.Emissions ->
+      configs.CandidateSourceConfig.Default.copy(enabled = false))
+    val f = fixture(sources = Seq(CandidateSource(configs.CandidateSourceConfig.Rollups, asked.ref),
+      CandidateSource(configs.CandidateSourceConfig.Emissions, disabled.ref)),
+      config = cfg.copy(blockTransactions = true, blockTxTimeout = 30000, sources = limits))
+    f.builder ! ChainAdvanced(100, "ab" * 32)
+    published(f)
+    f.builder ! ChainAdvanced(100, "cd" * 32)
+    asked.fishForSpecificMessage() { case dropped: CandidateTxsDropped => dropped } shouldBe
+      CandidateTxsDropped(100, rebuilding = true)
+    f.builder ! ChainAdvanced(101, "ef" * 32)
+    asked.fishForSpecificMessage() { case dropped: CandidateTxsDropped => dropped } shouldBe
+      CandidateTxsDropped(100)
+    disabled.expectNoMessage(500.millis)
+  }
+
   private val extras = Seq(CandidateTx("optional", "{}", CandidateTx.Payout))
 
   private def requested(source: TestProbe, within: FiniteDuration = 3.seconds): RequestBlockTxs =
@@ -437,7 +456,7 @@ class CandidateBuilderSpec extends TestKit(ActorSystem("candidate-builder-spec",
     val old = published(f)
     requested(source)
     f.builder ! ChainAdvanced(100, "cd" * 32)
-    source.expectMsg(CandidateTxsDropped(100))
+    source.expectMsg(CandidateTxsDropped(100, rebuilding = true))
     val replacement = published(f)
     requested(source)
     val replyTo = source.lastSender
@@ -547,7 +566,7 @@ class CandidateBuilderSpec extends TestKit(ActorSystem("candidate-builder-spec",
     requested(source)
     val oldReply = source.lastSender
     f.builder ! RebuildCandidate
-    source.expectMsg(CandidateTxsDropped(100))
+    source.expectMsg(CandidateTxsDropped(100, rebuilding = true))
     val replacement = published(f)
     replacement.collateral.collateralId should not equal first.collateral.collateralId
     requested(source)
@@ -680,7 +699,7 @@ class CandidateBuilderSpec extends TestKit(ActorSystem("candidate-builder-spec",
     awaitAssert(f.stub.builtFor should have size 1)
     // Wait for the rebuild's source notification before releasing the old build.
     f.builder ! RebuildCandidate
-    source.expectMsg(CandidateTxsDropped(100))
+    source.expectMsg(CandidateTxsDropped(100, rebuilding = true))
     f.stub.release()
     published(f).blockHeight shouldEqual 100
     awaitAssert(f.stub.builtFor should have size 2)

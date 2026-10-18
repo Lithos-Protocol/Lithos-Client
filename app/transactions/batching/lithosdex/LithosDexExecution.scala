@@ -77,7 +77,7 @@ final case class LithosDexChain(transactions: Vector[SignedTransaction],
     CandidateBundle(placements ++ members,
       placements.flatMap(placement => Seq(ChainFromMempool(placement.id), IncludeExisting(placement.id))) ++
         (if (competitors.isEmpty) Seq.empty else Seq(Supersede(competitors))),
-      Seq(CapitalEntry(CapitalOrigin.ExecutorReward, takings, transactions.last.getId)))
+      Seq(CapitalEntry(CapitalOrigin.ExecutorReward, takings, CandidateTx.txId(transactions.last))))
 }
 
 /**
@@ -414,7 +414,5 @@ object LithosDexExecution {
   }
 
   private[lithosdex] def member(signed: SignedTransaction, kind: String): CandidateTx =
-    CandidateTx(signed.getId, _root_.transactions.candidate.BlockTxMessages.CandidateTx.signedJson(signed), kind,
-      RollupExecution.signedInputIds(signed), RollupExecution.signedSizeBytes(signed),
-      signed.getCost.toLong, RollupExecution.signedLeaf(signed))
+    CandidateTx.signed(signed, kind)
 }

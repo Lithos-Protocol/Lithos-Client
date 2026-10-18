@@ -197,7 +197,7 @@ abstract class Batcher(nodeContext: NodeContext,
       }
 
     // Nothing to reconcile: a candidate execution holds no wallet input and was never broadcast.
-    case CandidateTxsDropped(blockHeight) => preparation.drop(blockHeight)
+    case CandidateTxsDropped(blockHeight, _) => preparation.drop(blockHeight)
 
     case HeldPlacements => sender() ! Held(evictedPlacements.placements)
   }

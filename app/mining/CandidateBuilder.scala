@@ -159,8 +159,9 @@ class CandidateBuilder(client: ErgoClient,
       if (height > 0 && (height > blockHeight ||
         (parent.nonEmpty && (parent != parentId || height != blockHeight)))) {
         // Told before anything else: a source holding a wallet box for the previous height's
-        // candidate has no other way to learn that height is over.
-        if (blockHeight > 0) dropCandidates(blockHeight)
+        // candidate has no other way to learn that height is over. A new parent at the same height
+        // rebuilds that height rather than ending it.
+        if (blockHeight > 0) dropCandidates(blockHeight, rebuilding = height == blockHeight)
         blockHeight = height
         parentId = parent
         buildGeneration = UUID.randomUUID()
@@ -188,7 +189,7 @@ class CandidateBuilder(client: ErgoClient,
       if (blockHeight > 0) {
         buildGeneration = UUID.randomUUID()
         collectingFor = None
-        dropCandidates(blockHeight)
+        dropCandidates(blockHeight, rebuilding = true)
         currentPackage = None
         buildRetries = 0
         selectedId.foreach(id => skipped += id)
@@ -368,8 +369,13 @@ class CandidateBuilder(client: ErgoClient,
     boxes.filterNot(b => knownSpent.contains(b.id)).toVector
   }
 
-  private def dropCandidates(height: Int): Unit =
-    txSources.foreach(_.ref ! CandidateTxsDropped(height))
+  /**
+   * Tells every source this client asks that `height`'s package is gone. The engine hears it twice,
+   * as the emissions source and through the rollups source, and both copies reach it before any
+   * request for a rebuild, so the second ends nothing the rebuild has taken.
+   */
+  private def dropCandidates(height: Int, rebuilding: Boolean = false): Unit =
+    enabledSources.foreach(_.ref ! CandidateTxsDropped(height, rebuilding))
 
   private def expireCollection(attempt: CollectionAttempt): Unit = {
     collectingFor = None

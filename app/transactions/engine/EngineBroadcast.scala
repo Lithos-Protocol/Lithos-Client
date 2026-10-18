@@ -8,6 +8,7 @@ import node.rest.NodeCodecs
 import org.ergoplatform.appkit.SignedTransaction
 import org.slf4j.LoggerFactory
 import state.synchronization.CompleteMempool
+import transactions.candidate.BlockTxMessages.CandidateTx
 import transactions.engine.wallet.EngineWalletMessages._
 
 import scala.concurrent.{Await, ExecutionContext}
@@ -87,7 +88,7 @@ class EngineBroadcast(owner: ActorRef, node: NodeApi, requestTimeout: FiniteDura
   def sendOwned(tx: SignedTransaction, allocations: Seq[Funding], operation: String,
                 alive: () => Boolean, replaces: Option[EngineHold] = None,
                 observed: Option[CompleteMempool.Observation] = None): Result = {
-    val txId = tx.getId
+    val txId = CandidateTx.txId(tx)
     // Distinguishes "the node never heard of this" from "the answer was lost", which decides
     // whether the inputs may be released below.
     var crossedSendBoundary = false

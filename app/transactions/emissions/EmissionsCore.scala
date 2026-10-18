@@ -166,7 +166,7 @@ trait EmissionsCore extends Actor with InjectedActorSupport {
     // The build for a height that can no longer land is forgotten, or it would be offered to a
     // later one. The drop is then passed on: the rollup candidates stacked beneath share this
     // mailbox and end their bond leases for that height on the same message.
-    case dropped @ CandidateTxsDropped(blockHeight) =>
+    case dropped @ CandidateTxsDropped(blockHeight, _) =>
       emissionPreparation.drop(blockHeight)
       rest.applyOrElse(dropped, (_: Any) => ())
 
@@ -206,12 +206,8 @@ trait EmissionsCore extends Actor with InjectedActorSupport {
     }
     if (spends.isEmpty) Seq.empty[transactions.candidate.CandidateBundle]
     else {
-      val own = spends.map(s => CandidateTx(
-        s.tx.getId.replace("\"", ""), _root_.transactions.candidate.BlockTxMessages.CandidateTx.signedJson(s.tx),
-        if (s.kind == EmissionSpend.Clear) CandidateTx.Clear else CandidateTx.Activate,
-        transactions.engine.execution.RollupExecution.signedInputIds(s.tx),
-        transactions.engine.execution.RollupExecution.signedSizeBytes(s.tx), s.tx.getCost.toLong,
-        transactions.engine.execution.RollupExecution.signedLeaf(s.tx)))
+      val own = spends.map(s =>
+        CandidateTx.signed(s.tx, if (s.kind == EmissionSpend.Clear) CandidateTx.Clear else CandidateTx.Activate))
       // Each spend depends only on those before it, so the longest prefix within the allowance is
       // still a valid chain, where the whole walk over it would be refused, Clears and all.
       val fits = own.scanLeft((0L, 0L)) { case ((bytes, cost), tx) => (bytes + tx.sizeBytes, cost + tx.cost) }
@@ -250,7 +246,7 @@ trait EmissionsCore extends Actor with InjectedActorSupport {
           // A spend can own both ordinary wallet funding and actor-held change from its parent.
           // The engine pins the entire funding set before contacting the node.
           new transactions.engine.EngineBroadcast(emissionWalletManager, emissionNodeApi)
-            .send(spend.tx, spend.reservations, "emission:" + spend.tx.getId, () => emissionAlive.get())
+            .send(spend.tx, spend.reservations, "emission:" + CandidateTx.txId(spend.tx), () => emissionAlive.get())
             .requireAccepted()
         }
         attempted :+= spend.kind -> result

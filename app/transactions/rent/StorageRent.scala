@@ -420,7 +420,7 @@ object StorageRent {
     val (parts, _) = layout(candidates)
     if (parts == 1) {
       val entry = CapitalEntry(CapitalOrigin.StorageRent,
-        InputUTXO(new InputBoxImpl(tx.outputs.head)), parentTxId = sweep.getId)
+        InputUTXO(new InputBoxImpl(tx.outputs.head)), parentTxId = CandidateTx.txId(sweep))
       CandidateBundle(Vector(member(sweep)), capital = Seq(entry))
     } else {
       val merge = merged(ctx, wallet, tx, parts, blockHeight, useTrueProp)
@@ -540,10 +540,7 @@ object StorageRent {
     wallet.sign(unsigned)
   }
 
-  private def member(signed: SignedTransaction): CandidateTx =
-    CandidateTx(signed.getId, CandidateTx.signedJson(signed), Kind,
-      RollupExecution.signedInputIds(signed), RollupExecution.signedSizeBytes(signed),
-      signed.getCost.toLong, RollupExecution.signedLeaf(signed))
+  private def member(signed: SignedTransaction): CandidateTx = CandidateTx.signed(signed, Kind)
 
   /**
    * What the block will be charged for the sweep, on the node's own accounting.

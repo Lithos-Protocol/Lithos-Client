@@ -234,8 +234,7 @@ private[engine] class ConsolidationExecution(node: NodeContext, api: NodeApi, ow
       val signed = node.getNodeWallet.sign(unsigned)
       require(signed.getCost > 0 && signed.getCost <= ctx.getDataSource.getParameters.getMaxBlockCost,
         "consolidation exceeds transaction cost budget")
-      val signedBytes = org.ergoplatform.ErgoLikeTransactionSerializer.toBytes(
-        signed.asInstanceOf[org.ergoplatform.appkit.impl.SignedTransactionImpl].getTx).length
+      val signedBytes = _root_.transactions.candidate.BlockTxMessages.CandidateTx.signedSize(signed)
       require(signedBytes <= math.min(MaxSignedBytes, ctx.getDataSource.getParameters.getMaxBlockSize),
         "consolidation exceeds transaction byte budget")
       val result = new EngineBroadcast(owner, api, timeout.duration).send(signed, Seq(allocation), "consolidation", alive)

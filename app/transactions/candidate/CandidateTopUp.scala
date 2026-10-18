@@ -67,9 +67,7 @@ object CandidateTopUp {
         } else Try(RollupTransactions.genHoldingTopUp(
           ctx, wallet, holding, revenue, Seq.empty[UTXO], blockHeight)) match {
           case Success(sTx) =>
-            Some(CandidateTx(sTx.getId.replace("\"", ""), _root_.transactions.candidate.BlockTxMessages.CandidateTx.signedJson(sTx), Kind,
-              RollupExecution.signedInputIds(sTx), RollupExecution.signedSizeBytes(sTx),
-              sTx.getCost.toLong, RollupExecution.signedLeaf(sTx)))
+            Some(CandidateTx.signed(sTx, Kind))
           case Failure(ex) =>
             logger.warn(s"Could not build the holding top-up for ${genesis.txId.take(8)}: ${ex.getMessage}")
             None

@@ -211,4 +211,30 @@ class TransactionEngineSpec extends TestKit(ActorSystem("transaction-engine-spec
       wallet.expectMsg(5.seconds, MarkReservationUncertain("bond"))
     } finally system.stop(engine)
   }
+
+  it should "keep the leases a rebuild of the same height takes" in {
+    // A rebuild drops the refused package and builds the height again. Moving past the height, the
+    // engine marked the rebuild's own bond leases uncertain on arrival, so the next refresh freed a
+    // box the rebuilt candidate still offered.
+    val (ctx, _, _) = FakeNodeContext()
+    val events = TestProbe()
+    val wallet = TestProbe()
+    val engine = system.actorOf(Props(new TransactionEngine(ctx, events.ref, events.ref, new support.FakeCache, play.api.Configuration(com.typesafe.config.ConfigFactory.load()), transactions.rollups.DataBoxSource.Stored) {
+      override protected lazy val reconciler = new EngineReconciler(ctx, events.ref, events.ref) {
+        override def reconcile(): Unit = ()
+      }
+      override def receive: Receive = ({
+        case uncertain: MarkReservationUncertain => wallet.ref ! uncertain
+      }: Receive).orElse(super.receive)
+    }))
+    try {
+      events.send(engine, RollupExecution.CandidateLeaseTaken(500, "refused-package"))
+      events.send(engine, CandidateTxsDropped(500, rebuilding = true))
+      wallet.expectMsg(5.seconds, MarkReservationUncertain("refused-package"))
+      events.send(engine, RollupExecution.CandidateLeaseTaken(500, "rebuilt"))
+      wallet.expectNoMessage(500.millis)
+      events.send(engine, CandidateTxsDropped(500))
+      wallet.expectMsg(5.seconds, MarkReservationUncertain("rebuilt"))
+    } finally system.stop(engine)
+  }
 }

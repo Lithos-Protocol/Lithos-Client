@@ -1096,8 +1096,9 @@ class DexAPIExecution(nodeContext: NodeContext, walletSelector: EngineFunding,
   }
 
   private def send(ctx: BlockchainContext, built: Funded[_ <: LDFundedTx]): Submission = {
+    val operation = "dex:" + _root_.transactions.candidate.BlockTxMessages.CandidateTx.txId(built.value.tx)
     val result = new EngineBroadcast(walletSelector.walletRef, executionNode)(walletSelector.executionContext)
-      .send(built.value.tx, built.reservation.toSeq, "dex:" + built.value.tx.getId, alive)
+      .send(built.value.tx, built.reservation.toSeq, operation, alive)
     Submission(result.txId, result.outcome)
   }
   private def positive(field: String, value: Long): Long =

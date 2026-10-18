@@ -60,10 +60,11 @@ trait EngineRollupCandidates extends Actor {
 
     // Whatever was offered for that height can no longer land, so its bond inputs stop being
     // candidate-held. Uncertain, not released: the block may have included the transaction.
-    case CandidateTxsDropped(blockHeight) =>
+    case CandidateTxsDropped(blockHeight, rebuilding) =>
       // The watermark moves past the dropped height, not just to it, so a lease still in flight when
-      // this arrives is reconciled on the way in.
-      latestCandidateHeight = math.max(latestCandidateHeight, blockHeight + 1)
+      // this arrives is reconciled on the way in. Not for a height being rebuilt: the rebuild's own
+      // leases are for this height, and marking them uncertain would free a box the candidate offers.
+      latestCandidateHeight = math.max(latestCandidateHeight, if (rebuilding) blockHeight else blockHeight + 1)
       reconcileCandidates(blockHeight)
 
     case CandidateSubmissionHeld(blockHeight, rollupId, bundle) =>

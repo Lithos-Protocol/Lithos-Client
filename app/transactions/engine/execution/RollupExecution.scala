@@ -489,10 +489,7 @@ class RollupExecution(nodeContext: NodeContext, walletManager: ActorRef, syncHan
     }
   }
 
-  private def candidateTx(sTx: SignedTransaction, kind: String): CandidateTx =
-    CandidateTx(sTx.getId.replace("\"", ""), _root_.transactions.candidate.BlockTxMessages.CandidateTx.signedJson(sTx), kind,
-      RollupExecution.signedInputIds(sTx), RollupExecution.signedSizeBytes(sTx), sTx.getCost.toLong,
-      RollupExecution.signedLeaf(sTx))
+  private def candidateTx(sTx: SignedTransaction, kind: String): CandidateTx = CandidateTx.signed(sTx, kind)
 
   // ─── submission ───────────────────────────────────────────────────────────
 
@@ -597,7 +594,7 @@ class RollupExecution(nodeContext: NodeContext, walletManager: ActorRef, syncHan
     if (allocations.isEmpty && outputMap.nonEmpty)
       // Cannot happen on a funded path: mkFeeOutputs put a fee box there. Refuse to guess rather
       // than map rollups onto arbitrary outputs — an empty map leaves the stubs queued for a retry.
-      logger.error(s"Initial transaction ${signed.getId} carries no fee output, so its wallet " +
+      logger.error(s"Initial transaction ${CandidateTx.txId(signed)} carries no fee output, so its wallet " +
         "outputs cannot be located. No fee allocations made; the batch's remaining stubs will retry")
     val mapped = outputMap.keys.zip(allocations).toSeq
     releaseFeeAllocations()
@@ -951,7 +948,7 @@ class RollupExecution(nodeContext: NodeContext, walletManager: ActorRef, syncHan
     Try(JavaHelpers.toIndexedSeq(tx.getOutputsToSpend).map(InputUTXO(_))
       .filter(box => wallet.signableTrees.contains(box.contract.ergoTreeHex)))
       .getOrElse {
-        logger.warn(s"Could not read the outputs of ${tx.getId} to return its change; " +
+        logger.warn(s"Could not read the outputs of ${CandidateTx.txId(tx)} to return its change; " +
           "it will come back on the next wallet refresh")
         Seq.empty[InputUTXO]
       }
@@ -1089,33 +1086,6 @@ object RollupExecution {
 
   /** The fee proposition every `UTXO.feeBox` sits at, derived once rather than per comparison. */
   private val FeeTreeHex: String = Contract.FEE.ergoTreeHex
-
-  /**
-   * The boxes a signed transaction spends, read from the transaction itself so candidate admission
-   * can find a conflict between two builders without decoding bodies of its own.
-   */
-  private[transactions] def signedInputIds(sTx: SignedTransaction): Set[String] = {
-    import scala.collection.JavaConverters._
-    sTx.getInputBoxesIds.asScala.map(_.replace("\"", "")).toSet
-  }
-
-  /** Serialized size as the node counts it towards the block limit, not the JSON length. */
-  private[transactions] def signedSizeBytes(sTx: SignedTransaction): Int = signedBytes(sTx).length
-
-  /**
-   * The merkle leaf a block's transaction tree would carry for this transaction, which is how an
-   * inclusion proof is matched back to what was requested.
-   *
-   * A block's transaction tree is built over transaction ids, not over the signed bytes: the id is
-   * the hash of the message to sign, so hashing the serialized form — proofs included — would
-   * produce a digest no returned proof can ever carry.
-   */
-  private[transactions] def signedLeaf(sTx: SignedTransaction): String =
-    sTx.getId.replace("\"", "")
-
-  private def signedBytes(sTx: SignedTransaction): Array[Byte] =
-    org.ergoplatform.ErgoLikeTransactionSerializer.toBytes(
-      sTx.asInstanceOf[org.ergoplatform.appkit.impl.SignedTransactionImpl].getTx)
 
   /**
    * Whether a stub may go into the candidate for `blockHeight`. Every builder signs at that height

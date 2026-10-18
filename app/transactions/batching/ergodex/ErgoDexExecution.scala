@@ -37,18 +37,14 @@ final case class ErgoDexChain(transactions: Vector[SignedTransaction], fills: Ve
 
   override def kind: String = ErgoDexExecution.Kind
 
-  def members: Vector[CandidateTx] = transactions.map { signed =>
-    CandidateTx(signed.getId, _root_.transactions.candidate.BlockTxMessages.CandidateTx.signedJson(signed), ErgoDexExecution.Kind,
-      RollupExecution.signedInputIds(signed), RollupExecution.signedSizeBytes(signed),
-      signed.getCost.toLong, RollupExecution.signedLeaf(signed))
-  }
+  def members: Vector[CandidateTx] = transactions.map(CandidateTx.signed(_, ErgoDexExecution.Kind))
 
   /** Carries ancestors first, supersedes competitors, and credits only the final takings box. */
   def bundle(competitors: Set[String], placements: Vector[CandidateTx] = Vector.empty): CandidateBundle =
     CandidateBundle(placements ++ members,
       placements.flatMap(placement => Seq(ChainFromMempool(placement.id), IncludeExisting(placement.id))) ++
         (if (competitors.isEmpty) Seq.empty else Seq(Supersede(competitors))),
-      Seq(CapitalEntry(CapitalOrigin.ExecutorReward, takings, transactions.last.getId)))
+      Seq(CapitalEntry(CapitalOrigin.ExecutorReward, takings, CandidateTx.txId(transactions.last))))
 }
 
 /**

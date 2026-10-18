@@ -53,6 +53,29 @@ object BlockTxMessages {
     }
 
     /**
+     * A candidate for a transaction this client signed. Its leaf is its id, because a block's
+     * transaction tree is built over transaction ids, not over the signed bytes.
+     */
+    def signed(tx: org.ergoplatform.appkit.SignedTransaction, kind: String): CandidateTx = {
+      val id = txId(tx)
+      CandidateTx(id, signedJson(tx), kind, inputIds(tx), signedSize(tx), tx.getCost.toLong, id)
+    }
+
+    /** A transaction's id. Appkit can return it wrapped in quotes, which no node response carries. */
+    def txId(tx: org.ergoplatform.appkit.SignedTransaction): String = tx.getId.replace("\"", "")
+
+    /** Every input's box id, so a conflict between two builders shows without decoding a body. */
+    def inputIds(tx: org.ergoplatform.appkit.SignedTransaction): Set[String] = {
+      import scala.collection.JavaConverters._
+      tx.getInputBoxesIds.asScala.map(_.replace("\"", "")).toSet
+    }
+
+    /** Serialized size as the node counts it towards the block limit, not the JSON length. */
+    def signedSize(tx: org.ergoplatform.appkit.SignedTransaction): Int =
+      org.ergoplatform.ErgoLikeTransactionSerializer.toBytes(
+        tx.asInstanceOf[org.ergoplatform.appkit.impl.SignedTransactionImpl].getTx).length
+
+    /**
      * The most context variables on one input that the node rebuilds in the order the JSON lists
      * them. Its decoder builds a Scala map, which keeps insertion order up to four entries and hashes
      * past that, landing on the order this client's own map signed with.
@@ -81,7 +104,7 @@ object BlockTxMessages {
           .map(_.keySet().asScala.toVector).getOrElse(Vector.empty[String])
       }.toVector
       require(listed.size == signed.size && signed.indices.forall(i => !ordered(i) || signed(i) == listed(i)),
-        s"transaction ${tx.getId} was signed with context variables " +
+        s"transaction ${txId(tx)} was signed with context variables " +
         s"${signed.map(_.mkString("(", ",", ")")).mkString(" ")} but its JSON lists " +
         s"${listed.map(_.mkString("(", ",", ")")).mkString(" ")}")
       json
@@ -100,6 +123,11 @@ object BlockTxMessages {
    */
   case class BlockTxsReady(blockHeight: Int, bundles: Seq[CandidateBundle])
 
-  /** Drops an obsolete height and reconciles any wallet reservations its candidate held. */
-  case class CandidateTxsDropped(blockHeight: Int)
+  /**
+   * Drops an obsolete height and reconciles any wallet reservations its candidate held.
+   *
+   * @param rebuilding the same height is built again straight after, so only the dropped package's
+   *                   work is over, not the height
+   */
+  case class CandidateTxsDropped(blockHeight: Int, rebuilding: Boolean = false)
 }

@@ -30,7 +30,8 @@ class EngineBroadcastSpec extends TestKit(ActorSystem("engine-broadcast-spec"))
   private val protocol = "bb" * 32
   private val anchor = "cc" * 32
 
-  private def exercise(response: Try[String], outcome: String, pin: Boolean = true): Unit = {
+  private def exercise(response: Try[String], outcome: String, pin: Boolean = true,
+                       quoted: Boolean = false): Unit = {
     val api = mock[NodeApi]
     val (ctx, _, wallet) = FakeNodeContext(api)
     val input = ctx.getClient.execute(c => UTXO(wallet.contract, 10000000L)
@@ -41,7 +42,7 @@ class EngineBroadcastSpec extends TestKit(ActorSystem("engine-broadcast-spec"))
     owner.reply(WalletInputs(Seq(input), request.reservationId))
     val allocation = Await.result(allocationFuture, 5.seconds)
     val signed = mock[SignedTransaction]
-    when(signed.getId).thenReturn(txId)
+    when(signed.getId).thenReturn(if (quoted) "\"" + txId + "\"" else txId)
     when(signed.toJson(false)).thenReturn(NodeCodecs.encodeTransaction(NodeTransaction(txId,
       Seq(NodeInput(protocol, NodeSpendingProof.empty), NodeInput(input.id.toString, NodeSpendingProof.empty)),
       Seq.empty, Seq.empty)).toString)
@@ -104,6 +105,14 @@ class EngineBroadcastSpec extends TestKit(ActorSystem("engine-broadcast-spec"))
   }
   it should "retain the known ID when the node response is lost" in {
     exercise(Failure(new RuntimeException("connection reset")), "uncertain")
+  }
+  it should "strip the quotes appkit can leave around a transaction id" in {
+    // A quoted id never equals the id in the signed JSON, so every such send failed its identity
+    // check, and the hold, acceptance check and reconciler would all have keyed on the wrong id.
+    exercise(Success(txId), "accepted", quoted = true)
+    val signed = mock[SignedTransaction]
+    when(signed.getId).thenReturn("\"" + txId + "\"")
+    transactions.candidate.BlockTxMessages.CandidateTx.txId(signed) shouldBe txId
   }
   it should "hand back the inputs of a send the node refused" in {
     exercise(Failure(NodeError.Rejected("Malformed transaction: script reduced to false")), "rejected")

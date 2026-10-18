@@ -36,10 +36,7 @@ object DFAccState {
 final case class DFStep(signed: SignedTransaction, position: Option[DFPosition], recorded: Boolean,
                         spent: DFAccState, next: DFAccState) {
 
-  def candidateTx: CandidateTx =
-    CandidateTx(signed.getId, CandidateTx.signedJson(signed), ForwardsTransactions.Kind,
-      RollupExecution.signedInputIds(signed), RollupExecution.signedSizeBytes(signed), signed.getCost.toLong,
-      RollupExecution.signedLeaf(signed))
+  def candidateTx: CandidateTx = CandidateTx.signed(signed, ForwardsTransactions.Kind)
 }
 
 /**

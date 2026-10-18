@@ -118,7 +118,7 @@ class StorageRentSource(nodeContext: NodeContext,
 
     // Nothing to reconcile: a rent sweep holds no wallet input and was never broadcast, so a
     // dropped height leaves only the work itself, which cannot be offered to a later one.
-    case CandidateTxsDropped(blockHeight) => preparation.drop(blockHeight)
+    case CandidateTxsDropped(blockHeight, _) => preparation.drop(blockHeight)
   }
 
   private def startBuild(blockHeight: Int, replyTo: Option[ActorRef]): Unit =

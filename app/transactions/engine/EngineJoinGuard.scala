@@ -6,6 +6,7 @@ import akka.util.Timeout
 import node.NodeApi
 import org.ergoplatform.appkit.SignedTransaction
 import state.synchronization.CompleteMempool
+import transactions.candidate.BlockTxMessages.CandidateTx
 import scala.concurrent.{Await, ExecutionContext}
 import scala.concurrent.duration._
 import transactions.engine.wallet.FundingAllocation
@@ -64,7 +65,7 @@ private[transactions] class EngineJoinGuard(owner: ActorRef, api: NodeApi)(impli
       CompleteMempool.anchor(api) == observed.snapshot.get.anchor,
       "lender key eligibility changed before send")
     require(allocations.nonEmpty &&
-      Await.result((owner ? Pin(key, lease, tx.getId, allocations.map(_.reservationId).toSet))
+      Await.result((owner ? Pin(key, lease, CandidateTx.txId(tx), allocations.map(_.reservationId).toSet))
         .mapTo[Boolean], timeout.duration), "lender key pin was refused")
     new EngineBroadcast(owner, api).send(tx, allocations, operation, alive)
   }
