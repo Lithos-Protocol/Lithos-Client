@@ -1,0 +1,1 @@
+"use strict";(globalThis.webpackChunklithos_webdocs=globalThis.webpackChunklithos_webdocs||[]).push([[8661],{2414:(s,e,o)=>{o.r(e),o.d(e,{default:()=>r});o(96540);var t=o(56347),a=o(29030),l=o(74848);function r(){return(0,l.jsx)(t.rd,{to:(0,a.default)("/extensions/forwards")})}}}]);
