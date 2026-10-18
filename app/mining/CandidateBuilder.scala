@@ -35,8 +35,8 @@ class CandidateBuilder(client: ErgoClient,
     context.system.dispatchers.lookup(Contexts.key(Contexts.Genesis))
   private val refreshEc: ExecutionContext =
     context.system.dispatchers.lookup(Contexts.key(Contexts.Polling))
-  private val collectionEc: ExecutionContext =
-    context.system.dispatchers.lookup(Contexts.key(Contexts.EngineCandidate))
+  /** Shared with the engine's candidate builds, whose slots it counts against. */
+  private val collection: configs.BoundedWorker = configs.BoundedWorkers(context.system)(Contexts.EngineCandidate)
 
   /**
    * How long a collection round waits for sources. The rest of `blockTxTimeout` is left for admission and
@@ -558,8 +558,9 @@ class CandidateBuilder(client: ErgoClient,
     val genesis = currentPackage.map(_.collateral)
     val genesisBytes = genesis.map(_.signedSizeBytes.toLong).getOrElse(0L)
     val genesisCost = genesis.map(_.cost).getOrElse(0L)
+    // With every slot taken the round collects nothing, rather than assembling on this mailbox.
     round.budgets
-      .map { case (blockBudget, packageBudget) =>
+      .flatMap { case (blockBudget, packageBudget) => collection.submit {
         val budget = packageBudget.less(genesisBytes, genesisCost)
         val (kept, txs, refused) = CandidateBundle.admit(offered.flatMap(_._2), totalTxLimit, budget)
         logRefusals("package", height, refused)
@@ -586,7 +587,9 @@ class CandidateBuilder(client: ErgoClient,
         BlockTxsCollected(attempt, txs ++ topUp, ledger.availableErg, from, late,
           Some(blockBudget).filterNot(_ == CandidateBudget.Unbounded),
           Some(packageBudget).filterNot(_ == CandidateBudget.Unbounded), revenue, protocol)
-      }(collectionEc)
+      }.getOrElse(Future.failed(new java.util.concurrent.RejectedExecutionException(
+        "every engine candidate worker is busy")))
+      }
       .onComplete {
         case Success(msg) => self ! msg
         case Failure(ex) =>

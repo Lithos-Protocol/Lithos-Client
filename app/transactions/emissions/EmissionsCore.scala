@@ -53,7 +53,7 @@ trait EmissionsCore extends Actor with InjectedActorSupport {
   /** Which side builds the queue head's Activates each block: the candidate first, then the funded pass. */
   private val queueOwnership = new QueueOwnership
   private val emissionPreparation = new transactions.candidate.CandidatePreparation(
-    context.system.dispatchers.lookup("lithos-contexts.engine-candidate-dispatcher"), self,
+    configs.BoundedWorkers(context.system)(configs.Contexts.EngineCandidate), self,
     queueOwnership.candidateStarted)
   private val emissionAlive = new java.util.concurrent.atomic.AtomicBoolean(true)
   private lazy val collateral = new transactions.engine.execution.CollateralExecution(
@@ -107,7 +107,8 @@ trait EmissionsCore extends Actor with InjectedActorSupport {
   /** Build the fee-less copies for one height, unless this source has nothing to offer. */
   private def startCandidateBuild(blockHeight: Int, limit: Int, replyTo: Option[ActorRef]): Unit =
     if (!emissionConfig.enabled || limit <= 0) emissionPreparation.answerEmpty(blockHeight, replyTo)
-    else emissionPreparation.start(blockHeight, replyTo)(candidateBundles(blockHeight, limit))
+    else if (!emissionPreparation.start(blockHeight, replyTo)(candidateBundles(blockHeight, limit)))
+      logger.warn(s"Every engine candidate worker is busy; emissions offer nothing for block $blockHeight")
 
   // ─── lifecycle ────────────────────────────────────────────────────────────
 

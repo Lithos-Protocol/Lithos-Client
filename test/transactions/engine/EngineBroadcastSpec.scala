@@ -81,6 +81,21 @@ class EngineBroadcastSpec extends TestKit(ActorSystem("engine-broadcast-spec"))
     refused.getMessage should include("Every input of the transaction should be in UTXO")
   }
 
+  "A node refusal" should "be told apart by what the node said, so each recovery branch can run" in {
+    // Every send now fails as a SubmissionOutcomeException, so the branches that read the node's
+    // words off an ErgoClientException (mempool reset, chain rebuild, a lost emission box) never ran.
+    def refused(reason: String, outcome: String = EngineBroadcast.Rejected) =
+      new EngineBroadcast.SubmissionOutcomeException("t1", outcome, Some(reason))
+    EngineBroadcast.refusal(refused("Malformed transaction: Every input of the transaction should be in UTXO: 3a")) shouldBe
+      Some(EngineBroadcast.InputMissing)
+    EngineBroadcast.refusal(refused("Double spending attempt: 3a")) shouldBe Some(EngineBroadcast.DoubleSpend)
+    EngineBroadcast.refusal(refused("Malformed transaction: script reduced to false")) shouldBe None
+    // An uncertain outcome carries no node verdict, whatever its text.
+    EngineBroadcast.refusal(refused("Double spending", EngineBroadcast.Uncertain)) shouldBe None
+    EngineBroadcast.refusal(new org.ergoplatform.appkit.ErgoClientException("Double spending", null)) shouldBe
+      Some(EngineBroadcast.DoubleSpend)
+  }
+
   "The engine broadcast boundary" should "report acceptance only for the signed transaction ID" in {
     exercise(Success(txId), "accepted")
   }

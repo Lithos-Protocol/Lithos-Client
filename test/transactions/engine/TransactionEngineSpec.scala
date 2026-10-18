@@ -58,6 +58,36 @@ class TransactionEngineSpec extends TestKit(ActorSystem("transaction-engine-spec
     } finally { gate.complete(()); system.stop(engine) }
   }
 
+  it should "admit a NISP batch while the optional lane is full" in {
+    // Each lane is limited by its own depth. Compared against the whole schedule, 256 optional
+    // entries refused every rollup batch, which is the work with a deadline.
+    val (ctx, _, _) = FakeNodeContext()
+    val replies = TestProbe()
+    val entered = TestProbe()
+    val gate = new CompletableFuture[Unit]()
+    val engine = system.actorOf(Props(new TransactionEngine(ctx, replies.ref, replies.ref, new support.FakeCache, play.api.Configuration(com.typesafe.config.ConfigFactory.load()), transactions.rollups.DataBoxSource.Stored) {
+      override protected lazy val reconciler = new EngineReconciler(ctx, replies.ref, replies.ref) {
+        override def reconcile(): Unit = ()
+      }
+      override protected def executeOptional(work: EngineIntent, alive: () => Boolean): Any = {
+        entered.ref ! "entered"
+        gate.get(10, TimeUnit.SECONDS)
+        Accepted(work.key, "cd" * 32)
+      }
+    }))
+    val stubs = Seq(transactions.rollups.TransactionMessages.RollupTxStub("a" * 64, Some(900L),
+      transactions.rollups.TransactionMessages.RollupTxType.HoldingTransform))
+    val submitter = TestProbe()
+    try {
+      (1 to 256).foreach(i => submitter.send(engine, Submit(intent.copy(requestId = s"optional-$i"))))
+      entered.expectMsg("entered")
+      submitter.send(engine, Submit(intent.copy(requestId = "one-too-many")))
+      submitter.expectMsgType[Deferred](5.seconds).key shouldBe intent.copy(requestId = "one-too-many").key
+      submitter.send(engine, transactions.rollups.TransactionMessages.RollupBatch(stubs))
+      submitter.expectMsg(5.seconds, transactions.rollups.TransactionMessages.BatchAccepted(stubs))
+    } finally { gate.complete(()); system.stop(engine) }
+  }
+
   it should "let queued work progress after a slow reconciliation receives another tick" in {
     val (ctx, _, _) = FakeNodeContext()
     val events = TestProbe()

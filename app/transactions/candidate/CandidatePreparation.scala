@@ -4,7 +4,6 @@ import akka.actor.{Actor, ActorRef}
 import transactions.candidate.BlockTxMessages.BlockTxsReady
 
 import java.util.UUID
-import scala.concurrent.{ExecutionContext, Future}
 import scala.util.{Failure, Try}
 
 /**
@@ -28,10 +27,11 @@ import scala.util.{Failure, Try}
  * Every method belongs to the actor's own thread. Only `build` does not, which is why it is taken by
  * name and must close over values rather than read the actor's fields.
  *
+ * @param worker  where builds run; one with no free slot refuses a build rather than run it inline
  * @param owner   the actor to deliver completions to
  * @param onStart bookkeeping the source ties to the start of a build, run on the actor's thread
  */
-final class CandidatePreparation(worker: ExecutionContext,
+final class CandidatePreparation(worker: configs.BoundedWorker,
                                  owner: ActorRef,
                                  onStart: Int => Unit = _ => ()) {
 
@@ -80,19 +80,29 @@ final class CandidatePreparation(worker: ExecutionContext,
    * Start building for this height, or join the build already running for it.
    *
    * A `replyTo` is answered once the build finishes; preparation passes none, because preparing is
-   * not a request and nothing is waiting on it.
+   * not a request and nothing is waiting on it. Returns false when the worker had no free slot, having
+   * answered this height's requesters with nothing.
    */
-  def start(blockHeight: Int, replyTo: Option[ActorRef])(build: => Seq[CandidateBundle]): Unit = {
+  def start(blockHeight: Int, replyTo: Option[ActorRef])(build: => Seq[CandidateBundle]): Boolean = {
     replyTo.foreach(r => waiting :+= (r -> blockHeight))
-    if (!buildingFor.exists(_._1 == blockHeight)) {
+    buildingFor.exists(_._1 == blockHeight) || {
       val attempt = UUID.randomUUID()
-      buildingFor = Some(blockHeight -> attempt)
-      prepared = None
-      onStart(blockHeight)
-      implicit val ec: ExecutionContext = worker
-      Try(Future(build).onComplete(result =>
-        owner ! Prepared(lane, attempt, blockHeight, result)))
-        .failed.foreach(ex => owner ! Prepared(lane, attempt, blockHeight, Failure(ex)))
+      // The build's own task delivers its result, so finishing never needs a second slot.
+      worker.submit(owner ! Prepared(lane, attempt, blockHeight, Try(build))) match {
+        case None =>
+          val (refused, rest) = waiting.partition(_._2 == blockHeight)
+          waiting = rest
+          refused.foreach { case (r, _) => r ! BlockTxsReady(blockHeight, Seq.empty[CandidateBundle]) }
+          false
+        case Some(started) =>
+          buildingFor = Some(blockHeight -> attempt)
+          prepared = None
+          onStart(blockHeight)
+          // Completed already only when submitting failed, so the build never ran to report itself
+          started.value.collect { case Failure(ex) => ex }
+            .foreach(ex => owner ! Prepared(lane, attempt, blockHeight, Failure(ex)))
+          true
+      }
     }
   }
 

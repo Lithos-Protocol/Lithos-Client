@@ -592,9 +592,13 @@ class EngineWalletState @Inject()(nodeContext: NodeContext,
     case ReserveKnownInputs(_, reservationId, deadlineMillis) if now() >= deadlineMillis =>
       sender() ! WalletInputs(Seq.empty, reservationId, Some(SelectionExpired))
 
+    case ReserveKnownInputs(inputs, reservationId, _) if inputs.size > walletLimits.maxInputs =>
+      sender() ! WalletInputs(Seq.empty, reservationId,
+        Some(s"${inputs.size} inputs exceed wallet.max-inputs (${walletLimits.maxInputs})"))
+
     case ReserveKnownInputs(inputs, reservationId, _) =>
       val ids = inputs.map(_.id.toString)
-      val accepted = inputs.nonEmpty && inputs.size <= MAX_TX_INPUTS &&
+      val accepted = inputs.nonEmpty &&
         ids.distinct.size == ids.size &&
         inputs.forall(box => box.bytes.length <= walletLimits.maxInputBytes &&
           (wallet.signableTrees.contains(box.contract.ergoTreeHex) ||
@@ -699,14 +703,14 @@ class EngineWalletState @Inject()(nodeContext: NodeContext,
       // Smallest first, so dust consolidates into the early batches instead of stranding a tail of
       // sub-fee boxes, and never more than the remaining optional ownership budget.
       val matured = spendableRewards.sortBy(_.value)
-        .take(math.min(MAX_TX_INPUTS, MAX_OPTIONAL_INPUTS - usedInputs.size))
+        .take(math.min(walletLimits.maxInputs, MAX_OPTIONAL_INPUTS - usedInputs.size))
       if (matured.isEmpty) replyTo ! RewardsClaimed(Seq.empty)
       else {
         sweeping = true
         // Reserved on the actor thread BEFORE anything leaves the mailbox, so no other selection
         // can take these boxes while the sweep runs. Each batch carries its own lease identity so
         // one failed batch never blocks committing the ones around it.
-        val batches = matured.grouped(MAX_TX_INPUTS).toVector
+        val batches = matured.grouped(walletLimits.maxInputs).toVector
         val leaseIds = batches.map(_ => UUID.randomUUID().toString)
         batches.zip(leaseIds).foreach { case (batch, leaseId) =>
           reserve(batch.map(_.id.toString), leaseId)
@@ -865,8 +869,8 @@ object EngineWalletState {
                                       reservedAtMillis: Long,
                                       status: ReservationStatus)
 
-  /** Maximum number of inputs returned in a single SelectInputs response. */
-  final val MAX_TX_INPUTS: Int = 75
+  /** The shipped `wallet.max-inputs`. The actor caps each request at the configured value instead. */
+  final val MAX_TX_INPUTS: Int = configs.WalletConfig.Default.maxInputs
 
   /** Page size for the wallet refresh, which pages to exhaustion. */
   final val MAX_WALLET_BOXES: Int = WalletInventory.PageSize

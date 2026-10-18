@@ -673,10 +673,10 @@ class RollupExecution(nodeContext: NodeContext, walletManager: ActorRef, syncHan
 
   private def reportAttempt(stub: RollupTxStub, txAttempt: Try[String]): Unit =
     txAttempt match {
-      case Failure(mal: ErgoClientException) if mal.getMessage.contains("Every input of the transaction should be in UTXO") =>
+      case Failure(missing) if EngineBroadcast.refusal(missing).contains(EngineBroadcast.InputMissing) =>
         syncHandler ! ResetMempoolState(stub.rollupBlockId)
         logger.warn(s"Got de-synced mempool state for rollup ${stub.rollupBlockId} attempting ${stub.txType}")
-      case Failure(ds: ErgoClientException) if ds.getMessage.contains("Double spending") =>
+      case Failure(spent) if EngineBroadcast.refusal(spent).contains(EngineBroadcast.DoubleSpend) =>
         logger.warn(s"Got double spend for rollup ${stub.rollupBlockId} attempting ${stub.txType}")
       // No commitment can ever be in force for this rollup: both its start height and the
       // commitment it would be judged against are fixed, so every retry asks the same question.
@@ -869,7 +869,7 @@ class RollupExecution(nodeContext: NodeContext, walletManager: ActorRef, syncHan
     val result = latestState(stub).flatMap(state => txFunc(stub, state))
     result.failed.foreach {
       case _: ProjectionChangedException => mempoolView ! RebuildMempoolChains
-      case ex: ErgoClientException if Option(ex.getMessage).exists(_.contains("Double spending")) =>
+      case spent if EngineBroadcast.refusal(spent).contains(EngineBroadcast.DoubleSpend) =>
         mempoolView ! RebuildMempoolChains
       case _ => ()
     }

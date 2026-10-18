@@ -86,9 +86,7 @@ case class EngineFunding(walletRef: ActorRef,
     val expectedIds = inputs.map(_.id.toString)
     if (expectedIds.distinct.size != expectedIds.size)
       throw new IllegalArgumentException("A known-output reservation cannot contain duplicate box ids")
-    if (inputs.size > EngineWalletState.MAX_TX_INPUTS)
-      throw new IllegalArgumentException(
-        s"A known-output reservation cannot exceed ${EngineWalletState.MAX_TX_INPUTS} inputs")
+    // The input cap is the wallet's configured one, which it enforces and names in its refusal.
 
     val reservationId = UUID.randomUUID().toString
     val deadline = System.currentTimeMillis() + timeout.toMillis

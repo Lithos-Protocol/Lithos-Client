@@ -61,7 +61,8 @@ object Configs {
     // ---- wallet ----
     // Absent keys fall back to WalletConfig.Default, so these bound what is supplied rather than
     // requiring it. The upper bounds are what the engine can actually honour, not taste.
-    v.range("wallet.max-inputs", v.int("wallet.max-inputs"), 1, 4096, "inputs per selection")
+    v.range("wallet.max-inputs", v.int("wallet.max-inputs"), 1,
+      transactions.engine.EngineBroadcast.MaxSignedInputs, "inputs per selection")
     v.range("wallet.max-descriptors", v.int("wallet.max-descriptors"), 1, 1000000, "cached descriptors")
     v.longRange("wallet.max-descriptor-bytes", v.long("wallet.max-descriptor-bytes"),
       1024L, 1024L * 1024L * 1024L, "descriptor cache bytes")

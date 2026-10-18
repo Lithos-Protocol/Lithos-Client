@@ -73,8 +73,8 @@ abstract class Batcher(nodeContext: NodeContext,
 
   /** Counts unfinished builds to keep worker saturation from running work on the mailbox. */
   private val buildsRunning = new AtomicInteger(0)
-  private val preparation =
-    new CandidatePreparation(worker, self, onStart = _ => buildsRunning.incrementAndGet())
+  private val preparation = new CandidatePreparation(configs.BoundedWorker.unbounded(worker), self,
+    onStart = _ => buildsRunning.incrementAndGet())
 
   protected def nodeApi: NodeApi = nodeContext.getNodeApi
 

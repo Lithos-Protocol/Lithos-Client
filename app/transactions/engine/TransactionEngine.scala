@@ -322,18 +322,21 @@ class TransactionEngine @Inject()(node: NodeContext,
       case _ => Automatic
     }
     val when = timing.getOrElse(Immediate(now + DefaultExpiry.toMillis))
+    // Each lane against its own depth, so a full optional lane never refuses a NISP batch.
     val queueLimit = if (work.lane == Lane.Critical) MaxCriticalQueued else MaxOptionalQueued
     if (!valid || when.expires <= math.max(now, when.notBefore) || when.expires - now > MaxExpiry.toMillis ||
-      (!schedule.contains(key) && schedule.size >= queueLimit)) {
+      (!schedule.contains(key) && schedule.depth(work.lane) >= queueLimit)) {
       reply ! Deferred(key, "invalid intent, deadline, or admission limit")
       false
     } else if (waiters.getOrElse(key, Vector.empty).size >= MaxWaitersPerKey) {
       reply ! Deferred(key, "duplicate waiter limit")
       false
+    } else if (!schedule.contains(key) && !schedule.register(Entry(key, work, work.lane, when, policy))) {
+      reply ! Deferred(key, "admission limit")
+      false
     } else {
+      // A key already queued or running is not registered again: the request joins it as a waiter.
       if (reply != context.system.deadLetters) waiters += key -> (waiters.getOrElse(key, Vector.empty) :+ reply)
-      // Registering an existing key is a no-op, so a duplicate request coalesces onto the running one.
-      schedule.register(Entry(key, work, work.lane, when, policy))
       drive()
       true
     }

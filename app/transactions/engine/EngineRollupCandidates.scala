@@ -16,12 +16,13 @@ trait EngineRollupCandidates extends Actor {
    * left behind by earlier heights are reconciled as each build begins.
    */
   private val rollupPreparation = new CandidatePreparation(
-    context.system.dispatchers.lookup("lithos-contexts.engine-candidate-dispatcher"), self,
+    configs.BoundedWorkers(context.system)(configs.Contexts.EngineCandidate), self,
     onStart = blockHeight => {
       latestCandidateHeight = math.max(latestCandidateHeight, blockHeight)
       candidateLeases.keys.filter(_ < blockHeight).toSeq.foreach(reconcileCandidates)
     })
   private val rollupAlive = new java.util.concurrent.atomic.AtomicBoolean(true)
+  private val candidateLogger = org.slf4j.LoggerFactory.getLogger("TransactionEngine")
 
   /**
    * Bond inputs withheld for fee-less submissions offered into this miner's own block, by the
@@ -81,13 +82,18 @@ trait EngineRollupCandidates extends Actor {
 
     // The report goes out before the bundles reach the package, so the stubs are held before any
     // job can carry them
+    // A build refused for want of a worker reports nothing built, so the stubs go to the funded path.
     case BuildBlockTxs(blockHeight, stubs, answer, _, limit, reportTo) =>
       val alive = () => rollupAlive.get()
       val held = heldSubmissions.getOrElse(blockHeight, Map.empty[String, CandidateBundle])
-      rollupPreparation.start(blockHeight, if (answer) Some(sender()) else None) {
+      val started = rollupPreparation.start(blockHeight, if (answer) Some(sender()) else None) {
         val build = candidateExecution(alive).candidates(stubs, blockHeight, limit, held)
         reportTo.foreach(_ ! CandidateStubsBuilt(blockHeight, stubs, build.built))
         build.bundles
+      }
+      if (!started) {
+        candidateLogger.warn(s"Every engine candidate worker is busy; rollups offer nothing for block $blockHeight")
+        reportTo.foreach(_ ! CandidateStubsBuilt(blockHeight, stubs, Seq.empty))
       }
   }
 

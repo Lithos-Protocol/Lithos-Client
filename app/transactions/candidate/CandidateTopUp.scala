@@ -6,7 +6,6 @@ import org.slf4j.{Logger, LoggerFactory}
 import stratum.CollateralData
 import transactions.candidate.BlockTxMessages.CandidateTx
 import transactions.engine.execution.RollupExecution
-import transactions.engine.wallet.EngineWalletState
 import transactions.rollups.RollupTransactions
 import work.lithos.mutations.UTXO
 
@@ -28,11 +27,12 @@ object CandidateTopUp {
   final val Kind = "holding-topup"
 
   /**
-   * Revenue inputs one top-up may spend, one short of this client's per-transaction ceiling because
-   * the holding box takes the first slot. Over the cap the most valuable entries are taken: every
-   * input costs about the same bytes and execution, so that is the most ERG the block will carry.
+   * Revenue inputs one top-up may spend: 74, so with the holding box in the first slot it carries 75.
+   * It spends no wallet box, so `wallet.max-inputs` does not apply. Over the cap the most valuable
+   * entries are taken: every input costs about the same bytes and execution, so that is the most ERG
+   * the block will carry.
    */
-  final val MaxRevenueInputs: Int = EngineWalletState.MAX_TX_INPUTS - 1
+  final val MaxRevenueInputs: Int = 74
 
   /**
    * Build the top-up for one package, or nothing when there is nothing to add.

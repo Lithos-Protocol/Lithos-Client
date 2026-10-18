@@ -215,6 +215,28 @@ class KnownReservationSpec
     reserveKnown(f, "one-too-many", Seq(knownOutput(f, erg - 1))) shouldBe empty
   }
 
+  it should "be capped at the configured wallet.max-inputs, not the shipped 75" in {
+    // Consolidation cuts its batches by max-inputs and reserves each one here, so a fixed cap made
+    // every batch fail once max-inputs was raised past it.
+    val api = mock[NodeApi]
+    val (ctx, _, wallet) = FakeNodeContext(api, numAddresses = 1)
+    when(api.indexerEnabled).thenReturn(true)
+    when(api.walletUnspentBoxes(any[ConfirmationRange], any[Paging])).thenReturn(Success(Seq.empty[WalletBox]))
+    when(api.unspentBoxesByErgoTree(anyString(), any[Paging], any[SortDirection], any[MempoolOptions]))
+      .thenReturn(Success(Seq.empty[IndexedBox]))
+    val mgr = system.actorOf(Props(new EngineWalletState(ctx, configs.WalletConfig.Default.copy(maxInputs = 100))))
+    val probe = TestProbe()
+    val boxes = ctx.getClient.execute(c => (1 to 101).map(i => walletBox(wallet, erg + i).toInputUTXO(c)))
+    try {
+      probe.send(mgr, ReserveKnownInputs(boxes, "over", Long.MaxValue))
+      val over = probe.expectMsgType[WalletInputs]
+      over.inputs shouldBe empty
+      over.unavailable.get should include("wallet.max-inputs")
+      probe.send(mgr, ReserveKnownInputs(boxes.take(100), "batch", Long.MaxValue))
+      probe.expectMsgType[WalletInputs].inputs should have size 100
+    } finally system.stop(mgr)
+  }
+
   it should "age out on the same TTL as a selection" in {
     // Deliberately NOT exempt from the sweep. A Known hold is released by its owner or it is a leak,
     // and the refresh cannot collect it, so the TTL is the only thing that ever ends an abandoned

@@ -35,11 +35,31 @@ object EngineBroadcast {
   final class SubmissionOutcomeException(val txId: String, val outcome: String, val reason: Option[String] = None)
     extends RuntimeException(s"Transaction $txId submission outcome is $outcome" + reason.map(": " + _).getOrElse(""))
 
+  /** The two node refusals callers recover from differently. */
+  sealed trait Refusal
+  /** An input is not in the UTXO set: already spent, or made by a transaction the node lacks. */
+  case object InputMissing extends Refusal
+  /** An input is already spent by a transaction in the node's mempool. */
+  case object DoubleSpend extends Refusal
+
+  /** Which known refusal a failed send was, read from the node's own words. Only a definite refusal counts. */
+  def refusal(failure: Throwable): Option[Refusal] = {
+    val text = failure match {
+      case refused: SubmissionOutcomeException if refused.outcome == Rejected => refused.reason
+      case node: org.ergoplatform.appkit.ErgoClientException => Option(node.getMessage)
+      case _ => None
+    }
+    text.collect {
+      case words if words.contains("Every input of the transaction should be in UTXO") => InputMissing
+      case words if words.contains("Double spending") => DoubleSpend
+    }
+  }
+
   /** Signed body accepted for submission. Anything larger is a build defect, not a node limit. */
   private final val MaxSignedBodyBytes = 1024 * 1024
 
   /** Inputs a single engine-built transaction may carry, well above the wallet's own selection cap. */
-  private final val MaxSignedInputs = 150
+  final val MaxSignedInputs = 150
 }
 
 /**

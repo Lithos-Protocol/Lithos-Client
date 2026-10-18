@@ -36,7 +36,8 @@ class StorageRentSource(nodeContext: NodeContext,
   private implicit val ec: ExecutionContext = context.dispatcher
   private val candidateWorker: ExecutionContext =
     context.system.dispatchers.lookup(configs.Contexts.key(configs.Contexts.Polling))
-  private val preparation = new transactions.candidate.CandidatePreparation(candidateWorker, self)
+  private val preparation =
+    new transactions.candidate.CandidatePreparation(configs.BoundedWorker.unbounded(candidateWorker), self)
 
   protected def nodeApi: NodeApi = nodeContext.getNodeApi
 

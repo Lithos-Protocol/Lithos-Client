@@ -72,6 +72,13 @@ object ConsolidationExecution {
   /** A previous consolidation still owns inputs, so starting another would chain unconfirmed spends. */
   final val OutcomeAwaitingReconciliation = "awaiting-reconciliation"
 
+  /**
+   * A pass's outcome from its sends' broadcast outcomes: the first that was not accepted, since the
+   * pass is only as good as its transactions, else accepted.
+   */
+  def passOutcome(sent: Seq[String]): String =
+    sent.find(_ != EngineBroadcast.Accepted).orElse(sent.headOption).getOrElse(OutcomeAwaitingReconciliation)
+
   /** Ceiling on one consolidation's signed size, well inside any supported node's block limit. */
   private final val MaxSignedBytes = 98304
 
@@ -289,11 +296,7 @@ private[engine] class ConsolidationExecution(node: NodeContext, api: NodeApi, ow
         logger.info(s"Consolidation sent ${sent.size} of ${affordable.size} transaction(s) merging " +
           s"${affordable.map(_.size).sum} box(es)" +
           (if (sent.nonEmpty) s": ${sent.mkString(", ")}" else ""))
-        // The pass is only as good as its transactions, so a send that did not simply succeed is
-        // the outcome worth surfacing.
-        val outcome = sent.find(_ != OutcomeEligible).orElse(sent.headOption)
-          .getOrElse(OutcomeAwaitingReconciliation)
-        plan.status.copy(outcome = outcome)
+        plan.status.copy(outcome = passOutcome(sent))
       }
     }
   }

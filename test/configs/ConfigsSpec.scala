@@ -32,6 +32,14 @@ class ConfigsSpec extends AnyFlatSpec with Matchers {
     thrown.getMessage should include("stratum.candidate.minNewProtocolTxs")
   }
 
+  it should "bound wallet.max-inputs by the most inputs a broadcast may carry" in {
+    def withInputs(cap: Int): Configuration = Configuration(ConfigFactory.parseString(
+      s"wallet.max-inputs = $cap").withFallback(shipped.underlying).resolve())
+    noException should be thrownBy Configs.validateAll(withInputs(150))
+    val thrown = the[ConfigValidationException] thrownBy Configs.validateAll(withInputs(151))
+    thrown.getMessage should include("wallet.max-inputs")
+  }
+
   it should "bound pinned inputs to 0 through 16" in {
     def withPins(pins: Int): Configuration = Configuration(ConfigFactory.parseString(
       s"stratum.candidate.pinnedInputs = $pins").withFallback(shipped.underlying).resolve())

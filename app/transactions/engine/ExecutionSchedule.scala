@@ -61,6 +61,9 @@ private[transactions] final class ExecutionSchedule[A](limit: Int = 128) {
   /** Whether one lane holds anything at all, queued or running. */
   def occupied(lane: String): Boolean = entries.exists(_.lane == lane)
 
+  /** Entries in one lane, queued or running. */
+  def depth(lane: String): Int = entries.count(_.lane == lane)
+
   /** Admit new work. A key already queued or running is left alone rather than duplicated. */
   def register(entry: Entry[A]): Boolean = {
     if (contains(entry.key)) false

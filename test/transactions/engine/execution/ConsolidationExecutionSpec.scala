@@ -38,6 +38,15 @@ class ConsolidationExecutionSpec extends AnyFlatSpec with Matchers with MockitoS
       val p = invocation.getArgument[Paging](1)
       Success(entries.slice(p.offset, p.offset + p.limit))
     }
+
+  "A pass of several transactions" should "report a rejection that follows an accepted send" in {
+    // Sends report broadcast outcomes, never "eligible", so comparing against it always surfaced
+    // the first transaction's outcome and hid any rejection behind it.
+    ConsolidationExecution.passOutcome(Seq("accepted", "rejected")) shouldBe "rejected"
+    ConsolidationExecution.passOutcome(Seq("accepted", "accepted")) shouldBe "accepted"
+    ConsolidationExecution.passOutcome(Seq.empty) shouldBe ConsolidationExecution.OutcomeAwaitingReconciliation
+  }
+
   "Consolidation selection" should "find the oldest boxes across unsorted pages and reduce only the excess" in {
     val api = mock[NodeApi]
     val entries = Vector.tabulate(5000)(i => entry(i + 1, 5000 - i))

@@ -9,7 +9,8 @@ import configs.{EmissionConfig, NodeContext}
 import lfsm.{CollateralParams, EmissionSchedule, LFSMHelpers, RollupProtocol}
 import node.MutationConversions._
 import node.model.IndexedBox
-import org.ergoplatform.appkit.{Address, BlockchainContext, ErgoClientException}
+import org.ergoplatform.appkit.{Address, BlockchainContext}
+import transactions.engine.EngineBroadcast
 import org.ergoplatform.sdk.ErgoId
 import org.slf4j.{Logger, LoggerFactory}
 import play.api.Configuration
@@ -601,15 +602,12 @@ class CollateralExecution(nodeContext: NodeContext,
    * keeps its own type so the controller's existing mapping decides - a wallet shortfall stays 422,
    * a defect in this client stays 500 and is not disguised as something the caller can retry.
    */
-  private def asStatus(ex: Throwable): Throwable = ex match {
-    case node: ErgoClientException
-      if Option(node.getMessage).exists(m =>
-        m.contains("Double spending") || m.contains("Every input of the transaction should be in UTXO")) =>
+  private def asStatus(ex: Throwable): Throwable =
+    if (EngineBroadcast.refusal(ex).isDefined)
       LithosApiErrors.LithosStateChanged(
         s"the emission box was spent by someone else before this join reached the node, so nothing " +
-          s"was created - re-quote and resend (${node.getMessage})")
-    case other => other
-  }
+          s"was created - re-quote and resend (${ex.getMessage})")
+    else ex
 
   private def joinCount(raw: Option[Int]): Int = {
     val count = raw.getOrElse(1)
