@@ -41,7 +41,8 @@ object CandidateConfig {
     collateralRefreshInterval = 60000,
     blockTransactions = true,
     sources = Map(
-      CandidateSourceConfig.Rollups -> CandidateSourceConfig.Default,
+      // Off: the bond box a fee-less NISP submission takes can stay withheld after its block passes.
+      CandidateSourceConfig.Rollups -> CandidateSourceConfig.Default.copy(enabled = false),
       // Room for a run of Clears; Activates alone stop at `emission.candidateActivates`.
       CandidateSourceConfig.Emissions -> CandidateSourceConfig.Default.copy(maxTxs = 20),
       // Two transactions: one sweep, and the merge folding its proceeds outputs into one box. Twice the

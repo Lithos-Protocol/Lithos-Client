@@ -48,8 +48,11 @@ class LithosPoolSpec extends TestKit(ActorSystem("lithos-pool-spec", LithosPoolS
   private val lender = "02" + "11" * 32
   private val soloKey = "03" + "22" * 32
   private val fixtures = ArrayBuffer.empty[Fixture]
+  // The fixture's one source is named rollups, so it is switched on whatever the shipped default is.
   private val cfg = CandidateConfig.Default.copy(genesisWaitMs = 30000, blockTxTimeout = 30000,
-    mempoolRefreshMs = 0, logTimings = true, waitForBlockPackage = false)
+    mempoolRefreshMs = 0, logTimings = true, waitForBlockPackage = false,
+    sources = CandidateConfig.Default.sources.updated(configs.CandidateSourceConfig.Rollups,
+      configs.CandidateSourceConfig.Default))
 
   override def beforeAll(): Unit = evaluation.NTable.lookUp(1)
   override def afterAll(): Unit = TestKit.shutdownActorSystem(system)

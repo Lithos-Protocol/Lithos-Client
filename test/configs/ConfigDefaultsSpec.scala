@@ -46,6 +46,7 @@ class ConfigDefaultsSpec extends AnyFlatSpec with Matchers {
     val building = """
       lithos-tasks.stratum-server.enabled = true
       stratum.candidate.blockTransactions = true
+      stratum.candidate.sources.rollups.enabled = true
     """
     target(building) shouldBe 1
     target(building + "\nstratum.candidate.pinnedInputs = 3") shouldBe 3
