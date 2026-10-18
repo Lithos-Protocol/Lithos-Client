@@ -33,6 +33,9 @@ final class ConfigValidationException(problems: Seq[ConfigProblem])
 /** Validates all runtime configuration before dependency injection constructs its consumers. */
 object Configs {
 
+  /** The BLAKE2b-256 of "hello", the api key `lithos.apiKeyHash` ships with. */
+  final val ShippedApiKeyHash = "324dcf027dd4a30a932c441f365a25e86b173defa4b8e58948253471b81b72cf"
+
   /** Throws immediately for a single fatal problem found outside the batch validation pass. */
   def fail(key: String, problem: String): Nothing =
     throw new ConfigValidationException(Seq(ConfigProblem(key, problem)))
@@ -431,6 +434,13 @@ object Configs {
         v.problem("lithos.apiKeyHash",
           "is not a 64-character hex hash. This is the BLAKE2b-256 of your api key, not the key " +
             "itself - hash it the same way you set your node's apiKeyHash")
+      // The API listens on every interface, so on mainnet the shipped key would leave the wallet
+      // endpoints open to anyone who has read this file.
+      else if (hash.equalsIgnoreCase(ShippedApiKeyHash) &&
+        v.string("node.networkType").exists(_.trim.equalsIgnoreCase("MAINNET")))
+        v.problem("lithos.apiKeyHash",
+          "is still the shipped hash of \"hello\". Choose your own api key and set its BLAKE2b-256 " +
+            "here before running on mainnet")
     }
 
     v.finish()

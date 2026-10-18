@@ -148,7 +148,7 @@ class MiningStratumServer(system: ActorSystem,
     val actorRefBridge = new AtomicReference[ActorRef]()
 
     // Step 2 — JStratum connection object; its state will forward to the bridge
-    val connection = new StratumTcpServerConnection(this, connectionSocket) {
+    val connection = new RigConnection(this, connectionSocket) {
       override protected def createPostConnectState(): ConnectionState =
         new MiningConnectionState(actorRefBridge, socketAddress, this)
 

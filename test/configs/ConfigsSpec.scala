@@ -8,10 +8,24 @@ import play.api.Configuration
 /** Verifies that startup validation accepts shipped configuration and aggregates invalid keys. */
 class ConfigsSpec extends AnyFlatSpec with Matchers {
 
-  private def shipped: Configuration =
+  private def asShipped: Configuration =
     Configuration(ConfigFactory.parseResources("application.conf").resolve())
 
-  "Configs.validateAll" should "accept the shipped application.conf" in {
+  /** The shipped file with an api key of the miner's own, which a mainnet start requires. */
+  private def shipped: Configuration = Configuration(ConfigFactory.parseString(
+    s"""lithos.apiKeyHash = "${"ab" * 32}"""").withFallback(asShipped.underlying).resolve())
+
+  "Configs.validateAll" should "refuse the shipped api key on mainnet, and only there" in {
+    // The API listens on every interface, so a hand-run mainnet install left on the shipped key had
+    // its wallet endpoints open to anyone who had read the default config.
+    val thrown = the[ConfigValidationException] thrownBy Configs.validateAll(asShipped)
+    thrown.getMessage should include("lithos.apiKeyHash")
+    thrown.getMessage should include("hello")
+    noException should be thrownBy Configs.validateAll(Configuration(ConfigFactory.parseString(
+      "node.networkType = TESTNET").withFallback(asShipped.underlying).resolve()))
+  }
+
+  it should "accept the shipped application.conf once an api key is set" in {
     try Configs.validateAll(shipped)
     catch {
       case t: ConfigValidationException => fail(t.getMessage)
