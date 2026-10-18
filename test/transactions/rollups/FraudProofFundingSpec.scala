@@ -89,7 +89,8 @@ class FraudProofFundingSpec extends TestKit(ActorSystem("fp-funding-spec", Fraud
         Success(rewards.filter(_.box.ergoTree == inv.getArgument[String](0)))
       }
 
-    val mgr: ActorRef = system.actorOf(Props(new EngineWalletState(ctx)))
+    val mgr: ActorRef = system.actorOf(Props(new EngineWalletState(ctx,
+      transactions.engine.wallet.EngineWalletStateSpec.NoAutoSweep)))
     mgr ! RefreshBoxes
 
     // The refresh runs off the mailbox, and the balance is both halves of one BoxesRefreshed, so it

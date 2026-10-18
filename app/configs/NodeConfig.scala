@@ -88,6 +88,12 @@ class NodeConfig(config: Configuration) extends NodeContext {
       logger.info(s"Prover holds $numAddresses EIP-3 address(es), primary ${nodeWallet.p2pk}")
   }
 
+  /** The password was checked against the node's own keystore above, so it is the one the node takes. */
+  private val walletUnlock = new NodeWalletUnlock(nodeApi, password)
+  walletUnlock.ensure()
+
+  override def unlockNodeWallet(): Boolean = walletUnlock.ensure()
+
 
   override def getNetwork: NetworkType   = networkType
   override def getExplorerURL: String    = {

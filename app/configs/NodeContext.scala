@@ -28,4 +28,10 @@ trait NodeContext {
   def getNodeApi: NodeApi
 
   def getNodeUrl: String
+
+  /**
+   * Whether the node's wallet is unlocked, unlocking it first when it is locked. Lender keys are
+   * derived through it. True by default, for contexts with no node wallet of their own.
+   */
+  def unlockNodeWallet(): Boolean = true
 }

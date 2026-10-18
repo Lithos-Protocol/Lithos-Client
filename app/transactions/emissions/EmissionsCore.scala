@@ -64,7 +64,8 @@ trait EmissionsCore extends Actor with InjectedActorSupport {
   private val walletSelector = EngineFunding(emissionWalletManager, EngineFunding.askTimeout(config), context.dispatcher)
   private lazy val txs = new EmissionTransactions(
     nodeConfig.getNodeWallet, emissionNodeApi, emissionConfig, walletSelector, () => emissionAlive.get(),
-    Some(new transactions.engine.EngineJoinGuard(emissionWalletManager, emissionNodeApi)))
+    Some(new transactions.engine.EngineJoinGuard(emissionWalletManager, emissionNodeApi)),
+    unlockWallet = () => nodeConfig.unlockNodeWallet())
 
   private var collateralizeTicker: Option[Cancellable] = None
   private var queueTicker: Option[Cancellable] = None
@@ -76,6 +77,8 @@ trait EmissionsCore extends Actor with InjectedActorSupport {
    * intervals make this collide on schedule: 120s and 600s coincide every 10 minutes.
    */
   private var spending: Boolean = false
+  /** Written by queue passes, one at a time under `spending`. */
+  @volatile private var keysProvisioned = false
   protected def executeEmission(intent: transactions.engine.EngineIntent): Future[Any] = {
     require(!spending, "an emission attempt is already running")
     spending = true
@@ -87,6 +90,9 @@ trait EmissionsCore extends Actor with InjectedActorSupport {
           client.execute(ctx => txs.selfCollateralize(ctx,
             new transactions.engine.EngineBroadcast(emissionWalletManager, emissionNodeApi)))
         case transactions.engine.EngineIntent.Queue => client.execute { ctx =>
+          // Until it succeeds once: derive the lender keys, so quotes count them as free. A failure
+          // here costs only that, never the queue pass.
+          if (!keysProvisioned) keysProvisioned = Try(txs.provisionLenderKeys(ctx)).getOrElse(false)
           val height = ctx.getHeight + 1
           // Activates this miner's own candidate holds for the block stay with it until they are
           // handed over; Clears are never held, so ordinary blocks still get this client's Clears.

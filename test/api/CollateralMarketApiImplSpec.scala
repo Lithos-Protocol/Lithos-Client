@@ -61,6 +61,9 @@ class CollateralMarketApiImplSpec
       case GetSpendableBalance => sender() ! SpendableBalance(spendable)
       case GetUnlockedRewards => sender() ! rewards
       case ClaimUnlockedRewards => sender() ! claimReply()
+      case GetReservations => sender() ! Reservations(0, 0L)
+      // The only other ask is for the lender keys joins are sending under, which this package cannot name.
+      case _ => sender() ! Set.empty[String]
     }
   }
 
@@ -103,9 +106,21 @@ class CollateralMarketApiImplSpec
                       rewards: RewardSummary = noRewards,
                       claimReply: () => Any = () => RewardsClaimed(Seq.empty),
                       ttlMs: Long = 10000L,
-                      config: Configuration = emptyConfig): Fixture = {
+                      config: Configuration = emptyConfig,
+                      walletLocked: Boolean = false): Fixture = {
     val nodeApi = mock[NodeApi]
-    val (nodeCtx, _, wallet) = FakeNodeContext(nodeApi, numAddresses)
+    val (fakeCtx, _, wallet) = FakeNodeContext(nodeApi, numAddresses)
+    // A node wallet that cannot be unlocked, for the paths that would derive a lender key.
+    val nodeCtx: NodeContext = if (!walletLocked) fakeCtx else new NodeContext {
+      override def getNetwork = fakeCtx.getNetwork
+      override def getExplorerURL = fakeCtx.getExplorerURL
+      override def getClient = fakeCtx.getClient
+      override def getNodeWallet = fakeCtx.getNodeWallet
+      override def getNodeKey = fakeCtx.getNodeKey
+      override def getNodeApi = fakeCtx.getNodeApi
+      override def getNodeUrl = fakeCtx.getNodeUrl
+      override def unlockNodeWallet(): Boolean = false
+    }
     val addresses = wallet.addresses
 
     val byToken = nodeCtx.getClient.execute(ctx => boxes(ctx, addresses))
@@ -173,6 +188,24 @@ class CollateralMarketApiImplSpec
       // enough not to pin the exact shape, tight enough that a per-address derivation fails it:
       // eight addresses would put this above thirty.
       f.index.calls.get() should be <= 12
+    }
+  }
+
+  it should "count keys left to derive only while the node wallet can be unlocked" in {
+    // The node derives lender keys only while its wallet is unlocked. Counting them anyway, the
+    // quote said positions fit that the join, deriving nothing, then refused.
+    val open = quoteFor(fixture(numAddresses = 4, boxes = (ctx, _) => baseBoxes(ctx)), 6)
+    open.keysDerivable shouldBe 28
+    open.fitting shouldBe 10
+    open.blockedReason shouldBe None
+
+    val locked = fixture(numAddresses = 4, boxes = (ctx, _) => baseBoxes(ctx), walletLocked = true)
+    val short = quoteFor(locked, 6)
+    short.fitting shouldBe 4
+    short.blockedReason shouldBe Some(CollateralJoinBlock.WalletLocked)
+    short.lenderAddresses shouldBe empty
+    withClue("the keys the wallet already holds still fit: ") {
+      quoteFor(locked, 4).blockedReason shouldBe None
     }
   }
 
@@ -492,5 +525,21 @@ class CollateralMarketApiImplSpec
         Fx.indexed(Fx.collateralBox(ctx, addrs.head, carriedLit = 0L, txId = "d1" * 32), height = 120000),
         Fx.indexed(Fx.collateralBox(ctx, addrs(1), carriedLit = 0L, txId = "d2" * 32), height = 0))))
     f.api.getActiveSet(None, None).map(_.inclusionHeight).sortBy(_.getOrElse(0)) shouldBe Seq(None, Some(120000))
+  }
+
+  "A join the engine will not run" should "say nothing was sent, rather than fail on a cast" in {
+    // The engine answers such a join with Deferred. Cast to a join result, that was a 500 naming two
+    // class names, which the field report saw for 24 and 25 positions.
+    val engine = system.actorOf(Props(new Actor {
+      override def receive: Receive = {
+        case _: transactions.engine.TransactionEngine.JoinCollateral =>
+          sender() ! transactions.engine.TransactionEngine.Deferred("join:x", "admission limit")
+      }
+    }))
+    val impl = new CollateralMarketApiImpl(FakeNodeContext()._1, emptyConfig, system, engine)
+    val refused = intercept[LithosApiErrors.LithosUnavailable](
+      impl.join(CollateralJoinExecuteRequest(24, Some(true), None, None)))
+    refused.getMessage should include("nothing was sent")
+    refused.getMessage should include("admission limit")
   }
 }

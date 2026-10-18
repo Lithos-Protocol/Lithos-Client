@@ -39,6 +39,8 @@ import scala.util.{Failure, Success}
  * the id from the box's contents, so a synthetic one does not survive the conversion.
  */
 object EngineWalletStateSpec {
+  val NoAutoSweep: configs.WalletConfig =
+    configs.WalletConfig.Default.copy(rewardSweep = configs.RewardSweepConfig(enabled = false, intervalMs = 1800000L))
   val config: com.typesafe.config.Config =
     com.typesafe.config.ConfigFactory.parseString("akka.test.single-expect-default = 20s").withFallback(com.typesafe.config.ConfigFactory.load())
 }
@@ -73,7 +75,8 @@ class EngineWalletStateSpec extends TestKit(ActorSystem("wallet-manager-spec", E
   }
 
   /** A EngineWalletState whose clock the test drives, so a reservation can age without waiting it out. */
-  private class TestableEngineWalletState(ctx: NodeContext, clock: () => Long) extends EngineWalletState(ctx) {
+  // The automatic reward sweep is off, so a coinbase in a fixture stays where the test put it.
+  private class TestableEngineWalletState(ctx: NodeContext, clock: () => Long) extends EngineWalletState(ctx, EngineWalletStateSpec.NoAutoSweep) {
     override protected def now(): Long = clock()
   }
 

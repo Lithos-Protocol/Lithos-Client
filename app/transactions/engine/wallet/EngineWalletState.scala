@@ -582,6 +582,7 @@ class EngineWalletState @Inject()(nodeContext: NodeContext,
         s"${spendableRewards.size} reward box(es) spendable" +
         (if (truncated) ", more boxes than the descriptor cache holds (wallet.max-descriptors, max-descriptor-bytes)" else ""))
       replenishPins()
+      sweepRewardsIfDue()
       finishRefresh()
 
     case SelectInputs(_, _, _, reservationId, deadlineMillis, _, _, _) if now() >= deadlineMillis =>
@@ -692,41 +693,67 @@ class EngineWalletState @Inject()(nodeContext: NodeContext,
         unlockedNanoErgs = saturate(valueOf(unlocked)),
         blocksUntilFirstUnlock)
 
+    case GetReservations =>
+      val held = usedInputs.keysIterator.flatMap(id => walletBoxes.get(id).orElse(rewardBoxes.get(id))).toSeq
+      sender() ! Reservations(usedInputs.size, saturate(valueOf(held)))
+
     case GetSpendableBalance =>
       sender() ! SpendableBalance(saturate(summary.filter(_._1 == walletRevision)
         .map(_._2.spendable).getOrElse(valueOf(available))))
 
     case ClaimUnlockedRewards if sweeping => sender() ! RewardClaimFailed("a reward sweep is already running")
 
-    case ClaimUnlockedRewards =>
-      val replyTo = sender()
-      // Smallest first, so dust consolidates into the early batches instead of stranding a tail of
-      // sub-fee boxes, and never more than the remaining optional ownership budget.
-      val matured = spendableRewards.sortBy(_.value)
-        .take(math.min(walletLimits.maxInputs, MAX_OPTIONAL_INPUTS - usedInputs.size))
-      if (matured.isEmpty) replyTo ! RewardsClaimed(Seq.empty)
-      else {
-        sweeping = true
-        // Reserved on the actor thread BEFORE anything leaves the mailbox, so no other selection
-        // can take these boxes while the sweep runs. Each batch carries its own lease identity so
-        // one failed batch never blocks committing the ones around it.
-        val batches = matured.grouped(walletLimits.maxInputs).toVector
-        val leaseIds = batches.map(_ => UUID.randomUUID().toString)
-        batches.zip(leaseIds).foreach { case (batch, leaseId) =>
-          reserve(batch.map(_.id.toString), leaseId)
-        }
-        val sweep = Promise[RewardsClaimed]()
-        Try(Future(runRewardSweep(batches.iterator.map(hydrateRewards), leaseIds, sweep))(maintenanceWorker))
-          .failed.foreach { ex =>
-            leaseIds.foreach(leaseId => self ! ReleaseInputs(leaseId))
-            sweep.tryFailure(ex)
-          }
-        sweep.future.onComplete { result =>
-          replyTo ! result.fold(ex => RewardClaimFailed(ex.getMessage), identity)
-          self ! WalletWorkerResult(walletIncarnation, SweepFinished)
-        }(context.dispatcher)
-      }
+    case ClaimUnlockedRewards => claimRewards(Some(sender()))
 
+  }
+
+  // ─── reward claims ────────────────────────────────────────────────────────
+
+  /** When the next automatic sweep may start. Checked as each refresh lands, so it acts on fresh boxes. */
+  private var nextRewardSweep = 0L
+
+  private def sweepRewardsIfDue(): Unit =
+    if (walletLimits.rewardSweep.enabled && !sweeping && now() >= nextRewardSweep && spendableRewards.nonEmpty) {
+      nextRewardSweep = now() + walletLimits.rewardSweep.intervalMs
+      logger.info(s"Sweeping ${spendableRewards.size} unlocked reward box(es) to the primary address " +
+        s"(wallet.reward-sweep)")
+      claimRewards(None)
+    }
+
+  /**
+   * Sweep every unlocked reward box, answering `replyTo` when there is one. The automatic sweep has
+   * no caller; its batches are logged as they go.
+   */
+  private def claimRewards(replyTo: Option[ActorRef]): Unit = {
+    // Smallest first, so dust consolidates into the early batches instead of stranding a tail of
+    // sub-fee boxes, and never more than the remaining optional ownership budget.
+    val matured = spendableRewards.sortBy(_.value)
+      .take(math.min(walletLimits.maxInputs, MAX_OPTIONAL_INPUTS - usedInputs.size))
+    if (matured.isEmpty) replyTo.foreach(_ ! RewardsClaimed(Seq.empty))
+    else {
+      sweeping = true
+      // Reserved on the actor thread BEFORE anything leaves the mailbox, so no other selection
+      // can take these boxes while the sweep runs. Each batch carries its own lease identity so
+      // one failed batch never blocks committing the ones around it.
+      val batches = matured.grouped(walletLimits.maxInputs).toVector
+      val leaseIds = batches.map(_ => UUID.randomUUID().toString)
+      batches.zip(leaseIds).foreach { case (batch, leaseId) =>
+        reserve(batch.map(_.id.toString), leaseId)
+      }
+      val sweep = Promise[RewardsClaimed]()
+      Try(Future(runRewardSweep(batches.iterator.map(hydrateRewards), leaseIds, sweep))(maintenanceWorker))
+        .failed.foreach { ex =>
+          leaseIds.foreach(leaseId => self ! ReleaseInputs(leaseId))
+          sweep.tryFailure(ex)
+        }
+      sweep.future.onComplete { result =>
+        replyTo match {
+          case Some(caller) => caller ! result.fold(ex => RewardClaimFailed(ex.getMessage), identity)
+          case None => result.failed.foreach(ex => logger.warn(s"Automatic reward sweep failed: ${ex.getMessage}"))
+        }
+        self ! WalletWorkerResult(walletIncarnation, SweepFinished)
+      }(context.dispatcher)
+    }
   }
 
   // ─── reward sweep ─────────────────────────────────────────────────────────

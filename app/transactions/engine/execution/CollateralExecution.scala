@@ -81,7 +81,7 @@ class CollateralExecution(nodeContext: NodeContext,
 
   private lazy val txs: EmissionTransactions =
     new EmissionTransactions(nodeContext.getNodeWallet, executionNode,
-      emissionConfig, walletSelector)
+      emissionConfig, walletSelector, unlockWallet = () => nodeContext.unlockNodeWallet())
 
   private def addressOf(sigmaProp: SigmaProp, ctx: BlockchainContext): Option[String] =
     Try(Address.fromErgoTree(ErgoTree.fromProposition(sigmaProp), ctx.getNetworkType).toString).toOption
@@ -315,6 +315,7 @@ class CollateralExecution(nodeContext: NodeContext,
 
   override def getWalletStatus: WalletCollateralStatus = {
     val rewards = askWallet[RewardSummary](GetUnlockedRewards, QuickAsk)
+    val reservations = askWallet[Reservations](GetReservations, QuickAsk)
 
     nodeContext.getClient.execute { ctx =>
       val tx = txs
@@ -369,7 +370,9 @@ class CollateralExecution(nodeContext: NodeContext,
         positions = positions.toSeq,
         rewards = CollateralRewardSummary(rewards.lockedBoxes, rewards.unlockedBoxes,
           rewards.lockedNanoErgs.toString, rewards.unlockedNanoErgs.toString,
-          rewards.blocksUntilFirstUnlock)
+          rewards.blocksUntilFirstUnlock),
+        reservedBoxes = reservations.boxes,
+        reservedNanoErgs = reservations.nanoErgs.toString
       )
     }
   }
@@ -443,7 +446,19 @@ class CollateralExecution(nodeContext: NodeContext,
 
   // ─── joining ──────────────────────────────────────────────────────────────
 
-  private val MaxJoinCount = 25
+  import CollateralExecution.{JoinCapacity, MaxJoinCount}
+
+  /**
+   * How many positions fit now, worked out one way for a quote and a join. Keys left to derive count
+   * only while the node wallet is unlocked, because the node derives them; it is unlocked here when
+   * any are left.
+   */
+  private def joinCapacity(mine: Seq[Address], taken: Set[String]): JoinCapacity = {
+    val free = mine.filterNot(a => taken.contains(hex(lenderEntry(a))))
+    val room = math.max(0, emissionConfig.maxOwnCollateral - (mine.size - free.size))
+    val derivable = math.max(0, emissionConfig.maxLenderKeys - mine.size)
+    JoinCapacity(room, free, derivable, unlocked = derivable == 0 || nodeContext.unlockNodeWallet())
+  }
 
   override def checkJoin(request: CollateralJoinCheckRequest): CollateralJoinQuote =
     nodeContext.getClient.execute { ctx =>
@@ -465,18 +480,19 @@ class CollateralExecution(nodeContext: NodeContext,
       // the shipped 32 keys, sixty-four exhaustive paged token scans for one unauthenticated
       // request. It is one derivation over the whole address list, not a per-address predicate.
       val view = collateralView(ctx)
-      val freeAddresses = view.mine.filterNot(a => view.taken.contains(hex(lenderEntry(a))))
-      val ourLive = view.mine.size - freeAddresses.size
-      val roomLeft = math.max(0, emissionConfig.maxOwnCollateral - ourLive)
-      val derivable = math.max(0, emissionConfig.maxLenderKeys - view.mine.size)
+      // Keys this client's own joins are sending under count as taken, as the join counts them.
+      val sending = Try(askWallet[Set[String]](EngineJoinGuard.Keys, QuickAsk)).getOrElse(Set.empty[String])
+      val capacity = joinCapacity(view.mine, view.taken ++ sending)
+      val freeAddresses = capacity.free
 
       // Ordered by what the reader has to change first: a config toggle, then a config number, then
-      // a key budget, then money. Reporting the last of these when the first also holds sends
-      // somebody to top up a wallet that was never the reason.
+      // the node wallet, then a key budget, then money. Reporting the last of these when the first
+      // also holds sends somebody to top up a wallet that was never the reason.
       val blocked =
         if (emissionConfig.autoCollateralize) Some(CollateralJoinBlock.AutoCollateralize)
-        else if (roomLeft < count) Some(CollateralJoinBlock.BudgetExhausted)
-        else if (freeAddresses.size + derivable < count) Some(CollateralJoinBlock.NoLenderKeys)
+        else if (capacity.room < count) Some(CollateralJoinBlock.BudgetExhausted)
+        else if (!capacity.unlocked && freeAddresses.size < count) Some(CollateralJoinBlock.WalletLocked)
+        else if (capacity.fitting < count) Some(CollateralJoinBlock.NoLenderKeys)
         else if (spendable < total) Some(CollateralJoinBlock.InsufficientFunds)
         else None
 
@@ -495,16 +511,19 @@ class CollateralExecution(nodeContext: NodeContext,
         emissionTipBoxId = tip.box.id.toString,
         affordNow = spendable >= total,
         shortfallNanoErgs = math.max(0L, total - spendable).toString,
-        ownRoomLeft = math.max(0, roomLeft - count),
+        ownRoomLeft = math.max(0, capacity.room - count),
         manualJoinAllowed = blocked.isEmpty,
         blockedReason = blocked,
         // Only the keys that already exist. Naming all `count` of them would mean deriving the
         // shortfall here, and a derivation writes to the node's wallet - a quote must not.
         lenderAddresses =
-          if (blocked.contains(CollateralJoinBlock.NoLenderKeys)) Seq.empty
+          if (blocked.exists(b => b == CollateralJoinBlock.NoLenderKeys || b == CollateralJoinBlock.WalletLocked))
+            Seq.empty
           else freeAddresses.take(count).map(_.toString),
         freeLenderKeys = freeAddresses.size,
-        keysRequired = count
+        keysRequired = count,
+        keysDerivable = capacity.derivable,
+        fitting = capacity.fitting
       )
     }
 
@@ -560,13 +579,15 @@ class CollateralExecution(nodeContext: NodeContext,
       val mine = tx.walletAddresses(ctx)
       val guard = new EngineJoinGuard(walletManager, executionNode)
       val taken = tx.takenLenderKeys(ctx, tip) ++ guard.exclusions()
-      val ourLive = mine.count(a => taken.contains(hex(lenderEntry(a))))
-      val room = math.max(0, emissionConfig.maxOwnCollateral - ourLive)
-      val keys = tx.freeLenderKeys(ctx, taken, math.min(count, room))
+      val capacity = joinCapacity(mine, taken)
+      val keys = tx.freeLenderKeys(ctx, taken, math.min(count, capacity.room))
+      // All or nothing: a partial spend the caller did not ask for is worse than a retry at `fitting`.
       if (keys.size < count)
         throw LithosApiErrors.LithosUnprocessable(
           s"only ${keys.size} of $count position(s) fit within the configured exposure budget " +
-            s"(${emissionConfig.maxOwnCollateral}) and free lender keys")
+            s"(${emissionConfig.maxOwnCollateral}) and free lender keys" +
+            (if (capacity.unlocked) "" else "; the node wallet could not be unlocked, so no key was derived") +
+            s" - nothing was sent; fitting=${keys.size}")
 
       // The permit cap was enforced against the planned positions above, so nothing here needs to
       // stop for cost: a breach sent nothing at all.
@@ -642,4 +663,20 @@ class CollateralExecution(nodeContext: NodeContext,
 
   private def paged(limit: Option[Int], offset: Option[Int]): (Int, Int) =
     (math.max(0, offset.getOrElse(0)), math.max(1, math.min(100, limit.getOrElse(50))))
+}
+
+object CollateralExecution {
+  /** Positions one join request may ask for. The engine's admission and the API share it. */
+  final val MaxJoinCount = 25
+
+  /**
+   * @param room      positions `maxOwnCollateral` still allows
+   * @param free      wallet keys no live or queued box uses
+   * @param derivable keys left below `maxLenderKeys`
+   * @param unlocked  whether those can be derived now
+   */
+  private[execution] final case class JoinCapacity(room: Int, free: Seq[Address], derivable: Int, unlocked: Boolean) {
+    /** Positions a join would accept. */
+    def fitting: Int = math.min(room, free.size + (if (unlocked) derivable else 0))
+  }
 }

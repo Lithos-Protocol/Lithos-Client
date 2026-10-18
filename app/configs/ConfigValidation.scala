@@ -100,6 +100,9 @@ object Configs {
       1, 1000, "consolidations per pass")
     val attemptTimeout = v.longRange("wallet.consolidation.attempt-timeout-ms",
       v.long("wallet.consolidation.attempt-timeout-ms"), 10000L, 86400000L, "milliseconds")
+    v.bool("wallet.reward-sweep.enabled")
+    v.longRange("wallet.reward-sweep.interval-ms", v.long("wallet.reward-sweep.interval-ms"),
+      60000L, 86400000L, "milliseconds")
     v.longRange("wallet.consolidation.request-timeout-ms", v.long("wallet.consolidation.request-timeout-ms"),
       1000L, 600000L, "milliseconds")
     // A walk that runs to its own limit would leave the pass nothing to sign and send in

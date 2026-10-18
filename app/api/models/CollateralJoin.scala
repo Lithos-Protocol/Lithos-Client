@@ -27,6 +27,8 @@ object CollateralJoinBlock {
   final val NoLenderKeys = "NO_LENDER_KEYS"
   /** `maxOwnCollateral` already reached, or reached by this many more positions. */
   final val BudgetExhausted = "BUDGET_EXHAUSTED"
+  /** New keys are needed and the node wallet, which derives them, could not be unlocked. */
+  final val WalletLocked = "WALLET_LOCKED"
   /** The wallet cannot cover principal plus fees for the requested count. */
   final val InsufficientFunds = "INSUFFICIENT_FUNDS"
 }
@@ -65,7 +67,9 @@ case class CollateralJoinQuote(count: Int,
                                blockedReason: Option[String],
                                lenderAddresses: Seq[String],
                                freeLenderKeys: Int,
-                               keysRequired: Int)
+                               keysRequired: Int,
+                               keysDerivable: Int,
+                               fitting: Int)
 
 object CollateralJoinQuote {
   implicit lazy val jsonFormat: Format[CollateralJoinQuote] = Json.format[CollateralJoinQuote]

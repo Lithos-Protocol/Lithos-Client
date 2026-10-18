@@ -307,7 +307,7 @@ class TransactionEngine @Inject()(node: NodeContext,
       case EngineIntent.Rollups(stubs) =>
         stubs.nonEmpty && stubs.size <= 100 && stubs.forall(_.rollupBlockId.matches("[0-9a-f]{64}"))
       case EngineIntent.Join(request, requestId) =>
-        request.count > 0 && request.count <= 10 && requestId.length <= 128
+        request.count > 0 && request.count <= execution.CollateralExecution.MaxJoinCount && requestId.length <= 128
       case EngineIntent.Register(diff) => diff.length <= api.models.DifficultyCommitment.MaxDiffLength
       case EngineIntent.Commit(diff) => diff.length <= api.models.DifficultyCommitment.MaxDiffLength
       case _ => true

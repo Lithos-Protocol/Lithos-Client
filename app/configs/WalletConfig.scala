@@ -52,7 +52,8 @@ case class WalletConfig(maxInputs: Int,
                         nodeMaxResponseBytes: Int,
                         maxWalletInputs: Int,
                         maxOptionalInputs: Int,
-                        consolidation: ConsolidationConfig)
+                        consolidation: ConsolidationConfig,
+                        rewardSweep: RewardSweepConfig = RewardSweepConfig.Default)
 
 /**
  * When this client merges its own wallet boxes.
@@ -79,6 +80,20 @@ case class WalletConfig(maxInputs: Int,
  */
 case class ConsolidationConfig(enabled: Boolean, targetUtxos: Int, intervalMs: Long, minInputs: Int,
                                transactions: Int, attemptTimeoutMs: Long, requestTimeoutMs: Long)
+
+/**
+ * When this client moves its unlocked mining rewards to its first address. Funding never selects a
+ * reward box, so rewards pay for nothing until a sweep moves them.
+ *
+ * @param enabled    on by default. A sweep is considered each time a wallet refresh lands, which is
+ *                   about every ten minutes and after every send.
+ * @param intervalMs shortest gap between automatic sweeps.
+ */
+case class RewardSweepConfig(enabled: Boolean, intervalMs: Long)
+
+object RewardSweepConfig {
+  val Default: RewardSweepConfig = RewardSweepConfig(enabled = true, intervalMs = 1800000L)
+}
 
 object WalletConfig {
 
@@ -136,6 +151,9 @@ object WalletConfig {
         minInputs = int("consolidation.min-inputs", d.consolidation.minInputs),
         transactions = int("consolidation.num-transactions", d.consolidation.transactions),
         attemptTimeoutMs = long("consolidation.attempt-timeout-ms", d.consolidation.attemptTimeoutMs),
-        requestTimeoutMs = long("consolidation.request-timeout-ms", d.consolidation.requestTimeoutMs)))
+        requestTimeoutMs = long("consolidation.request-timeout-ms", d.consolidation.requestTimeoutMs)),
+      rewardSweep = RewardSweepConfig(
+        enabled = bool("reward-sweep.enabled", d.rewardSweep.enabled),
+        intervalMs = long("reward-sweep.interval-ms", d.rewardSweep.intervalMs)))
   }
 }

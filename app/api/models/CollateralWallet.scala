@@ -64,6 +64,9 @@ object CollateralRewardSummary {
  * with no free key but room under `maxLenderKeys` derives one on demand and is not blocked; one at
  * its ceiling genuinely is. Collapsing them into a single "keys available" number reports the
  * second case as the first.
+ *
+ * `reservedBoxes` and `reservedNanoErgs` are wallet boxes held for transactions in flight or for this
+ * miner's own blocks. They are left out of the spendable balance a join quote is priced against.
  */
 case class WalletCollateralStatus(autoCollateralize: Boolean,
                                   maxOwnCollateral: Int,
@@ -77,7 +80,9 @@ case class WalletCollateralStatus(autoCollateralize: Boolean,
                                   keysDerivable: Int,
                                   lenderKeys: Seq[CollateralLenderKeyStatus],
                                   positions: Seq[CollateralPositionSummary],
-                                  rewards: CollateralRewardSummary)
+                                  rewards: CollateralRewardSummary,
+                                  reservedBoxes: Int,
+                                  reservedNanoErgs: String)
 
 object WalletCollateralStatus {
   implicit lazy val jsonFormat: Format[WalletCollateralStatus] =

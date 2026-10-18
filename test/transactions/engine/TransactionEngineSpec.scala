@@ -88,6 +88,27 @@ class TransactionEngineSpec extends TestKit(ActorSystem("transaction-engine-spec
     } finally { gate.complete(()); system.stop(engine) }
   }
 
+  it should "admit a join of as many positions as the API accepts" in {
+    // The API allowed 25 positions while admission stopped at 10, so 11 to 25 came back Deferred,
+    // which the API then cast into a 500.
+    val (ctx, _, _) = FakeNodeContext()
+    val replies = TestProbe()
+    val engine = system.actorOf(Props(new TransactionEngine(ctx, replies.ref, replies.ref, new support.FakeCache, play.api.Configuration(com.typesafe.config.ConfigFactory.load()), transactions.rollups.DataBoxSource.Stored) {
+      override protected lazy val reconciler = new EngineReconciler(ctx, replies.ref, replies.ref) {
+        override def reconcile(): Unit = ()
+      }
+      override protected def executeEmission(intent: EngineIntent): scala.concurrent.Future[Any] =
+        scala.concurrent.Future.successful("joined")
+    }))
+    def join(count: Int) = JoinCollateral(api.models.CollateralJoinExecuteRequest(count, Some(true), None, None))
+    try {
+      replies.send(engine, join(execution.CollateralExecution.MaxJoinCount))
+      replies.fishForSpecificMessage(5.seconds) { case "joined" => () }
+      replies.send(engine, join(execution.CollateralExecution.MaxJoinCount + 1))
+      replies.fishForSpecificMessage(5.seconds) { case refused: Deferred => refused }
+    } finally system.stop(engine)
+  }
+
   it should "let queued work progress after a slow reconciliation receives another tick" in {
     val (ctx, _, _) = FakeNodeContext()
     val events = TestProbe()

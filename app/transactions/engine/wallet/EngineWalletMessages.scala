@@ -159,6 +159,12 @@ object EngineWalletMessages {
   /** Reply to [[GetSpendableBalance]]. */
   final case class SpendableBalance(nanoErgs: Long)
 
+  /** Ask how many wallet boxes are held for transactions in flight or for this miner's own blocks. */
+  case object GetReservations
+
+  /** Reply to [[GetReservations]]. `nanoErgs` sums the held boxes the descriptor cache knows. */
+  final case class Reservations(boxes: Int, nanoErgs: Long)
+
   /**
    * Sweep every unlocked coinbase box to the wallet's primary address (EIP-3 index 0). Runs off the
    * actor in batches; each accepted batch retires its inputs exactly like an external send.

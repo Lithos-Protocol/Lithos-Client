@@ -86,7 +86,8 @@ class RewardSweepSpec extends TestKit(akka.actor.ActorSystem("reward-sweep-spec"
 
   // ---- reservation lifecycle through the actor ----
 
-  private class TestableEngineWalletState(ctx: NodeContext) extends EngineWalletState(ctx) {
+  private class TestableEngineWalletState(ctx: NodeContext, limits: configs.WalletConfig = EngineWalletStateSpec.NoAutoSweep)
+    extends EngineWalletState(ctx, limits) {
     override def receive: Receive = ({
       case state.synchronization.CompleteMempool.Refresh =>
         sender() ! state.synchronization.CompleteMempool.Observation(1L,
@@ -95,7 +96,8 @@ class RewardSweepSpec extends TestKit(akka.actor.ActorSystem("reward-sweep-spec"
   }
 
   /** A started manager whose node reports exactly `rewards`, first refresh settled. Mirrors EngineWalletStateSpec's fixture. */
-  private def fixtureWithRewards(rewards: Seq[Long], indexed: Boolean = true): (TestProbe, akka.actor.ActorRef) = {
+  private def fixtureWithRewards(rewards: Seq[Long], indexed: Boolean = true,
+                                 limits: configs.WalletConfig = EngineWalletStateSpec.NoAutoSweep): (TestProbe, akka.actor.ActorRef) = {
     val api = mock(classOf[NodeApi])
     val (ctx, _, wallet) = FakeNodeContext(api, numAddresses = 1)
     val master = wallet.rewardTrees.find(_._2 == wallet.prover.getAddress).get._1
@@ -126,7 +128,7 @@ class RewardSweepSpec extends TestKit(akka.actor.ActorSystem("reward-sweep-spec"
       }
 
     val probe = TestProbe()
-    val mgr = system.actorOf(Props(new TestableEngineWalletState(ctx)))
+    val mgr = system.actorOf(Props(new TestableEngineWalletState(ctx, limits)))
     mgr ! RefreshBoxes
     // The refresh runs off the mailbox; settle it before asserting, as EngineWalletStateSpec does.
     Thread.sleep(1200)
@@ -168,5 +170,23 @@ class RewardSweepSpec extends TestKit(akka.actor.ActorSystem("reward-sweep-spec"
     result.chunks.head.outcome shouldBe "uncertain"
     probe.send(mgr, GetUnlockedRewards)
     probe.expectMsgType[RewardSummary](20.seconds).unlockedBoxes shouldBe 0
+  }
+
+  "Unlocked rewards" should "be swept without a claim once a refresh sees them" in {
+    // Nothing moved them unless something called POST /collateral/rewards/claim, and funding never
+    // spends a reward box, so they sat unlocked indefinitely.
+    val (probe, mgr) = fixtureWithRewards(Seq(3000000000L, 3100000000L), limits = configs.WalletConfig.Default)
+    probe.awaitAssert({
+      probe.send(mgr, GetUnlockedRewards)
+      probe.expectMsgType[RewardSummary](20.seconds).unlockedBoxes shouldEqual 0
+    }, 30.seconds, 500.millis)
+  }
+
+  it should "stay put while wallet.reward-sweep is off" in {
+    val (probe, mgr) = fixtureWithRewards(Seq(3000000000L, 3100000000L))
+    probe.send(mgr, RefreshBoxes)
+    Thread.sleep(1200)
+    probe.send(mgr, GetUnlockedRewards)
+    probe.expectMsgType[RewardSummary](20.seconds).unlockedBoxes shouldEqual 2
   }
 }

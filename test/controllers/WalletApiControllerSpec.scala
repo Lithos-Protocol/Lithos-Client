@@ -56,7 +56,9 @@ class WalletApiControllerSpec
       keysDerivable = 28,
       lenderKeys = Seq.empty,
       positions = Seq.empty,
-      rewards = CollateralRewardSummary(0, 0, "0", "0", None)))
+      rewards = CollateralRewardSummary(0, 0, "0", "0", None),
+      reservedBoxes = 0,
+      reservedNanoErgs = "0"))
 
   private def controller(answer: => WalletBalances): WalletApiController =
     new WalletApiController(Helpers.stubControllerComponents(), new WalletApi {

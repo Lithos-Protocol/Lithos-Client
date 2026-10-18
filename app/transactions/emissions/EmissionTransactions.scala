@@ -147,7 +147,8 @@ class EmissionTransactions(prover: NodeWallet,
                            config: EmissionConfig,
                            walletSource: FundingSource,
                            alive: () => Boolean = () => true,
-                           joinGuard: Option[transactions.engine.EngineJoinGuard] = None) {
+                           joinGuard: Option[transactions.engine.EngineJoinGuard] = None,
+                           unlockWallet: () => Boolean = () => true) {
 
   private val logger: Logger = LoggerFactory.getLogger("EmissionTransactions")
 
@@ -465,17 +466,15 @@ class EmissionTransactions(prover: NodeWallet,
   def freeLenderKeys(ctx: BlockchainContext, taken: Set[String], count: Int): Seq[Address] = {
     var mine = walletAddresses(ctx)
     var free = mine.filterNot(a => taken.contains(hex(lenderEntry(a))))
-    var deriving = true
+    // The node derives only while its wallet is unlocked, so it is unlocked first when keys are short.
+    var deriving = free.size >= count || mine.size >= config.maxLenderKeys || unlockWallet()
 
     while (deriving && free.size < count && mine.size < config.maxLenderKeys) {
-      nodeApi.deriveNextKey().flatMap(d => Try(d.derivationPath -> Address.create(d.address))) match {
-        case Success((path, address)) =>
-          logger.info(s"Derived lender key $path -> $address")
+      deriveOne() match {
+        case Some(address) =>
           mine = mine :+ address
           if (!taken.contains(hex(lenderEntry(address)))) free = free :+ address
-        case Failure(ex) =>
-          logger.warn(s"Could not derive another lender key: ${ex.getMessage}")
-          deriving = false
+        case None => deriving = false
       }
     }
 
@@ -484,6 +483,32 @@ class EmissionTransactions(prover: NodeWallet,
         s"${free.size} of $count requested keys are free")
 
     free.take(count)
+  }
+
+  /** One more EIP-3 key from the node's wallet, or None when the node refuses. */
+  private def deriveOne(): Option[Address] =
+    nodeApi.deriveNextKey().flatMap(d => Try(d.derivationPath -> Address.create(d.address))) match {
+      case Success((path, address)) =>
+        logger.info(s"Derived lender key $path -> $address")
+        Some(address)
+      case Failure(ex) =>
+        logger.warn(s"Could not derive another lender key: ${ex.getMessage}")
+        None
+    }
+
+  /**
+   * Derive node keys until the wallet holds `maxLenderKeys`, so a quote counts them as free rather
+   * than leaving them to be derived by the join. True once the wallet holds them all.
+   */
+  def provisionLenderKeys(ctx: BlockchainContext): Boolean = {
+    val held = walletAddresses(ctx).size
+    val wanted = config.maxLenderKeys - held
+    wanted <= 0 || (unlockWallet() && {
+      val derived = Iterator.continually(deriveOne()).take(wanted).takeWhile(_.isDefined).size
+      logger.info(s"Derived $derived lender key(s): the node wallet holds ${held + derived} of " +
+        s"emission.maxLenderKeys (${config.maxLenderKeys})")
+      derived == wanted
+    })
   }
 
   // ══════════════════════════════════════════════════════════════════════════
