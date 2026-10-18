@@ -213,77 +213,39 @@ object LFSMHelpers {
     ((totalScore * BigInt(reward)) / BigInt(totalValue)).toLong
   }
 
-  def getFPToken(ctx: BlockchainContext): ErgoId = {
-    ctx.getNetworkType match {
-      case NetworkType.MAINNET => FP_TOKEN_MAINNET
-      case NetworkType.TESTNET => FP_TOKEN_TESTNET
-    }
-  }
+  // Every getter below answers from `Deployment`: the override installed for this network when there
+  // is one, the constants above otherwise. Contracts compile these ids in, so a getter that bypassed
+  // the override would compile one contract against a devnet deployment and its neighbour against
+  // the public one, and the pair would never validate together.
 
-  def getFPToken(networkType: NetworkType): ErgoId = {
-    networkType match {
-      case NetworkType.MAINNET => FP_TOKEN_MAINNET
-      case NetworkType.TESTNET => FP_TOKEN_TESTNET
-    }
-  }
+  def getFPToken(ctx: BlockchainContext): ErgoId = getFPToken(ctx.getNetworkType)
 
-  def getMDToken(networkType: NetworkType): ErgoId = {
-    networkType match {
-      case NetworkType.MAINNET => MD_TOKEN_MAINNET
-      case NetworkType.TESTNET => MD_TOKEN_TESTNET
-    }
-  }
+  def getFPToken(networkType: NetworkType): ErgoId = Deployment.ids(networkType).fpToken
 
-  def getLitId(networkType: NetworkType): ErgoId = networkType match {
-    case NetworkType.MAINNET => LIT_ID_MAINNET
-    case NetworkType.TESTNET => LIT_ID_TESTNET
-  }
+  def getMDToken(networkType: NetworkType): ErgoId = Deployment.ids(networkType).mdToken
 
-  def getEmissionNft(networkType: NetworkType): ErgoId = networkType match {
-    case NetworkType.MAINNET => EMISSION_NFT_MAINNET
-    case NetworkType.TESTNET => EMISSION_NFT_TESTNET
-  }
+  def getLitId(networkType: NetworkType): ErgoId = Deployment.ids(networkType).lit
 
-  def getEmConfigNft(networkType: NetworkType): ErgoId = networkType match {
-    case NetworkType.MAINNET => EMCONFIG_NFT_MAINNET
-    case NetworkType.TESTNET => EMCONFIG_NFT_TESTNET
-  }
+  def getEmissionNft(networkType: NetworkType): ErgoId = Deployment.ids(networkType).emissionNft
 
-  def getVoteToken(networkType: NetworkType): ErgoId = networkType match {
-    case NetworkType.MAINNET => VOTE_TOKEN_MAINNET
-    case NetworkType.TESTNET => VOTE_TOKEN_TESTNET
-  }
+  def getEmConfigNft(networkType: NetworkType): ErgoId = Deployment.ids(networkType).emConfigNft
 
-  def getMDGenesisId(networkType: NetworkType): String = networkType match {
-    case NetworkType.MAINNET => MD_GENESIS_ID_MAINNET
-    case NetworkType.TESTNET => MD_GENESIS_ID_TESTNET
-  }
+  def getVoteToken(networkType: NetworkType): ErgoId = Deployment.ids(networkType).voteToken
+
+  def getMDGenesisId(networkType: NetworkType): String = Deployment.ids(networkType).mdGenesisId
 
   /** The inclusion height of the genesis box, not its creation height. */
-  def getMDGenesisHeight(networkType: NetworkType): Int = networkType match {
-    case NetworkType.MAINNET => MD_GENESIS_HEIGHT_MAINNET
-    case NetworkType.TESTNET => MD_GENESIS_HEIGHT_TESTNET
-  }
+  def getMDGenesisHeight(networkType: NetworkType): Int = Deployment.ids(networkType).mdGenesisHeight
 
-  def getCollatToken(networkType: NetworkType): ErgoId = networkType match {
-    case NetworkType.MAINNET => COLLAT_TOKEN_MAINNET
-    case NetworkType.TESTNET => COLLAT_TOKEN_TESTNET
-  }
+  def getCollatToken(networkType: NetworkType): ErgoId = Deployment.ids(networkType).collatToken
 
-  def getQueueToken(networkType: NetworkType): ErgoId = networkType match {
-    case NetworkType.MAINNET => QUEUE_TOKEN_MAINNET
-    case NetworkType.TESTNET => QUEUE_TOKEN_TESTNET
-  }
+  def getQueueToken(networkType: NetworkType): ErgoId = Deployment.ids(networkType).queueToken
 
-  def getMDToken(client: ErgoClient): ErgoId = {
-    client.execute{
-      ctx =>
-        ctx.getNetworkType match {
-          case NetworkType.MAINNET => MD_TOKEN_MAINNET
-          case NetworkType.TESTNET => MD_TOKEN_TESTNET
-        }
-    }
-  }
+  /** Where the FP_Control box lives: `FP_CONTROL_TESTNET`, the compiled mainnet script, or the override's. */
+  def getFPControlAddress(networkType: NetworkType): Address = Deployment.ids(networkType).fpControlAddress
+
+  def getMDToken(client: ErgoClient): ErgoId = client.execute(ctx => getMDToken(ctx.getNetworkType))
+
   /**
    * The FP_Control box, found by the token every evaluation checks at its first data input. Confirmed
    * only, since a data input has to be in the UTXO set already.

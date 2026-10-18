@@ -40,6 +40,8 @@ object BlockTxMessages {
     final val Activate = "activate"
     final val Clear = "clear"
     final val MempoolAncestor = "mempool-ancestor"
+    /** Prefix of an upkeep successor's kind; the job's name follows, as `upkeep:<job>`. */
+    final val Upkeep = "upkeep"
 
     /**
      * An unconfirmed transaction carried ahead of a member that spends its outputs. Sized at the
