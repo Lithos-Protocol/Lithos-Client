@@ -3,8 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="generator" content="Docusaurus v3.7.0">
-<title data-rh="true">Difficulty forwards | Lithos Client</title><meta data-rh="true" name="viewport" content="width=device-width,initial-scale=1"><meta data-rh="true" name="twitter:card" content="summary_large_image"><meta data-rh="true" property="og:url" content="http://localhost:9000/assets/docs/extensions/difficulty-forwards"><meta data-rh="true" property="og:locale" content="en"><meta data-rh="true" name="docusaurus_locale" content="en"><meta data-rh="true" name="docsearch:language" content="en"><meta data-rh="true" name="docusaurus_version" content="current"><meta data-rh="true" name="docusaurus_tag" content="docs-default-current"><meta data-rh="true" name="docsearch:version" content="current"><meta data-rh="true" name="docsearch:docusaurus_tag" content="docs-default-current"><meta data-rh="true" property="og:title" content="Difficulty forwards | Lithos Client"><meta data-rh="true" name="description" content="How a difficulty forward is offered, filled, recorded and settled, what it pays, and how to trade one from the web panel."><meta data-rh="true" property="og:description" content="How a difficulty forward is offered, filled, recorded and settled, what it pays, and how to trade one from the web panel."><link data-rh="true" rel="icon" href="/assets/img/favicon.ico"><link data-rh="true" rel="canonical" href="http://localhost:9000/assets/docs/extensions/difficulty-forwards"><link data-rh="true" rel="alternate" href="http://localhost:9000/assets/docs/extensions/difficulty-forwards" hreflang="en"><link data-rh="true" rel="alternate" href="http://localhost:9000/assets/docs/extensions/difficulty-forwards" hreflang="x-default"><link rel="stylesheet" href="/assets/css/styles.a6101f44.css">
-<script src="/assets/js/runtime~main.5e72ffca.js" defer="defer"></script>
+<title data-rh="true">Difficulty forwards | Lithos Client</title><meta data-rh="true" name="viewport" content="width=device-width,initial-scale=1"><meta data-rh="true" name="twitter:card" content="summary_large_image"><meta data-rh="true" property="og:url" content="http://localhost:9000/assets/docs/extensions/difficulty-forwards"><meta data-rh="true" property="og:locale" content="en"><meta data-rh="true" name="docusaurus_locale" content="en"><meta data-rh="true" name="docsearch:language" content="en"><meta data-rh="true" name="docusaurus_version" content="current"><meta data-rh="true" name="docusaurus_tag" content="docs-default-current"><meta data-rh="true" name="docsearch:version" content="current"><meta data-rh="true" name="docsearch:docusaurus_tag" content="docs-default-current"><meta data-rh="true" property="og:title" content="Difficulty forwards | Lithos Client"><meta data-rh="true" name="description" content="How a difficulty forward is offered, filled, recorded and settled, what it pays, and how to trade one from the web panel."><meta data-rh="true" property="og:description" content="How a difficulty forward is offered, filled, recorded and settled, what it pays, and how to trade one from the web panel."><link data-rh="true" rel="icon" href="/assets/img/favicon.ico"><link data-rh="true" rel="canonical" href="http://localhost:9000/assets/docs/extensions/difficulty-forwards"><link data-rh="true" rel="alternate" href="http://localhost:9000/assets/docs/extensions/difficulty-forwards" hreflang="en"><link data-rh="true" rel="alternate" href="http://localhost:9000/assets/docs/extensions/difficulty-forwards" hreflang="x-default"><link rel="stylesheet" href="/assets/css/styles.632162da.css">
+<script src="/assets/js/runtime~main.90f6885e.js" defer="defer"></script>
 <script src="/assets/js/main.7c0f1f43.js" defer="defer"></script>
 </head>
 <body class="navigation-with-keyboard">
@@ -63,9 +63,11 @@ nobody trades against it with information the other side lacks.</p>
 <ul>
 <li><strong>A fill has a deadline.</strong> A window starting at epoch <code>E</code> can only be filled while the chain is at
 least 2 epochs before it. The panel shows each offer&#x27;s last fill height as <strong>Fill by</strong>.</li>
-<li><strong>Offers expire with the epoch.</strong> An offer&#x27;s strike goes stale once the next epoch&#x27;s difficulty is
-final, so the panel sets each new offer to expire at the last block of the epoch you post it in. You
-can set a later expiry yourself.</li>
+<li><strong>You choose when an offer expires.</strong> The panel sets each new offer to expire 128 blocks after you
+post it, about 4.3 hours, or at its last fill height if that comes first. Drag <strong>Expiry</strong> to keep the
+offer open longer, up to the last fill height. A longer expiry gives takers more chances: each
+difficulty change makes the window easier to forecast, and a taker fills only an offer that has
+turned in their favour.</li>
 </ul>
 <p>Short windows are cheap to move. A miner with a tenth of Ergo&#x27;s hashrate who mines elsewhere for one
 epoch lowers that epoch&#x27;s difficulty by about 7.5%, which can decide a 1-epoch window. Your client
@@ -101,8 +103,8 @@ quote is read again when you open it, so the amounts you confirm are the offer&#
 <p>To post your own offer:</p>
 <ol>
 <li>Open <strong>Make an offer</strong> and pick <strong>Long</strong> or <strong>Short</strong>.</li>
-<li>Set the window start, the window length, the strike and your margin. The chips next to the strike
-set it relative to the next epoch&#x27;s difficulty.</li>
+<li>Set the window start, the window length, the strike, your margin and the expiry. The chips next to
+the strike set it relative to the next epoch&#x27;s difficulty.</li>
 <li>Read the quote on the right, including any warnings, then click <strong>Post offer</strong>.</li>
 </ol>
 <p>Your offer locks its margin, 7.5 LIT and 0.002 ERG until a taker fills it or you cancel it from
