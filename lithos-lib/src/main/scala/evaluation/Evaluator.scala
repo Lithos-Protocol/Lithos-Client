@@ -103,14 +103,15 @@ case class Evaluator(ctx: BlockchainContext, prover: NodeWallet, evalInput: Inpu
   def evaluateProofTypes: Seq[(Array[Byte], Try[Option[String]])] =
     miners.map(m => m -> verdict(m)(None).map(_.map(_._2)))
 
+  /** One proof against one miner, signed. None when the proof no longer reduces to true, or this set lacks it. */
   def evaluateFor(miner: Array[Byte], fpContractHashHex: String, initInputs: Seq[InputUTXO],
-                  additionalOutputs: Seq[UTXO]): Option[SignedTransaction] = {
-    val fpContract = fpSet.ordered.find(_.hashedPropBytesHex == fpContractHashHex).get
-    val fraudProof = FraudProof.genFraudProof(fpSet, ctx, fpContract, miner, nispTree, evalInput, fpControl,
-      commitment, resolved.flatMap(_.get(miner)))
-    fraudProof
-      .attemptFraudProof(ctx, prover, TxBuilder(ctx), Some(initInputs), Some(additionalOutputs), includeFee = false)
-  }
+                  additionalOutputs: Seq[UTXO]): Option[SignedTransaction] =
+    fpSet.ordered.find(_.hashedPropBytesHex == fpContractHashHex).flatMap { fpContract =>
+      val fraudProof = FraudProof.genFraudProof(fpSet, ctx, fpContract, miner, nispTree, evalInput, fpControl,
+        commitment, resolved.flatMap(_.get(miner)))
+      fraudProof
+        .attemptFraudProof(ctx, prover, TxBuilder(ctx), Some(initInputs), Some(additionalOutputs), includeFee = false)
+    }
 
 }
 

@@ -5,6 +5,7 @@ import lfsm.states.RollupInfoState
 import lfsm.{LFSMHelpers, LFSMPhase, RollupProtocol}
 import mutations.{BoxLoader, NodeWallet}
 import nisp.{NISP, NispCommitment, ResolvedNisps}
+import org.bouncycastle.util.encoders.Hex
 import org.ergoplatform.appkit._
 import org.ergoplatform.appkit.scalaapi.scalaByteType
 import scorex.utils.Longs
@@ -12,7 +13,7 @@ import sigma.Colls
 import sigma.data.CBigInt
 import transactions.ProtocolContracts
 import transactions.batching.lithosdex.DexContracts
-import transactions.rollups.TransactionMessages.LatestRollup
+import transactions.rollups.TransactionMessages.{LatestRollup, StubInvalidException}
 import utils.Globals
 import utils.Helpers.{evalContract, holdingContract, holdingLogicContract, payoutContract}
 import work.lithos.mutations.{Contract, InputUTXO, Token, TxBuilder, UTXO}
@@ -378,7 +379,7 @@ object RollupTransactions {
    *
    * The proof is re-run rather than cached, because it is only valid against the exact tree state
    * it was built on. That re-run is also the check that the fraud is still there: `evaluateFor`
-   * returns None when the proof no longer reduces to true, and `.get` turns that into a failure.
+   * returns None when the proof no longer reduces to true, which fails the attempt as a stale stub.
    *
    * @param miner             hashed prop bytes of the miner to slash
    * @param fpContractHashHex which fraud proof contract to use, as found during evaluation
@@ -404,7 +405,7 @@ object RollupTransactions {
     val evaluator = Evaluator(ctx, wallet, evalInput, latestState.rollup, Seq.empty,
       fpControl, new BoxLoader(ctx, Globals.getNodeConfig.getNodeApi), fpSet,
       commitment = commitment, resolved = resolved)
-    val concreteEval = evaluator.evaluateFor(miner, fpContractHashHex, walletInputs, feeOutputs)
-    concreteEval.get
+    evaluator.evaluateFor(miner, fpContractHashHex, walletInputs, feeOutputs).getOrElse(throw StubInvalidException(
+      s"Fraud proof $fpContractHashHex no longer finds fraud by miner ${Hex.toHexString(miner)}"))
   }
 }

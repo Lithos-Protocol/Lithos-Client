@@ -119,6 +119,8 @@ class CollateralMarketApiController @Inject()(cc: ControllerComponents,
         BadRequest(ApiHelper.makeError(400, "Nothing to claim", e.getMessage))
       case Failure(e: LithosApiErrors.LithosBadRequest) =>
         BadRequest(ApiHelper.makeError(400, "Bad request", e.getMessage))
+      case Failure(e: OpenApiExceptions.MissingRequiredParameterException) =>
+        BadRequest(ApiHelper.makeError(400, "Bad request", e.getMessage))
       // `LDStateChangedResponse` carries the DEX's three box ids, which are always absent here, and
       // `openapi.yaml` documents this path's 409 as an ApiError. Answering with the DEX shape was
       // undocumented drift in a body a caller parses.

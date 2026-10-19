@@ -52,7 +52,22 @@ public class BlockTemplate {
 		}
 	}
 
-	private final Set<Object> submissions = new HashSet<>();
+	/** Most submissions one job remembers for duplicate detection. */
+	public static final int MAX_SUBMISSIONS = 65_536;
+
+	/** Insertion-ordered, and drops its oldest entry once it holds more than MAX_SUBMISSIONS. */
+	private static final class BoundedSubmissions extends LinkedHashMap<Submission, Boolean> {
+		@Override
+		protected boolean removeEldestEntry(Map.Entry<Submission, Boolean> eldest) {
+			return size() > MAX_SUBMISSIONS;
+		}
+	}
+
+	/**
+	 * Accepted submissions, oldest forgotten first past MAX_SUBMISSIONS. A forgotten share sent again counts
+	 * twice in local share totals only: NISP storage refuses a repeated super share on its own.
+	 */
+	private final Set<Submission> submissions = Collections.newSetFromMap(new BoundedSubmissions());
 
 	public BlockTemplate(String jobId, MiningCandidate miningCandidate, boolean usedCollateral) {
 		this(jobId, miningCandidate, BigInteger.valueOf(0), usedCollateral, false);

@@ -165,11 +165,12 @@ class StatsApiController @Inject()(cc: ControllerComponents, cache: StatsCache, 
     action(request).map(_.withHeaders("Cache-Control" -> "no-store"))
   }
 
+  private val apiKeyHash: Array[Byte] = config.get[String]("lithos.apiKeyHash").getBytes(StandardCharsets.UTF_8)
+
   private def withApiKey[A](action: Action[A]): Action[A] = noStore(Action.async(action.parser) { request =>
-    val expected = config.get[String]("lithos.apiKeyHash").getBytes(StandardCharsets.UTF_8)
     val authorized = request.headers.get("api_key").exists { key =>
       val actual = Hex.toHexString(Blake2b256.hash(key)).getBytes(StandardCharsets.UTF_8)
-      MessageDigest.isEqual(expected, actual)
+      MessageDigest.isEqual(apiKeyHash, actual)
     }
     if (authorized) action(request)
     else Future.successful(Forbidden(ApiHelper.makeError(403, "Forbidden request", "Could not authenticate request with given api key")))

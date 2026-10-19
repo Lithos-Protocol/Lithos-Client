@@ -68,6 +68,15 @@ class ContextExtensionOrderSpec extends AnyPropSpec with ContractSpecBase {
   /** The Lithos emission spend: op byte, the two executed scripts, and one of slot index / group element. */
   private val joinIds: Seq[Byte] = Seq(0, 64, 65, 2)
   private val activateIds: Seq[Byte] = Seq(0, 64, 65, 1)
+  /** The Clear spend: op byte and the two executed scripts, with no slot or group element. */
+  private val clearIds: Seq[Byte] = Seq(0, 64, 65)
+
+  property("the three-variable Clear set is already in wire order, and only that order survives") {
+    wireOrder(clearIds) shouldBe clearIds
+    signingOrder(wireOrder(clearIds)) shouldBe clearIds.sorted
+    survivesRoundTrip(wireOrder(clearIds)) shouldBe true
+    survivesRoundTrip(Seq[Byte](64, 65, 0)) shouldBe false
+  }
 
   property("the naive attachment order does NOT survive the trip to a node") {
     signingOrder(joinIds) shouldBe Seq[Byte](0, 64, 65, 2)

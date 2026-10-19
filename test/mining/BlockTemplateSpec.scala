@@ -22,12 +22,12 @@ import scala.collection.JavaConverters._
  */
 class BlockTemplateSpec extends AnyFlatSpec with Matchers {
 
-  private val shippedTau = BigInteger.valueOf(4000000000L) // stratum.diff = "4.0G"
+  private val tau4G = BigInteger.valueOf(4000000000L)
 
   private def candidate(height: Long = 479451L, b: BigInteger = BigInteger.ONE): MiningCandidate =
     new MiningCandidate(Array.fill[Byte](32)(7), height, 3, b, "02" * 33, null, null)
 
-  private def template(tau: BigInteger = shippedTau,
+  private def template(tau: BigInteger = tau4G,
                        usedCollateral: Boolean = true,
                        reduced: Boolean = false): BlockTemplate =
     new BlockTemplate("1a", candidate(), tau, usedCollateral, reduced)
@@ -38,7 +38,7 @@ class BlockTemplateSpec extends AnyFlatSpec with Matchers {
 
   "realTau" should "equal the expression share validation used to compute per share" in {
     Seq(
-      shippedTau,
+      tau4G,
       BigInteger.valueOf(1L),
       BigInteger.valueOf(1000L),
       BigInteger.valueOf(Long.MaxValue),
@@ -48,6 +48,18 @@ class BlockTemplateSpec extends AnyFlatSpec with Matchers {
         template(tau).realTau shouldEqual oldRealTau(tau)
       }
     }
+  }
+
+  "registerSubmit" should "refuse a repeat, and past the cap forget the oldest submission first" in {
+    val t = template()
+    def submit(i: Int): Boolean =
+      t.registerSubmit(Array[Byte](1, 2, 3, 4), java.nio.ByteBuffer.allocate(4).putInt(i).array(), "0", Array.emptyByteArray)
+
+    submit(0) shouldBe true
+    submit(0) shouldBe false
+    (1 to BlockTemplate.MAX_SUBMISSIONS).foreach(i => submit(i) shouldBe true)
+    submit(BlockTemplate.MAX_SUBMISSIONS) shouldBe false
+    submit(0) shouldBe true
   }
 
   "superShareThreshold" should "be realTau divided by the NISP coefficient" in {
@@ -78,8 +90,8 @@ class BlockTemplateSpec extends AnyFlatSpec with Matchers {
     val full = template(reduced = false).getJobParams.getString(6)
     val reduced = template(reduced = true).getJobParams.getString(6)
 
-    full shouldEqual shippedTau.toString
-    reduced shouldEqual shippedTau.divide(BigInteger.valueOf(10000L)).toString
+    full shouldEqual tau4G.toString
+    reduced shouldEqual tau4G.divide(BigInteger.valueOf(10000L)).toString
     BigInt(reduced) should be < BigInt(full)
   }
 
@@ -90,31 +102,31 @@ class BlockTemplateSpec extends AnyFlatSpec with Matchers {
       val t = template(reduced = reduced)
       t.getJobParams.getString(6) shouldEqual t.assignedThreshold.toString
     }
-    template(reduced = false).assignedThreshold shouldEqual shippedTau
+    template(reduced = false).assignedThreshold shouldEqual tau4G
     template(reduced = true).assignedThreshold shouldEqual
-      shippedTau.divide(BigInteger.valueOf(LFSMHelpers.NISP_COEFFICIENT))
+      tau4G.divide(BigInteger.valueOf(LFSMHelpers.NISP_COEFFICIENT))
   }
 
   it should "be tau cut by each configured reduction multiplier" in {
     // The notify and the work credit both read this field, so the multiplier has to reach it rather
     // than the NISP coefficient the five-argument constructor uses.
     configs.StratumConfig.ReductionMultipliers.foreach { m =>
-      val t = new BlockTemplate("1a", candidate(), shippedTau, true, true, m)
+      val t = new BlockTemplate("1a", candidate(), tau4G, true, true, m)
       withClue(s"multiplier $m: ") {
-        t.assignedThreshold shouldEqual shippedTau.divide(BigInteger.valueOf(m))
+        t.assignedThreshold shouldEqual tau4G.divide(BigInteger.valueOf(m))
         t.getJobParams.getString(6) shouldEqual t.assignedThreshold.toString
       }
     }
   }
 
   it should "ignore the multiplier while reduced reporting is off" in {
-    new BlockTemplate("1a", candidate(), shippedTau, true, false, 10).assignedThreshold shouldEqual shippedTau
+    new BlockTemplate("1a", candidate(), tau4G, true, false, 10).assignedThreshold shouldEqual tau4G
   }
 
   it should "leave the super-share threshold at the NISP coefficient whatever the multiplier" in {
     // A super share is what a NISP is built from. Reporting less often must not change what counts.
     configs.StratumConfig.ReductionMultipliers.foreach { m =>
-      new BlockTemplate("1a", candidate(), shippedTau, true, true, m).superShareThreshold shouldEqual
+      new BlockTemplate("1a", candidate(), tau4G, true, true, m).superShareThreshold shouldEqual
         template().superShareThreshold
     }
   }

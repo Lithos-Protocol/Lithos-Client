@@ -50,8 +50,6 @@ object LFSMHelpers {
   final val MIN_ENTRY_BOND     = 2000000L // 0.002 ERG
   final val BOND_DIVISOR       = 25L
 
-  final val FP_CONTROL_TESTNET      = Address.create("ShDJAh75M4bDZbCowYGqtmHi4iiBMqWJcbQRYLaxx8tZZHtj23c7qEcEvUiXYvSdnjdWE6R328rSazggEzz7UWRqXGZWc6L28bo96jMNK8NZs1bQBHAxkb9rLFW8Gf3HFQRPUm26CX8LZeqF1iJvftCYHTp2KC2LisbheejGeoXkv")
-
   // How long a rollup stays challengeable. MinerData_Logic spaces commitment changes by NISP_WINDOW
   // plus this, so the commitment governing any live rollup is still in one of its two slots.
   final val ROLLUP_LIFETIME = HOLDING_PERIOD + EVAL_PERIOD
@@ -79,7 +77,8 @@ object LFSMHelpers {
 
 
 
-  // Lithos token & emission parameters
+  // Lithos token & emission parameters. LIT has 9 decimals, the same as ERG, so Parameters.OneErg is one
+  // whole LIT in base units here and in the permit parameters below.
   final val INIT_MINT = Parameters.OneErg * 1000000000 // 1 billion LIT
 
   /**

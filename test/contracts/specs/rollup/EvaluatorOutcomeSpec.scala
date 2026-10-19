@@ -144,6 +144,16 @@ class EvaluatorOutcomeSpec extends AnyPropSpec with FraudProofSpecBase with Mock
     }
   }
 
+  property("rebuilding a proof answers None, not a throw, for an honest miner or a proof the set lacks") {
+    withCtx { ctx =>
+      val e = evaluatorOver(ctx, cleanNisp(ctx), Seq(fpInvalidFormat(ctx)))
+      val inputs = Seq(fundingInput(ctx, e.prover.prover))
+      val fee = Seq(UTXO.feeBox(Parameters.MinFee))
+      e.evaluateFor(accused(ctx), fpInvalidFormat(ctx).hashedPropBytesHex, inputs, fee) shouldBe None
+      e.evaluateFor(accused(ctx), "00" * 32, inputs, fee) shouldBe None
+    }
+  }
+
   property("payload unavailability is an incomplete evaluation and cannot be a clean verdict") {
     withCtx { ctx =>
       val e = evaluatorOver(ctx, cleanNisp(ctx), Seq(fpInvalidFormat(ctx))).copy(resolved = None)
