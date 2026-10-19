@@ -2,7 +2,7 @@
   // DF_Accumulator
   // Value: fixed at genesis and carried unchanged
   // Singleton record of Ergo's difficulty over the last 128 epochs, which DF_Position settles against.
-  // Anyone records the current epoch once it has started, and takes 1 LIT from the balance for doing so.
+  // Anyone records the current epoch once it has started, and takes 5 LIT from the balance for doing so.
 
   // REGISTERS
   // R4: lastEpoch (Int) - the newest epoch recorded. A recording sets it to the current epoch.
@@ -24,8 +24,8 @@
   val CONST_EPOCH_LENGTH = 128
   // Epochs the ring holds, so a window can still be read 127 epochs after it starts
   val CONST_RING_SIZE = 128
-  // 1 LIT, for whoever records a new epoch
-  val CONST_RECORD_REWARD = 1000000000L
+  // 5 LIT, for whoever records a new epoch
+  val CONST_RECORD_REWARD = 5000000000L
 
   // CONTEXT VARS
   // None.

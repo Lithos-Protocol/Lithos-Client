@@ -469,7 +469,7 @@ class ForwardsAPIExecutionSpec extends TestKit(ActorSystem("forwards-api-executi
     val id = f.onChain(ctx => positionAt(ctx, maker(ctx), taker(ctx), ended, 1)._1.boxId)
     val quote = f.api.checkSettle(id)
     quote.records shouldBe true
-    quote.rewardLit shouldBe (2 * LIT).toString
+    quote.rewardLit shouldBe (DFHelpers.SETTLE_REWARD + DFHelpers.RECORD_REWARD).toString
 
     val result = Future(f.api.settle(id))
     engineServes(f, funding = None)
@@ -520,7 +520,7 @@ class ForwardsAPIExecutionSpec extends TestKit(ActorSystem("forwards-api-executi
     market.positions shouldBe 3
     market.openInterest shouldBe (3 * NOTIONAL).toString
     (market.waiting, market.inWindow, market.settleable, market.refundable) shouldBe ((1, 0, 1, 1))
-    market.epochsFunded shouldBe Some(BALANCE / LIT)
+    market.epochsFunded shouldBe Some(BALANCE / DFHelpers.RECORD_REWARD)
   }
 
   /** `box` as the index lists it once `txId` spent it at `height`. */

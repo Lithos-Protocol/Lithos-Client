@@ -60,7 +60,7 @@ class DFOfferSpec extends AnyPropSpec with DFSpecBase {
     }
   }
 
-  property("fill: the position holds twice the margin plus 1.5 LIT from each side") {
+  property("fill: the position holds twice the margin plus each side's reward") {
     fill { s =>
       s.position.tokens.head.amount shouldBe 2L * (NOTIONAL / 5 + SIDE_REWARD)
       accepts(taker(s.ctx), s.tx())

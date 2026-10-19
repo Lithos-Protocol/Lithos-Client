@@ -70,7 +70,7 @@ class DFAccumulatorSpec extends AnyPropSpec with DFSpecBase {
 
   // ─── recording ────────────────────────────────────────────────────────────
 
-  property("record: accepts recording the next epoch and taking the 1 LIT reward") {
+  property("record: accepts recording the next epoch and taking the reward") {
     recording() { s => accepts(s.prover, s.tx()) }
   }
 
@@ -237,7 +237,7 @@ class DFAccumulatorSpec extends AnyPropSpec with DFSpecBase {
     }
   }
 
-  property("balance: under 1 LIT left, a recording may take all of it") {
+  property("balance: with less than the reward left, a recording may take all of it") {
     recording(balance = 4L * LIT / 10, taken = 4L * LIT / 10) { s => accepts(s.prover, s.tx()) }
   }
 

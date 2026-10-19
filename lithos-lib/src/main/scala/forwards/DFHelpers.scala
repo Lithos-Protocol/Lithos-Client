@@ -32,13 +32,13 @@ object DFHelpers {
   final val MARGIN_DIVISOR: Long = 5L
 
   /** DF_Offer CONST_SIDE_REWARD. LIT each side adds on top of its margin. */
-  final val SIDE_REWARD: Long = 1500000000L
+  final val SIDE_REWARD: Long = 7500000000L
 
   /** DF_Position CONST_ACC_DEPOSIT. LIT a settlement or refund adds to the accumulator's balance. */
-  final val ACC_DEPOSIT: Long = 2000000000L
+  final val ACC_DEPOSIT: Long = 10000000000L
 
   /** DF_Accumulator / DF_Position CONST_RECORD_REWARD. LIT a builder may take for recording a new epoch. */
-  final val RECORD_REWARD: Long = 1000000000L
+  final val RECORD_REWARD: Long = 5000000000L
 
   /** LIT left to the builder of a settlement or refund: both sides' rewards less the accumulator's deposit. */
   final val SETTLE_REWARD: Long = 2 * SIDE_REWARD - ACC_DEPOSIT

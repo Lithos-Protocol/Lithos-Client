@@ -96,10 +96,10 @@ class ForwardsTransactionsSpec extends AnyPropSpec with ForwardsFixtures {
 
       step.recorded shouldBe true
       step.next shouldBe step.next.copy(lastEpoch = fixtureEpoch,
-        ring = DFMath.recordedRing(acc.ring, acc.lastEpoch, fixtureEpoch, recording.difficulty), lit = BALANCE - LIT)
+        ring = DFMath.recordedRing(acc.ring, acc.lastEpoch, fixtureEpoch, recording.difficulty), lit = BALANCE - DFHelpers.RECORD_REWARD)
       outputs(step) should have size 2
       outputs(step)(1).getValue shouldBe UTXO.MIN_CHANGE
-      tokensOf(1, step) shouldBe Seq(lit(LIT))
+      tokensOf(1, step) shouldBe Seq(lit(DFHelpers.RECORD_REWARD))
       treeOf(1, step) shouldBe wallet.contract.ergoTreeHex
       withClue("the successor reads back as the accumulator: ") {
         DFBoxes.accumulator(nodeBox(ctx, step.next.box.toUTXO, 0), contracts).map(_.lastEpoch) shouldBe Some(fixtureEpoch)
@@ -114,11 +114,11 @@ class ForwardsTransactionsSpec extends AnyPropSpec with ForwardsFixtures {
         Seq(walletBox(ctx, wallet, Parameters.MinFee + UTXO.MIN_CHANGE)), Parameters.MinFee)
       outputs(step).map(_.getValue) shouldBe Vector(acc.box.value, Parameters.MinFee, UTXO.MIN_CHANGE)
       treeOf(1, step) shouldBe Contract.FEE.ergoTreeHex
-      tokensOf(2, step) shouldBe Seq(lit(LIT))
+      tokensOf(2, step) shouldBe Seq(lit(DFHelpers.RECORD_REWARD))
     }
   }
 
-  property("record: with under 1 LIT left, takes all of it and leaves the accumulator with its NFT alone") {
+  property("record: with less than the reward left, takes all of it and leaves the accumulator with its NFT alone") {
     atLastBlock() { (ctx, wallet) =>
       val acc = accAt(ctx, AccState(fixtureEpoch - 1, flatRing(STRIKE), LIT / 4))
       val step = ForwardsTransactions.record(ctx, wallet, contracts, acc, ForwardsTransactions.recordingAt(ctx).get,
@@ -139,7 +139,7 @@ class ForwardsTransactionsSpec extends AnyPropSpec with ForwardsFixtures {
 
   // ─── settling one position ────────────────────────────────────────────────
 
-  property("settle: fee-less, pays each side, deposits 2 LIT, and keeps 1 LIT and the ERG left over") {
+  property("settle: fee-less, pays each side, makes the deposit, and keeps the settler's reward and the ERG left over") {
     atLastBlock() { (ctx, wallet) =>
       val acc = accHolding(ctx, fixtureEpoch, 8, ended)
       val (position, box) = positionAt(ctx, maker(ctx), taker(ctx), ended, 1)
@@ -150,13 +150,13 @@ class ForwardsTransactionsSpec extends AnyPropSpec with ForwardsFixtures {
       step.next.lit shouldBe BALANCE + DFHelpers.ACC_DEPOSIT
       outputs(step).map(_.getValue) shouldBe
         Vector(acc.box.value, ForwardsTransactions.PayoutErg, ForwardsTransactions.PayoutErg, 2000000L)
-      Seq(1, 2, 3).map(tokensOf(_, step)) shouldBe Seq(Seq(lit(M + payout)), Seq(lit(M - payout)), Seq(lit(LIT)))
+      Seq(1, 2, 3).map(tokensOf(_, step)) shouldBe Seq(Seq(lit(M + payout)), Seq(lit(M - payout)), Seq(lit(DFHelpers.SETTLE_REWARD)))
       Seq(1, 2, 3).map(treeOf(_, step)) shouldBe
         Seq(contractOf(maker(ctx)), contractOf(taker(ctx)), wallet.contract).map(_.ergoTreeHex)
     }
   }
 
-  property("settle: recording in the same spend takes both rewards, and the balance rises by 1 LIT net") {
+  property("settle: recording in the same spend takes both rewards, and the balance rises by the deposit less the recording reward") {
     atLastBlock() { (ctx, wallet) =>
       val acc = accHolding(ctx, fixtureEpoch - 1, 8, ended)
       val (position, box) = positionAt(ctx, maker(ctx), taker(ctx), ended, 1)
@@ -165,7 +165,7 @@ class ForwardsTransactionsSpec extends AnyPropSpec with ForwardsFixtures {
       step.recorded shouldBe true
       step.next.lastEpoch shouldBe fixtureEpoch
       step.next.lit shouldBe BALANCE + DFHelpers.ACC_DEPOSIT - DFHelpers.RECORD_REWARD
-      tokensOf(3, step) shouldBe Seq(lit(2 * LIT))
+      tokensOf(3, step) shouldBe Seq(lit(DFHelpers.SETTLE_REWARD + DFHelpers.RECORD_REWARD))
     }
   }
 

@@ -19,7 +19,7 @@
   val expiry    = SELF.R9[Int].get
 
   // TOKENS
-  // 0: LIT, the maker's margin plus 1.5 LIT of rewards
+  // 0: LIT, the maker's margin plus 7.5 LIT of rewards
 
   // CONSTANTS
   // CONST_LIT_ID: Coll[Byte] - id of the LIT token
@@ -33,8 +33,8 @@
   // within 239 epochs of its fill, far inside the storage rent period
   val CONST_MAX_LEAD = 120
   val CONST_MAX_WINDOW = 120
-  // 1.5 LIT from each side: 0.5 LIT for whoever settles, 1 LIT for the accumulator's balance
-  val CONST_SIDE_REWARD = 1500000000L
+  // 7.5 LIT from each side: 2.5 LIT for whoever settles, 5 LIT for the accumulator's balance
+  val CONST_SIDE_REWARD = 7500000000L
   // 0.002 ERG from each side, for the settlement fee and the payout boxes
   val CONST_POSITION_ERG = 4000000L
 

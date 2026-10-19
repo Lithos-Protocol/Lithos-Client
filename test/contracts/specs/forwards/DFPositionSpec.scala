@@ -9,7 +9,7 @@ import work.lithos.mutations.{Contract, InputUTXO, Token, UTXO}
 /**
  * DF_Position: once the accumulator holds the whole window, the long side gets its margin plus the clamped
  * payout and the short side its margin less it, or both get their margins back if the window has left the
- * ring. Either way 2 LIT reach the accumulator, net of any recording reward taken in the same spend.
+ * ring. Either way the deposit reaches the accumulator, net of any recording reward taken in the same spend.
  *
  * The settler signs every settlement: the accumulator and the position both reduce to true.
  */
@@ -222,16 +222,16 @@ class DFPositionSpec extends AnyPropSpec with DFSpecBase {
 
   // ─── deposit ──────────────────────────────────────────────────────────────
 
-  property("deposit: rejects an accumulator raised by one unit under 2 LIT") {
+  property("deposit: rejects an accumulator raised by one unit under the deposit") {
     settle(8) { s =>
       rejectsAtSigning(s.prover, s.output(0, accUTXO(s.after.copy(lit = s.after.lit - 1))).tx)
     }
   }
 
-  property("deposit: when the spend also records, rejects a net rise of one unit under 1 LIT") {
+  property("deposit: when the spend also records, rejects a net rise of one unit under the deposit less the reward") {
     withCtx { ctx =>
       val s = settleScenario(ctx, terms(fixtureEpoch - 20, 8), _ => moved(STRIKE, 5), record = true)
-      // The accumulator allows the 1 LIT recording reward, so this is the position's deposit check alone
+      // The accumulator allows the recording reward, so this is the position's deposit check alone
       rejectsAtSigning(s.prover, s.output(0, accUTXO(s.after.copy(lit = s.after.lit - 1))).tx)
     }
   }
@@ -303,7 +303,7 @@ class DFPositionSpec extends AnyPropSpec with DFSpecBase {
   property("shape: a decoy at input 0 cannot let a settlement skip the deposit while the real accumulator sits elsewhere") {
     settle(8) { s =>
       // The real accumulator does not pin its own input, so it spends from input 2 to an unchanged successor at
-      // OUTPUTS(0). The decoy claims an empty balance, which the successor's untouched one would clear by 2 LIT.
+      // OUTPUTS(0). The decoy claims an empty balance, which the successor's untouched one would clear by the deposit.
       val decoy = inputAt(accUTXO(s.before.copy(lit = 0L), contract = Contract.SIGMA_TRUE, nft = unrelatedToken), s.ctx, 0)
       val realAt2 = inputAt(accUTXO(s.before), s.ctx, 2)
       val fund = funding(s.ctx, settler(s.ctx), 3)

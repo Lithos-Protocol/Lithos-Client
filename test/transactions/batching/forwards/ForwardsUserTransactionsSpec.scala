@@ -300,7 +300,7 @@ class ForwardsUserTransactionsSpec extends AnyPropSpec with ForwardsFixtures {
       outputs(step.signed).map(_.getValue) should contain(Parameters.MinFee)
       Seq(1, 2, 3).map(tokensOf(step.signed, _)) shouldBe
         Seq(Seq(lit(quote.owedLong)), Seq(lit(quote.owedShort)), Seq(lit(quote.rewardLit)))
-      quote.rewardLit shouldBe 2 * LIT
+      quote.rewardLit shouldBe DFHelpers.SETTLE_REWARD + DFHelpers.RECORD_REWARD
     }
   }
 
@@ -326,7 +326,7 @@ class ForwardsUserTransactionsSpec extends AnyPropSpec with ForwardsFixtures {
         ForwardsTransactions.recordingAt(ctx)) shouldBe None
       val gone = terms(fixtureEpoch - RING_SIZE - 2, 8)
       val refund = ForwardsUserTransactions.settlement(acc, positionAt(ctx, maker(ctx), taker(ctx), gone, 2)._1, None).get
-      refund shouldBe DFSettlement(records = false, refund = true, NOTIONAL / 5, NOTIONAL / 5, LIT)
+      refund shouldBe DFSettlement(records = false, refund = true, NOTIONAL / 5, NOTIONAL / 5, DFHelpers.SETTLE_REWARD)
     }
   }
 }

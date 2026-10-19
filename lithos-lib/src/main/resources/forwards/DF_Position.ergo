@@ -18,7 +18,7 @@
   val window   = SELF.R8[(Int, Int)].get
 
   // TOKENS
-  // 0: LIT, both margins plus 1.5 LIT of rewards from each side
+  // 0: LIT, both margins plus 7.5 LIT of rewards from each side
 
   // CONSTANTS
   // CONST_ACC_NFT: Coll[Byte] - singleton NFT of DF_Accumulator
@@ -26,10 +26,10 @@
 
   // Epochs DF_Accumulator's ring holds
   val CONST_RING_SIZE = 128
-  // 2 LIT into the accumulator's balance, 1 LIT from each side
-  val CONST_ACC_DEPOSIT = 2000000000L
+  // 10 LIT into the accumulator's balance, 5 LIT from each side
+  val CONST_ACC_DEPOSIT = 10000000000L
   // What DF_Accumulator lets a builder take from its balance in a spend that records a new epoch
-  val CONST_RECORD_REWARD = 1000000000L
+  val CONST_RECORD_REWARD = 5000000000L
 
   // CONTEXT VARS
   // None.
@@ -44,13 +44,13 @@
   // during creation of this UTXO
   // DF_Offer created this box and checked every term: a window of 1 to 120 epochs starting at least two
   // epochs after the fill, a positive strike and margin, both keys SigmaProps, and exactly twice the
-  // margin plus 1.5 LIT in LIT.
+  // margin plus 7.5 LIT in LIT.
   // DF_Accumulator keeps its NFT on its own script at OUTPUTS(0), and lets its ring and last epoch only
   // stay as they were or advance by one recording of the current epoch. Its ring therefore holds the
   // final difficulty of every epoch from lastEpoch - 127 to lastEpoch.
   //
   // DELIBERATE OMISSIONS - conditions left out on purpose
-  // The last 1 LIT, and whatever ERG the payout boxes and fee leave over, go to no named output. Whoever
+  // The last 5 LIT, and whatever ERG the payout boxes and fee leave over, go to no named output. Whoever
   // builds the settlement takes them.
   // Nothing proves a box at this address came from an offer. One that did not holds only its creator's
   // funds, and pays out only those.
@@ -115,8 +115,8 @@
     )
   }
 
-  // 2 LIT reach the accumulator's balance. A spend that also records may take the recording reward out
-  // of the same balance, which leaves the builder with both rewards and the balance up by 1 LIT.
+  // 10 LIT reach the accumulator's balance. A spend that also records may take the recording reward out
+  // of the same balance, which leaves the builder with both rewards and the balance up by 5 LIT.
   val accLit      = if (accIn.tokens.size > 1) accIn.tokens(1)._2 else 0L
   val nextAccLit  = if (accOut.tokens.size > 1) accOut.tokens(1)._2 else 0L
   val recorded    = lastEpoch != accIn.R4[Int].get

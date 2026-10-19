@@ -2560,7 +2560,7 @@ paths:
     post:
       summary: Create an offer
       description: >
-        Lock this wallet's side of a forward, its margin plus 1.5 LIT of rewards, in an offer any taker
+        Lock this wallet's side of a forward, its margin plus 7.5 LIT of rewards, in an offer any taker
         can fill. Cancel it with `POST /forwards/offers/{boxId}/cancel` while it is unfilled.
       operationId: createDFOffer
       security:
@@ -2716,7 +2716,7 @@ paths:
     post:
       summary: Fill an offer
       description: >
-        Take the other side of an offer: this wallet adds its margin plus 1.5 LIT and the position's ERG,
+        Take the other side of an offer: this wallet adds its margin plus 7.5 LIT and the position's ERG,
         and a position holding both sides is created. Refused when the fill would not be accepted in
         the next block. No body.
       operationId: fillDFOffer
@@ -3030,7 +3030,7 @@ paths:
       description: >
         Pay both sides of a position whose window has been recorded, recording the current epoch in the
         same transaction when it is due. The network fee comes out of the position; this wallet keeps the
-        rewards, 1 LIT, or 2 LIT when the settlement also records. No body.
+        rewards, 5 LIT, or 10 LIT when the settlement also records. No body.
       operationId: settleDFPosition
       security:
         - ApiKeyAuth: []
@@ -8295,7 +8295,7 @@ components:
           description: The newest epoch the accumulator has recorded.
         balance:
           type: string
-          description: LIT base units left to pay 1 LIT for each recorded epoch.
+          description: LIT base units left to pay 5 LIT for each recorded epoch.
         recent:
           type: array
           description: The 128 epochs the accumulator holds, oldest first. Empty without an accumulator.
@@ -8465,7 +8465,7 @@ components:
           format: int32
         lit:
           type: string
-          description: LIT base units locked in the offer, the margin plus 1.5 LIT of rewards.
+          description: LIT base units locked in the offer, the margin plus 7.5 LIT of rewards.
         nanoErgs:
           type: string
           description: nanoERG locked in the offer.
@@ -8473,7 +8473,7 @@ components:
           type: string
         maxLoss:
           type: string
-          description: The most this wallet can lose once the offer is filled, its margin plus 1.5 LIT.
+          description: The most this wallet can lose once the offer is filled, its margin plus 7.5 LIT.
         impliedMove:
           type: number
           format: double
@@ -8516,7 +8516,7 @@ components:
           type: string
         maxLoss:
           type: string
-          description: The most this wallet can lose, its margin plus 1.5 LIT.
+          description: The most this wallet can lose, its margin plus 7.5 LIT.
         warnings:
           type: array
           items:
@@ -8663,7 +8663,7 @@ components:
           description: Whether the window has left the accumulator, so each side gets its margin back.
         records:
           type: boolean
-          description: Whether the settlement also records the current epoch, which adds 1 LIT to the reward.
+          description: Whether the settlement also records the current epoch, which adds 5 LIT to the reward.
         owedLong:
           type: string
         owedShort:
@@ -8720,7 +8720,7 @@ components:
         epochsFunded:
           type: integer
           format: int64
-          description: Epochs the accumulator's balance pays a recording for, at 1 LIT each.
+          description: Epochs the accumulator's balance pays a recording for, at 5 LIT each.
         truncated:
           type: boolean
           description: Whether a scan stopped at 2,000 boxes, so the counts are lower bounds.
@@ -8774,7 +8774,7 @@ components:
           description: LIT base units this wallet's side or sides received, margins included.
         net:
           type: string
-          description: '`received` less what this wallet put in: each side''s margin and its 1.5 LIT of rewards.'
+          description: '`received` less what this wallet put in: each side''s margin and its 7.5 LIT of rewards.'
     DFPastOffer:
       type: object
       x-tags: forwards
