@@ -3,8 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="generator" content="Docusaurus v3.7.0">
-<title data-rh="true">Difficulty forwards | Lithos Client</title><meta data-rh="true" name="viewport" content="width=device-width,initial-scale=1"><meta data-rh="true" name="twitter:card" content="summary_large_image"><meta data-rh="true" property="og:url" content="http://localhost:9000/assets/docs/extensions/difficulty-forwards"><meta data-rh="true" property="og:locale" content="en"><meta data-rh="true" name="docusaurus_locale" content="en"><meta data-rh="true" name="docsearch:language" content="en"><meta data-rh="true" name="docusaurus_version" content="current"><meta data-rh="true" name="docusaurus_tag" content="docs-default-current"><meta data-rh="true" name="docsearch:version" content="current"><meta data-rh="true" name="docsearch:docusaurus_tag" content="docs-default-current"><meta data-rh="true" property="og:title" content="Difficulty forwards | Lithos Client"><meta data-rh="true" name="description" content="How a difficulty forward is offered, filled, recorded and settled, what it pays, and how to trade one from the web panel."><meta data-rh="true" property="og:description" content="How a difficulty forward is offered, filled, recorded and settled, what it pays, and how to trade one from the web panel."><link data-rh="true" rel="icon" href="/assets/img/favicon.ico"><link data-rh="true" rel="canonical" href="http://localhost:9000/assets/docs/extensions/difficulty-forwards"><link data-rh="true" rel="alternate" href="http://localhost:9000/assets/docs/extensions/difficulty-forwards" hreflang="en"><link data-rh="true" rel="alternate" href="http://localhost:9000/assets/docs/extensions/difficulty-forwards" hreflang="x-default"><link rel="stylesheet" href="/assets/css/styles.2866c945.css">
-<script src="/assets/js/runtime~main.26050bfd.js" defer="defer"></script>
+<title data-rh="true">Difficulty forwards | Lithos Client</title><meta data-rh="true" name="viewport" content="width=device-width,initial-scale=1"><meta data-rh="true" name="twitter:card" content="summary_large_image"><meta data-rh="true" property="og:url" content="http://localhost:9000/assets/docs/extensions/difficulty-forwards"><meta data-rh="true" property="og:locale" content="en"><meta data-rh="true" name="docusaurus_locale" content="en"><meta data-rh="true" name="docsearch:language" content="en"><meta data-rh="true" name="docusaurus_version" content="current"><meta data-rh="true" name="docusaurus_tag" content="docs-default-current"><meta data-rh="true" name="docsearch:version" content="current"><meta data-rh="true" name="docsearch:docusaurus_tag" content="docs-default-current"><meta data-rh="true" property="og:title" content="Difficulty forwards | Lithos Client"><meta data-rh="true" name="description" content="How a difficulty forward is offered, filled, recorded and settled, what it pays, and how to trade one from the web panel."><meta data-rh="true" property="og:description" content="How a difficulty forward is offered, filled, recorded and settled, what it pays, and how to trade one from the web panel."><link data-rh="true" rel="icon" href="/assets/img/favicon.ico"><link data-rh="true" rel="canonical" href="http://localhost:9000/assets/docs/extensions/difficulty-forwards"><link data-rh="true" rel="alternate" href="http://localhost:9000/assets/docs/extensions/difficulty-forwards" hreflang="en"><link data-rh="true" rel="alternate" href="http://localhost:9000/assets/docs/extensions/difficulty-forwards" hreflang="x-default"><link rel="stylesheet" href="/assets/css/styles.a6101f44.css">
+<script src="/assets/js/runtime~main.5e72ffca.js" defer="defer"></script>
 <script src="/assets/js/main.7c0f1f43.js" defer="defer"></script>
 </head>
 <body class="navigation-with-keyboard">
@@ -32,26 +32,26 @@ sides are always two people.</p>
 <h2 class="anchor anchorWithStickyNavbar_LWe7" id="how-a-forward-runs">How a forward runs<a href="#how-a-forward-runs" class="hash-link" aria-label="Direct link to How a forward runs" title="Direct link to How a forward runs">​</a></h2>
 <p>A forward goes through four steps:</p>
 <ol>
-<li><strong>Offer.</strong> A maker picks a side and the terms, and locks their margin plus 1.5 LIT of fees in an
+<li><strong>Offer.</strong> A maker picks a side and the terms, and locks their margin plus 7.5 LIT of fees in an
 offer.</li>
 <li><strong>Fill.</strong> A taker takes the other side and locks the same margin and fees. The offer becomes a
 position holding both margins.</li>
 <li><strong>Record.</strong> Once per epoch, a transaction writes that epoch&#x27;s difficulty into the <strong>difficulty
-accumulator</strong>, a single on-chain box holding the last 128 epochs. Whoever records earns 1 LIT from
+accumulator</strong>, a single on-chain box holding the last 128 epochs. Whoever records earns 5 LIT from
 the accumulator&#x27;s balance.</li>
 <li><strong>Settle.</strong> Once the window&#x27;s last epoch is recorded, anyone can settle the position. Each side is
-paid in the same transaction, and whoever settles keeps 1 LIT.</li>
+paid in the same transaction, and whoever settles keeps 5 LIT.</li>
 </ol>
 <p>Lithos clients record each epoch and settle finished positions on their own, so you do not need to do
-steps 3 or 4 yourself. Each side&#x27;s 1.5 LIT of fees funds this work and is not returned:</p>
-<table><thead><tr><th>Part of the 1.5 LIT</th><th>Goes to</th></tr></thead><tbody><tr><td>0.5 LIT</td><td>Whoever settles the position</td></tr><tr><td>1 LIT</td><td>The accumulator&#x27;s balance, which pays 1 LIT for each recorded epoch</td></tr></tbody></table>
+steps 3 or 4 yourself. Each side&#x27;s 7.5 LIT of fees funds this work and is not returned:</p>
+<table><thead><tr><th>Part of the 7.5 LIT</th><th>Goes to</th></tr></thead><tbody><tr><td>2.5 LIT</td><td>Whoever settles the position</td></tr><tr><td>5 LIT</td><td>The accumulator&#x27;s balance, which pays 5 LIT for each recorded epoch</td></tr></tbody></table>
 <h2 class="anchor anchorWithStickyNavbar_LWe7" id="what-a-position-pays">What a position pays<a href="#what-a-position-pays" class="hash-link" aria-label="Direct link to What a position pays" title="Direct link to What a position pays">​</a></h2>
 <p>Every 1% the window&#x27;s average ends above the strike moves 5% of the margin from the short side to the
 long side. Every 1% below it moves 5% the other way. At a 20% move the whole margin has moved, and a
 bigger move pays the same:</p>
 <div class="language-text codeBlockContainer_Ckt0 theme-code-block" style="--prism-color:#bfc7d5;--prism-background-color:#292d3e"><div class="codeBlockContent_biex"><pre tabindex="0" class="prism-code language-text codeBlock_bY9V thin-scrollbar" style="color:#bfc7d5;background-color:#292d3e"><code class="codeBlockLines_e6Vv"><span class="token-line" style="color:#bfc7d5"><span class="token plain">average = average difficulty over the window&#x27;s epochs</span><br></span><span class="token-line" style="color:#bfc7d5"><span class="token plain">move    = average / strike - 1</span><br></span><span class="token-line" style="color:#bfc7d5"><span class="token plain">payout  = 5 x margin x move, held between -margin and +margin</span><br></span></code></pre><div class="buttonGroup__atx"><button type="button" aria-label="Copy code to clipboard" title="Copy" class="clean-btn"><span class="copyButtonIcons_eSgA" aria-hidden="true"><svg viewBox="0 0 24 24" class="copyButtonIcon_y97N"><path fill="currentColor" d="M19,21H8V7H19M19,5H8A2,2 0 0,0 6,7V21A2,2 0 0,0 8,23H19A2,2 0 0,0 21,21V7A2,2 0 0,0 19,5M16,1H4A2,2 0 0,0 2,3V17H4V3H16V1Z"></path></svg><svg viewBox="0 0 24 24" class="copyButtonSuccessIcon_LjdS"><path fill="currentColor" d="M21,7L9,19L3.5,13.5L4.91,12.09L9,16.17L19.59,5.59L21,7Z"></path></svg></span></button></div></div></div>
 <p>The long side receives its margin plus the payout, and the short side its margin minus it. The most
-either side can lose is its own margin plus the 1.5 LIT of fees.</p>
+either side can lose is its own margin plus the 7.5 LIT of fees.</p>
 <p>For a 2,000 LIT margin, each 1% move is worth 100 LIT, and a position pays the following:</p>
 <table><thead><tr><th>Window average vs strike</th><th>Long receives</th><th>Short receives</th></tr></thead><tbody><tr><td>+8%</td><td>2,800 LIT</td><td>1,200 LIT</td></tr><tr><td>0%</td><td>2,000 LIT</td><td>2,000 LIT</td></tr><tr><td>-8%</td><td>1,200 LIT</td><td>2,800 LIT</td></tr><tr><td>+30%</td><td>4,000 LIT</td><td>0 LIT</td></tr></tbody></table>
 <h2 class="anchor anchorWithStickyNavbar_LWe7" id="choosing-a-window">Choosing a window<a href="#choosing-a-window" class="hash-link" aria-label="Direct link to Choosing a window" title="Direct link to Choosing a window">​</a></h2>
@@ -83,7 +83,8 @@ matches the income you expect. Your combined result is roughly the following:</p
 <p>Open <strong>Extensions</strong> in the top bar and choose <strong>Difficulty Forwards</strong>. The section has four views:</p>
 <table><thead><tr><th>View</th><th>What it shows</th></tr></thead><tbody><tr><td><strong>Market</strong></td><td>Difficulty by epoch with the next epoch&#x27;s computed figure, the margin at stake, and the order book</td></tr><tr><td><strong>Make an offer</strong></td><td>A form that quotes your offer as you edit it, with its payout curve and what each outcome pays</td></tr><tr><td><strong>Portfolio</strong></td><td>Your open positions, your offers, and every settled position with what it paid</td></tr><tr><td><strong>How it works</strong></td><td>The lifecycle and a payout calculator</td></tr></tbody></table>
 <p>Reading the market needs no API key. Filling, offering, cancelling, settling and your portfolio all need
-it. The panel holds the key in memory only, so you enter it again after a page refresh.</p>
+it. The panel holds the key in memory, so you enter it again after a page refresh, unless you chose to
+<a href="/assets/docs/configuration/node#remembering-the-key-in-the-web-panel">remember it in this browser</a>.</p>
 <p>The panel counts time in epochs. Tick <strong>Block heights</strong> next to <strong>Settings</strong> to see every window, start
 and deadline as block heights instead. The panel remembers the choice in this browser.</p>
 <h3 class="anchor anchorWithStickyNavbar_LWe7" id="filling-an-offer">Filling an offer<a href="#filling-an-offer" class="hash-link" aria-label="Direct link to Filling an offer" title="Direct link to Filling an offer">​</a></h3>
@@ -94,7 +95,7 @@ would take, and clicking a column of the strike chart narrows the book to that r
 <li>Click an offer to open its quote. Check <strong>Your margin</strong>, <strong>Most you can lose</strong> and the payout curve.</li>
 <li>Enter your API key if asked, then click <strong>Fill</strong>.</li>
 </ol>
-<p>The fill locks your margin and 1.5 LIT, plus 0.002 ERG for the position and a 0.001 ERG network fee. The
+<p>The fill locks your margin and 7.5 LIT, plus 0.002 ERG for the position and a 0.001 ERG network fee. The
 quote is read again when you open it, so the amounts you confirm are the offer&#x27;s current ones.</p>
 <h3 class="anchor anchorWithStickyNavbar_LWe7" id="making-an-offer">Making an offer<a href="#making-an-offer" class="hash-link" aria-label="Direct link to Making an offer" title="Direct link to Making an offer">​</a></h3>
 <p>To post your own offer:</p>
@@ -104,12 +105,12 @@ quote is read again when you open it, so the amounts you confirm are the offer&#
 set it relative to the next epoch&#x27;s difficulty.</li>
 <li>Read the quote on the right, including any warnings, then click <strong>Post offer</strong>.</li>
 </ol>
-<p>Your offer locks its margin, 1.5 LIT and 0.002 ERG until a taker fills it or you cancel it from
+<p>Your offer locks its margin, 7.5 LIT and 0.002 ERG until a taker fills it or you cancel it from
 <strong>Portfolio</strong>. An expired offer stays locked until you cancel it.</p>
 <h2 class="anchor anchorWithStickyNavbar_LWe7" id="settlement-and-refunds">Settlement and refunds<a href="#settlement-and-refunds" class="hash-link" aria-label="Direct link to Settlement and refunds" title="Direct link to Settlement and refunds">​</a></h2>
 <p>Lithos clients settle a finished position on their own, either in a Lithos block or by broadcast later
 in the epoch. You can also settle any finished position yourself from <strong>Portfolio</strong>, which pays the
-0.001 ERG fee out of the position and gives you the 1 LIT the settler keeps, or 2 LIT if the same
+0.001 ERG fee out of the position and gives you the 5 LIT the settler keeps, or 10 LIT if the same
 transaction records the current epoch.</p>
 <p>The accumulator only holds the last 128 epochs. If nobody settles a position before its window&#x27;s first
 epoch is 128 epochs old, the window can no longer be read, and settling returns each side&#x27;s margin
@@ -122,7 +123,7 @@ for weeks.</p>
 <li><strong>Short windows.</strong> Hashrate that can move away for an epoch can decide a short window. Keep short
 windows small.</li>
 <li><strong>Whole fills only.</strong> An offer is filled in full or not at all.</li>
-<li><strong>Fixed fees.</strong> The 1.5 LIT each side pays is a constant, whatever the margin.</li>
+<li><strong>Fixed fees.</strong> The 7.5 LIT each side pays is a constant, whatever the margin.</li>
 </ul>
 <h2 class="anchor anchorWithStickyNavbar_LWe7" id="settings">Settings<a href="#settings" class="hash-link" aria-label="Direct link to Settings" title="Direct link to Settings">​</a></h2>
 <p>The size limit on short windows is a client setting. It is shipped as follows in
