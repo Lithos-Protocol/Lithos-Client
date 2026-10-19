@@ -65,7 +65,7 @@ object DFHelpers {
   /** DF_Position CONST_ACC_NFT on testnet. PLACEHOLDER until genesis mints it. */
   private final val ACC_NFT_TESTNET = ErgoId.create("1b45c0957d32a54fe946ed4408245f45cd17c0a530dc986f1689eceb5b7e6d50")
   /** DF_Position CONST_ACC_NFT on mainnet. PLACEHOLDER until genesis mints it. */
-  private final val ACC_NFT_MAINNET = ACC_NFT_PLACEHOLDER
+  private final val ACC_NFT_MAINNET = ErgoId.create("6516505cb7361ce03673b1d58e73ede03a813edb15aa1b4bc5b0afd7c70bb03a")
 
   /** DF_Position CONST_ACC_NFT, the accumulator's singleton NFT, or None while the slot holds the placeholder. */
   def getAccNFT(networkType: NetworkType): Option[ErgoId] = {
