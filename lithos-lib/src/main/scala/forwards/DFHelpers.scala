@@ -63,7 +63,7 @@ object DFHelpers {
   private final val ACC_NFT_PLACEHOLDER = ErgoId.create("00" * 32)
 
   /** DF_Position CONST_ACC_NFT on testnet. PLACEHOLDER until genesis mints it. */
-  private final val ACC_NFT_TESTNET = ACC_NFT_PLACEHOLDER
+  private final val ACC_NFT_TESTNET = ErgoId.create("1b45c0957d32a54fe946ed4408245f45cd17c0a530dc986f1689eceb5b7e6d50")
   /** DF_Position CONST_ACC_NFT on mainnet. PLACEHOLDER until genesis mints it. */
   private final val ACC_NFT_MAINNET = ACC_NFT_PLACEHOLDER
 
