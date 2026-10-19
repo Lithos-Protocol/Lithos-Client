@@ -56,8 +56,6 @@ class EmissionCandidateSpec extends TestKit(ActorSystem("emission-candidate-spec
       throw new IllegalStateException("a fee-less build asked the wallet for funds")
     def reserveCovering(value: Long): FundingAllocation =
       throw new IllegalStateException("a fee-less build asked the wallet for one input")
-    def reserveCoveringP2PK(value: Long): FundingAllocation =
-      throw new IllegalStateException("a fee-less build asked the wallet for one P2PK input")
     def reserveKnown(inputs: Seq[InputUTXO]): FundingAllocation =
       throw new IllegalStateException("a fee-less build asked the wallet to hold known change")
     def giveBack(boxes: Seq[InputUTXO]): Unit = ()

@@ -108,7 +108,7 @@ class LithosPool(options: Options,
   /** The served package's rollup and emission transaction ids. */
   private var servedProtocol = Set.empty[String]
   private val hasPackageSources = candidateConfig.blockTransactions && txSources.exists { source =>
-    val limits = candidateConfig.sources.getOrElse(source.name, configs.CandidateSourceConfig.Default)
+    val limits = candidateConfig.limitsFor(source.name)
     limits.enabled && limits.maxTxs > 0
   }
   private var cacheDirty = true

@@ -16,7 +16,6 @@ import scorex.crypto.hash.Blake2b256
 import mutations.NotEnoughInputsException
 import transactions.batching.lithosdex.LDBoxes
 import transactions.engine.wallet.FundingExpiredException
-import transactions.engine.wallet.EngineWalletMessages.InsufficientWalletFundsException
 import stats.{DexStatsData, StatsCache}
 
 
@@ -301,8 +300,6 @@ class LithosDexApiController @Inject()(cc: ControllerComponents,
       // Insufficient selectable funds is a fact about this wallet right now, not a defect: a later
       // request after a confirmation or a refresh can succeed unchanged.
       case Failure(e: NotEnoughInputsException) =>
-        UnprocessableEntity(ApiHelper.makeError(422, "Cannot be executed", e.getMessage))
-      case Failure(e: InsufficientWalletFundsException) =>
         UnprocessableEntity(ApiHelper.makeError(422, "Cannot be executed", e.getMessage))
       // The node, its index, its mempool or its wallet did not answer. Nothing is wrong with the
       // request and nothing has been decided, so this must not look like either 400 or 500.

@@ -47,20 +47,17 @@ case class EngineFunding(walletRef: ActorRef,
   }
 
   override def reserveCovering(value: Long): FundingAllocation =
-    reserveOneBox(value, "one input", p2pkOnly = false)
-
-  override def reserveCoveringP2PK(value: Long): FundingAllocation =
-    reserveOneBox(value, "one P2PK input", p2pkOnly = true)
+    reserveOneBox(value, "one input")
 
   /**
    * One box already in a block, for a transaction offered to this miner's own candidate. The
    * candidate carries no parent for a wallet input, and the node skips a spend of a box it lacks.
    */
   def reserveCoveringConfirmed(value: Long): FundingAllocation =
-    reserveOneBox(value, "one confirmed input", p2pkOnly = false, confirmedOnly = true)
+    reserveOneBox(value, "one confirmed input", confirmedOnly = true)
 
   /** The single-box requests differ only in which set the wallet draws from. */
-  private def reserveOneBox(value: Long, description: String, p2pkOnly: Boolean,
+  private def reserveOneBox(value: Long, description: String,
                             confirmedOnly: Boolean = false): FundingAllocation = {
     if (value < 0)
       throw new IllegalArgumentException("Wallet requirements cannot be negative")
@@ -69,7 +66,7 @@ case class EngineFunding(walletRef: ActorRef,
     val selected = awaitReservation(
       reservationId,
       (walletRef ? fundingRequest(SelectInputs(value, reservationId = reservationId,
-        deadlineMillis = deadline, single = true, p2pkOnly = p2pkOnly,
+        deadlineMillis = deadline, single = true,
         confirmedOnly = confirmedOnly))).mapTo[WalletInputs])
     val reservation = new FundingAllocation(reservationId, selected, this)
     if (selected.isEmpty) {

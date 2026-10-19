@@ -494,28 +494,6 @@ class RollupExecution(nodeContext: NodeContext, walletManager: ActorRef, syncHan
   // ─── submission ───────────────────────────────────────────────────────────
 
   /**
-   * Gets rollup transaction function for a given stub
-   */
-  private def getRollupTransaction(stub: RollupTxStub,
-                                   initialTxInfo: Option[InitialTxInfo]): (RollupTxStub, LatestRollup) => Try[String] = {
-    stub.txType match {
-      case NISPSubmission => sendNISPSubmission(_, _, initialTxInfo)
-      case HoldingTransform => (_, _) => Failure(new IllegalArgumentException("structural transforms require metadata"))
-      case EvalTransform => (_, _) => Failure(new IllegalArgumentException("structural transforms require metadata"))
-      case NISPEvaluation =>
-        stub.fpInfo match {
-          case Some(_) =>
-            sendFraudProof(_, _, initialTxInfo)
-          case None =>
-            // Should never happen
-            (_, _) => Failure(new IllegalArgumentException("Got raw NISPEvaluation stub from RollupBatch"))
-        }
-
-      case Payout => sendPayout(_, _, initialTxInfo)
-    }
-  }
-
-  /**
    * Get transaction outputs for the initial transaction in the batch
    *
    * @param stub          TxStub associated with this rollup tx
@@ -546,11 +524,11 @@ class RollupExecution(nodeContext: NodeContext, walletManager: ActorRef, syncHan
     val ergForFees = initialTxInfo.feesToCreate.values.foldLeft(0L)(Math.addExact)
     // Reserved on selection, not after the send. EmissionsCore draws from the same EngineWalletState,
     // and the gap between selecting and sending spans retries and their sleeps.
-    // P2PK-only for a fraud proof, which pays the slashed bond to input 1's own proposition. A
-    // matured reward box here is contract-valid and silently relocks the reward for 720 blocks.
+    // One box for a fraud proof, which pays the slashed bond to input 1's own proposition. Funding
+    // never draws reward boxes, which would be contract-valid here and relock the reward for 720 blocks.
     val reservation =
       if (!isFPTx) walletSelector.reserve(ergForFees)
-      else criticalFunding.reserveCoveringP2PK(ergForFees)
+      else criticalFunding.reserveCovering(ergForFees)
     val feeInputs = reservation.inputs
     if (feeInputs.isEmpty)
       throw new NotEnoughInputsException("EngineWalletState could not return enough inputs for initial rollup tx")
@@ -576,16 +554,9 @@ class RollupExecution(nodeContext: NodeContext, walletManager: ActorRef, syncHan
 
   /**
    * Update the fee map after the initial transaction, so that later transactions can chain the
-   * outputs of the initial transaction to pay their own fees.
+   * outputs of the initial transaction to pay their own fees. `walletOutputsAfterFee` finds them.
    *
-   * The wallet outputs are found by locating the FEE BOX and taking what follows, rather than by a
-   * fixed index. `mkFeeOutputs` always emits `feeBox +: walletOuts` as one run at the end, but the
-   * number of outputs in front of it is per-builder: one for the rollup phases and the fee-less
-   * fraud proof, but TWO for a Payout that pays a miner as well as recreating its box. A constant
-   * offset handed the first rollup the fee box — unsignable, so its transaction failed every attempt
-   * — and shifted every other rollup onto a neighbour's box, which can be worth less than its fee.
-   *
-   * @param signed    Signed initial transaction
+   * @param signed   Signed initial transaction
    * @param outputMap Output map which is the result of calling initialTxOutputs()
    */
   private def updateFeeMap(signed: SignedTransaction, outputMap: Map[String, UTXO]): Unit = {
@@ -802,9 +773,16 @@ class RollupExecution(nodeContext: NodeContext, walletManager: ActorRef, syncHan
     }
   }
 
-  private def attemptRollup(stub: RollupTxStub, initialTxInfo: Option[InitialTxInfo]): Try[String] =
-    if (stub.txType == HoldingTransform || stub.txType == EvalTransform) sendTransform(stub, initialTxInfo)
-    else attemptTx[RollupTxStub, LatestRollup](getRollupTransaction(stub, initialTxInfo), materializedRollupState, stub)
+  private def attemptRollup(stub: RollupTxStub, initialTxInfo: Option[InitialTxInfo]): Try[String] = {
+    def attempt(send: (RollupTxStub, LatestRollup) => Try[String]): Try[String] =
+      attemptTx[RollupTxStub, LatestRollup](send, materializedRollupState, stub)
+    stub.txType match {
+      case HoldingTransform | EvalTransform => sendTransform(stub, initialTxInfo)
+      case NISPSubmission => attempt(sendNISPSubmission(_, _, initialTxInfo))
+      case NISPEvaluation => attempt(sendFraudProof(_, _, initialTxInfo))
+      case Payout => attempt(sendPayout(_, _, initialTxInfo))
+    }
+  }
 
   private def sendFraudProof(stub: RollupTxStub,
                              latestState: LatestRollup,
@@ -872,11 +850,6 @@ class RollupExecution(nodeContext: NodeContext, walletManager: ActorRef, syncHan
     }
     result
   }
-  /**
-   * End every bond lease taken for one height. Uncertain rather than released, because the block
-   * being assembled may have carried the transaction: only an authoritative mempool-aware refresh
-   * can say whether the input was spent, and that is what marking it uncertain triggers.
-   */
   /** Hand back inputs reserved for an initial transaction that was never sent. */
   private def releaseInitialInputs(): Unit =
     {
@@ -997,7 +970,7 @@ class RollupExecution(nodeContext: NodeContext, walletManager: ActorRef, syncHan
   private def latestOf(rollupTxStub: RollupTxStub, current: RollupMessages.CurrentRollup): Try[LatestRollup] =
     current.mempoolState match {
       case Some(projected) if !projected.toBeRemoved =>
-        logger.info(s"Using mempool state for rollup ${rollupTxStub.rollupBlockId}" +
+        logger.debug(s"Using mempool state for rollup ${rollupTxStub.rollupBlockId}" +
           s" with synced id ${current.utxoId} and mempool id ${projected.asInput.id}")
         Success(LatestRollup(projected.asInput, projected.rollup, projected.ancestorIds))
       case Some(_) =>
@@ -1146,11 +1119,10 @@ object RollupExecution {
    * The initial transaction's pre-created wallet outputs: the `count` outputs following the fee box.
    *
    * Located by finding the fee box rather than by a fixed index, because the number of outputs in
-   * FRONT of it is per-builder. `mkFeeOutputs` always emits `feeBox +: walletOuts` as one run, and
-   * every builder appends that run after its own outputs — but a Payout that pays a miner as well as
-   * recreating its box puts TWO there where the others put one. A constant offset handed the first
-   * rollup the fee-proposition box, which this client cannot sign for, and shifted every other rollup
-   * onto a neighbour's box, which can be worth less than its own fee.
+   * front of it is per-builder. `mkFeeOutputs` always emits `feeBox +: walletOuts` as one run after
+   * the builder's own outputs, and a Payout that pays a miner as well as recreating its box puts two
+   * outputs there where the others put one. A fixed index would hand a rollup the fee box, which this
+   * client cannot sign for, or a neighbour's box, which can be worth less than its own fee.
    *
    * Empty when there is no fee box, which the caller treats as "make no allocations" rather than
    * guessing.
@@ -1160,17 +1132,6 @@ object RollupExecution {
     if (feeIdx < 0) Seq.empty[InputUTXO]
     else outputs.slice(feeIdx + 1, feeIdx + 1 + count)
   }
-
-  /**
-   * Self-message: a fee-less candidate build finished off the actor thread.
-   *
-   * `build` names the attempt rather than the height, because a height can be built for twice —
-   * the first package was refused and a replacement is being assembled — and the superseded result
-   * must not answer the replacement.
-   */
-  private[transactions] case class RollupCandidateBuilt(incarnation: java.util.UUID,
-                                                build: java.util.UUID, height: Int,
-                                                result: Try[Seq[transactions.candidate.CandidateBundle]])
 
   /**
    * Self-message: a fee-less submission built off the actor thread took a bond input.

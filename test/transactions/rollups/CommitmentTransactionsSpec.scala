@@ -161,9 +161,13 @@ class CommitmentTransactionsSpec
     Fixture(commitments, EngineFunding(mgr, 5.seconds, ec), mgr, TestProbe(), clock, readable, sends, api)
   }
 
+  /** What a selection hands out, released again so a later ask sees the same wallet. */
   private def offered(f: Fixture, need: Long): Seq[InputUTXO] = {
-    f.probe.send(f.mgr, SelectInputs(need, Seq.empty, trackUsed = false))
-    f.probe.expectMsgType[WalletInputs].inputs
+    val id = java.util.UUID.randomUUID().toString
+    f.probe.send(f.mgr, SelectInputs(need, Seq.empty, reservationId = id))
+    val inputs = f.probe.expectMsgType[WalletInputs].inputs
+    f.probe.send(f.mgr, ReleaseInputs(id))
+    inputs
   }
 
   /** The current height, which every fixture's commitment heights are chosen relative to. */

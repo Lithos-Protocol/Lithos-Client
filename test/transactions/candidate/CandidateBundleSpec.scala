@@ -71,6 +71,15 @@ class CandidateBundleSpec extends AnyFlatSpec with Matchers {
   private def sized(id: String, bytes: Int, cost: Long) =
     tx(id).copy(inputIds = Set(id + "-in"), sizeBytes = bytes, cost = cost)
 
+  /** The bundles `admit` keeps, which is how a source is bounded before the package is. */
+  private def fitted(bundles: Seq[CandidateBundle], limit: Int): Vector[CandidateBundle] =
+    CandidateBundle.admit(bundles, limit)._1
+
+  /** What `admit` turned away, and why. */
+  private def refusals(bundles: Seq[CandidateBundle], limit: Int,
+                       budget: CandidateBudget = CandidateBudget.Unbounded): Vector[CandidateRefusal] =
+    CandidateBundle.admit(bundles, limit, budget)._3
+
   "The block budget" should "claim only its share of the block" in {
     CandidateBudget.of(1000L, 2000L) shouldBe CandidateBudget(500L, 1000L)
   }
@@ -152,13 +161,13 @@ class CandidateBundleSpec extends AnyFlatSpec with Matchers {
   "Fitting one source" should "return bundles rather than break them up" in {
     val pair = CandidateBundle(Vector(sized("a", 10, 0), sized("b", 10, 0)))
     val solo = CandidateBundle(Vector(sized("c", 10, 0)))
-    CandidateBundle.fit(Seq(pair, solo), 1).map(_.members.map(_.id)) shouldBe Vector(Vector("c"))
+    fitted(Seq(pair, solo), 1).map(_.members.map(_.id)) shouldBe Vector(Vector("c"))
   }
 
   it should "agree with what selection would flatten" in {
     val bundles = Seq(CandidateBundle(Vector(sized("a", 10, 0))),
       CandidateBundle(Vector(sized("b", 10, 0))))
-    CandidateBundle.fit(bundles, 5).flatMap(_.members).map(_.id) shouldBe
+    fitted(bundles, 5).flatMap(_.members).map(_.id) shouldBe
       CandidateBundle.select(bundles, 5).map(_.id)
   }
 
@@ -170,7 +179,7 @@ class CandidateBundleSpec extends AnyFlatSpec with Matchers {
    */
   "A refusal" should "name the cost overrun and what was left" in {
     val sweep = CandidateBundle(Vector(sized("sweep", 10, 700000)))
-    val refused = CandidateBundle.refusals(Seq(sweep), 5, CandidateBudget(Long.MaxValue, 500000))
+    val refused = refusals(Seq(sweep), 5, CandidateBudget(Long.MaxValue, 500000))
     refused.map(_.bundle) shouldBe Vector(sweep)
     refused.head.reason should include("700000 cost over the 500000")
   }
@@ -178,7 +187,7 @@ class CandidateBundleSpec extends AnyFlatSpec with Matchers {
   it should "charge the overrun against what earlier bundles already took" in {
     val first = CandidateBundle(Vector(sized("first", 10, 400000)))
     val second = CandidateBundle(Vector(sized("second", 10, 400000)))
-    val refused = CandidateBundle.refusals(Seq(first, second), 5,
+    val refused = refusals(Seq(first, second), 5,
       CandidateBudget(Long.MaxValue, 500000))
     refused.map(_.bundle) shouldBe Vector(second)
     refused.head.reason should include("400000 cost over the 100000")
@@ -186,7 +195,7 @@ class CandidateBundleSpec extends AnyFlatSpec with Matchers {
 
   it should "report the byte overrun separately from the cost one" in {
     val big = CandidateBundle(Vector(sized("big", 900, 0)))
-    CandidateBundle.refusals(Seq(big), 5, CandidateBudget(500, Long.MaxValue))
+    refusals(Seq(big), 5, CandidateBudget(500, Long.MaxValue))
       .head.reason should include("900 bytes over the 500")
   }
 
@@ -195,24 +204,24 @@ class CandidateBundleSpec extends AnyFlatSpec with Matchers {
     val mine = CandidateBundle(Vector(sized("mine", 10, 10)))
     val theirs = CandidateBundle(Vector(tx("theirs")
       .copy(inputIds = Set("mine-in"), sizeBytes = 9000, cost = 9000)))
-    CandidateBundle.refusals(Seq(mine, theirs), 5, CandidateBudget(100, 100))
+    refusals(Seq(mine, theirs), 5, CandidateBudget(100, 100))
       .head.reason shouldBe "an input is already claimed by this package"
   }
 
   it should "name a slot shortage rather than a budget" in {
     val pair = CandidateBundle(Vector(sized("a", 10, 0), sized("b", 10, 0)))
-    CandidateBundle.refusals(Seq(pair), 1).head.reason shouldBe
+    refusals(Seq(pair), 1).head.reason shouldBe
       "2 transactions into 1 free slot(s)"
   }
 
   it should "say nothing when everything offered fits" in {
-    CandidateBundle.refusals(Seq(CandidateBundle(Vector(sized("a", 10, 10)))), 5) shouldBe empty
+    refusals(Seq(CandidateBundle(Vector(sized("a", 10, 10)))), 5) shouldBe empty
   }
 
   /** The label is how the log line identifies a bundle, which has no id of its own. */
   it should "label a bundle by its members" in {
     val bundle = CandidateBundle(Vector(sized("aabbccddeeff0011", 10, 700000)))
-    val refusal = CandidateBundle.refusals(Seq(bundle), 5,
+    val refusal = refusals(Seq(bundle), 5,
       CandidateBudget(Long.MaxValue, 1)).head
     refusal.label shouldBe s"${CandidateTx.Activate}:aabbccdd"
     refusal.toString should startWith(s"[${refusal.label}] ")

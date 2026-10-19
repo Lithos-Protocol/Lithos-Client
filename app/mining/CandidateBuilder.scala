@@ -48,8 +48,7 @@ class CandidateBuilder(client: ErgoClient,
 
   private implicit val askTimeout: Timeout = Timeout(sourceDeadlineMs.milliseconds)
 
-  private def limitsFor(name: String): configs.CandidateSourceConfig =
-    config.sources.getOrElse(name, configs.CandidateSourceConfig.Default)
+  private def limitsFor(name: String): configs.CandidateSourceConfig = config.limitsFor(name)
 
   /** Sources this client will actually ask. A disabled one costs no build and no node read. */
   private val enabledSources: Seq[MiningMessages.CandidateSource] =
@@ -578,10 +577,9 @@ class CandidateBuilder(client: ErgoClient,
         val from = offered.collect {
           case (name, bundles) if bundles.exists(_.members.exists(tx => selected.contains(tx.id))) => name
         }.toSet
-        // Revenue per member, credited to whichever transaction created the output. Only unspent
-        // entries count: one a later member consumed was carried forward, not earned twice, so
-        // these sum to exactly the package revenue reported alongside them.
-        val revenue = ledger.unspent.groupBy(_.parentTxId)
+        // Revenue per member, credited to whichever transaction created the output, so these sum to
+        // exactly the package revenue reported alongside them.
+        val revenue = ledger.entries.groupBy(_.parentTxId)
           .map { case (txId, entries) => txId -> entries.map(_.value).sum }
         val protocol = offered.collect {
           case (name, bundles) if configs.CandidateSourceConfig.Protocol.contains(name) =>
@@ -638,16 +636,27 @@ class CandidateBuilder(client: ErgoClient,
     }
   }
 
-  /** Active node limits and the configured package share, read off the mailbox. */
-  private def readBudgets(height: Int): Future[(CandidateBudget, CandidateBudget)] =
-    Future(client.execute { ctx =>
-      val parameters = ctx.getDataSource.getParameters
-      val block = CandidateBudget(parameters.getMaxBlockSize, parameters.getMaxBlockCost)
-      block -> CandidateBudget.of(block.maxBytes, block.maxCost, config.blockShare)
-    })(refreshEc).recover { case ex =>
+  /** The node limits read for one height, reused by that height's refreshes. A failed read is not kept. */
+  private var budgetsRead = Option.empty[(Int, Future[(CandidateBudget, CandidateBudget)])]
+
+  /** Active node limits and the configured package share, read off the mailbox once per height. */
+  private def readBudgets(height: Int): Future[(CandidateBudget, CandidateBudget)] = {
+    val read = budgetsRead match {
+      case Some((`height`, cached)) if !cached.value.exists(_.isFailure) => cached
+      case _ =>
+        val fresh = Future(client.execute { ctx =>
+          val parameters = ctx.getDataSource.getParameters
+          val block = CandidateBudget(parameters.getMaxBlockSize, parameters.getMaxBlockCost)
+          block -> CandidateBudget.of(block.maxBytes, block.maxCost, config.blockShare)
+        })(refreshEc)
+        budgetsRead = Some(height -> fresh)
+        fresh
+    }
+    read.recover { case ex =>
       logger.warn(s"Cannot read candidate budgets for block $height: ${ex.getMessage}")
       CandidateBudget.Unbounded -> CandidateBudget.Unbounded
     }
+  }
 
   /** Source contributions count shared ancestors once, in package admission order. */
   private def logBudgets(height: Int, sources: Seq[(String, Seq[CandidateBundle])],

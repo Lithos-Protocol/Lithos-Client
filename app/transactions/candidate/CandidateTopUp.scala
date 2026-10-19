@@ -45,7 +45,7 @@ object CandidateTopUp {
             genesis: CollateralData,
             capital: CandidateCapital,
             blockHeight: Int): Option[CandidateTx] = {
-    val available = capital.unspent
+    val available = capital.entries
     if (available.isEmpty) None
     else genesis.holdingOutput match {
       case None =>

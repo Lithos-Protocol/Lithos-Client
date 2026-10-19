@@ -9,7 +9,6 @@ import play.api.Configuration
 import play.api.libs.json._
 import play.api.mvc._
 import stratum.CollateralNotFoundException
-import transactions.engine.wallet.EngineWalletMessages.InsufficientWalletFundsException
 import transactions.engine.wallet.FundingExpiredException
 import mutations.NotEnoughInputsException
 
@@ -134,8 +133,6 @@ class CollateralMarketApiController @Inject()(cc: ControllerComponents,
         NotFound(ApiHelper.makeError(404, "Not found",
           "no emission state on this network - has emission launched and is the node indexed?"))
       case Failure(e: NotEnoughInputsException) =>
-        UnprocessableEntity(ApiHelper.makeError(422, "Cannot be executed", e.getMessage))
-      case Failure(e: InsufficientWalletFundsException) =>
         UnprocessableEntity(ApiHelper.makeError(422, "Cannot be executed", e.getMessage))
       // The wallet did not get to select: expired, queue or input budget full. Not a shortfall.
       case Failure(e: FundingExpiredException) =>

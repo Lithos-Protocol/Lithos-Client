@@ -96,7 +96,7 @@ class RollupProcessor @Inject()(config: Configuration, nodeContext: NodeContext,
       val payouts         = headStubs.filter(_.txType == Payout)
       val evaluations     = headStubs.filter(e => e.txType == NISPEvaluation && e.fpInfo.isEmpty).sortBy(_.currentPeriod)
       val fraudProofs     = fpHeads.sortBy(_.currentPeriod)
-      // Priority order for the batch: NISPSubmissions -> Transforms -> Payouts
+      // Priority order for the batch: submissions, fraud proofs, transforms, payouts
 
       // Filtered after heads are chosen: a held head holds its rollup, since what follows spends its output
       val batch   = RollupBatch((nispSubmissions ++ fraudProofs ++ transforms ++ payouts)
@@ -183,11 +183,6 @@ class RollupProcessor @Inject()(config: Configuration, nodeContext: NodeContext,
       addRollupStubs(newEntries)
   }
 
-  /**
-   * Priority order for this miner's own block. Submissions and fraud proofs first, since both are
-   * time-boxed — a missed submission is a miner's whole claim on a rollup. Transforms and payouts
-   * are on much longer clocks and lose nothing by riding the mempool instead.
-   */
   /** Removes dispatched stubs by both transaction type and fraud target. */
   private def dropStubs(dispatched: Seq[RollupTxStub]): Unit =
     dispatched.foreach { stub =>
@@ -236,6 +231,11 @@ class RollupProcessor @Inject()(config: Configuration, nodeContext: NodeContext,
     case head => head
   }
 
+  /**
+   * Priority order for this miner's own block. Submissions and fraud proofs first, since both are
+   * time-boxed — a missed submission is a miner's whole claim on a rollup. Transforms and payouts
+   * are on much longer clocks and lose nothing by riding the mempool instead.
+   */
   private def prioritise(stubs: Seq[RollupTxStub]): Seq[RollupTxStub] = {
     val submissions = stubs.filter(_.txType == NISPSubmission).sortBy(_.currentPeriod)
     val fraudProofs = stubs.filter(s => s.txType == NISPEvaluation && s.fpInfo.isDefined).sortBy(_.currentPeriod)

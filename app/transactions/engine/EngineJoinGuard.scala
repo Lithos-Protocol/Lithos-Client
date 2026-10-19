@@ -34,20 +34,19 @@ private[transactions] class EngineJoinGuard(owner: ActorRef, api: NodeApi)(impli
   private implicit val timeout: Timeout = Timeout(40.seconds)
 
   /** Keys claimed by unconfirmed protocol boxes plus those held by local in-flight attempts. */
-  def exclusions(): Set[String] = {
-    val observed = Await.result(
-      (owner ? CompleteMempool.Refresh).mapTo[CompleteMempool.Observation], timeout.duration)
-    require(observed.fresh && CompleteMempool.anchor(api) == observed.snapshot.get.anchor,
-      "join eligibility requires a fresh complete mempool")
-    observed.snapshot.get.lenderKeys ++ Await.result((owner ? Keys).mapTo[Set[String]], timeout.duration)
-  }
+  def exclusions(): Set[String] =
+    CompleteMempool.observe(owner, api, timeout.duration, "join eligibility").snapshot.get.lenderKeys ++ localKeys()
+
+  private def localKeys(): Set[String] = Await.result((owner ? Keys).mapTo[Set[String]], timeout.duration)
 
   /**
    * Run `buildAndSend` while holding `key`. The claim is taken before funding so a second attempt
-   * sees the key as taken immediately, rather than after the first reaches the mempool.
+   * sees the key as taken immediately, rather than after the first reaches the mempool. The mempool
+   * is checked once, at `send`; here only local attempts are, since the caller's key list already
+   * left out what the mempool claimed when the run began.
    */
   def withKey[A](key: String)(buildAndSend: String => A): A = {
-    require(!exclusions().contains(key), "lender key is already owned")
+    require(!localKeys().contains(key), "lender key is already owned")
     val lease = java.util.UUID.randomUUID().toString
     try {
       require(Await.result((owner ? Acquire(key, lease)).mapTo[Boolean], timeout.duration),
@@ -56,17 +55,17 @@ private[transactions] class EngineJoinGuard(owner: ActorRef, api: NodeApi)(impli
     } finally owner ! Cancel(key, lease)
   }
 
-  /** Recheck the key against a fresh mempool, pin it to this transaction, then broadcast. */
+  /**
+   * Recheck the key against a fresh mempool, pin it to this transaction, then broadcast. The send
+   * checks its inputs against the same observation rather than walking the mempool again.
+   */
   def send(key: String, lease: String, tx: SignedTransaction, allocations: Seq[FundingAllocation],
            operation: String, alive: () => Boolean): EngineBroadcast.Result = {
-    val observed = Await.result(
-      (owner ? CompleteMempool.Refresh).mapTo[CompleteMempool.Observation], timeout.duration)
-    require(observed.fresh && !observed.snapshot.get.lenderKeys.contains(key) &&
-      CompleteMempool.anchor(api) == observed.snapshot.get.anchor,
-      "lender key eligibility changed before send")
+    val observed = CompleteMempool.observe(owner, api, timeout.duration, "lender key send")
+    require(!observed.snapshot.get.lenderKeys.contains(key), "lender key eligibility changed before send")
     require(allocations.nonEmpty &&
       Await.result((owner ? Pin(key, lease, CandidateTx.txId(tx), allocations.map(_.reservationId).toSet))
         .mapTo[Boolean], timeout.duration), "lender key pin was refused")
-    new EngineBroadcast(owner, api).send(tx, allocations, operation, alive)
+    new EngineBroadcast(owner, api).send(tx, allocations, operation, alive, Some(observed))
   }
 }

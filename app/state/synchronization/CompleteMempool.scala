@@ -1,10 +1,15 @@
 package state.synchronization
 
+import akka.actor.ActorRef
+import akka.pattern.ask
+import akka.util.Timeout
 import node.NodeApi
 import org.ergoplatform.appkit.NetworkType
 import node.rest.NodeCodecs
 
 import java.nio.charset.StandardCharsets.UTF_8
+import scala.concurrent.Await
+import scala.concurrent.duration.FiniteDuration
 import scala.util.Try
 
 /**
@@ -74,6 +79,18 @@ object CompleteMempool {
   /** Past this an observation cannot authorise a spend, however complete it was when taken. */
   final val MaxAgeNanos = 15000000000L
   final val MaxWalkNanos = 30000000000L
+
+  /**
+   * Ask `owner` for the newest observation and require it fresh and pinned to the node's current
+   * parent. Anything deciding that an input or a lender key is free reads through this.
+   */
+  def observe(owner: ActorRef, node: NodeApi, wait: FiniteDuration, purpose: String): Observation = {
+    val observed = Await.result((owner ? Refresh)(Timeout(wait)).mapTo[Observation], wait)
+    require(observed.fresh,
+      s"$purpose requires a fresh complete mempool: ${observed.failure.getOrElse("the last one is too old")}")
+    require(anchor(node) == observed.snapshot.get.anchor, s"$purpose: a block arrived during the mempool walk")
+    observed
+  }
 
   /** The parent an observation is pinned to. Every spend conclusion is only valid against it. */
   def anchor(node: NodeApi): String = {

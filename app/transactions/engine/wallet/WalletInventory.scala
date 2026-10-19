@@ -21,14 +21,61 @@ private[engine] case class WalletDescriptor(id: String, value: Long, creationHei
 }
 
 private[engine] object WalletInventory {
-  // TODO: Fix this and rewire from config only
-  final val MaxDescriptors = 2048
-  final val MaxDescriptorBytes = 1024L * 1024L
-  final val MaxInputBytes = 4096
-  /** Inputs one selection may return, which also caps a consolidation transaction. */
-  final val MaxInputs = 75
-  final val PageSize = 500
-  final val MaxWalkNanos = 240L * 1000000000L
+
+  /**
+   * A box's value less the nanoERG its re-emission tokens oblige a spender to pay away: their total
+   * amount on mainnet, nothing elsewhere. The gross value overstates a mainnet reward box by that much.
+   */
+  def netOfReemission(value: Long, tokens: Iterator[(String, Long)], mainnet: Boolean): Long =
+    if (!mainnet) value
+    else Math.subtractExact(value, tokens.collect { case (id, amount) if id == MainnetEip27Constants.TokenId => amount }
+      .foldLeft(0L)((sum, amount) => Math.addExact(sum, amount)))
+
+  /**
+   * Page through signable boxes: reward trees from the indexer first when rewards are wanted, then the
+   * wallet's own list, mempool-aware so a box a pooled transaction spends is left out. `consume` gets
+   * each box, whether it is a reward and whether it is in a block, and returns true to stop the walk.
+   */
+  def walk(api: _root_.node.NodeApi, signableTrees: Set[String], rewardTrees: Set[String],
+           limits: configs.WalletConfig, rewardsOnly: Boolean, p2pkOnly: Boolean,
+           deadlineMillis: Long = Long.MaxValue, includeRewards: Boolean = false, confirmedOnly: Boolean = false)
+          (consume: (NodeBox, Boolean, Boolean) => Boolean): Unit = {
+    val startedAt = System.nanoTime()
+    val budgetNanos = limits.inventoryTimeoutMs * 1000000L
+    var stop = false
+    val seenRewards = scala.collection.mutable.HashSet.empty[String]
+    // Each box comes with whether it is in a block and whether it is spent, filtered after the fetch so
+    // a filtered page is not mistaken for the last one
+    def pages(fetch: Paging => Seq[(NodeBox, Boolean, Boolean)], reward: Boolean): Unit = {
+      var paging = Paging(0, limits.pageSize)
+      var exhausted = false
+      while (!stop && !exhausted) {
+        require(System.nanoTime() - startedAt < budgetNanos, "wallet inventory walk exceeded its budget")
+        require(System.currentTimeMillis() < deadlineMillis, "wallet funding request expired during selection")
+        val page = fetch(paging)
+        require(page.size <= limits.pageSize, "wallet page exceeded the requested limit")
+        val boxes = page.iterator
+        while (boxes.hasNext && !stop) {
+          val (box, onchain, spent) = boxes.next()
+          val isReward = rewardTrees.contains(box.ergoTree)
+          val signable = if (isReward) !p2pkOnly && (includeRewards || rewardsOnly)
+            else !reward && !rewardsOnly && signableTrees.contains(box.ergoTree)
+          if (signable && !spent && (onchain || !confirmedOnly) && (!isReward || seenRewards.add(box.boxId)))
+            stop = consume(box, isReward, onchain)
+        }
+        exhausted = page.size < limits.pageSize
+        paging = paging.next
+      }
+    }
+    if ((includeRewards || rewardsOnly) && !p2pkOnly && api.indexerEnabled) rewardTrees.iterator.foreach { tree =>
+      if (!stop) pages(paging => api.unspentBoxesByErgoTree(tree, paging, SortDirection.Asc,
+        MempoolOptions(includeUnconfirmed = false, excludeMempoolSpent = true)).get
+        .map(indexed => (indexed.box, true, false)), reward = true)
+    }
+    if (!stop)
+      pages(paging => api.walletUnspentBoxes(ConfirmationRange.IncludeMempool, paging).get
+        .map(boxed => (boxed.box, boxed.onchain, boxed.spent)), reward = false)
+  }
 
   /**
    * Every page was read: a walk that stops part way throws instead of returning a snapshot.
@@ -60,76 +107,28 @@ private[engine] object WalletInventory {
  */
 private[engine] class WalletInventory(node: NodeContext, api: _root_.node.NodeApi,
                                       limits: configs.WalletConfig = configs.WalletConfig.Default) {
-  import limits._
-  private val PageSize = limits.pageSize
   private val MaxDescriptors = limits.maxDescriptors
   private val MaxDescriptorBytes = limits.maxDescriptorBytes
   private val MaxInputs = limits.maxInputs
   private val MaxInputBytes = limits.maxInputBytes
-  private val MaxWalkNanos = limits.inventoryTimeoutMs * 1000000L
 
   import WalletInventory._
   private val wallet = node.getNodeWallet
   private val mainnet = node.getNetwork == org.ergoplatform.appkit.NetworkType.MAINNET
 
-  /**
-   * Value this box can actually contribute, after the nanoERG that spending its re-emission tokens
-   * obliges the transaction to pay away. Treating the gross value as spendable overstates a mainnet
-   * reward box by exactly the token amount it carries.
-   */
-  private def spendableValue(box: NodeBox): Long = {
-    val reemissionDue = if (!mainnet) 0L
-      else box.assets.filter(_.tokenId == MainnetEip27Constants.TokenId)
-        .foldLeft(0L)((sum, asset) => Math.addExact(sum, asset.amount))
-    Math.subtractExact(box.value, reemissionDue)
-  }
+  /** Value this box can actually contribute, after its re-emission obligation. */
+  private def spendableValue(box: NodeBox): Long =
+    netOfReemission(box.value, box.assets.iterator.map(asset => asset.tokenId -> asset.amount), mainnet)
 
   private def matured(box: NodeBox, height: Int): Boolean =
     height.toLong > box.creationHeight.toLong + MINER_REWARD_DELAY
 
-  /**
-   * Page through signable boxes. Only maintenance scans query reward trees; ordinary funding
-   * filters wallet-reported coinbases without querying the indexer.
-   * `consume` returns true to stop the walk, which is how selection avoids paging the whole wallet.
-   */
+  /** Page through this wallet's signable boxes; see the companion's `walk`. */
   private def walk(rewardsOnly: Boolean, p2pkOnly: Boolean, deadlineMillis: Long = Long.MaxValue,
                    includeRewards: Boolean = false, confirmedOnly: Boolean = false)
-                  (consume: (NodeBox, Boolean) => Boolean): Unit = {
-    val startedAt = System.nanoTime()
-    var stop = false
-    val seenRewards = scala.collection.mutable.HashSet.empty[String]
-    // Each box comes with whether it is in a block, which `confirmedOnly` filters on after the fetch
-    // so a filtered page is not mistaken for the last one
-    def pages(fetch: Paging => Seq[(NodeBox, Boolean)], reward: Boolean): Unit = {
-      var paging = Paging(0, PageSize)
-      var exhausted = false
-      while (!stop && !exhausted) {
-        require(System.nanoTime() - startedAt < MaxWalkNanos, "wallet inventory walk exceeded its budget")
-        require(System.currentTimeMillis() < deadlineMillis, "wallet funding request expired during selection")
-        val page = fetch(paging)
-        require(page.size <= PageSize, "wallet page exceeded the requested limit")
-        val boxes = page.iterator
-        while (boxes.hasNext && !stop) {
-          val (box, onchain) = boxes.next()
-          val isReward = wallet.rewardTrees.contains(box.ergoTree)
-          val signable = if (isReward) !p2pkOnly && (includeRewards || rewardsOnly)
-            else !reward && !rewardsOnly && wallet.signableTrees.contains(box.ergoTree)
-          if (signable && (onchain || !confirmedOnly) && (!isReward || seenRewards.add(box.boxId)))
-            stop = consume(box, isReward)
-        }
-        exhausted = page.size < PageSize
-        paging = paging.next
-      }
-    }
-    if ((includeRewards || rewardsOnly) && !p2pkOnly && api.indexerEnabled) wallet.rewardTrees.keysIterator.foreach { tree =>
-      if (!stop) pages(paging => api.unspentBoxesByErgoTree(tree, paging, SortDirection.Asc,
-        MempoolOptions(includeUnconfirmed = false, excludeMempoolSpent = true)).get.map(_.box -> true), reward = true)
-    }
-    // Mempool-aware either way, so a confirmed box already spent by a pooled transaction is left out
-    if (!stop)
-      pages(paging => api.walletUnspentBoxes(ConfirmationRange.IncludeMempool, paging).get
-        .map(boxed => boxed.box -> boxed.onchain), reward = false)
-  }
+                  (consume: (NodeBox, Boolean) => Boolean): Unit =
+    WalletInventory.walk(api, wallet.signableTrees, wallet.rewardTrees.keySet, limits, rewardsOnly, p2pkOnly,
+      deadlineMillis, includeRewards, confirmedOnly)((box, reward, _) => consume(box, reward))
 
   /**
    * Count and total the whole wallet while retaining only as many descriptors as the cache ceilings
@@ -178,7 +177,7 @@ private[engine] class WalletInventory(node: NodeContext, api: _root_.node.NodeAp
    * Throws `NotEnoughInputsException` when the wallet cannot cover the request.
    */
   def select(ctx: BlockchainContext, erg: Long, required: Seq[Token], excluded: Set[String],
-             single: Boolean, p2pkOnly: Boolean, rewardsOnly: Boolean,
+             single: Boolean,
              known: Vector[NodeBox] = Vector.empty, deadlineMillis: Long = Long.MaxValue,
              confirmedOnly: Boolean = false): Vector[InputUTXO] = {
     require(erg >= 0 && required.forall(_.amount > 0), "invalid wallet requirement")
@@ -248,9 +247,9 @@ private[engine] class WalletInventory(node: NodeContext, api: _root_.node.NodeAp
     }
 
     // Locally built change is unconfirmed by definition
-    known.iterator.filter(box => !rewardsOnly && !confirmedOnly && wallet.signableTrees.contains(box.ergoTree))
+    known.iterator.filter(box => !confirmedOnly && wallet.signableTrees.contains(box.ergoTree))
       .takeWhile(_ => !covered).foreach(box => consume(box, reward = false))
-    if (!covered) walk(rewardsOnly, p2pkOnly, deadlineMillis, confirmedOnly = confirmedOnly)(consume)
+    if (!covered) walk(rewardsOnly = false, p2pkOnly = false, deadlineMillis, confirmedOnly = confirmedOnly)(consume)
     if (single) { selected = smallest.toVector; covered = smallest.nonEmpty }
     if (!covered) throw new NotEnoughInputsException("wallet cannot cover this request within the input budget")
 

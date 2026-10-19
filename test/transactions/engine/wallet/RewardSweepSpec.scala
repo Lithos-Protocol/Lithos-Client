@@ -7,17 +7,14 @@ import configs.NodeContext
 import node.MutationConversions._
 import node.model.{ConfirmationRange, IndexedBox, MempoolOptions, NodeBox, Paging, SortDirection, WalletBox}
 import node.NodeApi
-import org.ergoplatform.appkit.Parameters
 import org.mockito.ArgumentMatchers.{any, anyString}
 import org.mockito.Mockito.{mock, when}
 import org.scalatest.BeforeAndAfterAll
 import org.scalatest.flatspec.AnyFlatSpecLike
 import org.scalatest.matchers.should.Matchers
 import support.FakeNodeContext
-import transactions.engine.wallet.EngineWalletState.planRewardChunks
 import transactions.engine.wallet.EngineWalletState
 import transactions.engine.wallet.EngineWalletMessages._
-import work.lithos.mutations.InputUTXO
 
 import scala.concurrent.duration._
 import scala.language.postfixOps
@@ -45,44 +42,6 @@ class RewardSweepSpec extends TestKit(akka.actor.ActorSystem("reward-sweep-spec"
   with AnyFlatSpecLike with Matchers with BeforeAndAfterAll {
 
   override def afterAll(): Unit = TestKit.shutdownActorSystem(system)
-
-  private val Fee = Parameters.MinFee
-
-  // ---- planner ----
-
-  behavior.of("planRewardChunks")
-
-  private def box(value: Long): InputUTXO = {
-    val (_, _, wallet) = FakeNodeContext(mock(classOf[NodeApi]), numAddresses = 1)
-    FakeNodeContext.offlineClient().execute { ctx =>
-      support.CanonicalNodeBox(boxId = f"$value%064x", transactionId = "cc" * 32, value = value, index = 0,
-        creationHeight = 1, ergoTree = wallet.contract.ergoTreeHex, assets = Seq.empty)
-        .toInputUTXO(ctx)
-    }
-  }
-
-  it should "keep every box - nothing dropped for being small" in {
-    // 0.00001..0.004 ERG: every one of these is dust against one network fee.
-    val boxes = (1L to 40L).map(v => box(v * 10000L))
-    val chunks = planRewardChunks(boxes, Fee, maxInputs = 75)
-    chunks.flatten.map(_.value).sorted shouldEqual boxes.map(_.value).sorted
-  }
-
-  it should "order batches smallest-first so dust consolidates early" in {
-    val boxes = Seq(3000000000L, 1000L, 2000000000L, 5000L).map(box)
-    val chunks = planRewardChunks(boxes, Fee, maxInputs = 75)
-    val sums = chunks.map(_.map(_.value).sum)
-    sums shouldEqual sums.sorted
-  }
-
-  it should "never exceed the input cap per batch" in {
-    val boxes = (1L to 200L).map(box)
-    planRewardChunks(boxes, Fee, maxInputs = 75).foreach(_.size should be <= 75)
-  }
-
-  it should "return empty for nothing unlocked" in {
-    planRewardChunks(Seq.empty, Fee, maxInputs = 75) shouldBe empty
-  }
 
   // ---- reservation lifecycle through the actor ----
 

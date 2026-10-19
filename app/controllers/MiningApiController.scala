@@ -11,7 +11,6 @@ import play.api.Configuration
 import play.api.libs.json._
 import play.api.mvc._
 import scorex.crypto.hash.Blake2b256
-import transactions.engine.wallet.EngineWalletMessages.InsufficientWalletFundsException
 import transactions.engine.wallet.FundingExpiredException
 
 import java.nio.charset.StandardCharsets
@@ -124,8 +123,6 @@ class MiningApiController @Inject()(cc: ControllerComponents, api: MiningApi, co
       case Failure(e: LithosApiErrors.LithosUnprocessable) =>
         UnprocessableEntity(ApiHelper.makeError(422, "Cannot be executed", e.getMessage))
       case Failure(e: NotEnoughInputsException) => UnprocessableEntity(ApiHelper.makeError(422, "Cannot be executed", e.getMessage))
-      case Failure(e: InsufficientWalletFundsException) =>
-        UnprocessableEntity(ApiHelper.makeError(422, "Cannot be executed", e.getMessage))
       case Failure(e: LithosApiErrors.LithosUnavailable) => ServiceUnavailable(ApiHelper.makeError(503, "Unavailable", e.getMessage))
       case Failure(e: FundingExpiredException) => ServiceUnavailable(ApiHelper.makeError(503, "Wallet busy", e.getMessage))
       case Failure(e) => InternalServerError(ApiHelper.makeError(500, "Internal error occurred", e.getMessage))

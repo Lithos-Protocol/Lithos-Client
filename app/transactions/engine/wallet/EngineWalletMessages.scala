@@ -50,23 +50,20 @@ object EngineWalletMessages {
 
   /**
    * Request plain wallet UTXOs covering `erg` nanoERG and `tokens`. Rewards are maintenance-only.
+   * What is selected is reserved under `reservationId`, so nothing else can be handed the same boxes
+   * until they are seen spent, released, or the reservation ages out.
    *
-   * @param trackUsed      reserve what is selected, so nothing else can be handed the same boxes
-   *                       until they are seen spent, released, or the reservation ages out
    * @param single         one box must cover the whole request by itself, rather than a set; the
    *                       smallest such box, tokenless first
-   * @param p2pkOnly       retained for callers explicitly requiring P2PK; all funding now requires it
    * @param deadlineMillis past this the request is answered empty rather than queued further
    * @param confirmedOnly  only boxes already in a block, for a transaction offered to this miner's
    *                       own candidate, which cannot carry an unconfirmed parent it was not told of
    */
   private[transactions] case class SelectInputs(erg: Long,
                                           tokens: Seq[Token] = Seq.empty,
-                                          trackUsed: Boolean = true,
                                           reservationId: String = java.util.UUID.randomUUID().toString,
                                           deadlineMillis: Long = Long.MaxValue,
                                           single: Boolean = false,
-                                          p2pkOnly: Boolean = false,
                                           confirmedOnly: Boolean = false)
 
   /**
@@ -104,7 +101,10 @@ object EngineWalletMessages {
   /** Identity-bound acknowledgement for HoldReservationForCandidate. */
   private[transactions] case class ReservationHeldForCandidate(reservationId: String, accepted: Boolean)
 
-  /** Send outcome is ambiguous; never age this reservation out without a complete node refresh. */
+  /**
+   * Withhold this reservation until a complete node refresh says whether its inputs were spent. Sent
+   * after an ambiguous send, and when a candidate hold's height is over.
+   */
   private[transactions] case class MarkReservationUncertain(reservationId: String)
 
   /**
@@ -182,8 +182,4 @@ object EngineWalletMessages {
 
   /** Reply to [[ClaimUnlockedRewards]] when the sweep could not run at all. */
   final case class RewardClaimFailed(reason: String)
-
-  // ─── exceptions ───────────────────────────────────────────────────────────
-
-  class InsufficientWalletFundsException(msg: String) extends RuntimeException(msg)
 }

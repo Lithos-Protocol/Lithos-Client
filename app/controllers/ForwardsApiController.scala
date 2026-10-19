@@ -13,7 +13,6 @@ import play.api.Configuration
 import play.api.libs.json._
 import play.api.mvc._
 import scorex.crypto.hash.Blake2b256
-import transactions.engine.wallet.EngineWalletMessages.InsufficientWalletFundsException
 import transactions.engine.wallet.FundingExpiredException
 
 import java.nio.charset.StandardCharsets
@@ -127,8 +126,6 @@ class ForwardsApiController @Inject()(cc: ControllerComponents,
       case Failure(e: LithosUnprocessable) =>
         UnprocessableEntity(ApiHelper.makeError(422, "Cannot be executed", e.getMessage))
       case Failure(e: NotEnoughInputsException) =>
-        UnprocessableEntity(ApiHelper.makeError(422, "Cannot be executed", e.getMessage))
-      case Failure(e: InsufficientWalletFundsException) =>
         UnprocessableEntity(ApiHelper.makeError(422, "Cannot be executed", e.getMessage))
       case Failure(e: LithosNotFound) => NotFound(ApiHelper.makeError(404, "Not found", e.getMessage))
       case Failure(e: LithosUnavailable) =>

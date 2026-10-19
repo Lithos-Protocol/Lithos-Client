@@ -83,7 +83,7 @@ class CandidateHoldSpec extends TestKit(ActorSystem("candidate-hold-spec", Candi
   }
 
   private def covering(mgr: ActorRef, probe: TestProbe, id: String): Seq[InputUTXO] = {
-    probe.send(mgr, SelectInputs(erg, trackUsed = true, reservationId = id, single = true))
+    probe.send(mgr, SelectInputs(erg, reservationId = id, single = true))
     probe.expectMsgType[WalletInputs].inputs
   }
 

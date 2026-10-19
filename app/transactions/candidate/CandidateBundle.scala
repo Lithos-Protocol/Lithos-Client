@@ -68,24 +68,11 @@ object CandidateBundle {
              budget: CandidateBudget = CandidateBudget.Unbounded): Vector[CandidateTx] =
     admitted(bundles, limit, budget)._2
 
-  /** Reported alone, for a caller that only wants to say what it turned away. */
-  def refusals(bundles: Seq[CandidateBundle], limit: Int,
-               budget: CandidateBudget = CandidateBudget.Unbounded): Vector[CandidateRefusal] =
-    admitted(bundles, limit, budget)._3
-
-  /**
-   * The same choice, reported as the bundles that fit rather than their flattened members.
-   *
-   * Used to bound one source before the package is bounded as a whole: a bundle has to survive both
-   * passes intact, so the first cannot be allowed to break it up.
-   */
-  def fit(bundles: Seq[CandidateBundle], limit: Int,
-          budget: CandidateBudget = CandidateBudget.Unbounded): Vector[CandidateBundle] =
-    admitted(bundles, limit, budget)._1
-
   /**
    * The same choice, reported in full: the bundles, their transactions, and why the rest were
-   * turned away. A refused bundle is otherwise indistinguishable from one never offered.
+   * turned away. A refused bundle is otherwise indistinguishable from one never offered. A source is
+   * bounded by the bundles kept here before the package is bounded as a whole, so a bundle has to
+   * survive both passes intact.
    */
   def admit(bundles: Seq[CandidateBundle], limit: Int,
             budget: CandidateBudget = CandidateBudget.Unbounded)

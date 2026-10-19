@@ -72,10 +72,12 @@ class EngineBroadcast(owner: ActorRef, node: NodeApi, requestTimeout: FiniteDura
   import EngineBroadcast._
   private implicit val timeout: Timeout = Timeout(requestTimeout)
 
+  /** @param observed as for `sendOwned` */
   def send(tx: SignedTransaction, allocations: Seq[FundingAllocation], operation: String,
-           alive: () => Boolean): Result =
+           alive: () => Boolean, observed: Option[CompleteMempool.Observation] = None): Result =
     sendOwned(tx, allocations.map(allocation =>
-      Funding(allocation.reservationId, allocation.inputs.map(_.id.toString).toSet)), operation, alive)
+      Funding(allocation.reservationId, allocation.inputs.map(_.id.toString).toSet)), operation, alive,
+      observed = observed)
 
   /**
    * @param replaces the finished attempt this transaction supersedes, when rebuilding on the same
@@ -105,8 +107,7 @@ class EngineBroadcast(owner: ActorRef, node: NodeApi, requestTimeout: FiniteDura
       require(fundedInputIds.distinct.size == fundedInputIds.size &&
         fundedInputIds.toSet.subsetOf(signedInputIds),
         "signed inputs differ from engine funding allocations")
-      val unspent = observed.getOrElse(Await.result(
-        (owner ? CompleteMempool.Refresh).mapTo[CompleteMempool.Observation], timeout.duration))
+      val unspent = observed.getOrElse(CompleteMempool.observe(owner, node, timeout.duration, "transaction send"))
       require(unspent.fresh && !signedInputIds.exists(unspent.snapshot.get.spent.contains),
         "transaction inputs require a fresh complete unspent observation")
       allocations.foreach { allocation =>

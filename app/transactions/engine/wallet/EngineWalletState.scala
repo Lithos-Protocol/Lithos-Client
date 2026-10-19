@@ -34,8 +34,7 @@ import transactions.engine.{EngineBroadcast, EngineJoinGuard}
  *
  * The invariant everything here protects: an input owned by a nonterminal transaction is never
  * offered to another request. Releasing early is a double spend, so every ambiguous case withholds.
- */
-/**
+ *
  * @param pinnedInputs boxes to hold for transactions in this miner's own block, which need a wallet
  *                     input but are never broadcast. Zero pins nothing.
  */
@@ -56,13 +55,19 @@ class EngineWalletState @Inject()(nodeContext: NodeContext,
   // The engine passes the operator's `wallet` block. On a wallet of thousands of boxes the page
   // size decides how many node reads one selection costs, so it must not fall back to a default.
   private lazy val inventory = new WalletInventory(nodeContext, nodeApi, walletLimits)
-  // Shadow the object defaults with what the operator configured. Every ownership decision below
-  // reads these, so a wallet tuned for tens of thousands of boxes is not held to the shipped ceiling.
+  // What the operator configured. Every ownership decision below reads these, so a wallet tuned for
+  // tens of thousands of boxes is not held to the shipped ceiling.
+  /** Owned inputs across every transaction the engine has in flight. */
   private val MAX_ENGINE_INPUTS = walletLimits.maxWalletInputs
+  /**
+   * The ceiling optional work selects against. It stops short of the engine limit by two full
+   * transactions' worth of inputs, so a saturated optional queue always leaves a NISP submission
+   * or fraud proof room to fund itself.
+   */
   private val MAX_OPTIONAL_INPUTS = walletLimits.maxOptionalInputs
-  private lazy val walletWorker = context.system.dispatchers.lookup("lithos-contexts.wallet-io-dispatcher")
+  private lazy val walletWorker = context.system.dispatchers.lookup(configs.Contexts.key(configs.Contexts.WalletIo))
   // Inventory scans and reward sweeps cannot occupy the funding selection worker.
-  private lazy val maintenanceWorker = context.system.dispatchers.lookup("lithos-contexts.wallet-maintenance-dispatcher")
+  private lazy val maintenanceWorker = context.system.dispatchers.lookup(configs.Contexts.key(configs.Contexts.WalletMaintenance))
   private var selecting: Option[UUID] = None
   private var criticalSelecting: Option[UUID] = None
   /** When the in-flight selection began, so a slow one is reported as a measurement. */
@@ -71,7 +76,7 @@ class EngineWalletState @Inject()(nodeContext: NodeContext,
   /** Above this a selection is worth a line: it is the queue every other caller waits behind. */
   private final val SlowSelectionMillis = 5000L
   private var criticalMessage = false
-  private lazy val criticalWalletWorker = context.system.dispatchers.lookup("lithos-contexts.critical-wallet-dispatcher")
+  private lazy val criticalWalletWorker = context.system.dispatchers.lookup(configs.Contexts.key(configs.Contexts.CriticalWallet))
   private var waitingSelections = Vector.empty[SelectionRequest]
   private var knownOutputs = Vector.empty[node.model.NodeBox]
   private var summary: Option[(Long, WalletInventory.Snapshot)] = None
@@ -104,17 +109,10 @@ class EngineWalletState @Inject()(nodeContext: NodeContext,
     rewardBoxes = rewardBoxes.filter { case (id, _) => kept.contains(id) }
   }
 
-  /**
-   * Value this descriptor can contribute, after the nanoERG that spending its re-emission tokens
-   * obliges the transaction to pay away. Reporting the gross value would overstate a mainnet reward
-   * box by exactly the token amount it carries.
-   */
-  private def descriptorValue(box: WalletDescriptor): Long = {
-    val reemissionDue = if (nodeContext.getNetwork != org.ergoplatform.appkit.NetworkType.MAINNET) 0L
-      else box.tokens.filter(_.id.toString == MainnetEip27Constants.TokenId)
-        .foldLeft(0L)((sum, token) => Math.addExact(sum, token.amount))
-    Math.subtractExact(box.value, reemissionDue)
-  }
+  /** Value this descriptor can contribute, after its re-emission obligation. */
+  private def descriptorValue(box: WalletDescriptor): Long =
+    WalletInventory.netOfReemission(box.value, box.tokens.iterator.map(token => token.id.toString -> token.amount),
+      nodeContext.getNetwork == org.ergoplatform.appkit.NetworkType.MAINNET)
 
   private def valueOf(boxes: Seq[WalletDescriptor]): BigInt =
     boxes.map(box => BigInt(descriptorValue(box))).sum
@@ -127,8 +125,8 @@ class EngineWalletState @Inject()(nodeContext: NodeContext,
    * The reservation is taken when the result comes back, not here, so the actor never has to decide
    * ownership from a snapshot taken before the walk finished.
    */
-  private def selectWallet(erg: Long, tokens: Seq[Token], track: Boolean, reservationId: String,
-                           deadline: Long, single: Boolean, p2pkOnly: Boolean, confirmedOnly: Boolean,
+  private def selectWallet(erg: Long, tokens: Seq[Token], reservationId: String,
+                           deadline: Long, single: Boolean, confirmedOnly: Boolean,
                            reply: ActorRef = sender(), critical: Boolean = criticalMessage): Unit = {
     val busy = if (critical) criticalSelecting.nonEmpty else selecting.nonEmpty
     val ownershipLimit = if (critical) MAX_ENGINE_INPUTS else MAX_OPTIONAL_INPUTS
@@ -137,7 +135,7 @@ class EngineWalletState @Inject()(nodeContext: NodeContext,
     val worstCaseInputs = if (single) 1 else walletLimits.maxInputs
     if (busy && now() < deadline && waitingSelections.count(_.critical == critical) < MaxQueuedSelections &&
       tokens.size <= MaxRequestedTokens)
-      waitingSelections :+= SelectionRequest(erg, tokens, track, reservationId, deadline, single, p2pkOnly, reply,
+      waitingSelections :+= SelectionRequest(erg, tokens, reservationId, deadline, single, reply,
         critical, confirmedOnly)
     else if (busy || now() >= deadline || tokens.size > MaxRequestedTokens ||
       usedInputs.size + worstCaseInputs > ownershipLimit) {
@@ -154,12 +152,12 @@ class EngineWalletState @Inject()(nodeContext: NodeContext,
       val excluded = usedInputs.keySet
       val chainedChange = knownOutputs
       Try(Future(client.execute { ctx =>
-        inventory.select(ctx, erg, tokens, excluded, single, p2pkOnly, rewardsOnly = false, chainedChange,
+        inventory.select(ctx, erg, tokens, excluded, single, chainedChange,
           deadlineMillis = deadline, confirmedOnly = confirmedOnly)
       })(if (critical) criticalWalletWorker else walletWorker)
-        .onComplete(result => self ! SelectionFinished(attempt, reservationId, deadline, track, reply, result, critical)))
+        .onComplete(result => self ! SelectionFinished(attempt, reservationId, deadline, reply, result, critical)))
         .failed.foreach(ex =>
-          self ! SelectionFinished(attempt, reservationId, deadline, track, reply, Failure(ex), critical))
+          self ! SelectionFinished(attempt, reservationId, deadline, reply, Failure(ex), critical))
     }
   }
 
@@ -175,8 +173,8 @@ class EngineWalletState @Inject()(nodeContext: NodeContext,
     while (ready >= 0) {
       val request = waitingSelections(ready)
       waitingSelections = waitingSelections.patch(ready, Nil, 1)
-      selectWallet(request.erg, request.tokens, request.track, request.id, request.deadline,
-        request.single, request.p2pkOnly, request.confirmedOnly, request.reply, request.critical)
+      selectWallet(request.erg, request.tokens, request.id, request.deadline,
+        request.single, request.confirmedOnly, request.reply, request.critical)
       ready = nextReady
     }
   }
@@ -347,7 +345,7 @@ class EngineWalletState @Inject()(nodeContext: NodeContext,
     // the request is still inside its deadline, no box it chose was reserved meanwhile, and taking
     // them all still fits the lane's ownership budget. Any of those failing yields no inputs rather
     // than a partial selection the caller cannot fund a transaction with.
-    case SelectionFinished(attempt, reservationId, deadline, track, reply, result, critical)
+    case SelectionFinished(attempt, reservationId, deadline, reply, result, critical)
       if selecting.contains(attempt) || criticalSelecting.contains(attempt) =>
       val startedAt = if (critical) criticalSelectingSince else selectingSince
       if (critical) criticalSelecting = None else selecting = None
@@ -371,7 +369,7 @@ class EngineWalletState @Inject()(nodeContext: NodeContext,
         logger.warn(s"Wallet selection took ${elapsed}ms and returned ${selected.size} input(s) " +
           s"(critical=$critical, wallet.page-size=${walletLimits.pageSize}); every other funding " +
           "request waits behind this one")
-      if (track && selected.nonEmpty) reserve(selected.map(_.id.toString), reservationId)
+      if (selected.nonEmpty) reserve(selected.map(_.id.toString), reservationId)
       reply ! WalletInputs(selected, reservationId, unavailable)
       drainSelections()
     case _: SelectionFinished => ()
@@ -585,11 +583,11 @@ class EngineWalletState @Inject()(nodeContext: NodeContext,
       sweepRewardsIfDue()
       finishRefresh()
 
-    case SelectInputs(_, _, _, reservationId, deadlineMillis, _, _, _) if now() >= deadlineMillis =>
+    case SelectInputs(_, _, reservationId, deadlineMillis, _, _) if now() >= deadlineMillis =>
       sender() ! WalletInputs(Seq.empty, reservationId, Some(SelectionExpired))
 
-    case SelectInputs(erg, tokens, trackUsed, reservationId, deadline, single, p2pkOnly, confirmedOnly) =>
-      selectWallet(erg, tokens, trackUsed, reservationId, deadline, single, p2pkOnly, confirmedOnly)
+    case SelectInputs(erg, tokens, reservationId, deadline, single, confirmedOnly) =>
+      selectWallet(erg, tokens, reservationId, deadline, single, confirmedOnly)
     case ReserveKnownInputs(_, reservationId, deadlineMillis) if now() >= deadlineMillis =>
       sender() ! WalletInputs(Seq.empty, reservationId, Some(SelectionExpired))
 
@@ -779,7 +777,7 @@ class EngineWalletState @Inject()(nodeContext: NodeContext,
         // proxy, so that amount is not available to the payout. TxBuilder appends that output.
         val reemissionObligation = Eip27Adjustment.obligation(batch, nodeContext.getNetwork)
         val payoutValue = Math.subtractExact(
-          Math.subtractExact(grossValue, reemissionObligation), RewardSweepFee)
+          Math.subtractExact(grossValue, reemissionObligation), MaintenanceFee)
         if (payoutValue < Parameters.MinChangeValue) self ! ReleaseInputs(leaseId)
         else {
           // Everything except the re-emission tokens is forwarded; copying those into the payout
@@ -791,7 +789,7 @@ class EngineWalletState @Inject()(nodeContext: NodeContext,
             }
           val signed = client.execute { ctx =>
             val unsigned = TxBuilder(ctx).setInputs(batch: _*)
-              .setOutputs(UTXO(wallet.contract, payoutValue, payoutTokens), UTXO.feeBox(RewardSweepFee))
+              .setOutputs(UTXO(wallet.contract, payoutValue, payoutTokens), UTXO.feeBox(MaintenanceFee))
               .buildTx(0, wallet.p2pk)
             require(walletAlive.get(), "wallet engine attempt was superseded before signing")
             wallet.sign(unsigned)
@@ -870,15 +868,6 @@ object EngineWalletState {
   private final val PinSpares = 4
 
   private case class PinsVerified(boxIds: Seq[String])
-  /** Owned inputs across every transaction the engine has in flight. */
-  private[transactions] final val MAX_ENGINE_INPUTS = configs.WalletConfig.Default.maxWalletInputs
-
-  /**
-   * The ceiling optional work selects against. It stops short of the engine limit by two full
-   * transactions' worth of inputs, so a saturated optional queue always leaves a NISP submission
-   * or fraud proof room to fund itself.
-   */
-  private[transactions] final val MAX_OPTIONAL_INPUTS = configs.WalletConfig.Default.maxOptionalInputs
 
   /** Selections that may wait per lane before further requests are refused outright. */
   private final val MaxQueuedSelections = 8
@@ -896,25 +885,8 @@ object EngineWalletState {
                                       reservedAtMillis: Long,
                                       status: ReservationStatus)
 
-  /** The shipped `wallet.max-inputs`. The actor caps each request at the configured value instead. */
-  final val MAX_TX_INPUTS: Int = configs.WalletConfig.Default.maxInputs
-
-  /** Page size for the wallet refresh, which pages to exhaustion. */
-  final val MAX_WALLET_BOXES: Int = WalletInventory.PageSize
-
-  /** Fee on each reward-sweep broadcast. */
-  final val RewardSweepFee: Long = Parameters.MinFee
-
-  /**
-   * Batch the unlocked coinbases for sweeping, smallest first so dust consolidates into early
-   * batches instead of stranding a tail of sub-fee boxes.
-   *
-   * Batches are capped at `maxInputs`, so dust beyond that boundary waits for the next claim
-   * rather than joining a fuller batch - the input cap is hard. A batch whose gross still cannot
-   * cover one fee is cancelled by the sweep and becomes selectable again; nothing here drops it.
-   */
-  def planRewardChunks(rewards: Seq[InputUTXO], txFee: Long, maxInputs: Int): Seq[Seq[InputUTXO]] =
-    rewards.sortBy(_.value).grouped(math.max(1, maxInputs)).filter(_.nonEmpty).toSeq
+  /** Fee on each maintenance broadcast this client sends for itself: a reward sweep or a consolidation. */
+  final val MaintenanceFee: Long = Parameters.MinFee
 
   /**
    * How long a reservation survives with no sign of being spent or released. Only reached by a
@@ -935,10 +907,10 @@ object EngineWalletState {
   private case class RefreshFailed(generation: Long, cause: Throwable)
   private case class WalletWorkerResult(incarnation: UUID, result: Any)
   private case class SelectionFinished(attempt: UUID, reservationId: String, deadline: Long,
-                                       track: Boolean, reply: ActorRef, result: Try[Vector[InputUTXO]], critical: Boolean)
+                                       reply: ActorRef, result: Try[Vector[InputUTXO]], critical: Boolean)
   private case class TotalsRefreshed(revision: Long, snapshot: WalletInventory.Snapshot)
   private case object SweepFinished
-  private case class SelectionRequest(erg: Long, tokens: Seq[Token], track: Boolean, id: String,
-                                      deadline: Long, single: Boolean, p2pkOnly: Boolean, reply: ActorRef, critical: Boolean,
+  private case class SelectionRequest(erg: Long, tokens: Seq[Token], id: String,
+                                      deadline: Long, single: Boolean, reply: ActorRef, critical: Boolean,
                                       confirmedOnly: Boolean)
 }

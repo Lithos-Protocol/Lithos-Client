@@ -65,6 +65,30 @@ class ConsolidationExecutionSpec extends AnyFlatSpec with Matchers with MockitoS
     plan.status.total shouldBe 3
     plan.status.oldestExcluded shouldBe Some(2)
   }
+  it should "count an unconfirmed box but select only boxes already in a block" in {
+    val api = mock[NodeApi]
+    val pending = {
+      val e = entry(1, 1)
+      e.copy(confirmationsNum = None, inclusionHeight = None, onchain = false)
+    }
+    serve(api, Vector(pending, entry(2, 2), entry(3, 3)))
+    val plan = ConsolidationExecution.select(api, Set("wallet"), Set.empty, 100, 1)
+    plan.boxes.map(_.creationHeight) shouldBe Vector(2, 3)
+    plan.status.total shouldBe 3
+    plan.status.eligible shouldBe 2
+    plan.status.oldestExcluded shouldBe Some(1)
+  }
+
+  it should "neither count nor select a spent box or one under a tree it cannot sign" in {
+    val api = mock[NodeApi]
+    val spent = entry(1, 1).copy(spent = true)
+    val foreign = entry(2, 2).copy(box = entry(2, 2).box.copy(ergoTree = "someone-else"))
+    serve(api, Vector(spent, foreign, entry(3, 3), entry(4, 4), entry(5, 5)))
+    val plan = ConsolidationExecution.select(api, Set("wallet"), Set.empty, 100, 1)
+    plan.status.total shouldBe 3
+    plan.boxes.map(_.creationHeight) shouldBe Vector(3, 4, 5)
+  }
+
   it should "discard a partial scan when a later page fails" in {
     val api = mock[NodeApi]
     when(api.walletUnspentBoxes(any[ConfirmationRange], any[Paging])).thenReturn(

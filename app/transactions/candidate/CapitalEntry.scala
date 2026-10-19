@@ -16,25 +16,20 @@ object CapitalOrigin {
 
   /** Value legally removed from a box that is past its storage-rent deadline. */
   case object StorageRent extends CapitalOrigin
-
-  /** Realized gain on a round trip that both opens and closes inside this block. */
-  case object Arbitrage extends CapitalOrigin
 }
 
 /**
- * One output an earlier member of a candidate package created, and what became of it.
+ * One output an earlier member of a candidate package created.
  *
- * The box travels with the entry because it is not on the chain yet — a later member has to spend
- * it directly rather than read it back. `spentBy` names the member that consumed it, so an entry
- * with none is still available to the final top-up; `parentTxId` names the member that created it,
- * which is what orders the two inside a bundle.
+ * The box travels with the entry because it is not on the chain yet — the top-up has to spend it
+ * directly rather than read it back. `parentTxId` names the member that created it, which is what
+ * the package's revenue is credited to.
  *
  * Held for one block height by [[CandidateCapital]].
  */
 final case class CapitalEntry(origin: CapitalOrigin,
                               box: InputUTXO,
-                              parentTxId: String,
-                              spentBy: Option[String] = None) {
+                              parentTxId: String) {
   def outputId: String = box.id.toString
   def value: Long = box.value
   def tokens: Seq[Token] = box.tokens

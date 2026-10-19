@@ -115,9 +115,13 @@ class KnownReservationSpec
   private def knownOutput(f: Fixture, value: Long): InputUTXO =
     withCtx(f)(ctx => walletBox(f.wallet, value).toInputUTXO(ctx))
 
+  /** What a selection hands out, released again so a later ask sees the same wallet. */
   private def offered(f: Fixture, need: Long): Seq[InputUTXO] = {
-    f.probe.send(f.mgr, SelectInputs(need, Seq.empty, trackUsed = false))
-    f.probe.expectMsgType[WalletInputs].inputs
+    val id = java.util.UUID.randomUUID().toString
+    f.probe.send(f.mgr, SelectInputs(need, Seq.empty, reservationId = id))
+    val inputs = f.probe.expectMsgType[WalletInputs].inputs
+    f.probe.send(f.mgr, ReleaseInputs(id))
+    inputs
   }
 
   private def reserveKnown(f: Fixture, id: String, boxes: Seq[InputUTXO]): Seq[InputUTXO] = {
@@ -207,9 +211,9 @@ class KnownReservationSpec
     // The ceiling is what stops a chain that never releases from growing the reservation map without
     // bound. Nothing else caps it: a Known hold is not collected by the refresh.
     val f = fixture()
-    val many = (1 to EngineWalletState.MAX_OPTIONAL_INPUTS).map(i => knownOutput(f, erg + i))
-    // Held in chunks, since one request is also capped at MAX_TX_INPUTS.
-    many.grouped(EngineWalletState.MAX_TX_INPUTS).zipWithIndex.foreach { case (chunk, idx) =>
+    val many = (1 to configs.WalletConfig.Default.maxOptionalInputs).map(i => knownOutput(f, erg + i))
+    // Held in chunks, since one request is also capped at wallet.max-inputs.
+    many.grouped(configs.WalletConfig.Default.maxInputs).zipWithIndex.foreach { case (chunk, idx) =>
       reserveKnown(f, s"chunk-$idx", chunk) should have size chunk.size
     }
     reserveKnown(f, "one-too-many", Seq(knownOutput(f, erg - 1))) shouldBe empty

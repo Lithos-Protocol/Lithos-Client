@@ -20,7 +20,6 @@ class LenderKeyDerivationSpec extends AnyFlatSpec with Matchers with MockitoSuga
   private object NoFunding extends FundingSource {
     def reserve(value: Long, tokens: Seq[Token]): FundingAllocation = throw new IllegalStateException("funding asked")
     def reserveCovering(value: Long): FundingAllocation = throw new IllegalStateException("funding asked")
-    def reserveCoveringP2PK(value: Long): FundingAllocation = throw new IllegalStateException("funding asked")
     def reserveKnown(inputs: Seq[InputUTXO]): FundingAllocation = throw new IllegalStateException("funding asked")
     def giveBack(boxes: Seq[InputUTXO]): Unit = ()
   }

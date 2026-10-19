@@ -105,11 +105,11 @@ object ConsolidationExecution {
     else None
 
   /**
-   * Count the whole wallet but retain only the oldest input-budget worth of candidates, so a
+   * Count every signable wallet box but retain only the oldest input-budget worth of candidates, so a
    * fragmented wallet costs a bounded amount of memory rather than a sorted copy of itself.
    *
-   * Eligible means confirmed, on-chain, signable and unowned. Mining rewards must also have passed
-   * their timelock. Token boxes are included, with their assets preserved by the output plan.
+   * Eligible means in a block and unowned. Mining rewards must also have passed their timelock. Token
+   * boxes are included, with their assets preserved by the output plan.
    */
   private[engine] def select(api: NodeApi, trees: Set[String], excluded: Set[String],
                              height: Int, target: Int, minInputs: Int = 2,
@@ -123,46 +123,20 @@ object ConsolidationExecution {
     var total, eligible = 0L
     var oldestExcluded = Option.empty[Int]
     var oldestEligible = Vector.empty[NodeBox]
-    val startedAt = System.nanoTime()
-    val seenRewards = scala.collection.mutable.HashSet.empty[String]
-    def scan(fetch: Paging => Seq[WalletBox]): Unit = {
-      var paging = Paging(0, limits.pageSize)
-      var exhausted = false
-      while (!exhausted) {
-        require(System.nanoTime() - startedAt < limits.inventoryTimeoutMs * 1000000L,
-          "consolidation inventory deadline exceeded")
-        val page = fetch(paging)
-        require(page.size <= paging.limit, "oversized consolidation inventory page")
-        page.foreach { entry =>
-          val box = entry.box
-          val reward = rewardTrees.contains(box.ergoTree)
-          if (!reward || seenRewards.add(box.boxId)) {
-            total = Math.addExact(total, 1L)
-            val safe = entry.onchain && !entry.spent && entry.confirmationsNum.exists(_ > 0) &&
-              (trees.contains(box.ergoTree) || reward) &&
-              (!reward || height.toLong > box.creationHeight.toLong + mutations.NodeWallet.MINER_REWARD_DELAY) &&
-              !excluded.contains(box.boxId) && box.creationHeight <= height
-            if (safe) {
-              eligible = Math.addExact(eligible, 1L)
-              // Box id breaks height ties so the same wallet always yields the same selection.
-              oldestEligible = (oldestEligible :+ box)
-                .sortBy(candidate => (candidate.creationHeight, candidate.boxId))
-                .take(ceiling.toInt)
-            } else oldestExcluded = Some(oldestExcluded.fold(box.creationHeight)(math.min(_, box.creationHeight)))
-          }
-        }
-        exhausted = page.size < paging.limit
-        paging = paging.next
-      }
-    }
-    scan(paging => api.walletUnspentBoxes(ConfirmationRange.IncludeMempool, paging).get)
-    if (rewardTrees.nonEmpty && api.indexerEnabled) rewardTrees.foreach { tree =>
-      scan(paging => api.unspentBoxesByErgoTree(tree, paging, SortDirection.Asc,
-        MempoolOptions(includeUnconfirmed = false, excludeMempoolSpent = true)).get.map { entry =>
-        val box = entry.box
-        WalletBox(box, entry.address, Some(height - entry.inclusionHeight + 1), box.transactionId,
-          box.index, Some(entry.inclusionHeight), None, None, spent = false, onchain = true, Seq.empty)
-      })
+    WalletInventory.walk(api, trees, rewardTrees, limits, rewardsOnly = false, p2pkOnly = false,
+      includeRewards = rewardTrees.nonEmpty) { (box, reward, onchain) =>
+      total = Math.addExact(total, 1L)
+      val safe = onchain &&
+        (!reward || height.toLong > box.creationHeight.toLong + mutations.NodeWallet.MINER_REWARD_DELAY) &&
+        !excluded.contains(box.boxId) && box.creationHeight <= height
+      if (safe) {
+        eligible = Math.addExact(eligible, 1L)
+        // Box id breaks height ties so the same wallet always yields the same selection.
+        oldestEligible = (oldestEligible :+ box)
+          .sortBy(candidate => (candidate.creationHeight, candidate.boxId))
+          .take(ceiling.toInt)
+      } else oldestExcluded = Some(oldestExcluded.fold(box.creationHeight)(math.min(_, box.creationHeight)))
+      false
     }
     // Merging n inputs into one output removes n - 1 boxes, so overshooting the target by one input
     // is what lands exactly on it.
@@ -199,12 +173,8 @@ private[engine] class ConsolidationExecution(node: NodeContext, api: NodeApi, ow
     org.slf4j.LoggerFactory.getLogger("ConsolidationExecution")
   private implicit val timeout: Timeout = Timeout(limits.consolidation.requestTimeoutMs.milliseconds)
 
-  private def observation(): CompleteMempool.Observation = {
-    val observed = Await.result(
-      (owner ? CompleteMempool.Refresh).mapTo[CompleteMempool.Observation], timeout.duration)
-    require(observed.fresh, "consolidation requires a fresh complete mempool")
-    observed
-  }
+  private def observation(): CompleteMempool.Observation =
+    CompleteMempool.observe(owner, api, timeout.duration, "consolidation")
 
   /**
    * Build, sign and send one batch. Every bound is checked per transaction rather than per pass,
@@ -218,7 +188,7 @@ private[engine] class ConsolidationExecution(node: NodeContext, api: NodeApi, ow
         "consolidation input identity or byte budget is invalid")
       input
     }
-    val fee = transactions.rollups.TransactionMessages.RollupTxStub.ROLLUP_FEE
+    val fee = EngineWalletState.MaintenanceFee
     val obligation = Eip27Adjustment.obligation(inputs, node.getNetwork)
     val plan = outputPlan(inputs, fee, obligation)
     val merged = plan.flatMap(_._1)
@@ -226,6 +196,8 @@ private[engine] class ConsolidationExecution(node: NodeContext, api: NodeApi, ow
       case (tokens, value) => UTXO(node.getNodeWallet.contract, value, tokens)
     }
     val allocation = EngineFunding(owner, limits.reservationTimeoutMs.milliseconds, ec).reserveKnown(inputs)
+    // Released however the send ends. Release only clears a reservation that never crossed the send
+    // boundary; a broadcast transaction's inputs stay owned until reconciliation resolves them.
     try {
       val unsigned = TxBuilder(ctx).setInputs(inputs: _*)
         .setOutputs((outputs :+ UTXO.feeBox(fee)): _*)
@@ -241,8 +213,6 @@ private[engine] class ConsolidationExecution(node: NodeContext, api: NodeApi, ow
       logger.info(s"Sent transaction ${result.txId} to consolidate ${inputs.size} wallet box(es) " +
         s"into ${outputs.size} holding ${merged.size} token id(s): ${result.outcome}")
       result.outcome
-      // Release only clears a reservation that never crossed the send boundary; a broadcast
-      // transaction's inputs stay owned until reconciliation resolves them.
     } finally allocation.release()
   }
 

@@ -95,9 +95,7 @@ class StartMiningServer @Inject()(system: ActorSystem, config: Configuration,
 
         // Started only when enabled: the walk is a standing timer against the node, and a source
         // that is off is never asked for anything either.
-        def limitsFor(name: String): configs.CandidateSourceConfig =
-          stratumParams.candidate.sources.getOrElse(name, configs.CandidateConfig.Default.sources(name))
-        val rentLimits = limitsFor(configs.CandidateSourceConfig.Rent)
+        val rentLimits = stratumParams.candidate.limitsFor(configs.CandidateSourceConfig.Rent)
         val rentSource = if (!rentLimits.enabled) None else Some(
           mining.MiningMessages.CandidateSource(configs.CandidateSourceConfig.Rent,
             system.actorOf(akka.actor.Props(new transactions.rent.StorageRentSource(

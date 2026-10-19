@@ -43,7 +43,6 @@ class EngineFundingSpec extends TestKit(ActorSystem("wallet-selector-spec"))
     val request = manager.expectMsgType[SelectInputs]
     request.erg shouldEqual 1000L
     request.tokens shouldBe empty
-    request.trackUsed shouldBe true
     manager.reply(WalletInputs(Seq(selected), request.reservationId))
 
     Await.result(result, 2.seconds).inputs shouldEqual Seq(selected)

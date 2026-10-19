@@ -22,8 +22,8 @@ import scala.util.{Failure, Success, Try}
 
 /**
  * Owns the collateral queue: joining it with this miner's own funds, and driving it forward with
- * Activate and Clear. Separate from the rollup actors because it is keyed by queue position rather
- * than rollup block id and must run whether or not this miner has any rollups.
+ * Activate and Clear. Mixed into the transaction engine, so it shares the rollup work's mailbox, but
+ * keyed by queue position rather than rollup block id, and run whether or not this miner has rollups.
  *
  * Two timers, both broadcasting to the mempool: `collateralizeInterval` tops this miner's own
  * positions back up with Joins, `queueInterval` walks the head, Clearing duplicate-key boxes that
@@ -45,10 +45,10 @@ trait EmissionsCore extends Actor with InjectedActorSupport {
 
   /** The emissions source's byte and cost allowance, which a bundle has to fit whole to be admitted. */
   private val emissionBudget: transactions.candidate.CandidateBudget =
-    configs.CandidateConfig(config).sources(configs.CandidateSourceConfig.Emissions).budget
+    configs.CandidateConfig(config).limitsFor(configs.CandidateSourceConfig.Emissions).budget
 
   private implicit val emissionEc: ExecutionContext = context.dispatcher
-  private val emissionWorker = context.system.dispatchers.lookup("lithos-contexts.engine-io-dispatcher")
+  private val emissionWorker = context.system.dispatchers.lookup(configs.Contexts.key(configs.Contexts.EngineIo))
 
   /** Which side builds the queue head's Activates each block: the candidate first, then the funded pass. */
   private val queueOwnership = new QueueOwnership

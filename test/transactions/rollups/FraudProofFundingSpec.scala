@@ -141,7 +141,7 @@ class FraudProofFundingSpec extends TestKit(ActorSystem("fp-funding-spec", Fraud
     val refused = intercept[NotEnoughInputsException] {
       handler.initialTxInputs(oneFee, isFPTx = true)
     }
-    refused.getMessage should include("P2PK")
+    refused.getMessage should include("one input")
   }
 
   "A non-fraud-proof initial transaction" should "also leave coinbases for maintenance" in {

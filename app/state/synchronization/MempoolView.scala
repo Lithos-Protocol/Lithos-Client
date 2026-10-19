@@ -104,7 +104,7 @@ class MempoolView @Inject()(config: play.api.Configuration,
   protected lazy val completeNode: node.NodeApi = node.rest.RestNodeApi(node.rest.NodeHttpConfig(
     nodeContext.getNodeUrl, Some(nodeContext.getNodeKey), maxResponseBytes = 2 * 1024 * 1024,
     callTimeoutMs = 10000L))
-  private lazy val completeWorker = context.system.dispatchers.lookup("lithos-contexts.mempool-io-dispatcher")
+  private lazy val completeWorker = context.system.dispatchers.lookup(configs.Contexts.key(configs.Contexts.MempoolIo))
   private var walkAttempt: Option[java.util.UUID] = None
   private var completeWaiters = Vector.empty[ActorRef]
   /** Starts unusable, so nothing can act on a complete view before one has ever been taken. */

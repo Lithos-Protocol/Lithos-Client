@@ -20,12 +20,16 @@ import scala.util.control.NonFatal
  *
  * Every check fails towards keeping ownership. A missing or lagging index never means spent, and
  * absence from the local mempool never means an input is free.
+ *
+ * @param nodeApi the engine's own client, so reconciliation reads the node under the operator's
+ *                `wallet` limits. Absent, it builds a client with fixed limits.
  */
-class EngineReconciler(nodeContext: NodeContext, wallet: ActorRef, mempool: ActorRef)
+class EngineReconciler(nodeContext: NodeContext, wallet: ActorRef, mempool: ActorRef,
+                       nodeApi: Option[NodeApi] = None)
                       (implicit ec: ExecutionContext) {
   private implicit val timeout: Timeout = Timeout(40.seconds)
-  protected lazy val node: NodeApi = RestNodeApi(NodeHttpConfig(nodeContext.getNodeUrl,
-    Some(nodeContext.getNodeKey), maxResponseBytes = 2 * 1024 * 1024, callTimeoutMs = 10000L))
+  protected lazy val node: NodeApi = nodeApi.getOrElse(RestNodeApi(NodeHttpConfig(nodeContext.getNodeUrl,
+    Some(nodeContext.getNodeKey), maxResponseBytes = 2 * 1024 * 1024, callTimeoutMs = 10000L)))
 
   private def engineHolds(): Vector[EngineHold] =
     Await.result((wallet ? GetEngineHolds).mapTo[EngineHolds], timeout.duration).holds

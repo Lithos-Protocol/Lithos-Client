@@ -24,6 +24,13 @@ class WalletInventorySpec extends AnyFlatSpec with Matchers with MockitoSugar {
     }
   }
 
+  "A box's value net of re-emission" should "drop the re-emission tokens' amount on mainnet only" in {
+    val tokens = Seq(work.lithos.mutations.MainnetEip27Constants.TokenId -> 12000000000L, "cd" * 32 -> 5L)
+    WalletInventory.netOfReemission(15000000000L, tokens.iterator, mainnet = true) shouldBe 3000000000L
+    WalletInventory.netOfReemission(15000000000L, tokens.iterator, mainnet = false) shouldBe 15000000000L
+    WalletInventory.netOfReemission(15000000000L, Iterator.empty, mainnet = true) shouldBe 15000000000L
+  }
+
   "A confirmed-only selection" should "take neither a box still in the mempool nor locally built change" in {
     // A fee-less candidate transaction carries no parent for its wallet input, and the node skips a
     // spend of a box that is not yet in a block
@@ -37,7 +44,7 @@ class WalletInventorySpec extends AnyFlatSpec with Matchers with MockitoSugar {
         unconfirmed = Set(pending.id.toString))
       val inventory = new WalletInventory(node, api)
       def pick(confirmedOnly: Boolean, known: Vector[NodeBox]) = inventory.select(ctx, 1000000000L,
-        Seq.empty, Set.empty, single = true, p2pkOnly = false, rewardsOnly = false, known = known,
+        Seq.empty, Set.empty, single = true, known = known,
         confirmedOnly = confirmedOnly).map(_.id)
 
       pick(confirmedOnly = false, Vector(WalletInventory.nodeBox(change))) shouldBe Vector(change.id)
@@ -59,8 +66,8 @@ class WalletInventorySpec extends AnyFlatSpec with Matchers with MockitoSugar {
     snapshot.boxes.map(_.id) should not contain boxes.last.boxId
     snapshot.seen shouldBe Set(boxes.last.boxId)
     snapshot.spendable shouldBe BigInt(5000000000L)
-    snapshot.boxes.size should be <= WalletInventory.MaxDescriptors
-    snapshot.boxes.map(_.retainedBytes).sum should be <= WalletInventory.MaxDescriptorBytes
+    snapshot.boxes.size should be <= configs.WalletConfig.Default.maxDescriptors
+    snapshot.boxes.map(_.retainedBytes).sum should be <= configs.WalletConfig.Default.maxDescriptorBytes
   }
 
   it should "select a covering box beyond the cache horizon without retaining or hydrating preceding dust" in {
@@ -72,10 +79,10 @@ class WalletInventorySpec extends AnyFlatSpec with Matchers with MockitoSugar {
       } :+ WalletInventory.nodeBox(finalInput)
       serve(api, boxes)
       val selected = new WalletInventory(node, api).select(ctx, 5000000000L, Seq.empty, Set.empty,
-        single = false, p2pkOnly = true, rewardsOnly = false)
+        single = false)
       selected.map(_.id) shouldBe Vector(finalInput.id)
       val excluded = new WalletInventory(node, api).select(ctx, 5000000000L, Seq.empty,
-        boxes.take(5000).map(_.boxId).toSet, single = true, p2pkOnly = true, rewardsOnly = false)
+        boxes.take(5000).map(_.boxId).toSet, single = true)
       excluded.map(_.id) shouldBe Vector(finalInput.id)
     }
   }
@@ -90,8 +97,8 @@ class WalletInventorySpec extends AnyFlatSpec with Matchers with MockitoSugar {
       val dust = UTXO(wallet.contract, 1000000L).toDummyInput(ctx)
       val small = UTXO(wallet.contract, 50000000L).toDummyInput(ctx)
       serve(api, Vector(large, nine, dust, small).map(WalletInventory.nodeBox))
-      new WalletInventory(node, api).select(ctx, 3000000L, Seq.empty, Set.empty, single = true,
-        p2pkOnly = false, rewardsOnly = false).map(_.id) shouldBe Vector(small.id)
+      new WalletInventory(node, api).select(ctx, 3000000L, Seq.empty, Set.empty, single = true)
+        .map(_.id) shouldBe Vector(small.id)
     }
   }
 
@@ -102,8 +109,8 @@ class WalletInventorySpec extends AnyFlatSpec with Matchers with MockitoSugar {
         org.ergoplatform.sdk.ErgoId.create("ab" * 32), 5L))).toDummyInput(ctx)
       val plain = UTXO(wallet.contract, 900000000L).toDummyInput(ctx)
       serve(api, Vector(withLit, plain).map(WalletInventory.nodeBox))
-      new WalletInventory(node, api).select(ctx, 3000000L, Seq.empty, Set.empty, single = true,
-        p2pkOnly = false, rewardsOnly = false).map(_.id) shouldBe Vector(plain.id)
+      new WalletInventory(node, api).select(ctx, 3000000L, Seq.empty, Set.empty, single = true)
+        .map(_.id) shouldBe Vector(plain.id)
     }
   }
 
@@ -112,14 +119,14 @@ class WalletInventorySpec extends AnyFlatSpec with Matchers with MockitoSugar {
     node.getClient.execute { ctx =>
       val close = UTXO(wallet.contract, 5000000L).toDummyInput(ctx)
       // A full first page ending in a close box, so a second request would only come from reading on.
-      val boxes = Vector.tabulate(WalletInventory.PageSize - 1)(i =>
+      val boxes = Vector.tabulate(configs.WalletConfig.Default.pageSize - 1)(i =>
         NodeBox(f"${i + 1}%064x", "ab" * 32, 1000000000L + i, 0, 1, wallet.contract.ergoTreeHex)) :+
         WalletInventory.nodeBox(close)
       serve(api, boxes)
-      new WalletInventory(node, api).select(ctx, 3000000L, Seq.empty, Set.empty, single = true,
-        p2pkOnly = false, rewardsOnly = false).map(_.id) shouldBe Vector(close.id)
+      new WalletInventory(node, api).select(ctx, 3000000L, Seq.empty, Set.empty, single = true)
+        .map(_.id) shouldBe Vector(close.id)
       verify(api, never()).walletUnspentBoxes(any[ConfirmationRange],
-        org.mockito.ArgumentMatchers.eq(Paging(WalletInventory.PageSize, WalletInventory.PageSize)))
+        org.mockito.ArgumentMatchers.eq(Paging(configs.WalletConfig.Default.pageSize, configs.WalletConfig.Default.pageSize)))
     }
   }
 
@@ -129,7 +136,7 @@ class WalletInventorySpec extends AnyFlatSpec with Matchers with MockitoSugar {
       serve(api, Vector(WalletInventory.nodeBox(UTXO(wallet.contract, 1000000L).toDummyInput(ctx))))
       for (single <- Seq(false, true))
         intercept[mutations.NotEnoughInputsException](new WalletInventory(node, api).select(ctx, 3000000L,
-          Seq.empty, Set.empty, single, p2pkOnly = false, rewardsOnly = false))
+          Seq.empty, Set.empty, single))
     }
   }
 
@@ -143,9 +150,9 @@ class WalletInventorySpec extends AnyFlatSpec with Matchers with MockitoSugar {
       serve(api, Vector(WalletInventory.nodeBox(reward), WalletInventory.nodeBox(plain)))
       when(api.indexerEnabled).thenReturn(true)
       val inventory = new WalletInventory(node, api)
-      for (single <- Seq(false, true); p2pkOnly <- Seq(false, true)) {
-        inventory.select(ctx, 1000000000L, Seq.empty, Set.empty, single, p2pkOnly,
-          rewardsOnly = false, known = Vector(WalletInventory.nodeBox(reward))).map(_.id) shouldBe Vector(plain.id)
+      for (single <- Seq(false, true)) {
+        inventory.select(ctx, 1000000000L, Seq.empty, Set.empty, single, known = Vector(WalletInventory.nodeBox(reward)))
+          .map(_.id) shouldBe Vector(plain.id)
       }
       verify(api, never()).unspentBoxesByErgoTree(anyString(), any[Paging], any[SortDirection], any[MempoolOptions])
       verify(api, never()).indexerEnabled

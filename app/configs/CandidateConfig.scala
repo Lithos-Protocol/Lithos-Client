@@ -20,7 +20,12 @@ case class CandidateConfig(collateralPoolSize: Int,
                            refreshForProtocolTxs: Boolean = true,
                            minNewProtocolTxs: Int = 1,
                            pinnedInputs: Int = 1,
-                           collateralStrategy: String = CandidateConfig.HighestFee)
+                           collateralStrategy: String = CandidateConfig.HighestFee) {
+
+  /** One source's limits. Every source this client wires has an entry, so any other name is a defect. */
+  def limitsFor(name: String): CandidateSourceConfig =
+    sources.getOrElse(name, throw new IllegalArgumentException(s"no candidate source named '$name'"))
+}
 
 object CandidateConfig {
 
@@ -77,7 +82,7 @@ object CandidateConfig {
    */
   def pinTarget(config: Configuration): Int = {
     val candidate = CandidateConfig(config)
-    val rollups = candidate.sources.getOrElse(CandidateSourceConfig.Rollups, CandidateSourceConfig.Default)
+    val rollups = candidate.limitsFor(CandidateSourceConfig.Rollups)
     val mining = scala.util.Try(new TasksConfig(config).stratumServerTaskConfig.enabled).getOrElse(false)
     val transforming = !new StateConfig(config).disableTransforms.getOrElse(false)
     if (mining && transforming && candidate.blockTransactions && rollups.enabled && rollups.maxTxs > 0)

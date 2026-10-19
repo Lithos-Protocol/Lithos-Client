@@ -43,13 +43,9 @@ object TransactionEngine {
   private[engine] case object Reconcile
 
   /**
-   * Queue depth per lane.
-   *
-   * Optional depth has to exceed the number of rollups this client tracks: a processing tick offers
-   * one holding transform per rollup at once, each a distinct key, and admission refuses on queue
-   * size rather than on how fast the lane drains. Sized too small, the excess is rejected the moment
-   * it arrives however quickly work completes. Entries are a key and a small intent, so depth is
-   * cheap; per-key coalescing is what actually bounds the set.
+   * Queue depth per lane. Admission refuses on a lane's own count rather than on how fast it drains,
+   * so a burst past the depth is rejected however quickly work completes. Entries are a key and a
+   * small intent, so depth is cheap; per-key coalescing is what actually bounds the set.
    */
   private final val MaxCriticalQueued = 256
   private final val MaxOptionalQueued = 256
@@ -102,7 +98,7 @@ class TransactionEngine @Inject()(node: NodeContext,
 
   private val logger: org.slf4j.Logger = org.slf4j.LoggerFactory.getLogger("TransactionEngine")
 
-  private val rollupWorker = context.system.dispatchers.lookup("lithos-contexts.critical-tx-dispatcher")
+  private val rollupWorker = context.system.dispatchers.lookup(configs.Contexts.key(configs.Contexts.CriticalTx))
 
   /**
    * By selection rather than injection: `RollupProcessor` already injects this engine by name, so
@@ -127,14 +123,14 @@ class TransactionEngine @Inject()(node: NodeContext,
   private def newCommitmentExecution(eligible: () => Boolean): CommitmentExecution =
     new CommitmentExecution(node, sync, dataBoxes, nodeApi,
       EngineFunding(self, EngineFunding.askTimeout(config), ec), eligible)
-  private val worker = context.system.dispatchers.lookup("lithos-contexts.engine-io-dispatcher")
+  private val worker = context.system.dispatchers.lookup(configs.Contexts.key(configs.Contexts.EngineIo))
 
   /** Cleared on stop so an outstanding worker abandons its build instead of signing into a dead actor. */
   private val alive = new AtomicBoolean(true)
 
 
   /** Engine-wide: resolves outstanding sends for every operation */
-  protected lazy val reconciler = new EngineReconciler(node, self, mempool)
+  protected lazy val reconciler = new EngineReconciler(node, self, mempool, Some(nodeApi))
 
   // Sized from the lane depths so neither lane can be refused by a smaller shared cap.
   private val schedule = new ExecutionSchedule[EngineIntent](MaxCriticalQueued + MaxOptionalQueued)
