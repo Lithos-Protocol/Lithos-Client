@@ -57,14 +57,14 @@ object DFHelpers {
   // ---------------------------------------------------------------------------------------------
 
   /**
-   * PLACEHOLDER, not a minted token: no accumulator exists on either network yet. Genesis prints the real
-   * ids to paste over these. A token id is the hash of the box that minted it, so all zeroes is never one.
+   * Stands in for a network with no accumulator, which leaves forwards idle there. A token id is the hash of
+   * the box that minted it, so all zeroes is never one.
    */
   private final val ACC_NFT_PLACEHOLDER = ErgoId.create("00" * 32)
 
-  /** DF_Position CONST_ACC_NFT on testnet. PLACEHOLDER until genesis mints it. */
+  /** DF_Position CONST_ACC_NFT on testnet, minted by the accumulator's genesis. */
   private final val ACC_NFT_TESTNET = ErgoId.create("1b45c0957d32a54fe946ed4408245f45cd17c0a530dc986f1689eceb5b7e6d50")
-  /** DF_Position CONST_ACC_NFT on mainnet. PLACEHOLDER until genesis mints it. */
+  /** DF_Position CONST_ACC_NFT on mainnet, minted by the accumulator's genesis. */
   private final val ACC_NFT_MAINNET = ErgoId.create("6516505cb7361ce03673b1d58e73ede03a813edb15aa1b4bc5b0afd7c70bb03a")
 
   /** DF_Position CONST_ACC_NFT, the accumulator's singleton NFT, or None while the slot holds the placeholder. */

@@ -425,7 +425,7 @@ object StorageRent {
     } else {
       val merge = merged(ctx, wallet, tx, parts, blockHeight, useTrueProp)
       val entry = CapitalEntry(CapitalOrigin.StorageRent,
-        InputUTXO(merge.getOutputsToSpend.get(0)), parentTxId = merge.getId)
+        InputUTXO(merge.getOutputsToSpend.get(0)), parentTxId = CandidateTx.txId(merge))
       CandidateBundle(Vector(member(sweep), member(merge)), capital = Seq(entry))
     }
   }

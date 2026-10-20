@@ -50,6 +50,8 @@ class ForwardsAPIExecutionSpec extends TestKit(ActorSystem("forwards-api-executi
   private val Epoch = DFMath.epochOf(Tip)
   private val anchor = "cc" * 32
   private val BALANCE = 100L * LIT
+  /** The shipped notional limit on windows under 8 epochs, in LIT base units. */
+  private val ShortCap = ForwardsOffersConfig.Default.shortWindowMaxNotionalLit * LIT
   private def lit(amount: Long): Token = Token(litId, amount)
 
   private def snapshot(spending: (String, String)*): CompleteMempool.Snapshot =
@@ -178,7 +180,7 @@ class ForwardsAPIExecutionSpec extends TestKit(ActorSystem("forwards-api-executi
     info.boxId shouldBe None
     info.recent shouldBe empty
     info.nextDifficulty shouldBe None
-    info.limits shouldBe DFOfferLimits(Epoch + 2, Epoch + 120, 120, (Epoch + 1) * 128, 8, (1000L * LIT).toString)
+    info.limits shouldBe DFOfferLimits(Epoch + 2, Epoch + 120, 120, (Epoch + 1) * 128, 8, (10000L * LIT).toString)
   }
 
   it should "list the 128 epochs the accumulator holds, oldest first, with its balance" in {
@@ -238,7 +240,7 @@ class ForwardsAPIExecutionSpec extends TestKit(ActorSystem("forwards-api-executi
   }
 
   it should "mark an offer over the short-window size limit as one this client will not fill" in {
-    val big = terms(Epoch + 2, 4, notional = 2000L * LIT)
+    val big = terms(Epoch + 2, 4, notional = 2 * ShortCap)
     val view = fixture(offers = ctx => Seq(offerBox(ctx, big))).api.listOffers(None, None).offers.head
     view.fillable shouldBe false
     view.refusal.get should include("shortWindowMaxNotionalLit")
@@ -283,9 +285,9 @@ class ForwardsAPIExecutionSpec extends TestKit(ActorSystem("forwards-api-executi
     an[LithosBadRequest] should be thrownBy f.api.checkOffer(request(expiry = Some(Tip + 1)))
     an[LithosUnprocessable] should be thrownBy f.api.checkOffer(request(start = Epoch + 1))
     an[LithosUnprocessable] should be thrownBy f.api.checkOffer(request(start = Epoch + 121))
-    an[LithosUnprocessable] should be thrownBy f.api.checkOffer(request(length = 7, notional = 1001L * LIT))
-    noException should be thrownBy f.api.checkOffer(request(length = 7, notional = 1000L * LIT))
-    noException should be thrownBy f.api.checkOffer(request(length = 8, notional = 1001L * LIT))
+    an[LithosUnprocessable] should be thrownBy f.api.checkOffer(request(length = 7, notional = ShortCap + LIT))
+    noException should be thrownBy f.api.checkOffer(request(length = 7, notional = ShortCap))
+    noException should be thrownBy f.api.checkOffer(request(length = 8, notional = ShortCap + LIT))
   }
 
   it should "refuse every mutation on a network with no accumulator" in {
@@ -329,7 +331,7 @@ class ForwardsAPIExecutionSpec extends TestKit(ActorSystem("forwards-api-executi
     val cases = Seq(
       "own" -> ((ctx: BlockchainContext) => ownOfferBox(ctx, mineFixture.node, open, 0)),
       "unfunded" -> ((ctx: BlockchainContext) => offerBox(ctx, open, litHeld = DFMath.sideLit(NOTIONAL) - 1)),
-      "oversized" -> ((ctx: BlockchainContext) => offerBox(ctx, terms(Epoch + 2, 4, notional = 2000L * LIT))),
+      "oversized" -> ((ctx: BlockchainContext) => offerBox(ctx, terms(Epoch + 2, 4, notional = 2 * ShortCap))),
       "expired" -> ((ctx: BlockchainContext) => offerBox(ctx, open, expiry = Tip)))
     cases.foreach { case (name, box) =>
       val f = fixture(offers = ctx => Seq(box(ctx)))

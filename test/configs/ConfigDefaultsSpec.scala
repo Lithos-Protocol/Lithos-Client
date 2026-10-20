@@ -133,7 +133,7 @@ class ConfigDefaultsSpec extends AnyFlatSpec with Matchers {
 
   it should "limit only windows shorter than shortWindowEpochs, in LIT base units" in {
     val limits = ForwardsOffersConfig.Default
-    limits.maxNotional(7) shouldBe Some(1000L * 1000000000L)
+    limits.maxNotional(7) shouldBe Some(10000L * 1000000000L)
     limits.maxNotional(8) shouldBe None
     ForwardsOffersConfig(1, 0L).maxNotional(120) shouldBe None
     ForwardsOffersConfig(0, 5L).invalid should not be empty

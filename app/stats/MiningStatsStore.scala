@@ -43,10 +43,12 @@ object MiningStatsStore {
       Some(KeyValueStore.openOrThrow(settings.backend, root.resolve(s"mining-v$SchemaVersion"))) else None
     val store = try new MiningStatsStore(database, identity)
     catch { case NonFatal(error) => database.foreach(_.close()); throw error }
-    if (settings.enabled) olderSchemas(root).lastOption.foreach { case (version, path) =>
-      carryOver(store, settings.backend, version, path)
+    val notCarried = if (!settings.enabled) None else olderSchemas(root).lastOption.collect {
+      case (version, path) if !carryOver(store, settings.backend, version, path) => version
     }
-    if (settings.pruneOldSchemas) olderSchemas(root).foreach { case (version, path) => remove(version, path) }
+    // A store whose carry-over failed is kept for the next start, which tries again while this one is still fresh
+    if (settings.pruneOldSchemas) olderSchemas(root).filterNot(older => notCarried.contains(older._1))
+      .foreach { case (version, path) => remove(version, path) }
     store
   }
 
@@ -65,15 +67,22 @@ object MiningStatsStore {
       finally listing.close()
     }
 
-  /** Once, into a store this version has not written yet. A failure leaves the new store to rebuild alone. */
-  private def carryOver(store: MiningStatsStore, backend: String, version: Int, path: Path): Unit =
-    if (store.fresh) Try {
+  /**
+   * Once, into a store this version has not written yet. False when it failed, which leaves the new store to
+   * rebuild alone; true when it finished or was not wanted.
+   */
+  private def carryOver(store: MiningStatsStore, backend: String, version: Int, path: Path): Boolean =
+    !store.fresh || (Try {
       val older = KeyValueStore.openOrThrow(backend, path)
       try store.carryOver(older, version) finally older.close()
     } match {
-      case Success(copied) => logger.info(s"Carried $copied local and difficulty records over from mining statistics v$version")
-      case Failure(error) => logger.warn(s"Did not carry mining statistics over from v$version: ${error.getMessage}")
-    }
+      case Success(copied) =>
+        logger.info(s"Carried $copied local and difficulty records over from mining statistics v$version")
+        true
+      case Failure(error) =>
+        logger.warn(s"Did not carry mining statistics over from v$version, keeping it: ${error.getMessage}")
+        false
+    })
 
   /** Deletes an older schema's directory. Statistics never stop the client, so a failure is only logged. */
   private[stats] def remove(version: Int, path: Path): Unit = Try {

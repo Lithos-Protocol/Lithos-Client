@@ -9,7 +9,6 @@ import org.slf4j.{Logger, LoggerFactory}
 import sigma.util.NBitsUtils
 import transactions.batching.Batcher
 import transactions.candidate.BlockTxMessages.CandidateTx
-import transactions.engine.execution.RollupExecution
 import work.lithos.mutations.{Contract, InputUTXO, Token, TxBuilder, UTXO}
 
 import scala.concurrent.duration.Deadline
@@ -106,7 +105,7 @@ object ForwardsTransactions {
 
   /**
    * Records `recording` on its own. `funding` pays `fee` and the box the reward and change go to, since the
-   * accumulator's own value is fixed. The reward is 1 LIT, or the whole balance when less is left.
+   * accumulator's own value is fixed. The reward is 5 LIT, or the whole balance when less is left.
    */
   def record(ctx: BlockchainContext, wallet: NodeWallet, contracts: DFContracts, acc: DFAccState,
              recording: DFRecording, funding: Seq[InputUTXO], fee: Long): DFStep = {

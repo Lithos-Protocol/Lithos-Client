@@ -40,7 +40,7 @@ case class DFOfferLimits(minWindowStart: Int, maxWindowStart: Int, maxWindowLeng
  * @param nextDifficultyUnavailable why `nextDifficulty` is absent
  * @param boxId                     the accumulator box, the newest one including unconfirmed spends
  * @param lastEpoch                 the newest epoch it has recorded
- * @param balance                   LIT left to pay 1 LIT per recorded epoch
+ * @param balance                   LIT left to pay 5 LIT per recorded epoch
  * @param recent                    the 128 epochs it holds, oldest first
  * @param accumulatorUnavailable    why the accumulator could not be read, when deployed
  */
@@ -126,10 +126,10 @@ case class DFOfferRequest(makerSide: String,
 /**
  * What creating an offer locks, and what it is exposed to.
  *
- * @param lit           LIT locked in the offer: the margin plus 1.5 LIT of rewards
+ * @param lit           LIT locked in the offer: the margin plus 7.5 LIT of rewards
  * @param nanoErgs      nanoERG locked in the offer
  * @param networkFee    nanoERG paid to create it
- * @param maxLoss       the most this wallet can lose if the offer is filled: its margin plus 1.5 LIT
+ * @param maxLoss       the most this wallet can lose if the offer is filled: its margin plus 7.5 LIT
  * @param expiresInBlocks blocks after the next one until the offer expires
  * @param warnings      conditions worth reading before sending
  */
@@ -158,7 +158,7 @@ case class DFOfferResult(txId: String, outcome: String, offerBoxId: String)
  * What filling an offer costs this wallet, and the side it takes.
  *
  * @param takerSide the side this wallet takes, opposite the maker's
- * @param maxLoss   the most this wallet can lose: its margin plus 1.5 LIT
+ * @param maxLoss   the most this wallet can lose: its margin plus 7.5 LIT
  */
 case class DFFillQuote(offer: DFOfferView,
                        takerSide: String,
@@ -229,7 +229,7 @@ case class DFPositionList(height: Int, currentEpoch: Int, positions: Seq[DFPosit
  * What settling a position now pays.
  *
  * @param refund    whether the window has left the accumulator, so each side gets its margin back
- * @param records   whether the settlement also records the current epoch, which adds 1 LIT to the reward
+ * @param records   whether the settlement also records the current epoch, which adds 5 LIT to the reward
  * @param rewardLit LIT this wallet receives for building the settlement
  */
 case class DFSettleQuote(boxId: String, refund: Boolean, records: Boolean, owedLong: String, owedShort: String,
@@ -246,7 +246,7 @@ case class DFSettleResult(txId: String, outcome: String, refund: Boolean, owedLo
  * @param windowMean    the window's mean difficulty as the settlement read it; absent for a refund
  * @param payout        LIT the long side received on top of its margin, negative when the short side was paid
  * @param received      LIT this wallet's side or sides received, margins included
- * @param net           `received` less what this wallet put in: each side's margin and its 1.5 LIT of rewards
+ * @param net           `received` less what this wallet put in: each side's margin and its 7.5 LIT of rewards
  */
 case class DFSettledView(boxId: String,
                          side: String,
@@ -304,7 +304,7 @@ case class DFBookSide(offers: Int, notional: String)
  * @param longs         open offers whose maker is long, so a taker goes short
  * @param shorts        open offers whose maker is short
  * @param openInterest  notional of every unsettled position, in LIT base units
- * @param epochsFunded  epochs the accumulator's balance pays a recording for, at 1 LIT each
+ * @param epochsFunded  epochs the accumulator's balance pays a recording for, at 5 LIT each
  * @param truncated     whether a scan stopped at its cap, so the counts are lower bounds
  */
 case class DFMarket(height: Int,

@@ -31,7 +31,7 @@ object ForwardsOffersConfig {
   final val LitUnit: Long = 1000000000L
 
   /** Mirrors `forwards.offers` in application.conf; keep the two in step. */
-  val Default: ForwardsOffersConfig = ForwardsOffersConfig(shortWindowEpochs = 8, shortWindowMaxNotionalLit = 1000L)
+  val Default: ForwardsOffersConfig = ForwardsOffersConfig(shortWindowEpochs = 8, shortWindowMaxNotionalLit = 10000L)
 
   def apply(config: Configuration): ForwardsOffersConfig =
     ForwardsOffersConfig(

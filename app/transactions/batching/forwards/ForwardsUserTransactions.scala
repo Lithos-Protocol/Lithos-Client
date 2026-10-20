@@ -28,7 +28,7 @@ final case class DFFillTiming(tip: Int, nodeEpoch: Int, signerEpoch: Int)
 /**
  * What a settlement pays.
  *
- * @param records   whether it records the current epoch too, which pays the builder 1 LIT more
+ * @param records   whether it records the current epoch too, which pays the builder 5 LIT more
  * @param refund    whether the window has left the accumulator, so each side gets its margin back
  * @param owedLong  LIT to the long side, margin included
  * @param owedShort LIT to the short side

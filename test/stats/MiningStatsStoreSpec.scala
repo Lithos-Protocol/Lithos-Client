@@ -337,6 +337,28 @@ class MiningStatsStoreSpec extends AnyFlatSpec with Matchers {
     }
   }
 
+  it should "keep an older store it could not carry over, until the new store has begun its own history" in {
+    val root = Files.createTempDirectory("mining-stats-kept-")
+    val (node, _, _) = support.FakeNodeContext()
+    val protocol = support.ReducerFixtures.protocol()
+    val older = root.resolve(s"mining-v${MiningStatsStore.SchemaVersion - 1}")
+    // Written for another miner, so the carry-over refuses it
+    val previous = new MiningStatsStore(Some(LevelDbKeyValueStore.openOrThrow(older)),
+      MiningStatsStore.identityOf(node, protocol, MiningStatsStore.SchemaVersion - 1) ++ Json.obj("miner" -> "other"))
+    previous.saveLocal(Seq(LocalMiningObservation("shares", "s1", 1L, 0L, MiningHistory.HourMs + 1, Map("accepted" -> "3"))))
+    previous.close()
+
+    val settings = configs.StatsStorageConfig(path = root.toString)
+    val first = MiningStatsStore.open(settings, node, protocol)
+    try {
+      first.fresh shouldBe true
+      Files.exists(older) shouldBe true
+      first.initialize(cursor(1))
+    } finally first.close()
+    MiningStatsStore.open(settings, node, protocol).close()
+    Files.exists(older) shouldBe false
+  }
+
   it should "find only older schemas' directories, and remove one whole" in {
     val root = Files.createTempDirectory("mining-stats-root-")
     val current = MiningStatsStore.SchemaVersion
