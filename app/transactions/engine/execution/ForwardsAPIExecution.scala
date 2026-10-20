@@ -437,8 +437,8 @@ class ForwardsAPIExecution(nodeContext: NodeContext,
     val warnings = Seq(
       if (lastFill < expiry) Some(s"Fills stop at height $lastFill, before the expiry: after it, the window would " +
         s"start less than ${DFHelpers.MIN_LEAD} epochs after the fill.") else None,
-      if (expiry > default) Some(s"The offer stays open past the end of epoch $posting. The next epoch's " +
-        "difficulty is known from then on, and a strike set before it goes stale.") else None,
+      if (expiry > default) Some(s"The offer stays open past the end of epoch $posting, so a taker may fill it " +
+        "using difficulty data from later epochs than your strike was set with.") else None,
       if (request.expiry.isEmpty && expiry - (chain.tip + 1) < ShortExpiryBlocks)
         Some(s"Posted late in epoch $posting, the offer expires in ${expiry - (chain.tip + 1)} blocks. Set " +
           "'expiry' to keep it open longer.") else None
