@@ -169,9 +169,9 @@ object StorageRent {
   /**
    * Sort the outputs of a scanned block into what may be collected and what must wait.
    *
-   * `threshold` is the newest creation height a box may declare and still be due, so a box at or
-   * below it is old enough. Boxes carrying re-emission tokens are kept apart rather than dropped:
-   * they are eligible and will stay eligible, and only the node's own gap stops them today.
+   * `threshold` is the newest creation height a box may declare and still be kept. Boxes carrying
+   * re-emission tokens are kept apart rather than dropped: they are eligible and will stay eligible,
+   * and only the node's own gap stops them today.
    *
    * Says nothing about whether a box is still unspent — that is one batch read, made against the
    * ids this returns.

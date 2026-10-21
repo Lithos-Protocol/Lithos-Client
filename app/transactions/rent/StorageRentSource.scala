@@ -17,9 +17,9 @@ import scala.util.{Failure, Success, Try}
  * Finds boxes whose storage rent is due and offers them to this miner's own block.
  *
  * Two halves that never touch. A timer walks the chain four years behind the tip, remembering the
- * id of every box old enough to collect; the candidate path takes those ids, reads the boxes back
- * and builds one sweep. Only ids are kept, because the read that fetches a box back is also the
- * only check that matters — a box that does not come back has already been spent.
+ * id and creation height of every unspent box; the candidate path takes the ids that are due at its
+ * height, reads the boxes back and builds one sweep. The read that fetches a box back is also the
+ * only liveness check that matters — a box that does not come back has already been spent.
  *
  * Nothing here runs on the mining path. The walk is a background timer, and the sweep is built when
  * the height is first known rather than when the package is asked for.
@@ -44,8 +44,11 @@ class StorageRentSource(nodeContext: NodeContext,
   /** Next inclusion height the walk will read. */
   private var cursor: Int = rentConfig.startHeight
 
-  /** Boxes old enough to collect, as ids. The box itself is read back before anything is built. */
-  private var eligible: Set[String] = Set.empty
+  /**
+   * Unspent boxes the walk has met, by id, with the creation height their age is measured from.
+   * Some are not due yet; a build offers only those its own height makes old enough.
+   */
+  private var held: Map[String, Int] = Map.empty
 
   /**
    * Boxes that are due but carry re-emission tokens, which no rent transaction may spend today.
@@ -58,7 +61,8 @@ class StorageRentSource(nodeContext: NodeContext,
 
   override def preStart(): Unit = {
     logger.info(s"StorageRentSource started: startHeight=${rentConfig.startHeight}, " +
-      s"blocksPerScan=${rentConfig.blocksPerScan}, period=${StorageRent.StoragePeriod}")
+      s"blocksPerScan=${rentConfig.blocksPerScan}, lookaheadBlocks=${rentConfig.lookaheadBlocks}, " +
+      s"period=${StorageRent.StoragePeriod}")
     ticker = Some(context.system.scheduler.scheduleWithFixedDelay(
       rentConfig.scanIntervalMs.milliseconds, rentConfig.scanIntervalMs.milliseconds,
       self, ScanTick)(context.dispatcher))
@@ -82,11 +86,11 @@ class StorageRentSource(nodeContext: NodeContext,
       // Only advance past what was actually read, so a short pass resumes where it stopped rather
       // than skipping the blocks it never reached.
       cursor = math.max(cursor, pass.nextHeight)
-      eligible ++= pass.found
+      held ++= pass.found
       deferred ++= pass.blocked
       if (pass.found.nonEmpty || pass.blocked.nonEmpty)
         logger.info(s"Rent scan $from..${pass.nextHeight - 1} found ${pass.found.size} " +
-          s"collectable and ${pass.blocked.size} re-emission boxes; holding ${eligible.size}")
+          s"unspent and ${pass.blocked.size} re-emission boxes; holding ${held.size}")
 
     case Scanned(from, Failure(ex)) =>
       scanning = false
@@ -96,14 +100,14 @@ class StorageRentSource(nodeContext: NodeContext,
     // Found spent while a sweep was being built. Forgotten rather than retried: nothing brings a
     // spent box back, and the walk will never offer it again.
     case Spent(ids) =>
-      eligible --= ids
+      held --= ids
       deferred --= ids
 
     // Refused by the node's own rent rule while a sweep was being built. Dropped until restart, when
     // the walk starts over and finds them again; offered every block, each would cost its sweep.
     case Refused(ids) =>
-      eligible --= ids
-      logger.warn(s"Dropped ${ids.size} boxes the node's rent rule refuses; holding ${eligible.size}")
+      held --= ids
+      logger.warn(s"Dropped ${ids.size} boxes the node's rent rule refuses; holding ${held.size}")
 
     // ── the candidate path ──────────────────────────────────────────────────
 
@@ -121,14 +125,13 @@ class StorageRentSource(nodeContext: NodeContext,
     case CandidateTxsDropped(blockHeight, _) => preparation.drop(blockHeight)
   }
 
-  private def startBuild(blockHeight: Int, replyTo: Option[ActorRef]): Unit =
-    if (!limits.enabled || eligible.isEmpty) preparation.answerEmpty(blockHeight, replyTo)
-    else {
-      // Read here rather than inside the build: everything the build touches has to be a value it
-      // was handed, because it runs off the mailbox.
-      val ids = eligible.toSeq
-      preparation.start(blockHeight, replyTo)(sweep(ids, blockHeight))
-    }
+  private def startBuild(blockHeight: Int, replyTo: Option[ActorRef]): Unit = {
+    // Read here rather than inside the build: everything the build touches has to be a value it
+    // was handed, because it runs off the mailbox.
+    val ids = dueAt(held, blockHeight)
+    if (!limits.enabled || ids.isEmpty) preparation.answerEmpty(blockHeight, replyTo)
+    else preparation.start(blockHeight, replyTo)(sweep(ids, blockHeight))
+  }
 
   /**
    * Read every remembered box back, keep what still exists, and build one sweep out of what fits.
@@ -162,31 +165,31 @@ class StorageRentSource(nodeContext: NodeContext,
     }
 
   /**
-   * One pass of the walk, bounded by `blocksPerScan` and by how far behind the tip a box has to be.
+   * One pass of the walk, bounded by `blocksPerScan` and by `walkCeiling`.
    *
    * Two node reads a block: the block itself for what it created, then one batch read to keep only
    * the boxes still unspent. Storing the spent ones instead would mean remembering every output the
-   * chain ever made below the threshold.
+   * chain ever made below the ceiling.
    */
   private def scan(from: Int): Pass = {
     val protocol = nodeContext.getClient.execute(ProtocolBoxes.apply)
     val tip = nodeApi.info().toOption.flatMap(_.fullHeight).getOrElse(
       throw new IllegalStateException("the node did not report a height"))
-    val threshold = tip - StorageRent.StoragePeriod
-    if (from > threshold) return Pass(from, Set.empty, Set.empty)
+    val ceiling = walkCeiling(tip, rentConfig.lookaheadBlocks)
+    if (from > ceiling) return Pass(from, Map.empty, Set.empty)
 
-    val until = math.min(from + rentConfig.blocksPerScan, threshold + 1)
-    var found = Set.empty[String]
+    val until = math.min(from + rentConfig.blocksPerScan, ceiling + 1)
+    var found = Map.empty[String, Int]
     var blocked = Set.empty[String]
     var reached = from
     (from until until).foreach { height =>
       val outputs = nodeApi.blockAt(height).getOrElse(Seq.empty)
         .flatMap(_.blockTransactions.transactions.flatMap(_.outputs))
       val (open, reEmission) =
-        StorageRent.sortByAge(outputs, threshold, nodeContext.getNetwork, protocol)
+        StorageRent.sortByAge(outputs, ceiling, nodeContext.getNetwork, protocol)
       val unspent = if (open.isEmpty) Set.empty[String]
         else nodeApi.boxesWithPoolByIds(open.toSeq).getOrElse(Seq.empty).map(_.boxId).toSet
-      found ++= unspent
+      found ++= outputs.collect { case box if unspent.contains(box.boxId) => box.boxId -> box.creationHeight }
       blocked ++= reEmission
       reached = height + 1
     }
@@ -198,8 +201,22 @@ object StorageRentSource {
   /** Scheduler tick: read the next stretch of the chain. */
   private[rent] case object ScanTick
 
-  /** What one pass read, and the height the next one starts at. */
-  private[rent] final case class Pass(nextHeight: Int, found: Set[String], blocked: Set[String])
+  /** What one pass read, and the height the next one starts at. `found` maps id to creation height. */
+  private[rent] final case class Pass(nextHeight: Int, found: Map[String, Int], blocked: Set[String])
+
+  /**
+   * Last inclusion height a pass may read when the node's tip is `tip`.
+   *
+   * Every block at or under `tip + 1 - StoragePeriod` holds only boxes due in the next block. Wallets
+   * date a box a few blocks before it is included, so the walk reads `lookahead` blocks further and
+   * holds what it finds until it falls due.
+   */
+  def walkCeiling(tip: Int, lookahead: Int): Int = tip + 1 - StorageRent.StoragePeriod + lookahead
+
+  /** Held ids whose creation height makes them collectable in a block at `blockHeight`. */
+  def dueAt(held: Map[String, Int], blockHeight: Int): Seq[String] =
+    held.collect { case (id, created) if blockHeight.toLong - created >= StorageRent.StoragePeriod => id }
+      .toSeq
 
   private[rent] final case class Scanned(from: Int, result: Try[Pass])
 

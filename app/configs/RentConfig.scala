@@ -5,9 +5,9 @@ import play.api.{ConfigLoader, Configuration}
 /**
  * How this client looks for boxes whose storage rent is due.
  *
- * Discovery walks the chain by inclusion height rather than reading the whole UTXO set: a box
- * created at height `h` becomes collectable at `h + StoragePeriod`, so the walk trails four years
- * behind the tip and every box it meets there is old enough by construction.
+ * Discovery walks the chain by inclusion height rather than reading the whole UTXO set. A box
+ * created at height `h` becomes collectable at `h + StoragePeriod`, and is included at or after `h`,
+ * so the walk trails four years behind the tip and reads a little past what is already due.
  *
  * @param startHeight    inclusion height the walk begins at. Boxes created below it are never seen,
  *                       so it is set to wherever collection has already caught up rather than to
@@ -17,8 +17,11 @@ import play.api.{ConfigLoader, Configuration}
  *                       the path a block is built on.
  * @param blocksPerScan  blocks one pass reads. Two node calls each, so this is what bounds the load
  *                       a pass puts on the node while the walk is catching up.
+ * @param lookaheadBlocks blocks the walk reads past those whose boxes are already due. A box is
+ *                       usually included a few blocks after its declared creation height, and other
+ *                       collectors take it the block it falls due; boxes met early are held until then.
  */
-case class RentConfig(startHeight: Int, scanIntervalMs: Int, blocksPerScan: Int)
+case class RentConfig(startHeight: Int, scanIntervalMs: Int, blocksPerScan: Int, lookaheadBlocks: Int)
 
 object RentConfig {
 
@@ -26,7 +29,8 @@ object RentConfig {
   val Default: RentConfig = RentConfig(
     startHeight = 837000,
     scanIntervalMs = 30000,
-    blocksPerScan = 200)
+    blocksPerScan = 200,
+    lookaheadBlocks = 100)
 
   def apply(config: Configuration): RentConfig = {
     def int(key: String, fallback: Int): Int =
@@ -36,6 +40,7 @@ object RentConfig {
     RentConfig(
       startHeight = int("startHeight", Default.startHeight),
       scanIntervalMs = int("scanIntervalMs", Default.scanIntervalMs),
-      blocksPerScan = int("blocksPerScan", Default.blocksPerScan))
+      blocksPerScan = int("blocksPerScan", Default.blocksPerScan),
+      lookaheadBlocks = int("lookaheadBlocks", Default.lookaheadBlocks))
   }
 }

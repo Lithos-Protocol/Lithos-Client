@@ -132,6 +132,34 @@ class StorageRentSourceSpec extends AnyFlatSpec with Matchers with MockitoSugar 
     }
   }
 
+  // ─── when a box is offered ────────────────────────────────────────────────
+
+  private val period = StorageRent.StoragePeriod
+
+  /** The block being built is `tip + 1`, so its due boxes sit one block above `tip - period`. */
+  "The walk" should "reach the boxes due in the next block, with no lookahead" in {
+    val created = 900000
+    StorageRentSource.walkCeiling(tip = created + period - 1, lookahead = 0) shouldBe created
+  }
+
+  /**
+   * Wallets date a box a few blocks before it lands, and other collectors take it the block it is
+   * due. A walk reading only what is already due meets it after they have.
+   */
+  it should "meet a box included after its creation height before the box falls due" in {
+    val created = 900000
+    val included = created + 3
+    StorageRentSource.walkCeiling(tip = created + period - 1, RentConfig.Default.lookaheadBlocks) should
+      be >= included
+  }
+
+  "A held box" should "be offered from the block its creation height makes it due, not before" in {
+    val held = Map(id("a") -> 900000, id("b") -> 900001)
+    StorageRentSource.dueAt(held, 900000 + period - 1) shouldBe empty
+    StorageRentSource.dueAt(held, 900000 + period) shouldBe Seq(id("a"))
+    StorageRentSource.dueAt(held, 900001 + period).toSet shouldBe Set(id("a"), id("b"))
+  }
+
   // ─── what a sweep takes ───────────────────────────────────────────────────
 
   private def candidates(count: Int, value: Long): Seq[RentCandidate] =

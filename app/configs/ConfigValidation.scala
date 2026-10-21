@@ -209,6 +209,9 @@ object Configs {
       "unconfirmed transactions one rollup transaction may carry into the block")
     v.range("stratum.candidate.sources.rent.blocksPerScan",
       v.int("stratum.candidate.sources.rent.blocksPerScan"), 1, 10000, "blocks read per scan pass")
+    v.range("stratum.candidate.sources.rent.lookaheadBlocks",
+      v.int("stratum.candidate.sources.rent.lookaheadBlocks"), 0, 10000,
+      "blocks the storage-rent walk reads past what is already due")
     v.bool("stratum.candidate.useTruePropCollection")
     v.bool("stratum.candidate.logTimings")
     v.bool("stratum.candidate.waitForBlockPackage")
