@@ -89,7 +89,24 @@ class EngineBroadcast(owner: ActorRef, node: NodeApi, requestTimeout: FiniteDura
    */
   def sendOwned(tx: SignedTransaction, allocations: Seq[Funding], operation: String,
                 alive: () => Boolean, replaces: Option[EngineHold] = None,
-                observed: Option[CompleteMempool.Observation] = None): Result = {
+                observed: Option[CompleteMempool.Observation] = None): Result =
+    submit(tx, allocations, operation, alive, _ => replaces, cancelling = false, observed)
+
+  /**
+   * Send `tx` to cancel `stale`, every hold of one transaction that is out of the mempool. `tx`
+   * spends only boxes those holds own, so at most one of the two can be mined; until one is, the
+   * cancellation owns every box the stale holds did, including inputs that are not on chain.
+   */
+  def cancel(tx: SignedTransaction, stale: Seq[EngineHold], alive: () => Boolean): Result = {
+    require(stale.nonEmpty && stale.map(_.txId).distinct.size == 1, "a cancellation replaces one transaction")
+    submit(tx, stale.map(hold => Funding(hold.reservationId, hold.walletInputIds)), "cancel:" + stale.head.txId,
+      alive, funding => stale.find(_.reservationId == funding.reservationId), cancelling = true, None)
+  }
+
+  /** @param previous the attempt each allocation's boxes are bound to now, when replacing one */
+  private def submit(tx: SignedTransaction, allocations: Seq[Funding], operation: String,
+                     alive: () => Boolean, previous: Funding => Option[EngineHold], cancelling: Boolean,
+                     observed: Option[CompleteMempool.Observation]): Result = {
     val txId = CandidateTx.txId(tx)
     // Distinguishes "the node never heard of this" from "the answer was lost", which decides
     // whether the inputs may be released below.
@@ -102,19 +119,25 @@ class EngineBroadcast(owner: ActorRef, node: NodeApi, requestTimeout: FiniteDura
       require(decoded.id == txId && signedInputIds.size == decoded.inputs.size &&
         signedInputIds.size <= MaxSignedInputs, "signed transaction identity or input budget is invalid")
       // Every funded input must appear in the signed body, and no two allocations may claim the
-      // same box: otherwise one reservation's release would free another's input.
+      // same box: otherwise one reservation's release would free another's input. A cancellation
+      // is the reverse: it may spend nothing those allocations do not own.
       val fundedInputIds = allocations.flatMap(_.walletInputIds)
       require(fundedInputIds.distinct.size == fundedInputIds.size &&
-        fundedInputIds.toSet.subsetOf(signedInputIds),
+        (if (cancelling) signedInputIds.nonEmpty && signedInputIds.subsetOf(fundedInputIds.toSet)
+        else fundedInputIds.toSet.subsetOf(signedInputIds)),
         "signed inputs differ from engine funding allocations")
+      val outputIds = decoded.outputs.map(_.boxId).toSet
       val unspent = observed.getOrElse(CompleteMempool.observe(owner, node, timeout.duration, "transaction send"))
       require(unspent.fresh && !signedInputIds.exists(unspent.snapshot.get.spent.contains),
         "transaction inputs require a fresh complete unspent observation")
       allocations.foreach { allocation =>
         require(alive(), "engine attempt was superseded")
+        val replaced = previous(allocation)
         val hold = EngineHold(operation, allocation.reservationId, txId, signedInputIds,
-          allocation.walletInputIds)
-        require(Await.result((owner ? PinEngineInputs(hold, replaces.map(_.txId)))
+          allocation.walletInputIds, outputIds = outputIds,
+          supersedes = if (cancelling) replaced.map(old => old.supersedes + (old.txId -> old.outputIds))
+            .getOrElse(Map.empty) else Map.empty)
+        require(Await.result((owner ? PinEngineInputs(hold, replaced.map(_.txId), cancelling))
           .mapTo[Boolean], timeout.duration), "engine funding ownership changed before send")
       }
       // Re-read the anchor rather than trusting the earlier one: pinning took several round trips,
@@ -133,7 +156,7 @@ class EngineBroadcast(owner: ActorRef, node: NodeApi, requestTimeout: FiniteDura
         // A refused transaction spent nothing, so its inputs go back.
         case Failure(ex: _root_.node.NodeError.Rejected) =>
           LoggerFactory.getLogger("TransactionEngine").warn(s"Node refused $txId ($operation): ${ex.getMessage}")
-          allocations.foreach(a => owner ! EngineSendRefused(a.reservationId, txId, replaces))
+          allocations.foreach(a => owner ! EngineSendRefused(a.reservationId, txId, previous(a)))
           Result(txId, Rejected, Option(ex.getMessage))
         // A success carrying another transaction id is as ambiguous as no answer at all.
         case Success(_) => Result(txId, Uncertain, Some("node returned another transaction id"))
@@ -147,7 +170,7 @@ class EngineBroadcast(owner: ActorRef, node: NodeApi, requestTimeout: FiniteDura
       // Safe only because nothing reached the node on this path, so no input can be in flight.
       // A rebuild restores the attempt it was replacing instead of dropping its ownership.
       if (!crossedSendBoundary) allocations.foreach { allocation =>
-        owner ! CancelEngineInputs(allocation.reservationId, txId, replaces)
+        owner ! CancelEngineInputs(allocation.reservationId, txId, previous(allocation))
         owner ! ReleaseInputs(allocation.reservationId)
       }
     }

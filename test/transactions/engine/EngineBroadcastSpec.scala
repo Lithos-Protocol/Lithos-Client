@@ -155,4 +155,75 @@ class EngineBroadcastSpec extends TestKit(ActorSystem("engine-broadcast-spec"))
   it should "cancel exact pins when an acknowledgement is lost before any node call" in {
     grouped(None)
   }
+
+  private val owned = "de" * 32
+  private val phantom = "df" * 32
+  private val stale = EngineHold("join", "stale", "01" * 32, Set(owned, phantom, protocol), Set(owned, phantom),
+    sendFinished = true, accepted = true, outputIds = Set("0a" * 32))
+
+  private def spending(inputs: Seq[String]): SignedTransaction = {
+    val signed = mock[SignedTransaction]
+    when(signed.getId).thenReturn(txId)
+    when(signed.toJson(false)).thenReturn(NodeCodecs.encodeTransaction(NodeTransaction(txId,
+      inputs.map(id => NodeInput(id, NodeSpendingProof.empty)), Seq.empty,
+      Seq(NodeBox("0b" * 32, txId, 1000000L, 0, 1, "")))).toString)
+    signed
+  }
+
+  "A cancellation" should "refuse to spend anything the stale send does not own, before pinning" in {
+    val api = mock[NodeApi]
+    val owner = TestProbe()
+    intercept[IllegalArgumentException](new EngineBroadcast(owner.ref, api)
+      .cancel(spending(Seq(owned, protocol)), Seq(stale), () => true))
+    owner.expectMsg(CancelEngineInputs(stale.reservationId, txId, Some(stale)))
+    owner.expectMsg(ReleaseInputs(stale.reservationId))
+    owner.expectNoMessage(200.millis)
+    verify(api, never()).sendTransaction(anyString())
+  }
+
+  it should "take over every box the stale send owned, and hand them back if the node refuses it" in {
+    val api = mock[NodeApi]
+    val owner = TestProbe()
+    when(api.info()).thenReturn(Success(ChainFixtures.infoAt(100000).copy(bestFullHeaderId = Some(anchor))))
+    when(api.sendTransaction(anyString())).thenReturn(Failure(NodeError.Rejected("Double spending attempt")))
+    val result = Future(new EngineBroadcast(owner.ref, api).cancel(spending(Seq(owned)), Seq(stale), () => true))
+    owner.expectMsg(CompleteMempool.Refresh)
+    owner.reply(CompleteMempool.Observation(1L,
+      Some(CompleteMempool.Snapshot(anchor, Set.empty, Set.empty, System.nanoTime())), None))
+    val pin = owner.expectMsgType[PinEngineInputs]
+    pin.cancelling shouldBe true
+    pin.previousTxId shouldBe Some(stale.txId)
+    pin.hold shouldBe EngineHold("cancel:" + stale.txId, stale.reservationId, txId, Set(owned), Set(owned, phantom),
+      outputIds = Set("0b" * 32), supersedes = Map(stale.txId -> stale.outputIds))
+    owner.reply(true)
+    Await.result(result, 5.seconds).outcome shouldBe EngineBroadcast.Rejected
+    owner.expectMsg(EngineSendFinished(stale.reservationId, txId, accepted = false))
+    owner.expectMsg(RefreshBoxes)
+    owner.expectMsg(EngineSendRefused(stale.reservationId, txId, Some(stale)))
+  }
+
+  it should "pin every reservation of the stale send, and restore each to its own hold if one pin fails" in {
+    val api = mock[NodeApi]
+    val owner = TestProbe()
+    when(api.info()).thenReturn(Success(ChainFixtures.infoAt(100000).copy(bestFullHeaderId = Some(anchor))))
+    val fresh = stale.copy(reservationId = "fresh", walletInputIds = Set(owned))
+    val chained = stale.copy(reservationId = "chained", walletInputIds = Set(phantom))
+    val result = Future(new EngineBroadcast(owner.ref, api, 500.millis)
+      .cancel(spending(Seq(owned)), Seq(fresh, chained), () => true))
+    owner.expectMsg(CompleteMempool.Refresh)
+    owner.reply(CompleteMempool.Observation(1L,
+      Some(CompleteMempool.Snapshot(anchor, Set.empty, Set.empty, System.nanoTime())), None))
+    Seq(fresh -> true, chained -> false).foreach { case (previous, reply) =>
+      val pin = owner.expectMsgType[PinEngineInputs]
+      (pin.hold.reservationId, pin.hold.walletInputIds, pin.previousTxId, pin.cancelling) shouldBe
+        ((previous.reservationId, previous.walletInputIds, Some(stale.txId), true))
+      owner.reply(reply)
+    }
+    intercept[IllegalArgumentException](Await.result(result, 5.seconds))
+    Seq(fresh, chained).foreach { previous =>
+      owner.expectMsg(CancelEngineInputs(previous.reservationId, txId, Some(previous)))
+      owner.expectMsg(ReleaseInputs(previous.reservationId))
+    }
+    verify(api, never()).sendTransaction(anyString())
+  }
 }

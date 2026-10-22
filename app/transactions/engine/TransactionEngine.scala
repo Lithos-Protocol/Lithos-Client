@@ -130,7 +130,8 @@ class TransactionEngine @Inject()(node: NodeContext,
 
 
   /** Engine-wide: resolves outstanding sends for every operation */
-  protected lazy val reconciler = new EngineReconciler(node, self, mempool, Some(nodeApi))
+  protected lazy val reconciler =
+    new EngineReconciler(node, self, mempool, Some(nodeApi), () => alive.get(), walletConfig.reconcile)
 
   // Sized from the lane depths so neither lane can be refused by a smaller shared cap.
   private val schedule = new ExecutionSchedule[EngineIntent](MaxCriticalQueued + MaxOptionalQueued)

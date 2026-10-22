@@ -250,6 +250,17 @@ class ConfigsSpec extends AnyFlatSpec with Matchers {
       .foreach(key => thrown.getMessage should include(s"wallet.consolidation.$key"))
   }
 
+  it should "reject a cancellation window or hold ceiling out of range" in {
+    val configured = Configuration(ConfigFactory.parseString(
+      """wallet.reconcile.cancel-stale-sends = "sometimes"
+        |wallet.reconcile.cancel-after-blocks = 1
+        |wallet.reconcile.hold-ceiling-ms = 60000""".stripMargin)
+      .withFallback(shipped.underlying).resolve())
+    val thrown = the[ConfigValidationException] thrownBy Configs.validateAll(configured)
+    Seq("cancel-stale-sends", "cancel-after-blocks", "hold-ceiling-ms")
+      .foreach(key => thrown.getMessage should include(s"wallet.reconcile.$key"))
+  }
+
   /** The attempt deadline covers the wallet walk, so one no longer than the walk's own limit can expire every pass. */
   it should "reject a consolidation attempt timeout no longer than the wallet walk" in {
     val configured = Configuration(ConfigFactory.parseString(

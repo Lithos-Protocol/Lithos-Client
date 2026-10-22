@@ -15,13 +15,22 @@ object EngineWalletMessages {
    * @param signedInputIds every input of the signed transaction, protocol boxes included
    * @param walletInputIds the subset this reservation supplied
    * @param sendFinished   the node call returned or failed; until then nothing may resolve the hold
+   * @param outputIds      boxes the transaction creates, so a child spending one dies with it
+   * @param supersedes     transactions this one cancels, with their outputs: if this one is mined,
+   *                       none of them can be, and anything spending their outputs is dead too
    */
   private[transactions] final case class EngineHold(operation: String, reservationId: String,
     txId: String, signedInputIds: Set[String], walletInputIds: Set[String],
-    sendFinished: Boolean = false, accepted: Boolean = false)
+    sendFinished: Boolean = false, accepted: Boolean = false,
+    outputIds: Set[String] = Set.empty, supersedes: Map[String, Set[String]] = Map.empty)
 
-  /** Bind a reservation to a signed transaction. `previousTxId` names the attempt being replaced. */
-  private[transactions] case class PinEngineInputs(hold: EngineHold, previousTxId: Option[String] = None)
+  /**
+   * Bind a reservation to a signed transaction. `previousTxId` names the attempt being replaced.
+   * With `cancelling`, the new transaction spends only inputs of that attempt, so at most one of
+   * the two can be mined, and it takes over every box the attempt owned.
+   */
+  private[transactions] case class PinEngineInputs(hold: EngineHold, previousTxId: Option[String] = None,
+                                                   cancelling: Boolean = false)
 
   /** Undo a pin that never reached the node, restoring `previous` when this was a rebuild. */
   private[transactions] case class CancelEngineInputs(reservationId: String, txId: String,
@@ -39,9 +48,13 @@ object EngineWalletMessages {
   private[transactions] case object GetOwnedInputIds
   private[transactions] case class EngineHolds(holds: Vector[EngineHold])
 
-  /** Retire inputs proven consumed and free those proven to have survived. Never guesses. */
+  /**
+   * Retire inputs proven consumed and free those proven to have survived. Never guesses. `gone`
+   * are inputs of a settled transaction that are not on chain at all, such as change from a parent
+   * that never confirmed; they are retired like spent ones.
+   */
   private[transactions] case class ResolveEngineInputs(reservationId: String, txId: String,
-    spent: Set[String], free: Set[String])
+    spent: Set[String], free: Set[String], gone: Set[String] = Set.empty)
 
   // ─── public messages ──────────────────────────────────────────────────────
 

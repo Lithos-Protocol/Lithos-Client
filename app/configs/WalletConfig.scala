@@ -53,7 +53,8 @@ case class WalletConfig(maxInputs: Int,
                         maxWalletInputs: Int,
                         maxOptionalInputs: Int,
                         consolidation: ConsolidationConfig,
-                        rewardSweep: RewardSweepConfig = RewardSweepConfig.Default)
+                        rewardSweep: RewardSweepConfig = RewardSweepConfig.Default,
+                        reconcile: ReconcileConfig = ReconcileConfig.Default)
 
 /**
  * When this client merges its own wallet boxes.
@@ -93,6 +94,26 @@ case class RewardSweepConfig(enabled: Boolean, intervalMs: Long)
 
 object RewardSweepConfig {
   val Default: RewardSweepConfig = RewardSweepConfig(enabled = true, intervalMs = 1800000L)
+}
+
+/**
+ * How the engine ends its hold on a send that no longer looks alive. None of it touches a send still
+ * in this node's mempool.
+ *
+ * @param cancelStaleSends  cancel a send out of the mempool for `cancelAfterBlocks` with no input spent,
+ *                          by spending one of its wallet inputs back to this wallet for the minimum fee.
+ *                          NISP submissions and fraud proofs are never cancelled.
+ * @param cancelAfterBlocks blocks a send must stay out of the mempool before it is cancelled, or settled
+ *                          by the ceiling.
+ * @param holdCeilingMs     longest a hold lasts without proof. Past it a send out of the mempool is
+ *                          settled from its inputs' chain state, and candidate and ambiguous reservations
+ *                          are released.
+ */
+case class ReconcileConfig(cancelStaleSends: Boolean, cancelAfterBlocks: Int, holdCeilingMs: Long)
+
+object ReconcileConfig {
+  val Default: ReconcileConfig = ReconcileConfig(cancelStaleSends = true, cancelAfterBlocks = 20,
+    holdCeilingMs = 6L * 60 * 60 * 1000)
 }
 
 object WalletConfig {
@@ -154,6 +175,10 @@ object WalletConfig {
         requestTimeoutMs = long("consolidation.request-timeout-ms", d.consolidation.requestTimeoutMs)),
       rewardSweep = RewardSweepConfig(
         enabled = bool("reward-sweep.enabled", d.rewardSweep.enabled),
-        intervalMs = long("reward-sweep.interval-ms", d.rewardSweep.intervalMs)))
+        intervalMs = long("reward-sweep.interval-ms", d.rewardSweep.intervalMs)),
+      reconcile = ReconcileConfig(
+        cancelStaleSends = bool("reconcile.cancel-stale-sends", d.reconcile.cancelStaleSends),
+        cancelAfterBlocks = int("reconcile.cancel-after-blocks", d.reconcile.cancelAfterBlocks),
+        holdCeilingMs = long("reconcile.hold-ceiling-ms", d.reconcile.holdCeilingMs)))
   }
 }

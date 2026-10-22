@@ -973,6 +973,79 @@ class EngineWalletStateSpec extends TestKit(ActorSystem("wallet-manager-spec", E
     offered(f, erg / 2) shouldBe empty
   }
 
+  // ─── cancelling a send that left the mempool ──────────────────────────────
+
+  "A cancellation" should "take over a finished send's boxes only by spending some of its inputs" in {
+    val f = fixture(w => Seq(walletBox(w, erg)))
+    f.probe.send(f.mgr, SelectInputs(erg / 2, Seq.empty, reservationId = "stale"))
+    val ids = f.probe.expectMsgType[WalletInputs].inputs.map(_.id.toString).toSet
+    val protocol = "ee" * 32
+    val stale = EngineHold("join", "stale", "01" * 32, ids + protocol, ids)
+    val cancel = EngineHold("cancel:" + stale.txId, "stale", "02" * 32, ids, ids)
+    // Before the stale send finished, nothing may take its boxes over.
+    f.probe.send(f.mgr, PinEngineInputs(cancel, None, cancelling = true)); f.probe.expectMsg(false)
+    f.probe.send(f.mgr, PinEngineInputs(stale)); f.probe.expectMsg(true)
+    f.probe.send(f.mgr, PinEngineInputs(cancel, Some(stale.txId), cancelling = true)); f.probe.expectMsg(false)
+    f.probe.send(f.mgr, EngineSendFinished("stale", stale.txId, accepted = true))
+    // Spending a box the stale send did not, it would not conflict with it.
+    f.probe.send(f.mgr, PinEngineInputs(cancel.copy(signedInputIds = ids + ("dd" * 32)), Some(stale.txId),
+      cancelling = true))
+    f.probe.expectMsg(false)
+    f.probe.send(f.mgr, PinEngineInputs(cancel, Some("03" * 32), cancelling = true)); f.probe.expectMsg(false)
+    f.probe.send(f.mgr, PinEngineInputs(cancel, Some(stale.txId), cancelling = true)); f.probe.expectMsg(true)
+    f.probe.send(f.mgr, GetEngineHolds)
+    f.probe.expectMsgType[EngineHolds].holds.map(_.txId) shouldBe Vector(cancel.txId)
+    offered(f, erg / 2) shouldBe empty
+  }
+
+  it should "release the lender key once it settles, though the key was pinned to the send it cancelled" in {
+    val f = fixture(w => Seq(walletBox(w, erg)))
+    val key = "ab" * 32
+    f.probe.send(f.mgr, SelectInputs(erg / 2, Seq.empty, reservationId = "join-funding"))
+    val ids = f.probe.expectMsgType[WalletInputs].inputs.map(_.id.toString).toSet
+    val stale = EngineHold("join", "join-funding", "01" * 32, ids, ids)
+    val cancel = EngineHold("cancel:" + stale.txId, "join-funding", "02" * 32, ids, ids)
+    f.probe.send(f.mgr, EngineJoinGuard.Acquire(key, "lease")); f.probe.expectMsg(true)
+    f.probe.send(f.mgr, EngineJoinGuard.Pin(key, "lease", stale.txId, Set("join-funding"))); f.probe.expectMsg(true)
+    f.probe.send(f.mgr, PinEngineInputs(stale)); f.probe.expectMsg(true)
+    f.probe.send(f.mgr, EngineSendFinished("join-funding", stale.txId, accepted = true))
+    f.probe.send(f.mgr, PinEngineInputs(cancel, Some(stale.txId), cancelling = true)); f.probe.expectMsg(true)
+    f.probe.send(f.mgr, EngineSendFinished("join-funding", cancel.txId, accepted = true))
+    f.probe.send(f.mgr, ResolveEngineInputs("join-funding", cancel.txId, ids, Set.empty))
+    f.probe.expectMsg(true)
+    f.probe.send(f.mgr, EngineJoinGuard.Keys)
+    f.probe.expectMsg(Set.empty[String])
+  }
+
+  "A settled send" should "retire inputs that never reached the chain along with the spent ones" in {
+    val f = fixture(w => Seq(walletBox(w, erg)))
+    f.probe.send(f.mgr, SelectInputs(erg / 2, Seq.empty, reservationId = "chained"))
+    val ids = f.probe.expectMsgType[WalletInputs].inputs.map(_.id.toString).toSet
+    val hold = EngineHold("join", "chained", "01" * 32, ids, ids)
+    f.probe.send(f.mgr, PinEngineInputs(hold)); f.probe.expectMsg(true)
+    f.probe.send(f.mgr, EngineSendFinished("chained", hold.txId, accepted = true))
+    f.probe.send(f.mgr, ResolveEngineInputs("chained", hold.txId, Set.empty, Set.empty, ids))
+    f.probe.expectMsg(true)
+    f.probe.send(f.mgr, GetOwnedInputIds)
+    f.probe.expectMsg(Set.empty[String])
+  }
+
+  "A candidate hold" should "be released once it outlives the hold ceiling" in {
+    // Normally ended when its height is over. One that never got that signal held its box until restart.
+    val clock = new AtomicLong(1000000L)
+    val f = fixture(w => Seq(walletBox(w, erg)), time = () => clock.get())
+    f.probe.send(f.mgr, SelectInputs(erg / 2, Seq.empty, reservationId = "candidate"))
+    f.probe.expectMsgType[WalletInputs].inputs should have size 1
+    f.probe.send(f.mgr, HoldReservationForCandidate("candidate"))
+    f.probe.expectMsg(ReservationHeldForCandidate("candidate", accepted = true))
+    clock.addAndGet(EngineWalletState.ReservationTtlMs + 1L)
+    f.probe.send(f.mgr, ResetUsedInputs)
+    offered(f, erg / 2) shouldBe empty
+    clock.addAndGet(configs.ReconcileConfig.Default.holdCeilingMs)
+    f.probe.send(f.mgr, ResetUsedInputs)
+    f.probe.awaitAssert(offered(f, erg / 2) should have size 1, 5.seconds, 100.millis)
+  }
+
   // ─── why an empty answer is empty ─────────────────────────────────────────
 
   "An empty selection" should "say why unless the wallet is simply short" in {

@@ -108,6 +108,12 @@ object Configs {
       60000L, 86400000L, "milliseconds")
     v.longRange("wallet.consolidation.request-timeout-ms", v.long("wallet.consolidation.request-timeout-ms"),
       1000L, 600000L, "milliseconds")
+    // Below a few blocks a send a peer still holds is cancelled before it could be mined.
+    v.bool("wallet.reconcile.cancel-stale-sends")
+    v.range("wallet.reconcile.cancel-after-blocks", v.int("wallet.reconcile.cancel-after-blocks"),
+      5, 1440, "blocks out of the mempool")
+    v.longRange("wallet.reconcile.hold-ceiling-ms", v.long("wallet.reconcile.hold-ceiling-ms"),
+      3600000L, 604800000L, "milliseconds")
     // A walk that runs to its own limit would leave the pass nothing to sign and send in
     for (attempt <- attemptTimeout; walk <- v.long("wallet.inventory-walk-timeout-ms") if attempt <= walk)
       v.problem("wallet.consolidation.attempt-timeout-ms",

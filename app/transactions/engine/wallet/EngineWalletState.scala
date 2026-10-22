@@ -216,6 +216,15 @@ class EngineWalletState @Inject()(nodeContext: NodeContext,
     walletRevision += 1L
   }
 
+  /**
+   * Drop lender keys pinned to a join none of whose funding is owned any more: it was refused,
+   * mined, or proven unminable, so it can no longer post a box under the key.
+   */
+  private def releaseSettledKeys(): Unit = {
+    val funded = usedInputs.valuesIterator.map(_.id).toSet
+    joinKeys = joinKeys.filterNot { case (_, owned) => owned.txId.isDefined && !owned.funding.exists(funded.contains) }
+  }
+
   private def unreserved(boxes: Map[String, WalletDescriptor]): Seq[WalletDescriptor] =
     (boxes -- usedInputs.keys).values.toSeq
 
@@ -376,14 +385,17 @@ class EngineWalletState @Inject()(nodeContext: NodeContext,
     // Bind a reservation to the exact signed transaction about to be sent. A fresh pin requires an
     // ordinary reservation; a rebuild requires the previous attempt to have finished its send and to
     // have covered the same operation and inputs, so one attempt can never take over another's boxes.
-    case PinEngineInputs(hold, previousTxId) =>
+    // A cancellation instead spends a subset of the previous attempt's inputs, which is what stops
+    // both from being mined.
+    case PinEngineInputs(hold, previousTxId, cancelling) =>
       val reserved = usedInputs.filter { case (_, state) => state.id == hold.reservationId }
       val alreadyPinned = usedInputs.values.count(_.status.isInstanceOf[ReservationEngine])
       val accepted = reserved.nonEmpty && reserved.keySet == hold.walletInputIds &&
         reserved.values.forall(_.status match {
-          case ReservationSelected | ReservationKnown => previousTxId.isEmpty
+          case ReservationSelected | ReservationKnown => previousTxId.isEmpty && !cancelling
           case ReservationEngine(previous) => previous.sendFinished && previousTxId.contains(previous.txId) &&
-            previous.operation == hold.operation && previous.signedInputIds == hold.signedInputIds
+            (if (cancelling) hold.signedInputIds.nonEmpty && hold.signedInputIds.subsetOf(previous.signedInputIds)
+            else previous.operation == hold.operation && previous.signedInputIds == hold.signedInputIds)
           case _ => false
         }) && alreadyPinned + (if (previousTxId.isEmpty) reserved.size else 0) <= MAX_ENGINE_INPUTS
       if (accepted) {
@@ -420,10 +432,7 @@ class EngineWalletState @Inject()(nodeContext: NodeContext,
       }
       if (usedInputs != before) {
         walletRevision += 1L
-        joinKeys = joinKeys.filterNot { case (_, owned) =>
-          owned.txId.contains(txId) && owned.funding.contains(id) &&
-            !usedInputs.valuesIterator.exists(state => owned.funding.contains(state.id))
-        }
+        releaseSettledKeys()
       }
 
     case EngineJoinGuard.Keys => sender() ! joinKeys.keySet
@@ -477,16 +486,16 @@ class EngineWalletState @Inject()(nodeContext: NodeContext,
       }.toVector
       sender() ! EngineHolds(held)
 
-    // Retire inputs the chain consumed and free those a reconciler proved survived. Only boxes this
-    // exact finished send still owns are touched, so a stale reconciliation cannot resolve a newer
-    // attempt's inputs. A lender key is let go only once none of its funding remains owned.
-    case ResolveEngineInputs(reservationId, txId, spent, free) =>
+    // Retire inputs the chain consumed or never had, and free those a reconciler proved survived. Only
+    // boxes this exact finished send still owns are touched, so a stale reconciliation cannot resolve
+    // a newer attempt's inputs. A lender key is let go only once none of its funding remains owned.
+    case ResolveEngineInputs(reservationId, txId, spent, free, gone) =>
       val ownedByThisSend = usedInputs.collect {
         case (boxId, ReservationState(`reservationId`, _, ReservationEngine(hold)))
           if hold.txId == txId && hold.sendFinished => boxId
       }.toSet
-      val resolved = (spent ++ free).intersect(ownedByThisSend)
-      val consumed = spent.intersect(ownedByThisSend)
+      val resolved = (spent ++ free ++ gone).intersect(ownedByThisSend)
+      val consumed = (spent ++ gone).intersect(ownedByThisSend)
       usedInputs --= resolved
       walletBoxes --= consumed
       rewardBoxes --= consumed
@@ -495,12 +504,9 @@ class EngineWalletState @Inject()(nodeContext: NodeContext,
       knownOutputs = knownOutputs.filterNot(box => consumed.contains(box.boxId))
       if (resolved.nonEmpty) {
         walletRevision += 1L
-        joinKeys = joinKeys.filterNot { case (_, owned) =>
-          owned.txId.contains(txId) && owned.funding.contains(reservationId) &&
-            !usedInputs.valuesIterator.exists(state => owned.funding.contains(state.id))
-        }
+        releaseSettledKeys()
       }
-      sender() ! (resolved == (spent ++ free))
+      sender() ! (resolved == (spent ++ free ++ gone))
 
     // Off the actor thread: this pages the wallet and then does one lookup per address, and callers
     // Await on this mailbox with a 5-second budget. Blocking here fails their transactions.
@@ -673,6 +679,24 @@ class EngineWalletState @Inject()(nodeContext: NodeContext,
         usedInputs = usedInputs -- stale
         walletRevision += 1L
       }
+      // A candidate or ambiguous send normally ends at a wallet refresh. Past the ceiling it has
+      // outlived any block that could take it, so it is released: selection only reads boxes the
+      // node still reports unspent and unclaimed, so one the chain did consume is never offered.
+      val ceiling = now() - walletLimits.reconcile.holdCeilingMs
+      val overdue = usedInputs.collect {
+        case (id, reservation)
+          if (reservation.status == ReservationCandidate || reservation.status == ReservationUncertain)
+            && reservation.reservedAtMillis < ceiling => id
+      }.toSet
+      if (overdue.nonEmpty) {
+        logger.warn(s"Releasing ${overdue.size} candidate or uncertain reservation(s) held past " +
+          s"${walletLimits.reconcile.holdCeilingMs / 60000} minutes with no wallet refresh settling them")
+        usedInputs = usedInputs -- overdue
+        knownOutputs = knownOutputs.filterNot(box => overdue.contains(box.boxId))
+        walletRevision += 1L
+        self ! RefreshBoxes
+      }
+      if (stale.nonEmpty || overdue.nonEmpty) releaseSettledKeys()
 
     // ─── reward-box sweep ──────────────────────────────────────────────────
 
@@ -829,13 +853,14 @@ object EngineWalletState {
    *    from a complete refresh proves the box was spent. It does for a selected box, and does not
    *    for locally built change whose parent the node may not report yet;
    *  - after a send, `ReservationEngine` is bound to an exact transaction, and only the node
-   *    refusing it or per-input evidence from [[EngineReconciler]] can end it;
+   *    refusing it or on-chain evidence from [[transactions.engine.EngineReconciler]] can end it;
    *  - `ReservationCandidate` and `ReservationUncertain` cover the paths with no send outcome at
    *    all: a transaction offered into this miner's own block, and an ambiguous broadcast;
    *  - `ReservationPinned` is standing funding for transactions in this miner's own blocks.
    *
-   * Only `ReservationSelected` and `ReservationKnown` can be released outright. A complete refresh
-   * collects `ReservationSelected` and drops a `ReservationPinned` box it no longer reports.
+   * Only `ReservationSelected` and `ReservationKnown` can be released outright; candidate and
+   * uncertain reservations only past `wallet.reconcile.hold-ceiling-ms`. A complete refresh collects
+   * `ReservationSelected` and drops a `ReservationPinned` box it no longer reports.
    */
   private sealed trait ReservationStatus
   /** Chosen for a build that has not reached the node. A complete refresh or a release ends it. */
@@ -844,13 +869,17 @@ object EngineWalletState {
   private case object ReservationKnown extends ReservationStatus
   /**
    * Held by a signed transaction offered into this miner's own block candidate. It never reaches
-   * the node, so no send boundary resolves it and no TTL may release it: the input is unavailable
-   * until the height it was built for is over and reconciliation says whether the block took it.
+   * the node, so no send boundary resolves it and only the hold ceiling may release it: the input is
+   * unavailable until the height it was built for is over and reconciliation says whether the block
+   * took it.
    */
   private case object ReservationCandidate extends ReservationStatus
-  /** Broadcast with an unknown outcome. Only fresh per-input evidence may end it. */
+  /** Broadcast with an unknown outcome. A complete refresh ends it, or the hold ceiling. */
   private case object ReservationUncertain extends ReservationStatus
-  /** Bound to an exact signed transaction, which is the only thing that can resolve it. */
+  /**
+   * Bound to an exact signed transaction. Ended by the node refusing it, by the chain mining it or
+   * a conflicting spend, or, once out of the mempool past the hold ceiling, by its inputs' own state.
+   */
   private case class ReservationEngine(hold: EngineHold) extends ReservationStatus
   /**
    * Held for the life of the process to fund transactions in this miner's own blocks. Never
