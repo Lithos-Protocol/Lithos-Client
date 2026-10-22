@@ -24,10 +24,11 @@ object SeedExecution {
 
   /**
    * What one seed attempt concluded. `usable` counts plain tokenless boxes that can pay a fee and a
-   * change box; `created` is how many boxes of `boxValue` the sent transaction adds.
+   * change box; `created` is how many boxes of `boxValue` the sent transaction adds. `plainValue` is
+   * what the wallet held in plain boxes before the seed, and `fullSeedValue` what reaching `target` needs.
    */
   final case class Status(outcome: String, usable: Int, target: Int, created: Int, boxValue: Long,
-                          txId: Option[String] = None)
+                          txId: Option[String] = None, plainValue: BigInt = 0, fullSeedValue: BigInt = 0)
 
   /** No confirmed data box yet: the registration is unconfirmed, or synchronization has not recorded it. */
   final val OutcomeWaiting = "waiting"
@@ -101,6 +102,28 @@ object SeedExecution {
       Seq(wanted, budget, fromBox).min.max(BigInt(0)).toInt
   }
 
+  /** Plain value a seed to `target` needs under the half-value bound, when the extra arrives as one box. */
+  def fullSeedValue(scan: Scan, target: Int, boxValue: Long): BigInt =
+    (scan.small + BigInt(math.max(0, target - scan.usable)) * boxValue) * 2
+
+  /**
+   * The warning for an attempt that ran and left the wallet short of its target, naming the plain ERG a
+   * full seed needs. None when it reached the target, is still due, or never looked at the wallet.
+   */
+  def shortfall(status: Status): Option[String] = {
+    val reached = status.usable + status.created
+    val ran = status.outcome == OutcomeNoWork || (status.txId.nonEmpty && settles(status.outcome))
+    if (!ran || reached >= status.target) None
+    else Some(s"Wallet seed ended at $reached of ${status.target} plain boxes. A full seed needs about " +
+      s"${erg(status.fullSeedValue)} ERG in plain boxes and this wallet held ${erg(status.plainValue)} ERG" +
+      (if (status.plainValue >= status.fullSeedValue) ", but no confirmed, unreserved box was large enough to split"
+      else "") + ". ERG added now is seeded only if the client restarts within about a day of registering")
+  }
+
+  /** nanoERG as ERG to three places, rounded up so a stated requirement is never short. */
+  private def erg(nanoErgs: BigInt): String =
+    (BigDecimal(nanoErgs) / BigDecimal(Parameters.OneErg)).setScale(3, BigDecimal.RoundingMode.UP).toString
+
   /** `count` boxes of `boxValue`, then the split box's remainder, all to the first address, and the fee. */
   def build(ctx: BlockchainContext, wallet: NodeWallet, input: InputUTXO, count: Int,
             boxValue: Long, fee: Long): UnsignedTransaction = {
@@ -154,7 +177,8 @@ private[engine] class SeedExecution(node: NodeContext, api: NodeApi, owner: Acto
       val seen = scan(api, wallet.signableTrees, wallet.rewardTrees.keySet, owned ++ observed.snapshot.get.spent,
         ctx.getHeight, value, limits)
       val count = plan(seen, target, value, Fee)
-      if (count == 0) Status(OutcomeNoWork, seen.usable, target, 0, value)
+      val needed = fullSeedValue(seen, target, value)
+      if (count == 0) Status(OutcomeNoWork, seen.usable, target, 0, value, None, seen.total, needed)
       else {
         require(alive(), "seed attempt expired")
         val box = seen.largest.get
@@ -170,7 +194,7 @@ private[engine] class SeedExecution(node: NodeContext, api: NodeApi, owner: Acto
           val result = new EngineBroadcast(owner, api, requestTimeout).send(signed, Seq(allocation), "seed", alive)
           logger.info(s"Sent transaction ${result.txId} splitting $count box(es) of $value nanoERG from ${box.boxId}: " +
             s"${result.outcome}")
-          Status(result.outcome, seen.usable, target, count, value, Some(result.txId))
+          Status(result.outcome, seen.usable, target, count, value, Some(result.txId), seen.total, needed)
         } finally allocation.release()
       }
     }

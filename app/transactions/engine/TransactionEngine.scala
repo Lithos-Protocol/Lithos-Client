@@ -310,7 +310,10 @@ class TransactionEngine @Inject()(node: NodeContext,
     case _: WorkFinished | _: Reconciled => ()
   }
 
-  /** Clear `seedDue` once an attempt settles it, and say what it concluded unless it is still waiting. */
+  /**
+   * Clear `seedDue` once an attempt settles it, and say what it concluded unless it is still waiting. A
+   * seed that ends short of its target warns with the ERG a full one needs.
+   */
   private def seedFinished(result: Try[Any]): Unit = result match {
     case Success(status: SeedExecution.Status) =>
       if (SeedExecution.settles(status.outcome)) seedDue = false
@@ -318,15 +321,16 @@ class TransactionEngine @Inject()(node: NodeContext,
         case SeedExecution.OutcomeWaiting => ()
         case SeedExecution.OutcomeNotInitial =>
           logger.info("Wallet seed skipped: this miner's registration is not new, so the wallet is left as it is")
-        case SeedExecution.OutcomeNoWork =>
-          logger.info(s"Wallet seed has nothing to do: ${status.usable} plain box(es) against a target of " +
-            s"${status.target}" + (if (status.usable >= status.target) "" else
-            ", and no box can be split without putting over half the wallet's plain ERG into small boxes"))
+        case SeedExecution.OutcomeNoWork if status.usable >= status.target =>
+          logger.info(s"Wallet seed has nothing to do: ${status.usable} plain box(es) already meet the target " +
+            s"of ${status.target}")
+        case SeedExecution.OutcomeNoWork => ()
         case outcome =>
           logger.info(s"Wallet seed ${status.txId.getOrElse("")} $outcome: ${status.created} box(es) of " +
             s"${status.boxValue} nanoERG split off for a wallet of ${status.usable} plain box(es)" +
             (if (SeedExecution.settles(outcome)) "" else "; trying again later"))
       }
+      SeedExecution.shortfall(status).foreach(logger.warn)
     case Success(other) => logger.warn(s"Unexpected wallet seed result: $other")
     case Failure(ex) => logger.warn(s"Wallet seed attempt failed, trying again later: ${ex.getMessage}")
   }

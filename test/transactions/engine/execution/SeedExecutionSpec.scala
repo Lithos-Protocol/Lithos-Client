@@ -108,6 +108,52 @@ class SeedExecutionSpec extends AnyFlatSpec with Matchers with MockitoSugar {
     plan(scanOf(plain(Seq.fill(32)(Erg): _*)), 32, Seed, Fee) shouldBe 0
   }
 
+  // ─── what a short seed tells the miner ────────────────────────────────────
+
+  /** The figure the warning names has to be the one that works, not an estimate either side of it. */
+  "The value a full seed needs" should "be exactly what lets one box reach the target" in {
+    val needed = fullSeedValue(scanOf(plain(Erg)), 32, Seed)
+    needed shouldBe BigInt(2 * 31 * Seed)
+    plan(scanOf(plain(needed.toLong)), 32, Seed, Fee) shouldBe 31
+    plan(scanOf(plain(needed.toLong - 1)), 32, Seed, Fee) shouldBe 30
+  }
+
+  it should "grow with dust the wallet already holds" in {
+    val needed = fullSeedValue(scanOf(plain(Parameters.MinFee, Erg)), 32, Seed)
+    needed shouldBe BigInt(2 * (Parameters.MinFee + 31 * Seed))
+    plan(scanOf(plain(Parameters.MinFee, needed.toLong)), 32, Seed, Fee) shouldBe 31
+  }
+
+  private val ShortWallet = Status(OutcomeNoWork, 1, 32, 0, Seed, None, BigInt(Erg / 20), BigInt(2 * 31 * Seed))
+
+  "A seed short of its target" should "warn with the ERG a full seed needs and what the wallet held" in {
+    val warning = shortfall(ShortWallet).get
+    warning should include("1 of 32")
+    warning should include("3.100 ERG")
+    warning should include("0.050 ERG")
+    warning should not include "large enough"
+  }
+
+  it should "warn after a partial seed, counting the boxes it added" in {
+    val partial = ShortWallet.copy(outcome = transactions.engine.EngineBroadcast.Accepted, created = 10,
+      txId = Some("ab" * 32), plainValue = BigInt(Erg))
+    shortfall(partial).get should include("11 of 32")
+  }
+
+  it should "say so when the wallet held enough but no box could be split" in {
+    shortfall(ShortWallet.copy(plainValue = BigInt(5 * Erg))).get should include("no confirmed, unreserved box")
+  }
+
+  it should "stay quiet for a full seed, an attempt still due, or one that never read the wallet" in {
+    shortfall(ShortWallet.copy(outcome = transactions.engine.EngineBroadcast.Accepted, created = 31,
+      txId = Some("ab" * 32))) shouldBe None
+    shortfall(ShortWallet.copy(outcome = transactions.engine.EngineBroadcast.Rejected, created = 10,
+      txId = Some("ab" * 32))) shouldBe None
+    shortfall(ShortWallet.copy(outcome = OutcomeWaiting)) shouldBe None
+    shortfall(ShortWallet.copy(outcome = OutcomeNotInitial)) shouldBe None
+    shortfall(ShortWallet.copy(usable = 32)) shouldBe None
+  }
+
   // ─── what the scan sees ───────────────────────────────────────────────────
 
   "A seed scan" should "count unconfirmed and owned boxes but split only a confirmed unowned one" in {
