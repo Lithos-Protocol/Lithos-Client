@@ -41,8 +41,8 @@ class StorageRentSource(nodeContext: NodeContext,
 
   protected def nodeApi: NodeApi = nodeContext.getNodeApi
 
-  /** Next inclusion height the walk will read. */
-  private var cursor: Int = rentConfig.startHeight
+  /** Next inclusion height the walk will read. Empty until the first pass places it from the tip. */
+  private var cursor: Option[Int] = None
 
   /**
    * Unspent boxes the walk has met, by id, with the creation height their age is measured from.
@@ -60,7 +60,7 @@ class StorageRentSource(nodeContext: NodeContext,
   private var ticker: Option[Cancellable] = None
 
   override def preStart(): Unit = {
-    logger.info(s"StorageRentSource started: startHeight=${rentConfig.startHeight}, " +
+    logger.info(s"StorageRentSource started: startBehindBlocks=${rentConfig.startBehindBlocks}, " +
       s"blocksPerScan=${rentConfig.blocksPerScan}, lookaheadBlocks=${rentConfig.lookaheadBlocks}, " +
       s"period=${StorageRent.StoragePeriod}")
     ticker = Some(context.system.scheduler.scheduleWithFixedDelay(
@@ -77,25 +77,26 @@ class StorageRentSource(nodeContext: NodeContext,
     case ScanTick if !scanning =>
       scanning = true
       val from = cursor
-      Future(scan(from))(candidateWorker).onComplete(result => self ! Scanned(from, result))
+      Future(scan(from))(candidateWorker).onComplete(result => self ! Scanned(result))
 
     case ScanTick => ()
 
-    case Scanned(from, Success(pass)) =>
+    case Scanned(Success(pass)) =>
       scanning = false
       // Only advance past what was actually read, so a short pass resumes where it stopped rather
       // than skipping the blocks it never reached.
-      cursor = math.max(cursor, pass.nextHeight)
+      cursor = Some(cursor.fold(pass.nextHeight)(math.max(_, pass.nextHeight)))
       held ++= pass.found
       deferred ++= pass.blocked
       if (pass.found.nonEmpty || pass.blocked.nonEmpty)
-        logger.info(s"Rent scan $from..${pass.nextHeight - 1} found ${pass.found.size} " +
+        logger.info(s"Rent scan ${pass.from}..${pass.nextHeight - 1} found ${pass.found.size} " +
           s"unspent and ${pass.blocked.size} re-emission boxes; holding ${held.size}")
 
-    case Scanned(from, Failure(ex)) =>
+    case Scanned(Failure(ex)) =>
       scanning = false
       // The cursor stays put, so the next pass reads the same blocks again.
-      logger.warn(s"Rent scan from $from failed, retrying next pass: ${ex.getMessage}")
+      logger.warn(s"Rent scan from ${cursor.getOrElse("its start")} failed, retrying next pass: " +
+        ex.getMessage)
 
     // Found spent while a sweep was being built. Forgotten rather than retried: nothing brings a
     // spent box back, and the walk will never offer it again.
@@ -165,18 +166,20 @@ class StorageRentSource(nodeContext: NodeContext,
     }
 
   /**
-   * One pass of the walk, bounded by `blocksPerScan` and by `walkCeiling`.
+   * One pass of the walk, bounded by `blocksPerScan` and by `walkCeiling`. The first pass starts at
+   * `walkStart`, since the tip it is measured from is only known here.
    *
    * Two node reads a block: the block itself for what it created, then one batch read to keep only
    * the boxes still unspent. Storing the spent ones instead would mean remembering every output the
    * chain ever made below the ceiling.
    */
-  private def scan(from: Int): Pass = {
+  private def scan(cursor: Option[Int]): Pass = {
     val protocol = nodeContext.getClient.execute(ProtocolBoxes.apply)
     val tip = nodeApi.info().toOption.flatMap(_.fullHeight).getOrElse(
       throw new IllegalStateException("the node did not report a height"))
+    val from = cursor.getOrElse(walkStart(tip, rentConfig.startBehindBlocks))
     val ceiling = walkCeiling(tip, rentConfig.lookaheadBlocks)
-    if (from > ceiling) return Pass(from, Map.empty, Set.empty)
+    if (from > ceiling) return Pass(from, from, Map.empty, Set.empty)
 
     val until = math.min(from + rentConfig.blocksPerScan, ceiling + 1)
     var found = Map.empty[String, Int]
@@ -193,7 +196,7 @@ class StorageRentSource(nodeContext: NodeContext,
       blocked ++= reEmission
       reached = height + 1
     }
-    Pass(reached, found, blocked)
+    Pass(from, reached, found, blocked)
   }
 }
 
@@ -201,8 +204,19 @@ object StorageRentSource {
   /** Scheduler tick: read the next stretch of the chain. */
   private[rent] case object ScanTick
 
-  /** What one pass read, and the height the next one starts at. `found` maps id to creation height. */
-  private[rent] final case class Pass(nextHeight: Int, found: Map[String, Int], blocked: Set[String])
+  /**
+   * What one pass read, from where, and the height the next one starts at. `found` maps id to
+   * creation height.
+   */
+  private[rent] final case class Pass(from: Int, nextHeight: Int, found: Map[String, Int],
+                                      blocked: Set[String])
+
+  /**
+   * First inclusion height the walk reads, `behind` blocks before the newest block whose boxes are
+   * all due. Behind the due frontier, other collectors have usually swept everything already. Never
+   * below the first block, so a chain younger than `StoragePeriod` starts above its ceiling.
+   */
+  def walkStart(tip: Int, behind: Int): Int = math.max(1, walkCeiling(tip, 0) - behind)
 
   /**
    * Last inclusion height a pass may read when the node's tip is `tip`.
@@ -218,7 +232,7 @@ object StorageRentSource {
     held.collect { case (id, created) if blockHeight.toLong - created >= StorageRent.StoragePeriod => id }
       .toSeq
 
-  private[rent] final case class Scanned(from: Int, result: Try[Pass])
+  private[rent] final case class Scanned(result: Try[Pass])
 
   /** Boxes a build found already spent, so they stop being offered. */
   private[rent] final case class Spent(ids: Set[String])

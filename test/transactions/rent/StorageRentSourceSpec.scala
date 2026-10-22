@@ -153,6 +153,23 @@ class StorageRentSourceSpec extends AnyFlatSpec with Matchers with MockitoSugar 
       be >= included
   }
 
+  /** Placed from the tip, so a client started years from now begins as close to the frontier. */
+  it should "start a fixed distance behind the due frontier, wherever the tip is" in {
+    Seq(1899183, 2500000).foreach { tip =>
+      val frontier = StorageRentSource.walkCeiling(tip, 0)
+      StorageRentSource.walkStart(tip, RentConfig.Default.startBehindBlocks) shouldBe
+        frontier - RentConfig.Default.startBehindBlocks
+    }
+  }
+
+  /** A chain younger than one storage period has nothing due, and must not walk heights below 1. */
+  it should "read nothing on a chain younger than one storage period" in {
+    val tip = 300000
+    val start = StorageRentSource.walkStart(tip, RentConfig.Default.startBehindBlocks)
+    start shouldBe 1
+    start should be > StorageRentSource.walkCeiling(tip, RentConfig.Default.lookaheadBlocks)
+  }
+
   "A held box" should "be offered from the block its creation height makes it due, not before" in {
     val held = Map(id("a") -> 900000, id("b") -> 900001)
     StorageRentSource.dueAt(held, 900000 + period - 1) shouldBe empty
@@ -232,11 +249,11 @@ class StorageRentSourceSpec extends AnyFlatSpec with Matchers with MockitoSugar 
   // ─── config ───────────────────────────────────────────────────────────────
 
   /**
-   * On, and starting well past genesis. The early chain was swept years ago, so walking it costs
-   * node reads for nothing.
+   * On, and starting a short way behind the frontier. Collectors sweep boxes as they fall due, so
+   * a long walk back costs node reads for nothing.
    */
-  "The default" should "leave the source on and the walk short of the chain start" in {
-    RentConfig.Default.startHeight should be > 0
+  "The default" should "leave the source on and start within a few days of the frontier" in {
+    RentConfig.Default.startBehindBlocks should (be >= 0 and be <= 7 * 720)
     configs.CandidateConfig.Default.sources(CandidateSourceConfig.Rent).enabled shouldBe true
   }
 }

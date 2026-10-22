@@ -199,9 +199,9 @@ object Configs {
     v.range("stratum.candidate.genesisWaitMs", v.int("stratum.candidate.genesisWaitMs"), 0, 60000, "ms to wait for the genesis transaction before falling back to a solo candidate")
     v.range("stratum.candidate.mempoolRefreshMs", v.int("stratum.candidate.mempoolRefreshMs"), 0, 3600000, "ms between candidate refreshes within a block; 0 mines the block's initial transaction set")
     v.range("stratum.candidate.blockTxTimeout", v.int("stratum.candidate.blockTxTimeout"), 0, 600000, "ms")
-    v.range("stratum.candidate.sources.rent.startHeight",
-      v.int("stratum.candidate.sources.rent.startHeight"), 0, 100000000,
-      "inclusion height the storage-rent walk begins at")
+    v.range("stratum.candidate.sources.rent.startBehindBlocks",
+      v.int("stratum.candidate.sources.rent.startBehindBlocks"), 0, 1000000,
+      "blocks behind the due frontier the storage-rent walk begins at")
     v.range("stratum.candidate.sources.rent.scanIntervalMs",
       v.int("stratum.candidate.sources.rent.scanIntervalMs"), 1000, 3600000, "ms")
     v.range("stratum.candidate.sources.rollups.maxAncestorTxs",
