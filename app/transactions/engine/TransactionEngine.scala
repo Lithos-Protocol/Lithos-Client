@@ -9,7 +9,7 @@ import scala.concurrent.Future
 import scala.concurrent.duration._
 import scala.util.{Failure, Success, Try}
 import transactions.engine.execution.{CommitmentExecution, ConsolidationExecution, DexAPIExecution,
-  ForwardsAPIExecution, RollupExecution}
+  ForwardsAPIExecution, RollupExecution, SeedExecution}
 import transactions.engine.wallet.{EngineFunding, EngineWalletState}
 
 object TransactionEngine {
@@ -56,6 +56,8 @@ object TransactionEngine {
   /** Upper bound on a caller-supplied deadline, so a bad request cannot pin a queue slot forever. */
   private final val MaxExpiry = 7.days
   private final val MaintenanceInterval = 15000L
+  /** Gap between seed attempts while one is due. Before the registration confirms each costs one local read. */
+  private final val SeedInterval = 60000L
 }
 
 /**
@@ -155,6 +157,14 @@ class TransactionEngine @Inject()(node: NodeContext,
     if (consolidationEnabled) ConsolidationExecution.OutcomeNotObserved else ConsolidationExecution.OutcomeDisabled)
 
   private lazy val consolidation = new ConsolidationExecution(node, nodeApi, self, walletConfig)
+
+  /**
+   * Whether this process may still seed the wallet. Set at start and after each registration this
+   * client sends, and cleared once an attempt settles it: seeded, nothing to do, or no new registration.
+   */
+  private var seedDue = walletConfig.seed.onInitialCommitment
+  private var nextSeed = 0L
+  private lazy val seed = new SeedExecution(node, nodeApi, self, dataBoxes, walletConfig)
   private lazy val dex = new DexAPIExecution(node, EngineFunding(self, EngineFunding.askTimeout(config), ec),
     () => alive.get(), configs.LithosDexOrdersConfig(config)) {
     override protected def executionNode: _root_.node.NodeApi = TransactionEngine.this.nodeApi
@@ -183,6 +193,10 @@ class TransactionEngine @Inject()(node: NodeContext,
         s"inputs and at most ${walletConfig.consolidation.attemptTimeoutMs}ms per pass. Deferred while critical work is queued.")
     else
       logger.info("Consolidation OFF (wallet.consolidation.enabled)")
+    if (walletConfig.seed.onInitialCommitment)
+      logger.info(s"Wallet seed ON: a registration confirmed within ${SeedExecution.InitialWindow} blocks splits " +
+        s"the wallet towards ${walletConfig.seed.targetUtxos} plain boxes")
+    else logger.info("Wallet seed OFF (wallet.seed.on-initial-commitment)")
     logger.info(s"Wallet limits: maxInputs=${walletConfig.maxInputs} pageSize=${walletConfig.pageSize} " +
       s"maxDescriptors=${walletConfig.maxDescriptors} " +
       s"reservationTimeout=${walletConfig.reservationTimeoutMs}ms " +
@@ -237,6 +251,12 @@ class TransactionEngine @Inject()(node: NodeContext,
           admit(EngineIntent.Consolidate, context.system.deadLetters,
             Some(Immediate(now + walletConfig.consolidation.attemptTimeoutMs)))
         }
+        // An attempt walks the wallet, so its deadline covers the walk and leaves a minute to send
+        if (seedDue && now >= nextSeed && !schedule.occupied(Lane.Critical) && reconciling.isEmpty) {
+          nextSeed = now + SeedInterval
+          admit(EngineIntent.Seed, context.system.deadLetters,
+            Some(Immediate(now + walletConfig.inventoryTimeoutMs + 60000L)))
+        }
       }
       drive()
 
@@ -266,6 +286,9 @@ class TransactionEngine @Inject()(node: NodeContext,
             case Failure(ex) =>
               logger.warn(s"Consolidation pass failed: ${ex.getMessage}")
           }
+        case EngineIntent.Seed => seedFinished(result)
+        case _: EngineIntent.Register =>
+          if (result.isSuccess && walletConfig.seed.onInitialCommitment) seedDue = true
         case _ => ()
       }
       running -= key
@@ -285,6 +308,27 @@ class TransactionEngine @Inject()(node: NodeContext,
       drive()
 
     case _: WorkFinished | _: Reconciled => ()
+  }
+
+  /** Clear `seedDue` once an attempt settles it, and say what it concluded unless it is still waiting. */
+  private def seedFinished(result: Try[Any]): Unit = result match {
+    case Success(status: SeedExecution.Status) =>
+      if (SeedExecution.settles(status.outcome)) seedDue = false
+      status.outcome match {
+        case SeedExecution.OutcomeWaiting => ()
+        case SeedExecution.OutcomeNotInitial =>
+          logger.info("Wallet seed skipped: this miner's registration is not new, so the wallet is left as it is")
+        case SeedExecution.OutcomeNoWork =>
+          logger.info(s"Wallet seed has nothing to do: ${status.usable} plain box(es) against a target of " +
+            s"${status.target}" + (if (status.usable >= status.target) "" else
+            ", and no box can be split without putting over half the wallet's plain ERG into small boxes"))
+        case outcome =>
+          logger.info(s"Wallet seed ${status.txId.getOrElse("")} $outcome: ${status.created} box(es) of " +
+            s"${status.boxValue} nanoERG split off for a wallet of ${status.usable} plain box(es)" +
+            (if (SeedExecution.settles(outcome)) "" else "; trying again later"))
+      }
+    case Success(other) => logger.warn(s"Unexpected wallet seed result: $other")
+    case Failure(ex) => logger.warn(s"Wallet seed attempt failed, trying again later: ${ex.getMessage}")
   }
 
   private def completeWaiters(key: String, value: Any): Unit = {
@@ -388,6 +432,7 @@ class TransactionEngine @Inject()(node: NodeContext,
     case EngineIntent.Consolidate =>
       consolidation.execute(consolidationTarget, stillEligible,
         walletConfig.consolidation.minInputs, walletConfig.consolidation.transactions)
+    case EngineIntent.Seed => seed.execute(walletConfig.seed.targetUtxos, stillEligible)
     case _ => throw new IllegalArgumentException("unsupported engine intent")
   }
 }

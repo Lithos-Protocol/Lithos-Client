@@ -261,6 +261,30 @@ class ConfigsSpec extends AnyFlatSpec with Matchers {
       .foreach(key => thrown.getMessage should include(s"wallet.reconcile.$key"))
   }
 
+  it should "reject a seed target out of range" in {
+    val configured = Configuration(ConfigFactory.parseString(
+      """wallet.seed.on-initial-commitment = "sometimes"
+        |wallet.seed.target-utxos = 1""".stripMargin)
+      .withFallback(shipped.underlying).resolve())
+    val thrown = the[ConfigValidationException] thrownBy Configs.validateAll(configured)
+    Seq("on-initial-commitment", "target-utxos")
+      .foreach(key => thrown.getMessage should include(s"wallet.seed.$key"))
+  }
+
+  /** Consolidation merges whenever the wallet is above its own target, so it would undo a larger seed. */
+  it should "reject a seed target consolidation would merge back" in {
+    val clashing = ConfigFactory.parseString(
+      """wallet.consolidation.enabled = true
+        |wallet.consolidation.target-utxos = 32
+        |wallet.seed.target-utxos = 32""".stripMargin)
+    val thrown = the[ConfigValidationException] thrownBy Configs.validateAll(
+      Configuration(clashing.withFallback(shipped.underlying).resolve()))
+    thrown.getMessage should include("wallet.seed.target-utxos")
+    thrown.getMessage should include("wallet.consolidation.target-utxos")
+    noException should be thrownBy Configs.validateAll(Configuration(ConfigFactory.parseString(
+      "wallet.seed.on-initial-commitment = false").withFallback(clashing).withFallback(shipped.underlying).resolve()))
+  }
+
   /** The attempt deadline covers the wallet walk, so one no longer than the walk's own limit can expire every pass. */
   it should "reject a consolidation attempt timeout no longer than the wallet walk" in {
     val configured = Configuration(ConfigFactory.parseString(

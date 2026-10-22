@@ -54,7 +54,8 @@ case class WalletConfig(maxInputs: Int,
                         maxOptionalInputs: Int,
                         consolidation: ConsolidationConfig,
                         rewardSweep: RewardSweepConfig = RewardSweepConfig.Default,
-                        reconcile: ReconcileConfig = ReconcileConfig.Default)
+                        reconcile: ReconcileConfig = ReconcileConfig.Default,
+                        seed: SeedConfig = SeedConfig.Default)
 
 /**
  * When this client merges its own wallet boxes.
@@ -114,6 +115,19 @@ case class ReconcileConfig(cancelStaleSends: Boolean, cancelAfterBlocks: Int, ho
 object ReconcileConfig {
   val Default: ReconcileConfig = ReconcileConfig(cancelStaleSends = true, cancelAfterBlocks = 20,
     holdCeilingMs = 6L * 60 * 60 * 1000)
+}
+
+/**
+ * Splitting the wallet into plain boxes once this miner's first registration confirms.
+ *
+ * @param onInitialCommitment on by default. Only a registration confirmed within about a day is
+ *                            seeded, so a miner registered before that keeps its wallet as it is.
+ * @param targetUtxos         plain tokenless boxes to aim for, the split box's remainder included.
+ */
+case class SeedConfig(onInitialCommitment: Boolean, targetUtxos: Int)
+
+object SeedConfig {
+  val Default: SeedConfig = SeedConfig(onInitialCommitment = true, targetUtxos = 32)
 }
 
 object WalletConfig {
@@ -179,6 +193,9 @@ object WalletConfig {
       reconcile = ReconcileConfig(
         cancelStaleSends = bool("reconcile.cancel-stale-sends", d.reconcile.cancelStaleSends),
         cancelAfterBlocks = int("reconcile.cancel-after-blocks", d.reconcile.cancelAfterBlocks),
-        holdCeilingMs = long("reconcile.hold-ceiling-ms", d.reconcile.holdCeilingMs)))
+        holdCeilingMs = long("reconcile.hold-ceiling-ms", d.reconcile.holdCeilingMs)),
+      seed = SeedConfig(
+        onInitialCommitment = bool("seed.on-initial-commitment", d.seed.onInitialCommitment),
+        targetUtxos = int("seed.target-utxos", d.seed.targetUtxos)))
   }
 }

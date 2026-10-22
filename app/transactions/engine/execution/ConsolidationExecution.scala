@@ -21,7 +21,7 @@ object ConsolidationExecution {
 
   /**
    * What one maintenance tick observed. `oldestExcluded` covers boxes consolidation may not touch
-   * (token-bearing, reserved, unconfirmed), so an ineligible box drifting towards storage rent stays
+   * (reserved, unconfirmed, or a locked reward), so an ineligible box drifting towards storage rent stays
    * visible instead of silently ageing.
    */
   final case class Status(total: Long, target: Int, eligible: Long, oldestEligible: Option[Int],

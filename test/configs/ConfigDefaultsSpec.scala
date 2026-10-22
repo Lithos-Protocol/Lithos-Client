@@ -191,7 +191,8 @@ class ConfigDefaultsSpec extends AnyFlatSpec with Matchers {
       "consolidation.enabled", "consolidation.target-utxos", "consolidation.interval-ms",
       "consolidation.min-inputs", "consolidation.num-transactions", "consolidation.attempt-timeout-ms",
       "consolidation.request-timeout-ms", "reward-sweep.enabled", "reward-sweep.interval-ms",
-      "reconcile.cancel-stale-sends", "reconcile.cancel-after-blocks", "reconcile.hold-ceiling-ms")
+      "reconcile.cancel-stale-sends", "reconcile.cancel-after-blocks", "reconcile.hold-ceiling-ms",
+      "seed.on-initial-commitment", "seed.target-utxos")
     validated.foreach { key =>
       withClue(s"wallet.$key is validated but not shipped: ") {
         shipped.underlying.hasPath(s"wallet.$key") shouldBe true

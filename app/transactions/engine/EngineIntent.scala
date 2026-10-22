@@ -54,4 +54,6 @@ object EngineIntent {
   final case class Register(diff: String) extends EngineIntent { def key: String = "register-miner" }
   final case class Commit(diff: String) extends EngineIntent { def key: String = "difficulty-commitment" }
   case object Consolidate extends EngineIntent { val key = "consolidation" }
+  /** Split the wallet into seed boxes after this miner's first registration confirms. */
+  case object Seed extends EngineIntent { val key = "seed" }
 }

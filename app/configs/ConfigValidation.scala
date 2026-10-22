@@ -92,8 +92,8 @@ object Configs {
         s"$optional exceeds wallet.max-wallet-inputs ($ceiling), which leaves nothing for a NISP " +
           "submission or fraud proof to fund itself with")
 
-    v.bool("wallet.consolidation.enabled")
-    v.range("wallet.consolidation.target-utxos", v.int("wallet.consolidation.target-utxos"),
+    val consolidating = v.bool("wallet.consolidation.enabled")
+    val mergeTarget = v.range("wallet.consolidation.target-utxos", v.int("wallet.consolidation.target-utxos"),
       1, Int.MaxValue, "desired total wallet UTXO count")
     v.longRange("wallet.consolidation.interval-ms", v.long("wallet.consolidation.interval-ms"),
       1000L, 86400000L, "milliseconds")
@@ -114,6 +114,14 @@ object Configs {
       5, 1440, "blocks out of the mempool")
     v.longRange("wallet.reconcile.hold-ceiling-ms", v.long("wallet.reconcile.hold-ceiling-ms"),
       3600000L, 604800000L, "milliseconds")
+    val seeding = v.bool("wallet.seed.on-initial-commitment")
+    val seedTarget = v.range("wallet.seed.target-utxos", v.int("wallet.seed.target-utxos"), 2, 256,
+      "plain wallet boxes after a seed")
+    // Consolidation merges whenever the wallet is above its own target, so a lower one undoes the seed
+    for (on <- seeding; merging <- consolidating; seeded <- seedTarget; merged <- mergeTarget
+         if on && merging && seeded >= merged)
+      v.problem("wallet.seed.target-utxos",
+        s"$seeded is not below wallet.consolidation.target-utxos ($merged), so consolidation would merge the seed back")
     // A walk that runs to its own limit would leave the pass nothing to sign and send in
     for (attempt <- attemptTimeout; walk <- v.long("wallet.inventory-walk-timeout-ms") if attempt <= walk)
       v.problem("wallet.consolidation.attempt-timeout-ms",
