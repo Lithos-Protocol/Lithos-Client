@@ -9,7 +9,7 @@ import sigma.ast.{ByteArrayConstant, Constant, ErgoTree, SType}
 import sigma.{Colls, VersionContext}
 import work.lithos.mutations.{Contract, Mutator}
 
-/** One of the four contracts every LithosDex deployment is made of, and the ids or hashes it takes. */
+/** One of the contracts a LithosDex deployment is made of, and the ids or hashes it takes. */
 sealed abstract class LDContractKind(val scriptName: String, val termNames: Seq[String])
 
 object LDContractKind {
@@ -21,8 +21,18 @@ object LDContractKind {
   case object ProvisionGuard extends LDContractKind("LD_Provision_Guard", Seq(PROVISION_LOGIC_HASH))
   case object FeeVault extends LDContractKind("LD_FeeVault", Seq(POOL_NFT, PROV_TOKEN))
   case object LiquidityPool extends LDContractKind("LD_LiquidityPool", Seq(VAULT_NFT, PROVISION_GUARD_HASH))
+  /** The token/token pool's vault, holding fees in both of the pool's tokens. */
+  case object T2TFeeVault extends LDContractKind("LD_T2T_FeeVault", Seq(POOL_NFT, PROV_TOKEN))
+  /** The token/token pool. */
+  case object T2TLiquidityPool extends LDContractKind("LD_T2T_LiquidityPool", Seq(VAULT_NFT, PROVISION_GUARD_HASH))
 
-  val all: Seq[LDContractKind] = Seq(Provision, ProvisionGuard, FeeVault, LiquidityPool)
+  /** The four contracts of an ERG/token deployment. */
+  val n2t: Seq[LDContractKind] = Seq(Provision, ProvisionGuard, FeeVault, LiquidityPool)
+
+  /** What a token/token deployment adds. It shares the provision logic and guard with [[n2t]]. */
+  val t2t: Seq[LDContractKind] = Seq(T2TFeeVault, T2TLiquidityPool)
+
+  val all: Seq[LDContractKind] = n2t ++ t2t
 }
 
 /**
@@ -38,6 +48,9 @@ object LDContractKind {
  *          -> LD_LiquidityPool (guard hash, vaultNFT)
  *   LD_FeeVault        (poolNFT, provToken)
  * }}}
+ *
+ * A token/token deployment swaps in LD_T2T_LiquidityPool and LD_T2T_FeeVault, which take the same terms,
+ * and keeps the same provision logic and guard.
  */
 object LithosDexContracts {
 
@@ -148,15 +161,84 @@ object LithosDexContracts {
       "9a721e735e937220721e93e4c6723204069972239d9c7239997223e4c672340406723a93e4c6723205069972279d9c72" +
       "39997227e4c672340506723a938c723d01723193b2723f735f00723d92c1723e9ac1723b72169272429a8cb2723c7360" +
       "017240027225ec938c7241017207937242736193e4c6723e0406722393e4c6723e0506722793720e7362937211736373" +
-      "64"))
+      "64"),
 
-  private lazy val templates: Map[LDContractKind, ContractTemplate] =
+    LDContractKind.T2TFeeVault ->
+      ("1ba7051f0400040204040400040006043b9aca0002000402040404020402040201010500050004000e205f5f5f5f5f5f" +
+      "5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f0502040004060400020103000200020004000e205d5d" +
+      "5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d0203020404000100d80dd601e4e30002d602" +
+      "b2a5db6508fe00d603db6308a7d604b27203730000d605b27203730100d606b27203730200d607b2a4730300d608efe6" +
+      "c67202060ed609e5e301047304d60ae4c6a70406d60be4c6a70506d60c7305d60d9c9c720c720c720c959372017306d8" +
+      "06d60edb63087202d60fb2720e730700d610b2720e730800d6119a72097309d612b0dc0c1db4a4730a721101b4a5730b" +
+      "72118602730c8602730d730ed901123c3d593c6363d809d6148c721201d6158c721202d6168c721501d617b2db630872" +
+      "16730f00d618e4c672160406d619e4c672160506d61a8c721502d61b8c721402d61c7ee4c672160705068602ed8c7214" +
+      "0196830701938c7217017310938c7217027311907218720a907219720bec8f7218720a8f7219720b93e4c6721a040672" +
+      "0a93e4c6721a0506720b86029a8c721b017d9d9c721c99720a7218720d059a8c721b027d9d9c721c99720b7219720d05" +
+      "d6138c721202d1eded9683070193c5a7c5720793c27202c2a793b2720e731200720493b1720e7313938c720f018c7205" +
+      "01938c7210018c7206017208ed8c72120191720973149683050192c17202c1a7928c720f02998c7205028c721301928c" +
+      "721002998c7206028c72130293e4c672020406720a93e4c672020506720b959372017315d801d60ee5dc650cfe027316" +
+      "7317027318d1edededed938cb2db6308720773190001731aec93720e731b93720e731c93c27202c2a793b2db63087202" +
+      "731d0072047208d1731e"),
+
+    LDContractKind.T2TLiquidityPool ->
+      ("1be71064040004020402040404040406040604000402040005feffffffffffffffff0105feffffffffffffffff010500" +
+      "050006043b9aca00040204000e206d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d0e20" +
+      "5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e04000400040004080500050004040200" +
+      "050005000500050004a09c010402050004a09c0104040500020104020400050005000500050204020580989abc040500" +
+      "05000502050202020402040005020500050005020580897a050102030402040004020402040405000500040004020404" +
+      "05000500050005000500020404020402040004000404040004040402040405000580897a050005000502050204020580" +
+      "989abc040502040004020404050005000100d834d601c5a7d602b2a5730000d603db63087202d604db6308a7d605b272" +
+      "03730100d606b27204730200d6078c720601d608b27203730300d609b27204730400d60a8c720901d60bb27203730500" +
+      "d60cb27204730600d60d8c720c01d60ee4c6a70511d60f8c720502d610e4c672020611d611b27210730700d61299720f" +
+      "7211d6138c720802d614b27210730800d6159972137214d616e4e30002d6178c720602d618e4c6a70611d619b2721873" +
+      "0900d61a9972177219d61b997212721ad61c9972117219d61d99730ae4c672020405d61e99730be4c6a70405d61f9972" +
+      "1d721ed620dad901200eb0a4730cd9012241639a8c722201b0db63088c722202730dd90124414d0ed802d6268c722402" +
+      "d6278c72240195938c72260172209a72278c722602722701720dd6218c720c02d6229372207221d6238c720b02d62473" +
+      "0ed6259c9c722472247224d626e4c6a70706d627e4c672020706d628b27218730f00d6299972147228d62ae4c6a70806" +
+      "d62be4c672020806d62c99720f7217d62d8c720902d62e997213722dd62f99722d7228d630b2720e731000d631997215" +
+      "722fd6327311d633ed937227722693722b722ad6347312d1ed96830c0193c5b2a4731300720193c27202c2a793b27203" +
+      "731400b27204731500938c7205017207938c720801720a938c720b01720d93b17203731693e4c672020511720e92c172" +
+      "02c1a7ed9172127317917215731893b172107319efe6c67202090e95937216731ad804d6357e721c06d6367e721e06d6" +
+      "377e722906d638ededededed93721f731b722293722372219372279a72269d9c72357225723693722b9a722a9d9c7237" +
+      "72257236ec94722c731c94722e731d9591721b731ed801d6397e731f06ededed929c9c7e722f067e721b067e7230069c" +
+      "7ef07231069a9c7e721a0672397e9c721b7230069372359d9c7eb2720e732000067e722c06723993722973217238d801" +
+      "d6397e732206ededed929c9c7e721a067e7231067e7230069c7ef0721b069a9c7e722f0672397e9c7231723006937237" +
+      "9d9c7eb2720e732300067e722e06723993721c73247238959372167325d804d6357e721e06d636b2a5732600d637db63" +
+      "087236d638b27237732700968312017233722293721c7328937229732991721f732a907e721f06a19d9c7e721b067235" +
+      "7e721a069d9c7e72310672357e722f0693cbc272367232938c723801720d938c723802732b93b17237732c92c1723673" +
+      "2defe6c67236080e93e4c672360406722693e4c672360506722a93e4c67236060e720193e4c672360705721f93dad901" +
+      "390eb0a5732ed9013b41639a8c723b01b0db63088c723b02732fd9013d414d0ed802d63f8c723d02d6408c723d019593" +
+      "8c723f0172399a72408c723f02724001720173309372239972217331959372167332d805d635b2a4733300d636b2db63" +
+      "087235733400d6377e721e06d6387e721f06d6399a7221733596830b01723393721c7336937229733793cbc272357232" +
+      "938c723601720d938c7236027338ed929c7e721b0672379c72387e721a06929c7e72310672379c72387e722f0692721d" +
+      "7339939c733a721fe4c6723507059372207239937223723995937216733bd807d635b2a4733c00d636db63087235d637" +
+      "b27236733d00d638b2a5733e00d639db63087238d63ab27239733f00d63bb27239734000968314017233722293722372" +
+      "21ec91721973419172287342938c723701723493b27239734300723793722cf0721993722ef0722892c17238c1723593" +
+      "8c723a017207938c723b01720a928c723a029a8cb27236734400027219928c723b029a8cb2723673450002722893e4c6" +
+      "72380406722693e4c672380506722a9372117346937214734793721f734893721b7349937231734a95937216734bd810" +
+      "d635b2a5734c00d636e4c672350705d637b2a4734d00d638e4c672370705d639b2db63087237734e00d63adb63087235" +
+      "d63bb2723a734f00d63c7e723806d63d7e723606d63eb2a4735000d63fdb6308723ed640b2723f735100d641b2a57352" +
+      "00d642db63087241d643b27242735300d644b2724273540096831f0172339591721f7355d801d6457e721e06907e721f" +
+      "06a19d9c7e721b0672457e721a069d9c7e72310672457e722f06d802d6457e721e06d6467e721f06ed929c7e721b0672" +
+      "459c72467e721a06929c7e72310672459c72467e722f0692721d735693721f997236723894721f7357917236735893cb" +
+      "c272377232938c723901720d938c723902735993cbc272357232938c723b01720d938c723b02735a93b1723a735b92c1" +
+      "7235735cefe6c67235080e93e4c67235060ee4c67237060e9372209a7221735d937223722193e4c6723504069972269d" +
+      "9c723c997226e4c672370406723d93e4c67235050699722a9d9c723c99722ae4c672370506723d938c724001723493b2" +
+      "7242735e00724092c17241c1723e938c7243017207938c724401720a928c7243029a8cb2723f735f00027219928c7244" +
+      "029a8cb2723f73600002722893e4c672410406722693e4c672410506722a937211736193721473627363"))
+
+  private def load(kinds: Seq[LDContractKind]): Map[LDContractKind, ContractTemplate] =
     VersionContext.withVersions(VersionContext.V6SoftForkVersion, VersionContext.V6SoftForkVersion) {
-      LDContractKind.all.map(kind => kind -> fromTree(kind, ErgoTree.fromHex(pinnedTrees(kind)))).toMap
+      kinds.map(kind => kind -> fromTree(kind, ErgoTree.fromHex(pinnedTrees(kind)))).toMap
     }
 
+  // Loaded apart, so a token/token template can never stop the ERG/token deployments' from loading
+  private lazy val n2tTemplates: Map[LDContractKind, ContractTemplate] = load(LDContractKind.n2t)
+  private lazy val t2tTemplates: Map[LDContractKind, ContractTemplate] = load(LDContractKind.t2t)
+
   /** The template for one contract, read from its pinned tree. */
-  def template(kind: LDContractKind): ContractTemplate = templates(kind)
+  def template(kind: LDContractKind): ContractTemplate =
+    if (LDContractKind.t2t.contains(kind)) t2tTemplates(kind) else n2tTemplates(kind)
 
   /** The pinned tree, sentinels included, as hex. */
   def pinnedTreeHex(kind: LDContractKind): String = pinnedTrees(kind)
@@ -243,6 +325,15 @@ object LithosDexContracts {
   def mkLPContract(vaultNFT: ErgoId, provisionGuardHash: Array[Byte]): Contract =
     build(LDContractKind.LiquidityPool, Map(VAULT_NFT -> vaultNFT.getBytes, PROVISION_GUARD_HASH -> provisionGuardHash))
 
+  /** LD_T2T_FeeVault — the token/token singleton holding flushed fees in both tokens. */
+  def mkT2TFeeVault(poolNFT: ErgoId, provToken: ErgoId): Contract =
+    build(LDContractKind.T2TFeeVault, Map(POOL_NFT -> poolNFT.getBytes, PROV_TOKEN -> provToken.getBytes))
+
+  /** LD_T2T_LiquidityPool — the token/token AMM. Takes the guard's `hashedPropBytes`, as [[mkLPContract]] does. */
+  def mkT2TLPContract(vaultNFT: ErgoId, provisionGuardHash: Array[Byte]): Contract =
+    build(LDContractKind.T2TLiquidityPool,
+      Map(VAULT_NFT -> vaultNFT.getBytes, PROVISION_GUARD_HASH -> provisionGuardHash))
+
   /**
    * The context var carrying the provision logic into a guard-locked box's spend. Every provision input
    * needs this attached alongside its own CTX_OP.
@@ -294,4 +385,31 @@ object LDContracts {
 
   def apply(ctx: BlockchainContext, poolNFT: ErgoId, vaultNFT: ErgoId, provToken: ErgoId): LDContracts =
     LDContracts(poolNFT, vaultNFT, provToken, ctx.getNetworkType)
+}
+
+/**
+ * Every contract for one token/token deployment. Users create these pools, so there are no fixed ids:
+ * each deployment's three ids come from its own genesis, and nothing here says that genesis was sound —
+ * see [[lithosdex.LDT2TGenesis]].
+ *
+ * @param poolNFT   singleton NFT of the pool
+ * @param vaultNFT  singleton NFT of the fee vault
+ * @param provToken id of the provision token, whose whole supply is minted into the pool at genesis
+ */
+case class LDT2TContracts(poolNFT: ErgoId, vaultNFT: ErgoId, provToken: ErgoId) {
+
+  /** LD_Provision, the same logic an ERG/token deployment runs. Never a box script. */
+  val provisionLogic: Contract = LithosDexContracts.mkProvisionLogic(poolNFT, vaultNFT)
+
+  /** LD_Provision_Guard. This is the address a provision box actually sits at. */
+  val provisionGuard: Contract = LithosDexContracts.mkProvisionGuard(provisionLogic.hashedValueBytes)
+
+  /** LD_T2T_FeeVault. */
+  val feeVault: Contract = LithosDexContracts.mkT2TFeeVault(poolNFT, provToken)
+
+  /** LD_T2T_LiquidityPool. */
+  val liquidityPool: Contract = LithosDexContracts.mkT2TLPContract(vaultNFT, provisionGuard.hashedPropBytes)
+
+  /** Attach to every provision input being spent, alongside its CTX_OP. */
+  val provisionLogicVar: ContextVar = LithosDexContracts.provisionLogicVar(provisionLogic)
 }

@@ -44,10 +44,13 @@ class LithosDexConstantsSpec extends AnyFlatSpec with Matchers {
   private lazy val pool = declared("LD_LiquidityPool.ergo")
   private lazy val vault = declared("LD_FeeVault.ergo")
   private lazy val provision = declared("LD_Provision.ergo")
+  private lazy val t2tPool = declared("LD_T2T_LiquidityPool.ergo")
+  private lazy val t2tVault = declared("LD_T2T_FeeVault.ergo")
 
-  /** All three sources together. A constant declared in two of them is checked against both. */
+  /** Every source together. A constant declared in several of them is checked against each. */
   private lazy val everywhere: Seq[(String, Map[String, String])] =
-    Seq("LD_LiquidityPool.ergo" -> pool, "LD_FeeVault.ergo" -> vault, "LD_Provision.ergo" -> provision)
+    Seq("LD_LiquidityPool.ergo" -> pool, "LD_FeeVault.ergo" -> vault, "LD_Provision.ergo" -> provision,
+      "LD_T2T_LiquidityPool.ergo" -> t2tPool, "LD_T2T_FeeVault.ergo" -> t2tVault)
 
   /** `10000000L`, `10000`, `0x7fffffffffffffffL` — the forms ErgoScript writes a whole number in. */
   private def asLong(literal: String): Long = {
@@ -86,7 +89,8 @@ class LithosDexConstantsSpec extends AnyFlatSpec with Matchers {
     // recomputing the factors rather than by string comparison, so reformatting the line is allowed
     // and changing a nine to an eight is not.
     val factors = """(\d+)L\.toBigInt""".r
-    Seq("LD_LiquidityPool.ergo" -> pool, "LD_FeeVault.ergo" -> vault).foreach { case (file, consts) =>
+    Seq("LD_LiquidityPool.ergo" -> pool, "LD_FeeVault.ergo" -> vault,
+      "LD_T2T_LiquidityPool.ergo" -> t2tPool, "LD_T2T_FeeVault.ergo" -> t2tVault).foreach { case (file, consts) =>
       withClue(s"$file declares no CONST_SCALE: ")(consts.keySet should contain("CONST_SCALE"))
       val product = factors.findAllMatchIn(consts("CONST_SCALE"))
         .map(m => BigInt(m.group(1)))
@@ -107,6 +111,13 @@ class LithosDexConstantsSpec extends AnyFlatSpec with Matchers {
       "CONST_SCALE")
     val all = everywhere.flatMap(_._2.keySet).toSet
     withClue("add it to this spec and to LDHelpers' in-script block: ")(all.diff(checked) shouldBe empty)
+  }
+
+  it should "leave the token/token pool and vault with no ERG floor of their own" in {
+    // Their ERG is storage that can never decrease, so MIN_RENT and VAULT_MIN have no counterpart
+    // there, and LDHelpers' genesis floors are the client's ask rather than a contract's
+    t2tPool.keySet should not contain "CONST_MIN_RENT"
+    t2tVault.keySet should not contain "CONST_VAULT_MIN"
   }
 
   // ─── the launch mint ──────────────────────────────────────────────────────

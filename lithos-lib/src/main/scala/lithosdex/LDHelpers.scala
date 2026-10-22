@@ -84,6 +84,26 @@ object LDHelpers {
   final val PROVISION_LOGIC_VAR: Byte = 64.toByte
 
   // ---------------------------------------------------------------------------------------------
+  // Token/token pools — what a sound genesis looks like
+  // ---------------------------------------------------------------------------------------------
+  //
+  // Users create these pools, so no contract enforces any of this. LD_T2T_LiquidityPool and
+  // LD_T2T_FeeVault share every in-script constant above except MIN_RENT and VAULT_MIN: their ERG is
+  // storage only and can never decrease. These are what [[LDT2TGenesis]] asks of a genesis.
+
+  /** Units of each pool token the vault is created with. A payout cannot take an entry to zero. */
+  final val T2T_VAULT_SEED: Long = 1L
+
+  /**
+   * ERG a genesis pool box should hold to survive two storage-fee collections at the current factor,
+   * at its largest (2,488 bytes). A pool idle long enough to lose the rest loses its reserves too.
+   */
+  final val T2T_POOL_MIN_VALUE: Long = 6250000000L
+
+  /** The same for the vault (912 bytes at its largest), whose tokens are unclaimed fees. */
+  final val T2T_VAULT_MIN_VALUE: Long = 2300000000L
+
+  // ---------------------------------------------------------------------------------------------
   // Injected constants
   // ---------------------------------------------------------------------------------------------
 

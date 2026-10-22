@@ -1,6 +1,6 @@
 package contracts.specs.lithosdex
 
-import lithosdex.contracts.{LDOrderKind, LDOrderContracts}
+import lithosdex.contracts.{LDOrderContracts, LDOrderKind, LDT2TOrderKind}
 import org.bouncycastle.util.encoders.Hex
 import org.ergoplatform.appkit._
 import org.ergoplatform.sdk.ContractTemplate
@@ -25,7 +25,7 @@ class LDOrderTemplateSpec extends AnyPropSpec with LDOrderSpecBase {
    */
   property("templates: the pinned trees are exactly what the .ergo sources compile to") {
     withCtx { _ =>
-      val drifted = LDOrderKind.all.flatMap { kind =>
+      val drifted = (LDOrderKind.all ++ LDT2TOrderKind.all).flatMap { kind =>
         val hex = Hex.toHexString(LDOrderContracts.compileSource(kind).bytes)
         if (hex == LDOrderContracts.pinnedTreeHex(kind)) None
         else Some(s"${kind.scriptName} compiles to:\n" + hex.grouped(96).map(l => "\"" + l + "\"").mkString(" +\n"))

@@ -17,10 +17,36 @@ import java.math.BigInteger
 /**
  * What a LithosDex order asks the pool to do.
  *
- * @param inputIndex where the order sits in an executing transaction; the contract refuses anywhere else
- * @param poolOp     the pool operation an execution must run, which the contract reads from input 0
+ * inputIndex is where the order sits in an executing transaction; the contract refuses anywhere else.
+ * poolOp is the pool operation an execution must run, which the contract reads from input 0.
  */
+sealed trait LDOrderScript {
+  def scriptName: String
+  def inputIndex: Int
+  def poolOp: Byte
+}
+
+/** An order against an ERG/token pool. */
 sealed abstract class LDOrderKind(val scriptName: String, val inputIndex: Int, val poolOp: Byte)
+  extends LDOrderScript
+
+/**
+ * An order against a token/token pool. A type of its own so nothing that scans or matches the ERG/token
+ * kinds ever meets one.
+ */
+sealed abstract class LDT2TOrderKind(val scriptName: String, val inputIndex: Int, val poolOp: Byte)
+  extends LDOrderScript
+
+object LDT2TOrderKind {
+  /** One of the pool's tokens in, the other out. The token held decides the direction. */
+  case object Swap extends LDT2TOrderKind("LD_T2T_SwapOrder", 1, LDHelpers.POOL_SWAP)
+  /** Both tokens in, a provision and its ownership NFT out. */
+  case object Deposit extends LDT2TOrderKind("LD_T2T_DepositOrder", 1, LDHelpers.POOL_DEPOSIT)
+  /** An ownership NFT in, the provision's share of both reserves out. The provision is input 1. */
+  case object Redeem extends LDT2TOrderKind("LD_T2T_RedeemOrder", 2, LDHelpers.POOL_REDEEM)
+
+  val all: Seq[LDT2TOrderKind] = Seq(Swap, Deposit, Redeem)
+}
 
 object LDOrderKind {
   /** ERG in, the pool's token out. */
@@ -55,7 +81,7 @@ final case class LDOrderTerms(redeemer: SigmaBoolean,
  * Never compile an order with its real values instead: the compiler rewrites `x - 0` to `x` and `x * 1`
  * to `x` and merges equal constants, so the template would depend on the values and no scan would find it.
  */
-final case class LDOrderTemplate(kind: LDOrderKind, template: ContractTemplate) {
+final case class LDOrderTemplate(kind: LDOrderScript, template: ContractTemplate) {
 
   /** Template bytes as a node reports them: the expression with its constants left as placeholders. */
   lazy val templateBytes: Array[Byte] = template.applyTemplate(None, sentinelValues).template
@@ -84,10 +110,11 @@ final case class LDOrderTemplate(kind: LDOrderKind, template: ContractTemplate) 
 }
 
 /**
- * The four LithosDex order contracts.
+ * The LithosDex order contracts: four against ERG/token pools, three against token/token pools.
  *
  * Templates come from pinned trees, so nothing here compiles at runtime. Build orders through
- * `swapSell`, `swapBuy`, `deposit` and `redeem`, which apply those templates.
+ * `swapSell`, `swapBuy`, `deposit` and `redeem`, or `t2tSwap`, `t2tDeposit` and `t2tRedeem`, which apply
+ * those templates.
  */
 object LDOrderContracts {
 
@@ -113,17 +140,28 @@ object LDOrderContracts {
     DEPOSIT_X        -> "Most nanoERG offered to the pool's reserves, not counting the provision box.",
     MIN_SHARES       -> "Fewest shares the owner accepts for their funds, against the pool the order executes on.")
 
+  private val t2tDescriptions: Map[String, String] =
+    descriptions + (MIN_QUOTE -> "Fewest of the pool's other token the owner accepts for the token sold.")
+
   // Sentinels are numbered by position here, so a new term goes last and no pinned tree moves
   private val amountNames = Seq(EXECUTOR_FEE, MAX_MINER_FEE, BASE_AMOUNT, MIN_QUOTE, DEPOSIT_X, MIN_SHARES)
 
-  private def namesFor(kind: LDOrderKind): Seq[String] = {
+  private def namesFor(kind: LDOrderScript): Seq[String] = {
     val common = Seq(REDEEMER, POOL_NFT, EXECUTOR_FEE, MAX_MINER_FEE)
     kind match {
-      case LDOrderKind.SwapSell => common ++ Seq(BASE_AMOUNT, MIN_QUOTE)
-      case LDOrderKind.SwapBuy  => common :+ MIN_QUOTE
-      case LDOrderKind.Deposit  => common ++ Seq(DEPOSIT_X, MIN_SHARES)
-      case LDOrderKind.Redeem   => common
+      case LDOrderKind.SwapSell   => common ++ Seq(BASE_AMOUNT, MIN_QUOTE)
+      case LDOrderKind.SwapBuy    => common :+ MIN_QUOTE
+      case LDOrderKind.Deposit    => common ++ Seq(DEPOSIT_X, MIN_SHARES)
+      case LDOrderKind.Redeem     => common
+      case LDT2TOrderKind.Swap    => common :+ MIN_QUOTE
+      case LDT2TOrderKind.Deposit => common :+ MIN_SHARES
+      case LDT2TOrderKind.Redeem  => common
     }
+  }
+
+  private def descriptionsFor(kind: LDOrderScript): Map[String, String] = kind match {
+    case _: LDT2TOrderKind => t2tDescriptions
+    case _                 => descriptions
   }
 
   // Sentinels differ from each other and from every literal the scripts declare, and are never 0 or 1,
@@ -146,7 +184,7 @@ object LDOrderContracts {
    * ever placed carries this template, so a compiler that emitted anything different would leave all of
    * them invisible to a scan. `LDOrderTemplateSpec` compiles the sources and fails on any difference.
    */
-  private val pinnedTrees: Map[LDOrderKind, String] = Map(
+  private val pinnedTrees: Map[LDOrderScript, String] = Map(
     LDOrderKind.SwapSell ->
       ("1ba6041a040008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179806084c444f5503" +
       "0303030402040004000e205d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d0100040204" +
@@ -203,24 +241,80 @@ object LDOrderContracts {
       "650cfe02730d730e02730f731093e4c67203060e8cb2db6308a77311000193c27204d07202927ec1720406999a7e9ac1" +
       "a7c17203069d9c72057e99c17201b272067312000672077313938c720a017209927e8c720a02069d9c72057e998c7208" +
       "02b27206731400067207907eb0a57315d9010b4163d802d60d8c720b02d60e8c720b019593c2720d73169a720ec1720d" +
-      "720e0673177202"))
+      "720e0673177202"),
 
-  private lazy val templates: Map[LDOrderKind, LDOrderTemplate] =
+    LDT2TOrderKind.Swap ->
+      ("1bf9041c040008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f817980402040004000e" +
+      "205d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d010004000402040404020400040204" +
+      "0004a09c010402040404000300020002ff020006084c444f560404040406084c444f530101010106010105000e691005" +
+      "040004000e36100204a00b08cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ea02" +
+      "d192a39a8cc7a701730073011001020402d19683030193a38cc7b2a57300000193c2b2a57301007473027303830108cd" +
+      "eeac93b1a5730406084c444f5402020202d802d601b2a4730000d60273019595ed93db6508fe730291b1db6308720173" +
+      "03938cb2db630872017304000173057306d813d603b2db6308a7730700d6048c720301d605db63087201d606b2720573" +
+      "0800d6078c720601d6089372047207d609b27205730900d60a8c720901d60bb2a5730a00d60cb2db6308720b730b00d6" +
+      "0d7e8c720c0206d60ee4c672010611d60f998c720902b2720e730c00d610998c720602b2720e730d00d6117e8c720302" +
+      "06d612e4c672010511d6137e730e06d6149972119d9c72117e957208b27212730f00b27212731000067213d6157eb272" +
+      "1273110006d19683080193e5dc650cfe02731273130273147315ec7208937204720a93c2720bd07202938c720c019572" +
+      "08720a720792720d7316927ec1720b06997ec1a7067317909c9c7e957208720f721006721472159c9a720d73189a9c7e" +
+      "9572087210720f0672139c72147215907eb0a57319d901164163d802d6188c721602d6198c7216019593c27218731a9a" +
+      "7219c17218721906731b7202"),
+
+    LDT2TOrderKind.Deposit ->
+      ("1be4051e040008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f817980402040004000e" +
+      "205d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d0100040004020402040405feffffff" +
+      "ffffffffff0104000402040204040300020002ff020106084c444f5806060606040006084c444f530101010105000601" +
+      "00050006010005000e691005040004000e36100204a00b08cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce" +
+      "28d959f2815b16f81798ea02d192a39a8cc7a701730073011001020402d19683030193a38cc7b2a57300000193c2b2a5" +
+      "7301007473027303830108cdeeac93b1a5730406084c444f5402020202d802d601b2a4730000d60273019595ed93db65" +
+      "08fe730291b1db630872017303938cb2db630872017304000173057306d812d603db6308a7d604b27203730700d605db" +
+      "63087201d606b27205730800d6078c720601d608b27203730900d609b27205730a00d60a8c720901d60b7e99730be4c6" +
+      "7201040506d60ce4c672010611d60d7e998c720602b2720c730c0006d60e9d9c7e8c72040206720b720dd60f7e998c72" +
+      "0902b2720c730d0006d6109d9c7e8c72080206720b720fd611a1720e7210d612b2a5730e00d613b2a5730f00d614db63" +
+      "087213d196830b0193e5dc650cfe02731073110273127313938c7204017207938c720801720a9272117314927ee4c672" +
+      "12070506721193c27213d07202938cb2721473150001c57201927e9ac17213c1721206997ec1a7067316927eb0721473" +
+      "17d90115414d0ed802d6178c721502d6188c72150195938c72170172079a72188c7217027218069591720e72109d9c99" +
+      "720e7210720d720b7318927eb072147319d90115414d0ed802d6178c721502d6188c72150195938c721701720a9a7218" +
+      "8c72170272180695917210720e9d9c997210720e720f720b731a907eb0a5731bd901154163d802d6178c721502d6188c" +
+      "7215019593c27217731c9a7218c17217721806731d7202"),
+
+    LDT2TOrderKind.Redeem ->
+      ("1be20419040008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f817980404040004000e" +
+      "205d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d010004020402040205feffffffffff" +
+      "ffffff0104040300020002ff0202040006084c444f5301010101050004000500040205000e691005040004000e361002" +
+      "04a00b08cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ea02d192a39a8cc7a701" +
+      "730073011001020402d19683030193a38cc7b2a57300000193c2b2a57301007473027303830108cdeeac93b1a5730406" +
+      "084c444f5402020202d802d601b2a4730000d60273019595ed93db6508fe730291b1db630872017303938cb2db630872" +
+      "017304000173057306d809d603b2a4730700d604b2a5730800d605db63087204d606db63087201d607b27206730900d6" +
+      "087ee4c67203070506d609e4c672010611d60a7e99730ae4c67201040506d60bb27206730b00d19683070193e5dc650c" +
+      "fe02730c730d02730e730f93e4c67203060e8cb2db6308a77310000193c27204d07202927ec1720406997e9ac1a7c172" +
+      "03067311927eb072057312d9010c414d0ed802d60e8c720c02d60f8c720c0195938c720e018c7207019a720f8c720e02" +
+      "720f069d9c72087e998c720702b2720973130006720a927eb072057314d9010c414d0ed802d60e8c720c02d60f8c720c" +
+      "0195938c720e018c720b019a720f8c720e02720f069d9c72087e998c720b02b2720973150006720a907eb0a57316d901" +
+      "0c4163d802d60e8c720c02d60f8c720c019593c2720e73179a720fc1720e720f0673187202"))
+
+  private def load[K <: LDOrderScript](kinds: Seq[K]): Map[K, LDOrderTemplate] =
     VersionContext.withVersions(VersionContext.V6SoftForkVersion, VersionContext.V6SoftForkVersion) {
-      LDOrderKind.all.map(kind => kind -> fromTree(kind, ErgoTree.fromHex(pinnedTrees(kind)))).toMap
+      kinds.map(kind => kind -> fromTree(kind, ErgoTree.fromHex(pinnedTrees(kind)))).toMap
     }
+
+  // Loaded apart, so a token/token template can never stop the ERG/token orders' from loading
+  private lazy val templates: Map[LDOrderKind, LDOrderTemplate] = load(LDOrderKind.all)
+  private lazy val t2tTemplates: Map[LDT2TOrderKind, LDOrderTemplate] = load(LDT2TOrderKind.all)
 
   /** The template for one order kind, read from its pinned tree. */
   def template(kind: LDOrderKind): LDOrderTemplate = templates(kind)
 
+  /** The template for one token/token order kind, read from its pinned tree. */
+  def template(kind: LDT2TOrderKind): LDOrderTemplate = t2tTemplates(kind)
+
   /** The pinned tree, sentinels included, as hex. */
-  def pinnedTreeHex(kind: LDOrderKind): String = pinnedTrees(kind)
+  def pinnedTreeHex(kind: LDOrderScript): String = pinnedTrees(kind)
 
   /**
    * Compiles an order's `.ergo` source with sentinel terms, which is what the pinned tree must equal.
    * For the drift spec and for re-pinning only: compiling a script twice in one JVM can throw.
    */
-  def compileSource(kind: LDOrderKind): ErgoTree = {
+  def compileSource(kind: LDOrderScript): ErgoTree = {
     val builder = ConstantsBuilder.create()
     namesFor(kind).foreach(name => builder.item(name, sentinel(name).value.asInstanceOf[AnyRef]))
     builder.item(MINER_FEE_PROP, Colls.fromArray(Contract.FEE.propBytes))
@@ -229,7 +323,7 @@ object LDOrderContracts {
       ScriptGenerator.mkLithosDexScript(kind.scriptName), Seq.empty[Mutator]).ergoTree
   }
 
-  private def fromTree(kind: LDOrderKind, tree: ErgoTree): LDOrderTemplate = {
+  private def fromTree(kind: LDOrderScript, tree: ErgoTree): LDOrderTemplate = {
     val names = namesFor(kind)
     val constants = tree.constants
     def describe = constants.zipWithIndex.map { case (c, i) => s"$i: ${c.tpe} = ${c.value}" }.mkString("; ")
@@ -261,7 +355,7 @@ object LDOrderContracts {
       description = s"LithosDex ${kind.scriptName}, executed with pool operation ${kind.poolOp} at input ${kind.inputIndex}",
       constTypes = constants.map(_.tpe),
       constValues = Some(constants.indices.map(i => if (claimed(i)) None else Some(constants(i).value))),
-      parameters = names.map(n => Parameter(n, descriptions(n), indices(n))).toIndexedSeq,
+      parameters = names.map(n => Parameter(n, descriptionsFor(kind)(n), indices(n))).toIndexedSeq,
       expressionTree = tree.toProposition(false))
     LDOrderTemplate(kind, template)
   }
@@ -294,4 +388,22 @@ object LDOrderContracts {
   /** Close the provision owned by the NFT the order box holds at token 0. */
   def redeem(terms: LDOrderTerms): Contract =
     template(LDOrderKind.Redeem).withValues(common(terms))
+
+  /**
+   * Sell every unit of whichever of the pool's tokens the order box holds at token 0, for at least
+   * `minQuote` of the other. The executor fee comes out of the box's ERG.
+   */
+  def t2tSwap(terms: LDOrderTerms, minQuote: Long): Contract =
+    template(LDT2TOrderKind.Swap).withValues(common(terms) + (MIN_QUOTE -> amount(minQuote)))
+
+  /**
+   * Deposit every unit of token X at token 0 and token Y at token 1, for at least `minShares`. The box
+   * must also fund the provision box, which the pool requires to hold at least [[LDHelpers.PROVISION_MIN]].
+   */
+  def t2tDeposit(terms: LDOrderTerms, minShares: Long): Contract =
+    template(LDT2TOrderKind.Deposit).withValues(common(terms) + (MIN_SHARES -> amount(minShares)))
+
+  /** Close the token/token provision owned by the NFT the order box holds at token 0. */
+  def t2tRedeem(terms: LDOrderTerms): Contract =
+    template(LDT2TOrderKind.Redeem).withValues(common(terms))
 }
