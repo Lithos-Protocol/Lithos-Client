@@ -218,10 +218,10 @@ class StratumConnection(subscriptionId: String,
         case ShareRejected(id, msg, rejectedNonce1) =>
           id match {
             case 21 =>
-              // Share may be stale, but we don't send any errors to client.
-              logger.warn(s"Potentially stale share from ${workerName(requestId)} on connection $connectionId")
-              safeResponse(connection.sendResponse(Response.submit(requestId, trueResult, null)))
-              //currentJob.foreach(job => safeResponse(connection.sendResponse(Announcement.miningJob(job))))
+              // Rejected like any other share error so the miner counts it as stale. Logged at warn
+              // rather than error: a share in flight when its job ages out or is invalidated is routine.
+              logger.warn(s"Stale share from ${workerName(requestId)} on connection $connectionId")
+              safeResponse(connection.sendResponse(Response.submit(requestId, null, s"$id: $msg")))
 
             case 22 =>
               // Duplicate nonce: if it's OUR extraNonce1 that caused it, rotate

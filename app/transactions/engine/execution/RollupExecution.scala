@@ -228,8 +228,8 @@ class RollupExecution(nodeContext: NodeContext, walletManager: ActorRef, syncHan
       ancestorIds = transformAncestors
       withinAncestorCap(ancestorIds)
       client.execute { ctx =>
-        require(stub.currentPeriod == metadata.currentPeriod && stub.validate(blockHeight, metadata),
-          s"transform is not eligible at candidate height $blockHeight")
+        if (stub.currentPeriod != metadata.currentPeriod || !stub.validate(blockHeight, metadata))
+          throw new TransformIneligibleException(s"transform is not eligible at candidate height $blockHeight")
         val signed = if (stub.txType == HoldingTransform)
           RollupTransactions.genHoldingTransform(ctx, wallet, input, Seq.empty, Seq.empty, blockHeight)
         else RollupTransactions.genEvalTransform(ctx, wallet, input, Seq.empty, Seq.empty, blockHeight)
@@ -656,6 +656,8 @@ class RollupExecution(nodeContext: NodeContext, walletManager: ActorRef, syncHan
       // The rest are terminal for this attempt but not for the rollup, so they say why and stop.
       case Failure(nv: NoValidNISPException) =>
         logger.warn(nv.getMessage)
+      case Failure(ineligible: TransformIneligibleException) =>
+        logger.warn(s"[${stub.txType}] for rollup ${stub.rollupBlockId}: ${ineligible.getMessage}")
       case Failure(illegalState: IllegalStateException) =>
         logger.warn(illegalState.getMessage)
       case Failure(removed: RollupRemovedException) =>
@@ -759,8 +761,8 @@ class RollupExecution(nodeContext: NodeContext, walletManager: ActorRef, syncHan
     val (input, metadata, _) = transformInput(stub)
     client.execute { ctx =>
       val height = RollupExecution.pooledHeight(ctx)
-      require(stub.currentPeriod == metadata.currentPeriod && stub.validate(height, metadata),
-        "transform is no longer eligible")
+      if (stub.currentPeriod != metadata.currentPeriod || !stub.validate(height, metadata))
+        throw new TransformIneligibleException(s"transform is no longer eligible at height $height")
       val initOutputs = initialTxInfo.map(initialTxOutputs(stub, _))
       val fees = mkFeeOutputs(stub, initOutputs)
       val funding = rollupWalletInputs(stub, initialTxInfo)
