@@ -738,11 +738,18 @@ class CandidateBuilderSpec extends TestKit(ActorSystem("candidate-builder-spec",
     drawn shouldBe boxes.take(2).map(_.id).toSet
   }
 
-  it should "tie bids in the same 0.001 ERG step and leave out the step below" in {
+  it should "tie priority fees in the same 0.001 ERG step and leave out the step below" in {
     // Lenders outbid one another by a nanoERG or two, so the exact top bid is often a single box.
-    val boxes = boxesWith(Seq((1000000L, 150, 6000003L), (2000000L, 150, 6000000L), (3000000L, 150, 6999999L),
+    // Finder shares here: priority fees 0.030000015, 0.030, 0.030999995 and 0.029999995 ERG.
+    val boxes = boxesWith(Seq((1000000L, 150, 6000003L), (2000000L, 150, 6000000L), (3000000L, 150, 6199999L),
       (4000000L, 150, 5999999L)))
     CandidateTxBuilder.bestCandidates(boxes, 200).map(_.id) shouldBe boxes.take(3).map(_.id)
+  }
+
+  it should "separate priority fees one step apart even within a 0.001 ERG step of finder share" in {
+    // 0.0002 ERG of finder share is 0.001 ERG of priority fee: 0.031 against 0.030.
+    val boxes = boxesWith(Seq((1000000L, 150, 6200000L), (2000000L, 150, 6000000L)))
+    CandidateTxBuilder.bestCandidates(boxes, 200).map(_.id) shouldBe Seq(boxes.head.id)
   }
 
   it should "let a bid one full step higher win alone, rounding steps down" in {

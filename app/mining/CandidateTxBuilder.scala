@@ -2,7 +2,7 @@ package mining
 
 import configs.CandidateConfig
 import lfsm.states.RollupInfoState
-import lfsm.{EmissionSchedule, LFSMHelpers, RollupProtocol}
+import lfsm.{CollateralParams, EmissionSchedule, LFSMHelpers, RollupProtocol}
 import mutations.NodeWallet
 import node.MutationConversions._
 import node.NodeApi
@@ -58,12 +58,15 @@ object CandidateTxBuilder {
   private[mining] final val MaxCollateralCarriers: Int = 2 * EmissionSchedule.MAX_ACTIVE + 1
 
   /**
-   * Bids compare in whole 0.001 ERG steps of the finder's share, rounded down. Lenders outbid one
+   * Bids compare in whole 0.001 ERG steps of the priority fee, rounded down. Lenders outbid one
    * another by a few nanoERG, so an exact comparison often leaves a single box; within a step they tie.
    */
   final val BidStep: Long = 1000000L
 
-  private def bidStep(candidate: CollateralCandidate): Long = candidate.finderFee / BidStep
+  /** `BidStep` in finder's-share terms, so the comparison divides an R4 a lender chose and cannot overflow. */
+  private val FinderShareStep: Long = BidStep / (1L + CollateralParams.POOL_MULTIPLE)
+
+  private def bidStep(candidate: CollateralCandidate): Long = candidate.finderFee / FinderShareStep
 
   /**
    * The boxes that tie for best, for the caller to draw from at random. A box whose confirmed age has
