@@ -5253,8 +5253,9 @@ components:
           type: string
           enum: [highestFee, random]
           description: >-
-            How the collateral box is picked. `highestFee` takes the highest priority fee, at random
-            among equal fees, until a box reaches `clearanceAge`; `random` draws from every usable box.
+            How the collateral box is picked. `highestFee` takes the highest priority fee, compared in
+            0.005 ERG steps and drawn at random within a step, until a box reaches `clearanceAge`;
+            `random` draws from every usable box.
         clearanceAge:
           type: integer
           description: >-

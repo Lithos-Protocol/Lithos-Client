@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="generator" content="Docusaurus v3.7.0">
 <title data-rh="true">Block packages | Lithos Client</title><meta data-rh="true" name="viewport" content="width=device-width,initial-scale=1"><meta data-rh="true" name="twitter:card" content="summary_large_image"><meta data-rh="true" property="og:url" content="http://localhost:9000/assets/docs/configuration/candidate"><meta data-rh="true" property="og:locale" content="en"><meta data-rh="true" name="docusaurus_locale" content="en"><meta data-rh="true" name="docsearch:language" content="en"><meta data-rh="true" name="docusaurus_version" content="current"><meta data-rh="true" name="docusaurus_tag" content="docs-default-current"><meta data-rh="true" name="docsearch:version" content="current"><meta data-rh="true" name="docsearch:docusaurus_tag" content="docs-default-current"><meta data-rh="true" property="og:title" content="Block packages | Lithos Client"><meta data-rh="true" name="description" content="How the client assembles the blocks it mines, and what each transaction source may contribute."><meta data-rh="true" property="og:description" content="How the client assembles the blocks it mines, and what each transaction source may contribute."><link data-rh="true" rel="icon" href="/assets/img/favicon.ico"><link data-rh="true" rel="canonical" href="http://localhost:9000/assets/docs/configuration/candidate"><link data-rh="true" rel="alternate" href="http://localhost:9000/assets/docs/configuration/candidate" hreflang="en"><link data-rh="true" rel="alternate" href="http://localhost:9000/assets/docs/configuration/candidate" hreflang="x-default"><link rel="stylesheet" href="/assets/css/styles.632162da.css">
-<script src="/assets/js/runtime~main.a6a0c2ab.js" defer="defer"></script>
+<script src="/assets/js/runtime~main.bc16a993.js" defer="defer"></script>
 <script src="/assets/js/main.7c0f1f43.js" defer="defer"></script>
 </head>
 <body class="navigation-with-keyboard">
@@ -31,9 +31,14 @@ is the only moment a collateral box can be spent.</p>
 <ol>
 <li>If any box has been live for <code>clearanceAge</code> blocks or more, the oldest of those is drawn, whatever
 the others offer.</li>
-<li>Otherwise the box offering the finder the largest priority fee is drawn. Boxes tied on that fee are
-drawn at random, whatever their age.</li>
+<li>Otherwise the box offering the finder the largest priority fee is drawn. Fees compare by the
+finder&#x27;s fifth, rounded down to whole 0.001 ERG steps, and boxes in the same step are drawn at
+random, whatever their age.</li>
 </ol>
+<p><strong>Bids compare in steps of 0.005 ERG of priority fee.</strong> A priority fee of 0.012 ERG gives the finder
+0.0024 ERG and ties with one of 0.010 ERG, which gives 0.002 ERG. Any priority fee under 0.005 ERG ties
+with a box that offers nothing. To outbid another lender, offer enough to reach the next step.
+Overdue boxes of the same age compare the same way.</p>
 <p>The default of 7200 blocks is about 10 days on mainnet. Until a box reaches it, lenders compete on
 priority fee alone, which is what makes paying one worth anything. The age rule then clears boxes that
 offer nothing, so no box waits in the active set forever.</p>
