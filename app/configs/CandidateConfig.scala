@@ -20,7 +20,8 @@ case class CandidateConfig(collateralPoolSize: Int,
                            refreshForProtocolTxs: Boolean = true,
                            minNewProtocolTxs: Int = 1,
                            pinnedInputs: Int = 1,
-                           collateralStrategy: String = CandidateConfig.HighestFee) {
+                           collateralStrategy: String = CandidateConfig.HighestFee,
+                           cacheRefreshMs: Int = 30000) {
 
   /** One source's limits. Every source this client wires has an entry, so any other name is a defect. */
   def limitsFor(name: String): CandidateSourceConfig =
@@ -39,6 +40,13 @@ object CandidateConfig {
    */
   final val MinClearanceAge: Int = 100
   final val MaxClearanceAge: Int = 14400
+
+  /**
+   * Bounds on `cacheRefreshMs`. The node replaces a cached candidate once it is 60 s old, so a re-send
+   * must reach it within 60 s of that; the upper bound leaves 5 s for a request already in flight.
+   */
+  final val MinCacheRefreshMs: Int = 20000
+  final val MaxCacheRefreshMs: Int = 55000
 
   /** Mirrors the `stratum.candidate` block in `application.conf`; keep the two in step. */
   val Default: CandidateConfig = CandidateConfig(
@@ -73,7 +81,8 @@ object CandidateConfig {
     refreshForProtocolTxs = true,
     minNewProtocolTxs = 1,
     pinnedInputs = 1,
-    collateralStrategy = HighestFee
+    collateralStrategy = HighestFee,
+    cacheRefreshMs = 30000
   )
 
   /**
@@ -121,7 +130,8 @@ object CandidateConfig {
       minNewProtocolTxs = int("minNewProtocolTxs", Default.minNewProtocolTxs),
       pinnedInputs = int("pinnedInputs", Default.pinnedInputs),
       collateralStrategy = config.getOptional[String]("stratum.candidate.collateralStrategy")
-        .getOrElse(Default.collateralStrategy)
+        .getOrElse(Default.collateralStrategy),
+      cacheRefreshMs = int("cacheRefreshMs", Default.cacheRefreshMs)
     )
   }
 }

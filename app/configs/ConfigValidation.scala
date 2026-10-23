@@ -212,6 +212,9 @@ object Configs {
     }
     v.range("stratum.candidate.genesisWaitMs", v.int("stratum.candidate.genesisWaitMs"), 0, 60000, "ms to wait for the genesis transaction before falling back to a solo candidate")
     v.range("stratum.candidate.mempoolRefreshMs", v.int("stratum.candidate.mempoolRefreshMs"), 0, 3600000, "ms between candidate refreshes within a block; 0 mines the block's initial transaction set")
+    v.range("stratum.candidate.cacheRefreshMs", v.int("stratum.candidate.cacheRefreshMs"),
+      configs.CandidateConfig.MinCacheRefreshMs, configs.CandidateConfig.MaxCacheRefreshMs,
+      "ms between re-sending the served package, so the node keeps the job miners are on")
     v.range("stratum.candidate.blockTxTimeout", v.int("stratum.candidate.blockTxTimeout"), 0, 600000, "ms")
     v.range("stratum.candidate.sources.rent.startBehindBlocks",
       v.int("stratum.candidate.sources.rent.startBehindBlocks"), 0, 1000000,

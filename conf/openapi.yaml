@@ -5196,7 +5196,7 @@ components:
       type: object
       x-tags: mining
       required: [blockTransactions, sources, blockShare, waitForBlockPackage, genesisWaitMs,
-                 blockTxTimeout, mempoolRefreshMs, minCandidateChangeRevenue, refreshForProtocolTxs,
+                 blockTxTimeout, mempoolRefreshMs, cacheRefreshMs, minCandidateChangeRevenue, refreshForProtocolTxs,
                  minNewProtocolTxs, collateralStrategy, clearanceAge, pinnedInputs, defaultClearanceAge,
                  maxClearanceAge]
       properties:
@@ -5229,6 +5229,11 @@ components:
         mempoolRefreshMs:
           type: integer
           description: Milliseconds between mid-block package rebuilds. 0 turns them off.
+        cacheRefreshMs:
+          type: integer
+          description: >-
+            Milliseconds between re-sending the served package to the Ergo node, so the node keeps the
+            job miners are on. Between 20000 and 55000.
         minCandidateChangeRevenue:
           type: integer
           format: int64

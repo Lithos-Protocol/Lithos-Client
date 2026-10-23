@@ -19,6 +19,7 @@ class CandidateSettingsSpec extends AnyFlatSpec with Matchers {
     settings.sources.map(_.name) shouldBe Seq("rollups", "emissions", "rent", "forwards", "lithosdex", "ergodex")
     settings.sources.filter(_.active).map(_.name) shouldBe Seq("rollups", "emissions", "rent", "forwards", "lithosdex", "ergodex")
     settings.mempoolRefreshMs shouldBe 20000
+    settings.cacheRefreshMs shouldBe 30000
     settings.minCandidateChangeRevenue shouldBe 1000000L
     settings.collateralStrategy shouldBe "highestFee"
     settings.clearanceAge shouldBe 7200

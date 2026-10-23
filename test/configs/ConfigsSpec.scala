@@ -54,6 +54,18 @@ class ConfigsSpec extends AnyFlatSpec with Matchers {
     thrown.getMessage should include("wallet.max-inputs")
   }
 
+  it should "bound the node cache refresh to 20000 through 55000 ms" in {
+    def withRefresh(ms: Int): Configuration = Configuration(ConfigFactory.parseString(
+      s"stratum.candidate.cacheRefreshMs = $ms").withFallback(shipped.underlying).resolve())
+    Seq(20000, 30000, 55000).foreach { ms =>
+      withClue(s"cacheRefreshMs $ms: ")(noException should be thrownBy Configs.validateAll(withRefresh(ms)))
+    }
+    Seq(0, 19999, 55001, 60000).foreach { ms =>
+      val thrown = the[ConfigValidationException] thrownBy Configs.validateAll(withRefresh(ms))
+      thrown.getMessage should include("stratum.candidate.cacheRefreshMs")
+    }
+  }
+
   it should "bound pinned inputs to 0 through 16" in {
     def withPins(pins: Int): Configuration = Configuration(ConfigFactory.parseString(
       s"stratum.candidate.pinnedInputs = $pins").withFallback(shipped.underlying).resolve())

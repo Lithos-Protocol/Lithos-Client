@@ -25,6 +25,7 @@ case class CandidateSettings(blockTransactions: Boolean,
                              genesisWaitMs: Int,
                              blockTxTimeout: Int,
                              mempoolRefreshMs: Int,
+                             cacheRefreshMs: Int,
                              minCandidateChangeRevenue: Long,
                              refreshForProtocolTxs: Boolean,
                              minNewProtocolTxs: Int,
@@ -56,7 +57,7 @@ object CandidateSettings {
         source.maxTxs, source.maxBytes, source.maxCost)
     })
     CandidateSettings(candidate.blockTransactions, sources, candidate.blockShare, candidate.waitForBlockPackage,
-      candidate.genesisWaitMs, candidate.blockTxTimeout, candidate.mempoolRefreshMs,
+      candidate.genesisWaitMs, candidate.blockTxTimeout, candidate.mempoolRefreshMs, candidate.cacheRefreshMs,
       candidate.minCandidateChangeRevenue, candidate.refreshForProtocolTxs, candidate.minNewProtocolTxs,
       candidate.collateralStrategy, candidate.clearanceAge, candidate.pinnedInputs)
   }

@@ -75,6 +75,8 @@ class LithosPoolSpec extends TestKit(ActorSystem("lithos-pool-spec", LithosPoolS
   private class StubNode extends MiningNodeInterface("http://127.0.0.1:1/") {
     @volatile var observed: NodeInfo = LithosPoolSpec.this.nodeInfo()
     @volatile var closed = false
+    /** Holds `sendSolution` open until released, to keep a submission in flight. */
+    @volatile var solutionGate: Option[java.util.concurrent.CountDownLatch] = None
     val calls = new LinkedBlockingQueue[Call]()
     val solutions = new LinkedBlockingQueue[(String, String)]()
     val concurrent = new AtomicInteger()
@@ -86,6 +88,7 @@ class LithosPoolSpec extends TestKit(ActorSystem("lithos-pool-spec", LithosPoolS
     override def soloCandidate(): JSONObject = request(Seq.empty, soloKey)
     override def sendSolution(nonce: String, pk: String): Boolean = {
       solutions.add(nonce -> pk)
+      solutionGate.foreach(_.await(15, TimeUnit.SECONDS))
       true
     }
     private def request(txs: Seq[String], pk: String): JSONObject = {
@@ -833,6 +836,151 @@ class LithosPoolSpec extends TestKit(ActorSystem("lithos-pool-spec", LithosPoolS
     f.miner.expectMsgType[BroadcastJob]
     f.node.calls.poll(200, TimeUnit.MILLISECONDS) shouldBe null
     f.node.maximumConcurrent.get() shouldBe 1
+  }
+
+  /** The stub answers a re-send with the same seed when the node still holds the served candidate. */
+  "Node cache keep-alive" should "re-send the served package each cacheRefreshMs, keeping a job the node still holds" in {
+    val f = fixture()
+    genesis(f)
+    f.clock.addAndGet((cfg.cacheRefreshMs - 1).milliseconds.toNanos)
+    f.pool ! PollBlockTemplate
+    f.node.calls.poll(200, TimeUnit.MILLISECONDS) shouldBe null
+    f.clock.addAndGet(1.millisecond.toNanos)
+    f.pool ! PollBlockTemplate
+    val resend = nextCall(f)
+    resend.txs should have size 1
+    resend.response.complete(response(resend))
+    withClue("a candidate the node still holds is not a new job: ") { f.miner.expectNoMessage(200.millis) }
+    f.clock.addAndGet(cfg.cacheRefreshMs.milliseconds.toNanos)
+    f.pool ! PollBlockTemplate
+    nextCall(f).txs should have size 1
+  }
+
+  it should "publish the candidate the node rebuilds once it has replaced the served one" in {
+    val f = fixture()
+    val job = genesis(f)
+    f.clock.addAndGet(cfg.cacheRefreshMs.milliseconds.toNanos)
+    f.pool ! PollBlockTemplate
+    val resend = nextCall(f)
+    resend.response.complete(response(resend, 2))
+    val next = f.miner.expectMsgType[BroadcastJob].template
+    next.candidate.msg shouldEqual Hex.decode(response(resend, 2).getString("msg"))
+    next.jobId should not be job.jobId
+  }
+
+  it should "leave the package rebuild due when a re-send is answered from the node's cache" in {
+    val f = fixture(cfg.copy(blockTransactions = true, mempoolRefreshMs = 20000, cacheRefreshMs = 25000))
+    genesis(f)
+    f.clock.addAndGet(20.seconds.toNanos)
+    f.pool ! PollBlockTemplate
+    f.builder.expectMsg(RefreshBlockPackage(pkg().identity))
+    f.pool ! BlockPackageReady(pkg(), refreshed = true)
+    f.node.calls.poll(200, TimeUnit.MILLISECONDS) shouldBe null
+    f.clock.addAndGet(5.seconds.toNanos)
+    f.pool ! PollBlockTemplate
+    val resend = nextCall(f)
+    resend.response.complete(response(resend))
+    f.miner.expectNoMessage(200.millis)
+    f.clock.addAndGet(15.seconds.toNanos)
+    f.pool ! PollBlockTemplate
+    withClue("the rebuild falls due 20 s after the last rebuild, not 20 s after the re-send: ") {
+      f.builder.expectMsg(RefreshBlockPackage(pkg().identity))
+    }
+  }
+
+  it should "keep the served job with miners when a newer package lands during a re-send" in {
+    val f = fixture()
+    genesis(f)
+    f.pool ! BlockPackageReady(pkg(revision = 1))
+    val served = nextCall(f)
+    served.response.complete(response(served, 2))
+    val job = f.miner.expectMsgType[BroadcastJob].template
+    f.clock.addAndGet(cfg.cacheRefreshMs.milliseconds.toNanos)
+    f.pool ! PollBlockTemplate
+    val resend = nextCall(f)
+    resend.txs should have size 2
+    f.pool ! BlockPackageReady(pkg(revision = 2))
+    resend.response.complete(response(resend, 2))
+    val latest = nextCall(f)
+    withClue("the newer package follows at once, with its extras: ") { latest.txs.last should include("extra-2") }
+    val subscriber = TestProbe()
+    subscriber.send(f.pool, RequestSubscription)
+    withClue("miners keep the served job until the newer one is published: ") {
+      subscriber.expectMsgType[SubscriptionData].currentJob.map(_.jobId) shouldBe Some(job.jobId)
+    }
+    latest.response.complete(response(latest, 3))
+    f.miner.expectMsgType[BroadcastJob]
+    f.node.maximumConcurrent.get() shouldBe 1
+  }
+
+  it should "keep the job and give up nothing when a re-send fails" in {
+    val f = fixture()
+    val job = genesis(f)
+    f.clock.addAndGet(cfg.cacheRefreshMs.milliseconds.toNanos)
+    f.pool ! PollBlockTemplate
+    nextCall(f).response.completeExceptionally(new IllegalStateException("node unavailable"))
+    withClue("neither the genesis nor the package is rejected, and nothing is asked again at once: ") {
+      f.builder.expectNoMessage(200.millis)
+      f.node.calls.poll(200, TimeUnit.MILLISECONDS) shouldBe null
+    }
+    val subscriber = TestProbe()
+    subscriber.send(f.pool, RequestSubscription)
+    subscriber.expectMsgType[SubscriptionData].currentJob.map(_.jobId) shouldBe Some(job.jobId)
+    f.clock.addAndGet(cfg.cacheRefreshMs.milliseconds.toNanos)
+    f.pool ! PollBlockTemplate
+    withClue("the next re-send comes one interval later: ") { nextCall(f).txs should have size 1 }
+  }
+
+  it should "drop no extras when a re-send outlasts blockTxTimeout" in {
+    val f = fixture()
+    genesis(f)
+    f.pool ! BlockPackageReady(pkg(revision = 1))
+    val served = nextCall(f)
+    served.response.complete(response(served, 2))
+    f.miner.expectMsgType[BroadcastJob]
+    f.clock.addAndGet(cfg.cacheRefreshMs.milliseconds.toNanos)
+    f.pool ! PollBlockTemplate
+    val resend = nextCall(f)
+    resend.txs should have size 2
+    f.clock.addAndGet(cfg.blockTxTimeout.milliseconds.toNanos)
+    resend.response.complete(response(resend, 2))
+    withClue("miners never waited on the re-send, so its lateness rejects nothing: ") {
+      f.builder.expectNoMessage(200.millis)
+      f.node.calls.poll(200, TimeUnit.MILLISECONDS) shouldBe null
+      f.miner.expectNoMessage(200.millis)
+    }
+  }
+
+  it should "hold a due re-send while a block solution is being submitted" in {
+    val f = fixture()
+    val job = genesis(f)
+    val gate = new java.util.concurrent.CountDownLatch(1)
+    f.node.solutionGate = Some(gate)
+    try {
+      f.pool ! ShareAccepted(job.jobId, "127.0.0.1", "miner", BigInteger.ONE, 100L,
+        job.candidate.msg, BigInteger.ONE, true, BigInteger.ONE, Array.emptyByteArray,
+        false, job.candidate, Array.fill[Byte](8)(1))
+      f.node.solutions.poll(1, TimeUnit.SECONDS) should not be null
+      f.clock.addAndGet(cfg.cacheRefreshMs.milliseconds.toNanos)
+      f.pool ! PollBlockTemplate
+      withClue("a re-send could move the job the solution is for out of the node's cache: ") {
+        f.node.calls.poll(300, TimeUnit.MILLISECONDS) shouldBe null
+      }
+    } finally gate.countDown()
+    withClue("once the submission finishes, the due re-send goes out: ") { nextCall(f).txs should have size 1 }
+  }
+
+  it should "re-send a solo job's request as well" in {
+    val f = fixture()
+    f.clock.addAndGet(cfg.genesisWaitMs.milliseconds.toNanos)
+    f.pool ! PollBlockTemplate
+    val solo = nextCall(f)
+    solo.txs shouldBe empty
+    solo.response.complete(response(solo))
+    f.miner.expectMsgType[BroadcastJob]
+    f.clock.addAndGet(cfg.cacheRefreshMs.milliseconds.toNanos)
+    f.pool ! PollBlockTemplate
+    nextCall(f).txs shouldBe empty
   }
 
   "A rejected genesis" should "fall back to solo without marking the failed package served" in {

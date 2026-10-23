@@ -101,6 +101,8 @@ class LithosPool(options: Options,
   private var leftOutRebuilds = 0
   private var genesisDeadline = 0L
   private var lastRefreshAt = 0L
+  /** When the node was last asked for this job's candidate, which paces `cacheRefreshMs`. */
+  private var lastCandidateCallAt = 0L
   private var servedRevenue = 0L
   /** The served package's contributing sources, and those that had not answered when it was assembled. */
   private var servedSources = Set.empty[String]
@@ -379,14 +381,18 @@ class LithosPool(options: Options,
         nowNanos() - lastRefreshAt >= candidateConfig.mempoolRefreshMs.milliseconds.toNanos)
       val refreshPackage = refresh && !refreshMempool && hasPackageSources && pkg.nonEmpty &&
         !extrasRejected.contains(ChainTip(identity.height, identity.parentId) -> identity.genesisId)
+      val renew = cacheDirty || !servedCandidate.contains(identity) || (refresh && !refreshPackage)
+      // The node swaps a 60 s old candidate for its own, so the served package is re-sent before then
+      val keepAlive = !renew && nowNanos() - lastCandidateCallAt >= candidateConfig.cacheRefreshMs.milliseconds.toNanos
       if (!cacheDirty && servedCandidate.contains(identity) && refreshPackage) {
         lastRefreshAt = nowNanos()
         candidateBuilder.foreach(_ ! RefreshBlockPackage(identity))
-      } else if (cacheDirty || !servedCandidate.contains(identity) || (refresh && !refreshPackage)) {
-        lastRefreshAt = nowNanos()
-        val request = CandidateRequest(UUID.randomUUID(), identity, pkg, protocolVersion, nowNanos())
+      } else if (renew || keepAlive) {
+        if (renew) lastRefreshAt = nowNanos()
+        lastCandidateCallAt = nowNanos()
+        val request = CandidateRequest(UUID.randomUUID(), identity, pkg, protocolVersion, nowNanos(), keepAlive)
         activeRequest = Some(request)
-        if (request.hasExtras) candidateTimer = Some(context.system.scheduler.scheduleOnce(
+        if (request.hasDeadline) candidateTimer = Some(context.system.scheduler.scheduleOnce(
           candidateConfig.blockTxTimeout.milliseconds, self, CandidateExpired(request.id)))
         val node = nodeInterface
         run(candidateEc)(fetch(node, request, apiKey))(CandidateFetched(request.id, _))
@@ -415,6 +421,15 @@ class LithosPool(options: Options,
    */
   private def admitCandidate(request: CandidateRequest, result: Try[Fetched]): Unit = {
     if (!current(request)) {
+      // Only the package moved during a re-send: the served job stays with miners until the newer one
+      // is published, rather than being withdrawn first
+      if (request.keepAlive && tip.contains(request.chain) && request.version == protocolVersion &&
+        servedCandidate.contains(request.identity)) {
+        candidateTimer.foreach(_.cancel())
+        candidateTimer = None
+        driveCandidate()
+        return
+      }
       invalidateCachedJob()
       restoreGenesis = !candidateConfig.waitForBlockPackage
       driveCandidate()
@@ -464,8 +479,13 @@ class LithosPool(options: Options,
         if (!cacheDirty && servedWork.contains(work(candidate)) && servedCandidate.contains(request.identity)) {
           candidateTimer.foreach(_.cancel())
           candidateTimer = None
-          lastRefreshAt = nowNanos()
+          // A re-send answered from the node's cache refreshed nothing, so the package rebuild stays due
+          if (request.keepAlive) logger.debug(s"Node still holds the served candidate for block ${request.identity.height}")
+          else lastRefreshAt = nowNanos()
         } else {
+          if (request.keepAlive)
+            logger.info(s"Node had replaced the served candidate for block ${request.identity.height}; " +
+              "publishing the one it rebuilt from the same package")
           publishing = Some((request, candidate, fetched.materialized))
           jobManagerActor ! ProcessTemplate(candidate, tau.bigInteger, request.pkg.isDefined,
             reducedShareMessages, reductionMultiplier, mustPublish = true,
@@ -481,6 +501,12 @@ class LithosPool(options: Options,
           overtakenOn = Some(request.chain)
           observeChain()
         }
+      case Failure(ex) if request.keepAlive =>
+        // The node took this package for this block already, so one failed re-send rejects none of it
+        candidateTimer.foreach(_.cancel())
+        candidateTimer = None
+        logger.warn(s"Could not re-send the served package for block ${request.identity.height}: " +
+          s"${ex.getMessage}; keeping the current job and trying again in ${candidateConfig.cacheRefreshMs} ms")
       case Failure(ex) =>
         invalidateCachedJob()
         if (request.hasExtras) rejectExtras(request, ex.getMessage)
@@ -543,10 +569,10 @@ class LithosPool(options: Options,
 
   private def publicationFor(request: CandidateRequest): CandidatePublication =
     CandidatePublication(request.identity, request.id,
-      if (request.hasExtras) Some(request.startedAt + candidateConfig.blockTxTimeout.milliseconds.toNanos) else None)
+      if (request.hasDeadline) Some(request.startedAt + candidateConfig.blockTxTimeout.milliseconds.toNanos) else None)
 
-  /** Only augmented requests have a publication deadline; a genesis-only request never expires. */
-  private def expired(request: CandidateRequest): Boolean = request.hasExtras &&
+  /** Only augmented requests have a publication deadline; genesis-only requests and re-sends never expire. */
+  private def expired(request: CandidateRequest): Boolean = request.hasDeadline &&
     nowNanos() - request.startedAt >= candidateConfig.blockTxTimeout.milliseconds.toNanos
 
   /**
@@ -684,10 +710,14 @@ object LithosPool {
       "This client keeps polling and resumes on its own once the node reports mining.")
   /** How often the not-mining error repeats while it lasts; chain polls are too frequent to log each one. */
   private val NotMiningReportInterval = 1.minute
+  /** `keepAlive` marks a re-send of the served package, made only so the node keeps the job miners are on. */
   private[mining] case class CandidateRequest(id: UUID, identity: CandidateIdentity,
-                                             pkg: Option[BlockPackage], version: Int, startedAt: Long) {
+                                             pkg: Option[BlockPackage], version: Int, startedAt: Long,
+                                             keepAlive: Boolean = false) {
     def chain: ChainTip = ChainTip(identity.height, identity.parentId)
     def hasExtras: Boolean = pkg.exists(_.blockTxs.nonEmpty)
+    /** Whether miners wait on this request. A re-send has none, since they keep mining the served job. */
+    def hasDeadline: Boolean = hasExtras && !keepAlive
   }
   private[mining] case class Fetched(candidate: MiningCandidate, chain: ChainTip, version: Int,
                                      materialized: Option[CandidateMaterialized] = None)

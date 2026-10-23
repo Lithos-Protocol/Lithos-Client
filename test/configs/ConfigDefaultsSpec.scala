@@ -24,6 +24,7 @@ class ConfigDefaultsSpec extends AnyFlatSpec with Matchers {
     defaults.collateralStrategy shouldBe CandidateConfig.HighestFee
     defaults.refreshForProtocolTxs shouldBe true
     defaults.minNewProtocolTxs shouldBe 1
+    defaults.cacheRefreshMs shouldBe 30000
     val configured = CandidateConfig(Configuration(ConfigFactory.parseString("""
       stratum.candidate.minCandidateChangeRevenue = 0
       stratum.candidate.waitForBlockPackage = false
@@ -31,6 +32,7 @@ class ConfigDefaultsSpec extends AnyFlatSpec with Matchers {
       stratum.candidate.collateralStrategy = "random"
       stratum.candidate.refreshForProtocolTxs = false
       stratum.candidate.minNewProtocolTxs = 3
+      stratum.candidate.cacheRefreshMs = 45000
     """)))
     configured.minCandidateChangeRevenue shouldBe 0L
     configured.waitForBlockPackage shouldBe false
@@ -38,6 +40,7 @@ class ConfigDefaultsSpec extends AnyFlatSpec with Matchers {
     configured.collateralStrategy shouldBe CandidateConfig.Random
     configured.refreshForProtocolTxs shouldBe false
     configured.minNewProtocolTxs shouldBe 3
+    configured.cacheRefreshMs shouldBe 45000
   }
 
   "CandidateConfig.pinTarget" should "pin only when this miner builds candidates with rollup work" in {
