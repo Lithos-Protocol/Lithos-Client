@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="generator" content="Docusaurus v3.7.0">
 <title data-rh="true">Collateral and emission | Lithos Client</title><meta data-rh="true" name="viewport" content="width=device-width,initial-scale=1"><meta data-rh="true" name="twitter:card" content="summary_large_image"><meta data-rh="true" property="og:url" content="http://localhost:9000/assets/docs/configuration/emission"><meta data-rh="true" property="og:locale" content="en"><meta data-rh="true" name="docusaurus_locale" content="en"><meta data-rh="true" name="docsearch:language" content="en"><meta data-rh="true" name="docusaurus_version" content="current"><meta data-rh="true" name="docusaurus_tag" content="docs-default-current"><meta data-rh="true" name="docsearch:version" content="current"><meta data-rh="true" name="docsearch:docusaurus_tag" content="docs-default-current"><meta data-rh="true" property="og:title" content="Collateral and emission | Lithos Client"><meta data-rh="true" name="description" content="Driving the collateral queue, and putting your own ERG and LIT into it."><meta data-rh="true" property="og:description" content="Driving the collateral queue, and putting your own ERG and LIT into it."><link data-rh="true" rel="icon" href="/assets/img/favicon.ico"><link data-rh="true" rel="canonical" href="http://localhost:9000/assets/docs/configuration/emission"><link data-rh="true" rel="alternate" href="http://localhost:9000/assets/docs/configuration/emission" hreflang="en"><link data-rh="true" rel="alternate" href="http://localhost:9000/assets/docs/configuration/emission" hreflang="x-default"><link rel="stylesheet" href="/assets/css/styles.632162da.css">
-<script src="/assets/js/runtime~main.463d1858.js" defer="defer"></script>
+<script src="/assets/js/runtime~main.1c59f5ad.js" defer="defer"></script>
 <script src="/assets/js/main.7c0f1f43.js" defer="defer"></script>
 </head>
 <body class="navigation-with-keyboard">
@@ -70,8 +70,8 @@ can change that age with
 typical rather than guaranteed.</p>
 <p><code>0</code> posts at the floor and offers nothing. Any other value must be at least <code>1000000</code> (0.001 ERG), so
 the miner&#x27;s fifth is worth more than the output it arrives in. Miners running this client compare
-priority fees in <a href="/assets/docs/configuration/candidate#which-box-your-block-spends">steps of 0.005 ERG</a>, so a fee under
-<code>5000000</code> ranks no higher than <code>0</code>.</p>
+priority fees in <a href="/assets/docs/configuration/candidate#which-box-your-block-spends">steps of 0.001 ERG</a>, so a fee between
+two steps ranks with the lower one.</p>
 <div class="theme-admonition theme-admonition-warning admonition_xJq3 alert alert--warning"><div class="admonitionHeading_Gvgb"><span class="admonitionIcon_Rf37"><svg viewBox="0 0 16 16"><path fill-rule="evenodd" d="M8.893 1.5c-.183-.31-.52-.5-.887-.5s-.703.19-.886.5L.138 13.499a.98.98 0 0 0 0 1.001c.193.31.53.501.886.501h13.964c.367 0 .704-.19.877-.5a1.03 1.03 0 0 0 .01-1.002L8.893 1.5zm.133 11.497H6.987v-2.003h2.039v2.003zm0-3.004H6.987V5.987h2.039v4.006z"></path></svg></span>Past 0.085 ERG the block reward no longer covers your principal</div><div class="admonitionContent_BuS1"><p>The lender receives the 3 ERG block reward plus the block&#x27;s transaction fees. Above <code>85000000</code>
 (0.085 ERG) the priority fee takes the principal past 3 ERG, so getting it all back depends on the
 fees in the block that spends your box. The client allows it, and logs a warning on every
