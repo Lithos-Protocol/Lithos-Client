@@ -20,7 +20,7 @@ object ForwardsBatchingConfig {
   /** Mirrors `batching.forwards` in application.conf; keep the two in step. */
   val Default: ForwardsBatchingConfig = ForwardsBatchingConfig(
     BatchingConfig.Default.copy(scanIntervalMs = 30000L, maxOrdersPerBlock = 10),
-    broadcastAfterBlocks = 96)
+    broadcastAfterBlocks = 3)
 
   def apply(config: Configuration): ForwardsBatchingConfig =
     ForwardsBatchingConfig(

@@ -42,7 +42,7 @@ class ForwardsBatcherSpec extends TestKit(ActorSystem("forwards-batcher-spec", F
 
   private val anchor = "cc" * 32
 
-  /** 100 blocks into epoch 964, past the default broadcastAfterBlocks of 96. */
+  /** 100 blocks into epoch 964, past the default broadcastAfterBlocks of 3. */
   private val LateLastBlock = 964 * 128 + 100
 
   private def mempoolTx(txId: String, spends: Seq[String], outputs: Seq[NodeBox]) =
@@ -227,6 +227,24 @@ class ForwardsBatcherSpec extends TestKit(ActorSystem("forwards-batcher-spec", F
     broadcasting.awaitScanned()
     broadcasting.offered() shouldBe empty
     broadcasting.stop()
+  }
+
+  it should "leave recording to this miner's block until the default broadcastAfterBlocks, then stop offering it" in {
+    // A block can record only once the epoch's second block is the tip, so the default must leave room past it.
+    // The next epoch, because the header fixture cannot go below the stock height 20 blocks into this one.
+    val window = ForwardsBatchingConfig.Default.broadcastAfterBlocks
+    val epoch = fixtureEpoch + 1
+    val early = new Fixture(lastBlock = heightIn(epoch, window - 2), broadcast = true, accEpoch = epoch - 1)
+    ForwardsBatcher.blocksIntoEpoch(early.tip) shouldBe window - 1
+    early.awaitScanned()
+    early.offered().loneElement.members should have size 1
+    early.stop()
+
+    val due = new Fixture(lastBlock = heightIn(epoch, window - 1), broadcast = true, accEpoch = epoch - 1)
+    ForwardsBatcher.blocksIntoEpoch(due.tip) shouldBe window
+    due.awaitScanned()
+    due.offered() shouldBe empty
+    due.stop()
   }
 
   it should "leave the accumulator to a live mempool spend, and build again once it is gone" in {
