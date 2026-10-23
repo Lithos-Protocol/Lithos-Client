@@ -155,7 +155,7 @@ class CandidateBuilderSpec extends TestKit(ActorSystem("candidate-builder-spec",
   it should "be re-ranked when a new block arrives, so no box can hold the set" in {
     // Selection is sticky within a height and only within one. Carrying it across blocks froze the
     // set on whichever box was picked first, and nothing would ever become overdue.
-    val boxes = boxesWith(Seq((1000000L, 100, 0L), (2000000L, 100, 500000L)))
+    val boxes = boxesWith(Seq((1000000L, 100, 0L), (2000000L, 100, 5000000L)))
     val f = fixture(boxes = Some(boxes))
     advanceTo(f, 101).collateral.collateralId shouldEqual boxes(1).id
     // The higher bid is still the higher bid, so a re-rank must land on it again.
@@ -164,7 +164,7 @@ class CandidateBuilderSpec extends TestKit(ActorSystem("candidate-builder-spec",
 
   /** Two boxes whose ranking flips between one height and the next, purely on age. */
   private def flipAt101: Seq[CollateralCandidate] =
-    boxesWith(Seq((1000000L, 1, 0L), (2000000L, 100, 900000L)))
+    boxesWith(Seq((1000000L, 1, 0L), (2000000L, 100, 9000000L)))
 
   "A genesis build that lands after its block" should "not become the next block's choice" in {
     // At 100 nothing is overdue and the high bid wins. At 101 the older box crosses the overdue line
@@ -189,7 +189,7 @@ class CandidateBuilderSpec extends TestKit(ActorSystem("candidate-builder-spec",
   "A build failure that lands after its block" should "not skip a box the next block wants" in {
     // Both boxes are the same age at both heights, so the high bidder wins twice. The failure at 100
     // is about that block's attempt; applying its skip to 101 hands 101 the box nobody bid for.
-    val boxes = boxesWith(Seq((1000000L, 100, 0L), (2000000L, 100, 900000L)))
+    val boxes = boxesWith(Seq((1000000L, 100, 0L), (2000000L, 100, 9000000L)))
     val f = fixture(boxes = Some(boxes))
     f.stub.holdAt = Set(100)
     f.stub.failNextBuilds = 1
@@ -707,7 +707,7 @@ class CandidateBuilderSpec extends TestKit(ActorSystem("candidate-builder-spec",
   }
 
   "Ranking" should "prefer the highest bid while every box is young" in {
-    val boxes = boxesWith(Seq((1000000L, 100, 10L), (2000000L, 100, 900L), (3000000L, 100, 400L)))
+    val boxes = boxesWith(Seq((1000000L, 100, 1000000L), (2000000L, 100, 9000000L), (3000000L, 100, 4000000L)))
     val f = fixture(boxes = Some(boxes))
     advanceTo(f, 150).collateral.collateralId shouldEqual boxes(1).id
   }
@@ -721,10 +721,10 @@ class CandidateBuilderSpec extends TestKit(ActorSystem("candidate-builder-spec",
       .map(_.id) shouldBe boxes.map(_.id)
   }
 
-  it should "tie every box at the highest bid, whatever its age" in {
-    // 80, 50 and 10 blocks old at 200, so none is overdue and only the lower bid is left out.
-    val boxes = boxesWith(Seq((1000000L, 120, 500L), (2000000L, 150, 500L), (3000000L, 190, 500L),
-      (4000000L, 110, 400L)))
+  it should "tie every box in the highest bid step, whatever its age" in {
+    // 80, 50 and 10 blocks old at 200, so none is overdue and only the lower step is left out.
+    val boxes = boxesWith(Seq((1000000L, 120, 5000000L), (2000000L, 150, 5000000L), (3000000L, 190, 5000000L),
+      (4000000L, 110, 4000000L)))
     CandidateTxBuilder.selectionPool(boxes, 200, cfg.clearanceAge, CandidateConfig.HighestFee)
       .map(_.id) shouldBe boxes.take(3).map(_.id)
   }
@@ -732,21 +732,40 @@ class CandidateBuilderSpec extends TestKit(ActorSystem("candidate-builder-spec",
   it should "spread its draws across boxes tied on the highest bid" in {
     // If every client drew the same tied box, a lagging index would hand each of them the box the
     // last block spent. Two tied boxes landing on one side 30 times running is a 2-in-a-billion miss.
-    val boxes = boxesWith(Seq((1000000L, 90, 500L), (2000000L, 100, 500L), (3000000L, 100, 0L)))
+    val boxes = boxesWith(Seq((1000000L, 90, 5000000L), (2000000L, 100, 5000000L), (3000000L, 100, 4000000L)))
     val f = fixture(boxes = Some(boxes))
     val drawn = (101 to 130).map(h => advanceTo(f, h).collateral.collateralId).toSet
     drawn shouldBe boxes.take(2).map(_.id).toSet
   }
 
+  it should "tie bids in the same 0.001 ERG step and leave out the step below" in {
+    // Lenders outbid one another by a nanoERG or two, so the exact top bid is often a single box.
+    val boxes = boxesWith(Seq((1000000L, 150, 6000003L), (2000000L, 150, 6000000L), (3000000L, 150, 6999999L),
+      (4000000L, 150, 5999999L)))
+    CandidateTxBuilder.bestCandidates(boxes, 200).map(_.id) shouldBe boxes.take(3).map(_.id)
+  }
+
+  it should "let a bid one full step higher win alone, rounding steps down" in {
+    val boxes = boxesWith(Seq((1000000L, 150, 7000000L), (2000000L, 150, 6999999L)))
+    CandidateTxBuilder.bestCandidates(boxes, 200).map(_.id) shouldBe Seq(boxes.head.id)
+  }
+
+  it should "tie overdue boxes of the same age by bid step as well" in {
+    // The first three are 100 blocks old at 200 and overdue; the last bids most but is not.
+    val boxes = boxesWith(Seq((1000000L, 100, 2000001L), (2000000L, 100, 2000000L), (3000000L, 100, 1999999L),
+      (4000000L, 150, 9000000L)))
+    CandidateTxBuilder.bestCandidates(boxes, 200, clearanceAge = 100).map(_.id) shouldBe boxes.take(2).map(_.id)
+  }
+
   it should "take the oldest overdue box even when a younger one bids more" in {
-    val boxes = boxesWith(Seq((1000000L, 100, 0L), (2000000L, 180, 900000L)))
+    val boxes = boxesWith(Seq((1000000L, 100, 0L), (2000000L, 180, 9000000L)))
     val f = fixture(boxes = Some(boxes))
     // The first box is 100 blocks old at height 200, the second is 20.
     advanceTo(f, 200).collateral.collateralId shouldEqual boxes.head.id
   }
 
   it should "not treat a box one block short of the threshold as overdue" in {
-    val boxes = boxesWith(Seq((1000000L, 100, 0L), (2000000L, 180, 900000L)))
+    val boxes = boxesWith(Seq((1000000L, 100, 0L), (2000000L, 180, 9000000L)))
     val f = fixture(boxes = Some(boxes))
     // One block earlier the same box is only 99 old, so the bid still decides.
     advanceTo(f, 199).collateral.collateralId shouldEqual boxes(1).id
@@ -754,13 +773,13 @@ class CandidateBuilderSpec extends TestKit(ActorSystem("candidate-builder-spec",
 
   it should "draw by the configured clearance age, not the minimum" in {
     // The same pair as above: 100 blocks old is overdue at the minimum, and nowhere near 7200.
-    val boxes = boxesWith(Seq((1000000L, 100, 0L), (2000000L, 180, 900000L)))
+    val boxes = boxesWith(Seq((1000000L, 100, 0L), (2000000L, 180, 9000000L)))
     val f = fixture(boxes = Some(boxes), config = cfg.copy(clearanceAge = 7200))
     advanceTo(f, 200).collateral.collateralId shouldEqual boxes(1).id
   }
 
   "The default clearance age" should "let the bid decide until a box is 7200 blocks old" in {
-    val boxes = boxesWith(Seq((1000000L, 100, 0L), (2000000L, 7000, 900000L)))
+    val boxes = boxesWith(Seq((1000000L, 100, 0L), (2000000L, 7000, 9000000L)))
     CandidateTxBuilder.bestCandidates(boxes, 7299).map(_.id) shouldEqual Seq(boxes(1).id)
     CandidateTxBuilder.bestCandidates(boxes, 7300).map(_.id) shouldEqual Seq(boxes.head.id)
     CandidateConfig.Default.clearanceAge shouldEqual 7200

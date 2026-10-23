@@ -58,10 +58,19 @@ object CandidateTxBuilder {
   private[mining] final val MaxCollateralCarriers: Int = 2 * EmissionSchedule.MAX_ACTIVE + 1
 
   /**
+   * Bids compare in whole 0.001 ERG steps of the finder's share, rounded down. Lenders outbid one
+   * another by a few nanoERG, so an exact comparison often leaves a single box; within a step they tie.
+   */
+  final val BidStep: Long = 1000000L
+
+  private def bidStep(candidate: CollateralCandidate): Long = candidate.finderFee / BidStep
+
+  /**
    * The boxes that tie for best, for the caller to draw from at random. A box whose confirmed age has
    * reached `clearanceAge` stops competing on its bid: those boxes win outright, oldest first, so no
-   * bid can hold a stale box out of the set indefinitely. Among the rest every box at the highest bid
-   * ties whatever its age, so clients do not all draw the one box a lagging index still shows as live.
+   * bid can hold a stale box out of the set indefinitely. Among the rest every box in the highest
+   * `BidStep` ties whatever its age, so clients do not all draw the one box a lagging index still
+   * shows as live.
    */
   def bestCandidates(candidates: Seq[CollateralCandidate], blockHeight: Int,
                      clearanceAge: Int = CandidateConfig.Default.clearanceAge): Seq[CollateralCandidate] = {
@@ -69,12 +78,12 @@ object CandidateTxBuilder {
     if (overdue.nonEmpty) {
       val oldest = overdue.map(_.inclusionHeight).min
       val sameAge = overdue.filter(_.inclusionHeight == oldest)
-      val topBid = sameAge.map(_.finderFee).max
-      sameAge.filter(_.finderFee == topBid)
+      val topBid = sameAge.map(bidStep).max
+      sameAge.filter(bidStep(_) == topBid)
     } else if (candidates.isEmpty) Seq.empty[CollateralCandidate]
     else {
-      val topBid = candidates.map(_.finderFee).max
-      candidates.filter(_.finderFee == topBid)
+      val topBid = candidates.map(bidStep).max
+      candidates.filter(bidStep(_) == topBid)
     }
   }
 }
