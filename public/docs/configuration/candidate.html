@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="generator" content="Docusaurus v3.7.0">
 <title data-rh="true">Block packages | Lithos Client</title><meta data-rh="true" name="viewport" content="width=device-width,initial-scale=1"><meta data-rh="true" name="twitter:card" content="summary_large_image"><meta data-rh="true" property="og:url" content="http://localhost:9000/assets/docs/configuration/candidate"><meta data-rh="true" property="og:locale" content="en"><meta data-rh="true" name="docusaurus_locale" content="en"><meta data-rh="true" name="docsearch:language" content="en"><meta data-rh="true" name="docusaurus_version" content="current"><meta data-rh="true" name="docusaurus_tag" content="docs-default-current"><meta data-rh="true" name="docsearch:version" content="current"><meta data-rh="true" name="docsearch:docusaurus_tag" content="docs-default-current"><meta data-rh="true" property="og:title" content="Block packages | Lithos Client"><meta data-rh="true" name="description" content="How the client assembles the blocks it mines, and what each transaction source may contribute."><meta data-rh="true" property="og:description" content="How the client assembles the blocks it mines, and what each transaction source may contribute."><link data-rh="true" rel="icon" href="/assets/img/favicon.ico"><link data-rh="true" rel="canonical" href="http://localhost:9000/assets/docs/configuration/candidate"><link data-rh="true" rel="alternate" href="http://localhost:9000/assets/docs/configuration/candidate" hreflang="en"><link data-rh="true" rel="alternate" href="http://localhost:9000/assets/docs/configuration/candidate" hreflang="x-default"><link rel="stylesheet" href="/assets/css/styles.632162da.css">
-<script src="/assets/js/runtime~main.429a4fbf.js" defer="defer"></script>
+<script src="/assets/js/runtime~main.a6a0c2ab.js" defer="defer"></script>
 <script src="/assets/js/main.7c0f1f43.js" defer="defer"></script>
 </head>
 <body class="navigation-with-keyboard">
@@ -55,7 +55,7 @@ but on a new height build, it will wait at-most <code>genesisWaitMs</code> befor
 will first create the genesis transaction and send it out as a new job, before sending a following job containing package sources.
 This can potentially slow down mining, especially if the two jobs are sent in quick succession.</p>
 <h2 class="anchor anchorWithStickyNavbar_LWe7" id="refreshing-mid-block">Refreshing mid-block<a href="#refreshing-mid-block" class="hash-link" aria-label="Direct link to Refreshing mid-block" title="Direct link to Refreshing mid-block">​</a></h2>
-<table><thead><tr><th>Setting</th><th>Default</th><th>Range</th><th>What it does</th></tr></thead><tbody><tr><td><code>stratum.candidate.mempoolRefreshMs</code></td><td>20000</td><td>0 to 3600000 ms</td><td>Milliseconds between mid-block package rebuilds. <code>0</code> mines the block&#x27;s initial transaction set and never rebuilds</td></tr><tr><td><code>stratum.candidate.minCandidateChangeRevenue</code></td><td>1000000</td><td>0 to 9223372036854775807 nanoERG</td><td>Extra package revenue required before a mid-block job change is worth making</td></tr><tr><td><code>stratum.candidate.refreshForProtocolTxs</code></td><td><code>true</code></td><td><code>true</code> or <code>false</code></td><td>Also change the job when a rebuilt package adds rollup or emission transactions</td></tr><tr><td><code>stratum.candidate.minNewProtocolTxs</code></td><td>1</td><td>1 to 1000</td><td>Rollup or emission transactions a rebuilt package must add before the job changes</td></tr><tr><td><code>stratum.candidate.blockTxTimeout</code></td><td>20000</td><td>0 to 600000 ms</td><td>How long to wait for sources to build. Not validated separately from its range</td></tr></tbody></table>
+<table><thead><tr><th>Setting</th><th>Default</th><th>Range</th><th>What it does</th></tr></thead><tbody><tr><td><code>stratum.candidate.mempoolRefreshMs</code></td><td>20000</td><td>0 to 3600000 ms</td><td>Milliseconds between mid-block package rebuilds. <code>0</code> mines the block&#x27;s initial transaction set and never rebuilds</td></tr><tr><td><code>stratum.candidate.cacheRefreshMs</code></td><td>30000</td><td>20000 to 55000 ms</td><td>Milliseconds between re-sending the served package to your Ergo node, so the node still accepts a block found on the job your rigs are mining</td></tr><tr><td><code>stratum.candidate.minCandidateChangeRevenue</code></td><td>1000000</td><td>0 to 9223372036854775807 nanoERG</td><td>Extra package revenue required before a mid-block job change is worth making</td></tr><tr><td><code>stratum.candidate.refreshForProtocolTxs</code></td><td><code>true</code></td><td><code>true</code> or <code>false</code></td><td>Also change the job when a rebuilt package adds rollup or emission transactions</td></tr><tr><td><code>stratum.candidate.minNewProtocolTxs</code></td><td>1</td><td>1 to 1000</td><td>Rollup or emission transactions a rebuilt package must add before the job changes</td></tr><tr><td><code>stratum.candidate.blockTxTimeout</code></td><td>20000</td><td>0 to 600000 ms</td><td>How long to wait for sources to build. Not validated separately from its range</td></tr></tbody></table>
 <p>A rebuild picks up transactions that arrived since the last one, which can raise what the block earns.
 Rebuilding too often can slow down your rig&#x27;s hashrate, so feel free to adjust <code>mempoolRefreshMs</code> in order
 to control how often rebuilds happen.</p>
@@ -70,6 +70,18 @@ Unconfirmed transactions carried ahead of them do not count. Each change is a ne
 software, and at most one happens per <code>mempoolRefreshMs</code>.</p>
 <p>The client keeps the current job, whatever the rebuild adds, when a source that contributed to the
 current job did not answer the rebuild in time. Switching would drop that source&#x27;s work from the block.</p>
+<p><code>cacheRefreshMs</code> keeps the job your rigs are mining valid at your Ergo node. The Ergo node holds only
+its two latest candidates and accepts a block only if it was mined on one of them. Once a candidate is
+60 seconds old, the Ergo node replaces it with a candidate of its own the next time its mempool changes.
+After two replacements, a block your rigs find on the current job is refused. Every <code>cacheRefreshMs</code>,
+the client sends the package it is serving to the Ergo node again:</p>
+<ul>
+<li>If the Ergo node still holds the candidate, nothing changes and your mining software keeps its job.</li>
+<li>If the Ergo node has replaced the candidate, the Ergo node builds a new candidate from the same
+package and your mining software gets a new job. The client logs <code>Node had replaced the served candidate</code> each time.</li>
+</ul>
+<p>Keep <code>cacheRefreshMs</code> below the Ergo node&#x27;s <code>blockCandidateGenerationInterval</code>, which is 60 seconds
+unless you changed it in the Ergo node&#x27;s config.</p>
 <p><code>blockTxTimeout</code> tells you how long the client will wait before sending its best effort candidate to the stratum.
 In some cases, transaction sources can take a while, so before <code>blockTxTimeout</code> is hit, the candidate builder will
 collect transactions from the sources that <em>did</em> respond in time, and send just those. Later sources will still show up
