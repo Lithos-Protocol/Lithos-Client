@@ -58,10 +58,10 @@ object CandidateTxBuilder {
   private[mining] final val MaxCollateralCarriers: Int = 2 * EmissionSchedule.MAX_ACTIVE + 1
 
   /**
-   * The boxes that tie for best, for the caller to draw from. A box whose confirmed age has reached
-   * `clearanceAge` stops competing on its bid: those boxes win outright, oldest first, so no bid can
-   * hold a stale box out of the set indefinitely. Among the rest the highest bid wins and age breaks
-   * the tie.
+   * The boxes that tie for best, for the caller to draw from at random. A box whose confirmed age has
+   * reached `clearanceAge` stops competing on its bid: those boxes win outright, oldest first, so no
+   * bid can hold a stale box out of the set indefinitely. Among the rest every box at the highest bid
+   * ties whatever its age, so clients do not all draw the one box a lagging index still shows as live.
    */
   def bestCandidates(candidates: Seq[CollateralCandidate], blockHeight: Int,
                      clearanceAge: Int = CandidateConfig.Default.clearanceAge): Seq[CollateralCandidate] = {
@@ -74,9 +74,7 @@ object CandidateTxBuilder {
     } else if (candidates.isEmpty) Seq.empty[CollateralCandidate]
     else {
       val topBid = candidates.map(_.finderFee).max
-      val bidding = candidates.filter(_.finderFee == topBid)
-      val oldest = bidding.map(_.inclusionHeight).min
-      bidding.filter(_.inclusionHeight == oldest)
+      candidates.filter(_.finderFee == topBid)
     }
   }
 }

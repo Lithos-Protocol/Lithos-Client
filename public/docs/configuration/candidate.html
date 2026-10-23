@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="generator" content="Docusaurus v3.7.0">
 <title data-rh="true">Block packages | Lithos Client</title><meta data-rh="true" name="viewport" content="width=device-width,initial-scale=1"><meta data-rh="true" name="twitter:card" content="summary_large_image"><meta data-rh="true" property="og:url" content="http://localhost:9000/assets/docs/configuration/candidate"><meta data-rh="true" property="og:locale" content="en"><meta data-rh="true" name="docusaurus_locale" content="en"><meta data-rh="true" name="docsearch:language" content="en"><meta data-rh="true" name="docusaurus_version" content="current"><meta data-rh="true" name="docusaurus_tag" content="docs-default-current"><meta data-rh="true" name="docsearch:version" content="current"><meta data-rh="true" name="docsearch:docusaurus_tag" content="docs-default-current"><meta data-rh="true" property="og:title" content="Block packages | Lithos Client"><meta data-rh="true" name="description" content="How the client assembles the blocks it mines, and what each transaction source may contribute."><meta data-rh="true" property="og:description" content="How the client assembles the blocks it mines, and what each transaction source may contribute."><link data-rh="true" rel="icon" href="/assets/img/favicon.ico"><link data-rh="true" rel="canonical" href="http://localhost:9000/assets/docs/configuration/candidate"><link data-rh="true" rel="alternate" href="http://localhost:9000/assets/docs/configuration/candidate" hreflang="en"><link data-rh="true" rel="alternate" href="http://localhost:9000/assets/docs/configuration/candidate" hreflang="x-default"><link rel="stylesheet" href="/assets/css/styles.632162da.css">
-<script src="/assets/js/runtime~main.dba03a0d.js" defer="defer"></script>
+<script src="/assets/js/runtime~main.cdfe4e75.js" defer="defer"></script>
 <script src="/assets/js/main.7c0f1f43.js" defer="defer"></script>
 </head>
 <body class="navigation-with-keyboard">
@@ -31,7 +31,8 @@ is the only moment a collateral box can be spent.</p>
 <ol>
 <li>If any box has been live for <code>clearanceAge</code> blocks or more, the oldest of those is drawn, whatever
 the others offer.</li>
-<li>Otherwise the box offering the finder the largest priority fee is drawn, and the oldest breaks a tie.</li>
+<li>Otherwise the box offering the finder the largest priority fee is drawn. Boxes tied on that fee are
+drawn at random, whatever their age.</li>
 </ol>
 <p>The default of 7200 blocks is about 10 days on mainnet. Until a box reaches it, lenders compete on
 priority fee alone, which is what makes paying one worth anything. The age rule then clears boxes that
@@ -152,13 +153,16 @@ the client logs a warning once.</p>
 <p><code>0</code> turns pinning off. Fraud proofs then reach the chain through the mempool alone.</p>
 <h3 class="anchor anchorWithStickyNavbar_LWe7" id="storage-rent">Storage rent<a href="#storage-rent" class="hash-link" aria-label="Direct link to Storage rent" title="Direct link to Storage rent">​</a></h3>
 <p>Storage rent collects boxes nobody has touched for four years, which Ergo permits anyone to spend. It
-ships on, and it has three settings of its own:</p>
-<table><thead><tr><th>Setting</th><th>Default</th><th>Range</th><th>What it does</th></tr></thead><tbody><tr><td><code>stratum.candidate.sources.rent.startHeight</code></td><td>837000</td><td>0 to 100000000</td><td>Inclusion height the walk begins at</td></tr><tr><td><code>stratum.candidate.sources.rent.scanIntervalMs</code></td><td>30000</td><td>1000 to 3600000 ms</td><td>Gap between scan passes</td></tr><tr><td><code>stratum.candidate.sources.rent.blocksPerScan</code></td><td>200</td><td>1 to 10000</td><td>Blocks one pass reads. Two node calls each</td></tr></tbody></table>
+ships on, and it has the following four settings of its own:</p>
+<table><thead><tr><th>Setting</th><th>Default</th><th>Range</th><th>What it does</th></tr></thead><tbody><tr><td><code>stratum.candidate.sources.rent.startBehindBlocks</code></td><td>720</td><td>0 to 1000000</td><td>Blocks behind the due frontier the walk begins at, measured when the client starts</td></tr><tr><td><code>stratum.candidate.sources.rent.scanIntervalMs</code></td><td>30000</td><td>1000 to 3600000 ms</td><td>Gap between scan passes</td></tr><tr><td><code>stratum.candidate.sources.rent.blocksPerScan</code></td><td>200</td><td>1 to 10000</td><td>Blocks one pass reads. Two node calls each</td></tr><tr><td><code>stratum.candidate.sources.rent.lookaheadBlocks</code></td><td>100</td><td>0 to 10000</td><td>Blocks the walk reads past those whose boxes are already due</td></tr></tbody></table>
 <p>Discovery walks the chain by inclusion height rather than reading the whole UTXO set. A box created at
-height <code>h</code> becomes collectable at <code>h + 1051200</code>, so the walk trails four years behind the tip and every
-box it meets there is old enough by construction.</p>
-<p><strong>Set <code>startHeight</code> to roughly where collection has already caught up</strong>, not to zero. The early chain
-was swept long ago and walking it costs node reads for nothing.</p>
+height <code>h</code> becomes collectable at <code>h + 1051200</code>, measured from the creation height the box declares.
+Wallets usually declare a height a few blocks before the box is included, so the walk reads
+<code>lookaheadBlocks</code> past the due frontier and holds each box it finds until the box falls due.</p>
+<p>The due frontier is the newest block whose boxes are all collectable in the next block. Other
+collectors sweep boxes as soon as they fall due, so the chain behind the frontier holds almost nothing
+to collect. <code>startBehindBlocks</code> sets how far back the walk begins, and so how long it takes to catch up
+when the client starts.</p>
 <p>A collection is two transactions: the sweep, and one that folds what it took into a single box of
 yours. That is why the source needs <code>maxTxs</code> of at least 2 while it is on. Its <code>maxCost</code> is twice the
 other sources&#x27; because each claimed box can cost two inputs, one in each transaction.</p>

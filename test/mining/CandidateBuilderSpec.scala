@@ -721,6 +721,23 @@ class CandidateBuilderSpec extends TestKit(ActorSystem("candidate-builder-spec",
       .map(_.id) shouldBe boxes.map(_.id)
   }
 
+  it should "tie every box at the highest bid, whatever its age" in {
+    // 80, 50 and 10 blocks old at 200, so none is overdue and only the lower bid is left out.
+    val boxes = boxesWith(Seq((1000000L, 120, 500L), (2000000L, 150, 500L), (3000000L, 190, 500L),
+      (4000000L, 110, 400L)))
+    CandidateTxBuilder.selectionPool(boxes, 200, cfg.clearanceAge, CandidateConfig.HighestFee)
+      .map(_.id) shouldBe boxes.take(3).map(_.id)
+  }
+
+  it should "spread its draws across boxes tied on the highest bid" in {
+    // If every client drew the same tied box, a lagging index would hand each of them the box the
+    // last block spent. Two tied boxes landing on one side 30 times running is a 2-in-a-billion miss.
+    val boxes = boxesWith(Seq((1000000L, 90, 500L), (2000000L, 100, 500L), (3000000L, 100, 0L)))
+    val f = fixture(boxes = Some(boxes))
+    val drawn = (101 to 130).map(h => advanceTo(f, h).collateral.collateralId).toSet
+    drawn shouldBe boxes.take(2).map(_.id).toSet
+  }
+
   it should "take the oldest overdue box even when a younger one bids more" in {
     val boxes = boxesWith(Seq((1000000L, 100, 0L), (2000000L, 180, 900000L)))
     val f = fixture(boxes = Some(boxes))
