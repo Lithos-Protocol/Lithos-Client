@@ -19,9 +19,7 @@ GET  /collateral/market        controllers.CollateralMarketApiController.getMark
 GET  /collateral/queue         controllers.CollateralMarketApiController.getQueue(limit: Option[Int], offset: Option[Int])
 GET  /collateral/active        controllers.CollateralMarketApiController.getActiveSet(limit: Option[Int], offset: Option[Int])
 GET  /collateral/permits/history controllers.CollateralMarketApiController.getPermitHistory(limit: Option[Int])
-GET  /collateral/rewards       controllers.CollateralMarketApiController.getRewardSummary()
-+ nocsrf
-POST /collateral/rewards/claim controllers.CollateralMarketApiController.claimRewards()
+GET  /collateral/wallet        controllers.CollateralMarketApiController.getWalletStatus()
 + nocsrf
 POST /collateral/join/check    controllers.CollateralMarketApiController.checkJoin()
 + nocsrf
@@ -130,6 +128,10 @@ POST /forwards/positions/:boxId/settle          controllers.ForwardsApiControlle
 
 # Routes for Wallet API
 GET  /wallet/balances                           controllers.WalletApiController.getWalletBalances()
+GET  /wallet/rewards                            controllers.WalletApiController.getRewardSummary()
++ nocsrf
+POST /wallet/rewards/claim                      controllers.WalletApiController.claimRewards()
+GET  /wallet/tokens/verified                    controllers.WalletApiController.getVerifiedTokens()
 
 # Routes for Payments API
 

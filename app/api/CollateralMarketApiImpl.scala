@@ -26,8 +26,6 @@ class CollateralMarketApiImpl @Inject()(nodeContext: NodeContext, config: Config
   override def getActiveSet(limit: Option[Int], offset: Option[Int]): Seq[CollateralActiveEntry] = reads.getActiveSet(limit, offset)
   override def getPermitHistory(limit: Option[Int]): CollateralPermitHistory = reads.getPermitHistory(limit)
   override def getWalletStatus: WalletCollateralStatus = reads.getWalletStatus
-  override def getRewardSummary: CollateralRewardSummary = reads.getRewardSummary
-  override def claimUnlockedRewards: CollateralRewardClaimResult = reads.claimUnlockedRewards
   override def checkJoin(request: CollateralJoinCheckRequest): CollateralJoinQuote = reads.checkJoin(request)
   // The engine answers a join it would not run with Deferred, never with a result, so each answer is
   // matched rather than cast.

@@ -49,7 +49,9 @@ tags:
     x-displayName: Collateral Market
   - name: wallet
     description: >
-      Balances and lending status for the client's own wallet. Requires an `api_key`.
+      The client's own wallet: ERG and token balances, block rewards, and the list of verified
+      tokens those balances are matched against. Balances and rewards require an `api_key`; the
+      verified list does not.
 
 
       **All amounts are decimal strings, not JSON numbers.** ERG amounts are nanoERG; LIT amounts
@@ -3091,21 +3093,23 @@ paths:
     get:
       security:
         - ApiKeyAuth: []
-      summary: Wallet balances and lending status
+      summary: Wallet balances
       description: >
-        Spendable ERG, token balances, and — under `collateral` — lender keys, queued and live
-        positions, locked block rewards, and the self-collateralization settings in effect.
+        Spendable ERG, ERG held for transactions in flight, and every token the wallet holds,
+        each marked verified or not.
 
 
-        `nanoErgs` is the ERG available to spend right now: unreserved wallet boxes plus matured
-        block rewards. Reading balances and lending status in one call means both describe the same
-        instant.
+        `nanoErgs` is the ERG available to spend right now: unreserved plain wallet boxes. Block
+        rewards count only once claimed; see `GET /wallet/rewards`. A verified token's name, ticker
+        and decimals come from the client's verified list. Any other token's come from the node's
+        token index, where whoever minted the token chose them, so a token named like a verified one
+        is told apart only by `verified`.
       operationId: getWalletBalances
       tags:
         - wallet
       responses:
         '200':
-          description: Current wallet balances and lending status
+          description: Current wallet balances
           content:
             application/json:
               schema:
@@ -3117,11 +3121,127 @@ paths:
               schema:
                 $ref: '#/components/schemas/ApiError'
         '503':
-          description: Node or wallet unavailable — it may be locked. Retry.
+          description: Node or wallet unavailable. It may be locked. Retry.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiError'
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /wallet/rewards:
+    get:
+      summary: Your block rewards
+      security:
+        - ApiKeyAuth: []
+      description: >
+        Coinbase reward boxes held by this wallet: how many are still behind the 720-block
+        timelock, how many are spendable now, and the ERG totals.
+      operationId: getWalletRewardSummary
+      tags:
+        - wallet
+      responses:
+        '200':
+          description: Reward box counts and totals
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WalletRewardSummary'
+        '403':
+          description: Missing or wrong api_key
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '503':
+          description: Node or wallet unavailable. Retry.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /wallet/rewards/claim:
+    post:
+      summary: Claim unlocked block rewards
+      security:
+        - ApiKeyAuth: []
+      description: >
+        Sweep every unlocked reward box to this wallet's primary address (EIP-3 index 0), batching
+        boxes into as few transactions as possible. Dust is consolidated, never dropped.
+
+
+        A sweep that broadcasts nothing returns an error status rather than an empty 200, so a
+        result with no claims is never ambiguous.
+      operationId: claimWalletRewards
+      tags:
+        - wallet
+      responses:
+        '200':
+          description: The sweep transactions that were sent
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WalletRewardClaimResult'
+        '400':
+          description: >
+            No unlocked reward boxes to claim, or another claim is already sweeping them.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '403':
+          description: Missing or wrong api_key
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '422':
+          description: >
+            The sweep started and could not finish. `detail` carries the reason it stopped; batches
+            broadcast before that point have still been sent.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '503':
+          description: Node or wallet unavailable. Nothing was decided; retry.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /wallet/tokens/verified:
+    get:
+      summary: Verified tokens
+      description: >
+        Every token this release of the client marks verified. Each was checked by hand before it
+        was added to the list, which changes only with a client release. LIT is always on it.
+      operationId: getVerifiedTokens
+      tags:
+        - wallet
+      responses:
+        '200':
+          description: The verified tokens
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VerifiedTokenList'
         default:
           description: Error
           content:
@@ -3298,76 +3418,39 @@ paths:
               schema:
                 $ref: '#/components/schemas/ApiError'
 
-  /collateral/rewards:
+  /collateral/wallet:
     get:
-      summary: Your locked block rewards
+      summary: Your lending status
       security:
         - ApiKeyAuth: []
       description: >
-        Coinbase reward boxes held by this wallet — how many are still behind the 720-block
-        timelock, how many are spendable now, and the ERG totals.
-      operationId: getCollateralRewardSummary
+        This wallet's side of the collateral market: lender keys and their state, queued and live
+        positions, and the self-collateralization settings in effect. Balances are under
+        `GET /wallet/balances`.
+      operationId: getCollateralWalletStatus
       tags:
         - collateral-market
       responses:
         '200':
-          description: Reward box counts and totals
+          description: Lender keys, positions and settings
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/CollateralRewardSummary'
+                $ref: '#/components/schemas/WalletCollateralStatus'
+        '403':
+          description: Missing or wrong api_key
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '404':
+          description: No emission state on this network yet, or the node is not indexed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
         '503':
           description: Node or wallet unavailable. Retry.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiError'
-        default:
-          description: Error
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiError'
-
-  /collateral/rewards/claim:
-    post:
-      summary: Claim unlocked block rewards
-      security:
-        - ApiKeyAuth: []
-      description: >
-        Sweep every unlocked reward box to this wallet's primary address (EIP-3 index 0), batching
-        boxes into as few transactions as possible. Dust is consolidated, never dropped.
-
-
-        A sweep that broadcasts nothing returns an error status rather than an empty 200, so a
-        result with no claims is never ambiguous.
-      operationId: claimCollateralRewards
-      tags:
-        - collateral-market
-      responses:
-        '200':
-          description: The sweep transactions that were sent
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/CollateralRewardClaimResult'
-        '400':
-          description: >
-            No unlocked reward boxes to claim, or another claim is already sweeping them.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiError'
-        '422':
-          description: >
-            The sweep started and could not finish. `detail` carries the reason it stopped; batches
-            broadcast before that point have still been sent.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiError'
-        '503':
-          description: Node or wallet unavailable. Nothing was decided; retry.
           content:
             application/json:
               schema:
@@ -5854,10 +5937,10 @@ components:
           format: int32
           example: 484102
 
-    CollateralRewardSummary:
-      description: This wallet's locked coinbase rewards
+    WalletRewardSummary:
+      description: This wallet's coinbase rewards
       type: object
-      x-tags: collateral-market
+      x-tags: wallet
       required:
         - boxes
         - unlockedBoxes
@@ -5887,10 +5970,10 @@ components:
           format: int32
           description: Blocks until the earliest still-locked box matures. Absent when none are locked.
 
-    CollateralRewardClaimedChunk:
+    WalletRewardClaimedChunk:
       description: One broadcast batch of a reward claim
       type: object
-      x-tags: collateral-market
+      x-tags: wallet
       required:
         - outcome
         - txId
@@ -5914,10 +5997,10 @@ components:
           description: ERG paid to the primary address by this transaction. Decimal string.
           example: '36000000000'
 
-    CollateralRewardClaimResult:
+    WalletRewardClaimResult:
       description: Result of claiming unlocked block rewards to the primary address
       type: object
-      x-tags: collateral-market
+      x-tags: wallet
       required:
         - claims
         - claimedNanoErgs
@@ -5925,7 +6008,7 @@ components:
         claims:
           type: array
           items:
-            $ref: '#/components/schemas/CollateralRewardClaimedChunk'
+            $ref: '#/components/schemas/WalletRewardClaimedChunk'
         claimedNanoErgs:
           type: string
           description: Total ERG across every claim transaction. Decimal string.
@@ -5933,8 +6016,8 @@ components:
 
     WalletCollateralStatus:
       description: >
-        The collateral-market half of the wallet. Lender keys are the expensive part to compute, so
-        the client serves them from a short-lived cache rather than rescanning per request.
+        This wallet's side of the collateral market. Lender keys are the expensive part to compute,
+        so the client serves them from a short-lived cache rather than rescanning per request.
       type: object
       x-tags: collateral-market
       required:
@@ -5950,9 +6033,6 @@ components:
         - keysDerivable
         - lenderKeys
         - positions
-        - rewards
-        - reservedBoxes
-        - reservedNanoErgs
       properties:
         autoCollateralize:
           type: boolean
@@ -6017,19 +6097,6 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/CollateralPositionSummary'
-        rewards:
-          $ref: '#/components/schemas/CollateralRewardSummary'
-        reservedBoxes:
-          type: integer
-          format: int32
-          description: >
-            Wallet boxes held for transactions in flight or for this miner's own blocks. They are left
-            out of the spendable balance a join quote is priced against.
-          example: 2
-        reservedNanoErgs:
-          type: string
-          description: Value of the held boxes this client has descriptors for, in nanoERG
-          example: '18000000000'
 
     CollateralJoinCheckRequest:
       description: How many positions to price, and what each bids for priority. Omitted fields default.
@@ -8107,39 +8174,50 @@ components:
           description: Present and true for stale snapshots; inspect stats.historyComplete for history coverage.
 
     WalletToken:
-      description: A token balance held by the wallet
+      description: >
+        A token balance held by the wallet. For a verified token, `name`, `ticker` and `decimals`
+        come from the client's verified list. For any other token they come from the node's token
+        index, where whoever minted the token chose them, and are absent if the node has no index.
       type: object
-      x-tags: lithosdex
+      x-tags: wallet
       required:
         - tokenId
         - amount
+        - verified
       properties:
         tokenId:
           type: string
-          example: '86e272f770aa4ef48ad7e6d6dbe98b5069edd8383a403a8edb3ceed8a3d5cea3'
+          example: 'c1980d829988229516430a47a5eca376060b6ce859616db0936e78ab25cb6de7'
         name:
           type: string
+          example: 'LIT'
+        ticker:
+          type: string
+          description: Short symbol. Verified tokens only.
           example: 'LIT'
         decimals:
           type: integer
           format: int32
-          example: 4
+          example: 9
         amount:
           type: string
           description: Raw token units held. Decimal string.
           example: '5420000000'
+        verified:
+          type: boolean
+          description: Whether the token is on the client's verified list
+          example: true
 
     WalletBalances:
-      description: >
-        This client's wallet, for both LithosDex and the collateral market. One call so a page does
-        not have to stitch two together, and so both halves describe the same instant.
+      description: This client's wallet balances.
       type: object
       x-tags: wallet
       required:
         - primaryAddress
         - nanoErgs
+        - reservedBoxes
+        - reservedNanoErgs
         - tokens
-        - collateral
       properties:
         primaryAddress:
           type: string
@@ -8148,16 +8226,61 @@ components:
         nanoErgs:
           type: string
           description: >
-            Unreserved ERG available to spend right now, unclaimed coinbases excluded — the figure a
+            Unreserved ERG available to spend right now, unclaimed coinbases excluded. The figure a
             join quote's `affordNow` is decided against. Decimal string.
           example: '182400000000'
+        reservedBoxes:
+          type: integer
+          format: int32
+          description: >
+            Wallet boxes held for transactions in flight or for this miner's own blocks. They are left
+            out of `nanoErgs`.
+          example: 2
+        reservedNanoErgs:
+          type: string
+          description: Value of the held boxes this client has descriptors for, in nanoERG
+          example: '18000000000'
         tokens:
           type: array
           description: Every token the wallet holds, including LIT.
           items:
             $ref: '#/components/schemas/WalletToken'
-        collateral:
-          $ref: '#/components/schemas/WalletCollateralStatus'
+
+    VerifiedToken:
+      description: A token on the client's verified list
+      type: object
+      x-tags: wallet
+      required:
+        - tokenId
+        - name
+        - ticker
+        - decimals
+      properties:
+        tokenId:
+          type: string
+          example: 'c1980d829988229516430a47a5eca376060b6ce859616db0936e78ab25cb6de7'
+        name:
+          type: string
+          example: 'LIT'
+        ticker:
+          type: string
+          example: 'LIT'
+        decimals:
+          type: integer
+          format: int32
+          example: 9
+
+    VerifiedTokenList:
+      description: Every token the client marks verified
+      type: object
+      x-tags: wallet
+      required:
+        - tokens
+      properties:
+        tokens:
+          type: array
+          items:
+            $ref: '#/components/schemas/VerifiedToken'
 
     NISPRepresentation:
       description: Representation of a 10 super share NISP

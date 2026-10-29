@@ -45,18 +45,6 @@ object CollateralPositionSummary {
     Json.format[CollateralPositionSummary]
 }
 
-/** This wallet's locked coinbase rewards. */
-case class CollateralRewardSummary(boxes: Int,
-                                   unlockedBoxes: Int,
-                                   totalNanoErgs: String,
-                                   unlockedNanoErgs: String,
-                                   blocksUntilFirstUnlock: Option[Int])
-
-object CollateralRewardSummary {
-  implicit lazy val jsonFormat: Format[CollateralRewardSummary] =
-    Json.format[CollateralRewardSummary]
-}
-
 /**
  * This wallet's side of the collateral market.
  *
@@ -64,9 +52,6 @@ object CollateralRewardSummary {
  * with no free key but room under `maxLenderKeys` derives one on demand and is not blocked; one at
  * its ceiling genuinely is. Collapsing them into a single "keys available" number reports the
  * second case as the first.
- *
- * `reservedBoxes` and `reservedNanoErgs` are wallet boxes held for transactions in flight or for this
- * miner's own blocks. They are left out of the spendable balance a join quote is priced against.
  */
 case class WalletCollateralStatus(autoCollateralize: Boolean,
                                   maxOwnCollateral: Int,
@@ -79,10 +64,7 @@ case class WalletCollateralStatus(autoCollateralize: Boolean,
                                   freeLenderKeys: Int,
                                   keysDerivable: Int,
                                   lenderKeys: Seq[CollateralLenderKeyStatus],
-                                  positions: Seq[CollateralPositionSummary],
-                                  rewards: CollateralRewardSummary,
-                                  reservedBoxes: Int,
-                                  reservedNanoErgs: String)
+                                  positions: Seq[CollateralPositionSummary])
 
 object WalletCollateralStatus {
   implicit lazy val jsonFormat: Format[WalletCollateralStatus] =

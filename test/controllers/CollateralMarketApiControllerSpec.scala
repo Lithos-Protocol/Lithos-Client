@@ -62,8 +62,6 @@ class CollateralMarketApiControllerSpec
     override def getActiveSet(limit: Option[Int], offset: Option[Int]): Seq[CollateralActiveEntry] = ???
     override def getPermitHistory(limit: Option[Int]): CollateralPermitHistory = ???
     override def getWalletStatus: WalletCollateralStatus = ???
-    override def getRewardSummary: CollateralRewardSummary = ???
-    override def claimUnlockedRewards: CollateralRewardClaimResult = ???
   }
 
   private def controller(api: CollateralMarketApi): CollateralMarketApiController =
@@ -169,5 +167,29 @@ class CollateralMarketApiControllerSpec
     (json \ "manualJoinAllowed").as[Boolean] shouldBe false
     (json \ "keysDerivable").as[Int] shouldBe 0
     (json \ "fitting").as[Int] shouldBe 1
+  }
+
+  "GET /collateral/wallet" should "need the api_key, since it names this wallet's lender keys" in {
+    val walletStatus = WalletCollateralStatus(autoCollateralize = false, maxOwnCollateral = 10, maxJoinsPerRun = 5,
+      maxLenderKeys = 32, maxPermitPerJoinLit = "30000000000000", ownPositionsQueued = 0, ownPositionsLive = 0,
+      ownBudgetRemaining = 10, freeLenderKeys = 4, keysDerivable = 28, lenderKeys = Seq.empty, positions = Seq.empty)
+    val api = new StubApi(_ => quote(None, 3), _ => sent) {
+      override def getWalletStatus: WalletCollateralStatus = walletStatus
+    }
+    val action = controller(api).getWalletStatus()
+    status(action.apply(FakeRequest(GET, "/collateral/wallet"))) shouldBe FORBIDDEN
+
+    val result = action.apply(FakeRequest(GET, "/collateral/wallet").withHeaders("api_key" -> apiKey))
+    status(result) shouldBe OK
+    (contentAsJson(result) \ "freeLenderKeys").as[Int] shouldBe 4
+    (contentAsJson(result) \ "keysDerivable").as[Int] shouldBe 28
+  }
+
+  it should "be 404 rather than 500 before emission exists on the network" in {
+    val api = new StubApi(_ => quote(None, 3), _ => sent) {
+      override def getWalletStatus: WalletCollateralStatus = throw new stratum.CollateralNotFoundException("no emission box")
+    }
+    status(controller(api).getWalletStatus().apply(
+      FakeRequest(GET, "/collateral/wallet").withHeaders("api_key" -> apiKey))) shouldBe NOT_FOUND
   }
 }

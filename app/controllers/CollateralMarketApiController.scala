@@ -51,22 +51,12 @@ class CollateralMarketApiController @Inject()(cc: ControllerComponents,
   def getPermitHistory(limit: Option[Int]): Action[AnyContent] =
     Action.async { _ => offPool(respond(api.getPermitHistory(limit))) }
 
-  /**
-   * GET /collateral/rewards
-   *
-   * Key-gated. The spec has always said so and the route did not enforce it, which left this
-   * wallet's locked coinbase totals readable by anyone who could reach the port.
-   */
-  def getRewardSummary(): Action[AnyContent] = withApiKey {
-    Action.async { _ => offPool(respond(api.getRewardSummary)) }
+  /** GET /collateral/wallet. Key-gated: it names this wallet's lender addresses and positions. */
+  def getWalletStatus(): Action[AnyContent] = withApiKey {
+    Action.async { _ => offPool(respond(api.getWalletStatus)) }
   }
 
   // ── writes ───────────────────────────────────────────────────────────────
-
-  /** POST /collateral/rewards/claim */
-  def claimRewards(): Action[AnyContent] = withApiKey {
-    Action.async { _ => offPool(respond(api.claimUnlockedRewards)) }
-  }
 
   /**
    * POST /collateral/join/check
@@ -114,8 +104,6 @@ class CollateralMarketApiController @Inject()(cc: ControllerComponents,
   private def respond[A](result: => A)(implicit writes: Writes[A]): Result =
     Try(result) match {
       case Success(value) => Ok(Json.toJson(value))
-      case Failure(e: CollateralMarketApi.NothingToClaim) =>
-        BadRequest(ApiHelper.makeError(400, "Nothing to claim", e.getMessage))
       case Failure(e: LithosApiErrors.LithosBadRequest) =>
         BadRequest(ApiHelper.makeError(400, "Bad request", e.getMessage))
       case Failure(e: OpenApiExceptions.MissingRequiredParameterException) =>

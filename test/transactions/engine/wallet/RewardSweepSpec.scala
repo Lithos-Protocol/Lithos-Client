@@ -132,7 +132,7 @@ class RewardSweepSpec extends TestKit(akka.actor.ActorSystem("reward-sweep-spec"
   }
 
   "Unlocked rewards" should "be swept without a claim once a refresh sees them" in {
-    // Nothing moved them unless something called POST /collateral/rewards/claim, and funding never
+    // Nothing moved them unless something called POST /wallet/rewards/claim, and funding never
     // spends a reward box, so they sat unlocked indefinitely.
     val (probe, mgr) = fixtureWithRewards(Seq(3000000000L, 3100000000L), limits = configs.WalletConfig.Default)
     probe.awaitAssert({

@@ -52,9 +52,8 @@ class CollateralExecution(nodeContext: NodeContext,
   private val walletSelector =
     EngineFunding(walletManager, EngineFunding.askTimeout(config), ec)
 
-  /** Ask timeout for the fast wallet replies; the claim covers a multi-broadcast sweep. */
+  /** Ask timeout for the fast wallet replies. */
   private val QuickAsk = Timeout(5 seconds)
-  private val ClaimAsk = Timeout(180 seconds)
 
   /**
    * Ask the wallet actor and check the reply's type instead of casting it.
@@ -123,7 +122,7 @@ class CollateralExecution(nodeContext: NodeContext,
   private def isFresh(at: Long, generation: Long): Boolean =
     generation == viewGeneration && System.nanoTime() - at < snapshotTtlMs * 1000000L
 
-  /** Drop both snapshots. Called after anything that moves a position or a reward box. */
+  /** Drop both snapshots. Called after anything that moves a position. */
   def invalidateSnapshots(): Unit = synchronized {
     viewGeneration += 1L
     cachedView = None
@@ -314,9 +313,6 @@ class CollateralExecution(nodeContext: NodeContext,
   // ─── this wallet ──────────────────────────────────────────────────────────
 
   override def getWalletStatus: WalletCollateralStatus = {
-    val rewards = askWallet[RewardSummary](GetUnlockedRewards, QuickAsk)
-    val reservations = askWallet[Reservations](GetReservations, QuickAsk)
-
     nodeContext.getClient.execute { ctx =>
       val tx = txs
       val view = collateralView(ctx)
@@ -367,53 +363,8 @@ class CollateralExecution(nodeContext: NodeContext,
         // differently: no free key with room to derive is not blocked, at the ceiling it is.
         keysDerivable = math.max(0, emissionConfig.maxLenderKeys - view.mine.size),
         lenderKeys = keyStates,
-        positions = positions.toSeq,
-        rewards = CollateralRewardSummary(rewards.lockedBoxes, rewards.unlockedBoxes,
-          rewards.lockedNanoErgs.toString, rewards.unlockedNanoErgs.toString,
-          rewards.blocksUntilFirstUnlock),
-        reservedBoxes = reservations.boxes,
-        reservedNanoErgs = reservations.nanoErgs.toString
+        positions = positions.toSeq
       )
-    }
-  }
-
-  // ─── rewards ──────────────────────────────────────────────────────────────
-
-  override def getRewardSummary: CollateralRewardSummary = {
-    val rewards = askWallet[RewardSummary](GetUnlockedRewards, QuickAsk)
-    CollateralRewardSummary(rewards.lockedBoxes, rewards.unlockedBoxes,
-      rewards.lockedNanoErgs.toString, rewards.unlockedNanoErgs.toString,
-      rewards.blocksUntilFirstUnlock)
-  }
-
-  override def claimUnlockedRewards: CollateralRewardClaimResult = {
-    val summary = askWallet[RewardSummary](GetUnlockedRewards, QuickAsk)
-    if (summary.unlockedBoxes == 0)
-      throw new CollateralMarketApi.NothingToClaim("no unlocked reward boxes to claim")
-    val reply = askWalletRaw(ClaimUnlockedRewards, ClaimAsk)
-    // Nothing in either snapshot is derived from reward boxes today - the counts and the spendable
-    // balance are asked of the wallet actor per request - so this is insurance against a later field
-    // that is, not a correction. Kept because a sweep is rare and a rebuild is one scan.
-    invalidateSnapshots()
-
-    reply match {
-      case RewardsClaimed(chunks) if chunks.isEmpty =>
-        // The pre-check above passed, so another caller is holding the leases right now.
-        throw new CollateralMarketApi.NothingToClaim(
-          "another claim is already sweeping these boxes - try again shortly")
-      case RewardsClaimed(chunks) =>
-        CollateralRewardClaimResult(
-          claims = chunks.map(c => CollateralRewardClaimedChunk(c.txId, c.boxes, c.nanoErgs.toString, c.outcome)),
-          claimedNanoErgs = chunks.filter(_.outcome == "accepted").map(c => BigInt(c.nanoErgs)).sum.toString)
-      // A real reply the wallet sends and this used to cast away: the sweep raised before finishing.
-      // Cast, it became a ClassCastException naming two class names, so the one message carrying why
-      // the sweep failed was the one thing the caller could not see.
-      case RewardClaimFailed(reason) =>
-        throw LithosApiErrors.LithosUnprocessable(s"the reward sweep could not complete: $reason")
-      case other =>
-        // Both replies the wallet actually sends are handled above, so this is a defect here.
-        throw new IllegalStateException(
-          s"the wallet answered a claim with ${other.getClass.getSimpleName}")
     }
   }
 

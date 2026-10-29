@@ -31,7 +31,6 @@ import scala.util.{Success, Try}
  *
  *  - a quote derives the taken-key set ONCE, not once per wallet address;
  *  - a key a join will refuse is never reported as one a join could use;
- *  - a wallet reply of an unexpected type is a status a caller can act on, not a 500;
  *  - the snapshot behind the wallet view does not survive a join.
  */
 object CollateralMarketApiImplSpec {
@@ -50,24 +49,14 @@ class CollateralMarketApiImplSpec
 
   // ─── a wallet that answers ────────────────────────────────────────────────
 
-  /**
-   * Stands in for `EngineWalletState`. `claimReply` is a function so a test can make the actor answer
-   * `RewardClaimFailed`, which the manager really does send and which the API used to cast away.
-   */
-  private class StubWallet(spendable: Long,
-                           rewards: RewardSummary,
-                           claimReply: () => Any) extends Actor {
+  /** Stands in for `EngineWalletState`, answering the spendable balance a join quote is priced against. */
+  private class StubWallet(spendable: Long) extends Actor {
     override def receive: Receive = {
       case GetSpendableBalance => sender() ! SpendableBalance(spendable)
-      case GetUnlockedRewards => sender() ! rewards
-      case ClaimUnlockedRewards => sender() ! claimReply()
-      case GetReservations => sender() ! Reservations(0, 0L)
       // The only other ask is for the lender keys joins are sending under, which this package cannot name.
       case _ => sender() ! Set.empty[String]
     }
   }
-
-  private val noRewards = RewardSummary(0, 0, 0L, 0L, None)
 
   // ─── the node ─────────────────────────────────────────────────────────────
 
@@ -103,8 +92,6 @@ class CollateralMarketApiImplSpec
                       boxes: (BlockchainContext, Seq[Address]) => Map[String, Seq[IndexedBox]] =
                         (_, _) => Map.empty,
                       spendable: Long = 1000L * 1000000000L,
-                      rewards: RewardSummary = noRewards,
-                      claimReply: () => Any = () => RewardsClaimed(Seq.empty),
                       ttlMs: Long = 10000L,
                       config: Configuration = emptyConfig,
                       walletLocked: Boolean = false): Fixture = {
@@ -138,7 +125,7 @@ class CollateralMarketApiImplSpec
       support.ChainFixtures.infoAt(100).copy(bestFullHeaderId = Some("ab" * 32))))
 
     val walletRef: ActorRef =
-      system.actorOf(Props(new StubWallet(spendable, rewards, claimReply)))
+      system.actorOf(Props(new StubWallet(spendable)))
 
     val api = new transactions.engine.execution.CollateralExecution(nodeCtx, config, system, walletRef) {
       override protected val snapshotTtlMs: Long = ttlMs
@@ -413,35 +400,6 @@ class CollateralMarketApiImplSpec
     val thrown = the[LithosApiErrors.LithosStateChanged] thrownBy
       f.api.join(CollateralJoinExecuteRequest(1, Some(true), None, None))
     thrown.getMessage should include("autoCollateralize")
-  }
-
-  // ─── 5. a wallet reply the API did not expect ─────────────────────────────
-
-  "A sweep that failed" should "become a status carrying the reason, not a 500" in {
-    // `EngineWalletState` really does answer `RewardClaimFailed` — `runRewardSweep` catches Throwable
-    // and completes its promise with it. The API cast the reply to `RewardsClaimed`, so the one
-    // message carrying WHY the sweep failed became a ClassCastException naming two class names.
-    val f = fixture(
-      rewards = RewardSummary(0, 2, 0L, 6000000000L, None),
-      claimReply = () => RewardClaimFailed("node refused the sweep"))
-
-    val thrown = the[LithosApiErrors.LithosUnprocessable] thrownBy f.api.claimUnlockedRewards
-    thrown.getMessage should include("node refused the sweep")
-  }
-
-  it should "still report nothing-to-claim when the wallet holds no unlocked boxes" in {
-    val f = fixture(rewards = noRewards)
-    a[CollateralMarketApi.NothingToClaim] should be thrownBy f.api.claimUnlockedRewards
-  }
-
-  it should "report a concurrent sweep rather than success with an empty list" in {
-    // The pre-check passed, so an empty result means another caller holds the leases. A 200 with no
-    // claims cannot be told from a deliberate no-op.
-    val f = fixture(
-      rewards = RewardSummary(0, 2, 0L, 6000000000L, None),
-      claimReply = () => RewardsClaimed(Seq.empty))
-    val thrown = the[CollateralMarketApi.NothingToClaim] thrownBy f.api.claimUnlockedRewards
-    thrown.getMessage should include("already sweeping")
   }
 
   // ─── 6. the market snapshot ───────────────────────────────────────────────

@@ -7,7 +7,6 @@ import configs.Contexts
 import play.api.Configuration
 import play.api.libs.json._
 import play.api.mvc._
-import stratum.CollateralNotFoundException
 
 import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
@@ -16,8 +15,9 @@ import scala.concurrent.Future
 import scala.util.{Failure, Success, Try}
 
 /**
- * The wallet endpoints. Blocking node IO, so each action runs on the dex pool rather than Play's
- * request threads, matching the LithosDex and collateral-market controllers.
+ * The wallet endpoints. Balances and rewards do blocking node IO, so each runs on the dex pool rather
+ * than Play's request threads, matching the LithosDex and collateral-market controllers. The verified
+ * list is in memory and answers inline.
  */
 @Singleton
 class WalletApiController @Inject()(cc: ControllerComponents,
@@ -35,17 +35,31 @@ class WalletApiController @Inject()(cc: ControllerComponents,
     Action.async { _ => offPool(respond(api.getWalletBalances)) }
   }
 
-  /** Same mapping as the other two controllers, minus the cases these endpoints cannot raise. */
+  /** GET /wallet/rewards */
+  def getRewardSummary(): Action[AnyContent] = withApiKey {
+    Action.async { _ => offPool(respond(api.getRewardSummary)) }
+  }
+
+  /** POST /wallet/rewards/claim */
+  def claimRewards(): Action[AnyContent] = withApiKey {
+    Action.async { _ => offPool(respond(api.claimUnlockedRewards)) }
+  }
+
+  /** GET /wallet/tokens/verified */
+  def getVerifiedTokens(): Action[AnyContent] = Action { _ => respond(api.getVerifiedTokens) }
+
+  /** Same mapping as the other controllers, minus the cases these endpoints cannot raise. */
   private def respond[A](result: => A)(implicit writes: Writes[A]): Result =
     Try(result) match {
       case Success(value) => Ok(Json.toJson(value))
+      case Failure(e: WalletApi.NothingToClaim) =>
+        BadRequest(ApiHelper.makeError(400, "Nothing to claim", e.getMessage))
       case Failure(e: LithosApiErrors.LithosBadRequest) =>
         BadRequest(ApiHelper.makeError(400, "Bad request", e.getMessage))
+      case Failure(e: LithosApiErrors.LithosUnprocessable) =>
+        UnprocessableEntity(ApiHelper.makeError(422, "Cannot be executed", e.getMessage))
       case Failure(e: LithosApiErrors.LithosUnavailable) =>
         ServiceUnavailable(ApiHelper.makeError(503, "Node unavailable", e.getMessage))
-      case Failure(_: CollateralNotFoundException) =>
-        NotFound(ApiHelper.makeError(404, "Not found",
-          "no emission state on this network - has emission launched and is the node indexed?"))
       case Failure(e: java.util.concurrent.TimeoutException) =>
         ServiceUnavailable(ApiHelper.makeError(503, "Wallet busy", e.getMessage))
       case Failure(e: IllegalArgumentException) =>
