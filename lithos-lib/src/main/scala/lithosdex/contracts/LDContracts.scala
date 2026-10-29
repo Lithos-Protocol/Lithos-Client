@@ -21,6 +21,8 @@ object LDContractKind {
   case object ProvisionGuard extends LDContractKind("LD_Provision_Guard", Seq(PROVISION_LOGIC_HASH))
   case object FeeVault extends LDContractKind("LD_FeeVault", Seq(POOL_NFT, PROV_TOKEN))
   case object LiquidityPool extends LDContractKind("LD_LiquidityPool", Seq(VAULT_NFT, PROVISION_GUARD_HASH))
+  /** The token/token provision logic, whose refresh pays the refresher. Never a box script. */
+  case object T2TProvision extends LDContractKind("LD_T2T_Provision", Seq(POOL_NFT, VAULT_NFT))
   /** The token/token pool's vault, holding fees in both of the pool's tokens. */
   case object T2TFeeVault extends LDContractKind("LD_T2T_FeeVault", Seq(POOL_NFT, PROV_TOKEN))
   /** The token/token pool. */
@@ -29,8 +31,8 @@ object LDContractKind {
   /** The four contracts of an ERG/token deployment. */
   val n2t: Seq[LDContractKind] = Seq(Provision, ProvisionGuard, FeeVault, LiquidityPool)
 
-  /** What a token/token deployment adds. It shares the provision logic and guard with [[n2t]]. */
-  val t2t: Seq[LDContractKind] = Seq(T2TFeeVault, T2TLiquidityPool)
+  /** What a token/token deployment adds. It reuses the guard template from [[n2t]] with its own logic's hash. */
+  val t2t: Seq[LDContractKind] = Seq(T2TProvision, T2TFeeVault, T2TLiquidityPool)
 
   val all: Seq[LDContractKind] = n2t ++ t2t
 }
@@ -49,8 +51,8 @@ object LDContractKind {
  *   LD_FeeVault        (poolNFT, provToken)
  * }}}
  *
- * A token/token deployment swaps in LD_T2T_LiquidityPool and LD_T2T_FeeVault, which take the same terms,
- * and keeps the same provision logic and guard.
+ * A token/token deployment swaps in LD_T2T_Provision, LD_T2T_LiquidityPool and LD_T2T_FeeVault, which take
+ * the same terms, and keeps the guard template, so its provision boxes sit at a guard naming its own logic.
  */
 object LithosDexContracts {
 
@@ -162,6 +164,19 @@ object LithosDexContracts {
       "39997227e4c672340506723a938c723d01723193b2723f735f00723d92c1723e9ac1723b72169272429a8cb2723c7360" +
       "017240027225ec938c7241017207937242736193e4c6723e0406722393e4c6723e0506722793720e7362937211736373" +
       "64"),
+
+    LDContractKind.T2TProvision ->
+      ("1b8604110e205d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d0200040004000e205e5e" +
+      "5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e020104000400020204c09440058090bcfd02" +
+      "0580dac40904d00f0203040004000100d809d601e4e30002d602e4c6a7060ed603aea4d9010363aedb63087203d90105" +
+      "4d0e938c7205017202d604b2a5db6508fe00d605db6308a7d606e4c6a70705d607e4c6a70406d608e4c6a70506d60973" +
+      "00959372017301d1eded938cb2db6308b2a473020073030001730472039683080193c27204c2a792c17204c1a793db63" +
+      "087204720593e4c67204060e720293e4c672040705720692e4c672040406720792e4c6720405067208efe6c67204080e" +
+      "959372017305d1eded7203938cb2db6308b2a4730600730700017209afa5d9010a63efaedb6308720ad9010c4d0e938c" +
+      "720c017202959372017308d801d60ac1a7d1ed8f8cc7a70199a373099683090193c27204c2a792c17204a2a1720a730a" +
+      "99720a730b93db63087204720593e4c672040406720793e4c672040506720893e4c67204060e720293e4c67204070572" +
+      "06918cc772040199a3730cefe6c67204080e95937201730dd1eded7203938cb2db6308b2a4730e00730f000172099683" +
+      "050193c27204c2a792c17204c1a793db63087204720593e4c67204060e7202efe6c67204080ed17310"),
 
     LDContractKind.T2TFeeVault ->
       ("1ba7051f0400040204040400040006043b9aca0002000402040404020402040201010500050004000e205f5f5f5f5f5f" +
@@ -325,6 +340,13 @@ object LithosDexContracts {
   def mkLPContract(vaultNFT: ErgoId, provisionGuardHash: Array[Byte]): Contract =
     build(LDContractKind.LiquidityPool, Map(VAULT_NFT -> vaultNFT.getBytes, PROVISION_GUARD_HASH -> provisionGuardHash))
 
+  /**
+   * LD_T2T_Provision — the token/token provision logic. Like [[mkProvisionLogic]], never a box script: its
+   * value bytes reach a guard through context var 64.
+   */
+  def mkT2TProvisionLogic(poolNFT: ErgoId, vaultNFT: ErgoId): Contract =
+    build(LDContractKind.T2TProvision, Map(POOL_NFT -> poolNFT.getBytes, VAULT_NFT -> vaultNFT.getBytes))
+
   /** LD_T2T_FeeVault — the token/token singleton holding flushed fees in both tokens. */
   def mkT2TFeeVault(poolNFT: ErgoId, provToken: ErgoId): Contract =
     build(LDContractKind.T2TFeeVault, Map(POOL_NFT -> poolNFT.getBytes, PROV_TOKEN -> provToken.getBytes))
@@ -398,10 +420,10 @@ object LDContracts {
  */
 case class LDT2TContracts(poolNFT: ErgoId, vaultNFT: ErgoId, provToken: ErgoId) {
 
-  /** LD_Provision, the same logic an ERG/token deployment runs. Never a box script. */
-  val provisionLogic: Contract = LithosDexContracts.mkProvisionLogic(poolNFT, vaultNFT)
+  /** LD_T2T_Provision, whose refresh pays the refresher. Never a box script. */
+  val provisionLogic: Contract = LithosDexContracts.mkT2TProvisionLogic(poolNFT, vaultNFT)
 
-  /** LD_Provision_Guard. This is the address a provision box actually sits at. */
+  /** LD_Provision_Guard naming [[provisionLogic]]. This is the address a provision box actually sits at. */
   val provisionGuard: Contract = LithosDexContracts.mkProvisionGuard(provisionLogic.hashedValueBytes)
 
   /** LD_T2T_FeeVault. */

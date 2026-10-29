@@ -39,13 +39,17 @@ class LDContractTemplateSpec extends AnyPropSpec with LithosDexSpecBase {
     }
   }
 
-  property("templates: a token/token deployment runs the same provision logic and guard as an ERG/token one") {
+  property("templates: a token/token deployment runs its own provision logic behind the same guard template") {
     withCtx { _ =>
       val (pool, vault, prov) = (LithosDexSpecBase.poolNFT, LithosDexSpecBase.vaultNFT, LithosDexSpecBase.provToken)
       val n2t = LDContracts(pool, vault, prov, NetworkType.MAINNET)
       val t2t = LDT2TContracts(pool, vault, prov)
-      t2t.provisionLogic.propBytes shouldEqual n2t.provisionLogic.propBytes
-      t2t.provisionGuard.propBytes shouldEqual n2t.provisionGuard.propBytes
+      t2t.provisionLogic.propBytes should not equal n2t.provisionLogic.propBytes
+      t2t.provisionGuard.propBytes should not equal n2t.provisionGuard.propBytes
+      t2t.provisionGuard.ergoTree.template shouldEqual n2t.provisionGuard.ergoTree.template
+      t2t.provisionGuard.ergoTree.constants(
+        LithosDexContracts.indexOf(LDContractKind.ProvisionGuard, LithosDexContracts.PROVISION_LOGIC_HASH)) shouldEqual
+        ByteArrayConstant(t2t.provisionLogic.hashedValueBytes)
       t2t.liquidityPool.propBytes should not equal n2t.liquidityPool.propBytes
       t2t.feeVault.propBytes should not equal n2t.feeVault.propBytes
     }

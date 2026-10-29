@@ -37,6 +37,10 @@ class LDT2TStorageRentSpec extends AnyPropSpec with LDT2TSpecBase {
   private def structuralMaxVault: UTXO =
     vaultUTXO(Long.MaxValue, Long.MaxValue, typeMax, typeMax, value = Long.MaxValue)
 
+  /** The largest a provision box can be: one pinned token, two BigInt entries, the owner id, a Long, and no R8. */
+  private def structuralMaxProvision: UTXO =
+    provisionUTXO(typeMax, typeMax, LDT2TSpecBase.ownerNFT, Long.MaxValue, value = Long.MaxValue)
+
   property("rent: sizes and fees for the token/token boxes") {
     withCtx { ctx =>
       def show(name: String, box: UTXO, floor: Long): Unit = {
@@ -49,6 +53,14 @@ class LDT2TStorageRentSpec extends AnyPropSpec with LDT2TSpecBase {
       show("pool (typical)", poolUTXO(traded), LDHelpers.T2T_POOL_MIN_VALUE)
       show("vault (max)", structuralMaxVault, LDHelpers.T2T_VAULT_MIN_VALUE)
       show("vault (typical)", vaultUTXO(1000000L, 1000000L, traded.accX, traded.accY), LDHelpers.T2T_VAULT_MIN_VALUE)
+      show("provision (max)", structuralMaxProvision, LDHelpers.T2T_REFRESH_FLOOR)
+    }
+  }
+
+  property("rent: the refresh floor survives one collection at the provision's structural maximum") {
+    withCtx { ctx =>
+      // A collection takes the whole box, provision token included, unless its value exceeds the fee
+      LDHelpers.T2T_REFRESH_FLOOR should be > sizeOf(ctx, structuralMaxProvision) * factor(ctx)
     }
   }
 

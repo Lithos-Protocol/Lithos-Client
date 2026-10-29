@@ -54,6 +54,19 @@ object LDHelpers {
   /** LD_Provision CONST_HEIGHT_SLACK. How stale a refreshed box's declared creation height may be. */
   final val HEIGHT_SLACK: Int = 1000
 
+  /** LD_T2T_Provision CONST_REFRESH_BOUNTY. Most nanoERG a refresh may take from a token/token provision. */
+  final val T2T_REFRESH_BOUNTY: Long = 10000000L
+
+  /** LD_T2T_Provision CONST_REFRESH_FLOOR. Least a refresh may leave in a token/token provision. */
+  final val T2T_REFRESH_FLOOR: Long = 400000000L
+
+  /**
+   * Least a refreshed token/token provision may hold, as LD_T2T_Provision's refresh path computes it from the
+   * box's value. The difference is the bounty the refresher may keep.
+   */
+  def t2tRefreshMinValue(value: Long): Long =
+    math.max(math.min(value, T2T_REFRESH_FLOOR), value - T2T_REFRESH_BOUNTY)
+
   // ---------------------------------------------------------------------------------------------
   // Pool operations — LD_LiquidityPool CTX_OP(0)
   // ---------------------------------------------------------------------------------------------

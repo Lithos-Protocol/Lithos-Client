@@ -46,11 +46,13 @@ class LithosDexConstantsSpec extends AnyFlatSpec with Matchers {
   private lazy val provision = declared("LD_Provision.ergo")
   private lazy val t2tPool = declared("LD_T2T_LiquidityPool.ergo")
   private lazy val t2tVault = declared("LD_T2T_FeeVault.ergo")
+  private lazy val t2tProvision = declared("LD_T2T_Provision.ergo")
 
   /** Every source together. A constant declared in several of them is checked against each. */
   private lazy val everywhere: Seq[(String, Map[String, String])] =
     Seq("LD_LiquidityPool.ergo" -> pool, "LD_FeeVault.ergo" -> vault, "LD_Provision.ergo" -> provision,
-      "LD_T2T_LiquidityPool.ergo" -> t2tPool, "LD_T2T_FeeVault.ergo" -> t2tVault)
+      "LD_T2T_LiquidityPool.ergo" -> t2tPool, "LD_T2T_FeeVault.ergo" -> t2tVault,
+      "LD_T2T_Provision.ergo" -> t2tProvision)
 
   /** `10000000L`, `10000`, `0x7fffffffffffffffL` — the forms ErgoScript writes a whole number in. */
   private def asLong(literal: String): Long = {
@@ -82,6 +84,8 @@ class LithosDexConstantsSpec extends AnyFlatSpec with Matchers {
     check("CONST_VAULT_MIN", LDHelpers.VAULT_MIN)
     check("CONST_REFRESH_AGE", LDHelpers.REFRESH_AGE.toLong)
     check("CONST_HEIGHT_SLACK", LDHelpers.HEIGHT_SLACK.toLong)
+    check("CONST_REFRESH_BOUNTY", LDHelpers.T2T_REFRESH_BOUNTY)
+    check("CONST_REFRESH_FLOOR", LDHelpers.T2T_REFRESH_FLOOR)
   }
 
   it should "mirror the accumulator scale, which is written as a product rather than a literal" in {
@@ -108,7 +112,7 @@ class LithosDexConstantsSpec extends AnyFlatSpec with Matchers {
     val checked = Set(
       "CONST_LOCKED_LP", "CONST_FEE_DENOM", "CONST_MIN_RENT", "CONST_MIN_SUPPLY",
       "CONST_PROVISION_MIN", "CONST_VAULT_MIN", "CONST_REFRESH_AGE", "CONST_HEIGHT_SLACK",
-      "CONST_SCALE")
+      "CONST_REFRESH_BOUNTY", "CONST_REFRESH_FLOOR", "CONST_SCALE")
     val all = everywhere.flatMap(_._2.keySet).toSet
     withClue("add it to this spec and to LDHelpers' in-script block: ")(all.diff(checked) shouldBe empty)
   }
