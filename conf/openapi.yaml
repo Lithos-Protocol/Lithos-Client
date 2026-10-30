@@ -1203,6 +1203,57 @@ paths:
               schema:
                 $ref: '#/components/schemas/ApiError'
 
+  /dex/pools/{poolNft}/orders:
+    get:
+      summary: List your outstanding orders on any pool
+      description: >
+        Every order this wallet owns on the pool that has not yet filled or been cancelled, including
+        orders whose placement is unconfirmed, as `GET /dex/orders` lists them for ERG:LIT. A token/token
+        swap names the token it sells in `tokenIn`. Unconfirmed placements first, then newest first.
+      operationId: listLDPoolOrders
+      security:
+        - ApiKeyAuth: []
+      tags:
+        - lithosdex
+      parameters:
+        - name: poolNft
+          in: path
+          required: true
+          description: The pool's NFT id, 64 hex characters
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Outstanding orders owned by this wallet on the pool
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LDOrderList'
+        '403':
+          description: "Missing or wrong api_key"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '404':
+          description: "No LithosDex pool with that NFT."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '503':
+          description: "The pool index is still building, or the node or mempool did not answer. Never returns a partial list."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
   /dex/pools/create/check:
     post:
       summary: Quote a new LithosDex pool
@@ -9048,6 +9099,9 @@ components:
         ergIn:
           type: boolean
           description: SWAP only. True when selling ERG for the token.
+        tokenIn:
+          type: string
+          description: "A token/token SWAP only: the token sold."
           example: true
         amountIn:
           type: string

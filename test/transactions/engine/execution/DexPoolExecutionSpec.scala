@@ -21,6 +21,9 @@ import org.scalatest.flatspec.AnyFlatSpecLike
 import org.scalatest.matchers.should.Matchers
 import org.scalatestplus.mockito.MockitoSugar
 import sigma.Colls
+import lithosdex.contracts.{LDOrderContracts, LDOrderTerms}
+import org.ergoplatform.appkit.Address
+import state.synchronization.CompleteMempool
 import support.{FakeNodeContext, LDNodeFixtures}
 import transactions.batching.lithosdex.{LDBoxes, LDOrderTransactions, LithosDexExecution}
 import transactions.engine.wallet.EngineFunding
@@ -71,8 +74,12 @@ class DexPoolExecutionSpec extends TestKit(ActorSystem("dex-pool-execution-spec"
 
   private case class Fixture(exec: DexPoolExecution, nodeApi: NodeApi, node: NodeContext, wallet: TestProbe)
 
-  /** @param uncheckedReads what checking the unchecked pool's genesis at placement finds */
-  private def fixture(status: String = "ready", uncheckedReads: Option[GenesisVerdict] = sound): Fixture = {
+  /**
+   * @param uncheckedReads what checking the unchecked pool's genesis at placement finds
+   * @param mempool        the observation order listings read, in place of the engine's
+   */
+  private def fixture(status: String = "ready", uncheckedReads: Option[GenesisVerdict] = sound,
+                      mempool: Option[CompleteMempool.Snapshot] = None): Fixture = {
     val api = mock[NodeApi]
     val (node, _, _) = FakeNodeContext(api, numAddresses = 1)
     val boxes = node.getClient.execute { ctx: BlockchainContext =>
@@ -103,7 +110,10 @@ class DexPoolExecutionSpec extends TestKit(ActorSystem("dex-pool-execution-spec"
         if (pool.verified) None else if (pool.nft == unchecked.poolNFT.toString) uncheckedReads else pool.genesis
     }
     val probe = TestProbe()
-    Fixture(new DexPoolExecution(node, EngineFunding(probe.ref, 2.seconds, ec), index), api, node, probe)
+    val exec = new DexPoolExecution(node, EngineFunding(probe.ref, 2.seconds, ec), index) {
+      override protected def mempoolSnapshot(): CompleteMempool.Snapshot = mempool.getOrElse(super.mempoolSnapshot())
+    }
+    Fixture(exec, api, node, probe)
   }
 
   private def poolOf[A](f: Fixture, nft: ErgoId)(read: work.lithos.mutations.InputUTXO => A): A =
@@ -154,6 +164,39 @@ class DexPoolExecutionSpec extends TestKit(ActorSystem("dex-pool-execution-spec"
     q.excessY shouldBe split.excessY.toString
     q.totalErgRequired shouldBe LDOrderTransactions.depositValue(2000000000L, Fee).toString
     q.tokensRequired shouldBe Seq(LDTokenAmount(tokenY.toString, "300000000"))
+  }
+
+  "This wallet's orders on a pool" should "be its own orders of the pool's kind on that pool, and no one else's" in {
+    val f = fixture(mempool = Some(CompleteMempool.Snapshot("ce" * 32, Set.empty, Set.empty, System.nanoTime())))
+    val orders = f.node.getClient.execute { ctx: BlockchainContext =>
+      val me = f.node.getNodeWallet.p2pk
+      val other = FakeNodeContext.proverWith(f.node.getClient, 2).getEip3Addresses.get(1)
+      def swap(owner: Address, pool: ErgoId, index: Int) = LDNodeFixtures.nodeBox(ctx,
+        UTXO(LDOrderContracts.t2tSwap(LDOrderTerms(owner.getPublicKey, pool, Fee, Fee / 3), 1L),
+          LDOrderTransactions.t2tOrderValue(Fee), Seq(Token(tokenX, 1000000L))), index = index, txId = "f7" * 32)
+      def deposit(index: Int) = LDNodeFixtures.nodeBox(ctx,
+        UTXO(LDOrderContracts.deposit(LDOrderTerms(me.getPublicKey, n2t.poolNFT, Fee, Fee / 3), Parameters.OneErg, 1L),
+          LDOrderTransactions.depositValue(Parameters.OneErg, Fee), Seq(Token(tokenY, 100000000L))),
+          index = index, txId = "f7" * 32)
+      Seq(swap(me, t2t.poolNFT, 0), swap(other, t2t.poolNFT, 1), swap(me, drained.poolNFT, 2), deposit(3))
+    }
+    when(f.nodeApi.unspentBoxesByTemplateHash(anyString(), any[Paging], any[SortDirection], any[MempoolOptions]))
+      .thenReturn(Success(orders.map(LDNodeFixtures.indexed(_))))
+    when(f.nodeApi.boxesWithPoolByIds(any[Seq[String]])).thenAnswer { inv =>
+      val ids = inv.getArgument[Seq[String]](0).toSet
+      Success(orders.filter(o => ids.contains(o.boxId)))
+    }
+
+    val t2tOrders = f.exec.listOrders(t2t.poolNFT.toString).orders
+    t2tOrders.map(_.boxId) shouldBe Seq(orders.head.boxId)
+    val swap = t2tOrders.head
+    (swap.`type`, swap.status, swap.tokenIn, swap.ergIn, swap.amountIn) shouldBe
+      (("SWAP", "OPEN", Some(tokenX.toString), None, Some("1000000")))
+    swap.fillableNow shouldBe true
+    // The ERG/token pool's listing reads ERG/token orders only, so the deposit is its one order there
+    val n2tOrders = f.exec.listOrders(n2t.poolNFT.toString).orders
+    n2tOrders.map(o => (o.boxId, o.`type`, o.amountX)) shouldBe
+      Seq((orders(3).boxId, "DEPOSIT", Some(Parameters.OneErg.toString)))
   }
 
   "A pool" should "be not found when the index does not list it, and unavailable while the index builds" in {

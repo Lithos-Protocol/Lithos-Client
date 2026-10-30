@@ -59,6 +59,7 @@ GET /stats/local               controllers.StatsApiController.getLocalMiningStat
 GET  /dex/pool                                  controllers.LithosDexApiController.getPool()
 GET  /dex/pools                                 controllers.LDPoolsApiController.listPools()
 GET  /dex/pools/:poolNft                        controllers.LDPoolsApiController.getPool(poolNft: String)
+GET  /dex/pools/:poolNft/orders                 controllers.LDPoolsApiController.listPoolOrders(poolNft: String)
 + nocsrf
 POST /dex/pools/create/check                   controllers.LDPoolsApiController.checkCreatePool()
 + nocsrf

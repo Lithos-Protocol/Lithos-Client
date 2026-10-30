@@ -132,7 +132,7 @@ class LDPoolIndexSpec extends TestKit(ActorSystem("ld-pool-index-spec")) with An
     }
 
     val index = new LDPoolIndex(nodeContext, system)
-    val pools: LDPoolsApiImpl = new LDPoolsApiImpl(nodeContext, index, TestProbe().ref, Configuration.empty, system)
+    val pools: LDPoolsApiImpl = new LDPoolsApiImpl(nodeContext, index, TestProbe().ref, TestProbe().ref, Configuration.empty, system)
   }
 
   "The pool index" should "list ERG:LIT, an ERG/token pool and a token/token pool, verified first" in {

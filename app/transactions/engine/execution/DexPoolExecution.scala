@@ -11,6 +11,7 @@ import mutations.NodeWallet
 import node.NodeApi
 import org.ergoplatform.appkit.BlockchainContext
 import org.ergoplatform.sdk.ErgoId
+import state.synchronization.CompleteMempool
 import transactions.batching.lithosdex._
 import transactions.engine.EngineBroadcast
 import transactions.engine.wallet.{EngineFunding, FundingAllocation, WalletInventory}
@@ -28,10 +29,13 @@ import scala.util.control.NonFatal
  * be drained, and on an unverified pool needs the caller's acknowledgement. A redeem is open on every pool, so
  * liquidity can always leave. A redeem that claims spends the pool's vault, so it takes the one LithosDex
  * mutation lock every vault spend takes.
+ *
+ * @param heldPlacements placements the LithosDex batcher carried into candidates, which the node may no longer hold
  */
 class DexPoolExecution(nodeContext: NodeContext, walletSelector: EngineFunding, index: LDPoolIndex,
                        orderDefaults: LithosDexOrdersConfig = LithosDexOrdersConfig.Default,
-                       alive: () => Boolean = () => true) {
+                       alive: () => Boolean = () => true,
+                       heldPlacements: () => Seq[CompleteMempool.MempoolTx] = () => Seq.empty) {
   import DexPoolExecution.{Fees, exact, positive}
 
   private def nodeApi: NodeApi = nodeContext.getNodeApi
@@ -200,6 +204,30 @@ class DexPoolExecution(nodeContext: NodeContext, walletSelector: EngineFunding, 
         if (v.canClaim(prov.entryX, prov.entryY)) v.owed(prov.shares, prov.entryX, prov.entryY) else (0L, 0L)
     }
   }
+
+  // ── this wallet's orders ──────────────────────────────────────────────────
+
+  /** This wallet's orders on the pool, confirmed and unconfirmed, each with whether it would fill now. */
+  def listOrders(poolNft: String): LDOrderList = withPool(poolNft) { (ctx, live) =>
+    val owners = wallet.signableTrees
+    live match {
+      case n: LiveN2T =>
+        val owned = LDOrderBook.ownedOn(nodeApi, LDOrderBook.Family.ErgToken, n.indexed.nft, owners, mempoolSnapshot(),
+          heldPlacements())
+        val provisions = LDOrderViews.redeemProvisions(ctx, nodeApi, n.contracts.provisionGuard.ergoTreeHex,
+          n.contracts.provToken.toString, owned.map(_.order).collect { case r: LithosDexOrder.Redeem => r.ownerNft }.toSet)
+        LDOrderList(owned.map(LDOrderViews.ergToken(ctx, _, n.pool, provisions)))
+      case t: LiveT2T =>
+        val owned = LDOrderBook.ownedOn(nodeApi, LDOrderBook.Family.TokenToken, t.indexed.nft, owners, mempoolSnapshot(),
+          heldPlacements())
+        val provisions = LDOrderViews.redeemProvisions(ctx, nodeApi, t.contracts.provisionGuard.ergoTreeHex,
+          t.contracts.provToken.toString, owned.map(_.order).collect { case r: LDT2TOrder.Redeem => r.ownerNft }.toSet)
+        LDOrderList(owned.map(LDOrderViews.tokenToken(ctx, _, t.pool, provisions)))
+    }
+  }
+
+  /** A complete, fresh mempool observation, which order statuses are read from. */
+  protected def mempoolSnapshot(): CompleteMempool.Snapshot = LDOrderViews.mempoolSnapshot(walletSelector.walletRef)
 
   // ── the pool ──────────────────────────────────────────────────────────────
 

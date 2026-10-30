@@ -19,16 +19,20 @@ import javax.inject.{Inject, Named, Singleton}
  */
 @Singleton
 class LDPoolsApiImpl @Inject()(nodeContext: NodeContext, index: LDPoolIndex,
-                               @Named("transaction-engine") engine: ActorRef, config: Configuration,
+                               @Named("transaction-engine") engine: ActorRef,
+                               @Named("lithosdex-batcher") batcher: ActorRef, config: Configuration,
                                system: ActorSystem) extends LDPoolsApi {
 
   private lazy val funding = EngineFunding(engine, EngineFunding.AskTimeout, system.dispatcher)
-  private lazy val orders = new DexPoolExecution(nodeContext, funding, index, LithosDexOrdersConfig(config))
+  private lazy val orders = new DexPoolExecution(nodeContext, funding, index, LithosDexOrdersConfig(config),
+    heldPlacements = () => LithosDexApiImpl.heldPlacements(batcher))
   private lazy val creation = new DexPoolCreation(nodeContext, funding, index)
 
   override def checkCreatePool(request: LDPoolCreateRequest): LDPoolCreateQuote = creation.check(request)
 
   override def createPool(request: LDPoolCreateExecuteRequest): LDPoolCreated = creation.create(request)
+
+  override def listPoolOrders(poolNft: String): LDOrderList = orders.listOrders(poolNft)
 
   override def checkSwapOrder(poolNft: String, request: LDPoolSwapRequest): LDPoolSwapQuote =
     orders.checkSwap(poolNft, request)

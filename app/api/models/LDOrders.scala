@@ -136,6 +136,7 @@ object LDRedeemOrderQuote {
  * @param status       PENDING, OPEN, FILLING or CANCELLING
  * @param placedHeight height the placement confirmed at; absent while it is unconfirmed
  * @param spendingTxId the unconfirmed transaction filling or cancelling the order
+ * @param tokenIn      the token a token/token swap sells; an ERG/token swap says which side with `ergIn`
  * @param fillableNow  whether the order would fill against the current pool; always true while FILLING and
  *                     false while CANCELLING
  */
@@ -150,6 +151,7 @@ case class LDOrder(boxId: String,
                    executorFee: String,
                    maxMinerFee: String,
                    ergIn: Option[Boolean] = None,
+                   tokenIn: Option[String] = None,
                    amountIn: Option[String] = None,
                    minOutput: Option[String] = None,
                    amountX: Option[String] = None,

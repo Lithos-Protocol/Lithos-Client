@@ -1,9 +1,10 @@
 package transactions.batching.lithosdex
 
 import lithosdex.LDHelpers
-import lithosdex.contracts.{LDOrderContracts, LDOrderKind}
+import lithosdex.contracts.{LDOrderContracts, LDOrderKind, LDOrderTemplate, LDT2TOrderKind}
 import node.NodeApi
-import node.model.{IndexedBox, MempoolOptions, Paging, SortDirection}
+import node.model.{IndexedBox, MempoolOptions, NodeBox, Paging, SortDirection}
+import org.bouncycastle.util.encoders.Hex
 import org.ergoplatform.appkit.BlockchainContext
 import state.synchronization.CompleteMempool
 import transactions.batching.{Batcher, BatchingMempool, EvictedPlacements}
@@ -37,28 +38,54 @@ object LDOrderBook {
    * @param spendingTxId  the unconfirmed transaction filling or cancelling the order
    * @param placementTxId the transaction that created the order box
    */
-  final case class Owned(order: LithosDexOrder, placedHeight: Option[Int], status: Status, spendingTxId: Option[String],
-                         placementTxId: String)
+  final case class Owned[+O](order: O, placedHeight: Option[Int], status: Status, spendingTxId: Option[String],
+                             placementTxId: String)
+
+  /** One kind of pool's orders: the templates they are found by, and how a box reads as one. */
+  final class Family[O] private (val templates: Seq[(String, LDOrderTemplate)], val parse: NodeBox => Option[O],
+                                 val terms: O => LithosDexTerms, val box: O => NodeBox) {
+    /** A tree ends with its template, so matching the tail skips parsing every other mempool output. */
+    private[LDOrderBook] lazy val templatesHex: Seq[String] =
+      templates.map { case (_, t) => Hex.toHexString(t.templateBytes) }
+  }
+
+  object Family {
+    val ErgToken: Family[LithosDexOrder] = new Family(
+      LDOrderKind.all.map(kind => kind.scriptName -> LDOrderContracts.template(kind)), LithosDexOrder.parse,
+      (o: LithosDexOrder) => o.terms, (o: LithosDexOrder) => o.box)
+
+    val TokenToken: Family[LDT2TOrder] = new Family(
+      LDT2TOrderKind.all.map(kind => kind.scriptName -> LDOrderContracts.template(kind)), LDT2TOrder.parse,
+      (o: LDT2TOrder) => o.terms, (o: LDT2TOrder) => o.box)
+  }
+
+  /** Every order naming this network's canonical pool whose owner tree is in `owners`, as [[ownedOn]] reads them. */
+  def owned(ctx: BlockchainContext, nodeApi: NodeApi, owners: Set[String], snapshot: CompleteMempool.Snapshot,
+            held: Seq[CompleteMempool.MempoolTx]): Seq[Owned[LithosDexOrder]] =
+    ownedOn(nodeApi, Family.ErgToken, LDHelpers.getPoolNFT(ctx.getNetworkType).toString, owners, snapshot, held)
 
   /**
-   * Every order naming this network's pool whose owner tree is in `owners`, unconfirmed placements first
+   * Every order of `family` naming `poolNft` whose owner tree is in `owners`, unconfirmed placements first
    * and then newest first. Throws rather than answering partially when a template holds more boxes than
    * a scan reads, or when the node cannot answer.
    *
    * @param held placements a batcher carried into candidates, which the node may no longer hold
    */
-  def owned(ctx: BlockchainContext, nodeApi: NodeApi, owners: Set[String], snapshot: CompleteMempool.Snapshot,
-            held: Seq[CompleteMempool.MempoolTx]): Seq[Owned] = {
-    val poolNft = LDHelpers.getPoolNFT(ctx.getNetworkType).toString
-    def mine(order: LithosDexOrder): Boolean = order.poolNft == poolNft && owners.contains(order.terms.redeemerTree)
+  def ownedOn[O](nodeApi: NodeApi, family: Family[O], poolNft: String, owners: Set[String],
+                 snapshot: CompleteMempool.Snapshot, held: Seq[CompleteMempool.MempoolTx]): Seq[Owned[O]] = {
+    def mine(order: O): Boolean = {
+      val terms = family.terms(order)
+      terms.poolNft == poolNft && owners.contains(terms.redeemerTree)
+    }
+    def boxId(order: O): String = family.box(order).boxId
 
-    val listed = LDOrderKind.all.flatMap(kind => scan(nodeApi, kind, MempoolOptions.ConfirmedOnly))
-      .flatMap(indexed => LithosDexOrder.parse(indexed.box).filter(mine).map(_ -> indexed.inclusionHeight))
-      .groupBy(_._1.boxId).values.map(_.head).toVector
+    val listed = family.templates.flatMap { case (name, template) => scan(nodeApi, name, template, MempoolOptions.ConfirmedOnly) }
+      .flatMap(indexed => family.parse(indexed.box).filter(mine).map(_ -> indexed.inclusionHeight))
+      .groupBy(o => boxId(o._1)).values.map(_.head).toVector
     // The index can list a box the latest block spent
-    val current = unspent(nodeApi, listed.map(_._1.boxId))
-    val confirmed = listed.filter { case (order, _) => current.contains(order.boxId) }
-    val confirmedIds = confirmed.map(_._1.boxId).toSet
+    val current = unspent(nodeApi, listed.map(o => boxId(o._1)))
+    val confirmed = listed.filter { case (order, _) => current.contains(boxId(order)) }
+    val confirmedIds = confirmed.map(o => boxId(o._1)).toSet
 
     val missing = held.toVector.filterNot(tx => snapshot.ids.contains(tx.id))
     val restored = EvictedPlacements.carryable(missing, snapshot,
@@ -66,15 +93,14 @@ object LDOrderBook {
     // Taken with the creating transaction's id, since a mempool output need not report its own
     val unconfirmed = (snapshot.transactions ++ restored).iterator
       .flatMap(tx => tx.body.outputs.map(_ -> tx.id))
-      // A tree ends with its template, so this skips parsing every other output in the mempool
-      .filter { case (box, _) => templatesHex.exists(box.ergoTree.endsWith) }
-      .flatMap { case (box, txId) => LithosDexOrder.parse(box).filter(mine).map(_ -> txId) }
-      .filterNot { case (order, _) => confirmedIds.contains(order.boxId) }
-      .toVector.groupBy(_._1.boxId).values.map(_.head).toVector
+      .filter { case (box, _) => family.templatesHex.exists(box.ergoTree.endsWith) }
+      .flatMap { case (box, txId) => family.parse(box).filter(mine).map(_ -> txId) }
+      .filterNot { case (order, _) => confirmedIds.contains(boxId(order)) }
+      .toVector.groupBy(o => boxId(o._1)).values.map(_.head).toVector
 
     val spenders = BatchingMempool.spenders(snapshot)
-    def owned(order: LithosDexOrder, placedHeight: Option[Int], placementTxId: String): Owned =
-      spenders.getOrElse(order.boxId, Vector.empty) match {
+    def owned(order: O, placedHeight: Option[Int], placementTxId: String): Owned[O] =
+      spenders.getOrElse(boxId(order), Vector.empty) match {
         case claims if claims.isEmpty =>
           Owned(order, placedHeight, if (placedHeight.isEmpty) Status.Pending else Status.Open, None, placementTxId)
         case claims =>
@@ -84,9 +110,9 @@ object LDOrderBook {
           }
       }
 
-    (confirmed.map { case (order, height) => owned(order, Some(height), order.box.transactionId) } ++
+    (confirmed.map { case (order, height) => owned(order, Some(height), family.box(order).transactionId) } ++
       unconfirmed.map { case (order, txId) => owned(order, None, txId) })
-      .sortBy(o => (o.placedHeight.isDefined, -o.placedHeight.getOrElse(0), o.order.boxId))
+      .sortBy(o => (o.placedHeight.isDefined, -o.placedHeight.getOrElse(0), boxId(o.order)))
   }
 
   /**
@@ -96,27 +122,24 @@ object LDOrderBook {
    */
   def redeemOrders(ctx: BlockchainContext, nodeApi: NodeApi, owners: Set[String]): Map[String, String] = {
     val poolNft = LDHelpers.getPoolNFT(ctx.getNetworkType).toString
-    scan(nodeApi, LDOrderKind.Redeem, MempoolOptions.WithMempool)
+    scan(nodeApi, LDOrderKind.Redeem.scriptName, LDOrderContracts.template(LDOrderKind.Redeem), MempoolOptions.WithMempool)
       .flatMap(indexed => LithosDexOrder.parse(indexed.box))
       .collect { case order: LithosDexOrder.Redeem if order.poolNft == poolNft && owners.contains(order.terms.redeemerTree) =>
         order.ownerNft -> order.boxId
       }.toMap
   }
 
-  private lazy val templatesHex: Seq[String] =
-    LDOrderKind.all.map(kind => org.bouncycastle.util.encoders.Hex.toHexString(LDOrderContracts.template(kind).templateBytes))
-
   /** Every box at one order template, up to [[Batcher.MaxScannedPerTemplate]]. */
-  private def scan(nodeApi: NodeApi, kind: LDOrderKind, mempool: MempoolOptions): Vector[IndexedBox] = {
-    val hash = LDOrderContracts.template(kind).templateHash
+  private def scan(nodeApi: NodeApi, name: String, template: LDOrderTemplate, mempool: MempoolOptions): Vector[IndexedBox] = {
     var offset = 0
     var exhausted = false
     var found = Vector.empty[IndexedBox]
     while (!exhausted && offset < Batcher.MaxScannedPerTemplate) {
-      val page = nodeApi.unspentBoxesByTemplateHash(hash, Paging(offset, Batcher.PageSize), SortDirection.Desc, mempool) match {
+      val page = nodeApi.unspentBoxesByTemplateHash(template.templateHash, Paging(offset, Batcher.PageSize),
+        SortDirection.Desc, mempool) match {
         case Success(boxes) => boxes
         case Failure(ex) => throw new LDBoxes.IndexUnavailableException(
-          s"could not reach the node index reading ${kind.scriptName} orders: is extraIndex on? (${ex.getMessage})", ex)
+          s"could not reach the node index reading $name orders: is extraIndex on? (${ex.getMessage})", ex)
       }
       found ++= page
       exhausted = page.size < Batcher.PageSize
@@ -124,7 +147,7 @@ object LDOrderBook {
     }
     if (!exhausted)
       throw new LDBoxes.IndexTruncatedException(
-        s"${kind.scriptName} orders exceed the ${Batcher.MaxScannedPerTemplate}-box scan ceiling, so this answer would be partial")
+        s"$name orders exceed the ${Batcher.MaxScannedPerTemplate}-box scan ceiling, so this answer would be partial")
     found
   }
 

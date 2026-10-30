@@ -21,6 +21,9 @@ trait LDPoolsApi {
   /** POST /dex/pools/create */
   def createPool(request: LDPoolCreateExecuteRequest): LDPoolCreated
 
+  /** GET /dex/pools/:poolNft/orders: this wallet's orders on the pool */
+  def listPoolOrders(poolNft: String): LDOrderList
+
   /** POST /dex/pools/:poolNft/orders/swap/check */
   def checkSwapOrder(poolNft: String, request: LDPoolSwapRequest): LDPoolSwapQuote
 

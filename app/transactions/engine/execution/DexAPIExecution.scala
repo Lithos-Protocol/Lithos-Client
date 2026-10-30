@@ -886,43 +886,9 @@ class DexAPIExecution(nodeContext: NodeContext, walletSelector: EngineFunding,
       claimedY = parsed.collect { case _: LithosDexOrder.Redeem => LDAmounts(built.value.claimedY) })
   }
 
-  private def describeOrder(ctx: BlockchainContext, owned: LDOrderBook.Owned, liquidity: LDLiquidityPool,
-                            provisions: LithosDexExecution.Provisions): LDOrder = {
-    val order = owned.order
-    val base = LDOrder(
-      boxId = order.boxId,
-      `type` = "",
-      status = owned.status.name,
-      placementTxId = owned.placementTxId,
-      placedHeight = owned.placedHeight,
-      spendingTxId = owned.spendingTxId,
-      owner = Try(Address.fromErgoTree(ErgoTree.fromHex(order.terms.redeemerTree), ctx.getNetworkType).toString)
-        .getOrElse(order.terms.redeemerTree),
-      value = LDAmounts(order.box.value),
-      executorFee = LDAmounts(order.terms.executorFee),
-      maxMinerFee = LDAmounts(order.terms.maxMinerFee),
-      fillableNow = owned.status match {
-        // The pool is read at its mempool tip, which is what a filling order's own fill leaves, so pricing it
-        // there would call it unfillable. The node accepted that fill, so the order met its terms.
-        case LDOrderBook.Status.Filling => true
-        case LDOrderBook.Status.Cancelling => false
-        case _ => LithosDexExecution.price(order, liquidity, 0L, provisions, fundsItsOwnBox = false).nonEmpty
-      })
-    order match {
-      case sell: LithosDexOrder.SwapSell =>
-        base.copy(`type` = "SWAP", ergIn = Some(true), amountIn = Some(LDAmounts(sell.baseAmount)),
-          minOutput = Some(LDAmounts(sell.minQuote)))
-      case buy: LithosDexOrder.SwapBuy =>
-        base.copy(`type` = "SWAP", ergIn = Some(false), amountIn = Some(LDAmounts(buy.amount)),
-          minOutput = Some(LDAmounts(buy.minQuote)))
-      case deposit: LithosDexOrder.Deposit =>
-        base.copy(`type` = "DEPOSIT", amountX = Some(LDAmounts(deposit.depositX)),
-          amountY = Some(LDAmounts(deposit.amount)), minShares = Some(LDAmounts(deposit.minShares)))
-      case redeem: LithosDexOrder.Redeem =>
-        base.copy(`type` = "REDEEM", ownerNFT = Some(redeem.ownerNft),
-          provisionBoxId = provisions(redeem.ownerNft).map(_.boxId))
-    }
-  }
+  private def describeOrder(ctx: BlockchainContext, owned: LDOrderBook.Owned[LithosDexOrder],
+                            liquidity: LDLiquidityPool, provisions: LithosDexExecution.Provisions): LDOrder =
+    LDOrderViews.ergToken(ctx, owned, liquidity, provisions)
 
   /** The current provision each redeem order among `orders` closes, found by its ownership NFT. */
   private def redeemProvisions(ctx: BlockchainContext, nodeApi: NodeApi,
@@ -939,15 +905,7 @@ class DexAPIExecution(nodeContext: NodeContext, walletSelector: EngineFunding,
    * A complete, fresh mempool observation from the engine. Order statuses are read from it, so a stale or
    * partial one would report a filling order as open.
    */
-  protected def mempoolSnapshot(): CompleteMempool.Snapshot = {
-    val wait = transactions.batching.Batcher.ObservationTimeout
-    val observed = Try(Await.result((walletSelector.walletRef ? CompleteMempool.Refresh)(Timeout(wait))
-      .mapTo[CompleteMempool.Observation], wait)).getOrElse(throw LithosUnavailable(
-      "no mempool observation arrived from the transaction engine"))
-    if (!observed.fresh) throw LithosUnavailable(
-      s"no fresh mempool observation: ${observed.failure.getOrElse("the last one is too old")}")
-    observed.snapshot.get
-  }
+  protected def mempoolSnapshot(): CompleteMempool.Snapshot = LDOrderViews.mempoolSnapshot(walletSelector.walletRef)
 
   // Wallet balances moved to `WalletApiImpl`. LithosDex grew its own read for the swap card and the
   // collateral market grew a second one, and the two disagreed whenever a join landed between them.
