@@ -1,6 +1,6 @@
 package transactions.batching.lithosdex
 
-import lithosdex.contracts.{LDContractKind, LDContracts, LithosDexContracts}
+import lithosdex.contracts.{LDContractKind, LDContracts, LDT2TContracts, LithosDexContracts}
 import node.NodeApi
 import node.model.{MempoolOptions, Paging, SortDirection}
 import org.ergoplatform.appkit.NetworkType
@@ -48,9 +48,36 @@ object LDDeployments {
     boxes.size == 1 && boxes.head.box.ergoTree.equalsIgnoreCase(contracts.feeVault.ergoTreeHex)
   }
 
+  /**
+   * The token/token deployment a pool box belongs to, by the same test as [[verify]]: four distinct tokens
+   * (NFT, X, Y, provision token), the first a single unit, and a tree the contracts built from its own ids
+   * reproduce. Says nothing about how it was minted; that is `LDT2TGenesis`'s question.
+   */
+  def verifyT2T(ergoTreeHex: String, assets: Seq[(String, Long)]): Option[LDT2TContracts] = {
+    val tree = ergoTreeHex.toLowerCase
+    for {
+      (poolNft, poolAmount) <- assets.headOption
+      if poolAmount == 1L && assets.size == 4 && assets.map(_._1.toLowerCase).distinct.size == 4
+      parsed <- Try(ErgoTree.fromHex(tree)).toOption
+      vault <- parsed.constants.lift(T2TVaultNftIndex).flatMap(bytesOf) if vault.length == 32
+      contracts <- Try(LDT2TContracts(ErgoId.create(poolNft), new ErgoId(vault), ErgoId.create(assets(3)._1))).toOption
+      if contracts.liquidityPool.ergoTreeHex == tree
+    } yield contracts
+  }
+
+  /** The token/token deployment's vault: the only unspent box carrying its NFT, at its vault tree. */
+  def vaultStands(nodeApi: NodeApi, contracts: LDT2TContracts): Boolean = {
+    val boxes = nodeApi.unspentBoxesByTokenId(contracts.vaultNFT.toString, Paging(0, 2), SortDirection.Desc,
+      MempoolOptions.ConfirmedOnly).get
+    boxes.size == 1 && boxes.head.box.ergoTree.equalsIgnoreCase(contracts.feeVault.ergoTreeHex)
+  }
+
   /** Where CONST_VAULT_NFT sits among a pool tree's constants; the same in every deployment. */
   private lazy val VaultNftIndex: Int =
     LithosDexContracts.indexOf(LDContractKind.LiquidityPool, LithosDexContracts.VAULT_NFT)
+
+  private lazy val T2TVaultNftIndex: Int =
+    LithosDexContracts.indexOf(LDContractKind.T2TLiquidityPool, LithosDexContracts.VAULT_NFT)
 
   private def bytesOf(constant: Constant[SType]): Option[Array[Byte]] =
     if (constant.tpe != SByteArray) None

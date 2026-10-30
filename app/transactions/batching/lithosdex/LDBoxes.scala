@@ -125,9 +125,12 @@ object LDBoxes {
 
   /** The same, for the deployment `contracts` describes: its own guard address and provision token. */
   def provisionsOwnedBy(ctx: BlockchainContext, nodeApi: NodeApi, contracts: LDContracts, owners: Set[String],
-                        mempool: MempoolOptions): (Seq[Provision], Boolean) = {
-    val provTokenId = contracts.provToken.toString
-    val guard = contracts.provisionGuard.ergoTreeHex
+                        mempool: MempoolOptions): (Seq[Provision], Boolean) =
+    provisionsOwnedBy(ctx, nodeApi, contracts.provisionGuard.ergoTreeHex, contracts.provToken.toString, owners, mempool)
+
+  /** The same, for any deployment's guard tree and provision token, token/token ones included. */
+  def provisionsOwnedBy(ctx: BlockchainContext, nodeApi: NodeApi, guard: String, provTokenId: String,
+                        owners: Set[String], mempool: MempoolOptions): (Seq[Provision], Boolean) = {
     val wanted = owners.map(owner => OwnerRegisterPrefix + owner.toLowerCase)
 
     var found = Vector.empty[Provision]

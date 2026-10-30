@@ -1,7 +1,7 @@
 package transactions.batching.lithosdex
 
 import lithosdex.LDLiquidityPool
-import lithosdex.contracts.LDContracts
+import lithosdex.contracts.{LDContracts, LDT2TContracts}
 import org.ergoplatform.appkit.NetworkType
 import org.ergoplatform.sdk.ErgoId
 import org.scalatest.flatspec.AnyFlatSpec
@@ -95,6 +95,37 @@ class LDDeploymentsSpec extends AnyFlatSpec with Matchers {
     val contracts = LDDeployments.verify(Mainnet, secondPool, Seq(SecondPoolNft -> 1L, SecondToken -> 1L, other -> 1L))
       .getOrElse(fail("the pool tree alone does not depend on the provision token"))
     contracts.feeVault.ergoTreeHex should not be secondVault
+  }
+
+  // No token/token pool exists on chain yet, so its tree comes from the pinned templates and chosen ids
+  private val t2t = LDT2TContracts(id("d1" * 32), id("d2" * 32), id("d3" * 32))
+  private val t2tPool = t2t.liquidityPool.ergoTreeHex
+  private val t2tAssets = Seq("d1" * 32 -> 1L, "d4" * 32 -> 500L, "d5" * 32 -> 700L, "d3" * 32 -> 1000L)
+
+  "LDDeployments.verifyT2T" should "accept a token/token pool and rebuild its vault and its own guard" in {
+    val contracts = LDDeployments.verifyT2T(t2tPool, t2tAssets).getOrElse(fail("the token/token pool was refused"))
+    contracts.vaultNFT.toString shouldBe "d2" * 32
+    contracts.feeVault.ergoTreeHex shouldBe t2t.feeVault.ergoTreeHex
+    contracts.provisionGuard.ergoTreeHex shouldBe t2t.provisionGuard.ergoTreeHex
+  }
+
+  it should "refuse a token/token pool that names another deployment's guard" in {
+    val other = LDT2TContracts(id("e1" * 32), id("e2" * 32), id("e3" * 32))
+    val forged = t2tPool.replace(t2t.provisionGuard.hashedPropBytesHex, other.provisionGuard.hashedPropBytesHex)
+    forged should not be t2tPool
+    LDDeployments.verifyT2T(forged, t2tAssets) shouldBe None
+  }
+
+  it should "refuse anything but four distinct tokens, the first a single unit" in {
+    LDDeployments.verifyT2T(t2tPool, ("d1" * 32 -> 2L) +: t2tAssets.tail) shouldBe None
+    LDDeployments.verifyT2T(t2tPool, t2tAssets.take(3)) shouldBe None
+    LDDeployments.verifyT2T(t2tPool, t2tAssets :+ ("d6" * 32 -> 1L)) shouldBe None
+    LDDeployments.verifyT2T(t2tPool, t2tAssets.updated(2, "d4" * 32 -> 700L)) shouldBe None
+  }
+
+  it should "never cross kinds: an ERG/token pool is not a token/token one, nor the reverse" in {
+    LDDeployments.verifyT2T(secondPool, secondAssets :+ ("d6" * 32 -> 1L)) shouldBe None
+    LDDeployments.verify(Mainnet, t2tPool, t2tAssets.take(3)) shouldBe None
   }
 
   "LithosDexTransactions" should "build each box under the deployment it is handed, and refuse another's" in {

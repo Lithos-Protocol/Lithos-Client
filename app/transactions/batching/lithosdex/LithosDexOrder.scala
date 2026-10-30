@@ -116,7 +116,7 @@ object LithosDexOrder {
   }
 
   /** A BigInt term as a non-negative Long. Anything outside that range is not an amount this client spends. */
-  private def amountTerm(constant: Constant[SType]): Option[Long] =
+  private[lithosdex] def amountTerm(constant: Constant[SType]): Option[Long] =
     if (constant.tpe != SBigInt) None
     else constant.value match {
       case v: CBigInt =>
@@ -125,7 +125,7 @@ object LithosDexOrder {
       case _ => None
     }
 
-  private def bytesTerm(constant: Constant[SType]): Option[Array[Byte]] =
+  private[lithosdex] def bytesTerm(constant: Constant[SType]): Option[Array[Byte]] =
     if (constant.tpe != SByteArray) None
     else constant.value match {
       case coll: sigma.Coll[_] => Try(coll.asInstanceOf[sigma.Coll[Byte]].toArray).toOption
