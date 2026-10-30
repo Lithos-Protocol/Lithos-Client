@@ -60,6 +60,10 @@ GET  /dex/pool                                  controllers.LithosDexApiControll
 GET  /dex/pools                                 controllers.LDPoolsApiController.listPools()
 GET  /dex/pools/:poolNft                        controllers.LDPoolsApiController.getPool(poolNft: String)
 + nocsrf
+POST /dex/pools/create/check                   controllers.LDPoolsApiController.checkCreatePool()
++ nocsrf
+POST /dex/pools/create                         controllers.LDPoolsApiController.createPool()
++ nocsrf
 POST /dex/pools/:poolNft/orders/swap/check      controllers.LDPoolsApiController.checkSwapOrder(poolNft: String)
 + nocsrf
 POST /dex/pools/:poolNft/orders/swap            controllers.LDPoolsApiController.placeSwapOrder(poolNft: String)

@@ -15,6 +15,12 @@ trait LDPoolsApi {
   /** GET /dex/pools/:poolNft */
   def getPool(poolNft: String): LDPoolDetail
 
+  /** POST /dex/pools/create/check */
+  def checkCreatePool(request: LDPoolCreateRequest): LDPoolCreateQuote
+
+  /** POST /dex/pools/create */
+  def createPool(request: LDPoolCreateExecuteRequest): LDPoolCreated
+
   /** POST /dex/pools/:poolNft/orders/swap/check */
   def checkSwapOrder(poolNft: String, request: LDPoolSwapRequest): LDPoolSwapQuote
 

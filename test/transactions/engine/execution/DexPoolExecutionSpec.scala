@@ -129,6 +129,23 @@ class DexPoolExecutionSpec extends TestKit(ActorSystem("dex-pool-execution-spec"
     a[LithosBadRequest] should be thrownBy f.exec.checkSwap(t2t.poolNFT.toString, LDPoolSwapRequest("aa" * 32, "10"))
   }
 
+  "A swap quote" should "name the least input that still buys its output, on both kinds" in {
+    val f = fixture()
+    val t2tPool = poolOf(f, t2t.poolNFT)(LDT2TLiquidityPool(_))
+    val t = f.exec.checkSwap(t2t.poolNFT.toString, LDPoolSwapRequest(tokenY.toString, "400000000"))
+    val tLeast = t.minAmountIn.getOrElse(fail("no least input")).toLong
+    tLeast should be <= 400000000L
+    t2tPool.simSwap(tLeast, xIn = false).amountOut.toString shouldBe t.amountOut
+    t2tPool.simSwap(tLeast - 1L, xIn = false).amountOut.toString should not be t.amountOut
+    // Buying tokens worth about 10 nanoERG each with ERG, where the last few nanoERG may buy nothing
+    val n2tPool = poolOf(f, n2t.poolNFT)(LDLiquidityPool(_))
+    val n = f.exec.checkSwap(n2t.poolNFT.toString, LDPoolSwapRequest("ERG", "1000000009"))
+    val nLeast = n.minAmountIn.getOrElse(fail("no least input")).toLong
+    nLeast should be <= 1000000009L
+    n2tPool.simSwap(nLeast, ergIn = true).amountOut.toString shouldBe n.amountOut
+    n2tPool.simSwap(nLeast - 1L, ergIn = true).amountOut.toString should not be n.amountOut
+  }
+
   "An ERG/token deposit quote" should "split the offer as the executor will, on a pool other than ERG:LIT" in {
     val f = fixture()
     val q = f.exec.checkDeposit(n2t.poolNFT.toString, LDPoolDepositRequest("2000000000", "300000000"))

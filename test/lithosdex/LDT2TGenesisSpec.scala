@@ -190,4 +190,78 @@ class LDT2TGenesisSpec extends AnyPropSpec with LDT2TSpecBase {
       accepts(user(ctx), s.tx)
     }
   }
+  // ─── a provision genesis creates for the creator ─────────────────────────
+
+  private val Shares = LDGenesisBuilder.GENESIS_PROVISION_SHARES
+  private val owned = sound.copy(owners = Map(ownerNFT.toString -> 1L))
+  /** The genesis pool once one provision token has gone into the creator's provision. */
+  private val provisioned = genesis.copy(provTokens = LDHelpers.PROV_TOKEN_SUPPLY - 1L)
+
+  private def creatorProvision(ctx: BlockchainContext, box: UTXO = provisionUTXO(BigInt(0), BigInt(0), ownerNFT, Shares),
+                               index: Int = 2, txId: String = dummyTxId): InputUTXO = inputAt(box, ctx, index, txId)
+
+  private def checkProvisioned(ctx: BlockchainContext, provisions: Seq[InputUTXO],
+                               emissions: LDT2TGenesis.Emissions = owned,
+                               pool: PoolState = provisioned): LDT2TGenesis.Report =
+    LDT2TGenesis.check(poolBox(ctx, poolUTXO(pool)), vaultBox(ctx), emissions, provisions)
+
+  property("genesis: a provision for the creator, shaped as a deposit leaves it, is sound") {
+    withCtx { ctx =>
+      val r = checkProvisioned(ctx, Seq(creatorProvision(ctx)))
+      withClue(r.problems.mkString("; "))(r.sound shouldBe true)
+      r.warnings shouldBe empty
+    }
+  }
+
+  property("genesis: flags a genesis provision anyone could forge or overdraw") {
+    withCtx { ctx =>
+      def flagsOne(box: UTXO, about: String, emissions: LDT2TGenesis.Emissions = owned): Unit =
+        flags(checkProvisioned(ctx, Seq(creatorProvision(ctx, box)), emissions), about)
+      flagsOne(provisionUTXO(BigInt(0), BigInt(0), ownerNFT, Shares, contract = userContract(ctx)), "provision guard")
+      flagsOne(provisionUTXO(BigInt(1), BigInt(0), ownerNFT, Shares), "entries")
+      flagsOne(provisionUTXO(BigInt(0), BigInt(0), ownerNFT, Shares), "owner NFT", owned.copy(owners = Map(ownerNFT.toString -> 2L)))
+      flagsOne(provisionUTXO(BigInt(0), BigInt(0), ownerNFT, Shares), "owner NFT", sound)
+      flagsOne(provisionUTXO(BigInt(0), BigInt(0), poolNFT, Shares), "pool's own tokens",
+        owned.copy(owners = Map(poolNFT.toString -> 1L)))
+      flagsOne(provisionUTXO(BigInt(0), BigInt(0), ownerNFT, Shares + 1L), "no provision may represent")
+      flagsOne(provisionUTXO(BigInt(0), BigInt(0), ownerNFT, Shares).setRegs(
+        provisionUTXO(BigInt(0), BigInt(0), ownerNFT, Shares).registers :+ ErgoValue.of(1L): _*), "exactly R4 to R7")
+      flags(checkProvisioned(ctx, Seq(creatorProvision(ctx, txId = otherTxId))), "genesis transaction")
+    }
+  }
+
+  property("genesis: flags provision tokens in neither the pool nor a genesis provision, or two in one") {
+    withCtx { ctx =>
+      flags(checkProvisioned(ctx, Seq.empty), "provision token")
+      val doubled = provisionUTXO(BigInt(0), BigInt(0), ownerNFT, Shares).setTokens(Token(provToken, 2L))
+      flags(checkProvisioned(ctx, Seq(creatorProvision(ctx, doubled)),
+        pool = genesis.copy(provTokens = LDHelpers.PROV_TOKEN_SUPPLY - 2L)), "one provision token")
+    }
+  }
+
+  property("genesis: flags two genesis provisions sharing one owner NFT") {
+    withCtx { ctx =>
+      val half = provisionUTXO(BigInt(0), BigInt(0), ownerNFT, Shares / 2)
+      flags(checkProvisioned(ctx, Seq(creatorProvision(ctx, half, 2), creatorProvision(ctx, half, 3)),
+        pool = genesis.copy(provTokens = LDHelpers.PROV_TOKEN_SUPPLY - 2L)), "share one owner NFT")
+    }
+  }
+
+  property("genesis: warns on a genesis provision under the floor a deposit gives one") {
+    withCtx { ctx =>
+      val r = checkProvisioned(ctx, Seq(creatorProvision(ctx,
+        provisionUTXO(BigInt(0), BigInt(0), ownerNFT, Shares, value = LDHelpers.PROVISION_MIN - 1L))))
+      r.sound shouldBe true
+      r.warnings.mkString should include("provision")
+    }
+  }
+
+  property("genesis: a provisioned genesis is one the contracts let its creator redeem down to MIN_SUPPLY") {
+    withCtx { ctx =>
+      checkProvisioned(ctx, Seq(creatorProvision(ctx))).sound shouldBe true
+      val (s, after, _) = redeemScenario(ctx, shares = Shares, state = provisioned)
+      accepts(user(ctx), s.tx)
+      after.supply shouldBe LDHelpers.MIN_SUPPLY
+    }
+  }
 }

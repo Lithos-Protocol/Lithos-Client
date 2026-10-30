@@ -28,6 +28,8 @@ object LDPoolSwapExecuteRequest {
 /**
  * What a swap order would fill at against the pool now.
  *
+ * @param minAmountIn      the least input that still buys `amountOut`; anything above it buys nothing more, which
+ *                         matters for a token whose single unit is worth a lot. Absent when nothing comes out
  * @param netOutput        what the owner receives of `tokenOut`: the pool's output, less the executor fee
  *                         when that output is ERG
  * @param totalErgRequired nanoERG the order box holds, which leaves the wallet at placement
@@ -35,7 +37,7 @@ object LDPoolSwapExecuteRequest {
  * @param ergReturned      nanoERG that comes back beside the fill
  */
 case class LDPoolSwapQuote(poolNFT: String, tokenIn: String, tokenOut: String, amountIn: String, amountOut: String,
-                           netOutput: String, executable: Boolean, executorFee: String, maxMinerFee: String,
+                           minAmountIn: Option[String], netOutput: String, executable: Boolean, executorFee: String, maxMinerFee: String,
                            totalErgRequired: String, tokensRequired: Seq[LDTokenAmount], ergReturned: String,
                            networkFee: String)
 

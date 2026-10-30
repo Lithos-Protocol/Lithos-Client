@@ -97,7 +97,7 @@ case class LDT2TLiquidityPool(reservesX: Long,
     require(amountIn > 0, "Swap input must be positive")
 
     val sideFeeNum = if (xIn) xFeeNum else yFeeNum
-    val protocolFee = (BigInt(amountIn) * sideFeeNum / D).toLong
+    val protocolFee = sideFee(amountIn, sideFeeNum)
     val traded = amountIn - protocolFee
 
     val (reserveIn, reserveOut) = if (xIn) (reservesX, reservesY) else (reservesY, reservesX)
@@ -129,11 +129,11 @@ case class LDT2TLiquidityPool(reservesX: Long,
     // Invert the AMM inequality for the traded amount, rounding up so the result still satisfies it
     val traded = ceilDiv(BigInt(amountOut) * reserveIn * D, BigInt(dexFeeNum) * (reserveOut - amountOut)).toLong
 
-    // Then invert the side fee. The contract's fee is a truncating division, so step up until the
-    // amount left after it actually covers `traded` rather than trusting the closed form.
+    // Then invert the side fee. The contract rounds it up, so step up until the amount left after it
+    // actually covers `traded` rather than trusting the closed form.
     val sideFeeNum = if (xIn) xFeeNum else yFeeNum
     var amountIn = ceilDiv(BigInt(traded) * D, BigInt(D - sideFeeNum)).toLong
-    while (amountIn - (BigInt(amountIn) * sideFeeNum / D).toLong < traded) amountIn += 1
+    while (amountIn - sideFee(amountIn, sideFeeNum) < traded) amountIn += 1
 
     Some(simSwap(amountIn, xIn))
   }
@@ -273,6 +273,9 @@ case class LDT2TLiquidityPool(reservesX: Long,
   def shareOfSupply(shares: Long): Double = shares.toDouble / supply.toDouble
 
   private def ceilDiv(a: BigInt, b: BigInt): BigInt = (a + b - 1) / b
+
+  /** The side fee taken out of a swap's input, rounded up as the contract does: any side fee costs at least one unit. */
+  private def sideFee(amountIn: Long, sideFeeNum: Long): Long = ceilDiv(BigInt(amountIn) * sideFeeNum, D).toLong
 }
 
 object LDT2TLiquidityPool {

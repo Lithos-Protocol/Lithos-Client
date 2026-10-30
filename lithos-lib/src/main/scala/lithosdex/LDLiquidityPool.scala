@@ -125,10 +125,10 @@ case class LDLiquidityPool(reservesX: Long,
     // Invert the AMM inequality for the traded amount, rounding up so the result still satisfies it
     val traded = ceilDiv(BigInt(amountOut) * reserveIn * D, BigInt(dexFeeNum) * (reserveOut - amountOut)).toLong
 
-    // Then invert the side fee. The contract's fee is a truncating division, so step up until the
-    // amount left after it actually covers `traded` rather than trusting the closed form.
+    // Then invert the side fee. The contract's fee is a truncating division, so the least input that leaves
+    // `traded` lies just above (traded - 1) / (1 - fee): step up from there to the first that covers it.
     val sideFeeNum = if (ergIn) ergFeeNum else tokenFeeNum
-    var amountIn = ceilDiv(BigInt(traded) * D, BigInt(D - sideFeeNum)).toLong
+    var amountIn = (BigInt(traded - 1) * D / BigInt(D - sideFeeNum) + 1).toLong
     while (amountIn - (BigInt(amountIn) * sideFeeNum / D).toLong < traded) amountIn += 1
 
     Some(simSwap(amountIn, ergIn))

@@ -1203,6 +1203,112 @@ paths:
               schema:
                 $ref: '#/components/schemas/ApiError'
 
+  /dex/pools/create/check:
+    post:
+      summary: Quote a new LithosDex pool
+      description: >
+        What creating a pool with reserves `amountX` and `amountY` would do. `tokenX` is ERG for an
+        ERG/token pool. All of it goes into the pool at genesis, at the price the two amounts set, and
+        genesis gives this wallet a provision for all of the supply but 1,000,000 shares. Those shares
+        are locked for good, and with them a millionth of the pool. An ERG/token pool box must always keep
+        over 0.01 ERG, so a warning says when a full exit by its only provider would leave more than the
+        locked share behind. Lists any pool already trading the pair.
+      operationId: checkLDPoolCreate
+      tags:
+        - lithosdex
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LDPoolCreateRequest'
+      responses:
+        '200':
+          description: The quote
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LDPoolCreateQuote'
+        '400':
+          description: "The request is malformed, names ERG as tokenY or one token twice, offers an ERG reserve under 0.01 ERG, or gives fees out of bounds."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /dex/pools/create:
+    post:
+      summary: Create a LithosDex pool
+      description: >
+        Sends four transactions in turn: the pool NFT mint, the vault NFT mint, the mint of the NFT that
+        owns the provision, and the genesis, which creates the pool, its vault and this wallet's provision.
+        Every box one transaction passes to the next is held at the wallet before the first send, so
+        nothing else spends it. The chain stops at the first transaction the node does not accept, and
+        reports those after it as `unsent`. Besides the locked share, a token/token pool's boxes hold 6.3
+        ERG and 2.3 ERG for storage rent and its vault one unit of each token, and an ERG/token vault
+        holds 0.1 ERG, none of it recoverable. Needs `acknowledgeLocked`. The pool is listed once its
+        genesis is in a block.
+      operationId: createLDPool
+      security:
+        - ApiKeyAuth: []
+      tags:
+        - lithosdex
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LDPoolCreateExecuteRequest'
+      responses:
+        '200':
+          description: The four sends, as far as they went
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LDPoolCreated'
+        '400':
+          description: "The request is malformed, names ERG as tokenY or one token twice, offers an ERG reserve under 0.01 ERG, gives fees out of bounds, or lacks acknowledgeLocked."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '403':
+          description: "Missing or wrong api_key"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '409':
+          description: "The wallet's boxes moved while the chain was built. Resend."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LDStateChangedResponse'
+        '422':
+          description: "The wallet cannot cover the reserves, boxes and fees."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '503':
+          description: "The node or wallet did not answer. Nothing was sent. Retry."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
   /dex/pools/{poolNft}/orders/swap/check:
     post:
       summary: Quote a swap order on any pool
@@ -7166,6 +7272,9 @@ components:
         amountOut:
           type: string
           description: "What the pool gives for amountIn"
+        minAmountIn:
+          type: string
+          description: "The least input that still buys amountOut. Anything above it buys nothing more, which matters for a token whose single unit is worth a lot. Absent when nothing comes out."
         netOutput:
           type: string
           description: "What the owner receives"
@@ -7392,6 +7501,196 @@ components:
         provisionBoxId:
           type: string
           description: "A redeem placement that claimed: the provision's successor"
+
+    LDPoolCreateRequest:
+      description: "A new pool, at the price its two reserves set"
+      type: object
+      x-tags: lithosdex
+      required:
+        - tokenX
+        - tokenY
+        - amountX
+        - amountY
+      properties:
+        tokenX:
+          type: string
+          description: "ERG for an ERG/token pool, or a token/token pool's first token id"
+        tokenY:
+          type: string
+          description: "The pool's other token id"
+        amountX:
+          type: string
+          description: "The pool's reserve of X at genesis; nanoERG for ERG, at least 0.01 ERG"
+        amountY:
+          type: string
+        feeParams:
+          $ref: '#/components/schemas/LDFeeParams'
+
+    LDPoolCreateExecuteRequest:
+      description: "A new pool, created from this wallet"
+      type: object
+      x-tags: lithosdex
+      required:
+        - tokenX
+        - tokenY
+        - amountX
+        - amountY
+        - acknowledgeLocked
+      properties:
+        tokenX:
+          type: string
+          description: "ERG for an ERG/token pool, or a token/token pool's first token id"
+        tokenY:
+          type: string
+          description: "The pool's other token id"
+        amountX:
+          type: string
+          description: "The pool's reserve of X at genesis; nanoERG for ERG, at least 0.01 ERG"
+        amountY:
+          type: string
+        feeParams:
+          $ref: '#/components/schemas/LDFeeParams'
+        acknowledgeLocked:
+          type: boolean
+          description: "Must be true: the pool's own boxes and its locked share can never be taken back"
+
+    LDPoolCreateQuote:
+      description: "What creating the pool would do. Amounts are decimal strings in base units."
+      type: object
+      x-tags: lithosdex
+      required:
+        - kind
+        - tokenX
+        - tokenY
+        - feeParams
+        - reserveX
+        - reserveY
+        - shares
+        - lockedShares
+        - lockedShare
+        - lockedErg
+        - lockedTokens
+        - poolBoxValue
+        - vaultBoxValue
+        - provisionBoxValue
+        - totalErgRequired
+        - tokensRequired
+        - networkFee
+        - warnings
+      properties:
+        kind:
+          type: string
+          enum: [n2t, t2t]
+        tokenX:
+          type: string
+        tokenY:
+          type: string
+        feeParams:
+          $ref: '#/components/schemas/LDFeeParams'
+        reserveX:
+          type: string
+        reserveY:
+          type: string
+        shares:
+          type: string
+          description: "The creator's provision: all of the genesis supply but lockedShares"
+        lockedShares:
+          type: string
+          description: "Supply no provision may represent, so its share of the reserves is locked for good"
+        lockedShare:
+          type: number
+          format: double
+          description: "That supply's fraction of the pool"
+        lockedErg:
+          type: string
+          description: "nanoERG nobody can take back: the vault box, and a token/token pool box"
+        lockedTokens:
+          type: array
+          description: "Tokens nobody can take back beyond the locked share: a token/token vault's one of each"
+          items:
+            $ref: '#/components/schemas/LDTokenAmount'
+        poolBoxValue:
+          type: string
+        vaultBoxValue:
+          type: string
+        provisionBoxValue:
+          type: string
+          description: "nanoERG the provision box holds, which a redeem returns"
+        totalErgRequired:
+          type: string
+          description: "nanoERG that leaves the wallet across the four transactions"
+        tokensRequired:
+          type: array
+          items:
+            $ref: '#/components/schemas/LDTokenAmount'
+        networkFee:
+          type: string
+          description: "The four transactions' fees together"
+        warnings:
+          type: array
+          description: "Pools already trading this pair or why none were looked for, and an ERG/token pool's exit floor"
+          items:
+            type: string
+
+    LDPoolCreateStep:
+      description: "One of a pool creation's four transactions"
+      type: object
+      x-tags: lithosdex
+      required:
+        - step
+        - txId
+        - outcome
+      properties:
+        step:
+          type: string
+          enum: [POOL_NFT, VAULT_NFT, OWNER_NFT, GENESIS]
+        txId:
+          type: string
+        outcome:
+          type: string
+          enum: [accepted, rejected, uncertain, unsent]
+          description: "unsent: an earlier transaction was not accepted"
+        reason:
+          type: string
+          description: "The node's refusal, or why the transaction was not sent"
+
+    LDPoolCreated:
+      description: "A pool creation, as far as it went"
+      type: object
+      x-tags: lithosdex
+      required:
+        - outcome
+        - kind
+        - poolNFT
+        - vaultNFT
+        - provToken
+        - ownerNFT
+        - provisionBoxId
+        - steps
+      properties:
+        outcome:
+          type: string
+          enum: [accepted, rejected, uncertain, unsent]
+          description: "accepted when all four were, else the first step's that was not"
+        kind:
+          type: string
+          enum: [n2t, t2t]
+        poolNFT:
+          type: string
+        vaultNFT:
+          type: string
+        provToken:
+          type: string
+        ownerNFT:
+          type: string
+          description: "The NFT in this wallet that owns the creator's provision"
+        provisionBoxId:
+          type: string
+          description: "The creator's provision, which genesis creates"
+        steps:
+          type: array
+          items:
+            $ref: '#/components/schemas/LDPoolCreateStep'
 
     LDPoolInfo:
       description: State of the LithosDex liquidity pool box

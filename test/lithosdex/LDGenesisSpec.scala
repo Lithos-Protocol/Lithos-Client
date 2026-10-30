@@ -6,6 +6,7 @@ import lithosdex.LDGenesisBuilder.{N2TSeed, T2TSeed}
 import node.MutationConversions._
 import node.rest.NodeCodecs
 import org.ergoplatform.appkit._
+import org.ergoplatform.sdk.ErgoId
 import org.scalatest.propspec.AnyPropSpec
 import work.lithos.mutations.{InputUTXO, Token, UTXO}
 
@@ -144,6 +145,27 @@ class LDGenesisSpec extends AnyPropSpec with LDT2TSpecBase {
       withClue(r.problems.mkString("; "))(r.sound shouldBe true)
       r.warnings shouldBe empty
       r.contracts.map(_.liquidityPool.propBytes.toSeq) shouldBe Some(deployment.liquidityPool.propBytes.toSeq)
+    }
+  }
+
+  property("builder: an ERG/token genesis with the creator's provision signs, and LDGenesis calls it sound") {
+    withCtx { ctx =>
+      val (poolNft, vaultNft) = mintBoth(ctx)
+      val owner = ErgoId.create("ab" * 32)
+      val seed = N2TSeed(tokenY, reserveX = 2L * Parameters.OneErg, reserveY = 1000000L)
+      val (tx, deployment) = LDGenesisBuilder.n2tGenesis(ctx, poolNft, vaultNft,
+        Seq(funding(ctx, 2, Seq(Token(tokenY, seed.reserveY)))), seed, user(ctx).getAddress, Some(owner))
+      val outs = accepts(user(ctx), tx).getOutputsToSpend
+      val provision = InputUTXO(outs.get(2))
+      provision.contract.ergoTreeHex shouldBe deployment.provisionGuard.ergoTreeHex
+      InputUTXO(outs.get(0)).tokens(2) shouldBe Token(deployment.provToken, LDHelpers.PROV_TOKEN_SUPPLY - 1L)
+      val r = LDGenesis.check(ctx.getNetworkType, InputUTXO(outs.get(0)), InputUTXO(outs.get(1)),
+        LDGenesis.Emissions(1L, 1L, LDHelpers.PROV_TOKEN_SUPPLY, Map(owner.toString -> 1L)), Seq(provision))
+      withClue(r.problems.mkString("; "))(r.sound shouldBe true)
+      r.warnings shouldBe empty
+      // Without the provision, the unit it holds is a provision token loose outside the pool
+      LDGenesis.check(ctx.getNetworkType, InputUTXO(outs.get(0)), InputUTXO(outs.get(1)),
+        LDGenesis.Emissions(1L, 1L, LDHelpers.PROV_TOKEN_SUPPLY)).sound shouldBe false
     }
   }
 

@@ -39,6 +39,16 @@ class LDPoolsApiController @Inject()(cc: ControllerComponents, api: LDPoolsApi, 
   /** GET /dex/pools/:poolNft */
   def getPool(poolNft: String): Action[AnyContent] = Action.async { _ => offPool(respond(api.getPool(poolNft))) }
 
+  /** POST /dex/pools/create/check */
+  def checkCreatePool(): Action[AnyContent] = Action.async { request =>
+    offPool(respond(api.checkCreatePool(body[LDPoolCreateRequest](request))))
+  }
+
+  /** POST /dex/pools/create */
+  def createPool(): Action[AnyContent] = withApiKey {
+    Action.async(request => offPool(respond(api.createPool(body[LDPoolCreateExecuteRequest](request)))))
+  }
+
   /** POST /dex/pools/:poolNft/orders/swap/check */
   def checkSwapOrder(poolNft: String): Action[AnyContent] = Action.async { request =>
     offPool(respond(api.checkSwapOrder(poolNft, body[LDPoolSwapRequest](request))))

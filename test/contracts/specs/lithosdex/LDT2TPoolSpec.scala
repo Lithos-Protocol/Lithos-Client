@@ -67,6 +67,19 @@ class LDT2TPoolSpec extends AnyPropSpec with LDT2TSpecBase {
     }
   }
 
+  property("swap: a swap too small for its side fee to reach one unit still pays one (feeXAdded rounds up)") {
+    withCtx { ctx =>
+      val small = 100L
+      small * FEE_PARAMS(1) should be < FEE_DENOM
+      val (s, next, q) = swapScenario(ctx, amountIn = small, xIn = true)
+      q.protocolFee shouldBe 1L
+      accepts(user(ctx), s.tx)
+      // Paying none of it, the whole input traded and no accumulator moved, is what truncation would allow
+      rejectsAtSigning(user(ctx), s.output(POOL,
+        poolUTXO(next.copy(pendingX = traded.pendingX, reservesX = next.reservesX + 1L, accX = traded.accX))).tx)
+    }
+  }
+
   property("swap: rejects charging the X-side fee to a Y-in swap") {
     withCtx { ctx =>
       val (s, next, q) = swapScenario(ctx, xIn = false)
@@ -366,12 +379,14 @@ class LDT2TPoolSpec extends AnyPropSpec with LDT2TSpecBase {
 
   // ─── the client's view ────────────────────────────────────────────────────
 
-  property("client: the input simSwapForOutput quotes buys at least the output asked for, and is accepted") {
+  property("client: simSwapForOutput quotes the least input that buys the output asked for, and it is accepted") {
     withCtx { ctx =>
       Seq(true, false).foreach { xIn =>
         val wanted = 500L * 1000000L
         val q = traded.view.simSwapForOutput(wanted, xIn).get
         q.amountOut should be >= wanted
+        // And it is the least such input: one unit less buys less
+        traded.view.simSwap(q.amountIn - 1L, xIn).amountOut should be < wanted
         val (s, _, _) = swapScenario(ctx, amountIn = q.amountIn, xIn = xIn)
         accepts(user(ctx), s.tx)
       }

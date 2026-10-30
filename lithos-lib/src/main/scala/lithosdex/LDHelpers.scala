@@ -109,9 +109,9 @@ object LDHelpers {
 
   /**
    * ERG a genesis pool box should hold to survive two storage-fee collections at the current factor,
-   * at its largest (2,488 bytes). A pool idle long enough to lose the rest loses its reserves too.
+   * at its largest (2,506 bytes). A pool idle long enough to lose the rest loses its reserves too.
    */
-  final val T2T_POOL_MIN_VALUE: Long = 6250000000L
+  final val T2T_POOL_MIN_VALUE: Long = 6300000000L
 
   /** The same for the vault (912 bytes at its largest), whose tokens are unclaimed fees. */
   final val T2T_VAULT_MIN_VALUE: Long = 2300000000L

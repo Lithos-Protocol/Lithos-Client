@@ -9,6 +9,7 @@ import node.NodeApi
 import node.model.{IndexedBox, MempoolOptions, Paging, SortDirection}
 import org.bouncycastle.util.encoders.Hex
 import org.ergoplatform.appkit.{BlockchainContext, NetworkType}
+import org.ergoplatform.sdk.ErgoId
 import org.slf4j.{Logger, LoggerFactory}
 import scorex.crypto.hash.Blake2b256
 import transactions.batching.lithosdex.{DexContracts, LDDeployments}
@@ -198,11 +199,19 @@ class LDPoolIndex @Inject()(nodeContext: NodeContext, system: ActorSystem) {
         case Some(vault) =>
           val (poolIn, vaultIn) = (pool.box.toInputUTXO(ctx), vault.box.toInputUTXO(ctx))
           val (poolMint, vaultMint) = (emission(poolNft).emissionAmount, emission(vaultNft).emissionAmount)
+          // Every other unit of the provision token is in this transaction's outputs, so each must be a provision
+          val provisions = genesisTx.outputs.filter(o => o.box.boxId != pool.box.boxId &&
+            o.box.assets.exists(_.tokenId == provToken)).map(_.box.toInputUTXO(ctx))
+          // An unreadable owner is left out and one the node never minted reads as 0; the checker reports both
+          val owners = provisions.flatMap(p => Try(new ErgoId(p.registers(2).getValue.asInstanceOf[sigma.Coll[Byte]].toArray)
+            .toString).toOption).distinct.map(id => id -> nodeApi.tokenById(id).get.map(_.emissionAmount).getOrElse(0L)).toMap
           if (n2t) {
-            val r = LDGenesis.check(network, poolIn, vaultIn, LDGenesis.Emissions(poolMint, vaultMint, prov.emissionAmount))
+            val r = LDGenesis.check(network, poolIn, vaultIn,
+              LDGenesis.Emissions(poolMint, vaultMint, prov.emissionAmount, owners), provisions)
             GenesisVerdict(r.problems, r.warnings)
           } else {
-            val r = LDT2TGenesis.check(poolIn, vaultIn, LDT2TGenesis.Emissions(poolMint, vaultMint, prov.emissionAmount))
+            val r = LDT2TGenesis.check(poolIn, vaultIn,
+              LDT2TGenesis.Emissions(poolMint, vaultMint, prov.emissionAmount, owners), provisions)
             GenesisVerdict(r.problems, r.warnings)
           }
       }

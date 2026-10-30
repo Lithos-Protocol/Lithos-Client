@@ -8,7 +8,7 @@ import lithosdex.states.{LDFeeValue, LDT2TFeeValue}
 import node.MutationConversions._
 import node.model.{MempoolOptions, Paging, SortDirection}
 import play.api.Configuration
-import transactions.engine.execution.DexPoolExecution
+import transactions.engine.execution.{DexPoolCreation, DexPoolExecution}
 import transactions.engine.wallet.EngineFunding
 
 import javax.inject.{Inject, Named, Singleton}
@@ -22,8 +22,13 @@ class LDPoolsApiImpl @Inject()(nodeContext: NodeContext, index: LDPoolIndex,
                                @Named("transaction-engine") engine: ActorRef, config: Configuration,
                                system: ActorSystem) extends LDPoolsApi {
 
-  private lazy val orders = new DexPoolExecution(nodeContext,
-    EngineFunding(engine, EngineFunding.AskTimeout, system.dispatcher), index, LithosDexOrdersConfig(config))
+  private lazy val funding = EngineFunding(engine, EngineFunding.AskTimeout, system.dispatcher)
+  private lazy val orders = new DexPoolExecution(nodeContext, funding, index, LithosDexOrdersConfig(config))
+  private lazy val creation = new DexPoolCreation(nodeContext, funding, index)
+
+  override def checkCreatePool(request: LDPoolCreateRequest): LDPoolCreateQuote = creation.check(request)
+
+  override def createPool(request: LDPoolCreateExecuteRequest): LDPoolCreated = creation.create(request)
 
   override def checkSwapOrder(poolNft: String, request: LDPoolSwapRequest): LDPoolSwapQuote =
     orders.checkSwap(poolNft, request)

@@ -32,6 +32,7 @@ import scala.util.control.NonFatal
 class DexPoolExecution(nodeContext: NodeContext, walletSelector: EngineFunding, index: LDPoolIndex,
                        orderDefaults: LithosDexOrdersConfig = LithosDexOrdersConfig.Default,
                        alive: () => Boolean = () => true) {
+  import DexPoolExecution.{Fees, exact, positive}
 
   private def nodeApi: NodeApi = nodeContext.getNodeApi
   private def wallet: NodeWallet = nodeContext.getNodeWallet
@@ -65,8 +66,10 @@ class DexPoolExecution(nodeContext: NodeContext, walletSelector: EngineFunding, 
     case n: LiveN2T =>
       val sellsErg = ergIn(n, tokenIn)
       val q = n.pool.simSwap(amountIn, sellsErg)
+      val least = if (q.amountOut <= 0) None else n.pool.simSwapForOutput(q.amountOut, sellsErg).map(_.amountIn)
       LDPoolSwapQuote(n.indexed.nft, tokenIn, if (sellsErg) n.pool.tokenY.toString else "ERG", LDAmounts(amountIn),
-        LDAmounts(q.amountOut), LDAmounts(if (sellsErg) q.amountOut else q.amountOut - fees.executorFee),
+        LDAmounts(q.amountOut), least.map(LDAmounts(_)),
+        LDAmounts(if (sellsErg) q.amountOut else q.amountOut - fees.executorFee),
         q.isExecutable, LDAmounts(fees.executorFee), LDAmounts(fees.maxMinerFee),
         LDAmounts(exact(LDOrderTransactions.swapValue(amountIn, sellsErg, fees.executorFee))),
         if (sellsErg) Seq.empty else Seq(LDTokenAmount(n.pool.tokenY.toString, LDAmounts(amountIn))),
@@ -75,8 +78,9 @@ class DexPoolExecution(nodeContext: NodeContext, walletSelector: EngineFunding, 
       val sold = sideOf(t, tokenIn)
       val xIn = sold == t.pool.tokenX
       val q = t.pool.simSwap(amountIn, xIn)
+      val least = if (q.amountOut <= 0) None else t.pool.simSwapForOutput(q.amountOut, xIn).map(_.amountIn)
       LDPoolSwapQuote(t.indexed.nft, sold.toString, (if (xIn) t.pool.tokenY else t.pool.tokenX).toString,
-        LDAmounts(amountIn), LDAmounts(q.amountOut), LDAmounts(q.amountOut), q.isExecutable,
+        LDAmounts(amountIn), LDAmounts(q.amountOut), least.map(LDAmounts(_)), LDAmounts(q.amountOut), q.isExecutable,
         LDAmounts(fees.executorFee), LDAmounts(fees.maxMinerFee),
         LDAmounts(exact(LDOrderTransactions.t2tOrderValue(fees.executorFee))),
         Seq(LDTokenAmount(sold.toString, LDAmounts(amountIn))),
@@ -308,27 +312,33 @@ class DexPoolExecution(nodeContext: NodeContext, walletSelector: EngineFunding, 
     }
   }
 
-  // ── request fields ────────────────────────────────────────────────────────
+  private def orderFees(executorFee: Option[String], maxMinerFee: Option[String]): Fees =
+    DexPoolExecution.orderFees(orderDefaults, executorFee, maxMinerFee)
+}
 
-  private case class Fees(executorFee: Long, maxMinerFee: Long)
+/** Request fields every `/dex/pools` placement reads the same way. */
+object DexPoolExecution {
+
+  private[execution] case class Fees(executorFee: Long, maxMinerFee: Long)
 
   /** Fees a request names, or the configured defaults, refused unless the cap sits under the fee. */
-  private def orderFees(executorFee: Option[String], maxMinerFee: Option[String]): Fees = {
-    val fee = LDAmounts.parseLong("executorFee", executorFee).getOrElse(orderDefaults.executorFeeNanoErg)
-    val cap = LDAmounts.parseLong("maxMinerFee", maxMinerFee).getOrElse(orderDefaults.maxMinerFeeNanoErg)
+  private[execution] def orderFees(defaults: LithosDexOrdersConfig, executorFee: Option[String],
+                                   maxMinerFee: Option[String]): Fees = {
+    val fee = LDAmounts.parseLong("executorFee", executorFee).getOrElse(defaults.executorFeeNanoErg)
+    val cap = LDAmounts.parseLong("maxMinerFee", maxMinerFee).getOrElse(defaults.maxMinerFeeNanoErg)
     if (cap < 0) throw LithosBadRequest(s"'maxMinerFee' cannot be negative, got $cap")
     if (cap >= fee) throw LithosBadRequest(
       s"'maxMinerFee' ($cap) must be below 'executorFee' ($fee); omitted fields come from lithosdex.orders")
     Fees(fee, cap)
   }
 
-  private def positive(field: String, raw: String): Long = {
+  private[execution] def positive(field: String, raw: String): Long = {
     val value = LDAmounts.parseLong(field, raw)
     if (value > 0) value else throw LithosBadRequest(s"'$field' must be positive, got $value")
   }
 
   /** A request whose amounts overflow a 64-bit total is refused rather than failing as a defect. */
-  private def exact[A](build: => A): A =
+  private[execution] def exact[A](build: => A): A =
     try build catch {
       case _: ArithmeticException => throw LithosBadRequest("the amounts in this request overflow a 64-bit total")
     }

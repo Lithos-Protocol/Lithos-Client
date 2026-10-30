@@ -9,7 +9,8 @@
   // REGISTERS
   // R4: liquidity (Long) - reserved LP. Supply is CONST_LOCKED_LP - liquidity.
   // R5: feeParams (Coll[Long]) - [dexFee, xFee, yFee] numerators over CONST_FEE_DENOM. dexFee returns
-  // to the pool, the other two are externalized into pending.
+  // to the pool, the other two are externalized into pending, rounded up so that no swap carrying a side
+  // fee pays none of it.
   // R6: pending (Coll[Long]) - [pendingX, pendingY] fees accrued but not yet flushed to the vault. Held
   // apart from the reserves so the AMM never trades against money it has already promised away.
   // R7: accX (BigInt) - cumulative token X fee per share, scaled by CONST_SCALE
@@ -88,7 +89,9 @@
   // breaks any of it is unsafe to use, and the client checks it before offering the pool:
   // - The pool NFT and the vault NFT were each minted as a single unit, and sit in this box and the
   //   vault respectively
-  // - The whole provision token supply was minted into this box at genesis
+  // - The whole provision token supply was minted into this box at genesis, but for one unit in each
+  //   provision genesis created for the pool's creator, at the zero accumulators and with its shares in the
+  //   genesis supply
   // - Genesis set both accumulators and both pending fees to zero, a supply of at least CONST_MIN_SUPPLY
   //   that no provision represents, dexFee within (0, CONST_FEE_DENOM] and both side fees within
   //   [0, CONST_FEE_DENOM)
@@ -194,12 +197,12 @@
       if(deltaReservesX > 0){
         val satisfiesAMM = reservesY0.toBigInt * deltaReservesX * feeNum0 >=
           -deltaReservesY * (reservesX0.toBigInt * CONST_FEE_DENOM + deltaReservesX * feeNum0)
-        val feeXAdded = deltaPendingX.toBigInt == (feeParams(1).toBigInt * totalDeltaX) / CONST_FEE_DENOM
+        val feeXAdded = deltaPendingX.toBigInt == (feeParams(1).toBigInt * totalDeltaX + CONST_FEE_DENOM - 1) / CONST_FEE_DENOM
         satisfiesAMM && feeXAdded && deltaPendingY == 0 && common
       }else{
         val satisfiesAMM = reservesX0.toBigInt * deltaReservesY * feeNum0 >=
           -deltaReservesX * (reservesY0.toBigInt * CONST_FEE_DENOM + deltaReservesY * feeNum0)
-        val feeYAdded = deltaPendingY.toBigInt == (feeParams(2).toBigInt * totalDeltaY) / CONST_FEE_DENOM
+        val feeYAdded = deltaPendingY.toBigInt == (feeParams(2).toBigInt * totalDeltaY + CONST_FEE_DENOM - 1) / CONST_FEE_DENOM
         satisfiesAMM && feeYAdded && deltaPendingX == 0 && common
       }
 

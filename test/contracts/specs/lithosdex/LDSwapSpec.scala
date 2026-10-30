@@ -336,6 +336,19 @@ class LDSwapSpec extends AnyPropSpec with LithosDexSpecBase {
     }
   }
 
+  property("client: simSwapForOutput quotes the least input that buys the output asked for, and it is accepted") {
+    withCtx { ctx =>
+      Seq(true, false).foreach { ergIn =>
+        val wanted = if (ergIn) 1000000L else Parameters.OneErg / 10
+        val q = genesis.view.simSwapForOutput(wanted, ergIn).get
+        q.amountOut should be >= wanted
+        genesis.view.simSwap(q.amountIn - 1L, ergIn).amountOut should be < wanted
+        val s = swapScenario(ctx, amountIn = q.amountIn, ergIn = ergIn, state = genesis)
+        accepts(s.prover, swapTx(s)())
+      }
+    }
+  }
+
   property("swap: rejects a successor whose pending collection has been padded") {
     withCtx { ctx =>
       // Nothing above index 1 is ever read, so without a length check the successor could carry an
