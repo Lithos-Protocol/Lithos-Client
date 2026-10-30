@@ -24,18 +24,10 @@ final case class ErgoDexOrder(box: NodeBox,
                               maxMinerFee: Long,
                               quoteId: Option[String] = None,
                               fixedDexFee: Long = 0L,
-                              orderFeeNum: Option[Int] = None) {
+                              orderFeeNum: Option[Int] = None) extends PoolOrder {
 
   /** Whether this swap spends ERG to receive the pool's Y token. */
   def baseIsErg: Boolean = contract.kind == OrderKind.SwapSell
-
-  def boxId: String = box.boxId
-
-  /** Reconstructs the order input from the reported box fields. */
-  def boxAsInput(ctx: org.ergoplatform.appkit.BlockchainContext): work.lithos.mutations.InputUTXO = {
-    import node.MutationConversions._
-    box.toInputUTXO(ctx)
-  }
 
   /** Executor revenue in nanoERG: a quote-based rate for swaps and a fixed fee for liquidity orders. */
   def dexFee(quoteAmount: Long): Long =

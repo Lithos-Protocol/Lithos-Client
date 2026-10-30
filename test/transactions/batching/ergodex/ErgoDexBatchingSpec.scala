@@ -240,7 +240,7 @@ class ErgoDexBatchingSpec extends AnyFlatSpec with Matchers with MockitoSugar {
     val second = fill.copy(order = order.copy(box = orderBox.copy(boxId = id("1"))))
     val third = fill.copy(order = order.copy(box = orderBox.copy(boxId = id("2"))))
     val shared = mempoolTx(id("b"), Seq(wallet1.boxId))
-    val placementOf: ErgoDexOrder => Vector[CompleteMempool.MempoolTx] =
+    val placementOf: PoolOrder => Vector[CompleteMempool.MempoolTx] =
       o => if (o.boxId == orderBox.boxId) Vector.empty else Vector(shared)
     val fillPlacementOf: ErgoDexFill => Vector[CompleteMempool.MempoolTx] = f => placementOf(f.order)
 

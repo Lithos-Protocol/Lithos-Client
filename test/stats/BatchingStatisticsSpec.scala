@@ -60,6 +60,22 @@ class BatchingStatisticsSpec extends AnyFlatSpec with Matchers {
     }
   }
 
+  it should "count a real Machina fill through an ErgoDEX pool at the gap its two legs left" in {
+    support.MachinaFixtures.fills.foreach { m =>
+      withClue(m.name) {
+        val tx = BlockTx(m.tx.id, Seq(m.pool, m.order).map(b => TxInput(b.boxId, None)), Seq.empty,
+          m.tx.outputs.map(o => NodeSync.txOutput(o.box)))
+        val block = BlockInfo("block", m.tx.inclusionHeight, Seq(tx),
+          resolvedInputs = Seq(m.pool, m.order).map(b => b.boxId -> NodeSync.txOutput(b)).toMap)
+        val result = BatchingStatistics.read(block, tx, NetworkType.MAINNET, Contract.SIGMA_FALSE.ergoTreeHex)
+        result should have size 1
+        result.head.protocol shouldBe "ergodex"
+        result.head.grossNanoErg shouldBe m.gap.toString
+        result.head.transactionFeeNanoErg shouldBe m.minerFee.toString
+      }
+    }
+  }
+
   it should "measure the configured LithosDex executor fee separately from the pool's own fees" in {
     val fake = FakeNodeContext()
     fake._1.getClient.execute { ctx =>

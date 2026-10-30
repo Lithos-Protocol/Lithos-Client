@@ -82,10 +82,20 @@ class ErgoDexBatcherSpec extends TestKit(ActorSystem("ergodex-batcher-spec", Erg
     })
 
     when(api.info()).thenReturn(Success(ChainFixtures.infoAt(tip).copy(bestFullHeaderId = Some(anchor))))
+    // Any order kind: the scan is by template, whatever contract the box sits at
+    private val initialTemplateHash = org.bouncycastle.util.encoders.Hex.toHexString(
+      scorex.crypto.hash.Blake2b256(sigma.ast.ErgoTree.fromHex(initialOrder.ergoTree).template))
     when(api.unspentBoxesByTemplateHash(anyString(), any[Paging], any[SortDirection], any[MempoolOptions]))
       .thenAnswer { inv =>
-        if (discoverable && inv.getArgument[String](0) == ErgoDexOrder.parse(initialOrder).get.contract.templateHash)
+        if (discoverable && inv.getArgument[String](0) == initialTemplateHash)
           Success(Seq(IndexedBox(initialOrder, "", initialOrder.creationHeight + 1, 1L)))
+        else Success(Seq.empty[IndexedBox])
+      }
+    // The native pool scan Machina routing reads: the fixture's pool when it is a native one
+    when(api.unspentBoxesByErgoTree(anyString(), any[Paging], any[SortDirection], any[MempoolOptions]))
+      .thenAnswer { inv =>
+        if (inv.getArgument[String](0) == ErgoDexContracts.NativePoolErgoTree && inv.getArgument[Paging](1).offset == 0)
+          Success((Seq(pool) ++ extraPool).filter(ErgoDexPool.native(_).isDefined).map(IndexedBox(_, "", tip - 1, 4L)))
         else Success(Seq.empty[IndexedBox])
       }
     when(api.unspentBoxesByTokenId(anyString(), any[Paging], any[SortDirection], any[MempoolOptions]))
@@ -159,6 +169,24 @@ class ErgoDexBatcherSpec extends TestKit(ActorSystem("ergodex-batcher-spec", Erg
         bundle.members.last.inputIds should contain(e.order.boxId)
         bundle.capital.map(_.value) shouldBe Seq(e.revenue)
         verify(f.api, timeout(30000).times(1)).sendTransaction(anyString())
+        f.stop()
+      }
+    }
+  }
+
+  it should "discover live Machina orders, route each through its token's pool, and execute it at its best size" in {
+    support.MachinaFixtures.fills.foreach { m =>
+      withClue(m.name) {
+        val pool = ErgoDexPool.native(m.pool).get
+        val order = MachinaOrder.parse(m.order).get.routedThrough(pool.nft)
+        val best = ErgoDexExecution.price(order, pool, BatchingConfig.Default.minRevenueNanoErg).get
+        val broadcasts = ErgoDexExecution.price(order, pool, BatchingConfig.Default.broadcastMinRevenueNanoErg,
+          minerFeeCeiling = BatchingConfig.Default.broadcastMinerFeeCeiling).isDefined
+        val f = new Fixture(broadcast = true, initialOrder = m.order, initialPool = m.pool)
+        val bundle = f.offeredOnceTracked().head
+        bundle.members.last.inputIds should contain(m.order.boxId)
+        bundle.capital.map(_.value) shouldBe Seq(best.revenue)
+        if (broadcasts) verify(f.api, timeout(30000).times(1)).sendTransaction(anyString())
         f.stop()
       }
     }

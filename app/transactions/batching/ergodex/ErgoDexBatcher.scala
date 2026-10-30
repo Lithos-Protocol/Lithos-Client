@@ -50,7 +50,30 @@ class ErgoDexBatcher(nodeContext: NodeContext,
       logger.warn(s"ErgoDEX orders name ${nfts.size} pools; reading the first $MaxPoolReads this pass")
     val pools = nfts.take(MaxPoolReads).flatMap(nft => confirmedPool(nft).flatMap(indexed =>
       ErgoDexPool.parse(indexed.box).map(_ -> indexed.inclusionHeight)))
-    ErgoDexBatching.track(orders, pools, tip, batching)
+    // Machina orders name a token rather than a pool, so every native pool is read once, and only when there are
+    // any, and each order is routed through the one that pays most
+    val machina = MachinaContracts.templates.filter(_.executable)
+      .flatMap(template => scanTemplate(template.templateHash, s"Machina ${template.kind.name}")(MachinaOrder.parse))
+      .filterNot(order => skipped.contains(order.boxId))
+    val routed = if (machina.isEmpty) Seq.empty else ErgoDexBatching.route(machina, nativePools(), tip, batching)
+    ErgoDexBatching.track(orders ++ routed.map(_._1), pools ++ routed.map(_._2), tip, batching)
+  }
+
+  /** Every confirmed native pool, parsed a page at a time, up to [[MaxNativePoolPages]] pages. */
+  private def nativePools(): Seq[(ErgoDexPool, Int)] = {
+    var found = Vector.empty[(ErgoDexPool, Int)]
+    var offset = 0
+    var exhausted = false
+    while (!exhausted && offset < MaxNativePoolPages * Batcher.PageSize) {
+      val page = nodeApi.unspentBoxesByErgoTree(ErgoDexContracts.NativePoolErgoTree, Paging(offset, Batcher.PageSize),
+        SortDirection.Desc, MempoolOptions.ConfirmedOnly).get
+      found ++= page.flatMap(indexed => ErgoDexPool.native(indexed.box).map(_ -> indexed.inclusionHeight))
+      exhausted = page.size < Batcher.PageSize
+      offset += page.size
+    }
+    if (!exhausted)
+      logger.warn(s"ErgoDEX native pool scan stopped after $offset pools; Machina orders were routed through those only")
+    found
   }
 
   /** Returns the uniquely indexed confirmed box carrying the pool NFT. */
@@ -69,10 +92,11 @@ class ErgoDexBatcher(nodeContext: NodeContext,
   }
 
   /** Reloads tracked orders, retaining mempool-claimed boxes and reporting missing ids as spent. */
-  private def liveOrders(orders: Tracked): Seq[ErgoDexOrder] = {
+  private def liveOrders(orders: Tracked): Seq[PoolOrder] = {
     val live = if (orders.isEmpty) Seq.empty[NodeBox] else nodeApi.boxesWithPoolByIds(orders.keys.toSeq).get
     forget(orders.keySet -- live.map(_.boxId))
-    live.flatMap(ErgoDexOrder.parse).filter(order => orders.get(order.boxId).contains(order.poolNft))
+    live.flatMap(box => ErgoDexBatching.parse(box, orders.get(box.boxId)))
+      .filter(order => orders.get(order.boxId).contains(order.poolNft))
   }
 
   /** Builds fee-less runs against confirmed pools, carrying verified wallet ancestry for mempool orders. */
@@ -93,7 +117,7 @@ class ErgoDexBatcher(nodeContext: NodeContext,
           batching.maxMempoolOrdersPerTx))
         .groupBy(_.boxId).values.map(_.head).toSeq
         .filterNot(order => skipped.contains(order.boxId) ||
-          BatchingMempool.withdrawn(order.boxId, order.poolNft, spenders))
+          ErgoDexBatching.withdrawn(order, spenders))
       within(deadline, "reading tracked orders")
       val pools = currentPools(candidates.map(_.poolNft).distinct)
         .filter { case (_, box) => !creators.contains(box.boxId) }
@@ -156,10 +180,10 @@ class ErgoDexBatcher(nodeContext: NodeContext,
    * The highest-revenue runs that fit, one per pool, counting shared ancestors once. Pools are ranked by
    * what their orders price at; each pool's run then passes over any order that cannot be built.
    */
-  private def runs(ctx: BlockchainContext, pools: Seq[(NodeBox, Seq[ErgoDexOrder])], slots: Int,
+  private def runs(ctx: BlockchainContext, pools: Seq[(NodeBox, Seq[PoolOrder])], slots: Int,
                    blockHeight: Int, minRevenue: Long, minerFeeCeiling: Long, useTrueProp: Boolean,
                    deadline: Deadline,
-                   placementOf: ErgoDexOrder => Vector[CompleteMempool.MempoolTx] = _ => Vector.empty)
+                   placementOf: PoolOrder => Vector[CompleteMempool.MempoolTx] = _ => Vector.empty)
   : Vector[(ErgoDexChain, Vector[CompleteMempool.MempoolTx])] = {
     val priced = pools
       .flatMap { case (box, poolOrders) => ErgoDexPool.parse(box).map { pool =>
@@ -202,6 +226,9 @@ object ErgoDexBatcher {
 
   /** Maximum pool lookups per scan; each lookup requires a node call. */
   private[ergodex] final val MaxPoolReads = 512
+
+  /** Most pages of native pools a Machina routing pass reads; 287 pools filled three pages on 2026-10-30. */
+  private final val MaxNativePoolPages = 20
 
   /** A broadcast pass is not bound by the stratum's deadline; this only ends a run that would not. */
   private final val BroadcastBudget = 60.seconds

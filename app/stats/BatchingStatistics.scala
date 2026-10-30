@@ -4,7 +4,7 @@ import node.model.{NodeAsset, NodeBox, NodeRegisters}
 import org.bouncycastle.util.encoders.Hex
 import org.ergoplatform.appkit.NetworkType
 import state.messages.{BlockInfo, BlockTx, TxOutput}
-import transactions.batching.ergodex.{ErgoDexExecution, ErgoDexOrder, ErgoDexPool}
+import transactions.batching.ergodex.{ErgoDexExecution, ErgoDexOrder, ErgoDexPool, MachinaOrder}
 import transactions.batching.lithosdex.{DexContracts, LDDeployments, LithosDexOrder}
 import work.lithos.mutations.Contract
 
@@ -63,13 +63,21 @@ private[stats] object BatchingStatistics {
     ErgoDexPool.parse(box(pool)) match {
       case Some(before) =>
         inputs(1).toVector.flatMap { input =>
-          ErgoDexOrder.parse(box(input)).filter(o => nft.contains(o.poolNft)).toVector.flatMap { order =>
+          val ergoDex = ErgoDexOrder.parse(box(input)).filter(o => nft.contains(o.poolNft)).toVector.flatMap { order =>
             ErgoDexExecution.movement(order, before).toVector.flatMap { case (quote, after) =>
               val actual = ErgoDexPool.parse(box(next))
               if (!actual.exists(p => p.copy(boxId = after.boxId) == after) || quote < order.minQuoteAmount) Vector.empty
               else result(input, Hex.toHexString(order.redeemerPropBytes), 1, 0, 0, "ergodex", Some(order.dexFee(quote)))
             }
           }
+          // A Machina fill through the pool: the gap is what the pool and the order's child leave between them.
+          // Its child is the order recreated or its owner paid out, at output 1.
+          lazy val machina = MachinaOrder.parse(box(input)).filter(_.tokenId == before.yId).toVector.flatMap { order =>
+            tx.outputs.lift(1).map(_.ergoTree)
+              .filter(tree => tree == input.ergoTree || tree == Hex.toHexString(order.ownerPropBytes))
+              .toVector.flatMap(child => result(input, child, 1, 0, 0, "ergodex", None))
+          }
+          if (ergoDex.nonEmpty) ergoDex else machina
         }
       case None if lithosDexPool(pool, network) =>
         inputs.slice(1, 3).flatten.toVector.flatMap { input =>

@@ -17,11 +17,13 @@ import scala.concurrent.duration.{Deadline, FiniteDuration}
 import scala.util.{Failure, Success, Try}
 
 /**
- * Priced output balances for one order. Revenue includes the miner fee; quote is LP for deposits and X
- * for redemptions.
+ * Priced output balances for one order. Revenue includes the miner fee; quote is LP for deposits, X for
+ * redemptions, and the tokens moved for a Machina fill. The reward is output 1: the owner's reward for an
+ * ErgoDEX order, and the order's child for a Machina one, which `machina` describes.
  */
-final case class ErgoDexFill(order: ErgoDexOrder, pool: ErgoDexPool, quote: Long, revenue: Long,
-                             poolAfter: ErgoDexPool, rewardValue: Long, rewardTokens: Seq[NodeAsset])
+final case class ErgoDexFill(order: PoolOrder, pool: ErgoDexPool, quote: Long, revenue: Long,
+                             poolAfter: ErgoDexPool, rewardValue: Long, rewardTokens: Seq[NodeAsset],
+                             machina: Option[MachinaTrade] = None)
 
 /**
  * Signed executions in spend order, with the final unspent box holding their combined takings.
@@ -114,8 +116,26 @@ object ErgoDexExecution {
     }
 
   /** Requires gross revenue above the floor and positive net takings; the first fill must fund a box. */
-  def price(order: ErgoDexOrder, pool: ErgoDexPool, minRevenue: Long,
-            fundsItsOwnBox: Boolean = true, minerFeeCeiling: Long = 0L): Option[ErgoDexFill] = {
+  def price(order: PoolOrder, pool: ErgoDexPool, minRevenue: Long,
+            fundsItsOwnBox: Boolean = true, minerFeeCeiling: Long = 0L): Option[ErgoDexFill] = order match {
+    case m: MachinaOrder => priceMachina(m, pool, minRevenue, fundsItsOwnBox, minerFeeCeiling)
+    case o: ErgoDexOrder => priceOrder(o, pool, minRevenue, fundsItsOwnBox, minerFeeCeiling)
+    case _ => None
+  }
+
+  /** A Machina fill at the size that leaves the most ERG against this pool state, held to the same floors. */
+  private def priceMachina(order: MachinaOrder, pool: ErgoDexPool, minRevenue: Long, fundsItsOwnBox: Boolean,
+                           minerFeeCeiling: Long): Option[ErgoDexFill] =
+    if (order.poolNft != pool.nft) None
+    else MachinaPricing.best(order, pool).flatMap { trade =>
+      val net = trade.gap - math.min(order.maxMinerFee, math.max(0L, minerFeeCeiling))
+      if (trade.gap < minRevenue || net <= 0L || (fundsItsOwnBox && net < UTXO.MIN_CHANGE)) None
+      else Some(ErgoDexFill(order, pool, trade.tokens, trade.gap, trade.poolAfter, trade.childValue,
+        if (trade.childTokens > 0) Seq(NodeAsset(order.tokenId, trade.childTokens)) else Seq.empty, Some(trade)))
+    }
+
+  private def priceOrder(order: ErgoDexOrder, pool: ErgoDexPool, minRevenue: Long,
+                         fundsItsOwnBox: Boolean, minerFeeCeiling: Long): Option[ErgoDexFill] = {
     if (order.poolNft != pool.nft || order.contract.shape != pool.shape ||
       order.quoteId.exists(q => q != pool.yId && !pool.xId.contains(q))) None
     else {
@@ -153,18 +173,18 @@ object ErgoDexExecution {
    * What `strategy` would execute against `pool`, ignoring placements. Ranks pools; builds nothing. With no
    * time to search by default it plans greedily, so ranking many pools costs little.
    */
-  def priceChain(orders: Seq[ErgoDexOrder], pool: ErgoDexPool, minRevenue: Long,
+  def priceChain(orders: Seq[PoolOrder], pool: ErgoDexPool, minRevenue: Long,
                  limit: Int, minerFeeCeiling: Long = 0L, strategy: RunStrategy = RunStrategy.Default,
                  deadline: Deadline = Deadline.now): Vector[ErgoDexFill] =
     strategy.plan(problem(orders, pool, limit, minRevenue, minerFeeCeiling, fundsFirst = true, _ => Seq.empty,
       Set.empty, deadline)).map(_.priced.fill)
 
   /** `orders` against `pool` as a strategy sees them, the first fill funding its own box when `fundsFirst`. */
-  private def problem(orders: Seq[ErgoDexOrder], pool: ErgoDexPool, limit: Int, minRevenue: Long,
-                      minerFeeCeiling: Long, fundsFirst: Boolean, placements: ErgoDexOrder => Seq[String],
+  private def problem(orders: Seq[PoolOrder], pool: ErgoDexPool, limit: Int, minRevenue: Long,
+                      minerFeeCeiling: Long, fundsFirst: Boolean, placements: PoolOrder => Seq[String],
                       alreadyCarried: Set[String], deadline: Deadline,
-                      searchBudget: FiniteDuration = RunStrategy.SearchBudget): RunProblem[ErgoDexOrder, ErgoDexFill, ErgoDexPool] =
-    RunProblem[ErgoDexOrder, ErgoDexFill, ErgoDexPool](orders, pool, limit, _.boxId,
+                      searchBudget: FiniteDuration = RunStrategy.SearchBudget): RunProblem[PoolOrder, ErgoDexFill, ErgoDexPool] =
+    RunProblem[PoolOrder, ErgoDexFill, ErgoDexPool](orders, pool, limit, _.boxId,
       (order, state, first) => price(order, state, minRevenue, fundsItsOwnBox = first && fundsFirst, minerFeeCeiling)
         .map(fill => Priced(fill, fill.revenue - math.min(order.maxMinerFee, math.max(0L, minerFeeCeiling)),
           fill.poolAfter)),
@@ -184,9 +204,9 @@ object ErgoDexExecution {
    * @param searchBudget   most time `strategy` may spend on each plan
    */
   def run(ctx: BlockchainContext, wallet: NodeWallet, poolBox: InputUTXO, pool: ErgoDexPool,
-          orders: Seq[ErgoDexOrder], limit: Int, minRevenue: Long, blockHeight: Int, minerFeeCeiling: Long,
+          orders: Seq[PoolOrder], limit: Int, minRevenue: Long, blockHeight: Int, minerFeeCeiling: Long,
           useTrueProp: Boolean, deadline: Deadline,
-          placementOf: ErgoDexOrder => Vector[CompleteMempool.MempoolTx] = _ => Vector.empty,
+          placementOf: PoolOrder => Vector[CompleteMempool.MempoolTx] = _ => Vector.empty,
           alreadyCarried: Set[String] = Set.empty,
           unbuildableLimits: Batcher.UnbuildableLimits = Batcher.UnbuildableLimits.Default,
           strategy: RunStrategy = RunStrategy.Default,
@@ -203,7 +223,7 @@ object ErgoDexExecution {
     var unbuildable = Vector.empty[String]
     var failedByTx = Map.empty[String, Int]
     var passedOver = Set.empty[String]
-    var plan = Vector.empty[Planned[ErgoDexOrder, ErgoDexFill, ErgoDexPool]]
+    var plan = Vector.empty[Planned[PoolOrder, ErgoDexFill, ErgoDexPool]]
     var replan = true
     def slotsUsed(txs: Vector[CompleteMempool.MempoolTx]) = built.size + txs.count(tx => !alreadyCarried.contains(tx.id))
     def full = slotsUsed(placements) >= limit
@@ -279,8 +299,12 @@ object ErgoDexExecution {
     require(after.reservesX > 0 && after.reservesY > 0, "an execution cannot empty the pool")
 
     // Verify the reported order id before spending the reconstructed input.
-    val orderInput = order.boxAsInput(ctx)
-    require(orderInput.id.toString == order.boxId, "the order box's fields do not match its id")
+    val boxInput = order.boxAsInput(ctx)
+    require(boxInput.id.toString == order.boxId, "the order box's fields do not match its id")
+    val orderInput = (order, fill.machina) match {
+      case (machina: MachinaOrder, Some(trade)) => MachinaFill.input(boxInput, machina, trade)
+      case _ => boxInput
+    }
     val spent = Seq(poolBox, orderInput) ++ carriedTakings.toSeq
 
     // The block this execution is built for, unless a box it chains onto was itself built for a later
@@ -295,12 +319,16 @@ object ErgoDexExecution {
         Token(ErgoId.create(pool.yId), after.reservesY),
       poolBox.registers).setCreationHeight(height)
 
-    // The reward is the user's, and its proposition is the order's own constant rather than
-    // anything this client chooses.
-    val redeemer = Contract(sigma.ast.ErgoTree.fromBytes(order.redeemerPropBytes))
-    val rewardOut = UTXO(redeemer, fill.rewardValue,
-      fill.rewardTokens.map(asset => Token(ErgoId.create(asset.tokenId), asset.amount)))
-      .setCreationHeight(height)
+    // The reward is the user's, and its proposition is the order's own constant rather than anything this
+    // client chooses. A Machina order's is its child: the order recreated, or its owner paid out.
+    val rewardOut = (order, fill.machina) match {
+      case (machina: MachinaOrder, Some(trade)) => MachinaFill.child(boxInput, machina, trade).setCreationHeight(height)
+      case (ergoDex: ErgoDexOrder, _) =>
+        UTXO(Contract(sigma.ast.ErgoTree.fromBytes(ergoDex.redeemerPropBytes)), fill.rewardValue,
+          fill.rewardTokens.map(asset => Token(ErgoId.create(asset.tokenId), asset.amount)))
+          .setCreationHeight(height)
+      case _ => throw new IllegalArgumentException(s"no output rule for order ${order.boxId}")
+    }
 
     val takingsOut = UTXO(CandidateCapital.collectionContract(wallet, useTrueProp), takings)
       .setCreationHeight(height)

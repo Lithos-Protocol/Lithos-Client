@@ -71,7 +71,8 @@ class ErgoDexLiquiditySpec extends AnyFlatSpec with Matchers with MockitoSugar {
       val deposit = order(ctx, OrderKind.Deposit, fee = 8000000L)
       val redeem = order(ctx, OrderKind.Redeem)
       val fills = ErgoDexExecution.priceChain(Seq(redeem, swap(ctx), deposit), pool, 0L, 3)
-      fills.map(_.order.contract.kind) shouldBe Vector(OrderKind.Deposit, OrderKind.Redeem, OrderKind.SwapBuy)
+      fills.map(_.order).collect { case o: ErgoDexOrder => o.contract.kind } shouldBe
+        Vector(OrderKind.Deposit, OrderKind.Redeem, OrderKind.SwapBuy)
       fills(1).pool shouldBe fills.head.poolAfter
       fills(2).pool shouldBe fills(1).poolAfter
       val chain = ErgoDexExecution.run(ctx, wallet, box.toInputUTXO(ctx), pool, Seq(redeem, swap(ctx), deposit), 3, 0L,
