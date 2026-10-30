@@ -1133,6 +1133,76 @@ paths:
               schema:
                 $ref: '#/components/schemas/ApiError'
 
+  /dex/pools:
+    get:
+      summary: Every LithosDex pool
+      description: >
+        Every LithosDex pool on chain, ERG/token and token/token, verified pools first, then newest
+        first. Anyone can create a pool. A pool on the client's verified list was checked by hand; any
+        other pool is checked against the facts its contracts take on trust at genesis, and
+        `problems` lists each one it breaks. A pool with problems can be drained: do not trade with it.
+
+
+        Read from an index the client rebuilds in the background as blocks arrive, so a request never
+        waits on a scan. `status` is `building` until the first index completes.
+      operationId: listLDPools
+      tags:
+        - lithosdex
+      responses:
+        '200':
+          description: The pools, as the index last read them
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LDPoolList'
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /dex/pools/{poolNft}:
+    get:
+      summary: One LithosDex pool and its vault
+      description: >
+        One pool as the index last read it, with its fee vault read from the node now.
+      operationId: getLDPoolByNft
+      tags:
+        - lithosdex
+      parameters:
+        - name: poolNft
+          in: path
+          required: true
+          description: The pool's NFT id, 64 hex characters
+          schema:
+            type: string
+      responses:
+        '200':
+          description: The pool and its vault
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LDPoolDetail'
+        '404':
+          description: No LithosDex pool with that NFT.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '503':
+          description: The index is still building, or the vault could not be read. Retry.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
   /dex/vault:
     get:
       summary: LithosDex fee vault state
@@ -6449,6 +6519,180 @@ components:
           format: int64
           description: Denominator of every numerator above
           example: 10000
+
+    LDPoolToken:
+      description: >
+        One side of a pool. A verified token's name, ticker and decimals come from the client's verified
+        list; any other token's from the node's token index, where whoever minted the token chose them.
+      type: object
+      x-tags: lithosdex
+      required:
+        - tokenId
+        - verified
+      properties:
+        tokenId:
+          type: string
+          description: Token id, or `ERG` for the X side of an ERG/token pool
+          example: 'c1980d829988229516430a47a5eca376060b6ce859616db0936e78ab25cb6de7'
+        name:
+          type: string
+          example: 'LIT'
+        ticker:
+          type: string
+          description: Short symbol. Verified tokens and ERG only.
+          example: 'LIT'
+        decimals:
+          type: integer
+          format: int32
+          example: 9
+        verified:
+          type: boolean
+          example: true
+
+    LDPoolSummary:
+      description: One LithosDex pool as the index last read it. Amounts are decimal strings in base units.
+      type: object
+      x-tags: lithosdex
+      required:
+        - poolNFT
+        - kind
+        - utxoId
+        - inclusionHeight
+        - tokenX
+        - tokenY
+        - reservesX
+        - reservesY
+        - pendingX
+        - pendingY
+        - supply
+        - feeParams
+        - provTokensLeft
+        - verified
+        - genesisChecked
+        - problems
+        - warnings
+      properties:
+        poolNFT:
+          type: string
+        kind:
+          type: string
+          enum: [n2t, t2t]
+          description: '`n2t` is ERG against a token, `t2t` token against token'
+        utxoId:
+          type: string
+          description: The pool box the index read
+        inclusionHeight:
+          type: integer
+          format: int32
+        tokenX:
+          $ref: '#/components/schemas/LDPoolToken'
+        tokenY:
+          $ref: '#/components/schemas/LDPoolToken'
+        reservesX:
+          type: string
+        reservesY:
+          type: string
+        pendingX:
+          type: string
+          description: Fees awaiting a flush to the vault
+        pendingY:
+          type: string
+        supply:
+          type: string
+          description: Shares issued
+        feeParams:
+          $ref: '#/components/schemas/LDFeeParams'
+        provTokensLeft:
+          type: string
+          description: Deposits the pool can still take, one provision token each
+        price:
+          type: number
+          format: double
+          description: Units of Y per unit of X at display decimals. Absent when either side's decimals are unknown.
+          example: 0.1
+        verified:
+          type: boolean
+          description: Whether the client's verified list names this pool
+        genesisChecked:
+          type: boolean
+          description: >
+            Whether this pool's genesis was checked. False for verified pools, which are checked by hand,
+            and while the node could not be read.
+        problems:
+          type: array
+          description: Genesis facts this pool breaks. Any one can let the pool be drained.
+          items:
+            type: string
+        warnings:
+          type: array
+          description: Risks short of that, such as too little ERG to survive storage rent.
+          items:
+            type: string
+
+    LDPoolList:
+      description: Every LithosDex pool the index found
+      type: object
+      x-tags: lithosdex
+      required:
+        - status
+        - height
+        - truncated
+        - pools
+      properties:
+        status:
+          type: string
+          enum: [building, ready]
+        height:
+          type: integer
+          format: int32
+          description: The tip the index was read at
+        truncated:
+          type: boolean
+          description: More pools exist than one index reads; the newest are listed.
+        pools:
+          type: array
+          items:
+            $ref: '#/components/schemas/LDPoolSummary'
+
+    LDPoolVault:
+      description: A pool's fee vault. Amounts are decimal strings in base units.
+      type: object
+      x-tags: lithosdex
+      required:
+        - vaultNFT
+        - utxoId
+        - accX
+        - accY
+        - balanceX
+        - balanceY
+      properties:
+        vaultNFT:
+          type: string
+        utxoId:
+          type: string
+        accX:
+          type: string
+          description: Fee per share of X, scaled by 1e27, as of the last flush
+        accY:
+          type: string
+        balanceX:
+          type: string
+          description: Fees held for provisions to claim
+        balanceY:
+          type: string
+
+    LDPoolDetail:
+      description: One pool and its vault
+      type: object
+      x-tags: lithosdex
+      required:
+        - pool
+        - vault
+      properties:
+        pool:
+          $ref: '#/components/schemas/LDPoolSummary'
+        vault:
+          $ref: '#/components/schemas/LDPoolVault'
 
     LDPoolInfo:
       description: State of the LithosDex liquidity pool box

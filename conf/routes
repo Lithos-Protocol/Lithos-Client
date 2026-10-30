@@ -57,6 +57,8 @@ GET /stats/local               controllers.StatsApiController.getLocalMiningStat
 # package. Nothing here takes a wildcard in first position, so ordering within this block is free.
 
 GET  /dex/pool                                  controllers.LithosDexApiController.getPool()
+GET  /dex/pools                                 controllers.LDPoolsApiController.listPools()
+GET  /dex/pools/:poolNft                        controllers.LDPoolsApiController.getPool(poolNft: String)
 GET  /dex/vault                                 controllers.LithosDexApiController.getVault()
 GET  /dex/provisions                            controllers.LithosDexApiController.listProvisions()
 GET  /dex/fees/history                          controllers.LithosDexApiController.getFeeHistory(from: Option[Int], to: Option[Int], bucket: Option[Int])
