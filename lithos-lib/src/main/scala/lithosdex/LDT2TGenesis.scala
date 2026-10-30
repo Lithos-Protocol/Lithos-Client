@@ -1,9 +1,8 @@
 package lithosdex
 
+import lithosdex.GenesisReads._
 import lithosdex.contracts.LDT2TContracts
-import sigma.Coll
-import sigma.data.CBigInt
-import work.lithos.mutations.{Contract, InputUTXO}
+import work.lithos.mutations.InputUTXO
 
 /**
  * Checks the genesis of a user-created token/token pool.
@@ -73,7 +72,7 @@ object LDT2TGenesis {
         "vault does not hold token X and token Y at indices 1 and 2",
       liquidity.exists(l => l >= 0L && l <= LDHelpers.LOCKED_LP - LDHelpers.MIN_SUPPLY) ->
         s"R4 must be a Long leaving a supply of at least ${LDHelpers.MIN_SUPPLY}, found ${liquidity.getOrElse("none")}",
-      feeParams.exists(f => f.size == 3 && f(0) > 0 && f(0) <= D && f.tail.forall(s => s >= 0 && s < D)) ->
+      feeParams.exists(feesBounded) ->
         s"R5 must be [dexFee in (0, $D], xFee and yFee in [0, $D)], found ${feeParams.map(_.mkString("[", ", ", "]")).getOrElse("none")}",
       longsAt(pool, 2).contains(Seq(0L, 0L)) ->
         "R6 must be [0, 0]: nothing pending at genesis",
@@ -94,19 +93,4 @@ object LDT2TGenesis {
 
     Report(Some(contracts), problems, warnings)
   }
-
-  private def sameScript(a: Contract, b: Contract): Boolean = a.propBytes.sameElements(b.propBytes)
-
-  // Registers are read by matching their value's type, so a register of the wrong type reads as absent
-  private def longAt(box: InputUTXO, i: Int): Option[Long] =
-    box.registers.lift(i).map(_.getValue).collect { case v: java.lang.Long => v.longValue }
-
-  private def longsAt(box: InputUTXO, i: Int): Option[Seq[Long]] =
-    box.registers.lift(i).map(_.getValue).collect { case c: Coll[_] => c.toArray.toSeq }.flatMap { items =>
-      val longs = items.collect { case v: java.lang.Long => v.longValue }
-      if (longs.size == items.size) Some(longs) else None
-    }
-
-  private def bigIntAt(box: InputUTXO, i: Int): Option[BigInt] =
-    box.registers.lift(i).map(_.getValue).collect { case v: CBigInt => BigInt(v.wrappedValue) }
 }
