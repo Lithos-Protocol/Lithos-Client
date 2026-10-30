@@ -76,11 +76,12 @@ object LDBoxes {
     singletonBox(ctx, nodeApi, LDHelpers.getVaultNFT(ctx.getNetworkType),
       DexContracts(ctx).feeVault.ergoTreeHex, "fee vault")
 
-  private def singletonBox(ctx: BlockchainContext,
-                           nodeApi: NodeApi,
-                           nft: ErgoId,
-                           ergoTreeHex: String,
-                           what: String): InputUTXO = {
+  /** Any deployment's live pool or vault: the box carrying `nft` under `ergoTreeHex`, mempool tip first. */
+  def singletonBox(ctx: BlockchainContext,
+                   nodeApi: NodeApi,
+                   nft: ErgoId,
+                   ergoTreeHex: String,
+                   what: String): InputUTXO = {
     val found = nodeApi.unspentBoxesByTokenId(nft.toString, Paging(0, 20), mempool = MempoolOptions.WithMempool) match {
       case Success(boxes) => boxes.filter(_.ergoTree == ergoTreeHex)
       case Failure(ex) => throw indexUnavailable(s"the node index looking for the $what", ex)
@@ -181,9 +182,13 @@ object LDBoxes {
    *
    * The shape of the UTXO is verified in case of an incorrect boxId being given.
    */
-  def provisionById(ctx: BlockchainContext, nodeApi: NodeApi, boxId: String): Provision = {
-    val guard = DexContracts(ctx).provisionGuard.ergoTreeHex
-    val provTokenId = LDHelpers.getProvToken(ctx.getNetworkType).toString
+  def provisionById(ctx: BlockchainContext, nodeApi: NodeApi, boxId: String): Provision =
+    provisionById(ctx, nodeApi, boxId, DexContracts(ctx).provisionGuard.ergoTreeHex,
+      LDHelpers.getProvToken(ctx.getNetworkType).toString)
+
+  /** The same, for any deployment's guard tree and provision token, token/token ones included. */
+  def provisionById(ctx: BlockchainContext, nodeApi: NodeApi, boxId: String, guard: String,
+                    provTokenId: String): Provision = {
 
     // A box being spent in the mempool is NOT missing — it has a successor the caller can act on.
     // Reported as its own condition so the API can answer "it moved, read again" rather than the

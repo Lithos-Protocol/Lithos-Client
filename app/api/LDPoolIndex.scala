@@ -101,6 +101,15 @@ class LDPoolIndex @Inject()(nodeContext: NodeContext, system: ActorSystem) {
     current
   }
 
+  /**
+   * `pool`'s genesis verdict, read now on the calling thread if no rebuild has read it yet, and kept. None for
+   * a verified pool, and when the node could not answer.
+   */
+  def genesisNow(pool: IndexedPool): Option[GenesisVerdict] =
+    if (pool.verified) None
+    else pool.genesis.orElse(nodeContext.getClient.execute(ctx =>
+      verdict(ctx, pool.nft, pool.vaultNft, pool.provToken, n2t = pool.kind == VerifiedPool.Kind.N2T)))
+
   /** Rebuilds now, on the calling thread, and keeps the result. */
   def refreshNow(): PoolIndexSnapshot = {
     val tip = nodeApi.info().get.fullHeight.getOrElse(0)

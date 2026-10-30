@@ -1,10 +1,13 @@
 package transactions.batching.lithosdex
 
-import lithosdex.contracts.{LDOrderContracts, LDOrderTerms}
-import lithosdex.states.LDFeeValue
-import lithosdex.{LDHelpers, LDLiquidityPool}
+import lithosdex.contracts.{LDContracts, LDOrderContracts, LDOrderTerms, LDT2TContracts}
+import lithosdex.states.{LDFeeValue, LDT2TFeeValue}
+import lithosdex.{LDHelpers, LDLiquidityPool, LDT2TLiquidityPool}
 import mutations.NodeWallet
-import org.ergoplatform.appkit.BlockchainContext
+import org.ergoplatform.appkit.scalaapi.scalaByteType
+import org.ergoplatform.appkit.{BlockchainContext, ErgoValue}
+import org.ergoplatform.sdk.ErgoId
+import sigma.Colls
 import transactions.batching.lithosdex.LDBoxes.Provision
 import transactions.batching.lithosdex.LithosDexTransactions.{FUNDING_HEADROOM, TX_FEE, build, funded}
 import work.lithos.mutations.{Contract, InputUTXO, Token, UTXO}
@@ -68,7 +71,13 @@ object LDOrderTransactions {
    * leaves the NFT free to go into the order.
    */
   def redeem(ctx: BlockchainContext, wallet: NodeWallet, pool: LDLiquidityPool, provision: Provision,
-             vaultBox: Option[InputUTXO], executorFee: Long, maxMinerFee: Long): DexPlan[LDOrderTx] = {
+             vaultBox: Option[InputUTXO], executorFee: Long, maxMinerFee: Long): DexPlan[LDOrderTx] =
+    redeem(ctx, wallet, DexContracts(ctx), pool, provision, vaultBox, executorFee, maxMinerFee)
+
+  /** The same against `contracts`' pool, the deployment whose vault and provision guard the claim builds. */
+  def redeem(ctx: BlockchainContext, wallet: NodeWallet, contracts: LDContracts, pool: LDLiquidityPool,
+             provision: Provision, vaultBox: Option[InputUTXO], executorFee: Long,
+             maxMinerFee: Long): DexPlan[LDOrderTx] = {
     val nft = Token(provision.ownerNFT, 1L)
     val orderOut = UTXO(LDOrderContracts.redeem(terms(wallet, pool, executorFee, maxMinerFee)), RETURNED, Seq(nft))
     vaultBox match {
@@ -80,14 +89,79 @@ object LDOrderTransactions {
         val (owedX, owedY) = v.owed(provision.shares, provision.entryX, provision.entryY)
         require(v.payableX >= owedX && v.payableY >= owedY,
           s"the vault can pay ${v.payableX} nanoERG and ${v.payableY} tokens of the $owedX and $owedY this provision is owed")
-        val vaultOut = LithosDexTransactions.vaultUTXO(DexContracts(ctx), v, None, v.balanceX - owedX,
+        val vaultOut = LithosDexTransactions.vaultUTXO(contracts, v, None, v.balanceX - owedX,
           v.balanceY - owedY, v.accX, v.accY)
-        val provisionOut = LithosDexTransactions.provisionUTXO(DexContracts(ctx), provision.box.tokens.head.id, v.accX, v.accY,
+        val provisionOut = LithosDexTransactions.provisionUTXO(contracts, provision.box.tokens.head.id, v.accX, v.accY,
           provision.ownerNFT, provision.shares, provision.value)
         funded(Math.addExact(RETURNED, FUNDING_HEADROOM), Seq(nft)) { funding =>
           val inputs = Seq(
             LithosDexTransactions.vaultInput(box, LDHelpers.VAULT_CLAIM, 1),
-            LithosDexTransactions.provisionInput(DexContracts(ctx), provision.box, LDHelpers.PROV_CLAIM)) ++ funding
+            LithosDexTransactions.provisionInput(contracts, provision.box, LDHelpers.PROV_CLAIM)) ++ funding
+          val uTx = build(ctx, inputs, Seq(vaultOut, provisionOut, orderOut), wallet)
+          DexUnsigned(uTx, signed => LDOrderTx(signed, InputUTXO(signed.getOutputsToSpend.get(2)), owedX, owedY,
+            Some(signed.getOutputsToSpend.get(1).getId.toString)))
+        }
+    }
+  }
+
+  // ── token/token pools ─────────────────────────────────────────────────────
+
+  /** nanoERG a token/token swap or redeem order box holds: the executor fee and the return. */
+  def t2tOrderValue(executorFee: Long): Long = Math.addExact(executorFee, RETURNED)
+
+  /** nanoERG a token/token deposit order box holds: the provision box, the fee and the return. */
+  def t2tDepositValue(executorFee: Long): Long = Math.addExact(LDHelpers.PROVISION_MIN, t2tOrderValue(executorFee))
+
+  private def t2tTerms(wallet: NodeWallet, pool: LDT2TLiquidityPool, executorFee: Long, maxMinerFee: Long) =
+    LDOrderTerms(wallet.p2pk.getPublicKey, pool.poolNFT, executorFee, maxMinerFee)
+
+  /** Sells `amountIn` of `tokenIn`, one of the pool's two tokens, for at least `minOutput` of the other. */
+  def t2tSwap(ctx: BlockchainContext, wallet: NodeWallet, pool: LDT2TLiquidityPool, tokenIn: ErgoId, amountIn: Long,
+              minOutput: Long, executorFee: Long, maxMinerFee: Long): DexPlan[LDOrderTx] = {
+    require(tokenIn == pool.tokenX || tokenIn == pool.tokenY, s"token $tokenIn is not one of pool ${pool.poolNFT}'s")
+    val contract = LDOrderContracts.t2tSwap(t2tTerms(wallet, pool, executorFee, maxMinerFee), minOutput)
+    place(ctx, wallet, UTXO(contract, t2tOrderValue(executorFee), Seq(Token(tokenIn, amountIn))))
+  }
+
+  /** Offers `amountX` of token X and `amountY` of token Y, in that order, for at least `minShares`. */
+  def t2tDeposit(ctx: BlockchainContext, wallet: NodeWallet, pool: LDT2TLiquidityPool, amountX: Long, amountY: Long,
+                 minShares: Long, executorFee: Long, maxMinerFee: Long): DexPlan[LDOrderTx] = {
+    require(pool.canDeposit, "the pool has no provision tokens left to hand out")
+    val contract = LDOrderContracts.t2tDeposit(t2tTerms(wallet, pool, executorFee, maxMinerFee), minShares)
+    place(ctx, wallet, UTXO(contract, t2tDepositValue(executorFee),
+      Seq(Token(pool.tokenX, amountX), Token(pool.tokenY, amountY))))
+  }
+
+  /**
+   * Moves a token/token provision's ownership NFT into a redeem order, first claiming what the vault owes it
+   * when `vaultBox` is given, as [[redeem]] does: a fill forfeits whatever is left unclaimed.
+   */
+  def t2tRedeem(ctx: BlockchainContext, wallet: NodeWallet, contracts: LDT2TContracts, pool: LDT2TLiquidityPool,
+                provision: Provision, vaultBox: Option[InputUTXO], executorFee: Long,
+                maxMinerFee: Long): DexPlan[LDOrderTx] = {
+    val nft = Token(provision.ownerNFT, 1L)
+    val orderOut = UTXO(LDOrderContracts.t2tRedeem(t2tTerms(wallet, pool, executorFee, maxMinerFee)),
+      t2tOrderValue(executorFee), Seq(nft))
+    vaultBox match {
+      case None => place(ctx, wallet, orderOut)
+      case Some(box) =>
+        val v = LDT2TFeeValue.fromBox(box, 0, ctx.getHeight)
+        require(v.vaultNFT == contracts.vaultNFT, s"vault ${v.vaultNFT} is not pool ${contracts.poolNFT}'s")
+        require(v.canClaim(provision.entryX, provision.entryY),
+          s"provision ${provision.boxId} has nothing to settle against the vault")
+        val (owedX, owedY) = v.owed(provision.shares, provision.entryX, provision.entryY)
+        require(v.payableX >= owedX && v.payableY >= owedY,
+          s"the vault can pay ${v.payableX} and ${v.payableY} of the $owedX and $owedY this provision is owed")
+        val vaultOut = UTXO(contracts.feeVault, box.value,
+          Seq(Token(v.vaultNFT, 1L), Token(v.tokenX, v.balanceX - owedX), Token(v.tokenY, v.balanceY - owedY)),
+          Seq(ErgoValue.of(v.accX.bigInteger), ErgoValue.of(v.accY.bigInteger)))
+        val provisionOut = UTXO(contracts.provisionGuard, provision.value, Seq(Token(contracts.provToken, 1L)),
+          Seq(ErgoValue.of(v.accX.bigInteger), ErgoValue.of(v.accY.bigInteger),
+            ErgoValue.of(Colls.fromArray(provision.ownerNFT.getBytes), scalaByteType), ErgoValue.of(provision.shares)))
+        funded(Math.addExact(orderOut.value, FUNDING_HEADROOM), Seq(nft)) { funding =>
+          val inputs = Seq(
+            LithosDexTransactions.vaultInput(box, LDHelpers.VAULT_CLAIM, 1),
+            LDT2TExecution.provisionInput(contracts, provision.box, LDHelpers.PROV_CLAIM)) ++ funding
           val uTx = build(ctx, inputs, Seq(vaultOut, provisionOut, orderOut), wallet)
           DexUnsigned(uTx, signed => LDOrderTx(signed, InputUTXO(signed.getOutputsToSpend.get(2)), owedX, owedY,
             Some(signed.getOutputsToSpend.get(1).getId.toString)))

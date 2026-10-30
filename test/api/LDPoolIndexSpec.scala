@@ -1,7 +1,7 @@
 package api
 
 import akka.actor.ActorSystem
-import akka.testkit.TestKit
+import akka.testkit.{TestKit, TestProbe}
 import configs.VerifiedPool
 import lithosdex.LDGenesisBuilder.{N2TSeed, T2TSeed}
 import lithosdex.contracts.{LDContracts, LDT2TContracts}
@@ -16,6 +16,7 @@ import org.scalatest.BeforeAndAfterAll
 import org.scalatest.flatspec.AnyFlatSpecLike
 import org.scalatest.matchers.should.Matchers
 import org.scalatestplus.mockito.MockitoSugar
+import play.api.Configuration
 import support.{ChainFixtures, FakeNodeContext, LDNodeFixtures}
 import transactions.batching.lithosdex.DexContracts
 import work.lithos.mutations.{Token, UTXO}
@@ -131,7 +132,7 @@ class LDPoolIndexSpec extends TestKit(ActorSystem("ld-pool-index-spec")) with An
     }
 
     val index = new LDPoolIndex(nodeContext, system)
-    val pools: LDPoolsApiImpl = new LDPoolsApiImpl(nodeContext, index)
+    val pools: LDPoolsApiImpl = new LDPoolsApiImpl(nodeContext, index, TestProbe().ref, Configuration.empty, system)
   }
 
   "The pool index" should "list ERG:LIT, an ERG/token pool and a token/token pool, verified first" in {

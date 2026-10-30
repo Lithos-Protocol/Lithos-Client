@@ -1,17 +1,47 @@
 package api
 
+import akka.actor.{ActorRef, ActorSystem}
 import api.models._
-import configs.{NodeContext, VerifiedPool}
+import configs.{LithosDexOrdersConfig, NodeContext, VerifiedPool}
 import lithosdex.LDHelpers
 import lithosdex.states.{LDFeeValue, LDT2TFeeValue}
 import node.MutationConversions._
 import node.model.{MempoolOptions, Paging, SortDirection}
+import play.api.Configuration
+import transactions.engine.execution.DexPoolExecution
+import transactions.engine.wallet.EngineFunding
 
-import javax.inject.{Inject, Singleton}
+import javax.inject.{Inject, Named, Singleton}
 
-/** The pool list and detail, read from [[LDPoolIndex]]'s snapshot. Only a pool's detail reads its vault live. */
+/**
+ * The pool list and detail, read from [[LDPoolIndex]]'s snapshot, and orders on any pool through
+ * [[DexPoolExecution]]. Only a pool's detail and its order routes read the node live.
+ */
 @Singleton
-class LDPoolsApiImpl @Inject()(nodeContext: NodeContext, index: LDPoolIndex) extends LDPoolsApi {
+class LDPoolsApiImpl @Inject()(nodeContext: NodeContext, index: LDPoolIndex,
+                               @Named("transaction-engine") engine: ActorRef, config: Configuration,
+                               system: ActorSystem) extends LDPoolsApi {
+
+  private lazy val orders = new DexPoolExecution(nodeContext,
+    EngineFunding(engine, EngineFunding.AskTimeout, system.dispatcher), index, LithosDexOrdersConfig(config))
+
+  override def checkSwapOrder(poolNft: String, request: LDPoolSwapRequest): LDPoolSwapQuote =
+    orders.checkSwap(poolNft, request)
+
+  override def placeSwapOrder(poolNft: String, request: LDPoolSwapExecuteRequest): LDPoolOrderPlaced =
+    orders.placeSwap(poolNft, request)
+
+  override def checkDepositOrder(poolNft: String, request: LDPoolDepositRequest): LDPoolDepositQuote =
+    orders.checkDeposit(poolNft, request)
+
+  override def placeDepositOrder(poolNft: String, request: LDPoolDepositExecuteRequest): LDPoolOrderPlaced =
+    orders.placeDeposit(poolNft, request)
+
+  override def checkRedeemOrder(poolNft: String, request: LDPoolRedeemRequest): LDPoolRedeemQuote =
+    orders.checkRedeem(poolNft, request)
+
+  override def placeRedeemOrder(poolNft: String, request: LDPoolRedeemRequest): LDPoolOrderPlaced =
+    orders.placeRedeem(poolNft, request)
 
   /** @inheritdoc */
   override def listPools: LDPoolList = {

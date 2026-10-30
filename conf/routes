@@ -59,6 +59,18 @@ GET /stats/local               controllers.StatsApiController.getLocalMiningStat
 GET  /dex/pool                                  controllers.LithosDexApiController.getPool()
 GET  /dex/pools                                 controllers.LDPoolsApiController.listPools()
 GET  /dex/pools/:poolNft                        controllers.LDPoolsApiController.getPool(poolNft: String)
++ nocsrf
+POST /dex/pools/:poolNft/orders/swap/check      controllers.LDPoolsApiController.checkSwapOrder(poolNft: String)
++ nocsrf
+POST /dex/pools/:poolNft/orders/swap            controllers.LDPoolsApiController.placeSwapOrder(poolNft: String)
++ nocsrf
+POST /dex/pools/:poolNft/orders/deposit/check   controllers.LDPoolsApiController.checkDepositOrder(poolNft: String)
++ nocsrf
+POST /dex/pools/:poolNft/orders/deposit         controllers.LDPoolsApiController.placeDepositOrder(poolNft: String)
++ nocsrf
+POST /dex/pools/:poolNft/orders/redeem/check    controllers.LDPoolsApiController.checkRedeemOrder(poolNft: String)
++ nocsrf
+POST /dex/pools/:poolNft/orders/redeem          controllers.LDPoolsApiController.placeRedeemOrder(poolNft: String)
 GET  /dex/vault                                 controllers.LithosDexApiController.getVault()
 GET  /dex/provisions                            controllers.LithosDexApiController.listProvisions()
 GET  /dex/fees/history                          controllers.LithosDexApiController.getFeeHistory(from: Option[Int], to: Option[Int], bucket: Option[Int])

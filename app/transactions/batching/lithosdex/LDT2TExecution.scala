@@ -102,10 +102,10 @@ object LDT2TExecution {
     }
 
   /** Shares from the scarcer side, and whatever the other side cannot match returned, as the deposit order truncates. */
-  private[lithosdex] final case class Split(shares: BigInt, takenX: BigInt, takenY: BigInt,
-                                            excessX: BigInt, excessY: BigInt, unlocked: BigInt)
+  final case class Split(shares: BigInt, takenX: BigInt, takenY: BigInt,
+                         excessX: BigInt, excessY: BigInt, unlocked: BigInt)
 
-  private[lithosdex] def depositSplit(pool: LDT2TLiquidityPool, offeredX: Long, offeredY: Long): Split = {
+  def depositSplit(pool: LDT2TLiquidityPool, offeredX: Long, offeredY: Long): Split = {
     val supply = BigInt(pool.supply)
     val byX = BigInt(offeredX) * supply / pool.reservesX
     val byY = BigInt(offeredY) * supply / pool.reservesY

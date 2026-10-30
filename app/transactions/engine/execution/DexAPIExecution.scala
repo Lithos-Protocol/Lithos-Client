@@ -17,7 +17,7 @@ import sigma.ast.ErgoTree
 import transactions.batching.BatchingMempool
 import transactions.engine.wallet.EngineFunding
 import transactions.batching.lithosdex.LDBoxes.Provision
-import transactions.batching.lithosdex.{LDBoxes, LDFundedTx, LDOrderBook, LDOrderTransactions, LDOrderTx, LithosDexExecution, LithosDexOrder, LithosDexTransactions}
+import transactions.batching.lithosdex.{LDBoxes, LDFundedTx, LDOrderBook, LDOrderTransactions, LDOrderTx, LDT2TOrder, LithosDexExecution, LithosDexOrder, LithosDexTransactions}
 import work.lithos.mutations.InputUTXO
 
 import javax.inject.Inject
@@ -796,15 +796,17 @@ class DexAPIExecution(nodeContext: NodeContext, walletSelector: EngineFunding,
       case Success(found) => found.find(_.boxId == boxId)
       case Failure(ex) => throw LithosUnavailable(s"could not read order $boxId from the node: ${ex.getMessage}")
     }
-    val order = box.flatMap(LithosDexOrder.parse)
-      .filter(o => wallet.signableTrees.contains(o.terms.redeemerTree))
+    // Either kind: every LithosDex order refunds through its owner's key, with the order at input 0
+    val owners = wallet.signableTrees
+    val orderBox = box.filter(b => LithosDexOrder.parse(b).exists(o => owners.contains(o.terms.redeemerTree)) ||
+        LDT2TOrder.parse(b).exists(o => owners.contains(o.terms.redeemerTree)))
       .getOrElse(throw LithosNotFound(s"no outstanding order owned by this wallet has id $boxId"))
     BatchingMempool.spenders(snapshot).get(boxId).flatMap(_.headOption).foreach { tx =>
       throw LithosStateChanged(
         s"order $boxId is already being filled or cancelled by unconfirmed transaction ${tx.id}: re-read the order list")
     }
 
-    val built = fund(LDOrderTransactions.cancel(ctx, wallet, order.box.toInputUTXO(ctx)))
+    val built = fund(LDOrderTransactions.cancel(ctx, wallet, orderBox.toInputUTXO(ctx)))
     val submission = send(ctx, built)
     LDOrderCancelResult(
       outcome = submission.outcome,
@@ -976,28 +978,7 @@ class DexAPIExecution(nodeContext: NodeContext, walletSelector: EngineFunding,
    * A caller that cannot get in within the wait is told the state changed, not made to wait longer:
    * whatever it was quoted against is by then a box another mutation has spent.
    */
-  private def mutating[A](what: String)(f: => A): A = {
-    if (!DexAPIExecution.dexMutationLock.tryLock(mutationWaitMs, TimeUnit.MILLISECONDS)) {
-      // Which status this is depends on WHY the lock could not be taken, and the two want opposite
-      // things from the caller. A mutation that is merely ahead in the queue finishes in well under
-      // a second, so a 409 telling them to re-quote and resend is right. One that has been holding
-      // for longer than a node round trip should take is stuck on the node — and a 409 there invites
-      // an immediate retry, so a queue of callers hammers a node that is already not answering.
-      val heldFor = DexAPIExecution.heldForMillis()
-      if (heldFor > DexAPIExecution.StuckHolderMs)
-        throw LithosUnavailable(
-          s"a LithosDex mutation has held the lock for ${heldFor}ms, which is longer than a node " +
-            s"round trip should take, so $what was not attempted: the node may not be answering")
-      throw LithosStateChanged(
-        s"another LithosDex mutation is still running, so $what was not attempted: re-read the pool " +
-          "and vault and quote again")
-    }
-    DexAPIExecution.markAcquired()
-    try f finally {
-      DexAPIExecution.markReleased()
-      DexAPIExecution.dexMutationLock.unlock()
-    }
-  }
+  private def mutating[A](what: String)(f: => A): A = DexAPIExecution.mutating(what, mutationWaitMs)(f)
 
   /** Refuse a request quoted against a box that has since been spent, and say what replaced it. */
   private def expectPool(expected: Option[String], box: InputUTXO): Unit =
@@ -1146,5 +1127,32 @@ object DexAPIExecution {
   private def heldForMillis(): Long = holderSince.get() match {
     case 0L => 0L
     case since => System.currentTimeMillis() - since
+  }
+
+  /**
+   * Runs `f` holding the one LithosDex mutation lock, waiting at most `waitMs` for it. Shared by every
+   * class that spends a LithosDex singleton for the API, whichever pool it is.
+   */
+  private[execution] def mutating[A](what: String, waitMs: Long)(f: => A): A = {
+    if (!dexMutationLock.tryLock(waitMs, TimeUnit.MILLISECONDS)) {
+      // Which status this is depends on WHY the lock could not be taken, and the two want opposite
+      // things from the caller. A mutation that is merely ahead in the queue finishes in well under
+      // a second, so a 409 telling them to re-quote and resend is right. One that has been holding
+      // for longer than a node round trip should take is stuck on the node — and a 409 there invites
+      // an immediate retry, so a queue of callers hammers a node that is already not answering.
+      val heldFor = heldForMillis()
+      if (heldFor > StuckHolderMs)
+        throw LithosUnavailable(
+          s"a LithosDex mutation has held the lock for ${heldFor}ms, which is longer than a node " +
+            s"round trip should take, so $what was not attempted: the node may not be answering")
+      throw LithosStateChanged(
+        s"another LithosDex mutation is still running, so $what was not attempted: re-read the pool " +
+          "and vault and quote again")
+    }
+    markAcquired()
+    try f finally {
+      markReleased()
+      dexMutationLock.unlock()
+    }
   }
 }

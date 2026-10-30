@@ -1203,6 +1203,394 @@ paths:
               schema:
                 $ref: '#/components/schemas/ApiError'
 
+  /dex/pools/{poolNft}/orders/swap/check:
+    post:
+      summary: Quote a swap order on any pool
+      description: >
+        What a swap order selling `tokenIn` would fill at against the pool now, for either kind of pool.
+        `tokenIn` is `ERG` or one of the pool's tokens.
+      operationId: checkLDPoolSwapOrder
+      tags:
+        - lithosdex
+      parameters:
+        - name: poolNft
+          in: path
+          required: true
+          description: The pool's NFT id, 64 hex characters
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LDPoolSwapRequest'
+      responses:
+        '200':
+          description: The quote
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LDPoolSwapQuote'
+        '400':
+          description: "The request is malformed, or names a token the pool does not hold."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '404':
+          description: "No LithosDex pool with that NFT, or no live provision with that id."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '503':
+          description: "The pool index is still building, or the node could not be read. Retry."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /dex/pools/{poolNft}/orders/swap:
+    post:
+      summary: Place a swap order on any pool
+      description: >
+        Locks `amountIn` of `tokenIn` in an order any LithosDex miner fills for `executorFee`, at no less
+        than `minOutput`. Refused on a pool whose genesis has problems, which can be drained. On a pool
+        the verified list does not name, `acknowledgeUnverified` must be true; its genesis is checked
+        first if the index has not checked it yet.
+      operationId: placeLDPoolSwapOrder
+      security:
+        - ApiKeyAuth: []
+      tags:
+        - lithosdex
+      parameters:
+        - name: poolNft
+          in: path
+          required: true
+          description: The pool's NFT id, 64 hex characters
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LDPoolSwapExecuteRequest'
+      responses:
+        '200':
+          description: The placement
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LDPoolOrderPlaced'
+        '400':
+          description: "The request is malformed, names a token the pool does not hold, or trades with an unverified pool without acknowledgeUnverified."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '403':
+          description: "Missing or wrong api_key"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '404':
+          description: "No LithosDex pool with that NFT, or no live provision with that id."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '409':
+          description: "A box the placement spends moved, or another LithosDex mutation is running. Re-quote and resend."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LDStateChangedResponse'
+        '422':
+          description: "The pool can be drained, the pool cannot fill this, or the wallet cannot cover it."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '503':
+          description: "The pool index is still building, the pool's genesis could not be read, or the node or wallet did not answer. Retry."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /dex/pools/{poolNft}/orders/deposit/check:
+    post:
+      summary: Quote a deposit order on any pool
+      description: >
+        The shares a deposit order offering `amountX` and `amountY` would get now, and the excess of the
+        side the pool cannot match, which comes back. X is ERG for an ERG/token pool.
+      operationId: checkLDPoolDepositOrder
+      tags:
+        - lithosdex
+      parameters:
+        - name: poolNft
+          in: path
+          required: true
+          description: The pool's NFT id, 64 hex characters
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LDPoolDepositRequest'
+      responses:
+        '200':
+          description: The quote
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LDPoolDepositQuote'
+        '400':
+          description: "The request is malformed, or names a token the pool does not hold."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '404':
+          description: "No LithosDex pool with that NFT, or no live provision with that id."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '503':
+          description: "The pool index is still building, or the node could not be read. Retry."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /dex/pools/{poolNft}/orders/deposit:
+    post:
+      summary: Place a deposit order on any pool
+      description: >
+        Locks both sides and a provision box in an order that fills for at least `minShares`. The fill
+        mints this wallet a provision NFT. Refused on a pool that can be drained, and on an unverified
+        pool needs `acknowledgeUnverified`.
+      operationId: placeLDPoolDepositOrder
+      security:
+        - ApiKeyAuth: []
+      tags:
+        - lithosdex
+      parameters:
+        - name: poolNft
+          in: path
+          required: true
+          description: The pool's NFT id, 64 hex characters
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LDPoolDepositExecuteRequest'
+      responses:
+        '200':
+          description: The placement
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LDPoolOrderPlaced'
+        '400':
+          description: "The request is malformed, names a token the pool does not hold, or trades with an unverified pool without acknowledgeUnverified."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '403':
+          description: "Missing or wrong api_key"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '404':
+          description: "No LithosDex pool with that NFT, or no live provision with that id."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '409':
+          description: "A box the placement spends moved, or another LithosDex mutation is running. Re-quote and resend."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LDStateChangedResponse'
+        '422':
+          description: "The pool can be drained, the pool cannot fill this, or the wallet cannot cover it."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '503':
+          description: "The pool index is still building, the pool's genesis could not be read, or the node or wallet did not answer. Retry."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /dex/pools/{poolNft}/orders/redeem/check:
+    post:
+      summary: Quote a redeem order on any pool
+      description: >
+        What closing a provision through an order returns now, and the fees the placement would claim from
+        the vault first. A fill forfeits anything left unclaimed.
+      operationId: checkLDPoolRedeemOrder
+      tags:
+        - lithosdex
+      parameters:
+        - name: poolNft
+          in: path
+          required: true
+          description: The pool's NFT id, 64 hex characters
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LDPoolRedeemRequest'
+      responses:
+        '200':
+          description: The quote
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LDPoolRedeemQuote'
+        '400':
+          description: "The request is malformed, or names a token the pool does not hold."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '404':
+          description: "No LithosDex pool with that NFT, or no live provision with that id."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '503':
+          description: "The pool index is still building, or the node could not be read. Retry."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /dex/pools/{poolNft}/orders/redeem:
+    post:
+      summary: Place a redeem order on any pool
+      description: >
+        Moves the provision's NFT into a redeem order, in the same transaction claiming what the vault owes
+        the provision. Needs the NFT in this wallet. Open on every pool, whatever its genesis, so
+        liquidity can always leave.
+      operationId: placeLDPoolRedeemOrder
+      security:
+        - ApiKeyAuth: []
+      tags:
+        - lithosdex
+      parameters:
+        - name: poolNft
+          in: path
+          required: true
+          description: The pool's NFT id, 64 hex characters
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LDPoolRedeemRequest'
+      responses:
+        '200':
+          description: The placement
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LDPoolOrderPlaced'
+        '400':
+          description: "The request is malformed, names a token the pool does not hold."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '403':
+          description: "Missing or wrong api_key"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '404':
+          description: "No LithosDex pool with that NFT, or no live provision with that id."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '409':
+          description: "A box the placement spends moved, or another LithosDex mutation is running. Re-quote and resend."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LDStateChangedResponse'
+        '422':
+          description: "The pool can be drained, the pool cannot fill this, or the wallet cannot cover it."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '503':
+          description: "The pool index is still building, the pool's genesis could not be read, or the node or wallet did not answer. Retry."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
   /dex/vault:
     get:
       summary: LithosDex fee vault state
@@ -1587,9 +1975,9 @@ paths:
     post:
       summary: Cancel an order
       description: >
-        Return an outstanding order's ERG and tokens to this wallet. Accepted while the order is
-        `PENDING` or `OPEN`. A fill sent before the cancel can still confirm first, and the cancel is
-        then dropped. No body.
+        Return an outstanding order's ERG and tokens to this wallet, on any pool of either kind.
+        Accepted while the order is `PENDING` or `OPEN`. A fill sent before the cancel can still
+        confirm first, and the cancel is then dropped. No body.
       operationId: cancelLDOrder
       security:
         - ApiKeyAuth: []
@@ -6693,6 +7081,317 @@ components:
           $ref: '#/components/schemas/LDPoolSummary'
         vault:
           $ref: '#/components/schemas/LDPoolVault'
+
+    LDPoolSwapRequest:
+      description: "A swap order quote request on any pool"
+      type: object
+      x-tags: lithosdex
+      required:
+        - tokenIn
+        - amountIn
+      properties:
+        tokenIn:
+          type: string
+          description: "ERG, or one of the pool's tokens"
+          example: 'ERG'
+        amountIn:
+          type: string
+          description: "Base units sold"
+          example: '1000000000'
+        executorFee:
+          type: string
+          description: "nanoERG the filler keeps. Omitted, from lithosdex.orders."
+        maxMinerFee:
+          type: string
+          description: "Most of the executor fee a broadcast fill may pay as a network fee. Below executorFee."
+
+    LDPoolSwapExecuteRequest:
+      description: "A swap order on any pool"
+      type: object
+      x-tags: lithosdex
+      required:
+        - tokenIn
+        - amountIn
+        - minOutput
+      properties:
+        tokenIn:
+          type: string
+          description: "ERG, or one of the pool's tokens"
+          example: 'ERG'
+        amountIn:
+          type: string
+          description: "Base units sold"
+          example: '1000000000'
+        minOutput:
+          type: string
+          description: "Least of the other side the order accepts, net of the fee when that is ERG"
+        executorFee:
+          type: string
+          description: "nanoERG the filler keeps. Omitted, from lithosdex.orders."
+        maxMinerFee:
+          type: string
+          description: "Most of the executor fee a broadcast fill may pay as a network fee. Below executorFee."
+        acknowledgeUnverified:
+          type: boolean
+          description: "Must be true to trade with a pool the verified list does not name"
+
+    LDPoolSwapQuote:
+      description: "What a swap order would fill at now. Amounts are decimal strings in base units."
+      type: object
+      x-tags: lithosdex
+      required:
+        - poolNFT
+        - tokenIn
+        - tokenOut
+        - amountIn
+        - amountOut
+        - netOutput
+        - executable
+        - executorFee
+        - maxMinerFee
+        - totalErgRequired
+        - tokensRequired
+        - ergReturned
+        - networkFee
+      properties:
+        poolNFT:
+          type: string
+        tokenIn:
+          type: string
+        tokenOut:
+          type: string
+          description: "ERG, or the pool's other token"
+        amountIn:
+          type: string
+        amountOut:
+          type: string
+          description: "What the pool gives for amountIn"
+        netOutput:
+          type: string
+          description: "What the owner receives"
+        executable:
+          type: boolean
+          description: "Whether the pool can fill this at all"
+        executorFee:
+          type: string
+        maxMinerFee:
+          type: string
+        totalErgRequired:
+          type: string
+          description: "nanoERG the order box holds"
+        tokensRequired:
+          type: array
+          description: Tokens the order box holds
+          items:
+            $ref: '#/components/schemas/LDTokenAmount'
+        ergReturned:
+          type: string
+          description: "nanoERG returned beside the fill"
+        networkFee:
+          type: string
+          description: "The placement's own fee"
+
+    LDPoolDepositRequest:
+      description: "A deposit order quote request on any pool. X is ERG for an ERG/token pool."
+      type: object
+      x-tags: lithosdex
+      required:
+        - amountX
+        - amountY
+      properties:
+        amountX:
+          type: string
+        amountY:
+          type: string
+        executorFee:
+          type: string
+          description: "nanoERG the filler keeps. Omitted, from lithosdex.orders."
+        maxMinerFee:
+          type: string
+          description: "Most of the executor fee a broadcast fill may pay as a network fee. Below executorFee."
+
+    LDPoolDepositExecuteRequest:
+      description: "A deposit order on any pool"
+      type: object
+      x-tags: lithosdex
+      required:
+        - amountX
+        - amountY
+        - minShares
+      properties:
+        amountX:
+          type: string
+        amountY:
+          type: string
+        minShares:
+          type: string
+          description: "Fewest shares the order accepts"
+        executorFee:
+          type: string
+          description: "nanoERG the filler keeps. Omitted, from lithosdex.orders."
+        maxMinerFee:
+          type: string
+          description: "Most of the executor fee a broadcast fill may pay as a network fee. Below executorFee."
+        acknowledgeUnverified:
+          type: boolean
+          description: "Must be true to trade with a pool the verified list does not name"
+
+    LDPoolDepositQuote:
+      description: "The fill a deposit order would get now. Amounts are decimal strings in base units."
+      type: object
+      x-tags: lithosdex
+      required:
+        - poolNFT
+        - shares
+        - takenX
+        - takenY
+        - excessX
+        - excessY
+        - shareOfSupply
+        - provisionBoxValue
+        - executorFee
+        - maxMinerFee
+        - totalErgRequired
+        - tokensRequired
+        - ergReturned
+        - networkFee
+      properties:
+        poolNFT:
+          type: string
+        shares:
+          type: string
+        takenX:
+          type: string
+        takenY:
+          type: string
+        excessX:
+          type: string
+          description: "Returned, since the pool cannot match it"
+        excessY:
+          type: string
+        shareOfSupply:
+          type: number
+          format: double
+        provisionBoxValue:
+          type: string
+        executorFee:
+          type: string
+        maxMinerFee:
+          type: string
+        totalErgRequired:
+          type: string
+          description: "nanoERG the order box holds"
+        tokensRequired:
+          type: array
+          description: Tokens the order box holds
+          items:
+            $ref: '#/components/schemas/LDTokenAmount'
+        ergReturned:
+          type: string
+        networkFee:
+          type: string
+
+    LDPoolRedeemRequest:
+      description: "A redeem order on any pool"
+      type: object
+      x-tags: lithosdex
+      required:
+        - provisionBoxId
+      properties:
+        provisionBoxId:
+          type: string
+          description: "The live provision box to close"
+        executorFee:
+          type: string
+          description: "nanoERG the filler keeps. Omitted, from lithosdex.orders."
+        maxMinerFee:
+          type: string
+          description: "Most of the executor fee a broadcast fill may pay as a network fee. Below executorFee."
+
+    LDPoolRedeemQuote:
+      description: "What closing a provision returns now. Amounts are decimal strings in base units."
+      type: object
+      x-tags: lithosdex
+      required:
+        - poolNFT
+        - provisionBoxId
+        - shares
+        - amountX
+        - amountY
+        - claimableX
+        - claimableY
+        - provisionValue
+        - ergReturned
+        - withinMinSupply
+        - executorFee
+        - maxMinerFee
+        - totalErgRequired
+        - networkFee
+      properties:
+        poolNFT:
+          type: string
+        provisionBoxId:
+          type: string
+        shares:
+          type: string
+        amountX:
+          type: string
+          description: "The provision's share of reserve X; nanoERG for an ERG/token pool"
+        amountY:
+          type: string
+        claimableX:
+          type: string
+          description: "Claimed from the vault by the placement. A fill forfeits anything unclaimed."
+        claimableY:
+          type: string
+        provisionValue:
+          type: string
+        ergReturned:
+          type: string
+          description: "nanoERG back beside the reserves, net of the fee where it comes out of them"
+        withinMinSupply:
+          type: boolean
+          description: "False when the pool refuses to close this provision"
+        executorFee:
+          type: string
+        maxMinerFee:
+          type: string
+        totalErgRequired:
+          type: string
+        networkFee:
+          type: string
+
+    LDPoolOrderPlaced:
+      description: "A placed order"
+      type: object
+      x-tags: lithosdex
+      required:
+        - outcome
+        - txId
+        - poolNFT
+        - kind
+        - orderBoxId
+      properties:
+        outcome:
+          type: string
+          enum: [accepted, rejected, uncertain]
+        txId:
+          type: string
+        poolNFT:
+          type: string
+        kind:
+          type: string
+          enum: [SWAP, DEPOSIT, REDEEM]
+        orderBoxId:
+          type: string
+        claimedX:
+          type: string
+          description: "A redeem placement: what it claimed from the vault"
+        claimedY:
+          type: string
+        provisionBoxId:
+          type: string
+          description: "A redeem placement that claimed: the provision's successor"
 
     LDPoolInfo:
       description: State of the LithosDex liquidity pool box
