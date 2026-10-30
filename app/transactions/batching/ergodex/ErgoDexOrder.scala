@@ -7,8 +7,11 @@ import sigma.ast.{Constant, SType}
 import scala.util.Try
 
 /**
- * Native v1 order terms. Base amount is swap input, deposit ERG, or redeemed LP; liquidity orders pay a
- * fixed fee.
+ * v1 order terms. Base amount is swap input, deposited X (ERG on a native pool), or redeemed LP; liquidity
+ * orders pay a fixed fee.
+ *
+ * @param orderFeeNum the pool fee a token pool swap prices itself at; None on a native order. The pool's own fee
+ *                    decides the output, and the order refuses one more than a unit short of its own price.
  */
 final case class ErgoDexOrder(box: NodeBox,
                               contract: OrderContract,
@@ -20,7 +23,8 @@ final case class ErgoDexOrder(box: NodeBox,
                               dexFeePerTokenDenom: Long,
                               maxMinerFee: Long,
                               quoteId: Option[String] = None,
-                              fixedDexFee: Long = 0L) {
+                              fixedDexFee: Long = 0L,
+                              orderFeeNum: Option[Int] = None) {
 
   /** Whether this swap spends ERG to receive the pool's Y token. */
   def baseIsErg: Boolean = contract.kind == OrderKind.SwapSell
@@ -92,6 +96,40 @@ object ErgoDexOrder {
     val Size = 18
   }
 
+  /** Constant positions in the token pool v1 swap, which serves both directions. */
+  private object SwapT2TV1 {
+    /** Also the redeemer, as on every v1 order. */
+    val RefundProp = 0
+    /** The token the reward must carry, which decides the direction. */
+    val QuoteId = 2
+    val FeeNum = 3
+    val FeeDenom = 4
+    val PoolNft = 14
+    val MinQuoteAmount = 15
+    val DexFeePerTokenNum = 16
+    val DexFeePerTokenDenom = 17
+    val MaxMinerFee = 21
+    val Size = 23
+  }
+
+  private object DepositT2TV1 {
+    val RefundProp = 0
+    val InitiallyLockedLP = 6
+    val PoolNft = 13
+    val DexFee = 15
+    val MaxMinerFee = 25
+    val Size = 27
+  }
+
+  private object RedeemT2TV1 {
+    val RefundProp = 0
+    val InitiallyLockedLP = 10
+    val PoolNft = 13
+    val DexFee = 15
+    val MaxMinerFee = 19
+    val Size = 21
+  }
+
   /**
    * Identifies executable templates and reads their typed constants, returning None for malformed
    * orders.
@@ -101,11 +139,15 @@ object ErgoDexOrder {
       val hash = Hex.toHexString(scorex.crypto.hash.Blake2b256(tree.template))
       ErgoDexContracts.executableByTemplateHash.get(hash).flatMap { contract =>
         val constants = Try(tree.constants).getOrElse(IndexedSeq.empty)
-        contract.kind match {
-          case OrderKind.SwapSell => swapSell(box, contract, constants)
-          case OrderKind.SwapBuy => swapBuy(box, contract, constants)
-          case OrderKind.Deposit => deposit(box, contract, constants)
-          case OrderKind.Redeem => redeem(box, contract, constants)
+        (contract.kind, contract.shape) match {
+          case (OrderKind.SwapSell, PoolShape.Native) => swapSell(box, contract, constants)
+          case (OrderKind.SwapBuy, PoolShape.Native) => swapBuy(box, contract, constants)
+          case (OrderKind.Deposit, PoolShape.Native) => deposit(box, contract, constants)
+          case (OrderKind.Redeem, PoolShape.Native) => redeem(box, contract, constants)
+          case (OrderKind.Swap, PoolShape.Token) => tokenSwap(box, contract, constants)
+          case (OrderKind.Deposit, PoolShape.Token) => tokenDeposit(box, contract, constants)
+          case (OrderKind.Redeem, PoolShape.Token) => tokenRedeem(box, contract, constants)
+          case _ => None
         }
       }
     }
@@ -179,6 +221,59 @@ object ErgoDexOrder {
       box.assets.head.amount, 1L, 0L, 1L, maxMinerFee, fixedDexFee = fee)
   }
 
+  /** A token pool swap: base is the box's one token, and the quote id says which side it buys. */
+  private def tokenSwap(box: NodeBox, contract: OrderContract,
+                        constants: Seq[Constant[SType]]): Option[ErgoDexOrder] = {
+    import SwapT2TV1._
+    if (constants.size != Size) None
+    else for {
+      base <- box.assets.headOption if box.assets.size == 1
+      quoteId <- bytesAt(constants, QuoteId) if quoteId.length == 32
+      quote = Hex.toHexString(quoteId)
+      if quote != base.tokenId
+      // The price check divides by this; an order declaring another denominator is not one this prices.
+      denominator <- intAt(constants, FeeDenom) if denominator == ErgoDexContracts.FeeDenominator
+      orderFee <- intAt(constants, FeeNum) if orderFee > 0 && orderFee <= ErgoDexContracts.FeeDenominator
+      poolNft <- bytesAt(constants, PoolNft) if poolNft.length == 32
+      redeemer <- propBytesAt(constants, RefundProp)
+      minQuote <- longAt(constants, MinQuoteAmount)
+      feeNum <- longAt(constants, DexFeePerTokenNum)
+      feeDenom <- longAt(constants, DexFeePerTokenDenom)
+      maxMinerFee <- longAt(constants, MaxMinerFee)
+      order <- build(box, contract, poolNft, redeemer, base.amount, minQuote, feeNum, feeDenom, maxMinerFee)
+    } yield order.copy(quoteId = Some(quote), orderFeeNum = Some(orderFee))
+  }
+
+  /** A token pool deposit: X is the box's first token and Y its second. */
+  private def tokenDeposit(box: NodeBox, contract: OrderContract,
+                           constants: Seq[Constant[SType]]): Option[ErgoDexOrder] = {
+    import DepositT2TV1._
+    if (constants.size != Size || box.assets.size != 2 || box.assets.exists(_.amount <= 0) ||
+      box.assets.head.tokenId == box.assets(1).tokenId) None
+    else for {
+      supply <- longAt(constants, InitiallyLockedLP) if supply == Long.MaxValue
+      poolNft <- bytesAt(constants, PoolNft) if poolNft.length == 32
+      redeemer <- propBytesAt(constants, RefundProp)
+      fee <- longAt(constants, DexFee) if fee >= 0
+      maxMinerFee <- longAt(constants, MaxMinerFee) if maxMinerFee >= 0
+    } yield ErgoDexOrder(box, contract, Hex.toHexString(poolNft), redeemer,
+      box.assets.head.amount, 1L, 0L, 1L, maxMinerFee, fixedDexFee = fee)
+  }
+
+  private def tokenRedeem(box: NodeBox, contract: OrderContract,
+                          constants: Seq[Constant[SType]]): Option[ErgoDexOrder] = {
+    import RedeemT2TV1._
+    if (constants.size != Size || box.assets.size != 1 || box.assets.head.amount <= 0) None
+    else for {
+      supply <- longAt(constants, InitiallyLockedLP) if supply == Long.MaxValue
+      poolNft <- bytesAt(constants, PoolNft) if poolNft.length == 32
+      redeemer <- propBytesAt(constants, RefundProp)
+      fee <- longAt(constants, DexFee) if fee >= 0
+      maxMinerFee <- longAt(constants, MaxMinerFee) if maxMinerFee >= 0
+    } yield ErgoDexOrder(box, contract, Hex.toHexString(poolNft), redeemer,
+      box.assets.head.amount, 1L, 0L, 1L, maxMinerFee, fixedDexFee = fee)
+  }
+
   /** Validates the amount, fee rate and miner fee cap shared by both swap directions. */
   private def build(box: NodeBox, contract: OrderContract, poolNft: Array[Byte],
                     redeemer: Array[Byte], baseAmount: Long, minQuote: Long,
@@ -192,6 +287,9 @@ object ErgoDexOrder {
 
   private def longAt(constants: Seq[Constant[SType]], index: Int): Option[Long] =
     at(constants, index).collect { case value: java.lang.Long => value.longValue() }
+
+  private def intAt(constants: Seq[Constant[SType]], index: Int): Option[Int] =
+    at(constants, index).collect { case value: java.lang.Integer => value.intValue() }
 
   private def bytesAt(constants: Seq[Constant[SType]], index: Int): Option[Array[Byte]] =
     at(constants, index).collect { case coll: sigma.Coll[_] =>

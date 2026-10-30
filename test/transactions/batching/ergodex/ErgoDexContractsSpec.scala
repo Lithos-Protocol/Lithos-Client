@@ -80,6 +80,26 @@ class ErgoDexContractsSpec extends AnyFlatSpec with Matchers {
     ErgoDexContracts.byTemplateHash.get(Hex.toHexString(Blake2b256(unrelated))) shouldBe None
   }
 
+  "Token pool v1 templates" should "be the published v1 trees' templates, executable, one per kind" in {
+    Seq("swap" -> OrderKind.Swap, "deposit" -> OrderKind.Deposit, "redeem" -> OrderKind.Redeem).foreach {
+      case (name, kind) =>
+        withClue(name) {
+          val hash = Hex.toHexString(Blake2b256(support.ErgoDexTokenFixtures.published(name).template))
+          val contract = ErgoDexContracts.executableByTemplateHash(hash)
+          contract.kind shouldBe kind
+          contract.shape shouldBe PoolShape.Token
+          contract.version shouldBe "v1"
+        }
+    }
+  }
+
+  it should "identify every live token pool order executed on mainnet" in {
+    support.ErgoDexTokenFixtures.executions.foreach { e =>
+      val hash = Hex.toHexString(Blake2b256(sigma.ast.ErgoTree.fromHex(e.order.ergoTree).template))
+      withClue(e.name)(ErgoDexContracts.executableByTemplateHash.get(hash).map(_.shape) shouldBe Some(PoolShape.Token))
+    }
+  }
+
   "Pool scripts" should "parse and differ from each other" in {
     val native = sigma.ast.ErgoTree.fromHex(ErgoDexContracts.NativePoolErgoTree)
     val token  = sigma.ast.ErgoTree.fromHex(ErgoDexContracts.TokenPoolErgoTree)

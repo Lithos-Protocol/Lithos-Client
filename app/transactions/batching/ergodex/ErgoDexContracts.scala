@@ -19,6 +19,8 @@ object OrderKind {
   case object SwapSell extends OrderKind
   /** Spend the Y asset to receive X. On a native pool, ERG out. */
   case object SwapBuy extends OrderKind
+  /** Spend one side of a token pool to receive the other; the order's quote id names the side it receives. */
+  case object Swap extends OrderKind
   /** Add both sides and receive LP tokens. */
   case object Deposit extends OrderKind
   /** Return LP tokens to the pool and receive both reserve assets. */
@@ -87,8 +89,8 @@ object ErgoDexContracts {
     "7202050695ed720f917213730e907217a19d721972149d721a7211ed9272199c7217721492721a9c72177211"
 
   /**
-   * Native v1 swaps, deposits and redemptions pay ERG and are executable; other versions are recognised
-   * only.
+   * v1 swaps, deposits and redemptions pay ERG and are executable, on both pool shapes; other versions are
+   * recognised only.
    */
   val orders: Vector[OrderContract] = Vector(
     OrderContract(OrderKind.SwapSell, PoolShape.Native, "v3",
@@ -212,7 +214,37 @@ object ErgoDexContracts {
       "0400d605b2db63087204730500d606b27203730600d6077e8cb2db6308a77307000206d6087e9973088cb27203730900" +
       "0206edededed938cb27203730a0001730b93c27204d07201938c7205018c720601927e9a99c17204c1a7730c069d9c72" +
       "077ec17202067208927e8c720502069d9c72077e8c720602067208730d",
-      executable = false))
+      executable = false),
+
+    OrderContract(OrderKind.Swap, PoolShape.Token, "v1",
+      "d805d6017300d602b2a4730100d6037302d6047303d6057304eb027201d195ed92b1a4730593b1db630872027306d80a" +
+      "d606db63087202d607b2a5730700d608b2db63087207730800d6098c720802d60a7e720906d60bb27206730900d60c7e" +
+      "8c720b0206d60d7e8cb2db6308a7730a000206d60e7e8cb27206730b000206d60f9a720a730cedededededed938cb272" +
+      "06730d0001730e93c27207d07201938c7208017203927209730f927ec1720706997ec1a7069d9c720a7e7310067e7311" +
+      "0695938c720b017203909c9c720c720d7e7204069c720f9a9c720e7e7205069c720d7e720406909c9c720e720d7e7204" +
+      "069c720f9a9c720c7e7205069c720d7e72040690b0ada5d90110639593c272107312c1721073137314d90110599a8c72" +
+      "10018c72100273157316",
+      executable = true),
+
+    OrderContract(OrderKind.Deposit, PoolShape.Token, "v1",
+      "d803d6017300d602b2a4730100d603db6308a7eb027201d195ed92b1a4730293b1db630872027303d80cd604db630872" +
+      "02d605b2a5730400d606b27204730500d6077e9973068c72060206d608b27204730700d6097e8c72080206d60a9d9c7e" +
+      "8cb27203730800020672077209d60bb27204730900d60c7e8c720b0206d60d9d9c7e8cb27203730a0002067207720cd6" +
+      "0edb63087205d60fb2720e730b00edededededed93b27204730c008602730d730e93c27205d0720192c1720599c1a773" +
+      "0f95ed8f720a720d93b1720e7310d801d610b2720e731100ed938c7210018c720b01927e8c721002069d9c99720d720a" +
+      "720c720795ed91720a720d93b1720e7312d801d610b2720e731300ed938c7210018c720801927e8c721002069d9c9972" +
+      "0a720d720972079593720a720d73147315938c720f018c720601927e8c720f0206a1720a720d90b0ada5d90110639593" +
+      "c272107316c1721073177318d90110599a8c7210018c7210027319731a",
+      executable = true),
+
+    OrderContract(OrderKind.Redeem, PoolShape.Token, "v1",
+      "d802d6017300d602b2a4730100eb027201d195ed92b1a4730293b1db630872027303d809d603db63087202d604b2a573" +
+      "0400d605db63087204d606b27205730500d607b27203730600d608b27205730700d609b27203730800d60a7e8cb2db63" +
+      "08a77309000206d60b7e99730a8cb27203730b000206ededededededed93b27203730c008602730d730e93c27204d072" +
+      "0192c1720499c1a7730f938c7206018c720701938c7208018c720901927e8c720602069d9c720a7e8c72070206720b92" +
+      "7e8c720802069d9c720a7e8c72090206720b90b0ada5d9010c639593c2720c7310c1720c73117312d9010c599a8c720c" +
+      "018c720c0273137314",
+      executable = true))
 
   /** Executable contracts indexed by the node's template hash, which is how a scan finds them. */
   lazy val executableByTemplateHash: Map[String, OrderContract] =

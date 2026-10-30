@@ -16,7 +16,7 @@ import javax.inject.{Inject, Named}
 import scala.util.{Failure, Success, Try}
 import scala.concurrent.duration._
 
-/** Scans executable native orders and builds candidate or broadcast runs on background workers. */
+/** Scans executable v1 orders on both pool shapes and builds candidate or broadcast runs on background workers. */
 class ErgoDexBatcher(nodeContext: NodeContext,
                      batching: BatchingConfig,
                      servesCandidates: Boolean,
@@ -49,7 +49,7 @@ class ErgoDexBatcher(nodeContext: NodeContext,
     if (nfts.size > MaxPoolReads)
       logger.warn(s"ErgoDEX orders name ${nfts.size} pools; reading the first $MaxPoolReads this pass")
     val pools = nfts.take(MaxPoolReads).flatMap(nft => confirmedPool(nft).flatMap(indexed =>
-      ErgoDexPool.native(indexed.box).map(_ -> indexed.inclusionHeight)))
+      ErgoDexPool.parse(indexed.box).map(_ -> indexed.inclusionHeight)))
     ErgoDexBatching.track(orders, pools, tip, batching)
   }
 
@@ -99,7 +99,7 @@ class ErgoDexBatcher(nodeContext: NodeContext,
         .filter { case (_, box) => !creators.contains(box.boxId) }
       within(deadline, "reading pools")
       // Load ancestry only for orders that can be executed profitably.
-      val priceable = candidates.filter(order => pools.get(order.poolNft).flatMap(ErgoDexPool.native)
+      val priceable = candidates.filter(order => pools.get(order.poolNft).flatMap(ErgoDexPool.parse)
         .exists(pool => ErgoDexExecution.price(order, pool, batching.minRevenueNanoErg, fundsItsOwnBox = false).nonEmpty))
       val placed = walletPlacements(priceable.flatMap(order => creators.get(order.boxId)), creators, spenders,
         math.min(slots - 1, batching.maxAncestorTxs), ErgoDexBatching.placedByWallet(_, _, spenders))
@@ -162,7 +162,7 @@ class ErgoDexBatcher(nodeContext: NodeContext,
                    placementOf: ErgoDexOrder => Vector[CompleteMempool.MempoolTx] = _ => Vector.empty)
   : Vector[(ErgoDexChain, Vector[CompleteMempool.MempoolTx])] = {
     val priced = pools
-      .flatMap { case (box, poolOrders) => ErgoDexPool.native(box).map { pool =>
+      .flatMap { case (box, poolOrders) => ErgoDexPool.parse(box).map { pool =>
         (box, pool, poolOrders, ErgoDexExecution.priceChain(poolOrders, pool, minRevenue, slots, minerFeeCeiling, strategy))
       } }
       .filter(_._4.nonEmpty)

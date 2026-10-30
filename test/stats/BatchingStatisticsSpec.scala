@@ -17,7 +17,7 @@ class BatchingStatisticsSpec extends AnyFlatSpec with Matchers {
     val orderBox = ErgoDexFixtures.Sell.orderBox
     val order = ErgoDexOrder.parse(orderBox).get
     val before = ErgoDexPool.native(pool).get
-    val quote = before.outputAmount(order.baseAmount, baseIsErg = true)
+    val quote = before.outputAmount(order.baseAmount, baseIsX = true)
     val after = pool.copy(boxId = SyncFixtures.id(1), value = ErgoDexFixtures.Sell.poolErgAfter,
       assets = pool.assets.updated(2, pool.assets(2).copy(amount = ErgoDexFixtures.Sell.poolTokensAfter)))
     val owner = orderBox.copy(boxId = SyncFixtures.id(2), ergoTree = Hex.toHexString(order.redeemerPropBytes),
@@ -41,6 +41,23 @@ class BatchingStatisticsSpec extends AnyFlatSpec with Matchers {
     BatchingStatistics.read(block, cancelled, NetworkType.TESTNET, other) shouldBe empty
     val wrongOwner = tx.copy(outputs = tx.outputs.updated(1, tx.outputs(1).copy(ergoTree = Contract.SIGMA_FALSE.ergoTreeHex)))
     BatchingStatistics.read(block, wrongOwner, NetworkType.TESTNET, other) shouldBe empty
+  }
+
+  it should "count a real ErgoDEX token pool execution, whose pool ERG never moves, at its executor fee" in {
+    support.ErgoDexTokenFixtures.executions.foreach { e =>
+      withClue(e.name) {
+        val tx = BlockTx(e.tx.id, Seq(e.pool, e.order).map(b => TxInput(b.boxId, None)), Seq.empty,
+          e.tx.outputs.map(o => NodeSync.txOutput(o.box)))
+        val block = BlockInfo("block", e.tx.inclusionHeight, Seq(tx),
+          resolvedInputs = Seq(e.pool, e.order).map(b => b.boxId -> NodeSync.txOutput(b)).toMap)
+        val result = BatchingStatistics.read(block, tx, NetworkType.MAINNET, Contract.SIGMA_FALSE.ergoTreeHex)
+        result should have size 1
+        result.head.protocol shouldBe "ergodex"
+        result.head.grossNanoErg shouldBe e.revenue.toString
+        result.head.transactionFeeNanoErg shouldBe e.minerFee.toString
+        result.head.local shouldBe false
+      }
+    }
   }
 
   it should "measure the configured LithosDex executor fee separately from the pool's own fees" in {

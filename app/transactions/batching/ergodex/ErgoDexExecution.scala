@@ -68,39 +68,79 @@ object ErgoDexExecution {
   /** Named so a refused candidate says which builder produced the offending transaction. */
   final val Kind = "ergodex-batch"
 
+  /**
+   * What `order` does to `pool`: the quote (swap output, LP issued, or X redeemed) and the pool after it. None
+   * when the order's assets do not fit the pool, or a token pool swap would be refused at its own price.
+   */
+  def movement(order: ErgoDexOrder, pool: ErgoDexPool): Option[(Long, ErgoDexPool)] = {
+    val assets = order.box.assets
+    def held(index: Int, id: String) = assets.lift(index).exists(_.tokenId == id)
+    (order.contract.kind, pool.xId) match {
+      case (OrderKind.Deposit, None) if assets.size == 1 && held(0, pool.yId) =>
+        pool.deposit(order.baseAmount, assets.head.amount)
+      case (OrderKind.Deposit, Some(x)) if assets.size == 2 && held(0, x) && held(1, pool.yId) =>
+        pool.deposit(order.baseAmount, assets(1).amount)
+      case (OrderKind.Redeem, _) if assets.size == 1 && held(0, pool.lpId) =>
+        pool.redeem(order.baseAmount)
+      case (OrderKind.SwapSell, None) if assets.isEmpty =>
+        val quote = pool.outputAmount(order.baseAmount, baseIsX = true)
+        Some(quote -> pool.afterSwap(order.baseAmount, quote, baseIsX = true))
+      case (OrderKind.SwapBuy, None) if assets.size == 1 && held(0, pool.yId) =>
+        val quote = pool.outputAmount(order.baseAmount, baseIsX = false)
+        Some(quote -> pool.afterSwap(order.baseAmount, quote, baseIsX = false))
+      case (OrderKind.Swap, Some(x)) if assets.size == 1 =>
+        val xIn = held(0, x) && order.quoteId.contains(pool.yId)
+        val yIn = held(0, pool.yId) && order.quoteId.contains(x)
+        if (!xIn && !yIn) None
+        else {
+          val quote = pool.outputAmount(order.baseAmount, baseIsX = xIn)
+          if (!fairPrice(order, pool, xIn, quote)) None
+          else Some(quote -> pool.afterSwap(order.baseAmount, quote, baseIsX = xIn))
+        }
+      case _ => None
+    }
+  }
+
+  /**
+   * A token pool swap's own check: the output plus one unit must reach what the order's fee numerator prices,
+   * against the pool before the swap. The pool's fee decides the output, so an order pricing itself at a lower
+   * fee than the pool charges is never fillable.
+   */
+  private def fairPrice(order: ErgoDexOrder, pool: ErgoDexPool, xIn: Boolean, quote: Long): Boolean =
+    order.orderFeeNum.forall { fee =>
+      val (reservesIn, reservesOut) = if (xIn) (pool.reservesX, pool.reservesY) else (pool.reservesY, pool.reservesX)
+      BigInt(reservesOut) * order.baseAmount * fee <=
+        (BigInt(quote) + 1) * (BigInt(reservesIn) * ErgoDexContracts.FeeDenominator + BigInt(order.baseAmount) * fee)
+    }
+
   /** Requires gross revenue above the floor and positive net takings; the first fill must fund a box. */
   def price(order: ErgoDexOrder, pool: ErgoDexPool, minRevenue: Long,
             fundsItsOwnBox: Boolean = true, minerFeeCeiling: Long = 0L): Option[ErgoDexFill] = {
-    if (order.poolNft != pool.nft || order.quoteId.exists(_ != pool.yId)) None
+    if (order.poolNft != pool.nft || order.contract.shape != pool.shape ||
+      order.quoteId.exists(q => q != pool.yId && !pool.xId.contains(q))) None
     else {
       Try {
         val assets = order.box.assets
-        val movement = order.contract.kind match {
-          case OrderKind.Deposit if assets.size == 1 && assets.head.tokenId == pool.yId =>
-            pool.deposit(order.baseAmount, assets.head.amount)
-          case OrderKind.Redeem if assets.size == 1 && assets.head.tokenId == pool.lpId =>
-            pool.redeem(order.baseAmount)
-          case OrderKind.SwapSell if assets.isEmpty =>
-            val quote = pool.outputAmount(order.baseAmount, baseIsErg = true)
-            Some(quote -> pool.afterSwap(order.baseAmount, quote, baseIsErg = true))
-          case OrderKind.SwapBuy if assets.size == 1 && assets.head.tokenId == pool.yId =>
-            val quote = pool.outputAmount(order.baseAmount, baseIsErg = false)
-            Some(quote -> pool.afterSwap(order.baseAmount, quote, baseIsErg = false))
-          case _ => None
-        }
-        movement.flatMap { case (quote, after) =>
+        movement(order, pool).flatMap { case (quote, after) =>
           val revenue = order.dexFee(quote)
           val net = revenue - math.min(order.maxMinerFee, math.max(0L, minerFeeCeiling))
-          val rewardValue = BigInt(order.box.value) + pool.reservesX - after.reservesX - revenue
-          // Conservation fixes the reward amounts; LP tokens must precede deposit change.
-          val tokens = Seq((pool.lpId, pool.lpSupply, after.lpSupply), (pool.yId, pool.reservesY, after.reservesY))
-            .map { case (id, before, remaining) =>
-              id -> (BigInt(before) + assets.filter(_.tokenId == id).map(a => BigInt(a.amount)).sum - remaining)
-            }
+          // A token pool's ERG never moves, so the reward's ERG is the order's less the fee
+          val ergOut = if (pool.xId.isDefined) BigInt(0) else BigInt(pool.reservesX) - after.reservesX
+          val rewardValue = BigInt(order.box.value) + ergOut - revenue
+          // Conservation fixes the reward amounts; LP tokens must precede deposit change, and X precede Y.
+          val sides = (pool.lpId, pool.lpSupply, after.lpSupply) +:
+            pool.xId.map(x => (x, pool.reservesX, after.reservesX)).toSeq :+
+            ((pool.yId, pool.reservesY, after.reservesY))
+          val tokens = sides.map { case (id, before, remaining) =>
+            id -> (BigInt(before) + assets.filter(_.tokenId == id).map(a => BigInt(a.amount)).sum - remaining)
+          }
+          // A token pool's reward holds only what the order left beyond the fee, usually a box's bare minimum,
+          // which assembly checks byte for byte; a native reward also carries ERG out of the pool
+          val rewardFloor = if (pool.xId.isDefined) 1L else UTXO.MIN_CHANGE
           if (quote < order.minQuoteAmount || revenue < minRevenue || net <= 0L ||
             (fundsItsOwnBox && net < UTXO.MIN_CHANGE) ||
-            !rewardValue.isValidLong || rewardValue < UTXO.MIN_CHANGE ||
-            after.reservesX <= ErgoDexPool.MinStorageRent || after.reservesY <= 0 || after.lpSupply <= 0 ||
+            !rewardValue.isValidLong || rewardValue < rewardFloor ||
+            after.reservesX <= after.minReservesX || after.reservesY <= 0 || after.lpSupply <= 0 ||
             tokens.exists { case (_, amount) => !amount.isValidLong || amount < 0 }) None
           else Some(ErgoDexFill(order, pool, quote, revenue, after, rewardValue.toLong,
             tokens.collect { case (id, amount) if amount > 0 => NodeAsset(id, amount.toLong) }))
@@ -247,11 +287,12 @@ object ErgoDexExecution {
     // one: consensus refuses an output created below the newest input.
     val height = math.max(blockHeight, TxBuilder.newestInput(spent))
 
-    // Preserve pool identity, script and registers while updating reserves and LP balance.
-    val poolOut = UTXO(poolBox.contract, after.reservesX,
-      Seq(Token(ErgoId.create(pool.nft), 1L),
-        Token(ErgoId.create(pool.lpId), after.lpSupply),
-        Token(ErgoId.create(pool.yId), after.reservesY)),
+    // Preserve pool identity, script and registers while updating reserves and LP balance. A token pool keeps
+    // its ERG and carries X as its third token; a native pool's ERG is its X.
+    val poolOut = UTXO(poolBox.contract, if (pool.xId.isDefined) poolBox.value else after.reservesX,
+      Seq(Token(ErgoId.create(pool.nft), 1L), Token(ErgoId.create(pool.lpId), after.lpSupply)) ++
+        pool.xId.map(x => Token(ErgoId.create(x), after.reservesX)).toSeq :+
+        Token(ErgoId.create(pool.yId), after.reservesY),
       poolBox.registers).setCreationHeight(height)
 
     // The reward is the user's, and its proposition is the order's own constant rather than

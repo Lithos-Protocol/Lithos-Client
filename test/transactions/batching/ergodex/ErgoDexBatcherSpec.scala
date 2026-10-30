@@ -91,8 +91,8 @@ class ErgoDexBatcherSpec extends TestKit(ActorSystem("ergodex-batcher-spec", Erg
     when(api.unspentBoxesByTokenId(anyString(), any[Paging], any[SortDirection], any[MempoolOptions]))
       .thenAnswer { inv =>
         val nft = inv.getArgument[String](0)
-        if (nft == poolNft) Success(Seq(IndexedBox(pool, "", tip - 1, 2L)))
-        else Success(extraPool.filter(box => ErgoDexPool.native(box).exists(_.nft == nft))
+        if (nft == poolNft || ErgoDexPool.parse(pool).exists(_.nft == nft)) Success(Seq(IndexedBox(pool, "", tip - 1, 2L)))
+        else Success(extraPool.filter(box => ErgoDexPool.parse(box).exists(_.nft == nft))
           .map(IndexedBox(_, "", tip - 1, 3L)).toSeq)
       }
     when(api.boxesWithPoolByIds(any[Seq[String]])).thenAnswer { inv =>
@@ -148,6 +148,19 @@ class ErgoDexBatcherSpec extends TestKit(ActorSystem("ergodex-batcher-spec", Erg
       bundle.capital.map(_.value) shouldBe Seq(support.ErgoDexLiquidityFixtures.Fee)
       verify(f.api, timeout(30000).times(1)).sendTransaction(anyString())
       f.stop()
+    }
+  }
+
+  it should "discover and execute live token pool swaps, deposits and redemptions for candidates and broadcasts" in {
+    support.ErgoDexTokenFixtures.executions.foreach { e =>
+      withClue(e.name) {
+        val f = new Fixture(broadcast = true, initialOrder = e.order, initialPool = e.pool)
+        val bundle = f.offeredOnceTracked().head
+        bundle.members.last.inputIds should contain(e.order.boxId)
+        bundle.capital.map(_.value) shouldBe Seq(e.revenue)
+        verify(f.api, timeout(30000).times(1)).sendTransaction(anyString())
+        f.stop()
+      }
     }
   }
 

@@ -4,7 +4,7 @@ import node.model.{NodeAsset, NodeBox, NodeRegisters}
 import org.bouncycastle.util.encoders.Hex
 import org.ergoplatform.appkit.NetworkType
 import state.messages.{BlockInfo, BlockTx, TxOutput}
-import transactions.batching.ergodex.{ErgoDexOrder, ErgoDexPool, OrderKind}
+import transactions.batching.ergodex.{ErgoDexExecution, ErgoDexOrder, ErgoDexPool}
 import transactions.batching.lithosdex.{DexContracts, LDDeployments, LithosDexOrder}
 import work.lithos.mutations.Contract
 
@@ -60,23 +60,12 @@ private[stats] object BatchingStatistics {
         else Vector(BatchingFee(tx.id, order.id, protocol, gross.toString, fee.toString, local))
       }
     }
-    ErgoDexPool.native(box(pool)) match {
+    ErgoDexPool.parse(box(pool)) match {
       case Some(before) =>
         inputs(1).toVector.flatMap { input =>
           ErgoDexOrder.parse(box(input)).filter(o => nft.contains(o.poolNft)).toVector.flatMap { order =>
-            val movement = order.contract.kind match {
-              case OrderKind.SwapSell =>
-                val quote = before.outputAmount(order.baseAmount, baseIsErg = true)
-                Some(quote -> before.afterSwap(order.baseAmount, quote, baseIsErg = true))
-              case OrderKind.SwapBuy =>
-                val quote = before.outputAmount(order.baseAmount, baseIsErg = false)
-                Some(quote -> before.afterSwap(order.baseAmount, quote, baseIsErg = false))
-              case OrderKind.Deposit => before.deposit(order.baseAmount,
-                input.assets.find(_.id.toString == before.yId).map(_.amount).getOrElse(0L))
-              case OrderKind.Redeem => before.redeem(order.baseAmount)
-            }
-            movement.toVector.flatMap { case (quote, after) =>
-              val actual = ErgoDexPool.native(box(next))
+            ErgoDexExecution.movement(order, before).toVector.flatMap { case (quote, after) =>
+              val actual = ErgoDexPool.parse(box(next))
               if (!actual.exists(p => p.copy(boxId = after.boxId) == after) || quote < order.minQuoteAmount) Vector.empty
               else result(input, Hex.toHexString(order.redeemerPropBytes), 1, 0, 0, "ergodex", Some(order.dexFee(quote)))
             }
