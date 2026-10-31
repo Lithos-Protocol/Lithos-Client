@@ -166,6 +166,36 @@ class LDPoolsApiController @Inject()(cc: ControllerComponents, api: LDPoolsApi, 
     Action.async(request => offPool(respond(api.placeRedeemOrder(poolNft, body[LDPoolRedeemRequest](request)))))
   }
 
+  /** POST /dex/pools/:poolNft/swap/check */
+  def checkDirectSwap(poolNft: String): Action[AnyContent] = Action.async { request =>
+    offPool(respond(api.checkDirectSwap(poolNft, body[LDPoolSwapRequest](request))))
+  }
+
+  /** POST /dex/pools/:poolNft/swap */
+  def directSwap(poolNft: String): Action[AnyContent] = withApiKey {
+    Action.async(request => offPool(respond(api.directSwap(poolNft, body[LDPoolDirectSwapRequest](request)))))
+  }
+
+  /** POST /dex/pools/:poolNft/deposit/check */
+  def checkDirectDeposit(poolNft: String): Action[AnyContent] = Action.async { request =>
+    offPool(respond(api.checkDirectDeposit(poolNft, body[LDPoolDepositRequest](request))))
+  }
+
+  /** POST /dex/pools/:poolNft/deposit */
+  def directDeposit(poolNft: String): Action[AnyContent] = withApiKey {
+    Action.async(request => offPool(respond(api.directDeposit(poolNft, body[LDPoolDirectDepositRequest](request)))))
+  }
+
+  /** POST /dex/pools/:poolNft/redeem/check */
+  def checkDirectRedeem(poolNft: String): Action[AnyContent] = Action.async { request =>
+    offPool(respond(api.checkDirectRedeem(poolNft, body[LDPoolRedeemRequest](request))))
+  }
+
+  /** POST /dex/pools/:poolNft/redeem */
+  def directRedeem(poolNft: String): Action[AnyContent] = withApiKey {
+    Action.async(request => offPool(respond(api.directRedeem(poolNft, body[LDPoolDirectRedeemRequest](request)))))
+  }
+
   /** The JSON body as `A`, or `empty` when the request has no body: every field of these requests is optional. */
   private def optionalBody[A](request: Request[AnyContent], empty: A)(implicit reads: Reads[A]): A =
     if (request.body.asJson.isEmpty) empty else body[A](request)

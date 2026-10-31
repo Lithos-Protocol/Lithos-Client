@@ -59,4 +59,22 @@ trait LDPoolsApi {
 
   /** POST /dex/pools/:poolNft/orders/redeem */
   def placeRedeemOrder(poolNft: String, request: LDPoolRedeemRequest): LDPoolOrderPlaced
+
+  /** POST /dex/pools/:poolNft/swap/check */
+  def checkDirectSwap(poolNft: String, request: LDPoolSwapRequest): LDPoolDirectSwapQuote
+
+  /** POST /dex/pools/:poolNft/swap */
+  def directSwap(poolNft: String, request: LDPoolDirectSwapRequest): LDPoolDirectResult
+
+  /** POST /dex/pools/:poolNft/deposit/check */
+  def checkDirectDeposit(poolNft: String, request: LDPoolDepositRequest): LDPoolDirectDepositQuote
+
+  /** POST /dex/pools/:poolNft/deposit */
+  def directDeposit(poolNft: String, request: LDPoolDirectDepositRequest): LDPoolDirectResult
+
+  /** POST /dex/pools/:poolNft/redeem/check */
+  def checkDirectRedeem(poolNft: String, request: LDPoolRedeemRequest): LDPoolDirectRedeemQuote
+
+  /** POST /dex/pools/:poolNft/redeem */
+  def directRedeem(poolNft: String, request: LDPoolDirectRedeemRequest): LDPoolDirectResult
 }

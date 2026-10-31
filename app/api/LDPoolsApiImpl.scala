@@ -83,6 +83,24 @@ class LDPoolsApiImpl @Inject()(nodeContext: NodeContext, index: LDPoolIndex,
   override def placeRedeemOrder(poolNft: String, request: LDPoolRedeemRequest): LDPoolOrderPlaced =
     orders.placeRedeem(poolNft, request)
 
+  override def checkDirectSwap(poolNft: String, request: LDPoolSwapRequest): LDPoolDirectSwapQuote =
+    orders.checkDirectSwap(poolNft, request)
+
+  override def directSwap(poolNft: String, request: LDPoolDirectSwapRequest): LDPoolDirectResult =
+    orders.swap(poolNft, request)
+
+  override def checkDirectDeposit(poolNft: String, request: LDPoolDepositRequest): LDPoolDirectDepositQuote =
+    orders.checkDirectDeposit(poolNft, request)
+
+  override def directDeposit(poolNft: String, request: LDPoolDirectDepositRequest): LDPoolDirectResult =
+    orders.deposit(poolNft, request)
+
+  override def checkDirectRedeem(poolNft: String, request: LDPoolRedeemRequest): LDPoolDirectRedeemQuote =
+    orders.checkDirectRedeem(poolNft, request)
+
+  override def directRedeem(poolNft: String, request: LDPoolDirectRedeemRequest): LDPoolDirectResult =
+    orders.redeem(poolNft, request)
+
   /** @inheritdoc */
   override def listPools: LDPoolList = {
     val s = index.snapshot()

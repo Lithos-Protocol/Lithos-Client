@@ -82,6 +82,18 @@ POST /dex/pools/:poolNft/orders/redeem/check    controllers.LDPoolsApiController
 + nocsrf
 POST /dex/pools/:poolNft/orders/redeem          controllers.LDPoolsApiController.placeRedeemOrder(poolNft: String)
 + nocsrf
+POST /dex/pools/:poolNft/swap/check             controllers.LDPoolsApiController.checkDirectSwap(poolNft: String)
++ nocsrf
+POST /dex/pools/:poolNft/swap                   controllers.LDPoolsApiController.directSwap(poolNft: String)
++ nocsrf
+POST /dex/pools/:poolNft/deposit/check          controllers.LDPoolsApiController.checkDirectDeposit(poolNft: String)
++ nocsrf
+POST /dex/pools/:poolNft/deposit                controllers.LDPoolsApiController.directDeposit(poolNft: String)
++ nocsrf
+POST /dex/pools/:poolNft/redeem/check           controllers.LDPoolsApiController.checkDirectRedeem(poolNft: String)
++ nocsrf
+POST /dex/pools/:poolNft/redeem                 controllers.LDPoolsApiController.directRedeem(poolNft: String)
++ nocsrf
 POST /dex/pools/:poolNft/provisions/:boxId/claim controllers.LDPoolsApiController.claimPoolProvision(poolNft: String, boxId: String)
 + nocsrf
 POST /dex/pools/:poolNft/flush/check            controllers.LDPoolsApiController.checkPoolFlush(poolNft: String)

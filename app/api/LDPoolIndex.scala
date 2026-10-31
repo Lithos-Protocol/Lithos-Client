@@ -137,7 +137,9 @@ class LDPoolIndex @Inject()(nodeContext: NodeContext, system: ActorSystem) {
     val pools =
       n2tBoxes.flatMap(box => Try(n2tPool(ctx, box, registry)).getOrElse(None)) ++
         t2tBoxes.flatMap(box => Try(t2tPool(ctx, box, registry)).getOrElse(None))
-    val sorted = pools.sortBy(p => (!p.verified, -p.inclusionHeight, p.nft))
+    // ERG:LIT first whatever else holds, then verified pools, then newest
+    val canonical = lithosdex.LDHelpers.getPoolNFT(network).toString
+    val sorted = pools.sortBy(p => (p.nft != canonical, !p.verified, -p.inclusionHeight, p.nft))
     PoolIndexSnapshot("ready", tip, n2tCut || t2tCut, sorted, metaFor(sorted.flatMap(p => p.tokenX.toSeq :+ p.tokenY), registry))
   }
 

@@ -2,7 +2,7 @@ package transactions.engine.execution
 
 import akka.actor.ActorSystem
 import akka.testkit.{TestKit, TestProbe}
-import api.LithosApiErrors.{LithosBadRequest, LithosNotFound, LithosUnavailable, LithosUnprocessable}
+import api.LithosApiErrors.{LithosBadRequest, LithosNotFound, LithosStateChanged, LithosUnavailable, LithosUnprocessable}
 import api.models._
 import api.{GenesisProvision, GenesisVerdict, IndexedPool, LDPoolIndex, PoolIndexSnapshot}
 import configs.{NodeContext, VerifiedPool}
@@ -426,6 +426,65 @@ class DexPoolExecutionSpec extends TestKit(ActorSystem("dex-pool-execution-spec"
     val selection = f.wallet.expectMsgType[SelectInputs](10.seconds)
     selection.erg shouldBe Fee + LDOrderTransactions.RETURNED + Parameters.MinFee * 3
     selection.tokens shouldBe Seq(Token(tokenX, 1000000000L))
+  }
+
+  "A direct spend" should "be gated like an order, and reserve only the side sold and the network headroom" in {
+    val f = fixture()
+    the[LithosUnprocessable].thrownBy(f.exec.swap(drained.poolNFT.toString,
+      LDPoolDirectSwapRequest("ERG", "1000000000", "1", acknowledgeUnverified = Ack))).getMessage should include("pool NFT minted 2")
+    the[LithosBadRequest].thrownBy(f.exec.swap(t2t.poolNFT.toString,
+      LDPoolDirectSwapRequest(tokenX.toString, "1000000000", "1"))).getMessage should include("acknowledgeUnverified")
+    f.wallet.expectNoMessage(200.millis)
+    Future(Try(f.exec.swap(t2t.poolNFT.toString,
+      LDPoolDirectSwapRequest(tokenX.toString, "1000000000", "1", acknowledgeUnverified = Ack))))
+    val selection = f.wallet.expectMsgType[SelectInputs](10.seconds)
+    // No executor fee and no order box: only the fee and the change box come from the wallet's ERG
+    selection.erg shouldBe Parameters.MinFee * 3
+    selection.tokens shouldBe Seq(Token(tokenX, 1000000000L))
+  }
+
+  it should "refuse a swap the pool no longer fills at its floor, or a pool that moved, before reserving anything" in {
+    val f = fixture()
+    val q = f.exec.checkDirectSwap(n2t.poolNFT.toString, LDPoolSwapRequest("ERG", "1000000000"))
+    q.tokenOut shouldBe tokenY.toString
+    q.priceImpact should be > 0.0
+    the[LithosUnprocessable].thrownBy(f.exec.swap(n2t.poolNFT.toString, LDPoolDirectSwapRequest("ERG", "1000000000",
+      (BigInt(q.amountOut) + 1).toString, acknowledgeUnverified = Ack))).getMessage should include("floor")
+    a[LithosStateChanged] should be thrownBy f.exec.swap(n2t.poolNFT.toString, LDPoolDirectSwapRequest("ERG", "1000000000",
+      "1", expectedPoolBoxId = Some("00" * 32), acknowledgeUnverified = Ack))
+    f.wallet.expectNoMessage(200.millis)
+  }
+
+  it should "deposit the balanced part of an offer, for the shares it buys" in {
+    val f = fixture()
+    val q = f.exec.checkDirectDeposit(n2t.poolNFT.toString, LDPoolDepositRequest("2000000000", "300000000"))
+    (BigInt(q.takenX) + BigInt(q.excessX), BigInt(q.takenY) + BigInt(q.excessY)) shouldBe ((BigInt(2000000000L), BigInt(300000000L)))
+    a[LithosUnprocessable] should be thrownBy f.exec.deposit(n2t.poolNFT.toString, LDPoolDirectDepositRequest("2000000000",
+      "300000000", (BigInt(q.shares) + 1).toString, acknowledgeUnverified = Ack))
+    Future(Try(f.exec.deposit(n2t.poolNFT.toString,
+      LDPoolDirectDepositRequest("2000000000", "300000000", q.shares, acknowledgeUnverified = Ack))))
+    val selection = f.wallet.expectMsgType[SelectInputs](10.seconds)
+    selection.erg shouldBe BigInt(q.takenX).toLong + LDHelpers.PROVISION_MIN + Parameters.MinFee + Parameters.MinFee * 3
+    selection.tokens shouldBe Seq(Token(tokenY, BigInt(q.takenY).toLong))
+  }
+
+  it should "need acknowledgeUnclaimedFees to redeem a provision its vault owes, on a pool of any genesis" in {
+    val f = fixture()
+    val owner = ErgoId.create("a6" * 32)
+    val prov = f.node.getClient.execute { ctx: BlockchainContext =>
+      LDNodeFixtures.nodeBox(ctx, UTXO(t2t.provisionGuard, LDHelpers.PROVISION_MIN, Seq(Token(t2t.provToken, 1L)),
+        Seq(zero, zero, ErgoValue.of(Colls.fromArray(owner.getBytes), scalaByteType), ErgoValue.of(1000L))),
+        index = 0, txId = "f7" * 32)
+    }
+    when(f.nodeApi.indexedBoxById(prov.boxId)).thenReturn(Success(Some(LDNodeFixtures.indexed(prov))))
+    val q = f.exec.checkDirectRedeem(t2t.poolNFT.toString, LDPoolRedeemRequest(prov.boxId))
+    // The vault's accumulators stand three and two per share past the provision's entries
+    (q.unclaimedX, q.unclaimedY) shouldBe (("3000", "2000"))
+    the[LithosBadRequest].thrownBy(f.exec.redeem(t2t.poolNFT.toString, LDPoolDirectRedeemRequest(prov.boxId)))
+      .getMessage should include("acknowledgeUnclaimedFees")
+    f.wallet.expectNoMessage(200.millis)
+    Future(Try(f.exec.redeem(t2t.poolNFT.toString, LDPoolDirectRedeemRequest(prov.boxId, Some(true)))))
+    f.wallet.expectMsgType[SelectInputs](10.seconds).tokens shouldBe Seq(Token(owner, 1L))
   }
 
   "A redeem" should "never be refused for its pool's genesis, so liquidity can always leave" in {

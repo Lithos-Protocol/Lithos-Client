@@ -79,7 +79,8 @@ class DexPoolExecution(nodeContext: NodeContext, walletSelector: EngineFunding, 
         q.isExecutable, LDAmounts(fees.executorFee), LDAmounts(fees.maxMinerFee),
         LDAmounts(exact(LDOrderTransactions.swapValue(amountIn, sellsErg, fees.executorFee))),
         if (sellsErg) Seq.empty else Seq(LDTokenAmount(n.pool.tokenY.toString, LDAmounts(amountIn))),
-        LDAmounts(LDOrderTransactions.RETURNED), LDAmounts(LithosDexTransactions.TX_FEE))
+        LDAmounts(LDOrderTransactions.RETURNED), LDAmounts(LithosDexTransactions.TX_FEE), q.priceImpact,
+        LDAmounts(q.protocolFee), LDAmounts(q.ammFee))
     case t: LiveT2T =>
       val sold = sideOf(t, tokenIn)
       val xIn = sold == t.pool.tokenX
@@ -90,7 +91,8 @@ class DexPoolExecution(nodeContext: NodeContext, walletSelector: EngineFunding, 
         LDAmounts(fees.executorFee), LDAmounts(fees.maxMinerFee),
         LDAmounts(exact(LDOrderTransactions.t2tOrderValue(fees.executorFee))),
         Seq(LDTokenAmount(sold.toString, LDAmounts(amountIn))),
-        LDAmounts(LDOrderTransactions.RETURNED), LDAmounts(LithosDexTransactions.TX_FEE))
+        LDAmounts(LDOrderTransactions.RETURNED), LDAmounts(LithosDexTransactions.TX_FEE), q.priceImpact,
+        LDAmounts(q.protocolFee), LDAmounts(q.ammFee))
   }
 
   // ── deposit ───────────────────────────────────────────────────────────────
@@ -186,6 +188,145 @@ class DexPoolExecution(nodeContext: NodeContext, walletSelector: EngineFunding, 
               fees.executorFee, fees.maxMinerFee)
         }
         placed(ctx, live, "REDEEM", plan)
+      }
+    }
+
+  // ── direct spends ─────────────────────────────────────────────────────────
+
+  def checkDirectSwap(poolNft: String, request: LDPoolSwapRequest): LDPoolDirectSwapQuote = withPool(poolNft) { (_, live) =>
+    directSwapQuote(live, request.tokenIn, positive("amountIn", request.amountIn))
+  }
+
+  private def directSwapQuote(live: Live, tokenIn: String, amountIn: Long): LDPoolDirectSwapQuote = {
+    val fee = LDAmounts(LithosDexTransactions.TX_FEE)
+    live match {
+      case n: LiveN2T =>
+        val sellsErg = ergIn(n, tokenIn)
+        val q = n.pool.simSwap(amountIn, sellsErg)
+        val least = if (q.amountOut <= 0) None else n.pool.simSwapForOutput(q.amountOut, sellsErg).map(_.amountIn)
+        val (in, out) = if (sellsErg) ("ERG", n.pool.tokenY.toString) else (n.pool.tokenY.toString, "ERG")
+        LDPoolDirectSwapQuote(n.indexed.nft, in, out, LDAmounts(amountIn), LDAmounts(q.amountOut), least.map(LDAmounts(_)),
+          q.isExecutable, q.priceImpact, LDAmounts(q.protocolFee), LDAmounts(q.ammFee), fee, n.box.id.toString)
+      case t: LiveT2T =>
+        val xIn = sideOf(t, tokenIn) == t.pool.tokenX
+        val q = t.pool.simSwap(amountIn, xIn)
+        val least = if (q.amountOut <= 0) None else t.pool.simSwapForOutput(q.amountOut, xIn).map(_.amountIn)
+        val (in, out) = if (xIn) (t.pool.tokenX, t.pool.tokenY) else (t.pool.tokenY, t.pool.tokenX)
+        LDPoolDirectSwapQuote(t.indexed.nft, in.toString, out.toString, LDAmounts(amountIn), LDAmounts(q.amountOut),
+          least.map(LDAmounts(_)), q.isExecutable, q.priceImpact, LDAmounts(q.protocolFee), LDAmounts(q.ammFee), fee,
+          t.box.id.toString)
+    }
+  }
+
+  /** Spends the pool now, the network fee paid from this wallet. Gated like a swap order. */
+  def swap(poolNft: String, request: LDPoolDirectSwapRequest): LDPoolDirectResult =
+    DexAPIExecution.mutating("this swap", mutationWaitMs) {
+      withPool(poolNft) { (ctx, live) =>
+        tradable(live.indexed, request.acknowledgeUnverified.contains(true))
+        expectBox("pool", request.expectedPoolBoxId, live.box, id => LithosStateChanged(_, poolBoxId = Some(id)))
+        val amountIn = positive("amountIn", request.amountIn)
+        // A zero floor would accept whatever the pool returns
+        val minOutput = positive("minOutput", request.minOutput)
+        val q = directSwapQuote(live, request.tokenIn, amountIn)
+        if (!q.executable) throw LithosUnprocessable(s"the pool cannot fill a swap of $amountIn at its current depth")
+        if (BigInt(q.amountOut) < minOutput) throw LithosUnprocessable(
+          s"the pool now returns ${q.amountOut}, below the $minOutput floor")
+        val (sent, out) = live match {
+          case n: LiveN2T =>
+            val built = fund(LithosDexTransactions.swap(ctx, wallet, n.contracts, n.box, amountIn, ergIn(n, request.tokenIn),
+              minOutput), (_: LDSwapTx) => ())
+            (send(built), built.value.quote.amountOut)
+          case t: LiveT2T =>
+            val built = fund(LithosDexTransactions.t2tSwap(ctx, wallet, t.contracts, t.box, amountIn,
+              sideOf(t, request.tokenIn) == t.pool.tokenX, minOutput), (_: LDT2TSwapTx) => ())
+            (send(built), built.value.quote.amountOut)
+        }
+        LDPoolDirectResult(sent.outcome, sent.txId, live.indexed.nft, "SWAP", LDAmounts(amountIn), LDAmounts(out))
+      }
+    }
+
+  def checkDirectDeposit(poolNft: String, request: LDPoolDepositRequest): LDPoolDirectDepositQuote =
+    withPool(poolNft) { (_, live) =>
+      directDepositQuote(live, positive("amountX", request.amountX), positive("amountY", request.amountY))
+    }
+
+  /** The most shares the offered amounts buy, what the pool takes for them, and what stays in the wallet. */
+  private def directDepositQuote(live: Live, amountX: Long, amountY: Long): LDPoolDirectDepositQuote = {
+    val (shares, takenX, takenY, share, ergX) = live match {
+      case n: LiveN2T =>
+        val q = n.pool.simDeposit(amountX, amountY)
+        (q.shares, q.amountX, q.amountY, q.shareOfSupply, q.amountX)
+      case t: LiveT2T =>
+        val q = t.pool.simDeposit(amountX, amountY)
+        (q.shares, q.amountX, q.amountY, q.shareOfSupply, 0L)
+    }
+    val ergNeeded = ergX + LDHelpers.PROVISION_MIN + LithosDexTransactions.OWNER_BOX_VALUE + LithosDexTransactions.TX_FEE
+    LDPoolDirectDepositQuote(live.indexed.nft, LDAmounts(shares), LDAmounts(takenX), LDAmounts(takenY),
+      LDAmounts(amountX - takenX), LDAmounts(amountY - takenY), share, LDAmounts(LDHelpers.PROVISION_MIN),
+      LDAmounts(ergNeeded), LDAmounts(LithosDexTransactions.TX_FEE), live.box.id.toString)
+  }
+
+  /** Opens a provision now for the most shares the offer buys, refused below `minShares`. Gated like a deposit order. */
+  def deposit(poolNft: String, request: LDPoolDirectDepositRequest): LDPoolDirectResult =
+    DexAPIExecution.mutating("this deposit", mutationWaitMs) {
+      withPool(poolNft) { (ctx, live) =>
+        tradable(live.indexed, request.acknowledgeUnverified.contains(true))
+        expectBox("pool", request.expectedPoolBoxId, live.box, id => LithosStateChanged(_, poolBoxId = Some(id)))
+        val minShares = positive("minShares", request.minShares)
+        val canDeposit = live match { case n: LiveN2T => n.pool.canDeposit; case t: LiveT2T => t.pool.canDeposit }
+        if (!canDeposit) throw LithosUnprocessable("the pool has no provision tokens left, so it takes no deposit")
+        val q = directDepositQuote(live, positive("amountX", request.amountX), positive("amountY", request.amountY))
+        val shares = BigInt(q.shares).toLong
+        if (shares <= 0) throw LithosUnprocessable("the offer is too small to buy a single share")
+        if (shares < minShares) throw LithosUnprocessable(s"the pool now issues $shares shares, below the $minShares floor")
+        val (sent, ownerNft, provisionBox) = live match {
+          case n: LiveN2T =>
+            val built = fund(LithosDexTransactions.deposit(ctx, wallet, n.contracts, n.box, shares), (_: LDDepositTx) => ())
+            (send(built), built.value.ownerNFT, built.value.provisionBoxId)
+          case t: LiveT2T =>
+            val built = fund(LithosDexTransactions.t2tDeposit(ctx, wallet, t.contracts, t.box, shares), (_: LDT2TDepositTx) => ())
+            (send(built), built.value.ownerNFT, built.value.provisionBoxId)
+        }
+        LDPoolDirectResult(sent.outcome, sent.txId, live.indexed.nft, "DEPOSIT", q.takenX, q.takenY, Some(q.shares),
+          Some(ownerNft.toString), Some(provisionBox))
+      }
+    }
+
+  def checkDirectRedeem(poolNft: String, request: LDPoolRedeemRequest): LDPoolDirectRedeemQuote =
+    withPool(poolNft) { (ctx, live) =>
+      val prov = provision(ctx, live, request.provisionBoxId)
+      directRedeemQuote(ctx, live, prov)
+    }
+
+  private def directRedeemQuote(ctx: BlockchainContext, live: Live, prov: LDBoxes.Provision): LDPoolDirectRedeemQuote = {
+    val (amountX, amountY, within) = redeemShare(live, prov)
+    // Settled but unclaimed fees die with the provision box; a direct redemption claims nothing first
+    val (owedX, owedY) = claimable(ctx, live, prov)
+    LDPoolDirectRedeemQuote(live.indexed.nft, prov.boxId, LDAmounts(prov.shares), LDAmounts(amountX), LDAmounts(amountY),
+      LDAmounts(prov.value), LDAmounts(owedX.max(0L)), LDAmounts(owedY.max(0L)), within,
+      LDAmounts(LithosDexTransactions.TX_FEE), live.box.id.toString)
+  }
+
+  /**
+   * Closes one of this wallet's provisions now. Open on every pool, as redeem orders are. Forfeits any fees the vault
+   * owes the provision, so it needs `acknowledgeUnclaimedFees` when there are some.
+   */
+  def redeem(poolNft: String, request: LDPoolDirectRedeemRequest): LDPoolDirectResult =
+    DexAPIExecution.mutating("this redemption", mutationWaitMs) {
+      withPool(poolNft) { (ctx, live) =>
+        expectBox("pool", request.expectedPoolBoxId, live.box, id => LithosStateChanged(_, poolBoxId = Some(id)))
+        val prov = provision(ctx, live, request.provisionBoxId)
+        val q = directRedeemQuote(ctx, live, prov)
+        if (!q.withinMinSupply) throw LithosUnprocessable(
+          s"closing provision ${prov.boxId} would take supply under ${LDHelpers.MIN_SUPPLY}, which the pool refuses")
+        if ((BigInt(q.unclaimedX) > 0 || BigInt(q.unclaimedY) > 0) && !request.acknowledgeUnclaimedFees.contains(true))
+          throw LithosBadRequest(s"provision ${prov.boxId} is owed ${q.unclaimedX} and ${q.unclaimedY} in fees, which " +
+            "redeeming it destroys: claim them first, or set 'acknowledgeUnclaimedFees' to true")
+        val sent = send(live match {
+          case n: LiveN2T => fund(LithosDexTransactions.redeem(ctx, wallet, n.contracts, n.box, prov), (_: LDRedeemTx) => ())
+          case t: LiveT2T => fund(LithosDexTransactions.t2tRedeem(ctx, wallet, t.contracts, t.box, prov), (_: LDRedeemTx) => ())
+        })
+        LDPoolDirectResult(sent.outcome, sent.txId, live.indexed.nft, "REDEEM", q.amountX, q.amountY, Some(q.shares))
       }
     }
 

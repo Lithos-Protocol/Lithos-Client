@@ -173,6 +173,53 @@ class LDT2TOrderTransactionsSpec extends AnyFlatSpec with Matchers {
     (vaultOut.balanceX, vaultOut.balanceY) shouldBe ((1000000L - owed, 1000000L - owed))
   }
 
+  "A token/token direct swap" should "spend the pool now, keep its ERG, and pay the bought token here" in withCtx { ctx =>
+    val poolIn = poolNode(ctx).toInputUTXO(ctx)
+    val q = pool(ctx).simSwap(1000000000L, xIn = true)
+    val plan = LithosDexTransactions.t2tSwap(ctx, wallet, deployment, poolIn, 1000000000L, xIn = true, q.amountOut)
+    (plan.value, plan.tokens) shouldBe ((Headroom, Seq(Token(tokenX, 1000000000L))))
+    val unsigned = plan.build(Seq(funding(ctx, plan)))
+    // Signing runs the pool contract, so a swap it refuses fails here
+    val swapped = unsigned.describe(wallet.sign(unsigned.tx))
+    val outputs = swapped.tx.getOutputsToSpend
+    val poolOut = LDT2TLiquidityPool(InputUTXO(outputs.get(0)))
+    (poolOut.reservesX, poolOut.reservesY) shouldBe ((pool(ctx).afterSwap(q).reservesX, pool(ctx).afterSwap(q).reservesY))
+    outputs.get(0).getValue shouldBe LDHelpers.T2T_POOL_MIN_VALUE
+    val bought = (1 until outputs.size).map(outputs.get).filter(o => InputUTXO(o).contract.ergoTreeHex == wallet.contract.ergoTreeHex)
+      .flatMap(o => InputUTXO(o).tokens).filter(_.id == tokenY).map(_.amount).sum
+    bought shouldBe q.amountOut
+    an[IllegalArgumentException] should be thrownBy
+      LithosDexTransactions.t2tSwap(ctx, wallet, deployment, poolIn, 1000000000L, xIn = true, q.amountOut + 1)
+  }
+
+  "A token/token direct deposit" should "open a provision at output 1, owned by the NFT the pool box mints" in withCtx { ctx =>
+    val poolIn = poolNode(ctx).toInputUTXO(ctx)
+    val q = pool(ctx).simDepositForShares(Shares)
+    val plan = LithosDexTransactions.t2tDeposit(ctx, wallet, deployment, poolIn, Shares)
+    plan.tokens shouldBe Seq(Token(tokenX, q.amountX), Token(tokenY, q.amountY))
+    val unsigned = plan.build(Seq(funding(ctx, plan)))
+    val deposited = unsigned.describe(wallet.sign(unsigned.tx))
+    deposited.ownerNFT shouldBe poolIn.id
+    val prov = LDBoxes.readProvision(InputUTXO(deposited.tx.getOutputsToSpend.get(1)))
+    (prov.ownerNFT, prov.shares, prov.entryX, prov.entryY) shouldBe ((poolIn.id, Shares, pool(ctx).accX, pool(ctx).accY))
+    InputUTXO(deposited.tx.getOutputsToSpend.get(2)).tokens shouldBe Seq(Token(poolIn.id, 1L))
+  }
+
+  "A token/token direct redemption" should "return both reserves' share and the box's ERG, and burn the NFT" in withCtx { ctx =>
+    val prov = provision(ctx)
+    val q = pool(ctx).simRedeem(Shares)
+    val plan = LithosDexTransactions.t2tRedeem(ctx, wallet, deployment, poolNode(ctx).toInputUTXO(ctx), prov)
+    plan.tokens shouldBe Seq(Token(ownerNFT, 1L))
+    val unsigned = plan.build(Seq(funding(ctx, plan)))
+    // Signing runs the pool and the token/token provision logic
+    val redeemed = unsigned.describe(wallet.sign(unsigned.tx))
+    val payout = InputUTXO(redeemed.tx.getOutputsToSpend.get(1))
+    payout.value shouldBe LDHelpers.PROVISION_MIN
+    payout.tokens.toSet shouldBe Set(Token(tokenX, q.amountX), Token(tokenY, q.amountY))
+    (0 until redeemed.tx.getOutputsToSpend.size).map(i => InputUTXO(redeemed.tx.getOutputsToSpend.get(i)))
+      .exists(_.tokens.exists(_.id == ownerNFT)) shouldBe false
+  }
+
   it should "place without a claim when the vault owes nothing" in withCtx { ctx =>
     val plan = LDOrderTransactions.t2tRedeem(ctx, wallet, deployment, pool(ctx), provision(ctx), None, Fee, Cap)
     val placed = signed(plan, Seq(funding(ctx, plan)))

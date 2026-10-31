@@ -72,6 +72,16 @@ object LithosDexTransactions {
            poolBox: InputUTXO,
            amountIn: Long,
            ergIn: Boolean,
+           minOutput: Long): DexPlan[LDSwapTx] =
+    swap(ctx, wallet, DexContracts(ctx), poolBox, amountIn, ergIn, minOutput)
+
+  /** The same, against the pool of the ERG/token deployment `contracts`. */
+  def swap(ctx: BlockchainContext,
+           wallet: NodeWallet,
+           contracts: LDContracts,
+           poolBox: InputUTXO,
+           amountIn: Long,
+           ergIn: Boolean,
            minOutput: Long): DexPlan[LDSwapTx] = {
     val p = LDLiquidityPool(poolBox)
     val q = p.simSwap(amountIn, ergIn)
@@ -82,7 +92,7 @@ object LithosDexTransactions {
     require(q.amountOut >= minOutput,
       s"the pool has moved since the quote: it would return ${q.amountOut}, below the ${minOutput} floor")
 
-    val out = poolUTXO(DexContracts(ctx), p, p.afterSwap(q))
+    val out = poolUTXO(contracts, p, p.afterSwap(q))
 
     val fundingValue = if (ergIn) amountIn + FUNDING_HEADROOM else FUNDING_HEADROOM
     val fundingTokens = if (ergIn) Seq.empty else Seq(Token(p.tokenY, amountIn))
@@ -107,6 +117,14 @@ object LithosDexTransactions {
   def deposit(ctx: BlockchainContext,
               wallet: NodeWallet,
               poolBox: InputUTXO,
+              shares: Long): DexPlan[LDDepositTx] =
+    deposit(ctx, wallet, DexContracts(ctx), poolBox, shares)
+
+  /** The same, into the pool of the ERG/token deployment `contracts`. */
+  def deposit(ctx: BlockchainContext,
+              wallet: NodeWallet,
+              contracts: LDContracts,
+              poolBox: InputUTXO,
               shares: Long): DexPlan[LDDepositTx] = {
     val p = LDLiquidityPool(poolBox)
     require(p.canDeposit, "the pool has no provision tokens left to hand out")
@@ -116,9 +134,9 @@ object LithosDexTransactions {
     // unmintable anywhere else, and it is why this cannot be quoted ahead of the box it will spend.
     val ownerNFT = poolBox.id
 
-    val poolOut = poolUTXO(DexContracts(ctx), p, p.afterDeposit(q.amountX, q.amountY, q.shares))
+    val poolOut = poolUTXO(contracts, p, p.afterDeposit(q.amountX, q.amountY, q.shares))
 
-    val provisionOut = provisionUTXO(DexContracts(ctx), p.provToken, q.entryX, q.entryY, ownerNFT, q.shares,
+    val provisionOut = provisionUTXO(contracts, p.provToken, q.entryX, q.entryY, ownerNFT, q.shares,
       LDHelpers.PROVISION_MIN)
     val ownerOut = ownerNftUTXO(ctx, wallet, p, ownerNFT, q.entryX, q.entryY, q.shares, q.amountX, q.amountY)
 
@@ -147,13 +165,21 @@ object LithosDexTransactions {
   def redeem(ctx: BlockchainContext,
              wallet: NodeWallet,
              poolBox: InputUTXO,
+             provision: Provision): DexPlan[LDRedeemTx] =
+    redeem(ctx, wallet, DexContracts(ctx), poolBox, provision)
+
+  /** The same, against the pool of the ERG/token deployment `contracts`. */
+  def redeem(ctx: BlockchainContext,
+             wallet: NodeWallet,
+             contracts: LDContracts,
+             poolBox: InputUTXO,
              provision: Provision): DexPlan[LDRedeemTx] = {
     val p = LDLiquidityPool(poolBox)
     val q = p.simRedeem(provision.shares)
     require(q.withinMinSupply,
       s"closing this provision would take supply under ${LDHelpers.MIN_SUPPLY}, which the pool refuses")
 
-    val poolOut = poolUTXO(DexContracts(ctx), p, p.afterRedeem(q))
+    val poolOut = poolUTXO(contracts, p, p.afterRedeem(q))
 
     // OUTPUTS(1) has to exist: the provision sits at INPUTS(1) and reads OUTPUTS(selfBoxIndex).
     val payout = UTXO(wallet.contract, q.amountX + provision.value,
@@ -165,10 +191,91 @@ object LithosDexTransactions {
       val walletInputs = funding
       val inputs = Seq(
         poolInput(poolBox, LDHelpers.POOL_REDEEM),
-        provisionInput(DexContracts(ctx), provision.box, LDHelpers.PROV_REDEEM)) ++ walletInputs
+        provisionInput(contracts, provision.box, LDHelpers.PROV_REDEEM)) ++ walletInputs
 
       val uTx = build(ctx, inputs, Seq(poolOut, payout), wallet,
         burn = Seq(Token(provision.ownerNFT, 1L)))
+      DexUnsigned(uTx, signed => LDRedeemTx(signed, q))
+    }
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  //  TOKEN/TOKEN DIRECT SPENDS — pool ops 0, 1 and 2
+  // ══════════════════════════════════════════════════════════════════════════
+
+  /**
+   * Swap against a token/token pool: `amountIn` of X when `xIn`, else of Y, for at least `minOutput` of the other.
+   * The pool's ERG is storage and never moves, so the wallet funds only the network fee and its change box.
+   */
+  def t2tSwap(ctx: BlockchainContext,
+              wallet: NodeWallet,
+              contracts: LDT2TContracts,
+              poolBox: InputUTXO,
+              amountIn: Long,
+              xIn: Boolean,
+              minOutput: Long): DexPlan[LDT2TSwapTx] = {
+    val p = LDT2TLiquidityPool(poolBox)
+    val q = p.simSwap(amountIn, xIn)
+    require(q.isExecutable,
+      s"the pool cannot fill this swap: ${q.tradedIn} reaches the curve for ${q.amountOut} out of a ${q.reserveOut} reserve")
+    require(q.amountOut >= minOutput,
+      s"the pool has moved since the quote: it would return ${q.amountOut}, below the $minOutput floor")
+    val out = LDT2TExecution.poolUTXO(contracts, poolBox, p.afterSwap(q))
+    funded(FUNDING_HEADROOM, Seq(Token(if (xIn) p.tokenX else p.tokenY, amountIn))) { funding =>
+      val uTx = build(ctx, poolInput(poolBox, LDHelpers.POOL_SWAP) +: funding, Seq(out), wallet)
+      DexUnsigned(uTx, signed => LDT2TSwapTx(signed, q))
+    }
+  }
+
+  /**
+   * Open a provision of exactly `shares` on a token/token pool. As on an ERG/token pool, the ownership NFT takes the
+   * pool box's id, the provision sits at output 1 and the NFT at output 2.
+   */
+  def t2tDeposit(ctx: BlockchainContext,
+                 wallet: NodeWallet,
+                 contracts: LDT2TContracts,
+                 poolBox: InputUTXO,
+                 shares: Long): DexPlan[LDT2TDepositTx] = {
+    val p = LDT2TLiquidityPool(poolBox)
+    require(p.canDeposit, "the pool has no provision tokens left to hand out")
+    val q = p.simDepositForShares(shares)
+    val ownerNFT = poolBox.id
+    val poolOut = LDT2TExecution.poolUTXO(contracts, poolBox, p.afterDeposit(q.amountX, q.amountY, q.shares))
+    val provisionOut = UTXO(contracts.provisionGuard, LDHelpers.PROVISION_MIN, Seq(Token(contracts.provToken, 1L)),
+      Seq(bigIntValue(q.entryX), bigIntValue(q.entryY), bytesValue(ownerNFT.getBytes), ErgoValue.of(q.shares)))
+    val ownerOut = UTXO(wallet.contract, OWNER_BOX_VALUE, Seq(Token(ownerNFT, 1L)))
+      .withReg(0, utf8(provisionNftName(ownerNFT)))
+      .withReg(1, utf8(s"LithosDex provision of ${q.shares} shares in pool ${p.poolNFT}"))
+      .withReg(2, utf8("0"))
+    funded(LDHelpers.PROVISION_MIN + OWNER_BOX_VALUE + FUNDING_HEADROOM,
+      Seq(Token(p.tokenX, q.amountX), Token(p.tokenY, q.amountY))) { funding =>
+      val uTx = build(ctx, poolInput(poolBox, LDHelpers.POOL_DEPOSIT) +: funding,
+        Seq(poolOut, provisionOut, ownerOut), wallet)
+      DexUnsigned(uTx, signed => LDT2TDepositTx(signed, q, signed.getOutputsToSpend.get(1).getId.toString, ownerNFT))
+    }
+  }
+
+  /**
+   * Close a token/token provision: both reserves' share out, the provision token home, the ownership NFT burned.
+   * Fees settled but not claimed are forfeited, as on an ERG/token pool; the caller decides from the quote.
+   */
+  def t2tRedeem(ctx: BlockchainContext,
+                wallet: NodeWallet,
+                contracts: LDT2TContracts,
+                poolBox: InputUTXO,
+                provision: Provision): DexPlan[LDRedeemTx] = {
+    val p = LDT2TLiquidityPool(poolBox)
+    val q = p.simRedeem(provision.shares)
+    require(q.withinMinSupply,
+      s"closing this provision would take supply under ${LDHelpers.MIN_SUPPLY}, which the pool refuses")
+    val poolOut = LDT2TExecution.poolUTXO(contracts, poolBox, p.afterRedeem(q))
+    // OUTPUTS(1) has to exist: the provision sits at INPUTS(1) and reads OUTPUTS(selfBoxIndex)
+    val payout = UTXO(wallet.contract, provision.value,
+      Seq(Token(p.tokenX, q.amountX), Token(p.tokenY, q.amountY)).filter(_.amount > 0))
+    funded(FUNDING_HEADROOM, Seq(Token(provision.ownerNFT, 1L))) { funding =>
+      val inputs = Seq(poolInput(poolBox, LDHelpers.POOL_REDEEM),
+        LDT2TExecution.provisionInput(contracts, provision.box, LDHelpers.PROV_REDEEM)) ++ funding
+      val uTx = build(ctx, inputs, Seq(poolOut, payout), wallet, burn = Seq(Token(provision.ownerNFT, 1L)))
       DexUnsigned(uTx, signed => LDRedeemTx(signed, q))
     }
   }
@@ -652,6 +759,16 @@ case class LDDepositTx(tx: SignedTransaction,
 
 case class LDRedeemTx(tx: SignedTransaction,
                       quote: lithosdex.LDRedeemQuote) extends LDFundedTx
+
+/** @param quote the swap as the token/token pool would execute it, quoted against the box being spent */
+case class LDT2TSwapTx(tx: SignedTransaction,
+                       quote: lithosdex.LDT2TSwapQuote) extends LDFundedTx
+
+/** As [[LDDepositTx]], on a token/token pool. */
+case class LDT2TDepositTx(tx: SignedTransaction,
+                          quote: lithosdex.LDT2TDepositQuote,
+                          provisionBoxId: String,
+                          ownerNFT: ErgoId) extends LDFundedTx
 
 case class LDFlushTx(tx: SignedTransaction,
                      flushedX: Long,

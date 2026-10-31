@@ -1145,7 +1145,7 @@ paths:
     get:
       summary: Every LithosDex pool
       description: >
-        Every LithosDex pool on chain, ERG/token and token/token, verified pools first, then newest
+        Every LithosDex pool on chain, ERG/token and token/token, ERG:LIT first, then verified pools, then newest
         first. Anyone can create a pool. A pool on the client's verified list was checked by hand; any
         other pool is checked against the facts its contracts take on trust at genesis, and
         `problems` lists each one it breaks. A pool with problems can be drained: do not trade with it.
@@ -1263,6 +1263,367 @@ paths:
               schema:
                 $ref: '#/components/schemas/ApiError'
 
+  /dex/pools/{poolNft}/swap/check:
+    post:
+      summary: Quote a direct swap on any pool
+      description: >
+        What a swap spending the pool now would return, with its price impact and fees. No executor is paid;
+        the wallet pays the network fee.
+      operationId: checkLDPoolDirectSwap
+      tags:
+        - lithosdex
+      parameters:
+        - name: poolNft
+          in: path
+          required: true
+          description: The pool's NFT id, 64 hex characters
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LDPoolSwapRequest'
+      responses:
+        '200':
+          description: The quote
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LDPoolDirectSwapQuote'
+        '400':
+          description: "The request is malformed, names a token the pool does not hold, or leaves out an acknowledgement it needs."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '404':
+          description: "No LithosDex pool with that NFT, or no live provision with that id."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '422':
+          description: "The pool can be drained, the pool cannot fill this at its depth or above the floor, or the wallet cannot cover it."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '503':
+          description: "Node or wallet unavailable. Retry."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+  /dex/pools/{poolNft}/swap:
+    post:
+      summary: Swap directly on any pool
+      description: >
+        Spends the pool now rather than placing an order, refused when it returns less than `minOutput`. Gated
+        like a swap order: a pool that can be drained takes none, and an unverified one needs
+        `acknowledgeUnverified`. A miner batching orders may replace an unconfirmed direct spend in its own
+        block, after which it has to be sent again.
+      operationId: directLDPoolSwap
+      security:
+        - ApiKeyAuth: []
+      tags:
+        - lithosdex
+      parameters:
+        - name: poolNft
+          in: path
+          required: true
+          description: The pool's NFT id, 64 hex characters
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LDPoolDirectSwapRequest'
+      responses:
+        '200':
+          description: The transaction sent
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LDPoolDirectResult'
+        '400':
+          description: "The request is malformed, names a token the pool does not hold, or leaves out an acknowledgement it needs."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '403':
+          description: "Missing or wrong api_key"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '404':
+          description: "No LithosDex pool with that NFT, or no live provision with that id."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '409':
+          description: "The pool or provision moved since the quote, or another LithosDex mutation is running. Re-quote and resend."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LDStateChangedResponse'
+        '422':
+          description: "The pool can be drained, the pool cannot fill this at its depth or above the floor, or the wallet cannot cover it."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '503':
+          description: "Node or wallet unavailable. Retry."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+  /dex/pools/{poolNft}/deposit/check:
+    post:
+      summary: Quote a direct deposit on any pool
+      description: >
+        The most shares the offered amounts buy now, what the pool takes for them and what stays in the wallet.
+      operationId: checkLDPoolDirectDeposit
+      tags:
+        - lithosdex
+      parameters:
+        - name: poolNft
+          in: path
+          required: true
+          description: The pool's NFT id, 64 hex characters
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LDPoolDepositRequest'
+      responses:
+        '200':
+          description: The quote
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LDPoolDirectDepositQuote'
+        '400':
+          description: "The request is malformed, names a token the pool does not hold, or leaves out an acknowledgement it needs."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '404':
+          description: "No LithosDex pool with that NFT, or no live provision with that id."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '422':
+          description: "The pool can be drained, the pool cannot fill this at its depth or above the floor, or the wallet cannot cover it."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '503':
+          description: "Node or wallet unavailable. Retry."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+  /dex/pools/{poolNft}/deposit:
+    post:
+      summary: Deposit directly on any pool
+      description: >
+        Opens a provision now for the most shares the offer buys, refused below `minShares`. The owner NFT
+        arrives in this wallet in the same transaction. Gated like a deposit order.
+      operationId: directLDPoolDeposit
+      security:
+        - ApiKeyAuth: []
+      tags:
+        - lithosdex
+      parameters:
+        - name: poolNft
+          in: path
+          required: true
+          description: The pool's NFT id, 64 hex characters
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LDPoolDirectDepositRequest'
+      responses:
+        '200':
+          description: The transaction sent
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LDPoolDirectResult'
+        '400':
+          description: "The request is malformed, names a token the pool does not hold, or leaves out an acknowledgement it needs."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '403':
+          description: "Missing or wrong api_key"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '404':
+          description: "No LithosDex pool with that NFT, or no live provision with that id."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '409':
+          description: "The pool or provision moved since the quote, or another LithosDex mutation is running. Re-quote and resend."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LDStateChangedResponse'
+        '422':
+          description: "The pool can be drained, the pool cannot fill this at its depth or above the floor, or the wallet cannot cover it."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '503':
+          description: "Node or wallet unavailable. Retry."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+  /dex/pools/{poolNft}/redeem/check:
+    post:
+      summary: Quote a direct redemption on any pool
+      description: >
+        What closing the provision now returns, and the fees the vault owes it that a direct redemption loses.
+      operationId: checkLDPoolDirectRedeem
+      tags:
+        - lithosdex
+      parameters:
+        - name: poolNft
+          in: path
+          required: true
+          description: The pool's NFT id, 64 hex characters
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LDPoolRedeemRequest'
+      responses:
+        '200':
+          description: The quote
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LDPoolDirectRedeemQuote'
+        '400':
+          description: "The request is malformed, names a token the pool does not hold, or leaves out an acknowledgement it needs."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '404':
+          description: "No LithosDex pool with that NFT, or no live provision with that id."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '422':
+          description: "The pool can be drained, the pool cannot fill this at its depth or above the floor, or the wallet cannot cover it."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '503':
+          description: "Node or wallet unavailable. Retry."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+  /dex/pools/{poolNft}/redeem:
+    post:
+      summary: Redeem a provision directly on any pool
+      description: >
+        Closes one of this wallet's provisions now. Open on every pool, whatever its genesis. Fees the vault
+        owes the provision are lost with its box, so a provision owed any needs `acknowledgeUnclaimedFees`;
+        claim them first to keep them.
+      operationId: directLDPoolRedeem
+      security:
+        - ApiKeyAuth: []
+      tags:
+        - lithosdex
+      parameters:
+        - name: poolNft
+          in: path
+          required: true
+          description: The pool's NFT id, 64 hex characters
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LDPoolDirectRedeemRequest'
+      responses:
+        '200':
+          description: The transaction sent
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LDPoolDirectResult'
+        '400':
+          description: "The request is malformed, names a token the pool does not hold, or leaves out an acknowledgement it needs."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '403':
+          description: "Missing or wrong api_key"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '404':
+          description: "No LithosDex pool with that NFT, or no live provision with that id."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '409':
+          description: "The pool or provision moved since the quote, or another LithosDex mutation is running. Re-quote and resend."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LDStateChangedResponse'
+        '422':
+          description: "The pool can be drained, the pool cannot fill this at its depth or above the floor, or the wallet cannot cover it."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '503':
+          description: "Node or wallet unavailable. Retry."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
   /dex/pools/{poolNft}/provisions:
     get:
       summary: List your provisions on any pool
@@ -7994,6 +8355,16 @@ components:
         networkFee:
           type: string
           description: "The placement's own fee"
+        priceImpact:
+          type: number
+          format: double
+          description: "How far the fill falls short of the pool's price before it, fees included, as a fraction"
+        protocolFee:
+          type: string
+          description: "Of tokenIn, set aside for the pool's providers"
+        ammFee:
+          type: string
+          description: "Of tokenIn, the curve's own fee, which stays in the reserves"
 
     LDPoolDepositRequest:
       description: "A deposit order quote request on any pool. X is ERG for an ERG/token pool."
@@ -8165,6 +8536,181 @@ components:
         networkFee:
           type: string
 
+    LDPoolDirectSwapRequest:
+      description: A direct swap against any pool, spending it now rather than placing an order.
+      type: object
+      x-tags: lithosdex
+      required: [tokenIn, amountIn, minOutput]
+      properties:
+        tokenIn:
+          type: string
+          description: "The token sold: `ERG` or the pool's token on an ERG/token pool, either token on a token/token pool"
+        amountIn:
+          type: string
+        minOutput:
+          type: string
+          description: The least of the other side to accept, checked against the pool box this spends. Must be positive.
+        expectedPoolBoxId:
+          type: string
+          description: The pool box the quote was read from. A pool that has moved since answers 409.
+        acknowledgeUnverified:
+          type: boolean
+          description: Required on a pool the verified list does not name.
+    LDPoolDirectSwapQuote:
+      description: What a direct swap would return against the pool now.
+      type: object
+      x-tags: lithosdex
+      required: [poolNFT, tokenIn, tokenOut, amountIn, amountOut, executable, priceImpact, protocolFee, ammFee, networkFee, poolBoxId]
+      properties:
+        poolNFT:
+          type: string
+        tokenIn:
+          type: string
+        tokenOut:
+          type: string
+        amountIn:
+          type: string
+        amountOut:
+          type: string
+        minAmountIn:
+          type: string
+          description: The least input that still buys `amountOut`. Absent when nothing comes out.
+        executable:
+          type: boolean
+        priceImpact:
+          type: number
+          format: double
+          description: How far the swap falls short of the pool's price before it, fees included, as a fraction.
+        protocolFee:
+          type: string
+          description: Of `tokenIn`, set aside for the pool's providers.
+        ammFee:
+          type: string
+          description: Of `tokenIn`, the curve's own fee, which stays in the reserves.
+        networkFee:
+          type: string
+        poolBoxId:
+          type: string
+          description: The pool box quoted against, to send back as `expectedPoolBoxId`.
+    LDPoolDirectDepositRequest:
+      description: A direct deposit offering both sides. The pool takes the balanced part; the rest stays in the wallet.
+      type: object
+      x-tags: lithosdex
+      required: [amountX, amountY, minShares]
+      properties:
+        amountX:
+          type: string
+          description: nanoERG on an ERG/token pool
+        amountY:
+          type: string
+        minShares:
+          type: string
+          description: Refused when the pool would issue fewer. Must be positive.
+        expectedPoolBoxId:
+          type: string
+        acknowledgeUnverified:
+          type: boolean
+    LDPoolDirectDepositQuote:
+      description: What a direct deposit would take and issue against the pool now.
+      type: object
+      x-tags: lithosdex
+      required: [poolNFT, shares, takenX, takenY, excessX, excessY, shareOfSupply, provisionBoxValue, totalErgRequired, networkFee, poolBoxId]
+      properties:
+        poolNFT:
+          type: string
+        shares:
+          type: string
+        takenX:
+          type: string
+        takenY:
+          type: string
+        excessX:
+          type: string
+        excessY:
+          type: string
+        shareOfSupply:
+          type: number
+          format: double
+        provisionBoxValue:
+          type: string
+          description: nanoERG in the new provision box, returned on redemption
+        totalErgRequired:
+          type: string
+          description: nanoERG leaving the wallet, X itself included on an ERG/token pool
+        networkFee:
+          type: string
+        poolBoxId:
+          type: string
+    LDPoolDirectRedeemRequest:
+      description: A direct redemption of one of this wallet's provisions.
+      type: object
+      x-tags: lithosdex
+      required: [provisionBoxId]
+      properties:
+        provisionBoxId:
+          type: string
+        acknowledgeUnclaimedFees:
+          type: boolean
+          description: Required when the vault owes the provision fees, which the redemption destroys.
+        expectedPoolBoxId:
+          type: string
+    LDPoolDirectRedeemQuote:
+      description: What a direct redemption returns now, and the fees it would lose.
+      type: object
+      x-tags: lithosdex
+      required: [poolNFT, provisionBoxId, shares, amountX, amountY, ergReturned, unclaimedX, unclaimedY, withinMinSupply, networkFee, poolBoxId]
+      properties:
+        poolNFT:
+          type: string
+        provisionBoxId:
+          type: string
+        shares:
+          type: string
+        amountX:
+          type: string
+        amountY:
+          type: string
+        ergReturned:
+          type: string
+          description: The provision box's ERG, which comes back beside the reserves
+        unclaimedX:
+          type: string
+          description: Fees the vault owes the provision now, lost when its box is spent
+        unclaimedY:
+          type: string
+        withinMinSupply:
+          type: boolean
+        networkFee:
+          type: string
+        poolBoxId:
+          type: string
+    LDPoolDirectResult:
+      description: >
+        A direct spend sent. For a swap `amountX` is what was sold and `amountY` what came back; for a deposit
+        and a redemption, X and Y in pool order.
+      type: object
+      x-tags: lithosdex
+      required: [outcome, txId, poolNFT, kind, amountX, amountY]
+      properties:
+        outcome:
+          type: string
+        txId:
+          type: string
+        poolNFT:
+          type: string
+        kind:
+          type: string
+          enum: [SWAP, DEPOSIT, REDEEM]
+        amountX:
+          type: string
+        amountY:
+          type: string
+        shares:
+          type: string
+        ownerNFT:
+          type: string
+        provisionBoxId:
+          type: string
     LDPoolOrderPlaced:
       description: "A placed order"
       type: object
