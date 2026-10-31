@@ -48,6 +48,7 @@ class Module(environment: Environment, configuration: Configuration) extends Abs
 
     // Bindings
     bind(classOf[stats.DexStatsSource]).to(classOf[stats.NodeDexStatsSource])
+    bind(classOf[stats.PoolStatsSource]).to(classOf[stats.NodeDexStatsSource])
     bindActor(classOf[stats.StatsCollector], "stats-collector", p =>
       p.withDispatcher("lithos-contexts.stats-dispatcher").withMailbox("stats-mailbox"))
     bindActor(classOf[StateSnapshotActor], "state-snapshot", p => p.withDispatcher("lithos-contexts.database-dispatcher"))

@@ -24,6 +24,24 @@ trait LDPoolsApi {
   /** GET /dex/pools/:poolNft/orders: this wallet's orders on the pool */
   def listPoolOrders(poolNft: String): LDOrderList
 
+  /** POST /dex/provisions/nft: which tokens own a provision, on any pool */
+  def lookupNfts(request: LDNftLookupRequest): LDNftLookupList
+
+  /** GET /dex/pools/:poolNft/provisions: this wallet's provisions on the pool */
+  def listPoolProvisions(poolNft: String): LDProvisionList
+
+  /** POST /dex/pools/:poolNft/provisions/:boxId/claim */
+  def claimPoolProvision(poolNft: String, boxId: String, request: LDClaimRequest): LDClaimResult
+
+  /** POST /dex/pools/:poolNft/flush/check */
+  def checkPoolFlush(poolNft: String): LDFlushCheck
+
+  /** One provision on the pool: its shares and both entries, read from its own box. */
+  def provisionTerms(poolNft: String, boxId: String): (Long, BigInt, BigInt)
+
+  /** POST /dex/pools/:poolNft/flush */
+  def flushPool(poolNft: String, request: LDFlushRequest): LDFlushResult
+
   /** POST /dex/pools/:poolNft/orders/swap/check */
   def checkSwapOrder(poolNft: String, request: LDPoolSwapRequest): LDPoolSwapQuote
 

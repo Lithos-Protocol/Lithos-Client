@@ -1,6 +1,6 @@
 package transactions.engine.execution
 
-import api.LithosApiErrors.{LithosBadRequest, LithosNotFound, LithosUnavailable, LithosUnprocessable}
+import api.LithosApiErrors.{LithosBadRequest, LithosNotFound, LithosStateChanged, LithosUnavailable, LithosUnprocessable}
 import api.models._
 import api.{IndexedPool, LDPoolIndex}
 import configs.{LithosDexOrdersConfig, NodeContext}
@@ -9,13 +9,14 @@ import lithosdex.states.{LDFeeValue, LDT2TFeeValue}
 import lithosdex.{LDHelpers, LDLiquidityPool, LDT2TLiquidityPool}
 import mutations.NodeWallet
 import node.NodeApi
+import node.model.MempoolOptions
 import org.ergoplatform.appkit.BlockchainContext
 import org.ergoplatform.sdk.ErgoId
 import state.synchronization.CompleteMempool
 import transactions.batching.lithosdex._
 import transactions.engine.EngineBroadcast
 import transactions.engine.wallet.{EngineFunding, FundingAllocation, WalletInventory}
-import work.lithos.mutations.{Eip27Adjustment, Token}
+import work.lithos.mutations.{Eip27Adjustment, InputUTXO, Token}
 
 import scala.util.Try
 import scala.util.control.NonFatal
@@ -36,7 +37,7 @@ class DexPoolExecution(nodeContext: NodeContext, walletSelector: EngineFunding, 
                        orderDefaults: LithosDexOrdersConfig = LithosDexOrdersConfig.Default,
                        alive: () => Boolean = () => true,
                        heldPlacements: () => Seq[CompleteMempool.MempoolTx] = () => Seq.empty) {
-  import DexPoolExecution.{Fees, exact, positive}
+  import DexPoolExecution.{Fees, Live, LiveN2T, LiveT2T, exact, positive}
 
   private def nodeApi: NodeApi = nodeContext.getNodeApi
   private def wallet: NodeWallet = nodeContext.getNodeWallet
@@ -226,15 +227,190 @@ class DexPoolExecution(nodeContext: NodeContext, walletSelector: EngineFunding, 
     }
   }
 
+  // ── this wallet's provisions ──────────────────────────────────────────────
+
+  /**
+   * This wallet's provisions on the pool: those whose ownership NFT it holds, and those whose NFT waits in one of its
+   * redeem orders there. Only the pool's own guard is scanned, and a box is decoded only when its R6 names one of
+   * those NFTs. Never partial: a scan cut short at its ceiling refuses to answer.
+   */
+  def listProvisions(poolNft: String): LDProvisionList = withPool(poolNft) { (ctx, live) =>
+    val inOrders = LDOrderBook.redeemOrdersOn(nodeApi, live.indexed.nft, wallet.signableTrees,
+      tokenToken = live.isInstanceOf[LiveT2T])
+    val owners = LDBoxes.walletTokenIds(nodeApi) ++ inOrders.keySet
+    def owned(guard: String, provToken: String): Seq[LDBoxes.Provision] = {
+      val (found, complete) = LDBoxes.provisionsOwnedBy(ctx, nodeApi, guard, provToken, owners, MempoolOptions.WithMempool)
+      if (!complete) throw new LDBoxes.IndexTruncatedException(
+        s"pool ${live.indexed.nft} has more provisions than one scan reads, so this answer would be partial")
+      found
+    }
+    val vaultBox = vault(ctx, live)
+    val described = live match {
+      case n: LiveN2T =>
+        val v = LDFeeValue.fromBox(vaultBox, 0, ctx.getHeight)
+        owned(n.contracts.provisionGuard.ergoTreeHex, n.contracts.provToken.toString).map(p => LDOrderViews.provision(p,
+          n.pool.feesAccrued(p.shares, p.entryX, p.entryY), v.owed(p.shares, p.entryX, p.entryY),
+          v.canClaim(p.entryX, p.entryY), n.pool.shareOfSupply(p.shares)))
+      case t: LiveT2T =>
+        val v = LDT2TFeeValue.fromBox(vaultBox, 0, ctx.getHeight)
+        owned(t.contracts.provisionGuard.ergoTreeHex, t.contracts.provToken.toString).map(p => LDOrderViews.provision(p,
+          t.pool.feesAccrued(p.shares, p.entryX, p.entryY), v.owed(p.shares, p.entryX, p.entryY),
+          v.canClaim(p.entryX, p.entryY), t.pool.shareOfSupply(p.shares)))
+    }
+    // A provision whose NFT waits in a redeem order cannot be claimed until that order fills or is cancelled
+    LDProvisionList(described.map { p =>
+      val order = inOrders.get(p.ownerNFT)
+      p.copy(canClaim = p.canClaim && order.isEmpty, redeemOrderBoxId = order)
+    })
+  }
+
+  // ── provision NFTs ────────────────────────────────────────────────────────
+
+  /**
+   * Which of `tokenIds` own a provision, each with its pool, the provision and that provision's share of the reserves.
+   * An ownership NFT's id is the id of the pool box its deposit spent, so one indexed box read rules out any other
+   * token. The rest are grouped by pool, whose guard is scanned once for all of them. A token whose pool the index
+   * does not list reads as no provision NFT.
+   */
+  def lookupNfts(tokenIds: Seq[String]): Map[String, (IndexedPool, LDProvision, Long, Long)] = {
+    val ids = tokenIds.map(_.toLowerCase).distinct
+    if (ids.size > DexPoolExecution.MaxNftLookups) throw LithosBadRequest(
+      s"at most ${DexPoolExecution.MaxNftLookups} token ids per request, got ${ids.size}")
+    ids.find(!_.matches("[0-9a-f]{64}")).foreach(id => throw LithosBadRequest(s"'$id' is not a 64-character token id"))
+    val snapshot = index.snapshot()
+    if (snapshot.status != "ready") throw LithosUnavailable("the pool index is still building; retry shortly")
+    val byNft = snapshot.pools.map(p => p.nft -> p).toMap
+    def treeOf(p: IndexedPool) = p.n2t.map(_.liquidityPool.ergoTreeHex).orElse(p.t2t.map(_.liquidityPool.ergoTreeHex))
+    val poolOf = ids.flatMap { id =>
+      val box = nodeApi.indexedBoxById(id).getOrElse(throw LithosUnavailable(s"could not read box $id from the node"))
+      for {
+        b <- box if b.boxId == id
+        first <- b.box.assets.headOption
+        pool <- byNft.get(first.tokenId) if treeOf(pool).contains(b.box.ergoTree)
+      } yield id -> pool
+    }
+    poolOf.groupBy(_._2.nft).flatMap { case (nft, group) =>
+      withPool(nft) { (ctx, live) =>
+        val owners = group.map(_._1).toSet
+        val (guard, provToken) = live match {
+          case n: LiveN2T => (n.contracts.provisionGuard.ergoTreeHex, n.contracts.provToken.toString)
+          case t: LiveT2T => (t.contracts.provisionGuard.ergoTreeHex, t.contracts.provToken.toString)
+        }
+        val (found, complete) = LDBoxes.provisionsOwnedBy(ctx, nodeApi, guard, provToken, owners, MempoolOptions.WithMempool)
+        if (!complete) throw new LDBoxes.IndexTruncatedException(
+          s"pool $nft has more provisions than one scan reads, so this answer would be partial")
+        val vaultBox = vault(ctx, live)
+        found.map { p =>
+          val (described, x, y) = live match {
+            case n: LiveN2T =>
+              val v = LDFeeValue.fromBox(vaultBox, 0, ctx.getHeight)
+              val q = n.pool.simRedeem(p.shares)
+              (LDOrderViews.provision(p, n.pool.feesAccrued(p.shares, p.entryX, p.entryY), v.owed(p.shares, p.entryX,
+                p.entryY), v.canClaim(p.entryX, p.entryY), n.pool.shareOfSupply(p.shares)), q.amountX, q.amountY)
+            case t: LiveT2T =>
+              val v = LDT2TFeeValue.fromBox(vaultBox, 0, ctx.getHeight)
+              val q = t.pool.simRedeem(p.shares)
+              (LDOrderViews.provision(p, t.pool.feesAccrued(p.shares, p.entryX, p.entryY), v.owed(p.shares, p.entryX,
+                p.entryY), v.canClaim(p.entryX, p.entryY), t.pool.shareOfSupply(p.shares)), q.amountX, q.amountY)
+          }
+          p.ownerNFT.toString -> ((live.indexed, described, x, y))
+        }.toMap
+      }
+    }
+  }
+
+  /** One provision on the pool, by box id, checked to be under the pool's own guard with its provision token. */
+  def provisionOf(poolNft: String, boxId: String): LDBoxes.Provision =
+    withPool(poolNft)((ctx, live) => provision(ctx, live, boxId))
+
+  // ── flush and claim ───────────────────────────────────────────────────────
+
+  /** What a flush of the pool would move into its vault now. */
+  def checkFlush(poolNft: String): LDFlushCheck = withPool(poolNft) { (ctx, live) =>
+    val box = vault(ctx, live)
+    val (pending, acc, canFlush) = live match {
+      case n: LiveN2T => ((n.pool.pendingX, n.pool.pendingY), (n.pool.accX, n.pool.accY), n.pool.canFlush)
+      case t: LiveT2T => ((t.pool.pendingX, t.pool.pendingY), (t.pool.accX, t.pool.accY), t.pool.canFlush)
+    }
+    val (vaultAcc, balance) = live match {
+      case _: LiveN2T => val v = LDFeeValue.fromBox(box, 0, ctx.getHeight); ((v.accX, v.accY), (v.balanceX, v.balanceY))
+      case _: LiveT2T => val v = LDT2TFeeValue.fromBox(box, 0, ctx.getHeight); ((v.accX, v.accY), (v.balanceX, v.balanceY))
+    }
+    LDFlushCheck(LDAmounts(pending._1), LDAmounts(pending._2), canFlush, LDAmounts(acc._1), LDAmounts(acc._2),
+      LDAmounts(vaultAcc._1), LDAmounts(vaultAcc._2), LDAmounts(balance._1 + pending._1), LDAmounts(balance._2 + pending._2),
+      lastFlushHeight = None, currentHeight = ctx.getHeight)
+  }
+
+  /**
+   * Moves the pool's pending fees into its vault, the network fee paid from this wallet. Open on every pool: it only
+   * moves fees already owed to that pool's providers into the box that pays them. Spends the vault, so it takes the
+   * LithosDex mutation lock.
+   */
+  def flush(poolNft: String, request: LDFlushRequest): LDFlushResult =
+    DexAPIExecution.mutating("this flush", mutationWaitMs) {
+      withPool(poolNft) { (ctx, live) =>
+        expectBox("pool", request.expectedPoolBoxId, live.box, id => LithosStateChanged(_, poolBoxId = Some(id)))
+        val vaultBox = vault(ctx, live)
+        expectBox("vault", request.expectedVaultBoxId, vaultBox, id => LithosStateChanged(_, vaultBoxId = Some(id)))
+        val canFlush = live match { case n: LiveN2T => n.pool.canFlush; case t: LiveT2T => t.pool.canFlush }
+        if (!canFlush) throw LithosBadRequest(
+          "nothing is pending: the pool refuses a flush that moves nothing. Fees accrue on swaps.")
+        val built = fund(live match {
+          case n: LiveN2T => LithosDexTransactions.flush(ctx, wallet, n.contracts, n.box, vaultBox)
+          case t: LiveT2T => LithosDexTransactions.t2tFlush(ctx, wallet, t.contracts, t.box, vaultBox)
+        }, (_: LDFlushTx) => ())
+        val sent = send(built)
+        LDFlushResult(LDAmounts(built.value.flushedX), LDAmounts(built.value.flushedY), sent.txId, outcome = sent.outcome)
+      }
+    }
+
+  /**
+   * Settles one of this wallet's provisions on the pool against its vault. Needs the provision's owner NFT in the
+   * wallet, and a vault flushed since the provision last claimed. Open on every pool, as redeems are.
+   */
+  def claim(poolNft: String, boxId: String, request: LDClaimRequest): LDClaimResult =
+    DexAPIExecution.mutating("this claim", mutationWaitMs) {
+      withPool(poolNft) { (ctx, live) =>
+        val minX = LDAmounts.parseLong("minAmountX", request.minAmountX)
+        val minY = LDAmounts.parseLong("minAmountY", request.minAmountY)
+        val vaultBox = vault(ctx, live)
+        expectBox("vault", request.expectedVaultBoxId, vaultBox, id => LithosStateChanged(_, vaultBoxId = Some(id)))
+        val prov = provision(ctx, live, boxId)
+        request.expectedProvisionBoxId.filter(_ != prov.boxId).foreach(stale => throw LithosStateChanged(
+          s"provision $stale has been spent; its successor is ${prov.boxId}", provisionBoxId = Some(prov.boxId)))
+        val (canClaim, owed) = live match {
+          case _: LiveN2T => val v = LDFeeValue.fromBox(vaultBox, 0, ctx.getHeight)
+            (v.canClaim(prov.entryX, prov.entryY), v.owed(prov.shares, prov.entryX, prov.entryY))
+          case _: LiveT2T => val v = LDT2TFeeValue.fromBox(vaultBox, 0, ctx.getHeight)
+            (v.canClaim(prov.entryX, prov.entryY), v.owed(prov.shares, prov.entryX, prov.entryY))
+        }
+        if (!canClaim) throw LithosBadRequest(s"provision $boxId has nothing to settle: its entry is level with the " +
+          "vault's accumulator. Flush the pool first, or wait for one.")
+        minX.filter(_ > owed._1).foreach(m => throw LithosUnprocessable(s"the claim pays ${owed._1} of X, below minAmountX $m"))
+        minY.filter(_ > owed._2).foreach(m => throw LithosUnprocessable(s"the claim pays ${owed._2} of Y, below minAmountY $m"))
+        val built = fund(live match {
+          case n: LiveN2T => LithosDexTransactions.claim(ctx, wallet, n.contracts, vaultBox, Seq(prov))
+          case t: LiveT2T => LithosDexTransactions.t2tClaim(ctx, wallet, t.contracts, vaultBox, prov)
+        }, (_: LDClaimTx) => ())
+        // The vault sits at input 0 and the provision at 1, so output 1 is the provision's successor
+        val successor = built.value.tx.getOutputsToSpend.get(1).getId.toString
+        val sent = send(built)
+        LDClaimResult(LDAmounts(built.value.claimedX), LDAmounts(built.value.claimedY), successor, sent.txId,
+          outcome = sent.outcome)
+      }
+    }
+
+  /** Refuses a request quoted against a box that has since moved, naming the box that replaced it. */
+  private def expectBox(what: String, expected: Option[String], box: InputUTXO,
+                        changed: String => String => LithosStateChanged): Unit =
+    expected.filter(_ != box.id.toString).foreach { stale =>
+      throw changed(box.id.toString)(s"the $what has moved: quoted against $stale, now ${box.id}")
+    }
+
   /** A complete, fresh mempool observation, which order statuses are read from. */
   protected def mempoolSnapshot(): CompleteMempool.Snapshot = LDOrderViews.mempoolSnapshot(walletSelector.walletRef)
 
   // ── the pool ──────────────────────────────────────────────────────────────
-
-  /** A pool the index lists, with its box read live. */
-  private sealed trait Live { def indexed: IndexedPool }
-  private final case class LiveN2T(indexed: IndexedPool, contracts: LDContracts, pool: LDLiquidityPool) extends Live
-  private final case class LiveT2T(indexed: IndexedPool, contracts: LDT2TContracts, pool: LDT2TLiquidityPool) extends Live
 
   private def withPool[A](poolNft: String)(f: (BlockchainContext, Live) => A): A = {
     val snapshot = index.snapshot()
@@ -245,11 +421,9 @@ class DexPoolExecution(nodeContext: NodeContext, walletSelector: EngineFunding, 
     nodeContext.getClient.execute { ctx =>
       val live = (indexed.n2t, indexed.t2t) match {
         case (Some(c), _) =>
-          LiveN2T(indexed, c, LDLiquidityPool(LDBoxes.singletonBox(ctx, nodeApi, c.poolNFT, c.liquidityPool.ergoTreeHex,
-            "liquidity pool")))
+          LiveN2T(indexed, c, LDBoxes.singletonBox(ctx, nodeApi, c.poolNFT, c.liquidityPool.ergoTreeHex, "liquidity pool"))
         case (_, Some(c)) =>
-          LiveT2T(indexed, c, LDT2TLiquidityPool(LDBoxes.singletonBox(ctx, nodeApi, c.poolNFT,
-            c.liquidityPool.ergoTreeHex, "liquidity pool")))
+          LiveT2T(indexed, c, LDBoxes.singletonBox(ctx, nodeApi, c.poolNFT, c.liquidityPool.ergoTreeHex, "liquidity pool"))
         case _ => throw new IllegalStateException(s"pool $poolNft was indexed without a deployment")
       }
       f(ctx, live)
@@ -311,9 +485,7 @@ class DexPoolExecution(nodeContext: NodeContext, walletSelector: EngineFunding, 
       if (!reads) throw new IllegalStateException(
         s"the order box ${tx.order.id} does not read back as this wallet's order on pool ${live.indexed.nft}")
     })
-    val operation = "dex:" + transactions.candidate.BlockTxMessages.CandidateTx.txId(built.value.tx)
-    val result = new EngineBroadcast(walletSelector.walletRef, nodeApi)(walletSelector.executionContext)
-      .send(built.value.tx, built.reservation.toSeq, operation, alive)
+    val result = send(built)
     val redeem = kind == "REDEEM"
     LDPoolOrderPlaced(result.outcome, result.txId, live.indexed.nft, kind, built.value.order.id.toString,
       if (redeem) Some(LDAmounts(built.value.claimedX)) else None,
@@ -321,10 +493,17 @@ class DexPoolExecution(nodeContext: NodeContext, walletSelector: EngineFunding, 
       built.value.provisionSuccessor)
   }
 
-  private final case class Funded(value: LDOrderTx, reservation: Option[FundingAllocation])
+  private final case class Funded[A <: LDFundedTx](value: A, reservation: Option[FundingAllocation])
+
+  /** Sends a signed transaction through the engine, which holds its reservation until the outcome is known. */
+  private def send(built: Funded[_ <: LDFundedTx]) = {
+    val operation = "dex:" + transactions.candidate.BlockTxMessages.CandidateTx.txId(built.value.tx)
+    new EngineBroadcast(walletSelector.walletRef, nodeApi)(walletSelector.executionContext)
+      .send(built.value.tx, built.reservation.toSeq, operation, alive)
+  }
 
   /** Reserves what `plan` needs, builds, signs and checks it, releasing the reservation if any step throws. */
-  private def fund(plan: DexPlan[LDOrderTx], verify: LDOrderTx => Unit): Funded = {
+  private def fund[A <: LDFundedTx](plan: DexPlan[A], verify: A => Unit): Funded[A] = {
     require(alive(), "engine attempt was superseded")
     val reservation =
       if (plan.value == 0L && plan.tokens.isEmpty) None else Some(walletSelector.reserve(plan.value, plan.tokens))
@@ -347,7 +526,19 @@ class DexPoolExecution(nodeContext: NodeContext, walletSelector: EngineFunding, 
 /** Request fields every `/dex/pools` placement reads the same way. */
 object DexPoolExecution {
 
+  /** A pool the index lists, with its box read live. */
+  private sealed trait Live { def indexed: IndexedPool; def box: InputUTXO }
+  private final case class LiveN2T(indexed: IndexedPool, contracts: LDContracts, box: InputUTXO) extends Live {
+    val pool: LDLiquidityPool = LDLiquidityPool(box)
+  }
+  private final case class LiveT2T(indexed: IndexedPool, contracts: LDT2TContracts, box: InputUTXO) extends Live {
+    val pool: LDT2TLiquidityPool = LDT2TLiquidityPool(box)
+  }
+
   private[execution] case class Fees(executorFee: Long, maxMinerFee: Long)
+
+  /** Token ids one provision NFT lookup checks; each costs one indexed box read. */
+  final val MaxNftLookups = 100
 
   /** Fees a request names, or the configured defaults, refused unless the cap sits under the fee. */
   private[execution] def orderFees(defaults: LithosDexOrdersConfig, executorFee: Option[String],

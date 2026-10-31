@@ -120,13 +120,21 @@ object LDOrderBook {
    * tree is in `owners`. Mempool-aware: an order a fill or a cancel already spends is left out, and one
    * an unconfirmed placement creates is included.
    */
-  def redeemOrders(ctx: BlockchainContext, nodeApi: NodeApi, owners: Set[String]): Map[String, String] = {
-    val poolNft = LDHelpers.getPoolNFT(ctx.getNetworkType).toString
-    scan(nodeApi, LDOrderKind.Redeem.scriptName, LDOrderContracts.template(LDOrderKind.Redeem), MempoolOptions.WithMempool)
-      .flatMap(indexed => LithosDexOrder.parse(indexed.box))
-      .collect { case order: LithosDexOrder.Redeem if order.poolNft == poolNft && owners.contains(order.terms.redeemerTree) =>
-        order.ownerNft -> order.boxId
-      }.toMap
+  def redeemOrders(ctx: BlockchainContext, nodeApi: NodeApi, owners: Set[String]): Map[String, String] =
+    redeemOrdersOn(nodeApi, LDHelpers.getPoolNFT(ctx.getNetworkType).toString, owners, tokenToken = false)
+
+  /** The same for any pool; `tokenToken` reads the token/token redeem template instead of the ERG/token one. */
+  def redeemOrdersOn(nodeApi: NodeApi, poolNft: String, owners: Set[String], tokenToken: Boolean): Map[String, String] = {
+    def mine(terms: LithosDexTerms): Boolean = terms.poolNft == poolNft && owners.contains(terms.redeemerTree)
+    if (tokenToken)
+      scan(nodeApi, LDT2TOrderKind.Redeem.scriptName, LDOrderContracts.template(LDT2TOrderKind.Redeem),
+        MempoolOptions.WithMempool)
+        .flatMap(indexed => LDT2TOrder.parse(indexed.box))
+        .collect { case order: LDT2TOrder.Redeem if mine(order.terms) => order.ownerNft -> order.boxId }.toMap
+    else
+      scan(nodeApi, LDOrderKind.Redeem.scriptName, LDOrderContracts.template(LDOrderKind.Redeem), MempoolOptions.WithMempool)
+        .flatMap(indexed => LithosDexOrder.parse(indexed.box))
+        .collect { case order: LithosDexOrder.Redeem if mine(order.terms) => order.ownerNft -> order.boxId }.toMap
   }
 
   /** Every box at one order template, up to [[Batcher.MaxScannedPerTemplate]]. */

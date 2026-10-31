@@ -34,6 +34,31 @@ class LDPoolsApiImpl @Inject()(nodeContext: NodeContext, index: LDPoolIndex,
 
   override def listPoolOrders(poolNft: String): LDOrderList = orders.listOrders(poolNft)
 
+  override def listPoolProvisions(poolNft: String): LDProvisionList = orders.listProvisions(poolNft)
+
+  override def lookupNfts(request: LDNftLookupRequest): LDNftLookupList = {
+    val found = orders.lookupNfts(request.tokenIds)
+    val tokens = index.snapshot().tokens
+    LDNftLookupList(request.tokenIds.map(_.toLowerCase).distinct.map { id =>
+      found.get(id).fold(LDNftLookup(id, provisionNft = false)) { case (pool, provision, x, y) =>
+        LDNftLookup(id, provisionNft = true, Some(LDPoolsApiImpl.summary(pool, tokens)), Some(provision),
+          Some(LDAmounts(x)), Some(LDAmounts(y)))
+      }
+    })
+  }
+
+  override def claimPoolProvision(poolNft: String, boxId: String, request: LDClaimRequest): LDClaimResult =
+    orders.claim(poolNft, boxId, request)
+
+  override def checkPoolFlush(poolNft: String): LDFlushCheck = orders.checkFlush(poolNft)
+
+  override def flushPool(poolNft: String, request: LDFlushRequest): LDFlushResult = orders.flush(poolNft, request)
+
+  override def provisionTerms(poolNft: String, boxId: String): (Long, BigInt, BigInt) = {
+    val p = orders.provisionOf(poolNft, boxId)
+    (p.shares, p.entryX, p.entryY)
+  }
+
   override def checkSwapOrder(poolNft: String, request: LDPoolSwapRequest): LDPoolSwapQuote =
     orders.checkSwap(poolNft, request)
 

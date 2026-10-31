@@ -18,13 +18,15 @@ object DexHistory {
     (name, blocks, size)
   }
 
-  def spotPrice(reservesX: Long, reservesY: Long, decimals: Int): Double =
+  /** Y per X at display decimals; X is ERG, at 9, unless `decimalsX` says otherwise. */
+  def spotPrice(reservesX: Long, reservesY: Long, decimals: Int, decimalsX: Int = 9): Double =
     if (reservesX <= 0 || reservesY <= 0) 0.0
     else ((BigDecimal(reservesY) / BigDecimal(10).pow(decimals)) /
-      (BigDecimal(reservesX) / BigDecimal(10).pow(9))).toDouble
+      (BigDecimal(reservesX) / BigDecimal(10).pow(decimalsX))).toDouble
 
   def price(snapshots: Seq[PoolSnapshot], complete: Boolean, current: LDPricePoint, decimals: Int,
-            range: Option[String], bucket: Option[Int], timestamps: Seq[Int] => Map[Int, Long]): LDPriceHistory = {
+            range: Option[String], bucket: Option[Int], timestamps: Seq[Int] => Map[Int, Long],
+            decimalsX: Int = 9): LDPriceHistory = {
     val (name, blocks, size) = priceRange(range, bucket)
     val lo = math.max(0, current.height - blocks)
     val start = snapshots.filter(_.height <= lo).lastOption.map(_.copy(height = lo))
@@ -33,7 +35,7 @@ object DexHistory {
       .map { case (_, points) => points.maxBy(s => (s.height, s.globalIndex)) }
     val times = timestamps(selected.map(_.height))
     val points = selected.map(s => LDPricePoint(s.height, times.get(s.height),
-      spotPrice(s.reservesX, s.reservesY, decimals), s.reservesX.toString, s.reservesY.toString))
+      spotPrice(s.reservesX, s.reservesY, decimals, decimalsX), s.reservesX.toString, s.reservesY.toString))
     val series = (if (points.lastOption.exists(_.height >= current.height)) points.init else points) :+ current
     val first = series.head.price
     LDPriceHistory(name, if (first <= 0) 0.0 else (current.price - first) / first,
@@ -64,6 +66,36 @@ object DexHistory {
       LDFeeHistoryPoint(height, times.get(height), (cx - px).toString, (cy - py).toString,
         cx.toString, cy.toString)
     }, partial = !complete)
+  }
+
+  /**
+   * One provision's fees per height bucket over `lo..hi`: its share of each accumulator step, counting only the part
+   * above its own entry, so fees that accrued before it existed are never credited to it. Its size is read as it
+   * stands now, since a resize rewrites size and entry together and records neither the old size nor when.
+   */
+  def provisionFees(snapshots: Seq[PoolSnapshot], lo: Int, hi: Int, size: Int, shares: Long, entryX: BigInt,
+                    entryY: BigInt, timestamps: Map[Int, Long]): Seq[LDFeeHistoryPoint] = {
+    if (lo < 0 || hi < lo || size <= 0 || (hi.toLong - lo) / size + 1 > LDPriceHistory.MaxPoints)
+      throw LithosBadRequest("invalid fee range or bucket: at most 500 points are supported")
+    def earned(before: BigInt, after: BigInt, entry: BigInt): BigInt = {
+      val delta = (after - before.max(entry)).max(0)
+      BigInt(shares) * delta / LDHelpers.SCALE
+    }
+    var x = BigInt(0)
+    var y = BigInt(0)
+    val cumulative = snapshots.sliding(2).collect {
+      case Seq(prev, next) if next.height >= lo && next.height <= hi =>
+        x += earned(prev.accX, next.accX, entryX)
+        y += earned(prev.accY, next.accY, entryY)
+        (next.height, x, y)
+    }.toVector
+    val buckets = cumulative.groupBy(p => (p._1 - lo) / size).toVector.sortBy(_._1).map {
+      case (index, points) => (math.min(lo.toLong + (index.toLong + 1) * size - 1, hi).toInt, points.last._2, points.last._3)
+    }
+    val previous = (BigInt(0), BigInt(0)) +: buckets.map(p => p._2 -> p._3)
+    buckets.zip(previous).map { case ((height, cx, cy), (px, py)) =>
+      LDFeeHistoryPoint(height, timestamps.get(height), (cx - px).toString, (cy - py).toString, cx.toString, cy.toString)
+    }
   }
 
   def activity(transitions: Seq[PoolTransition], times: Map[Int, Long]): LDRecentActivity =

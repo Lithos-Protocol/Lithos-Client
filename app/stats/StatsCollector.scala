@@ -17,9 +17,12 @@ object StatsCollector {
 }
 
 class StatsCollector(cache: StatsCache, dexRefresh: Option[DexStatsRefresh], persistence: Option[StatsPersistence],
-                       mining: Option[MiningStatsRefresh]) extends Actor {
-  @Inject def this(cache: StatsCache, dexRefresh: DexStatsRefresh, persistence: StatsPersistence, mining: MiningStatsRefresh) =
-    this(cache, Some(dexRefresh), Some(persistence), Some(mining))
+                       mining: Option[MiningStatsRefresh], verifiedRefresh: Option[VerifiedPoolStatsRefresh]) extends Actor {
+  @Inject def this(cache: StatsCache, dexRefresh: DexStatsRefresh, persistence: StatsPersistence, mining: MiningStatsRefresh,
+                   verifiedRefresh: VerifiedPoolStatsRefresh) =
+    this(cache, Some(dexRefresh), Some(persistence), Some(mining), Some(verifiedRefresh))
+  def this(cache: StatsCache, dexRefresh: Option[DexStatsRefresh], persistence: Option[StatsPersistence],
+           mining: Option[MiningStatsRefresh]) = this(cache, dexRefresh, persistence, mining, None)
   def this(cache: StatsCache, dexRefresh: Option[DexStatsRefresh], persistence: Option[StatsPersistence]) =
     this(cache, dexRefresh, persistence, None)
   def this(cache: StatsCache, dexRefresh: Option[DexStatsRefresh]) = this(cache, dexRefresh, None)
@@ -29,11 +32,12 @@ class StatsCollector(cache: StatsCache, dexRefresh: Option[DexStatsRefresh], per
   private val incarnation = UUID.randomUUID()
   private var refreshTicker: Option[Cancellable] = None
   private var nextDexRead = System.nanoTime()
+  private var nextVerifiedRead = System.nanoTime()
 
   private var source: Option[(ActorRef, UUID, Long)] = None
 
   override def preStart(): Unit = if (cache.settings.enabled &&
-    (dexRefresh.isDefined || persistence.isDefined || mining.isDefined)) {
+    (dexRefresh.isDefined || persistence.isDefined || mining.isDefined || verifiedRefresh.isDefined)) {
     self ! RefreshStatistics
     refreshTicker = Some(context.system.scheduler.scheduleWithFixedDelay(1.second, 1.second,
       self, RefreshStatistics)(context.dispatcher))
@@ -84,6 +88,20 @@ class StatsCollector(cache: StatsCache, dexRefresh: Option[DexStatsRefresh], per
       }
       if (!refresh.busy && System.nanoTime() - nextDexRead >= 0) refresh.start(incarnation)
       cache.refreshingDex(refresh.busy)
+    }
+    verifiedRefresh.filter(_ => cache.settings.dex.enabled).foreach { refresh =>
+      refresh.takeCompleted().foreach { case (flight, result) =>
+        if (flight.owner == incarnation) {
+          result match {
+            case Success(pools) =>
+              pools.collect { case (nft, Failure(ex)) => logger.warn(s"DEX statistics refresh of pool $nft failed: ${ex.getMessage}") }
+              cache.publishVerifiedDex(pools, flight.startedAt, flight.startedNanos)
+            case Failure(ex) => logger.warn(s"DEX statistics refresh of verified pools failed: ${ex.getMessage}")
+          }
+          nextVerifiedRead = System.nanoTime() + cache.settings.dex.refreshIntervalMs.milliseconds.toNanos
+        }
+      }
+      if (!refresh.busy && System.nanoTime() - nextVerifiedRead >= 0) refresh.start(incarnation)
     }
   }
 

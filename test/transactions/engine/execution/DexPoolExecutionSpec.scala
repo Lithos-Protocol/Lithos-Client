@@ -11,7 +11,7 @@ import lithosdex.{LDHelpers, LDLiquidityPool, LDT2TLiquidityPool}
 import node.MutationConversions._
 import node.NodeApi
 import node.model._
-import org.ergoplatform.appkit.scalaapi.scalaLongType
+import org.ergoplatform.appkit.scalaapi.{scalaByteType, scalaLongType}
 import org.ergoplatform.appkit.{BlockchainContext, ErgoValue, NetworkType, Parameters}
 import org.ergoplatform.sdk.ErgoId
 import org.mockito.ArgumentMatchers.{any, anyString}
@@ -94,7 +94,13 @@ class DexPoolExecutionSpec extends TestKit(ActorSystem("dex-pool-execution-spec"
             zero, zero))),
         n2t.poolNFT.toString -> n2tBox(n2t, 1),
         drained.poolNFT.toString -> n2tBox(drained, 2),
-        unchecked.poolNFT.toString -> n2tBox(unchecked, 3))
+        unchecked.poolNFT.toString -> n2tBox(unchecked, 3),
+        // Three X and two Y owed per share since genesis, beyond the one unit of each a vault is seeded with
+        t2t.vaultNFT.toString -> LDNodeFixtures.nodeBox(ctx, UTXO(t2t.feeVault, 2L * Parameters.OneErg,
+          Seq(Token(t2t.vaultNFT, 1L), Token(tokenX, 1000001L), Token(tokenY, 1000001L)),
+          Seq(ErgoValue.of((LDHelpers.SCALE * 3).bigInteger), ErgoValue.of((LDHelpers.SCALE * 2).bigInteger))), index = 4),
+        n2t.vaultNFT.toString -> LDNodeFixtures.nodeBox(ctx, UTXO(n2t.feeVault, Parameters.OneErg,
+          Seq(Token(n2t.vaultNFT, 1L)), Seq(zero, zero)), index = 5))
     }
     when(api.unspentBoxesByTokenId(anyString(), any[Paging], any[SortDirection], any[MempoolOptions])).thenAnswer { inv =>
       Success(boxes.get(inv.getArgument[String](0)).map(LDNodeFixtures.indexed(_)).toSeq)
@@ -197,6 +203,81 @@ class DexPoolExecutionSpec extends TestKit(ActorSystem("dex-pool-execution-spec"
     val n2tOrders = f.exec.listOrders(n2t.poolNFT.toString).orders
     n2tOrders.map(o => (o.boxId, o.`type`, o.amountX)) shouldBe
       Seq((orders(3).boxId, "DEPOSIT", Some(Parameters.OneErg.toString)))
+  }
+
+  "This wallet's provisions on a pool" should "be those whose NFT it holds or keeps in a redeem order there" in {
+    val f = fixture()
+    val (held, ordered, stranger) = (ErgoId.create("a1" * 32), ErgoId.create("a2" * 32), ErgoId.create("a3" * 32))
+    val (provisions, order) = f.node.getClient.execute { ctx: BlockchainContext =>
+      def provision(owner: ErgoId, index: Int) = LDNodeFixtures.nodeBox(ctx, UTXO(t2t.provisionGuard,
+        LDHelpers.PROVISION_MIN, Seq(Token(t2t.provToken, 1L)), Seq(zero, zero,
+          ErgoValue.of(Colls.fromArray(owner.getBytes), scalaByteType), ErgoValue.of(1000L))), index = index,
+        txId = "f8" * 32)
+      val me = f.node.getNodeWallet.p2pk
+      (Seq(provision(held, 0), provision(ordered, 1), provision(stranger, 2)),
+        LDNodeFixtures.nodeBox(ctx, UTXO(LDOrderContracts.t2tRedeem(LDOrderTerms(me.getPublicKey, t2t.poolNFT, Fee,
+          Fee / 3)), LDOrderTransactions.t2tOrderValue(Fee), Seq(Token(ordered, 1L))), txId = "f9" * 32))
+    }
+    when(f.nodeApi.unspentBoxesByErgoTree(anyString(), any[Paging], any[SortDirection], any[MempoolOptions]))
+      .thenAnswer { inv =>
+        Success(if (inv.getArgument[String](0) == t2t.provisionGuard.ergoTreeHex) provisions.map(LDNodeFixtures.indexed(_))
+        else Seq.empty)
+      }
+    when(f.nodeApi.unspentBoxesByTemplateHash(anyString(), any[Paging], any[SortDirection], any[MempoolOptions]))
+      .thenReturn(Success(Seq(LDNodeFixtures.indexed(order))))
+    when(f.nodeApi.walletBalances()).thenReturn(Success(_root_.node.model.WalletBalances(500, Parameters.OneErg,
+      Seq(NodeAsset(held.toString, 1L), NodeAsset(tokenX.toString, 5L)))))
+
+    val listed = f.exec.listProvisions(t2t.poolNFT.toString).provisions
+    listed.map(p => (p.boxId, p.redeemOrderBoxId)) should contain theSameElementsAs Seq(
+      provisions.head.boxId -> None, provisions(1).boxId -> Some(order.boxId))
+    val accrued = poolOf(f, t2t.poolNFT)(LDT2TLiquidityPool(_)).feesAccrued(1000L, BigInt(0), BigInt(0))
+    listed.foreach { p =>
+      (p.claimableX, p.claimableY, p.accruedX, p.accruedY) shouldBe
+        (("3000", "2000", accrued._1.toString, accrued._2.toString))
+    }
+    // Only the provision whose NFT is in the wallet can be claimed; the other waits on its redeem order
+    listed.map(p => p.boxId -> p.canClaim).toMap shouldBe Map(provisions.head.boxId -> true, provisions(1).boxId -> false)
+    // The ERG/token pool's guard holds none of them
+    f.exec.listProvisions(n2t.poolNFT.toString).provisions shouldBe empty
+  }
+
+  "A provision NFT lookup" should "name only the tokens a provision of the pool their id names is owned by" in {
+    val f = fixture()
+    val (held, ghost, provision) = f.node.getClient.execute { ctx: BlockchainContext =>
+      // Earlier pool boxes: an ownership NFT's id is the id of the pool box its deposit spent
+      def historic(c: LDContracts, index: Int) = LDNodeFixtures.nodeBox(ctx, UTXO(c.liquidityPool, 9L * Parameters.OneErg,
+        Seq(Token(c.poolNFT, 1L), Token(tokenY, 900000000L), Token(c.provToken, 1001L)),
+        Seq(ErgoValue.of(LDHelpers.LOCKED_LP - 999000000L), longs(LDHelpers.GENESIS_FEE_PARAMS), longs(Array(0L, 0L)),
+          zero, zero)), index = index, txId = "c7" * 32)
+      val t2tHistoric = LDNodeFixtures.nodeBox(ctx, UTXO(t2t.liquidityPool, LDHelpers.T2T_POOL_MIN_VALUE,
+        Seq(Token(t2t.poolNFT, 1L), Token(tokenX, 40000000000L), Token(tokenY, 10000000000L), Token(t2t.provToken, 1001L)),
+        Seq(ErgoValue.of(LDHelpers.LOCKED_LP - 20000000000L), longs(LDHelpers.GENESIS_FEE_PARAMS), longs(Array(0L, 0L)),
+          zero, zero)), index = 3, txId = "c8" * 32)
+      val n2tHistoric = historic(n2t, 2)
+      val prov = LDNodeFixtures.nodeBox(ctx, UTXO(n2t.provisionGuard, LDHelpers.PROVISION_MIN, Seq(Token(n2t.provToken, 1L)),
+        Seq(zero, zero, ErgoValue.of(Colls.fromArray(ErgoId.create(n2tHistoric.boxId).getBytes), scalaByteType),
+          ErgoValue.of(1000L))), index = 0, txId = "c9" * 32)
+      (n2tHistoric, t2tHistoric, prov)
+    }
+    val stranger = "f0" * 32
+    val boxes = Map(held.boxId -> held, ghost.boxId -> ghost)
+    when(f.nodeApi.indexedBoxById(anyString())).thenAnswer(inv =>
+      Success(boxes.get(inv.getArgument[String](0)).map(LDNodeFixtures.indexed(_))))
+    when(f.nodeApi.unspentBoxesByErgoTree(anyString(), any[Paging], any[SortDirection], any[MempoolOptions]))
+      .thenAnswer { inv =>
+        Success(if (inv.getArgument[String](0) == n2t.provisionGuard.ergoTreeHex) Seq(LDNodeFixtures.indexed(provision))
+        else Seq.empty)
+      }
+
+    val found = f.exec.lookupNfts(Seq(held.boxId, ghost.boxId.toUpperCase, stranger))
+    found.keySet shouldBe Set(held.boxId)
+    val (pool, described, x, y) = found(held.boxId)
+    val expected = poolOf(f, n2t.poolNFT)(LDLiquidityPool(_)).simRedeem(1000L)
+    (pool.nft, described.shares, described.boxId, x, y) shouldBe
+      ((n2t.poolNFT.toString, "1000", provision.boxId, expected.amountX, expected.amountY))
+    a[LithosBadRequest] should be thrownBy f.exec.lookupNfts(Seq.fill(101)("ab").zipWithIndex.map { case (_, i) => f"$i%064x" })
+    a[LithosBadRequest] should be thrownBy f.exec.lookupNfts(Seq("not-an-id"))
   }
 
   "A pool" should "be not found when the index does not list it, and unavailable while the index builds" in {

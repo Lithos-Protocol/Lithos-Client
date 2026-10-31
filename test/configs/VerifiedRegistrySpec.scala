@@ -68,7 +68,7 @@ class VerifiedRegistrySpec extends AnyFlatSpec with Matchers {
 
   "A well-formed list" should "add its tokens and pools beside the built-in ones" in {
     val registry = VerifiedRegistry.parse(Main, listJson(token(tokenA), token(tokenB)),
-      listJson(s"""{"poolNft": "$poolNft", "kind": "t2t", "tokens": ["$tokenA", "$tokenB"]}""")).toOption.get
+      listJson(s"""{"poolNft": "$poolNft", "kind": "t2t", "tokens": ["$tokenA", "$tokenB"], "addedHeight": 1900000}""")).toOption.get
     registry.token(tokenA.toUpperCase).map(_.name) shouldBe Some("Token")
     registry.pool(poolNft).map(_.kind) shouldBe Some(VerifiedPool.Kind.T2T)
     registry.tokens.size shouldBe 3
@@ -97,20 +97,32 @@ class VerifiedRegistrySpec extends AnyFlatSpec with Matchers {
 
   "A pool entry" should "be refused when its token count does not match its kind" in {
     problems(listJson(token(tokenA)),
-      listJson(s"""{"poolNft": "$poolNft", "kind": "n2t", "tokens": ["$tokenA", "$tokenA"]}""")).mkString should
+      listJson(s"""{"poolNft": "$poolNft", "kind": "n2t", "tokens": ["$tokenA", "$tokenA"], "addedHeight": 1900000}""")).mkString should
       include("must name 1 token")
   }
 
   it should "be refused when it names a token that is not verified" in {
     problems(listJson(),
-      listJson(s"""{"poolNft": "$poolNft", "kind": "n2t", "tokens": ["$tokenA"]}""")).mkString should
+      listJson(s"""{"poolNft": "$poolNft", "kind": "n2t", "tokens": ["$tokenA"], "addedHeight": 1900000}""")).mkString should
       include("not a verified token")
+  }
+
+  it should "need the height it joined the list, which its graphs are collected from" in {
+    problems(listJson(token(tokenA)),
+      listJson(s"""{"poolNft": "$poolNft", "kind": "n2t", "tokens": ["$tokenA"]}""")).mkString should include("addedHeight")
+    problems(listJson(token(tokenA)),
+      listJson(s"""{"poolNft": "$poolNft", "kind": "n2t", "tokens": ["$tokenA"], "addedHeight": 0}""")).mkString should
+      include("addedHeight")
+    VerifiedRegistry.parse(Main, listJson(token(tokenA)),
+      listJson(s"""{"poolNft": "$poolNft", "kind": "n2t", "tokens": ["$tokenA"], "addedHeight": 1900000}""")).toOption.get
+      .pool(poolNft).flatMap(_.addedHeight) shouldBe Some(1900000)
+    VerifiedRegistry.forNetwork(Main).pools.head.addedHeight shouldBe None
   }
 
   it should "be refused for an unknown kind or a repeated pool" in {
     problems(listJson(token(tokenA)),
-      listJson(s"""{"poolNft": "$poolNft", "kind": "x2y", "tokens": ["$tokenA"]}""")).mkString should include("kind")
-    val entry = s"""{"poolNft": "$poolNft", "kind": "n2t", "tokens": ["$tokenA"]}"""
+      listJson(s"""{"poolNft": "$poolNft", "kind": "x2y", "tokens": ["$tokenA"], "addedHeight": 1900000}""")).mkString should include("kind")
+    val entry = s"""{"poolNft": "$poolNft", "kind": "n2t", "tokens": ["$tokenA"], "addedHeight": 1900000}"""
     problems(listJson(token(tokenA)), listJson(entry, entry)).mkString should include("listed more than once")
   }
 

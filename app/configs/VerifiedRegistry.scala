@@ -11,8 +11,13 @@ import scala.util.{Failure, Success, Try}
 /** A token this release marks verified. */
 final case class VerifiedToken(tokenId: String, name: String, ticker: String, decimals: Int)
 
-/** A LithosDex pool this release marks verified. `tokens` is Y alone for an ERG pool, X then Y for a token pool. */
-final case class VerifiedPool(poolNft: String, kind: VerifiedPool.Kind, tokens: Seq[String])
+/**
+ * A LithosDex pool this release marks verified. `tokens` is Y alone for an ERG pool, X then Y for a token pool.
+ * `addedHeight` is the height it joined the list: its graphs are collected from there, and anything earlier is
+ * reported as not collected. None for ERG:LIT, whose graphs cover its whole life.
+ */
+final case class VerifiedPool(poolNft: String, kind: VerifiedPool.Kind, tokens: Seq[String],
+                              addedHeight: Option[Int] = None)
 
 object VerifiedPool {
   sealed abstract class Kind(val name: String, val tokenCount: Int)
@@ -46,7 +51,7 @@ object VerifiedRegistry {
 
   private val IdPattern = "[0-9a-f]{64}"
   private val TokenFields = Set("tokenId", "name", "ticker", "decimals")
-  private val PoolFields = Set("poolNft", "kind", "tokens")
+  private val PoolFields = Set("poolNft", "kind", "tokens", "addedHeight")
 
   /** LIT and the ERG:LIT pool, from the same constants the contracts are built with. */
   def builtIn(network: NetworkType): (Seq[VerifiedToken], Seq[VerifiedPool]) = (
@@ -120,11 +125,13 @@ object VerifiedRegistry {
             val parsed = vs.indices.map(j => id(s"$where tokens[$j]", JsDefined(vs(j))))
             if (parsed.forall(_.isDefined)) Some(parsed.flatten) else None
         }
-        for (n <- poolNft; k <- kind; ts <- ids) yield {
+        val added = (obj \ "addedHeight").asOpt[Int].filter(_ > 0)
+        if (added.isEmpty) problems += s"$where addedHeight must be the positive block height the pool joined the list at"
+        for (n <- poolNft; k <- kind; ts <- ids; h <- added) yield {
           if (ts.size != k.tokenCount) problems += s"$where is ${k.name} and must name ${k.tokenCount} token(s), not ${ts.size}"
           if (ts.distinct.size != ts.size) problems += s"$where names the same token twice"
           ts.filterNot(tokenIds).foreach(t => problems += s"$where names $t, which is not a verified token")
-          VerifiedPool(n, k, ts)
+          VerifiedPool(n, k, ts, Some(h))
         }
       }
     }

@@ -4,7 +4,7 @@ import akka.actor.ActorRef
 import akka.pattern.ask
 import akka.util.Timeout
 import api.LithosApiErrors.LithosUnavailable
-import api.models.{LDAmounts, LDOrder}
+import api.models.{LDAmounts, LDOrder, LDProvision}
 import lithosdex.{LDLiquidityPool, LDT2TLiquidityPool}
 import node.NodeApi
 import node.model.{MempoolOptions, NodeBox}
@@ -41,6 +41,36 @@ private[execution] object LDOrderViews {
       val (found, _) = LDBoxes.provisionsOwnedBy(ctx, nodeApi, guard, provToken, ownerNfts, MempoolOptions.WithMempool)
       found.map(p => p.ownerNFT.toString -> p).toMap.get
     }
+
+  /**
+   * A provision with both fee figures and their difference. `accrued` is what the pool says it has earned, unflushed
+   * fees included; `owed` is what the vault's arithmetic pays now. A provision opened or resized while the pool held
+   * unflushed fees enters ahead of the vault's accumulator, where that arithmetic runs negative: it shows as nothing
+   * claimable and `awaitingFlush`, rather than as a debt. Display only; nothing here builds a transaction.
+   */
+  def provision(prov: LDBoxes.Provision, accrued: (Long, Long), owed: (Long, Long), canClaim: Boolean,
+                shareOfSupply: Double): LDProvision = {
+    val (accruedX, accruedY) = accrued
+    val claimableX = math.max(0L, owed._1)
+    val claimableY = math.max(0L, owed._2)
+    LDProvision(
+      boxId = prov.boxId,
+      ownerNFT = prov.ownerNFT.toString,
+      shares = LDAmounts(prov.shares),
+      entryX = LDAmounts(prov.entryX),
+      entryY = LDAmounts(prov.entryY),
+      value = LDAmounts(prov.value),
+      createdHeight = prov.createdHeight,
+      shareOfSupply = shareOfSupply,
+      accruedX = LDAmounts(accruedX),
+      accruedY = LDAmounts(accruedY),
+      claimableX = LDAmounts(claimableX),
+      claimableY = LDAmounts(claimableY),
+      unflushedX = LDAmounts(math.max(0L, accruedX - claimableX)),
+      unflushedY = LDAmounts(math.max(0L, accruedY - claimableY)),
+      canClaim = canClaim,
+      awaitingFlush = owed._1 < 0 || owed._2 < 0)
+  }
 
   def ergToken(ctx: BlockchainContext, owned: LDOrderBook.Owned[LithosDexOrder], pool: LDLiquidityPool,
                provisions: LithosDexExecution.Provisions): LDOrder = {

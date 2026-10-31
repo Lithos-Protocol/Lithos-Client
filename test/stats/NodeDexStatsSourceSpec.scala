@@ -57,7 +57,59 @@ class NodeDexStatsSourceSpec extends AnyFlatSpec with Matchers with MockitoSugar
     verify(context, never()).getClient
   }
 
-  it should "refuse a mixed-branch read even when the height has not changed" in {
+  it should "read a verified token/token pool only from the height it joined the list, its reserves from its tokens" in {
+    val (api, source, cache) = {
+      val (a, s, _) = fixture()
+      (a, s, new StatsCache(StatsConfig(dex = DexStatsConfig(timestampLookups = 0))))
+    }
+    val t2t = lithosdex.contracts.LDT2TContracts(org.ergoplatform.sdk.ErgoId.create("e1" * 32),
+      org.ergoplatform.sdk.ErgoId.create("e2" * 32), org.ergoplatform.sdk.ErgoId.create("e3" * 32))
+    val (tokenX, tokenY) = ("e4" * 32, "e5" * 32)
+    def t2tBox(index: Int, height: Int, x: Long, y: Long): IndexedBox = fake.getClient.execute { ctx =>
+      import org.ergoplatform.appkit.ErgoValue
+      import org.ergoplatform.appkit.scalaapi.scalaLongType
+      def longs(v: Array[Long]) = ErgoValue.of(sigma.Colls.fromArray(v), scalaLongType)
+      LDNodeFixtures.indexed(LDNodeFixtures.nodeBox(ctx, work.lithos.mutations.UTXO(t2t.liquidityPool,
+        LDHelpers.T2T_POOL_MIN_VALUE, Seq(work.lithos.mutations.Token(t2t.poolNFT, 1L),
+          work.lithos.mutations.Token(org.ergoplatform.sdk.ErgoId.create(tokenX), x + 10L),
+          work.lithos.mutations.Token(org.ergoplatform.sdk.ErgoId.create(tokenY), y + 20L),
+          work.lithos.mutations.Token(t2t.provToken, 1000L)),
+        Seq(ErgoValue.of(LDHelpers.LOCKED_LP - 1000000L), longs(LDHelpers.GENESIS_FEE_PARAMS), longs(Array(10L, 20L)),
+          ErgoValue.of(BigInt(0).bigInteger), ErgoValue.of(BigInt(0).bigInteger))), index = index),
+        height = height).copy(globalIndex = index.toLong)
+    }
+    // Newest first, as the node lists them: the box from 110 is the pool as it stood when it joined the list at 500
+    val boxes = Vector(t2tBox(3, 980, 4000L, 9000L), t2tBox(2, 110, 5000L, 8000L), t2tBox(1, 100, 6000L, 7000L))
+    when(api.boxesByTokenId(anyString(), any[Paging])).thenReturn(Success(Paged(boxes, 3)))
+    when(api.unspentBoxesByTokenId(anyString(), any[Paging], any[SortDirection], any[MempoolOptions]))
+      .thenReturn(Success(Vector(boxes.head)))
+
+    val target = DexStatsTarget(transactions.batching.lithosdex.LDBoxes.PoolLineage(t2t.poolNFT.toString,
+      t2t.liquidityPool.ergoTreeHex, t2t.vaultNFT.toString, tokenToken = true), Some(tokenX), tokenY, since = 500)
+    val data = source.read(target)
+    (data.collectedFrom, data.fromHeight) shouldBe ((Some(500), 500))
+    data.history.map(_.height) shouldBe Seq(110, 980)
+    (data.current.reservesX, data.current.reservesY) shouldBe (("4000", "9000"))
+    data.current.price shouldBe 2.25
+    data.prices("30D").partial shouldBe true
+    cache.publishVerifiedDex(Map(t2t.poolNFT.toString -> Success(data)), 1L, System.nanoTime())
+    cache.verifiedDexSnapshot(t2t.poolNFT.toString).flatMap(_.view.collectedFrom) shouldBe Some(500)
+  }
+
+  "Verified pool targets" should "be every verified pool but ERG:LIT that names the height it joined the list" in {
+    def indexed(nft: String, verified: Boolean) = api.IndexedPool(configs.VerifiedPool.Kind.T2T, nft, "00" * 32, 1,
+      Some("e4" * 32), "e5" * 32, 0L, 0L, 0L, 0L, 0L, Seq.empty, 0L, "e2" * 32, "e3" * 32, verified, None, None,
+      Some(lithosdex.contracts.LDT2TContracts(org.ergoplatform.sdk.ErgoId.create(nft),
+        org.ergoplatform.sdk.ErgoId.create("e2" * 32), org.ergoplatform.sdk.ErgoId.create("e3" * 32))))
+    val snapshot = api.PoolIndexSnapshot("ready", 1000, truncated = false,
+      Seq(indexed("a1" * 32, verified = true), indexed("a2" * 32, verified = true), indexed("a3" * 32, verified = false),
+        indexed("a4" * 32, verified = true)), Map.empty)
+    val added = Map("a2" * 32 -> 700, "a3" * 32 -> 800)
+    val targets = VerifiedPoolStatsRefresh.targets(snapshot, "a1" * 32, added.get)
+    targets.map(t => (t.lineage.nft, t.since, t.lineage.tokenToken)) shouldBe Seq(("a2" * 32, 700, true))
+  }
+
+  "DEX source" should "refuse a mixed-branch read even when the height has not changed" in {
     val (api, source, _) = fixture()
     when(api.info()).thenReturn(Success(before), Success(before.copy(bestFullHeaderId = Some("cd" * 32))))
     val error = intercept[IllegalArgumentException](source.read())

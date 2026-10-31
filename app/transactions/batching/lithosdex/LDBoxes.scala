@@ -1,7 +1,7 @@
 package transactions.batching.lithosdex
 
 import lithosdex.LDHelpers
-import lithosdex.contracts.{LDContracts, LDOrderKind}
+import lithosdex.contracts.{LDContracts, LDOrderKind, LDT2TOrderKind}
 import node.MutationConversions._
 import node.NodeApi
 import node.model.SortDirection.Asc
@@ -337,7 +337,7 @@ object LDBoxes {
     while (!exhausted && pages < MaxHistoryPages) {
       nodeApi.boxesByTokenId(nft, paging).map(_.items) match {
         case Success(page) =>
-          loaded ++= page.filter(_.ergoTree == ergoTreeHex).flatMap(readSnapshot)
+          loaded ++= page.filter(_.ergoTree == ergoTreeHex).flatMap(b => readSnapshot(b))
           exhausted = page.size < paging.limit
           paging = paging.next
         case Failure(ex) =>
@@ -359,7 +359,10 @@ object LDBoxes {
    * Returns `None` for a box that does not decode. Callers requiring continuous history must reject
    * that read rather than silently joining the snapshots on either side of the unreadable box.
    */
-  def readSnapshot(b: IndexedBox): Option[PoolSnapshot] =
+  def readSnapshot(b: IndexedBox): Option[PoolSnapshot] = readSnapshot(b, tokenToken = false)
+
+  /** The same for either kind: a token/token pool holds X at tokens(1) and Y at tokens(2), its ERG being storage. */
+  def readSnapshot(b: IndexedBox, tokenToken: Boolean): Option[PoolSnapshot] =
     Try {
       def reg(i: Int): ErgoValue[_] =
         ErgoValue.fromHex(b.box.additionalRegisters.get(i).getOrElse(
@@ -371,8 +374,8 @@ object LDBoxes {
         globalIndex = b.globalIndex,
         boxId = b.boxId,
         txId = b.box.transactionId,
-        reservesX = b.value - pending(0),
-        reservesY = b.assets(1).amount - pending(1),
+        reservesX = (if (tokenToken) b.assets(1).amount else b.value) - pending(0),
+        reservesY = b.assets(if (tokenToken) 2 else 1).amount - pending(1),
         pendingX = pending(0),
         pendingY = pending(1),
         accX = BigInt(reg(7).getValue.asInstanceOf[sigma.data.CBigInt].wrappedValue),
@@ -381,8 +384,21 @@ object LDBoxes {
     }.toOption
 
   /** The same decode, for a box that is still in the mempool and so has no height or global index. */
-  private def readMempoolSnapshot(b: NodeBox): Option[PoolSnapshot] =
-    readSnapshot(IndexedBox(box = b, address = "", inclusionHeight = -1, globalIndex = -1L))
+  private def readMempoolSnapshot(b: NodeBox, tokenToken: Boolean): Option[PoolSnapshot] =
+    readSnapshot(IndexedBox(box = b, address = "", inclusionHeight = -1, globalIndex = -1L), tokenToken)
+
+  /**
+   * Which pool a lineage read follows: its NFT, the tree its boxes sit under, its vault's NFT (a resize spends the
+   * vault at input 2) and whether it is a token/token pool, whose orders and reserves read differently.
+   */
+  final case class PoolLineage(nft: String, tree: String, vaultNft: String, tokenToken: Boolean)
+
+  object PoolLineage {
+    /** This network's ERG:LIT pool. */
+    def canonical(network: org.ergoplatform.appkit.NetworkType): PoolLineage =
+      PoolLineage(LDHelpers.getPoolNFT(network).toString, DexContracts(network).liquidityPool.ergoTreeHex,
+        LDHelpers.getVaultNFT(network).toString, tokenToken = false)
+  }
 
   /** What one pool transition did, as the recent activity list reports it. */
   sealed abstract class TransitionKind(val name: String)
@@ -422,17 +438,25 @@ object LDBoxes {
    * @param inputs the creating transaction's input at an index, when known
    */
   def classifyTransition(prev: PoolSnapshot, next: PoolSnapshot, txId: String, height: Option[Int],
-                         inputs: Int => Option[NodeBox], poolNft: String, vaultNft: String): Option[PoolTransition] = {
+                         inputs: Int => Option[NodeBox], poolNft: String, vaultNft: String): Option[PoolTransition] =
+    classifyTransition(prev, next, txId, height, inputs, poolNft, vaultNft, tokenToken = false)
+
+  /** The same for either kind of pool; `tokenToken` reads the token/token order templates at the order indexes. */
+  def classifyTransition(prev: PoolSnapshot, next: PoolSnapshot, txId: String, height: Option[Int],
+                         inputs: Int => Option[NodeBox], poolNft: String, vaultNft: String,
+                         tokenToken: Boolean): Option[PoolTransition] = {
     val dX = next.reservesX - prev.reservesX
     val dY = next.reservesY - prev.reservesY
     val dSupply = next.supply - prev.supply
-    def filled(index: Int, kinds: Set[LDOrderKind]): Option[String] =
-      inputs(index).flatMap(LithosDexOrder.parse)
-        .filter(order => kinds.contains(order.kind) && order.poolNft == poolNft).map(_.boxId)
+    def filled(index: Int, kind: TransitionKind): Option[String] =
+      inputs(index).flatMap { box =>
+        if (tokenToken) LDT2TOrder.parse(box).filter(o => o.poolNft == poolNft && transitionOf(o.kind) == kind).map(_.boxId)
+        else LithosDexOrder.parse(box).filter(o => o.poolNft == poolNft && transitionOf(o.kind) == kind).map(_.boxId)
+      }
 
     if (dSupply == 0)
       classifySwap(prev, next, height).map(swap => PoolTransition(txId, height, TransitionKind.Swap,
-        filled(1, Set(LDOrderKind.SwapSell, LDOrderKind.SwapBuy)), Some(swap), 0L, 0L, 0L))
+        filled(1, TransitionKind.Swap), Some(swap), 0L, 0L, 0L))
         .orElse {
           // A flush moves pending into the vault and nothing else; the pool refuses one that moves nothing
           val flushed = dX == 0 && dY == 0 && next.pendingX == 0 && next.pendingY == 0 &&
@@ -445,9 +469,21 @@ object LDBoxes {
     else if (inputs(2).exists(_.assets.headOption.exists(_.tokenId == vaultNft)))
       Some(PoolTransition(txId, height, TransitionKind.Resize, None, None, dX.abs, dY.abs, dSupply))
     else if (dSupply > 0)
-      Some(PoolTransition(txId, height, TransitionKind.Deposit, filled(1, Set(LDOrderKind.Deposit)), None, dX, dY, dSupply))
+      Some(PoolTransition(txId, height, TransitionKind.Deposit, filled(1, TransitionKind.Deposit), None, dX, dY, dSupply))
     else
-      Some(PoolTransition(txId, height, TransitionKind.Redeem, filled(2, Set(LDOrderKind.Redeem)), None, -dX, -dY, -dSupply))
+      Some(PoolTransition(txId, height, TransitionKind.Redeem, filled(2, TransitionKind.Redeem), None, -dX, -dY, -dSupply))
+  }
+
+  private def transitionOf(kind: LDOrderKind): TransitionKind = kind match {
+    case LDOrderKind.Deposit => TransitionKind.Deposit
+    case LDOrderKind.Redeem => TransitionKind.Redeem
+    case _ => TransitionKind.Swap
+  }
+
+  private def transitionOf(kind: LDT2TOrderKind): TransitionKind = kind match {
+    case LDT2TOrderKind.Deposit => TransitionKind.Deposit
+    case LDT2TOrderKind.Redeem => TransitionKind.Redeem
+    case _ => TransitionKind.Swap
   }
 
   /**
@@ -464,11 +500,17 @@ object LDBoxes {
     recentTransitions(ctx.getNetworkType, nodeApi, snapshots, limit)
 
   def recentTransitions(n: org.ergoplatform.appkit.NetworkType, nodeApi: NodeApi,
-                        snapshots: Seq[PoolSnapshot], limit: Int): Vector[PoolTransition] = {
-    val poolNft = LDHelpers.getPoolNFT(n).toString
-    val vaultNft = LDHelpers.getVaultNFT(n).toString
+                        snapshots: Seq[PoolSnapshot], limit: Int): Vector[PoolTransition] =
+    recentTransitions(PoolLineage.canonical(n), nodeApi, snapshots, limit)
 
-    val pending = mempoolTransitions(n, nodeApi, snapshots.map(s => s.boxId -> s).toMap)
+  /** The same for any pool `lineage` names. */
+  def recentTransitions(lineage: PoolLineage, nodeApi: NodeApi, snapshots: Seq[PoolSnapshot],
+                        limit: Int): Vector[PoolTransition] = {
+    val poolNft = lineage.nft
+    val vaultNft = lineage.vaultNft
+    val tokenToken = lineage.tokenToken
+
+    val pending = mempoolTransitions(lineage, nodeApi, snapshots.map(s => s.boxId -> s).toMap)
     // Inputs 1 and 2 are where an order or the vault can sit
     val inputIds = pending.flatMap { case (tx, _, _) => tx.inputs.slice(1, 3).map(_.boxId) }.distinct
     val pendingInputs =
@@ -479,7 +521,7 @@ object LDBoxes {
       }
     val unconfirmed = pending.iterator.flatMap { case (tx, prev, next) =>
       classifyTransition(prev, next, tx.id, None,
-        i => tx.inputs.lift(i).flatMap(input => pendingInputs.get(input.boxId)), poolNft, vaultNft)
+        i => tx.inputs.lift(i).flatMap(input => pendingInputs.get(input.boxId)), poolNft, vaultNft, tokenToken)
     }
 
     val confirmed = snapshots.iterator.sliding(2).collect { case Seq(prev, next) => (prev, next) }
@@ -488,7 +530,7 @@ object LDBoxes {
           case Success(tx) => tx.map(_.inputs.map(_.box)).getOrElse(Seq.empty)
           case Failure(ex) => throw indexUnavailable(s"the node index reading pool transaction ${next.txId}", ex)
         }
-        classifyTransition(prev, next, next.txId, Some(next.height), i => inputs.lift(i), poolNft, vaultNft)
+        classifyTransition(prev, next, next.txId, Some(next.height), i => inputs.lift(i), poolNft, vaultNft, tokenToken)
       }
 
     (unconfirmed ++ confirmed).take(limit).toVector
@@ -511,9 +553,14 @@ object LDBoxes {
     mempoolTransitions(ctx.getNetworkType, nodeApi, known)
 
   def mempoolTransitions(network: org.ergoplatform.appkit.NetworkType, nodeApi: NodeApi,
+                         known: Map[String, PoolSnapshot]): Seq[(NodeTransaction, PoolSnapshot, PoolSnapshot)] =
+    mempoolTransitions(PoolLineage.canonical(network), nodeApi, known)
+
+  /** The same for any pool `lineage` names. */
+  def mempoolTransitions(lineage: PoolLineage, nodeApi: NodeApi,
                          known: Map[String, PoolSnapshot]): Seq[(NodeTransaction, PoolSnapshot, PoolSnapshot)] = {
-    val nft = LDHelpers.getPoolNFT(network).toString
-    val ergoTreeHex = DexContracts(network).liquidityPool.ergoTreeHex
+    val nft = lineage.nft
+    val ergoTreeHex = lineage.tree
 
     val txs = nodeApi.unconfirmedTransactionsByErgoTree(ergoTreeHex, Paging(0, PageSize)) match {
       case Success(found) => found
@@ -524,7 +571,7 @@ object LDBoxes {
     val produced = txs.flatMap { tx =>
       tx.outputs
         .find(o => o.ergoTree == ergoTreeHex && o.assets.headOption.exists(_.tokenId == nft))
-        .flatMap(o => readMempoolSnapshot(o).map(s => tx -> s))
+        .flatMap(o => readMempoolSnapshot(o, lineage.tokenToken).map(s => tx -> s))
     }
     val byId = known ++ produced.map { case (_, s) => s.boxId -> s }.toMap
 

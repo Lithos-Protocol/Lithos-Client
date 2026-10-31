@@ -133,6 +133,46 @@ class LDT2TOrderTransactionsSpec extends AnyFlatSpec with Matchers {
     filled.fills.head.provision.map(_.boxId) shouldBe Some(successor.boxId)
   }
 
+  "A token/token flush from this wallet" should "move pending fees and the pool's accumulators into the vault" in withCtx { ctx =>
+    // The pool's accumulators stand one Step per share past the vault's, which across its supply is this much pending
+    val pending = (Step * 30000000000L / LDHelpers.SCALE).toLong
+    val poolIn = LDNodeFixtures.nodeBox(ctx, UTXO(deployment.liquidityPool, LDHelpers.T2T_POOL_MIN_VALUE,
+      Seq(Token(deployment.poolNFT, 1L), Token(tokenX, 50000000000L + pending), Token(tokenY, 20000000000L + pending),
+        Token(deployment.provToken, LDHelpers.PROV_TOKEN_SUPPLY - 10L)),
+      Seq(ErgoValue.of(LDHelpers.LOCKED_LP - 30000000000L), longs(Array(9970L, 15L, 25L)), longs(Array(pending, pending)),
+        big(BigInt(5) + 2 * Step), big(BigInt(7) + 2 * Step))), index = 0, txId = "ab" * 32).toInputUTXO(ctx)
+    val plan = LithosDexTransactions.t2tFlush(ctx, wallet, deployment, poolIn, vaultIn(ctx))
+    plan.tokens shouldBe empty
+    val unsigned = plan.build(Seq(funding(ctx, plan)))
+    val flushed = unsigned.describe(wallet.sign(unsigned.tx))
+    (flushed.flushedX, flushed.flushedY) shouldBe ((pending, pending))
+    val outputs = flushed.tx.getOutputsToSpend
+    val poolOut = LDT2TLiquidityPool(InputUTXO(outputs.get(0)))
+    (poolOut.pendingX, poolOut.pendingY, poolOut.reservesX) shouldBe ((0L, 0L, 50000000000L))
+    val vaultOut = lithosdex.states.LDT2TFeeValue.fromBox(InputUTXO(outputs.get(1)), 0, Height)
+    (vaultOut.balanceX, vaultOut.balanceY, vaultOut.accX) shouldBe ((1000000L + pending, 1000000L + pending, BigInt(5) + 2 * Step))
+    outputs.get(1).getValue shouldBe LDHelpers.T2T_VAULT_MIN_VALUE
+  }
+
+  it should "be refused on a pool with nothing pending" in withCtx { ctx =>
+    an[IllegalArgumentException] should be thrownBy
+      LithosDexTransactions.t2tFlush(ctx, wallet, deployment, poolNode(ctx).toInputUTXO(ctx), vaultIn(ctx))
+  }
+
+  "A token/token claim from this wallet" should "pay what the vault owes and move the entry to the vault's" in withCtx { ctx =>
+    val prov = provision(ctx)
+    val plan = LithosDexTransactions.t2tClaim(ctx, wallet, deployment, vaultIn(ctx), prov)
+    plan.tokens shouldBe Seq(Token(ownerNFT, 1L))
+    val unsigned = plan.build(Seq(funding(ctx, plan)))
+    val claimed = unsigned.describe(wallet.sign(unsigned.tx))
+    val owed = (Step * Shares / LDHelpers.SCALE).toLong
+    (claimed.claimedX, claimed.claimedY) shouldBe ((owed, owed))
+    val successor = LDBoxes.readProvision(InputUTXO(claimed.tx.getOutputsToSpend.get(1)))
+    (successor.entryX, successor.entryY, successor.shares) shouldBe ((BigInt(5) + Step, BigInt(7) + Step, Shares))
+    val vaultOut = lithosdex.states.LDT2TFeeValue.fromBox(InputUTXO(claimed.tx.getOutputsToSpend.get(0)), 0, Height)
+    (vaultOut.balanceX, vaultOut.balanceY) shouldBe ((1000000L - owed, 1000000L - owed))
+  }
+
   it should "place without a claim when the vault owes nothing" in withCtx { ctx =>
     val plan = LDOrderTransactions.t2tRedeem(ctx, wallet, deployment, pool(ctx), provision(ctx), None, Fee, Cap)
     val placed = signed(plan, Seq(funding(ctx, plan)))

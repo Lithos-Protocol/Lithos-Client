@@ -28,6 +28,8 @@ class StatsCache(val settings: StatsConfig) {
   private val current = new AtomicReference(Published(StatsView(settings.enabled, LocalStatsView(initial)), 0L))
   private val dex = new AtomicReference(DexPublished(DexStatsSnapshot(
     DexStatsView(status = if (settings.enabled && settings.dex.enabled) "loading" else "disabled"), None), 0L))
+  /** Verified pools other than ERG:LIT, by pool NFT, as the last pass over them read them. In memory only. */
+  private val verified = new AtomicReference(Map.empty[String, DexPublished])
   private val storage = new AtomicReference(StatsStorageView(
     status = if (settings.enabled && settings.dex.enabled && settings.storage.enabled) "loading" else "disabled"))
   private val mining = new AtomicReference(MiningStatsView(
@@ -75,8 +77,35 @@ class StatsCache(val settings: StatsConfig) {
   }
 
   private[stats] def publishDex(data: DexStatsData, observedAt: Long, observedNanos: Long): Unit =
-    dex.set(DexPublished(DexStatsSnapshot(DexStatsView("ready", Some(observedAt), Some(data.height),
-      Some(data.blockId), Some(data.fromHeight), data.history.headOption.map(_.height), Some(data.complete)), Some(data)), observedNanos))
+    dex.set(DexPublished(ready(data, observedAt), observedNanos))
+
+  private def ready(data: DexStatsData, observedAt: Long): DexStatsSnapshot =
+    DexStatsSnapshot(DexStatsView("ready", Some(observedAt), Some(data.height), Some(data.blockId), Some(data.fromHeight),
+      data.history.headOption.map(_.height), Some(data.complete), collectedFrom = data.collectedFrom), Some(data))
+
+  /**
+   * Publishes one pass over the verified pools other than ERG:LIT. A pool whose read failed keeps its last data,
+   * marked stale; a pool no longer in the pass is dropped.
+   */
+  private[stats] def publishVerifiedDex(results: Map[String, scala.util.Try[DexStatsData]], observedAt: Long,
+                                        observedNanos: Long): Unit = {
+    val previous = verified.get()
+    verified.set(results.map { case (nft, result) =>
+      nft -> (result match {
+        case scala.util.Success(data) => DexPublished(ready(data, observedAt), observedNanos)
+        case scala.util.Failure(_) => previous.get(nft) match {
+          case Some(p) => p.copy(snapshot = p.snapshot.copy(view = p.snapshot.view.copy(status = "stale",
+            error = Some("DEX refresh failed; see the client log"))))
+          case None => DexPublished(DexStatsSnapshot(DexStatsView("unavailable",
+            error = Some("DEX refresh failed; see the client log")), None), observedNanos)
+        }
+      })
+    })
+  }
+
+  /** A verified pool's graphs, other than ERG:LIT's, or None when no pass has read it. */
+  def verifiedDexSnapshot(poolNft: String, nowNanos: Long = System.nanoTime()): Option[DexStatsSnapshot] =
+    verified.get().get(poolNft.toLowerCase).map(published => withStaleness(published, nowNanos))
 
   /** Restored chain data is display-only until a new node read succeeds. Never replace a live read. */
   private[stats] def restoreDex(snapshot: StoredDexStats): Unit = {
@@ -97,13 +126,13 @@ class StatsCache(val settings: StatsConfig) {
       error = Some("DEX refresh failed; see the client log")))))
   }
 
-  def dexSnapshot(nowNanos: Long = System.nanoTime()): DexStatsSnapshot = {
-    val published = dex.get()
+  def dexSnapshot(nowNanos: Long = System.nanoTime()): DexStatsSnapshot = withStaleness(dex.get(), nowNanos)
+
+  private def withStaleness(published: DexPublished, nowNanos: Long): DexStatsSnapshot =
     if (published.snapshot.data.isDefined &&
       nowNanos - published.observedNanos > settings.dex.staleAfterMs.milliseconds.toNanos)
       published.snapshot.copy(view = published.snapshot.view.copy(status = "stale"))
     else published.snapshot
-  }
 
   private[stats] def publish(stratum: StratumStatsView, observedNanos: Long): Unit =
     if (settings.enabled) current.set(Published(StatsView(enabled = true, local = LocalStatsView(stratum)), observedNanos))

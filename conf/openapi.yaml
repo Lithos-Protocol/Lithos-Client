@@ -1254,6 +1254,464 @@ paths:
               schema:
                 $ref: '#/components/schemas/ApiError'
 
+  /dex/pools/{poolNft}/provisions:
+    get:
+      summary: List your provisions on any pool
+      description: >
+        Every provision on the pool whose `ownerNFT` this wallet holds, including those whose NFT sits in one of
+        its redeem orders there, as `GET /dex/provisions` lists them for ERG:LIT. X is ERG for an ERG/token pool.
+        `claimable*` is what a redeem placement claims from the vault first.
+      operationId: listLDPoolProvisions
+      security:
+        - ApiKeyAuth: []
+      tags:
+        - lithosdex
+      parameters:
+        - name: poolNft
+          in: path
+          required: true
+          description: The pool's NFT id, 64 hex characters
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Provisions held by this wallet on the pool
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LDProvisionList'
+        '403':
+          description: "Missing or wrong api_key"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '404':
+          description: "No LithosDex pool with that NFT."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '503':
+          description: "The pool index is still building, or the node or wallet did not answer. Never returns a partial list."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /dex/pools/{poolNft}/provisions/{boxId}/claim:
+    post:
+      summary: Claim a provision's fees on any pool
+      description: >
+        Settles one of this wallet's provisions on the pool against the pool's vault, paying what the vault owes it.
+        Needs the provision's `ownerNFT` in this wallet and a vault flushed since the provision last claimed. The
+        provision gets a new box id, returned as `successorBoxId`. Open on every pool, whatever its genesis. The body
+        is optional; every field bounds the claim.
+      operationId: claimLDPoolProvision
+      security:
+        - ApiKeyAuth: []
+      tags:
+        - lithosdex
+      parameters:
+        - name: poolNft
+          in: path
+          required: true
+          description: The pool's NFT id, 64 hex characters
+          schema:
+            type: string
+        - name: boxId
+          in: path
+          required: true
+          description: The provision box to settle
+          schema:
+            type: string
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LDClaimRequest'
+      responses:
+        '200':
+          description: The claim
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LDClaimResult'
+        '400':
+          description: "The provision has nothing to settle until the pool is flushed, or the vault cannot pay what it is owed."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '403':
+          description: "Missing or wrong api_key"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '404':
+          description: "No LithosDex pool with that NFT, or no live provision of the pool with that id."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '409':
+          description: "The vault or the provision moved since the quote, or another LithosDex mutation is running. Re-read and resend."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LDStateChangedResponse'
+        '422':
+          description: "The claim pays less than a minimum, or this wallet does not hold the provision's ownerNFT."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '503':
+          description: "The pool index is still building, or the node or wallet did not answer. Retry."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /dex/pools/{poolNft}/flush/check:
+    post:
+      summary: Check a flush on any pool
+      description: >
+        What flushing the pool would move into its vault now. X is ERG for an ERG/token pool. `lastFlushHeight` is
+        not tracked for these pools.
+      operationId: checkLDPoolFlush
+      tags:
+        - lithosdex
+      parameters:
+        - name: poolNft
+          in: path
+          required: true
+          description: The pool's NFT id, 64 hex characters
+          schema:
+            type: string
+      responses:
+        '200':
+          description: The flush as it stands
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LDFlushCheck'
+        '404':
+          description: "No LithosDex pool with that NFT."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '503':
+          description: "The pool index is still building, or the node could not be read. Retry."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /dex/pools/{poolNft}/flush:
+    post:
+      summary: Flush any pool
+      description: >
+        Moves the pool's pending fees into its vault, so providers can claim them. Permissionless, and it pays you
+        nothing; the network fee comes from this wallet. Open on every pool. The body is optional.
+      operationId: flushLDPool
+      security:
+        - ApiKeyAuth: []
+      tags:
+        - lithosdex
+      parameters:
+        - name: poolNft
+          in: path
+          required: true
+          description: The pool's NFT id, 64 hex characters
+          schema:
+            type: string
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LDFlushRequest'
+      responses:
+        '200':
+          description: The flush
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LDFlushResult'
+        '400':
+          description: "Nothing is pending, so the pool refuses a flush."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '403':
+          description: "Missing or wrong api_key"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '404':
+          description: "No LithosDex pool with that NFT."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '409':
+          description: "The pool or the vault moved since the check, or another LithosDex mutation is running. Re-check and resend."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LDStateChangedResponse'
+        '422':
+          description: "The wallet cannot cover the network fee."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '503':
+          description: "The pool index is still building, or the node or wallet did not answer. Retry."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /dex/pools/{poolNft}/price/history:
+    get:
+      summary: A verified pool's price history
+      description: >
+        `GET /dex/price/history` for any verified pool: Y per X at display decimals, from a background snapshot.
+        Collected for verified pools only. A pool other than ERG:LIT is collected from the height it joined the
+        verified list, `stats.collectedFrom`; a range reaching earlier is `partial`.
+      operationId: getLDPoolPriceHistory
+      tags:
+        - lithosdex
+      parameters:
+        - name: poolNft
+          in: path
+          required: true
+          description: The pool's NFT id, 64 hex characters
+          schema:
+            type: string
+        - in: query
+          name: range
+          required: false
+          description: How far back to go
+          schema:
+            type: string
+            enum: ['1H', '24H', '7D', '30D']
+            default: '24H'
+        - in: query
+          name: bucket
+          required: false
+          description: Positive bucket size in blocks. At most 500 points including range boundaries.
+          schema:
+            type: integer
+            format: int32
+      responses:
+        '200':
+          description: Price series for the requested range
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LDPriceHistory'
+        '400':
+          description: Unknown `range`, or a `bucket` that would return too many points.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '404':
+          description: Not a verified pool, so nothing is collected for it.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '503':
+          description: No snapshot yet, or the pool index is still building. Retry-After is 5 seconds.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DexStatsUnavailable'
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /dex/pools/{poolNft}/fees/history:
+    get:
+      summary: A verified pool's fee history
+      description: >
+        `GET /dex/fees/history` for any verified pool. Collected for verified pools only, each other than ERG:LIT from
+        the height it joined the verified list, `stats.collectedFrom`.
+      operationId: getLDPoolFeeHistory
+      tags:
+        - lithosdex
+      parameters:
+        - name: poolNft
+          in: path
+          required: true
+          description: The pool's NFT id, 64 hex characters
+          schema:
+            type: string
+        - { in: query, name: from, required: false, description: "First height", schema: { type: integer, format: int32 } }
+        - { in: query, name: to, required: false, description: "Last height", schema: { type: integer, format: int32 } }
+        - { in: query, name: bucket, required: false, description: "Bucket size in blocks, default 720", schema: { type: integer, format: int32 } }
+      responses:
+        '200':
+          description: Fee series
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LDFeeHistory'
+        '400':
+          description: Heights outside the collected window, or too many points.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '404':
+          description: Not a verified pool, so nothing is collected for it.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '503':
+          description: No snapshot yet, or the pool index is still building. Retry-After is 5 seconds.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DexStatsUnavailable'
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /dex/pools/{poolNft}/activity/recent:
+    get:
+      summary: A verified pool's recent activity
+      description: >
+        `GET /dex/activity/recent` for any verified pool. On a token/token pool `ergIn` means X was sold. Collected for
+        verified pools only.
+      operationId: getLDPoolRecentActivity
+      tags:
+        - lithosdex
+      parameters:
+        - name: poolNft
+          in: path
+          required: true
+          description: The pool's NFT id, 64 hex characters
+          schema:
+            type: string
+        - { in: query, name: limit, required: false, description: "Most entries", schema: { type: integer, format: int32 } }
+      responses:
+        '200':
+          description: Recent pool transitions, newest first
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LDRecentActivity'
+        '404':
+          description: Not a verified pool, so nothing is collected for it.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '503':
+          description: No snapshot yet, or the pool index is still building. Retry-After is 5 seconds.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DexStatsUnavailable'
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /dex/pools/{poolNft}/provisions/{boxId}/fees/history:
+    get:
+      summary: A provision's fee history on a verified pool
+      description: >
+        The fees one provision earned over the collected window, from its size and entry as they stand now. Collected
+        for verified pools only.
+      operationId: getLDPoolProvisionFeeHistory
+      tags:
+        - lithosdex
+      parameters:
+        - name: poolNft
+          in: path
+          required: true
+          description: The pool's NFT id, 64 hex characters
+          schema:
+            type: string
+        - name: boxId
+          in: path
+          required: true
+          description: The provision box
+          schema:
+            type: string
+        - { in: query, name: from, required: false, description: "First height", schema: { type: integer, format: int32 } }
+        - { in: query, name: to, required: false, description: "Last height", schema: { type: integer, format: int32 } }
+        - { in: query, name: bucket, required: false, description: "Bucket size in blocks, default 720", schema: { type: integer, format: int32 } }
+      responses:
+        '200':
+          description: The provision's fee series
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LDProvisionFeeHistory'
+        '404':
+          description: Not a verified pool, or no live provision of the pool with that id.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '503':
+          description: No snapshot yet, or the pool index is still building. Retry-After is 5 seconds.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DexStatsUnavailable'
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
   /dex/pools/create/check:
     post:
       summary: Quote a new LithosDex pool
@@ -2562,6 +3020,51 @@ paths:
                 $ref: '#/components/schemas/LDProvisionList'
         '503':
           description: Node or wallet unavailable. Never returns a partial list.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /dex/provisions/nft:
+    post:
+      summary: Look up provision NFTs
+      description: >
+        Which of up to 100 tokens own a provision on a listed LithosDex pool, of either kind. A
+        provision's NFT has the id of the pool box its deposit spent, so a token is checked against that
+        box first, and the pool's provisions are read once for every token naming it. Each token comes
+        back once, with `provisionNft` false when it owns none. When it owns one, the answer carries the
+        pool, the provision and the provision's share of the reserves now. Open, so it can check tokens
+        held anywhere.
+      operationId: lookupLDProvisionNfts
+      tags:
+        - lithosdex
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LDNftLookupRequest'
+      responses:
+        '200':
+          description: One entry per distinct token id, in lower case
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LDNftLookupList'
+        '400':
+          description: "The request is malformed, names more than 100 tokens, or has an id that is not 64 hex characters."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '503':
+          description: "The pool index is still building, the node is unavailable, or a pool has more provisions than one scan reads. Never returns a partial answer."
           content:
             application/json:
               schema:
@@ -5456,6 +5959,13 @@ components:
         error:
           type: string
           description: Short refresh failure message. Details stay in the client log.
+        collectedFrom:
+          type: integer
+          format: int32
+          description: >
+            The height a verified pool other than ERG:LIT joined the verified list. Nothing before it is collected, so
+            a graph covering earlier heights shows that range as not collected. Absent for ERG:LIT, whose whole life
+            is collected.
     DexStatsUnavailable:
       allOf:
         - $ref: '#/components/schemas/ApiError'
@@ -8397,6 +8907,58 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/LDProvision'
+
+    LDNftLookupRequest:
+      description: "Token ids to check as provision NFTs"
+      type: object
+      x-tags: lithosdex
+      required:
+        - tokenIds
+      properties:
+        tokenIds:
+          type: array
+          maxItems: 100
+          items:
+            type: string
+          example: ['88c297f99da7172f6aa20efbead69aa40e2b7734a1873d66ca1db6b19d214db6']
+
+    LDNftLookup:
+      description: >
+        One token checked as a provision NFT. `pool`, `provision`, `amountX` and `amountY` are
+        present only when `provisionNft` is true.
+      type: object
+      x-tags: lithosdex
+      required:
+        - tokenId
+        - provisionNft
+      properties:
+        tokenId:
+          type: string
+        provisionNft:
+          type: boolean
+          description: "Whether this token owns a provision on a listed pool"
+        pool:
+          $ref: '#/components/schemas/LDPoolSummary'
+        provision:
+          $ref: '#/components/schemas/LDProvision'
+        amountX:
+          type: string
+          description: "The provision's share of the pool's X reserve now. nanoERG for an ERG/token pool."
+        amountY:
+          type: string
+          description: "The provision's share of the pool's Y reserve now"
+
+    LDNftLookupList:
+      description: "Each distinct token id checked, once"
+      type: object
+      x-tags: lithosdex
+      required:
+        - nfts
+      properties:
+        nfts:
+          type: array
+          items:
+            $ref: '#/components/schemas/LDNftLookup'
 
     LDClaimRequest:
       description: >

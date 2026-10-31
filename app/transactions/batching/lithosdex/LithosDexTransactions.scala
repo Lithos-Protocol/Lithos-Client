@@ -1,8 +1,8 @@
 package transactions.batching.lithosdex
 
-import lithosdex.contracts.LDContracts
-import lithosdex.states.LDFeeValue
-import lithosdex.{LDHelpers, LDLiquidityPool}
+import lithosdex.contracts.{LDContracts, LDT2TContracts}
+import lithosdex.states.{LDFeeValue, LDT2TFeeValue}
+import lithosdex.{LDHelpers, LDLiquidityPool, LDT2TLiquidityPool}
 import mutations.NodeWallet
 import org.ergoplatform.appkit._
 import org.ergoplatform.appkit.scalaapi._
@@ -186,18 +186,26 @@ object LithosDexTransactions {
   def flush(ctx: BlockchainContext,
             wallet: NodeWallet,
             poolBox: InputUTXO,
+            vaultBox: InputUTXO): DexPlan[LDFlushTx] =
+    flush(ctx, wallet, DexContracts(ctx), poolBox, vaultBox)
+
+  /** The same against `contracts`' pool and vault, for any ERG/token deployment. */
+  def flush(ctx: BlockchainContext,
+            wallet: NodeWallet,
+            contracts: LDContracts,
+            poolBox: InputUTXO,
             vaultBox: InputUTXO): DexPlan[LDFlushTx] = {
     val p = LDLiquidityPool(poolBox)
     val v = LDFeeValue.fromBox(vaultBox, 0, ctx.getHeight)
     require(p.canFlush, "nothing is pending: the pool refuses a flush that moves nothing")
 
-    val poolOut = poolUTXO(DexContracts(ctx), p,
+    val poolOut = poolUTXO(contracts, p,
       reservesX = p.reservesX, reservesY = p.reservesY,
       pendingX = 0L, pendingY = 0L,
       supply = p.supply, provTokens = p.provTokensLeft,
       accX = p.accX, accY = p.accY)
 
-    val vaultOut = vaultUTXO(DexContracts(ctx), v, Some(p.tokenY),
+    val vaultOut = vaultUTXO(contracts, v, Some(p.tokenY),
       balanceX = v.balanceX + p.pendingX,
       balanceY = v.balanceY + p.pendingY,
       accX = p.accX, accY = p.accY)
@@ -228,7 +236,15 @@ object LithosDexTransactions {
   def claim(ctx: BlockchainContext,
             wallet: NodeWallet,
             vaultBox: InputUTXO,
-             provisions: Seq[Provision]): DexPlan[LDClaimTx] = {
+             provisions: Seq[Provision]): DexPlan[LDClaimTx] =
+    claim(ctx, wallet, DexContracts(ctx), vaultBox, provisions)
+
+  /** The same against `contracts`' vault and provision guard, for any ERG/token deployment. */
+  def claim(ctx: BlockchainContext,
+            wallet: NodeWallet,
+            contracts: LDContracts,
+            vaultBox: InputUTXO,
+            provisions: Seq[Provision]): DexPlan[LDClaimTx] = {
     require(provisions.nonEmpty, "a claim must settle at least one provision")
     val v = LDFeeValue.fromBox(vaultBox, 0, ctx.getHeight)
 
@@ -245,7 +261,7 @@ object LithosDexTransactions {
         s"${LDHelpers.VAULT_MIN} is held back for storage rent and is never payable")
     require(v.payableY >= owedY, s"the vault holds only ${v.payableY} tokens of the $owedY owed")
 
-    val vaultOut = vaultUTXO(DexContracts(ctx), v, None,
+    val vaultOut = vaultUTXO(contracts, v, None,
       balanceX = v.balanceX - owedX,
       balanceY = v.balanceY - owedY,
       accX = v.accX, accY = v.accY)
@@ -253,20 +269,72 @@ object LithosDexTransactions {
     // Each successor must sit at its own input index and carry the vault's accumulator forward exactly.
     // Leaving one short would let the same stretch be settled twice.
     val provOuts = provisions.map(p =>
-      provisionUTXO(DexContracts(ctx), p.box.tokens.head.id, v.accX, v.accY, p.ownerNFT, p.shares, p.value))
+      provisionUTXO(contracts, p.box.tokens.head.id, v.accX, v.accY, p.ownerNFT, p.shares, p.value))
 
     val ownerRequirements = provisions.map(p => Token(p.ownerNFT, 1L))
     funded(FUNDING_HEADROOM, ownerRequirements) { funding =>
       val walletInputs = funding
       val inputs =
         Seq(vaultInput(vaultBox, LDHelpers.VAULT_CLAIM, provisions.size)) ++
-          provisions.map(p => provisionInput(DexContracts(ctx), p.box, LDHelpers.PROV_CLAIM)) ++
+          provisions.map(p => provisionInput(contracts, p.box, LDHelpers.PROV_CLAIM)) ++
           walletInputs
 
       val uTx = build(ctx, inputs, vaultOut +: provOuts, wallet)
       DexUnsigned(uTx, signed => LDClaimTx(signed, owedX, owedY))
     }
   }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  //  TOKEN/TOKEN FLUSH AND CLAIM — the same ops, with both fee sides held as tokens
+  // ══════════════════════════════════════════════════════════════════════════
+
+  /**
+   * Moves a token/token pool's pending fees into its vault, paying the network fee from the wallet. The pool's and
+   * the vault's ERG are storage and never move.
+   */
+  def t2tFlush(ctx: BlockchainContext, wallet: NodeWallet, contracts: LDT2TContracts, poolBox: InputUTXO,
+               vaultBox: InputUTXO): DexPlan[LDFlushTx] = {
+    val p = LDT2TLiquidityPool(poolBox)
+    require(p.canFlush, "nothing is pending: the pool refuses a flush that moves nothing")
+    val v = LDT2TFeeValue.fromBox(vaultBox, 0, ctx.getHeight)
+    require(v.vaultNFT.toString == contracts.vaultNFT.toString, s"vault ${v.vaultNFT} is not pool ${contracts.poolNFT}'s")
+    val poolOut = LDT2TExecution.poolUTXO(contracts, poolBox, p.copy(pendingX = 0L, pendingY = 0L))
+    val vaultOut = t2tVaultUTXO(contracts, vaultBox, v, v.balanceX + p.pendingX, v.balanceY + p.pendingY, p.accX, p.accY)
+    funded(FUNDING_HEADROOM) { funding =>
+      val inputs = Seq(poolInput(poolBox, LDHelpers.POOL_FLUSH), vaultInput(vaultBox, LDHelpers.VAULT_FLUSH)) ++ funding
+      DexUnsigned(build(ctx, inputs, Seq(poolOut, vaultOut), wallet), signed => LDFlushTx(signed, p.pendingX, p.pendingY))
+    }
+  }
+
+  /**
+   * Settles one token/token provision against its vault: the vault at input 0, the provision at 1 finding its
+   * successor at output 1, and the owner NFT spent from the wallet to authorise it. Pays what the vault owes.
+   */
+  def t2tClaim(ctx: BlockchainContext, wallet: NodeWallet, contracts: LDT2TContracts, vaultBox: InputUTXO,
+               provision: Provision): DexPlan[LDClaimTx] = {
+    val v = LDT2TFeeValue.fromBox(vaultBox, 0, ctx.getHeight)
+    require(v.vaultNFT.toString == contracts.vaultNFT.toString, s"vault ${v.vaultNFT} is not pool ${contracts.poolNFT}'s")
+    require(v.canClaim(provision.entryX, provision.entryY),
+      s"provision ${provision.boxId} has nothing to settle: the vault has not been flushed since it last claimed")
+    val (owedX, owedY) = v.owed(provision.shares, provision.entryX, provision.entryY)
+    require(v.payableX >= owedX && v.payableY >= owedY,
+      s"the vault can pay ${v.payableX} and ${v.payableY} of the $owedX and $owedY this provision is owed")
+    val vaultOut = t2tVaultUTXO(contracts, vaultBox, v, v.balanceX - owedX, v.balanceY - owedY, v.accX, v.accY)
+    val provisionOut = UTXO(contracts.provisionGuard, provision.value, Seq(Token(contracts.provToken, 1L)),
+      Seq(bigIntValue(v.accX), bigIntValue(v.accY), bytesValue(provision.ownerNFT.getBytes), ErgoValue.of(provision.shares)))
+    funded(FUNDING_HEADROOM, Seq(Token(provision.ownerNFT, 1L))) { funding =>
+      val inputs = Seq(vaultInput(vaultBox, LDHelpers.VAULT_CLAIM, 1),
+        LDT2TExecution.provisionInput(contracts, provision.box, LDHelpers.PROV_CLAIM)) ++ funding
+      DexUnsigned(build(ctx, inputs, Seq(vaultOut, provisionOut), wallet), signed => LDClaimTx(signed, owedX, owedY))
+    }
+  }
+
+  /** A token/token vault box: its own ERG, the NFT, then X and Y balances, which never reach zero. */
+  private def t2tVaultUTXO(contracts: LDT2TContracts, spent: InputUTXO, v: LDT2TFeeValue, balanceX: Long,
+                           balanceY: Long, accX: BigInt, accY: BigInt): UTXO =
+    UTXO(contracts.feeVault, spent.value,
+      Seq(Token(v.vaultNFT, 1L), Token(v.tokenX, balanceX), Token(v.tokenY, balanceY)),
+      Seq(bigIntValue(accX), bigIntValue(accY)))
 
   // ══════════════════════════════════════════════════════════════════════════
   //  RESIZE — pool op 4, provision op 3, vault op 1

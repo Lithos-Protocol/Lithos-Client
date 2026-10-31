@@ -60,6 +60,11 @@ GET  /dex/pool                                  controllers.LithosDexApiControll
 GET  /dex/pools                                 controllers.LDPoolsApiController.listPools()
 GET  /dex/pools/:poolNft                        controllers.LDPoolsApiController.getPool(poolNft: String)
 GET  /dex/pools/:poolNft/orders                 controllers.LDPoolsApiController.listPoolOrders(poolNft: String)
+GET  /dex/pools/:poolNft/provisions             controllers.LDPoolsApiController.listPoolProvisions(poolNft: String)
+GET  /dex/pools/:poolNft/provisions/:boxId/fees/history controllers.LDPoolsApiController.getPoolProvisionFeeHistory(poolNft: String, boxId: String, from: Option[Int], to: Option[Int], bucket: Option[Int])
+GET  /dex/pools/:poolNft/price/history          controllers.LDPoolsApiController.getPoolPriceHistory(poolNft: String, range: Option[String], bucket: Option[Int])
+GET  /dex/pools/:poolNft/fees/history           controllers.LDPoolsApiController.getPoolFeeHistory(poolNft: String, from: Option[Int], to: Option[Int], bucket: Option[Int])
+GET  /dex/pools/:poolNft/activity/recent        controllers.LDPoolsApiController.getPoolRecentActivity(poolNft: String, limit: Option[Int])
 + nocsrf
 POST /dex/pools/create/check                   controllers.LDPoolsApiController.checkCreatePool()
 + nocsrf
@@ -76,8 +81,16 @@ POST /dex/pools/:poolNft/orders/deposit         controllers.LDPoolsApiController
 POST /dex/pools/:poolNft/orders/redeem/check    controllers.LDPoolsApiController.checkRedeemOrder(poolNft: String)
 + nocsrf
 POST /dex/pools/:poolNft/orders/redeem          controllers.LDPoolsApiController.placeRedeemOrder(poolNft: String)
++ nocsrf
+POST /dex/pools/:poolNft/provisions/:boxId/claim controllers.LDPoolsApiController.claimPoolProvision(poolNft: String, boxId: String)
++ nocsrf
+POST /dex/pools/:poolNft/flush/check            controllers.LDPoolsApiController.checkPoolFlush(poolNft: String)
++ nocsrf
+POST /dex/pools/:poolNft/flush                  controllers.LDPoolsApiController.flushPool(poolNft: String)
 GET  /dex/vault                                 controllers.LithosDexApiController.getVault()
 GET  /dex/provisions                            controllers.LithosDexApiController.listProvisions()
++ nocsrf
+POST /dex/provisions/nft                       controllers.LDPoolsApiController.lookupNfts()
 GET  /dex/fees/history                          controllers.LithosDexApiController.getFeeHistory(from: Option[Int], to: Option[Int], bucket: Option[Int])
 GET  /dex/price/history                         controllers.LithosDexApiController.getPriceHistory(range: Option[String], bucket: Option[Int])
 GET  /dex/activity/recent                       controllers.LithosDexApiController.getRecentActivity(limit: Option[Int])

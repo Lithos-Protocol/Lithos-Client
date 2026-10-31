@@ -299,43 +299,11 @@ class DexAPIExecution(nodeContext: NodeContext, walletSelector: EngineFunding,
     })
   }
 
-  /**
-   * Both fee figures, and their difference.
-   *
-   * `accrued` is what the pool says the provision has earned, unflushed fees included. `claimable` is
-   * what the vault can actually pay, which is smaller by whatever has not been flushed. Returning one
-   * without the other misleads — the gap is precisely what a flush would release.
-   */
-  private def describe(liquidity: LDLiquidityPool, vault: LDFeeValue, prov: Provision): LDProvision = {
-    val (accruedX, accruedY) = liquidity.feesAccrued(prov.shares, prov.entryX, prov.entryY)
-    val (owedX, owedY) = vault.owed(prov.shares, prov.entryX, prov.entryY)
-
-    // A provision opened or resized while the pool held unflushed fees enters at an accumulator AHEAD
-    // of the vault's, and the contract's own arithmetic is negative there. Execution already refuses
-    // that case; showing it as a negative claim reads as a debt the holder owes. Clamped for display
-    // only — nothing here is used to build a transaction.
-    val awaitingFlush = owedX < 0 || owedY < 0
-    val claimableX = math.max(0L, owedX)
-    val claimableY = math.max(0L, owedY)
-
-    LDProvision(
-      boxId = prov.boxId,
-      ownerNFT = prov.ownerNFT.toString,
-      shares = LDAmounts(prov.shares),
-      entryX = LDAmounts(prov.entryX),
-      entryY = LDAmounts(prov.entryY),
-      value = LDAmounts(prov.value),
-      createdHeight = prov.createdHeight,
-      shareOfSupply = liquidity.shareOfSupply(prov.shares),
-      accruedX = LDAmounts(accruedX),
-      accruedY = LDAmounts(accruedY),
-      claimableX = LDAmounts(claimableX),
-      claimableY = LDAmounts(claimableY),
-      unflushedX = LDAmounts(math.max(0L, accruedX - claimableX)),
-      unflushedY = LDAmounts(math.max(0L, accruedY - claimableY)),
-      canClaim = vault.canClaim(prov.entryX, prov.entryY),
-      awaitingFlush = awaitingFlush)
-  }
+  /** Both fee figures and their difference, which is precisely what a flush would release. */
+  private def describe(liquidity: LDLiquidityPool, vault: LDFeeValue, prov: Provision): LDProvision =
+    LDOrderViews.provision(prov, liquidity.feesAccrued(prov.shares, prov.entryX, prov.entryY),
+      vault.owed(prov.shares, prov.entryX, prov.entryY), vault.canClaim(prov.entryX, prov.entryY),
+      liquidity.shareOfSupply(prov.shares))
 
   /** @inheritdoc */
   override def claimProvision(boxId: String, request: LDClaimRequest, ldCache: LDCache): LDClaimResult =
