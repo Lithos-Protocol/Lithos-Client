@@ -8,6 +8,7 @@ import lithosdex.contracts.{LDContracts, LDT2TContracts}
 import lithosdex.states.{LDFeeValue, LDT2TFeeValue}
 import lithosdex.{LDHelpers, LDLiquidityPool, LDT2TLiquidityPool}
 import mutations.NodeWallet
+import node.MutationConversions._
 import node.NodeApi
 import node.model.MempoolOptions
 import org.ergoplatform.appkit.BlockchainContext
@@ -267,57 +268,137 @@ class DexPoolExecution(nodeContext: NodeContext, walletSelector: EngineFunding, 
   // ── provision NFTs ────────────────────────────────────────────────────────
 
   /**
-   * Which of `tokenIds` own a provision, each with its pool, the provision and that provision's share of the reserves.
-   * An ownership NFT's id is the id of the pool box its deposit spent, so one indexed box read rules out any other
-   * token. The rest are grouped by pool, whose guard is scanned once for all of them. A token whose pool the index
-   * does not list reads as no provision NFT.
+   * Which of `tokenIds` own, or owned, a provision: each with its pool, how it was minted, and the provision now.
+   * A deposit's NFT takes the id of the pool box the deposit spent, so one indexed box read rules out most tokens;
+   * a pool creator's NFT is minted apart and is named by the pool's genesis, which the index already holds. The
+   * rest are grouped by pool, whose guard is scanned once for all of them. Answers hold for the tip they were read
+   * at; how an NFT was minted never changes and is kept. A token whose pool the index does not list is no NFT.
    */
-  def lookupNfts(tokenIds: Seq[String]): Map[String, (IndexedPool, LDProvision, Long, Long)] = {
+  def lookupNfts(tokenIds: Seq[String]): Map[String, DexPoolExecution.NftFound] = {
     val ids = tokenIds.map(_.toLowerCase).distinct
     if (ids.size > DexPoolExecution.MaxNftLookups) throw LithosBadRequest(
       s"at most ${DexPoolExecution.MaxNftLookups} token ids per request, got ${ids.size}")
     ids.find(!_.matches("[0-9a-f]{64}")).foreach(id => throw LithosBadRequest(s"'$id' is not a 64-character token id"))
     val snapshot = index.snapshot()
     if (snapshot.status != "ready") throw LithosUnavailable("the pool index is still building; retry shortly")
-    val byNft = snapshot.pools.map(p => p.nft -> p).toMap
-    def treeOf(p: IndexedPool) = p.n2t.map(_.liquidityPool.ergoTreeHex).orElse(p.t2t.map(_.liquidityPool.ergoTreeHex))
-    val poolOf = ids.flatMap { id =>
-      val box = nodeApi.indexedBoxById(id).getOrElse(throw LithosUnavailable(s"could not read box $id from the node"))
-      for {
-        b <- box if b.boxId == id
-        first <- b.box.assets.headOption
-        pool <- byNft.get(first.tokenId) if treeOf(pool).contains(b.box.ergoTree)
-      } yield id -> pool
+    val cached = Option(nftAnswers.get()).filter(_._1 == snapshot.height).map(_._2).getOrElse(Map.empty)
+    val todo = ids.filterNot(cached.contains)
+    val read = if (todo.isEmpty) Map.empty[String, Option[DexPoolExecution.NftFound]] else readNfts(todo, snapshot.pools)
+    if (read.nonEmpty) nftAnswers.updateAndGet { held =>
+      val base = Option(held).filter(_._1 == snapshot.height).map(_._2).getOrElse(Map.empty)
+      if (base.size + read.size > DexPoolExecution.MaxCachedNftAnswers) held else (snapshot.height, base ++ read)
     }
-    poolOf.groupBy(_._2.nft).flatMap { case (nft, group) =>
+    ids.flatMap(id => cached.get(id).orElse(read.get(id)).flatten.map(id -> _)).toMap
+  }
+
+  /** Answers for the tip of the index snapshot they were read against, by token id. None is "no NFT". */
+  private val nftAnswers =
+    new java.util.concurrent.atomic.AtomicReference[(Int, Map[String, Option[DexPoolExecution.NftFound]])]()
+  /** How each NFT was minted, by token id; None when its box is a pool's but no deposit made it an owner. */
+  private val nftMints = new java.util.concurrent.ConcurrentHashMap[String, Option[DexPoolExecution.NftMint]]()
+
+  private def readNfts(ids: Seq[String], pools: Seq[IndexedPool]): Map[String, Option[DexPoolExecution.NftFound]] = {
+    import DexPoolExecution.{NftFound, NftLive, NftMint}
+    val byNft = pools.map(p => p.nft -> p).toMap
+    val atGenesis = pools.flatMap(p => p.genesisProvisions.map(g => g.owner -> (p, g))).toMap
+    def treeOf(p: IndexedPool) = p.n2t.map(_.liquidityPool.ergoTreeHex).orElse(p.t2t.map(_.liquidityPool.ergoTreeHex))
+    // Each id's pool, and the pool box its deposit spent when genesis did not mint it
+    val resolved = ids.flatMap { id =>
+      atGenesis.get(id).map { case (pool, _) => (id, pool, Option.empty[node.model.IndexedBox]) }.orElse {
+        val box = nodeApi.indexedBoxById(id).getOrElse(throw LithosUnavailable(s"could not read box $id from the node"))
+        for {
+          b <- box if b.boxId == id
+          first <- b.box.assets.headOption
+          pool <- byNft.get(first.tokenId) if treeOf(pool).contains(b.box.ergoTree)
+        } yield (id, pool, Some(b))
+      }
+    }
+    // A creator's NFT whose pool genesis the index could not read: the NFT's own description names its pool. That
+    // is only where to look; a provision under that pool's guard naming the token is the proof, as for any other.
+    val unresolved = ids.filterNot(id => resolved.exists(_._1 == id))
+    val hinted = if (unresolved.isEmpty) Seq.empty else
+      Try(nodeApi.tokensByIds(unresolved).get).getOrElse(Seq.empty).flatMap { t =>
+        DexPoolExecution.PoolNamed.findFirstMatchIn(Option(t.description).getOrElse("")).map(_.group(1))
+          .flatMap(byNft.get).filter(_ => unresolved.contains(t.id)).map(pool => (t.id, pool, Option.empty[node.model.IndexedBox]))
+      }
+    val candidates = resolved ++ hinted
+    val found = candidates.groupBy(_._2.nft).flatMap { case (nft, group) =>
       withPool(nft) { (ctx, live) =>
-        val owners = group.map(_._1).toSet
         val (guard, provToken) = live match {
           case n: LiveN2T => (n.contracts.provisionGuard.ergoTreeHex, n.contracts.provToken.toString)
           case t: LiveT2T => (t.contracts.provisionGuard.ergoTreeHex, t.contracts.provToken.toString)
         }
-        val (found, complete) = LDBoxes.provisionsOwnedBy(ctx, nodeApi, guard, provToken, owners, MempoolOptions.WithMempool)
+        val (owned, complete) = LDBoxes.provisionsOwnedBy(ctx, nodeApi, guard, provToken, group.map(_._1).toSet,
+          MempoolOptions.WithMempool)
         if (!complete) throw new LDBoxes.IndexTruncatedException(
           s"pool $nft has more provisions than one scan reads, so this answer would be partial")
-        val vaultBox = vault(ctx, live)
-        found.map { p =>
-          val (described, x, y) = live match {
-            case n: LiveN2T =>
-              val v = LDFeeValue.fromBox(vaultBox, 0, ctx.getHeight)
-              val q = n.pool.simRedeem(p.shares)
-              (LDOrderViews.provision(p, n.pool.feesAccrued(p.shares, p.entryX, p.entryY), v.owed(p.shares, p.entryX,
-                p.entryY), v.canClaim(p.entryX, p.entryY), n.pool.shareOfSupply(p.shares)), q.amountX, q.amountY)
-            case t: LiveT2T =>
-              val v = LDT2TFeeValue.fromBox(vaultBox, 0, ctx.getHeight)
-              val q = t.pool.simRedeem(p.shares)
-              (LDOrderViews.provision(p, t.pool.feesAccrued(p.shares, p.entryX, p.entryY), v.owed(p.shares, p.entryX,
-                p.entryY), v.canClaim(p.entryX, p.entryY), t.pool.shareOfSupply(p.shares)), q.amountX, q.amountY)
+        val byOwner = owned.map(p => p.ownerNFT.toString -> p).toMap
+        lazy val vaultBox = vault(ctx, live)
+        group.map { case (id, _, mintedFrom) =>
+          val mint = mintedFrom match {
+            case None => atGenesis.get(id).map { case (_, g) =>
+              NftMint(g.height, g.shares, g.amountX, g.amountY, BigInt(0), BigInt(0), genesis = true) }
+            case Some(poolBox) => mintOf(ctx, id, poolBox, live, guard, provToken)
           }
-          p.ownerNFT.toString -> ((live.indexed, described, x, y))
+          val now = byOwner.get(id).map { p =>
+            val (described, x, y) = live match {
+              case n: LiveN2T =>
+                val v = LDFeeValue.fromBox(vaultBox, 0, ctx.getHeight)
+                val q = n.pool.simRedeem(p.shares)
+                (LDOrderViews.provision(p, n.pool.feesAccrued(p.shares, p.entryX, p.entryY), v.owed(p.shares, p.entryX,
+                  p.entryY), v.canClaim(p.entryX, p.entryY), n.pool.shareOfSupply(p.shares)), q.amountX, q.amountY)
+              case t: LiveT2T =>
+                val v = LDT2TFeeValue.fromBox(vaultBox, 0, ctx.getHeight)
+                val q = t.pool.simRedeem(p.shares)
+                (LDOrderViews.provision(p, t.pool.feesAccrued(p.shares, p.entryX, p.entryY), v.owed(p.shares, p.entryX,
+                  p.entryY), v.canClaim(p.entryX, p.entryY), t.pool.shareOfSupply(p.shares)), q.amountX, q.amountY)
+            }
+            // Only a claim or a resize moves the entries, and each recreates the box, so its height is that spend's
+            val claimed = mint.filter(m => m.entryX != p.entryX || m.entryY != p.entryY).map(_ => p.createdHeight)
+            val bounty = live match {
+              case _: LiveT2T => Some(p.value - LDHelpers.t2tRefreshMinValue(p.value))
+              case _ => None
+            }
+            NftLive(described, x, y, claimed, bounty, p.createdHeight + LDHelpers.REFRESH_AGE + 1)
+          }
+          // A token no provision names, and no deposit or genesis made an owner, only looks like an NFT
+          id -> (if (now.isEmpty && mint.isEmpty) None else Some(NftFound(live.indexed, mint, now)))
         }.toMap
       }
     }
+    ids.map(id => id -> found.getOrElse(id, None)).toMap
   }
+
+  /**
+   * How the deposit that spent `poolBox` minted `id`, kept once read: the transaction's provision at output 1 must
+   * sit at the pool's guard with its provision token and name `id`. What the depositor put in is how much the pool
+   * grew. None when the box was spent some other way, so `id` was never an owner.
+   */
+  private def mintOf(ctx: BlockchainContext, id: String, poolBox: node.model.IndexedBox, live: Live, guard: String,
+                     provToken: String): Option[DexPoolExecution.NftMint] =
+    Option(nftMints.get(id)).getOrElse {
+      val deposit = poolBox.spentTransactionId.flatMap(txId => nodeApi.indexedTransactionById(txId)
+        .getOrElse(throw LithosUnavailable(s"could not read transaction $txId from the node")))
+      val mint = for {
+        tx <- deposit
+        after <- tx.outputs.headOption
+        made <- tx.outputs.lift(1)
+        if made.box.ergoTree.equalsIgnoreCase(guard) && made.box.assets.exists(_.tokenId == provToken)
+        p <- Try(LDBoxes.readProvision(made.box.toInputUTXO(ctx))).toOption if p.ownerNFT.toString == id
+      } yield {
+        val (before, grown) = (poolBox.box.toInputUTXO(ctx), after.box.toInputUTXO(ctx))
+        val (x, y) = live match {
+          case _: LiveN2T => (LDLiquidityPool(grown).reservesX - LDLiquidityPool(before).reservesX,
+            LDLiquidityPool(grown).reservesY - LDLiquidityPool(before).reservesY)
+          case _: LiveT2T => (LDT2TLiquidityPool(grown).reservesX - LDT2TLiquidityPool(before).reservesX,
+            LDT2TLiquidityPool(grown).reservesY - LDT2TLiquidityPool(before).reservesY)
+        }
+        DexPoolExecution.NftMint(tx.inclusionHeight, p.shares, x, y, p.entryX, p.entryY, genesis = false)
+      }
+      // Kept only once the box is spent: an unspent pool box may yet be spent by the deposit that mints it
+      if (deposit.isDefined && nftMints.size < DexPoolExecution.MaxCachedNftAnswers) nftMints.put(id, mint)
+      mint
+    }
 
   /** One provision on the pool, by box id, checked to be under the pool's own guard with its provision token. */
   def provisionOf(poolNft: String, boxId: String): LDBoxes.Provision =
@@ -539,6 +620,32 @@ object DexPoolExecution {
 
   /** Token ids one provision NFT lookup checks; each costs one indexed box read. */
   final val MaxNftLookups = 100
+
+  /** Most NFT answers held for one tip, and most mints held for the process. Past either, answers are not kept. */
+  final val MaxCachedNftAnswers = 4096
+
+  /** A pool NFT where a provision NFT's description names its pool, in either form this client writes. */
+  private[execution] val PoolNamed = """pool\W{1,4}([0-9a-f]{64})""".r
+
+  /**
+   * How a provision's NFT was minted: by a deposit, or by the pool's genesis for its creator.
+   *
+   * @param amountX what the depositor put in on the X side, ERG for an ERG/token pool; for a genesis, the reserve
+   * @param entryX  the entry the provision started from, which only a claim or a resize moves
+   */
+  final case class NftMint(height: Int, shares: Long, amountX: Long, amountY: Long, entryX: BigInt, entryY: BigInt,
+                           genesis: Boolean)
+
+  /**
+   * The provision an NFT owns now, and its share of the reserves. `lastClaimedHeight` is None while the entries are
+   * still the ones it was minted with. `refreshBounty` is what a refresh may take from a token/token provision now;
+   * `refreshableHeight` the first block anyone may refresh it, for either kind.
+   */
+  final case class NftLive(provision: LDProvision, amountX: Long, amountY: Long, lastClaimedHeight: Option[Int],
+                           refreshBounty: Option[Long], refreshableHeight: Int)
+
+  /** A token that owns a provision (`live`), or owned one since redeemed (`live` None, `mint` known). */
+  final case class NftFound(pool: IndexedPool, mint: Option[NftMint], live: Option[NftLive])
 
   /** Fees a request names, or the configured defaults, refused unless the cap sits under the fee. */
   private[execution] def orderFees(defaults: LithosDexOrdersConfig, executorFee: Option[String],

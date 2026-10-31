@@ -4,7 +4,7 @@ import akka.actor.ActorSystem
 import akka.testkit.{TestKit, TestProbe}
 import api.LithosApiErrors.{LithosBadRequest, LithosNotFound, LithosUnavailable, LithosUnprocessable}
 import api.models._
-import api.{GenesisVerdict, IndexedPool, LDPoolIndex, PoolIndexSnapshot}
+import api.{GenesisProvision, GenesisVerdict, IndexedPool, LDPoolIndex, PoolIndexSnapshot}
 import configs.{NodeContext, VerifiedPool}
 import lithosdex.contracts.{LDContracts, LDT2TContracts}
 import lithosdex.{LDHelpers, LDLiquidityPool, LDT2TLiquidityPool}
@@ -15,7 +15,7 @@ import org.ergoplatform.appkit.scalaapi.{scalaByteType, scalaLongType}
 import org.ergoplatform.appkit.{BlockchainContext, ErgoValue, NetworkType, Parameters}
 import org.ergoplatform.sdk.ErgoId
 import org.mockito.ArgumentMatchers.{any, anyString}
-import org.mockito.Mockito.when
+import org.mockito.Mockito.{never, times, verify, when}
 import org.scalatest.BeforeAndAfterAll
 import org.scalatest.flatspec.AnyFlatSpecLike
 import org.scalatest.matchers.should.Matchers
@@ -79,7 +79,8 @@ class DexPoolExecutionSpec extends TestKit(ActorSystem("dex-pool-execution-spec"
    * @param mempool        the observation order listings read, in place of the engine's
    */
   private def fixture(status: String = "ready", uncheckedReads: Option[GenesisVerdict] = sound,
-                      mempool: Option[CompleteMempool.Snapshot] = None): Fixture = {
+                      mempool: Option[CompleteMempool.Snapshot] = None,
+                      n2tGenesis: Seq[GenesisProvision] = Seq.empty): Fixture = {
     val api = mock[NodeApi]
     val (node, _, _) = FakeNodeContext(api, numAddresses = 1)
     val boxes = node.getClient.execute { ctx: BlockchainContext =>
@@ -110,7 +111,8 @@ class DexPoolExecutionSpec extends TestKit(ActorSystem("dex-pool-execution-spec"
     when(api.unconfirmedOutputByBoxId(anyString())).thenReturn(Success(None))
     val index = new LDPoolIndex(node, system) {
       override def snapshot(): PoolIndexSnapshot = PoolIndexSnapshot(status, 100, truncated = false,
-        if (status == "ready") pools else Seq.empty, Map.empty)
+        if (status == "ready") pools.map(p => if (p.nft == n2t.poolNFT.toString) p.copy(genesisProvisions = n2tGenesis) else p)
+        else Seq.empty, Map.empty)
       // The unchecked pool is read at placement; the others keep what the snapshot says
       override def genesisNow(pool: IndexedPool): Option[GenesisVerdict] =
         if (pool.verified) None else if (pool.nft == unchecked.poolNFT.toString) uncheckedReads else pool.genesis
@@ -272,12 +274,104 @@ class DexPoolExecutionSpec extends TestKit(ActorSystem("dex-pool-execution-spec"
 
     val found = f.exec.lookupNfts(Seq(held.boxId, ghost.boxId.toUpperCase, stranger))
     found.keySet shouldBe Set(held.boxId)
-    val (pool, described, x, y) = found(held.boxId)
+    val live = found(held.boxId).live.get
     val expected = poolOf(f, n2t.poolNFT)(LDLiquidityPool(_)).simRedeem(1000L)
-    (pool.nft, described.shares, described.boxId, x, y) shouldBe
+    (found(held.boxId).pool.nft, live.provision.shares, live.provision.boxId, live.amountX, live.amountY) shouldBe
       ((n2t.poolNFT.toString, "1000", provision.boxId, expected.amountX, expected.amountY))
+    withClue("an ERG/token provision has no refresh bounty, and anyone may refresh it once 525,600 blocks old: ") {
+      live.refreshBounty shouldBe None
+      live.refreshableHeight shouldBe live.provision.createdHeight + LDHelpers.REFRESH_AGE + 1
+    }
     a[LithosBadRequest] should be thrownBy f.exec.lookupNfts(Seq.fill(101)("ab").zipWithIndex.map { case (_, i) => f"$i%064x" })
     a[LithosBadRequest] should be thrownBy f.exec.lookupNfts(Seq("not-an-id"))
+  }
+
+  it should "say how each NFT was minted, name a redeemed one, find a creator's, and read each once a tip" in {
+    val creator = "a7" * 32
+    val f = fixture(n2tGenesis = Seq(GenesisProvision(creator, 90, LDHelpers.GENESIS_SUPPLY - LDHelpers.MIN_SUPPLY,
+      10L * Parameters.OneErg, 1000000000L)))
+    def provisionOf(ctx: BlockchainContext, owner: String, entry: BigInt, index: Int, txId: String) =
+      LDNodeFixtures.nodeBox(ctx, UTXO(n2t.provisionGuard, LDHelpers.PROVISION_MIN, Seq(Token(n2t.provToken, 1L)),
+        Seq(ErgoValue.of(entry.bigInteger), zero, ErgoValue.of(Colls.fromArray(ErgoId.create(owner).getBytes), scalaByteType),
+          ErgoValue.of(1000L))), index = index, txId = txId)
+    val (claimed, redeemed, swapped, deposits, live) = f.node.getClient.execute { ctx: BlockchainContext =>
+      def before(index: Int, txId: String) = LDNodeFixtures.nodeBox(ctx, UTXO(n2t.liquidityPool, 9L * Parameters.OneErg,
+        Seq(Token(n2t.poolNFT, 1L), Token(tokenY, 900000000L), Token(n2t.provToken, 1001L)),
+        Seq(ErgoValue.of(LDHelpers.LOCKED_LP - 999000000L), longs(LDHelpers.GENESIS_FEE_PARAMS), longs(Array(0L, 0L)),
+          zero, zero)), index = index, txId = txId)
+      val after = LDNodeFixtures.nodeBox(ctx, UTXO(n2t.liquidityPool, 10L * Parameters.OneErg,
+        Seq(Token(n2t.poolNFT, 1L), Token(tokenY, 1000000000L), Token(n2t.provToken, 1000L)),
+        Seq(ErgoValue.of(LDHelpers.LOCKED_LP - 1000000000L), longs(LDHelpers.GENESIS_FEE_PARAMS), longs(Array(0L, 0L)),
+          zero, zero)), index = 0, txId = "d7" * 32)
+      val (c, r, s) = (before(2, "c1" * 32), before(3, "c2" * 32), before(4, "c3" * 32))
+      def deposit(spent: NodeBox, txId: String) = IndexedTransaction(txId, Seq(LDNodeFixtures.indexed(spent)), Seq.empty,
+        Seq(LDNodeFixtures.indexed(after), LDNodeFixtures.indexed(provisionOf(ctx, spent.boxId, 0, 1, txId))), 80, 1,
+        "block", 0L, 0, 1L, 100)
+      val swap = IndexedTransaction("e9" * 32, Seq(LDNodeFixtures.indexed(s)), Seq.empty,
+        Seq(LDNodeFixtures.indexed(after), LDNodeFixtures.indexed(after.copy(boxId = "e8" * 32))), 80, 1, "block", 0L, 0, 1L, 100)
+      // The claimed NFT's provision has moved its entry since; the creator's sits as genesis made it
+      val provisions = Seq(provisionOf(ctx, c.boxId, LDHelpers.SCALE, 0, "f1" * 32), provisionOf(ctx, creator, 0, 0, "f2" * 32))
+      (c, r, s, Map(c.boxId -> deposit(c, "d1" * 32), r.boxId -> deposit(r, "d2" * 32), s.boxId -> swap), provisions)
+    }
+    val spentBy = Map(claimed.boxId -> "d1" * 32, redeemed.boxId -> "d2" * 32, swapped.boxId -> "e9" * 32)
+    val boxes = Seq(claimed, redeemed, swapped).map(b => b.boxId -> b).toMap
+    when(f.nodeApi.indexedBoxById(anyString())).thenAnswer(inv => Success(boxes.get(inv.getArgument[String](0))
+      .map(b => LDNodeFixtures.indexed(b).copy(spentTransactionId = spentBy.get(b.boxId)))))
+    when(f.nodeApi.indexedTransactionById(anyString())).thenAnswer(inv =>
+      Success(deposits.values.find(_.id == inv.getArgument[String](0))))
+    when(f.nodeApi.unspentBoxesByErgoTree(anyString(), any[Paging], any[SortDirection], any[MempoolOptions]))
+      .thenAnswer { inv =>
+        Success(if (inv.getArgument[String](0) == n2t.provisionGuard.ergoTreeHex) live.map(LDNodeFixtures.indexed(_))
+        else Seq.empty)
+      }
+
+    val ids = Seq(claimed.boxId, redeemed.boxId, swapped.boxId, creator)
+    val found = f.exec.lookupNfts(ids)
+    withClue("a pool box a swap spent minted nothing it can own: ") {
+      found.keySet shouldBe Set(claimed.boxId, redeemed.boxId, creator)
+    }
+    val deposited = found(claimed.boxId).mint.get
+    (deposited.height, deposited.shares, deposited.amountX, deposited.amountY, deposited.genesis) shouldBe
+      ((80, 1000L, Parameters.OneErg, 100000000L, false))
+    found(claimed.boxId).live.get.lastClaimedHeight shouldBe Some(found(claimed.boxId).live.get.provision.createdHeight)
+    withClue("redeemed: its deposit made it an owner, and no provision names it now: ") {
+      found(redeemed.boxId).live shouldBe None
+      found(redeemed.boxId).mint.map(_.amountY) shouldBe Some(100000000L)
+    }
+    withClue("the creator's NFT, minted apart from the pool, is found from the genesis the index holds: ") {
+      found(creator).mint.map(m => (m.genesis, m.amountX)) shouldBe Some((true, 10L * Parameters.OneErg))
+      found(creator).live.get.lastClaimedHeight shouldBe None
+      verify(f.nodeApi, never()).indexedBoxById(creator)
+    }
+
+    f.exec.lookupNfts(ids).keySet shouldBe found.keySet
+    withClue("a second lookup at the same tip reads nothing again: ") {
+      verify(f.nodeApi, times(1)).unspentBoxesByErgoTree(anyString(), any[Paging], any[SortDirection], any[MempoolOptions])
+      verify(f.nodeApi, times(1)).indexedBoxById(claimed.boxId)
+    }
+  }
+
+  it should "find a creator's NFT by the pool its description names when the index has no genesis for it" in {
+    val creator = "a8" * 32
+    val liar = "a9" * 32
+    val f = fixture()
+    val provision = f.node.getClient.execute { ctx: BlockchainContext =>
+      LDNodeFixtures.nodeBox(ctx, UTXO(n2t.provisionGuard, LDHelpers.PROVISION_MIN, Seq(Token(n2t.provToken, 1L)),
+        Seq(zero, zero, ErgoValue.of(Colls.fromArray(ErgoId.create(creator).getBytes), scalaByteType),
+          ErgoValue.of(999000000000L))), index = 0, txId = "f3" * 32)
+    }
+    // Both name the pool; only one is named by a provision under its guard
+    when(f.nodeApi.tokensByIds(any[Seq[String]])).thenReturn(Success(Seq(
+      TokenInfo(creator, "00" * 32, 1L, "LD-NFT-a8a8a8", s"""{"type":"LithosDex Provision","pool":"${n2t.poolNFT}"}""", 0),
+      TokenInfo(liar, "00" * 32, 1L, "LD-NFT-a9a9a9", s"LithosDex provision of 5 shares in pool ${n2t.poolNFT}", 0))))
+    when(f.nodeApi.unspentBoxesByErgoTree(anyString(), any[Paging], any[SortDirection], any[MempoolOptions]))
+      .thenAnswer { inv =>
+        Success(if (inv.getArgument[String](0) == n2t.provisionGuard.ergoTreeHex) Seq(LDNodeFixtures.indexed(provision))
+        else Seq.empty)
+      }
+    val found = f.exec.lookupNfts(Seq(creator, liar))
+    found.keySet shouldBe Set(creator)
+    found(creator).live.map(_.provision.shares) shouldBe Some("999000000000")
   }
 
   "A pool" should "be not found when the index does not list it, and unavailable while the index builds" in {

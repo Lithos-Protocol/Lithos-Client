@@ -197,7 +197,85 @@ class NodeMiningStatsSourceSpec extends AnyFlatSpec with Matchers with MockitoSu
     } finally server.shutdown()
   }
 
-  "Collateral statistics" should "filter authentic unspent boxes and label a capped index read as partial" in {
+  it should "record how any lender's box was selected, what they put in and what came back" in {
+    val wallet = FakeNodeContext(mock[NodeApi], numAddresses = 2)._3
+    val key = wallet.addresses(1)
+    val lenderRegister = ErgoValue.of(key.getPublicKey).toHex
+    val rewardTree = Contract(org.ergoplatform.ErgoTreePredef.rewardOutputScript(
+      mutations.NodeWallet.MINER_REWARD_DELAY, key.getPublicKey)).ergoTreeHex
+    val feeTree = Contract.FEE.ergoTreeHex
+    def box(id: Int, tree: String, value: Long, height: Int = 100, registers: Map[String, String] = Map.empty) =
+      IndexedBox(NodeBox(SyncFixtures.id(id), SyncFixtures.id(id + 1), value, 0, height - 1, tree, Seq.empty,
+        NodeRegisters(registers)), "", height, 1L)
+    val lent = collateral.copy(box = collateral.box.copy(additionalRegisters =
+      NodeRegisters(collateral.box.additionalRegisters.values + ("R5" -> lenderRegister))))
+    val coinbase = transaction(SyncFixtures.id(901), 100, Seq(box(910, minerTree, 1L)), Seq(box(911, rewardTree, 3000000000L)))
+    val fees = transaction(SyncFixtures.id(903), 100, Seq(box(922, feeTree, 2000000L)), Seq(box(931, rewardTree, 2000000L)))
+    val user = transaction(SyncFixtures.id(902), 100, Seq(box(920, minerTree, 9000000L)), Seq(box(922, feeTree, 2000000L)))
+    def activatedAt(queuedHeight: Int) = transaction(lent.box.transactionId, 80,
+      Seq(box(940, Contract.SIGMA_TRUE.ergoTreeHex, 2925000000L, height = queuedHeight, registers = Map("R5" -> lenderRegister))),
+      Seq(lent))
+    def selected(activation: IndexedTransaction, txs: Seq[IndexedTransaction] = Seq(genesis.copy(inputs = Seq(lent)),
+      coinbase, user, fees)): Option[CollateralSelection] = {
+      val (api, _) = fixture(txs, 100)
+      when(api.indexedTransactionById(lent.box.transactionId)).thenReturn(Success(Some(activation)))
+      // No lender keys of this wallet's: the selection is recorded for everyone's boxes
+      read(new NodeMiningStatsSource(api, protocol, minerTree), 100).blocks.head.selection
+    }
+
+    selected(activatedAt(60)) shouldBe Some(CollateralSelection("bid", 60, 80, "2925000000", "3002000000"))
+    withClue("a queue box the index places after its own activation is not recorded, so the store never refuses the block: ") {
+      selected(activatedAt(90)) shouldBe None
+    }
+    withClue("a box no queue box became, as at bootstrap: ") {
+      selected(activatedAt(60).copy(inputs = Seq(box(941, Contract.SIGMA_TRUE.ergoTreeHex, 1L, height = 60)))) shouldBe None
+    }
+    withClue("a box naming no lender key: ") {
+      read(fixture(Seq(genesis, coinbase, user, fees), 100)._2, 100).blocks.head.selection shouldBe None
+    }
+  }
+
+  "A collateral box's selection" should "be clearance from the shipped clearance age on, and by bid below it" in {
+    val age = configs.CandidateConfig.Default.clearanceAge
+    CollateralSelection.pathAt(10000, 10000 - age + 1) shouldBe "bid"
+    CollateralSelection.pathAt(10000, 10000 - age) shouldBe "clearance"
+  }
+
+  "Collateral statistics" should "summarise the queue's bids: the best, the boxes in its step, and the bid to be first" in {
+    val (api, source) = fixture(Seq.empty)
+    val gate = transactions.ProtocolContracts.forNetwork(protocol.networkType).gate.ergoTreeHex
+    val queueToken = lfsm.LFSMHelpers.getQueueToken(protocol.networkType).toString
+    def queued(id: String, priorityFee: Long, position: Option[Long] = Some(1L), tree: String = gate) =
+      IndexedBox(NodeBox(id, "tx", 2925000000L, 0, 90, tree, Seq(NodeAsset(queueToken, 1L)),
+        NodeRegisters(Map("R4" -> feeChannel(priorityFee)) ++ position.map(p => "R7" -> ErgoValue.of(p).toHex))), "", 90, 1L)
+    val queue = Seq(queued("q1", 0L), queued("q2", 2000000L), queued("q3", 2999995L), queued("q4", 1999995L),
+      queued("pos", 9000000L, position = None), queued("elsewhere", 9000000L, tree = minerTree))
+    when(api.unspentBoxesByTokenId(anyString(), any[Paging], any[SortDirection], any[MempoolOptions]))
+      .thenReturn(Success(Seq.empty))
+    when(api.unspentBoxesByTokenId(org.mockito.ArgumentMatchers.eq(queueToken), any[Paging], any[SortDirection],
+      any[MempoolOptions])).thenReturn(Success(queue))
+
+    val stats = source.collateral(NodeMiningStatsSource.cursor(header(120))).get.queue
+    withClue("a gate box with no queue position is a proof of spend, and a box away from the gate is not queued: ") {
+      stats.boxes shouldBe 4
+    }
+    stats.bidding shouldBe 3
+    stats.bestNanoErg shouldBe "2999995"
+    withClue("2,000,000 and 2,999,995 share the 0.001 ERG step; 1,999,995 is in the one below: ") {
+      stats.bestStepBoxes shouldBe 2
+    }
+    stats.firstNanoErg shouldBe "3000000"
+    stats.partial shouldBe false
+
+    when(api.unspentBoxesByTokenId(org.mockito.ArgumentMatchers.eq(queueToken), any[Paging], any[SortDirection],
+      any[MempoolOptions])).thenReturn(Success(Seq(queued("q1", 0L))))
+    withClue("with every queued box at the floor, the least bid of all puts a box first: ") {
+      source.collateral(NodeMiningStatsSource.cursor(header(120))).get.queue.firstNanoErg shouldBe
+        lfsm.RollupProtocol.MinPriorityFee.toString
+    }
+  }
+
+  it should "filter authentic unspent boxes and label a capped index read as partial" in {
     val (api, source) = fixture(Seq.empty)
     when(api.unspentBoxesByTokenId(anyString(), any[Paging], any[SortDirection], any[MempoolOptions]))
       .thenReturn(Success(Seq(collateral, collateral.copy(box = collateral.box.copy(boxId = "fake", ergoTree = "unrelated")))))

@@ -425,6 +425,9 @@ class MiningStatsStore(database: Option[KeyValueStore], identity: JsObject) {
       at.timestamp > record.previous.timestamp && BigInt(record.difficulty) >= 0, "invalid mining block record")
     require(record.blocks.forall(b => b.blockId == at.blockId && b.height == at.height && b.timestamp == at.timestamp &&
       BigInt(b.collateralNanoErg) >= 0 && BigInt(b.initialHoldingNanoErg) >= 0), "invalid Lithos block record")
+    require(record.blocks.forall(_.selection.forall(s => Set("bid", "clearance").contains(s.path) &&
+      s.joinedHeight <= s.activatedHeight && s.activatedHeight <= at.height &&
+      BigInt(s.queueNanoErg) >= 0 && BigInt(s.receivedNanoErg) >= 0)), "invalid collateral selection record")
     require(record.payments.forall(p => p.blockId == at.blockId && p.height == at.height && p.timestamp == at.timestamp &&
       p.minedHeight <= at.height && BigInt(p.grossNanoErg) >= 0), "invalid mining payment record")
     require(record.blocks.map(_.transactionId).distinct.size == record.blocks.size &&

@@ -56,8 +56,70 @@ object CollateralFeeStats {
   }
 }
 
+/**
+ * The bids waiting in the queue. The queue activates boxes strictly in order, and live boxes then compete by
+ * bid in whole 0.001 ERG steps, so a new box bidding a step above every queued bid is taken ahead of all of them.
+ *
+ * @param bestStepBoxes queued boxes whose bid falls in the best bid's step, and so tie with it
+ * @param firstNanoErg  the least priority fee in the step above the best queued bid: the bid to be first
+ */
+final case class CollateralQueueStats(boxes: Int = 0, bidding: Int = 0, unreadable: Int = 0, bestNanoErg: String = "0",
+                                       bestStepBoxes: Int = 0, firstNanoErg: String = RollupProtocol.MinPriorityFee.toString,
+                                       partial: Boolean = true)
+
+object CollateralQueueStats {
+  def of(fees: Vector[Long], unreadable: Int, partial: Boolean): CollateralQueueStats = {
+    val step = mining.CandidateTxBuilder.BidStep
+    val best = if (fees.isEmpty) 0L else fees.max
+    CollateralQueueStats(fees.size + unreadable, fees.count(_ > 0L), unreadable, best.toString,
+      fees.count(_ / step == best / step), ((best / step + 1) * step).toString, partial)
+  }
+}
+
+/**
+ * What lenders of boxes selected one way put in and got back over the retained history.
+ *
+ * @param netNanoErg what came back less what was posted, signed
+ * @param aprPercent the net over every box's ERG locked from its join until its reward unlocks, as a simple
+ *                   yearly rate: pooled, so a large box weighs more than a small one. None with nothing locked
+ */
+final case class CollateralPathStats(boxes: Long, meanPriorityFeeNanoErg: Option[String], meanWaitBlocks: Option[Long],
+                                     costNanoErg: String, receivedNanoErg: String, netNanoErg: String,
+                                     aprPercent: Option[Double])
+
+/**
+ * Lender returns by how each spent box was selected: by bid, or through clearance once at least `clearanceAge`
+ * blocks old. Lithos blocks recorded before selections were (or whose activation the index does not show) are
+ * in `lithosBlocks` but not `coveredBlocks`, and in neither path.
+ */
+final case class CollateralSelectionStats(lithosBlocks: Long, coveredBlocks: Long, fromHeight: Option[Int],
+                                          clearanceAge: Int, bid: CollateralPathStats, clearance: CollateralPathStats)
+
+object CollateralSelectionStats {
+  /** Ergo's two-minute target block time, in blocks a year. */
+  final val BlocksPerYear: Int = 262800
+
+  def of(totals: MiningAccountingTotals, fromHeight: Option[Int]): CollateralSelectionStats = {
+    def path(name: String): CollateralPathStats = {
+      def amount(key: String) = totals.amount(s"collateral.$name.$key")
+      val boxes = amount("boxes")
+      val (cost, received, capital) = (amount("costNanoErg"), amount("receivedNanoErg"), amount("capitalNanoErgBlocks"))
+      val net = received - cost
+      CollateralPathStats(boxes.toLong,
+        if (boxes > 0) Some((amount("priorityFeeNanoErg") / boxes).toString) else None,
+        if (boxes > 0) Some((amount("waitBlocks") / boxes).toLong) else None,
+        cost.toString, received.toString, net.toString,
+        if (capital > 0) Some((BigDecimal(net) * BlocksPerYear * 100 / BigDecimal(capital)).setScale(2,
+          BigDecimal.RoundingMode.HALF_EVEN).toDouble) else None)
+    }
+    val (bid, clearance) = (path("bid"), path("clearance"))
+    CollateralSelectionStats(totals.amount("lithos.blocks").toLong, bid.boxes + clearance.boxes, fromHeight,
+      configs.CandidateConfig.Default.clearanceAge, bid, clearance)
+  }
+}
+
 final case class CollateralStats(status: String = "loading", observedAt: Option[Long] = None,
                                    source: Option[MiningCursor] = None, boxes: Int = 0,
                                    nanoErg: String = "0", partial: Boolean = true,
                                    fees: CollateralFeeStats = CollateralFeeStats(),
-                                   error: Option[String] = None)
+                                   error: Option[String] = None, queue: CollateralQueueStats = CollateralQueueStats())

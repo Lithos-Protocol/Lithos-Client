@@ -111,7 +111,6 @@ object VerifiedRegistry {
     }
     val tokens = baseTokens ++ fileTokens
     duplicates(tokens.map(_.tokenId)).foreach(t => problems += s"token $t is listed more than once")
-    val tokenIds = tokens.map(_.tokenId).toSet
 
     val filePools = listIn(PoolsResource, poolsJson).zipWithIndex.flatMap { case (item, i) =>
       val where = s"$PoolsResource $key[$i]"
@@ -130,7 +129,6 @@ object VerifiedRegistry {
         for (n <- poolNft; k <- kind; ts <- ids; h <- added) yield {
           if (ts.size != k.tokenCount) problems += s"$where is ${k.name} and must name ${k.tokenCount} token(s), not ${ts.size}"
           if (ts.distinct.size != ts.size) problems += s"$where names the same token twice"
-          ts.filterNot(tokenIds).foreach(t => problems += s"$where names $t, which is not a verified token")
           VerifiedPool(n, k, ts, Some(h))
         }
       }

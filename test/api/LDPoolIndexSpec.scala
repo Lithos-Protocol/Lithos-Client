@@ -5,7 +5,8 @@ import akka.testkit.{TestKit, TestProbe}
 import configs.VerifiedPool
 import lithosdex.LDGenesisBuilder.{N2TSeed, T2TSeed}
 import lithosdex.contracts.{LDContracts, LDT2TContracts}
-import lithosdex.{LDGenesisBuilder, LDHelpers}
+import lithosdex.{LDGenesisBuilder, LDHelpers, LDLiquidityPool}
+import node.MutationConversions._
 import node.NodeApi
 import node.model._
 import org.ergoplatform.appkit.{BlockchainContext, NetworkType, Parameters}
@@ -51,7 +52,7 @@ class LDPoolIndexSpec extends TestKit(ActorSystem("ld-pool-index-spec")) with An
    * @param forged         the token/token pool names another deployment's guard
    */
   private class Fixture(vaultApart: Boolean = false, provMintedMore: Boolean = false, genesisFails: Boolean = false,
-                        forged: Boolean = false) {
+                        forged: Boolean = false, creator: Option[String] = None) {
     val api: NodeApi = mock[NodeApi]
     val (nodeContext, _, _) = FakeNodeContext(api, numAddresses = 1)
 
@@ -81,6 +82,14 @@ class LDPoolIndexSpec extends TestKit(ActorSystem("ld-pool-index-spec")) with An
       val t2tVaultBox = LDNodeFixtures.nodeBox(ctx, LDGenesisBuilder.t2tVault(t2t, t2tSeed), index = 1, txId = t2tGenesisTx)
       (litPoolBox, litVaultBox, n2tPoolBox, n2tVaultBox, t2tPoolBox, t2tVaultBox)
     }
+    /** The creator's provision, as the client's own pool creation puts it in the genesis. */
+    val creatorProvision: Option[NodeBox] = creator.map(owner => nodeContext.getClient.execute { ctx: BlockchainContext =>
+      def zero = org.ergoplatform.appkit.ErgoValue.of(BigInt(0).bigInteger)
+      LDNodeFixtures.nodeBox(ctx, UTXO(n2t.provisionGuard, LDHelpers.PROVISION_MIN, Seq(Token(n2t.provToken, 1L)),
+        Seq(zero, zero, org.ergoplatform.appkit.ErgoValue.of(sigma.Colls.fromArray(ErgoId.create(owner).getBytes),
+          org.ergoplatform.appkit.scalaapi.scalaByteType), org.ergoplatform.appkit.ErgoValue.of(999000000000L))),
+        index = 2, txId = n2tGenesisTx)
+    })
 
     private val n2tTemplate = LDPoolIndex.n2tTemplateHash(NetworkType.MAINNET)
     private val t2tTemplate = LDPoolIndex.t2tTemplateHash(NetworkType.MAINNET)
@@ -122,7 +131,8 @@ class LDPoolIndexSpec extends TestKit(ActorSystem("ld-pool-index-spec")) with An
     }
     when(api.indexedTransactionById(anyString())).thenAnswer { inv =>
       Success(inv.getArgument[String](0) match {
-        case `n2tGenesisTx` => Some(if (vaultApart) tx(n2tGenesisTx, n2tPool) else tx(n2tGenesisTx, n2tPool, n2tVault))
+        case `n2tGenesisTx` => Some(if (vaultApart) tx(n2tGenesisTx, n2tPool)
+          else tx(n2tGenesisTx, Seq(n2tPool, n2tVault) ++ creatorProvision: _*))
         case `t2tGenesisTx` => Some(tx(t2tGenesisTx, t2tPool, t2tVault))
         case _ => None
       })
@@ -167,6 +177,17 @@ class LDPoolIndexSpec extends TestKit(ActorSystem("ld-pool-index-spec")) with An
     new Fixture(forged = true).index.refreshNow().pools.map(_.nft) should not contain t2t.poolNFT.toString
   }
 
+  it should "keep the provisions a genesis created, with their owners, for verified pools too" in {
+    val owner = "a7" * 32
+    val f = new Fixture(creator = Some(owner))
+    val pool = f.index.refreshNow().pools.find(_.nft == n2t.poolNFT.toString).get
+    val reserves = f.nodeContext.getClient.execute((ctx: BlockchainContext) => LDLiquidityPool(f.n2tPool.toInputUTXO(ctx)))
+    pool.genesisProvisions shouldBe Seq(GenesisProvision(owner, 100, 999000000000L, reserves.reservesX, reserves.reservesY))
+    withClue("the pool's other genesis outputs are not provisions: ") {
+      new Fixture().index.refreshNow().pools.find(_.nft == n2t.poolNFT.toString).get.genesisProvisions shouldBe empty
+    }
+  }
+
   it should "read each genesis once, and retry one the node could not answer" in {
     val f = new Fixture()
     f.index.refreshNow()
@@ -178,6 +199,24 @@ class LDPoolIndexSpec extends TestKit(ActorSystem("ld-pool-index-spec")) with An
     failing.index.refreshNow().pools.find(_.nft == n2t.poolNFT.toString).get.genesis shouldBe None
     failing.index.refreshNow()
     verify(failing.api, times(2)).tokenById(n2t.provToken.toString)
+
+    withClue("after three failed reads the index stops trying, and the pool shows as unchecked: ") {
+      val passes = (1 to 3).map(_ => failing.index.refreshNow())
+      verify(failing.api, times(LDPoolIndex.MaxGenesisReads)).tokenById(n2t.provToken.toString)
+      passes.last.pools.find(_.nft == n2t.poolNFT.toString).get.genesis.map(_.problems) shouldBe
+        Some(Seq(LDPoolIndex.GenesisUnreadable))
+    }
+  }
+
+  "The pool list" should "leave out the pools lithosdex.pools.hidden names, whose own routes still answer" in {
+    val f = new Fixture()
+    f.index.refreshNow()
+    val hiding = new LDPoolsApiImpl(f.nodeContext, f.index, TestProbe().ref, TestProbe().ref, Configuration(
+      com.typesafe.config.ConfigFactory.parseString(s"""lithosdex.pools.hidden = ["${t2t.poolNFT.toString.toUpperCase}"]""")),
+      system)
+    hiding.listPools.pools.map(_.poolNFT) should not contain t2t.poolNFT.toString
+    hiding.listPools.pools.map(_.poolNFT) should contain(n2t.poolNFT.toString)
+    hiding.getPool(t2t.poolNFT.toString).pool.poolNFT shouldBe t2t.poolNFT.toString
   }
 
   "The pools API" should "name ERG and verified tokens, and price Y per X at display decimals" in {

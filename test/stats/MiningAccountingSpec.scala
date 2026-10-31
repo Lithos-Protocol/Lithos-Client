@@ -164,4 +164,71 @@ class MiningAccountingSpec extends AnyFlatSpec with Matchers {
     plain.amount("pool.batching.lithosdex.orders") shouldBe BigInt(0)
     plain.amount("local.batching.lithosdex.afterTransactionFeesNanoErg") shouldBe BigInt(6000000)
   }
+
+  it should "total kept tokens by verified id, count the rest, and credit this client only what reached it" in {
+    val genesis = mined.copy(blockId = at.blockId, height = at.height, timestamp = at.timestamp)
+    val lit = "c1" * 32
+    val record = MiningBlockRecord(at, MiningStatsStoreSpec.cursor(99), "1", Vector(genesis), Vector.empty,
+      MiningActivity(batchingFees = Vector(
+        BatchingFee("own", "acc", "forwards", "0", "0", local = true, Seq(TokenAmount(lit, "5000000000")), 1),
+        BatchingFee("theirs", "acc2", "forwards", "0", "0", tokens = Seq(TokenAmount(lit, "5000000000"))))))
+    val totals = MiningAccounting.contribution(record)
+    totals.amount(s"batching.forwards.tokens.$lit") shouldBe BigInt(10000000000L)
+    totals.amount("batching.forwards.otherTokens") shouldBe BigInt(1)
+    totals.amount(s"local.received.forwards.tokens.$lit") shouldBe BigInt(5000000000L)
+    totals.amount("local.received.forwards.otherTokens") shouldBe BigInt(1)
+    // Tokens never top up the rollup, so nothing about them is pooled.
+    totals.values.keys.filter(k => k.startsWith("pool.") && k.contains("tokens")) shouldBe empty
+    // Removing the record takes away exactly what adding it gave.
+    MiningTotals().include(record, 1).include(record, -1).accounting.values shouldBe empty
+  }
+
+  it should "keep a fee above its gross apart, so a recording paid from the wallet leaves no key below zero" in {
+    val record = MiningBlockRecord(at, MiningStatsStoreSpec.cursor(99), "1", Vector.empty, Vector.empty,
+      MiningActivity(batchingFees = Vector(BatchingFee("rec", "acc", "forwards", "0", "1000000", local = true))))
+    val totals = MiningAccounting.contribution(record)
+    totals.amount("local.batching.forwards.afterTransactionFeesNanoErg") shouldBe BigInt(0)
+    totals.amount("local.batching.forwards.feeAboveGrossNanoErg") shouldBe BigInt(1000000)
+    totals.amount("batching.forwards.transactionFeeNanoErg") shouldBe BigInt(1000000)
+  }
+
+  "Lender returns" should "total each selection path apart, and pool its APR over the ERG-blocks locked" in {
+    val genesis = mined.copy(blockId = at.blockId, height = at.height, timestamp = at.timestamp)
+    // Joined 1,000 blocks before this one, so the queue box's ERG is locked for 1,720 blocks
+    val bid = genesis.copy(selection = Some(CollateralSelection("bid", at.height - 1000, at.height - 10,
+      "3000000000", "3050000000")))
+    val record = MiningBlockRecord(at, MiningStatsStoreSpec.cursor(99), "1", Vector(bid), Vector.empty)
+    val totals = MiningAccounting.contribution(record)
+    totals.amount("collateral.bid.boxes") shouldBe BigInt(1)
+    totals.amount("collateral.bid.waitBlocks") shouldBe BigInt(1000)
+    totals.amount("collateral.bid.capitalNanoErgBlocks") shouldBe BigInt(3000000000L) * 1720
+    totals.values.keys.exists(_.startsWith("collateral.clearance")) shouldBe false
+    MiningTotals().include(record, 1).include(record, -1).accounting.values shouldBe empty
+
+    val stats = CollateralSelectionStats.of(totals, Some(1))
+    stats.coveredBlocks shouldBe 1
+    stats.bid.netNanoErg shouldBe "50000000"
+    // 0.05 ERG over 3 ERG for 1,720 blocks, at 262,800 blocks a year
+    stats.bid.aprPercent shouldBe Some(254.65)
+    stats.clearance.aprPercent shouldBe None
+    stats.clearance.meanWaitBlocks shouldBe None
+
+    withClue("a record from before selections parses without one, and counts toward neither path: ") {
+      import play.api.libs.json.Json
+      import MiningStatsData.blockFormat
+      (Json.toJsObject(genesis) - "selection").as[LithosBlockRecord] shouldBe genesis
+      CollateralSelectionStats.of(MiningAccounting.contribution(record.copy(blocks = Vector(genesis))), None)
+        .coveredBlocks shouldBe 0
+    }
+  }
+
+  "A stored execution" should "parse without its token fields, as executions recorded before them were stored" in {
+    import play.api.libs.json.Json
+    import MiningStatsData.batchingFeeFormat
+    val stored = Json.obj("transactionId" -> "t", "orderId" -> "o", "protocol" -> "ergodex", "grossNanoErg" -> "5",
+      "transactionFeeNanoErg" -> "1", "local" -> true)
+    stored.as[BatchingFee] shouldBe BatchingFee("t", "o", "ergodex", "5", "1", local = true)
+    val withTokens = BatchingFee("t", "o", "forwards", "0", "0", tokens = Seq(TokenAmount("c1" * 32, "5")), otherTokens = 2)
+    Json.toJson(withTokens).as[BatchingFee] shouldBe withTokens
+  }
 }

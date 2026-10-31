@@ -36,9 +36,16 @@ final case class RollupActivity(transactionId: String, rollupNft: String, minedB
                                  localTarget: Boolean = false, rewardLit: Option[String] = None)
 
 final case class MiningTransactionFee(transactionId: String, kind: String, nanoErg: String)
-/** `local` means the execution's takings landed at this client's own address rather than another executor's. */
+/** A token amount as a decimal string, like every other amount the statistics keep. */
+final case class TokenAmount(tokenId: String, amount: String)
+/**
+ * `local` means the execution's takings landed at this client's own address rather than another executor's.
+ * `tokens` are the verified tokens the executor kept and `otherTokens` how many unverified ones it kept, both
+ * fixed when the record is made, so removing a record subtracts what adding it added whatever the list says later.
+ */
 final case class BatchingFee(transactionId: String, orderId: String, protocol: String,
-                               grossNanoErg: String, transactionFeeNanoErg: String, local: Boolean = false)
+                               grossNanoErg: String, transactionFeeNanoErg: String, local: Boolean = false,
+                               tokens: Seq[TokenAmount] = Seq.empty, otherTokens: Int = 0)
 final case class MinerRegistrationActivity(transactionId: String, kind: String, minerHash: String, local: Boolean)
 final case class MiningActivity(networkPayments: Vector[MiningPaymentRecord] = Vector.empty,
                                   rollups: Vector[RollupActivity] = Vector.empty,
@@ -144,6 +151,18 @@ object MiningAccounting {
       val priorityFee = BigInt(b.priorityFeeNanoErg)
       add("lithos.priorityFeeNanoErg", priorityFee)
       if (priorityFee > 0) add("lithos.blocksWithPriorityFee", 1)
+      // Per selection path, what lenders put in and got back. The queue box's ERG is locked from the block
+      // that included it until the reward unlocks, MINER_REWARD_DELAY blocks after this one.
+      b.selection.foreach { s =>
+        val prefix = s"collateral.${s.path}"
+        val cost = BigInt(s.queueNanoErg)
+        add(s"$prefix.boxes", 1)
+        add(s"$prefix.priorityFeeNanoErg", priorityFee)
+        add(s"$prefix.costNanoErg", cost)
+        add(s"$prefix.receivedNanoErg", BigInt(s.receivedNanoErg))
+        add(s"$prefix.waitBlocks", b.height - s.joinedHeight)
+        add(s"$prefix.capitalNanoErgBlocks", cost * (b.height + mutations.NodeWallet.MINER_REWARD_DELAY - s.joinedHeight))
+      }
     }
     def payment(p: MiningPaymentRecord, prefix: String): Unit = {
       add(s"$prefix.outputs", 1)
@@ -182,14 +201,25 @@ object MiningAccounting {
     }
     def batching(fee: BatchingFee, scope: String): Unit = {
       val prefix = s"$scope.${fee.protocol}"
+      val gross = BigInt(fee.grossNanoErg)
+      val paid = BigInt(fee.transactionFeeNanoErg)
       add(s"$prefix.orders", 1)
-      add(s"$prefix.grossNanoErg", BigInt(fee.grossNanoErg))
-      add(s"$prefix.transactionFeeNanoErg", BigInt(fee.transactionFeeNanoErg))
-      add(s"$prefix.afterTransactionFeesNanoErg",
-        BigInt(fee.grossNanoErg) - BigInt(fee.transactionFeeNanoErg))
+      add(s"$prefix.grossNanoErg", gross)
+      add(s"$prefix.transactionFeeNanoErg", paid)
+      add(s"$prefix.afterTransactionFeesNanoErg", (gross - paid).max(0))
+      // A forwards recording broadcast alone pays its fee from the wallet for LIT, so its ERG goes negative.
+      // Kept apart because no key may go below zero: the net is the key above less this one.
+      if (paid > gross) add(s"$prefix.feeAboveGrossNanoErg", paid - gross)
+    }
+    // Tokens never reach the rollup: a Lithos block's holding box keeps its own token list, so tokens an
+    // execution keeps go to an address. This client's share is whatever landed at its own address.
+    def tokens(fee: BatchingFee, prefix: String): Unit = {
+      fee.tokens.foreach(t => add(s"$prefix.tokens.${t.tokenId}", BigInt(t.amount)))
+      if (fee.otherTokens > 0) add(s"$prefix.otherTokens", fee.otherTokens)
     }
     record.activity.batchingFees.foreach { fee =>
       batching(fee, "batching")
+      tokens(fee, s"batching.${fee.protocol}")
       if (record.blocks.nonEmpty) batching(fee, "lithos.batching")
       // A fee-less execution in a Lithos block is its miner's candidate execution, whose takings top
       // up the rollup. Anything else this client executed paid its own fee and kept the takings.
@@ -197,6 +227,7 @@ object MiningAccounting {
         add(s"pool.batching.${fee.protocol}.orders", 1)
         add(s"pool.batching.${fee.protocol}.grossNanoErg", BigInt(fee.grossNanoErg))
       } else if (fee.local) batching(fee, "local.batching")
+      if (fee.local) tokens(fee, s"local.received.${fee.protocol}")
     }
     record.activity.registrations.foreach { event =>
       add(s"registration.${event.kind}.count", 1)

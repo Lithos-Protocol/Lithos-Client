@@ -1,4 +1,9 @@
 {
-  "mainnet": [],
+  "mainnet": [
+    {"poolNft": "9af5070647d31917db7e0289e9e71c9447bfaa124e7e8fb4d2af0fb77e1267e4", "kind": "n2t", "tokens": ["01dce8a5632d19799950ff90bca3b5d0ca3ebfa8aaafd06f0cc6dd1e97150e7f"], "addedHeight": 1906463},
+    {"poolNft": "f9c1fa65071d66c0ba9de11ed951487ed84f564c10ddd8e225be28ca26e55e57", "kind": "n2t", "tokens": ["f0cac602d618081f46db086726d3c4da53006b646b50e382989054dcf3c93bd8"], "addedHeight": 1906463},
+    {"poolNft": "77ebb7ac1a9386d6cc5b64fffa52602bea574b0bb454fb856188ae54acb84894", "kind": "n2t", "tokens": ["fffe6122886e3b0ab9b72b401b39bf8d3f13580c1335a41d91d19deb8038ccd4"], "addedHeight": 1906463},
+    {"poolNft": "5495181954aa2c6766ea8e8ed7aeba6283469163660d962570fbf62d660d8fd0", "kind": "t2t", "tokens": ["c1980d829988229516430a47a5eca376060b6ce859616db0936e78ab25cb6de7", "8b08cdd5449a9592a9e79711d7d79249d7a03c535d17efaee83e216e80a44c4b"], "addedHeight": 1906475}
+  ],
   "testnet": []
 }

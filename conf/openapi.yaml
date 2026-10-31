@@ -797,6 +797,14 @@ paths:
         distribution there is what a lender is bidding against and `fees.bestNanoErg` is the bid to
         beat. Read it with `/collateral/active`, which names the individual boxes behind it.
 
+        `queue` is the same for boxes still waiting. The queue activates boxes strictly in order, and live
+        boxes compete by bid in whole 0.001 ERG steps, so `queue.firstNanoErg`, the least bid in the step
+        above every queued bid, puts a new box ahead of every box queued before it.
+
+        `selection` is what lenders put in and got back over the retained history, by how each spent box
+        was taken: by bid, or through clearance once its box was `clearanceAge` blocks old. It covers the
+        Lithos blocks recorded since this release could read selections; `coveredBlocks` says how many.
+
         Each background read looks at up to 1,000 boxes; hitting that cap sets `partial` and reports
         only what was scanned. Check `status` and `observedAt` before showing the numbers as current:
         loading and disabled responses hold placeholders, and a failed refresh keeps the previous
@@ -1144,7 +1152,8 @@ paths:
 
 
         Read from an index the client rebuilds in the background as blocks arrive, so a request never
-        waits on a scan. `status` is `building` until the first index completes.
+        waits on a scan. `status` is `building` until the first index completes. Pools named in
+        `lithosdex.pools.hidden` are left out; their own routes still answer.
       operationId: listLDPools
       tags:
         - lithosdex
@@ -3036,11 +3045,13 @@ paths:
       summary: Look up provision NFTs
       description: >
         Which of up to 100 tokens own a provision on a listed LithosDex pool, of either kind. A
-        provision's NFT has the id of the pool box its deposit spent, so a token is checked against that
-        box first, and the pool's provisions are read once for every token naming it. Each token comes
-        back once, with `provisionNft` false when it owns none. When it owns one, the answer carries the
-        pool, the provision and the provision's share of the reserves now. Open, so it can check tokens
-        held anywhere.
+        deposit's NFT has the id of the pool box the deposit spent, so a token is checked against that
+        box first; a pool creator's NFT is named by the pool's genesis. The pool's provisions are read once
+        for every token naming it. Each token comes back once, with `provisionNft` false when it owns none.
+        When it owns one, the answer carries the pool, the provision, its share of the reserves now and
+        how it was minted. A `redeemed` token owned a provision since closed. Answers hold for one block:
+        a second request at the same tip reads nothing from the node. Open, so it can check tokens held
+        anywhere.
       operationId: lookupLDProvisionNfts
       tags:
         - lithosdex
@@ -4831,10 +4842,13 @@ components:
         | `holding.genesisNanoErg` | Value placed in holding boxes at genesis. Contains the pool's share of any priority bid. |
         | `lithos.priorityFeeNanoErg` | Priority fees carried by the collateral boxes those blocks spent. |
         | `lithos.blocksWithPriorityFee` | How many of those blocks carried a fee at all. |
-        | `batching.<protocol>.*` | Executor fees earned filling `ergodex` or `lithosdex` orders. |
+        | `collateral.<path>.*` | Lender cost and return by how the spent box was taken, `bid` or `clearance`: `boxes`, `priorityFeeNanoErg`, `costNanoErg`, `receivedNanoErg`, `waitBlocks`, and `capitalNanoErgBlocks`, the queue box's value times the blocks it stayed locked. `/stats/collateral` turns these into rates. |
+        | `batching.<protocol>.*` | Executor fees earned filling `ergodex` or `lithosdex` orders, and builder takings from `forwards` recordings and settlements. |
+        | `batching.<protocol>.tokens.<tokenId>`, `.otherTokens` | Tokens executors kept, by verified token id; `otherTokens` counts the times an unlisted token was kept, never its amount. |
         | `lithos.batching.<protocol>.*` | The same, counting only blocks that carried a Lithos genesis. |
         | `pool.batching.<protocol>.orders`, `.grossNanoErg` | Fee-less executions inside Lithos blocks. Their takings top up the rollup, so they reach miners through payouts. |
         | `local.batching.<protocol>.*` | Executions whose takings went to this client, outside the pool. Paid straight to its wallet, less the transaction fee. |
+        | `local.received.<protocol>.tokens.<tokenId>`, `.otherTokens` | Tokens that reached this client's own address, in its own Lithos blocks too: a holding box never takes tokens, so they go to the block's finder. |
         | `rollup.<kind>.*` | Confirmed rollup transitions: `topUp`, `submission`, `evaluation`, `fraudProof`, `payoutReady`. |
         | `transaction.<kind>.count`, `.feeNanoErg` | Recognised transactions and the fees they paid. |
         | `registration.<kind>.count`, `.localCount` | Miner Dictionary `add`, `remove` and `evict` events. |
@@ -4849,7 +4863,10 @@ components:
         activity. Gross is newly earned executor fees and excludes takings carried in from earlier.
         Liquidity-provider fees are a different thing and live on the DEX API. `pool.batching` pays
         no transaction fee, so it holds only `orders` and `grossNanoErg`. It and `local.batching`
-        never count the same execution.
+        never count the same execution. A `forwards` recording broadcast alone pays its fee from the
+        wallet for LIT, so its fee is above its gross: that part is `feeAboveGrossNanoErg`, and the net
+        is `afterTransactionFeesNanoErg - feeAboveGrossNanoErg`. Token keys are named only for tokens
+        on the verified list when the execution was recorded; `tokens` in the response names each one.
 
         **Rollup families** hold `count`, `miners`, `claimedScore`, `bondNanoErg` and `valueNanoErg`,
         plus `localCount`, `localValueNanoErg`, `localBondNanoErg` and `localClaimedScore` where the
@@ -4862,7 +4879,7 @@ components:
         These are stages of the same funds, so summing them is not income.
 
         `transaction.<kind>` covers `genesis`, the rollup kinds above, `payout`, `registration`,
-        `ergodex`, `lithosdex`, `ergodexOtherPoolSpend` and `lithosdexOtherPoolSpend`. Those fees
+        `ergodex`, `lithosdex`, `forwards`, `ergodexOtherPoolSpend` and `lithosdexOtherPoolSpend`. Those fees
         overlap the block fee totals.
 
         **Priority fees.** `lithos.priorityFeeNanoErg / lithos.blocks` is the mean fee across every
@@ -4914,6 +4931,11 @@ components:
           description: Timestamp of the first retained block, in Unix milliseconds. Absent when there are no block records.
         totals:
           $ref: '#/components/schemas/MiningAccountingMetrics'
+        tokens:
+          type: object
+          description: Every verified token a `.tokens.<tokenId>` key above names, by id, so each amount can be shown in whole units.
+          additionalProperties:
+            $ref: '#/components/schemas/VerifiedToken'
     MiningCursor:
       type: object
       required: [height, blockId, parentId, timestamp]
@@ -4977,6 +4999,11 @@ components:
           description: True when retained coverage does not span the whole requested range, including when the history is empty.
         status:
           $ref: '#/components/schemas/MiningCollectionStatus'
+        tokens:
+          type: object
+          description: Every verified token a bucket's `.tokens.<tokenId>` key names, by id, so each amount can be shown in whole units.
+          additionalProperties:
+            $ref: '#/components/schemas/VerifiedToken'
     LithosHashrateEstimate:
       type: object
       required: [status, sourceStatus, source, from, until, sampleCount, difficultySum, partial, population, formula]
@@ -5104,6 +5131,90 @@ components:
         error:
           type: string
           description: Short failure summary. Details stay in the client log.
+        queue:
+          $ref: '#/components/schemas/CollateralQueueStats'
+        selection:
+          $ref: '#/components/schemas/CollateralSelectionStats'
+    CollateralQueueStats:
+      type: object
+      description: The bids of the boxes waiting in the queue, read with the live inventory.
+      required: [boxes, bidding, unreadable, bestNanoErg, bestStepBoxes, firstNanoErg, partial]
+      properties:
+        boxes:
+          type: integer
+          description: Queued boxes seen, including any whose bid could not be read.
+        bidding:
+          type: integer
+          description: Queued boxes bidding above the floor.
+        unreadable:
+          type: integer
+          description: Queued boxes whose fee channel could not be read. Left out of every bid figure.
+        bestNanoErg:
+          type: string
+          description: The highest priority fee in the queue, `0` when every box is at the floor.
+        bestStepBoxes:
+          type: integer
+          description: Queued boxes whose bid falls in the same 0.001 ERG step as the best, which tie with it once live.
+        firstNanoErg:
+          type: string
+          description: The least priority fee in the step above the best queued bid. A box bidding it is taken ahead of every box queued before it, unless one of those reaches the clearance age first.
+        partial:
+          type: boolean
+          description: True when the queue held more boxes than one read takes (1,000).
+    CollateralSelectionStats:
+      type: object
+      required: [lithosBlocks, coveredBlocks, clearanceAge, bid, clearance]
+      properties:
+        lithosBlocks:
+          type: integer
+          format: int64
+          description: Lithos blocks in the retained history.
+        coveredBlocks:
+          type: integer
+          format: int64
+          description: Of those, the blocks whose selection was recorded. The rest were recorded before this release, or the index does not show their activation.
+        fromHeight:
+          type: integer
+          description: The first retained height.
+        clearanceAge:
+          type: integer
+          description: Blocks a live box must age before any client takes it first whatever it bids, as this release ships it.
+        bid:
+          $ref: '#/components/schemas/CollateralPathStats'
+        clearance:
+          $ref: '#/components/schemas/CollateralPathStats'
+    CollateralPathStats:
+      type: object
+      description: |
+        What the lenders of boxes taken one way put in and got back. Cost is the queue box: the
+        principal and the whole priority fee. What came back is the block reward less re-emission,
+        and the block's fees, both paid to the lender's key.
+      required: [boxes, costNanoErg, receivedNanoErg, netNanoErg]
+      properties:
+        boxes:
+          type: integer
+          format: int64
+        meanPriorityFeeNanoErg:
+          type: string
+          description: Absent with no boxes.
+        meanWaitBlocks:
+          type: integer
+          format: int64
+          description: Mean blocks from the block that included the queue box to the one that spent the collateral. Absent with no boxes.
+        costNanoErg:
+          type: string
+        receivedNanoErg:
+          type: string
+        netNanoErg:
+          type: string
+          description: What came back less the cost. Signed.
+        aprPercent:
+          type: number
+          format: double
+          description: |
+            The net over every box's ERG locked from its queue box's block until its reward unlocks, 720
+            blocks after the spend, as a simple yearly rate at 262,800 blocks a year. Pooled, so a large
+            box weighs more than a small one. ERG only: the LIT permit is left out. Absent with nothing locked.
     LocalMiningResponse:
       type: object
       required: [enabled, producers]
@@ -5343,6 +5454,29 @@ components:
         initialHoldingNanoErg:
           type: string
           description: Exact value of genesis output zero, before any top-ups. Not the block's final revenue.
+        selection:
+          $ref: '#/components/schemas/CollateralSelection'
+    CollateralSelection:
+      type: object
+      description: How the block's collateral box came to be spent. Absent for blocks recorded before this release, and where the index does not show the box's activation.
+      required: [path, joinedHeight, activatedHeight, queueNanoErg, receivedNanoErg]
+      properties:
+        path:
+          type: string
+          enum: [bid, clearance]
+          description: '`clearance` when the box was at least the shipped clearance age when spent, otherwise `bid`.'
+        joinedHeight:
+          type: integer
+          description: The block that included the lender's queue box.
+        activatedHeight:
+          type: integer
+          description: The block that included the collateral box. Its age counts from here.
+        queueNanoErg:
+          type: string
+          description: The queue box's value, the lender's cost.
+        receivedNanoErg:
+          type: string
+          description: The block reward less re-emission, and the block's fees, paid to the lender's key.
     MiningPaymentRecord:
       type: object
       required: [transactionId, outputId, payoutBoxId, rollupNft, minedBlockId, minedHeight, minedTimestamp, blockId, height, timestamp, grossNanoErg]
@@ -8924,8 +9058,9 @@ components:
 
     LDNftLookup:
       description: >
-        One token checked as a provision NFT. `pool`, `provision`, `amountX` and `amountY` are
-        present only when `provisionNft` is true.
+        One token checked as a provision NFT. `provision`, `amountX`, `amountY`, `lastClaimedHeight`
+        and `refreshableHeight` are present only when `provisionNft` is true. A `redeemed` token
+        carries `pool` and `minted` alone.
       type: object
       x-tags: lithosdex
       required:
@@ -8947,6 +9082,47 @@ components:
         amountY:
           type: string
           description: "The provision's share of the pool's Y reserve now"
+        redeemed:
+          type: boolean
+          description: "The token owned a provision on this pool that has since been closed"
+        minted:
+          $ref: '#/components/schemas/LDNftMint'
+        lastClaimedHeight:
+          type: integer
+          description: >
+            The block that last recreated the provision with moved entries, by a claim or a resize.
+            Absent while it has never been claimed. A refresh keeps the entries but recreates the box,
+            so after one this is the refresh's block.
+        refreshBountyNanoErg:
+          type: string
+          description: "Token/token provisions only: what a refresh may take from the provision box's ERG now"
+        refreshableHeight:
+          type: integer
+          description: "The first block anyone may refresh the provision box, renewing its age before storage rent"
+
+    LDNftMint:
+      description: "How a provision NFT was minted: by a deposit, or by its pool's genesis for the pool's creator"
+      type: object
+      x-tags: lithosdex
+      required:
+        - height
+        - shares
+        - amountX
+        - amountY
+        - genesis
+      properties:
+        height:
+          type: integer
+        shares:
+          type: string
+          description: "Shares the provision was created with"
+        amountX:
+          type: string
+          description: "What went in on the X side, nanoERG for an ERG/token pool. For a genesis, the whole reserve, a millionth of which stays locked"
+        amountY:
+          type: string
+        genesis:
+          type: boolean
 
     LDNftLookupList:
       description: "Each distinct token id checked, once"

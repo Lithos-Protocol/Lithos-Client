@@ -101,10 +101,11 @@ class VerifiedRegistrySpec extends AnyFlatSpec with Matchers {
       include("must name 1 token")
   }
 
-  it should "be refused when it names a token that is not verified" in {
-    problems(listJson(),
-      listJson(s"""{"poolNft": "$poolNft", "kind": "n2t", "tokens": ["$tokenA"], "addedHeight": 1900000}""")).mkString should
-      include("not a verified token")
+  it should "be accepted when it names a token that is not verified, which stays unverified" in {
+    val registry = VerifiedRegistry.parse(Main, listJson(),
+      listJson(s"""{"poolNft": "$poolNft", "kind": "n2t", "tokens": ["$tokenA"], "addedHeight": 1900000}""")).toOption.get
+    registry.pool(poolNft).map(_.tokens) shouldBe Some(Seq(tokenA))
+    registry.token(tokenA) shouldBe None
   }
 
   it should "need the height it joined the list, which its graphs are collected from" in {

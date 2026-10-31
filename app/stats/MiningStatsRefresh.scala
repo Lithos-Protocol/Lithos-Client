@@ -49,6 +49,10 @@ class MiningStatsRefresh(settings: MiningStatsConfig, persistent: Boolean, start
   // Accessed only by the worker.
   private var store: Option[MiningStatsStore] = None
 
+  /** The tokens and pools this release marks verified on the network these statistics read. */
+  def verified: configs.VerifiedRegistry = configs.VerifiedRegistry.forNetwork(
+    if (mainnet) org.ergoplatform.appkit.NetworkType.MAINNET else org.ergoplatform.appkit.NetworkType.TESTNET)
+
   def view: MiningStatsView = {
     val value = published.get()
     if (value.status == "ready" && System.nanoTime() - observedNanos > settings.staleAfterMs.milliseconds.toNanos)

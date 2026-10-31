@@ -148,6 +148,18 @@ class ConfigDefaultsSpec extends AnyFlatSpec with Matchers {
     LithosDexOrdersConfig(Configuration.empty) shouldEqual LithosDexOrdersConfig.Default
   }
 
+  "LithosDexPoolsConfig.Default" should "equal what the shipped application.conf parses" in {
+    LithosDexPoolsConfig(shipped) shouldEqual LithosDexPoolsConfig.Default
+    LithosDexPoolsConfig(Configuration.empty) shouldEqual LithosDexPoolsConfig.Default
+  }
+
+  it should "drop an entry that is not a pool NFT id, and read ids in any case" in {
+    val listed = Configuration(ConfigFactory.parseString(
+      s"""lithosdex.pools.hidden = ["${"AB" * 32}", "not-an-id"]"""))
+    LithosDexPoolsConfig(listed).hidden shouldBe Set("ab" * 32)
+    LithosDexPoolsConfig(Configuration(ConfigFactory.parseString("lithosdex.pools.hidden = []"))).hidden shouldBe empty
+  }
+
   "LithosDexBatchingConfig" should "read autoFlush from the LithosDex block, on when absent" in {
     LithosDexBatchingConfig(Configuration.empty).autoFlush shouldBe true
     LithosDexBatchingConfig(Configuration(ConfigFactory.parseString("batching.lithosdex.autoFlush = false")))

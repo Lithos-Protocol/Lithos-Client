@@ -43,6 +43,37 @@ class BatchingStatisticsSpec extends AnyFlatSpec with Matchers {
     BatchingStatistics.read(block, wrongOwner, NetworkType.TESTNET, other) shouldBe empty
   }
 
+  it should "count the tokens an executor kept, net of a carried takings box, naming only verified ones" in {
+    val lit = lfsm.LFSMHelpers.getLitId(NetworkType.TESTNET).toString
+    val stranger = "d9" * 32
+    val pool = ErgoDexFixtures.Sell.poolBox
+    val orderBox = ErgoDexFixtures.Sell.orderBox
+    val order = ErgoDexOrder.parse(orderBox).get
+    val before = ErgoDexPool.native(pool).get
+    val quote = before.outputAmount(order.baseAmount, baseIsX = true)
+    val after = pool.copy(boxId = SyncFixtures.id(1), value = ErgoDexFixtures.Sell.poolErgAfter,
+      assets = pool.assets.updated(2, pool.assets(2).copy(amount = ErgoDexFixtures.Sell.poolTokensAfter)))
+    val owner = orderBox.copy(boxId = SyncFixtures.id(2), ergoTree = Hex.toHexString(order.redeemerPropBytes),
+      value = ErgoDexFixtures.Sell.rewardValue, assets = Seq(NodeAsset(before.yId, quote)))
+    // The executor's rolling box already held 10 LIT; it leaves with 12 and one unit of a token nobody listed.
+    val carry = owner.copy(boxId = SyncFixtures.id(3), ergoTree = Contract.SIGMA_TRUE.ergoTreeHex,
+      value = 9000000000L, assets = Seq(NodeAsset(lit, 10L)))
+    val takings = carry.copy(boxId = SyncFixtures.id(4), value = carry.value + ErgoDexFixtures.Sell.executorOutput,
+      assets = Seq(NodeAsset(lit, 12L), NodeAsset(stranger, 1L)))
+    val fee = carry.copy(boxId = SyncFixtures.id(5), ergoTree = Contract.FEE.ergoTreeHex, value = ErgoDexFixtures.Sell.minerFee,
+      assets = Seq.empty)
+    val tx = BlockTx("executed", Seq(pool, orderBox, carry).map(b => TxInput(b.boxId, None)), Seq.empty,
+      Seq(after, owner, takings, fee).map(NodeSync.txOutput))
+    val block = BlockInfo("block", 120, Seq(tx), resolvedInputs = Seq(pool, orderBox, carry).map(b => b.boxId -> NodeSync.txOutput(b)).toMap)
+    val result = BatchingStatistics.read(block, tx, NetworkType.TESTNET, Contract.SIGMA_TRUE.ergoTreeHex)
+    result.map(f => (f.tokens, f.otherTokens)) shouldBe Vector((Seq(TokenAmount(lit, "2")), 1))
+
+    // The owner's reward is the order's, never the executor's, whatever it holds.
+    val carriedOnly = tx.copy(outputs = tx.outputs.updated(2, NodeSync.txOutput(takings.copy(assets = carry.assets))))
+    BatchingStatistics.read(block, carriedOnly, NetworkType.TESTNET, "00").map(f => (f.tokens, f.otherTokens)) shouldBe
+      Vector((Seq.empty, 0))
+  }
+
   it should "count a real ErgoDEX token pool execution, whose pool ERG never moves, at its executor fee" in {
     support.ErgoDexTokenFixtures.executions.foreach { e =>
       withClue(e.name) {
@@ -134,6 +165,40 @@ class BatchingStatisticsSpec extends AnyFlatSpec with Matchers {
       // Same template, but provisions would be checked against ERG:LIT's guard: not a deployment's pool
       val forgedTree = pool.ergoTree.replace(second.provisionGuard.hashedPropBytesHex,
         DexContracts(ctx).provisionGuard.hashedPropBytesHex)
+      val (forgedBlock, forgedTx) = executed(pool.copy(ergoTree = forgedTree), after.copy(ergoTree = forgedTree))
+      BatchingStatistics.read(forgedBlock, forgedTx, ctx.getNetworkType, "00") shouldBe empty
+    }
+  }
+
+  it should "count a token/token LithosDex swap at its executor fee, and not one on a pool its ids do not build" in {
+    val fake = FakeNodeContext()
+    fake._1.getClient.execute { ctx =>
+      import lithosdex.contracts.{LDOrderContracts, LDOrderTerms, LDT2TContracts}
+      import org.ergoplatform.sdk.ErgoId
+      val t2t = LDT2TContracts(ErgoId.create("d1" * 32), ErgoId.create("d2" * 32), ErgoId.create("d3" * 32))
+      val (x, y) = ("e1" * 32, "e2" * 32)
+      val pool = NodeBox(SyncFixtures.id(31), "created", 6300000000L, 0, 100, t2t.liquidityPool.ergoTreeHex,
+        Seq(NodeAsset(t2t.poolNFT.toString, 1L), NodeAsset(x, 1000000L), NodeAsset(y, 1000000L),
+          NodeAsset(t2t.provToken.toString, 999000000000L)), NodeRegisters(Map.empty))
+      val terms = LDOrderTerms(fake._3.contract.sigmaBoolean.get, t2t.poolNFT, 6000000, 2000000)
+      val order = NodeBox(SyncFixtures.id(32), "placed", 7000000L, 0, 100,
+        LDOrderContracts.t2tSwap(terms, 1L).ergoTreeHex, Seq(NodeAsset(x, 1000L)), NodeRegisters(Map.empty))
+      val after = pool.copy(boxId = SyncFixtures.id(33),
+        assets = pool.assets.updated(1, NodeAsset(x, 1001000L)).updated(2, NodeAsset(y, 999010L)))
+      val reward = order.copy(boxId = SyncFixtures.id(34), ergoTree = fake._3.contract.ergoTreeHex, value = 1000000L,
+        assets = Seq(NodeAsset(y, 990L)))
+      def executed(poolIn: NodeBox, poolOut: NodeBox): (BlockInfo, BlockTx) = {
+        val tx = BlockTx("ld-t2t", Seq(TxInput(poolIn.boxId, None), TxInput(order.boxId, None)), Seq.empty,
+          Seq(poolOut, reward).map(NodeSync.txOutput))
+        BlockInfo("block", 120, Seq(tx),
+          resolvedInputs = Seq(poolIn, order).map(b => b.boxId -> NodeSync.txOutput(b)).toMap) -> tx
+      }
+      val (block, tx) = executed(pool, after)
+      BatchingStatistics.read(block, tx, ctx.getNetworkType, "00").map(f => (f.protocol, f.grossNanoErg)) shouldBe
+        Vector(("lithosdex", "6000000"))
+      BatchingStatistics.poolProtocol(NodeSync.txOutput(pool), ctx.getNetworkType) shouldBe Some("lithosdex")
+
+      val forgedTree = pool.ergoTree.replace(t2t.provisionGuard.hashedPropBytesHex, "ab" * 32)
       val (forgedBlock, forgedTx) = executed(pool.copy(ergoTree = forgedTree), after.copy(ergoTree = forgedTree))
       BatchingStatistics.read(forgedBlock, forgedTx, ctx.getNetworkType, "00") shouldBe empty
     }

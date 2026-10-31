@@ -6,12 +6,31 @@ final case class MiningCursor(height: Int, blockId: String, parentId: String, ti
 /**
  * `priorityFeeNanoErg` is the whole fee this block's collateral box carried above the floor. The
  * share of it that went to the pool is not a separate field: it landed in the holding box and is
- * already inside `initialHoldingNanoErg`.
+ * already inside `initialHoldingNanoErg`. `selection` is None in records made before it existed, and
+ * where the index does not show the box's activation.
  */
 final case class LithosBlockRecord(blockId: String, height: Int, timestamp: Long, transactionId: String,
                                     holdingBoxId: String, collateralBoxId: String,
                                     collateralNanoErg: String, initialHoldingNanoErg: String,
-                                    priorityFeeNanoErg: String)
+                                    priorityFeeNanoErg: String, selection: Option[CollateralSelection] = None)
+/**
+ * How the block's collateral box came to be spent, and what its lender put in and got back, whoever they are.
+ *
+ * @param path            `clearance` when the box was at least the shipped clearance age when the block spent it,
+ *                        so any client takes it first whatever it bids, otherwise `bid`. Fixed when recorded
+ * @param joinedHeight    the block that included the queue box the lender joined with
+ * @param activatedHeight the block that included the collateral box, from which its age counts
+ * @param queueNanoErg    the queue box's value: the principal and the whole priority fee, the lender's cost
+ * @param receivedNanoErg the block reward less re-emission, and the block's fees, both paid to the lender's key
+ */
+final case class CollateralSelection(path: String, joinedHeight: Int, activatedHeight: Int, queueNanoErg: String,
+                                      receivedNanoErg: String)
+
+object CollateralSelection {
+  /** Every client takes a box at least the shipped clearance age first, whatever it bids; younger ones go by bid. */
+  def pathAt(blockHeight: Int, activatedHeight: Int): String =
+    if (blockHeight - activatedHeight >= configs.CandidateConfig.Default.clearanceAge) "clearance" else "bid"
+}
 /** Gross designated payout output, including the refunded submission bond. This is not net earnings. */
 final case class MiningPaymentRecord(transactionId: String, outputId: String, payoutBoxId: String,
                                       rollupNft: String, minedBlockId: String, minedHeight: Int,
@@ -67,6 +86,7 @@ final case class MiningStatsView(status: String = "loading", observedAt: Option[
 
 object MiningStatsData {
   implicit val cursorFormat: OFormat[MiningCursor] = Json.format[MiningCursor]
+  implicit val selectionFormat: OFormat[CollateralSelection] = Json.format[CollateralSelection]
   implicit val blockFormat: OFormat[LithosBlockRecord] = Json.format[LithosBlockRecord]
   implicit val payoutAmountsFormat: OFormat[PayoutAmounts] = Json.format[PayoutAmounts]
   implicit val paymentFormat: OFormat[MiningPaymentRecord] = Json.format[MiningPaymentRecord]
@@ -74,7 +94,9 @@ object MiningStatsData {
   implicit val lendingTotalsFormat: OFormat[LendingTotals] = Json.format[LendingTotals]
   implicit val rollupActivityFormat: OFormat[RollupActivity] = Json.format[RollupActivity]
   implicit val transactionFeeFormat: OFormat[MiningTransactionFee] = Json.format[MiningTransactionFee]
-  implicit val batchingFeeFormat: OFormat[BatchingFee] = Json.format[BatchingFee]
+  implicit val tokenAmountFormat: OFormat[TokenAmount] = Json.format[TokenAmount]
+  // Defaults fill the token fields of executions recorded before they existed, so those still parse.
+  implicit val batchingFeeFormat: OFormat[BatchingFee] = Json.using[Json.WithDefaultValues].format[BatchingFee]
   implicit val ledgerEventFormat: OFormat[LedgerEvent] = Json.format[LedgerEvent]
   implicit val registrationFormat: OFormat[MinerRegistrationActivity] = Json.format[MinerRegistrationActivity]
   implicit val activityFormat: OFormat[MiningActivity] = Json.format[MiningActivity]

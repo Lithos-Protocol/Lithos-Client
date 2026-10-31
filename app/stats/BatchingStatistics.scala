@@ -1,25 +1,37 @@
 package stats
 
+import configs.VerifiedRegistry
+import forwards.DFHelpers
+import forwards.contracts.DFContracts
 import node.model.{NodeAsset, NodeBox, NodeRegisters}
 import org.bouncycastle.util.encoders.Hex
 import org.ergoplatform.appkit.NetworkType
 import state.messages.{BlockInfo, BlockTx, TxOutput}
-import transactions.batching.ergodex.{ErgoDexExecution, ErgoDexOrder, ErgoDexPool, MachinaOrder}
-import transactions.batching.lithosdex.{DexContracts, LDDeployments, LithosDexOrder}
+import transactions.batching.ergodex.{ErgoDexContracts, ErgoDexExecution, ErgoDexOrder, ErgoDexPool, MachinaOrder}
+import transactions.batching.forwards.DFBoxes
+import transactions.batching.lithosdex.{DexContracts, LDDeployments, LDT2TOrder, LithosDexOrder}
 import work.lithos.mutations.Contract
 
 import scala.collection.concurrent.TrieMap
+import scala.util.Try
 
 /** Recognizes the executed pool/order/output layout. Carried executor boxes are never counted again. */
 private[stats] object BatchingStatistics {
   def poolProtocol(input: TxOutput, network: NetworkType): Option[String] = {
-    if (input.ergoTree == transactions.batching.ergodex.ErgoDexContracts.NativePoolErgoTree) Some("ergodex")
-    else if (lithosDexPool(input, network)) Some("lithosdex")
+    if (input.ergoTree == ErgoDexContracts.NativePoolErgoTree || input.ergoTree == ErgoDexContracts.TokenPoolErgoTree)
+      Some("ergodex")
+    else if (lithosDexPool(input, network) || lithosDexT2TPool(input)) Some("lithosdex")
     else None
   }
 
   /** The pool contract's template as hex, which every LithosDex deployment's pool tree ends with. */
   private val poolTemplates = TrieMap.empty[NetworkType, String]
+
+  /** The token/token pool's template as hex. Every token/token deployment shares it, whatever its ids. */
+  private lazy val t2tPoolTemplate: String = {
+    val any = DexContracts(NetworkType.MAINNET).poolNFT
+    Hex.toHexString(lithosdex.contracts.LDT2TContracts(any, any, any).liquidityPool.ergoTree.template)
+  }
 
   /**
    * Any LithosDex deployment's pool, ERG:LIT included: a box whose contracts, built from its own ids,
@@ -28,36 +40,126 @@ private[stats] object BatchingStatistics {
   private def lithosDexPool(box: TxOutput, network: NetworkType): Boolean =
     box.ergoTree.endsWith(poolTemplates.getOrElseUpdate(network,
       Hex.toHexString(DexContracts(network).liquidityPool.ergoTree.template))) &&
-      LDDeployments.verify(network, box.ergoTree, box.assets.map(t => t.id.toString -> t.amount)).isDefined
+      LDDeployments.verify(network, box.ergoTree, assetsOf(box)).isDefined
+
+  /** Any token/token LithosDex deployment's pool, by the same test. */
+  private def lithosDexT2TPool(box: TxOutput): Boolean =
+    box.ergoTree.endsWith(t2tPoolTemplate) && LDDeployments.verifyT2T(box.ergoTree, assetsOf(box)).isDefined
+
+  /** The network's forwards deployment, or None while it has no accumulator. Built once per network. */
+  private val forwardsDeployments = TrieMap.empty[NetworkType, Option[DFContracts]]
+
+  private def forwardsDeployment(network: NetworkType): Option[DFContracts] =
+    forwardsDeployments.getOrElseUpdate(network,
+      DFHelpers.getAccNFT(network).flatMap(nft => Try(DFContracts(nft, DFHelpers.getLitId(network))).toOption))
+
   def transactionFee(tx: BlockTx): BigInt = tx.outputs.filter(_.ergoTree == Contract.FEE.ergoTreeHex)
     .map(out => BigInt(out.value)).sum
+
+  private def assetsOf(out: TxOutput): Seq[(String, Long)] = out.assets.map(t => t.id.toString -> t.amount)
 
   private def box(out: TxOutput): NodeBox = NodeBox(out.id, out.txId, out.value, out.index,
     out.creationHeight, out.ergoTree, out.assets.map(t => NodeAsset(t.id.toString, t.amount)),
     NodeRegisters(out.registers.zipWithIndex.map { case (value, index) => s"R${index + 4}" -> value }.toMap))
 
+  /**
+   * Tokens the executor kept: those in outputs outside `protocolOutputs` (fee outputs aside, which go to the
+   * block's lender) less those its own inputs, outside `protocolInputs`, brought. Only gains count, so a carried
+   * takings box nets out. Verified tokens are named; the rest are counted. Nothing when an input is unresolved.
+   */
+  private def takings(tx: BlockTx, inputs: Seq[Option[TxOutput]], protocolInputs: Set[Int],
+                      protocolOutputs: Set[Int], registry: VerifiedRegistry): (Seq[TokenAmount], Int) = {
+    val own = inputs.indices.filterNot(protocolInputs)
+    if (own.exists(i => inputs(i).isEmpty)) return (Seq.empty, 0)
+    val net = scala.collection.mutable.LinkedHashMap.empty[String, BigInt]
+    def move(out: TxOutput, sign: Int): Unit = out.assets.foreach { t =>
+      val id = t.id.toString
+      net.update(id, net.getOrElse(id, BigInt(0)) + sign * BigInt(t.amount))
+    }
+    tx.outputs.zipWithIndex.foreach { case (out, i) =>
+      if (!protocolOutputs(i) && out.ergoTree != Contract.FEE.ergoTreeHex) move(out, 1)
+    }
+    own.foreach(i => move(inputs(i).get, -1))
+    val gains = net.filter(_._2 > 0).toSeq
+    val (verified, other) = gains.partition { case (id, _) => registry.token(id).isDefined }
+    (verified.map { case (id, amount) => TokenAmount(id, amount.toString) }, other.size)
+  }
+
   /** `minerTree` is this client's own script; an execution whose takings went to it is this client's. */
-  def read(block: BlockInfo, tx: BlockTx, network: NetworkType, minerTree: String): Vector[BatchingFee] = {
+  def read(block: BlockInfo, tx: BlockTx, network: NetworkType, minerTree: String): Vector[BatchingFee] =
+    read(block, tx, network, minerTree, forwardsDeployment(network), VerifiedRegistry.forNetwork(network))
+
+  /** The same, against a given forwards deployment and verified list. */
+  def read(block: BlockInfo, tx: BlockTx, network: NetworkType, minerTree: String,
+           forwardsContracts: Option[DFContracts], registry: VerifiedRegistry): Vector[BatchingFee] = {
     val inputs = tx.inputs.map(in => block.inputBox(in.id))
     if (inputs.size < 2 || inputs.head.isEmpty || tx.outputs.size < 2) return Vector.empty
+    forwardsContracts.flatMap(forwards(tx, inputs, _, registry, minerTree))
+      .getOrElse(executions(tx, inputs, network, registry, minerTree))
+  }
+
+  /**
+   * A spend of the forwards accumulator, recording an epoch, settling a position, or both. None when input 0 is
+   * not the accumulator. What the builder kept is everything outside the accumulator's successor and the
+   * position's payouts, less what its own inputs brought: 5 LIT a recording and a settlement's rewards.
+   * A spend that kept nothing, such as a top-up of the accumulator, is no work and gives an empty result.
+   */
+  private def forwards(tx: BlockTx, inputs: Seq[Option[TxOutput]], contracts: DFContracts,
+                       registry: VerifiedRegistry, minerTree: String): Option[Vector[BatchingFee]] = {
+    val acc = inputs.head.get
+    val next = tx.outputs.head
+    def holdsAcc(out: TxOutput) = out.ergoTree.equalsIgnoreCase(contracts.accumulator.ergoTreeHex) &&
+      out.assets.headOption.exists(t => t.id == contracts.accNFT && t.amount == 1L)
+    if (!holdsAcc(acc) || !holdsAcc(next)) None
+    else Some {
+      val position = inputs(1).flatMap(p => DFBoxes.position(box(p), contracts).map(p -> _))
+      val payoutTrees = position.toSeq.flatMap { case (_, p) => Seq(p.long.ergoTreeHex, p.short.ergoTreeHex) }.toSet
+      val payouts = tx.outputs.indices.drop(1).filter(i => payoutTrees(tx.outputs(i).ergoTree)).toSet
+      val protocolIn = Set(0) ++ position.map(_ => 1)
+      val gross = BigInt(acc.value) + position.map(p => BigInt(p._1.value)).getOrElse(BigInt(0)) -
+        next.value - payouts.toSeq.map(i => BigInt(tx.outputs(i).value)).sum
+      val (tokens, otherTokens) = takings(tx, inputs, protocolIn, payouts + 0, registry)
+      val local = tx.outputs.indices.drop(1).exists(i => !payouts(i) && tx.outputs(i).ergoTree == minerTree)
+      if (gross < 0 || (gross == 0 && tokens.isEmpty && otherTokens == 0)) Vector.empty
+      else Vector(BatchingFee(tx.id, position.fold(acc.id)(_._1.id), "forwards", gross.toString,
+        transactionFee(tx).toString, local, tokens, otherTokens))
+    }
+  }
+
+  private def executions(tx: BlockTx, inputs: Seq[Option[TxOutput]], network: NetworkType, registry: VerifiedRegistry,
+                         minerTree: String): Vector[BatchingFee] = {
     val pool = inputs.head.get
     val next = tx.outputs.head
     val nft = pool.assets.headOption.filter(_.amount == 1L).map(_.id.toString)
     if (nft.isEmpty || next.ergoTree != pool.ergoTree ||
       !next.assets.headOption.exists(t => nft.contains(t.id.toString) && t.amount == 1L)) return Vector.empty
 
-    def result(order: TxOutput, owner: String, rewardIndex: Int, provisionIn: BigInt,
-                   provisionOut: BigInt, protocol: String, expected: Option[Long]): Vector[BatchingFee] = {
+    /*
+     * The order sits at input `orderIndex` and its owner's output at `rewardIndex`. A redemption spends a
+     * provision at input 1 and a deposit creates one at output 1; both belong to the protocol, not the executor.
+     */
+    def result(orderIndex: Int, owner: String, rewardIndex: Int, provisionIn: Boolean, provisionOut: Boolean,
+               protocol: String, expected: Option[Long]): Vector[BatchingFee] = {
+      val order = inputs(orderIndex).get
       tx.outputs.lift(rewardIndex).filter(_.ergoTree == owner).toVector.flatMap { reward =>
-        // Conservation across the pool, order, provision and designated owner output measures the
-        // amount left for execution, independently of any takings carried from earlier transactions.
-        val gross = BigInt(pool.value) + order.value + provisionIn - next.value - provisionOut - reward.value
-        val fee = transactionFee(tx)
-        // Past the pool and the owner's reward, the takings box is what the executor keeps. The reward
-        // is skipped so filling this client's own order is not mistaken for executing it.
-        val local = tx.outputs.zipWithIndex.exists { case (out, i) => i != 0 && i != rewardIndex && out.ergoTree == minerTree }
-        if (gross < 0 || expected.exists(BigInt(_) != gross) || fee > gross) Vector.empty
-        else Vector(BatchingFee(tx.id, order.id, protocol, gross.toString, fee.toString, local))
+        val provisionInValue = if (provisionIn) inputs(1).map(p => BigInt(p.value)) else Some(BigInt(0))
+        val provisionOutValue = if (provisionOut) tx.outputs.lift(1).map(p => BigInt(p.value)) else Some(BigInt(0))
+        provisionInValue.zip(provisionOutValue).toVector.flatMap { case (provIn, provOut) =>
+          // Conservation across the pool, order, provision and designated owner output measures the
+          // amount left for execution, independently of any takings carried from earlier transactions.
+          val gross = BigInt(pool.value) + order.value + provIn - next.value - provOut - reward.value
+          val fee = transactionFee(tx)
+          // Past the pool and the owner's reward, the takings box is what the executor keeps. The reward
+          // is skipped so filling this client's own order is not mistaken for executing it.
+          val local = tx.outputs.zipWithIndex.exists { case (out, i) => i != 0 && i != rewardIndex && out.ergoTree == minerTree }
+          if (gross < 0 || expected.exists(BigInt(_) != gross) || fee > gross) Vector.empty
+          else {
+            val protocolIn = Set(0, orderIndex) ++ (if (provisionIn) Set(1) else Set.empty)
+            val protocolOut = Set(0, rewardIndex) ++ (if (provisionOut) Set(1) else Set.empty)
+            val (tokens, otherTokens) = takings(tx, inputs, protocolIn, protocolOut, registry)
+            Vector(BatchingFee(tx.id, order.id, protocol, gross.toString, fee.toString, local, tokens, otherTokens))
+          }
+        }
       }
     }
     ErgoDexPool.parse(box(pool)) match {
@@ -67,7 +169,8 @@ private[stats] object BatchingStatistics {
             ErgoDexExecution.movement(order, before).toVector.flatMap { case (quote, after) =>
               val actual = ErgoDexPool.parse(box(next))
               if (!actual.exists(p => p.copy(boxId = after.boxId) == after) || quote < order.minQuoteAmount) Vector.empty
-              else result(input, Hex.toHexString(order.redeemerPropBytes), 1, 0, 0, "ergodex", Some(order.dexFee(quote)))
+              else result(1, Hex.toHexString(order.redeemerPropBytes), 1, provisionIn = false, provisionOut = false,
+                "ergodex", Some(order.dexFee(quote)))
             }
           }
           // A Machina fill through the pool: the gap is what the pool and the order's child leave between them.
@@ -75,20 +178,41 @@ private[stats] object BatchingStatistics {
           lazy val machina = MachinaOrder.parse(box(input)).filter(_.tokenId == before.yId).toVector.flatMap { order =>
             tx.outputs.lift(1).map(_.ergoTree)
               .filter(tree => tree == input.ergoTree || tree == Hex.toHexString(order.ownerPropBytes))
-              .toVector.flatMap(child => result(input, child, 1, 0, 0, "ergodex", None))
+              .toVector.flatMap(child => result(1, child, 1, provisionIn = false, provisionOut = false, "ergodex", None))
           }
           if (ergoDex.nonEmpty) ergoDex else machina
         }
       case None if lithosDexPool(pool, network) =>
-        inputs.slice(1, 3).flatten.toVector.flatMap { input =>
-          LithosDexOrder.parse(box(input)).filter(o => nft.contains(o.poolNft)).toVector.flatMap { order =>
-            order match {
-              case _: LithosDexOrder.Deposit if inputs(1).contains(input) && tx.outputs.size > 2 =>
-                result(input, order.terms.redeemerTree, 2, 0, BigInt(tx.outputs(1).value), "lithosdex", Some(order.terms.executorFee))
-              case _: LithosDexOrder.Redeem if inputs.lift(2).flatten.contains(input) && inputs(1).isDefined =>
-                result(input, order.terms.redeemerTree, 1, BigInt(inputs(1).get.value), 0, "lithosdex", Some(order.terms.executorFee))
-              case _: LithosDexOrder.SwapSell | _: LithosDexOrder.SwapBuy if inputs(1).contains(input) =>
-                result(input, order.terms.redeemerTree, 1, 0, 0, "lithosdex", Some(order.terms.executorFee))
+        Vector(1, 2).flatMap { at =>
+          inputs.lift(at).flatten.toVector.flatMap { input =>
+            LithosDexOrder.parse(box(input)).filter(o => nft.contains(o.poolNft)).toVector.flatMap {
+              case order: LithosDexOrder.Deposit if at == 1 && tx.outputs.size > 2 =>
+                result(1, order.terms.redeemerTree, 2, provisionIn = false, provisionOut = true, "lithosdex",
+                  Some(order.terms.executorFee))
+              case order: LithosDexOrder.Redeem if at == 2 && inputs(1).isDefined =>
+                result(2, order.terms.redeemerTree, 1, provisionIn = true, provisionOut = false, "lithosdex",
+                  Some(order.terms.executorFee))
+              case order @ (_: LithosDexOrder.SwapSell | _: LithosDexOrder.SwapBuy) if at == 1 =>
+                result(1, order.terms.redeemerTree, 1, provisionIn = false, provisionOut = false, "lithosdex",
+                  Some(order.terms.executorFee))
+              case _ => Vector.empty
+            }
+          }
+        }
+      // A token/token pool's orders take the same positions as an ERG/token pool's, and pay the same ERG fee.
+      case None if lithosDexT2TPool(pool) =>
+        Vector(1, 2).flatMap { at =>
+          inputs.lift(at).flatten.toVector.flatMap { input =>
+            LDT2TOrder.parse(box(input)).filter(o => nft.contains(o.poolNft)).toVector.flatMap {
+              case order: LDT2TOrder.Deposit if at == 1 && tx.outputs.size > 2 =>
+                result(1, order.terms.redeemerTree, 2, provisionIn = false, provisionOut = true, "lithosdex",
+                  Some(order.terms.executorFee))
+              case order: LDT2TOrder.Redeem if at == 2 && inputs(1).isDefined =>
+                result(2, order.terms.redeemerTree, 1, provisionIn = true, provisionOut = false, "lithosdex",
+                  Some(order.terms.executorFee))
+              case order: LDT2TOrder.Swap if at == 1 =>
+                result(1, order.terms.redeemerTree, 1, provisionIn = false, provisionOut = false, "lithosdex",
+                  Some(order.terms.executorFee))
               case _ => Vector.empty
             }
           }

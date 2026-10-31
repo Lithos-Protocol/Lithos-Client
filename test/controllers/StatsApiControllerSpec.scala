@@ -318,6 +318,7 @@ class StatsApiControllerSpec extends AnyFlatSpec with Matchers with MockitoSugar
     val mining = mock[MiningStatsRefresh]
     when(mining.collateral).thenReturn(CollateralStats("stale", Some(1000L), Some(source),
       1000, "92233720368547758080", partial = true))
+    when(mining.view).thenReturn(MiningStatsView())
     val result = call(withMining(mining).getCollateralStats())
     status(result) shouldBe OK
     val json = contentAsJson(result)
@@ -327,12 +328,29 @@ class StatsApiControllerSpec extends AnyFlatSpec with Matchers with MockitoSugar
     (json \ "source" \ "blockId").as[String] shouldBe source.blockId
   }
 
+  it should "carry the queue's bids and the lender returns by selection path beside the inventory" in {
+    val mining = mock[MiningStatsRefresh]
+    when(mining.collateral).thenReturn(CollateralStats("ready", Some(1000L), Some(source), 1, "2925000000",
+      partial = false, queue = CollateralQueueStats.of(Vector(2500000L), unreadable = 0, partial = false)))
+    when(mining.view).thenReturn(MiningStatsView(totals = MiningTotals(accounting = MiningAccountingTotals(Map(
+      "lithos.blocks" -> "3", "collateral.bid.boxes" -> "2", "collateral.bid.costNanoErg" -> "6000000000",
+      "collateral.bid.receivedNanoErg" -> "6100000000", "collateral.bid.capitalNanoErgBlocks" -> "10320000000000")))))
+    val json = contentAsJson(call(withMining(mining).getCollateralStats()))
+    (json \ "queue" \ "firstNanoErg").as[String] shouldBe "3000000"
+    (json \ "selection" \ "lithosBlocks").as[Long] shouldBe 3
+    (json \ "selection" \ "coveredBlocks").as[Long] shouldBe 2
+    (json \ "selection" \ "bid" \ "netNanoErg").as[String] shouldBe "100000000"
+    (json \ "selection" \ "bid" \ "aprPercent").as[Double] shouldBe 254.65
+    (json \ "selection" \ "clearance" \ "aprPercent").toOption shouldBe None
+  }
+
   /** The bid book rides on the inventory response, so its shape is part of that endpoint's contract. */
   it should "serialise the bid distribution as exact strings beside the inventory" in {
     val mining = mock[MiningStatsRefresh]
     when(mining.collateral).thenReturn(CollateralStats("ready", Some(1000L), Some(source), 4,
       "11660000000", partial = false,
       fees = CollateralFeeStats.of(Vector(0L, 0L, 2000000L, 9223372036854775807L), unreadable = 1)))
+    when(mining.view).thenReturn(MiningStatsView())
     val fees = contentAsJson(call(withMining(mining).getCollateralStats())) \ "fees"
 
     (fees \ "atFloor").as[Int] shouldBe 2

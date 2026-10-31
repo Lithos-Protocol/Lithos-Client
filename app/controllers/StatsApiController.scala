@@ -38,11 +38,11 @@ class StatsApiController @Inject()(cc: ControllerComponents, cache: StatsCache, 
   })
 
   def getMiningTotals(): Action[AnyContent] = noStore(Action {
-    Ok(Json.toJson(StatsResponses.totals(mining.view)))
+    Ok(Json.toJson(StatsResponses.totals(mining.view, mining.verified)))
   })
 
   def getMiningBuckets(): Action[AnyContent] = history { (from, until, width) =>
-    mining.buckets(from, until, width).map(value => Ok(Json.toJson(value)))
+    mining.buckets(from, until, width).map(value => Ok(StatsResponses.buckets(value, mining.verified)))
   }
 
   def getMiningHashrate(): Action[AnyContent] = history { (from, until, width) =>
@@ -117,7 +117,7 @@ class StatsApiController @Inject()(cc: ControllerComponents, cache: StatsCache, 
   }
 
   def getCollateralStats(): Action[AnyContent] = noStore(Action {
-    Ok(Json.toJson(mining.collateral))
+    Ok(StatsResponses.collateral(mining.collateral, mining.view))
   })
 
   def getLocalMiningStats(): Action[AnyContent] = withApiKey(Action {

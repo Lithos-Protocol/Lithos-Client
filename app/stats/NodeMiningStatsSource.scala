@@ -4,10 +4,11 @@ import com.google.gson.JsonElement
 import configs.{MiningStatsConfig, NodeContext}
 import lfsm.RollupProtocol
 import node.NodeApi
-import node.model.{NodeHeader, Paging}
+import node.model.{IndexedBox, IndexedTransaction, NodeHeader, Paging}
 import node.rest.{NodeHttp, NodeHttpConfig, RestNodeApi}
 import okhttp3.OkHttpClient
 import org.bouncycastle.util.encoders.Hex
+import org.ergoplatform.ErgoTreePredef
 import org.ergoplatform.appkit.ErgoValue
 import sigma.Coll
 import state.messages.{BlockInfo, BlockTx, NodeSync, TxOutput}
@@ -111,19 +112,58 @@ class NodeMiningStatsSource(api: NodeApi, protocol: SyncProtocolContext, minerTr
       complete = boxes.size < 200
       page += 1
     }
+    val queue = queued()
     val current = heights
     MiningStatsRefresh.requireSameChain(
       current.chain == at.height && current.usable == at.height && header(at.height) == at,
       "chain changed while reading collateral statistics")
     Some(CollateralStats("ready", Some(observed), Some(at), count, value.toString, partial = !complete,
-      fees = CollateralFeeStats.of(fees.result(), unreadable)))
+      fees = CollateralFeeStats.of(fees.result(), unreadable), queue = queue))
+  }
+
+  /** The emission gate, where queue boxes wait. Compiled once per network for the process. */
+  private lazy val gateTree: String = transactions.ProtocolContracts.forNetwork(protocol.networkType).gate.ergoTreeHex
+
+  /**
+   * The bids in the queue, from the same paged token read as the live boxes. A queue box carries the queue token
+   * first, sits at the gate, and holds its position in R7; the gate also holds proof-of-spend boxes, which do not.
+   */
+  private def queued(): CollateralQueueStats = {
+    val token = lfsm.LFSMHelpers.getQueueToken(protocol.networkType).toString
+    val seen = mutable.Set.empty[String]
+    val fees = Vector.newBuilder[Long]
+    var unreadable = 0
+    var complete = false
+    var page = 0
+    while (!complete && page < 5) {
+      val boxes = api.unspentBoxesByTokenId(token, Paging(page * 200, 200)).get
+      require(boxes.size <= 200, "queue page exceeds its limit")
+      boxes.foreach { box =>
+        require(seen.add(box.boxId), "queue index pages overlap")
+        val registers = box.box.additionalRegisters
+        val positioned = registers.get(7).exists(hex => Try(ErgoValue.fromHex(hex).getValue).toOption.exists(_.isInstanceOf[java.lang.Long]))
+        if (box.ergoTree == gateTree && positioned && box.assets.headOption.exists(t => t.tokenId == token && t.amount == 1L)) {
+          RollupProtocol.finderFeeOf(registers.get(4)) match {
+            case Some(share) => fees += RollupProtocol.priorityFeeOf(share)
+            case None => unreadable += 1
+          }
+        }
+      }
+      complete = boxes.size < 200
+      page += 1
+    }
+    CollateralQueueStats.of(fees.result(), unreadable, partial = !complete)
   }
 
   override def read(at: MiningCursor, previous: MiningCursor): MiningBlockRecord = {
     val fullHeader = chain.headerAt(at.height).get
     MiningStatsRefresh.requireSameChain(cursor(fullHeader) == at, "chain changed before reading mining statistics")
     val block = chain.blocksFor(Seq(fullHeader)).get.head
+    // One indexed read per Lithos block, of the transaction that created its collateral box, serves both
+    // how the box was selected and, when the lender is this wallet, when it joined.
+    val activations = mutable.Map.empty[String, Option[IndexedTransaction]]
     val blocks = block.txs.flatMap(tx => genesis(block, tx, at)).toVector
+      .map(b => b.copy(selection = selection(block, b, activations)))
     blocks.foreach(b => origins.update(b.collateralBoxId, Some(b)))
     val payments = Vector.newBuilder[MiningPaymentRecord]
     val rollups = Vector.newBuilder[RollupActivity]
@@ -161,7 +201,7 @@ class NodeMiningStatsSource(api: NodeApi, protocol: SyncProtocolContext, minerTr
     MiningBlockRecord(at, previous, fullHeader.difficulty.toString, blocks, networkPayments.filter(_.local),
       MiningActivity(networkPayments, rollups.result(), fees.result(), batches.result(), registrations.result()),
       block.txs.map(BatchingStatistics.transactionFee).sum.toString,
-      blocks.headOption.flatMap(lending(block, _, at)))
+      blocks.headOption.flatMap(lending(block, _, at, activations)))
   }
 
   /**
@@ -169,21 +209,50 @@ class NodeMiningStatsSource(api: NodeApi, protocol: SyncProtocolContext, minerTr
    * The collateral contract makes the block's coinbase pay the box's lender, and the fee transaction pays the
    * same key, so both are outputs at that key's reward script in this block.
    */
-  private def lending(block: BlockInfo, genesis: LithosBlockRecord, at: MiningCursor): Option[LendingRecord] = for {
+  private def lending(block: BlockInfo, genesis: LithosBlockRecord, at: MiningCursor,
+                      activations: mutable.Map[String, Option[IndexedTransaction]]): Option[LendingRecord] = for {
     tx <- block.txs.find(_.id == genesis.transactionId)
     collateral <- tx.inputs.headOption.flatMap(in => block.inputBox(in.id))
     lenderRegister <- collateral.registers.lift(1)
     lender <- lenderTree(lenderRegister).flatMap(lenders.get)
   } yield {
+    val (coinbase, fees) = receipts(block, lender.rewardTree)
+    LendingRecord(at.blockId, at.height, at.timestamp, collateral.id, lender.address, collateral.value.toString,
+      genesis.priorityFeeNanoErg, coinbase.toString, fees.toString,
+      activation(collateral, activations).flatMap(queueInput(_, collateral, lenderRegister)).map(_.inclusionHeight))
+  }
+
+  /**
+   * How the collateral `genesis` spent came to be selected, and its lender's cost and return, for any lender.
+   * None when the box names no single key, or the index does not show the queue box its activation spent.
+   */
+  private def selection(block: BlockInfo, genesis: LithosBlockRecord,
+                        activations: mutable.Map[String, Option[IndexedTransaction]]): Option[CollateralSelection] = for {
+    tx <- block.txs.find(_.id == genesis.transactionId)
+    collateral <- tx.inputs.headOption.flatMap(in => block.inputBox(in.id))
+    lenderRegister <- collateral.registers.lift(1)
+    rewardTree <- rewardTreeOf(lenderRegister)
+    activated <- activation(collateral, activations)
+    queue <- queueInput(activated, collateral, lenderRegister)
+    (coinbase, fees) = receipts(block, rewardTree)
+    // Heights out of order or a negative return would fail the store's check, and every later block with it
+    if queue.inclusionHeight <= activated.inclusionHeight && activated.inclusionHeight <= genesis.height &&
+      coinbase + fees >= 0 && queue.value >= 0
+  } yield CollateralSelection(CollateralSelection.pathAt(genesis.height, activated.inclusionHeight),
+    queue.inclusionHeight, activated.inclusionHeight, queue.value.toString, (coinbase + fees).toString)
+
+  /**
+   * The block reward less re-emission, and the block's fees, paid to the key whose reward script is `rewardTree`.
+   * A fee collection spends only fee boxes, which is what tells the two apart.
+   */
+  private def receipts(block: BlockInfo, rewardTree: String): (BigInt, BigInt) = {
     val feeTree = Contract.FEE.ergoTreeHex
     val feeBoxes = block.txs.flatMap(_.outputs).filter(_.ergoTree == feeTree).map(_.id).toSet
     def collectsFees(t: BlockTx): Boolean = t.inputs.nonEmpty &&
       t.inputs.forall(in => feeBoxes(in.id) || block.inputBox(in.id).exists(_.ergoTree == feeTree))
-    val (fees, coinbase) = block.txs.flatMap(t => t.outputs.filter(_.ergoTree == lender.rewardTree).map(t -> _))
+    val (fees, coinbase) = block.txs.flatMap(t => t.outputs.filter(_.ergoTree == rewardTree).map(t -> _))
       .partition { case (t, _) => collectsFees(t) }
-    LendingRecord(at.blockId, at.height, at.timestamp, collateral.id, lender.address, collateral.value.toString,
-      genesis.priorityFeeNanoErg, coinbase.map { case (_, out) => out.value - reemission(out) }.sum.toString,
-      fees.map(_._2.value).sum.toString, joinedHeight(collateral, lenderRegister))
+    (coinbase.map { case (_, out) => BigInt(out.value - reemission(out)) }.sum, fees.map(f => BigInt(f._2.value)).sum)
   }
 
   /** The P2PK tree a lender register names, which is the key's own proposition bytes. */
@@ -192,18 +261,30 @@ class NodeMiningStatsSource(api: NodeApi, protocol: SyncProtocolContext, minerTr
       case key: sigma.SigmaProp => Hex.toHexString(key.propBytes.toArray)
     }
 
+  /** The script a block reward to the key a lender register names is locked under, or None for a compound key. */
+  private def rewardTreeOf(register: String): Option[String] =
+    Try(ErgoValue.fromHex(register).getValue).toOption.collect {
+      case key: sigma.data.CSigmaProp => key.wrappedValue
+    }.collect {
+      case pk: sigma.data.ProveDlog =>
+        Contract(ErgoTreePredef.rewardOutputScript(mutations.NodeWallet.MINER_REWARD_DELAY, pk)).ergoTreeHex
+    }
+
   /** NanoERG a spend of `out` must pay to re-emission: one per re-emission token it carries, mainnet only. */
   private def reemission(out: TxOutput): Long =
     out.assets.filter(_.id.toString == MainnetEip27Constants.TokenId).map(_.amount).sum
 
   /**
-   * When the lender joined: the queue box the activation spent, which names the same lender. A failed read fails
-   * the block, to be read again, rather than record a position without its start.
+   * The transaction that created `collateral`, read once per block. A failed read fails the block, to be read
+   * again, rather than record a position without its start.
    */
-  private def joinedHeight(collateral: TxOutput, lenderRegister: String): Option[Int] =
-    api.indexedTransactionById(collateral.txId).get.flatMap(_.inputs
-      .find(in => in.boxId != collateral.id && in.box.additionalRegisters.get(5).contains(lenderRegister))
-      .map(_.inclusionHeight))
+  private def activation(collateral: TxOutput,
+                         activations: mutable.Map[String, Option[IndexedTransaction]]): Option[IndexedTransaction] =
+    activations.getOrElseUpdate(collateral.txId, api.indexedTransactionById(collateral.txId).get)
+
+  /** The queue box an activation spent for the lender `collateral` names: when they joined, and what it held. */
+  private def queueInput(activated: IndexedTransaction, collateral: TxOutput, lenderRegister: String): Option[IndexedBox] =
+    activated.inputs.find(in => in.boxId != collateral.id && in.box.additionalRegisters.get(5).contains(lenderRegister))
 
   /**
    * A dictionary spend that carries no operation is not a registration. Throwing on one instead

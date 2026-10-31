@@ -2,7 +2,7 @@ package api
 
 import akka.actor.{ActorRef, ActorSystem}
 import api.models._
-import configs.{LithosDexOrdersConfig, NodeContext, VerifiedPool}
+import configs.{LithosDexOrdersConfig, LithosDexPoolsConfig, NodeContext, VerifiedPool}
 import lithosdex.LDHelpers
 import lithosdex.states.{LDFeeValue, LDT2TFeeValue}
 import node.MutationConversions._
@@ -27,6 +27,7 @@ class LDPoolsApiImpl @Inject()(nodeContext: NodeContext, index: LDPoolIndex,
   private lazy val orders = new DexPoolExecution(nodeContext, funding, index, LithosDexOrdersConfig(config),
     heldPlacements = () => LithosDexApiImpl.heldPlacements(batcher))
   private lazy val creation = new DexPoolCreation(nodeContext, funding, index)
+  private val hidden = LithosDexPoolsConfig(config).hidden
 
   override def checkCreatePool(request: LDPoolCreateRequest): LDPoolCreateQuote = creation.check(request)
 
@@ -40,9 +41,14 @@ class LDPoolsApiImpl @Inject()(nodeContext: NodeContext, index: LDPoolIndex,
     val found = orders.lookupNfts(request.tokenIds)
     val tokens = index.snapshot().tokens
     LDNftLookupList(request.tokenIds.map(_.toLowerCase).distinct.map { id =>
-      found.get(id).fold(LDNftLookup(id, provisionNft = false)) { case (pool, provision, x, y) =>
-        LDNftLookup(id, provisionNft = true, Some(LDPoolsApiImpl.summary(pool, tokens)), Some(provision),
-          Some(LDAmounts(x)), Some(LDAmounts(y)))
+      found.get(id).fold(LDNftLookup(id, provisionNft = false)) { f =>
+        val minted = f.mint.map(m => LDNftMint(m.height, m.shares.toString, LDAmounts(m.amountX), LDAmounts(m.amountY),
+          m.genesis))
+        LDNftLookup(id, provisionNft = f.live.isDefined, Some(LDPoolsApiImpl.summary(f.pool, tokens)),
+          f.live.map(_.provision), f.live.map(l => LDAmounts(l.amountX)), f.live.map(l => LDAmounts(l.amountY)),
+          redeemed = f.live.isEmpty, minted = minted, lastClaimedHeight = f.live.flatMap(_.lastClaimedHeight),
+          refreshBountyNanoErg = f.live.flatMap(_.refreshBounty).map(LDAmounts(_)),
+          refreshableHeight = f.live.map(_.refreshableHeight))
       }
     })
   }
@@ -80,7 +86,8 @@ class LDPoolsApiImpl @Inject()(nodeContext: NodeContext, index: LDPoolIndex,
   /** @inheritdoc */
   override def listPools: LDPoolList = {
     val s = index.snapshot()
-    LDPoolList(s.status, s.height, s.truncated, s.pools.map(LDPoolsApiImpl.summary(_, s.tokens)))
+    LDPoolList(s.status, s.height, s.truncated,
+      s.pools.filterNot(p => hidden.contains(p.nft.toLowerCase)).map(LDPoolsApiImpl.summary(_, s.tokens)))
   }
 
   /** @inheritdoc */
