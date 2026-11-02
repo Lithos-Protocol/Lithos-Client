@@ -5794,7 +5794,7 @@ components:
           description: Exact decimal integer. Includes bond refunds and any surplus, so it is not net earnings.
     LithosBlockRecord:
       type: object
-      required: [blockId, height, timestamp, transactionId, holdingBoxId, collateralBoxId, collateralNanoErg, initialHoldingNanoErg]
+      required: [blockId, height, timestamp, transactionId, holdingBoxId, collateralBoxId, collateralNanoErg, initialHoldingNanoErg, priorityFeeNanoErg]
       properties:
         blockId:
           type: string
@@ -5815,11 +5815,14 @@ components:
         initialHoldingNanoErg:
           type: string
           description: Exact value of genesis output zero, before any top-ups. Not the block's final revenue.
+        priorityFeeNanoErg:
+          type: string
+          description: The whole fee the collateral box carried above the floor. The pool's share of it is already in `initialHoldingNanoErg`.
         selection:
           $ref: '#/components/schemas/CollateralSelection'
     CollateralSelection:
       type: object
-      description: How the block's collateral box came to be spent. Absent for blocks recorded before this release, and where the index does not show the box's activation.
+      description: How the block's collateral box came to be spent. Absent when the stored record lacks it, and where the index does not show the box's activation.
       required: [path, joinedHeight, activatedHeight, queueNanoErg, receivedNanoErg]
       properties:
         path:
