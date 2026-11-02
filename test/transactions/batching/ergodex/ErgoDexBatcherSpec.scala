@@ -233,6 +233,26 @@ class ErgoDexBatcherSpec extends TestKit(ActorSystem("ergodex-batcher-spec", Erg
     f.stop()
   }
 
+  it should "scan once per index height, and again once the index moves" in {
+    val f = new Fixture(scanIntervalMs = 100L)
+    @volatile var indexed = tip
+    when(f.api.indexedHeight()).thenAnswer(_ => Success(BlockchainIndexHeight(indexed, indexed)))
+    // Each scan reads the tip once; ticks at the same index height reuse the last scan
+    verify(f.api, timeout(10000).times(1)).info()
+    awaitAssert(verify(f.api, org.mockito.Mockito.atLeast(10)).indexedHeight(), 10.seconds, 100.millis)
+    verify(f.api, times(1)).info()
+    indexed = tip + 1
+    verify(f.api, timeout(10000).times(2)).info()
+    f.stop()
+  }
+
+  it should "rescan every tick while the index is behind the chain" in {
+    val f = new Fixture(scanIntervalMs = 100L)
+    when(f.api.indexedHeight()).thenReturn(Success(BlockchainIndexHeight(tip - 1, tip)))
+    verify(f.api, timeout(10000).atLeast(3)).info()
+    f.stop()
+  }
+
   it should "rebuild a cached height when a wallet places an order between mempool refreshes" in {
     val f = new Fixture(discoverable = false)
     val height = heights.incrementAndGet()

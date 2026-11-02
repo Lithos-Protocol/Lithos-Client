@@ -116,6 +116,15 @@ abstract class Batcher(nodeContext: NodeContext,
   /** Scans for executable orders. Runs on the worker; a failure leaves the previous set tracked. */
   protected def discover(): Tracked
 
+  /**
+   * Whether [[discover]] reads confirmed state alone, so a scan at the index height the last one read finds the
+   * same orders. Each block then costs one scan rather than one per tick.
+   */
+  protected def scansConfirmedOnly: Boolean = false
+
+  /** The last scan's result and the index height it read, while that height may still be current. */
+  private val lastScan = new AtomicReference(Option.empty[(Int, Tracked)])
+
   /** The bundles offered for one block, built before `deadline`. Runs on the worker; a failure offers nothing. */
   protected def executions(orders: Tracked, blockHeight: Int, slots: Int, deadline: Deadline): Seq[CandidateBundle]
 
@@ -153,7 +162,7 @@ abstract class Batcher(nodeContext: NodeContext,
 
     case ScanTick if !busy =>
       busy = true
-      offMailbox(discover())(Scanned)
+      offMailbox(scan())(Scanned)
 
     case ScanTick => ()
 
@@ -186,6 +195,7 @@ abstract class Batcher(nodeContext: NodeContext,
     case Spent(ids) =>
       tracked --= ids
       rejected --= ids
+      lastScan.updateAndGet(_.map { case (height, found) => height -> (found -- ids) })
 
     case PrepareBlockTxs(blockHeight, limit) => startBuild(blockHeight, limit, None)
 
@@ -207,6 +217,24 @@ abstract class Batcher(nodeContext: NodeContext,
 
   /** Stops reading back orders a build found spent. Safe to call from the worker. */
   protected def forget(ids: Set[String]): Unit = if (ids.nonEmpty) self ! Spent(ids)
+
+  /**
+   * [[discover]], or with [[scansConfirmedOnly]] the last scan's orders less those skipped since, while the node's
+   * index stands at the height that scan read. An index behind the chain, or unreadable, always rescans.
+   */
+  private def scan(): Tracked =
+    if (!scansConfirmedOnly) discover()
+    else {
+      val indexed = Try(nodeApi.indexedHeight().get).toOption
+        .collect { case h if h.indexedHeight == h.fullHeight => h.indexedHeight }
+      lastScan.get match {
+        case Some((height, found)) if indexed.contains(height) => found -- skippedOrders()
+        case _ =>
+          val found = discover()
+          lastScan.set(indexed.map(_ -> found))
+          found
+      }
+    }
 
   /** Run `work` on the worker and deliver its result as `wrap`, including a refused submission. */
   private def offMailbox[T](work: => T)(wrap: Try[T] => Any): Unit =

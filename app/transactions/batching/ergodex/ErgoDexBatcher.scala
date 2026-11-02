@@ -36,6 +36,8 @@ class ErgoDexBatcher(nodeContext: NodeContext,
 
   override protected val label: String = "ErgoDEX"
 
+  override protected def scansConfirmedOnly: Boolean = true
+
   /** Scans executable templates and their pools. A failed read leaves the previous tracked set intact. */
   override protected def discover(): Tracked = {
     val tip = nodeApi.info().get.fullHeight.getOrElse(

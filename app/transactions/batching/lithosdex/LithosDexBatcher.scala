@@ -56,6 +56,8 @@ class LithosDexBatcher(nodeContext: NodeContext,
 
   override protected val label: String = "LithosDEX"
 
+  override protected def scansConfirmedOnly: Boolean = true
+
   private val batching = settings.batching
   private val poolNft: String = LDHelpers.getPoolNFT(nodeContext.getNetwork).toString
 
