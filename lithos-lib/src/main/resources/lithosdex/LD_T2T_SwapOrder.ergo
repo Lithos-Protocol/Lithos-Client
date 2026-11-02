@@ -70,9 +70,10 @@
     val rewardBox   = OUTPUTS(1)
     val rewardQuote = rewardBox.tokens(0)
 
-    // The pool sets the side fee aside before the curve sees an input, with the same truncation
+    // The pool sets the side fee aside before the curve sees an input, rounded up as the pool rounds it. A
+    // truncated fee would price one more unit than the pool trades, which no fill can pay.
     val sold   = base._2.toBigInt
-    val traded = sold - (sold * sideFee) / CONST_FEE_DENOM
+    val traded = sold - (sold * sideFee + CONST_FEE_DENOM - 1) / CONST_FEE_DENOM
     val quote  = rewardQuote._2.toBigInt
 
     // The pool's swap inequality solved for the output, relaxed by one unit because the pool can release

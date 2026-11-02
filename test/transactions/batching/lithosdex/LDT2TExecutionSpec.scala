@@ -118,6 +118,19 @@ class LDT2TExecutionSpec extends AnyFlatSpec with Matchers {
     last.value shouldBe LDHelpers.T2T_POOL_MIN_VALUE
   }
 
+  it should "sign swaps whose side fee leaves a remainder, each way" in withCtx { ctx =>
+    // 25 * 400000001 and 15 * 1000000333 leave remainders over 10000, so the pool rounds each side fee up
+    val orders = Seq(swap(ctx, 10, sold = tokenY, amount = 400000001L), swap(ctx, 11, amount = 1000000333L))
+    orders.foreach(_ shouldBe defined)
+    orders.flatten.foreach { order =>
+      val r = run(ctx, Seq(order))
+      withClue(s"order selling ${order.asInstanceOf[LDT2TOrder.Swap].tokenId.take(4)}: ") {
+        r.unbuildable shouldBe empty
+        r.chain.map(_.transactions.size) shouldBe Some(1)
+      }
+    }
+  }
+
   it should "pay the capped miner fee out of the executor fee when broadcast" in withCtx { ctx =>
     val r = run(ctx, Seq(swap(ctx, 10).get), minerFeeCeiling = 1000000L)
     val tx = r.chain.get.transactions.head
