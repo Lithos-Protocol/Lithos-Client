@@ -26,8 +26,16 @@ object MachinaKind {
  */
 object MachinaContracts {
 
-  final case class Template(kind: MachinaKind, templateHex: String, executable: Boolean) {
+  /**
+   * @param headerHex    the tree's header, size and constant count, then the token constant's type and length
+   * @param constantsHex every constant after the token id, as every mainnet order of the kind carries them
+   */
+  final case class Template(kind: MachinaKind, templateHex: String, executable: Boolean,
+                            headerHex: String = "", constantsHex: String = "") {
     lazy val templateHash: String = Hex.toHexString(Blake2b256(Hex.decode(templateHex)))
+
+    /** The whole tree of an order for `tokenId`, so a box differing anywhere but its token is not taken for one. */
+    def treeHex(tokenId: String): String = headerHex + tokenId + constantsHex + templateHex
   }
 
   val templates: Vector[Template] = Vector(
@@ -38,7 +46,7 @@ object MachinaContracts {
       "08720493e4c672060505720993e4c672060601720593e4c67206070ec5a7eded93c27206d0720493720a720293e4c672" +
       "06040ec5a7957205d801d60c99c17206c1a7ed91720c730692720c9c99720b72087209d801d60c997208720bed91720c" +
       "7307929c720c720999c1a7c172067204",
-      executable = true),
+      executable = true, headerHex = "19b302080e20", constantsHex = "05000400040005000580897a05000500"),
 
     Template(MachinaKind.Grid,
       "d804d601e30104d6027300d603860272027301d604e4c6a7040895e67201d805d605b2a5e4720100d606b2db63087205" +
@@ -46,7 +54,7 @@ object MachinaContracts {
       "01720293e4c672050408720493e4c672050511720793e4c67205060ec5a795e4e30001d801d60a99c17205c1a7ed9172" +
       "0a730492720a9c9972087209b27207730500d801d60a9972097208ed91720a7306929c720ab2720773070099c1a7c172" +
       "057204",
-      executable = true),
+      executable = true, headerHex = "19f401080e20", constantsHex = "0500040004000500040005000402"),
 
     Template(MachinaKind.TokenGrid,
       "d804d601e30104d6027300d603860272027301d604e4c6a7040895e67201d80bd605b2a5e4720100d606db6308a7d607" +
@@ -101,8 +109,9 @@ final case class MachinaOrder(box: NodeBox,
 object MachinaOrder {
 
   /**
-   * An executable Machina order, or None for any other box, an older contract's, a malformed one, or one holding
-   * anything but its own token, which no honest fill puts there.
+   * An executable Machina order, or None for any other box, an older contract's, a malformed one, one whose tree
+   * differs from its kind's anywhere but the token id, or one holding anything but its own token, which no honest
+   * fill puts there.
    */
   def parse(box: NodeBox): Option[MachinaOrder] =
     Try(sigma.ast.ErgoTree.fromHex(box.ergoTree)).toOption.flatMap { tree =>
@@ -113,6 +122,8 @@ object MachinaOrder {
             Try(c.asInstanceOf[sigma.Coll[Byte]].toArray).toOption }.flatten
           if token.length == 32
           tokenId = Hex.toHexString(token)
+          // Pricing assumes the contract's own constants, so a box that changed one would only fail at signing
+          if box.ergoTree.equalsIgnoreCase(template.treeHex(tokenId))
           if box.value > 0 && box.assets.size <= 1 && box.assets.forall(a => a.tokenId == tokenId && a.amount > 0)
           owner <- register(box, 4).collect { case p: sigma.SigmaProp => p.propBytes.toArray }
           (ask, bid) <- prices(template.kind, box)

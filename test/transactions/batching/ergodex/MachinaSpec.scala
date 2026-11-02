@@ -249,6 +249,18 @@ class MachinaSpec extends AnyFlatSpec with Matchers with MockitoSugar {
     }
   }
 
+  it should "not be parsed with a constant its kind does not carry, though its template matches" in {
+    nodeContext.getClient.execute { ctx =>
+      // SAFE_MIN_BOX_VALUE 1,000,000 raised by one, the same length, so only the constant differs
+      val tree = limitSellOrder.ergoTree.replace("0580897a", "0582897a")
+      tree should not equal limitSellOrder.ergoTree
+      Hex.toHexString(Blake2b256(ErgoTree.fromHex(tree).template)) shouldBe
+        Hex.toHexString(Blake2b256(ErgoTree.fromHex(limitSellOrder.ergoTree).template))
+      MachinaOrder.parse(withId(ctx, limitSellOrder.copy(ergoTree = tree))) shouldBe None
+      MachinaOrder.parse(withId(ctx, limitSellOrder)) should not be empty
+    }
+  }
+
   // ─── chained with ErgoDEX orders ─────────────────────────────────────────
 
   /** A native v1 redemption of a thousandth of the circulating LP of `pool`, built from the published tree. */
