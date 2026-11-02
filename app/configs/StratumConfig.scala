@@ -30,6 +30,9 @@ class StratumConfig(config: Configuration){
   val rotateExtraNonceInterval: Int =
     config.getOptional[Int]("stratum.rotateExtraNonceInterval").getOrElse(0)
 
+  /** Announce each job's share difficulty in mining.set_difficulty instead of 1, as NiceHash requires. */
+  val niceHashMode: Boolean = config.getOptional[Boolean]("stratum.niceHashMode").getOrElse(false)
+
   /** Everything under `stratum.candidate`, all optional — see [[CandidateConfig]]. */
   val candidate: CandidateConfig = CandidateConfig(config)
 }

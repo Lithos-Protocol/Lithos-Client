@@ -110,9 +110,11 @@ object MiningMessages {
   /** JStratum input thread forwarded a mining.authorize request. */
   case class MinerAuthorize(requestId: String, workerName: String, password: String)
 
-  /** JStratum input thread forwarded a mining.submit request. */
-  case class MinerSubmit(requestId: String, workerName: String, jobId: String,
-                         extraNonce2Hex: String, nTime: String, extraNonce1Hex: String)
+  /** JStratum input thread forwarded a mining.submit request, its params as text, unparsed. */
+  case class MinerSubmit(requestId: String, params: Seq[String])
+
+  /** JStratum input thread forwarded a mining.extranonce.subscribe request. */
+  case class MinerExtranonceSubscribe(requestId: String)
 
   /**
    * The block now being mined is one past the full-chain tip. A changed parent invalidates

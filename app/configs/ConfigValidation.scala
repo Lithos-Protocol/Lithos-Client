@@ -178,6 +178,7 @@ object Configs {
     v.range("stratum.rotateExtraNonceInterval", v.int("stratum.rotateExtraNonceInterval"), 0, 3600000,
       "ms without work before extraNonce rotation; 0 disables it")
     v.bool("stratum.forceConfigDiff")
+    v.bool("stratum.niceHashMode")
 
     // ---- stratum.candidate ----
     v.range("stratum.candidate.collateralPoolSize", v.int("stratum.candidate.collateralPoolSize"), 1, 100,

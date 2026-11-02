@@ -12,6 +12,7 @@ import mutations.NodeWallet
 import nisp.NISPDatabase
 import org.bouncycastle.util.encoders.Hex
 import org.ergoplatform.appkit.ErgoClient
+import org.json.JSONObject
 import org.slf4j.{Logger, LoggerFactory}
 import stratum.counter.SubscriptionIdCounter
 import stratum.data.Options
@@ -22,6 +23,7 @@ import java.math.BigDecimal
 import java.net.{InetSocketAddress, Socket}
 import java.util.Arrays
 import java.util.concurrent.atomic.AtomicReference
+import scala.collection.JavaConverters._
 import scala.collection.concurrent.TrieMap
 import scala.concurrent.Await
 import scala.concurrent.duration.{Duration, DurationInt, FiniteDuration}
@@ -72,6 +74,8 @@ import scala.concurrent.duration.{Duration, DurationInt, FiniteDuration}
  * @param nispDB              NISP database for super-share persistence
  * @param candidateConfig     Tuning for CandidateBuilder, which builds the transactions inserted
  *                            into every Lithos block
+ * @param niceHashMode        Announce each job's real share difficulty in mining.set_difficulty, as
+ *                            NiceHash requires, instead of the 1 other mining software expects
  */
 class MiningStratumServer(system: ActorSystem,
                           options: Options,
@@ -88,6 +92,7 @@ class MiningStratumServer(system: ActorSystem,
                           candidateConfig: CandidateConfig = CandidateConfig.Default,
                           txSources: Seq[MiningMessages.CandidateSource] = Seq.empty,
                           rotateExtraNonceInterval: Int = 0,
+                          niceHashMode: Boolean = false,
                           statsCollector: Option[ActorRef] = None,
                           statsRefreshIntervalMs: Int = configs.StatsConfig.Default.refreshIntervalMs)
   extends BoundStratumTcpServer {
@@ -169,7 +174,7 @@ class MiningStratumServer(system: ActorSystem,
     // Step 3 — create the actor BEFORE populating the bridge
     val connectionActor = system.actorOf(
       Props(new StratumConnection(subscriptionId, socketAddress, poolActor, jobManager, connectionId,
-        rotateExtraNonceInterval, () => connectionActors.remove(connectionId))),
+        rotateExtraNonceInterval, niceHashMode, () => connectionActors.remove(connectionId))),
       s"connection-$connectionId"
     )
 
@@ -243,19 +248,17 @@ class MiningStratumServer(system: ActorSystem,
       actor ! MinerAuthorize(m.getId, m.workerName, m.password)
     })
 
+    // Forwarded as text and read by the connection, which knows the extraNonce1 a short layout omits
+    // and answers a malformed submit rather than leaving the miner waiting on it.
     registerRequestHandler(Requests.Submit.NAME, classOf[Requests.Submit], (m: Requests.Submit) => {
-      try {
-        val params       = m.getParams
-        val workerName   = params.get(0).asInstanceOf[String]
-        val jobId        = params.get(1).asInstanceOf[String]
-        val extraNonce2  = params.get(2).asInstanceOf[String]
-        val nTime        = params.get(3).asInstanceOf[String]
-        val extraNonce1H = params.get(4).asInstanceOf[String]
-        actor ! MinerSubmit(m.getId, workerName, jobId, extraNonce2, nTime, extraNonce1H)
-      } catch {
-        case ex: Exception =>
-          logger.error(s"Failed to parse mining.submit from ${socketAddress.getHostString}: ${ex.getMessage}")
-      }
+      val params = m.getParams.asScala.map(p => if (p == null || JSONObject.NULL.equals(p)) "" else p.toString)
+      actor ! MinerSubmit(m.getId, params.toList)
     })
+
+    registerRequestHandler(Requests.ExtranonceSubscribe.NAME, classOf[Requests.ExtranonceSubscribe],
+      (m: Requests.ExtranonceSubscribe) => {
+        logger.info(s"mining.extranonce.subscribe from ${socketAddress.getHostString}")
+        actor ! MinerExtranonceSubscribe(m.getId)
+      })
   }
 }

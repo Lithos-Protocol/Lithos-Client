@@ -1,8 +1,10 @@
 package mining
 
 import com.redbottledesign.bitcoin.rpc.stratum.UnhandledStratumMessageException
+import com.redbottledesign.bitcoin.rpc.stratum.message.RequestMessage
 import com.redbottledesign.bitcoin.rpc.stratum.transport.tcp.{StratumTcpServer, StratumTcpServerConnection, TcpSocketInputThread}
 import org.slf4j.{Logger, LoggerFactory}
+import stratum.message.Response
 
 import java.net.{Socket, SocketException}
 import java.util.Scanner
@@ -24,6 +26,16 @@ abstract class RigConnection(server: StratumTcpServer, socket: Socket)
 
   /** `open()` starts whatever this returns, and `close()` interrupts it. */
   override protected def getInputThread: TcpSocketInputThread = reader
+
+  /**
+   * Refuses a method the connection state has no handler for, such as mining.configure. JStratum's own
+   * refusal sends the id back as a string, which a client matching replies by numeric id never pairs
+   * with its request.
+   */
+  override protected def handleUnsupportedRequest(request: RequestMessage): Unit = {
+    readerLogger.info(s"Refusing unsupported ${request.getMethodName} on connection $getConnectionId")
+    sendResponse(Response.unsupported(request.getId, request.getMethodName))
+  }
 
   /**
    * Hands each line to the connection state as JStratum does, under the same lock, until the rig

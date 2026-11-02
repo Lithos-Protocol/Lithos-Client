@@ -92,6 +92,9 @@ class StartMiningServer @Inject()(system: ActorSystem, config: Configuration,
           logger.info(s"Stratum tau: $displayTau (score: ${LFSMHelpers.convertTauOrScore(displayTau)})")
         }
         logger.info(s"Using tau $t (score: ${LFSMHelpers.convertTauOrScore(t)}) for NISPs")
+        if (stratumParams.niceHashMode)
+          logger.info("NiceHash mode enabled: mining.set_difficulty carries each job's share difficulty " +
+            "instead of 1. Mining software other than NiceHash may misread it")
 
         // Started only when enabled: the walk is a standing timer against the node, and a source
         // that is off is never asked for anything either.
@@ -133,6 +136,7 @@ class StartMiningServer @Inject()(system: ActorSystem, config: Configuration,
               configs.CandidateSourceConfig.Emissions, emissionHandler)) ++ rentSource ++ forwardsSource ++
             lithosDexSource ++ ergoDexSource,
           rotateExtraNonceInterval = stratumParams.rotateExtraNonceInterval,
+          niceHashMode = stratumParams.niceHashMode,
           statsCollector = if (statsConfig.enabled) Some(statsCollector) else None,
           statsRefreshIntervalMs = statsConfig.refreshIntervalMs
         )

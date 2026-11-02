@@ -163,7 +163,7 @@ public class ResponseMessage2
             final Result result = this.getResult();
             final String error  = this.getError();
 
-            object.put(JSON_STRATUM_KEY_ID, (this.getId() != null) ? Integer.valueOf(this.getId()) : this.getId());
+            object.put(JSON_STRATUM_KEY_ID, wireId(this.getId()));
             object.put(JSON_STRATUM_KEY_ERROR,  (error != null)  ? error           : JSONObject.NULL);
             object.put(JSON_STRATUM_KEY_RESULT, (result != null) ? result.toJson() : JSONObject.NULL);
         } catch (JSONException ex) {
@@ -175,6 +175,19 @@ public class ResponseMessage2
         }
 
         return object;
+    }
+
+    /**
+     * The request id as it goes back on the wire. JStratum keeps every id as text, so an integral one is
+     * restored to a number and anything else, which clients may also send, stays a string.
+     */
+    static Object wireId(final String id) {
+        if (id == null || id.equals("null")) return JSONObject.NULL;
+        try {
+            return Long.valueOf(id);
+        } catch (NumberFormatException notIntegral) {
+            return id;
+        }
     }
 
     /**

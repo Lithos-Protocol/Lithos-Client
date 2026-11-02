@@ -88,6 +88,11 @@ class ConfigDefaultsSpec extends AnyFlatSpec with Matchers {
     StratumConfig.DefaultReductionMultiplier shouldEqual lfsm.LFSMHelpers.NISP_COEFFICIENT
   }
 
+  "stratum.niceHashMode" should "ship off, and stay off when the key is absent" in {
+    new StratumConfig(shipped).niceHashMode shouldBe false
+    new StratumConfig(Configuration(shipped.underlying.withoutPath("stratum.niceHashMode"))).niceHashMode shouldBe false
+  }
+
   "StratumConfig.DefaultBindAddress" should "equal what the shipped application.conf parses" in {
     new StratumConfig(shipped).bindAddress shouldEqual StratumConfig.DefaultBindAddress
   }

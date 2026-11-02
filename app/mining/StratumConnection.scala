@@ -10,10 +10,8 @@ import org.bouncycastle.util.encoders.Hex
 import org.slf4j.{Logger, LoggerFactory}
 import stratum.message.{Announcement, Response}
 
-import java.math.BigDecimal
+import java.math.{BigDecimal, BigInteger}
 import java.net.InetSocketAddress
-import java.util
-import java.util.Arrays
 import javax.inject.Inject
 import scala.concurrent.duration._
 import scala.language.postfixOps
@@ -24,8 +22,8 @@ import scala.util.{Failure, Success, Try}
  *
  * Each time a miner opens a TCP connection, MiningStratumServer creates one of
  * these actors and passes it a reference to the underlying JStratum connection
- * object.  All Stratum protocol handling (subscribe / authorize / submit) is
- * implemented here; the actor communicates with LithosPool (and, via forwarding,
+ * object.  All Stratum protocol handling (subscribe / authorize / submit /
+ * extranonce.subscribe) is implemented here; the actor communicates with LithosPool (and, via forwarding,
  * with LithosJobManager) for everything that requires shared state.
  *
  * Design notes
@@ -52,6 +50,9 @@ import scala.util.{Failure, Success, Try}
  * @param poolActor        LithosPool reference (also routes to LithosJobManager via forward)
  * @param connectionId     Stable ID used to deregister from LithosPool on disconnect
  * @param nonceRotateMs    Rotate extraNonce1 after this long with no new work; 0 disables it
+ * @param niceHashMode     Announce each job's share difficulty in mining.set_difficulty rather than 1.
+ *                         NiceHash refuses a stratum announcing 1; other mining software reads the
+ *                         target from the job and may misread anything but 1.
  * @param onTerminated     Run once when this actor stops, so whoever tracks it can forget it. The
  *                         server's own map has no other way to hear about a closed socket, and one
  *                         retained entry per connection ever accepted is the only unbounded
@@ -63,6 +64,7 @@ class StratumConnection(subscriptionId: String,
                         jobManager: ActorRef,
                         connectionId: String,
                         nonceRotateMs: Int = 0,
+                        niceHashMode: Boolean = false,
                         onTerminated: () => Unit = () => ())
   extends Actor with Stash {
 
@@ -79,6 +81,12 @@ class StratumConnection(subscriptionId: String,
 
   /** When this miner last got something new to search: a job, or a fresh extraNonce1. */
   private var lastWorkAt: Long = System.currentTimeMillis()
+
+  /** The difficulty this miner was last sent, so mining.set_difficulty goes out only when it changes. */
+  private var announcedDifficulty: Option[BigInteger] = None
+
+  /** Whether the miner sent mining.extranonce.subscribe, asking to be told of extraNonce1 changes. */
+  private var extranonceSubscribed: Boolean = false
 
   // Periodic liveness check so the actor self-terminates when the socket closes
   private val livenessTicker: Cancellable =
@@ -121,7 +129,7 @@ class StratumConnection(subscriptionId: String,
       if (!connection.isOpen) {
         logger.info(s"Connection $connectionId closed remotely, stopping actor")
         context.stop(self)
-      } else if (nonceRotateMs > 0 && extraNonce1.isDefined &&
+      } else if (nonceRotateMs > 0 && extraNonce1.isDefined && mayRotateExtraNonce &&
         System.currentTimeMillis() - lastWorkAt > nonceRotateMs) {
         logger.info(s"No new work for ${nonceRotateMs / 1000}s on connection $connectionId, " +
           "rotating extraNonce1 so the miner does not run out of nonce space")
@@ -132,10 +140,11 @@ class StratumConnection(subscriptionId: String,
       }
 
     // ── broadcast from LithosPool ──────────────────────────────────────────
+    // Held until the miner subscribes: a job is unusable without the extraNonce1 the subscribe hands out.
     case BroadcastJob(template) =>
       currentJob = Some(template)
       lastWorkAt = System.currentTimeMillis()
-      safeResponse(connection.sendResponse(Announcement.miningJob(template)))
+      if (extraNonce1.isDefined) announceJob(template)
 
     // ── Stratum subscribe ─────────────────────────────────────────────────
     // Ask LithosJobManager (via LithosPool.forward) for a fresh extraNonce1
@@ -146,18 +155,27 @@ class StratumConnection(subscriptionId: String,
         .map(data => SubscriptionReady(requestId, data))
         .pipeTo(self)
 
+    // The last broadcast job is preferred to the one in the answer, which is older when a broadcast
+    // arrived while the answer was in flight; a newer job still to arrive is sent when it does.
     case SubscriptionReady(requestId, data) =>
       extraNonce1 = Some(data.extraNonce1)
+      announcedDifficulty = None
       safeResponse(
         connection.sendResponse(
           Response.subscribe(requestId, subscriptionId, data.extraNonce1, data.extraNonce2Size)
         )
       )
-      safeResponse(connection.sendResponse(Announcement.difficulty(BigDecimal.ONE)))
-      data.currentJob.foreach { job =>
-        currentJob = Some(job)
-        safeResponse(connection.sendResponse(Announcement.miningJob(job)))
+      currentJob = currentJob.orElse(data.currentJob)
+      currentJob match {
+        case Some(job)            => announceJob(job)
+        case None if niceHashMode => // its difficulty comes from the first job
+        case None                 => announceDifficulty(BigInteger.ONE)
       }
+
+    // ── extranonce subscribe ──────────────────────────────────────────────
+    case MinerExtranonceSubscribe(requestId) =>
+      extranonceSubscribed = true
+      safeResponse(connection.sendResponse(Response.acknowledge(requestId)))
 
     // ── Stratum authorize ─────────────────────────────────────────────────
     // Always accepts.  Mirrors ErgoConnectionState behaviour.
@@ -166,24 +184,26 @@ class StratumConnection(subscriptionId: String,
       safeResponse(connection.sendResponse(Response.authorize(requestId, true, null)))
 
     // ── Stratum submit ────────────────────────────────────────────────────
-    case MinerSubmit(requestId, workerName, jobId, en2Hex, nTime, en1Hex) =>
-      extraNonce1 match {
+    case MinerSubmit(requestId, params) =>
+      extraNonce1.map(parseSubmit(params, _)) match {
         case None =>
           safeResponse(connection.sendResponse(Response.submit(requestId, null, "25: not subscribed")))
 
-        case Some(_) =>
-          // Truncated to the length WE issued, not a hardcoded 4. The two halves have to add up to
-          // Ergo's 8-byte nonce, so a mismatch here rejects every share the miner sends.
-          val en1Bytes = extraNonce1.map(_.length / 2).getOrElse(4)
+        case Some(Left(reason)) =>
+          logger.warn(s"Malformed mining.submit on connection $connectionId: $reason")
+          safeResponse(connection.sendResponse(Response.submit(requestId, null, s"20: $reason")))
+
+        case Some(Right(share)) =>
+          val jobId = share.jobId
           val shareMsg = ProcessShare(
             jobId      = jobId,
-            difficulty = java.math.BigInteger.ONE,
-            extraNonce1 = util.Arrays.copyOfRange(Hex.decode(en1Hex), 0, en1Bytes),
-            extraNonce2 = Hex.decode(en2Hex),
-            nTime      = nTime,
+            difficulty = BigInteger.ONE,
+            extraNonce1 = share.extraNonce1,
+            extraNonce2 = share.extraNonce2,
+            nTime      = share.nTime,
             ipAddress  = socketAddress.getHostString,
             port       = socketAddress.getPort,
-            workerName = workerName
+            workerName = share.workerName
           )
           // Straight to the job manager, never via LithosPool: that actor blocks its own mailbox on
           // node HTTP every poll, and routing shares through it puts those round trips in front of
@@ -223,6 +243,11 @@ class StratumConnection(subscriptionId: String,
               logger.warn(s"Stale share from ${workerName(requestId)} on connection $connectionId")
               safeResponse(connection.sendResponse(Response.submit(requestId, null, s"$id: $msg")))
 
+            case 22 if !mayRotateExtraNonce =>
+              logger.warn(s"Duplicate share from ${workerName(requestId)} on connection $connectionId, " +
+                "rejected: the miner has not asked for extraNonce1 changes")
+              safeResponse(connection.sendResponse(Response.submit(requestId, null, s"$id: $msg")))
+
             case 22 =>
               // Duplicate nonce: if it's OUR extraNonce1 that caused it, rotate
               // to a fresh one exactly as the Java version does
@@ -257,7 +282,7 @@ class StratumConnection(subscriptionId: String,
         )
       )
       // extraNonce changes don't take effect immediately unless a new job is sent
-      currentJob.foreach(job => safeResponse(connection.sendResponse(Announcement.miningJob(job))))
+      currentJob.foreach(announceJob)
 
       if (requestId.nonEmpty)
         safeResponse(connection.sendResponse(Response.submit(requestId, trueResult, null)))
@@ -268,6 +293,29 @@ class StratumConnection(subscriptionId: String,
   }
 
   // ─── helpers ──────────────────────────────────────────────────────────────
+
+  /** Sends a job, after a mining.set_difficulty when its difficulty differs from the last one sent. */
+  private def announceJob(job: stratum.BlockTemplate): Unit = {
+    announceDifficulty(if (niceHashMode) niceHashDifficulty(job.assignedThreshold) else BigInteger.ONE)
+    safeResponse(connection.sendResponse(Announcement.miningJob(job)))
+  }
+
+  private def announceDifficulty(difficulty: BigInteger): Unit =
+    if (!announcedDifficulty.contains(difficulty)) {
+      announcedDifficulty = Some(difficulty)
+      if (niceHashMode && difficulty.compareTo(NiceHashMinDifficulty) < 0)
+        logger.warn(s"NiceHash mode is announcing share difficulty $difficulty on connection $connectionId, " +
+          s"below NiceHash's Autolykos minimum of $NiceHashMinDifficulty, so NiceHash will refuse this " +
+          "stratum. Turn on stratum.reduceShareMessages, or raise stratum.reductionMultiplier or your " +
+          "difficulty commitment")
+      safeResponse(connection.sendResponse(Announcement.difficulty(new BigDecimal(difficulty))))
+    }
+
+  /**
+   * Whether this miner may be sent mining.set_extranonce. Rigs have always been sent it unasked;
+   * NiceHash mode keeps to the extension's rule that only a client that subscribed to it gets one.
+   */
+  private def mayRotateExtraNonce: Boolean = extranonceSubscribed || !niceHashMode
 
   /** Executes a sendResponse call, logging but not crashing on I/O errors. */
   private def safeResponse(block: => Unit): Unit =
@@ -284,6 +332,51 @@ class StratumConnection(subscriptionId: String,
 }
 
 object StratumConnection {
+
+  /** NiceHash's posted minimum pool difficulty for Autolykos. */
+  val NiceHashMinDifficulty: BigInteger = BigInteger.valueOf(4000000000L)
+
+  private val Two256: BigInteger = BigInteger.ONE.shiftLeft(256)
+
+  /** Length of Ergo's nonce, extraNonce1 and extraNonce2 together. */
+  private val NonceBytes = 8
+
+  /**
+   * A share threshold as NiceHash counts difficulty: expected hashes per share, 2^256 over the target,
+   * rounded up. Miningcore's NiceHash unit divides 0xffff * 2^240 instead, which is smaller, so a target
+   * NiceHash derives back from this under either is never easier than the job's.
+   */
+  private[mining] def niceHashDifficulty(threshold: BigInteger): BigInteger =
+    if (threshold.signum <= 0) BigInteger.ONE
+    else {
+      val Array(quotient, remainder) = Two256.divideAndRemainder(threshold)
+      if (remainder.signum == 0) quotient else quotient.add(BigInteger.ONE)
+    }
+
+  /** What share validation needs from one mining.submit. */
+  private[mining] case class SubmittedShare(workerName: String, jobId: String, extraNonce1: Array[Byte],
+                                            extraNonce2: Array[Byte], nTime: String)
+
+  /**
+   * Reads mining.submit in the layouts mining software sends: [worker, job, extraNonce2, nTime, nonce],
+   * the nonce led by the extraNonce1 it was mined under; [worker, job, extraNonce2, nTime]; and
+   * [worker, job, x], x being the whole nonce or the extraNonce2 alone. Where the nonce is missing or
+   * too short to hold an extraNonce1, the one this connection issued is used. Hex may carry a 0x prefix.
+   */
+  private[mining] def parseSubmit(params: Seq[String], issuedExtraNonce1: String): Either[String, SubmittedShare] =
+    if (params.size < 3) Left(s"mining.submit needs at least 3 params, got ${params.size}")
+    else Try {
+      val issued = Hex.decode(issuedExtraNonce1)
+      val third  = Hex.decode(params(2).stripPrefix("0x"))
+      val (en1, en2) =
+        if (params.size == 3 && third.length == NonceBytes) third.splitAt(issued.length)
+        else if (params.size >= 5) {
+          val nonce = Hex.decode(params(4).stripPrefix("0x"))
+          (if (nonce.length >= issued.length) nonce.take(issued.length) else issued, third)
+        }
+        else (issued, third)
+      SubmittedShare(params(0), params(1), en1, en2, if (params.size > 3) params(3) else "")
+    }.toEither.left.map(_ => "mining.submit nonce fields are not hex")
 
   // ─── internal async messages (never appear in MiningMessages) ─────────────
 
