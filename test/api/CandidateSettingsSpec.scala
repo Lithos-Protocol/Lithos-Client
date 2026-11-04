@@ -13,10 +13,11 @@ class CandidateSettingsSpec extends AnyFlatSpec with Matchers {
   private def withOverrides(overrides: String): Configuration =
     Configuration(ConfigFactory.parseString(overrides).withFallback(shipped.underlying).resolve())
 
-  "Candidate settings" should "report the shipped config, with every enabled source active" in {
+  "Candidate settings" should "report the shipped config, every enabled source active but arb, which ships off" in {
     val settings = CandidateSettings.from(shipped)
     settings.blockTransactions shouldBe true
-    settings.sources.map(_.name) shouldBe Seq("rollups", "emissions", "rent", "forwards", "lithosdex", "ergodex")
+    settings.sources.map(_.name) shouldBe Seq("rollups", "emissions", "rent", "forwards", "lithosdex", "ergodex", "arb")
+    // The arb source ships enabled, but batching.arb ships off, so nothing asks it
     settings.sources.filter(_.active).map(_.name) shouldBe Seq("rollups", "emissions", "rent", "forwards", "lithosdex", "ergodex")
     settings.mempoolRefreshMs shouldBe 20000
     settings.cacheRefreshMs shouldBe 30000
@@ -29,7 +30,8 @@ class CandidateSettingsSpec extends AnyFlatSpec with Matchers {
     val settings = CandidateSettings.from(withOverrides("stratum.candidate.blockTransactions = false"))
     settings.sources.exists(_.active) shouldBe false
     // Enabled is the source's own setting, reported even while nothing asks it.
-    settings.sources.filter(_.enabled).map(_.name) shouldBe Seq("rollups", "emissions", "rent", "forwards", "lithosdex", "ergodex")
+    settings.sources.filter(_.enabled).map(_.name) shouldBe
+      Seq("rollups", "emissions", "rent", "forwards", "lithosdex", "ergodex", "arb")
   }
 
   it should "mark a source active only when it would be asked" in {
@@ -40,6 +42,7 @@ class CandidateSettingsSpec extends AnyFlatSpec with Matchers {
         |batching.ergodex.enabled = false
         |stratum.candidate.sources.emissions.maxTxs = 0
         |batching.forwards.enabled = false
+        |batching.arb.enabled = true
         |""".stripMargin))
     settings.sources.map(s => s.name -> s.active).toMap shouldBe Map(
       "rollups" -> true,
@@ -50,7 +53,14 @@ class CandidateSettingsSpec extends AnyFlatSpec with Matchers {
       "forwards" -> false,
       "lithosdex" -> true,
       // Enabled as a source, but its batcher is off, so nothing would answer.
-      "ergodex" -> false)
+      "ergodex" -> false,
+      // Served by batching.arb, which is on here
+      "arb" -> true)
+
+    CandidateSettings.from(withOverrides(
+      """batching.arb.enabled = true
+        |stratum.candidate.sources.arb.enabled = false
+        |""".stripMargin)).sources.find(_.name == "arb").map(_.active) shouldBe Some(false)
   }
 
   it should "serialise under the config key names" in {

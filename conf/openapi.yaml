@@ -5204,7 +5204,7 @@ components:
         | `lithos.priorityFeeNanoErg` | Priority fees carried by the collateral boxes those blocks spent. |
         | `lithos.blocksWithPriorityFee` | How many of those blocks carried a fee at all. |
         | `collateral.<path>.*` | Lender cost and return by how the spent box was taken, `bid` or `clearance`: `boxes`, `priorityFeeNanoErg`, `costNanoErg`, `receivedNanoErg`, `waitBlocks`, and `capitalNanoErgBlocks`, the queue box's value times the blocks it stayed locked. `/stats/collateral` turns these into rates. |
-        | `batching.<protocol>.*` | Executor fees earned filling `ergodex` or `lithosdex` orders, and builder takings from `forwards` recordings and settlements. |
+        | `batching.<protocol>.*` | Executor fees earned filling `ergodex` or `lithosdex` orders, builder takings from `forwards` recordings and settlements, and `arb` cycle profit. |
         | `batching.<protocol>.tokens.<tokenId>`, `.otherTokens` | Tokens executors kept, by verified token id; `otherTokens` counts the times an unlisted token was kept, never its amount. |
         | `lithos.batching.<protocol>.*` | The same, counting only blocks that carried a Lithos genesis. |
         | `pool.batching.<protocol>.orders`, `.grossNanoErg` | Fee-less executions inside Lithos blocks. Their takings top up the rollup, so they reach miners through payouts. |
@@ -5229,6 +5229,10 @@ components:
         is `afterTransactionFeesNanoErg - feeAboveGrossNanoErg`. Token keys are named only for tokens
         on the verified list when the execution was recorded; `tokens` in the response names each one.
 
+        For `arb`, `orders` counts cycles and gross is the ERG a cycle returned above its stake. A cycle
+        runs only in its own miner's block with no fee, so in a Lithos block it is counted in
+        `pool.batching.arb`.
+
         **Rollup families** hold `count`, `miners`, `claimedScore`, `bondNanoErg` and `valueNanoErg`,
         plus `localCount`, `localValueNanoErg`, `localBondNanoErg` and `localClaimedScore` where the
         local miner is identifiable — the submitting miner for submissions, the prover input for fraud
@@ -5240,8 +5244,8 @@ components:
         These are stages of the same funds, so summing them is not income.
 
         `transaction.<kind>` covers `genesis`, the rollup kinds above, `payout`, `registration`,
-        `ergodex`, `lithosdex`, `forwards`, `ergodexOtherPoolSpend` and `lithosdexOtherPoolSpend`. Those fees
-        overlap the block fee totals.
+        `ergodex`, `lithosdex`, `forwards`, `arb` (each leg of a cycle), `ergodexOtherPoolSpend` and
+        `lithosdexOtherPoolSpend`. Those fees overlap the block fee totals.
 
         **Priority fees.** `lithos.priorityFeeNanoErg / lithos.blocks` is the mean fee across every
         Lithos block; divide by `lithos.blocksWithPriorityFee` instead for the mean across the blocks
@@ -6876,7 +6880,7 @@ components:
       properties:
         name:
           type: string
-          enum: [rollups, emissions, rent, forwards, lithosdex, ergodex]
+          enum: [rollups, emissions, rent, forwards, lithosdex, ergodex, arb]
         enabled:
           type: boolean
           description: The source's own `enabled` setting.
@@ -6884,8 +6888,8 @@ components:
           type: boolean
           description: >-
             Whether candidates ask this source for transactions: `blockTransactions` is on, the
-            source is enabled with `maxTxs` above 0 and, for `forwards`, `lithosdex` and `ergodex`, the
-            matching `batching` block is enabled.
+            source is enabled with `maxTxs` above 0 and, for `forwards`, `lithosdex`, `ergodex` and `arb`,
+            the matching `batching` block is enabled.
         maxTxs:
           type: integer
           description: Transactions this source may place in one block, carried ancestors included.

@@ -1,12 +1,12 @@
 package api.models
 
-import configs.{BatchingConfig, CandidateConfig, CandidateSourceConfig}
+import configs.{ArbConfig, BatchingConfig, CandidateConfig, CandidateSourceConfig}
 import play.api.Configuration
 import play.api.libs.json._
 
 /**
  * One `stratum.candidate.sources` entry. `active` is whether candidates actually ask this source:
- * block transactions are on, the source is enabled with at least one slot and, for a batcher, its
+ * block transactions are on, the source is enabled with at least one slot and, for a batcher or arb, its
  * `batching` block is enabled too.
  */
 case class CandidateSourceSettings(name: String, enabled: Boolean, active: Boolean, maxTxs: Int,
@@ -42,7 +42,7 @@ object CandidateSettings {
   /** In the order the stratum asks them, which is the order their work takes block slots. */
   private val SourceOrder: Seq[String] = Seq(CandidateSourceConfig.Rollups, CandidateSourceConfig.Emissions,
     CandidateSourceConfig.Rent, CandidateSourceConfig.Forwards, CandidateSourceConfig.LithosDex,
-    CandidateSourceConfig.ErgoDex)
+    CandidateSourceConfig.ErgoDex, CandidateSourceConfig.Arb)
 
   /** Sources served by a batcher, which also needs its own `batching` block enabled. */
   private val Batchers: Set[String] = Set(CandidateSourceConfig.Forwards, CandidateSourceConfig.LithosDex,
@@ -51,7 +51,9 @@ object CandidateSettings {
   def from(config: Configuration): CandidateSettings = {
     val candidate = CandidateConfig(config)
     val sources = SourceOrder.flatMap(name => candidate.sources.get(name).map { source =>
-      val served = !Batchers.contains(name) || BatchingConfig(config, name).enabled
+      // The arb stage is served by `batching.arb`, which has its own config rather than a batcher's
+      val served = if (name == CandidateSourceConfig.Arb) ArbConfig(config).enabled
+        else !Batchers.contains(name) || BatchingConfig(config, name).enabled
       CandidateSourceSettings(name, source.enabled,
         candidate.blockTransactions && source.enabled && source.maxTxs > 0 && served,
         source.maxTxs, source.maxBytes, source.maxCost)
