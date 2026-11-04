@@ -344,6 +344,7 @@ object Configs {
       "nanoERG held as the arb stake")
     v.longRange("batching.arb.minProfitNanoErg", v.long("batching.arb.minProfitNanoErg"), 0L, 1000000000000L,
       "nanoERG of profit a cycle must leave")
+    v.bool("batching.arb.autoReserve")
 
     // ---- emission ----
     v.bool("emission.enabled")

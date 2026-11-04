@@ -9,8 +9,10 @@ import play.api.{ConfigLoader, Configuration}
  * @param enabled          whether the arb stage runs at all. Off, no arb code runs and no stake is held
  * @param stakeNanoErg     the least ERG the stake box holds, and the most one cycle can put in
  * @param minProfitNanoErg the least profit a cycle must leave to be built
+ * @param autoReserve      with no wallet box free to hold the stake, merge plain boxes into one, given twice the
+ *                         stake in confirmed plain boxes
  */
-case class ArbConfig(enabled: Boolean, stakeNanoErg: Long, minProfitNanoErg: Long)
+case class ArbConfig(enabled: Boolean, stakeNanoErg: Long, minProfitNanoErg: Long, autoReserve: Boolean = true)
 
 object ArbConfig {
 
@@ -18,7 +20,8 @@ object ArbConfig {
   final val Name: String = CandidateSourceConfig.Arb
 
   /** Mirrors `batching.arb` in application.conf; keep the two in step. */
-  val Default: ArbConfig = ArbConfig(enabled = false, stakeNanoErg = 10000000000L, minProfitNanoErg = 1000000L)
+  val Default: ArbConfig =
+    ArbConfig(enabled = true, stakeNanoErg = 10000000000L, minProfitNanoErg = 1000000L, autoReserve = true)
 
   def apply(config: Configuration): ArbConfig = {
     def path(key: String): String = s"batching.$Name.$key"
@@ -26,7 +29,8 @@ object ArbConfig {
       enabled = config.getOptional(path("enabled"))(ConfigLoader.booleanLoader).getOrElse(Default.enabled),
       stakeNanoErg = config.getOptional(path("stakeNanoErg"))(ConfigLoader.longLoader).getOrElse(Default.stakeNanoErg),
       minProfitNanoErg =
-        config.getOptional(path("minProfitNanoErg"))(ConfigLoader.longLoader).getOrElse(Default.minProfitNanoErg))
+        config.getOptional(path("minProfitNanoErg"))(ConfigLoader.longLoader).getOrElse(Default.minProfitNanoErg),
+      autoReserve = config.getOptional(path("autoReserve"))(ConfigLoader.booleanLoader).getOrElse(Default.autoReserve))
   }
 
   /**

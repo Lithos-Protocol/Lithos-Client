@@ -328,6 +328,16 @@ class EngineWalletState @Inject()(nodeContext: NodeContext,
       }
     }
 
+  /**
+   * Whether arb wants a stake and the wallet's last look found no box to hold: none held, none on its way from a
+   * cycle, no proposal out. What `batching.arb.autoReserve` acts on.
+   */
+  protected def stakeShort: Boolean =
+    arbStakeNanoErg > 0L && stake.isEmpty && pendingStakes.isEmpty && !stakeSelecting && warnedNoStake
+
+  /** Pinnable boxes the fraud-proof pins still lack, which the stake's candidates leave to them. */
+  protected def missingPinShare: Int = math.max(0, pinnedInputs - pinnedIds.size)
+
   private def warnNoStake(): Unit =
     if (!warnedNoStake) {
       warnedNoStake = true

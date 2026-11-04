@@ -57,20 +57,21 @@ object CandidateConfig {
       CandidateSourceConfig.Rollups -> CandidateSourceConfig.Default,
       // Room for a run of Clears; Activates alone stop at `emission.candidateActivates`.
       CandidateSourceConfig.Emissions -> CandidateSourceConfig.Default.copy(maxTxs = 20),
-      // Two transactions: one sweep, and the merge folding its proceeds outputs into one box. Twice the
+      // Each collection is two transactions: one sweep, and the merge folding its proceeds into one box. Twice the
       // usual cost, because a claim with its own proceeds output also pays for a signed merge input.
       CandidateSourceConfig.Rent ->
-        CandidateSourceConfig.Default.copy(enabled = true, maxTxs = 2, maxCost = 2000000L),
+        CandidateSourceConfig.Default.copy(enabled = true, maxTxs = 8, maxCost = 2000000L),
       // The slots include placement ancestors and executions.
-      CandidateSourceConfig.ErgoDex -> CandidateSourceConfig.Default.copy(maxTxs = 20),
+      CandidateSourceConfig.ErgoDex -> CandidateSourceConfig.Default.copy(maxTxs = 40),
       // On by default: LithosDex is the protocol's own DEX. Slots include placements and the flush.
-      CandidateSourceConfig.LithosDex -> CandidateSourceConfig.Default.copy(enabled = true, maxTxs = 20),
+      CandidateSourceConfig.LithosDex -> CandidateSourceConfig.Default.copy(enabled = true, maxTxs = 40),
       // On by default: recording difficulty keeps the protocol's forwards settleable. One recording and the
       // settlements chained after it.
       CandidateSourceConfig.Forwards -> CandidateSourceConfig.Default.copy(enabled = true, maxTxs = 10),
-      // Asked only while `batching.arb.enabled`, after the DEX batchers. Every leg of a cycle takes a slot.
-      CandidateSourceConfig.Arb -> CandidateSourceConfig.Default.copy(enabled = true, maxTxs = 8)),
-    blockShare = 0.5,
+      // Asked only while `batching.arb.enabled`, after the DEX batchers. Every leg of a cycle takes a slot, and
+      // 80 legs of the costliest pool kind fit the cost.
+      CandidateSourceConfig.Arb -> CandidateSourceConfig.Default.copy(enabled = true, maxTxs = 80, maxCost = 2000000L)),
+    blockShare = 0.75,
     useTruePropCollection = false,
     genesisWaitMs = 1500,
     mempoolRefreshMs = 20000,

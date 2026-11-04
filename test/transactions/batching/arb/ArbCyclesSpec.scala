@@ -188,7 +188,7 @@ class ArbCyclesSpec extends AnyFlatSpec with Matchers with MockitoSugar {
     }
   }
 
-  "The shipped arb budget" should "hold eight legs of the costliest kind" in {
+  "The shipped arb budget" should "hold a leg of the costliest kind in every slot" in {
     nodeContext.getClient.execute { ctx =>
       val a = nativePool(ctx, id(4), id(104), 1000 * Erg, 1000000000000L)
       val aRsn = tokenPool(ctx, id(5), id(104), Rsn, 10000000000000L, 100000L)
