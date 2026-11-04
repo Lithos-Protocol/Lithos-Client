@@ -2,7 +2,7 @@ package transactions.candidate
 
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
-import transactions.candidate.BlockTxMessages.{CandidateTx, ChainFromMempool, IncludeExisting, Supersede}
+import transactions.candidate.BlockTxMessages.{CandidateTx, ChainFromMempool, ChainFromPackage, IncludeExisting, Supersede}
 
 class CandidateBundleSpec extends AnyFlatSpec with Matchers {
   private def tx(id: String) = CandidateTx(id, id, CandidateTx.Activate)
@@ -225,5 +225,41 @@ class CandidateBundleSpec extends AnyFlatSpec with Matchers {
       CandidateBudget(Long.MaxValue, 1)).head
     refusal.label shouldBe s"${CandidateTx.Activate}:aabbccdd"
     refusal.toString should startWith(s"[${refusal.label}] ")
+  }
+
+  /**
+   * A bundle that spends an output of another bundle's transaction is only valid in a block that carries
+   * that transaction ahead of it. Without the rule, dropping the parent bundle kept the child, and the node
+   * refused every inserted transaction over the missing input.
+   */
+  "A bundle building on another bundle's transaction" should "be admitted once that transaction is" in {
+    val parent = tx("pool-run").copy(inputIds = Set("pool-0"))
+    val cycle = CandidateBundle(Vector(tx("leg").copy(inputIds = Set("pool-1"))), Seq(ChainFromPackage("pool-run")))
+    CandidateBundle.select(Seq(CandidateBundle(Vector(parent)), cycle), 5) shouldBe Vector(parent, cycle.members.head)
+  }
+
+  it should "be refused, alone, when that transaction was not admitted ahead of it" in {
+    val parent = tx("pool-run").copy(inputIds = Set("pool-0"))
+    val other = tx("other").copy(inputIds = Set("box-9"))
+    val cycle = CandidateBundle(Vector(tx("leg").copy(inputIds = Set("pool-1"))), Seq(ChainFromPackage("pool-run")))
+    // The parent bundle does not fit, so the cycle building on it must go too
+    val (kept, txs, refused) = CandidateBundle.admit(
+      Seq(CandidateBundle(Vector(tx("filler"), parent)), CandidateBundle(Vector(other)), cycle), 1)
+    txs shouldBe Vector(other)
+    kept.map(_.members.head.id) shouldBe Vector("other")
+    refused.map(_.reason) shouldBe Vector("2 transactions into 1 free slot(s)",
+      "a package transaction it builds on was not admitted")
+    // Offered ahead of its parent, it is refused too
+    CandidateBundle.select(Seq(cycle, CandidateBundle(Vector(parent))), 5) shouldBe Vector(parent)
+  }
+
+  it should "count a parent that travels in the bundle, or that the caller says is already admitted" in {
+    val parent = tx("pool-run").copy(inputIds = Set("pool-0"))
+    val leg = tx("leg").copy(inputIds = Set("pool-1"))
+    CandidateBundle.select(Seq(CandidateBundle(Vector(parent, leg), Seq(ChainFromPackage("pool-run")))), 5) shouldBe
+      Vector(parent, leg)
+    val alone = CandidateBundle(Vector(leg), Seq(ChainFromPackage("pool-run")))
+    CandidateBundle.admit(Seq(alone), 5, packageTxs = Set("pool-run"))._2 shouldBe Vector(leg)
+    CandidateBundle.admit(Seq(alone), 5)._2 shouldBe empty
   }
 }

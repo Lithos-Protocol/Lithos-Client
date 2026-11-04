@@ -1,6 +1,6 @@
 package transactions.candidate
 
-import transactions.candidate.BlockTxMessages.{CandidateTx, ChainFromMempool, MempoolInteraction}
+import transactions.candidate.BlockTxMessages.{CandidateTx, ChainFromMempool, ChainFromPackage, MempoolInteraction}
 
 /**
  * Members are admitted together locally, in dependency order supplied by their builder.
@@ -26,6 +26,9 @@ final case class CandidateBundle(members: Vector[CandidateTx],
       case _ => true
     }
   }
+
+  /** Transactions of other bundles this one builds on, which must be admitted ahead of it. */
+  def packageParents: Seq[String] = interactions.collect { case ChainFromPackage(parentTxId) => parentTxId }
 }
 
 /**
@@ -58,9 +61,10 @@ object CandidateBundle {
    * Choose bundles for one candidate package, in the order they are offered.
    *
    * Shared members consume one slot, and a bundle that cannot fit contributes nothing rather than a
-   * partial prefix. Four things disqualify one: a member whose body disagrees with a copy already
-   * selected, a box already claimed by the package, a declared mempool parent it does not carry, and
-   * exceeding the count or either budget dimension. Two sources spending the same box is a double
+   * partial prefix. Five things disqualify one: a member whose body disagrees with a copy already
+   * selected, a box already claimed by the package, a declared mempool parent it does not carry, a
+   * package transaction it builds on that was not admitted ahead of it, and exceeding the count or
+   * either budget dimension. Two sources spending the same box is a double
    * spend the node would refuse the whole candidate over, and sources build independently, so none
    * of them can see the conflict itself.
    */
@@ -74,12 +78,17 @@ object CandidateBundle {
    * bounded by the bundles kept here before the package is bounded as a whole, so a bundle has to
    * survive both passes intact.
    */
+  /**
+   * @param packageTxs transactions already admitted outside `bundles`, which a bundle may build on: a source's
+   *                   allowance is checked before the package it builds on is assembled
+   */
   def admit(bundles: Seq[CandidateBundle], limit: Int,
-            budget: CandidateBudget = CandidateBudget.Unbounded)
+            budget: CandidateBudget = CandidateBudget.Unbounded, packageTxs: Set[String] = Set.empty)
   : (Vector[CandidateBundle], Vector[CandidateTx], Vector[CandidateRefusal]) =
-    admitted(bundles, limit, budget)
+    admitted(bundles, limit, budget, packageTxs)
 
-  private def admitted(bundles: Seq[CandidateBundle], limit: Int, budget: CandidateBudget)
+  private def admitted(bundles: Seq[CandidateBundle], limit: Int, budget: CandidateBudget,
+                       packageTxs: Set[String] = Set.empty)
   : (Vector[CandidateBundle], Vector[CandidateTx], Vector[CandidateRefusal]) = {
     var keptBundles = Vector.empty[CandidateBundle]
     var selected = Vector.empty[CandidateTx]
@@ -101,7 +110,9 @@ object CandidateBundle {
         addedInputs.distinct.size == addedInputs.size
       val affordable = additions.size <= slots &&
         bytes + addedBytes <= budget.maxBytes && cost + addedCost <= budget.maxCost
-      if (consistent && unconflicted && affordable && bundle.carriesItsParents) {
+      val parentsAdmitted = bundle.packageParents.forall(parent =>
+        byId.contains(parent) || packageTxs.contains(parent) || bundle.members.exists(_.id == parent))
+      if (consistent && unconflicted && affordable && bundle.carriesItsParents && parentsAdmitted) {
         keptBundles :+= bundle
         selected ++= additions
         byId ++= additions.map(tx => tx.id -> tx)
@@ -114,6 +125,7 @@ object CandidateBundle {
           if (!consistent) "a member disagrees with a copy already selected"
           else if (!unconflicted) "an input is already claimed by this package"
           else if (!bundle.carriesItsParents) "a declared mempool parent does not travel with it"
+          else if (!parentsAdmitted) "a package transaction it builds on was not admitted"
           else if (additions.size > slots) s"${additions.size} transactions into $slots free slot(s)"
           else if (bytes + addedBytes > budget.maxBytes)
             s"$addedBytes bytes over the ${budget.maxBytes - bytes} left in the package"

@@ -30,6 +30,12 @@ object BlockTxMessages {
    */
   final case class Supersede(conflicting: Set[String]) extends MempoolInteraction
 
+  /**
+   * Spend an output of `parentTxId`, a transaction another source's bundle earlier in this package carries.
+   * Admitted only once that transaction is: a block carrying this bundle without it is invalid.
+   */
+  final case class ChainFromPackage(parentTxId: String) extends MempoolInteraction
+
   object CandidateTx {
     final val Genesis = "genesis"
     final val NispSubmission = "nisp-submission"
@@ -116,6 +122,13 @@ object BlockTxMessages {
 
   /** Collects source offers. Refresh rebuilds mempool-dependent work while preserving height-held wallet funding. */
   case class RequestBlockTxs(blockHeight: Int, limit: Int, refresh: Boolean = false)
+
+  /**
+   * Asks the arb stage for its bundles, built on `basis`: the bundles the ErgoDEX and LithosDex batchers had
+   * admitted for this round. The stage takes pools at the successors those bundles leave, never spends a box
+   * they spend, and answers with [[BlockTxsReady]].
+   */
+  case class RequestArbTxs(blockHeight: Int, limit: Int, refresh: Boolean, basis: Seq[CandidateBundle])
 
   /**
    * A source's answer, in the order the node must apply it — any unconfirmed ancestor before

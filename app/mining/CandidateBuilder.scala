@@ -12,7 +12,7 @@ import node.NodeApi
 import org.ergoplatform.appkit.ErgoClient
 import org.slf4j.{Logger, LoggerFactory}
 import stratum.{CollateralData, CollateralNotFoundException}
-import transactions.candidate.BlockTxMessages.{BlockTxsReady, CandidateTx, CandidateTxsDropped, PrepareBlockTxs, RequestBlockTxs}
+import transactions.candidate.BlockTxMessages.{BlockTxsReady, CandidateTx, CandidateTxsDropped, PrepareBlockTxs, RequestArbTxs, RequestBlockTxs}
 import transactions.candidate.{CandidateBudget, CandidateBundle, CandidateCapital, CandidateRefusal}
 import java.util.UUID
 
@@ -50,12 +50,27 @@ class CandidateBuilder(client: ErgoClient,
 
   private def limitsFor(name: String): configs.CandidateSourceConfig = config.limitsFor(name)
 
-  /** Sources this client will actually ask. A disabled one costs no build and no node read. */
-  private val enabledSources: Seq[MiningMessages.CandidateSource] =
+  /** Every source this client will actually ask. A disabled one costs no build and no node read. */
+  private val askedSources: Seq[MiningMessages.CandidateSource] =
     txSources.filter(source => limitsFor(source.name).enabled && limitsFor(source.name).maxTxs > 0)
 
-  /** The package cannot hold more than every enabled source is allowed between them. */
-  private val totalTxLimit: Int = enabledSources.map(source => limitsFor(source.name).maxTxs).sum
+  /**
+   * The arb stage, when this client runs one. It is asked only once the DEX batchers have answered, builds on
+   * what they admitted, and is admitted after every other source, so it can only ever cost itself a bundle.
+   */
+  private val arbStage: Option[MiningMessages.CandidateSource] =
+    askedSources.find(_.name == configs.CandidateSourceConfig.Arb)
+
+  /** The sources asked at the start of every round: all but the arb stage. */
+  private val enabledSources: Seq[MiningMessages.CandidateSource] =
+    askedSources.filterNot(_.name == configs.CandidateSourceConfig.Arb)
+
+  /** Where in `enabledSources` the batchers sit whose admitted bundles the arb stage builds on. */
+  private val arbBasisIndices: Seq[Int] =
+    enabledSources.indices.filter(i => ArbBasisSources.contains(enabledSources(i).name))
+
+  /** The package cannot hold more than every asked source is allowed between them. */
+  private val totalTxLimit: Int = askedSources.map(source => limitsFor(source.name).maxTxs).sum
 
   /** Overridable so a test can drive the actor's selection rules without signing real transactions. */
   protected val txBuilder: CandidateTxBuilder = new CandidateTxBuilder(prover, nodeApi, config)
@@ -94,7 +109,14 @@ class CandidateBuilder(client: ErgoClient,
     val answers: Array[Option[Seq[CandidateBundle]]] = Array.fill(enabledSources.size)(None)
     var waitingOn: Int = enabledSources.size
     var assembling: Boolean = false
+    /** The arb stage's admitted bundles once it answers, and whether it has been asked this round. */
+    var arbAnswer: Option[Seq[CandidateBundle]] = None
+    var arbAsked: Boolean = false
   }
+
+  /** Every source asked has answered, the arb stage included when this client runs one. */
+  private def complete(round: Collection): Boolean =
+    round.waitingOn == 0 && (arbStage.isEmpty || round.arbAnswer.nonEmpty)
 
   private var collectingFor: Option[Collection] = None
 
@@ -136,7 +158,7 @@ class CandidateBuilder(client: ErgoClient,
   override def preStart(): Unit = {
     logger.info(s"CandidateBuilder started: collateralPoolSize=${config.collateralPoolSize}, " +
       s"blockTransactions=${config.blockTransactions}, sources=[" +
-      enabledSources.map(s => s"${s.name}:${limitsFor(s.name).maxTxs}").mkString(", ") + "]")
+      askedSources.map(s => s"${s.name}:${limitsFor(s.name).maxTxs}").mkString(", ") + "]")
 
     // Warms both the collateral set and the compiled contract cache before the first block.
     startRefresh()
@@ -234,7 +256,7 @@ class CandidateBuilder(client: ErgoClient,
 
     case RefreshBlockPackage(identity) =>
       currentPackage.filter(_.identity.sameGenesis(identity)).foreach { pkg =>
-        if (config.blockTransactions && enabledSources.nonEmpty && !blockTxsBlockedAt.contains(blockHeight))
+        if (config.blockTransactions && askedSources.nonEmpty && !blockTxsBlockedAt.contains(blockHeight))
           collectBlockTxs(blockHeight, refresh = true)
         else context.parent ! BlockPackageReady(pkg, refreshed = true)
       }
@@ -291,7 +313,19 @@ class CandidateBuilder(client: ErgoClient,
             round.answers(index) = Some(bundles)
             round.waitingOn -= 1
           }
-          if (round.waitingOn == 0) assemble(round)
+          if (arbStage.nonEmpty && !round.arbAsked && arbBasisIndices.forall(i => round.answers(i).nonEmpty))
+            askArb(round)
+          if (complete(round)) assemble(round)
+        }
+      }
+
+    // Held to the same source deadline as every other answer.
+    case ArbAnswered(attempt, bundles) =>
+      waitingRound(attempt).foreach { round =>
+        if (nowNanos() - attempt.startedAt >= sourceDeadlineNanos) stopWaiting(round)
+        else {
+          if (round.arbAnswer.isEmpty) round.arbAnswer = Some(bundles)
+          if (complete(round)) assemble(round)
         }
       }
 
@@ -374,7 +408,7 @@ class CandidateBuilder(client: ErgoClient,
    * request for a rebuild, so the second ends nothing the rebuild has taken.
    */
   private def dropCandidates(height: Int, rebuilding: Boolean = false): Unit =
-    enabledSources.foreach(_.ref ! CandidateTxsDropped(height, rebuilding))
+    askedSources.foreach(_.ref ! CandidateTxsDropped(height, rebuilding))
 
   private def expireCollection(attempt: CollectionAttempt): Unit = {
     collectingFor = None
@@ -461,7 +495,7 @@ class CandidateBuilder(client: ErgoClient,
   /** Starts enabled sources alongside genesis construction. */
   private def prepareBlockTxs(height: Int): Unit =
     if (config.blockTransactions)
-      enabledSources.foreach(source =>
+      askedSources.foreach(source =>
         source.ref ! PrepareBlockTxs(height, limitsFor(source.name).maxTxs))
 
   /** Reports bundles rejected by source or package admission. */
@@ -475,11 +509,12 @@ class CandidateBuilder(client: ErgoClient,
    * round assembles once all have answered or the source deadline passes, whichever is first.
    */
   private def collectBlockTxs(height: Int, refresh: Boolean = false): Unit =
-    if (collectingFor.isEmpty && enabledSources.nonEmpty && totalTxLimit > 0) {
+    if (collectingFor.isEmpty && askedSources.nonEmpty && totalTxLimit > 0) {
       val attempt = CollectionAttempt(UUID.randomUUID(), height,
         currentPackage.get.collateral.txId, nowNanos(), refresh)
       // Started with the round so assembly does not wait on it
-      collectingFor = Some(new Collection(attempt, readBudgets(height)))
+      val round = new Collection(attempt, readBudgets(height))
+      collectingFor = Some(round)
       collectStartedAt = System.nanoTime()
       context.system.scheduler.scheduleOnce(
         sourceDeadlineMs.milliseconds, self, SourcesDue(attempt))(context.dispatcher)
@@ -510,6 +545,39 @@ class CandidateBuilder(client: ErgoClient,
           }
           .foreach(bundles => self ! SourceAnswered(attempt, index, bundles))
       }
+      // With no DEX batcher asked there is nothing to wait for
+      if (arbStage.nonEmpty && arbBasisIndices.isEmpty) askArb(round)
+    }
+
+  /**
+   * Asks the arb stage for its allowance, built on the bundles the DEX batchers answered this round. Its own
+   * allowance is checked with those batchers' transactions taken as admitted, since its cycles build on them;
+   * package admission then refuses a cycle whose batcher bundle did not make the package.
+   */
+  private def askArb(round: Collection): Unit =
+    arbStage.foreach { stage =>
+      round.arbAsked = true
+      val attempt = round.attempt
+      val basis = arbBasisIndices.flatMap(i => round.answers(i).getOrElse(Seq.empty))
+      val basisTxs = basis.iterator.flatMap(_.members.iterator.map(_.id)).toSet
+      val limits = limitsFor(stage.name)
+      (stage.ref ? RequestArbTxs(attempt.height, limits.maxTxs, attempt.refresh, basis))
+        .mapTo[BlockTxsReady]
+        .map { reply =>
+          if (reply.blockHeight != attempt.height) Seq.empty[CandidateBundle]
+          else {
+            val (fitted, _, refused) = CandidateBundle.admit(reply.bundles, limits.maxTxs, limits.budget, basisTxs)
+            logRefusals(s"${stage.name} allowance", attempt.height, refused)
+            fitted
+          }
+        }
+        .recover {
+          case _: AskTimeoutException => Seq.empty[CandidateBundle]
+          case ex =>
+            logger.warn(s"Transaction source ${stage.name} failed for block ${attempt.height}: ${ex.getMessage}")
+            Seq.empty[CandidateBundle]
+        }
+        .foreach(bundles => self ! ArbAnswered(attempt, bundles))
     }
 
   /**
@@ -518,10 +586,13 @@ class CandidateBuilder(client: ErgoClient,
    */
   private def stopWaiting(round: Collection): Unit = {
     val attempt = round.attempt
-    val (answered, late) = enabledSources.indices.partition(i => round.answers(i).nonEmpty)
-    val summary = s"${late.map(i => enabledSources(i).name).mkString(", ")} did not answer within " +
+    val (answeredAt, lateAt) = enabledSources.indices.partition(i => round.answers(i).nonEmpty)
+    val (arbAnswered, arbLate) = arbStage.map(_.name).toSeq.partition(_ => round.arbAnswer.nonEmpty)
+    val answered = answeredAt.map(i => enabledSources(i).name) ++ arbAnswered
+    val late = lateAt.map(i => enabledSources(i).name) ++ arbLate
+    val summary = s"${late.mkString(", ")} did not answer within " +
       s"${sourceDeadlineMs}ms (answered: " +
-      s"${if (answered.isEmpty) "none" else answered.map(i => enabledSources(i).name).mkString(", ")})"
+      s"${if (answered.isEmpty) "none" else answered.mkString(", ")})"
     if (attempt.refresh) logger.warn(s"Package refresh for block ${attempt.height}: $summary")
     else logger.error(s"Block ${attempt.height}: $summary; building the package without them")
     assemble(round)
@@ -536,6 +607,8 @@ class CandidateBuilder(client: ErgoClient,
     val retry = new Collection(attempt, round.budgets)
     round.answers.indices.foreach(i => retry.answers(i) = round.answers(i))
     retry.waitingOn = 0
+    retry.arbAnswer = round.arbAnswer
+    retry.arbAsked = true
     collectingFor = Some(retry)
     collectStartedAt = System.nanoTime()
     context.system.scheduler.scheduleOnce(
@@ -551,14 +624,18 @@ class CandidateBuilder(client: ErgoClient,
     val height = attempt.height
     // A bundle goes whole, since its later members spend its earlier ones' outputs.
     val excluded = if (leftOutAt == height) leftOut else Set.empty[String]
-    val offered = enabledSources.indices.flatMap(i => round.answers(i).map { bundles =>
+    def withoutLeftOut(name: String, bundles: Seq[CandidateBundle]): (String, Seq[CandidateBundle]) = {
       val (dropped, kept) = bundles.partition(_.members.exists(tx => excluded.contains(tx.id)))
       if (dropped.nonEmpty)
-        logger.info(s"Leaving ${dropped.size} ${enabledSources(i).name} bundle(s) out of block $height: " +
+        logger.info(s"Leaving ${dropped.size} $name bundle(s) out of block $height: " +
           "the node left one of their transactions out")
-      enabledSources(i).name -> kept
-    })
-    val late = enabledSources.indices.filter(i => round.answers(i).isEmpty).map(i => enabledSources(i).name).toSet
+      name -> kept
+    }
+    // The arb stage last, so a cycle is admitted only after the batcher bundle it builds on
+    val offered = enabledSources.indices.flatMap(i => round.answers(i).map(withoutLeftOut(enabledSources(i).name, _))) ++
+      arbStage.flatMap(stage => round.arbAnswer.map(withoutLeftOut(stage.name, _)))
+    val late = (enabledSources.indices.filter(i => round.answers(i).isEmpty).map(i => enabledSources(i).name) ++
+      arbStage.filter(_ => round.arbAnswer.isEmpty).map(_.name)).toSet
     // Charge the signed genesis bytes and cost before admitting source bundles.
     val genesis = currentPackage.map(_.collateral)
     val genesisBytes = genesis.map(_.signedSizeBytes.toLong).getOrElse(0L)
@@ -713,6 +790,10 @@ object CandidateBuilder {
   /** Number of blocks to exclude a spent collateral box still reported by the indexer. */
   private[mining] final val SpentMemoryBlocks: Int = 3
 
+  /** The batchers whose admitted bundles the arb stage builds on, and waits for. */
+  private[mining] final val ArbBasisSources: Set[String] =
+    Set(configs.CandidateSourceConfig.LithosDex, configs.CandidateSourceConfig.ErgoDex)
+
   /** Scheduler tick and manual trigger for the background collateral refresh. */
   private[mining] case object RefreshCollateralSet
 
@@ -733,6 +814,9 @@ object CandidateBuilder {
 
   /** A round's source deadline: stop waiting on sources that have not answered. */
   private[mining] case class SourcesDue(attempt: CollectionAttempt)
+
+  /** The arb stage's admitted bundles for a round; empty when it failed. */
+  private[mining] case class ArbAnswered(attempt: CollectionAttempt, bundles: Seq[CandidateBundle])
 
   /**
    * @param from     names of the sources whose transactions `txs` carries

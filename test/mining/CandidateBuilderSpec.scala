@@ -14,7 +14,7 @@ import org.scalatest.flatspec.AnyFlatSpecLike
 import org.scalatest.matchers.should.Matchers
 import org.scalatestplus.mockito.MockitoSugar
 import stratum.{CollateralData, CollateralNotFoundException}
-import transactions.candidate.BlockTxMessages.{BlockTxsReady, CandidateTx, CandidateTxsDropped, PrepareBlockTxs, RequestBlockTxs}
+import transactions.candidate.BlockTxMessages.{BlockTxsReady, CandidateTx, CandidateTxsDropped, ChainFromPackage, PrepareBlockTxs, RequestArbTxs, RequestBlockTxs}
 import support.FakeNodeContext
 import transactions.candidate.{CandidateBundle, CapitalEntry, CapitalOrigin}
 import work.lithos.mutations.{InputUTXO, UTXO}
@@ -667,6 +667,156 @@ class CandidateBuilderSpec extends TestKit(ActorSystem("candidate-builder-spec",
     val pkg = f.parent.expectMsgType[BlockPackageReady](1.second).pkg
     pkg.sources shouldBe Set("rollups")
     pkg.late shouldBe empty
+  }
+
+  /**
+   * Both DEX batchers and the arb stage, with room for everything and a deadline short enough to wait out:
+   * sources stop at 3 s. `dexLimit` caps each batcher's allowance.
+   */
+  private def withArb(lithosDex: TestProbe, ergoDex: TestProbe, arb: Option[TestProbe], dexLimit: Int = 4): Fixture = {
+    val limits = configs.CandidateSourceConfig.Default.copy(maxTxs = 4)
+    val dex = configs.CandidateSourceConfig.Default.copy(maxTxs = dexLimit)
+    val named = Seq(CandidateSource("lithosdex", lithosDex.ref), CandidateSource("ergodex", ergoDex.ref)) ++
+      arb.map(probe => CandidateSource("arb", probe.ref))
+    fixture(sources = named, config = collectingConfig.copy(blockTxTimeout = 4000,
+      sources = Map("lithosdex" -> dex, "ergodex" -> dex, "arb" -> limits)))
+  }
+
+  private def askedForArb(arb: TestProbe, within: FiniteDuration = 3.seconds): RequestArbTxs =
+    arb.fishForSpecificMessage(within) { case request: RequestArbTxs => request }
+
+  /** The arb requests `arb` receives within `window`, ignoring preparation and drop notices. */
+  private def arbRequestsWithin(arb: TestProbe, window: FiniteDuration): Seq[RequestArbTxs] =
+    arb.receiveWhile(window) { case message => message }.collect { case request: RequestArbTxs => request }
+
+  private def run(id: String, box: String): CandidateBundle =
+    CandidateBundle(Vector(CandidateTx(id, "{}", "dex-batch", Set(box))))
+
+  /** One leg spending an output of `parent`, a batcher transaction, declared as its package parent. */
+  private def cycle(id: String, parent: String): CandidateBundle =
+    CandidateBundle(Vector(CandidateTx(id, "{}", "arb", Set(s"$parent-out"))), Seq(ChainFromPackage(parent)))
+
+  "The arb stage" should "be asked only once both DEX batchers answer, build on their bundles, and go last" in {
+    val ld = TestProbe()
+    val ed = TestProbe()
+    val arb = TestProbe()
+    val f = withArb(ld, ed, Some(arb))
+    advanceTo(f, 100)
+    requested(ld)
+    requested(ed)
+    ld.reply(BlockTxsReady(100, Seq(run("ld-run", "erg-lit"))))
+    withClue("one batcher answering is not enough: ") {
+      arbRequestsWithin(arb, 700.millis) shouldBe empty
+    }
+    ed.reply(BlockTxsReady(100, Seq(run("ed-run", "erg-rsn"))))
+    val request = askedForArb(arb)
+    request.blockHeight shouldBe 100
+    request.refresh shouldBe false
+    request.basis.flatMap(_.members.map(_.id)) shouldBe Seq("ld-run", "ed-run")
+    arb.reply(BlockTxsReady(100, Seq(cycle("leg", "ld-run"))))
+    val pkg = f.parent.expectMsgType[BlockPackageReady](2.seconds).pkg
+    pkg.blockTxs.map(_.id) shouldBe Seq("ld-run", "ed-run", "leg")
+    pkg.sources shouldBe Set("lithosdex", "ergodex", "arb")
+    pkg.late shouldBe empty
+  }
+
+  it should "lose only its own cycle when the batcher bundle it builds on was not admitted" in {
+    val ld = TestProbe()
+    val ed = TestProbe()
+    val arb = TestProbe()
+    // LithosDex has room for one transaction, so its second run is refused at its own allowance
+    val f = withArb(ld, ed, Some(arb), dexLimit = 1)
+    advanceTo(f, 100)
+    requested(ld)
+    requested(ed)
+    ld.reply(BlockTxsReady(100, Seq(run("ld-run", "erg-lit"), run("ld-second", "lit-x"))))
+    ed.reply(BlockTxsReady(100, Seq(run("ed-run", "erg-rsn"))))
+    askedForArb(arb).basis.flatMap(_.members.map(_.id)) shouldBe Seq("ld-run", "ed-run")
+    arb.reply(BlockTxsReady(100, Seq(cycle("orphan", "ld-second"), cycle("leg", "ed-run"))))
+    val pkg = f.parent.expectMsgType[BlockPackageReady](2.seconds).pkg
+    pkg.blockTxs.map(_.id) shouldBe Seq("ld-run", "ed-run", "leg")
+  }
+
+  it should "be left out like a late source when it misses the deadline" in {
+    val ld = TestProbe()
+    val ed = TestProbe()
+    val arb = TestProbe()
+    val f = withArb(ld, ed, Some(arb))
+    advanceTo(f, 100)
+    requested(ld)
+    requested(ed)
+    ld.reply(BlockTxsReady(100, Seq(run("ld-run", "erg-lit"))))
+    ed.reply(BlockTxsReady(100, Seq(run("ed-run", "erg-rsn"))))
+    askedForArb(arb)
+    val pkg = f.parent.expectMsgType[BlockPackageReady](6.seconds).pkg
+    pkg.blockTxs.map(_.id) shouldBe Seq("ld-run", "ed-run")
+    pkg.sources shouldBe Set("lithosdex", "ergodex")
+    pkg.late shouldBe Set("arb")
+    arb.reply(BlockTxsReady(100, Seq(cycle("too-late", "ld-run"))))
+    f.parent.expectNoMessage(500.millis)
+  }
+
+  it should "run again on a refresh, built on the refreshed batcher answers" in {
+    val ld = TestProbe()
+    val ed = TestProbe()
+    val arb = TestProbe()
+    val f = withArb(ld, ed, Some(arb))
+    val base = advanceTo(f, 100)
+    requested(ld)
+    requested(ed)
+    ld.reply(BlockTxsReady(100, Seq(run("ld-run", "erg-lit"))))
+    ed.reply(BlockTxsReady(100, Seq(run("ed-run", "erg-rsn"))))
+    askedForArb(arb)
+    arb.reply(BlockTxsReady(100, Seq(cycle("leg", "ld-run"))))
+    published(f).blockTxs.map(_.id) shouldBe Seq("ld-run", "ed-run", "leg")
+
+    f.builder ! RefreshBlockPackage(base.identity)
+    requested(ld).refresh shouldBe true
+    requested(ed)
+    ld.reply(BlockTxsReady(100, Seq(run("ld-run-2", "erg-lit"))))
+    ed.reply(BlockTxsReady(100, Seq(run("ed-run", "erg-rsn"))))
+    val again = askedForArb(arb)
+    again.refresh shouldBe true
+    again.basis.flatMap(_.members.map(_.id)) shouldBe Seq("ld-run-2", "ed-run")
+    arb.reply(BlockTxsReady(100, Seq(cycle("leg-2", "ld-run-2"))))
+    val refreshed = f.parent.expectMsgType[BlockPackageReady](2.seconds)
+    refreshed.refreshed shouldBe true
+    refreshed.pkg.blockTxs.map(_.id) shouldBe Seq("ld-run-2", "ed-run", "leg-2")
+  }
+
+  it should "be asked at once when no DEX batcher is, with nothing to build on" in {
+    val rollups = TestProbe()
+    val arb = TestProbe()
+    val limits = configs.CandidateSourceConfig.Default.copy(maxTxs = 4)
+    val f = fixture(sources = Seq(CandidateSource("rollups", rollups.ref), CandidateSource("arb", arb.ref)),
+      config = collectingConfig.copy(blockTxTimeout = 4000, sources = Map("rollups" -> limits, "arb" -> limits)))
+    advanceTo(f, 100)
+    askedForArb(arb).basis shouldBe empty
+  }
+
+  it should "leave rounds and packages exactly as they were when this client runs none" in {
+    def packaged(arb: Boolean): BlockPackage = {
+      val ld = TestProbe()
+      val ed = TestProbe()
+      val stage = TestProbe()
+      val f = withArb(ld, ed, if (arb) Some(stage) else None)
+      advanceTo(f, 100)
+      requested(ld)
+      requested(ed)
+      ld.reply(BlockTxsReady(100, Seq(run("ld-run", "erg-lit"))))
+      ed.reply(BlockTxsReady(100, Seq(run("ed-run", "erg-rsn"))))
+      if (arb) {
+        askedForArb(stage)
+        stage.reply(BlockTxsReady(100, Seq.empty))
+      }
+      f.parent.expectMsgType[BlockPackageReady](1.second).pkg
+    }
+    val without = packaged(arb = false)
+    val withEmptyArb = packaged(arb = true)
+    without.blockTxs shouldBe withEmptyArb.blockTxs
+    without.sources shouldBe Set("lithosdex", "ergodex")
+    without.late shouldBe empty
+    withEmptyArb.late shouldBe empty
   }
 
   "Protocol work" should "be named by id, without the ancestors it carries or another source's work" in {
