@@ -547,7 +547,7 @@ object LithosDexTransactions {
    * Ids and fee params come from the pool being spent rather than from `LDHelpers`, so a successor is
    * built against what the box actually holds, under `contracts`, the deployment that pool belongs to.
    */
-  private[lithosdex] def poolUTXO(contracts: LDContracts,
+  private[batching] def poolUTXO(contracts: LDContracts,
                        p: LDLiquidityPool,
                        reservesX: Long,
                        reservesY: Long,
@@ -572,7 +572,7 @@ object LithosDexTransactions {
   }
 
   /** The pool box holding `next`, with ids and fee params taken from `p`, the box being spent. */
-  private[lithosdex] def poolUTXO(contracts: LDContracts, p: LDLiquidityPool, next: LDLiquidityPool): UTXO =
+  private[batching] def poolUTXO(contracts: LDContracts, p: LDLiquidityPool, next: LDLiquidityPool): UTXO =
     poolUTXO(contracts, p, next.reservesX, next.reservesY, next.pendingX, next.pendingY, next.supply,
       next.provTokensLeft, next.accX, next.accY)
 
@@ -673,7 +673,7 @@ object LithosDexTransactions {
   //
   // Always through DexContracts.attachCtxVars until ContextVar fix is made.
 
-  private[lithosdex] def poolInput(box: InputUTXO, op: Byte): InputUTXO =
+  private[batching] def poolInput(box: InputUTXO, op: Byte): InputUTXO =
     DexContracts.attachCtxVars(box, Seq(0.toByte -> ErgoValue.of(op)))
 
   private[lithosdex] def vaultInput(box: InputUTXO, op: Byte, count: Int = -1): InputUTXO =

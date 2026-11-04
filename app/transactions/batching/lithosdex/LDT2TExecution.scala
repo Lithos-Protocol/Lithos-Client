@@ -357,7 +357,7 @@ object LDT2TExecution {
    * The pool box holding `next`, with ids and fee params taken from the box being spent. Its ERG is storage
    * and never changes; each token entry is reserves plus pending fees.
    */
-  private[lithosdex] def poolUTXO(contracts: LDT2TContracts, spent: InputUTXO, next: LDT2TLiquidityPool): UTXO = {
+  private[batching] def poolUTXO(contracts: LDT2TContracts, spent: InputUTXO, next: LDT2TLiquidityPool): UTXO = {
     val p = LDT2TLiquidityPool(spent)
     require(p.poolNFT.toString == contracts.poolNFT.toString && p.provToken.toString == contracts.provToken.toString,
       s"pool ${p.poolNFT} is not the deployment of pool ${contracts.poolNFT}")
