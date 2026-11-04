@@ -3,8 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="generator" content="Docusaurus v3.7.0">
-<title data-rh="true">Renting hashrate into Lithos | Lithos Client</title><meta data-rh="true" name="viewport" content="width=device-width,initial-scale=1"><meta data-rh="true" name="twitter:card" content="summary_large_image"><meta data-rh="true" property="og:url" content="http://localhost:9000/assets/docs/operations/renting-hashrate"><meta data-rh="true" property="og:locale" content="en"><meta data-rh="true" name="docusaurus_locale" content="en"><meta data-rh="true" name="docsearch:language" content="en"><meta data-rh="true" name="docusaurus_version" content="current"><meta data-rh="true" name="docusaurus_tag" content="docs-default-current"><meta data-rh="true" name="docsearch:version" content="current"><meta data-rh="true" name="docsearch:docusaurus_tag" content="docs-default-current"><meta data-rh="true" property="og:title" content="Renting hashrate into Lithos | Lithos Client"><meta data-rh="true" name="description" content="Rent Autolykos hashrate on NiceHash, point it at your Lithos client, and size, commit and run the rental at a profit."><meta data-rh="true" property="og:description" content="Rent Autolykos hashrate on NiceHash, point it at your Lithos client, and size, commit and run the rental at a profit."><link data-rh="true" rel="icon" href="/assets/img/favicon.ico"><link data-rh="true" rel="canonical" href="http://localhost:9000/assets/docs/operations/renting-hashrate"><link data-rh="true" rel="alternate" href="http://localhost:9000/assets/docs/operations/renting-hashrate" hreflang="en"><link data-rh="true" rel="alternate" href="http://localhost:9000/assets/docs/operations/renting-hashrate" hreflang="x-default"><link rel="stylesheet" href="/assets/css/styles.dbbe51ea.css">
-<script src="/assets/js/runtime~main.23c276a3.js" defer="defer"></script>
+<title data-rh="true">Renting hashrate into Lithos | Lithos Client</title><meta data-rh="true" name="viewport" content="width=device-width,initial-scale=1"><meta data-rh="true" name="twitter:card" content="summary_large_image"><meta data-rh="true" property="og:url" content="http://localhost:9000/assets/docs/operations/renting-hashrate"><meta data-rh="true" property="og:locale" content="en"><meta data-rh="true" name="docusaurus_locale" content="en"><meta data-rh="true" name="docsearch:language" content="en"><meta data-rh="true" name="docusaurus_version" content="current"><meta data-rh="true" name="docusaurus_tag" content="docs-default-current"><meta data-rh="true" name="docsearch:version" content="current"><meta data-rh="true" name="docsearch:docusaurus_tag" content="docs-default-current"><meta data-rh="true" property="og:title" content="Renting hashrate into Lithos | Lithos Client"><meta data-rh="true" name="description" content="Rent Autolykos hashrate on NiceHash, point it at your Lithos client, and size, commit and run the rental at a profit."><meta data-rh="true" property="og:description" content="Rent Autolykos hashrate on NiceHash, point it at your Lithos client, and size, commit and run the rental at a profit."><link data-rh="true" rel="icon" href="/assets/img/favicon.ico"><link data-rh="true" rel="canonical" href="http://localhost:9000/assets/docs/operations/renting-hashrate"><link data-rh="true" rel="alternate" href="http://localhost:9000/assets/docs/operations/renting-hashrate" hreflang="en"><link data-rh="true" rel="alternate" href="http://localhost:9000/assets/docs/operations/renting-hashrate" hreflang="x-default"><link rel="stylesheet" href="/assets/css/styles.b6b392a7.css">
+<script src="/assets/js/runtime~main.3ad28614.js" defer="defer"></script>
 <script src="/assets/js/main.514cfb08.js" defer="defer"></script>
 </head>
 <body class="navigation-with-keyboard">
@@ -16,21 +16,22 @@ how to set up the client and the rental order, how large to make it, which diffi
 make, and how to run and stop it. It does not explain how Lithos pays miners in general, which is in
 <a href="/assets/docs/tutorial-basics/mining-on-lithos">Mining on Lithos</a>, or how forwards work, which is in
 <a href="/assets/docs/extensions/difficulty-forwards">Difficulty forwards</a>.</p>
-<div class="theme-admonition theme-admonition-info admonition_xJq3 alert alert--info"><div class="admonitionHeading_Gvgb"><span class="admonitionIcon_Rf37"><svg viewBox="0 0 14 16"><path fill-rule="evenodd" d="M7 2.3c3.14 0 5.7 2.56 5.7 5.7s-2.56 5.7-5.7 5.7A5.71 5.71 0 0 1 1.3 8c0-3.14 2.56-5.7 5.7-5.7zM7 1C3.14 1 0 4.14 0 8s3.14 7 7 7 7-3.14 7-7-3.14-7-7-7zm1 3H6v5h2V4zm0 6H6v2h2v-2z"></path></svg></span>Figures as of 29 October 2026</div><div class="admonitionContent_BuS1"><p>Every ERG and dollar figure on this page uses the following spot prices. Prices and hashrates move
-daily, so rerun the <a href="#sizing-the-rental">sizing formula</a> with live inputs before you rent.</p><table><thead><tr><th>Asset</th><th>Spot price</th></tr></thead><tbody><tr><td>ERG</td><td>$0.2875, or 3.74 × 10⁻⁶ BTC</td></tr><tr><td>BTC</td><td>$76,942</td></tr><tr><td>LIT</td><td>0.002975 ERG ($0.00086), from the LithosDex ERG/LIT pool</td></tr></tbody></table><p>NiceHash bills in BTC, so dollar costs come from BTC. Dollar revenue comes from ERG and LIT.</p></div></div>
+<div class="theme-admonition theme-admonition-info admonition_xJq3 alert alert--info"><div class="admonitionHeading_Gvgb"><span class="admonitionIcon_Rf37"><svg viewBox="0 0 14 16"><path fill-rule="evenodd" d="M7 2.3c3.14 0 5.7 2.56 5.7 5.7s-2.56 5.7-5.7 5.7A5.71 5.71 0 0 1 1.3 8c0-3.14 2.56-5.7 5.7-5.7zM7 1C3.14 1 0 4.14 0 8s3.14 7 7 7 7-3.14 7-7-3.14-7-7-7zm1 3H6v5h2V4zm0 6H6v2h2v-2z"></path></svg></span>Figures as of 2 November 2026</div><div class="admonitionContent_BuS1"><p>Every ERG and dollar figure on this page uses the following spot prices. Prices and hashrates move
+daily, so rerun the <a href="#sizing-the-rental">sizing formula</a> with live inputs before you rent.</p><table><thead><tr><th>Asset</th><th>Spot price</th></tr></thead><tbody><tr><td>ERG</td><td>$0.2792, or 3.64 × 10⁻⁶ BTC</td></tr><tr><td>BTC</td><td>$76,720</td></tr><tr><td>LIT</td><td>0.003237 ERG ($0.00090), from the LithosDex ERG/LIT pool</td></tr></tbody></table><p>NiceHash bills in BTC, so dollar costs come from BTC. Dollar revenue comes from ERG and LIT.</p><p>Revenue uses Ergo&#x27;s mean network difficulty over the 7 days to 2 November, 65.3T, not a single reading.
+Difficulty ranged from 52.9T to 76.7T over those 7 days.</p></div></div>
 <h2 class="anchor anchorWithStickyNavbar_LWe7" id="deciding-whether-renting-pays">Deciding whether renting pays<a href="#deciding-whether-renting-pays" class="hash-link" aria-label="Direct link to Deciding whether renting pays" title="Direct link to Deciding whether renting pays">​</a></h2>
 <p>Renting hashrate into Lithos pays at these prices. The following figures are for 25 GH/s rented at
 0.0153 BTC/TH/day, with 5 GH/s already mining on Lithos:</p>
-<table><thead><tr><th>Per day</th><th>ERG</th><th>USD</th></tr></thead><tbody><tr><td>Rental cost</td><td>105</td><td>$30.21</td></tr><tr><td>Gross revenue before LIT</td><td>160</td><td>$46.05</td></tr><tr><td>Gross revenue with LIT at spot</td><td>207</td><td>$59.65</td></tr></tbody></table>
-<p>That nets $15.84 a day before LIT, or $29.44 with LIT. With 35 GH/s already in Lithos, the same rental
-earns $41.51 a day gross before LIT ($55.22 with LIT) and nets $11.30 ($25.01 with LIT).</p>
+<table><thead><tr><th>Per day</th><th>ERG</th><th>USD</th></tr></thead><tbody><tr><td>Rental cost</td><td>108</td><td>$30.13</td></tr><tr><td>Gross revenue before LIT</td><td>150</td><td>$41.75</td></tr><tr><td>Gross revenue with LIT at spot</td><td>199</td><td>$55.48</td></tr></tbody></table>
+<p>That nets $11.62 a day before LIT, or $25.35 with LIT. With 35 GH/s already in Lithos, the same rental
+earns $37.96 a day gross before LIT ($51.75 with LIT) and nets $7.83 ($21.62 with LIT).</p>
 <p>Four facts decide the strategy:</p>
 <ul>
-<li><strong>Rented hashrate costs about what it earns on a normal pool.</strong> NiceHash bids run at about 91% of pool
-revenue, so renting into a pool roughly breaks even.</li>
-<li><strong>The profit is the Lithos premium.</strong> Each Lithos block carries storage rent, about 2.1 ERG ($0.61)
-per rented GH/s per day, and 480 LIT, about 2.0 ERG ($0.57) per GH/s per day at spot.</li>
-<li><strong>The premium is shared.</strong> Storage rent is about 216 ERG a day for the whole network. Every GH/s added
+<li><strong>Rented hashrate costs more than it earns on a normal pool.</strong> NiceHash bids run at about 98% of pool
+revenue before the 3% fee, so renting into a pool at best breaks even.</li>
+<li><strong>The profit is the Lithos premium.</strong> Each Lithos block carries storage rent, about 1.9 ERG ($0.54)
+per rented GH/s per day, and 480 LIT, about 2.1 ERG ($0.57) per GH/s per day at spot.</li>
+<li><strong>The premium is shared.</strong> Storage rent is about 214 ERG a day for the whole network. Every GH/s added
 to Lithos, yours or anyone else&#x27;s, shrinks everyone&#x27;s share of it.</li>
 <li><strong>A difficulty commitment fixes your size for about 28 hours, never your duration.</strong> Stopping costs
 only the income you skip.</li>
@@ -49,15 +50,15 @@ hold delivered speed at that target.</li>
 <p>A Lithos block pays miners about the same ERG as a pool block, plus storage rent and LIT. Rental prices
 track pool revenue, so rent and LIT are the margin. The following table gives gross revenue per rented
 GH/s per day:</p>
-<table><thead><tr><th>Source</th><th>ERG</th><th>USD</th><th>How it is set</th></tr></thead><tbody><tr><td>Normal pool</td><td>4.12</td><td>$1.18</td><td>3.01 ERG per block, less a 1% pool fee</td></tr><tr><td>Lithos base</td><td>4.05</td><td>$1.16</td><td>2.93 ERG per block from the lender&#x27;s collateral</td></tr><tr><td>Lithos storage rent</td><td>2.12</td><td>$0.61</td><td>Rent folded into each Lithos block&#x27;s rewards. Shrinks as Lithos hashrate grows</td></tr><tr><td>Lithos LIT</td><td>1.97</td><td>$0.57</td><td>480 LIT per block at 0.002975 ERG, before selling costs</td></tr><tr><td><strong>Lithos total</strong></td><td><strong>8.14</strong></td><td><strong>$2.34</strong></td><td>Sum of the three Lithos rows</td></tr></tbody></table>
-<p>Against that, a NiceHash rental at 0.0150 BTC/TH/day plus the 3% buyer fee costs 4.13 ERG ($1.19) per
+<table><thead><tr><th>Source</th><th>ERG</th><th>USD</th><th>How it is set</th></tr></thead><tbody><tr><td>Normal pool</td><td>3.94</td><td>$1.10</td><td>3.01 ERG per block, less a 1% pool fee</td></tr><tr><td>Lithos base</td><td>3.87</td><td>$1.08</td><td>2.93 ERG per block from the lender&#x27;s collateral</td></tr><tr><td>Lithos storage rent</td><td>1.94</td><td>$0.54</td><td>Rent folded into each Lithos block&#x27;s rewards. Shrinks as Lithos hashrate grows</td></tr><tr><td>Lithos LIT</td><td>2.06</td><td>$0.57</td><td>480 LIT per block at 0.003237 ERG, before selling costs</td></tr><tr><td><strong>Lithos total</strong></td><td><strong>7.87</strong></td><td><strong>$2.20</strong></td><td>Sum of the three Lithos rows</td></tr></tbody></table>
+<p>Against that, a NiceHash rental at 0.0150 BTC/TH/day plus the 3% buyer fee costs 4.25 ERG ($1.19) per
 GH/s per day. The rent row assumes 25 GH/s rented on top of 25 GH/s already in Lithos. The other rows
 hold at any size while network hashrate stays the same.</p>
-<p>Every row comes from one rate: each GH/s finds 720 ÷ network GH/s blocks a day. At difficulty 62.5T the
-network runs 521 GH/s, which gives 1.382 blocks a day. The three Lithos rows are:</p>
-<div class="language-text codeBlockContainer_Ckt0 theme-code-block" style="--prism-color:#bfc7d5;--prism-background-color:#292d3e"><div class="codeBlockContent_biex"><pre tabindex="0" class="prism-code language-text codeBlock_bY9V thin-scrollbar" style="color:#bfc7d5;background-color:#292d3e"><code class="codeBlockLines_e6Vv"><span class="token-line" style="color:#bfc7d5"><span class="token plain">base  = 1.382 × 2.93</span><br></span><span class="token-line" style="color:#bfc7d5"><span class="token plain">LIT   = 1.382 × 480 × P_LIT</span><br></span><span class="token-line" style="color:#bfc7d5"><span class="token plain">rent  = R ÷ (H_L + h + H_o)</span><br></span></code></pre><div class="buttonGroup__atx"><button type="button" aria-label="Copy code to clipboard" title="Copy" class="clean-btn"><span class="copyButtonIcons_eSgA" aria-hidden="true"><svg viewBox="0 0 24 24" class="copyButtonIcon_y97N"><path fill="currentColor" d="M19,21H8V7H19M19,5H8A2,2 0 0,0 6,7V21A2,2 0 0,0 8,23H19A2,2 0 0,0 21,21V7A2,2 0 0,0 19,5M16,1H4A2,2 0 0,0 2,3V17H4V3H16V1Z"></path></svg><svg viewBox="0 0 24 24" class="copyButtonSuccessIcon_LjdS"><path fill="currentColor" d="M21,7L9,19L3.5,13.5L4.91,12.09L9,16.17L19.59,5.59L21,7Z"></path></svg></span></button></div></div></div>
+<p>Every row comes from one rate: each GH/s finds 720 ÷ network GH/s blocks a day. At the 7-day mean
+difficulty of 65.3T the network runs 544 GH/s, which gives 1.322 blocks a day. The three Lithos rows are:</p>
+<div class="language-text codeBlockContainer_Ckt0 theme-code-block" style="--prism-color:#bfc7d5;--prism-background-color:#292d3e"><div class="codeBlockContent_biex"><pre tabindex="0" class="prism-code language-text codeBlock_bY9V thin-scrollbar" style="color:#bfc7d5;background-color:#292d3e"><code class="codeBlockLines_e6Vv"><span class="token-line" style="color:#bfc7d5"><span class="token plain">base  = 1.322 × 2.93</span><br></span><span class="token-line" style="color:#bfc7d5"><span class="token plain">LIT   = 1.322 × 480 × P_LIT</span><br></span><span class="token-line" style="color:#bfc7d5"><span class="token plain">rent  = R ÷ (H_L + h + H_o)</span><br></span></code></pre><div class="buttonGroup__atx"><button type="button" aria-label="Copy code to clipboard" title="Copy" class="clean-btn"><span class="copyButtonIcons_eSgA" aria-hidden="true"><svg viewBox="0 0 24 24" class="copyButtonIcon_y97N"><path fill="currentColor" d="M19,21H8V7H19M19,5H8A2,2 0 0,0 6,7V21A2,2 0 0,0 8,23H19A2,2 0 0,0 21,21V7A2,2 0 0,0 19,5M16,1H4A2,2 0 0,0 2,3V17H4V3H16V1Z"></path></svg><svg viewBox="0 0 24 24" class="copyButtonSuccessIcon_LjdS"><path fill="currentColor" d="M21,7L9,19L3.5,13.5L4.91,12.09L9,16.17L19.59,5.59L21,7Z"></path></svg></span></button></div></div></div>
 <p>The symbols mean the following:</p>
-<table><thead><tr><th>Symbol</th><th>Meaning</th></tr></thead><tbody><tr><td><code>R</code></td><td>Storage rent coming due per day, about 216 ERG</td></tr><tr><td><code>H_L</code></td><td>Hashrate already in Lithos</td></tr><tr><td><code>h</code></td><td>Your rented hashrate</td></tr><tr><td><code>H_o</code></td><td>Hashrate of other pools that collect rent, about 52 GH/s</td></tr><tr><td><code>P_LIT</code></td><td>LIT price in ERG</td></tr></tbody></table>
+<table><thead><tr><th>Symbol</th><th>Meaning</th></tr></thead><tbody><tr><td><code>R</code></td><td>Storage rent coming due per day, about 214 ERG</td></tr><tr><td><code>H_L</code></td><td>Hashrate already in Lithos</td></tr><tr><td><code>h</code></td><td>Your rented hashrate</td></tr><tr><td><code>H_o</code></td><td>Hashrate of other pools that collect rent, about 60 GH/s</td></tr><tr><td><code>P_LIT</code></td><td>LIT price in ERG</td></tr></tbody></table>
 <p>Three notes on the table:</p>
 <ul>
 <li><strong>Everything in a Lithos block&#x27;s rewards is split by committed score.</strong> That covers collateral, rent,
@@ -65,23 +66,23 @@ batching fees and LIT, so the commitment cushion in <a href="#choosing-your-diff
 commitment</a> scales all three Lithos rows.</li>
 <li><strong>Large pools earn little beyond the block reward.</strong> The two largest Ergo pools collect no storage rent,
 so pool revenue stays close to the 3 ERG reward.</li>
-<li><strong>Renting into a normal pool roughly breaks even.</strong> It returns $1.18 against $1.19 of rental per GH/s
-per day.</li>
+<li><strong>Renting into a normal pool loses money.</strong> It returns $1.10 against $1.19 of rental per GH/s per
+day.</li>
 </ul>
 <h2 class="anchor anchorWithStickyNavbar_LWe7" id="choosing-where-to-rent">Choosing where to rent<a href="#choosing-where-to-rent" class="hash-link" aria-label="Direct link to Choosing where to rent" title="Direct link to Choosing where to rent">​</a></h2>
 <p>Rent on <a href="https://www.nicehash.com/pricing" target="_blank" rel="noopener noreferrer">NiceHash</a>. It is the only liquid Autolykos market, with about
-160 GH/s delivered on 29 October 2026, about 30% of Ergo&#x27;s hashrate. The following table compares the
+98 GH/s delivered on 2 November 2026, about 18% of Ergo&#x27;s hashrate. The following table compares the
 two markets that list Autolykos:</p>
-<table><thead><tr><th>Market</th><th>Autolykos supply</th><th>Price</th><th>ERG per GH/s per day</th><th>Verdict</th></tr></thead><tbody><tr><td>NiceHash standard orders</td><td>About 160 GH/s delivered, 16 live orders</td><td>0.0137 to 0.0159 BTC/TH/day</td><td>3.78 to 4.38 with fee ($1.09 to $1.26)</td><td>Use it</td></tr><tr><td>MiningRigRentals</td><td>37 rigs listed, none rented</td><td>Asks from 0.00006 BTC/GH/day</td><td>About 16.1 ($4.62)</td><td>Four times pool revenue. Skip it</td></tr></tbody></table>
+<table><thead><tr><th>Market</th><th>Autolykos supply</th><th>Price</th><th>ERG per GH/s per day</th><th>Verdict</th></tr></thead><tbody><tr><td>NiceHash standard orders</td><td>About 98 GH/s delivered, 15 live orders</td><td>0.0138 to 0.0142 BTC/TH/day</td><td>3.91 to 4.02 with fee ($1.09 to $1.12)</td><td>Use it</td></tr><tr><td>MiningRigRentals</td><td>40 rigs listed, none rented</td><td>Asks from 0.00006 BTC/GH/day</td><td>About 16.5 ($4.60)</td><td>Over four times pool revenue. Skip it</td></tr></tbody></table>
 <p>MiningRigRentals&#x27; last 10 rentals averaged 0.000055 BTC/GH/day. Check it again if asks fall toward
-0.000015 BTC/GH/day, which is about pool revenue.</p>
+0.0000143 BTC/GH/day, which is about pool revenue.</p>
 <p>To convert a NiceHash price to ERG per GH/s per day:</p>
 <ol>
 <li>Divide the BTC/TH/day price by 1,000.</li>
 <li>Divide the result by the BTC price of one ERG.</li>
 <li>Add 3% for the buyer fee.</li>
 </ol>
-<p>At 3.74 × 10⁻⁶ BTC per ERG, 0.0150 BTC/TH/day is 4.13 ERG ($1.19).</p>
+<p>At 3.64 × 10⁻⁶ BTC per ERG, 0.0150 BTC/TH/day is 4.25 ERG ($1.19).</p>
 <h3 class="anchor anchorWithStickyNavbar_LWe7" id="nicehash-rules-that-shape-the-strategy">NiceHash rules that shape the strategy<a href="#nicehash-rules-that-shape-the-strategy" class="hash-link" aria-label="Direct link to NiceHash rules that shape the strategy" title="Direct link to NiceHash rules that shape the strategy">​</a></h3>
 <p>The following NiceHash rules decide how you bid, resize and stop:</p>
 <table><thead><tr><th>Rule</th><th>What it means for you</th></tr></thead><tbody><tr><td><a href="https://www.nicehash.com/support/hash-power-marketplace/orders/how-to-create-a-business-order-ui-&amp;-api-guide" target="_blank" rel="noopener noreferrer">Standard orders only</a></td><td>Fixed-price business orders do not cover Autolykos. You bid a price and compete for hashrate</td></tr><tr><td><a href="https://www.nicehash.com/support/hash-power-marketplace/orders/how-does-order-sorting-work" target="_blank" rel="noopener noreferrer">Highest price fills first</a></td><td>Equal prices fill oldest first. Rigs move from lower orders 20% at a time every 4 minutes, so a raise takes 20 to 40 minutes to fill</td></tr><tr><td><a href="https://www.nicehash.com/support/hash-power-marketplace/orders/can-you-edit-or-refill-your-order-and-what-happens-if-you-cancel-the-order" target="_blank" rel="noopener noreferrer">Raises are unlimited, cuts are not</a></td><td>A cut moves one step of 0.0001 BTC/TH/day at most every 10 minutes. It also sends you to the back of your price level</td></tr><tr><td><a href="https://www.nicehash.com/support/hash-power-marketplace/orders/why-is-the-speed-on-the-order-higher-or-lower-than-the-limit-you-set" target="_blank" rel="noopener noreferrer">The speed limit is approximate</a></td><td>You pay for shares NiceHash validates, not shares your client accepts. A dead stratum costs nothing</td></tr><tr><td><a href="https://www.nicehash.com/support/hash-power-marketplace/general-help/what-is-the-service-fee-for-buyers" target="_blank" rel="noopener noreferrer">Fees</a></td><td>3% of the BTC spent on delivered hashrate, plus 0.00001 BTC per new order. Refills and edits are free</td></tr><tr><td>Minimums</td><td>0.001 BTC per order and a 3 GH/s speed limit. Your stratum must send a share difficulty of at least 4,000,000,000</td></tr><tr><td>Cancelling</td><td>Cancelling refunds unspent BTC, but you compensate the rigs still on the order. Lower the limit to the minimum, wait for the rigs to leave, then cancel</td></tr></tbody></table>
@@ -126,28 +127,28 @@ and order 5 GH/s with the 0.001 BTC minimum.</li>
 cheaply. The test commitment then holds for about 28 hours before you can raise it to full size.</p>
 <h2 class="anchor anchorWithStickyNavbar_LWe7" id="sizing-the-rental">Sizing the rental<a href="#sizing-the-rental" class="hash-link" aria-label="Direct link to Sizing the rental" title="Direct link to Sizing the rental">​</a></h2>
 <p>Size the rental to the hashrate already in Lithos. With 5 GH/s in Lithos, profit before LIT rises to
-about 60 ERG ($17) a day at 30 GH/s and barely moves after that. With 35 GH/s in Lithos, profit peaks at
-about 44 ERG ($12.50) a day at 40 GH/s.</p>
+about 45 ERG ($12) a day at 30 GH/s and barely moves after that. With 35 GH/s in Lithos, profit peaks at
+about 29 ERG ($8) a day at 30 GH/s.</p>
 <p>The following table gives daily rental cost against daily gross revenue, your share of each block&#x27;s
 rewards plus LIT where shown, at the best cushion for each size:</p>
-<table><thead><tr><th>GH/s rented</th><th>Rental cost</th><th>Lithos at 5 GH/s, before LIT</th><th>Lithos at 5 GH/s, with LIT</th><th>Lithos at 35 GH/s, before LIT</th><th>Lithos at 35 GH/s, with LIT</th></tr></thead><tbody><tr><td>10</td><td>40 ERG ($11.49)</td><td>69 ERG ($19.89)</td><td>88 ERG ($25.29)</td><td>62 ERG ($17.96)</td><td>82 ERG ($23.61)</td></tr><tr><td>20</td><td>83 ERG ($23.78)</td><td>131 ERG ($37.66)</td><td>169 ERG ($48.51)</td><td>118 ERG ($33.94)</td><td>156 ERG ($44.98)</td></tr><tr><td>30</td><td>128 ERG ($36.85)</td><td>188 ERG ($54.16)</td><td>245 ERG ($70.53)</td><td>170 ERG ($48.85)</td><td>227 ERG ($65.21)</td></tr><tr><td>40</td><td>176 ERG ($50.72)</td><td>242 ERG ($69.71)</td><td>319 ERG ($91.64)</td><td>220 ERG ($63.24)</td><td>295 ERG ($84.95)</td></tr><tr><td>45</td><td>202 ERG ($57.95)</td><td>269 ERG ($77.21)</td><td>355 ERG ($101.93)</td><td>244 ERG ($70.22)</td><td>329 ERG ($94.60)</td></tr><tr><td>60</td><td>281 ERG ($80.84)</td><td>344 ERG ($98.88)</td><td>459 ERG ($131.99)</td><td>315 ERG ($90.60)</td><td>428 ERG ($123.01)</td></tr></tbody></table>
+<table><thead><tr><th>GH/s rented</th><th>Rental cost</th><th>Lithos at 5 GH/s, before LIT</th><th>Lithos at 5 GH/s, with LIT</th><th>Lithos at 35 GH/s, before LIT</th><th>Lithos at 35 GH/s, with LIT</th></tr></thead><tbody><tr><td>10</td><td>41 ERG ($11.46)</td><td>64 ERG ($17.82)</td><td>83 ERG ($23.26)</td><td>58 ERG ($16.33)</td><td>79 ERG ($22.01)</td></tr><tr><td>20</td><td>85 ERG ($23.71)</td><td>122 ERG ($34.02)</td><td>161 ERG ($44.96)</td><td>111 ERG ($30.99)</td><td>151 ERG ($42.10)</td></tr><tr><td>25</td><td>108 ERG ($30.13)</td><td>150 ERG ($41.75)</td><td>199 ERG ($55.48)</td><td>136 ERG ($37.96)</td><td>185 ERG ($51.75)</td></tr><tr><td>30</td><td>132 ERG ($36.75)</td><td>176 ERG ($49.23)</td><td>236 ERG ($65.75)</td><td>160 ERG ($44.75)</td><td>219 ERG ($61.21)</td></tr><tr><td>40</td><td>181 ERG ($50.57)</td><td>228 ERG ($63.67)</td><td>307 ERG ($85.81)</td><td>208 ERG ($58.06)</td><td>286 ERG ($79.92)</td></tr><tr><td>45</td><td>207 ERG ($57.78)</td><td>253 ERG ($70.65)</td><td>342 ERG ($95.59)</td><td>231 ERG ($64.52)</td><td>319 ERG ($89.07)</td></tr><tr><td>60</td><td>289 ERG ($80.60)</td><td>325 ERG ($90.87)</td><td>445 ERG ($124.30)</td><td>299 ERG ($83.49)</td><td>416 ERG ($116.14)</td></tr></tbody></table>
 <p>At every size and both Lithos levels, gross revenue beats the rental cost, even before LIT. The
 following table gives what you keep, gross revenue minus rental cost, per day:</p>
-<table><thead><tr><th>GH/s rented</th><th>Lithos at 5 GH/s, before LIT</th><th>Lithos at 5 GH/s, with LIT</th><th>Lithos at 35 GH/s, before LIT</th><th>Lithos at 35 GH/s, with LIT</th></tr></thead><tbody><tr><td>10</td><td>29 ERG ($8.40)</td><td>48 ERG ($13.80)</td><td>23 ERG ($6.47)</td><td>42 ERG ($12.12)</td></tr><tr><td>20</td><td>48 ERG ($13.88)</td><td>86 ERG ($24.73)</td><td>35 ERG ($10.16)</td><td>74 ERG ($21.21)</td></tr><tr><td>30</td><td>60 ERG ($17.31)</td><td>117 ERG ($33.68)</td><td>42 ERG ($12.00)</td><td>99 ERG ($28.36)</td></tr><tr><td>40</td><td>66 ERG ($18.99)</td><td>142 ERG ($40.92)</td><td><strong>44 ERG ($12.52), peak</strong></td><td>119 ERG ($34.23)</td></tr><tr><td>45</td><td><strong>67 ERG ($19.26), peak</strong></td><td>153 ERG ($43.98)</td><td>43 ERG ($12.27)</td><td>128 ERG ($36.65)</td></tr><tr><td>60</td><td>63 ERG ($18.04)</td><td>178 ERG ($51.15)</td><td>34 ERG ($9.77)</td><td>147 ERG ($42.18)</td></tr></tbody></table>
-<p>LIT at spot adds about 1.9 ERG ($0.54) per rented GH/s per day. Both tables assume the rental price
+<table><thead><tr><th>GH/s rented</th><th>Lithos at 5 GH/s, before LIT</th><th>Lithos at 5 GH/s, with LIT</th><th>Lithos at 35 GH/s, before LIT</th><th>Lithos at 35 GH/s, with LIT</th></tr></thead><tbody><tr><td>10</td><td>23 ERG ($6.36)</td><td>42 ERG ($11.80)</td><td>17 ERG ($4.87)</td><td>38 ERG ($10.55)</td></tr><tr><td>20</td><td>37 ERG ($10.31)</td><td>76 ERG ($21.25)</td><td>26 ERG ($7.28)</td><td>66 ERG ($18.39)</td></tr><tr><td>25</td><td>42 ERG ($11.62)</td><td>91 ERG ($25.35)</td><td>28 ERG ($7.83)</td><td>77 ERG ($21.62)</td></tr><tr><td>30</td><td>45 ERG ($12.49)</td><td>104 ERG ($29.00)</td><td><strong>29 ERG ($8.00), peak</strong></td><td>88 ERG ($24.47)</td></tr><tr><td>40</td><td><strong>47 ERG ($13.10), peak</strong></td><td>126 ERG ($35.23)</td><td>27 ERG ($7.48)</td><td>105 ERG ($29.34)</td></tr><tr><td>45</td><td>46 ERG ($12.86)</td><td>135 ERG ($37.81)</td><td>24 ERG ($6.74)</td><td>112 ERG ($31.29)</td></tr><tr><td>60</td><td>37 ERG ($10.26)</td><td>157 ERG ($43.69)</td><td>10 ERG ($2.89)</td><td>127 ERG ($35.54)</td></tr></tbody></table>
+<p>LIT at spot adds about 2.0 ERG ($0.55) per rented GH/s per day. Both tables assume the rental price
 rises with size, at 0.0140 + 0.00005 × GH/s BTC/TH/day. Profit per day at your inputs is:</p>
-<div class="language-text codeBlockContainer_Ckt0 theme-code-block" style="--prism-color:#bfc7d5;--prism-background-color:#292d3e"><div class="codeBlockContent_biex"><pre tabindex="0" class="prism-code language-text codeBlock_bY9V thin-scrollbar" style="color:#bfc7d5;background-color:#292d3e"><code class="codeBlockLines_e6Vv"><span class="token-line" style="color:#bfc7d5"><span class="token plain">profit(h) = hit × S ÷ (S + O) × [ 1.382 × (H_L + h) × (2.93 + 480 × P_LIT)</span><br></span><span class="token-line" style="color:#bfc7d5"><span class="token plain">                                 + R × (H_L + h) ÷ (H_L + h + H_o) ]</span><br></span><span class="token-line" style="color:#bfc7d5"><span class="token plain">            − c(h) × h</span><br></span></code></pre><div class="buttonGroup__atx"><button type="button" aria-label="Copy code to clipboard" title="Copy" class="clean-btn"><span class="copyButtonIcons_eSgA" aria-hidden="true"><svg viewBox="0 0 24 24" class="copyButtonIcon_y97N"><path fill="currentColor" d="M19,21H8V7H19M19,5H8A2,2 0 0,0 6,7V21A2,2 0 0,0 8,23H19A2,2 0 0,0 21,21V7A2,2 0 0,0 19,5M16,1H4A2,2 0 0,0 2,3V17H4V3H16V1Z"></path></svg><svg viewBox="0 0 24 24" class="copyButtonSuccessIcon_LjdS"><path fill="currentColor" d="M21,7L9,19L3.5,13.5L4.91,12.09L9,16.17L19.59,5.59L21,7Z"></path></svg></span></button></div></div></div>
+<div class="language-text codeBlockContainer_Ckt0 theme-code-block" style="--prism-color:#bfc7d5;--prism-background-color:#292d3e"><div class="codeBlockContent_biex"><pre tabindex="0" class="prism-code language-text codeBlock_bY9V thin-scrollbar" style="color:#bfc7d5;background-color:#292d3e"><code class="codeBlockLines_e6Vv"><span class="token-line" style="color:#bfc7d5"><span class="token plain">profit(h) = hit × S ÷ (S + O) × [ 1.322 × (H_L + h) × (2.93 + 480 × P_LIT)</span><br></span><span class="token-line" style="color:#bfc7d5"><span class="token plain">                                 + R × (H_L + h) ÷ (H_L + h + H_o) ]</span><br></span><span class="token-line" style="color:#bfc7d5"><span class="token plain">            − c(h) × h</span><br></span></code></pre><div class="buttonGroup__atx"><button type="button" aria-label="Copy code to clipboard" title="Copy" class="clean-btn"><span class="copyButtonIcons_eSgA" aria-hidden="true"><svg viewBox="0 0 24 24" class="copyButtonIcon_y97N"><path fill="currentColor" d="M19,21H8V7H19M19,5H8A2,2 0 0,0 6,7V21A2,2 0 0,0 8,23H19A2,2 0 0,0 21,21V7A2,2 0 0,0 19,5M16,1H4A2,2 0 0,0 2,3V17H4V3H16V1Z"></path></svg><svg viewBox="0 0 24 24" class="copyButtonSuccessIcon_LjdS"><path fill="currentColor" d="M21,7L9,19L3.5,13.5L4.91,12.09L9,16.17L19.59,5.59L21,7Z"></path></svg></span></button></div></div></div>
 <p>Here <code>hit</code> is your NISP hit rate, <code>S</code> your committed score, <code>O</code> the other miners&#x27; committed score and
 <code>c(h)</code> your rental cost per GH/s per day. Set <code>P_LIT</code> to zero for profit before LIT. Four things follow
 from the curve:</p>
 <ul>
 <li><strong>Past about 30 GH/s the curve flattens.</strong> Each extra GH/s outbids more of the order book and earns a
 smaller share of a fixed rent supply.</li>
-<li><strong>The low end of the flat range is the better choice.</strong> 30 GH/s nets $17.31 a day against $19.26 at
-45 GH/s, costs $21 a day less to rent, and is less exposed to a price spike or a new renter.</li>
-<li><strong>Break-even rental price at 25 GH/s</strong> is 0.0232 BTC/TH/day before LIT with 5 GH/s in Lithos, or 0.0210
-with 35 GH/s. With LIT at spot it is 0.0301 and 0.0279.</li>
-<li><strong>NiceHash&#x27;s whole Autolykos supply is about 160 GH/s,</strong> so 30 GH/s is about a fifth of it.</li>
+<li><strong>The low end of the flat range is the better choice.</strong> 30 GH/s nets $12.49 a day against $13.10 at
+40 GH/s, costs $14 a day less to rent, and is less exposed to a price spike or a new renter.</li>
+<li><strong>Break-even rental price at 25 GH/s</strong> is 0.0211 BTC/TH/day before LIT with 5 GH/s in Lithos, or 0.0192
+with 35 GH/s. With LIT at spot it is 0.0281 and 0.0262.</li>
+<li><strong>NiceHash&#x27;s whole Autolykos supply is about 98 GH/s,</strong> so 30 GH/s is about a third of it.</li>
 </ul>
 <h2 class="anchor anchorWithStickyNavbar_LWe7" id="choosing-your-difficulty-commitment">Choosing your difficulty commitment<a href="#choosing-your-difficulty-commitment" class="hash-link" aria-label="Direct link to Choosing your difficulty commitment" title="Direct link to Choosing your difficulty commitment">​</a></h2>
 <p>Commit for 14 to 21 super shares per NISP window, depending on how much of Lithos&#x27;s committed score is
@@ -173,7 +174,7 @@ bigger score helps only while others hold most of the score, and a miss hurts mo
 it. The following table gives the best <code>n</code> for each share:</p>
 <table><thead><tr><th>Your share of Lithos score</th><th>Best n</th><th>NISP hit rate</th></tr></thead><tbody><tr><td>Under 30%</td><td>14 to 15</td><td>85% to 90%</td></tr><tr><td>40% to 60%</td><td>15 to 17</td><td>90% to 95%</td></tr><tr><td>60% to 80%</td><td>17 to 19</td><td>95% to 98%</td></tr><tr><td>Over 85%</td><td>20 to 21</td><td>98% to 99%</td></tr></tbody></table>
 <p>Hit rates come from the NISP windows of the last 20,000 mainnet blocks, with 10% noise added to
-delivered hashrate. The middle 90% of windows ran 94 to 150 minutes.</p>
+delivered hashrate. The middle 90% of windows ran 94 to 148 minutes.</p>
 <h3 class="anchor anchorWithStickyNavbar_LWe7" id="staggering-commitments-across-tranches">Staggering commitments across tranches<a href="#staggering-commitments-across-tranches" class="hash-link" aria-label="Direct link to Staggering commitments across tranches" title="Direct link to Staggering commitments across tranches">​</a></h3>
 <p>One Lithos client holds one miner identity and one difficulty commitment. Two or three Lithos clients on
 separate ports, each with its own wallet and NiceHash order, let you stagger their commitment cycles and
@@ -202,7 +203,7 @@ misses.</li>
 <p>Once a cycle, about every 28 hours or once per tranche, rerun the sizing and send the next difficulty
 commitment, following the raise and cut timing above. The controller reads its inputs from the following
 places:</p>
-<table><thead><tr><th>Input</th><th>Where to read it</th></tr></thead><tbody><tr><td>Delivered speed</td><td>The NiceHash order&#x27;s accepted speed, and the Lithos client&#x27;s share rate</td></tr><tr><td>Competing bids</td><td>NiceHash&#x27;s public <a href="https://api2.nicehash.com/main/api/v2/hashpower/orderBook?algorithm=AUTOLYKOS" target="_blank" rel="noopener noreferrer">Autolykos order book</a></td></tr><tr><td>Network difficulty</td><td>Your Ergo node&#x27;s <code>/info</code></td></tr><tr><td>Lithos hashrate</td><td>Lithos blocks per day, and the committed scores of miners who submitted to recent rollups</td></tr><tr><td>Rent coming due</td><td>Unspent boxes created 1,051,200 blocks (about 4 years) before the heights ahead</td></tr><tr><td>LIT price</td><td>The LithosDex ERG/LIT pool box</td></tr><tr><td>ERG/BTC price</td><td>Your exchange</td></tr></tbody></table>
+<table><thead><tr><th>Input</th><th>Where to read it</th></tr></thead><tbody><tr><td>Delivered speed</td><td>The NiceHash order&#x27;s accepted speed, and the Lithos client&#x27;s share rate</td></tr><tr><td>Competing bids</td><td>NiceHash&#x27;s public <a href="https://api2.nicehash.com/main/api/v2/hashpower/orderBook?algorithm=AUTOLYKOS" target="_blank" rel="noopener noreferrer">Autolykos order book</a></td></tr><tr><td>Network difficulty</td><td>The mean over the last 7 days of headers, from your Ergo node&#x27;s <code>/blocks/chainSlice</code></td></tr><tr><td>Lithos hashrate</td><td>Lithos blocks per day, and the committed scores of miners who submitted to recent rollups</td></tr><tr><td>Rent coming due</td><td>Unspent boxes created 1,051,200 blocks (about 4 years) before the heights ahead</td></tr><tr><td>LIT price</td><td>The LithosDex ERG/LIT pool box</td></tr><tr><td>ERG/BTC price</td><td>Your exchange</td></tr></tbody></table>
 <p>The following alarms are worth wiring:</p>
 <ul>
 <li><strong>Super shares per hour below 90% of n ÷ 2 for two hours:</strong> a delivery or stratum problem.</li>
@@ -213,37 +214,37 @@ cycle.</li>
 <p>A rollup pays 720 blocks (about 24 hours) after it opens, but NiceHash is prepaid in BTC. Keep about two
 days of rental cost as float.</p>
 <h2 class="anchor anchorWithStickyNavbar_LWe7" id="planning-around-storage-rent">Planning around storage rent<a href="#planning-around-storage-rent" class="hash-link" aria-label="Direct link to Planning around storage rent" title="Direct link to Planning around storage rent">​</a></h2>
-<p>Rent is the dependable part of the premium, and it is flat from day to day: 198 to 236 ERG comes due in
+<p>Rent is the dependable part of the premium, and it is flat from day to day: 196 to 233 ERG comes due in
 each of the next 14 days. Time rentals by the month, not the day.</p>
 <p>A box becomes collectable once it is 1,051,200 blocks (about 4 years) old, counted from its creation
 height. The next block that collects it takes the rent. In a Lithos block, the Lithos client folds the
 rent into the holding box, so it is split by committed score like the rest of the block&#x27;s rewards.</p>
 <p>Lithos&#x27;s share of rent is <code>s ÷ (s + o)</code>, where <code>s</code> is Lithos&#x27;s share of blocks and <code>o</code> is the block share
-of other pools that collect rent. Fitted on mainnet blocks of 24 to 27 October 2026, <code>o</code> is about 0.10.
-That gives the following:</p>
+of other pools that collect rent. Fitted on mainnet blocks of 25 to 28 October 2026, <code>o</code> is about 0.11.
+Lithos found too few blocks after that for a newer fit. That gives the following:</p>
 <ul>
-<li>Lithos takes 9% of rent at 1% of blocks, 33% at 5%, 50% at 10% and 60% at 15%.</li>
+<li>Lithos takes 8% of rent at 1% of blocks, 31% at 5%, 48% at 10% and 58% at 15%.</li>
 <li>More Lithos hashrate takes rent from other pools, but less per block. Adding 25 GH/s to 25 GH/s lifts
-Lithos&#x27;s rent from 70 to 106 ERG a day. The new hashrate earns 53 ERG a day of it: 36 from other pools
-and 17 from existing Lithos miners.</li>
+Lithos&#x27;s rent from 62.9 to 97.2 ERG a day. The new hashrate earns 48.6 ERG a day of it: 34.3 from other
+pools and 14.3 from existing Lithos miners.</li>
 <li>No hours are worth aiming for. Over the next 14 days, the busiest 5% of hours hold just 8% of the rent,
-19.5 ERG in the largest hour against 8.8 ERG in the median. A 28-hour commitment cycle could not target
+19.0 ERG in the largest hour against 8.8 ERG in the median. A 28-hour commitment cycle could not target
 hours anyway.</li>
 </ul>
 <p>The months matter. Forecast from unspent boxes by creation height, rent coming due runs as follows:</p>
 <ul>
-<li>About 200 ERG a day now.</li>
+<li>About 214 ERG a day now.</li>
 <li>About 57 to 94 ERG a day for boxes turning collectable from late 2027 to late 2028.</li>
 <li>About 160 to 397 ERG a day in 2029 and 2030.</li>
 </ul>
 <p>These are upper bounds, since some boxes will be spent before they age in. The following table gives the
 best size and its profit at each rent level, using today&#x27;s rental prices and the rising price curve from
 <a href="#sizing-the-rental">Sizing the rental</a>:</p>
-<table><thead><tr><th>Rent coming due</th><th>Best size, Lithos at 5 GH/s</th><th>Profit before LIT</th><th>Best size, Lithos at 35 GH/s</th><th>Profit before LIT</th></tr></thead><tbody><tr><td>216 ERG a day (now)</td><td>45 GH/s</td><td>67 ERG ($19.30) a day</td><td>40 GH/s</td><td>44 ERG ($12.50) a day</td></tr><tr><td>150 ERG a day</td><td>40 GH/s</td><td>40 ERG ($11.40) a day</td><td>30 GH/s</td><td>25 ERG ($7.30) a day</td></tr><tr><td>94 ERG a day</td><td>30 GH/s</td><td>20 ERG ($5.70) a day</td><td>20 GH/s</td><td>13 ERG ($3.80) a day</td></tr><tr><td>57 ERG a day</td><td>20 GH/s</td><td>9 ERG ($2.50) a day</td><td>15 GH/s</td><td>7 ERG ($2.00) a day</td></tr></tbody></table>
+<table><thead><tr><th>Rent coming due</th><th>Best size, Lithos at 5 GH/s</th><th>Profit before LIT</th><th>Best size, Lithos at 35 GH/s</th><th>Profit before LIT</th></tr></thead><tbody><tr><td>214 ERG a day (now)</td><td>40 GH/s</td><td>47 ERG ($13.10) a day</td><td>30 GH/s</td><td>29 ERG ($8.00) a day</td></tr><tr><td>150 ERG a day</td><td>30 GH/s</td><td>25 ERG ($7.10) a day</td><td>20 GH/s</td><td>15 ERG ($4.30) a day</td></tr><tr><td>94 ERG a day</td><td>20 GH/s</td><td>10 ERG ($2.80) a day</td><td>15 GH/s</td><td>7 ERG ($1.80) a day</td></tr><tr><td>57 ERG a day</td><td>10 GH/s</td><td>3 ERG ($0.80) a day</td><td>10 GH/s</td><td>3 ERG ($0.70) a day</td></tr></tbody></table>
 <p>Batching fees add under 1 ERG a day across the whole network, so they do not change the table.</p>
 <h2 class="anchor anchorWithStickyNavbar_LWe7" id="hedging-difficulty-with-forwards">Hedging difficulty with forwards<a href="#hedging-difficulty-with-forwards" class="hash-link" aria-label="Direct link to Hedging difficulty with forwards" title="Direct link to Hedging difficulty with forwards">​</a></h2>
-<p>Forwards matter least of a renter&#x27;s tools, and the market cannot yet hold a renter-sized hedge. On 29
-October 2026 it held 3,500 LIT of offers, against about 57,000 LIT needed to cover one cycle at 25 GH/s.</p>
+<p>Forwards matter least of a renter&#x27;s tools, and the market cannot yet hold a renter-sized hedge. On 2
+November 2026 it held 5,000 LIT of offers, against about 51,000 LIT needed to cover one cycle at 25 GH/s.</p>
 <p>A <a href="/assets/docs/extensions/difficulty-forwards">difficulty forward</a> is a LIT-margined bet on the average
 difficulty over 1 to 120 epochs of 128 blocks, about 4.3 hours each. The window starts 2 to 120 epochs
 after the fill. The long side receives notional × clamp(window mean ÷ strike − 1, ±20%). Each side posts
@@ -259,9 +260,9 @@ after the fill. The long side receives notional × clamp(window mean ÷ strike �
 the position is large. A 10% rise in difficulty cuts base and LIT revenue by about 9%. To size a hedge:</p>
 <ol>
 <li>Go long, with notional equal to the base and LIT revenue the window covers, in LIT. At 25 GH/s with 5
-GH/s in Lithos, that is about 145 ERG ($42) a day, or about 57,000 LIT per 28-hour cycle at 0.002975
+GH/s in Lithos, that is about 142 ERG ($40) a day, or about 51,000 LIT per 28-hour cycle at 0.003237
 ERG.</li>
-<li>Post 20% of notional as margin, about 11,400 LIT (about 34 ERG, $10).</li>
+<li>Post 20% of notional as margin, about 10,200 LIT (about 33 ERG, $9).</li>
 <li>Cover the epochs of your next cycle. Windows start at least 2 epochs out, so post the offer when you
 send the commitment change.</li>
 <li>Strike at the forecast window mean, from realised hashrate rather than recorded difficulty. Dips have
@@ -272,23 +273,24 @@ reverted with a half-life of about 3 epochs.</li>
 <li>The ±20% clamp binds in 1.5% to 5.5% of windows.</li>
 <li>The payout is in LIT.</li>
 <li>A fair hedge has zero expected value. It reduces variance and adds no profit.</li>
-<li>Both open offers on 29 October 2026 were long, so a renter would have to post long offers and wait for
-takers.</li>
+<li>On 2 November 2026 the book held one long and one short offer, 2,500 LIT each. Filling the short covers
+2,500 LIT of a long hedge if its window fits. For the rest, a renter would have to post long offers and
+wait for takers.</li>
 </ul>
 <h2 class="anchor anchorWithStickyNavbar_LWe7" id="managing-the-risks">Managing the risks<a href="#managing-the-risks" class="hash-link" aria-label="Direct link to Managing the risks" title="Direct link to Managing the risks">​</a></h2>
 <p>Two risks end the strategy: other renters diluting the premium, and storage rent falling in late 2027.
 The controller, the cushion and the stop rule handle the rest. The following table lists each risk:</p>
-<table><thead><tr><th>Risk</th><th>What it does</th><th>What to do</th></tr></thead><tbody><tr><td>Another renter joins Lithos</td><td>Your share of score and rent per GH/s fall. At 25 GH/s, profit before LIT drops from $16 to $11 a day as Lithos goes from 5 to 35 GH/s</td><td>Watch committed score and resize every cycle</td></tr><tr><td>Rent falls, late 2027 to late 2028</td><td>Profit before LIT at the best size falls to 7 to 20 ERG ($2 to $6) a day</td><td>Plan the scale-down months ahead</td></tr><tr><td>Rental prices rise</td><td>Before LIT you break even at 0.021 to 0.023 BTC/TH/day, against 0.014 to 0.016 today</td><td>Apply the stop rule</td></tr><tr><td>Outbid, or delivery drops</td><td>NISPs miss, and those rollups&#x27; rewards go to other miners</td><td>Let the controller raise the price, and keep the cushion from the commitment table</td></tr><tr><td>LIT price</td><td>LIT roughly doubles profit at spot. It fell 82% in 18 days, and the ERG/LIT pool holds 1,672 ERG</td><td>Treat LIT as upside, and check slippage before selling</td></tr><tr><td>ERG falls against BTC</td><td>Rentals are paid in BTC and revenue arrives in ERG. A 10% drop cuts revenue 10% against cost</td><td>Convert payouts to BTC regularly</td></tr><tr><td>Lithos luck</td><td>At about 40 Lithos blocks a day, daily revenue varies about 16%. About 1 day in 50 loses money at today&#x27;s prices</td><td>Judge results weekly</td></tr><tr><td>Stratum incompatible with NiceHash</td><td>Super shares go unrecorded</td><td>Run the one-cycle test order</td></tr><tr><td>Cancelling with rigs on the order</td><td>You compensate the rigs</td><td>Drop the limit to the minimum, then cancel</td></tr><tr><td>Payout lag</td><td>Rollups pay about 24 hours after they open</td><td>Keep two days of float</td></tr></tbody></table>
+<table><thead><tr><th>Risk</th><th>What it does</th><th>What to do</th></tr></thead><tbody><tr><td>Another renter joins Lithos</td><td>Your share of score and rent per GH/s fall. At 25 GH/s, profit before LIT drops from $12 to $8 a day as Lithos goes from 5 to 35 GH/s</td><td>Watch committed score and resize every cycle</td></tr><tr><td>Rent falls, late 2027 to late 2028</td><td>Profit before LIT at the best size falls to 3 to 10 ERG ($0.70 to $2.80) a day</td><td>Plan the scale-down months ahead</td></tr><tr><td>Rental prices rise</td><td>Before LIT you break even at 0.019 to 0.021 BTC/TH/day, against 0.014 to 0.016 today</td><td>Apply the stop rule</td></tr><tr><td>Outbid, or delivery drops</td><td>NISPs miss, and those rollups&#x27; rewards go to other miners</td><td>Let the controller raise the price, and keep the cushion from the commitment table</td></tr><tr><td>LIT price</td><td>LIT more than doubles profit at spot. It fell 77% in 18 days, and the ERG/LIT pool holds 1,747 ERG</td><td>Treat LIT as upside, and check slippage before selling</td></tr><tr><td>ERG falls against BTC</td><td>Rentals are paid in BTC and revenue arrives in ERG. A 10% drop cuts revenue 10% against cost</td><td>Convert payouts to BTC regularly</td></tr><tr><td>Lithos luck</td><td>At about 40 Lithos blocks a day, daily revenue varies about 16%. About 1 day in 30 loses money before LIT at today&#x27;s prices</td><td>Judge results weekly</td></tr><tr><td>Stratum incompatible with NiceHash</td><td>Super shares go unrecorded</td><td>Run the one-cycle test order</td></tr><tr><td>Cancelling with rigs on the order</td><td>You compensate the rigs</td><td>Drop the limit to the minimum, then cancel</td></tr><tr><td>Payout lag</td><td>Rollups pay about 24 hours after they open</td><td>Keep two days of float</td></tr></tbody></table>
 <h2 class="anchor anchorWithStickyNavbar_LWe7" id="working-through-an-example">Working through an example<a href="#working-through-an-example" class="hash-link" aria-label="Direct link to Working through an example" title="Direct link to Working through an example">​</a></h2>
-<p>With 5 GH/s in Lithos, renting 25 GH/s nets about 55 ERG ($16) a day before LIT, or about 102 ERG ($29)
+<p>With 5 GH/s in Lithos, renting 25 GH/s nets about 42 ERG ($12) a day before LIT, or about 91 ERG ($25)
 a day with LIT at spot. The position is the following:</p>
-<table><thead><tr><th>Item</th><th>Value</th></tr></thead><tbody><tr><td>Your share of committed Lithos score</td><td>About 80%, so n = 19</td></tr><tr><td>Difficulty commitment</td><td>7200 × 25 GH/s ÷ (10,000 × 19) = 947M</td></tr><tr><td>Bid</td><td>0.0153 BTC/TH/day</td></tr><tr><td>Lithos blocks</td><td>About 41 a day, with 30 GH/s in Lithos</td></tr><tr><td>Your share of block rewards</td><td>0.80, after a 97.6% NISP hit rate</td></tr><tr><td>Bonds in flight</td><td>About 1.6 ERG, 0.038 ERG × about 41 rollups</td></tr><tr><td>Float</td><td>About 0.0008 BTC ($60), two days of rental</td></tr></tbody></table>
+<table><thead><tr><th>Item</th><th>Value</th></tr></thead><tbody><tr><td>Your share of committed Lithos score</td><td>About 80%, so n = 19</td></tr><tr><td>Difficulty commitment</td><td>7200 × 25 GH/s ÷ (10,000 × 19) = 947M</td></tr><tr><td>Bid</td><td>0.0153 BTC/TH/day</td></tr><tr><td>Lithos blocks</td><td>About 40 a day, with 30 GH/s in Lithos</td></tr><tr><td>Your share of block rewards</td><td>0.80, after a 97.6% NISP hit rate</td></tr><tr><td>Bonds in flight</td><td>About 1.5 ERG, 0.038 ERG × about 40 rollups</td></tr><tr><td>Float</td><td>About 0.0008 BTC ($60), two days of rental</td></tr></tbody></table>
 <p>The following table gives what you pay and what you earn per day:</p>
-<table><thead><tr><th>Per day</th><th>ERG</th><th>USD</th></tr></thead><tbody><tr><td>Rental cost, 0.000393 BTC with fee</td><td>105</td><td>$30.21</td></tr><tr><td>Gross revenue from base and rent</td><td>160</td><td>$46.05</td></tr><tr><td>Gross revenue from LIT at spot</td><td>47</td><td>$13.60</td></tr><tr><td>Gross revenue in total</td><td>207</td><td>$59.65</td></tr></tbody></table>
+<table><thead><tr><th>Per day</th><th>ERG</th><th>USD</th></tr></thead><tbody><tr><td>Rental cost, 0.000393 BTC with fee</td><td>108</td><td>$30.13</td></tr><tr><td>Gross revenue from base and rent</td><td>150</td><td>$41.75</td></tr><tr><td>Gross revenue from LIT at spot</td><td>49</td><td>$13.72</td></tr><tr><td>Gross revenue in total</td><td>199</td><td>$55.48</td></tr></tbody></table>
 <p>What you keep is gross revenue minus rental cost:</p>
 <ul>
-<li>Before LIT: 55 ERG ($15.84) a day, about $475 a month.</li>
-<li>With LIT at spot: 102 ERG ($29.44) a day, about $880 a month.</li>
+<li>Before LIT: 42 ERG ($11.62) a day, about $350 a month.</li>
+<li>With LIT at spot: 91 ERG ($25.35) a day, about $760 a month.</li>
 </ul>
 <h2 class="anchor anchorWithStickyNavbar_LWe7" id="checking-before-you-rent">Checking before you rent<a href="#checking-before-you-rent" class="hash-link" aria-label="Direct link to Checking before you rent" title="Direct link to Checking before you rent">​</a></h2>
 <p>Run the following checklist before scaling up a rental:</p>
@@ -305,20 +307,22 @@ a day with LIT at spot. The position is the following:</p>
 <li class="task-list-item"><input type="checkbox" disabled=""> <!-- -->Forwards hedge only if the margin before LIT is under 15% or the position is large</li>
 </ul>
 <h2 class="anchor anchorWithStickyNavbar_LWe7" id="how-the-figures-were-measured">How the figures were measured<a href="#how-the-figures-were-measured" class="hash-link" aria-label="Direct link to How the figures were measured" title="Direct link to How the figures were measured">​</a></h2>
-<p>Every chain figure was read from an Ergo mainnet node with the extra index, at height 1,905,430 on 29
-October 2026. The following inputs went into it:</p>
+<p>Every chain figure was read from an Ergo mainnet node with the extra index, at height 1,908,274 on 2
+November 2026. The following inputs went into it:</p>
 <ul>
-<li><strong>Lithos blocks and rewards:</strong> 751 Lithos blocks. A block&#x27;s rewards are its holding box at genesis
+<li><strong>Lithos blocks and rewards:</strong> 762 Lithos blocks. A block&#x27;s rewards are its holding box at genesis
 height, and the top-up is its value above the base.</li>
 <li><strong>NISPs:</strong> every submission since height 1,889,000, decoded for score and super-share timestamps.</li>
-<li><strong>Rent coming due:</strong> unspent boxes created at heights 854,231 to 864,310. Rent per box is the smaller of
+<li><strong>Rent coming due:</strong> unspent boxes created at heights 857,075 to 867,154. Rent per box is the smaller of
 its value and 1,250,000 nanoERG per byte.</li>
+<li><strong>Network difficulty:</strong> the mean of the 5,014 blocks in the 7 days to 2 November 2026, 65.3T. The
+difficulty at the tip was 69.3T.</li>
 <li><strong>Window lengths:</strong> the last 20,000 headers.</li>
-<li><strong>LIT price:</strong> 1,090 states of the LithosDex ERG/LIT pool box.</li>
+<li><strong>LIT price:</strong> 1,800 states of the LithosDex ERG/LIT pool box.</li>
 </ul>
 <p>The model behind the numbers uses the following:</p>
 <ul>
-<li>Blocks per day per GH/s = 720 ÷ network GH/s.</li>
+<li>Blocks per day per GH/s = 720 ÷ network GH/s, with network GH/s = 7-day mean difficulty ÷ 120 seconds.</li>
 <li>Lithos rent share = <code>s ÷ (s + o)</code>, fitted per 3-day window.</li>
 <li>Your pay = hit rate × S ÷ (S + others&#x27; score), with other miners at 17 super shares and no misses.</li>
 <li>Hit rate = the probability of at least 10 super shares over the measured windows, with 10% log-normal
@@ -328,7 +332,7 @@ noise in delivered speed.</li>
 <li>Rental costs converted from BTC, and revenue from ERG and LIT, at the spot prices at the top of this
 page.</li>
 </ul>
-<p>Market data, all read on 29 October 2026, came from the following sources:</p>
+<p>Market data, all read on 2 November 2026, came from the following sources:</p>
 <ul>
 <li><a href="https://api2.nicehash.com/main/api/v2/hashpower/orderBook?algorithm=AUTOLYKOS" target="_blank" rel="noopener noreferrer">NiceHash Autolykos order book</a></li>
 <li><a href="https://api2.nicehash.com/main/api/v2/mining/algorithms" target="_blank" rel="noopener noreferrer">NiceHash algorithm limits</a></li>
