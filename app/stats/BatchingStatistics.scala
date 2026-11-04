@@ -126,6 +126,75 @@ private[stats] object BatchingStatistics {
     }
   }
 
+  /** One arb cycle in a block: its record, and the ids of its legs in the order they spend the carry. */
+  final case class ArbCycle(fee: BatchingFee, legs: Seq[String])
+
+  /**
+   * A fee-less pool swap with one other input, the carry, and the carry handed on at output 1: the pool at input 0
+   * and its successor at output 0 under the same tree and NFT. A leg that ends a cycle splits its profit off to
+   * output 2. Anything else in the transaction, a fee output included, makes it no leg.
+   */
+  private final case class ArbLegTx(tx: BlockTx, carryIn: TxOutput, nft: String) {
+    def carryOut: TxOutput = tx.outputs(1)
+    def profit: Option[TxOutput] = tx.outputs.lift(2)
+  }
+
+  private def arbLeg(block: BlockInfo, tx: BlockTx, network: NetworkType): Option[ArbLegTx] =
+    if (tx.inputs.size != 2 || tx.outputs.size < 2 || tx.outputs.size > 3 ||
+      tx.outputs.exists(_.ergoTree == Contract.FEE.ergoTreeHex)) None
+    else for {
+      pool <- block.inputBox(tx.inputs.head.id)
+      carry <- block.inputBox(tx.inputs(1).id)
+      nft <- pool.assets.headOption.filter(_.amount == 1L).map(_.id.toString)
+      next = tx.outputs.head
+      if next.ergoTree == pool.ergoTree && next.assets.headOption.exists(t => t.id.toString == nft && t.amount == 1L)
+      if tx.outputs(1).ergoTree != pool.ergoTree && poolProtocol(pool, network).isDefined
+    } yield ArbLegTx(tx, carry, nft)
+
+  /**
+   * Arb cycles this block carries, in any block: chains of legs where each spends the carry the one before handed
+   * on, ending at a leg that splits off profit. A cycle starts from an ERG-only P2PK box, passes the carry at one
+   * tree throughout, and returns the start's ERG whole to that tree, with no tokens, beside an ERG-only profit
+   * output at the same tree or `true`, where the holding top-up can take it. The next cycle may start from the
+   * returned box. Gross is the profit; `local` means the carry was this client's.
+   */
+  def arbCycles(block: BlockInfo, network: NetworkType, minerTree: String): Vector[ArbCycle] = {
+    val legs = block.txs.flatMap(arbLeg(block, _, network)).toVector
+    val byCarryIn = legs.map(l => l.carryIn.id -> l).toMap
+    val handedOn = legs.map(_.carryOut.id).toSet
+    legs.filterNot(l => handedOn(l.carryIn.id)).flatMap { start =>
+      // A chain of legs is a path through distinct transactions, so it ends within as many steps as there are legs
+      val chain = Iterator.iterate(Option(start))(_.flatMap(l => byCarryIn.get(l.carryOut.id)))
+        .take(legs.size).takeWhile(_.isDefined).map(_.get).toVector
+      cycles(chain, minerTree)
+    }
+  }
+
+  /** `chain` cut after each leg with a profit output, keeping each piece that has the whole shape of a cycle. */
+  private def cycles(chain: Vector[ArbLegTx], minerTree: String): Vector[ArbCycle] = {
+    val ends = chain.indices.filter(i => chain(i).profit.isDefined)
+    ends.zip(-1 +: ends).flatMap { case (end, before) =>
+      val piece = chain.slice(before + 1, end + 1)
+      val first = piece.head.carryIn
+      val returned = piece.last.carryOut
+      val tree = returned.ergoTree
+      val profit = piece.last.profit.get
+      val shaped = piece.size >= 2 && first.assets.isEmpty && isP2PK(first.ergoTree) &&
+        piece.forall(_.carryOut.ergoTree == tree) && returned.assets.isEmpty && returned.value == first.value &&
+        profit.assets.isEmpty && profit.value > 0L &&
+        (profit.ergoTree == tree || profit.ergoTree == Contract.SIGMA_TRUE.ergoTreeHex)
+      if (!shaped) None
+      else Some(ArbCycle(BatchingFee(piece.last.tx.id, piece.head.nft, ArbProtocol, profit.value.toString, "0",
+        local = tree == minerTree), piece.map(_.tx.id)))
+    }.toVector
+  }
+
+  /** The protocol name arb cycles are recorded under. */
+  final val ArbProtocol = "arb"
+
+  /** A P2PK tree: header 0x00, then a constant sigma proposition holding one 33-byte group element. */
+  private def isP2PK(tree: String): Boolean = tree.length == 72 && tree.startsWith("0008cd")
+
   private def executions(tx: BlockTx, inputs: Seq[Option[TxOutput]], network: NetworkType, registry: VerifiedRegistry,
                          minerTree: String): Vector[BatchingFee] = {
     val pool = inputs.head.get

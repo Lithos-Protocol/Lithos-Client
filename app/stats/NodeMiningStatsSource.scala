@@ -170,6 +170,10 @@ class NodeMiningStatsSource(api: NodeApi, protocol: SyncProtocolContext, minerTr
     val fees = Vector.newBuilder[MiningTransactionFee]
     val batches = Vector.newBuilder[BatchingFee]
     val registrations = Vector.newBuilder[MinerRegistrationActivity]
+    // An arb cycle spans several transactions, so it is read from the whole block before each one is classified
+    val cycles = BatchingStatistics.arbCycles(block, protocol.networkType, minerTree)
+    val arbLegs = cycles.flatMap(_.legs).toSet
+    batches ++= cycles.map(_.fee)
     block.txs.foreach { tx =>
       val input = tx.inputs.headOption.flatMap(in => block.inputBox(in.id))
       val registration = input.filter(i => i.assets.exists(t => t.id == protocol.minerDictionaryToken && t.amount == 1L &&
@@ -194,6 +198,7 @@ class NodeMiningStatsSource(api: NodeApi, protocol: SyncProtocolContext, minerTr
       val kind = if (blocks.exists(_.transactionId == tx.id)) Some("genesis")
         else activity.map(_.kind).orElse(rollup.map(_ => "payout")).orElse(batch.headOption.map(_.protocol))
           .orElse(registration.map(_ => "registration"))
+          .orElse(Some(BatchingStatistics.ArbProtocol).filter(_ => arbLegs(tx.id)))
           .orElse(input.flatMap(BatchingStatistics.poolProtocol(_, protocol.networkType)).map(_ + "OtherPoolSpend"))
       kind.foreach(k => fees += MiningTransactionFee(tx.id, k, BatchingStatistics.transactionFee(tx).toString))
     }

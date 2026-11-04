@@ -405,4 +405,20 @@ class NodeMiningStatsSourceSpec extends AnyFlatSpec with Matchers with MockitoSu
     val tx = transaction(add.id, 120, Seq(input), add.outputs.map(indexed))
     read(fixture(Seq(tx))._2).activity.registrations shouldBe empty
   }
+
+  "Arb statistics" should "record a cycle in a Lithos block once, pooled, with each leg's transaction kind arb" in {
+    val (arbNode, _, wallet) = FakeNodeContext(mock[NodeApi], numAddresses = 1)
+    val (confirmed, legs) = arbNode.getClient.execute(ctx => ArbStatisticsSpec.built(ctx, wallet, pairs = 1))
+    val boxes = (confirmed.map(state.messages.NodeSync.txOutput) ++ legs.flatMap(_.outputs)).map(b => b.id -> b).toMap
+    val txs = legs.map(tx => transaction(tx.id, 100, tx.inputs.map(in => indexed(boxes(in.id))), tx.outputs.map(indexed)))
+    val result = read(fixture(genesis +: txs, 100)._2, 100)
+    result.blocks should have size 1
+    result.activity.batchingFees.map(f => (f.protocol, f.transactionId, f.local)) shouldBe
+      Vector(("arb", legs.last.id, false))
+    result.activity.transactionFees.filter(f => legs.exists(_.id == f.transactionId)).map(_.kind) shouldBe
+      Vector("arb", "arb")
+    val totals = MiningAccounting.contribution(result)
+    totals.amount("pool.batching.arb.orders") shouldBe BigInt(1)
+    totals.amount("pool.batching.arb.grossNanoErg") shouldBe BigInt(legs.last.outputs(2).value)
+  }
 }

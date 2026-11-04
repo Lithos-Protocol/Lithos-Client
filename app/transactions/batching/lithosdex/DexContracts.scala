@@ -7,24 +7,24 @@ import work.lithos.mutations.InputUTXO
 import scala.jdk.CollectionConverters.iterableAsScalaIterableConverter
 
 /**
- * The canonical LithosDex deployment `LDHelpers` names, built once for the lifetime of the JVM.
+ * The canonical LithosDex deployment `LDHelpers` names, built once per network for the lifetime of the JVM.
  *
  * Other deployments are never looked up here: the batcher hands each builder the contracts of the pool
  * it is building, so no shared table can drop a pool another build is still using.
  */
 object DexContracts {
 
-  @volatile private var canonical: Option[LDContracts] = None
+  @volatile private var canonical: Map[NetworkType, LDContracts] = Map.empty
 
   def apply(ctx: BlockchainContext): LDContracts = apply(ctx.getNetworkType)
 
-  /** Built under the lock once; read without it after, so a candidate build never waits on it. */
-  def apply(networkType: NetworkType): LDContracts = canonical.getOrElse(synchronized {
-    canonical.getOrElse {
+  /** Built under the lock once per network; read without it after, so a candidate build never waits on it. */
+  def apply(networkType: NetworkType): LDContracts = canonical.getOrElse(networkType, synchronized {
+    canonical.getOrElse(networkType, {
       val all = LDContracts(networkType)
-      canonical = Some(all)
+      canonical += networkType -> all
       all
-    }
+    })
   })
 
   /** Attaches unique context variables in ascending ID order. */
