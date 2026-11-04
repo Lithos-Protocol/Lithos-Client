@@ -61,20 +61,13 @@ class ErgoDexBatcher(nodeContext: NodeContext,
     ErgoDexBatching.track(orders ++ routed.map(_._1), pools ++ routed.map(_._2), tip, batching)
   }
 
-  /** Every confirmed native pool, parsed a page at a time, up to [[MaxNativePoolPages]] pages. */
+  /** Every confirmed native pool, parsed a page at a time, up to [[ErgoDexPoolScan.MaxPages]] pages. */
   private def nativePools(): Seq[(ErgoDexPool, Int)] = {
-    var found = Vector.empty[(ErgoDexPool, Int)]
-    var offset = 0
-    var exhausted = false
-    while (!exhausted && offset < MaxNativePoolPages * Batcher.PageSize) {
-      val page = nodeApi.unspentBoxesByErgoTree(ErgoDexContracts.NativePoolErgoTree, Paging(offset, Batcher.PageSize),
-        SortDirection.Desc, MempoolOptions.ConfirmedOnly).get
-      found ++= page.flatMap(indexed => ErgoDexPool.native(indexed.box).map(_ -> indexed.inclusionHeight))
-      exhausted = page.size < Batcher.PageSize
-      offset += page.size
-    }
+    val (found, exhausted) = ErgoDexPoolScan.confirmed(nodeApi, ErgoDexContracts.NativePoolErgoTree)(indexed =>
+      ErgoDexPool.native(indexed.box).map(_ -> indexed.inclusionHeight))
     if (!exhausted)
-      logger.warn(s"ErgoDEX native pool scan stopped after $offset pools; Machina orders were routed through those only")
+      logger.warn(s"ErgoDEX native pool scan stopped after ${ErgoDexPoolScan.MaxPages} pages; Machina orders were " +
+        "routed through those only")
     found
   }
 
@@ -228,9 +221,6 @@ object ErgoDexBatcher {
 
   /** Maximum pool lookups per scan; each lookup requires a node call. */
   private[ergodex] final val MaxPoolReads = 512
-
-  /** Most pages of native pools a Machina routing pass reads; 287 pools filled three pages on 2026-10-30. */
-  private final val MaxNativePoolPages = 20
 
   /** A broadcast pass is not bound by the stratum's deadline; this only ends a run that would not. */
   private final val BroadcastBudget = 60.seconds

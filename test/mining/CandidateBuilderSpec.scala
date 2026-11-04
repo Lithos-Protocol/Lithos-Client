@@ -720,6 +720,28 @@ class CandidateBuilderSpec extends TestKit(ActorSystem("candidate-builder-spec",
     pkg.late shouldBe empty
   }
 
+  it should "have its profit folded into the holding top-up, after the batcher run it builds on" in {
+    val ld = TestProbe()
+    val ed = TestProbe()
+    val arb = TestProbe()
+    val f = withArb(ld, ed, Some(arb))
+    // The top-up signs against the offline context, so the block is the one after its tip
+    val height = f.nextHeight
+    advanceTo(f, height)
+    requested(ld)
+    requested(ed)
+    ld.reply(BlockTxsReady(height, Seq(run("ld-run", "erg-lit"))))
+    ed.reply(BlockTxsReady(height, Seq.empty))
+    askedForArb(arb)
+    val profit = revenueBox(f, Parameters.OneErg / 10)
+    arb.reply(BlockTxsReady(height, Seq(cycle("leg", "ld-run").copy(
+      capital = Seq(CapitalEntry(CapitalOrigin.Arbitrage, profit, parentTxId = "leg"))))))
+    val pkg = f.parent.expectMsgType[BlockPackageReady](2.seconds).pkg
+    pkg.blockTxs.map(_.id).init shouldBe Seq("ld-run", "leg")
+    pkg.blockTxs.last.kind shouldBe transactions.candidate.CandidateTopUp.Kind
+    pkg.blockTxs.last.inputIds should contain(profit.id.toString)
+  }
+
   it should "lose only its own cycle when the batcher bundle it builds on was not admitted" in {
     val ld = TestProbe()
     val ed = TestProbe()

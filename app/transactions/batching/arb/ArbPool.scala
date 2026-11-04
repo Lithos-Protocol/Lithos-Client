@@ -63,6 +63,12 @@ sealed trait ArbPool {
   /** What `amountIn` of X (when `xIn`) or Y returns, or 0 when the pool cannot fill it. */
   def quote(amountIn: Long, xIn: Boolean): Long
 
+  /**
+   * Units out per unit in for a vanishing input, fees included: the slope of `quote` at zero. Rounding only
+   * lowers what a swap returns, so no input returns more than this rate times itself.
+   */
+  def marginal(xIn: Boolean): Double
+
   /** The swap and the state it leaves, or None when the pool cannot fill it. */
   def swap(amountIn: Long, xIn: Boolean): Option[ArbSwap]
 
@@ -79,6 +85,14 @@ sealed trait ArbPool {
   def trades(asset: ArbAsset): Boolean = asset == x || asset == y
 }
 
+object ArbPool {
+  /** A LithosDex pool's slope at zero: the side fee leaves the input first, then the curve keeps its own fee. */
+  private[arb] def sideThenCurve(sideFeeNum: Long, dexFeeNum: Long, reserveIn: Long, reserveOut: Long): Double = {
+    val d = LDHelpers.FEE_DENOM.toDouble
+    if (reserveIn <= 0L) 0.0 else (d - sideFeeNum) / d * (dexFeeNum / d) * (reserveOut.toDouble / reserveIn)
+  }
+}
+
 /**
  * An ErgoDEX pool of either shape: a native pool's X is its ERG, a token pool's X its third token. Prices with
  * the pool's own fee over 1,000, rounding down, exactly as order executions do.
@@ -92,6 +106,12 @@ final case class ErgoDexArbPool(state: ErgoDexPool) extends ArbPool {
   override val y: ArbAsset = ArbAsset.token(state.yId)
 
   override def quote(amountIn: Long, xIn: Boolean): Long = afterSwap(amountIn, xIn).fold(0L)(_._1)
+
+  override def marginal(xIn: Boolean): Double = {
+    val (in, out) = if (xIn) (state.reservesX, state.reservesY) else (state.reservesY, state.reservesX)
+    if (in <= 0L) 0.0
+    else out.toDouble * state.feeNum / (in.toDouble * transactions.batching.ergodex.ErgoDexContracts.FeeDenominator)
+  }
 
   override def swap(amountIn: Long, xIn: Boolean): Option[ArbSwap] =
     afterSwap(amountIn, xIn).map { case (out, next) => ArbSwap(this, amountIn, xIn, out, copy(state = next)) }
@@ -146,6 +166,10 @@ final case class LithosDexArbPool(state: LDLiquidityPool, contracts: LDContracts
       else Some(ArbSwap(this, amountIn, xIn, q.amountOut, copy(state = state.afterSwap(q))))
     }.toOption.flatten
 
+  override def marginal(xIn: Boolean): Double =
+    ArbPool.sideThenCurve(if (xIn) state.ergFeeNum else state.tokenFeeNum, state.dexFeeNum,
+      if (xIn) state.reservesX else state.reservesY, if (xIn) state.reservesY else state.reservesX)
+
   override def withBox(boxId: String): ArbPool = copy(boxId = boxId)
 
   override def input(poolBox: InputUTXO): InputUTXO = LithosDexTransactions.poolInput(poolBox, LDHelpers.POOL_SWAP)
@@ -182,6 +206,10 @@ final case class LithosDexT2TArbPool(state: LDT2TLiquidityPool, contracts: LDT2T
       if (!q.isExecutable) None
       else Some(ArbSwap(this, amountIn, xIn, q.amountOut, copy(state = state.afterSwap(q))))
     }.toOption.flatten
+
+  override def marginal(xIn: Boolean): Double =
+    ArbPool.sideThenCurve(if (xIn) state.xFeeNum else state.yFeeNum, state.dexFeeNum,
+      if (xIn) state.reservesX else state.reservesY, if (xIn) state.reservesY else state.reservesX)
 
   override def withBox(boxId: String): ArbPool = copy(boxId = boxId)
 

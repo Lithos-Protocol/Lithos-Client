@@ -44,7 +44,8 @@ class ArbStakeSpec extends TestKit(ActorSystem("arb-stake-spec", PinnedInputsSpe
    * @param confirmed ids the confirmed UTXO set holds, which the stake is checked against
    */
   private case class Fixture(engine: ActorRef, wallet: NodeWallet, reported: AtomicReference[Seq[WalletBox]],
-                             confirmed: AtomicReference[Set[String]]) {
+                             confirmed: AtomicReference[Set[String]],
+                             readDelayMs: java.util.concurrent.atomic.AtomicLong) {
     def idOf(value: Long): String = reported.get.find(_.box.value == value).get.box.boxId
 
     /** A wallet box of `value` that a block has just created: reported and confirmed from now on. */
@@ -74,14 +75,17 @@ class ArbStakeSpec extends TestKit(ActorSystem("arb-stake-spec", PinnedInputsSpe
     }
     when(api.unspentBoxesByErgoTree(anyString(), any[Paging], any[SortDirection], any[MempoolOptions]))
       .thenReturn(Success(Seq.empty[IndexedBox]))
+    // How long each confirmed-set read takes, so a test can hold a stake check out
+    val readDelayMs = new java.util.concurrent.atomic.AtomicLong(0L)
     when(api.boxById(anyString())).thenAnswer { inv =>
+      Thread.sleep(readDelayMs.get)
       val id = inv.getArgument[String](0)
       Success(reported.get.map(_.box).find(box => box.boxId == id && confirmed.get.contains(id)))
     }
 
     val engine = system.actorOf(Props(new EngineWalletState(ctx, configs.WalletConfig.Default, pins, stake)))
     engine ! RefreshBoxes
-    Fixture(engine, wallet, reported, confirmed)
+    Fixture(engine, wallet, reported, confirmed, readDelayMs)
   }
 
   private def stakeAt(f: Fixture, height: Int): Option[String] = {
@@ -243,7 +247,45 @@ class ArbStakeSpec extends TestKit(ActorSystem("arb-stake-spec", PinnedInputsSpe
     reserveSuccessor(f, stake, "d1" * 32, 102) shouldBe false
     reserveSuccessor(f, stake, "not a box id", 101) shouldBe false
     reserveSuccessor(f, stake, f.idOf(15 * erg), 101) shouldBe true
-    reserveSuccessor(f, stake, f.idOf(15 * erg), 101) shouldBe false
+    awaitAssert(pinned(f) should not be empty, 15.seconds, 200.millis)
+    reserveSuccessor(f, stake, pinned(f).head, 101) shouldBe false
+  }
+
+  it should "be taken again when a refresh builds the same cycle and names the same output" in {
+    val f = fixture(Seq(erg / 50, 12 * erg, 15 * erg))
+    val stake = f.idOf(12 * erg)
+    awaitStake(f, 101, Some(stake))
+    val successor = "d2" * 32
+    reserveSuccessor(f, stake, successor, 101) shouldBe true
+    reserveSuccessor(f, stake, successor, 101) shouldBe true
+    owned(f) should contain(successor)
+  }
+
+  it should "be refused past 256 held at once, while each already held is still taken again" in {
+    val f = fixture(Seq(erg / 50, 12 * erg, 15 * erg))
+    val stake = f.idOf(12 * erg)
+    awaitStake(f, 101, Some(stake))
+    (1 to 256).foreach(i => reserveSuccessor(f, stake, f"$i%064x", 101) shouldBe true)
+    reserveSuccessor(f, stake, f"${257}%064x", 101) shouldBe false
+    reserveSuccessor(f, stake, f"${256}%064x", 101) shouldBe true
+    owned(f) should not contain f"${257}%064x"
+  }
+
+  "A stake check" should "never answer for a height with the stake checked for an earlier one, even while it is out" in {
+    val f = fixture(Seq(erg / 50, 12 * erg, 15 * erg))
+    val stake = f.idOf(12 * erg)
+    awaitStake(f, 101, Some(stake))
+    f.readDelayMs.set(2000L)
+    stakeAt(f, 102) shouldBe None
+    withClue("asked for the next height while the check for 102 is out: ") {
+      stakeAt(f, 103) shouldBe None
+    }
+    f.readDelayMs.set(0L)
+    awaitStake(f, 102, Some(stake))
+    withClue("the check for 102 has come back, and none for 103 was started while it was out: ") {
+      stakeAt(f, 103) shouldBe None
+    }
+    awaitStake(f, 103, Some(stake))
   }
 
   "A stake a block spent with no successor" should "be replaced by another box" in {

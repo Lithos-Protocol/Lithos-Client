@@ -20,9 +20,9 @@ final case class ArbCarry(value: Long, tokens: Seq[Token]) {
 
 /**
  * One direct swap: the pool at input 0 and its successor at output 0, as every pool kind requires, then the
- * carry box. The carry inputs follow the pool, and output 1 takes everything they held after the swap, so a
- * chain of legs spends one box per leg and each leg balances to zero change. With no miner fee the leg suits
- * this miner's own block; a broadcast pays its fee from the carry.
+ * carry box. The carry inputs follow the pool, and output 1 takes everything they held after the swap, less
+ * any profit split off to output 2, so a chain of legs spends one box per leg and each leg balances to zero
+ * change. With no miner fee the leg suits this miner's own block; a broadcast pays its fee from the carry.
  */
 object ArbLeg {
 
@@ -63,29 +63,35 @@ object ArbLeg {
       })
 
   /**
-   * Signs `swap` against `poolBox` with `carry` paying for it, the rest returned to `carryTo`. Built for
+   * Signs `swap` against `poolBox` with `carry` paying for it, the rest returned to `carryTo`. With `profit`,
+   * that many nanoERG of the rest go to their own output 2 instead, at the contract given. Built for
    * `blockHeight`, or for the newest input's height when that is later. Throws when the swap is not priced
-   * against `poolBox`, the carry cannot pay for it, or the pool's contract refuses the successor.
+   * against `poolBox`, the carry cannot pay for it and keep its floor, or the pool's contract refuses the successor.
    */
   def build(ctx: BlockchainContext, wallet: NodeWallet, swap: ArbSwap, poolBox: InputUTXO, carry: Seq[InputUTXO],
-            carryTo: Contract, blockHeight: Int, minerFee: Long = 0L): SignedTransaction = {
+            carryTo: Contract, blockHeight: Int, minerFee: Long = 0L,
+            profit: Option[(Contract, Long)] = None): SignedTransaction = {
     require(poolBox.id.toString == swap.pool.boxId,
       s"swap priced against pool box ${swap.pool.boxId}, not ${poolBox.id}")
     require(carry.nonEmpty, "a leg needs a carry input to pay for its swap")
     val left = carried(holding(carry), swap, minerFee).getOrElse(throw new IllegalArgumentException(
       s"the carry cannot pay ${swap.amountIn} of ${swap.assetIn} and a $minerFee fee and keep $MinCarryValue"))
+    val split = profit.fold(0L)(_._2)
+    require(split >= 0L && left.value - split >= MinCarryValue,
+      s"the carry holds ${left.value} nanoERG, too little to split off $split and keep $MinCarryValue")
 
     val spent = swap.pool.input(poolBox) +: carry
     val height = math.max(blockHeight, TxBuilder.newestInput(spent))
     val poolOut = swap.pool.successor(poolBox, swap.after).setCreationHeight(height)
     require(poolOut.value - poolBox.value == swap.poolErgDelta,
       s"the successor moves ${poolOut.value - poolBox.value} nanoERG where the swap moves ${swap.poolErgDelta}")
-    val carryOut = UTXO(carryTo, left.value, left.tokens).setCreationHeight(height)
+    val carryOut = UTXO(carryTo, left.value - split, left.tokens).setCreationHeight(height)
+    val profitOut = profit.filter(_._2 > 0L).map { case (to, amount) => UTXO(to, amount).setCreationHeight(height) }
     val feeOut = if (minerFee > 0L) Seq(UTXO.feeBox(minerFee).setCreationHeight(height)) else Seq.empty
 
     val unsigned = TxBuilder(ctx)
       .setInputs(spent: _*)
-      .setOutputs((Seq(poolOut, carryOut) ++ feeOut): _*)
+      .setOutputs((Seq(poolOut, carryOut) ++ profitOut ++ feeOut): _*)
       .buildTx(0L, wallet.p2pk)
     // Signing runs the pool's script, so a successor the contract refuses fails here.
     Batcher.withNodeMinimums(ctx, wallet.sign(unsigned))

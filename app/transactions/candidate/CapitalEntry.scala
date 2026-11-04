@@ -16,6 +16,9 @@ object CapitalOrigin {
 
   /** Value legally removed from a box that is past its storage-rent deadline. */
   case object StorageRent extends CapitalOrigin
+
+  /** What an arb cycle in this miner's own block returned above the stake it put in. */
+  case object Arbitrage extends CapitalOrigin
 }
 
 /**

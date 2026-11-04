@@ -583,10 +583,14 @@ class EngineWalletState @Inject()(nodeContext: NodeContext,
       sender() ! ArbStake(stake.collect { case (box, checked) if checked >= height => box })
       if (stake.exists(_._2 < height)) checkStake(height)
 
+    // A refresh that builds the same cycle again names the same output, which is already held: that is a yes
     case ReserveStakeSuccessor(replaces, boxId, height) =>
-      val accepted = stake.exists { case (box, checked) => box.boxId == replaces && checked >= height } &&
-        boxId.matches("[0-9a-f]{64}") && !usedInputs.contains(boxId) && pendingStakes.size < MaxPendingStakes
-      if (accepted) {
+      val held = stake.exists { case (box, checked) => box.boxId == replaces && checked >= height }
+      val again = held && pendingStakes.contains(boxId)
+      val accepted = again || (held && boxId.matches("[0-9a-f]{64}") && !usedInputs.contains(boxId) &&
+        pendingStakes.size < MaxPendingStakes)
+      if (again) pendingStakes += boxId -> math.max(height, pendingStakes(boxId))
+      else if (accepted) {
         pendingStakes += boxId -> height
         reserve(Seq(boxId), StakeReservationId, ReservationPendingStake)
       }
