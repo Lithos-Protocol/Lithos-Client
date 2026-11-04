@@ -145,7 +145,8 @@ final case class ErgoDexArbPool(state: ErgoDexPool) extends ArbPool {
 
 /**
  * A LithosDex ERG/token pool of the deployment `contracts`. The side fee comes out of the input first, over
- * 10,000 and rounded down; the AMM fee then prices the rest, as `LDLiquidityPool.simSwap` does.
+ * 10,000 and rounded down; the AMM fee then prices the rest, as `LDLiquidityPool.simSwap` does. A swap is
+ * refused when it would leave the box at or under the contract's `MIN_RENT`, or either reserve at or under zero.
  */
 final case class LithosDexArbPool(state: LDLiquidityPool, contracts: LDContracts, boxId: String) extends ArbPool {
 
@@ -154,16 +155,16 @@ final case class LithosDexArbPool(state: LDLiquidityPool, contracts: LDContracts
   override val x: ArbAsset = ArbAsset.Erg
   override val y: ArbAsset = ArbAsset.token(state.tokenY.toString)
 
-  override def quote(amountIn: Long, xIn: Boolean): Long =
-    if (amountIn <= 0L) 0L
-    else Try(state.simSwap(amountIn, xIn)).toOption.filter(_.isExecutable).fold(0L)(_.amountOut)
+  override def quote(amountIn: Long, xIn: Boolean): Long = swap(amountIn, xIn).fold(0L)(_.amountOut)
 
   override def swap(amountIn: Long, xIn: Boolean): Option[ArbSwap] =
     if (amountIn <= 0L) None
     else Try {
       val q = state.simSwap(amountIn, xIn)
       if (!q.isExecutable) None
-      else Some(ArbSwap(this, amountIn, xIn, q.amountOut, copy(state = state.afterSwap(q))))
+      else Some(state.afterSwap(q))
+        .filter(next => next.boxValue > LDHelpers.MIN_RENT && next.reservesX > 0L && next.reservesY > 0L)
+        .map(next => ArbSwap(this, amountIn, xIn, q.amountOut, copy(state = next)))
     }.toOption.flatten
 
   override def marginal(xIn: Boolean): Double =
@@ -186,7 +187,10 @@ object LithosDexArbPool {
     LithosDexArbPool(LDLiquidityPool(box), contracts, box.id.toString)
 }
 
-/** A LithosDex token/token pool of the deployment `contracts`. Its ERG is storage and never moves. */
+/**
+ * A LithosDex token/token pool of the deployment `contracts`. Its ERG is storage and never moves. A swap is
+ * refused when it would leave either reserve at or under zero, as the contract refuses it.
+ */
 final case class LithosDexT2TArbPool(state: LDT2TLiquidityPool, contracts: LDT2TContracts, boxId: String)
   extends ArbPool {
 
@@ -195,16 +199,16 @@ final case class LithosDexT2TArbPool(state: LDT2TLiquidityPool, contracts: LDT2T
   override val x: ArbAsset = ArbAsset.token(state.tokenX.toString)
   override val y: ArbAsset = ArbAsset.token(state.tokenY.toString)
 
-  override def quote(amountIn: Long, xIn: Boolean): Long =
-    if (amountIn <= 0L) 0L
-    else Try(state.simSwap(amountIn, xIn)).toOption.filter(_.isExecutable).fold(0L)(_.amountOut)
+  override def quote(amountIn: Long, xIn: Boolean): Long = swap(amountIn, xIn).fold(0L)(_.amountOut)
 
   override def swap(amountIn: Long, xIn: Boolean): Option[ArbSwap] =
     if (amountIn <= 0L) None
     else Try {
       val q = state.simSwap(amountIn, xIn)
       if (!q.isExecutable) None
-      else Some(ArbSwap(this, amountIn, xIn, q.amountOut, copy(state = state.afterSwap(q))))
+      else Some(state.afterSwap(q))
+        .filter(next => next.reservesX > 0L && next.reservesY > 0L)
+        .map(next => ArbSwap(this, amountIn, xIn, q.amountOut, copy(state = next)))
     }.toOption.flatten
 
   override def marginal(xIn: Boolean): Double =

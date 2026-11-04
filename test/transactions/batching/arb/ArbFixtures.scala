@@ -72,15 +72,28 @@ object ArbFixtures {
     LDNodeFixtures.nodeBox(ctx, UTXO(wallet.contract, value), 0, id(seed))
 
   /** `box` as discovery would read it. */
-  def entry(ctx: BlockchainContext, box: NodeBox): ArbPoolEntry =
+  def entry(ctx: BlockchainContext, box: NodeBox): ArbPoolEntry = {
+    val assets = box.assets.map(a => a.tokenId -> a.amount)
     if (box.ergoTree == ErgoDexContracts.NativePoolErgoTree || box.ergoTree == ErgoDexContracts.TokenPoolErgoTree)
       ArbPoolEntry(ErgoDexArbPool(ErgoDexPool.parse(box).get), box)
     else if (box.ergoTree.equalsIgnoreCase(DexContracts(ctx).liquidityPool.ergoTreeHex))
       ArbPoolEntry(LithosDexArbPool(box.toInputUTXO(ctx), DexContracts(ctx)), box)
-    else {
-      val contracts = LDDeployments.verifyT2T(box.ergoTree, box.assets.map(a => a.tokenId -> a.amount)).get
-      ArbPoolEntry(LithosDexT2TArbPool(box.toInputUTXO(ctx), contracts), box)
-    }
+    else LDDeployments.verify(NetworkType.MAINNET, box.ergoTree, assets)
+      .map(contracts => ArbPoolEntry(LithosDexArbPool(box.toInputUTXO(ctx), contracts), box))
+      .getOrElse(ArbPoolEntry(LithosDexT2TArbPool(box.toInputUTXO(ctx), LDDeployments.verifyT2T(box.ergoTree, assets).get), box))
+  }
+
+  /**
+   * BBC's ErgoDEX ERG pool and its LithosDex ERG pool as mainnet held them at height 1,909,293. The LithosDex box
+   * holds 10,000,001 nanoERG, one over its contract's floor, so no swap can take ERG out of it.
+   */
+  lazy val bbcPools: (NodeBox, NodeBox) = {
+    val source = Source.fromResource("arb/bbc-pools.json")
+    try {
+      val doc = new com.google.gson.JsonParser().parse(source.mkString).getAsJsonObject
+      NodeCodecs.box(doc.getAsJsonObject("ergodex")) -> NodeCodecs.box(doc.getAsJsonObject("lithosdex"))
+    } finally source.close()
+  }
 
   /** The index discovery would build at `height` over `boxes`. */
   def index(ctx: BlockchainContext, boxes: Seq[NodeBox], height: Int = 1908200): ArbIndex =

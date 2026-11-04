@@ -137,6 +137,57 @@ class ArbCyclesSpec extends AnyFlatSpec with Matchers with MockitoSugar {
     }
   }
 
+  "A LithosDex ERG pool at its 0.01 ERG floor" should "never be priced into a cycle that takes ERG out of it" in {
+    nodeContext.getClient.execute { ctx =>
+      val (ergoDexBbc, lithosDexBbc) = bbcPools
+      val ld = entry(ctx, lithosDexBbc).pool
+      ld.kind shouldBe ArbPoolKind.LithosDexNative
+      lithosDexBbc.value shouldBe lithosdex.LDHelpers.MIN_RENT + 1
+      ld.swap(1000000000L, xIn = false) shouldBe None
+      ld.quote(1000000000L, xIn = false) shouldBe 0L
+      // ERG in only raises the box, so that side still trades
+      ld.swap(Erg / 100, xIn = true) should not be empty
+      // Live on mainnet, the stage priced this pair and the pool's contract refused its second leg every round
+      val idx = index(ctx, Seq(ergoDexBbc, lithosDexBbc))
+      val pair = idx.routes.find(r => r.hops == Vector(ArbHop(ergoDexBbc.assets.head.tokenId, xIn = true),
+        ArbHop(lithosDexBbc.assets.head.tokenId, xIn = false))).get
+      ArbSearch.best(pair, states(idx), 10 * Erg) shouldBe None
+      var offered = 0
+      ArbSearch.select(idx.routes, states(idx), 10 * Erg, 1000000L, 8, Deadline.now + 1.minute) { _ =>
+        offered += 1
+        true
+      }
+      offered shouldBe 0
+    }
+  }
+
+  it should "take out as much ERG as leaves the box over the floor, and the contract refuses one unit more" in {
+    nodeContext.getClient.execute { ctx =>
+      // 2,000,000 nanoERG of room over the floor
+      val box = canonicalPool(ctx, lithosdex.LDHelpers.MIN_RENT + 2000000L, 10000000000000L)
+      val pool = entry(ctx, box).pool.asInstanceOf[LithosDexArbPool]
+      def out(in: Long): Long = pool.state.simSwap(in, ergIn = false).amountOut
+      // The least LIT whose swap would take the box to the floor or under it
+      var (lo, hi) = (1L, 10000000000000L)
+      while (lo < hi) { val mid = lo + (hi - lo) / 2; if (out(mid) >= 2000000L) hi = mid else lo = mid + 1 }
+      val over = lo
+      pool.swap(over, xIn = false) shouldBe None
+      val edge = pool.swap(over - 1, xIn = false).get
+      edge.after.asInstanceOf[LithosDexArbPool].state.boxValue should be > lithosdex.LDHelpers.MIN_RENT
+
+      def carry(lit: Long) = LDNodeFixtures.nodeBox(ctx, UTXO(wallet.contract, Erg,
+        Seq(work.lithos.mutations.Token(org.ergoplatform.sdk.ErgoId.create(Lit), lit))), 0, id(902)).toInputUTXO(ctx)
+      val input = box.toInputUTXO(ctx)
+      ArbLeg.build(ctx, wallet, edge, input, Seq(carry(over - 1)), wallet.contract, height) should not be null
+      // Built past the check, so the pool's own contract is what refuses it
+      val q = pool.state.simSwap(over, ergIn = false)
+      val crossing = ArbSwap(pool, over, xIn = false, q.amountOut, pool.copy(state = pool.state.afterSwap(q)))
+      val refused = scala.util.Try(ArbLeg.build(ctx, wallet, crossing, input, Seq(carry(over)), wallet.contract, height))
+      refused.isFailure shouldBe true
+      refused.failed.get.getMessage should include("Script reduced to false")
+    }
+  }
+
   "The shipped arb budget" should "hold eight legs of the costliest kind" in {
     nodeContext.getClient.execute { ctx =>
       val a = nativePool(ctx, id(4), id(104), 1000 * Erg, 1000000000000L)
