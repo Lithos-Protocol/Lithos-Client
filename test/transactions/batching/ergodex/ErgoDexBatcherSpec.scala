@@ -16,7 +16,8 @@ import state.synchronization.CompleteMempool
 import support.ErgoDexFixtures._
 import support.{ChainFixtures, FakeNodeContext}
 import transactions.batching.Batcher
-import transactions.candidate.BlockTxMessages.{BlockTxsReady, CandidateTx, ChainFromMempool, IncludeExisting, RequestBlockTxs, Supersede}
+import transactions.batching.tracking.{PoolTracker, ScriptedChain, TrackerFixtures}
+import transactions.candidate.BlockTxMessages.{BlockTxsReady, CandidateTx, ChainFromMempool, IncludeExisting, PrepareBlockTxs, RequestBlockTxs, Supersede}
 import transactions.candidate.CandidateBundle
 
 import java.util.concurrent.atomic.AtomicInteger
@@ -56,7 +57,8 @@ class ErgoDexBatcherSpec extends TestKit(ActorSystem("ergodex-batcher-spec", Erg
                         servesCandidates: Boolean = true, observes: Boolean = true,
                         buildBudgetMs: Long = Batcher.DefaultBuildBudgetMs, extraPool: Option[NodeBox] = None,
                         maxAncestorTxs: Int = BatchingConfig.Default.maxAncestorTxs, scanIntervalMs: Long = 3600000L,
-                        broadcastMempoolOrders: Boolean = BatchingConfig.Default.broadcastMempoolOrders) {
+                        broadcastMempoolOrders: Boolean = BatchingConfig.Default.broadcastMempoolOrders,
+                        tracker: Option[PoolTracker] = None) {
     val api: NodeApi = mock[NodeApi]
     val (nodeContext, _, _) = FakeNodeContext(api, numAddresses = 1)
 
@@ -115,7 +117,7 @@ class ErgoDexBatcherSpec extends TestKit(ActorSystem("ergodex-batcher-spec", Erg
     val source: ActorRef = system.actorOf(Props(new ErgoDexBatcher(nodeContext,
       BatchingConfig.Default.copy(scanIntervalMs = scanIntervalMs, broadcast = broadcast, maxAncestorTxs = maxAncestorTxs,
         broadcastMempoolOrders = broadcastMempoolOrders),
-      servesCandidates, engine.ref, useTrueProp = false, buildBudgetMs)))
+      servesCandidates, engine.ref, useTrueProp = false, buildBudgetMs, tracker)))
 
     def offered(): Seq[CandidateBundle] = {
       val height = heights.incrementAndGet()
@@ -126,6 +128,15 @@ class ErgoDexBatcherSpec extends TestKit(ActorSystem("ergodex-batcher-spec", Erg
 
     def offeredOnceTracked(): Seq[CandidateBundle] =
       awaitAssert({ val bundles = offered(); bundles should not be empty; bundles }, 30.seconds, 250.millis)
+
+    /** A request after the preparation that names its parent on `chain`, as the stratum sends them. */
+    def offeredOn(chain: ScriptedChain): Seq[CandidateBundle] = {
+      val height = heights.incrementAndGet()
+      val requester = TestProbe()
+      requester.send(source, PrepareBlockTxs(height, 8, chain.header(height - 1).id))
+      requester.send(source, RequestBlockTxs(height, 8))
+      requester.expectMsgType[BlockTxsReady].bundles
+    }
 
     def stop(): Unit = system.stop(source)
   }
@@ -233,7 +244,23 @@ class ErgoDexBatcherSpec extends TestKit(ActorSystem("ergodex-batcher-spec", Erg
     f.stop()
   }
 
-  it should "scan once per index height, and again once the index moves" in {
+  "Pool tracking" should "give a candidate the pool box tracked at its parent while the index lists a spent one" in {
+    val chain = new ScriptedChain
+    val start = heights.get
+    chain.extend(start - 2, start + 200)
+    chain.indexed = start
+    chain.scans(IndexedBox(poolBox, "", start - 5, 1L))
+    val f = new Fixture(tracker = Some(TrackerFixtures.tracker(chain)))
+    // The chain no longer holds the box the index lists, so a build reading the node finds no pool
+    f.poolUnspent = false
+    awaitAssert(f.offeredOn(chain) should not be empty, 30.seconds, 250.millis)
+    withClue("a block the tracker was not told of is read from the node, as without tracking: ") {
+      f.offered() shouldBe empty
+    }
+    f.stop()
+  }
+
+  "The source" should "scan once per index height, and again once the index moves" in {
     val f = new Fixture(scanIntervalMs = 100L)
     @volatile var indexed = tip
     when(f.api.indexedHeight()).thenAnswer(_ => Success(BlockchainIndexHeight(indexed, indexed)))
@@ -452,12 +479,13 @@ class ErgoDexBatcherSpec extends TestKit(ActorSystem("ergodex-batcher-spec", Erg
     point.getDependencies.asScala.map(_.getKey) shouldBe Seq(
       com.google.inject.Key.get(classOf[configs.NodeContext]),
       com.google.inject.Key.get(classOf[play.api.Configuration]),
-      com.google.inject.Key.get(classOf[ActorRef], com.google.inject.name.Names.named("transaction-engine")))
+      com.google.inject.Key.get(classOf[ActorRef], com.google.inject.name.Names.named("transaction-engine")),
+      com.google.inject.Key.get(classOf[PoolTracker]))
 
     val (nodeContext, _, _) = FakeNodeContext(mock[NodeApi], numAddresses = 1)
     val engine = TestProbe()
     val batcher = system.actorOf(Props(classOf[ErgoDexBatcher], nodeContext,
-      play.api.Configuration(ErgoDexBatcherSpec.config), engine.ref))
+      play.api.Configuration(ErgoDexBatcherSpec.config), engine.ref, TrackerFixtures.tracker(new ScriptedChain)))
 
     // No scan has run yet, so the first request is answered with nothing
     val requester = TestProbe()

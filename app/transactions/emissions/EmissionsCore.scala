@@ -176,7 +176,7 @@ trait EmissionsCore extends Actor with InjectedActorSupport {
       emissionPreparation.drop(blockHeight)
       rest.applyOrElse(dropped, (_: Any) => ())
 
-    case PrepareBlockTxs(blockHeight, limit) => startCandidateBuild(blockHeight, limit, None)
+    case PrepareBlockTxs(blockHeight, limit, _) => startCandidateBuild(blockHeight, limit, None)
 
     case RequestBlockTxs(blockHeight, limit, refresh) =>
       val replyTo = sender()

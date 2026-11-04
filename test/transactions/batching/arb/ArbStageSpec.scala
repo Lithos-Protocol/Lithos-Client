@@ -5,17 +5,15 @@ import akka.testkit.{TestKit, TestProbe}
 import com.typesafe.config.ConfigFactory
 import configs.{ArbConfig, BatchingConfig}
 import mutations.NodeWallet
-import node.NodeApi
 import node.model._
-import org.mockito.ArgumentMatchers.{any, anyString, eq => same}
-import org.mockito.Mockito.{times, verify, when}
+import org.mockito.ArgumentMatchers.{any, anyString}
+import org.mockito.Mockito.when
 import org.scalatest.BeforeAndAfterAll
 import org.scalatest.flatspec.AnyFlatSpecLike
 import org.scalatest.matchers.should.Matchers
-import org.scalatestplus.mockito.MockitoSugar
 import support.{FakeNodeContext, LDNodeFixtures}
-import transactions.batching.ergodex.ErgoDexContracts
-import transactions.candidate.BlockTxMessages.{BlockTxsReady, CandidateTxsDropped, PrepareBlockTxs, RequestArbTxs}
+import transactions.batching.tracking.{ScriptedChain, TrackerFixtures}
+import transactions.candidate.BlockTxMessages.{BlockTxsReady, PrepareBlockTxs, RequestArbTxs}
 import transactions.engine.wallet.EngineWalletMessages.RefreshBoxes
 import transactions.engine.wallet.EngineWalletState
 
@@ -28,14 +26,16 @@ object ArbStageSpec {
 }
 
 /**
- * The arb stage against a mocked node and a real wallet actor holding the stake. These pin that a round is
- * answered with a signed cycle once discovery has read the block being built on, that discovery reads each
- * block once however many rounds ask, that a refresh rebuilding the same cycle is offered again, that a new
- * parent at the same height is read again, and that a round at a height discovery has not reached gets nothing.
+ * The arb stage on a scripted chain, a real pool tracker and a real wallet actor holding the stake. These pin
+ * that a round is answered with a signed cycle once the tracker has read the block being built on, that a
+ * refresh with nothing changed answers with the same cycles without building them again, that a block moving a
+ * pool is built on its new box, that a new parent at the same height is built on rather than answered from the
+ * last build, and that a round on a block the tracker was never told of gets nothing.
  */
 class ArbStageSpec extends TestKit(ActorSystem("arb-stage-spec", ArbStageSpec.config))
-  with AnyFlatSpecLike with Matchers with BeforeAndAfterAll with MockitoSugar {
+  with AnyFlatSpecLike with Matchers with BeforeAndAfterAll {
   import ArbFixtures._
+  import TrackerFixtures.tx
 
   override def afterAll(): Unit = TestKit.shutdownActorSystem(system)
 
@@ -49,105 +49,86 @@ class ArbStageSpec extends TestKit(ActorSystem("arb-stage-spec", ArbStageSpec.co
       creationOutIndex = 0, inclusionHeight = Some(100), spendingTransaction = None,
       spendingHeight = None, spent = false, onchain = true, scans = Seq(10))
 
-  "The arb stage" should "offer a signed cycle once discovery has read the block, and the same cycle again on a refresh" in {
-    val api = mock[NodeApi]
+  "The arb stage" should "offer a signed cycle on the tracked pools, and the same cycles on a refresh without rebuilding" in {
+    val chain = new ScriptedChain
+    val api = chain.api
     val (nodeContext, _, wallet) = FakeNodeContext(api, numAddresses = 1)
-    val (cheap, dear) = nodeContext.getClient.execute { ctx =>
-      nativePool(ctx, id(1), id(101), 1000 * Erg, 1000000000000L) ->
-        nativePool(ctx, id(2), id(101), 1100 * Erg, 1000000000000L)
+    val (cheap, dear, dearer, dearest) = nodeContext.getClient.execute { ctx =>
+      (nativePool(ctx, id(1), id(101), 1000 * Erg, 1000000000000L),
+        nativePool(ctx, id(2), id(101), 1100 * Erg, 1000000000000L),
+        nativePool(ctx, id(2), id(101), 1200 * Erg, 1000000000000L),
+        nativePool(ctx, id(2), id(101), 1300 * Erg, 1000000000000L))
     }
+    chain.extend(tip - 1, tip)
+    chain.indexed = tip
+    chain.scans(LDNodeFixtures.indexed(cheap, tip - 5), LDNodeFixtures.indexed(dear, tip - 5))
     val boxes = Seq(walletBox(wallet, 12 * Erg), walletBox(wallet, 15 * Erg))
     when(api.indexerEnabled).thenReturn(false)
-    when(api.indexedHeight()).thenReturn(Success(BlockchainIndexHeight(tip, tip)))
     when(api.walletUnspentBoxes(any[ConfirmationRange], any[Paging])).thenAnswer { inv =>
       if (inv.getArgument[Paging](1).offset == 0) Success(boxes) else Success(Seq.empty[WalletBox])
     }
     when(api.boxById(anyString())).thenAnswer { inv =>
       Success(boxes.map(_.box).find(_.boxId == inv.getArgument[String](0)))
     }
-    when(api.unspentBoxesByErgoTree(anyString(), any[Paging], any[SortDirection], any[MempoolOptions])).thenAnswer { inv =>
-      val first = inv.getArgument[Paging](1).offset == 0
-      if (inv.getArgument[String](0) == ErgoDexContracts.NativePoolErgoTree && first)
-        Success(Seq(LDNodeFixtures.indexed(cheap, tip - 5), LDNodeFixtures.indexed(dear, tip - 5)))
-      else Success(Seq.empty[IndexedBox])
-    }
 
     val engine = system.actorOf(Props(new EngineWalletState(nodeContext, configs.WalletConfig.Default, 0, 10 * Erg)))
     engine ! RefreshBoxes
+    val tracker = TrackerFixtures.tracker(chain)
     val stage = system.actorOf(Props(new ArbStage(nodeContext, ArbConfig.Default.copy(enabled = true),
-      BatchingConfig.Default, Set.empty, () => Seq.empty, engine, useTrueProp = false, buildBudgetMs = 10000L,
-      tickMs = 200L)))
+      BatchingConfig.Default, Set.empty, tracker, engine, useTrueProp = false, buildBudgetMs = 10000L)))
     val probe = TestProbe()
 
-    stage ! PrepareBlockTxs(tip + 1, 8)
-    var offered = Seq.empty[Seq[String]]
+    stage ! PrepareBlockTxs(tip + 1, 8, chain.header(tip).id)
+    var first: BlockTxsReady = null
     awaitAssert({
       probe.send(stage, RequestArbTxs(tip + 1, 8, refresh = false, Seq.empty))
-      val reply = probe.expectMsgType[BlockTxsReady]
-      reply.blockHeight shouldBe tip + 1
-      reply.bundles should not be empty
-      offered = reply.bundles.map(_.members.map(_.id))
+      first = probe.expectMsgType[BlockTxsReady]
+      first.blockHeight shouldBe tip + 1
+      first.bundles should not be empty
     }, 30.seconds, 300.millis)
     // A ten percent gap: the stake caps each pass at 10 ERG, so the pair is taken again while it still pays
-    offered.foreach(_.size shouldBe 2)
-    offered.size should be <= 4
+    first.bundles.foreach(_.members.size shouldBe 2)
+    first.bundles.size should be <= 4
+    chain.scanPages.get should be > 0
+    val scanned = chain.scanPages.get
 
-    withClue("a refresh at the same height builds the same cycles, whose stake outputs the wallet already holds: ") {
+    withClue("a refresh with the same stake, basis and parent answers with the build it already made: ") {
       probe.send(stage, RequestArbTxs(tip + 1, 8, refresh = true, Seq.empty))
-      probe.expectMsgType[BlockTxsReady].bundles.map(_.members.map(_.id)) shouldBe offered
+      probe.expectMsgType[BlockTxsReady].bundles should be theSameInstanceAs first.bundles
     }
-    verify(api, times(1)).unspentBoxesByErgoTree(same(ErgoDexContracts.NativePoolErgoTree), any[Paging],
-      any[SortDirection], any[MempoolOptions])
 
-    withClue("a new parent at the same height, or a refused package, has the pools read again: ") {
-      stage ! CandidateTxsDropped(tip + 1, rebuilding = true)
-      awaitAssert(verify(api, times(2)).unspentBoxesByErgoTree(same(ErgoDexContracts.NativePoolErgoTree),
-        any[Paging], any[SortDirection], any[MempoolOptions]), 10.seconds, 200.millis)
-      stage ! CandidateTxsDropped(tip + 1, rebuilding = false)
+    withClue("the next block moves a pool: its new box is read from the block, with no scan: ") {
+      chain.extend(tip + 1, tip + 1)
+      chain.block(tip + 1, tx("t", Seq(dear.boxId), Seq(dearer)))
+      stage ! PrepareBlockTxs(tip + 2, 8, chain.header(tip + 1).id)
       awaitAssert({
-        probe.send(stage, RequestArbTxs(tip + 1, 8, refresh = true, Seq.empty))
-        probe.expectMsgType[BlockTxsReady].bundles.map(_.members.map(_.id)) shouldBe offered
-      }, 10.seconds, 200.millis)
-      verify(api, times(2)).unspentBoxesByErgoTree(same(ErgoDexContracts.NativePoolErgoTree), any[Paging],
-        any[SortDirection], any[MempoolOptions])
+        probe.send(stage, RequestArbTxs(tip + 2, 8, refresh = false, Seq.empty))
+        val next = probe.expectMsgType[BlockTxsReady]
+        next.bundles should not be empty
+        val spent = next.bundles.flatMap(_.members).flatMap(_.inputIds).toSet
+        spent should contain(dearer.boxId)
+        spent should not contain dear.boxId
+      }, 30.seconds, 300.millis)
+      chain.scanPages.get shouldBe scanned
     }
 
-    withClue("a block discovery has not read yet gets no cycles, and costs no scan while the index is behind: ") {
-      // Settle: the wallet checks the stake for the new height meanwhile, so only the pools can be what is missing.
-      // An empty answer cannot be polled for, and several ticks have to pass to show none scans
-      stage ! PrepareBlockTxs(tip + 2, 8)
-      Thread.sleep(1500)
-      probe.send(stage, RequestArbTxs(tip + 2, 8, refresh = false, Seq.empty))
+    withClue("a new parent at the same height that moves the pool elsewhere is built on, not answered from the " +
+      "last build, and undone without a scan: ") {
+      chain.extend(tip + 1, tip + 1, branch = 1)
+      chain.block(tip + 1, tx("u", Seq(dear.boxId), Seq(dearest)))
+      stage ! PrepareBlockTxs(tip + 2, 8, chain.header(tip + 1).id)
+      awaitAssert({
+        probe.send(stage, RequestArbTxs(tip + 2, 8, refresh = true, Seq.empty))
+        val spent = probe.expectMsgType[BlockTxsReady].bundles.flatMap(_.members).flatMap(_.inputIds).toSet
+        spent should contain(dearest.boxId)
+        spent should not contain dearer.boxId
+      }, 30.seconds, 300.millis)
+      chain.scanPages.get shouldBe scanned
+    }
+
+    withClue("a block the tracker was never told of gets no cycles: ") {
+      probe.send(stage, RequestArbTxs(tip + 5, 8, refresh = false, Seq.empty))
       probe.expectMsgType[BlockTxsReady].bundles shouldBe empty
-      verify(api, times(2)).unspentBoxesByErgoTree(same(ErgoDexContracts.NativePoolErgoTree), any[Paging],
-        any[SortDirection], any[MempoolOptions])
     }
-  }
-
-  it should "throw away a discovery that started before a rebuilding drop, and read the pools again" in {
-    val api = mock[NodeApi]
-    val (nodeContext, _, _) = FakeNodeContext(api, numAddresses = 1)
-    val (cheap, dear) = nodeContext.getClient.execute { ctx =>
-      nativePool(ctx, id(1), id(101), 1000 * Erg, 1000000000000L) ->
-        nativePool(ctx, id(2), id(101), 1100 * Erg, 1000000000000L)
-    }
-    // The first scan waits until released, so the drop lands while that discovery is out
-    val gate = new java.util.concurrent.CountDownLatch(1)
-    val scans = new java.util.concurrent.atomic.AtomicInteger(0)
-    when(api.indexedHeight()).thenReturn(Success(BlockchainIndexHeight(tip, tip)))
-    when(api.unspentBoxesByErgoTree(anyString(), any[Paging], any[SortDirection], any[MempoolOptions])).thenAnswer { inv =>
-      if (inv.getArgument[String](0) == ErgoDexContracts.NativePoolErgoTree && inv.getArgument[Paging](1).offset == 0) {
-        if (scans.incrementAndGet() == 1) gate.await(10, java.util.concurrent.TimeUnit.SECONDS)
-        Success(Seq(LDNodeFixtures.indexed(cheap, tip - 5), LDNodeFixtures.indexed(dear, tip - 5)))
-      } else Success(Seq.empty[IndexedBox])
-    }
-    val stage = system.actorOf(Props(new ArbStage(nodeContext, ArbConfig.Default.copy(enabled = true),
-      BatchingConfig.Default, Set.empty, () => Seq.empty, TestProbe().ref, useTrueProp = false, buildBudgetMs = 10000L,
-      tickMs = 200L)))
-    stage ! PrepareBlockTxs(tip + 1, 8)
-    awaitAssert(scans.get shouldBe 1, 10.seconds, 100.millis)
-    stage ! CandidateTxsDropped(tip + 1, rebuilding = true)
-    gate.countDown()
-    awaitAssert(scans.get shouldBe 2, 10.seconds, 100.millis)
   }
 }

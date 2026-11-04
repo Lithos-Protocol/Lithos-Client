@@ -112,7 +112,7 @@ class StorageRentSource(nodeContext: NodeContext,
 
     // ── the candidate path ──────────────────────────────────────────────────
 
-    case PrepareBlockTxs(blockHeight, _) => startBuild(blockHeight, None)
+    case PrepareBlockTxs(blockHeight, _, _) => startBuild(blockHeight, None)
 
     case RequestBlockTxs(blockHeight, _, refresh) =>
       val replyTo = sender()

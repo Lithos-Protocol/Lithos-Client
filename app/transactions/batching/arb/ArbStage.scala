@@ -1,11 +1,12 @@
 package transactions.batching.arb
 
-import akka.actor.{Actor, ActorRef, Cancellable}
+import akka.actor.{Actor, ActorRef}
 import akka.pattern.ask
 import akka.util.Timeout
-import api.IndexedPool
 import configs.{ArbConfig, BatchingConfig, NodeContext}
 import org.slf4j.{Logger, LoggerFactory}
+import transactions.batching.lithosdex.LDDeployments
+import transactions.batching.tracking.{PoolDeployment, PoolTracker}
 import transactions.candidate.BlockTxMessages.{BlockTxsReady, CandidateTxsDropped, PrepareBlockTxs, RequestArbTxs}
 import transactions.candidate.{CandidateBundle, CandidateCapital}
 import transactions.engine.wallet.EngineWalletMessages.{ArbStake, GetArbStake, ReserveStakeSuccessor}
@@ -20,24 +21,21 @@ import scala.util.{Failure, Success, Try}
  * they admitted and answers with one bundle per cycle. Started only while `batching.arb` is active, so with arb
  * off none of this runs.
  *
- * Discovery reads the pools once per indexed block, on a worker. A build waits for nothing on the node: the
- * stake comes from the wallet, which checked it for the height, and pools come from the last discovery, which
- * must have read the block the candidate builds on. Either missing means no arb for that request; a later
- * refresh at the same height tries again.
+ * Pools come from the pool tracker, which reads each block the candidate builds on as it arrives; a build waits
+ * for it at most a quarter of its budget. The stake comes from the wallet, which checked it for the height. Either
+ * missing means no arb for that request; a later refresh at the same height tries again. A build whose inputs
+ * all match the last one's answers with that build's cycles, held again in the wallet, rather than signing anew.
  *
- * @param ldPools        the LithosDex pools `LDPoolIndex` verified; reading it starts its own rebuild per tip
- * @param buildBudgetMs  how long one build may run; selection stops at half of it
- * @param tickMs         how often discovery is retried while it is behind the height being built
+ * @param buildBudgetMs how long one build may run; selection stops at half of it
  */
 class ArbStage(nodeContext: NodeContext,
                arb: ArbConfig,
                ergoDex: BatchingConfig,
                deniedPools: Set[String],
-               ldPools: () => Seq[IndexedPool],
+               tracker: PoolTracker,
                engine: ActorRef,
                useTrueProp: Boolean,
-               buildBudgetMs: Long,
-               tickMs: Long = ArbStage.TickMs) extends Actor {
+               buildBudgetMs: Long) extends Actor {
 
   import ArbStage._
 
@@ -46,142 +44,119 @@ class ArbStage(nodeContext: NodeContext,
   /** Delivers completions only, kept off the worker so a full worker cannot drop one. */
   private val completions: ExecutionContext = context.dispatcher
 
-  /** The last discovery's pools and routes. */
+  /** The last build's pool index, which the next one updates rather than rebuilds. */
   private var index: Option[ArbIndex] = None
-  /** The newest height a block has been built on, which discovery has to reach. */
-  private var wanted: Int = 0
-  private var discovering = false
+  /** The last complete build, which a build with the same inputs answers with. */
+  private var last: Option[LastBuild] = None
   private var building = false
-  private var ticker: Option[Cancellable] = None
-  /** Pool and route counts and the route cap last logged, so discovery logs only when they change. */
+  /** Pool and route counts and the route cap last logged, so the index logs only when they change. */
   private var logged: (Int, Int, Boolean) = (-1, -1, false)
-  /** The height the last failed discovery was reaching for, so a failure repeating each tick warns once. */
-  private var failedFor: Int = 0
-  /** Counts rebuilding drops; a discovery started before the latest one is thrown away. */
-  private var generation: Int = 0
 
-  override def preStart(): Unit = {
+  override def preStart(): Unit =
     logger.info(s"ArbStage started: stakeNanoErg=${arb.stakeNanoErg}, minProfitNanoErg=${arb.minProfitNanoErg}, " +
       s"buildBudgetMs=$buildBudgetMs")
-    ticker = Some(context.system.scheduler.scheduleWithFixedDelay(
-      tickMs.milliseconds, tickMs.milliseconds, self, DiscoveryTick)(context.dispatcher))
-  }
-
-  override def postStop(): Unit = ticker.foreach(_.cancel())
 
   override def receive: Receive = {
 
-    // Starts the wallet's stake check and discovery for the new height before any round asks.
-    case PrepareBlockTxs(blockHeight, _) =>
+    // Starts the wallet's stake check and the tracker's read of the parent before any round asks
+    case PrepareBlockTxs(blockHeight, _, parentId) =>
       engine ! GetArbStake(blockHeight)
-      wanted = math.max(wanted, blockHeight - 1)
-      discoverIfBehind()
+      Try(tracker.follow(blockHeight - 1, parentId)).failed
+        .foreach(ex => logger.warn(s"Could not pass block $parentId to pool tracking: ${ex.getMessage}"))
 
     // Answer to the stake check started above; the build asks again for the one it uses.
     case ArbStake(_) => ()
 
-    case DiscoveryTick => discoverIfBehind()
-
-    // Read before a rebuilding drop, so possibly from the block that drop replaced: read again
-    case Discovered(startedIn, _) if startedIn != generation =>
-      discovering = false
-      discoverIfBehind()
-
-    case Discovered(_, result) =>
-      discovering = false
-      result match {
-        case Success(Some(found)) =>
-          if (index.forall(_.height <= found.height)) index = Some(found)
-          if ((found.pools.size, found.routes.size, found.cut) != logged) {
-            logged = (found.pools.size, found.routes.size, found.cut)
-            logger.info(s"Arb discovery at height ${found.height}: ${found.pools.size} pool(s) on " +
-              s"${found.routes.size} route(s)")
-            if (found.cut) logger.warn(s"Arb discovery found more than ${ArbDiscovery.MaxRoutes} routes; the " +
-              "longest are left out")
-          }
-          // A block that arrived while it read is read now, not at the next tick
-          discoverIfBehind()
-        case Success(None) => ()
-        case Failure(ex) =>
-          // Retried every tick while behind, so one warning per height
-          if (failedFor != wanted) logger.warn(s"Arb discovery failed, offering no cycles until it reads the " +
-            s"block at $wanted: ${ex.getMessage}")
-          failedFor = wanted
-      }
-
     case RequestArbTxs(blockHeight, limit, _, basis) =>
       val replyTo = sender()
-      wanted = math.max(wanted, blockHeight - 1)
-      discoverIfBehind()
-      index.filter(_.height == blockHeight - 1) match {
-        case _ if limit <= 0 => replyTo ! BlockTxsReady(blockHeight, Seq.empty)
-        case _ if building =>
-          logger.info(s"An arb build is still running; offering no cycles for block $blockHeight")
-          replyTo ! BlockTxsReady(blockHeight, Seq.empty)
-        case None =>
-          logger.debug(s"No arb discovery for block $blockHeight yet; offering no cycles")
-          replyTo ! BlockTxsReady(blockHeight, Seq.empty)
-        case Some(found) =>
-          building = true
-          offMailbox(buildFor(found, blockHeight, limit, basis))(result => Built(blockHeight, replyTo, result))
+      if (limit <= 0) replyTo ! BlockTxsReady(blockHeight, Seq.empty)
+      else if (building) {
+        logger.info(s"An arb build is still running; offering no cycles for block $blockHeight")
+        replyTo ! BlockTxsReady(blockHeight, Seq.empty)
+      } else {
+        building = true
+        val (previous, previousBuild) = (index, last)
+        offMailbox(buildFor(previous, previousBuild, blockHeight, limit, basis))(result =>
+          Built(blockHeight, replyTo, result))
       }
 
     case Built(blockHeight, replyTo, result) =>
       building = false
       val bundles = result match {
-        case Success(found) => found
+        case Success(outcome) =>
+          outcome.index.foreach { found =>
+            if (index.forall(_.height <= found.height)) index = Some(found)
+            if ((found.pools.size, found.routes.size, found.cut) != logged) {
+              logged = (found.pools.size, found.routes.size, found.cut)
+              logger.info(s"Arb pools at height ${found.height}: ${found.pools.size} pool(s) on " +
+                s"${found.routes.size} route(s)")
+              if (found.cut) logger.warn(s"Arb found more than ${ArbDiscovery.MaxRoutes} routes; the longest are left out")
+            }
+          }
+          outcome.build.foreach(b => last = Some(b))
+          outcome.bundles
         case Failure(ex) =>
           logger.warn(s"Arb build for block $blockHeight failed, offering no cycles: ${ex.getMessage}")
           Seq.empty[CandidateBundle]
       }
       replyTo ! BlockTxsReady(blockHeight, bundles)
 
-    // A new parent at the same height, or a package the node refused: the pools read for that height may be
-    // spent, so they are read again. A stake output reserved for a block that never came is the wallet's to drop.
-    case CandidateTxsDropped(blockHeight, rebuilding) =>
-      if (rebuilding && index.forall(_.height == blockHeight - 1)) {
-        index = None
-        generation += 1
-        discoverIfBehind()
-      }
+    // The tracker follows a new parent through the next PrepareBlockTxs, and the wallet drops a reserved stake
+    // output whose block never came
+    case CandidateTxsDropped(_, _) => ()
   }
 
-  /** Starts discovery when the last one read an older block than the newest one built on. */
-  private def discoverIfBehind(): Unit =
-    if (!discovering && wanted > 0 && index.forall(_.height < wanted)) {
-      discovering = true
-      val (atLeast, startedIn) = (wanted, generation)
-      offMailbox(nodeContext.getClient.execute(ctx =>
-        ArbDiscovery.discover(nodeContext.getNodeApi, ctx, ergoDex, deniedPools, ldPools(), atLeast, logger)))(
-        Discovered(startedIn, _))
-    }
-
-  /** Cycles for `blockHeight` on `found`, built on the stake the wallet checked for that height. */
-  private def buildFor(found: ArbIndex, blockHeight: Int, limit: Int, basisBundles: Seq[CandidateBundle])
-  : Seq[CandidateBundle] = {
+  /** Cycles for `blockHeight`, on the pools as of its parent and the stake the wallet checked for that height. */
+  private def buildFor(previous: Option[ArbIndex], previousBuild: Option[LastBuild], blockHeight: Int, limit: Int,
+                       basisBundles: Seq[CandidateBundle]): Outcome = {
     val started = Deadline.now
-    Try(Await.result((engine ? GetArbStake(blockHeight))(AskTimeout).mapTo[ArbStake], AskTimeout.duration)) match {
-      case Success(ArbStake(Some(stake))) =>
-        val basis = ArbBasis.of(basisBundles)
-        val wallet = nodeContext.getNodeWallet
-        val maxIn = math.min(arb.stakeNanoErg, stake.value - ArbLeg.MinCarryValue)
-        def reserve(boxId: String): Boolean = Try(Await.result(
-          (engine ? ReserveStakeSuccessor(stake.boxId, boxId, blockHeight))(AskTimeout).mapTo[Boolean],
-          AskTimeout.duration)).getOrElse(false)
-        val bundles = nodeContext.getClient.execute(ctx => ArbCycles.build(ctx, wallet, found, basis, stake,
-          blockHeight, limit, maxIn, math.max(arb.minProfitNanoErg, MinProfitOutput),
-          CandidateCapital.collectionContract(wallet, useTrueProp), started + (buildBudgetMs / 2).milliseconds,
-          started + buildBudgetMs.milliseconds, reserve))
-        if (bundles.nonEmpty)
-          logger.info(s"Arb offers ${bundles.size} cycle(s) for block $blockHeight, " +
-            s"${bundles.map(_.capital.map(_.value).sum).sum} nanoERG of profit")
-        bundles
-      case Success(ArbStake(None)) =>
-        logger.debug(s"No arb stake checked for block $blockHeight yet; offering no cycles")
-        Seq.empty
-      case Failure(ex) =>
-        logger.warn(s"The wallet did not answer for the arb stake for block $blockHeight: ${ex.getMessage}")
-        Seq.empty
+    // A quarter of the budget at most, so selection, which stops at half, keeps at least a quarter
+    tracker.at(blockHeight - 1, (buildBudgetMs / 4).milliseconds) match {
+      case None =>
+        logger.debug(s"Pool tracking has not read the parent of block $blockHeight; offering no cycles")
+        Outcome(None, None, Seq.empty)
+      case Some(tracked) =>
+        val nodeApi = nodeContext.getNodeApi
+        val found = nodeContext.getClient.execute(ctx => ArbDiscovery.index(ctx, tracked, previous, ergoDex,
+          deniedPools, {
+            case PoolDeployment.LithosDexNative(c) => LDDeployments.vaultStands(nodeApi, c)
+            case PoolDeployment.LithosDexToken(c) => LDDeployments.vaultStands(nodeApi, c)
+            case _ => true
+          }))
+        Try(Await.result((engine ? GetArbStake(blockHeight))(AskTimeout).mapTo[ArbStake], AskTimeout.duration)) match {
+          case Success(ArbStake(Some(stake))) =>
+            val basis = ArbBasis.of(basisBundles)
+            val maxIn = math.min(arb.stakeNanoErg, stake.value - ArbLeg.MinCarryValue)
+            val minProfit = math.max(arb.minProfitNanoErg, MinProfitOutput)
+            val key = BuildKey(blockHeight, tracked.headerId, stake.boxId, basis, limit, maxIn, minProfit)
+            def reserve(boxId: String): Boolean = Try(Await.result(
+              (engine ? ReserveStakeSuccessor(stake.boxId, boxId, blockHeight))(AskTimeout).mapTo[Boolean],
+              AskTimeout.duration)).getOrElse(false)
+            previousBuild.filter(b => b.key == key && b.routes.eq(found.routes) && b.reserved.forall(reserve)) match {
+              case Some(same) => Outcome(Some(found), Some(same), same.bundles)
+              case None =>
+                val wallet = nodeContext.getNodeWallet
+                val (selectUntil, buildUntil) = (started + (buildBudgetMs / 2).milliseconds,
+                  started + buildBudgetMs.milliseconds)
+                var reserved = Vector.empty[String]
+                val bundles = nodeContext.getClient.execute(ctx => ArbCycles.build(ctx, wallet, found, basis, stake,
+                  blockHeight, limit, maxIn, minProfit, CandidateCapital.collectionContract(wallet, useTrueProp),
+                  selectUntil, buildUntil, id => { val held = reserve(id); if (held) reserved :+= id; held }))
+                if (bundles.nonEmpty)
+                  logger.info(s"Arb offers ${bundles.size} cycle(s) for block $blockHeight, " +
+                    s"${bundles.map(_.capital.map(_.value).sum).sum} nanoERG of profit")
+                // A build a deadline cut short is not reused: a later one with time to spare may take more cycles
+                val complete = !selectUntil.isOverdue()
+                Outcome(Some(found), if (complete) Some(LastBuild(key, found.routes, reserved, bundles)) else None,
+                  bundles)
+            }
+          case Success(ArbStake(None)) =>
+            logger.debug(s"No arb stake checked for block $blockHeight yet; offering no cycles")
+            Outcome(Some(found), None, Seq.empty)
+          case Failure(ex) =>
+            logger.warn(s"The wallet did not answer for the arb stake for block $blockHeight: ${ex.getMessage}")
+            Outcome(Some(found), None, Seq.empty)
+        }
     }
   }
 
@@ -193,21 +168,27 @@ class ArbStage(nodeContext: NodeContext,
 
 object ArbStage {
 
-  /** How often discovery is retried while behind. A retry costs one indexed-height read. */
-  final val TickMs = 2000L
-
   /** How long a build waits on the wallet for the stake, or to hold a stake output. */
   private[arb] final val AskTimeout: Timeout = Timeout(2.seconds)
 
   /** The least profit a cycle can take, since its profit needs an output of its own. */
   final val MinProfitOutput: Long = UTXO.MIN_CHANGE
 
-  private[arb] case object DiscoveryTick
+  /** Everything a build's cycles follow from besides the pool states, which `headerId` and the basis fix. */
+  private[arb] final case class BuildKey(blockHeight: Int, headerId: String, stakeId: String, basis: ArbBasis,
+                                         limit: Int, maxIn: Long, minProfit: Long)
 
-  /** @param generation the stage's drop count when the discovery started */
-  private[arb] final case class Discovered(generation: Int, result: Try[Option[ArbIndex]])
+  /**
+   * A complete build: its key, the routes it priced, the stake outputs it had the wallet hold, in order, and the
+   * cycles it offered.
+   */
+  private[arb] final case class LastBuild(key: BuildKey, routes: Vector[ArbRoute], reserved: Vector[String],
+                                          bundles: Seq[CandidateBundle])
 
-  private[arb] final case class Built(blockHeight: Int, replyTo: ActorRef, result: Try[Seq[CandidateBundle]])
+  /** A build's result: the index it read, the build to reuse next time, and the cycles it offers. */
+  private[arb] final case class Outcome(index: Option[ArbIndex], build: Option[LastBuild], bundles: Seq[CandidateBundle])
+
+  private[arb] final case class Built(blockHeight: Int, replyTo: ActorRef, result: Try[Outcome])
 
   /** A build's budget: a third of a batcher's, which leaves the arb stage's answer inside the source deadline. */
   def buildBudgetMs(batcherBudgetMs: Long): Long = math.max(1L, batcherBudgetMs / 3L)

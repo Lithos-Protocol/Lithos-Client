@@ -1,113 +1,123 @@
 package transactions.batching.arb
 
-import api.IndexedPool
-import configs.{BatchingConfig, VerifiedPool}
-import node.NodeApi
-import node.model._
-import org.mockito.ArgumentMatchers.{any, anyString, eq => same}
-import org.mockito.Mockito.{never, verify, when}
+import configs.BatchingConfig
+import lithosdex.contracts.LDT2TContracts
+import node.model.NodeBox
+import org.ergoplatform.sdk.ErgoId
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
-import org.scalatestplus.mockito.MockitoSugar
-import org.slf4j.LoggerFactory
-import support.{FakeNodeContext, LDNodeFixtures}
-import transactions.batching.ergodex.ErgoDexContracts
-import transactions.batching.lithosdex.{DexContracts, LDDeployments}
-
-import scala.util.Success
+import support.FakeNodeContext
+import transactions.batching.tracking.TrackerFixtures.{shapes, tx}
+import transactions.batching.tracking.{PoolDeployment, TrackedBox, TrackedPools}
 
 /**
- * Discovery against a mocked node: ErgoDEX pools from the two script scans, LithosDex pools from the pool
- * index's list with each box read by its NFT. These pin which pools make the index, that a stale or moving
- * index gives none, and that one behind the height asked for costs no scan.
+ * Discovery from the tracked pools, with no node: which pools make the index, that a LithosDex pool needs its
+ * vault read as standing once, and that a block moving no pool's box, or moving one, re-reads only what changed.
  */
-class ArbDiscoverySpec extends AnyFlatSpec with Matchers with MockitoSugar {
+class ArbDiscoverySpec extends AnyFlatSpec with Matchers {
   import ArbFixtures._
 
   private val tip = 1908200
-  private val logger = LoggerFactory.getLogger("ArbDiscoverySpec")
-
-  private def ldPool(nft: String, box: NodeBox, n2t: Option[lithosdex.contracts.LDContracts],
-                     t2t: Option[lithosdex.contracts.LDT2TContracts]): IndexedPool =
-    IndexedPool(if (n2t.isDefined) VerifiedPool.Kind.N2T else VerifiedPool.Kind.T2T, nft, box.boxId, tip - 3,
-      None, "", 0L, 0L, 0L, 0L, 0L, Seq.empty, 0L, "", "", verified = false, None, n2t, t2t)
-
-  private case class Node(api: NodeApi, ldPools: Seq[IndexedPool], boxes: Map[String, NodeBox])
+  private val (nodeContext, _, _) = FakeNodeContext(numAddresses = 1)
 
   /**
    * Two ErgoDEX pools of one token, one too old and one denied; an ErgoDEX RSN pool; the canonical ERG:LIT pool
-   * and the LIT/RSN token pool, each listed with its deployment.
+   * and the LIT/RSN token pool.
    */
-  private def node(heights: Seq[BlockchainIndexHeight] = Seq(BlockchainIndexHeight(tip, tip))): Node = {
-    val api = mock[NodeApi]
-    val (nodeContext, _, _) = FakeNodeContext(api, numAddresses = 1)
-    nodeContext.getClient.execute { ctx =>
-      val boxes = Map(
-        "cheap" -> nativePool(ctx, id(1), id(101), 1000 * Erg, 1000000000000L),
-        "dear" -> nativePool(ctx, id(2), id(101), 1100 * Erg, 1000000000000L),
-        "old" -> nativePool(ctx, id(3), id(101), 1200 * Erg, 1000000000000L),
-        "denied" -> nativePool(ctx, id(4), id(101), 1300 * Erg, 1000000000000L),
-        "rsn" -> nativePool(ctx, id(5), Rsn, 2000 * Erg, 10000L),
-        "canonical" -> canonicalPool(ctx, 100000 * Erg, 10000000000000L),
-        "litRsn" -> litRsnPool)
-      val height = heights.iterator
-      var last = heights.head
-      when(api.indexedHeight()).thenAnswer(_ => { if (height.hasNext) last = height.next(); Success(last) })
-      when(api.unspentBoxesByErgoTree(anyString(), any[Paging], any[SortDirection], any[MempoolOptions])).thenAnswer { inv =>
-        val first = inv.getArgument[Paging](1).offset == 0
-        if (inv.getArgument[String](0) == ErgoDexContracts.NativePoolErgoTree && first)
-          Success(Seq(LDNodeFixtures.indexed(boxes("cheap"), tip - 5), LDNodeFixtures.indexed(boxes("dear"), tip - 5),
-            LDNodeFixtures.indexed(boxes("old"), tip - BatchingConfig.Default.maxPoolAgeBlocks - 1),
-            LDNodeFixtures.indexed(boxes("denied"), tip - 5), LDNodeFixtures.indexed(boxes("rsn"), tip - 5)))
-        else Success(Seq.empty[IndexedBox])
-      }
-      when(api.unspentBoxesByTokenId(anyString(), any[Paging], any[SortDirection], any[MempoolOptions])).thenAnswer { inv =>
-        val nft = inv.getArgument[String](0)
-        Success(boxes.values.filter(_.assets.headOption.exists(_.tokenId == nft)).map(LDNodeFixtures.indexed(_, tip - 3)).toSeq)
-      }
-      val t2t = LDDeployments.verifyT2T(litRsnPool.ergoTree, litRsnPool.assets.map(a => a.tokenId -> a.amount))
-      Node(api, Seq(ldPool(CanonicalNft, boxes("canonical"), Some(DexContracts(ctx)), None),
-        ldPool(litRsnPool.assets.head.tokenId, litRsnPool, None, t2t)), boxes)
-    }
+  private lazy val boxes: Map[String, NodeBox] = nodeContext.getClient.execute { ctx =>
+    Map(
+      "cheap" -> nativePool(ctx, id(1), id(101), 1000 * Erg, 1000000000000L),
+      "dear" -> nativePool(ctx, id(2), id(101), 1100 * Erg, 1000000000000L),
+      "old" -> nativePool(ctx, id(3), id(101), 1200 * Erg, 1000000000000L),
+      "denied" -> nativePool(ctx, id(4), id(101), 1300 * Erg, 1000000000000L),
+      "rsn" -> nativePool(ctx, id(5), Rsn, 2000 * Erg, 10000L),
+      "canonical" -> canonicalPool(ctx, 100000 * Erg, 10000000000000L),
+      "litRsn" -> litRsnPool)
   }
 
-  private def discover(n: Node, atLeast: Int = tip, ldPools: Option[Seq[IndexedPool]] = None): Option[ArbIndex] = {
-    val (nodeContext, _, _) = FakeNodeContext(n.api, numAddresses = 1)
-    nodeContext.getClient.execute(ctx => ArbDiscovery.discover(n.api, ctx, BatchingConfig.Default,
-      Set(id(4)), ldPools.getOrElse(n.ldPools), atLeast, logger))
-  }
+  private def tracked: TrackedPools = TrackedPools.seeded(tip, "h", boxes.toSeq.map { case (name, box) =>
+    val included = if (name == "old") tip - BatchingConfig.Default.maxPoolAgeBlocks - 1 else tip - 5
+    shapes.read(box, included).get
+  }, cut = false)
 
-  "Discovery" should "index ErgoDEX pools from the scans and LithosDex pools by their NFT, less old and denied pools" in {
-    val n = node()
-    val found = discover(n).get
-    found.height shouldBe tip
+  private def discover(state: TrackedPools, previous: Option[ArbIndex] = None,
+                       stands: PoolDeployment => Boolean = _ => true): ArbIndex =
+    nodeContext.getClient.execute(ctx => ArbDiscovery.index(ctx, state, previous, BatchingConfig.Default,
+      Set(id(4)), stands))
+
+  "Discovery" should "index tracked ErgoDEX and LithosDex pools, less old and denied ones" in {
+    val found = discover(tracked)
+    (found.height, found.headerId) shouldBe (tip -> "h")
     found.pools.keySet shouldBe Set(id(1), id(2), id(5), CanonicalNft, litRsnPool.assets.head.tokenId)
     found.pools.values.map(_.pool.kind).toSet shouldBe Set(ArbPoolKind.ErgoDexNative, ArbPoolKind.LithosDexNative,
       ArbPoolKind.LithosDexToken)
-    found.pools(CanonicalNft).box.boxId shouldBe n.boxes("canonical").boxId
+    found.pools(CanonicalNft).box.boxId shouldBe boxes("canonical").boxId
     // The pair both ways, and the triangle through the LIT hub both ways
     found.routes.map(_.hops.size).sorted shouldBe Vector(2, 2, 3, 3)
     found.cut shouldBe false
   }
 
-  it should "leave out a LithosDex pool whose box is not at its deployment's tree" in {
-    val n = node()
-    val misfiled = n.ldPools.map(p => if (p.nft == CanonicalNft) p.copy(n2t = None, t2t = n.ldPools(1).t2t) else p)
-    discover(n, ldPools = Some(misfiled)).get.pools.keySet should not contain CanonicalNft
+  it should "leave out a LithosDex pool whose vault does not stand, and read a standing vault once" in {
+    var reads = 0
+    val noCanonical: PoolDeployment => Boolean = {
+      case PoolDeployment.LithosDexNative(_) => reads += 1; false
+      case _ => reads += 1; true
+    }
+    val first = discover(tracked, stands = noCanonical)
+    first.parsed.keySet should not contain CanonicalNft
+    // Parsed, though without ERG:LIT no cycle passes through it
+    first.parsed.keySet should contain(litRsnPool.assets.head.tokenId)
+    reads shouldBe 2
+    // The token pool's vault was kept as standing; the canonical one is asked again
+    val second = discover(tracked, Some(first), noCanonical)
+    reads shouldBe 3
+    // The token pool's box moves, so it is parsed again, but its vault is not read again
+    val rsnNft = litRsnPool.assets.head.tokenId
+    val movedRsn = shapes.read(litRsnPool, tip - 5).get.copy(box = litRsnPool.copy(boxId = "aa" * 32))
+    discover(TrackedPools.seeded(tip, "h", tracked.boxes.values.filterNot(_.nft == rsnNft).toSeq :+ movedRsn,
+      cut = false), Some(second), noCanonical)
+    reads shouldBe 4
+    withClue("a vault read that throws leaves its pool out without failing discovery: ") {
+      // Without the LIT hub the RSN pool closes no cycle, so only the pair is left
+      discover(tracked, stands = _ => throw new RuntimeException("node down")).pools.keySet shouldBe Set(id(1), id(2))
+    }
   }
 
-  it should "give nothing when the index moved while it read, or is behind the chain" in {
-    discover(node(Seq(BlockchainIndexHeight(tip, tip), BlockchainIndexHeight(tip + 1, tip + 1)))) shouldBe None
-    val behind = node(Seq(BlockchainIndexHeight(tip - 1, tip)))
-    discover(behind) shouldBe None
-    verify(behind.api, never()).unspentBoxesByErgoTree(same(ErgoDexContracts.NativePoolErgoTree), any[Paging],
-      any[SortDirection], any[MempoolOptions])
+  it should "read at most a few new vaults per build" in {
+    // Token pools under made-up deployments, each its own vault; the vault reads come before any box is parsed
+    val prov = ErgoId.create(id(900))
+    val pools = (1 to ArbDiscovery.MaxVaultReads + 3).map { i =>
+      val nft = id(800 + i)
+      TrackedBox(litRsnPool.copy(boxId = id(700 + i),
+        assets = litRsnPool.assets.updated(0, litRsnPool.assets.head.copy(tokenId = nft))), tip - 5,
+        PoolDeployment.LithosDexToken(LDT2TContracts(ErgoId.create(nft), ErgoId.create(id(600 + i)), prov)))
+    }
+    var reads = 0
+    discover(TrackedPools.seeded(tip, "h", pools, cut = false), stands = _ => { reads += 1; false })
+    reads shouldBe ArbDiscovery.MaxVaultReads
   }
 
-  it should "cost no scan while the index is below the height asked for" in {
-    val n = node()
-    discover(n, atLeast = tip + 1) shouldBe None
-    verify(n.api, never()).unspentBoxesByErgoTree(anyString(), any[Paging], any[SortDirection], any[MempoolOptions])
-    verify(n.api, never()).unspentBoxesByTokenId(anyString(), any[Paging], any[SortDirection], any[MempoolOptions])
+  it should "keep an unmoved pool's parsed state and the routes, and re-read only a pool that moved" in {
+    val first = discover(tracked)
+    val quiet = tracked.applied(tip + 1, "h1", "h", Seq.empty, shapes, 1000)
+    val same = discover(quiet, Some(first))
+    same.routes should be theSameInstanceAs first.routes
+    same.pools(id(1)) should be theSameInstanceAs first.pools(id(1))
+    same.headerId shouldBe "h1"
+
+    val moved = nodeContext.getClient.execute(ctx => nativePool(ctx, id(1), id(101), 1010 * Erg, 990000000000L))
+    val traded = quiet.applied(tip + 2, "h2", "h1", Seq(tx("t", Seq(boxes("cheap").boxId), Seq(moved))), shapes, 1000)
+    val next = discover(traded, Some(same))
+    next.routes should be theSameInstanceAs first.routes
+    next.pools(id(1)).box.boxId shouldBe moved.boxId
+    next.pools(id(2)) should be theSameInstanceAs first.pools(id(2))
+
+    withClue("a new pool changes the set, so the routes are enumerated again: ") {
+      val added = nodeContext.getClient.execute(ctx => nativePool(ctx, id(6), Rsn, 3000 * Erg, 10000L))
+      val grown = traded.applied(tip + 3, "h3", "h2", Seq(tx("t2", Seq.empty, Seq(added))), shapes, 1000)
+      val wider = discover(grown, Some(next))
+      wider.routes should not be theSameInstanceAs(first.routes)
+      wider.pools.keySet should contain(id(6))
+    }
   }
 }

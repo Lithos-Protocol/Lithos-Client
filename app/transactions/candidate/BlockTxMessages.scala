@@ -117,8 +117,11 @@ object BlockTxMessages {
     }
   }
 
-  /** Starts source construction for a height and caches the result for collection. */
-  case class PrepareBlockTxs(blockHeight: Int, limit: Int)
+  /**
+   * Starts source construction for a height and caches the result for collection. `parentId` is the block the
+   * candidate builds on, at `blockHeight - 1`; empty where a sender does not know it.
+   */
+  case class PrepareBlockTxs(blockHeight: Int, limit: Int, parentId: String = "")
 
   /** Collects source offers. Refresh rebuilds mempool-dependent work while preserving height-held wallet funding. */
   case class RequestBlockTxs(blockHeight: Int, limit: Int, refresh: Boolean = false)

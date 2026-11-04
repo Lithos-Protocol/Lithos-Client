@@ -496,7 +496,7 @@ class CandidateBuilder(client: ErgoClient,
   private def prepareBlockTxs(height: Int): Unit =
     if (config.blockTransactions)
       askedSources.foreach(source =>
-        source.ref ! PrepareBlockTxs(height, limitsFor(source.name).maxTxs))
+        source.ref ! PrepareBlockTxs(height, limitsFor(source.name).maxTxs, parentId))
 
   /** Reports bundles rejected by source or package admission. */
   private def logRefusals(where: String, height: Int, refused: Seq[CandidateRefusal]): Unit =

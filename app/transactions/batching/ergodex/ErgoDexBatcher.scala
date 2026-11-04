@@ -8,6 +8,7 @@ import org.ergoplatform.appkit.BlockchainContext
 import play.api.Configuration
 import state.synchronization.CompleteMempool
 import transactions.batching.Batcher.{BroadcastResult, Tracked}
+import transactions.batching.tracking.{PoolDeployment, PoolTracker, TrackedPools}
 import transactions.batching.{Batcher, BatchingMempool}
 import transactions.candidate.BlockTxMessages.CandidateTx
 import transactions.candidate.CandidateBundle
@@ -22,17 +23,21 @@ class ErgoDexBatcher(nodeContext: NodeContext,
                      servesCandidates: Boolean,
                      engine: ActorRef,
                      useTrueProp: Boolean,
-                     buildBudgetMs: Long = Batcher.DefaultBuildBudgetMs)
+                     buildBudgetMs: Long = Batcher.DefaultBuildBudgetMs,
+                     poolTracking: Option[PoolTracker] = None)
   extends Batcher(nodeContext, batching, servesCandidates, engine, configs.Contexts.BatchingIo, buildBudgetMs) {
 
   import ErgoDexBatcher._
 
   /** Built by `Module`, reading every setting from the application configuration. */
   @Inject()
-  def this(nodeContext: NodeContext, config: Configuration, @Named("transaction-engine") engine: ActorRef) =
+  def this(nodeContext: NodeContext, config: Configuration, @Named("transaction-engine") engine: ActorRef,
+           tracker: PoolTracker) =
     this(nodeContext, BatchingConfig(config, ErgoDexBatcher.Name),
       Batcher.servesCandidates(config, ErgoDexBatcher.Name), engine,
-      CandidateConfig(config).useTruePropCollection, Batcher.buildBudgetMs(config))
+      CandidateConfig(config).useTruePropCollection, Batcher.buildBudgetMs(config), Some(tracker))
+
+  override protected def poolTracker: Option[PoolTracker] = poolTracking
 
   override protected val label: String = "ErgoDEX"
 
@@ -57,19 +62,28 @@ class ErgoDexBatcher(nodeContext: NodeContext,
     val machina = MachinaContracts.templates.filter(_.executable)
       .flatMap(template => scanTemplate(template.templateHash, s"Machina ${template.kind.name}")(MachinaOrder.parse))
       .filterNot(order => skipped.contains(order.boxId))
-    val routed = if (machina.isEmpty) Seq.empty else ErgoDexBatching.route(machina, nativePools(), tip, batching)
+    val routed = if (machina.isEmpty) Seq.empty else ErgoDexBatching.route(machina, nativePools(tip), tip, batching)
     ErgoDexBatching.track(orders ++ routed.map(_._1), pools ++ routed.map(_._2), tip, batching)
   }
 
-  /** Every confirmed native pool, parsed a page at a time, up to [[ErgoDexPoolScan.MaxPages]] pages. */
-  private def nativePools(): Seq[(ErgoDexPool, Int)] = {
-    val (found, exhausted) = ErgoDexPoolScan.confirmed(nodeApi, ErgoDexContracts.NativePoolErgoTree)(indexed =>
-      ErgoDexPool.native(indexed.box).map(_ -> indexed.inclusionHeight))
-    if (!exhausted)
-      logger.warn(s"ErgoDEX native pool scan stopped after ${ErgoDexPoolScan.MaxPages} pages; Machina orders were " +
-        "routed through those only")
-    found
-  }
+  /**
+   * Every confirmed native pool with its inclusion height: from the pool tracker while it is within
+   * [[TrackedLagBlocks]] of `tip` and no cap cut it, otherwise parsed from a scan a page at a time, up to
+   * [[ErgoDexPoolScan.MaxPages]] pages.
+   */
+  private def nativePools(tip: Int): Seq[(ErgoDexPool, Int)] =
+    poolTracking.flatMap(_.latest).filter(state => !state.cut && tip - state.height <= TrackedLagBlocks) match {
+      case Some(state) =>
+        state.pools.filter(_.deployment == PoolDeployment.ErgoDexNative)
+          .flatMap(t => ErgoDexPool.native(t.box).map(_ -> t.inclusionHeight)).toVector
+      case None =>
+        val (found, exhausted) = ErgoDexPoolScan.confirmed(nodeApi, ErgoDexContracts.NativePoolErgoTree)(indexed =>
+          ErgoDexPool.native(indexed.box).map(_ -> indexed.inclusionHeight))
+        if (!exhausted)
+          logger.warn(s"ErgoDEX native pool scan stopped after ${ErgoDexPoolScan.MaxPages} pages; Machina orders " +
+            "were routed through those only")
+        found
+    }
 
   /** Returns the uniquely indexed confirmed box carrying the pool NFT. */
   private def confirmedPool(nft: String): Option[IndexedBox] = {
@@ -85,6 +99,18 @@ class ErgoDexBatcher(nodeContext: NodeContext,
     else nodeApi.boxesWithPoolByIds(listed.keys.toSeq).get
       .flatMap(box => listed.get(box.boxId).map(_ -> box)).toMap
   }
+
+  /**
+   * The confirmed box of each pool in `nfts` as of the block a candidate builds on: from `tracked` with no node
+   * read, and from the node for a pool `tracked` lacks only when a cap cut it. Without `tracked`, from the node.
+   */
+  private def currentPools(nfts: Seq[String], tracked: Option[TrackedPools]): Map[String, NodeBox] =
+    tracked match {
+      case Some(state) =>
+        val (held, missing) = nfts.partition(nft => state.pool(nft).isDefined)
+        held.map(nft => nft -> state.pool(nft).get.box).toMap ++ (if (state.cut) currentPools(missing) else Map.empty)
+      case None => currentPools(nfts)
+    }
 
   /** Reloads tracked orders, retaining mempool-claimed boxes and reporting missing ids as spent. */
   private def liveOrders(orders: Tracked): Seq[PoolOrder] = {
@@ -114,7 +140,7 @@ class ErgoDexBatcher(nodeContext: NodeContext,
         .filterNot(order => skipped.contains(order.boxId) ||
           ErgoDexBatching.withdrawn(order, spenders))
       within(deadline, "reading tracked orders")
-      val pools = currentPools(candidates.map(_.poolNft).distinct)
+      val pools = currentPools(candidates.map(_.poolNft).distinct, trackedPools(blockHeight, deadline))
         .filter { case (_, box) => !creators.contains(box.boxId) }
       within(deadline, "reading pools")
       // Load ancestry only for orders that can be executed profitably.
@@ -224,4 +250,7 @@ object ErgoDexBatcher {
 
   /** A broadcast pass is not bound by the stratum's deadline; this only ends a run that would not. */
   private final val BroadcastBudget = 60.seconds
+
+  /** How far behind the chain the pool tracker may be for a scan to route Machina orders on its pools. */
+  private final val TrackedLagBlocks = 2
 }

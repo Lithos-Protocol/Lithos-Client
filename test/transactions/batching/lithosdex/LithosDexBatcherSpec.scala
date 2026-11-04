@@ -20,7 +20,8 @@ import org.scalatestplus.mockito.MockitoSugar
 import state.synchronization.CompleteMempool
 import support.{FakeNodeContext, LDNodeFixtures}
 import transactions.batching.Batcher
-import transactions.candidate.BlockTxMessages.{BlockTxsReady, CandidateTx, RequestBlockTxs, Supersede}
+import transactions.batching.tracking.{PoolTracker, ScriptedChain, TrackerFixtures}
+import transactions.candidate.BlockTxMessages.{BlockTxsReady, CandidateTx, PrepareBlockTxs, RequestBlockTxs, Supersede}
 import transactions.candidate.CandidateBundle
 import work.lithos.mutations.{Contract, Token, UTXO}
 
@@ -78,9 +79,12 @@ class LithosDexBatcherSpec extends TestKit(ActorSystem("lithosdex-batcher-spec",
                         observes: Boolean = true, buildBudgetMs: Long = Batcher.DefaultBuildBudgetMs,
                         placed: Boolean = false, claimed: Boolean = false,
                         maxAncestorTxs: Int = BatchingConfig.Default.maxAncestorTxs,
-                        broadcastMempoolOrders: Boolean = BatchingConfig.Default.broadcastMempoolOrders) {
+                        broadcastMempoolOrders: Boolean = BatchingConfig.Default.broadcastMempoolOrders,
+                        tracker: Option[PoolTracker] = None) {
     val api: NodeApi = mock[NodeApi]
     private val placementId = id("e")
+    /** Whether the index lists the pool box; off, a build reading the node finds no pool. */
+    @volatile var poolListed: Boolean = true
     val walletBox: NodeBox = NodeBox(id("9"), id("8"), 2000000000L, 0, 100, "0008cd02" + "11" * 32)
     @volatile var walletUnspent: Boolean = true
     val (nodeContext, _, _) = FakeNodeContext(api, numAddresses = 1)
@@ -151,7 +155,7 @@ class LithosDexBatcherSpec extends TestKit(ActorSystem("lithosdex-batcher-spec",
     when(api.unspentBoxesByTokenId(anyString(), any[Paging], any[SortDirection], any[MempoolOptions]))
       .thenAnswer { inv =>
         inv.getArgument[String](0) match {
-          case `poolNft` => Success(Seq(IndexedBox(pool, "", 100, 2L)))
+          case `poolNft` => Success(Seq(IndexedBox(pool, "", 100, 2L)).filter(_ => poolListed))
           case `vaultNft` => Success(Seq(IndexedBox(vault, "", 100, 3L)))
           case _ => Success(Seq.empty[IndexedBox])
         }
@@ -181,7 +185,7 @@ class LithosDexBatcherSpec extends TestKit(ActorSystem("lithosdex-batcher-spec",
       LithosDexBatchingConfig(BatchingConfig.Default.copy(scanIntervalMs = scanIntervalMs, broadcast = broadcast,
         maxSkippedOrders = maxSkippedOrders, maxAncestorTxs = maxAncestorTxs,
         broadcastMempoolOrders = broadcastMempoolOrders), autoFlush),
-      servesCandidates = true, engine.ref, useTrueProp = false, buildBudgetMs)))
+      servesCandidates = true, engine.ref, useTrueProp = false, buildBudgetMs, tracker)))
 
     /** Box ids of the last read of tracked orders, which is the read naming this fixture's own order. */
     def lastOrderRead(): Seq[String] = {
@@ -203,6 +207,15 @@ class LithosDexBatcherSpec extends TestKit(ActorSystem("lithosdex-batcher-spec",
 
     def offeredOnceTracked(): Seq[CandidateBundle] =
       awaitAssert({ val bundles = offered(); bundles should not be empty; bundles }, 30.seconds, 250.millis)
+
+    /** A request after the preparation that names its parent on `chain`, as the stratum sends them. */
+    def offeredOn(chain: ScriptedChain): Seq[CandidateBundle] = {
+      val height = heights.incrementAndGet()
+      val requester = TestProbe()
+      requester.send(batcher, PrepareBlockTxs(height, 8, chain.header(height - 1).id))
+      requester.send(batcher, RequestBlockTxs(height, 8))
+      requester.expectMsgType[BlockTxsReady].bundles
+    }
 
     def stop(): Unit = system.stop(batcher)
   }
@@ -408,6 +421,23 @@ class LithosDexBatcherSpec extends TestKit(ActorSystem("lithosdex-batcher-spec",
     f.stop()
   }
 
+  it should "give a candidate the pool box tracked at its parent while the index does not list it" in {
+    val chain = new ScriptedChain
+    val start = heights.get
+    chain.extend(start - 2, start + 200)
+    chain.indexed = start
+    val f = new Fixture(tracker = Some(TrackerFixtures.tracker(chain)))
+    chain.scans(IndexedBox(f.pool, "", start - 5, 1L))
+    // Listed while the scan prices the order, then gone from the index as at a block it has not caught up to
+    f.awaitScanned()
+    f.poolListed = false
+    awaitAssert(f.offeredOn(chain) should not be empty, 30.seconds, 250.millis)
+    withClue("a block the tracker was not told of is read from the node, as without tracking: ") {
+      f.offered() shouldBe empty
+    }
+    f.stop()
+  }
+
   /** Module builds this batcher through Guice; see the ErgoDEX batcher spec for why instantiation is not run. */
   it should "be buildable by Module from configuration alone" in {
     import scala.collection.JavaConverters._
@@ -415,7 +445,8 @@ class LithosDexBatcherSpec extends TestKit(ActorSystem("lithosdex-batcher-spec",
     point.getDependencies.asScala.map(_.getKey) shouldBe Seq(
       com.google.inject.Key.get(classOf[configs.NodeContext]),
       com.google.inject.Key.get(classOf[play.api.Configuration]),
-      com.google.inject.Key.get(classOf[ActorRef], com.google.inject.name.Names.named("transaction-engine")))
+      com.google.inject.Key.get(classOf[ActorRef], com.google.inject.name.Names.named("transaction-engine")),
+      com.google.inject.Key.get(classOf[PoolTracker]))
 
     // Shipped with block transactions on, so the shipped LithosDex source serves this miner's block and a
     // request really builds. Turned off, the stratum never asks and the batcher stays idle.
@@ -438,7 +469,8 @@ class LithosDexBatcherSpec extends TestKit(ActorSystem("lithosdex-batcher-spec",
         this
       }
     })
-    val batcher = system.actorOf(Props(classOf[LithosDexBatcher], nodeContext, mining, engine.ref))
+    val batcher = system.actorOf(Props(classOf[LithosDexBatcher], nodeContext, mining, engine.ref,
+      TrackerFixtures.tracker(new ScriptedChain)))
     val requester = TestProbe()
     requester.send(batcher, RequestBlockTxs(heights.incrementAndGet(), 8))
     requester.expectMsgType[BlockTxsReady].bundles shouldBe empty

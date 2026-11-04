@@ -1,13 +1,11 @@
 package transactions.batching.arb
 
-import api.IndexedPool
 import configs.BatchingConfig
 import node.MutationConversions._
-import node.NodeApi
-import node.model.{IndexedBox, MempoolOptions, NodeBox, Paging, SortDirection}
+import node.model.NodeBox
 import org.ergoplatform.appkit.BlockchainContext
-import org.slf4j.Logger
-import transactions.batching.ergodex.{ErgoDexContracts, ErgoDexPool, ErgoDexPoolScan}
+import transactions.batching.ergodex.ErgoDexPool
+import transactions.batching.tracking.{PoolDeployment, TrackedBox, TrackedPools}
 
 import scala.util.Try
 
@@ -30,41 +28,66 @@ final case class ArbPoolEntry(pool: ArbPool, box: NodeBox) {
 }
 
 /**
- * What one discovery found at indexed height `height`: every pool some route passes through, by NFT, and the
- * routes. Valid for blocks built on that height alone, since a later block may have spent any of its boxes.
- * `cut` says the route cap left some routes out.
+ * What discovery found as of block `headerId` at `height`: every pool some route passes through, by NFT, and the
+ * routes. Valid for blocks built on that block alone. `cut` says the route cap left some routes out. `parsed`
+ * holds every pool that qualified, routed or not, and `vaults` the LithosDex vault NFTs read as standing, so the
+ * next block re-reads neither for a pool whose box did not move.
  */
 final case class ArbIndex(height: Int, pools: Map[String, ArbPoolEntry], routes: Vector[ArbRoute],
-                          cut: Boolean = false)
+                          cut: Boolean = false, headerId: String = "",
+                          parsed: Map[String, ArbPoolEntry] = Map.empty, vaults: Set[String] = Set.empty)
 
 /**
- * Reads the pools arb can trade: ErgoDEX native and token pools from one paged scan of each script, and the
- * LithosDex pools `LDPoolIndex` verified, each from its confirmed box. All confirmed, so the same height
- * gives the same pools.
+ * Builds arb's pool index from the tracked pools: ErgoDEX native and token pools less denied ones and those
+ * whose box is older than `maxPoolAgeBlocks`, and LithosDex pools of both kinds whose vault stands. Nothing is
+ * scanned; the only node reads are a LithosDex vault seen for the first time.
  */
 object ArbDiscovery {
 
   /** Most routes held; past it the longest are left out, and discovery says so. */
   final val MaxRoutes = 20000
 
+  /** Most vaults read for the first time in one build; a pool whose vault waits is left out until a later one. */
+  final val MaxVaultReads = 4
+
   /**
-   * The index at the node's indexed height, or None when the index is behind the chain or below `atLeast`, or
-   * moved while it was read, which leaves pools from two heights. Only the first of those costs a scan. A failed
-   * read throws.
-   *
-   * @param ldPools the LithosDex pools `LDPoolIndex` verified; their boxes are read here, not taken from it
-   * @param denied  pool NFTs either batcher denies
+   * The index for blocks built on `tracked`. A pool whose box `previous` parsed keeps that state, and the routes
+   * are enumerated again only when the set of pools changed. `vaultStands` reads whether a LithosDex
+   * deployment's vault stands; an answer of true is kept, and a failed read leaves that pool out this time.
    */
-  def discover(nodeApi: NodeApi, ctx: BlockchainContext, ergoDex: BatchingConfig, denied: Set[String],
-               ldPools: Seq[IndexedPool], atLeast: Int, logger: Logger): Option[ArbIndex] = {
-    val before = nodeApi.indexedHeight().get
-    if (before.indexedHeight != before.fullHeight || before.indexedHeight < atLeast) None
-    else {
-      val tip = before.indexedHeight
-      val pools = ergoDexPools(nodeApi, ergoDex, denied, tip, logger) ++ lithosDexPools(nodeApi, ctx, denied, ldPools)
-      val after = nodeApi.indexedHeight().get
-      if (after.indexedHeight != tip || after.fullHeight != tip) None
-      else Some(index(tip, pools))
+  def index(ctx: BlockchainContext, tracked: TrackedPools, previous: Option[ArbIndex], ergoDex: BatchingConfig,
+            denied: Set[String], vaultStands: PoolDeployment => Boolean): ArbIndex = {
+    val known = previous.map(_.parsed).getOrElse(Map.empty[String, ArbPoolEntry])
+    var vaults = previous.map(_.vaults).getOrElse(Set.empty[String])
+    var vaultReads = 0
+
+    // A vault already read as standing costs nothing; a new one is read while this build has reads left
+    def standing(deployment: PoolDeployment): Boolean = vaultOf(deployment).forall { vault =>
+      vaults.contains(vault) || (vaultReads < MaxVaultReads && {
+        vaultReads += 1
+        val stands = Try(vaultStands(deployment)).getOrElse(false)
+        if (stands) vaults += vault
+        stands
+      })
+    }
+
+    val qualifying = tracked.pools.filter { t =>
+      !denied.contains(t.nft.toLowerCase) && (t.deployment match {
+        case PoolDeployment.ErgoDexNative | PoolDeployment.ErgoDexToken =>
+          tracked.height - t.inclusionHeight <= ergoDex.maxPoolAgeBlocks
+        case _ => true
+      })
+    }.toVector.sortBy(_.nft)
+    val parsed = qualifying.flatMap { t =>
+      known.get(t.nft).filter(_.box.boxId == t.boxId).orElse(if (!standing(t.deployment)) None else entry(ctx, t))
+    }.map(e => e.nft -> e).toMap
+
+    previous.filter(p => p.parsed.keySet == parsed.keySet) match {
+      case Some(p) =>
+        ArbIndex(tracked.height, p.pools.keysIterator.map(nft => nft -> parsed(nft)).toMap, p.routes, p.cut,
+          tracked.headerId, parsed, vaults)
+      case None =>
+        index(tracked.height, parsed.values.toSeq).copy(headerId = tracked.headerId, parsed = parsed, vaults = vaults)
     }
   }
 
@@ -76,43 +99,20 @@ object ArbDiscovery {
     ArbIndex(height, distinct.filter(e => used.contains(e.nft)).map(e => e.nft -> e).toMap, routes, cut)
   }
 
-  /**
-   * Both ErgoDEX pool shapes, less denied pools and those whose box is older than `maxPoolAgeBlocks`. Each box
-   * kept shares one copy of its script's tree, since every pool of a shape has the same one.
-   */
-  private def ergoDexPools(nodeApi: NodeApi, ergoDex: BatchingConfig, denied: Set[String], tip: Int,
-                           logger: Logger): Vector[ArbPoolEntry] =
-    Seq(ErgoDexContracts.NativePoolErgoTree -> "native", ErgoDexContracts.TokenPoolErgoTree -> "token").flatMap {
-      case (tree, shape) =>
-        val (found, exhausted) = ErgoDexPoolScan.confirmed(nodeApi, tree)(indexed => ergoDexEntry(indexed, tree)
-          .filter(_ => tip - indexed.inclusionHeight <= ergoDex.maxPoolAgeBlocks))
-        if (!exhausted) logger.warn(s"Arb discovery stopped the ErgoDEX $shape pool scan after " +
-          s"${ErgoDexPoolScan.MaxPages} pages; cycles use those pools only")
-        found.filterNot(e => denied.contains(e.nft))
-    }.toVector
+  /** The pool a tracked box holds, or None when its box does not read as one. */
+  private def entry(ctx: BlockchainContext, tracked: TrackedBox): Option[ArbPoolEntry] = Try {
+    val box = tracked.box
+    val pool: Option[ArbPool] = tracked.deployment match {
+      case PoolDeployment.ErgoDexNative | PoolDeployment.ErgoDexToken => ErgoDexPool.parse(box).map(ErgoDexArbPool)
+      case PoolDeployment.LithosDexNative(c) => Some(LithosDexArbPool(box.toInputUTXO(ctx), c))
+      case PoolDeployment.LithosDexToken(c) => Some(LithosDexT2TArbPool(box.toInputUTXO(ctx), c))
+    }
+    pool.filter(_.boxId == box.boxId).map(ArbPoolEntry(_, box))
+  }.toOption.flatten
 
-  private def ergoDexEntry(indexed: IndexedBox, tree: String): Option[ArbPoolEntry] =
-    ErgoDexPool.parse(indexed.box).map(pool => ArbPoolEntry(ErgoDexArbPool(pool), indexed.box.copy(ergoTree = tree)))
-
-  /**
-   * Each verified LithosDex pool's one confirmed box, if it sits at the tree its deployment builds. A pool whose
-   * box is not unique, or does not read, is left out this pass.
-   */
-  private def lithosDexPools(nodeApi: NodeApi, ctx: BlockchainContext, denied: Set[String],
-                             ldPools: Seq[IndexedPool]): Vector[ArbPoolEntry] =
-    ldPools.iterator.filterNot(p => denied.contains(p.nft.toLowerCase)).flatMap { p =>
-      val boxes = nodeApi.unspentBoxesByTokenId(p.nft, Paging(0, 2), SortDirection.Desc, MempoolOptions.ConfirmedOnly).get
-      boxes match {
-        case Seq(only) =>
-          val box = only.box
-          (p.n2t, p.t2t) match {
-            case (Some(c), _) if box.ergoTree.equalsIgnoreCase(c.liquidityPool.ergoTreeHex) =>
-              Try(ArbPoolEntry(LithosDexArbPool(box.toInputUTXO(ctx), c), box)).toOption
-            case (_, Some(c)) if box.ergoTree.equalsIgnoreCase(c.liquidityPool.ergoTreeHex) =>
-              Try(ArbPoolEntry(LithosDexT2TArbPool(box.toInputUTXO(ctx), c), box)).toOption
-            case _ => None
-          }
-        case _ => None
-      }
-    }.filter(e => e.pool.boxId == e.box.boxId).toVector
+  private def vaultOf(deployment: PoolDeployment): Option[String] = deployment match {
+    case PoolDeployment.LithosDexNative(c) => Some(c.vaultNFT.toString)
+    case PoolDeployment.LithosDexToken(c) => Some(c.vaultNFT.toString)
+    case _ => None
+  }
 }

@@ -124,7 +124,7 @@ class RollupProcessor @Inject()(config: Configuration, nodeContext: NodeContext,
         s"${fpStubs.headOption.map(_.rollupBlockId).getOrElse("?")}")
       fpStubs.foreach(s => addRollupStubs(Map(s.rollupBlockId -> s)))
     // Prepare selected rollup work without dispatching its funded copies.
-    case PrepareBlockTxs(blockHeight, limit) =>
+    case PrepareBlockTxs(blockHeight, limit, _) =>
       candidateFirst.candidateAsked(blockHeight)
       val chosen = chooseCandidateStubs(blockHeight, limit)
       if (chosen.nonEmpty) transactionEngine ! BuildBlockTxs(blockHeight, chosen, answer = false, limit = limit,

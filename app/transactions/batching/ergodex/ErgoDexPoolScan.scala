@@ -6,8 +6,8 @@ import transactions.batching.Batcher
 
 /**
  * The confirmed boxes at one ErgoDEX pool script, read a page at a time. Each page is parsed and dropped, so a
- * scan holds only what `keep` returns. Machina routing reads the native pools this way, and the arb stage both
- * shapes.
+ * scan holds only what `keep` returns. Machina routing reads the native pools this way while the pool tracker has
+ * not read the chain.
  */
 object ErgoDexPoolScan {
 

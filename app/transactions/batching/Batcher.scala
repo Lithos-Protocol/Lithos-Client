@@ -12,6 +12,7 @@ import play.api.Configuration
 import state.synchronization.CompleteMempool
 import transactions.candidate.BlockTxMessages.{BlockTxsReady, CandidateTxsDropped, PrepareBlockTxs, RequestBlockTxs}
 import transactions.candidate.{CandidateBundle, CandidatePreparation}
+import transactions.batching.tracking.{PoolTracker, TrackedPools}
 import transactions.engine.EngineBroadcast
 
 import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger, AtomicReference}
@@ -128,6 +129,16 @@ abstract class Batcher(nodeContext: NodeContext,
   /** The bundles offered for one block, built before `deadline`. Runs on the worker; a failure offers nothing. */
   protected def executions(orders: Tracked, blockHeight: Int, slots: Int, deadline: Deadline): Seq[CandidateBundle]
 
+  /** The pool tracker a build reads confirmed pool boxes from, for adapters that trade against pools. */
+  protected def poolTracker: Option[PoolTracker] = None
+
+  /**
+   * The tracked pools as of the parent of `blockHeight`, waiting at most [[TrackerWait]] and never past
+   * `deadline`. None means read the pools from the node.
+   */
+  protected def trackedPools(blockHeight: Int, deadline: Deadline): Option[TrackedPools] =
+    poolTracker.flatMap(_.at(blockHeight - 1, TrackerWait.min(deadline.timeLeft).max(Duration.Zero)))
+
   /** Sends runs to the mempool: `orders`, and with `broadcastMempoolOrders` the unconfirmed orders too. */
   protected def broadcastPass(orders: Tracked, refused: Map[String, String]): BroadcastResult
 
@@ -197,7 +208,11 @@ abstract class Batcher(nodeContext: NodeContext,
       rejected --= ids
       lastScan.updateAndGet(_.map { case (height, found) => height -> (found -- ids) })
 
-    case PrepareBlockTxs(blockHeight, limit) => startBuild(blockHeight, limit, None)
+    case PrepareBlockTxs(blockHeight, limit, parentId) =>
+      // Told first, so the tracker is already reading the parent when the build asks for it
+      Try(poolTracker.foreach(_.follow(blockHeight - 1, parentId))).failed
+        .foreach(ex => logger.warn(s"Could not pass block $parentId to pool tracking: ${ex.getMessage}"))
+      startBuild(blockHeight, limit, None)
 
     case RequestBlockTxs(blockHeight, limit, refresh) =>
       val replyTo = sender()
@@ -417,6 +432,9 @@ object Batcher {
 
   /** Together with one scan, these builds fit a worker of two threads and four queued tasks. */
   final val MaxBuildsRunning = 3
+
+  /** Most a build waits for the pool tracker to read the block it builds on, before reading pools from the node. */
+  final val TrackerWait: FiniteDuration = 2.seconds
 
   /**
    * Order-shaped boxes from `snapshot`, at most `perTx` from any one transaction and `limit` in all.

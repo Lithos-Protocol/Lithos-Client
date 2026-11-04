@@ -279,8 +279,9 @@ class CandidateBuilderSpec extends TestKit(ActorSystem("candidate-builder-spec",
     val source = TestProbe()
     val f = fixture(sources = Seq(CandidateSource(configs.CandidateSourceConfig.Rollups, source.ref)),
       config = cfg.copy(blockTransactions = true, blockTxTimeout = 30000, sources = sourceLimits(7)))
-    f.builder ! ChainAdvanced(100)
-    source.expectMsg(PrepareBlockTxs(100, 7))
+    f.builder ! ChainAdvanced(100, "ab" * 32)
+    // With the block it builds on, so a source following pool boxes knows which block to read
+    source.expectMsg(PrepareBlockTxs(100, 7, "ab" * 32))
   }
 
   it should "not be sent to a source this client has turned off" in {

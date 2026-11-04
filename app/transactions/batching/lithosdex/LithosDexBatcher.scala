@@ -11,6 +11,7 @@ import org.ergoplatform.appkit.BlockchainContext
 import play.api.Configuration
 import state.synchronization.CompleteMempool
 import transactions.batching.Batcher.{BroadcastResult, Tracked}
+import transactions.batching.tracking.{PoolTracker, TrackedPools}
 import transactions.batching.{Batcher, BatchingMempool}
 import transactions.candidate.BlockTxMessages.CandidateTx
 import transactions.candidate.CandidateBundle
@@ -42,7 +43,8 @@ class LithosDexBatcher(nodeContext: NodeContext,
                        servesCandidates: Boolean,
                        engine: ActorRef,
                        useTrueProp: Boolean,
-                       buildBudgetMs: Long = Batcher.DefaultBuildBudgetMs)
+                       buildBudgetMs: Long = Batcher.DefaultBuildBudgetMs,
+                       poolTracking: Option[PoolTracker] = None)
   extends Batcher(nodeContext, settings.batching, servesCandidates, engine, configs.Contexts.LithosDexBatchingIo,
     buildBudgetMs) {
 
@@ -50,9 +52,12 @@ class LithosDexBatcher(nodeContext: NodeContext,
 
   /** Built by `Module`, reading every setting from the application configuration. */
   @Inject()
-  def this(nodeContext: NodeContext, config: Configuration, @Named("transaction-engine") engine: ActorRef) =
+  def this(nodeContext: NodeContext, config: Configuration, @Named("transaction-engine") engine: ActorRef,
+           tracker: PoolTracker) =
     this(nodeContext, LithosDexBatchingConfig(config), Batcher.servesCandidates(config, LithosDexBatchingConfig.Name),
-      engine, CandidateConfig(config).useTruePropCollection, Batcher.buildBudgetMs(config))
+      engine, CandidateConfig(config).useTruePropCollection, Batcher.buildBudgetMs(config), Some(tracker))
+
+  override protected def poolTracker: Option[PoolTracker] = poolTracking
 
   override protected val label: String = "LithosDEX"
 
@@ -223,11 +228,12 @@ class LithosDexBatcher(nodeContext: NodeContext,
           BatchingMempool.withdrawn(order.boxId, order.poolNft, spenders))
       within(deadline, "reading tracked orders")
 
+      val tracked = trackedPools(blockHeight, deadline)
       val known = served
       val plans = candidates.groupBy(_.poolNft).toSeq.sortBy { case (nft, _) => readOrder(nft, known) }.flatMap {
         case (nft, poolOrders) =>
           if (deadline.isOverdue()) None
-          else Try(plan(ctx, nft, poolOrders, known, creators)) match {
+          else Try(plan(ctx, nft, poolOrders, known, creators, tracked)) match {
             case Success(found) => found
             case Failure(ex) =>
               logger.warn(s"Could not read LithosDEX pool $nft for block $blockHeight, the other pools go on: " +
@@ -239,7 +245,7 @@ class LithosDexBatcher(nodeContext: NodeContext,
       val t2tPlans = t2tCandidates.groupBy(_.poolNft).toSeq.sortBy { case (nft, _) => (!knownT2T.contains(nft), nft) }
         .flatMap { case (nft, poolOrders) =>
           if (deadline.isOverdue()) None
-          else Try(t2tPlan(ctx, nft, poolOrders, knownT2T, creators)) match {
+          else Try(t2tPlan(ctx, nft, poolOrders, knownT2T, creators, tracked)) match {
             case Success(found) => found
             case Failure(ex) =>
               logger.warn(s"Could not read LithosDEX token/token pool $nft for block $blockHeight, the other pools " +
@@ -303,9 +309,9 @@ class LithosDexBatcher(nodeContext: NodeContext,
    * None when the box is not a served deployment's pool, a mempool transaction created it, or nothing prices.
    */
   private def plan(ctx: BlockchainContext, nft: String, orders: Seq[LithosDexOrder], known: Map[String, LDContracts],
-                   creators: Map[String, CompleteMempool.MempoolTx]): Option[PoolPlan] =
+                   creators: Map[String, CompleteMempool.MempoolTx], tracked: Option[TrackedPools]): Option[PoolPlan] =
     for {
-      (box, contracts) <- currentPool(nft, known).filterNot { case (box, _) => creators.contains(box.boxId) }
+      (box, contracts) <- currentPool(nft, known, tracked).filterNot { case (box, _) => creators.contains(box.boxId) }
       poolBox = box.toInputUTXO(ctx)
       // A pool box that will not read costs its own orders, as a malformed ErgoDEX pool does
       pool <- Try(LDLiquidityPool(poolBox)).toOption
@@ -320,9 +326,9 @@ class LithosDexBatcher(nodeContext: NodeContext,
 
   /** The same for a token/token pool. Redemptions placed by a claim are not followed here; they wait to confirm. */
   private def t2tPlan(ctx: BlockchainContext, nft: String, orders: Seq[LDT2TOrder], known: Map[String, LDT2TContracts],
-                      creators: Map[String, CompleteMempool.MempoolTx]): Option[T2TPoolPlan] =
+                      creators: Map[String, CompleteMempool.MempoolTx], tracked: Option[TrackedPools]): Option[T2TPoolPlan] =
     for {
-      (box, contracts) <- currentT2TPool(nft, known).filterNot { case (box, _) => creators.contains(box.boxId) }
+      (box, contracts) <- currentT2TPool(nft, known, tracked).filterNot { case (box, _) => creators.contains(box.boxId) }
       poolBox = box.toInputUTXO(ctx)
       pool <- Try(LDT2TLiquidityPool(poolBox)).toOption
       provisions = t2tProvisionsFor(ctx, contracts, orders, MempoolOptions.ConfirmedOnly)
@@ -542,19 +548,41 @@ class LithosDexBatcher(nodeContext: NodeContext,
     if (boxes.size == 1) boxes.headOption else None
   }
 
-  /** The confirmed pool box `nft` names and the deployment it belongs to, rechecked against the UTXO set. */
-  private def currentPool(nft: String, known: Map[String, LDContracts]): Option[(NodeBox, LDContracts)] =
-    confirmedPool(nft).flatMap(indexed => deploymentOf(indexed.box, known).map(indexed.box -> _))
-      .flatMap { case (listed, contracts) =>
-        nodeApi.boxesWithPoolByIds(Seq(listed.boxId)).get.find(_.boxId == listed.boxId).map(_ -> contracts)
-      }
+  /**
+   * The confirmed pool box `nft` names and the deployment it belongs to. From `tracked` with no read of the box
+   * when given, and from the node for a pool it lacks only when a cap cut it; otherwise from the index, rechecked
+   * against the UTXO set.
+   */
+  private def currentPool(nft: String, known: Map[String, LDContracts],
+                          tracked: Option[TrackedPools] = None): Option[(NodeBox, LDContracts)] =
+    trackedBox(nft, tracked) match {
+      case Some(found) => found.flatMap(box => deploymentOf(box, known).map(box -> _))
+      case None => confirmedPool(nft).flatMap(indexed => deploymentOf(indexed.box, known).map(indexed.box -> _))
+        .flatMap { case (listed, contracts) =>
+          nodeApi.boxesWithPoolByIds(Seq(listed.boxId)).get.find(_.boxId == listed.boxId).map(_ -> contracts)
+        }
+    }
 
   /** The same for a token/token pool. */
-  private def currentT2TPool(nft: String, known: Map[String, LDT2TContracts]): Option[(NodeBox, LDT2TContracts)] =
-    confirmedPool(nft).flatMap(indexed => t2tDeploymentOf(indexed.box, known).map(indexed.box -> _))
-      .flatMap { case (listed, contracts) =>
-        nodeApi.boxesWithPoolByIds(Seq(listed.boxId)).get.find(_.boxId == listed.boxId).map(_ -> contracts)
-      }
+  private def currentT2TPool(nft: String, known: Map[String, LDT2TContracts],
+                             tracked: Option[TrackedPools] = None): Option[(NodeBox, LDT2TContracts)] =
+    trackedBox(nft, tracked) match {
+      case Some(found) => found.flatMap(box => t2tDeploymentOf(box, known).map(box -> _))
+      case None => confirmedPool(nft).flatMap(indexed => t2tDeploymentOf(indexed.box, known).map(indexed.box -> _))
+        .flatMap { case (listed, contracts) =>
+          nodeApi.boxesWithPoolByIds(Seq(listed.boxId)).get.find(_.boxId == listed.boxId).map(_ -> contracts)
+        }
+    }
+
+  /**
+   * What `tracked` says of `nft`'s box: Some of the box or of None when it settles the question, None when the
+   * node must be read, which is without `tracked` or for a pool it lacks after a cap cut it.
+   */
+  private def trackedBox(nft: String, tracked: Option[TrackedPools]): Option[Option[NodeBox]] =
+    tracked.flatMap(state => state.pool(nft) match {
+      case Some(found) => Some(Some(found.box))
+      case None => if (state.cut) None else Some(None)
+    })
 
   /** The one confirmed box carrying `nft` under `tree`, from the index. */
   private def confirmedSingleton(nft: String, tree: String): Option[NodeBox] =

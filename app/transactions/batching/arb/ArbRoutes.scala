@@ -13,7 +13,8 @@ final case class ArbRoute(hops: Vector[ArbHop]) {
 }
 
 /**
- * Every route of two to four legs from ERG back to ERG, read once per discovery so a build only prices them.
+ * Every route of two to four legs from ERG back to ERG, enumerated when the set of pools changes so a build only
+ * prices them.
  * Pools are distinct within a route, and so are the assets it passes through, since a route that returns to an
  * asset holds a shorter cycle. Shorter routes come first, so a cap keeps the cheapest to price and sign.
  */
