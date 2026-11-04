@@ -67,7 +67,9 @@ object CandidateConfig {
       CandidateSourceConfig.LithosDex -> CandidateSourceConfig.Default.copy(enabled = true, maxTxs = 20),
       // On by default: recording difficulty keeps the protocol's forwards settleable. One recording and the
       // settlements chained after it.
-      CandidateSourceConfig.Forwards -> CandidateSourceConfig.Default.copy(enabled = true, maxTxs = 10)),
+      CandidateSourceConfig.Forwards -> CandidateSourceConfig.Default.copy(enabled = true, maxTxs = 10),
+      // Asked only while `batching.arb.enabled`, after the DEX batchers. Every leg of a cycle takes a slot.
+      CandidateSourceConfig.Arb -> CandidateSourceConfig.Default.copy(enabled = true, maxTxs = 8)),
     blockShare = 0.5,
     useTruePropCollection = false,
     genesisWaitMs = 1500,

@@ -27,6 +27,7 @@ object CandidateSourceConfig {
   final val ErgoDex = "ergodex"
   final val LithosDex = "lithosdex"
   final val Forwards = "forwards"
+  final val Arb = "arb"
 
   /** Sources whose transactions are pool work that earns no ERG, so no revenue gain reflects them. */
   final val Protocol: Set[String] = Set(Rollups, Emissions)

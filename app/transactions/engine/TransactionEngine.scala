@@ -73,7 +73,8 @@ class TransactionEngine @Inject()(node: NodeContext,
   protected val cacheApi: play.api.cache.SyncCacheApi,
   protected val config: play.api.Configuration,
   protected val dataBoxes: transactions.rollups.DataBoxSource)
-  extends EngineWalletState(node, configs.WalletConfig(config), configs.CandidateConfig.pinTarget(config))
+  extends EngineWalletState(node, configs.WalletConfig(config), configs.CandidateConfig.pinTarget(config),
+    configs.ArbConfig.stakeTarget(config))
     with EngineRollupCandidates with transactions.emissions.EmissionsCore {
   import TransactionEngine._
   import ExecutionSchedule._

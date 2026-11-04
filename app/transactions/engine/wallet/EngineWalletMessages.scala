@@ -136,6 +136,23 @@ object EngineWalletMessages {
   private[transactions] case class UnpinInput(boxId: String)
 
   /**
+   * Ask for the arb stake: one plain P2PK box of at least `batching.arb.stakeNanoErg`, held apart from the
+   * fraud-proof pins. Answered with the box only once it has been found in the confirmed UTXO set after
+   * the block before `height`, the height being built; otherwise with none, and that check is started.
+   */
+  private[transactions] case class GetArbStake(height: Int)
+
+  /** Reply to [[GetArbStake]]: the stake box as the node reported it, or none to build on at that height. */
+  private[transactions] case class ArbStake(box: Option[node.model.NodeBox])
+
+  /**
+   * `boxId`, an output of an arb cycle built for `height` that returns the stake, becomes the stake if a block
+   * spends `replaces`, the current stake. Kept out of every selection from now on. Answered with whether it
+   * was taken: a cycle whose output is not held must not be offered.
+   */
+  private[transactions] case class ReserveStakeSuccessor(replaces: String, boxId: String, height: Int)
+
+  /**
    * Reply sent back to the requester with the selected UTXOs and matching lease identity.
    *
    * @param unavailable why the request was not served, when the cause is not a funds shortfall: it

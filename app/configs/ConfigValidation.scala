@@ -196,7 +196,8 @@ object Configs {
       "fraction of the block's byte and cost limits this client's package may claim")
     Seq(configs.CandidateSourceConfig.Rollups, configs.CandidateSourceConfig.Emissions,
       configs.CandidateSourceConfig.Rent, configs.CandidateSourceConfig.ErgoDex,
-      configs.CandidateSourceConfig.LithosDex, configs.CandidateSourceConfig.Forwards).foreach { source =>
+      configs.CandidateSourceConfig.LithosDex, configs.CandidateSourceConfig.Forwards,
+      configs.CandidateSourceConfig.Arb).foreach { source =>
       val enabled = v.bool(s"stratum.candidate.sources.$source.enabled")
       val maxTxs = v.range(s"stratum.candidate.sources.$source.maxTxs",
         v.int(s"stratum.candidate.sources.$source.maxTxs"), 0, 100, "transactions inserted per block")
@@ -336,6 +337,13 @@ object Configs {
       60000L, 86400000L, "ms an unbuildable position is left out")
     v.range("batching.forwards.maxSkippedOrders", v.int("batching.forwards.maxSkippedOrders"), 0, 100000,
       "unbuildable positions remembered; about 200 bytes each")
+
+    // ---- arb ----
+    v.bool("batching.arb.enabled")
+    v.longRange("batching.arb.stakeNanoErg", v.long("batching.arb.stakeNanoErg"), 100000000L, 10000000000000L,
+      "nanoERG held as the arb stake")
+    v.longRange("batching.arb.minProfitNanoErg", v.long("batching.arb.minProfitNanoErg"), 0L, 1000000000000L,
+      "nanoERG of profit a cycle must leave")
 
     // ---- emission ----
     v.bool("emission.enabled")
