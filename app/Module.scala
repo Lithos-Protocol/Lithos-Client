@@ -66,6 +66,7 @@ class Module(environment: Environment, configuration: Configuration) extends Abs
     bindActor(classOf[transactions.batching.ergodex.ErgoDexBatcher], "ergodex-batcher")
     bindActor(classOf[transactions.batching.lithosdex.LithosDexBatcher], "lithosdex-batcher")
     bindActor(classOf[transactions.batching.forwards.ForwardsBatcher], "forwards-batcher")
+    bindActor(classOf[transactions.batching.sigmafi.SigmaFiBatcher], "sigmafi-batcher")
 
     bind(classOf[BlocksApi]).to(classOf[BlocksApiImpl])
     bind(classOf[CollateralMarketApi]).to(classOf[CollateralMarketApiImpl])
@@ -75,6 +76,7 @@ class Module(environment: Environment, configuration: Configuration) extends Abs
     bind(classOf[LithosDexApi]).to(classOf[LithosDexApiImpl])
     bind(classOf[LDPoolsApi]).to(classOf[LDPoolsApiImpl])
     bind(classOf[ForwardsApi]).to(classOf[ForwardsApiImpl])
+    bind(classOf[SigmaFiApi]).to(classOf[SigmaFiApiImpl])
     bind(classOf[WalletApi]).to(classOf[WalletApiImpl])
     bind[StartupTasks](classOf[StartupTasks]).asEagerSingleton()
     //bind[StartStratumServer](classOf[StartStratumServer]).asEagerSingleton()

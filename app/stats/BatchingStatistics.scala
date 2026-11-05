@@ -93,6 +93,8 @@ private[stats] object BatchingStatistics {
   def read(block: BlockInfo, tx: BlockTx, network: NetworkType, minerTree: String,
            forwardsContracts: Option[DFContracts], registry: VerifiedRegistry): Vector[BatchingFee] = {
     val inputs = tx.inputs.map(in => block.inputBox(in.id))
+    val liquidated = sigmaFi(tx, inputs, minerTree)
+    if (liquidated.nonEmpty) return liquidated
     if (inputs.size < 2 || inputs.head.isEmpty || tx.outputs.size < 2) return Vector.empty
     forwardsContracts.flatMap(forwards(tx, inputs, _, registry, minerTree))
       .getOrElse(executions(tx, inputs, network, registry, minerTree))
@@ -123,6 +125,40 @@ private[stats] object BatchingStatistics {
       if (gross < 0 || (gross == 0 && tokens.isEmpty && otherTokens == 0)) Vector.empty
       else Vector(BatchingFee(tx.id, position.fold(acc.id)(_._1.id), "forwards", gross.toString,
         transactionFee(tx).toString, local, tokens, otherTokens))
+    }
+  }
+
+  /** The protocol name SigmaFi liquidations are recorded under. */
+  final val SigmaFiProtocol = "sigmafi"
+
+  /**
+   * SigmaFi bonds `tx` liquidates: each input that reads as a bond, spent with a liquidation script in context
+   * variable 0, whose output at the same index is a vault box. Each is one record, gross what the bond gave up
+   * beyond its vault box. The miner fee is split evenly across the records, the remainder on the first ones,
+   * so totals count it once and a broadcast batch's every record shows a fee, as a fee-less one in a Lithos
+   * block is what marks this miner's own candidate work.
+   */
+  private def sigmaFi(tx: BlockTx, inputs: Seq[Option[TxOutput]], minerTree: String): Vector[BatchingFee] = {
+    val vault = sigmafi.contracts.SigmaFiContracts.vault.ergoTreeHex
+    val settled = inputs.indices.toVector.flatMap { i =>
+      for {
+        in <- inputs(i)
+        if tx.inputs(i).spendingProof.exists(_.ext.contains("0"))
+        bond <- transactions.batching.sigmafi.SigmaFiBoxes.bond(box(in))
+        out <- tx.outputs.lift(i) if out.ergoTree.equalsIgnoreCase(vault)
+        gross = BigInt(in.value) - out.value if gross >= 0
+      } yield (i, bond.boxId, gross)
+    }
+    if (settled.isEmpty) Vector.empty
+    else {
+      val vaults = settled.map(_._1).toSet
+      val local = tx.outputs.zipWithIndex.exists { case (out, i) => !vaults(i) && out.ergoTree == minerTree }
+      val fee = transactionFee(tx)
+      val (share, remainder) = (fee / settled.size, fee % settled.size)
+      settled.zipWithIndex.map { case ((_, bondId, gross), k) =>
+        val paid = share + (if (k < remainder) 1 else 0)
+        BatchingFee(tx.id, bondId, SigmaFiProtocol, gross.toString, paid.toString, local)
+      }
     }
   }
 

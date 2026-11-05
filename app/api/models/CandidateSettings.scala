@@ -41,12 +41,12 @@ object CandidateSettings {
 
   /** In the order the stratum asks them, which is the order their work takes block slots. */
   private val SourceOrder: Seq[String] = Seq(CandidateSourceConfig.Rollups, CandidateSourceConfig.Emissions,
-    CandidateSourceConfig.Rent, CandidateSourceConfig.Forwards, CandidateSourceConfig.LithosDex,
+    CandidateSourceConfig.Rent, CandidateSourceConfig.Forwards, CandidateSourceConfig.SigmaFi, CandidateSourceConfig.LithosDex,
     CandidateSourceConfig.ErgoDex, CandidateSourceConfig.Arb)
 
   /** Sources served by a batcher, which also needs its own `batching` block enabled. */
-  private val Batchers: Set[String] = Set(CandidateSourceConfig.Forwards, CandidateSourceConfig.LithosDex,
-    CandidateSourceConfig.ErgoDex)
+  private val Batchers: Set[String] = Set(CandidateSourceConfig.Forwards, CandidateSourceConfig.SigmaFi,
+    CandidateSourceConfig.LithosDex, CandidateSourceConfig.ErgoDex)
 
   def from(config: Configuration): CandidateSettings = {
     val candidate = CandidateConfig(config)

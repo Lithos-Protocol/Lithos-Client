@@ -196,7 +196,7 @@ object Configs {
       "fraction of the block's byte and cost limits this client's package may claim")
     Seq(configs.CandidateSourceConfig.Rollups, configs.CandidateSourceConfig.Emissions,
       configs.CandidateSourceConfig.Rent, configs.CandidateSourceConfig.ErgoDex,
-      configs.CandidateSourceConfig.LithosDex, configs.CandidateSourceConfig.Forwards,
+      configs.CandidateSourceConfig.LithosDex, configs.CandidateSourceConfig.Forwards, configs.CandidateSourceConfig.SigmaFi,
       configs.CandidateSourceConfig.Arb).foreach { source =>
       val enabled = v.bool(s"stratum.candidate.sources.$source.enabled")
       val maxTxs = v.range(s"stratum.candidate.sources.$source.maxTxs",
@@ -337,6 +337,28 @@ object Configs {
       60000L, 86400000L, "ms an unbuildable position is left out")
     v.range("batching.forwards.maxSkippedOrders", v.int("batching.forwards.maxSkippedOrders"), 0, 100000,
       "unbuildable positions remembered; about 200 bytes each")
+
+    // ---- batching.sigmafi ----
+    v.bool("batching.sigmafi.enabled")
+    v.longRange("batching.sigmafi.scanIntervalMs", v.long("batching.sigmafi.scanIntervalMs"),
+      5000L, 3600000L, "ms between scans; each pages the bond scripts once per indexed block")
+    v.range("batching.sigmafi.maxTrackedOrders", v.int("batching.sigmafi.maxTrackedOrders"), 1, 4096,
+      "due bonds held between scans")
+    // Every bond is one input and one output of a single transaction, so this bounds that transaction's size
+    v.range("batching.sigmafi.maxOrdersPerBlock", v.int("batching.sigmafi.maxOrdersPerBlock"), 1, 100,
+      "bonds liquidated per candidate build or broadcast pass")
+    v.bool("batching.sigmafi.broadcast")
+    v.range("batching.sigmafi.broadcastAfterBlocks", v.int("batching.sigmafi.broadcastAfterBlocks"), 0, 720,
+      "blocks after a bond matures before its liquidation is broadcast")
+    v.longRange("batching.sigmafi.minBatchingFeeNanoErg", v.long("batching.sigmafi.minBatchingFeeNanoErg"),
+      2000000L, 100000000000L, "least batching fee a bond pays to be liquidated; must cover a broadcast's miner fee")
+    v.longRange("batching.sigmafi.skippedOrderTtlMs", v.long("batching.sigmafi.skippedOrderTtlMs"),
+      60000L, 86400000L, "ms an unbuildable bond is left out")
+    v.range("batching.sigmafi.maxSkippedOrders", v.int("batching.sigmafi.maxSkippedOrders"), 0, 100000,
+      "unbuildable bonds remembered; about 200 bytes each")
+    v.longRange("sigmafi.bonds.batchingFeeNanoErg", v.long("sigmafi.bonds.batchingFeeNanoErg"),
+      configs.SigmaFiBatchingConfig.ShippedMinBatchingFee, 100000000000L,
+      "batching fee on orders and offers made through the API; at least the shipped floor, which clients liquidate")
 
     // ---- arb ----
     v.bool("batching.arb.enabled")

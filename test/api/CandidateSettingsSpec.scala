@@ -16,9 +16,9 @@ class CandidateSettingsSpec extends AnyFlatSpec with Matchers {
   "Candidate settings" should "report the shipped config, with every enabled source active" in {
     val settings = CandidateSettings.from(shipped)
     settings.blockTransactions shouldBe true
-    settings.sources.map(_.name) shouldBe Seq("rollups", "emissions", "rent", "forwards", "lithosdex", "ergodex", "arb")
+    settings.sources.map(_.name) shouldBe Seq("rollups", "emissions", "rent", "forwards", "sigmafi", "lithosdex", "ergodex", "arb")
     settings.sources.filter(_.active).map(_.name) shouldBe
-      Seq("rollups", "emissions", "rent", "forwards", "lithosdex", "ergodex", "arb")
+      Seq("rollups", "emissions", "rent", "forwards", "sigmafi", "lithosdex", "ergodex", "arb")
     settings.mempoolRefreshMs shouldBe 20000
     settings.cacheRefreshMs shouldBe 30000
     settings.minCandidateChangeRevenue shouldBe 1000000L
@@ -31,7 +31,7 @@ class CandidateSettingsSpec extends AnyFlatSpec with Matchers {
     settings.sources.exists(_.active) shouldBe false
     // Enabled is the source's own setting, reported even while nothing asks it.
     settings.sources.filter(_.enabled).map(_.name) shouldBe
-      Seq("rollups", "emissions", "rent", "forwards", "lithosdex", "ergodex", "arb")
+      Seq("rollups", "emissions", "rent", "forwards", "sigmafi", "lithosdex", "ergodex", "arb")
   }
 
   it should "mark a source active only when it would be asked" in {
@@ -51,6 +51,7 @@ class CandidateSettingsSpec extends AnyFlatSpec with Matchers {
       "rent" -> true,
       // The forwards batcher serves its source, so the source is idle with it off.
       "forwards" -> false,
+      "sigmafi" -> true,
       "lithosdex" -> true,
       // Enabled as a source, but its batcher is off, so nothing would answer.
       "ergodex" -> false,

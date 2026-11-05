@@ -38,6 +38,7 @@ class StartMiningServer @Inject()(system: ActorSystem, config: Configuration,
                                   @Named("ergodex-batcher") ergoDexBatcher: ActorRef,
                                   @Named("lithosdex-batcher") lithosDexBatcher: ActorRef,
                                   @Named("forwards-batcher") forwardsBatcher: ActorRef,
+                                  @Named("sigmafi-batcher") sigmaFiBatcher: ActorRef,
                                   @Named("stats-collector") statsCollector: ActorRef,
                                   poolTracker: transactions.batching.tracking.PoolTracker) {
 
@@ -113,6 +114,7 @@ class StartMiningServer @Inject()(system: ActorSystem, config: Configuration,
         val lithosDexSource = batcherSource(configs.CandidateSourceConfig.LithosDex, lithosDexBatcher)
         val ergoDexSource = batcherSource(configs.CandidateSourceConfig.ErgoDex, ergoDexBatcher)
         val forwardsSource = batcherSource(configs.CandidateSourceConfig.Forwards, forwardsBatcher)
+        val sigmaFiSource = batcherSource(configs.CandidateSourceConfig.SigmaFi, sigmaFiBatcher)
 
         // Started only while arb is active: off, no arb code runs and no stake is held
         val arbSource = if (!ArbConfig.active(config)) None else {
@@ -146,7 +148,7 @@ class StartMiningServer @Inject()(system: ActorSystem, config: Configuration,
             mining.MiningMessages.CandidateSource(
               configs.CandidateSourceConfig.Rollups, transactionProcessor),
             mining.MiningMessages.CandidateSource(
-              configs.CandidateSourceConfig.Emissions, emissionHandler)) ++ rentSource ++ forwardsSource ++
+              configs.CandidateSourceConfig.Emissions, emissionHandler)) ++ rentSource ++ forwardsSource ++ sigmaFiSource ++
             lithosDexSource ++ ergoDexSource ++ arbSource,
           rotateExtraNonceInterval = stratumParams.rotateExtraNonceInterval,
           niceHashMode = stratumParams.niceHashMode,

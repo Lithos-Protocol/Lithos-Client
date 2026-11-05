@@ -68,6 +68,8 @@ object CandidateConfig {
       // On by default: recording difficulty keeps the protocol's forwards settleable. One recording and the
       // settlements chained after it.
       CandidateSourceConfig.Forwards -> CandidateSourceConfig.Default.copy(enabled = true, maxTxs = 10),
+      // On by default: liquidating matured SigmaFi bonds needs no stake. One transaction holds a whole batch.
+      CandidateSourceConfig.SigmaFi -> CandidateSourceConfig.Default.copy(enabled = true, maxTxs = 2),
       // Asked only while `batching.arb.enabled`, after the DEX batchers. Every leg of a cycle takes a slot, and
       // 80 legs of the costliest pool kind fit the cost.
       CandidateSourceConfig.Arb -> CandidateSourceConfig.Default.copy(enabled = true, maxTxs = 80, maxCost = 2000000L)),

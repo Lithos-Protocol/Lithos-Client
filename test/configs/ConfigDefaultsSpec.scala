@@ -133,6 +133,19 @@ class ConfigDefaultsSpec extends AnyFlatSpec with Matchers {
     CandidateConfig(Configuration.empty).sources(CandidateSourceConfig.Forwards).enabled shouldBe true
   }
 
+  "SigmaFiBatchingConfig.Default" should "equal what the shipped application.conf parses, and what an empty one does" in {
+    SigmaFiBatchingConfig(shipped) shouldEqual SigmaFiBatchingConfig.Default
+    SigmaFiBatchingConfig(Configuration.empty) shouldEqual SigmaFiBatchingConfig.Default
+    CandidateConfig(Configuration.empty).sources(CandidateSourceConfig.SigmaFi) shouldEqual
+      CandidateConfig(shipped).sources(CandidateSourceConfig.SigmaFi)
+  }
+
+  "SigmaFiBondsConfig.Default" should "equal what the shipped application.conf parses, at the shipped fee floor" in {
+    SigmaFiBondsConfig(shipped) shouldEqual SigmaFiBondsConfig.Default
+    SigmaFiBondsConfig(Configuration.empty) shouldEqual SigmaFiBondsConfig.Default
+    SigmaFiBondsConfig.Default.batchingFeeNanoErg shouldBe SigmaFiBatchingConfig.Default.minBatchingFeeNanoErg
+  }
+
   "ForwardsOffersConfig.Default" should "equal what the shipped application.conf parses, and what an empty one does" in {
     ForwardsOffersConfig(shipped) shouldEqual ForwardsOffersConfig.Default
     ForwardsOffersConfig(Configuration.empty) shouldEqual ForwardsOffersConfig.Default

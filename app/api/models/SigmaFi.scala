@@ -1,0 +1,144 @@
+package api.models
+
+import play.api.libs.json._
+
+/** A token and an amount in its base units, as a string so a large one keeps every digit. */
+case class SFTokenAmount(tokenId: String, amount: String)
+
+/**
+ * A bond's terms, as an order or an offer states them and the bond then carries.
+ *
+ * @param kind              the bond's kind: "zero-coupon" for every SigmaFi V2 bond today
+ * @param principalNanoErgs nanoERG lent; for a token loan, only the principal box's floor. Absent for a bond whose
+ *                          order or offer this client could not read
+ * @param principalToken    the token lent, absent for an ERG loan
+ * @param repayment         what the borrower pays back: nanoERG, or base units of `repayToken`
+ * @param repayToken        the token a token loan is repaid in, absent when repaid in ERG
+ * @param maturityHeight    repayment is open strictly below it; absent for an on-close order until it is filled
+ * @param durationBlocks    an on-close order's term, counted from its fill
+ * @param batchingFee       the most of the collateral's nanoERG a liquidator keeps if the bond is not repaid
+ * @param liquidation       the liquidation script's name, absent when this client does not know it
+ */
+case class SFTerms(kind: String, principalNanoErgs: Option[String], principalToken: Option[SFTokenAmount], repayment: String,
+                   repayToken: Option[String], collateralNanoErgs: String, collateralTokens: Seq[SFTokenAmount],
+                   maturityHeight: Option[Int], durationBlocks: Option[Int], batchingFee: String,
+                   liquidation: Option[String], liquidationHash: String)
+
+/**
+ * A borrower's order waiting for a lender.
+ *
+ * @param borrower address the principal goes to, when this client can tell
+ * @param mine     whether this wallet made it, so it can cancel it
+ * @param refusal  why this client would not fill it, absent when it would
+ */
+case class SFOrderView(boxId: String, terms: SFTerms, borrower: Option[String], mine: Boolean,
+                       refusal: Option[String], creationHeight: Int)
+
+/**
+ * A lender's offer waiting for a borrower.
+ *
+ * @param assetName the name the bond asset will carry, which the lender chose and which proves nothing
+ */
+case class SFOfferView(boxId: String, terms: SFTerms, lender: Option[String], assetName: String, mine: Boolean,
+                       refusal: Option[String], creationHeight: Int)
+
+/**
+ * A live bond.
+ *
+ * @param assetId      the bond asset whose holder is paid the repayment or the collateral
+ * @param verified     whether this bond is the one its asset's genesis order or offer created
+ * @param verification why it is not verified, when it is not
+ * @param status       "open" while it can be repaid, "matured" once it can only be liquidated
+ * @param blocksLeft   blocks before repayment closes, 0 once matured
+ */
+case class SFBondView(boxId: String, assetId: String, terms: SFTerms, verified: Boolean, verification: Option[String],
+                      status: String, blocksLeft: Int, borrowerIsMe: Boolean, creationHeight: Int)
+
+case class SFOrderBook(height: Int, orders: Seq[SFOrderView], total: Int, truncated: Boolean)
+case class SFOfferBook(height: Int, offers: Seq[SFOfferView], total: Int, truncated: Boolean)
+case class SFBondList(height: Int, bonds: Seq[SFBondView], total: Int, unverified: Int, truncated: Boolean)
+
+/** A vault box: one settled bond's repayment or collateral, claimed by the holder of `assetId`. */
+case class SFVaultView(boxId: String, bondId: Option[String], assetId: String, nanoErgs: String,
+                       tokens: Seq[SFTokenAmount])
+
+/**
+ * A bond asset this wallet holds: the bond it claims while that is live, and what the vault holds for it once
+ * the bond is repaid or liquidated.
+ *
+ * @param claimable whether the vault holds anything for it and no pending transaction still settles into it
+ */
+case class SFHolding(assetId: String, bond: Option[SFBondView], vault: Seq[SFVaultView], claimable: Boolean)
+
+/**
+ * This wallet in SigmaFi.
+ *
+ * @param borrowing bonds whose collateral returns to this wallet on repayment
+ * @param lending   bond assets this wallet holds
+ */
+case class SFPortfolio(height: Int, orders: Seq[SFOrderView], offers: Seq[SFOfferView], borrowing: Seq[SFBondView],
+                       lending: Seq[SFHolding], truncated: Boolean)
+
+/** Token ids to look up as bond assets. */
+case class SFAssetLookupRequest(tokenIds: Seq[String])
+
+/**
+ * One token as a bond asset, read from the chain, never from its name or description.
+ *
+ * @param bondAsset whether a SigmaFi order or offer minted it
+ * @param bond      the live bond naming it, absent once settled
+ * @param vault     what the vault holds for it
+ */
+case class SFAssetLookup(tokenId: String, bondAsset: Boolean, verified: Boolean, verification: Option[String],
+                         bond: Option[SFBondView], vault: Seq[SFVaultView])
+
+/** A new order: collateral locked now, for a loan a lender fills later. Exactly one of the maturity fields. */
+case class SFOrderRequest(collateralNanoErgs: String, collateralTokens: Option[Seq[SFTokenAmount]],
+                          principalNanoErgs: Option[String], principalToken: Option[SFTokenAmount], repayment: String,
+                          maturityHeight: Option[Int], durationBlocks: Option[Int], batchingFee: Option[String],
+                          liquidation: Option[String])
+
+/** A new offer: the principal locked now, for a borrower who posts the collateral asked for. */
+case class SFOfferRequest(principalNanoErgs: Option[String], principalToken: Option[SFTokenAmount], repayment: String,
+                          maturityHeight: Int, collateralNanoErgs: String, collateralTokens: Option[Seq[SFTokenAmount]],
+                          batchingFee: Option[String], liquidation: Option[String])
+
+/**
+ * What an action would do, signing nothing.
+ *
+ * @param pays     what leaves this wallet, the network fee included
+ * @param receives what comes back to this wallet
+ * @param notes    what the transaction does, in order
+ * @param warnings what is worth reading before sending it
+ */
+case class SFQuote(action: String, boxId: Option[String], terms: Option[SFTerms], paysNanoErgs: String,
+                   paysTokens: Seq[SFTokenAmount], receivesNanoErgs: String, receivesTokens: Seq[SFTokenAmount],
+                   feeNanoErgs: String, notes: Seq[String], warnings: Seq[String])
+
+/**
+ * A sent action.
+ *
+ * @param boxId   the output that matters: the new order, offer or bond
+ * @param assetId the bond asset a fill or a close minted
+ */
+case class SFResult(txId: String, outcome: String, boxId: Option[String], assetId: Option[String])
+
+object SigmaFi {
+  implicit lazy val sfTokenAmountFormat: Format[SFTokenAmount] = Json.format[SFTokenAmount]
+  implicit lazy val sfTermsFormat: Format[SFTerms] = Json.format[SFTerms]
+  implicit lazy val sfOrderViewFormat: Format[SFOrderView] = Json.format[SFOrderView]
+  implicit lazy val sfOfferViewFormat: Format[SFOfferView] = Json.format[SFOfferView]
+  implicit lazy val sfBondViewFormat: Format[SFBondView] = Json.format[SFBondView]
+  implicit lazy val sfOrderBookFormat: Format[SFOrderBook] = Json.format[SFOrderBook]
+  implicit lazy val sfOfferBookFormat: Format[SFOfferBook] = Json.format[SFOfferBook]
+  implicit lazy val sfBondListFormat: Format[SFBondList] = Json.format[SFBondList]
+  implicit lazy val sfVaultViewFormat: Format[SFVaultView] = Json.format[SFVaultView]
+  implicit lazy val sfHoldingFormat: Format[SFHolding] = Json.format[SFHolding]
+  implicit lazy val sfPortfolioFormat: Format[SFPortfolio] = Json.format[SFPortfolio]
+  implicit lazy val sfAssetLookupRequestFormat: Format[SFAssetLookupRequest] = Json.format[SFAssetLookupRequest]
+  implicit lazy val sfAssetLookupFormat: Format[SFAssetLookup] = Json.format[SFAssetLookup]
+  implicit lazy val sfOrderRequestFormat: Format[SFOrderRequest] = Json.format[SFOrderRequest]
+  implicit lazy val sfOfferRequestFormat: Format[SFOfferRequest] = Json.format[SFOfferRequest]
+  implicit lazy val sfQuoteFormat: Format[SFQuote] = Json.format[SFQuote]
+  implicit lazy val sfResultFormat: Format[SFResult] = Json.format[SFResult]
+}

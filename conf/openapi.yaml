@@ -87,6 +87,19 @@ tags:
       **All amounts and difficulties are decimal strings, not JSON numbers.** LIT amounts are base
       units (9 decimals). A 409 means a box you named is already being spent: re-read and resend.
     x-displayName: Difficulty Forwards
+  - name: sigmafi
+    description: >
+      SigmaFi bonds: peer-to-peer zero-coupon loans. A borrower posts an order with collateral, or a lender posts
+      an offer with the principal; the other side fills or closes it, which creates a bond and mints one bond
+      asset to the lender. The borrower repays before maturity and takes the collateral back; otherwise anyone
+      may liquidate the bond, sending the collateral less its batching fee to the vault. Whoever holds the bond
+      asset claims what the vault holds for it.
+
+
+      Lists, the asset lookup and every `check` are open and sign nothing; the portfolio and everything that
+      signs need an `api_key`. **All amounts are decimal strings, not JSON numbers.** A 409 means a box you
+      named is already being spent: re-read and resend.
+    x-displayName: SigmaFi Bonds
 x-tagGroups:
   - name: Lithos
     tags:
@@ -97,6 +110,7 @@ x-tagGroups:
       - collateral-market
       - lithosdex
       - forwards
+      - sigmafi
       - wallet
   - name: Stratum
     tags:
@@ -4579,6 +4593,550 @@ paths:
               schema:
                 $ref: '#/components/schemas/ApiError'
 
+  /sigmafi/orders:
+    get:
+      summary: List open orders
+      description: >
+        Borrowers' orders waiting for a lender, newest first. Unconfirmed orders are included and orders already
+        being spent are not. `collateral` keeps orders whose collateral holds that token, or any ERG with `erg`;
+        `loan` keeps orders borrowing that token, or ERG with `erg`. Each order says why this client would not
+        fill it, when it would not.
+      operationId: listSFOrders
+      tags:
+        - sigmafi
+      parameters:
+        - $ref: '#/components/parameters/SFOffset'
+        - $ref: '#/components/parameters/SFLimit'
+        - $ref: '#/components/parameters/SFCollateral'
+        - $ref: '#/components/parameters/SFLoan'
+      responses:
+        '200':
+          description: One page of open orders
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SFOrderBook'
+        '400':
+          $ref: '#/components/responses/SigmaFiBadRequest'
+        '503':
+          $ref: '#/components/responses/SigmaFiUnavailable'
+    post:
+      summary: Create an order
+      description: >
+        Lock collateral in an order asking to borrow ERG or one token, repaid by a fixed height or a number of
+        blocks after a lender fills it. Its batching fee is `sigmafi.bonds.batchingFeeNanoErg` unless the request
+        sets a higher one. Cancel it with `POST /sigmafi/orders/{boxId}/cancel` while it is unfilled.
+      operationId: createSFOrder
+      security:
+        - ApiKeyAuth: []
+      tags:
+        - sigmafi
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SFOrderRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/SigmaFiSent'
+        '400':
+          $ref: '#/components/responses/SigmaFiBadRequest'
+        '403':
+          $ref: '#/components/responses/SigmaFiForbidden'
+        '422':
+          $ref: '#/components/responses/SigmaFiUnprocessable'
+        '503':
+          $ref: '#/components/responses/SigmaFiSendUnavailable'
+  /sigmafi/orders/check:
+    post:
+      summary: Quote an order
+      description: What creating the order would lock, and its terms as a lender reads them. Signs nothing.
+      operationId: checkSFOrder
+      tags:
+        - sigmafi
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SFOrderRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/SigmaFiQuoted'
+        '400':
+          $ref: '#/components/responses/SigmaFiBadRequest'
+        '503':
+          $ref: '#/components/responses/SigmaFiUnavailable'
+  /sigmafi/orders/{boxId}/cancel/check:
+    post:
+      summary: Quote cancelling an order
+      description: What cancelling this wallet's order returns. Signs nothing.
+      operationId: checkCancelSFOrder
+      tags:
+        - sigmafi
+      parameters:
+        - $ref: '#/components/parameters/SFBoxId'
+      responses:
+        '200':
+          $ref: '#/components/responses/SigmaFiQuoted'
+        '404':
+          $ref: '#/components/responses/SigmaFiNotFound'
+        '422':
+          $ref: '#/components/responses/SigmaFiUnprocessable'
+        '503':
+          $ref: '#/components/responses/SigmaFiUnavailable'
+  /sigmafi/orders/{boxId}/cancel:
+    post:
+      summary: Cancel an order
+      description: >
+        Return this wallet's order to it. The contract accepts a cancel only with a box at the borrower's
+        address spent alongside, so one of this wallet's boxes there is used.
+      operationId: cancelSFOrder
+      security:
+        - ApiKeyAuth: []
+      tags:
+        - sigmafi
+      parameters:
+        - $ref: '#/components/parameters/SFBoxId'
+      responses:
+        '200':
+          $ref: '#/components/responses/SigmaFiSent'
+        '403':
+          $ref: '#/components/responses/SigmaFiForbidden'
+        '404':
+          $ref: '#/components/responses/SigmaFiNotFound'
+        '409':
+          $ref: '#/components/responses/SigmaFiConflict'
+        '422':
+          $ref: '#/components/responses/SigmaFiUnprocessable'
+        '503':
+          $ref: '#/components/responses/SigmaFiSendUnavailable'
+  /sigmafi/orders/{boxId}/fill/check:
+    post:
+      summary: Quote filling an order
+      description: >
+        What lending to this order costs and the bond it creates, with the maturity an on-close order would
+        get now. Signs nothing.
+      operationId: checkFillSFOrder
+      tags:
+        - sigmafi
+      parameters:
+        - $ref: '#/components/parameters/SFBoxId'
+      responses:
+        '200':
+          $ref: '#/components/responses/SigmaFiQuoted'
+        '404':
+          $ref: '#/components/responses/SigmaFiNotFound'
+        '422':
+          $ref: '#/components/responses/SigmaFiUnprocessable'
+        '503':
+          $ref: '#/components/responses/SigmaFiUnavailable'
+  /sigmafi/orders/{boxId}/fill:
+    post:
+      summary: Fill an order
+      description: >
+        Lend the principal to the borrower. The fill mints the bond asset, one unit, to this wallet: its id is
+        the order's box id, and whoever holds it is paid the repayment, or the collateral if the bond is not
+        repaid by maturity.
+      operationId: fillSFOrder
+      security:
+        - ApiKeyAuth: []
+      tags:
+        - sigmafi
+      parameters:
+        - $ref: '#/components/parameters/SFBoxId'
+      responses:
+        '200':
+          $ref: '#/components/responses/SigmaFiSent'
+        '403':
+          $ref: '#/components/responses/SigmaFiForbidden'
+        '404':
+          $ref: '#/components/responses/SigmaFiNotFound'
+        '409':
+          $ref: '#/components/responses/SigmaFiConflict'
+        '422':
+          $ref: '#/components/responses/SigmaFiUnprocessable'
+        '503':
+          $ref: '#/components/responses/SigmaFiSendUnavailable'
+  /sigmafi/offers:
+    get:
+      summary: List open offers
+      description: >
+        Lenders' offers waiting for a borrower, newest first, filtered as `GET /sigmafi/orders` is. Each offer
+        says why this client would not close it, when it would not.
+      operationId: listSFOffers
+      tags:
+        - sigmafi
+      parameters:
+        - $ref: '#/components/parameters/SFOffset'
+        - $ref: '#/components/parameters/SFLimit'
+        - $ref: '#/components/parameters/SFCollateral'
+        - $ref: '#/components/parameters/SFLoan'
+      responses:
+        '200':
+          description: One page of open offers
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SFOfferBook'
+        '400':
+          $ref: '#/components/responses/SigmaFiBadRequest'
+        '503':
+          $ref: '#/components/responses/SigmaFiUnavailable'
+    post:
+      summary: Create an offer
+      description: >
+        Lock a principal of ERG or one token in an offer, with the collateral, repayment and maturity a borrower
+        must accept. The bond asset reaches this wallet when a borrower closes it. Cancel it with
+        `POST /sigmafi/offers/{boxId}/cancel` while it is open.
+      operationId: createSFOffer
+      security:
+        - ApiKeyAuth: []
+      tags:
+        - sigmafi
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SFOfferRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/SigmaFiSent'
+        '400':
+          $ref: '#/components/responses/SigmaFiBadRequest'
+        '403':
+          $ref: '#/components/responses/SigmaFiForbidden'
+        '422':
+          $ref: '#/components/responses/SigmaFiUnprocessable'
+        '503':
+          $ref: '#/components/responses/SigmaFiSendUnavailable'
+  /sigmafi/offers/check:
+    post:
+      summary: Quote an offer
+      description: What creating the offer would lock, and its terms as a borrower reads them. Signs nothing.
+      operationId: checkSFOffer
+      tags:
+        - sigmafi
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SFOfferRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/SigmaFiQuoted'
+        '400':
+          $ref: '#/components/responses/SigmaFiBadRequest'
+        '503':
+          $ref: '#/components/responses/SigmaFiUnavailable'
+  /sigmafi/offers/{boxId}/cancel/check:
+    post:
+      summary: Quote cancelling an offer
+      description: What cancelling this wallet's offer returns. Signs nothing.
+      operationId: checkCancelSFOffer
+      tags:
+        - sigmafi
+      parameters:
+        - $ref: '#/components/parameters/SFBoxId'
+      responses:
+        '200':
+          $ref: '#/components/responses/SigmaFiQuoted'
+        '404':
+          $ref: '#/components/responses/SigmaFiNotFound'
+        '422':
+          $ref: '#/components/responses/SigmaFiUnprocessable'
+        '503':
+          $ref: '#/components/responses/SigmaFiUnavailable'
+  /sigmafi/offers/{boxId}/cancel:
+    post:
+      summary: Cancel an offer
+      description: >
+        Return this wallet's offer to it, with one of this wallet's boxes at the lender's address spent
+        alongside, as the contract requires.
+      operationId: cancelSFOffer
+      security:
+        - ApiKeyAuth: []
+      tags:
+        - sigmafi
+      parameters:
+        - $ref: '#/components/parameters/SFBoxId'
+      responses:
+        '200':
+          $ref: '#/components/responses/SigmaFiSent'
+        '403':
+          $ref: '#/components/responses/SigmaFiForbidden'
+        '404':
+          $ref: '#/components/responses/SigmaFiNotFound'
+        '409':
+          $ref: '#/components/responses/SigmaFiConflict'
+        '422':
+          $ref: '#/components/responses/SigmaFiUnprocessable'
+        '503':
+          $ref: '#/components/responses/SigmaFiSendUnavailable'
+  /sigmafi/offers/{boxId}/close/check:
+    post:
+      summary: Quote closing an offer
+      description: What borrowing from this offer locks and pays out. Signs nothing.
+      operationId: checkCloseSFOffer
+      tags:
+        - sigmafi
+      parameters:
+        - $ref: '#/components/parameters/SFBoxId'
+      responses:
+        '200':
+          $ref: '#/components/responses/SigmaFiQuoted'
+        '404':
+          $ref: '#/components/responses/SigmaFiNotFound'
+        '422':
+          $ref: '#/components/responses/SigmaFiUnprocessable'
+        '503':
+          $ref: '#/components/responses/SigmaFiUnavailable'
+  /sigmafi/offers/{boxId}/close:
+    post:
+      summary: Close an offer
+      description: >
+        Borrow from the offer: this wallet's collateral goes into a bond and the principal comes to this
+        wallet. The close mints the bond asset to the lender. Repay before maturity with
+        `POST /sigmafi/bonds/{boxId}/repay`.
+      operationId: closeSFOffer
+      security:
+        - ApiKeyAuth: []
+      tags:
+        - sigmafi
+      parameters:
+        - $ref: '#/components/parameters/SFBoxId'
+      responses:
+        '200':
+          $ref: '#/components/responses/SigmaFiSent'
+        '403':
+          $ref: '#/components/responses/SigmaFiForbidden'
+        '404':
+          $ref: '#/components/responses/SigmaFiNotFound'
+        '409':
+          $ref: '#/components/responses/SigmaFiConflict'
+        '422':
+          $ref: '#/components/responses/SigmaFiUnprocessable'
+        '503':
+          $ref: '#/components/responses/SigmaFiSendUnavailable'
+  /sigmafi/bonds:
+    get:
+      summary: List live bonds
+      description: >
+        Bonds not yet repaid or liquidated, soonest maturity first. Only verified bonds unless `all` is true:
+        a verified bond is the one its bond asset's genesis order or offer created. Anyone can build a bond
+        naming any asset, and such a bond only ever pays that asset's holder.
+      operationId: listSFBonds
+      tags:
+        - sigmafi
+      parameters:
+        - $ref: '#/components/parameters/SFOffset'
+        - $ref: '#/components/parameters/SFLimit'
+        - in: query
+          name: all
+          required: false
+          description: Include unverified bonds.
+          schema:
+            type: boolean
+            default: false
+      responses:
+        '200':
+          description: One page of bonds
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SFBondList'
+        '400':
+          $ref: '#/components/responses/SigmaFiBadRequest'
+        '503':
+          $ref: '#/components/responses/SigmaFiUnavailable'
+  /sigmafi/bonds/{boxId}/repay/check:
+    post:
+      summary: Quote repaying a bond
+      description: What repaying costs and where the collateral goes. Signs nothing.
+      operationId: checkRepaySFBond
+      tags:
+        - sigmafi
+      parameters:
+        - $ref: '#/components/parameters/SFBoxId'
+      responses:
+        '200':
+          $ref: '#/components/responses/SigmaFiQuoted'
+        '404':
+          $ref: '#/components/responses/SigmaFiNotFound'
+        '422':
+          $ref: '#/components/responses/SigmaFiUnprocessable'
+        '503':
+          $ref: '#/components/responses/SigmaFiUnavailable'
+  /sigmafi/bonds/{boxId}/repay:
+    post:
+      summary: Repay a bond
+      description: >
+        Pay the repayment into the vault for the bond asset's holder, and return the collateral to the
+        borrower. Open strictly below maturity. Anyone may repay; the collateral always goes to the borrower.
+      operationId: repaySFBond
+      security:
+        - ApiKeyAuth: []
+      tags:
+        - sigmafi
+      parameters:
+        - $ref: '#/components/parameters/SFBoxId'
+      responses:
+        '200':
+          $ref: '#/components/responses/SigmaFiSent'
+        '403':
+          $ref: '#/components/responses/SigmaFiForbidden'
+        '404':
+          $ref: '#/components/responses/SigmaFiNotFound'
+        '409':
+          $ref: '#/components/responses/SigmaFiConflict'
+        '422':
+          $ref: '#/components/responses/SigmaFiUnprocessable'
+        '503':
+          $ref: '#/components/responses/SigmaFiSendUnavailable'
+  /sigmafi/bonds/{boxId}/liquidate/check:
+    post:
+      summary: Quote liquidating a bond
+      description: What liquidating a matured bond pays this wallet. Signs nothing.
+      operationId: checkLiquidateSFBond
+      tags:
+        - sigmafi
+      parameters:
+        - $ref: '#/components/parameters/SFBoxId'
+      responses:
+        '200':
+          $ref: '#/components/responses/SigmaFiQuoted'
+        '404':
+          $ref: '#/components/responses/SigmaFiNotFound'
+        '422':
+          $ref: '#/components/responses/SigmaFiUnprocessable'
+        '503':
+          $ref: '#/components/responses/SigmaFiUnavailable'
+  /sigmafi/bonds/{boxId}/liquidate:
+    post:
+      summary: Liquidate a bond
+      description: >
+        Send a matured bond's collateral, less its batching fee, to the vault for the bond asset's holder. The
+        fee less the 0.001 ERG network fee comes to this wallet. Only bonds under the maturity liquidation
+        script. Mining clients liquidate bonds paying at least their fee floor on their own.
+      operationId: liquidateSFBond
+      security:
+        - ApiKeyAuth: []
+      tags:
+        - sigmafi
+      parameters:
+        - $ref: '#/components/parameters/SFBoxId'
+      responses:
+        '200':
+          $ref: '#/components/responses/SigmaFiSent'
+        '403':
+          $ref: '#/components/responses/SigmaFiForbidden'
+        '404':
+          $ref: '#/components/responses/SigmaFiNotFound'
+        '409':
+          $ref: '#/components/responses/SigmaFiConflict'
+        '422':
+          $ref: '#/components/responses/SigmaFiUnprocessable'
+        '503':
+          $ref: '#/components/responses/SigmaFiSendUnavailable'
+  /sigmafi/claims/{tokenId}/check:
+    post:
+      summary: Quote a claim
+      description: What the vault holds for this bond asset. Signs nothing.
+      operationId: checkSFClaim
+      tags:
+        - sigmafi
+      parameters:
+        - $ref: '#/components/parameters/SFTokenId'
+      responses:
+        '200':
+          $ref: '#/components/responses/SigmaFiQuoted'
+        '404':
+          $ref: '#/components/responses/SigmaFiNotFound'
+        '422':
+          $ref: '#/components/responses/SigmaFiUnprocessable'
+        '503':
+          $ref: '#/components/responses/SigmaFiUnavailable'
+  /sigmafi/claims/{tokenId}:
+    post:
+      summary: Claim a settled bond
+      description: >
+        Take everything the vault holds for a bond asset this wallet holds, burning the asset. Every vault box
+        for it is claimed at once: once the asset is burned, nothing left behind can be claimed. Refused while
+        a pending transaction still pays into the vault for it.
+      operationId: claimSFBond
+      security:
+        - ApiKeyAuth: []
+      tags:
+        - sigmafi
+      parameters:
+        - $ref: '#/components/parameters/SFTokenId'
+      responses:
+        '200':
+          $ref: '#/components/responses/SigmaFiSent'
+        '403':
+          $ref: '#/components/responses/SigmaFiForbidden'
+        '404':
+          $ref: '#/components/responses/SigmaFiNotFound'
+        '409':
+          $ref: '#/components/responses/SigmaFiConflict'
+        '422':
+          $ref: '#/components/responses/SigmaFiUnprocessable'
+        '503':
+          $ref: '#/components/responses/SigmaFiSendUnavailable'
+  /sigmafi/assets:
+    post:
+      summary: Look up bond assets
+      description: >
+        Whether each token is a SigmaFi bond asset, read from the chain and never from its name or
+        description: the order or offer that minted it, the bond it claims while that is live, and what the
+        vault holds for it once settled. Up to 50 token ids.
+      operationId: lookupSFAssets
+      tags:
+        - sigmafi
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SFAssetLookupRequest'
+      responses:
+        '200':
+          description: One entry per token id, in the order asked
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/SFAssetLookup'
+        '400':
+          $ref: '#/components/responses/SigmaFiBadRequest'
+        '503':
+          $ref: '#/components/responses/SigmaFiUnavailable'
+  /sigmafi/portfolio:
+    get:
+      summary: This wallet in SigmaFi
+      description: >
+        This wallet's open orders and offers, the bonds it borrows on, and the bond assets it holds with what
+        the vault holds for each.
+      operationId: getSFPortfolio
+      security:
+        - ApiKeyAuth: []
+      tags:
+        - sigmafi
+      responses:
+        '200':
+          description: The portfolio
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SFPortfolio'
+        '403':
+          $ref: '#/components/responses/SigmaFiForbidden'
+        '503':
+          $ref: '#/components/responses/SigmaFiUnavailable'
   /wallet/balances:
     get:
       security:
@@ -5096,6 +5654,52 @@ paths:
 
 components:
   parameters:
+    SFOffset:
+      in: query
+      name: offset
+      required: false
+      schema:
+        type: integer
+        minimum: 0
+        default: 0
+    SFLimit:
+      in: query
+      name: limit
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 10
+    SFCollateral:
+      in: query
+      name: collateral
+      required: false
+      description: A token id the collateral must hold, or `erg` for collateral with any ERG.
+      schema:
+        type: string
+    SFLoan:
+      in: query
+      name: loan
+      required: false
+      description: The token lent, or `erg` for ERG loans.
+      schema:
+        type: string
+    SFBoxId:
+      in: path
+      name: boxId
+      required: true
+      schema:
+        type: string
+        pattern: '^[0-9a-fA-F]{64}$'
+    SFTokenId:
+      in: path
+      name: tokenId
+      required: true
+      description: The bond asset's token id.
+      schema:
+        type: string
+        pattern: '^[0-9a-fA-F]{64}$'
     StatsFrom:
       name: from
       in: query
@@ -5142,6 +5746,64 @@ components:
         type: string
         pattern: '^[0-9a-fA-F]{64}$'
   responses:
+    SigmaFiQuoted:
+      description: What the action would do. Nothing was signed or sent.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/SFQuote'
+    SigmaFiSent:
+      description: The transaction was sent; `outcome` says whether the node accepted it.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/SFResult'
+    SigmaFiBadRequest:
+      description: A malformed field, or terms no contract or shipped client accepts.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+    SigmaFiForbidden:
+      description: Missing or wrong api_key.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+    SigmaFiNotFound:
+      description: No unspent box has that id, it is not the kind named, or it is not this wallet's.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+    SigmaFiConflict:
+      description: A pending transaction already spends a box this names. Re-read and resend.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+    SigmaFiUnprocessable:
+      description: >-
+        Valid, but not possible now: the box's terms are refused, maturity has passed or not come, the wallet
+        cannot cover it, or no wallet box can authorize a cancel.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+    SigmaFiUnavailable:
+      description: Node or index unavailable. Never returns a partial answer.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+    SigmaFiSendUnavailable:
+      description: >-
+        Node, wallet or transaction engine unavailable, or the request ran out of time. The message says whether
+        anything was sent. When it says the outcome is unknown, check `GET /sigmafi/portfolio` before retrying.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
     StatsForbidden:
       description: The api_key header is missing or wrong.
       content:
@@ -11576,6 +12238,372 @@ components:
           type: string
         rewardLit:
           type: string
+    SFTokenAmount:
+      type: object
+      x-tags: sigmafi
+      required: [tokenId, amount]
+      properties:
+        tokenId:
+          type: string
+        amount:
+          type: string
+          description: Base units.
+    SFTerms:
+      type: object
+      x-tags: sigmafi
+      description: A bond's terms, as its order or offer states them and the bond carries them.
+      required: [kind, repayment, collateralNanoErgs, collateralTokens, batchingFee, liquidationHash]
+      properties:
+        kind:
+          type: string
+          description: The bond's kind. Every SigmaFi V2 bond is `zero-coupon`.
+        principalNanoErgs:
+          type: string
+          description: >-
+            nanoERG lent; for a token loan, only the principal box's floor. Absent for a bond whose order or offer
+            could not be read.
+        principalToken:
+          $ref: '#/components/schemas/SFTokenAmount'
+        repayment:
+          type: string
+          description: What the borrower repays, in nanoERG or in base units of `repayToken`.
+        repayToken:
+          type: string
+          description: The token a token loan is repaid in. Absent when repaid in ERG.
+        collateralNanoErgs:
+          type: string
+        collateralTokens:
+          type: array
+          items:
+            $ref: '#/components/schemas/SFTokenAmount'
+        maturityHeight:
+          type: integer
+          description: Repayment is open strictly below it. Absent for an on-close order until it is filled.
+        durationBlocks:
+          type: integer
+          description: An on-close order's term, counted from its fill.
+        batchingFee:
+          type: string
+          description: The most of the collateral's nanoERG a liquidator keeps if the bond is not repaid.
+        liquidation:
+          type: string
+          description: The liquidation script's name. Absent when this client does not know it.
+        liquidationHash:
+          type: string
+    SFOrderView:
+      type: object
+      x-tags: sigmafi
+      required: [boxId, terms, mine, creationHeight]
+      properties:
+        boxId:
+          type: string
+        terms:
+          $ref: '#/components/schemas/SFTerms'
+        borrower:
+          type: string
+          description: The address the principal goes to, when this client can tell.
+        mine:
+          type: boolean
+        refusal:
+          type: string
+          description: Why this client would not fill it. Absent when it would.
+        creationHeight:
+          type: integer
+    SFOfferView:
+      type: object
+      x-tags: sigmafi
+      required: [boxId, terms, assetName, mine, creationHeight]
+      properties:
+        boxId:
+          type: string
+        terms:
+          $ref: '#/components/schemas/SFTerms'
+        lender:
+          type: string
+        assetName:
+          type: string
+          description: The name the bond asset will carry. The lender chose it, and it proves nothing.
+        mine:
+          type: boolean
+        refusal:
+          type: string
+          description: Why this client would not close it. Absent when it would.
+        creationHeight:
+          type: integer
+    SFBondView:
+      type: object
+      x-tags: sigmafi
+      required: [boxId, assetId, terms, verified, status, blocksLeft, borrowerIsMe, creationHeight]
+      properties:
+        boxId:
+          type: string
+        assetId:
+          type: string
+          description: The bond asset whose holder is paid.
+        terms:
+          $ref: '#/components/schemas/SFTerms'
+        verified:
+          type: boolean
+          description: Whether this is the bond its asset's genesis order or offer created.
+        verification:
+          type: string
+          description: Why it is not verified.
+        status:
+          type: string
+          enum: [open, matured]
+        blocksLeft:
+          type: integer
+          description: Blocks before repayment closes. 0 once matured.
+        borrowerIsMe:
+          type: boolean
+        creationHeight:
+          type: integer
+    SFOrderBook:
+      type: object
+      x-tags: sigmafi
+      required: [height, orders, total, truncated]
+      properties:
+        height:
+          type: integer
+        orders:
+          type: array
+          items:
+            $ref: '#/components/schemas/SFOrderView'
+        total:
+          type: integer
+        truncated:
+          type: boolean
+          description: The scan stopped at its cap, so older orders were not read.
+    SFOfferBook:
+      type: object
+      x-tags: sigmafi
+      required: [height, offers, total, truncated]
+      properties:
+        height:
+          type: integer
+        offers:
+          type: array
+          items:
+            $ref: '#/components/schemas/SFOfferView'
+        total:
+          type: integer
+        truncated:
+          type: boolean
+    SFBondList:
+      type: object
+      x-tags: sigmafi
+      required: [height, bonds, total, unverified, truncated]
+      properties:
+        height:
+          type: integer
+        bonds:
+          type: array
+          items:
+            $ref: '#/components/schemas/SFBondView'
+        total:
+          type: integer
+        unverified:
+          type: integer
+          description: Live bonds that failed verification, listed only with `all`.
+        truncated:
+          type: boolean
+    SFVaultView:
+      type: object
+      x-tags: sigmafi
+      required: [boxId, assetId, nanoErgs, tokens]
+      properties:
+        boxId:
+          type: string
+        bondId:
+          type: string
+          description: The bond this box settles.
+        assetId:
+          type: string
+        nanoErgs:
+          type: string
+        tokens:
+          type: array
+          items:
+            $ref: '#/components/schemas/SFTokenAmount'
+    SFHolding:
+      type: object
+      x-tags: sigmafi
+      required: [assetId, vault, claimable]
+      properties:
+        assetId:
+          type: string
+        bond:
+          $ref: '#/components/schemas/SFBondView'
+        vault:
+          type: array
+          items:
+            $ref: '#/components/schemas/SFVaultView'
+        claimable:
+          type: boolean
+    SFPortfolio:
+      type: object
+      x-tags: sigmafi
+      required: [height, orders, offers, borrowing, lending, truncated]
+      properties:
+        height:
+          type: integer
+        orders:
+          type: array
+          items:
+            $ref: '#/components/schemas/SFOrderView'
+        offers:
+          type: array
+          items:
+            $ref: '#/components/schemas/SFOfferView'
+        borrowing:
+          type: array
+          description: Bonds whose collateral returns to this wallet on repayment.
+          items:
+            $ref: '#/components/schemas/SFBondView'
+        lending:
+          type: array
+          description: Bond assets this wallet holds.
+          items:
+            $ref: '#/components/schemas/SFHolding'
+        truncated:
+          type: boolean
+    SFAssetLookupRequest:
+      type: object
+      x-tags: sigmafi
+      required: [tokenIds]
+      properties:
+        tokenIds:
+          type: array
+          maxItems: 50
+          items:
+            type: string
+    SFAssetLookup:
+      type: object
+      x-tags: sigmafi
+      required: [tokenId, bondAsset, verified, vault]
+      properties:
+        tokenId:
+          type: string
+        bondAsset:
+          type: boolean
+          description: Whether a SigmaFi order or offer minted it.
+        verified:
+          type: boolean
+        verification:
+          type: string
+        bond:
+          $ref: '#/components/schemas/SFBondView'
+        vault:
+          type: array
+          items:
+            $ref: '#/components/schemas/SFVaultView'
+    SFOrderRequest:
+      type: object
+      x-tags: sigmafi
+      description: >-
+        Exactly one of `principalNanoErgs` and `principalToken`, and exactly one of `maturityHeight` and
+        `durationBlocks`.
+      required: [collateralNanoErgs, repayment]
+      properties:
+        collateralNanoErgs:
+          type: string
+        collateralTokens:
+          type: array
+          items:
+            $ref: '#/components/schemas/SFTokenAmount'
+        principalNanoErgs:
+          type: string
+        principalToken:
+          $ref: '#/components/schemas/SFTokenAmount'
+        repayment:
+          type: string
+        maturityHeight:
+          type: integer
+          description: At least 3 blocks above the current height.
+        durationBlocks:
+          type: integer
+          minimum: 30
+        batchingFee:
+          type: string
+          description: At least 50000000. Defaults to `sigmafi.bonds.batchingFeeNanoErg`.
+        liquidation:
+          type: string
+          default: MaturityLiquidation
+    SFOfferRequest:
+      type: object
+      x-tags: sigmafi
+      description: Exactly one of `principalNanoErgs` and `principalToken`.
+      required: [repayment, maturityHeight, collateralNanoErgs]
+      properties:
+        principalNanoErgs:
+          type: string
+        principalToken:
+          $ref: '#/components/schemas/SFTokenAmount'
+        repayment:
+          type: string
+        maturityHeight:
+          type: integer
+        collateralNanoErgs:
+          type: string
+        collateralTokens:
+          type: array
+          items:
+            $ref: '#/components/schemas/SFTokenAmount'
+        batchingFee:
+          type: string
+        liquidation:
+          type: string
+          default: MaturityLiquidation
+    SFQuote:
+      type: object
+      x-tags: sigmafi
+      required: [action, paysNanoErgs, paysTokens, receivesNanoErgs, receivesTokens, feeNanoErgs, notes, warnings]
+      properties:
+        action:
+          type: string
+        boxId:
+          type: string
+        terms:
+          $ref: '#/components/schemas/SFTerms'
+        paysNanoErgs:
+          type: string
+          description: What leaves this wallet, the network fee included.
+        paysTokens:
+          type: array
+          items:
+            $ref: '#/components/schemas/SFTokenAmount'
+        receivesNanoErgs:
+          type: string
+        receivesTokens:
+          type: array
+          items:
+            $ref: '#/components/schemas/SFTokenAmount'
+        feeNanoErgs:
+          type: string
+        notes:
+          type: array
+          items:
+            type: string
+        warnings:
+          type: array
+          items:
+            type: string
+    SFResult:
+      type: object
+      x-tags: sigmafi
+      required: [txId, outcome]
+      properties:
+        txId:
+          type: string
+        outcome:
+          type: string
+          enum: [accepted, rejected, uncertain]
+        boxId:
+          type: string
+          description: The output that matters, the new order, offer or bond.
+        assetId:
+          type: string
+          description: The bond asset a fill or a close minted.
   securitySchemes:
     ApiKeyAuth:
       description: >

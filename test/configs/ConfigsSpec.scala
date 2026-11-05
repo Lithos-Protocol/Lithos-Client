@@ -383,7 +383,7 @@ class ConfigsSpec extends AnyFlatSpec with Matchers {
     Contexts.Names should contain theSameElementsAs
       Seq(Contexts.Stratum, Contexts.Polling, Contexts.Sync, Contexts.Tx, Contexts.Dex,
         Contexts.Database, Contexts.SnapshotIo, Contexts.CandidateIo, Contexts.MiningControlIo, Contexts.Genesis, Contexts.EngineIo, Contexts.MempoolIo, Contexts.WalletIo, Contexts.WalletMaintenance, Contexts.EngineCandidate, Contexts.CriticalWallet, Contexts.CriticalTx, Contexts.BatchingIo,
-        Contexts.LithosDexBatchingIo, Contexts.ForwardsBatchingIo, Contexts.ArbIo, Contexts.PoolTracking, Contexts.Stats,
+        Contexts.LithosDexBatchingIo, Contexts.ForwardsBatchingIo, Contexts.SigmaFiBatchingIo, Contexts.ArbIo, Contexts.PoolTracking, Contexts.Stats,
         Contexts.StatsRead,
         Contexts.StatsStore, Contexts.MiningStats)
   }

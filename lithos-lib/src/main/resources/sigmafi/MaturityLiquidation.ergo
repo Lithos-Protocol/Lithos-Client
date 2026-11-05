@@ -1,0 +1,20 @@
+{
+    // Maturity Liquidation - SigmaFi V1's liquidation rule, as a V2 liquidation script
+    // Once the bond reaches its maturity height, anyone may liquidate it. V1 bonds did exactly this:
+    // `HEIGHT >= maturityHeight` opened the liquidation path, with no signature, sending the collateral
+    // to the lender.
+    //
+    // Not a contract that guards boxes. A bond runs it with executeFromVar, so SELF is the bond being
+    // liquidated: R7 is that bond's maturity height. Its serialized expression is what an executor attaches
+    // as context var 0, and the blake2b256 of those bytes is what a bond keeps in R8.
+    //
+    // Everything else about the liquidation is the bond's: where the collateral goes, the R4/R5 settlement
+    // tags into the vault, and the batching fee. That fee (bond R6(1)) is the only difference from
+    // V1: the lender receives the collateral less at most the fee, and whoever builds the transaction keeps
+    // the difference. A bond with a zero fee liquidates to the lender in full, as V1 did.
+    //
+    // Repayment closes at the same height (the bond allows it strictly below maturity), so as in V1 there
+    // is no block where both or neither are open.
+
+    sigmaProp(HEIGHT >= SELF.R7[Int].get)
+}

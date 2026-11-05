@@ -1,0 +1,115 @@
+{
+    // Zero-Coupon Bond Order, On-Close - a borrower's standing request for a loan of a fixed length
+    // ZC_Order with one difference: the borrower asks for a duration rather than a maturity height, and the
+    // bond matures that many blocks after the order is filled. An order can then wait for a lender as long
+    // as it likes without its loan getting shorter. This is SigmaFi V1's On-Close order: the same 30-block
+    // minimum duration, and the same 8-block allowance for the fill to reach a block.
+    //
+    // CONSTANTS (same template and verification rules as ZC_Order)
+    // The borrower's terms:
+    // CONST_BOND_HASH:        Coll[Byte] - blake2b256 of the bond ErgoTree: ZC_ERG_Bond, or ZC_Token_Bond
+    //                                      compiled for the repayment token. Either pays the vault.
+    // CONST_BORROWER_HASH:    Coll[Byte] - blake2b256 of the borrower's ErgoTree. Bond R5; receives the
+    //                                      principal; authorizes the cancel.
+    // CONST_PRINCIPAL_ERG:    Long       - the least nanoERG the principal box may hold
+    // CONST_PRINCIPAL_TOKENS: Coll[(Coll[Byte], Long)] - the principal box's tokens, exactly
+    // CONST_REPAYMENT:        Long       - bond R6(0)
+    // CONST_BATCHING_FEE:     Long       - bond R6(1)
+    // CONST_DURATION:         Int        - blocks from the fill to the bond's maturity, at least 30
+    // CONST_LIQ_SCRIPT_HASH:  Coll[Byte] - bond R8
+    //
+    // PATHS
+    // Fill (SELF at INPUTS(0), the only input that can mint; asset supply exactly 1):
+    //   OUTPUTS(0) lender's unit: (asset, 1) at tokens(0), anywhere the lender likes. It is the first output
+    //              carrying the new token, so its R4-R6 are the asset's EIP-4 name, description, decimals.
+    //   OUTPUTS(1) bond: SELF.tokens unchanged, value >= SELF.value. Every register is pinned; R4 is SELF.id,
+    //              and R7 is within 8 blocks below HEIGHT + CONST_DURATION.
+    //   OUTPUTS(2) principal: to the borrower.
+    // Cancel: nothing is minted, and the borrower spends a box guarded by CONST_BORROWER_HASH alongside.
+    //
+    // MATURITY
+    // The lender stamps R7 as (build height + duration) and the transaction may reach a block a little later,
+    // so R7 may trail HEIGHT + CONST_DURATION by up to 8 blocks. A fill still unconfirmed after that is invalid
+    // and must be rebuilt. The lender profits from an earlier maturity, so the borrower may lose up to 8 blocks
+    // of the term, as in V1.
+    //
+    // ASSUMPTIONS
+    // - One order fills per transaction, since only INPUTS(0) can mint.
+    // - The lender builds the fill, so where the lender's unit goes and its metadata are the lender's choice.
+    //   A unit sent into the vault would let anyone claim that vault box: the lender must not do that.
+    // - The batching fee is the borrower's term, and the lender reads it before filling.
+    // - The bond and the principal are not checked against each other. A token order whose bond repays in
+    //   another token is the borrower's own mistake; the client must build them as a pair.
+    // - The cancel authenticates the borrower by co-spend, as a P2PK borrower's box needs their signature.
+    //   It does not constrain outputs, so a borrower script anyone can spend makes the cancel anyone's.
+
+    // Helper Methods
+    def numTokenInOutputs(tokenId: Coll[Byte]): Long = {
+        OUTPUTS.fold(0L, {
+            (a: Long, b: Box) =>
+                val totalTokens = b.tokens.fold(0L, {
+                    (z: Long, t: (Coll[Byte], Long)) => if(t._1 == tokenId) z + t._2 else z
+                })
+                a + totalTokens
+        })
+    }
+
+    // One unit, held by the lender: the bond names the asset in R4 instead of holding a unit of its own
+    val mintAmount = 1L
+    val minted     = numTokenInOutputs(SELF.id)
+
+    if (minted > 0L) {
+        // Fill
+        val lenderUnit   = OUTPUTS(0)
+        val bondBox      = OUTPUTS(1)
+        val principalBox = OUTPUTS(2)
+        val bondAmounts  = bondBox.R6[Coll[Long]].get
+
+        // minted counts every output, so the unit at OUTPUTS(0) is the only one there is
+        val verifiedMint =
+            SELF.id == INPUTS(0).id &&
+            minted == mintAmount &&
+            lenderUnit.tokens.size > 0 &&
+            lenderUnit.tokens(0)._1 == SELF.id
+
+        val validBond =
+            blake2b256(bondBox.propositionBytes) == CONST_BOND_HASH &&
+            bondBox.tokens == SELF.tokens &&
+            bondBox.value >= SELF.value
+
+        val validTerms =
+            bondBox.R4[Coll[Byte]].get == SELF.id &&
+            bondBox.R5[Coll[Byte]].get == CONST_BORROWER_HASH &&
+            bondAmounts.size == 2 &&
+            bondAmounts(0) == CONST_REPAYMENT &&
+            bondAmounts(1) == CONST_BATCHING_FEE &&
+            bondBox.R8[Coll[Byte]].get == CONST_LIQ_SCRIPT_HASH
+
+        // Read off the bond, not the constants, so the compiler cannot fold this and change the template
+        val feeBounded =
+            bondAmounts(1) >= 0L &&
+            bondBox.value - bondAmounts(1) >= 1000000L
+
+        // Every term here involves HEIGHT. `CONST_DURATION >= 30` on its own would be folded when the
+        // template is compiled, and every order stamped from it would skip the check.
+        val bondMaturity   = bondBox.R7[Int].get
+        val targetMaturity = HEIGHT + CONST_DURATION
+        val maturityOnClose =
+            targetMaturity - HEIGHT >= 30 &&
+            bondMaturity <= targetMaturity &&
+            bondMaturity >= targetMaturity - 8
+
+        val principalPaid =
+            blake2b256(principalBox.propositionBytes) == CONST_BORROWER_HASH &&
+            principalBox.value >= CONST_PRINCIPAL_ERG &&
+            principalBox.tokens == CONST_PRINCIPAL_TOKENS
+
+        sigmaProp(verifiedMint && validBond && validTerms && feeBounded && maturityOnClose && principalPaid)
+    } else {
+        // Cancel
+        val borrowerAuth = INPUTS.exists { (b: Box) =>
+            blake2b256(b.propositionBytes) == CONST_BORROWER_HASH
+        }
+        sigmaProp(borrowerAuth)
+    }
+}
