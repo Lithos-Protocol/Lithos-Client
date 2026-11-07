@@ -38,7 +38,7 @@ trait SigmaFiFixtures extends ContractSpecBase {
   protected def bondUTXO(repayToken: Option[ErgoId], borrower: Contract, maturity: Int, value: Long = 5 * Erg,
                          collateral: Seq[Token] = Seq.empty, repayment: Long = 2 * Erg, fee: Long = 50000000L,
                          asset: ErgoId = assetId, liqHash: Array[Byte] = liq.hash): UTXO =
-    UTXO(SigmaFiContracts.bond(repayToken), value, collateral,
+    UTXO(SigmaFiContracts.bond(repayToken), value, Token(asset, 1L) +: collateral,
       bondRegisters(asset, hashOf(borrower), repayment, fee, maturity, liqHash))
 
   protected def orderTerms(borrower: Contract, schedule: ZCSchedule, principalErg: Long = Erg,
@@ -48,13 +48,6 @@ trait SigmaFiFixtures extends ContractSpecBase {
     ZCOrderTerms(SigmaFiContracts.bond(repayToken).hashedPropBytes, hashOf(borrower), principalErg, principalTokens,
       repayment, fee, schedule, liq.hash)
   }
-
-  protected def offerTerms(lender: Contract, maturity: Int, repayToken: Option[ErgoId] = None,
-                           collateralErg: Long = 5 * Erg, collateralTokens: Seq[(ErgoId, Long)] = Seq.empty,
-                           repayment: Long = 2 * Erg, fee: Long = 50000000L): ZCOfferTerms =
-    ZCOfferTerms(hashOf(lender), "SigmaFi ZC-Bond".getBytes("UTF-8"), "{}".getBytes("UTF-8"),
-      SigmaFiContracts.bond(repayToken).hashedPropBytes, repayment, fee, maturity, liq.hash, collateralErg,
-      collateralTokens)
 
   protected def vaultUTXO(bondId: ErgoId, asset: ErgoId, value: Long = 2 * Erg, tokens: Seq[Token] = Seq.empty): UTXO =
     UTXO(SigmaFiContracts.vault, value, tokens, Seq(ErgoValue.of(bondId.getBytes), ErgoValue.of(asset.getBytes)))

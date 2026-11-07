@@ -73,4 +73,30 @@ class SigmaFiStatisticsSpec extends AnyPropSpec with SigmaFiFixtures {
         .filter(_.protocol == "sigmafi") shouldBe empty
     }
   }
+
+  property("custom liquidation expressions are not priced as maturity batching fees") {
+    client.execute { ctx =>
+      val boxes = bonds(ctx)
+      val (block, tx) = inBlock(liquidation(ctx, boxes, 0L), boxes)
+      val custom = ErgoValue.of(Array[Byte](1, 2, 3)).toHex
+      val changed = tx.copy(inputs = tx.inputs.map(_.copy(spendingProof = Some(InputSpendingProof(Map("0" -> custom))))))
+      BatchingStatistics.read(block.copy(txs = Seq(changed)), changed, NetworkType.MAINNET,
+        wallet.contract.ergoTreeHex).filter(_.protocol == "sigmafi") shouldBe empty
+    }
+  }
+
+  property("maturity attribution requires settlement tags, exact collateral, and disappearance of the singleton") {
+    client.execute { ctx =>
+      val boxes = bonds(ctx).take(1)
+      val (block, tx) = inBlock(liquidation(ctx, boxes, 0L), boxes)
+      val wrongTag = tx.outputs.head.copy(registers = tx.outputs.head.registers.updated(0, ErgoValue.of(assetId.getBytes).toHex))
+      val wrongTokens = tx.outputs.head.copy(assets = Seq(Token(tokenB, 1L)))
+      val singletonSurvives = tx.outputs.last.copy(assets = Seq(Token(ErgoId.create(boxes.head.assets.head.tokenId), 1L)))
+      Seq(tx.copy(outputs = wrongTag +: tx.outputs.tail), tx.copy(outputs = wrongTokens +: tx.outputs.tail),
+        tx.copy(outputs = tx.outputs.init :+ singletonSurvives)).foreach { changed =>
+        BatchingStatistics.read(block, changed, NetworkType.MAINNET, wallet.contract.ergoTreeHex)
+          .filter(_.protocol == "sigmafi") shouldBe empty
+      }
+    }
+  }
 }

@@ -32,7 +32,7 @@ import scala.util.{Failure, Success, Try}
  * which owns the wallet: each reserves its funding there, signs with the node wallet and broadcasts through
  * [[EngineBroadcast]], paying the network fee.
  *
- * @param bonds the batching fee orders and offers carry when a request names none
+ * @param bonds the batching fee orders carry when a request names none
  * @param alive whether the engine still wants this attempt; once false, nothing is signed or sent
  */
 class SigmaFiAPIExecution(nodeContext: NodeContext,
@@ -46,7 +46,7 @@ class SigmaFiAPIExecution(nodeContext: NodeContext,
 
   private def wallet: NodeWallet = nodeContext.getNodeWallet
 
-  /** Blake2b256 of each tree this wallet signs for, to its contract: what orders, offers and bonds commit to. */
+  /** Blake2b256 of each tree this wallet signs for, to its contract: what orders and bonds commit to. */
   private lazy val walletHashes: Map[String, Contract] = wallet.signableTrees.toSeq.map { hex =>
     val c = Contract(ErgoTree.fromHex(hex))
     Hex.toHexString(c.hashedPropBytes) -> c
@@ -69,18 +69,6 @@ class SigmaFiAPIExecution(nodeContext: NodeContext,
   }
 
   /** @inheritdoc */
-  override def listOffers(offset: Option[Int], limit: Option[Int], collateral: Option[String],
-                          loan: Option[String]): SFOfferBook = withCtx { (ctx, nodeApi) =>
-    val (from, size) = page(offset, limit)
-    val (offers, cut) = scanOffers(nodeApi)
-    val shown = offers.filter { o =>
-      holdsTokens(o.terms.collateralTokens, collateral) &&
-        lends(o.box.assets.map(a => ErgoId.create(a.tokenId) -> a.amount), loan)
-    }.sortBy(o => (-o.box.creationHeight, o.boxId))
-    SFOfferBook(ctx.getHeight, shown.slice(from, from + size).map(offerView(ctx, _)), shown.size, cut)
-  }
-
-  /** @inheritdoc */
   override def listBonds(offset: Option[Int], limit: Option[Int], all: Option[Boolean]): SFBondList =
     withCtx { (ctx, nodeApi) =>
       val (from, size) = page(offset, limit)
@@ -98,11 +86,12 @@ class SigmaFiAPIExecution(nodeContext: NodeContext,
     if (ids.isEmpty) Seq.empty
     else {
       val (live, _) = scanBonds(nodeApi)
-      val byAsset = live.map(b => b.asset.toString -> b).toMap
+      val byAsset = live.groupBy(_.asset.toString)
       val vaults = scanVault(nodeApi)._1.groupBy(_.asset.toString)
       ids.map { id =>
         val origin = assetOrigin(nodeApi, id)
-        val bond = byAsset.get(id)
+        val candidates = byAsset.getOrElse(id, Seq.empty)
+        val bond = candidates.find(b => origin.exists(_.bondId == b.boxId)).orElse(candidates.headOption)
         val verified = bond.fold(origin.isRight)(b => origin.exists(_.bondId == b.boxId))
         SFAssetLookup(id, origin.isRight || origin.left.exists(_.minted), verified,
           origin.left.toOption.map(_.reason).orElse(bond.filterNot(_ => verified).map(_ => NotItsBond)),
@@ -114,7 +103,6 @@ class SigmaFiAPIExecution(nodeContext: NodeContext,
   /** @inheritdoc */
   override def getPortfolio: SFPortfolio = withCtx { (ctx, nodeApi) =>
     val (orders, ordersCut) = scanOrders(nodeApi)
-    val (offers, offersCut) = scanOffers(nodeApi)
     val (live, bondsCut) = scanBonds(nodeApi)
     val (vaults, vaultCut) = scanVault(nodeApi)
     val held = nodeApi.walletBalances() match {
@@ -130,9 +118,8 @@ class SigmaFiAPIExecution(nodeContext: NodeContext,
     }
     SFPortfolio(ctx.getHeight,
       orders.filter(o => isMine(o.terms.borrowerHash)).map(orderView(ctx, _)),
-      offers.filter(o => isMine(o.terms.lenderHash)).map(offerView(ctx, _)),
       live.filter(b => isMine(b.borrowerHash)).sortBy(_.maturity).map(bondView(ctx, nodeApi, _)),
-      holdings, ordersCut || offersCut || bondsCut || vaultCut)
+      holdings, ordersCut || bondsCut || vaultCut)
   }
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -153,6 +140,8 @@ class SigmaFiAPIExecution(nodeContext: NodeContext,
       case (None, Some(d)) =>
         if (d < SigmaFiContracts.MinOnCloseDuration)
           throw LithosBadRequest(s"'durationBlocks' must be at least ${SigmaFiContracts.MinOnCloseDuration}, got $d")
+        if (tip.toLong + d > Int.MaxValue)
+          throw LithosBadRequest("'durationBlocks' would overflow the bond's maturity height")
         OnClose(d)
       case _ => throw LithosBadRequest("give exactly one of 'maturityHeight' and 'durationBlocks'")
     }
@@ -172,36 +161,6 @@ class SigmaFiAPIExecution(nodeContext: NodeContext,
     }
   }
 
-  /** @inheritdoc */
-  override def createOffer(request: SFOfferRequest, send: Boolean): Either[SFQuote, SFResult] = withCtx { (ctx, _) =>
-    val loan = loanOf(request.principalNanoErgs, request.principalToken)
-    val collateralErg = amount("collateralNanoErgs", request.collateralNanoErgs)
-    val collateral = tokens("collateralTokens", request.collateralTokens.getOrElse(Seq.empty))
-    val fee = batchingFee(request.batchingFee)
-    val liq = liquidationNamed(request.liquidation)
-    val repayment = amount("repayment", request.repayment)
-    checkMaturity(request.maturityHeight, ctx.getHeight)
-    checkCollateral(collateralErg, fee, collateral, loan.token)
-    val description = SigmaFiUserTransactions.bondAssetDescription(loan.erg, loan.token.map(t => t.id -> t.amount).toSeq,
-      repayment, loan.repayToken, Left(request.maturityHeight), collateralErg, collateral.map(t => t.id -> t.amount),
-      fee, liq.name)
-    val terms = ZCOfferTerms(wallet.contract.hashedPropBytes, SigmaFiUserTransactions.BondAssetName.getBytes("UTF-8"),
-      description.getBytes("UTF-8"), SigmaFiContracts.bond(loan.repayToken).hashedPropBytes, repayment, fee,
-      request.maturityHeight, liq.hash, collateralErg, collateral.map(t => t.id -> t.amount))
-    val plan = SigmaFiUserTransactions.createOffer(ctx, wallet, terms, loan.erg, loan.token.toSeq)
-    val quote = SFQuote("createOffer", None, Some(offerTerms(terms, loan.erg, loan.token.toSeq.map(amountOf))),
-      (loan.erg + MinBox + TxFee).toString, loan.token.toSeq.map(amountOf), "0", Seq.empty, TxFee.toString,
-      Seq("Locks the principal, and 0.001 ERG for your bond asset's box, under a new offer. Any borrower posting " +
-        "the collateral asked for closes it and takes the principal; your bond asset arrives in this wallet then. " +
-        "Cancel it any time before it is closed."),
-      interestWarnings(loan, repayment))
-    if (!send) Left(quote)
-    else {
-      val (signed, sent) = fundAndSend(ctx, plan)
-      Right(SFResult(sent.txId, sent.outcome, Some(outputId(signed, 0)), None))
-    }
-  }
-
   // ══════════════════════════════════════════════════════════════════════════
   //  CANCELLING
   // ══════════════════════════════════════════════════════════════════════════
@@ -211,13 +170,6 @@ class SigmaFiAPIExecution(nodeContext: NodeContext,
     val order = read(nodeApi, boxId, "SigmaFi order")(SigmaFiBoxes.order)
     cancelBox(ctx, nodeApi, "cancelOrder", order.box, order.terms.borrowerHash,
       Some(orderTerms(order.terms, order.box.value, tokensOf(order.box))), send)
-  }
-
-  /** @inheritdoc */
-  override def cancelOffer(boxId: String, send: Boolean): Either[SFQuote, SFResult] = withCtx { (ctx, nodeApi) =>
-    val offer = read(nodeApi, boxId, "SigmaFi offer")(SigmaFiBoxes.offer)
-    cancelBox(ctx, nodeApi, "cancelOffer", offer.box, offer.terms.lenderHash,
-      Some(offerTerms(offer.terms, offer.principalErg, tokensOf(offer.box))), send)
   }
 
   /**
@@ -251,7 +203,7 @@ class SigmaFiAPIExecution(nodeContext: NodeContext,
   }
 
   // ══════════════════════════════════════════════════════════════════════════
-  //  FILLING AND CLOSING
+  //  FILLING
   // ══════════════════════════════════════════════════════════════════════════
 
   /** @inheritdoc */
@@ -266,39 +218,15 @@ class SigmaFiAPIExecution(nodeContext: NodeContext,
     val maturity = SigmaFiUserTransactions.fillMaturity(ctx, order)
     val plan = SigmaFiUserTransactions.fillOrder(ctx, wallet, order, inputOf(ctx, order.box), repayToken, borrower)
     val principalErg = math.max(t.principalErg, MinBox)
+    val unitValue = SigmaFiUserTransactions.lenderUnit(ctx, wallet, order, repayToken, maturity).value
     val quote = SFQuote("fillOrder", Some(boxId), Some(orderTerms(t, order.box.value, tokensOf(order.box), Some(maturity))),
-      (principalErg + MinBox + TxFee).toString, t.principalTokens.map { case (id, n) => SFTokenAmount(id.toString, n.toString) },
-      MinBox.toString, Seq(SFTokenAmount(boxId, "1")), TxFee.toString,
+      Math.addExact(principalErg, Math.addExact(unitValue, TxFee)).toString,
+      t.principalTokens.map { case (id, n) => SFTokenAmount(id.toString, n.toString) },
+      unitValue.toString, Seq(SFTokenAmount(boxId, "1")), TxFee.toString,
       Seq(s"Lends to ${addressOf(borrower)}. Mints bond asset $boxId to this wallet: whoever holds it is paid the " +
         s"repayment, or the collateral if the bond is not repaid by height $maturity."),
       lowFeeWarning(t.batchingFee) ++ interestWarnings(Loan(t.principalErg, t.principalTokens.headOption.map {
         case (id, n) => Token(id, n) }), t.repayment))
-    if (!send) Left(quote)
-    else {
-      unclaimed(mempoolSnapshot(), boxId)
-      val (signed, sent) = fundAndSend(ctx, plan)
-      Right(SFResult(sent.txId, sent.outcome, Some(outputId(signed, 1)), Some(boxId)))
-    }
-  }
-
-  /** @inheritdoc */
-  override def closeOffer(boxId: String, send: Boolean): Either[SFQuote, SFResult] = withCtx { (ctx, nodeApi) =>
-    val offer = read(nodeApi, boxId, "SigmaFi offer")(SigmaFiBoxes.offer)
-    closeRefusal(ctx, offer).foreach(reason => throw LithosUnprocessable(reason))
-    val t = offer.terms
-    val principal = offer.box.assets.map(a => ErgoId.create(a.tokenId) -> a.amount)
-    val repayToken = SigmaFiBoxes.pairedBond(t.bondHash, principal).get
-    val lender = treeFor(nodeApi, t.lenderHash, offer.box, SigmaFiBoxes.hintTrees(offer.box)).getOrElse(
-      throw LithosUnprocessable("cannot find the lender's address: the offer carries no hint, and no box in the " +
-        "transaction that created it is at the address its terms name"))
-    val plan = SigmaFiUserTransactions.closeOffer(ctx, wallet, offer, inputOf(ctx, offer.box), repayToken, lender)
-    val collateral = t.collateralTokens.map { case (id, n) => SFTokenAmount(id.toString, n.toString) }
-    val quote = SFQuote("closeOffer", Some(boxId), Some(offerTerms(t, offer.principalErg, tokensOf(offer.box))),
-      (t.collateralErg + TxFee).toString, collateral, offer.principalErg.toString,
-      offer.box.assets.map(a => SFTokenAmount(a.tokenId, a.amount.toString)), TxFee.toString,
-      Seq(s"Borrows from ${addressOf(lender)}, locking the collateral in a bond. Repay before height ${t.maturity} " +
-        "to take it back; after that it can be liquidated to the lender."),
-      Seq.empty)
     if (!send) Left(quote)
     else {
       unclaimed(mempoolSnapshot(), boxId)
@@ -324,7 +252,7 @@ class SigmaFiAPIExecution(nodeContext: NodeContext,
       (MinBox, Seq(SFTokenAmount(id.toString, bond.repayment.toString))))
     val toMe = isMine(bond.borrowerHash)
     val quote = SFQuote("repay", Some(boxId), Some(bondTerms(bond, None)), (paysErg + TxFee).toString, paysTokens,
-      if (toMe) bond.box.value.toString else "0", if (toMe) tokensOf(bond.box) else Seq.empty, TxFee.toString,
+      if (toMe) bond.box.value.toString else "0", if (toMe) bond.collateral.map(a => SFTokenAmount(a.tokenId, a.amount.toString)) else Seq.empty, TxFee.toString,
       Seq(s"Pays the repayment into the vault for the holder of ${bond.asset}, and returns the collateral to " +
         s"${addressOf(borrower)}."),
       if (toMe) Seq.empty else Seq("This wallet is not the borrower: the collateral goes to the borrower, not to you."))
@@ -406,26 +334,14 @@ class SigmaFiAPIExecution(nodeContext: NodeContext,
       Some("the order's bond does not match its loan, so its bond could not be repaid as asked")
     else if (t.batchingFee < 0 || order.box.value - t.batchingFee < MinBox)
       Some("the order's batching fee leaves its bond under 0.001 ERG")
+    else if (t.repayment <= 0 || t.principalErg < MinBox || t.principalTokens.exists(_._2 <= 0))
+      Some("the order's principal or repayment is not a positive supported amount")
     else t.schedule match {
       case FixedMaturity(h) if h <= tip + 2 => Some(s"the order matures at $h, too close to height $tip to fill")
       case OnClose(d) if d < SigmaFiContracts.MinOnCloseDuration => Some(s"the order's duration of $d blocks is under 30")
+      case OnClose(d) if tip.toLong + d > Int.MaxValue => Some("the order's duration would overflow its bond's maturity height")
       case _ => None
     }
-  }
-
-  /** Why this client would not close `offer`, or None. */
-  private def closeRefusal(ctx: BlockchainContext, offer: SigmaFiOffer): Option[String] = {
-    val t = offer.terms
-    val principal = offer.box.assets.map(a => ErgoId.create(a.tokenId) -> a.amount)
-    if (isMine(t.lenderHash)) Some("this wallet made the offer; cancel it rather than closing it")
-    else if (offer.liquidation.isEmpty) Some("the offer names a liquidation script this client does not know")
-    else if (SigmaFiBoxes.pairedBond(t.bondHash, principal).isEmpty)
-      Some("the offer's bond does not match its principal, so its bond could not be repaid as asked")
-    else if (t.maturity <= ctx.getHeight + 2)
-      Some(s"the offer matures at ${t.maturity}, so close to height ${ctx.getHeight} its bond could be liquidated at once")
-    else if (t.batchingFee < 0 || t.collateralErg - t.batchingFee < MinBox)
-      Some("the offer's batching fee leaves its bond under 0.001 ERG")
-    else None
   }
 
   private def checkMaturity(h: Int, tip: Int): Unit =
@@ -479,28 +395,16 @@ class SigmaFiAPIExecution(nodeContext: NodeContext,
   private def orderTerms(t: ZCOrderTerms, collateralErg: Long, collateral: Seq[Token]): SFTerms =
     orderTerms(t, collateralErg, collateral.map(amountOf))
 
-  private def offerTerms(t: ZCOfferTerms, principalErg: Long, principal: Seq[SFTokenAmount]): SFTerms =
-    SFTerms(Kind, Some(principalErg.toString), principal.headOption, t.repayment.toString,
-      principal.headOption.map(_.tokenId), t.collateralErg.toString,
-      t.collateralTokens.map { case (id, n) => SFTokenAmount(id.toString, n.toString) }, Some(t.maturity), None,
-      t.batchingFee.toString, SigmaFiContracts.liquidationOf(t.liqScriptHash).map(_.name),
-      Hex.toHexString(t.liqScriptHash))
-
-  /** A bond's terms; the principal comes from the order or offer that created it, when that was read. */
+  /** A bond's terms; the principal comes from the order that created it, when that was read. */
   private def bondTerms(b: SigmaFiBond, principal: Option[(Long, Option[SFTokenAmount])]): SFTerms =
     SFTerms(Kind, principal.map(_._1.toString), principal.flatMap(_._2), b.repayment.toString,
-      b.repayToken.map(_.toString), b.box.value.toString, tokensOf(b.box), Some(b.maturity), None,
+      b.repayToken.map(_.toString), b.box.value.toString, b.collateral.map(a => SFTokenAmount(a.tokenId, a.amount.toString)), Some(b.maturity), None,
       b.batchingFee.toString, b.liquidation.map(_.name), Hex.toHexString(b.liqScriptHash))
 
   private def orderView(ctx: BlockchainContext, o: SigmaFiOrder): SFOrderView =
     SFOrderView(o.boxId, orderTerms(o.terms, o.box.value, tokensOf(o.box)),
       hintAddress(o.box, o.terms.borrowerHash), isMine(o.terms.borrowerHash), fillRefusal(ctx, o).filterNot(_ =>
         isMine(o.terms.borrowerHash)), o.box.creationHeight)
-
-  private def offerView(ctx: BlockchainContext, o: SigmaFiOffer): SFOfferView =
-    SFOfferView(o.boxId, offerTerms(o.terms, o.principalErg, tokensOf(o.box)), hintAddress(o.box, o.terms.lenderHash),
-      new String(o.terms.assetName, "UTF-8"), isMine(o.terms.lenderHash),
-      closeRefusal(ctx, o).filterNot(_ => isMine(o.terms.lenderHash)), o.box.creationHeight)
 
   private def bondView(ctx: BlockchainContext, nodeApi: NodeApi, b: SigmaFiBond): SFBondView = {
     val origin = assetOrigin(nodeApi, b.asset.toString)
@@ -523,7 +427,7 @@ class SigmaFiAPIExecution(nodeContext: NodeContext,
   // ══════════════════════════════════════════════════════════════════════════
 
   /**
-   * Where bond asset `id` came from, read from the chain: its genesis box must be a genuine order or offer, and
+   * Where bond asset `id` came from, read from the chain: its genesis box must be a genuine order, and
    * the transaction spending it must have created a bond naming `id` at output 1. Cached by asset once known,
    * since neither can change after; a node failure is not cached.
    */
@@ -534,16 +438,31 @@ class SigmaFiAPIExecution(nodeContext: NodeContext,
           case None => Left(Unverified("the node's index has no genesis box for this asset", minted = false, settled = false))
           case Some(genesis) =>
             val tree = SigmaFiBoxes.parse(genesis.ergoTree)
-            if (!tree.exists(SigmaFiContracts.isMinter))
-              Left(Unverified("it was not minted by a SigmaFi order or offer", minted = false, settled = true))
+            if (genesis.boxId != id || !tree.exists(SigmaFiContracts.isMinter))
+              Left(Unverified("it was not minted by a SigmaFi order", minted = false, settled = true))
             else genesis.spentTransactionId match {
-              case None => Left(Unverified("its order or offer is still open", minted = false, settled = false))
+              case None => Left(Unverified("its order is still open", minted = false, settled = false))
               case Some(txId) =>
-                nodeApi.indexedTransactionById(txId).get.flatMap(_.outputs.lift(1))
-                  .flatMap(out => SigmaFiBoxes.bond(out.box).filter(_.asset.toString == id).map(_ -> out))
-                  .fold[Either[Unverified, Origin]](Left(Unverified(NotItsBond, minted = true, settled = true))) { case (bond, _) =>
-                    Right(Origin(bond.boxId, principalOf(genesis.box)))
-                  }
+                nodeApi.indexedTransactionById(txId).get match {
+                  case None => Left(Unverified("the node's index has not returned its mint transaction", minted = false, settled = false))
+                  case Some(tx) =>
+                    val bond = tx.outputs.lift(1).flatMap(out => SigmaFiBoxes.bond(out.box))
+                    val supply = tx.outputs.flatMap(_.box.assets).filter(_.tokenId == id).map(a => BigInt(a.amount)).sum
+                    val lenderUnit = tx.outputs.headOption.flatMap(_.box.assets.headOption)
+                      .exists(a => a.tokenId == id && a.amount == 1L)
+                    val order = SigmaFiBoxes.order(genesis.box).get
+                    val principalPaid = tx.outputs.lift(2).exists { output =>
+                      output.value >= order.terms.principalErg &&
+                        output.assets.map(a => ErgoId.create(a.tokenId) -> a.amount) == order.terms.principalTokens &&
+                        SigmaFiBoxes.parse(output.ergoTree).exists(t =>
+                          SigmaFiBoxes.hashOf(t).sameElements(order.terms.borrowerHash))
+                    }
+                    val valid = tx.id == txId && tx.inputs.headOption.exists(_.boxId == id) && principalPaid &&
+                      supply == 2 && lenderUnit && bond.exists(b => b.asset.toString == id &&
+                        SigmaFiBoxes.verify(b, Some(genesis.copy(spendingHeight = Some(tx.inclusionHeight)))).isRight)
+                    if (valid) Right(Origin(bond.get.boxId, principalOf(genesis.box)))
+                    else Left(Unverified(NotItsBond, minted = false, settled = true))
+                }
             }
         }
       }
@@ -551,12 +470,10 @@ class SigmaFiAPIExecution(nodeContext: NodeContext,
       read.getOrElse(Left(Unverified("the node's index did not answer", minted = false, settled = false)))
     }
 
-  /** The principal an order or offer genesis box lent. */
+  /** The principal an order genesis box lent. */
   private def principalOf(genesis: NodeBox): Option[(Long, Option[SFTokenAmount])] =
     SigmaFiBoxes.order(genesis).map(o => o.terms.principalErg -> o.terms.principalTokens.headOption.map {
       case (id, n) => SFTokenAmount(id.toString, n.toString) })
-      .orElse(SigmaFiBoxes.offer(genesis).map(o => o.principalErg -> o.box.assets.headOption.map(a =>
-        SFTokenAmount(a.tokenId, a.amount.toString))))
 
   // ══════════════════════════════════════════════════════════════════════════
   //  PLUMBING
@@ -580,9 +497,6 @@ class SigmaFiAPIExecution(nodeContext: NodeContext,
     val (onClose, b) = scanTemplate(nodeApi, SigmaFiTemplateKind.OrderOnClose)(SigmaFiBoxes.order)
     (fixed ++ onClose, a || b)
   }
-
-  private def scanOffers(nodeApi: NodeApi): (Vector[SigmaFiOffer], Boolean) =
-    scanTemplate(nodeApi, SigmaFiTemplateKind.Offer)(SigmaFiBoxes.offer)
 
   private def scanBonds(nodeApi: NodeApi): (Vector[SigmaFiBond], Boolean) = {
     val (erg, a) = scanTree(nodeApi, SigmaFiContracts.ergBond.ergoTreeHex)(SigmaFiBoxes.bond)
@@ -690,7 +604,8 @@ class SigmaFiAPIExecution(nodeContext: NodeContext,
   private def fundAndSend(ctx: BlockchainContext, plan: SFPlan): (SignedTransaction, EngineBroadcast.Result) = {
     stillRunning()
     val reservation =
-      if (plan.value == 0L && plan.tokens.isEmpty) None else Some(walletSelector.reserve(plan.value, plan.tokens))
+      if (plan.value == 0L && plan.tokens.isEmpty) None
+      else Some(walletSelector.reserveAvoiding(plan.value, plan.tokens, plan.avoidTokens))
     val signed = try sign(ctx, plan.build(reservation.map(_.inputs).getOrElse(Seq.empty)))
     catch { case NonFatal(ex) => reservation.foreach(_.release()); throw ex }
     (signed, broadcast(signed, reservation.toSeq))
@@ -723,7 +638,7 @@ object SigmaFiAPIExecution {
   final val MaxPage = 100
   final val MaxLookup = 50
   private final val MaxAuthTries = 5
-  private final val NotItsBond = "it is not the bond its asset's order or offer created"
+  private final val NotItsBond = "it is not the bond its asset's order created"
 
   /** The engine operation a SigmaFi send is recorded under, keyed by its transaction id. */
   def operation(signed: SignedTransaction): String =
@@ -749,10 +664,10 @@ object SigmaFiAPIExecution {
     case _ => throw LithosBadRequest("give exactly one of 'principalNanoErgs' and 'principalToken'")
   }
 
-  /** Why a bond asset is not verified; `minted` when a genuine order or offer did mint it, `settled` when no later block can change that. */
+  /** Why a bond asset is not verified; `minted` when a genuine order did mint it, `settled` when no later block can change that. */
   private final case class Unverified(reason: String, minted: Boolean, settled: Boolean)
 
-  /** A verified asset: the bond its mint created, and the principal its order or offer lent. */
+  /** A verified asset: the bond its mint created, and the principal its order lent. */
   private final case class Origin(bondId: String, principal: Option[(Long, Option[SFTokenAmount])])
 
   /** Verification outcomes by asset id. Bounded: the oldest is dropped past [[MaxVerifications]]. */
@@ -763,7 +678,7 @@ object SigmaFiAPIExecution {
         size() > MaxVerifications
     }
     def get(id: String): Option[Either[Unverified, Origin]] = held.synchronized(Option(held.get(id)))
-    /** An open order or offer may still mint later, so only settled outcomes are kept. */
+    /** An open order may still mint later, so only settled outcomes are kept. */
     def put(id: String, outcome: Either[Unverified, Origin]): Unit =
       if (outcome.fold(_.settled, _ => true)) held.synchronized(held.put(id, outcome))
   }
@@ -786,9 +701,6 @@ object SigmaFiAPIExecution {
   /** Whether a box holding `assets` and `erg` is collateral of `asset`: "erg" for ERG, or a token id. */
   private def holds(assets: Seq[node.model.NodeAsset], erg: Long, asset: Option[String]): Boolean =
     asset.map(_.trim.toLowerCase).forall(a => if (a == "erg") erg > 0 else assets.exists(_.tokenId == a))
-
-  private def holdsTokens(ts: Seq[(ErgoId, Long)], asset: Option[String]): Boolean =
-    asset.map(_.trim.toLowerCase).forall(a => a == "erg" || ts.exists(_._1.toString == a))
 
   /** Whether a loan of `principal` tokens lends `asset`: "erg" for an ERG loan, or a token id. */
   private def lends(principal: Seq[(ErgoId, Long)], asset: Option[String]): Boolean =

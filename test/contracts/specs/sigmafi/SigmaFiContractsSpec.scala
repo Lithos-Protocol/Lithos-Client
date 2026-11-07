@@ -14,8 +14,7 @@ import work.lithos.mutations.Contract
  * The SigmaFi V2 contracts this client builds and reads, pinned rather than compiled.
  *
  * Two checks hold them in place. The `.ergo` copies compile to the pinned trees here, and the pinned trees give
- * the addresses, hashes and term positions SigmaFi's own client printed for the same contracts. A bond, order or
- * offer made by either client is then found and spent by the other.
+ * the addresses, hashes and term positions SigmaFi's own client printed for the same contracts. A bond, order made by either client is then found and spent by the other.
  */
 class SigmaFiContractsSpec extends AnyPropSpec with ContractSpecBase {
 
@@ -40,7 +39,7 @@ class SigmaFiContractsSpec extends AnyPropSpec with ContractSpecBase {
   }
 
   /**
-   * A difference means every bond, order and offer already on chain sits at a script the new one does not
+   * A difference means every bond, order already on chain sits at a script the new one does not
    * match, so re-pinning is a decision about those boxes, not a fix.
    */
   property("pins: every tree is exactly what its .ergo source compiles to") {
@@ -91,35 +90,34 @@ object SigmaFiContractsSpec {
 
   /** Printed by SigmaFi's `BondsV2Report` at the pinned commit, for mainnet. */
   final val VaultAddress =
-    "3zECWKFRn9xN1djLR4kBGr8fzqX7jtzFU2q4xmSeGPQqVXBG6vGs92apVncKpxF8u8E9ksW1uCQcYwbVnhkMyUchVds2xS9M97XamNjKtmWqLCRQ8" +
-      "ZdZsbsqeSHhhPngStjbivVHMFTiw8BYbGXuBKhpyt2DWuJCqXyzChNhUYtKtP8VPxsn269aWr7CHCDnGaJkPqRaQWqkxqw1Wo2Hg44JB9KdDR8w" +
-      "BvYkEkWaNvJXKtqg"
+    "3zECWKFRn9xN1djLR4kBGr8fzqX7jtzFU2q4xmSeGPQqVXBG6vGs92apVncKpxF8u8E9ksW1uCQcYwbVnhkMyUchVds2xS9M97XamNjK" +
+      "tmWqLCRQ8ZdZsbsqeSHhhPngStjbivVHMFTiw8BYbGXuBKhpyt2DWuJCqXyzChNhUYtKtP8VPxsn269aWr7CHCDnGaJkPqRaQWqkxqw1" +
+      "Wo2Hg44JB9KdDR8wBvYkEkWaNvJXKtqg"
   final val VaultHash = "ed132c371e35881b1b4fde03f092bc2eb8d9deb96df89cd9a5a32ab4f94b3c6b"
   final val ErgBondAddress =
-    "Pftjcg9bAunFqwxjdVBNnfPjxQF28pX5WpE3guyaDFEVBPCihTZXUJkj6Hf4k1Nh3XQvckjyw9wP9tYGCE72e8ATjvoKJ7x3mv2escwdY2BbDLVj" +
-      "AK9Ve1ek5AbuSJcAtBkBsuMh5XrStz73akzMXEeS4NWqKk2sPq4bXUt8pQCZEzM4htd8hxRQgZLvRDQBFVaEf4MK3MrrFxTyjyQZwTdBy7UgK3M" +
-      "JHKZgtuBEC88p86bYZa1BXU5Q5BBDAAExiKsXyXeS8JuAdm2rpNNYsnchfUonBgZvRywwLsJXFHe83mBwitt4cv3fah4K7S68YYTDioBemAU"
-  final val ErgBondHash = "3055b257bd81c1e6c4d703f41d2c1991c97585fa01a9e71e242bad24c1ab7e0a"
+    "5PxqVLKJBKWqownSfVSv9cRj7Zcr4KWhNWZQC4EkA8VDfkJeuEbgz1KX7ReDquJ155rS3NNuDFebR9NU68VfACdaBFMJxfVBVaHNhYqW" +
+      "NcfS1mPipnW23uHhADe2Wm2ULqs854Pd2XZibiGDaEyQmgfE6n3xHdMUvfDpMyDB8VyUdHTpUH6iduT2kmrkeWo9JFHUx5cyqa5TJeGA" +
+      "eYJnzuACWcrxT3pKUAbDMduLbJgAGhfiD2M3efKjXwUQhMJAaTwnwXLE63S7i8YkuHVL4nJDrjXWF3niKoMchS2HHwSqdbBUXviFgfSz" +
+      "Tnmx8kWaTV4AC7MgR6p2snnrRrRBUi61uxpMj8VcwhLw9SzHTsUpbr1cJ9FA7dTpc5Nb8VFKu91gEKQgio18PGfEv1UBB2f4HFWjDb2w" +
+      "sYwTNEtEKc3"
+  final val ErgBondHash = "3839341bb246c79a8a4b98feffbf7805cbc41a8ca877920f2abade3507e92235"
   final val SigUsd = "03faf2cb329f2e90d6d23b58d91bbb6c046aa143261cc21f52fbe2824bfcbf04"
   final val SigUsdBondAddress =
-    "5p5JrCnsQcSxcGUkdQmG3UingR1D5fGHM5tXwtVMpjYgLuUwkgduoMXBVZods3G1NpRBo7yyMaiTsb5jS5geH1z5W8D6po9gdeAFNoQnpfxi6vLT" +
-      "zd46ibmFLuig4kRyQVJoPwtEDuiM3ySdCArs6CDhKUUfbkootyzwTcWiviJ6xYq7pFyNyphvECTyUC9yjbwRixjjpnk7TZJnrUUZxZ3aaLhRdzjP" +
-      "VQJhJ194fcPkcj7NTUwPrEhvT7Ryt26C7jYKhjSLiBDSUTGjRSmehQbcz3QkKpybVu4wnE8LEQbEPnCuagHJbLMStzAQuuisCqGUnKyJBVDd7VVM" +
-      "mSbDjveCcNjMotddhGVg3UJuDry1Dj1vzZthGXRytp3vy4wQsvna4iXHxiuzYGkghZTDvMH1ULUwooffJhspErdzwrZRJD675FmoB7A5FE"
-  final val SigUsdBondHash = "9325bcc25e91ad2b9edc8b390dcf9e00235f5500fd1113b72c8ecb3d8c9c88cd"
-  final val MaturityLiquidationHash = "83f2d5427f032846504b3e9d71319cf7262a0a80f01404ca94105ea9eb569185"
-  final val TokenBondTemplateHash = "1be0ff4b324f56dd17ee6cb13a6283aaf9349d0c707720266a49fd86dd7fa099"
+    "w7b7Ht8ELRboQhcFmcV5ZwjpGJS4JL7dhjywVZwYd76CanXf33eBosWC71etNib7zoenYpUM9KMXuqAjmVjuxFDaECkobiZiGwBRKMXY" +
+      "VNo24m6ij8kfKGYpiZgTjLFBpseQdYbF9h3AQHhpAQtx9Pits1YXCj27QoxwJVSAw3oXnYXkTxyFudynWy42We3BXqfjcKTie3N9MHVQ" +
+      "2gWaRgbcDte3zeHEPcSLZe1yu6736HZHVz72LjGvRsNeiboKVBJGD7YMbUTmu77p1CorhcSbqdTCtVxGh8gBW8Xzicat6ecz8JhoSinw" +
+      "JdYMFMpsKrSr4W9rx6C5jrZMAZjynnE6bDLJuya2SY7iSaAJukir9z9e8tKtTcTjJLkATFUwDWVugbC7yzZYRDV3K6qZgmywmcByUXdP" +
+      "Mm4BX2TP4jWNF9Yk3QCstErr8MhCgYgnSxLx24aBDFU38wWWKxwkzB27iwpZh4z8pPdi19F2e6GF5zYPPvjrPkLaQGhYGdnoBLm111r3" +
+      "jubUEztcVU8am8YfM"
+  final val SigUsdBondHash = "9b2b3ca15eb9042a3ca8f5956d139a8feb6639dae56f74195c405f66962ad512"
+  final val MaturityLiquidationHash = "23b131585209a670a79817292233ed8c30618c3c8046ba174b655afee0e828a3"
+  final val TokenBondTemplateHash = "6e9bdb6db48c3986a0f01b11876264a1c7aad6e547090e6238c91b793121290a"
 
   import SigmaFiContracts._
 
   final val Templates: Map[SigmaFiTemplateKind, (String, Map[String, Int])] = Map(
-    SigmaFiTemplateKind.Offer -> ("11724775e64ab60852d8f6833f40285d81dc3ed58f22ab4c6f33593d08fb7a58", Map(
-      LENDER_HASH -> 2, ASSET_NAME -> 12, ASSET_DESCRIPTION -> 13, BOND_HASH -> 15, COLLATERAL_TOKENS -> 16,
-      COLLATERAL_ERG -> 17, REPAYMENT -> 20, BATCHING_FEE -> 22, MATURITY -> 23, LIQ_SCRIPT_HASH -> 24)),
-    SigmaFiTemplateKind.Order -> ("a5a619be5bff9c9eb6d1f6d15ac4b95475512afed917f3a4e95b5afe334fe30c", Map(
-      BORROWER_HASH -> 2, BOND_HASH -> 12, REPAYMENT -> 15, BATCHING_FEE -> 17, MATURITY -> 18,
-      LIQ_SCRIPT_HASH -> 19, PRINCIPAL_ERG -> 23, PRINCIPAL_TOKENS -> 24)),
-    SigmaFiTemplateKind.OrderOnClose -> ("51959c0b41c3796aa09e6387e058cbec22bb1f61e883caed82003a07a6d2ca5a", Map(
-      BORROWER_HASH -> 2, DURATION -> 7, BOND_HASH -> 13, REPAYMENT -> 16, BATCHING_FEE -> 18,
-      LIQ_SCRIPT_HASH -> 19, PRINCIPAL_ERG -> 24, PRINCIPAL_TOKENS -> 25)))
+    SigmaFiTemplateKind.Order -> ("5e82ac73dba7b8dbe463d8f05fd8058604542c00fecc0eade894785a24934bcf", Map(
+      BORROWER_HASH -> 2, BOND_HASH -> 14, REPAYMENT -> 22, BATCHING_FEE -> 24, MATURITY -> 25, LIQ_SCRIPT_HASH -> 26, PRINCIPAL_ERG -> 30, PRINCIPAL_TOKENS -> 31)),
+    SigmaFiTemplateKind.OrderOnClose -> ("f5e91924fcc12cce98913e60a43d9c03b8d6495fd88409143aed94373e35499f", Map(
+      BORROWER_HASH -> 2, DURATION -> 7, BOND_HASH -> 15, REPAYMENT -> 23, BATCHING_FEE -> 25, LIQ_SCRIPT_HASH -> 26, PRINCIPAL_ERG -> 31, PRINCIPAL_TOKENS -> 32)))
 }

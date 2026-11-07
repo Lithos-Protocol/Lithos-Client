@@ -8,7 +8,7 @@
     // CONSTANTS (same template and verification rules as ZC_Order)
     // The borrower's terms:
     // CONST_BOND_HASH:        Coll[Byte] - blake2b256 of the bond ErgoTree: ZC_ERG_Bond, or ZC_Token_Bond
-    //                                      compiled for the repayment token. Either pays the vault.
+    //                                      compiled for the repayment token
     // CONST_BORROWER_HASH:    Coll[Byte] - blake2b256 of the borrower's ErgoTree. Bond R5; receives the
     //                                      principal; authorizes the cancel.
     // CONST_PRINCIPAL_ERG:    Long       - the least nanoERG the principal box may hold
@@ -19,11 +19,11 @@
     // CONST_LIQ_SCRIPT_HASH:  Coll[Byte] - bond R8
     //
     // PATHS
-    // Fill (SELF at INPUTS(0), the only input that can mint; asset supply exactly 1):
+    // Fill (SELF at INPUTS(0), the only input that can mint; asset supply exactly 2):
     //   OUTPUTS(0) lender's unit: (asset, 1) at tokens(0), anywhere the lender likes. It is the first output
     //              carrying the new token, so its R4-R6 are the asset's EIP-4 name, description, decimals.
-    //   OUTPUTS(1) bond: SELF.tokens unchanged, value >= SELF.value. Every register is pinned; R4 is SELF.id,
-    //              and R7 is within 8 blocks below HEIGHT + CONST_DURATION.
+    //   OUTPUTS(1) bond: (asset, 1), then SELF.tokens unchanged, value >= SELF.value. Every register is
+    //              pinned; R7 is within 8 blocks below HEIGHT + CONST_DURATION.
     //   OUTPUTS(2) principal: to the borrower.
     // Cancel: nothing is minted, and the borrower spends a box guarded by CONST_BORROWER_HASH alongside.
     //
@@ -54,8 +54,8 @@
         })
     }
 
-    // One unit, held by the lender: the bond names the asset in R4 instead of holding a unit of its own
-    val mintAmount = 1L
+    // Technically we mint 2, but only 1 is ever circulating.
+    val mintAmount = 2L
     val minted     = numTokenInOutputs(SELF.id)
 
     if (minted > 0L) {
@@ -65,16 +65,19 @@
         val principalBox = OUTPUTS(2)
         val bondAmounts  = bondBox.R6[Coll[Long]].get
 
-        // minted counts every output, so the unit at OUTPUTS(0) is the only one there is
         val verifiedMint =
             SELF.id == INPUTS(0).id &&
             minted == mintAmount &&
             lenderUnit.tokens.size > 0 &&
-            lenderUnit.tokens(0)._1 == SELF.id
+            lenderUnit.tokens(0)._1 == SELF.id &&
+            lenderUnit.tokens(0)._2 == 1L
 
         val validBond =
             blake2b256(bondBox.propositionBytes) == CONST_BOND_HASH &&
-            bondBox.tokens == SELF.tokens &&
+            bondBox.tokens.size > 0 &&
+            bondBox.tokens(0)._1 == SELF.id &&
+            bondBox.tokens(0)._2 == 1L &&
+            bondBox.tokens.slice(1, bondBox.tokens.size) == SELF.tokens &&
             bondBox.value >= SELF.value
 
         val validTerms =

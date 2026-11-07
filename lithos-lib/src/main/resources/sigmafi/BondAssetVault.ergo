@@ -1,22 +1,23 @@
 {
     // Bond Asset Vault - May be spent with the bond asset, as long as the asset is burned.
-    // Every bond pays its repayment or liquidated collateral here, and whoever holds the bond asset claims
-    // it. The asset is the bearer claim on the bond.
-    // One vault serves every bond: it has no constants, so every bond names the same hash.
+    // Every bond pins this vault's hash and pays its repayment or liquidation proceeds here, and
+    // whoever holds the circulating bond asset claims it. The asset is the bearer claim on the bond.
+    // One vault serves every bond: it has no constants, so every tradeable bond names the same hash.
     //
     // REGISTERS
     // R4: Coll[Byte] - Box id of the bond this box settles. Not read here; the bond pinned it.
-    // R5: Coll[Byte] - Token Id of bond asset that claims this box. The bond pinned it to the asset its R4 names.
+    // R5: Coll[Byte] - Token Id of bond asset that claims this box. The bond pinned it to its own asset.
     //
     // ASSUMPTIONS
-    // - The bond asset came from a verified mint, so its supply is exactly 1 and the lender holds it.
-    //   Only one unit can ever be presented here.
+    // - The bond asset came from a verified mint, so its supply is exactly 2, and the bond burned its
+    //   own unit (the singleton) when it settled. Only one unit can ever be presented here.
     // - Anyone can send a box here naming any asset in R5. That only gives their own funds to whoever
-    //   holds that asset; only boxes a bond created are worth anything, and the bond pins R5. A bond built
-    //   by hand can name any asset too, and so only ever pays that asset's holder.
+    //   holds that asset; only boxes a bond created are worth anything, and the bond pins R5.
+    // - A box without a Coll[Byte] R5 is locked for good.
+    // - The settlement transaction itself spends the singleton, so it could also sweep any vault box
+    //   that already existed for this asset. The protocol never creates one before settlement.
     // - Burning the asset is all-or-nothing: every vault box for this asset must be claimed in the
     //   same transaction. Anything sent here afterwards is locked for good.
-    // - A box without a Coll[Byte] R5 is locked for good.
     // - The outputs are not constrained. The holder takes everything, wherever they like.
     // - A vault box holding its own bond asset is spendable by anyone. Never send the asset here.
 

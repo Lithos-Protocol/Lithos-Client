@@ -172,7 +172,6 @@ POST /forwards/positions/:boxId/settle          controllers.ForwardsApiControlle
 
 # Routes for SigmaFi bonds (the portfolio and everything that signs require api_key)
 GET  /sigmafi/orders                            controllers.SigmaFiApiController.listOrders(offset: Option[Int], limit: Option[Int], collateral: Option[String], loan: Option[String])
-GET  /sigmafi/offers                            controllers.SigmaFiApiController.listOffers(offset: Option[Int], limit: Option[Int], collateral: Option[String], loan: Option[String])
 GET  /sigmafi/bonds                             controllers.SigmaFiApiController.listBonds(offset: Option[Int], limit: Option[Int], all: Option[Boolean])
 GET  /sigmafi/portfolio                         controllers.SigmaFiApiController.getPortfolio()
 + nocsrf
@@ -189,18 +188,6 @@ POST /sigmafi/orders/:boxId/cancel              controllers.SigmaFiApiController
 POST /sigmafi/orders/:boxId/fill/check          controllers.SigmaFiApiController.checkFillOrder(boxId: String)
 + nocsrf
 POST /sigmafi/orders/:boxId/fill                controllers.SigmaFiApiController.fillOrder(boxId: String)
-+ nocsrf
-POST /sigmafi/offers/check                      controllers.SigmaFiApiController.checkCreateOffer()
-+ nocsrf
-POST /sigmafi/offers                            controllers.SigmaFiApiController.createOffer()
-+ nocsrf
-POST /sigmafi/offers/:boxId/cancel/check        controllers.SigmaFiApiController.checkCancelOffer(boxId: String)
-+ nocsrf
-POST /sigmafi/offers/:boxId/cancel              controllers.SigmaFiApiController.cancelOffer(boxId: String)
-+ nocsrf
-POST /sigmafi/offers/:boxId/close/check         controllers.SigmaFiApiController.checkCloseOffer(boxId: String)
-+ nocsrf
-POST /sigmafi/offers/:boxId/close               controllers.SigmaFiApiController.closeOffer(boxId: String)
 + nocsrf
 POST /sigmafi/bonds/:boxId/repay/check          controllers.SigmaFiApiController.checkRepay(boxId: String)
 + nocsrf

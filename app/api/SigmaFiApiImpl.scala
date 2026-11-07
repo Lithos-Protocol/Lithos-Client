@@ -55,8 +55,7 @@ class SigmaFiApiImpl @Inject()(node: NodeContext,
 
   override def listOrders(offset: Option[Int], limit: Option[Int], collateral: Option[String],
                           loan: Option[String]): SFOrderBook = reads.listOrders(offset, limit, collateral, loan)
-  override def listOffers(offset: Option[Int], limit: Option[Int], collateral: Option[String],
-                          loan: Option[String]): SFOfferBook = reads.listOffers(offset, limit, collateral, loan)
+
   override def listBonds(offset: Option[Int], limit: Option[Int], all: Option[Boolean]): SFBondList =
     reads.listBonds(offset, limit, all)
   override def lookupAssets(request: SFAssetLookupRequest): Seq[SFAssetLookup] = reads.lookupAssets(request)
@@ -64,16 +63,13 @@ class SigmaFiApiImpl @Inject()(node: NodeContext,
 
   override def createOrder(request: SFOrderRequest, send: Boolean): Either[SFQuote, SFResult] =
     act(reads.createOrder(request, send = false), send, SigmaFiIntent.CreateOrder(request))
-  override def createOffer(request: SFOfferRequest, send: Boolean): Either[SFQuote, SFResult] =
-    act(reads.createOffer(request, send = false), send, SigmaFiIntent.CreateOffer(request))
+
   override def cancelOrder(boxId: String, send: Boolean): Either[SFQuote, SFResult] =
     act(reads.cancelOrder(boxId, send = false), send, SigmaFiIntent.CancelOrder(boxId))
-  override def cancelOffer(boxId: String, send: Boolean): Either[SFQuote, SFResult] =
-    act(reads.cancelOffer(boxId, send = false), send, SigmaFiIntent.CancelOffer(boxId))
+
   override def fillOrder(boxId: String, send: Boolean): Either[SFQuote, SFResult] =
     act(reads.fillOrder(boxId, send = false), send, SigmaFiIntent.FillOrder(boxId))
-  override def closeOffer(boxId: String, send: Boolean): Either[SFQuote, SFResult] =
-    act(reads.closeOffer(boxId, send = false), send, SigmaFiIntent.CloseOffer(boxId))
+
   override def repay(boxId: String, send: Boolean): Either[SFQuote, SFResult] =
     act(reads.repay(boxId, send = false), send, SigmaFiIntent.Repay(boxId))
   override def liquidate(boxId: String, send: Boolean): Either[SFQuote, SFResult] =

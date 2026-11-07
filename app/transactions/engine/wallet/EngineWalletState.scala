@@ -130,22 +130,25 @@ class EngineWalletState @Inject()(nodeContext: NodeContext,
    */
   private def selectWallet(erg: Long, tokens: Seq[Token], reservationId: String,
                            deadline: Long, single: Boolean, confirmedOnly: Boolean,
-                           reply: ActorRef = sender(), critical: Boolean = criticalMessage): Unit = {
+                           reply: ActorRef = sender(), critical: Boolean = criticalMessage,
+                           avoidTokens: Set[String] = Set.empty): Unit = {
     val busy = if (critical) criticalSelecting.nonEmpty else selecting.nonEmpty
     val ownershipLimit = if (critical) MAX_ENGINE_INPUTS else MAX_OPTIONAL_INPUTS
     // Worst-case ownership, not the eventual selection size: a request that could not be honoured
     // within the budget is refused before it walks anything.
     val worstCaseInputs = if (single) 1 else walletLimits.maxInputs
+    val validRequest = tokens.size <= MaxRequestedTokens && avoidTokens.size <= MaxRequestedTokens &&
+      avoidTokens.forall(_.matches("[0-9a-f]{64}"))
     if (busy && now() < deadline && waitingSelections.count(_.critical == critical) < MaxQueuedSelections &&
-      tokens.size <= MaxRequestedTokens)
+      validRequest)
       waitingSelections :+= SelectionRequest(erg, tokens, reservationId, deadline, single, reply,
-        critical, confirmedOnly)
-    else if (busy || now() >= deadline || tokens.size > MaxRequestedTokens ||
+        critical, confirmedOnly, avoidTokens)
+    else if (busy || now() >= deadline || !validRequest ||
       usedInputs.size + worstCaseInputs > ownershipLimit) {
       val unavailable =
         if (busy) Some("the wallet's selection queue is full")
         else if (now() >= deadline) Some(SelectionExpired)
-        else if (tokens.size > MaxRequestedTokens) None
+        else if (!validRequest) None
         else Some(ownershipFull(ownershipLimit))
       reply ! WalletInputs(Seq.empty, reservationId, unavailable)
     } else {
@@ -156,7 +159,7 @@ class EngineWalletState @Inject()(nodeContext: NodeContext,
       val chainedChange = knownOutputs
       Try(Future(client.execute { ctx =>
         inventory.select(ctx, erg, tokens, excluded, single, chainedChange,
-          deadlineMillis = deadline, confirmedOnly = confirmedOnly)
+          deadlineMillis = deadline, confirmedOnly = confirmedOnly, avoidTokens = avoidTokens)
       })(if (critical) criticalWalletWorker else walletWorker)
         .onComplete(result => self ! SelectionFinished(attempt, reservationId, deadline, reply, result, critical)))
         .failed.foreach(ex =>
@@ -177,7 +180,7 @@ class EngineWalletState @Inject()(nodeContext: NodeContext,
       val request = waitingSelections(ready)
       waitingSelections = waitingSelections.patch(ready, Nil, 1)
       selectWallet(request.erg, request.tokens, request.id, request.deadline,
-        request.single, request.confirmedOnly, request.reply, request.critical)
+        request.single, request.confirmedOnly, request.reply, request.critical, request.avoidTokens)
       ready = nextReady
     }
   }
@@ -787,11 +790,11 @@ class EngineWalletState @Inject()(nodeContext: NodeContext,
       sweepRewardsIfDue()
       finishRefresh()
 
-    case SelectInputs(_, _, reservationId, deadlineMillis, _, _) if now() >= deadlineMillis =>
+    case SelectInputs(_, _, reservationId, deadlineMillis, _, _, _) if now() >= deadlineMillis =>
       sender() ! WalletInputs(Seq.empty, reservationId, Some(SelectionExpired))
 
-    case SelectInputs(erg, tokens, reservationId, deadline, single, confirmedOnly) =>
-      selectWallet(erg, tokens, reservationId, deadline, single, confirmedOnly)
+    case SelectInputs(erg, tokens, reservationId, deadline, single, confirmedOnly, avoidTokens) =>
+      selectWallet(erg, tokens, reservationId, deadline, single, confirmedOnly, avoidTokens = avoidTokens)
     case ReserveKnownInputs(_, reservationId, deadlineMillis) if now() >= deadlineMillis =>
       sender() ! WalletInputs(Seq.empty, reservationId, Some(SelectionExpired))
 
@@ -1167,5 +1170,5 @@ object EngineWalletState {
   private case object SweepFinished
   private case class SelectionRequest(erg: Long, tokens: Seq[Token], id: String,
                                       deadline: Long, single: Boolean, reply: ActorRef, critical: Boolean,
-                                      confirmedOnly: Boolean)
+                                      confirmedOnly: Boolean, avoidTokens: Set[String])
 }

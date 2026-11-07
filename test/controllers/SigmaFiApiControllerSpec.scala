@@ -45,34 +45,28 @@ class SigmaFiApiControllerSpec
 
   private val orderBody = Json.obj("collateralNanoErgs" -> "5000000000", "principalNanoErgs" -> "1000000000",
     "repayment" -> "1100000000", "maturityHeight" -> 2000000)
-  private val offerBody = Json.obj("principalNanoErgs" -> "1000000000", "repayment" -> "1100000000",
-    "maturityHeight" -> 2000000, "collateralNanoErgs" -> "5000000000")
-
   private val quote = SFQuote("x", None, None, "0", Seq.empty, "0", Seq.empty, "1000000", Seq.empty, Seq.empty)
   private val result = SFResult("ab" * 32, "accepted", Some(boxId), None)
 
   /** Every send, with the request each needs. */
   private def sends(c: SigmaFiApiController): Seq[(String, Action[AnyContent])] = Seq(
-    "create order" -> c.createOrder(), "create offer" -> c.createOffer(), "cancel order" -> c.cancelOrder(boxId),
-    "cancel offer" -> c.cancelOffer(boxId), "fill" -> c.fillOrder(boxId), "close" -> c.closeOffer(boxId),
+    "create order" -> c.createOrder(), "cancel order" -> c.cancelOrder(boxId),
+    "fill" -> c.fillOrder(boxId),
     "repay" -> c.repay(boxId), "liquidate" -> c.liquidate(boxId), "claim" -> c.claim(boxId))
 
   private def checks(c: SigmaFiApiController): Seq[(String, Action[AnyContent])] = Seq(
-    "create order" -> c.checkCreateOrder(), "create offer" -> c.checkCreateOffer(),
-    "cancel order" -> c.checkCancelOrder(boxId), "cancel offer" -> c.checkCancelOffer(boxId),
-    "fill" -> c.checkFillOrder(boxId), "close" -> c.checkCloseOffer(boxId), "repay" -> c.checkRepay(boxId),
+    "create order" -> c.checkCreateOrder(),
+    "cancel order" -> c.checkCancelOrder(boxId),
+    "fill" -> c.checkFillOrder(boxId), "repay" -> c.checkRepay(boxId),
     "liquidate" -> c.checkLiquidate(boxId), "claim" -> c.checkClaim(boxId))
 
-  private def body(name: String) = if (name == "create offer") offerBody else orderBody
+  private def body(name: String) = orderBody
 
   private def stubbed(): SigmaFiApi = {
     val api = mock[SigmaFiApi]
     when(api.createOrder(any[SFOrderRequest], anyBoolean())).thenAnswer(i => answer(i.getArgument[Boolean](1)))
-    when(api.createOffer(any[SFOfferRequest], anyBoolean())).thenAnswer(i => answer(i.getArgument[Boolean](1)))
     when(api.cancelOrder(anyString(), anyBoolean())).thenAnswer(i => answer(i.getArgument[Boolean](1)))
-    when(api.cancelOffer(anyString(), anyBoolean())).thenAnswer(i => answer(i.getArgument[Boolean](1)))
     when(api.fillOrder(anyString(), anyBoolean())).thenAnswer(i => answer(i.getArgument[Boolean](1)))
-    when(api.closeOffer(anyString(), anyBoolean())).thenAnswer(i => answer(i.getArgument[Boolean](1)))
     when(api.repay(anyString(), anyBoolean())).thenAnswer(i => answer(i.getArgument[Boolean](1)))
     when(api.liquidate(anyString(), anyBoolean())).thenAnswer(i => answer(i.getArgument[Boolean](1)))
     when(api.claim(anyString(), anyBoolean())).thenAnswer(i => answer(i.getArgument[Boolean](1)))
@@ -89,11 +83,8 @@ class SigmaFiApiControllerSpec
     }
     verify(api, never()).getPortfolio
     verify(api, never()).createOrder(any[SFOrderRequest], anyBoolean())
-    verify(api, never()).createOffer(any[SFOfferRequest], anyBoolean())
     verify(api, never()).cancelOrder(anyString(), anyBoolean())
-    verify(api, never()).cancelOffer(anyString(), anyBoolean())
     verify(api, never()).fillOrder(anyString(), anyBoolean())
-    verify(api, never()).closeOffer(anyString(), anyBoolean())
     verify(api, never()).repay(anyString(), anyBoolean())
     verify(api, never()).liquidate(anyString(), anyBoolean())
     verify(api, never()).claim(anyString(), anyBoolean())
@@ -110,11 +101,8 @@ class SigmaFiApiControllerSpec
       }
     }
     verify(api, never()).createOrder(any[SFOrderRequest], is(true))
-    verify(api, never()).createOffer(any[SFOfferRequest], is(true))
     verify(api, never()).cancelOrder(anyString(), is(true))
-    verify(api, never()).cancelOffer(anyString(), is(true))
     verify(api, never()).fillOrder(anyString(), is(true))
-    verify(api, never()).closeOffer(anyString(), is(true))
     verify(api, never()).repay(anyString(), is(true))
     verify(api, never()).liquidate(anyString(), is(true))
     verify(api, never()).claim(anyString(), is(true))
@@ -135,12 +123,10 @@ class SigmaFiApiControllerSpec
   "Lists and the asset lookup" should "need no api_key" in {
     val api = mock[SigmaFiApi]
     when(api.listOrders(any(), any(), any(), any())).thenReturn(SFOrderBook(1, Seq.empty, 0, truncated = false))
-    when(api.listOffers(any(), any(), any(), any())).thenReturn(SFOfferBook(1, Seq.empty, 0, truncated = false))
     when(api.listBonds(any(), any(), any())).thenReturn(SFBondList(1, Seq.empty, 0, 0, truncated = false))
     when(api.lookupAssets(any[SFAssetLookupRequest])).thenReturn(Seq.empty)
     val c = controller(api)
     status(c.listOrders(None, None, None, None).apply(FakeRequest())) shouldBe OK
-    status(c.listOffers(None, None, None, None).apply(FakeRequest())) shouldBe OK
     status(c.listBonds(None, None, None).apply(FakeRequest())) shouldBe OK
     status(c.lookupAssets().apply(FakeRequest(POST, "/sigmafi/assets").withJsonBody(Json.obj("tokenIds" -> Seq(boxId))))) shouldBe OK
   }

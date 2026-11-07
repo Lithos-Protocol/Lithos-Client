@@ -1,20 +1,20 @@
 {
-    // Maturity Liquidation - SigmaFi V1's liquidation rule, as a V2 liquidation script
-    // Once the bond reaches its maturity height, anyone may liquidate it. V1 bonds did exactly this:
-    // `HEIGHT >= maturityHeight` opened the liquidation path, with no signature, sending the collateral
-    // to the lender.
+    // Maturity liquidation, run with the bond as SELF via context variable 0.
+    // R7 is maturity; R6(1) is the maximum nanoERG fee the executor may retain.
+    // This expression sends all collateral tokens and at least SELF.value - fee to the vault.
+    // The bond itself pins that vault, its R4/R5 tags, and the singleton burn.
     //
-    // Not a contract that guards boxes. A bond runs it with executeFromVar, so SELF is the bond being
-    // liquidated: R7 is that bond's maturity height. Its serialized expression is what an executor attaches
-    // as context var 0, and the blake2b256 of those bytes is what a bond keeps in R8.
-    //
-    // Everything else about the liquidation is the bond's: where the collateral goes, the R4/R5 settlement
-    // tags into the vault, and the batching fee. That fee (bond R6(1)) is the only difference from
-    // V1: the lender receives the collateral less at most the fee, and whoever builds the transaction keeps
-    // the difference. A bond with a zero fee liquidates to the lender in full, as V1 did.
-    //
-    // Repayment closes at the same height (the bond allows it strictly below maturity), so as in V1 there
-    // is no block where both or neither are open.
+    // ASSUMPTIONS
+    // - The originating order bounded the fee to 0 <= fee <= collateral ERG - minimum box value.
+    // - tokens(0) is the bond singleton; only tokens(1..) are collateral.
+    // - Repayment closes at maturity, so this rule leaves no gap or overlap.
+    val settlementBox    = OUTPUTS(CONTEXT.selfBoxIndex)
+    val batchingFee      = SELF.R6[Coll[Long]].get(1)
+    val collateralAssets = SELF.tokens.slice(1, SELF.tokens.size)
 
-    sigmaProp(HEIGHT >= SELF.R7[Int].get)
+    sigmaProp(
+        HEIGHT >= SELF.R7[Int].get &&
+        settlementBox.tokens == collateralAssets &&
+        settlementBox.value >= SELF.value - batchingFee
+    )
 }

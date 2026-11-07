@@ -4,8 +4,10 @@ import mutations.NodeWallet
 import org.ergoplatform.appkit.scalaapi.scalaByteType
 import org.ergoplatform.appkit.{BlockchainContext, ErgoValue, Parameters, UnsignedTransaction}
 import org.ergoplatform.sdk.ErgoId
+import org.bouncycastle.util.encoders.Hex
+import play.api.libs.json.{JsObject, Json}
 import sigma.Colls
-import sigmafi.contracts.{FixedMaturity, OnClose, SigmaFiContracts, ZCOfferTerms, ZCOrderTerms}
+import sigmafi.contracts.{FixedMaturity, OnClose, SigmaFiContracts, ZCOrderTerms}
 import work.lithos.mutations.{Contract, InputUTXO, Token, TxBuilder, UTXO}
 
 /**
@@ -14,7 +16,8 @@ import work.lithos.mutations.{Contract, InputUTXO, Token, TxBuilder, UTXO}
  * @param value  nanoERG the wallet inputs must cover, the fee and change headroom included
  * @param tokens tokens they must cover
  */
-final case class SFPlan(value: Long, tokens: Seq[Token], build: Seq[InputUTXO] => UnsignedTransaction)
+final case class SFPlan(value: Long, tokens: Seq[Token], build: Seq[InputUTXO] => UnsignedTransaction,
+                        avoidTokens: Set[String] = Set.empty)
 
 /**
  * The SigmaFi V2 transactions a user asks for, shaped as SigmaFi's own client shapes them: protocol inputs at
@@ -22,11 +25,10 @@ final case class SFPlan(value: Long, tokens: Seq[Token], build: Seq[InputUTXO] =
  * fee, since none of these goes into a block of this miner's own.
  *
  * {{{
- *   create order/offer   IN  wallet...                OUT order|offer, [change], fee
+ *   create order         IN  wallet...                OUT order, [change], fee
  *   fill order           IN  order, wallet...         OUT lender unit, bond, principal, [change], fee
- *   close offer          IN  offer, wallet...         OUT lender unit, bond, principal, [change], fee
- *   cancel               IN  order|offer, auth box    OUT refund, fee
- *   repay                IN  bond, wallet...          OUT vault, collateral back, [change], fee
+ *   cancel               IN  order, auth box          OUT refund, fee
+ *   repay                IN  bond, wallet...          OUT vault, collateral back, [change], fee (singleton burned)
  *   claim                IN  vault..., wallet...      OUT claimed, [change], fee        (bond asset burned)
  * }}}
  */
@@ -40,26 +42,32 @@ object SigmaFiUserTransactions {
   private final val MinBox: Long = SigmaFiContracts.MinBox
 
   /** The EIP-4 name every bond asset this client mints carries. A name proves nothing; the chain does. */
-  final val BondAssetName: String = "SigmaFi ZC-Bond"
+  def bondAssetName(asset: ErgoId): String = s"SigmaFi-ZC-Bond-${asset.toString.take(6)}"
 
   /**
-   * The bond asset's EIP-4 description: its terms as compact JSON, so a wallet can show them. Every value is a
-   * hex id, a number or a fixed word, so nothing needs escaping. Never trusted on read: terms come from the chain.
+   * EIP-4 display snapshot, matching SigmaFi's generated metadata. Amounts remain exact integer JSON values.
+   * The height is the build context, not an inclusion height. Verification never trusts this description.
    */
-  def bondAssetDescription(principalErg: Long, principalTokens: Seq[(ErgoId, Long)], repayment: Long,
-                           repayToken: Option[ErgoId], maturity: Either[Int, Int], collateralErg: Long,
-                           collateralTokens: Seq[(ErgoId, Long)], batchingFee: Long, liquidation: String): String = {
-    def tokens(ts: Seq[(ErgoId, Long)]) = ts.map { case (id, n) => s"""{"id":"$id","amount":$n}""" }.mkString("[", ",", "]")
-    Seq(
-      s""""type":"SigmaFi ZC-Bond"""",
-      s""""principal":{"nanoErgs":$principalErg,"tokens":${tokens(principalTokens)}}""",
-      s""""repayment":$repayment""",
-      s""""repayToken":"${repayToken.fold("ERG")(_.toString)}"""",
-      maturity.fold(h => s""""maturity":$h""", d => s""""durationBlocks":$d"""),
-      s""""collateral":{"nanoErgs":$collateralErg,"tokens":${tokens(collateralTokens)}}""",
-      s""""batchingFee":$batchingFee""",
-      s""""liquidation":"$liquidation""""
-    ).mkString("{", ",", "}")
+  def bondAssetDescription(order: SigmaFiOrder, repayToken: Option[ErgoId], maturity: Int, height: Int): String = {
+    def contents(value: Long, ts: Seq[(ErgoId, Long)]): JsObject = Json.obj(
+      "nanoErgs" -> value, "tokens" -> ts.map { case (id, n) => Json.obj("id" -> id.toString, "amount" -> n) })
+    val t = order.terms
+    val description = Json.obj(
+      "type" -> "SigmaFi ZC-Bond",
+      "bondAsset" -> order.boxId,
+      "borrowerHash" -> Hex.toHexString(t.borrowerHash),
+      "principal" -> contents(math.max(t.principalErg, MinBox), t.principalTokens),
+      "repayment" -> t.repayment, "repayToken" -> repayToken.fold("ERG")(_.toString),
+      "maturity" -> maturity,
+      "collateral" -> contents(order.box.value, order.box.assets.map(a => ErgoId.create(a.tokenId) -> a.amount)),
+      "batchingFee" -> t.batchingFee,
+      "liquidation" -> order.liquidation.fold("unknown")(_.name),
+      "liquidationHash" -> Hex.toHexString(t.liqScriptHash), "height" -> height)
+    val duration = t.schedule match {
+      case OnClose(d) => Json.obj("durationBlocks" -> d)
+      case FixedMaturity(_) => Json.obj()
+    }
+    Json.stringify(description ++ duration)
   }
 
   /** An order of this wallet's: the collateral locked under the order, R4 hinting this wallet's tree. */
@@ -71,17 +79,8 @@ object SigmaFiUserTransactions {
       TxBuilder(ctx).setInputs(funding: _*).setOutputs(order).buildTx(TxFee, wallet.p2pk))
   }
 
-  /** An offer of this wallet's: the principal plus the lender unit's box, R4 hinting this wallet's tree. */
-  def createOffer(ctx: BlockchainContext, wallet: NodeWallet, terms: ZCOfferTerms, principalErg: Long,
-                  principalTokens: Seq[Token]): SFPlan = {
-    val offer = UTXO(SigmaFiContracts.offer(terms), Math.addExact(principalErg, MinBox), principalTokens,
-      Seq(SigmaFiBoxes.hintValue(wallet.contract.ergoTree)))
-    SFPlan(Math.addExact(offer.value, TxFee + Headroom), principalTokens, funding =>
-      TxBuilder(ctx).setInputs(funding: _*).setOutputs(offer).buildTx(TxFee, wallet.p2pk))
-  }
-
   /**
-   * Takes an order or offer back, authorized by `auth`, a wallet box at the creator's own tree. Everything both
+   * Takes an order back, authorized by `auth`, a wallet box at the creator's own tree. Everything both
    * hold, less the fee, returns to `refundTo` in one box.
    */
   def cancel(ctx: BlockchainContext, wallet: NodeWallet, box: InputUTXO, auth: InputUTXO,
@@ -95,10 +94,27 @@ object SigmaFiUserTransactions {
   private def unitBox(to: Contract, asset: ErgoId, name: Array[Byte], description: Array[Byte]): UTXO =
     UTXO(to, MinBox, Seq(Token(asset, 1L)), Seq(bytes(name), bytes(description), bytes("0".getBytes("UTF-8"))))
 
+  /** Rich issuance metadata can exceed the size covered by 0.001 ERG; fund the node's actual minimum. */
+  def lenderUnit(ctx: BlockchainContext, wallet: NodeWallet, order: SigmaFiOrder,
+                 repayToken: Option[ErgoId], maturity: Int): UTXO = {
+    val asset = ErgoId.create(order.boxId)
+    val description = bondAssetDescription(order, repayToken, maturity, ctx.getHeight)
+    var unit = unitBox(wallet.contract, asset, bondAssetName(asset).getBytes("UTF-8"), description.getBytes("UTF-8"))
+    val perByte = ctx.getDataSource.getParameters.getMinValuePerByte.toLong
+    def minimum: Long = Math.multiplyExact(unit.toInput(ctx, asset, 0).bytes.length.toLong, perByte)
+    // Increasing the value can itself increase its serialized length, so check again after each increase.
+    var needed = minimum
+    while (unit.value < needed) {
+      unit = unit.setValue(needed)
+      needed = minimum
+    }
+    unit
+  }
+
   private def bondBox(repayToken: Option[ErgoId], value: Long, collateral: Seq[Token], asset: ErgoId,
                       borrowerHash: Array[Byte], repayment: Long, fee: Long, maturity: Int,
                       liqHash: Array[Byte]): UTXO =
-    UTXO(SigmaFiContracts.bond(repayToken), value, collateral, Seq(bytes(asset.getBytes), bytes(borrowerHash),
+    UTXO(SigmaFiContracts.bond(repayToken), value, Token(asset, 1L) +: collateral, Seq(bytes(asset.getBytes), bytes(borrowerHash),
       ErgoValue.of(Array(repayment, fee)), ErgoValue.of(maturity), bytes(liqHash)))
 
   /**
@@ -119,34 +135,13 @@ object SigmaFiUserTransactions {
     val t = order.terms
     val asset = orderBox.id
     val maturity = fillMaturity(ctx, order)
-    val description = bondAssetDescription(t.principalErg, t.principalTokens, t.repayment, repayToken,
-      Left(maturity), orderBox.value, orderBox.tokens.map(tk => tk.id -> tk.amount), t.batchingFee,
-      order.liquidation.fold("unknown")(_.name))
-    val unit = unitBox(wallet.contract, asset, BondAssetName.getBytes("UTF-8"), description.getBytes("UTF-8"))
+    val unit = lenderUnit(ctx, wallet, order, repayToken, maturity)
     val bond = bondBox(repayToken, orderBox.value, orderBox.tokens, asset, t.borrowerHash, t.repayment,
       t.batchingFee, maturity, t.liqScriptHash)
     val principalTokens = t.principalTokens.map { case (id, n) => Token(id, n) }
     val principal = UTXO(borrower, math.max(t.principalErg, MinBox), principalTokens)
-    SFPlan(MinBox + principal.value + TxFee + Headroom, principalTokens, funding =>
+    SFPlan(Math.addExact(principal.value, Math.addExact(unit.value, TxFee + Headroom)), principalTokens, funding =>
       TxBuilder(ctx).setInputs(orderBox +: funding: _*).setOutputs(unit, bond, principal).buildTx(TxFee, wallet.p2pk))
-  }
-
-  /**
-   * Closes `offer`, this wallet borrowing. The offer is input 0, so the close mints the bond asset, whose id is
-   * the offer's: one unit to `lender` at output 0 under the offer's name and description, the bond holding this
-   * wallet's collateral at output 1, the principal to this wallet at output 2.
-   */
-  def closeOffer(ctx: BlockchainContext, wallet: NodeWallet, offer: SigmaFiOffer, offerBox: InputUTXO,
-                 repayToken: Option[ErgoId], lender: Contract): SFPlan = {
-    val t = offer.terms
-    val asset = offerBox.id
-    val collateral = t.collateralTokens.map { case (id, n) => Token(id, n) }
-    val unit = unitBox(lender, asset, t.assetName, t.assetDescription)
-    val bond = bondBox(repayToken, t.collateralErg, collateral, asset, wallet.contract.hashedPropBytes, t.repayment,
-      t.batchingFee, t.maturity, t.liqScriptHash)
-    val principal = UTXO(wallet.contract, offerBox.value - MinBox, offerBox.tokens)
-    SFPlan(Math.addExact(t.collateralErg, TxFee + Headroom), collateral, funding =>
-      TxBuilder(ctx).setInputs(offerBox +: funding: _*).setOutputs(unit, bond, principal).buildTx(TxFee, wallet.p2pk))
   }
 
   /**
@@ -162,9 +157,12 @@ object SigmaFiUserTransactions {
         val owed = Token(token, bond.repayment)
         UTXO(SigmaFiContracts.vault, MinBox, Seq(owed), tags) -> Seq(owed)
     }
-    val back = UTXO(borrower, bondBox.value, bondBox.tokens, Seq(bytes(ErgoId.create(bond.boxId).getBytes)))
-    SFPlan(Math.addExact(settlement.value, TxFee + Headroom), tokens, funding =>
-      TxBuilder(ctx).setInputs(bondBox +: funding: _*).setOutputs(settlement, back).buildTx(TxFee, wallet.p2pk))
+    val back = UTXO(borrower, bondBox.value, bondBox.tokens.drop(1), Seq(bytes(ErgoId.create(bond.boxId).getBytes)))
+    SFPlan(Math.addExact(settlement.value, TxFee + Headroom), tokens, funding => {
+      require(!funding.exists(_.tokens.exists(_.id == bond.asset)), "repayment funding must preserve the lender's circulating unit")
+      TxBuilder(ctx).setInputs(bondBox +: funding: _*).setOutputs(settlement, back)
+        .buildTx(TxFee, wallet.p2pk, Seq(Token(bond.asset, 1L)))
+    }, avoidTokens = Set(bond.asset.toString))
   }
 
   /**

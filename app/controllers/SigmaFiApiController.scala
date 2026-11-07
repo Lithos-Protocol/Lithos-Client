@@ -42,10 +42,6 @@ class SigmaFiApiController @Inject()(cc: ControllerComponents,
   def listOrders(offset: Option[Int], limit: Option[Int], collateral: Option[String], loan: Option[String]): Action[AnyContent] =
     Action.async { _ => offPool(respond(api.listOrders(offset, limit, collateral, loan))) }
 
-  /** GET /sigmafi/offers */
-  def listOffers(offset: Option[Int], limit: Option[Int], collateral: Option[String], loan: Option[String]): Action[AnyContent] =
-    Action.async { _ => offPool(respond(api.listOffers(offset, limit, collateral, loan))) }
-
   /** GET /sigmafi/bonds */
   def listBonds(offset: Option[Int], limit: Option[Int], all: Option[Boolean]): Action[AnyContent] =
     Action.async { _ => offPool(respond(api.listBonds(offset, limit, all))) }
@@ -67,24 +63,11 @@ class SigmaFiApiController @Inject()(cc: ControllerComponents,
     Action.async { r => offPool(respondEither(api.createOrder(body[SFOrderRequest](r, "orderRequest"), send = true))) }
   }
 
-  def checkCreateOffer(): Action[AnyContent] = Action.async { r =>
-    offPool(respondEither(api.createOffer(body[SFOfferRequest](r, "offerRequest"), send = false)))
-  }
-  def createOffer(): Action[AnyContent] = withApiKey {
-    Action.async { r => offPool(respondEither(api.createOffer(body[SFOfferRequest](r, "offerRequest"), send = true))) }
-  }
-
   def checkCancelOrder(boxId: String): Action[AnyContent] = check(api.cancelOrder(boxId, send = false))
   def cancelOrder(boxId: String): Action[AnyContent] = sendKeyed(api.cancelOrder(boxId, send = true))
 
-  def checkCancelOffer(boxId: String): Action[AnyContent] = check(api.cancelOffer(boxId, send = false))
-  def cancelOffer(boxId: String): Action[AnyContent] = sendKeyed(api.cancelOffer(boxId, send = true))
-
   def checkFillOrder(boxId: String): Action[AnyContent] = check(api.fillOrder(boxId, send = false))
   def fillOrder(boxId: String): Action[AnyContent] = sendKeyed(api.fillOrder(boxId, send = true))
-
-  def checkCloseOffer(boxId: String): Action[AnyContent] = check(api.closeOffer(boxId, send = false))
-  def closeOffer(boxId: String): Action[AnyContent] = sendKeyed(api.closeOffer(boxId, send = true))
 
   def checkRepay(boxId: String): Action[AnyContent] = check(api.repay(boxId, send = false))
   def repay(boxId: String): Action[AnyContent] = sendKeyed(api.repay(boxId, send = true))

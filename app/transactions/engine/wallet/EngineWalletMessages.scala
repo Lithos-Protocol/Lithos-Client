@@ -71,13 +71,15 @@ object EngineWalletMessages {
    * @param deadlineMillis past this the request is answered empty rather than queued further
    * @param confirmedOnly  only boxes already in a block, for a transaction offered to this miner's
    *                       own candidate, which cannot carry an unconfirmed parent it was not told of
+   * @param avoidTokens    skip boxes carrying these tokens, preserving a bond's separate circulating unit
    */
   private[transactions] case class SelectInputs(erg: Long,
                                           tokens: Seq[Token] = Seq.empty,
                                           reservationId: String = java.util.UUID.randomUUID().toString,
                                           deadlineMillis: Long = Long.MaxValue,
                                           single: Boolean = false,
-                                          confirmedOnly: Boolean = false)
+                                          confirmedOnly: Boolean = false,
+                                          avoidTokens: Set[String] = Set.empty)
 
   /**
    * Reserve exact plain wallet outputs or matured rewards selected for consolidation.

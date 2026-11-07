@@ -151,6 +151,15 @@ class EngineWalletStateSpec extends TestKit(ActorSystem("wallet-manager-spec", E
 
   private def values(boxes: Seq[InputUTXO]): Seq[Long] = boxes.map(_.value).sorted
 
+  "Settlement selection" should "leave the lender's circulating unit out of engine reservations" in {
+    val asset = "ac" * 32
+    val f = fixture(w => Seq(walletBox(w, 9 * erg, Seq(NodeAsset(asset, 1L))), walletBox(w, 3 * erg)))
+    val inputs = selected(f, SelectInputs(erg, avoidTokens = Set(asset)))
+    values(inputs) shouldBe Seq(3 * erg)
+    inputs.flatMap(_.tokens).map(_.id.toString) should not contain asset
+    system.stop(f.mgr)
+  }
+
   // ─── the property the whole mechanism exists for ──────────────────────────
 
   "Engine input ownership" should "survive ordinary refresh and refuse stale-attempt reconciliation" in {

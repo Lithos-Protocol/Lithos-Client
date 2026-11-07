@@ -1,0 +1,38 @@
+{
+  val v1 = getVar[Coll[Int]](0).get
+  val v2 = v1(0)
+  val v3 = SELF.id
+  val v4 = v1(1)
+  val v5 = INPUTS(v4)
+  val v6 = SELF.propositionBytes
+  val v7 = ((((INPUTS(v2).id == v3) && (v5.propositionBytes == v6)) && (v4 < v2)) && (v5.creationInfo._1 > (HEIGHT - 1051200)))
+  val v8 = fromBase16("f5e47f921b32094c0b49f2ca09717b56cbbde827d9c68a2f8f1d2455da3f9c7b")
+  if ((v7 || getVar[Coll[Byte]](1).isDefined)) allOf(sigmaProp(CONTEXT.dataInputs.exists({ (v9: Box) =>
+    {
+      val v11 = v9.tokens
+      (((v11.size > 0) && (v11(0)._1 == fromBase16("289c9c0e8a394769cf5b9622546e58b263d20dd2504eabdcaa01515bf149da8b"))) && v9.R8[Coll[Coll[Byte]]].get.exists({ (v12: Coll[Byte]) =>
+        (v12 == v8)
+      }))
+    }
+  })), if (v7) sigmaProp(true) else allOf(sigmaProp((blake2b256(getVar[Coll[Byte]](1).get) == v8)), deserializeContext[SigmaProp](1))) else {
+    val v9 = SELF.tokens
+    val v10 = v9(0)._1
+    val v11 = OUTPUTS(v1(2))
+    sigmaProp(((((((((v5.id != v3) && v5.tokens.exists({ (v12: ) =>
+      (v12._1 == v10)
+    })) && (v5.creationInfo._1 > (HEIGHT - 1051200))) && INPUTS.forall({ (v12: Box) =>
+      ((v12.id == v3) || (v12.propositionBytes != v6))
+    })) && OUTPUTS.forall({ (v12: Box) =>
+      v12.tokens.forall({ (v14: ) =>
+        (v14._1 != v10)
+      })
+    })) && (v11.propositionBytes == v5.propositionBytes)) && (v11.value >= (SELF.value - 10000000L))) && v9.forall({ (v12: ) =>
+      {
+        val v14 = v12._1
+        ((v14 == v10) || v11.tokens.exists({ (v15: ) =>
+          ((v15._1 == v14) && (v15._2 >= v12._2))
+        }))
+      }
+    })))
+  }
+}

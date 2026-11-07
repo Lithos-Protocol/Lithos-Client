@@ -70,6 +70,21 @@ class WalletInventorySpec extends AnyFlatSpec with Matchers with MockitoSugar {
     snapshot.boxes.map(_.retainedBytes).sum should be <= configs.WalletConfig.Default.maxDescriptorBytes
   }
 
+  "Settlement funding" should "skip the circulating asset in node pages and locally built change" in {
+    val (node, api, wallet) = FakeNodeContext(numAddresses = 1)
+    node.getClient.execute { ctx =>
+      val asset = org.ergoplatform.sdk.ErgoId.create("ab" * 32)
+      val claim = UTXO(wallet.contract, 9000000000L, Seq(work.lithos.mutations.Token(asset, 1L))).toDummyInput(ctx)
+      val plain = UTXO(wallet.contract, 3000000000L).toDummyInput(ctx)
+      serve(api, Vector(claim, plain).map(WalletInventory.nodeBox))
+      for (single <- Seq(false, true)) {
+        new WalletInventory(node, api).select(ctx, 1000000000L, Seq.empty, Set.empty, single,
+          known = Vector(WalletInventory.nodeBox(claim)), avoidTokens = Set(asset.toString))
+          .map(_.id) shouldBe Vector(plain.id)
+      }
+    }
+  }
+
   it should "select a covering box beyond the cache horizon without retaining or hydrating preceding dust" in {
     val (node, api, wallet) = FakeNodeContext(numAddresses = 1)
     node.getClient.execute { ctx =>

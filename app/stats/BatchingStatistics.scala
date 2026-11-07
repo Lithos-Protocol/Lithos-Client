@@ -132,21 +132,33 @@ private[stats] object BatchingStatistics {
   final val SigmaFiProtocol = "sigmafi"
 
   /**
-   * SigmaFi bonds `tx` liquidates: each input that reads as a bond, spent with a liquidation script in context
-   * variable 0, whose output at the same index is a vault box. Each is one record, gross what the bond gave up
-   * beyond its vault box. The miner fee is split evenly across the records, the remainder on the first ones,
+   * Standard maturity liquidations only: a custom expression may convert collateral, so the difference in
+   * ERG values does not measure its revenue. Match the expression, collateral, tags and singleton burn before
+   * attributing the bounded ERG difference as a fee. The miner fee is split across the records,
    * so totals count it once and a broadcast batch's every record shows a fee, as a fee-less one in a Lithos
    * block is what marks this miner's own candidate work.
    */
   private def sigmaFi(tx: BlockTx, inputs: Seq[Option[TxOutput]], minerTree: String): Vector[BatchingFee] = {
-    val vault = sigmafi.contracts.SigmaFiContracts.vault.ergoTreeHex
+    val contracts = sigmafi.contracts.SigmaFiContracts
+    val vault = contracts.vault.ergoTreeHex
+    def maturityExpression(hex: String): Boolean =
+      Try(org.ergoplatform.appkit.ErgoValue.fromHex(hex).getValue).toOption.exists {
+        case bytes: sigma.Coll[Byte @unchecked] =>
+          Try(bytes.toArray.sameElements(contracts.MaturityLiquidation.bytes)).getOrElse(false)
+        case _ => false
+      }
     val settled = inputs.indices.toVector.flatMap { i =>
       for {
         in <- inputs(i)
-        if tx.inputs(i).spendingProof.exists(_.ext.contains("0"))
+        if tx.inputs(i).spendingProof.flatMap(_.ext.get("0")).exists(maturityExpression)
         bond <- transactions.batching.sigmafi.SigmaFiBoxes.bond(box(in))
+        if bond.liquidation.contains(contracts.MaturityLiquidation)
         out <- tx.outputs.lift(i) if out.ergoTree.equalsIgnoreCase(vault)
-        gross = BigInt(in.value) - out.value if gross >= 0
+        settlement <- transactions.batching.sigmafi.SigmaFiBoxes.vault(box(out))
+        if settlement.bondId.contains(bond.boxId) && settlement.asset == bond.asset &&
+          settlement.box.assets == bond.collateral
+        if !tx.outputs.exists(_.assets.exists(_.id == bond.asset))
+        gross = BigInt(in.value) - out.value if gross >= 0 && gross <= bond.batchingFee
       } yield (i, bond.boxId, gross)
     }
     if (settled.isEmpty) Vector.empty

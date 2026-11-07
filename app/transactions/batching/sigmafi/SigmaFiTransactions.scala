@@ -34,7 +34,8 @@ final case class SigmaFiLiquidation(signed: SignedTransaction, bonds: Vector[Sig
  * Builds liquidations of matured bonds under the maturity liquidation script.
  *
  * Bond i sits at input i with the script's bytes as context variable 0, and its vault box at output i: the
- * bond's tokens in the same order, its value less its batching fee, R4 the bond's id and R5 its bond asset.
+ * collateral tokens in the same order, value less its batching fee, R4 the bond's id and R5 its bond asset.
+ * Each bond singleton is burned; the lender's circulating unit is never a funding input.
  * Every fee goes to one last output. No wallet box is spent, so the transaction balances exactly.
  */
 object SigmaFiTransactions {
@@ -72,7 +73,7 @@ object SigmaFiTransactions {
     val outputs = bonds.map { case (b, _) => vaultBox(b) } :+ UTXO(feeTo, fees - minerFee)
     val unsigned = work.lithos.mutations.TxBuilder(ctx).setInputs(inputs: _*).setOutputs(outputs: _*)
       .setPreHeader(ctx.createPreHeader().height(height).build())
-      .buildTx(minerFee, wallet.p2pk)
+      .buildTx(minerFee, wallet.p2pk, bonds.map { case (b, _) => Token(b.asset, 1L) })
     // Signing runs every bond's script and its liquidation, so a spend either refuses fails here
     val signed = Batcher.withNodeMinimums(ctx, wallet.sign(unsigned))
     SigmaFiLiquidation(signed, bonds.map(_._1).toVector, InputUTXO(signed.getOutputsToSpend.get(bonds.size)), fees)

@@ -11,7 +11,7 @@ import sigmafi.contracts._
 import work.lithos.mutations.{Contract, Token, UTXO}
 
 /**
- * What the client accepts as a SigmaFi bond, order, offer or vault box. Anyone can create a box at any of these
+ * What the client accepts as a SigmaFi bond, order or vault box. Anyone can create a box at any of these
  * scripts, so every refusal here is a box a stranger could plant to be read with terms no contract enforces.
  */
 class SigmaFiBoxesSpec extends AnyPropSpec with SigmaFiFixtures {
@@ -45,6 +45,17 @@ class SigmaFiBoxesSpec extends AnyPropSpec with SigmaFiFixtures {
     }
   }
 
+  property("bond: requires the first token to be a singleton matching R4, and hashes to be 32 bytes") {
+    withCtx { ctx =>
+      val b = bondUTXO(None, contractOf(miner(ctx)), maturity, collateral = Seq(Token(tokenB, 7L)))
+      Seq(b.copy(tokens = b.tokens.tail), b.copy(tokens = Token(assetId, 2L) +: b.tokens.tail),
+        b.copy(tokens = b.tokens.reverse), b.withReg(0, ErgoValue.of(tokenA.getBytes)),
+        b.withReg(1, ErgoValue.of(Array[Byte](1))), b.withReg(4, ErgoValue.of(Array[Byte](1)))).foreach { bad =>
+        SigmaFiBoxes.bond(nodeBox(ctx, bad)) shouldBe None
+      }
+    }
+  }
+
   property("bond: refuses a token bond tree whose vault hash is not the pinned vault's, though its template matches") {
     withCtx { ctx =>
       val genuine = SigmaFiContracts.tokenBond(tokenA).ergoTree
@@ -73,47 +84,14 @@ class SigmaFiBoxesSpec extends AnyPropSpec with SigmaFiFixtures {
     }
   }
 
-  property("order: refuses a forged order that shares the template hash but mints two") {
+  property("order: refuses a forged order that shares the template hash but mints three") {
     withCtx { ctx =>
       val genuine = SigmaFiContracts.order(orderTerms(contractOf(miner(ctx)), FixedMaturity(maturity))).ergoTree
-      val mintAt = constantIndex(genuine, SLong, 1L)
-      val forged = Contract(forge(genuine, mintAt, 2L))
+      val mintAt = constantIndex(genuine, SLong, 2L)
+      val forged = Contract(forge(genuine, mintAt, 3L))
       Blake2b256.hash(forged.ergoTree.template).toSeq shouldBe Blake2b256.hash(genuine.template).toSeq
       SigmaFiBoxes.order(nodeBox(ctx, UTXO(forged, 3 * Erg))) shouldBe None
       SigmaFiBoxes.order(nodeBox(ctx, UTXO(Contract(genuine), 3 * Erg))) should not be empty
-    }
-  }
-
-  // ─── offers ─────────────────────────────────────────────────────────────
-
-  property("offer: reads its terms, principal and the asset it will mint") {
-    withCtx { ctx =>
-      val lender = contractOf(miner(ctx))
-      val terms = offerTerms(lender, maturity, collateralTokens = Seq(tokenB -> 9L))
-      val box = nodeBox(ctx, UTXO(SigmaFiContracts.offer(terms), Erg + MinBox))
-      val read = SigmaFiBoxes.offer(box).get
-      read.principalErg shouldBe Erg
-      read.terms.collateralTokens shouldBe Seq(tokenB -> 9L)
-      read.terms.maturity shouldBe maturity
-      new String(read.terms.assetName, "UTF-8") shouldBe "SigmaFi ZC-Bond"
-      SigmaFiBoxes.pairedBond(read.terms.bondHash, Seq.empty) shouldBe Some(None)
-    }
-  }
-
-  property("offer: refuses a box too small to pay the lender's unit and a principal") {
-    withCtx { ctx =>
-      val terms = offerTerms(contractOf(miner(ctx)), maturity)
-      SigmaFiBoxes.offer(nodeBox(ctx, UTXO(SigmaFiContracts.offer(terms), 2 * MinBox - 1))) shouldBe None
-    }
-  }
-
-  property("offer: refuses a forged offer whose minimum unit value is not the template's") {
-    withCtx { ctx =>
-      val genuine = SigmaFiContracts.offer(offerTerms(contractOf(miner(ctx)), maturity)).ergoTree
-      val unitAt = genuine.constants.indices.filter(i => genuine.constants(i).tpe == SLong &&
-        genuine.constants(i).value == 1000000L).head
-      val forged = Contract(forge(genuine, unitAt, 1L))
-      SigmaFiBoxes.offer(nodeBox(ctx, UTXO(forged, Erg))) shouldBe None
     }
   }
 
@@ -156,13 +134,13 @@ class SigmaFiBoxesSpec extends AnyPropSpec with SigmaFiFixtures {
 
   // ─── verification ───────────────────────────────────────────────────────
 
-  property("verify: a bond is its asset's own only when its mint's genesis box was an order or offer it spent") {
+  property("verify: a bond is its asset's own only when its mint's genesis box was an order it spent") {
     withCtx { ctx =>
       val borrower = contractOf(miner(ctx))
       val order = nodeBox(ctx, UTXO(SigmaFiContracts.order(orderTerms(borrower, FixedMaturity(maturity))), 3 * Erg),
         0, "e1" * 32)
       val fillTx = "f2" * 32
-      val bond = SigmaFiBoxes.bond(nodeBox(ctx, bondUTXO(None, borrower, maturity, asset = ErgoId.create(order.boxId)),
+      val bond = SigmaFiBoxes.bond(nodeBox(ctx, bondUTXO(None, borrower, maturity, value = 3 * Erg, asset = ErgoId.create(order.boxId)),
         1, fillTx)).get
       def genesis(box: node.model.NodeBox, spentBy: Option[String]) =
         Some(IndexedBox(box, "", 1, 1L, spentTransactionId = spentBy))

@@ -19,8 +19,8 @@ import scala.concurrent.duration._
 import scala.util.{Failure, Success, Try}
 
 /**
- * Liquidates SigmaFi V2 bonds that matured unpaid under the maturity liquidation script, taking each one's
- * batching fee.
+ * Liquidates SigmaFi V2 bonds that matured unpaid under the exact known maturity expression, burning each
+ * bond singleton and collecting its batching fee.
  *
  * For `broadcastAfterBlocks` blocks after a bond matures, only this miner's own blocks carry its liquidation:
  * fee-less, its fee going to the block's holding box, superseding any pending spend of the bond. From then on

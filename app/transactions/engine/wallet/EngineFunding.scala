@@ -29,7 +29,10 @@ case class EngineFunding(walletRef: ActorRef,
   private implicit val askTimeout: Timeout = Timeout(timeout)
   private def fundingRequest(request: Any): Any = if (critical) CriticalWalletRequest(request) else request
 
-  override def reserve(value: Long, tokens: Seq[Token]): FundingAllocation = {
+  override def reserve(value: Long, tokens: Seq[Token]): FundingAllocation = reserveAvoiding(value, tokens, Set.empty)
+
+  /** Settlement funding must leave a lender's circulating bond asset untouched. */
+  def reserveAvoiding(value: Long, tokens: Seq[Token], avoidTokens: Set[String]): FundingAllocation = {
     if (value < 0 || tokens.exists(_.amount < 0))
       throw new IllegalArgumentException("Wallet requirements cannot be negative")
     val reservationId = UUID.randomUUID().toString
@@ -37,9 +40,9 @@ case class EngineFunding(walletRef: ActorRef,
     val selected = awaitReservation(
       reservationId,
       (walletRef ? fundingRequest(SelectInputs(value, tokens, reservationId = reservationId,
-        deadlineMillis = deadline))).mapTo[WalletInputs])
+        deadlineMillis = deadline, avoidTokens = avoidTokens))).mapTo[WalletInputs])
     val reservation = new FundingAllocation(reservationId, selected, this)
-    if (!covers(selected, value, tokens)) {
+    if (!covers(selected, value, tokens) || selected.exists(_.tokens.exists(t => avoidTokens(t.id.toString)))) {
       reservation.release()
       throw new NotEnoughInputsException(requirement(value, tokens))
     }

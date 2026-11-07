@@ -62,6 +62,18 @@ class EngineFundingSpec extends TestKit(ActorSystem("wallet-selector-spec"))
     manager.expectNoMessage(100.millis)
   }
 
+  it should "carry settlement exclusions and release a reply that contains the circulating asset" in {
+    val manager = TestProbe()
+    val selector = EngineFunding(manager.ref, 2.seconds, ec)
+    val asset = ErgoId.create("bc" * 32)
+    val result = Future(selector.reserveAvoiding(1000L, Seq.empty, Set(asset.toString)))
+    val request = manager.expectMsgType[SelectInputs]
+    request.avoidTokens shouldBe Set(asset.toString)
+    manager.reply(WalletInputs(Seq(input(2000L, Some(Token(asset, 1L)))), request.reservationId))
+    manager.expectMsg(ReleaseInputs(request.reservationId))
+    intercept[NotEnoughInputsException](Await.result(result, 2.seconds))
+  }
+
   it should "retain candidate ownership when its acknowledgement is lost" in {
     val manager = TestProbe()
     val funding = EngineFunding(manager.ref, 200.millis, ec)

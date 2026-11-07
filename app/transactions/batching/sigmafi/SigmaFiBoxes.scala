@@ -8,7 +8,7 @@ import org.ergoplatform.sdk.ErgoId
 import scorex.crypto.hash.Blake2b256
 import sigma.VersionContext
 import sigma.ast.ErgoTree
-import sigmafi.contracts.{LiquidationScript, SigmaFiContracts, SigmaFiTemplateKind, ZCOfferTerms, ZCOrderTerms}
+import sigmafi.contracts.{FixedMaturity, LiquidationScript, OnClose, SigmaFiContracts, SigmaFiTemplateKind, ZCOrderTerms}
 import work.lithos.mutations.InputUTXO
 
 import scala.util.Try
@@ -17,7 +17,7 @@ import scala.util.Try
  * A live zero-coupon bond.
  *
  * @param repayToken   None for an ERG bond, the token a token bond is repaid in otherwise
- * @param asset        R4: the bond asset that claims the payout, the id of the order or offer that minted it
+ * @param asset        first token, quantity one; R4 must agree with this originating order id
  * @param borrowerHash R5: blake2b256 of the tree the collateral returns to on repayment
  * @param repayment    R6(0): nanoERG, or token units for a token bond
  * @param batchingFee  R6(1): the most nanoERG a liquidator may keep
@@ -27,21 +27,10 @@ final case class SigmaFiBond(box: NodeBox, repayToken: Option[ErgoId], asset: Er
                              repayment: Long, batchingFee: Long, maturity: Int, liqScriptHash: Array[Byte]) {
   def boxId: String = box.boxId
 
-  def collateral: Seq[NodeAsset] = box.assets
+  def collateral: Seq[NodeAsset] = box.assets.drop(1)
 
   /** The liquidation script R8 names, when this client knows it. */
   def liquidation: Option[LiquidationScript] = SigmaFiContracts.liquidationOf(liqScriptHash)
-}
-
-/** A lender's offer: the principal plus 0.001 ERG for the lender's unit box. Its id becomes the bond asset's. */
-final case class SigmaFiOffer(box: NodeBox, terms: ZCOfferTerms) {
-  def boxId: String = box.boxId
-
-  def principalErg: Long = box.value - SigmaFiContracts.MinBox
-
-  def principalTokens: Seq[NodeAsset] = box.assets
-
-  def liquidation: Option[LiquidationScript] = SigmaFiContracts.liquidationOf(terms.liqScriptHash)
 }
 
 /** A borrower's order: the box's whole contents are the collateral. Its id becomes the bond asset's. */
@@ -91,24 +80,17 @@ object SigmaFiBoxes {
     repayToken.flatMap { token =>
       Try {
         for {
-          asset <- bytes(box, 4).filter(_.length == 32)
-          borrower <- bytes(box, 5)
+          singleton <- box.assets.headOption.filter(a => a.amount == 1L && a.tokenId.matches("[0-9a-fA-F]{64}"))
+          asset <- bytes(box, 4).filter(b => b.length == 32 && Hex.toHexString(b).equalsIgnoreCase(singleton.tokenId))
+          borrower <- bytes(box, 5).filter(_.length == 32)
           amounts <- register(box, 6, LongsType).collect { case c: sigma.Coll[Long @unchecked] => c.toArray }
           if amounts.length == 2
           maturity <- register(box, 7, IntType).collect { case v: Integer => v.intValue }
-          liq <- bytes(box, 8)
+          liq <- bytes(box, 8).filter(_.length == 32)
         } yield SigmaFiBond(box, token, new ErgoId(asset), borrower, amounts(0), amounts(1), maturity, liq)
       }.toOption.flatten
     }
   }
-
-  /**
-   * `box` as an offer, or None. Refused when it holds less than the lender unit's box plus a principal box,
-   * since no close could then pay both.
-   */
-  def offer(box: NodeBox): Option[SigmaFiOffer] =
-    if (box.value < 2 * SigmaFiContracts.MinBox || !shaped(box.ergoTree, SigmaFiTemplateKind.Offer)) None
-    else parse(box.ergoTree).flatMap(SigmaFiContracts.offerTerms).map(SigmaFiOffer(box, _))
 
   /** `box` as an order of either style, or None. */
   def order(box: NodeBox): Option[SigmaFiOrder] =
@@ -124,14 +106,14 @@ object SigmaFiBoxes {
       }
     }.toOption.flatten
 
-  /** The ErgoTrees R4 lists as hints, as this client writes them on orders and offers. Bad entries are dropped. */
+  /** The ErgoTrees R4 lists as order hints. Bad entries are dropped. */
   def hintTrees(box: NodeBox): Seq[ErgoTree] =
     register(box, 4, TreesType).toSeq.flatMap {
       case c: sigma.Coll[sigma.Coll[Byte] @unchecked] => c.toArray.toSeq.flatMap(b => parse(Hex.toHexString(b.toArray)))
       case _ => Seq.empty
     }
 
-  /** R4 hint for an order or offer: `Coll[Coll[Byte]]`, each entry an ErgoTree's bytes. No contract reads it. */
+  /** R4 order hint: `Coll[Coll[Byte]]`, each entry an ErgoTree's bytes. No contract reads it. */
   def hintValue(trees: ErgoTree*): ErgoValue[_] =
     ErgoValue.of(sigma.Colls.fromArray(trees.map(t => sigma.Colls.fromArray(t.bytes)).toArray)(
       sigma.collRType(sigma.ByteType)), ErgoType.collType(org.ergoplatform.appkit.scalaapi.scalaByteType))
@@ -139,7 +121,7 @@ object SigmaFiBoxes {
   /**
    * The repayment token a bond hash names for a loan of `principalTokens`: Some(None) for an ERG loan paired
    * with the ERG bond, Some(Some(id)) for a loan of one token paired with that token's bond, otherwise None.
-   * Neither orders nor offers check the pairing, so a mismatched one is never built on.
+   * Orders do not check the pairing, so a mismatched one is never built on.
    */
   def pairedBond(bondHash: Array[Byte], principalTokens: Seq[(ErgoId, Long)]): Option[Option[ErgoId]] =
     principalTokens match {
@@ -150,19 +132,36 @@ object SigmaFiBoxes {
 
   /**
    * Whether `bond` is the one its bond asset's mint created: the asset's genesis box `genesis` is a genuine
-   * order or offer, spent by the transaction that created the bond, with the bond at output 1. For display
-   * and pricing only; nothing liquidated or repaid depends on it. Left is the reason it is not.
+   * borrower order, spent by the transaction that created the bond at output 1, with matching terms and
+   * collateral. This is indexed historical evidence, not an on-chain proof or a storage-rent guarantee.
    */
   def verify(bond: SigmaFiBond, genesis: Option[IndexedBox]): Either[String, Unit] =
     for {
       g <- genesis.toRight("the node's index has no genesis box for its bond asset")
       _ <- Either.cond(g.boxId == bond.asset.toString, (), "the box found is not its bond asset's genesis box")
-      tree <- parse(g.ergoTree).toRight("its bond asset's genesis box has an unreadable script")
-      _ <- Either.cond(SigmaFiContracts.isMinter(tree), (), "its bond asset was not minted by a SigmaFi order or offer")
+      originOrder <- order(g.box).toRight("its bond asset was not minted by a SigmaFi borrower order")
       _ <- Either.cond(g.spentTransactionId.contains(bond.box.transactionId), (),
         "it is not the bond its asset's mint created")
       _ <- Either.cond(bond.box.index == 1, (), "it is not its mint's second output")
+      _ <- Either.cond(pairedBond(originOrder.terms.bondHash, originOrder.terms.principalTokens).contains(bond.repayToken), (),
+        "its order's bond does not match its loan")
+      _ <- Either.cond(matchesOrder(bond, originOrder, g.spendingHeight), (), "its terms or collateral do not match its originating order")
     } yield ()
+
+  private def matchesOrder(b: SigmaFiBond, o: SigmaFiOrder, spendingHeight: Option[Int]): Boolean = {
+    val t = o.terms
+    val scheduleMatches = t.schedule match {
+      case FixedMaturity(h) => b.maturity == h
+      case OnClose(d) =>
+        val latest = spendingHeight.getOrElse(b.box.creationHeight).toLong + d
+        d >= SigmaFiContracts.MinOnCloseDuration && b.maturity.toLong <= latest &&
+          b.maturity.toLong >= latest - SigmaFiContracts.OnCloseAllowance
+    }
+    hashOf(parse(b.box.ergoTree).get).sameElements(t.bondHash) &&
+      b.borrowerHash.sameElements(t.borrowerHash) && b.repayment == t.repayment &&
+      b.batchingFee == t.batchingFee && b.liqScriptHash.sameElements(t.liqScriptHash) &&
+      b.box.value >= o.box.value && b.collateral == o.box.assets && scheduleMatches
+  }
 
   /** `box` rebuilt for spending, or None when its id does not come back the same. */
   def input(box: NodeBox, ctx: BlockchainContext): Option[InputUTXO] =

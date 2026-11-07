@@ -6,7 +6,7 @@ import org.ergoplatform.sdk.ErgoId
 import org.scalatest.propspec.AnyPropSpec
 import sigmafi.contracts.SigmaFiContracts
 import support.FakeNodeContext
-import work.lithos.mutations.{Contract, InputUTXO, Token}
+import work.lithos.mutations.{Contract, InputUTXO, Token, TxBuilder, UTXO}
 
 import scala.collection.JavaConverters._
 
@@ -118,6 +118,29 @@ class SigmaFiTransactionsSpec extends AnyPropSpec with SigmaFiFixtures {
       SigmaFiBatcher.liquidatable(due, 1000, floor + 1) shouldBe false
       val (other, _) = bondAt(ctx, 13, maturity = 1000, liqHash = Array.fill(32)(1.toByte))
       SigmaFiBatcher.liquidatable(other, 1000, floor) shouldBe false
+    }
+  }
+
+  property("maturity settlement rejects diverted collateral, an excessive fee and a surviving singleton at signing") {
+    client.execute { ctx =>
+      Seq(None, Some(tokenA)).zipWithIndex.foreach { case (repayToken, index) =>
+        val (bond, input) = bondAt(ctx, 30 + index, repayToken, nextBlock(ctx), Seq(Token(tokenB, 7L)))
+        val protocolInput = input.withCtxVar(0.toByte, ErgoValue.of(liq.bytes))
+        val valid = SigmaFiTransactions.vaultBox(bond)
+        val badSettlements = Seq(valid.copy(tokens = Seq.empty), valid.subValue(1L))
+        badSettlements.foreach { settlement =>
+          val diverted = input.tokens.drop(1).filterNot(t => settlement.tokens.exists(_.id == t.id))
+          val fee = UTXO(wallet.contract, bond.box.value - settlement.value, diverted)
+          val unsigned = TxBuilder(ctx).setInputs(protocolInput).setOutputs(settlement, fee)
+            .setPreHeader(ctx.createPreHeader().height(nextBlock(ctx)).build())
+            .buildTx(0L, wallet.p2pk, Seq(Token(bond.asset, 1L)))
+          an[Exception] should be thrownBy wallet.sign(unsigned)
+        }
+        // Without the explicit burn, Appkit puts the singleton in change. Construction must succeed first.
+        val unsigned = TxBuilder(ctx).setInputs(protocolInput).setOutputs(valid)
+          .setPreHeader(ctx.createPreHeader().height(nextBlock(ctx)).build()).buildTx(0L, wallet.p2pk)
+        an[Exception] should be thrownBy wallet.sign(unsigned)
+      }
     }
   }
 }

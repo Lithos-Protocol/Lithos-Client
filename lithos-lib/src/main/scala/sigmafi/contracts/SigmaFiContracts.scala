@@ -18,20 +18,6 @@ final case class FixedMaturity(height: Int) extends ZCSchedule
 final case class OnClose(duration: Int) extends ZCSchedule
 
 /**
- * A lender's offer terms, the constants of one `ZC_Offer`.
- *
- * @param lenderHash       blake2b256 of the lender's ErgoTree: receives the bond asset, authorizes a cancel
- * @param assetName        EIP-4 name of the bond asset, UTF-8
- * @param assetDescription EIP-4 description of the bond asset, UTF-8
- * @param bondHash         blake2b256 of the bond tree a close must create
- * @param collateralErg    least nanoERG the bond holds
- * @param collateralTokens the bond's tokens, exactly
- */
-final case class ZCOfferTerms(lenderHash: Array[Byte], assetName: Array[Byte], assetDescription: Array[Byte],
-                              bondHash: Array[Byte], repayment: Long, batchingFee: Long, maturity: Int,
-                              liqScriptHash: Array[Byte], collateralErg: Long, collateralTokens: Seq[(ErgoId, Long)])
-
-/**
  * A borrower's order terms, the constants of one `ZC_Order` or `ZC_OrderOnClose`.
  *
  * @param principalErg    least nanoERG of the principal box
@@ -54,8 +40,6 @@ sealed abstract class SigmaFiTemplateKind(val scriptName: String, val termNames:
 object SigmaFiTemplateKind {
   import SigmaFiContracts._
 
-  case object Offer extends SigmaFiTemplateKind("ZC_Offer", Seq(LENDER_HASH, ASSET_NAME, ASSET_DESCRIPTION,
-    BOND_HASH, REPAYMENT, BATCHING_FEE, MATURITY, LIQ_SCRIPT_HASH, COLLATERAL_ERG, COLLATERAL_TOKENS))
   case object Order extends SigmaFiTemplateKind("ZC_Order", Seq(BOND_HASH, BORROWER_HASH, PRINCIPAL_ERG,
     PRINCIPAL_TOKENS, REPAYMENT, BATCHING_FEE, MATURITY, LIQ_SCRIPT_HASH))
   case object OrderOnClose extends SigmaFiTemplateKind("ZC_OrderOnClose", Seq(BOND_HASH, BORROWER_HASH,
@@ -63,7 +47,7 @@ object SigmaFiTemplateKind {
   /** One token bond per repayment token, CONST_TOKEN_ID its only term. */
   case object TokenBond extends SigmaFiTemplateKind("ZC_Token_Bond", Seq(TOKEN_ID))
 
-  val all: Seq[SigmaFiTemplateKind] = Seq(Offer, Order, OrderOnClose, TokenBond)
+  val all: Seq[SigmaFiTemplateKind] = Seq(Order, OrderOnClose, TokenBond)
 }
 
 /**
@@ -119,16 +103,13 @@ final case class SigmaFiTemplate(kind: SigmaFiTemplateKind, tree: ErgoTree, posi
 /**
  * The SigmaFi V2 zero-coupon bond contracts, pinned rather than compiled at runtime.
  *
- * The vault and the ERG bond are single trees. The token bond, both orders and the offer are templates
+ * The vault and the ERG bond are single trees. The token bond and both orders are templates
  * compiled with sentinel terms, and instances are built by substituting constants into them. Every term
  * is one constant at a fixed position. `SigmaFiContractsSpec` compiles the sources and fails on any
  * difference from these pins or from the addresses and hashes SigmaFi's own client reports.
  */
 object SigmaFiContracts {
 
-  final val LENDER_HASH = "CONST_LENDER_HASH"
-  final val ASSET_NAME = "CONST_ASSET_NAME"
-  final val ASSET_DESCRIPTION = "CONST_ASSET_DESCRIPTION"
   final val BOND_HASH = "CONST_BOND_HASH"
   final val BORROWER_HASH = "CONST_BORROWER_HASH"
   final val REPAYMENT = "CONST_REPAYMENT"
@@ -136,8 +117,6 @@ object SigmaFiContracts {
   final val MATURITY = "CONST_MATURITY"
   final val DURATION = "CONST_DURATION"
   final val LIQ_SCRIPT_HASH = "CONST_LIQ_SCRIPT_HASH"
-  final val COLLATERAL_ERG = "CONST_COLLATERAL_ERG"
-  final val COLLATERAL_TOKENS = "CONST_COLLATERAL_TOKENS"
   final val PRINCIPAL_ERG = "CONST_PRINCIPAL_ERG"
   final val PRINCIPAL_TOKENS = "CONST_PRINCIPAL_TOKENS"
   final val TOKEN_ID = "CONST_TOKEN_ID"
@@ -159,62 +138,53 @@ object SigmaFiContracts {
       "029a72098c72080272090172017305"
 
   final val ErgBondTreeHex: String =
-    "1beb01040e20ed132c371e35881b1b4fde03f092bc2eb8d9deb96df89cd9a5a32ab4f94b3c6b040204020400d809d601e3000ed6" +
-      "02db6508fed603b2a5720200d604db6308a7d605c1a7d606e4c6a70611d60793cbc272037300d608c5a7d609ed93e4c67203040e" +
-      "720893e4c67203050ee4c6a7040e95e67201ea02d19683050193cbe47201e4c6a7080e7207720993db63087203720492c1720399" +
-      "7205b27206730100d40800d801d60ab2a59a7202730200d1968308018fa3e4c6a707047207720992c17203b2720673030093cbc2" +
-      "720ae4c6a7050e93e4c6720a040e720893db6308720a720492c1720a7205"
+    "1bb102080e20ed132c371e35881b1b4fde03f092bc2eb8d9deb96df89cd9a5a32ab4f94b3c6b0400050005000500040204000402" +
+      "d809d601e3000ed602db6508fed603b2a5720200d60493cbc272037300d605c5a7d606db6308a7d6078cb2720673010001d608ed" +
+      "93e4c67203040e720593e4c67203050e7207d60993dad901090eb0a57302d9010b41639a8c720b01b0db63088c720b027303d901" +
+      "0d414d0ed802d60f8c720d02d6108c720d0195938c720f0172099a72108c720f027210017207730495e67201ea02d19683040193" +
+      "cbe47201e4c6a7080e720472087209d40800d801d60ab2a59a7202730500d1968309018fa3e4c6a707047204720892c17203b2e4" +
+      "c6a7061173060093cbc2720ae4c6a7050e93e4c6720a040e720593db6308720ab472067307b1720692c1720ac1a77209"
 
-  /** Each template's tree with sentinel terms, and the sentinel values that find each term's position. */
+  /** Prototypes from Sigma-Finance-V2/docs/LITHOS_SIGMAFI_V2_REFERENCE.md, master, 2026-11-06. */
   private val pinnedTrees: Map[SigmaFiTemplateKind, String] = Map(
     SigmaFiTemplateKind.TokenBond ->
-      ("1bbc02090e20ed132c371e35881b1b4fde03f092bc2eb8d9deb96df89cd9a5a32ab4f94b3c6b040204020580897a040204000e20" +
-        "7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e04000400d809d601e3000ed602db6508fed603b2" +
-        "a5720200d604db6308a7d605c1a7d606e4c6a70611d60793cbc272037300d608c5a7d609ed93e4c67203040e720893e4c6720305" +
-        "0ee4c6a7040e95e67201ea02d19683050193cbe47201e4c6a7080e7207720993db63087203720492c17203997205b27206730100" +
-        "d40800d802d60adb63087203d60bb2a59a7202730200d1968309018fa3e4c6a707047207720992c172037303eded93b1720a7304" +
-        "938cb2720a730500017306928cb2720a73070002b2720673080093cbc2720be4c6a7050e93e4c6720b040e720893db6308720b72" +
-        "0492c1720b7205"),
-
-    SigmaFiTemplateKind.Offer ->
-      ("1bc8041b050005000e205252525252525252525252525252525252525252525252525252525252525252050004000402040204" +
-        "000502040004000580897a0e1455555555555555555555555555555555555555550e15565656565656565656565656565656565656" +
-        "56565602300e2051515151515151515151515151515151515151515151515151515151515151510c4d0e012054545454545454545454" +
-        "54545454545454545454545454545454545454545454dee1bbf93905dce1bbf9390404040005d6e1bbf939040205d8e1bbf93904" +
-        "daf85e0e20535353535353535353535353535353535353535353535353535353535353535305000580897ad803d601c5a7d602da" +
-        "d901020eb0a57300d9010441639a8c720401b0db63088c7204027301d90106414d0ed802d6088c720602d6098c72060195938c72" +
-        "080172029a72098c7208027209017201d6037302959172027303d804d604b2a5730400d605b2a5730500d606e4c672050611d607" +
-        "b27206730600d1ededededededededed937201c5b2a4730700937202730891b1db630872047309938cb2db63087204730a000172" +
-        "0193cbc27204720392c17204730bededed93e4c67204040e730c93e4c67204050e730d93e4c67204060e830102730eefe6c67204" +
-        "070eeded93cbc27205730f93db63087205731092c172057311edededededed93e4c67205040e7201e6c67205050e93b172067312" +
-        "93b27206731300731493b27206731500731693e4c672050704731793e4c67205080e7318ed92720773199299c172057207731ad1" +
-        "aea4d901046393cbc272047203"),
+      ("1b82030d0e20ed132c371e35881b1b4fde03f092bc2eb8d9deb96df89cd9a5a32ab4f94b3c6b040005000500050004020580897a" +
+      "040204000e207e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e040004000402d809d601e3000ed6" +
+      "02db6508fed603b2a5720200d60493cbc272037300d605c5a7d606db6308a7d6078cb2720673010001d608ed93e4c67203040e72" +
+      "0593e4c67203050e7207d60993dad901090eb0a57302d9010b41639a8c720b01b0db63088c720b027303d9010d414d0ed802d60f" +
+      "8c720d02d6108c720d0195938c720f0172099a72108c720f027210017207730495e67201ea02d19683040193cbe47201e4c6a708" +
+      "0e720472087209d40800d802d60adb63087203d60bb2a59a7202730500d196830a018fa3e4c6a707047204720892c172037306ed" +
+      "ed93b1720a7307938cb2720a730800017309928cb2720a730a0002b2e4c6a70611730b0093cbc2720be4c6a7050e93e4c6720b04" +
+      "0e720593db6308720bb47206730cb1720692c1720bc1a77209"),
 
     SigmaFiTemplateKind.Order ->
-      ("1b910419050005000e206262626262626262626262626262626262626262626262626262626262626262050004000402040204" +
-        "0404000502040004000e2061616161616161616161616161616161616161616161616161616161616161610404040005e4b88d9d42" +
-        "040205e6b88d9d4204e8c06c0e20636363636363636363636363636363636363636363636363636363636363636305000580897a04" +
-        "0205e2b88d9d420c4d0e01206464646464646464646464646464646464646464646464646464646464646464eab88d9d42d803d6" +
-        "01c5a7d602dad901020eb0a57300d9010441639a8c720401b0db63088c7204027301d90106414d0ed802d6088c720602d6098c72" +
-        "060195938c72080172029a72098c7208027209017201d6037302959172027303d805d604b2a5730400d605b2a5730500d606e4c6" +
-        "72050611d607b27206730600d608b2a5730700d1edededededededed937201c5b2a4730800937202730991b1db63087204730a93" +
-        "8cb2db63087204730b00017201eded93cbc27205730c93db63087205db6308a792c17205c1a7edededededed93e4c67205040e72" +
-        "0193e4c67205050e720393b17206730d93b27206730e00730f93b27206731000731193e4c672050704731293e4c67205080e7313" +
-        "ed92720773149299c172057207731591e4c6720507049aa37316eded93cbc27208720392c17208731793db630872087318d1aea4" +
-        "d901046393cbc272047203"),
+      ("1be20420050005000e20626262626262626262626262626262626262626262626262626262626262626205000400040204020404" +
+      "0400050404000400040005020e206161616161616161616161616161616161616161616161616161616161616161040004000400" +
+      "050204020404040005e4b88d9d42040205e6b88d9d4204e8c06c0e20636363636363636363636363636363636363636363636363" +
+      "636363636363636305000580897a040205e2b88d9d420c4d0e012064646464646464646464646464646464646464646464646464" +
+      "64646464646464eab88d9d42d803d601c5a7d602dad901020eb0a57300d9010441639a8c720401b0db63088c7204027301d90106" +
+      "414d0ed802d6088c720602d6098c72060195938c72080172029a72098c7208027209017201d6037302959172027303d805d604b2" +
+      "a5730400d605b2a5730500d606e4c672050611d607b27206730600d608b2a5730700d1ededededededededed937201c5b2a47308" +
+      "00937202730991b1db63087204730a938cb2db63087204730b00017201938cb2db63087204730c0002730dededededed93cbc272" +
+      "05730e91b1db63087205730f938cb2db63087205731000017201938cb2db63087205731100027312d801d609db6308720593b472" +
+      "097313b17209db6308a792c17205c1a7edededededed93e4c67205040e720193e4c67205050e720393b17206731493b272067315" +
+      "00731693b27206731700731893e4c672050704731993e4c67205080e731aed927207731b9299c172057207731c91e4c672050704" +
+      "9aa3731deded93cbc27208720392c17208731e93db63087208731fd1aea4d901046393cbc272047203"),
 
     SigmaFiTemplateKind.OrderOnClose ->
-      ("1ba2041a050005000e207272727272727272727272727272727272727272727272727272727272727272050004000402040204" +
-        "f4887a040404000502040004000e2071717171717171717171717171717171717171717171717171717171717171710404040005" +
-        "f08fdfc04a040205f28fdfc04a0e20737373737373737373737373737373737373737373737373737373737373737305000580897a" +
-        "043c041005ee8fdfc04a0c4d0e01207474747474747474747474747474747474747474747474747474747474747474f68fdfc04ad8" +
-        "03d601c5a7d602dad901020eb0a57300d9010441639a8c720401b0db63088c7204027301d90106414d0ed802d6088c720602d609" +
-        "8c72060195938c72080172029a72098c7208027209017201d6037302959172027303d807d604b2a5730400d605b2a5730500d606" +
-        "e4c672050611d607b27206730600d6089aa37307d609e4c672050704d60ab2a5730800d1edededededededed937201c5b2a47309" +
-        "00937202730a91b1db63087204730b938cb2db63087204730c00017201eded93cbc27205730d93db63087205db6308a792c17205" +
-        "c1a7ededededed93e4c67205040e720193e4c67205050e720393b17206730e93b27206730f00731093b27206731100731293e4c6" +
-        "7205080e7313ed92720773149299c1720572077315eded92997208a3731690720972089272099972087317eded93cbc2720a7203" +
-        "92c1720a731893db6308720a7319d1aea4d901046393cbc272047203"))
+      ("1bf30421050005000e207272727272727272727272727272727272727272727272727272727272727272050004000402040204f4" +
+      "887a04040400050404000400040005020e2071717171717171717171717171717171717171717171717171717171717171710400" +
+      "04000400050204020404040005f08fdfc04a040205f28fdfc04a0e20737373737373737373737373737373737373737373737373" +
+      "737373737373737305000580897a043c041005ee8fdfc04a0c4d0e01207474747474747474747474747474747474747474747474" +
+      "747474747474747474f68fdfc04ad803d601c5a7d602dad901020eb0a57300d9010441639a8c720401b0db63088c7204027301d9" +
+      "0106414d0ed802d6088c720602d6098c72060195938c72080172029a72098c7208027209017201d6037302959172027303d807d6" +
+      "04b2a5730400d605b2a5730500d606e4c672050611d607b27206730600d6089aa37307d609e4c672050704d60ab2a5730800d1ed" +
+      "edededededededed937201c5b2a4730900937202730a91b1db63087204730b938cb2db63087204730c00017201938cb2db630872" +
+      "04730d0002730eededededed93cbc27205730f91b1db630872057310938cb2db63087205731100017201938cb2db630872057312" +
+      "00027313d801d60bdb6308720593b4720b7314b1720bdb6308a792c17205c1a7ededededed93e4c67205040e720193e4c6720505" +
+      "0e720393b17206731593b27206731600731793b27206731800731993e4c67205080e731aed927207731b9299c172057207731ced" +
+      "ed92997208a3731d9072097208927209997208731eeded93cbc2720a720392c1720a731f93db6308720a7320d1aea4d901046393" +
+      "cbc272047203"))
 
   private def bytes(fill: Int, n: Int = 32): Coll[Byte] = Colls.fromArray(Array.fill(n)(fill.toByte))
 
@@ -228,11 +198,6 @@ object SigmaFiContracts {
    */
   private[contracts] val sentinels: Map[SigmaFiTemplateKind, Map[String, Any]] = Map(
     SigmaFiTemplateKind.TokenBond -> Map(TOKEN_ID -> bytes(0x7e)),
-    SigmaFiTemplateKind.Offer -> Map(
-      LENDER_HASH -> bytes(0x52), ASSET_NAME -> bytes(0x55, 20), ASSET_DESCRIPTION -> bytes(0x56, 21),
-      BOND_HASH -> bytes(0x51), REPAYMENT -> 7777777771L, BATCHING_FEE -> 7777777772L, MATURITY -> 777773,
-      LIQ_SCRIPT_HASH -> bytes(0x53), COLLATERAL_ERG -> 7777777774L,
-      COLLATERAL_TOKENS -> tokenColl(Seq(new ErgoId(Array.fill(32)(0x54.toByte)) -> 7777777775L))),
     SigmaFiTemplateKind.Order -> Map(
       BOND_HASH -> bytes(0x61), BORROWER_HASH -> bytes(0x62), PRINCIPAL_ERG -> 8888888881L,
       PRINCIPAL_TOKENS -> tokenColl(Seq(new ErgoId(Array.fill(32)(0x64.toByte)) -> 8888888885L)),
@@ -280,8 +245,8 @@ object SigmaFiContracts {
 
   // ─── liquidation scripts ─────────────────────────────────────────────────
 
-  /** HEIGHT >= SELF.R7: anyone may liquidate once the bond matures. */
-  final val MaturityLiquidation = LiquidationScript("MaturityLiquidation", Hex.decode("d192a3e4c6a70704"))
+  /** Maturity plus exact collateral tokens and the fee bound; the bond pins vault, tags and burn. */
+  final val MaturityLiquidation = LiquidationScript("MaturityLiquidation", Hex.decode("d802d601b2a5db6508fe00d602db6308a7d1eded92a3e4c6a7070493db63087201b472020402b1720292c1720199c1a7b2e4c6a70611040200"))
 
   /** Every liquidation script this client will build for or liquidate under. */
   val liquidations: Seq[LiquidationScript] = Seq(MaturityLiquidation)
@@ -291,13 +256,6 @@ object SigmaFiContracts {
   def liquidation(name: String): Option[LiquidationScript] = liquidations.find(_.name == name)
 
   // ─── instances ───────────────────────────────────────────────────────────
-
-  def offer(t: ZCOfferTerms): Contract = template(SigmaFiTemplateKind.Offer).withTerms(Map(
-    LENDER_HASH -> Colls.fromArray(t.lenderHash), ASSET_NAME -> Colls.fromArray(t.assetName),
-    ASSET_DESCRIPTION -> Colls.fromArray(t.assetDescription), BOND_HASH -> Colls.fromArray(t.bondHash),
-    REPAYMENT -> t.repayment, BATCHING_FEE -> t.batchingFee, MATURITY -> t.maturity,
-    LIQ_SCRIPT_HASH -> Colls.fromArray(t.liqScriptHash), COLLATERAL_ERG -> t.collateralErg,
-    COLLATERAL_TOKENS -> tokenColl(t.collateralTokens)))
 
   def order(t: ZCOrderTerms): Contract = {
     val common: Map[String, Any] = Map(
@@ -311,21 +269,6 @@ object SigmaFiContracts {
   }
 
   // ─── reading terms back ──────────────────────────────────────────────────
-
-  /** `tree`'s terms when it is a genuine offer, with every hash and token id 32 bytes. */
-  def offerTerms(tree: ErgoTree): Option[ZCOfferTerms] =
-    template(SigmaFiTemplateKind.Offer).termsOf(tree).flatMap { v =>
-      Try {
-        for {
-          lender <- hash32(v(LENDER_HASH))
-          bond <- hash32(v(BOND_HASH))
-          liq <- hash32(v(LIQ_SCRIPT_HASH))
-          tokens <- tokenList(v(COLLATERAL_TOKENS))
-        } yield ZCOfferTerms(lender, collBytes(v(ASSET_NAME)), collBytes(v(ASSET_DESCRIPTION)), bond,
-          v(REPAYMENT).asInstanceOf[Long], v(BATCHING_FEE).asInstanceOf[Long], v(MATURITY).asInstanceOf[Int], liq,
-          v(COLLATERAL_ERG).asInstanceOf[Long], tokens)
-      }.toOption.flatten
-    }
 
   /** `tree`'s terms when it is a genuine order of either style. */
   def orderTerms(tree: ErgoTree): Option[ZCOrderTerms] =
@@ -354,9 +297,9 @@ object SigmaFiContracts {
     else template(SigmaFiTemplateKind.TokenBond).termsOf(tree)
       .flatMap(v => hash32(v(TOKEN_ID))).map(id => Some(new ErgoId(id)))
 
-  /** Whether `tree` is a genuine order or offer, the only contracts that mint bond assets. */
+  /** Whether `tree` is a genuine borrower order, the only contracts that mint bond assets. */
   def isMinter(tree: ErgoTree): Boolean =
-    Seq(SigmaFiTemplateKind.Offer, SigmaFiTemplateKind.Order, SigmaFiTemplateKind.OrderOnClose)
+    Seq(SigmaFiTemplateKind.Order, SigmaFiTemplateKind.OrderOnClose)
       .exists(k => Try(template(k).matches(tree)).getOrElse(false))
 
   /** A short name for a SigmaFi tree, or None. */

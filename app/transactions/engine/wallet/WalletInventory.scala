@@ -179,7 +179,7 @@ private[engine] class WalletInventory(node: NodeContext, api: _root_.node.NodeAp
   def select(ctx: BlockchainContext, erg: Long, required: Seq[Token], excluded: Set[String],
              single: Boolean,
              known: Vector[NodeBox] = Vector.empty, deadlineMillis: Long = Long.MaxValue,
-             confirmedOnly: Boolean = false): Vector[InputUTXO] = {
+             confirmedOnly: Boolean = false, avoidTokens: Set[String] = Set.empty): Vector[InputUTXO] = {
     require(erg >= 0 && required.forall(_.amount > 0), "invalid wallet requirement")
     require(!mainnet || !required.exists(_.id.toString == MainnetEip27Constants.TokenId),
       "re-emission tokens cannot be transferred")
@@ -212,6 +212,7 @@ private[engine] class WalletInventory(node: NodeContext, api: _root_.node.NodeAp
 
     def consume(box: NodeBox, reward: Boolean): Boolean = {
       if (!excluded.contains(box.boxId) && !selected.exists(_.boxId == box.boxId) &&
+        !box.assets.exists(a => avoidTokens(a.tokenId)) &&
         (!reward || matured(box, ctx.getHeight)) && spendableValue(box) > 0) {
         if (single) {
           if (covers(Vector(box)) && smallest.forall(best => Ordering[(Boolean, Long)].lt(rank(box), rank(best)))) {
