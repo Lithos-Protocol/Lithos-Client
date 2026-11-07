@@ -170,6 +170,10 @@ POST /forwards/positions/:boxId/settle/check    controllers.ForwardsApiControlle
 + nocsrf
 POST /forwards/positions/:boxId/settle          controllers.ForwardsApiController.settle(boxId: String)
 
+# Public confirmed oracle feeds and their recent state history
+GET  /oracles                                  controllers.OraclesApiController.listFeeds()
+GET  /oracles/:feedId                          controllers.OraclesApiController.getFeed(feedId: String, offset: Option[Int], limit: Option[Int], atBlockId: Option[String])
+
 # Routes for SigmaFi bonds (the portfolio and everything that signs require api_key)
 GET  /sigmafi/orders                            controllers.SigmaFiApiController.listOrders(offset: Option[Int], limit: Option[Int], collateral: Option[String], loan: Option[String])
 GET  /sigmafi/bonds                             controllers.SigmaFiApiController.listBonds(offset: Option[Int], limit: Option[Int], all: Option[Boolean])

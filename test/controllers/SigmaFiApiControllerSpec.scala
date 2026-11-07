@@ -140,4 +140,21 @@ class SigmaFiApiControllerSpec
     status(c.checkRepay(boxId).apply(FakeRequest())) shouldBe CONFLICT
     status(c.checkCreateOrder().apply(FakeRequest(POST, "/").withJsonBody(Json.obj("x" -> 1)))) shouldBe BAD_REQUEST
   }
+
+  "Asset verification" should "expose a named settlement even when its vault has already been claimed" in {
+    val api = mock[SigmaFiApi]
+    val vault = SFVaultView("cd" * 32, Some(boxId), "ef" * 32, "2000000000", Seq.empty)
+    val settlement = SFSettlement("aa" * 32, 123456, Some(1700000000000L), boxId, vault, None, Some("ab" * 32))
+    when(api.lookupAssets(any[SFAssetLookupRequest])).thenReturn(Seq(
+      SFAssetLookup("ef" * 32, bondAsset = true, verified = true, None, None, Seq.empty,
+        status = "Liquidated", settlement = Some(settlement))))
+    val response = controller(api).lookupAssets().apply(FakeRequest(POST, "/sigmafi/assets")
+      .withJsonBody(Json.obj("tokenIds" -> Seq("ef" * 32))))
+    status(response) shouldBe OK
+    val asset = contentAsJson(response).as[Seq[play.api.libs.json.JsValue]].head
+    (asset \ "status").as[String] shouldBe "Liquidated"
+    (asset \ "vault").as[Seq[play.api.libs.json.JsValue]] shouldBe empty
+    (asset \ "settlement" \ "txId").as[String] shouldBe settlement.txId
+    (asset \ "settlement" \ "vault" \ "nanoErgs").as[String] shouldBe "2000000000"
+  }
 }

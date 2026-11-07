@@ -77,6 +77,7 @@ class Module(environment: Environment, configuration: Configuration) extends Abs
     bind(classOf[LDPoolsApi]).to(classOf[LDPoolsApiImpl])
     bind(classOf[ForwardsApi]).to(classOf[ForwardsApiImpl])
     bind(classOf[SigmaFiApi]).to(classOf[SigmaFiApiImpl])
+    bind(classOf[OraclesApi]).to(classOf[OraclesApiImpl])
     bind(classOf[WalletApi]).to(classOf[WalletApiImpl])
     bind[StartupTasks](classOf[StartupTasks]).asEagerSingleton()
     //bind[StartStratumServer](classOf[StartStratumServer]).asEagerSingleton()

@@ -2,7 +2,7 @@ package transactions.engine.execution
 
 import akka.pattern.ask
 import akka.util.Timeout
-import api.SigmaFiApi
+import api.{BondSettlement, SigmaFiApi}
 import api.LithosApiErrors.{LithosBadRequest, LithosNotFound, LithosStateChanged, LithosUnavailable, LithosUnprocessable}
 import api.models._
 import configs.{NodeContext, SigmaFiBatchingConfig, SigmaFiBondsConfig}
@@ -93,9 +93,12 @@ class SigmaFiAPIExecution(nodeContext: NodeContext,
         val candidates = byAsset.getOrElse(id, Seq.empty)
         val bond = candidates.find(b => origin.exists(_.bondId == b.boxId)).orElse(candidates.headOption)
         val verified = bond.fold(origin.isRight)(b => origin.exists(_.bondId == b.boxId))
+        val state = origin.fold(_ => BondSettlement.State("Unverified"),
+          o => BondSettlement.read(nodeApi, o.bondId, id, ctx.getHeight))
         SFAssetLookup(id, origin.isRight || origin.left.exists(_.minted), verified,
           origin.left.toOption.map(_.reason).orElse(bond.filterNot(_ => verified).map(_ => NotItsBond)),
-          bond.map(bondView(ctx, nodeApi, _)), vaults.getOrElse(id, Seq.empty).map(vaultView))
+          bond.filterNot(_ => state.settlement.isDefined).map(bondView(ctx, nodeApi, _)),
+          vaults.getOrElse(id, Seq.empty).map(vaultView), state.status, state.settlement, state.reason)
       }
     }
   }

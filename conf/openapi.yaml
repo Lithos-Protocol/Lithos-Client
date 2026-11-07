@@ -87,6 +87,12 @@ tags:
       **All amounts and difficulties are decimal strings, not JSON numbers.** LIT amounts are base
       units (9 decimals). A 409 means a box you named is already being spent: re-read and resend.
     x-displayName: Difficulty Forwards
+  - name: oracles
+    description: >-
+      Confirmed oracle feeds read from this client's Ergo node and extra index. The shipped mainnet feed
+      `erg-usd` is USD v2. Other v2 pools can be configured under `oracles.feeds`. Prices and raw integers
+      are decimal strings. No wallet or API key is required.
+    x-displayName: Oracle Feeds
   - name: sigmafi
     description: >
       SigmaFi bonds: peer-to-peer zero-coupon loans. A borrower posts a collateral-backed order. A lender
@@ -111,6 +117,7 @@ x-tagGroups:
       - lithosdex
       - forwards
       - sigmafi
+      - oracles
       - wallet
   - name: Stratum
     tags:
@@ -4593,6 +4600,78 @@ paths:
               schema:
                 $ref: '#/components/schemas/ApiError'
 
+  /oracles:
+    get:
+      summary: List configured oracle feeds
+      operationId: listOracleFeeds
+      tags: [oracles]
+      responses:
+        '200':
+          description: Feeds configured for this node's network; an empty list on networks without a deployment.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OracleFeeds'
+  /oracles/{feedId}:
+    get:
+      summary: Current oracle state and recent confirmed history
+      description: >-
+        The confirmed pool NFT box, its exact R4 raw rate and R5 epoch, converted price, age and recent history.
+        USD v2 stores nanoERG per USD; USD per ERG is `1000000000 / rawValue`. The displayed price is rounded
+        to 18 decimal places; `priceNumerator / priceDenominator` preserves the exact rational conversion.
+        Current and history boxes must match the configured NFT, guard hash and register types.
+        History is newest first, including the current point on the first page, and defaults to the latest
+        100 confirmed pool updates. Set `limit=0` for current state only. Offsets count NFT boxes, including
+        governance transitions and the initial zero-price bootstrap box, which is omitted from price points.
+        Follow `nextOffset` and pass the returned `blockId` as `atBlockId` to keep pagination on the same tip.
+        `stale` uses creation-height age and the configured `maxAgeBlocks`, not wall-clock market freshness.
+        Timestamps are confirmed block timestamps when available; missing ones are omitted and reported by
+        `timestampsComplete=false`. A lagging index or unavailable/unsupported pool is 503; a tip change is 409.
+      operationId: getOracleFeed
+      tags: [oracles]
+      parameters:
+        - name: feedId
+          in: path
+          required: true
+          schema: {type: string}
+          example: erg-usd
+        - name: offset
+          in: query
+          schema: {type: integer, minimum: 0, maximum: 1000000, default: 0}
+        - name: limit
+          in: query
+          schema: {type: integer, minimum: 0, maximum: 200, default: 100}
+        - name: atBlockId
+          in: query
+          description: Optional tip id returned by the preceding page; a changed tip requires pagination to restart.
+          schema: {type: string}
+      responses:
+        '200':
+          description: Confirmed node snapshot; a stale published price is returned with `stale=true`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OracleState'
+        '400':
+          description: Invalid paging or block id.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ApiError'}
+        '404':
+          description: No configured feed with this id on the node's network.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ApiError'}
+        '409':
+          description: Chain tip changed; retry the snapshot or restart pagination.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ApiError'}
+        '503':
+          description: Node, index, oracle identity or supported pool state unavailable.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ApiError'}
   /sigmafi/orders:
     get:
       summary: List open orders
@@ -12279,7 +12358,7 @@ components:
     SFAssetLookup:
       type: object
       x-tags: sigmafi
-      required: [tokenId, bondAsset, verified, vault]
+      required: [tokenId, bondAsset, verified, vault, status]
       properties:
         tokenId:
           type: string
@@ -12296,6 +12375,124 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/SFVaultView'
+        status:
+          type: string
+          enum: [Open, Matured, Repaid, Liquidated, Unknown, Unverified]
+          description: >-
+            Confirmed indexed bond state. Repaid and Liquidated are established from the actual spend,
+            tagged payout and singleton burn, not inferred from maturity or absence in the live scan.
+            Unknown means the index or spend evidence is incomplete or the spend used a rent extension.
+        settlement:
+          $ref: '#/components/schemas/SFSettlement'
+        statusReason:
+          type: string
+          description: Why a verified asset's current settlement state could not be established.
+    SFBoxValue:
+      type: object
+      required: [boxId, nanoErgs, tokens]
+      properties:
+        boxId: {type: string}
+        nanoErgs: {type: string}
+        tokens:
+          type: array
+          items: {$ref: '#/components/schemas/SFTokenAmount'}
+    SFSettlement:
+      type: object
+      x-tags: sigmafi
+      required: [txId, height, bondBoxId, vault]
+      description: Historical confirmed settlement, available even after the vault output is claimed.
+      properties:
+        txId: {type: string}
+        height: {type: integer}
+        timestamp:
+          type: integer
+          format: int64
+          description: Confirmed block timestamp in milliseconds, when the index provides it.
+        bondBoxId: {type: string}
+        vault: {$ref: '#/components/schemas/SFVaultView'}
+        returnedCollateral: {$ref: '#/components/schemas/SFBoxValue'}
+        liquidationHash:
+          type: string
+          description: Authenticated liquidation expression hash; present for Liquidated, absent for Repaid.
+    OracleFeed:
+      type: object
+      x-tags: oracles
+      required: [id, name, network, protocol, poolNft, ergoTreeHash, baseAsset, quoteAsset, rawUnit, priceUnit, baseDecimals, maxAgeBlocks]
+      properties:
+        id: {type: string, example: erg-usd}
+        name: {type: string, example: USD v2}
+        network: {type: string, enum: [MAINNET, TESTNET]}
+        protocol: {type: string, example: oracle-pool-v2}
+        poolNft: {type: string}
+        ergoTreeHash:
+          type: string
+          description: Configured full ErgoTree blake2b256. Governance changes require review of this pin.
+        baseAsset: {type: string, example: ERG}
+        quoteAsset: {type: string, example: USD}
+        rawUnit: {type: string, example: nanoERG/USD}
+        priceUnit: {type: string, example: USD/ERG}
+        baseDecimals: {type: integer, example: 9}
+        maxAgeBlocks: {type: integer, example: 30}
+    OracleFeeds:
+      type: object
+      x-tags: oracles
+      required: [network, feeds]
+      properties:
+        network: {type: string}
+        feeds:
+          type: array
+          items: {$ref: '#/components/schemas/OracleFeed'}
+    OraclePoint:
+      type: object
+      x-tags: oracles
+      required: [boxId, transactionId, creationHeight, inclusionHeight, epoch, rawValue, price, priceNumerator, priceDenominator, ergoTreeHash]
+      properties:
+        boxId: {type: string}
+        transactionId: {type: string}
+        creationHeight:
+          type: integer
+          description: Height committed by the pool box; used to compute ageBlocks.
+        inclusionHeight: {type: integer}
+        epoch: {type: integer}
+        rawValue:
+          type: string
+          description: Exact positive R4 Long in the feed's rawUnit.
+        price:
+          type: string
+          description: Converted quote units per base unit, rounded to 18 decimal places.
+        priceNumerator: {type: string}
+        priceDenominator: {type: string}
+        ergoTreeHash: {type: string}
+        timestamp:
+          type: integer
+          format: int64
+          description: Inclusion block timestamp in milliseconds, omitted if unavailable.
+    OracleState:
+      type: object
+      x-tags: oracles
+      required: [feed, height, blockId, indexedHeight, current, ageBlocks, stale, history, offset, limit, timestampsComplete]
+      properties:
+        feed: {$ref: '#/components/schemas/OracleFeed'}
+        height: {type: integer}
+        blockId: {type: string}
+        indexedHeight: {type: integer}
+        current: {$ref: '#/components/schemas/OraclePoint'}
+        ageBlocks: {type: integer}
+        stale:
+          type: boolean
+          description: ageBlocks exceeds the configured maxAgeBlocks; no wall-clock freshness is implied.
+        history:
+          type: array
+          items: {$ref: '#/components/schemas/OraclePoint'}
+        offset: {type: integer}
+        limit: {type: integer}
+        total:
+          type: integer
+          description: Indexed NFT box count, including the bootstrap box; omitted with limit=0.
+        nextOffset:
+          type: integer
+          description: Next NFT-box offset, absent at the end or when history is omitted.
+        timestampsComplete: {type: boolean}
     SFOrderRequest:
       type: object
       x-tags: sigmafi

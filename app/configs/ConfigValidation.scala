@@ -495,6 +495,7 @@ object Configs {
             "here before running on mainnet")
     }
 
+    OracleConfig.validate(config)
     v.finish()
   }
 }

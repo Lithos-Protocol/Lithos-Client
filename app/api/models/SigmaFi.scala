@@ -81,7 +81,13 @@ case class SFAssetLookupRequest(tokenIds: Seq[String])
  * @param vault     what the vault holds for it
  */
 case class SFAssetLookup(tokenId: String, bondAsset: Boolean, verified: Boolean, verification: Option[String],
-                         bond: Option[SFBondView], vault: Seq[SFVaultView])
+                         bond: Option[SFBondView], vault: Seq[SFVaultView], status: String = "Unknown",
+                         settlement: Option[SFSettlement] = None, statusReason: Option[String] = None)
+
+/** Confirmed settlement evidence persists after the lender claims the vault output. */
+case class SFSettlement(txId: String, height: Int, timestamp: Option[Long], bondBoxId: String, vault: SFVaultView,
+                         returnedCollateral: Option[SFBoxValue], liquidationHash: Option[String])
+case class SFBoxValue(boxId: String, nanoErgs: String, tokens: Seq[SFTokenAmount])
 
 /** A new order: collateral locked now, for a loan a lender fills later. Exactly one of the maturity fields. */
 case class SFOrderRequest(collateralNanoErgs: String, collateralTokens: Option[Seq[SFTokenAmount]],
@@ -120,6 +126,8 @@ object SigmaFi {
   implicit lazy val sfHoldingFormat: Format[SFHolding] = Json.format[SFHolding]
   implicit lazy val sfPortfolioFormat: Format[SFPortfolio] = Json.format[SFPortfolio]
   implicit lazy val sfAssetLookupRequestFormat: Format[SFAssetLookupRequest] = Json.format[SFAssetLookupRequest]
+  implicit lazy val sfBoxValueFormat: Format[SFBoxValue] = Json.format[SFBoxValue]
+  implicit lazy val sfSettlementFormat: Format[SFSettlement] = Json.format[SFSettlement]
   implicit lazy val sfAssetLookupFormat: Format[SFAssetLookup] = Json.format[SFAssetLookup]
   implicit lazy val sfOrderRequestFormat: Format[SFOrderRequest] = Json.format[SFOrderRequest]
   implicit lazy val sfQuoteFormat: Format[SFQuote] = Json.format[SFQuote]
