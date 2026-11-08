@@ -6,17 +6,17 @@ import api.models.{SFAssetLookupRequest, SFOrderRequest, SFTokenAmount}
 import configs.NodeContext
 import mutations.NodeWallet
 import node.NodeApi
-import node.model.{IndexedBox, IndexedTransaction, MempoolOptions, NodeBox, Paging, SortDirection}
-import org.ergoplatform.appkit.{ErgoClient, NetworkType}
+import node.model.{IndexedBox, IndexedTransaction, MempoolOptions, NodeBox, NodeSpendingProof, Paging, SortDirection}
+import org.ergoplatform.appkit.{ErgoClient, ErgoValue, NetworkType}
 import org.mockito.ArgumentMatchers.{any, anyString}
-import org.mockito.Mockito.when
+import org.mockito.Mockito.{never, times, verify, when}
 import org.scalatest.propspec.AnyPropSpec
 import org.scalatestplus.mockito.MockitoSugar
 import sigmafi.contracts.{FixedMaturity, SigmaFiContracts}
 import support.FakeNodeContext
 import transactions.batching.sigmafi.{SigmaFiBoxes, SigmaFiFixtures, SigmaFiUserTransactions}
 import transactions.engine.wallet.EngineFunding
-import work.lithos.mutations.{InputUTXO, Token, UTXO}
+import work.lithos.mutations.{InputUTXO, Token, TxBuilder, UTXO}
 
 import scala.collection.JavaConverters._
 
@@ -65,7 +65,7 @@ class SigmaFiAPIExecutionSpec extends AnyPropSpec with SigmaFiFixtures with Mock
   property("create: quotes a valid order, paying its collateral and the fee") {
     val quote = new Fixture().execution.createOrder(request, send = false).left.get
     quote.paysNanoErgs shouldBe (5000000000L + SigmaFiAPIExecution.TxFee).toString
-    quote.terms.get.batchingFee shouldBe "50000000"
+    quote.terms.get.batchingFee shouldBe "0"
     quote.terms.get.liquidation shouldBe Some("MaturityLiquidation")
   }
 
@@ -82,7 +82,7 @@ class SigmaFiAPIExecutionSpec extends AnyPropSpec with SigmaFiFixtures with Mock
       e.createOrder(request.copy(maturityHeight = None, durationBlocks = Some(29)), send = false)
     an[LithosBadRequest] should be thrownBy e.createOrder(request.copy(durationBlocks = Some(720)), send = false)
     an[LithosBadRequest] should be thrownBy
-      e.createOrder(request.copy(maturityHeight = None, durationBlocks = Some(Int.MaxValue)), send = false)
+      e.createOrder(request.copy(maturityHeight = None, durationBlocks = Some(Long.MaxValue)), send = false)
     val token = SFTokenAmount(tokenA.toString, "5")
     an[LithosBadRequest] should be thrownBy e.createOrder(request.copy(principalNanoErgs = None,
       principalToken = Some(token), collateralTokens = Some(Seq(token))), send = false)
@@ -132,6 +132,8 @@ class SigmaFiAPIExecutionSpec extends AnyPropSpec with SigmaFiFixtures with Mock
       val quote = new Fixture(box).execution.repay(box.boxId, send = false).left.get
       quote.receivesTokens shouldBe Seq(SFTokenAmount(tokenB.toString, "7"))
       quote.terms.get.collateralTokens shouldBe quote.receivesTokens
+      quote.receivesNanoErgs shouldBe (box.value - 50000000L).toString
+      quote.terms.get.principalNanoErgs shouldBe Some(Erg.toString)
     }
   }
 
@@ -147,7 +149,26 @@ class SigmaFiAPIExecutionSpec extends AnyPropSpec with SigmaFiFixtures with Mock
       val quote = new Fixture(box).execution.fillOrder(box.boxId, send = false).left.get
       deposit should be > MinBox
       quote.receivesNanoErgs shouldBe deposit.toString
-      quote.paysNanoErgs shouldBe (terms.principalErg + deposit + SigmaFiAPIExecution.TxFee).toString
+      quote.paysNanoErgs shouldBe (terms.principalErg + deposit + SigmaFiAPIExecution.TxFee + 50000000L).toString
+    }
+  }
+
+  property("fill reserve overrides are lender-funded, support zero with a warning, and reject negative amounts") {
+    client.execute { ctx =>
+      val borrower = contractOf(miner(ctx))
+      val terms = orderTerms(borrower, FixedMaturity(tip + 100))
+      val box = nodeBox(ctx, UTXO(SigmaFiContracts.order(terms), MinBox, Seq.empty,
+        Seq(SigmaFiBoxes.hintValue(borrower.ergoTree))), 45)
+      val e = new Fixture(box).execution
+      val standard = e.fillOrder(box.boxId, send = false).left.get
+      val raised = e.fillOrder(box.boxId, send = false, Some("75000000")).left.get
+      raised.terms.get.batchingFee shouldBe "75000000"
+      BigInt(raised.paysNanoErgs) - BigInt(standard.paysNanoErgs) shouldBe 25000000L
+      val zero = e.fillOrder(box.boxId, send = false, Some("0")).left.get
+      zero.terms.get.batchingFee shouldBe "0"
+      zero.warnings should not be empty
+      an[LithosBadRequest] should be thrownBy e.fillOrder(box.boxId, send = false, Some("-1"))
+      an[LithosBadRequest] should be thrownBy e.fillOrder(box.boxId, send = false, Some(Long.MaxValue.toString))
     }
   }
 
@@ -190,7 +211,65 @@ class SigmaFiAPIExecutionSpec extends AnyPropSpec with SigmaFiFixtures with Mock
         val valid = variant == "valid" || variant == "delayed"
         result.verified shouldBe valid
         result.bondAsset shouldBe valid
+        verify(f.api, never()).unspentBoxesByTemplateHash(anyString(), any[Paging], any[SortDirection], any[MempoolOptions])
+        verify(f.api, never()).unspentBoxesByErgoTree(org.mockito.ArgumentMatchers.eq(SigmaFiContracts.ergBond.ergoTreeHex),
+          any[Paging], any[SortDirection], any[MempoolOptions])
       }
+    }
+  }
+
+  property("asset lookup shares one history read for a batch repayment and refreshes it on the next request") {
+    client.execute { ctx =>
+      def indexed(box: NodeBox) = IndexedBox(box, "", tip, 1L)
+      def outputs(tx: org.ergoplatform.appkit.SignedTransaction) = {
+        val id = transactions.candidate.BlockTxMessages.CandidateTx.txId(tx)
+        tx.getOutputsToSpend.asScala.zipWithIndex.map { case (b, n) =>
+          indexed(nodeBox(ctx, InputUTXO(b).toUTXO, n, id))
+        }.toVector
+      }
+      def transaction(id: String, inputs: Seq[IndexedBox], outs: Seq[IndexedBox]) =
+        IndexedTransaction(id, inputs, Seq.empty, outs, tip, 1, "block", 1700000000000L, 0, 1L, 1000)
+      val borrower = contractOf(miner(ctx))
+      val mints = (0 to 1).map { i =>
+        val terms = orderTerms(borrower, FixedMaturity(tip + 100))
+        val orderBox = nodeBox(ctx, UTXO(SigmaFiContracts.order(terms), 5 * Erg,
+          Seq(Token(tokenB, i + 7L))), i, "d2" * 32)
+        val order = SigmaFiBoxes.order(orderBox).get
+        val funding = UTXO(wallet.contract, 10 * Erg).toInput(ctx, assetId, (i + 200).toShort)
+        val fill = wallet.sign(SigmaFiUserTransactions.fillOrder(ctx, wallet, order,
+          SigmaFiBoxes.input(orderBox, ctx).get, None, borrower).build(Seq(funding)))
+        val outs = outputs(fill)
+        val id = transactions.candidate.BlockTxMessages.CandidateTx.txId(fill)
+        val genesis = indexed(orderBox).copy(spentTransactionId = Some(id), spendingHeight = Some(tip))
+        (genesis, transaction(id, Seq(genesis), outs), SigmaFiBoxes.bond(outs(1).box).get)
+      }
+      val bonds = mints.map(_._3)
+      val inputs = bonds.zipWithIndex.map { case (b, i) => SigmaFiBoxes.input(b.box, ctx).get
+        .withCtxVar(1.toByte, ErgoValue.of(i * 2)).withCtxVar(2.toByte, ErgoValue.of(i * 2 + 1)) }
+      val payouts = bonds.flatMap { b => Seq(
+        UTXO(SigmaFiContracts.vault, b.repayment + b.batchingFee, Seq.empty, Seq(
+          ErgoValue.of(org.ergoplatform.sdk.ErgoId.create(b.boxId).getBytes), ErgoValue.of(b.asset.getBytes), ErgoValue.of(0.toByte))),
+        UTXO(borrower, b.collateralErg, b.collateral.map(a => Token(org.ergoplatform.sdk.ErgoId.create(a.tokenId), a.amount)),
+          Seq(ErgoValue.of(org.ergoplatform.sdk.ErgoId.create(b.boxId).getBytes)))) }
+      val funding = UTXO(wallet.contract, 10 * Erg).toInput(ctx, assetId, 250)
+      val paid = wallet.sign(TxBuilder(ctx).setInputs(inputs :+ funding: _*).setOutputs(payouts: _*)
+        .buildTx(SigmaFiAPIExecution.TxFee, wallet.p2pk, bonds.map(b => Token(b.asset, 1L))))
+      val closeId = transactions.candidate.BlockTxMessages.CandidateTx.txId(paid)
+      val closed = bonds.zipWithIndex.map { case (b, i) => indexed(b.box).copy(spentTransactionId = Some(closeId),
+        spendingHeight = Some(tip), spendingProof = Some(NodeSpendingProof("", Map(
+          "1" -> ErgoValue.of(i * 2).toHex, "2" -> ErgoValue.of(i * 2 + 1).toHex)))) }
+      val history = mints.map(m => m._2.id -> m._2).toMap + (closeId -> transaction(closeId, closed, outputs(paid)))
+      val boxes = (mints.map(_._1) ++ closed).map(b => b.boxId -> b).toMap
+      val f = new Fixture()
+      when(f.api.indexedBoxById(anyString())).thenAnswer(i => Success(boxes.get(i.getArgument[String](0))))
+      when(f.api.indexedTransactionById(anyString())).thenAnswer(i => Success(history.get(i.getArgument[String](0))))
+      val request = SFAssetLookupRequest(bonds.map(_.asset.toString))
+      val result = f.execution.lookupAssets(request)
+      result.map(_.status) shouldBe Seq("Repaid", "Repaid")
+      result.foreach { asset => asset.verified shouldBe true; asset.bond shouldBe None }
+      verify(f.api, times(1)).indexedTransactionById(closeId)
+      f.execution.lookupAssets(request).map(_.status) shouldBe Seq("Repaid", "Repaid")
+      verify(f.api, times(2)).indexedTransactionById(closeId)
     }
   }
 }

@@ -21,11 +21,14 @@ import scala.util.Try
  * @param borrowerHash R5: blake2b256 of the tree the collateral returns to on repayment
  * @param repayment    R6(0): nanoERG, or token units for a token bond
  * @param batchingFee  R6(1): the most nanoERG a liquidator may keep
- * @param maturity     R7: repayment is open strictly below it
+ * @param maturity     R6(3): repayment is open strictly below it
  */
 final case class SigmaFiBond(box: NodeBox, repayToken: Option[ErgoId], asset: ErgoId, borrowerHash: Array[Byte],
-                             repayment: Long, batchingFee: Long, maturity: Int, liqScriptHash: Array[Byte]) {
+                             repayment: Long, batchingFee: Long, maturity: Long, liqScriptHash: Array[Byte],
+                             principalErg: Long, principalTokens: Seq[(ErgoId, Long)]) {
   def boxId: String = box.boxId
+
+  def collateralErg: Long = box.value - batchingFee
 
   def collateral: Seq[NodeAsset] = box.assets.drop(1)
 
@@ -46,7 +49,7 @@ final case class SigmaFiOrder(box: NodeBox, terms: ZCOrderTerms) {
  * @param bondId R4, the bond it settles, when R4 reads as bytes
  * @param asset  R5, the bond asset that claims it
  */
-final case class SigmaFiVaultBox(box: NodeBox, bondId: Option[String], asset: ErgoId) {
+final case class SigmaFiVaultBox(box: NodeBox, bondId: Option[String], asset: ErgoId, settlementPath: Option[Byte]) {
   def boxId: String = box.boxId
 }
 
@@ -59,7 +62,7 @@ object SigmaFiBoxes {
 
   private val BytesType = ErgoType.collType(ErgoType.byteType())
   private val LongsType = ErgoType.collType(ErgoType.longType())
-  private val IntType = ErgoType.integerType()
+  private val TokensType = ErgoType.collType(ErgoType.pairType(BytesType, ErgoType.longType()))
   private val TreesType = ErgoType.collType(ErgoType.collType(ErgoType.byteType()))
 
   /** Each template's root expression as hex, which every instance's tree ends with. */
@@ -84,10 +87,16 @@ object SigmaFiBoxes {
           asset <- bytes(box, 4).filter(b => b.length == 32 && Hex.toHexString(b).equalsIgnoreCase(singleton.tokenId))
           borrower <- bytes(box, 5).filter(_.length == 32)
           amounts <- register(box, 6, LongsType).collect { case c: sigma.Coll[Long @unchecked] => c.toArray }
-          if amounts.length == 2
-          maturity <- register(box, 7, IntType).collect { case v: Integer => v.intValue }
+          if amounts.length == 4 && amounts(0) > 0 && amounts(1) >= 0 &&
+            amounts(1) <= box.value - SigmaFiContracts.MinBox && amounts(2) >= SigmaFiContracts.MinBox && amounts(3) > 0
+          principal <- register(box, 7, TokensType).collect {
+            case c: sigma.Coll[(sigma.Coll[Byte], Long) @unchecked] => c.toArray.toSeq
+          }
+          if principal.forall { case (id, n) => id.length == 32 && n > 0 } &&
+            principal.map(_._1).distinct.size == principal.size
           liq <- bytes(box, 8).filter(_.length == 32)
-        } yield SigmaFiBond(box, token, new ErgoId(asset), borrower, amounts(0), amounts(1), maturity, liq)
+        } yield SigmaFiBond(box, token, new ErgoId(asset), borrower, amounts(0), amounts(1), amounts(3), liq,
+          amounts(2), principal.map { case (id, n) => new ErgoId(id.toArray) -> n })
       }.toOption.flatten
     }
   }
@@ -102,7 +111,8 @@ object SigmaFiBoxes {
     if (!box.ergoTree.equalsIgnoreCase(SigmaFiContracts.vault.ergoTreeHex)) None
     else Try {
       bytes(box, 5).filter(_.length == 32).map { asset =>
-        SigmaFiVaultBox(box, bytes(box, 4).map(Hex.toHexString), new ErgoId(asset))
+        SigmaFiVaultBox(box, bytes(box, 4).filter(_.length == 32).map(Hex.toHexString), new ErgoId(asset),
+          register(box, 6, ErgoType.byteType()).collect { case b: java.lang.Byte if b == 0 || b == 1 => b.byteValue })
       }
     }.toOption.flatten
 
@@ -153,14 +163,14 @@ object SigmaFiBoxes {
     val scheduleMatches = t.schedule match {
       case FixedMaturity(h) => b.maturity == h
       case OnClose(d) =>
-        val latest = spendingHeight.getOrElse(b.box.creationHeight).toLong + d
+        val latest = BigInt(spendingHeight.getOrElse(b.box.creationHeight)) + d
         d >= SigmaFiContracts.MinOnCloseDuration && b.maturity.toLong <= latest &&
           b.maturity.toLong >= latest - SigmaFiContracts.OnCloseAllowance
     }
     hashOf(parse(b.box.ergoTree).get).sameElements(t.bondHash) &&
       b.borrowerHash.sameElements(t.borrowerHash) && b.repayment == t.repayment &&
-      b.batchingFee == t.batchingFee && b.liqScriptHash.sameElements(t.liqScriptHash) &&
-      b.box.value >= o.box.value && b.collateral == o.box.assets && scheduleMatches
+      b.principalErg == t.principalErg && b.principalTokens == t.principalTokens && b.liqScriptHash.sameElements(t.liqScriptHash) &&
+      b.box.value >= o.box.value && b.box.value - o.box.value >= b.batchingFee && b.collateral == o.box.assets && scheduleMatches
   }
 
   /** `box` rebuilt for spending, or None when its id does not come back the same. */

@@ -9,19 +9,18 @@ case class SFTokenAmount(tokenId: String, amount: String)
  * A bond's terms, as an order states them and the bond then carries.
  *
  * @param kind              the bond's kind: "zero-coupon" for every SigmaFi V2 bond today
- * @param principalNanoErgs nanoERG lent; for a token loan, only the principal box's floor. Absent for a bond whose
- *                          order this client could not read
+ * @param principalNanoErgs agreed nanoERG lent; for a token loan, the principal box's floor, read directly from the bond
  * @param principalToken    the token lent, absent for an ERG loan
  * @param repayment         what the borrower pays back: nanoERG, or base units of `repayToken`
  * @param repayToken        the token a token loan is repaid in, absent when repaid in ERG
  * @param maturityHeight    repayment is open strictly below it; absent for an on-close order until it is filled
  * @param durationBlocks    an on-close order's term, counted from its fill
- * @param batchingFee       the most of the collateral's nanoERG a liquidator keeps if the bond is not repaid
+ * @param batchingFee       lender-funded reserve; zero on an unfilled order, selected on fill
  * @param liquidation       the liquidation script's name, absent when this client does not know it
  */
 case class SFTerms(kind: String, principalNanoErgs: Option[String], principalToken: Option[SFTokenAmount], repayment: String,
                    repayToken: Option[String], collateralNanoErgs: String, collateralTokens: Seq[SFTokenAmount],
-                   maturityHeight: Option[Int], durationBlocks: Option[Int], batchingFee: String,
+                   maturityHeight: Option[Long], durationBlocks: Option[Long], batchingFee: String,
                    liquidation: Option[String], liquidationHash: String)
 
 /**
@@ -44,7 +43,7 @@ case class SFOrderView(boxId: String, terms: SFTerms, borrower: Option[String], 
  * @param blocksLeft   blocks before repayment closes, 0 once matured
  */
 case class SFBondView(boxId: String, assetId: String, terms: SFTerms, verified: Boolean, verification: Option[String],
-                      status: String, blocksLeft: Int, borrowerIsMe: Boolean, creationHeight: Int)
+                      status: String, blocksLeft: Long, borrowerIsMe: Boolean, creationHeight: Int)
 
 case class SFOrderBook(height: Int, orders: Seq[SFOrderView], total: Int, truncated: Boolean)
 case class SFBondList(height: Int, bonds: Seq[SFBondView], total: Int, unverified: Int, truncated: Boolean)
@@ -90,9 +89,11 @@ case class SFSettlement(txId: String, height: Int, timestamp: Option[Long], bond
 case class SFBoxValue(boxId: String, nanoErgs: String, tokens: Seq[SFTokenAmount])
 
 /** A new order: collateral locked now, for a loan a lender fills later. Exactly one of the maturity fields. */
+case class SFFillRequest(batchingFee: Option[String])
+
 case class SFOrderRequest(collateralNanoErgs: String, collateralTokens: Option[Seq[SFTokenAmount]],
                           principalNanoErgs: Option[String], principalToken: Option[SFTokenAmount], repayment: String,
-                          maturityHeight: Option[Int], durationBlocks: Option[Int], batchingFee: Option[String],
+                          maturityHeight: Option[Long], durationBlocks: Option[Long], batchingFee: Option[String],
                           liquidation: Option[String])
 
 /**
@@ -129,6 +130,7 @@ object SigmaFi {
   implicit lazy val sfBoxValueFormat: Format[SFBoxValue] = Json.format[SFBoxValue]
   implicit lazy val sfSettlementFormat: Format[SFSettlement] = Json.format[SFSettlement]
   implicit lazy val sfAssetLookupFormat: Format[SFAssetLookup] = Json.format[SFAssetLookup]
+  implicit lazy val sfFillRequestFormat: Format[SFFillRequest] = Json.format[SFFillRequest]
   implicit lazy val sfOrderRequestFormat: Format[SFOrderRequest] = Json.format[SFOrderRequest]
   implicit lazy val sfQuoteFormat: Format[SFQuote] = Json.format[SFQuote]
   implicit lazy val sfResultFormat: Format[SFResult] = Json.format[SFResult]

@@ -29,7 +29,7 @@ trait SigmaFiApi {
   def cancelOrder(boxId: String, send: Boolean): Either[SFQuote, SFResult]
 
   /** POST /sigmafi/orders/:boxId/fill[/check] */
-  def fillOrder(boxId: String, send: Boolean): Either[SFQuote, SFResult]
+  def fillOrder(boxId: String, send: Boolean, reserve: Option[String] = None): Either[SFQuote, SFResult]
 
   /** POST /sigmafi/bonds/:boxId/repay[/check] */
   def repay(boxId: String, send: Boolean): Either[SFQuote, SFResult]

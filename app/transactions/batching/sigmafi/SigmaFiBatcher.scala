@@ -84,7 +84,7 @@ class SigmaFiBatcher(nodeContext: NodeContext,
   /** One liquidation of the due bonds for this miner's block, superseding every pending spend of them. */
   override protected def executions(orders: Tracked, blockHeight: Int, slots: Int,
                                     deadline: Deadline): Seq[CandidateBundle] =
-    if (orders.isEmpty) Seq.empty
+    if (orders.isEmpty || slots <= 0) Seq.empty
     else {
       val observed = observation(Some(deadline))
       if (!observed.fresh) {
@@ -96,9 +96,9 @@ class SigmaFiBatcher(nodeContext: NodeContext,
         val due = liveBonds(ctx, orders).filter { case (b, _) => liquidatable(b, blockHeight, settings.minBatchingFeeNanoErg) }
           .take(batching.maxOrdersPerBlock)
         within(deadline, "reading tracked bonds")
-        build(ctx, due, CandidateCapital.collectionContract(nodeContext.getNodeWallet, useTrueProp), 0L, blockHeight)
+        build(ctx, due, CandidateCapital.collectionContract(nodeContext.getNodeWallet, useTrueProp), 0L, blockHeight,
+          slots, Some(deadline))
           .map(l => l.bundle(BatchingMempool.competitors(spenders, l.bonds.map(_.boxId))))
-          .toSeq
       }
     }
 
@@ -121,14 +121,15 @@ class SigmaFiBatcher(nodeContext: NodeContext,
         }.take(batching.maxOrdersPerBlock)
         val wallet = nodeContext.getNodeWallet.contract
         val sender = broadcaster()
-        build(ctx, due, wallet, Parameters.MinFee, height).fold(BroadcastResult(Map.empty)) { batch =>
-          if (sent(sender, batch, observed)) BroadcastResult(Map.empty)
-          else if (batch.bonds.size == 1) BroadcastResult(Map(batch.bonds.head.boxId -> batch.bonds.head.boxId))
-          else BroadcastResult(due.flatMap { single =>
+        val refusedBonds = build(ctx, due, wallet, Parameters.MinFee, height).flatMap { batch =>
+          if (sent(sender, batch, observed)) Seq.empty
+          else if (batch.bonds.size == 1) Seq(batch.bonds.head.boxId -> batch.bonds.head.boxId)
+          else due.filter(b => batch.bonds.exists(_.boxId == b._1.boxId)).flatMap { single =>
             build(ctx, Seq(single), wallet, Parameters.MinFee, height)
               .filterNot(one => sent(sender, one, observed)).map(_ => single._1.boxId -> single._1.boxId)
-          }.toMap)
-        }
+          }
+        }.toMap
+        BroadcastResult(refusedBonds)
       }
     }
 
@@ -148,28 +149,28 @@ class SigmaFiBatcher(nodeContext: NodeContext,
     }
 
   /**
-   * One liquidation of `bonds`, or None. When the batch does not sign, each bond is tried alone and those that
-   * fail are left out until `skippedOrderTtlMs` passes, so one bad bond never blocks the rest.
+   * Split a batch that cannot sign into smaller batches, preserving valid bonds when the combined
+   * transaction exceeds a cost or size limit. Only an individual failing bond is temporarily skipped.
    */
   private def build(ctx: BlockchainContext, bonds: Seq[(SigmaFiBond, InputUTXO)], feeTo: work.lithos.mutations.Contract,
-                    minerFee: Long, height: Int): Option[SigmaFiLiquidation] =
-    if (bonds.isEmpty) None
-    else Try(SigmaFiTransactions.liquidate(ctx, nodeContext.getNodeWallet, bonds, feeTo, minerFee, height)) match {
-      case Success(batch) => Some(batch)
-      case Failure(ex) =>
-        val buildable = bonds.filter { single =>
-          val ok = Try(SigmaFiTransactions.liquidate(ctx, nodeContext.getNodeWallet, Seq(single), feeTo, minerFee, height))
-          ok.failed.foreach { e =>
-            logger.warn(s"Could not liquidate SigmaFi bond ${single._1.boxId} at $height, leaving it out: ${e.getMessage}")
-            skipOrder(single._1.boxId)
-          }
-          ok.isSuccess
-        }
-        if (buildable.size == bonds.size) {
-          logger.warn(s"SigmaFi liquidation of ${bonds.size} bonds failed though each builds alone: ${ex.getMessage}")
-          None
-        } else build(ctx, buildable, feeTo, minerFee, height)
+                    minerFee: Long, height: Int, slots: Int = Int.MaxValue,
+                    deadline: Option[Deadline] = None): Vector[SigmaFiLiquidation] = {
+    if (bonds.isEmpty || slots <= 0) Vector.empty
+    else {
+      deadline.foreach(within(_, "building SigmaFi liquidations"))
+      Try(SigmaFiTransactions.liquidate(ctx, nodeContext.getNodeWallet, bonds, feeTo, minerFee, height)) match {
+        case Success(batch) => Vector(batch)
+        case Failure(ex) if bonds.size == 1 =>
+          logger.warn(s"Could not liquidate SigmaFi bond ${bonds.head._1.boxId} at $height: ${ex.getMessage}")
+          skipOrder(bonds.head._1.boxId)
+          Vector.empty
+        case Failure(_) =>
+          val (left, right) = bonds.splitAt(bonds.size / 2)
+          val built = build(ctx, left, feeTo, minerFee, height, slots, deadline)
+          built ++ build(ctx, right, feeTo, minerFee, height, slots - built.size, deadline)
       }
+    }
+  }
 
   /**
    * Tracked bonds still unspent on chain, oldest maturity first. A bond a mempool transaction spends is read

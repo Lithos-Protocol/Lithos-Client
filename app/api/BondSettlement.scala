@@ -12,18 +12,23 @@ import scala.util.Try
 
 /** Classifies the actual confirmed spend path; maturity and an empty live scan do not prove settlement. */
 object BondSettlement {
-  final case class State(status: String, settlement: Option[SFSettlement] = None, reason: Option[String] = None)
+  final case class State(status: String, settlement: Option[SFSettlement] = None, reason: Option[String] = None,
+                         liveBond: Option[SigmaFiBond] = None)
   private def unknown(reason: String): State = State("Unknown", reason = Some(reason))
 
-  def read(api: NodeApi, bondId: String, assetId: String, height: Int): State = {
+  def read(api: NodeApi, bondId: String, assetId: String, height: Int): State =
+    read(api, bondId, assetId, height, id => api.indexedTransactionById(id))
+
+  def read(api: NodeApi, bondId: String, assetId: String, height: Int,
+           readTransaction: String => Try[Option[IndexedTransaction]]): State = {
     val result = for {
       indexed <- api.indexedBoxById(bondId)
       state <- Try(indexed match {
         case Some(box) if box.boxId == bondId =>
           SigmaFiBoxes.bond(box.box).filter(_.asset.toString == assetId) match {
             case Some(bond) => box.spentTransactionId match {
-              case None => State(if (height.toLong + 1 >= bond.maturity) "Matured" else "Open")
-              case Some(txId) => api.indexedTransactionById(txId).get match {
+              case None => State(if (height.toLong + 1 >= bond.maturity) "Matured" else "Open", liveBond = Some(bond))
+              case Some(txId) => readTransaction(txId).get match {
                 case Some(tx) if tx.id == txId && tx.inclusionHeight <= height => classify(bond, box, tx)
                 case _ => unknown("the node has not returned the bond's settlement transaction")
               }
@@ -39,12 +44,17 @@ object BondSettlement {
   private def classify(bond: SigmaFiBond, indexed: IndexedBox, tx: IndexedTransaction): State = {
     val position = tx.inputs.indexWhere(_.boxId == bond.boxId)
     val proof = tx.inputs.lift(position).flatMap(_.spendingProof).orElse(indexed.spendingProof)
-    val settlement = tx.outputs.lift(position).flatMap(b => SigmaFiBoxes.vault(b.box))
+    val extension = proof.map(_.extension).getOrElse(Map.empty)
+    def outputIndex(variable: String): Option[Int] = extension.get(variable).flatMap { hex =>
+      Try(ErgoValue.fromHex(hex)).toOption.filter(_.getType == ErgoType.integerType())
+        .map(_.getValue.asInstanceOf[Integer].intValue).filter(_ >= 0)
+    }
+    val settlementIndex = outputIndex("1")
+    val settlement = settlementIndex.flatMap(tx.outputs.lift).flatMap(b => SigmaFiBoxes.vault(b.box))
       .filter(v => v.bondId.contains(bond.boxId) && v.asset == bond.asset)
     if (position < 0 || tx.inclusionHeight <= 0 || proof.isEmpty || settlement.isEmpty ||
       tx.outputs.exists(_.assets.exists(_.tokenId == bond.asset.toString)))
       return unknown("the indexed spend does not establish a tagged vault settlement and singleton burn")
-    val extension = proof.get.extension
     // Rent can bypass a guard; do not label that path as a contractual repayment or liquidation.
     if (extension.contains("127")) return unknown("the bond spend carries a storage-rent extension")
     val vault = settlement.get
@@ -55,22 +65,23 @@ object BondSettlement {
         .map(_.getValue.asInstanceOf[sigma.Coll[Byte]].toArray)
     }.exists(bytes => Blake2b256.hash(bytes).sameElements(bond.liqScriptHash))
     if (expression.isDefined) {
-      if (!authenticated) unknown("the liquidation expression does not match the bond's agreed hash")
+      if (!authenticated || !vault.settlementPath.contains(1.toByte))
+        unknown("the liquidation expression or settlement marker does not match the bond's agreed path")
       else State("Liquidated", Some(SFSettlement(tx.id, tx.inclusionHeight, Some(tx.timestamp).filter(_ > 0), bond.boxId, payout,
         None, Some(Hex.toHexString(bond.liqScriptHash)))))
     } else {
-      val returned = tx.outputs.lift(position + 1).map(_.box).filter { box =>
+      val returned = outputIndex("2").filterNot(i => settlementIndex.contains(i)).flatMap(tx.outputs.lift).map(_.box).filter { box =>
         SigmaFiBoxes.parse(box.ergoTree).exists(t => SigmaFiBoxes.hashOf(t).sameElements(bond.borrowerHash)) &&
-          box.value >= bond.box.value && box.assets == bond.collateral &&
+          box.value >= bond.collateralErg && box.assets == bond.collateral &&
           box.additionalRegisters.get(4).exists(hex => Try(ErgoValue.fromHex(hex)).toOption.exists(v =>
             v.getType == ErgoType.collType(ErgoType.byteType()) &&
               v.getValue.asInstanceOf[sigma.Coll[Byte]].toArray.sameElements(Hex.decode(bond.boxId))))
       }
-      val paid = bond.repayToken.fold(vault.box.value >= bond.repayment) { token =>
-        vault.box.value >= 1000000L && vault.box.assets.size == 1 &&
+      val paid = vault.box.value >= bond.batchingFee && bond.repayToken.fold(vault.box.value - bond.batchingFee >= bond.repayment) { token =>
+        vault.box.value - bond.batchingFee >= 1000000L && vault.box.assets.size == 1 &&
           vault.box.assets.head.tokenId == token.toString && vault.box.assets.head.amount >= bond.repayment
       }
-      if (tx.inclusionHeight >= bond.maturity || !paid || returned.isEmpty)
+      if (!vault.settlementPath.contains(0.toByte) || tx.inclusionHeight >= bond.maturity || !paid || returned.isEmpty)
         unknown("the indexed spend does not establish a full repayment and collateral return")
       else State("Repaid", Some(SFSettlement(tx.id, tx.inclusionHeight, Some(tx.timestamp).filter(_ > 0), bond.boxId, payout,
         returned.map(b => SFBoxValue(b.boxId, b.value.toString, tokens(b))), None)))

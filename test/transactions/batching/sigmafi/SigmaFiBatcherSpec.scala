@@ -7,10 +7,10 @@ import configs.{NodeContext, SigmaFiBatchingConfig}
 import mutations.NodeWallet
 import node.NodeApi
 import node.model._
-import org.ergoplatform.appkit.{ErgoClient, NetworkType}
+import org.ergoplatform.appkit.{ErgoClient, NetworkType, UnsignedTransaction}
 import org.ergoplatform.sdk.ErgoId
 import org.mockito.ArgumentMatchers.{any, anyString}
-import org.mockito.Mockito.{never, timeout, verify, when}
+import org.mockito.Mockito.{doAnswer, never, spy, timeout, verify, when}
 import org.scalatest.flatspec.AnyFlatSpecLike
 import org.scalatest.{BeforeAndAfterAll, LoneElement}
 import org.scalatestplus.mockito.MockitoSugar
@@ -45,10 +45,15 @@ class SigmaFiBatcherSpec extends TestKit(ActorSystem("sigmafi-batcher-spec", Sig
   private val anchor = "cc" * 32
   private val pendingTx = "77" * 32
 
-  private class Fixture(broadcast: Boolean = false) {
+  private class Fixture(broadcast: Boolean = false, maxInputs: Int = Int.MaxValue) {
     val api: NodeApi = mock[NodeApi]
     val client: ErgoClient = FakeNodeContext.offlineClient()
-    val wallet: NodeWallet = NodeWallet(FakeNodeContext.proverWith(client, 1))
+    private val prover = spy(FakeNodeContext.proverWith(client, 1))
+    doAnswer { invocation: org.mockito.invocation.InvocationOnMock =>
+      require(invocation.getArgument[UnsignedTransaction](0).getInputs.size <= maxInputs, "batch cost limit")
+      invocation.callRealMethod()
+    }.when(prover).sign(any[UnsignedTransaction])
+    val wallet: NodeWallet = NodeWallet(prover)
     val tip: Int = client.execute(_.getHeight)
     val nodeContext: NodeContext = new NodeContext {
       override def getNetwork: NetworkType = NetworkType.MAINNET
@@ -129,11 +134,15 @@ class SigmaFiBatcherSpec extends TestKit(ActorSystem("sigmafi-batcher-spec", Sig
       servesCandidates = true, engine.ref, useTrueProp = false)))
 
     /** What this miner's block for the tip's successor is offered, once a scan has tracked the due bonds. */
-    def offered(): CandidateBundle = awaitAssert({
+    def offeredBatches(slots: Int = 10): Seq[CandidateBundle] = awaitAssert({
       val requester = TestProbe()
-      requester.send(batcher, RequestBlockTxs(tip + 1, 10, refresh = true))
-      requester.expectMsgType[BlockTxsReady].bundles.loneElement
+      requester.send(batcher, RequestBlockTxs(tip + 1, slots, refresh = true))
+      val bundles = requester.expectMsgType[BlockTxsReady].bundles
+      bundles should not be empty
+      bundles
     }, 30.seconds, 250.millis)
+
+    def offered(): CandidateBundle = offeredBatches().loneElement
 
     def stop(): Unit = system.stop(batcher)
   }
@@ -176,6 +185,18 @@ class SigmaFiBatcherSpec extends TestKit(ActorSystem("sigmafi-batcher-spec", Sig
     val f = new Fixture()
     f.offered()
     verify(f.api, never()).sendTransaction(anyString())
+    f.stop()
+  }
+
+  it should "split a combined build that exceeds the signing limit while retaining every valid bond" in {
+    val f = new Fixture(maxInputs = 2)
+    val bundles = f.offeredBatches()
+    bundles should have size 2
+    val inputs = bundles.flatMap(_.members.flatMap(_.inputIds))
+    inputs.toSet shouldBe Set(f.pastWindow, f.inWindow, f.tokenBond, f.pending).map(_.boxId)
+    inputs.distinct.size shouldBe inputs.size
+    bundles.map(_.capital.loneElement.value).sum shouldBe 4 * 50000000L
+    f.offeredBatches(slots = 1) should have size 1
     f.stop()
   }
 }

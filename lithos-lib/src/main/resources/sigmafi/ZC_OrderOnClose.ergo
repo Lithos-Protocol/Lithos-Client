@@ -14,22 +14,21 @@
     // CONST_PRINCIPAL_ERG:    Long       - the least nanoERG the principal box may hold
     // CONST_PRINCIPAL_TOKENS: Coll[(Coll[Byte], Long)] - the principal box's tokens, exactly
     // CONST_REPAYMENT:        Long       - bond R6(0)
-    // CONST_BATCHING_FEE:     Long       - bond R6(1)
-    // CONST_DURATION:         Int        - blocks from the fill to the bond's maturity, at least 30
+    // CONST_DURATION:         Long        - blocks from the fill to the bond's maturity, at least 30
     // CONST_LIQ_SCRIPT_HASH:  Coll[Byte] - bond R8
     //
     // PATHS
     // Fill (SELF at INPUTS(0), the only input that can mint; asset supply exactly 2):
     //   OUTPUTS(0) lender's unit: (asset, 1) at tokens(0), anywhere the lender likes. It is the first output
     //              carrying the new token, so its R4-R6 are the asset's EIP-4 name, description, decimals.
-    //   OUTPUTS(1) bond: (asset, 1), then SELF.tokens unchanged, value >= SELF.value. Every register is
-    //              pinned; R7 is within 8 blocks below HEIGHT + CONST_DURATION.
+    //   OUTPUTS(1) bond: (asset, 1), then SELF.tokens unchanged, value >= SELF.value + lender fee reserve. Every register is
+    //              pinned; R6(3) is within 8 blocks below HEIGHT + CONST_DURATION.
     //   OUTPUTS(2) principal: to the borrower.
     // Cancel: nothing is minted, and the borrower spends a box guarded by CONST_BORROWER_HASH alongside.
     //
     // MATURITY
-    // The lender stamps R7 as (build height + duration) and the transaction may reach a block a little later,
-    // so R7 may trail HEIGHT + CONST_DURATION by up to 8 blocks. A fill still unconfirmed after that is invalid
+    // The lender stamps R6(3) as (build height + duration) and the transaction may reach a block a little later,
+    // so R6(3) may trail HEIGHT + CONST_DURATION by up to 8 blocks. A fill still unconfirmed after that is invalid
     // and must be rebuilt. The lender profits from an earlier maturity, so the borrower may lose up to 8 blocks
     // of the term, as in V1.
     //
@@ -37,7 +36,12 @@
     // - One order fills per transaction, since only INPUTS(0) can mint.
     // - The lender builds the fill, so where the lender's unit goes and its metadata are the lender's choice.
     //   A unit sent into the vault would let anyone claim that vault box: the lender must not do that.
-    // - The batching fee is the borrower's term, and the lender reads it before filling.
+    // - The lender chooses a nonnegative nanoERG fee via context var 0: Long on this order input.
+    //   It must be funded on top of the entire order value; borrower collateral cannot pay it.
+    //   The bond refunds the unused reserve into the lender's vault on repayment.
+    // - R6 is (repayment, fee reserve, agreed principal nanoERG, maturity height), all Long.
+    //   R7 is the agreed principal token list, not extra tokens held by the bond.
+    //   Principal data is pinned to the order terms, not inflated by accidental overpayment.
     // - The bond and the principal are not checked against each other. A token order whose bond repays in
     //   another token is the borrower's own mistake; the client must build them as a pair.
     // - The cancel authenticates the borrower by co-spend, as a P2PK borrower's box needs their signature.
@@ -64,6 +68,7 @@
         val bondBox      = OUTPUTS(1)
         val principalBox = OUTPUTS(2)
         val bondAmounts  = bondBox.R6[Coll[Long]].get
+        val batchingFee  = getVar[Long](0).get
 
         val verifiedMint =
             SELF.id == INPUTS(0).id &&
@@ -78,14 +83,18 @@
             bondBox.tokens(0)._1 == SELF.id &&
             bondBox.tokens(0)._2 == 1L &&
             bondBox.tokens.slice(1, bondBox.tokens.size) == SELF.tokens &&
-            bondBox.value >= SELF.value
+            bondBox.value >= SELF.value &&
+            batchingFee >= 0L &&
+            bondBox.value - SELF.value >= batchingFee
 
         val validTerms =
             bondBox.R4[Coll[Byte]].get == SELF.id &&
             bondBox.R5[Coll[Byte]].get == CONST_BORROWER_HASH &&
-            bondAmounts.size == 2 &&
+            bondAmounts.size == 4 &&
             bondAmounts(0) == CONST_REPAYMENT &&
-            bondAmounts(1) == CONST_BATCHING_FEE &&
+            bondAmounts(1) == batchingFee &&
+            bondAmounts(2) == CONST_PRINCIPAL_ERG &&
+            bondBox.R7[Coll[(Coll[Byte], Long)]].get == CONST_PRINCIPAL_TOKENS &&
             bondBox.R8[Coll[Byte]].get == CONST_LIQ_SCRIPT_HASH
 
         // Read off the bond, not the constants, so the compiler cannot fold this and change the template
@@ -95,17 +104,18 @@
 
         // Every term here involves HEIGHT. `CONST_DURATION >= 30` on its own would be folded when the
         // template is compiled, and every order stamped from it would skip the check.
-        val bondMaturity   = bondBox.R7[Int].get
-        val targetMaturity = HEIGHT + CONST_DURATION
+        val bondMaturity   = bondAmounts(3)
+        val targetMaturity = HEIGHT.toLong + CONST_DURATION
         val maturityOnClose =
-            targetMaturity - HEIGHT >= 30 &&
+            targetMaturity >= HEIGHT.toLong + 30L &&
+            targetMaturity - HEIGHT.toLong >= 30L &&
             bondMaturity <= targetMaturity &&
             bondMaturity >= targetMaturity - 8
 
         val principalPaid =
             blake2b256(principalBox.propositionBytes) == CONST_BORROWER_HASH &&
-            principalBox.value >= CONST_PRINCIPAL_ERG &&
-            principalBox.tokens == CONST_PRINCIPAL_TOKENS
+            principalBox.value >= bondAmounts(2) &&
+            principalBox.tokens == bondBox.R7[Coll[(Coll[Byte], Long)]].get
 
         sigmaProp(verifiedMint && validBond && validTerms && feeBounded && maturityOnClose && principalPaid)
     } else {

@@ -67,19 +67,23 @@ class SigmaFiUserTransactionsSpec extends AnyPropSpec with SigmaFiFixtures {
       text(6) shouldBe "0"
       (bond.asset, bond.maturity, bond.repayment) shouldBe ((asset, maturity, terms.repayment))
       bond.collateral shouldBe Seq(NodeAsset(tokenB.toString, 7L))
+      bond.principalErg shouldBe terms.principalErg
+      bond.principalTokens shouldBe terms.principalTokens
+      bond.box.value shouldBe order.box.value + bond.batchingFee
+      bond.collateralErg shouldBe order.box.value
       out(filled, 2).value shouldBe terms.principalErg
 
       val repaid = sign(ctx, SigmaFiUserTransactions.repay(ctx, wallet, bond, input(ctx, bond.box), wallet.contract),
         funds(ctx, 10 * Erg))
       val vault = SigmaFiBoxes.vault(out(repaid, 0)).get
-      (vault.asset, vault.box.value) shouldBe ((asset, terms.repayment))
+      (vault.asset, vault.box.value) shouldBe ((asset, terms.repayment + bond.batchingFee))
       out(repaid, 1).assets shouldBe Seq(NodeAsset(tokenB.toString, 7L))
       repaid.getOutputsToSpend.asScala.flatMap(_.getTokens.asScala).map(_.getId) should not contain asset
 
       val claimed = sign(ctx, SigmaFiUserTransactions.claim(ctx, wallet, asset, Seq(input(ctx, vault.box))),
         input(ctx, unit), funds(ctx, Erg))
       claimed.getOutputsToSpend.asScala.flatMap(_.getTokens.asScala).map(_.getId) should not contain asset
-      claimed.getOutputsToSpend.asScala.head.getValue.toLong shouldBe terms.repayment
+      claimed.getOutputsToSpend.asScala.head.getValue.toLong shouldBe terms.repayment + bond.batchingFee
     }
   }
 
@@ -97,7 +101,7 @@ class SigmaFiUserTransactionsSpec extends AnyPropSpec with SigmaFiFixtures {
         val unit = input(ctx, out(filled, 0))
         val bond = SigmaFiBoxes.bond(out(filled, 1)).get
         val liquidated = SigmaFiTransactions.liquidate(ctx, wallet, Seq(bond -> input(ctx, bond.box)),
-          wallet.contract, SigmaFiUserTransactions.TxFee, bond.maturity)
+          wallet.contract, SigmaFiUserTransactions.TxFee, Math.toIntExact(bond.maturity))
         val settlement = out(liquidated.signed, 0)
         settlement.assets shouldBe Seq(NodeAsset(tokenB.toString, 9L))
         liquidated.signed.getOutputsToSpend.asScala.flatMap(_.getTokens.asScala).map(_.getId) should not contain bond.asset
@@ -113,11 +117,14 @@ class SigmaFiUserTransactionsSpec extends AnyPropSpec with SigmaFiFixtures {
     client.execute { ctx =>
       val terms = orderTerms(wallet.contract, FixedMaturity(ctx.getHeight + 100))
       val orderBox = UTXO(SigmaFiContracts.order(terms), 5 * Erg).toInput(ctx, ErgoId.create("e8" * 32), 0)
+        .withCtxVar(0.toByte, ErgoValue.of(50000000L))
       val asset = orderBox.id
       val lender = UTXO(wallet.contract, MinBox, Seq(Token(asset, 1L)))
-      val bond = bondUTXO(None, wallet.contract, ctx.getHeight + 100, asset = asset)
+      val bond = bondUTXO(None, wallet.contract, ctx.getHeight + 100, value = 5 * Erg + 50000000L, asset = asset)
       val principal = UTXO(wallet.contract, Erg)
       val funding = funds(ctx, 10 * Erg)
+      noException should be thrownBy wallet.sign(TxBuilder(ctx).setInputs(orderBox, funding)
+        .setOutputs(lender, bond, principal).buildTx(SigmaFiUserTransactions.TxFee, wallet.p2pk))
       val malformed = Seq(
         Seq(lender, bond.copy(tokens = Seq.empty), principal),
         Seq(lender.copy(tokens = Seq(Token(asset, 2L))), bond, principal),
@@ -226,6 +233,32 @@ class SigmaFiUserTransactionsSpec extends AnyPropSpec with SigmaFiFixtures {
       unit.getValue.toLong should be > MinBox
       unit.getValue.toLong should be >= unit.getBytes.length.toLong * ctx.getDataSource.getParameters.getMinValuePerByte
       SigmaFiBoxes.bond(out(filled, 1)).get.collateral.size shouldBe 32
+    }
+  }
+
+  property("fills preserve Long schedules, principal token data and an independently selected reserve") {
+    client.execute { ctx =>
+      Seq(FixedMaturity(Int.MaxValue.toLong + 100), OnClose(Int.MaxValue.toLong + 200)).foreach { schedule =>
+        val terms = orderTerms(wallet.contract, schedule, principalErg = MinBox,
+          principalTokens = Seq(tokenA -> 500L), repayment = 550L)
+        val created = sign(ctx, SigmaFiUserTransactions.createOrder(ctx, wallet, terms, MinBox, Seq(Token(tokenB, 3L))),
+          funds(ctx, Erg, Token(tokenB, 3L)))
+        val order = SigmaFiBoxes.order(out(created, 0)).get
+        val reserve = 75000000L
+        val filled = sign(ctx, SigmaFiUserTransactions.fillOrder(ctx, wallet, order, input(ctx, order.box),
+          Some(tokenA), wallet.contract, reserve), funds(ctx, Erg, Token(tokenA, 500L)))
+        val bond = SigmaFiBoxes.bond(out(filled, 1)).get
+        bond.maturity should be > Int.MaxValue.toLong
+        bond.principalTokens shouldBe terms.principalTokens
+        bond.principalErg shouldBe MinBox
+        bond.collateralErg shouldBe MinBox
+        bond.batchingFee shouldBe reserve
+        val repaid = sign(ctx, SigmaFiUserTransactions.repay(ctx, wallet, bond, input(ctx, bond.box), wallet.contract),
+          funds(ctx, Erg, Token(tokenA, 550L)))
+        out(repaid, 0).value shouldBe MinBox + reserve
+        out(repaid, 1).value shouldBe MinBox
+        out(repaid, 1).assets shouldBe Seq(NodeAsset(tokenB.toString, 3L))
+      }
     }
   }
 }

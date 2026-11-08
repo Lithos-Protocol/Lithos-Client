@@ -4,8 +4,8 @@
     // REGISTERS
     // R4: Coll[Byte] - originating order id, also the bond asset id
     // R5: Coll[Byte] - blake2b256 of the borrower's ErgoTree
-    // R6: Coll[Long] - (repayment in nanoERG, batching fee in nanoERG)
-    // R7: Int        - maturity height; repayment is open strictly below it
+    // R6: Coll[Long] - (repayment in nanoERG, lender fee reserve, principal nanoERG, maturity height)
+    // R7: Coll[(Coll[Byte], Long)] - agreed principal tokens; empty for an ERG loan
     // R8: Coll[Byte] - blake2b256 of the serialized liquidation expression
     //
     // CONSTANTS
@@ -17,11 +17,13 @@
     //
     // CONTEXT VARS
     // 0: Coll[Byte] - liquidation expression; its absence selects repayment
+    // 1: Int - settlement output index (both paths)
+    // 2: Int - collateral return output index (repayment only)
     //
     // OUTPUTS
-    // Bond at INPUTS(i): settlement at OUTPUTS(i), with R4 = SELF.id, R5 = bond asset id.
-    // Repayment also returns the complete collateral to the borrower at OUTPUTS(i + 1), R4 = SELF.id.
-    // Multiple repayments need filler inputs between bonds, since each uses two outputs.
+    // Context vars select outputs independently of input positions; no filler inputs needed.
+    // Settlement: R4 = SELF.id, R5 = bond asset id, R6: Byte = 0 repaid / 1 liquidated. Collateral return: R4 = SELF.id.
+    // Repayment requires distinct settlement and return indices.
     //
     // ASSUMPTIONS
     // - A verified order minted exactly two units, one here and one for the lender, and pinned the terms.
@@ -44,54 +46,68 @@
     val borrowerHash     = SELF.R5[Coll[Byte]].get
     val amounts          = SELF.R6[Coll[Long]].get
     val repayment        = amounts(0)
-    val maturityHeight   = SELF.R7[Int].get
+    val batchingFee      = amounts(1)
+    val maturityHeight   = amounts(3)
     val liqScriptHash    = SELF.R8[Coll[Byte]].get
     val bondAssetId      = SELF.tokens(0)._1
     val collateralAssets = SELF.tokens.slice(1, SELF.tokens.size)
-    val collateralERG    = SELF.value
+    val collateralERG    = SELF.value - batchingFee
 
     // Shared by both paths, so evaluating these eagerly costs neither path anything it does not need
-    val settlementBox    = OUTPUTS(CONTEXT.selfBoxIndex)
-    val toVault          = blake2b256(settlementBox.propositionBytes) == CONST_VAULT_HASH
-    // R5 is what the generic vault opens with. Unpinned, a settler could name an asset of its own
-    // there and claim the lender's box from the vault itself.
-    val settlementTagged =
-        settlementBox.R4[Coll[Byte]].get == SELF.id &&
-        settlementBox.R5[Coll[Byte]].get == bondAssetId
-    // The singleton must not survive the bond, or its holder could claim the lender's vault
-    val assetBurned      = numTokenInOutputs(bondAssetId) == 0L
-
-    val liquidationScript = getVar[Coll[Byte]](0)
-
-    if (liquidationScript.isDefined) {
-        val liquidated = allOf(
-            Coll(
-                blake2b256(liquidationScript.get) == liqScriptHash,
-                toVault,
-                settlementTagged,
-                assetBurned
-            )
-        )
-        sigmaProp(liquidated) && executeFromVar[SigmaProp](0)
+    val settlementIndex = getVar[Int](1).get
+    if (amounts.size != 4 || batchingFee < 0L || batchingFee > SELF.value - 1000000L ||
+        settlementIndex < 0 || settlementIndex >= OUTPUTS.size) {
+        sigmaProp(false)
     } else {
-        // Collateral box returned to borrower. Read only here, so a liquidation of the last bond in a
-        // transaction does not need an output after it.
-        val returnBox = OUTPUTS(CONTEXT.selfBoxIndex + 1)
-        val repaid = allOf(
-            Coll(
-                HEIGHT < maturityHeight,
-                // RepaymentBox Conditions
-                toVault,
-                settlementTagged,
-                settlementBox.value >= repayment,
-                // ReturnBox Conditions
-                blake2b256(returnBox.propositionBytes) == borrowerHash,
-                returnBox.R4[Coll[Byte]].get == SELF.id,
-                returnBox.tokens == collateralAssets,
-                returnBox.value  >= collateralERG,
-                assetBurned
+        val settlementBox    = OUTPUTS(settlementIndex)
+        val toVault          = blake2b256(settlementBox.propositionBytes) == CONST_VAULT_HASH
+        // R5 is what the generic vault opens with. Unpinned, a settler could name an asset of its own
+        // there and claim the lender's box from the vault itself.
+        val settlementTagged =
+            settlementBox.R4[Coll[Byte]].get == SELF.id &&
+            settlementBox.R5[Coll[Byte]].get == bondAssetId
+        // The singleton must not survive the bond, or its holder could claim the lender's vault
+        val assetBurned      = numTokenInOutputs(bondAssetId) == 0L
+
+        val liquidationScript = getVar[Coll[Byte]](0)
+
+        if (liquidationScript.isDefined) {
+            val liquidated = allOf(
+                Coll(
+                    blake2b256(liquidationScript.get) == liqScriptHash,
+                    toVault,
+                    settlementTagged,
+                    settlementBox.R6[Byte].get == 1.toByte,
+                    assetBurned
+                )
             )
-        )
-        sigmaProp(repaid)
+            sigmaProp(liquidated) && executeFromVar[SigmaProp](0)
+        } else {
+            // Only repayment requires a collateral return index.
+            val returnIndex = getVar[Int](2).get
+            if (returnIndex < 0 || returnIndex >= OUTPUTS.size || returnIndex == settlementIndex) {
+                sigmaProp(false)
+            } else {
+                val returnBox = OUTPUTS(returnIndex)
+                val repaid = allOf(
+                    Coll(
+                        HEIGHT.toLong < maturityHeight,
+                        // Repayment includes refund of the lender-funded reserve; subtract to avoid overflow.
+                        toVault,
+                        settlementTagged,
+                        settlementBox.R6[Byte].get == 0.toByte,
+                        settlementBox.value >= batchingFee &&
+                        settlementBox.value - batchingFee >= repayment,
+                        // ReturnBox Conditions
+                        blake2b256(returnBox.propositionBytes) == borrowerHash,
+                        returnBox.R4[Coll[Byte]].get == SELF.id,
+                        returnBox.tokens == collateralAssets,
+                        returnBox.value  >= collateralERG,
+                        assetBurned
+                    )
+                )
+                sigmaProp(repaid)
+            }
+        }
     }
 }

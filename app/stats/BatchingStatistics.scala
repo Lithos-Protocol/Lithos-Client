@@ -150,16 +150,22 @@ private[stats] object BatchingStatistics {
     val settled = inputs.indices.toVector.flatMap { i =>
       for {
         in <- inputs(i)
+        if !tx.inputs(i).spendingProof.exists(_.ext.contains("127"))
         if tx.inputs(i).spendingProof.flatMap(_.ext.get("0")).exists(maturityExpression)
         bond <- transactions.batching.sigmafi.SigmaFiBoxes.bond(box(in))
         if bond.liquidation.contains(contracts.MaturityLiquidation)
-        out <- tx.outputs.lift(i) if out.ergoTree.equalsIgnoreCase(vault)
+        outputIndex <- tx.inputs(i).spendingProof.flatMap(_.ext.get("1")).flatMap { hex =>
+          Try(org.ergoplatform.appkit.ErgoValue.fromHex(hex)).toOption
+            .filter(_.getType == org.ergoplatform.appkit.ErgoType.integerType())
+            .map(_.getValue.asInstanceOf[Integer].intValue).filter(_ >= 0)
+        }
+        out <- tx.outputs.lift(outputIndex) if out.ergoTree.equalsIgnoreCase(vault)
         settlement <- transactions.batching.sigmafi.SigmaFiBoxes.vault(box(out))
         if settlement.bondId.contains(bond.boxId) && settlement.asset == bond.asset &&
-          settlement.box.assets == bond.collateral
+          settlement.box.assets == bond.collateral && settlement.settlementPath.contains(1.toByte)
         if !tx.outputs.exists(_.assets.exists(_.id == bond.asset))
         gross = BigInt(in.value) - out.value if gross >= 0 && gross <= bond.batchingFee
-      } yield (i, bond.boxId, gross)
+      } yield (outputIndex, bond.boxId, gross)
     }
     if (settled.isEmpty) Vector.empty
     else {

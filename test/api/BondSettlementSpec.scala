@@ -46,7 +46,8 @@ class BondSettlementSpec extends AnyPropSpec with SigmaFiFixtures with MockitoSu
         val funding = UTXO(wallet.contract, 10 * Erg, repayToken.toSeq.map(Token(_, 550L))).toDummyInput(ctx)
         val paid = wallet.sign(SigmaFiUserTransactions.repay(ctx, wallet, bond, SigmaFiBoxes.input(box, ctx).get,
           wallet.contract).build(Seq(funding)))
-        val (indexed, tx) = history(ctx, box, paid, ctx.getHeight, Map.empty)
+        val (indexed, tx) = history(ctx, box, paid, ctx.getHeight,
+          Map("1" -> ErgoValue.of(0).toHex, "2" -> ErgoValue.of(1).toHex))
         val result = BondSettlement.read(source(indexed, tx), box.boxId, bond.asset.toString, ctx.getHeight)
         result.status shouldBe "Repaid"
         result.settlement.get.txId shouldBe tx.id
@@ -55,7 +56,7 @@ class BondSettlementSpec extends AnyPropSpec with SigmaFiFixtures with MockitoSu
         result.settlement.get.liquidationHash shouldBe None
         result.settlement.get.vault.assetId shouldBe bond.asset.toString
         // The reader uses historical transaction outputs, not the vault's current unspent set.
-        result.settlement.get.vault.nanoErgs shouldBe (if (repayToken.isEmpty) 2 * Erg else MinBox).toString
+        result.settlement.get.vault.nanoErgs shouldBe ((if (repayToken.isEmpty) 2 * Erg else MinBox) + bond.batchingFee).toString
       }
     }
   }
@@ -66,7 +67,8 @@ class BondSettlementSpec extends AnyPropSpec with SigmaFiFixtures with MockitoSu
       val bond = SigmaFiBoxes.bond(box).get
       val closed = SigmaFiTransactions.liquidate(ctx, wallet, Seq(bond -> SigmaFiBoxes.input(box, ctx).get),
         wallet.contract, 0L, ctx.getHeight + 1)
-      val (indexed, tx) = history(ctx, box, closed.signed, ctx.getHeight + 1, Map("0" -> ErgoValue.of(liq.bytes).toHex))
+      val (indexed, tx) = history(ctx, box, closed.signed, ctx.getHeight + 1,
+        Map("0" -> ErgoValue.of(liq.bytes).toHex, "1" -> ErgoValue.of(0).toHex))
       val result = BondSettlement.read(source(indexed, tx), box.boxId, bond.asset.toString, ctx.getHeight + 1)
       result.status shouldBe "Liquidated"
       result.settlement.get.vault.nanoErgs shouldBe (box.value - bond.batchingFee).toString
@@ -109,12 +111,14 @@ class BondSettlementSpec extends AnyPropSpec with SigmaFiFixtures with MockitoSu
         collateral = Seq(Token(tokenB, 7L)), liqHash = rule.hash))
       val bond = SigmaFiBoxes.bond(box).get
       val protocolInput = SigmaFiBoxes.input(box, ctx).get.withCtxVar(0.toByte, ErgoValue.of(expression))
+        .withCtxVar(1.toByte, ErgoValue.of(0))
       val vault = vaultUTXO(protocolInput.id, bond.asset, 2 * Erg)
       val executor = UTXO(wallet.contract, 3 * Erg - SigmaFiUserTransactions.TxFee, Seq(Token(tokenB, 7L)))
       val unsigned = TxBuilder(ctx).setInputs(protocolInput).setOutputs(vault, executor)
         .buildTx(SigmaFiUserTransactions.TxFee, wallet.p2pk, Seq(Token(bond.asset, 1L)))
       val closed = wallet.sign(unsigned)
-      val (indexed, tx) = history(ctx, box, closed, ctx.getHeight, Map("0" -> ErgoValue.of(expression).toHex))
+      val (indexed, tx) = history(ctx, box, closed, ctx.getHeight,
+        Map("0" -> ErgoValue.of(expression).toHex, "1" -> ErgoValue.of(0).toHex))
       val state = BondSettlement.read(source(indexed, tx), box.boxId, bond.asset.toString, ctx.getHeight)
       state.status shouldBe "Liquidated"
       state.settlement.get.vault.tokens shouldBe empty
@@ -123,17 +127,49 @@ class BondSettlementSpec extends AnyPropSpec with SigmaFiFixtures with MockitoSu
     }
   }
 
-  property("a batched liquidation uses the bond's actual input index for its payout") {
+  property("a batched liquidation follows each bond's settlement context index") {
     client.execute { ctx =>
       val boxes = (1 to 2).map(i => nodeBox(ctx, bondUTXO(None, wallet.contract, ctx.getHeight + 1,
         collateral = Seq(Token(tokenB, i.toLong)), asset = org.ergoplatform.sdk.ErgoId.create(f"$i%02x" * 32)), i))
       val closed = SigmaFiTransactions.liquidate(ctx, wallet,
         boxes.map(b => SigmaFiBoxes.bond(b).get -> SigmaFiBoxes.input(b, ctx).get), wallet.contract, 0L, ctx.getHeight + 1)
-      val (indexed, basic) = history(ctx, boxes(1), closed.signed, ctx.getHeight + 1, Map("0" -> ErgoValue.of(liq.bytes).toHex))
+      val (indexed, basic) = history(ctx, boxes(1), closed.signed, ctx.getHeight + 1,
+        Map("0" -> ErgoValue.of(liq.bytes).toHex, "1" -> ErgoValue.of(1).toHex))
       val tx = basic.copy(inputs = Seq(indexed.copy(box = boxes.head), indexed))
       val state = BondSettlement.read(source(indexed, tx), boxes(1).boxId, boxes(1).assets.head.tokenId, ctx.getHeight + 1)
       state.status shouldBe "Liquidated"
       state.settlement.get.vault.tokens.map(_.amount) shouldBe Seq("2")
+    }
+  }
+
+  property("reordered batch outputs sign and classify using context indices, and forged markers are refused") {
+    client.execute { ctx =>
+      val boxes = (1 to 2).map(i => nodeBox(ctx, bondUTXO(None, wallet.contract, ctx.getHeight,
+        collateral = Seq(Token(tokenB, i.toLong)), asset = org.ergoplatform.sdk.ErgoId.create(f"${i + 10}%02x" * 32)), i))
+      val bonds = boxes.map(b => SigmaFiBoxes.bond(b).get)
+      val inputs = boxes.zipWithIndex.map { case (box, i) => SigmaFiBoxes.input(box, ctx).get
+        .withCtxVar(0.toByte, ErgoValue.of(liq.bytes)).withCtxVar(1.toByte, ErgoValue.of(1 - i)) }
+      val settlements = bonds.reverse.map(SigmaFiTransactions.vaultBox)
+      val reward = UTXO(wallet.contract, bonds.map(_.batchingFee).sum)
+      def build(outputs: Seq[UTXO]) = TxBuilder(ctx).setInputs(inputs: _*).setOutputs(outputs :+ reward: _*)
+        .buildTx(0L, wallet.p2pk, bonds.map(b => Token(b.asset, 1L)))
+      val signed = wallet.sign(build(settlements))
+      bonds.indices.foreach { i =>
+        val ext = Map("0" -> ErgoValue.of(liq.bytes).toHex, "1" -> ErgoValue.of(1 - i).toHex)
+        val (indexed, base) = history(ctx, boxes(i), signed, ctx.getHeight, ext)
+        val tx = base.copy(inputs = boxes.zipWithIndex.map { case (box, j) => indexed.copy(box = box,
+          spendingProof = Some(NodeSpendingProof("", Map("0" -> ErgoValue.of(liq.bytes).toHex,
+            "1" -> ErgoValue.of(1 - j).toHex)))) })
+        val state = BondSettlement.read(source(indexed, tx), boxes(i).boxId, bonds(i).asset.toString, ctx.getHeight)
+        state.status shouldBe "Liquidated"
+        state.settlement.get.vault.tokens.map(_.amount) shouldBe Seq((i + 1).toString)
+        val wrongIndex = tx.copy(inputs = tx.inputs.updated(i, tx.inputs(i).copy(spendingProof =
+          Some(NodeSpendingProof("", ext.updated("1", ErgoValue.of(i).toHex))))))
+        BondSettlement.read(source(indexed, wrongIndex), boxes(i).boxId, bonds(i).asset.toString,
+          ctx.getHeight).status shouldBe "Unknown"
+      }
+      an[Exception] should be thrownBy wallet.sign(build(settlements.updated(0,
+        settlements.head.withReg(2, ErgoValue.of(0.toByte)))))
     }
   }
 }

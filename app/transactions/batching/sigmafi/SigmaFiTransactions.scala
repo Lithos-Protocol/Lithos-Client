@@ -33,8 +33,9 @@ final case class SigmaFiLiquidation(signed: SignedTransaction, bonds: Vector[Sig
 /**
  * Builds liquidations of matured bonds under the maturity liquidation script.
  *
- * Bond i sits at input i with the script's bytes as context variable 0, and its vault box at output i: the
- * collateral tokens in the same order, value less its batching fee, R4 the bond's id and R5 its bond asset.
+ * Each bond carries its settlement output index as context variable 1 and the script's bytes as variable 0.
+ * The selected vault preserves collateral token order, value less the reserve, R4 the bond's id,
+ * R5 its asset and R6 the liquidation marker, independently of the bond's input position.
  * Each bond singleton is burned; the lender's circulating unit is never a funding input.
  * Every fee goes to one last output. No wallet box is spent, so the transaction balances exactly.
  */
@@ -47,7 +48,7 @@ object SigmaFiTransactions {
   def vaultBox(bond: SigmaFiBond): UTXO =
     UTXO(SigmaFiContracts.vault, bond.box.value - bond.batchingFee,
       bond.collateral.map(a => Token(ErgoId.create(a.tokenId), a.amount)),
-      Seq(bytes(ErgoId.create(bond.boxId).getBytes), bytes(bond.asset.getBytes)))
+      Seq(bytes(ErgoId.create(bond.boxId).getBytes), bytes(bond.asset.getBytes), ErgoValue.of(1.toByte)))
 
   /**
    * Liquidates `bonds` in a block at `height`, sending their fees less `minerFee` to `feeTo`. Signed with HEIGHT
@@ -69,7 +70,13 @@ object SigmaFiTransactions {
     require(fees - minerFee >= SigmaFiContracts.MinBox,
       s"the batching fees, $fees nanoERG, do not cover a $minerFee nanoERG miner fee and a box of their own")
     val script = bytes(SigmaFiContracts.MaturityLiquidation.bytes)
-    val inputs = bonds.map { case (_, box) => box.withCtxVar(0.toByte, script) }
+    require(minerFee >= 0, "miner fee cannot be negative")
+    require(bonds.map(_._1.boxId).distinct.size == bonds.size, "duplicate bonds")
+    val inputs = bonds.zipWithIndex.map { case ((b, box), i) =>
+      require(box.id.toString == b.boxId, "bond input does not match its terms")
+      require(height.toLong >= b.maturity, "bond has not matured")
+      box.withCtxVar(0.toByte, script).withCtxVar(1.toByte, ErgoValue.of(i))
+    }
     val outputs = bonds.map { case (b, _) => vaultBox(b) } :+ UTXO(feeTo, fees - minerFee)
     val unsigned = work.lithos.mutations.TxBuilder(ctx).setInputs(inputs: _*).setOutputs(outputs: _*)
       .setPreHeader(ctx.createPreHeader().height(height).build())

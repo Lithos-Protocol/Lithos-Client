@@ -88,36 +88,25 @@ class SigmaFiContractsSpec extends AnyPropSpec with ContractSpecBase {
 
 object SigmaFiContractsSpec {
 
-  /** Printed by SigmaFi's `BondsV2Report` at the pinned commit, for mainnet. */
+  /** Exported by SigmaFi's `LithosReference` at 6384141, for mainnet. */
   final val VaultAddress =
-    "3zECWKFRn9xN1djLR4kBGr8fzqX7jtzFU2q4xmSeGPQqVXBG6vGs92apVncKpxF8u8E9ksW1uCQcYwbVnhkMyUchVds2xS9M97XamNjK" +
-      "tmWqLCRQ8ZdZsbsqeSHhhPngStjbivVHMFTiw8BYbGXuBKhpyt2DWuJCqXyzChNhUYtKtP8VPxsn269aWr7CHCDnGaJkPqRaQWqkxqw1" +
-      "Wo2Hg44JB9KdDR8wBvYkEkWaNvJXKtqg"
+    "3zECWKFRn9xN1djLR4kBGr8fzqX7jtzFU2q4xmSeGPQqVXBG6vGs92apVncKpxF8u8E9ksW1uCQcYwbVnhkMyUchVds2xS9M97XamNjKtmWqLCRQ8ZdZsbsqeSHhhPngStjbivVHMFTiw8BYbGXuBKhpyt2DWuJCqXyzChNhUYtKtP8VPxsn269aWr7CHCDnGaJkPqRaQWqkxqw1Wo2Hg44JB9KdDR8wBvYkEkWaNvJXKtqg"
   final val VaultHash = "ed132c371e35881b1b4fde03f092bc2eb8d9deb96df89cd9a5a32ab4f94b3c6b"
   final val ErgBondAddress =
-    "5PxqVLKJBKWqownSfVSv9cRj7Zcr4KWhNWZQC4EkA8VDfkJeuEbgz1KX7ReDquJ155rS3NNuDFebR9NU68VfACdaBFMJxfVBVaHNhYqW" +
-      "NcfS1mPipnW23uHhADe2Wm2ULqs854Pd2XZibiGDaEyQmgfE6n3xHdMUvfDpMyDB8VyUdHTpUH6iduT2kmrkeWo9JFHUx5cyqa5TJeGA" +
-      "eYJnzuACWcrxT3pKUAbDMduLbJgAGhfiD2M3efKjXwUQhMJAaTwnwXLE63S7i8YkuHVL4nJDrjXWF3niKoMchS2HHwSqdbBUXviFgfSz" +
-      "Tnmx8kWaTV4AC7MgR6p2snnrRrRBUi61uxpMj8VcwhLw9SzHTsUpbr1cJ9FA7dTpc5Nb8VFKu91gEKQgio18PGfEv1UBB2f4HFWjDb2w" +
-      "sYwTNEtEKc3"
-  final val ErgBondHash = "3839341bb246c79a8a4b98feffbf7805cbc41a8ca877920f2abade3507e92235"
+    "AbMVCU6L2xciF5BfFo19UscGtuzpyGTNtPiEWAh84N8h2aP6EGHgfdioSUz9Y4DvPTE59LjSxC5KgKcRskLPoGnmkEGJwroYq5FEzLJoMyRNZdi2D5ZxgupVGuVWzxjwc1cj4hfD4Rh3xSW5Mc2AbdF9XH61URkYYGDHnumNKQhTkzwNNX1b4AWjcn84TJeqD3AUtLiGQHfLVMWcnuNYSynXZPRaaSpWLMn8wE7jkDpKpx6fC4T1wp7cw6SpCbDqxLNcMia8aGCqRMCQKrLRt32toQbV7ZZAVpc21A7ct3Y1Y1CBMmdXqpk6exQATpdt2wMqiedKoshvAke5sMN23mr1BuFAasbRtKSgiiFuYwtXFr5qwS831KytNRH5U4Ts1mWpfzaVoq869NUiveR8cPtdbsVNcp5DvmUUjNofKKyqBjZpp4poZooQCV25fvhrWuGVqG8SftDpg1kAgqTP3Lxn8MnSYJ8rNN9qY64kuk3qCHLgTPrTXmzucPcn5v5T9qpzWPjLARNQByNvxXvP5bCdSUNYMJgz6qCveADLppv2jzBLqSoSxHdF7T6ZMYX2kT43QbQ9oJZCNiUrgztyuGHWpFZr4W72Mp2dPGHfra"
+  final val ErgBondHash = "1bceba97922f67d50e2718f39696c3f43f21279d971c83381a14ea0334df93b9"
   final val SigUsd = "03faf2cb329f2e90d6d23b58d91bbb6c046aa143261cc21f52fbe2824bfcbf04"
   final val SigUsdBondAddress =
-    "w7b7Ht8ELRboQhcFmcV5ZwjpGJS4JL7dhjywVZwYd76CanXf33eBosWC71etNib7zoenYpUM9KMXuqAjmVjuxFDaECkobiZiGwBRKMXY" +
-      "VNo24m6ij8kfKGYpiZgTjLFBpseQdYbF9h3AQHhpAQtx9Pits1YXCj27QoxwJVSAw3oXnYXkTxyFudynWy42We3BXqfjcKTie3N9MHVQ" +
-      "2gWaRgbcDte3zeHEPcSLZe1yu6736HZHVz72LjGvRsNeiboKVBJGD7YMbUTmu77p1CorhcSbqdTCtVxGh8gBW8Xzicat6ecz8JhoSinw" +
-      "JdYMFMpsKrSr4W9rx6C5jrZMAZjynnE6bDLJuya2SY7iSaAJukir9z9e8tKtTcTjJLkATFUwDWVugbC7yzZYRDV3K6qZgmywmcByUXdP" +
-      "Mm4BX2TP4jWNF9Yk3QCstErr8MhCgYgnSxLx24aBDFU38wWWKxwkzB27iwpZh4z8pPdi19F2e6GF5zYPPvjrPkLaQGhYGdnoBLm111r3" +
-      "jubUEztcVU8am8YfM"
-  final val SigUsdBondHash = "9b2b3ca15eb9042a3ca8f5956d139a8feb6639dae56f74195c405f66962ad512"
-  final val MaturityLiquidationHash = "23b131585209a670a79817292233ed8c30618c3c8046ba174b655afee0e828a3"
-  final val TokenBondTemplateHash = "6e9bdb6db48c3986a0f01b11876264a1c7aad6e547090e6238c91b793121290a"
+    "335hjjFkLYzyY99TeUyNeUzWBdkxb4ZSLXRwpG6uXJDYefQQrASucVdcJ2B7Aiv5kagCBUoyTzozVmvACff9gEg79YyoPBtKBUt7nYFpCmnKbc2RzFvvsbANvq25kyuwZ3qCYM2ZVnXaVnXduNH3C7GE9wdPn2mwn5SS3fUj8ECAYe3xWEcy5pt94o7aWUPBbdNKxxuWk7pUt2EBNYFWhFaJfxvwqK4Vae3VJHVqoqZNnuGWRm4o615yRnRP67v5AgPbEEyE5CnWAHGd7LQik9CATe8FRq4hDuB9mx1ogMyx9fT8ATURbNY6uYp1QKqo9euSP85RR47SFpjEWbCCGQa9zmY34BYaMjNAaWHc88fjLwZWa3a3qj8aeaq59Zr6CkrgffKF7qXM9NUKrAsa1xa1e86AnV3i6Zzqv2WgHTg1nAqHreRokAJ3xtMRnW5Y4KNFj36PLsXp9yz5bj977aMHcTnSvZesZ5KTNHvPcEkeZyBYUSJhyrxyRhzACJLZZnFXjsxwhcb5LNvNv452P2nap8HEtqSsQmnS23YNXT2RAnUxiFx2cowjdU15dRGTk5kAwx5GCtnWc9tFUscbdHXzufKvzogGGmDm7CxcGyM2KNDYEAeNmwHSuCXC3QxuZezeZuD8zTbpGcYpAL3cq2TyTGvJTaoXzKtVc1fLqVsDbpU88VX2iV18aTjsHtmgS2kVAYLmBk77HWTiSb6eJFWBh"
+  final val SigUsdBondHash = "9425199824c3985ccbda2614ebcf4e4f17336e5e8abdb58be0830982f9a507cd"
+  final val MaturityLiquidationHash = "ea301f93d1a806e8fedd21ef0ffae39bdbfc15671c41247c4476ccb942a1485b"
+  final val TokenBondTemplateHash = "01dc8c5e62641965839a9b984bb7f73a7a9e24928b8483a6642459ba13dc1181"
 
   import SigmaFiContracts._
 
   final val Templates: Map[SigmaFiTemplateKind, (String, Map[String, Int])] = Map(
-    SigmaFiTemplateKind.Order -> ("5e82ac73dba7b8dbe463d8f05fd8058604542c00fecc0eade894785a24934bcf", Map(
-      BORROWER_HASH -> 2, BOND_HASH -> 14, REPAYMENT -> 22, BATCHING_FEE -> 24, MATURITY -> 25, LIQ_SCRIPT_HASH -> 26, PRINCIPAL_ERG -> 30, PRINCIPAL_TOKENS -> 31)),
-    SigmaFiTemplateKind.OrderOnClose -> ("f5e91924fcc12cce98913e60a43d9c03b8d6495fd88409143aed94373e35499f", Map(
-      BORROWER_HASH -> 2, DURATION -> 7, BOND_HASH -> 15, REPAYMENT -> 23, BATCHING_FEE -> 25, LIQ_SCRIPT_HASH -> 26, PRINCIPAL_ERG -> 31, PRINCIPAL_TOKENS -> 32)))
+    SigmaFiTemplateKind.Order -> ("49dd9de79ddf81c435b42703a884abb7f212b20ad052f2a50d9d779f4171bf4d", Map(
+      BORROWER_HASH -> 2, BOND_HASH -> 14, REPAYMENT -> 23, PRINCIPAL_ERG -> 26, PRINCIPAL_TOKENS -> 27, MATURITY -> 29, LIQ_SCRIPT_HASH -> 30)),
+    SigmaFiTemplateKind.OrderOnClose -> ("362744a608dc1c7f872a616f1a6ad88c92240500ba5ec9a9498d74ef031bcc52", Map(
+      BORROWER_HASH -> 2, DURATION -> 7, BOND_HASH -> 16, REPAYMENT -> 25, PRINCIPAL_ERG -> 28, PRINCIPAL_TOKENS -> 29, LIQ_SCRIPT_HASH -> 30)))
 }

@@ -66,7 +66,7 @@ class SigmaFiApiControllerSpec
     val api = mock[SigmaFiApi]
     when(api.createOrder(any[SFOrderRequest], anyBoolean())).thenAnswer(i => answer(i.getArgument[Boolean](1)))
     when(api.cancelOrder(anyString(), anyBoolean())).thenAnswer(i => answer(i.getArgument[Boolean](1)))
-    when(api.fillOrder(anyString(), anyBoolean())).thenAnswer(i => answer(i.getArgument[Boolean](1)))
+    when(api.fillOrder(anyString(), anyBoolean(), org.mockito.ArgumentMatchers.eq(None))).thenAnswer(i => answer(i.getArgument[Boolean](1)))
     when(api.repay(anyString(), anyBoolean())).thenAnswer(i => answer(i.getArgument[Boolean](1)))
     when(api.liquidate(anyString(), anyBoolean())).thenAnswer(i => answer(i.getArgument[Boolean](1)))
     when(api.claim(anyString(), anyBoolean())).thenAnswer(i => answer(i.getArgument[Boolean](1)))
@@ -84,7 +84,7 @@ class SigmaFiApiControllerSpec
     verify(api, never()).getPortfolio
     verify(api, never()).createOrder(any[SFOrderRequest], anyBoolean())
     verify(api, never()).cancelOrder(anyString(), anyBoolean())
-    verify(api, never()).fillOrder(anyString(), anyBoolean())
+    verify(api, never()).fillOrder(anyString(), anyBoolean(), org.mockito.ArgumentMatchers.eq(None))
     verify(api, never()).repay(anyString(), anyBoolean())
     verify(api, never()).liquidate(anyString(), anyBoolean())
     verify(api, never()).claim(anyString(), anyBoolean())
@@ -102,7 +102,7 @@ class SigmaFiApiControllerSpec
     }
     verify(api, never()).createOrder(any[SFOrderRequest], is(true))
     verify(api, never()).cancelOrder(anyString(), is(true))
-    verify(api, never()).fillOrder(anyString(), is(true))
+    verify(api, never()).fillOrder(anyString(), is(true), org.mockito.ArgumentMatchers.eq(None))
     verify(api, never()).repay(anyString(), is(true))
     verify(api, never()).liquidate(anyString(), is(true))
     verify(api, never()).claim(anyString(), is(true))
@@ -133,12 +133,26 @@ class SigmaFiApiControllerSpec
 
   "Failures" should "map to the status a caller can act on" in {
     val api = mock[SigmaFiApi]
-    when(api.fillOrder(anyString(), anyBoolean())).thenThrow(LithosUnprocessable("no"))
+    when(api.fillOrder(anyString(), anyBoolean(), org.mockito.ArgumentMatchers.eq(None))).thenThrow(LithosUnprocessable("no"))
     when(api.repay(anyString(), anyBoolean())).thenThrow(LithosStateChanged("spent"))
     val c = controller(api)
     status(c.checkFillOrder(boxId).apply(FakeRequest())) shouldBe UNPROCESSABLE_ENTITY
     status(c.checkRepay(boxId).apply(FakeRequest())) shouldBe CONFLICT
     status(c.checkCreateOrder().apply(FakeRequest(POST, "/").withJsonBody(Json.obj("x" -> 1)))) shouldBe BAD_REQUEST
+  }
+
+  "Fill requests" should "pass the reserve override through checks and keyed sends and reject malformed bodies" in {
+    val api = mock[SigmaFiApi]
+    when(api.fillOrder(anyString(), anyBoolean(), any[Option[String]]))
+      .thenAnswer(i => answer(i.getArgument[Boolean](1)))
+    val c = controller(api)
+    val request = FakeRequest(POST, "/sigmafi").withJsonBody(Json.obj("batchingFee" -> "75000000"))
+    status(c.checkFillOrder(boxId).apply(request)) shouldBe OK
+    verify(api).fillOrder(boxId, false, Some("75000000"))
+    status(c.fillOrder(boxId).apply(keyed(request))) shouldBe OK
+    verify(api).fillOrder(boxId, true, Some("75000000"))
+    status(c.checkFillOrder(boxId).apply(FakeRequest(POST, "/").withJsonBody(Json.obj("batchingFee" -> 1)))) shouldBe BAD_REQUEST
+    status(c.checkFillOrder(boxId).apply(FakeRequest(POST, "/").withJsonBody(Json.arr()))) shouldBe BAD_REQUEST
   }
 
   "Asset verification" should "expose a named settlement even when its vault has already been claimed" in {

@@ -21,7 +21,7 @@ object SigmaFiIntent {
       r.collateralTokens.forall(_.size <= 32) && (Seq(r.collateralNanoErgs, r.repayment) ++ r.principalNanoErgs ++
         r.batchingFee ++ r.liquidation).forall(_.length <= 64)
     case CancelOrder(b) => id(b)
-    case FillOrder(b) => id(b)
+    case FillOrder(b, reserve) => id(b) && reserve.forall(_.length <= 64)
     case Repay(b) => id(b)
     case Liquidate(b) => id(b)
     case Claim(t) => id(t)
@@ -36,8 +36,8 @@ object SigmaFiIntent {
   final case class CancelOrder(boxId: String) extends SigmaFiIntent {
     def execute(e: SigmaFiAPIExecution): SFResult = sent(e.cancelOrder(boxId, send = true))
   }
-  final case class FillOrder(boxId: String) extends SigmaFiIntent {
-    def execute(e: SigmaFiAPIExecution): SFResult = sent(e.fillOrder(boxId, send = true))
+  final case class FillOrder(boxId: String, reserve: Option[String] = None) extends SigmaFiIntent {
+    def execute(e: SigmaFiAPIExecution): SFResult = sent(e.fillOrder(boxId, send = true, reserve))
   }
   final case class Repay(boxId: String) extends SigmaFiIntent {
     def execute(e: SigmaFiAPIExecution): SFResult = sent(e.repay(boxId, send = true))

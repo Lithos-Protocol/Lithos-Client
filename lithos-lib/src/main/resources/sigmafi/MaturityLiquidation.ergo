@@ -1,20 +1,37 @@
 {
     // Maturity liquidation, run with the bond as SELF via context variable 0.
-    // R7 is maturity; R6(1) is the maximum nanoERG fee the executor may retain.
+    // R6(3) is maturity (Long); R6(1) is the lender-funded nanoERG fee reserve.
     // This expression sends all collateral tokens and at least SELF.value - fee to the vault.
     // The bond itself pins that vault, its R4/R5 tags, and the singleton burn.
     //
+    // LIQUIDATION SCRIPT RULES (also apply to future expressions)
+    // - Use getVar[Int](1) for settlement, exactly as the bond does; never selfBoxIndex.
+    // - Context variables are untrusted: validate indices before indexing OUTPUTS.
+    // - Every additional bond-specific payout must require R4[Coll[Byte]] == SELF.id.
+    // - Require distinct indices for separate payout obligations within the same bond.
+    //   R4 prevents sharing across bonds, but cannot separate roles within one bond.
+    // - The bond pins the vault, R4/R5, R6 = 1.toByte and singleton burn; the expression must enforce
+    //   eligibility and economics on that same settlement and any additional payouts.
+    // - R6 is (repayment, fee reserve, agreed principal ERG, Long maturity); R7 holds principal tokens.
+    //   Exclude R6(1) from collateral valuation: that reserve is lender-funded and can be arbitrarily large.
+    // - Var 0 is the expression; var 1 is settlement; var 2 is reserved for repayment return.
+    //
     // ASSUMPTIONS
-    // - The originating order bounded the fee to 0 <= fee <= collateral ERG - minimum box value.
+    // - The originating order required the fee on top of its entire collateral ERG.
     // - tokens(0) is the bond singleton; only tokens(1..) are collateral.
     // - Repayment closes at maturity, so this rule leaves no gap or overlap.
-    val settlementBox    = OUTPUTS(CONTEXT.selfBoxIndex)
-    val batchingFee      = SELF.R6[Coll[Long]].get(1)
-    val collateralAssets = SELF.tokens.slice(1, SELF.tokens.size)
+    val settlementIndex = getVar[Int](1).get
+    if (settlementIndex < 0 || settlementIndex >= OUTPUTS.size) {
+        sigmaProp(false)
+    } else {
+        val settlementBox    = OUTPUTS(settlementIndex)
+        val batchingFee      = SELF.R6[Coll[Long]].get(1)
+        val collateralAssets = SELF.tokens.slice(1, SELF.tokens.size)
 
-    sigmaProp(
-        HEIGHT >= SELF.R7[Int].get &&
-        settlementBox.tokens == collateralAssets &&
-        settlementBox.value >= SELF.value - batchingFee
-    )
+        sigmaProp(
+            HEIGHT.toLong >= SELF.R6[Coll[Long]].get(3) &&
+            settlementBox.tokens == collateralAssets &&
+            settlementBox.value >= SELF.value - batchingFee
+        )
+    }
 }

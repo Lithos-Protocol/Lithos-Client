@@ -8,7 +8,7 @@ import api.models._
 import configs.{NodeContext, SigmaFiBatchingConfig, SigmaFiBondsConfig}
 import mutations.NodeWallet
 import node.NodeApi
-import node.model.{IndexedBox, MempoolOptions, NodeBox, Paging, SortDirection}
+import node.model.{IndexedBox, IndexedTransaction, MempoolOptions, NodeBox, Paging, SortDirection}
 import org.bouncycastle.util.encoders.Hex
 import org.ergoplatform.appkit.{BlockchainContext, SignedTransaction}
 import org.ergoplatform.sdk.ErgoId
@@ -32,7 +32,7 @@ import scala.util.{Failure, Success, Try}
  * which owns the wallet: each reserves its funding there, signs with the node wallet and broadcasts through
  * [[EngineBroadcast]], paying the network fee.
  *
- * @param bonds the batching fee orders carry when a request names none
+ * @param bonds the lender-funded reserve used on fills when a request names none
  * @param alive whether the engine still wants this attempt; once false, nothing is signed or sent
  */
 class SigmaFiAPIExecution(nodeContext: NodeContext,
@@ -85,19 +85,18 @@ class SigmaFiAPIExecution(nodeContext: NodeContext,
     ids.foreach(id => if (!id.matches("[0-9a-f]{64}")) throw LithosBadRequest(s"'$id' is not a token id"))
     if (ids.isEmpty) Seq.empty
     else {
-      val (live, _) = scanBonds(nodeApi)
-      val byAsset = live.groupBy(_.asset.toString)
       val vaults = scanVault(nodeApi)._1.groupBy(_.asset.toString)
+      // One transaction can settle many requested assets. Read that immutable evidence once per request.
+      val transactions = scala.collection.mutable.Map.empty[String, Try[Option[IndexedTransaction]]]
+      def transaction(id: String): Try[Option[IndexedTransaction]] =
+        transactions.getOrElseUpdate(id, nodeApi.indexedTransactionById(id))
       ids.map { id =>
         val origin = assetOrigin(nodeApi, id)
-        val candidates = byAsset.getOrElse(id, Seq.empty)
-        val bond = candidates.find(b => origin.exists(_.bondId == b.boxId)).orElse(candidates.headOption)
-        val verified = bond.fold(origin.isRight)(b => origin.exists(_.bondId == b.boxId))
         val state = origin.fold(_ => BondSettlement.State("Unverified"),
-          o => BondSettlement.read(nodeApi, o.bondId, id, ctx.getHeight))
-        SFAssetLookup(id, origin.isRight || origin.left.exists(_.minted), verified,
-          origin.left.toOption.map(_.reason).orElse(bond.filterNot(_ => verified).map(_ => NotItsBond)),
-          bond.filterNot(_ => state.settlement.isDefined).map(bondView(ctx, nodeApi, _)),
+          o => BondSettlement.read(nodeApi, o.bondId, id, ctx.getHeight, transaction))
+        SFAssetLookup(id, origin.isRight || origin.left.exists(_.minted), origin.isRight,
+          origin.left.toOption.map(_.reason),
+          state.liveBond.map(bondView(ctx, nodeApi, _)),
           vaults.getOrElse(id, Seq.empty).map(vaultView), state.status, state.settlement, state.reason)
       }
     }
@@ -135,7 +134,7 @@ class SigmaFiAPIExecution(nodeContext: NodeContext,
     val loan = loanOf(request.principalNanoErgs, request.principalToken)
     val collateralErg = amount("collateralNanoErgs", request.collateralNanoErgs)
     val collateral = tokens("collateralTokens", request.collateralTokens.getOrElse(Seq.empty))
-    val fee = batchingFee(request.batchingFee)
+    if (request.batchingFee.isDefined) throw LithosBadRequest("batchingFee is chosen by the lender on fill, not on order creation")
     val liq = liquidationNamed(request.liquidation)
     val repayment = amount("repayment", request.repayment)
     val schedule = (request.maturityHeight, request.durationBlocks) match {
@@ -143,14 +142,14 @@ class SigmaFiAPIExecution(nodeContext: NodeContext,
       case (None, Some(d)) =>
         if (d < SigmaFiContracts.MinOnCloseDuration)
           throw LithosBadRequest(s"'durationBlocks' must be at least ${SigmaFiContracts.MinOnCloseDuration}, got $d")
-        if (tip.toLong + d > Int.MaxValue)
+        if (BigInt(tip) + d > Long.MaxValue)
           throw LithosBadRequest("'durationBlocks' would overflow the bond's maturity height")
         OnClose(d)
       case _ => throw LithosBadRequest("give exactly one of 'maturityHeight' and 'durationBlocks'")
     }
-    checkCollateral(collateralErg, fee, collateral, loan.token)
+    checkCollateral(collateralErg, collateral, loan.token)
     val terms = ZCOrderTerms(SigmaFiContracts.bond(loan.repayToken).hashedPropBytes, wallet.contract.hashedPropBytes,
-      loan.erg, loan.token.map(t => t.id -> t.amount).toSeq, repayment, fee, schedule, liq.hash)
+      loan.erg, loan.token.map(t => t.id -> t.amount).toSeq, repayment, schedule, liq.hash)
     val plan = SigmaFiUserTransactions.createOrder(ctx, wallet, terms, collateralErg, collateral)
     val quote = SFQuote("createOrder", None, Some(orderTerms(terms, collateralErg, collateral)),
       (collateralErg + TxFee).toString, collateral.map(amountOf), "0", Seq.empty, TxFee.toString,
@@ -210,7 +209,7 @@ class SigmaFiAPIExecution(nodeContext: NodeContext,
   // ══════════════════════════════════════════════════════════════════════════
 
   /** @inheritdoc */
-  override def fillOrder(boxId: String, send: Boolean): Either[SFQuote, SFResult] = withCtx { (ctx, nodeApi) =>
+  override def fillOrder(boxId: String, send: Boolean, reserve: Option[String] = None): Either[SFQuote, SFResult] = withCtx { (ctx, nodeApi) =>
     val order = read(nodeApi, boxId, "SigmaFi order")(SigmaFiBoxes.order)
     fillRefusal(ctx, order).foreach(reason => throw LithosUnprocessable(reason))
     val t = order.terms
@@ -218,17 +217,21 @@ class SigmaFiAPIExecution(nodeContext: NodeContext,
     val borrower = treeFor(nodeApi, t.borrowerHash, order.box, SigmaFiBoxes.hintTrees(order.box)).getOrElse(
       throw LithosUnprocessable("cannot find the borrower's address: the order carries no hint, and no box in the " +
         "transaction that created it is at the address its terms name"))
+    val fee = batchingFee(reserve)
     val maturity = SigmaFiUserTransactions.fillMaturity(ctx, order)
-    val plan = SigmaFiUserTransactions.fillOrder(ctx, wallet, order, inputOf(ctx, order.box), repayToken, borrower)
     val principalErg = math.max(t.principalErg, MinBox)
-    val unitValue = SigmaFiUserTransactions.lenderUnit(ctx, wallet, order, repayToken, maturity).value
-    val quote = SFQuote("fillOrder", Some(boxId), Some(orderTerms(t, order.box.value, tokensOf(order.box), Some(maturity))),
-      Math.addExact(principalErg, Math.addExact(unitValue, TxFee)).toString,
+    val unitValue = SigmaFiUserTransactions.lenderUnit(ctx, wallet, order, repayToken, maturity, fee).value
+    if (BigInt(order.box.value) + fee + principalErg + unitValue + TxFee + work.lithos.mutations.UTXO.MIN_CHANGE > Long.MaxValue)
+      throw LithosBadRequest("the order, principal and reserve exceed the supported nanoERG amount")
+    val plan = SigmaFiUserTransactions.fillOrder(ctx, wallet, order, inputOf(ctx, order.box), repayToken, borrower, fee)
+    val quote = SFQuote("fillOrder", Some(boxId), Some(orderTerms(t, order.box.value, tokensOf(order.box), Some(maturity), fee)),
+      Math.addExact(fee, Math.addExact(principalErg, Math.addExact(unitValue, TxFee))).toString,
       t.principalTokens.map { case (id, n) => SFTokenAmount(id.toString, n.toString) },
       unitValue.toString, Seq(SFTokenAmount(boxId, "1")), TxFee.toString,
-      Seq(s"Lends to ${addressOf(borrower)}. Mints bond asset $boxId to this wallet: whoever holds it is paid the " +
+      Seq(s"Lends to ${addressOf(borrower)} and funds a $fee nanoERG reserve above the collateral, refunded on repayment. " +
+        s"Mints bond asset $boxId to this wallet: whoever holds it is paid the " +
         s"repayment, or the collateral if the bond is not repaid by height $maturity."),
-      lowFeeWarning(t.batchingFee) ++ interestWarnings(Loan(t.principalErg, t.principalTokens.headOption.map {
+      lowFeeWarning(fee) ++ interestWarnings(Loan(t.principalErg, t.principalTokens.headOption.map {
         case (id, n) => Token(id, n) }), t.repayment))
     if (!send) Left(quote)
     else {
@@ -247,15 +250,17 @@ class SigmaFiAPIExecution(nodeContext: NodeContext,
     val bond = read(nodeApi, boxId, "SigmaFi bond")(SigmaFiBoxes.bond)
     if (ctx.getHeight + 1 >= bond.maturity)
       throw LithosUnprocessable(s"bond $boxId matured at height ${bond.maturity}: repayment is closed")
-    val origin = Try(nodeApi.indexedBoxById(bond.asset.toString).toOption.flatten).toOption.flatten
-    val borrower = treeFor(nodeApi, bond.borrowerHash, bond.box, origin.toSeq.flatMap(b => SigmaFiBoxes.hintTrees(b.box)))
+    val borrower = walletHashes.get(Hex.toHexString(bond.borrowerHash)).orElse {
+      val origin = Try(nodeApi.indexedBoxById(bond.asset.toString).toOption.flatten).toOption.flatten
+      treeFor(nodeApi, bond.borrowerHash, bond.box, origin.toSeq.flatMap(b => SigmaFiBoxes.hintTrees(b.box)))
+    }
       .getOrElse(throw LithosUnprocessable("cannot find the borrower's address, which the collateral must return to"))
     val plan = SigmaFiUserTransactions.repay(ctx, wallet, bond, inputOf(ctx, bond.box), borrower)
     val (paysErg, paysTokens) = bond.repayToken.fold((math.max(bond.repayment, MinBox), Seq.empty[SFTokenAmount]))(id =>
       (MinBox, Seq(SFTokenAmount(id.toString, bond.repayment.toString))))
     val toMe = isMine(bond.borrowerHash)
-    val quote = SFQuote("repay", Some(boxId), Some(bondTerms(bond, None)), (paysErg + TxFee).toString, paysTokens,
-      if (toMe) bond.box.value.toString else "0", if (toMe) bond.collateral.map(a => SFTokenAmount(a.tokenId, a.amount.toString)) else Seq.empty, TxFee.toString,
+    val quote = SFQuote("repay", Some(boxId), Some(bondTerms(bond)), Math.addExact(paysErg, TxFee).toString, paysTokens,
+      if (toMe) bond.collateralErg.toString else "0", if (toMe) bond.collateral.map(a => SFTokenAmount(a.tokenId, a.amount.toString)) else Seq.empty, TxFee.toString,
       Seq(s"Pays the repayment into the vault for the holder of ${bond.asset}, and returns the collateral to " +
         s"${addressOf(borrower)}."),
       if (toMe) Seq.empty else Seq("This wallet is not the borrower: the collateral goes to the borrower, not to you."))
@@ -279,9 +284,9 @@ class SigmaFiAPIExecution(nodeContext: NodeContext,
     if (bond.batchingFee - TxFee < MinBox)
       throw LithosUnprocessable(s"bond $boxId's batching fee, ${bond.batchingFee} nanoERG, cannot pay the network " +
         "fee and a box of its own; it can still be liquidated by anyone who adds their own ERG")
-    val quote = SFQuote("liquidate", Some(boxId), Some(bondTerms(bond, None)), "0", Seq.empty,
+    val quote = SFQuote("liquidate", Some(boxId), Some(bondTerms(bond)), "0", Seq.empty,
       (bond.batchingFee - TxFee).toString, Seq.empty, TxFee.toString,
-      Seq(s"Sends the collateral, less the ${bond.batchingFee} nanoERG batching fee, to the vault for the holder of " +
+      Seq(s"Sends the full borrower collateral to the vault for the holder of " +
         s"${bond.asset}. The fee, less the network fee, comes to this wallet."), Seq.empty)
     if (!send) Left(quote)
     else {
@@ -335,8 +340,7 @@ class SigmaFiAPIExecution(nodeContext: NodeContext,
     else if (order.liquidation.isEmpty) Some("the order names a liquidation script this client does not know")
     else if (SigmaFiBoxes.pairedBond(t.bondHash, t.principalTokens).isEmpty)
       Some("the order's bond does not match its loan, so its bond could not be repaid as asked")
-    else if (t.batchingFee < 0 || order.box.value - t.batchingFee < MinBox)
-      Some("the order's batching fee leaves its bond under 0.001 ERG")
+    else if (order.box.value < MinBox) Some("the order collateral is under 0.001 ERG")
     else if (t.repayment <= 0 || t.principalErg < MinBox || t.principalTokens.exists(_._2 <= 0))
       Some("the order's principal or repayment is not a positive supported amount")
     else t.schedule match {
@@ -347,12 +351,12 @@ class SigmaFiAPIExecution(nodeContext: NodeContext,
     }
   }
 
-  private def checkMaturity(h: Int, tip: Int): Unit =
+  private def checkMaturity(h: Long, tip: Int): Unit =
     if (h <= tip + 2) throw LithosBadRequest(s"maturity $h is not far enough above the current height $tip")
 
-  private def checkCollateral(erg: Long, fee: Long, collateral: Seq[Token], principal: Option[Token]): Unit = {
-    if (erg - fee < MinBox)
-      throw LithosBadRequest("the collateral's nanoERG must exceed the batching fee by at least 0.001 ERG")
+  private def checkCollateral(erg: Long, collateral: Seq[Token], principal: Option[Token]): Unit = {
+    if (erg < MinBox)
+      throw LithosBadRequest("collateral must hold at least 0.001 ERG")
     if (collateral.map(_.id).distinct.size != collateral.size) throw LithosBadRequest("list each collateral token once")
     if (principal.exists(p => collateral.exists(_.id == p.id)))
       throw LithosBadRequest("the token lent cannot also be collateral")
@@ -360,9 +364,7 @@ class SigmaFiAPIExecution(nodeContext: NodeContext,
 
   private def batchingFee(raw: Option[String]): Long = {
     val fee = raw.map(amount("batchingFee", _, allowZero = true)).getOrElse(bonds.batchingFeeNanoErg)
-    if (fee < SigmaFiBatchingConfig.ShippedMinBatchingFee)
-      throw LithosBadRequest(s"the batching fee must be at least ${SigmaFiBatchingConfig.ShippedMinBatchingFee} " +
-        "nanoERG, the least clients on their shipped settings liquidate")
+    if (fee < 0) throw LithosBadRequest("the configured batching reserve must be nonnegative")
     fee
   }
 
@@ -387,21 +389,21 @@ class SigmaFiAPIExecution(nodeContext: NodeContext,
   // ══════════════════════════════════════════════════════════════════════════
 
   private def orderTerms(t: ZCOrderTerms, collateralErg: Long, collateral: Seq[SFTokenAmount],
-                         maturity: Option[Int] = None): SFTerms =
+                         maturity: Option[Long] = None, reserve: Long = 0L): SFTerms =
     SFTerms(Kind, Some(t.principalErg.toString), t.principalTokens.headOption.map { case (id, n) =>
       SFTokenAmount(id.toString, n.toString) }, t.repayment.toString, t.principalTokens.headOption.map(_._1.toString),
       collateralErg.toString, collateral,
       maturity.orElse(Some(t.schedule).collect { case FixedMaturity(h) => h }),
-      Some(t.schedule).collect { case OnClose(d) => d }, t.batchingFee.toString,
+      Some(t.schedule).collect { case OnClose(d) => d }, reserve.toString,
       SigmaFiContracts.liquidationOf(t.liqScriptHash).map(_.name), Hex.toHexString(t.liqScriptHash))
 
   private def orderTerms(t: ZCOrderTerms, collateralErg: Long, collateral: Seq[Token]): SFTerms =
     orderTerms(t, collateralErg, collateral.map(amountOf))
 
-  /** A bond's terms; the principal comes from the order that created it, when that was read. */
-  private def bondTerms(b: SigmaFiBond, principal: Option[(Long, Option[SFTokenAmount])]): SFTerms =
-    SFTerms(Kind, principal.map(_._1.toString), principal.flatMap(_._2), b.repayment.toString,
-      b.repayToken.map(_.toString), b.box.value.toString, b.collateral.map(a => SFTokenAmount(a.tokenId, a.amount.toString)), Some(b.maturity), None,
+  /** Principal and collateral amounts are carried directly by the bond. */
+  private def bondTerms(b: SigmaFiBond): SFTerms =
+    SFTerms(Kind, Some(b.principalErg.toString), b.principalTokens.headOption.map { case (id, n) => SFTokenAmount(id.toString, n.toString) }, b.repayment.toString,
+      b.repayToken.map(_.toString), b.collateralErg.toString, b.collateral.map(a => SFTokenAmount(a.tokenId, a.amount.toString)), Some(b.maturity), None,
       b.batchingFee.toString, b.liquidation.map(_.name), Hex.toHexString(b.liqScriptHash))
 
   private def orderView(ctx: BlockchainContext, o: SigmaFiOrder): SFOrderView =
@@ -413,7 +415,7 @@ class SigmaFiAPIExecution(nodeContext: NodeContext,
     val origin = assetOrigin(nodeApi, b.asset.toString)
     val verified = origin.exists(_.bondId == b.boxId)
     val left = math.max(0, b.maturity - (ctx.getHeight + 1))
-    SFBondView(b.boxId, b.asset.toString, bondTerms(b, origin.toOption.flatMap(_.principal)), verified,
+    SFBondView(b.boxId, b.asset.toString, bondTerms(b), verified,
       if (verified) None else Some(origin.left.toOption.map(_.reason).getOrElse(NotItsBond)),
       if (left > 0) "open" else "matured", left, isMine(b.borrowerHash), b.box.creationHeight)
   }
@@ -463,7 +465,7 @@ class SigmaFiAPIExecution(nodeContext: NodeContext,
                     val valid = tx.id == txId && tx.inputs.headOption.exists(_.boxId == id) && principalPaid &&
                       supply == 2 && lenderUnit && bond.exists(b => b.asset.toString == id &&
                         SigmaFiBoxes.verify(b, Some(genesis.copy(spendingHeight = Some(tx.inclusionHeight)))).isRight)
-                    if (valid) Right(Origin(bond.get.boxId, principalOf(genesis.box)))
+                    if (valid) Right(Origin(bond.get.boxId))
                     else Left(Unverified(NotItsBond, minted = false, settled = true))
                 }
             }
@@ -472,11 +474,6 @@ class SigmaFiAPIExecution(nodeContext: NodeContext,
       read.foreach(Verifications.put(id, _))
       read.getOrElse(Left(Unverified("the node's index did not answer", minted = false, settled = false)))
     }
-
-  /** The principal an order genesis box lent. */
-  private def principalOf(genesis: NodeBox): Option[(Long, Option[SFTokenAmount])] =
-    SigmaFiBoxes.order(genesis).map(o => o.terms.principalErg -> o.terms.principalTokens.headOption.map {
-      case (id, n) => SFTokenAmount(id.toString, n.toString) })
 
   // ══════════════════════════════════════════════════════════════════════════
   //  PLUMBING
@@ -670,8 +667,8 @@ object SigmaFiAPIExecution {
   /** Why a bond asset is not verified; `minted` when a genuine order did mint it, `settled` when no later block can change that. */
   private final case class Unverified(reason: String, minted: Boolean, settled: Boolean)
 
-  /** A verified asset: the bond its mint created, and the principal its order lent. */
-  private final case class Origin(bondId: String, principal: Option[(Long, Option[SFTokenAmount])])
+  /** A verified asset and the bond its mint created. Principal is carried by the bond itself. */
+  private final case class Origin(bondId: String)
 
   /** Verification outcomes by asset id. Bounded: the oldest is dropped past [[MaxVerifications]]. */
   private object Verifications {

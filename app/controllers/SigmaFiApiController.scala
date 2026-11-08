@@ -66,8 +66,23 @@ class SigmaFiApiController @Inject()(cc: ControllerComponents,
   def checkCancelOrder(boxId: String): Action[AnyContent] = check(api.cancelOrder(boxId, send = false))
   def cancelOrder(boxId: String): Action[AnyContent] = sendKeyed(api.cancelOrder(boxId, send = true))
 
-  def checkFillOrder(boxId: String): Action[AnyContent] = check(api.fillOrder(boxId, send = false))
-  def fillOrder(boxId: String): Action[AnyContent] = sendKeyed(api.fillOrder(boxId, send = true))
+  def checkFillOrder(boxId: String): Action[AnyContent] = fill(boxId, send = false)
+  def fillOrder(boxId: String): Action[AnyContent] = withApiKey { fill(boxId, send = true) }
+
+  private def fill(boxId: String, send: Boolean): Action[AnyContent] = Action.async { r =>
+    offPool(respondEither {
+      val reserve = r.body.asJson match {
+        case None if r.body.asText.forall(_.trim.isEmpty) => None
+        case None => throw LithosBadRequest("fill body must be a JSON object")
+        case Some(json: JsObject) => json.validate[SFFillRequest] match {
+          case JsSuccess(value, _) => value.batchingFee
+          case _ => throw LithosBadRequest("fill body must contain an optional string batchingFee")
+        }
+        case _ => throw LithosBadRequest("fill body must be a JSON object")
+      }
+      api.fillOrder(boxId, send, reserve)
+    })
+  }
 
   def checkRepay(boxId: String): Action[AnyContent] = check(api.repay(boxId, send = false))
   def repay(boxId: String): Action[AnyContent] = sendKeyed(api.repay(boxId, send = true))

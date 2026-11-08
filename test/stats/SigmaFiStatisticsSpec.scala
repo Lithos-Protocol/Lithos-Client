@@ -40,8 +40,8 @@ class SigmaFiStatisticsSpec extends AnyPropSpec with SigmaFiFixtures {
         b.getRegisters.asScala.map(_.toHex).toSeq, b.getTokens.asScala.map(Token.ergo).toSeq, id, b.getCreationHeight, i)
     }
     val script = ErgoValue.of(SigmaFiContracts.MaturityLiquidation.bytes).toHex
-    val tx = BlockTx(id, inputs.map(b => TxInput(b.boxId,
-      if (withScript) Some(InputSpendingProof(Map("0" -> script))) else None)), Seq.empty, outputs)
+    val tx = BlockTx(id, inputs.zipWithIndex.map { case (b, i) => TxInput(b.boxId,
+      if (withScript) Some(InputSpendingProof(Map("0" -> script, "1" -> ErgoValue.of(i).toHex))) else None) }, Seq.empty, outputs)
     BlockInfo("block", 1, Seq(tx), resolvedInputs = inputs.map(b => b.boxId -> NodeSync.txOutput(b)).toMap) -> tx
   }
 
@@ -92,8 +92,10 @@ class SigmaFiStatisticsSpec extends AnyPropSpec with SigmaFiFixtures {
       val wrongTag = tx.outputs.head.copy(registers = tx.outputs.head.registers.updated(0, ErgoValue.of(assetId.getBytes).toHex))
       val wrongTokens = tx.outputs.head.copy(assets = Seq(Token(tokenB, 1L)))
       val singletonSurvives = tx.outputs.last.copy(assets = Seq(Token(ErgoId.create(boxes.head.assets.head.tokenId), 1L)))
+      val rented = tx.copy(inputs = tx.inputs.map(in => in.copy(spendingProof = in.spendingProof.map(p =>
+        InputSpendingProof(p.ext + ("127" -> ErgoValue.of(0).toHex))))))
       Seq(tx.copy(outputs = wrongTag +: tx.outputs.tail), tx.copy(outputs = wrongTokens +: tx.outputs.tail),
-        tx.copy(outputs = tx.outputs.init :+ singletonSurvives)).foreach { changed =>
+        tx.copy(outputs = tx.outputs.init :+ singletonSurvives), rented).foreach { changed =>
         BatchingStatistics.read(block, changed, NetworkType.MAINNET, wallet.contract.ergoTreeHex)
           .filter(_.protocol == "sigmafi") shouldBe empty
       }

@@ -40,10 +40,10 @@ object SigmaFiBatchingConfig {
 }
 
 /**
- * The `sigmafi.bonds` block: terms the API puts on orders when a request leaves them out.
+ * The `sigmafi.bonds` block: lender reserve selected on fill when the request leaves it out.
  *
- * @param batchingFeeNanoErg the batching fee orders carry, the most a liquidator keeps from the
- *                           collateral of a bond that is not repaid. Never below the shipped fee floor
+ * @param batchingFeeNanoErg lender-funded reserve added above the order's collateral, refunded to the
+ *                           lender on repayment or available to a liquidator. Fill requests may override it.
  */
 case class SigmaFiBondsConfig(batchingFeeNanoErg: Long)
 

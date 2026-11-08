@@ -36,7 +36,7 @@ class SigmaFiBoxesSpec extends AnyPropSpec with SigmaFiFixtures {
     }
   }
 
-  property("bond: refuses a register at another type, or amounts that are not two") {
+  property("bond: refuses a register at another type, or amounts that are not four") {
     withCtx { ctx =>
       val b = bondUTXO(None, contractOf(miner(ctx)), maturity)
       SigmaFiBoxes.bond(nodeBox(ctx, b.withReg(3, ErgoValue.of(maturity.toLong)))) shouldBe None
@@ -78,7 +78,7 @@ class SigmaFiBoxesSpec extends AnyPropSpec with SigmaFiFixtures {
         read.schedule shouldBe schedule
         read.principalTokens shouldBe Seq(tokenA -> 500L)
         read.borrowerHash.toSeq shouldBe terms.borrowerHash.toSeq
-        (read.repayment, read.batchingFee, read.principalErg) shouldBe ((terms.repayment, terms.batchingFee, terms.principalErg))
+        (read.repayment, read.principalErg) shouldBe ((terms.repayment, terms.principalErg))
         SigmaFiBoxes.pairedBond(read.bondHash, read.principalTokens) shouldBe Some(Some(tokenA))
       }
     }
@@ -115,7 +115,7 @@ class SigmaFiBoxesSpec extends AnyPropSpec with SigmaFiFixtures {
 
   property("building: a term of the wrong type is refused, not built into a tree") {
     val t = SigmaFiContracts.template(SigmaFiTemplateKind.Order)
-    val values = SigmaFiContracts.sentinelTerms(SigmaFiTemplateKind.Order) + (SigmaFiContracts.MATURITY -> 5L)
+    val values = SigmaFiContracts.sentinelTerms(SigmaFiTemplateKind.Order) + (SigmaFiContracts.MATURITY -> 5)
     an[IllegalArgumentException] should be thrownBy t.withTerms(values)
   }
 
@@ -140,7 +140,7 @@ class SigmaFiBoxesSpec extends AnyPropSpec with SigmaFiFixtures {
       val order = nodeBox(ctx, UTXO(SigmaFiContracts.order(orderTerms(borrower, FixedMaturity(maturity))), 3 * Erg),
         0, "e1" * 32)
       val fillTx = "f2" * 32
-      val bond = SigmaFiBoxes.bond(nodeBox(ctx, bondUTXO(None, borrower, maturity, value = 3 * Erg, asset = ErgoId.create(order.boxId)),
+      val bond = SigmaFiBoxes.bond(nodeBox(ctx, bondUTXO(None, borrower, maturity, value = 3 * Erg + 50000000L, asset = ErgoId.create(order.boxId)),
         1, fillTx)).get
       def genesis(box: node.model.NodeBox, spentBy: Option[String]) =
         Some(IndexedBox(box, "", 1, 1L, spentTransactionId = spentBy))

@@ -44,7 +44,8 @@ class SigmaFiTransactionsSpec extends AnyPropSpec with SigmaFiFixtures {
       vault.getValue.toLong shouldBe bond.box.value - bond.batchingFee
       vault.getTokens.asScala.map(t => t.getId.toString -> t.getValue.toLong) shouldBe Seq(tokenB.toString -> 3L, tokenA.toString -> 9L)
       vault.getRegisters.asScala.map(_.toHex) shouldBe Seq(
-        ErgoValue.of(ErgoId.create(bond.boxId).getBytes).toHex, ErgoValue.of(bond.asset.getBytes).toHex)
+        ErgoValue.of(ErgoId.create(bond.boxId).getBytes).toHex, ErgoValue.of(bond.asset.getBytes).toHex,
+        ErgoValue.of(1.toByte).toHex)
       outs(1).getValue.toLong shouldBe bond.batchingFee
       l.feeBox.value shouldBe bond.batchingFee
       withClue("fee-less: everything the bond held is in the two outputs") { ergIn(ctx, l) shouldBe bond.box.value }
@@ -125,7 +126,7 @@ class SigmaFiTransactionsSpec extends AnyPropSpec with SigmaFiFixtures {
     client.execute { ctx =>
       Seq(None, Some(tokenA)).zipWithIndex.foreach { case (repayToken, index) =>
         val (bond, input) = bondAt(ctx, 30 + index, repayToken, nextBlock(ctx), Seq(Token(tokenB, 7L)))
-        val protocolInput = input.withCtxVar(0.toByte, ErgoValue.of(liq.bytes))
+        val protocolInput = input.withCtxVar(0.toByte, ErgoValue.of(liq.bytes)).withCtxVar(1.toByte, ErgoValue.of(0))
         val valid = SigmaFiTransactions.vaultBox(bond)
         val badSettlements = Seq(valid.copy(tokens = Seq.empty), valid.subValue(1L))
         badSettlements.foreach { settlement =>

@@ -29,11 +29,11 @@ trait SigmaFiFixtures extends ContractSpecBase {
   protected def nodeBox(ctx: BlockchainContext, utxo: UTXO, index: Int = 0, txId: String = "ab" * 32): NodeBox =
     LDNodeFixtures.nodeBox(ctx, utxo, index, txId)
 
-  /** The registers a bond carries: R4 asset, R5 borrower hash, R6 (repayment, fee), R7 maturity, R8 liquidation. */
-  protected def bondRegisters(asset: ErgoId, borrowerHash: Array[Byte], repayment: Long, fee: Long, maturity: Int,
+  /** R4 asset, R5 borrower hash, R6 (repayment, reserve, principal ERG, Long maturity), R7 principal tokens, R8 liquidation. */
+  protected def bondRegisters(asset: ErgoId, borrowerHash: Array[Byte], repayment: Long, fee: Long, maturity: Long,
                               liqHash: Array[Byte] = liq.hash): Seq[ErgoValue[_]] =
-    Seq(ErgoValue.of(asset.getBytes), ErgoValue.of(borrowerHash), ErgoValue.of(Array(repayment, fee)),
-      ErgoValue.of(maturity), ErgoValue.of(liqHash))
+    Seq(ErgoValue.of(asset.getBytes), ErgoValue.of(borrowerHash), ErgoValue.of(Array(repayment, fee, Erg, maturity)),
+      SigmaFiUserTransactions.principalValue(Seq.empty), ErgoValue.of(liqHash))
 
   protected def bondUTXO(repayToken: Option[ErgoId], borrower: Contract, maturity: Int, value: Long = 5 * Erg,
                          collateral: Seq[Token] = Seq.empty, repayment: Long = 2 * Erg, fee: Long = 50000000L,
@@ -46,11 +46,11 @@ trait SigmaFiFixtures extends ContractSpecBase {
                            fee: Long = 50000000L): ZCOrderTerms = {
     val repayToken = principalTokens.headOption.map(_._1)
     ZCOrderTerms(SigmaFiContracts.bond(repayToken).hashedPropBytes, hashOf(borrower), principalErg, principalTokens,
-      repayment, fee, schedule, liq.hash)
+      repayment, schedule, liq.hash)
   }
 
   protected def vaultUTXO(bondId: ErgoId, asset: ErgoId, value: Long = 2 * Erg, tokens: Seq[Token] = Seq.empty): UTXO =
-    UTXO(SigmaFiContracts.vault, value, tokens, Seq(ErgoValue.of(bondId.getBytes), ErgoValue.of(asset.getBytes)))
+    UTXO(SigmaFiContracts.vault, value, tokens, Seq(ErgoValue.of(bondId.getBytes), ErgoValue.of(asset.getBytes), ErgoValue.of(1.toByte)))
 
   /** `tree` with constant `index` replaced, built the way instances are, so its template hash is unchanged. */
   protected def forge(tree: ErgoTree, index: Int, value: Any): ErgoTree =

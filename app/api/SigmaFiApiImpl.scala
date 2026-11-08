@@ -67,8 +67,8 @@ class SigmaFiApiImpl @Inject()(node: NodeContext,
   override def cancelOrder(boxId: String, send: Boolean): Either[SFQuote, SFResult] =
     act(reads.cancelOrder(boxId, send = false), send, SigmaFiIntent.CancelOrder(boxId))
 
-  override def fillOrder(boxId: String, send: Boolean): Either[SFQuote, SFResult] =
-    act(reads.fillOrder(boxId, send = false), send, SigmaFiIntent.FillOrder(boxId))
+  override def fillOrder(boxId: String, send: Boolean, reserve: Option[String] = None): Either[SFQuote, SFResult] =
+    act(reads.fillOrder(boxId, send = false, reserve), send, SigmaFiIntent.FillOrder(boxId, reserve))
 
   override def repay(boxId: String, send: Boolean): Either[SFQuote, SFResult] =
     act(reads.repay(boxId, send = false), send, SigmaFiIntent.Repay(boxId))

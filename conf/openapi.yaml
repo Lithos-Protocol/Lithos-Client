@@ -4802,6 +4802,12 @@ paths:
         - sigmafi
       parameters:
         - $ref: '#/components/parameters/SFBoxId'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SFFillRequest'
       responses:
         '200':
           $ref: '#/components/responses/SigmaFiQuoted'
@@ -4817,7 +4823,8 @@ paths:
       description: >
         Lend the principal to the borrower. The fill mints two units with the order's box id as token id:
         one circulating claim to this wallet and one singleton locked in the bond. Whoever holds the claim
-        receives the repayment, or the collateral less its batching fee after maturity liquidation.
+        receives the repayment plus the unused reserve, or the collateral after maturity liquidation.
+        The lender funds the reserve above the borrower's full collateral value.
       operationId: fillSFOrder
       security:
         - ApiKeyAuth: []
@@ -4825,6 +4832,12 @@ paths:
         - sigmafi
       parameters:
         - $ref: '#/components/parameters/SFBoxId'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SFFillRequest'
       responses:
         '200':
           $ref: '#/components/responses/SigmaFiSent'
@@ -12178,8 +12191,7 @@ components:
         principalNanoErgs:
           type: string
           description: >-
-            nanoERG lent; for a token loan, only the principal box's floor. Absent for a bond whose order
-            could not be read.
+            Agreed nanoERG lent; for a token loan, the principal box's floor. Read directly from a bond's R6.
         principalToken:
           $ref: '#/components/schemas/SFTokenAmount'
         repayment:
@@ -12190,19 +12202,22 @@ components:
           description: The token a token loan is repaid in. Absent when repaid in ERG.
         collateralNanoErgs:
           type: string
+          description: Borrower collateral nanoERG, excluding the lender-funded reserve.
         collateralTokens:
           type: array
           items:
             $ref: '#/components/schemas/SFTokenAmount'
         maturityHeight:
           type: integer
+          format: int64
           description: Repayment is open strictly below it. Absent for an on-close order until it is filled.
         durationBlocks:
           type: integer
+          format: int64
           description: An on-close order's term, counted from its fill.
         batchingFee:
           type: string
-          description: The most of the collateral's nanoERG a liquidator keeps if the bond is not repaid.
+          description: Lender-funded reserve selected on fill; zero on unfilled orders. Refunded on repayment.
         liquidation:
           type: string
           description: The liquidation script's name. Absent when this client does not know it.
@@ -12250,6 +12265,7 @@ components:
           enum: [open, matured]
         blocksLeft:
           type: integer
+          format: int64
           description: Blocks before repayment closes. 0 once matured.
         borrowerIsMe:
           type: boolean
@@ -12493,6 +12509,14 @@ components:
           type: integer
           description: Next NFT-box offset, absent at the end or when history is omitted.
         timestampsComplete: {type: boolean}
+    SFFillRequest:
+      type: object
+      x-tags: sigmafi
+      description: Optional lender-funded reserve override. An empty body uses the configured default.
+      properties:
+        batchingFee:
+          type: string
+          description: Nonnegative nanoERG added above collateral. Defaults to sigmafi.bonds.batchingFeeNanoErg (50000000). Values below the automatic batcher floor produce a warning.
     SFOrderRequest:
       type: object
       x-tags: sigmafi
@@ -12515,13 +12539,16 @@ components:
           type: string
         maturityHeight:
           type: integer
+          format: int64
           description: At least 3 blocks above the current height.
         durationBlocks:
           type: integer
+          format: int64
           minimum: 30
         batchingFee:
           type: string
-          description: At least 50000000. Defaults to `sigmafi.bonds.batchingFeeNanoErg`.
+          deprecated: true
+          description: Rejected on order creation. The lender selects this reserve in SFFillRequest instead.
         liquidation:
           type: string
           default: MaturityLiquidation

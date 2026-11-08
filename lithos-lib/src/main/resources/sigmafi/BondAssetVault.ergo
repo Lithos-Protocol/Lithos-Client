@@ -8,6 +8,8 @@
     // R4: Coll[Byte] - Box id of the bond this box settles. Not read here; the bond pinned it.
     // R5: Coll[Byte] - Token Id of bond asset that claims this box. The bond pinned it to its own asset.
     //
+    // R6: Byte - settlement path: 0 repayment, 1 liquidation. Enforced by the bond, not this vault.
+    //
     // ASSUMPTIONS
     // - The bond asset came from a verified mint, so its supply is exactly 2, and the bond burned its
     //   own unit (the singleton) when it settled. Only one unit can ever be presented here.
