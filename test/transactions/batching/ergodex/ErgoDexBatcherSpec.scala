@@ -58,7 +58,9 @@ class ErgoDexBatcherSpec extends TestKit(ActorSystem("ergodex-batcher-spec", Erg
                         buildBudgetMs: Long = Batcher.DefaultBuildBudgetMs, extraPool: Option[NodeBox] = None,
                         maxAncestorTxs: Int = BatchingConfig.Default.maxAncestorTxs, scanIntervalMs: Long = 3600000L,
                         broadcastMempoolOrders: Boolean = BatchingConfig.Default.broadcastMempoolOrders,
-                        tracker: Option[PoolTracker] = None) {
+                        tracker: Option[PoolTracker] = None,
+                        handoff: Option[transactions.batching.arb.MachinaHandoff] = None,
+                        tokenBoxes: Seq[NodeBox] = Seq.empty) {
     val api: NodeApi = mock[NodeApi]
     val (nodeContext, _, _) = FakeNodeContext(api, numAddresses = 1)
 
@@ -104,8 +106,8 @@ class ErgoDexBatcherSpec extends TestKit(ActorSystem("ergodex-batcher-spec", Erg
       .thenAnswer { inv =>
         val nft = inv.getArgument[String](0)
         if (nft == poolNft || ErgoDexPool.parse(pool).exists(_.nft == nft)) Success(Seq(IndexedBox(pool, "", tip - 1, 2L)))
-        else Success(extraPool.filter(box => ErgoDexPool.parse(box).exists(_.nft == nft))
-          .map(IndexedBox(_, "", tip - 1, 3L)).toSeq)
+        else Success((extraPool.filter(box => ErgoDexPool.parse(box).exists(_.nft == nft)).toSeq ++
+          tokenBoxes.filter(_.assets.headOption.exists(_.tokenId == nft))).map(IndexedBox(_, "", tip - 1, 3L)))
       }
     when(api.boxesWithPoolByIds(any[Seq[String]])).thenAnswer { inv =>
       val wanted = inv.getArgument[Seq[String]](0).toSet
@@ -117,7 +119,7 @@ class ErgoDexBatcherSpec extends TestKit(ActorSystem("ergodex-batcher-spec", Erg
     val source: ActorRef = system.actorOf(Props(new ErgoDexBatcher(nodeContext,
       BatchingConfig.Default.copy(scanIntervalMs = scanIntervalMs, broadcast = broadcast, maxAncestorTxs = maxAncestorTxs,
         broadcastMempoolOrders = broadcastMempoolOrders),
-      servesCandidates, engine.ref, useTrueProp = false, buildBudgetMs, tracker)))
+      servesCandidates, engine.ref, useTrueProp = false, buildBudgetMs, tracker, handoff)))
 
     def offered(): Seq[CandidateBundle] = {
       val height = heights.incrementAndGet()
@@ -201,6 +203,138 @@ class ErgoDexBatcherSpec extends TestKit(ActorSystem("ergodex-batcher-spec", Erg
         f.stop()
       }
     }
+  }
+
+  /**
+   * The Machina grid-sells fixture and its ErgoDEX pool, with the LithosDex ERG/FAKU pool priced `ratio` times the
+   * order's ask, both tracked at the batcher's tip, and a source handing orders to `handoff` when given one.
+   */
+  private def lithosDexRouting(ratio: Double, handoff: Option[transactions.batching.arb.MachinaHandoff],
+                               vaultStands: Boolean = true): (Fixture, MachinaOrder, NodeBox) = {
+    val m = support.MachinaFixtures.gridSells
+    val order = MachinaOrder.parse(m.order).get
+    val (nodeContext, _, _) = FakeNodeContext(mock[NodeApi], numAddresses = 1)
+    val ld = nodeContext.getClient.execute(ctx => support.MachinaFixtures.lithosDexFakuPoolAt(ctx, order.ask.get * ratio))
+    val chain = new ScriptedChain
+    chain.extend(tip - 3, tip)
+    chain.indexed = tip
+    chain.scans(IndexedBox(m.pool, "", tip - 1, 1L), IndexedBox(ld, "", tip - 1, 2L))
+    val tracker = TrackerFixtures.tracker(chain)
+    TrackerFixtures.warmed(chain, tracker)
+    (new Fixture(initialOrder = m.order, initialPool = m.pool, tracker = Some(tracker), handoff = handoff,
+      tokenBoxes = if (vaultStands) Seq(vaultOf(ld)) else Seq.empty), order, ld)
+  }
+
+  /** The fee vault of the LithosDex pool `pool`: its deployment's vault script holding the vault NFT. */
+  private def vaultOf(pool: NodeBox): NodeBox = {
+    val contracts = transactions.batching.lithosdex.LDDeployments.verify(org.ergoplatform.appkit.NetworkType.MAINNET,
+      pool.ergoTree, pool.assets.map(a => a.tokenId -> a.amount)).get
+    NodeBox(id("6"), id("5"), 1000000L, 0, tip - 5, contracts.feeVault.ergoTreeHex,
+      Seq(NodeAsset(contracts.vaultNFT.toString, 1L)))
+  }
+
+  /** The bundles offered for a fresh height, and that height. */
+  private def offeredAt(f: Fixture): (Seq[CandidateBundle], Int) = {
+    val height = heights.incrementAndGet()
+    val requester = TestProbe()
+    requester.send(f.source, RequestBlockTxs(height, 8))
+    requester.expectMsgType[BlockTxsReady].bundles -> height
+  }
+
+  it should "leave a Machina order a LithosDex pool pays more for out of its run, for the arb stage to fill" in {
+    val handoff = new transactions.batching.arb.MachinaHandoff(active = true, Set.empty)
+    val (f, order, ld) = lithosDexRouting(1.5, Some(handoff))
+    awaitAssert({
+      val (bundles, height) = offeredAt(f)
+      bundles shouldBe empty
+      handoff.at(height).map(o => o.boxId -> o.poolNft) shouldBe Vector(order.boxId -> ld.assets.head.tokenId)
+    }, 30.seconds, 250.millis)
+    withClue("an order the arb stage could not build is skipped, by neither stage tried again for a while: ") {
+      handoff.refuse(order.boxId)
+      val (bundles, height) = offeredAt(f)
+      bundles shouldBe empty
+      handoff.at(height) shouldBe empty
+      val (later, next) = offeredAt(f)
+      later shouldBe empty
+      handoff.at(next) shouldBe empty
+    }
+    f.stop()
+  }
+
+  it should "keep a Machina order in its run while ErgoDEX pays more than any LithosDex pool" in {
+    val handoff = new transactions.batching.arb.MachinaHandoff(active = true, Set.empty)
+    val (f, order, _) = lithosDexRouting(1.02, Some(handoff))
+    val (bundles, height) = awaitAssert({
+      val (bundles, height) = offeredAt(f)
+      bundles should not be empty
+      bundles -> height
+    }, 30.seconds, 250.millis)
+    bundles.head.members.last.inputIds should contain(order.boxId)
+    handoff.at(height) shouldBe empty
+    f.stop()
+  }
+
+  it should "track a Machina order only a LithosDex pool fills, hand it over, and never broadcast it" in {
+    import node.MutationConversions._
+    import transactions.batching.arb.ArbFixtures
+    val handoff = new transactions.batching.arb.MachinaHandoff(active = true, Set.empty)
+    val (nodeContext, _, _) = FakeNodeContext(mock[NodeApi], numAddresses = 1)
+    // A limit order selling LIT, which trades only on LithosDex, at the real limit contract for LIT
+    val (canonical, litOrder, vault) = nodeContext.getClient.execute { ctx =>
+      val limit = MachinaContracts.templates.find(_.kind == MachinaKind.Limit).get
+      val sell = support.MachinaFixtures.limitSellOrder
+      val box = sell.copy(ergoTree = limit.treeHex(ArbFixtures.Lit), assets = Seq(NodeAsset(ArbFixtures.Lit, 1000000000L)),
+        additionalRegisters = NodeRegisters(sell.additionalRegisters.values.updated("R5",
+          org.ergoplatform.appkit.ErgoValue.of(8L).toHex)))
+      val contracts = transactions.batching.lithosdex.DexContracts(ctx)
+      (ArbFixtures.canonicalPool(ctx, 100000L * ArbFixtures.Erg, 10000000000000L),
+        box.copy(boxId = box.toInputUTXO(ctx).id.toString),
+        NodeBox(id("6"), id("5"), 1000000L, 0, tip - 5, contracts.feeVault.ergoTreeHex,
+          Seq(NodeAsset(contracts.vaultNFT.toString, 1L))))
+    }
+    val chain = new ScriptedChain
+    chain.extend(tip - 3, tip)
+    chain.indexed = tip
+    chain.scans(IndexedBox(canonical, "", tip - 1, 1L))
+    val tracker = TrackerFixtures.tracker(chain)
+    TrackerFixtures.warmed(chain, tracker)
+    val f = new Fixture(broadcast = true, initialOrder = litOrder, tracker = Some(tracker), handoff = Some(handoff),
+      scanIntervalMs = 1500L, tokenBoxes = Seq(vault))
+    awaitAssert({
+      val (bundles, height) = offeredAt(f)
+      bundles shouldBe empty
+      handoff.at(height).map(o => o.boxId -> o.poolNft) shouldBe Vector(litOrder.boxId -> ArbFixtures.CanonicalNft)
+    }, 30.seconds, 250.millis)
+    val passes = f.observations.get()
+    awaitAssert(f.observations.get() should be >= passes + 2, 30.seconds, 250.millis)
+    withClue("a broadcast pass neither sends it nor reads its LithosDex pool from the node: ") {
+      verify(f.api, times(0)).sendTransaction(anyString())
+      verify(f.api, times(0)).unspentBoxesByTokenId(org.mockito.ArgumentMatchers.eq(ArbFixtures.CanonicalNft),
+        any[Paging], any[SortDirection], any[MempoolOptions])
+    }
+    f.stop()
+  }
+
+  it should "route every Machina order through ErgoDEX, as before, with arb off" in {
+    val (f, order, _) = lithosDexRouting(1.5, None)
+    val bundle = f.offeredOnceTracked().head
+    bundle.members.last.inputIds should contain(order.boxId)
+    f.stop()
+  }
+
+  it should "not route a Machina order to a LithosDex pool whose fee vault does not stand" in {
+    val (f, order, _) = lithosDexRouting(1.5,
+      Some(new transactions.batching.arb.MachinaHandoff(active = true, Set.empty)), vaultStands = false)
+    f.offeredOnceTracked().head.members.last.inputIds should contain(order.boxId)
+    f.stop()
+  }
+
+  it should "not route a Machina order to a LithosDex pool either batcher denies" in {
+    val denied = support.MachinaFixtures.lithosDexFakuPool.assets.head.tokenId
+    val (f, order, _) = lithosDexRouting(1.5,
+      Some(new transactions.batching.arb.MachinaHandoff(active = true, Set(denied))))
+    f.offeredOnceTracked().head.members.last.inputIds should contain(order.boxId)
+    f.stop()
   }
 
   it should "answer within its build budget when a mempool observation never arrives" in {
@@ -480,12 +614,14 @@ class ErgoDexBatcherSpec extends TestKit(ActorSystem("ergodex-batcher-spec", Erg
       com.google.inject.Key.get(classOf[configs.NodeContext]),
       com.google.inject.Key.get(classOf[play.api.Configuration]),
       com.google.inject.Key.get(classOf[ActorRef], com.google.inject.name.Names.named("transaction-engine")),
-      com.google.inject.Key.get(classOf[PoolTracker]))
+      com.google.inject.Key.get(classOf[PoolTracker]),
+      com.google.inject.Key.get(classOf[transactions.batching.arb.MachinaHandoff]))
 
     val (nodeContext, _, _) = FakeNodeContext(mock[NodeApi], numAddresses = 1)
     val engine = TestProbe()
-    val batcher = system.actorOf(Props(classOf[ErgoDexBatcher], nodeContext,
-      play.api.Configuration(ErgoDexBatcherSpec.config), engine.ref, TrackerFixtures.tracker(new ScriptedChain)))
+    val configuration = play.api.Configuration(ErgoDexBatcherSpec.config)
+    val batcher = system.actorOf(Props(classOf[ErgoDexBatcher], nodeContext, configuration, engine.ref,
+      TrackerFixtures.tracker(new ScriptedChain), new transactions.batching.arb.MachinaHandoff(configuration)))
 
     // No scan has run yet, so the first request is answered with nothing
     val requester = TestProbe()

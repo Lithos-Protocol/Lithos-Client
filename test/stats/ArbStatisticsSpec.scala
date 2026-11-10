@@ -222,8 +222,8 @@ object ArbStatisticsSpec {
     val stake =
       if (fromArbAddress) arbStakeBox(ctx, wallet, 10 * Erg + ArbLeg.MinCarryValue)
       else stakeBox(ctx, wallet, 10 * Erg + ArbLeg.MinCarryValue)
-    val bundles = ArbCycles.build(ctx, wallet, index(ctx, pools), ArbBasis.Empty, stake, height, slots,
-      stake.value - ArbLeg.MinCarryValue, 1000000L, profitTo.getOrElse(wallet.contract),
+    val bundles = ArbCycles.build(ctx, wallet, index(ctx, pools), ArbBasis.Empty, Some(stake), Seq.empty, 1000000L,
+      height, slots, stake.value - ArbLeg.MinCarryValue, 1000000L, profitTo.getOrElse(wallet.contract),
       Deadline.now + 1.minute, Deadline.now + 1.minute, _ => true)
     require(bundles.size == cycles, s"expected $cycles cycles, built ${bundles.size}")
     (pools :+ stake, bundles.flatMap(_.members).map(m => NodeSync.blockTx(decoded(m))).toVector)

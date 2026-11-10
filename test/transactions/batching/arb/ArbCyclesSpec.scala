@@ -30,8 +30,9 @@ class ArbCyclesSpec extends AnyFlatSpec with Matchers with MockitoSugar {
 
   private def build(ctx: BlockchainContext, index: ArbIndex, stake: NodeBox, basis: ArbBasis = ArbBasis.Empty,
                     slots: Int = 8, reserve: String => Boolean = _ => true): Vector[CandidateBundle] =
-    ArbCycles.build(ctx, wallet, index, basis, stake, height, slots, stake.value - ArbLeg.MinCarryValue, 1000000L,
-      wallet.contract, Deadline.now + 1.minute, Deadline.now + 1.minute, reserve)
+    ArbCycles.build(ctx, wallet, index, basis, Some(stake), Seq.empty, 1000000L, height, slots,
+      stake.value - ArbLeg.MinCarryValue, 1000000L, wallet.contract, Deadline.now + 1.minute, Deadline.now + 1.minute,
+      reserve)
 
   private def decoded(tx: CandidateTx): NodeTransaction =
     NodeCodecs.transaction(new com.google.gson.JsonParser().parse(tx.json).getAsJsonObject)
@@ -269,8 +270,9 @@ class ArbCyclesSpec extends AnyFlatSpec with Matchers with MockitoSugar {
       val dear2 = nativePool(ctx, id(7), id(101), 1080 * Erg, 1000000000000L)
       remember(dear2)
       val stake = stakeBox(ctx, wallet, 100 * Erg + ArbLeg.MinCarryValue)
-      val bundles = ArbCycles.build(ctx, wallet, index(ctx, Seq(cheap, dear, dear2)), ArbBasis.Empty, stake, height, 4,
-        100 * Erg, 1000000L, wallet.contract, Deadline.now + 1.minute, Deadline.now + 1.minute, _ => true)
+      val bundles = ArbCycles.build(ctx, wallet, index(ctx, Seq(cheap, dear, dear2)), ArbBasis.Empty, Some(stake),
+        Seq.empty, 1000000L, height, 4, 100 * Erg, 1000000L, wallet.contract, Deadline.now + 1.minute,
+        Deadline.now + 1.minute, _ => true)
       bundles.size shouldBe 2
       val firstOuts = legs(bundles.head).flatMap(_.outputs).map(_.boxId).toSet
       val shared = legs(bundles(1)).map(_.inputs.head.boxId).filter(firstOuts.contains)

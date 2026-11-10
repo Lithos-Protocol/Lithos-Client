@@ -241,24 +241,31 @@ object MachinaFill {
    * The order input with the context vars its contract reads: the child's index, and for a grid the side, true
    * when the filler buys the box's tokens.
    */
-  def input(orderInput: InputUTXO, order: MachinaOrder, trade: MachinaTrade): InputUTXO = order.kind match {
-    case MachinaKind.Grid =>
-      orderInput.withCtxVar(0.toByte, ErgoValue.of(trade.boxSells)).withCtxVar(1.toByte, ErgoValue.of(ChildIndex))
-    case _ => orderInput.withCtxVar(0.toByte, ErgoValue.of(ChildIndex))
-  }
+  def input(orderInput: InputUTXO, order: MachinaOrder, trade: MachinaTrade): InputUTXO =
+    input(orderInput, order, trade.boxSells, ChildIndex)
+
+  /** The order input with its child at output `childIndex`; `boxSells` is the grid's side. */
+  def input(orderInput: InputUTXO, order: MachinaOrder, boxSells: Boolean, childIndex: Int): InputUTXO =
+    order.kind match {
+      case MachinaKind.Limit => orderInput.withCtxVar(0.toByte, ErgoValue.of(childIndex))
+      case _ => orderInput.withCtxVar(0.toByte, ErgoValue.of(boxSells)).withCtxVar(1.toByte, ErgoValue.of(childIndex))
+    }
+
+  def child(orderInput: InputUTXO, order: MachinaOrder, trade: MachinaTrade): UTXO =
+    child(orderInput, order, trade.childValue, trade.childTokens, trade.toOwner)
 
   /**
-   * The order's child, every register bound to the spent box's id. Recreated, it keeps the order's script, owner
-   * and prices (and a limit's side); paid out to the owner, it carries the id alone, in R4.
+   * The order's child holding `value` and `tokens` of the order's token, every register bound to the spent box's
+   * id. Recreated, it keeps the order's script, owner and prices (and a limit's side); paid out to the owner when
+   * `toOwner`, it carries the id alone, in R4.
    */
-  def child(orderInput: InputUTXO, order: MachinaOrder, trade: MachinaTrade): UTXO = {
+  def child(orderInput: InputUTXO, order: MachinaOrder, value: Long, tokens: Long, toOwner: Boolean): UTXO = {
     val binding = ErgoValue.of(orderInput.id.getBytes)
-    val tokens = if (trade.childTokens > 0) Seq(Token(ErgoId.create(order.tokenId), trade.childTokens)) else Seq.empty
-    if (trade.toOwner) UTXO(Contract(sigma.ast.ErgoTree.fromBytes(order.ownerPropBytes)), trade.childValue, tokens,
-      Seq(binding))
+    val held = if (tokens > 0) Seq(Token(ErgoId.create(order.tokenId), tokens)) else Seq.empty
+    if (toOwner) UTXO(Contract(sigma.ast.ErgoTree.fromBytes(order.ownerPropBytes)), value, held, Seq(binding))
     else {
       val kept = if (order.kind == MachinaKind.Limit) 3 else 2
-      UTXO(orderInput.contract, trade.childValue, tokens, orderInput.registers.take(kept) :+ binding)
+      UTXO(orderInput.contract, value, held, orderInput.registers.take(kept) :+ binding)
     }
   }
 }

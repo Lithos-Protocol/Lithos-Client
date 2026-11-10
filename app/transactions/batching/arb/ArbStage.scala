@@ -2,6 +2,7 @@ package transactions.batching.arb
 
 import akka.actor.{Actor, ActorRef}
 import configs.{ArbConfig, BatchingConfig, NodeContext}
+import node.model.NodeBox
 import org.slf4j.{Logger, LoggerFactory}
 import transactions.batching.lithosdex.LDDeployments
 import transactions.batching.tracking.{PoolDeployment, PoolTracker}
@@ -20,11 +21,14 @@ import scala.util.{Failure, Success, Try}
  *
  * Pools come from the pool tracker, which reads each block the candidate builds on as it arrives; a build waits
  * for it at most a quarter of its budget. The stake is the box at the arb address, checked once for the block
- * being built on. Either missing means no arb for that request; a later refresh at the same height tries again.
+ * being built on. Without the pools nothing is offered, and without the stake no cycle; a later refresh at the
+ * same height tries again.
  * A build whose inputs all match the last one's answers with that build's cycles, their stake outputs noted
- * again, rather than signing anew.
+ * again, rather than signing anew. Machina orders the ErgoDEX batcher hands over for the block are filled first,
+ * with or without a stake.
  *
  * @param buildBudgetMs how long one build may run; selection stops at half of it
+ * @param machina       where the ErgoDEX batcher hands over the Machina orders a LithosDex pool pays more for
  */
 class ArbStage(nodeContext: NodeContext,
                arb: ArbConfig,
@@ -33,7 +37,8 @@ class ArbStage(nodeContext: NodeContext,
                tracker: PoolTracker,
                stakes: ArbStake,
                useTrueProp: Boolean,
-               buildBudgetMs: Long) extends Actor {
+               buildBudgetMs: Long,
+               machina: MachinaHandoff = MachinaHandoff.idle) extends Actor {
 
   import ArbStage._
 
@@ -117,31 +122,39 @@ class ArbStage(nodeContext: NodeContext,
             case PoolDeployment.LithosDexToken(c) => LDDeployments.vaultStands(nodeApi, c)
             case _ => true
           }))
+        val basis = ArbBasis.of(basisBundles)
+        val orders = machina.at(blockHeight)
+        val wallet = nodeContext.getNodeWallet
+        val (selectUntil, buildUntil) = (started + (buildBudgetMs / 2).milliseconds, started + buildBudgetMs.milliseconds)
+        // A fill's takings need an output of their own, as a cycle's profit does
+        val minFill = math.max(ergoDex.minRevenueNanoErg, MinProfitOutput)
+        val minProfit = math.max(arb.minProfitNanoErg, MinProfitOutput)
+        def built(stake: Option[NodeBox], maxIn: Long, reserve: String => Boolean): Seq[CandidateBundle] =
+          nodeContext.getClient.execute(ctx => ArbCycles.build(ctx, wallet, found, basis, stake, orders, minFill,
+            blockHeight, limit, maxIn, minProfit, CandidateCapital.collectionContract(wallet, useTrueProp),
+            selectUntil, buildUntil, reserve, machina.refuse))
         stakes.at(blockHeight, tracked.headerId) match {
           case Some(stake) =>
-            val basis = ArbBasis.of(basisBundles)
             val maxIn = math.min(arb.stakeNanoErg, stake.value - ArbLeg.MinCarryValue)
-            val minProfit = math.max(arb.minProfitNanoErg, MinProfitOutput)
-            val key = BuildKey(blockHeight, tracked.headerId, stake.boxId, basis, limit, maxIn, minProfit)
+            val key = BuildKey(blockHeight, tracked.headerId, stake.boxId, basis, limit, maxIn, minProfit,
+              orders.map(o => o.boxId -> o.poolNft))
             def reserve(boxId: String): Boolean = stakes.handOn(stake.boxId, boxId, blockHeight)
             previousBuild.filter(b => b.key == key && b.routes.eq(found.routes) && b.reserved.forall(reserve)) match {
               case Some(same) => Outcome(Some(found), Some(same), same.bundles)
               case None =>
-                val wallet = nodeContext.getNodeWallet
-                val (selectUntil, buildUntil) = (started + (buildBudgetMs / 2).milliseconds,
-                  started + buildBudgetMs.milliseconds)
                 var reserved = Vector.empty[String]
-                val bundles = nodeContext.getClient.execute(ctx => ArbCycles.build(ctx, wallet, found, basis, stake,
-                  blockHeight, limit, maxIn, minProfit, CandidateCapital.collectionContract(wallet, useTrueProp),
-                  selectUntil, buildUntil, id => { val held = reserve(id); if (held) reserved :+= id; held }))
+                val bundles = built(Some(stake), maxIn, id => { val held = reserve(id); if (held) reserved :+= id; held })
                 if (bundles.nonEmpty)
-                  logger.info(s"Arb offers ${bundles.size} cycle(s) for block $blockHeight, " +
-                    s"${bundles.map(_.capital.map(_.value).sum).sum} nanoERG of profit")
+                  logger.info(s"Arb offers ${bundles.size} bundle(s) for block $blockHeight, " +
+                    s"${bundles.map(_.capital.map(_.value).sum).sum} nanoERG of takings and profit")
                 // A build a deadline cut short is not reused: a later one with time to spare may take more cycles
                 val complete = !selectUntil.isOverdue()
                 Outcome(Some(found), if (complete) Some(LastBuild(key, found.routes, reserved, bundles)) else None,
                   bundles)
             }
+          case None if orders.nonEmpty =>
+            logger.debug(s"No arb stake to build on for block $blockHeight; offering Machina fills only")
+            Outcome(Some(found), None, built(None, 0L, _ => false))
           case None =>
             logger.debug(s"No arb stake to build on for block $blockHeight; offering no cycles")
             Outcome(Some(found), None, Seq.empty)
@@ -160,9 +173,13 @@ object ArbStage {
   /** The least profit a cycle can take, since its profit needs an output of its own. */
   final val MinProfitOutput: Long = UTXO.MIN_CHANGE
 
-  /** Everything a build's cycles follow from besides the pool states, which `headerId` and the basis fix. */
+  /**
+   * Everything a build's fills and cycles follow from besides the pool states, which `headerId` and the basis fix:
+   * `machina` is each handed-over order's box id and pool.
+   */
   private[arb] final case class BuildKey(blockHeight: Int, headerId: String, stakeId: String, basis: ArbBasis,
-                                         limit: Int, maxIn: Long, minProfit: Long)
+                                         limit: Int, maxIn: Long, minProfit: Long,
+                                         machina: Vector[(String, String)] = Vector.empty)
 
   /**
    * A complete build: its key, the routes it priced, the stake outputs it had the wallet hold, in order, and the

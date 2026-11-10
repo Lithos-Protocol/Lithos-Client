@@ -50,4 +50,25 @@ object MachinaFixtures {
 
   /** A fill of the older limit contract, whose orders are no longer filled. Block 1,892,431. */
   lazy val oldLimit: Fill = load("old-limit-fill")
+
+  /**
+   * The LithosDex ERG/FAKU pool, the one LithosDex ERG pool of the fixtures' token, under its own deployment.
+   * Box `54307bbc9a30…`, block 1,912,934.
+   */
+  lazy val lithosDexFakuPool: NodeBox = NodeCodecs.indexedBox(json("ld-faku-pool")).box
+
+  /**
+   * [[lithosDexFakuPool]] holding 30 ERG in its reserves at `price` nanoERG a unit, its pending fees kept, under
+   * the id its new contents give it. Its script is the deployment's own, so a fill through it signs as through the
+   * live pool.
+   */
+  def lithosDexFakuPoolAt(ctx: org.ergoplatform.appkit.BlockchainContext, price: Double): NodeBox = {
+    import node.MutationConversions._
+    val box = lithosDexFakuPool
+    val pool = lithosdex.LDLiquidityPool(box.toInputUTXO(ctx))
+    val erg = 30000000000L
+    val moved = box.copy(value = erg + pool.pendingX,
+      assets = box.assets.updated(1, box.assets(1).copy(amount = (erg / price).toLong + pool.pendingY)))
+    moved.copy(boxId = moved.toInputUTXO(ctx).id.toString)
+  }
 }

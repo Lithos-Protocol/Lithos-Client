@@ -72,6 +72,13 @@ sealed trait ArbPool {
   /** The swap and the state it leaves, or None when the pool cannot fill it. */
   def swap(amountIn: Long, xIn: Boolean): Option[ArbSwap]
 
+  /**
+   * The least input that takes exactly `amountOut` out, and the state that leaves, or None when the pool cannot
+   * pay that much. Every pool's contract checks its curve with an inequality, so a swap may take less than the
+   * input buys; the rest stays in the pool.
+   */
+  def swapFor(amountOut: Long, xIn: Boolean): Option[ArbSwap]
+
   /** The same state, held by the box `boxId`. */
   def withBox(boxId: String): ArbPool
 
@@ -115,6 +122,21 @@ final case class ErgoDexArbPool(state: ErgoDexPool) extends ArbPool {
 
   override def swap(amountIn: Long, xIn: Boolean): Option[ArbSwap] =
     afterSwap(amountIn, xIn).map { case (out, next) => ArbSwap(this, amountIn, xIn, out, copy(state = next)) }
+
+  /** The least input the pool's check `out · (in·1000 + Δ·fee) ≤ reserveOut · Δ · fee` accepts, rounded up. */
+  override def swapFor(amountOut: Long, xIn: Boolean): Option[ArbSwap] = {
+    val (in, out) = if (xIn) (state.reservesX, state.reservesY) else (state.reservesY, state.reservesX)
+    if (amountOut <= 0L || amountOut >= out) None
+    else Try {
+      val f = BigInt(state.feeNum)
+      val needed = BigInt(amountOut) * in * transactions.batching.ergodex.ErgoDexContracts.FeeDenominator
+      val cost = (needed + f * (out - amountOut) - 1) / (f * (out - amountOut))
+      if (!cost.isValidLong) None
+      else Some(state.afterSwap(cost.toLong, amountOut, baseIsX = xIn))
+        .filter(next => next.reservesX > next.minReservesX && next.reservesY > 0)
+        .map(next => ArbSwap(this, cost.toLong, xIn, amountOut, copy(state = next)))
+    }.toOption.flatten
+  }
 
   /** Refuses a swap that would take a native pool's ERG below the storage rent it must keep. */
   private def afterSwap(amountIn: Long, xIn: Boolean): Option[(Long, ErgoDexPool)] = {
@@ -167,6 +189,15 @@ final case class LithosDexArbPool(state: LDLiquidityPool, contracts: LDContracts
         .map(next => ArbSwap(this, amountIn, xIn, q.amountOut, copy(state = next)))
     }.toOption.flatten
 
+  override def swapFor(amountOut: Long, xIn: Boolean): Option[ArbSwap] =
+    if (amountOut <= 0L) None
+    else Try {
+      state.simSwapForOutput(amountOut, xIn).filter(_.isExecutable).map(_.copy(amountOut = amountOut))
+        .map(q => q -> state.afterSwap(q))
+        .filter { case (_, next) => next.boxValue > LDHelpers.MIN_RENT && next.reservesX > 0L && next.reservesY > 0L }
+        .map { case (q, next) => ArbSwap(this, q.amountIn, xIn, amountOut, copy(state = next)) }
+    }.toOption.flatten
+
   override def marginal(xIn: Boolean): Double =
     ArbPool.sideThenCurve(if (xIn) state.ergFeeNum else state.tokenFeeNum, state.dexFeeNum,
       if (xIn) state.reservesX else state.reservesY, if (xIn) state.reservesY else state.reservesX)
@@ -209,6 +240,15 @@ final case class LithosDexT2TArbPool(state: LDT2TLiquidityPool, contracts: LDT2T
       else Some(state.afterSwap(q))
         .filter(next => next.reservesX > 0L && next.reservesY > 0L)
         .map(next => ArbSwap(this, amountIn, xIn, q.amountOut, copy(state = next)))
+    }.toOption.flatten
+
+  override def swapFor(amountOut: Long, xIn: Boolean): Option[ArbSwap] =
+    if (amountOut <= 0L) None
+    else Try {
+      state.simSwapForOutput(amountOut, xIn).filter(_.isExecutable).map(_.copy(amountOut = amountOut))
+        .map(q => q -> state.afterSwap(q))
+        .filter { case (_, next) => next.reservesX > 0L && next.reservesY > 0L }
+        .map { case (q, next) => ArbSwap(this, q.amountIn, xIn, amountOut, copy(state = next)) }
     }.toOption.flatten
 
   override def marginal(xIn: Boolean): Double =

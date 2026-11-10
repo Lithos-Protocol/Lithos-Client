@@ -289,6 +289,16 @@ private[stats] object BatchingStatistics {
         }
       }
     }
+    // A Machina fill through an ERG pool of `token`: the gap is what the pool and the order's child leave between
+    // them. Its child is the order recreated or its owner paid out, at output 1. Counted as ErgoDEX work through
+    // either DEX's pools, since the order is ErgoDEX's batcher's to route.
+    def machina(token: String): Vector[BatchingFee] = inputs(1).toVector.flatMap { input =>
+      MachinaOrder.parse(box(input)).filter(_.tokenId == token).toVector.flatMap { order =>
+        tx.outputs.lift(1).map(_.ergoTree)
+          .filter(tree => tree == input.ergoTree || tree == Hex.toHexString(order.ownerPropBytes))
+          .toVector.flatMap(child => result(1, child, 1, provisionIn = false, provisionOut = false, "ergodex", None))
+      }
+    }
     ErgoDexPool.parse(box(pool)) match {
       case Some(before) =>
         inputs(1).toVector.flatMap { input =>
@@ -300,17 +310,10 @@ private[stats] object BatchingStatistics {
                 "ergodex", Some(order.dexFee(quote)))
             }
           }
-          // A Machina fill through the pool: the gap is what the pool and the order's child leave between them.
-          // Its child is the order recreated or its owner paid out, at output 1.
-          lazy val machina = MachinaOrder.parse(box(input)).filter(_.tokenId == before.yId).toVector.flatMap { order =>
-            tx.outputs.lift(1).map(_.ergoTree)
-              .filter(tree => tree == input.ergoTree || tree == Hex.toHexString(order.ownerPropBytes))
-              .toVector.flatMap(child => result(1, child, 1, provisionIn = false, provisionOut = false, "ergodex", None))
-          }
-          if (ergoDex.nonEmpty) ergoDex else machina
+          if (ergoDex.nonEmpty) ergoDex else machina(before.yId)
         }
       case None if lithosDexPool(pool, network) =>
-        Vector(1, 2).flatMap { at =>
+        val orders = Vector(1, 2).flatMap { at =>
           inputs.lift(at).flatten.toVector.flatMap { input =>
             LithosDexOrder.parse(box(input)).filter(o => nft.contains(o.poolNft)).toVector.flatMap {
               case order: LithosDexOrder.Deposit if at == 1 && tx.outputs.size > 2 =>
@@ -326,6 +329,8 @@ private[stats] object BatchingStatistics {
             }
           }
         }
+        // An ERG pool's token is its second token
+        if (orders.nonEmpty) orders else pool.assets.lift(1).toVector.flatMap(t => machina(t.id.toString))
       // A token/token pool's orders take the same positions as an ERG/token pool's, and pay the same ERG fee.
       case None if lithosDexT2TPool(pool) =>
         Vector(1, 2).flatMap { at =>

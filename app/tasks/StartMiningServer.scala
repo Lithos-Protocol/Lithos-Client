@@ -41,7 +41,8 @@ class StartMiningServer @Inject()(system: ActorSystem, config: Configuration,
                                   @Named("sigmafi-batcher") sigmaFiBatcher: ActorRef,
                                   @Named("stats-collector") statsCollector: ActorRef,
                                   poolTracker: transactions.batching.tracking.PoolTracker,
-                                  arbStakes: transactions.batching.arb.ArbStake) {
+                                  arbStakes: transactions.batching.arb.ArbStake,
+                                  machinaHandoff: transactions.batching.arb.MachinaHandoff) {
 
   val logger: Logger = LoggerFactory.getLogger("StartMiningServer")
 
@@ -125,8 +126,8 @@ class StartMiningServer @Inject()(system: ActorSystem, config: Configuration,
             system.actorOf(akka.actor.Props(new transactions.batching.arb.ArbStage(nodeConfig, ArbConfig(config),
               ergoDexBatching, denied, poolTracker, arbStakes,
               stratumParams.candidate.useTruePropCollection,
-              transactions.batching.arb.ArbStage.buildBudgetMs(transactions.batching.Batcher.buildBudgetMs(config)))),
-              "arb-stage")))
+              transactions.batching.arb.ArbStage.buildBudgetMs(transactions.batching.Batcher.buildBudgetMs(config)),
+              machinaHandoff)), "arb-stage")))
         }
 
         val server = new MiningStratumServer(

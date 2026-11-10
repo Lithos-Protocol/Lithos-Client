@@ -107,6 +107,36 @@ class BatchingStatisticsSpec extends AnyFlatSpec with Matchers {
     }
   }
 
+  it should "count a Machina fill the arb stage signed through a LithosDex ERG pool under ergodex, at its gap" in {
+    import node.MutationConversions._
+    val fake = FakeNodeContext()
+    val wallet = fake._3
+    fake._1.getClient.execute { ctx =>
+      support.MachinaFixtures.fills.foreach { m =>
+        withClue(m.name) {
+          val live = transactions.batching.ergodex.MachinaOrder.parse(m.order).get
+          val pool = support.MachinaFixtures.lithosDexFakuPoolAt(ctx,
+            if (m.boxSells) live.ask.get * 1.5 else live.bid.get / 1.5)
+          val order = live.routedThrough(pool.assets.head.tokenId)
+          val state = transactions.batching.arb.ArbFixtures.entry(ctx, pool).pool
+          val fill = transactions.batching.arb.ArbMachina.best(order, state).get
+          val signed = transactions.batching.arb.ArbMachina.build(ctx, wallet, fill, pool.toInputUTXO(ctx),
+            wallet.contract, 1913000)
+          val body = node.rest.NodeCodecs.transaction(new com.google.gson.JsonParser()
+            .parse(transactions.candidate.BlockTxMessages.CandidateTx.signed(signed, "arb").json).getAsJsonObject)
+          val tx = NodeSync.blockTx(body)
+          val block = BlockInfo("block", 1913000, Seq(tx),
+            resolvedInputs = Seq(pool, m.order).map(b => b.boxId -> NodeSync.txOutput(b)).toMap)
+          val result = BatchingStatistics.read(block, tx, NetworkType.MAINNET, wallet.contract.ergoTreeHex)
+          result.map(f => (f.protocol, f.orderId, f.grossNanoErg, f.transactionFeeNanoErg, f.local)) shouldBe
+            Vector(("ergodex", m.order.boxId, fill.gap.toString, "0", true))
+          BatchingStatistics.read(block, tx, NetworkType.MAINNET, Contract.SIGMA_FALSE.ergoTreeHex).map(_.local) shouldBe
+            Vector(false)
+        }
+      }
+    }
+  }
+
   it should "measure the configured LithosDex executor fee separately from the pool's own fees" in {
     val fake = FakeNodeContext()
     fake._1.getClient.execute { ctx =>

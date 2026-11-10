@@ -127,4 +127,48 @@ class ArbStageSpec extends TestKit(ActorSystem("arb-stage-spec", ArbStageSpec.co
       probe.expectMsgType[BlockTxsReady].bundles shouldBe empty
     }
   }
+
+  it should "fill the Machina orders handed over for the block, with no stake at the arb address" in {
+    import node.model.{IndexedBox, MempoolOptions, NodeAsset, NodeBox, Paging, SortDirection}
+    import org.mockito.ArgumentMatchers.{any, eq => is}
+    val chain = new ScriptedChain
+    val api = chain.api
+    val (nodeContext, _, wallet) = FakeNodeContext(api, numAddresses = 1)
+    val gridSells = support.MachinaFixtures.gridSells
+    val live = transactions.batching.ergodex.MachinaOrder.parse(gridSells.order).get
+    val ld = nodeContext.getClient.execute(ctx => support.MachinaFixtures.lithosDexFakuPoolAt(ctx, live.ask.get * 1.5))
+    chain.extend(tip - 1, tip)
+    chain.indexed = tip
+    chain.scans(LDNodeFixtures.indexed(ld, tip - 5))
+    when(api.indexerEnabled).thenReturn(true)
+    when(api.boxById(anyString())).thenReturn(Success(None))
+    // The pool's fee vault stands, as its deployment's own script holding its NFT
+    val contracts = transactions.batching.lithosdex.LDDeployments.verify(org.ergoplatform.appkit.NetworkType.MAINNET,
+      ld.ergoTree, ld.assets.map(a => a.tokenId -> a.amount)).get
+    val vault = NodeBox(id(61), id(62), 1000000L, 0, tip - 5, contracts.feeVault.ergoTreeHex,
+      Seq(NodeAsset(contracts.vaultNFT.toString, 1L)))
+    when(api.unspentBoxesByTokenId(is(contracts.vaultNFT.toString), any[Paging], any[SortDirection],
+      any[MempoolOptions])).thenReturn(Success(Seq(IndexedBox(vault, "", tip - 5, 9L))))
+
+    val handoff = new MachinaHandoff(active = true, Set.empty)
+    val order = live.routedThrough(ld.assets.head.tokenId)
+    handoff.offer(tip + 1, Seq(order))
+    val stakes = new ArbStake(() => api, stakeContract(wallet), nodeContext.getNetwork, 10 * Erg)
+    val stage = system.actorOf(Props(new ArbStage(nodeContext, ArbConfig.Default.copy(enabled = true),
+      BatchingConfig.Default, Set.empty, TrackerFixtures.tracker(chain), stakes, useTrueProp = false,
+      buildBudgetMs = 10000L, machina = handoff)))
+    val probe = TestProbe()
+    stage ! PrepareBlockTxs(tip + 1, 8, chain.header(tip).id)
+    awaitAssert({
+      probe.send(stage, RequestArbTxs(tip + 1, 8, refresh = false, Seq.empty))
+      val bundles = probe.expectMsgType[BlockTxsReady].bundles
+      bundles.map(_.members.map(_.inputIds)) shouldBe Seq(Vector(Set(ld.boxId, order.boxId)))
+    }, 30.seconds, 300.millis)
+    stakes.current shouldBe None
+    withClue("orders offered for another block are not filled in this one: ") {
+      handoff.offer(tip + 2, Seq(order))
+      probe.send(stage, RequestArbTxs(tip + 1, 8, refresh = true, Seq.empty))
+      probe.expectMsgType[BlockTxsReady].bundles shouldBe empty
+    }
+  }
 }
