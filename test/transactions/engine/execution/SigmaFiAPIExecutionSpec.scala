@@ -351,6 +351,61 @@ class SigmaFiAPIExecutionSpec extends AnyPropSpec with SigmaFiFixtures with Mock
     }
   }
 
+  property("repay: warns while two blocks or fewer can carry the repayment, in the quote and the send's result") {
+    client.execute { ctx =>
+      // The next block is tip + 1, and a repayment counts only in a block below maturity
+      val bonds = (1 to 4).map(left => left -> nodeBox(ctx, bondUTXO(None, wallet.contract, tip + 1 + left), 30 + left))
+      val f = new Fixture(bonds.map(_._2): _*)
+      // Spelled out rather than taken from the warning's own function, so a moved threshold fails here
+      def late(left: Int): Seq[String] = Seq(s"Only $left block(s) can still carry this repayment: it counts only " +
+        s"in a block below height ${tip + 1 + left}. If it is not mined by then, it fails and the bond can be liquidated.")
+      bonds.foreach { case (left, box) =>
+        withClue(s"$left block(s) left: ") {
+          f.execution.repay(box.boxId, send = false).left.get.warnings shouldBe (if (left <= 2) late(left) else Seq.empty)
+        }
+      }
+
+      // Sent through the real broadcast boundary, an engine stand-in answering its observation and pin
+      val system = akka.actor.ActorSystem("sigmafi-repay-send")
+      try {
+        val anchor = "cc" * 32
+        val engine = akka.testkit.TestProbe()(system)
+        engine.setAutoPilot(new akka.testkit.TestActor.AutoPilot {
+          def run(sender: ActorRef, msg: Any): akka.testkit.TestActor.AutoPilot = {
+            msg match {
+              case state.synchronization.CompleteMempool.Refresh =>
+                sender ! state.synchronization.CompleteMempool.Observation(1L, Some(state.synchronization.CompleteMempool
+                  .Snapshot(anchor, Set.empty, Set.empty, System.nanoTime())), None)
+              case _: transactions.engine.wallet.EngineWalletMessages.PinEngineInputs => sender ! true
+              case _ => ()
+            }
+            this
+          }
+        })
+        when(f.api.info()).thenReturn(Success(support.ChainFixtures.infoAt(tip).copy(bestFullHeaderId = Some(anchor))))
+        when(f.api.sendTransaction(anyString())).thenAnswer { inv =>
+          Success("\"" + """"id"\s*:\s*"([0-9a-f]{64})"""".r.findFirstMatchIn(inv.getArgument[String](0)).get.group(1) + "\"")
+        }
+        var funded = 0
+        val funding = new EngineFunding(engine.ref, 5.seconds, ExecutionContext.global) {
+          override def reserveAvoiding(value: Long, tokens: Seq[Token], avoidTokens: Set[String]) = {
+            funded += 1
+            new transactions.engine.wallet.FundingAllocation(s"repay-$funded", Seq(UTXO(wallet.contract, 10 * Erg)
+              .toInput(ctx, org.ergoplatform.sdk.ErgoId.create("f1" * 32), funded.toShort)), this)
+          }
+        }
+        val snapshot = state.synchronization.CompleteMempool.Snapshot(anchor, Set.empty, Set.empty, System.nanoTime())
+        bonds.filter(b => b._1 == 1 || b._1 == 3).foreach { case (left, box) =>
+          withClue(s"sent with $left block(s) left: ") {
+            val sent = f.sending(snapshot, funding).repay(box.boxId, send = true).right.get
+            sent.outcome shouldBe "accepted"
+            sent.warnings shouldBe (if (left == 1) late(1) else Seq.empty)
+          }
+        }
+      } finally akka.testkit.TestKit.shutdownActorSystem(system)
+    }
+  }
+
   property("repayment quotes return collateral without counting the bond singleton") {
     client.execute { ctx =>
       val box = nodeBox(ctx, bondUTXO(None, wallet.contract, tip + 100, collateral = Seq(Token(tokenB, 7L))))

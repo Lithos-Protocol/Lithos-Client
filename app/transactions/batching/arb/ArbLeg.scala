@@ -19,15 +19,32 @@ final case class ArbCarry(value: Long, tokens: Seq[Token]) {
 }
 
 /**
+ * The kind every transaction of an arb-stage bundle carries in the block package, so the package says what each
+ * bundle is and a refused candidate which builder made it. All four come from the `arb` candidate source.
+ */
+object ArbKind {
+  /** A pool cycle whose every leg swaps through an ErgoDEX pool. */
+  final val ErgoDexCycle = "arb"
+  /** A pool cycle with at least one leg through a LithosDex pool. */
+  final val LithosDexCycle = "arb-lithosdex"
+  /** A Machina order filled through a LithosDex ERG pool, with no stake. */
+  final val MachinaFill = "arb-machina"
+  /** A Machina token/token grid's fill and the sale of its gap, both transactions. */
+  final val Grid = "arb-grid"
+
+  /** A pool cycle's kind, from the pools its legs swap through. */
+  def cycle(pools: Seq[ArbPool]): String =
+    if (pools.exists(p => p.kind == ArbPoolKind.LithosDexNative || p.kind == ArbPoolKind.LithosDexToken)) LithosDexCycle
+    else ErgoDexCycle
+}
+
+/**
  * One direct swap: the pool at input 0 and its successor at output 0, as every pool kind requires, then the
  * carry box. The carry inputs follow the pool, and output 1 takes everything they held after the swap, less
  * any profit split off to output 2, so a chain of legs spends one box per leg and each leg balances to zero
  * change. With no miner fee the leg suits this miner's own block; a broadcast pays its fee from the carry.
  */
 object ArbLeg {
-
-  /** Named so a refused candidate says which builder produced the offending transaction. */
-  final val Kind = "arb"
 
   /**
    * The least ERG a carry box keeps. A leg that buys tokens holds them in the carry box, so its ERG funds that

@@ -51,7 +51,8 @@ class MachinaSpec extends AnyFlatSpec with Matchers with MockitoSugar {
   }
 
   "A live Machina order" should "parse as its kind, trading the token of the pool it was filled through" in {
-    val kinds = Map(limitBuys -> MachinaKind.Limit, gridSells -> MachinaKind.Grid, gridBuys -> MachinaKind.Grid)
+    val kinds = Map(limitBuys -> MachinaKind.Limit, gridSells -> MachinaKind.Grid, gridBuys -> MachinaKind.Grid,
+      gridV2Sells -> MachinaKind.Grid)
     fills.foreach { f =>
       withClue(f.name) {
         val (order, pool) = parsed(f)
@@ -116,6 +117,50 @@ class MachinaSpec extends AnyFlatSpec with Matchers with MockitoSugar {
             }
         }
       }
+    }
+  }
+
+  "A grid on the ErgoTree version 2 header" should "parse as the current grid, its tree the pinned one but for the version" in {
+    val grid = MachinaContracts.templates.find(_.kind == MachinaKind.Grid).get
+    Seq(gridV2Order, gridV2Sells.order).foreach { box =>
+      withClue(box.boxId) {
+        val order = MachinaOrder.parse(box).get
+        order.kind shouldBe MachinaKind.Grid
+        val pinned = grid.treeHex(order.tokenId)
+        // Byte 0 is the header: 0x19 is version 1, 0x1a version 2, both with constants segregated and a size
+        box.ergoTree.take(2) shouldBe "1a"
+        pinned.take(2) shouldBe "19"
+        box.ergoTree.drop(2) shouldBe pinned.drop(2)
+        (ErgoTree.fromHex(box.ergoTree).version.toInt, ErgoTree.fromHex(pinned).version.toInt) shouldBe ((2, 1))
+      }
+    }
+    val live = MachinaOrder.parse(gridV2Order).get
+    (live.tokens, live.ask, live.bid) shouldBe ((119800L, Some(1000000L), Some(10000L)))
+  }
+
+  it should "not be parsed under any other version, nor on the limit contract, where no live order carries it" in {
+    def templateHash(tree: String) = Hex.toHexString(Blake2b256(ErgoTree.fromHex(tree).template))
+    // Version 3 evaluates some operations differently, so it is not the same contract; only the header refuses it
+    val v3 = "1b" + gridV2Order.ergoTree.drop(2)
+    templateHash(v3) shouldBe templateHash(gridV2Order.ergoTree)
+    MachinaOrder.parse(gridV2Order.copy(ergoTree = v3)) shouldBe None
+    MachinaOrder.parse(gridV2Order) should not be empty
+    val limitV2 = "1a" + limitSellOrder.ergoTree.drop(2)
+    templateHash(limitV2) shouldBe templateHash(limitSellOrder.ergoTree)
+    MachinaOrder.parse(limitSellOrder.copy(ergoTree = limitV2)) shouldBe None
+    MachinaOrder.parse(limitSellOrder) should not be empty
+  }
+
+  it should "be filled through its pool and signed against its own tree, its child on that same tree" in {
+    nodeContext.getClient.execute { ctx =>
+      val (order, pool) = parsed(gridV2Sells)
+      val fill = ErgoDexExecution.price(order, pool, 0L).get
+      fill.revenue should be >= gridV2Sells.gap
+      val signed = sign(ctx, gridV2Sells, fill, 0L)
+      signed.getSignedInputs.get(1).getId.toString shouldBe gridV2Sells.order.boxId
+      val child = signed.getOutputsToSpend.get(1)
+      child.getErgoTree.bytesHex shouldBe gridV2Sells.order.ergoTree
+      child.getErgoTree.version.toInt shouldBe 2
     }
   }
 

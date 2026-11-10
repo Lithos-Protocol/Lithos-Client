@@ -57,13 +57,14 @@ class ArbCyclesSpec extends AnyFlatSpec with Matchers with MockitoSugar {
   /**
    * The shape every cycle bundle has, whatever its pools: checked field by field off the signed bodies.
    *
+   * @param kind      what every leg is named in the block package: a cycle through any LithosDex pool is apart
    * @param stakeTree the script the stake came from, where every carry and the returned stake must sit
    */
-  private def checkCycle(bundle: CandidateBundle, stakeIn: String, poolBoxes: Seq[String],
+  private def checkCycle(bundle: CandidateBundle, stakeIn: String, poolBoxes: Seq[String], kind: String,
                          stakeTree: String = wallet.contract.ergoTreeHex): Unit = {
     val txs = legs(bundle)
     txs.size shouldBe poolBoxes.size
-    bundle.members.foreach(_.kind shouldBe ArbLeg.Kind)
+    bundle.members.map(_.kind) shouldBe Vector.fill(txs.size)(kind)
     txs.zip(poolBoxes).foreach { case (tx, pool) => tx.inputs.head.boxId shouldBe pool }
     txs.head.inputs.map(_.boxId).tail shouldBe Seq(stakeIn)
     txs.sliding(2).foreach {
@@ -107,7 +108,7 @@ class ArbCyclesSpec extends AnyFlatSpec with Matchers with MockitoSugar {
       val stake = stakeBox(ctx, wallet, stakeValue)
       val bundles = build(ctx, index(ctx, Seq(cheap, dear)), stake, slots = 2)
       bundles.size shouldBe 1
-      checkCycle(bundles.head, stake.boxId, Seq(cheap.boxId, dear.boxId))
+      checkCycle(bundles.head, stake.boxId, Seq(cheap.boxId, dear.boxId), ArbKind.ErgoDexCycle)
       bundles.head.packageParents shouldBe empty
     }
   }
@@ -124,7 +125,8 @@ class ArbCyclesSpec extends AnyFlatSpec with Matchers with MockitoSugar {
       val bundles = build(ctx, index(ctx, Seq(canonical, litRsnPool, rsn)), stake, slots = 3)
       bundles.size shouldBe 1
       // Three legs, so two carries hold tokens on the way; each is at the arb address, never at the wallet's
-      checkCycle(bundles.head, stake.boxId, Seq(canonical.boxId, litRsnPool.boxId, rsn.boxId), arbTree)
+      checkCycle(bundles.head, stake.boxId, Seq(canonical.boxId, litRsnPool.boxId, rsn.boxId), ArbKind.LithosDexCycle,
+        arbTree)
       val txs = legs(bundles.head)
       txs.init.foreach(_.outputs(1).assets should not be empty)
       txs.flatMap(_.outputs).filter(_.ergoTree == wallet.contract.ergoTreeHex).map(_.boxId) shouldBe
@@ -141,8 +143,9 @@ class ArbCyclesSpec extends AnyFlatSpec with Matchers with MockitoSugar {
       val bundles = build(ctx, index(ctx, Seq(p1, p2, q1, q2)), stake, slots = 4)
       bundles.size shouldBe 2
       val first = legs(bundles.head)
-      checkCycle(bundles.head, stake.boxId, first.map(_.inputs.head.boxId), arbTree)
-      checkCycle(bundles(1), first.last.outputs(1).boxId, legs(bundles(1)).map(_.inputs.head.boxId), arbTree)
+      checkCycle(bundles.head, stake.boxId, first.map(_.inputs.head.boxId), ArbKind.ErgoDexCycle, arbTree)
+      checkCycle(bundles(1), first.last.outputs(1).boxId, legs(bundles(1)).map(_.inputs.head.boxId), ArbKind.ErgoDexCycle,
+        arbTree)
       parentsDeclared(bundles)
     }
   }
@@ -157,7 +160,7 @@ class ArbCyclesSpec extends AnyFlatSpec with Matchers with MockitoSugar {
       idx.routes.map(_.hops.size).distinct shouldBe Vector(3)
       val bundles = build(ctx, idx, stake, slots = 3)
       bundles.size shouldBe 1
-      checkCycle(bundles.head, stake.boxId, Seq(canonical.boxId, litRsnPool.boxId, rsn.boxId))
+      checkCycle(bundles.head, stake.boxId, Seq(canonical.boxId, litRsnPool.boxId, rsn.boxId), ArbKind.LithosDexCycle)
     }
   }
 
@@ -174,7 +177,25 @@ class ArbCyclesSpec extends AnyFlatSpec with Matchers with MockitoSugar {
         ArbPoolKind.LithosDexNative, ArbPoolKind.LithosDexToken)
       val bundles = build(ctx, idx, stake, slots = 4)
       bundles.size shouldBe 1
-      checkCycle(bundles.head, stake.boxId, Seq(a.boxId, aRsn.boxId, litRsnPool.boxId, canonical.boxId))
+      checkCycle(bundles.head, stake.boxId, Seq(a.boxId, aRsn.boxId, litRsnPool.boxId, canonical.boxId),
+        ArbKind.LithosDexCycle)
+    }
+  }
+
+  "A cycle's kind" should "be arb through ErgoDEX pools of either shape, and arb-lithosdex with any LithosDex pool" in {
+    nodeContext.getClient.execute { ctx =>
+      val native = entry(ctx, nativePool(ctx, id(4), id(104), 1000 * Erg, 1000000000000L)).pool
+      val token = entry(ctx, tokenPool(ctx, id(5), id(104), Rsn, 10000000000000L, 100000L)).pool
+      val ld = entry(ctx, canonicalPool(ctx, 100000 * Erg, 10000000000000L)).pool
+      val ldToken = entry(ctx, litRsnPool).pool
+      Seq(native, token, ld, ldToken).map(_.kind) shouldBe Seq(ArbPoolKind.ErgoDexNative, ArbPoolKind.ErgoDexToken,
+        ArbPoolKind.LithosDexNative, ArbPoolKind.LithosDexToken)
+      ArbKind.cycle(Seq(native, token)) shouldBe ArbKind.ErgoDexCycle
+      ArbKind.cycle(Seq(native, ld)) shouldBe ArbKind.LithosDexCycle
+      ArbKind.cycle(Seq(token, ldToken, native)) shouldBe ArbKind.LithosDexCycle
+      // The block package and the web panel read these exact strings
+      Seq(ArbKind.ErgoDexCycle, ArbKind.LithosDexCycle, ArbKind.MachinaFill, ArbKind.Grid) shouldBe
+        Seq("arb", "arb-lithosdex", "arb-machina", "arb-grid")
     }
   }
 
@@ -254,8 +275,8 @@ class ArbCyclesSpec extends AnyFlatSpec with Matchers with MockitoSugar {
       val bundles = build(ctx, index(ctx, Seq(p1, p2, q1, q2)), stake, slots = 4, reserve = { id => reserved += id; true })
       bundles.size shouldBe 2
       val first = legs(bundles.head)
-      checkCycle(bundles.head, stake.boxId, first.map(_.inputs.head.boxId))
-      checkCycle(bundles(1), first.last.outputs(1).boxId, legs(bundles(1)).map(_.inputs.head.boxId))
+      checkCycle(bundles.head, stake.boxId, first.map(_.inputs.head.boxId), ArbKind.ErgoDexCycle)
+      checkCycle(bundles(1), first.last.outputs(1).boxId, legs(bundles(1)).map(_.inputs.head.boxId), ArbKind.ErgoDexCycle)
       bundles.map(legs(_).last.outputs(1).boxId) shouldBe reserved.result()
       bundles(1).packageParents shouldBe Seq(bundles.head.members.last.id)
       parentsDeclared(bundles)
@@ -302,7 +323,7 @@ class ArbCyclesSpec extends AnyFlatSpec with Matchers with MockitoSugar {
       val stake = stakeBox(ctx, wallet, stakeValue)
       val bundles = build(ctx, index(ctx, Seq(cheap, dear)), stake, ArbBasis.of(Seq(run)), slots = 2)
       bundles.size shouldBe 1
-      checkCycle(bundles.head, stake.boxId, Seq(successor.boxId, dear.boxId))
+      checkCycle(bundles.head, stake.boxId, Seq(successor.boxId, dear.boxId), ArbKind.ErgoDexCycle)
       bundles.flatMap(_.members).flatMap(_.inputIds) should not contain cheap.boxId
       bundles.head.packageParents shouldBe Seq(run.members.head.id)
       parentsDeclared(bundles, Seq(run))

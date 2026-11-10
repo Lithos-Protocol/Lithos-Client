@@ -27,7 +27,7 @@ object SigmaFiBatchingConfig {
   /** Mirrors `batching.sigmafi` in application.conf; keep the two in step. */
   val Default: SigmaFiBatchingConfig = SigmaFiBatchingConfig(
     BatchingConfig.Default.copy(scanIntervalMs = 30000L, maxOrdersPerBlock = 20),
-    broadcastAfterBlocks = 2,
+    broadcastAfterBlocks = 1,
     minBatchingFeeNanoErg = ShippedMinBatchingFee)
 
   def apply(config: Configuration): SigmaFiBatchingConfig =

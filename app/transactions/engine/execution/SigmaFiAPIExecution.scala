@@ -257,6 +257,7 @@ class SigmaFiAPIExecution(nodeContext: NodeContext,
     val bond = read(nodeApi, boxId, "SigmaFi bond")(SigmaFiBoxes.bond)
     if (ctx.getHeight + 1 >= bond.maturity)
       throw LithosUnprocessable(s"bond $boxId matured at height ${bond.maturity}: repayment is closed")
+    val late = lateRepayWarning(bond.maturity - (ctx.getHeight + 1), bond.maturity)
     val borrower = walletHashes.get(Hex.toHexString(bond.borrowerHash)).orElse {
       val origin = Try(nodeApi.indexedBoxById(bond.asset.toString).toOption.flatten).toOption.flatten
       treeFor(nodeApi, bond.borrowerHash, bond.box, origin.toSeq.flatMap(b => SigmaFiBoxes.hintTrees(b.box)))
@@ -270,12 +271,13 @@ class SigmaFiAPIExecution(nodeContext: NodeContext,
       if (toMe) bond.collateralErg.toString else "0", if (toMe) bond.collateral.map(a => SFTokenAmount(a.tokenId, a.amount.toString)) else Seq.empty, TxFee.toString,
       Seq(s"Pays the repayment into the vault for the holder of ${bond.asset}, and returns the collateral to " +
         s"${addressOf(borrower)}."),
-      if (toMe) Seq.empty else Seq("This wallet is not the borrower: the collateral goes to the borrower, not to you."))
+      (if (toMe) Seq.empty else Seq("This wallet is not the borrower: the collateral goes to the borrower, not to you.")) ++
+        late)
     if (!send) Left(quote)
     else {
       unclaimed(mempoolSnapshot(), boxId)
       val (signed, sent) = fundAndSend(ctx, plan)
-      Right(SFResult(sent.txId, sent.outcome, Some(outputId(signed, 0)), None))
+      Right(SFResult(sent.txId, sent.outcome, Some(outputId(signed, 0)), None, late))
     }
   }
 
@@ -720,6 +722,19 @@ object SigmaFiAPIExecution {
    * the 1,000,000 cost and 98,304 bytes a node relays by default.
    */
   final val MaxClaimExtras = 8
+
+  /**
+   * Blocks left at or under which a repayment is warned about. It is valid only in a block below maturity, and the
+   * node checks it against the next block, so with one block left a block mined before miners pick it up leaves it
+   * invalid for good. Two leaves one more chance, and a block can arrive between a quote and its send.
+   */
+  final val LateRepayBlocks = 2
+
+  /** What a repayer is told when `blocksLeft` blocks, before `maturity`, can still carry the repayment. */
+  def lateRepayWarning(blocksLeft: Long, maturity: Long): Seq[String] =
+    if (blocksLeft > LateRepayBlocks) Seq.empty
+    else Seq(s"Only $blocksLeft block(s) can still carry this repayment: it counts only in a block below height " +
+      s"$maturity. If it is not mined by then, it fails and the bond can be liquidated.")
 
   private final val MaxAuthTries = 5
   private final val NotItsBond = "it is not the bond its asset's order created"

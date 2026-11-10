@@ -91,7 +91,7 @@ object ArbCycles {
             refuse(order.boxId)
           case Success(Some((fill, Success(tx)))) =>
             val id = CandidateTx.txId(tx)
-            bundles :+= CandidateBundle(Vector(CandidateTx.signed(tx, ArbLeg.Kind)),
+            bundles :+= CandidateBundle(Vector(CandidateTx.signed(tx, ArbKind.MachinaFill)),
               at(order.poolNft).createdBy.toSeq.map(ChainFromPackage),
               Seq(CapitalEntry(CapitalOrigin.ExecutorReward, InputUTXO(tx.getOutputsToSpend.get(2)), id)))
             val successor = InputUTXO(tx.getOutputsToSpend.get(0))
@@ -134,8 +134,8 @@ object ArbCycles {
       var stopped = false
       def used: Int = bundles.map(_.members.size).sum
 
-      // Marks a signed cycle's pools and stake as moved, and offers it; false when its stake output is not noted
-      def take(legs: Vector[SignedTransaction], pools: Vector[String], parents: Vector[String]): Boolean = {
+      // Marks a signed cycle's pools and stake as moved, and offers it as `kind`; false when its stake output is not noted
+      def take(legs: Vector[SignedTransaction], pools: Vector[String], parents: Vector[String], kind: String): Boolean = {
         val stakeOut = InputUTXO(legs.last.getOutputsToSpend.get(1))
         if (!reserve(stakeOut.id.toString)) {
           logger.warn(s"${stakeOut.id} could not be noted as the next arb stake; no further cycles for " +
@@ -145,7 +145,7 @@ object ArbCycles {
         } else {
           val ids = legs.map(CandidateTx.txId)
           val profit = InputUTXO(legs.last.getOutputsToSpend.get(2))
-          bundles :+= CandidateBundle(legs.map(CandidateTx.signed(_, ArbLeg.Kind)),
+          bundles :+= CandidateBundle(legs.map(CandidateTx.signed(_, kind)),
             (parents ++ carryCreatedBy).distinct.filterNot(ids.contains).map(ChainFromPackage),
             Seq(CapitalEntry(CapitalOrigin.Arbitrage, profit, ids.last)))
           pools.zip(legs).zip(ids).foreach { case ((nft, leg), id) =>
@@ -171,7 +171,7 @@ object ArbCycles {
                   s"sell its gap for block $blockHeight, leaving it out for a while: ${ex.getMessage}")
                 refuse(order.boxId)
               case Success(legs) =>
-                if (take(legs, pools, pools.flatMap(at(_).createdBy))) {
+                if (take(legs, pools, pools.flatMap(at(_).createdBy), ArbKind.Grid)) {
                   states += pools.head -> cycle.fill.swap.after.withBox(InputUTXO(legs.head.getOutputsToSpend.get(0)).id.toString)
                   states += pools(1) -> cycle.sale.after.withBox(InputUTXO(legs(1).getOutputsToSpend.get(0)).id.toString)
                 }
@@ -188,7 +188,7 @@ object ArbCycles {
             false
           case Success(legs) =>
             val pools = cycle.route.hops.map(_.nft)
-            take(legs, pools, pools.flatMap(at(_).createdBy))
+            take(legs, pools, pools.flatMap(at(_).createdBy), ArbKind.cycle(cycle.swaps.map(_.pool)))
         }
       }
       bundles

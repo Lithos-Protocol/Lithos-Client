@@ -42,8 +42,16 @@ object MachinaFixtures {
   lazy val gridSells: Fill = load("grid-sells")
   /** A grid buying 3,207 tokens at its bid. Block 1,905,007. */
   lazy val gridBuys: Fill = load("grid-buys")
+  /**
+   * A grid on the ErgoTree version 2 header `1af401…`, otherwise the current grid's tree byte for byte, selling 471
+   * tokens at its ask of 31,348, its child on the same tree. Block 1,896,838.
+   */
+  lazy val gridV2Sells: Fill = load("grid-v2-sells")
 
-  lazy val fills: Seq[Fill] = Seq(limitBuys, gridSells, gridBuys)
+  lazy val fills: Seq[Fill] = Seq(limitBuys, gridSells, gridBuys, gridV2Sells)
+
+  /** An unfilled grid on the version 2 header, holding 119,800 tokens, asking 1,000,000 and bidding 10,000. */
+  lazy val gridV2Order: NodeBox = NodeCodecs.indexedBox(json("grid-v2-order")).box
 
   /** An unfilled current limit order selling 5,000 units of `limitBuys`'s token at 45,233. Block 1,903,888. */
   lazy val limitSellOrder: NodeBox = NodeCodecs.indexedBox(json("limit-sell-order")).box

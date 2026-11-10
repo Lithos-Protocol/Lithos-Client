@@ -45,9 +45,13 @@ class SigmaFiBatcherSpec extends TestKit(ActorSystem("sigmafi-batcher-spec", Sig
   private val anchor = "cc" * 32
   private val pendingTx = "77" * 32
 
-  /** @param tokenBondsCrowded newest first, the token bond template answers full pages of other boxes up to the cap */
+  /**
+   * @param tokenBondsCrowded newest first, the token bond template answers full pages of other boxes up to the cap
+   * @param maturedAtTip      also hold a bond that matured at the tip, one block before the block being built
+   */
   private class Fixture(broadcast: Boolean = false, maxInputs: Int = Int.MaxValue,
-                        allowance: CandidateBudget = CandidateBudget.Unbounded, tokenBondsCrowded: Boolean = false) {
+                        allowance: CandidateBudget = CandidateBudget.Unbounded, tokenBondsCrowded: Boolean = false,
+                        maturedAtTip: Boolean = false) {
     val api: NodeApi = mock[NodeApi]
     val client: ErgoClient = FakeNodeContext.offlineClient()
     private val prover = spy(FakeNodeContext.proverWith(client, 1))
@@ -84,7 +88,10 @@ class SigmaFiBatcherSpec extends TestKit(ActorSystem("sigmafi-batcher-spec", Sig
     /** Due, but a pending transaction already liquidates it. */
     val pending: NodeBox = bond(7, tip - 30)
 
-    val ergBonds: Seq[NodeBox] = Seq(pastWindow, inWindow, notDue, underFloor, otherScript, pending)
+    val atTip: NodeBox = bond(8, tip)
+
+    val ergBonds: Seq[NodeBox] = Seq(pastWindow, inWindow, notDue, underFloor, otherScript, pending) ++
+      (if (maturedAtTip) Seq(atTip) else Seq.empty)
     val all: Seq[NodeBox] = ergBonds :+ tokenBond
 
     val mempool: Vector[CompleteMempool.MempoolTx] = Vector(CompleteMempool.MempoolTx(pendingTx,
@@ -133,8 +140,8 @@ class SigmaFiBatcherSpec extends TestKit(ActorSystem("sigmafi-batcher-spec", Sig
     }
 
     val batcher: ActorRef = system.actorOf(Props(new SigmaFiBatcher(nodeContext,
-      SigmaFiBatchingConfig(SigmaFiBatchingConfig.Default.batching.copy(scanIntervalMs = 3600000L, broadcast = broadcast),
-        broadcastAfterBlocks = 2, minBatchingFeeNanoErg = 50000000L),
+      SigmaFiBatchingConfig.Default.copy(
+        batching = SigmaFiBatchingConfig.Default.batching.copy(scanIntervalMs = 3600000L, broadcast = broadcast)),
       servesCandidates = true, engine.ref, useTrueProp = false, allowance = allowance)))
 
     /** What this miner's block for the tip's successor is offered, once a scan has tracked the due bonds. */
@@ -232,6 +239,27 @@ class SigmaFiBatcherSpec extends TestKit(ActorSystem("sigmafi-batcher-spec", Sig
   it should "read token bonds oldest first, so newer ones past the scan's cap cannot hide a due one" in {
     val f = new Fixture(tokenBondsCrowded = true)
     f.offered().members.loneElement.inputIds should contain(f.tokenBond.boxId)
+    f.stop()
+  }
+
+  it should "under the shipped window, leave only the block a bond matures in to Lithos blocks and broadcast it from the next" in {
+    val f = new Fixture(broadcast = true, maturedAtTip = true)
+    verify(f.api, timeout(30000).times(1)).sendTransaction(anyString())
+    val sent = f.sent.asScala.loneElement
+    // Matured at the tip, so the block being built is the first after its maturity block
+    sent should include(f.atTip.boxId)
+    sent should not include f.inWindow.boxId
+    f.stop()
+  }
+
+  it should "keep every bond of the largest batch within the shipped slots, even when each has to go alone" in {
+    val limits = configs.CandidateConfig.Default.limitsFor(SigmaFiBatchingConfig.Name)
+    limits.maxTxs should be >= SigmaFiBatchingConfig.Default.batching.maxOrdersPerBlock
+    val f = new Fixture(maxInputs = 1)
+    val bundles = f.offeredBatches(slots = limits.maxTxs)
+    bundles.map(_.members.loneElement.inputIds.loneElement).toSet shouldBe
+      Set(f.pastWindow, f.inWindow, f.tokenBond, f.pending).map(_.boxId)
+    CandidateBundle.admit(bundles, limits.maxTxs, limits.budget)._1 shouldBe bundles
     f.stop()
   }
 }

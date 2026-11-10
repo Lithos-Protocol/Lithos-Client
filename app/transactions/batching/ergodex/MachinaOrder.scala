@@ -32,13 +32,21 @@ object MachinaContracts {
   /**
    * @param headerHex    the tree's header, size and constant count, then the token constant's type and length
    * @param constantsHex every constant after the token id, as every mainnet order of the kind carries them
+   * @param otherHeaders other values of `headerHex` live orders carry over the same constants and template. Each
+   *                     differs only in the ErgoTree version, 1 or 2, which the interpreter evaluates alike
    */
   final case class Template(kind: MachinaKind, templateHex: String, executable: Boolean,
-                            headerHex: String = "", constantsHex: String = "") {
+                            headerHex: String = "", constantsHex: String = "", otherHeaders: Seq[String] = Seq.empty) {
     lazy val templateHash: String = Hex.toHexString(Blake2b256(Hex.decode(templateHex)))
 
     /** The whole tree of an order for `tokenId`, so a box differing anywhere but its token is not taken for one. */
-    def treeHex(tokenId: String): String = headerHex + tokenId + constantsHex + templateHex
+    def treeHex(tokenId: String): String = treeHex(tokenId, headerHex)
+
+    private def treeHex(tokenId: String, header: String): String = header + tokenId + constantsHex + templateHex
+
+    /** Whether `tree` is this contract's for `tokenId` under any header it is accepted with. */
+    def matches(tree: String, tokenId: String): Boolean =
+      (headerHex +: otherHeaders).exists(header => tree.equalsIgnoreCase(treeHex(tokenId, header)))
   }
 
   val templates: Vector[Template] = Vector(
@@ -57,7 +65,8 @@ object MachinaContracts {
       "01720293e4c672050408720493e4c672050511720793e4c67205060ec5a795e4e30001d801d60a99c17205c1a7ed9172" +
       "0a730492720a9c9972087209b27207730500d801d60a9972097208ed91720a7306929c720ab2720773070099c1a7c172" +
       "057204",
-      executable = true, headerHex = "19f401080e20", constantsHex = "0500040004000500040005000402"),
+      executable = true, headerHex = "19f401080e20", constantsHex = "0500040004000500040005000402",
+      otherHeaders = Seq("1af401080e20")),
 
     Template(MachinaKind.TokenGrid,
       "d804d601e30104d6027300d603860272027301d604e4c6a7040895e67201d80bd605b2a5e4720100d606db6308a7d607" +
@@ -132,7 +141,7 @@ object MachinaOrder {
         for {
           tokenId <- tokenOf(tree)
           // Pricing assumes the contract's own constants, so a box that changed one would only fail at signing
-          if box.ergoTree.equalsIgnoreCase(template.treeHex(tokenId))
+          if template.matches(box.ergoTree, tokenId)
           if box.value > 0 && box.assets.size <= 1 && box.assets.forall(a => a.tokenId == tokenId && a.amount > 0)
           owner <- register(box, 4).collect { case p: sigma.SigmaProp => p.propBytes.toArray }
           (ask, bid) <- prices(template.kind, box)
@@ -151,7 +160,7 @@ object MachinaOrder {
       .filter(tree => Hex.toHexString(Blake2b256(tree.template)) == template.templateHash).flatMap { tree =>
         for {
           tokenId <- tokenOf(tree)
-          if box.ergoTree.equalsIgnoreCase(template.treeHex(tokenId))
+          if template.matches(box.ergoTree, tokenId)
           base <- box.assets.headOption if base.tokenId != tokenId && base.amount > 0
           if box.value > 0 && box.assets.size <= 2 && box.assets.drop(1).forall(a => a.tokenId == tokenId && a.amount > 0)
           owner <- register(box, 4).collect { case p: sigma.SigmaProp => p.propBytes.toArray }

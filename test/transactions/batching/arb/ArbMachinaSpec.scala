@@ -115,7 +115,7 @@ class ArbMachinaSpec extends AnyFlatSpec with Matchers with MockitoSugar {
           val bundles = build(ctx, indexOf(ctx, box), Seq(order))
           bundles.size shouldBe 1
           val bundle = bundles.head
-          bundle.members.map(_.kind) shouldBe Vector(ArbLeg.Kind)
+          bundle.members.map(_.kind) shouldBe Vector(ArbKind.MachinaFill)
           bundle.packageParents shouldBe empty
           val tx = decoded(bundle.members.head)
           tx.inputs.map(_.boxId) shouldBe Seq(box.boxId, order.boxId)
@@ -194,6 +194,9 @@ class ArbMachinaSpec extends AnyFlatSpec with Matchers with MockitoSugar {
         val legs = cycle.members.map(decoded)
         legs.map(_.inputs.head.boxId) should contain(fillTx.outputs.head.boxId)
         cycle.packageParents should contain(fill.members.head.id)
+        // The fill and the cycle are told apart in the block package, the cycle by its LithosDex leg
+        fill.members.map(_.kind) shouldBe Vector(ArbKind.MachinaFill)
+        cycle.members.map(_.kind) shouldBe Vector.fill(legs.size)(ArbKind.LithosDexCycle)
       }
       CandidateBundle.admit(run +: bundles, 32)._1.size shouldBe 1 + bundles.size
       CandidateBundle.admit(bundles, 32)._1 shouldBe empty
@@ -344,7 +347,7 @@ class ArbMachinaSpec extends AnyFlatSpec with Matchers with MockitoSugar {
       val (bundles, stake) = gridBuild(ctx, Seq(fakuCigPool, fakuErgoDexPool, lithosDexFakuPool), Seq(order))
       bundles.size shouldBe 1
       val bundle = bundles.head
-      bundle.members.map(_.kind) shouldBe Vector(ArbLeg.Kind, ArbLeg.Kind)
+      bundle.members.map(_.kind) shouldBe Vector(ArbKind.Grid, ArbKind.Grid)
       val Seq(fill, sale) = bundle.members.map(decoded)
       val arbTree = stakeContract(wallet).ergoTreeHex
 
@@ -454,6 +457,9 @@ class ArbMachinaSpec extends AnyFlatSpec with Matchers with MockitoSugar {
       next.head.inputs(1).boxId shouldBe gridLegs.last.outputs(1).boxId
       bundles(1).packageParents should contain(bundles.head.members.last.id)
       next.map(_.inputs.head.boxId) should contain(gridLegs.last.outputs.head.boxId)
+      // A grid through ErgoDEX pools alone is still a grid, and the pair is a cycle through LithosDex
+      bundles.head.members.map(_.kind) shouldBe Vector(ArbKind.Grid, ArbKind.Grid)
+      bundles(1).members.map(_.kind) shouldBe Vector.fill(next.size)(ArbKind.LithosDexCycle)
     }
   }
 }
