@@ -29,7 +29,7 @@ final case class SFPlan(value: Long, tokens: Seq[Token], build: Seq[InputUTXO] =
  *   fill order           IN  order, wallet...         OUT lender unit, bond, principal, [change], fee
  *   cancel               IN  order, auth box          OUT refund, fee
  *   repay                IN  bond, wallet...          OUT vault, collateral back, [change], fee (singleton burned)
- *   claim                IN  vault..., wallet...      OUT claimed, [change], fee        (bond asset burned)
+ *   claim                IN  vault..., wallet...      OUT one per vault box, [change], fee   (bond asset burned)
  * }}}
  */
 object SigmaFiUserTransactions {
@@ -170,15 +170,15 @@ object SigmaFiUserTransactions {
 
   /**
    * Claims every vault box for `asset` with the unit this wallet holds, which is burned. All of them go in one
-   * transaction: once the unit is burned, a vault box left behind can never be claimed.
+   * transaction: once the unit is burned, a vault box left behind can never be claimed. Each box's contents come
+   * back in an output of their own, smaller than the vault box, so a stranger's box cannot oversize the claim.
    */
   def claim(ctx: BlockchainContext, wallet: NodeWallet, asset: ErgoId, vaults: Seq[InputUTXO]): SFPlan = {
     require(vaults.nonEmpty, s"the vault holds nothing for bond asset $asset")
     val unit = Token(asset, 1L)
-    val tokens = vaults.flatMap(_.tokens).groupBy(_.id).map { case (id, ts) => Token(id, ts.map(_.amount).sum) }.toSeq
-    val claimed = UTXO(wallet.contract, vaults.map(_.value).foldLeft(0L)(Math.addExact), tokens)
+    val claimed = vaults.map(v => UTXO(wallet.contract, v.value, v.tokens))
     SFPlan(TxFee + Headroom, Seq(unit), funding =>
-      TxBuilder(ctx).setInputs(vaults ++ funding: _*).setOutputs(claimed).buildTx(TxFee, wallet.p2pk, Seq(unit)))
+      TxBuilder(ctx).setInputs(vaults ++ funding: _*).setOutputs(claimed: _*).buildTx(TxFee, wallet.p2pk, Seq(unit)))
   }
 
   def principalValue(tokens: Seq[(ErgoId, Long)]): ErgoValue[_] =

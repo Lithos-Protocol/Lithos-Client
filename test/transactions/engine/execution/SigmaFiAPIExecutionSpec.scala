@@ -6,10 +6,11 @@ import api.models.{SFAssetLookupRequest, SFOrderRequest, SFTokenAmount}
 import configs.NodeContext
 import mutations.NodeWallet
 import node.NodeApi
-import node.model.{IndexedBox, IndexedTransaction, MempoolOptions, NodeBox, NodeSpendingProof, Paging, SortDirection}
+import node.model.{IndexedBox, IndexedTransaction, MempoolOptions, NodeAsset, NodeBox, NodeSpendingProof, Paging,
+  SortDirection, WalletBalances}
 import org.ergoplatform.appkit.{ErgoClient, ErgoValue, NetworkType}
 import org.mockito.ArgumentMatchers.{any, anyString}
-import org.mockito.Mockito.{never, times, verify, when}
+import org.mockito.Mockito.{doAnswer, never, times, verify, when}
 import org.scalatest.propspec.AnyPropSpec
 import org.scalatestplus.mockito.MockitoSugar
 import sigmafi.contracts.{FixedMaturity, SigmaFiContracts}
@@ -124,6 +125,83 @@ class SigmaFiAPIExecutionSpec extends AnyPropSpec with SigmaFiFixtures with Mock
 
   property("claim: refuses an asset the vault holds nothing for") {
     an[LithosUnprocessable] should be thrownBy new Fixture().execution.claim(assetId.toString, send = false)
+  }
+
+  /** Scans of each tree in `trees` answer its boxes, and every other tree answers nothing. */
+  private def treesHold(f: Fixture, trees: Map[String, Seq[NodeBox]]): Unit =
+    doAnswer { inv: org.mockito.invocation.InvocationOnMock =>
+      val boxes = if (inv.getArgument[Paging](1).offset > 0) Seq.empty else trees.getOrElse(inv.getArgument[String](0), Seq.empty)
+      Success(boxes.map(b => IndexedBox(b, "", tip, 1L)))
+    }.when(f.api).unspentBoxesByErgoTree(anyString(), any[Paging], any[SortDirection], any[MempoolOptions])
+
+  private def walletHolds(f: Fixture, asset: org.ergoplatform.sdk.ErgoId): Unit =
+    when(f.api.walletBalances()).thenReturn(Success(WalletBalances(tip, 10 * Erg, Seq(NodeAsset(asset.toString, 1L)))))
+
+  /** The unspent boxes holding `asset`, read again on every call. */
+  private def tokenHeldBy(f: Fixture, holders: () => Seq[NodeBox]): Unit =
+    when(f.api.unspentBoxesByTokenId(anyString(), any[Paging], any[SortDirection], any[MempoolOptions]))
+      .thenAnswer(_ => Success(holders().map(b => IndexedBox(b, "", tip, 1L))))
+
+  property("claim: refuses while a bond still holds the asset's other unit, whatever the vault holds") {
+    client.execute { ctx =>
+      val bond = nodeBox(ctx, bondUTXO(None, contractOf(miner(ctx)), tip + 50), 5)
+      val unit = nodeBox(ctx, UTXO(wallet.contract, MinBox, Seq(Token(assetId, 1L))), 6)
+      // Anyone can send a box to the vault naming any asset; this one names a bond that has not settled
+      val gift = nodeBox(ctx, vaultUTXO(org.ergoplatform.sdk.ErgoId.create("dd" * 32), assetId, MinBox), 7)
+      val f = new Fixture()
+      treesHold(f, Map(SigmaFiContracts.vault.ergoTreeHex -> Seq(gift)))
+      walletHolds(f, assetId)
+      @volatile var holders = Seq(bond, unit)
+      tokenHeldBy(f, () => holders)
+      val refused = the[LithosUnprocessable] thrownBy f.execution.claim(assetId.toString, send = false)
+      refused.getMessage should include(bond.boxId)
+      withClue("once the bond is gone the same vault box is claimable: ") {
+        holders = Seq(unit)
+        f.execution.claim(assetId.toString, send = false).left.get.receivesNanoErgs shouldBe MinBox.toString
+      }
+    }
+  }
+
+  property("claim: refuses when the vault scan stopped at its cap, since a box it missed would be lost") {
+    client.execute { ctx =>
+      val unit = nodeBox(ctx, UTXO(wallet.contract, MinBox, Seq(Token(assetId, 1L))), 8)
+      val settled = nodeBox(ctx, vaultUTXO(org.ergoplatform.sdk.ErgoId.create("de" * 32), assetId, 2 * Erg), 9)
+      // Vault boxes with no R5 read as nothing, but each still counts toward the scan's cap
+      val other = (n: Int) => NodeBox(f"$n%064x", "ab" * 32, MinBox, 0, tip, SigmaFiContracts.vault.ergoTreeHex)
+      val f = new Fixture()
+      doAnswer { inv: org.mockito.invocation.InvocationOnMock =>
+        val offset = inv.getArgument[Paging](1).offset
+        val page = if (!inv.getArgument[String](0).equalsIgnoreCase(SigmaFiContracts.vault.ergoTreeHex)) Seq.empty
+          else (offset until offset + 100).map(n => if (n == 0) settled else other(n))
+        Success(page.map(b => IndexedBox(b, "", tip, 1L)))
+      }.when(f.api).unspentBoxesByErgoTree(anyString(), any[Paging], any[SortDirection], any[MempoolOptions])
+      walletHolds(f, assetId)
+      tokenHeldBy(f, () => Seq(unit))
+      val refused = the[LithosUnprocessable] thrownBy f.execution.claim(assetId.toString, send = false)
+      refused.getMessage should include("vault")
+    }
+  }
+
+  property("portfolio: a vault box naming a live bond's asset is not claimable, even a bond the reader passes over") {
+    client.execute { ctx =>
+      val unit = nodeBox(ctx, UTXO(wallet.contract, MinBox, Seq(Token(assetId, 1L))), 10)
+      val gift = nodeBox(ctx, vaultUTXO(org.ergoplatform.sdk.ErgoId.create("df" * 32), assetId, MinBox), 11)
+      // A zero repayment is a term the order contract allows and this client's bond reader refuses
+      Seq(2 * Erg, 0L).foreach { repayment =>
+        val bond = nodeBox(ctx, bondUTXO(None, contractOf(miner(ctx)), tip + 50, repayment = repayment), 12)
+        val f = new Fixture()
+        treesHold(f, Map(SigmaFiContracts.vault.ergoTreeHex -> Seq(gift), SigmaFiContracts.ergBond.ergoTreeHex -> Seq(bond)))
+        walletHolds(f, assetId)
+        @volatile var holders = Seq(bond, unit)
+        tokenHeldBy(f, () => holders)
+        withClue(s"repayment $repayment: ") {
+          f.execution.getPortfolio.lending.map(h => h.assetId -> h.claimable) shouldBe Seq(assetId.toString -> false)
+        }
+        treesHold(f, Map(SigmaFiContracts.vault.ergoTreeHex -> Seq(gift)))
+        holders = Seq(unit)
+        f.execution.getPortfolio.lending.map(h => h.assetId -> h.claimable) shouldBe Seq(assetId.toString -> true)
+      }
+    }
   }
 
   property("repayment quotes return collateral without counting the bond singleton") {

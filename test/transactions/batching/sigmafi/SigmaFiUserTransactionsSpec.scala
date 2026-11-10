@@ -155,6 +155,41 @@ class SigmaFiUserTransactionsSpec extends AnyPropSpec with SigmaFiFixtures {
     }
   }
 
+  property("the vault lets the unit claim a box anyone made for a live bond's asset, so a claim must wait for the bond") {
+    client.execute { ctx =>
+      val terms = orderTerms(wallet.contract, FixedMaturity(ctx.getHeight + 100))
+      val order = SigmaFiBoxes.order(out(sign(ctx, SigmaFiUserTransactions.createOrder(ctx, wallet, terms, 5 * Erg,
+        Seq.empty), funds(ctx, 10 * Erg)), 0)).get
+      val filled = sign(ctx, SigmaFiUserTransactions.fillOrder(ctx, wallet, order, input(ctx, order.box), None,
+        wallet.contract), funds(ctx, 10 * Erg))
+      val bond = SigmaFiBoxes.bond(out(filled, 1)).get
+      val gift = UTXO(SigmaFiContracts.vault, MinBox, Seq.empty, Seq(ErgoValue.of(Array.fill(32)(1.toByte)),
+        ErgoValue.of(bond.asset.getBytes), ErgoValue.of(0.toByte))).toInput(ctx, ErgoId.create("f2" * 32), 0)
+      // The contract accepts it: the unit is burned while the bond's singleton still lives
+      val claimed = sign(ctx, SigmaFiUserTransactions.claim(ctx, wallet, bond.asset, Seq(gift)), input(ctx, out(filled, 0)),
+        funds(ctx, Erg))
+      claimed.getOutputsToSpend.asScala.flatMap(_.getTokens.asScala).map(_.getId) should not contain bond.asset
+    }
+  }
+
+  property("a claim pays each vault box into its own output, so a stranger's token-heavy box cannot oversize it") {
+    client.execute { ctx =>
+      val asset = ErgoId.create("c7" * 32)
+      def vault(i: Int): InputUTXO = UTXO(SigmaFiContracts.vault, 2 * Erg,
+        (1 to 70).map(t => Token(ErgoId.create(f"${i * 1000 + t}%064x"), t.toLong)),
+        Seq(ErgoValue.of(Array.fill(32)(i.toByte)), ErgoValue.of(asset.getBytes), ErgoValue.of(1.toByte)))
+        .toInput(ctx, ErgoId.create(f"$i%064x"), 0)
+      val vaults = Seq(vault(1), vault(2))
+      vaults.foreach(_.bytes.length should be <= sigma.data.SigmaConstants.MaxBoxSize.value)
+      val claimed = sign(ctx, SigmaFiUserTransactions.claim(ctx, wallet, asset, vaults), funds(ctx, Erg, Token(asset, 1L)))
+      val outputs = claimed.getOutputsToSpend.asScala
+      outputs.foreach(_.getBytes.length should be <= sigma.data.SigmaConstants.MaxBoxSize.value)
+      outputs.flatMap(_.getTokens.asScala).map(_.getId).toSet shouldBe vaults.flatMap(_.tokens).map(_.id).toSet
+      outputs.filter(o => work.lithos.mutations.Contract(o.getErgoTree) == wallet.contract)
+        .map(_.getValue.toLong).sum should be >= vaults.map(_.value).sum
+    }
+  }
+
   property("a token loan is filled with the token and repaid in it, into its own token bond") {
     client.execute { ctx =>
       val terms = orderTerms(wallet.contract, FixedMaturity(ctx.getHeight + 100), principalErg = MinBox,

@@ -115,8 +115,9 @@ class SigmaFiAPIExecution(nodeContext: NodeContext,
     val vaultByAsset = vaults.groupBy(_.asset.toString)
     val holdings = held.toSeq.filter(id => byAsset.contains(id) || vaultByAsset.contains(id)).sorted.map { id =>
       val vault = vaultByAsset.getOrElse(id, Seq.empty)
-      SFHolding(id, byAsset.get(id).flatMap(_.headOption).map(bondView(ctx, nodeApi, _)), vault.map(vaultView),
-        claimable = vault.nonEmpty)
+      val bond = byAsset.get(id).flatMap(_.headOption)
+      SFHolding(id, bond.map(bondView(ctx, nodeApi, _)), vault.map(vaultView),
+        claimable = vault.nonEmpty && bond.isEmpty && !vaultCut && unsettled(nodeApi, id).isEmpty)
     }
     SFPortfolio(ctx.getHeight,
       orders.filter(o => isMine(o.terms.borrowerHash)).map(orderView(ctx, _)),
@@ -304,11 +305,17 @@ class SigmaFiAPIExecution(nodeContext: NodeContext,
     val id = tokenId.trim.toLowerCase
     if (!id.matches("[0-9a-f]{64}")) throw LithosBadRequest(s"'$tokenId' is not a token id")
     val asset = ErgoId.create(id)
-    val vaults = scanVault(nodeApi, MempoolOptions.ConfirmedOnly)._1.filter(_.asset == asset)
+    val (scanned, cut) = scanVault(nodeApi, MempoolOptions.ConfirmedOnly)
+    // The burn is final, so a vault box past the scan's cap would be left behind for good
+    if (cut)
+      throw LithosUnprocessable(s"the vault holds more than ${Batcher.MaxScannedPerTemplate} boxes, so this client " +
+        s"cannot tell it has found every one for $id; a claim now could leave one unclaimable for good")
+    val vaults = scanned.filter(_.asset == asset)
     if (vaults.isEmpty)
       throw LithosUnprocessable(s"the vault holds nothing for $id: its bond is not repaid or liquidated yet")
     val holds = nodeApi.walletBalances().toOption.exists(_.assets.exists(a => a.tokenId == id && a.amount >= 1))
     if (!holds) throw LithosNotFound(s"this wallet does not hold bond asset $id")
+    unsettled(nodeApi, id).foreach(reason => throw LithosUnprocessable(reason))
     val inputs = vaults.map(v => inputOf(ctx, v.box))
     val plan = SigmaFiUserTransactions.claim(ctx, wallet, asset, inputs)
     val claimed = inputs.flatMap(_.tokens).groupBy(_.id).map { case (t, ts) => SFTokenAmount(t.toString, ts.map(_.amount).sum.toString) }
@@ -350,6 +357,23 @@ class SigmaFiAPIExecution(nodeContext: NodeContext,
       case _ => None
     }
   }
+
+  /**
+   * Why a claim of bond asset `id` has to wait, or None. A bond still holding the asset as its singleton can later
+   * repay or liquidate into the vault for it, and a claim burns the only other unit, so that payment would be lost.
+   * Read confirmed only: a settlement still pending leaves the bond holding it.
+   */
+  private def unsettled(nodeApi: NodeApi, id: String): Option[String] =
+    nodeApi.unspentBoxesByTokenId(id, Paging(0, Batcher.PageSize), SortDirection.Desc, MempoolOptions.ConfirmedOnly) match {
+      case Failure(ex) => throw LithosUnavailable(s"could not read which boxes hold $id: ${ex.getMessage}", ex)
+      case Success(holders) =>
+        holders.map(_.box).find(b => b.assets.headOption.exists(_.tokenId.equalsIgnoreCase(id)) &&
+          SigmaFiBoxes.parse(b.ergoTree).exists(t => SigmaFiContracts.bondRepayToken(t).isDefined))
+          .map(bond => s"bond ${bond.boxId} still holds the other unit of $id, so its repayment or collateral is not " +
+            "in the vault yet; claiming now would burn your unit and leave that payment unclaimable for good")
+          .orElse(if (holders.size < Batcher.PageSize) None
+          else Some(s"more boxes hold $id than one read covers, so this client cannot rule out a bond still to settle"))
+    }
 
   private def checkMaturity(h: Long, tip: Int): Unit =
     if (h <= tip + 2) throw LithosBadRequest(s"maturity $h is not far enough above the current height $tip")

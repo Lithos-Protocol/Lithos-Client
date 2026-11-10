@@ -5000,8 +5000,9 @@ paths:
       summary: Claim a settled bond
       description: >
         Take everything the vault holds for a bond asset this wallet holds, burning the asset. Every vault box
-        for it is claimed at once: once the asset is burned, nothing left behind can be claimed. Refused while
-        a pending transaction still pays into the vault for it.
+        for it is claimed at once, each into an output of its own: once the asset is burned, nothing left behind
+        can be claimed. Refused while a pending transaction still pays into the vault for it, while a bond still
+        holds the asset's other unit, and while the vault holds more boxes than one scan reads.
       operationId: claimSFBond
       security:
         - ApiKeyAuth: []
@@ -12528,6 +12529,9 @@ components:
             $ref: '#/components/schemas/SFVaultView'
         claimable:
           type: boolean
+          description: >-
+            Whether a claim can take the vault's boxes now: the vault holds something for the asset and no bond
+            still holds its other unit.
     SFPortfolio:
       type: object
       x-tags: sigmafi
@@ -12788,10 +12792,12 @@ components:
           enum: [accepted, rejected, uncertain]
         boxId:
           type: string
-          description: The output that matters, the new order or bond.
+          description: >-
+            The output that matters: the new order or bond, the vault box a repayment or liquidation pays, or the
+            first box a cancel or claim returns to this wallet.
         assetId:
           type: string
-          description: The bond asset a fill or a close minted.
+          description: The bond asset a fill minted.
   securitySchemes:
     ApiKeyAuth:
       description: >

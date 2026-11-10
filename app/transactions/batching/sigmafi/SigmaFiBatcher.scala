@@ -2,15 +2,15 @@ package transactions.batching.sigmafi
 
 import akka.actor.ActorRef
 import configs.{CandidateConfig, NodeContext, SigmaFiBatchingConfig}
-import node.model.{MempoolOptions, NodeBox, Paging, SortDirection}
+import node.model.{IndexedBox, MempoolOptions, NodeBox, Paging, SortDirection}
 import org.ergoplatform.appkit.{BlockchainContext, Parameters}
 import play.api.Configuration
 import sigmafi.contracts.{SigmaFiContracts, SigmaFiTemplateKind}
 import state.synchronization.CompleteMempool
 import transactions.batching.Batcher.{BroadcastResult, Tracked}
 import transactions.batching.{Batcher, BatchingMempool}
-import transactions.candidate.CandidateBundle
-import transactions.candidate.CandidateCapital
+import transactions.candidate.BlockTxMessages.CandidateTx
+import transactions.candidate.{CandidateBudget, CandidateBundle, CandidateCapital}
 import transactions.engine.EngineBroadcast
 import work.lithos.mutations.InputUTXO
 
@@ -32,7 +32,8 @@ class SigmaFiBatcher(nodeContext: NodeContext,
                      servesCandidates: Boolean,
                      engine: ActorRef,
                      useTrueProp: Boolean,
-                     buildBudgetMs: Long = Batcher.DefaultBuildBudgetMs)
+                     buildBudgetMs: Long = Batcher.DefaultBuildBudgetMs,
+                     allowance: CandidateBudget = CandidateBudget.Unbounded)
   extends Batcher(nodeContext, settings.batching, servesCandidates, engine, configs.Contexts.SigmaFiBatchingIo,
     buildBudgetMs) {
 
@@ -42,7 +43,8 @@ class SigmaFiBatcher(nodeContext: NodeContext,
   @Inject()
   def this(nodeContext: NodeContext, config: Configuration, @Named("transaction-engine") engine: ActorRef) =
     this(nodeContext, SigmaFiBatchingConfig(config), Batcher.servesCandidates(config, SigmaFiBatchingConfig.Name),
-      engine, CandidateConfig(config).useTruePropCollection, Batcher.buildBudgetMs(config))
+      engine, CandidateConfig(config).useTruePropCollection, Batcher.buildBudgetMs(config),
+      CandidateConfig(config).limitsFor(SigmaFiBatchingConfig.Name).budget)
 
   override protected val label: String = "SigmaFi"
 
@@ -57,27 +59,32 @@ class SigmaFiBatcher(nodeContext: NodeContext,
   override protected def discover(): Tracked = {
     val tip = nodeApi.info().get.fullHeight.getOrElse(throw new IllegalStateException("the node did not report a height"))
     val skipped = skippedOrders()
-    val bonds = scanTree(SigmaFiContracts.ergBond.ergoTreeHex) ++
-      scanTemplate(SigmaFiContracts.template(SigmaFiTemplateKind.TokenBond).templateHashHex, "token bond")(SigmaFiBoxes.bond)
+    val tokenTemplate = SigmaFiContracts.template(SigmaFiTemplateKind.TokenBond).templateHashHex
+    val bonds = scanBonds("ERG bonds")(page => nodeApi.unspentBoxesByErgoTree(SigmaFiContracts.ergBond.ergoTreeHex,
+      page, SortDirection.Asc, MempoolOptions.ConfirmedOnly)) ++
+      scanBonds("token bonds")(page => nodeApi.unspentBoxesByTemplateHash(tokenTemplate, page, SortDirection.Asc,
+        MempoolOptions.ConfirmedOnly))
     bonds.filter(b => liquidatable(b, tip + 1, settings.minBatchingFeeNanoErg) && !skipped.contains(b.boxId))
       .sortBy(b => (b.maturity, b.boxId)).take(batching.maxTrackedOrders)
       .map(b => b.boxId -> b.asset.toString).toMap
   }
 
-  /** Every confirmed ERG bond, paged, capped at [[Batcher.MaxScannedPerTemplate]]. */
-  private def scanTree(tree: String): Vector[SigmaFiBond] = {
+  /**
+   * Every confirmed bond `fetch` pages, capped at [[Batcher.MaxScannedPerTemplate]]. Pages oldest first, so past
+   * the cap the bonds left unread are the newest, the furthest from maturity.
+   */
+  private def scanBonds(what: String)(fetch: Paging => Try[Seq[IndexedBox]]): Vector[SigmaFiBond] = {
     var offset = 0
     var exhausted = false
     var found = Vector.empty[SigmaFiBond]
     while (!exhausted && offset < Batcher.MaxScannedPerTemplate) {
-      val page = nodeApi.unspentBoxesByErgoTree(tree, Paging(offset, Batcher.PageSize), SortDirection.Asc,
-        MempoolOptions.ConfirmedOnly).get
+      val page = fetch(Paging(offset, Batcher.PageSize)).get
       found ++= page.flatMap(indexed => SigmaFiBoxes.bond(indexed.box))
       exhausted = page.size < Batcher.PageSize
       offset += page.size
     }
     if (!exhausted)
-      logger.warn(s"SigmaFi scan stopped after ${Batcher.MaxScannedPerTemplate} ERG bonds; newer ones were not read")
+      logger.warn(s"SigmaFi scan stopped after ${Batcher.MaxScannedPerTemplate} $what; newer ones were not read")
     found
   }
 
@@ -97,7 +104,7 @@ class SigmaFiBatcher(nodeContext: NodeContext,
           .take(batching.maxOrdersPerBlock)
         within(deadline, "reading tracked bonds")
         build(ctx, due, CandidateCapital.collectionContract(nodeContext.getNodeWallet, useTrueProp), 0L, blockHeight,
-          slots, Some(deadline))
+          slots, Some(deadline), allowance)
           .map(l => l.bundle(BatchingMempool.competitors(spenders, l.bonds.map(_.boxId))))
       }
     }
@@ -149,25 +156,30 @@ class SigmaFiBatcher(nodeContext: NodeContext,
     }
 
   /**
-   * Split a batch that cannot sign into smaller batches, preserving valid bonds when the combined
-   * transaction exceeds a cost or size limit. Only an individual failing bond is temporarily skipped.
+   * Split a batch that cannot sign, or that exceeds what is left of `budget`, into smaller batches, so a candidate
+   * source is never offered a bundle its allowance refuses. Only a bond that fails to sign alone is skipped for a
+   * while; one that only does not fit is left for a later build or the broadcast.
    */
   private def build(ctx: BlockchainContext, bonds: Seq[(SigmaFiBond, InputUTXO)], feeTo: work.lithos.mutations.Contract,
-                    minerFee: Long, height: Int, slots: Int = Int.MaxValue,
-                    deadline: Option[Deadline] = None): Vector[SigmaFiLiquidation] = {
+                    minerFee: Long, height: Int, slots: Int = Int.MaxValue, deadline: Option[Deadline] = None,
+                    budget: CandidateBudget = CandidateBudget.Unbounded): Vector[SigmaFiLiquidation] = {
+    def size(l: SigmaFiLiquidation): Long = CandidateTx.signedSize(l.signed).toLong
+    def cost(l: SigmaFiLiquidation): Long = l.signed.getCost.toLong
     if (bonds.isEmpty || slots <= 0) Vector.empty
     else {
       deadline.foreach(within(_, "building SigmaFi liquidations"))
       Try(SigmaFiTransactions.liquidate(ctx, nodeContext.getNodeWallet, bonds, feeTo, minerFee, height)) match {
-        case Success(batch) => Vector(batch)
+        case Success(batch) if size(batch) <= budget.maxBytes && cost(batch) <= budget.maxCost => Vector(batch)
+        case Success(_) if bonds.size == 1 => Vector.empty
         case Failure(ex) if bonds.size == 1 =>
           logger.warn(s"Could not liquidate SigmaFi bond ${bonds.head._1.boxId} at $height: ${ex.getMessage}")
           skipOrder(bonds.head._1.boxId)
           Vector.empty
-        case Failure(_) =>
+        case _ =>
           val (left, right) = bonds.splitAt(bonds.size / 2)
-          val built = build(ctx, left, feeTo, minerFee, height, slots, deadline)
-          built ++ build(ctx, right, feeTo, minerFee, height, slots - built.size, deadline)
+          val built = build(ctx, left, feeTo, minerFee, height, slots, deadline, budget)
+          built ++ build(ctx, right, feeTo, minerFee, height, slots - built.size, deadline,
+            budget.less(built.map(size).sum, built.map(cost).sum))
       }
     }
   }

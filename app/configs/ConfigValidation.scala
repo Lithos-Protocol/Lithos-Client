@@ -358,7 +358,7 @@ object Configs {
       "unbuildable bonds remembered; about 200 bytes each")
     v.longRange("sigmafi.bonds.batchingFeeNanoErg", v.long("sigmafi.bonds.batchingFeeNanoErg"),
       configs.SigmaFiBatchingConfig.ShippedMinBatchingFee, 100000000000L,
-      "batching fee on orders and offers made through the API; at least the shipped floor, which clients liquidate")
+      "reserve a fill through the API funds when its request names none; at least the shipped floor, which clients liquidate")
 
     // ---- arb ----
     v.bool("batching.arb.enabled")

@@ -18,7 +18,7 @@ import sigmafi.contracts.SigmaFiContracts
 import state.synchronization.CompleteMempool
 import support.FakeNodeContext
 import transactions.candidate.BlockTxMessages.{BlockTxsReady, RequestBlockTxs, Supersede}
-import transactions.candidate.CandidateBundle
+import transactions.candidate.{CandidateBudget, CandidateBundle}
 import transactions.engine.wallet.EngineWalletMessages._
 import work.lithos.mutations.Token
 
@@ -45,7 +45,9 @@ class SigmaFiBatcherSpec extends TestKit(ActorSystem("sigmafi-batcher-spec", Sig
   private val anchor = "cc" * 32
   private val pendingTx = "77" * 32
 
-  private class Fixture(broadcast: Boolean = false, maxInputs: Int = Int.MaxValue) {
+  /** @param tokenBondsCrowded newest first, the token bond template answers full pages of other boxes up to the cap */
+  private class Fixture(broadcast: Boolean = false, maxInputs: Int = Int.MaxValue,
+                        allowance: CandidateBudget = CandidateBudget.Unbounded, tokenBondsCrowded: Boolean = false) {
     val api: NodeApi = mock[NodeApi]
     val client: ErgoClient = FakeNodeContext.offlineClient()
     private val prover = spy(FakeNodeContext.proverWith(client, 1))
@@ -113,7 +115,9 @@ class SigmaFiBatcherSpec extends TestKit(ActorSystem("sigmafi-batcher-spec", Sig
       }
     when(api.unspentBoxesByTemplateHash(anyString(), any[Paging], any[SortDirection], any[MempoolOptions]))
       .thenAnswer { inv =>
-        if (inv.getArgument[Paging](1).offset == 0) Success(Seq(IndexedBox(tokenBond, "", 100, 3L)))
+        if (tokenBondsCrowded && inv.getArgument[SortDirection](2) == SortDirection.Desc)
+          Success(Seq.fill(100)(IndexedBox(NodeBox("ee" * 32, "", 1L, 0, 0, "00"), "", 100, 4L)))
+        else if (inv.getArgument[Paging](1).offset == 0) Success(Seq(IndexedBox(tokenBond, "", 100, 3L)))
         else Success(Seq.empty[IndexedBox])
       }
     // The pool-aware read leaves out what the mempool spends; the confirmed read still has it
@@ -131,7 +135,7 @@ class SigmaFiBatcherSpec extends TestKit(ActorSystem("sigmafi-batcher-spec", Sig
     val batcher: ActorRef = system.actorOf(Props(new SigmaFiBatcher(nodeContext,
       SigmaFiBatchingConfig(SigmaFiBatchingConfig.Default.batching.copy(scanIntervalMs = 3600000L, broadcast = broadcast),
         broadcastAfterBlocks = 2, minBatchingFeeNanoErg = 50000000L),
-      servesCandidates = true, engine.ref, useTrueProp = false)))
+      servesCandidates = true, engine.ref, useTrueProp = false, allowance = allowance)))
 
     /** What this miner's block for the tip's successor is offered, once a scan has tracked the due bonds. */
     def offeredBatches(slots: Int = 10): Seq[CandidateBundle] = awaitAssert({
@@ -143,6 +147,13 @@ class SigmaFiBatcherSpec extends TestKit(ActorSystem("sigmafi-batcher-spec", Sig
     }, 30.seconds, 250.millis)
 
     def offered(): CandidateBundle = offeredBatches().loneElement
+
+    /** The cost and size of one liquidation of `boxes` for this miner's block, as the batcher would sign it. */
+    def measure(boxes: Seq[NodeBox]): (Long, Long) = client.execute { ctx =>
+      val built = SigmaFiTransactions.liquidate(ctx, wallet,
+        boxes.map(b => SigmaFiBoxes.bond(b).get -> SigmaFiBoxes.input(b, ctx).get), wallet.contract, 0L, tip + 1)
+      (built.candidateTx.cost, built.candidateTx.sizeBytes.toLong)
+    }
 
     def stop(): Unit = system.stop(batcher)
   }
@@ -197,6 +208,30 @@ class SigmaFiBatcherSpec extends TestKit(ActorSystem("sigmafi-batcher-spec", Sig
     inputs.distinct.size shouldBe inputs.size
     bundles.map(_.capital.loneElement.value).sum shouldBe 4 * 50000000L
     f.offeredBatches(slots = 1) should have size 1
+    f.stop()
+  }
+
+  it should "split a build the source's cost allowance could not admit, offering only bundles that fit it together" in {
+    val probe = new Fixture()
+    val due = Seq(probe.pending, probe.tokenBond, probe.pastWindow, probe.inWindow)
+    val (whole, _) = probe.measure(due)
+    probe.stop()
+    val allowance = CandidateBudget(262144L, whole - 1)
+    val f = new Fixture(allowance = allowance)
+    val bundles = f.offeredBatches()
+    val members = bundles.flatMap(_.members)
+    withClue(s"one liquidation of all four costs $whole: ") {
+      members.map(_.cost).sum should be <= allowance.maxCost
+      members.flatMap(_.inputIds).distinct.size shouldBe members.flatMap(_.inputIds).size
+    }
+    // Admission is what the candidate builder applies to this source
+    CandidateBundle.admit(bundles, 2, allowance)._1 shouldBe bundles
+    f.stop()
+  }
+
+  it should "read token bonds oldest first, so newer ones past the scan's cap cannot hide a due one" in {
+    val f = new Fixture(tokenBondsCrowded = true)
+    f.offered().members.loneElement.inputIds should contain(f.tokenBond.boxId)
     f.stop()
   }
 }

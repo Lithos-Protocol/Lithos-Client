@@ -56,7 +56,8 @@ case class SFVaultView(boxId: String, bondId: Option[String], assetId: String, n
  * A bond asset this wallet holds: the bond it claims while that is live, and what the vault holds for it once
  * the bond is repaid or liquidated.
  *
- * @param claimable whether the vault holds anything for it and no pending transaction still settles into it
+ * @param claimable whether a claim can take the vault's boxes now: the vault holds something for it, no bond still
+ *                  holds its other unit, and the vault scan was complete
  */
 case class SFHolding(assetId: String, bond: Option[SFBondView], vault: Seq[SFVaultView], claimable: Boolean)
 
@@ -111,7 +112,8 @@ case class SFQuote(action: String, boxId: Option[String], terms: Option[SFTerms]
 /**
  * A sent action.
  *
- * @param boxId   the output that matters: the new order or bond
+ * @param boxId   the output that matters: the new order or bond, the vault box a repayment or liquidation pays, or
+ *                the first box a cancel or claim returns to this wallet
  * @param assetId the bond asset a fill minted
  */
 case class SFResult(txId: String, outcome: String, boxId: Option[String], assetId: Option[String])
