@@ -12,8 +12,9 @@ import scala.util.Try
 
 /** Classifies the actual confirmed spend path; maturity and an empty live scan do not prove settlement. */
 object BondSettlement {
+  /** @param output the settlement's vault output as the index reports it, spent or not, for Repaid and Liquidated */
   final case class State(status: String, settlement: Option[SFSettlement] = None, reason: Option[String] = None,
-                         liveBond: Option[SigmaFiBond] = None)
+                         liveBond: Option[SigmaFiBond] = None, output: Option[IndexedBox] = None)
   private def unknown(reason: String): State = State("Unknown", reason = Some(reason))
 
   def read(api: NodeApi, bondId: String, assetId: String, height: Int): State =
@@ -50,7 +51,8 @@ object BondSettlement {
         .map(_.getValue.asInstanceOf[Integer].intValue).filter(_ >= 0)
     }
     val settlementIndex = outputIndex("1")
-    val settlement = settlementIndex.flatMap(tx.outputs.lift).flatMap(b => SigmaFiBoxes.vault(b.box))
+    val output = settlementIndex.flatMap(tx.outputs.lift)
+    val settlement = output.flatMap(b => SigmaFiBoxes.vault(b.box))
       .filter(v => v.bondId.contains(bond.boxId) && v.asset == bond.asset)
     if (position < 0 || tx.inclusionHeight <= 0 || proof.isEmpty || settlement.isEmpty ||
       tx.outputs.exists(_.assets.exists(_.tokenId == bond.asset.toString)))
@@ -68,7 +70,7 @@ object BondSettlement {
       if (!authenticated || !vault.settlementPath.contains(1.toByte))
         unknown("the liquidation expression or settlement marker does not match the bond's agreed path")
       else State("Liquidated", Some(SFSettlement(tx.id, tx.inclusionHeight, Some(tx.timestamp).filter(_ > 0), bond.boxId, payout,
-        None, Some(Hex.toHexString(bond.liqScriptHash)))))
+        None, Some(Hex.toHexString(bond.liqScriptHash)))), output = output)
     } else {
       val returned = outputIndex("2").filterNot(i => settlementIndex.contains(i)).flatMap(tx.outputs.lift).map(_.box).filter { box =>
         SigmaFiBoxes.parse(box.ergoTree).exists(t => SigmaFiBoxes.hashOf(t).sameElements(bond.borrowerHash)) &&
@@ -84,7 +86,7 @@ object BondSettlement {
       if (!vault.settlementPath.contains(0.toByte) || tx.inclusionHeight >= bond.maturity || !paid || returned.isEmpty)
         unknown("the indexed spend does not establish a full repayment and collateral return")
       else State("Repaid", Some(SFSettlement(tx.id, tx.inclusionHeight, Some(tx.timestamp).filter(_ > 0), bond.boxId, payout,
-        returned.map(b => SFBoxValue(b.boxId, b.value.toString, tokens(b))), None)))
+        returned.map(b => SFBoxValue(b.boxId, b.value.toString, tokens(b))), None)), output = output)
     }
   }
 

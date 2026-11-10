@@ -86,10 +86,7 @@ class SigmaFiAPIExecution(nodeContext: NodeContext,
     if (ids.isEmpty) Seq.empty
     else {
       val vaults = scanVault(nodeApi)._1.groupBy(_.asset.toString)
-      // One transaction can settle many requested assets. Read that immutable evidence once per request.
-      val transactions = scala.collection.mutable.Map.empty[String, Try[Option[IndexedTransaction]]]
-      def transaction(id: String): Try[Option[IndexedTransaction]] =
-        transactions.getOrElseUpdate(id, nodeApi.indexedTransactionById(id))
+      val transaction = transactionReads(nodeApi)
       ids.map { id =>
         val origin = assetOrigin(nodeApi, id)
         val state = origin.fold(_ => BondSettlement.State("Unverified"),
@@ -113,11 +110,20 @@ class SigmaFiAPIExecution(nodeContext: NodeContext,
     }
     val byAsset = live.groupBy(_.asset.toString)
     val vaultByAsset = vaults.groupBy(_.asset.toString)
-    val holdings = held.toSeq.filter(id => byAsset.contains(id) || vaultByAsset.contains(id)).sorted.map { id =>
+    val transaction = transactionReads(nodeApi)
+    val listed = held.toSeq.filter(id => byAsset.contains(id) || vaultByAsset.contains(id))
+    // Past the scan's cap a settlement output can be missing from it, so a bounded few held units are looked up too
+    val unlisted = if (vaultCut) (held -- listed).toSeq.sorted.take(MaxLookup) else Seq.empty
+    val holdings = (listed ++ unlisted).sorted.flatMap { id =>
       val vault = vaultByAsset.getOrElse(id, Seq.empty)
       val bond = byAsset.get(id).flatMap(_.headOption)
-      SFHolding(id, bond.map(bondView(ctx, nodeApi, _)), vault.map(vaultView),
-        claimable = vault.nonEmpty && bond.isEmpty && !vaultCut && unsettled(nodeApi, id).isEmpty)
+      // What a claim requires: a known, unspent settlement output, which a live bond never has
+      val output = if (bond.isDefined) None else settlementOutput(nodeApi, id, ctx.getHeight, transaction).toOption
+      // The boxes a claim would take: the settlement output, then the largest others up to the claim's cap
+      val others = vault.filterNot(v => output.exists(_.boxId == v.boxId)).sortBy(v => (-v.box.value, v.boxId))
+      val shown = output.flatMap(o => SigmaFiBoxes.vault(o.box)).toSeq ++ others.take(MaxClaimExtras + 1 - output.size)
+      if (bond.isEmpty && shown.isEmpty) None
+      else Some(SFHolding(id, bond.map(bondView(ctx, nodeApi, _)), shown.map(vaultView), claimable = output.isDefined))
     }
     SFPortfolio(ctx.getHeight,
       orders.filter(o => isMine(o.terms.borrowerHash)).map(orderView(ctx, _)),
@@ -305,33 +311,39 @@ class SigmaFiAPIExecution(nodeContext: NodeContext,
     val id = tokenId.trim.toLowerCase
     if (!id.matches("[0-9a-f]{64}")) throw LithosBadRequest(s"'$tokenId' is not a token id")
     val asset = ErgoId.create(id)
-    val (scanned, cut) = scanVault(nodeApi, MempoolOptions.ConfirmedOnly)
-    // The burn is final, so a vault box past the scan's cap would be left behind for good
-    if (cut)
-      throw LithosUnprocessable(s"the vault holds more than ${Batcher.MaxScannedPerTemplate} boxes, so this client " +
-        s"cannot tell it has found every one for $id; a claim now could leave one unclaimable for good")
-    val vaults = scanned.filter(_.asset == asset)
-    if (vaults.isEmpty)
-      throw LithosUnprocessable(s"the vault holds nothing for $id: its bond is not repaid or liquidated yet")
+    unsettled(nodeApi, id).foreach(reason => throw LithosUnprocessable(reason))
+    val output = settlementOutput(nodeApi, id, ctx.getHeight, transactionReads(nodeApi))
+      .fold(reason => throw LithosUnprocessable(reason), identity)
+    // Spent from the UTXO set, not the index, which can trail the chain
+    val settlement = nodeApi.boxById(output.boxId) match {
+      case Success(found) => found.flatMap(SigmaFiBoxes.vault).filter(_.asset == asset).getOrElse(throw LithosUnprocessable(
+        s"the settlement output ${output.boxId} for $id is not unspent on chain; if the node's index is behind, try again"))
+      case Failure(ex) => throw LithosUnavailable(s"could not read box ${output.boxId} from the node: ${ex.getMessage}", ex)
+    }
     val holds = nodeApi.walletBalances().toOption.exists(_.assets.exists(a => a.tokenId == id && a.amount >= 1))
     if (!holds) throw LithosNotFound(s"this wallet does not hold bond asset $id")
-    unsettled(nodeApi, id).foreach(reason => throw LithosUnprocessable(reason))
+    val (scanned, cut) = scanVault(nodeApi, MempoolOptions.ConfirmedOnly)
+    val (extras, left) = scanned.filter(v => v.asset == asset && v.boxId != settlement.boxId)
+      .sortBy(v => (-v.box.value, v.boxId)).splitAt(MaxClaimExtras)
+    val vaults = settlement +: extras
     val inputs = vaults.map(v => inputOf(ctx, v.box))
     val plan = SigmaFiUserTransactions.claim(ctx, wallet, asset, inputs)
     val claimed = inputs.flatMap(_.tokens).groupBy(_.id).map { case (t, ts) => SFTokenAmount(t.toString, ts.map(_.amount).sum.toString) }
+    val warnings = leftBehind(id, left, cut)
     val quote = SFQuote("claim", None, None, TxFee.toString, Seq(SFTokenAmount(id, "1")),
       inputs.map(_.value).sum.toString, claimed.toSeq, TxFee.toString,
-      Seq(s"Claims ${vaults.size} vault box(es) and burns bond asset $id, which has nothing left to claim after."),
-      Seq.empty)
+      Seq(s"Claims the bond's settlement output ${settlement.boxId}" +
+        (if (extras.isEmpty) "" else s" and ${extras.size} other vault box(es) naming $id") +
+        s", and burns bond asset $id, after which no vault box naming it can be claimed."), warnings)
     if (!send) Left(quote)
     else {
       val snapshot = mempoolSnapshot()
       vaults.foreach(v => unclaimed(snapshot, v.boxId))
-      // A vault box still pending would be locked for good once the asset is burned
-      if (snapshot.transactions.exists(_.body.outputs.exists(o => SigmaFiBoxes.vault(o).exists(_.asset == asset))))
-        throw LithosStateChanged(s"a pending transaction still pays into the vault for $id; claim after it confirms")
+      val pending = snapshot.transactions.exists(_.body.outputs.exists(o => SigmaFiBoxes.vault(o).exists(_.asset == asset)))
       val (signed, sent) = fundAndSend(ctx, plan)
-      Right(SFResult(sent.txId, sent.outcome, Some(outputId(signed, 0)), None))
+      Right(SFResult(sent.txId, sent.outcome, Some(outputId(signed, 0)), None, warnings ++
+        (if (!pending) Seq.empty else Seq(s"A pending transaction pays into the vault for $id; burning the asset " +
+          "locks that payment for good."))))
     }
   }
 
@@ -374,6 +386,46 @@ class SigmaFiAPIExecution(nodeContext: NodeContext,
           .orElse(if (holders.size < Batcher.PageSize) None
           else Some(s"more boxes hold $id than one read covers, so this client cannot rule out a bond still to settle"))
     }
+
+  /**
+   * The vault output bond asset `id`'s settlement paid, from the bond's own indexed spend, or why a claim cannot
+   * take one now. Only a verified asset has a bond to follow; anything else is refused rather than guessed at.
+   */
+  private def settlementOutput(nodeApi: NodeApi, id: String, height: Int,
+                               transaction: String => Try[Option[IndexedTransaction]]): Either[String, IndexedBox] =
+    assetOrigin(nodeApi, id) match {
+      case Left(u) => Left(s"bond asset $id is not verified (${u.reason}), so this client cannot find the settlement " +
+        "a claim must take")
+      case Right(origin) =>
+        val state = BondSettlement.read(nodeApi, origin.bondId, id, height, transaction)
+        (state.status, state.output) match {
+          case ("Repaid" | "Liquidated", Some(out)) if out.spentTransactionId.isEmpty => Right(out)
+          case ("Repaid" | "Liquidated", Some(out)) =>
+            Left(s"the settlement output ${out.boxId} for $id is already spent")
+          case ("Open" | "Matured", _) =>
+            Left(s"bond ${origin.bondId} for $id has not been repaid or liquidated yet, so the vault holds nothing for it")
+          case _ => Left(s"the settlement of bond ${origin.bondId} for $id cannot be established: " +
+            state.reason.getOrElse(state.status))
+        }
+    }
+
+  /**
+   * What a claim of `id` leaves in the vault: `left`, past the boxes one claim takes, and with `cut` any the scan did
+   * not reach. The claim burns the only unit that opens them, so they are locked for good.
+   */
+  private def leftBehind(id: String, left: Seq[SigmaFiVaultBox], cut: Boolean): Seq[String] =
+    (if (left.isEmpty) Seq.empty else Seq(s"${left.size} more vault box(es) naming $id, holding " +
+      s"${left.map(v => BigInt(v.box.value)).sum} nanoERG and ${left.map(_.box.assets.size).sum} token(s), are left " +
+      s"out: one claim takes the settlement output and at most $MaxClaimExtras others. Burning the asset locks them " +
+      "for good.")) ++
+      (if (!cut) Seq.empty else Seq(s"The vault holds more than ${Batcher.MaxScannedPerTemplate} boxes, more than one " +
+        s"scan reads, so others naming $id may be left out. Burning the asset locks them for good."))
+
+  /** Indexed transactions read at most once per request: one transaction can settle many bonds. */
+  private def transactionReads(nodeApi: NodeApi): String => Try[Option[IndexedTransaction]] = {
+    val read = scala.collection.mutable.Map.empty[String, Try[Option[IndexedTransaction]]]
+    id => read.getOrElseUpdate(id, nodeApi.indexedTransactionById(id))
+  }
 
   private def checkMaturity(h: Long, tip: Int): Unit =
     if (h <= tip + 2) throw LithosBadRequest(s"maturity $h is not far enough above the current height $tip")
@@ -661,6 +713,14 @@ object SigmaFiAPIExecution {
   final val DefaultPage = 10
   final val MaxPage = 100
   final val MaxLookup = 50
+
+  /**
+   * Vault boxes a claim takes beside the bond's settlement output. Each vault box's script folds over every input
+   * and output, so cost grows with the square of the boxes; at this cap a claim of boxes full of tokens stays under
+   * the 1,000,000 cost and 98,304 bytes a node relays by default.
+   */
+  final val MaxClaimExtras = 8
+
   private final val MaxAuthTries = 5
   private final val NotItsBond = "it is not the bond its asset's order created"
 

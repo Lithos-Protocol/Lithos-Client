@@ -4980,7 +4980,7 @@ paths:
   /sigmafi/claims/{tokenId}/check:
     post:
       summary: Quote a claim
-      description: What the vault holds for this bond asset. Signs nothing.
+      description: What a claim of this bond asset takes, and what it leaves locked. Signs nothing.
       operationId: checkSFClaim
       tags:
         - sigmafi
@@ -4999,10 +4999,11 @@ paths:
     post:
       summary: Claim a settled bond
       description: >
-        Take everything the vault holds for a bond asset this wallet holds, burning the asset. Every vault box
-        for it is claimed at once, each into an output of its own: once the asset is burned, nothing left behind
-        can be claimed. Refused while a pending transaction still pays into the vault for it, while a bond still
-        holds the asset's other unit, and while the vault holds more boxes than one scan reads.
+        Take the vault output the bond's settlement paid, found from the bond's own confirmed spend, burning the
+        bond asset. Up to 8 other vault boxes naming the asset, largest first, come with it, each box into an output
+        of its own. Burning the asset locks every vault box naming it that the claim leaves, for good; the quote's
+        `warnings` and the result's `warnings` say what is left. Refused while a bond still holds the asset's other
+        unit, for an asset that is not verified, and while the settlement cannot be established from the node's index.
       operationId: claimSFBond
       security:
         - ApiKeyAuth: []
@@ -12529,9 +12530,7 @@ components:
             $ref: '#/components/schemas/SFVaultView'
         claimable:
           type: boolean
-          description: >-
-            Whether a claim can take the vault's boxes now: the vault holds something for the asset and no bond
-            still holds its other unit.
+          description: Whether a claim goes through now. The bond's own settlement output is known and unspent.
     SFPortfolio:
       type: object
       x-tags: sigmafi
@@ -12798,6 +12797,11 @@ components:
         assetId:
           type: string
           description: The bond asset a fill minted.
+        warnings:
+          type: array
+          description: What the sent transaction left undone, such as vault boxes a claim left locked for good.
+          items:
+            type: string
   securitySchemes:
     ApiKeyAuth:
       description: >

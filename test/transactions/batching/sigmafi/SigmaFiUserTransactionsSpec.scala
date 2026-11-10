@@ -190,6 +190,26 @@ class SigmaFiUserTransactionsSpec extends AnyPropSpec with SigmaFiFixtures {
     }
   }
 
+  property("a claim of the most vault boxes the API takes, each as full as a box can be, stays inside what nodes relay") {
+    client.execute { ctx =>
+      val asset = ErgoId.create("c9" * 32)
+      def vault(i: Int, tokens: Int, amount: Long): InputUTXO = UTXO(SigmaFiContracts.vault, 2 * Erg,
+        (1 to tokens).map(t => Token(ErgoId.create(f"${i * 1000 + t}%064x"), amount)),
+        Seq(ErgoValue.of(Array.fill(32)(i.toByte)), ErgoValue.of(asset.getBytes), ErgoValue.of(1.toByte)))
+        .toInput(ctx, ErgoId.create(f"${i + 50}%064x"), 0)
+      // The most tokens a vault box can hold: small amounts fit the most, and every token adds to the claim's cost
+      Seq(1L, Long.MaxValue).foreach { amount =>
+        val tokens = (122 to 1 by -1).find(k => vault(0, k, amount).bytes.length <= sigma.data.SigmaConstants.MaxBoxSize.value).get
+        val vaults = (0 to transactions.engine.execution.SigmaFiAPIExecution.MaxClaimExtras).map(vault(_, tokens, amount))
+        val claimed = sign(ctx, SigmaFiUserTransactions.claim(ctx, wallet, asset, vaults), funds(ctx, Erg, Token(asset, 1L)))
+        withClue(s"${vaults.size} boxes of $tokens tokens of $amount: ") {
+          claimed.getCost.toLong should be <= 1000000L
+          transactions.candidate.BlockTxMessages.CandidateTx.signedSize(claimed) should be <= 98304
+        }
+      }
+    }
+  }
+
   property("a token loan is filled with the token and repaid in it, into its own token bond") {
     client.execute { ctx =>
       val terms = orderTerms(wallet.contract, FixedMaturity(ctx.getHeight + 100), principalErg = MinBox,

@@ -169,9 +169,9 @@ object SigmaFiUserTransactions {
   }
 
   /**
-   * Claims every vault box for `asset` with the unit this wallet holds, which is burned. All of them go in one
-   * transaction: once the unit is burned, a vault box left behind can never be claimed. Each box's contents come
-   * back in an output of their own, smaller than the vault box, so a stranger's box cannot oversize the claim.
+   * Claims `vaults` with the unit this wallet holds, which is burned, so a vault box for `asset` not among them can
+   * never be claimed after. Each box's contents come back in an output of their own, smaller than the vault box, so a
+   * stranger's box cannot oversize the claim.
    */
   def claim(ctx: BlockchainContext, wallet: NodeWallet, asset: ErgoId, vaults: Seq[InputUTXO]): SFPlan = {
     require(vaults.nonEmpty, s"the vault holds nothing for bond asset $asset")
