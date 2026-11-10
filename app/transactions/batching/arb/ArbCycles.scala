@@ -15,8 +15,9 @@ import scala.util.{Failure, Success, Try}
 /**
  * Builds this miner's arb cycles for one block. Each pool is taken at the last successor the DEX batchers'
  * bundles leave, or at its confirmed box when they leave it alone, and never where a batcher spent its box
- * without leaving one. Cycles run best first on one stake: each returns the stake whole to the wallet, which
- * the next cycle spends, and sends its profit to an output the holding top-up folds into the pool.
+ * without leaving one. Cycles run best first on one stake: each returns the stake whole to the script it came
+ * from, which the next cycle spends, and sends its profit to an output the holding top-up folds into the pool.
+ * Every carry between legs sits at that script too, so no wallet box is spent or created.
  *
  * Nothing here is broadcast, and nothing reads the node.
  */
@@ -33,14 +34,14 @@ object ArbCycles {
   /**
    * One bundle per cycle, in the order they spend the stake.
    *
-   * @param stake       the arb stake, as the wallet last found it unspent
+   * @param stake       the arb stake, as last found unspent, at a script this wallet signs for
    * @param maxIn       the most ERG one cycle puts in
    * @param minProfit   the least profit a cycle must leave; at least what an output of its own needs
    * @param profitTo    the contract each cycle's profit output carries
    * @param selectUntil when pricing stops taking new cycles
    * @param buildUntil  when signing stops; a cycle not signed by then is not offered
-   * @param reserve     holds a cycle's stake output in the wallet, and says whether it did. A cycle whose output
-   *                    is not held is not offered, and no later cycle is built on it
+   * @param reserve     notes a cycle's stake output as the next stake, and says whether it did. A cycle whose
+   *                    output is not noted is not offered, and no later cycle is built on it
    */
   def build(ctx: BlockchainContext, wallet: NodeWallet, index: ArbIndex, basis: ArbBasis, stake: NodeBox,
             blockHeight: Int, slots: Int, maxIn: Long, minProfit: Long, profitTo: Contract,
@@ -68,7 +69,7 @@ object ArbCycles {
           case Success(legs) =>
             val stakeOut = InputUTXO(legs.last.getOutputsToSpend.get(1))
             if (!reserve(stakeOut.id.toString)) {
-              logger.warn(s"The wallet would not hold ${stakeOut.id} as the next arb stake; no further cycles for " +
+              logger.warn(s"${stakeOut.id} could not be noted as the next arb stake; no further cycles for " +
                 s"block $blockHeight")
               stopped = true
               false
@@ -113,9 +114,10 @@ object ArbCycles {
   }
 
   /**
-   * `cycle`'s legs signed in order, each pool at the box `at` names and the carry passing from leg to leg; the
-   * last leg returns the carry's ERG less the profit to the wallet as the next stake, and the profit to
-   * `profitTo`. Fails when a pool box does not read back as the state the cycle was priced on.
+   * `cycle`'s legs signed in order, each pool at the box `at` names and the carry passing from leg to leg at
+   * the stake's own script; the last leg returns the carry's ERG less the profit to that script as the next
+   * stake, and the profit to `profitTo`. Fails when a pool box does not read back as the state the cycle was
+   * priced on.
    */
   private def signed(ctx: BlockchainContext, wallet: NodeWallet, cycle: ArbCycle, at: Map[String, At],
                      stake: InputUTXO, blockHeight: Int, profitTo: Contract): Try[Vector[SignedTransaction]] = Try {
@@ -130,10 +132,11 @@ object ArbCycles {
         .filter(_.amountOut == planned.amountOut)
         .getOrElse(throw new IllegalStateException(s"pool ${hop.nft} no longer fills leg ${i + 1} as priced"))
       val last = i == cycle.legs - 1
-      val leg = ArbLeg.build(ctx, wallet, swap, poolBox, Seq(carry), wallet.contract, blockHeight,
+      val leg = ArbLeg.build(ctx, wallet, swap, poolBox, Seq(carry), stake.contract, blockHeight,
         profit = if (last) Some(profitTo -> cycle.profit) else None)
       carry = InputUTXO(leg.getOutputsToSpend.get(1))
-      if (last) require(carry.value == stake.value && carry.tokens.isEmpty,
+      if (last) require(carry.value == stake.value && carry.tokens.isEmpty &&
+        carry.contract.ergoTreeHex == stake.contract.ergoTreeHex,
         s"the last leg returns ${carry.value} nanoERG and ${carry.tokens.size} token(s) where the stake was ${stake.value}")
       leg
     }

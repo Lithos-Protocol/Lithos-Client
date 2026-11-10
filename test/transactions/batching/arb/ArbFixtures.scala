@@ -67,9 +67,21 @@ object ArbFixtures {
 
   lazy val Rsn: String = litRsnPool.assets(2).tokenId
 
-  /** A plain wallet box of `value`, as the wallet would hand it out as the stake. */
+  /** A plain wallet box of `value`, for a cycle started from a plain key. */
   def stakeBox(ctx: BlockchainContext, wallet: NodeWallet, value: Long, seed: Int = 7): NodeBox =
     LDNodeFixtures.nodeBox(ctx, UTXO(wallet.contract, value), 0, id(seed))
+
+  /** The arb stake script of `wallet`'s first key. */
+  def stakeContract(wallet: NodeWallet): Contract =
+    arbitrage.contracts.ArbStakeContract.forKey(wallet.p2pk.getPublicKey)
+
+  /** A box of `value` at `wallet`'s arb address, as the arb stage is handed its stake. */
+  def arbStakeBox(ctx: BlockchainContext, wallet: NodeWallet, value: Long, seed: Int = 8): NodeBox =
+    LDNodeFixtures.nodeBox(ctx, UTXO(stakeContract(wallet), value), 0, id(seed))
+
+  /** The stake of a client with arb off: it hands out nothing and never reads the node. */
+  def idleStake(nodeContext: configs.NodeContext): ArbStake =
+    new ArbStake(() => nodeContext.getNodeApi, stakeContract(nodeContext.getNodeWallet), nodeContext.getNetwork, 0L)
 
   /** `box` as discovery would read it. */
   def entry(ctx: BlockchainContext, box: NodeBox): ArbPoolEntry = {

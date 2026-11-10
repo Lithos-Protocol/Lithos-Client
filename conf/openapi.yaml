@@ -49,9 +49,9 @@ tags:
     x-displayName: Collateral Market
   - name: wallet
     description: >
-      The client's own wallet: ERG and token balances, block rewards, and the list of verified
-      tokens those balances are matched against. Balances and rewards require an `api_key`; the
-      verified list does not.
+      The client's own wallet: ERG and token balances, block rewards, the arb stake, and the list
+      of verified tokens those balances are matched against. Balances, rewards and the arb stake
+      require an `api_key`; the verified list does not.
 
 
       **All amounts are decimal strings, not JSON numbers.** ERG amounts are nanoERG; LIT amounts
@@ -98,8 +98,9 @@ tags:
       SigmaFi bonds: peer-to-peer zero-coupon loans. A borrower posts a collateral-backed order. A lender
       fills it, creating a bond and minting two bond-asset units: one singleton locked in the bond and one
       circulating claim for the lender. Repayment and liquidation burn the singleton. The borrower repays before maturity and takes the collateral back; otherwise anyone
-      may liquidate the bond, sending the collateral less its batching fee to the vault. Whoever holds the bond
-      asset claims what the vault holds for it.
+      may liquidate the bond, sending the borrower's collateral to the vault. The lender chooses and funds a
+      separate batching reserve on fill, above all borrower collateral; repayment refunds it to the bond holder,
+      while liquidation may pay it to the liquidator. Whoever holds the bond asset claims what the vault holds for it.
 
 
       Lists, the asset lookup and every `check` are open and sign nothing; the portfolio and everything that
@@ -4703,8 +4704,8 @@ paths:
       summary: Create an order
       description: >
         Lock collateral in an order asking to borrow ERG or one token, repaid by a fixed height or a number of
-        blocks after a lender fills it. Its batching fee is `sigmafi.bonds.batchingFeeNanoErg` unless the request
-        sets a higher one. Cancel it with `POST /sigmafi/orders/{boxId}/cancel` while it is unfilled.
+        blocks after a lender fills it. Do not send `batchingFee` on creation: the lender chooses and funds the
+        reserve when filling. Cancel it with `POST /sigmafi/orders/{boxId}/cancel` while it is unfilled.
       operationId: createSFOrder
       security:
         - ApiKeyAuth: []
@@ -4811,6 +4812,8 @@ paths:
       responses:
         '200':
           $ref: '#/components/responses/SigmaFiQuoted'
+        '400':
+          $ref: '#/components/responses/SigmaFiBadRequest'
         '404':
           $ref: '#/components/responses/SigmaFiNotFound'
         '422':
@@ -4843,6 +4846,8 @@ paths:
           $ref: '#/components/responses/SigmaFiSent'
         '403':
           $ref: '#/components/responses/SigmaFiForbidden'
+        '400':
+          $ref: '#/components/responses/SigmaFiBadRequest'
         '404':
           $ref: '#/components/responses/SigmaFiNotFound'
         '409':
@@ -4904,7 +4909,7 @@ paths:
     post:
       summary: Repay a bond
       description: >
-        Pay the repayment into the vault for the bond asset's holder, and return the collateral to the
+        Pay the repayment plus the unused lender-funded reserve into the vault for the bond asset's holder, and return the collateral to the
         borrower, burning the bond singleton. Open strictly below maturity. Anyone may repay; the collateral
         always goes to the borrower and the circulating claim stays with its holder.
       operationId: repaySFBond
@@ -4949,8 +4954,8 @@ paths:
     post:
       summary: Liquidate a bond
       description: >
-        Send a matured bond's collateral, less its batching fee, to the vault for the bond asset's holder. The
-        fee less the 0.001 ERG network fee comes to this wallet. Only bonds under the maturity liquidation
+        Send a matured bond's full borrower collateral to the vault for the bond asset's holder. The separate
+        lender-funded reserve less the 0.001 ERG network fee comes to this wallet. Only bonds under the maturity liquidation
         script. Burns the bond singleton. Mining clients liquidate bonds paying at least their fee floor on their own.
       operationId: liquidateSFBond
       security:
@@ -5221,6 +5226,109 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/VerifiedTokenList'
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /wallet/arb:
+    get:
+      summary: Arb stake
+      security:
+        - ApiKeyAuth: []
+      description: >
+        The arb address and the confirmed boxes at it. Arbitrage in this miner's own blocks starts
+        from the largest box there holding at least 0.1 ERG and no tokens, and returns it to the
+        same address in the same block.
+
+
+        The address is this wallet's first key under a script of its own. Only that key spends it,
+        but the node wallet does not list boxes there, so this ERG is not in `/wallet/balances`.
+        ERG sent to the address is used as the stake.
+      operationId: getWalletArbStake
+      tags:
+        - wallet
+      responses:
+        '200':
+          description: The arb address and what it holds
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WalletArbStake'
+        '403':
+          description: Missing or wrong api_key
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '503':
+          description: >
+            The arb address could not be read. It is read from the node's extra index.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /wallet/arb/reclaim:
+    post:
+      summary: Reclaim the arb stake
+      security:
+        - ApiKeyAuth: []
+      description: >
+        Send every confirmed box at the arb address, tokens included, to this wallet's primary
+        address in one transaction paying the 0.001 ERG fee out of those boxes. Arbitrage stops
+        first and stays off until the client restarts, and `batching.arb.autoReserve` sends no new
+        stake until then. Set `batching.arb.enabled = false` to keep it off after a restart.
+
+
+        One transaction spends at most `wallet.max-inputs` boxes, largest first; `remainingBoxes`
+        counts the rest, which another call returns. If one of this miner's blocks spends the stake
+        before the transaction confirms, the node refuses it and the stake is still at the arb
+        address: call again.
+      operationId: reclaimWalletArbStake
+      tags:
+        - wallet
+      responses:
+        '200':
+          description: The reclaim transaction that was sent
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WalletArbReclaimResult'
+        '400':
+          description: No confirmed box at the arb address. Arbitrage is left running.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '403':
+          description: Missing or wrong api_key
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '422':
+          description: >
+            The node refused the transaction. `detail` carries its reason. Arbitrage stays off
+            until the client restarts.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '503':
+          description: Node unavailable. Nothing was sent; retry.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
         default:
           description: Error
           content:
@@ -8233,6 +8341,88 @@ components:
           type: string
           description: Total ERG across every claim transaction. Decimal string.
           example: '72000000000'
+
+    WalletArbStake:
+      description: >
+        The arb address and the confirmed boxes at it. None of this ERG is counted in the wallet's
+        balances.
+      type: object
+      x-tags: wallet
+      required:
+        - address
+        - enabled
+        - paused
+        - targetNanoErgs
+        - stakeNanoErgs
+        - boxes
+        - nanoErgs
+      properties:
+        address:
+          type: string
+          description: The arb address. ERG sent here is used as the arb stake.
+        enabled:
+          type: boolean
+          description: >
+            Arbitrage is on and can reach this miner's blocks: `batching.arb.enabled`, block
+            transactions and the `arb` candidate source are all on.
+        paused:
+          type: boolean
+          description: A reclaim stopped arbitrage. It resumes when the client restarts.
+        targetNanoErgs:
+          type: string
+          description: >
+            `batching.arb.stakeNanoErg`, the size `batching.arb.autoReserve` sends and the most one
+            cycle puts in. `0` while `enabled` is false. Decimal string.
+          example: '10000000000'
+        stakeNanoErgs:
+          type: string
+          description: >
+            ERG of the box cycles start from. `0` until a candidate build has taken one up, and
+            after a reclaim. Decimal string.
+          example: '10000000000'
+        boxes:
+          type: integer
+          format: int32
+          description: Confirmed boxes at the address, at most 1000 counted
+          example: 1
+        nanoErgs:
+          type: string
+          description: ERG in those boxes, which a reclaim returns less its fee. Decimal string.
+          example: '10000000000'
+
+    WalletArbReclaimResult:
+      description: The transaction a reclaim of the arb stake sent
+      type: object
+      x-tags: wallet
+      required:
+        - txId
+        - boxes
+        - nanoErgs
+        - outcome
+        - remainingBoxes
+      properties:
+        txId:
+          type: string
+        boxes:
+          type: integer
+          format: int32
+          description: Boxes this transaction spends
+          example: 1
+        nanoErgs:
+          type: string
+          description: ERG in those boxes, before the 0.001 ERG fee. Decimal string.
+          example: '10000000000'
+        outcome:
+          type: string
+          enum: [accepted, uncertain]
+          description: >
+            `accepted` when the node took the transaction. `uncertain` when its answer was lost:
+            check `GET /wallet/arb` before calling again.
+        remainingBoxes:
+          type: integer
+          format: int32
+          description: Boxes left at the address for another call
+          example: 0
 
     WalletCollateralStatus:
       description: >

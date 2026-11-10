@@ -4,9 +4,7 @@ import akka.actor.{ActorSystem, Props}
 import akka.testkit.{TestKit, TestProbe}
 import com.typesafe.config.ConfigFactory
 import configs.{ArbConfig, BatchingConfig}
-import mutations.NodeWallet
-import node.model._
-import org.mockito.ArgumentMatchers.{any, anyString}
+import org.mockito.ArgumentMatchers.anyString
 import org.mockito.Mockito.when
 import org.scalatest.BeforeAndAfterAll
 import org.scalatest.flatspec.AnyFlatSpecLike
@@ -14,8 +12,6 @@ import org.scalatest.matchers.should.Matchers
 import support.{FakeNodeContext, LDNodeFixtures}
 import transactions.batching.tracking.{ScriptedChain, TrackerFixtures}
 import transactions.candidate.BlockTxMessages.{BlockTxsReady, PrepareBlockTxs, RequestArbTxs}
-import transactions.engine.wallet.EngineWalletMessages.RefreshBoxes
-import transactions.engine.wallet.EngineWalletState
 
 import scala.concurrent.duration._
 import scala.util.Success
@@ -26,11 +22,11 @@ object ArbStageSpec {
 }
 
 /**
- * The arb stage on a scripted chain, a real pool tracker and a real wallet actor holding the stake. These pin
- * that a round is answered with a signed cycle once the tracker has read the block being built on, that a
- * refresh with nothing changed answers with the same cycles without building them again, that a block moving a
- * pool is built on its new box, that a new parent at the same height is built on rather than answered from the
- * last build, and that a round on a block the tracker was never told of gets nothing.
+ * The arb stage on a scripted chain, a real pool tracker and the stake at its arb address. These pin that a
+ * round is answered with a signed cycle once the tracker has read the block being built on, that a refresh with
+ * nothing changed answers with the same cycles without building them again, that a block moving a pool is built
+ * on its new box, that a new parent at the same height is built on rather than answered from the last build,
+ * and that a round on a block the tracker was never told of, or with the stake paused, gets nothing.
  */
 class ArbStageSpec extends TestKit(ActorSystem("arb-stage-spec", ArbStageSpec.config))
   with AnyFlatSpecLike with Matchers with BeforeAndAfterAll {
@@ -40,14 +36,6 @@ class ArbStageSpec extends TestKit(ActorSystem("arb-stage-spec", ArbStageSpec.co
   override def afterAll(): Unit = TestKit.shutdownActorSystem(system)
 
   private val tip = 1908200
-
-  private def walletBox(wallet: NodeWallet, value: Long): WalletBox =
-    WalletBox(
-      box = support.CanonicalNodeBox(boxId = "00" * 32, transactionId = f"$value%064x", value = value, index = 0,
-        creationHeight = 100, ergoTree = wallet.contract.ergoTreeHex, assets = Seq.empty),
-      address = wallet.p2pk.toString, confirmationsNum = Some(10), creationTransaction = f"$value%064x",
-      creationOutIndex = 0, inclusionHeight = Some(100), spendingTransaction = None,
-      spendingHeight = None, spent = false, onchain = true, scans = Seq(10))
 
   "The arb stage" should "offer a signed cycle on the tracked pools, and the same cycles on a refresh without rebuilding" in {
     val chain = new ScriptedChain
@@ -61,21 +49,19 @@ class ArbStageSpec extends TestKit(ActorSystem("arb-stage-spec", ArbStageSpec.co
     }
     chain.extend(tip - 1, tip)
     chain.indexed = tip
-    chain.scans(LDNodeFixtures.indexed(cheap, tip - 5), LDNodeFixtures.indexed(dear, tip - 5))
-    val boxes = Seq(walletBox(wallet, 12 * Erg), walletBox(wallet, 15 * Erg))
-    when(api.indexerEnabled).thenReturn(false)
-    when(api.walletUnspentBoxes(any[ConfirmationRange], any[Paging])).thenAnswer { inv =>
-      if (inv.getArgument[Paging](1).offset == 0) Success(boxes) else Success(Seq.empty[WalletBox])
-    }
+    // The stake sits at the arb address, where the index lists it and the UTXO set holds it; no wallet is asked
+    val stakeBox = nodeContext.getClient.execute(ctx => arbStakeBox(ctx, wallet, 12 * Erg))
+    chain.scans(LDNodeFixtures.indexed(cheap, tip - 5), LDNodeFixtures.indexed(dear, tip - 5),
+      LDNodeFixtures.indexed(stakeBox, tip - 5))
+    when(api.indexerEnabled).thenReturn(true)
     when(api.boxById(anyString())).thenAnswer { inv =>
-      Success(boxes.map(_.box).find(_.boxId == inv.getArgument[String](0)))
+      Success(Some(stakeBox).filter(_.boxId == inv.getArgument[String](0)))
     }
 
-    val engine = system.actorOf(Props(new EngineWalletState(nodeContext, configs.WalletConfig.Default, 0, 10 * Erg)))
-    engine ! RefreshBoxes
+    val stakes = new ArbStake(() => api, stakeContract(wallet), nodeContext.getNetwork, 10 * Erg)
     val tracker = TrackerFixtures.tracker(chain)
     val stage = system.actorOf(Props(new ArbStage(nodeContext, ArbConfig.Default.copy(enabled = true),
-      BatchingConfig.Default, Set.empty, tracker, engine, useTrueProp = false, buildBudgetMs = 10000L)))
+      BatchingConfig.Default, Set.empty, tracker, stakes, useTrueProp = false, buildBudgetMs = 10000L)))
     val probe = TestProbe()
 
     stage ! PrepareBlockTxs(tip + 1, 8, chain.header(tip).id)
@@ -89,6 +75,10 @@ class ArbStageSpec extends TestKit(ActorSystem("arb-stage-spec", ArbStageSpec.co
     // A ten percent gap: the stake caps each pass at 10 ERG, so the pair is taken again while it still pays
     first.bundles.foreach(_.members.size shouldBe 2)
     first.bundles.size should be <= 4
+    withClue("the first cycle starts from the box at the arb address and no cycle spends a wallet box: ") {
+      first.bundles.head.members.head.inputIds should contain(stakeBox.boxId)
+      stakes.current.map(_.boxId) shouldBe Some(stakeBox.boxId)
+    }
     chain.scanPages.get should be > 0
     val scanned = chain.scanPages.get
 
@@ -128,6 +118,12 @@ class ArbStageSpec extends TestKit(ActorSystem("arb-stage-spec", ArbStageSpec.co
 
     withClue("a block the tracker was never told of gets no cycles: ") {
       probe.send(stage, RequestArbTxs(tip + 5, 8, refresh = false, Seq.empty))
+      probe.expectMsgType[BlockTxsReady].bundles shouldBe empty
+    }
+
+    withClue("a paused stake gets no cycles, on a block that had them: ") {
+      stakes.pause()
+      probe.send(stage, RequestArbTxs(tip + 2, 8, refresh = true, Seq.empty))
       probe.expectMsgType[BlockTxsReady].bundles shouldBe empty
     }
   }

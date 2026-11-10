@@ -53,8 +53,13 @@ class ArbCyclesSpec extends AnyFlatSpec with Matchers with MockitoSugar {
     }
   }
 
-  /** The shape every cycle bundle has, whatever its pools: checked field by field off the signed bodies. */
-  private def checkCycle(bundle: CandidateBundle, stakeIn: String, poolBoxes: Seq[String]): Unit = {
+  /**
+   * The shape every cycle bundle has, whatever its pools: checked field by field off the signed bodies.
+   *
+   * @param stakeTree the script the stake came from, where every carry and the returned stake must sit
+   */
+  private def checkCycle(bundle: CandidateBundle, stakeIn: String, poolBoxes: Seq[String],
+                         stakeTree: String = wallet.contract.ergoTreeHex): Unit = {
     val txs = legs(bundle)
     txs.size shouldBe poolBoxes.size
     bundle.members.foreach(_.kind shouldBe ArbLeg.Kind)
@@ -64,9 +69,9 @@ class ArbCyclesSpec extends AnyFlatSpec with Matchers with MockitoSugar {
       case Seq(a, b) => b.inputs(1).boxId shouldBe a.outputs(1).boxId
       case _ => ()
     }
+    txs.foreach(_.outputs(1).ergoTree shouldBe stakeTree)
     val last = txs.last
     last.outputs.size shouldBe 3
-    last.outputs(1).ergoTree shouldBe wallet.contract.ergoTreeHex
     last.outputs(1).value shouldBe stakeValue
     last.outputs(1).assets shouldBe empty
     val profit = last.outputs(2)
@@ -103,6 +108,41 @@ class ArbCyclesSpec extends AnyFlatSpec with Matchers with MockitoSugar {
       bundles.size shouldBe 1
       checkCycle(bundles.head, stake.boxId, Seq(cheap.boxId, dear.boxId))
       bundles.head.packageParents shouldBe empty
+    }
+  }
+
+  "A cycle started from the arb address" should "keep every carry and the returned stake there, signed by the wallet's key, with the profit apart" in {
+    nodeContext.getClient.execute { ctx =>
+      val canonical = canonicalPool(ctx, 100000 * Erg, 10000000000000L)
+      val rsn = nativePool(ctx, id(3), Rsn, 2000 * Erg, 10000L)
+      remember(canonical, litRsnPool, rsn)
+      val stake = arbStakeBox(ctx, wallet, stakeValue)
+      val arbTree = stakeContract(wallet).ergoTreeHex
+      stake.ergoTree shouldBe arbTree
+      arbTree should not be wallet.contract.ergoTreeHex
+      val bundles = build(ctx, index(ctx, Seq(canonical, litRsnPool, rsn)), stake, slots = 3)
+      bundles.size shouldBe 1
+      // Three legs, so two carries hold tokens on the way; each is at the arb address, never at the wallet's
+      checkCycle(bundles.head, stake.boxId, Seq(canonical.boxId, litRsnPool.boxId, rsn.boxId), arbTree)
+      val txs = legs(bundles.head)
+      txs.init.foreach(_.outputs(1).assets should not be empty)
+      txs.flatMap(_.outputs).filter(_.ergoTree == wallet.contract.ergoTreeHex).map(_.boxId) shouldBe
+        Seq(txs.last.outputs(2).boxId)
+    }
+  }
+
+  "Two cycles from the arb address" should "run on one stake, the second spending the box the first returned there" in {
+    nodeContext.getClient.execute { ctx =>
+      val (p1, p2) = pair(ctx, 101, (1, 2))
+      val (q1, q2) = pair(ctx, 102, (11, 12))
+      val stake = arbStakeBox(ctx, wallet, stakeValue)
+      val arbTree = stakeContract(wallet).ergoTreeHex
+      val bundles = build(ctx, index(ctx, Seq(p1, p2, q1, q2)), stake, slots = 4)
+      bundles.size shouldBe 2
+      val first = legs(bundles.head)
+      checkCycle(bundles.head, stake.boxId, first.map(_.inputs.head.boxId), arbTree)
+      checkCycle(bundles(1), first.last.outputs(1).boxId, legs(bundles(1)).map(_.inputs.head.boxId), arbTree)
+      parentsDeclared(bundles)
     }
   }
 
@@ -193,7 +233,8 @@ class ArbCyclesSpec extends AnyFlatSpec with Matchers with MockitoSugar {
       val a = nativePool(ctx, id(4), id(104), 1000 * Erg, 1000000000000L)
       val aRsn = tokenPool(ctx, id(5), id(104), Rsn, 10000000000000L, 100000L)
       val canonical = canonicalPool(ctx, 100000 * Erg, 10000000000000L)
-      val bundle = build(ctx, index(ctx, Seq(a, aRsn, litRsnPool, canonical)), stakeBox(ctx, wallet, stakeValue),
+      // From the arb address, as the stage builds: its script costs more to check than a plain key's
+      val bundle = build(ctx, index(ctx, Seq(a, aRsn, litRsnPool, canonical)), arbStakeBox(ctx, wallet, stakeValue),
         slots = 4).head
       val limits = configs.CandidateConfig.Default.limitsFor(configs.CandidateSourceConfig.Arb)
       // One leg through each pool kind, so the dearest of the four bounds any leg

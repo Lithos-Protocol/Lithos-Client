@@ -34,7 +34,8 @@ class TransactionEngineSpec extends TestKit(ActorSystem("transaction-engine-spec
     val replies = TestProbe()
     val gate = new CompletableFuture[Unit]()
     val calls = new AtomicInteger()
-    val engine = system.actorOf(Props(new TransactionEngine(ctx, replies.ref, replies.ref, new support.FakeCache, play.api.Configuration(com.typesafe.config.ConfigFactory.load()), transactions.rollups.DataBoxSource.Stored) {
+    val engine = system.actorOf(Props(new TransactionEngine(ctx, replies.ref, replies.ref, new support.FakeCache, play.api.Configuration(com.typesafe.config.ConfigFactory.load()), transactions.rollups.DataBoxSource.Stored,
+      transactions.batching.arb.ArbFixtures.idleStake(ctx)) {
       override protected lazy val reconciler = new EngineReconciler(ctx, replies.ref, replies.ref) {
         override def reconcile(): Unit = ()
       }
@@ -65,7 +66,8 @@ class TransactionEngineSpec extends TestKit(ActorSystem("transaction-engine-spec
     val replies = TestProbe()
     val entered = TestProbe()
     val gate = new CompletableFuture[Unit]()
-    val engine = system.actorOf(Props(new TransactionEngine(ctx, replies.ref, replies.ref, new support.FakeCache, play.api.Configuration(com.typesafe.config.ConfigFactory.load()), transactions.rollups.DataBoxSource.Stored) {
+    val engine = system.actorOf(Props(new TransactionEngine(ctx, replies.ref, replies.ref, new support.FakeCache, play.api.Configuration(com.typesafe.config.ConfigFactory.load()), transactions.rollups.DataBoxSource.Stored,
+      transactions.batching.arb.ArbFixtures.idleStake(ctx)) {
       override protected lazy val reconciler = new EngineReconciler(ctx, replies.ref, replies.ref) {
         override def reconcile(): Unit = ()
       }
@@ -93,7 +95,8 @@ class TransactionEngineSpec extends TestKit(ActorSystem("transaction-engine-spec
     // which the API then cast into a 500.
     val (ctx, _, _) = FakeNodeContext()
     val replies = TestProbe()
-    val engine = system.actorOf(Props(new TransactionEngine(ctx, replies.ref, replies.ref, new support.FakeCache, play.api.Configuration(com.typesafe.config.ConfigFactory.load()), transactions.rollups.DataBoxSource.Stored) {
+    val engine = system.actorOf(Props(new TransactionEngine(ctx, replies.ref, replies.ref, new support.FakeCache, play.api.Configuration(com.typesafe.config.ConfigFactory.load()), transactions.rollups.DataBoxSource.Stored,
+      transactions.batching.arb.ArbFixtures.idleStake(ctx)) {
       override protected lazy val reconciler = new EngineReconciler(ctx, replies.ref, replies.ref) {
         override def reconcile(): Unit = ()
       }
@@ -113,7 +116,8 @@ class TransactionEngineSpec extends TestKit(ActorSystem("transaction-engine-spec
     val (ctx, _, _) = FakeNodeContext()
     val events = TestProbe()
     val gate = new CompletableFuture[Unit]()
-    val engine = system.actorOf(Props(new TransactionEngine(ctx, events.ref, events.ref, new support.FakeCache, play.api.Configuration(com.typesafe.config.ConfigFactory.load()), transactions.rollups.DataBoxSource.Stored) {
+    val engine = system.actorOf(Props(new TransactionEngine(ctx, events.ref, events.ref, new support.FakeCache, play.api.Configuration(com.typesafe.config.ConfigFactory.load()), transactions.rollups.DataBoxSource.Stored,
+      transactions.batching.arb.ArbFixtures.idleStake(ctx)) {
       override protected lazy val reconciler = new EngineReconciler(ctx, events.ref, events.ref) {
         override def reconcile(): Unit = {
           events.ref ! "reconcile"
@@ -143,7 +147,8 @@ class TransactionEngineSpec extends TestKit(ActorSystem("transaction-engine-spec
     val replies = TestProbe()
     val gate = new CompletableFuture[Unit]()
     @volatile var eligible: () => Boolean = () => true
-    val engine = system.actorOf(Props(new TransactionEngine(ctx, replies.ref, replies.ref, new support.FakeCache, play.api.Configuration(com.typesafe.config.ConfigFactory.load()), transactions.rollups.DataBoxSource.Stored) {
+    val engine = system.actorOf(Props(new TransactionEngine(ctx, replies.ref, replies.ref, new support.FakeCache, play.api.Configuration(com.typesafe.config.ConfigFactory.load()), transactions.rollups.DataBoxSource.Stored,
+      transactions.batching.arb.ArbFixtures.idleStake(ctx)) {
       override protected lazy val reconciler = new EngineReconciler(ctx, replies.ref, replies.ref) {
         override def reconcile(): Unit = ()
       }
@@ -180,7 +185,8 @@ class TransactionEngineSpec extends TestKit(ActorSystem("transaction-engine-spec
     val gate = new CompletableFuture[Unit]()
     val incarnations = new AtomicInteger()
     val parent = TestProbe()
-    val engine = system.actorOf(Props(new TransactionEngine(ctx, events.ref, events.ref, new support.FakeCache, play.api.Configuration(com.typesafe.config.ConfigFactory.load()), transactions.rollups.DataBoxSource.Stored) {
+    val engine = system.actorOf(Props(new TransactionEngine(ctx, events.ref, events.ref, new support.FakeCache, play.api.Configuration(com.typesafe.config.ConfigFactory.load()), transactions.rollups.DataBoxSource.Stored,
+      transactions.batching.arb.ArbFixtures.idleStake(ctx)) {
       private val incarnation = incarnations.incrementAndGet()
       override def preStart(): Unit = { super.preStart(); events.ref ! incarnation }
       override def receive: Receive = ({ case "restart" => throw new RuntimeException("test restart") }: Receive)
@@ -217,7 +223,8 @@ class TransactionEngineSpec extends TestKit(ActorSystem("transaction-engine-spec
     val (ctx, _, _) = FakeNodeContext()
     val events = TestProbe()
     val wallet = TestProbe()
-    val engine = system.actorOf(Props(new TransactionEngine(ctx, events.ref, events.ref, new support.FakeCache, play.api.Configuration(com.typesafe.config.ConfigFactory.load()), transactions.rollups.DataBoxSource.Stored) {
+    val engine = system.actorOf(Props(new TransactionEngine(ctx, events.ref, events.ref, new support.FakeCache, play.api.Configuration(com.typesafe.config.ConfigFactory.load()), transactions.rollups.DataBoxSource.Stored,
+      transactions.batching.arb.ArbFixtures.idleStake(ctx)) {
       override protected lazy val reconciler = new EngineReconciler(ctx, events.ref, events.ref) {
         override def reconcile(): Unit = ()
       }
@@ -240,7 +247,8 @@ class TransactionEngineSpec extends TestKit(ActorSystem("transaction-engine-spec
     val (ctx, _, _) = FakeNodeContext()
     val events = TestProbe()
     val wallet = TestProbe()
-    val engine = system.actorOf(Props(new TransactionEngine(ctx, events.ref, events.ref, new support.FakeCache, play.api.Configuration(com.typesafe.config.ConfigFactory.load()), transactions.rollups.DataBoxSource.Stored) {
+    val engine = system.actorOf(Props(new TransactionEngine(ctx, events.ref, events.ref, new support.FakeCache, play.api.Configuration(com.typesafe.config.ConfigFactory.load()), transactions.rollups.DataBoxSource.Stored,
+      transactions.batching.arb.ArbFixtures.idleStake(ctx)) {
       override protected lazy val reconciler = new EngineReconciler(ctx, events.ref, events.ref) {
         override def reconcile(): Unit = ()
       }
@@ -257,5 +265,48 @@ class TransactionEngineSpec extends TestKit(ActorSystem("transaction-engine-spec
       events.send(engine, CandidateTxsDropped(500))
       wallet.expectMsg(5.seconds, MarkReservationUncertain("rebuilt"))
     } finally system.stop(engine)
+  }
+
+  /**
+   * An engine whose arb reserve is due at once and reports each attempt to `events` instead of sending.
+   *
+   * @param target the stake's size, 0 for a client with arb off
+   */
+  private def reserving(target: Long, events: TestProbe, paused: Boolean = false) = {
+    val (ctx, _, wallet) = FakeNodeContext()
+    val stakes = new transactions.batching.arb.ArbStake(() => ctx.getNodeApi,
+      transactions.batching.arb.ArbFixtures.stakeContract(wallet), ctx.getNetwork, target)
+    if (paused) stakes.pause()
+    system.actorOf(Props(new TransactionEngine(ctx, events.ref, events.ref, new support.FakeCache,
+      play.api.Configuration(ConfigFactory.load()), transactions.rollups.DataBoxSource.Stored, stakes) {
+      override protected def arbReserveDelayMs: Long = 0L
+      override protected lazy val reconciler = new EngineReconciler(ctx, events.ref, events.ref) {
+        override def reconcile(): Unit = ()
+      }
+      override protected def executeOptional(work: EngineIntent, alive: () => Boolean): Any = work match {
+        case EngineIntent.ArbReserve =>
+          events.ref ! "arb-reserve"
+          transactions.engine.execution.ArbReserveExecution.Status(
+            transactions.engine.execution.ArbReserveExecution.OutcomeHeld, 0L, target)
+        case other => Completed(other.key)
+      }
+    }))
+  }
+
+  /** Whether an arb reserve attempt reaches `events` within `wait`, whatever else the engine sends there. */
+  private def attempted(events: TestProbe, wait: FiniteDuration): Boolean =
+    events.receiveWhile(wait, wait) { case message => message }.contains("arb-reserve")
+
+  "The arb reserve" should "be attempted by a client with arb on and auto-reserve on" in {
+    val events = TestProbe()
+    val engine = reserving(10000000000L, events)
+    try attempted(events, 5.seconds) shouldBe true finally system.stop(engine)
+  }
+
+  it should "never be attempted after a reclaim, nor with arb off" in {
+    val events = TestProbe()
+    val reclaimed = reserving(10000000000L, events, paused = true)
+    val off = reserving(0L, events)
+    try attempted(events, 4.seconds) shouldBe false finally { system.stop(reclaimed); system.stop(off) }
   }
 }

@@ -16,6 +16,7 @@ object ScriptGenerator {
   private final val LITHOS_DEX = "lithosdex/"
   private final val FORWARDS = "forwards/"
   private final val SIGMAFI = "sigmafi/"
+  private final val ARBITRAGE = "arbitrage/"
 
   def mkSigTrue(ctx: BlockchainContext): Contract = {
     mkSigTrue(ctx.getNetworkType)
@@ -70,6 +71,13 @@ object ScriptGenerator {
 
   def mkSigmaFiScript(name: String): String = {
     val src = Source.fromResource(SIGMAFI + name + EXT)
+    val script = src.mkString
+    src.close()
+    script
+  }
+
+  def mkArbitrageScript(name: String): String = {
+    val src = Source.fromResource(ARBITRAGE + name + EXT)
     val script = src.mkString
     src.close()
     script

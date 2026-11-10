@@ -1,5 +1,6 @@
 package stats
 
+import arbitrage.contracts.ArbStakeContract
 import configs.VerifiedRegistry
 import forwards.DFHelpers
 import forwards.contracts.DFContracts
@@ -207,10 +208,11 @@ private[stats] object BatchingStatistics {
 
   /**
    * Arb cycles this block carries, in any block: chains of legs where each spends the carry the one before handed
-   * on, ending at a leg that splits off profit. A cycle starts from an ERG-only P2PK box, passes the carry at one
-   * tree throughout, and returns the start's ERG whole to that tree, with no tokens, beside an ERG-only profit
-   * output at the same tree or `true`, where the holding top-up can take it. The next cycle may start from the
-   * returned box. Gross is the profit; `local` means the carry was this client's.
+   * on, ending at a leg that splits off profit. A cycle starts from an ERG-only box at a plain key or at a key's
+   * arb stake script, passes the carry at one tree throughout, and returns the start's ERG whole to that tree,
+   * with no tokens, beside an ERG-only profit output at that tree, at the stake's owner's plain key, or at `true`,
+   * where the holding top-up can take it. The next cycle may start from the returned box. Gross is the profit;
+   * `local` means the carry was this client's: at `minerTree` or at its key's arb stake script.
    */
   def arbCycles(block: BlockInfo, network: NetworkType, minerTree: String): Vector[ArbCycle] = {
     val legs = block.txs.flatMap(arbLeg(block, _, network)).toVector
@@ -233,13 +235,15 @@ private[stats] object BatchingStatistics {
       val returned = piece.last.carryOut
       val tree = returned.ergoTree
       val profit = piece.last.profit.get
-      val shaped = piece.size >= 2 && first.assets.isEmpty && isP2PK(first.ergoTree) &&
+      val owner = ArbStakeContract.ownerP2PK(first.ergoTree)
+      val shaped = piece.size >= 2 && first.assets.isEmpty && (isP2PK(first.ergoTree) || owner.isDefined) &&
         piece.forall(_.carryOut.ergoTree == tree) && returned.assets.isEmpty && returned.value == first.value &&
         profit.assets.isEmpty && profit.value > 0L &&
-        (profit.ergoTree == tree || profit.ergoTree == Contract.SIGMA_TRUE.ergoTreeHex)
+        (profit.ergoTree == tree || owner.contains(profit.ergoTree) ||
+          profit.ergoTree == Contract.SIGMA_TRUE.ergoTreeHex)
       if (!shaped) None
       else Some(ArbCycle(BatchingFee(piece.last.tx.id, piece.head.nft, ArbProtocol, profit.value.toString, "0",
-        local = tree == minerTree), piece.map(_.tx.id)))
+        local = tree == minerTree || owner.contains(minerTree)), piece.map(_.tx.id)))
     }.toVector
   }
 

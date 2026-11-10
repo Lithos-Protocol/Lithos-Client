@@ -8,7 +8,7 @@ import node.MutationConversions._
 import node.NodeApi
 import mutations.NodeWallet.MINER_REWARD_DELAY
 import mutations.NotEnoughInputsException
-import node.model.{ConfirmationRange, MempoolOptions, NodeBox, Paging, SortDirection}
+import node.model.{ConfirmationRange, MempoolOptions, Paging, SortDirection}
 import org.ergoplatform.appkit.{BlockchainContext, ErgoClient, Parameters}
 import org.slf4j.{Logger, LoggerFactory}
 import play.api.libs.concurrent.InjectedActorSupport
@@ -35,15 +35,12 @@ import transactions.engine.{EngineBroadcast, EngineJoinGuard}
  * The invariant everything here protects: an input owned by a nonterminal transaction is never
  * offered to another request. Releasing early is a double spend, so every ambiguous case withholds.
  *
- * @param pinnedInputs    boxes to hold for transactions in this miner's own block, which need a wallet
- *                        input but are never broadcast. Zero pins nothing.
- * @param arbStakeNanoErg the least ERG of the one box held as the arb stake, apart from those pins. Zero holds
- *                        none, which is what a client with arb off passes.
+ * @param pinnedInputs boxes to hold for transactions in this miner's own block, which need a wallet
+ *                     input but are never broadcast. Zero pins nothing.
  */
 class EngineWalletState @Inject()(nodeContext: NodeContext,
                                   walletLimits: configs.WalletConfig = configs.WalletConfig.Default,
-                                  pinnedInputs: Int = 0,
-                                  arbStakeNanoErg: Long = 0L)
+                                  pinnedInputs: Int = 0)
   extends Actor with InjectedActorSupport {
 
   implicit val ec: ExecutionContext = context.dispatcher
@@ -268,7 +265,6 @@ class EngineWalletState @Inject()(nodeContext: NodeContext,
   private def replenishPins(): Unit = {
     val missing = pinnedInputs - pinnedIds.size
     if (missing > 0 && !pinning) {
-      if (available.count(pinnable) - 1 < missing) yieldStake()
       val eligible = available.filter(pinnable).sortBy(_.value)
       val proposed = eligible.take(math.min(missing + PinSpares, eligible.size - 1)).map(_.id)
       if (proposed.size < missing && !warnedPinShortfall) {
@@ -286,124 +282,6 @@ class EngineWalletState @Inject()(nodeContext: NodeContext,
       }
     }
   }
-
-  // ─── arb stake ────────────────────────────────────────────────────────────
-
-  /** The stake box as last read, and the height being built when it was last found unspent; 0 before any check. */
-  private var stake: Option[(NodeBox, Int)] = None
-
-  /** Cycle outputs that become the stake if a block spends it, each with the height its cycle was built for. */
-  private var pendingStakes: Map[String, Int] = Map.empty
-
-  /** The stake a found block replaced, kept so a reorg that undoes that block can bring it back. */
-  private var previousStake: Option[String] = None
-
-  /** A stake proposal or check is out; one of each at a time. */
-  private var stakeSelecting = false
-  private var stakeChecking = false
-  private var warnedNoStake = false
-
-  /** The pinnable boxes a stake may come from: those left once the fraud-proof pins' missing share is set aside. */
-  private def stakeCandidates: Seq[WalletDescriptor] =
-    available.filter(pinnable).sortBy(_.value).drop(math.max(0, pinnedInputs - pinnedIds.size))
-
-  /**
-   * Choose a stake when none is held: the smallest box of at least the target among `stakeCandidates`, and only
-   * while another of them stays free for the mempool, so the stake can neither take nor block a fraud-proof pin.
-   * Checked against the confirmed UTXO set off the mailbox, as pins are, since a candidate cannot carry the
-   * unconfirmed parent of its input.
-   */
-  private def replenishStake(): Unit =
-    if (arbStakeNanoErg > 0L && stake.isEmpty && pendingStakes.isEmpty && !stakeSelecting && !pinning) {
-      val free = stakeCandidates
-      val proposed =
-        if (free.size < 2) Seq.empty[String]
-        else free.filter(_.value >= arbStakeNanoErg).take(1 + PinSpares).map(_.id)
-      if (proposed.isEmpty) warnNoStake()
-      else {
-        stakeSelecting = true
-        // A read that fails ends the proposal without a verdict; the next refresh proposes again
-        Try(Future(proposed.iterator.map(id => nodeApi.boxById(id).get.filter(_.boxId == id))
-          .collectFirst { case Some(box) => box })(maintenanceWorker)
-          .onComplete(result => self ! WalletWorkerResult(walletIncarnation,
-            StakeChosen(result.toOption.flatten, readFailed = result.isFailure))))
-          .failed.foreach(_ => self ! WalletWorkerResult(walletIncarnation, StakeChosen(None, readFailed = true)))
-      }
-    }
-
-  /**
-   * Whether arb wants a stake and the wallet's last look found no box to hold: none held, none on its way from a
-   * cycle, no proposal out. What `batching.arb.autoReserve` acts on.
-   */
-  protected def stakeShort: Boolean =
-    arbStakeNanoErg > 0L && stake.isEmpty && pendingStakes.isEmpty && !stakeSelecting && warnedNoStake
-
-  /** Pinnable boxes the fraud-proof pins still lack, which the stake's candidates leave to them. */
-  protected def missingPinShare: Int = math.max(0, pinnedInputs - pinnedIds.size)
-
-  private def warnNoStake(): Unit =
-    if (!warnedNoStake) {
-      warnedNoStake = true
-      logger.warn(s"No plain wallet box of at least $arbStakeNanoErg nanoERG is free to hold as the arb stake " +
-        "(batching.arb.stakeNanoErg) once the fraud-proof pins are held and one box is left for the mempool, " +
-        "so no arb runs. A box of that size arriving in the wallet is taken at the next refresh")
-    }
-
-  /**
-   * Find out off the mailbox whether the stake survived the block before `height`. When it did not, the cycle
-   * output that replaced it is looked for, newest first, and failing that the stake before it, which a reorg
-   * undoing the block that spent it brings back. A node read that fails changes nothing.
-   */
-  private def checkStake(height: Int): Unit =
-    stake.foreach { case (box, _) =>
-      if (!stakeChecking) {
-        stakeChecking = true
-        val current = box.boxId
-        val successors = pendingStakes.toSeq.sortBy(-_._2).map(_._1)
-        val previous = previousStake
-        def fetch(id: String): Option[NodeBox] = nodeApi.boxById(id).get.filter(_.boxId == id)
-        Try(Future {
-          fetch(current).map(found => StakeUnspent(found): StakeOutcome)
-            .orElse(successors.iterator.map(fetch).collectFirst { case Some(found) => StakePromoted(found) })
-            .orElse(previous.flatMap(fetch).map(StakeRestored))
-            .getOrElse(StakeGone)
-        }(maintenanceWorker).onComplete(result => self ! WalletWorkerResult(walletIncarnation,
-          StakeChecked(height, current, result.getOrElse(StakeUnknown)))))
-          .failed.foreach(_ => self ! WalletWorkerResult(walletIncarnation, StakeChecked(height, current, StakeUnknown)))
-      }
-    }
-
-  /** Drops the pending successors `drop` names. */
-  private def dropPendingStakes(drop: (String, Int) => Boolean): Unit = {
-    val dropped = pendingStakes.filter { case (id, height) => drop(id, height) }.keySet
-    if (dropped.nonEmpty) {
-      pendingStakes --= dropped
-      usedInputs --= dropped
-      walletRevision += 1L
-    }
-  }
-
-  /** Ends the stake `boxId`, which the chain no longer holds. */
-  private def dropStake(boxId: String): Unit = {
-    usedInputs -= boxId
-    walletBoxes -= boxId
-    stake = None
-    walletRevision += 1L
-  }
-
-  /**
-   * Gives the stake back to the wallet so a fraud-proof pin can take it: fraud proofs come first. Not while a
-   * cycle built on it may sit in a block, since its pending successor would be left unheld.
-   */
-  private def yieldStake(): Unit =
-    stake.foreach { case (box, _) =>
-      if (pendingStakes.isEmpty) {
-        usedInputs -= box.boxId
-        stake = None
-        walletRevision += 1L
-        logger.warn(s"Releasing the arb stake ${box.boxId}: a fraud-proof pin needs a box and no other is free")
-      }
-    }
 
   private var warnedNoIndexer: Boolean = false
 
@@ -588,80 +466,6 @@ class EngineWalletState @Inject()(nodeContext: NodeContext,
         walletRevision += 1L
         logger.info(s"Pinned input $boxId is no longer unspent; proposing a replacement")
         replenishPins()
-        replenishStake()
-      }
-
-    // Only a stake confirmed unspent once the block before `height` was on chain is handed out.
-    case GetArbStake(height) =>
-      sender() ! ArbStake(stake.collect { case (box, checked) if checked >= height => box })
-      if (stake.exists(_._2 < height)) checkStake(height)
-
-    // A refresh that builds the same cycle again names the same output, which is already held: that is a yes
-    case ReserveStakeSuccessor(replaces, boxId, height) =>
-      val held = stake.exists { case (box, checked) => box.boxId == replaces && checked >= height }
-      val again = held && pendingStakes.contains(boxId)
-      val accepted = again || (held && boxId.matches("[0-9a-f]{64}") && !usedInputs.contains(boxId) &&
-        pendingStakes.size < MaxPendingStakes)
-      if (again) pendingStakes += boxId -> math.max(height, pendingStakes(boxId))
-      else if (accepted) {
-        pendingStakes += boxId -> height
-        reserve(Seq(boxId), StakeReservationId, ReservationPendingStake)
-      }
-      sender() ! accepted
-
-    // A result for a stake no longer held changes nothing.
-    case StakeChecked(height, checkedId, outcome) =>
-      stakeChecking = false
-      if (stake.exists(_._1.boxId == checkedId)) outcome match {
-        case StakeUnspent(box) =>
-          stake = Some(box -> math.max(height, stake.get._2))
-          // No block spent the stake before `height`, so successors built for earlier heights are dead
-          dropPendingStakes((_, builtFor) => builtFor < height)
-        case StakePromoted(box) =>
-          dropStake(checkedId)
-          dropPendingStakes((id, _) => id != box.boxId)
-          pendingStakes = Map.empty
-          usedInputs += box.boxId -> ReservationState(StakeReservationId, now(), ReservationStake)
-          stake = Some(box -> height)
-          previousStake = Some(checkedId)
-          logger.info(s"Arb stake $checkedId was spent by a block; ${box.boxId} (${box.value} nanoERG) is the stake now")
-        case StakeRestored(box) =>
-          dropStake(checkedId)
-          dropPendingStakes((_, _) => true)
-          previousStake = None
-          if (usedInputs.contains(box.boxId)) {
-            logger.warn(s"Arb stake $checkedId is gone and the stake before it, ${box.boxId}, is unspent again " +
-              "but already reserved; choosing a new stake")
-            replenishStake()
-          } else {
-            reserve(Seq(box.boxId), StakeReservationId, ReservationStake)
-            stake = Some(box -> height)
-            logger.warn(s"Arb stake $checkedId is gone and ${box.boxId}, the stake before it, is unspent again " +
-              "after a reorg; holding it as the stake")
-          }
-        case StakeGone =>
-          dropStake(checkedId)
-          dropPendingStakes((_, _) => true)
-          previousStake = None
-          logger.warn(s"Arb stake $checkedId is no longer unspent and no cycle output replaced it; choosing a new stake")
-          replenishStake()
-        case StakeUnknown => ()
-      }
-
-    // Checked off the mailbox, so a box reserved or dropped meanwhile, or now among the pins' share, is refused.
-    case StakeChosen(_, true) => stakeSelecting = false
-
-    case StakeChosen(found, _) =>
-      stakeSelecting = false
-      val free = stakeCandidates
-      found.filter(box => stake.isEmpty && free.size >= 2 && box.value >= arbStakeNanoErg &&
-        free.exists(_.id == box.boxId)) match {
-        case Some(box) =>
-          reserve(Seq(box.boxId), StakeReservationId, ReservationStake)
-          stake = Some(box -> 0)
-          warnedNoStake = false
-          logger.info(s"Holding ${box.boxId} (${box.value} nanoERG) as the arb stake for this miner's own blocks")
-        case None => warnNoStake()
       }
 
     // Checked off the mailbox, so a box reserved or dropped meanwhile is left out here.
@@ -675,7 +479,6 @@ class EngineWalletState @Inject()(nodeContext: NodeContext,
         logger.info(s"Pinned ${taking.mkString(", ")} for transactions in this miner's own blocks; " +
           s"${pinnedIds.size} of $pinnedInputs held")
       }
-      replenishStake()
 
     case GetOwnedInputIds => sender() ! usedInputs.keySet
     case GetEngineHolds =>
@@ -786,7 +589,6 @@ class EngineWalletState @Inject()(nodeContext: NodeContext,
         s"${spendableRewards.size} reward box(es) spendable" +
         (if (truncated) ", more boxes than the descriptor cache holds (wallet.max-descriptors, max-descriptor-bytes)" else ""))
       replenishPins()
-      replenishStake()
       sweepRewardsIfDue()
       finishRefresh()
 
@@ -1057,9 +859,7 @@ object EngineWalletState {
    *    refusing it or on-chain evidence from [[transactions.engine.EngineReconciler]] can end it;
    *  - `ReservationCandidate` and `ReservationUncertain` cover the paths with no send outcome at
    *    all: a transaction offered into this miner's own block, and an ambiguous broadcast;
-   *  - `ReservationPinned` is standing funding for transactions in this miner's own blocks;
-   *  - `ReservationStake` and `ReservationPendingStake` are the arb stake and the cycle outputs that may
-   *    replace it, ended only by a stake check against the confirmed UTXO set.
+   *  - `ReservationPinned` is standing funding for transactions in this miner's own blocks.
    *
    * Only `ReservationSelected` and `ReservationKnown` can be released outright; candidate and
    * uncertain reservations only past `wallet.reconcile.hold-ceiling-ms`. A complete refresh collects
@@ -1089,32 +889,6 @@ object EngineWalletState {
    * broadcast, never selected and never aged out; it ends when the box is found spent.
    */
   private case object ReservationPinned extends ReservationStatus
-  /** Held as the arb stake, the box arb cycles in this miner's own blocks start from. */
-  private case object ReservationStake extends ReservationStatus
-  /**
-   * A cycle output not yet on chain that becomes the stake if a block spends the stake. Dropped once a later
-   * height finds the stake unspent, or once another successor takes its place.
-   */
-  private case object ReservationPendingStake extends ReservationStatus
-
-  /** The lease the stake and its pending successors share. Nothing releases by it. */
-  private final val StakeReservationId = "arb-stake"
-
-  /** Pending successors held at once. A cycle past it is refused, since its output would be left unheld. */
-  private final val MaxPendingStakes = 256
-
-  /** @param readFailed a node read failed, so `box` being empty says nothing about the wallet */
-  private case class StakeChosen(box: Option[NodeBox], readFailed: Boolean)
-
-  /** What a stake check found: the stake, the successor that replaced it, the stake before it, or none. */
-  private sealed trait StakeOutcome
-  private case class StakeUnspent(box: NodeBox) extends StakeOutcome
-  private case class StakePromoted(box: NodeBox) extends StakeOutcome
-  private case class StakeRestored(box: NodeBox) extends StakeOutcome
-  private case object StakeGone extends StakeOutcome
-  /** The node read failed, so nothing is known. */
-  private case object StakeUnknown extends StakeOutcome
-  private case class StakeChecked(height: Int, stakeId: String, outcome: StakeOutcome)
 
   /** The lease every pinned box shares. Nothing releases by it: pins end one box at a time. */
   private final val PinnedReservationId = "pinned-candidate-inputs"

@@ -97,6 +97,37 @@ class ArbStatisticsSpec extends AnyFlatSpec with Matchers with MockitoSugar {
     }
   }
 
+  "A cycle started from an arb address" should "be recorded, as this client's when the address is its own key's" in {
+    nodeContext.getClient.execute { ctx =>
+      val (confirmed, txs) = built(ctx, wallet, pairs = 2, fromArbAddress = true)
+      val arbTree = stakeContract(wallet).ergoTreeHex
+      val block = blockOf(txs, confirmed)
+      // The stake and every carry sit at the arb address; the profit is at the owner's plain key
+      block.inputBox(txs.head.inputs(1).id).get.ergoTree shouldBe arbTree
+      txs.foreach(_.outputs(1).ergoTree shouldBe arbTree)
+      txs(1).outputs(2).ergoTree shouldBe mine
+      val found = cycles(block, ctx)
+      found.map(_.legs) shouldBe Vector(txs.take(2).map(_.id), txs.drop(2).map(_.id))
+      found.map(_.fee.local) shouldBe Vector(true, true)
+      found.map(_.fee.grossNanoErg) shouldBe Vector(txs(1).outputs(2).value.toString, txs(3).outputs(2).value.toString)
+      // Read by a client with another key, it is another miner's cycle
+      val stranger = "0008cd" + "02" + "11" * 32
+      cycles(block, ctx, stranger).map(_.fee.local) shouldBe Vector(false, false)
+    }
+  }
+
+  it should "be recorded with its profit at true, and not with its profit at another key or a third script" in {
+    nodeContext.getClient.execute { ctx =>
+      val (toTrue, trueTxs) = built(ctx, wallet, pairs = 1, profitTo = Some(Contract.SIGMA_TRUE), fromArbAddress = true)
+      cycles(blockOf(trueTxs, toTrue), ctx).map(_.fee.local) shouldBe Vector(true)
+      val (confirmed, txs) = built(ctx, wallet, pairs = 1, fromArbAddress = true)
+      val otherKey = updated(txs, 1)(output(_, 2)(o => o.copy(ergoTree = "0008cd" + "02" + "11" * 32)))
+      val elsewhere = updated(txs, 1)(output(_, 2)(o => o.copy(ergoTree = Contract.SIGMA_FALSE.ergoTreeHex)))
+      cycles(blockOf(otherKey, confirmed), ctx) shouldBe empty
+      cycles(blockOf(elsewhere, confirmed), ctx) shouldBe empty
+    }
+  }
+
   "A chain of legs" should "not be recorded when the stake does not come back whole" in {
     nodeContext.getClient.execute { ctx =>
       val (confirmed, txs) = built(ctx, wallet, pairs = 1)
@@ -177,18 +208,20 @@ object ArbStatisticsSpec {
    * offer them: the boxes they spend from the chain, and their legs in spending order.
    */
   def built(ctx: BlockchainContext, wallet: mutations.NodeWallet, pairs: Int,
-            profitTo: Option[Contract] = None): (Seq[NodeBox], Vector[BlockTx]) = {
+            profitTo: Option[Contract] = None, fromArbAddress: Boolean = false): (Seq[NodeBox], Vector[BlockTx]) = {
     val pools = (0 until pairs).flatMap { i =>
       Seq(nativePool(ctx, id(10 * i + 1), id(100 + i), 1000 * Erg, 1000000000000L),
         nativePool(ctx, id(10 * i + 2), id(100 + i), 1100 * Erg, 1000000000000L))
     }
-    over(ctx, wallet, pools, cycles = pairs, slots = 2 * pairs, profitTo)
+    over(ctx, wallet, pools, cycles = pairs, slots = 2 * pairs, profitTo, fromArbAddress)
   }
 
   /** The cycles `ArbCycles` builds through `pools` on one stake, which must number `cycles`. */
   def over(ctx: BlockchainContext, wallet: mutations.NodeWallet, pools: Seq[NodeBox], cycles: Int, slots: Int,
-           profitTo: Option[Contract] = None): (Seq[NodeBox], Vector[BlockTx]) = {
-    val stake = stakeBox(ctx, wallet, 10 * Erg + ArbLeg.MinCarryValue)
+           profitTo: Option[Contract] = None, fromArbAddress: Boolean = false): (Seq[NodeBox], Vector[BlockTx]) = {
+    val stake =
+      if (fromArbAddress) arbStakeBox(ctx, wallet, 10 * Erg + ArbLeg.MinCarryValue)
+      else stakeBox(ctx, wallet, 10 * Erg + ArbLeg.MinCarryValue)
     val bundles = ArbCycles.build(ctx, wallet, index(ctx, pools), ArbBasis.Empty, stake, height, slots,
       stake.value - ArbLeg.MinCarryValue, 1000000L, profitTo.getOrElse(wallet.contract),
       Deadline.now + 1.minute, Deadline.now + 1.minute, _ => true)

@@ -3,14 +3,14 @@ package configs
 import play.api.{ConfigLoader, Configuration}
 
 /**
- * The `batching.arb` block: arbitrage cycles in this miner's own blocks, funded from one wallet box held as
- * the stake.
+ * The `batching.arb` block: arbitrage cycles in this miner's own blocks, funded from the stake box at this
+ * wallet's arb address.
  *
- * @param enabled          whether the arb stage runs at all. Off, no arb code runs and no stake is held
- * @param stakeNanoErg     the least ERG the stake box holds, and the most one cycle can put in
+ * @param enabled          whether the arb stage runs at all. Off, no arb code runs and the arb address is not read
+ * @param stakeNanoErg     the ERG auto-reserve sends to the arb address, and the most one cycle can put in
  * @param minProfitNanoErg the least profit a cycle must leave to be built
- * @param autoReserve      with no wallet box free to hold the stake, merge plain boxes into one, given twice the
- *                         stake in confirmed plain boxes
+ * @param autoReserve      with no box of the stake's size at the arb address, send one from the wallet, given
+ *                         twice the stake spendable
  */
 case class ArbConfig(enabled: Boolean, stakeNanoErg: Long, minProfitNanoErg: Long, autoReserve: Boolean = true)
 

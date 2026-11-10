@@ -62,6 +62,8 @@ object EngineIntent {
   case object Consolidate extends EngineIntent { val key = "consolidation" }
   /** Split the wallet into seed boxes after this miner's first registration confirms. */
   case object Seed extends EngineIntent { val key = "seed" }
-  /** Merge plain wallet boxes into one the arb stake can be held from, when none can. */
+  /** Send the arb stake from the wallet to the arb address, when none is there. */
   case object ArbReserve extends EngineIntent { val key = "arb-reserve" }
+  /** Stop arb and send everything at the arb address back to the first address. Answered with what was sent, if anything. */
+  case object ArbReclaim extends EngineIntent { val key = "arb-reclaim" }
 }

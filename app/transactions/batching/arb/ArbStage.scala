@@ -1,19 +1,16 @@
 package transactions.batching.arb
 
 import akka.actor.{Actor, ActorRef}
-import akka.pattern.ask
-import akka.util.Timeout
 import configs.{ArbConfig, BatchingConfig, NodeContext}
 import org.slf4j.{Logger, LoggerFactory}
 import transactions.batching.lithosdex.LDDeployments
 import transactions.batching.tracking.{PoolDeployment, PoolTracker}
 import transactions.candidate.BlockTxMessages.{BlockTxsReady, CandidateTxsDropped, PrepareBlockTxs, RequestArbTxs}
 import transactions.candidate.{CandidateBundle, CandidateCapital}
-import transactions.engine.wallet.EngineWalletMessages.{ArbStake, GetArbStake, ReserveStakeSuccessor}
 import work.lithos.mutations.UTXO
 
 import scala.concurrent.duration._
-import scala.concurrent.{Await, ExecutionContext, Future}
+import scala.concurrent.{ExecutionContext, Future}
 import scala.util.{Failure, Success, Try}
 
 /**
@@ -22,9 +19,10 @@ import scala.util.{Failure, Success, Try}
  * off none of this runs.
  *
  * Pools come from the pool tracker, which reads each block the candidate builds on as it arrives; a build waits
- * for it at most a quarter of its budget. The stake comes from the wallet, which checked it for the height. Either
- * missing means no arb for that request; a later refresh at the same height tries again. A build whose inputs
- * all match the last one's answers with that build's cycles, held again in the wallet, rather than signing anew.
+ * for it at most a quarter of its budget. The stake is the box at the arb address, checked once for the block
+ * being built on. Either missing means no arb for that request; a later refresh at the same height tries again.
+ * A build whose inputs all match the last one's answers with that build's cycles, their stake outputs noted
+ * again, rather than signing anew.
  *
  * @param buildBudgetMs how long one build may run; selection stops at half of it
  */
@@ -33,7 +31,7 @@ class ArbStage(nodeContext: NodeContext,
                ergoDex: BatchingConfig,
                deniedPools: Set[String],
                tracker: PoolTracker,
-               engine: ActorRef,
+               stakes: ArbStake,
                useTrueProp: Boolean,
                buildBudgetMs: Long) extends Actor {
 
@@ -54,18 +52,14 @@ class ArbStage(nodeContext: NodeContext,
 
   override def preStart(): Unit =
     logger.info(s"ArbStage started: stakeNanoErg=${arb.stakeNanoErg}, minProfitNanoErg=${arb.minProfitNanoErg}, " +
-      s"buildBudgetMs=$buildBudgetMs")
+      s"buildBudgetMs=$buildBudgetMs, arb address ${stakes.address}")
 
   override def receive: Receive = {
 
-    // Starts the wallet's stake check and the tracker's read of the parent before any round asks
+    // Starts the tracker's read of the parent before any round asks
     case PrepareBlockTxs(blockHeight, _, parentId) =>
-      engine ! GetArbStake(blockHeight)
       Try(tracker.follow(blockHeight - 1, parentId)).failed
         .foreach(ex => logger.warn(s"Could not pass block $parentId to pool tracking: ${ex.getMessage}"))
-
-    // Answer to the stake check started above; the build asks again for the one it uses.
-    case ArbStake(_) => ()
 
     case RequestArbTxs(blockHeight, limit, _, basis) =>
       val replyTo = sender()
@@ -101,12 +95,12 @@ class ArbStage(nodeContext: NodeContext,
       }
       replyTo ! BlockTxsReady(blockHeight, bundles)
 
-    // The tracker follows a new parent through the next PrepareBlockTxs, and the wallet drops a reserved stake
-    // output whose block never came
+    // The tracker follows a new parent through the next PrepareBlockTxs, and a stake output whose block never
+    // came is dropped at the next height's stake check
     case CandidateTxsDropped(_, _) => ()
   }
 
-  /** Cycles for `blockHeight`, on the pools as of its parent and the stake the wallet checked for that height. */
+  /** Cycles for `blockHeight`, on the pools as of its parent and the stake found unspent after that parent. */
   private def buildFor(previous: Option[ArbIndex], previousBuild: Option[LastBuild], blockHeight: Int, limit: Int,
                        basisBundles: Seq[CandidateBundle]): Outcome = {
     val started = Deadline.now
@@ -123,15 +117,13 @@ class ArbStage(nodeContext: NodeContext,
             case PoolDeployment.LithosDexToken(c) => LDDeployments.vaultStands(nodeApi, c)
             case _ => true
           }))
-        Try(Await.result((engine ? GetArbStake(blockHeight))(AskTimeout).mapTo[ArbStake], AskTimeout.duration)) match {
-          case Success(ArbStake(Some(stake))) =>
+        stakes.at(blockHeight, tracked.headerId) match {
+          case Some(stake) =>
             val basis = ArbBasis.of(basisBundles)
             val maxIn = math.min(arb.stakeNanoErg, stake.value - ArbLeg.MinCarryValue)
             val minProfit = math.max(arb.minProfitNanoErg, MinProfitOutput)
             val key = BuildKey(blockHeight, tracked.headerId, stake.boxId, basis, limit, maxIn, minProfit)
-            def reserve(boxId: String): Boolean = Try(Await.result(
-              (engine ? ReserveStakeSuccessor(stake.boxId, boxId, blockHeight))(AskTimeout).mapTo[Boolean],
-              AskTimeout.duration)).getOrElse(false)
+            def reserve(boxId: String): Boolean = stakes.handOn(stake.boxId, boxId, blockHeight)
             previousBuild.filter(b => b.key == key && b.routes.eq(found.routes) && b.reserved.forall(reserve)) match {
               case Some(same) => Outcome(Some(found), Some(same), same.bundles)
               case None =>
@@ -150,11 +142,8 @@ class ArbStage(nodeContext: NodeContext,
                 Outcome(Some(found), if (complete) Some(LastBuild(key, found.routes, reserved, bundles)) else None,
                   bundles)
             }
-          case Success(ArbStake(None)) =>
-            logger.debug(s"No arb stake checked for block $blockHeight yet; offering no cycles")
-            Outcome(Some(found), None, Seq.empty)
-          case Failure(ex) =>
-            logger.warn(s"The wallet did not answer for the arb stake for block $blockHeight: ${ex.getMessage}")
+          case None =>
+            logger.debug(s"No arb stake to build on for block $blockHeight; offering no cycles")
             Outcome(Some(found), None, Seq.empty)
         }
     }
@@ -167,9 +156,6 @@ class ArbStage(nodeContext: NodeContext,
 }
 
 object ArbStage {
-
-  /** How long a build waits on the wallet for the stake, or to hold a stake output. */
-  private[arb] final val AskTimeout: Timeout = Timeout(2.seconds)
 
   /** The least profit a cycle can take, since its profit needs an output of its own. */
   final val MinProfitOutput: Long = UTXO.MIN_CHANGE

@@ -1,0 +1,16 @@
+{
+    // Arb Stake - Spent by its owner's signature alone, exactly as a plain wallet box is.
+    // A miner keeps the ERG its arbitrage cycles start from here rather than at its wallet address. The
+    // script differs from a plain key's, so no wallet lists the box and nothing but the miner's arb code
+    // selects it. Each cycle spends the box and returns its ERG to this same script.
+    //
+    // CONSTANTS
+    // CONST_OWNER: SigmaProp - The miner's key. The only spending condition.
+    //
+    // ASSUMPTIONS
+    // - The second operand is always true and only makes the script differ from a plain key's.
+    // - The outputs are not constrained. Returning the stake here is the builder's choice.
+    // - Anyone can send a box here. That gives their funds to the owner.
+
+    CONST_OWNER && sigmaProp(1 == 1)
+}

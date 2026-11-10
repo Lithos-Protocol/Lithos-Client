@@ -37,32 +37,46 @@ class WalletApiImplSpec
   private val strangerId = "5e" * 32
 
   /** Stands in for `EngineWalletState`. `claimReply` is a function so a test can answer `RewardClaimFailed`. */
-  private class StubWallet(rewards: RewardSummary, claimReply: () => Any) extends Actor {
+  private class StubWallet(rewards: RewardSummary, claimReply: () => Any, reclaimReply: () => Any) extends Actor {
     override def receive: Receive = {
       case GetSpendableBalance => sender() ! SpendableBalance(182400000000L)
       case GetReservations => sender() ! Reservations(2, 3000000000L)
       case GetUnlockedRewards => sender() ! rewards
       case ClaimUnlockedRewards => sender() ! claimReply()
+      case transactions.engine.TransactionEngine.Submit(transactions.engine.EngineIntent.ArbReclaim) =>
+        sender() ! reclaimReply()
     }
   }
 
   private val noRewards = RewardSummary(0, 0, 0L, 0L, None)
 
-  private case class Fixture(api: WalletApiImpl, nodeApi: NodeApi)
+  private case class Fixture(api: WalletApiImpl, nodeApi: NodeApi, stakes: transactions.batching.arb.ArbStake)
 
   private def fixture(assets: Seq[NodeAsset] = Seq.empty,
                       tokenInfo: Seq[TokenInfo] = Seq.empty,
                       rewards: RewardSummary = noRewards,
-                      claimReply: () => Any = () => RewardsClaimed(Seq.empty)): Fixture = {
+                      claimReply: () => Any = () => RewardsClaimed(Seq.empty),
+                      reclaimReply: () => Any = () => None,
+                      arbTarget: Long = 10000000000L,
+                      atArbAddress: String => Seq[node.model.NodeBox] = _ => Seq.empty): Fixture = {
     val nodeApi = mock[NodeApi]
-    val (ctx, _, _) = FakeNodeContext(nodeApi)
+    val (ctx, _, wallet) = FakeNodeContext(nodeApi)
+    val stakes = new transactions.batching.arb.ArbStake(() => nodeApi,
+      arbitrage.contracts.ArbStakeContract.forKey(wallet.p2pk.getPublicKey), ctx.getNetwork, arbTarget)
+    when(nodeApi.indexerEnabled).thenReturn(true)
+    when(nodeApi.unspentBoxesByErgoTree(any[String], any[node.model.Paging], any[node.model.SortDirection],
+      any[node.model.MempoolOptions])).thenAnswer { inv =>
+      val paging = inv.getArgument[node.model.Paging](1)
+      Success(atArbAddress(inv.getArgument[String](0)).slice(paging.offset, paging.offset + paging.limit)
+        .map(box => node.model.IndexedBox(box, "", 100, 1L)))
+    }
     when(nodeApi.walletBalances()).thenReturn(Success(NodeWalletBalances(500, 200000000000L, assets)))
     when(nodeApi.tokensByIds(any[Seq[String]])).thenReturn(Success(tokenInfo))
-    val walletRef: ActorRef = system.actorOf(Props(new StubWallet(rewards, claimReply)))
-    val api = new WalletApiImpl(ctx, walletRef) {
+    val walletRef: ActorRef = system.actorOf(Props(new StubWallet(rewards, claimReply, reclaimReply)))
+    val api = new WalletApiImpl(ctx, walletRef, stakes) {
       override protected lazy val registry: VerifiedRegistry = VerifiedRegistrySpec.shippedMainnet
     }
-    Fixture(api, nodeApi)
+    Fixture(api, nodeApi, stakes)
   }
 
   "A verified token" should "carry the shipped list's name, not the one its minter chose" in {
@@ -156,5 +170,59 @@ class WalletApiImplSpec
     val tokens = fixture().api.getVerifiedTokens.tokens
     tokens.find(_.tokenId == litId).map(t => (t.ticker, t.decimals)) shouldBe Some(("LIT", 9))
     tokens.exists(_.tokenId == strangerId) shouldBe false
+  }
+
+  /** Boxes at the arb address the fixture's node lists, whatever script it is asked about. */
+  private def arbBoxes(values: Long*): String => Seq[node.model.NodeBox] = tree =>
+    values.zipWithIndex.map { case (value, i) =>
+      node.model.NodeBox(f"${i + 1}%064x", "ab" * 32, value, 0, 100, tree)
+    }
+
+  "The arb stake" should "report its address and everything there, apart from the wallet's balance" in {
+    val f = fixture(atArbAddress = arbBoxes(10000000000L, 250000000L))
+    val stake = f.api.getArbStake
+    stake.address shouldBe f.stakes.address
+    stake.enabled shouldBe true
+    stake.paused shouldBe false
+    stake.targetNanoErgs shouldBe "10000000000"
+    stake.boxes shouldBe 2
+    stake.nanoErgs shouldBe "10250000000"
+    // No build has taken a box up yet, and the wallet's own figure does not move with the arb address
+    stake.stakeNanoErgs shouldBe "0"
+    f.api.getWalletBalances.nanoErgs shouldBe "182400000000"
+  }
+
+  it should "still be shown with arb off, so ERG left there can be found and reclaimed" in {
+    val stake = fixture(arbTarget = 0L, atArbAddress = arbBoxes(10000000000L)).api.getArbStake
+    stake.enabled shouldBe false
+    stake.targetNanoErgs shouldBe "0"
+    stake.nanoErgs shouldBe "10000000000"
+  }
+
+  it should "be a node-unavailable error when the arb address cannot be read, not an empty stake" in {
+    val f = fixture(atArbAddress = arbBoxes(10000000000L))
+    when(f.nodeApi.indexerEnabled).thenReturn(false)
+    a[LithosApiErrors.LithosUnavailable] should be thrownBy f.api.getArbStake
+  }
+
+  "A reclaim" should "be nothing-to-claim when the engine found nothing at the arb address" in {
+    a[WalletApi.NothingToClaim] should be thrownBy fixture().api.reclaimArbStake
+  }
+
+  it should "carry what the engine sent, and the node's reason when it refused" in {
+    import transactions.engine.execution.ArbReserveExecution.Reclaimed
+    val sent = fixture(reclaimReply = () => Some(Reclaimed("ab" * 32, 2, 10250000000L, "accepted", None, 1)))
+      .api.reclaimArbStake
+    sent shouldBe api.models.WalletArbReclaimResult("ab" * 32, 2, "10250000000", "accepted", 1)
+    val refused = fixture(reclaimReply = () =>
+      Some(Reclaimed("ab" * 32, 1, 10000000000L, "rejected", Some("Double spending attempt"), 0)))
+    (the[LithosApiErrors.LithosUnprocessable] thrownBy refused.api.reclaimArbStake).getMessage should
+      include("Double spending attempt")
+  }
+
+  it should "be node-unavailable when the engine would not take it, and never a success" in {
+    val busy = fixture(reclaimReply = () =>
+      transactions.engine.TransactionEngine.Deferred("arb-reclaim", "admission limit"))
+    a[LithosApiErrors.LithosUnavailable] should be thrownBy busy.api.reclaimArbStake
   }
 }

@@ -44,9 +44,17 @@ class WalletApiControllerSpec
     reservedNanoErgs = "3000000000",
     tokens = Seq(WalletToken(litId, Some("LIT"), Some("LIT"), Some(9), "45000000000", verified = true)))
 
+  private val arbStake = WalletArbStake("arbAddress", enabled = true, paused = false, "10000000000", "10000000000",
+    1, "10000000000")
+
   private class StubApi(onBalances: => WalletBalances = balances,
-                        onClaim: => WalletRewardClaimResult = WalletRewardClaimResult(Seq.empty, "0"))
+                        onClaim: => WalletRewardClaimResult = WalletRewardClaimResult(Seq.empty, "0"),
+                        onArb: => WalletArbStake = arbStake,
+                        onReclaim: => WalletArbReclaimResult =
+                          WalletArbReclaimResult("ab" * 32, 1, "10000000000", "accepted", 0))
     extends WalletApi {
+    override def getArbStake: WalletArbStake = onArb
+    override def reclaimArbStake: WalletArbReclaimResult = onReclaim
     override def getWalletBalances: WalletBalances = onBalances
     override def getRewardSummary: WalletRewardSummary = WalletRewardSummary(4, 2, "12000000000", "6000000000", Some(30))
     override def claimUnlockedRewards: WalletRewardClaimResult = onClaim
@@ -128,6 +136,45 @@ class WalletApiControllerSpec
     val result = call(c.claimRewards(), POST, "/wallet/rewards/claim", Some(apiKey))
     status(result) shouldBe UNPROCESSABLE_ENTITY
     contentAsString(result) should include("node refused the sweep")
+  }
+
+  "GET /wallet/arb" should "need the api_key, and carry the address and what it holds" in {
+    val refused = call(controller().getArbStake(), GET, "/wallet/arb", None)
+    status(refused) shouldBe FORBIDDEN
+    contentAsString(refused) should not include "arbAddress"
+    val result = call(controller().getArbStake(), GET, "/wallet/arb", Some(apiKey))
+    status(result) shouldBe OK
+    val json = contentAsJson(result)
+    (json \ "address").as[String] shouldBe "arbAddress"
+    (json \ "nanoErgs").as[String] shouldBe "10000000000"
+    (json \ "paused").as[Boolean] shouldBe false
+  }
+
+  it should "be 503 when the arb address cannot be read" in {
+    val c = controller(new StubApi(onArb = throw LithosApiErrors.LithosUnavailable("could not read the arb address")))
+    status(call(c.getArbStake(), GET, "/wallet/arb", Some(apiKey))) shouldBe SERVICE_UNAVAILABLE
+  }
+
+  "POST /wallet/arb/reclaim" should "need the api_key, and never reclaim without it" in {
+    var reclaimed = 0
+    val c = controller(new StubApi(onReclaim = { reclaimed += 1; WalletArbReclaimResult("ab" * 32, 1, "1", "accepted", 0) }))
+    status(call(c.reclaimArbStake(), POST, "/wallet/arb/reclaim", None)) shouldBe FORBIDDEN
+    status(call(c.reclaimArbStake(), POST, "/wallet/arb/reclaim", Some("not-the-key"))) shouldBe FORBIDDEN
+    reclaimed shouldBe 0
+    val result = call(c.reclaimArbStake(), POST, "/wallet/arb/reclaim", Some(apiKey))
+    status(result) shouldBe OK
+    (contentAsJson(result) \ "txId").as[String] shouldBe "ab" * 32
+    reclaimed shouldBe 1
+  }
+
+  it should "be 400 when the address holds nothing, and 422 carrying the node's reason when it refused" in {
+    val empty = controller(new StubApi(onReclaim = throw new WalletApi.NothingToClaim("no confirmed box at the arb address")))
+    status(call(empty.reclaimArbStake(), POST, "/wallet/arb/reclaim", Some(apiKey))) shouldBe BAD_REQUEST
+    val refused = controller(new StubApi(onReclaim =
+      throw LithosApiErrors.LithosUnprocessable("the node refused the reclaim: Double spending attempt")))
+    val result = call(refused.reclaimArbStake(), POST, "/wallet/arb/reclaim", Some(apiKey))
+    status(result) shouldBe UNPROCESSABLE_ENTITY
+    contentAsString(result) should include("Double spending attempt")
   }
 
   "GET /wallet/tokens/verified" should "be open, so a page can draw it before a key is entered" in {

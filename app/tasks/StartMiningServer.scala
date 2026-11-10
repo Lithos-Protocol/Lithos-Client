@@ -40,7 +40,8 @@ class StartMiningServer @Inject()(system: ActorSystem, config: Configuration,
                                   @Named("forwards-batcher") forwardsBatcher: ActorRef,
                                   @Named("sigmafi-batcher") sigmaFiBatcher: ActorRef,
                                   @Named("stats-collector") statsCollector: ActorRef,
-                                  poolTracker: transactions.batching.tracking.PoolTracker) {
+                                  poolTracker: transactions.batching.tracking.PoolTracker,
+                                  arbStakes: transactions.batching.arb.ArbStake) {
 
   val logger: Logger = LoggerFactory.getLogger("StartMiningServer")
 
@@ -116,13 +117,13 @@ class StartMiningServer @Inject()(system: ActorSystem, config: Configuration,
         val forwardsSource = batcherSource(configs.CandidateSourceConfig.Forwards, forwardsBatcher)
         val sigmaFiSource = batcherSource(configs.CandidateSourceConfig.SigmaFi, sigmaFiBatcher)
 
-        // Started only while arb is active: off, no arb code runs and no stake is held
+        // Started only while arb is active: off, no arb code runs and the arb address is never read
         val arbSource = if (!ArbConfig.active(config)) None else {
           val ergoDexBatching = BatchingConfig(config, configs.CandidateSourceConfig.ErgoDex)
           val denied = ergoDexBatching.deniedPools ++ LithosDexBatchingConfig(config).batching.deniedPools
           Some(mining.MiningMessages.CandidateSource(configs.CandidateSourceConfig.Arb,
             system.actorOf(akka.actor.Props(new transactions.batching.arb.ArbStage(nodeConfig, ArbConfig(config),
-              ergoDexBatching, denied, poolTracker, emissionHandler,
+              ergoDexBatching, denied, poolTracker, arbStakes,
               stratumParams.candidate.useTruePropCollection,
               transactions.batching.arb.ArbStage.buildBudgetMs(transactions.batching.Batcher.buildBudgetMs(config)))),
               "arb-stage")))

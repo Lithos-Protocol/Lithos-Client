@@ -211,6 +211,9 @@ GET  /wallet/rewards                            controllers.WalletApiController.
 + nocsrf
 POST /wallet/rewards/claim                      controllers.WalletApiController.claimRewards()
 GET  /wallet/tokens/verified                    controllers.WalletApiController.getVerifiedTokens()
+GET  /wallet/arb                                controllers.WalletApiController.getArbStake()
++ nocsrf
+POST /wallet/arb/reclaim                        controllers.WalletApiController.reclaimArbStake()
 
 # Routes for Payments API
 

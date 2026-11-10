@@ -58,8 +58,10 @@ object TransactionEngine {
   private final val MaintenanceInterval = 15000L
   /** Gap between seed attempts while one is due. Before the registration confirms each costs one local read. */
   private final val SeedInterval = 60000L
-  /** Gap between arb reserve attempts, about five blocks, so a merge sent by one confirms before the next looks. */
+  /** Gap between arb reserve attempts, about five blocks, so a stake sent by one confirms before the next looks. */
   private final val ArbReserveInterval = 600000L
+  /** How long after start the first arb reserve attempt waits, so the wallet has been read once. */
+  private final val ArbReserveDelay = 60000L
 }
 
 /**
@@ -74,9 +76,9 @@ class TransactionEngine @Inject()(node: NodeContext,
   @Named("mempool-view") mempool: ActorRef,
   protected val cacheApi: play.api.cache.SyncCacheApi,
   protected val config: play.api.Configuration,
-  protected val dataBoxes: transactions.rollups.DataBoxSource)
-  extends EngineWalletState(node, configs.WalletConfig(config), configs.CandidateConfig.pinTarget(config),
-    configs.ArbConfig.stakeTarget(config))
+  protected val dataBoxes: transactions.rollups.DataBoxSource,
+  arbStakes: transactions.batching.arb.ArbStake)
+  extends EngineWalletState(node, configs.WalletConfig(config), configs.CandidateConfig.pinTarget(config))
     with EngineRollupCandidates with transactions.emissions.EmissionsCore {
   import TransactionEngine._
   import ExecutionSchedule._
@@ -169,13 +171,19 @@ class TransactionEngine @Inject()(node: NodeContext,
   private var nextSeed = 0L
   private lazy val seed = new SeedExecution(node, nodeApi, self, dataBoxes, walletConfig)
 
-  /** The arb stake this wallet holds, zero with arb inactive, and whether a missing one is made by merging boxes. */
-  private val arbStake = configs.ArbConfig.stakeTarget(config)
-  private val arbAutoReserve = arbStake > 0L && configs.ArbConfig(config).autoReserve
-  private var nextArbReserve = 0L
-  /** The last attempt's outcome, so a wallet that stays short or unreachable is told once rather than each pass. */
+  /** The arb stake's size, zero with arb inactive. */
+  private val arbStake = arbStakes.target
+  /**
+   * Whether this process may still send the stake to the arb address: arb is active with auto-reserve on, and
+   * no attempt has yet found a stake there.
+   */
+  private var arbReserveDue = arbStake > 0L && configs.ArbConfig(config).autoReserve
+  /** Overridable so a test need not wait out the start-up delay. */
+  protected def arbReserveDelayMs: Long = ArbReserveDelay
+  private var nextArbReserve = System.currentTimeMillis() + arbReserveDelayMs
+  /** The last attempt's outcome, so a wallet that stays short is told once rather than each pass. */
   private var arbReserveOutcome = ""
-  private lazy val arbReserve = new ArbReserveExecution(node, nodeApi, self, arbStake, walletConfig)
+  private lazy val arbReserve = new ArbReserveExecution(node, nodeApi, self, arbStakes, walletConfig)
   private lazy val dex = new DexAPIExecution(node, EngineFunding(self, EngineFunding.askTimeout(config), ec),
     () => alive.get(), configs.LithosDexOrdersConfig(config)) {
     override protected def executionNode: _root_.node.NodeApi = TransactionEngine.this.nodeApi
@@ -217,10 +225,11 @@ class TransactionEngine @Inject()(node: NodeContext,
       logger.info(s"Wallet seed ON: a registration confirmed within ${SeedExecution.InitialWindow} blocks splits " +
         s"the wallet towards ${walletConfig.seed.targetUtxos} plain boxes")
     else logger.info("Wallet seed OFF (wallet.seed.on-initial-commitment)")
-    if (arbAutoReserve)
-      logger.info(s"Arb auto-reserve ON: with no box free to hold the $arbStake nanoERG stake, plain boxes holding " +
-        s"at least ${arbStake * ArbReserveExecution.ReserveMultiple} nanoERG are merged into one")
-    else if (arbStake > 0L) logger.info("Arb auto-reserve OFF (batching.arb.autoReserve)")
+    if (arbReserveDue)
+      logger.info(s"Arb auto-reserve ON: with no box of $arbStake nanoERG at the arb address ${arbStakes.address}, " +
+        s"a wallet with at least ${arbStake * ArbReserveExecution.ReserveMultiple} nanoERG spendable sends one there")
+    else if (arbStake > 0L)
+      logger.info(s"Arb auto-reserve OFF (batching.arb.autoReserve): arb runs on ERG sent to ${arbStakes.address}")
     logger.info(s"Wallet limits: maxInputs=${walletConfig.maxInputs} pageSize=${walletConfig.pageSize} " +
       s"maxDescriptors=${walletConfig.maxDescriptors} " +
       s"reservationTimeout=${walletConfig.reservationTimeoutMs}ms " +
@@ -266,6 +275,8 @@ class TransactionEngine @Inject()(node: NodeContext,
       if (now >= nextMaintenance) {
         nextMaintenance = now + MaintenanceInterval
         reconcileDue = true
+        // Read before this pass admits anything: an admission starts the reconciliation that is due
+        val clearAtPass = !schedule.occupied(Lane.Critical) && reconciling.isEmpty
         // Blocked by critical work only. Requiring the whole schedule to be empty meant a client
         // tracking rollups never consolidated at all, because the optional lane is rarely idle.
         // Consolidation still runs in the optional lane, so it cannot delay a NISP or a fraud proof.
@@ -282,9 +293,9 @@ class TransactionEngine @Inject()(node: NodeContext,
           admit(EngineIntent.Seed, context.system.deadLetters,
             Some(Immediate(now + walletConfig.inventoryTimeoutMs + 60000L)))
         }
-        // Only once the wallet has looked for a stake and found no box for one
-        if (arbAutoReserve && stakeShort && now >= nextArbReserve && !schedule.occupied(Lane.Critical) &&
-          reconciling.isEmpty) {
+        // Until an attempt finds a stake at the arb address, and never after a reclaim. Judged on the lanes as
+        // the pass found them, so a seed admitted just above does not put the reserve off by a pass each time
+        if (arbReserveDue && !arbStakes.paused && now >= nextArbReserve && clearAtPass) {
           nextArbReserve = now + ArbReserveInterval
           admit(EngineIntent.ArbReserve, context.system.deadLetters,
             Some(Immediate(now + walletConfig.inventoryTimeoutMs + 60000L)))
@@ -369,27 +380,25 @@ class TransactionEngine @Inject()(node: NodeContext,
   }
 
   /**
-   * Say what an arb reserve attempt concluded. A send is always logged; a wallet too small or too scattered is
-   * warned about once until the outcome changes; a merge already waiting to confirm says nothing.
+   * Say what an arb reserve attempt concluded, and stop attempting once a stake is at the arb address or was
+   * reclaimed. A send is always logged and looked for again by the next attempt; a wallet too small is warned
+   * about once until the outcome changes.
    */
   private def arbReserveFinished(result: Try[Any]): Unit = result match {
     case Success(status: ArbReserveExecution.Status) =>
       val repeated = status.outcome == arbReserveOutcome
       arbReserveOutcome = status.outcome
       status.outcome match {
-        case ArbReserveExecution.OutcomeHeld => ()
+        case ArbReserveExecution.OutcomeHeld | ArbReserveExecution.OutcomePaused => arbReserveDue = false
         case ArbReserveExecution.OutcomeShort if !repeated =>
-          logger.warn(s"No arb runs: no wallet box can hold the $arbStake nanoERG stake, and confirmed plain boxes " +
-            s"hold ${status.plainValue} nanoERG, under the ${arbStake * ArbReserveExecution.ReserveMultiple} " +
-            "batching.arb.autoReserve needs to merge some into one. Send ERG to this wallet, or lower " +
-            "batching.arb.stakeNanoErg")
-        case ArbReserveExecution.OutcomeUnreachable if !repeated =>
-          logger.warn(s"No arb runs: confirmed plain boxes hold ${status.plainValue} nanoERG, but no merge of at most " +
-            s"${walletConfig.maxInputs} of them leaves a box the wallet can hold as the $arbStake nanoERG stake")
-        case ArbReserveExecution.OutcomeShort | ArbReserveExecution.OutcomeUnreachable => ()
+          logger.warn(s"No arb stake was sent: this wallet's spendable ERG is ${status.walletValue} nanoERG, under " +
+            s"the ${arbStake * ArbReserveExecution.ReserveMultiple} batching.arb.autoReserve needs to send $arbStake " +
+            s"to the arb address ${arbStakes.address}. Send ERG to this wallet, send some to that address yourself, " +
+            "or lower batching.arb.stakeNanoErg")
+        case ArbReserveExecution.OutcomeShort | ArbReserveExecution.OutcomePending => ()
         case outcome =>
-          logger.info(s"Arb reserve ${status.txId.getOrElse("")} $outcome: ${status.inputs} box(es) merged into " +
-            s"${status.outputs.mkString(", ")} nanoERG; the stake is taken once it confirms")
+          logger.info(s"Arb reserve ${status.txId.getOrElse("")} $outcome: $arbStake nanoERG sent to the arb address " +
+            s"${arbStakes.address}; cycles start from it once it confirms")
       }
     case Success(other) => logger.warn(s"Unexpected arb reserve result: $other")
     case Failure(ex) => logger.warn(s"Arb reserve attempt failed, trying again later: ${ex.getMessage}")
@@ -423,6 +432,7 @@ class TransactionEngine @Inject()(node: NodeContext,
     // commitment loop asks again every pass, so its own work is not retried here either.
     val policy = work match {
       case _: EngineIntent.Dex | _: EngineIntent.Forwards | _: EngineIntent.SigmaFi | _: EngineIntent.Join |
+           EngineIntent.ArbReclaim |
            _: EngineIntent.Register | _: EngineIntent.Commit => OneOff
       case _: EngineIntent.Rollups => Critical
       case _ => Automatic
@@ -480,13 +490,6 @@ class TransactionEngine @Inject()(node: NodeContext,
       case work @ (_: EngineIntent.Join | EngineIntent.Queue | EngineIntent.Collateralize) => executeEmission(work)
       case EngineIntent.Register(diff) => Future(newCommitmentExecution(stillEligible).register(diff))(worker)
       case EngineIntent.Commit(diff) => Future(newCommitmentExecution(stillEligible).commit(diff))(worker)
-      // The pins' share is read here, on the mailbox, since the worker cannot read wallet state
-      case EngineIntent.ArbReserve =>
-        val missingPins = missingPinShare
-        Future {
-          require(stillEligible(), "engine attempt expired")
-          arbReserve.execute(missingPins, stillEligible)
-        }(worker)
       case work => Future {
         require(stillEligible(), "engine attempt expired")
         executeOptional(work, stillEligible)
@@ -506,6 +509,9 @@ class TransactionEngine @Inject()(node: NodeContext,
       consolidation.execute(consolidationTarget, stillEligible,
         walletConfig.consolidation.minInputs, walletConfig.consolidation.transactions)
     case EngineIntent.Seed => seed.execute(walletConfig.seed.targetUtxos, stillEligible)
+    case EngineIntent.ArbReserve => arbReserve.execute(stillEligible)
+    // In the reserve's lane, so the two never run at once and a reserve cannot refill what a reclaim empties
+    case EngineIntent.ArbReclaim => arbReserve.reclaim(stillEligible)
     case _ => throw new IllegalArgumentException("unsupported engine intent")
   }
 }

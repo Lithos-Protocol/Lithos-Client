@@ -20,7 +20,8 @@ import scala.util.Try
  */
 @Singleton
 class WalletApiImpl @Inject()(nodeContext: NodeContext,
-                              @Named("transaction-engine") walletManager: ActorRef) extends WalletApi {
+                              @Named("transaction-engine") walletManager: ActorRef,
+                              arbStakes: transactions.batching.arb.ArbStake) extends WalletApi {
 
   /** Ask timeout for the fast wallet replies; the claim covers a multi-broadcast sweep. */
   private val QuickAsk = Timeout(5 seconds)
@@ -97,6 +98,39 @@ class WalletApiImpl @Inject()(nodeContext: NodeContext,
   /** @inheritdoc */
   override def getVerifiedTokens: VerifiedTokenList =
     VerifiedTokenList(registry.tokens.map(v => VerifiedTokenInfo(v.tokenId, v.name, v.ticker, v.decimals)))
+
+  /** @inheritdoc */
+  override def getArbStake: WalletArbStake = {
+    val there = arbStakes.boxes().getOrElse(
+      throw LithosApiErrors.LithosUnavailable("could not read the arb address: is the node's extra index on?"))
+    WalletArbStake(
+      address = arbStakes.address,
+      enabled = arbStakes.target > 0L,
+      paused = arbStakes.paused,
+      targetNanoErgs = arbStakes.target.toString,
+      stakeNanoErgs = arbStakes.current.map(_.value).getOrElse(0L).toString,
+      boxes = there.size,
+      nanoErgs = there.map(box => BigInt(box.value)).sum.toString)
+  }
+
+  /** @inheritdoc */
+  override def reclaimArbStake: WalletArbReclaimResult = {
+    import transactions.engine.execution.ArbReserveExecution.Reclaimed
+    import transactions.engine.{EngineBroadcast, EngineIntent, TransactionEngine}
+    // Run by the engine, in the lane the reserve runs in, so the two can never be in flight together
+    Await.result((walletManager ? TransactionEngine.Submit(EngineIntent.ArbReclaim))(ClaimAsk), ClaimAsk.duration) match {
+      case None => throw new WalletApi.NothingToClaim("no confirmed box at the arb address to reclaim")
+      case Some(sent: Reclaimed) if sent.outcome == EngineBroadcast.Rejected =>
+        throw LithosApiErrors.LithosUnprocessable("the node refused the reclaim" +
+          sent.reason.map(": " + _).getOrElse("") + ". Arb stays off until this client restarts; try again shortly")
+      case Some(sent: Reclaimed) =>
+        WalletArbReclaimResult(sent.txId, sent.boxes, sent.nanoErgs.toString, sent.outcome, sent.left)
+      case deferred: TransactionEngine.Deferred =>
+        throw LithosApiErrors.LithosUnavailable(s"the reclaim was not started: ${deferred.reason}")
+      case other =>
+        throw new IllegalStateException(s"the engine answered a reclaim with ${other.getClass.getSimpleName}")
+    }
+  }
 
   /**
    * Ask the wallet actor and check the reply's type instead of casting it. A dead wallet times out and a
