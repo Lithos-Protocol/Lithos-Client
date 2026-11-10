@@ -16,7 +16,10 @@ object MachinaKind {
   case object Limit extends MachinaKind("e2t-limit")
   /** ERG against a token, both ways at once: R5 holds the ask and the bid. */
   case object Grid extends MachinaKind("e2t-grid")
-  /** Token against token. Recognised only: a fill through a token pool leaves its gap in tokens. */
+  /**
+   * Its token against a base token, both ways: the base is the box's first token, R5 the ask and bid in base units.
+   * Not the ErgoDEX batcher's: a fill leaves its gap in the base token, which only the arb stage sells for ERG.
+   */
   case object TokenGrid extends MachinaKind("t2t-grid")
 }
 
@@ -63,10 +66,13 @@ object MachinaContracts {
       "01938c720a01720293e4c672050408720493e4c672050511720b93e4c67205060ec5a795e4e30001d801d61099720c72" +
       "0ded91721073069272109c99720e720fb2720b730700d801d61099720f720eed9172107308929c7210b2720b73090099" +
       "720d720c7204",
-      executable = false))
+      executable = false, headerHex = "1aab020a0e20", constantsHex = "050004000400040204020500040005000402"))
 
   lazy val executableByTemplateHash: Map[String, Template] =
     templates.filter(_.executable).map(t => t.templateHash -> t).toMap
+
+  /** The token/token grid, which only [[MachinaOrder.parseTokenGrid]] reads. */
+  lazy val tokenGrid: Template = templates.find(_.kind == MachinaKind.TokenGrid).get
 
   lazy val byTemplateHash: Map[String, Template] = templates.map(t => t.templateHash -> t).toMap
 
@@ -85,9 +91,10 @@ object MachinaContracts {
 }
 
 /**
- * An E2T Machina Finance order: a box trading `tokenId` against ERG at its own prices. `ask` is the nanoERG it
- * takes for a unit of its tokens and `bid` what it pays for one; a limit order has one of the two, a grid both.
- * `poolNft` is the ErgoDEX native pool a fill is routed through, chosen per discovery pass.
+ * A Machina Finance order: a box trading `tokenId` against its base at its own prices, the base ERG, or for a
+ * token/token grid the token `base` names. `ask` is what it takes in base units for a unit of its tokens and `bid`
+ * what it pays for one; a limit order has one of the two, a grid both. `poolNft` is the pool a fill is routed
+ * through, chosen per discovery pass.
  */
 final case class MachinaOrder(box: NodeBox,
                               kind: MachinaKind,
@@ -95,13 +102,18 @@ final case class MachinaOrder(box: NodeBox,
                               ownerPropBytes: Array[Byte],
                               ask: Option[Long],
                               bid: Option[Long],
-                              poolNft: String = "") extends PoolOrder {
+                              poolNft: String = "",
+                              base: Option[String] = None) extends PoolOrder {
 
   /** The contracts bound no miner fee, so a broadcast fill pays up to the configured ceiling. */
   override def maxMinerFee: Long = Long.MaxValue
 
   /** Units of `tokenId` the box holds. */
-  def tokens: Long = box.assets.headOption.map(_.amount).getOrElse(0L)
+  def tokens: Long = box.assets.find(_.tokenId == tokenId).map(_.amount).getOrElse(0L)
+
+  /** What the box holds of its base: its nanoERG, or a token/token grid's base token, its first. */
+  def baseHeld: Long =
+    base.fold(box.value)(id => box.assets.headOption.filter(_.tokenId == id).map(_.amount).getOrElse(0L))
 
   def routedThrough(nft: String): MachinaOrder = copy(poolNft = nft)
 }
@@ -118,10 +130,7 @@ object MachinaOrder {
       val hash = Hex.toHexString(Blake2b256(tree.template))
       MachinaContracts.executableByTemplateHash.get(hash).flatMap { template =>
         for {
-          token <- Try(tree.constants.head.value).toOption.collect { case c: sigma.Coll[_] =>
-            Try(c.asInstanceOf[sigma.Coll[Byte]].toArray).toOption }.flatten
-          if token.length == 32
-          tokenId = Hex.toHexString(token)
+          tokenId <- tokenOf(tree)
           // Pricing assumes the contract's own constants, so a box that changed one would only fail at signing
           if box.ergoTree.equalsIgnoreCase(template.treeHex(tokenId))
           if box.value > 0 && box.assets.size <= 1 && box.assets.forall(a => a.tokenId == tokenId && a.amount > 0)
@@ -131,17 +140,41 @@ object MachinaOrder {
       }
     }
 
-  /** The limit's one price, on the side R6 names; the grid's ask and bid, the first two entries of R5. */
+  /**
+   * A token/token grid order, or None for any other box: its tree the grid's with its own token id and nothing else
+   * changed, its first token another token, which is its base, its second, if it holds one, its own token, and
+   * nothing more, which no honest fill adds.
+   */
+  def parseTokenGrid(box: NodeBox): Option[MachinaOrder] = {
+    val template = MachinaContracts.tokenGrid
+    Try(sigma.ast.ErgoTree.fromHex(box.ergoTree)).toOption
+      .filter(tree => Hex.toHexString(Blake2b256(tree.template)) == template.templateHash).flatMap { tree =>
+        for {
+          tokenId <- tokenOf(tree)
+          if box.ergoTree.equalsIgnoreCase(template.treeHex(tokenId))
+          base <- box.assets.headOption if base.tokenId != tokenId && base.amount > 0
+          if box.value > 0 && box.assets.size <= 2 && box.assets.drop(1).forall(a => a.tokenId == tokenId && a.amount > 0)
+          owner <- register(box, 4).collect { case p: sigma.SigmaProp => p.propBytes.toArray }
+          (ask, bid) <- prices(MachinaKind.TokenGrid, box)
+        } yield MachinaOrder(box, MachinaKind.TokenGrid, tokenId, owner, ask, bid, base = Some(base.tokenId))
+      }
+  }
+
+  /** Constant 0, the order's token id, when it is 32 bytes. */
+  private def tokenOf(tree: sigma.ast.ErgoTree): Option[String] =
+    Try(tree.constants.head.value).toOption.collect { case c: sigma.Coll[_] =>
+      Try(c.asInstanceOf[sigma.Coll[Byte]].toArray).toOption }.flatten.filter(_.length == 32).map(Hex.toHexString)
+
+  /** The limit's one price, on the side R6 names; a grid's ask and bid, the first two entries of R5. */
   private def prices(kind: MachinaKind, box: NodeBox): Option[(Option[Long], Option[Long])] = kind match {
     case MachinaKind.Limit =>
       for {
         price <- register(box, 5).collect { case p: java.lang.Long => p.longValue() } if price > 0
         sells <- register(box, 6).collect { case s: java.lang.Boolean => s.booleanValue() }
       } yield if (sells) (Some(price), None) else (None, Some(price))
-    case MachinaKind.Grid =>
+    case MachinaKind.Grid | MachinaKind.TokenGrid =>
       register(box, 5).collect { case c: sigma.Coll[_] => Try(c.toArray.toSeq.map(_.asInstanceOf[Long])).toOption }
         .flatten.filter(p => p.size >= 2 && p.head > 0 && p(1) > 0).map(p => (Some(p.head), Some(p(1))))
-    case MachinaKind.TokenGrid => None
   }
 
   private def register(box: NodeBox, index: Int): Option[Any] =
@@ -255,13 +288,15 @@ object MachinaFill {
     child(orderInput, order, trade.childValue, trade.childTokens, trade.toOwner)
 
   /**
-   * The order's child holding `value` and `tokens` of the order's token, every register bound to the spent box's
-   * id. Recreated, it keeps the order's script, owner and prices (and a limit's side); paid out to the owner when
-   * `toOwner`, it carries the id alone, in R4.
+   * The order's child holding `value`, `base` of a token/token grid's base token first, and `tokens` of the order's
+   * token, every register bound to the spent box's id. Recreated, it keeps the order's script, owner and prices (and
+   * a limit's side); paid out to the owner when `toOwner`, it carries the id alone, in R4.
    */
-  def child(orderInput: InputUTXO, order: MachinaOrder, value: Long, tokens: Long, toOwner: Boolean): UTXO = {
+  def child(orderInput: InputUTXO, order: MachinaOrder, value: Long, tokens: Long, toOwner: Boolean,
+            base: Long = 0L): UTXO = {
     val binding = ErgoValue.of(orderInput.id.getBytes)
-    val held = if (tokens > 0) Seq(Token(ErgoId.create(order.tokenId), tokens)) else Seq.empty
+    val held = order.base.map(id => Token(ErgoId.create(id), base)).toSeq ++
+      (if (tokens > 0) Seq(Token(ErgoId.create(order.tokenId), tokens)) else Seq.empty)
     if (toOwner) UTXO(Contract(sigma.ast.ErgoTree.fromBytes(order.ownerPropBytes)), value, held, Seq(binding))
     else {
       val kept = if (order.kind == MachinaKind.Limit) 3 else 2

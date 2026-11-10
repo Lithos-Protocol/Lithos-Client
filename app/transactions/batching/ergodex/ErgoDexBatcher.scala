@@ -84,9 +84,36 @@ class ErgoDexBatcher(nodeContext: NodeContext,
     lithosDexRoutes = toLithosDex.map { case (id, nft, _) => id -> nft }.toMap
     // An order no ErgoDEX pool fills is tracked by its LithosDex pool, so builds still read it back
     val viaErgoDex = routed.map(_._1.boxId).toSet
+    // A token/token grid names no pool: the arb stage picks two at build, so it is tracked by none
+    val grids = machinaHandoff.toVector.flatMap(_ => tokenGrids(tip, skipped))
     ErgoDexBatching.track(orders ++ routed.map(_._1), pools ++ routed.map(_._2), tip, batching) ++
       toLithosDex.filterNot(route => viaErgoDex.contains(route._1)).take(batching.maxTrackedOrders)
-        .map { case (id, nft, _) => id -> nft }
+        .map { case (id, nft, _) => id -> nft } ++
+      grids.map(_.boxId -> "")
+  }
+
+  /**
+   * Token/token grid orders the arb stage could fill: the pool tracker, within [[TrackedLagBlocks]] of `tip`, holds a
+   * token/token pool of the order's pair and an ERG pool of its base token. At most `maxTrackedOrders`.
+   */
+  private def tokenGrids(tip: Int, skipped: Set[String]): Vector[MachinaOrder] = {
+    val template = MachinaContracts.tokenGrid
+    val found = scanTemplate(template.templateHash, s"Machina ${template.kind.name}")(MachinaOrder.parseTokenGrid)
+      .filterNot(order => skipped.contains(order.boxId))
+    val tracked = if (found.isEmpty) Seq.empty
+      else poolTracking.flatMap(_.latest).filter(state => tip - state.height <= TrackedLagBlocks).toSeq.flatMap(_.pools)
+    def tokens(t: TrackedBox, at: Int*): Seq[String] = at.flatMap(i => t.box.assets.lift(i).map(_.tokenId))
+    val pairs = tracked.collect {
+      case t if t.deployment == PoolDeployment.ErgoDexToken => tokens(t, 2, 3).toSet
+      case t @ TrackedBox(_, _, PoolDeployment.LithosDexToken(_)) => tokens(t, 1, 2).toSet
+    }.toSet
+    val withErgPool = tracked.flatMap {
+      case t if t.deployment == PoolDeployment.ErgoDexNative => tokens(t, 2)
+      case t @ TrackedBox(_, _, PoolDeployment.LithosDexNative(_)) => tokens(t, 1)
+      case _ => Seq.empty
+    }.toSet
+    found.filter(order => order.base.exists(base => pairs.contains(Set(base, order.tokenId)) && withErgPool.contains(base)))
+      .take(batching.maxTrackedOrders)
   }
 
   /**
@@ -118,8 +145,8 @@ class ErgoDexBatcher(nodeContext: NodeContext,
 
   /**
    * Hands the arb stage this block's Machina orders a LithosDex pool fills for more, each routed through that pool,
-   * and returns the rest for this batcher's run. Orders the arb stage could not build go on this batcher's skip
-   * list, as its own unbuildable orders do. Everything stays, while arb is off.
+   * and its token/token grids, and returns the rest for this batcher's run. Orders the arb stage could not build go
+   * on this batcher's skip list, as its own unbuildable orders do. Everything stays, while arb is off.
    */
   private def handOff(candidates: Seq[PoolOrder], blockHeight: Int): Seq[PoolOrder] = machinaHandoff match {
     case None => candidates
@@ -128,10 +155,13 @@ class ErgoDexBatcher(nodeContext: NodeContext,
       refused.foreach(skipOrder)
       val routes = lithosDexRoutes
       val (toArb, rest) = candidates.filterNot(order => refused.contains(order.boxId)).partition {
-        case machina: MachinaOrder => routes.contains(machina.boxId)
+        case machina: MachinaOrder => ErgoDexBatching.tokenGrid(machina) || routes.contains(machina.boxId)
         case _ => false
       }
-      handoff.offer(blockHeight, toArb.collect { case machina: MachinaOrder => machina.routedThrough(routes(machina.boxId)) })
+      handoff.offer(blockHeight, toArb.collect {
+        case grid: MachinaOrder if ErgoDexBatching.tokenGrid(grid) => grid
+        case machina: MachinaOrder => machina.routedThrough(routes(machina.boxId))
+      })
       rest
   }
 
@@ -247,11 +277,11 @@ class ErgoDexBatcher(nodeContext: NodeContext,
           ErgoDexBatching.unconfirmedOrders(snapshot, batching.deniedPools, batching.maxMempoolOrders,
             batching.maxMempoolOrdersPerTx)
         else Vector.empty
-      // An order only a LithosDex pool fills is the arb stage's, in this miner's own block
+      // An order only a LithosDex pool fills, or a token/token grid, is the arb stage's, in this miner's own block
       val routes = lithosDexRoutes
       val byPool = (liveOrders(orders) ++ unconfirmed).groupBy(_.boxId).values.map(_.head).toSeq
         .filterNot(order => snapshot.spent.contains(order.boxId) || skipped.contains(order.boxId) ||
-          routes.get(order.boxId).contains(order.poolNft))
+          routes.get(order.boxId).contains(order.poolNft) || ErgoDexBatching.tokenGrid(order))
         .groupBy(_.poolNft)
       val pools = currentPools(byPool.keys.toSeq).toSeq.flatMap { case (nft, current) =>
         for {

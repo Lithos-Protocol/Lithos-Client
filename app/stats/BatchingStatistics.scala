@@ -187,16 +187,18 @@ private[stats] object BatchingStatistics {
   /**
    * A fee-less pool swap with one other input, the carry, and the carry handed on at output 1: the pool at input 0
    * and its successor at output 0 under the same tree and NFT. A leg that ends a cycle splits its profit off to
-   * output 2. Anything else in the transaction, a fee output included, makes it no leg.
+   * output 2. A leg that fills a token/token grid on the way has the order at input 2 and its child at output 2,
+   * and splits off nothing. Anything else in the transaction, a fee output included, makes it no leg.
    */
-  private final case class ArbLegTx(tx: BlockTx, carryIn: TxOutput, nft: String) {
+  private final case class ArbLegTx(tx: BlockTx, carryIn: TxOutput, nft: String, fillsGrid: Boolean = false) {
     def carryOut: TxOutput = tx.outputs(1)
-    def profit: Option[TxOutput] = tx.outputs.lift(2)
+    def profit: Option[TxOutput] = if (fillsGrid) None else tx.outputs.lift(2)
   }
 
-  private def arbLeg(block: BlockInfo, tx: BlockTx, network: NetworkType): Option[ArbLegTx] =
-    if (tx.inputs.size != 2 || tx.outputs.size < 2 || tx.outputs.size > 3 ||
-      tx.outputs.exists(_.ergoTree == Contract.FEE.ergoTreeHex)) None
+  private def arbLeg(block: BlockInfo, tx: BlockTx, network: NetworkType): Option[ArbLegTx] = {
+    val swaps = tx.inputs.size == 2 && tx.outputs.size >= 2 && tx.outputs.size <= 3
+    val fillsGrid = tx.inputs.size == 3 && tx.outputs.size == 3
+    if ((!swaps && !fillsGrid) || tx.outputs.exists(_.ergoTree == Contract.FEE.ergoTreeHex)) None
     else for {
       pool <- block.inputBox(tx.inputs.head.id)
       carry <- block.inputBox(tx.inputs(1).id)
@@ -204,7 +206,10 @@ private[stats] object BatchingStatistics {
       next = tx.outputs.head
       if next.ergoTree == pool.ergoTree && next.assets.headOption.exists(t => t.id.toString == nft && t.amount == 1L)
       if tx.outputs(1).ergoTree != pool.ergoTree && poolProtocol(pool, network).isDefined
-    } yield ArbLegTx(tx, carry, nft)
+      if !fillsGrid || block.inputBox(tx.inputs(2).id).exists(order =>
+        tx.outputs(2).ergoTree == order.ergoTree && MachinaOrder.parseTokenGrid(box(order)).isDefined)
+    } yield ArbLegTx(tx, carry, nft, fillsGrid)
+  }
 
   /**
    * Arb cycles this block carries, in any block: chains of legs where each spends the carry the one before handed

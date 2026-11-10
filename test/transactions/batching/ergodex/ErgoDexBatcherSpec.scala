@@ -315,6 +315,56 @@ class ErgoDexBatcherSpec extends TestKit(ActorSystem("ergodex-batcher-spec", Erg
     f.stop()
   }
 
+  /** The open token/token grid order, with the pool tracker holding `pools` at the batcher's tip. */
+  private def tokenGrids(pools: Seq[NodeBox], handoff: Option[transactions.batching.arb.MachinaHandoff]): Fixture = {
+    val chain = new ScriptedChain
+    chain.extend(tip - 3, tip)
+    chain.indexed = tip
+    chain.scans(pools.zipWithIndex.map { case (box, i) => IndexedBox(box, "", tip - 1, i.toLong) }: _*)
+    val tracker = TrackerFixtures.tracker(chain)
+    TrackerFixtures.warmed(chain, tracker)
+    new Fixture(broadcast = true, initialOrder = support.MachinaFixtures.tokenGridOrder, tracker = Some(tracker),
+      handoff = handoff, scanIntervalMs = 1500L)
+  }
+
+  it should "hand a token/token grid to the arb stage, with arb on and pools for it tracked, and never broadcast it" in {
+    import support.MachinaFixtures._
+    val handoff = new transactions.batching.arb.MachinaHandoff(active = true, Set.empty)
+    val f = tokenGrids(Seq(fakuCigPool, fakuErgoDexPool), Some(handoff))
+    awaitAssert({
+      val (bundles, height) = offeredAt(f)
+      bundles shouldBe empty
+      handoff.at(height).map(o => (o.boxId, o.kind, o.base)) shouldBe
+        Vector((tokenGridOrder.boxId, MachinaKind.TokenGrid, Some(fakuCigPool.assets(2).tokenId)))
+    }, 30.seconds, 250.millis)
+    val passes = f.observations.get()
+    awaitAssert(f.observations.get() should be >= passes + 2, 30.seconds, 250.millis)
+    withClue("a broadcast pass neither sends it nor reads a pool for it: ") {
+      verify(f.api, times(0)).sendTransaction(anyString())
+      verify(f.api, times(0)).unspentBoxesByTokenId(org.mockito.ArgumentMatchers.eq(""), any[Paging],
+        any[SortDirection], any[MempoolOptions])
+    }
+    f.stop()
+  }
+
+  it should "not hand over a token/token grid without a token pool of its pair, nor read one with arb off" in {
+    import support.MachinaFixtures._
+    val handoff = new transactions.batching.arb.MachinaHandoff(active = true, Set.empty)
+    val unpaired = tokenGrids(Seq(fakuErgoDexPool), Some(handoff))
+    // Scans run every 1.5 s; by the third, the first discovery has long been read back by a build
+    awaitAssert(verify(unpaired.api, org.mockito.Mockito.atLeast(2)).info(), 30.seconds, 250.millis)
+    val (_, height) = offeredAt(unpaired)
+    handoff.at(height) shouldBe empty
+    unpaired.stop()
+
+    val off = tokenGrids(Seq(fakuCigPool, fakuErgoDexPool), None)
+    awaitAssert(verify(off.api, org.mockito.Mockito.atLeast(2)).info(), 30.seconds, 250.millis)
+    verify(off.api, times(0)).unspentBoxesByTemplateHash(
+      org.mockito.ArgumentMatchers.eq(MachinaContracts.tokenGrid.templateHash), any[Paging], any[SortDirection],
+      any[MempoolOptions])
+    off.stop()
+  }
+
   it should "route every Machina order through ErgoDEX, as before, with arb off" in {
     val (f, order, _) = lithosDexRouting(1.5, None)
     val bundle = f.offeredOnceTracked().head

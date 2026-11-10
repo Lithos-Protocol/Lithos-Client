@@ -49,9 +49,19 @@ object ErgoDexBatching {
     }
   }
 
-  /** An ErgoDEX order, or a Machina order routed through `routedThrough` when one was chosen for it. */
+  /**
+   * An ErgoDEX order, or a Machina order routed through `routedThrough` when one was chosen for it. A token/token
+   * grid is read only when tracked, which only arb's handoff makes it, and is routed through nothing.
+   */
   def parse(box: NodeBox, routedThrough: Option[String]): Option[PoolOrder] =
-    ErgoDexOrder.parse(box).orElse(routedThrough.flatMap(nft => MachinaOrder.parse(box).map(_.routedThrough(nft))))
+    ErgoDexOrder.parse(box).orElse(routedThrough.flatMap(nft =>
+      MachinaOrder.parse(box).orElse(MachinaOrder.parseTokenGrid(box)).map(_.routedThrough(nft))))
+
+  /** Whether `order` is a token/token grid, which only the arb stage fills. */
+  def tokenGrid(order: PoolOrder): Boolean = order match {
+    case machina: MachinaOrder => machina.kind == MachinaKind.TokenGrid
+    case _ => false
+  }
 
   /**
    * Whether an unconfirmed transaction takes the order away rather than executing it. An ErgoDEX execution

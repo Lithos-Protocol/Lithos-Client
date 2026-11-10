@@ -24,11 +24,12 @@ import scala.util.{Failure, Success, Try}
  * being built on. Without the pools nothing is offered, and without the stake no cycle; a later refresh at the
  * same height tries again.
  * A build whose inputs all match the last one's answers with that build's cycles, their stake outputs noted
- * again, rather than signing anew. Machina orders the ErgoDEX batcher hands over for the block are filled first,
- * with or without a stake.
+ * again, rather than signing anew. ERG/token Machina orders the ErgoDEX batcher hands over for the block are filled
+ * first, with or without a stake; token/token grid orders it hands over run on the stake, before the cycles.
  *
  * @param buildBudgetMs how long one build may run; selection stops at half of it
- * @param machina       where the ErgoDEX batcher hands over the Machina orders a LithosDex pool pays more for
+ * @param machina       where the ErgoDEX batcher hands over the Machina orders a LithosDex pool pays more for, and
+ *                      token/token grids
  */
 class ArbStage(nodeContext: NodeContext,
                arb: ArbConfig,

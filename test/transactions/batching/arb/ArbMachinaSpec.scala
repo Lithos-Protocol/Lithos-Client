@@ -9,7 +9,7 @@ import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 import org.scalatestplus.mockito.MockitoSugar
 import support.MachinaFixtures
-import transactions.batching.ergodex.{ErgoDexPool, MachinaContracts, MachinaKind, MachinaOrder, MachinaPricing}
+import transactions.batching.ergodex.{ErgoDexPool, MachinaContracts, MachinaFill, MachinaKind, MachinaOrder, MachinaPricing}
 import transactions.candidate.BlockTxMessages.{CandidateTx, ChainFromPackage}
 import transactions.candidate.{CandidateBundle, CapitalOrigin}
 import work.lithos.mutations.UTXO
@@ -21,7 +21,9 @@ import scala.concurrent.duration._
  * Machina orders the arb stage fills through LithosDex ERG pools, against real mainnet orders and the real
  * LithosDex ERG/FAKU pool: the pricing replayed to the unit on real ErgoDEX fills, the routing between the two
  * DEXes, every fill signed against the pool's and the order's own contracts, and a fill built on a LithosDex run's
- * last successor with a cycle through the same pool priced after it.
+ * last successor with a cycle through the same pool priced after it. Then token/token grids: the one open on
+ * mainnet and two real fills replayed to the child, and the fill and the sale of its gap signed against the real
+ * grid, the ErgoDEX FAKU/`ebb40eca…` token pool and FAKU's ERG pools.
  */
 class ArbMachinaSpec extends AnyFlatSpec with Matchers with MockitoSugar {
   import ArbFixtures._
@@ -262,6 +264,196 @@ class ArbMachinaSpec extends AnyFlatSpec with Matchers with MockitoSugar {
       val proof = tx.getSignedInputs.asScala(1)
       proof.getContextVars.asScala.map { case (k, v) => k.toInt -> v.getValue }.toMap shouldBe
         Map(0 -> fill.boxSells, 1 -> 1)
+    }
+  }
+
+  // ─── token/token grids ───────────────────────────────────────────────────
+
+  private def grid(box: NodeBox): MachinaOrder = MachinaOrder.parseTokenGrid(box).get
+
+  "A token/token grid order" should "parse with its base token first, its own token, its ask and its bid" in {
+    val order = grid(tokenGridOrder)
+    order.kind shouldBe MachinaKind.TokenGrid
+    order.base shouldBe Some(faku)
+    order.tokenId shouldBe tokenGridOrder.assets(1).tokenId
+    (order.ask, order.bid, order.tokens, order.baseHeld) shouldBe ((Some(50L), Some(10L), 200L, 500L))
+    withClue("it is never taken for an ERG/token order, nor an ERG/token order for it: ") {
+      MachinaOrder.parse(tokenGridOrder) shouldBe None
+      MachinaOrder.parseTokenGrid(gridSells.order) shouldBe None
+    }
+    Seq(tokenGridBuys, tokenGridSells).foreach(f => grid(f.order).base shouldBe Some(faku))
+  }
+
+  it should "not parse holding a third token, its own token first, or a constant its contract does not carry" in {
+    nodeContext.getClient.execute { ctx =>
+      val third = withId(ctx, tokenGridOrder.copy(assets = tokenGridOrder.assets :+ NodeAsset("5e" * 32, 1L)))
+      MachinaOrder.parseTokenGrid(third) shouldBe None
+      val swapped = withId(ctx, tokenGridOrder.copy(assets = tokenGridOrder.assets.reverse))
+      MachinaOrder.parseTokenGrid(swapped) shouldBe None
+      // The last constant, the bid's index in R5, made 2: same template, another contract
+      val tree = tokenGridOrder.ergoTree.replace("0500040005000402d804", "0500040005000404d804")
+      tree should not equal tokenGridOrder.ergoTree
+      Hex.toHexString(scorex.crypto.hash.Blake2b256(sigma.ast.ErgoTree.fromHex(tree).template)) shouldBe
+        MachinaContracts.templates.find(_.kind == MachinaKind.TokenGrid).get.templateHash
+      MachinaOrder.parseTokenGrid(withId(ctx, tokenGridOrder.copy(ergoTree = tree))) shouldBe None
+      MachinaOrder.parseTokenGrid(withId(ctx, tokenGridOrder)) should not be empty
+    }
+  }
+
+  "A mainnet token/token grid fill" should "leave the child this client builds for the same fill, byte for byte" in {
+    nodeContext.getClient.execute { ctx =>
+      Seq(tokenGridBuys -> false, tokenGridSells -> true).foreach { case (f, sells) =>
+        withClue(f.name) {
+          val order = grid(f.order)
+          val moved = math.abs(f.child.assets(1).amount - f.order.assets(1).amount)
+          // Any token/token pool of the pair: the child depends only on the order, its side and the size
+          val pool = ErgoDexArbPool(ErgoDexPool.token(tokenPool(ctx, id(41), faku, order.tokenId,
+            100000000L, 100000L)).get)
+          val fill = ArbMachina.at(order.routedThrough(pool.nft), pool, moved, sells).get
+          val input = f.order.toInputUTXO(ctx)
+          val child = MachinaFill.child(input, order, fill.childValue, fill.childTokens, fill.toOwner, fill.childBase)
+          child.contract.ergoTreeHex shouldBe f.child.ergoTree
+          child.value shouldBe f.child.value
+          child.tokens.map(t => t.id.toString -> t.amount) shouldBe f.child.assets.map(a => a.tokenId -> a.amount)
+          child.registers.map(_.toHex) shouldBe Seq("R4", "R5", "R6").map(f.child.additionalRegisters.values)
+          // The filler's context variables: the side, and the child's index, there 1
+          MachinaFill.input(input, order, sells, 1).ctxVars.map(v => v.getId.toString -> v.getValue.toHex).toMap shouldBe
+            contextVars(f, 1)
+        }
+      }
+    }
+  }
+
+  /** The live grid order holding `value`, enough for its child to carry the id register it lacks. */
+  private def funded(ctx: BlockchainContext, value: Long = 1000000L): MachinaOrder =
+    grid(withId(ctx, tokenGridOrder.copy(value = value)))
+
+  /** Grid cycles built for `orders` through `pools` on a stake at the arb address, and the stake. */
+  private def gridBuild(ctx: BlockchainContext, pools: Seq[NodeBox], orders: Seq[MachinaOrder],
+                        minProfit: Long = 1000000L, slots: Int = 8,
+                        refuse: String => Unit = _ => ()): (Vector[CandidateBundle], NodeBox) = {
+    val stake = arbStakeBox(ctx, wallet, 10 * Erg + ArbLeg.MinCarryValue)
+    ArbCycles.build(ctx, wallet, indexOf(ctx, pools: _*), ArbBasis.Empty, Some(stake), orders, 1000000L, height, slots,
+      stake.value - ArbLeg.MinCarryValue, minProfit, wallet.contract, Deadline.now + 1.minute, Deadline.now + 1.minute,
+      _ => true, refuse) -> stake
+  }
+
+  "A token/token grid order" should "be filled through its pair's token pool, its gap sold through its base token's deepest ERG pool, on the stake" in {
+    nodeContext.getClient.execute { ctx =>
+      val order = funded(ctx)
+      val (bundles, stake) = gridBuild(ctx, Seq(fakuCigPool, fakuErgoDexPool, lithosDexFakuPool), Seq(order))
+      bundles.size shouldBe 1
+      val bundle = bundles.head
+      bundle.members.map(_.kind) shouldBe Vector(ArbLeg.Kind, ArbLeg.Kind)
+      val Seq(fill, sale) = bundle.members.map(decoded)
+      val arbTree = stakeContract(wallet).ergoTreeHex
+
+      // The fill: the token pool, the stake carried through, the order; its child at output 2
+      fill.inputs.map(_.boxId) shouldBe Seq(fakuCigPool.boxId, stake.boxId, order.boxId)
+      fill.outputs.size shouldBe 3
+      fill.outputs.head.value shouldBe fakuCigPool.value
+      val carry = fill.outputs(1)
+      carry.ergoTree shouldBe arbTree
+      carry.value shouldBe stake.value
+      val child = fill.outputs(2)
+      child.ergoTree shouldBe order.box.ergoTree
+      child.value shouldBe order.box.value
+      // It bids 10 FAKU units for each unit of its token: it buys all its 500 FAKU allow, keeping one
+      val bought = child.assets(1).amount - 200L
+      bought shouldBe 49L
+      child.assets.map(_.amount) shouldBe Seq(500L - 10L * bought, 200L + bought)
+      val paid = fill.outputs.head.assets(2).amount - fakuCigPool.assets(2).amount
+      carry.assets.map(a => a.tokenId -> a.amount) shouldBe Seq(faku -> (10L * bought - paid))
+
+      // The sale: FAKU's deepest ERG pool, the ErgoDEX one, not the LithosDex one
+      sale.inputs.map(_.boxId) shouldBe Seq(fakuErgoDexPool.boxId, carry.boxId)
+      sale.outputs(1).ergoTree shouldBe arbTree
+      sale.outputs(1).value shouldBe stake.value
+      sale.outputs(1).assets shouldBe empty
+      val profit = sale.outputs(2)
+      profit.value shouldBe fakuErgoDexPool.value - sale.outputs.head.value
+      profit.value should be >= 1000000L
+      bundle.capital.map(c => (c.origin, c.outputId, c.value)) shouldBe
+        Seq((CapitalOrigin.Arbitrage, profit.boxId, profit.value))
+      bundle.packageParents shouldBe empty
+    }
+  }
+
+  it should "be sold through LithosDex when that is its base token's deepest ERG pool" in {
+    nodeContext.getClient.execute { ctx =>
+      val shallow = nativePool(ctx, id(42), faku, 10 * Erg, 300000L)
+      val (bundles, _) = gridBuild(ctx, Seq(fakuCigPool, shallow, lithosDexFakuPool), Seq(funded(ctx)))
+      decoded(bundles.head.members(1)).inputs.head.boxId shouldBe lithosDexFakuPool.boxId
+    }
+  }
+
+  it should "not be filled when the ERG its sale returns is under the least profit" in {
+    nodeContext.getClient.execute { ctx =>
+      val order = funded(ctx)
+      val pools = Seq(fakuCigPool, fakuErgoDexPool)
+      val profit = decoded(gridBuild(ctx, pools, Seq(order))._1.head.members(1)).outputs(2).value
+      gridBuild(ctx, pools, Seq(order), minProfit = profit)._1 should have size 1
+      gridBuild(ctx, pools, Seq(order), minProfit = profit + 1)._1 shouldBe empty
+    }
+  }
+
+  it should "need the stake, two slots, a token pool of its pair and an ERG pool of its base" in {
+    nodeContext.getClient.execute { ctx =>
+      val order = funded(ctx)
+      build(ctx, indexOf(ctx, fakuCigPool, fakuErgoDexPool), Seq(order)) shouldBe empty
+      gridBuild(ctx, Seq(fakuCigPool, fakuErgoDexPool), Seq(order), slots = 1)._1 shouldBe empty
+      gridBuild(ctx, Seq(fakuErgoDexPool), Seq(order))._1 shouldBe empty
+      gridBuild(ctx, Seq(fakuCigPool), Seq(order))._1 shouldBe empty
+      gridBuild(ctx, Seq(fakuCigPool, fakuErgoDexPool), Seq(order))._1 should have size 1
+    }
+  }
+
+  it should "be filled through a LithosDex token/token pool and sold through ERG:LIT, at the real grid contract for RSN" in {
+    nodeContext.getClient.execute { ctx =>
+      // A grid holding LIT, its base, bidding half again what LIT/RSN asks for RSN, and selling none
+      val pool = entry(ctx, litRsnPool).pool.asInstanceOf[LithosDexT2TArbPool].state
+      val bid = (BigInt(pool.reservesX) * 3 / (BigInt(pool.reservesY) * 2) + 1).toLong
+      val prices = ErgoValue.of(sigma.Colls.fromArray(Array(Long.MaxValue / 4, bid)),
+        org.ergoplatform.appkit.scalaapi.scalaLongType).toHex
+      val box = withId(ctx, tokenGridOrder.copy(value = 1000000L,
+        ergoTree = MachinaContracts.tokenGrid.treeHex(Rsn), assets = Seq(NodeAsset(Lit, bid * 1000L + 1L)),
+        additionalRegisters = node.model.NodeRegisters(tokenGridOrder.additionalRegisters.values.updated("R5", prices))))
+      val order = grid(box)
+      (order.base, order.tokenId, order.tokens) shouldBe ((Some(Lit), Rsn, 0L))
+      val canonical = canonicalPool(ctx, 100000 * Erg, 10000000000000L)
+      val (bundles, stake) = gridBuild(ctx, Seq(litRsnPool, canonical), Seq(order))
+      bundles.size shouldBe 1
+      val Seq(fill, sale) = bundles.head.members.map(decoded)
+      fill.inputs.map(_.boxId) shouldBe Seq(litRsnPool.boxId, stake.boxId, order.boxId)
+      fill.outputs(2).assets.map(_.tokenId) shouldBe Seq(Lit, Rsn)
+      sale.inputs.head.boxId shouldBe canonical.boxId
+      sale.outputs(1).value shouldBe stake.value
+      sale.outputs(2).value should be >= 1000000L
+    }
+  }
+
+  "The live token/token grid order" should "not be filled, its child unable to hold the id register at its value, and be refused" in {
+    nodeContext.getClient.execute { ctx =>
+      val order = grid(tokenGridOrder)
+      tokenGridOrder.value shouldBe 162720L
+      var refused = Vector.empty[String]
+      gridBuild(ctx, Seq(fakuCigPool, fakuErgoDexPool), Seq(order), refuse = id => refused :+= id)._1 shouldBe empty
+      refused shouldBe Vector(order.boxId)
+    }
+  }
+
+  "A grid cycle and a pool cycle" should "share the stake, the grid's first, the pool cycle priced on the ERG pool the sale left" in {
+    nodeContext.getClient.execute { ctx =>
+      // FAKU dearer on LithosDex than on ErgoDEX, so a pair pays besides the grid
+      val (bundles, stake) = gridBuild(ctx, Seq(fakuCigPool, fakuErgoDexPool, lithosDex(ctx, 33000.0)),
+        Seq(funded(ctx)))
+      bundles.size should be >= 2
+      val gridLegs = bundles.head.members.map(decoded)
+      gridLegs.head.inputs(1).boxId shouldBe stake.boxId
+      val next = bundles(1).members.map(decoded)
+      next.head.inputs(1).boxId shouldBe gridLegs.last.outputs(1).boxId
+      bundles(1).packageParents should contain(bundles.head.members.last.id)
+      next.map(_.inputs.head.boxId) should contain(gridLegs.last.outputs.head.boxId)
     }
   }
 }

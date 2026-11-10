@@ -184,7 +184,35 @@ class ArbStatisticsSpec extends AnyFlatSpec with Matchers with MockitoSugar {
     }
   }
 
-  it should "not be recorded as a cycle of one leg" in {
+  "A token/token grid filled on the stake" should "be recorded once, at its sale's profit, under its token pool's NFT" in {
+    import node.MutationConversions._
+    import support.MachinaFixtures._
+    nodeContext.getClient.execute { ctx =>
+      // The open grid order, funded so its child can hold the id register, filled through the real pools
+      val funded = tokenGridOrder.copy(value = 1000000L)
+      val order = transactions.batching.ergodex.MachinaOrder.parseTokenGrid(
+        funded.copy(boxId = funded.toInputUTXO(ctx).id.toString)).get
+      val stake = arbStakeBox(ctx, wallet, 10 * Erg + ArbLeg.MinCarryValue)
+      val bundles = ArbCycles.build(ctx, wallet, index(ctx, Seq(fakuCigPool, fakuErgoDexPool)).copy(parsed =
+        Seq(fakuCigPool, fakuErgoDexPool).map(b => entry(ctx, b)).map(e => e.nft -> e).toMap), ArbBasis.Empty,
+        Some(stake), Seq(order), 1000000L, height, 8, stake.value - ArbLeg.MinCarryValue, 1000000L, wallet.contract,
+        Deadline.now + 1.minute, Deadline.now + 1.minute, _ => true)
+      bundles.size shouldBe 1
+      val txs = bundles.head.members.map(m => NodeSync.blockTx(decoded(m)))
+      val block = blockOf(txs, Seq(fakuCigPool, fakuErgoDexPool, stake, order.box))
+      val profit = txs.last.outputs(2)
+      cycles(block, ctx) shouldBe Vector(BatchingStatistics.ArbCycle(BatchingFee(txs.last.id,
+        fakuCigPool.assets.head.tokenId, "arb", profit.value.toString, "0", local = true), txs.map(_.id)))
+      txs.foreach(tx => BatchingStatistics.read(block, tx, ctx.getNetworkType, mine) shouldBe empty)
+      withClue("a third input that is no token/token grid makes the fill no leg, so no cycle: ") {
+        val plain = stakeBox(ctx, wallet, order.box.value, seed = 77)
+        val notGrid = txs.head.copy(inputs = txs.head.inputs.updated(2, state.messages.TxInput(plain.boxId, None)))
+        cycles(blockOf(Vector(notGrid, txs.last), Seq(fakuCigPool, fakuErgoDexPool, stake, plain)), ctx) shouldBe empty
+      }
+    }
+  }
+
+  "A chain of legs" should "not be recorded as a cycle of one leg" in {
     nodeContext.getClient.execute { ctx =>
       val (confirmed, txs) = built(ctx, wallet, pairs = 1)
       // The last leg alone, its carry input taken from the stake so the value would come back whole

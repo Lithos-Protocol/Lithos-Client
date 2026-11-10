@@ -52,6 +52,35 @@ object MachinaFixtures {
   lazy val oldLimit: Fill = load("old-limit-fill")
 
   /**
+   * The one token/token grid order open on mainnet: 500 FAKU units, its base, then 200 of its token `ebb40eca…`,
+   * asking 50 FAKU units a unit and bidding 10. It holds 162,720 nanoERG, the minimum for its own size. Box
+   * `84f59301ac49…`, block 1,785,999, still open at 1,913,935.
+   */
+  lazy val tokenGridOrder: NodeBox = NodeCodecs.indexedBox(json("t2t-grid-order")).box
+
+  /** The ErgoDEX FAKU/`ebb40eca…` token pool, FAKU as X. Box `dd4c3c8c2b6e…`, block 1,912,895. */
+  lazy val fakuCigPool: NodeBox = NodeCodecs.indexedBox(json("faku-cig-t2t-pool")).box
+
+  /** The ErgoDEX ERG/FAKU pool, FAKU's deepest ERG pool. Box `730d34e5a5a7…`, block 1,913,076. */
+  lazy val fakuErgoDexPool: NodeBox = NodeCodecs.indexedBox(json("faku-ergodex-pool")).box
+
+  /**
+   * Two fills of FAKU/SigUSD token/token grids, each by a bot paying ERG through an ErgoDEX ERG pool at input 0, the
+   * grid at input 1 and its child at output 1: one buying a SigUSD unit for 1,097 FAKU units (block 1,896,838), one
+   * selling a SigUSD unit for 569 (block 1,895,970).
+   */
+  lazy val tokenGridBuys: Fill = load("t2t-grid-buys")
+  lazy val tokenGridSells: Fill = load("t2t-grid-sells")
+
+  /** The context variables a fill's input at `input` was spent with, as the node reports them. */
+  def contextVars(fill: Fill, input: Int): Map[String, String] = {
+    import scala.collection.JavaConverters._
+    val extension = json(fill.name).getAsJsonArray("inputs").get(input).getAsJsonObject
+      .getAsJsonObject("spendingProof").getAsJsonObject("extension")
+    extension.entrySet().asScala.map(e => e.getKey -> e.getValue.getAsString).toMap
+  }
+
+  /**
    * The LithosDex ERG/FAKU pool, the one LithosDex ERG pool of the fixtures' token, under its own deployment.
    * Box `54307bbc9a30…`, block 1,912,934.
    */
