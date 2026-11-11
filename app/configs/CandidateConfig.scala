@@ -73,7 +73,8 @@ object CandidateConfig {
       CandidateSourceConfig.SigmaFi -> CandidateSourceConfig.Default.copy(enabled = true, maxTxs = 20),
       // Asked only while `batching.arb.enabled`, after the DEX batchers. Every leg of a cycle takes a slot, and
       // 100 legs of the costliest pool kind fit the cost and, just, the bytes.
-      CandidateSourceConfig.Arb -> CandidateSourceConfig.Default.copy(enabled = true, maxTxs = 100, maxCost = 2000000L)),
+      CandidateSourceConfig.Arb -> CandidateSourceConfig.Default.copy(enabled = true, maxTxs = 100, maxBytes = 327680L,
+        maxCost = 2000000L)),
     blockShare = 0.75,
     useTruePropCollection = false,
     genesisWaitMs = 1500,
