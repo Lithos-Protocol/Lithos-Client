@@ -26,6 +26,12 @@ object CompleteMempool {
   case object Refresh
 
   /**
+   * Ask the owning actor for the observation it already holds, starting no walk. For readers that only display
+   * the mempool and follow the periodic walk rather than forcing one.
+   */
+  case object Latest
+
+  /**
    * The mempool moved under the walk, rather than the node failing.
    *
    * Ordinary traffic: arrivals, confirmations and evictions all cause it. The observation is still

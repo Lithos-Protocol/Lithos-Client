@@ -22,7 +22,7 @@ import scala.concurrent.Future
 import scala.util.{Failure, Success, Try}
 
 /**
- * The `sigmafi` endpoints: the whole of `/sigmafi`. Lists, the asset lookup and every check are open; the
+ * The first-generation `sigmafi` endpoints, under `/sigmafi/old`. Lists, the asset lookup and every check are open; the
  * portfolio and everything that signs need the api key. Each action does blocking node IO, so it runs on the dex
  * pool rather than Play's request threads.
  */
@@ -38,20 +38,20 @@ class SigmaFiApiController @Inject()(cc: ControllerComponents,
 
   // ── reads ────────────────────────────────────────────────────────────────
 
-  /** GET /sigmafi/orders */
+  /** GET /sigmafi/old/orders */
   def listOrders(offset: Option[Int], limit: Option[Int], collateral: Option[String], loan: Option[String]): Action[AnyContent] =
     Action.async { _ => offPool(respond(api.listOrders(offset, limit, collateral, loan))) }
 
-  /** GET /sigmafi/bonds */
+  /** GET /sigmafi/old/bonds */
   def listBonds(offset: Option[Int], limit: Option[Int], all: Option[Boolean]): Action[AnyContent] =
     Action.async { _ => offPool(respond(api.listBonds(offset, limit, all))) }
 
-  /** POST /sigmafi/assets */
+  /** POST /sigmafi/old/assets */
   def lookupAssets(): Action[AnyContent] = Action.async { request =>
     offPool(respond(api.lookupAssets(body[SFAssetLookupRequest](request, "assetLookupRequest"))))
   }
 
-  /** GET /sigmafi/portfolio */
+  /** GET /sigmafi/old/portfolio */
   def getPortfolio(): Action[AnyContent] = withApiKey { Action.async { _ => offPool(respond(api.getPortfolio)) } }
 
   // ── actions: each `check` is open and signs nothing, each send needs the key ─────────────

@@ -33,6 +33,11 @@ object EngineIntent {
     def key: String = "sigmafi:" + requestId
   }
 
+  /** A one-off SigmaFi ZC request, keyed per request like [[Dex]]. */
+  final case class Zc(request: ZcIntent, requestId: String = java.util.UUID.randomUUID().toString) extends EngineIntent {
+    def key: String = "sigmafi-zc:" + requestId
+  }
+
   final case class Rollups(stubs: Vector[RollupTxStub]) extends EngineIntent {
     override val lane = Lane.Critical
 

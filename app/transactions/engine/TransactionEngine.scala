@@ -211,6 +211,13 @@ class TransactionEngine @Inject()(node: NodeContext,
       override protected def executionNode: _root_.node.NodeApi = TransactionEngine.this.nodeApi
     }
 
+  /** One attempt's ZC write execution, over the tracker and resolver the intent carries. */
+  protected def newZcExecution(intent: ZcIntent, stillEligible: () => Boolean): execution.ZcWriteExecution =
+    new execution.ZcWriteExecution(node, EngineFunding(self, EngineFunding.askTimeout(config), ec), intent.tracker,
+      intent.resolver, stillEligible, intent.capability) {
+      override protected def executionNode: _root_.node.NodeApi = TransactionEngine.this.nodeApi
+    }
+
   override def preStart(): Unit = {
     super.preStart()
     // Consolidation is invisible otherwise: it has no log of its own, and its status is only
@@ -252,6 +259,7 @@ class TransactionEngine @Inject()(node: NodeContext,
     case intent: DexIntent => admit(EngineIntent.Dex(intent), sender())
     case intent: ForwardsIntent => admit(EngineIntent.Forwards(intent), sender())
     case intent: SigmaFiIntent => admit(EngineIntent.SigmaFi(intent), sender())
+    case intent: ZcIntent => admit(EngineIntent.Zc(intent), sender())
     case JoinCollateral(request) => admit(EngineIntent.Join(request), sender())
     case RegisterMiner(diff) => admit(EngineIntent.Register(diff), sender())
     case CommitDifficulty(diff) => admit(EngineIntent.Commit(diff), sender())
@@ -419,6 +427,7 @@ class TransactionEngine @Inject()(node: NodeContext,
       case EngineIntent.Dex(request, requestId) => DexIntent.fitsBudget(request) && requestId.length <= 128
       case EngineIntent.Forwards(request, requestId) => ForwardsIntent.admissible(request) && requestId.length <= 128
       case EngineIntent.SigmaFi(request, requestId) => SigmaFiIntent.admissible(request) && requestId.length <= 128
+      case EngineIntent.Zc(request, requestId) => ZcIntent.admissible(request) && requestId.length <= 128
       case EngineIntent.Rollups(stubs) =>
         stubs.nonEmpty && stubs.size <= 100 && stubs.forall(_.rollupBlockId.matches("[0-9a-f]{64}"))
       case EngineIntent.Join(request, requestId) =>
@@ -431,7 +440,7 @@ class TransactionEngine @Inject()(node: NodeContext,
     // A one-off API request is never retried: the caller has already been answered by then. The
     // commitment loop asks again every pass, so its own work is not retried here either.
     val policy = work match {
-      case _: EngineIntent.Dex | _: EngineIntent.Forwards | _: EngineIntent.SigmaFi | _: EngineIntent.Join |
+      case _: EngineIntent.Dex | _: EngineIntent.Forwards | _: EngineIntent.SigmaFi | _: EngineIntent.Zc | _: EngineIntent.Join |
            EngineIntent.ArbReclaim |
            _: EngineIntent.Register | _: EngineIntent.Commit => OneOff
       case _: EngineIntent.Rollups => Critical
@@ -505,6 +514,7 @@ class TransactionEngine @Inject()(node: NodeContext,
     case EngineIntent.Dex(request, _) => request.execute(dex, dexCache)
     case EngineIntent.Forwards(request, _) => request.execute(newForwardsExecution(stillEligible))
     case EngineIntent.SigmaFi(request, _) => request.execute(newSigmaFiExecution(stillEligible))
+    case EngineIntent.Zc(request, _) => request.execute(newZcExecution(request, stillEligible))
     case EngineIntent.Consolidate =>
       consolidation.execute(consolidationTarget, stillEligible,
         walletConfig.consolidation.minInputs, walletConfig.consolidation.transactions)

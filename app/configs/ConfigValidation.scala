@@ -338,6 +338,13 @@ object Configs {
     v.range("batching.forwards.maxSkippedOrders", v.int("batching.forwards.maxSkippedOrders"), 0, 100000,
       "unbuildable positions remembered; about 200 bytes each")
 
+    // ---- sigmafi.zc ----
+    v.bool("sigmafi.zc.enabled")
+    v.range("sigmafi.zc.maxBoxes", v.int("sigmafi.zc.maxBoxes"), ZcConfig.MinBoxes, ZcConfig.MaxBoxes,
+      "ZC boxes held in memory; about 2 KB each")
+    v.range("sigmafi.zc.fillsFromHeight", v.int("sigmafi.zc.fillsFromHeight"), 0, Int.MaxValue,
+      "the first block holding a ZC box, or 0 for no fill history")
+
     // ---- batching.sigmafi ----
     v.bool("batching.sigmafi.enabled")
     v.longRange("batching.sigmafi.scanIntervalMs", v.long("batching.sigmafi.scanIntervalMs"),

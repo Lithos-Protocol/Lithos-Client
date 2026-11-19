@@ -10,33 +10,33 @@ import api.models._
  */
 trait SigmaFiApi {
 
-  /** GET /sigmafi/orders */
+  /** GET /sigmafi/old/orders */
   def listOrders(offset: Option[Int], limit: Option[Int], collateral: Option[String], loan: Option[String]): SFOrderBook
 
-  /** GET /sigmafi/bonds */
+  /** GET /sigmafi/old/bonds */
   def listBonds(offset: Option[Int], limit: Option[Int], all: Option[Boolean]): SFBondList
 
-  /** POST /sigmafi/assets */
+  /** POST /sigmafi/old/assets */
   def lookupAssets(request: SFAssetLookupRequest): Seq[SFAssetLookup]
 
-  /** GET /sigmafi/portfolio */
+  /** GET /sigmafi/old/portfolio */
   def getPortfolio: SFPortfolio
 
-  /** POST /sigmafi/orders/check, and POST /sigmafi/orders with `send` */
+  /** POST /sigmafi/old/orders/check, and POST /sigmafi/old/orders with `send` */
   def createOrder(request: SFOrderRequest, send: Boolean): Either[SFQuote, SFResult]
 
-  /** POST /sigmafi/orders/:boxId/cancel[/check] */
+  /** POST /sigmafi/old/orders/:boxId/cancel[/check] */
   def cancelOrder(boxId: String, send: Boolean): Either[SFQuote, SFResult]
 
-  /** POST /sigmafi/orders/:boxId/fill[/check] */
+  /** POST /sigmafi/old/orders/:boxId/fill[/check] */
   def fillOrder(boxId: String, send: Boolean, reserve: Option[String] = None): Either[SFQuote, SFResult]
 
-  /** POST /sigmafi/bonds/:boxId/repay[/check] */
+  /** POST /sigmafi/old/bonds/:boxId/repay[/check] */
   def repay(boxId: String, send: Boolean): Either[SFQuote, SFResult]
 
-  /** POST /sigmafi/bonds/:boxId/liquidate[/check] */
+  /** POST /sigmafi/old/bonds/:boxId/liquidate[/check] */
   def liquidate(boxId: String, send: Boolean): Either[SFQuote, SFResult]
 
-  /** POST /sigmafi/claims/:tokenId[/check] */
+  /** POST /sigmafi/old/claims/:tokenId[/check] */
   def claim(tokenId: String, send: Boolean): Either[SFQuote, SFResult]
 }

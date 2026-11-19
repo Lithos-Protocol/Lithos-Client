@@ -174,36 +174,128 @@ POST /forwards/positions/:boxId/settle          controllers.ForwardsApiControlle
 GET  /oracles                                  controllers.OraclesApiController.listFeeds()
 GET  /oracles/:feedId                          controllers.OraclesApiController.getFeed(feedId: String, offset: Option[Int], limit: Option[Int], atBlockId: Option[String])
 
-# Routes for SigmaFi bonds (the portfolio and everything that signs require api_key)
-GET  /sigmafi/orders                            controllers.SigmaFiApiController.listOrders(offset: Option[Int], limit: Option[Int], collateral: Option[String], loan: Option[String])
-GET  /sigmafi/bonds                             controllers.SigmaFiApiController.listBonds(offset: Option[Int], limit: Option[Int], all: Option[Boolean])
-GET  /sigmafi/portfolio                         controllers.SigmaFiApiController.getPortfolio()
+# Routes for first-generation SigmaFi bonds, kept for existing boxes (the portfolio and everything that signs require api_key)
+GET  /sigmafi/old/orders                        controllers.SigmaFiApiController.listOrders(offset: Option[Int], limit: Option[Int], collateral: Option[String], loan: Option[String])
+GET  /sigmafi/old/bonds                         controllers.SigmaFiApiController.listBonds(offset: Option[Int], limit: Option[Int], all: Option[Boolean])
+GET  /sigmafi/old/portfolio                     controllers.SigmaFiApiController.getPortfolio()
 + nocsrf
-POST /sigmafi/assets                            controllers.SigmaFiApiController.lookupAssets()
+POST /sigmafi/old/assets                        controllers.SigmaFiApiController.lookupAssets()
 + nocsrf
-POST /sigmafi/orders/check                      controllers.SigmaFiApiController.checkCreateOrder()
+POST /sigmafi/old/orders/check                  controllers.SigmaFiApiController.checkCreateOrder()
 + nocsrf
-POST /sigmafi/orders                            controllers.SigmaFiApiController.createOrder()
+POST /sigmafi/old/orders                        controllers.SigmaFiApiController.createOrder()
 + nocsrf
-POST /sigmafi/orders/:boxId/cancel/check        controllers.SigmaFiApiController.checkCancelOrder(boxId: String)
+POST /sigmafi/old/orders/:boxId/cancel/check    controllers.SigmaFiApiController.checkCancelOrder(boxId: String)
 + nocsrf
-POST /sigmafi/orders/:boxId/cancel              controllers.SigmaFiApiController.cancelOrder(boxId: String)
+POST /sigmafi/old/orders/:boxId/cancel          controllers.SigmaFiApiController.cancelOrder(boxId: String)
 + nocsrf
-POST /sigmafi/orders/:boxId/fill/check          controllers.SigmaFiApiController.checkFillOrder(boxId: String)
+POST /sigmafi/old/orders/:boxId/fill/check      controllers.SigmaFiApiController.checkFillOrder(boxId: String)
 + nocsrf
-POST /sigmafi/orders/:boxId/fill                controllers.SigmaFiApiController.fillOrder(boxId: String)
+POST /sigmafi/old/orders/:boxId/fill            controllers.SigmaFiApiController.fillOrder(boxId: String)
 + nocsrf
-POST /sigmafi/bonds/:boxId/repay/check          controllers.SigmaFiApiController.checkRepay(boxId: String)
+POST /sigmafi/old/bonds/:boxId/repay/check      controllers.SigmaFiApiController.checkRepay(boxId: String)
 + nocsrf
-POST /sigmafi/bonds/:boxId/repay                controllers.SigmaFiApiController.repay(boxId: String)
+POST /sigmafi/old/bonds/:boxId/repay            controllers.SigmaFiApiController.repay(boxId: String)
 + nocsrf
-POST /sigmafi/bonds/:boxId/liquidate/check      controllers.SigmaFiApiController.checkLiquidate(boxId: String)
+POST /sigmafi/old/bonds/:boxId/liquidate/check  controllers.SigmaFiApiController.checkLiquidate(boxId: String)
 + nocsrf
-POST /sigmafi/bonds/:boxId/liquidate            controllers.SigmaFiApiController.liquidate(boxId: String)
+POST /sigmafi/old/bonds/:boxId/liquidate        controllers.SigmaFiApiController.liquidate(boxId: String)
 + nocsrf
-POST /sigmafi/claims/:tokenId/check             controllers.SigmaFiApiController.checkClaim(tokenId: String)
+POST /sigmafi/old/claims/:tokenId/check         controllers.SigmaFiApiController.checkClaim(tokenId: String)
 + nocsrf
-POST /sigmafi/claims/:tokenId                   controllers.SigmaFiApiController.claim(tokenId: String)
+POST /sigmafi/old/claims/:tokenId               controllers.SigmaFiApiController.claim(tokenId: String)
+
+# Routes for SigmaFi ZC Standard reads (the portfolio requires api_key); ifRevision answers 304 when nothing changed
+GET  /sigmafi/zc/info                           controllers.ZcApiController.info(ifRevision: Option[Long])
+GET  /sigmafi/zc/markets/:market/asks           controllers.ZcApiController.asks(market: String, coverage: Option[Long], kind: Option[String], matchable: Option[Boolean], grid: Option[Boolean], from: Option[Long], to: Option[Long], sort: Option[String], cursor: Option[String], limit: Option[Int], ifRevision: Option[Long])
+GET  /sigmafi/zc/markets/:market/offers         controllers.ZcApiController.offers(market: String, coverage: Option[Long], kind: Option[String], matchable: Option[Boolean], grid: Option[Boolean], from: Option[Long], to: Option[Long], sort: Option[String], cursor: Option[String], limit: Option[Int], ifRevision: Option[Long])
+GET  /sigmafi/zc/markets/:market/curves         controllers.ZcApiController.curves(market: String, coverage: Option[Long], kind: Option[String], matchable: Option[Boolean], grid: Option[Boolean], ifRevision: Option[Long])
+GET  /sigmafi/zc/markets/:market/orderbook      controllers.ZcApiController.orderbook(market: String, coverage: Option[Long], kind: Option[String], matchable: Option[Boolean], grid: Option[Boolean], to: Option[Long], around: Option[Long], band: Option[Long], ifRevision: Option[Long])
+GET  /sigmafi/zc/markets/:market/fills          controllers.ZcApiController.fills(market: String, fromHeight: Option[Int], kind: Option[String], via: Option[String], cursor: Option[String], limit: Option[Int])
+GET  /sigmafi/zc/matches/:id                   controllers.ZcApiController.matches(id: String, ifRevision: Option[Long])
++ nocsrf
+POST /sigmafi/zc/simulate                       controllers.ZcApiController.simulate(ifRevision: Option[Long])
+GET  /sigmafi/zc/auctions                       controllers.ZcApiController.auctions(market: Option[String], ifRevision: Option[Long])
+GET  /sigmafi/zc/lookup/:id                     controllers.ZcApiController.lookup(id: String, ifRevision: Option[Long])
+GET  /sigmafi/zc/search                         controllers.ZcApiController.search(q: String, ifRevision: Option[Long])
++ nocsrf
+POST /sigmafi/zc/assets                         controllers.ZcApiController.assets()
+GET  /sigmafi/zc/portfolio                      controllers.ZcApiController.portfolio(ifRevision: Option[Long])
+GET  /sigmafi/zc/activity                       controllers.ZcApiController.activity(cursor: Option[String], limit: Option[Int])
+
+# Routes for SigmaFi ZC Standard writes: each /check is open and signs nothing, each send requires api_key
++ nocsrf
+POST /sigmafi/zc/orders/check                   controllers.ZcApiController.checkCreateOrder()
++ nocsrf
+POST /sigmafi/zc/orders                         controllers.ZcApiController.createOrder()
++ nocsrf
+POST /sigmafi/zc/offers/check                   controllers.ZcApiController.checkCreateOffer()
++ nocsrf
+POST /sigmafi/zc/offers                         controllers.ZcApiController.createOffer()
++ nocsrf
+POST /sigmafi/zc/asks/check                     controllers.ZcApiController.checkCreateAsk()
++ nocsrf
+POST /sigmafi/zc/asks                           controllers.ZcApiController.createAsk()
++ nocsrf
+POST /sigmafi/zc/boxes/:boxId/cancel/check      controllers.ZcApiController.checkCancel(boxId: String)
++ nocsrf
+POST /sigmafi/zc/boxes/:boxId/cancel            controllers.ZcApiController.cancel(boxId: String)
++ nocsrf
+POST /sigmafi/zc/lots/check                     controllers.ZcApiController.checkCreateLot()
++ nocsrf
+POST /sigmafi/zc/lots                           controllers.ZcApiController.createLot()
++ nocsrf
+POST /sigmafi/zc/lots/:boxId/buy/check          controllers.ZcApiController.checkBuyLot(boxId: String)
++ nocsrf
+POST /sigmafi/zc/lots/:boxId/buy                controllers.ZcApiController.buyLot(boxId: String)
++ nocsrf
+POST /sigmafi/zc/orders/:boxId/fill/check       controllers.ZcApiController.checkFillOrder(boxId: String)
++ nocsrf
+POST /sigmafi/zc/orders/:boxId/fill             controllers.ZcApiController.fillOrder(boxId: String)
++ nocsrf
+POST /sigmafi/zc/asks/:boxId/buy/check          controllers.ZcApiController.checkBuyAsk(boxId: String)
++ nocsrf
+POST /sigmafi/zc/asks/:boxId/buy                controllers.ZcApiController.buyAsk(boxId: String)
++ nocsrf
+POST /sigmafi/zc/vaults/:boxId/buy/check        controllers.ZcApiController.checkBuyVault(boxId: String)
++ nocsrf
+POST /sigmafi/zc/vaults/:boxId/buy              controllers.ZcApiController.buyVault(boxId: String)
++ nocsrf
+POST /sigmafi/zc/vaults/:boxId/pull/check       controllers.ZcApiController.checkPull(boxId: String)
++ nocsrf
+POST /sigmafi/zc/vaults/:boxId/pull             controllers.ZcApiController.pull(boxId: String)
++ nocsrf
+POST /sigmafi/zc/bonds/:assetId/fractionalize/check controllers.ZcApiController.checkFractionalize(assetId: String)
++ nocsrf
+POST /sigmafi/zc/bonds/:assetId/fractionalize   controllers.ZcApiController.fractionalize(assetId: String)
++ nocsrf
+POST /sigmafi/zc/bonds/:assetId/repay/check     controllers.ZcApiController.checkRepay(assetId: String)
++ nocsrf
+POST /sigmafi/zc/bonds/:assetId/repay           controllers.ZcApiController.repay(assetId: String)
++ nocsrf
+POST /sigmafi/zc/bonds/:assetId/recollateralize/check controllers.ZcApiController.checkRecollateralize(assetId: String)
++ nocsrf
+POST /sigmafi/zc/bonds/:assetId/recollateralize controllers.ZcApiController.recollateralize(assetId: String)
++ nocsrf
+POST /sigmafi/zc/bonds/:assetId/liquidate/check controllers.ZcApiController.checkLiquidate(assetId: String)
++ nocsrf
+POST /sigmafi/zc/bonds/:assetId/liquidate       controllers.ZcApiController.liquidate(assetId: String)
++ nocsrf
+POST /sigmafi/zc/claims/:tokenId/check          controllers.ZcApiController.checkClaim(tokenId: String)
++ nocsrf
+POST /sigmafi/zc/claims/:tokenId                controllers.ZcApiController.claim(tokenId: String)
++ nocsrf
+POST /sigmafi/zc/wraps/check                    controllers.ZcApiController.checkCreateWrap()
++ nocsrf
+POST /sigmafi/zc/wraps                          controllers.ZcApiController.createWrap()
++ nocsrf
+POST /sigmafi/zc/wraps/:receiptId/unwrap/check  controllers.ZcApiController.checkUnwrap(receiptId: String)
++ nocsrf
+POST /sigmafi/zc/wraps/:receiptId/unwrap        controllers.ZcApiController.unwrap(receiptId: String)
++ nocsrf
+POST /sigmafi/zc/mints/:boxId/check             controllers.ZcApiController.checkMint(boxId: String)
++ nocsrf
+POST /sigmafi/zc/mints/:boxId                   controllers.ZcApiController.mint(boxId: String)
 
 # Routes for Wallet API
 GET  /wallet/balances                           controllers.WalletApiController.getWalletBalances()

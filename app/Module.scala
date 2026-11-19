@@ -67,6 +67,8 @@ class Module(environment: Environment, configuration: Configuration) extends Abs
     bindActor(classOf[transactions.batching.lithosdex.LithosDexBatcher], "lithosdex-batcher")
     bindActor(classOf[transactions.batching.forwards.ForwardsBatcher], "forwards-batcher")
     bindActor(classOf[transactions.batching.sigmafi.SigmaFiBatcher], "sigmafi-batcher")
+    // Follows ZC boxes for the API whether or not this node mines; idle when sigmafi.zc.enabled is off.
+    bindActor(classOf[transactions.batching.sigmafi.zc.ZcFeed], "zc-feed")
 
     bind(classOf[BlocksApi]).to(classOf[BlocksApiImpl])
     bind(classOf[CollateralMarketApi]).to(classOf[CollateralMarketApiImpl])

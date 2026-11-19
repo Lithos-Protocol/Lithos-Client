@@ -79,6 +79,10 @@ final class ScriptedChain {
     val tree = inv.getArgument[String](0)
     page(_.box.ergoTree == tree, inv.getArgument[Paging](1))
   }
+  when(api.unspentBoxesByTokenId(anyString(), any[Paging], any[SortDirection], any[MempoolOptions])).thenAnswer { inv =>
+    val token = inv.getArgument[String](0)
+    page(_.box.assets.exists(_.tokenId == token), inv.getArgument[Paging](1))
+  }
   when(api.unspentBoxesByTemplateHash(anyString(), any[Paging], any[SortDirection], any[MempoolOptions])).thenAnswer { inv =>
     val hash = inv.getArgument[String](0)
     val kind: IndexedBox => Boolean = b => shapes.read(b.box, 0).exists(t => (t.deployment, hash) match {

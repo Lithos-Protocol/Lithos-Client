@@ -146,6 +146,11 @@ class ConfigDefaultsSpec extends AnyFlatSpec with Matchers {
     SigmaFiBondsConfig.Default.batchingFeeNanoErg shouldBe SigmaFiBatchingConfig.Default.minBatchingFeeNanoErg
   }
 
+  "ZcConfig.Default" should "equal what the shipped application.conf parses, and what an empty one does" in {
+    ZcConfig(shipped) shouldEqual ZcConfig.Default
+    ZcConfig(Configuration.empty) shouldEqual ZcConfig.Default
+  }
+
   "ForwardsOffersConfig.Default" should "equal what the shipped application.conf parses, and what an empty one does" in {
     ForwardsOffersConfig(shipped) shouldEqual ForwardsOffersConfig.Default
     ForwardsOffersConfig(Configuration.empty) shouldEqual ForwardsOffersConfig.Default

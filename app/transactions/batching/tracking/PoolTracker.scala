@@ -190,24 +190,10 @@ object PoolTracker {
    */
   private[tracking] def follow(api: NodeApi, source: CanonicalBlockSource, shapes: PoolShapes, state: TrackedPools,
                                height: Int, headerId: String): Option[TrackedPools] =
-    if (height - state.height > MaxCatchUp || height < state.base) None
-    else {
-      // The tip's own height first, which is all a block extending it needs; the retained window only on a fork
-      def shared(from: Int): Option[(Seq[node.model.NodeHeader], Int)] = {
-        val headers = source.headerSlice(from, height).get
-        if (!headers.lastOption.exists(_.id == headerId))
-          throw new IllegalStateException(s"the node's chain does not have block $headerId at height $height")
-        headers.filter(h => h.height <= state.height && state.idAt(h.height).contains(h.id))
-          .lastOption.map(ancestor => headers -> ancestor.height)
-      }
-      val near = math.min(state.height, height)
-      shared(near).orElse(if (state.base < near) shared(state.base) else None).map { case (headers, ancestor) =>
-        headers.filter(_.height > ancestor).foldLeft(state.rolledBackTo(ancestor).get) { (at, header) =>
-          val txs = api.blockTransactions(header.id).get
-            .getOrElse(throw new NoSuchElementException(s"the node has no transactions for block ${header.id}"))
-          at.applied(header.height, header.id, header.parentId, txs.transactions, shapes, MaxBoxes)
-        }
-      }
+    BlockFollow.follow(source, state, height, headerId, MaxCatchUp) { (at, header) =>
+      val txs = api.blockTransactions(header.id).get
+        .getOrElse(throw new NoSuchElementException(s"the node has no transactions for block ${header.id}"))
+      at.applied(header.height, header.id, header.parentId, txs.transactions, shapes, MaxBoxes)
     }
 
   /**

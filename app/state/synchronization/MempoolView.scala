@@ -139,6 +139,7 @@ class MempoolView @Inject()(config: play.api.Configuration,
         completeWaiters :+= sender()
         startWalk()
       }
+    case CompleteMempool.Latest => sender() ! completeObservation
 
     // Skip projections before readiness; no consumer can use them during catch-up.
     case Tick =>

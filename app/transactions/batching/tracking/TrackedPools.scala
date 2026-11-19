@@ -84,7 +84,7 @@ final case class AppliedBlock(height: Int, headerId: String, parentId: String, r
  */
 final case class TrackedPools(height: Int, headerId: String, boxes: Map[String, TrackedBox],
                               byNft: Map[String, Set[String]], history: Vector[AppliedBlock], cut: Boolean,
-                              scannedAt: Int) {
+                              scannedAt: Int) extends BlockKept[TrackedPools] {
 
   /** The one box carrying `nft`, if exactly one does. */
   def pool(nft: String): Option[TrackedBox] = byNft.get(nft) match {

@@ -95,7 +95,7 @@ tags:
     x-displayName: Oracle Feeds
   - name: sigmafi
     description: >
-      SigmaFi bonds: peer-to-peer zero-coupon loans. A borrower posts a collateral-backed order. A lender
+      First-generation SigmaFi bonds, under `/sigmafi/old/`: peer-to-peer zero-coupon loans. A borrower posts a collateral-backed order. A lender
       fills it, creating a bond and minting two bond-asset units: one singleton locked in the bond and one
       circulating claim for the lender. Repayment and liquidation burn the singleton. The borrower repays before maturity and takes the collateral back; otherwise anyone
       may liquidate the bond, sending the borrower's collateral to the vault. The lender chooses and funds a
@@ -106,7 +106,18 @@ tags:
       Lists, the asset lookup and every `check` are open and sign nothing; the portfolio and everything that
       signs need an `api_key`. **All amounts are decimal strings, not JSON numbers.** A 409 means a box you
       named is already being spent: re-read and resend.
-    x-displayName: SigmaFi Bonds
+    x-displayName: SigmaFi First Generation
+  - name: sigmafi-zc
+    description: >
+      The SigmaFi ZC Standard: zero-coupon bonds with yield-priced orders and asks, yield-curve lend offers, window
+      orders, Selective and Dutch share vaults, lot auctions and custody wraps. The client tracks every ZC box with the
+      mempool laid over it and answers every read from one snapshot, `at`.
+
+
+      Reads, `simulate` and every `/check` are open and sign nothing; the portfolio, the activity and every send
+      need an `api_key`. **Amounts are decimal strings in the market's unit**; yields and ratios are integer basis
+      points. A 409 means a box the write needs is already being spent, or the quote moved past `limits`: re-quote.
+    x-displayName: SigmaFi ZC Standard
 x-tagGroups:
   - name: Lithos
     tags:
@@ -118,6 +129,7 @@ x-tagGroups:
       - lithosdex
       - forwards
       - sigmafi
+      - sigmafi-zc
       - oracles
       - wallet
   - name: Stratum
@@ -4673,7 +4685,7 @@ paths:
           content:
             application/json:
               schema: {$ref: '#/components/schemas/ApiError'}
-  /sigmafi/orders:
+  /sigmafi/old/orders:
     get:
       summary: List open orders
       description: >
@@ -4705,7 +4717,7 @@ paths:
       description: >
         Lock collateral in an order asking to borrow ERG or one token, repaid by a fixed height or a number of
         blocks after a lender fills it. Do not send `batchingFee` on creation: the lender chooses and funds the
-        reserve when filling. Cancel it with `POST /sigmafi/orders/{boxId}/cancel` while it is unfilled.
+        reserve when filling. Cancel it with `POST /sigmafi/old/orders/{boxId}/cancel` while it is unfilled.
       operationId: createSFOrder
       security:
         - ApiKeyAuth: []
@@ -4728,7 +4740,7 @@ paths:
           $ref: '#/components/responses/SigmaFiUnprocessable'
         '503':
           $ref: '#/components/responses/SigmaFiSendUnavailable'
-  /sigmafi/orders/check:
+  /sigmafi/old/orders/check:
     post:
       summary: Quote an order
       description: What creating the order would lock, and its terms as a lender reads them. Signs nothing.
@@ -4748,7 +4760,7 @@ paths:
           $ref: '#/components/responses/SigmaFiBadRequest'
         '503':
           $ref: '#/components/responses/SigmaFiUnavailable'
-  /sigmafi/orders/{boxId}/cancel/check:
+  /sigmafi/old/orders/{boxId}/cancel/check:
     post:
       summary: Quote cancelling an order
       description: What cancelling this wallet's order returns. Signs nothing.
@@ -4766,7 +4778,7 @@ paths:
           $ref: '#/components/responses/SigmaFiUnprocessable'
         '503':
           $ref: '#/components/responses/SigmaFiUnavailable'
-  /sigmafi/orders/{boxId}/cancel:
+  /sigmafi/old/orders/{boxId}/cancel:
     post:
       summary: Cancel an order
       description: >
@@ -4792,7 +4804,7 @@ paths:
           $ref: '#/components/responses/SigmaFiUnprocessable'
         '503':
           $ref: '#/components/responses/SigmaFiSendUnavailable'
-  /sigmafi/orders/{boxId}/fill/check:
+  /sigmafi/old/orders/{boxId}/fill/check:
     post:
       summary: Quote filling an order
       description: >
@@ -4820,7 +4832,7 @@ paths:
           $ref: '#/components/responses/SigmaFiUnprocessable'
         '503':
           $ref: '#/components/responses/SigmaFiUnavailable'
-  /sigmafi/orders/{boxId}/fill:
+  /sigmafi/old/orders/{boxId}/fill:
     post:
       summary: Fill an order
       description: >
@@ -4856,7 +4868,7 @@ paths:
           $ref: '#/components/responses/SigmaFiUnprocessable'
         '503':
           $ref: '#/components/responses/SigmaFiSendUnavailable'
-  /sigmafi/bonds:
+  /sigmafi/old/bonds:
     get:
       summary: List live bonds
       description: >
@@ -4887,7 +4899,7 @@ paths:
           $ref: '#/components/responses/SigmaFiBadRequest'
         '503':
           $ref: '#/components/responses/SigmaFiUnavailable'
-  /sigmafi/bonds/{boxId}/repay/check:
+  /sigmafi/old/bonds/{boxId}/repay/check:
     post:
       summary: Quote repaying a bond
       description: >
@@ -4908,7 +4920,7 @@ paths:
           $ref: '#/components/responses/SigmaFiUnprocessable'
         '503':
           $ref: '#/components/responses/SigmaFiUnavailable'
-  /sigmafi/bonds/{boxId}/repay:
+  /sigmafi/old/bonds/{boxId}/repay:
     post:
       summary: Repay a bond
       description: >
@@ -4936,7 +4948,7 @@ paths:
           $ref: '#/components/responses/SigmaFiUnprocessable'
         '503':
           $ref: '#/components/responses/SigmaFiSendUnavailable'
-  /sigmafi/bonds/{boxId}/liquidate/check:
+  /sigmafi/old/bonds/{boxId}/liquidate/check:
     post:
       summary: Quote liquidating a bond
       description: What liquidating a matured bond pays this wallet. Signs nothing.
@@ -4954,7 +4966,7 @@ paths:
           $ref: '#/components/responses/SigmaFiUnprocessable'
         '503':
           $ref: '#/components/responses/SigmaFiUnavailable'
-  /sigmafi/bonds/{boxId}/liquidate:
+  /sigmafi/old/bonds/{boxId}/liquidate:
     post:
       summary: Liquidate a bond
       description: >
@@ -4981,7 +4993,7 @@ paths:
           $ref: '#/components/responses/SigmaFiUnprocessable'
         '503':
           $ref: '#/components/responses/SigmaFiSendUnavailable'
-  /sigmafi/claims/{tokenId}/check:
+  /sigmafi/old/claims/{tokenId}/check:
     post:
       summary: Quote a claim
       description: What a claim of this bond asset takes, and what it leaves locked. Signs nothing.
@@ -4999,7 +5011,7 @@ paths:
           $ref: '#/components/responses/SigmaFiUnprocessable'
         '503':
           $ref: '#/components/responses/SigmaFiUnavailable'
-  /sigmafi/claims/{tokenId}:
+  /sigmafi/old/claims/{tokenId}:
     post:
       summary: Claim a settled bond
       description: >
@@ -5028,7 +5040,7 @@ paths:
           $ref: '#/components/responses/SigmaFiUnprocessable'
         '503':
           $ref: '#/components/responses/SigmaFiSendUnavailable'
-  /sigmafi/assets:
+  /sigmafi/old/assets:
     post:
       summary: Look up bond assets
       description: >
@@ -5057,7 +5069,7 @@ paths:
           $ref: '#/components/responses/SigmaFiBadRequest'
         '503':
           $ref: '#/components/responses/SigmaFiUnavailable'
-  /sigmafi/portfolio:
+  /sigmafi/old/portfolio:
     get:
       summary: This wallet in SigmaFi
       description: >
@@ -5079,6 +5091,1458 @@ paths:
           $ref: '#/components/responses/SigmaFiForbidden'
         '503':
           $ref: '#/components/responses/SigmaFiUnavailable'
+  /sigmafi/zc/info:
+    get:
+      summary: ZC market info
+      description: >
+        The snapshot every ZC read is answered from, the USD oracle, both markets with each contract's tree
+        hash, template hash and address and each expression's hash, and the zcs1 defaults. Poll it with `ifRevision`:
+        a 304 means nothing a read returns has changed.
+      operationId: getZcInfo
+      tags:
+        - sigmafi-zc
+      parameters:
+        - $ref: '#/components/parameters/ZcIfRevision'
+      responses:
+        '200':
+          description: Market info
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ZcInfo'
+        '304':
+          $ref: '#/components/responses/ZcNotModified'
+        '503':
+          $ref: '#/components/responses/ZcUnavailable'
+  /sigmafi/zc/markets/{market}/asks:
+    get:
+      summary: List asks
+      description: >
+        Borrow orders and asks selling bond units or shares in one market, each with its quote now, its
+        status and its checks. Unconfirmed boxes are included and boxes a pending transaction spends are not. `from`
+        and `to` keep rows with that many blocks to maturity.
+      operationId: listZcAsks
+      tags:
+        - sigmafi-zc
+      parameters:
+        - $ref: '#/components/parameters/ZcMarket'
+        - $ref: '#/components/parameters/ZcCoverage'
+        - $ref: '#/components/parameters/ZcKind'
+        - $ref: '#/components/parameters/ZcMatchable'
+        - $ref: '#/components/parameters/ZcGrid'
+        - $ref: '#/components/parameters/ZcFrom'
+        - $ref: '#/components/parameters/ZcTo'
+        - $ref: '#/components/parameters/ZcSort'
+        - $ref: '#/components/parameters/ZcCursor'
+        - $ref: '#/components/parameters/ZcLimit'
+        - $ref: '#/components/parameters/ZcIfRevision'
+      responses:
+        '200':
+          description: One page of asks
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ZcPage'
+        '304':
+          $ref: '#/components/responses/ZcNotModified'
+        '400':
+          $ref: '#/components/responses/ZcBadRequest'
+        '503':
+          $ref: '#/components/responses/ZcUnavailable'
+  /sigmafi/zc/markets/{market}/offers:
+    get:
+      summary: List lend offers
+      description: >
+        Lend offers in one market with their curves, budgets, current batcher reward and status. `from`
+        and `to` keep offers whose maturity window reaches that many blocks.
+      operationId: listZcOffers
+      tags:
+        - sigmafi-zc
+      parameters:
+        - $ref: '#/components/parameters/ZcMarket'
+        - $ref: '#/components/parameters/ZcCoverage'
+        - $ref: '#/components/parameters/ZcKind'
+        - $ref: '#/components/parameters/ZcMatchable'
+        - $ref: '#/components/parameters/ZcGrid'
+        - $ref: '#/components/parameters/ZcFrom'
+        - $ref: '#/components/parameters/ZcTo'
+        - $ref: '#/components/parameters/ZcSort'
+        - $ref: '#/components/parameters/ZcCursor'
+        - $ref: '#/components/parameters/ZcLimit'
+        - $ref: '#/components/parameters/ZcIfRevision'
+      responses:
+        '200':
+          description: One page of offers
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ZcPage'
+        '304':
+          $ref: '#/components/responses/ZcNotModified'
+        '400':
+          $ref: '#/components/responses/ZcBadRequest'
+        '503':
+          $ref: '#/components/responses/ZcUnavailable'
+  /sigmafi/zc/markets/{market}/curves:
+    get:
+      summary: Bid and ask curves
+      description: >
+        The best bid line (the lowest yield any offer accepts at each maturity), the ask dots and line,
+        and market totals, computed with the batcher's own rules.
+      operationId: getZcCurves
+      tags:
+        - sigmafi-zc
+      parameters:
+        - $ref: '#/components/parameters/ZcMarket'
+        - $ref: '#/components/parameters/ZcCoverage'
+        - $ref: '#/components/parameters/ZcKind'
+        - $ref: '#/components/parameters/ZcMatchable'
+        - $ref: '#/components/parameters/ZcGrid'
+        - $ref: '#/components/parameters/ZcIfRevision'
+      responses:
+        '200':
+          description: The curves
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ZcObject'
+        '304':
+          $ref: '#/components/responses/ZcNotModified'
+        '400':
+          $ref: '#/components/responses/ZcBadRequest'
+        '503':
+          $ref: '#/components/responses/ZcUnavailable'
+  /sigmafi/zc/markets/{market}/orderbook:
+    get:
+      summary: Order book
+      description: >
+        Asks and bids around a maturity, `around` ± `band` blocks, or up to `to` blocks out, with the
+        spread between the best of each.
+      operationId: getZcOrderbook
+      tags:
+        - sigmafi-zc
+      parameters:
+        - $ref: '#/components/parameters/ZcMarket'
+        - $ref: '#/components/parameters/ZcCoverage'
+        - $ref: '#/components/parameters/ZcKind'
+        - $ref: '#/components/parameters/ZcMatchable'
+        - $ref: '#/components/parameters/ZcGrid'
+        - $ref: '#/components/parameters/ZcOrderbookTo'
+        - $ref: '#/components/parameters/ZcAround'
+        - $ref: '#/components/parameters/ZcBand'
+        - $ref: '#/components/parameters/ZcIfRevision'
+      responses:
+        '200':
+          description: The order book
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ZcObject'
+        '304':
+          $ref: '#/components/responses/ZcNotModified'
+        '400':
+          $ref: '#/components/responses/ZcBadRequest'
+        '503':
+          $ref: '#/components/responses/ZcUnavailable'
+  /sigmafi/zc/markets/{market}/fills:
+    get:
+      summary: Fill history
+      description: >
+        New bonds and ask purchases in one market, newest first, each with its values at the fill. `status`
+        says how far the index has read: `disabled`, `not-configured`, `loading`, `catching-up`, `ready`,
+        `stale` or `unavailable`.
+      operationId: listZcFills
+      tags:
+        - sigmafi-zc
+      parameters:
+        - $ref: '#/components/parameters/ZcMarket'
+        - $ref: '#/components/parameters/ZcFromHeight'
+        - $ref: '#/components/parameters/ZcFillKind'
+        - $ref: '#/components/parameters/ZcVia'
+        - $ref: '#/components/parameters/ZcCursor'
+        - $ref: '#/components/parameters/ZcLimit'
+      responses:
+        '200':
+          description: One page of fills
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ZcFills'
+        '400':
+          $ref: '#/components/responses/ZcBadRequest'
+        '503':
+          $ref: '#/components/responses/ZcUnavailable'
+  /sigmafi/zc/matches/{id}:
+    get:
+      summary: What a box would match
+      description: >
+        For an offer, what it would buy now in the zcs1 matching order. For an order or ask, the offers that
+        would take it. Any box id in an offer's or ask's chain resolves to its current box.
+      operationId: getZcMatches
+      tags:
+        - sigmafi-zc
+      parameters:
+        - $ref: '#/components/parameters/ZcAnyId'
+        - $ref: '#/components/parameters/ZcIfRevision'
+      responses:
+        '200':
+          description: The matches
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ZcObject'
+        '304':
+          $ref: '#/components/responses/ZcNotModified'
+        '400':
+          $ref: '#/components/responses/ZcBadRequest'
+        '404':
+          $ref: '#/components/responses/ZcNotFound'
+        '503':
+          $ref: '#/components/responses/ZcUnavailable'
+  /sigmafi/zc/simulate:
+    post:
+      summary: Simulate a draft
+      description: >
+        Run the zcs1 batch over the market with a draft order, offer or ask added, or price a wallet lend
+        across the best sources. Rate-limited per caller; 429 when over.
+      operationId: simulateZc
+      tags:
+        - sigmafi-zc
+      parameters:
+        - $ref: '#/components/parameters/ZcIfRevision'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ZcSimulateRequest'
+      responses:
+        '200':
+          description: The simulation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ZcObject'
+        '304':
+          $ref: '#/components/responses/ZcNotModified'
+        '400':
+          $ref: '#/components/responses/ZcBadRequest'
+        '429':
+          $ref: '#/components/responses/ZcTooManyRequests'
+        '503':
+          $ref: '#/components/responses/ZcUnavailable'
+  /sigmafi/zc/auctions:
+    get:
+      summary: Open auctions
+      description: >
+        Lot auctions with their price now and phase, and share vaults whose floor or excess auction is open,
+        with what a buyer pays now.
+      operationId: listZcAuctions
+      tags:
+        - sigmafi-zc
+      parameters:
+        - $ref: '#/components/parameters/ZcMarketQuery'
+        - $ref: '#/components/parameters/ZcIfRevision'
+      responses:
+        '200':
+          description: The auctions
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ZcObject'
+        '304':
+          $ref: '#/components/responses/ZcNotModified'
+        '400':
+          $ref: '#/components/responses/ZcBadRequest'
+        '503':
+          $ref: '#/components/responses/ZcUnavailable'
+  /sigmafi/zc/lookup/{id}:
+    get:
+      summary: Look up an id
+      description: >
+        Any ZC box id, bond asset, share token or wrap receipt: its record, the current box of its chain,
+        the pending transaction spending it, and its checks.
+      operationId: lookupZc
+      tags:
+        - sigmafi-zc
+      parameters:
+        - $ref: '#/components/parameters/ZcAnyId'
+        - $ref: '#/components/parameters/ZcIfRevision'
+      responses:
+        '200':
+          description: The record
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ZcObject'
+        '304':
+          $ref: '#/components/responses/ZcNotModified'
+        '400':
+          $ref: '#/components/responses/ZcBadRequest'
+        '404':
+          $ref: '#/components/responses/ZcNotFound'
+        '503':
+          $ref: '#/components/responses/ZcUnavailable'
+  /sigmafi/zc/search:
+    get:
+      summary: Search by id prefix
+      description: >
+        Open boxes, bond assets and share tokens whose id starts with `q` (at least 4 hex characters).
+      operationId: searchZc
+      tags:
+        - sigmafi-zc
+      parameters:
+        - $ref: '#/components/parameters/ZcQuery'
+        - $ref: '#/components/parameters/ZcIfRevision'
+      responses:
+        '200':
+          description: The hits
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ZcObject'
+        '304':
+          $ref: '#/components/responses/ZcNotModified'
+        '400':
+          $ref: '#/components/responses/ZcBadRequest'
+        '503':
+          $ref: '#/components/responses/ZcUnavailable'
+  /sigmafi/zc/assets:
+    post:
+      summary: Describe tokens
+      description: >
+        Up to 50 token ids, each with its name, decimals and, for a bond unit, shares or receipt, its proven origin.
+      operationId: lookupZcAssets
+      tags:
+        - sigmafi-zc
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ZcAssetsRequest'
+      responses:
+        '200':
+          description: The tokens
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ZcObject'
+        '400':
+          $ref: '#/components/responses/ZcBadRequest'
+        '503':
+          $ref: '#/components/responses/ZcUnavailable'
+  /sigmafi/zc/portfolio:
+    get:
+      summary: This wallet in ZC
+      description: >
+        Every bond unit and share token this wallet holds, with its status, cost from the wallet's history,
+        mark and the actions open now; the bonds it borrows on; its open orders, asks, offers, lots and requests; its
+        wraps; unrealized and realized P&L per market. `history` is the wallet history's status: `off`,
+        `not-configured`, `loading`, `ready` or `unavailable`. Units with no recorded acquisition have `cost`
+        null.
+      operationId: getZcPortfolio
+      security:
+        - ApiKeyAuth: []
+      tags:
+        - sigmafi-zc
+      parameters:
+        - $ref: '#/components/parameters/ZcIfRevision'
+      responses:
+        '200':
+          description: The portfolio
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ZcObject'
+        '304':
+          $ref: '#/components/responses/ZcNotModified'
+        '403':
+          $ref: '#/components/responses/ZcForbidden'
+        '503':
+          $ref: '#/components/responses/ZcUnavailable'
+  /sigmafi/zc/activity:
+    get:
+      summary: This wallet's ZC activity
+      description: >
+        This wallet's ZC events from its own transactions since the ZC start height, newest first. The first
+        page leads with `pending` events from the mempool: boxes naming this wallet not yet confirmed (`posted`) and
+        confirmed ones a pending transaction spends (`spending`).
+      operationId: listZcActivity
+      security:
+        - ApiKeyAuth: []
+      tags:
+        - sigmafi-zc
+      parameters:
+        - $ref: '#/components/parameters/ZcCursor'
+        - $ref: '#/components/parameters/ZcLimit'
+      responses:
+        '200':
+          description: One page of events
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ZcActivity'
+        '400':
+          $ref: '#/components/responses/ZcBadRequest'
+        '403':
+          $ref: '#/components/responses/ZcForbidden'
+        '503':
+          $ref: '#/components/responses/ZcUnavailable'
+  /sigmafi/zc/orders/check:
+    post:
+      summary: Create an order (quote)
+      description: >
+        What the send would do, at the snapshot `at`. Signs nothing. A write that cannot run now answers
+        200 with its `refusals`.
+      operationId: checkCreateZcOrder
+      tags:
+        - sigmafi-zc
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ZcOrderRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/ZcQuoted'
+        '400':
+          $ref: '#/components/responses/ZcBadRequest'
+        '404':
+          $ref: '#/components/responses/ZcNotFound'
+        '503':
+          $ref: '#/components/responses/ZcUnavailable'
+  /sigmafi/zc/orders:
+    post:
+      summary: Create an order
+      description: >
+        Lock collateral in an
+        `Order` or a `PricedOrder`, depending on pricing and timing. An unguarded oracle order already under its own
+        ratio is refused unless `allowLiquidatable`.
+      operationId: createZcOrder
+      security:
+        - ApiKeyAuth: []
+      tags:
+        - sigmafi-zc
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ZcOrderRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/ZcSent'
+        '400':
+          $ref: '#/components/responses/ZcBadRequest'
+        '403':
+          $ref: '#/components/responses/ZcForbidden'
+        '404':
+          $ref: '#/components/responses/ZcNotFound'
+        '409':
+          $ref: '#/components/responses/ZcConflict'
+        '422':
+          $ref: '#/components/responses/ZcUnprocessable'
+        '503':
+          $ref: '#/components/responses/ZcUnavailable'
+  /sigmafi/zc/offers/check:
+    post:
+      summary: Create a lend offer (quote)
+      description: >
+        What the send would do, at the snapshot `at`. Signs nothing. A write that cannot run now answers
+        200 with its `refusals`.
+      operationId: checkCreateZcOffer
+      tags:
+        - sigmafi-zc
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ZcOfferRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/ZcQuoted'
+        '400':
+          $ref: '#/components/responses/ZcBadRequest'
+        '404':
+          $ref: '#/components/responses/ZcNotFound'
+        '503':
+          $ref: '#/components/responses/ZcUnavailable'
+  /sigmafi/zc/offers:
+    post:
+      summary: Create a lend offer
+      description: >
+        Post a `LendOffer` that batchers fill from orders and asks it accepts.
+      operationId: createZcOffer
+      security:
+        - ApiKeyAuth: []
+      tags:
+        - sigmafi-zc
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ZcOfferRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/ZcSent'
+        '400':
+          $ref: '#/components/responses/ZcBadRequest'
+        '403':
+          $ref: '#/components/responses/ZcForbidden'
+        '404':
+          $ref: '#/components/responses/ZcNotFound'
+        '409':
+          $ref: '#/components/responses/ZcConflict'
+        '422':
+          $ref: '#/components/responses/ZcUnprocessable'
+        '503':
+          $ref: '#/components/responses/ZcUnavailable'
+  /sigmafi/zc/asks/check:
+    post:
+      summary: Create an ask (quote)
+      description: >
+        What the send would do, at the snapshot `at`. Signs nothing. A write that cannot run now answers
+        200 with its `refusals`.
+      operationId: checkCreateZcAsk
+      tags:
+        - sigmafi-zc
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ZcAskRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/ZcQuoted'
+        '400':
+          $ref: '#/components/responses/ZcBadRequest'
+        '404':
+          $ref: '#/components/responses/ZcNotFound'
+        '503':
+          $ref: '#/components/responses/ZcUnavailable'
+  /sigmafi/zc/asks:
+    post:
+      summary: Create an ask
+      description: >
+        Sell bond units or shares
+        this wallet holds: a `SaleOrder` at a fixed price, or a `PricedAsk` at a yield or behind a sale guard. A bond
+        under its own ratio is refused.
+      operationId: createZcAsk
+      security:
+        - ApiKeyAuth: []
+      tags:
+        - sigmafi-zc
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ZcAskRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/ZcSent'
+        '400':
+          $ref: '#/components/responses/ZcBadRequest'
+        '403':
+          $ref: '#/components/responses/ZcForbidden'
+        '404':
+          $ref: '#/components/responses/ZcNotFound'
+        '409':
+          $ref: '#/components/responses/ZcConflict'
+        '422':
+          $ref: '#/components/responses/ZcUnprocessable'
+        '503':
+          $ref: '#/components/responses/ZcUnavailable'
+  /sigmafi/zc/lots/check:
+    post:
+      summary: Create a lot auction (quote)
+      description: >
+        What the send would do, at the snapshot `at`. Signs nothing. A write that cannot run now answers
+        200 with its `refusals`.
+      operationId: checkCreateZcLot
+      tags:
+        - sigmafi-zc
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ZcLotRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/ZcQuoted'
+        '400':
+          $ref: '#/components/responses/ZcBadRequest'
+        '404':
+          $ref: '#/components/responses/ZcNotFound'
+        '503':
+          $ref: '#/components/responses/ZcUnavailable'
+  /sigmafi/zc/lots:
+    post:
+      summary: Create a lot auction
+      description: >
+        Sell a basket whole
+        at a price falling from `opening` to `floor`. A LithosDex provision NFT is refused: wrap it and sell the
+        receipt. A token-market lot cannot hold the market's own token.
+      operationId: createZcLot
+      security:
+        - ApiKeyAuth: []
+      tags:
+        - sigmafi-zc
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ZcLotRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/ZcSent'
+        '400':
+          $ref: '#/components/responses/ZcBadRequest'
+        '403':
+          $ref: '#/components/responses/ZcForbidden'
+        '404':
+          $ref: '#/components/responses/ZcNotFound'
+        '409':
+          $ref: '#/components/responses/ZcConflict'
+        '422':
+          $ref: '#/components/responses/ZcUnprocessable'
+        '503':
+          $ref: '#/components/responses/ZcUnavailable'
+  /sigmafi/zc/orders/{boxId}/fill/check:
+    post:
+      summary: Fill an order (quote)
+      description: >
+        What the send would do, at the snapshot `at`. Signs nothing. A write that cannot run now answers
+        200 with its `refusals`.
+      operationId: checkFillZcOrder
+      tags:
+        - sigmafi-zc
+      parameters:
+        - $ref: '#/components/parameters/ZcBoxId'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ZcFillRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/ZcQuoted'
+        '400':
+          $ref: '#/components/responses/ZcBadRequest'
+        '404':
+          $ref: '#/components/responses/ZcNotFound'
+        '503':
+          $ref: '#/components/responses/ZcUnavailable'
+  /sigmafi/zc/orders/{boxId}/fill:
+    post:
+      summary: Fill an order
+      description: >
+        Lend from this wallet. The fill mints the bond asset, the order's box id: one unit to this wallet, two locked
+        in the bond. A priced order is quoted at the most it asks over the next 3 blocks. Refused under the order's fill
+        guard, or when the bond would start under its own ratio unless `allowLiquidatable`.
+      operationId: fillZcOrder
+      security:
+        - ApiKeyAuth: []
+      tags:
+        - sigmafi-zc
+      parameters:
+        - $ref: '#/components/parameters/ZcBoxId'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ZcFillRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/ZcSent'
+        '400':
+          $ref: '#/components/responses/ZcBadRequest'
+        '403':
+          $ref: '#/components/responses/ZcForbidden'
+        '404':
+          $ref: '#/components/responses/ZcNotFound'
+        '409':
+          $ref: '#/components/responses/ZcConflict'
+        '422':
+          $ref: '#/components/responses/ZcUnprocessable'
+        '503':
+          $ref: '#/components/responses/ZcUnavailable'
+  /sigmafi/zc/asks/{boxId}/buy/check:
+    post:
+      summary: Buy from an ask (quote)
+      description: >
+        What the send would do, at the snapshot `at`. Signs nothing. A write that cannot run now answers
+        200 with its `refusals`.
+      operationId: checkBuyZcAsk
+      tags:
+        - sigmafi-zc
+      parameters:
+        - $ref: '#/components/parameters/ZcBoxId'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ZcBuyRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/ZcQuoted'
+        '400':
+          $ref: '#/components/responses/ZcBadRequest'
+        '404':
+          $ref: '#/components/responses/ZcNotFound'
+        '503':
+          $ref: '#/components/responses/ZcUnavailable'
+  /sigmafi/zc/asks/{boxId}/buy:
+    post:
+      summary: Buy from an ask
+      description: >
+        Buy `units` (default all) of an ask; the units arrive in this wallet. Shares whose mint is not proven are
+        refused; a token that is not a proven bond unit or shares is bought with a warning.
+      operationId: buyZcAsk
+      security:
+        - ApiKeyAuth: []
+      tags:
+        - sigmafi-zc
+      parameters:
+        - $ref: '#/components/parameters/ZcBoxId'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ZcBuyRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/ZcSent'
+        '400':
+          $ref: '#/components/responses/ZcBadRequest'
+        '403':
+          $ref: '#/components/responses/ZcForbidden'
+        '404':
+          $ref: '#/components/responses/ZcNotFound'
+        '409':
+          $ref: '#/components/responses/ZcConflict'
+        '422':
+          $ref: '#/components/responses/ZcUnprocessable'
+        '503':
+          $ref: '#/components/responses/ZcUnavailable'
+  /sigmafi/zc/lots/{boxId}/buy/check:
+    post:
+      summary: Buy a lot (quote)
+      description: >
+        What the send would do, at the snapshot `at`. Signs nothing. A write that cannot run now answers
+        200 with its `refusals`.
+      operationId: checkBuyZcLot
+      tags:
+        - sigmafi-zc
+      parameters:
+        - $ref: '#/components/parameters/ZcBoxId'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ZcLimitsOnly'
+      responses:
+        '200':
+          $ref: '#/components/responses/ZcQuoted'
+        '400':
+          $ref: '#/components/responses/ZcBadRequest'
+        '404':
+          $ref: '#/components/responses/ZcNotFound'
+        '503':
+          $ref: '#/components/responses/ZcUnavailable'
+  /sigmafi/zc/lots/{boxId}/buy:
+    post:
+      summary: Buy a lot
+      description: >
+        Buy a lot whole at its current price, which only falls.
+      operationId: buyZcLot
+      security:
+        - ApiKeyAuth: []
+      tags:
+        - sigmafi-zc
+      parameters:
+        - $ref: '#/components/parameters/ZcBoxId'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ZcLimitsOnly'
+      responses:
+        '200':
+          $ref: '#/components/responses/ZcSent'
+        '400':
+          $ref: '#/components/responses/ZcBadRequest'
+        '403':
+          $ref: '#/components/responses/ZcForbidden'
+        '404':
+          $ref: '#/components/responses/ZcNotFound'
+        '409':
+          $ref: '#/components/responses/ZcConflict'
+        '422':
+          $ref: '#/components/responses/ZcUnprocessable'
+        '503':
+          $ref: '#/components/responses/ZcUnavailable'
+  /sigmafi/zc/vaults/{boxId}/buy/check:
+    post:
+      summary: Buy a vault auction (quote)
+      description: >
+        What the send would do, at the snapshot `at`. Signs nothing. A write that cannot run now answers
+        200 with its `refusals`.
+      operationId: checkBuyZcVault
+      tags:
+        - sigmafi-zc
+      parameters:
+        - $ref: '#/components/parameters/ZcBoxId'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ZcLimitsOnly'
+      responses:
+        '200':
+          $ref: '#/components/responses/ZcQuoted'
+        '400':
+          $ref: '#/components/responses/ZcBadRequest'
+        '404':
+          $ref: '#/components/responses/ZcNotFound'
+        '503':
+          $ref: '#/components/responses/ZcUnavailable'
+  /sigmafi/zc/vaults/{boxId}/buy:
+    post:
+      summary: Buy a vault auction
+      description: >
+        Buy an open share-vault auction. A floor auction (state 1): pay the vault up to its target and take the whole
+        lot. An excess auction (state 4): pay its falling price and take the thin items.
+      operationId: buyZcVault
+      security:
+        - ApiKeyAuth: []
+      tags:
+        - sigmafi-zc
+      parameters:
+        - $ref: '#/components/parameters/ZcBoxId'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ZcLimitsOnly'
+      responses:
+        '200':
+          $ref: '#/components/responses/ZcSent'
+        '400':
+          $ref: '#/components/responses/ZcBadRequest'
+        '403':
+          $ref: '#/components/responses/ZcForbidden'
+        '404':
+          $ref: '#/components/responses/ZcNotFound'
+        '409':
+          $ref: '#/components/responses/ZcConflict'
+        '422':
+          $ref: '#/components/responses/ZcUnprocessable'
+        '503':
+          $ref: '#/components/responses/ZcUnavailable'
+  /sigmafi/zc/vaults/{boxId}/pull/check:
+    post:
+      summary: Pull a settled bond (quote)
+      description: >
+        What the send would do, at the snapshot `at`. Signs nothing. A write that cannot run now answers
+        200 with its `refusals`.
+      operationId: checkPullZcVault
+      tags:
+        - sigmafi-zc
+      parameters:
+        - $ref: '#/components/parameters/ZcBoxId'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ZcLimitsOnly'
+      responses:
+        '200':
+          $ref: '#/components/responses/ZcQuoted'
+        '400':
+          $ref: '#/components/responses/ZcBadRequest'
+        '404':
+          $ref: '#/components/responses/ZcNotFound'
+        '503':
+          $ref: '#/components/responses/ZcUnavailable'
+  /sigmafi/zc/vaults/{boxId}/pull:
+    post:
+      summary: Pull a settled bond
+      description: >
+        Move a settled bond's proceeds into the share vault holding its unit, burning the bond's three units. Anyone may
+        run it; this wallet keeps the pull fee less the miner fee. Share claims other than a final one wait for it.
+      operationId: pullZcVault
+      security:
+        - ApiKeyAuth: []
+      tags:
+        - sigmafi-zc
+      parameters:
+        - $ref: '#/components/parameters/ZcBoxId'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ZcLimitsOnly'
+      responses:
+        '200':
+          $ref: '#/components/responses/ZcSent'
+        '400':
+          $ref: '#/components/responses/ZcBadRequest'
+        '403':
+          $ref: '#/components/responses/ZcForbidden'
+        '404':
+          $ref: '#/components/responses/ZcNotFound'
+        '409':
+          $ref: '#/components/responses/ZcConflict'
+        '422':
+          $ref: '#/components/responses/ZcUnprocessable'
+        '503':
+          $ref: '#/components/responses/ZcUnavailable'
+  /sigmafi/zc/bonds/{assetId}/fractionalize/check:
+    post:
+      summary: Fractionalize a bond unit (quote)
+      description: >
+        What the send would do, at the snapshot `at`. Signs nothing. A write that cannot run now answers
+        200 with its `refusals`.
+      operationId: checkFractionalizeZc
+      tags:
+        - sigmafi-zc
+      parameters:
+        - $ref: '#/components/parameters/ZcAssetId'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ZcFractionalizeRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/ZcQuoted'
+        '400':
+          $ref: '#/components/responses/ZcBadRequest'
+        '404':
+          $ref: '#/components/responses/ZcNotFound'
+        '503':
+          $ref: '#/components/responses/ZcUnavailable'
+  /sigmafi/zc/bonds/{assetId}/fractionalize:
+    post:
+      summary: Fractionalize a bond unit
+      description: >
+        Put this wallet's bond unit into a share mint request. Its box id
+        becomes the share token's id once a batcher mints it (`POST /sigmafi/zc/mints/{boxId}`). `offersBuying` counts the
+        offers whose share bounds accept the auction terms.
+      operationId: fractionalizeZc
+      security:
+        - ApiKeyAuth: []
+      tags:
+        - sigmafi-zc
+      parameters:
+        - $ref: '#/components/parameters/ZcAssetId'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ZcFractionalizeRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/ZcSent'
+        '400':
+          $ref: '#/components/responses/ZcBadRequest'
+        '403':
+          $ref: '#/components/responses/ZcForbidden'
+        '404':
+          $ref: '#/components/responses/ZcNotFound'
+        '409':
+          $ref: '#/components/responses/ZcConflict'
+        '422':
+          $ref: '#/components/responses/ZcUnprocessable'
+        '503':
+          $ref: '#/components/responses/ZcUnavailable'
+  /sigmafi/zc/bonds/{assetId}/repay/check:
+    post:
+      summary: Repay a bond (quote)
+      description: >
+        What the send would do, at the snapshot `at`. Signs nothing. A write that cannot run now answers
+        200 with its `refusals`.
+      operationId: checkRepayZcBond
+      tags:
+        - sigmafi-zc
+      parameters:
+        - $ref: '#/components/parameters/ZcAssetId'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ZcRepayRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/ZcQuoted'
+        '400':
+          $ref: '#/components/responses/ZcBadRequest'
+        '404':
+          $ref: '#/components/responses/ZcNotFound'
+        '503':
+          $ref: '#/components/responses/ZcUnavailable'
+  /sigmafi/zc/bonds/{assetId}/repay:
+    post:
+      summary: Repay a bond
+      description: >
+        Repay before maturity: the repayment and the fee reserve to the bond vault, the collateral back to the borrower.
+        Anyone may repay; repaying from the collateral needs this wallet to be the borrower.
+      operationId: repayZcBond
+      security:
+        - ApiKeyAuth: []
+      tags:
+        - sigmafi-zc
+      parameters:
+        - $ref: '#/components/parameters/ZcAssetId'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ZcRepayRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/ZcSent'
+        '400':
+          $ref: '#/components/responses/ZcBadRequest'
+        '403':
+          $ref: '#/components/responses/ZcForbidden'
+        '404':
+          $ref: '#/components/responses/ZcNotFound'
+        '409':
+          $ref: '#/components/responses/ZcConflict'
+        '422':
+          $ref: '#/components/responses/ZcUnprocessable'
+        '503':
+          $ref: '#/components/responses/ZcUnavailable'
+  /sigmafi/zc/bonds/{assetId}/recollateralize/check:
+    post:
+      summary: Add collateral (quote)
+      description: >
+        What the send would do, at the snapshot `at`. Signs nothing. A write that cannot run now answers
+        200 with its `refusals`.
+      operationId: checkRecollateralizeZcBond
+      tags:
+        - sigmafi-zc
+      parameters:
+        - $ref: '#/components/parameters/ZcAssetId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ZcRecollateralizeRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/ZcQuoted'
+        '400':
+          $ref: '#/components/responses/ZcBadRequest'
+        '404':
+          $ref: '#/components/responses/ZcNotFound'
+        '503':
+          $ref: '#/components/responses/ZcUnavailable'
+  /sigmafi/zc/bonds/{assetId}/recollateralize:
+    post:
+      summary: Add collateral
+      description: >
+        Add ERG, more of a token the bond holds, or a token bond's
+        repayment token. Open 60 blocks after the bond last moved, and only to its borrower.
+      operationId: recollateralizeZcBond
+      security:
+        - ApiKeyAuth: []
+      tags:
+        - sigmafi-zc
+      parameters:
+        - $ref: '#/components/parameters/ZcAssetId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ZcRecollateralizeRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/ZcSent'
+        '400':
+          $ref: '#/components/responses/ZcBadRequest'
+        '403':
+          $ref: '#/components/responses/ZcForbidden'
+        '404':
+          $ref: '#/components/responses/ZcNotFound'
+        '409':
+          $ref: '#/components/responses/ZcConflict'
+        '422':
+          $ref: '#/components/responses/ZcUnprocessable'
+        '503':
+          $ref: '#/components/responses/ZcUnavailable'
+  /sigmafi/zc/bonds/{assetId}/liquidate/check:
+    post:
+      summary: Liquidate a bond (quote)
+      description: >
+        What the send would do, at the snapshot `at`. Signs nothing. A write that cannot run now answers
+        200 with its `refusals`.
+      operationId: checkLiquidateZcBond
+      tags:
+        - sigmafi-zc
+      parameters:
+        - $ref: '#/components/parameters/ZcAssetId'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ZcLimitsOnly'
+      responses:
+        '200':
+          $ref: '#/components/responses/ZcQuoted'
+        '400':
+          $ref: '#/components/responses/ZcBadRequest'
+        '404':
+          $ref: '#/components/responses/ZcNotFound'
+        '503':
+          $ref: '#/components/responses/ZcUnavailable'
+  /sigmafi/zc/bonds/{assetId}/liquidate:
+    post:
+      summary: Liquidate a bond
+      description: >
+        Settle any bond into the vault from maturity on, or before it while its cover is under its
+        own oracle ratio at a fresh enough oracle. This wallet keeps the fee reserve less the miner fee.
+      operationId: liquidateZcBond
+      security:
+        - ApiKeyAuth: []
+      tags:
+        - sigmafi-zc
+      parameters:
+        - $ref: '#/components/parameters/ZcAssetId'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ZcLimitsOnly'
+      responses:
+        '200':
+          $ref: '#/components/responses/ZcSent'
+        '400':
+          $ref: '#/components/responses/ZcBadRequest'
+        '403':
+          $ref: '#/components/responses/ZcForbidden'
+        '404':
+          $ref: '#/components/responses/ZcNotFound'
+        '409':
+          $ref: '#/components/responses/ZcConflict'
+        '422':
+          $ref: '#/components/responses/ZcUnprocessable'
+        '503':
+          $ref: '#/components/responses/ZcUnavailable'
+  /sigmafi/zc/claims/{tokenId}/check:
+    post:
+      summary: Claim a settled bond (quote)
+      description: >
+        What the send would do, at the snapshot `at`. Signs nothing. A write that cannot run now answers
+        200 with its `refusals`.
+      operationId: checkClaimZc
+      tags:
+        - sigmafi-zc
+      parameters:
+        - $ref: '#/components/parameters/ZcTokenId'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ZcClaimRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/ZcQuoted'
+        '400':
+          $ref: '#/components/responses/ZcBadRequest'
+        '404':
+          $ref: '#/components/responses/ZcNotFound'
+        '503':
+          $ref: '#/components/responses/ZcUnavailable'
+  /sigmafi/zc/claims/{tokenId}:
+    post:
+      summary: Claim a settled bond
+      description: >
+        Claim with the bond unit, burning all three units, or with shares. Burning every outstanding share is a final
+        claim and takes the vault. A partial claim waits for the pull (`requires: ["pull"]`) and an open auction
+        (`requires: ["auction"]`), and pays each asset's share rounded down.
+      operationId: claimZc
+      security:
+        - ApiKeyAuth: []
+      tags:
+        - sigmafi-zc
+      parameters:
+        - $ref: '#/components/parameters/ZcTokenId'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ZcClaimRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/ZcSent'
+        '400':
+          $ref: '#/components/responses/ZcBadRequest'
+        '403':
+          $ref: '#/components/responses/ZcForbidden'
+        '404':
+          $ref: '#/components/responses/ZcNotFound'
+        '409':
+          $ref: '#/components/responses/ZcConflict'
+        '422':
+          $ref: '#/components/responses/ZcUnprocessable'
+        '503':
+          $ref: '#/components/responses/ZcUnavailable'
+  /sigmafi/zc/wraps/check:
+    post:
+      summary: Wrap a token (quote)
+      description: >
+        What the send would do, at the snapshot `at`. Signs nothing. A write that cannot run now answers
+        200 with its `refusals`.
+      operationId: checkCreateZcWrap
+      tags:
+        - sigmafi-zc
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ZcWrapRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/ZcQuoted'
+        '400':
+          $ref: '#/components/responses/ZcBadRequest'
+        '404':
+          $ref: '#/components/responses/ZcNotFound'
+        '503':
+          $ref: '#/components/responses/ZcUnavailable'
+  /sigmafi/zc/wraps:
+    post:
+      summary: Wrap a token
+      description: >
+        Put a token into a wrap
+        request; a batcher mints its receipt to this wallet. Use the receipt, not a capability token, in orders, asks and
+        lots.
+      operationId: createZcWrap
+      security:
+        - ApiKeyAuth: []
+      tags:
+        - sigmafi-zc
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ZcWrapRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/ZcSent'
+        '400':
+          $ref: '#/components/responses/ZcBadRequest'
+        '403':
+          $ref: '#/components/responses/ZcForbidden'
+        '404':
+          $ref: '#/components/responses/ZcNotFound'
+        '409':
+          $ref: '#/components/responses/ZcConflict'
+        '422':
+          $ref: '#/components/responses/ZcUnprocessable'
+        '503':
+          $ref: '#/components/responses/ZcUnavailable'
+  /sigmafi/zc/wraps/{receiptId}/unwrap/check:
+    post:
+      summary: Unwrap (quote)
+      description: >
+        What the send would do, at the snapshot `at`. Signs nothing. A write that cannot run now answers
+        200 with its `refusals`.
+      operationId: checkUnwrapZc
+      tags:
+        - sigmafi-zc
+      parameters:
+        - $ref: '#/components/parameters/ZcReceiptId'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ZcLimitsOnly'
+      responses:
+        '200':
+          $ref: '#/components/responses/ZcQuoted'
+        '400':
+          $ref: '#/components/responses/ZcBadRequest'
+        '404':
+          $ref: '#/components/responses/ZcNotFound'
+        '503':
+          $ref: '#/components/responses/ZcUnavailable'
+  /sigmafi/zc/wraps/{receiptId}/unwrap:
+    post:
+      summary: Unwrap
+      description: >
+        Burn all three receipt units and take the wrapped token back.
+      operationId: unwrapZc
+      security:
+        - ApiKeyAuth: []
+      tags:
+        - sigmafi-zc
+      parameters:
+        - $ref: '#/components/parameters/ZcReceiptId'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ZcLimitsOnly'
+      responses:
+        '200':
+          $ref: '#/components/responses/ZcSent'
+        '400':
+          $ref: '#/components/responses/ZcBadRequest'
+        '403':
+          $ref: '#/components/responses/ZcForbidden'
+        '404':
+          $ref: '#/components/responses/ZcNotFound'
+        '409':
+          $ref: '#/components/responses/ZcConflict'
+        '422':
+          $ref: '#/components/responses/ZcUnprocessable'
+        '503':
+          $ref: '#/components/responses/ZcUnavailable'
+  /sigmafi/zc/mints/{boxId}/check:
+    post:
+      summary: Run a mint (quote)
+      description: >
+        What the send would do, at the snapshot `at`. Signs nothing. A write that cannot run now answers
+        200 with its `refusals`.
+      operationId: checkMintZc
+      tags:
+        - sigmafi-zc
+      parameters:
+        - $ref: '#/components/parameters/ZcBoxId'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ZcLimitsOnly'
+      responses:
+        '200':
+          $ref: '#/components/responses/ZcQuoted'
+        '400':
+          $ref: '#/components/responses/ZcBadRequest'
+        '404':
+          $ref: '#/components/responses/ZcNotFound'
+        '503':
+          $ref: '#/components/responses/ZcUnavailable'
+  /sigmafi/zc/mints/{boxId}:
+    post:
+      summary: Run a mint
+      description: >
+        Mint a pending
+        share request's shares or a wrap request's receipt. Anyone may run it; this wallet keeps the mint fee less the
+        miner fee. A wrap mint is its transaction's only input.
+      operationId: mintZc
+      security:
+        - ApiKeyAuth: []
+      tags:
+        - sigmafi-zc
+      parameters:
+        - $ref: '#/components/parameters/ZcBoxId'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ZcLimitsOnly'
+      responses:
+        '200':
+          $ref: '#/components/responses/ZcSent'
+        '400':
+          $ref: '#/components/responses/ZcBadRequest'
+        '403':
+          $ref: '#/components/responses/ZcForbidden'
+        '404':
+          $ref: '#/components/responses/ZcNotFound'
+        '409':
+          $ref: '#/components/responses/ZcConflict'
+        '422':
+          $ref: '#/components/responses/ZcUnprocessable'
+        '503':
+          $ref: '#/components/responses/ZcUnavailable'
+  /sigmafi/zc/boxes/{boxId}/cancel/check:
+    post:
+      summary: Cancel a box (quote)
+      description: >
+        What the send would do, at the snapshot `at`. Signs nothing. A write that cannot run now answers
+        200 with its `refusals`.
+      operationId: checkCancelZcBox
+      tags:
+        - sigmafi-zc
+      parameters:
+        - $ref: '#/components/parameters/ZcBoxId'
+      responses:
+        '200':
+          $ref: '#/components/responses/ZcQuoted'
+        '400':
+          $ref: '#/components/responses/ZcBadRequest'
+        '404':
+          $ref: '#/components/responses/ZcNotFound'
+        '503':
+          $ref: '#/components/responses/ZcUnavailable'
+  /sigmafi/zc/boxes/{boxId}/cancel:
+    post:
+      summary: Cancel a box
+      description: >
+        Take back
+        an order, offer, ask, lot, share request or wrap request this wallet made, with one of its boxes at the creator's
+        address as consent. A box past its expiry may be refunded by anyone first.
+      operationId: cancelZcBox
+      security:
+        - ApiKeyAuth: []
+      tags:
+        - sigmafi-zc
+      parameters:
+        - $ref: '#/components/parameters/ZcBoxId'
+      responses:
+        '200':
+          $ref: '#/components/responses/ZcSent'
+        '400':
+          $ref: '#/components/responses/ZcBadRequest'
+        '403':
+          $ref: '#/components/responses/ZcForbidden'
+        '404':
+          $ref: '#/components/responses/ZcNotFound'
+        '409':
+          $ref: '#/components/responses/ZcConflict'
+        '422':
+          $ref: '#/components/responses/ZcUnprocessable'
+        '503':
+          $ref: '#/components/responses/ZcUnavailable'
   /wallet/balances:
     get:
       security:
@@ -5699,6 +7163,218 @@ paths:
 
 components:
   parameters:
+    ZcMarket:
+      in: path
+      name: market
+      required: true
+      description: >
+        The market: `ERG` or `SigUSD`.
+      schema:
+        type: string
+        enum: [ERG, SigUSD]
+    ZcMarketQuery:
+      in: query
+      name: market
+      required: false
+      description: >
+        Keep one market: `ERG` or `SigUSD`.
+      schema:
+        type: string
+        enum: [ERG, SigUSD]
+    ZcCoverage:
+      in: query
+      name: coverage
+      required: false
+      description: >
+        Asks with cover of at least this many bps; offers with a floor of at most this many. Default 15000.
+      schema:
+        type: integer
+        format: int64
+    ZcKind:
+      in: query
+      name: kind
+      required: false
+      description: >
+        `all`, `new` (borrow orders), `resale` (bond units and shares) or `shares`. Default `all`.
+      schema:
+        type: string
+        enum: [all, new, resale, shares]
+    ZcMatchable:
+      in: query
+      name: matchable
+      required: false
+      description: >
+        Leave out paused, expired and flagged boxes. Default true.
+      schema:
+        type: boolean
+    ZcGrid:
+      in: query
+      name: grid
+      required: false
+      description: >
+        Only maturities on the 21,600-block grid, and window orders that can pick one. Default false.
+      schema:
+        type: boolean
+    ZcFrom:
+      in: query
+      name: from
+      required: false
+      description: >
+        Least blocks to maturity.
+      schema:
+        type: integer
+        format: int64
+    ZcTo:
+      in: query
+      name: to
+      required: false
+      description: >
+        Most blocks to maturity.
+      schema:
+        type: integer
+        format: int64
+    ZcOrderbookTo:
+      in: query
+      name: to
+      required: false
+      description: >
+        Most blocks to maturity shown.
+      schema:
+        type: integer
+        format: int64
+    ZcAround:
+      in: query
+      name: around
+      required: false
+      description: >
+        Blocks to maturity the book centres on.
+      schema:
+        type: integer
+        format: int64
+    ZcBand:
+      in: query
+      name: band
+      required: false
+      description: >
+        Blocks either side of `around`.
+      schema:
+        type: integer
+        format: int64
+    ZcSort:
+      in: query
+      name: sort
+      required: false
+      description: >
+        `apr` (default), `maturity` or `size`.
+      schema:
+        type: string
+        enum: [apr, maturity, size]
+    ZcCursor:
+      in: query
+      name: cursor
+      required: false
+      description: >
+        The `next` value of the previous page.
+      schema:
+        type: string
+    ZcLimit:
+      in: query
+      name: limit
+      required: false
+      description: >
+        Page size, 1 to 200. Default 50.
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 200
+    ZcIfRevision:
+      in: query
+      name: ifRevision
+      required: false
+      description: >
+        Answer 304 when the snapshot revision still equals this.
+      schema:
+        type: integer
+        format: int64
+    ZcFromHeight:
+      in: query
+      name: fromHeight
+      required: false
+      description: >
+        Fills at or above this height.
+      schema:
+        type: integer
+    ZcFillKind:
+      in: query
+      name: kind
+      required: false
+      description: >
+        `new`, `resale` or `shares`.
+      schema:
+        type: string
+        enum: [new, resale, shares]
+    ZcVia:
+      in: query
+      name: via
+      required: false
+      description: >
+        `offer` or `wallet`.
+      schema:
+        type: string
+        enum: [offer, wallet]
+    ZcQuery:
+      in: query
+      name: q
+      required: true
+      description: >
+        An id or its first characters.
+      schema:
+        type: string
+    ZcAnyId:
+      in: path
+      name: id
+      required: true
+      description: >
+        A box id, bond asset, share token or receipt id.
+      schema:
+        type: string
+        pattern: '^[0-9a-fA-F]{64}$'
+    ZcBoxId:
+      in: path
+      name: boxId
+      required: true
+      description: >
+        A ZC box id.
+      schema:
+        type: string
+        pattern: '^[0-9a-fA-F]{64}$'
+    ZcAssetId:
+      in: path
+      name: assetId
+      required: true
+      description: >
+        A bond asset id: the id of the order box its fill spent.
+      schema:
+        type: string
+        pattern: '^[0-9a-fA-F]{64}$'
+    ZcTokenId:
+      in: path
+      name: tokenId
+      required: true
+      description: >
+        A bond asset or share token id.
+      schema:
+        type: string
+        pattern: '^[0-9a-fA-F]{64}$'
+    ZcReceiptId:
+      in: path
+      name: receiptId
+      required: true
+      description: >
+        A wrap receipt id.
+      schema:
+        type: string
+        pattern: '^[0-9a-fA-F]{64}$'
     SFOffset:
       in: query
       name: offset
@@ -5791,6 +7467,62 @@ components:
         type: string
         pattern: '^[0-9a-fA-F]{64}$'
   responses:
+    ZcQuoted:
+      description: "What the write would do, or its `refusals`. Nothing was signed or sent."
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ZcQuote'
+    ZcSent:
+      description: "The transaction was sent; `outcome` says whether the node accepted it."
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ZcResult'
+    ZcNotModified:
+      description: "Nothing changed since `ifRevision`."
+    ZcBadRequest:
+      description: "A malformed field, or terms the contracts refuse."
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+    ZcForbidden:
+      description: "Missing or wrong api_key."
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+    ZcNotFound:
+      description: "No such box or token, or not this wallet's."
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+    ZcConflict:
+      description: "A pending transaction already spends a box this needs, or the rebuilt transaction is outside `limits`. Re-quote and resend."
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+    ZcUnprocessable:
+      description: "Valid, but not possible now; the message gives the reason the check lists in `refusals`."
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+    ZcTooManyRequests:
+      description: "Too many simulations: at most 5 at once per caller, then 1 a second."
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+    ZcUnavailable:
+      description: "ZC tracking is off or not seeded, or the node, its index or the wallet did not answer. Nothing was sent."
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
     SigmaFiQuoted:
       description: What the action would do. Nothing was signed or sent.
       content:
@@ -5844,7 +7576,7 @@ components:
     SigmaFiSendUnavailable:
       description: >-
         Node, wallet or transaction engine unavailable, or the request ran out of time. The message says whether
-        anything was sent. When it says the outcome is unknown, check `GET /sigmafi/portfolio` before retrying.
+        anything was sent. When it says the outcome is unknown, check `GET /sigmafi/old/portfolio` before retrying.
       content:
         application/json:
           schema:
@@ -5874,6 +7606,339 @@ components:
           schema:
             $ref: '#/components/schemas/ApiError'
   schemas:
+    ZcAt:
+      type: object
+      description: "The snapshot a read or quote was taken from."
+      properties:
+        height: {type: integer}
+        blockId: {type: string}
+        indexedHeight: {type: integer}
+        revision: {type: integer, format: int64, description: "Changes whenever anything a read returns changes, the mempool included."}
+        cut: {type: boolean, description: "True when the book is at its size cap and left boxes out."}
+        mempool: {type: boolean, description: "Whether unconfirmed boxes are laid over the confirmed book."}
+    ZcObject:
+      type: object
+      description: "A ZC read. Every read carries `at`."
+      properties:
+        at: {$ref: '#/components/schemas/ZcAt'}
+      additionalProperties: true
+    ZcPage:
+      type: object
+      properties:
+        at: {$ref: '#/components/schemas/ZcAt'}
+        items: {type: array, items: {type: object, additionalProperties: true}}
+        next: {type: string, nullable: true, description: "The cursor of the next page."}
+      additionalProperties: true
+    ZcInfo:
+      type: object
+      properties:
+        at: {$ref: '#/components/schemas/ZcAt'}
+        network: {type: string, enum: [mainnet, testnet]}
+        profile: {type: string, description: "The off-chain profile the client follows, `zcs1`."}
+        pinnedCommit: {type: string, description: "The Sigma-Finance-V2 commit the contract trees are pinned at."}
+        deployed: {type: boolean, description: "Whether any ZC box exists."}
+        oracle:
+          type: object
+          nullable: true
+          properties:
+            boxId: {type: string}
+            nanoErgPerUsd: {type: string}
+            usdPerErg: {type: string}
+            updatedHeight: {type: integer}
+            age: {type: integer}
+            refreshPending: {type: boolean, description: "A pending transaction spends the oracle box; trades reading it wait a block."}
+        markets: {type: array, items: {type: object, additionalProperties: true}}
+        defaults: {type: object, additionalProperties: true}
+    ZcFills:
+      type: object
+      properties:
+        status: {type: string, enum: [disabled, not-configured, loading, catching-up, ready, stale, unavailable]}
+        observedAt: {type: integer, format: int64}
+        indexedTo: {type: integer}
+        items: {type: array, items: {type: object, additionalProperties: true}}
+        next: {type: string, nullable: true}
+    ZcActivity:
+      type: object
+      properties:
+        at: {$ref: '#/components/schemas/ZcAt'}
+        status: {type: string, enum: [not-configured, loading, ready], description: "How far the wallet history has read."}
+        items:
+          type: array
+          items:
+            type: object
+            properties:
+              id: {type: string}
+              height: {type: integer, nullable: true}
+              txId: {type: string}
+              type:
+                type: string
+                description: >
+                  lent, borrowed, bought, sold, lotBought, lotSold, repaid, liquidated, recollateralized, claimed, pulled,
+                  sharesMinted, wrapped, unwrapped, posted, returned; pending events are posted or spending.
+              status: {type: string, enum: [pending, confirmed]}
+              market: {type: string, nullable: true}
+              refs: {type: object, additionalProperties: {type: string}}
+              amounts:
+                type: object
+                properties:
+                  tokenId: {type: string, nullable: true}
+                  units: {type: string}
+                  amount: {type: string, description: "In the market's unit. Paid for lent and bought; received for sold and claimed; the principal for borrowed and repaid."}
+        next: {type: string, nullable: true}
+    ZcSimulateRequest:
+      type: object
+      required: [draft]
+      properties:
+        draft:
+          type: object
+          description: >
+            A create-order, create-offer or create-ask body with `type` set to `order`, `offer` or `ask`; or
+            `{ type: walletLend, market, amount, to, coverage }`.
+          additionalProperties: true
+    ZcAssetsRequest:
+      type: object
+      required: [tokenIds]
+      properties:
+        tokenIds: {type: array, maxItems: 50, items: {type: string}}
+    ZcLimits:
+      type: object
+      description: >
+        Bounds on the rebuilt transaction, in the action's market unit (nanoERG for ERG, fee included; raw units for
+        SigUSD; nanoERG for actions with no market). Outside them the send answers 409.
+      properties:
+        maxPay: {type: string}
+        minReceive: {type: string}
+    ZcLimitsOnly:
+      type: object
+      properties:
+        limits: {$ref: '#/components/schemas/ZcLimits'}
+    ZcToken:
+      type: object
+      required: [tokenId, amount]
+      properties:
+        tokenId: {type: string}
+        amount: {type: string}
+    ZcPoint:
+      type: object
+      required: [blocks, bps]
+      properties:
+        blocks: {type: integer, format: int64, description: "Blocks left to maturity."}
+        bps: {type: integer, format: int64, description: "Simple yield per 262,800 blocks, in bps."}
+    ZcOrderRequest:
+      type: object
+      required: [market, principal, repayment, timing, collateral, rule]
+      properties:
+        market: {type: string, enum: [ERG, SigUSD]}
+        pricing: {type: string, enum: [fixed, yield, window], description: "Default fixed."}
+        principal: {type: string, description: "Exact for fixed pricing; the floor for yield and window pricing."}
+        repayment: {type: string}
+        timing:
+          type: object
+          description: >
+            `{ mode: fixed, maturity or blocks, exact }` (snapped to the 21,600-block grid unless `exact`),
+            `{ mode: term, duration }` counted from the fill, or `{ mode: window, minDuration, maxDuration }`.
+          additionalProperties: true
+        yield:
+          type: object
+          description: "Yield pricing. `endHeight` defaults to the expiry and `endBps` to `startBps`."
+          properties:
+            startBps: {type: integer, format: int64}
+            endBps: {type: integer, format: int64}
+            endHeight: {type: integer, format: int64}
+        curve:
+          type: object
+          description: "Window pricing. The most yield paid, then up to 20 points."
+          properties:
+            capBps: {type: integer, format: int64}
+            points: {type: array, maxItems: 20, items: {$ref: '#/components/schemas/ZcPoint'}}
+        collateral:
+          type: object
+          properties:
+            nanoErg: {type: string}
+            tokens: {type: array, items: {$ref: '#/components/schemas/ZcToken'}}
+        rule:
+          type: object
+          description: "`{ kind: oracle, ratioBps, oracleAge }` or `{ kind: maturity }`."
+          additionalProperties: true
+        fillGuard:
+          type: object
+          nullable: true
+          description: "Left out, the guard is on at the rule's ratio for oracle orders. null turns it off."
+          properties:
+            ratioBps: {type: integer, format: int64}
+        expiry: {type: integer, format: int64}
+        expiryFeeNanoErg: {type: string, description: "Default 5000000."}
+        allowLiquidatable: {type: boolean}
+        limits: {$ref: '#/components/schemas/ZcLimits'}
+    ZcOfferRequest:
+      type: object
+      required: [market, capital, minYieldBps, floorBps]
+      properties:
+        market: {type: string, enum: [ERG, SigUSD]}
+        capital: {type: string}
+        minYieldBps: {type: integer, format: int64}
+        curve: {type: array, maxItems: 20, items: {$ref: '#/components/schemas/ZcPoint'}, description: "Blocks strictly increasing."}
+        minBlocks: {type: integer, format: int64}
+        maxBlocks: {type: integer, format: int64}
+        floorBps: {type: integer, format: int64, description: "Least cover a bond it buys must have."}
+        oracleAge: {type: integer, format: int64, description: "Default 30."}
+        expiry: {type: integer, format: int64}
+        reserveNanoErg: {type: string, description: "The fee reserve each new bond gets. Default 50000000."}
+        minPrice: {type: string, description: "Default 1."}
+        erg:
+          type: object
+          description: "An ERG offer's batcher fee per fill."
+          properties:
+            batcherFeeNanoErg: {type: string}
+        token:
+          type: object
+          description: "A SigUSD offer's refund fee, ERG funding, least fill and reward budget."
+          properties:
+            refundFeeNanoErg: {type: string}
+            ergFundingNanoErg: {type: string}
+            minFillBps: {type: integer, format: int64}
+            rewardBudgetNanoErg: {type: string}
+        shareBounds:
+          type: object
+          nullable: true
+          description: "null buys no shares."
+          properties:
+            floorBps: {type: integer, format: int64}
+            maxExpiry: {type: integer, format: int64}
+        delivery:
+          type: object
+          description: "`{ kind: unit }`, or `{ kind: selective or dutch, openingBps, floorBps, length, expiry, mintFeeNanoErg, pullFeeNanoErg }`."
+          additionalProperties: true
+        limits: {$ref: '#/components/schemas/ZcLimits'}
+    ZcAskRequest:
+      type: object
+      required: [tokenId, units, pricing]
+      properties:
+        tokenId: {type: string}
+        units: {type: string}
+        pricing:
+          type: object
+          description: >
+            `{ kind: fixed, price }` or `{ kind: yield, startBps, endBps, endHeight, floor }`. `price` and `floor`
+            are totals for `units`.
+          additionalProperties: true
+        saleGuard:
+          type: object
+          nullable: true
+          properties:
+            ratioBps: {type: integer, format: int64}
+            oracleAge: {type: integer, format: int64}
+        minFill: {type: string}
+        expiry: {type: integer, format: int64}
+        limits: {$ref: '#/components/schemas/ZcLimits'}
+    ZcLotRequest:
+      type: object
+      required: [market, opening, floor, end]
+      properties:
+        market: {type: string, enum: [ERG, SigUSD]}
+        items: {type: array, items: {$ref: '#/components/schemas/ZcToken'}}
+        nanoErg: {type: string, description: "ERG sold beside the items; SigUSD lots only."}
+        opening: {type: string, description: "The price until `start`, in the market's unit."}
+        floor: {type: string, description: "The price from `end` on."}
+        start: {type: integer, format: int64, description: "Default the current height."}
+        end: {type: integer, format: int64}
+        expiry: {type: integer, format: int64, description: "Default `end`. From then anyone may return the lot for its refund fee."}
+        refundFeeNanoErg: {type: string, description: "Default 2000000."}
+        limits: {$ref: '#/components/schemas/ZcLimits'}
+    ZcFillRequest:
+      type: object
+      properties:
+        maturity: {type: integer, format: int64, description: "Window orders only. Default the earliest grid height in the window, else its shortest."}
+        reserveNanoErg: {type: string, description: "The bond's liquidation fee reserve, at least and by default 50000000."}
+        allowLiquidatable: {type: boolean}
+        limits: {$ref: '#/components/schemas/ZcLimits'}
+    ZcBuyRequest:
+      type: object
+      properties:
+        units: {type: string, description: "Default all the ask holds."}
+        allowLiquidatable: {type: boolean}
+        limits: {$ref: '#/components/schemas/ZcLimits'}
+    ZcRepayRequest:
+      type: object
+      properties:
+        fromCollateral:
+          type: string
+          description: "`max` or a raw amount of the repayment asset taken from the collateral. Needs this wallet to be the borrower."
+        limits: {$ref: '#/components/schemas/ZcLimits'}
+    ZcRecollateralizeRequest:
+      type: object
+      properties:
+        nanoErg: {type: string}
+        tokens: {type: array, items: {$ref: '#/components/schemas/ZcToken'}}
+        limits: {$ref: '#/components/schemas/ZcLimits'}
+    ZcClaimRequest:
+      type: object
+      properties:
+        units: {type: string, description: "Shares to burn. Default all held. Ignored for a bond unit."}
+        limits: {$ref: '#/components/schemas/ZcLimits'}
+    ZcFractionalizeRequest:
+      type: object
+      properties:
+        vault: {type: string, enum: [selective, dutch, plain], description: "Default selective. Lend offers buy only selective and dutch shares."}
+        openingBps: {type: integer, format: int64, description: "Required for selective and dutch."}
+        floorBps: {type: integer, format: int64, description: "Required for selective and dutch."}
+        length: {type: integer, format: int64, description: "Default 720."}
+        expiry: {type: integer, format: int64, description: "Default the greater of 2160 and `length`."}
+        mintFeeNanoErg: {type: string, description: "Default 5000000."}
+        pullFeeNanoErg: {type: string, description: "Default 5000000."}
+        shareCount: {type: string, description: "Default 100000000."}
+        limits: {$ref: '#/components/schemas/ZcLimits'}
+    ZcWrapRequest:
+      type: object
+      required: [tokenId]
+      properties:
+        tokenId: {type: string}
+        amount: {type: string, description: "Default all this wallet holds."}
+        mintFeeNanoErg: {type: string, description: "Default 5000000."}
+        refreshReserveNanoErg: {type: string, description: "Default 30000000, three paid refreshes."}
+        limits: {$ref: '#/components/schemas/ZcLimits'}
+    ZcQuote:
+      type: object
+      properties:
+        action: {type: string}
+        at: {$ref: '#/components/schemas/ZcAt'}
+        paysNanoErgs: {type: string, description: "nanoERG leaving this wallet, the miner fee included."}
+        paysTokens: {type: array, items: {$ref: '#/components/schemas/ZcToken'}}
+        receivesNanoErgs: {type: string}
+        receivesTokens: {type: array, items: {$ref: '#/components/schemas/ZcToken'}}
+        fees:
+          type: array
+          items:
+            type: object
+            properties:
+              name: {type: string}
+              nanoErg: {type: string}
+              kind: {type: string, enum: [spent, locked, refundable, earned]}
+        creates:
+          type: array
+          description: "Each output that does not come to this wallet, by role."
+          items:
+            type: object
+            properties:
+              role: {type: string}
+              contract: {type: string, nullable: true}
+              nanoErg: {type: string}
+              tokens: {type: array, items: {$ref: '#/components/schemas/ZcToken'}}
+        terms: {type: object, additionalProperties: true, description: "The resolved terms; they differ by action."}
+        validFrom: {type: integer}
+        validThrough: {type: integer, nullable: true}
+        matchesNow: {description: "For a create, the simulation of its body; for a fill or buy, the offers that would compete for it."}
+        warnings: {type: array, items: {type: string}}
+        refusals: {type: array, items: {type: string}, description: "When not empty, the send answers 422 with these reasons."}
+        requires: {type: array, items: {type: string, enum: [pull, auction]}, description: "What must happen before the write can run."}
+    ZcResult:
+      type: object
+      properties:
+        txId: {type: string}
+        outcome: {type: string}
+        boxId: {type: string, nullable: true, description: "The transaction's first output."}
+        assetId: {type: string, nullable: true, description: "The bond asset a fill minted."}
+        warnings: {type: array, items: {type: string}}
     StatsInteger:
       type: string
       pattern: '^[0-9]+$'
