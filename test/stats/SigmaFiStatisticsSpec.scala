@@ -9,14 +9,14 @@ import org.scalatest.propspec.AnyPropSpec
 import sigmafi.contracts.SigmaFiContracts
 import state.messages.{BlockInfo, BlockTx, InputSpendingProof, NodeSync, TxInput, TxOutput}
 import support.FakeNodeContext
-import transactions.batching.sigmafi.{SigmaFiBoxes, SigmaFiFixtures, SigmaFiLiquidation, SigmaFiTransactions}
+import transactions.batching.sigmafi.{SigmaFiBoxes, SigmaFiFixtures}
 import work.lithos.mutations.Token
 
 import scala.collection.JavaConverters._
 
 /**
- * SigmaFi liquidations as the statistics see them in a block: signed by the client's own builder against the
- * pinned contracts, then read back the way `NodeMiningStatsSource` reads a block.
+ * SigmaFi liquidations as the statistics see them in a block: signed against the pinned legacy contracts,
+ * then read back the way `NodeMiningStatsSource` reads a block.
  */
 class SigmaFiStatisticsSpec extends AnyPropSpec with SigmaFiFixtures {
 
@@ -28,14 +28,14 @@ class SigmaFiStatisticsSpec extends AnyPropSpec with SigmaFiFixtures {
     nodeBox(ctx, bondUTXO(None, contractOf(miner(ctx)), 100, fee = fee + i, asset = ErgoId.create(f"$i%02x" * 32)), i, "e7" * 32)
   }
 
-  private def liquidation(ctx: BlockchainContext, boxes: Seq[NodeBox], minerFee: Long): SigmaFiLiquidation =
-    SigmaFiTransactions.liquidate(ctx, wallet,
+  private def liquidation(ctx: BlockchainContext, boxes: Seq[NodeBox], minerFee: Long): org.ergoplatform.appkit.SignedTransaction =
+    legacyLiquidate(ctx, wallet,
       boxes.map(b => SigmaFiBoxes.bond(b).get -> SigmaFiBoxes.input(b, ctx).get), wallet.contract, minerFee, ctx.getHeight + 1)
 
   /** The signed liquidation as a block holding it reports it. `withScript` keeps each input's context variable 0. */
-  private def inBlock(l: SigmaFiLiquidation, inputs: Seq[NodeBox], withScript: Boolean = true): (BlockInfo, BlockTx) = {
-    val id = l.txId
-    val outputs = l.signed.getOutputsToSpend.asScala.toVector.zipWithIndex.map { case (b, i) =>
+  private def inBlock(signed: org.ergoplatform.appkit.SignedTransaction, inputs: Seq[NodeBox], withScript: Boolean = true): (BlockInfo, BlockTx) = {
+    val id = transactions.candidate.BlockTxMessages.CandidateTx.txId(signed)
+    val outputs = signed.getOutputsToSpend.asScala.toVector.zipWithIndex.map { case (b, i) =>
       TxOutput(b.getId.toString, b.getValue, Hex.toHexString(b.getErgoTree.bytes),
         b.getRegisters.asScala.map(_.toHex).toSeq, b.getTokens.asScala.map(Token.ergo).toSeq, id, b.getCreationHeight, i)
     }

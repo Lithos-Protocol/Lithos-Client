@@ -4,7 +4,9 @@ import configs.NodeContext
 import node.NodeApi
 import node.model.IndexedBox
 import org.bouncycastle.util.encoders.Hex
+import org.ergoplatform.appkit.BlockchainContext
 import scorex.crypto.hash.Blake2b256
+import transactions.batching.sigmafi.SigmaFiBoxes
 
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.{AtomicInteger, AtomicLong}
@@ -42,6 +44,11 @@ final class ZcResolver(api: () => NodeApi, tracker: ZcTracker, maxEntries: Int =
   private val origins = new ConcurrentHashMap[String, ZcOrigin]()
   private val scripts = new ConcurrentHashMap[String, String]()
   private val scriptChars = new AtomicLong(0L)
+  /** Serialized ErgoBox bytes verified against their box id, for offer ask-origin/share-mint and Dutch-mint proofs. */
+  private val serialized = new ConcurrentHashMap[String, Array[Byte]]()
+  private val serializedBytes = new AtomicLong(0L)
+  /** Settled bond repayment and serialized bytes by bond box id, for Dutch share mints of settled bonds. */
+  private val settledBonds = new ConcurrentHashMap[String, (Long, Array[Byte])]()
   /** A box's chain root, and an ERG offer chain's first capital. */
   private val roots = new ConcurrentHashMap[String, (String, Long)]()
   /** What was looked up and not found, to the height it may be tried again. */
@@ -176,6 +183,75 @@ final class ZcResolver(api: () => NodeApi, tracker: ZcTracker, maxEntries: Int =
     }
     if (scripts.putIfAbsent(h, t) == null) {
       scriptChars.addAndGet(t.length.toLong)
+      learned.incrementAndGet()
+    }
+  }
+
+  // ─── serialized box bytes ──────────────────────────────────────────────────
+
+  /** Serialized bytes of `boxId` from the cache, with no read. */
+  def knownBoxBytes(boxId: String): Option[Array[Byte]] = Option(serialized.get(boxId))
+
+  /**
+   * Serialized ErgoBox bytes of `boxId` (an order minting a bond asset or a share mint request), verified so
+   * `blake2b256(bytes) == boxId`. Cached under `maxScriptChars` bytes; a box not found is negative-cached.
+   */
+  def boxBytes(boxId: String, ctx: BlockchainContext, budget: ZcBudget): Option[Array[Byte]] =
+    knownBoxBytes(boxId).orElse {
+      val key = "b:" + boxId
+      if (tried(key)) None
+      else read(budget)(_.indexedBoxById(boxId)) match {
+        case None => None
+        case Some(found) =>
+          val verified = found.filter(_.spentTransactionId.isDefined)
+            .flatMap(b => SigmaFiBoxes.input(b.box, ctx).map(_.bytes))
+            .filter(bs => Hex.toHexString(Blake2b256.hash(bs)) == boxId)
+          verified match {
+            case Some(bs) => rememberBytes(boxId, bs); Some(bs)
+            case None => miss(key); None
+          }
+      }
+    }
+
+  /** Repayment and verified serialized bytes of a settled bond box, for Dutch share mints on settled bonds. */
+  def settledBond(bondBoxId: String, ctx: BlockchainContext, budget: ZcBudget): Option[(Long, Array[Byte])] =
+    Option(settledBonds.get(bondBoxId)).orElse {
+      val key = "sb:" + bondBoxId
+      if (tried(key)) None
+      else read(budget)(_.indexedBoxById(bondBoxId)) match {
+        case None => None
+        case Some(found) =>
+          val resolved = for {
+            b <- found
+            repayment <- ZcBoxes.read(b.box).collect { case bond: ZcBond => bond.repayment }
+            bytes <- SigmaFiBoxes.input(b.box, ctx).map(_.bytes)
+            if Hex.toHexString(Blake2b256.hash(bytes)) == bondBoxId
+          } yield repayment -> bytes
+          resolved match {
+            case Some(pair) =>
+              bound(settledBonds)
+              if (settledBonds.putIfAbsent(bondBoxId, pair) == null) learned.incrementAndGet()
+              rememberBytes(bondBoxId, pair._2)
+              Some(pair)
+            case None => miss(key); None
+          }
+      }
+    }
+
+  private def rememberBytes(boxId: String, bs: Array[Byte]): Unit = {
+    if (serializedBytes.get() + bs.length > maxScriptChars) {
+      val it = serialized.entrySet().iterator()
+      var drop = math.max(1, serialized.size / 4)
+      while (it.hasNext && drop > 0) {
+        val e = it.next()
+        it.remove()
+        serializedBytes.addAndGet(-e.getValue.length.toLong)
+        drop -= 1
+      }
+      if (serializedBytes.get() + bs.length > maxScriptChars) { serialized.clear(); serializedBytes.set(0L) }
+    }
+    if (serialized.putIfAbsent(boxId, bs) == null) {
+      serializedBytes.addAndGet(bs.length.toLong)
       learned.incrementAndGet()
     }
   }

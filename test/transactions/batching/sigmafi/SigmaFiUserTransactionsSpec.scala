@@ -100,11 +100,24 @@ class SigmaFiUserTransactionsSpec extends AnyPropSpec with SigmaFiFixtures {
           repayToken, wallet.contract), funds(ctx, 10 * Erg, repayToken.toSeq.map(Token(_, 500L)): _*))
         val unit = input(ctx, out(filled, 0))
         val bond = SigmaFiBoxes.bond(out(filled, 1)).get
-        val liquidated = SigmaFiTransactions.liquidate(ctx, wallet, Seq(bond -> input(ctx, bond.box)),
-          wallet.contract, SigmaFiUserTransactions.TxFee, Math.toIntExact(bond.maturity))
-        val settlement = out(liquidated.signed, 0)
+        val settlement = {
+          val bondIn = input(ctx, bond.box)
+            .withCtxVar(0.toByte, ErgoValue.of(sigma.Colls.fromArray(SigmaFiContracts.MaturityLiquidation.bytes),
+              org.ergoplatform.appkit.scalaapi.scalaByteType))
+            .withCtxVar(1.toByte, ErgoValue.of(0))
+          val vault = UTXO(SigmaFiContracts.vault, bond.box.value - bond.batchingFee,
+            bond.collateral.map(a => Token(ErgoId.create(a.tokenId), a.amount)),
+            Seq(ErgoValue.of(sigma.Colls.fromArray(ErgoId.create(bond.boxId).getBytes), org.ergoplatform.appkit.scalaapi.scalaByteType),
+              ErgoValue.of(sigma.Colls.fromArray(bond.asset.getBytes), org.ergoplatform.appkit.scalaapi.scalaByteType),
+              ErgoValue.of(1.toByte)))
+          val feeOut = UTXO(wallet.contract, bond.batchingFee - SigmaFiUserTransactions.TxFee)
+          val liqTx = wallet.sign(TxBuilder(ctx).setInputs(bondIn).setOutputs(vault, feeOut)
+            .setPreHeader(ctx.createPreHeader().height(Math.toIntExact(bond.maturity)).build())
+            .buildTx(SigmaFiUserTransactions.TxFee, wallet.p2pk, Seq(Token(bond.asset, 1L))))
+          liqTx.getOutputsToSpend.asScala.flatMap(_.getTokens.asScala).map(_.getId) should not contain bond.asset
+          out(liqTx, 0)
+        }
         settlement.assets shouldBe Seq(NodeAsset(tokenB.toString, 9L))
-        liquidated.signed.getOutputsToSpend.asScala.flatMap(_.getTokens.asScala).map(_.getId) should not contain bond.asset
         val claimed = sign(ctx, SigmaFiUserTransactions.claim(ctx, wallet, bond.asset, Seq(input(ctx, settlement))),
           unit, funds(ctx, Erg))
         out(claimed, 0).assets shouldBe settlement.assets

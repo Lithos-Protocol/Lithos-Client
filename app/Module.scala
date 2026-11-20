@@ -66,7 +66,7 @@ class Module(environment: Environment, configuration: Configuration) extends Abs
     bindActor(classOf[transactions.batching.ergodex.ErgoDexBatcher], "ergodex-batcher")
     bindActor(classOf[transactions.batching.lithosdex.LithosDexBatcher], "lithosdex-batcher")
     bindActor(classOf[transactions.batching.forwards.ForwardsBatcher], "forwards-batcher")
-    bindActor(classOf[transactions.batching.sigmafi.SigmaFiBatcher], "sigmafi-batcher")
+    bindActor(classOf[transactions.batching.sigmafi.zc.ZcBatcher], "sigmafi-batcher")
     // Follows ZC boxes for the API whether or not this node mines; idle when sigmafi.zc.enabled is off.
     bindActor(classOf[transactions.batching.sigmafi.zc.ZcFeed], "zc-feed")
 

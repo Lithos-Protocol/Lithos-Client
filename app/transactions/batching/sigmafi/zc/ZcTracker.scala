@@ -14,7 +14,8 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
 import javax.inject.{Inject, Singleton}
 import scala.collection.mutable
-import scala.concurrent.{ExecutionContext, Future}
+import scala.concurrent.duration._
+import scala.concurrent.{Await, ExecutionContext, Future, Promise}
 import scala.util.{Failure, Success, Try}
 
 /**
@@ -45,11 +46,13 @@ class ZcTracker(api: () => NodeApi, io: ExecutionContext, settings: ZcConfig,
   @volatile private var published: Option[ZcView] = None
   /** The newest block the sync committed and offered. Guarded by `lock`. */
   private var target: Option[BlockInfo] = None
+  /** The newest block a candidate build asked to follow: height and id. Guarded by `lock`. */
+  private var followed: Option[(Int, String)] = None
   /** The newest mempool observation, and its revision. Guarded by `lock`. */
   private var mempool: Option[CompleteMempool.Snapshot] = None
   private var mempoolRevision: Long = -1L
-  /** Whether a step is running. Guarded by `lock`. */
-  private var running = false
+  /** Completed once the step currently running finishes publishing. Guarded by `lock`. */
+  private var running: Option[Future[Unit]] = None
   /** Whether the overlay needs rebuilding: a new observation, or a failed step to retry. Guarded by `lock`. */
   private var stale = false
   /**
@@ -78,6 +81,49 @@ class ZcTracker(api: () => NodeApi, io: ExecutionContext, settings: ZcConfig,
     kick()
   }
 
+  /**
+   * Says a candidate builds on block `headerId` at `height`, and starts moving the book to it if no step is
+   * running. A candidate parent can arrive ahead of canonical sync, so this follows it directly without waiting.
+   */
+  def follow(height: Int, headerId: String): Unit =
+    if (enabled && height > 0 && headerId.nonEmpty) lock.synchronized {
+      if (!followed.contains(height -> headerId)) {
+        followed = Some(height -> headerId)
+        if (!warnedFor.contains(headerId)) { failedAt = None; failures = 0 }
+      }
+      kick()
+    }
+
+  /**
+   * The confirmed book as of the block last followed at `height`, waiting up to `wait` for an in-flight step
+   * to reach it. None when tracking is off, no block at `height` was followed, or the step did not finish in time.
+   */
+  def at(height: Int, wait: FiniteDuration): Option[ZcBook] =
+    if (!enabled) None
+    else {
+      val until = Deadline.now + wait
+      var answer = Option.empty[ZcBook]
+      var going = true
+      while (going) {
+        val (wanted, pending) = lock.synchronized {
+          kick()
+          (followed, running)
+        }
+        wanted match {
+          case Some((h, id)) if h == height =>
+            confirmed.filter(_.headerId == id) match {
+              case found @ Some(_) => answer = found; going = false
+              case None => pending match {
+                case Some(work) if until.hasTimeLeft() => Try(Await.ready(work, until.timeLeft))
+                case _ => going = false
+              }
+            }
+          case _ => going = false
+        }
+      }
+      answer
+    }
+
   /** A mempool observation. One with a revision already seen changes nothing. */
   def observe(observation: CompleteMempool.Observation): Unit = if (enabled) lock.synchronized {
     if (observation.revision != mempoolRevision && observation.snapshot.isDefined) {
@@ -100,39 +146,52 @@ class ZcTracker(api: () => NodeApi, io: ExecutionContext, settings: ZcConfig,
   /** The script behind `hash`, when a transaction the tracker applied disclosed it. */
   def script(hash: String): Option[String] = Option(scripts.get(hash.toLowerCase))
 
+  /** Picks the desired target: a candidate follow at or ahead of sync wins unless sync already gave that exact block. */
+  private def desiredTarget(): Option[Either[BlockInfo, (Int, String)]] = (target, followed) match {
+    case (Some(b), Some((_, id))) if b.id == id => Some(Left(b))
+    case (Some(b), Some(f @ (h, _))) if h >= b.height => Some(Right(f))
+    case (Some(b), _) => Some(Left(b))
+    case (None, Some(f)) => Some(Right(f))
+    case (None, None) => None
+  }
+
   /** Starts a step if one is due and none is running. Holds `lock`. */
-  private def kick(): Unit = if (!running) {
+  private def kick(): Unit = if (running.isEmpty) {
     val book = confirmed
-    val due = book.isEmpty || stale || target.exists(t => !holds(book.get, t)) || book.exists(rescanDue)
+    val wanted = desiredTarget()
+    val due = book.isEmpty || stale || wanted.exists(t => !holdsTarget(book.get, t)) || book.exists(rescanDue)
     val backoff = math.min(MaxRetryMs, retryMs << math.min(failures - 1, 16).max(0))
     val waiting = failedAt.exists(at => System.currentTimeMillis() - at < backoff)
     if (due && !waiting) {
-      running = true
-      val (wanted, snapshot) = (target, mempool)
+      val snapshot = mempool
       stale = false
+      val done = Promise[Unit]()
+      running = Some(done.future)
       val work = Try(Future(step(book, wanted, snapshot))(io)) match {
         case Success(f) => f
         case Failure(ex) => Future.failed(ex)
       }
-      work.onComplete(result => lock.synchronized {
-        running = false
-        result match {
-          case Success(_) =>
-            failedAt = None
-            failures = 0
-            warnedFor = None
-          case Failure(ex) =>
-            failedAt = Some(System.currentTimeMillis())
-            failures += 1
-            val key = wanted.map(_.id).getOrElse("seed")
-            if (!warnedFor.contains(key)) logger.warn(s"ZC tracking could not reach ${wanted.fold("its seed")(b =>
-              s"block ${b.id} at ${b.height}")}; ZC reads stay at ${confirmed.fold("nothing")(b => s"height ${b.height}")}: " +
-              ex.getMessage)
-            warnedFor = Some(key)
-            stale = true
-        }
-        kick()
-      })(io)
+      work.onComplete { result =>
+        try lock.synchronized {
+          running = None
+          result match {
+            case Success(_) =>
+              failedAt = None
+              failures = 0
+              warnedFor = None
+            case Failure(ex) =>
+              failedAt = Some(System.currentTimeMillis())
+              failures += 1
+              val key = wanted.map(_.fold(_.id, _._2)).getOrElse("seed")
+              if (!warnedFor.contains(key)) logger.warn(s"ZC tracking could not reach ${wanted.fold("its seed")(_.fold(
+                b => s"block ${b.id} at ${b.height}", { case (h, id) => s"block $id at $h" }))}; " +
+                s"ZC reads stay at ${confirmed.fold("nothing")(b => s"height ${b.height}")}: ${ex.getMessage}")
+              warnedFor = Some(key)
+              stale = true
+          }
+          kick()
+        } finally done.trySuccess(())
+      }(io)
     }
   }
 
@@ -145,9 +204,10 @@ class ZcTracker(api: () => NodeApi, io: ExecutionContext, settings: ZcConfig,
       (book.cut && book.boxes.size < settings.maxBoxes * 3 / 4 && book.height - book.scannedAt >= recoveryBlocks))
 
   /** Moves the book to `wanted` (or seeds it), runs a due rescan, then republishes the view. */
-  private def step(book: Option[ZcBook], wanted: Option[BlockInfo], snapshot: Option[CompleteMempool.Snapshot]): Unit = {
+  private def step(book: Option[ZcBook], wanted: Option[Either[BlockInfo, (Int, String)]],
+                   snapshot: Option[CompleteMempool.Snapshot]): Unit = {
     val known: String => Boolean = h => scripts.containsKey(h)
-    val (moved, found) = advance(api(), book, wanted, settings.maxBoxes, known, logger)
+    val (moved, found) = advanceTarget(api(), book, wanted, settings.maxBoxes, known, logger)
     remember(found, moved)
     val next = checked(moved, known)
     if (next.cut && !warnedCut)
@@ -260,12 +320,23 @@ object ZcTracker {
   private[zc] def holds(book: ZcBook, block: BlockInfo): Boolean =
     block.height < book.base || book.idAt(block.height).contains(block.id)
 
+  /** Whether `book` already satisfies a target (sync block or candidate follow header). */
+  private[zc] def holdsTarget(book: ZcBook, wanted: Either[BlockInfo, (Int, String)]): Boolean = wanted match {
+    case Left(block) => holds(book, block)
+    case Right((h, id)) => h < book.base || book.idAt(h).contains(id)
+  }
+
   /**
    * The book moved to `wanted`: kept when it holds the block, the block applied when it extends the book, else the
    * canonical blocks to its parent read and applied first, else a rescan. With no book, a seed scan.
    */
   private[zc] def advance(api: NodeApi, book: Option[ZcBook], wanted: Option[BlockInfo], cap: Int,
-                          known: String => Boolean, logger: Logger): (ZcBook, Map[String, String]) = {
+                          known: String => Boolean, logger: Logger): (ZcBook, Map[String, String]) =
+    advanceTarget(api, book, wanted.map(Left(_)), cap, known, logger)
+
+  /** Moves `book` to either a sync `BlockInfo` (zero-read apply) or a followed `(height, headerId)`. */
+  private[zc] def advanceTarget(api: NodeApi, book: Option[ZcBook], wanted: Option[Either[BlockInfo, (Int, String)]],
+                                cap: Int, known: String => Boolean, logger: Logger): (ZcBook, Map[String, String]) = {
     var found = Map.empty[String, String]
     def knows(h: String) = known(h) || found.contains(h)
     def apply(b: ZcBook, height: Int, id: String, parentId: String, txs: Seq[ZcTx]): ZcBook = {
@@ -285,28 +356,39 @@ object ZcTracker {
       val (seed, scripts) = rescan(api, -1, "", cap, knows, logger)
       found ++= scripts
       wanted match {
-        case Some(block) if block.height > seed.height =>
+        case Some(Left(block)) if block.height > seed.height =>
           BlockFollow.follow(source, seed, block.height - 1, block.parentId, MaxCatchUp)(read)
             .map(offered(_, block))
             .getOrElse(throw new IllegalStateException(
               s"block ${block.id} at ${block.height} does not descend from the scan at ${seed.height}"))
-        // The index holds another block at that height than the sync committed: a failure, so retries back off
-        case Some(block) if !holds(seed, block) =>
+        case Some(Left(block)) if !holds(seed, block) =>
           throw new IllegalStateException(s"the node's index has another block than ${block.id} at ${block.height}")
+        case Some(Right((h, id))) if h > seed.height =>
+          BlockFollow.follow(source, seed, h, id, MaxCatchUp)(read)
+            .getOrElse(throw new IllegalStateException(
+              s"block $id at $h does not descend from the scan at ${seed.height}"))
+        case Some(Right((h, id))) if h == seed.height && seed.headerId != id =>
+          throw new IllegalStateException(s"the node's index has another block than $id at $h")
         case _ => seed
       }
     }
     val next = (book, wanted) match {
       case (Some(b), None) => b
-      case (Some(b), Some(block)) if holds(b, block) => b
-      case (Some(b), Some(block)) if block.height == b.height + 1 && block.parentId == b.headerId => offered(b, block)
-      case (Some(b), Some(block)) =>
+      case (Some(b), Some(t)) if holdsTarget(b, t) => b
+      case (Some(b), Some(Left(block))) if block.height == b.height + 1 && block.parentId == b.headerId =>
+        offered(b, block)
+      case (Some(b), Some(Left(block))) =>
         BlockFollow.follow(source, b, block.height - 1, block.parentId, MaxCatchUp)(read).map(offered(_, block))
           .getOrElse {
             logger.info(s"ZC tracking is more than ${b.history.size} blocks off block ${block.id} at " +
               s"${block.height}; rescanning the ZC trees")
             reseeded()
           }
+      case (Some(b), Some(Right((h, id)))) =>
+        BlockFollow.follow(source, b, h, id, MaxCatchUp)(read).getOrElse {
+          logger.info(s"ZC tracking is more than ${b.history.size} blocks off block $id at $h; rescanning the ZC trees")
+          reseeded()
+        }
       case (None, _) => reseeded()
     }
     next -> found

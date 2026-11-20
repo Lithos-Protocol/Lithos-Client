@@ -285,7 +285,7 @@ class SigmaFiAPIExecution(nodeContext: NodeContext,
   override def liquidate(boxId: String, send: Boolean): Either[SFQuote, SFResult] = withCtx { (ctx, nodeApi) =>
     val bond = read(nodeApi, boxId, "SigmaFi bond")(SigmaFiBoxes.bond)
     val height = ctx.getHeight + 1
-    if (!SigmaFiBatcher.liquidatable(bond, height, 0L))
+    if (!SigmaFiUserTransactions.liquidatable(bond, height, 0L))
       throw LithosUnprocessable(
         if (height < bond.maturity) s"bond $boxId matures at height ${bond.maturity}; it can be liquidated from then on"
         else s"bond $boxId names a liquidation script this client does not run, or its fee leaves its vault box " +
@@ -301,10 +301,10 @@ class SigmaFiAPIExecution(nodeContext: NodeContext,
     else {
       unclaimed(mempoolSnapshot(), boxId)
       stillRunning()
-      val built = SigmaFiTransactions.liquidate(ctx, wallet, Seq(bond -> inputOf(ctx, bond.box)), wallet.contract,
+      val signed = SigmaFiUserTransactions.liquidate(ctx, wallet, bond, inputOf(ctx, bond.box), wallet.contract,
         TxFee, height)
-      val sent = broadcast(built.signed, Seq.empty)
-      Right(SFResult(sent.txId, sent.outcome, Some(outputId(built.signed, 0)), None))
+      val sent = broadcast(signed, Seq.empty)
+      Right(SFResult(sent.txId, sent.outcome, Some(outputId(signed, 0)), None))
     }
   }
 

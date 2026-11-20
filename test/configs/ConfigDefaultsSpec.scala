@@ -151,6 +151,11 @@ class ConfigDefaultsSpec extends AnyFlatSpec with Matchers {
     ZcConfig(Configuration.empty) shouldEqual ZcConfig.Default
   }
 
+  "ArbConfig.Default" should "equal what the shipped application.conf parses, and what an empty one does" in {
+    ArbConfig(shipped) shouldEqual ArbConfig.Default
+    ArbConfig(Configuration.empty) shouldEqual ArbConfig.Default
+  }
+
   "ForwardsOffersConfig.Default" should "equal what the shipped application.conf parses, and what an empty one does" in {
     ForwardsOffersConfig(shipped) shouldEqual ForwardsOffersConfig.Default
     ForwardsOffersConfig(Configuration.empty) shouldEqual ForwardsOffersConfig.Default

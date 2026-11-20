@@ -3,15 +3,16 @@ package configs
 import play.api.{ConfigLoader, Configuration}
 
 /**
- * The `batching.sigmafi` block: the settings every batcher shares, plus when broadcasts begin and the least fee
- * a bond must pay to be liquidated.
+ * The `batching.sigmafi` block: ZC Standard batching settings, broadcast wait and fee floors.
  *
- * @param broadcastAfterBlocks  blocks after a bond matures that only this miner's own blocks carry its
- *                              liquidation, fee-less, its fee going to the pool. From then on, with `broadcast`,
+ * @param broadcastAfterBlocks  blocks after a box becomes eligible that only this miner's own blocks carry its
+ *                              execution, fee-less, its fee going to the pool. From then on, with `broadcast`,
  *                              it is broadcast, paying the miner fee out of the batching fee
- * @param minBatchingFeeNanoErg bonds paying less are left to their lender
+ * @param minBatchingFeeNanoErg least fee reserve a ZC bond liquidation must pay
+ * @param minActionFeeNanoErg   least reward a ZC match, share/wrap mint, pull, refund or refresh must pay
  */
-case class SigmaFiBatchingConfig(batching: BatchingConfig, broadcastAfterBlocks: Int, minBatchingFeeNanoErg: Long)
+case class SigmaFiBatchingConfig(batching: BatchingConfig, broadcastAfterBlocks: Int, minBatchingFeeNanoErg: Long,
+                                 minActionFeeNanoErg: Long = SigmaFiBatchingConfig.ShippedMinActionFee)
 
 object SigmaFiBatchingConfig {
 
@@ -19,16 +20,20 @@ object SigmaFiBatchingConfig {
   final val Name: String = CandidateSourceConfig.SigmaFi
 
   /**
-   * The shipped fee floor. Anyone can build a bond naming an asset they hold, and its liquidation pays
-   * everything back to them, so a bond paying nothing would be free filler in every Lithos block.
+   * The shipped liquidation fee floor (0.05 ERG). Anyone can build a bond naming an asset they hold, and its
+   * liquidation pays everything back to them, so a bond paying nothing would be free filler in every Lithos block.
    */
   final val ShippedMinBatchingFee: Long = 50000000L
+
+  /** The shipped floor for non-liquidation ZC actions (0.002 ERG), matching the zcs1 contract floor. */
+  final val ShippedMinActionFee: Long = 2000000L
 
   /** Mirrors `batching.sigmafi` in application.conf; keep the two in step. */
   val Default: SigmaFiBatchingConfig = SigmaFiBatchingConfig(
     BatchingConfig.Default.copy(scanIntervalMs = 30000L, maxOrdersPerBlock = 20),
     broadcastAfterBlocks = 1,
-    minBatchingFeeNanoErg = ShippedMinBatchingFee)
+    minBatchingFeeNanoErg = ShippedMinBatchingFee,
+    minActionFeeNanoErg = ShippedMinActionFee)
 
   def apply(config: Configuration): SigmaFiBatchingConfig =
     SigmaFiBatchingConfig(
@@ -36,7 +41,9 @@ object SigmaFiBatchingConfig {
       config.getOptional(s"batching.$Name.broadcastAfterBlocks")(ConfigLoader.intLoader)
         .getOrElse(Default.broadcastAfterBlocks),
       config.getOptional(s"batching.$Name.minBatchingFeeNanoErg")(ConfigLoader.longLoader)
-        .getOrElse(Default.minBatchingFeeNanoErg))
+        .getOrElse(Default.minBatchingFeeNanoErg),
+      config.getOptional(s"batching.$Name.minActionFeeNanoErg")(ConfigLoader.longLoader)
+        .getOrElse(Default.minActionFeeNanoErg))
 }
 
 /**

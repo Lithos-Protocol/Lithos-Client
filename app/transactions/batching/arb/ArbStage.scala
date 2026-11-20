@@ -5,6 +5,7 @@ import configs.{ArbConfig, BatchingConfig, NodeContext}
 import node.model.NodeBox
 import org.slf4j.{Logger, LoggerFactory}
 import transactions.batching.lithosdex.LDDeployments
+import transactions.batching.sigmafi.zc.{ZcBook, ZcCollateralArb, ZcResolver, ZcTracker}
 import transactions.batching.tracking.{PoolDeployment, PoolTracker}
 import transactions.candidate.BlockTxMessages.{BlockTxsReady, CandidateTxsDropped, PrepareBlockTxs, RequestArbTxs}
 import transactions.candidate.{CandidateBundle, CandidateCapital}
@@ -39,7 +40,9 @@ class ArbStage(nodeContext: NodeContext,
                stakes: ArbStake,
                useTrueProp: Boolean,
                buildBudgetMs: Long,
-               machina: MachinaHandoff = MachinaHandoff.idle) extends Actor {
+               machina: MachinaHandoff = MachinaHandoff.idle,
+               zcTracker: Option[ZcTracker] = None,
+               zcResolver: Option[ZcResolver] = None) extends Actor {
 
   import ArbStage._
 
@@ -55,17 +58,37 @@ class ArbStage(nodeContext: NodeContext,
   private var building = false
   /** Pool and route counts and the route cap last logged, so the index logs only when they change. */
   private var logged: (Int, Int, Boolean) = (-1, -1, false)
+  /** ZC boxes that priced for arb but failed to sign, skipped for an hour (bounded to 1,024 entries). */
+  private val zcRefused = new java.util.concurrent.atomic.AtomicReference(Map.empty[String, Long])
+
+  private def skippedZc(): Set[String] = {
+    val cutoff = System.currentTimeMillis() - ZcRefusalTtlMs
+    zcRefused.get.collect { case (id, at) if at > cutoff => id }.toSet
+  }
+
+  private def refuseZc(boxId: String): Unit = {
+    val now = System.currentTimeMillis()
+    zcRefused.updateAndGet { held =>
+      val live = held.filter { case (_, at) => at > now - ZcRefusalTtlMs } + (boxId -> now)
+      if (live.size <= MaxZcRefused) live
+      else live.toVector.sortBy(_._2).drop(live.size - MaxZcRefused).toMap
+    }
+  }
 
   override def preStart(): Unit =
     logger.info(s"ArbStage started: stakeNanoErg=${arb.stakeNanoErg}, minProfitNanoErg=${arb.minProfitNanoErg}, " +
-      s"buildBudgetMs=$buildBudgetMs, arb address ${stakes.address}")
+      s"zcEnabled=${arb.zcEnabled}, buildBudgetMs=$buildBudgetMs, arb address ${stakes.address}")
 
   override def receive: Receive = {
 
-    // Starts the tracker's read of the parent before any round asks
+    // Starts the pool and ZC trackers' reads of the parent before any round asks
     case PrepareBlockTxs(blockHeight, _, parentId) =>
       Try(tracker.follow(blockHeight - 1, parentId)).failed
         .foreach(ex => logger.warn(s"Could not pass block $parentId to pool tracking: ${ex.getMessage}"))
+      zcTracker.filter(_ => arb.zcEnabled).foreach { zt =>
+        Try(zt.follow(blockHeight - 1, parentId)).failed
+          .foreach(ex => logger.warn(s"Could not pass block $parentId to ZC tracking: ${ex.getMessage}"))
+      }
 
     case RequestArbTxs(blockHeight, limit, _, basis) =>
       val replyTo = sender()
@@ -130,15 +153,31 @@ class ArbStage(nodeContext: NodeContext,
         // A fill's takings need an output of their own, as a cycle's profit does
         val minFill = math.max(ergoDex.minRevenueNanoErg, MinProfitOutput)
         val minProfit = math.max(arb.minProfitNanoErg, MinProfitOutput)
+        val zcBook: Option[ZcBook] =
+          if (!arb.zcEnabled || arb.zcMaxBundlesPerBlock <= 0) None
+          else zcTracker.filter(_.enabled).flatMap { zt =>
+            val wait = (buildBudgetMs / 8).milliseconds.min(selectUntil.timeLeft).max(Duration.Zero)
+            zt.at(blockHeight - 1, wait).orElse(zt.book.filter(_.height == blockHeight - 1))
+          }
+        val zcCtx: Option[ArbCycles.ZcArbContext] = for {
+          book <- zcBook
+          res <- zcResolver
+        } yield {
+          val cap = if (arb.zcMaxCostNanoErg > 0L) arb.zcMaxCostNanoErg else arb.stakeNanoErg
+          ArbCycles.ZcArbContext(book, res, arb.zcMaxBundlesPerBlock, cap,
+            math.max(arb.zcMinProfitNanoErg, MinProfitOutput), arb.zcMinLegProceedsNanoErg,
+            skippedZc(), refuseZc)
+        }
         def built(stake: Option[NodeBox], maxIn: Long, reserve: String => Boolean): Seq[CandidateBundle] =
           nodeContext.getClient.execute(ctx => ArbCycles.build(ctx, wallet, found, basis, stake, orders, minFill,
             blockHeight, limit, maxIn, minProfit, CandidateCapital.collectionContract(wallet, useTrueProp),
-            selectUntil, buildUntil, reserve, machina.refuse))
+            selectUntil, buildUntil, reserve, machina.refuse, zcCtx))
         stakes.at(blockHeight, tracked.headerId) match {
           case Some(stake) =>
             val maxIn = math.min(arb.stakeNanoErg, stake.value - ArbLeg.MinCarryValue)
             val key = BuildKey(blockHeight, tracked.headerId, stake.boxId, basis, limit, maxIn, minProfit,
-              orders.map(o => o.boxId -> o.poolNft))
+              orders.map(o => o.boxId -> o.poolNft), zcBook.map(_.headerId).getOrElse(""),
+              zcResolver.map(_.generation).getOrElse(0L))
             def reserve(boxId: String): Boolean = stakes.handOn(stake.boxId, boxId, blockHeight)
             previousBuild.filter(b => b.key == key && b.routes.eq(found.routes) && b.reserved.forall(reserve)) match {
               case Some(same) => Outcome(Some(found), Some(same), same.bundles)
@@ -174,13 +213,18 @@ object ArbStage {
   /** The least profit a cycle can take, since its profit needs an output of its own. */
   final val MinProfitOutput: Long = UTXO.MIN_CHANGE
 
+  /** How long a ZC box that priced for arb but failed to sign is left out, and the cap on remembered ids. */
+  private[arb] final val ZcRefusalTtlMs: Long = 3600000L
+  private[arb] final val MaxZcRefused: Int = 1024
+
   /**
-   * Everything a build's fills and cycles follow from besides the pool states, which `headerId` and the basis fix:
-   * `machina` is each handed-over order's box id and pool.
+   * Everything a build's fills, ZC arbs and cycles follow from besides the pool states, which `headerId` and the
+   * basis fix: `machina` is each handed-over order's box id and pool; `zcHeader` and `zcGen` track ZC state.
    */
   private[arb] final case class BuildKey(blockHeight: Int, headerId: String, stakeId: String, basis: ArbBasis,
                                          limit: Int, maxIn: Long, minProfit: Long,
-                                         machina: Vector[(String, String)] = Vector.empty)
+                                         machina: Vector[(String, String)] = Vector.empty,
+                                         zcHeader: String = "", zcGen: Long = 0L)
 
   /**
    * A complete build: its key, the routes it priced, the stake outputs it had the wallet hold, in order, and the

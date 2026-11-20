@@ -52,6 +52,26 @@ trait SigmaFiFixtures extends ContractSpecBase {
   protected def vaultUTXO(bondId: ErgoId, asset: ErgoId, value: Long = 2 * Erg, tokens: Seq[Token] = Seq.empty): UTXO =
     UTXO(SigmaFiContracts.vault, value, tokens, Seq(ErgoValue.of(bondId.getBytes), ErgoValue.of(asset.getBytes), ErgoValue.of(1.toByte)))
 
+  /** Legacy first-gen multi-bond maturity liquidation helper for historical settlement/stats specs. */
+  protected def legacyVaultBox(bond: SigmaFiBond): UTXO =
+    UTXO(SigmaFiContracts.vault, bond.box.value - bond.batchingFee,
+      bond.collateral.map(a => Token(ErgoId.create(a.tokenId), a.amount)),
+      Seq(ErgoValue.of(ErgoId.create(bond.boxId).getBytes), ErgoValue.of(bond.asset.getBytes), ErgoValue.of(1.toByte)))
+
+  protected def legacyLiquidate(ctx: BlockchainContext, wallet: mutations.NodeWallet,
+                                bonds: Seq[(SigmaFiBond, work.lithos.mutations.InputUTXO)],
+                                feeTo: Contract, minerFee: Long, height: Int): org.ergoplatform.appkit.SignedTransaction = {
+    val inputs = bonds.zipWithIndex.map { case ((_, in), i) =>
+      in.withCtxVar(0.toByte, ErgoValue.of(liq.bytes)).withCtxVar(1.toByte, ErgoValue.of(i))
+    }
+    val vaults = bonds.map { case (b, _) => legacyVaultBox(b) }
+    val reward = UTXO(feeTo, bonds.map(_._1.batchingFee).sum - minerFee)
+    val unsigned = work.lithos.mutations.TxBuilder(ctx).setInputs(inputs: _*).setOutputs(vaults :+ reward: _*)
+      .setPreHeader(ctx.createPreHeader().height(height).build())
+      .buildTx(minerFee, wallet.p2pk, bonds.map { case (b, _) => Token(b.asset, 1L) })
+    wallet.sign(unsigned)
+  }
+
   /** `tree` with constant `index` replaced, built the way instances are, so its template hash is unchanged. */
   protected def forge(tree: ErgoTree, index: Int, value: Any): ErgoTree =
     sigma.VersionContext.withVersions(3, 3) {

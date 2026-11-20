@@ -42,7 +42,9 @@ class StartMiningServer @Inject()(system: ActorSystem, config: Configuration,
                                   @Named("stats-collector") statsCollector: ActorRef,
                                   poolTracker: transactions.batching.tracking.PoolTracker,
                                   arbStakes: transactions.batching.arb.ArbStake,
-                                  machinaHandoff: transactions.batching.arb.MachinaHandoff) {
+                                  machinaHandoff: transactions.batching.arb.MachinaHandoff,
+                                  zcTracker: transactions.batching.sigmafi.zc.ZcTracker,
+                                  zcResolver: transactions.batching.sigmafi.zc.ZcResolver) {
 
   val logger: Logger = LoggerFactory.getLogger("StartMiningServer")
 
@@ -127,7 +129,7 @@ class StartMiningServer @Inject()(system: ActorSystem, config: Configuration,
               ergoDexBatching, denied, poolTracker, arbStakes,
               stratumParams.candidate.useTruePropCollection,
               transactions.batching.arb.ArbStage.buildBudgetMs(transactions.batching.Batcher.buildBudgetMs(config)),
-              machinaHandoff)), "arb-stage")))
+              machinaHandoff, Some(zcTracker), Some(zcResolver))), "arb-stage")))
         }
 
         val server = new MiningStratumServer(

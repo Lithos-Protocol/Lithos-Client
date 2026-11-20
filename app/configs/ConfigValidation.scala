@@ -359,6 +359,8 @@ object Configs {
       "blocks after a bond matures before its liquidation is broadcast")
     v.longRange("batching.sigmafi.minBatchingFeeNanoErg", v.long("batching.sigmafi.minBatchingFeeNanoErg"),
       2000000L, 100000000000L, "least batching fee a bond pays to be liquidated; must cover a broadcast's miner fee")
+    v.longRange("batching.sigmafi.minActionFeeNanoErg", v.long("batching.sigmafi.minActionFeeNanoErg"),
+      2000000L, 100000000000L, "least fee a ZC match, mint, pull, refund or refresh must pay")
     v.longRange("batching.sigmafi.skippedOrderTtlMs", v.long("batching.sigmafi.skippedOrderTtlMs"),
       60000L, 86400000L, "ms an unbuildable bond is left out")
     v.range("batching.sigmafi.maxSkippedOrders", v.int("batching.sigmafi.maxSkippedOrders"), 0, 100000,
@@ -374,6 +376,15 @@ object Configs {
     v.longRange("batching.arb.minProfitNanoErg", v.long("batching.arb.minProfitNanoErg"), 0L, 1000000000000L,
       "nanoERG of profit a cycle must leave")
     v.bool("batching.arb.autoReserve")
+    v.bool("batching.arb.zcEnabled")
+    v.longRange("batching.arb.zcMinProfitNanoErg", v.long("batching.arb.zcMinProfitNanoErg"), 0L, 1000000000000L,
+      "nanoERG of confirmed profit a ZC collateral arb bundle must leave")
+    v.longRange("batching.arb.zcMaxCostNanoErg", v.long("batching.arb.zcMaxCostNanoErg"), 0L, 10000000000000L,
+      "nanoERG cap per ZC collateral arb bundle; 0 uses stakeNanoErg")
+    v.range("batching.arb.zcMaxBundlesPerBlock", v.int("batching.arb.zcMaxBundlesPerBlock"), 0, 100,
+      "ZC collateral arb bundles per block")
+    v.longRange("batching.arb.zcMinLegProceedsNanoErg", v.long("batching.arb.zcMinLegProceedsNanoErg"),
+      0L, 1000000000000L, "nanoERG a single token AMM liquidation leg must return")
 
     // ---- emission ----
     v.bool("emission.enabled")

@@ -9,7 +9,7 @@ import org.scalatestplus.mockito.MockitoSugar
 import org.mockito.ArgumentMatchers.anyString
 import org.mockito.Mockito.when
 import support.FakeNodeContext
-import transactions.batching.sigmafi.{SigmaFiBoxes, SigmaFiFixtures, SigmaFiTransactions, SigmaFiUserTransactions}
+import transactions.batching.sigmafi.{SigmaFiBoxes, SigmaFiFixtures, SigmaFiUserTransactions}
 import work.lithos.mutations.{Contract, InputUTXO, Token, TxBuilder, UTXO}
 
 import scala.collection.JavaConverters._
@@ -65,9 +65,9 @@ class BondSettlementSpec extends AnyPropSpec with SigmaFiFixtures with MockitoSu
     client.execute { ctx =>
       val box = nodeBox(ctx, bondUTXO(None, wallet.contract, ctx.getHeight + 1, collateral = Seq(Token(tokenB, 9L))))
       val bond = SigmaFiBoxes.bond(box).get
-      val closed = SigmaFiTransactions.liquidate(ctx, wallet, Seq(bond -> SigmaFiBoxes.input(box, ctx).get),
+      val closed = legacyLiquidate(ctx, wallet, Seq(bond -> SigmaFiBoxes.input(box, ctx).get),
         wallet.contract, 0L, ctx.getHeight + 1)
-      val (indexed, tx) = history(ctx, box, closed.signed, ctx.getHeight + 1,
+      val (indexed, tx) = history(ctx, box, closed, ctx.getHeight + 1,
         Map("0" -> ErgoValue.of(liq.bytes).toHex, "1" -> ErgoValue.of(0).toHex))
       val result = BondSettlement.read(source(indexed, tx), box.boxId, bond.asset.toString, ctx.getHeight + 1)
       result.status shouldBe "Liquidated"
@@ -131,9 +131,9 @@ class BondSettlementSpec extends AnyPropSpec with SigmaFiFixtures with MockitoSu
     client.execute { ctx =>
       val boxes = (1 to 2).map(i => nodeBox(ctx, bondUTXO(None, wallet.contract, ctx.getHeight + 1,
         collateral = Seq(Token(tokenB, i.toLong)), asset = org.ergoplatform.sdk.ErgoId.create(f"$i%02x" * 32)), i))
-      val closed = SigmaFiTransactions.liquidate(ctx, wallet,
+      val closed = legacyLiquidate(ctx, wallet,
         boxes.map(b => SigmaFiBoxes.bond(b).get -> SigmaFiBoxes.input(b, ctx).get), wallet.contract, 0L, ctx.getHeight + 1)
-      val (indexed, basic) = history(ctx, boxes(1), closed.signed, ctx.getHeight + 1,
+      val (indexed, basic) = history(ctx, boxes(1), closed, ctx.getHeight + 1,
         Map("0" -> ErgoValue.of(liq.bytes).toHex, "1" -> ErgoValue.of(1).toHex))
       val tx = basic.copy(inputs = Seq(indexed.copy(box = boxes.head), indexed))
       val state = BondSettlement.read(source(indexed, tx), boxes(1).boxId, boxes(1).assets.head.tokenId, ctx.getHeight + 1)
@@ -149,7 +149,7 @@ class BondSettlementSpec extends AnyPropSpec with SigmaFiFixtures with MockitoSu
       val bonds = boxes.map(b => SigmaFiBoxes.bond(b).get)
       val inputs = boxes.zipWithIndex.map { case (box, i) => SigmaFiBoxes.input(box, ctx).get
         .withCtxVar(0.toByte, ErgoValue.of(liq.bytes)).withCtxVar(1.toByte, ErgoValue.of(1 - i)) }
-      val settlements = bonds.reverse.map(SigmaFiTransactions.vaultBox)
+      val settlements = bonds.reverse.map(legacyVaultBox)
       val reward = UTXO(wallet.contract, bonds.map(_.batchingFee).sum)
       def build(outputs: Seq[UTXO]) = TxBuilder(ctx).setInputs(inputs: _*).setOutputs(outputs :+ reward: _*)
         .buildTx(0L, wallet.p2pk, bonds.map(b => Token(b.asset, 1L)))

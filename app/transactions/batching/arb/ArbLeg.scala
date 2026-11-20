@@ -31,6 +31,8 @@ object ArbKind {
   final val MachinaFill = "arb-machina"
   /** A Machina token/token grid's fill and the sale of its gap, both transactions. */
   final val Grid = "arb-grid"
+  /** A SigmaFi ZC collateral arbitrage bundle (lot, Dutch vault auction or sale order + AMM legs). */
+  final val ZcArb = "arb-zc"
 
   /** A pool cycle's kind, from the pools its legs swap through. */
   def cycle(pools: Seq[ArbPool]): String =

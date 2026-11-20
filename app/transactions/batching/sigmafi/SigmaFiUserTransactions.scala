@@ -181,6 +181,27 @@ object SigmaFiUserTransactions {
       TxBuilder(ctx).setInputs(vaults ++ funding: _*).setOutputs(claimed: _*).buildTx(TxFee, wallet.p2pk, Seq(unit)))
   }
 
+  /** Whether a first-generation bond can be liquidated at `height` under the maturity liquidation script. */
+  def liquidatable(bond: SigmaFiBond, height: Int, floor: Long = 0L): Boolean =
+    height >= bond.maturity && bond.liquidation.contains(SigmaFiContracts.MaturityLiquidation) &&
+      bond.batchingFee >= floor && bond.box.value - bond.batchingFee >= SigmaFiContracts.MinBox
+
+  /** Liquidates one matured first-generation bond for the legacy `/sigmafi/old` API route. */
+  def liquidate(ctx: BlockchainContext, wallet: NodeWallet, bond: SigmaFiBond, bondBox: InputUTXO,
+                feeTo: Contract, minerFee: Long, height: Int): org.ergoplatform.appkit.SignedTransaction = {
+    require(liquidatable(bond, height, 0L), s"bond ${bond.boxId} is not liquidatable at $height")
+    require(bond.batchingFee - minerFee >= SigmaFiContracts.MinBox, "bond batching fee cannot cover miner fee and output")
+    val in = bondBox.withCtxVar(0.toByte, bytes(SigmaFiContracts.MaturityLiquidation.bytes))
+      .withCtxVar(1.toByte, ErgoValue.of(0))
+    val vault = UTXO(SigmaFiContracts.vault, bond.box.value - bond.batchingFee,
+      bond.collateral.map(a => Token(ErgoId.create(a.tokenId), a.amount)),
+      Seq(bytes(ErgoId.create(bond.boxId).getBytes), bytes(bond.asset.getBytes), ErgoValue.of(1.toByte)))
+    val unsigned = TxBuilder(ctx).setInputs(in).setOutputs(vault, UTXO(feeTo, bond.batchingFee - minerFee))
+      .setPreHeader(ctx.createPreHeader().height(height).build())
+      .buildTx(minerFee, wallet.p2pk, Seq(Token(bond.asset, 1L)))
+    transactions.batching.Batcher.withNodeMinimums(ctx, wallet.sign(unsigned))
+  }
+
   def principalValue(tokens: Seq[(ErgoId, Long)]): ErgoValue[_] =
     ErgoValue.of(Colls.fromArray(tokens.map { case (id, n) => Colls.fromArray(id.getBytes) -> n }.toArray)(
       sigma.data.RType.pairRType(sigma.collRType(sigma.ByteType), sigma.LongType)),

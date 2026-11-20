@@ -6,6 +6,7 @@ import node.model.NodeBox
 import org.ergoplatform.appkit.{BlockchainContext, SignedTransaction}
 import org.slf4j.{Logger, LoggerFactory}
 import transactions.batching.ergodex.{MachinaKind, MachinaOrder}
+import transactions.batching.sigmafi.zc.{ZcAssetPricer, ZcBook, ZcCollateralArb, ZcResolver}
 import transactions.candidate.BlockTxMessages.{CandidateTx, ChainFromPackage}
 import transactions.candidate.{CandidateBundle, CapitalEntry, CapitalOrigin}
 import work.lithos.mutations.{Contract, InputUTXO}
@@ -36,8 +37,16 @@ object ArbCycles {
   private final case class At(box: Either[NodeBox, InputUTXO], createdBy: Option[String])
 
   /**
-   * One bundle per ERG/token Machina fill, then one per token/token grid and per cycle in the order they spend the
-   * stake.
+   * Optional SigmaFi ZC collateral arbitrage parameters for one build: the confirmed book, resolver, profit and
+   * cost bounds, refused box ids, and pluggable asset pricer.
+   */
+  final case class ZcArbContext(book: ZcBook, resolver: ZcResolver, maxBundles: Int, maxCost: Long, minProfit: Long,
+                                minLegProceeds: Long, refused: Set[String] = Set.empty,
+                                onRefuse: String => Unit = _ => (), pricer: ZcAssetPricer = ZcAssetPricer.Default)
+
+  /**
+   * One bundle per ERG/token Machina fill, then one per token/token grid, ZC collateral arb and pool cycle in the
+   * order they spend the stake.
    *
    * @param stake       the arb stake, as last found unspent, at a script this wallet signs for; None builds
    *                    ERG/token fills only
@@ -52,18 +61,22 @@ object ArbCycles {
    * @param reserve     notes a cycle's stake output as the next stake, and says whether it did. A cycle whose
    *                    output is not noted is not offered, and no later cycle is built on it
    * @param refuse      told each order whose fill, or grid cycle, priced but could not be signed
+   * @param zc          when present, also evaluates and arbitrages ZC lots, Dutch vaults and AMM-priced sale orders
    */
   def build(ctx: BlockchainContext, wallet: NodeWallet, index: ArbIndex, basis: ArbBasis, stake: Option[NodeBox],
             machina: Seq[MachinaOrder], minFill: Long, blockHeight: Int, slots: Int, maxIn: Long, minProfit: Long,
             profitTo: Contract, selectUntil: Deadline, buildUntil: Deadline,
-            reserve: String => Boolean, refuse: String => Unit = _ => ()): Vector[CandidateBundle] = {
+            reserve: String => Boolean, refuse: String => Unit = _ => (),
+            zc: Option[ZcArbContext] = None): Vector[CandidateBundle] = {
     val (grids, fills) = machina.partition(_.kind == MachinaKind.TokenGrid)
     val fillPools = fills.map(_.poolNft).toSet
-    // A token/token grid may go through any pool trading its base token: one of its pair, or an ERG pool of it
+    // A token/token grid may go through any pool trading its base token; ZC collateral arb may sell through any
+    // qualifying AMM pool in `index.parsed`, even one not on a multi-pool DEX cycle.
     val gridBases = grids.map(ArbMachina.baseOf).toSet
-    val held = index.pools ++ index.parsed.filter { case (nft, entry) =>
-      fillPools.contains(nft) || gridBases.exists(entry.pool.trades)
-    }
+    val held = if (zc.isDefined) index.pools ++ index.parsed
+      else index.pools ++ index.parsed.filter { case (nft, entry) =>
+        fillPools.contains(nft) || gridBases.exists(entry.pool.trades)
+      }
     val (initial, places) = standing(ctx, held, basis)
     var states = initial
     var at = places
@@ -107,19 +120,18 @@ object ArbCycles {
 
     bundles ++ stake.toVector.flatMap(box =>
       cycles(ctx, wallet, index, basis, box, grids, states, at, blockHeight, slots - bundles.size, maxIn, minProfit,
-        profitTo, selectUntil, buildUntil, reserve, refuse))
+        profitTo, selectUntil, buildUntil, reserve, refuse, zc))
   }
 
   /**
    * Cycles on `stake`, from the pool states and boxes `states` and `places` hold, in the order they spend it: the
-   * token/token `grids` first, each a fill and the sale of its gap, best profit first, then the pool cycles priced
-   * on what they left.
+   * token/token `grids` first, then ZC collateral arbitrage when enabled, then the pool cycles priced on what they left.
    */
   private def cycles(ctx: BlockchainContext, wallet: NodeWallet, index: ArbIndex, basis: ArbBasis, stake: NodeBox,
                      grids: Seq[MachinaOrder], initial: Map[String, ArbPool], places: Map[String, At],
                      blockHeight: Int, slots: Int, maxIn: Long, minProfit: Long, profitTo: Contract,
                      selectUntil: Deadline, buildUntil: Deadline, reserve: String => Boolean,
-                     refuse: String => Unit): Vector[CandidateBundle] = {
+                     refuse: String => Unit, zc: Option[ZcArbContext]): Vector[CandidateBundle] = {
     val stakeInput = stake.toInputUTXO(ctx)
     if (basis.spent.contains(stake.boxId) || stakeInput.id.toString != stake.boxId) {
       logger.warn(s"The arb stake ${stake.boxId} is spent by a batcher's bundle or does not read back; no arb " +
@@ -177,6 +189,25 @@ object ArbCycles {
                 }
             }
           }
+      }
+
+      // SigmaFi ZC collateral arbitrage on the same stake and live pool states
+      zc.foreach { z =>
+        if (!stopped && z.maxBundles > 0 && used < slots && !selectUntil.isOverdue() && !buildUntil.isOverdue()) {
+          val rawPlaces = at.map { case (nft, p) => nft -> (p.box -> p.createdBy) }
+          var reserveFailed = false
+          val (zcBundles, nextCarry, nextCarryParent, nextStates, nextPlaces) =
+            ZcCollateralArb.buildAll(ctx, wallet, z.book, z.resolver, basis, states, rawPlaces, carry, carryCreatedBy,
+              stakeInput, blockHeight, slots - used, z.maxBundles, math.min(maxIn, z.maxCost), z.minProfit,
+              z.minLegProceeds, profitTo, selectUntil, buildUntil,
+              id => { val ok = reserve(id); if (!ok) reserveFailed = true; ok }, z.refused, z.onRefuse, z.pricer)
+          bundles ++= zcBundles
+          carry = nextCarry
+          carryCreatedBy = nextCarryParent
+          states = nextStates
+          at = nextPlaces.map { case (nft, (box, parent)) => nft -> At(box, parent) }
+          if (reserveFailed) stopped = true
+        }
       }
 
       ArbSearch.select(index.routes, states, maxIn, minProfit, slots - used, selectUntil) { cycle =>

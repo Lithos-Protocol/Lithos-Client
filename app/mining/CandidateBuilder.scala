@@ -792,7 +792,8 @@ object CandidateBuilder {
 
   /** The batchers whose admitted bundles the arb stage builds on, and waits for. */
   private[mining] final val ArbBasisSources: Set[String] =
-    Set(configs.CandidateSourceConfig.LithosDex, configs.CandidateSourceConfig.ErgoDex)
+    Set(configs.CandidateSourceConfig.LithosDex, configs.CandidateSourceConfig.ErgoDex,
+      configs.CandidateSourceConfig.SigmaFi)
 
   /** Scheduler tick and manual trigger for the background collateral refresh. */
   private[mining] case object RefreshCollateralSet
