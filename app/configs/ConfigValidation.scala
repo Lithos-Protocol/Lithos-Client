@@ -344,6 +344,8 @@ object Configs {
       "ZC boxes held in memory; about 2 KB each")
     v.range("sigmafi.zc.fillsFromHeight", v.int("sigmafi.zc.fillsFromHeight"), 0, Int.MaxValue,
       "the first block holding a ZC box, or 0 for no fill history")
+    v.range("sigmafi.zc.fillsRetentionDays", v.int("sigmafi.zc.fillsRetentionDays"), 0, ZcConfig.MaxFillsRetentionDays,
+      "days of ZC fill history retained (720 blocks/day), or 0 to keep forever")
 
     // ---- batching.sigmafi ----
     v.bool("batching.sigmafi.enabled")

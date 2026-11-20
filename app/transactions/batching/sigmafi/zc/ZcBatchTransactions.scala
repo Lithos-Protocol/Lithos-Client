@@ -127,6 +127,9 @@ object ZcBatchTransactions {
       .setPreHeader(ctx.createPreHeader().height(height).build())
       .buildTx(minerFee, wallet.p2pk, burn)
     val signed = Batcher.withNodeMinimums(ctx, wallet.sign(unsigned))
+    val expectedOutputs = allOutputs.size + (if (minerFee > 0L) 1 else 0)
+    require(signed.getOutputsToSpend.size == expectedOutputs,
+      s"$kind produced ${signed.getOutputsToSpend.size} outputs, expected $expectedOutputs (no change allowed)")
     val feeBox = InputUTXO(signed.getOutputsToSpend.get(outputs.size))
     require(feeBox.value == net && feeBox.tokens.isEmpty,
       s"$kind reward output holds ${feeBox.value} nanoERG and ${feeBox.tokens.size} token(s), expected $net")

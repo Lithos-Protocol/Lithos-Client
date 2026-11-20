@@ -24,6 +24,21 @@ import scala.util.{Failure, Success, Try}
 final case class ZcBatchBuild(txs: Vector[(ZcBatchTx, Seq[String])], failedIds: Set[String])
 
 /**
+ * Off-critical-path precomputed zcs1 offer-match runs for one confirmed book revision and resolver generation.
+ * Handed into [[ZcBatchPlanner.build]] on the candidate critical path so a 10,000-box book skips `ZcMarketBook.of`
+ * and `ZcMatcher.batch` completely.
+ */
+final case class ZcPrecomputedMatches(headerId: String, height: Int, resolverGen: Long, marketBook: ZcMarketBook,
+                                      runs: Map[ZcMarket, ZcBatchRun], ordersById: Map[String, ZcOrder],
+                                      asksById: Map[String, ZcAsk], offersById: Map[String, ZcOffer],
+                                      askBondIds: Map[String, String] = Map.empty) {
+  def matches(book: ZcBook, matcherHeight: Int, gen: Long, claimed: scala.collection.Set[String]): Boolean =
+    headerId == book.headerId && height == matcherHeight && resolverGen == gen &&
+      runs.values.forall(r => !r.taken.keys.exists(claimed.contains) && !r.takenBy.keys.exists(claimed.contains)) &&
+      !askBondIds.values.exists(claimed.contains)
+}
+
+/**
  * Pure planner and builder for SigmaFi ZC Standard batching over a confirmed [[ZcBook]].
  *
  * Handles every zcs1 batchable action — bond liquidations (maturity and early oracle), offer matches against orders
@@ -113,6 +128,25 @@ object ZcBatchPlanner {
   }
 
   /**
+   * Precomputes zcs1 offer matches across both markets for `book` off the candidate critical path, using only
+   * cached origins and known-disclosure flags (zero node reads).
+   */
+  def precomputeMatches(book: ZcBook, resolver: ZcResolver): ZcPrecomputedMatches = {
+    val gen = resolver.generation
+    val marketBook = ZcMarketBook.of(ZcView(book, None, 0L))
+    val matcher = new ZcMatcher(marketBook, resolver.knownOrigin,
+      excluded = r => resolver.knownDisclosed(r).contains(false))
+    val runs = ZcMarket.all.map(m => m -> matcher.batch(m, rounds = math.min(ZcMatcher.Rounds, 5))).toMap
+    val ordersById = marketBook.orders.map(o => o.boxId -> o.record).toMap
+    val asksById = marketBook.asks.map(a => a.boxId -> a.record).toMap
+    val offersById = marketBook.offers.map(o => o.boxId -> o.record).toMap
+    val askBondIds = runs.valuesIterator.flatMap(_.takenBy.keysIterator).flatMap { id =>
+      asksById.get(id).flatMap(a => matcher.askSource(ZcOpen(a, pending = false)).toOption.map(s => id -> s.bond.boxId))
+    }.toMap
+    ZcPrecomputedMatches(book.headerId, book.height, gen, marketBook, runs, ordersById, asksById, offersById, askBondIds)
+  }
+
+  /**
    * Builds ZC batching transactions for `signingHeight` from `book`, within `slots`, `budget` and `deadline`.
    *
    * @param book           confirmed ZC book
@@ -122,13 +156,17 @@ object ZcBatchPlanner {
    * @param excluded       box ids to skip (skip list, mempool-spent boxes on broadcast, refused boxes)
    * @param oracleUsable   false while a mempool refresh spends the oracle box (oracle-dependent paths wait)
    * @param broadcastWait  `Some(broadcastAfterBlocks)` on broadcast passes; `None` on candidate builds
+   * @param precomputed    optional off-critical-path match runs for `book` (reused when revision and resolver match)
+   * @param onComputed     optional callback receiving freshly computed clean match runs for later refreshes
    */
   def build(ctx: BlockchainContext, wallet: NodeWallet, book: ZcBook, resolver: ZcResolver,
             settings: SigmaFiBatchingConfig, signingHeight: Int, minerFee: Long, feeTo: Contract,
             slots: Int, allowance: CandidateBudget, deadline: Option[Deadline],
             excluded: Set[String] = Set.empty, oracleUsable: Boolean = true,
             broadcastWait: Option[Int] = None,
-            resolverReads: Int = CandidateResolverReads): ZcBatchBuild = {
+            resolverReads: Int = CandidateResolverReads,
+            precomputed: Option[ZcPrecomputedMatches] = None,
+            onComputed: ZcPrecomputedMatches => Unit = _ => ()): ZcBatchBuild = {
     if (slots <= 0) ZcBatchBuild(Vector.empty, Set.empty)
     else {
       val readBudget = new ZcBudget(resolverReads)
@@ -172,7 +210,6 @@ object ZcBatchPlanner {
 
       // ─── 1. Gather packable items (liquidations, refunds, refreshes) ────────
       val packable = Vector.newBuilder[PackItem]
-      val liquidatingIds = mutable.HashSet.empty[String]
 
       book.boxes.valuesIterator.filterNot(e => claimed.contains(e.boxId)).foreach { entry =>
         entry.record match {
@@ -188,7 +225,6 @@ object ZcBatchPlanner {
             if (canLiq) {
               val elig = if (matured) b.maturity else math.max(entry.height.toLong, oracle.get.box.creationHeight.toLong)
               if (waitCleared(elig)) {
-                liquidatingIds += b.boxId
                 val expr = ZcContracts.expression(
                   if (rule == ZcRule.Maturity) ZcExpression.MaturityLiquidation else ZcExpression.OracleLiquidation,
                   if (rule == ZcRule.Maturity) None else Some(b.market)).bytes
@@ -289,7 +325,8 @@ object ZcBatchPlanner {
       // ─── 2. Offer matches (zcs1 matching order, chaining offer continuations) ─
       if (!overdue && usedSlots < slots && oracleIn.isDefined && unbuildable < MaxUnbuildablePerRun) {
         buildOfferMatches(ctx, wallet, book, resolver, readBudget, settings, signingHeight, minerFee, feeTo,
-          oracleIn.get, minAct, broadcastWait, claimed, failed, () => usedSlots < slots && !overdue && unbuildable < MaxUnbuildablePerRun,
+          oracleIn.get, minAct, broadcastWait, precomputed, onComputed, claimed, failed,
+          () => usedSlots < slots && !overdue && unbuildable < MaxUnbuildablePerRun,
           recordTx, () => { unbuildable += 1 })
       }
 
@@ -316,7 +353,8 @@ object ZcBatchPlanner {
             case r: ZcShareRequest if !knownUndisclosed(r) && r.terms.size >= 3 =>
               val Seq(n, pullFee, mintFee) = r.terms.take(3)
               val valid = n >= 1L && n <= 1000000000L && pullFee >= ZcPricing.MinBatchingFee &&
-                mintFee >= minAct && pullFee <= r.box.value && mintFee <= r.box.value - pullFee - ZcBoxes.MinBox
+                mintFee >= minAct &&
+                BigInt(pullFee) + BigInt(mintFee) + BigInt(2L * ZcBoxes.MinBox) <= BigInt(r.box.value)
               val elig = entry.height.toLong
               if (valid && waitCleared(elig)) {
                 standalone += StandaloneItem(Set(r.boxId), mintFee, elig, (c, to, mFee, sh) =>
@@ -325,9 +363,9 @@ object ZcBatchPlanner {
                       case None => Some(None)
                       case Some(_) =>
                         book.stateOf(r.bondAsset).map(_.record) match {
-                          case Some(b: ZcBond) =>
+                          case Some(b: ZcBond) if !claimed.contains(b.boxId) =>
                             inputOf(b.box, c).map(bIn => Some((bIn, b.repayment, None)))
-                          case Some(s: ZcSettlement) =>
+                          case Some(s: ZcSettlement) if !claimed.contains(s.boxId) =>
                             for (sIn <- inputOf(s.box, c); (rep, bytes) <- resolver.settledBond(s.bondBoxId, c, readBudget))
                               yield Some((sIn, rep, Some(bytes)))
                           case _ => None
@@ -399,20 +437,29 @@ object ZcBatchPlanner {
   private def buildOfferMatches(ctx: BlockchainContext, wallet: NodeWallet, book: ZcBook, resolver: ZcResolver,
                                 readBudget: ZcBudget, settings: SigmaFiBatchingConfig, signingHeight: Int,
                                 minerFee: Long, feeTo: Contract, oracleIn: InputUTXO, minAct: Long,
-                                broadcastWait: Option[Int], claimed: mutable.HashSet[String],
+                                broadcastWait: Option[Int], precomputed: Option[ZcPrecomputedMatches],
+                                onComputed: ZcPrecomputedMatches => Unit,
+                                claimed: mutable.HashSet[String],
                                 failed: mutable.HashSet[String], canContinue: () => Boolean,
                                 recordTx: (ZcBatchTx, Seq[String]) => Boolean, onFailure: () => Unit): Unit = {
     // Matcher operates at `matcherHeight` so `at = matcherHeight + 1` equals the block where the tx lands.
     val matcherHeight = if (minerFee == 0L) signingHeight - 1 else signingHeight
-    val adjustedBook = if (book.height == matcherHeight) book else book.copy(height = matcherHeight)
-    val marketBook = ZcMarketBook.of(ZcView(adjustedBook, None, 0L))
+    val startGen = resolver.generation
+    val cleanStart = claimed.isEmpty && book.height == matcherHeight
+    val cached = precomputed.filter(_.matches(book, matcherHeight, startGen, claimed))
+    val marketBook = cached.map(_.marketBook).getOrElse {
+      val adjustedBook = if (book.height == matcherHeight) book else book.copy(height = matcherHeight)
+      ZcMarketBook.of(ZcView(adjustedBook, None, 0L))
+    }
     val originLookup: String => Option[ZcOrigin] = token => resolver.origin(token, readBudget)
     val matcher = new ZcMatcher(marketBook, originLookup,
       excluded = r => claimed.contains(r.boxId) || resolver.knownDisclosed(r).contains(false))
 
-    val ordersById = marketBook.orders.map(o => o.boxId -> o.record).toMap
-    val asksById = marketBook.asks.map(a => a.boxId -> a.record).toMap
-    val offersById = marketBook.offers.map(o => o.boxId -> o.record).toMap
+    val ordersById = cached.map(_.ordersById).getOrElse(marketBook.orders.map(o => o.boxId -> o.record).toMap)
+    val asksById = cached.map(_.asksById).getOrElse(marketBook.asks.map(a => a.boxId -> a.record).toMap)
+    val offersById = cached.map(_.offersById).getOrElse(marketBook.offers.map(o => o.boxId -> o.record).toMap)
+    val parsedContracts = mutable.HashMap.empty[String, Option[Contract]]
+    def parsedContract(hex: String): Option[Contract] = parsedContracts.getOrElseUpdate(hex, contractOf(hex))
     val nextHeight = if (minerFee == 0L) signingHeight.toLong else signingHeight.toLong + 1L
 
     def waitCleared(offerId: String, sourceId: String): Boolean = broadcastWait.forall { wait =>
@@ -421,104 +468,124 @@ object ZcBatchPlanner {
       nextHeight >= math.max(oh, sh) + wait.toLong
     }
 
+    val computedRuns = mutable.HashMap.empty[ZcMarket, ZcBatchRun]
     var builtCount = 0
     ZcMarket.all.foreach { market =>
       if (canContinue() && builtCount < MaxMatchesPerBuild) {
-        val run = matcher.batch(market, rounds = math.min(ZcMatcher.Rounds, 5))
+        val run = cached.flatMap(_.runs.get(market)).getOrElse {
+          val r = matcher.batch(market, rounds = math.min(ZcMatcher.Rounds, 5))
+          if (cached.isEmpty && cleanStart) computedRuns += market -> r
+          r
+        }
         // Process each offer in zcs1 priority order, chaining its continuation across its matched sources
         val orderedOffers = run.taken.keys.toVector.flatMap(offersById.get)
           .sortBy(o => (-ZcRules.fillFee(ZcOfferState.of(o), o.capital), o.boxId))
         orderedOffers.foreach { initialOffer =>
           if (canContinue() && builtCount < MaxMatchesPerBuild && !claimed.contains(initialOffer.boxId)) {
             val matches = run.taken.getOrElse(initialOffer.boxId, Vector.empty)
-            var curOffer = initialOffer
-            var curOfferIn: Option[InputUTXO] = inputOf(initialOffer.box, ctx)
-            var curParent = Option.empty[String]
-            var chainAlive = curOfferIn.isDefined
-            val ownerOpt = resolver.script(initialOffer, pending = false, readBudget).flatMap(contractOf)
-            if (ownerOpt.isEmpty) chainAlive = false
+            val ownerOpt = resolver.script(initialOffer, pending = false, readBudget).flatMap(parsedContract)
+            if (ownerOpt.isDefined) {
+              var curOffer = initialOffer
+              var curOfferIn: Option[InputUTXO] = inputOf(initialOffer.box, ctx)
+              var curParent = Option.empty[String]
+              var chainAlive = curOfferIn.isDefined
+              if (!chainAlive) onFailure()
 
-            matches.foreach { m =>
-              if (chainAlive && canContinue() && builtCount < MaxMatchesPerBuild &&
-                !claimed.contains(m.sourceId) && m.fee >= minAct && waitCleared(initialOffer.boxId, m.sourceId)) {
-                val owner = ownerOpt.get
-                val offerInput = curOfferIn.get
-                ordersById.get(m.sourceId) match {
-                  case Some(order) =>
-                    // Recompute maturity & principal at the exact signing start height so Order/PricedOrder accepts.
-                    val start = signingHeight.toLong
-                    val res = for {
-                      borrower <- resolver.script(order, pending = false, readBudget).flatMap(contractOf)
-                        .toRight("borrower script undisclosed")
-                      orderIn <- inputOf(order.box, ctx).toRight("order input invalid")
-                      maturity <-
-                        if (ZcRules.window(order))
-                          ZcRules.windowMaturity(ZcOfferState.of(curOffer), order, book.oracle, start - 1L)
-                            .filter(mat => mat - start >= order.terms(3) && ZcRules.orderWindow(order).exists(w => mat - start <= w._2))
-                            .orElse(ZcRules.orderMaturity(order, start).toOption)
-                            .toRight("no window maturity suits offer at signing height")
-                        else ZcRules.orderMaturity(order, start)
-                      principal <- ZcRules.resolvePrincipal(order, if (minerFee == 0L) start - 1L else start, maturity)
-                      fee = ZcRules.fillFee(ZcOfferState.of(curOffer), principal)
-                      _ <- if (fee >= minAct) Right(()) else Left("fill fee below action floor")
-                      built <- Try(ZcBatchTransactions.matchOrder(ctx, wallet, curOffer, offerInput, order, orderIn,
-                        borrower, owner, maturity, principal, oracleIn, feeTo, minerFee, signingHeight)).toEither
-                        .left.map(_.getMessage)
-                    } yield built
-                    res match {
-                      case Right(built) =>
-                        if (recordTx(built.tx, curParent.toSeq)) {
-                          curOffer = built.nextOffer
-                          curOfferIn = Some(built.nextOfferInput)
-                          curParent = Some(built.tx.txId)
-                          builtCount += 1
-                        } else chainAlive = false
-                      case Left(reason) =>
-                        onFailure()
-                        failed += order.boxId
-                        chainAlive = false
-                        logger.warn(s"Could not match offer ${curOffer.boxId} with order ${order.boxId}: $reason")
-                    }
+              matches.foreach { m =>
+                if (chainAlive && canContinue() && builtCount < MaxMatchesPerBuild &&
+                  !claimed.contains(m.sourceId) && m.fee >= minAct && waitCleared(initialOffer.boxId, m.sourceId)) {
+                  val owner = ownerOpt.get
+                  val offerInput = curOfferIn.get
+                  ordersById.get(m.sourceId) match {
+                    case Some(order) =>
+                      // Recompute maturity & principal at the exact signing start height so Order/PricedOrder accepts.
+                      val start = signingHeight.toLong
+                      val ready = for {
+                        borrower <- resolver.script(order, pending = false, readBudget).flatMap(parsedContract)
+                        maturity <- (
+                          if (ZcRules.window(order))
+                            ZcRules.windowMaturity(ZcOfferState.of(curOffer), order, book.oracle, start - 1L)
+                              .filter(mat => mat - start >= order.terms(3) && ZcRules.orderWindow(order).exists(w => mat - start <= w._2))
+                              .orElse(ZcRules.orderMaturity(order, start).toOption)
+                          else ZcRules.orderMaturity(order, start).toOption
+                        )
+                        principal <- ZcRules.resolvePrincipal(order, if (minerFee == 0L) start - 1L else start, maturity).toOption
+                        fee = ZcRules.fillFee(ZcOfferState.of(curOffer), principal)
+                        if fee >= minAct
+                      } yield (borrower, maturity, principal)
 
-                  case None =>
-                    asksById.get(m.sourceId).foreach { ask =>
-                      val res = for {
-                        seller <- resolver.script(ask, pending = false, readBudget).flatMap(contractOf)
-                          .toRight("seller script undisclosed")
-                        askIn <- inputOf(ask.box, ctx).toRight("ask input invalid")
-                        src <- matcher.askSource(ZcOpen(ask, pending = false))
-                        bondIn <- inputOf(src.bond.record.box, ctx).toRight("bond data input invalid")
-                        originBytes <- resolver.boxBytes(src.asset, ctx, readBudget)
-                          .toRight(s"origin box bytes for ${src.asset} unavailable")
-                        reqBytes <-
-                          if (!src.shares) Right(None)
-                          else resolver.boxBytes(ask.token.tokenId, ctx, readBudget)
-                            .map(Some(_)).toRight(s"share request bytes for ${ask.token.tokenId} unavailable")
-                        built <- Try(ZcBatchTransactions.matchAsk(ctx, wallet, curOffer, offerInput, ask, askIn,
-                          seller, owner, m.units, m.price, bondIn, oracleIn, originBytes, reqBytes, feeTo, minerFee,
-                          signingHeight)).toEither.left.map(_.getMessage)
-                      } yield built
-                      res match {
-                        case Right(built) =>
-                          if (recordTx(built.tx, curParent.toSeq)) {
-                            curOffer = built.nextOffer
-                            curOfferIn = Some(built.nextOfferInput)
-                            curParent = Some(built.tx.txId)
-                            builtCount += 1
-                          } else chainAlive = false
-                        case Left(reason) =>
-                          onFailure()
-                          failed += ask.boxId
-                          chainAlive = false
-                          logger.warn(s"Could not match offer ${curOffer.boxId} with ask ${ask.boxId}: $reason")
+                      // Soft skips (undisclosed/unwarmed script or timing window) leave the offer chain alive and unpenalized.
+                      ready.foreach { case (borrower, maturity, principal) =>
+                        val builtRes = inputOf(order.box, ctx).toRight("order input invalid").flatMap { orderIn =>
+                          Try(ZcBatchTransactions.matchOrder(ctx, wallet, curOffer, offerInput, order, orderIn,
+                            borrower, owner, maturity, principal, oracleIn, feeTo, minerFee, signingHeight))
+                            .toEither.left.map(_.getMessage)
+                        }
+                        builtRes match {
+                          case Right(built) =>
+                            if (recordTx(built.tx, curParent.toSeq)) {
+                              curOffer = built.nextOffer
+                              curOfferIn = Some(built.nextOfferInput)
+                              curParent = Some(built.tx.txId)
+                              builtCount += 1
+                            } else chainAlive = false
+                          case Left(reason) =>
+                            onFailure()
+                            failed += order.boxId
+                            logger.warn(s"Could not match offer ${curOffer.boxId} with order ${order.boxId}: $reason")
+                        }
                       }
-                    }
+
+                    case None =>
+                      asksById.get(m.sourceId).foreach { ask =>
+                        val ready = for {
+                          seller <- resolver.script(ask, pending = false, readBudget).flatMap(parsedContract)
+                          src <- matcher.askSource(ZcOpen(ask, pending = false)).toOption
+                          if !claimed.contains(src.bond.boxId)
+                          originBytes <- resolver.boxBytes(src.asset, ctx, readBudget)
+                          reqBytes <- if (!src.shares) Some(None)
+                            else resolver.boxBytes(ask.token.tokenId, ctx, readBudget).map(Some(_))
+                        } yield (seller, src, originBytes, reqBytes)
+
+                        ready.foreach { case (seller, src, originBytes, reqBytes) =>
+                          val builtRes = for {
+                            askIn <- inputOf(ask.box, ctx).toRight("ask input invalid")
+                            bondIn <- inputOf(src.bond.record.box, ctx).toRight("bond data input invalid")
+                            built <- Try(ZcBatchTransactions.matchAsk(ctx, wallet, curOffer, offerInput, ask, askIn,
+                              seller, owner, m.units, m.price, bondIn, oracleIn, originBytes, reqBytes, feeTo, minerFee,
+                              signingHeight)).toEither.left.map(_.getMessage)
+                          } yield built
+                          builtRes match {
+                            case Right(built) =>
+                              if (recordTx(built.tx, curParent.toSeq)) {
+                                curOffer = built.nextOffer
+                                curOfferIn = Some(built.nextOfferInput)
+                                curParent = Some(built.tx.txId)
+                                builtCount += 1
+                              } else chainAlive = false
+                            case Left(reason) =>
+                              onFailure()
+                              failed += ask.boxId
+                              logger.warn(s"Could not match offer ${curOffer.boxId} with ask ${ask.boxId}: $reason")
+                          }
+                        }
+                      }
+                  }
                 }
               }
             }
           }
         }
       }
+    }
+
+    if (cached.isEmpty && cleanStart && computedRuns.size == ZcMarket.all.size && resolver.generation == startGen) {
+      val runsMap = computedRuns.toMap
+      val askBondIds = runsMap.valuesIterator.flatMap(_.takenBy.keysIterator).flatMap { id =>
+        asksById.get(id).flatMap(a => matcher.askSource(ZcOpen(a, pending = false)).toOption.map(s => id -> s.bond.boxId))
+      }.toMap
+      onComputed(ZcPrecomputedMatches(book.headerId, book.height, startGen, marketBook, runsMap,
+        ordersById, asksById, offersById, askBondIds))
     }
   }
 }

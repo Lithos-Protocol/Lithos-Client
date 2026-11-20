@@ -111,12 +111,13 @@ final class ZcJson(matcher: ZcMatcher, known: ZcKnown) {
   def standing(a: ZcAsk): ZcStanding = {
     val claim = matcher.claimOf(a.token.tokenId)
     val source = matcher.askSource(ZcOpen(a, pending = false))
-    val expr = a.priced && !yieldAsk(a)
+    val guardBad = guardedAsk(a) && !saleGuard(a).exists { case (minBps, age) => minBps > 0L && age >= 1L && age <= MaxOracleAge }
+    val expr = (a.priced && !yieldAsk(a)) || guardBad
     val disc = disclosure(a)
     val checks = Seq(
       ZcCheck("origin", Some(claim.isRight), claim.fold(identity, c => if (c._2 > 1L) "shares of a standard mint" else "a standard bond unit")),
       ZcCheck("state", Some(source.isRight), source.fold(identity, _ => "the bond is live")),
-      ZcCheck("expression", Some(!expr), if (expr) "names an unknown pricing expression" else "pinned expressions"),
+      ZcCheck("expression", Some(!expr), if (guardBad) "malformed sale guard terms" else if (expr) "names an unknown pricing expression" else "pinned expressions"),
       disc) ++ claim.toOption.filter(_._2 > 1L).map(c => ZcCheck("shareCount", Some(c._2 == ShareCount),
       s"${c._2} raw shares")).toSeq
     if (height + 1L >= a.expiry) ZcStanding("expired", Seq.empty, checks)
@@ -136,18 +137,24 @@ final class ZcJson(matcher: ZcMatcher, known: ZcKnown) {
 
   def standing(o: ZcOffer): ZcStanding = {
     val s = ZcOfferState.of(o)
-    val policy = o.policyHash == ZcContracts.expression(ZcExpression.CollateralPolicy, Some(o.market)).hash
+    val policy = policyValid(o)
+    val curveOk = offerCurve(o).ordered && o.terms(0) >= 0L && minBlocks(o) >= 1L && maxBlocks(o) >= minBlocks(o) &&
+      feeReserve(o) >= 0L && deliveryValid(o)
     val disc = disclosure(o)
-    val budgetBad = token(o) && (originalCapital(s) <= 0L || s.capital > originalCapital(s) || spendBudget(o) <= 0L ||
-      rewardBudget(o) <= 0L || rewardBudget(o) >= spendBudget(o) || minFillBps(o) < 100L || minFillBps(o) > 10000L)
+    val ergShort = !token(o) && BigInt(s.value) <= BigInt(batcherFee(o)) + BigInt(ZcBoxes.MinBox) +
+      deliveryErgBig(o, shares = buysShares(o))
+    val budgetBad = ergShort || (token(o) && (originalCapital(s) <= 0L || s.capital <= 0L ||
+      s.capital > originalCapital(s) || spendBudget(o) <= 0L || rewardBudget(o) <= 0L ||
+      rewardBudget(o) >= spendBudget(o) || minFillBps(o) < 100L || minFillBps(o) > 10000L ||
+      BigInt(s.value) < BigInt(ZcBoxes.MinBox) + BigInt(batcherFee(o)) + BigInt(MinBatchingFee)))
     val checks = Seq(
       ZcCheck("origin", Some(true), "LendOffer script, standard"),
       ZcCheck("expression", Some(policy), if (policy) "the market's collateral policy" else "an unknown collateral policy"),
-      ZcCheck("curve", Some(offerCurve(o).ordered && o.terms(0) >= 0L), "points strictly increasing"),
+      ZcCheck("curve", Some(curveOk), "points strictly increasing"),
       disc)
     if (height + 1L >= o.expiry) ZcStanding("expired", Seq.empty, checks)
-    else if (!policy || !offerCurve(o).ordered || disc.ok.contains(false)) ZcStanding("flagged",
-      (if (!policy || !offerCurve(o).ordered) Seq("expression") else Seq.empty) ++
+    else if (!policy || !curveOk || disc.ok.contains(false)) ZcStanding("flagged",
+      (if (!policy || !curveOk) Seq("expression") else Seq.empty) ++
         (if (disc.ok.contains(false)) Seq("disclosure") else Seq.empty), checks)
     else {
       val pauses = oraclePause(maxAge(o)).toSeq ++

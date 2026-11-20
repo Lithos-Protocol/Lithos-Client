@@ -405,13 +405,8 @@ final class ZcReads(tracker: ZcTracker, resolver: ZcResolver, node: () => NodeAp
     val lots = s.book.lots.filter(o => m.forall(_ == o.record.market)).take(MaxPage).map { o =>
       val lot = o.record
       val Seq(opening, floor, start, end, expiry, refund) = lot.terms.take(6)
-      val valid = floor >= 1L && floor <= opening && start < end && end <= expiry
-      val price = if (!valid) None else Some {
-        val at = h.max(start).min(end)
-        val span = BigInt(end - start)
-        val owed = BigInt(opening) * span - BigInt(opening - floor) * (at - start)
-        (owed + span - 1) / span
-      }
+      val valid = lotValid(lot)
+      val price = if (!valid) None else Some(BigInt(lotPrice(lot, h)))
       Json.obj("boxId" -> lot.boxId, "chainId" -> lot.boxId, "pending" -> o.pending, "mine" -> l.known.mine(lot.sellerHash),
         "sellerHash" -> lot.sellerHash, "market" -> lot.market.name, "items" -> l.json.tokens(lot.box.assets),
         "nanoErg" -> lot.box.value.toString, "opening" -> opening.toString, "floor" -> floor.toString, "start" -> start,
@@ -419,43 +414,42 @@ final class ZcReads(tracker: ZcTracker, resolver: ZcResolver, node: () => NodeAp
         "valid" -> valid,
         "phase" -> (if (h + 1L >= expiry) "expired" else if (h < start) "before" else if (h < end) "falling" else "floor"))
     }
-    val vaults = s.book.shareVaults.values.toVector.filter { o =>
+    val vaults = s.book.shareVaults.values.toVector.flatMap { o =>
       val v = o.record
-      v.dutch && !v.holding && (v.state.contains(1.toByte) || v.state.contains(4.toByte)) && v.auction.size >= 7
-    }.sortBy(_.boxId).take(MaxPage).flatMap { o =>
-      val v = o.record
-      val currency = v.currency.filter(_.length == 32).map(org.bouncycastle.util.encoders.Hex.toHexString)
-      val vm = ZcMarket.all.find(_.tokenId == currency)
-      if (m.exists(x => !vm.contains(x))) None
+      if (!v.dutch || v.holding || !(v.state.contains(1.toByte) || v.state.contains(4.toByte)) || v.auction.size < 7) None
       else {
-        val Seq(repayment, opening, floor, length, expiry, threshold, began) = v.auction.take(7)
-        val held = currency.fold(v.box.value)(id => v.box.assets.filter(_.tokenId == id).map(_.amount).sum)
-        val excess = v.state.contains(4.toByte)
-        val quote = if (length < 1L) Json.obj("done" -> true)
-          else if (excess) {
-            val since = math.max(h - began, 0L)
-            if (since >= length || h + 1L >= began + length) Json.obj("priceRaw" -> JsNull, "done" -> true)
-            else {
-              val num = BigInt(repayment) * opening * (length - since)
-              val den = BigInt(10000) * length
-              Json.obj("priceRaw" -> ((num + den - 1) / den).toString, "done" -> false)
-            }
-          } else {
-            val since = math.min(math.max(h - began, 0L), length)
-            val num = BigInt(repayment) * (BigInt(opening) * length - BigInt(opening - floor) * since)
-            val den = BigInt(10000) * length
-            val target = ((num + den - 1) / den).max(BigInt(held))
-            Json.obj("targetRaw" -> target.toString, "payRaw" -> (target - held).toString,
-              "bps" -> (BigInt(opening) * length - BigInt(opening - floor) * since) / length, "done" -> (h >= began + expiry))
-          }
-        val items = v.box.assets.drop(1).filterNot(t => currency.contains(t.tokenId))
-          .filter(t => !excess || t.amount < threshold)
-        Some(Json.obj("boxId" -> v.boxId, "shareTokenId" -> v.shareId, "bondId" -> v.bondAsset, "market" -> vm.map(_.name),
-          "type" -> (if (threshold == Long.MaxValue) "dutch" else "selective"), "state" -> v.state.map(_.toInt),
-          "repayment" -> repayment.toString, "openingBps" -> opening, "floorBps" -> floor, "length" -> length,
-          "expiry" -> expiry, "auctionStart" -> began, "currencyHeld" -> held.toString, "items" -> l.json.tokens(items),
-          "quote" -> quote, "pending" -> o.pending))
+        val currency = vaultCurrency(v)
+        val vm = ZcMarket.all.find(_.tokenId == currency)
+        if (m.exists(x => !vm.contains(x))) None else Some((o, currency, vm))
       }
+    }.sortBy(_._1.boxId).take(MaxPage).map { case (o, currency, vm) =>
+      val v = o.record
+      val Seq(repayment, opening, floor, length, expiry, threshold, began) = v.auction.take(7)
+      val held = currencyHeld(v)
+      val excess = v.state.contains(4.toByte)
+      val quote = if (length < 1L) Json.obj("done" -> true)
+        else if (excess) {
+          val done = BigInt(h) + 1 >= BigInt(began) + BigInt(length)
+          val priceOpt = if (done) None else excessPrice(v, h)
+          priceOpt match {
+            case None => Json.obj("priceRaw" -> JsNull, "done" -> true)
+            case Some(p) => Json.obj("priceRaw" -> p.toString, "done" -> false)
+          }
+        } else {
+          val since = (BigInt(h) - BigInt(began)).max(BigInt(0)).min(BigInt(length))
+          val target = BigInt(lotTarget(v, h)).max(BigInt(held))
+          val bps = (BigInt(opening) * BigInt(length) - (BigInt(opening) - BigInt(floor)) * since) / BigInt(length)
+          val done = BigInt(h) >= BigInt(began) + BigInt(expiry)
+          Json.obj("targetRaw" -> target.toString, "payRaw" -> (target - BigInt(held)).toString,
+            "bps" -> bps, "done" -> done)
+        }
+      val items = v.box.assets.drop(1).filterNot(t => currency.contains(t.tokenId))
+        .filter(t => !excess || t.amount < threshold)
+      Json.obj("boxId" -> v.boxId, "shareTokenId" -> v.shareId, "bondId" -> v.bondAsset, "market" -> vm.map(_.name),
+        "type" -> (if (threshold == Long.MaxValue) "dutch" else "selective"), "state" -> v.state.map(_.toInt),
+        "repayment" -> repayment.toString, "openingBps" -> opening, "floorBps" -> floor, "length" -> length,
+        "expiry" -> expiry, "auctionStart" -> began, "currencyHeld" -> held.toString, "items" -> l.json.tokens(items),
+        "quote" -> quote, "pending" -> o.pending)
     }
     withAt(s, Json.obj("lots" -> lots, "vaults" -> vaults))
   }
@@ -489,13 +483,26 @@ final class ZcReads(tracker: ZcTracker, resolver: ZcResolver, node: () => NodeAp
         val (kind, json) = recordJson(r, pending)
         answer(kind, json, Some(r.boxId), s.view.spentBy(id), None)
       case None =>
-        if (s.book.bonds.contains(id) || s.book.settlements.contains(id))
-          answer("bond", l.json.bondJson(id).get, s.book.bonds.get(id).orElse(s.book.settlements.get(id)).map(_.boxId), None, None)
-        else if (s.book.shareVaults.contains(id))
-          answer("shares", l.json.sharesJson(id).get, s.book.shareVaults.get(id).map(_.boxId), None, None)
-        else if (s.book.wrapVaults.contains(id))
-          answer("wrap", wrapJson(s.book.wrapVaults(id).record), s.book.wrapVaults.get(id).map(_.boxId), None, None)
-        else followSpent(s, l, id, answer)
+        s.view.spentBy(id).flatMap(txId => s.view.book.entry(id).map(_ -> txId)) match {
+          case Some((entry, spentTx)) =>
+            val (kind, json) = recordJson(entry.record, pending = false)
+            val pendingSucc = s.view.mempool.flatMap(_.pending.values.find { p =>
+              p.txId == spentTx && (p.record match {
+                case o: ZcOffer => o.predecessor.contains(id)
+                case a: ZcAsk => a.predecessor.contains(id)
+                case _ => false
+              })
+            }).map(_.record.boxId)
+            answer(kind, json, pendingSucc, Some(spentTx), pendingSucc)
+          case None =>
+            if (s.book.bonds.contains(id) || s.book.settlements.contains(id))
+              answer("bond", l.json.bondJson(id).get, s.book.bonds.get(id).orElse(s.book.settlements.get(id)).map(_.boxId), None, None)
+            else if (s.book.shareVaults.contains(id))
+              answer("shares", l.json.sharesJson(id).get, s.book.shareVaults.get(id).map(_.boxId), None, None)
+            else if (s.book.wrapVaults.contains(id))
+              answer("wrap", wrapJson(s.book.wrapVaults(id).record), s.book.wrapVaults.get(id).map(_.boxId), None, None)
+            else followSpent(s, l, id, answer)
+        }
     }
   }
 
@@ -565,7 +572,7 @@ final class ZcReads(tracker: ZcTracker, resolver: ZcResolver, node: () => NodeAp
     val s = snap()
     val l = new Lookups(s)
     val hits = mutable.LinkedHashMap.empty[String, JsObject]
-    def hit(id: String, kind: String, mk: Option[ZcMarket], title: String, status: Option[String], y: Option[Long]): Unit =
+    def hit(id: String, kind: String, mk: Option[ZcMarket], title: String, status: => Option[String], y: => Option[Long]): Unit =
       if (hits.size < MaxSearchHits && id.startsWith(q) && !hits.contains(id))
         hits(id) = Json.obj("id" -> id, "type" -> kind, "market" -> mk.map(_.name), "title" -> title, "status" -> status,
           "yieldBps" -> y)
@@ -594,13 +601,15 @@ final class ZcReads(tracker: ZcTracker, resolver: ZcResolver, node: () => NodeAp
   /** TokenInfo for each id, read from chain proofs, never from names. Names come from the index within the budget. */
   private def tokensOf(l: Lookups, s: Snap, ids: Seq[String]): JsObject = JsObject(ids.map { id =>
     val origin = l.origin(id)
-    val kind = origin.map(_.kind) match {
+    val info = if (l.budget.take()) Try(node().tokenById(id).get).toOption.flatten else None
+    val mintedExists = s.book.bonds.contains(id) || s.book.settlements.contains(id) ||
+      s.book.shareVaults.contains(id) || s.book.wrapVaults.contains(id) || info.isDefined
+    val kind = if (!mintedExists) "token" else origin.map(_.kind) match {
       case Some(ZcKind.Order) | Some(ZcKind.PricedOrder) => "bondUnit"
       case Some(ZcKind.FractionalMint) | Some(ZcKind.DutchAuctionMint) => "shares"
       case Some(ZcKind.WrapMint) => "wrapReceipt"
       case _ => "token"
     }
-    val info = if (l.budget.take()) Try(node().tokenById(id).get).toOption.flatten else None
     id -> Json.obj("id" -> id, "name" -> info.map(_.name), "decimals" -> info.map(_.decimals),
       "verified" -> (kind != "token"), "kind" -> kind,
       "bond" -> (if (kind == "bondUnit") l.json.bondJson(id) else None),
@@ -640,9 +649,9 @@ final class ZcReads(tracker: ZcTracker, resolver: ZcResolver, node: () => NodeAp
         val due = h >= r.maturity || confirmedBelow(s, ZcBondTerms.of(r))
         Json.obj("bond" -> l.json.bondJson(r.asset), "status" -> (if (due) "liquidatable" else "live"),
           "actions" -> Seq(
-            action("repay", h + 1L < r.maturity || !due, if (due) Some("the bond is due for liquidation") else None),
-            action("recollateralize", h >= r.box.creationHeight + RecollateralizeWait,
-              Some(s"opens at #${r.box.creationHeight + RecollateralizeWait}"))))
+            action("repay", h + 1L < r.maturity, if (h + 1L >= r.maturity) Some("the bond has reached maturity") else None),
+            action("recollateralize", h + 1L < r.maturity && h >= r.box.creationHeight + RecollateralizeWait,
+              Some(if (h + 1L >= r.maturity) "the bond has reached maturity" else s"opens at #${r.box.creationHeight + RecollateralizeWait}"))))
       }
     val named = s.book.view.open.filter { case (r, _) => r.namedHash.exists(hashes.contains) }.toVector
     def openOf[A](pick: PartialFunction[(ZcRecord, Boolean), JsObject]): Seq[JsObject] = named.collect(pick)
@@ -722,33 +731,37 @@ final class ZcReads(tracker: ZcTracker, resolver: ZcResolver, node: () => NodeAp
       case (Some(b), _, _) if h >= b.maturity => "maturedUnpaid"
       case (Some(_), _, _) => "live"
       case (None, Some(_), Some(v)) if v.holding => "pullNeeded"
-      case (None, _, Some(v)) if v.dutch && (v.state.contains(1.toByte) || v.state.contains(4.toByte)) => "auction"
+      case (None, _, Some(v)) if auctionOpen(v) && h < claimableFrom(v) => "auction"
       case (None, Some(st), None) => if (st.liquidated) "liquidated" else "repaid"
       case _ => "claimable"
     }
     val mark = live.map { b =>
       val left = b.maturity - (h + 1L)
+      val entryTerm = cost.map(c => b.maturity - c.height).filter(_ > 0L).getOrElse(left)
       val face = BigInt(b.repayment) * t.amount / whole
       val cover = l.json.coverBps(ZcBondTerms.of(b))
       val bid = s.book.offers.iterator.map(_.record).filter(o => o.market == b.market && left >= minBlocks(o) &&
-        left <= maxBlocks(o) && cover.forall(_ >= floorBps(o)) && height(o, h)).map(o => offerCurve(o).bpsAt(left))
+        left <= maxBlocks(o) && cover.forall(_ >= floorBps(o)) && height(o, h) &&
+        (whole == 1L || buysShares(o)) && l.json.standing(o).ok)
+        .map(o => offerCurve(o).bpsAt(left)).filter(_ >= 0L)
         .reduceOption(_ min _)
       bid match {
-        case Some(bps) if left > 0L =>
+        case Some(bps) if left > 0L && Year + BigInt(bps) * left > 0 =>
           val value = face * Year / (Year + BigInt(bps) * left)
           Json.obj("basis" -> "bid", "bidBps" -> bps, "value" -> value.toString, "atMaturity" -> face.toString,
-            "pnl" -> pnl(value), "entryBps" -> paid.flatMap(p => yieldBps(face, p, left)))
+            "pnl" -> pnl(value), "entryBps" -> paid.flatMap(p => yieldBps(face, p, entryTerm)))
         case _ =>
           val span = math.max(b.maturity - b.start, 1L)
           val principal = BigInt(if (b.market.tokenId.isEmpty) b.terms(1) else b.principalTokens.headOption.fold(0L)(_.amount)) *
             t.amount / whole
           val accrued = principal + (face - principal) * math.min(math.max(h - b.start, 0L), span) / span
           Json.obj("basis" -> "accrual", "value" -> accrued.toString, "atMaturity" -> face.toString, "pnl" -> pnl(accrued),
-            "entryBps" -> paid.flatMap(p => yieldBps(face, p, left)))
+            "entryBps" -> paid.flatMap(p => yieldBps(face, p, entryTerm)))
       }
     }.orElse(settled.map { st =>
+      val sigUsdMarket = l.origin(asset).flatMap(_.market).exists(_.tokenId.isDefined)
       val sigUsd = st.proceeds.filter(_.tokenId == sigmafi.zc.ZcContracts.SigUsdId).map(_.amount).sum
-      val value = BigInt(if (sigUsd > 0L) sigUsd else st.box.value) * t.amount / whole
+      val value = BigInt(if (sigUsdMarket) sigUsd else st.box.value) * t.amount / whole
       Json.obj("basis" -> "settled", "nanoErg" -> st.box.value.toString, "value" -> value.toString, "pnl" -> pnl(value))
     })
     Json.obj("tokenId" -> t.tokenId, "kind" -> (if (whole > 1L) "shares" else "bondUnit"), "units" -> t.amount.toString,

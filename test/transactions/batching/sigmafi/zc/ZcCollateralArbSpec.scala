@@ -346,4 +346,88 @@ class ZcCollateralArbSpec extends AnyFlatSpec with Matchers {
       reserved.size shouldBe bundles.size
     }
   }
+
+  it should "rank by estimated net profit so high-value non-arb listings cannot crowd out real smaller arbs" in {
+    client.execute { ctx =>
+      val h = ctx.getHeight + 1
+      val pA = poolEntry(nativePool(ctx, arbId(1), TokenA, 1000 * Erg, 1000000L)) // spot ~0.001 ERG / TokenA
+      val pools = Map(pA.nft -> pA.pool)
+
+      // 250 high-value non-arb asks (asking 2x spot = 0.002 ERG/TokenA for 50,000 TokenA each -> huge gross value, negative net!)
+      val overpriced = (1 to 250).map { _ =>
+        nodeOf(seeded(ctx, UTXO(ZcContracts.script(ZcKind.SaleOrder, Some(ZcMarket.Erg)).contract, MinBox,
+          Seq(tok(TokenA, 50000L)), Seq(bytes(sellerHash), longs(2000000L, 1L, 1L, h.toLong + 500L)), Some(h - 5))))
+      }
+      // One real profitable smaller lot (5,000 TokenA worth ~5 ERG for 2 ERG)
+      val realLot = nodeOf(seeded(ctx, UTXO(ZcContracts.script(ZcKind.LotAuction, Some(ZcMarket.Erg)).contract, 3000000L,
+        Seq(tok(TokenA, 5000L)),
+        Seq(bytes(sellerHash), longs(2 * Erg, 2 * Erg, h.toLong - 10, h.toLong + 100, h.toLong + 500, 2000000L)),
+        Some(h - 10))))
+
+      val book = bookOf(h - 1, (overpriced :+ realLot): _*)
+      val found = ZcCollateralArb.bestPlan(book, Seq.empty, pools, _ => Some(seller), h, 8 * Erg, MinBox,
+        slots = 6, minLegProceeds = 100000L, spentBoxes = Set.empty)
+      found shouldBe defined
+      found.get._1.target.boxId shouldBe realLot.boxId
+    }
+  }
+
+  it should "find the optimal partial SaleOrder fill even when minFill is unprofitable and full amount exceeds maxErgIn" in {
+    client.execute { ctx =>
+      val h = ctx.getHeight + 1
+      // Pool: 1000 ERG / 1,000,000 TokenA (~1,000,000 nanoERG per TokenA)
+      val pA = poolEntry(nativePool(ctx, arbId(1), TokenA, 1000 * Erg, 1000000L))
+      val pools = Map(pA.nft -> pA.pool)
+      // Ask selling 500,000 TokenA at 0.5x spot (500,000 nanoERG/TokenA), minFill = 1 (proceeds ~1M - MinBox 1M = 0 -> unprofitable!)
+      // Full fill costs 250 ERG >> maxErgIn (2 ERG), so both ends of [1, 499999] fail tryUnits!
+      val askBox = nodeOf(seeded(ctx, UTXO(ZcContracts.script(ZcKind.SaleOrder, Some(ZcMarket.Erg)).contract, MinBox,
+        Seq(tok(TokenA, 500000L)), Seq(bytes(sellerHash), longs(500000L, 1L, 1L, h.toLong + 500L)), Some(h - 5))))
+      val ask = ZcBoxes.read(askBox).get.asInstanceOf[ZcAsk]
+      val plan = ZcCollateralArb.evaluateSaleOrder(ask, pools, _ => Some(seller), h.toLong,
+        maxErgIn = 2 * Erg, maxLegs = 4, minLegProceeds = 100000L, pricer = ZcAssetPricer.Default)
+      plan shouldBe defined
+      plan.get.target.asInstanceOf[ZcSaleOrderTarget].full shouldBe false
+      plan.get.netProfit should be > Erg // ~4000 TokenA bought for 2 ERG, sold for ~3.97 ERG -> ~1.97 ERG profit!
+    }
+  }
+
+  it should "cap unbuildable targets per build in ZcCollateralArb.buildAll so spam cannot starve DEX cycles" in {
+    client.execute { ctx =>
+      val h = ctx.getHeight + 1
+      val pA = poolEntry(nativePool(ctx, arbId(1), TokenA, 1000 * Erg, 1000000L))
+      val states = Map(pA.nft -> pA.pool)
+      val places: Map[String, (Either[node.model.NodeBox, InputUTXO], Option[String])] =
+        Map(pA.nft -> (Left(pA.box) -> None))
+      val stakeBox = arbStakeBox(ctx, wallet, 10 * Erg)
+      val stake = SigmaFiBoxes.input(stakeBox, ctx).get
+
+      // 20 lots whose book boxIds mismatch their serialized box so sign fails (testing MaxUnbuildablePerBuild cap)
+      val badLots = (1 to 20).map { _ =>
+        nodeOf(seeded(ctx, UTXO(ZcContracts.script(ZcKind.LotAuction, Some(ZcMarket.Erg)).contract, 3000000L,
+          Seq(tok(TokenA, 5000L)),
+          Seq(bytes(sellerHash), longs(2 * Erg, 2 * Erg, h.toLong - 10, h.toLong + 100, h.toLong + 500, 2000000L)),
+          Some(h - 10))))
+      }
+      val chain = new ScriptedChain
+      val tracker = new ZcTracker(() => chain.api, scala.concurrent.ExecutionContext.global, ZcConfig.Default)
+      val resolver = new ZcResolver(() => chain.api, tracker)
+      var refusedCount = 0
+      val corruptedLots = badLots.zipWithIndex.map { case (b, i) =>
+        val fakeId = f"aa${i + 1}%062x"
+        val tx = node.model.IndexedTransaction(b.transactionId, Seq.empty, Seq.empty,
+          Seq(node.model.IndexedBox(b.copy(ergoTree = seller.ergoTreeHex), "", h - 10, 1L)),
+          h - 10, 1, "", 0L, 0, 0L, 100)
+        org.mockito.Mockito.when(chain.api.indexedTransactionById(b.transactionId)).thenReturn(scala.util.Success(Some(tx)))
+        b.copy(boxId = fakeId)
+      }
+      val spamBook = bookOf(h - 1, corruptedLots: _*)
+      val (bundles, _, _, _, _) = ZcCollateralArb.buildAll(ctx, wallet, spamBook, resolver, ArbBasis.Empty,
+        states, places, stake, None, stake, h, slots = 10, maxBundles = 5, maxErgIn = 8 * Erg, minProfit = MinBox,
+        minLegProceeds = 100000L, profitTo = profitTo,
+        selectUntil = Deadline.now + 10.seconds, buildUntil = Deadline.now + 10.seconds,
+        reserve = _ => true, refused = Set.empty, onRefuse = _ => refusedCount += 1)
+      bundles shouldBe empty
+      refusedCount shouldBe ZcCollateralArb.MaxUnbuildablePerBuild
+    }
+  }
 }

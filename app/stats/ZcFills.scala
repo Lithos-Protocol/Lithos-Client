@@ -39,9 +39,11 @@ final case class ZcFillPage(status: String, observedAt: Option[Long], indexedTo:
 
 /**
  * The ZC fill history: canonical blocks replayed from `sigmafi.zc.fillsFromHeight` on its own thread, each fill kept in
- * the stats store under its own keys and never pruned. Two node reads a block on average while catching up (a slice
- * of headers, then each block's transactions), plus one read to confirm each fill's order or ask and one for its
- * oracle data input. A reorg is undone block by block from the per-block records.
+ * the stats store under its own keys and pruned past `sigmafi.zc.fillsRetentionDays` (default 1460 days, ~4 years; 0
+ * keeps fills forever). Live bond and share facts maturing past the cutoff stay so later resales still price. Two node
+ * reads a block on average while catching up (a slice of headers, then each block's transactions), plus one read to
+ * confirm each fill's order or ask and one for its oracle data input. A reorg is undone block by block from the
+ * per-block records.
  *
  * Fills are recognised from outputs: a new bond at OUTPUTS(1) holding two units of INPUTS(0)'s id, or a payout tagged
  * with an input's id in R4 and the units in R5. Bond and share terms learned along the way (`bond/`, `share/`) price
@@ -102,7 +104,8 @@ final class ZcFills(settings: ZcConfig, openStore: () => ZcFillStore, api: () =>
     // Undo blocks the canonical chain no longer holds
     def canonical(c: (Int, String)): Boolean = c._1 <= indexed && source.headerAt(c._1).toOption.exists(_.id == c._2)
     while (!canonical(db.cursor.get) && work < blocksPerCycle) {
-      if (db.cursor.get._1 < settings.fillsFromHeight) {
+      val (ch, _) = db.cursor.get
+      if (ch < settings.fillsFromHeight || !db.hasBlock(ch)) {
         db.clear()
         db.initialize(settings.fillsFromHeight - 1, source.headerAt(settings.fillsFromHeight - 1).get.id)
       } else db.rollback()
@@ -120,6 +123,10 @@ final class ZcFills(settings: ZcConfig, openStore: () => ZcFillStore, api: () =>
       }
     }
     val cursor = db.cursor.get._1
+    if (settings.fillsRetentionDays > 0) {
+      val cutoff = cursor.toLong - settings.fillsRetentionDays.toLong * BlocksPerDay
+      if (cutoff > 0L) db.prune(cutoff.min(Int.MaxValue).toInt)
+    }
     state.set(Standing(if (cursor < indexed) "catching-up" else "ready", Some(System.currentTimeMillis()), Some(cursor)))
   }
 
@@ -186,6 +193,12 @@ final class ZcFills(settings: ZcConfig, openStore: () => ZcFillStore, api: () =>
 object ZcFills {
 
   final val BlocksPerCycle = 200
+  /** Expected Ergo blocks per day (2-minute block target), used to convert `fillsRetentionDays` to a height cutoff. */
+  final val BlocksPerDay = 720
+  /** Recent blocks never pruned so normal chain reorganisations always have per-block undo records. */
+  final val RollbackBuffer = 64
+  /** Most old block records (and matured fact entries) pruned per cycle, keeping background disk I/O bounded. */
+  final val PruneBatchSize = 256
 
   final case class Standing(status: String, observedAt: Option[Long], indexedTo: Option[Int])
 
@@ -269,6 +282,64 @@ final class ZcFillStore(database: Option[KeyValueStore], identity: JsObject) {
     val added = (record \ "keys").as[Seq[String]]
     write(added.map(k => Delete(key(k))) ++ Seq(Delete(key(blockKey(h))),
       put("cursor", Json.obj("height" -> (h - 1), "blockId" -> (record \ "parent").as[String]))))
+  }
+
+  def hasBlock(height: Int): Boolean = get(blockKey(height)).isDefined
+
+  /**
+   * Prunes per-block undo records, fills, and matured bond/share facts strictly older than `cutoffHeight` (while
+   * keeping at least [[ZcFills.RollbackBuffer]] blocks behind the cursor for reorg rollbacks, and preserving live
+   * `bond/` and `share/` facts whose bond matures at or after the prune height so later resales still price).
+   * Bounded to `limit` blocks / matured entries per call so pruning never stalls a cycle.
+   */
+  def prune(cutoffHeight: Int, limit: Int = ZcFills.PruneBatchSize): Int = {
+    val maxPrune = cursor.map(_._1 - ZcFills.RollbackBuffer).map(math.min(cutoffHeight, _)).getOrElse(0)
+    if (maxPrune <= 0 || limit <= 0) 0
+    else {
+      val deletes = scala.collection.mutable.LinkedHashSet.empty[String]
+      val blockCutoff = blockKey(maxPrune)
+      keys("block/").iterator.takeWhile(_ < blockCutoff).take(limit).foreach { bk =>
+        deletes += bk
+        get(bk).foreach { record =>
+          (record \ "keys").asOpt[Seq[String]].getOrElse(Seq.empty).foreach { k =>
+            if (k.startsWith("fill/")) deletes += k
+            else if (k.startsWith("bond/")) {
+              if (bond(k.stripPrefix("bond/")).forall(_.maturity < maxPrune)) deletes += k
+            } else if (k.startsWith("share/")) {
+              if (share(k.stripPrefix("share/")).forall { case (asset, _) => bond(asset).forall(_.maturity < maxPrune) })
+                deletes += k
+            }
+          }
+        }
+      }
+
+      // Sweep any remaining fill keys older than maxPrune, plus long-dated bonds/shares that have now matured.
+      val fillCutoff = f"fill/$maxPrune%010d"
+      keys("fill/").iterator.takeWhile(_ < fillCutoff).filterNot(deletes.contains).take(limit).foreach(deletes += _)
+
+      var extraBonds = 0
+      keys("bond/").iterator.filterNot(deletes.contains).foreach { bk =>
+        if (extraBonds < limit && bond(bk.stripPrefix("bond/")).forall(_.maturity < maxPrune)) {
+          deletes += bk
+          extraBonds += 1
+        }
+      }
+      var extraShares = 0
+      keys("share/").iterator.filterNot(deletes.contains).foreach { sk =>
+        if (extraShares < limit) {
+          val dead = share(sk.stripPrefix("share/")).forall { case (asset, _) =>
+            deletes.contains("bond/" + asset) || bond(asset).forall(_.maturity < maxPrune)
+          }
+          if (dead) {
+            deletes += sk
+            extraShares += 1
+          }
+        }
+      }
+
+      if (deletes.nonEmpty) write(deletes.iterator.map(k => Delete(key(k))).toSeq)
+      deletes.size
+    }
   }
 
   /** Drops the whole history, for a fork deeper than its start. */

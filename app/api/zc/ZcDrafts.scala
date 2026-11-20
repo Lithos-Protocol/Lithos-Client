@@ -89,23 +89,28 @@ object ZcDrafts {
         p <- resolvePrincipal(o.order, h, mat).toOption
         bond = ZcBondTerms.prospect(o.order, h, mat, p)
         if guardRefusal(o.order, bond, oracle, h).isEmpty && !oracle.exists(or => belowOwnRatio(bond, or.price))
-      } yield (o.boxId, BigInt(p), BigInt(o.order.repayment), mat, bond)
+      } yield (o.boxId, 1L, 1L, BigInt(p), BigInt(o.order.repayment), mat, bond)
       case a: ZcAskSource =>
         val bond = ZcBondTerms.of(a.bond.record)
         askPrice(a.ask, a.ask.token.amount, Some(bond), h).toOption
           .filter(_ => saleGuardRefusal(a.ask, bond, oracle, h).isEmpty && !oracle.exists(or => belowOwnRatio(bond, or.price)))
-          .map(p => (a.boxId, BigInt(p), BigInt(bond.repayment) * a.ask.token.amount / a.whole, bond.maturity, bond))
-    }.filter { case (_, _, _, mat, bond) =>
+          .map(p => (a.boxId, a.ask.token.amount, a.whole, BigInt(p), BigInt(bond.repayment), bond.maturity, bond))
+    }.filter { case (_, _, _, _, _, mat, bond) =>
       mat - (h + 1L) <= to && json.coverBps(bond).forall(_ >= coverage)
-    }.map { case (id, cost, face, mat, _) => (id, cost, face, mat, ZcPricing.rankYield(face, cost, mat - (h + 1L))) }
-      .toVector.sortBy(x => (-x._5, x._1))
+    }.map { case (id, units, whole, cost, repayment, mat, _) =>
+      val face = repayment * units
+      val rank = ZcPricing.rankYield(face, cost * whole, mat - (h + 1L))
+      (id, units, whole, cost, repayment, mat, rank)
+    }.toVector.sortBy(x => (-x._7, x._1))
     var left = BigInt(amount)
-    val taken = buys.filter { case (_, cost, _, _, _) => if (cost <= left) { left -= cost; true } else false }
+    val taken = buys.filter { case (_, _, _, cost, _, _, _) => if (cost <= left) { left -= cost; true } else false }
     val filled = BigInt(amount) - left
-    Json.obj("outcome" -> (if (taken.isEmpty) "waiting" else if (left == 0 || buys.forall(_._2 > left)) "full" else "partial"),
-      "matches" -> taken.map { case (id, cost, face, mat, _) => Json.obj("counterpartyId" -> id, "units" -> "1",
-        "cost" -> cost.toString, "face" -> face.toString,
-        "yieldBps" -> ZcPricing.yieldBps(face, cost, mat - (h + 1L)), "maturity" -> mat) },
+    Json.obj("outcome" -> (if (taken.isEmpty) "waiting" else if (left == 0) "full" else "partial"),
+      "matches" -> taken.map { case (id, units, whole, cost, repayment, mat, _) =>
+        val face = repayment * units
+        Json.obj("counterpartyId" -> id, "units" -> units.toString,
+          "cost" -> cost.toString, "face" -> (face / whole).toString,
+          "yieldBps" -> ZcPricing.yieldBps(face, cost * whole, mat - (h + 1L)), "maturity" -> mat) },
       "filled" -> filled.toString, "remaining" -> left.toString, "searched" -> buys.size)
   }
 
@@ -126,6 +131,8 @@ object ZcDrafts {
     val bounds = obj(d, "shareBounds")
     val (aFloor, aExpiry) = (bounds.flatMap(long(_, "floorBps")).getOrElse(0L), bounds.flatMap(long(_, "maxExpiry")).getOrElse(0L))
     check(capital > 0L && minYield >= 0L && floor > 0L, "capital and floorBps must be positive, minYieldBps not negative")
+    check(reserve >= 0L && minPrice >= 1L && aFloor >= 0L && aExpiry >= 0L,
+      "reserveNanoErg and shareBounds cannot be negative, and minPrice must be at least 1")
     check(minB >= 1L && maxB >= minB, "the window needs 1 <= minBlocks <= maxBlocks")
     check(curve.size <= ZcBoxes.MaxCurvePoints && ordered(curve) && curve.forall { case (y, b) => y >= 0L && b >= 1L },
       s"the curve holds at most ${ZcBoxes.MaxCurvePoints} points, blocks strictly increasing")

@@ -83,8 +83,9 @@ class ZcBatcherSpec extends TestKit(ActorSystem("zc-batcher-spec", ZcBatcherSpec
       Some(h - 100))))
 
   private def ergOrderBox(ctx: BlockchainContext, h: Int, expiryOffset: Long = 5000L,
-                          expiryFee: Long = Fee, ownerHash: String = borrowerHash): NodeBox = {
-    val terms = Seq(2 * Erg, Erg, 2 * Erg, h.toLong + 50000L, h.toLong + expiryOffset, expiryFee, 0L, 15000L, 60L)
+                          expiryFee: Long = Fee, ownerHash: String = borrowerHash,
+                          repayment: Long = 2 * Erg): NodeBox = {
+    val terms = Seq(repayment, Erg, repayment, h.toLong + 50000L, h.toLong + expiryOffset, expiryFee, 0L, 15000L, 60L)
     nodeOf(seeded(ctx, UTXO(ZcContracts.script(ZcKind.Order, Some(ZcMarket.Erg)).contract,
       expiryFee + MinBox, Seq(tok(SigUsd, 2000L)),
       Seq(longs(terms: _*), tokens(), bytes(ownerHash), bytes(expr(ZcExpression.OracleLiquidation, ZcMarket.Erg))),
@@ -332,6 +333,97 @@ class ZcBatcherSpec extends TestKit(ActorSystem("zc-batcher-spec", ZcBatcherSpec
       built.txs should have size 1
       built.txs.head._1.spentIds shouldBe Set(agedMatured.boxId)
       built.txs.head._1.feeBox.value shouldBe Reserve - Parameters.MinFee
+    }
+  }
+
+  it should "match inline builds identically when using precomputed matches, and fall back when an excluded box was taken" in {
+    client.execute { ctx =>
+      val h = 1900000
+      val oracle = oracleNodeBox(ctx, 500000000L, h - 5)
+      val offer = ergOfferBox(ctx, h, capital = 10 * Erg)
+      val order1 = ergOrderBox(ctx, h, expiryOffset = 5000L)
+      val order2 = ergOrderBox(ctx, h, expiryOffset = 5000L)
+
+      val chain = new ScriptedChain
+      val tracker = new ZcTracker(() => chain.api, ExecutionContext.global, ZcConfig.Default)
+      val resolver = new ZcResolver(() => chain.api, tracker)
+      discloseTx(chain.api, offer, lender.ergoTreeHex, h - 10)
+      discloseTx(chain.api, order1, borrower.ergoTreeHex, h - 10)
+      discloseTx(chain.api, order2, borrower.ergoTreeHex, h - 10)
+      val book = bookOf(h - 1, Some(oracle), offer -> (h - 10), order1 -> (h - 10), order2 -> (h - 10))
+      ZcBatchPlanner.warmCaches(book, ctx, resolver, SigmaFiBatchingConfig.Default, (h - 1).toLong)
+
+      val pre = ZcBatchPlanner.precomputeMatches(book, resolver)
+      pre.matches(book, h - 1, resolver.generation, Set.empty) shouldBe true
+      pre.matches(book, h - 1, resolver.generation, Set(order1.boxId)) shouldBe false
+      pre.matches(book.copy(headerId = "ff" * 32), h - 1, resolver.generation, Set.empty) shouldBe false
+
+      val inline = ZcBatchPlanner.build(ctx, wallet, book, resolver, SigmaFiBatchingConfig.Default,
+        signingHeight = h, minerFee = 0L, feeTo = feeTo, slots = 10, allowance = CandidateBudget.Unbounded,
+        deadline = None)
+      val cached = ZcBatchPlanner.build(ctx, wallet, book, resolver, SigmaFiBatchingConfig.Default,
+        signingHeight = h, minerFee = 0L, feeTo = feeTo, slots = 10, allowance = CandidateBudget.Unbounded,
+        deadline = None, precomputed = Some(pre))
+
+      cached.txs.map(_._1.spentIds) shouldBe inline.txs.map(_._1.spentIds)
+      cached.txs.map(_._1.fees) shouldBe inline.txs.map(_._1.fees)
+
+      // Excluding order1 invalidates precomputed matches cleanly so order2 is still matched
+      val withExcluded = ZcBatchPlanner.build(ctx, wallet, book, resolver, SigmaFiBatchingConfig.Default,
+        signingHeight = h, minerFee = 0L, feeTo = feeTo, slots = 10, allowance = CandidateBudget.Unbounded,
+        deadline = None, excluded = Set(order1.boxId), precomputed = Some(pre))
+      withExcluded.txs.map(_._1.spentIds) shouldBe Vector(Set(order2.boxId, offer.boxId))
+    }
+  }
+
+  it should "not blacklist unwarmed orders or kill an offer chain when resolver reads run out" in {
+    client.execute { ctx =>
+      val h = 1900000
+      val oracle = oracleNodeBox(ctx, 500000000L, h - 5)
+      val offer = ergOfferBox(ctx, h, capital = 10 * Erg)
+      // order1 has a higher yield (different ownerHash, unwarmed) and order2 has a warmed borrower script
+      val unwarmedHash = "cd" * 32
+      val order1 = ergOrderBox(ctx, h, expiryOffset = 5000L, repayment = 1200000000L, ownerHash = unwarmedHash)
+      val order2 = ergOrderBox(ctx, h, expiryOffset = 5000L, repayment = 1100000000L, ownerHash = borrowerHash)
+
+      val chain = new ScriptedChain
+      val tracker = new ZcTracker(() => chain.api, ExecutionContext.global, ZcConfig.Default)
+      val resolver = new ZcResolver(() => chain.api, tracker)
+      discloseTx(chain.api, offer, lender.ergoTreeHex, h - 10)
+      discloseTx(chain.api, order2, borrower.ergoTreeHex, h - 10)
+      // Warm ONLY offer and order2; leave order1 unwarmed and pass resolverReads = 0!
+      val warmBudget = new ZcBudget(10)
+      ZcBoxes.read(offer).foreach(resolver.script(_, pending = false, warmBudget))
+      ZcBoxes.read(order2).foreach(resolver.script(_, pending = false, warmBudget))
+
+      val book = bookOf(h - 1, Some(oracle), offer -> (h - 10), order1 -> (h - 10), order2 -> (h - 10))
+      val built = ZcBatchPlanner.build(ctx, wallet, book, resolver, SigmaFiBatchingConfig.Default,
+        signingHeight = h, minerFee = 0L, feeTo = feeTo, slots = 10, allowance = CandidateBudget.Unbounded,
+        deadline = None, resolverReads = 0)
+
+      // order1 was softly skipped (NOT blacklisted in failedIds!) and the offer chain stayed alive to match order2!
+      built.failedIds shouldBe empty
+      built.txs.size shouldBe 1
+      built.txs.head._1.spentIds shouldBe Set(order2.boxId, offer.boxId)
+    }
+  }
+
+  it should "bump resolver.generation when learning an undisclosed script so precomputed matches invalidate" in {
+    client.execute { ctx =>
+      val h = 1900000
+      val chain = new ScriptedChain
+      val tracker = new ZcTracker(() => chain.api, ExecutionContext.global, ZcConfig.Default)
+      val resolver = new ZcResolver(() => chain.api, tracker)
+      val spam = ergOrderBox(ctx, h, expiryOffset = 5000L, ownerHash = "ef" * 32)
+      val emptyTx = IndexedTransaction(spam.transactionId, Seq.empty, Seq.empty, Seq.empty, h - 10, 1, "", 0L, 0, 0L, 100)
+      when(chain.api.indexedTransactionById(spam.transactionId)).thenReturn(Success(Some(emptyTx)))
+
+      val book = bookOf(h - 1, None, spam -> (h - 10))
+      val pre = ZcBatchPlanner.precomputeMatches(book, resolver)
+      val genBefore = resolver.generation
+      ZcBoxes.read(spam).foreach(resolver.script(_, pending = false, new ZcBudget(5)))
+      resolver.generation should be > genBefore
+      pre.matches(book, h - 1, resolver.generation, Set.empty) shouldBe false
     }
   }
 }

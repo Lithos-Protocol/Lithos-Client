@@ -17,7 +17,7 @@ import transactions.candidate.BlockTxMessages.{CandidateTx, ChainFromPackage}
 import transactions.candidate.{CandidateBundle, CapitalEntry, CapitalOrigin}
 import work.lithos.mutations.{Contract, InputUTXO, Token, TxBuilder, UTXO}
 
-import scala.concurrent.duration.Deadline
+import scala.concurrent.duration.{Deadline, Duration}
 import scala.util.{Failure, Success, Try}
 
 /** What ZC box a collateral arb bundle purchases, and its contract-exact purchase terms. */
@@ -83,6 +83,8 @@ object ZcCollateralArb {
   final val MaxResolverReads = 32
   /** Most transactions in one ZC arb bundle (acquire + purchase + up to 6 liquidation legs). */
   final val MaxLegsPerBundle = 8
+  /** Most unbuildable/failing targets tolerated per block build so spam never starves DEX cycles. */
+  final val MaxUnbuildablePerBuild = 8
 
   private final val MinBox: Long = ZcBoxes.MinBox
 
@@ -109,15 +111,21 @@ object ZcCollateralArb {
     if (slots < 1 || maxErgIn < MinBox || minProfit < ArbStage.MinProfitOutput) None
     else {
       val h = blockHeight.toLong
-      // O(|pools|) upper-bound ERG spot map for the shipped AMM pricer: filters unpriced spam in O(1) and ranks
-      // high-value collateral ahead of dust spam before applying MaxEvaluatedTargets.
-      val spotErg: Option[Map[String, Double]] =
+      // O(|pools|) upper-bound sell spot map and lower-bound buy cost map for the shipped AMM pricer: filters
+      // unpriced and underwater boxes in O(1) and ranks highest estimated net profit first before MaxEvaluatedTargets.
+      val spotRates: Option[(Map[String, Double], Map[String, Double])] =
         if (pricer eq ZcAssetPricer.Default) {
           val direct = scala.collection.mutable.HashMap.empty[String, Double]
+          val minAcquire = scala.collection.mutable.HashMap.empty[String, Double]
           pools.valuesIterator.filter(_.x.isErg).foreach { p =>
             p.y.tokenId.foreach { id =>
-              val r = p.marginal(xIn = false)
-              if (r > direct.getOrElse(id, 0.0)) direct.update(id, r)
+              val sellRate = p.marginal(xIn = false)
+              if (sellRate > direct.getOrElse(id, 0.0)) direct.update(id, sellRate)
+              val buySlope = p.marginal(xIn = true)
+              if (buySlope > 0.0) {
+                val ergPerToken = 1.0 / buySlope
+                if (ergPerToken < minAcquire.getOrElse(id, Double.PositiveInfinity)) minAcquire.update(id, ergPerToken)
+              }
             }
           }
           val combined = scala.collection.mutable.HashMap.empty[String, Double] ++= direct
@@ -133,46 +141,92 @@ object ZcCollateralArb {
               }
             }
           }
-          Some(combined.toMap)
+          Some(combined.toMap -> minAcquire.toMap)
         } else None
+
+      def costLower(market: ZcMarket, priceInMarket: Long, minAcquire: Map[String, Double]): Double =
+        if (priceInMarket <= 0L) 0.0
+        else market.tokenId match {
+          case None => priceInMarket.toDouble
+          case Some(curId) =>
+            minAcquire.get(curId.toLowerCase).filter(_ > 0.0)
+              .map(r => priceInMarket.toDouble * r).getOrElse(Double.PositiveInfinity)
+        }
 
       def scoreCandidate(r: ZcRecord): Option[Double] = r match {
         case l: ZcLot if ZcRules.lotValid(l) && h < l.expiry =>
-          spotErg match {
-            case Some(spot) =>
-              val ergVal = if (l.market.tokenId.isDefined) math.max(0L, l.box.value - MinBox).toDouble else 0.0
-              var tokVal = 0.0
-              var hasPriced = false
-              l.box.assets.foreach { t =>
-                spot.get(t.tokenId.toLowerCase).foreach { rate =>
-                  if (t.amount > 0L && rate > 0.0) { hasPriced = true; tokVal += t.amount.toDouble * rate }
-                }
-              }
-              if (hasPriced || ergVal > 0.0) Some(ergVal + tokVal) else None
-            case None => Some(l.box.value.toDouble)
-          }
-        case v: ZcShareVault if ZcRules.auctionOpen(v) =>
-          spotErg match {
-            case Some(spot) =>
-              val cur = ZcRules.vaultCurrency(v)
-              val ergVal = if (cur.isDefined && !ZcRules.saleKeepsErg(v)) math.max(0L, v.box.value - MinBox).toDouble else 0.0
-              var tokVal = 0.0
-              var hasPriced = false
-              v.box.assets.drop(1).foreach { t =>
-                if (!cur.contains(t.tokenId)) {
+          spotRates match {
+            case Some((spot, minAcquire)) =>
+              val p = ZcRules.lotPrice(l, h)
+              if (p <= 0L) None
+              else {
+                val ergVal = if (l.market.tokenId.isDefined) math.max(0L, l.box.value - MinBox).toDouble else 0.0
+                var tokVal = 0.0
+                var hasPriced = false
+                l.box.assets.foreach { t =>
                   spot.get(t.tokenId.toLowerCase).foreach { rate =>
                     if (t.amount > 0L && rate > 0.0) { hasPriced = true; tokVal += t.amount.toDouble * rate }
                   }
                 }
+                val est = (ergVal + tokVal) - costLower(l.market, p, minAcquire)
+                if ((hasPriced || ergVal > 0.0) && est > 0.0) Some(est) else None
               }
-              if (hasPriced || ergVal > 0.0) Some(ergVal + tokVal) else None
+            case None => Some(l.box.value.toDouble)
+          }
+        case v: ZcShareVault if ZcRules.auctionOpen(v) =>
+          spotRates match {
+            case Some((spot, minAcquire)) =>
+              val cur = ZcRules.vaultCurrency(v)
+              ZcMarket.all.find(_.tokenId == cur).flatMap { market =>
+                val excess = ZcRules.excessAuction(v)
+                val priceOpt: Option[Long] = if (excess) {
+                  if (BigInt(h) >= BigInt(v.auction(6)) + BigInt(v.auction(3))) None
+                  else ZcRules.excessPrice(v, h).filter(_ > 0L)
+                } else {
+                  val before = ZcRules.currencyHeld(v)
+                  val aft = math.max(ZcRules.lotTarget(v, h), before)
+                  Some(aft - before)
+                }
+                priceOpt.flatMap { price =>
+                  val threshold = ZcRules.threshold(v)
+                  val ergVal = if (cur.isDefined && !ZcRules.saleKeepsErg(v)) math.max(0L, v.box.value - MinBox).toDouble else 0.0
+                  var tokVal = 0.0
+                  var hasPriced = false
+                  v.box.assets.drop(1).foreach { t =>
+                    if (!cur.contains(t.tokenId) && (!excess || t.amount < threshold)) {
+                      spot.get(t.tokenId.toLowerCase).foreach { rate =>
+                        if (t.amount > 0L && rate > 0.0) { hasPriced = true; tokVal += t.amount.toDouble * rate }
+                      }
+                    }
+                  }
+                  val est = (ergVal + tokVal) - costLower(market, price, minAcquire)
+                  if ((hasPriced || ergVal > 0.0) && est > 0.0) Some(est) else None
+                }
+              }
             case None => Some(v.box.value.toDouble)
           }
-        case a: ZcAsk if !a.priced && h < a.expiry && a.token.amount > 0L =>
-          spotErg match {
-            case Some(spot) =>
-              spot.get(a.token.tokenId.toLowerCase).filter(_ > 0.0)
-                .map(rate => a.box.value.toDouble + a.token.amount.toDouble * rate)
+        case a: ZcAsk if !a.priced && h < a.expiry && a.token.amount > 0L &&
+          a.terms.size >= 2 && a.terms(0) > 0L && a.terms(1) > 0L =>
+          spotRates match {
+            case Some((spot, minAcquire)) =>
+              spot.get(a.token.tokenId.toLowerCase).filter(_ > 0.0).flatMap { rate =>
+                val curUnitCost = a.market.tokenId match {
+                  case None => 1.0
+                  case Some(curId) => minAcquire.getOrElse(curId.toLowerCase, Double.PositiveInfinity)
+                }
+                if (curUnitCost.isInfinite) None
+                else {
+                  val fullRawPrice = ZcRules.fixedPrice(a, a.token.amount).toDouble
+                  val fullCost = if (a.market.tokenId.isEmpty) math.max(fullRawPrice, MinBox.toDouble)
+                    else fullRawPrice * curUnitCost + MinBox.toDouble
+                  val fullEst = a.box.value.toDouble + a.token.amount.toDouble * rate - fullCost
+                  val askUnitCost = (a.terms(0).toDouble / a.terms(1).toDouble) * curUnitCost
+                  val partialEst = if (rate > askUnitCost) a.token.amount.toDouble * (rate - askUnitCost)
+                    else Double.NegativeInfinity
+                  val est = math.max(fullEst, partialEst)
+                  if (est > 0.0) Some(est) else None
+                }
+              }
             case None => Some(a.box.value.toDouble)
           }
         case _ => None
@@ -262,7 +316,7 @@ object ZcCollateralArb {
     val before = ZcRules.currencyHeld(v)
     val excess = ZcRules.excessAuction(v)
     val (after, price) = if (excess) {
-      if (height >= v.auction(6) + v.auction(3)) return None
+      if (BigInt(height) >= BigInt(v.auction(6)) + BigInt(v.auction(3))) return None
       val p = ZcRules.excessPrice(v, height).getOrElse(return None)
       if (p <= 0L) return None
       (Try(Math.addExact(before, p)).getOrElse(return None), p)
@@ -373,23 +427,67 @@ object ZcCollateralArb {
       }
     }
 
-    // Check full fill, plus ternary search over partial fills when allowed and amount > minFill
+    // Check full fill, plus ternary search over affordable partial fills when allowed and amount > minFill
     var bestUnits: Option[(Long, Long, Option[ArbSwap], ZcBasketValuation, Long)] =
       tryUnits(ask.token.amount).map { case (p, acq, v, net) => (ask.token.amount, p, acq, v, net) }
 
     val minF = math.max(1L, ZcRules.minFill(ask))
     if (ask.token.amount > minF) {
-      var lo = minF
-      var hi = ask.token.amount - 1L
-      def score(u: Long): Long = tryUnits(u).fold(Long.MinValue)(_._4)
-      while (hi - lo > 2L) {
-        val third = (hi - lo) / 3L
-        val (m1, m2) = (lo + third, hi - third)
-        if (score(m1) < score(m2)) lo = m1 + 1L else hi = m2
+      def affordable(u: Long): Boolean = {
+        val pBig = ZcRules.fixedPrice(ask, u)
+        if (pBig <= 0 || !pBig.isValidLong) false
+        else ask.market.tokenId match {
+          case None => math.max(pBig.toLong, MinBox) <= maxErgIn
+          case Some(currencyId) =>
+            maxLegs >= 3 && ZcCollateralPricing.acquireToken(currencyId, pBig.toLong, pools).exists { case (acq, _) =>
+              acq.amountIn <= maxErgIn && Try(Math.addExact(acq.amountIn, MinBox)).getOrElse(Long.MaxValue) <= maxErgIn
+            }
+        }
       }
-      (lo to hi).foreach { u =>
-        tryUnits(u).foreach { case (p, acq, v, net) =>
-          if (bestUnits.forall(b => net > b._5)) bestUnits = Some((u, p, acq, v, net))
+
+      if (affordable(minF)) {
+        // Bound the upper search endpoint directly to the largest affordable partial fill so the search never plateaus
+        // on unaffordable sizes.
+        var hi = if (affordable(ask.token.amount - 1L)) ask.token.amount - 1L else {
+          var a = minF
+          var b = ask.token.amount - 1L
+          while (a < b) {
+            val mid = a + (b - a + 1L) / 2L
+            if (affordable(mid)) a = mid else b = mid - 1L
+          }
+          a
+        }
+        var lo = minF
+        // Use exact signed profit (including negative net for tiny fills) so the objective is strictly unimodal over [lo, hi].
+        def signedNet(u: Long): Long = {
+          val pBig = ZcRules.fixedPrice(ask, u)
+          if (pBig <= 0 || !pBig.isValidLong) Long.MinValue
+          else {
+            val rawPrice = pBig.toLong
+            ask.market.tokenId match {
+              case None =>
+                val paidErg = math.max(rawPrice, MinBox)
+                val valn = ZcCollateralPricing.evaluateBasket(0L, Seq(NodeAsset(tokenId, u)), pools, pricer,
+                  math.min(2, maxLegs - 1), 0L)
+                valn.totalErgOut - paidErg - valn.sweepErgCost
+              case Some(currencyId) =>
+                ZcCollateralPricing.acquireToken(currencyId, rawPrice, pools).fold(Long.MinValue) { case (acq, afterAcq) =>
+                  val valn = ZcCollateralPricing.evaluateBasket(0L, Seq(NodeAsset(tokenId, u)), afterAcq, pricer,
+                    math.min(2, maxLegs - 2), 0L)
+                  valn.totalErgOut - (acq.amountIn + MinBox) - valn.sweepErgCost
+                }
+            }
+          }
+        }
+        while (hi - lo > 2L) {
+          val third = (hi - lo) / 3L
+          val (m1, m2) = (lo + third, hi - third)
+          if (signedNet(m1) < signedNet(m2)) lo = m1 + 1L else hi = m2
+        }
+        (lo to hi).foreach { u =>
+          tryUnits(u).foreach { case (p, acq, v, net) =>
+            if (bestUnits.forall(b => net > b._5)) bestUnits = Some((u, p, acq, v, net))
+          }
         }
       }
     }
@@ -423,8 +521,8 @@ object ZcCollateralArb {
     // 1. Optional SigUSD acquisition leg
     plan.acquireSwap.foreach { planned =>
       val poolBox = curPoolBox(planned.pool.nft)
-      val swap = planned.pool.withBox(poolBox.id.toString).swap(planned.amountIn, planned.xIn)
-        .filter(_.amountOut == planned.amountOut)
+      val swap = planned.pool.withBox(poolBox.id.toString).swapFor(planned.amountOut, planned.xIn)
+        .filter(_.amountIn == planned.amountIn)
         .getOrElse(throw new IllegalStateException(s"pool ${planned.pool.nft} no longer supplies SigUSD as priced"))
       val tx = ArbLeg.build(ctx, wallet, swap, poolBox, Seq(carry), stake.contract, blockHeight)
       val id = CandidateTx.txId(tx)
@@ -586,7 +684,10 @@ object ZcCollateralArb {
     var spentZc = basis.spent ++ refused
     var bundles = Vector.empty[CandidateBundle]
     var usedSlots = 0
+    var unbuildable = 0
     var stopped = false
+    // Bound ZC arb to half the remaining selection window so a spam wave never starves DEX cycles.
+    val zcDeadline = Deadline.now + (selectUntil.timeLeft / 2).max(Duration.Zero)
 
     def poolInput(nft: String): InputUTXO = places(nft)._1.fold(box => {
       val in = SigmaFiBoxes.input(box, ctx).getOrElse(throw new IllegalStateException(s"pool box ${box.boxId} invalid"))
@@ -594,8 +695,8 @@ object ZcCollateralArb {
       in
     }, identity)
 
-    while (!stopped && bundles.size < maxBundles && usedSlots < slots &&
-      !selectUntil.isOverdue() && !buildUntil.isOverdue()) {
+    while (!stopped && bundles.size < maxBundles && usedSlots < slots && unbuildable < MaxUnbuildablePerBuild &&
+      !zcDeadline.isOverdue() && !buildUntil.isOverdue()) {
       bestPlan(book, createdZc, states, resolveScript, blockHeight, maxErgIn, minProfit, slots - usedSlots,
         minLegProceeds, spentZc, pricer) match {
         case None => stopped = true
@@ -605,6 +706,7 @@ object ZcCollateralArb {
               logger.warn(s"Could not build ZC collateral arb for ${plan.target.boxId} at $blockHeight, skipping: ${ex.getMessage}")
               spentZc += plan.target.boxId
               onRefuse(plan.target.boxId)
+              unbuildable += 1
             case Success((legs, movedPools, nextCarry, profitOut)) =>
               if (!reserve(nextCarry.id.toString)) {
                 logger.warn(s"${nextCarry.id} could not be noted as the next arb stake; stopping ZC arb for $blockHeight")

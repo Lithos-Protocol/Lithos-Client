@@ -144,4 +144,24 @@ class ZcMatcherSpec extends AnyFlatSpec with Matchers with org.scalatest.LoneEle
       _ => None, excluded = _.boxId == id(1))
     m.sources(Mkt).map(_.boxId) shouldBe Seq(id(2))
   }
+
+  it should "drop dust ERG offers and non-oracle orders so spam cannot crowd out MaxOffers or MaxSources" in {
+    // Dust offer claiming a huge batcher fee (10 ERG) while holding only 0.2 ERG cannot fill anything
+    val dustOffer = ergOffer(id(70), value = 200000000L, fee = 10 * Erg)
+    val realOffer = ergOffer(id(71), value = 10 * Erg, fee = 5000000L)
+    val matOrder = order(id(72))
+    val realOrder = oracleOrder(id(73))
+    val m = new ZcMatcher(ZcMarketBook.of(view(Seq(dustOffer, realOffer, matOrder, realOrder))),
+      _ => None, maxOffers = 1, maxSources = 1)
+    m.offerStates(Mkt).map(_.boxId) shouldBe Vector(id(71))
+    m.sources(Mkt).map(_.boxId) shouldBe Vector(id(73))
+  }
+
+  it should "exclude asks whose live bond is in the excluded set (e.g. liquidated in the same block)" in {
+    val boxes = Seq(oracleBond(id(81), id(80)), ask(id(82), id(80), 1L, Erg, 1L))
+    val origins = Map(id(80) -> unitOrigin(id(80)))
+    val m = new ZcMatcher(ZcMarketBook.of(view(boxes)), origins.get, excluded = _.boxId == id(81))
+    m.askSource(m.book.asks.head).left.toOption.get should include("excluded")
+    m.sources(Mkt) shouldBe empty
+  }
 }

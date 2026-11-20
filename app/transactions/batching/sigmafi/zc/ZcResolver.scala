@@ -64,7 +64,13 @@ final class ZcResolver(api: () => NodeApi, tracker: ZcTracker, maxEntries: Int =
 
   private def tried(key: String): Boolean = Option(missing.get(key)).exists(_ > height)
 
-  private def miss(key: String): Unit = { bound(missing); missing.put(key, height + RetryBlocks) }
+  private def miss(key: String): Unit = {
+    val h = height
+    val wasTried = Option(missing.get(key)).exists(_ > h)
+    bound(missing)
+    missing.put(key, h + RetryBlocks)
+    if (!wasTried && key.startsWith("s:")) learned.incrementAndGet()
+  }
 
   private def bound[K, V](m: ConcurrentHashMap[K, V]): Unit = if (m.size >= maxEntries) {
     val it = m.keySet().iterator()
@@ -146,28 +152,29 @@ final class ZcResolver(api: () => NodeApi, tracker: ZcTracker, maxEntries: Int =
           }
           fromFill.foreach(remember)
           val found = fromBox.get(hash).orElse(fromFill.flatMap(_.get(hash)))
-          // Only a lookup that read everything it needed proves the script undisclosed
-          if (found.isEmpty && fromFill.isDefined) miss(key)
+          // Only a confirmed lookup that read everything it needed proves the script undisclosed
+          if (!pending && found.isEmpty && fromFill.isDefined) miss(key)
           found
         }
       }
     }
 
   /**
-   * The scripts a transaction carries, by hash: empty when the node answered that it has no such transaction, None
-   * when it could not be asked.
+   * The scripts a transaction carries, by hash: None when the node could not be asked OR does not have the
+   * transaction (e.g. a mempool tx that just confirmed, or an indexed tx not yet flushed), so a transient miss
+   * never poisons the negative cache.
    */
   private def carried(txId: String, pending: Boolean, budget: ZcBudget): Option[Map[String, String]] = {
-    val answered: Option[Option[(Seq[Map[String, String]], Seq[String])]] =
-      if (pending) read(budget)(_.unconfirmedTransactionById(txId))
-        .map(_.map(tx => (tx.inputs.map(_.spendingProof.extension), tx.outputs.map(_.ergoTree))))
-      else read(budget)(_.indexedTransactionById(txId))
-        .map(_.map(tx => (tx.inputs.flatMap(_.spendingProof.map(_.extension)), (tx.inputs ++ tx.outputs).map(_.box.ergoTree))))
-    answered.map(_.fold(Map.empty[String, String]) { case (exts, trees) =>
+    val answered: Option[(Seq[Map[String, String]], Seq[String])] =
+      if (pending) read(budget)(_.unconfirmedTransactionById(txId)).flatten
+        .map(tx => (tx.inputs.map(_.spendingProof.extension), tx.outputs.map(_.ergoTree)))
+      else read(budget)(_.indexedTransactionById(txId)).flatten
+        .map(tx => (tx.inputs.flatMap(_.spendingProof.map(_.extension)), (tx.inputs ++ tx.outputs).map(_.box.ergoTree)))
+    answered.map { case (exts, trees) =>
       (exts.flatMap(_.get(ZcTx.DisclosureVar).toSeq.flatMap(ZcBoxes.disclosedTrees)) ++ trees)
         .filter(_.length <= ZcTx.MaxScriptChars)
         .flatMap(t => Try(Hex.toHexString(Blake2b256.hash(Hex.decode(t)))).toOption.map(_ -> t.toLowerCase)).toMap
-    })
+    }
   }
 
   /** Keeps `found`, first dropping scripts no tracked box names when it would not fit, then everything if still full. */
@@ -276,11 +283,22 @@ final class ZcResolver(api: () => NodeApi, tracker: ZcTracker, maxEntries: Int =
             answer = Some(at.boxId -> at.box.value)
             done = true
           case Some(prev) if steps < MaxChainSteps =>
-            path = at.boxId :: path
-            steps += 1
-            read(budget)(_.indexedBoxById(prev)).flatten.flatMap(b => ZcBoxes.read(b.box)) match {
-              case Some(r) => at = r
-              case None => done = true
+            val missKey = "c:" + at.boxId
+            if (tried(missKey)) done = true
+            else {
+              path = at.boxId :: path
+              steps += 1
+              read(budget)(_.indexedBoxById(prev)) match {
+                case None => done = true
+                case Some(foundOpt) =>
+                  val linked = foundOpt.filter(_.spentTransactionId.contains(at.box.transactionId))
+                    .flatMap(b => ZcBoxes.read(b.box))
+                    .filter(r => r.script == at.script && r.namedHash == at.namedHash)
+                  linked match {
+                    case Some(r) => at = r
+                    case None => miss(missKey); done = true
+                  }
+              }
             }
           case Some(_) => done = true
         }

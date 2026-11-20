@@ -6,11 +6,14 @@ import forwards.DFHelpers
 import forwards.contracts.DFContracts
 import node.model.{NodeAsset, NodeBox, NodeRegisters}
 import org.bouncycastle.util.encoders.Hex
-import org.ergoplatform.appkit.NetworkType
+import org.ergoplatform.appkit.{ErgoType, ErgoValue, NetworkType}
+import scorex.crypto.hash.Blake2b256
 import state.messages.{BlockInfo, BlockTx, TxOutput}
+import sigmafi.zc.{ZcContracts, ZcExpression}
 import transactions.batching.ergodex.{ErgoDexContracts, ErgoDexExecution, ErgoDexOrder, ErgoDexPool, MachinaOrder}
 import transactions.batching.forwards.DFBoxes
 import transactions.batching.lithosdex.{DexContracts, LDDeployments, LDT2TOrder, LithosDexOrder}
+import transactions.batching.sigmafi.zc._
 import work.lithos.mutations.Contract
 
 import scala.collection.concurrent.TrieMap
@@ -96,6 +99,8 @@ private[stats] object BatchingStatistics {
     val inputs = tx.inputs.map(in => block.inputBox(in.id))
     val liquidated = sigmaFi(tx, inputs, minerTree)
     if (liquidated.nonEmpty) return liquidated
+    val zc = sigmaFiZc(tx, inputs, minerTree)
+    if (zc.nonEmpty) return zc
     if (inputs.size < 2 || inputs.head.isEmpty || tx.outputs.size < 2) return Vector.empty
     forwardsContracts.flatMap(forwards(tx, inputs, _, registry, minerTree))
       .getOrElse(executions(tx, inputs, network, registry, minerTree))
@@ -181,21 +186,265 @@ private[stats] object BatchingStatistics {
     }
   }
 
+  private val BytesType = ErgoType.collType(ErgoType.byteType())
+
+  private def notRented(tx: BlockTx, inputIndex: Int): Boolean =
+    !tx.inputs(inputIndex).spendingProof.exists(_.ext.contains("127"))
+
+  private def extInt(tx: BlockTx, inputIndex: Int, key: String): Option[Int] =
+    tx.inputs(inputIndex).spendingProof.flatMap(_.ext.get(key)).flatMap { hex =>
+      Try(ErgoValue.fromHex(hex)).toOption
+        .filter(_.getType == ErgoType.integerType())
+        .map(_.getValue.asInstanceOf[Integer].intValue)
+    }
+
+  private def extBytes(tx: BlockTx, inputIndex: Int, key: String): Option[Array[Byte]] =
+    tx.inputs(inputIndex).spendingProof.flatMap(_.ext.get(key)).flatMap { hex =>
+      Try(ErgoValue.fromHex(hex)).toOption.filter(_.getType == BytesType).map(_.getValue).collect {
+        case c: sigma.Coll[Byte @unchecked] => c.toArray
+      }
+    }
+
+  private def r4Id(out: TxOutput): Option[String] =
+    out.registers.headOption.flatMap[ErgoValue[_]](h => Try(ErgoValue.fromHex(h)).toOption)
+      .filter(_.getType == BytesType).map(_.getValue).collect {
+        case c: sigma.Coll[Byte @unchecked] if c.length == 32 => Hex.toHexString(c.toArray)
+      }
+
+  private def treeHash(ergoTreeHex: String): Option[String] =
+    Try(Hex.toHexString(Blake2b256.hash(Hex.decode(ergoTreeHex)))).toOption
+
+  /**
+   * SigmaFi V2 ZC Standard batching transactions recorded under `"sigmafi"`: offer matches against orders and asks,
+   * standalone share/wrap mints and vault pulls, and packed liquidations, expiry refunds and paid refreshes
+   * (including wrap vault refreshes). Miner fees on packed transactions are split across records so totals count
+   * the fee once.
+   */
+  private def sigmaFiZc(tx: BlockTx, inputs: Seq[Option[TxOutput]], minerTree: String): Vector[BatchingFee] = {
+    if (inputs.isEmpty || tx.outputs.size < 2) return Vector.empty
+    zcOfferMatch(tx, inputs, minerTree)
+      .orElse(zcStandalone(tx, inputs, minerTree))
+      .getOrElse(zcPacked(tx, inputs, minerTree))
+  }
+
+  private def zcOfferMatch(tx: BlockTx, inputs: Seq[Option[TxOutput]], minerTree: String): Option[Vector[BatchingFee]] = {
+    if (inputs.size < 2 || !notRented(tx, 0) || !notRented(tx, 1)) return None
+    for {
+      in0 <- inputs.head
+      in1 <- inputs(1)
+      rec0 <- ZcBoxes.read(box(in0))
+      offer <- ZcBoxes.read(box(in1)).collect { case o: ZcOffer => o }
+      fee = transactionFee(tx)
+      result <- rec0 match {
+        case order: ZcOrder if order.market == offer.market && extInt(tx, 1, "0").contains(3) && tx.outputs.size >= 5 =>
+          val (out0, out1, out2, out3) = (tx.outputs(0), tx.outputs(1), tx.outputs(2), tx.outputs(3))
+          for {
+            bond <- ZcBoxes.read(box(out1)).collect { case b: ZcBond => b }
+            if bond.asset == order.boxId && bond.market == order.market
+            if out0.assets.exists(t => t.id.toString == order.boxId && t.amount == 1L)
+            if r4Id(out2).contains(order.boxId) && treeHash(out2.ergoTree).contains(order.borrowerHash)
+            rest <- ZcBoxes.read(box(out3)).collect { case o: ZcOffer => o }
+            if rest.market == offer.market && rest.predecessor.contains(offer.boxId)
+            principal = if (order.market.tokenId.isEmpty) bond.terms(1) else bond.principalTokens.headOption.fold(0L)(_.amount)
+            gross = BigInt(in0.value) + in1.value - out0.value - out1.value - out2.value - out3.value
+            maxGross = BigInt(ZcRules.fillFee(ZcOfferState.of(offer), principal))
+            if gross > 0 && gross <= maxGross && fee <= gross
+          } yield {
+            val local = tx.outputs.zipWithIndex.exists { case (o, i) => i >= 4 && o.ergoTree == minerTree }
+            Vector(BatchingFee(tx.id, order.boxId, SigmaFiProtocol, gross.toString, fee.toString, local))
+          }
+
+        case ask: ZcAsk if ask.market == offer.market && extInt(tx, 1, "0").contains(2) && tx.outputs.size >= 4 =>
+          val (out0, out1, out2) = (tx.outputs(0), tx.outputs(1), tx.outputs(2))
+          for {
+            (tagId, units) <- ZcBoxes.payoutTag(box(out0))
+            if tagId == ask.boxId && units >= 1L && units <= ask.token.amount
+            if treeHash(out0.ergoTree).contains(ask.sellerHash)
+            if out1.assets.exists(t => t.id.toString == ask.token.tokenId && t.amount == units)
+            rest <- ZcBoxes.read(box(out2)).collect { case o: ZcOffer => o }
+            if rest.market == offer.market && rest.predecessor.contains(offer.boxId)
+            partial = units < ask.token.amount
+            if !partial || tx.outputs.lift(3).flatMap(o => ZcBoxes.read(box(o))).exists {
+              case a: ZcAsk => a.box.ergoTree == ask.box.ergoTree && a.predecessor.contains(ask.boxId) &&
+                a.token.tokenId == ask.token.tokenId && a.token.amount == ask.token.amount - units
+              case _ => false
+            }
+            protoCount = if (partial) 4 else 3
+            if tx.outputs.size > protoCount
+            paid = ask.market.tokenId.fold(out0.value)(id => out0.assets.filter(_.id.toString == id).map(_.amount).sum)
+            gross = BigInt(in0.value) + in1.value - tx.outputs.take(protoCount).map(o => BigInt(o.value)).sum
+            maxGross = BigInt(ZcRules.fillFee(ZcOfferState.of(offer), paid)) + (if (partial) BigInt(0) else BigInt(in0.value))
+            if gross > 0 && gross <= maxGross && fee <= gross
+          } yield {
+            val local = tx.outputs.zipWithIndex.exists { case (o, i) => i >= protoCount && o.ergoTree == minerTree }
+            Vector(BatchingFee(tx.id, ask.boxId, SigmaFiProtocol, gross.toString, fee.toString, local))
+          }
+
+        case _ => None
+      }
+    } yield result
+  }
+
+  private def zcStandalone(tx: BlockTx, inputs: Seq[Option[TxOutput]], minerTree: String): Option[Vector[BatchingFee]] = {
+    if (!notRented(tx, 0)) return None
+    val fee = transactionFee(tx)
+    inputs.head.flatMap(in0 => ZcBoxes.read(box(in0)).flatMap {
+      case req: ZcShareRequest if req.terms.size >= 3 && tx.outputs.size >= 3 =>
+        val (out0, out1) = (tx.outputs(0), tx.outputs(1))
+        val (n, mintFee) = (req.terms(0), req.terms(2))
+        for {
+          v <- ZcBoxes.read(box(out1)).collect { case s: ZcShareVault => s }
+          if treeHash(out0.ergoTree).contains(req.ownerHash)
+          if out0.assets.exists(t => t.id.toString == req.shareId && t.amount == n)
+          if v.shareId == req.shareId && v.bondAsset == req.bondAsset && v.shares == n && v.dutch == req.dutch.isDefined
+          gross = BigInt(in0.value) - out0.value - out1.value
+          if gross > 0 && gross <= mintFee && fee <= gross
+        } yield {
+          val local = tx.outputs.zipWithIndex.exists { case (o, i) => i >= 2 && o.ergoTree == minerTree }
+          Vector(BatchingFee(tx.id, req.boxId, SigmaFiProtocol, gross.toString, fee.toString, local))
+        }
+
+      case v: ZcShareVault if v.holding && inputs.size >= 2 && notRented(tx, 1) =>
+        for {
+          in1 <- inputs(1)
+          s <- ZcBoxes.read(box(in1)).collect { case s: ZcSettlement => s } if s.asset == v.bondAsset
+          outIdx <- extInt(tx, 0, "0").filter(_ >= 0)
+          out <- tx.outputs.lift(outIdx)
+          next <- ZcBoxes.read(box(out)).collect { case sv: ZcShareVault => sv }
+          if next.box.ergoTree == v.box.ergoTree && next.shareId == v.shareId && next.bondAsset == v.bondAsset &&
+            !next.holding && next.shares == v.shares && next.outstanding == v.outstanding
+          if !tx.outputs.exists(_.assets.exists(_.id.toString == v.bondAsset))
+          gross = BigInt(in0.value) + in1.value - out.value
+          if gross > 0 && gross <= v.pullFee && fee <= gross
+        } yield {
+          val local = tx.outputs.zipWithIndex.exists { case (o, i) => i != outIdx && o.ergoTree == minerTree }
+          Vector(BatchingFee(tx.id, v.boxId, SigmaFiProtocol, gross.toString, fee.toString, local))
+        }
+
+      case req: ZcWrapRequest if inputs.size == 1 && tx.outputs.size >= 3 =>
+        val (out0, out1) = (tx.outputs(0), tx.outputs(1))
+        for {
+          v <- ZcBoxes.read(box(out1)).collect { case w: ZcWrapVault => w }
+          if treeHash(out0.ergoTree).contains(req.ownerHash)
+          if out0.assets.exists(t => t.id.toString == req.receiptId && t.amount == 1L)
+          if v.receiptId == req.receiptId && v.wrapped == req.wrapped
+          gross = BigInt(in0.value) - out0.value - out1.value
+          if gross > 0 && gross <= req.mintFee && fee <= gross
+        } yield {
+          val local = tx.outputs.zipWithIndex.exists { case (o, i) => i >= 2 && o.ergoTree == minerTree }
+          Vector(BatchingFee(tx.id, req.boxId, SigmaFiProtocol, gross.toString, fee.toString, local))
+        }
+
+      case _ => None
+    })
+  }
+
+  private def zcPacked(tx: BlockTx, inputs: Seq[Option[TxOutput]], minerTree: String): Vector[BatchingFee] = {
+    def refreshPiece(in: TxOutput, i: Int): Option[(Int, String, BigInt)] = for {
+      outIdx <- extInt(tx, i, "9").filter(_ >= 0)
+      out <- tx.outputs.lift(outIdx)
+      if out.ergoTree == in.ergoTree && out.assets == in.assets && out.registers == in.registers
+      gross = BigInt(in.value) - out.value
+      if gross > 0 && gross <= ZcPricing.RefreshBounty
+    } yield (outIdx, in.id, gross)
+
+    val pieces = inputs.indices.toVector.flatMap { i =>
+      if (!notRented(tx, i)) None
+      else inputs(i).flatMap(in => ZcBoxes.read(box(in)).flatMap {
+        case b: ZcBond =>
+          val liq = for {
+            rule <- Some(ZcRules.rule(b.liqHash, b.market)).filter(_ != ZcRule.Other)
+            expected = ZcContracts.expression(
+              if (rule == ZcRule.Maturity) ZcExpression.MaturityLiquidation else ZcExpression.OracleLiquidation,
+              if (rule == ZcRule.Maturity) None else Some(b.market)).bytes
+            if extBytes(tx, i, "0").exists(_.sameElements(expected))
+            outIdx <- extInt(tx, i, "1").filter(_ >= 0)
+            out <- tx.outputs.lift(outIdx)
+            s <- ZcBoxes.read(box(out)).collect { case s: ZcSettlement => s }
+            if s.liquidated && s.bondBoxId == b.boxId && s.asset == b.asset && out.assets == in.assets
+            gross = BigInt(in.value) - out.value
+            if gross > 0 && gross <= b.feeReserve
+          } yield (outIdx, b.boxId, gross)
+          liq.orElse(refreshPiece(in, i))
+
+        case _: ZcSettlement | _: ZcShareVault | _: ZcWrapVault =>
+          refreshPiece(in, i)
+
+        case o: ZcOrder => for {
+          outIdx <- extInt(tx, i, "0").filter(_ >= 0)
+          out <- tx.outputs.lift(outIdx)
+          if out.assets == in.assets && r4Id(out).contains(o.boxId) && treeHash(out.ergoTree).contains(o.borrowerHash)
+          gross = BigInt(in.value) - out.value
+          if gross > 0 && gross <= o.expiryFee
+        } yield (outIdx, o.boxId, gross)
+
+        case o: ZcOffer => for {
+          outIdx <- extInt(tx, i, "0").filter(_ >= 0)
+          out <- tx.outputs.lift(outIdx)
+          if out.assets == in.assets && r4Id(out).contains(o.boxId) && treeHash(out.ergoTree).contains(o.ownerHash)
+          gross = BigInt(in.value) - out.value
+          if gross > 0 && gross <= ZcRules.batcherFee(o)
+        } yield (outIdx, o.boxId, gross)
+
+        case a: ZcAsk => for {
+          outIdx <- extInt(tx, i, "0").filter(_ >= 0)
+          out <- tx.outputs.lift(outIdx)
+          if out.assets == in.assets && out.registers.size == 1 && r4Id(out).contains(a.boxId) &&
+            treeHash(out.ergoTree).contains(a.sellerHash) && out.value >= ZcBoxes.MinBox
+          gross = BigInt(in.value) - out.value
+          if gross > 0
+        } yield (outIdx, a.boxId, gross)
+
+        case l: ZcLot => for {
+          outIdx <- extInt(tx, i, "0").filter(_ >= 0)
+          out <- tx.outputs.lift(outIdx)
+          if out.assets == in.assets && r4Id(out).contains(l.boxId) && treeHash(out.ergoTree).contains(l.sellerHash)
+          gross = BigInt(in.value) - out.value
+          if gross > 0 && gross <= ZcRules.lotRefundFee(l)
+        } yield (outIdx, l.boxId, gross)
+
+        case _ => None
+      })
+    }
+
+    if (pieces.isEmpty || pieces.map(_._1).distinct.size != pieces.size) Vector.empty
+    else {
+      val totalGross = pieces.map(_._3).sum
+      val fee = transactionFee(tx)
+      if (fee > totalGross) Vector.empty
+      else {
+        val protoOuts = pieces.map(_._1).toSet
+        val local = tx.outputs.zipWithIndex.exists { case (out, i) => !protoOuts(i) && out.ergoTree == minerTree }
+        val (share, remainder) = (fee / pieces.size, fee % pieces.size)
+        pieces.zipWithIndex.map { case ((_, boxId, gross), k) =>
+          val paid = share + (if (k < remainder) 1 else 0)
+          BatchingFee(tx.id, boxId, SigmaFiProtocol, gross.toString, paid.toString, local)
+        }
+      }
+    }
+  }
+
   /** One arb cycle in a block: its record, and the ids of its legs in the order they spend the carry. */
   final case class ArbCycle(fee: BatchingFee, legs: Seq[String])
 
   /**
-   * A fee-less pool swap with one other input, the carry, and the carry handed on at output 1: the pool at input 0
-   * and its successor at output 0 under the same tree and NFT. A leg that ends a cycle splits its profit off to
-   * output 2. A leg that fills a token/token grid on the way has the order at input 2 and its child at output 2,
-   * and splits off nothing. Anything else in the transaction, a fee output included, makes it no leg.
+   * One fee-less leg of an arb chain:
+   * - a DEX pool swap (`[pool, carry] -> [poolNext, carryOut, profit?]`)
+   * - a token/token grid fill (`[pool, carry, gridOrder] -> [poolNext, carryOut, gridChild]`)
+   * - a SigmaFi ZC collateral purchase (`[zcTarget, carry] -> protoOutputs ++ sweepOut? ++ [carryOut] ++ profitOut?`)
+   * Anything else in the transaction, a fee output included, makes it no leg.
    */
-  private final case class ArbLegTx(tx: BlockTx, carryIn: TxOutput, nft: String, fillsGrid: Boolean = false) {
-    def carryOut: TxOutput = tx.outputs(1)
-    def profit: Option[TxOutput] = if (fillsGrid) None else tx.outputs.lift(2)
+  private final case class ArbLegTx(tx: BlockTx, carryIn: TxOutput, refId: String,
+                                    carryIndex: Int = 1, profitIndex: Option[Int] = None,
+                                    sweep: Option[TxOutput] = None, isZc: Boolean = false) {
+    def carryOut: TxOutput = tx.outputs(carryIndex)
+    def profit: Option[TxOutput] = profitIndex.flatMap(tx.outputs.lift)
   }
 
-  private def arbLeg(block: BlockInfo, tx: BlockTx, network: NetworkType): Option[ArbLegTx] = {
+  private def arbLeg(block: BlockInfo, tx: BlockTx, network: NetworkType): Option[ArbLegTx] =
+    poolArbLeg(block, tx, network).orElse(zcArbLeg(block, tx))
+
+  private def poolArbLeg(block: BlockInfo, tx: BlockTx, network: NetworkType): Option[ArbLegTx] = {
     val swaps = tx.inputs.size == 2 && tx.outputs.size >= 2 && tx.outputs.size <= 3
     val fillsGrid = tx.inputs.size == 3 && tx.outputs.size == 3
     if ((!swaps && !fillsGrid) || tx.outputs.exists(_.ergoTree == Contract.FEE.ergoTreeHex)) None
@@ -208,7 +457,69 @@ private[stats] object BatchingStatistics {
       if tx.outputs(1).ergoTree != pool.ergoTree && poolProtocol(pool, network).isDefined
       if !fillsGrid || block.inputBox(tx.inputs(2).id).exists(order =>
         tx.outputs(2).ergoTree == order.ergoTree && MachinaOrder.parseTokenGrid(box(order)).isDefined)
-    } yield ArbLegTx(tx, carry, nft, fillsGrid)
+    } yield ArbLegTx(tx, carry, nft, carryIndex = 1,
+      profitIndex = if (fillsGrid || tx.outputs.size < 3) None else Some(2))
+  }
+
+  private def zcArbLeg(block: BlockInfo, tx: BlockTx): Option[ArbLegTx] = {
+    if (tx.inputs.size != 2 || tx.outputs.size < 2 || tx.outputs.size > 5 ||
+      tx.outputs.exists(_.ergoTree == Contract.FEE.ergoTreeHex)) return None
+    for {
+      zcBox <- block.inputBox(tx.inputs.head.id)
+      carry <- block.inputBox(tx.inputs(1).id)
+      rec <- ZcBoxes.read(box(zcBox))
+      protoCount <- zcArbProtoCount(rec, zcBox, tx)
+      tail = tx.outputs.drop(protoCount)
+      (sweep, carryIdx, profitIdx) <- tail.size match {
+        case 1 => Some((None, protoCount, None))
+        case 2 =>
+          if (tail.head.assets.nonEmpty && tail.head.value == ZcBoxes.MinBox)
+            Some((Some(tail.head), protoCount + 1, None))
+          else if (tail.head.assets.isEmpty && tail(1).assets.isEmpty && tail(1).value > 0L)
+            Some((None, protoCount, Some(protoCount + 1)))
+          else None
+        case 3 =>
+          if (tail.head.assets.nonEmpty && tail.head.value == ZcBoxes.MinBox &&
+            tail(1).assets.isEmpty && tail(2).assets.isEmpty && tail(2).value > 0L)
+            Some((Some(tail.head), protoCount + 1, Some(protoCount + 2)))
+          else None
+        case _ => None
+      }
+      carryOut = tx.outputs(carryIdx)
+      if carryOut.ergoTree == carry.ergoTree && carryOut.ergoTree != zcBox.ergoTree
+    } yield ArbLegTx(tx, carry, rec.boxId, carryIndex = carryIdx, profitIndex = profitIdx, sweep = sweep, isZc = true)
+  }
+
+  private def zcArbProtoCount(rec: ZcRecord, zcBox: TxOutput, tx: BlockTx): Option[Int] = rec match {
+    case l: ZcLot =>
+      tx.outputs.headOption.filter { payout =>
+        r4Id(payout).contains(l.boxId) && treeHash(payout.ergoTree).contains(l.sellerHash) &&
+          (l.market.tokenId match {
+            case None => payout.assets.isEmpty && payout.value > zcBox.value
+            case Some(cur) => payout.value >= ZcBoxes.MinBox &&
+              payout.assets.exists(t => t.id.toString == cur && t.amount > 0L)
+          })
+      }.map(_ => 1)
+
+    case v: ZcShareVault if ZcRules.auctionOpen(v) =>
+      tx.outputs.headOption.flatMap(o => ZcBoxes.read(box(o))).collect {
+        case next: ZcShareVault if next.box.ergoTree == v.box.ergoTree && next.shareId == v.shareId &&
+          next.bondAsset == v.bondAsset && next.state.contains(2.toByte) => 1
+      }
+
+    case a: ZcAsk if !a.priced =>
+      for {
+        payout <- tx.outputs.headOption
+        (tagId, units) <- ZcBoxes.payoutTag(box(payout))
+        if tagId == a.boxId && units >= 1L && units <= a.token.amount && treeHash(payout.ergoTree).contains(a.sellerHash)
+        count <- if (units == a.token.amount) Some(1)
+          else tx.outputs.lift(1).flatMap(o => ZcBoxes.read(box(o))).collect {
+            case rest: ZcAsk if rest.box.ergoTree == a.box.ergoTree && rest.predecessor.contains(a.boxId) &&
+              rest.token.tokenId == a.token.tokenId && rest.token.amount == a.token.amount - units => 2
+          }
+      } yield count
+
+    case _ => None
   }
 
   /**
@@ -216,8 +527,9 @@ private[stats] object BatchingStatistics {
    * on, ending at a leg that splits off profit. A cycle starts from an ERG-only box at a plain key or at a key's
    * arb stake script, passes the carry at one tree throughout, and returns the start's ERG whole to that tree,
    * with no tokens, beside an ERG-only profit output at that tree, at the stake's owner's plain key, or at `true`,
-   * where the holding top-up can take it. The next cycle may start from the returned box. Gross is the profit;
-   * `local` means the carry was this client's: at `minerTree` or at its key's arb stake script.
+   * where the holding top-up can take it. Any unpriced-token sweep box on a ZC purchase leg must hold tokens plus
+   * `MinBox` at `tree` or `owner`. The next cycle may start from the returned box. Gross is the profit; `local`
+   * means the carry was this client's: at `minerTree` or at its key's arb stake script.
    */
   def arbCycles(block: BlockInfo, network: NetworkType, minerTree: String): Vector[ArbCycle] = {
     val legs = block.txs.flatMap(arbLeg(block, _, network)).toVector
@@ -241,13 +553,16 @@ private[stats] object BatchingStatistics {
       val tree = returned.ergoTree
       val profit = piece.last.profit.get
       val owner = ArbStakeContract.ownerP2PK(first.ergoTree)
-      val shaped = piece.size >= 2 && first.assets.isEmpty && (isP2PK(first.ergoTree) || owner.isDefined) &&
-        piece.forall(_.carryOut.ergoTree == tree) && returned.assets.isEmpty && returned.value == first.value &&
+      val sweepsOk = piece.forall(_.sweep.forall(s =>
+        s.assets.nonEmpty && s.value == ZcBoxes.MinBox && (s.ergoTree == tree || owner.contains(s.ergoTree))))
+      val validLen = piece.size >= 2 || (piece.size == 1 && piece.head.isZc)
+      val shaped = validLen && first.assets.isEmpty && (isP2PK(first.ergoTree) || owner.isDefined) &&
+        piece.forall(_.carryOut.ergoTree == tree) && sweepsOk && returned.assets.isEmpty && returned.value == first.value &&
         profit.assets.isEmpty && profit.value > 0L &&
         (profit.ergoTree == tree || owner.contains(profit.ergoTree) ||
           profit.ergoTree == Contract.SIGMA_TRUE.ergoTreeHex)
       if (!shaped) None
-      else Some(ArbCycle(BatchingFee(piece.last.tx.id, piece.head.nft, ArbProtocol, profit.value.toString, "0",
+      else Some(ArbCycle(BatchingFee(piece.last.tx.id, piece.head.refId, ArbProtocol, profit.value.toString, "0",
         local = tree == minerTree || owner.contains(minerTree)), piece.map(_.tx.id)))
     }.toVector
   }

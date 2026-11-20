@@ -148,6 +148,7 @@ final class ZcMatcher(val book: ZcMarketBook, origin: String => Option[ZcOrigin]
     claimOf(a.record.token.tokenId).flatMap { case (asset, whole, mint) =>
       book.bonds.get(asset) match {
         case None => Left("the bond is not live")
+        case Some(bond) if excluded(bond.record) => Left("the bond is excluded")
         case Some(bond) if bond.record.market != a.record.market => Left("the ask is paid in another market than its bond")
         case Some(_) if a.record.priced && !a.record.pricedAsset.contains(asset) => Left("the ask prices another bond")
         case Some(bond) => Right(ZcAskSource(a, asset, whole, bond, mint))
@@ -169,7 +170,7 @@ final class ZcMatcher(val book: ZcMarketBook, origin: String => Option[ZcOrigin]
 
   private def evaluateOrder(s: ZcOfferState, order: ZcOrder, ignoreYield: Boolean): Either[String, ZcMatch] = {
     val maturity =
-      if (window(order)) windowMaturity(s, order, oracle, height).toRight("no maturity in the window suits the offer")
+      if (window(order)) windowMaturity(s, order, oracle, height, ignoreYield).toRight("no maturity in the window suits the offer")
       else orderMaturity(order, height)
     for {
       m <- maturity
@@ -178,8 +179,9 @@ final class ZcMatcher(val book: ZcMarketBook, origin: String => Option[ZcOrigin]
       _ <- offerRefusal(s, bond, principal, 1L, 1L, oracle, height, primary = true, ignoreYield = ignoreYield).toLeft(())
       _ <- guardRefusal(order, bond, oracle, height).toLeft(())
       fee = fillFee(s, principal)
-      matched <- purchase(s, order.boxId, 1L, 1L, principal, order.repayment, m, fee,
-        fee + deliveryErg(s.offer, shares = false) + feeReserve(s.offer) + bond.principalErg)
+      ergOutBig = BigInt(fee) + deliveryErgBig(s.offer, shares = false) + BigInt(feeReserve(s.offer)) + BigInt(bond.principalErg)
+      ergOut <- if (ergOutBig >= 0 && ergOutBig.isValidLong) Right(ergOutBig.toLong) else Left("the fill's ERG requirement overflows")
+      matched <- purchase(s, order.boxId, 1L, 1L, principal, order.repayment, m, fee, ergOut)
     } yield matched
   }
 
@@ -194,8 +196,9 @@ final class ZcMatcher(val book: ZcMarketBook, origin: String => Option[ZcOrigin]
       _ <- offerRefusal(s, bond, price, a.units, a.whole, oracle, height, shares = a.shares, ignoreYield = ignoreYield).toLeft(())
       _ <- saleGuardRefusal(a.ask, bond, oracle, height).toLeft(())
       fee = fillFee(s, price)
-      matched <- purchase(s, a.boxId, a.units, a.whole, price, bond.repayment, bond.maturity, fee,
-        fee + deliveryErg(s.offer, a.shares) + (if (token(s.offer)) ZcBoxes.MinBox else price))
+      ergOutBig = BigInt(fee) + deliveryErgBig(s.offer, a.shares) + BigInt(if (token(s.offer)) ZcBoxes.MinBox else price)
+      ergOut <- if (ergOutBig >= 0 && ergOutBig.isValidLong) Right(ergOutBig.toLong) else Left("the fill's ERG requirement overflows")
+      matched <- purchase(s, a.boxId, a.units, a.whole, price, bond.repayment, bond.maturity, fee, ergOut)
     } yield matched
   }
 
@@ -207,7 +210,8 @@ final class ZcMatcher(val book: ZcMarketBook, origin: String => Option[ZcOrigin]
   private def purchase(s: ZcOfferState, sourceId: String, units: Long, whole: Long, price: Long, repayment: Long,
                        maturity: Long, fee: Long, ergOut: Long): Either[String, ZcMatch] =
     if (fee <= ZcMatcher.MinerFee) Left("the batcher reward does not cover a miner fee")
-    else if (s.value - ergOut < ZcBoxes.MinBox) Left("the offer cannot keep a box minimum after this fill")
+    else if (ergOut < 0L || BigInt(s.value) - BigInt(ergOut) < BigInt(ZcBoxes.MinBox))
+      Left("the offer cannot keep a box minimum after this fill")
     else {
       val c = cost(s, price)
       val face = BigInt(repayment) * units
@@ -219,21 +223,42 @@ final class ZcMatcher(val book: ZcMarketBook, origin: String => Option[ZcOrigin]
 
   // ─── the book's matchable sides ────────────────────────────────────────────
 
-  /** Offers a batcher would run now: unexpired, worth a miner fee, by zcs1's priority. */
+  /** Offers a batcher would run now: unexpired, valid policy/curve/budgets, funded for at least one fill, by priority. */
   def offerStates(market: ZcMarket): Vector[ZcOfferState] =
-    book.offers.iterator.filter(o => o.record.market == market && height + 1L < o.record.expiry && !excluded(o.record))
-      .map(o => ZcOfferState.of(o.record)).filter(s => fillFee(s, s.capital) > ZcMatcher.MinerFee)
+    book.offers.iterator.filter { op =>
+      val o = op.record
+      val s = ZcOfferState.of(o)
+      o.market == market && height + 1L < o.expiry && !excluded(o) &&
+        policyValid(o) && offerCurve(o).ordered && o.terms(0) >= 0L &&
+        minBlocks(o) >= 1L && maxBlocks(o) >= minBlocks(o) &&
+        feeReserve(o) >= 0L && deliveryValid(o) && batcherFee(o) >= ZcPricing.MinBatchingFee &&
+        (if (!token(o)) {
+          val minDelivery = deliveryErgBig(o, shares = buysShares(o))
+          BigInt(s.value) > BigInt(batcherFee(o)) + BigInt(ZcBoxes.MinBox) + minDelivery
+        } else {
+          originalCapital(s) > 0L && s.capital > 0L && s.capital <= originalCapital(s) &&
+            spendBudget(o) > 0L && rewardBudget(o) > 0L && rewardBudget(o) < spendBudget(o) &&
+            minFillBps(o) >= 100L && minFillBps(o) <= 10000L &&
+            BigInt(s.value) >= BigInt(ZcBoxes.MinBox) + BigInt(batcherFee(o)) + BigInt(ZcPricing.MinBatchingFee)
+        })
+    }.map(o => ZcOfferState.of(o.record)).filter(s => fillFee(s, s.capital) > ZcMatcher.MinerFee)
       .toVector.sortBy(s => (-fillFee(s, s.capital), s.boxId))
 
   /**
    * Sources a batcher could serve now, before any offer's own test, best own yield first. `excluded` drops boxes known
-   * to break script disclosure, which zcs1 batchers skip.
+   * to break script disclosure, which zcs1 batchers skip. Only oracle-rule orders/bonds qualify because lend offers
+   * match only oracle-rule bonds.
    */
   def sources(market: ZcMarket): Vector[ZcSource] = {
-    val orders = book.orders.iterator.filter(o => o.record.market == market && !excluded(o.record) &&
-      orderRefusal(o.record, height).isEmpty).map(ZcOrderSource)
+    val orders = book.orders.iterator.filter { o =>
+      o.record.market == market && !excluded(o.record) &&
+        rule(o.record.liqHash, market) == ZcRule.Oracle &&
+        orderRefusal(o.record, height).isEmpty
+    }.map(ZcOrderSource)
     val asks = book.asks.iterator.filter(a => a.record.market == market && height + 1L < a.record.expiry && !excluded(a.record))
       .flatMap(a => askSource(a).toOption)
+      .filter(a => rule(a.bond.record.liqHash, market) == ZcRule.Oracle &&
+        !oracle.exists(or => belowOwnRatio(ZcBondTerms.of(a.bond.record), or.price)))
     (orders ++ asks).map(s => s -> ownYield(s)).toVector.sortBy { case (s, y) => (-y, s.boxId) }.map(_._1)
   }
 

@@ -9,13 +9,14 @@ import sigmafi.zc.{ZcContracts, ZcMarket}
  * expressions compare it.
  */
 final case class YieldLine(start: Long, startBps: Long, end: Long, endBps: Long) {
-  def valid: Boolean = startBps >= 0L && endBps >= 0L && end > start
+  def valid: Boolean = start >= 0L && startBps >= 0L && endBps >= 0L && end > start
 
   /** The yield at `height` as `(rate, span)`: exactly `rate / span` bps. */
   def at(height: Long): (BigInt, BigInt) = {
     val h = height.max(start).min(end)
-    val span = BigInt(end - start)
-    (BigInt(startBps) * span + (BigInt(endBps) - startBps) * (h - start), span)
+    val span = BigInt(end) - BigInt(start)
+    if (span <= 0) (BigInt(startBps.max(0L)), BigInt(1))
+    else (BigInt(startBps) * span + (BigInt(endBps) - BigInt(startBps)) * (BigInt(h) - BigInt(start)), span)
   }
 
   /** The yield at `height` in whole bps, rounded down. */
@@ -26,7 +27,7 @@ final case class YieldLine(start: Long, startBps: Long, end: Long, endBps: Long)
     val (rate, span) = at(height)
     val num = BigInt(units) * repayment * ZcPricing.Year * span
     val den = BigInt(whole) * (ZcPricing.Year * span + rate * blocksLeft)
-    (num + den - 1) / den
+    if (den <= 0) BigInt(0) else (num + den - 1) / den
   }
 }
 
@@ -36,7 +37,7 @@ final case class YieldLine(start: Long, startBps: Long, end: Long, endBps: Long)
  * exactly as the offer does.
  */
 final case class YieldCurve(minBps: Long, points: Seq[(Long, Long)]) {
-  def ordered: Boolean = ZcPricing.ordered(points)
+  def ordered: Boolean = ZcPricing.ordered(points) && points.forall(p => p._1 >= 0L && p._2 >= 0L)
 
   /** The yield required at `blocksLeft` as `(rate, span)`. */
   def at(blocksLeft: Long): (BigInt, BigInt) = {
@@ -56,7 +57,8 @@ final case class YieldCurve(minBps: Long, points: Seq[(Long, Long)]) {
   /** The most the offer pays for `units` of `whole` (an ERG offer's fee included), rounded down. */
   def ceiling(repayment: Long, units: Long, whole: Long, blocksLeft: Long): BigInt = {
     val (rate, span) = at(blocksLeft)
-    BigInt(repayment) * units * ZcPricing.Year * span / (BigInt(whole) * (ZcPricing.Year * span + rate * blocksLeft))
+    val den = BigInt(whole) * (ZcPricing.Year * span + rate * blocksLeft)
+    if (den <= 0) BigInt(0) else BigInt(repayment) * units * ZcPricing.Year * span / den
   }
 }
 
@@ -66,7 +68,7 @@ final case class YieldCurve(minBps: Long, points: Seq[(Long, Long)]) {
  */
 final case class BorrowCurve(maxBps: Long, points: Seq[(Long, Long)]) {
   def valid: Boolean = maxBps >= 0L && points.size <= ZcBoxes.MaxCurvePoints && ZcPricing.ordered(points) &&
-    points.forall(_._1 >= 0L)
+    points.forall(p => p._1 >= 0L && p._2 >= 0L)
 
   def at(blocksLeft: Long): (BigInt, BigInt) = {
     val (rate, span) = ZcPricing.interpolate(points, blocksLeft).getOrElse((BigInt(maxBps), BigInt(1)))
@@ -80,7 +82,7 @@ final case class BorrowCurve(maxBps: Long, points: Seq[(Long, Long)]) {
     val (rate, span) = at(blocksLeft)
     val num = BigInt(repayment) * ZcPricing.Year * span
     val den = ZcPricing.Year * span + rate * blocksLeft
-    (num + den - 1) / den
+    if (den <= 0) BigInt(0) else (num + den - 1) / den
   }
 
   def breakpoints: Seq[Long] = points.map(_._2)
@@ -115,20 +117,20 @@ object ZcPricing {
   def ordered(points: Seq[(Long, Long)]): Boolean =
     points.iterator.map(_._2).sliding(2).forall { case Seq(a, b) => b > a; case _ => true }
 
-  /** The curve through `points` at `blocksLeft` as `(rate, span)`, flat beyond the ends; None with no points. */
+  /** The curve through `points` at `blocksLeft` as `(rate, span)`, flat beyond the ends; None with no or unordered points. */
   private[zc] def interpolate(points: Seq[(Long, Long)], blocksLeft: Long): Option[(BigInt, BigInt)] =
-    if (points.isEmpty) None
+    if (points.isEmpty || !ordered(points)) None
     else {
       val below = points.count(_._2 <= blocksLeft)
-      Some(
-        if (below == 0) (BigInt(points.head._1), BigInt(1))
-        else if (below == points.size) (BigInt(points.last._1), BigInt(1))
-        else {
-          val (y1, d1) = points(below - 1)
-          val (y2, d2) = points(below)
-          val l = BigInt(d2 - d1)
-          (BigInt(y1) * l + (BigInt(y2) - y1) * (blocksLeft - d1), l)
-        })
+      if (below == 0) Some((BigInt(points.head._1), BigInt(1)))
+      else if (below == points.size) Some((BigInt(points.last._1), BigInt(1)))
+      else {
+        val (y1, d1) = points(below - 1)
+        val (y2, d2) = points(below)
+        val l = BigInt(d2) - BigInt(d1)
+        if (l <= 0) None
+        else Some((BigInt(y1) * l + (BigInt(y2) - BigInt(y1)) * (BigInt(blocksLeft) - BigInt(d1)), l))
+      }
     }
 
   /** `(bps, blocks)` pairs from a flat curve tail. */
@@ -139,17 +141,24 @@ object ZcPricing {
    * maturity keeps its height: rounding it could shorten a 10-day loan to minutes.
    */
   def snapMaturity(target: Long, height: Long): Long =
-    if (target - height < Grid) target
+    if (BigInt(target) - BigInt(height) < BigInt(Grid)) target
     else {
       val below = Math.floorDiv(target, Grid) * Grid
-      Seq(below, below + Grid).minBy(g => (math.abs(g - target), -g))
+      val above = BigInt(below) + BigInt(Grid)
+      if (!above.isValidLong) below
+      else Seq(below, above.toLong).minBy(g => ((BigInt(g) - BigInt(target)).abs, -BigInt(g)))
     }
 
   /** The grid heights from `from` to `to` inclusive, at most 64. */
-  def gridBetween(from: Long, to: Long): Seq[Long] = {
-    val first = Math.floorDiv(from + Grid - 1L, Grid) * Grid
-    Iterator.iterate(first)(_ + Grid).takeWhile(_ <= to).take(64).toSeq
-  }
+  def gridBetween(from: Long, to: Long): Seq[Long] =
+    if (from > to) Seq.empty
+    else {
+      val g = BigInt(Grid)
+      val f = BigInt(from)
+      val t = BigInt(to)
+      val first = ((f + g - 1) / g) * g
+      Iterator.iterate(first)(_ + g).takeWhile(x => x <= t && x.isValidLong).take(64).map(_.toLong).toSeq
+    }
 
   /** zcs1's default order expiry: `week` blocks, but never more than half a fixed maturity's remaining term. */
   def defaultOrderExpiry(height: Long, maturity: Option[Long], week: Long): Long =

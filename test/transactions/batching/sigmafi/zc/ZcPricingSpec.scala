@@ -106,4 +106,20 @@ class ZcPricingSpec extends AnyFlatSpec with Matchers {
     cheaper2 shouldBe false
     crossingPrice(ZcMarket.Erg, 10000000000L, Seq(NodeAsset("ab" * 32, 5L)), 6000000000L, 15000L) shouldBe None
   }
+
+  "Adversarial extreme register bounds" should "never overflow or divide by zero in YieldLine, interpolate or curves" in {
+    // YieldLine with start/end spanning > Long.MaxValue or negative start
+    YieldLine(500L, -10L, 1000L, 100L).valid shouldBe false
+    YieldLine(500L, 0L, 1000L, Long.MaxValue).valid shouldBe true
+    YieldLine(500L, 0L, 1000L, Long.MaxValue).at(Long.MaxValue / 2)._2 should be > BigInt(0)
+    YieldLine(500L, Long.MinValue, 1000L, Long.MaxValue).valid shouldBe false
+    YieldLine(500L, Long.MinValue, 1000L, Long.MaxValue).price(1000L, 100L, 1L, 1L, 1000L) should be > BigInt(0)
+    // interpolate with reversed or extreme Long coordinates
+    interpolate(Seq(500L -> Long.MinValue, 1000L -> Long.MaxValue), 1000L).get._2 should be > BigInt(0)
+    interpolate(Seq(500L -> 100L, 1000L -> 50L), 1000L) shouldBe None
+    YieldCurve(0L, Seq(500L -> 0L, 1000L -> Long.MaxValue)).ordered shouldBe true
+    YieldCurve(0L, Seq(500L -> 0L, 1000L -> Long.MaxValue)).ceiling(1000000L, 1000L, 1L, 1L) should be > BigInt(0)
+    BorrowCurve(5000L, Seq(500L -> 0L, 1000L -> Long.MaxValue)).valid shouldBe true
+    BorrowCurve(5000L, Seq(500L -> 0L, 1000L -> Long.MaxValue)).price(1000000L, 1000L) should be > BigInt(0)
+  }
 }

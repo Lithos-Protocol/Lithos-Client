@@ -10,6 +10,7 @@ import transactions.batching.{Batcher, BatchingMempool}
 import transactions.candidate.{CandidateBudget, CandidateBundle, CandidateCapital}
 import transactions.engine.EngineBroadcast
 
+import java.util.concurrent.atomic.AtomicReference
 import scala.concurrent.duration._
 import scala.util.{Failure, Success, Try}
 import javax.inject.{Inject, Named}
@@ -46,6 +47,29 @@ class ZcBatcher(nodeContext: NodeContext,
 
   private val batching = settings.batching
 
+  /** Off-critical-path precomputed offer matches for the newest confirmed book revision. */
+  private val cachedMatches = new AtomicReference[Option[ZcPrecomputedMatches]](None)
+  /** Boxes refused by broadcast, suppressed for `skippedOrderTtlMs` even when the book exceeds `maxTrackedOrders`. */
+  private val broadcastRefused = new AtomicReference[Map[String, Long]](Map.empty)
+
+  private def activeBroadcastRefused(): Set[String] = {
+    val cutoff = System.currentTimeMillis() - batching.skippedOrderTtlMs
+    broadcastRefused.get.collect { case (id, at) if at > cutoff => id }.toSet
+  }
+
+  private def noteBroadcastRefused(ids: Iterable[String]): Unit = if (ids.nonEmpty) {
+    val now = System.currentTimeMillis()
+    val cutoff = now - batching.skippedOrderTtlMs
+    broadcastRefused.updateAndGet { held =>
+      val live = held.filter { case (_, at) => at > cutoff } ++ ids.iterator.map(_ -> now)
+      if (live.size <= batching.maxSkippedOrders) live
+      else live.toSeq.sortBy(-_._2).take(batching.maxSkippedOrders).toMap
+    }
+  }
+
+  /** ZC broadcasts only from confirmed book state; skip idle mempool polling when the book is empty. */
+  override protected def broadcastDue(tracked: Tracked): Boolean = tracked.nonEmpty
+
   /**
    * Passes the candidate's parent block to [[ZcTracker]] on `PrepareBlockTxs` (via `receive` override) so the
    * confirmed ZC book is already moving to `blockHeight - 1` before `RequestBlockTxs` asks for it.
@@ -59,8 +83,9 @@ class ZcBatcher(nodeContext: NodeContext,
   }
 
   /**
-   * Background tick: warms `resolver` caches (scripts, origins, box bytes) from the tracker's confirmed book so
-   * candidate builds make near-zero node reads, and reports whether the tracker holds any boxes to consider.
+   * Background tick: warms `resolver` caches (scripts, origins, box bytes) from the tracker's confirmed book and
+   * precomputes offer matches off the candidate critical path so candidate builds make near-zero node reads and
+   * skip `ZcMatcher.batch` on large books.
    */
   override protected def discover(): Tracked =
     if (!tracker.enabled) Map.empty
@@ -70,6 +95,9 @@ class ZcBatcher(nodeContext: NodeContext,
         nodeContext.getClient.execute { ctx =>
           ZcBatchPlanner.warmCaches(book, ctx, resolver, settings, book.height.toLong)
         }
+        val key = (book.headerId, book.height, resolver.generation)
+        if (!cachedMatches.get().exists(p => (p.headerId, p.height, p.resolverGen) == key))
+          cachedMatches.set(Some(ZcBatchPlanner.precomputeMatches(book, resolver)))
         // Return a lightweight summary map so Batcher's broadcastDue triggers when the ZC book is non-empty.
         book.boxes.keysIterator.take(batching.maxTrackedOrders).map(id => id -> "zc").toMap
     }
@@ -104,7 +132,8 @@ class ZcBatcher(nodeContext: NodeContext,
               val built = ZcBatchPlanner.build(ctx, nodeContext.getNodeWallet, book, resolver, settings,
                 signingHeight = blockHeight, minerFee = 0L, feeTo = feeTo, slots = slots, allowance = allowance,
                 deadline = Some(deadline), excluded = skippedOrders(), oracleUsable = !oracleBusy,
-                broadcastWait = None)
+                broadcastWait = None, precomputed = cachedMatches.get(),
+                onComputed = p => cachedMatches.set(Some(p)))
               built.failedIds.foreach(skipOrder)
               built.txs.map { case (tx, parents) =>
                 tx.bundle(BatchingMempool.competitors(spenders, tx.spentIds.toSeq), parents)
@@ -127,7 +156,7 @@ class ZcBatcher(nodeContext: NodeContext,
         require(observed.fresh, s"no fresh mempool observation: ${observed.failure.getOrElse("too old")}")
         val snapshot = observed.snapshot.get
         val oracleBusy = book.oracle.exists(o => snapshot.spent.contains(o.box.boxId))
-        val excluded = skippedOrders() ++ refused.keySet ++ snapshot.spent
+        val excluded = skippedOrders() ++ refused.keySet ++ activeBroadcastRefused() ++ snapshot.spent
         nodeContext.getClient.execute { ctx =>
           val tip = ctx.getHeight
           val wallet = nodeContext.getNodeWallet.contract
@@ -150,6 +179,7 @@ class ZcBatcher(nodeContext: NodeContext,
               tx.spentIds.foreach(id => refusedOut += id -> id)
             }
           }
+          noteBroadcastRefused(refusedOut.keys)
           BroadcastResult(refusedOut.toMap)
         }
     }
