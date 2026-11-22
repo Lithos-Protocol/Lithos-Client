@@ -75,6 +75,52 @@ class ZcHistorySpec extends AnyFlatSpec with Matchers with Eventually {
     claimed.head.amount shouldBe BigInt(2050000000L - 1000000L)
   }
 
+  "An extinguished bond" should "be classified for the borrower, clear cost without lending P&L, and be found via its bond box" in {
+    val ext = indexedTx(id(120), Seq(bond(bond1, order1, borrower = Me), mine(id(51), 1000000L, Seq(order1 -> 1L))),
+      Seq(mine(id(74), 3050000000L)))
+    val events = ZcHistory.classify(ext, wallet)
+    events.map(_.kind) shouldBe Seq("extinguished")
+    events.head.token shouldBe Some(order1)
+    events.head.units shouldBe 1L
+    events.head.refs.get("bondBoxId") shouldBe Some(bond1)
+    ZcHistory.classify(ext, Set(hashOf(party(3)))) shouldBe empty
+
+    // Cost basis from buying back the bond clears without realizing lending P&L
+    def e(kind: String, token: String, units: Long, amount: Long, refs: (String, String)*) =
+      ZcEvent("tx-" + kind, 1, 0, kind, Some(ZcMarket.Erg), Some(token), units, amount, refs.toMap)
+    val shares = id(91)
+    val l = ZcHistory.ledger(Seq(
+      e("bought", shares, ZcPricing.ShareCount, 1500000000L),
+      e("claimed", shares, ZcPricing.ShareCount, 0L, "bondId" -> order1, "unfractionalized" -> "true"),
+      e("extinguished", order1, 1L, 2 * Erg, "assetId" -> order1, "bondBoxId" -> bond1)), "ready")
+    l.costs shouldBe empty
+    l.realized shouldBe empty
+
+    // Reader detects an unmarked extinguish tx (no ZC outputs, no R4 tags) via the borrowed bond box remembered on fill
+    val c = new ScriptedChain
+    c.extend(1700060, 1700120)
+    c.indexed = 1700120
+    c.scans(LDNodeFixtures.indexed(oracleBox(id(99)), 1700050))
+    val t = new ZcTracker(() => c.api, ExecutionContext.global, ZcConfig(enabled = true, 1000), retryMs = 20L)
+    t.poke()
+    eventually(t.view.map(_.book.height) shouldBe Some(1700120))
+    val borrowFill = indexedTx(id(121),
+      Seq(order(order1, borrower = Me), box(id(122), party(2), 5 * Erg, Seq.empty, NodeRegisters.empty)),
+      Seq(box(id(123), party(2), 1000000L, Seq(order1 -> 1L), NodeRegisters.empty), bond(bond1, order1, borrower = Me),
+        mine(id(124), Erg + 5000000L, regs = regs(bytes(order1)))), height = 1700095)
+    val wtFill = WalletTransaction(borrowFill.id, Seq(NodeInput(order1, NodeSpendingProof("", Map.empty))), Seq.empty,
+      borrowFill.outputs.map(_.box), 1700095, 25, Seq.empty)
+    val wtExt = WalletTransaction(ext.id,
+      Seq(NodeInput(bond1, NodeSpendingProof("", Map.empty)), NodeInput(id(51), NodeSpendingProof("", Map.empty))),
+      Seq.empty, ext.outputs.map(_.box), 1700105, 15, Seq.empty)
+    when(c.api.walletTransactions(any[Option[Int]], any[Option[Int]], any[Option[Int]], any[Option[Int]]))
+      .thenReturn(Success(Seq(wtFill, wtExt)))
+    when(c.api.indexedTransactionById(borrowFill.id)).thenReturn(Success(Some(borrowFill)))
+    when(c.api.indexedTransactionById(ext.id)).thenReturn(Success(Some(ext)))
+    val hist = new ZcHistory(() => c.api, () => wallet, t, 1700080)
+    hist.all().map(_.kind) shouldBe Seq("extinguished", "borrowed")
+  }
+
   "A posted order" should "be posted, and its cancel returned" in {
     val post = indexedTx(id(104), Seq(mine(id(80), 5 * Erg)), Seq(order(id(81), borrower = Me), mine(id(82), Erg)))
     ZcHistory.classify(post, wallet).map(_.kind) shouldBe Seq("posted")

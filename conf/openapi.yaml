@@ -5119,7 +5119,8 @@ paths:
       summary: List asks
       description: >
         Borrow orders and asks selling bond units or shares in one market, each with its quote now, its
-        status and its checks. Unconfirmed boxes are included and boxes a pending transaction spends are not. `from`
+        status, its checks, and `borrowedByMe` marking listings whose underlying live bond belongs to this wallet as
+        borrower. Unconfirmed boxes are included and boxes a pending transaction spends are not. `from`
         and `to` keep rows with that many blocks to maturity.
       operationId: listZcAsks
       tags:
@@ -5187,8 +5188,8 @@ paths:
     get:
       summary: Bid and ask curves
       description: >
-        The best bid line (the lowest yield any offer accepts at each maturity), the ask dots and line,
-        and market totals, computed with the batcher's own rules.
+        The best bid line (the lowest yield any offer accepts at each maturity), the ask dots and line (each ask
+        dot carrying `borrowedByMe`), and market totals, computed with the batcher's own rules.
       operationId: getZcCurves
       tags:
         - sigmafi-zc
@@ -5216,8 +5217,8 @@ paths:
     get:
       summary: Order book
       description: >
-        Asks and bids around a maturity, `around` ± `band` blocks, or up to `to` blocks out, with the
-        spread between the best of each.
+        Asks (each carrying `borrowedByMe`) and bids around a maturity, `around` ± `band` blocks, or up to `to`
+        blocks out, with the spread between the best of each.
       operationId: getZcOrderbook
       tags:
         - sigmafi-zc
@@ -5335,8 +5336,9 @@ paths:
     get:
       summary: Open auctions
       description: >
-        Lot auctions with their price now and phase, and share vaults whose floor or excess auction is open,
-        with what a buyer pays now.
+        Lot auctions with their price now, phase, and `borrowedByMe` / `borrowedBondIds` when a lot carries a
+        bond unit or shares from a live loan this wallet borrowed, and share vaults whose floor or excess auction
+        is open, with what a buyer pays now.
       operationId: listZcAuctions
       tags:
         - sigmafi-zc
@@ -5436,11 +5438,12 @@ paths:
     get:
       summary: This wallet in ZC
       description: >
-        Every bond unit and share token this wallet holds, with its status, cost from the wallet's history,
-        mark and the actions open now; the bonds it borrows on; its open orders, asks, offers, lots and requests; its
-        wraps; unrealized and realized P&L per market. `history` is the wallet history's status: `off`,
-        `not-configured`, `loading`, `ready` or `unavailable`. Units with no recorded acquisition have `cost`
-        null.
+        Every bond unit and share token this wallet holds, with its status, `borrowedByMe` flag, cost from the
+        wallet's history, mark and the actions open now (including `extinguish` when this wallet holds its own
+        borrowed bond unit); the bonds it borrows on (with `holdsUnit` and `extinguish` availability); its open
+        orders, asks, offers, lots and requests; its wraps; unrealized and realized P&L per market. `history` is
+        the wallet history's status: `off`, `not-configured`, `loading`, `ready` or `unavailable`. Units with no
+        recorded acquisition have `cost` null.
       operationId: getZcPortfolio
       security:
         - ApiKeyAuth: []
@@ -6229,6 +6232,67 @@ paths:
         Settle any bond into the vault from maturity on, or before it while its cover is under its
         own oracle ratio at a fresh enough oracle. This wallet keeps the fee reserve less the miner fee.
       operationId: liquidateZcBond
+      security:
+        - ApiKeyAuth: []
+      tags:
+        - sigmafi-zc
+      parameters:
+        - $ref: '#/components/parameters/ZcAssetId'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ZcLimitsOnly'
+      responses:
+        '200':
+          $ref: '#/components/responses/ZcSent'
+        '400':
+          $ref: '#/components/responses/ZcBadRequest'
+        '403':
+          $ref: '#/components/responses/ZcForbidden'
+        '404':
+          $ref: '#/components/responses/ZcNotFound'
+        '409':
+          $ref: '#/components/responses/ZcConflict'
+        '422':
+          $ref: '#/components/responses/ZcUnprocessable'
+        '503':
+          $ref: '#/components/responses/ZcUnavailable'
+  /sigmafi/zc/bonds/{assetId}/extinguish/check:
+    post:
+      summary: Extinguish a bond (quote)
+      description: >
+        What the send would do, at the snapshot `at`. Signs nothing. A write that cannot run now answers
+        200 with its `refusals`.
+      operationId: checkExtinguishZcBond
+      tags:
+        - sigmafi-zc
+      parameters:
+        - $ref: '#/components/parameters/ZcAssetId'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ZcLimitsOnly'
+      responses:
+        '200':
+          $ref: '#/components/responses/ZcQuoted'
+        '400':
+          $ref: '#/components/responses/ZcBadRequest'
+        '404':
+          $ref: '#/components/responses/ZcNotFound'
+        '503':
+          $ref: '#/components/responses/ZcUnavailable'
+  /sigmafi/zc/bonds/{assetId}/extinguish:
+    post:
+      summary: Extinguish a bond
+      description: >
+        Close a live bond directly by burning its two locked units together with the circulating unit held by this
+        wallet. Requires this wallet to be the borrower, works at any height, and returns the collateral and the
+        liquidation fee reserve straight to the borrower without passing through the bond vault.
+      operationId: extinguishZcBond
       security:
         - ApiKeyAuth: []
       tags:
@@ -7673,8 +7737,8 @@ components:
               type:
                 type: string
                 description: >
-                  lent, borrowed, bought, sold, lotBought, lotSold, repaid, liquidated, recollateralized, claimed, pulled,
-                  sharesMinted, wrapped, unwrapped, posted, returned; pending events are posted or spending.
+                  lent, borrowed, bought, sold, lotBought, lotSold, repaid, liquidated, extinguished, recollateralized,
+                  claimed, pulled, sharesMinted, wrapped, unwrapped, posted, returned; pending events are posted or spending.
               status: {type: string, enum: [pending, confirmed]}
               market: {type: string, nullable: true}
               refs: {type: object, additionalProperties: {type: string}}

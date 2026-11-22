@@ -165,6 +165,8 @@ class ZcApiController @Inject()(cc: ControllerComponents, tracker: ZcTracker, re
   def recollateralize(assetId: String): Action[AnyContent] = zc("recollateralize", Some(assetId), send = true)
   def checkLiquidate(assetId: String): Action[AnyContent] = zc("liquidate", Some(assetId), send = false)
   def liquidate(assetId: String): Action[AnyContent] = zc("liquidate", Some(assetId), send = true)
+  def checkExtinguish(assetId: String): Action[AnyContent] = zc("extinguish", Some(assetId), send = false)
+  def extinguish(assetId: String): Action[AnyContent] = zc("extinguish", Some(assetId), send = true)
   def checkClaim(tokenId: String): Action[AnyContent] = zc("claim", Some(tokenId), send = false)
   def claim(tokenId: String): Action[AnyContent] = zc("claim", Some(tokenId), send = true)
   def checkCreateWrap(): Action[AnyContent] = zc("createWrap", None, send = false)

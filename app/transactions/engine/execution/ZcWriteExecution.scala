@@ -471,6 +471,46 @@ class ZcWriteExecution(nodeContext: NodeContext, walletSelector: EngineFunding, 
       else Seq.empty, Seq.empty, if (oracle.isDefined) h + 1L else Long.MaxValue, body, send, snapshot, Seq.empty, None)
   })
 
+  /**
+   * POST /sigmafi/zc/bonds/:assetId/extinguish[/check]: closes a live bond directly by burning all three bond units
+   * (the two locked in the bond plus the circulating unit this wallet holds). Needs this wallet to be the borrower,
+   * works at any height, and sweeps collateral and the fee reserve straight to the borrower without BondVault.
+   */
+  def extinguish(assetId: String, body: JsObject, send: Boolean): JsObject = checked("extinguish", send)(withCtx { ctx =>
+    val h = ctx.getHeight.toLong
+    val v = view
+    val m = matcher(v)
+    val (bond, box) = liveBond(v, assetId)
+    val borrower = walletHashes.getOrElse(bond.borrowerHash, refuse("only the borrower may extinguish a bond: it needs their box"))
+    if (walletHeld(bond.asset) < 1L) {
+      val sharesHint = m.book.shareVaults.values.find(_.record.bondAsset == bond.asset)
+        .filter(sv => walletHeld(sv.record.shareId) > 0L)
+        .map(sv => s"; this wallet holds shares of ${sv.record.shareId} — final-claim all ${sv.record.outstanding} shares first to recover the bond unit")
+        .getOrElse("")
+      refuse(s"this wallet does not hold bond unit ${bond.asset}$sharesHint")
+    }
+    val snapshot = if (send) Some(fresh(Seq(bond.boxId))) else None
+    val auth = if (send) authorize(ctx, borrower, snapshot, preferToken = Some(bond.asset)) else { requireAuth(borrower); null }
+    try {
+      val authInput = Option(auth).map(_.inputs.head)
+        .getOrElse(UTXO(borrower, ZcBoxes.MinBox, Seq(Token(ErgoId.create(bond.asset), 1L))).toDummyInput(ctx))
+      val spend = ZcUserTransactions.extinguish(bond, protocolInput(ctx, box), authInput, borrower)
+      val warnings =
+        if (h >= bond.maturity)
+          Seq("the bond has reached maturity and can be liquidated by anyone: extinguishing races any liquidation")
+        else if (v.book.oracle.exists(o => ZcRules.belowOwnRatio(ZcBondTerms.of(bond), o.price)))
+          Seq("the bond is under its liquidation ratio and can be liquidated by anyone: extinguishing races any liquidation")
+        else Seq.empty
+      val returnedErg = math.max(0L, bond.box.value - ZcUserTransactions.TxFee)
+      val terms = Json.obj("assetId" -> bond.asset, "bondBoxId" -> bond.boxId, "market" -> bond.market.name,
+        "repayment" -> bond.repayment.toString, "feeReserveNanoErg" -> bond.feeReserve.toString,
+        "returns" -> Json.obj("nanoErg" -> returnedErg.toString,
+          "tokens" -> bond.collateral.map(a => tokenJson(a.tokenId, a.amount))))
+      execute(ctx, "extinguish", None, spend, Seq.empty, terms, Seq.empty, warnings, Seq.empty, Long.MaxValue,
+        body, send, snapshot, Option(auth).toSeq, None, ownInputs = Seq(authInput))
+    } catch { case NonFatal(ex) => Option(auth).foreach(_.release()); throw ex }
+  })
+
   // ─── claims ────────────────────────────────────────────────────────────────
 
   /**
@@ -829,10 +869,11 @@ class ZcWriteExecution(nodeContext: NodeContext, walletSelector: EngineFunding, 
 
   // ─── authorizing boxes ─────────────────────────────────────────────────────
 
-  private def authCandidates(creator: Contract, spent: Set[String]): Seq[NodeBox] =
+  private def authCandidates(creator: Contract, spent: Set[String], preferToken: Option[String] = None): Seq[NodeBox] =
     executionNode.unspentBoxesByErgoTree(creator.ergoTreeHex, Paging(0, Batcher.PageSize), SortDirection.Desc,
       MempoolOptions.ConfirmedOnly) match {
-      case Success(boxes) => boxes.map(_.box).filterNot(b => spent(b.boxId)).sortBy(_.value)
+      case Success(boxes) => boxes.map(_.box).filterNot(b => spent(b.boxId))
+        .sortBy(b => (!preferToken.exists(t => b.assets.exists(_.tokenId == t)), b.value))
       case Failure(ex) => throw LithosUnavailable(s"could not read this wallet's boxes: ${ex.getMessage}", ex)
     }
 
@@ -840,9 +881,10 @@ class ZcWriteExecution(nodeContext: NodeContext, walletSelector: EngineFunding, 
     if (authCandidates(creator, Set.empty).isEmpty)
       refuse("this wallet holds no box at the creator's address, which this transaction must spend")
 
-  private def reserveAuth(ctx: BlockchainContext, creator: Contract, snapshot: CompleteMempool.Snapshot): FundingAllocation = {
+  private def reserveAuth(ctx: BlockchainContext, creator: Contract, snapshot: CompleteMempool.Snapshot,
+                          preferToken: Option[String] = None): FundingAllocation = {
     stillRunning()
-    authCandidates(creator, snapshot.spent).take(MaxAuthTries).iterator
+    authCandidates(creator, snapshot.spent, preferToken).take(MaxAuthTries).iterator
       .flatMap(box => SigmaFiBoxes.input(box, ctx))
       .map(input => Try(walletSelector.reserveKnown(Seq(input))))
       .collectFirst { case Success(allocation) => allocation }
@@ -850,9 +892,10 @@ class ZcWriteExecution(nodeContext: NodeContext, walletSelector: EngineFunding, 
   }
 
   /** A box at `creator` to authorize a send; a check only confirms one exists. */
-  private def authorize(ctx: BlockchainContext, creator: Contract, snapshot: Option[CompleteMempool.Snapshot]): FundingAllocation =
+  private def authorize(ctx: BlockchainContext, creator: Contract, snapshot: Option[CompleteMempool.Snapshot],
+                        preferToken: Option[String] = None): FundingAllocation =
     snapshot match {
-      case Some(s) => reserveAuth(ctx, creator, s)
+      case Some(s) => reserveAuth(ctx, creator, s, preferToken)
       case None => requireAuth(creator); null
     }
 

@@ -201,7 +201,8 @@ final class ZcJson(matcher: ZcMatcher, known: ZcKnown) {
     }
     val pricing = if (!o.priced) "fixed" else if (yieldOrder(o)) "yield" else if (curveOrder(o)) "window" else "other"
     base(o, open.pending, chain = false) ++ Json.obj(
-      "market" -> o.market.name, "kind" -> "order", "borrowerHash" -> o.borrowerHash, "pricing" -> pricing,
+      "market" -> o.market.name, "kind" -> "order", "borrowerHash" -> o.borrowerHash,
+      "borrowedByMe" -> known.mine(o.borrowerHash), "pricing" -> pricing,
       "timing" -> timing, "principal" -> str(o.principal), "repayment" -> str(o.repayment),
       "yield" -> yieldLine(o).map(yieldJson),
       "collateral" -> collateral(o.box.value - o.expiryFee, o.box.assets),
@@ -242,6 +243,7 @@ final class ZcJson(matcher: ZcMatcher, known: ZcKnown) {
         "yield" -> askLine(a).filter(_ => fixedGuard.isEmpty).map(yieldJson))
     base(a, open.pending, chain = true) ++ Json.obj(
       "market" -> a.market.name, "kind" -> (if (whole > 1L) "shares" else "unit"), "sellerHash" -> a.sellerHash,
+      "borrowedByMe" -> bond.exists(b => known.mine(b.borrowerHash)),
       "pricing" -> pricing, "tokenId" -> a.token.tokenId, "units" -> str(a.token.amount), "minFill" -> str(minFill(a)),
       "saleGuard" -> (guard orElse fixedGuard).map { case (bps, age) => Json.obj("ratioBps" -> bps, "oracleAge" -> age) },
       "expiry" -> a.expiry, "bondId" -> claim.map(_._1),
@@ -308,7 +310,7 @@ final class ZcJson(matcher: ZcMatcher, known: ZcKnown) {
         "recollateralizeFrom" -> (b.box.creationHeight + RecollateralizeWait),
         "refreshFrom" -> (b.box.creationHeight + RefreshAge + 1L),
         "origin" -> originJson, "settlement" -> JsNull, "pending" -> book.bonds(asset).pending,
-        "mine" -> known.mine(b.borrowerHash),
+        "mine" -> known.mine(b.borrowerHash), "borrowedByMe" -> known.mine(b.borrowerHash),
         "checks" -> Seq(originCheck).map(c => Json.obj("key" -> c.key, "ok" -> c.ok, "detail" -> c.detail)))
     }.orElse(settled.map { s =>
       val v = s.record
@@ -331,6 +333,7 @@ final class ZcJson(matcher: ZcMatcher, known: ZcKnown) {
     val auction = if (v.dutch && v.auction.size >= 7) Some(Json.obj("openingBps" -> v.auction(1), "floorBps" -> v.auction(2),
       "length" -> v.auction(3), "expiry" -> v.auction(4), "threshold" -> str(v.auction(5)))) else None
     Json.obj("tokenId" -> shareId, "bondId" -> v.bondAsset, "mint" -> mint.map(_.kind.name),
+      "borrowedByMe" -> book.bonds.get(v.bondAsset).exists(b => known.mine(b.record.borrowerHash)),
       "type" -> (if (!v.dutch) "plain" else if (v.auction.lift(5).contains(Long.MaxValue)) "dutch" else "selective"),
       "shareCount" -> str(v.shares), "decimals" -> 6, "auction" -> auction,
       "vault" -> Json.obj("boxId" -> v.boxId, "contract" -> v.script.kind.name, "state" -> v.state.map(_.toInt),

@@ -25,6 +25,7 @@ import java.nio.charset.StandardCharsets.UTF_8
  *   fill order                       IN  order, wallet...          OUT unit, bond, principal, [change], fee
  *   buy from ask                     IN  ask, wallet...            OUT payout, [rest], [change], fee
  *   repay                            IN  bond, [auth], wallet...   OUT settlement, collateral back, [change], fee
+ *   extinguish                       IN  bond, auth, [wallet...]   OUT one sweep, fee              (3 units burned)
  *   recollateralize                  IN  bond, auth, wallet...     OUT successor, [change], fee
  *   liquidate                        IN  bond, [wallet...]         OUT settlement, [change], fee
  *   claim a unit                     IN  settlement..., wallet...  OUT one sweep, fee              (3 units burned)
@@ -310,6 +311,17 @@ object ZcUserTransactions {
     }
     val back = UTXO(borrower, backErg, backTokens.map(t => token(t.tokenId, t.amount)), Seq(bytes(bond.boxId)))
     ZcSpend(input.withCtxVar(1.toByte, int(0)).withCtxVar(2.toByte, int(1)) +: auth.toSeq, Seq(settlement, back))
+  }
+
+  /**
+   * Extinguishes `bond` directly: burns its two locked units together with the circulating unit the wallet adds
+   * (from `auth` or funding), with `auth` at the borrower's script authorizing it and no context variables set.
+   * Valid at any height; sweeps collateral and fee reserve straight to `to`.
+   */
+  def extinguish(bond: ZcBond, input: InputUTXO, auth: InputUTXO, to: Contract): ZcSpend = {
+    val locked = input.tokens.filter(_.id.toString == bond.asset).map(_.amount).sum
+    require(locked == 2L, s"bond ${bond.boxId} must hold 2 reserve units of ${bond.asset}, found $locked")
+    ZcSpend(Seq(input, auth), Seq.empty, burn = Seq(token(bond.asset, 3L)), sweep = Some(to))
   }
 
   /** The most of the repayment the bond's own collateral can pay: nanoERG above a box minimum, or the repayment token. */

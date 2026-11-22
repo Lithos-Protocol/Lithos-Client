@@ -143,7 +143,7 @@ final class ZcReads(tracker: ZcTracker, resolver: ZcResolver, node: () => NodeAp
         gridBetween(s.book.height + lo, s.book.height + hi).nonEmpty }
       AskRow(o, () => j.orderJson(o), q.map(_._2), q.map(_._3), q.flatMap(x => (x._1 \ "cost").asOpt[String]).map(BigInt(_))
         .getOrElse(BigInt(0)), j.defaultProspect(o.record).flatMap(j.coverBps), "new", j.standing(o.record),
-        (o.record.mode == 0L && o.record.terms(3) % Grid == 0L) || window)
+        (o.record.mode == 0L && o.record.terms(3) % Grid == 0L) || window, l.known.mine(o.record.borrowerHash))
     }
     val asks = s.book.asks.filter(_.record.market == m).map { a =>
       val claim = l.matcher.claimOf(a.record.token.tokenId).toOption
@@ -151,7 +151,8 @@ final class ZcReads(tracker: ZcTracker, resolver: ZcResolver, node: () => NodeAp
       val q = j.askQuote(a.record, bond, claim.map(_._2).getOrElse(1L))
       AskRow(a, () => j.askJson(a), q.map(_._2), q.map(_._3), q.flatMap(x => (x._1 \ "cost").asOpt[String]).map(BigInt(_))
         .getOrElse(BigInt(0)), bond.map(ZcBondTerms.of).flatMap(j.coverBps),
-        if (claim.exists(_._2 > 1L)) "shares" else "resale", j.standing(a.record), bond.exists(_.maturity % Grid == 0L))
+        if (claim.exists(_._2 > 1L)) "shares" else "resale", j.standing(a.record), bond.exists(_.maturity % Grid == 0L),
+        bond.exists(b => l.known.mine(b.borrowerHash)))
     }
     orders ++ asks
   }
@@ -221,7 +222,8 @@ final class ZcReads(tracker: ZcTracker, resolver: ZcResolver, node: () => NodeAp
   def curves(marketName: String, f: ZcFilters): JsObject = {
     val s = snap()
     val m = market(marketName)
-    s.derived.get(s"curves:$m:$f", () => {
+    val wf = Try(walletHashes()).getOrElse(Set.empty).hashCode
+    s.derived.get(s"curves:$m:$f:$wf", () => {
       val l = new Lookups(s)
       val offers = s.book.offers.filter(o => o.record.market == m).map(o => o -> l.json.standing(o.record))
       val matchableOffers = offers.filter { case (o, st) => st.ok && floorBps(o.record) <= f.coverage }
@@ -250,8 +252,8 @@ final class ZcReads(tracker: ZcTracker, resolver: ZcResolver, node: () => NodeAp
       }
       val matchableAsks = rows.filter(r => r.standing.ok && r.cover.forall(_ >= f.coverage))
       withAt(s, Json.obj("filters" -> filtersJson(f), "domain" -> Seq(0L, BlocksPerYear), "bidLine" -> bidLine,
-        "askLine" -> askLine, "askDots" -> dots.map(r => Json.obj("askId" -> r.open.boxId, "blocks" -> r.blocksLeft,
-          "bps" -> r.yieldBps, "ok" -> r.standing.ok, "pending" -> r.open.pending)),
+        "askLine" -> askLine, "askDots" -> dots.map(r => Json.obj("askId" -> r.open.boxId, "kind" -> r.kind, "blocks" -> r.blocksLeft,
+          "bps" -> r.yieldBps, "ok" -> r.standing.ok, "pending" -> r.open.pending, "borrowedByMe" -> r.borrowedByMe)),
         "windows" -> windows,
         "totals" -> Json.obj(
           "asks" -> Json.obj("matchable" -> matchableAsks.size, "count" -> rows.size, "cost" -> matchableAsks.map(_.cost).sum.toString),
@@ -277,7 +279,8 @@ final class ZcReads(tracker: ZcTracker, resolver: ZcResolver, node: () => NodeAp
       case (None, None) => (720L, BlocksPerYear)
       case _ => throw LithosBadRequest("give either to (at least 720) or around, not both")
     }
-    s.derived.get(s"book:$m:$f:$lo:$hi", () => {
+    val wf = Try(walletHashes()).getOrElse(Set.empty).hashCode
+    s.derived.get(s"book:$m:$f:$lo:$hi:$wf", () => {
       val l = new Lookups(s)
       val h = s.book.height.toLong
       val rows = askRows(l, s, m).filter(keep(_, f, None, None))
@@ -286,11 +289,12 @@ final class ZcReads(tracker: ZcTracker, resolver: ZcResolver, node: () => NodeAp
           case o: ZcOrder if window(o) =>
             bestWindowQuote(o, h, lo, hi).map { case (blocks, bps, cost) =>
               Json.obj("boxId" -> r.open.boxId, "kind" -> r.kind, "bps" -> bps, "size" -> cost.toString, "blocks" -> blocks,
-                "window" -> true, "ok" -> r.standing.ok, "reason" -> r.standing.reasons.headOption)
+                "window" -> true, "ok" -> r.standing.ok, "reason" -> r.standing.reasons.headOption,
+                "borrowedByMe" -> r.borrowedByMe)
             }
           case _ => r.blocksLeft.filter(b => b >= lo && b <= hi).map(b => Json.obj("boxId" -> r.open.boxId, "kind" -> r.kind,
             "bps" -> r.yieldBps, "size" -> r.cost.toString, "blocks" -> b, "window" -> false, "ok" -> r.standing.ok,
-            "reason" -> r.standing.reasons.headOption))
+            "reason" -> r.standing.reasons.headOption, "borrowedByMe" -> r.borrowedByMe))
         }
       }.sortBy(j => (-(j \ "bps").asOpt[Long].getOrElse(Long.MinValue + 1), (j \ "boxId").as[String])).take(MaxBookRows)
       val bids = s.book.offers.filter(_.record.market == m).map(o => o -> l.json.standing(o.record))
@@ -341,7 +345,7 @@ final class ZcReads(tracker: ZcTracker, resolver: ZcResolver, node: () => NodeAp
         val taken = run.taken.getOrElse(o.boxId, Vector.empty)
         val spent = taken.map(t => BigInt(t.price)).sum
         withAt(s, Json.obj("type" -> "offer", "offerId" -> o.boxId,
-          "buys" -> buys.take(MaxMatchRows).map(mt => matchJson(s, mt, sourceKey = "askId")),
+          "buys" -> buys.take(MaxMatchRows).map(mt => matchJson(s, l, mt, sourceKey = "askId")),
           "next" -> Json.obj("taken" -> taken.map(_.sourceId), "spent" -> spent.toString,
             "avgYieldBps" -> weightedYield(taken), "rounds" -> run.rounds),
           "searched" -> searchedJson(run.searched, sources.size)))
@@ -363,9 +367,16 @@ final class ZcReads(tracker: ZcTracker, resolver: ZcResolver, node: () => NodeAp
       "searched" -> searchedJson(run.searched, offers.size)))
   }
 
-  private def matchJson(s: Snap, mt: ZcMatch, sourceKey: String): JsObject = {
+  private def borrowedAsset(s: Snap, l: Lookups, tokenId: String): Option[String] =
+    s.book.bonds.get(tokenId)
+      .orElse(s.book.shareVaults.get(tokenId).flatMap(v => s.book.bonds.get(v.record.bondAsset)))
+      .filter(b => l.known.mine(b.record.borrowerHash))
+      .map(_.record.asset)
+
+  private def matchJson(s: Snap, l: Lookups, mt: ZcMatch, sourceKey: String): JsObject = {
+    val rec = s.view.record(mt.sourceId).map(_._1)
     val coverNow = s.book.confirmedOracle.flatMap { or =>
-      s.view.record(mt.sourceId).map(_._1).flatMap {
+      rec.flatMap {
         case o: ZcOrder => resolvePrincipal(o, s.book.height, mt.maturity).toOption
           .flatMap(p => cover(ZcBondTerms.prospect(o, s.book.height, mt.maturity, p), or.price))
         case a: ZcAsk => s.book.bonds.values.find(b => b.record.asset == a.token.tokenId || a.pricedAsset.contains(b.record.asset))
@@ -373,8 +384,14 @@ final class ZcReads(tracker: ZcTracker, resolver: ZcResolver, node: () => NodeAp
         case _ => None
       }.map(ratioBps)
     }
+    val borrowed = rec.exists {
+      case o: ZcOrder => l.known.mine(o.borrowerHash)
+      case a: ZcAsk => borrowedAsset(s, l, a.token.tokenId).isDefined
+      case _ => false
+    }
     Json.obj(sourceKey -> mt.sourceId, "units" -> mt.units.toString, "cost" -> mt.cost.toString, "face" -> mt.face.toString,
-      "yieldBps" -> mt.yieldBps, "requiredBps" -> mt.requiredBps, "maturity" -> mt.maturity, "coverBps" -> coverNow)
+      "yieldBps" -> mt.yieldBps, "requiredBps" -> mt.requiredBps, "maturity" -> mt.maturity, "coverBps" -> coverNow,
+      "borrowedByMe" -> borrowed)
   }
 
   private def weightedYield(ms: Seq[ZcMatch]): Option[Long] = {
@@ -407,7 +424,9 @@ final class ZcReads(tracker: ZcTracker, resolver: ZcResolver, node: () => NodeAp
       val Seq(opening, floor, start, end, expiry, refund) = lot.terms.take(6)
       val valid = lotValid(lot)
       val price = if (!valid) None else Some(BigInt(lotPrice(lot, h)))
+      val borrowedBondIds = lot.box.assets.flatMap(a => borrowedAsset(s, l, a.tokenId)).distinct
       Json.obj("boxId" -> lot.boxId, "chainId" -> lot.boxId, "pending" -> o.pending, "mine" -> l.known.mine(lot.sellerHash),
+        "borrowedByMe" -> borrowedBondIds.nonEmpty, "borrowedBondIds" -> borrowedBondIds,
         "sellerHash" -> lot.sellerHash, "market" -> lot.market.name, "items" -> l.json.tokens(lot.box.assets),
         "nanoErg" -> lot.box.value.toString, "opening" -> opening.toString, "floor" -> floor.toString, "start" -> start,
         "end" -> end, "expiry" -> expiry, "refundFeeNanoErg" -> refund.toString, "priceNow" -> price.map(_.toString),
@@ -572,20 +591,24 @@ final class ZcReads(tracker: ZcTracker, resolver: ZcResolver, node: () => NodeAp
     val s = snap()
     val l = new Lookups(s)
     val hits = mutable.LinkedHashMap.empty[String, JsObject]
-    def hit(id: String, kind: String, mk: Option[ZcMarket], title: String, status: => Option[String], y: => Option[Long]): Unit =
+    def hit(id: String, kind: String, mk: Option[ZcMarket], title: String, status: => Option[String], y: => Option[Long],
+            borrowed: => Boolean = false): Unit =
       if (hits.size < MaxSearchHits && id.startsWith(q) && !hits.contains(id))
         hits(id) = Json.obj("id" -> id, "type" -> kind, "market" -> mk.map(_.name), "title" -> title, "status" -> status,
-          "yieldBps" -> y)
-    s.book.bonds.foreach { case (asset, b) => hit(asset, "bond", Some(b.record.market), "Bond", Some("live"), None) }
+          "yieldBps" -> y, "borrowedByMe" -> borrowed)
+    s.book.bonds.foreach { case (asset, b) => hit(asset, "bond", Some(b.record.market), "Bond", Some("live"), None,
+      l.known.mine(b.record.borrowerHash)) }
     s.book.settlements.foreach { case (asset, v) => hit(asset, "bond", None, "Bond", Some(if (v.record.liquidated) "liquidated" else "repaid"), None) }
-    s.book.shareVaults.keys.foreach(t => hit(t, "shares", None, "Shares", None, None))
+    s.book.shareVaults.keys.foreach(t => hit(t, "shares", None, "Shares", None, None, borrowedAsset(s, l, t).isDefined))
     s.book.wrapVaults.keys.foreach(t => hit(t, "wrap", None, "Wrap receipt", None, None))
     s.book.orders.foreach(o => hit(o.boxId, "order", Some(o.record.market), "Borrow order",
-      Some(l.json.standing(o.record).status), l.json.orderQuote(o.record).map(_._2)))
-    s.book.asks.foreach(a => hit(a.boxId, "ask", Some(a.record.market), "Ask", Some(l.json.standing(a.record).status), None))
+      Some(l.json.standing(o.record).status), l.json.orderQuote(o.record).map(_._2), l.known.mine(o.record.borrowerHash)))
+    s.book.asks.foreach(a => hit(a.boxId, "ask", Some(a.record.market), "Ask", Some(l.json.standing(a.record).status), None,
+      borrowedAsset(s, l, a.record.token.tokenId).isDefined))
     s.book.offers.foreach(o => hit(o.boxId, "offer", Some(o.record.market), "Lend offer",
       Some(l.json.standing(o.record).status), Some(o.record.terms(0))))
-    s.book.lots.foreach(o => hit(o.boxId, "lot", Some(o.record.market), "Lot auction", None, None))
+    s.book.lots.foreach(o => hit(o.boxId, "lot", Some(o.record.market), "Lot auction", None, None,
+      o.record.box.assets.exists(a => borrowedAsset(s, l, a.tokenId).isDefined)))
     withAt(s, Json.obj("q" -> q, "hits" -> hits.values.toSeq))
   }
 
@@ -633,9 +656,9 @@ final class ZcReads(tracker: ZcTracker, resolver: ZcResolver, node: () => NodeAp
       val origin = l.origin(t.tokenId)
       val cost = ledger.flatMap(_.costs.get(t.tokenId))
       origin.map(_.kind) match {
-        case Some(ZcKind.Order) | Some(ZcKind.PricedOrder) => Some(position(s, l, t, t.tokenId, 1L, None, cost))
+        case Some(ZcKind.Order) | Some(ZcKind.PricedOrder) => Some(position(s, l, hashes, t, t.tokenId, 1L, None, cost))
         case Some(ZcKind.FractionalMint) | Some(ZcKind.DutchAuctionMint) =>
-          s.book.shareVaults.get(t.tokenId).map(v => position(s, l, t, v.record.bondAsset, v.record.shares, Some(v.record), cost))
+          s.book.shareVaults.get(t.tokenId).map(v => position(s, l, hashes, t, v.record.bondAsset, v.record.shares, Some(v.record), cost))
         case _ => None
       }
     }
@@ -647,11 +670,14 @@ final class ZcReads(tracker: ZcTracker, resolver: ZcResolver, node: () => NodeAp
       .map { b =>
         val r = b.record
         val due = h >= r.maturity || confirmedBelow(s, ZcBondTerms.of(r))
+        val holdsUnit = held.exists(t => t.tokenId == r.asset && t.amount >= 1L)
         Json.obj("bond" -> l.json.bondJson(r.asset), "status" -> (if (due) "liquidatable" else "live"),
+          "holdsUnit" -> holdsUnit,
           "actions" -> Seq(
             action("repay", h + 1L < r.maturity, if (h + 1L >= r.maturity) Some("the bond has reached maturity") else None),
             action("recollateralize", h + 1L < r.maturity && h >= r.box.creationHeight + RecollateralizeWait,
-              Some(if (h + 1L >= r.maturity) "the bond has reached maturity" else s"opens at #${r.box.creationHeight + RecollateralizeWait}"))))
+              Some(if (h + 1L >= r.maturity) "the bond has reached maturity" else s"opens at #${r.box.creationHeight + RecollateralizeWait}")),
+            action("extinguish", holdsUnit, Some("buy or hold the circulating bond unit first"))))
       }
     val named = s.book.view.open.filter { case (r, _) => r.namedHash.exists(hashes.contains) }.toVector
     def openOf[A](pick: PartialFunction[(ZcRecord, Boolean), JsObject]): Seq[JsObject] = named.collect(pick)
@@ -719,14 +745,16 @@ final class ZcReads(tracker: ZcTracker, resolver: ZcResolver, node: () => NodeAp
    * One lending position: `units` of a token that is `whole` units of bond `asset`, marked at the best bid for the
    * maturity left (basis `bid`), at its accrued value when no bid prices it (`accrual`), or at its settlement.
    */
-  private def position(s: Snap, l: Lookups, t: NodeAsset, asset: String, whole: Long, vault: Option[ZcShareVault],
-                       cost: Option[ZcCost]): JsObject = {
+  private def position(s: Snap, l: Lookups, hashes: Set[String], t: NodeAsset, asset: String, whole: Long,
+                       vault: Option[ZcShareVault], cost: Option[ZcCost]): JsObject = {
     // the cost of the units held, when history recorded at least as many
     val paid = cost.filter(c => c.units >= t.amount && c.units > 0L).map(c => c.paid * t.amount / c.units)
     def pnl(value: BigInt): JsValue = paid.fold[JsValue](JsNull)(p => JsString((value - p).toString))
     val h = s.book.height.toLong
     val live = s.book.bonds.get(asset).map(_.record)
     val settled = s.book.settlements.get(asset).map(_.record)
+    val borrowedByMe = live.exists(b => hashes.contains(b.borrowerHash))
+    val canUnfrac = vault.exists(v => v.holding && t.amount >= v.outstanding)
     val status = (live, settled, vault) match {
       case (Some(b), _, _) if h >= b.maturity => "maturedUnpaid"
       case (Some(_), _, _) => "live"
@@ -765,15 +793,20 @@ final class ZcReads(tracker: ZcTracker, resolver: ZcResolver, node: () => NodeAp
       Json.obj("basis" -> "settled", "nanoErg" -> st.box.value.toString, "value" -> value.toString, "pnl" -> pnl(value))
     })
     Json.obj("tokenId" -> t.tokenId, "kind" -> (if (whole > 1L) "shares" else "bondUnit"), "units" -> t.amount.toString,
+      "borrowedByMe" -> borrowedByMe,
       "bond" -> l.json.bondJson(asset), "shares" -> vault.flatMap(v => l.json.sharesJson(v.shareId)), "status" -> status,
       "cost" -> (for (c <- cost; p <- paid) yield Json.obj("paid" -> p.toString, "height" -> c.height, "txId" -> c.txId,
         "viaOffer" -> c.viaOffer)),
       "mark" -> mark,
       "actions" -> Seq(
         action("sell", live.isDefined, Some("the bond is not live")),
-        action("claim", status == "claimable" || status == "repaid" || status == "liquidated", Some("not settled")),
+        action("claim", status == "claimable" || status == "repaid" || status == "liquidated" || canUnfrac, Some("not settled")),
         action("pull", status == "pullNeeded", Some("nothing to pull")),
-        action("liquidate", live.exists(b => h >= b.maturity || confirmedBelow(s, ZcBondTerms.of(b))), Some("not due"))))
+        action("liquidate", live.exists(b => h >= b.maturity || confirmedBelow(s, ZcBondTerms.of(b))), Some("not due")),
+        action("extinguish", borrowedByMe && whole == 1L && live.isDefined, Some(
+          if (!borrowedByMe) "not your borrowed bond"
+          else if (whole > 1L) "final-claim all shares first to recover the bond unit"
+          else "the bond is not live"))))
   }
 
   private def height(o: ZcOffer, h: Long): Boolean = h + 1L < o.expiry
@@ -790,7 +823,7 @@ object ZcReads {
   /** One ask row: its record, and what sorting and filtering read from it. */
   private[zc] final case class AskRow(open: ZcOpen[_ <: ZcRecord], json: () => JsObject, yieldBps: Option[Long],
                                       blocksLeft: Option[Long], cost: BigInt, cover: Option[Long], kind: String,
-                                      standing: ZcStanding, grid: Boolean)
+                                      standing: ZcStanding, grid: Boolean, borrowedByMe: Boolean)
 
   /** Node reads one request may make for origins, scripts, chains and names. */
   final val ReadsPerRequest = 16

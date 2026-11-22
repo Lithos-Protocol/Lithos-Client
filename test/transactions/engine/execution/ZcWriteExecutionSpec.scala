@@ -3,7 +3,7 @@ package transactions.engine.execution
 import api.LithosApiErrors.{LithosStateChanged, LithosUnprocessable}
 import api.zc.ZcDrafts
 import configs.ZcConfig
-import node.model.{NodeAsset, NodeBox, NodeRegisters}
+import node.model.{NodeAsset, NodeBox, NodeRegisters, WalletBalances}
 import org.bouncycastle.util.encoders.Hex
 import org.ergoplatform.appkit.{BlockchainContext, SignedTransaction}
 import org.ergoplatform.sdk.ErgoId
@@ -52,11 +52,14 @@ class ZcWriteExecutionSpec extends AnyFlatSpec with Matchers with Eventually {
   }
 
   /** A posted order of this wallet's and a live maturity-rule bond, both real boxes the tracker holds. */
-  private def world(orderSpentInMempool: Boolean = false): World = {
+  private def world(orderSpentInMempool: Boolean = false, bondSpentInMempool: Boolean = false,
+                    walletHoldsUnit: Boolean = false, bondMatured: Boolean = false,
+                    bondOwnedByMe: Boolean = true): World = {
     val c = new ScriptedChain
     val (ctx0, _, wallet) = FakeNodeContext(c.api)
     val ownHash = Hex.toHexString(wallet.contract.hashedPropBytes)
-    val (order, bond, asset) = ctx0.getClient.execute { ctx: BlockchainContext =>
+    val borrowerHash = if (bondOwnedByMe) ownHash else "bb" * 32
+    val (order, bond, authBox, asset) = ctx0.getClient.execute { ctx: BlockchainContext =>
       val h = ctx.getHeight
       val body = Json.obj("market" -> "ERG", "pricing" -> "fixed", "principal" -> "1000000000", "repayment" -> "1100000000",
         "timing" -> Json.obj("mode" -> "fixed", "maturity" -> (h + 50000), "exact" -> true),
@@ -66,29 +69,38 @@ class ZcWriteExecutionSpec extends AnyFlatSpec with Matchers with Eventually {
       val posted = Batcher.withNodeMinimums(ctx, wallet.sign(ZcUserTransactions.post(ctx, wallet,
         ZcUserTransactions.orderBox(draft, ownHash, h), wallet.contract).build(Seq(funding))))
       val asset = "d1" * 32
-      val terms = Seq(2 * Erg, Erg, 2 * Erg, h + 1000L, h.toLong, 5000000L, 0L)
+      val maturity = if (bondMatured) h - 1L else h + 1000L
+      val terms = Seq(2 * Erg, Erg, 2 * Erg, maturity, h.toLong, 5000000L, 0L)
       val live = UTXO(ZcContracts.script(ZcKind.Bond, Some(ZcMarket.Erg)).contract, 3 * Erg, Seq(Token(ErgoId.create(asset), 2L)),
-        Seq(bytes(asset), bytes(ownHash), longs(terms: _*), tokens(), bytes(expr(ZcExpression.MaturityLiquidation)),
-          longs(50000000L, h - 100L, h + 1000L)), Some(h - 100)).toInput(ctx, ErgoId.create("f1" * 32), 0)
+        Seq(bytes(asset), bytes(borrowerHash), longs(terms: _*), tokens(), bytes(expr(ZcExpression.MaturityLiquidation)),
+          longs(50000000L, h - 100L, maturity)), Some(h - 100)).toInput(ctx, ErgoId.create("f1" * 32), 0)
       val b = live.input
       val bondBox = NodeBox(b.getId.toString, "f1" * 32, b.getValue, 0, b.getCreationHeight, Hex.toHexString(b.getErgoTree.bytes),
         Seq(NodeAsset(asset, 2L)), NodeRegisters(b.getRegisters.asScala.zipWithIndex.map { case (v, k) => s"R${k + 4}" -> v.toHex }.toMap))
-      (nodeOf(posted, 0), bondBox, asset)
+      val authIn = UTXO(wallet.contract, ZcBoxes.MinBox, if (walletHoldsUnit) Seq(Token(ErgoId.create(asset), 1L)) else Seq.empty)
+        .toInput(ctx, ErgoId.create("f2" * 32), 0).input
+      val auth = NodeBox(authIn.getId.toString, "f2" * 32, authIn.getValue, 0, authIn.getCreationHeight,
+        Hex.toHexString(authIn.getErgoTree.bytes),
+        authIn.getTokens.asScala.map(t => NodeAsset(t.getId.toString, t.getValue)), NodeRegisters.empty)
+      (nodeOf(posted, 0), bondBox, auth, asset)
     }
     val h = ctx0.getClient.execute(_.getHeight)
     c.extend(h - 40, h)
     c.indexed = h
-    c.scans(Seq(order, bond).map(b => LDNodeFixtures.indexed(b, h - 10)): _*)
-    val boxes = Seq(order, bond).map(b => b.boxId -> b).toMap
+    c.scans(Seq(order, bond, authBox).map(b => LDNodeFixtures.indexed(b, h - 10)): _*)
+    val boxes = Seq(order, bond, authBox).map(b => b.boxId -> b).toMap
     when(c.api.boxesWithPoolByIds(any[Seq[String]])).thenAnswer(inv =>
       Success(inv.getArgument[Seq[String]](0).flatMap(boxes.get)))
+    when(c.api.walletBalancesWithUnconfirmed()).thenReturn(Success(WalletBalances(h, 5 * Erg,
+      if (walletHoldsUnit) Seq(NodeAsset(asset, 1L)) else Seq.empty)))
     val t = new ZcTracker(() => c.api, ExecutionContext.global, ZcConfig(enabled = true, 1000), retryMs = 20L)
     t.poke()
     eventually(t.view.map(_.book.height) shouldBe Some(h))
     val r = new ZcResolver(() => c.api, t)
     val exec = new ZcWriteExecution(ctx0, EngineFunding(null, 1.second, ExecutionContext.global), t, r) {
       override protected def mempoolSnapshot(): CompleteMempool.Snapshot = {
-        val spentInMempool = if (orderSpentInMempool) Seq(order.boxId) else Seq.empty[String]
+        val spentInMempool = (if (orderSpentInMempool) Seq(order.boxId) else Seq.empty[String]) ++
+          (if (bondSpentInMempool) Seq(bond.boxId) else Seq.empty[String])
         val txs = spentInMempool.map(id => CompleteMempool.MempoolTx("ab" * 32, nodeTx("ab" * 32, Seq(id), Seq.empty), 100))
         CompleteMempool.Snapshot(c.headerId(h), txs.map(_.id).toSet, spentInMempool.toSet, System.currentTimeMillis(),
           transactions = txs.toVector)
@@ -115,10 +127,45 @@ class ZcWriteExecutionSpec extends AnyFlatSpec with Matchers with Eventually {
     an[LithosUnprocessable] should be thrownBy w.exec.liquidate(w.asset, Json.obj(), send = true)
   }
 
+  "An extinguish check" should "quote burning the unit and returning collateral plus fee reserve, including after maturity" in {
+    val w = world(walletHoldsUnit = true)
+    val quote = w.exec.extinguish(w.asset, Json.obj(), send = false)
+    (quote \ "refusals").as[Seq[String]] shouldBe empty
+    (quote \ "warnings").as[Seq[String]] shouldBe empty
+    (quote \ "paysNanoErgs").as[String] shouldBe "0"
+    (quote \ "receivesNanoErgs").as[String] shouldBe (w.bond.value - ZcUserTransactions.TxFee).toString
+    (quote \ "paysTokens").as[Seq[JsObject]].map(t => (t \ "tokenId").as[String] -> (t \ "amount").as[String]) shouldBe
+      Seq(w.asset -> "1")
+    (quote \ "creates").as[Seq[JsObject]] shouldBe empty
+    (quote \ "terms" \ "assetId").as[String] shouldBe w.asset
+    (quote \ "terms" \ "returns" \ "nanoErg").as[String] shouldBe (w.bond.value - ZcUserTransactions.TxFee).toString
+
+    val due = world(walletHoldsUnit = true, bondMatured = true)
+    val dueQuote = due.exec.extinguish(due.asset, Json.obj(), send = false)
+    (dueQuote \ "refusals").as[Seq[String]] shouldBe empty
+    (dueQuote \ "warnings").as[Seq[String]].head should include("races any liquidation")
+  }
+
+  it should "refuse when this wallet is not the borrower or does not hold the circulating unit" in {
+    val noUnit = world(walletHoldsUnit = false)
+    (noUnit.exec.extinguish(noUnit.asset, Json.obj(), send = false) \ "refusals").as[Seq[String]].head should
+      include("does not hold bond unit")
+    an[LithosUnprocessable] should be thrownBy noUnit.exec.extinguish(noUnit.asset, Json.obj(), send = true)
+
+    val otherBorrower = world(walletHoldsUnit = true, bondOwnedByMe = false)
+    (otherBorrower.exec.extinguish(otherBorrower.asset, Json.obj(), send = false) \ "refusals").as[Seq[String]].head should
+      include("only the borrower may extinguish")
+    an[LithosUnprocessable] should be thrownBy otherBorrower.exec.extinguish(otherBorrower.asset, Json.obj(), send = true)
+  }
+
   "A send" should "refuse a box a fresh mempool observation shows spent, with 409" in {
     val spent = world(orderSpentInMempool = true)
     val e = the[LithosStateChanged] thrownBy spent.exec.fillOrder(spent.order.boxId, Json.obj(), send = true)
     e.reason should include("already spent by unconfirmed transaction")
+
+    val spentBond = world(bondSpentInMempool = true, walletHoldsUnit = true)
+    val e2 = the[LithosStateChanged] thrownBy spentBond.exec.extinguish(spentBond.asset, Json.obj(), send = true)
+    e2.reason should include("already spent by unconfirmed transaction")
   }
 
   it should "refuse a quote that moved past the body's limits, with 409, before reserving anything" in {

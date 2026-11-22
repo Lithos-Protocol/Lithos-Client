@@ -105,8 +105,10 @@ class ZcApiControllerSpec
     val (c, _) = controller()
     val x = id(1)
     val sends = Seq(c.createLot(), c.buyLot(x), c.fillOrder(x), c.buyAsk(x), c.buyVault(x), c.pull(x), c.fractionalize(x),
-      c.repay(x), c.recollateralize(x), c.liquidate(x), c.claim(x), c.createWrap(), c.unwrap(x), c.mint(x),
+      c.repay(x), c.recollateralize(x), c.liquidate(x), c.extinguish(x), c.claim(x), c.createWrap(), c.unwrap(x), c.mint(x),
       c.activity(None, None))
     sends.map(a => status(a.apply(FakeRequest(POST, "/").withJsonBody(play.api.libs.json.Json.obj())))).toSet shouldBe Set(FORBIDDEN)
+    // checkExtinguish is open (no key) and validates the bond asset id before hitting the node
+    status(c.checkExtinguish("not-a-hex-id").apply(FakeRequest(POST, "/").withJsonBody(play.api.libs.json.Json.obj()))) shouldBe BAD_REQUEST
   }
 }

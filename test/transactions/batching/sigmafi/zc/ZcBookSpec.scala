@@ -57,6 +57,16 @@ class ZcBookSpec extends AnyFlatSpec with Matchers {
     undone.origins.keySet shouldBe Set(id(1))
   }
 
+  it should "drop a bond and its origin when extinguished directly, and restore both on rollback" in {
+    val live = filled()
+    val extinguished = apply(live, zcTx("b9" * 32, Seq(id(3), id(2)), Seq(wallet(id(8)))))
+    extinguished.boxes shouldBe empty
+    extinguished.origins shouldBe empty
+    val undone = extinguished.rolledBackTo(live.height).get
+    undone.stateOf(id(1)).map(_.boxId) shouldBe Some(id(3))
+    undone.origins.keySet shouldBe Set(id(1))
+  }
+
   it should "undo every block back to the one asked for, and refuse below its history" in {
     val b = filled()
     val back = b.rolledBackTo(h0).get

@@ -53,7 +53,7 @@ object ZcIntent {
 
   object Write {
     val Actions: Set[String] = Set("createLot", "createWrap", "fractionalize", "fillOrder", "buyAsk", "buyLot", "buyVault",
-      "repay", "recollateralize", "liquidate", "claim", "mint", "pull", "unwrap")
+      "repay", "recollateralize", "liquidate", "extinguish", "claim", "mint", "pull", "unwrap")
 
     /** Runs `action` on `e`: the one dispatch the checks and the engine share. */
     def run(e: ZcWriteExecution, action: String, id: Option[String], body: JsObject, send: Boolean): JsObject = {
@@ -69,6 +69,7 @@ object ZcIntent {
         case "repay" => e.repay(path, body, send)
         case "recollateralize" => e.recollateralize(path, body, send)
         case "liquidate" => e.liquidate(path, body, send)
+        case "extinguish" => e.extinguish(path, body, send)
         case "claim" => e.claim(path, body, send)
         case "mint" => e.mint(path, body, send)
         case "pull" => e.pull(path, body, send)

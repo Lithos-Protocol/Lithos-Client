@@ -228,6 +228,61 @@ class ZcLifecycleSpec extends AnyFlatSpec with Matchers {
     }
   }
 
+  "Extinguishing" should "burn all three units directly and return collateral plus fee reserve, at any height" in {
+    client.execute { ctx =>
+      // 1. Before maturity, circulating unit held at borrower's own address (unit itself authorizes)
+      val (fill, _) = filled(ctx)
+      val b = read[ZcBond](out(fill, 1))
+      val unitAtBorrower = input(ctx, out(fill, 0))
+      val ext = sign(ctx, ZcUserTransactions.extinguish(b, input(ctx, b.box), unitAtBorrower, me))
+      ext.getSignedInputs.size shouldBe 2
+      ext.getOutputsToSpend.asScala.flatMap(_.getTokens.asScala).map(_.getId.toString) should not contain b.asset
+      ext.getOutputsToSpend.get(0).getValue.longValue shouldBe b.box.value + unitAtBorrower.value - ZcUserTransactions.TxFee
+
+      // 2. Unit held at a separate wallet address alongside an explicit borrower auth box
+      val (fill2, _) = filled(ctx)
+      val b2 = read[ZcBond](out(fill2, 1))
+      val unitElsewhere = seeded(ctx, UTXO(seller, MinBox, Seq(token(b2.asset, 1L))))
+      val authBox = funds(ctx, MinBox)
+      val ext2 = sign(ctx, ZcUserTransactions.extinguish(b2, input(ctx, b2.box), authBox, me), unitElsewhere)
+      ext2.getSignedInputs.size shouldBe 3
+      ext2.getOutputsToSpend.asScala.flatMap(_.getTokens.asScala).map(_.getId.toString) should not contain b2.asset
+      ext2.getOutputsToSpend.get(0).getValue.longValue shouldBe b2.box.value + authBox.value + unitElsewhere.value - ZcUserTransactions.TxFee
+
+      // 3. Past maturity on a SigUSD bond with collateral tokens: still extinguishable
+      val h = ctx.getHeight.toLong
+      val sigAsset = "d9" * 32
+      val collToken = "da" * 32
+      val dueSig = bond(ctx, sigAsset, 2 * Erg, Seq(token(collToken, 50L)), 500L, ZcExpression.MaturityLiquidation,
+        h - 1000, h - 1, h.toInt - 1000, market = ZcMarket.SigUsd)
+      val dueBond = read[ZcBond](nodeOf(dueSig))
+      val dueUnit = funds(ctx, MinBox, token(sigAsset, 1L))
+      val extDue = sign(ctx, ZcUserTransactions.extinguish(dueBond, dueSig, dueUnit, me))
+      val swept = extDue.getOutputsToSpend.get(0)
+      swept.getValue.longValue shouldBe dueBond.box.value + dueUnit.value - ZcUserTransactions.TxFee
+      swept.getTokens.asScala.map(t => t.getId.toString -> t.getValue) shouldBe Seq(collToken -> 50L)
+    }
+  }
+
+  it should "be refused by the contract without borrower auth, with unburned units, or with a path context var" in {
+    client.execute { ctx =>
+      // Missing borrower auth (non-borrower holds the circulating unit)
+      val (fill, _) = filled(ctx)
+      val b = read[ZcBond](out(fill, 1))
+      val nonBorrowerUnit = seeded(ctx, UTXO(seller, MinBox, Seq(token(b.asset, 1L))))
+      an[Exception] should be thrownBy sign(ctx, ZcUserTransactions.extinguish(b, input(ctx, b.box), nonBorrowerUnit, seller))
+
+      // Leaving one unit unburned (outCount == 1)
+      val unitAtBorrower = input(ctx, out(fill, 0))
+      val badBurn = ZcSpend(Seq(input(ctx, b.box), unitAtBorrower), Seq.empty, burn = Seq(token(b.asset, 2L)), sweep = Some(me))
+      an[Exception] should be thrownBy sign(ctx, badBurn)
+
+      // Path context var set on bond input (var 3 enters recollateralize instead of extinguish)
+      val withVar = ZcUserTransactions.extinguish(b, input(ctx, b.box).withCtxVar(3.toByte, ErgoValue.of(0)), unitAtBorrower, me)
+      an[Exception] should be thrownBy sign(ctx, withVar)
+    }
+  }
+
   "Recollateralizing" should "grow the bond 60 blocks after it moved, and be refused before" in {
     client.execute { ctx =>
       val h = ctx.getHeight
@@ -298,6 +353,13 @@ class ZcLifecycleSpec extends AnyFlatSpec with Matchers {
         input(ctx, settlement.box), h)), 0))
       pulled.holding shouldBe false
       pulled.box.value shouldBe vault.box.value + settlement.box.value - vault.pullFee
+
+      // CONST_VAULT_HASH: FractionalVault must reject pulling from a live Bond (even burning 3 units) instead of BondVault
+      val fakePull = ZcSpend(Seq(input(ctx, vault.box).withCtxVar(0.toByte, ErgoValue.of(0)), input(ctx, b.box)),
+        Seq(UTXO(ZcContracts.script(ZcKind.FractionalVault, None).contract, vault.box.value + b.box.value - vault.pullFee,
+          Seq(token(vault.shareId, ShareCount + 1L)), input(ctx, vault.box).registers)),
+        burn = Seq(token(asset, 3L)))
+      an[Exception] should be thrownBy sign(ctx, fakePull)
 
       val partial = sign(ctx, ZcUserTransactions.claimShares(pulled, input(ctx, pulled.box), ShareCount / 4, me),
         input(ctx, shares), funds(ctx, Erg))

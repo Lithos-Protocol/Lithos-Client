@@ -229,6 +229,16 @@ class ZcStatisticsSpec extends AnyFlatSpec with Matchers {
       val userTx = decoded(userSigned)
       val userBlock = blockOf(h, Seq(userTx), Seq(nodeOf(userOrderIn), nodeOf(funding)))
       BatchingStatistics.read(userBlock, userTx, NetworkType.MAINNET, mine) shouldBe empty
+
+      // 4. Borrower extinguish (direct 3-unit burn of live bond) must NOT be counted as batching revenue
+      val unitOut = out(userSigned, 0)
+      val liveBondOut = out(userSigned, 1)
+      val borrowerUnitIn = seeded(ctx, UTXO(borrower, MinBox, Seq(tok(userOrder.boxId, 1L))))
+      val extSpend = ZcUserTransactions.extinguish(read[ZcBond](liveBondOut), input(ctx, liveBondOut), borrowerUnitIn, borrower)
+      val extSigned = wallet.sign(ZcUserTransactions.plan(ctx, wallet, extSpend).build(Seq.empty))
+      val extTx = decoded(extSigned)
+      val extBlock = blockOf(h, Seq(extTx), Seq(liveBondOut, nodeOf(borrowerUnitIn)))
+      BatchingStatistics.read(extBlock, extTx, NetworkType.MAINNET, mine) shouldBe empty
     }
   }
 

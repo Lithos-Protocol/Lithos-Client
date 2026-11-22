@@ -281,6 +281,10 @@ POST /sigmafi/zc/bonds/:assetId/liquidate/check controllers.ZcApiController.chec
 + nocsrf
 POST /sigmafi/zc/bonds/:assetId/liquidate       controllers.ZcApiController.liquidate(assetId: String)
 + nocsrf
+POST /sigmafi/zc/bonds/:assetId/extinguish/check controllers.ZcApiController.checkExtinguish(assetId: String)
++ nocsrf
+POST /sigmafi/zc/bonds/:assetId/extinguish      controllers.ZcApiController.extinguish(assetId: String)
++ nocsrf
 POST /sigmafi/zc/claims/:tokenId/check          controllers.ZcApiController.checkClaim(tokenId: String)
 + nocsrf
 POST /sigmafi/zc/claims/:tokenId                controllers.ZcApiController.claim(tokenId: String)

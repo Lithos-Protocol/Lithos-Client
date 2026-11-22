@@ -214,8 +214,59 @@ class ZcReadsSpec extends AnyFlatSpec with Matchers with Eventually with org.sca
     val j = w.reads.portfolio()
     val lending = (j \ "lending").as[Seq[JsObject]].loneElement
     (lending \ "status").as[String] shouldBe "live"
+    (lending \ "borrowedByMe").as[Boolean] shouldBe true
     (lending \ "mark" \ "basis").as[String] shouldBe "bid"
-    ((j \ "borrowing").as[Seq[JsObject]].loneElement \ "bond" \ "assetId").as[String] shouldBe asset
+    (lending \ "actions").as[Seq[JsObject]].find(a => (a \ "name").as[String] == "extinguish").map(a => (a \ "enabled").as[Boolean]) shouldBe Some(true)
+    val borrowing = (j \ "borrowing").as[Seq[JsObject]].loneElement
+    (borrowing \ "bond" \ "assetId").as[String] shouldBe asset
+    (borrowing \ "holdsUnit").as[Boolean] shouldBe true
+    (borrowing \ "actions").as[Seq[JsObject]].find(a => (a \ "name").as[String] == "extinguish").map(a => (a \ "enabled").as[Boolean]) shouldBe Some(true)
     ((j \ "open" \ "orders").as[Seq[JsObject]].loneElement \ "boxId").as[String] shouldBe order1
+
+    // Without the bond unit in wallet, extinguish is disabled on the borrowing row
+    val wNoUnit = world(market, hashes = Set(hashOf(party(1))), balance = (5000000000L, Seq.empty))
+    val bNoUnit = (wNoUnit.reads.portfolio() \ "borrowing").as[Seq[JsObject]].loneElement
+    (bNoUnit \ "holdsUnit").as[Boolean] shouldBe false
+    (bNoUnit \ "actions").as[Seq[JsObject]].find(a => (a \ "name").as[String] == "extinguish").map(a => (a \ "enabled").as[Boolean]) shouldBe Some(false)
+  }
+
+  "borrowedByMe" should "mark resale asks, curves, orderbook, lots and search hits for a bond this wallet borrowed" in {
+    val origin = IndexedBox(oracleOrder(asset), "order", H - 1001, 1L, Some("aa" * 32), Some(H - 1000))
+    val askId = "deadbe" + id(40).drop(6)
+    val lotId = id(41)
+    val resale = ask(askId, asset, 1L, Erg, 1L, seller = 3)
+    val lot = box(lotId, tree(sigmafi.zc.ZcKind.LotAuction), 3000000L, Seq(asset -> 1L),
+      regs(bytes(hashOf(party(3))), longs(2 * Erg, Erg, H - 10L, H + 100L, H + 500L, 2000000L)))
+    val w = world(market ++ Seq(resale, lot), hashes = Set(hashOf(party(1))))
+    doAnswer(inv => Success(if (inv.getArgument[String](0) == asset) Some(origin) else None))
+      .when(w.chain.api).indexedBoxById(anyString())
+
+    // Asks: seller is party(3), so mine is false while borrowedByMe is true
+    val resaleItem = items(w.reads.asks("ERG", ZcFilters(kind = "resale", matchable = false), None, None, None, None, None)).loneElement
+    (resaleItem \ "boxId").as[String] shouldBe askId
+    (resaleItem \ "mine").as[Boolean] shouldBe false
+    (resaleItem \ "borrowedByMe").as[Boolean] shouldBe true
+    (resaleItem \ "bond" \ "borrowedByMe").as[Boolean] shouldBe true
+
+    // Orderbook & curves carry borrowedByMe on the resale ask
+    val obAsk = (w.reads.orderbook("ERG", ZcFilters(kind = "resale", matchable = false), Some(262800L), None, None) \ "asks")
+      .as[Seq[JsObject]].loneElement
+    (obAsk \ "boxId").as[String] shouldBe askId
+    (obAsk \ "borrowedByMe").as[Boolean] shouldBe true
+    val dot = (w.reads.curves("ERG", ZcFilters(kind = "resale", matchable = false)) \ "askDots").as[Seq[JsObject]].loneElement
+    (dot \ "askId").as[String] shouldBe askId
+    (dot \ "kind").as[String] shouldBe "resale"
+    (dot \ "borrowedByMe").as[Boolean] shouldBe true
+
+    // Lot auction containing the borrowed bond unit marks borrowedByMe and lists its bondId
+    val lotJson = (w.reads.auctions(Some("ERG")) \ "lots").as[Seq[JsObject]].loneElement
+    (lotJson \ "mine").as[Boolean] shouldBe false
+    (lotJson \ "borrowedByMe").as[Boolean] shouldBe true
+    (lotJson \ "borrowedBondIds").as[Seq[String]] shouldBe Seq(asset)
+
+    // Search marks borrowedByMe on matching ask hit
+    val hit = (w.reads.search("deadbe") \ "hits").as[Seq[JsObject]].loneElement
+    (hit \ "id").as[String] shouldBe askId
+    (hit \ "borrowedByMe").as[Boolean] shouldBe true
   }
 }

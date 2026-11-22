@@ -121,10 +121,20 @@ final class ZcHistory(api: () => NodeApi, walletHashes: () => Set[String], track
   private def remember(txId: String, found: Seq[ZcEvent], full: IndexedTransaction, hashes: Set[String]): Unit = {
     if (classified.size >= MaxTxs) classified.remove(classified.head._1)
     classified(txId) = found
-    val tokens = found.flatMap(_.token).toSet
-    full.outputs.map(_.box).filter(b => hashes(treeHash(b)) && b.assets.exists(a => tokens(a.tokenId))).foreach { b =>
+    val carried = full.inputs.flatMap(i => tokenBoxes.get(i.box.boxId)).flatten.toSet
+    val lotTokens = full.inputs.map(_.box).flatMap(b => ZcBoxes.read(b)).collect { case l: ZcLot => l.box.assets.map(_.tokenId) }.flatten
+    val tokens = found.flatMap(e => e.token.toSeq ++ e.refs.get("bondId")).toSet ++ carried ++ lotTokens
+    def watch(boxId: String, ids: Set[String]): Unit = {
       if (tokenBoxes.size >= MaxTxs) tokenBoxes.remove(tokenBoxes.head._1)
-      tokenBoxes(b.boxId) = b.assets.map(_.tokenId).toSet
+      tokenBoxes(boxId) = ids
+    }
+    full.outputs.map(_.box).foreach { b =>
+      if (hashes(treeHash(b)) && b.assets.exists(a => tokens(a.tokenId)))
+        watch(b.boxId, b.assets.map(_.tokenId).toSet.intersect(tokens))
+      else ZcBoxes.read(b) match {
+        case Some(bond: ZcBond) if hashes(bond.borrowerHash) => watch(b.boxId, Set(bond.asset))
+        case _ =>
+      }
     }
   }
 }
@@ -226,10 +236,12 @@ object ZcHistory {
         else if (s.liquidated) ev("liquidated", Some(b.market), Some(b.asset), 0L, net(None), "assetId" -> b.asset, "role" -> "runner")
       }
     }
-    // a bond recollateralized: the bond spent into a bond holding the same asset
+    // a bond recollateralized or extinguished (not settled into a vault)
     zin.flatten.collect { case b: ZcBond => b }.filterNot(b => consumed(b.boxId)).foreach { b =>
       if (zout.flatten.exists { case n: ZcBond => n.asset == b.asset; case _ => false } && wallet(b.borrowerHash))
         ev("recollateralized", Some(b.market), Some(b.asset), 0L, -net(None), "assetId" -> b.asset)
+      else if (!outs.exists(_.assets.exists(_.tokenId == b.asset)) && wallet(b.borrowerHash))
+        ev("extinguished", Some(b.market), Some(b.asset), 1L, b.repayment, "assetId" -> b.asset, "bondBoxId" -> b.boxId)
     }
     // claims: a settlement or a share vault spent while this wallet's tokens burn
     zin.flatten.collect { case s: ZcSettlement => s }.foreach { s =>
@@ -243,10 +255,12 @@ object ZcHistory {
       val mineBurned = ins.filter(mine).flatMap(_.assets).filter(_.tokenId == v.shareId).map(_.amount).sum -
         outs.filter(mine).flatMap(_.assets).filter(_.tokenId == v.shareId).map(_.amount).sum
       val m = ZcMarket.all.find(_.tokenId == ZcRules.vaultCurrency(v)).getOrElse(ZcMarket.Erg)
-      if (held > left && mineBurned > 0L)
-        ev("claimed", Some(m), Some(v.shareId), math.min(mineBurned, v.outstanding), net(m.tokenId), "vaultBoxId" -> v.boxId,
-          "bondId" -> v.bondAsset)
-      else if (v.holding && zin.flatten.exists(_.isInstanceOf[ZcSettlement]) && net(None) > 0)
+      if (held > left && mineBurned > 0L) {
+        val unfrac = v.holding && outs.exists(o => mine(o) && o.assets.exists(_.tokenId == v.bondAsset))
+        val refs = Seq("vaultBoxId" -> v.boxId, "bondId" -> v.bondAsset) ++
+          (if (unfrac) Seq("unfractionalized" -> "true") else Seq.empty)
+        ev("claimed", Some(m), Some(v.shareId), math.min(mineBurned, v.outstanding), net(m.tokenId), refs: _*)
+      } else if (v.holding && zin.flatten.exists(_.isInstanceOf[ZcSettlement]) && net(None) > 0)
         ev("pulled", None, Some(v.shareId), 0L, net(None), "vaultBoxId" -> v.boxId)
     }
     // mints and requests
@@ -295,8 +309,9 @@ object ZcHistory {
 
   /**
    * Cost basis and realized P&L from `events`, oldest first. An acquisition adds what was paid; a disposal takes the
-   * average cost of the units it gives up and realizes the rest; a share mint carries the unit's cost to the shares.
-   * Units with no recorded acquisition have no cost, and their disposals realize nothing.
+   * average cost of the units it gives up and realizes the rest; a share mint or an un-fractionalized final claim
+   * carries the cost across the unit and its shares; an extinguish clears the burned unit's cost without realizing
+   * lending P&L. Units with no recorded acquisition have no cost, and their disposals realize nothing.
    */
   def ledger(events: Seq[ZcEvent], status: String): ZcLedger = {
     val costs = mutable.Map.empty[String, ZcCost]
@@ -307,12 +322,25 @@ object ZcHistory {
           val before = costs.get(t)
           costs(t) = ZcCost(before.fold(BigInt(0))(_.paid) + e.amount, before.fold(0L)(_.units) + e.units, e.market,
             e.height, e.txId, e.refs.get("viaOffer"))
+        case ("claimed", Some(shares)) if e.refs.get("unfractionalized").contains("true") =>
+          e.refs.get("bondId").foreach { bondId =>
+            costs.remove(shares).foreach(c => costs(bondId) = c.copy(units = 1L, height = e.height, txId = e.txId))
+          }
         case ("sold" | "claimed", Some(t)) =>
           costs.get(t).filter(_.units > 0L).foreach { c =>
             val u = math.min(e.units, c.units)
             val part = c.paid * u / c.units
             e.market.foreach(m => realized(m.name) = realized.getOrElse(m.name, BigInt(0)) + e.amount - part)
             if (c.units - u <= 0L) costs.remove(t) else costs(t) = c.copy(paid = c.paid - part, units = c.units - u)
+          }
+        case ("extinguished", Some(t)) =>
+          costs.get(t).filter(_.units > 0L).foreach { c =>
+            val u = math.min(e.units, c.units)
+            if (c.units - u <= 0L) costs.remove(t)
+            else {
+              val part = c.paid * u / c.units
+              costs(t) = c.copy(paid = c.paid - part, units = c.units - u)
+            }
           }
         case ("sharesMinted", Some(shares)) =>
           e.refs.get("bondId").flatMap(costs.remove).foreach(c => costs(shares) = c.copy(units = e.units, height = e.height,
