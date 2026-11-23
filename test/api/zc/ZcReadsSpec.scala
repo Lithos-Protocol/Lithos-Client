@@ -125,12 +125,83 @@ class ZcReadsSpec extends AnyFlatSpec with Matchers with Eventually with org.sca
     (j \ "totals" \ "searched" \ "offers").as[Int] shouldBe 1
   }
 
-  "orderbook" should "place each ask at its maturity and each bid at its lowest yield in range" in {
+  private def rows(j: JsObject, side: String): Seq[JsObject] = (j \ side).as[Seq[JsObject]]
+  private def long(j: JsObject, k: String): Option[Long] = (j \ k).asOpt[Long]
+
+  "orderbook" should "place each ask at its maturity and read each bid at the anchor, with its range over the slice" in {
     val j = world(market).reads.orderbook("ERG", ZcFilters(), Some(262800L), None, None)
-    ((j \ "bids").as[Seq[JsObject]].head \ "bps").as[Long] shouldBe 820L
-    ((j \ "asks").as[Seq[JsObject]].head \ "boxId").as[String] shouldBe order1
-    (j \ "spreadBps").as[Long] should be < 0L
+    val bid = rows(j, "bids").head
+    long(bid, "bps") shouldBe Some(940L)
+    long(bid, "minBps") shouldBe Some(820L)
+    long(bid, "maxBps") shouldBe Some(940L)
+    (rows(j, "asks").head \ "boxId").as[String] shouldBe order1
+    long(j, "anchorBlocks") shouldBe Some(262800L)
+    long(j, "anchorBidBps") shouldBe Some(940L)
+    long(j, "bestBidBps") shouldBe Some(940L)
     an[LithosBadRequest] should be thrownBy world(market).reads.orderbook("ERG", ZcFilters(), Some(1000L), Some(5L), None)
+  }
+
+  it should "compare each ask with the bid at its own maturity, and give the tightest such spread" in {
+    val j = world(market).reads.orderbook("ERG", ZcFilters(), Some(262800L), None, None)
+    val ask = rows(j, "asks").head
+    val (d, y, bidAt) = (long(ask, "blocks").get, long(ask, "bps").get, long(ask, "bidAtBps").get)
+    bidAt should (be > 820L and be < 940L)
+    long(ask, "spreadBps") shouldBe Some(bidAt - y)
+    long(j, "spreadBps") shouldBe Some(bidAt - y)
+    long(j, "spreadBps").get should be < 0L
+    long(j, "spreadBlocks") shouldBe Some(d)
+    long(j, "spreadBidBps") shouldBe Some(bidAt)
+    long(j, "spreadAskBps") shouldBe Some(y)
+  }
+
+  it should "not call an ask crossed because the bid curve is lower at a shorter maturity" in {
+    // A steep bid curve: 700 bps to 21,600 blocks, about 799 at the order's ~39,600. The order pays about 756: over
+    // the curve's low end, under it at its own maturity.
+    val steep = Seq(ergOffer(offer1, curve = Seq(700L -> 21600L, 1300L -> 131400L)), oracleOrder(order1, repayment = 1011400000L))
+    val j = world(steep).reads.orderbook("ERG", ZcFilters(), Some(64800L), None, None)
+    val ask = rows(j, "asks").loneElement
+    long(ask, "bps").get should (be > 700L and be < long(ask, "bidAtBps").get)
+    long(rows(j, "bids").loneElement, "minBps") shouldBe Some(700L)
+    long(j, "spreadBps").get should be > 0L
+    long(j, "spreadBps") shouldBe Some(long(j, "spreadBidBps").get - long(j, "spreadAskBps").get)
+  }
+
+  it should "track the bid at the anchor, and give no spread when no ask shares a maturity with a bid" in {
+    val w = world(market)
+    def book(to: Option[Long], around: Option[Long] = None) = w.reads.orderbook("ERG", ZcFilters(), to, around, None)
+    val short = book(Some(21600L))
+    rows(short, "asks") shouldBe empty
+    long(short, "anchorBidBps") shouldBe Some(820L)
+    long(short, "spreadBps") shouldBe None
+    val mid = long(book(Some(64800L)), "anchorBidBps").get
+    mid should (be > 820L and be < 940L)
+    val near = book(None, Some(131400L))
+    long(near, "anchorBlocks") shouldBe Some(131400L)
+    long(near, "anchorBidBps") shouldBe Some(940L)
+
+    // A bid from 43,200 blocks and an ask at ~39,600: both in range, at no shared maturity.
+    val apart = world(Seq(ergOffer(offer1, min = 43200L), oracleOrder(order1))).reads
+      .orderbook("ERG", ZcFilters(), Some(64800L), None, None)
+    val ask = rows(apart, "asks").loneElement
+    long(ask, "bidAtBps") shouldBe None
+    long(ask, "spreadBps") shouldBe None
+    (rows(apart, "bids").loneElement \ "range").as[Seq[Long]] shouldBe Seq(43200L, 64800L)
+    long(apart, "spreadBps") shouldBe None
+    long(apart, "spreadBlocks") shouldBe None
+  }
+
+  it should "search a window order's maturities for its tightest gap to the bid curve" in {
+    val j = world(Seq(ergOffer(offer1), windowOrder(id(50), 20000L, 60000L, 5000L))).reads
+      .orderbook("ERG", ZcFilters(matchable = false), Some(262800L), None, None)
+    val ask = rows(j, "asks").loneElement
+    (ask \ "window").as[Boolean] shouldBe true
+    // The window runs 20,000 to 60,000 blocks from now; blocks left count from the next block, as a fill would.
+    val d = long(j, "spreadBlocks").get
+    d should (be >= 19999L and be <= 59999L)
+    long(ask, "spreadBps") shouldBe long(j, "spreadBps")
+    long(ask, "bidAtBps") shouldBe long(j, "spreadBidBps")
+    long(j, "spreadBps") shouldBe Some(long(j, "spreadBidBps").get - long(j, "spreadAskBps").get)
+    long(j, "spreadBps").get should be <= 0L
   }
 
   "matches" should "agree from both sides: what an offer would buy, and which offer takes an ask first" in {

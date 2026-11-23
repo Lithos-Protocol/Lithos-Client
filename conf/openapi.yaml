@@ -5217,8 +5217,13 @@ paths:
     get:
       summary: Order book
       description: >
-        Asks (each carrying `borrowedByMe`) and bids around a maturity, `around` ± `band` blocks, or up to `to`
-        blocks out, with the spread between the best of each.
+        Asks (each carrying `borrowedByMe`) and bids around a maturity, `around` ± `band` blocks, or up to `to` blocks
+        out. A bid and an ask are only compared at the same maturity: each ask carries the best bid at its own
+        maturity (`bidAtBps`) and the gap to it (`spreadBps`, zero or less when it crosses), and the top-level
+        `spreadBps` is the tightest such gap, with `spreadBlocks`, `spreadBidBps` and `spreadAskBps` saying where. It
+        is null when no ask shares a maturity with a bid. Each bid is read at the anchor maturity (`anchorBlocks`:
+        `to`, `around`, or a year), with `minBps` and `maxBps` across the range; `anchorBidBps` is the best bid at the
+        anchor.
       operationId: getZcOrderbook
       tags:
         - sigmafi-zc

@@ -268,52 +268,108 @@ final class ZcReads(tracker: ZcTracker, resolver: ZcResolver, node: () => NodeAp
 
   // ─── 5. orderbook ──────────────────────────────────────────────────────────
 
+  /**
+   * The order book over blocks-left range [lo, hi], read at one anchor maturity: `to` in up-to mode, `around` in
+   * around mode, `hi` for the whole book. A bid and an ask are only ever compared at the same maturity: each ask
+   * carries the best bid at its own maturity (`bidAtBps`) and the gap to it (`spreadBps`), and the top-of-book
+   * spread is the tightest of those gaps, with the maturity it occurs at. Asks and bids that share no maturity in
+   * range give no spread rather than one made up across maturities. Each bid row reads its offer at the anchor,
+   * with its lowest and highest yield in range beside it.
+   */
   def orderbook(marketName: String, f: ZcFilters, to: Option[Long], around: Option[Long], band: Option[Long]): JsObject = {
     val s = snap()
     val m = market(marketName)
-    val (lo, hi) = (to, around) match {
-      case (Some(t), None) if t >= 720L => (720L, t)
+    val (lo, hi, anchor) = (to, around) match {
+      case (Some(t), None) if t >= 720L => (720L, t, t)
       case (None, Some(a)) if a > 0L =>
         val b = band.getOrElse(math.max(720L, a / 10L))
-        (math.max(1L, a - b), a + b)
-      case (None, None) => (720L, BlocksPerYear)
+        (math.max(1L, a - b), a + b, a)
+      case (None, None) => (720L, BlocksPerYear, BlocksPerYear)
       case _ => throw LithosBadRequest("give either to (at least 720) or around, not both")
     }
     val wf = Try(walletHashes()).getOrElse(Set.empty).hashCode
-    s.derived.get(s"book:$m:$f:$lo:$hi:$wf", () => {
+    s.derived.get(s"book:$m:$f:$lo:$hi:$anchor:$wf", () => {
       val l = new Lookups(s)
       val h = s.book.height.toLong
+      val bidders = s.book.offers.filter(_.record.market == m).map(o => o -> l.json.standing(o.record))
+        .filter { case (o, st) => (!f.matchable || st.ok) && floorBps(o.record) <= f.coverage &&
+          maxBlocks(o.record) >= lo && minBlocks(o.record) <= hi }
+        .map { case (o, st) => (o, st, offerCurve(o.record)) }
+      // The best bid at exactly `d` blocks left: the lowest yield any eligible offer covering `d` accepts there.
+      def bidAt(d: Long): Option[Long] = bidders.iterator.collect {
+        case (o, _, c) if d >= minBlocks(o.record) && d <= maxBlocks(o.record) => c.bpsAt(d)
+      }.reduceOption(_ min _)
+      val bidBlocks = bidders.flatMap { case (o, _, _) =>
+        Seq(minBlocks(o.record), maxBlocks(o.record)) ++ o.record.curve.map(_._2) }.distinct
+
       val rows = askRows(l, s, m).filter(keep(_, f, None, None))
-      val asks = rows.flatMap { r =>
+      val priced = rows.flatMap { r =>
         r.open.record match {
           case o: ZcOrder if window(o) =>
             bestWindowQuote(o, h, lo, hi).map { case (blocks, bps, cost) =>
-              Json.obj("boxId" -> r.open.boxId, "kind" -> r.kind, "bps" -> bps, "size" -> cost.toString, "blocks" -> blocks,
+              val gap = bestWindowSpread(o, h, lo, hi, bidAt, bidBlocks)
+              (Json.obj("boxId" -> r.open.boxId, "kind" -> r.kind, "bps" -> bps, "size" -> cost.toString, "blocks" -> blocks,
                 "window" -> true, "ok" -> r.standing.ok, "reason" -> r.standing.reasons.headOption,
-                "borrowedByMe" -> r.borrowedByMe)
+                "borrowedByMe" -> r.borrowedByMe, "bidAtBps" -> gap.map(_.bid), "spreadBps" -> gap.map(_.gap)), gap)
             }
-          case _ => r.blocksLeft.filter(b => b >= lo && b <= hi).map(b => Json.obj("boxId" -> r.open.boxId, "kind" -> r.kind,
-            "bps" -> r.yieldBps, "size" -> r.cost.toString, "blocks" -> b, "window" -> false, "ok" -> r.standing.ok,
-            "reason" -> r.standing.reasons.headOption, "borrowedByMe" -> r.borrowedByMe))
+          case _ => r.blocksLeft.filter(b => b >= lo && b <= hi).map { b =>
+            val bid = bidAt(b)
+            val gap = for (x <- bid; y <- r.yieldBps) yield Gap(b, x, y)
+            (Json.obj("boxId" -> r.open.boxId, "kind" -> r.kind, "bps" -> r.yieldBps, "size" -> r.cost.toString,
+              "blocks" -> b, "window" -> false, "ok" -> r.standing.ok, "reason" -> r.standing.reasons.headOption,
+              "borrowedByMe" -> r.borrowedByMe, "bidAtBps" -> bid, "spreadBps" -> gap.map(_.gap)), gap)
+          }
         }
-      }.sortBy(j => (-(j \ "bps").asOpt[Long].getOrElse(Long.MinValue + 1), (j \ "boxId").as[String])).take(MaxBookRows)
-      val bids = s.book.offers.filter(_.record.market == m).map(o => o -> l.json.standing(o.record))
-        .filter { case (o, st) => (!f.matchable || st.ok) && floorBps(o.record) <= f.coverage &&
-          maxBlocks(o.record) >= lo && minBlocks(o.record) <= hi }
-        .flatMap { case (o, st) =>
-          val r = o.record
-          val (a, b) = (math.max(lo, minBlocks(r)), math.min(hi, maxBlocks(r)))
-          val at = (Seq(a, b) ++ r.curve.map(_._2).filter(d => d >= a && d <= b)).map(offerCurve(r).bpsAt)
-          at.reduceOption(_ min _).map(bps => Json.obj("boxId" -> o.boxId, "bps" -> bps, "size" -> r.capital.toString,
-            "range" -> Seq(a, b), "ok" -> st.ok, "reason" -> st.reasons.headOption))
-        }.sortBy(j => ((j \ "bps").as[Long], (j \ "boxId").as[String])).take(MaxBookRows)
+      }
+      val asks = priced.map(_._1)
+        .sortBy(j => (-(j \ "bps").asOpt[Long].getOrElse(Long.MinValue + 1), (j \ "boxId").as[String])).take(MaxBookRows)
+      val tightest = priced.flatMap(_._2).sortBy(_.rank).headOption
+
+      val bids = bidders.map { case (o, st, c) =>
+        val r = o.record
+        val (a, b) = (math.max(lo, minBlocks(r)), math.min(hi, maxBlocks(r)))
+        val ys = (Seq(a, b) ++ r.curve.map(_._2).filter(d => d >= a && d <= b)).map(c.bpsAt)
+        val atY = c.bpsAt(math.min(b, math.max(a, anchor)))
+        (atY, Json.obj("boxId" -> o.boxId, "bps" -> atY, "minBps" -> ys.min, "maxBps" -> ys.max,
+          "size" -> r.capital.toString, "range" -> Seq(a, b), "ok" -> st.ok, "reason" -> st.reasons.headOption))
+      }.sortBy { case (y, j) => (y, (j \ "boxId").as[String]) }.take(MaxBookRows).map(_._2)
+
+      val anchorBid = bidAt(anchor)
       val bestAsk = asks.flatMap(j => (j \ "bps").asOpt[Long]).reduceOption(_ max _)
-      val bestBid = bids.map(j => (j \ "bps").as[Long]).reduceOption(_ min _)
-      withAt(s, Json.obj("filters" -> filtersJson(f), "range" -> Json.obj("from" -> lo, "to" -> hi), "asks" -> asks,
-        "bids" -> bids, "bestAskBps" -> bestAsk, "bestBidBps" -> bestBid,
-        "spreadBps" -> (for (a <- bestAsk; b <- bestBid) yield b - a)))
+      val bestBid = anchorBid.orElse(bids.map(j => (j \ "bps").as[Long]).reduceOption(_ min _))
+      withAt(s, Json.obj("filters" -> filtersJson(f), "range" -> Json.obj("from" -> lo, "to" -> hi),
+        "anchorBlocks" -> anchor, "anchorBidBps" -> anchorBid, "asks" -> asks, "bids" -> bids,
+        "bestAskBps" -> bestAsk, "bestBidBps" -> bestBid, "spreadBps" -> tightest.map(_.gap),
+        "spreadBlocks" -> tightest.map(_.blocks), "spreadBidBps" -> tightest.map(_.bid),
+        "spreadAskBps" -> tightest.map(_.ask)))
     })
   }
+
+  /**
+   * A window order's tightest same-maturity gap to the bid curve in blocks-left range [lo, hi]: the maturity where
+   * the best bid most nearly meets (or falls under) what the order pays. Searches the window's ends, its curve's
+   * breakpoints, the eligible offers' bounds and breakpoints (`bidBlocks`) and the grid.
+   */
+  private def bestWindowSpread(o: ZcOrder, h: Long, lo: Long, hi: Long, bidAt: Long => Option[Long],
+                               bidBlocks: Seq[Long]): Option[Gap] =
+    for {
+      (wlo, whi) <- orderWindow(o)
+      c <- borrowCurve(o)
+      at = h + 1L
+      from = math.max(h + wlo, at + lo)
+      until = math.min(h + whi, at + hi)
+      if from <= until
+      best <- (Seq(from, until) ++ c.breakpoints.map(h + _) ++ bidBlocks.map(at + _) ++ gridBetween(from, until))
+        .filter(x => x >= from && x <= until).distinct
+        .flatMap { mat =>
+          val blocks = mat - at
+          for {
+            bid <- bidAt(blocks)
+            p <- resolvePrincipal(o, h, mat).toOption
+            y <- ZcPricing.yieldBps(BigInt(o.repayment), BigInt(p), blocks)
+          } yield Gap(blocks, bid, y)
+        }.sortBy(_.rank).headOption
+    } yield best
 
   /** A window order's best maturity in blocks-left range [lo, hi] for whoever fills it: the highest yield it pays. */
   private def bestWindowQuote(o: ZcOrder, h: Long, lo: Long, hi: Long): Option[(Long, Long, BigInt)] =
@@ -824,6 +880,15 @@ object ZcReads {
   private[zc] final case class AskRow(open: ZcOpen[_ <: ZcRecord], json: () => JsObject, yieldBps: Option[Long],
                                       blocksLeft: Option[Long], cost: BigInt, cover: Option[Long], kind: String,
                                       standing: ZcStanding, grid: Boolean, borrowedByMe: Boolean)
+
+  /**
+   * A bid and an ask read at the same maturity, `blocks` left: `gap` is bid minus ask, so zero or less means the ask
+   * pays at least what the bid curve asks there. Ranked tightest first, then the higher ask, then the shorter maturity.
+   */
+  private[zc] final case class Gap(blocks: Long, bid: Long, ask: Long) {
+    def gap: Long = bid - ask
+    def rank: (Long, Long, Long) = (gap, -ask, blocks)
+  }
 
   /** Node reads one request may make for origins, scripts, chains and names. */
   final val ReadsPerRequest = 16
