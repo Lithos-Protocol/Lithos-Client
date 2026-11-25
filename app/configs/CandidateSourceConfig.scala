@@ -30,6 +30,9 @@ object CandidateSourceConfig {
   final val SigmaFi = "sigmafi"
   final val Arb = "arb"
 
+  /** The most transactions any one source may place in a block. */
+  final val MaxTxs = 200
+
   /** Sources whose transactions are pool work that earns no ERG, so no revenue gain reflects them. */
   final val Protocol: Set[String] = Set(Rollups, Emissions)
 

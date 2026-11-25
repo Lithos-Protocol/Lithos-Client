@@ -139,24 +139,16 @@ object LDOrderBook {
 
   /** Every box at one order template, up to [[Batcher.MaxScannedPerTemplate]]. */
   private def scan(nodeApi: NodeApi, name: String, template: LDOrderTemplate, mempool: MempoolOptions): Vector[IndexedBox] = {
-    var offset = 0
-    var exhausted = false
-    var found = Vector.empty[IndexedBox]
-    while (!exhausted && offset < Batcher.MaxScannedPerTemplate) {
-      val page = nodeApi.unspentBoxesByTemplateHash(template.templateHash, Paging(offset, Batcher.PageSize),
-        SortDirection.Desc, mempool) match {
-        case Success(boxes) => boxes
-        case Failure(ex) => throw new LDBoxes.IndexUnavailableException(
-          s"could not reach the node index reading $name orders: is extraIndex on? (${ex.getMessage})", ex)
-      }
-      found ++= page
-      exhausted = page.size < Batcher.PageSize
-      offset += page.size
-    }
+    val found = Vector.newBuilder[IndexedBox]
+    val exhausted = utils.PagedScan(Batcher.MaxScannedPerTemplate)(paging =>
+      nodeApi.unspentBoxesByTemplateHash(template.templateHash, paging, SortDirection.Desc, mempool).recoverWith {
+        case ex => Failure(new LDBoxes.IndexUnavailableException(
+          s"could not reach the node index reading $name orders: is extraIndex on? (${ex.getMessage})", ex))
+      })(found += _)
     if (!exhausted)
       throw new LDBoxes.IndexTruncatedException(
         s"$name orders exceed the ${Batcher.MaxScannedPerTemplate}-box scan ceiling, so this answer would be partial")
-    found
+    found.result()
   }
 
   /** The ids among `boxIds` the node holds in its UTXO set or as mempool outputs. */

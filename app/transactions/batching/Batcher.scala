@@ -286,10 +286,10 @@ abstract class Batcher(nodeContext: NodeContext,
   protected def within(deadline: Deadline, doing: String): Unit =
     if (deadline.isOverdue()) throw new BuildDeadlinePassed(doing)
 
-  /** Orders to leave out of scans and builds: refused within the last `skippedOrderTtlMs`. */
+  /** Orders to leave out of scans and builds: those `deniedOrders` names, and those refused within `skippedOrderTtlMs`. */
   protected def skippedOrders(): Set[String] = {
     val cutoff = System.currentTimeMillis() - batching.skippedOrderTtlMs
-    skipList.get.collect { case (id, at) if at > cutoff => id }.toSet
+    batching.deniedOrders ++ skipList.get.collect { case (id, at) if at > cutoff => id }
   }
 
   /** Leaves the order `id` out until `skippedOrderTtlMs` passes, keeping the newest `maxSkippedOrders`. */
@@ -304,16 +304,8 @@ abstract class Batcher(nodeContext: NodeContext,
 
   /** The parsed orders at one template, newest first, capped at [[MaxScannedPerTemplate]] boxes. */
   protected def scanTemplate[O](templateHash: String, name: String)(parse: NodeBox => Option[O]): Vector[O] = {
-    var offset = 0
-    var exhausted = false
-    var found = Vector.empty[O]
-    while (!exhausted && offset < MaxScannedPerTemplate) {
-      val page = nodeApi.unspentBoxesByTemplateHash(templateHash, Paging(offset, PageSize),
-        SortDirection.Desc, MempoolOptions.ConfirmedOnly).get
-      found ++= page.flatMap(indexed => parse(indexed.box))
-      exhausted = page.size < PageSize
-      offset += page.size
-    }
+    val (found, exhausted) = utils.PagedScan.collect(MaxScannedPerTemplate)(
+      utils.PagedScan.byTemplate(nodeApi, templateHash))(indexed => parse(indexed.box))
     if (!exhausted)
       logger.warn(s"$label scan stopped after $MaxScannedPerTemplate $name boxes; " +
         "older orders were not read this pass")
@@ -420,9 +412,6 @@ object Batcher {
 
   /** Placements the node may have evicted from its mempool after a candidate carried them. */
   final case class Held(placements: Vector[CompleteMempool.MempoolTx])
-
-  /** Boxes per indexer page. */
-  final val PageSize = 100
 
   /** Maximum boxes read from one template during a scan. */
   final val MaxScannedPerTemplate = 2000

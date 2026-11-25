@@ -109,7 +109,7 @@ class DexPoolExecutionSpec extends TestKit(ActorSystem("dex-pool-execution-spec"
     when(api.unconfirmedInputByBoxId(anyString())).thenReturn(Success(None))
     when(api.indexedBoxById(anyString())).thenReturn(Success(None))
     when(api.unconfirmedOutputByBoxId(anyString())).thenReturn(Success(None))
-    val index = new LDPoolIndex(node, system) {
+    val index = new LDPoolIndex(node, system.dispatcher, (_, _) => (), () => None) {
       override def snapshot(): PoolIndexSnapshot = PoolIndexSnapshot(status, 100, truncated = false,
         if (status == "ready") pools.map(p => if (p.nft == n2t.poolNFT.toString) p.copy(genesisProvisions = n2tGenesis) else p)
         else Seq.empty, Map.empty)

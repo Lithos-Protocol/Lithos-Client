@@ -171,4 +171,55 @@ class ArbStageSpec extends TestKit(ActorSystem("arb-stage-spec", ArbStageSpec.co
       probe.expectMsgType[BlockTxsReady].bundles shouldBe empty
     }
   }
+
+  it should "read the handoff at every request, so an order handed over before, between or after builds is filled" in {
+    import node.model.{IndexedBox, MempoolOptions, NodeAsset, NodeBox, Paging, SortDirection}
+    import org.mockito.ArgumentMatchers.{any, eq => is}
+    val chain = new ScriptedChain
+    val api = chain.api
+    val (nodeContext, _, wallet) = FakeNodeContext(api, numAddresses = 1)
+    val live = transactions.batching.ergodex.MachinaOrder.parse(support.MachinaFixtures.gridSells.order).get
+    val ld = nodeContext.getClient.execute(ctx => support.MachinaFixtures.lithosDexFakuPoolAt(ctx, live.ask.get * 1.5))
+    val stakeBox = nodeContext.getClient.execute(ctx => arbStakeBox(ctx, wallet, 12 * Erg))
+    chain.extend(tip - 1, tip)
+    chain.indexed = tip
+    chain.scans(LDNodeFixtures.indexed(ld, tip - 5), LDNodeFixtures.indexed(stakeBox, tip - 5))
+    when(api.indexerEnabled).thenReturn(true)
+    when(api.boxById(anyString())).thenAnswer { inv =>
+      Success(Some(stakeBox).filter(_.boxId == inv.getArgument[String](0)))
+    }
+    val contracts = transactions.batching.lithosdex.LDDeployments.verify(org.ergoplatform.appkit.NetworkType.MAINNET,
+      ld.ergoTree, ld.assets.map(a => a.tokenId -> a.amount)).get
+    val vault = NodeBox(id(61), id(62), 1000000L, 0, tip - 5, contracts.feeVault.ergoTreeHex,
+      Seq(NodeAsset(contracts.vaultNFT.toString, 1L)))
+    when(api.unspentBoxesByTokenId(is(contracts.vaultNFT.toString), any[Paging], any[SortDirection],
+      any[MempoolOptions])).thenReturn(Success(Seq(IndexedBox(vault, "", tip - 5, 9L))))
+
+    val handoff = new MachinaHandoff(active = true, Set.empty)
+    val order = live.routedThrough(ld.assets.head.tokenId)
+    val tracker = TrackerFixtures.tracker(chain)
+    // Read to the tip first, so an empty answer below is the handoff's and not a tracker still reading
+    TrackerFixtures.warmed(chain, tracker)
+    val stage = system.actorOf(Props(new ArbStage(nodeContext, ArbConfig.Default.copy(enabled = true),
+      BatchingConfig.Default, Set.empty, tracker, new ArbStake(() => api, stakeContract(wallet),
+        nodeContext.getNetwork, 10 * Erg), useTrueProp = false, buildBudgetMs = 10000L, machina = handoff)))
+    val probe = TestProbe()
+    def filled(refresh: Boolean): Boolean = {
+      probe.send(stage, RequestArbTxs(tip + 1, 8, refresh, Seq.empty))
+      probe.expectMsgType[BlockTxsReady].bundles.flatMap(_.members).exists(_.inputIds.contains(order.boxId))
+    }
+    stage ! PrepareBlockTxs(tip + 1, 8, chain.header(tip).id)
+    // A one-pool index has no cycle, so with the stake read this build is complete, empty and kept for reuse
+    withClue("a request before the batcher hands anything over fills nothing: ")(filled(refresh = false) shouldBe false)
+    withClue("an order handed over after that build is filled by the next request at the same height: ") {
+      handoff.offer(tip + 1, Seq(order))
+      filled(refresh = true) shouldBe true
+    }
+    withClue("a handoff the batcher replaced between two requests is read anew: ") {
+      handoff.offer(tip + 1, Seq.empty)
+      filled(refresh = true) shouldBe false
+      handoff.offer(tip + 1, Seq(order))
+      filled(refresh = true) shouldBe true
+    }
+  }
 }

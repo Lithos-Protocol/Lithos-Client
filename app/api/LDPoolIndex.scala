@@ -6,13 +6,12 @@ import lithosdex.contracts.{LDContracts, LDT2TContracts}
 import lithosdex.{LDGenesis, LDLiquidityPool, LDT2TGenesis, LDT2TLiquidityPool}
 import node.MutationConversions._
 import node.NodeApi
-import node.model.{IndexedBox, MempoolOptions, Paging, SortDirection}
-import org.bouncycastle.util.encoders.Hex
+import node.model.IndexedBox
 import org.ergoplatform.appkit.{BlockchainContext, NetworkType}
 import org.ergoplatform.sdk.ErgoId
 import org.slf4j.{Logger, LoggerFactory}
-import scorex.crypto.hash.Blake2b256
-import transactions.batching.lithosdex.{DexContracts, LDDeployments}
+import transactions.batching.lithosdex.LDDeployments
+import transactions.batching.tracking.{PoolDeployment, PoolTracker, TrackedBox, TrackedPools}
 
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
@@ -75,19 +74,26 @@ final case class PoolIndexSnapshot(status: String, height: Int, truncated: Boole
                                    tokens: Map[String, TokenMeta])
 
 /**
- * Every LithosDex pool on chain, of both kinds, for the API and the web panel. Never on a request's path: a
- * request reads the last snapshot, and a request that finds the tip moved past it starts one rebuild in the
- * background. A rebuild is one unspent scan per pool template; each pool is verified as the batcher verifies
- * one, and costs one vault read the first time it is seen. Genesis verdicts and token metadata never change,
- * so each is read once per process.
+ * Every LithosDex pool on chain, of both kinds, for the API and the web panel, read from the pool tracker's
+ * boxes. Never on a request's path: a request reads the last snapshot, tells the tracker the node's tip so a
+ * client that does not mine tracks pools too, and starts one rebuild in the background once the tracker has
+ * moved past the snapshot. A rebuild reads no pool box from the node; each pool costs one vault read the first
+ * time it is seen. Genesis verdicts and token metadata never change, so each is read once per process.
+ *
+ * @param follow  tells the pool tracker the node's best block, its height and id
+ * @param tracked the pool tracker's newest state
  */
 @Singleton
-class LDPoolIndex @Inject()(nodeContext: NodeContext, system: ActorSystem) {
+class LDPoolIndex(nodeContext: NodeContext, ioContext: => scala.concurrent.ExecutionContext,
+                  follow: (Int, String) => Unit, tracked: () => Option[TrackedPools]) {
+
+  @Inject def this(nodeContext: NodeContext, system: ActorSystem, tracker: PoolTracker) =
+    this(nodeContext, new Contexts(system).dexContext, tracker.followAhead, () => tracker.latest)
 
   import LDPoolIndex._
 
   private val logger: Logger = LoggerFactory.getLogger("LDPoolIndex")
-  private lazy val io = new Contexts(system).dexContext
+  private lazy val io = ioContext
 
   @volatile private var current = PoolIndexSnapshot("building", 0, truncated = false, Seq.empty, Map.empty)
   private val refreshing = new AtomicBoolean(false)
@@ -102,15 +108,19 @@ class LDPoolIndex @Inject()(nodeContext: NodeContext, system: ActorSystem) {
   private def nodeApi: NodeApi = nodeContext.getNodeApi
   private def network: NetworkType = nodeContext.getNetwork
 
-  /** The last snapshot, starting a rebuild in the background when the tip has moved past it. */
+  /** The last snapshot, starting a rebuild in the background when the tracker has moved past it. */
   def snapshot(): PoolIndexSnapshot = {
-    val tip = Try(nodeApi.info().get.fullHeight.getOrElse(0)).getOrElse(0)
-    if (tip > current.height && refreshing.compareAndSet(false, true))
-      Future {
-        try current = build(tip)
-        catch { case NonFatal(ex) => logger.warn(s"The LithosDEX pool index did not rebuild at $tip: ${ex.getMessage}") }
-        finally refreshing.set(false)
-      }(io)
+    Try(nodeApi.info().get).toOption.foreach(info =>
+      for (height <- info.fullHeight; id <- info.bestFullHeaderId) Try(follow(height, id)))
+    tracked().filter(_.height > current.height).foreach { state =>
+      if (refreshing.compareAndSet(false, true))
+        Future {
+          try current = build(state)
+          catch {
+            case NonFatal(ex) => logger.warn(s"The LithosDEX pool index did not rebuild at ${state.height}: ${ex.getMessage}")
+          } finally refreshing.set(false)
+        }(io)
+    }
     current
   }
 
@@ -123,49 +133,40 @@ class LDPoolIndex @Inject()(nodeContext: NodeContext, system: ActorSystem) {
     else pool.genesis.orElse(nodeContext.getClient.execute(ctx =>
       verdict(ctx, pool.nft, pool.vaultNft, pool.provToken, n2t = pool.kind == VerifiedPool.Kind.N2T)))
 
-  /** Rebuilds now, on the calling thread, and keeps the result. */
-  def refreshNow(): PoolIndexSnapshot = {
-    val tip = nodeApi.info().get.fullHeight.getOrElse(0)
-    current = build(tip)
+  /** Rebuilds now from the tracker's newest state, on the calling thread, and keeps the result. */
+  private[api] def refreshNow(): PoolIndexSnapshot = {
+    tracked().foreach(state => current = build(state))
     current
   }
 
-  private[api] def build(tip: Int): PoolIndexSnapshot = nodeContext.getClient.execute { ctx =>
+  /** The pools `state` holds at the LithosDex templates, each kind's newest [[MaxPoolsPerKind]]. */
+  private[api] def build(state: TrackedPools): PoolIndexSnapshot = nodeContext.getClient.execute { ctx =>
     val registry = VerifiedRegistry.forNetwork(network)
-    val (n2tBoxes, n2tCut) = scan(n2tTemplateHash(network))
-    val (t2tBoxes, t2tCut) = scan(t2tTemplateHash(network))
+    def newest(boxes: Seq[TrackedBox], kind: String): (Seq[TrackedBox], Boolean) = {
+      if (boxes.size > MaxPoolsPerKind) logger.warn(s"More than $MaxPoolsPerKind LithosDEX $kind pools are tracked; " +
+        "indexing the newest")
+      boxes.sortBy(b => (-b.inclusionHeight, b.boxId)).take(MaxPoolsPerKind) -> (boxes.size > MaxPoolsPerKind)
+    }
+    val all = state.pools.toVector
+    val (n2tBoxes, n2tCut) = newest(all.collect { case t @ TrackedBox(_, _, _: PoolDeployment.LithosDexNative) => t },
+      "ERG/token")
+    val (t2tBoxes, t2tCut) = newest(all.collect { case t @ TrackedBox(_, _, _: PoolDeployment.LithosDexToken) => t },
+      "token/token")
     val pools =
       n2tBoxes.flatMap(box => Try(n2tPool(ctx, box, registry)).getOrElse(None)) ++
         t2tBoxes.flatMap(box => Try(t2tPool(ctx, box, registry)).getOrElse(None))
     // ERG:LIT first whatever else holds, then verified pools, then newest
     val canonical = lithosdex.LDHelpers.getPoolNFT(network).toString
     val sorted = pools.sortBy(p => (p.nft != canonical, !p.verified, -p.inclusionHeight, p.nft))
-    PoolIndexSnapshot("ready", tip, n2tCut || t2tCut, sorted, metaFor(sorted.flatMap(p => p.tokenX.toSeq :+ p.tokenY), registry))
+    PoolIndexSnapshot("ready", state.height, state.cut || n2tCut || t2tCut, sorted,
+      metaFor(sorted.flatMap(p => p.tokenX.toSeq :+ p.tokenY), registry))
   }
 
-  /** Every unspent pool box at `templateHash`, newest first, to [[MaxPoolsPerKind]]; and whether that cut it short. */
-  private def scan(templateHash: String): (Seq[IndexedBox], Boolean) = {
-    var found = Vector.empty[IndexedBox]
-    var paging = Paging(0, PageSize)
-    var exhausted = false
-    while (!exhausted && found.size < MaxPoolsPerKind) {
-      val page = nodeApi.unspentBoxesByTemplateHash(templateHash, paging, SortDirection.Desc,
-        MempoolOptions.ConfirmedOnly).get
-      found ++= page
-      exhausted = page.size < paging.limit
-      paging = paging.next
+  private def n2tPool(ctx: BlockchainContext, box: TrackedBox, registry: VerifiedRegistry): Option[IndexedPool] = {
+    val contracts = box.deployment match {
+      case PoolDeployment.LithosDexNative(c) => Some(c)
+      case _ => None
     }
-    if (!exhausted) logger.warn(s"More than $MaxPoolsPerKind LithosDEX pools share template $templateHash; indexing the newest")
-    (found.take(MaxPoolsPerKind), !exhausted)
-  }
-
-  private def n2tPool(ctx: BlockchainContext, box: IndexedBox, registry: VerifiedRegistry): Option[IndexedPool] = {
-    val assets = box.box.assets.map(a => a.tokenId -> a.amount)
-    val canonical = DexContracts(network)
-    val contracts =
-      if (box.box.assets.headOption.exists(_.tokenId == canonical.poolNFT.toString) &&
-        box.box.ergoTree.equalsIgnoreCase(canonical.liquidityPool.ergoTreeHex)) Some(canonical)
-      else LDDeployments.verify(network, box.box.ergoTree, assets)
     contracts.filter(c => vaultStands(c.vaultNFT.toString, LDDeployments.vaultStands(nodeApi, c))).map { c =>
       val p = LDLiquidityPool(box.box.toInputUTXO(ctx))
       val verified = registry.pool(c.poolNFT.toString).exists(_.kind == VerifiedPool.Kind.N2T)
@@ -177,9 +178,11 @@ class LDPoolIndex @Inject()(nodeContext: NodeContext, system: ActorSystem) {
     }
   }
 
-  private def t2tPool(ctx: BlockchainContext, box: IndexedBox, registry: VerifiedRegistry): Option[IndexedPool] =
-    LDDeployments.verifyT2T(box.box.ergoTree, box.box.assets.map(a => a.tokenId -> a.amount))
-      .filter(c => vaultStands(c.vaultNFT.toString, LDDeployments.vaultStands(nodeApi, c))).map { c =>
+  private def t2tPool(ctx: BlockchainContext, box: TrackedBox, registry: VerifiedRegistry): Option[IndexedPool] =
+    (box.deployment match {
+      case PoolDeployment.LithosDexToken(c) => Some(c)
+      case _ => None
+    }).filter(c => vaultStands(c.vaultNFT.toString, LDDeployments.vaultStands(nodeApi, c))).map { c =>
         val p = LDT2TLiquidityPool(box.box.toInputUTXO(ctx))
         val verified = registry.pool(c.poolNFT.toString).exists(_.kind == VerifiedPool.Kind.T2T)
         val judged = if (verified) None
@@ -324,8 +327,6 @@ class LDPoolIndex @Inject()(nodeContext: NodeContext, system: ActorSystem) {
 
 object LDPoolIndex {
 
-  final val PageSize = 100
-
   /** Most pool boxes indexed per template. Each new one costs a vault read and, unverified, a genesis check. */
   final val MaxPoolsPerKind = 512
 
@@ -336,13 +337,4 @@ object LDPoolIndex {
 
   final val CannotBeChecked =
     "genesis cannot be checked: the vault was not created in the transaction that minted the provision token"
-
-  def n2tTemplateHash(network: NetworkType): String =
-    Hex.toHexString(Blake2b256.hash(DexContracts(network).liquidityPool.ergoTree.template))
-
-  /** Every token/token deployment shares one template, so any ids give its hash. */
-  def t2tTemplateHash(network: NetworkType): String = {
-    val any = DexContracts(network).poolNFT
-    Hex.toHexString(Blake2b256.hash(LDT2TContracts(any, any, any).liquidityPool.ergoTree.template))
-  }
 }

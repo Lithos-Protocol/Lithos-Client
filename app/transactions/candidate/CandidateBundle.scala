@@ -54,6 +54,9 @@ object CandidateBudget {
 
   /** Used when the node's parameters could not be read; the count limit still applies. */
   val Unbounded: CandidateBudget = CandidateBudget(Long.MaxValue, Long.MaxValue)
+
+  /** Nothing: what an admission with no reserved share holds back. */
+  val Zero: CandidateBudget = CandidateBudget(0L, 0L)
 }
 
 object CandidateBundle {
@@ -81,15 +84,31 @@ object CandidateBundle {
   /**
    * @param packageTxs transactions already admitted outside `bundles`, which a bundle may build on: a source's
    *                   allowance is checked before the package it builds on is assembled
+   * @param reserved   bytes and cost only the bundles from index `reservedFrom` on may use; those before it are
+   *                   held to `budget` less this
    */
   def admit(bundles: Seq[CandidateBundle], limit: Int,
-            budget: CandidateBudget = CandidateBudget.Unbounded, packageTxs: Set[String] = Set.empty)
+            budget: CandidateBudget = CandidateBudget.Unbounded, packageTxs: Set[String] = Set.empty,
+            reserved: CandidateBudget = CandidateBudget.Zero, reservedFrom: Int = Int.MaxValue)
   : (Vector[CandidateBundle], Vector[CandidateTx], Vector[CandidateRefusal]) =
-    admitted(bundles, limit, budget, packageTxs)
+    admitted(bundles, limit, budget, packageTxs, reserved, reservedFrom)
+
+  /**
+   * What the last `reserving` bundles of a package may hold back from those before them: `share` of `budget`, and
+   * no more than their members need, so a source offering nothing leaves the others the whole budget.
+   */
+  def reserve(budget: CandidateBudget, share: Double, reserving: Seq[CandidateBundle]): CandidateBudget = {
+    val members = reserving.iterator.flatMap(_.members).toVector.groupBy(_.id).values.map(_.head)
+    def part(limit: Long): Long = if (limit == Long.MaxValue) Long.MaxValue else (BigDecimal(limit) * share).toLong
+    CandidateBudget(math.min(part(budget.maxBytes), members.map(_.sizeBytes.toLong).sum),
+      math.min(part(budget.maxCost), members.map(_.cost).sum))
+  }
 
   private def admitted(bundles: Seq[CandidateBundle], limit: Int, budget: CandidateBudget,
-                       packageTxs: Set[String] = Set.empty)
+                       packageTxs: Set[String] = Set.empty, reserved: CandidateBudget = CandidateBudget.Zero,
+                       reservedFrom: Int = Int.MaxValue)
   : (Vector[CandidateBundle], Vector[CandidateTx], Vector[CandidateRefusal]) = {
+    val held = budget.less(reserved.maxBytes, reserved.maxCost)
     var keptBundles = Vector.empty[CandidateBundle]
     var selected = Vector.empty[CandidateTx]
     var refused = Vector.empty[CandidateRefusal]
@@ -97,7 +116,8 @@ object CandidateBundle {
     var claimed = Set.empty[String]
     var bytes = 0L
     var cost = 0L
-    bundles.foreach { bundle =>
+    bundles.iterator.zipWithIndex.foreach { case (bundle, index) =>
+      val cap = if (index >= reservedFrom) budget else held
       val additions = bundle.members.filterNot(tx => byId.contains(tx.id))
       // A member already selected brought its own inputs and charges with it, so only the additions
       // can conflict or cost anything — with the package, and with each other inside this bundle.
@@ -109,7 +129,7 @@ object CandidateBundle {
       val unconflicted = !addedInputs.exists(claimed.contains) &&
         addedInputs.distinct.size == addedInputs.size
       val affordable = additions.size <= slots &&
-        bytes + addedBytes <= budget.maxBytes && cost + addedCost <= budget.maxCost
+        bytes + addedBytes <= cap.maxBytes && cost + addedCost <= cap.maxCost
       val parentsAdmitted = bundle.packageParents.forall(parent =>
         byId.contains(parent) || packageTxs.contains(parent) || bundle.members.exists(_.id == parent))
       if (consistent && unconflicted && affordable && bundle.carriesItsParents && parentsAdmitted) {
@@ -127,9 +147,9 @@ object CandidateBundle {
           else if (!bundle.carriesItsParents) "a declared mempool parent does not travel with it"
           else if (!parentsAdmitted) "a package transaction it builds on was not admitted"
           else if (additions.size > slots) s"${additions.size} transactions into $slots free slot(s)"
-          else if (bytes + addedBytes > budget.maxBytes)
-            s"$addedBytes bytes over the ${budget.maxBytes - bytes} left in the package"
-          else s"$addedCost cost over the ${budget.maxCost - cost} left in the package"
+          else if (bytes + addedBytes > cap.maxBytes)
+            s"$addedBytes bytes over the ${math.max(0L, cap.maxBytes - bytes)} left in the package"
+          else s"$addedCost cost over the ${math.max(0L, cap.maxCost - cost)} left in the package"
         refused :+= CandidateRefusal(bundle, reason)
       }
     }

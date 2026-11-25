@@ -5,7 +5,7 @@ import node.MutationConversions._
 import node.model.NodeBox
 import org.ergoplatform.appkit.{BlockchainContext, SignedTransaction}
 import org.slf4j.{Logger, LoggerFactory}
-import transactions.batching.ergodex.{MachinaKind, MachinaOrder}
+import transactions.batching.ergodex.{MachinaFill, MachinaKind, MachinaOrder}
 import transactions.batching.sigmafi.zc.{ZcAssetPricer, ZcBook, ZcCollateralArb, ZcResolver}
 import transactions.candidate.BlockTxMessages.{CandidateTx, ChainFromPackage}
 import transactions.candidate.{CandidateBundle, CapitalEntry, CapitalOrigin}
@@ -72,7 +72,7 @@ object ArbCycles {
     val fillPools = fills.map(_.poolNft).toSet
     // A token/token grid may go through any pool trading its base token; ZC collateral arb may sell through any
     // qualifying AMM pool in `index.parsed`, even one not on a multi-pool DEX cycle.
-    val gridBases = grids.map(ArbMachina.baseOf).toSet
+    val gridBases = grids.map(MachinaFill.baseOf).toSet
     val held = if (zc.isDefined) index.pools ++ index.parsed
       else index.pools ++ index.parsed.filter { case (nft, entry) =>
         fillPools.contains(nft) || gridBases.exists(entry.pool.trades)
@@ -85,14 +85,15 @@ object ArbCycles {
     // Best gap first, each priced again on the pool the fills before it left
     val ranked = fills.groupBy(_.boxId).values.map(_.head).toVector
       .filterNot(order => basis.spent.contains(order.boxId))
-      .flatMap(order => states.get(order.poolNft).flatMap(ArbMachina.best(order, _)).map(order -> _.gap))
+      .flatMap(order => states.get(order.poolNft).flatMap(MachinaFill.best(order, _)).map(order -> _.gap))
       .sortBy { case (order, gap) => (-gap, order.boxId) }
     ranked.foreach { case (order, _) =>
       if (bundles.size < slots && !buildUntil.isOverdue()) {
         // A pool box that does not read back is the pool's fault, so only a fill that fails to sign is refused
         val built = Try(input(ctx, at(order.poolNft))).map { poolBox =>
-          ArbMachina.best(order, states(order.poolNft).withBox(poolBox.id.toString)).filter(_.gap >= minFill)
-            .map(fill => fill -> Try(ArbMachina.build(ctx, wallet, fill, poolBox, profitTo, blockHeight)))
+          MachinaFill.best(order, states(order.poolNft).withBox(poolBox.id.toString)).filter(_.gap >= minFill)
+            .map(fill => fill ->
+              Try(MachinaFill.build(ctx, wallet, fill, poolBox, MachinaFill.Takings.ToBox(profitTo), blockHeight)))
         }
         built match {
           case Failure(ex) =>
@@ -261,7 +262,7 @@ object ArbCycles {
   private def gridSigned(ctx: BlockchainContext, wallet: NodeWallet, cycle: ArbMachina.GridCycle, at: Map[String, At],
                          stake: InputUTXO, blockHeight: Int, profitTo: Contract): Try[Vector[SignedTransaction]] = Try {
     val poolBox = input(ctx, at(cycle.fill.swap.pool.nft))
-    val fill = ArbMachina.gridLeg(ctx, wallet, cycle.fill, poolBox, stake, blockHeight)
+    val fill = MachinaFill.build(ctx, wallet, cycle.fill, poolBox, MachinaFill.Takings.IntoCarry(stake), blockHeight)
     val carry = InputUTXO(fill.getOutputsToSpend.get(1))
     val ergBox = input(ctx, at(cycle.sale.pool.nft))
     val sale = cycle.sale.pool.withBox(ergBox.id.toString).swap(cycle.sale.amountIn, xIn = false)

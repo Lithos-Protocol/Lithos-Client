@@ -870,7 +870,7 @@ class ZcWriteExecution(nodeContext: NodeContext, walletSelector: EngineFunding, 
   // ─── authorizing boxes ─────────────────────────────────────────────────────
 
   private def authCandidates(creator: Contract, spent: Set[String], preferToken: Option[String] = None): Seq[NodeBox] =
-    executionNode.unspentBoxesByErgoTree(creator.ergoTreeHex, Paging(0, Batcher.PageSize), SortDirection.Desc,
+    executionNode.unspentBoxesByErgoTree(creator.ergoTreeHex, Paging(0, utils.PagedScan.PageSize), SortDirection.Desc,
       MempoolOptions.ConfirmedOnly) match {
       case Success(boxes) => boxes.map(_.box).filterNot(b => spent(b.boxId))
         .sortBy(b => (!preferToken.exists(t => b.assets.exists(_.tokenId == t)), b.value))

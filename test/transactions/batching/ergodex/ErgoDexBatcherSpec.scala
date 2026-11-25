@@ -60,7 +60,7 @@ class ErgoDexBatcherSpec extends TestKit(ActorSystem("ergodex-batcher-spec", Erg
                         broadcastMempoolOrders: Boolean = BatchingConfig.Default.broadcastMempoolOrders,
                         tracker: Option[PoolTracker] = None,
                         handoff: Option[transactions.batching.arb.MachinaHandoff] = None,
-                        tokenBoxes: Seq[NodeBox] = Seq.empty) {
+                        tokenBoxes: Seq[NodeBox] = Seq.empty, deniedOrders: Set[String] = Set.empty) {
     val api: NodeApi = mock[NodeApi]
     val (nodeContext, _, _) = FakeNodeContext(api, numAddresses = 1)
 
@@ -95,13 +95,9 @@ class ErgoDexBatcherSpec extends TestKit(ActorSystem("ergodex-batcher-spec", Erg
           Success(Seq(IndexedBox(initialOrder, "", initialOrder.creationHeight + 1, 1L)))
         else Success(Seq.empty[IndexedBox])
       }
-    // The native pool scan Machina routing reads: the fixture's pool when it is a native one
+    // No pool script is scanned: Machina routing reads native pools from the tracker alone
     when(api.unspentBoxesByErgoTree(anyString(), any[Paging], any[SortDirection], any[MempoolOptions]))
-      .thenAnswer { inv =>
-        if (inv.getArgument[String](0) == ErgoDexContracts.NativePoolErgoTree && inv.getArgument[Paging](1).offset == 0)
-          Success((Seq(pool) ++ extraPool).filter(ErgoDexPool.native(_).isDefined).map(IndexedBox(_, "", tip - 1, 4L)))
-        else Success(Seq.empty[IndexedBox])
-      }
+      .thenReturn(Failure(new IllegalStateException("no pool script is scanned by the batcher")))
     when(api.unspentBoxesByTokenId(anyString(), any[Paging], any[SortDirection], any[MempoolOptions]))
       .thenAnswer { inv =>
         val nft = inv.getArgument[String](0)
@@ -118,7 +114,7 @@ class ErgoDexBatcherSpec extends TestKit(ActorSystem("ergodex-batcher-spec", Erg
 
     val source: ActorRef = system.actorOf(Props(new ErgoDexBatcher(nodeContext,
       BatchingConfig.Default.copy(scanIntervalMs = scanIntervalMs, broadcast = broadcast, maxAncestorTxs = maxAncestorTxs,
-        broadcastMempoolOrders = broadcastMempoolOrders),
+        broadcastMempoolOrders = broadcastMempoolOrders, deniedOrders = deniedOrders),
       servesCandidates, engine.ref, useTrueProp = false, buildBudgetMs, tracker, handoff)))
 
     def offered(): Seq[CandidateBundle] = {
@@ -195,7 +191,14 @@ class ErgoDexBatcherSpec extends TestKit(ActorSystem("ergodex-batcher-spec", Erg
         val best = ErgoDexExecution.price(order, pool, BatchingConfig.Default.minRevenueNanoErg).get
         val broadcasts = ErgoDexExecution.price(order, pool, BatchingConfig.Default.broadcastMinRevenueNanoErg,
           minerFeeCeiling = BatchingConfig.Default.broadcastMinerFeeCeiling).isDefined
-        val f = new Fixture(broadcast = true, initialOrder = m.order, initialPool = m.pool)
+        // Machina routing reads native pools from the tracker alone
+        val chain = new ScriptedChain
+        chain.extend(tip - 3, tip)
+        chain.indexed = tip
+        chain.scans(IndexedBox(m.pool, "", tip - 1, 1L))
+        val tracker = TrackerFixtures.tracker(chain)
+        TrackerFixtures.warmed(chain, tracker)
+        val f = new Fixture(broadcast = true, initialOrder = m.order, initialPool = m.pool, tracker = Some(tracker))
         val bundle = f.offeredOnceTracked().head
         bundle.members.last.inputIds should contain(m.order.boxId)
         bundle.capital.map(_.value) shouldBe Seq(best.revenue)
@@ -210,7 +213,7 @@ class ErgoDexBatcherSpec extends TestKit(ActorSystem("ergodex-batcher-spec", Erg
    * order's ask, both tracked at the batcher's tip, and a source handing orders to `handoff` when given one.
    */
   private def lithosDexRouting(ratio: Double, handoff: Option[transactions.batching.arb.MachinaHandoff],
-                               vaultStands: Boolean = true): (Fixture, MachinaOrder, NodeBox) = {
+                               vaultStands: Boolean = true, scanIntervalMs: Long = 3600000L): (Fixture, MachinaOrder, NodeBox) = {
     val m = support.MachinaFixtures.gridSells
     val order = MachinaOrder.parse(m.order).get
     val (nodeContext, _, _) = FakeNodeContext(mock[NodeApi], numAddresses = 1)
@@ -222,7 +225,7 @@ class ErgoDexBatcherSpec extends TestKit(ActorSystem("ergodex-batcher-spec", Erg
     val tracker = TrackerFixtures.tracker(chain)
     TrackerFixtures.warmed(chain, tracker)
     (new Fixture(initialOrder = m.order, initialPool = m.pool, tracker = Some(tracker), handoff = handoff,
-      tokenBoxes = if (vaultStands) Seq(vaultOf(ld)) else Seq.empty), order, ld)
+      tokenBoxes = if (vaultStands) Seq(vaultOf(ld)) else Seq.empty, scanIntervalMs = scanIntervalMs), order, ld)
   }
 
   /** The fee vault of the LithosDex pool `pool`: its deployment's vault script holding the vault NFT. */
@@ -316,7 +319,8 @@ class ErgoDexBatcherSpec extends TestKit(ActorSystem("ergodex-batcher-spec", Erg
   }
 
   /** The open token/token grid order, with the pool tracker holding `pools` at the batcher's tip. */
-  private def tokenGrids(pools: Seq[NodeBox], handoff: Option[transactions.batching.arb.MachinaHandoff]): Fixture = {
+  private def tokenGrids(pools: Seq[NodeBox], handoff: Option[transactions.batching.arb.MachinaHandoff],
+                         deniedOrders: Set[String] = Set.empty): Fixture = {
     val chain = new ScriptedChain
     chain.extend(tip - 3, tip)
     chain.indexed = tip
@@ -324,7 +328,7 @@ class ErgoDexBatcherSpec extends TestKit(ActorSystem("ergodex-batcher-spec", Erg
     val tracker = TrackerFixtures.tracker(chain)
     TrackerFixtures.warmed(chain, tracker)
     new Fixture(broadcast = true, initialOrder = support.MachinaFixtures.tokenGridOrder, tracker = Some(tracker),
-      handoff = handoff, scanIntervalMs = 1500L)
+      handoff = handoff, scanIntervalMs = 1500L, deniedOrders = deniedOrders)
   }
 
   it should "hand a token/token grid to the arb stage, with arb on and pools for it tracked, and never broadcast it" in {
@@ -347,7 +351,31 @@ class ErgoDexBatcherSpec extends TestKit(ActorSystem("ergodex-batcher-spec", Erg
     f.stop()
   }
 
-  it should "not hand over a token/token grid without a token pool of its pair, nor read one with arb off" in {
+  it should "never hand over, read back or broadcast an order deniedOrders names" in {
+    import support.MachinaFixtures._
+    val handoff = new transactions.batching.arb.MachinaHandoff(active = true, Set.empty)
+    // The same pools and arb setting as the handoff test above, which hands this grid over
+    val f = tokenGrids(Seq(fakuCigPool, fakuErgoDexPool), Some(handoff), deniedOrders = Set(tokenGridOrder.boxId))
+    // Scans run every 1.5 s; by the third, the first discovery has long been read back by a build
+    awaitAssert(verify(f.api, org.mockito.Mockito.atLeast(3)).info(), 30.seconds, 250.millis)
+    val (bundles, height) = offeredAt(f)
+    bundles shouldBe empty
+    handoff.at(height) shouldBe empty
+    verify(f.api, times(0)).boxesWithPoolByIds(org.mockito.ArgumentMatchers.argThat[Seq[String]](
+      (ids: Seq[String]) => ids != null && ids.contains(tokenGridOrder.boxId)))
+    verify(f.api, times(0)).sendTransaction(anyString())
+    f.stop()
+  }
+
+  "BatchingConfig" should "deny the unfillable token/token grid for ErgoDEX by default, and nothing for LithosDex" in {
+    val none = play.api.Configuration.empty
+    BatchingConfig(none, "ergodex").deniedOrders shouldBe Set(support.MachinaFixtures.tokenGridOrder.boxId)
+    BatchingConfig(none, "lithosdex").deniedOrders shouldBe empty
+    BatchingConfig(play.api.Configuration(ConfigFactory.parseString(
+      """batching.ergodex.deniedOrders = [" AB12 "]""")), "ergodex").deniedOrders shouldBe Set("ab12")
+  }
+
+  "The source" should "not hand over a token/token grid without a token pool of its pair, nor read one with arb off" in {
     import support.MachinaFixtures._
     val handoff = new transactions.batching.arb.MachinaHandoff(active = true, Set.empty)
     val unpaired = tokenGrids(Seq(fakuErgoDexPool), Some(handoff))
@@ -370,6 +398,24 @@ class ErgoDexBatcherSpec extends TestKit(ActorSystem("ergodex-batcher-spec", Erg
     val bundle = f.offeredOnceTracked().head
     bundle.members.last.inputIds should contain(order.boxId)
     f.stop()
+  }
+
+  it should "read a LithosDex pool's fee vault once it stands, and again each scan while it does not" in {
+    import org.mockito.ArgumentMatchers.{eq => is}
+    val (f, _, ld) = lithosDexRouting(1.5, Some(new transactions.batching.arb.MachinaHandoff(active = true, Set.empty)),
+      scanIntervalMs = 1500L)
+    val vaultNft = vaultOf(ld).assets.head.tokenId
+    // Scans run every 1.5 s and the node reports no index height, so each one discovers anew
+    awaitAssert(verify(f.api, org.mockito.Mockito.atLeast(4)).info(), 30.seconds, 250.millis)
+    verify(f.api, times(1)).unspentBoxesByTokenId(is(vaultNft), any[Paging], any[SortDirection], any[MempoolOptions])
+    f.stop()
+
+    val (g, _, _) = lithosDexRouting(1.5, Some(new transactions.batching.arb.MachinaHandoff(active = true, Set.empty)),
+      vaultStands = false, scanIntervalMs = 1500L)
+    awaitAssert(verify(g.api, org.mockito.Mockito.atLeast(4)).info(), 30.seconds, 250.millis)
+    verify(g.api, org.mockito.Mockito.atLeast(2)).unspentBoxesByTokenId(is(vaultNft), any[Paging], any[SortDirection],
+      any[MempoolOptions])
+    g.stop()
   }
 
   it should "not route a Machina order to a LithosDex pool whose fee vault does not stand" in {

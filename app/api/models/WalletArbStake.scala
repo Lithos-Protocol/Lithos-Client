@@ -8,9 +8,9 @@ import play.api.libs.json._
  *
  * @param address        the arb address: this wallet's first key under a script of its own
  * @param enabled        arb is on and can reach a block
- * @param paused         a reclaim stopped arb until this client restarts
+ * @param paused         a reclaim stopped arb until it is resumed or this client restarts
  * @param targetNanoErgs `batching.arb.stakeNanoErg`, the size auto-reserve sends
- * @param stakeNanoErgs  ERG of the box cycles start from, 0 when none has been taken up
+ * @param stakeNanoErgs  ERG of the box cycles start from, 0 when there is none or arb is off or paused
  * @param boxes          confirmed boxes at the address
  * @param nanoErgs       their ERG, which a reclaim returns less its fee
  */

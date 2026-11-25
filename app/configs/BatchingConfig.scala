@@ -20,6 +20,7 @@ object MempoolSorting {
 /**
  * Order discovery limits and revenue floors. Candidate transaction budgets are configured per source.
  *
+ * @param deniedOrders      order box ids never built, broadcast or handed to arb, for orders known to be unbuildable
  * @param skippedOrderTtlMs how long an order that priced but could not be built is left out of scans and builds
  * @param maxSkippedOrders  most such orders remembered at once, oldest forgotten first; 0 remembers none
  * @param maxAncestorTxs    unconfirmed transactions one order may need carried ahead of it: its placement and
@@ -55,7 +56,8 @@ case class BatchingConfig(enabled: Boolean,
                           maxUnbuildablePerRun: Int,
                           maxUnbuildablePerTx: Int,
                           strategy: String = "maxFees",
-                          searchBudgetMs: Long = 250L)
+                          searchBudgetMs: Long = 250L,
+                          deniedOrders: Set[String] = Set.empty)
 
 object BatchingConfig {
 
@@ -81,9 +83,21 @@ object BatchingConfig {
     maxUnbuildablePerRun = 32,
     maxUnbuildablePerTx = 2,
     strategy = "maxFees",
-    searchBudgetMs = 250L)
+    searchBudgetMs = 250L,
+    deniedOrders = Set.empty)
 
-  def apply(config: Configuration, name: String): BatchingConfig = apply(config, name, Default)
+  /**
+   * The one token/token Machina grid open on mainnet. Its ERG cannot cover the child box a fill must leave, so no
+   * filler can take it, and the arb stage would otherwise price and refuse it on every build.
+   */
+  final val UnfillableMachinaGrid: String = "84f59301ac4929d825c8bc0957c728f6f4a62a0da8cdd4f5ebc59f3f3aff09e7"
+
+  /** The ErgoDEX batcher's defaults: [[Default]], with the orders known to be unfillable denied. */
+  val ErgoDexDefault: BatchingConfig = Default.copy(deniedOrders = Set(UnfillableMachinaGrid))
+
+  /** The `batching.<name>` block, reading the ErgoDEX batcher's defaults for `ergodex` and [[Default]] otherwise. */
+  def apply(config: Configuration, name: String): BatchingConfig =
+    apply(config, name, if (name == CandidateSourceConfig.ErgoDex) ErgoDexDefault else Default)
 
   /** The `batching.<name>` block, reading `defaults` for any key it leaves out. */
   def apply(config: Configuration, name: String, defaults: BatchingConfig): BatchingConfig = {
@@ -94,6 +108,10 @@ object BatchingConfig {
       config.getOptional(path(key))(ConfigLoader.longLoader).getOrElse(fallback)
     def bool(key: String, fallback: Boolean): Boolean =
       config.getOptional(path(key))(ConfigLoader.booleanLoader).getOrElse(fallback)
+    // Lowercased because token and box ids are compared as the node reports them.
+    def ids(key: String, fallback: Set[String]): Set[String] =
+      config.getOptional(path(key))(ConfigLoader.seqStringLoader)
+        .map(_.map(_.trim.toLowerCase).filter(_.nonEmpty).toSet).getOrElse(fallback)
 
     BatchingConfig(
       enabled = bool("enabled", defaults.enabled),
@@ -106,9 +124,7 @@ object BatchingConfig {
       broadcastMinerFeeCeiling = long("broadcastMinerFeeCeiling", defaults.broadcastMinerFeeCeiling),
       maxPoolAgeBlocks = int("maxPoolAgeBlocks", defaults.maxPoolAgeBlocks),
       broadcast = bool("broadcast", defaults.broadcast),
-      // Lowercased because token ids are compared as the node reports them.
-      deniedPools = config.getOptional(path("deniedPools"))(ConfigLoader.seqStringLoader)
-        .map(_.map(_.trim.toLowerCase).toSet).getOrElse(defaults.deniedPools),
+      deniedPools = ids("deniedPools", defaults.deniedPools),
       skippedOrderTtlMs = long("skippedOrderTtlMs", defaults.skippedOrderTtlMs),
       maxSkippedOrders = int("maxSkippedOrders", defaults.maxSkippedOrders),
       maxAncestorTxs = int("maxAncestorTxs", defaults.maxAncestorTxs),
@@ -118,6 +134,7 @@ object BatchingConfig {
       maxUnbuildablePerRun = int("maxUnbuildablePerRun", defaults.maxUnbuildablePerRun),
       maxUnbuildablePerTx = int("maxUnbuildablePerTx", defaults.maxUnbuildablePerTx),
       strategy = config.getOptional[String](path("strategy")).map(_.trim).getOrElse(defaults.strategy),
-      searchBudgetMs = long("searchBudgetMs", defaults.searchBudgetMs))
+      searchBudgetMs = long("searchBudgetMs", defaults.searchBudgetMs),
+      deniedOrders = ids("deniedOrders", defaults.deniedOrders))
   }
 }

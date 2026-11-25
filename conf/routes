@@ -310,6 +310,8 @@ GET  /wallet/tokens/verified                    controllers.WalletApiController.
 GET  /wallet/arb                                controllers.WalletApiController.getArbStake()
 + nocsrf
 POST /wallet/arb/reclaim                        controllers.WalletApiController.reclaimArbStake()
++ nocsrf
+POST /wallet/arb/resume                         controllers.WalletApiController.resumeArbStake()
 
 # Routes for Payments API
 

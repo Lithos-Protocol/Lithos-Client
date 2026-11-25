@@ -34,11 +34,13 @@ private[engine] object WalletInventory {
   /**
    * Page through signable boxes: reward trees from the indexer first when rewards are wanted, then the
    * wallet's own list, mempool-aware so a box a pooled transaction spends is left out. `consume` gets
-   * each box, whether it is a reward and whether it is in a block, and returns true to stop the walk.
+   * each box, whether it is a reward and whether it is in a block, and returns true to stop the walk;
+   * `pageDone`, asked after each page, true stops it before the next page is read.
    */
   def walk(api: _root_.node.NodeApi, signableTrees: Set[String], rewardTrees: Set[String],
            limits: configs.WalletConfig, rewardsOnly: Boolean, p2pkOnly: Boolean,
-           deadlineMillis: Long = Long.MaxValue, includeRewards: Boolean = false, confirmedOnly: Boolean = false)
+           deadlineMillis: Long = Long.MaxValue, includeRewards: Boolean = false, confirmedOnly: Boolean = false,
+           pageDone: () => Boolean = () => false)
           (consume: (NodeBox, Boolean, Boolean) => Boolean): Unit = {
     val startedAt = System.nanoTime()
     val budgetNanos = limits.inventoryTimeoutMs * 1000000L
@@ -63,6 +65,7 @@ private[engine] object WalletInventory {
           if (signable && !spent && (onchain || !confirmedOnly) && (!isReward || seenRewards.add(box.boxId)))
             stop = consume(box, isReward, onchain)
         }
+        if (!stop) stop = pageDone()
         exhausted = page.size < limits.pageSize
         paging = paging.next
       }
@@ -125,10 +128,11 @@ private[engine] class WalletInventory(node: NodeContext, api: _root_.node.NodeAp
 
   /** Page through this wallet's signable boxes; see the companion's `walk`. */
   private def walk(rewardsOnly: Boolean, p2pkOnly: Boolean, deadlineMillis: Long = Long.MaxValue,
-                   includeRewards: Boolean = false, confirmedOnly: Boolean = false)
+                   includeRewards: Boolean = false, confirmedOnly: Boolean = false,
+                   pageDone: () => Boolean = () => false)
                   (consume: (NodeBox, Boolean) => Boolean): Unit =
     WalletInventory.walk(api, wallet.signableTrees, wallet.rewardTrees.keySet, limits, rewardsOnly, p2pkOnly,
-      deadlineMillis, includeRewards, confirmedOnly)((box, reward, _) => consume(box, reward))
+      deadlineMillis, includeRewards, confirmedOnly, pageDone)((box, reward, _) => consume(box, reward))
 
   /**
    * Count and total the whole wallet while retaining only as many descriptors as the cache ceilings
@@ -174,7 +178,10 @@ private[engine] class WalletInventory(node: NodeContext, api: _root_.node.NodeAp
    *
    * A `single` request takes the smallest covering box, tokenless first, so a small requirement
    * never holds a large box. It reads on past the first match unless one is within twice the request.
-   * Throws `NotEnoughInputsException` when the wallet cannot cover the request.
+   * A request for ERG alone takes the smallest tokenless box that covers it among the pages it reads, leaving
+   * no change or at least `UTXO.MIN_CHANGE`, finishing the page it is on rather than stopping at the first set
+   * that covers, and accumulates only when no one box does. Throws `NotEnoughInputsException` when the wallet
+   * cannot cover the request.
    */
   def select(ctx: BlockchainContext, erg: Long, required: Seq[Token], excluded: Set[String],
              single: Boolean,
@@ -188,6 +195,10 @@ private[engine] class WalletInventory(node: NodeContext, api: _root_.node.NodeAp
     var selected = Vector.empty[NodeBox]
     var covered = false
     var smallest = Option.empty[NodeBox]
+    // Best fit for ERG alone: the smallest tokenless box that covers it, besides the accumulating set
+    val bestFit = !single && required.isEmpty
+    // A one-box match within twice the request, which ends the walk at once
+    var tight = false
 
     // Re-emission tokens are excluded everywhere: they are burned by the build, never delivered, so
     // counting them as held would let a request for them appear satisfiable.
@@ -207,6 +218,13 @@ private[engine] class WalletInventory(node: NodeContext, api: _root_.node.NodeAp
         requiredTokens.forall { case (id, amount) => heldTokens.getOrElse(id, BigInt(0)) >= amount }
     }
 
+    // A best-fit box leaves no change or change a box can hold: change under the minimum fails any build with no
+    // fee output to fold it into, and the closest box is the likeliest to leave some
+    def fitsChange(box: NodeBox): Boolean = {
+      val change = spendableValue(box) - erg
+      change == 0L || change >= UTXO.MIN_CHANGE
+    }
+
     // Tokenless before token-bearing, then by value: the order a single-box request prefers.
     def rank(box: NodeBox): (Boolean, Long) = (box.assets.nonEmpty, spendableValue(box))
 
@@ -214,13 +232,14 @@ private[engine] class WalletInventory(node: NodeContext, api: _root_.node.NodeAp
       if (!excluded.contains(box.boxId) && !selected.exists(_.boxId == box.boxId) &&
         !box.assets.exists(a => avoidTokens(a.tokenId)) &&
         (!reward || matured(box, ctx.getHeight)) && spendableValue(box) > 0) {
-        if (single) {
-          if (covers(Vector(box)) && smallest.forall(best => Ordering[(Boolean, Long)].lt(rank(box), rank(best)))) {
+        if (single || bestFit) {
+          if (covers(Vector(box)) && (single || (box.assets.isEmpty && fitsChange(box))) &&
+            smallest.forall(best => Ordering[(Boolean, Long)].lt(rank(box), rank(best)))) {
             smallest = Some(box)
-            covered = box.assets.isEmpty && spendableValue(box) - erg <= erg
+            tight = box.assets.isEmpty && spendableValue(box) - erg <= erg
           }
         }
-        else {
+        if (!single) {
           val heldTokens = tokenTotals(selected)
           val advancesTokens = box.assets.exists(asset =>
             heldTokens.getOrElse(asset.tokenId, BigInt(0)) < requiredTokens.getOrElse(asset.tokenId, BigInt(0)))
@@ -244,14 +263,19 @@ private[engine] class WalletInventory(node: NodeContext, api: _root_.node.NodeAp
           covered = covers(selected)
         }
       }
-      covered
+      done
     }
+    // Whether to stop reading: a one-box request at a tight match, an ERG-only one at a tight match or at the end
+    // of the page that covered it, anything else once its set covers
+    def done: Boolean = if (single || bestFit) tight else covered
 
     // Locally built change is unconfirmed by definition
     known.iterator.filter(box => !confirmedOnly && wallet.signableTrees.contains(box.ergoTree))
-      .takeWhile(_ => !covered).foreach(box => consume(box, reward = false))
-    if (!covered) walk(rewardsOnly = false, p2pkOnly = false, deadlineMillis, confirmedOnly = confirmedOnly)(consume)
-    if (single) { selected = smallest.toVector; covered = smallest.nonEmpty }
+      .takeWhile(_ => !done).foreach(box => consume(box, reward = false))
+    if (!done && !(bestFit && covered))
+      walk(rewardsOnly = false, p2pkOnly = false, deadlineMillis, confirmedOnly = confirmedOnly,
+        pageDone = () => bestFit && (covered || smallest.nonEmpty))(consume)
+    if (single || (bestFit && smallest.nonEmpty)) { selected = smallest.toVector; covered = smallest.nonEmpty }
     if (!covered) throw new NotEnoughInputsException("wallet cannot cover this request within the input budget")
 
     // Boxes added while the set was still short can turn out to be unnecessary once a later box

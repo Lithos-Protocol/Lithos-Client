@@ -45,7 +45,7 @@ final case class OrderContract(kind: OrderKind,
 object ErgoDexContracts {
 
   /** Fee numerator is per-pool in R4; the denominator is shared by every pool. */
-  final val FeeDenominator: Long = 1000L
+  final val FeeDenominator: Long = pricing.SwapCurve.ErgoDexFeeDenominator
 
   /** Pool token positions. A native pool has no X entry — its X reserve is the box value. */
   object NativePoolTokens {

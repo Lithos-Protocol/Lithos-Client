@@ -109,18 +109,9 @@ class ForwardsBatcher(nodeContext: NodeContext,
 
     val newest = DFMath.epochOf(tip)
     val skipped = skippedOrders()
-    var offset = 0
-    var exhausted = false
-    var due = Vector.empty[(Int, String)]
-    while (!exhausted && offset < Batcher.MaxScannedPerTemplate) {
-      val page = nodeApi.unspentBoxesByErgoTree(contracts.position.ergoTreeHex, Paging(offset, Batcher.PageSize),
-        SortDirection.Asc, MempoolOptions.ConfirmedOnly).get
-      due ++= page.flatMap(indexed => DFBoxes.position(indexed.box, contracts))
-        .filter(p => p.windowEnd <= newest && !skipped.contains(p.boxId))
-        .map(p => p.windowEnd -> p.boxId)
-      exhausted = page.size < Batcher.PageSize
-      offset += page.size
-    }
+    val (due, exhausted) = utils.PagedScan.collect(Batcher.MaxScannedPerTemplate)(utils.PagedScan.byTree(nodeApi,
+      contracts.position.ergoTreeHex, SortDirection.Asc))(indexed => DFBoxes.position(indexed.box, contracts)
+      .filter(p => p.windowEnd <= newest && !skipped.contains(p.boxId)).map(p => p.windowEnd -> p.boxId))
     if (!exhausted)
       logger.warn(s"Difficulty forward scan stopped after ${Batcher.MaxScannedPerTemplate} positions; " +
         "newer positions were not read this pass")

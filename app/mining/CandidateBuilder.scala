@@ -644,7 +644,12 @@ class CandidateBuilder(client: ErgoClient,
     round.budgets
       .flatMap { case (blockBudget, packageBudget) => collection.submit {
         val budget = packageBudget.less(genesisBytes, genesisCost)
-        val (kept, txs, refused) = CandidateBundle.admit(offered.flatMap(_._2), totalTxLimit, budget)
+        // Arb's floor: the sources before it leave it its share of the package, up to what it offered
+        val arbOffered = arbStage.flatMap(stage => offered.find(_._1 == stage.name)).toSeq.flatMap(_._2)
+        val reserved = CandidateBundle.reserve(budget, config.arbReservedShare, arbOffered)
+        val bundles = offered.flatMap(_._2)
+        val (kept, txs, refused) = CandidateBundle.admit(bundles, totalTxLimit, budget,
+          reserved = reserved, reservedFrom = bundles.size - arbOffered.size)
         logRefusals("package", height, refused)
         val ledger = capitalFor(height, kept)
         val topUp = topUpFor(height, ledger, txs, budget, genesis)

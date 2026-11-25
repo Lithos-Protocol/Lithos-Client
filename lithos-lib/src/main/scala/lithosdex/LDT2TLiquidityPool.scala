@@ -96,15 +96,12 @@ case class LDT2TLiquidityPool(reservesX: Long,
   def simSwap(amountIn: Long, xIn: Boolean): LDT2TSwapQuote = {
     require(amountIn > 0, "Swap input must be positive")
 
-    val sideFeeNum = if (xIn) xFeeNum else yFeeNum
-    val protocolFee = sideFee(amountIn, sideFeeNum)
+    val priced = curve(xIn)
+    val protocolFee = priced.sideFee(amountIn)
     val traded = amountIn - protocolFee
 
     val (reserveIn, reserveOut) = if (xIn) (reservesX, reservesY) else (reservesY, reservesX)
-    val amountOut =
-      if (traded <= 0) 0L
-      else ((BigInt(reserveOut) * traded * dexFeeNum) /
-            (BigInt(reserveIn) * D + BigInt(traded) * dexFeeNum)).toLong
+    val amountOut = priced.out(reserveIn, reserveOut, amountIn)
 
     // What the constant-product curve would have returned with no dex fee at all
     val ammFee = if (traded <= 0) 0L else (BigInt(traded) * (D - dexFeeNum) / D).toLong
@@ -124,19 +121,12 @@ case class LDT2TLiquidityPool(reservesX: Long,
     require(amountOut > 0, "Swap output must be positive")
 
     val (reserveIn, reserveOut) = if (xIn) (reservesX, reservesY) else (reservesY, reservesX)
-    if (amountOut >= reserveOut) return None
-
-    // Invert the AMM inequality for the traded amount, rounding up so the result still satisfies it
-    val traded = ceilDiv(BigInt(amountOut) * reserveIn * D, BigInt(dexFeeNum) * (reserveOut - amountOut)).toLong
-
-    // Then invert the side fee. The contract rounds it up, so step up until the amount left after it
-    // actually covers `traded` rather than trusting the closed form.
-    val sideFeeNum = if (xIn) xFeeNum else yFeeNum
-    var amountIn = ceilDiv(BigInt(traded) * D, BigInt(D - sideFeeNum)).toLong
-    while (amountIn - sideFee(amountIn, sideFeeNum) < traded) amountIn += 1
-
-    Some(simSwap(amountIn, xIn))
+    curve(xIn).in(reserveIn, reserveOut, amountOut).map(simSwap(_, xIn))
   }
+
+  /** How this pool prices a swap selling X when `xIn`, else Y: the side fee for that side, rounded up. */
+  def curve(xIn: Boolean): pricing.SwapCurve =
+    pricing.SwapCurve.LithosDexToken(dexFeeNum, if (xIn) xFeeNum else yFeeNum)
 
   /**
    * The pool after `q` lands: the traded amount onto the curve, the protocol fee into pending, and that
@@ -273,9 +263,6 @@ case class LDT2TLiquidityPool(reservesX: Long,
   def shareOfSupply(shares: Long): Double = shares.toDouble / supply.toDouble
 
   private def ceilDiv(a: BigInt, b: BigInt): BigInt = (a + b - 1) / b
-
-  /** The side fee taken out of a swap's input, rounded up as the contract does: any side fee costs at least one unit. */
-  private def sideFee(amountIn: Long, sideFeeNum: Long): Long = ceilDiv(BigInt(amountIn) * sideFeeNum, D).toLong
 }
 
 object LDT2TLiquidityPool {

@@ -21,18 +21,12 @@ final case class ErgoDexPool(nft: String,
 
   def shape: PoolShape = if (xId.isDefined) PoolShape.Token else PoolShape.Native
 
-  /** Constant-product output after the pool fee, using BigInt to avoid reserve-product overflow. */
-  def outputAmount(baseAmount: Long, baseIsX: Boolean): Long = {
-    if (baseAmount <= 0) 0L
-    else {
-      val (reservesIn, reservesOut) =
-        if (baseIsX) (BigInt(reservesX), BigInt(reservesY)) else (BigInt(reservesY), BigInt(reservesX))
-      val baseWithFee = BigInt(baseAmount) * feeNum
-      val quote = reservesOut * baseWithFee /
-        (reservesIn * ErgoDexContracts.FeeDenominator + baseWithFee)
-      if (quote > Long.MaxValue) 0L else quote.toLong
-    }
-  }
+  /** How this pool prices a swap, in either direction. */
+  def curve: pricing.SwapCurve = pricing.SwapCurve.ErgoDex(feeNum)
+
+  /** What `baseAmount` of X (when `baseIsX`) or Y buys of the other side, or 0. */
+  def outputAmount(baseAmount: Long, baseIsX: Boolean): Long =
+    if (baseIsX) curve.out(reservesX, reservesY, baseAmount) else curve.out(reservesY, reservesX, baseAmount)
 
   /** The pool as it stands after this swap, which is what the execution's pool output must hold. */
   def afterSwap(baseAmount: Long, quoteAmount: Long, baseIsX: Boolean): ErgoDexPool =

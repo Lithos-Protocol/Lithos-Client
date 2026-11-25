@@ -13,6 +13,7 @@ import sigma.Colls
 import sigma.ast.{ByteArrayConstant, Constant, ErgoTree, LongConstant, SType}
 import support.MachinaFixtures
 import support.MachinaFixtures.Fill
+import transactions.batching.arb.ErgoDexArbPool
 
 import scala.collection.JavaConverters._
 import scala.concurrent.duration._
@@ -74,8 +75,8 @@ class MachinaSpec extends AnyFlatSpec with Matchers with MockitoSugar {
     fills.foreach { f =>
       withClue(f.name) {
         val (order, pool) = parsed(f)
-        val trade = MachinaPricing.at(order, pool, f.tokensMoved, f.boxSells).get
-        ErgoDexPool.native(f.poolAfter).get.copy(boxId = pool.boxId) shouldBe trade.poolAfter
+        val trade = MachinaFill.at(order, ErgoDexArbPool(pool), f.tokensMoved, f.boxSells).get
+        ErgoDexArbPool(ErgoDexPool.native(f.poolAfter).get.copy(boxId = pool.boxId)) shouldBe trade.swap.after
         trade.childValue shouldBe f.child.value
         trade.childTokens shouldBe f.child.assets.headOption.map(_.amount).getOrElse(0L)
         trade.toOwner shouldBe (f.child.ergoTree != f.order.ergoTree)
@@ -88,9 +89,9 @@ class MachinaSpec extends AnyFlatSpec with Matchers with MockitoSugar {
     fills.foreach { f =>
       withClue(f.name) {
         val (order, pool) = parsed(f)
-        val best = MachinaPricing.best(order, pool).get
+        val best = MachinaFill.best(order, ErgoDexArbPool(pool)).get
         best.gap should be >= f.gap
-        Seq(best.tokens - 1, best.tokens + 1).flatMap(k => MachinaPricing.at(order, pool, k, best.boxSells))
+        Seq(best.tokens - 1, best.tokens + 1).flatMap(k => MachinaFill.at(order, ErgoDexArbPool(pool), k, best.boxSells))
           .foreach(neighbour => neighbour.gap should be <= best.gap)
       }
     }
@@ -166,11 +167,11 @@ class MachinaSpec extends AnyFlatSpec with Matchers with MockitoSugar {
 
   // ─── the limit contract's sides ──────────────────────────────────────────
 
-  private def fillOf(order: MachinaOrder, pool: ErgoDexPool, trade: MachinaTrade) =
-    ErgoDexFill(order, pool, trade.tokens, trade.gap, trade.poolAfter, trade.childValue,
+  private def fillOf(order: MachinaOrder, pool: ErgoDexPool, trade: MachinaFill) =
+    ErgoDexFill(order, pool, trade.tokens, trade.gap, trade.swap.after.asInstanceOf[ErgoDexArbPool].state, trade.childValue,
       if (trade.childTokens > 0) Seq(NodeAsset(order.tokenId, trade.childTokens)) else Seq.empty, Some(trade))
 
-  private def signOn(ctx: BlockchainContext, poolBox: NodeBox, order: MachinaOrder, trade: MachinaTrade) = {
+  private def signOn(ctx: BlockchainContext, poolBox: NodeBox, order: MachinaOrder, trade: MachinaFill) = {
     val pool = ErgoDexPool.native(poolBox).get
     ErgoDexExecution.assembled(ctx, wallet, poolBox.toInputUTXO(ctx), fillOf(order, pool, trade),
       math.max(poolBox.creationHeight, order.box.creationHeight) + 10, 0L, useTrueProp = false)
@@ -185,23 +186,23 @@ class MachinaSpec extends AnyFlatSpec with Matchers with MockitoSugar {
   }
 
   /** `tokens` units sold to `order` past its floor: priced with ERG to spare, then the spare taken back. */
-  private def forced(order: MachinaOrder, pool: ErgoDexPool, tokens: Long): MachinaTrade = {
+  private def forced(order: MachinaOrder, pool: ErgoDexPool, tokens: Long): MachinaFill = {
     val spare = 100000000L
     val roomy = order.copy(box = order.box.copy(value = order.box.value + spare))
-    val trade = MachinaPricing.at(roomy, pool, tokens, boxSells = false).get
-    trade.copy(childValue = trade.childValue - spare)
+    val trade = MachinaFill.at(roomy, ErgoDexArbPool(pool), tokens, boxSells = false).get
+    trade.copy(order = order, childValue = trade.childValue - spare)
   }
 
   "A limit order buying tokens" should "keep more than 1,000,000 nanoERG, so it is recreated rather than paid out" in {
     nodeContext.getClient.execute { ctx =>
       val (live, pool) = parsed(limitBuys)
-      val best = MachinaPricing.best(live, pool).get
+      val best = MachinaFill.best(live, ErgoDexArbPool(pool)).get
       best.toOwner shouldBe false
       best.childValue should be > MachinaContracts.SafeMinBoxValue
       // Left exactly 1,000,000 after 2,828 units, the box would have to pay out; one unit fewer keeps it
       val atFloor = buying(ctx, MachinaContracts.SafeMinBoxValue + 2828 * live.bid.get)
-      MachinaPricing.at(atFloor, pool, 2828, boxSells = false) shouldBe None
-      val kept = MachinaPricing.at(atFloor, pool, 2827, boxSells = false).get
+      MachinaFill.at(atFloor, ErgoDexArbPool(pool), 2828, boxSells = false) shouldBe None
+      val kept = MachinaFill.at(atFloor, ErgoDexArbPool(pool), 2827, boxSells = false).get
       forced(atFloor, pool, 2827) shouldBe kept
       signOn(ctx, limitBuys.pool, atFloor, kept)
       Try(signOn(ctx, limitBuys.pool, atFloor, forced(atFloor, pool, 2828))).isFailure shouldBe true
@@ -214,10 +215,10 @@ class MachinaSpec extends AnyFlatSpec with Matchers with MockitoSugar {
       // After 49 units at 2,000,000 the box keeps 1,500,000: above the safe minimum, below its price
       val price = 2000000L
       val order = buying(ctx, 49 * price + 1500000L, Some(price))
-      MachinaPricing.at(order, pool, 49, boxSells = false) shouldBe None
-      MachinaPricing.at(order, pool, 48, boxSells = false).get.childValue shouldBe 1500000L + price
-      MachinaPricing.best(order, pool).get.tokens shouldBe 48
-      val kept = MachinaPricing.at(order, pool, 48, boxSells = false).get
+      MachinaFill.at(order, ErgoDexArbPool(pool), 49, boxSells = false) shouldBe None
+      MachinaFill.at(order, ErgoDexArbPool(pool), 48, boxSells = false).get.childValue shouldBe 1500000L + price
+      MachinaFill.best(order, ErgoDexArbPool(pool)).get.tokens shouldBe 48
+      val kept = MachinaFill.at(order, ErgoDexArbPool(pool), 48, boxSells = false).get
       forced(order, pool, 48) shouldBe kept
       signOn(ctx, limitBuys.pool, order, kept)
       Try(signOn(ctx, limitBuys.pool, order, forced(order, pool, 49))).isFailure shouldBe true
@@ -235,7 +236,7 @@ class MachinaSpec extends AnyFlatSpec with Matchers with MockitoSugar {
       val poolBox = poolHolding(ctx, 6700000000L, 136815L)
       val pool = ErgoDexPool.native(poolBox).get
       val order = MachinaOrder.parse(limitSellOrder).get.routedThrough(pool.nft)
-      val trade = MachinaPricing.best(order, pool).get
+      val trade = MachinaFill.best(order, ErgoDexArbPool(pool)).get
       trade.boxSells shouldBe true
       trade.tokens should (be > 0L and be < order.tokens)
       trade.toOwner shouldBe false
@@ -253,7 +254,7 @@ class MachinaSpec extends AnyFlatSpec with Matchers with MockitoSugar {
       val poolBox = poolHolding(ctx, 6600000000000L, 136815369L)
       val pool = ErgoDexPool.native(poolBox).get
       val order = MachinaOrder.parse(limitSellOrder).get.routedThrough(pool.nft)
-      val trade = MachinaPricing.best(order, pool).get
+      val trade = MachinaFill.best(order, ErgoDexArbPool(pool)).get
       trade.tokens shouldBe order.tokens
       trade.toOwner shouldBe true
       val payout = signOn(ctx, poolBox, order, trade).getOutputsToSpend.get(1)
@@ -282,8 +283,8 @@ class MachinaSpec extends AnyFlatSpec with Matchers with MockitoSugar {
       val fair = MachinaOrder.parse(withId(ctx, gridSells.order.copy(additionalRegisters =
         node.model.NodeRegisters(gridSells.order.additionalRegisters.values.updated("R5", prices))))).get
       fair.ask shouldBe Some(Long.MaxValue / 4)
-      MachinaPricing.best(fair.routedThrough(pool.nft), pool) shouldBe None
-      MachinaPricing.best(live, pool) should not be empty
+      MachinaFill.best(fair.routedThrough(pool.nft), ErgoDexArbPool(pool)) shouldBe None
+      MachinaFill.best(live, ErgoDexArbPool(pool)) should not be empty
     }
   }
 
@@ -335,8 +336,36 @@ class MachinaSpec extends AnyFlatSpec with Matchers with MockitoSugar {
       val chain = run.chain.get
       chain.transactions should have size 2
       chain.fills.map(_.order.boxId).toSet shouldBe Set(machina.boxId, redeem.boxId)
-      chain.fills(1).pool shouldBe chain.fills.head.poolAfter
-      chain.transactions(1).getSignedInputs.get(0).getId shouldBe chain.transactions.head.getOutputsToSpend.get(0).getId
+      val successor = chain.transactions.head.getOutputsToSpend.get(0).getId
+      chain.fills(1).pool shouldBe chain.fills.head.poolAfter.copy(boxId = successor.toString)
+      chain.transactions(1).getSignedInputs.get(0).getId shouldBe successor
+      chain.takings.value shouldBe chain.fills.map(_.revenue).sum
+    }
+  }
+
+  "Two Machina fills on one pool" should "chain in one run, the second priced and built on the box the first created" in {
+    nodeContext.getClient.execute { ctx =>
+      val (seller, pool) = parsed(gridSells)
+      val sold = MachinaFill.best(seller, ErgoDexArbPool(pool)).get.swap.after
+      // A grid bidding between what a token costs from the pool before the sale and after it: it fills only second
+      val (before, after) = (1.0 / ErgoDexArbPool(pool).marginal(true), 1.0 / sold.marginal(true))
+      val bid = ((before + after) / 2).toLong
+      withClue(s"a bid between $after and $before: ")(bid.toDouble should (be > after and be < before))
+      val prices = ErgoValue.of(Colls.fromArray(Array(Long.MaxValue / 4, bid)), scalaLongType).toHex
+      val buyer = MachinaOrder.parse(withId(ctx, gridSells.order.copy(value = 50000000000L, assets = Seq.empty,
+        additionalRegisters = node.model.NodeRegisters(gridSells.order.additionalRegisters.values.updated("R5", prices)))))
+        .get.routedThrough(pool.nft)
+      MachinaFill.best(buyer, ErgoDexArbPool(pool)) shouldBe None
+
+      val run = ErgoDexExecution.run(ctx, wallet, gridSells.pool.toInputUTXO(ctx), pool, Seq(buyer, seller), 3, 0L,
+        height(gridSells), 0L, useTrueProp = false, Deadline.now + 1.minute)
+      run.unbuildable shouldBe empty
+      val chain = run.chain.get
+      chain.fills.map(_.order.boxId) shouldBe Seq(seller.boxId, buyer.boxId)
+      val (first, second) = (chain.transactions.head.getOutputsToSpend, chain.transactions(1).getSignedInputs)
+      second.get(0).getId shouldBe first.get(0).getId
+      second.get(2).getId shouldBe first.get(2).getId
+      chain.fills(1).machina.get.swap.pool.boxId shouldBe first.get(0).getId.toString
       chain.takings.value shouldBe chain.fills.map(_.revenue).sum
     }
   }

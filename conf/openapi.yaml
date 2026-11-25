@@ -6824,8 +6824,9 @@ paths:
       description: >
         Send every confirmed box at the arb address, tokens included, to this wallet's primary
         address in one transaction paying the 0.001 ERG fee out of those boxes. Arbitrage stops
-        first and stays off until the client restarts, and `batching.arb.autoReserve` sends no new
-        stake until then. Set `batching.arb.enabled = false` to keep it off after a restart.
+        first and stays off until `POST /wallet/arb/resume` or a restart, and
+        `batching.arb.autoReserve` sends no new stake until then. Set `batching.arb.enabled = false`
+        to keep it off after a restart.
 
 
         One transaction spends at most `wallet.max-inputs` boxes, largest first; `remainingBoxes`
@@ -6857,13 +6858,65 @@ paths:
         '422':
           description: >
             The node refused the transaction. `detail` carries its reason. Arbitrage stays off
-            until the client restarts.
+            until it is resumed.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiError'
         '503':
           description: Node unavailable. Nothing was sent; retry.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /wallet/arb/resume:
+    post:
+      summary: Resume arb after a reclaim
+      security:
+        - ApiKeyAuth: []
+      description: >
+        Turn arbitrage back on after a reclaim paused it, without restarting the client. With
+        `batching.arb.autoReserve` on, the client sends a new stake to the arb address once the
+        wallet holds twice `batching.arb.stakeNanoErg`; otherwise arbitrage runs on ERG sent there.
+
+
+        Refused while the reclaim is still in the mempool, since a block of this miner's built on the
+        stake would undo it. Calling it while arbitrage runs changes nothing. Answers with the stake
+        as `GET /wallet/arb` reports it.
+      operationId: resumeWalletArbStake
+      tags:
+        - wallet
+      responses:
+        '200':
+          description: Arbitrage runs
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WalletArbStake'
+        '403':
+          description: Missing or wrong api_key
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '422':
+          description: >
+            Arbitrage is off in configuration, or a pending transaction still spends a box at the
+            arb address. `detail` says which.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '503':
+          description: >
+            The arb address could not be read, or a reclaim is still running. Nothing changed; retry.
           content:
             application/json:
               schema:
@@ -10513,7 +10566,8 @@ components:
             transactions and the `arb` candidate source are all on.
         paused:
           type: boolean
-          description: A reclaim stopped arbitrage. It resumes when the client restarts.
+          description: >
+            A reclaim stopped arbitrage. It runs again after `POST /wallet/arb/resume` or a restart.
         targetNanoErgs:
           type: string
           description: >
@@ -10523,8 +10577,9 @@ components:
         stakeNanoErgs:
           type: string
           description: >
-            ERG of the box cycles start from. `0` until a candidate build has taken one up, and
-            after a reclaim. Decimal string.
+            ERG of the box cycles start from: before the first candidate build, the largest box
+            at the address holding at least 0.1 ERG and no tokens. `0` when there is none, while
+            `enabled` is false and while `paused`. Decimal string.
           example: '10000000000'
         boxes:
           type: integer

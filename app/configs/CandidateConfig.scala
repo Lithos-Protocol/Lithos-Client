@@ -21,7 +21,8 @@ case class CandidateConfig(collateralPoolSize: Int,
                            minNewProtocolTxs: Int = 1,
                            pinnedInputs: Int = 1,
                            collateralStrategy: String = CandidateConfig.HighestFee,
-                           cacheRefreshMs: Int = 30000) {
+                           cacheRefreshMs: Int = 30000,
+                           arbReservedShare: Double = CandidateConfig.DefaultArbReservedShare) {
 
   /** One source's limits. Every source this client wires has an entry, so any other name is a defect. */
   def limitsFor(name: String): CandidateSourceConfig =
@@ -48,6 +49,12 @@ object CandidateConfig {
   final val MinCacheRefreshMs: Int = 20000
   final val MaxCacheRefreshMs: Int = 55000
 
+  /**
+   * Share of the package's bytes and cost the other sources leave for arbitrage, up to what it offers. Arb is
+   * admitted last, so without it a block where every source fills leaves arb nothing.
+   */
+  final val DefaultArbReservedShare: Double = 0.25
+
   /** Mirrors the `stratum.candidate` block in `application.conf`; keep the two in step. */
   val Default: CandidateConfig = CandidateConfig(
     collateralPoolSize = 100,
@@ -72,9 +79,9 @@ object CandidateConfig {
       // batch split to fit takes a slot per part, so as many slots as bonds in a batch keep every bond.
       CandidateSourceConfig.SigmaFi -> CandidateSourceConfig.Default.copy(enabled = true, maxTxs = 20),
       // Asked only while `batching.arb.enabled`, after the DEX batchers. Every leg of a cycle takes a slot, and
-      // 100 legs of the costliest pool kind fit the cost and, just, the bytes.
-      CandidateSourceConfig.Arb -> CandidateSourceConfig.Default.copy(enabled = true, maxTxs = 100, maxBytes = 327680L,
-        maxCost = 2000000L)),
+      // 150 of the costliest arb transaction fit the cost and the bytes.
+      CandidateSourceConfig.Arb -> CandidateSourceConfig.Default.copy(enabled = true, maxTxs = 150, maxBytes = 491520L,
+        maxCost = 3000000L)),
     blockShare = 0.75,
     useTruePropCollection = false,
     genesisWaitMs = 1500,
@@ -89,7 +96,8 @@ object CandidateConfig {
     minNewProtocolTxs = 1,
     pinnedInputs = 1,
     collateralStrategy = HighestFee,
-    cacheRefreshMs = 30000
+    cacheRefreshMs = 30000,
+    arbReservedShare = DefaultArbReservedShare
   )
 
   /**
@@ -138,7 +146,9 @@ object CandidateConfig {
       pinnedInputs = int("pinnedInputs", Default.pinnedInputs),
       collateralStrategy = config.getOptional[String]("stratum.candidate.collateralStrategy")
         .getOrElse(Default.collateralStrategy),
-      cacheRefreshMs = int("cacheRefreshMs", Default.cacheRefreshMs)
+      cacheRefreshMs = int("cacheRefreshMs", Default.cacheRefreshMs),
+      arbReservedShare = config.getOptional(s"stratum.candidate.sources.${CandidateSourceConfig.Arb}.reservedShare")(
+        ConfigLoader.doubleLoader).getOrElse(Default.arbReservedShare)
     )
   }
 }

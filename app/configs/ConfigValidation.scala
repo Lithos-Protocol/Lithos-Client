@@ -200,7 +200,7 @@ object Configs {
       configs.CandidateSourceConfig.Arb).foreach { source =>
       val enabled = v.bool(s"stratum.candidate.sources.$source.enabled")
       val maxTxs = v.range(s"stratum.candidate.sources.$source.maxTxs",
-        v.int(s"stratum.candidate.sources.$source.maxTxs"), 0, 100, "transactions inserted per block")
+        v.int(s"stratum.candidate.sources.$source.maxTxs"), 0, CandidateSourceConfig.MaxTxs, "transactions inserted per block")
       // A rent collection with several claims is a sweep plus the merge of its proceeds, so one slot
       // would refuse every such collection while the source kept building them.
       if (source == configs.CandidateSourceConfig.Rent && enabled.contains(true) && maxTxs.contains(1))
@@ -212,6 +212,8 @@ object Configs {
       v.longRange(s"stratum.candidate.sources.$source.maxCost",
         v.long(s"stratum.candidate.sources.$source.maxCost"), 0L, 100000000L, "execution cost per block")
     }
+    v.doubleRange("stratum.candidate.sources.arb.reservedShare", v.double("stratum.candidate.sources.arb.reservedShare"),
+      0.0, 1.0, "fraction of the package's bytes and cost only arbitrage may use")
     v.range("stratum.candidate.genesisWaitMs", v.int("stratum.candidate.genesisWaitMs"), 0, 60000, "ms to wait for the genesis transaction before falling back to a solo candidate")
     v.range("stratum.candidate.mempoolRefreshMs", v.int("stratum.candidate.mempoolRefreshMs"), 0, 3600000, "ms between candidate refreshes within a block; 0 mines the block's initial transaction set")
     v.range("stratum.candidate.cacheRefreshMs", v.int("stratum.candidate.cacheRefreshMs"),

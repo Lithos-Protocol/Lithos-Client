@@ -116,8 +116,8 @@ class ConfigDefaultsSpec extends AnyFlatSpec with Matchers {
     new StateConfig(Configuration.empty).autoCommit shouldBe false
   }
 
-  "BatchingConfig.Default" should "equal what the shipped application.conf parses" in {
-    BatchingConfig(shipped, "ergodex") shouldEqual BatchingConfig.Default
+  "BatchingConfig.ErgoDexDefault" should "equal what the shipped application.conf parses" in {
+    BatchingConfig(shipped, "ergodex") shouldEqual BatchingConfig.ErgoDexDefault
   }
 
   "LithosDexBatchingConfig.Default" should "equal what the shipped application.conf parses" in {

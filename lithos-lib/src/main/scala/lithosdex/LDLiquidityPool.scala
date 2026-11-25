@@ -92,15 +92,12 @@ case class LDLiquidityPool(reservesX: Long,
   def simSwap(amountIn: Long, ergIn: Boolean): LDSwapQuote = {
     require(amountIn > 0, "Swap input must be positive")
 
-    val sideFeeNum = if (ergIn) ergFeeNum else tokenFeeNum
-    val protocolFee = (BigInt(amountIn) * sideFeeNum / D).toLong
+    val priced = curve(ergIn)
+    val protocolFee = priced.sideFee(amountIn)
     val traded = amountIn - protocolFee
 
     val (reserveIn, reserveOut) = if (ergIn) (reservesX, reservesY) else (reservesY, reservesX)
-    val amountOut =
-      if (traded <= 0) 0L
-      else ((BigInt(reserveOut) * traded * dexFeeNum) /
-            (BigInt(reserveIn) * D + BigInt(traded) * dexFeeNum)).toLong
+    val amountOut = priced.out(reserveIn, reserveOut, amountIn)
 
     // What the constant-product curve would have returned with no dex fee at all
     val ammFee = if (traded <= 0) 0L else (BigInt(traded) * (D - dexFeeNum) / D).toLong
@@ -120,19 +117,12 @@ case class LDLiquidityPool(reservesX: Long,
     require(amountOut > 0, "Swap output must be positive")
 
     val (reserveIn, reserveOut) = if (ergIn) (reservesX, reservesY) else (reservesY, reservesX)
-    if (amountOut >= reserveOut) return None
-
-    // Invert the AMM inequality for the traded amount, rounding up so the result still satisfies it
-    val traded = ceilDiv(BigInt(amountOut) * reserveIn * D, BigInt(dexFeeNum) * (reserveOut - amountOut)).toLong
-
-    // Then invert the side fee. The contract's fee is a truncating division, so the least input that leaves
-    // `traded` lies just above (traded - 1) / (1 - fee): step up from there to the first that covers it.
-    val sideFeeNum = if (ergIn) ergFeeNum else tokenFeeNum
-    var amountIn = (BigInt(traded - 1) * D / BigInt(D - sideFeeNum) + 1).toLong
-    while (amountIn - (BigInt(amountIn) * sideFeeNum / D).toLong < traded) amountIn += 1
-
-    Some(simSwap(amountIn, ergIn))
+    curve(ergIn).in(reserveIn, reserveOut, amountOut).map(simSwap(_, ergIn))
   }
+
+  /** How this pool prices a swap selling ERG when `ergIn`, else its token: the side fee for that side, truncated. */
+  def curve(ergIn: Boolean): pricing.SwapCurve =
+    pricing.SwapCurve.LithosDexNative(dexFeeNum, if (ergIn) ergFeeNum else tokenFeeNum)
 
   /**
    * The pool after `q` lands: the traded amount onto the curve, the protocol fee into pending, and that

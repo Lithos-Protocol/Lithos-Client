@@ -145,6 +145,64 @@ class WalletInventorySpec extends AnyFlatSpec with Matchers with MockitoSugar {
     }
   }
 
+  "A request for ERG alone" should "take the smallest box that covers it on the page read, not the first that does" in {
+    // A 0.002 ERG commitment held the wallet's largest box when that box came first in node order
+    val (node, api, wallet) = FakeNodeContext(numAddresses = 1)
+    node.getClient.execute { ctx =>
+      val large = UTXO(wallet.contract, 1874000000000L).toDummyInput(ctx)
+      val nine = UTXO(wallet.contract, 9000000000L).toDummyInput(ctx)
+      val small = UTXO(wallet.contract, 50000000L).toDummyInput(ctx)
+      val withToken = UTXO(wallet.contract, 3000000L, Seq(work.lithos.mutations.Token(
+        org.ergoplatform.sdk.ErgoId.create("ab" * 32), 5L))).toDummyInput(ctx)
+      serve(api, Vector(large, nine, withToken, small).map(WalletInventory.nodeBox))
+      new WalletInventory(node, api).select(ctx, 2000000L, Seq.empty, Set.empty, single = false)
+        .map(_.id) shouldBe Vector(small.id)
+    }
+  }
+
+  it should "pass over a box whose change would be under the least a box may hold" in {
+    val (node, api, wallet) = FakeNodeContext(numAddresses = 1)
+    node.getClient.execute { ctx =>
+      val request = 2000000L
+      // 500 nanoERG of change fails any build with no fee output to fold it into
+      val dusty = UTXO(wallet.contract, request + 500L).toDummyInput(ctx)
+      val roomy = UTXO(wallet.contract, request + UTXO.MIN_CHANGE).toDummyInput(ctx)
+      serve(api, Vector(dusty, roomy).map(WalletInventory.nodeBox))
+      new WalletInventory(node, api).select(ctx, request, Seq.empty, Set.empty, single = false)
+        .map(_.id) shouldBe Vector(roomy.id)
+
+      // A box that leaves no change at all fits; read first, it also ends the walk, being within twice the request
+      val (node2, api2, wallet2) = FakeNodeContext(numAddresses = 1)
+      serve(api2, Vector(request + 500L, request, request + UTXO.MIN_CHANGE).map(value =>
+        WalletInventory.nodeBox(UTXO(wallet2.contract, value).toDummyInput(ctx))))
+      new WalletInventory(node2, api2).select(ctx, request, Seq.empty, Set.empty, single = false)
+        .map(_.value) shouldBe Vector(request)
+    }
+  }
+
+  it should "read no page past the one that covered it, and accumulate when no one box covers it" in {
+    val (node, api, wallet) = FakeNodeContext(numAddresses = 1)
+    node.getClient.execute { ctx =>
+      val pageSize = configs.WalletConfig.Default.pageSize
+      // A full first page of boxes that each cover the request, none within twice it, then a close one
+      val boxes = Vector.tabulate(pageSize)(i =>
+        WalletInventory.nodeBox(UTXO(wallet.contract, 1000000000L + i).toDummyInput(ctx))) :+
+        WalletInventory.nodeBox(UTXO(wallet.contract, 3000000L).toDummyInput(ctx))
+      serve(api, boxes)
+      new WalletInventory(node, api).select(ctx, 2000000L, Seq.empty, Set.empty, single = false)
+        .map(_.value) shouldBe Vector(1000000000L)
+      verify(api, never()).walletUnspentBoxes(any[ConfirmationRange],
+        org.mockito.ArgumentMatchers.eq(Paging(pageSize, pageSize)))
+
+      val (node2, api2, wallet2) = FakeNodeContext(numAddresses = 1)
+      // Distinct values, since a box's id is the hash of its contents
+      val parts = Vector.tabulate(3)(i => WalletInventory.nodeBox(UTXO(wallet2.contract, 400000000L + i).toDummyInput(ctx)))
+      serve(api2, parts)
+      new WalletInventory(node2, api2).select(ctx, 1000000000L, Seq.empty, Set.empty, single = false)
+        .map(_.value).sum shouldBe 1200000003L
+    }
+  }
+
   "A request the wallet cannot cover" should "fail as a shortfall, not as a broken read" in {
     val (node, api, wallet) = FakeNodeContext(numAddresses = 1)
     node.getClient.execute { ctx =>

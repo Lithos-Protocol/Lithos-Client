@@ -9,7 +9,7 @@ import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 import org.scalatestplus.mockito.MockitoSugar
 import support.MachinaFixtures
-import transactions.batching.ergodex.{ErgoDexPool, MachinaContracts, MachinaFill, MachinaKind, MachinaOrder, MachinaPricing}
+import transactions.batching.ergodex.{ErgoDexExecution, ErgoDexPool, MachinaContracts, MachinaFill, MachinaKind, MachinaOrder}
 import transactions.candidate.BlockTxMessages.{CandidateTx, ChainFromPackage}
 import transactions.candidate.{CandidateBundle, CapitalOrigin}
 import work.lithos.mutations.UTXO
@@ -57,18 +57,18 @@ class ArbMachinaSpec extends AnyFlatSpec with Matchers with MockitoSugar {
 
   private def parsed(f: Fill): MachinaOrder = MachinaOrder.parse(f.order).get
 
-  "A Machina fill priced through any ERG pool" should "reproduce the ErgoDEX batcher's fills to the unit, and its best size" in {
+  "A Machina fill priced through any ERG pool" should "reproduce real ErgoDEX fills to the unit, and be the fill the ErgoDEX batcher prices" in {
     fills.foreach { f =>
       withClue(f.name) {
         val pool = ErgoDexPool.native(f.pool).get
         val order = parsed(f).routedThrough(pool.nft)
-        val fill = ArbMachina.at(order, ErgoDexArbPool(pool), f.tokensMoved, f.boxSells).get
+        val fill = MachinaFill.at(order, ErgoDexArbPool(pool), f.tokensMoved, f.boxSells).get
         fill.gap shouldBe f.gap
         fill.childValue shouldBe f.child.value
         fill.childTokens shouldBe f.child.assets.headOption.map(_.amount).getOrElse(0L)
         fill.toOwner shouldBe (f.child.ergoTree != f.order.ergoTree)
         fill.swap.after shouldBe ErgoDexArbPool(ErgoDexPool.native(f.poolAfter).get.copy(boxId = pool.boxId))
-        ArbMachina.best(order, ErgoDexArbPool(pool)).map(_.gap) shouldBe MachinaPricing.best(order, pool).map(_.gap)
+        ErgoDexExecution.price(order, pool, 0L).flatMap(_.machina) shouldBe MachinaFill.best(order, ErgoDexArbPool(pool))
       }
     }
   }
@@ -78,13 +78,13 @@ class ArbMachinaSpec extends AnyFlatSpec with Matchers with MockitoSugar {
       val f = gridSells
       val ergoDex = ErgoDexPool.native(f.pool).get
       val order = parsed(f)
-      val throughErgoDex = MachinaPricing.best(order.routedThrough(ergoDex.nft), ergoDex).get.gap
+      val throughErgoDex = MachinaFill.best(order.routedThrough(ergoDex.nft), ErgoDexArbPool(ergoDex)).get.gap
       val ask = order.ask.get.toDouble
       val dearer = entry(ctx, lithosDex(ctx, ask * 1.5)).pool
       val cheaper = entry(ctx, lithosDex(ctx, ask * 1.02)).pool
-      val dearGap = ArbMachina.best(order.routedThrough(ldNft), dearer).get.gap
+      val dearGap = MachinaFill.best(order.routedThrough(ldNft), dearer).get.gap
       dearGap should be > throughErgoDex
-      ArbMachina.best(order.routedThrough(ldNft), cheaper).fold(0L)(_.gap) should be < throughErgoDex
+      MachinaFill.best(order.routedThrough(ldNft), cheaper).fold(0L)(_.gap) should be < throughErgoDex
 
       ArbMachina.preferLithosDex(Seq(order), Map(order.boxId -> throughErgoDex), Seq(dearer), 1000000L) shouldBe
         Vector((order.boxId, ldNft, dearGap))
@@ -110,7 +110,7 @@ class ArbMachinaSpec extends AnyFlatSpec with Matchers with MockitoSugar {
         withClue(name) {
           val box = lithosDex(ctx, if (sells) live.ask.get * 1.5 else live.bid.get / 1.5)
           val order = live.routedThrough(ldNft)
-          val fill = ArbMachina.best(order, entry(ctx, box).pool).get
+          val fill = MachinaFill.best(order, entry(ctx, box).pool).get
           fill.boxSells shouldBe sells
           val bundles = build(ctx, indexOf(ctx, box), Seq(order))
           bundles.size shouldBe 1
@@ -218,7 +218,7 @@ class ArbMachinaSpec extends AnyFlatSpec with Matchers with MockitoSugar {
     nodeContext.getClient.execute { ctx =>
       val order = parsed(gridSells).routedThrough(ldNft)
       val ld = lithosDex(ctx, order.ask.get * 1.5)
-      val gap = ArbMachina.best(order, entry(ctx, ld).pool).get.gap
+      val gap = MachinaFill.best(order, entry(ctx, ld).pool).get.gap
       build(ctx, indexOf(ctx, ld), Seq(order), minFill = gap) should have size 1
       build(ctx, indexOf(ctx, ld), Seq(order), minFill = gap + 1) shouldBe empty
     }
@@ -262,8 +262,8 @@ class ArbMachinaSpec extends AnyFlatSpec with Matchers with MockitoSugar {
     nodeContext.getClient.execute { ctx =>
       val order = parsed(gridSells).routedThrough(ldNft)
       val ld = lithosDex(ctx, order.ask.get * 1.5)
-      val fill = ArbMachina.best(order, entry(ctx, ld).pool).get
-      val tx = ArbMachina.build(ctx, wallet, fill, ld.toInputUTXO(ctx), wallet.contract, height)
+      val fill = MachinaFill.best(order, entry(ctx, ld).pool).get
+      val tx = MachinaFill.build(ctx, wallet, fill, ld.toInputUTXO(ctx), MachinaFill.Takings.ToBox(wallet.contract), height)
       val proof = tx.getSignedInputs.asScala(1)
       proof.getContextVars.asScala.map { case (k, v) => k.toInt -> v.getValue }.toMap shouldBe
         Map(0 -> fill.boxSells, 1 -> 1)
@@ -312,7 +312,7 @@ class ArbMachinaSpec extends AnyFlatSpec with Matchers with MockitoSugar {
           // Any token/token pool of the pair: the child depends only on the order, its side and the size
           val pool = ErgoDexArbPool(ErgoDexPool.token(tokenPool(ctx, id(41), faku, order.tokenId,
             100000000L, 100000L)).get)
-          val fill = ArbMachina.at(order.routedThrough(pool.nft), pool, moved, sells).get
+          val fill = MachinaFill.at(order.routedThrough(pool.nft), pool, moved, sells).get
           val input = f.order.toInputUTXO(ctx)
           val child = MachinaFill.child(input, order, fill.childValue, fill.childTokens, fill.toOwner, fill.childBase)
           child.contract.ergoTreeHex shouldBe f.child.ergoTree
@@ -431,6 +431,35 @@ class ArbMachinaSpec extends AnyFlatSpec with Matchers with MockitoSugar {
       fill.outputs(2).assets.map(_.tokenId) shouldBe Seq(Lit, Rsn)
       sale.inputs.head.boxId shouldBe canonical.boxId
       sale.outputs(1).value shouldBe stake.value
+      sale.outputs(2).value should be >= 1000000L
+    }
+  }
+
+  it should "be filled through a LithosDex token/token pool and sold through an ErgoDEX ERG pool deeper than ERG:LIT" in {
+    nodeContext.getClient.execute { ctx =>
+      // The grid above, bidding half again what LIT/RSN asks for RSN
+      val pool = entry(ctx, litRsnPool).pool.asInstanceOf[LithosDexT2TArbPool].state
+      val bid = (BigInt(pool.reservesX) * 3 / (BigInt(pool.reservesY) * 2) + 1).toLong
+      val prices = ErgoValue.of(sigma.Colls.fromArray(Array(Long.MaxValue / 4, bid)),
+        org.ergoplatform.appkit.scalaapi.scalaLongType).toHex
+      val order = grid(withId(ctx, tokenGridOrder.copy(value = 1000000L,
+        ergoTree = MachinaContracts.tokenGrid.treeHex(Rsn), assets = Seq(NodeAsset(Lit, bid * 1000L + 1L)),
+        additionalRegisters = node.model.NodeRegisters(tokenGridOrder.additionalRegisters.values.updated("R5", prices)))))
+      val canonical = canonicalPool(ctx, 100000 * Erg, 10000000000000L)
+      // An ErgoDEX ERG/LIT pool at the same price with twice the ERG, so the sale goes through ErgoDEX
+      val ergoDexLit = nativePool(ctx, id(43), Lit, 200000 * Erg, 20000000000000L)
+      val (bundles, stake) = gridBuild(ctx, Seq(litRsnPool, canonical, ergoDexLit), Seq(order))
+      bundles.size shouldBe 1
+      bundles.head.members.map(_.kind) shouldBe Vector(ArbKind.Grid, ArbKind.Grid)
+      val Seq(fill, sale) = bundles.head.members.map(decoded)
+      fill.inputs.map(_.boxId) shouldBe Seq(litRsnPool.boxId, stake.boxId, order.boxId)
+      fill.outputs.head.ergoTree shouldBe litRsnPool.ergoTree
+      sale.inputs.map(_.boxId) shouldBe Seq(ergoDexLit.boxId, fill.outputs(1).boxId)
+      sale.outputs.head.ergoTree shouldBe ergoDexLit.ergoTree
+      sale.outputs(1).ergoTree shouldBe stakeContract(wallet).ergoTreeHex
+      sale.outputs(1).value shouldBe stake.value
+      sale.outputs(1).assets shouldBe empty
+      sale.outputs(2).value shouldBe ergoDexLit.value - sale.outputs.head.value
       sale.outputs(2).value should be >= 1000000L
     }
   }

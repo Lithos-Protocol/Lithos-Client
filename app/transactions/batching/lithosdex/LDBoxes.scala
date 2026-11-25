@@ -11,6 +11,7 @@ import org.ergoplatform.sdk.ErgoId
 import org.bouncycastle.util.encoders.Hex
 import work.lithos.mutations.InputUTXO
 
+import scala.util.control.NonFatal
 import scala.util.{Failure, Success, Try}
 
 /**
@@ -19,21 +20,21 @@ import scala.util.{Failure, Success, Try}
  */
 object LDBoxes {
 
-  /** Node index pages. The guard address holds one box per live provision, so this has to page. */
-  private final val PageSize = 200
-
-  /** How many index pages a LISTING will walk before giving up. */
-  private final val MaxPages = 50
+  /** How many boxes a LISTING will read before giving up. The guard address holds one box per live provision. */
+  private final val MaxListed = 10000
 
   /**
-   * How many index pages a history walk covers: 100,000 transitions.
+   * How many boxes a history walk covers: 100,000 transitions.
    *
    * Far higher than a listing's ceiling because the two bound different things. A listing is over
    * live boxes, and ten thousand live provisions is already implausible; the pool's lineage is every
    * box it has ever occupied and only grows. Hitting this reports a partial series rather than
    * failing, so the ceiling is a memory bound, not a correctness one.
    */
-  private final val MaxHistoryPages = 500
+  private final val MaxHistory = 100000
+
+  /** Unconfirmed transactions at the pool's tree read for one answer. */
+  private final val MaxMempoolTxs = 200
 
   /**
    * Ceiling on the per-height header lookups a history request will make to label its buckets, and
@@ -107,8 +108,7 @@ object LDBoxes {
     val provTokenId = LDHelpers.getProvToken(ctx.getNetworkType).toString
     val guard = DexContracts(ctx).provisionGuard.ergoTreeHex
 
-    pagedIndex("provisions")(page =>
-      nodeApi.unspentBoxesByErgoTree(guard, page, Asc, mempool))
+    listed("provisions")(page => nodeApi.unspentBoxesByErgoTree(guard, page, Asc, mempool))
       .filter(b => isProvision(b.ergoTree, b.assets.map(a => a.tokenId -> a.amount), guard, provTokenId))
       .map(b => readProvision(b.toInputUTXO(ctx)))
   }
@@ -134,24 +134,16 @@ object LDBoxes {
                         owners: Set[String], mempool: MempoolOptions): (Seq[Provision], Boolean) = {
     val wanted = owners.map(owner => OwnerRegisterPrefix + owner.toLowerCase)
 
-    var found = Vector.empty[Provision]
-    var paging = Paging(0, PageSize)
-    var pages = 0
-    var exhausted = false
-    while (!exhausted && pages < MaxPages) {
-      val page = nodeApi.unspentBoxesByErgoTree(guard, paging, Asc, mempool) match {
-        case Success(boxes) => boxes
-        case Failure(ex) => throw indexUnavailable(s"the node index reading provisions (stopped after $pages page(s))", ex)
-      }
-      found ++= page
-        .filter(b => b.box.additionalRegisters.get(6).exists(r => wanted.contains(r.toLowerCase)) &&
-          isProvision(b.ergoTree, b.assets.map(a => a.tokenId -> a.amount), guard, provTokenId))
-        .map(b => readProvision(b.toInputUTXO(ctx)))
-      exhausted = page.size < paging.limit
-      paging = paging.next
-      pages += 1
+    val found = Vector.newBuilder[Provision]
+    var seen = 0
+    val exhausted = scanned(s"provisions (stopped after $seen box(es))", MaxListed)(page =>
+      nodeApi.unspentBoxesByErgoTree(guard, page, Asc, mempool)) { b =>
+      seen += 1
+      if (b.box.additionalRegisters.get(6).exists(r => wanted.contains(r.toLowerCase)) &&
+        isProvision(b.ergoTree, b.assets.map(a => a.tokenId -> a.amount), guard, provTokenId))
+        found += readProvision(b.toInputUTXO(ctx))
     }
-    (found, exhausted)
+    (found.result(), exhausted)
   }
 
   /** How the node serializes a 32-byte `Coll[Byte]` register ahead of its bytes: type 0x0e, length 0x20. */
@@ -330,23 +322,13 @@ object LDBoxes {
     val nft = LDHelpers.getPoolNFT(ctx.getNetworkType).toString
     val ergoTreeHex = DexContracts(ctx).liquidityPool.ergoTreeHex
 
-    var loaded = Vector.empty[PoolSnapshot]
-    var paging = Paging(0, PageSize)
-    var pages = 0
-    var exhausted = false
-    while (!exhausted && pages < MaxHistoryPages) {
-      nodeApi.boxesByTokenId(nft, paging).map(_.items) match {
-        case Success(page) =>
-          loaded ++= page.filter(_.ergoTree == ergoTreeHex).flatMap(b => readSnapshot(b))
-          exhausted = page.size < paging.limit
-          paging = paging.next
-        case Failure(ex) =>
-          throw indexUnavailable(s"the node index reading pool history " +
-            s"(stopped after ${loaded.size} transition(s))", ex)
-      }
-      pages += 1
+    val loaded = Vector.newBuilder[PoolSnapshot]
+    var count = 0
+    val exhausted = scanned(s"pool history (stopped after $count transition(s))", MaxHistory)(page =>
+      nodeApi.boxesByTokenId(nft, page).map(_.items)) { b =>
+      if (b.ergoTree == ergoTreeHex) readSnapshot(b).foreach { snapshot => loaded += snapshot; count += 1 }
     }
-    (loaded.sortBy(s => (s.height, s.globalIndex)), exhausted)
+    (loaded.result().sortBy(s => (s.height, s.globalIndex)), exhausted)
   }
 
   /**
@@ -562,7 +544,7 @@ object LDBoxes {
     val nft = lineage.nft
     val ergoTreeHex = lineage.tree
 
-    val txs = nodeApi.unconfirmedTransactionsByErgoTree(ergoTreeHex, Paging(0, PageSize)) match {
+    val txs = nodeApi.unconfirmedTransactionsByErgoTree(ergoTreeHex, Paging(0, MaxMempoolTxs)) match {
       case Success(found) => found
       case Failure(ex) => throw indexUnavailable("the mempool reading pool transactions", ex)
     }
@@ -624,33 +606,28 @@ object LDBoxes {
 
   // ── paging ───────────────────────────────────────────────────────────────
 
-  private def pagedIndex(what: String)(fetch: Paging => Try[Seq[IndexedBox]]): Seq[IndexedBox] =
-    paged[IndexedBox](what)(fetch)
-
-  /**
-   * Walk an index endpoint to exhaustion, or say so.
-   */
-  private def paged[A](what: String)(fetch: Paging => Try[Seq[A]]): Seq[A] = {
-    var loaded = Seq.empty[A]
-    var paging = Paging(0, PageSize)
-    var pages = 0
-    var exhausted = false
-    while (!exhausted && pages < MaxPages) {
-      fetch(paging) match {
-        case Success(page) =>
-          loaded = loaded ++ page
-          exhausted = page.size < paging.limit
-          paging = paging.next
-        case Failure(ex) =>
-          throw indexUnavailable(s"the node index reading $what (stopped after ${loaded.size} box(es))", ex)
-      }
-      pages += 1
+  /** Every box `read` lists, or [[IndexTruncatedException]] when there are more than a listing reads. */
+  private def listed(what: String)(read: Paging => Try[Seq[IndexedBox]]): Seq[IndexedBox] = {
+    val loaded = Vector.newBuilder[IndexedBox]
+    var count = 0
+    val exhausted = scanned(s"$what (stopped after $count box(es))", MaxListed)(read) { box =>
+      loaded += box
+      count += 1
     }
     if (!exhausted)
-      throw new IndexTruncatedException(
-        s"$what exceeds the ${MaxPages * PageSize}-box scan ceiling, so this answer would be partial")
-    loaded
+      throw new IndexTruncatedException(s"$what exceeds the $MaxListed-box scan ceiling, so this answer would be partial")
+    loaded.result()
   }
+
+  /**
+   * Feeds `keep` every box `read` lists, to `maxBoxes`, and says whether it reached the end. A failed read is
+   * [[IndexUnavailableException]], naming `what`, which is read when it fails.
+   */
+  private def scanned(what: => String, maxBoxes: Int)(read: Paging => Try[Seq[IndexedBox]])
+                     (keep: IndexedBox => Unit): Boolean =
+    utils.PagedScan(maxBoxes)((page: Paging) => read(page).recoverWith {
+      case NonFatal(ex) => Failure(indexUnavailable(s"the node index reading $what", ex))
+    })(keep)
 
   private def indexUnavailable(what: String, cause: Throwable): IndexUnavailableException =
     new IndexUnavailableException(

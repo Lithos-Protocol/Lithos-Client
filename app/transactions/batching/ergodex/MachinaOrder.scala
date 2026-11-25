@@ -1,11 +1,8 @@
 package transactions.batching.ergodex
 
 import node.model.NodeBox
-import org.ergoplatform.appkit.ErgoValue
-import org.ergoplatform.sdk.ErgoId
 import org.bouncycastle.util.encoders.Hex
 import scorex.crypto.hash.Blake2b256
-import work.lithos.mutations.{Contract, InputUTXO, Token, UTXO}
 
 import scala.util.Try
 
@@ -189,127 +186,4 @@ object MachinaOrder {
   private def register(box: NodeBox, index: Int): Option[Any] =
     box.additionalRegisters.get(index).flatMap(hex =>
       Try(org.ergoplatform.appkit.ErgoValue.fromHex(hex).getValue).toOption)
-}
-
-/**
- * One Machina fill against one pool state: `tokens` units bought from the box and sold into the pool when
- * `boxSells`, or bought from the pool and sold to the box otherwise. `gap` is the ERG left between the two legs,
- * which is the executor's. The order's child holds `childValue` and `childTokens`, at the owner's script when
- * `toOwner`.
- */
-final case class MachinaTrade(tokens: Long, boxSells: Boolean, gap: Long, poolAfter: ErgoDexPool,
-                              childValue: Long, childTokens: Long, toOwner: Boolean)
-
-object MachinaPricing {
-
-  /**
-   * The fill of `order` through `pool` that leaves the most ERG, if any leaves some. Each side's gap is concave in
-   * the size, so the real optimum of the constant-product formulas is solved for and its integer neighbours
-   * compared, with the size bounds as candidates too.
-   */
-  def best(order: MachinaOrder, pool: ErgoDexPool): Option[MachinaTrade] =
-    if (pool.xId.isDefined || pool.yId != order.tokenId) None
-    else (sells(order, pool) ++ buys(order, pool)).filter(_.gap > 0).sortBy(t => (-t.gap, t.tokens)).headOption
-
-  /** `tokens` units moved through `pool` on the given side, if the order and the pool both allow it. */
-  def at(order: MachinaOrder, pool: ErgoDexPool, tokens: Long, boxSells: Boolean): Option[MachinaTrade] =
-    Try {
-      if (tokens <= 0) None
-      else if (boxSells) order.ask.flatMap { price =>
-        if (tokens > order.tokens) None
-        else {
-          val ergOut = pool.outputAmount(tokens, baseIsX = false)
-          val paid = BigInt(tokens) * price
-          val child = BigInt(order.box.value) + paid
-          val after = pool.afterSwap(tokens, ergOut, baseIsX = false)
-          if (!child.isValidLong || after.reservesX <= after.minReservesX) None
-          // A limit box emptied of its tokens pays out to its owner; a grid box is recreated, empty or not
-          else Some(MachinaTrade(tokens, boxSells = true, (BigInt(ergOut) - paid).toLong, after, child.toLong,
-            order.tokens - tokens, toOwner = order.kind == MachinaKind.Limit && tokens == order.tokens))
-        }
-      } else order.bid.flatMap { price =>
-        if (tokens >= pool.reservesY) None
-        else {
-          val (x, y, f) = (BigInt(pool.reservesX), BigInt(pool.reservesY), BigInt(pool.feeNum))
-          // The least ERG the pool accepts for these tokens, rounded up
-          val cost = (BigInt(tokens) * x * ErgoDexContracts.FeeDenominator + f * (y - tokens) - 1) /
-            (f * (y - tokens))
-          val received = BigInt(tokens) * price
-          val child = BigInt(order.box.value) - received
-          if (child < MachinaContracts.childFloor(order, price) || !(x + cost).isValidLong) None
-          else Some(MachinaTrade(tokens, boxSells = false, (received - cost).toLong,
-            pool.copy(reservesX = (x + cost).toLong, reservesY = pool.reservesY - tokens), child.toLong,
-            Math.addExact(order.tokens, tokens), toOwner = false))
-        }
-      }
-    }.toOption.flatten
-
-  /** The box sells: k units at the ask, sold on into the pool. Optimum where the pool's marginal price is the ask. */
-  private def sells(order: MachinaOrder, pool: ErgoDexPool): Seq[MachinaTrade] =
-    order.ask.filter(_ > 0 && order.tokens > 0).toSeq.flatMap { price =>
-      val (x, y, f) = (BigInt(pool.reservesX), BigInt(pool.reservesY), BigInt(pool.feeNum))
-      val root = sqrt(x * y * ErgoDexContracts.FeeDenominator * f / price)
-      sized(order, pool, (root - y * ErgoDexContracts.FeeDenominator) / f, 1L, order.tokens, boxSells = true)
-    }
-
-  /** The box buys: k units bought from the pool at the bid. Optimum where the pool's marginal cost is the bid. */
-  private def buys(order: MachinaOrder, pool: ErgoDexPool): Seq[MachinaTrade] =
-    order.bid.filter(_ > 0).toSeq.flatMap { price =>
-      val (x, y, f) = (BigInt(pool.reservesX), BigInt(pool.reservesY), BigInt(pool.feeNum))
-      val affordable = (order.box.value - MachinaContracts.childFloor(order, price)) / price
-      val guess = y - sqrt(x * y * ErgoDexContracts.FeeDenominator / (f * price))
-      sized(order, pool, guess, 1L, math.min(affordable, pool.reservesY - 1), boxSells = false)
-    }
-
-  /** Every candidate size near `guess`, and the bounds, priced exactly. */
-  private def sized(order: MachinaOrder, pool: ErgoDexPool, guess: BigInt, lo: Long, hi: Long,
-                    boxSells: Boolean): Seq[MachinaTrade] =
-    if (hi < lo) Seq.empty
-    else {
-      val near = (-2 to 2).map(guess + _).filter(k => k >= lo && k <= hi).map(_.toLong)
-      (near :+ lo :+ hi).distinct.flatMap(k => at(order, pool, k, boxSells))
-    }
-
-  private def sqrt(n: BigInt): BigInt = if (n <= 0) BigInt(0) else BigInt(n.bigInteger.sqrt())
-}
-
-/** How a priced Machina trade is laid out: the order's context vars and its child at output 1. */
-object MachinaFill {
-
-  /** The pool's successor is output 0, so the child goes next. */
-  final val ChildIndex: Int = 1
-
-  /**
-   * The order input with the context vars its contract reads: the child's index, and for a grid the side, true
-   * when the filler buys the box's tokens.
-   */
-  def input(orderInput: InputUTXO, order: MachinaOrder, trade: MachinaTrade): InputUTXO =
-    input(orderInput, order, trade.boxSells, ChildIndex)
-
-  /** The order input with its child at output `childIndex`; `boxSells` is the grid's side. */
-  def input(orderInput: InputUTXO, order: MachinaOrder, boxSells: Boolean, childIndex: Int): InputUTXO =
-    order.kind match {
-      case MachinaKind.Limit => orderInput.withCtxVar(0.toByte, ErgoValue.of(childIndex))
-      case _ => orderInput.withCtxVar(0.toByte, ErgoValue.of(boxSells)).withCtxVar(1.toByte, ErgoValue.of(childIndex))
-    }
-
-  def child(orderInput: InputUTXO, order: MachinaOrder, trade: MachinaTrade): UTXO =
-    child(orderInput, order, trade.childValue, trade.childTokens, trade.toOwner)
-
-  /**
-   * The order's child holding `value`, `base` of a token/token grid's base token first, and `tokens` of the order's
-   * token, every register bound to the spent box's id. Recreated, it keeps the order's script, owner and prices (and
-   * a limit's side); paid out to the owner when `toOwner`, it carries the id alone, in R4.
-   */
-  def child(orderInput: InputUTXO, order: MachinaOrder, value: Long, tokens: Long, toOwner: Boolean,
-            base: Long = 0L): UTXO = {
-    val binding = ErgoValue.of(orderInput.id.getBytes)
-    val held = order.base.map(id => Token(ErgoId.create(id), base)).toSeq ++
-      (if (tokens > 0) Seq(Token(ErgoId.create(order.tokenId), tokens)) else Seq.empty)
-    if (toOwner) UTXO(Contract(sigma.ast.ErgoTree.fromBytes(order.ownerPropBytes)), value, held, Seq(binding))
-    else {
-      val kept = if (order.kind == MachinaKind.Limit) 3 else 2
-      UTXO(orderInput.contract, value, held, orderInput.registers.take(kept) :+ binding)
-    }
-  }
 }

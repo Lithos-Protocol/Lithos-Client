@@ -20,6 +20,7 @@ import org.scalatestplus.mockito.MockitoSugar
 import play.api.Configuration
 import support.{ChainFixtures, FakeNodeContext, LDNodeFixtures}
 import transactions.batching.lithosdex.DexContracts
+import transactions.batching.tracking.{TrackedPools, TrackerFixtures}
 import work.lithos.mutations.{Token, UTXO}
 
 import scala.util.{Failure, Success}
@@ -91,18 +92,15 @@ class LDPoolIndexSpec extends TestKit(ActorSystem("ld-pool-index-spec")) with An
         index = 2, txId = n2tGenesisTx)
     })
 
-    private val n2tTemplate = LDPoolIndex.n2tTemplateHash(NetworkType.MAINNET)
-    private val t2tTemplate = LDPoolIndex.t2tTemplateHash(NetworkType.MAINNET)
+    /** The pools as the tracker holds them at the tip; a box its own ids do not reproduce is never tracked. */
+    val tracked: TrackedPools = TrackedPools.seeded(Tip, "ab" * 32,
+      Seq(litPool -> 90, n2tPool -> 150, t2tPool -> 160).flatMap { case (box, height) =>
+        TrackerFixtures.shapes.read(box, height) }, cut = false)
+    @volatile var followed = Vector.empty[(Int, String)]
 
-    when(api.info()).thenReturn(Success(ChainFixtures.infoAt(Tip)))
+    when(api.info()).thenReturn(Success(ChainFixtures.infoAt(Tip).copy(bestFullHeaderId = Some("ab" * 32))))
     when(api.unspentBoxesByTemplateHash(anyString(), any[Paging], any[SortDirection], any[MempoolOptions]))
-      .thenAnswer { inv =>
-        inv.getArgument[String](0) match {
-          case `n2tTemplate` => Success(Seq(indexed(litPool, 90), indexed(n2tPool, 150)))
-          case `t2tTemplate` => Success(Seq(indexed(t2tPool, 160)))
-          case _ => Success(Seq.empty[IndexedBox])
-        }
-      }
+      .thenReturn(Failure(new IllegalStateException("the index scans no pool template")))
     when(api.unspentBoxesByTokenId(anyString(), any[Paging], any[SortDirection], any[MempoolOptions]))
       .thenAnswer { inv =>
         inv.getArgument[String](0) match {
@@ -141,7 +139,7 @@ class LDPoolIndexSpec extends TestKit(ActorSystem("ld-pool-index-spec")) with An
       Success(inv.getArgument[Seq[String]](0).map(id => TokenInfo(id, "00" * 32, 1L, s"name-${id.take(4)}", "", 3)))
     }
 
-    val index = new LDPoolIndex(nodeContext, system)
+    val index = new LDPoolIndex(nodeContext, system.dispatcher, (h, id) => followed :+= (h -> id), () => Some(tracked))
     val pools: LDPoolsApiImpl = new LDPoolsApiImpl(nodeContext, index, TestProbe().ref, TestProbe().ref, Configuration.empty, system)
   }
 
@@ -206,6 +204,19 @@ class LDPoolIndexSpec extends TestKit(ActorSystem("ld-pool-index-spec")) with An
       passes.last.pools.find(_.nft == n2t.poolNFT.toString).get.genesis.map(_.problems) shouldBe
         Some(Seq(LDPoolIndex.GenesisUnreadable))
     }
+  }
+
+  it should "rebuild from the tracker in the background, telling it the node's tip, with no scan of the node" in {
+    val f = new Fixture()
+    f.index.snapshot().status shouldBe "building"
+    f.followed shouldBe Vector(Tip -> "ab" * 32)
+    org.scalatest.concurrent.Eventually.eventually(org.scalatest.concurrent.Eventually.timeout(
+      org.scalatest.time.Span(10, org.scalatest.time.Seconds))) {
+      f.index.snapshot().pools.map(_.nft) should contain(n2t.poolNFT.toString)
+    }
+    f.index.snapshot().height shouldBe Tip
+    verify(f.api, times(0)).unspentBoxesByTemplateHash(anyString(), any[Paging], any[SortDirection],
+      any[MempoolOptions])
   }
 
   "The pool list" should "leave out the pools lithosdex.pools.hidden names, whose own routes still answer" in {

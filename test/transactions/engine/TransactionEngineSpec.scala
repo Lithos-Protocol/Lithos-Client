@@ -272,26 +272,47 @@ class TransactionEngineSpec extends TestKit(ActorSystem("transaction-engine-spec
    *
    * @param target the stake's size, 0 for a client with arb off
    */
-  private def reserving(target: Long, events: TestProbe, paused: Boolean = false) = {
-    val (ctx, _, wallet) = FakeNodeContext()
+  private def reserving(target: Long, events: TestProbe, paused: Boolean = false) =
+    reservingWith(target, events, paused)._2
+
+  /**
+   * [[reserving]], with the stake the engine was built on.
+   *
+   * @param outcome what each stubbed reserve attempt concludes
+   * @param quick   maintenance and reserve attempts every 200 ms, so several attempts fit a short test
+   * @param real    runs the real reserve and reclaim against `api` rather than the stub
+   */
+  private def reservingWith(target: Long, events: TestProbe, paused: Boolean,
+                            outcome: String = transactions.engine.execution.ArbReserveExecution.OutcomeHeld,
+                            quick: Boolean = false, real: Boolean = false,
+                            api: _root_.node.NodeApi = org.scalatestplus.mockito.MockitoSugar.mock[_root_.node.NodeApi]) = {
+    val (ctx, _, wallet) = FakeNodeContext(api)
     val stakes = new transactions.batching.arb.ArbStake(() => ctx.getNodeApi,
       transactions.batching.arb.ArbFixtures.stakeContract(wallet), ctx.getNetwork, target)
     if (paused) stakes.pause()
-    system.actorOf(Props(new TransactionEngine(ctx, events.ref, events.ref, new support.FakeCache,
+    stakes -> system.actorOf(Props(new TransactionEngine(ctx, events.ref, events.ref, new support.FakeCache,
       play.api.Configuration(ConfigFactory.load()), transactions.rollups.DataBoxSource.Stored, stakes) {
       override protected def arbReserveDelayMs: Long = 0L
+      override protected def arbReserveIntervalMs: Long = if (quick) 200L else super.arbReserveIntervalMs
+      override protected def maintenanceIntervalMs: Long = if (quick) 200L else super.maintenanceIntervalMs
       override protected lazy val reconciler = new EngineReconciler(ctx, events.ref, events.ref) {
         override def reconcile(): Unit = ()
       }
       override protected def executeOptional(work: EngineIntent, alive: () => Boolean): Any = work match {
+        case EngineIntent.ArbReserve | EngineIntent.ArbReclaim if real =>
+          if (work == EngineIntent.ArbReserve) events.ref ! "arb-reserve"
+          super.executeOptional(work, alive)
         case EngineIntent.ArbReserve =>
           events.ref ! "arb-reserve"
-          transactions.engine.execution.ArbReserveExecution.Status(
-            transactions.engine.execution.ArbReserveExecution.OutcomeHeld, 0L, target)
+          transactions.engine.execution.ArbReserveExecution.Status(outcome, 0L, target)
         case other => Completed(other.key)
       }
     }))
   }
+
+  /** Reserve attempts that reach `events` within `wait`. */
+  private def attempts(events: TestProbe, wait: FiniteDuration): Int =
+    events.receiveWhile(wait, wait) { case message => message }.count(_ == "arb-reserve")
 
   /** Whether an arb reserve attempt reaches `events` within `wait`, whatever else the engine sends there. */
   private def attempted(events: TestProbe, wait: FiniteDuration): Boolean =
@@ -308,5 +329,81 @@ class TransactionEngineSpec extends TestKit(ActorSystem("transaction-engine-spec
     val reclaimed = reserving(10000000000L, events, paused = true)
     val off = reserving(0L, events)
     try attempted(events, 4.seconds) shouldBe false finally { system.stop(reclaimed); system.stop(off) }
+  }
+
+  it should "be due again once arb is resumed after a reclaim, though an attempt had already found a stake" in {
+    val events = TestProbe()
+    val (stakes, engine) = reservingWith(10000000000L, events, paused = false)
+    def reserved(): Any = events.fishForMessage(25.seconds) { case "arb-reserve" => true; case _ => false }
+    try {
+      // The first attempt finds a stake, which ends attempts for good until a resume re-arms them
+      reserved()
+      stakes.pause()
+      val caller = TestProbe()
+      caller.send(engine, ResumeArb)
+      caller.expectMsg(5.seconds, ArbResumed(autoReserve = true))
+      stakes.paused shouldBe false
+      // The next maintenance pass, at most fifteen seconds on
+      reserved()
+    } finally system.stop(engine)
+  }
+
+  it should "stop once an attempt finds a stake held, and keep trying while the wallet is short" in {
+    import transactions.engine.execution.ArbReserveExecution.{OutcomeHeld, OutcomeShort}
+    val (heldEvents, shortEvents) = (TestProbe(), TestProbe())
+    val held = reservingWith(10000000000L, heldEvents, paused = false, outcome = OutcomeHeld, quick = true)._2
+    val short = reservingWith(10000000000L, shortEvents, paused = false, outcome = OutcomeShort, quick = true)._2
+    try {
+      // Maintenance ticks once a second, so four seconds hold three or four attempts where nothing ends them
+      attempts(shortEvents, 4.seconds) should be >= 3
+      attempts(heldEvents, 4.seconds) shouldBe 1
+    } finally { system.stop(held); system.stop(short) }
+  }
+
+  "The real arb reserve and reclaim" should "run through the engine: a stake found ends attempts, and a reclaim of " +
+    "an empty address answers nothing and leaves arb running" in {
+    import _root_.node.model.{IndexedBox, MempoolOptions, NodeBox, Paging, SortDirection}
+    import org.mockito.ArgumentMatchers.{any, anyString}
+    import org.mockito.Mockito.{atLeastOnce, verify, when}
+    val api = org.scalatestplus.mockito.MockitoSugar.mock[_root_.node.NodeApi]
+    @volatile var atAddress = Seq.empty[NodeBox]
+    when(api.indexerEnabled).thenReturn(true)
+    when(api.unspentBoxesByErgoTree(anyString(), any[Paging], any[SortDirection], any[MempoolOptions])).thenAnswer { inv =>
+      val tree = inv.getArgument[String](0)
+      scala.util.Success(atAddress.filter(_.ergoTree == tree).map(IndexedBox(_, "", 100, 1L)))
+    }
+    when(api.boxById(anyString())).thenAnswer { inv =>
+      scala.util.Success(atAddress.find(_.boxId == inv.getArgument[String](0)))
+    }
+    val target = 10000000000L
+    // Arb off, so no reserve runs beside the reclaim and the wallet is never asked
+    val (idle, reclaiming) = reservingWith(0L, TestProbe(), paused = false, quick = true, real = true, api = api)
+    try withClue("a reclaim of an empty address sends nothing and leaves the stake unpaused: ") {
+      val reclaimer = TestProbe()
+      reclaimer.send(reclaiming, Submit(EngineIntent.ArbReclaim))
+      reclaimer.expectMsg(10.seconds, None)
+      idle.paused shouldBe false
+      verify(api, atLeastOnce()).unspentBoxesByErgoTree(anyString(), any[Paging], any[SortDirection], any[MempoolOptions])
+    } finally system.stop(reclaiming)
+
+    // Every fake context holds the same key, so the second engine's arb address is the first's
+    atAddress = Seq(NodeBox("ab" * 32, "cd" * 32, target, 0, 100, idle.tree))
+    val events = TestProbe()
+    val (stakes, engine) = reservingWith(target, events, paused = false, quick = true, real = true, api = api)
+    stakes.tree shouldBe idle.tree
+    try withClue("a stake of full size at the address is found held by the first attempt, and none follows: ") {
+      attempts(events, 3.seconds) shouldBe 1
+    } finally system.stop(engine)
+  }
+
+  "A resume" should "be deferred with arb off, and leave a stake it did not resume paused" in {
+    val events = TestProbe()
+    val (stakes, engine) = reservingWith(0L, events, paused = true)
+    try {
+      val caller = TestProbe()
+      caller.send(engine, ResumeArb)
+      caller.expectMsgType[Deferred](5.seconds).reason should include("off")
+      stakes.paused shouldBe true
+    } finally system.stop(engine)
   }
 }

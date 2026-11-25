@@ -262,4 +262,33 @@ class CandidateBundleSpec extends AnyFlatSpec with Matchers {
     CandidateBundle.admit(Seq(alone), 5, packageTxs = Set("pool-run"))._2 shouldBe Vector(leg)
     CandidateBundle.admit(Seq(alone), 5)._2 shouldBe empty
   }
+
+  "A reserved share" should "keep the bundles before it out of the space the last ones may use" in {
+    val budget = CandidateBudget(100L, 1000L)
+    val offered = Seq(CandidateBundle(Vector(sized("dex", 60, 0))), CandidateBundle(Vector(sized("rent", 30, 0))),
+      CandidateBundle(Vector(sized("arb", 30, 0))))
+    // Without it, the earlier sources take the space and the last bundle is refused
+    CandidateBundle.admit(offered, 10, budget)._2.map(_.id) shouldBe Vector("dex", "rent")
+    val reserved = CandidateBundle.reserve(budget, 0.25, offered.drop(2))
+    reserved shouldBe CandidateBudget(25L, 0L)
+    // 25 bytes held back: rent no longer fits beside dex, and arb takes what it left
+    CandidateBundle.admit(offered, 10, budget, reserved = reserved, reservedFrom = 2)._2.map(_.id) shouldBe
+      Vector("dex", "arb")
+  }
+
+  it should "hold back no more than the last bundles need, and nothing when they offer nothing" in {
+    val budget = CandidateBudget(1000L, 1000L)
+    val arb = Seq(CandidateBundle(Vector(sized("a", 40, 70), sized("b", 10, 5))))
+    CandidateBundle.reserve(budget, 0.25, arb) shouldBe CandidateBudget(50L, 75L)
+    CandidateBundle.reserve(budget, 0.25, Seq.empty) shouldBe CandidateBudget.Zero
+    CandidateBundle.reserve(budget, 0.0, arb) shouldBe CandidateBudget.Zero
+    CandidateBundle.reserve(CandidateBudget.Unbounded, 0.25, arb) shouldBe CandidateBudget(50L, 75L)
+  }
+
+  it should "name what the earlier bundles were left when it refuses one" in {
+    val offered = Seq(CandidateBundle(Vector(sized("dex", 80, 0))), CandidateBundle(Vector(sized("arb", 20, 0))))
+    val (_, _, refused) = CandidateBundle.admit(offered, 10, CandidateBudget(90L, 1000L),
+      reserved = CandidateBudget(20L, 0L), reservedFrom = 1)
+    refused.map(_.toString).mkString should include("80 bytes over the 70 left")
+  }
 }

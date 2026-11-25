@@ -279,11 +279,10 @@ object ZcTracker {
   final val MaxCatchUp = 32
 
   /**
-   * Pages read per tree in a scan. The scan keeps only the `maxBoxes` boxes holding most ERG as it goes, so this
+   * Boxes read per tree in a scan. The scan keeps only the `maxBoxes` boxes holding most ERG as it goes, so this
    * bounds start-up reads, not memory.
    */
-  final val MaxPages = 200
-  final val PageSize = 100
+  final val MaxScanned = 20000
 
   /** Blocks between check rescans: about a day. */
   final val ReseedBlocks = 720
@@ -294,7 +293,7 @@ object ZcTracker {
   final val RescanBackoffBlocks = 10
 
   /**
-   * Blocks a cut book waits between recovery rescans. A tree flooded past [[MaxPages]] pages keeps the book cut,
+   * Blocks a cut book waits between recovery rescans. A tree flooded past [[MaxScanned]] boxes keeps the book cut,
    * and without this floor it would rescan every block.
    */
   final val RecoveryBlocks = 30
@@ -413,7 +412,7 @@ object ZcTracker {
         MempoolOptions.ConfirmedOnly))(b => ZcBoxes.read(b.box, script).foreach(r => best.offer(ZcEntry(r, b.inclusionHeight))))
       if (!exhausted) {
         cut = true
-        logger.warn(s"ZC tracking stopped the ${script.label} scan after $MaxPages pages; boxes past it are not tracked")
+        logger.warn(s"ZC tracking stopped the ${script.label} scan after $MaxScanned boxes; boxes past it are not tracked")
       }
     }
     var oracle = Vector.empty[(node.model.NodeBox, Int)]
@@ -465,16 +464,7 @@ object ZcTracker {
     def result: Seq[ZcEntry] = heap.toVector
   }
 
-  /** Feeds every box `read` pages through to `keep`, to [[MaxPages]] pages, and says whether it reached the end. */
-  private def scan(read: Paging => Try[Seq[IndexedBox]])(keep: IndexedBox => Unit): Boolean = {
-    var offset = 0
-    var exhausted = false
-    while (!exhausted && offset < MaxPages * PageSize) {
-      val page = read(Paging(offset, PageSize)).get
-      page.foreach(keep)
-      exhausted = page.size < PageSize
-      offset += page.size
-    }
-    exhausted
-  }
+  /** Feeds every box `read` pages through to `keep`, to [[MaxScanned]] boxes, and says whether it reached the end. */
+  private def scan(read: Paging => Try[Seq[IndexedBox]])(keep: IndexedBox => Unit): Boolean =
+    utils.PagedScan(MaxScanned)(read)(keep)
 }

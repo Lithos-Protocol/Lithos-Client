@@ -119,9 +119,9 @@ class BatchingStatisticsSpec extends AnyFlatSpec with Matchers {
             if (m.boxSells) live.ask.get * 1.5 else live.bid.get / 1.5)
           val order = live.routedThrough(pool.assets.head.tokenId)
           val state = transactions.batching.arb.ArbFixtures.entry(ctx, pool).pool
-          val fill = transactions.batching.arb.ArbMachina.best(order, state).get
-          val signed = transactions.batching.arb.ArbMachina.build(ctx, wallet, fill, pool.toInputUTXO(ctx),
-            wallet.contract, 1913000)
+          val fill = transactions.batching.ergodex.MachinaFill.best(order, state).get
+          val signed = transactions.batching.ergodex.MachinaFill.build(ctx, wallet, fill, pool.toInputUTXO(ctx),
+            transactions.batching.ergodex.MachinaFill.Takings.ToBox(wallet.contract), 1913000)
           val body = node.rest.NodeCodecs.transaction(new com.google.gson.JsonParser()
             .parse(transactions.candidate.BlockTxMessages.CandidateTx.signed(signed, "arb").json).getAsJsonObject)
           val tx = NodeSync.blockTx(body)

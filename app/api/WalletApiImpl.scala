@@ -101,17 +101,43 @@ class WalletApiImpl @Inject()(nodeContext: NodeContext,
 
   /** @inheritdoc */
   override def getArbStake: WalletArbStake = {
-    val there = arbStakes.boxes().getOrElse(
-      throw LithosApiErrors.LithosUnavailable("could not read the arb address: is the node's extra index on?"))
+    val there = atArbAddress(node.model.MempoolOptions.ConfirmedOnly)
     WalletArbStake(
       address = arbStakes.address,
       enabled = arbStakes.target > 0L,
       paused = arbStakes.paused,
       targetNanoErgs = arbStakes.target.toString,
-      stakeNanoErgs = arbStakes.current.map(_.value).getOrElse(0L).toString,
+      stakeNanoErgs = arbStakes.shown(there).map(_.value).getOrElse(0L).toString,
       boxes = there.size,
       nanoErgs = there.map(box => BigInt(box.value)).sum.toString)
   }
+
+  /** @inheritdoc */
+  override def resumeArbStake: WalletArbStake = {
+    import transactions.engine.TransactionEngine
+    if (arbStakes.target <= 0L)
+      throw LithosApiErrors.LithosUnprocessable("arb is off in this client's configuration (batching.arb.enabled)")
+    if (arbStakes.paused) {
+      // A box the mempool spends is the reclaim's: resumed before it confirms, a block of ours would undo it
+      val unspent = atArbAddress(node.model.MempoolOptions.WithMempool).map(_.boxId).toSet
+      val spending = atArbAddress(node.model.MempoolOptions.ConfirmedOnly).count(box => !unspent.contains(box.boxId))
+      if (spending > 0)
+        throw LithosApiErrors.LithosUnprocessable(s"a pending transaction still spends $spending box(es) at the arb " +
+          "address; resume once it confirms")
+      Await.result((walletManager ? TransactionEngine.ResumeArb)(QuickAsk), QuickAsk.duration) match {
+        case _: TransactionEngine.ArbResumed => ()
+        case deferred: TransactionEngine.Deferred =>
+          throw LithosApiErrors.LithosUnavailable(s"arb was not resumed: ${deferred.reason}")
+        case other =>
+          throw new IllegalStateException(s"the engine answered a resume with ${other.getClass.getSimpleName}")
+      }
+    }
+    getArbStake
+  }
+
+  private def atArbAddress(mempool: node.model.MempoolOptions): Vector[node.model.NodeBox] =
+    arbStakes.boxes(mempool).getOrElse(
+      throw LithosApiErrors.LithosUnavailable("could not read the arb address: is the node's extra index on?"))
 
   /** @inheritdoc */
   override def reclaimArbStake: WalletArbReclaimResult = {
@@ -122,7 +148,7 @@ class WalletApiImpl @Inject()(nodeContext: NodeContext,
       case None => throw new WalletApi.NothingToClaim("no confirmed box at the arb address to reclaim")
       case Some(sent: Reclaimed) if sent.outcome == EngineBroadcast.Rejected =>
         throw LithosApiErrors.LithosUnprocessable("the node refused the reclaim" +
-          sent.reason.map(": " + _).getOrElse("") + ". Arb stays off until this client restarts; try again shortly")
+          sent.reason.map(": " + _).getOrElse("") + ". Arb stays off until it is resumed; try again shortly")
       case Some(sent: Reclaimed) =>
         WalletArbReclaimResult(sent.txId, sent.boxes, sent.nanoErgs.toString, sent.outcome, sent.left)
       case deferred: TransactionEngine.Deferred =>

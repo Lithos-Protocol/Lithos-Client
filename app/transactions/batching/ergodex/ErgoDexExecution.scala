@@ -7,6 +7,7 @@ import org.ergoplatform.appkit.{BlockchainContext, SignedTransaction}
 import org.ergoplatform.sdk.ErgoId
 import org.slf4j.{Logger, LoggerFactory}
 import state.synchronization.CompleteMempool
+import transactions.batching.arb.ErgoDexArbPool
 import transactions.batching.{BatchRun, Batcher, Planned, Priced, RunProblem, RunStrategy}
 import transactions.candidate.BlockTxMessages.{CandidateTx, ChainFromMempool, IncludeExisting, Supersede}
 import transactions.candidate.{CandidateBundle, CandidateCapital, CapitalEntry, CapitalOrigin}
@@ -23,7 +24,7 @@ import scala.util.{Failure, Success, Try}
  */
 final case class ErgoDexFill(order: PoolOrder, pool: ErgoDexPool, quote: Long, revenue: Long,
                              poolAfter: ErgoDexPool, rewardValue: Long, rewardTokens: Seq[NodeAsset],
-                             machina: Option[MachinaTrade] = None)
+                             machina: Option[MachinaFill] = None)
 
 /**
  * Signed executions in spend order, with the final unspent box holding their combined takings.
@@ -123,15 +124,22 @@ object ErgoDexExecution {
     case _ => None
   }
 
-  /** A Machina fill at the size that leaves the most ERG against this pool state, held to the same floors. */
+  /**
+   * An ERG/token Machina fill through this native pool at the size that leaves the most ERG, held to the same
+   * floors. A token/token grid is the arb stage's, so never priced here.
+   */
   private def priceMachina(order: MachinaOrder, pool: ErgoDexPool, minRevenue: Long, fundsItsOwnBox: Boolean,
                            minerFeeCeiling: Long): Option[ErgoDexFill] =
-    if (order.poolNft != pool.nft) None
-    else MachinaPricing.best(order, pool).flatMap { trade =>
-      val net = trade.gap - math.min(order.maxMinerFee, math.max(0L, minerFeeCeiling))
-      if (trade.gap < minRevenue || net <= 0L || (fundsItsOwnBox && net < UTXO.MIN_CHANGE)) None
-      else Some(ErgoDexFill(order, pool, trade.tokens, trade.gap, trade.poolAfter, trade.childValue,
-        if (trade.childTokens > 0) Seq(NodeAsset(order.tokenId, trade.childTokens)) else Seq.empty, Some(trade)))
+    if (order.poolNft != pool.nft || order.base.nonEmpty || pool.xId.isDefined) None
+    else MachinaFill.best(order, ErgoDexArbPool(pool)).flatMap { fill =>
+      val net = fill.gap - math.min(order.maxMinerFee, math.max(0L, minerFeeCeiling))
+      val after = fill.swap.after match {
+        case ErgoDexArbPool(state) => state
+        case other => throw new IllegalStateException(s"an ErgoDEX pool priced as a ${other.kind.label} pool")
+      }
+      if (fill.gap < minRevenue || net <= 0L || (fundsItsOwnBox && net < UTXO.MIN_CHANGE)) None
+      else Some(ErgoDexFill(order, pool, fill.tokens, fill.gap, after, fill.childValue,
+        if (fill.childTokens > 0) Seq(NodeAsset(order.tokenId, fill.childTokens)) else Seq.empty, Some(fill)))
     }
 
   private def priceOrder(order: ErgoDexOrder, pool: ErgoDexPool, minRevenue: Long,
@@ -266,7 +274,8 @@ object ErgoDexExecution {
             poolIds :+= box.id.toString
             placements ++= added
             box = nextPool
-            state = fill.poolAfter
+            // Held by the box this execution created, which the next one spends
+            state = fill.poolAfter.copy(boxId = nextPool.id.toString)
             carried = Some(takings)
           case Some((_, Failure(ex))) =>
             logger.warn(s"Could not build ErgoDEX order ${order.boxId} against pool ${pool.nft.take(12)}, " +
@@ -281,7 +290,10 @@ object ErgoDexExecution {
       cutShort = (replan || plan.nonEmpty) && !full)
   }
 
-  /** Builds pool, reward and takings outputs in contract order, followed by an optional miner fee. */
+  /**
+   * Builds pool, reward and takings outputs in contract order, followed by an optional miner fee. A Machina fill is
+   * built by [[MachinaFill.build]], its child the reward.
+   */
   private[transactions] def assembled(ctx: BlockchainContext, wallet: NodeWallet, poolBox: InputUTXO,
                        fill: ErgoDexFill, blockHeight: Int, minerFeeCeiling: Long,
                        useTrueProp: Boolean,
@@ -297,50 +309,39 @@ object ErgoDexExecution {
 
     val after = fill.poolAfter
     require(after.reservesX > 0 && after.reservesY > 0, "an execution cannot empty the pool")
+    val collectedBy = CandidateCapital.collectionContract(wallet, useTrueProp)
 
-    // Verify the reported order id before spending the reconstructed input.
-    val boxInput = order.boxAsInput(ctx)
-    require(boxInput.id.toString == order.boxId, "the order box's fields do not match its id")
-    val orderInput = (order, fill.machina) match {
-      case (machina: MachinaOrder, Some(trade)) => MachinaFill.input(boxInput, machina, trade)
-      case _ => boxInput
-    }
-    val spent = Seq(poolBox, orderInput) ++ carriedTakings.toSeq
-
-    // The block this execution is built for, unless a box it chains onto was itself built for a later
-    // one: consensus refuses an output created below the newest input.
-    val height = math.max(blockHeight, TxBuilder.newestInput(spent))
-
-    // Preserve pool identity, script and registers while updating reserves and LP balance. A token pool keeps
-    // its ERG and carries X as its third token; a native pool's ERG is its X.
-    val poolOut = UTXO(poolBox.contract, if (pool.xId.isDefined) poolBox.value else after.reservesX,
-      Seq(Token(ErgoId.create(pool.nft), 1L), Token(ErgoId.create(pool.lpId), after.lpSupply)) ++
-        pool.xId.map(x => Token(ErgoId.create(x), after.reservesX)).toSeq :+
-        Token(ErgoId.create(pool.yId), after.reservesY),
-      poolBox.registers).setCreationHeight(height)
-
-    // The reward is the user's, and its proposition is the order's own constant rather than anything this
-    // client chooses. A Machina order's is its child: the order recreated, or its owner paid out.
-    val rewardOut = (order, fill.machina) match {
-      case (machina: MachinaOrder, Some(trade)) => MachinaFill.child(boxInput, machina, trade).setCreationHeight(height)
+    (order, fill.machina) match {
+      case (_: MachinaOrder, Some(machina)) =>
+        MachinaFill.build(ctx, wallet, machina, poolBox,
+          MachinaFill.Takings.ToBox(collectedBy, carriedTakings, minerFee), blockHeight)
       case (ergoDex: ErgoDexOrder, _) =>
-        UTXO(Contract(sigma.ast.ErgoTree.fromBytes(ergoDex.redeemerPropBytes)), fill.rewardValue,
-          fill.rewardTokens.map(asset => Token(ErgoId.create(asset.tokenId), asset.amount)))
-          .setCreationHeight(height)
+        // Verify the reported order id before spending the reconstructed input.
+        val boxInput = order.boxAsInput(ctx)
+        require(boxInput.id.toString == order.boxId, "the order box's fields do not match its id")
+        val spent = Seq(poolBox, boxInput) ++ carriedTakings.toSeq
+
+        // The block this execution is built for, unless a box it chains onto was itself built for a later
+        // one: consensus refuses an output created below the newest input.
+        val height = math.max(blockHeight, TxBuilder.newestInput(spent))
+        val poolOut = ErgoDexArbPool(pool).successor(poolBox, ErgoDexArbPool(after)).setCreationHeight(height)
+
+        // The reward is the user's, and its proposition is the order's own constant rather than anything this
+        // client chooses.
+        val rewardOut = UTXO(Contract(sigma.ast.ErgoTree.fromBytes(ergoDex.redeemerPropBytes)), fill.rewardValue,
+          fill.rewardTokens.map(asset => Token(ErgoId.create(asset.tokenId), asset.amount))).setCreationHeight(height)
+        val takingsOut = UTXO(collectedBy, takings).setCreationHeight(height)
+        val feeOut =
+          if (minerFee > 0) Seq(UTXO.feeBox(minerFee).setCreationHeight(height)) else Seq.empty
+
+        val unsigned = TxBuilder(ctx)
+          .setInputs(spent: _*)
+          .setOutputs((Seq(poolOut, rewardOut, takingsOut) ++ feeOut): _*)
+          .buildTx(0L, wallet.p2pk)
+        // Signing validates the scripts and supplies the measured execution cost.
+        Batcher.withNodeMinimums(ctx, wallet.sign(unsigned))
       case _ => throw new IllegalArgumentException(s"no output rule for order ${order.boxId}")
     }
-
-    val takingsOut = UTXO(CandidateCapital.collectionContract(wallet, useTrueProp), takings)
-      .setCreationHeight(height)
-    val feeOut =
-      if (minerFee > 0) Seq(UTXO.feeBox(minerFee).setCreationHeight(height)) else Seq.empty
-
-    val unsigned = TxBuilder(ctx)
-      .setInputs(spent: _*)
-      .setOutputs((Seq(poolOut, rewardOut, takingsOut) ++ feeOut): _*)
-      .buildTx(0L, wallet.p2pk)
-    // Signing validates the scripts and supplies the measured execution cost.
-    Batcher.withNodeMinimums(ctx, wallet.sign(unsigned))
   }
 
 }

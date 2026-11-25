@@ -262,11 +262,11 @@ class ArbStakeSpec extends AnyFlatSpec with Matchers with MockitoSugar {
     (1 to 250).foreach(i => chain.arrive(box(i, Erg)))
     val stake = chain.stake()
     stake.boxes().get.size shouldBe 250
-    chain.scans.get shouldBe 3
+    chain.scans.get shouldBe 250 / utils.PagedScan.PageSize + 1
     // Past the cap the newest are read and the oldest page with them, so a stake older than a flood of boxes is seen
-    (251 to ArbStake.MaxBoxes + 200).foreach(i => chain.arrive(box(i, Erg)))
+    (251 to ArbStake.MaxBoxes + 2 * utils.PagedScan.PageSize).foreach(i => chain.arrive(box(i, Erg)))
     val read = stake.boxes().get
-    read.size shouldBe ArbStake.MaxBoxes + 100
+    read.size shouldBe ArbStake.MaxBoxes + utils.PagedScan.PageSize
     read.map(_.boxId) should contain(id(1))
     read.map(_.boxId).distinct.size shouldBe read.size
   }

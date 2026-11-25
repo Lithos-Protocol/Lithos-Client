@@ -47,14 +47,23 @@ class ArbStake(api: () => NodeApi, val contract: Contract, network: NetworkType,
   private var warnedEmpty = false
   private var warnedNoIndex = false
 
-  /** Whether cycles may run on the stake: arb is active and the stake was not reclaimed in this process. */
+  /** Whether cycles may run on the stake: arb is active and no reclaim has paused it. */
   def active: Boolean = target > 0L && !stopped
 
-  /** Whether a reclaim stopped arb for the rest of this process. */
+  /** Whether a reclaim stopped arb until it is resumed or the client restarts. */
   def paused: Boolean = stopped
 
   /** The stake as last found unspent, for display. */
   def current: Option[NodeBox] = held.map(_.box)
+
+  /**
+   * The stake to show beside `atAddress`, the boxes an address read just found: what the last build found once
+   * one has run, else the box the first build would start from, the largest usable one. None while inactive.
+   */
+  def shown(atAddress: Seq[NodeBox]): Option[NodeBox] =
+    if (!active) None
+    else if (checked.isDefined) current
+    else atAddress.filter(usable(_, tree)).sortBy(box => (-box.value, box.boxId)).headOption
 
   /**
    * The stake a block at `height` on `parentId` may spend: found in the confirmed UTXO set once that parent was
@@ -112,7 +121,7 @@ class ArbStake(api: () => NodeApi, val contract: Contract, network: NetworkType,
     checked = None
   }
 
-  /** Undoes `pause` for a reclaim that found nothing to spend. */
+  /** Undoes `pause`: for a reclaim that found nothing to spend, or when asked to run arb again after one. */
   def resume(): Unit = lock.synchronized { stopped = false }
 
   /**
@@ -121,24 +130,17 @@ class ArbStake(api: () => NodeApi, val contract: Contract, network: NetworkType,
    */
   def boxes(mempool: MempoolOptions = MempoolOptions.ConfirmedOnly): Try[Vector[NodeBox]] = Try {
     require(api().indexerEnabled, "the node's extra index is off (ergo.node.extraIndex)")
-    var found = Vector.empty[NodeBox]
-    var paging = Paging(0, PageSize)
-    var done = false
-    while (!done) {
-      val page = api().unspentBoxesByErgoTree(tree, paging, SortDirection.Desc, mempool).get
-      require(page.size <= PageSize, "the node returned more boxes than the page asked for")
-      found ++= page.map(_.box).filter(_.ergoTree == tree)
-      done = page.size < PageSize || found.size >= MaxBoxes
-      paging = paging.next
-    }
-    if (found.size >= MaxBoxes) {
+    val (newest, exhausted) = utils.PagedScan.collect(MaxBoxes)(utils.PagedScan.byTree(api(), tree, SortDirection.Desc,
+      mempool))(indexed => Some(indexed.box).filter(_.ergoTree == tree))
+    if (exhausted) newest
+    else {
       // The oldest page as well, so boxes sent after a stake cannot be the only ones read
-      val oldest = api().unspentBoxesByErgoTree(tree, Paging(0, PageSize), SortDirection.Asc, mempool).get
-      found = found.take(MaxBoxes) ++ oldest.map(_.box).filter(b => b.ergoTree == tree && !found.exists(_.boxId == b.boxId))
+      val oldest = api().unspentBoxesByErgoTree(tree, Paging(0, utils.PagedScan.PageSize), SortDirection.Asc, mempool).get
       logger.warn(s"The arb address $address holds $MaxBoxes boxes or more; only the newest $MaxBoxes and the oldest " +
-        s"$PageSize are read")
+        s"${utils.PagedScan.PageSize} are read")
+      val seen = newest.map(_.boxId).toSet
+      newest ++ oldest.map(_.box).filter(b => b.ergoTree == tree && !seen.contains(b.boxId))
     }
-    found
   }
 
   /**
@@ -207,8 +209,6 @@ object ArbStake {
 
   /** Cycle outputs followed at once. A cycle past it is refused, since its output would not be looked for. */
   private[arb] final val MaxSuccessors = 256
-
-  private final val PageSize = 100
 
   /** Boxes one read of the arb address returns. */
   final val MaxBoxes = 1000

@@ -51,9 +51,11 @@ class WalletApiControllerSpec
                         onClaim: => WalletRewardClaimResult = WalletRewardClaimResult(Seq.empty, "0"),
                         onArb: => WalletArbStake = arbStake,
                         onReclaim: => WalletArbReclaimResult =
-                          WalletArbReclaimResult("ab" * 32, 1, "10000000000", "accepted", 0))
+                          WalletArbReclaimResult("ab" * 32, 1, "10000000000", "accepted", 0),
+                        onResume: => WalletArbStake = arbStake)
     extends WalletApi {
     override def getArbStake: WalletArbStake = onArb
+    override def resumeArbStake: WalletArbStake = onResume
     override def reclaimArbStake: WalletArbReclaimResult = onReclaim
     override def getWalletBalances: WalletBalances = onBalances
     override def getRewardSummary: WalletRewardSummary = WalletRewardSummary(4, 2, "12000000000", "6000000000", Some(30))
@@ -175,6 +177,22 @@ class WalletApiControllerSpec
     val result = call(refused.reclaimArbStake(), POST, "/wallet/arb/reclaim", Some(apiKey))
     status(result) shouldBe UNPROCESSABLE_ENTITY
     contentAsString(result) should include("Double spending attempt")
+  }
+
+  "POST /wallet/arb/resume" should "need the api_key, and be 422 carrying why when it is refused" in {
+    var resumed = 0
+    val c = controller(new StubApi(onResume = { resumed += 1; arbStake }))
+    status(call(c.resumeArbStake(), POST, "/wallet/arb/resume", None)) shouldBe FORBIDDEN
+    resumed shouldBe 0
+    val result = call(c.resumeArbStake(), POST, "/wallet/arb/resume", Some(apiKey))
+    status(result) shouldBe OK
+    (contentAsJson(result) \ "paused").as[Boolean] shouldBe false
+    resumed shouldBe 1
+    val pending = controller(new StubApi(onResume =
+      throw LithosApiErrors.LithosUnprocessable("a pending transaction still spends 1 box(es) at the arb address")))
+    val refused = call(pending.resumeArbStake(), POST, "/wallet/arb/resume", Some(apiKey))
+    status(refused) shouldBe UNPROCESSABLE_ENTITY
+    contentAsString(refused) should include("pending transaction")
   }
 
   "GET /wallet/tokens/verified" should "be open, so a page can draw it before a key is entered" in {

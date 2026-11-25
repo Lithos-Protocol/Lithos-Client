@@ -31,7 +31,7 @@ object ArbReserveExecution {
   final val OutcomeShort = "short"
   /** A box of at least the stake is in the mempool on its way there, so nothing is sent until it is seen again. */
   final val OutcomePending = "pending"
-  /** The stake was reclaimed in this process, so none is sent until a restart. */
+  /** A reclaim paused arb, so none is sent until arb is resumed or the client restarts. */
   final val OutcomePaused = "paused"
 
   /** What a reclaim sent: `boxes` holding `nanoErgs` back to the first address, with `left` boxes still there. */
@@ -134,7 +134,7 @@ private[engine] class ArbReserveExecution(node: NodeContext, api: NodeApi, owner
   }
 
   /**
-   * Stops arb for the rest of this process and sends the confirmed boxes at the arb address, largest first up
+   * Pauses arb until it is resumed and sends the confirmed boxes at the arb address, largest first up
    * to `wallet.max-inputs`, back to the first address. None when the address holds nothing confirmed, which
    * leaves arb running. A block of this miner's found meanwhile can spend the stake first; the node then refuses
    * this transaction, and the stake's successor is still at the address for another reclaim.
@@ -157,7 +157,8 @@ private[engine] class ArbReserveExecution(node: NodeContext, api: NodeApi, owner
           .send(wallet.sign(unsigned), Seq.empty, "arb-reclaim", alive)
         val value = inputs.foldLeft(0L)((sum, box) => Math.addExact(sum, box.value))
         logger.info(s"Sent transaction ${result.txId} returning ${inputs.size} box(es) holding $value nanoERG from " +
-          s"the arb address ${stakes.address} to the wallet: ${result.outcome}. Arb is off until this client restarts")
+          s"the arb address ${stakes.address} to the wallet: ${result.outcome}. Arb is off until it is resumed or " +
+          "this client restarts")
         Some(Reclaimed(result.txId, inputs.size, value, result.outcome, result.reason, there.size - taken.size))
       }
     } catch {

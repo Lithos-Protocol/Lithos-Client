@@ -29,6 +29,9 @@ trait WalletApi {
 
   /** POST /wallet/arb/reclaim */
   def reclaimArbStake: WalletArbReclaimResult
+
+  /** POST /wallet/arb/resume */
+  def resumeArbStake: WalletArbStake
 }
 
 object WalletApi {

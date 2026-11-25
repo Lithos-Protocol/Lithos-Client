@@ -23,6 +23,10 @@ object TransactionEngine {
   /** Admit work that only becomes eligible later. Same lifecycle as an immediate request. */
   final case class Schedule(intent: EngineIntent, notBeforeMillis: Long, expiresAtMillis: Long)
   case object GetConsolidationStatus
+  /** Runs arb again after a reclaim paused it. Answered with [[ArbResumed]], or [[Deferred]] while a reclaim runs. */
+  case object ResumeArb
+  /** Arb runs again; `autoReserve` says whether the stake is sent to the arb address when none is there. */
+  final case class ArbResumed(autoReserve: Boolean)
 
   private case object Maintenance
   /** A worker finished. `attempt` is checked against the schedule so stale results are dropped. */
@@ -173,13 +177,18 @@ class TransactionEngine @Inject()(node: NodeContext,
 
   /** The arb stake's size, zero with arb inactive. */
   private val arbStake = arbStakes.target
+  /** `batching.arb.autoReserve`, read once so a resume re-arms the reserve without parsing config in `receive`. */
+  private val autoReserve = configs.ArbConfig(config).autoReserve
   /**
    * Whether this process may still send the stake to the arb address: arb is active with auto-reserve on, and
    * no attempt has yet found a stake there.
    */
-  private var arbReserveDue = arbStake > 0L && configs.ArbConfig(config).autoReserve
+  private var arbReserveDue = arbStake > 0L && autoReserve
   /** Overridable so a test need not wait out the start-up delay. */
   protected def arbReserveDelayMs: Long = ArbReserveDelay
+  /** Overridable, with [[maintenanceIntervalMs]], so a test can watch several attempts without waiting minutes. */
+  protected def arbReserveIntervalMs: Long = ArbReserveInterval
+  protected def maintenanceIntervalMs: Long = MaintenanceInterval
   private var nextArbReserve = System.currentTimeMillis() + arbReserveDelayMs
   /** The last attempt's outcome, so a wallet that stays short is told once rather than each pass. */
   private var arbReserveOutcome = ""
@@ -255,6 +264,21 @@ class TransactionEngine @Inject()(node: NodeContext,
       mempool.forward(state.synchronization.CompleteMempool.Refresh)
     case GetConsolidationStatus => sender() ! consolidationStatus
 
+    // Re-arms the reserve as start-up does, so a stake the reclaim returned is sent back once the wallet affords it
+    case ResumeArb =>
+      val reclaim = EngineIntent.ArbReclaim.key
+      if (arbStake <= 0L) sender() ! Deferred(reclaim, "arb is off in this client's configuration")
+      else if (running.contains(reclaim) || schedule.contains(reclaim))
+        sender() ! Deferred(reclaim, "a reclaim is still running")
+      else {
+        arbStakes.resume()
+        arbReserveDue = autoReserve
+        nextArbReserve = System.currentTimeMillis()
+        arbReserveOutcome = ""
+        logger.info(s"Arb resumed on request; auto-reserve ${if (arbReserveDue) "ON" else "OFF"}")
+        sender() ! ArbResumed(arbReserveDue)
+      }
+
     case Submit(intent) => admit(intent, sender())
     case intent: DexIntent => admit(EngineIntent.Dex(intent), sender())
     case intent: ForwardsIntent => admit(EngineIntent.Forwards(intent), sender())
@@ -281,7 +305,7 @@ class TransactionEngine @Inject()(node: NodeContext,
       schedule.expire(now).foreach(entry =>
         completeWaiters(entry.key, Deferred(entry.key, "intent expired before dispatch")))
       if (now >= nextMaintenance) {
-        nextMaintenance = now + MaintenanceInterval
+        nextMaintenance = now + maintenanceIntervalMs
         reconcileDue = true
         // Read before this pass admits anything: an admission starts the reconciliation that is due
         val clearAtPass = !schedule.occupied(Lane.Critical) && reconciling.isEmpty
@@ -304,7 +328,7 @@ class TransactionEngine @Inject()(node: NodeContext,
         // Until an attempt finds a stake at the arb address, and never after a reclaim. Judged on the lanes as
         // the pass found them, so a seed admitted just above does not put the reserve off by a pass each time
         if (arbReserveDue && !arbStakes.paused && now >= nextArbReserve && clearAtPass) {
-          nextArbReserve = now + ArbReserveInterval
+          nextArbReserve = now + arbReserveIntervalMs
           admit(EngineIntent.ArbReserve, context.system.deadLetters,
             Some(Immediate(now + walletConfig.inventoryTimeoutMs + 60000L)))
         }

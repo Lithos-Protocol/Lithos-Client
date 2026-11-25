@@ -578,20 +578,11 @@ class ForwardsAPIExecution(nodeContext: NodeContext,
    * read and dropped, keeping only what `read` returns.
    */
   private def scan[A](nodeApi: NodeApi, tree: String)(read: NodeBox => Option[A]): (Vector[A], Boolean) = {
-    var offset = 0
-    var exhausted = false
-    val found = Vector.newBuilder[A]
-    while (!exhausted && offset < Batcher.MaxScannedPerTemplate) {
-      val page = nodeApi.unspentBoxesByErgoTree(tree, Paging(offset, Batcher.PageSize), SortDirection.Desc,
-        MempoolOptions.WithMempool) match {
-        case Success(boxes) => boxes
-        case Failure(ex) => throw LithosUnavailable(s"the node's index did not answer: ${ex.getMessage}", ex)
-      }
-      found ++= page.flatMap(indexed => read(indexed.box))
-      exhausted = page.size < Batcher.PageSize
-      offset += page.size
-    }
-    (found.result(), !exhausted)
+    val (found, exhausted) = utils.PagedScan.collect(Batcher.MaxScannedPerTemplate)(paging =>
+      nodeApi.unspentBoxesByErgoTree(tree, paging, SortDirection.Desc, MempoolOptions.WithMempool).recoverWith {
+        case ex => Failure(LithosUnavailable(s"the node's index did not answer: ${ex.getMessage}", ex))
+      })(indexed => read(indexed.box))
+    (found, !exhausted)
   }
 
   /**
@@ -600,21 +591,15 @@ class ForwardsAPIExecution(nodeContext: NodeContext,
    * [[scan]], and whether either cap cut it short comes back with it.
    */
   private def scanSpent[A](nodeApi: NodeApi, tree: String)(read: NodeBox => Option[A]): (Vector[(A, String)], Boolean) = {
-    var offset = 0
-    var total = Int.MaxValue
     val found = Vector.newBuilder[(A, String, Int)]
-    while (offset < total && offset < Batcher.MaxScannedPerTemplate) {
-      val page = nodeApi.boxesByErgoTree(tree, Paging(offset, Batcher.PageSize)) match {
-        case Success(p) => p
-        case Failure(ex) => throw LithosUnavailable(s"the node's index did not answer: ${ex.getMessage}", ex)
-      }
-      total = page.total
-      found ++= page.items.flatMap(b => b.spentTransactionId.flatMap(txId =>
-        read(b.box).map(a => (a, txId, b.spendingHeight.getOrElse(0)))))
-      offset = if (page.items.isEmpty) total else offset + page.items.size
+    val exhausted = utils.PagedScan(Batcher.MaxScannedPerTemplate)((paging: Paging) =>
+      nodeApi.boxesByErgoTree(tree, paging).map(_.items).recoverWith {
+        case ex => Failure(LithosUnavailable(s"the node's index did not answer: ${ex.getMessage}", ex))
+      }) { b =>
+      b.spentTransactionId.foreach(txId => read(b.box).foreach(a => found += ((a, txId, b.spendingHeight.getOrElse(0)))))
     }
     val all = found.result().sortBy(-_._3)
-    (all.take(MaxHistory).map { case (a, txId, _) => a -> txId }, offset < total || all.size > MaxHistory)
+    (all.take(MaxHistory).map { case (a, txId, _) => a -> txId }, !exhausted || all.size > MaxHistory)
   }
 
   /** The confirmed transaction `txId`, or None when the index does not hold it. */

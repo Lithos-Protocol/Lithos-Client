@@ -261,8 +261,43 @@ class ArbCyclesSpec extends AnyFlatSpec with Matchers with MockitoSugar {
       val limits = configs.CandidateConfig.Default.limitsFor(configs.CandidateSourceConfig.Arb)
       // One leg through each pool kind, so the dearest of the four bounds any leg
       bundle.members.size shouldBe 4
+      info(s"dearest cycle leg: cost ${bundle.members.map(_.cost).max}, ${bundle.members.map(_.sizeBytes).max} bytes")
       limits.maxTxs.toLong * bundle.members.map(_.cost).max should be <= limits.maxCost
       limits.maxTxs.toLong * bundle.members.map(_.sizeBytes.toLong).max should be <= limits.maxBytes
+    }
+  }
+
+  it should "hold a Machina fill through LithosDex, and a token/token grid's legs, in every slot" in {
+    import support.MachinaFixtures._
+    nodeContext.getClient.execute { ctx =>
+      val limits = configs.CandidateConfig.Default.limitsFor(configs.CandidateSourceConfig.Arb)
+      def held(what: String, members: Seq[CandidateTx]): Unit = withClue(what) {
+        members should not be empty
+        info(s"$what: cost ${members.map(_.cost).max}, ${members.map(_.sizeBytes).max} bytes")
+        limits.maxTxs.toLong * members.map(_.cost).max should be <= limits.maxCost
+        limits.maxTxs.toLong * members.map(_.sizeBytes.toLong).max should be <= limits.maxBytes
+      }
+      // A selling limit order through the LithosDex ERG/FAKU pool, priced so it leaves a gap
+      val order = transactions.batching.ergodex.MachinaOrder.parse(limitSellOrder).get
+      val ld = lithosDexFakuPoolAt(ctx, order.ask.get * 1.5)
+      val ldEntry = entry(ctx, ld)
+      val fill = ArbCycles.build(ctx, wallet, ArbDiscovery.index(height - 1, Seq(ldEntry)).copy(parsed =
+        Map(ldEntry.nft -> ldEntry)), ArbBasis.Empty,
+        None, Seq(order.routedThrough(ld.assets.head.tokenId)), 1000000L, height, 8, 0L, 1000000L, wallet.contract,
+        Deadline.now + 1.minute, Deadline.now + 1.minute, _ => true)
+      held("Machina fill through LithosDex", fill.flatMap(_.members))
+      // The open grid, funded so its child can exist, through the FAKU token pool and sold through FAKU's ERG pool
+      val gridBox = tokenGridOrder.copy(value = 1000000L)
+      val grid = transactions.batching.ergodex.MachinaOrder.parseTokenGrid(
+        gridBox.copy(boxId = gridBox.toInputUTXO(ctx).id.toString)).get
+      val pools = Seq(fakuCigPool, fakuErgoDexPool).map(entry(ctx, _))
+      val stake = arbStakeBox(ctx, wallet, stakeValue)
+      val legs = ArbCycles.build(ctx, wallet, ArbDiscovery.index(height - 1, pools).copy(parsed =
+        pools.map(e => e.nft -> e).toMap), ArbBasis.Empty, Some(stake), Seq(grid), 1000000L, height, 8,
+        stake.value - ArbLeg.MinCarryValue, 1000000L, wallet.contract, Deadline.now + 1.minute,
+        Deadline.now + 1.minute, _ => true)
+      legs.flatMap(_.members).map(_.kind) shouldBe Vector(ArbKind.Grid, ArbKind.Grid)
+      held("token/token grid legs", legs.flatMap(_.members))
     }
   }
 

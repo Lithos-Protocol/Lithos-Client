@@ -378,14 +378,14 @@ class SigmaFiAPIExecution(nodeContext: NodeContext,
    * Read confirmed only: a settlement still pending leaves the bond holding it.
    */
   private def unsettled(nodeApi: NodeApi, id: String): Option[String] =
-    nodeApi.unspentBoxesByTokenId(id, Paging(0, Batcher.PageSize), SortDirection.Desc, MempoolOptions.ConfirmedOnly) match {
+    nodeApi.unspentBoxesByTokenId(id, Paging(0, utils.PagedScan.PageSize), SortDirection.Desc, MempoolOptions.ConfirmedOnly) match {
       case Failure(ex) => throw LithosUnavailable(s"could not read which boxes hold $id: ${ex.getMessage}", ex)
       case Success(holders) =>
         holders.map(_.box).find(b => b.assets.headOption.exists(_.tokenId.equalsIgnoreCase(id)) &&
           SigmaFiBoxes.parse(b.ergoTree).exists(t => SigmaFiContracts.bondRepayToken(t).isDefined))
           .map(bond => s"bond ${bond.boxId} still holds the other unit of $id, so its repayment or collateral is not " +
             "in the vault yet; claiming now would burn your unit and leave that payment unclaimable for good")
-          .orElse(if (holders.size < Batcher.PageSize) None
+          .orElse(if (holders.size < utils.PagedScan.PageSize) None
           else Some(s"more boxes hold $id than one read covers, so this client cannot rule out a bond still to settle"))
     }
 
@@ -589,26 +589,17 @@ class SigmaFiAPIExecution(nodeContext: NodeContext,
   /** Every box at `tree` that `parse` accepts, with whether the scan stopped at its cap. Pages are dropped. */
   private def scanTree[A](nodeApi: NodeApi, tree: String, mempool: MempoolOptions = MempoolOptions.WithMempool)
                          (parse: NodeBox => Option[A]): (Vector[A], Boolean) =
-    paged(offset => nodeApi.unspentBoxesByErgoTree(tree, Paging(offset, Batcher.PageSize), SortDirection.Desc, mempool))(parse)
+    paged(paging => nodeApi.unspentBoxesByErgoTree(tree, paging, SortDirection.Desc, mempool))(parse)
 
   private def scanTemplate[A](nodeApi: NodeApi, kind: SigmaFiTemplateKind)(parse: NodeBox => Option[A]): (Vector[A], Boolean) =
-    paged(offset => nodeApi.unspentBoxesByTemplateHash(SigmaFiContracts.template(kind).templateHashHex,
-      Paging(offset, Batcher.PageSize), SortDirection.Desc, MempoolOptions.WithMempool))(parse)
+    paged(paging => nodeApi.unspentBoxesByTemplateHash(SigmaFiContracts.template(kind).templateHashHex,
+      paging, SortDirection.Desc, MempoolOptions.WithMempool))(parse)
 
-  private def paged[A](fetch: Int => Try[Seq[IndexedBox]])(parse: NodeBox => Option[A]): (Vector[A], Boolean) = {
-    var offset = 0
-    var exhausted = false
-    val found = Vector.newBuilder[A]
-    while (!exhausted && offset < Batcher.MaxScannedPerTemplate) {
-      val page = fetch(offset) match {
-        case Success(boxes) => boxes
-        case Failure(ex) => throw LithosUnavailable(s"the node's index did not answer: ${ex.getMessage}", ex)
-      }
-      found ++= page.flatMap(indexed => parse(indexed.box))
-      exhausted = page.size < Batcher.PageSize
-      offset += page.size
-    }
-    (found.result(), !exhausted)
+  private def paged[A](fetch: Paging => Try[Seq[IndexedBox]])(parse: NodeBox => Option[A]): (Vector[A], Boolean) = {
+    val (found, exhausted) = utils.PagedScan.collect(Batcher.MaxScannedPerTemplate)(paging => fetch(paging).recoverWith {
+      case ex => Failure(LithosUnavailable(s"the node's index did not answer: ${ex.getMessage}", ex))
+    })(indexed => parse(indexed.box))
+    (found, !exhausted)
   }
 
   /** The unspent box `boxId` as `what`, unconfirmed ones included. */
@@ -639,7 +630,7 @@ class SigmaFiAPIExecution(nodeContext: NodeContext,
 
   /** Confirmed wallet boxes at `creator`'s tree, smallest first, leaving out those in `spent`. */
   private def authCandidates(nodeApi: NodeApi, creator: Contract, spent: Set[String]): Seq[NodeBox] =
-    nodeApi.unspentBoxesByErgoTree(creator.ergoTreeHex, Paging(0, Batcher.PageSize), SortDirection.Desc,
+    nodeApi.unspentBoxesByErgoTree(creator.ergoTreeHex, Paging(0, utils.PagedScan.PageSize), SortDirection.Desc,
       MempoolOptions.ConfirmedOnly) match {
       case Success(boxes) => boxes.map(_.box).filterNot(b => spent(b.boxId)).sortBy(_.value)
       case Failure(ex) => throw LithosUnavailable(s"could not read this wallet's boxes: ${ex.getMessage}", ex)

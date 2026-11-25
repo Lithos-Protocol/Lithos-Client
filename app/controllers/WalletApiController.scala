@@ -58,6 +58,11 @@ class WalletApiController @Inject()(cc: ControllerComponents,
     Action.async { _ => offPool(respond(api.reclaimArbStake)) }
   }
 
+  /** POST /wallet/arb/resume */
+  def resumeArbStake(): Action[AnyContent] = withApiKey {
+    Action.async { _ => offPool(respond(api.resumeArbStake)) }
+  }
+
   /** Same mapping as the other controllers, minus the cases these endpoints cannot raise. */
   private def respond[A](result: => A)(implicit writes: Writes[A]): Result =
     Try(result) match {

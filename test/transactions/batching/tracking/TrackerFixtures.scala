@@ -50,8 +50,20 @@ final class ScriptedChain {
 
   def block(height: Int, transactions: NodeTransaction*): Unit = txs.update(header(height).id, transactions)
 
-  /** What the index scans return, every box at whichever script or template it sits at. */
+  /**
+   * What the index scans return, every box at whichever script or template it sits at. Each is also an output of
+   * the canonical block at its inclusion height, up to the index's height, as on a node whose index is current.
+   */
   def scans(boxes: IndexedBox*): Unit = scanned = boxes
+
+  /** Scanned boxes the canonical chain never created: an orphaned block the index has not yet undone. */
+  @volatile var orphaned: Set[String] = Set.empty
+
+  /** The block at `height` creating every scanned box included there, as one transaction per box. */
+  private def indexedOutputs(height: Int): Seq[NodeTransaction] =
+    if (height > indexed) Seq.empty
+    else scanned.filter(b => b.inclusionHeight == height && !orphaned.contains(b.box.boxId))
+      .map(b => NodeTransaction(b.box.transactionId, Seq.empty, Seq.empty, Seq(b.box)))
 
   def tip: Int = chain.keys.max
 
@@ -67,7 +79,10 @@ final class ScriptedChain {
   when(api.blockTransactions(anyString())).thenAnswer { inv =>
     blockReads.incrementAndGet()
     val id = inv.getArgument[String](0)
-    fail().getOrElse(Success(Some(NodeBlockTransactions(id, txs.getOrElse(id, Seq.empty), 0))))
+    val scripted = txs.getOrElse(id, Seq.empty)
+    val created = chain.values.find(_.id == id).toSeq.flatMap(h => indexedOutputs(h.height))
+      .filterNot(t => scripted.exists(_.outputs.exists(o => t.outputs.exists(_.boxId == o.boxId))))
+    fail().getOrElse(Success(Some(NodeBlockTransactions(id, created ++ scripted, 0))))
   }
   private def page(select: IndexedBox => Boolean, paging: Paging) = {
     scanPages.incrementAndGet()

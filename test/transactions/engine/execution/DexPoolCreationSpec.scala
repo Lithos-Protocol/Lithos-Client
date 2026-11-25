@@ -62,7 +62,7 @@ class DexPoolCreationSpec extends TestKit(ActorSystem("dex-pool-creation-spec"))
   private def fixture(status: String = "ready"): Fixture = {
     val api = mock[NodeApi]
     val (node, _, _) = FakeNodeContext(api, numAddresses = 1)
-    val index = new LDPoolIndex(node, system) {
+    val index = new LDPoolIndex(node, system.dispatcher, (_, _) => (), () => None) {
       override def snapshot(): PoolIndexSnapshot =
         PoolIndexSnapshot(status, 100, truncated = false, if (status == "ready") listed else Seq.empty, Map.empty)
     }

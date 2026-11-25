@@ -141,12 +141,13 @@ class SigmaFiAPIExecutionSpec extends AnyPropSpec with SigmaFiFixtures with Mock
   private def treesHold(f: Fixture, trees: Map[String, Seq[NodeBox]]): Unit =
     vaultPages(f, trees.getOrElse(SigmaFiContracts.vault.ergoTreeHex, Seq.empty), trees - SigmaFiContracts.vault.ergoTreeHex)
 
-  /** The vault scan pages through `vault` a hundred at a time; other trees in `trees` answer on their first page. */
+  /** The vault scan pages through `vault` at the page size it asks; other trees answer on their first page. */
   private def vaultPages(f: Fixture, vault: Seq[NodeBox], trees: Map[String, Seq[NodeBox]] = Map.empty): Unit =
     doAnswer { inv: org.mockito.invocation.InvocationOnMock =>
-      val offset = inv.getArgument[Paging](1).offset
+      val paging = inv.getArgument[Paging](1)
+      val offset = paging.offset
       val tree = inv.getArgument[String](0)
-      val boxes = if (tree.equalsIgnoreCase(SigmaFiContracts.vault.ergoTreeHex)) vault.slice(offset, offset + 100)
+      val boxes = if (tree.equalsIgnoreCase(SigmaFiContracts.vault.ergoTreeHex)) vault.slice(offset, offset + paging.limit)
         else if (offset > 0) Seq.empty else trees.getOrElse(tree, Seq.empty)
       Success(boxes.map(b => IndexedBox(b, "", tip, 1L)))
     }.when(f.api).unspentBoxesByErgoTree(anyString(), any[Paging], any[SortDirection], any[MempoolOptions])

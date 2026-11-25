@@ -56,6 +56,17 @@ class PoolTracker(api: () => NodeApi, network: NetworkType, io: ExecutionContext
     }
 
   /**
+   * As [[follow]] for a reader that builds no candidate, such as the DEX API: moves the target only past the height
+   * already followed. A tip it read just before a block arrived cannot then pull the tracker back from the block a
+   * candidate builds on; a fork at the same height is left to the candidate's own follow.
+   */
+  def followAhead(height: Int, headerId: String): Unit =
+    if (height > 0 && headerId.nonEmpty) lock.synchronized {
+      if (target.forall(_._1 < height)) target = Some(height -> headerId)
+      kick()
+    }
+
+  /**
    * The pools as of the block last followed at `height`, waiting up to `wait` for an advance to reach it. None
    * when no block at `height` was followed, or the advance did not finish in time or failed.
    */
@@ -151,9 +162,8 @@ object PoolTracker {
   /** Most boxes tracked: each ErgoDEX script held a few hundred pools in 2026, and the scans stopped at 2,000. */
   final val MaxBoxes = 5000
 
-  /** Pages read per script or template in a scan. */
-  final val MaxPages = 20
-  final val PageSize = 100
+  /** Boxes read per script or template in a scan. */
+  final val MaxScanned = 2000
 
   /** Blocks between rescans that check the kept state against the node's index: about a day. */
   final val ReseedBlocks = 720
@@ -163,6 +173,9 @@ object PoolTracker {
 
   /** Blocks a failed periodic rescan waits before the next. */
   final val RescanBackoffBlocks = 10
+
+  /** How many of the newest indexed blocks a scan's boxes are checked against, the deepest reorg looked for. */
+  final val ForkCheckDepth = 3
 
   /**
    * The pools as of block `headerId` at `height`: from `from` by applying or undoing blocks where it can, else
@@ -217,10 +230,11 @@ object PoolTracker {
         SortDirection.Desc, MempoolOptions.ConfirmedOnly)))
     var cut = false
     val found = reads.flatMap { case (name, read) =>
-      val (boxes, exhausted) = scan(read)(indexed => shapes.read(indexed.box, indexed.inclusionHeight))
+      val (boxes, exhausted) = utils.PagedScan.collect(MaxScanned)(read)(indexed =>
+        shapes.read(indexed.box, indexed.inclusionHeight))
       if (!exhausted) {
         cut = true
-        logger.warn(s"Pool tracking stopped the $name scan after $MaxPages pages; pools past it are read from the node")
+        logger.warn(s"Pool tracking stopped the $name scan after $MaxScanned boxes; pools past it are read from the node")
       }
       boxes
     }
@@ -228,23 +242,30 @@ object PoolTracker {
     require(after == indexed && source.headerAt(indexed).get.id == base.id,
       s"the node's index moved from $indexed while the pools were scanned")
     val distinct = found.groupBy(_.boxId).values.map(_.head).toSeq
+    canonical(api, source, distinct, indexed)
     val seeded = TrackedPools.seeded(indexed, base.id, distinct.take(MaxBoxes), cut || distinct.size > MaxBoxes)
     logger.info(s"Pool tracking scanned ${seeded.boxes.size} pool box(es) at $indexed")
     follow(api, source, shapes, seeded, height, headerId).getOrElse(
       throw new IllegalStateException(s"block $headerId at $height does not descend from the scanned block ${base.id}"))
   }
 
-  /** What `keep` makes of every box `read` pages through, to [[MaxPages]] pages, and whether it reached the end. */
-  private def scan[A](read: Paging => Try[Seq[IndexedBox]])(keep: IndexedBox => Option[A]): (Vector[A], Boolean) = {
-    val found = Vector.newBuilder[A]
-    var offset = 0
-    var exhausted = false
-    while (!exhausted && offset < MaxPages * PageSize) {
-      val page = read(Paging(offset, PageSize)).get
-      page.foreach(indexed => keep(indexed).foreach(found += _))
-      exhausted = page.size < PageSize
-      offset += page.size
+  /**
+   * Fails when a scanned box from the last [[ForkCheckDepth]] blocks up to `indexed` was not created by the
+   * canonical block at its height. The node's index trails a reorg, so a scan can still list an orphaned block's
+   * pool boxes; seeded from them, a pool would be served at a box that does not exist. One block read per height
+   * holding such a box.
+   */
+  private def canonical(api: NodeApi, source: CanonicalBlockSource, scanned: Seq[TrackedBox], indexed: Int): Unit =
+    scanned.filter(_.inclusionHeight > indexed - ForkCheckDepth).groupBy(_.inclusionHeight).foreach {
+      case (height, boxes) =>
+        val header = source.headerAt(height).get
+        val created = api.blockTransactions(header.id).get
+          .getOrElse(throw new NoSuchElementException(s"the node has no transactions for block ${header.id}"))
+          .transactions.iterator.flatMap(_.outputs.iterator.map(_.boxId)).toSet
+        boxes.find(box => !created.contains(box.boxId)).foreach { box =>
+          throw new IllegalStateException(s"the node's index lists pool box ${box.boxId} at $height, which block " +
+            s"${header.id} there did not create: the index has not yet undone an orphaned block")
+        }
     }
-    found.result() -> exhausted
-  }
+
 }

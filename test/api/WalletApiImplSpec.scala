@@ -37,7 +37,8 @@ class WalletApiImplSpec
   private val strangerId = "5e" * 32
 
   /** Stands in for `EngineWalletState`. `claimReply` is a function so a test can answer `RewardClaimFailed`. */
-  private class StubWallet(rewards: RewardSummary, claimReply: () => Any, reclaimReply: () => Any) extends Actor {
+  private class StubWallet(rewards: RewardSummary, claimReply: () => Any, reclaimReply: () => Any,
+                           resumeReply: () => Any) extends Actor {
     override def receive: Receive = {
       case GetSpendableBalance => sender() ! SpendableBalance(182400000000L)
       case GetReservations => sender() ! Reservations(2, 3000000000L)
@@ -45,6 +46,7 @@ class WalletApiImplSpec
       case ClaimUnlockedRewards => sender() ! claimReply()
       case transactions.engine.TransactionEngine.Submit(transactions.engine.EngineIntent.ArbReclaim) =>
         sender() ! reclaimReply()
+      case transactions.engine.TransactionEngine.ResumeArb => sender() ! resumeReply()
     }
   }
 
@@ -58,7 +60,11 @@ class WalletApiImplSpec
                       claimReply: () => Any = () => RewardsClaimed(Seq.empty),
                       reclaimReply: () => Any = () => None,
                       arbTarget: Long = 10000000000L,
-                      atArbAddress: String => Seq[node.model.NodeBox] = _ => Seq.empty): Fixture = {
+                      atArbAddress: String => Seq[node.model.NodeBox] = _ => Seq.empty,
+                      pendingSpent: Set[String] = Set.empty,
+                      resumeReply: transactions.batching.arb.ArbStake => Any = stakes => {
+                        stakes.resume(); transactions.engine.TransactionEngine.ArbResumed(autoReserve = true)
+                      }): Fixture = {
     val nodeApi = mock[NodeApi]
     val (ctx, _, wallet) = FakeNodeContext(nodeApi)
     val stakes = new transactions.batching.arb.ArbStake(() => nodeApi,
@@ -67,12 +73,15 @@ class WalletApiImplSpec
     when(nodeApi.unspentBoxesByErgoTree(any[String], any[node.model.Paging], any[node.model.SortDirection],
       any[node.model.MempoolOptions])).thenAnswer { inv =>
       val paging = inv.getArgument[node.model.Paging](1)
-      Success(atArbAddress(inv.getArgument[String](0)).slice(paging.offset, paging.offset + paging.limit)
+      val listed = atArbAddress(inv.getArgument[String](0)).filterNot(box =>
+        inv.getArgument[node.model.MempoolOptions](3).excludeMempoolSpent && pendingSpent.contains(box.boxId))
+      Success(listed.slice(paging.offset, paging.offset + paging.limit)
         .map(box => node.model.IndexedBox(box, "", 100, 1L)))
     }
     when(nodeApi.walletBalances()).thenReturn(Success(NodeWalletBalances(500, 200000000000L, assets)))
     when(nodeApi.tokensByIds(any[Seq[String]])).thenReturn(Success(tokenInfo))
-    val walletRef: ActorRef = system.actorOf(Props(new StubWallet(rewards, claimReply, reclaimReply)))
+    val walletRef: ActorRef =
+      system.actorOf(Props(new StubWallet(rewards, claimReply, reclaimReply, () => resumeReply(stakes))))
     val api = new WalletApiImpl(ctx, walletRef, stakes) {
       override protected lazy val registry: VerifiedRegistry = VerifiedRegistrySpec.shippedMainnet
     }
@@ -187,9 +196,53 @@ class WalletApiImplSpec
     stake.targetNanoErgs shouldBe "10000000000"
     stake.boxes shouldBe 2
     stake.nanoErgs shouldBe "10250000000"
-    // No build has taken a box up yet, and the wallet's own figure does not move with the arb address
-    stake.stakeNanoErgs shouldBe "0"
+    // No build has taken a box up yet: the largest usable one is the one the first build would take
+    stake.stakeNanoErgs shouldBe "10000000000"
+    // The wallet's own figure does not move with the arb address
     f.api.getWalletBalances.nanoErgs shouldBe "182400000000"
+  }
+
+  it should "show no stake once a build found none, while paused, or with no usable box there" in {
+    val built = fixture(atArbAddress = arbBoxes(10000000000L))
+    // The build's own check reads by id, and this node's UTXO set holds nothing
+    when(built.nodeApi.boxById(any[String])).thenReturn(Success(None))
+    built.stakes.at(500, "aa" * 32) shouldBe None
+    built.api.getArbStake.stakeNanoErgs shouldBe "0"
+    val paused = fixture(atArbAddress = arbBoxes(10000000000L))
+    paused.stakes.pause()
+    paused.api.getArbStake.stakeNanoErgs shouldBe "0"
+    fixture(atArbAddress = arbBoxes(50000000L)).api.getArbStake.stakeNanoErgs shouldBe "0"
+  }
+
+  "A resume" should "run arb again after a reclaim, and report the stake the next build would take" in {
+    val f = fixture(atArbAddress = arbBoxes(10000000000L))
+    f.stakes.pause()
+    val stake = f.api.resumeArbStake
+    stake.paused shouldBe false
+    f.stakes.active shouldBe true
+    stake.stakeNanoErgs shouldBe "10000000000"
+  }
+
+  it should "be refused while a pending transaction spends a box at the arb address, leaving arb paused" in {
+    val f = fixture(atArbAddress = arbBoxes(10000000000L), pendingSpent = Set(f"${1}%064x"))
+    f.stakes.pause()
+    (the[LithosApiErrors.LithosUnprocessable] thrownBy f.api.resumeArbStake).getMessage should include("pending")
+    f.stakes.paused shouldBe true
+  }
+
+  it should "be refused with arb off, and change nothing while arb runs" in {
+    a[LithosApiErrors.LithosUnprocessable] should be thrownBy fixture(arbTarget = 0L).api.resumeArbStake
+    val running = fixture(atArbAddress = arbBoxes(10000000000L),
+      resumeReply = _ => throw new IllegalStateException("the engine is not asked while arb runs"))
+    running.api.resumeArbStake.paused shouldBe false
+  }
+
+  it should "be node-unavailable when the engine defers it, leaving arb paused" in {
+    val f = fixture(atArbAddress = arbBoxes(10000000000L), resumeReply = _ =>
+      transactions.engine.TransactionEngine.Deferred("arb-reclaim", "a reclaim is still running"))
+    f.stakes.pause()
+    (the[LithosApiErrors.LithosUnavailable] thrownBy f.api.resumeArbStake).getMessage should include("reclaim")
+    f.stakes.paused shouldBe true
   }
 
   it should "still be shown with arb off, so ERG left there can be found and reclaimed" in {

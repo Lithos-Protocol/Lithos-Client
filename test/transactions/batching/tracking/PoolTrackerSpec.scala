@@ -114,7 +114,22 @@ class PoolTrackerSpec extends AnyFlatSpec with Matchers with Eventually {
     t.latest.map(_.height) shouldBe Some(tip)
   }
 
-  it should "get nothing while the node cannot serve the block, and the block once it can" in {
+  "A reader that builds no candidate" should "move the tracker forward, never back from the block a candidate follows" in {
+    val c = chain()
+    val t = tracker(c)
+    warmed(c, t)
+    c.extend(tip + 1, tip + 2)
+    t.follow(tip + 1, c.header(tip + 1).id)
+    // The DEX API read the tip just before block tip + 1 arrived, and tells the tracker after the candidate did
+    t.followAhead(tip, c.header(tip).id)
+    t.at(tip + 1, 10.seconds).map(_.height) shouldBe Some(tip + 1)
+    t.followAhead(tip + 1, "77" * 32)
+    t.at(tip + 1, 10.seconds).map(_.headerId) shouldBe Some(c.header(tip + 1).id)
+    t.followAhead(tip + 2, c.header(tip + 2).id)
+    t.at(tip + 2, 10.seconds).map(_.height) shouldBe Some(tip + 2)
+  }
+
+  "A reader" should "get nothing while the node cannot serve the block, and the block once it can" in {
     val c = chain()
     c.failing = Some("node down")
     val t = tracker(c, retryMs = 100L)
@@ -134,6 +149,40 @@ class PoolTrackerSpec extends AnyFlatSpec with Matchers with Eventually {
     t.latest.map(_.height) shouldBe Some(tip)
   }
 
+  "A seeding scan" should "not start from an orphaned block the index still holds at its height, and start once " +
+    "the index has undone it" in {
+    // The index read block A at `tip` and lists the pool box A created; the chain has since replaced A with A',
+    // which left pool 1 at its earlier box
+    val c = new ScriptedChain
+    c.extend(tip - 40, tip)
+    c.indexed = tip
+    val orphan = LDNodeFixtures.indexed(pool(1, 105), tip)
+    c.scans(orphan, LDNodeFixtures.indexed(pool(2, 100), tip - 5))
+    c.orphaned = Set(orphan.box.boxId)
+    val t = tracker(c, retryMs = 100L)
+    t.follow(tip, c.header(tip).id)
+    withClue("a seed from the stale index would serve pool 1 at a box no block created: ") {
+      t.at(tip, 2.seconds) shouldBe None
+      t.latest shouldBe None
+    }
+    // The index undoes A and lists pool 1 at the box A' kept
+    c.scans(LDNodeFixtures.indexed(pool(1, 100), tip - 5), LDNodeFixtures.indexed(pool(2, 100), tip - 5))
+    c.orphaned = Set.empty
+    eventually(t.at(tip, 1.second).flatMap(_.pool(id(1))).map(_.boxId) shouldBe Some(pool(1, 100).boxId))
+  }
+
+  it should "start from boxes its newest blocks created, at one block read per height holding any" in {
+    val c = new ScriptedChain
+    c.extend(tip - 40, tip)
+    c.indexed = tip
+    c.scans(LDNodeFixtures.indexed(pool(1, 105), tip), LDNodeFixtures.indexed(pool(2, 100), tip - 1),
+      LDNodeFixtures.indexed(pool(3, 100), tip - 30))
+    val state = warmed(c, tracker(c))
+    state.pool(id(1)).map(_.boxId) shouldBe Some(pool(1, 105).boxId)
+    state.pool(id(3)).map(_.boxId) shouldBe Some(pool(3, 100).boxId)
+    c.blockReads.get shouldBe 2
+  }
+
   "The periodic rescan" should "replace the kept state with what it finds" in {
     val c = chain()
     val t = tracker(c, reseedBlocks = 2)
@@ -141,7 +190,7 @@ class PoolTrackerSpec extends AnyFlatSpec with Matchers with Eventually {
     val scans = c.scanPages.get
     // A pool the blocks never showed: only a rescan finds it
     c.scans(LDNodeFixtures.indexed(pool(1, 100), tip - 3), LDNodeFixtures.indexed(pool(2, 100), tip - 3),
-      LDNodeFixtures.indexed(pool(3, 100), tip + 1))
+      LDNodeFixtures.indexed(pool(3, 100), tip - 3))
     c.extend(tip + 1, tip + 2)
     c.indexed = tip + 2
     t.follow(tip + 2, c.header(tip + 2).id)
@@ -158,7 +207,7 @@ class PoolTrackerSpec extends AnyFlatSpec with Matchers with Eventually {
     val scans = c.scanPages.get
     c.scansFailing = true
     c.scans(LDNodeFixtures.indexed(pool(1, 100), tip - 3), LDNodeFixtures.indexed(pool(2, 100), tip - 3),
-      LDNodeFixtures.indexed(pool(3, 100), tip + 1))
+      LDNodeFixtures.indexed(pool(3, 100), tip - 3))
     c.extend(tip + 1, tip + 2)
     c.indexed = tip + 2
     t.follow(tip + 2, c.header(tip + 2).id)

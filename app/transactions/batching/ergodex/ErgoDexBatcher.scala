@@ -130,7 +130,7 @@ class ErgoDexBatcher(nodeContext: NodeContext,
         case t @ TrackedBox(box, _, PoolDeployment.LithosDexNative(contracts))
           if !denied.contains(t.nft.toLowerCase) && box.assets.lift(1).exists(a => tokens.contains(a.tokenId)) =>
           box -> contracts
-      }.filter { case (_, contracts) => Try(LDDeployments.vaultStands(nodeApi, contracts)).getOrElse(false) }
+      }.filter { case (_, contracts) => vaultStands(contracts) }
     if (boxes.isEmpty) Vector.empty
     else nodeContext.getClient.execute { ctx =>
       val pools = boxes.flatMap { case (box, contracts) => Try(LithosDexArbPool(box.toInputUTXO(ctx), contracts)).toOption }
@@ -141,6 +141,21 @@ class ErgoDexBatcher(nodeContext: NodeContext,
       ArbMachina.preferLithosDex(machina, throughErgoDex, pools,
         math.max(batching.minRevenueNanoErg, work.lithos.mutations.UTXO.MIN_CHANGE))
     }
+  }
+
+  /** Vault NFTs of LithosDex pools whose fee vault was found standing, at most [[MaxStandingVaults]]. */
+  private val standingVaults = java.util.concurrent.ConcurrentHashMap.newKeySet[String]()
+
+  /**
+   * Whether the fee vault of the pool `contracts` builds stands. A vault's contract recreates it on every spend,
+   * so one found standing is not read again; one that is not is read again at the next discovery.
+   */
+  private def vaultStands(contracts: _root_.lithosdex.contracts.LDContracts): Boolean = {
+    val nft = contracts.vaultNFT.toString
+    standingVaults.contains(nft) || (Try(LDDeployments.vaultStands(nodeApi, contracts)).getOrElse(false) && {
+      if (standingVaults.size < MaxStandingVaults) standingVaults.add(nft)
+      true
+    })
   }
 
   /**
@@ -166,23 +181,24 @@ class ErgoDexBatcher(nodeContext: NodeContext,
   }
 
   /**
-   * Every confirmed native pool with its inclusion height: from the pool tracker while it is within
-   * [[TrackedLagBlocks]] of `tip` and no cap cut it, otherwise parsed from a scan a page at a time, up to
-   * [[ErgoDexPoolScan.MaxPages]] pages.
+   * Every confirmed native pool with its inclusion height, from the pool tracker while it is within
+   * [[TrackedLagBlocks]] of `tip`. None until it is: Machina orders then wait for a later scan, warned of once.
    */
   private def nativePools(tip: Int): Seq[(ErgoDexPool, Int)] =
-    poolTracking.flatMap(_.latest).filter(state => !state.cut && tip - state.height <= TrackedLagBlocks) match {
+    poolTracking.flatMap(_.latest).filter(state => tip - state.height <= TrackedLagBlocks) match {
       case Some(state) =>
+        untracked = false
         state.pools.filter(_.deployment == PoolDeployment.ErgoDexNative)
           .flatMap(t => ErgoDexPool.native(t.box).map(_ -> t.inclusionHeight)).toVector
       case None =>
-        val (found, exhausted) = ErgoDexPoolScan.confirmed(nodeApi, ErgoDexContracts.NativePoolErgoTree)(indexed =>
-          ErgoDexPool.native(indexed.box).map(_ -> indexed.inclusionHeight))
-        if (!exhausted)
-          logger.warn(s"ErgoDEX native pool scan stopped after ${ErgoDexPoolScan.MaxPages} pages; Machina orders " +
-            "were routed through those only")
-        found
+        if (!untracked) logger.warn(s"Pool tracking is not within $TrackedLagBlocks blocks of $tip; Machina orders " +
+          "wait for it before they are routed")
+        untracked = true
+        Seq.empty
     }
+
+  /** The last scan found the pool tracker too far behind to route Machina orders; logged once per stretch. */
+  @volatile private var untracked = false
 
   /** Returns the uniquely indexed confirmed box carrying the pool NFT. */
   private def confirmedPool(nft: String): Option[IndexedBox] = {
@@ -355,4 +371,7 @@ object ErgoDexBatcher {
 
   /** How far behind the chain the pool tracker may be for a scan to route Machina orders on its pools. */
   private final val TrackedLagBlocks = 2
+
+  /** Most standing vaults remembered: as many pool boxes as the tracker holds. */
+  private final val MaxStandingVaults = PoolTracker.MaxBoxes
 }
