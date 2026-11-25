@@ -10,7 +10,6 @@ import sigma.ast.ShortConstant
 import sigma.interpreter.{ContextExtension, ProverResult}
 import transactions.candidate.BlockTxMessages.CandidateTx
 import transactions.candidate.{CandidateBundle, CandidateCapital, CapitalEntry, CapitalOrigin}
-import transactions.engine.execution.RollupExecution
 import work.lithos.mutations.{Contract, InputUTXO, MainnetEip27Constants, Token, TxBuilder, UTXO}
 
 import scala.util.{Failure, Success, Try}

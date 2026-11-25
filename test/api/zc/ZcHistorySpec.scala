@@ -54,6 +54,20 @@ class ZcHistorySpec extends AnyFlatSpec with Matchers with Eventually {
     ZcHistory.classify(fill, Set(hashOf(party(1)))).map(_.kind) shouldBe Seq("borrowed")
   }
 
+  "A SigUSD lot of nanoERG alone" should "be sold and bought when its seller is paid SigUSD, and returned otherwise" in {
+    val sig = sigmafi.zc.ZcContracts.SigUsdId
+    val lot = box(id(70), tree(sigmafi.zc.ZcKind.LotAuction, ZcMarket.SigUsd), 50000000L, Seq.empty,
+      regs(bytes(hashOf(party(3))), longs(2000L, 1000L, 1700000L, 1700720L, 1702880L, 2000000L)))
+    val sold = indexedTx(id(103), Seq(lot, mine(id(71), Erg, Seq(sig -> 2000L))),
+      Seq(box(id(72), party(3), 1000000L, Seq(sig -> 1500L), regs(bytes(id(70)))),
+        mine(id(73), Erg + 48000000L, Seq(sig -> 500L))))
+    ZcHistory.classify(sold, Set(hashOf(party(3)))).map(_.kind) shouldBe Seq("lotSold")
+    ZcHistory.classify(sold, wallet).map(_.kind) shouldBe Seq("lotBought")
+    ZcHistory.classify(sold, wallet).head.amount shouldBe BigInt(1500L)
+    val returned = indexedTx(id(104), Seq(lot), Seq(box(id(74), party(3), 48000000L, Seq.empty, regs(bytes(id(70))))))
+    ZcHistory.classify(returned, Set(hashOf(party(3)))).map(_.kind) shouldBe Seq("returned")
+  }
+
   "An ask purchase" should "be bought by the buyer and sold by the seller, at the payout" in {
     val ask = saleOrder(id(60), order1, 1L, seller = 3)
     val payout = box(id(62), party(3), 2 * Erg, Seq.empty, regs(bytes(id(60)), long(1L)))

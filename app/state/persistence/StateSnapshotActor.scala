@@ -8,7 +8,7 @@ import org.bouncycastle.util.encoders.Hex
 import org.slf4j.{Logger, LoggerFactory}
 import play.api.Configuration
 import state.messages.SyncMessages.SyncCursor
-import state.synchronization.{CanonicalBlockSource, CommittedSyncState, SyncProtocolContext}
+import state.synchronization.{CanonicalBlockSource, SyncProtocolContext}
 import storage.KeyValueStore
 
 import javax.inject.Inject

@@ -11,7 +11,6 @@ import node.MutationConversions._
 import node.model.IndexedBox
 import org.ergoplatform.appkit.{Address, BlockchainContext}
 import transactions.engine.EngineBroadcast
-import org.ergoplatform.sdk.ErgoId
 import org.slf4j.{Logger, LoggerFactory}
 import play.api.Configuration
 import sigma.SigmaProp
@@ -19,17 +18,14 @@ import sigma.ast.ErgoTree
 import transactions.ProtocolContracts.{hex, lenderEntry}
 import transactions.emissions.EmissionTransactions
 import transactions.engine.wallet.EngineWalletMessages._
-import transactions.engine.wallet.{EngineFunding, FundingAllocation}
-import work.lithos.mutations.Token
+import transactions.engine.wallet.EngineFunding
 
-import javax.inject.{Inject, Named, Singleton}
-import scala.collection.JavaConverters._
 import scala.collection.mutable
 import scala.concurrent.duration._
 import scala.concurrent.{Await, ExecutionContext, blocking}
 import scala.language.postfixOps
 import scala.reflect.ClassTag
-import scala.util.{Failure, Success, Try}
+import scala.util.Try
 import transactions.engine.EngineJoinGuard
 
 /**
@@ -269,7 +265,6 @@ class CollateralExecution(nodeContext: NodeContext,
       val tx = txs
       val gateTree = tx.contracts(ctx).gate.ergoTreeHex
       val (from, count) = paged(limit, offset)
-      val litIdStr = LFSMHelpers.getLitId(ctx.getNetworkType).toString
       liveBoxes(ctx, tx, gateTree)
         .sortBy(-_.box.creationHeight)
         .slice(from, from + count)

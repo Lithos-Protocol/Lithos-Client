@@ -6,7 +6,6 @@ import akka.util.Timeout
 import utils.Globals
 import lfsm.LFSMPhase
 import org.bouncycastle.util.encoders.Hex
-import models.ApiError
 import models.BlockMiners
 import models.PoolBlock
 import play.api.cache.SyncCacheApi

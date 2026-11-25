@@ -39,6 +39,9 @@ class ZcTracker(api: () => NodeApi, io: ExecutionContext, settings: ZcConfig,
 
   def enabled: Boolean = settings.enabled
 
+  /** The boxes this client's own pending collateral arb broadcasts spend, shared by the batcher and the arb stage. */
+  val ownArbs: ZcOwnArbs = new ZcOwnArbs()
+
   private val logger: Logger = LoggerFactory.getLogger("ZcTracker")
 
   private val lock = new Object
@@ -216,7 +219,9 @@ class ZcTracker(api: () => NodeApi, io: ExecutionContext, settings: ZcConfig,
     warnedCut = next.cut
     confirmed = Some(next)
     val previous = published.filter(_.book.headerId == next.headerId).flatMap(_.mempool)
-    val view = ZcView(next, snapshot.flatMap(ZcMempool.over(next, _, previous)), 0L)
+    // A refresh still pending across a block keeps the time it was first seen
+    val seen = published.flatMap(_.mempool).toSeq.flatMap(_.refreshes)
+    val view = ZcView(next, snapshot.flatMap(ZcMempool.over(next, _, previous, seen)), 0L)
     lock.synchronized {
       val print = view.fingerprint
       if (!fingerprint.contains(print)) {

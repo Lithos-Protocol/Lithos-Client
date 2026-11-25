@@ -6,11 +6,15 @@ import org.bouncycastle.util.encoders.Hex
 import org.ergoplatform.appkit.NetworkType
 import scorex.crypto.hash.Blake2b256
 import transactions.batching.ergodex.{ErgoDexContracts, ErgoDexPool}
+import sigmausd.SigmaUsdContracts
 import transactions.batching.lithosdex.{DexContracts, LDDeployments}
 
 import scala.util.Try
 
-/** The contract a tracked pool box sits at; a LithosDex one carries the deployment its own ids build. */
+/**
+ * The contract a tracked pool box sits at; a LithosDex one carries the deployment its own ids build. The SigmaUSD bank
+ * and the oracle pool box it reads are followed beside the pools.
+ */
 sealed trait PoolDeployment
 
 object PoolDeployment {
@@ -18,20 +22,30 @@ object PoolDeployment {
   case object ErgoDexToken extends PoolDeployment
   final case class LithosDexNative(contracts: LDContracts) extends PoolDeployment
   final case class LithosDexToken(contracts: LDT2TContracts) extends PoolDeployment
+  case object SigmaUsdBank extends PoolDeployment
+  case object SigmaUsdOracle extends PoolDeployment
+
+  /** Whether `deployment` is a DEX pool, which a swap moves, rather than the bank or its oracle. */
+  def dex(deployment: PoolDeployment): Boolean = deployment match {
+    case SigmaUsdBank | SigmaUsdOracle => false
+    case _ => true
+  }
 }
 
 /** A confirmed pool box, the height of the block that created it, and its deployment. */
 final case class TrackedBox(box: NodeBox, inclusionHeight: Int, deployment: PoolDeployment) {
   def boxId: String = box.boxId
-  def nft: String = box.assets.head.tokenId
+  /** The token that identifies the box: the first, except the bank's NFT, which it holds third. */
+  def nft: String = if (deployment == PoolDeployment.SigmaUsdBank) box.assets(2).tokenId else box.assets.head.tokenId
 }
 
 /**
  * Says whether a box is a pool this client tracks: at an ErgoDEX pool script and parsing as that shape, or at a
- * LithosDex pool template and verified as the deployment its own ids build. No node reads; a vault's standing
+ * LithosDex pool template and verified as the deployment its own ids build. On mainnet also the SigmaUSD bank, at its
+ * pinned script holding its NFT, and the box holding its oracle pool's NFT, whatever script it is at. No node reads; a vault's standing
  * is the consumer's to check. ErgoDEX boxes kept share one copy of their script's tree.
  */
-final class PoolShapes(network: NetworkType) {
+final class PoolShapes(val network: NetworkType) {
 
   private val canonical = DexContracts(network)
   private val n2tTemplate = canonical.liquidityPool.ergoTree.template
@@ -60,6 +74,12 @@ final class PoolShapes(network: NetworkType) {
     } else if (tree.endsWith(t2tTemplateHex))
       LDDeployments.verifyT2T(tree, box.assets.map(a => a.tokenId -> a.amount))
         .map(c => TrackedBox(box, height, PoolDeployment.LithosDexToken(c)))
+    else if (network == NetworkType.MAINNET && tree.equalsIgnoreCase(SigmaUsdContracts.BankErgoTree) &&
+      box.assets.lift(2).exists(a => a.tokenId == SigmaUsdContracts.BankNft && a.amount == 1L))
+      Some(TrackedBox(box, height, PoolDeployment.SigmaUsdBank))
+    else if (network == NetworkType.MAINNET &&
+      box.assets.headOption.exists(a => a.tokenId == SigmaUsdContracts.OracleNft && a.amount == 1L))
+      Some(TrackedBox(box, height, PoolDeployment.SigmaUsdOracle))
     else None
   }.toOption.flatten
 

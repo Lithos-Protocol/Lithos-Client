@@ -8,15 +8,14 @@ import nisp.{NISP, NispCommitment, ResolvedNisps}
 import org.bouncycastle.util.encoders.Hex
 import org.ergoplatform.appkit._
 import org.ergoplatform.appkit.scalaapi.scalaByteType
-import scorex.utils.Longs
 import sigma.Colls
 import sigma.data.CBigInt
 import transactions.ProtocolContracts
 import transactions.batching.lithosdex.DexContracts
 import transactions.rollups.TransactionMessages.{LatestRollup, StubInvalidException}
 import utils.Globals
-import utils.Helpers.{evalContract, holdingContract, holdingLogicContract, payoutContract}
-import work.lithos.mutations.{Contract, InputUTXO, Token, TxBuilder, UTXO}
+import utils.Helpers.{evalContract, holdingLogicContract, payoutContract}
+import work.lithos.mutations.{InputUTXO, Token, TxBuilder, UTXO}
 
 object RollupTransactions {
 

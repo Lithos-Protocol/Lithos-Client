@@ -1,6 +1,5 @@
 package state.messages
 
-import akka.actor.ActorRef
 
 object StateFrameMessages {
 

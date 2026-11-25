@@ -6,7 +6,6 @@ import mutations.NotEnoughInputsException
 import node.MutationConversions._
 import node.model._
 import org.ergoplatform.appkit.BlockchainContext
-import org.slf4j.LoggerFactory
 import work.lithos.mutations.{InputUTXO, MainnetEip27Constants, Token, UTXO}
 
 /**

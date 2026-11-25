@@ -5,7 +5,6 @@ import akka.pattern.ask
 import akka.util.Timeout
 import configs.NodeContext
 import lfsm.LFSMPhase
-import lfsm.contracts.FraudProofContracts
 import lfsm.states.{Rollup, RollupInfoState}
 import mutations.NotEnoughInputsException
 import org.bouncycastle.util.encoders.Hex
@@ -19,15 +18,15 @@ import state.messages.RollupMessages.{GetCurrentRollupCritical, GetRollupMetadat
 import state.DataBoxRetrievalException
 import state.synchronization.CompleteMempool
 import transactions.candidate.{BlockTxMessages, CandidateBundle}
-import transactions.candidate.BlockTxMessages.{BlockTxsReady, CandidateTx, CandidateTxsDropped}
+import transactions.candidate.BlockTxMessages.CandidateTx
 import transactions.engine.execution.RollupExecution._
 import transactions.rollups.TransactionMessages.RollupTxType._
 import transactions.rollups.TransactionMessages._
 import utils.Globals
-import work.lithos.mutations.{Contract, InputUTXO, Token, UTXO}
+import work.lithos.mutations.{Contract, InputUTXO, UTXO}
 
 import scala.concurrent.duration.DurationInt
-import scala.concurrent.{Await, ExecutionContext, Future, blocking}
+import scala.concurrent.{Await, ExecutionContext, Future}
 import scala.util.{Failure, Success, Try}
 import scala.util.control.NonFatal
 
@@ -900,7 +899,7 @@ class RollupExecution(nodeContext: NodeContext, walletManager: ActorRef, syncHan
     RollupExecution.sendIfCurrentInput(rollupId, expectedRollupInput, current, lapsing) {
       require(alive(), "rollup engine attempt was superseded")
       try {
-        val txId = new transactions.engine.EngineBroadcast(walletManager, rollupNodeApi)(ec)
+        val txId = new transactions.engine.EngineBroadcast(walletManager, rollupNodeApi)
           .send(tx, allReservations, "rollup:" + rollupId, () => alive()).requireAccepted()
         walletSelector.giveBack(change)
         if (usesInitialReservation) initialReservation = None

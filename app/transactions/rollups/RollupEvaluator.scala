@@ -1,5 +1,4 @@
 package transactions.rollups
-import transactions.engine.wallet.EngineWalletState
 
 import akka.actor.{Actor, ActorRef, Cancellable}
 import akka.pattern.ask
@@ -9,7 +8,7 @@ import evaluation.Evaluator
 import lfsm.LFSMHelpers
 import lfsm.LFSMPhase
 import lfsm.states.RollupMetadata
-import nisp.{NispCommitment, NispPayloadUnavailable, ResolvedNisps}
+import nisp.{NispCommitment, NispPayloadUnavailable}
 import lfsm.contracts.FraudProofContracts.FraudProofSet
 import mutations.BoxLoader
 import org.bouncycastle.util.encoders.Hex

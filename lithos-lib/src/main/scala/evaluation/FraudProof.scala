@@ -8,9 +8,8 @@ import nisp.{NispCommitment, NispPayloadUnavailable, ResolvedNisp}
 import org.bouncycastle.util.encoders.Hex
 import org.ergoplatform.ErgoTreePredef
 import org.ergoplatform.appkit.scalaapi.scalaByteType
-import org.ergoplatform.appkit.{BlockchainContext, ContextVar, ErgoProver, ErgoType, ErgoValue, Parameters, SignedTransaction}
+import org.ergoplatform.appkit.{BlockchainContext, ContextVar, ErgoProver, ErgoValue, Parameters, SignedTransaction}
 import org.slf4j.Logger
-import scorex.utils.Longs
 import sigma.{AvlTree, Coll, Colls}
 import sigma.data.CBigInt
 import sigma.exceptions.InterpreterException
@@ -181,7 +180,7 @@ object FraudProof {
 
       val copy = nispTree.dictionary.copy()
       val lookUp = copy.lookUp(miner)
-      val removal = copy.delete(miner)
+      copy.delete(miner)
 
       val score = NispCommitment.decode(lookUp.response.head.get).score
       val lastMiners = evalOutput.registers(1).getValue.asInstanceOf[Int]

@@ -2,7 +2,6 @@ package api
 
 import models.ApiError
 import play.api.libs.json.{JsValue, Json}
-import play.api.mvc._
 object ApiHelper {
   def makeError(code: Int, reason: String, detail: String): JsValue = {
     val error = ApiError(code, reason, detail)

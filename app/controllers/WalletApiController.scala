@@ -1,7 +1,6 @@
 package controllers
 
 import akka.actor.ActorSystem
-import api.models._
 import api.{ApiHelper, LithosApiErrors, WalletApi}
 import configs.Contexts
 import play.api.Configuration

@@ -68,7 +68,7 @@ class DexPoolCreation(nodeContext: NodeContext, walletSelector: EngineFunding, i
   /** Sends each link in turn, each with the reservations of exactly the wallet boxes it spends. */
   private def send(chain: Chain, funding: FundingAllocation, held: Map[String, FundingAllocation],
                    p: Plan): LDPoolCreated = {
-    val broadcast = new EngineBroadcast(walletSelector.walletRef, nodeApi)(walletSelector.executionContext)
+    val broadcast = new EngineBroadcast(walletSelector.walletRef, nodeApi)
     var stopped = false
     val steps = chain.links.zipWithIndex.map { case (link, i) =>
       val allocations = if (link.chained.isEmpty) Seq(funding) else link.chained.map(b => held(b.id.toString))

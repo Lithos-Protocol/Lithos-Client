@@ -9,8 +9,9 @@ final case class ZcOpen[A <: ZcRecord](record: A, pending: Boolean) {
 
 /**
  * One tracker snapshot sorted for the market reads: every open box by kind, the state box of each bond asset, share
- * and receipt, and the oracle. `oracle` is the confirmed pool box a trade may read; it is None while a mempool
- * refresh spends it (`refreshPending`), since anything reading it would fail once that refresh confirms.
+ * and receipt, and the oracle. `currentOracle` is the box a trade reads: the one pending refresh's successor
+ * (`oraclePending`), else the confirmed box. `oracle` is the same, but None while competing refreshes spend the
+ * confirmed box (`refreshPending`), since nothing can tell which of them will confirm.
  */
 final case class ZcMarketBook(view: ZcView, orders: Vector[ZcOpen[ZcOrder]], asks: Vector[ZcOpen[ZcAsk]],
                               offers: Vector[ZcOpen[ZcOffer]], lots: Vector[ZcOpen[ZcLot]],
@@ -19,9 +20,10 @@ final case class ZcMarketBook(view: ZcView, orders: Vector[ZcOpen[ZcOrder]], ask
                               shareVaults: Map[String, ZcOpen[ZcShareVault]], wrapVaults: Map[String, ZcOpen[ZcWrapVault]]) {
   def height: Int = view.book.height
   def revision: Long = view.revision
-  def confirmedOracle: Option[ZcOracle] = view.book.oracle
+  def currentOracle: Option[ZcOracle] = view.oracle
+  def oraclePending: Boolean = view.pendingOracle.isDefined
   def refreshPending: Boolean = view.refreshPending
-  def oracle: Option[ZcOracle] = if (refreshPending) None else confirmedOracle
+  def oracle: Option[ZcOracle] = if (refreshPending) None else currentOracle
 }
 
 object ZcMarketBook {
@@ -81,7 +83,7 @@ final case class ZcAskSource(open: ZcOpen[ZcAsk], asset: String, whole: Long, bo
   def ask: ZcAsk = open.record
   def market: ZcMarket = ask.market
   def shares: Boolean = whole > 1L
-  /** An offer buys one bond unit, or a share ask whole. */
+  /** An offer buys one bond unit, or a share ask whole when it can pay for all of it. */
   def units: Long = if (shares) ask.token.amount else 1L
 }
 
@@ -106,10 +108,11 @@ final case class ZcSearched(offers: Int, offersSearched: Int, sources: Int, sour
  *
  * Work is bounded: per market, at most `maxOffers` offers and `maxSources` sources are searched, each list taken in its
  * own priority order after the checks that need no offer, so a box failing those costs nothing past its own check.
+ * `lateBlocks` is how many blocks after the next a fill may land and still be checked: 0 for this miner's own block.
  */
 final class ZcMatcher(val book: ZcMarketBook, origin: String => Option[ZcOrigin],
                       maxOffers: Int = ZcMatcher.MaxOffers, maxSources: Int = ZcMatcher.MaxSources,
-                      excluded: ZcRecord => Boolean = _ => false) {
+                      excluded: ZcRecord => Boolean = _ => false, lateBlocks: Long = 0L) {
 
   import ZcRules._
 
@@ -170,13 +173,15 @@ final class ZcMatcher(val book: ZcMarketBook, origin: String => Option[ZcOrigin]
 
   private def evaluateOrder(s: ZcOfferState, order: ZcOrder, ignoreYield: Boolean): Either[String, ZcMatch] = {
     val maturity =
-      if (window(order)) windowMaturity(s, order, oracle, height, ignoreYield).toRight("no maturity in the window suits the offer")
+      if (window(order)) windowMaturity(s, order, oracle, height, ignoreYield, lateBlocks)
+        .toRight("no maturity in the window suits the offer")
       else orderMaturity(order, height)
     for {
       m <- maturity
       principal <- resolvePrincipal(order, height, m)
       bond = ZcBondTerms.prospect(order, height, m, principal)
-      _ <- offerRefusal(s, bond, principal, 1L, 1L, oracle, height, primary = true, ignoreYield = ignoreYield).toLeft(())
+      _ <- offerRefusal(s, bond, principal, 1L, 1L, oracle, height, primary = true, ignoreYield = ignoreYield,
+        late = lateBlocks).toLeft(())
       _ <- guardRefusal(order, bond, oracle, height).toLeft(())
       fee = fillFee(s, principal)
       ergOutBig = BigInt(fee) + deliveryErgBig(s.offer, shares = false) + BigInt(feeReserve(s.offer)) + BigInt(bond.principalErg)
@@ -185,21 +190,57 @@ final class ZcMatcher(val book: ZcMarketBook, origin: String => Option[ZcOrigin]
     } yield matched
   }
 
+  /** The whole ask, or for shares an offer cannot pay for whole, the most units of it the offer can. */
   private def evaluateAsk(s: ZcOfferState, a: ZcAskSource, ignoreYield: Boolean): Either[String, ZcMatch] = {
+    val whole = evaluateAskUnits(s, a, a.units, ignoreYield)
+    if (whole.isRight || !a.shares || affordable(s, a, a.units)) whole
+    else mostAffordable(s, a).fold(whole)(units => evaluateAskUnits(s, a, units, ignoreYield))
+  }
+
+  private def evaluateAskUnits(s: ZcOfferState, a: ZcAskSource, units: Long,
+                               ignoreYield: Boolean): Either[String, ZcMatch] = {
     val bond = ZcBondTerms.of(a.bond.record)
     for {
-      _ <- fillRefusal(a.ask, a.units, height).toLeft(())
+      _ <- fillRefusal(a.ask, units, height).toLeft(())
       _ <- (if (a.shares) a.mint.toRight("the shares' mint is unknown").flatMap(m => shareRefusal(s.offer, m).toLeft(()))
         else Right(()))
-      quoted <- askPrice(a.ask, a.units, Some(bond), height)
+      quoted <- askPrice(a.ask, units, Some(bond), height)
       price = if (!token(s.offer)) math.max(quoted, ZcBoxes.MinBox) else quoted
-      _ <- offerRefusal(s, bond, price, a.units, a.whole, oracle, height, shares = a.shares, ignoreYield = ignoreYield).toLeft(())
+      _ <- offerRefusal(s, bond, price, units, a.whole, oracle, height, shares = a.shares, ignoreYield = ignoreYield,
+        late = lateBlocks).toLeft(())
       _ <- saleGuardRefusal(a.ask, bond, oracle, height).toLeft(())
       fee = fillFee(s, price)
       ergOutBig = BigInt(fee) + deliveryErgBig(s.offer, a.shares) + BigInt(if (token(s.offer)) ZcBoxes.MinBox else price)
       ergOut <- if (ergOutBig >= 0 && ergOutBig.isValidLong) Right(ergOutBig.toLong) else Left("the fill's ERG requirement overflows")
-      matched <- purchase(s, a.boxId, a.units, a.whole, price, bond.repayment, bond.maturity, fee, ergOut)
+      matched <- purchase(s, a.boxId, units, a.whole, price, bond.repayment, bond.maturity, fee, ergOut)
     } yield matched
+  }
+
+  /**
+   * Whether `s` can pay for `units` of share ask `a` and keep its box minimum, and a token offer its capital and
+   * refund reserve. The price only rises with the units, so this holds for every count under one it holds for.
+   */
+  private def affordable(s: ZcOfferState, a: ZcAskSource, units: Long): Boolean =
+    askPrice(a.ask, units, Some(ZcBondTerms.of(a.bond.record)), height).toOption.exists { quoted =>
+      val price = if (!token(s.offer)) math.max(quoted, ZcBoxes.MinBox) else quoted
+      val ergOut = BigInt(fillFee(s, price)) + deliveryErgBig(s.offer, shares = true) +
+        BigInt(if (token(s.offer)) ZcBoxes.MinBox else price)
+      if (token(s.offer)) price <= s.capital &&
+        BigInt(s.value) - ergOut >= BigInt(ZcBoxes.MinBox) + batcherFee(s.offer) &&
+        BigInt(s.value) - ergOut >= BigInt(s.offer.restLeast)
+      else BigInt(s.value) - ergOut >= BigInt(s.offer.restLeast)
+    }
+
+  /** The most units of share ask `a` from its least fill that `s` can afford, by bisection; None when not even that. */
+  private def mostAffordable(s: ZcOfferState, a: ZcAskSource): Option[Long] = {
+    var lo = math.max(1L, minFill(a.ask))
+    var hi = a.ask.token.amount - 1L
+    var best = Option.empty[Long]
+    while (lo <= hi) {
+      val mid = lo + (hi - lo) / 2L
+      if (affordable(s, a, mid)) { best = Some(mid); lo = mid + 1L } else hi = mid - 1L
+    }
+    best
   }
 
   /**
@@ -210,7 +251,7 @@ final class ZcMatcher(val book: ZcMarketBook, origin: String => Option[ZcOrigin]
   private def purchase(s: ZcOfferState, sourceId: String, units: Long, whole: Long, price: Long, repayment: Long,
                        maturity: Long, fee: Long, ergOut: Long): Either[String, ZcMatch] =
     if (fee <= ZcMatcher.MinerFee) Left("the batcher reward does not cover a miner fee")
-    else if (ergOut < 0L || BigInt(s.value) - BigInt(ergOut) < BigInt(ZcBoxes.MinBox))
+    else if (ergOut < 0L || BigInt(s.value) - BigInt(ergOut) < BigInt(s.offer.restLeast))
       Left("the offer cannot keep a box minimum after this fill")
     else {
       val c = cost(s, price)

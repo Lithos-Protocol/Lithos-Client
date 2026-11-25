@@ -2,7 +2,7 @@ package stats
 
 import configs.{NodeContext, StatsStorageConfig, ZcConfig}
 import node.NodeApi
-import node.model.{NodeBox, NodeHeader, NodeTransaction}
+import node.model.{NodeHeader, NodeTransaction}
 import org.slf4j.LoggerFactory
 import play.api.Configuration
 import play.api.libs.json._

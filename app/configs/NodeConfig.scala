@@ -6,7 +6,6 @@ import mutations.NodeWallet
 import node.NodeApi
 import node.rest.RestNodeApi
 import org.ergoplatform.appkit._
-import org.ergoplatform.restapi.client.ApiClient
 import org.slf4j.{Logger, LoggerFactory}
 import play.api.Configuration
 

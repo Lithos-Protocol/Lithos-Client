@@ -1,8 +1,9 @@
 package transactions.engine
 
+import configs.ZcCollateralArbConfig
 import play.api.libs.json.{JsObject, Json}
-import transactions.batching.sigmafi.zc.{ZcResolver, ZcTracker}
-import transactions.engine.execution.ZcWriteExecution
+import transactions.batching.sigmafi.zc.{ZcMempoolPlan, ZcResolver, ZcTracker}
+import transactions.engine.execution.{ZcHeld, ZcRefusal, ZcWriteExecution}
 
 /**
  * One ZC write that signs, carried to the engine as an ordinary intent. It carries the tracker and resolver its
@@ -28,7 +29,14 @@ object ZcIntent {
     case CreateOrder(b, _, _) => Json.stringify(b).length <= MaxBodyChars
     case CreateOffer(b, _, _) => Json.stringify(b).length <= MaxBodyChars
     case CreateAsk(b, _, _) => Json.stringify(b).length <= MaxBodyChars
-    case Write(action, id, b, _, _, _) => Write.Actions(action) && id.forall(hex) && Json.stringify(b).length <= MaxBodyChars
+    case Write(action, id, b, _, _, _, _) => Write.Actions(action) && id.forall(hex) && Json.stringify(b).length <= MaxBodyChars
+    case CollateralArb(planned, settings, _, _) => planned.paid <= settings.maxErgIn
+  }
+
+  /** A collateral arb the batcher planned, sent from this wallet: never from the API. */
+  final case class CollateralArb(planned: ZcMempoolPlan, settings: ZcCollateralArbConfig, tracker: ZcTracker,
+                                 resolver: ZcResolver) extends ZcIntent {
+    def execute(e: ZcWriteExecution): JsObject = e.collateralArb(planned, settings)
   }
 
   final case class CreateOrder(body: JsObject, tracker: ZcTracker, resolver: ZcResolver) extends ZcIntent {
@@ -44,12 +52,38 @@ object ZcIntent {
     def execute(e: ZcWriteExecution): JsObject = e.cancel(boxId, send = true)
   }
 
-  /** Every other write: `action` names it, `id` the box, bond asset or token its path names. */
+  /**
+   * Every other write: `action` names it, `id` the box, bond asset or token its path names. `heldUntil` is set on a
+   * write held for an oracle refresh: the time (ms) past which it is no longer sent.
+   */
   final case class Write(action: String, id: Option[String], body: JsObject, tracker: ZcTracker, resolver: ZcResolver,
-                         override val capability: Seq[String] => Set[String] = _ => Set.empty)
+                         override val capability: Seq[String] => Set[String] = _ => Set.empty,
+                         heldUntil: Option[Long] = None)
     extends ZcIntent {
-    def execute(e: ZcWriteExecution): JsObject = Write.run(e, action, id, body, send = true)
+    def execute(e: ZcWriteExecution): JsObject =
+      try {
+        val tried = scala.util.Try(Write.run(e, action, id, body, send = true))
+        if (heldUntil.isDefined) e.heldOutcome(action, tried)
+        tried.get
+      } catch {
+        case held: ZcHeld =>
+          val until = heldUntil.getOrElse(System.currentTimeMillis() + HoldMs)
+          val again = System.currentTimeMillis() + RetryMs
+          if (again >= until) {
+            val refusal = new ZcRefusal(s"${held.reason}; the refresh did not confirm in time, so nothing was sent")
+            if (heldUntil.isDefined) e.heldOutcome(action, scala.util.Failure(refusal))
+            throw refusal
+          }
+          e.hold(copy(heldUntil = Some(until)), again, until)
+          Json.obj("txId" -> play.api.libs.json.JsNull, "outcome" -> "held", "reason" -> held.reason,
+            "retriesUntil" -> until)
+      }
   }
+
+  /** How long a held write keeps waiting for its oracle refresh to confirm: about five blocks. */
+  final val HoldMs: Long = 10L * 60L * 1000L
+  /** How often a held write is tried again. */
+  final val RetryMs: Long = 30L * 1000L
 
   object Write {
     val Actions: Set[String] = Set("createLot", "createWrap", "fractionalize", "fillOrder", "buyAsk", "buyLot", "buyVault",

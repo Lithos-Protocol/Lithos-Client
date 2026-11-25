@@ -1,7 +1,6 @@
 package state.messages
 
 import lfsm.states.{Rollup, RollupMetadata}
-import state.messages.RollupMessages.RollupTransform
 import state.messages.SyncMessages.Transform
 import work.lithos.mutations.InputUTXO
 

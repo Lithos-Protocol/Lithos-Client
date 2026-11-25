@@ -5,7 +5,7 @@ import lfsm.states.Rollup
 import nisp.ResolvedNisps
 import mutations.{BoxLoader, NodeWallet}
 import org.bouncycastle.util.encoders.Hex
-import org.ergoplatform.appkit.{BlockchainContext, ErgoProver, SignedTransaction}
+import org.ergoplatform.appkit.{BlockchainContext, SignedTransaction}
 import org.slf4j.{Logger, LoggerFactory}
 import evaluation.Evaluator.{Clean, Failed, Fraud, ProofOutcome}
 import work.lithos.mutations.{Contract, InputUTXO, TxBuilder, UTXO}

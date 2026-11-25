@@ -13,7 +13,7 @@ import transactions.batching.sigmafi.zc._
 
 import javax.inject.{Inject, Singleton}
 import scala.collection.mutable
-import scala.util.{Failure, Success, Try}
+import scala.util.{Failure, Success}
 
 /**
  * One thing a transaction did for this wallet. `amount` is in `market`'s unit (nanoERG or raw SigUSD): what was paid
@@ -212,17 +212,25 @@ object ZcHistory {
         case None => if (wallet(a.sellerHash)) ev("returned", Some(a.market), Some(a.token.tokenId), a.token.amount, 0, "boxId" -> a.boxId)
       }
     }
-    // lots: the payout or the return is tagged with the lot's id
+    // lots: the payout or the return is tagged with the lot's id. A sale pays the seller the market's asset: its token
+    // on a token market, the lot's own nanoERG and more on an ERG market, which a return never does.
     zin.flatten.collect { case l: ZcLot => l }.foreach { l =>
       consumed += l.boxId
-      val back = outs.find(o => tag(o).contains(l.boxId) && l.box.assets.forall(a => o.assets.contains(a)))
-      val payout = outs.find(o => tag(o).contains(l.boxId))
-      (back, payout) match {
-        case (None, Some(p)) =>
+      val sale = outs.find(o => tag(o).contains(l.boxId) && (l.market.tokenId match {
+        case Some(id) => o.assets.exists(a => a.tokenId == id && a.amount > 0L)
+        case None => o.value > l.box.value
+      }))
+      sale match {
+        case Some(p) =>
           val price = BigInt(holds(p, l.market)) - (if (l.market.tokenId.isEmpty) l.box.value else 0L)
           if (wallet(l.sellerHash)) ev("lotSold", Some(l.market), None, 0L, price, "lotBoxId" -> l.boxId)
-          if (l.box.assets.headOption.exists(a => net(Some(a.tokenId)) > 0)) ev("lotBought", Some(l.market), None, 0L, price, "lotBoxId" -> l.boxId)
-        case _ => if (wallet(l.sellerHash)) ev("returned", Some(l.market), None, 0L, 0, "boxId" -> l.boxId)
+          // The buyer took the lot's first item, or for a lot of nanoERG alone, paid the token it is sold for.
+          val bought = l.box.assets.headOption match {
+            case Some(a) => net(Some(a.tokenId)) > 0
+            case None => l.market.tokenId.exists(id => net(Some(id)) < 0)
+          }
+          if (bought) ev("lotBought", Some(l.market), None, 0L, price, "lotBoxId" -> l.boxId)
+        case None => if (wallet(l.sellerHash)) ev("returned", Some(l.market), None, 0L, 0, "boxId" -> l.boxId)
       }
     }
     // settlements: a repayment or a liquidation of a bond spent here

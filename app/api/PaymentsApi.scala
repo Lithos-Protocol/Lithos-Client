@@ -1,7 +1,5 @@
 package api
 
-import play.api.libs.json._
-import models.ApiError
 import models.PaymentTransaction
 import play.api.Configuration
 import play.api.cache.SyncCacheApi

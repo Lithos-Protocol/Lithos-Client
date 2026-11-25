@@ -540,8 +540,36 @@ private[stats] object BatchingStatistics {
       val chain = Iterator.iterate(Option(start))(_.flatMap(l => byCarryIn.get(l.carryOut.id)))
         .take(legs.size).takeWhile(_.isDefined).map(_.get).toVector
       cycles(chain, minerTree)
-    }
+    } ++ block.txs.flatMap(zcBroadcastArb(block, _, network, minerTree))
   }
+
+  /**
+   * A ZC collateral arb broadcast as one transaction: `[pool, ZC box, funding...] -> [pool successor, the ZC box's
+   * outputs, wallet, miner fee]`, every funding input and the wallet output at one script. Gross is what the wallet
+   * output holds over the funding, and the fee recorded is the miner fee, which no in-block arb pays.
+   */
+  private def zcBroadcastArb(block: BlockInfo, tx: BlockTx, network: NetworkType, minerTree: String): Option[ArbCycle] =
+    if (tx.inputs.size < 3 || tx.outputs.size < 4) None
+    else for {
+      pool <- block.inputBox(tx.inputs.head.id)
+      zcBox <- block.inputBox(tx.inputs(1).id)
+      funding = tx.inputs.drop(2).flatMap(in => block.inputBox(in.id))
+      if funding.size == tx.inputs.size - 2
+      wallet = funding.head.ergoTree
+      if funding.forall(_.ergoTree == wallet) && poolProtocol(pool, network).isDefined
+      nft <- pool.assets.headOption.filter(_.amount == 1L).map(_.id.toString)
+      next = tx.outputs.head
+      if next.ergoTree == pool.ergoTree && next.assets.headOption.exists(t => t.id.toString == nft && t.amount == 1L)
+      fee = tx.outputs.last
+      out = tx.outputs(tx.outputs.size - 2)
+      if fee.ergoTree == Contract.FEE.ergoTreeHex && out.ergoTree == wallet && wallet != pool.ergoTree
+      rec <- ZcBoxes.read(box(zcBox))
+      protoCount <- zcArbProtoCount(rec, zcBox, tx.copy(outputs = tx.outputs.slice(1, tx.outputs.size - 2)))
+      if protoCount == tx.outputs.size - 3
+      gross = BigInt(out.value) - funding.map(b => BigInt(b.value)).sum
+      if gross > 0 && gross.isValidLong
+    } yield ArbCycle(BatchingFee(tx.id, rec.boxId, ArbProtocol, gross.toString, fee.value.toString,
+      local = wallet == minerTree), Seq(tx.id))
 
   /** `chain` cut after each leg with a profit output, keeping each piece that has the whole shape of a cycle. */
   private def cycles(chain: Vector[ArbLegTx], minerTree: String): Vector[ArbCycle] = {

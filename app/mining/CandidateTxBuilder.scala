@@ -20,6 +20,7 @@ import sigma.{Coll, Colls, SigmaProp}
 import stratum.{CollateralData, CollateralNotFoundException, InvalidSigmaBooleanException}
 import transactions.ProtocolContracts
 import transactions.ProtocolContracts.{hex, lenderEntry}
+import utils.BoxMinimum
 import work.lithos.mutations.{Contract, InputUTXO, Token, TxBuilder, UTXO}
 import work.lithos.plasma.PlasmaParameters
 import work.lithos.plasma.collections.PlasmaMap
@@ -213,35 +214,39 @@ class CandidateTxBuilder(prover: NodeWallet, nodeApi: NodeApi, config: Candidate
         s"contract ${hex(rollupHash)}, which this build does not produce")
 
     // The holding box takes whatever these did not, so they are sized first. Founder boxes and the
-    // permit return carry a contract-imposed 1e6 floor; the other two only clear the consensus
-    // per-byte minimum. Their total must stay under `feeValue`, pinned by the enforcer at 0.005 ERG.
+    // permit return carry a contract-imposed 1e6 floor; the other two have a value of their own. Each
+    // is then raised to the node's per-byte minimum, which the collateral contract's `>=` floors allow.
+    // Their total must stay under `feeValue`, pinned by the enforcer at 0.005 ERG.
+    val rate = minValuePerByte(ctx)
+    def sized(u: UTXO): UTXO = BoxMinimum.sized(ctx, u, u.value, rate)
     val founderBoxes = founderSplit.map { case (hash, amount) =>
       val recipient = Seq(LFSMHelpers.FOUNDER_1, LFSMHelpers.FOUNDER_2, LFSMHelpers.FOUNDER_3)
         .find(_.hashedPropBytes.sameElements(hash))
         .getOrElse(throw new CollateralNotFoundException(
           s"collateral box ${collat.id} names an unknown founder ${hex(hash)}"))
-      UTXO(recipient, 1000000L, Seq(Token(litId, amount)))
+      sized(UTXO(recipient, 1000000L, Seq(Token(litId, amount))))
     }
     val permitBox =
-      if (permitChange > 0) Seq(UTXO(Contract.fromAddress(lenderAddress), 1000000L,
-        Seq(Token(litId, permitChange))))
+      if (permitChange > 0) Seq(sized(UTXO(Contract.fromAddress(lenderAddress), 1000000L,
+        Seq(Token(litId, permitChange)))))
       else Seq.empty[UTXO]
     // A lender bidding for priority posts five times their offer: four go to the pool through the
     // holding box, and this one is the finder's, taken here rather than left to change so it lands
     // at this miner's own key instead of the lender's. Below the floor there is no box that can
     // legally carry it, so it stays with the pool.
     val finderFee = RollupProtocol.finderFee(feeValue)
+    val finderTokens = if (finderLIT > 0) Seq(Token(litId, finderLIT)) else Seq.empty[Token]
+    val finderFloor = sized(UTXO(prover.contract, FinderBoxValue, finderTokens)).value
     val finderValue =
-      if (finderLIT > 0) FinderBoxValue + finderFee
-      else if (finderFee >= FinderBoxValue) finderFee
+      if (finderLIT > 0) finderFloor + finderFee
+      else if (finderFee >= finderFloor) finderFee
       else 0L
     val finderBox =
-      if (finderValue > 0) Seq(UTXO(prover.contract, finderValue,
-        if (finderLIT > 0) Seq(Token(litId, finderLIT)) else Seq.empty[Token]))
+      if (finderValue > 0) Seq(sized(UTXO(prover.contract, finderValue, finderTokens)))
       else Seq.empty[UTXO]
-    val proofOfSpend = UTXO(c.gate, 150000L, Seq(Token(collat.tokens.head.id, 1L)),
+    val proofOfSpend = sized(UTXO(c.gate, 150000L, Seq(Token(collat.tokens.head.id, 1L)),
       Seq(bytesValue(lenderEntry(lenderProp))))
-      .setCreationHeight(blockHeight)
+      .setCreationHeight(blockHeight))
 
     val trailing = founderBoxes ++ permitBox ++ finderBox ++ Seq(proofOfSpend)
     val holdingValue = collat.value - trailing.map(_.value).sum
@@ -348,6 +353,9 @@ class CandidateTxBuilder(prover: NodeWallet, nodeApi: NodeApi, config: Candidate
 
   /** What the finder's LIT box has always been worth, and the floor a bare fee box has to clear. */
   private val FinderBoxValue: Long = 100000L
+
+  /** The node's nanoERG per byte, which every genesis output must clear. */
+  protected def minValuePerByte(ctx: BlockchainContext): Long = BoxMinimum.perByte(ctx)
 
   private def carriesOne(b: IndexedBox, tokenId: ErgoId): Boolean =
     b.assets.headOption.exists(a => a.tokenId == tokenId.toString && a.amount == 1L)

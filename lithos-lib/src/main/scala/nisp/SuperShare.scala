@@ -1,13 +1,10 @@
 package nisp
 
 import org.bouncycastle.util.encoders.Hex
-import org.ergoplatform.sdk.JavaHelpers
-import org.ergoplatform.{AutolykosSolution, ErgoHeader, HeaderWithoutPow, HeaderWithoutPowSerializer}
+import org.ergoplatform.{AutolykosSolution, ErgoHeader, HeaderWithoutPowSerializer}
 import scorex.crypto.hash.Blake2b256
 import scorex.utils.{Ints, Shorts}
-import sigma.GroupElement
 import sigma.crypto.{BigIntegers, Platform}
-import sigma.crypto.Platform.Ecp
 import sigma.data.CHeader
 import sigma.pow.Autolykos2PowValidation
 import sigma.serialization.GroupElementSerializer

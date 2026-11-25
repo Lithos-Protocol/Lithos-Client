@@ -7,7 +7,7 @@ import node.NodeApi
 import org.ergoplatform.appkit.SignedTransaction
 import state.synchronization.CompleteMempool
 import transactions.candidate.BlockTxMessages.CandidateTx
-import scala.concurrent.{Await, ExecutionContext}
+import scala.concurrent.Await
 import scala.concurrent.duration._
 import transactions.engine.wallet.FundingAllocation
 
@@ -29,7 +29,7 @@ private[transactions] object EngineJoinGuard {
  * produces a queue position that can only be cleared or slashed, so every check here fails closed:
  * an incomplete scan means "ineligible", never "free".
  */
-private[transactions] class EngineJoinGuard(owner: ActorRef, api: NodeApi)(implicit ec: ExecutionContext) {
+private[transactions] class EngineJoinGuard(owner: ActorRef, api: NodeApi) {
   import EngineJoinGuard._
   private implicit val timeout: Timeout = Timeout(40.seconds)
 

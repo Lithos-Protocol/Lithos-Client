@@ -56,6 +56,8 @@ final case class ZcSettlement(box: NodeBox, script: ZcScript, bondBoxId: String,
   def namedHash: Option[String] = None
   def asset: String = box.assets.head.tokenId
   def proceeds: Seq[NodeAsset] = box.assets.drop(1)
+  /** The registers a successor keeps: R4 the bond box and R5 whether it was liquidated. Anything after is dropped. */
+  def schemaRegisters: Int = 2
 }
 
 /**
@@ -69,6 +71,8 @@ final case class ZcOffer(box: NodeBox, script: ZcScript, market: ZcMarket, owner
                          metadata: Seq[Array[Byte]], mintHash: Array[Byte]) extends ZcRecord {
   def namedHash: Option[String] = Some(ownerHash)
   def expiry: Long = terms(6)
+  /** The least nanoERG the offer's continuation may hold after a fill. */
+  lazy val restLeast: Long = ZcSizing.offerRestLeast(box)
   /** Capital in the market's unit: the box's nanoERG, or its repayment token. */
   def capital: Long = market.tokenId.fold(box.value)(id => box.assets.filter(_.tokenId == id).map(_.amount).sum)
   /** The yield curve's (yield bps, blocks left) points, after the market's fixed terms. */
@@ -119,6 +123,11 @@ final case class ZcShareVault(box: NodeBox, script: ZcScript, dutch: Boolean, bo
   def shareId: String = box.assets.head.tokenId
   /** Whether the bond unit is still inside, so the vault has not been pulled. */
   def holding: Boolean = box.assets.drop(1).exists(_.tokenId == bondAsset)
+  /**
+   * The registers a successor keeps: R4–R8 for a Dutch vault, R4–R5 for a plain one holding its bond unit, R4–R6 once
+   * pulled. A later register is anyone's to add on a permissionless spend, and a refresh requires it gone.
+   */
+  def schemaRegisters: Int = if (dutch) 5 else if (holding) 2 else 3
 }
 
 /** A `WrapMint` request: one token waiting to be wrapped. Its own id becomes the receipt's. */

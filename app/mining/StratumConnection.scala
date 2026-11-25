@@ -12,10 +12,8 @@ import stratum.message.{Announcement, Response}
 
 import java.math.{BigDecimal, BigInteger}
 import java.net.InetSocketAddress
-import javax.inject.Inject
 import scala.concurrent.duration._
-import scala.language.postfixOps
-import scala.util.{Failure, Success, Try}
+import scala.util.{Failure, Try}
 
 /**
  * Per-miner-connection actor.

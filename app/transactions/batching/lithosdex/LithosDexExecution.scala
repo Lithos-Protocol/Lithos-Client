@@ -11,10 +11,8 @@ import state.synchronization.CompleteMempool
 import transactions.batching.{BatchRun, Batcher, Planned, Priced, RunProblem, RunStrategy}
 import transactions.candidate.BlockTxMessages.{CandidateTx, ChainFromMempool, IncludeExisting, Supersede}
 import transactions.candidate.{CandidateBundle, CandidateCapital, CapitalEntry, CapitalOrigin}
-import transactions.engine.execution.RollupExecution
 import work.lithos.mutations.{Contract, InputUTXO, Token, TxBuilder, UTXO}
 
-import scala.collection.JavaConverters._
 import scala.concurrent.duration.{Deadline, FiniteDuration}
 import scala.util.{Failure, Success, Try}
 

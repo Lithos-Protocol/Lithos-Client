@@ -1,7 +1,6 @@
 package work.lithos
 package mutations
 
-import org.ergoplatform.appkit.Parameters
 
 object StdMutators {
   def newBoxAt(contract: Contract, amount: Long, outputIdx: Int): Mutator = {

@@ -1,7 +1,7 @@
 package state.messages
 
 import lfsm.states.{Rollup, RollupMetadata}
-import state.messages.MempoolMessages.{MempoolChain, MempoolRollupMetadata, MempoolRollupState}
+import state.messages.MempoolMessages.{MempoolRollupMetadata, MempoolRollupState}
 import state.messages.SyncMessages.Transform
 
 object RollupMessages {

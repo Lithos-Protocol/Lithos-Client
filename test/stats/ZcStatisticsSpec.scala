@@ -137,7 +137,7 @@ class ZcStatisticsSpec extends AnyFlatSpec with Matchers {
         ZcBatchTransactions.offerRefundPiece(read[ZcOffer](confirmed(3)), expOfferIn, lender),
         ZcBatchTransactions.askRefundPiece(read[ZcAsk](confirmed(4)), expAskIn, seller),
         ZcBatchTransactions.lotRefundPiece(read[ZcLot](confirmed(5)), expLotIn, seller),
-        ZcBatchTransactions.settlementRefreshPiece(read[ZcSettlement](confirmed(6)), oldVaultIn, h))
+        ZcBatchTransactions.settlementRefreshPiece(ctx, read[ZcSettlement](confirmed(6)), oldVaultIn, h))
 
       // Fee-less local pack
       val localPack = ZcBatchTransactions.pack(ctx, wallet, pieces, wallet.contract, minerFee = 0L, height = h)
@@ -182,7 +182,7 @@ class ZcStatisticsSpec extends AnyFlatSpec with Matchers {
         Seq(bytes("77" * 32), bytes(borrowerHash), longs(2 * Erg, Erg, 2 * Erg, h.toLong + 10000, h.toLong - 500000, Fee, 0L),
           tokens(), bytes(expr(ZcExpression.MaturityLiquidation)), longs(Reserve, old.toLong, h.toLong + 10000)), Some(old)))
       val bondBox = nodeOf(bondIn)
-      val piece = ZcBatchTransactions.bondRefreshPiece(read[ZcBond](bondBox), bondIn, borrower, h)
+      val piece = ZcBatchTransactions.bondRefreshPiece(ctx, read[ZcBond](bondBox), bondIn, borrower, h)
       val refreshed = ZcBatchTransactions.pack(ctx, wallet, Seq(piece), wallet.contract, minerFee = 0L, height = h)
       val tx = decoded(refreshed.signed)
       val fees = BatchingStatistics.read(blockOf(h, Seq(tx), Seq(bondBox)), tx, NetworkType.MAINNET, mine)
@@ -390,6 +390,35 @@ class ZcStatisticsSpec extends AnyFlatSpec with Matchers {
         BatchingFee(txs.last.id, ask.boxId, "arb", plan.netProfit.toString, "0", local = true),
         txs.map(_.id)))
       txs.foreach(tx => BatchingStatistics.read(block, tx, ctx.getNetworkType, mine) shouldBe empty)
+    }
+  }
+
+  it should "attribute a ZC collateral arb broadcast as one transaction under arb, with its miner fee" in {
+    client.execute { ctx =>
+      val h = ctx.getHeight + 1
+      val pA = poolEntry(nativePool(ctx, arbId(1), TokenA, 1000 * Erg, 1000000L))
+      val lotIn = seeded(ctx, UTXO(ZcContracts.script(ZcKind.LotAuction, Some(ZcMarket.Erg)).contract, 3000000L,
+        Seq(tok(TokenA, 5000L)),
+        Seq(bytes(sellerHash), longs(2 * Erg, 2 * Erg, h.toLong - 10, h.toLong + 100, h.toLong + 500, 2000000L)),
+        Some(h - 10)))
+      val book = ZcBook.seeded(h - 1, "00" * 32, Seq(ZcEntry(read[ZcLot](nodeOf(lotIn)), h - 5)), Seq.empty, cut = false)
+      val settings = configs.ZcCollateralArbConfig.Default
+      val planned = ZcMempoolArb.best(book, Map(pA.nft -> pA.pool), Map(pA.nft -> pA.box), _ => Some(seller), h, settings,
+        100000L, Set.empty).get
+      val fundingIn = seeded(ctx, UTXO(wallet.contract, 5 * Erg))
+      val signed = ZcMempoolArb.sign(ctx, wallet, planned, input(ctx, pA.box), input(ctx, nodeOf(lotIn)), Seq(fundingIn),
+        settings)
+      val tx = decoded(signed)
+      val block = blockOf(h, Seq(tx), Seq(nodeOf(lotIn), pA.box, nodeOf(fundingIn)))
+      val net = signed.getOutputsToSpend.get(2).getValue - fundingIn.value
+      BatchingStatistics.arbCycles(block, ctx.getNetworkType, mine) shouldBe Vector(BatchingStatistics.ArbCycle(
+        BatchingFee(tx.id, nodeOf(lotIn).boxId, "arb", net.toString, ZcMempoolArb.TxFee.toString, local = true), Seq(tx.id)))
+      BatchingStatistics.arbCycles(block, ctx.getNetworkType, stranger).map(_.fee.local) shouldBe Vector(false)
+      BatchingStatistics.read(block, tx, ctx.getNetworkType, mine) shouldBe empty
+      // The wallet output paid elsewhere is no arb of anyone's
+      val elsewhere = tx.copy(outputs = tx.outputs.updated(2, tx.outputs(2).copy(ergoTree = stranger)))
+      BatchingStatistics.arbCycles(blockOf(h, Seq(elsewhere), Seq(nodeOf(lotIn), pA.box, nodeOf(fundingIn))),
+        ctx.getNetworkType, mine) shouldBe empty
     }
   }
 }

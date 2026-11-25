@@ -114,7 +114,7 @@ final class ZcReads(tracker: ZcTracker, resolver: ZcResolver, node: () => NodeAp
 
   def info(): JsObject = {
     val s = snap()
-    val o = s.book.confirmedOracle
+    val o = s.book.currentOracle
     val markets = ZcMarket.all.map { m =>
       val contracts = ZcContracts.scripts.filter(c => c.market.forall(_ == m)).map { c =>
         c.kind.name -> Json.obj("treeHash" -> c.treeHash, "templateHash" -> c.templateHash,
@@ -129,7 +129,8 @@ final class ZcReads(tracker: ZcTracker, resolver: ZcResolver, node: () => NodeAp
       "pinnedCommit" -> ZcContracts.PinnedCommit, "deployed" -> s.view.book.boxes.nonEmpty,
       "oracle" -> o.map(or => Json.obj("feed" -> "erg-usd", "boxId" -> or.box.boxId, "nanoErgPerUsd" -> or.price.toString,
         "usdPerErg" -> usdPerErg(BigInt(or.price)), "updatedHeight" -> or.box.creationHeight,
-        "age" -> (s.book.height - or.box.creationHeight), "refreshPending" -> s.book.refreshPending)),
+        "age" -> (s.book.height - or.box.creationHeight), "pending" -> s.book.oraclePending,
+        "refreshPending" -> s.book.refreshPending)),
       "markets" -> markets, "defaults" -> Defaults))
   }
 
@@ -359,7 +360,7 @@ final class ZcReads(tracker: ZcTracker, resolver: ZcResolver, node: () => NodeAp
       from = math.max(h + wlo, at + lo)
       until = math.min(h + whi, at + hi)
       if from <= until
-      best <- (Seq(from, until) ++ c.breakpoints.map(h + _) ++ bidBlocks.map(at + _) ++ gridBetween(from, until))
+      best <- (Seq(from, until) ++ c.breakpoints.map(at + _) ++ bidBlocks.map(at + _) ++ gridBetween(from, until))
         .filter(x => x >= from && x <= until).distinct
         .flatMap { mat =>
           val blocks = mat - at
@@ -380,7 +381,7 @@ final class ZcReads(tracker: ZcTracker, resolver: ZcResolver, node: () => NodeAp
       from = math.max(h + wlo, at + lo)
       until = math.min(h + whi, at + hi)
       if from <= until
-      best <- (Seq(from, until) ++ c.breakpoints.map(h + _) ++ gridBetween(from, until)).filter(x => x >= from && x <= until)
+      best <- (Seq(from, until) ++ c.breakpoints.map(at + _) ++ gridBetween(from, until)).filter(x => x >= from && x <= until)
         .distinct.flatMap(mat => resolvePrincipal(o, h, mat).toOption.map(p =>
           (mat - at, ZcPricing.yieldBps(BigInt(o.repayment), BigInt(p), mat - at).getOrElse(0L), BigInt(p))))
         .sortBy(x => (-x._2, x._1)).headOption
@@ -431,7 +432,7 @@ final class ZcReads(tracker: ZcTracker, resolver: ZcResolver, node: () => NodeAp
 
   private def matchJson(s: Snap, l: Lookups, mt: ZcMatch, sourceKey: String): JsObject = {
     val rec = s.view.record(mt.sourceId).map(_._1)
-    val coverNow = s.book.confirmedOracle.flatMap { or =>
+    val coverNow = s.book.currentOracle.flatMap { or =>
       rec.flatMap {
         case o: ZcOrder => resolvePrincipal(o, s.book.height, mt.maturity).toOption
           .flatMap(p => cover(ZcBondTerms.prospect(o, s.book.height, mt.maturity, p), or.price))
@@ -512,7 +513,7 @@ final class ZcReads(tracker: ZcTracker, resolver: ZcResolver, node: () => NodeAp
           }
         } else {
           val since = (BigInt(h) - BigInt(began)).max(BigInt(0)).min(BigInt(length))
-          val target = BigInt(lotTarget(v, h)).max(BigInt(held))
+          val target = lotTarget(v, h).fold(BigInt(Long.MaxValue))(BigInt(_)).max(BigInt(held))
           val bps = (BigInt(opening) * BigInt(length) - (BigInt(opening) - BigInt(floor)) * since) / BigInt(length)
           val done = BigInt(h) >= BigInt(began) + BigInt(expiry)
           Json.obj("targetRaw" -> target.toString, "payRaw" -> (target - BigInt(held)).toString,
@@ -792,7 +793,7 @@ final class ZcReads(tracker: ZcTracker, resolver: ZcResolver, node: () => NodeAp
   }
 
   private def confirmedBelow(s: Snap, b: ZcBondTerms): Boolean =
-    s.book.confirmedOracle.exists(o => fresh(o, b.payload.lift(1).getOrElse(0L), s.book.height) && belowOwnRatio(b, o.price))
+    s.book.currentOracle.exists(o => fresh(o, b.payload.lift(1).getOrElse(0L), s.book.height) && belowOwnRatio(b, o.price))
 
   private def action(name: String, enabled: Boolean, reason: Option[String]): JsObject =
     Json.obj("name" -> name, "enabled" -> enabled, "reason" -> (if (enabled) None else reason))

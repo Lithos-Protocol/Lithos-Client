@@ -5,7 +5,6 @@ import akka.pattern.{AskTimeoutException, ask}
 import akka.util.Timeout
 import configs.{NodeContext, StateConfig, StratumConfig, TasksConfig}
 import lfsm.LFSMHelpers
-import models.ApiError
 import models.CandidateSettings
 import models.{CommitmentBlock, CommitmentRequest, CommitmentResult, DifficultyCommitment}
 import models.NISPRepresentation

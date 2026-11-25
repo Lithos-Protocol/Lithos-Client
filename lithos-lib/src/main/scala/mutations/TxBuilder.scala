@@ -1,10 +1,9 @@
 package work.lithos
 package mutations
 
-import org.ergoplatform.{ErgoScriptPredef, ErgoTreePredef}
+import org.ergoplatform.ErgoTreePredef
 import org.ergoplatform.appkit.{Address, BlockchainContext, Parameters, PreHeader, UnsignedTransaction, UnsignedTransactionBuilder}
 
-import scala.collection.JavaConverters.seqAsJavaListConverter
 import scala.collection.JavaConverters._
 
 class TxBuilder(ctx: BlockchainContext){

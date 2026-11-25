@@ -20,7 +20,7 @@ import sigmafi.zc.{ZcContracts, ZcExpression, ZcKind, ZcMarket}
 import state.synchronization.CompleteMempool
 import support.{FakeNodeContext, LDNodeFixtures}
 import transactions.batching.tracking.ScriptedChain
-import transactions.candidate.BlockTxMessages.{BlockTxsReady, PrepareBlockTxs, RequestBlockTxs, Supersede}
+import transactions.candidate.BlockTxMessages.{BlockTxsReady, CandidateTx, ChainFromMempool, IncludeExisting, PrepareBlockTxs, RequestBlockTxs, Supersede}
 import transactions.candidate.CandidateBudget
 import work.lithos.mutations.{Contract, InputUTXO, Token, UTXO}
 
@@ -253,6 +253,83 @@ class ZcBatcherSpec extends TestKit(ActorSystem("zc-batcher-spec", ZcBatcherSpec
 
   // ─── ZcTracker.holdsTarget regression ─────────────────────────────────────
 
+  it should "choose a broadcast window match's maturity for the block after the tip, where it lands" in {
+    client.execute { ctx =>
+      val h = 1900000
+      val oracle = oracleNodeBox(ctx, 500000000L, h - 5)
+      // The window ends 723 blocks after the bond's start and the offer takes 720 or more at any of the three blocks a
+      // broadcast may land in, tip + 1 to tip + 3, so only tip + 723 suits both.
+      val window = nodeOf(seeded(ctx, UTXO(ZcContracts.script(ZcKind.PricedOrder, Some(ZcMarket.Erg)).contract, 4 * Erg,
+        Seq.empty, Seq(longs(2 * Erg, Erg, 2 * Erg, 30L, h.toLong + 5000L, Fee, 2L, 15000L, 60L), tokens(),
+          bytes(borrowerHash), bytes(expr(ZcExpression.OracleLiquidation)),
+          bytesList(expr(ZcExpression.CurveOrderPricing), ""), longs(723L, 50000L)), Some(h - 10))))
+      val offer = ergOfferBox(ctx, h, capital = 10 * Erg)
+
+      val chain = new ScriptedChain
+      val tracker = new ZcTracker(() => chain.api, ExecutionContext.global, ZcConfig.Default)
+      val resolver = new ZcResolver(() => chain.api, tracker)
+      discloseTx(chain.api, window, borrower.ergoTreeHex, h - 10)
+      discloseTx(chain.api, offer, lender.ergoTreeHex, h - 10)
+
+      val book = bookOf(h, Some(oracle), offer -> (h - 10), window -> (h - 10))
+      val built = ZcBatchPlanner.build(ctx, wallet, book, resolver, SigmaFiBatchingConfig.Default,
+        signingHeight = h, minerFee = Parameters.MinFee, feeTo = feeTo, slots = 10,
+        allowance = CandidateBudget.Unbounded, deadline = None, broadcastWait = Some(1))
+
+      val matched = built.txs.map(_._1).find(_.kind == ZcBatchTransactions.KindMatchOrder)
+        .getOrElse(fail(s"no match built; failed ${built.failedIds}"))
+      val bond = ZcBoxes.read(ZcBatchTransactions.nodeBoxOf(matched.signed.getOutputsToSpend.get(1), matched.txId, 1))
+        .collect { case b: ZcBond => b }.get
+      bond.maturity shouldBe h + 723L
+    }
+  }
+
+  it should "build the rest of a pack when one of its pieces cannot be built" in {
+    client.execute { ctx =>
+      val h = 1900000
+      val old = h - RefreshAge.toInt - 100
+      val matured = maturedBondBox(ctx, h, "34" * 32)
+      // A Dutch vault of 60 tokens: its refreshed successor would pass the node's 4,096 bytes.
+      val held = (1 to 60).map(i => tok(f"${i + 100}%02x" * 32, 1000L))
+      val vault = nodeOf(seeded(ctx, UTXO(ZcContracts.script(ZcKind.DutchAuctionVault, None).contract, 10 * Erg,
+        tok("35" * 32, 100000001L) +: held, Seq(bytes("36" * 32), longs(100000000L, 100000000L, Fee), byte(2),
+          longs(2 * Erg, 10000L, 9000L, 720L, 2160L, 100L, h.toLong - 5000L), bytes("")), Some(old))))
+      val chain = new ScriptedChain
+      val tracker = new ZcTracker(() => chain.api, ExecutionContext.global, ZcConfig.Default)
+      val resolver = new ZcResolver(() => chain.api, tracker)
+      val book = bookOf(h - 1, None, matured -> (h - 100), vault -> old)
+      val built = ZcBatchPlanner.build(ctx, wallet, book, resolver, SigmaFiBatchingConfig.Default,
+        signingHeight = h, minerFee = 0L, feeTo = feeTo, slots = 10, allowance = CandidateBudget.Unbounded,
+        deadline = None)
+      built.txs.map(_._1.spentIds) shouldBe Vector(Set(matured.boxId))
+      built.failedIds shouldBe Set(vault.boxId)
+    }
+  }
+
+  it should "schedule no share mint whose Dutch auction terms zcs1 would refuse" in {
+    client.execute { ctx =>
+      val h = 1900000
+      val asset = "37" * 32
+      val live = maturedBondBox(ctx, h, asset, maturityOffset = 10000L)
+      def request(floorBps: Long) = nodeOf(seeded(ctx, UTXO(
+        ZcContracts.script(ZcKind.DutchAuctionMint, Some(ZcMarket.Erg)).contract, 20000000L, Seq(tok(asset, 1L)),
+        Seq(bytes(""), bytes(""), byte(0), bytes(lenderHash), longs(100000000L, Fee, Fee, 10000L, floorBps, 720L, 2160L, 100L),
+          ZcUserTransactions.bytesList(Seq("a", "b", "c").map(_.getBytes("UTF-8")))), Some(h - 10))))
+      def attempted(req: NodeBox): Boolean = {
+        val chain = new ScriptedChain
+        val tracker = new ZcTracker(() => chain.api, ExecutionContext.global, ZcConfig.Default)
+        val resolver = new ZcResolver(() => chain.api, tracker)
+        discloseTx(chain.api, req, lender.ergoTreeHex, h - 10)
+        val built = ZcBatchPlanner.build(ctx, wallet, bookOf(h - 1, None, live -> (h - 100), req -> (h - 10)), resolver,
+          SigmaFiBatchingConfig.Default, signingHeight = h, minerFee = 0L, feeTo = feeTo, slots = 10,
+          allowance = CandidateBudget.Unbounded, deadline = None)
+        built.txs.exists(_._1.spentIds.contains(req.boxId)) || built.failedIds.contains(req.boxId)
+      }
+      attempted(request(9000L)) shouldBe true
+      attempted(request(10001L)) shouldBe false
+    }
+  }
+
   "ZcTracker.holdsTarget" should "hold stale followed heights below book.base or already in history without rescanning" in {
     val book = ZcBook.seeded(100, "aa" * 32, Seq.empty, Seq.empty, cut = false)
     ZcTracker.holdsTarget(book, Right(100 -> ("aa" * 32))) shouldBe true
@@ -262,7 +339,81 @@ class ZcBatcherSpec extends TestKit(ActorSystem("zc-batcher-spec", ZcBatcherSpec
 
   // ─── ZcBatcher actor end-to-end ───────────────────────────────────────────
 
-  "ZcBatcher" should "offer fee-less candidate bundles superseding competing mempool spends" in {
+  it should "match at a pending refresh's oracle box when the confirmed one is too old, reading the new box" in {
+    client.execute { ctx =>
+      val h = 1900000
+      val stale = oracleNodeBox(ctx, 500000000L, h - 200)
+      val pending = ZcBoxes.oracle(oracleNodeBox(ctx, 500000000L, h - 1)).get
+      val offer = ergOfferBox(ctx, h, capital = 10 * Erg)
+      val order = ergOrderBox(ctx, h, expiryOffset = 5000L)
+      val chain = new ScriptedChain
+      val tracker = new ZcTracker(() => chain.api, ExecutionContext.global, ZcConfig.Default)
+      val resolver = new ZcResolver(() => chain.api, tracker)
+      discloseTx(chain.api, offer, lender.ergoTreeHex, h - 10)
+      discloseTx(chain.api, order, borrower.ergoTreeHex, h - 10)
+      val book = bookOf(h - 1, Some(stale), offer -> (h - 10), order -> (h - 10))
+      def build(b: ZcBook) = ZcBatchPlanner.build(ctx, wallet, b, resolver, SigmaFiBatchingConfig.Default,
+        signingHeight = h, minerFee = 0L, feeTo = feeTo, slots = 10, allowance = CandidateBudget.Unbounded, deadline = None)
+      build(book).txs.filter(_._1.kind == ZcBatchTransactions.KindMatchOrder) shouldBe empty
+      val matched = build(book.withOracle(pending)).txs.filter(_._1.kind == ZcBatchTransactions.KindMatchOrder)
+      matched should have size 1
+      val read = matched.head._1.signed.asInstanceOf[org.ergoplatform.appkit.impl.SignedTransactionImpl].getTx.dataInputs
+        .map(d => Hex.toHexString(d.boxId))
+      read shouldBe Seq(pending.box.boxId)
+    }
+  }
+
+  "ZcBatcher" should "carry a pending oracle refresh ahead of the candidate bundle that reads its box" in {
+    val chain = new ScriptedChain
+    val tip = 1900000
+    chain.extend(tip - 200, tip)
+    chain.indexed = tip
+    val (nodeContext, _, _) = FakeNodeContext(chain.api, numAddresses = 3)
+    val (stale, fresh, offer, order) = nodeContext.getClient.execute { ctx =>
+      (oracleNodeBox(ctx, 500000000L, tip - 150), oracleNodeBox(ctx, 500000000L, tip),
+        ergOfferBox(ctx, tip + 1, capital = 10 * Erg), ergOrderBox(ctx, tip + 1, expiryOffset = 5000L))
+    }
+    chain.scans(LDNodeFixtures.indexed(stale, tip - 150), LDNodeFixtures.indexed(offer, tip - 10),
+      LDNodeFixtures.indexed(order, tip - 10))
+    discloseTx(chain.api, offer, lender.ergoTreeHex, tip - 10)
+    discloseTx(chain.api, order, borrower.ergoTreeHex, tip - 10)
+    val tracker = new ZcTracker(() => chain.api, ExecutionContext.global, ZcConfig.Default)
+    val resolver = new ZcResolver(() => chain.api, tracker)
+    tracker.poke()
+    awaitAssert(tracker.book.map(_.height) shouldBe Some(tip), 10.seconds, 50.millis)
+    tracker.book.flatMap(_.oracle).map(_.box.boxId) shouldBe Some(stale.boxId)
+
+    val refreshId = "fa" * 32
+    val refresh = CompleteMempool.MempoolTx(refreshId,
+      NodeTransaction(refreshId, Seq(NodeInput(stale.boxId, NodeSpendingProof.empty)), Seq.empty, Seq(fresh)), 800)
+    val anchor = chain.header(tip).id
+    val engine = TestProbe()
+    engine.setAutoPilot(new TestActor.AutoPilot {
+      def run(sender: ActorRef, msg: Any): TestActor.AutoPilot = {
+        if (msg == CompleteMempool.Refresh) sender ! CompleteMempool.Observation(1L, Some(CompleteMempool.Snapshot(
+          anchor, Set(refreshId), Set(stale.boxId), System.nanoTime(), transactions = Vector(refresh))), None)
+        this
+      }
+    })
+    val settings = SigmaFiBatchingConfig(BatchingConfig.Default.copy(scanIntervalMs = 3600000L, broadcast = false),
+      broadcastAfterBlocks = 1, minBatchingFeeNanoErg = Reserve, minActionFeeNanoErg = 2000000L)
+    val batcher = system.actorOf(Props(new ZcBatcher(nodeContext, settings, servesCandidates = true,
+      engine.ref, tracker, resolver, useTrueProp = false)))
+    val requester = TestProbe()
+    requester.send(batcher, PrepareBlockTxs(tip + 1, 10, anchor))
+    requester.send(batcher, RequestBlockTxs(tip + 1, 10))
+    val ready = requester.expectMsgType[BlockTxsReady]
+
+    val reading = ready.bundles.filter(_.members.exists(_.kind == ZcBatchTransactions.KindMatchOrder))
+    reading should have size 1
+    reading.head.members.map(_.kind) shouldBe Vector(CandidateTx.MempoolAncestor, ZcBatchTransactions.KindMatchOrder)
+    reading.head.members.head.id shouldBe refreshId
+    reading.head.interactions should contain allOf(ChainFromMempool(refreshId), IncludeExisting(refreshId))
+    reading.head.carriesItsParents shouldBe true
+    system.stop(batcher)
+  }
+
+  it should "offer fee-less candidate bundles superseding competing mempool spends" in {
     val chain = new ScriptedChain
     val tip = 1900000
     chain.extend(tip - 20, tip)

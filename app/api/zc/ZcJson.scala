@@ -34,7 +34,7 @@ final class ZcJson(matcher: ZcMatcher, known: ZcKnown) {
   private val book = matcher.book
   private val height: Long = book.height.toLong
   private val oracle = book.oracle
-  private val confirmedOracle = book.confirmedOracle
+  private val currentOracle = book.currentOracle
 
   def str(n: Long): JsString = JsString(n.toString)
   def str(n: BigInt): JsString = JsString(n.toString)
@@ -48,7 +48,7 @@ final class ZcJson(matcher: ZcMatcher, known: ZcKnown) {
   private def created(r: ZcRecord, pending: Boolean): JsValue =
     if (pending) JsNull else book.view.book.entry(r.boxId).map(e => JsNumber(e.height)).getOrElse(JsNull)
 
-  def coverBps(b: ZcBondTerms): Option[Long] = confirmedOracle.flatMap(o => cover(b, o.price)).map(ratioBps)
+  def coverBps(b: ZcBondTerms): Option[Long] = currentOracle.flatMap(o => cover(b, o.price)).map(ratioBps)
 
   def rule(liqHash: String, market: ZcMarket, payload: IndexedSeq[Long]): JsObject = {
     val kind = ZcRules.rule(liqHash, market)
@@ -73,7 +73,7 @@ final class ZcJson(matcher: ZcMatcher, known: ZcKnown) {
   /** The oracle a box that reads it would get now, as a pause reason when it cannot. */
   private def oraclePause(age: Long): Option[String] =
     if (book.refreshPending) Some("oracleRefreshPending")
-    else confirmedOracle match {
+    else currentOracle match {
       case None => Some("oracleStale")
       case Some(o) if !fresh(o, age, height) => Some("oracleStale")
       case _ => None
@@ -97,7 +97,7 @@ final class ZcJson(matcher: ZcMatcher, known: ZcKnown) {
       val guardAge = if (o.guardHash.isDefined) o.payload.lift(1) else None
       val pauses = guardAge.flatMap(oraclePause).toSeq ++
         bond.toSeq.flatMap(b => guardRefusal(o, b, oracle, height).filter(_ => oracle.isDefined).map(_ => "guard")) ++
-        bond.toSeq.flatMap(b => confirmedOracle.filter(or => belowOwnRatio(b, or.price)).map(_ => "underRatio"))
+        bond.toSeq.flatMap(b => currentOracle.filter(or => belowOwnRatio(b, or.price)).map(_ => "underRatio"))
       ZcStanding(if (pauses.isEmpty) "ok" else "paused", pauses.distinct, checks)
     }
   }
@@ -130,7 +130,7 @@ final class ZcJson(matcher: ZcMatcher, known: ZcKnown) {
         val bond = ZcBondTerms.of(s.bond.record)
         val pauses = saleGuard(a).flatMap { case (_, age) => oraclePause(age) }.toSeq ++
           saleGuardRefusal(a, bond, oracle, height).filter(_ => oracle.isDefined).map(_ => "guard").toSeq ++
-          confirmedOracle.filter(or => belowOwnRatio(bond, or.price)).map(_ => "underRatio").toSeq
+          currentOracle.filter(or => belowOwnRatio(bond, or.price)).map(_ => "underRatio").toSeq
         ZcStanding(if (pauses.isEmpty) "ok" else "paused", pauses.distinct, checks)
     }
   }
@@ -311,7 +311,8 @@ final class ZcJson(matcher: ZcMatcher, known: ZcKnown) {
         "refreshFrom" -> (b.box.creationHeight + RefreshAge + 1L),
         "origin" -> originJson, "settlement" -> JsNull, "pending" -> book.bonds(asset).pending,
         "mine" -> known.mine(b.borrowerHash), "borrowedByMe" -> known.mine(b.borrowerHash),
-        "checks" -> Seq(originCheck).map(c => Json.obj("key" -> c.key, "ok" -> c.ok, "detail" -> c.detail)))
+        "checks" -> Seq(originCheck, collateralCheck(b.collateral.size))
+          .map(c => Json.obj("key" -> c.key, "ok" -> c.ok, "detail" -> c.detail)))
     }.orElse(settled.map { s =>
       val v = s.record
       Json.obj("assetId" -> asset, "stateBoxId" -> v.boxId, "state" -> (if (v.liquidated) "liquidated" else "repaid"),
@@ -321,6 +322,11 @@ final class ZcJson(matcher: ZcMatcher, known: ZcKnown) {
         "checks" -> Seq(originCheck).map(c => Json.obj("key" -> c.key, "ok" -> c.ok, "detail" -> c.detail)))
     })
   }
+
+  /** Whether a bond's collateral fits a Dutch vault: one that holds more cannot be split into Dutch shares. */
+  private def collateralCheck(n: Int): ZcCheck =
+    ZcCheck("collateralTokens", Some(n <= ZcSizing.MaxCollateralTokens),
+      s"$n collateral tokens; a Dutch vault takes at most ${ZcSizing.MaxCollateralTokens}")
 
   private def principalOf(b: ZcBond): Long = if (b.market.tokenId.isEmpty) b.terms(1) else b.principalTokens.headOption.fold(0L)(_.amount)
 
@@ -339,10 +345,11 @@ final class ZcJson(matcher: ZcMatcher, known: ZcKnown) {
       "vault" -> Json.obj("boxId" -> v.boxId, "contract" -> v.script.kind.name, "state" -> v.state.map(_.toInt),
         "pulled" -> !v.holding, "outstanding" -> str(v.outstanding), "nanoErg" -> str(v.box.value),
         "tokens" -> tokens(v.box.assets.drop(1)), "auctionStart" -> v.auction.lift(6).filter(_ > 0L), "pending" -> open.pending),
-      "minLot" -> repayment.filter(_ > 0L).map(r => str(math.max(1L, (v.shares + r - 1L) / r))),
-      "checks" -> Seq(
+      "minLot" -> repayment.filter(_ > 0L).map(r => ((BigInt(v.shares) + r - 1) / r).max(BigInt(1)).toString),
+      "checks" -> (Seq(
         ZcCheck("origin", if (mint.isEmpty) None else Some(claim.isRight), claim.fold(identity, _ => "a standard share mint")),
-        ZcCheck("shareCount", Some(v.shares == ShareCount), s"${v.shares} raw shares"))
+        ZcCheck("shareCount", Some(v.shares == ShareCount), s"${v.shares} raw shares")) ++
+        book.bonds.get(v.bondAsset).filter(_ => v.dutch).map(b => collateralCheck(b.record.collateral.size)).toSeq)
         .map(c => Json.obj("key" -> c.key, "ok" -> c.ok, "detail" -> c.detail)))
   }
 }

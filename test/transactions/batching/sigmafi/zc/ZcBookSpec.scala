@@ -2,7 +2,7 @@ package transactions.batching.sigmafi.zc
 
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
-import sigmafi.zc.ZcKind
+import sigmafi.zc.{ZcContracts, ZcKind}
 
 /**
  * The book as blocks change it. These pin the spam rules (a state box joins only from its token's previous state
@@ -160,7 +160,27 @@ class ZcBookSpec extends AnyFlatSpec with Matchers {
     first.oracleSpentBy shouldBe Some(refresh.id)
     val second = ZcMempool.over(b, snapshot(b.headerId, fill, refresh), Some(first)).get
     (second.pending(id(63)).record eq first.pending(id(63)).record) shouldBe true
-    ZcView(b, Some(second), 0L).refreshPending shouldBe true
+    second.refresh.map(_.firstSeen) shouldBe first.refresh.map(_.firstSeen)
+    val view = ZcView(b, Some(second), 0L)
+    view.refreshPending shouldBe false
+    view.pendingOracle.map(_.box.boxId) shouldBe Some(id(64))
+    view.oracle.map(_.box.boxId) shouldBe Some(id(64))
+  }
+
+  it should "pause oracle trades while two refreshes compete, or one leaves no oracle that reads" in {
+    val b = apply(emptyBook(h0), zcTx("30" * 32, Seq(id(900)), Seq(oracleBox(id(80)))))
+    val one = nodeTx("31" * 32, Seq(id(80)), Seq(oracleBox(id(81), price = 400000000L)))
+    val rival = nodeTx("32" * 32, Seq(id(80)), Seq(oracleBox(id(82))))
+    val broken = nodeTx("33" * 32, Seq(id(80)), Seq(wallet(id(83), assets = Seq(ZcContracts.OracleNft -> 1L))))
+    val single = ZcView(b, ZcMempool.over(b, snapshot(b.headerId, one), None), 0L)
+    single.pendingOracle.map(_.price) shouldBe Some(400000000L)
+    val competing = ZcView(b, ZcMempool.over(b, snapshot(b.headerId, one, rival), None), 0L)
+    competing.mempool.get.oracleSpends shouldBe 2
+    competing.refreshPending shouldBe true
+    competing.pendingOracle shouldBe None
+    competing.oracle.map(_.box.boxId) shouldBe Some(id(80))
+    ZcView(b, ZcMempool.over(b, snapshot(b.headerId, broken), None), 0L).refreshPending shouldBe true
+    single.fingerprint should not be ZcView(b, ZcMempool.over(b, snapshot(b.headerId, rival), None), 0L).fingerprint
   }
 
   "The view's fingerprint" should "change with the block or the mempool's effect, and only then" in {

@@ -12,7 +12,6 @@ import sigma.Colls
 import transactions.batching.lithosdex.LDBoxes.Provision
 import work.lithos.mutations.{InputUTXO, Token, TxBuilder, UTXO}
 
-import scala.util.control.NonFatal
 
 /**
  * The seven LithosDex transactions.

@@ -24,6 +24,7 @@ final case class ArbPoolEntry(pool: ArbPool, box: NodeBox) {
       case _: ErgoDexArbPool => ErgoDexPool.parse(candidate).map(ErgoDexArbPool)
       case p: LithosDexArbPool => Some(LithosDexArbPool(candidate.toInputUTXO(ctx), p.contracts))
       case p: LithosDexT2TArbPool => Some(LithosDexT2TArbPool(candidate.toInputUTXO(ctx), p.contracts))
+      case _: SigmaUsdArbPool => None
     }).toOption.flatten.filter(_.boxId == candidate.boxId)
 }
 
@@ -39,7 +40,8 @@ final case class ArbIndex(height: Int, pools: Map[String, ArbPoolEntry], routes:
 
 /**
  * Builds arb's pool index from the tracked pools: ErgoDEX native and token pools less denied ones and those
- * whose box is older than `maxPoolAgeBlocks`, and LithosDex pools of both kinds whose vault stands. Nothing is
+ * whose box is older than `maxPoolAgeBlocks`, LithosDex pools of both kinds whose vault stands, and both sides of the
+ * SigmaUSD bank priced at the tracked oracle box (rebuilt every time, since the oracle moves without the bank). Nothing is
  * scanned; the only node reads are a LithosDex vault seen for the first time.
  */
 object ArbDiscovery {
@@ -75,11 +77,15 @@ object ArbDiscovery {
       !denied.contains(t.nft.toLowerCase) && (t.deployment match {
         case PoolDeployment.ErgoDexNative | PoolDeployment.ErgoDexToken =>
           tracked.height - t.inclusionHeight <= ergoDex.maxPoolAgeBlocks
+        case PoolDeployment.SigmaUsdOracle => false
         case _ => true
       })
     }.toVector.sortBy(_.nft)
+    val oracle = tracked.pools.find(_.deployment == PoolDeployment.SigmaUsdOracle).map(_.box)
     val parsed = qualifying.flatMap { t =>
-      known.get(t.nft).filter(_.box.boxId == t.boxId).orElse(if (!standing(t.deployment)) None else entry(ctx, t))
+      if (t.deployment == PoolDeployment.SigmaUsdBank)
+        oracle.toSeq.flatMap(o => SigmaUsdArbPool.read(t.box, o)).map(ArbPoolEntry(_, t.box))
+      else known.get(t.nft).filter(_.box.boxId == t.boxId).orElse(if (!standing(t.deployment)) None else entry(ctx, t)).toSeq
     }.map(e => e.nft -> e).toMap
 
     previous.filter(p => p.parsed.keySet == parsed.keySet) match {
@@ -106,6 +112,7 @@ object ArbDiscovery {
       case PoolDeployment.ErgoDexNative | PoolDeployment.ErgoDexToken => ErgoDexPool.parse(box).map(ErgoDexArbPool)
       case PoolDeployment.LithosDexNative(c) => Some(LithosDexArbPool(box.toInputUTXO(ctx), c))
       case PoolDeployment.LithosDexToken(c) => Some(LithosDexT2TArbPool(box.toInputUTXO(ctx), c))
+      case PoolDeployment.SigmaUsdBank | PoolDeployment.SigmaUsdOracle => None
     }
     pool.filter(_.boxId == box.boxId).map(ArbPoolEntry(_, box))
   }.toOption.flatten

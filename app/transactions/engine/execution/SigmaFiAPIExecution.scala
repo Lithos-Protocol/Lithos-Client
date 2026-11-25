@@ -688,7 +688,7 @@ class SigmaFiAPIExecution(nodeContext: NodeContext,
 
   /** Sends `signed`. A throw from here comes before the node call, so the engine's stop is reported as nothing sent. */
   private def broadcast(signed: SignedTransaction, funding: Seq[FundingAllocation]): EngineBroadcast.Result =
-    try new EngineBroadcast(walletSelector.walletRef, executionNode)(walletSelector.executionContext)
+    try new EngineBroadcast(walletSelector.walletRef, executionNode)
       .send(signed, funding, operation(signed), alive)
     catch { case _: IllegalArgumentException if !alive() => throw stopped }
 

@@ -19,7 +19,7 @@ class ZcContractsSpec extends AnyFlatSpec with Matchers {
     (ZcKind.FractionalMint, None, "e4e27a1ddc8d4e431c0d1b0f0d178cbefa74eea924917c730726e2799d9b259c", "cc52aadf4d985c832d5272bc5dac6cb63a82825571feab204f75c79c08d81655"),
     (ZcKind.DutchAuctionVault, None, "a06947169baf279e8b8520d1d6ab8e2da944b73f1d9bad1c6e66a7aed8a95552", "ca31beaaf7e956b9335f0b7445080e6d6d9e90523da9e02020834579cc09b14e"),
     (ZcKind.WrapVault, None, "181c3ac1ff619d82515c5af3dc93af5360e0ef30e4abab95406537b8d4d38177", "80cb3ac721bcd186fa72dc029feefd8daa76a60a44078f24f8623776554237d0"),
-    (ZcKind.WrapMint, None, "893c20eedb43e82ebf05f0f345cec7acb4d47c33b7dbf556fad27b2d6ac2595e", "b2f5569cea01a13d249e23612ae3b6bc224c390b0d48fd2c0573456b1510cb1f"),
+    (ZcKind.WrapMint, None, "95dd499a9ea4c10c14ce474a5ee916f60236b1eec379ae04f170d22b2a651a47", "9972a876f976da80074b4e0d81fc4cc1b731df11ca5f0128f8d072883b48dcba"),
     (ZcKind.Bond, Some(Erg), "319a66e05ae32391584bb6f649e1c91dfb2eead2c496768c53de0a101c1114c5", "1a4cf42f39a1cfd057d3914effeffb71d059be5581393f6e6037bf1d31a4c20b"),
     (ZcKind.Order, Some(Erg), "802a89eb52be746700099523bbba257e51805ea8fbc4c795a19c45b1d650b4fe", "2bd49c8c8602085776b854e106f27115387a8f0020ba6c0332211ea5a222f69a"),
     (ZcKind.LendOffer, Some(Erg), "5fac97abf7d708d6e83b0600404fbd0b0ff33466afb134fb09713f08bdbd1844", "73daef976f7574a8fd350bd804f593eea14577faa6747959aad6efdf3f00b686"),

@@ -17,10 +17,12 @@ import play.api.{ConfigLoader, Configuration}
  * @param zcMaxCostNanoErg        most ERG one ZC collateral arb may put in; 0 uses `stakeNanoErg`
  * @param zcMaxBundlesPerBlock    most ZC collateral arb bundles built in one block
  * @param zcMinLegProceedsNanoErg least ERG an AMM swap of one collateral token must return to be worth a leg
+ * @param pendingSwaps            whether cycles may back-run pending swaps on a pool, carrying them first
  */
 case class ArbConfig(enabled: Boolean, stakeNanoErg: Long, minProfitNanoErg: Long, autoReserve: Boolean = true,
                      zcEnabled: Boolean = true, zcMinProfitNanoErg: Long = 1000000L, zcMaxCostNanoErg: Long = 0L,
-                     zcMaxBundlesPerBlock: Int = 5, zcMinLegProceedsNanoErg: Long = 100000L)
+                     zcMaxBundlesPerBlock: Int = 5, zcMinLegProceedsNanoErg: Long = 100000L,
+                     pendingSwaps: Boolean = true)
 
 object ArbConfig {
 
@@ -31,7 +33,7 @@ object ArbConfig {
   val Default: ArbConfig =
     ArbConfig(enabled = true, stakeNanoErg = 10000000000L, minProfitNanoErg = 1000000L, autoReserve = true,
       zcEnabled = true, zcMinProfitNanoErg = 1000000L, zcMaxCostNanoErg = 0L, zcMaxBundlesPerBlock = 5,
-      zcMinLegProceedsNanoErg = 100000L)
+      zcMinLegProceedsNanoErg = 100000L, pendingSwaps = true)
 
   def apply(config: Configuration): ArbConfig = {
     def path(key: String): String = s"batching.$Name.$key"
@@ -49,7 +51,9 @@ object ArbConfig {
       zcMaxBundlesPerBlock =
         config.getOptional(path("zcMaxBundlesPerBlock"))(ConfigLoader.intLoader).getOrElse(Default.zcMaxBundlesPerBlock),
       zcMinLegProceedsNanoErg =
-        config.getOptional(path("zcMinLegProceedsNanoErg"))(ConfigLoader.longLoader).getOrElse(Default.zcMinLegProceedsNanoErg))
+        config.getOptional(path("zcMinLegProceedsNanoErg"))(ConfigLoader.longLoader).getOrElse(Default.zcMinLegProceedsNanoErg),
+      pendingSwaps =
+        config.getOptional(path("pendingSwaps"))(ConfigLoader.booleanLoader).getOrElse(Default.pendingSwaps))
   }
 
   /**

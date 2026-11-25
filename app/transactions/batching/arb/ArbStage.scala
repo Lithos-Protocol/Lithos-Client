@@ -5,14 +5,17 @@ import configs.{ArbConfig, BatchingConfig, NodeContext}
 import node.model.NodeBox
 import org.slf4j.{Logger, LoggerFactory}
 import transactions.batching.lithosdex.LDDeployments
-import transactions.batching.sigmafi.zc.{ZcBook, ZcCollateralArb, ZcResolver, ZcTracker}
-import transactions.batching.tracking.{PoolDeployment, PoolTracker}
-import transactions.candidate.BlockTxMessages.{BlockTxsReady, CandidateTxsDropped, PrepareBlockTxs, RequestArbTxs}
+import transactions.batching.sigmafi.zc.{ZcBook, ZcResolver, ZcTracker}
+import akka.pattern.ask
+import akka.util.Timeout
+import state.synchronization.CompleteMempool
+import transactions.batching.tracking.{PoolDeployment, PoolTracker, TrackedPools}
+import transactions.candidate.BlockTxMessages.{BlockTxsReady, CandidateTx, CandidateTxsDropped, PrepareBlockTxs, RequestArbTxs}
 import transactions.candidate.{CandidateBundle, CandidateCapital}
 import work.lithos.mutations.UTXO
 
 import scala.concurrent.duration._
-import scala.concurrent.{ExecutionContext, Future}
+import scala.concurrent.{Await, ExecutionContext, Future}
 import scala.util.{Failure, Success, Try}
 
 /**
@@ -29,8 +32,13 @@ import scala.util.{Failure, Success, Try}
  * first, with or without a stake; token/token grid orders it hands over run on the stake, before the cycles.
  *
  * @param buildBudgetMs how long one build may run; selection stops at half of it
+ * With `batching.arb.pendingSwaps` on, a build also reads the mempool observation the batchers' round already took
+ * (never a walk of its own) when it was taken on the same parent, and pools the batchers left alone stand where
+ * their pending swaps leave them; a new pending pool spend makes a refresh at the same height build again.
+ *
  * @param machina       where the ErgoDEX batcher hands over the Machina orders a LithosDex pool pays more for, and
  *                      token/token grids
+ * @param mempool       the mempool view, asked only for the observation it holds
  */
 class ArbStage(nodeContext: NodeContext,
                arb: ArbConfig,
@@ -42,7 +50,8 @@ class ArbStage(nodeContext: NodeContext,
                buildBudgetMs: Long,
                machina: MachinaHandoff = MachinaHandoff.idle,
                zcTracker: Option[ZcTracker] = None,
-               zcResolver: Option[ZcResolver] = None) extends Actor {
+               zcResolver: Option[ZcResolver] = None,
+               mempool: Option[ActorRef] = None) extends Actor {
 
   import ArbStage._
 
@@ -55,6 +64,8 @@ class ArbStage(nodeContext: NodeContext,
   private var index: Option[ArbIndex] = None
   /** The last complete build, which a build with the same inputs answers with. */
   private var last: Option[LastBuild] = None
+  /** The last pending view, which a build on the same observation reuses. */
+  private var pendingView: Option[ArbPending] = None
   private var building = false
   /** Pool and route counts and the route cap last logged, so the index logs only when they change. */
   private var logged: (Int, Int, Boolean) = (-1, -1, false)
@@ -98,8 +109,8 @@ class ArbStage(nodeContext: NodeContext,
         replyTo ! BlockTxsReady(blockHeight, Seq.empty)
       } else {
         building = true
-        val (previous, previousBuild) = (index, last)
-        offMailbox(buildFor(previous, previousBuild, blockHeight, limit, basis))(result =>
+        val (previous, previousBuild, previousPending) = (index, last, pendingView)
+        offMailbox(buildFor(previous, previousBuild, previousPending, blockHeight, limit, basis))(result =>
           Built(blockHeight, replyTo, result))
       }
 
@@ -117,6 +128,7 @@ class ArbStage(nodeContext: NodeContext,
             }
           }
           outcome.build.foreach(b => last = Some(b))
+          outcome.pending.foreach(p => pendingView = Some(p))
           outcome.bundles
         case Failure(ex) =>
           logger.warn(s"Arb build for block $blockHeight failed, offering no cycles: ${ex.getMessage}")
@@ -130,8 +142,8 @@ class ArbStage(nodeContext: NodeContext,
   }
 
   /** Cycles for `blockHeight`, on the pools as of its parent and the stake found unspent after that parent. */
-  private def buildFor(previous: Option[ArbIndex], previousBuild: Option[LastBuild], blockHeight: Int, limit: Int,
-                       basisBundles: Seq[CandidateBundle]): Outcome = {
+  private def buildFor(previous: Option[ArbIndex], previousBuild: Option[LastBuild], previousPending: Option[ArbPending],
+                       blockHeight: Int, limit: Int, basisBundles: Seq[CandidateBundle]): Outcome = {
     val started = Deadline.now
     // A quarter of the budget at most, so selection, which stops at half, keeps at least a quarter
     tracker.at(blockHeight - 1, (buildBudgetMs / 4).milliseconds) match {
@@ -139,6 +151,7 @@ class ArbStage(nodeContext: NodeContext,
         logger.debug(s"Pool tracking has not read the parent of block $blockHeight; offering no cycles")
         Outcome(None, None, Seq.empty)
       case Some(tracked) =>
+        val pending = pendingFor(tracked, previousPending)
         val nodeApi = nodeContext.getNodeApi
         val found = nodeContext.getClient.execute(ctx => ArbDiscovery.index(ctx, tracked, previous, ergoDex,
           deniedPools, {
@@ -164,20 +177,21 @@ class ArbStage(nodeContext: NodeContext,
           res <- zcResolver
         } yield {
           val cap = if (arb.zcMaxCostNanoErg > 0L) arb.zcMaxCostNanoErg else arb.stakeNanoErg
+          // A box this client's own broadcast already buys is left to that transaction, which the block can carry
           ArbCycles.ZcArbContext(book, res, arb.zcMaxBundlesPerBlock, cap,
             math.max(arb.zcMinProfitNanoErg, MinProfitOutput), arb.zcMinLegProceedsNanoErg,
-            skippedZc(), refuseZc)
+            skippedZc() ++ zcTracker.fold(Set.empty[String])(_.ownArbs.boxes), refuseZc)
         }
         def built(stake: Option[NodeBox], maxIn: Long, reserve: String => Boolean): Seq[CandidateBundle] =
           nodeContext.getClient.execute(ctx => ArbCycles.build(ctx, wallet, found, basis, stake, orders, minFill,
             blockHeight, limit, maxIn, minProfit, CandidateCapital.collectionContract(wallet, useTrueProp),
-            selectUntil, buildUntil, reserve, machina.refuse, zcCtx))
-        stakes.at(blockHeight, tracked.headerId) match {
+            selectUntil, buildUntil, reserve, machina.refuse, zcCtx, pending))
+        val outcome = stakes.at(blockHeight, tracked.headerId) match {
           case Some(stake) =>
             val maxIn = math.min(arb.stakeNanoErg, stake.value - ArbLeg.MinCarryValue)
             val key = BuildKey(blockHeight, tracked.headerId, stake.boxId, basis, limit, maxIn, minProfit,
               orders.map(o => o.boxId -> o.poolNft), zcBook.map(_.headerId).getOrElse(""),
-              zcResolver.map(_.generation).getOrElse(0L))
+              zcResolver.map(_.generation).getOrElse(0L), pending.key)
             def reserve(boxId: String): Boolean = stakes.handOn(stake.boxId, boxId, blockHeight)
             previousBuild.filter(b => b.key == key && b.routes.eq(found.routes) && b.reserved.forall(reserve)) match {
               case Some(same) => Outcome(Some(found), Some(same), same.bundles)
@@ -199,8 +213,41 @@ class ArbStage(nodeContext: NodeContext,
             logger.debug(s"No arb stake to build on for block $blockHeight; offering no cycles")
             Outcome(Some(found), None, Seq.empty)
         }
+        val carried = outcome.bundles.flatMap(_.members).count(_.kind == CandidateTx.MempoolAncestor)
+        if (carried > 0)
+          logger.info(s"Arb carries $carried pending transaction(s) into block $blockHeight ahead of its cycles")
+        outcome.copy(pending = Some(pending).filter(_.revision >= 0L))
     }
   }
+
+  /**
+   * The pending pool spends for a build on `tracked`, from the observation the mempool view holds when it was
+   * taken on that same block, reused while the observation is the same one. Empty with the option off, with no
+   * observation, or with one taken on another block.
+   */
+  private def pendingFor(tracked: TrackedPools, previous: Option[ArbPending]): ArbPending =
+    if (!arb.pendingSwaps) ArbPending.Empty
+    else mempool.flatMap { ref =>
+      val wait = math.max(1L, math.min(PendingObservationWaitMs, buildBudgetMs / 8)).milliseconds
+      Try(Await.result((ref ? CompleteMempool.Latest)(Timeout(wait)).mapTo[CompleteMempool.Observation], wait))
+        .toOption
+    }.flatMap(observed => observed.snapshot.map(observed.revision -> _))
+      .filter { case (_, snapshot) => snapshot.anchor.equalsIgnoreCase(tracked.headerId) } match {
+      case None => ArbPending.Empty
+      case Some((revision, snapshot)) =>
+        previous.filter(p => p.revision == revision && p.anchor == snapshot.anchor).getOrElse {
+          val nodeApi = nodeContext.getNodeApi
+          val pools = tracked.pools.filter(t => PoolDeployment.dex(t.deployment)).map(t => t.nft -> t.box).toMap
+          // A view that cannot be built leaves every pool confirmed, as with the option off
+          Try(ArbPending.of(snapshot, revision, pools,
+            ids => nodeApi.boxesWithPoolByIds(ids).get.map(b => b.boxId -> b).toMap,
+            previous.map(_.boxes).getOrElse(Map.empty))).recover { case ex =>
+            logger.warn(s"Could not read the pending pool spends for block ${tracked.height + 1}; pricing " +
+              s"confirmed pools only: ${ex.getMessage}")
+            ArbPending.Empty
+          }.get
+        }
+    }
 
   /** Runs `work` on the worker and delivers its result as `wrap`, including a refused submission. */
   private def offMailbox[T](work: => T)(wrap: Try[T] => Any): Unit =
@@ -219,12 +266,14 @@ object ArbStage {
 
   /**
    * Everything a build's fills, ZC arbs and cycles follow from besides the pool states, which `headerId` and the
-   * basis fix: `machina` is each handed-over order's box id and pool; `zcHeader` and `zcGen` track ZC state.
+   * basis fix: `machina` is each handed-over order's box id and pool; `zcHeader` and `zcGen` track ZC state;
+   * `pending` names the pending pool spends the build carried or displaced.
    */
   private[arb] final case class BuildKey(blockHeight: Int, headerId: String, stakeId: String, basis: ArbBasis,
                                          limit: Int, maxIn: Long, minProfit: Long,
                                          machina: Vector[(String, String)] = Vector.empty,
-                                         zcHeader: String = "", zcGen: Long = 0L)
+                                         zcHeader: String = "", zcGen: Long = 0L,
+                                         pending: Vector[String] = Vector.empty)
 
   /**
    * A complete build: its key, the routes it priced, the stake outputs it had the wallet hold, in order, and the
@@ -233,8 +282,12 @@ object ArbStage {
   private[arb] final case class LastBuild(key: BuildKey, routes: Vector[ArbRoute], reserved: Vector[String],
                                           bundles: Seq[CandidateBundle])
 
-  /** A build's result: the index it read, the build to reuse next time, and the cycles it offers. */
-  private[arb] final case class Outcome(index: Option[ArbIndex], build: Option[LastBuild], bundles: Seq[CandidateBundle])
+  /** A build's result: the index it read, the build to reuse next time, the cycles it offers, and its pending view. */
+  private[arb] final case class Outcome(index: Option[ArbIndex], build: Option[LastBuild], bundles: Seq[CandidateBundle],
+                                        pending: Option[ArbPending] = None)
+
+  /** Longest a build waits for the mempool view to answer with the observation it holds. */
+  private[arb] final val PendingObservationWaitMs: Long = 250L
 
   private[arb] final case class Built(blockHeight: Int, replyTo: ActorRef, result: Try[Outcome])
 

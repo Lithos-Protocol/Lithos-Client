@@ -53,19 +53,21 @@ object ZcMarketFixtures {
    */
   def ergOffer(boxId: String, value: Long = 10 * Erg, fee: Long = 5000000L, minYield: Long = 700L,
                curve: Seq[(Long, Long)] = Seq(820L -> 21600L, 940L -> 131400L), floor: Long = 15000L,
-               min: Long = 720L, max: Long = 262800L, shareBounds: Option[(Long, Long)] = None, owner: Int = 2): NodeBox = {
+               min: Long = 720L, max: Long = 262800L, shareBounds: Option[(Long, Long)] = None, owner: Int = 2,
+               metadata: Seq[String] = Seq.empty): NodeBox = {
     val (aFloor, aExpiry) = shareBounds.getOrElse((0L, 0L))
     box(boxId, tree(ZcKind.LendOffer), value, Seq.empty,
       regs(bytes(hashOf(party(owner))),
         longs(Seq(minYield, min, max, fee, 50000000L, floor, H + 5000L, 1L, 30L, aFloor, aExpiry) ++
           curve.flatMap { case (y, d) => Seq(y, d) }: _*),
-        bytes(expr(ZcExpression.CollateralPolicy)), longs(), bytesList(), bytes("")))
+        bytes(expr(ZcExpression.CollateralPolicy)), longs(), bytesList(metadata: _*), bytes("")))
   }
 
   /** A live ERG bond for `asset` under the oracle rule, started at `start`. */
   def oracleBond(boxId: String, asset: String, repayment: Long = 1050000000L, maturity: Long = 1749600L,
-                 value: Long = 3 * Erg, start: Long = H - 1000L, borrower: Int = 1): NodeBox =
-    box(boxId, tree(ZcKind.Bond), value, Seq(asset -> 2L),
+                 value: Long = 3 * Erg, start: Long = H - 1000L, borrower: Int = 1,
+                 collateral: Seq[(String, Long)] = Seq.empty): NodeBox =
+    box(boxId, tree(ZcKind.Bond), value, (asset -> 2L) +: collateral,
       regs(bytes(asset), bytes(hashOf(party(borrower))),
         longs(repayment, Erg, repayment, maturity, H + 5000L, 5000000L, 0L, 15000L, 60L), tokens(),
         bytes(expr(ZcExpression.OracleLiquidation)), longs(50000000L, start, maturity)))
@@ -84,12 +86,12 @@ object ZcMarketFixtures {
     ZcOrigin(share, ZcKind.DutchAuctionMint, Some(ZcMarket.Erg), "ab" * 32, Some(H - 900),
       IndexedSeq(100000000L, 5000000L, 5000000L, 10000L, floorBps, 720L, expiry, 100L), Some(NodeAsset(asset, 1L)))
 
-  /** A view of `boxes` at [[H]], with the oracle unless left out, and a pending refresh when asked. */
+  /** A view of `boxes` at [[H]], with the oracle unless left out, and two competing refreshes when asked. */
   def view(boxes: Seq[NodeBox], withOracle: Boolean = true, refreshing: Boolean = false): ZcView = {
     val entries = boxes.map(b => ZcEntry(ZcBoxes.read(b).getOrElse(throw new IllegalArgumentException(s"not a ZC box: ${b.boxId}")), H - 10))
     val book = ZcBook.seeded(H, blockId(H), entries, if (withOracle) Seq(oracle() -> (H - 5)) else Seq.empty, cut = false)
     val mempool = if (!refreshing) None
-      else Some(ZcMempool(book.headerId, 0L, Map.empty, Map.empty, Map.empty, Some("cc" * 32), Map.empty))
+      else Some(ZcMempool(book.headerId, 0L, Map.empty, Map.empty, Map.empty, 2, Vector.empty, Map.empty))
     ZcView(book, mempool, 1L)
   }
 

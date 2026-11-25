@@ -1,6 +1,6 @@
 package mining
 
-import akka.actor.{Actor, ActorRef, Cancellable}
+import akka.actor.{Actor, Cancellable}
 import akka.pattern.{AskTimeoutException, ask}
 import akka.util.Timeout
 import configs.CandidateConfig

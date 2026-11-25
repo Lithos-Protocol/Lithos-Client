@@ -15,8 +15,8 @@ final case class ArbRoute(hops: Vector[ArbHop]) {
 /**
  * Every route of two to four legs from ERG back to ERG, enumerated when the set of pools changes so a build only
  * prices them.
- * Pools are distinct within a route, and so are the assets it passes through, since a route that returns to an
- * asset holds a shorter cycle. Shorter routes come first, so a cap keeps the cheapest to price and sign.
+ * Pools are distinct within a route, counted by the box that holds them so the two sides of the SigmaUSD bank are one,
+ * and so are the assets it passes through, since a route that returns to an asset holds a shorter cycle. Shorter routes come first, so a cap keeps the cheapest to price and sign.
  */
 object ArbRoutes {
 
@@ -35,6 +35,7 @@ object ArbRoutes {
     val edges: Map[ArbAsset, Vector[Edge]] = pools.iterator
       .flatMap(p => Iterator(Edge(p.x, p.y, ArbHop(p.nft, xIn = true)), Edge(p.y, p.x, ArbHop(p.nft, xIn = false))))
       .toVector.groupBy(_.in)
+    val holderOf: Map[String, String] = pools.iterator.map(p => p.nft -> p.holder).toMap
     val found = Vector.newBuilder[ArbRoute]
     var count = 0
     var cut = false
@@ -42,7 +43,7 @@ object ArbRoutes {
     // Routes of exactly `legs` legs, depth first from ERG; stops once the cap is reached
     def extend(legs: Int, at: ArbAsset, path: Vector[ArbHop], usedPools: Set[String], seen: Set[ArbAsset]): Unit =
       edges.getOrElse(at, Vector.empty).foreach { edge =>
-        if (!cut && !usedPools.contains(edge.hop.nft)) {
+        if (!cut && !usedPools.contains(holderOf(edge.hop.nft))) {
           val next = path :+ edge.hop
           if (next.size == legs) {
             if (edge.out.isErg) {
@@ -50,7 +51,7 @@ object ArbRoutes {
               else { found += ArbRoute(next); count += 1 }
             }
           } else if (!edge.out.isErg && !seen.contains(edge.out))
-            extend(legs, edge.out, next, usedPools + edge.hop.nft, seen + edge.out)
+            extend(legs, edge.out, next, usedPools + holderOf(edge.hop.nft), seen + edge.out)
         }
       }
 

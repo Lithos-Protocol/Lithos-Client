@@ -2,15 +2,12 @@ package utils
 
 import configs.NodeConfig
 import lfsm.MDDatabase
-import mining.MiningStratumServer
 import nisp.NISPDatabase
 import org.slf4j.LoggerFactory
 import play.api.Configuration
 import state.messages.SyncMessages.SyncStatus
 import state.messages.SyncView
-import stratum.data.Options
 
-import java.math.BigInteger
 import scala.util.{Failure, Success, Try}
 
 /** Process-wide holders retained for legacy callers outside dependency injection. */

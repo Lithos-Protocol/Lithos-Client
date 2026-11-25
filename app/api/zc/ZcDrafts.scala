@@ -57,10 +57,16 @@ object ZcDrafts {
     (need(p, "bps"), need(p, "blocks"))
   }
 
-  private def tokens(j: JsValue): Seq[NodeAsset] = (j.asOpt[JsArray].map(_.value).getOrElse(Seq.empty)).map { t =>
-    val id = (t \ "tokenId").asOpt[String].map(_.toLowerCase).filter(_.length == 64)
-      .getOrElse(throw LithosBadRequest("each token needs a 64-character tokenId"))
-    NodeAsset(id, need(t, "amount"))
+  /** A token list: each id once, each amount at least 1. */
+  private def tokens(j: JsValue): Seq[NodeAsset] = {
+    val listed = (j.asOpt[JsArray].map(_.value).getOrElse(Seq.empty)).map { t =>
+      val id = (t \ "tokenId").asOpt[String].map(_.toLowerCase).filter(_.length == 64)
+        .getOrElse(throw LithosBadRequest("each token needs a 64-character tokenId"))
+      NodeAsset(id, need(t, "amount"))
+    }.toSeq
+    check(listed.map(_.tokenId).distinct.size == listed.size, "list each token once")
+    check(listed.forall(_.amount >= 1L), "each token amount must be at least 1")
+    listed
   }
 
   private def check(ok: Boolean, why: => String): Unit = if (!ok) throw LithosBadRequest(why)
@@ -142,11 +148,9 @@ object ZcDrafts {
     val (fractional, mintHash) = (delivery \ "kind").asOpt[String].getOrElse("unit") match {
       case "unit" => (IndexedSeq.empty[Long], Array.emptyByteArray)
       case k @ ("selective" | "dutch") =>
-        val terms = IndexedSeq(long(delivery, "shareCount").getOrElse(ShareCount), long(delivery, "pullFeeNanoErg").getOrElse(5000000L),
-          long(delivery, "mintFeeNanoErg").getOrElse(5000000L), need(delivery, "openingBps"), need(delivery, "floorBps"),
-          long(delivery, "length").getOrElse(720L), long(delivery, "expiry").getOrElse(2160L),
-          if (k == "dutch") Long.MaxValue else 100L)
-        (terms, Hex.decode(ZcContracts.script(ZcKind.DutchAuctionMint, Some(m)).treeHash))
+        // The request the offer delivers into, checked as a create-share-request body is.
+        (shareRequestOf(delivery ++ Json.obj("vault" -> k)).terms.toIndexedSeq,
+          Hex.decode(ZcContracts.script(ZcKind.DutchAuctionMint, Some(m)).treeHash))
       case other => throw LithosBadRequest(s"delivery.kind must be unit, selective or dutch, not $other")
     }
     val (value, assets, fee, budget) = m.tokenId match {
@@ -165,6 +169,8 @@ object ZcDrafts {
         (funding, Seq(NodeAsset(id, capital)), fee, IndexedSeq(capital, spend, minFill, reward))
     }
     check(fee >= MinBatchingFee, "the batcher fee must be at least 0.002 ERG")
+    check(m.tokenId.isDefined || fee < capital - ZcBoxes.MinBox,
+      "an ERG offer's batcher fee must leave more than 0.001 ERG of its capital, or no fill could pay it")
     val terms = IndexedSeq(minYield, minB, maxB, fee, reserve, floor, expiry, minPrice, age, aFloor, aExpiry) ++ budget ++
       curve.flatMap { case (y, b) => Seq(y, b) }
     ZcOffer(box(ZcKind.LendOffer, m, value, assets, h), ZcContracts.script(ZcKind.LendOffer, Some(m)), m, "",
@@ -179,7 +185,7 @@ object ZcDrafts {
     val reachable = matcher.sources(o.market).take(ZcMatcher.MaxSources).flatMap(src =>
       matcher.evaluate(state, src, ignoreYield = true).toOption)
     val filled = taken.map(t => BigInt(t.price)).sum
-    Json.obj("outcome" -> (if (taken.isEmpty) "waiting" else if (taken.map(_.price).sum >= o.capital) "full" else "partial"),
+    Json.obj("outcome" -> (if (taken.isEmpty) "waiting" else if (filled >= o.capital) "full" else "partial"),
       "matches" -> taken.map(matchJson), "filled" -> filled.toString, "remaining" -> (BigInt(o.capital) - filled).toString,
       "askDots" -> reachable.map(mt => Json.obj("askId" -> mt.sourceId, "blocks" -> mt.blocksLeft, "bps" -> mt.yieldBps,
         "requiredBps" -> mt.requiredBps)),
@@ -271,7 +277,11 @@ object ZcDrafts {
           IndexedSeq(need(timing, "maxDuration"), curve.maxBps) ++ curve.points.flatMap { case (y, b) => Seq(y, b) })
       case other => throw LithosBadRequest(s"pricing must be fixed, yield or window, not $other")
     }
-    ZcOrder(box(kind, m, colErg + expiryFee, tokens((col \ "tokens").getOrElse(JsArray())), h),
+    val collateral = tokens((col \ "tokens").getOrElse(JsArray()))
+    check(collateral.size <= ZcSizing.MaxCollateralTokens, s"at most ${ZcSizing.MaxCollateralTokens} collateral tokens: " +
+      "a liquidated bond must still fit a share vault's box")
+    val value = Try(Math.addExact(colErg, expiryFee)).getOrElse(throw LithosBadRequest("the collateral and expiry fee overflow"))
+    ZcOrder(box(kind, m, value, collateral, h),
       ZcContracts.script(kind, Some(m)), m, terms, principalTokens, "", liq, guardHash, pricingHash, pricingTerms,
       if (kind == ZcKind.PricedOrder) 2 else 0)
   }
@@ -299,7 +309,7 @@ object ZcDrafts {
    * maturity-rule order, or with no oracle.
    */
   private def collateralNeeded(o: ZcOrder, funders: Seq[ZcOfferState], matcher: ZcMatcher): Option[String] =
-    matcher.book.confirmedOracle.filter(_ => o.payload.nonEmpty).map { or =>
+    matcher.book.currentOracle.filter(_ => o.payload.nonEmpty).map { or =>
       val target = (o.payload.take(1) ++ o.payload.lift(2).toSeq ++ funders.map(s => floorBps(s.offer)).reduceOption(_ min _).toSeq).max
       val sigUsd = BigInt(o.box.assets.filter(_.tokenId == ZcContracts.SigUsdId).map(_.amount).sum)
       val debt = if (o.market.tokenId.isEmpty) BigInt(o.repayment) * 100 else BigInt(or.price) * o.repayment
@@ -308,6 +318,13 @@ object ZcDrafts {
     }
 
   // ─── ask ───────────────────────────────────────────────────────────────────
+
+  /** A fixed ask's whole price, which must be above 0. */
+  private def fixedPriceOf(p: JsObject): Long = {
+    val price = need(p, "price")
+    check(price > 0L, "a fixed price must be above 0")
+    price
+  }
 
   /** The ask box a create-ask body posts. A fixed price with a sale guard is a guarded yield ask at 10^15 bps. */
   def askOf(d: JsObject, matcher: ZcMatcher): ZcAsk = {
@@ -321,13 +338,16 @@ object ZcDrafts {
     val expiry = long(d, "expiry").getOrElse(h + 5040L)
     check(expiry > h + 1L, "the expiry must be above the current height")
     val minFill = long(d, "minFill").getOrElse(1L)
+    check(minFill >= 1L && minFill <= units, "minFill must be 1 to the units listed")
     val guard = obj(d, "saleGuard").map(g => (need(g, "ratioBps"), long(g, "oracleAge").getOrElse(30L)))
+    guard.foreach { case (ratio, age) => check(ratio > 0L && age >= 1L && age <= MaxOracleAge,
+      "a sale guard needs a positive ratioBps and an oracleAge of 1 to 100000") }
     val p = obj(d, "pricing").getOrElse(throw LithosBadRequest("pricing is required"))
     val (kind, terms, pricing) = (p \ "kind").asOpt[String] match {
       case Some("fixed") if guard.isEmpty =>
-        (ZcKind.SaleOrder, IndexedSeq(need(p, "price"), units, minFill, expiry), None)
+        (ZcKind.SaleOrder, IndexedSeq(fixedPriceOf(p), units, minFill, expiry), None)
       case Some("fixed") =>
-        (ZcKind.PricedAsk, IndexedSeq(need(p, "price"), units, minFill, expiry, whole, h, GuardedFixedYield, expiry,
+        (ZcKind.PricedAsk, IndexedSeq(fixedPriceOf(p), units, minFill, expiry, whole, h, GuardedFixedYield, expiry,
           GuardedFixedYield) ++ guard.toSeq.flatMap(g => Seq(g._1, g._2)), Some(exprHash(ZcExpression.GuardedYieldPricing, m)))
       case Some("yield") =>
         val start = need(p, "startBps")

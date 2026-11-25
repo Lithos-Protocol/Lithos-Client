@@ -39,12 +39,15 @@ object ArbFixtures {
 
   private def lpOf(nft: String): ErgoId = ErgoId.create("ee" + nft.drop(2))
 
-  /** An ErgoDEX ERG/token pool under `nft`, holding `erg` and `tokens` of `token`, at fee `fee` over 1,000. */
+  /**
+   * An ErgoDEX ERG/token pool under `nft`, holding `erg` and `tokens` of `token`, at fee `fee` over 1,000, as
+   * output 0 of `txId`.
+   */
   def nativePool(ctx: BlockchainContext, nft: String, token: String, erg: Long, tokens: Long,
-                 fee: Int = 997): NodeBox =
+                 fee: Int = 997, txId: String = ""): NodeBox =
     LDNodeFixtures.nodeBox(ctx, UTXO(nativeTree, erg,
       Seq(Token(ErgoId.create(nft), 1L), Token(lpOf(nft), LpHeld), Token(ErgoId.create(token), tokens)),
-      Seq(ErgoValue.of(fee))), 0, nft)
+      Seq(ErgoValue.of(fee))), 0, if (txId.isEmpty) nft else txId)
 
   /** An ErgoDEX token/token pool under `nft`: X then Y, with storage ERG no swap moves. */
   def tokenPool(ctx: BlockchainContext, nft: String, x: String, y: String, xAmount: Long, yAmount: Long,

@@ -3,12 +3,12 @@ package transactions.batching.sigmafi.zc
 import configs.SigmaFiBatchingConfig
 import mutations.NodeWallet
 import node.model.NodeBox
-import org.ergoplatform.appkit.{BlockchainContext, Parameters}
+import org.ergoplatform.appkit.BlockchainContext
 import org.slf4j.LoggerFactory
 import sigma.ast.ErgoTree
 import sigmafi.zc.{ZcContracts, ZcExpression, ZcKind, ZcMarket}
 import transactions.batching.sigmafi.SigmaFiBoxes
-import transactions.candidate.{CandidateBudget, CandidateBundle}
+import transactions.candidate.CandidateBudget
 import work.lithos.mutations.{Contract, InputUTXO}
 
 import scala.collection.mutable
@@ -31,9 +31,10 @@ final case class ZcBatchBuild(txs: Vector[(ZcBatchTx, Seq[String])], failedIds: 
 final case class ZcPrecomputedMatches(headerId: String, height: Int, resolverGen: Long, marketBook: ZcMarketBook,
                                       runs: Map[ZcMarket, ZcBatchRun], ordersById: Map[String, ZcOrder],
                                       asksById: Map[String, ZcAsk], offersById: Map[String, ZcOffer],
-                                      askBondIds: Map[String, String] = Map.empty) {
+                                      askBondIds: Map[String, String] = Map.empty, oracleBoxId: Option[String] = None) {
   def matches(book: ZcBook, matcherHeight: Int, gen: Long, claimed: scala.collection.Set[String]): Boolean =
     headerId == book.headerId && height == matcherHeight && resolverGen == gen &&
+      oracleBoxId == book.oracle.map(_.box.boxId) &&
       runs.values.forall(r => !r.taken.keys.exists(claimed.contains) && !r.takenBy.keys.exists(claimed.contains)) &&
       !askBondIds.values.exists(claimed.contains)
 }
@@ -143,7 +144,8 @@ object ZcBatchPlanner {
     val askBondIds = runs.valuesIterator.flatMap(_.takenBy.keysIterator).flatMap { id =>
       asksById.get(id).flatMap(a => matcher.askSource(ZcOpen(a, pending = false)).toOption.map(s => id -> s.bond.boxId))
     }.toMap
-    ZcPrecomputedMatches(book.headerId, book.height, gen, marketBook, runs, ordersById, asksById, offersById, askBondIds)
+    ZcPrecomputedMatches(book.headerId, book.height, gen, marketBook, runs, ordersById, asksById, offersById, askBondIds,
+      book.oracle.map(_.box.boxId))
   }
 
   /**
@@ -241,7 +243,7 @@ object ZcBatchPlanner {
               if (bounty >= settings.minActionFeeNanoErg && waitCleared(elig)) {
                 packable += PackItem(b.boxId, bounty, elig, aged = true, c =>
                   for (in <- inputOf(b.box, c); borrower <- scriptFor(b))
-                    yield ZcBatchTransactions.bondRefreshPiece(b, in, borrower, signingHeight))
+                    yield ZcBatchTransactions.bondRefreshPiece(c, b, in, borrower, signingHeight))
               }
             }
 
@@ -278,7 +280,7 @@ object ZcBatchPlanner {
             val elig = s.box.creationHeight.toLong + ZcPricing.RefreshAge + 1L
             if (bounty >= settings.minActionFeeNanoErg && waitCleared(elig)) {
               packable += PackItem(s.boxId, bounty, elig, aged = false, c =>
-                inputOf(s.box, c).map(ZcBatchTransactions.settlementRefreshPiece(s, _, signingHeight)))
+                inputOf(s.box, c).map(ZcBatchTransactions.settlementRefreshPiece(c, s, _, signingHeight)))
             }
 
           case v: ZcShareVault if ZcBatchTransactions.refreshable(v.box.creationHeight.toLong, h) =>
@@ -287,7 +289,7 @@ object ZcBatchPlanner {
             val elig = v.box.creationHeight.toLong + ZcPricing.RefreshAge + 1L
             if (bounty >= settings.minActionFeeNanoErg && waitCleared(elig)) {
               packable += PackItem(v.boxId, bounty, elig, aged = false, c =>
-                inputOf(v.box, c).map(ZcBatchTransactions.shareVaultRefreshPiece(v, _, signingHeight)))
+                inputOf(v.box, c).map(ZcBatchTransactions.shareVaultRefreshPiece(c, v, _, signingHeight)))
             }
 
           case _ => ()
@@ -296,6 +298,18 @@ object ZcBatchPlanner {
 
       val (agedItems, regularItems) = packable.result().sortBy(i => (-i.reward, i.boxId))
         .take(MaxPackablePieces).partition(_.aged)
+
+      /** `item`'s piece, or None when it cannot be built here, such as a refresh whose box cannot pay its own size. */
+      def pieceOf(item: PackItem): Option[ZcPiece] =
+        if (overdue) None
+        else Try(item.build(ctx)) match {
+          case Success(piece) => piece
+          case Failure(ex) =>
+            unbuildable += 1
+            failed += item.boxId
+            logger.warn(s"Could not build ZC pack piece ${item.boxId} at $signingHeight: ${ex.getMessage}")
+            None
+        }
 
       /** Signs a chunk of pieces, bisecting on signing failure or budget overflow so one bad box costs only itself. */
       def buildPackChunk(pieces: Vector[ZcPiece]): Unit = {
@@ -318,7 +332,7 @@ object ZcBatchPlanner {
 
       // Pack regular items (liquidations, refunds, vault refreshes) first — highest revenue per slot
       if (!overdue && regularItems.nonEmpty) {
-        val resolvedPieces = regularItems.flatMap(i => if (overdue) None else i.build(ctx))
+        val resolvedPieces = regularItems.flatMap(pieceOf)
         resolvedPieces.grouped(ZcBatchTransactions.PackLimit).foreach(chunk => buildPackChunk(chunk.toVector))
       }
 
@@ -354,7 +368,8 @@ object ZcBatchPlanner {
               val Seq(n, pullFee, mintFee) = r.terms.take(3)
               val valid = n >= 1L && n <= 1000000000L && pullFee >= ZcPricing.MinBatchingFee &&
                 mintFee >= minAct &&
-                BigInt(pullFee) + BigInt(mintFee) + BigInt(2L * ZcBoxes.MinBox) <= BigInt(r.box.value)
+                BigInt(pullFee) + BigInt(mintFee) + BigInt(2L * ZcBoxes.MinBox) <= BigInt(r.box.value) &&
+                (r.dutch.isEmpty || ZcRules.auctionTermsValid(r.terms))
               val elig = entry.height.toLong
               if (valid && waitCleared(elig)) {
                 standalone += StandaloneItem(Set(r.boxId), mintFee, elig, (c, to, mFee, sh) =>
@@ -422,7 +437,7 @@ object ZcBatchPlanner {
       // ─── 4. Aged bond refreshes (packed apart per EIP-39) ──────────────────
       if (!overdue && usedSlots < slots && agedItems.nonEmpty && unbuildable < MaxUnbuildablePerRun) {
         val resolvedAged = agedItems.filterNot(i => claimed.contains(i.boxId))
-          .flatMap(i => if (overdue) None else i.build(ctx))
+          .flatMap(pieceOf)
         resolvedAged.grouped(ZcBatchTransactions.PackLimit).foreach(chunk => buildPackChunk(chunk.toVector))
       }
 
@@ -452,8 +467,10 @@ object ZcBatchPlanner {
       ZcMarketBook.of(ZcView(adjustedBook, None, 0L))
     }
     val originLookup: String => Option[ZcOrigin] = token => resolver.origin(token, readBudget)
+    // A broadcast may land in any of the blocks a priced order is quoted over; this miner's block lands next.
+    val lateBlocks = if (minerFee == 0L) 0L else ZcPricing.QuoteBlocks - 1L
     val matcher = new ZcMatcher(marketBook, originLookup,
-      excluded = r => claimed.contains(r.boxId) || resolver.knownDisclosed(r).contains(false))
+      excluded = r => claimed.contains(r.boxId) || resolver.knownDisclosed(r).contains(false), lateBlocks = lateBlocks)
 
     val ordersById = cached.map(_.ordersById).getOrElse(marketBook.orders.map(o => o.boxId -> o.record).toMap)
     val asksById = cached.map(_.asksById).getOrElse(marketBook.asks.map(a => a.boxId -> a.record).toMap)
@@ -500,16 +517,18 @@ object ZcBatchPlanner {
                     case Some(order) =>
                       // Recompute maturity & principal at the exact signing start height so Order/PricedOrder accepts.
                       val start = signingHeight.toLong
+                      // The rules' height, whose next block is where the transaction lands: the matcher's height.
+                      val ruleHeight = matcherHeight.toLong
                       val ready = for {
                         borrower <- resolver.script(order, pending = false, readBudget).flatMap(parsedContract)
                         maturity <- (
                           if (ZcRules.window(order))
-                            ZcRules.windowMaturity(ZcOfferState.of(curOffer), order, book.oracle, start - 1L)
+                            ZcRules.windowMaturity(ZcOfferState.of(curOffer), order, book.oracle, ruleHeight, late = lateBlocks)
                               .filter(mat => mat - start >= order.terms(3) && ZcRules.orderWindow(order).exists(w => mat - start <= w._2))
                               .orElse(ZcRules.orderMaturity(order, start).toOption)
                           else ZcRules.orderMaturity(order, start).toOption
                         )
-                        principal <- ZcRules.resolvePrincipal(order, if (minerFee == 0L) start - 1L else start, maturity).toOption
+                        principal <- ZcRules.resolvePrincipal(order, ruleHeight, maturity).toOption
                         fee = ZcRules.fillFee(ZcOfferState.of(curOffer), principal)
                         if fee >= minAct
                       } yield (borrower, maturity, principal)

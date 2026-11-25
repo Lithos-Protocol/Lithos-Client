@@ -3,7 +3,7 @@ package transactions.batching.lithosdex
 import lithosdex.LDHelpers
 import lithosdex.contracts.{LDOrderContracts, LDOrderKind, LDOrderTemplate, LDT2TOrderKind}
 import node.NodeApi
-import node.model.{IndexedBox, MempoolOptions, NodeBox, Paging, SortDirection}
+import node.model.{IndexedBox, MempoolOptions, NodeBox, SortDirection}
 import org.bouncycastle.util.encoders.Hex
 import org.ergoplatform.appkit.BlockchainContext
 import state.synchronization.CompleteMempool

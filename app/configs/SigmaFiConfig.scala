@@ -10,9 +10,38 @@ import play.api.{ConfigLoader, Configuration}
  *                              it is broadcast, paying the miner fee out of the batching fee
  * @param minBatchingFeeNanoErg least fee reserve a ZC bond liquidation must pay
  * @param minActionFeeNanoErg   least reward a ZC match, share/wrap mint, pull, refund or refresh must pay
+ * @param collateralArb         the `collateralArb` block: ZC collateral arb broadcast in one transaction each
  */
 case class SigmaFiBatchingConfig(batching: BatchingConfig, broadcastAfterBlocks: Int, minBatchingFeeNanoErg: Long,
-                                 minActionFeeNanoErg: Long = SigmaFiBatchingConfig.ShippedMinActionFee)
+                                 minActionFeeNanoErg: Long = SigmaFiBatchingConfig.ShippedMinActionFee,
+                                 collateralArb: ZcCollateralArbConfig = ZcCollateralArbConfig.Default)
+
+/**
+ * The `batching.sigmafi.collateralArb` block: buying a ZC lot, Dutch vault auction or sale order and selling its
+ * collateral through one ERG pool, in one broadcast transaction funded from the node wallet.
+ *
+ * @param broadcast        whether the background tick sends these at all
+ * @param minReturnPercent least net ERG profit, as a percentage of the ERG one transaction pays out
+ * @param minProfitNanoErg least net ERG profit one transaction must leave, after its miner fee
+ * @param maxErgIn         most nanoERG one transaction may take from the wallet
+ */
+case class ZcCollateralArbConfig(broadcast: Boolean, minReturnPercent: Int, minProfitNanoErg: Long, maxErgIn: Long)
+
+object ZcCollateralArbConfig {
+
+  /** Mirrors `batching.sigmafi.collateralArb` in application.conf; keep the two in step. */
+  val Default: ZcCollateralArbConfig = ZcCollateralArbConfig(broadcast = true, minReturnPercent = 10,
+    minProfitNanoErg = 10000000L, maxErgIn = 10000000000L)
+
+  def apply(config: Configuration, path: String): ZcCollateralArbConfig = {
+    def key(name: String) = s"$path.collateralArb.$name"
+    ZcCollateralArbConfig(
+      config.getOptional(key("broadcast"))(ConfigLoader.booleanLoader).getOrElse(Default.broadcast),
+      config.getOptional(key("minReturnPercent"))(ConfigLoader.intLoader).getOrElse(Default.minReturnPercent),
+      config.getOptional(key("minProfitNanoErg"))(ConfigLoader.longLoader).getOrElse(Default.minProfitNanoErg),
+      config.getOptional(key("maxErgIn"))(ConfigLoader.longLoader).getOrElse(Default.maxErgIn))
+  }
+}
 
 object SigmaFiBatchingConfig {
 
@@ -43,7 +72,8 @@ object SigmaFiBatchingConfig {
       config.getOptional(s"batching.$Name.minBatchingFeeNanoErg")(ConfigLoader.longLoader)
         .getOrElse(Default.minBatchingFeeNanoErg),
       config.getOptional(s"batching.$Name.minActionFeeNanoErg")(ConfigLoader.longLoader)
-        .getOrElse(Default.minActionFeeNanoErg))
+        .getOrElse(Default.minActionFeeNanoErg),
+      ZcCollateralArbConfig(config, s"batching.$Name"))
 }
 
 /**

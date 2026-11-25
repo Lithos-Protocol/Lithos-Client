@@ -3,7 +3,6 @@ package lfsm.contracts
 import lfsm.{LFSMHelpers, ScriptGenerator}
 import org.ergoplatform.appkit.{BlockchainContext, ConstantsBuilder, NetworkType}
 import org.ergoplatform.sdk.ErgoId
-import org.ergoplatform.appkit.scalaapi._
 import sigma.Colls
 import work.lithos.mutations.Contract
 

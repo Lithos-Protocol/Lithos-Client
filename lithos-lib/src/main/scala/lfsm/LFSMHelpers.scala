@@ -1,10 +1,8 @@
 package lfsm
 
-import lfsm.contracts.RollupContracts
 import node.MutationConversions._
 import node.NodeApi
 import node.model.{MempoolOptions, Paging, SortDirection}
-import org.ergoplatform.ErgoTreePredef
 import org.ergoplatform.appkit.{Address, BlockchainContext, ErgoClient, NetworkType, Parameters}
 import org.ergoplatform.sdk.ErgoId
 import work.lithos.mutations.{Contract, InputUTXO}

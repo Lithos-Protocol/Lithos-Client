@@ -147,8 +147,6 @@ private[stats] object StatsStoreCodec {
   val MaxSnapshotBytes: Int = 8 * 1024 * 1024
   val SchemaVersion = 1
 
-  private implicit val integerFormat: Format[BigInt] = Format(
-    Reads.StringReads.map(BigInt(_)), Writes(value => JsString(value.toString)))
   implicit val poolFormat: OFormat[LDBoxes.PoolSnapshot] = Json.format[LDBoxes.PoolSnapshot]
   implicit val observationFormat: OFormat[DexObservation] = Json.format[DexObservation]
 

@@ -10,30 +10,22 @@ import mutations.NodeWallet
 import node.MutationConversions._
 import node.NodeApi
 import node.model.MempoolOptions
-import org.ergoplatform.appkit.{Address, BlockchainContext}
+import org.ergoplatform.appkit.BlockchainContext
 import org.ergoplatform.sdk.ErgoId
 import configs.NodeContext
-import sigma.ast.ErgoTree
 import transactions.batching.BatchingMempool
 import transactions.engine.wallet.EngineFunding
 import transactions.batching.lithosdex.LDBoxes.Provision
 import transactions.batching.lithosdex.{LDBoxes, LDFundedTx, LDOrderBook, LDOrderTransactions, LDOrderTx, LDT2TOrder, LithosDexExecution, LithosDexOrder, LithosDexTransactions}
 import work.lithos.mutations.InputUTXO
 
-import javax.inject.Inject
 
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.locks.ReentrantLock
-import scala.collection.JavaConverters._
 import scala.util.{Failure, Success, Try}
 import scala.util.control.NonFatal
-import akka.pattern.ask
-import akka.util.Timeout
-import scala.concurrent.Await
-import scala.concurrent.duration._
 import state.synchronization.CompleteMempool
-import transactions.engine.wallet.EngineWalletMessages._
 import transactions.engine.DexIntent
 import transactions.engine.EngineBroadcast
 
@@ -1004,7 +996,7 @@ class DexAPIExecution(nodeContext: NodeContext, walletSelector: EngineFunding,
 
   private def send(ctx: BlockchainContext, built: Funded[_ <: LDFundedTx]): Submission = {
     val operation = "dex:" + _root_.transactions.candidate.BlockTxMessages.CandidateTx.txId(built.value.tx)
-    val result = new EngineBroadcast(walletSelector.walletRef, executionNode)(walletSelector.executionContext)
+    val result = new EngineBroadcast(walletSelector.walletRef, executionNode)
       .send(built.value.tx, built.reservation.toSeq, operation, alive)
     Submission(result.txId, result.outcome)
   }

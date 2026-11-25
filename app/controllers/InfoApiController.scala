@@ -23,15 +23,4 @@ class InfoApiController @Inject()(cc: ControllerComponents, api: InfoApi, cache:
     Ok(json)
   }
 
-  private def splitCollectionParam(paramValues: String, collectionFormat: String): List[String] = {
-    val splitBy =
-      collectionFormat match {
-        case "csv" => ",+"
-        case "tsv" => "\t+"
-        case "ssv" => " +"
-        case "pipes" => "|+"
-      }
-
-    paramValues.split(splitBy).toList
-  }
 }

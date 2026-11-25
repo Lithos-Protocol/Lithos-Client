@@ -7,6 +7,7 @@ import node.model.{IndexedBox, MempoolOptions, Paging, SortDirection}
 import org.ergoplatform.appkit.NetworkType
 import org.slf4j.{Logger, LoggerFactory}
 import state.synchronization.CanonicalBlockSource
+import sigmausd.SigmaUsdContracts
 import transactions.batching.ergodex.ErgoDexContracts
 
 import javax.inject.{Inject, Singleton}
@@ -227,7 +228,12 @@ object PoolTracker {
       "LithosDex ERG pool template" -> (p => api.unspentBoxesByTemplateHash(shapes.n2tTemplateHash, p,
         SortDirection.Desc, MempoolOptions.ConfirmedOnly)),
       "LithosDex token pool template" -> (p => api.unspentBoxesByTemplateHash(shapes.t2tTemplateHash, p,
-        SortDirection.Desc, MempoolOptions.ConfirmedOnly)))
+        SortDirection.Desc, MempoolOptions.ConfirmedOnly))) ++
+      (if (shapes.network != NetworkType.MAINNET) Seq.empty else Seq(
+        "SigmaUSD bank" -> ((p: Paging) => api.unspentBoxesByTokenId(SigmaUsdContracts.BankNft, p, SortDirection.Desc,
+          MempoolOptions.ConfirmedOnly)),
+        "SigmaUSD oracle pool" -> ((p: Paging) => api.unspentBoxesByTokenId(SigmaUsdContracts.OracleNft, p,
+          SortDirection.Desc, MempoolOptions.ConfirmedOnly))))
     var cut = false
     val found = reads.flatMap { case (name, read) =>
       val (boxes, exhausted) = utils.PagedScan.collect(MaxScanned)(read)(indexed =>

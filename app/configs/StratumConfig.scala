@@ -2,9 +2,6 @@ package configs
 
 import play.api.Configuration
 
-import java.sql.DriverManager
-import java.util.Properties
-import scala.concurrent.duration.FiniteDuration
 
 class StratumConfig(config: Configuration){
 

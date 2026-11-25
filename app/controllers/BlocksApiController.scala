@@ -144,18 +144,6 @@ class BlocksApiController @Inject()(cc: ControllerComponents, api: BlocksApi, ca
       Ok(json)
   }
 
-  private def splitCollectionParam(paramValues: String, collectionFormat: String): List[String] = {
-    val splitBy =
-      collectionFormat match {
-        case "csv" => ",+"
-        case "tsv" => "\t+"
-        case "ssv" => " +"
-        case "pipes" => "|+"
-      }
-
-    paramValues.split(splitBy).toList
-  }
-
   private val apiKeyHash: String = config.get[String]("lithos.apiKeyHash")
 
   private def withApiKey[A](action: Action[A]) = Action.async(action.parser) { request =>

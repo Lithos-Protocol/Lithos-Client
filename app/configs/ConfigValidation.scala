@@ -369,6 +369,13 @@ object Configs {
       60000L, 86400000L, "ms an unbuildable bond is left out")
     v.range("batching.sigmafi.maxSkippedOrders", v.int("batching.sigmafi.maxSkippedOrders"), 0, 100000,
       "unbuildable bonds remembered; about 200 bytes each")
+    v.bool("batching.sigmafi.collateralArb.broadcast")
+    v.range("batching.sigmafi.collateralArb.minReturnPercent", v.int("batching.sigmafi.collateralArb.minReturnPercent"),
+      0, 1000, "least net profit as a percentage of the ERG one collateral arb pays out")
+    v.longRange("batching.sigmafi.collateralArb.minProfitNanoErg", v.long("batching.sigmafi.collateralArb.minProfitNanoErg"),
+      1000000L, 1000000000000L, "least net profit one collateral arb leaves after its miner fee")
+    v.longRange("batching.sigmafi.collateralArb.maxErgIn", v.long("batching.sigmafi.collateralArb.maxErgIn"),
+      0L, 10000000000000L, "most nanoERG one collateral arb takes from the wallet; 0 sends none")
     v.longRange("sigmafi.bonds.batchingFeeNanoErg", v.long("sigmafi.bonds.batchingFeeNanoErg"),
       configs.SigmaFiBatchingConfig.ShippedMinBatchingFee, 100000000000L,
       "reserve a fill through the API funds when its request names none; at least the shipped floor, which clients liquidate")

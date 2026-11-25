@@ -23,8 +23,6 @@ import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
 import javax.inject.{Inject, Named, Singleton}
 import scala.concurrent.Future
-import scala.concurrent.duration.DurationInt
-import scala.language.postfixOps
 import scala.util.{Failure, Success, Try}
 
 /**

@@ -1,18 +1,13 @@
 package utils
 
 import org.bouncycastle.util.encoders.Hex
-import org.ergoplatform.appkit.{BlockchainContext, ErgoClient, ErgoProver, ErgoValue}
-import org.ergoplatform.sdk.ErgoId
-import org.ergoplatform.restapi.client.ErgoTransactionOutput
+import org.ergoplatform.appkit.{BlockchainContext, ErgoClient}
 import sigma.SigmaProp
-import sigma.ast.ErgoTree
 import sigma.data.{CSigmaProp, ProveDlog, SigmaBoolean, SigmaLeaf}
 import sigma.serialization.GroupElementSerializer
 import transactions.ProtocolContracts
-import work.lithos.mutations.{Contract, InputUTXO, UTXO}
+import work.lithos.mutations.Contract
 
-import java.math.{BigDecimal, BigInteger, RoundingMode}
-import scala.util.Try
 
 object Helpers {
 

@@ -204,6 +204,14 @@ class ZcReadsSpec extends AnyFlatSpec with Matchers with Eventually with org.sca
     long(j, "spreadBps").get should be <= 0L
   }
 
+  it should "quote a window order at its curve's breakpoint, counted in blocks left from the next block" in {
+    // The borrower pays most, 9,000 bps, at exactly 30,000 blocks left, and less on either side.
+    val curve = Seq(1000L -> 25000L, 9000L -> 30000L, 1000L -> 35000L)
+    val j = world(Seq(ergOffer(offer1), windowOrder(id(50), 20000L, 60000L, 9000L, curve = curve))).reads
+      .orderbook("ERG", ZcFilters(matchable = false), Some(262800L), None, None)
+    long(rows(j, "asks").loneElement, "blocks") shouldBe Some(30000L)
+  }
+
   "matches" should "agree from both sides: what an offer would buy, and which offer takes an ask first" in {
     val w = world(market)
     val forOffer = w.reads.matches(offer1)

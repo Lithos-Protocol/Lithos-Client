@@ -93,8 +93,8 @@ object ArbSearch {
         if (take(top)) {
           taken :+= top
           left -= top.legs
-          states ++= top.swaps.iterator.map(s => s.after.nft -> s.after)
-          val moved = top.route.pools
+          states = top.swaps.foldLeft(states)((acc, s) => ArbPool.moved(acc, s.after))
+          val moved = top.swaps.iterator.flatMap(s => ArbPool.keys(s.after)).toSet
           priced = priced.filterNot { case (route, _) => route.pools.exists(moved.contains) }
           eligible.iterator
             .filter(r => r.hops.size <= left && r.pools.exists(moved.contains) && !refused.contains(r))

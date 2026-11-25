@@ -288,7 +288,10 @@ class ZcLifecycleSpec extends AnyFlatSpec with Matchers {
       val h = ctx.getHeight
       val old = bond(ctx, "c2" * 32, 3 * Erg, Seq.empty, 2 * Erg, ZcExpression.MaturityLiquidation, h - 100, h + 1000, h - 61)
       val b = read[ZcBond](nodeOf(old))
-      val signed = sign(ctx, ZcUserTransactions.recollateralize(b, old, funds(ctx, Erg / 10), Erg, Seq.empty, h), funds(ctx, 2 * Erg))
+      val auth = funds(ctx, Erg / 10)
+      val spend = ZcUserTransactions.recollateralize(b, old, auth, Erg, Seq.empty, h)
+      spend.named shouldBe Seq(auth.contract)
+      val signed = sign(ctx, spend, funds(ctx, 2 * Erg))
       val grown = read[ZcBond](out(signed, 0))
       grown.collateralErg shouldBe b.collateralErg + Erg
       grown.box.creationHeight shouldBe h
@@ -361,7 +364,7 @@ class ZcLifecycleSpec extends AnyFlatSpec with Matchers {
         burn = Seq(token(asset, 3L)))
       an[Exception] should be thrownBy sign(ctx, fakePull)
 
-      val partial = sign(ctx, ZcUserTransactions.claimShares(pulled, input(ctx, pulled.box), ShareCount / 4, me),
+      val partial = sign(ctx, ZcUserTransactions.claimShares(ctx, pulled, input(ctx, pulled.box), ShareCount / 4, me),
         input(ctx, shares), funds(ctx, Erg))
       out(partial, 0).value shouldBe pulled.box.value / 4
       val left = read[ZcShareVault](out(partial, 1))
@@ -370,7 +373,7 @@ class ZcLifecycleSpec extends AnyFlatSpec with Matchers {
         case (o, i) if o.getTokens.asScala.exists(t => t.getId.toString == req.shareId && t.getValue == ShareCount - ShareCount / 4) =>
           out(partial, i)
       }.get
-      val last = sign(ctx, ZcUserTransactions.claimShares(left, input(ctx, left.box), left.outstanding, me), input(ctx, rest))
+      val last = sign(ctx, ZcUserTransactions.claimShares(ctx, left, input(ctx, left.box), left.outstanding, me), input(ctx, rest))
       last.getOutputsToSpend.asScala.flatMap(_.getTokens.asScala).map(_.getId.toString) should not contain req.shareId
     }
   }
@@ -399,12 +402,50 @@ class ZcLifecycleSpec extends AnyFlatSpec with Matchers {
         input(ctx, settlement.box), h)), 0))
       pulled.state shouldBe Some(1.toByte)
       ZcRules.auctionOpen(pulled) shouldBe true
-      val target = ZcRules.lotTarget(pulled, h)
-      val sold = sign(ctx, ZcUserTransactions.buyFromVault(pulled, input(ctx, pulled.box), h), funds(ctx, target + Erg))
+      val target = ZcRules.lotTarget(pulled, h).get
+      val sold = sign(ctx, ZcUserTransactions.buyFromVault(ctx, pulled, input(ctx, pulled.box), h), funds(ctx, target + Erg))
       val after = read[ZcShareVault](out(sold, 0))
       after.state shouldBe Some(2.toByte)
       after.box.value shouldBe target
       sold.getOutputsToSpend.asScala.exists(_.getTokens.asScala.exists(_.getId.toString == thin)) shouldBe true
+    }
+  }
+
+  "A partial claim" should "top a vault left under 0.001 ERG up to its minimum, and leave out a register anyone added" in {
+    client.execute { ctx =>
+      val share = "c9" * 32
+      val proceeds = "ca" * 32
+      val spam = bytes("ab" * 200)
+      val vaultIn = seeded(ctx, UTXO(ZcContracts.script(ZcKind.FractionalVault, None).contract, 2 * MinBox,
+        Seq(token(share, ShareCount + 1L), token(proceeds, 1000L)),
+        Seq(bytes("cb" * 32), longs(ShareCount, ShareCount, 5000000L), ErgoValue.of(0.toByte), spam), Some(ctx.getHeight - 10)))
+      val vault = read[ZcShareVault](nodeOf(vaultIn))
+      val burned = ShareCount * 6 / 10
+      val claimed = sign(ctx, ZcUserTransactions.claimShares(ctx, vault, vaultIn, burned, me),
+        funds(ctx, Erg, token(share, burned)))
+      out(claimed, 0).value shouldBe 2 * MinBox * 6 / 10
+      val left = out(claimed, 1)
+      left.value shouldBe MinBox
+      left.additionalRegisters.values.size shouldBe 3
+      read[ZcShareVault](left).outstanding shouldBe ShareCount - burned
+    }
+  }
+
+  "A floor auction's sale" should "leave out a register anyone added to the Dutch vault" in {
+    client.execute { ctx =>
+      val h = ctx.getHeight.toLong
+      val share = "cc" * 32
+      val thin = "cd" * 32
+      val vaultIn = seeded(ctx, UTXO(ZcContracts.script(ZcKind.DutchAuctionVault, None).contract, Erg,
+        Seq(token(share, ShareCount + 1L), token(thin, 50L)),
+        Seq(bytes("ce" * 32), longs(ShareCount, ShareCount, 5000000L), ErgoValue.of(1.toByte),
+          longs(2 * Erg, 10000L, 9000L, 720L, 2160L, 100L, h - 10L), bytes(""), bytes("ab" * 200)), Some(h.toInt - 10)))
+      val vault = read[ZcShareVault](nodeOf(vaultIn))
+      ZcRules.auctionOpen(vault) shouldBe true
+      val target = ZcRules.lotTarget(vault, h).get
+      val sold = sign(ctx, ZcUserTransactions.buyFromVault(ctx, vault, vaultIn, h), funds(ctx, target + Erg))
+      out(sold, 0).additionalRegisters.values.size shouldBe 5
+      read[ZcShareVault](out(sold, 0)).state shouldBe Some(2.toByte)
     }
   }
 

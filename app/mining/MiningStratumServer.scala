@@ -2,7 +2,6 @@ package mining
 
 import akka.actor.{ActorRef, ActorSystem, Props}
 import akka.pattern.ask
-import com.redbottledesign.bitcoin.rpc.stratum.MalformedStratumMessageException
 import configs.CandidateConfig
 import com.redbottledesign.bitcoin.rpc.stratum.transport.{AbstractConnectionState, ConnectionState, StatefulMessageTransport}
 import com.redbottledesign.bitcoin.rpc.stratum.transport.tcp.StratumTcpServerConnection
@@ -10,23 +9,20 @@ import mining.StratumConnection.ConnectionEstablished
 import mining.MiningMessages._
 import mutations.NodeWallet
 import nisp.NISPDatabase
-import org.bouncycastle.util.encoders.Hex
 import org.ergoplatform.appkit.ErgoClient
 import org.json.JSONObject
 import org.slf4j.{Logger, LoggerFactory}
 import stratum.counter.SubscriptionIdCounter
 import stratum.data.Options
-import stratum.message.{Announcement, Requests, Response}
+import stratum.message.Requests
 
 import java.io.IOException
-import java.math.BigDecimal
 import java.net.{InetSocketAddress, Socket}
-import java.util.Arrays
 import java.util.concurrent.atomic.AtomicReference
 import scala.collection.JavaConverters._
 import scala.collection.concurrent.TrieMap
 import scala.concurrent.Await
-import scala.concurrent.duration.{Duration, DurationInt, FiniteDuration}
+import scala.concurrent.duration.DurationInt
 
 /**
  * Actor-based Stratum TCP server.

@@ -1,13 +1,13 @@
 package transactions.batching.sigmafi.zc
 
 import node.model.NodeAsset
-import transactions.batching.arb.{ArbAsset, ArbPool, ArbSwap}
+import transactions.batching.arb.{ArbAsset, ArbPool, ArbPoolKind, ArbSwap}
 
 /**
  * How one collateral asset in a ZC basket is converted into ERG.
  *
- * Currently only AMM swaps (`ZcAmmLiquidation`) are implemented for normal fungible tokens living in ErgoDEX or
- * LithosDex pools. Future support for bond units, shares, and wrapped LithosDex position NFTs plugs in by adding
+ * AMM swaps (`ZcAmmLiquidation`) for fungible tokens in ErgoDEX or LithosDex pools, and a SigmaUSD bank redeem
+ * (`BankAssetLiquidation`) for SigUSD. Future support for bond units, shares, and wrapped LithosDex position NFTs plugs in by adding
  * new subtypes here and corresponding [[ZcAssetPricer]] implementations without changing basket evaluation or arb
  * orchestration.
  */
@@ -18,6 +18,8 @@ trait ZcAssetLiquidation {
   def ergOut: Long
   /** Number of block transactions this liquidation consumes. */
   def legs: Int
+  /** The swaps that carry it out, in order, the last paying ERG. */
+  def swaps: Vector[ArbSwap]
 }
 
 /** Liquidates `amount` raw units of a fungible token into ERG via 1 or 2 AMM swaps. */
@@ -25,6 +27,14 @@ final case class ZcAmmLiquidation(tokenId: String, amount: Long, swaps: Vector[A
   require(swaps.nonEmpty && swaps.last.assetOut.isErg, "an AMM liquidation must end in ERG")
   override def ergOut: Long = swaps.last.amountOut
   override def legs: Int = swaps.size
+}
+
+/** Liquidates `amount` of a SigmaUSD coin by one redeem at the bank. */
+final case class BankAssetLiquidation(tokenId: String, amount: Long, swap: ArbSwap) extends ZcAssetLiquidation {
+  require(swap.pool.kind == ArbPoolKind.SigmaUsdBank && swap.assetOut.isErg, "a bank liquidation is one redeem")
+  override def ergOut: Long = swap.amountOut
+  override def legs: Int = 1
+  override def swaps: Vector[ArbSwap] = Vector(swap)
 }
 
 /**
@@ -51,25 +61,26 @@ object ZcAssetPricer {
       pricers.iterator.flatMap(_.price(tokenId, amount, pools, maxLegs, minProceeds)).take(1).toSeq.headOption
   }
 
-  /** Shipped default: normal fungible tokens traded in AMMs only; all other tokens have 0 value. */
-  val Default: ZcAssetPricer = AmmAssetPricer
+  /** Shipped default: the bank where it pays more for a SigmaUSD coin, AMM pools otherwise; other tokens have 0 value. */
+  val Default: ZcAssetPricer = chain(Seq(BankAssetPricer, AmmAssetPricer))
 }
 
 /**
  * Prices normal fungible tokens that trade in ErgoDEX or LithosDex AMM pools (1-hop `Token -> ERG`, or 2-hop
  * `Token -> Mid -> ERG` when `maxLegs >= 2`). Uses each pool's exact integer `swap` math; returns `None` for any
- * token without a liquid route yielding at least `minProceeds`.
+ * token without a liquid route yielding at least `minProceeds`. The SigmaUSD bank is [[BankAssetPricer]]'s, not this.
  */
 object AmmAssetPricer extends ZcAssetPricer {
 
   /** Most candidate pools inspected per hop, keeping valuation bounded even on dense pool graphs. */
   final val MaxPoolsPerAsset = 32
 
-  override def price(tokenId: String, amount: Long, pools: Map[String, ArbPool], maxLegs: Int,
+  override def price(tokenId: String, amount: Long, all: Map[String, ArbPool], maxLegs: Int,
                      minProceeds: Long): Option[(ZcAssetLiquidation, Map[String, ArbPool])] =
     if (amount <= 0L || maxLegs < 1) None
     else {
       val asset = ArbAsset.token(tokenId)
+      val pools = all.filter { case (_, p) => p.kind != ArbPoolKind.SigmaUsdBank }
       var best: Option[(Vector[ArbSwap], Long)] = None
       def consider(swaps: Vector[ArbSwap]): Unit = {
         val out = swaps.last.amountOut
@@ -102,9 +113,30 @@ object AmmAssetPricer extends ZcAssetPricer {
       }
 
       best.map { case (swaps, _) =>
-        val updated = swaps.foldLeft(pools)((ps, s) => ps.updated(s.pool.nft, s.after))
+        val updated = swaps.foldLeft(all)((ps, s) => ArbPool.moved(ps, s.after))
         ZcAmmLiquidation(tokenId, amount, swaps) -> updated
       }
+    }
+}
+
+/**
+ * Prices a SigmaUSD coin at what the bank's redeem pays for the whole amount, and owns it only when that is at least
+ * what [[AmmAssetPricer]] gets from the pools. An amount the bank cannot redeem (the ratio, the coins in
+ * circulation), or one the pools pay more for, is left to the pools.
+ */
+object BankAssetPricer extends ZcAssetPricer {
+
+  override def price(tokenId: String, amount: Long, pools: Map[String, ArbPool], maxLegs: Int,
+                     minProceeds: Long): Option[(ZcAssetLiquidation, Map[String, ArbPool])] =
+    if (amount <= 0L || maxLegs < 1) None
+    else {
+      val asset = ArbAsset.token(tokenId)
+      val redeem = pools.valuesIterator.filter(p => p.kind == ArbPoolKind.SigmaUsdBank && p.y == asset)
+        .flatMap(_.swap(amount, xIn = false)).filter(_.amountOut >= minProceeds)
+        .foldLeft(Option.empty[ArbSwap])((best, s) => if (best.forall(_.amountOut < s.amountOut)) Some(s) else best)
+      redeem.filter { s =>
+        AmmAssetPricer.price(tokenId, amount, pools, maxLegs, minProceeds).forall(_._1.ergOut <= s.amountOut)
+      }.map(s => BankAssetLiquidation(tokenId, amount, s) -> ArbPool.moved(pools, s.after))
     }
 }
 
@@ -150,7 +182,7 @@ object ZcCollateralPricing {
           if (best.forall(b => s.amountIn < b.amountIn || (s.amountIn == b.amountIn && s.pool.nft < b.pool.nft)))
             Some(s)
           else best
-        }.map(s => s -> pools.updated(s.pool.nft, s.after))
+        }.map(s => s -> ArbPool.moved(pools, s.after))
     }
 
   /**

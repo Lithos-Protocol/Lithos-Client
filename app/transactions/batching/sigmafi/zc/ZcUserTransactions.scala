@@ -16,7 +16,7 @@ import java.nio.charset.StandardCharsets.UTF_8
 /**
  * The ZC transactions this wallet makes, at the input and output positions and context variables of the reference
  * CLI. Protocol inputs come first; wallet boxes follow only when those inputs do not cover the outputs and the fee.
- * When no input or output sits at a script a posted box names, INPUTS(0) discloses it in context variable 64.
+ * When no output carries a script a posted box names, INPUTS(0) discloses it in context variable 64.
  *
  * {{{
  *   post order, offer, ask, lot,     IN  wallet...                 OUT the box, [change], fee
@@ -80,10 +80,11 @@ object ZcUserTransactions {
    * A ZC spend: protocol inputs at the positions their contracts read, the outputs they name, burns, the token the
    * spend mints and data inputs. `alone` refuses wallet boxes, for a wrap mint, whose request must be the only input.
    * `sweep` sends everything the inputs hold, less burns and the fee, to one box at that script in place of `outputs`.
+   * `named` are scripts a box names by hash that no output carries: INPUTS(0) discloses them in variable 64.
    */
   final case class ZcSpend(inputs: Seq[InputUTXO], outputs: Seq[UTXO], burn: Seq[Token] = Seq.empty,
                            minted: Option[String] = None, dataInputs: Seq[InputUTXO] = Seq.empty,
-                           alone: Boolean = false, sweep: Option[Contract] = None)
+                           alone: Boolean = false, sweep: Option[Contract] = None, named: Seq[Contract] = Seq.empty)
 
   private def tally(ts: Seq[Token]): Map[String, Long] =
     ts.groupBy(_.id.toString).map { case (id, xs) => id -> xs.map(_.amount).sum }
@@ -126,7 +127,8 @@ object ZcUserTransactions {
       Seq(UTXO(to, erg, kept))
     }
     val dust = if (s.sweep.isEmpty && erg > 0L && erg < MinBox && kept.isEmpty) erg else 0L
-    TxBuilder(ctx).setInputs(inputs: _*).setDataInputs(s.dataInputs: _*).setOutputs(outputs: _*)
+    TxBuilder(ctx).setInputs(disclosedAll(inputs, outputs, s.named): _*).setDataInputs(s.dataInputs: _*)
+      .setOutputs(outputs: _*)
       .buildTx(TxFee + dust, wallet.p2pk, s.burn)
   }
 
@@ -142,6 +144,10 @@ object ZcUserTransactions {
         longs(o.pricingTerms))
     UTXO(contract(o), o.box.value, tokens(o), core ++ extra, if (o.priced) Some(height) else None)
   }
+
+  /** `offer` as its first fill leaves it: R6 grows from the policy hash to the policy hash and a 32-byte box id. */
+  def offerAfterFirstFill(offer: UTXO, policyHash: String): UTXO =
+    offer.withRegNum(6, raw(Hex.decode(policyHash) ++ new Array[Byte](32)))
 
   /**
    * The offer box a draft offer describes, naming `owner` by hash. One that delivers shares carries their zcs1
@@ -188,8 +194,8 @@ object ZcUserTransactions {
         bytesList(ZcMetadata.receipt(tokenId, amount).map(_.getBytes(UTF_8)))))
 
   /**
-   * Posts `box` from this wallet. When no funding input sits at `named`, the script the box names, INPUTS(0) carries it
-   * in variable 64: a batcher then finds it in one lookup of this transaction.
+   * Posts `box` from this wallet. INPUTS(0) carries `named`, the script the box names, in variable 64: a batcher then
+   * finds it in one lookup of this transaction, pending or not.
    */
   def post(ctx: BlockchainContext, wallet: NodeWallet, box: UTXO, named: Contract): SFPlan =
     SFPlan(Math.addExact(box.value, TxFee + Headroom), box.tokens, funding => {
@@ -197,11 +203,21 @@ object ZcUserTransactions {
       TxBuilder(ctx).setInputs(disclosed(funding, Seq(box), named): _*).setOutputs(box).buildTx(TxFee, wallet.p2pk)
     })
 
-  /** `inputs` with `named` disclosed on INPUTS(0) unless an input or output already carries it. */
-  def disclosed(inputs: Seq[InputUTXO], outputs: Seq[UTXO], named: Contract): Seq[InputUTXO] = {
-    val present = (inputs.map(_.contract.ergoTreeHex) ++ outputs.map(_.contract.ergoTreeHex)).toSet
-    if (present.contains(named.ergoTreeHex)) inputs
-    else inputs.head.withCtxVar(DisclosureVar, bytesList(Seq(named.ergoTree.bytes))) +: inputs.tail
+  /** `inputs` with `named` disclosed on INPUTS(0) unless a listed output carries it. */
+  def disclosed(inputs: Seq[InputUTXO], outputs: Seq[UTXO], named: Contract): Seq[InputUTXO] =
+    disclosedAll(inputs, outputs, Seq(named))
+
+  /**
+   * `inputs` with every `named` script that no listed output carries disclosed in variable 64 of INPUTS(0). Inputs do
+   * not count: the node's unconfirmed transactions leave out input scripts, so only an output shows one while pending.
+   */
+  def disclosedAll(inputs: Seq[InputUTXO], outputs: Seq[UTXO], named: Seq[Contract]): Seq[InputUTXO] = {
+    val present = outputs.map(_.contract.ergoTreeHex).toSet
+    val missing = named.foldLeft(Vector.empty[Contract]) { (acc, c) =>
+      if (present.contains(c.ergoTreeHex) || acc.exists(_.ergoTreeHex == c.ergoTreeHex)) acc else acc :+ c
+    }
+    if (missing.isEmpty || inputs.isEmpty) inputs
+    else inputs.head.withCtxVar(DisclosureVar, bytesList(missing.map(_.ergoTree.bytes))) +: inputs.tail
   }
 
   /** Takes `box` back: `auth`, a box at the creator's script, authorizes it, and both go to `refundTo` less the fee. */
@@ -339,7 +355,7 @@ object ZcUserTransactions {
     val grown = input.tokens.map(t => added.find(_.id == t.id).fold(t)(a => Token(t.id, Math.addExact(t.amount, a.amount))))
     val appended = added.filterNot(a => input.tokens.exists(_.id == a.id))
     val successor = UTXO(contract(bond), Math.addExact(bond.box.value, erg), grown ++ appended, input.registers, Some(height))
-    ZcSpend(Seq(input.withCtxVar(3.toByte, int(0)), auth), Seq(successor))
+    ZcSpend(Seq(input.withCtxVar(3.toByte, int(0)), auth), Seq(successor), named = Seq(auth.contract))
   }
 
   /**
@@ -366,25 +382,27 @@ object ZcUserTransactions {
    * too, all to `to`. A partial claim pays the burned fraction of each asset, rounded down, at OUTPUTS(0), and the vault
    * continues at OUTPUTS(1); an open auction it ends is marked state 3.
    */
-  def claimShares(v: ZcShareVault, input: InputUTXO, burned: Long, to: Contract): ZcSpend = {
+  def claimShares(ctx: BlockchainContext, v: ZcShareVault, input: InputUTXO, burned: Long, to: Contract): ZcSpend = {
     val tag = Seq(bytes(v.boxId))
     val assets = v.box.assets.drop(1)
     if (burned >= v.outstanding)
       ZcSpend(Seq(input.withCtxVar(1.toByte, int(0))),
-        Seq(UTXO(to, math.max(v.box.value, MinBox), assets.map(t => token(t.tokenId, t.amount)), tag)),
+        Seq(ZcSizing.sized(ctx, UTXO(to, MinBox, assets.map(t => token(t.tokenId, t.amount)), tag), v.box.value)),
         burn = Seq(token(v.shareId, Math.addExact(v.outstanding, v.shares + 1L))))
     else {
       def part(n: Long): Long = (BigInt(n) * burned / v.outstanding).toLong
       val paidErg = part(v.box.value)
       val paid = assets.flatMap(t => Some(part(t.amount)).filter(_ > 0L).map(token(t.tokenId, _)))
       val kept = assets.flatMap(t => Some(t.amount - part(t.amount)).filter(_ > 0L).map(token(t.tokenId, _)))
-      val regs = input.registers
+      val regs = input.registers.take(v.schemaRegisters)
       val state = if (ZcRules.auctionOpen(v)) Some(3.toByte) else v.state
       val next = regs.updated(1, longs(Seq(v.shares, v.outstanding - burned, v.pullFee)))
         .patch(2, state.map(s => byte(s)).toSeq, if (regs.size > 2) 1 else 0)
+      // Both outputs only have to hold at least their share, so the wallet tops either up to its size minimum.
       ZcSpend(Seq(input.withCtxVar(0.toByte, int(1)).withCtxVar(1.toByte, int(0))),
-        Seq(UTXO(to, math.max(paidErg, MinBox), paid, tag),
-          UTXO(contract(v), v.box.value - paidErg, token(v.shareId, v.shares + 1L) +: kept, next)),
+        Seq(ZcSizing.sized(ctx, UTXO(to, MinBox, paid, tag), paidErg),
+          ZcSizing.sized(ctx, UTXO(contract(v), MinBox, token(v.shareId, v.shares + 1L) +: kept, next),
+            v.box.value - paidErg)),
         burn = Seq(token(v.shareId, burned)))
     }
   }
@@ -426,7 +444,7 @@ object ZcUserTransactions {
    * than the floor, else an excess auction (state 4) when the opening is above zero.
    */
   def pull(v: ZcShareVault, input: InputUTXO, source: ZcSettlement, sourceInput: InputUTXO, height: Long): ZcSpend = {
-    val value = v.box.value + source.box.value - v.pullFee
+    val value = Math.addExact(v.box.value, source.box.value) - v.pullFee
     val proceeds = source.proceeds.map(t => token(t.tokenId, t.amount))
     val supply = Seq(bytes(v.bondAsset), longs(Seq(v.shares, v.outstanding, v.pullFee)))
     val regs =
@@ -454,21 +472,30 @@ object ZcUserTransactions {
    * target, and take the whole lot. An excess auction: add its price, and take only the thin items. What the buyer
    * takes reaches this wallet as change.
    */
-  def buyFromVault(v: ZcShareVault, input: InputUTXO, height: Long): ZcSpend = {
+  def buyFromVault(ctx: BlockchainContext, v: ZcShareVault, input: InputUTXO, height: Long): ZcSpend = {
     val before = ZcRules.currencyHeld(v)
     val after =
       if (ZcRules.excessAuction(v)) Math.addExact(before, ZcRules.excessPrice(v, height).getOrElse(
         throw new IllegalArgumentException("the excess auction's price reached zero")))
-      else math.max(ZcRules.lotTarget(v, height), before)
-    val regs = input.registers.updated(2, byte(2.toByte))
+      else math.max(ZcRules.lotTarget(v, height).getOrElse(
+        throw new IllegalArgumentException("the auction's target is past a Long")), before)
+    ZcSpend(Seq(input.withCtxVar(0.toByte, int(0))), Seq(soldVault(ctx, v, input, after)))
+  }
+
+  /**
+   * `v` marked sold (state 2) once its currency stands at `after`, keeping only its five registers. An ERG vault holds
+   * `after`; a token vault holds `after` of its currency and only its size minimum in ERG, unless the sale keeps the
+   * vault's ERG. What else it held goes to the buyer.
+   */
+  def soldVault(ctx: BlockchainContext, v: ZcShareVault, input: InputUTXO, after: Long): UTXO = {
+    val regs = input.registers.take(v.schemaRegisters).updated(2, byte(2.toByte))
     val kept = ZcRules.keptBySale(v).map(t => token(t.tokenId, t.amount))
     val reserve = token(v.shareId, v.shares + 1L)
-    val sold = ZcRules.vaultCurrency(v) match {
-      case None => UTXO(contract(v), after, reserve +: kept, regs)
-      case Some(id) => UTXO(contract(v), if (ZcRules.saleKeepsErg(v)) v.box.value else MinBox,
-        Seq(reserve, token(id, after)) ++ kept, regs)
+    ZcRules.vaultCurrency(v) match {
+      case None => ZcSizing.sized(ctx, UTXO(contract(v), MinBox, reserve +: kept, regs), after)
+      case Some(id) => ZcSizing.sized(ctx, UTXO(contract(v), MinBox, Seq(reserve, token(id, after)) ++ kept, regs),
+        if (ZcRules.saleKeepsErg(v)) v.box.value else MinBox)
     }
-    ZcSpend(Seq(input.withCtxVar(0.toByte, int(0))), Seq(sold))
   }
 
   // ─── wraps ─────────────────────────────────────────────────────────────────

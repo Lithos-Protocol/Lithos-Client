@@ -21,7 +21,7 @@ import transactions.batching.sigmafi.zc.ZcUserTransactions.ZcSpend
 import transactions.batching.sigmafi.zc._
 import transactions.batching.sigmafi.{SFPlan, SigmaFiBoxes}
 import transactions.batching.{Batcher, BatchingMempool}
-import transactions.engine.EngineBroadcast
+import transactions.engine.{EngineBroadcast, ZcIntent}
 import transactions.engine.wallet.{EngineFunding, FundingAllocation}
 import work.lithos.mutations.{Contract, InputUTXO, Token, UTXO}
 
@@ -31,6 +31,12 @@ import scala.util.{Failure, Success, Try}
 
 /** A write that cannot run now, with what must happen first (`requires`, e.g. `pull`). */
 final class ZcRefusal(reason: String, val requires: Seq[String] = Seq.empty) extends LithosUnprocessable(reason)
+
+/**
+ * A signed write that reads an oracle box a pending refresh creates, which miners might reach before the refresh:
+ * nothing was sent, and the write is tried again once the refresh can have confirmed.
+ */
+final class ZcHeld(val reason: String) extends RuntimeException(reason)
 
 /**
  * The ZC writes this wallet makes. Each has a check that signs nothing and a send that runs on the transaction engine's
@@ -51,6 +57,8 @@ class ZcWriteExecution(nodeContext: NodeContext, walletSelector: EngineFunding, 
   import ZcWriteExecution._
 
   protected def executionNode: NodeApi = nodeContext.getNodeApi
+
+  private val logger = org.slf4j.LoggerFactory.getLogger("ZcWriteExecution")
 
   private def wallet: NodeWallet = nodeContext.getNodeWallet
 
@@ -95,7 +103,7 @@ class ZcWriteExecution(nodeContext: NodeContext, walletSelector: EngineFunding, 
     val guardRatio = ZcRules.fillRatio(draft)
     val prospect = ZcRules.orderMaturity(draft, h.toLong).flatMap(mat =>
       ZcRules.resolvePrincipal(draft, h.toLong, mat).map(p => ZcBondTerms.prospect(draft, h.toLong, mat, p))).toOption
-    val coverNow = for (o <- v.book.oracle; b <- prospect; c <- ZcRules.cover(b, o.price)) yield c
+    val coverNow = for (o <- v.oracle; b <- prospect; c <- ZcRules.cover(b, o.price)) yield c
     val under = ratio.exists(r => coverNow.exists(c => !atLeast(c, r)))
     val allow = (body \ "allowLiquidatable").asOpt[Boolean].contains(true)
     if (under && guardRatio.isEmpty && !allow)
@@ -103,6 +111,7 @@ class ZcWriteExecution(nodeContext: NodeContext, walletSelector: EngineFunding, 
         "would start a bond anyone could liquidate at once, taking all the collateral. Add collateral, keep the fill guard, " +
         "or set allowLiquidatable")
     val box = ZcUserTransactions.orderBox(draft, ownHash, h)
+    ZcSizing.refusal(ctx, box).foreach(r => throw LithosBadRequest(s"the order box would be $r"))
     val warnings = (if (guardRatio.exists(g => coverNow.exists(c => !atLeast(c, g))))
       Seq("at the oracle price now the fill guard refuses every fill; the order waits until cover recovers") else Seq.empty) ++
       (draft.mode match {
@@ -130,9 +139,15 @@ class ZcWriteExecution(nodeContext: NodeContext, walletSelector: EngineFunding, 
     val h = ctx.getHeight
     val draft = ZcDrafts.offerOf(body, h.toLong)
     val box = ZcUserTransactions.offerBox(draft, ownHash)
-    val warnings = (if (ZcRules.batcherFee(draft) < MinBatchingFee) Seq("the batcher fee is under 0.002 ERG: no batcher fills it")
-      else Seq.empty) ++ (if (ZcRules.token(draft) && ZcRules.minFillBps(draft) > 100L)
-      Seq("the least fill refuses small new loans") else Seq.empty)
+    ZcSizing.refusal(ctx, box).foreach(r => throw LithosBadRequest(s"the offer box would be $r"))
+    ZcSizing.refusal(ctx, ZcUserTransactions.offerAfterFirstFill(box, draft.policyHash))
+      .foreach(r => throw LithosBadRequest(s"after its first fill the offer box would be $r"))
+    val warnings = (if (ZcRules.token(draft) && ZcRules.minFillBps(draft) > 100L)
+      Seq("the least fill refuses small new loans") else Seq.empty) ++
+      (if (!ZcRules.token(draft) && BigInt(ZcRules.batcherFee(draft)) * 5 >= BigInt(draft.capital))
+        Seq("the batcher fee is at least a fifth of the capital, and an expiry refund pays it too") else Seq.empty) ++
+      (if (draft.terms(10) > 0L && draft.terms(9) == 0L)
+        Seq("a 0 bps least auction floor takes shares whose auction opens at 0 bps, which never auction") else Seq.empty)
     val terms = Json.obj("contract" -> "LendOffer", "policyHash" -> draft.policyHash, "terms" -> draft.terms.map(_.toString),
       "funding" -> draft.box.value.toString)
     post(ctx, "createOffer", "offer", box, terms, warnings, body ++ Json.obj("type" -> "offer"), matcher(view), send)
@@ -145,13 +160,20 @@ class ZcWriteExecution(nodeContext: NodeContext, walletSelector: EngineFunding, 
     val draft = ZcDrafts.askOf(body, m)
     val claim = m.claimOf(draft.token.tokenId).toOption
     val bond = claim.flatMap(c => m.book.bonds.get(c._1)).map(b => ZcBondTerms.of(b.record))
-    if (bond.exists(b => v.book.oracle.exists(o => ZcRules.belowOwnRatio(b, o.price))))
+    if (bond.exists(b => v.oracle.exists(o => ZcRules.belowOwnRatio(b, o.price))))
       refuse("the bond is under its own ratio: liquidate it, which pays its holder the collateral, rather than sell it")
     val box = ZcUserTransactions.askBox(draft, ownHash)
     val terms = Json.obj("contract" -> draft.script.kind.name, "tokenId" -> draft.token.tokenId,
       "units" -> draft.token.amount.toString, "bondId" -> claim.map(_._1), "unitsPerBond" -> claim.map(_._2.toString),
-      "pricingHash" -> draft.pricingHash, "terms" -> draft.terms.map(_.toString))
-    post(ctx, "createAsk", "ask", box, terms, Seq.empty, body ++ Json.obj("type" -> "ask"), m, send)
+      "pricingHash" -> draft.pricingHash, "terms" -> draft.terms.map(_.toString),
+      "closingFeeNanoErg" -> draft.box.value.toString)
+    // A full fill hands the box's own nanoERG to whoever fills it, so a fixed ERG ask at or under it sells for nothing net.
+    val fixed = (body \ "pricing" \ "kind").asOpt[String].contains("fixed")
+    val warnings = if (fixed && draft.market.tokenId.isEmpty &&
+      ZcRules.fixedPrice(draft, draft.token.amount) <= draft.box.value)
+      Seq(s"the whole ask is priced at or under the ${draft.box.value} nanoERG its own box holds, which goes to whoever " +
+        "fills it: a buyer would pay nothing net") else Seq.empty
+    post(ctx, "createAsk", "ask", box, terms, warnings, body ++ Json.obj("type" -> "ask"), m, send)
   })
 
   /**
@@ -172,7 +194,9 @@ class ZcWriteExecution(nodeContext: NodeContext, walletSelector: EngineFunding, 
     val terms = Json.obj("contract" -> "LotAuction", "market" -> m.name, "opening" -> lot.terms(0).toString,
       "floor" -> lot.terms(1).toString, "start" -> lot.terms(2), "end" -> lot.terms(3), "expiry" -> lot.terms(4),
       "refundFeeNanoErg" -> lot.terms(5).toString)
-    post(ctx, "createLot", "lot", box, terms, Seq.empty, body, matcher(view), send, simulate = false)
+    val warnings = if (m.tokenId.isDefined && lot.terms(5) > 0L)
+      Seq(s"the ${lot.terms(5)} nanoERG refund fee goes to the lot's buyer with the rest of its nanoERG") else Seq.empty
+    post(ctx, "createLot", "lot", box, terms, warnings, body, matcher(view), send, simulate = false)
   })
 
   /**
@@ -189,6 +213,12 @@ class ZcWriteExecution(nodeContext: NodeContext, walletSelector: EngineFunding, 
     val market = origin.market.getOrElse(refuse("the bond's market is unknown"))
     val req = ZcDrafts.shareRequestOf(body)
     val live = m.book.bonds.get(asset).map(_.record)
+    if (req.auction.isDefined) {
+      val held = live.map(_.collateral.size).orElse(m.book.settlements.get(asset).map(_.record.proceeds.size))
+      held.filter(_ > ZcSizing.MaxCollateralTokens).foreach(n => refuse(s"the bond holds $n collateral tokens: over " +
+        s"${ZcSizing.MaxCollateralTokens}, its Dutch vault could not take a liquidation's proceeds within the node's box " +
+        "limit, and no share could be claimed in part. Split it into a plain vault (vault: plain)"))
+    }
     val facts = live.map(b => ZcMetadata.BondFacts(market, asset, if (market.tokenId.isEmpty) b.terms(1)
       else b.principalTokens.headOption.fold(0L)(_.amount), b.repayment, b.start, b.maturity,
       ZcMetadata.ruleFields(ZcRules.rule(b.liqHash, market), b.terms.drop(7), b.liqHash)))
@@ -200,7 +230,10 @@ class ZcWriteExecution(nodeContext: NodeContext, walletSelector: EngineFunding, 
     }
     val warnings = (if (req.auction.isEmpty) Seq("a plain fractional vault pays holders in kind after a liquidation, a token too " +
       "thin to split going to the last claimant; lend offers do not buy these shares") else Seq.empty) ++
-      (if (req.terms(0) != ShareCount) Seq(s"a nonstandard share count: zcs1 uses $ShareCount") else Seq.empty)
+      (if (req.terms(0) != ShareCount) Seq(s"a nonstandard share count: zcs1 uses $ShareCount") else Seq.empty) ++
+      (if (market.tokenId.isDefined && req.auction.exists(_.threshold == Long.MaxValue))
+        Seq("a dutch vault on a SigUSD bond always auctions the 0.001 ERG its box keeps after a liquidation, so " +
+          "partial claims wait for that auction to end; selective does not") else Seq.empty)
     val terms = Json.obj("contract" -> (if (req.auction.isDefined) "DutchAuctionMint" else "FractionalMint"), "bondId" -> asset, "market" -> market.name, "shares" -> req.terms(0).toString,
       "pullFeeNanoErg" -> req.terms(1).toString, "mintFeeNanoErg" -> req.terms(2).toString,
       "auction" -> req.auction.map(a => Json.obj("openingBps" -> a.openingBps, "floorBps" -> a.floorBps, "length" -> a.length,
@@ -261,8 +294,8 @@ class ZcWriteExecution(nodeContext: NodeContext, walletSelector: EngineFunding, 
     val m = matcher(v)
     val box = read(id)
     val order = ZcBoxes.read(box).collect { case o: ZcOrder => o }.getOrElse(throw LithosNotFound(s"$id is not a ZC order"))
-    ZcRules.orderRefusal(order, h).foreach(r => refuse(r))
     val chosen = long(body, "maturity")
+    ZcRules.orderRefusal(order, h, chosen).foreach(r => refuse(r))
     val reserve = long(body, "reserveNanoErg").getOrElse(DefaultReserve)
     if (reserve < DefaultReserve) throw LithosBadRequest(s"reserveNanoErg must be at least $DefaultReserve")
     if (chosen.isDefined && !ZcRules.window(order)) throw LithosBadRequest("only a window order lets the lender choose its maturity")
@@ -283,7 +316,7 @@ class ZcWriteExecution(nodeContext: NodeContext, walletSelector: EngineFunding, 
     val terms = Json.obj("assetId" -> id, "market" -> order.market.name, "principal" -> principal.toString,
       "repayment" -> order.repayment.toString, "start" -> h, "maturity" -> maturity,
       "yieldBps" -> yieldBps(BigInt(order.repayment), BigInt(principal), maturity - (h + 1L)),
-      "coverBps" -> v.book.oracle.flatMap(o => ZcRules.cover(prospect, o.price)).map(ratioBps),
+      "coverBps" -> v.oracle.flatMap(o => ZcRules.cover(prospect, o.price)).map(ratioBps),
       "window" -> ZcRules.orderWindow(order).map { case (lo, hi) => Json.obj("from" -> (h + lo), "to" -> (h + hi)) },
       "feeReserveNanoErg" -> reserve.toString)
     val validThrough = if (order.priced) h + QuoteBlocks else math.min(order.expiry - 2L, maturity - 3L)
@@ -312,6 +345,10 @@ class ZcWriteExecution(nodeContext: NodeContext, walletSelector: EngineFunding, 
       refuse(s"$token sits in a share vault naming a bond, but no standard share mint minted it: anyone can make such " +
         "a vault, so it claims nothing")
     val liveBond = claim.toOption.flatMap(c => m.book.bonds.get(c._1)).map(_.record)
+    if (m.book.shareVaults.get(token).exists(_.record.dutch))
+      liveBond.map(_.collateral.size).filter(_ > ZcSizing.MaxCollateralTokens).foreach(n => refuse(s"the bond behind " +
+        s"these shares holds $n collateral tokens: over ${ZcSizing.MaxCollateralTokens}, its Dutch vault could not take " +
+        "a liquidation's proceeds within the node's box limit, and no share could be claimed in part"))
     if (ask.priced && !ZcRules.yieldAsk(ask)) refuse("the ask names a pricing expression this client does not know")
     val pricedBond = if (!ask.priced) None
       else Some(ask.pricedAsset.flatMap(a => m.book.bonds.get(a)).map(_.record)
@@ -345,6 +382,8 @@ class ZcWriteExecution(nodeContext: NodeContext, walletSelector: EngineFunding, 
     val box = read(id)
     val lot = ZcBoxes.read(box).collect { case l: ZcLot => l }.getOrElse(throw LithosNotFound(s"$id is not a ZC lot"))
     if (!ZcRules.lotValid(lot)) refuse("the lot's terms are malformed, so only its seller can cancel it")
+    lot.market.tokenId.filter(id => lot.box.assets.exists(_.tokenId == id)).foreach(id =>
+      refuse(s"the lot holds $id, the currency it is paid in, which its contract cannot sell: only its seller can cancel it"))
     if (h + 1L >= lot.expiry) refuse(s"the lot expired at height ${lot.expiry}")
     val price = ZcRules.lotPrice(lot, h)
     val snapshot = if (send) Some(fresh(Seq(id))) else None
@@ -424,7 +463,7 @@ class ZcWriteExecution(nodeContext: NodeContext, walletSelector: EngineFunding, 
       val spend = ZcUserTransactions.recollateralize(bond, protocolInput(ctx, box), authInput, erg,
         added.map(t => Token(ErgoId.create(t.tokenId), t.amount)), h.toInt)
       val after = spend.outputs.head
-      val cover = v.book.oracle.flatMap(o => ZcRules.cover(ZcBondTerms.of(bond).copy(collateralErg = after.value - bond.feeReserve,
+      val cover = v.oracle.flatMap(o => ZcRules.cover(ZcBondTerms.of(bond).copy(collateralErg = after.value - bond.feeReserve,
         collateral = after.tokens.drop(1).map(t => NodeAsset(t.id.toString, t.amount))), o.price)).map(ratioBps)
       val terms = Json.obj("assetId" -> bond.asset, "bondBoxId" -> bond.boxId, "addsNanoErg" -> erg.toString,
         "addsTokens" -> added.map(t => tokenJson(t.tokenId, t.amount)), "coverBpsAfter" -> cover,
@@ -465,7 +504,7 @@ class ZcWriteExecution(nodeContext: NodeContext, walletSelector: EngineFunding, 
       oracle.map(o => dataInput(ctx, o.box.boxId)))
     val terms = Json.obj("assetId" -> bond.asset, "bondBoxId" -> bond.boxId, "rule" -> rule.name, "matured" -> matured,
       "feeReserveNanoErg" -> bond.feeReserve.toString,
-      "coverBps" -> v.book.oracle.flatMap(o => ZcRules.cover(ZcBondTerms.of(bond), o.price)).map(ratioBps))
+      "coverBps" -> v.oracle.flatMap(o => ZcRules.cover(ZcBondTerms.of(bond), o.price)).map(ratioBps))
     execute(ctx, "liquidate", Some(bond.market), spend, Seq("vault"), terms, Seq.empty,
       if (bond.feeReserve <= ZcUserTransactions.TxFee) Seq("the fee reserve does not cover the miner fee: this wallet pays the rest")
       else Seq.empty, Seq.empty, if (oracle.isDefined) h + 1L else Long.MaxValue, body, send, snapshot, Seq.empty, None)
@@ -498,7 +537,7 @@ class ZcWriteExecution(nodeContext: NodeContext, walletSelector: EngineFunding, 
       val warnings =
         if (h >= bond.maturity)
           Seq("the bond has reached maturity and can be liquidated by anyone: extinguishing races any liquidation")
-        else if (v.book.oracle.exists(o => ZcRules.belowOwnRatio(ZcBondTerms.of(bond), o.price)))
+        else if (v.oracle.exists(o => ZcRules.belowOwnRatio(ZcBondTerms.of(bond), o.price)))
           Seq("the bond is under its liquidation ratio and can be liquidated by anyone: extinguishing races any liquidation")
         else Seq.empty
       val returnedErg = math.max(0L, bond.box.value - ZcUserTransactions.TxFee)
@@ -554,7 +593,7 @@ class ZcWriteExecution(nodeContext: NodeContext, walletSelector: EngineFunding, 
         if (!finalClaim && ZcRules.auctionOpen(vault) && h < ZcRules.claimableFrom(vault))
           refuse(s"the vault's auction runs until height ${ZcRules.claimableFrom(vault)}; claims wait for it", Seq("auction"))
         val snapshot = if (send) Some(fresh(Seq(vault.boxId))) else None
-        val spend = ZcUserTransactions.claimShares(vault, protocolInput(ctx, read(vault.boxId)), burned, own)
+        val spend = ZcUserTransactions.claimShares(ctx, vault, protocolInput(ctx, read(vault.boxId)), burned, own)
         val rounded = if (finalClaim) Seq.empty else vault.box.assets.drop(1)
           .filter(t => BigInt(t.amount) * burned / vault.outstanding == 0)
           .map(t => s"this claim takes none of ${t.tokenId} (${t.amount} held); claim at least " +
@@ -582,8 +621,10 @@ class ZcWriteExecution(nodeContext: NodeContext, walletSelector: EngineFunding, 
     ZcBoxes.read(box) match {
       case Some(req: ZcShareRequest) =>
         val Seq(n, pullFee, mintFee) = req.terms.take(3)
-        if (n < 1L || n > 1000000000L || pullFee < MinBatchingFee || mintFee < MinBatchingFee || pullFee > box.value ||
-          mintFee > box.value - pullFee) refuse("the request's terms are outside its contract's bounds, so only its owner can cancel it")
+        if (n < 1L || n > 1000000000L || pullFee < MinBatchingFee || mintFee < MinBatchingFee ||
+          BigInt(pullFee) + mintFee + 2L * ZcBoxes.MinBox > BigInt(box.value) ||
+          (req.dutch.isDefined && !ZcRules.auctionTermsValid(req.terms)))
+          refuse("the request's terms are outside what a mint can take, so only its owner can cancel it")
         val stateId = req.dutch.map(_ => v.book.stateOf(req.bondAsset).map(_.record)
           .getOrElse(refuse(s"no live bond or settlement holds the reserve of ${req.bondAsset}")))
         val snapshot = if (send) Some(fresh(Seq(id) ++ stateId.map(_.boxId))) else None
@@ -658,7 +699,7 @@ class ZcWriteExecution(nodeContext: NodeContext, walletSelector: EngineFunding, 
     val market = ZcMarket.all.find(_.tokenId == ZcRules.vaultCurrency(vault))
       .getOrElse(refuse("the vault's currency is not a market this client knows"))
     val snapshot = if (send) Some(fresh(Seq(id))) else None
-    val spend = ZcUserTransactions.buyFromVault(vault, protocolInput(ctx, box), h)
+    val spend = ZcUserTransactions.buyFromVault(ctx, vault, protocolInput(ctx, box), h)
     val before = ZcRules.currencyHeld(vault)
     val after = market.tokenId.fold(spend.outputs.head.value)(c => spend.outputs.head.tokens.filter(_.id.toString == c).map(_.amount).sum)
     val terms = Json.obj("vaultBoxId" -> id, "kind" -> (if (excess) "excess" else "floor"), "market" -> market.name,
@@ -728,6 +769,51 @@ class ZcWriteExecution(nodeContext: NodeContext, walletSelector: EngineFunding, 
     }
   })
 
+  // ─── held writes ───────────────────────────────────────────────────────────
+
+  /** Logs what became of a held write tried again, which no caller is waiting to hear. */
+  def heldOutcome(action: String, result: scala.util.Try[JsObject]): Unit = result match {
+    case Success(r) => logger.info(s"Held ZC $action: ${(r \ "outcome").asOpt[String].getOrElse("?")} " +
+      s"${(r \ "txId").asOpt[String].getOrElse("")}")
+    case Failure(_: ZcHeld) => ()
+    case Failure(ex) => logger.warn(s"Held ZC $action was not sent: ${ex.getMessage}")
+  }
+
+  /** Puts `intent` back on the engine's queue from `notBefore` to `until` (ms), with no caller waiting on it. */
+  def hold(intent: ZcIntent, notBefore: Long, until: Long): Unit = {
+    logger.info(s"A ZC write waits for the oracle refresh it reads to confirm; trying again until $until")
+    walletSelector.walletRef ! transactions.engine.TransactionEngine.Schedule(
+      transactions.engine.EngineIntent.Zc(intent), notBefore, until)
+  }
+
+  // ─── collateral arb ────────────────────────────────────────────────────────
+
+  /**
+   * Sends one collateral arb the batcher planned, funded from this wallet. Refused (409) when the mempool already
+   * spends its ZC box or pool box, or either is gone; nothing is sent unless the signed transaction nets what
+   * `settings` asks. The wallet box funding it is never one holding a token the ZC box or the pool holds.
+   */
+  def collateralArb(planned: ZcMempoolPlan, settings: configs.ZcCollateralArbConfig): JsObject = withCtx { ctx =>
+    val ids = Seq(planned.targetId, planned.poolBox.boxId)
+    if (planned.paid > settings.maxErgIn) refuse(s"the arb pays out ${planned.paid} nanoERG, over maxErgIn ${settings.maxErgIn}")
+    fresh(ids)
+    val Seq(zcBox, poolBox) = readAll(ids)
+    val zc = protocolInput(ctx, zcBox)
+    val pool = protocolInput(ctx, poolBox)
+    stillRunning()
+    val avoid = (zcBox.assets ++ poolBox.assets).map(_.tokenId).toSet
+    val reservation = walletSelector.reserveAvoiding(planned.paid, Seq.empty, avoid)
+    val signed = try {
+      stillRunning()
+      ZcMempoolArb.sign(ctx, wallet, planned, pool, zc, reservation.inputs, settings)
+    } catch { case NonFatal(ex) => reservation.release(); throw ex }
+    val sent = broadcast(signed, Seq(reservation))
+    val outs = signed.getOutputsToSpend
+    val net = outs.get(outs.size - 2).getValue - reservation.inputs.map(_.value).sum
+    Json.obj("txId" -> sent.txId, "outcome" -> sent.outcome, "reason" -> sent.reason, "boxId" -> planned.targetId,
+      "poolBoxId" -> planned.poolBox.boxId, "netNanoErg" -> net.toString)
+  }
+
   // ─── one spend: quote, or sign and send ────────────────────────────────────
 
   /**
@@ -762,7 +848,7 @@ class ZcWriteExecution(nodeContext: NodeContext, walletSelector: EngineFunding, 
             "nanoErg" -> o.value.toString, "tokens" -> o.tokens.map(t => tokenJson(t.id.toString, t.amount)))
         },
       "terms" -> terms, "validFrom" -> ctx.getHeight, "validThrough" -> (if (validThrough == Long.MaxValue) None else Some(validThrough)),
-      "matchesNow" -> competing, "warnings" -> warnings, "refusals" -> JsArray())
+      "matchesNow" -> competing, "warnings" -> (warnings ++ refreshing(spend)), "refusals" -> JsArray())
     if (!send) quote
     else {
       limit(body, math.max(0L, -marketNet), math.max(0L, marketNet))
@@ -777,10 +863,15 @@ class ZcWriteExecution(nodeContext: NodeContext, walletSelector: EngineFunding, 
     stillRunning()
     if (ZcUserTransactions.selfFunded(plan)) {
       val signed = sign(ctx, plan.build(Seq.empty))
+      guardRefresh(signed)
       (signed, broadcast(signed, held))
     } else {
       val reservation = walletSelector.reserveAvoiding(plan.value, plan.tokens, plan.avoidTokens)
-      val signed = try sign(ctx, plan.build(reservation.inputs)) catch { case NonFatal(ex) => reservation.release(); throw ex }
+      val signed = try {
+        val s = sign(ctx, plan.build(reservation.inputs))
+        guardRefresh(s)
+        s
+      } catch { case NonFatal(ex) => reservation.release(); throw ex }
       (signed, broadcast(signed, held :+ reservation))
     }
   }
@@ -820,18 +911,50 @@ class ZcWriteExecution(nodeContext: NodeContext, walletSelector: EngineFunding, 
     }
   }
 
-  /** The confirmed oracle a trade may read; refused while a mempool refresh spends it. */
+  /**
+   * The oracle a trade reads: a single pending refresh's new box, priced at its rate, else the confirmed box. Refused
+   * while competing refreshes spend the confirmed box, since only one of them can confirm.
+   */
   private def oracleOf(v: ZcView): ZcOracle =
-    if (v.refreshPending) refuse("the oracle pool is being refreshed: a mempool transaction spends its box, so a transaction " +
-      "reading it would fail once that confirms. Try after the next block")
-    else v.book.oracle.getOrElse(refuse("the node's index has no single USD oracle pool box"))
+    if (v.refreshPending) refuse("competing refreshes of the oracle pool are pending: a transaction reading either one's " +
+      "box fails if the other confirms. Try after the next block")
+    else v.oracle.getOrElse(refuse("the node's index has no single USD oracle pool box"))
+
+  /** A quote's warning when `spend` reads the box a pending oracle refresh creates. */
+  private def refreshing(spend: ZcSpend): Seq[String] =
+    view.pendingOracle.filter(o => spend.dataInputs.exists(_.id.toString == o.box.boxId)).map(o =>
+      s"the oracle pool is refreshing: this is priced at its new rate, ${o.price} nanoERG per USD. Sent while the " +
+        "refresh is pending only when miners must reach the refresh first; otherwise it is held and sent once the " +
+        "refresh confirms").toSeq
+
+  /**
+   * Throws [[ZcHeld]] when `signed` reads the box a pending refresh creates and miners could reach it before that
+   * refresh: see [[ZcRefreshGuard]].
+   */
+  private def guardRefresh(signed: SignedTransaction): Unit = {
+    val read = signed.asInstanceOf[org.ergoplatform.appkit.impl.SignedTransactionImpl].getTx.dataInputs
+      .map(d => Hex.toHexString(d.boxId)).toSet
+    val v = view
+    // A box some pending refresh creates, read once that refresh is no longer the only one, may never confirm
+    v.mempool.toSeq.flatMap(_.refreshes).flatMap(_.successor).find(o => read.contains(o.box.boxId))
+      .filterNot(o => v.pendingOracle.exists(_.box.boxId == o.box.boxId))
+      .foreach(o => throw new ZcHeld(s"it reads oracle box ${o.box.boxId}, and competing refreshes are now pending"))
+    v.refresh.filter(_.successor.exists(o => read.contains(o.box.boxId))).foreach { r =>
+      val outs = signed.getOutputsToSpend
+      val fee = (0 until outs.size).map(outs.get).filter(o => InputUTXO(o).contract.ergoTreeHex == Contract.FEE.ergoTreeHex)
+        .map(_.getValue.longValue).sum
+      ZcRefreshGuard.refusal(fee, _root_.transactions.candidate.BlockTxMessages.CandidateTx.signedSize(signed).toLong,
+        signed.getCost.toLong, r, System.nanoTime()).foreach(reason => throw new ZcHeld(
+        s"it reads oracle box ${r.successor.get.box.boxId}, which refresh ${r.txId} creates and is still pending: $reason"))
+    }
+  }
 
   /**
    * zcs1: nothing this wallet buys or fills may start below the bond's own oracle ratio, which anyone could liquidate at
    * once. Refused unless the body sets `allowLiquidatable`.
    */
   private def coverCheck(v: ZcView, bond: ZcBondTerms, body: JsObject, why: String, instead: String): Unit =
-    v.book.oracle.foreach { o =>
+    v.oracle.foreach { o =>
       if (ZcRules.belowOwnRatio(bond, o.price) && !(body \ "allowLiquidatable").asOpt[Boolean].contains(true))
         refuse(s"$why at ${ZcRules.cover(bond, o.price).map(ratioBps).getOrElse(0L)} bps of its repayment, under its own ratio " +
           s"at the oracle price: anyone could liquidate it at once, taking all the collateral. $instead, or set allowLiquidatable")
@@ -951,7 +1074,7 @@ class ZcWriteExecution(nodeContext: NodeContext, walletSelector: EngineFunding, 
   }
 
   private def broadcast(signed: SignedTransaction, funding: Seq[FundingAllocation]): EngineBroadcast.Result =
-    try new EngineBroadcast(walletSelector.walletRef, executionNode)(walletSelector.executionContext)
+    try new EngineBroadcast(walletSelector.walletRef, executionNode)
       .send(signed, funding, operation(signed), alive)
     catch { case _: IllegalArgumentException if !alive() => throw stopped }
 

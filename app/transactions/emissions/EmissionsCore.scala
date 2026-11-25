@@ -3,22 +3,20 @@ package transactions.emissions
 import akka.actor.{Actor, ActorRef, Cancellable}
 import configs.{EmissionConfig, NodeContext}
 import node.NodeApi
-import node.rest.NodeCodecs
-import org.ergoplatform.appkit.{ErgoClient, SignedTransaction}
+import org.ergoplatform.appkit.ErgoClient
 import org.slf4j.{Logger, LoggerFactory}
 import play.api.Configuration
 import play.api.libs.concurrent.InjectedActorSupport
 import transactions.candidate.BlockTxMessages
 import transactions.candidate.BlockTxMessages.{BlockTxsReady, CandidateTx, CandidateTxsDropped, PrepareBlockTxs, RequestBlockTxs}
 import transactions.emissions.EmissionsCore._
-import transactions.engine.wallet.{EngineFunding, FundingAllocation}
+import transactions.engine.wallet.EngineFunding
 import work.lithos.mutations.InputUTXO
 
-import javax.inject.{Inject, Named}
 import scala.concurrent.duration._
-import scala.concurrent.{ExecutionContext, Future}
+import scala.concurrent.Future
 import scala.collection.JavaConverters._
-import scala.util.{Failure, Success, Try}
+import scala.util.{Failure, Try}
 
 /**
  * Owns the collateral queue: joining it with this miner's own funds, and driving it forward with
@@ -47,7 +45,6 @@ trait EmissionsCore extends Actor with InjectedActorSupport {
   private val emissionBudget: transactions.candidate.CandidateBudget =
     configs.CandidateConfig(config).limitsFor(configs.CandidateSourceConfig.Emissions).budget
 
-  private implicit val emissionEc: ExecutionContext = context.dispatcher
   private val emissionWorker = context.system.dispatchers.lookup(configs.Contexts.key(configs.Contexts.EngineIo))
 
   /** Which side builds the queue head's Activates each block: the candidate first, then the funded pass. */

@@ -120,6 +120,31 @@ class ZcWriteExecutionSpec extends AnyFlatSpec with Matchers with Eventually {
     (quote \ "fees").as[Seq[JsObject]].map(f => (f \ "name").as[String]) should contain("liquidationReserve")
   }
 
+  "An offer check" should "quote an offer of 20 points delivering shares, refusing nothing" in {
+    val w = world()
+    val body = Json.obj("market" -> "ERG", "capital" -> Erg.toString, "minYieldBps" -> 500,
+      "floorBps" -> 13000, "curve" -> (1 to 20).map(i => Json.obj("bps" -> (800 + i), "blocks" -> (10000 * i))),
+      "delivery" -> Json.obj("kind" -> "selective", "openingBps" -> 10000, "floorBps" -> 9000))
+    (w.exec.createOffer(body, send = false) \ "refusals").as[Seq[String]] shouldBe empty
+  }
+
+  it should "warn of a 0 bps least auction floor, and of a batcher fee a fifth of the capital" in {
+    val w = world()
+    val body = Json.obj("market" -> "ERG", "capital" -> "20000000", "minYieldBps" -> 500, "floorBps" -> 13000,
+      "shareBounds" -> Json.obj("floorBps" -> 0, "maxExpiry" -> 3000))
+    val warnings = (w.exec.createOffer(body, send = false) \ "warnings").as[Seq[String]]
+    warnings.exists(_.contains("never auction")) shouldBe true
+    warnings.exists(_.contains("a fifth of the capital")) shouldBe true
+  }
+
+  "A SigUSD lot check" should "warn that its refund fee goes to its buyer" in {
+    val w = world()
+    val body = Json.obj("market" -> "SigUSD", "nanoErg" -> "100000000", "opening" -> "2000", "floor" -> "1000",
+      "end" -> (w.order.creationHeight + 1000))
+    val warnings = (w.exec.createLot(body, send = false) \ "warnings").as[Seq[String]]
+    warnings.exists(_.contains("refund fee goes to the lot's buyer")) shouldBe true
+  }
+
   "A refused write" should "answer its refusals on the check and 422 on the send" in {
     val w = world()
     val quote = w.exec.liquidate(w.asset, Json.obj(), send = false)
@@ -173,5 +198,88 @@ class ZcWriteExecutionSpec extends AnyFlatSpec with Matchers with Eventually {
     val e = the[LithosStateChanged] thrownBy w.exec.fillOrder(w.order.boxId, Json.obj("limits" -> Json.obj("maxPay" -> "1")),
       send = true)
     e.reason should include("over the 1 the request allows")
+  }
+
+  /**
+   * An oracle-rule bond far under its ratio, a confirmed oracle box too old for it, and, when `refresh` is set, one
+   * pending refresh whose new box is fresh. The engine is `engine`, so a held write's reschedule reaches it.
+   */
+  private def oracleWorld(refresh: Option[(Option[Int], Option[Long])], engine: akka.actor.ActorRef)
+  : (ZcWriteExecution, ZcTracker, ZcResolver, String, String) = {
+    val c = new ScriptedChain
+    val (ctx0, _, wallet) = FakeNodeContext(c.api)
+    val asset = "d3" * 32
+    def nodeOf(in: work.lithos.mutations.InputUTXO, txId: String): NodeBox = {
+      val b = in.input
+      NodeBox(b.getId.toString, txId, b.getValue, 0, b.getCreationHeight, Hex.toHexString(b.getErgoTree.bytes),
+        b.getTokens.asScala.map(t => NodeAsset(t.getId.toString, t.getValue)),
+        NodeRegisters(b.getRegisters.asScala.zipWithIndex.map { case (v, k) => s"R${k + 4}" -> v.toHex }.toMap))
+    }
+    val (bond, stale, fresh, h) = ctx0.getClient.execute { ctx: BlockchainContext =>
+      val h = ctx.getHeight
+      val terms = Seq(2 * Erg, Erg, 2 * Erg, h + 1000L, h - 100L, 5000000L, 0L, 1000000L, 60L)
+      val bond = UTXO(ZcContracts.script(ZcKind.Bond, Some(ZcMarket.Erg)).contract, 3 * Erg, Seq(Token(ErgoId.create(asset), 2L)),
+        Seq(bytes(asset), bytes("bb" * 32), longs(terms: _*), tokens(), bytes(expr(ZcExpression.OracleLiquidation)),
+          longs(50000000L, h - 100L, h + 1000L)), Some(h - 100)).toInput(ctx, ErgoId.create("e1" * 32), 0)
+      def oracle(made: Int, txId: String) = UTXO(work.lithos.mutations.Contract.SIGMA_TRUE, ZcBoxes.MinBox,
+        Seq(Token(ErgoId.create(ZcContracts.OracleNft), 1L)),
+        Seq(org.ergoplatform.appkit.ErgoValue.of(465116279L), org.ergoplatform.appkit.ErgoValue.of(1)), Some(made))
+        .toInput(ctx, ErgoId.create(txId), 0)
+      (nodeOf(bond, "e1" * 32), nodeOf(oracle(h - 200, "e2" * 32), "e2" * 32), nodeOf(oracle(h, "e3" * 32), "e3" * 32), h)
+    }
+    c.extend(h - 250, h)
+    c.indexed = h
+    c.scans(LDNodeFixtures.indexed(bond, h - 100), LDNodeFixtures.indexed(stale, h - 200))
+    val boxes = Seq(bond, stale, fresh).map(b => b.boxId -> b).toMap
+    when(c.api.boxesWithPoolByIds(any[Seq[String]])).thenAnswer(inv =>
+      Success(inv.getArgument[Seq[String]](0).flatMap(boxes.get)))
+    val t = new ZcTracker(() => c.api, ExecutionContext.global, ZcConfig(enabled = true, 1000), retryMs = 20L)
+    t.poke()
+    eventually(t.view.map(_.book.height) shouldBe Some(h))
+    val txs = refresh.toVector.map { case (size, cost) =>
+      val body = node.model.NodeTransaction("e4" * 32, Seq(node.model.NodeInput(stale.boxId, node.model.NodeSpendingProof.empty)),
+        Seq.empty, Seq(fresh), size, cost)
+      CompleteMempool.MempoolTx(body.id, body, 800)
+    }
+    val snapshot = CompleteMempool.Snapshot(c.headerId(h), txs.map(_.id).toSet, txs.flatMap(_.body.inputs.map(_.boxId)).toSet,
+      System.nanoTime(), transactions = txs)
+    t.observe(CompleteMempool.Observation(1L, Some(snapshot), None))
+    if (refresh.isDefined) eventually(t.view.flatMap(_.pendingOracle).map(_.box.boxId) shouldBe Some(fresh.boxId))
+    val r = new ZcResolver(() => c.api, t)
+    val exec = new ZcWriteExecution(ctx0, EngineFunding(engine, 1.second, ExecutionContext.global), t, r) {
+      override protected def mempoolSnapshot(): CompleteMempool.Snapshot = snapshot
+    }
+    (exec, t, r, asset, fresh.boxId)
+  }
+
+  "A write reading the oracle" should "price at a single pending refresh's box, and hold its send while miners could reach it first" in {
+    implicit val system: akka.actor.ActorSystem = akka.actor.ActorSystem("zc-held-write")
+    try {
+      val engine = akka.testkit.TestProbe()
+      val (confirmedOnly, _, _, asset, _) = oracleWorld(None, engine.ref)
+      (confirmedOnly.liquidate(asset, Json.obj(), send = false) \ "refusals").as[Seq[String]].head should include("older than")
+
+      // The node reports no cost for the refresh, so nothing can show miners reach it first
+      val (exec, tracker, resolver, asset2, freshId) = oracleWorld(Some(Some(788) -> None), engine.ref)
+      val quote = exec.liquidate(asset2, Json.obj(), send = false)
+      (quote \ "refusals").as[Seq[String]] shouldBe empty
+      (quote \ "warnings").as[Seq[String]].exists(_.contains("refreshing")) shouldBe true
+      val held = the[ZcHeld] thrownBy exec.liquidate(asset2, Json.obj(), send = true)
+      held.reason should (include(freshId) and include("no cost"))
+
+      val before = System.currentTimeMillis()
+      val answer = transactions.engine.ZcIntent.Write("liquidate", Some(asset2), Json.obj(), tracker, resolver).execute(exec)
+      (answer \ "outcome").as[String] shouldBe "held"
+      val again = engine.expectMsgType[transactions.engine.TransactionEngine.Schedule](5.seconds)
+      again.notBeforeMillis should be >= (before + transactions.engine.ZcIntent.RetryMs)
+      again.expiresAtMillis should be <= (System.currentTimeMillis() + transactions.engine.ZcIntent.HoldMs)
+      again.intent match {
+        case transactions.engine.EngineIntent.Zc(w: transactions.engine.ZcIntent.Write, _) => w.heldUntil shouldBe defined
+        case other => fail(s"rescheduled $other")
+      }
+      // Past its hold, a held write is refused rather than rescheduled
+      an[ZcRefusal] should be thrownBy transactions.engine.ZcIntent.Write("liquidate", Some(asset2), Json.obj(), tracker,
+        resolver, heldUntil = Some(System.currentTimeMillis())).execute(exec)
+    } finally akka.testkit.TestKit.shutdownActorSystem(system)
   }
 }

@@ -16,14 +16,13 @@ import play.api.libs.concurrent.InjectedActorSupport
 import state.messages.MempoolMessages.MempoolRollupMetadata
 import state.messages.SyncMessages._
 import transactions.rollups.TransactionMessages.RollupTxType._
-import transactions.rollups.TransactionMessages.{PublishRollupTxs, PublishedRollupMap, RollupTxStub, RollupTxType}
+import transactions.rollups.TransactionMessages.{PublishRollupTxs, PublishedRollupMap, RollupTxStub}
 import transactions.rollups.RollupPublisher._
 
 import javax.inject.{Inject, Named}
 import scala.collection.mutable
 import scala.concurrent.{ExecutionContext, Future}
 import scala.concurrent.duration._
-import scala.language.postfixOps
 import scala.util.{Failure, Success, Try}
 
 /**

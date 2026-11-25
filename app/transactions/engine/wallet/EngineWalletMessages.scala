@@ -1,5 +1,4 @@
 package transactions.engine.wallet
-import transactions.engine.wallet.EngineWalletState
 
 import work.lithos.mutations.{InputUTXO, Token}
 

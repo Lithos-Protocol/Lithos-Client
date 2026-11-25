@@ -103,6 +103,12 @@ final case class ZcBook(height: Int, headerId: String, boxes: Map[String, ZcEntr
   lazy val oracle: Option[ZcOracle] =
     if (oracleBoxes.size == 1) ZcBoxes.oracle(oracleBoxes.head._2._1) else None
 
+  /**
+   * This book reading `pending`, a refresh's oracle box still in the mempool, as its oracle. For planning a build
+   * only: no block is ever applied to it.
+   */
+  def withOracle(pending: ZcOracle): ZcBook = copy(oracleBoxes = Map(pending.box.boxId -> (pending.box -> height)))
+
   def entry(boxId: String): Option[ZcEntry] = boxes.get(boxId)
 
   /** Every box whose first token is `token`. */
@@ -321,37 +327,112 @@ object ZcBook {
 final case class ZcPending(record: ZcRecord, txId: String)
 
 /**
+ * A mempool transaction spending the confirmed oracle box. `successor` is its output holding the oracle NFT, when
+ * that parses as the oracle. `fee`, `size` and `cost` are what miners order it by (size and cost as the node reports
+ * them, cost measured on admission), and `firstSeen` the `System.nanoTime` of the first observation holding it.
+ */
+final case class ZcRefresh(body: NodeTransaction, successor: Option[ZcOracle], fee: Long, size: Option[Int],
+                           cost: Option[Long], firstSeen: Long) {
+  def txId: String = body.id
+}
+
+object ZcRefresh {
+
+  /** Spends of the oracle box kept per observation; more only count, since any two already pause oracle work. */
+  final val MaxKept = 4
+
+  private val FeeTree: String = work.lithos.mutations.Contract.FEE.ergoTreeHex
+
+  /**
+   * How many mempool transactions spend `oracleBox`, and up to [[MaxKept]] of them, each first seen when `seen`
+   * says it was, else at `observedAt`.
+   */
+  def of(txs: Seq[NodeTransaction], oracleBox: Option[String], observedAt: Long,
+         seen: Seq[ZcRefresh]): (Int, Vector[ZcRefresh]) = oracleBox match {
+    case None => (0, Vector.empty)
+    case Some(id) =>
+      val spends = txs.filter(_.inputs.exists(_.boxId == id))
+      (spends.size, spends.take(MaxKept).map { tx =>
+        val fee = tx.outputs.filter(_.ergoTree.equalsIgnoreCase(FeeTree)).map(_.value).foldLeft(0L)((a, v) =>
+          Try(Math.addExact(a, v)).getOrElse(Long.MaxValue))
+        ZcRefresh(tx, tx.outputs.find(ZcBoxes.holdsOracleNft).flatMap(ZcBoxes.oracle), fee, tx.size, tx.cost,
+          seen.find(_.txId == tx.id).map(_.firstSeen).getOrElse(observedAt))
+      }.toVector)
+  }
+}
+
+/**
+ * Whether a broadcast reading a pending refresh's oracle box may be sent now. The node orders its mempool by fee per
+ * byte or per cost, as `fee * 1024 / factor`, and a transaction reaching a miner's walk before the refresh it reads
+ * is dropped. So both of ours must be strictly below the refresh's, the refresh first seen at least [[SeenNanos]]
+ * ago so peers hold it first, and the fee at least the node's minimum.
+ */
+object ZcRefreshGuard {
+
+  final val SeenNanos: Long = 10L * 1000000000L
+
+  /** Our cost is counted at this share of what signing measured, in case the node measures less. */
+  final val CostShare: BigDecimal = BigDecimal("0.9")
+
+  def weight(fee: Long, factor: BigInt): BigInt = if (factor <= 0) BigInt(Long.MaxValue) else BigInt(fee) * 1024 / factor
+
+  /** Why `fee`, `size` and `cost` of ours may not chain off `refresh` at `now` (nanoTime), or None when they may. */
+  def refusal(fee: Long, size: Long, cost: Long, refresh: ZcRefresh, now: Long): Option[String] = {
+    val ourCost = (BigDecimal(cost) * CostShare).toBigInt
+    if (fee < org.ergoplatform.appkit.Parameters.MinFee) Some(s"the fee $fee is under the node's minimum")
+    else if (refresh.size.isEmpty) Some(s"the node reports no size for refresh ${refresh.txId}")
+    else if (refresh.cost.isEmpty) Some(s"the node reports no cost for refresh ${refresh.txId}")
+    else if (weight(fee, size) >= weight(refresh.fee, refresh.size.get))
+      Some(s"its fee per byte is not below refresh ${refresh.txId}'s, so a miner could reach it first")
+    else if (weight(fee, ourCost) >= weight(refresh.fee, refresh.cost.get))
+      Some(s"its fee per cost is not below refresh ${refresh.txId}'s, so a miner could reach it first")
+    else if (now - refresh.firstSeen < SeenNanos) Some(s"refresh ${refresh.txId} was first seen under 10 s ago")
+    else None
+  }
+}
+
+/**
  * The mempool laid over a book: which confirmed ZC boxes a mempool transaction spends (and which one), the ZC boxes
- * mempool transactions create that nothing in the mempool spends, the mints among them, and the transaction spending
- * the oracle box. Built only from an observation taken on the book's own block. `read` holds every ZC box the
- * mempool creates, so the next observation parses only boxes it has not seen.
+ * mempool transactions create that nothing in the mempool spends, the mints among them, and the transactions
+ * spending the oracle box (`oracleSpends` of them, the first few in `refreshes`). Built only from an observation
+ * taken on the book's own block. `read` holds every ZC box the mempool creates, so the next observation parses only
+ * boxes it has not seen.
  */
 final case class ZcMempool(anchor: String, observedAt: Long, spentBy: Map[String, String],
                            pending: Map[String, ZcPending], origins: Map[String, ZcOrigin],
-                           oracleSpentBy: Option[String], read: Map[String, ZcPending])
+                           oracleSpends: Int, refreshes: Vector[ZcRefresh], read: Map[String, ZcPending]) {
+
+  /** The one transaction spending the oracle box, when exactly one does. */
+  def refresh: Option[ZcRefresh] = if (oracleSpends == 1) refreshes.headOption else None
+
+  def oracleSpentBy: Option[String] = refreshes.headOption.map(_.txId)
+}
 
 object ZcMempool {
 
-  /** `snapshot` over `book`, reusing what `previous` parsed, or None when the snapshot was taken on another block. */
-  def over(book: ZcBook, snapshot: CompleteMempool.Snapshot, previous: Option[ZcMempool]): Option[ZcMempool] =
+  /**
+   * `snapshot` over `book`, reusing what `previous` parsed, or None when the snapshot was taken on another block.
+   * A refresh `seen` lists keeps the time it was first seen.
+   */
+  def over(book: ZcBook, snapshot: CompleteMempool.Snapshot, previous: Option[ZcMempool],
+           seen: Seq[ZcRefresh] = Seq.empty): Option[ZcMempool] =
     if (!snapshot.anchor.equalsIgnoreCase(book.headerId)) None
     else {
       val txs = snapshot.transactions.map(_.body)
-      val seen = previous.map(_.read).getOrElse(Map.empty)
+      val seenBoxes = previous.map(_.read).getOrElse(Map.empty)
       var spentBy = Map.empty[String, String]
-      var oracleSpentBy = Option.empty[String]
-      val oracleBox = book.oracle.map(_.box.boxId)
       txs.foreach(tx => tx.inputs.foreach { in =>
         if (book.boxes.contains(in.boxId) && !spentBy.contains(in.boxId)) spentBy += in.boxId -> tx.id
-        if (oracleBox.contains(in.boxId) && oracleSpentBy.isEmpty) oracleSpentBy = Some(tx.id)
       })
+      val (oracleSpends, refreshes) = ZcRefresh.of(txs, book.oracle.map(_.box.boxId), snapshot.observedAt,
+        seen ++ previous.toSeq.flatMap(_.refreshes))
       // Every ZC box the mempool creates, chained ones included, so a mint of a pending request is still seen
       val read: Map[String, ZcPending] = txs.flatMap { tx =>
         val minter = tx.inputs.headOption.flatMap(in => book.boxes.get(in.boxId)).map(_.record)
         val moved = tx.inputs.flatMap(in => book.boxes.get(in.boxId)).filter(ZcBook.isState)
           .flatMap(_.record.box.assets.headOption.map(_.tokenId)).toSet
         tx.outputs.flatMap { o =>
-          seen.get(o.boxId).orElse(ZcBoxes.read(o).map(ZcPending(_, tx.id)))
+          seenBoxes.get(o.boxId).orElse(ZcBoxes.read(o).map(ZcPending(_, tx.id)))
             .filter(p => ZcBook.admissible(p.record, moved, minter, book.cut)).map(o.boxId -> _)
         }
       }.toMap
@@ -362,7 +443,7 @@ object ZcMempool {
             tx.outputs.exists(_.assets.exists(_.tokenId == m.boxId)))
           .map(m => m.boxId -> ZcOrigin.of(m, tx.id, None))
       }.toMap
-      Some(ZcMempool(snapshot.anchor, snapshot.observedAt, spentBy, pending, origins, oracleSpentBy, read))
+      Some(ZcMempool(snapshot.anchor, snapshot.observedAt, spentBy, pending, origins, oracleSpends, refreshes, read))
     }
 }
 
@@ -387,15 +468,28 @@ final case class ZcView(book: ZcBook, mempool: Option[ZcMempool], revision: Long
 
   def origin(token: String): Option[ZcOrigin] = book.origins.get(token).orElse(mempool.flatMap(_.origins.get(token)))
 
-  /** Whether a mempool transaction spends the confirmed oracle box, so a trade reading it waits for the next block. */
-  def refreshPending: Boolean = mempool.exists(_.oracleSpentBy.isDefined)
+  /** The one pending refresh of the confirmed oracle box, when exactly one spends it and its successor parses. */
+  def refresh: Option[ZcRefresh] = mempool.flatMap(_.refresh).filter(_.successor.isDefined)
+
+  /** The oracle box that refresh creates, which trades read while it is pending. */
+  def pendingOracle: Option[ZcOracle] = refresh.flatMap(_.successor)
+
+  /** The oracle a trade reads: a single pending refresh's successor, else the confirmed box. */
+  def oracle: Option[ZcOracle] = pendingOracle.orElse(book.oracle)
+
+  /**
+   * Whether trades reading the oracle wait for the next block: two or more mempool transactions spend the confirmed
+   * oracle box, or one does whose oracle output does not parse.
+   */
+  def refreshPending: Boolean = mempool.exists(_.oracleSpends > 0) && pendingOracle.isEmpty
 
   /** What `revision` follows: the block, and the mempool's effect on the market. */
   def fingerprint: ZcView.Fingerprint =
     ZcView.Fingerprint(book.headerId, mempool.map(_.spentBy.keySet).getOrElse(Set.empty),
-      mempool.map(_.pending.keySet).getOrElse(Set.empty), refreshPending)
+      mempool.map(_.pending.keySet).getOrElse(Set.empty), refreshPending, pendingOracle.map(_.box.boxId))
 }
 
 object ZcView {
-  final case class Fingerprint(headerId: String, spent: Set[String], pending: Set[String], refreshPending: Boolean)
+  final case class Fingerprint(headerId: String, spent: Set[String], pending: Set[String], refreshPending: Boolean,
+                               pendingOracle: Option[String])
 }

@@ -5,7 +5,6 @@ import org.ergoplatform.appkit.BlockchainContext
 import org.slf4j.{Logger, LoggerFactory}
 import stratum.CollateralData
 import transactions.candidate.BlockTxMessages.CandidateTx
-import transactions.engine.execution.RollupExecution
 import transactions.rollups.RollupTransactions
 import work.lithos.mutations.UTXO
 

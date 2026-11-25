@@ -1,6 +1,6 @@
 package controllers
 
-import akka.actor.{ActorRef, ActorSystem}
+import akka.actor.ActorSystem
 import api.models._
 import api.openapitools.OpenApiExceptions
 import api.{ApiHelper, CollateralMarketApi, LithosApiErrors}

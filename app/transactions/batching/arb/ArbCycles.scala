@@ -7,7 +7,7 @@ import org.ergoplatform.appkit.{BlockchainContext, SignedTransaction}
 import org.slf4j.{Logger, LoggerFactory}
 import transactions.batching.ergodex.{MachinaFill, MachinaKind, MachinaOrder}
 import transactions.batching.sigmafi.zc.{ZcAssetPricer, ZcBook, ZcCollateralArb, ZcResolver}
-import transactions.candidate.BlockTxMessages.{CandidateTx, ChainFromPackage}
+import transactions.candidate.BlockTxMessages.{CandidateTx, ChainFromMempool, ChainFromPackage, IncludeExisting, Supersede}
 import transactions.candidate.{CandidateBundle, CapitalEntry, CapitalOrigin}
 import work.lithos.mutations.{Contract, InputUTXO}
 
@@ -16,8 +16,8 @@ import scala.util.{Failure, Success, Try}
 
 /**
  * Builds this miner's arb work for one block. Each pool is taken at the last successor the DEX batchers'
- * bundles leave, or at its confirmed box when they leave it alone, and never where a batcher spent its box
- * without leaving one. ERG/token Machina orders handed over by the ErgoDEX batcher are filled first, needing no
+ * bundles leave, or, when they leave it alone, where its pending swaps leave it (carried ahead of the first
+ * bundle through it) or at its confirmed box, and never where a batcher spent its box without leaving one. ERG/token Machina orders handed over by the ErgoDEX batcher are filled first, needing no
  * stake, so a cycle through the same pool is priced on what the fills left. Token/token grids then run on the stake,
  * each a fill and the sale of its gap for ERG, and cycles after them, best first on the same stake: each
  * returns the stake whole to the script it came from, which the next cycle spends, and sends its profit to an
@@ -32,9 +32,31 @@ object ArbCycles {
 
   /**
    * Where a pool stands for this build: the box holding its state, and the transaction outside the cycle being
-   * built that created it, which that cycle names as a package parent. None for a confirmed box.
+   * built that created it, which that cycle names as a package parent. None for a confirmed box. `carry` is a
+   * pending chain the first bundle through the pool carries ahead of its own members, ending in `createdBy`.
    */
-  private final case class At(box: Either[NodeBox, InputUTXO], createdBy: Option[String])
+  private final case class At(box: Either[NodeBox, InputUTXO], createdBy: Option[String],
+                              carry: Vector[CandidateTx] = Vector.empty)
+
+  /**
+   * A bundle of `own` through pools standing at `places`: the pending chains those pools carry go first, each
+   * declared as chained from the mempool; every other transaction outside the bundle that created a pool box it
+   * spends is a package parent; and every pending transaction spending one of its inputs is declared superseded.
+   */
+  private def bundleOf(own: Vector[CandidateTx], places: Seq[At], extraParents: Seq[String], pending: ArbPending,
+                       capital: Seq[CapitalEntry]): CandidateBundle = {
+    val carried = places.flatMap(_.carry).groupBy(_.id).values.map(_.head).toVector
+      .sortBy(tx => places.iterator.flatMap(_.carry).indexWhere(_.id == tx.id))
+    val carriedIds = carried.map(_.id).toSet
+    val ownIds = own.map(_.id).toSet
+    val parents = (places.flatMap(p => p.createdBy.filter(_ => p.carry.isEmpty)) ++ extraParents).distinct
+      .filterNot(id => ownIds.contains(id) || carriedIds.contains(id))
+    val displaced = pending.competitors(own.flatMap(_.inputIds)) -- carriedIds -- ownIds
+    CandidateBundle(carried ++ own,
+      carried.flatMap(tx => Seq(ChainFromMempool(tx.id), IncludeExisting(tx.id))) ++ parents.map(ChainFromPackage) ++
+        (if (displaced.isEmpty) Seq.empty else Seq(Supersede(displaced))),
+      capital)
+  }
 
   /**
    * Optional SigmaFi ZC collateral arbitrage parameters for one build: the confirmed book, resolver, profit and
@@ -62,12 +84,14 @@ object ArbCycles {
    *                    output is not noted is not offered, and no later cycle is built on it
    * @param refuse      told each order whose fill, or grid cycle, priced but could not be signed
    * @param zc          when present, also evaluates and arbitrages ZC lots, Dutch vaults and AMM-priced sale orders
+   * @param pending     pending pool spends: a pool the batchers left alone stands where its carried chain leaves it,
+   *                    and that chain goes ahead of the first bundle through it
    */
   def build(ctx: BlockchainContext, wallet: NodeWallet, index: ArbIndex, basis: ArbBasis, stake: Option[NodeBox],
             machina: Seq[MachinaOrder], minFill: Long, blockHeight: Int, slots: Int, maxIn: Long, minProfit: Long,
             profitTo: Contract, selectUntil: Deadline, buildUntil: Deadline,
             reserve: String => Boolean, refuse: String => Unit = _ => (),
-            zc: Option[ZcArbContext] = None): Vector[CandidateBundle] = {
+            zc: Option[ZcArbContext] = None, pending: ArbPending = ArbPending.Empty): Vector[CandidateBundle] = {
     val (grids, fills) = machina.partition(_.kind == MachinaKind.TokenGrid)
     val fillPools = fills.map(_.poolNft).toSet
     // A token/token grid may go through any pool trading its base token; ZC collateral arb may sell through any
@@ -77,7 +101,7 @@ object ArbCycles {
       else index.pools ++ index.parsed.filter { case (nft, entry) =>
         fillPools.contains(nft) || gridBases.exists(entry.pool.trades)
       }
-    val (initial, places) = standing(ctx, held, basis)
+    val (initial, places) = standing(ctx, held, basis, pending)
     var states = initial
     var at = places
     var bundles = Vector.empty[CandidateBundle]
@@ -88,7 +112,7 @@ object ArbCycles {
       .flatMap(order => states.get(order.poolNft).flatMap(MachinaFill.best(order, _)).map(order -> _.gap))
       .sortBy { case (order, gap) => (-gap, order.boxId) }
     ranked.foreach { case (order, _) =>
-      if (bundles.size < slots && !buildUntil.isOverdue()) {
+      if (bundles.map(_.members.size).sum + 1 + at(order.poolNft).carry.size <= slots && !buildUntil.isOverdue()) {
         // A pool box that does not read back is the pool's fault, so only a fill that fails to sign is refused
         val built = Try(input(ctx, at(order.poolNft))).map { poolBox =>
           MachinaFill.best(order, states(order.poolNft).withBox(poolBox.id.toString)).filter(_.gap >= minFill)
@@ -105,12 +129,11 @@ object ArbCycles {
             refuse(order.boxId)
           case Success(Some((fill, Success(tx)))) =>
             val id = CandidateTx.txId(tx)
-            bundles :+= CandidateBundle(Vector(CandidateTx.signed(tx, ArbKind.MachinaFill)),
-              at(order.poolNft).createdBy.toSeq.map(ChainFromPackage),
-              Seq(CapitalEntry(CapitalOrigin.ExecutorReward, InputUTXO(tx.getOutputsToSpend.get(2)), id)))
+            bundles :+= bundleOf(Vector(CandidateTx.signed(tx, ArbKind.MachinaFill)), Seq(at(order.poolNft)), Nil,
+              pending, Seq(CapitalEntry(CapitalOrigin.ExecutorReward, InputUTXO(tx.getOutputsToSpend.get(2)), id)))
             val successor = InputUTXO(tx.getOutputsToSpend.get(0))
-            states += order.poolNft -> fill.swap.after.withBox(successor.id.toString)
-            at += order.poolNft -> At(Right(successor), Some(id))
+            states = ArbPool.moved(states, fill.swap.after.withBox(successor.id.toString))
+            ArbPool.keys(fill.swap.after).foreach(k => at += k -> At(Right(successor), Some(id)))
           case Success(None) => ()
         }
       }
@@ -120,8 +143,9 @@ object ArbCycles {
         s"${bundles.flatMap(_.capital.map(_.value)).sum} nanoERG")
 
     bundles ++ stake.toVector.flatMap(box =>
-      cycles(ctx, wallet, index, basis, box, grids, states, at, blockHeight, slots - bundles.size, maxIn, minProfit,
-        profitTo, selectUntil, buildUntil, reserve, refuse, zc))
+      cycles(ctx, wallet, index, basis, box, grids, states, at, blockHeight, slots - bundles.map(_.members.size).sum,
+        maxIn, minProfit,
+        profitTo, selectUntil, buildUntil, reserve, refuse, zc, pending))
   }
 
   /**
@@ -132,7 +156,7 @@ object ArbCycles {
                      grids: Seq[MachinaOrder], initial: Map[String, ArbPool], places: Map[String, At],
                      blockHeight: Int, slots: Int, maxIn: Long, minProfit: Long, profitTo: Contract,
                      selectUntil: Deadline, buildUntil: Deadline, reserve: String => Boolean,
-                     refuse: String => Unit, zc: Option[ZcArbContext]): Vector[CandidateBundle] = {
+                     refuse: String => Unit, zc: Option[ZcArbContext], pending: ArbPending): Vector[CandidateBundle] = {
     val stakeInput = stake.toInputUTXO(ctx)
     if (basis.spent.contains(stake.boxId) || stakeInput.id.toString != stake.boxId) {
       logger.warn(s"The arb stake ${stake.boxId} is spent by a batcher's bundle or does not read back; no arb " +
@@ -146,9 +170,11 @@ object ArbCycles {
       var bundles = Vector.empty[CandidateBundle]
       var stopped = false
       def used: Int = bundles.map(_.members.size).sum
+      // What a bundle through `pools` adds to the package besides its own transactions: the chains they carry
+      def carriedBy(pools: Seq[String]): Int = pools.flatMap(at(_).carry.map(_.id)).distinct.size
 
       // Marks a signed cycle's pools and stake as moved, and offers it as `kind`; false when its stake output is not noted
-      def take(legs: Vector[SignedTransaction], pools: Vector[String], parents: Vector[String], kind: String): Boolean = {
+      def take(legs: Vector[SignedTransaction], pools: Vector[String], kind: String): Boolean = {
         val stakeOut = InputUTXO(legs.last.getOutputsToSpend.get(1))
         if (!reserve(stakeOut.id.toString)) {
           logger.warn(s"${stakeOut.id} could not be noted as the next arb stake; no further cycles for " +
@@ -158,11 +184,11 @@ object ArbCycles {
         } else {
           val ids = legs.map(CandidateTx.txId)
           val profit = InputUTXO(legs.last.getOutputsToSpend.get(2))
-          bundles :+= CandidateBundle(legs.map(CandidateTx.signed(_, kind)),
-            (parents ++ carryCreatedBy).distinct.filterNot(ids.contains).map(ChainFromPackage),
-            Seq(CapitalEntry(CapitalOrigin.Arbitrage, profit, ids.last)))
+          bundles :+= bundleOf(legs.map(CandidateTx.signed(_, kind)), pools.distinct.map(at), carryCreatedBy.toSeq,
+            pending, Seq(CapitalEntry(CapitalOrigin.Arbitrage, profit, ids.last)))
           pools.zip(legs).zip(ids).foreach { case ((nft, leg), id) =>
-            at += nft -> At(Right(InputUTXO(leg.getOutputsToSpend.get(0))), Some(id))
+            val place = At(Right(InputUTXO(leg.getOutputsToSpend.get(0))), Some(id))
+            states.get(nft).fold(Seq(nft))(ArbPool.keys).foreach(k => at += k -> place)
           }
           carry = stakeOut
           carryCreatedBy = Some(ids.last)
@@ -178,15 +204,17 @@ object ArbCycles {
         if (!stopped && used + 2 <= slots && !buildUntil.isOverdue())
           ArbMachina.gridCycle(order, states.values).filter(_.profit >= minProfit).foreach { cycle =>
             val pools = Vector(cycle.fill.swap.pool.nft, cycle.sale.pool.nft)
-            gridSigned(ctx, wallet, cycle, at, carry, blockHeight, profitTo) match {
+            if (used + 2 + carriedBy(pools) <= slots) gridSigned(ctx, wallet, cycle, at, carry, blockHeight, profitTo) match {
               case Failure(ex) =>
                 logger.warn(s"Could not fill Machina order ${order.boxId} through pool ${pools.head.take(12)} and " +
                   s"sell its gap for block $blockHeight, leaving it out for a while: ${ex.getMessage}")
                 refuse(order.boxId)
               case Success(legs) =>
-                if (take(legs, pools, pools.flatMap(at(_).createdBy), ArbKind.Grid)) {
-                  states += pools.head -> cycle.fill.swap.after.withBox(InputUTXO(legs.head.getOutputsToSpend.get(0)).id.toString)
-                  states += pools(1) -> cycle.sale.after.withBox(InputUTXO(legs(1).getOutputsToSpend.get(0)).id.toString)
+                if (take(legs, pools, ArbKind.Grid)) {
+                  states = ArbPool.moved(states,
+                    cycle.fill.swap.after.withBox(InputUTXO(legs.head.getOutputsToSpend.get(0)).id.toString))
+                  states = ArbPool.moved(states,
+                    cycle.sale.after.withBox(InputUTXO(legs(1).getOutputsToSpend.get(0)).id.toString))
                 }
             }
           }
@@ -195,18 +223,22 @@ object ArbCycles {
       // SigmaFi ZC collateral arbitrage on the same stake and live pool states
       zc.foreach { z =>
         if (!stopped && z.maxBundles > 0 && used < slots && !selectUntil.isOverdue() && !buildUntil.isOverdue()) {
-          val rawPlaces = at.map { case (nft, p) => nft -> (p.box -> p.createdBy) }
+          // A pool with a pending chain to carry is left out, since ZC bundles name only package parents
+          val carrying = at.collect { case (nft, p) if p.carry.nonEmpty => nft }.toSet
+          val rawPlaces = at.collect { case (nft, p) if p.carry.isEmpty => nft -> (p.box -> p.createdBy) }
           var reserveFailed = false
           val (zcBundles, nextCarry, nextCarryParent, nextStates, nextPlaces) =
-            ZcCollateralArb.buildAll(ctx, wallet, z.book, z.resolver, basis, states, rawPlaces, carry, carryCreatedBy,
+            ZcCollateralArb.buildAll(ctx, wallet, z.book, z.resolver, basis, states -- carrying, rawPlaces, carry, carryCreatedBy,
               stakeInput, blockHeight, slots - used, z.maxBundles, math.min(maxIn, z.maxCost), z.minProfit,
               z.minLegProceeds, profitTo, selectUntil, buildUntil,
               id => { val ok = reserve(id); if (!ok) reserveFailed = true; ok }, z.refused, z.onRefuse, z.pricer)
           bundles ++= zcBundles
           carry = nextCarry
           carryCreatedBy = nextCarryParent
-          states = nextStates
-          at = nextPlaces.map { case (nft, (box, parent)) => nft -> At(box, parent) }
+          states = (nextStates -- carrying) ++ states.filter { case (nft, _) => carrying.contains(nft) }
+          at = nextPlaces.filterNot { case (nft, _) => carrying.contains(nft) }
+            .map { case (nft, (box, parent)) => nft -> At(box, parent) } ++
+            at.filter { case (nft, _) => carrying.contains(nft) }
           if (reserveFailed) stopped = true
         }
       }
@@ -220,7 +252,8 @@ object ArbCycles {
             false
           case Success(legs) =>
             val pools = cycle.route.hops.map(_.nft)
-            take(legs, pools, pools.flatMap(at(_).createdBy), ArbKind.cycle(cycle.swaps.map(_.pool)))
+            if (used + legs.size + carriedBy(pools) > slots) false
+            else take(legs, pools, ArbKind.cycle(cycle.swaps.map(_.pool)))
         }
       }
       bundles
@@ -229,11 +262,16 @@ object ArbCycles {
 
   /**
    * The state and box of every pool `pools` names, for this build. A box the basis creates that reads as one of
-   * them is that pool's latest state; a pool with no such box keeps its confirmed box, unless the basis spent it.
-   * A pool two basis boxes claim is left out, since only one can be its state.
+   * them is that pool's latest state; a pool with no such box keeps its confirmed box, unless the basis spent it,
+   * or stands where its pending chain leaves it when that chain spends nothing the basis spends and its tip reads
+   * as the pool. A pool two basis boxes claim is left out, since only one can be its state.
    */
-  private def standing(ctx: BlockchainContext, pools: Map[String, ArbPoolEntry], basis: ArbBasis)
-  : (Map[String, ArbPool], Map[String, At]) = {
+  private def standing(ctx: BlockchainContext, pools: Map[String, ArbPoolEntry], basis: ArbBasis,
+                       pending: ArbPending): (Map[String, ArbPool], Map[String, At]) = {
+    def carried(entry: ArbPoolEntry): Option[(ArbPool, At)] = pending.chains.get(entry.nft)
+      .filter(c => c.confirmedId == entry.box.boxId &&
+        !c.members.exists(tx => !basis.txIds.contains(tx.id) && tx.inputIds.exists(basis.spent.contains)))
+      .flatMap(c => entry.read(ctx, c.tip).map(state => state -> At(Left(c.tip), Some(c.tipTx), c.members)))
     val successors = basis.created.flatMap { c =>
       c.box.assets.headOption.flatMap(a => pools.get(a.tokenId))
         .flatMap(entry => entry.read(ctx, c.box).map(state => entry.nft -> (state, At(Left(c.box), Some(c.txId)))))
@@ -241,7 +279,7 @@ object ArbCycles {
     val confirmed = pools.collect {
       case (nft, entry) if !successors.contains(nft) && !basis.spent.contains(entry.box.boxId) &&
         !basis.created.exists(_.box.assets.headOption.exists(_.tokenId == nft)) =>
-        nft -> (entry.pool, At(Left(entry.box), None))
+        nft -> carried(entry).getOrElse(entry.pool -> At(Left(entry.box), None))
     }
     val all = successors ++ confirmed
     all.map { case (nft, (state, _)) => nft -> state } -> all.map { case (nft, (_, place)) => nft -> place }

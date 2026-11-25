@@ -20,7 +20,7 @@ import transactions.batching.forwards._
 import transactions.batching.{Batcher, BatchingMempool}
 import transactions.engine.EngineBroadcast
 import transactions.engine.wallet.{EngineFunding, FundingAllocation}
-import work.lithos.mutations.{InputUTXO, UTXO}
+import work.lithos.mutations.InputUTXO
 
 import scala.concurrent.Await
 import scala.util.control.NonFatal
@@ -659,7 +659,7 @@ class ForwardsAPIExecution(nodeContext: NodeContext,
    * is reported as nothing sent.
    */
   private def broadcast(signed: SignedTransaction, funding: Seq[FundingAllocation]): EngineBroadcast.Result =
-    try new EngineBroadcast(walletSelector.walletRef, executionNode)(walletSelector.executionContext)
+    try new EngineBroadcast(walletSelector.walletRef, executionNode)
       .send(signed, funding, ForwardsAPIExecution.operation(signed), alive)
     catch { case _: IllegalArgumentException if !alive() => throw stopped }
 

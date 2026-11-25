@@ -5,13 +5,11 @@ import configs.NodeContext
 import org.slf4j.{Logger, LoggerFactory}
 import state.messages.MempoolMessages._
 import state.messages.StateFrameMessages.NewBlock
-import state.messages.SyncMessages.Ready
 import state.messages.{BlockTx, NodeSync}
 
 import javax.inject.{Inject, Named}
 import scala.annotation.tailrec
 import scala.concurrent.{ExecutionContext, Future}
-import scala.concurrent.duration._
 import scala.util.{Failure, Success, Try}
 
 object MempoolView {

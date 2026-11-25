@@ -1,5 +1,4 @@
 package transactions.engine.wallet
-import transactions.engine.wallet.EngineWalletState
 
 import akka.actor.ActorRef
 import akka.pattern.ask

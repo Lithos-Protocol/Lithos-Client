@@ -98,7 +98,7 @@ final case class ZcExpr(expression: ZcExpression, market: Option[ZcMarket], byte
 object ZcContracts {
 
   final val Resource = "sigmafi/zc/contracts.tsv"
-  final val PinnedCommit = "7ddd07a"
+  final val PinnedCommit = "adce8ac"
 
   /** The SigUSD token: the SigUSD market's repayment asset. */
   final val SigUsdId = "03faf2cb329f2e90d6d23b58d91bbb6c046aa143261cc21f52fbe2824bfcbf04"

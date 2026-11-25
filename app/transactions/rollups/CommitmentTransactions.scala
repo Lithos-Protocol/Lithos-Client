@@ -340,7 +340,7 @@ class CommitmentTransactions(nodeContext: NodeContext, dataBoxes: DataBoxSource,
     // Converted before submission begins
     val change = signableOutputs(signed, prover)
 
-    val result = new transactions.engine.EngineBroadcast(walletSelector.walletRef, executionNode)(walletSelector.executionContext)
+    val result = new transactions.engine.EngineBroadcast(walletSelector.walletRef, executionNode)
       .send(signed, Seq(reservation), operation, alive)
     val uncertain = result.outcome == transactions.engine.EngineBroadcast.Uncertain
     if (!uncertain) result.requireAccepted()

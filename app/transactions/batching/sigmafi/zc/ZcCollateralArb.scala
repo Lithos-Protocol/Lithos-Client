@@ -9,7 +9,7 @@ import org.ergoplatform.sdk.ErgoId
 import org.slf4j.LoggerFactory
 import sigma.Colls
 import sigma.ast.ErgoTree
-import sigmafi.zc.{ZcContracts, ZcMarket}
+import sigmafi.zc.ZcMarket
 import transactions.batching.Batcher
 import transactions.batching.arb._
 import transactions.batching.sigmafi.SigmaFiBoxes
@@ -57,9 +57,7 @@ final case class ZcSaleOrderTarget(ask: ZcAsk, seller: Contract, units: Long, pr
 final case class ZcArbPlan(target: ZcArbTarget, acquireSwap: Option[ArbSwap], valuation: ZcBasketValuation,
                            ergCost: Long, netProfit: Long, poolsAfter: Map[String, ArbPool]) {
   def legs: Int = (if (acquireSwap.isDefined) 1 else 0) + 1 + valuation.liquidationLegs
-  def allSwaps: Vector[ArbSwap] = acquireSwap.toVector ++ valuation.liquidations.collect {
-    case a: ZcAmmLiquidation => a.swaps
-  }.flatten
+  def allSwaps: Vector[ArbSwap] = acquireSwap.toVector ++ valuation.liquidations.flatMap(_.swaps)
 }
 
 /**
@@ -90,7 +88,6 @@ object ZcCollateralArb {
 
   private def bytes(hex: String): ErgoValue[_] = ErgoValue.of(Colls.fromArray(Hex.decode(hex)), scalaByteType)
   private def int(i: Int): ErgoValue[_] = ErgoValue.of(i)
-  private def byte(b: Byte): ErgoValue[_] = ErgoValue.of(b)
   private def long(l: Long): ErgoValue[_] = ErgoValue.of(l)
   private def token(id: String, n: Long): Token = Token(ErgoId.create(id), n)
 
@@ -102,12 +99,14 @@ object ZcCollateralArb {
 
   /**
    * Finds the single most profitable ZC collateral arb opportunity on `book` (excluding `spentBoxes`) given current
-   * `pools`, `maxErgIn`, `minProfit` and remaining `slots`. Pure apart from bounded script cache reads.
+   * `pools`, `maxErgIn`, `minProfit` and remaining `slots`, among the plans `admit` takes. Pure apart from bounded
+   * script cache reads.
    */
   def bestPlan(book: ZcBook, createdInBasis: Seq[(String, ZcRecord)], pools: Map[String, ArbPool],
                resolveScript: ZcRecord => Option[Contract], blockHeight: Int, maxErgIn: Long, minProfit: Long,
                slots: Int, minLegProceeds: Long, spentBoxes: Set[String],
-               pricer: ZcAssetPricer = ZcAssetPricer.Default): Option[(ZcArbPlan, Option[String])] = {
+               pricer: ZcAssetPricer = ZcAssetPricer.Default,
+               admit: ZcArbPlan => Boolean = _ => true): Option[(ZcArbPlan, Option[String])] = {
     if (slots < 1 || maxErgIn < MinBox || minProfit < ArbStage.MinProfitOutput) None
     else {
       val h = blockHeight.toLong
@@ -184,8 +183,7 @@ object ZcCollateralArb {
                   else ZcRules.excessPrice(v, h).filter(_ > 0L)
                 } else {
                   val before = ZcRules.currencyHeld(v)
-                  val aft = math.max(ZcRules.lotTarget(v, h), before)
-                  Some(aft - before)
+                  ZcRules.lotTarget(v, h).map(t => math.max(t, before) - before)
                 }
                 priceOpt.flatMap { price =>
                   val threshold = ZcRules.threshold(v)
@@ -244,7 +242,7 @@ object ZcCollateralArb {
       val legCap = math.min(MaxLegsPerBundle, slots)
       var best: Option[(ZcArbPlan, Option[String])] = None
       def consider(plan: ZcArbPlan, parentTx: Option[String]): Unit =
-        if (plan.netProfit >= minProfit && plan.legs <= legCap) {
+        if (plan.netProfit >= minProfit && plan.legs <= legCap && admit(plan)) {
           val beats = best.forall { case (prev, _) =>
             plan.netProfit > prev.netProfit || (plan.netProfit == prev.netProfit &&
               (plan.legs < prev.legs || (plan.legs == prev.legs && plan.target.boxId < prev.target.boxId)))
@@ -321,7 +319,7 @@ object ZcCollateralArb {
       if (p <= 0L) return None
       (Try(Math.addExact(before, p)).getOrElse(return None), p)
     } else {
-      val target = ZcRules.lotTarget(v, height)
+      val target = ZcRules.lotTarget(v, height).getOrElse(return None)
       val aft = math.max(target, before)
       (aft, aft - before)
     }
@@ -516,7 +514,7 @@ object ZcCollateralArb {
     val movedPools = Vector.newBuilder[(String, InputUTXO, String)]
     var localPools = Map.empty[String, InputUTXO]
     def curPoolBox(nft: String): InputUTXO = localPools.getOrElse(nft, poolBoxOf(nft))
-    val allSwaps = plan.valuation.liquidations.collect { case a: ZcAmmLiquidation => a.swaps }.flatten
+    val allSwaps = plan.valuation.liquidations.flatMap(_.swaps)
 
     // 1. Optional SigUSD acquisition leg
     plan.acquireSwap.foreach { planned =>
@@ -527,7 +525,7 @@ object ZcCollateralArb {
       val tx = ArbLeg.build(ctx, wallet, swap, poolBox, Seq(carry), stake.contract, blockHeight)
       val id = CandidateTx.txId(tx)
       val succ = InputUTXO(tx.getOutputsToSpend.get(0))
-      localPools += planned.pool.nft -> succ
+      ArbPool.keys(swap.after).foreach(k => localPools += k -> succ)
       movedPools += ((planned.pool.nft, succ, id))
       carry = InputUTXO(tx.getOutputsToSpend.get(1))
       legs += tx
@@ -555,7 +553,7 @@ object ZcCollateralArb {
         profit = if (last) Some(profitTo -> plan.netProfit) else None)
       val id = CandidateTx.txId(tx)
       val succ = InputUTXO(tx.getOutputsToSpend.get(0))
-      localPools += planned.pool.nft -> succ
+      ArbPool.keys(swap.after).foreach(k => localPools += k -> succ)
       movedPools += ((planned.pool.nft, succ, id))
       carry = InputUTXO(tx.getOutputsToSpend.get(1))
       if (last) profitBox = Some(InputUTXO(tx.getOutputsToSpend.get(2)))
@@ -587,16 +585,8 @@ object ZcCollateralArb {
         }
         (zcInput.withCtxVar(0.toByte, int(0)), Seq(payout))
 
-      case ZcVaultTarget(v, market, _, after) =>
-        val regs = zcInput.registers.updated(2, byte(2.toByte))
-        val kept = ZcRules.keptBySale(v).map(t => token(t.tokenId, t.amount))
-        val reserve = token(v.shareId, v.shares + 1L)
-        val sold = market.tokenId match {
-          case None => UTXO(v.script.contract, after, reserve +: kept, regs)
-          case Some(id) => UTXO(v.script.contract, if (ZcRules.saleKeepsErg(v)) v.box.value else MinBox,
-            Seq(reserve, token(id, after)) ++ kept, regs)
-        }
-        (zcInput.withCtxVar(0.toByte, int(0)), Seq(sold))
+      case ZcVaultTarget(v, _, _, after) =>
+        (zcInput.withCtxVar(0.toByte, int(0)), Seq(ZcUserTransactions.soldVault(ctx, v, zcInput, after)))
 
       case ZcSaleOrderTarget(ask, seller, units, price) =>
         val tag = Seq(bytes(ask.boxId), long(units))
@@ -718,11 +708,10 @@ object ZcCollateralArb {
                 bundles :+= CandidateBundle(legs.map(CandidateTx.signed(_, ArbKind.ZcArb)),
                   parents.map(ChainFromPackage),
                   Seq(CapitalEntry(CapitalOrigin.Arbitrage, profitOut, ids.last)))
-                movedPools.foreach { case (nft, box, txId) =>
-                  places += nft -> (Right(box) -> Some(txId))
-                }
-                plan.allSwaps.zip(movedPools).foreach { case (s, (nft, box, _)) =>
-                  states += nft -> s.after.withBox(box.id.toString)
+                // A box holding several pool states (the bank's two sides) moves them all
+                plan.allSwaps.zip(movedPools).foreach { case (s, (_, box, txId)) =>
+                  ArbPool.keys(s.after).foreach(k => places += k -> (Right(box) -> Some(txId)))
+                  states = ArbPool.moved(states, s.after.withBox(box.id.toString))
                 }
                 spentZc += plan.target.boxId
                 carry = nextCarry

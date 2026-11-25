@@ -1,7 +1,6 @@
 package lfsm
 
 import org.ergoplatform.appkit._
-import sigma.util.NBitsUtils
 import work.lithos.mutations.{Contract, Mutator}
 
 import scala.io.Source

@@ -4,7 +4,12 @@ import lithosdex.contracts.{LDContracts, LDT2TContracts}
 import lithosdex.{LDHelpers, LDLiquidityPool, LDT2TLiquidityPool}
 import transactions.batching.ergodex.ErgoDexPool
 import transactions.batching.lithosdex.{LDT2TExecution, LithosDexTransactions}
+import node.MutationConversions._
+import node.model.NodeBox
+import org.ergoplatform.appkit.{BlockchainContext, ErgoValue}
 import org.ergoplatform.sdk.ErgoId
+import pricing.SigmaUsdBank
+import sigmausd.SigmaUsdContracts
 import work.lithos.mutations.{InputUTXO, Token, UTXO}
 
 import scala.util.Try
@@ -20,7 +25,7 @@ object ArbAsset {
   def token(id: String): ArbAsset = ArbAsset(Some(id.toLowerCase))
 }
 
-/** The four pool kinds a leg can swap through. */
+/** The pool kinds a leg can swap through: four AMM kinds and the SigmaUSD bank. */
 sealed abstract class ArbPoolKind(val label: String)
 
 object ArbPoolKind {
@@ -28,6 +33,7 @@ object ArbPoolKind {
   case object ErgoDexToken extends ArbPoolKind("ergodex-t2t")
   case object LithosDexNative extends ArbPoolKind("lithosdex-n2t")
   case object LithosDexToken extends ArbPoolKind("lithosdex-t2t")
+  case object SigmaUsdBank extends ArbPoolKind("sigmausd-bank")
 }
 
 /**
@@ -90,6 +96,27 @@ sealed trait ArbPool {
 
   /** Whether `asset` is one of this pool's two sides. */
   def trades(asset: ArbAsset): Boolean = asset == x || asset == y
+
+  /** The NFT of the box this state is held by; several states held by one box share it, and a route takes one. */
+  def holder: String = nft
+
+  /** The other states the same box holds, in the same state as this one; a leg through this one moves them too. */
+  def sharing: Seq[ArbPool] = Seq.empty
+
+  /** Boxes a leg through this pool reads as data inputs, in order. */
+  def dataInputs(ctx: BlockchainContext): Seq[InputUTXO] = Seq.empty
+
+  /** Registers the leg's carry output (output 1) must hold for this pool's contract. */
+  def carryRegisters(swap: ArbSwap): Seq[ErgoValue[_]] = Seq.empty
+}
+
+object ArbPool {
+  /** `states` with `after` in place of its pool and of every state its box also holds. */
+  def moved(states: Map[String, ArbPool], after: ArbPool): Map[String, ArbPool] =
+    states ++ (after +: after.sharing).map(p => p.nft -> p)
+
+  /** The NFT keys of `pool` and of every state its box also holds. */
+  def keys(pool: ArbPool): Seq[String] = (pool +: pool.sharing).map(_.nft)
 }
 
 /**
@@ -252,4 +279,100 @@ object LithosDexT2TArbPool {
   /** The pool `box` holds, under the token/token deployment `contracts` it was verified against. */
   def apply(box: InputUTXO, contracts: LDT2TContracts): LithosDexT2TArbPool =
     LithosDexT2TArbPool(LDT2TLiquidityPool(box), contracts, box.id.toString)
+}
+
+/**
+ * One side of the SigmaUSD bank: ERG against SigUSD when `sc`, else against SigRSV. X is ERG, so ERG in mints and the
+ * coin in redeems, each at exactly what the bank's rule fixes; a mint takes only what its whole coins cost. Both sides
+ * are one box, so a leg through one moves the other and a route takes at most one. A leg reads `oracle` as data
+ * input 0, and its carry output is the contract's receipt: the change in circulation in R4, the reserve's in R5.
+ */
+final case class SigmaUsdArbPool(bank: SigmaUsdBank, sc: Boolean, boxId: String, oracle: NodeBox) extends ArbPool {
+
+  override def kind: ArbPoolKind = ArbPoolKind.SigmaUsdBank
+  override def nft: String = SigmaUsdArbPool.key(sc)
+  override def holder: String = SigmaUsdContracts.BankNft
+  override val x: ArbAsset = ArbAsset.Erg
+  override val y: ArbAsset = ArbAsset.token(if (sc) SigmaUsdContracts.SigUsd else SigmaUsdContracts.SigRsv)
+
+  override def quote(amountIn: Long, xIn: Boolean): Long = swap(amountIn, xIn).fold(0L)(_.amountOut)
+
+  override def swap(amountIn: Long, xIn: Boolean): Option[ArbSwap] =
+    if (xIn) bank.mintFor(sc, amountIn).map(ex => ArbSwap(this, ex.reserveDelta, xIn = true, ex.circDelta, moved(ex)))
+    else bank.redeem(sc, amountIn).map(ex => ArbSwap(this, amountIn, xIn = false, -ex.reserveDelta, moved(ex)))
+
+  /** The mint of exactly `amountOut` coins. A redeem pays what its coins fix, never a chosen amount, so it gives None. */
+  override def swapFor(amountOut: Long, xIn: Boolean): Option[ArbSwap] =
+    if (!xIn) None
+    else bank.mintOf(sc, amountOut).map(ex => ArbSwap(this, ex.reserveDelta, xIn = true, amountOut, moved(ex)))
+
+  /** The fee-inclusive rate for one coin, a millionth over so no amount beats it; 0 while the operation is closed. */
+  override def marginal(xIn: Boolean): Double = {
+    val price = (if (sc) bank.scPrice else bank.rcPrice).toDouble
+    val pct = SigmaUsdBank.FeePercent.toDouble
+    if (xIn) bank.mintOf(sc, 1L).fold(0.0)(_ => 100.0 / ((100.0 + pct) * price) * 1.000001)
+    else bank.redeem(sc, 1L).fold(0.0)(_ => price * (100.0 - pct) / 100.0 * 1.000001)
+  }
+
+  override def withBox(boxId: String): ArbPool = copy(boxId = boxId)
+
+  override def sharing: Seq[ArbPool] = Seq(copy(sc = !sc))
+
+  override def input(poolBox: InputUTXO): InputUTXO = poolBox
+
+  override def dataInputs(ctx: BlockchainContext): Seq[InputUTXO] = {
+    val input = oracle.toInputUTXO(ctx)
+    require(input.id.toString == oracle.boxId, s"oracle box ${oracle.boxId} reads back as ${input.id}")
+    Seq(input)
+  }
+
+  override def carryRegisters(swap: ArbSwap): Seq[ErgoValue[_]] = {
+    val circDelta = if (swap.xIn) swap.amountOut else -swap.amountIn
+    Seq(ErgoValue.of(circDelta), ErgoValue.of(swap.poolErgDelta))
+  }
+
+  /** The bank box with `after`'s reserve, coins and circulation, its script and token order kept. */
+  override def successor(poolBox: InputUTXO, after: ArbPool): UTXO = after match {
+    case SigmaUsdArbPool(next, _, _, _) =>
+      val ids = poolBox.tokens.map(_.id)
+      require(ids.size == 3 && ids(2).toString == SigmaUsdContracts.BankNft, s"box ${poolBox.id} is not the bank")
+      UTXO(poolBox.contract, next.reserve,
+        Seq(Token(ids.head, next.scTokens), Token(ids(1), next.rcTokens), Token(ids(2), 1L)),
+        Seq(ErgoValue.of(next.scCirc), ErgoValue.of(next.rcCirc)))
+    case other => throw new IllegalArgumentException(s"the SigmaUSD bank cannot be succeeded by a ${other.kind.label} pool")
+  }
+
+  private def moved(ex: SigmaUsdBank.Exchange): SigmaUsdArbPool = copy(bank = ex.after)
+}
+
+object SigmaUsdArbPool {
+
+  /** The key a side goes by in routes and pool maps: the bank NFT and the coin, so the two sides differ. */
+  def key(sc: Boolean): String = SigmaUsdContracts.BankNft + (if (sc) ":sigusd" else ":sigrsv")
+
+  /**
+   * Both sides of the bank `bankBox` holds, priced at the rate `oracleBox` holds, or nothing when either is not what
+   * the contract reads: the bank at its pinned script with SigUSD, SigRSV and its NFT in that order and its two
+   * circulation registers, and the oracle box carrying the oracle NFT first with a positive rate in R4.
+   */
+  def read(bankBox: NodeBox, oracleBox: NodeBox): Seq[SigmaUsdArbPool] = Try {
+    require(bankBox.ergoTree.equalsIgnoreCase(SigmaUsdContracts.BankErgoTree))
+    val ids = bankBox.assets.map(_.tokenId)
+    require(ids == Seq(SigmaUsdContracts.SigUsd, SigmaUsdContracts.SigRsv, SigmaUsdContracts.BankNft) &&
+      bankBox.assets(2).amount == 1L)
+    require(oracleBox.assets.headOption.exists(a => a.tokenId == SigmaUsdContracts.OracleNft && a.amount == 1L))
+    def long(box: NodeBox, at: Int): Long = {
+      val values = box.registerValues
+      require(values.size > at)
+      values(at).getValue match {
+        case v: java.lang.Long => v.longValue
+        case other => throw new IllegalArgumentException(s"register R${at + 4} holds $other")
+      }
+    }
+    val rate = SigmaUsdBank.rateOf(long(oracleBox, 0))
+    require(rate > 0L)
+    val bank = SigmaUsdBank(bankBox.value, long(bankBox, 0), long(bankBox, 1), bankBox.assets.head.amount,
+      bankBox.assets(1).amount, rate)
+    Seq(true, false).map(sc => SigmaUsdArbPool(bank, sc, bankBox.boxId, oracleBox))
+  }.getOrElse(Seq.empty)
 }

@@ -273,7 +273,7 @@ class ZcBatchTransactionsSpec extends AnyFlatSpec with Matchers {
         ZcBatchTransactions.offerRefundPiece(expOffer, expOfferIn, lender),
         ZcBatchTransactions.askRefundPiece(expAsk, expAskIn, seller),
         ZcBatchTransactions.lotRefundPiece(expLot, expLotIn, seller),
-        ZcBatchTransactions.settlementRefreshPiece(oldVault, oldVaultIn, h))
+        ZcBatchTransactions.settlementRefreshPiece(ctx, oldVault, oldVaultIn, h))
 
       val packed = ZcBatchTransactions.pack(ctx, wallet, pieces, feeTo, minerFee = 0L, height = h)
       val expectedReward = Reserve + Reserve + Fee + Fee + Fee + Fee + RefreshBounty
@@ -298,7 +298,7 @@ class ZcBatchTransactionsSpec extends AnyFlatSpec with Matchers {
         Seq(bytes(asset), bytes(borrowerHash), longs(2 * Erg, Erg, 2 * Erg, h.toLong + 10000, h.toLong - 500000, Fee, 0L),
           tokens(), bytes(expr(ZcExpression.MaturityLiquidation)), longs(Reserve, old.toLong, h.toLong + 10000)), Some(old)))
       val bond = read[ZcBond](nodeOf(bondIn))
-      val piece = ZcBatchTransactions.bondRefreshPiece(bond, bondIn, borrower, h)
+      val piece = ZcBatchTransactions.bondRefreshPiece(ctx, bond, bondIn, borrower, h)
       piece.aged shouldBe true
 
       val refreshed = ZcBatchTransactions.pack(ctx, wallet, Seq(piece), feeTo, minerFee = 0L, height = h)
@@ -308,11 +308,84 @@ class ZcBatchTransactionsSpec extends AnyFlatSpec with Matchers {
 
       val oldVaultIn = seeded(ctx, UTXO(ZcContracts.script(ZcKind.BondVault, None).contract, MinBox + RefreshBounty,
         Seq(tok("88" * 32, 2L)), Seq(bytes("99" * 32), byte(1)), Some(old)))
-      val vaultPiece = ZcBatchTransactions.settlementRefreshPiece(read[ZcSettlement](nodeOf(oldVaultIn)), oldVaultIn, h)
+      val vaultPiece = ZcBatchTransactions.settlementRefreshPiece(ctx, read[ZcSettlement](nodeOf(oldVaultIn)), oldVaultIn, h)
       an[IllegalArgumentException] should be thrownBy
         ZcBatchTransactions.pack(ctx, wallet, Seq(piece, vaultPiece), feeTo, 0L, h)
     }
   }
+
+  it should "refresh a bond vault and both share vaults past a register anyone added, leaving it out" in {
+    client.execute { ctx =>
+      val h = 1900000
+      val old = h - RefreshAge.toInt - 100
+      val spam = bytes("ab" * 200)
+      val settlementIn = seeded(ctx, UTXO(ZcContracts.script(ZcKind.BondVault, None).contract, MinBox + RefreshBounty,
+        Seq(tok("51" * 32, 2L)), Seq(bytes("52" * 32), byte(1), spam), Some(old)))
+      val plainIn = seeded(ctx, UTXO(ZcContracts.script(ZcKind.FractionalVault, None).contract, MinBox + RefreshBounty,
+        Seq(tok("53" * 32, ShareCount + 1L), tok("54" * 32, 10L)),
+        Seq(bytes("55" * 32), longs(ShareCount, ShareCount, Fee), byte(0), spam), Some(old)))
+      val dutchIn = seeded(ctx, UTXO(ZcContracts.script(ZcKind.DutchAuctionVault, None).contract, MinBox + RefreshBounty,
+        Seq(tok("56" * 32, ShareCount + 1L), tok("57" * 32, 10L)),
+        Seq(bytes("58" * 32), longs(ShareCount, ShareCount, Fee), byte(2),
+          longs(2 * Erg, 10000L, 9000L, 720L, 2160L, 100L, h.toLong - 5000L), bytes(""), spam), Some(old)))
+      val pieces = Seq(
+        ZcBatchTransactions.settlementRefreshPiece(ctx, read[ZcSettlement](nodeOf(settlementIn)), settlementIn, h),
+        ZcBatchTransactions.shareVaultRefreshPiece(ctx, read[ZcShareVault](nodeOf(plainIn)), plainIn, h),
+        ZcBatchTransactions.shareVaultRefreshPiece(ctx, read[ZcShareVault](nodeOf(dutchIn)), dutchIn, h))
+      val packed = ZcBatchTransactions.pack(ctx, wallet, pieces, feeTo, minerFee = 0L, height = h)
+      (0 to 2).map(i => out(packed.signed, i).additionalRegisters.values.size) shouldBe Seq(2, 3, 5)
+      packed.fees shouldBe 3 * RefreshBounty
+    }
+  }
+
+  it should "keep a refreshed Dutch vault of 14 tokens at its size minimum, paying only what is above it" in {
+    client.execute { ctx =>
+      val h = 1900000
+      val old = h - RefreshAge.toInt - 100
+      val held = (1 to 14).map(i => tok(f"$i%02x" * 32, 1000L))
+      val vaultIn = seeded(ctx, UTXO(ZcContracts.script(ZcKind.DutchAuctionVault, None).contract, MinBox + RefreshBounty,
+        tok("59" * 32, ShareCount + 1L) +: held,
+        Seq(bytes("5a" * 32), longs(ShareCount, ShareCount, Fee), byte(2),
+          longs(2 * Erg, 10000L, 9000L, 720L, 2160L, 100L, h.toLong - 5000L), bytes("")), Some(old)))
+      val piece = ZcBatchTransactions.shareVaultRefreshPiece(ctx, read[ZcShareVault](nodeOf(vaultIn)), vaultIn, h)
+      val next = piece.outputs.head
+      val size = ZcSizing.bytes(ctx, next)
+      size.toLong * ZcSizing.perByte(ctx) should be > MinBox
+      next.value shouldBe size.toLong * ZcSizing.perByte(ctx)
+      piece.reward shouldBe MinBox + RefreshBounty - next.value
+      ZcBatchTransactions.pack(ctx, wallet, Seq(piece), feeTo, minerFee = 0L, height = h).fees shouldBe piece.reward
+    }
+  }
+
+  it should "refuse a refresh whose successor would pass the node's 4,096 bytes" in {
+    client.execute { ctx =>
+      val h = 1900000
+      val old = h - RefreshAge.toInt - 100
+      val held = (1 to 60).map(i => tok(f"${i + 100}%02x" * 32, 1000L))
+      val vaultIn = seeded(ctx, UTXO(ZcContracts.script(ZcKind.DutchAuctionVault, None).contract, 10 * Erg,
+        tok("5b" * 32, ShareCount + 1L) +: held,
+        Seq(bytes("5c" * 32), longs(ShareCount, ShareCount, Fee), byte(2),
+          longs(2 * Erg, 10000L, 9000L, 720L, 2160L, 100L, h.toLong - 5000L), bytes("")), Some(old)))
+      val refused = the[IllegalArgumentException] thrownBy
+        ZcBatchTransactions.shareVaultRefreshPiece(ctx, read[ZcShareVault](nodeOf(vaultIn)), vaultIn, h)
+      refused.getMessage should include("-byte box is over the node's 4096-byte limit")
+    }
+  }
+
+  "withNodeMinimums" should "refuse a signed output over the node's 4,096 bytes" in {
+    client.execute { ctx =>
+      val held = (1 to 120).map(i => tok(f"${i + 130}%02x" * 32, 1000L))
+      val in = seeded(ctx, UTXO(feeTo, 10 * Erg, held))
+      val signed = wallet.sign(oneOutput(ctx, in, UTXO(feeTo, 10 * Erg - Parameters.MinFee, held)))
+      signed.getOutputsToSpend.get(0).getBytes.length should be > 4096
+      the[IllegalArgumentException] thrownBy transactions.batching.Batcher.withNodeMinimums(ctx, signed) should
+        have message s"requirement failed: output 0 is ${signed.getOutputsToSpend.get(0).getBytes.length} bytes, " +
+        "over the node's 4096-byte limit"
+    }
+  }
+
+  private def oneOutput(ctx: BlockchainContext, in: InputUTXO, out: UTXO) =
+    work.lithos.mutations.TxBuilder(ctx).setInputs(in).setOutputs(out).buildTx(Parameters.MinFee, wallet.p2pk)
 
   "Standalone actions" should "pull a liquidated settlement into a Dutch share vault, mint a wrap, and refresh a wrap vault" in {
     client.execute { ctx =>

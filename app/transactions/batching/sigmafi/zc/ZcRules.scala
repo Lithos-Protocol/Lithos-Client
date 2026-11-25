@@ -75,9 +75,16 @@ object ZcRules {
   def cover(b: ZcBondTerms, price: Long): Option[(BigInt, BigInt)] =
     coverOf(b.market, b.collateralErg, b.collateral, b.repayment, price)
 
+  /** The cover as the bond's own oracle rule measures it: in the rule's market, which a bond may hold either of. */
+  def ruleCover(b: ZcBondTerms, price: Long): Option[(BigInt, BigInt)] =
+    ZcMarket.all.find(m => b.liqHash == hashOf(ZcExpression.OracleLiquidation, m)) match {
+      case Some(rm) => coverOf(rm, b.collateralErg, b.collateral, b.repayment, price)
+      case None => cover(b, price)
+    }
+
   /** Whether the bond's collateral is strictly below its own oracle ratio at `price`: anyone may liquidate it. */
   def belowOwnRatio(b: ZcBondTerms, price: Long): Boolean =
-    ownRatio(b).exists(r => cover(b, price).exists { case (c, d) => c * 10000 < d * r })
+    ownRatio(b).exists(r => ruleCover(b, price).exists { case (c, d) => c * 10000 < d * r })
 
   /** Whether `oracle` is fresh enough for an age limit of `age` blocks at a landing height of `height + 1`. */
   def fresh(oracle: ZcOracle, age: Long, height: Long): Boolean = height + 1L - oracle.box.creationHeight <= age
@@ -153,8 +160,11 @@ object ZcRules {
       for (best <- acc; p <- orderPrincipal(o, height + d, maturity)) yield math.max(best, p)
     }
 
-  /** Why no fill of `o` can be built now, or None: the CLI's own checks before any offer or guard. */
-  def orderRefusal(o: ZcOrder, height: Long): Option[String] = {
+  /**
+   * Why no fill of `o` can be built now, or None: the CLI's own checks before any offer or guard. A window order is
+   * checked at `chosen` when the lender names a maturity, else at zcs1's default.
+   */
+  def orderRefusal(o: ZcOrder, height: Long, chosen: Option[Long] = None): Option[String] = {
     val windowIssue =
       if (window(o)) {
         if (!o.priced || !curveOrder(o)) Some("a window order not priced by CurveOrder_Pricing")
@@ -173,8 +183,8 @@ object ZcRules {
       .orElse(if (o.priced && (o.policies != 2 || !o.pricingHash.exists(_.length == 64) ||
         o.guardHash.exists(_.length != 64) || o.pricingTerms.size > 64)) Some("the priced order has malformed policy commitments")
         else None)
-      .orElse(if (o.priced) orderMaturity(o, height).flatMap(m => orderPrincipal(o, height + QuoteBlocks, m)).left.toOption
-        else orderMaturity(o, height).left.toOption)
+      .orElse(if (o.priced) orderMaturity(o, height, chosen).flatMap(m => orderPrincipal(o, height + QuoteBlocks, m)).left.toOption
+        else orderMaturity(o, height, chosen).left.toOption)
       .orElse(if (!oneAsset) Some(s"the order does not lend and repay in ${o.market} alone") else None)
       .orElse(if (o.repayment <= 0L || o.terms(2) <= 0L || o.principalErg < 0L) Some("the order has invalid amounts") else None)
       .orElse(if (o.mode != 0L && o.mode != 1L && !(o.mode == 2L && o.priced)) Some("unknown maturity mode") else None)
@@ -249,15 +259,18 @@ object ZcRules {
   def currencyHeld(v: ZcShareVault): Long =
     vaultCurrency(v).fold(v.box.value)(id => v.box.assets.drop(1).filter(_.tokenId == id).map(_.amount).sum)
 
-  /** The least currency a floor auction's vault must hold after a sale at `at`, rounded up. */
-  def lotTarget(v: ZcShareVault, at: Long): Long = {
+  /**
+   * The least currency a floor auction's vault must hold after a sale at `at`, rounded up. None past a Long: no
+   * buyer could pay it.
+   */
+  def lotTarget(v: ZcShareVault, at: Long): Option[Long] = {
     val Seq(repayment, opening, floor, length, _, _, began) = v.auction.take(7)
-    if (length < 1L || repayment <= 0L) 0L
+    if (length < 1L || repayment <= 0L) Some(0L)
     else {
       val since = (BigInt(at) - BigInt(began)).max(BigInt(0)).min(BigInt(length))
       val num = BigInt(repayment) * (BigInt(opening) * BigInt(length) - (BigInt(opening) - BigInt(floor)) * since)
       val den = BigInt(10000) * BigInt(length)
-      ((num + den - 1) / den).max(BigInt(0)).min(BigInt(Long.MaxValue)).toLong
+      Some((num + den - 1) / den).map(_.max(BigInt(0))).filter(_.isValidLong).map(_.toLong)
     }
   }
 
@@ -371,6 +384,21 @@ object ZcRules {
   def buysShares(o: ZcOffer): Boolean = o.terms(10) > 0L
   def delivers(o: ZcOffer): Boolean = o.fractional.nonEmpty
 
+  /**
+   * Whether a Dutch share request's terms (shares, pull fee, mint fee, opening, floor, length, expiry, threshold) carry
+   * an auction zcs1 lets a request make: `0 <= floor <= opening <= 1,000,000` bps and `1 <= length <= expiry <=
+   * 1,000,000` blocks.
+   */
+  def auctionTermsValid(terms: Seq[Long]): Boolean = terms.size >= 8 && {
+    val Seq(opening, floor, length, expiry) = terms.slice(3, 7)
+    floor >= 0L && floor <= opening && opening <= 1000000L && length >= 1L && length <= expiry && expiry <= 1000000L
+  }
+
+  /** Whether `o` delivers what it buys into a Dutch or Selective share mint, whose vault is a Dutch vault. */
+  def deliversDutch(o: ZcOffer): Boolean = delivers(o) &&
+    org.bouncycastle.util.encoders.Hex.toHexString(o.mintHash) ==
+      ZcContracts.script(ZcKind.DutchAuctionMint, Some(o.market)).treeHash
+
   /** Whether `o`'s delivery settings (if delivering into a share mint) are well-formed and name a pinned mint script. */
   def deliveryValid(o: ZcOffer): Boolean =
     if (!delivers(o)) true
@@ -418,36 +446,49 @@ object ZcRules {
     if (token(s.offer)) BigInt(price) else BigInt(price) + fillFee(s, price)
 
   /**
+   * The last height a fill built at `height` may land at and still be checked: `late` blocks after the next, for a
+   * broadcast that a miner may take later, never at or past the offer's expiry.
+   */
+  private def lastLanding(o: ZcOffer, height: Long, late: Long): Long =
+    math.max(height + 1L, math.min(height + 1L + late, o.expiry - 1L))
+
+  /**
    * Why the offer would refuse paying `price` for `units` of `whole` of `bond`, or None: expiry, its window, least
-   * price, the yield test, capital, a token offer's budgets, the policy at the oracle, and zcs1's refusal of a bond
-   * under its own ratio. `primary` is a new bond from an order; `shares` a share purchase.
+   * price, the yield test, capital, the box minimum an ERG offer keeps, a token offer's budgets, a Dutch vault's token
+   * limit, the policy at the oracle, and zcs1's refusal of a bond under its own ratio. `primary` is a new bond from an
+   * order; `shares` a share purchase. The window and the yield must hold at every height up to `late` blocks on.
    */
   def offerRefusal(s: ZcOfferState, bond: ZcBondTerms, price: Long, units: Long, whole: Long, oracle: Option[ZcOracle],
                    height: Long, primary: Boolean = false, shares: Boolean = false,
-                   ignoreYield: Boolean = false): Option[String] = {
+                   ignoreYield: Boolean = false, late: Long = 0L): Option[String] = {
     val o = s.offer
     val at = height + 1L
+    val last = lastLanding(o, height, late)
     val remaining = bond.maturity - at
     val fee = fillFee(s, price)
     val c = cost(s, price)
     val delivery = deliveryErgBig(o, shares)
-    // nanoERG leaving the offer: the fee, the delivery, and a new bond's reserve and principal, or an ask's payout box
+    // nanoERG leaving the offer: the fee, the delivery, a new bond's reserve, and the price on an ERG offer or a token
+    // offer's payout box
     val ergOut = BigInt(fee) + delivery + (if (primary) BigInt(feeReserve(o)) else BigInt(0)) +
-      (if (primary) BigInt(bond.principalErg) else BigInt(ZcBoxes.MinBox))
+      (if (!token(o)) BigInt(price) else if (primary) BigInt(bond.principalErg) else BigInt(ZcBoxes.MinBox))
     lazy val coverNow = oracle.flatMap(p => cover(bond, p.price))
     if (at >= o.expiry) Some(s"the offer expired at ${o.expiry}")
     else if (!policyValid(o)) Some("the offer names an unknown collateral policy")
     else if (feeReserve(o) < 0L || !deliveryValid(o)) Some("the offer's reserve or delivery terms are invalid")
     else if (minBlocks(o) < 1L || maxBlocks(o) < minBlocks(o)) Some("the offer's maturity bounds are invalid")
     else if (o.market != bond.market) Some(s"the offer lends ${o.market}, the bond repays ${bond.market}")
-    else if (remaining <= 0L || remaining < minBlocks(o) || remaining > maxBlocks(o))
+    else if (remaining <= 0L || bond.maturity - last < minBlocks(o) || remaining > maxBlocks(o))
       Some(s"$remaining blocks to maturity, outside the offer's ${minBlocks(o)} to ${maxBlocks(o)}")
     else if (price <= 0L || price < minPrice(o)) Some("under the offer's least price")
     else if (!offerCurve(o).ordered || o.terms(0) < 0L) Some("the offer's curve is malformed")
-    else if (!c.isValidLong || (!ignoreYield && !offerCurve(o).accepts(bond.repayment, units, c.toLong, whole, remaining)))
+    else if (!c.isValidLong || (!ignoreYield &&
+      !(at to last).forall(h => offerCurve(o).accepts(bond.repayment, units, c.toLong, whole, bond.maturity - h))))
       Some(s"under the offer's ${offerCurve(o).bpsAt(remaining)} bps at $remaining blocks")
     else if (s.capital < price) Some("the offer's capital is short")
     else if (!ergOut.isValidLong || ergOut < 0) Some("the fill's ERG requirement overflows")
+    else if (!token(o) && BigInt(s.value) - ergOut < BigInt(o.restLeast))
+      Some("the offer cannot keep a box minimum after this fill")
     else if (token(o) && (originalCapital(s) <= 0L || s.capital > originalCapital(s) || spendBudget(o) <= 0L ||
       rewardBudget(o) <= 0L || rewardBudget(o) >= spendBudget(o) || minFillBps(o) < 100L || minFillBps(o) > 10000L ||
       batcherFee(o) < MinBatchingFee)) Some("the token offer's budget terms are invalid")
@@ -457,6 +498,8 @@ object ZcRules {
     else if (token(o) && ergOut * originalCapital(s) > BigInt(spendBudget(o)) * price) Some("over the offer's ERG budget")
     else if (token(o) && BigInt(s.value) - ergOut < BigInt(ZcBoxes.MinBox) + batcherFee(o))
       Some("the fill would spend the offer's refund reserve")
+    else if ((shares || deliversDutch(o)) && bond.collateral.size > ZcSizing.MaxCollateralTokens)
+      Some(s"the bond holds ${bond.collateral.size} collateral tokens, more than a Dutch vault can take")
     else if (bond.liqHash != hashOf(ZcExpression.OracleLiquidation, o.market)) Some("the bond's rule is not the oracle rule")
     else if (bond.payload.size < 2 || bond.payload(0) < floorBps(o) || bond.payload(1) < maxAge(o) ||
       bond.payload(1) > MaxOracleAge) Some("the bond's ratio or oracle age is under the offer's")
@@ -477,43 +520,70 @@ object ZcRules {
     else if (mint.terms(4) < o.terms(9) || mint.terms(6) > o.terms(10)) Some("the shares' auction is outside the offer's bounds")
     else None
 
+
   /**
    * zcs1's maturity for filling window order `order` from offer `s`, or None when none suits both. The candidates are
-   * the ends of the heights both accept, both curves' breakpoints and the grid heights between, since both yields are
-   * straight lines between those. Of the ones the offer and the guard accept: a grid height first, then the widest gap
-   * between the yield earned and the yield required, then the shorter.
+   * the ends of the heights both accept, both curves' breakpoints and the grid heights between. Both curves are
+   * straight lines between breakpoints, but an ERG offer's fixed batcher fee bends the yield it earns, so a ternary
+   * search adds the peak inside each span for an ERG offer. Of the candidates the offer and the guard accept: a grid
+   * height first, then the widest gap between the yield earned and the yield required, then the shorter. The offer's
+   * least maturity is checked at the last height a broadcast may land, `late` blocks on.
    */
   def windowMaturity(s: ZcOfferState, order: ZcOrder, oracle: Option[ZcOracle], height: Long,
-                     ignoreYield: Boolean = false): Option[Long] = {
+                     ignoreYield: Boolean = false, late: Long = 0L): Option[Long] = {
     val o = s.offer
     val start = height
     val at = start + 1L
     (orderWindow(order), borrowCurve(order)) match {
       case (Some((lo, hi)), Some(borrow)) if minBlocks(o) >= 1L && maxBlocks(o) >= minBlocks(o) =>
-        val fromBig = (BigInt(start) + BigInt(lo)).max(BigInt(at) + BigInt(minBlocks(o)))
+        val fromBig = (BigInt(start) + BigInt(lo)).max(BigInt(lastLanding(o, height, late)) + BigInt(minBlocks(o)))
         val toBig = (BigInt(start) + BigInt(hi)).min(BigInt(at) + BigInt(maxBlocks(o))).min(BigInt(Long.MaxValue))
         if (!fromBig.isValidLong || fromBig > toBig) None
         else {
           val from = fromBig.toLong
           val to = toBig.toLong
+          def gap(m: Long, principal: Long): BigInt = {
+            val (rate, span) = offerCurve(o).at(m - at)
+            rankYield(BigInt(order.repayment), cost(s, principal), m - at) - rate * 1000000 / span
+          }
+          def gapAt(m: Long): Option[BigInt] = resolvePrincipal(order, height, m).toOption.map(gap(m, _))
           val bPoints = borrow.breakpoints.flatMap(d => Seq(BigInt(start) + BigInt(d), BigInt(at) + BigInt(d)))
           val oPoints = o.curve.map(p => BigInt(at) + BigInt(p._2))
-          val candidates = (Seq(BigInt(from), BigInt(to)) ++ bPoints ++ oPoints ++
-            gridBetween(from, to).map(BigInt(_)))
-            .filter(m => m >= fromBig && m <= toBig && m.isValidLong).map(_.toLong).distinct
+          val knots = (Seq(BigInt(from), BigInt(to)) ++ bPoints ++ oPoints)
+            .filter(m => m >= fromBig && m <= toBig).map(_.toLong).distinct.sorted
+          val peaks = if (token(o)) Seq.empty[Long] else knots.sliding(2).collect {
+            case Seq(a, b) if b - a > 2L => interiorPeak(a, b, gapAt)
+          }.flatten.toSeq
+          val candidates = (knots ++ peaks ++ gridBetween(from, to)).filter(m => m >= from && m <= to).distinct
           val feasible = candidates.flatMap { m =>
             resolvePrincipal(order, height, m).toOption.flatMap { principal =>
               val bond = ZcBondTerms.prospect(order, start, m, principal)
-              if (offerRefusal(s, bond, principal, 1L, 1L, oracle, height, primary = true, ignoreYield = ignoreYield).isEmpty &&
-                guardRefusal(order, bond, oracle, height).isEmpty) {
-                val (rate, span) = offerCurve(o).at(m - at)
-                Some(m -> (rankYield(BigInt(order.repayment), cost(s, principal), m - at) - rate * 1000000 / span))
-              } else None
+              if (offerRefusal(s, bond, principal, 1L, 1L, oracle, height, primary = true, ignoreYield = ignoreYield,
+                late = late).isEmpty && guardRefusal(order, bond, oracle, height).isEmpty) Some(m -> gap(m, principal))
+              else None
             }
           }
           feasible.sortBy { case (m, gap) => (if (m % Grid == 0L) 0 else 1, -gap, m) }.headOption.map(_._1)
         }
       case _ => None
     }
+  }
+
+  /**
+   * Heights strictly between `a` and `b` around the most of `gap`, which rises then falls there: a ternary search,
+   * two probes a round and about 31 rounds for a span of a year of blocks. A height with no gap counts as the lowest.
+   */
+  private def interiorPeak(a: Long, b: Long, gap: Long => Option[BigInt]): Seq[Long] = {
+    var l = a
+    var r = b
+    while (r - l > 2L) {
+      val m1 = l + (r - l) / 3L
+      val m2 = r - (r - l) / 3L
+      (gap(m1), gap(m2)) match {
+        case (Some(g1), g2) if g2.forall(g1 >= _) => r = m2
+        case _ => l = m1
+      }
+    }
+    (l to r).filter(m => m > a && m < b)
   }
 }

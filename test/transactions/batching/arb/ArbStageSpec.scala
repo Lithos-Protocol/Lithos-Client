@@ -128,6 +128,88 @@ class ArbStageSpec extends TestKit(ActorSystem("arb-stage-spec", ArbStageSpec.co
     }
   }
 
+  it should "build again at the same height when a swap enters the mempool, carrying it ahead of the cycle behind it" in {
+    import node.model.{NodeInput, NodeSpendingProof, NodeTransaction}
+    import state.synchronization.CompleteMempool
+    val chain = new ScriptedChain
+    val api = chain.api
+    val (nodeContext, _, wallet) = FakeNodeContext(api, numAddresses = 1)
+    val swapId = "5a" * 32
+    val (cheap, dear, swapped) = nodeContext.getClient.execute { ctx =>
+      (nativePool(ctx, id(1), id(101), 1000 * Erg, 1000000000000L),
+        nativePool(ctx, id(2), id(101), 1100 * Erg, 1000000000000L),
+        // A trader buys the token from the dear pool, which leaves it dearer still
+        nativePool(ctx, id(2), id(101), 1150 * Erg, 957000000000L, txId = swapId))
+    }
+    chain.extend(tip - 1, tip)
+    chain.indexed = tip
+    val stakeBox = nodeContext.getClient.execute(ctx => arbStakeBox(ctx, wallet, 12 * Erg))
+    chain.scans(LDNodeFixtures.indexed(cheap, tip - 5), LDNodeFixtures.indexed(dear, tip - 5),
+      LDNodeFixtures.indexed(stakeBox, tip - 5))
+    when(api.indexerEnabled).thenReturn(true)
+    when(api.boxById(anyString())).thenAnswer { inv =>
+      Success(Some(stakeBox).filter(_.boxId == inv.getArgument[String](0)))
+    }
+    val traderBox = id(90)
+    val swap = NodeTransaction(swapId, Seq(NodeInput(dear.boxId, NodeSpendingProof("", Map.empty)),
+      NodeInput(traderBox, NodeSpendingProof("", Map.empty))), Seq.empty,
+      Seq(swapped, swapped.copy(boxId = id(91), index = 1, ergoTree = wallet.contract.ergoTreeHex, assets = Seq.empty)))
+    val observed = new java.util.concurrent.atomic.AtomicReference(CompleteMempool.Observation(1L,
+      Some(CompleteMempool.Snapshot(chain.header(tip).id, Set.empty, Set.empty, System.nanoTime())), None))
+    val mempoolView = system.actorOf(Props(new akka.actor.Actor {
+      def receive: Receive = { case CompleteMempool.Latest => sender() ! observed.get }
+    }))
+    def pendingSwap(anchor: String, revision: Long): Unit = observed.set(CompleteMempool.Observation(revision,
+      Some(CompleteMempool.Snapshot(anchor, Set(swapId), swap.inputs.map(_.boxId).toSet, System.nanoTime(),
+        transactions = Vector(CompleteMempool.MempoolTx(swapId, swap, 0)))), None))
+
+    val stakes = new ArbStake(() => api, stakeContract(wallet), nodeContext.getNetwork, 10 * Erg)
+    val stage = system.actorOf(Props(new ArbStage(nodeContext, ArbConfig.Default.copy(enabled = true),
+      BatchingConfig.Default, Set.empty, TrackerFixtures.tracker(chain), stakes, useTrueProp = false,
+      buildBudgetMs = 10000L, mempool = Some(mempoolView))))
+    val probe = TestProbe()
+    stage ! PrepareBlockTxs(tip + 1, 8, chain.header(tip).id)
+    var first: BlockTxsReady = null
+    awaitAssert({
+      probe.send(stage, RequestArbTxs(tip + 1, 8, refresh = false, Seq.empty))
+      first = probe.expectMsgType[BlockTxsReady]
+      first.bundles should not be empty
+    }, 30.seconds, 300.millis)
+    first.bundles.flatMap(_.members).flatMap(_.inputIds) should contain(dear.boxId)
+
+    withClue("a swap pending on another block is not carried, and the last build stands: ") {
+      pendingSwap(id(77), 2L)
+      probe.send(stage, RequestArbTxs(tip + 1, 8, refresh = true, Seq.empty))
+      probe.expectMsgType[BlockTxsReady].bundles should be theSameInstanceAs first.bundles
+    }
+
+    withClue("the same swap pending on this block is a new build, on the box the swap leaves: ") {
+      pendingSwap(chain.header(tip).id, 3L)
+      probe.send(stage, RequestArbTxs(tip + 1, 8, refresh = true, Seq.empty))
+      val next = probe.expectMsgType[BlockTxsReady].bundles
+      next should not be theSameInstanceAs(first.bundles)
+      next.head.members.head.id shouldBe swapId
+      val ours = next.flatMap(_.members).filterNot(_.id == swapId).flatMap(_.inputIds).toSet
+      ours should contain(swapped.boxId)
+      ours should not contain dear.boxId
+      next.flatMap(_.members).count(_.id == swapId) shouldBe 1
+    }
+
+    withClue("with the option off, the pending swap is ignored: ") {
+      val off = system.actorOf(Props(new ArbStage(nodeContext, ArbConfig.Default.copy(enabled = true,
+        pendingSwaps = false), BatchingConfig.Default, Set.empty, TrackerFixtures.tracker(chain),
+        new ArbStake(() => api, stakeContract(wallet), nodeContext.getNetwork, 10 * Erg), useTrueProp = false,
+        buildBudgetMs = 10000L, mempool = Some(mempoolView))))
+      off ! PrepareBlockTxs(tip + 1, 8, chain.header(tip).id)
+      awaitAssert({
+        probe.send(off, RequestArbTxs(tip + 1, 8, refresh = false, Seq.empty))
+        val bundles = probe.expectMsgType[BlockTxsReady].bundles
+        bundles should not be empty
+        bundles.flatMap(_.members).map(_.id) should not contain swapId
+      }, 30.seconds, 300.millis)
+    }
+  }
+
   it should "fill the Machina orders handed over for the block, with no stake at the arb address" in {
     import node.model.{IndexedBox, MempoolOptions, NodeAsset, NodeBox, Paging, SortDirection}
     import org.mockito.ArgumentMatchers.{any, eq => is}

@@ -1,15 +1,10 @@
 package nisp
 
 import org.bouncycastle.util.encoders.Hex
-import org.ergoplatform.HeaderWithoutPow
 import org.ergoplatform.appkit.ErgoValue
 import org.ergoplatform.appkit.scalaapi.scalaByteType
 import scorex.utils.Longs
-import sigma.data.CHeader
-import sigma.pow.Autolykos2PowValidation
-import sigma.util.NBitsUtils
 import sigma.{Coll, Colls}
-import stratum.data.MiningCandidate
 
 /**
  * Non-Interactive Share Proof, represented by a set of 10 high-difficulty shares and the associated value these shares

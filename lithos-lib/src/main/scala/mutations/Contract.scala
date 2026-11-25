@@ -3,22 +3,16 @@ package mutations
 
 
 import org.bouncycastle.util.encoders.Hex
-import org.ergoplatform.ErgoAddressEncoder.NetworkPrefix
 import org.ergoplatform.ErgoTreePredef
 import org.ergoplatform.appkit._
 import scorex.crypto.hash.Blake2b256
 import sigma.VersionContext
-import sigma.ast.SCollection.SByteArray
-import sigma.ast.SigmaPredef.{PredefFuncInfo, PredefinedFunc, PredefinedFuncRegistry}
-import sigma.ast.{ErgoTree, Global, Lambda, MethodCall, OperationInfo, SBoolean, SByte, SCollection, SGlobalMethods, SInt, SSigmaProp, SType, SUnsignedBigInt, SigmaBuilder, TransformingSigmaBuilder, Value}
-import sigma.ast.syntax.{FalseSigmaProp, SValue, TrueSigmaProp}
+import sigma.ast.{ErgoTree, SBoolean, SSigmaProp, Value}
+import sigma.ast.syntax.{FalseSigmaProp, TrueSigmaProp}
 import sigma.compiler.ir.CompiletimeIRContext
-import sigma.compiler.phases.{SigmaBinder, SigmaTyper}
-import sigma.compiler.{CompilerResult, CompilerSettings, SigmaCompiler}
+import sigma.compiler.{CompilerResult, SigmaCompiler}
 import sigma.data.SigmaBoolean
-import sigma.serialization.CoreByteWriter.ArgInfo
 import sigma.serialization.ValueSerializer
-import sigmastate.interpreter.Interpreter.ScriptEnv
 
 import scala.collection.JavaConverters
 import scala.util.{Failure, Success, Try}

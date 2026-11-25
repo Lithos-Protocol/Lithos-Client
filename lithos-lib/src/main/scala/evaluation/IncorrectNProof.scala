@@ -1,7 +1,7 @@
 package evaluation
 
 import lfsm.states.Rollup
-import org.ergoplatform.appkit.{ContextVar, ErgoValue}
+import org.ergoplatform.appkit.ContextVar
 import org.slf4j.{Logger, LoggerFactory}
 import work.lithos.mutations.{Contract, InputUTXO}
 

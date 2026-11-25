@@ -128,18 +128,6 @@ class MiningApiController @Inject()(cc: ControllerComponents, api: MiningApi, co
       case Failure(e) => InternalServerError(ApiHelper.makeError(500, "Internal error occurred", e.getMessage))
     }
 
-  private def splitCollectionParam(paramValues: String, collectionFormat: String): List[String] = {
-    val splitBy =
-      collectionFormat match {
-        case "csv" => ",+"
-        case "tsv" => "\t+"
-        case "ssv" => " +"
-        case "pipes" => "|+"
-      }
-
-    paramValues.split(splitBy).toList
-  }
-
   private val apiKeyHash: String = config.get[String]("lithos.apiKeyHash")
 
   private def withApiKey[A](action: Action[A]) = Action.async(action.parser) { request =>

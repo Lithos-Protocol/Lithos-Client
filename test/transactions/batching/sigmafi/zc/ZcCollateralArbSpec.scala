@@ -90,6 +90,7 @@ class ZcCollateralArbSpec extends AnyFlatSpec with Matchers {
                            minProceeds: Long): Option[(ZcAssetLiquidation, Map[String, ArbPool])] =
           if (tokenId == UnpricedNft) Some(new ZcAssetLiquidation {
             def tokenId = UnpricedNft; def amount = 1L; def ergOut = 5 * Erg; def legs = 1
+            def swaps = Vector.empty[transactions.batching.arb.ArbSwap]
           } -> pools)
           else None
       }
@@ -428,6 +429,40 @@ class ZcCollateralArbSpec extends AnyFlatSpec with Matchers {
         reserve = _ => true, refused = Set.empty, onRefuse = _ => refusedCount += 1)
       bundles shouldBe empty
       refusedCount shouldBe ZcCollateralArb.MaxUnbuildablePerBuild
+    }
+  }
+
+  "A SigUSD lot" should "liquidate its collateral through a SigmaUSD bank redeem, signed against the real bank" in {
+    client.execute { ctx =>
+      val h = ctx.getHeight + 1
+      val doc = {
+        val source = scala.io.Source.fromResource("arb/sigmausd-bank.json")
+        try new com.google.gson.JsonParser().parse(source.mkString).getAsJsonObject finally source.close()
+      }
+      val bankBox = node.rest.NodeCodecs.box(doc.getAsJsonObject("bank"))
+      val oracleBox = node.rest.NodeCodecs.box(doc.getAsJsonObject("oracle"))
+      val sides = SigmaUsdArbPool.read(bankBox, oracleBox)
+      val scPrice = sides.head.bank.scPrice
+      // The only pool sells SigUSD 10% under the bank, so the bank pays more for the 1 SigUSD in the lot
+      val pUsd = poolEntry(nativePool(ctx, arbId(1), SigUsd, scPrice * 10000000L * 9 / 10, 10000000L))
+      val pools = Map(pUsd.nft -> pUsd.pool) ++ sides.map(s => s.nft -> s)
+      val bankIn = SigmaFiBoxes.input(bankBox, ctx).get
+      val poolBoxes = Map(pUsd.nft -> SigmaFiBoxes.input(pUsd.box, ctx).get) ++ sides.map(s => s.nft -> bankIn)
+      val stake = SigmaFiBoxes.input(arbStakeBox(ctx, wallet, 10 * Erg), ctx).get
+      val cost = scPrice * 100L * 9 / 10
+      val lotIn = seeded(ctx, UTXO(ZcContracts.script(ZcKind.LotAuction, Some(ZcMarket.Erg)).contract, 3000000L,
+        Seq(tok(SigUsd, 100L)),
+        Seq(bytes(sellerHash), longs(cost, cost, h.toLong - 10, h.toLong + 100, h.toLong + 500, 2000000L)),
+        Some(h - 10)))
+      val lot = read[ZcLot](nodeOf(lotIn))
+      val plan = ZcCollateralArb.evaluateLot(lot, pools, _ => Some(seller), h.toLong, 8 * Erg, 6, 100000L,
+        ZcAssetPricer.Default).get
+      plan.valuation.liquidations.map(_.getClass) shouldBe Vector(classOf[BankAssetLiquidation])
+      val (legs, _, nextCarry, profitOut) = ZcCollateralArb.sign(ctx, wallet, plan, poolBoxes, stake, h, profitTo, MinBox).get
+      legs.size shouldBe 2
+      legs(1).getSignedInputs.get(0).getId.toString shouldBe bankBox.boxId
+      nextCarry.value shouldBe stake.value
+      profitOut.value shouldBe plan.netProfit
     }
   }
 }

@@ -82,7 +82,8 @@ object ArbLeg {
       })
 
   /**
-   * Signs `swap` against `poolBox` with `carry` paying for it, the rest returned to `carryTo`. With `profit`,
+   * Signs `swap` against `poolBox` with `carry` paying for it, the rest returned to `carryTo`, holding whatever
+   * registers the pool's contract reads there, with the pool's data inputs read. With `profit`,
    * that many nanoERG of the rest go to their own output 2 instead, at the contract given. Built for
    * `blockHeight`, or for the newest input's height when that is later. Throws when the swap is not priced
    * against `poolBox`, the carry cannot pay for it and keep its floor, or the pool's contract refuses the successor.
@@ -104,12 +105,13 @@ object ArbLeg {
     val poolOut = swap.pool.successor(poolBox, swap.after).setCreationHeight(height)
     require(poolOut.value - poolBox.value == swap.poolErgDelta,
       s"the successor moves ${poolOut.value - poolBox.value} nanoERG where the swap moves ${swap.poolErgDelta}")
-    val carryOut = UTXO(carryTo, left.value - split, left.tokens).setCreationHeight(height)
+    val carryOut = UTXO(carryTo, left.value - split, left.tokens, swap.pool.carryRegisters(swap)).setCreationHeight(height)
     val profitOut = profit.filter(_._2 > 0L).map { case (to, amount) => UTXO(to, amount).setCreationHeight(height) }
     val feeOut = if (minerFee > 0L) Seq(UTXO.feeBox(minerFee).setCreationHeight(height)) else Seq.empty
 
     val unsigned = TxBuilder(ctx)
       .setInputs(spent: _*)
+      .setDataInputs(swap.pool.dataInputs(ctx): _*)
       .setOutputs((Seq(poolOut, carryOut) ++ profitOut ++ feeOut): _*)
       .buildTx(0L, wallet.p2pk)
     // Signing runs the pool's script, so a successor the contract refuses fails here.

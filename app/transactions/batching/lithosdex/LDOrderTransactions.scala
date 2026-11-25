@@ -10,7 +10,7 @@ import org.ergoplatform.sdk.ErgoId
 import sigma.Colls
 import transactions.batching.lithosdex.LDBoxes.Provision
 import transactions.batching.lithosdex.LithosDexTransactions.{FUNDING_HEADROOM, TX_FEE, build, funded}
-import work.lithos.mutations.{Contract, InputUTXO, Token, UTXO}
+import work.lithos.mutations.{InputUTXO, Token, UTXO}
 
 /**
  * Placing and cancelling LithosDex orders owned by this wallet.

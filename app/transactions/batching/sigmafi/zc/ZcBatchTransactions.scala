@@ -55,8 +55,8 @@ final case class ZcAskMatchBuilt(tx: ZcBatchTx, nextOffer: ZcOffer, nextOfferInp
  * share mints, pulls, wrap mints and wrap vault refreshes.
  *
  * Every builder balances protocol inputs to protocol outputs + `feeBox` + `minerFee` with zero change and zero
- * wallet boxes, signs with `preHeader.height(height)`, discloses any named output script not present among input
- * or output trees in context variable 64 of `INPUTS(0)` (zcs1), and checks node output minimums.
+ * wallet boxes, signs with `preHeader.height(height)`, discloses any named script no output carries in context
+ * variable 64 of `INPUTS(0)` (zcs1), and checks node output minimums.
  */
 object ZcBatchTransactions {
 
@@ -98,17 +98,6 @@ object ZcBatchTransactions {
   /** Whether a box made at `created` is old enough to refresh at signing height `height`. */
   def refreshable(created: Long, height: Long): Boolean = created < height - ZcPricing.RefreshAge
 
-  /** `inputs` with any `named` script not already carried by an input or output disclosed in var 64 of `INPUTS(0)`. */
-  private def discloseAll(inputs: Seq[InputUTXO], outputs: Seq[UTXO], named: Seq[Contract]): Seq[InputUTXO] = {
-    val present = (inputs.map(_.contract.ergoTreeHex) ++ outputs.map(_.contract.ergoTreeHex)).toSet
-    val missing = named.foldLeft(Vector.empty[Contract]) { (acc, c) =>
-      if (present.contains(c.ergoTreeHex) || acc.exists(_.ergoTreeHex == c.ergoTreeHex)) acc else acc :+ c
-    }
-    if (missing.isEmpty) inputs
-    else inputs.head.withCtxVar(ZcUserTransactions.DisclosureVar,
-      ZcUserTransactions.bytesList(missing.map(_.ergoTree.bytes))) +: inputs.tail
-  }
-
   /** Signs a self-funded transaction at `height`, asserting zero change and node output minimums. */
   private def signSelfFunded(ctx: BlockchainContext, wallet: NodeWallet, inputs: Seq[InputUTXO], outputs: Seq[UTXO],
                              feeTo: Contract, reward: Long, minerFee: Long, height: Int, kind: String,
@@ -119,7 +108,7 @@ object ZcBatchTransactions {
     require(net >= MinBox, s"reward $reward does not cover miner fee $minerFee and a minimum output")
     val feeOut = UTXO(feeTo, net, creationHeight = Some(height))
     val allOutputs = outputs :+ feeOut
-    val finalInputs = discloseAll(inputs, allOutputs, named)
+    val finalInputs = ZcUserTransactions.disclosedAll(inputs, allOutputs, named)
     val unsigned = TxBuilder(ctx)
       .setInputs(finalInputs: _*)
       .setDataInputs(dataInputs: _*)
@@ -196,42 +185,49 @@ object ZcBatchTransactions {
    * Paid refresh of an aged bond: stamped 60 blocks back so the borrower can recollateralize immediately, and
    * disclosing `borrower` in var 64 so later batchers still resolve it. Packs only with other bond refreshes.
    */
-  def bondRefreshPiece(bond: ZcBond, input: InputUTXO, borrower: Contract, height: Int): ZcPiece = {
+  def bondRefreshPiece(ctx: BlockchainContext, bond: ZcBond, input: InputUTXO, borrower: Contract,
+                       height: Int): ZcPiece = {
     require(input.id.toString == bond.boxId, "bond input does not match its id")
     require(refreshable(input.input.getCreationHeight.toLong, height.toLong), "bond is not old enough to refresh")
     require(height.toLong >= bond.maturity || height.toLong < bond.maturity - ZcPricing.RefreshMaturityGap,
       "bond is inside the 720-block pre-maturity refresh guard")
-    val nextValue = refreshedValue(bond.box.value, bond.feeReserve + MinBox)
-    val bounty = bond.box.value - nextValue
-    require(bounty > 0L, "bond pays no refresh bounty")
     val stamp = (height.toLong - ZcPricing.RecollateralizeWait).toInt
     require(input.input.getCreationHeight <= stamp, "bond input is newer than its refresh stamp")
-    val successor = UTXO(input.contract, nextValue, input.tokens, input.registers, Some(stamp))
+    val (successor, bounty) = refreshed(ctx, input, input.registers, bond.feeReserve + MinBox, stamp)
+    require(bounty > 0L, "bond pays no refresh bounty")
     ZcPiece(bond.boxId, i => input.withCtxVar(9.toByte, int(i)), Seq(successor), bounty,
       disclose = Seq(borrower), aged = true)
   }
 
   /** Paid refresh of an aged bond vault (`BondVault`). */
-  def settlementRefreshPiece(s: ZcSettlement, input: InputUTXO, height: Int): ZcPiece = {
+  def settlementRefreshPiece(ctx: BlockchainContext, s: ZcSettlement, input: InputUTXO, height: Int): ZcPiece = {
     require(input.id.toString == s.boxId, "settlement input does not match its id")
     require(refreshable(input.input.getCreationHeight.toLong, height.toLong), "settlement is not old enough to refresh")
-    val nextValue = refreshedValue(s.box.value, MinBox)
-    val bounty = s.box.value - nextValue
+    val (successor, bounty) = refreshed(ctx, input, input.registers.take(s.schemaRegisters), MinBox, height)
     require(bounty > 0L, "settlement pays no refresh bounty")
-    val successor = UTXO(input.contract, nextValue, input.tokens, input.registers, Some(height))
     ZcPiece(s.boxId, i => input.withCtxVar(9.toByte, int(i)), Seq(successor), bounty)
   }
 
   /** Paid refresh of an aged fractional or Dutch share vault. */
-  def shareVaultRefreshPiece(v: ZcShareVault, input: InputUTXO, height: Int): ZcPiece = {
+  def shareVaultRefreshPiece(ctx: BlockchainContext, v: ZcShareVault, input: InputUTXO, height: Int): ZcPiece = {
     require(input.id.toString == v.boxId, "share vault input does not match its id")
     require(refreshable(input.input.getCreationHeight.toLong, height.toLong), "share vault is not old enough to refresh")
     val floor = if (v.holding) MinBox + v.pullFee else MinBox
-    val nextValue = refreshedValue(v.box.value, floor)
-    val bounty = v.box.value - nextValue
+    val (successor, bounty) = refreshed(ctx, input, input.registers.take(v.schemaRegisters), floor, height)
     require(bounty > 0L, "share vault pays no refresh bounty")
-    val successor = UTXO(input.contract, nextValue, input.tokens, input.registers, Some(height))
     ZcPiece(v.boxId, i => input.withCtxVar(9.toByte, int(i)), Seq(successor), bounty)
+  }
+
+  /**
+   * `input`'s refreshed successor keeping `registers`, stamped `stamp`, and the bounty it pays: at most
+   * `RefreshBounty` comes out, never taking the box under `floor` or under its own size minimum. A box already under
+   * that minimum pays no bounty.
+   */
+  private def refreshed(ctx: BlockchainContext, input: InputUTXO, registers: Seq[ErgoValue[_]], floor: Long,
+                        stamp: Int): (UTXO, Long) = {
+    val base = UTXO(input.contract, MinBox, input.tokens, registers, Some(stamp))
+    val next = ZcSizing.sized(ctx, base, refreshedValue(input.value, math.max(floor, ZcSizing.least(ctx, base))))
+    (next, input.value - next.value)
   }
 
   /**
@@ -281,17 +277,23 @@ object ZcBatchTransactions {
     }
   }
 
-  /** Offer continuation box after paying `price` and `ergOut`, naming `offer.boxId` as predecessor in R6's suffix. */
-  private def offerContinuation(offer: ZcOffer, offerInput: InputUTXO, price: Long, ergOut: Long): UTXO = {
+  /**
+   * Offer continuation box after paying `price` and `ergOut`, naming `offer.boxId` as predecessor in R6's suffix.
+   * Refused when what is left is under the box's own size minimum: the offer's ERG is all it has.
+   */
+  private def offerContinuation(ctx: BlockchainContext, offer: ZcOffer, offerInput: InputUTXO, price: Long,
+                                ergOut: Long): UTXO = {
     val leftCap = offer.capital - price
     val tokens = offer.market.tokenId match {
       case None => Seq.empty[Token]
       case Some(id) => if (leftCap > 0L) Seq(token(id, leftCap)) else Seq.empty
     }
     val value = offer.box.value - ergOut
-    require(value >= MinBox, s"offer ${offer.boxId} leaves $value nanoERG under MinBox after $ergOut")
-    UTXO(offer.script.contract, value, tokens, offerInput.registers)
+    val rest = UTXO(offer.script.contract, MinBox, tokens, offerInput.registers)
       .withRegNum(6, raw(Hex.decode(offer.policyHash) ++ Hex.decode(offer.boxId)))
+    val least = ZcSizing.least(ctx, rest)
+    require(value >= least, s"offer ${offer.boxId} leaves $value nanoERG after $ergOut, under its box minimum $least")
+    ZcSizing.sized(ctx, rest, value)
   }
 
   /**
@@ -323,7 +325,7 @@ object ZcBatchTransactions {
       order.principalTokens.map(t => token(t.tokenId, t.amount)), Seq(bytes(asset)))
     val fee = ZcRules.fillFee(ZcOfferState.of(offer), order.principal)
     val ergOut = Math.addExact(Math.addExact(fee, deliveryFunding), Math.addExact(feeReserve, order.principalErg))
-    val rest = offerContinuation(offer, offerInput, order.principal, ergOut)
+    val rest = offerContinuation(ctx, offer, offerInput, order.principal, ergOut)
 
     val guardedOrder = if (order.guardHash.isEmpty) orderInput
       else orderInput.withCtxVar(1.toByte, raw(ZcContracts.expression(ZcExpression.FillGuard, Some(m)).bytes))
@@ -366,7 +368,7 @@ object ZcBatchTransactions {
       else unitDelivery(offer, owner, ask.token.tokenId, Seq.empty)
     val fee = ZcRules.fillFee(ZcOfferState.of(offer), price)
     val ergOut = Math.addExact(Math.addExact(fee, deliveryFunding), paidErg)
-    val offerRest = offerContinuation(offer, offerInput, price, ergOut)
+    val offerRest = offerContinuation(ctx, offer, offerInput, price, ergOut)
     val remaining = ask.token.amount - units
     val askRest = if (remaining <= 0L) None
       else Some(UTXO(ask.script.contract, ask.box.value, Seq(token(ask.token.tokenId, remaining)), askInput.registers)
@@ -440,10 +442,8 @@ object ZcBatchTransactions {
                        feeTo: Contract, minerFee: Long, height: Int): ZcBatchTx = {
     require(input.id.toString == vault.boxId, "wrap vault input does not match its id")
     require(refreshable(input.input.getCreationHeight.toLong, height.toLong), "wrap vault is not old enough to refresh")
-    val nextValue = refreshedValue(vault.box.value, MinBox)
-    val bounty = vault.box.value - nextValue
+    val (successor, bounty) = refreshed(ctx, input, Seq.empty, MinBox, height)
     require(bounty > 0L, "wrap vault pays no refresh bounty")
-    val successor = UTXO(input.contract, nextValue, input.tokens, Seq.empty, Some(height))
     signSelfFunded(ctx, wallet, Seq(input.withCtxVar(9.toByte, int(0))), Seq(successor), feeTo, bounty, minerFee,
       height, KindWrapRefresh, Set(vault.boxId))
   }

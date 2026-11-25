@@ -7768,7 +7768,8 @@ components:
             usdPerErg: {type: string}
             updatedHeight: {type: integer}
             age: {type: integer}
-            refreshPending: {type: boolean, description: "A pending transaction spends the oracle box; trades reading it wait a block."}
+            pending: {type: boolean, description: "The oracle is the box one pending refresh creates; trades price and read it while it confirms."}
+            refreshPending: {type: boolean, description: "Competing pending refreshes spend the confirmed oracle box; trades reading it wait a block."}
         markets: {type: array, items: {type: object, additionalProperties: true}}
         defaults: {type: object, additionalProperties: true}
     ZcFills:
@@ -7877,7 +7878,13 @@ components:
           type: object
           properties:
             nanoErg: {type: string}
-            tokens: {type: array, items: {$ref: '#/components/schemas/ZcToken'}}
+            tokens:
+              type: array
+              maxItems: 30
+              items: {$ref: '#/components/schemas/ZcToken'}
+              description: >
+                At most 30, each token once, each amount at least 1. A liquidated bond holding more could not be
+                pulled into a Dutch share vault within the node's 4,096-byte box limit.
         rule:
           type: object
           description: "`{ kind: oracle, ratioBps, oracleAge }` or `{ kind: maturity }`."
@@ -7909,7 +7916,7 @@ components:
         minPrice: {type: string, description: "Default 1."}
         erg:
           type: object
-          description: "An ERG offer's batcher fee per fill."
+          description: "An ERG offer's batcher fee per fill. It must leave more than 0.001 ERG of the capital, and an expiry refund pays it too."
           properties:
             batcherFeeNanoErg: {type: string}
         token:
@@ -7929,12 +7936,15 @@ components:
             maxExpiry: {type: integer, format: int64}
         delivery:
           type: object
-          description: "`{ kind: unit }`, or `{ kind: selective or dutch, openingBps, floorBps, length, expiry, mintFeeNanoErg, pullFeeNanoErg }`."
+          description: "`{ kind: unit }`, or `{ kind: selective or dutch, openingBps, floorBps, length, expiry, mintFeeNanoErg, pullFeeNanoErg, shareCount }`, checked and defaulted as a fractionalize body is."
           additionalProperties: true
         limits: {$ref: '#/components/schemas/ZcLimits'}
     ZcAskRequest:
       type: object
       required: [tokenId, units, pricing]
+      description: >
+        The ask box holds 0.003 ERG: the box minimum and a 0.002 ERG refund fee. On a full fill that ERG goes to
+        whoever fills the ask, and on expiry to the batcher that returns it. The quote names it as `closingFeeNanoErg`.
       properties:
         tokenId: {type: string}
         units: {type: string}
@@ -7942,7 +7952,7 @@ components:
           type: object
           description: >
             `{ kind: fixed, price }` or `{ kind: yield, startBps, endBps, endHeight, floor }`. `price` and `floor`
-            are totals for `units`.
+            are totals for `units`; a fixed price must be above 0.
           additionalProperties: true
         saleGuard:
           type: object
@@ -7950,7 +7960,7 @@ components:
           properties:
             ratioBps: {type: integer, format: int64}
             oracleAge: {type: integer, format: int64}
-        minFill: {type: string}
+        minFill: {type: string, description: "1 to `units`. Default 1."}
         expiry: {type: integer, format: int64}
         limits: {$ref: '#/components/schemas/ZcLimits'}
     ZcLotRequest:
@@ -7965,7 +7975,7 @@ components:
         start: {type: integer, format: int64, description: "Default the current height."}
         end: {type: integer, format: int64}
         expiry: {type: integer, format: int64, description: "Default `end`. From then anyone may return the lot for its refund fee."}
-        refundFeeNanoErg: {type: string, description: "Default 2000000."}
+        refundFeeNanoErg: {type: string, description: "Default 2000000. On a SigUSD lot the buyer takes the box's whole nanoERG, this fee included."}
         limits: {$ref: '#/components/schemas/ZcLimits'}
     ZcFillRequest:
       type: object
@@ -8001,7 +8011,13 @@ components:
     ZcFractionalizeRequest:
       type: object
       properties:
-        vault: {type: string, enum: [selective, dutch, plain], description: "Default selective. Lend offers buy only selective and dutch shares."}
+        vault:
+          type: string
+          enum: [selective, dutch, plain]
+          description: >
+            Default selective. Lend offers buy only selective and dutch shares. A dutch vault on a SigUSD bond always
+            auctions the 0.001 ERG its box keeps after a liquidation, so partial claims wait for that auction. A bond
+            holding more than 30 collateral tokens can only be split into a plain vault.
         openingBps: {type: integer, format: int64, description: "Required for selective and dutch."}
         floorBps: {type: integer, format: int64, description: "Required for selective and dutch."}
         length: {type: integer, format: int64, description: "Default 720."}
@@ -8056,8 +8072,16 @@ components:
     ZcResult:
       type: object
       properties:
-        txId: {type: string}
-        outcome: {type: string}
+        txId: {type: string, nullable: true, description: "None while the write is held."}
+        outcome:
+          type: string
+          enum: [accepted, rejected, uncertain, held]
+          description: >-
+            The node's answer. `held`: the write reads the box a pending oracle refresh creates, and a miner
+            could reach it before that refresh, so nothing was sent yet. The client tries it again every 30 seconds
+            for 10 minutes, rebuilt and checked against `limits` each time, and sends it once the refresh confirms.
+        reason: {type: string, description: "Why a write is held."}
+        retriesUntil: {type: integer, format: int64, description: "When a held write stops being tried (ms since the epoch)."}
         boxId: {type: string, nullable: true, description: "The transaction's first output."}
         assetId: {type: string, nullable: true, description: "The bond asset a fill minted."}
         warnings: {type: array, items: {type: string}}

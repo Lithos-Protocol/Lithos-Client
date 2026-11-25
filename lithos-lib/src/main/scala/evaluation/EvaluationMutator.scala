@@ -1,7 +1,6 @@
 package evaluation
 
 import lfsm.LFSMHelpers
-import lfsm.contracts.FraudProofContracts
 import work.lithos.mutations.{Contract, Mutator, TxContext, UTXO}
 // Setup Mutator to create initial output for fraud proof evaluation
 class EvaluationMutator(evalContract: Contract) extends Mutator{

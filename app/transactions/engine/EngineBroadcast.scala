@@ -11,11 +11,11 @@ import state.synchronization.CompleteMempool
 import transactions.candidate.BlockTxMessages.CandidateTx
 import transactions.engine.wallet.EngineWalletMessages._
 
-import scala.concurrent.{Await, ExecutionContext}
+import scala.concurrent.Await
 import scala.concurrent.duration._
 import scala.util.{Failure, Success}
 import scala.util.control.NonFatal
-import transactions.engine.wallet.{EngineWalletMessages, FundingAllocation}
+import transactions.engine.wallet.FundingAllocation
 
 object EngineBroadcast {
   /** One reservation's wallet inputs, without the hydrated boxes the worker used to build. */
@@ -67,8 +67,7 @@ object EngineBroadcast {
  * The send boundary. Pins every funding allocation to the exact signed transaction before the node
  * call, so an ambiguous response leaves the inputs owned rather than free.
  */
-class EngineBroadcast(owner: ActorRef, node: NodeApi, requestTimeout: FiniteDuration = 40.seconds)
-                     (implicit ec: ExecutionContext) {
+class EngineBroadcast(owner: ActorRef, node: NodeApi, requestTimeout: FiniteDuration = 40.seconds) {
   import EngineBroadcast._
   private implicit val timeout: Timeout = Timeout(requestTimeout)
 

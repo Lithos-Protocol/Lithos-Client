@@ -76,6 +76,42 @@ class CandidateTxBuilderSpec extends AnyFlatSpec with Matchers with EmissionSpec
 
   // ─── the round trip ───────────────────────────────────────────────────────
 
+  /** The builder as if the node priced boxes at `rate` nanoERG a byte. */
+  private def pricedBuilder(ctx: BlockchainContext, rate: Long): (CandidateTxBuilder, NodeWallet) = {
+    val wallet = nodeWallet(ctx)
+    (new CandidateTxBuilder(wallet, mock[NodeApi], cfg) {
+      override protected def minValuePerByte(ctx: BlockchainContext): Long = rate
+    }, wallet)
+  }
+
+  "Genesis outputs" should "rise to the node's minimum for their size, and still satisfy the collateral contract" in {
+    withCtx { ctx =>
+      val (txBuilder, wallet) = pricedBuilder(ctx, 1000L)
+      val outputs = outputsOf(txBuilder.buildGenesis(ctx, collateralInput(ctx), ctx.getHeight + 1))
+      def valueAt(tree: String): Long = outputs.find(_.getString("ergoTree") == tree).get.getLong("value")
+      val finderTokens = outputs.find(_.getString("ergoTree") == wallet.contract.ergoTreeHex).get
+        .getJSONArray("assets")
+      val finder = UTXO(wallet.contract, 100000L, (0 until finderTokens.length()).map { i =>
+        val t = finderTokens.getJSONObject(i)
+        work.lithos.mutations.Token(org.ergoplatform.sdk.ErgoId.create(t.getString("tokenId")), t.getLong("amount"))
+      })
+      val finderValue = valueAt(wallet.contract.ergoTreeHex)
+      finderValue should be > 100000L
+      finderValue shouldBe utils.BoxMinimum.sized(ctx, finder, 100000L, 1000L).value
+      valueAt(ProtocolContracts(ctx).gate.ergoTreeHex) should be > 150000L
+      valueAt(LFSMHelpers.FOUNDER_1.ergoTreeHex) shouldBe 1000000L
+    }
+  }
+
+  it should "leave a box whose outputs the node's rate prices past its fee channel" in {
+    withCtx { ctx =>
+      val (txBuilder, _) = pricedBuilder(ctx, 10000L)
+      val refused = the[CollateralNotFoundException] thrownBy
+        txBuilder.buildGenesis(ctx, collateralInput(ctx), ctx.getHeight + 1)
+      refused.getMessage should (include("genesis outputs take") and include("fee channel"))
+    }
+  }
+
   "A built genesis transaction" should "be accepted by the collateral contract itself" in {
     withCtx { ctx =>
       val (txBuilder, wallet) = builder(ctx)

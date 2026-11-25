@@ -5,7 +5,7 @@ import akka.pattern.ask
 import akka.util.Timeout
 import configs.{BatchingConfig, CandidateConfig, NodeContext, TasksConfig}
 import node.NodeApi
-import node.model.{MempoolOptions, NodeBox, Paging, SortDirection}
+import node.model.NodeBox
 import org.ergoplatform.appkit.{BlockchainContext, SignedTransaction}
 import org.slf4j.{Logger, LoggerFactory}
 import play.api.Configuration
@@ -372,7 +372,7 @@ abstract class Batcher(nodeContext: NodeContext,
   }
 
   /** A sender for one broadcast pass, on this adapter's worker. */
-  protected def broadcaster(): EngineBroadcast = new EngineBroadcast(engine, nodeApi, ObservationTimeout)(worker)
+  protected def broadcaster(): EngineBroadcast = new EngineBroadcast(engine, nodeApi, ObservationTimeout)
 }
 
 object Batcher {
@@ -486,15 +486,20 @@ object Batcher {
   /** A build used its budget; the message says what it was doing. */
   final class BuildDeadlinePassed(doing: String) extends RuntimeException(doing)
 
+  /** The largest box the node accepts, in bytes. */
+  final val MaxBoxBytes: Int = utils.BoxMinimum.MaxBoxBytes
+
   /**
-   * `signed`, or an exception when an output holds less than the node's minimum for its size. Signing does
-   * not check this and the node drops such a transaction from a candidate without a word. An order's owner
-   * script sets its reward box's size, so an order can make its own reward too small to exist.
+   * `signed`, or an exception when an output holds less than the node's minimum for its size or is larger than
+   * [[MaxBoxBytes]]. Signing checks neither and the node drops such a transaction from a candidate without a
+   * word. An order's owner script sets its reward box's size, so an order can make its own reward too small
+   * to exist, and anyone can post an order or offer whose next box would be too large.
    */
   def withNodeMinimums(ctx: BlockchainContext, signed: SignedTransaction): SignedTransaction = {
     val perByte = ctx.getDataSource.getParameters.getMinValuePerByte.toLong
     signed.getOutputsToSpend.asScala.zipWithIndex.foreach { case (box, index) =>
       val bytes = box.getBytes.length
+      require(bytes <= MaxBoxBytes, s"output $index is $bytes bytes, over the node's $MaxBoxBytes-byte limit")
       require(box.getValue >= bytes * perByte,
         s"output $index holds ${box.getValue} nanoERG, under the node's ${bytes * perByte} minimum for $bytes bytes")
     }

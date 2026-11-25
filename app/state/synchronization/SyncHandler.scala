@@ -2,7 +2,7 @@ package state.synchronization
 
 import akka.actor.{Actor, ActorRef, Cancellable}
 import configs.SyncConfig
-import lfsm.states.{AuthenticatedDictionaryView, DeferredDictionary, PlasmaDictionary, Rollup}
+import lfsm.states.{AuthenticatedDictionaryView, DeferredDictionary, PlasmaDictionary}
 import org.bouncycastle.util.encoders.Hex
 import org.slf4j.{Logger, LoggerFactory}
 import play.api.Configuration
@@ -1477,11 +1477,6 @@ class SyncHandler @Inject()(config: Configuration,
     catch {
       case NonFatal(ex) => markRuntimeFailure("Could not publish the mempool revision", ex)
     }
-
-  private def failRequest(requester: akka.actor.ActorRef, message: String, ex: Throwable): Unit = {
-    markRuntimeFailure(message, ex)
-    requester ! SyncUnavailable(status)
-  }
 
   private def markRuntimeFailure(message: String, ex: Throwable): Unit = {
     val reason = s"$message: ${Option(ex.getMessage).getOrElse(ex.getClass.getSimpleName)}"

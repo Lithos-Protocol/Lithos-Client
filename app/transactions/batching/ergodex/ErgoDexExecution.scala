@@ -2,7 +2,6 @@ package transactions.batching.ergodex
 
 import mutations.NodeWallet
 import node.model.NodeAsset
-import node.MutationConversions._
 import org.ergoplatform.appkit.{BlockchainContext, SignedTransaction}
 import org.ergoplatform.sdk.ErgoId
 import org.slf4j.{Logger, LoggerFactory}
@@ -11,7 +10,6 @@ import transactions.batching.arb.ErgoDexArbPool
 import transactions.batching.{BatchRun, Batcher, Planned, Priced, RunProblem, RunStrategy}
 import transactions.candidate.BlockTxMessages.{CandidateTx, ChainFromMempool, IncludeExisting, Supersede}
 import transactions.candidate.{CandidateBundle, CandidateCapital, CapitalEntry, CapitalOrigin}
-import transactions.engine.execution.RollupExecution
 import work.lithos.mutations.{Contract, InputUTXO, Token, TxBuilder, UTXO}
 
 import scala.concurrent.duration.{Deadline, FiniteDuration}

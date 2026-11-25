@@ -1,7 +1,5 @@
 package api
 
-import play.api.libs.json._
-import models.ApiError
 import models.CandidateSettings
 import models.{CommitmentRequest, CommitmentResult, DifficultyCommitment}
 import models.NISPRepresentation

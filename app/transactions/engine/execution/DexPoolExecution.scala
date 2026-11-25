@@ -17,7 +17,7 @@ import state.synchronization.CompleteMempool
 import transactions.batching.lithosdex._
 import transactions.engine.EngineBroadcast
 import transactions.engine.wallet.{EngineFunding, FundingAllocation, WalletInventory}
-import work.lithos.mutations.{Eip27Adjustment, InputUTXO, Token}
+import work.lithos.mutations.{Eip27Adjustment, InputUTXO}
 
 import scala.util.Try
 import scala.util.control.NonFatal
@@ -720,7 +720,7 @@ class DexPoolExecution(nodeContext: NodeContext, walletSelector: EngineFunding, 
   /** Sends a signed transaction through the engine, which holds its reservation until the outcome is known. */
   private def send(built: Funded[_ <: LDFundedTx]) = {
     val operation = "dex:" + transactions.candidate.BlockTxMessages.CandidateTx.txId(built.value.tx)
-    new EngineBroadcast(walletSelector.walletRef, nodeApi)(walletSelector.executionContext)
+    new EngineBroadcast(walletSelector.walletRef, nodeApi)
       .send(built.value.tx, built.reservation.toSeq, operation, alive)
   }
 

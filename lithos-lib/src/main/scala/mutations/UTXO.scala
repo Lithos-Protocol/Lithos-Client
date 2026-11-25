@@ -3,9 +3,7 @@ package work.lithos.mutations
 import org.ergoplatform.appkit.{BlockchainContext, ErgoValue, OutBox, Parameters}
 import org.ergoplatform.sdk.ErgoId
 import sigma.Coll
-import sigmastate.utils.Helpers
 
-import scala.util.{Failure, Success, Try}
 
 case class UTXO(contract: Contract, value: Long,
                 tokens: Seq[Token] = Seq.empty[Token],

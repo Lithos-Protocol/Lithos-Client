@@ -16,7 +16,7 @@ import work.lithos.mutations.{Eip27Adjustment, InputUTXO, TxBuilder, UTXO}
 
 import scala.annotation.tailrec
 import scala.collection.mutable
-import scala.concurrent.{Await, ExecutionContext}
+import scala.concurrent.Await
 import scala.concurrent.duration._
 import scala.util.Try
 import scala.util.control.NonFatal
@@ -62,8 +62,7 @@ object EngineReconciler {
  */
 class EngineReconciler(nodeContext: NodeContext, wallet: ActorRef, mempool: ActorRef,
                        nodeApi: Option[NodeApi] = None, alive: () => Boolean = () => true,
-                       settings: configs.ReconcileConfig = configs.ReconcileConfig.Default)
-                      (implicit ec: ExecutionContext) {
+                       settings: configs.ReconcileConfig = configs.ReconcileConfig.Default) {
   import EngineReconciler._
   private implicit val timeout: Timeout = Timeout(40.seconds)
   private val logger = org.slf4j.LoggerFactory.getLogger("TransactionEngine")
