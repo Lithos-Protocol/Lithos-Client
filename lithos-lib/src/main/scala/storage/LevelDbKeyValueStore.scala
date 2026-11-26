@@ -35,6 +35,33 @@ final class LevelDbKeyValueStore private (private val db: DB,
       readSnapshot(_.scanKeys(safePrefix))
     }
 
+  override def scanKeysRange(prefix: Array[Byte], startAt: Array[Byte], exclusive: Boolean,
+                             limit: Int): Either[StoreError, Vector[Array[Byte]]] =
+    for {
+      safePrefix <- validateBytes(prefix, "prefix")
+      safeStart <- validateBytes(startAt, "startAt")
+      _ <- if (limit < 0) Left(InvalidArgument("limit cannot be negative")) else Right(())
+      result <- readSnapshot(_.scanKeysRange(safePrefix, safeStart, exclusive, limit))
+    } yield result
+
+  override def scanPrefixRange(prefix: Array[Byte], startAt: Array[Byte], exclusive: Boolean,
+                               limit: Int): Either[StoreError, Vector[(Array[Byte], Array[Byte])]] =
+    for {
+      safePrefix <- validateBytes(prefix, "prefix")
+      safeStart <- validateBytes(startAt, "startAt")
+      _ <- if (limit < 0) Left(InvalidArgument("limit cannot be negative")) else Right(())
+      result <- readSnapshot(_.scanPrefixRange(safePrefix, safeStart, exclusive, limit))
+    } yield result
+
+  override def scanPrefixReverse(prefix: Array[Byte], startAt: Array[Byte], exclusive: Boolean,
+                                 limit: Int): Either[StoreError, Vector[(Array[Byte], Array[Byte])]] =
+    for {
+      safePrefix <- validateBytes(prefix, "prefix")
+      safeStart <- validateBytes(startAt, "startAt")
+      _ <- if (limit < 0) Left(InvalidArgument("limit cannot be negative")) else Right(())
+      result <- readSnapshot(_.scanPrefixReverse(safePrefix, safeStart, exclusive, limit))
+    } yield result
+
   override def readSnapshot[A](f: KeyValueReadView => Either[StoreError, A]): Either[StoreError, A] = {
     if (f == null)
       return Left(InvalidArgument("Read transaction callback cannot be null"))
@@ -219,6 +246,144 @@ private final class LevelDbReadView(db: DB, options: ReadOptions, storePath: Pat
 
   override def scanKeys(prefix: Array[Byte]): Either[StoreError, Vector[Array[Byte]]] =
     scan(prefix, "snapshot key scan")(_.getKey.clone())
+
+  override def scanKeysRange(prefix: Array[Byte], startAt: Array[Byte], exclusive: Boolean,
+                             limit: Int): Either[StoreError, Vector[Array[Byte]]] =
+    scanRange(prefix, startAt, exclusive, limit, "snapshot key range scan")(_.getKey.clone())
+
+  override def scanPrefixRange(prefix: Array[Byte], startAt: Array[Byte], exclusive: Boolean,
+                               limit: Int): Either[StoreError, Vector[(Array[Byte], Array[Byte])]] =
+    scanRange(prefix, startAt, exclusive, limit, "snapshot prefix range scan")(e => e.getKey.clone() -> e.getValue.clone())
+
+  override def scanPrefixReverse(prefix: Array[Byte], startAt: Array[Byte], exclusive: Boolean,
+                                 limit: Int): Either[StoreError, Vector[(Array[Byte], Array[Byte])]] = {
+    if (!active) Left(Closed(storePath))
+    else if (prefix == null) Left(InvalidArgument("prefix cannot be null"))
+    else if (startAt == null) Left(InvalidArgument("startAt cannot be null"))
+    else if (limit < 0) Left(InvalidArgument("limit cannot be negative"))
+    else if (limit == 0) Right(Vector.empty)
+    else {
+      var iterator: org.iq80.leveldb.DBIterator = null
+      var result: Either[StoreError, Vector[(Array[Byte], Array[Byte])]] = null
+      var closeFailure: Option[Throwable] = None
+      try {
+        val safePrefix = prefix.clone()
+        val safeStart = startAt.clone()
+        val entries = Vector.newBuilder[(Array[Byte], Array[Byte])]
+        var count = 0
+        iterator = db.iterator(options)
+        val seekTarget = if (safeStart.nonEmpty) Some(safeStart) else nextPrefix(safePrefix)
+        seekTarget match {
+          case Some(target) =>
+            iterator.seek(target)
+            if (!iterator.hasNext) iterator.seekToLast()
+          case None =>
+            iterator.seekToLast()
+        }
+        def underBound(k: Array[Byte]): Boolean =
+          safeStart.isEmpty || {
+            val cmp = KeyValueStore.compareUnsigned(k, safeStart)
+            if (exclusive) cmp < 0 else cmp <= 0
+          }
+        def belowPrefix(k: Array[Byte]): Boolean =
+          !startsWith(k, safePrefix) && KeyValueStore.compareUnsigned(k, safePrefix) < 0
+
+        if (iterator.hasNext) {
+          val first = iterator.peekNext()
+          val fk = first.getKey
+          if (startsWith(fk, safePrefix) && underBound(fk)) {
+            entries += (fk.clone() -> first.getValue.clone())
+            count += 1
+          }
+          var scanning = count < limit && !belowPrefix(fk)
+          while (scanning && iterator.hasPrev) {
+            val entry = iterator.prev()
+            val k = entry.getKey
+            if (startsWith(k, safePrefix)) {
+              if (underBound(k)) {
+                entries += (k.clone() -> entry.getValue.clone())
+                count += 1
+                if (count >= limit) scanning = false
+              }
+            } else if (KeyValueStore.compareUnsigned(k, safePrefix) < 0) {
+              scanning = false
+            }
+          }
+        }
+        result = Right(entries.result())
+      } catch {
+        case NonFatal(error) => result = Left(ReadFailed(storePath, "snapshot reverse prefix scan", error))
+      } finally {
+        if (iterator != null) {
+          try iterator.close()
+          catch { case NonFatal(error) => closeFailure = Some(error) }
+        }
+      }
+      closeFailure match {
+        case Some(error) if result.isRight => Left(ReadFailed(storePath, "snapshot iterator close", error))
+        case _ => result
+      }
+    }
+  }
+
+  private def scanRange[A](prefix: Array[Byte], startAt: Array[Byte], exclusive: Boolean, limit: Int, operation: String)
+                          (read: java.util.Map.Entry[Array[Byte], Array[Byte]] => A): Either[StoreError, Vector[A]] = {
+    if (!active) Left(Closed(storePath))
+    else if (prefix == null) Left(InvalidArgument("prefix cannot be null"))
+    else if (startAt == null) Left(InvalidArgument("startAt cannot be null"))
+    else if (limit < 0) Left(InvalidArgument("limit cannot be negative"))
+    else if (limit == 0) Right(Vector.empty)
+    else {
+      var iterator: org.iq80.leveldb.DBIterator = null
+      var result: Either[StoreError, Vector[A]] = null
+      var closeFailure: Option[Throwable] = None
+      try {
+        val safePrefix = prefix.clone()
+        val safeStart = startAt.clone()
+        val seekKey = if (safeStart.nonEmpty && KeyValueStore.compareUnsigned(safeStart, safePrefix) > 0) safeStart else safePrefix
+        val entries = Vector.newBuilder[A]
+        var count = 0
+        iterator = db.iterator(options)
+        iterator.seek(seekKey)
+        var scanning = true
+        while (scanning && count < limit && iterator.hasNext) {
+          val entry = iterator.next()
+          val k = entry.getKey
+          if (!startsWith(k, safePrefix)) scanning = false
+          else if (safeStart.isEmpty || {
+            val cmp = KeyValueStore.compareUnsigned(k, safeStart)
+            if (exclusive) cmp > 0 else cmp >= 0
+          }) {
+            entries += read(entry)
+            count += 1
+          }
+        }
+        result = Right(entries.result())
+      } catch {
+        case NonFatal(error) => result = Left(ReadFailed(storePath, operation, error))
+      } finally {
+        if (iterator != null) {
+          try iterator.close()
+          catch { case NonFatal(error) => closeFailure = Some(error) }
+        }
+      }
+      closeFailure match {
+        case Some(error) if result.isRight => Left(ReadFailed(storePath, "snapshot iterator close", error))
+        case _ => result
+      }
+    }
+  }
+
+  private def nextPrefix(prefix: Array[Byte]): Option[Array[Byte]] = {
+    var i = prefix.length - 1
+    while (i >= 0 && (prefix(i) & 0xff) == 0xff) i -= 1
+    if (i < 0) None
+    else {
+      val next = java.util.Arrays.copyOf(prefix, i + 1)
+      next(i) = ((next(i) & 0xff) + 1).toByte
+      Some(next)
+    }
+  }
 
   private def scan[A](prefix: Array[Byte], operation: String)
                      (read: java.util.Map.Entry[Array[Byte], Array[Byte]] => A):

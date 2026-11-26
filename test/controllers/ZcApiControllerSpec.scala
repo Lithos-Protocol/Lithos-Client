@@ -119,9 +119,48 @@ class ZcApiControllerSpec
     status(c.checkCreateOrder().apply(FakeRequest(POST, "/").withJsonBody(Json.obj()))) shouldBe OK
   }
 
-  "The wrap quote" should "need the API key, since it reads this wallet's holdings" in {
+  "The claim and wrap quotes" should "need the API key, since they read this wallet's holdings" in {
     val (c, _) = controller()
     status(c.checkCreateWrap().apply(FakeRequest(POST, "/").withJsonBody(Json.obj("tokenId" -> id(1))))) shouldBe FORBIDDEN
+    status(c.checkClaim(id(1)).apply(FakeRequest(POST, "/").withJsonBody(Json.obj()))) shouldBe FORBIDDEN
+    status(c.checkClaim("not-a-hex-id").apply(FakeRequest(POST, "/").withHeaders("api_key" -> apiKey)
+      .withJsonBody(Json.obj()))) shouldBe BAD_REQUEST
+  }
+
+  "Expensive public reads" should "share the heavy-read slots, refusing past them before anything is queued" in {
+    val latch = new java.util.concurrent.CountDownLatch(1)
+    val c = new ScriptedChain
+    c.extend(H - 40, H)
+    c.indexed = H
+    c.scans(Seq(ergOffer(id(20)), oracleOrder(id(1)), oracle()).map(b => LDNodeFixtures.indexed(b, H - 10)): _*)
+    val t = new ZcTracker(() => c.api, ExecutionContext.global, ZcConfig(enabled = true, 1000), retryMs = 20L)
+    t.poke()
+    eventually(t.view.isDefined shouldBe true)
+    val r = new ZcResolver(() => c.api, t)
+    val blockingReads = new ZcReads(t, r, () => c.api, () => Set.empty, () => (0L, Seq.empty), warmer = None) {
+      override def orderbook(marketName: String, f: api.zc.ZcFilters, to: Option[Long], around: Option[Long],
+                             band: Option[Long]): play.api.libs.json.JsObject = {
+        latch.await(10, java.util.concurrent.TimeUnit.SECONDS)
+        super.orderbook(marketName, f, to, around, band)
+      }
+    }
+    val fills = new stats.ZcFills(ZcConfig(enabled = true, 1000), () => stats.ZcFillStore.inMemory(ZcConfig(enabled = true, 1000)),
+      () => c.api, ExecutionContext.global, enabled = false)
+    val ctl = new ZcApiController(Helpers.stubControllerComponents(), t, r, mock[NodeContext], config, system, fills,
+      new api.zc.ZcWrites(mock[NodeContext], system.deadLetters, t, r, config, system),
+      new api.zc.ZcHistory(() => c.api, () => Set.empty[String], t, 0)) {
+      override protected lazy val reads: ZcReads = blockingReads
+    }
+    val held = (1 to ZcApiController.MaxHeavyReads).map(_ =>
+      ctl.orderbook("ERG", None, None, None, None, None, None, None, None).apply(FakeRequest()))
+    status(ctl.orderbook("ERG", None, None, None, None, None, None, None, None).apply(FakeRequest())) shouldBe TOO_MANY_REQUESTS
+    status(ctl.curves("ERG", None, None, None, None, None).apply(FakeRequest())) shouldBe TOO_MANY_REQUESTS
+    status(ctl.fills("ERG", None, None, None, None, None).apply(FakeRequest())) shouldBe TOO_MANY_REQUESTS
+    // 304 revision polls bypass the heavy-read slots
+    status(ctl.orderbook("ERG", None, None, None, None, None, None, None, t.view.map(_.revision)).apply(FakeRequest())) shouldBe NOT_MODIFIED
+    latch.countDown()
+    held.map(status(_)).toSet shouldBe Set(OK)
+    status(ctl.fills("ERG", None, None, None, None, None).apply(FakeRequest())) shouldBe OK
   }
 
   "Every ZC send" should "need the API key, and activity too" in {

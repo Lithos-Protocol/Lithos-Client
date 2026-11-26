@@ -44,12 +44,14 @@ final class ZcHeld(val reason: String) extends RuntimeException(reason)
  * from the node and refuses one a fresh mempool observation shows spent (409).
  *
  * A check that cannot run answers 200 with its `refusals`; the send answers 422 with them. A send body may carry
- * `limits: { maxPay, minReceive }` in the action's market unit (nanoERG for ERG, fee included; raw units for SigUSD;
- * nanoERG for actions with no market): a rebuilt transaction outside them is refused with 409, so a quote that moved
- * between review and send is never signed silently.
+ * `limits: { maxPay, minReceive }`: for fills, buys, repays, recollateralizations and claims these are in the action's
+ * market unit (nanoERG for ERG, fee included; raw units for SigUSD; nanoERG for actions with no market); for posts
+ * (orders, offers, asks, lots, fractionalize and wraps) `maxPay` is always in nanoERG (box value plus miner fee). A
+ * rebuilt transaction outside them is refused with 409, so a quote that moved between review and send is never signed
+ * silently.
  *
  * @param alive      whether the engine still wants this attempt; once false, nothing is signed or sent
- * @param capability which of the given token ids are capability tokens (LithosDex provision NFTs), refused in lots
+ * @param capability which of the given token ids are capability tokens (LithosDex provision NFTs), refused in orders and lots
  */
 class ZcWriteExecution(nodeContext: NodeContext, walletSelector: EngineFunding, tracker: ZcTracker, resolver: ZcResolver,
                        alive: () => Boolean = () => true, capability: Seq[String] => Set[String] = _ => Set.empty) {
@@ -95,6 +97,9 @@ class ZcWriteExecution(nodeContext: NodeContext, walletSelector: EngineFunding, 
   def createOrder(body: JsObject, send: Boolean): JsObject = checked("createOrder", send)(withCtx { ctx =>
     val h = ctx.getHeight
     val draft = ZcDrafts.orderOf(body, h.toLong)
+    capability(draft.box.assets.filter(_.amount == 1L).map(_.tokenId)).headOption.foreach(id =>
+      refuse(s"$id is a capability token (a LithosDex provision NFT): whoever spends a box holding it acts for its " +
+        "position, and an order or bond can be spent beside it. Wrap it (POST /sigmafi/zc/wraps) and use the receipt"))
     val v = view
     val m = matcher(v)
     ZcRules.orderRefusal(draft, h.toLong).filterNot(_.contains("expired")).foreach(r => throw LithosBadRequest(r))

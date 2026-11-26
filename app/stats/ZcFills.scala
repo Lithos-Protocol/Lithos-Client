@@ -64,6 +64,8 @@ final class ZcFills(settings: ZcConfig, openStore: () => ZcFillStore, api: () =>
   private val state = new AtomicReference(Standing(if (!on) "disabled" else if (settings.fillsFromHeight <= 0)
     "not-configured" else "loading", None, None))
   @volatile private var store: Option[ZcFillStore] = None
+  private var lastPrunedCursor: Int = -1
+  private var pruneBacklog: Boolean = true
 
   private def on: Boolean = enabled && settings.enabled
 
@@ -78,16 +80,18 @@ final class ZcFills(settings: ZcConfig, openStore: () => ZcFillStore, api: () =>
     } finally running.set(false))(worker)).failed.foreach(_ => running.set(false))
   }
 
-  /** Fills in `market` from `fromHeight`, newest first, paged by an opaque cursor. */
+  /** Fills in `market` from `fromHeight`, newest first, paged directly from ordered storage with a scan bound. */
   def fills(market: ZcMarket, fromHeight: Int, kind: Option[String], via: Option[String], cursor: Option[String],
             limit: Int): ZcFillPage = {
     val s = state.get()
-    val db = store
-    val all = db.map(_.fillsFrom(fromHeight)).getOrElse(Vector.empty).filter(f => f.market == market.name &&
-      kind.forall(_ == f.kind) && via.forall(_ == f.via)).sortBy(f => (-f.height, f.id))
-    val from = cursor.flatMap(c => Try(c.toInt).toOption).filter(_ >= 0).getOrElse(0)
-    val page = all.slice(from, from + limit)
-    ZcFillPage(s.status, s.observedAt, s.indexedTo, page, if (from + limit < all.size) Some((from + limit).toString) else None)
+    val afterKey = cursor.map(_.trim).filter(_.nonEmpty)
+    afterKey.foreach { k =>
+      if (!k.startsWith("fill/")) throw new IllegalArgumentException("cursor must be the next value of an earlier page")
+    }
+    val (page, next) = store.map(_.fillsPage(fromHeight,
+      f => f.market == market.name && kind.forall(_ == f.kind) && via.forall(_ == f.via),
+      afterKey, limit, MaxRowsPerRead)).getOrElse((Vector.empty, None))
+    ZcFillPage(s.status, s.observedAt, s.indexedTo, page, next)
   }
 
   private def cycle(): Unit = {
@@ -105,15 +109,26 @@ final class ZcFills(settings: ZcConfig, openStore: () => ZcFillStore, api: () =>
       val parent = source.headerAt(start - 1).get
       db.initialize(parent.height, parent.id)
     }
+    val initial = db.cursor.get
+    // A lagging node index is not evidence against our cursor: preserve history and wait until the index catches up.
+    if (initial._1 > indexed) {
+      state.set(Standing("stale", Some(System.currentTimeMillis()), Some(initial._1)))
+      return
+    }
     var work = 0
-    // Undo blocks the canonical chain no longer holds
-    def canonical(c: (Int, String)): Boolean = c._1 <= indexed && source.headerAt(c._1).toOption.exists(_.id == c._2)
-    while (!canonical(db.cursor.get) && work < blocksPerCycle) {
+    var changed = false
+    // Require a successfully read conflicting header before rolling back; a header read failure throws into tick()'s
+    // catch handler, marking the history stale while preserving the cursor and stored history.
+    def isCanonical(c: (Int, String)): Boolean = source.headerAt(c._1).get.id == c._2
+    while (!isCanonical(db.cursor.get) && work < blocksPerCycle) {
       val (ch, _) = db.cursor.get
       if (ch < settings.fillsFromHeight || !db.hasBlock(ch)) {
+        // Verify the replacement anchor before clearing the index.
+        val anchor = source.headerAt(settings.fillsFromHeight - 1).get
         db.clear()
-        db.initialize(settings.fillsFromHeight - 1, source.headerAt(settings.fillsFromHeight - 1).get.id)
+        db.initialize(anchor.height, anchor.id)
       } else db.rollback()
+      changed = true
       work += 1
     }
     val (at, _) = db.cursor.get
@@ -126,11 +141,16 @@ final class ZcFills(settings: ZcConfig, openStore: () => ZcFillStore, api: () =>
           throw new NoSuchElementException(s"the node has no transactions for block ${h.id}"))
         db.append(h, read(node, db, h, txs))
       }
+      changed = true
     }
     val cursor = db.cursor.get._1
     if (settings.fillsRetentionDays > 0) {
       val cutoff = cursor.toLong - settings.fillsRetentionDays.toLong * BlocksPerDay
-      if (cutoff > 0L) db.prune(cutoff.min(Int.MaxValue).toInt)
+      if (cutoff > 0L && (changed || cursor != lastPrunedCursor || pruneBacklog)) {
+        val pruned = db.pruneStep(cutoff.min(Int.MaxValue).toInt)
+        lastPrunedCursor = cursor
+        pruneBacklog = pruned.more
+      }
     }
     state.set(Standing(if (cursor < indexed) "catching-up" else "ready", Some(System.currentTimeMillis()), Some(cursor)))
   }
@@ -204,8 +224,15 @@ object ZcFills {
   final val RollbackBuffer = 64
   /** Most old block records (and matured fact entries) pruned per cycle, keeping background disk I/O bounded. */
   final val PruneBatchSize = 256
+  /** Most fill rows examined by one public fills request before stopping and returning a continuation cursor. */
+  final val MaxRowsPerRead = 2000
+  /** Batch size used when clearing stored prefixes on a deep reorg or schema change. */
+  final val ClearBatchSize = 2048
 
   final case class Standing(status: String, observedAt: Option[Long], indexedTo: Option[Int])
+
+  /** Result of one bounded pruning step: entries deleted and whether more work remains in any prefix. */
+  final case class PruneResult(deleted: Int, more: Boolean)
 
   /** What a bond unit's resale is priced against: its market, repayment and maturity. */
   final case class BondFacts(market: String, repayment: Long, maturity: Long)
@@ -233,23 +260,99 @@ final class ZcFillStore(database: Option[KeyValueStore], identity: JsObject) {
   import KeyValueMutation.{Delete, Put}
   import ZcFills._
 
-  @volatile private var memory = Map.empty[String, Array[Byte]]
+  private val memory = new java.util.TreeMap[String, Array[Byte]]()
 
   private def key(s: String): Array[Byte] = s.getBytes(UTF_8)
-  private def get(name: String): Option[JsValue] = (database match {
+  private def rawGet(name: String): Option[Array[Byte]] = database match {
     case Some(db) => KeyValueStore.orThrow(db.get(key(name)))
-    case None => memory.get(name)
-  }).map(Json.parse)
-  private def keys(prefix: String): Vector[String] = (database match {
-    case Some(db) => KeyValueStore.orThrow(db.scanKeys(key(prefix))).map(new String(_, UTF_8))
-    case None => memory.keysIterator.filter(_.startsWith(prefix)).toVector
-  }).sorted
+    case None => memory.synchronized(Option(memory.get(name)).map(_.clone()))
+  }
+  private def get(name: String): Option[JsValue] = rawGet(name).map(Json.parse)
+  private def getString(name: String): Option[String] = rawGet(name).map(new String(_, UTF_8))
+
+  private def scanKeysRange(prefix: String, startAt: String, exclusive: Boolean, limit: Int): Vector[String] =
+    if (limit <= 0) Vector.empty
+    else database match {
+      case Some(db) =>
+        KeyValueStore.orThrow(db.scanKeysRange(key(prefix), if (startAt.isEmpty) Array.emptyByteArray else key(startAt),
+          exclusive, limit)).map(new String(_, UTF_8))
+      case None => memory.synchronized {
+        val seek = if (startAt.nonEmpty && startAt > prefix) startAt else prefix
+        val tail = memory.tailMap(seek, !(exclusive && seek == startAt))
+        val it = tail.keySet().iterator()
+        val out = Vector.newBuilder[String]
+        var count = 0
+        var going = true
+        while (going && count < limit && it.hasNext) {
+          val k = it.next()
+          if (!k.startsWith(prefix)) going = false
+          else {
+            out += k
+            count += 1
+          }
+        }
+        out.result()
+      }
+    }
+
+  private def scanEntriesRange(prefix: String, startAt: String, exclusive: Boolean, limit: Int): Vector[(String, Array[Byte])] =
+    if (limit <= 0) Vector.empty
+    else database match {
+      case Some(db) =>
+        KeyValueStore.orThrow(db.scanPrefixRange(key(prefix), if (startAt.isEmpty) Array.emptyByteArray else key(startAt),
+          exclusive, limit)).map { case (k, v) => new String(k, UTF_8) -> v }
+      case None => memory.synchronized {
+        val seek = if (startAt.nonEmpty && startAt > prefix) startAt else prefix
+        val tail = memory.tailMap(seek, !(exclusive && seek == startAt))
+        val it = tail.entrySet().iterator()
+        val out = Vector.newBuilder[(String, Array[Byte])]
+        var count = 0
+        var going = true
+        while (going && count < limit && it.hasNext) {
+          val e = it.next()
+          if (!e.getKey.startsWith(prefix)) going = false
+          else {
+            out += e.getKey -> e.getValue.clone()
+            count += 1
+          }
+        }
+        out.result()
+      }
+    }
+
+  private def scanEntriesReverse(prefix: String, startAt: String, exclusive: Boolean, limit: Int): Vector[(String, Array[Byte])] =
+    if (limit <= 0) Vector.empty
+    else database match {
+      case Some(db) =>
+        KeyValueStore.orThrow(db.scanPrefixReverse(key(prefix), if (startAt.isEmpty) Array.emptyByteArray else key(startAt),
+          exclusive, limit)).map { case (k, v) => new String(k, UTF_8) -> v }
+      case None => memory.synchronized {
+        val prefixEnd = prefix.init + (prefix.last + 1).toChar
+        val upper = if (startAt.nonEmpty) startAt else prefixEnd
+        val inclusive = startAt.nonEmpty && !exclusive
+        val desc = memory.headMap(upper, inclusive).descendingMap()
+        val it = desc.entrySet().iterator()
+        val out = Vector.newBuilder[(String, Array[Byte])]
+        var count = 0
+        var going = true
+        while (going && count < limit && it.hasNext) {
+          val e = it.next()
+          val k = e.getKey
+          if (k.startsWith(prefix)) {
+            out += k -> e.getValue.clone()
+            count += 1
+          } else if (k < prefix) going = false
+        }
+        out.result()
+      }
+    }
+
   private def write(changes: Seq[KeyValueMutation]): Unit = database match {
     case Some(db) => KeyValueStore.orThrow(db.write(changes, WriteDurability.Synchronous))
-    case None => synchronized {
-      memory = changes.foldLeft(memory) {
-        case (m, Put(k, v)) => m.updated(new String(k, UTF_8), v)
-        case (m, Delete(k)) => m - new String(k, UTF_8)
+    case None => memory.synchronized {
+      changes.foreach {
+        case Put(k, v) => memory.put(new String(k, UTF_8), v.clone())
+        case Delete(k) => memory.remove(new String(k, UTF_8))
       }
     }
   }
@@ -295,15 +398,19 @@ final class ZcFillStore(database: Option[KeyValueStore], identity: JsObject) {
    * Prunes per-block undo records, fills, and matured bond/share facts strictly older than `cutoffHeight` (while
    * keeping at least [[ZcFills.RollbackBuffer]] blocks behind the cursor for reorg rollbacks, and preserving live
    * `bond/` and `share/` facts whose bond matures at or after the prune height so later resales still price).
-   * Bounded to `limit` blocks / matured entries per call so pruning never stalls a cycle.
+   * Strictly bounded per prefix via ordered range seeks and persisted `bond/`/`share/` seek cursors.
    */
-  def prune(cutoffHeight: Int, limit: Int = ZcFills.PruneBatchSize): Int = {
+  def prune(cutoffHeight: Int, limit: Int = ZcFills.PruneBatchSize): Int = pruneStep(cutoffHeight, limit).deleted
+
+  def pruneStep(cutoffHeight: Int, limit: Int = ZcFills.PruneBatchSize): PruneResult = {
     val maxPrune = cursor.map(_._1 - ZcFills.RollbackBuffer).map(math.min(cutoffHeight, _)).getOrElse(0)
-    if (maxPrune <= 0 || limit <= 0) 0
+    if (maxPrune <= 0 || limit <= 0) PruneResult(0, more = false)
     else {
       val deletes = scala.collection.mutable.LinkedHashSet.empty[String]
       val blockCutoff = blockKey(maxPrune)
-      keys("block/").iterator.takeWhile(_ < blockCutoff).take(limit).foreach { bk =>
+      val oldBlocks = scanKeysRange("block/", "", exclusive = false, limit + 1).takeWhile(_ < blockCutoff)
+      val moreBlocks = oldBlocks.size > limit
+      oldBlocks.take(limit).foreach { bk =>
         deletes += bk
         get(bk).foreach { record =>
           (record \ "keys").asOpt[Seq[String]].getOrElse(Seq.empty).foreach { k =>
@@ -318,44 +425,124 @@ final class ZcFillStore(database: Option[KeyValueStore], identity: JsObject) {
         }
       }
 
-      // Sweep any remaining fill keys older than maxPrune, plus long-dated bonds/shares that have now matured.
+      // Sweep any remaining fill keys older than maxPrune using a bounded prefix seek.
       val fillCutoff = f"fill/$maxPrune%010d"
-      keys("fill/").iterator.takeWhile(_ < fillCutoff).filterNot(deletes.contains).take(limit).foreach(deletes += _)
+      val oldFills = scanKeysRange("fill/", "", exclusive = false, limit + 1).takeWhile(_ < fillCutoff)
+      val moreFills = oldFills.size > limit
+      oldFills.take(limit).foreach(deletes += _)
 
-      var extraBonds = 0
-      keys("bond/").iterator.filterNot(deletes.contains).foreach { bk =>
-        if (extraBonds < limit && bond(bk.stripPrefix("bond/")).forall(_.maturity < maxPrune)) {
+      // Sweep long-dated bonds/shares that have now matured via bounded, persisted seek cursors.
+      val bondCursor = getString("prune/bond").getOrElse("")
+      val bondBatch = scanEntriesRange("bond/", bondCursor, exclusive = bondCursor.nonEmpty, limit)
+      bondBatch.foreach { case (bk, raw) =>
+        if (!deletes.contains(bk) && Try(Json.parse(raw).as[BondFacts]).toOption.forall(_.maturity < maxPrune))
           deletes += bk
-          extraBonds += 1
-        }
       }
-      var extraShares = 0
-      keys("share/").iterator.filterNot(deletes.contains).foreach { sk =>
-        if (extraShares < limit) {
-          val dead = share(sk.stripPrefix("share/")).forall { case (asset, _) =>
+      val nextBondCursor = if (bondBatch.size < limit) "" else bondBatch.last._1
+      val moreBonds = bondBatch.size >= limit
+
+      val shareCursor = getString("prune/share").getOrElse("")
+      val shareBatch = scanEntriesRange("share/", shareCursor, exclusive = shareCursor.nonEmpty, limit)
+      shareBatch.foreach { case (sk, raw) =>
+        if (!deletes.contains(sk)) {
+          val dead = Try(Json.parse(raw)).toOption.flatMap(j => (j \ "bond").asOpt[String]).forall { asset =>
             deletes.contains("bond/" + asset) || bond(asset).forall(_.maturity < maxPrune)
           }
-          if (dead) {
-            deletes += sk
-            extraShares += 1
-          }
+          if (dead) deletes += sk
         }
       }
+      val nextShareCursor = if (shareBatch.size < limit) "" else shareBatch.last._1
+      val moreShares = shareBatch.size >= limit
 
-      if (deletes.nonEmpty) write(deletes.iterator.map(k => Delete(key(k))).toSeq)
-      deletes.size
+      val mutations = Vector.newBuilder[KeyValueMutation]
+      deletes.foreach(k => mutations += Delete(key(k)))
+      if (nextBondCursor != bondCursor)
+        mutations += (if (nextBondCursor.isEmpty) Delete(key("prune/bond")) else Put(key("prune/bond"), key(nextBondCursor)))
+      if (nextShareCursor != shareCursor)
+        mutations += (if (nextShareCursor.isEmpty) Delete(key("prune/share")) else Put(key("prune/share"), key(nextShareCursor)))
+      val changes = mutations.result()
+      if (changes.nonEmpty) write(changes)
+      PruneResult(deletes.size, moreBlocks || moreFills || moreBonds || moreShares)
     }
   }
 
-  /** Drops the whole history, for a fork deeper than its start. */
-  def clear(): Unit = write(Seq("fill/", "bond/", "share/", "block/").flatMap(keys).map(k => Delete(key(k))) :+ Delete(key("cursor")))
+  /** Drops the whole history in bounded batches, for a fork deeper than its start. */
+  def clear(): Unit = {
+    Seq("fill/", "bond/", "share/", "block/").foreach { prefix =>
+      var batch = scanKeysRange(prefix, "", exclusive = false, ZcFills.ClearBatchSize)
+      while (batch.nonEmpty) {
+        write(batch.map(k => Delete(key(k))))
+        batch = if (batch.size < ZcFills.ClearBatchSize) Vector.empty
+          else scanKeysRange(prefix, "", exclusive = false, ZcFills.ClearBatchSize)
+      }
+    }
+    write(Seq(Delete(key("cursor")), Delete(key("prune/bond")), Delete(key("prune/share"))))
+  }
 
   def bond(asset: String): Option[BondFacts] = get("bond/" + asset).map(_.as[BondFacts])
 
   def share(id: String): Option[(String, Long)] = get("share/" + id).map(j => ((j \ "bond").as[String], (j \ "n").as[Long]))
 
-  def fillsFrom(height: Int): Vector[ZcFill] =
-    keys("fill/").filter(_ >= f"fill/$height%010d").flatMap(k => get(k).map(_.as[ZcFill]))
+  /**
+   * Pages fills from `fromHeight` onward directly from reverse-ordered storage, examining at most `maxScanned` rows.
+   * Returns `(matchingPage, nextCursor)` where `nextCursor` is an opaque storage key for the next page.
+   */
+  def fillsPage(fromHeight: Int, predicate: ZcFill => Boolean, afterKey: Option[String],
+                limit: Int, maxScanned: Int = ZcFills.MaxRowsPerRead): (Vector[ZcFill], Option[String]) = {
+    if (limit <= 0 || maxScanned <= 0) (Vector.empty, None)
+    else {
+      val minKey = f"fill/${math.max(0, fromHeight)}%010d"
+      val out = Vector.newBuilder[ZcFill]
+      var collected = 0
+      var scanned = 0
+      var cursorKey = afterKey.getOrElse("")
+      var exclusive = afterKey.isDefined
+      var lastMatchedKey = Option.empty[String]
+      var lastScannedKey = Option.empty[String]
+      var hasMore = false
+      var done = false
+      while (!done) {
+        val remaining = maxScanned - scanned
+        if (remaining <= 0) {
+          hasMore = lastScannedKey.isDefined
+          done = true
+        } else {
+          val batchSize = math.min(math.max(limit * 2, 64), remaining)
+          val batch = scanEntriesReverse("fill/", cursorKey, exclusive, batchSize)
+          if (batch.isEmpty) done = true
+          else {
+            val it = batch.iterator
+            while (it.hasNext && !done) {
+              val (k, raw) = it.next()
+              if (k < minKey) done = true
+              else {
+                scanned += 1
+                lastScannedKey = Some(k)
+                cursorKey = k
+                exclusive = true
+                Try(Json.parse(raw).as[ZcFill]).toOption.filter(predicate).foreach { fill =>
+                  if (collected >= limit) {
+                    hasMore = true
+                    done = true
+                  } else {
+                    out += fill
+                    collected += 1
+                    lastMatchedKey = Some(k)
+                  }
+                }
+              }
+            }
+            if (!done && batch.size < batchSize) done = true
+          }
+        }
+      }
+      val nextCursor =
+        if (!hasMore) None
+        else if (collected >= limit) lastMatchedKey
+        else lastScannedKey
+      (out.result(), nextCursor)
+    }
+  }
 
   def close(): Unit = database.foreach(_.close())
 }

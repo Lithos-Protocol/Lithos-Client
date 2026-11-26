@@ -50,6 +50,48 @@ trait KeyValueStoreContract { self: AnyFlatSpec with Matchers =>
     unchanged._2.toVector shouldEqual Vector[Byte](1)
   }
 
+  it should "page bounded forward and reverse prefix ranges in unsigned bytewise order" in withStore { store =>
+    val p = "fill/".getBytes("UTF-8")
+    val entries = Vector(
+      "block/0001" -> "b1",
+      "fill/0001/a" -> "1a",
+      "fill/0001/b" -> "1b",
+      "fill/0002/a" -> "2a",
+      "fill/0003/a" -> "3a",
+      "share/0001" -> "s1"
+    )
+    store.write(entries.map { case (k, v) => Put(k.getBytes("UTF-8"), v.getBytes("UTF-8")) }) shouldBe Right(())
+
+    def s(bs: Array[Byte]) = new String(bs, "UTF-8")
+    def b(str: String) = str.getBytes("UTF-8")
+
+    // Forward key range: inclusive, exclusive, and empty start
+    KeyValueStore.orThrow(store.scanKeysRange(p, Array.emptyByteArray, exclusive = false, limit = 2)).map(s) shouldEqual
+      Vector("fill/0001/a", "fill/0001/b")
+    KeyValueStore.orThrow(store.scanKeysRange(p, b("fill/0001/b"), exclusive = false, limit = 2)).map(s) shouldEqual
+      Vector("fill/0001/b", "fill/0002/a")
+    KeyValueStore.orThrow(store.scanKeysRange(p, b("fill/0001/b"), exclusive = true, limit = 2)).map(s) shouldEqual
+      Vector("fill/0002/a", "fill/0003/a")
+    KeyValueStore.orThrow(store.scanKeysRange(p, b("fill/0003/a"), exclusive = true, limit = 5)).map(s) shouldBe empty
+    KeyValueStore.orThrow(store.scanKeysRange(p, Array.emptyByteArray, exclusive = false, limit = 0)) shouldBe empty
+
+    // Forward entry range
+    KeyValueStore.orThrow(store.scanPrefixRange(p, b("fill/0001/b"), exclusive = true, limit = 1))
+      .map { case (k, v) => s(k) -> s(v) } shouldEqual Vector("fill/0002/a" -> "2a")
+
+    // Reverse entry range: from end, inclusive, exclusive, between keys, and prefix at very end of DB
+    KeyValueStore.orThrow(store.scanPrefixReverse(p, Array.emptyByteArray, exclusive = false, limit = 2))
+      .map { case (k, v) => s(k) -> s(v) } shouldEqual Vector("fill/0003/a" -> "3a", "fill/0002/a" -> "2a")
+    KeyValueStore.orThrow(store.scanPrefixReverse(p, b("fill/0002/a"), exclusive = false, limit = 2))
+      .map { case (k, v) => s(k) -> s(v) } shouldEqual Vector("fill/0002/a" -> "2a", "fill/0001/b" -> "1b")
+    KeyValueStore.orThrow(store.scanPrefixReverse(p, b("fill/0002/a"), exclusive = true, limit = 5))
+      .map { case (k, v) => s(k) -> s(v) } shouldEqual Vector("fill/0001/b" -> "1b", "fill/0001/a" -> "1a")
+    KeyValueStore.orThrow(store.scanPrefixReverse(p, b("fill/0001/a"), exclusive = true, limit = 5)) shouldBe empty
+    KeyValueStore.orThrow(store.scanPrefixReverse(b("share/"), Array.emptyByteArray, exclusive = false, limit = 5))
+      .map { case (k, v) => s(k) -> s(v) } shouldEqual Vector("share/0001" -> "s1")
+    KeyValueStore.orThrow(store.scanPrefixReverse(b("missing/"), Array.emptyByteArray, exclusive = false, limit = 5)) shouldBe empty
+  }
+
   it should "keep a read snapshot stable across a committed write" in withStore { store =>
     val key = Array[Byte](3)
     store.put(key, Array[Byte](10)) shouldBe Right(())

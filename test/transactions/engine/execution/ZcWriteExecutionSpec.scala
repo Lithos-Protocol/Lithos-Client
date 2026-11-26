@@ -54,7 +54,8 @@ class ZcWriteExecutionSpec extends AnyFlatSpec with Matchers with Eventually {
   /** A posted order of this wallet's and a live maturity-rule bond, both real boxes the tracker holds. */
   private def world(orderSpentInMempool: Boolean = false, bondSpentInMempool: Boolean = false,
                     walletHoldsUnit: Boolean = false, bondMatured: Boolean = false,
-                    bondOwnedByMe: Boolean = true): World = {
+                    bondOwnedByMe: Boolean = true,
+                    capability: Seq[String] => Set[String] = _ => Set.empty): World = {
     val c = new ScriptedChain
     val (ctx0, _, wallet) = FakeNodeContext(c.api)
     val ownHash = Hex.toHexString(wallet.contract.hashedPropBytes)
@@ -97,7 +98,8 @@ class ZcWriteExecutionSpec extends AnyFlatSpec with Matchers with Eventually {
     t.poke()
     eventually(t.view.map(_.book.height) shouldBe Some(h))
     val r = new ZcResolver(() => c.api, t)
-    val exec = new ZcWriteExecution(ctx0, EngineFunding(null, 1.second, ExecutionContext.global), t, r) {
+    val exec = new ZcWriteExecution(ctx0, EngineFunding(null, 1.second, ExecutionContext.global), t, r,
+      capability = capability) {
       override protected def mempoolSnapshot(): CompleteMempool.Snapshot = {
         val spentInMempool = (if (orderSpentInMempool) Seq(order.boxId) else Seq.empty[String]) ++
           (if (bondSpentInMempool) Seq(bond.boxId) else Seq.empty[String])
@@ -107,6 +109,27 @@ class ZcWriteExecutionSpec extends AnyFlatSpec with Matchers with Eventually {
       }
     }
     World(exec, order, bond, asset)
+  }
+
+  "A borrow order" should "refuse an unwrapped LithosDex provision NFT as collateral, fail closed on lookup error, and allow a wrapped receipt" in {
+    val rawLpNft = "11" * 32
+    val wrappedReceipt = "22" * 32
+    val w = world(capability = ids => ids.filter(_ == rawLpNft).toSet)
+    val h = w.order.creationHeight
+    def orderBody(tokenId: String) = Json.obj("market" -> "ERG", "pricing" -> "fixed", "principal" -> "1000000000",
+      "repayment" -> "1100000000", "timing" -> Json.obj("mode" -> "fixed", "maturity" -> (h + 50000), "exact" -> true),
+      "collateral" -> Json.obj("nanoErg" -> "3000000000", "tokens" -> Seq(Json.obj("tokenId" -> tokenId, "amount" -> "1"))),
+      "rule" -> Json.obj("kind" -> "maturity"))
+
+    val refusedQuote = w.exec.createOrder(orderBody(rawLpNft), send = false)
+    (refusedQuote \ "refusals").as[Seq[String]].head should include("capability token")
+    an[LithosUnprocessable] should be thrownBy w.exec.createOrder(orderBody(rawLpNft), send = true)
+
+    val wrappedQuote = w.exec.createOrder(orderBody(wrappedReceipt), send = false)
+    (wrappedQuote \ "refusals").as[Seq[String]] shouldBe empty
+
+    val failingCap = world(capability = _ => throw api.LithosApiErrors.LithosUnavailable("pool index incomplete"))
+    an[api.LithosApiErrors.LithosUnavailable] should be thrownBy failingCap.exec.createOrder(orderBody(rawLpNft), send = true)
   }
 
   "A fill check" should "quote the bond it creates and the unit this wallet receives, signing nothing" in {

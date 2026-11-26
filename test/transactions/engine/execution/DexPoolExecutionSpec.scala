@@ -80,7 +80,9 @@ class DexPoolExecutionSpec extends TestKit(ActorSystem("dex-pool-execution-spec"
    */
   private def fixture(status: String = "ready", uncheckedReads: Option[GenesisVerdict] = sound,
                       mempool: Option[CompleteMempool.Snapshot] = None,
-                      n2tGenesis: Seq[GenesisProvision] = Seq.empty, truncated: Boolean = false): Fixture = {
+                      n2tGenesis: Seq[GenesisProvision] = Seq.empty, truncated: Boolean = false,
+                      genesisIncomplete: Boolean = false, headerId: String = "aa" * 32,
+                      fresh: Option[() => PoolIndexSnapshot] = None): Fixture = {
     val api = mock[NodeApi]
     val (node, _, _) = FakeNodeContext(api, numAddresses = 1)
     val boxes = node.getClient.execute { ctx: BlockchainContext =>
@@ -109,10 +111,12 @@ class DexPoolExecutionSpec extends TestKit(ActorSystem("dex-pool-execution-spec"
     when(api.unconfirmedInputByBoxId(anyString())).thenReturn(Success(None))
     when(api.indexedBoxById(anyString())).thenReturn(Success(None))
     when(api.unconfirmedOutputByBoxId(anyString())).thenReturn(Success(None))
+    when(api.tokensByIds(any[Seq[String]])).thenReturn(Success(Seq.empty))
     val index = new LDPoolIndex(node, system.dispatcher, (_, _) => (), () => None) {
       override def snapshot(): PoolIndexSnapshot = PoolIndexSnapshot(status, 100, truncated = truncated,
         if (status == "ready") pools.map(p => if (p.nft == n2t.poolNFT.toString) p.copy(genesisProvisions = n2tGenesis) else p)
-        else Seq.empty, Map.empty)
+        else Seq.empty, Map.empty, headerId = headerId, genesisIncomplete = genesisIncomplete)
+      override def freshSnapshot(wait: FiniteDuration): PoolIndexSnapshot = fresh.map(_()).getOrElse(snapshot())
       // The unchecked pool is read at placement; the others keep what the snapshot says
       override def genesisNow(pool: IndexedPool): Option[GenesisVerdict] =
         if (pool.verified) None else if (pool.nft == unchecked.poolNFT.toString) uncheckedReads else pool.genesis
@@ -286,14 +290,66 @@ class DexPoolExecutionSpec extends TestKit(ActorSystem("dex-pool-execution-spec"
     a[LithosBadRequest] should be thrownBy f.exec.lookupNfts(Seq("not-an-id"))
   }
 
-  it should "refuse to rule a token out while the index may be missing its pool" in {
+  it should "refuse to rule a token out while the index may be missing its pool or genesis, or when metadata fails" in {
     val stranger = "f0" * 32
     fixture().exec.lookupNfts(Seq(stranger)) shouldBe empty
-    val f = fixture(truncated = true)
-    a[LithosUnavailable] should be thrownBy f.exec.lookupNfts(Seq(stranger))
+
+    val truncated = fixture(truncated = true)
+    a[LithosUnavailable] should be thrownBy truncated.exec.lookupNfts(Seq(stranger))
     withClue("nor answer from a cache filled while it was incomplete: ") {
-      a[LithosUnavailable] should be thrownBy f.exec.lookupNfts(Seq(stranger))
+      a[LithosUnavailable] should be thrownBy truncated.exec.lookupNfts(Seq(stranger))
     }
+
+    val incompleteGenesis = fixture(genesisIncomplete = true)
+    a[LithosUnavailable] should be thrownBy incompleteGenesis.exec.lookupNfts(Seq(stranger))
+    withClue("incomplete genesis never caches a negative answer: ") {
+      a[LithosUnavailable] should be thrownBy incompleteGenesis.exec.lookupNfts(Seq(stranger))
+    }
+
+    val metaDown = fixture()
+    when(metaDown.nodeApi.tokensByIds(any[Seq[String]])).thenReturn(scala.util.Failure(new RuntimeException("node down")))
+    a[LithosUnavailable] should be thrownBy metaDown.exec.lookupNfts(Seq(stranger))
+    withClue("once metadata recovers, the uncached token resolves cleanly: ") {
+      when(metaDown.nodeApi.tokensByIds(any[Seq[String]])).thenReturn(Success(Seq.empty))
+      metaDown.exec.lookupNfts(Seq(stranger)) shouldBe empty
+    }
+  }
+
+  it should "verify fresh snapshots when requireFresh is set and invalidate negative cache on same-height reorgs" in {
+    val creator = "b7" * 32
+    var header = "11" * 32
+    var genesis = Seq.empty[GenesisProvision]
+    val f = fixture(fresh = Some(() => PoolIndexSnapshot("ready", 101, truncated = false,
+      pools.map(p => if (p.nft == n2t.poolNFT.toString) p.copy(genesisProvisions = Seq(
+        GenesisProvision(creator, 101, 1000L, 10L * Parameters.OneErg, 1000000000L))) else p),
+      Map.empty, headerId = "22" * 32)))
+    val provision = f.node.getClient.execute { ctx: BlockchainContext =>
+      LDNodeFixtures.nodeBox(ctx, UTXO(n2t.provisionGuard, LDHelpers.PROVISION_MIN, Seq(Token(n2t.provToken, 1L)),
+        Seq(zero, zero, ErgoValue.of(Colls.fromArray(ErgoId.create(creator).getBytes), scalaByteType),
+          ErgoValue.of(1000L))), index = 0, txId = "f4" * 32)
+    }
+    when(f.nodeApi.unspentBoxesByErgoTree(anyString(), any[Paging], any[SortDirection], any[MempoolOptions]))
+      .thenAnswer { inv =>
+        Success(if (inv.getArgument[String](0) == n2t.provisionGuard.ergoTreeHex) Seq(LDNodeFixtures.indexed(provision))
+        else Seq.empty)
+      }
+    // Cached snapshot at height 100 does not have the new genesis provision yet, while freshSnapshot at 101 does
+    f.exec.lookupNfts(Seq(creator), requireFresh = false) shouldBe empty
+    f.exec.lookupNfts(Seq(creator), requireFresh = true).keySet shouldBe Set(creator)
+
+    // Same-height reorg changes headerId and must invalidate any negative cache entry from the orphaned block
+    val reorgFixture = fixture(fresh = Some(() => PoolIndexSnapshot("ready", 100, truncated = false,
+      pools.map(p => if (p.nft == n2t.poolNFT.toString) p.copy(genesisProvisions = genesis) else p),
+      Map.empty, headerId = header)))
+    when(reorgFixture.nodeApi.unspentBoxesByErgoTree(anyString(), any[Paging], any[SortDirection], any[MempoolOptions]))
+      .thenAnswer { inv =>
+        Success(if (inv.getArgument[String](0) == n2t.provisionGuard.ergoTreeHex) Seq(LDNodeFixtures.indexed(provision))
+        else Seq.empty)
+      }
+    reorgFixture.exec.lookupNfts(Seq(creator), requireFresh = true) shouldBe empty
+    header = "33" * 32
+    genesis = Seq(GenesisProvision(creator, 100, 1000L, 10L * Parameters.OneErg, 1000000000L))
+    reorgFixture.exec.lookupNfts(Seq(creator), requireFresh = true).keySet shouldBe Set(creator)
   }
 
   it should "say how each NFT was minted, name a redeemed one, find a creator's, and read each once a tip" in {

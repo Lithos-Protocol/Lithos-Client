@@ -32,7 +32,7 @@ final case class ZcFilters(coverage: Long = 15000L, kind: String = "all", matcha
  * @param walletHashes the hashes of the trees this node's wallet signs for, for `mine` and the portfolio
  * @param walletBalance this wallet's confirmed and pending nanoERG and tokens, for the portfolio
  */
-final class ZcReads(tracker: ZcTracker, resolver: ZcResolver, node: () => NodeApi, walletHashes: () => Set[String],
+class ZcReads(tracker: ZcTracker, resolver: ZcResolver, node: () => NodeApi, walletHashes: () => Set[String],
                     walletBalance: () => (Long, Seq[NodeAsset]), network: NetworkType = NetworkType.MAINNET,
                     readsPerRequest: Int = ZcReads.ReadsPerRequest, warmReads: Int = ZcReads.WarmReads,
                     warmer: Option[ExecutionContext] = Some(ZcReads.ownThread()), history: Option[ZcHistory] = None) {
@@ -292,41 +292,51 @@ final class ZcReads(tracker: ZcTracker, resolver: ZcResolver, node: () => NodeAp
     s.derived.get(s"book:$m:$f:$lo:$hi:$anchor:$wf", () => {
       val l = new Lookups(s)
       val h = s.book.height.toLong
-      val bidders = s.book.offers.filter(_.record.market == m).map(o => o -> l.json.standing(o.record))
+      val allBidders = s.book.offers.filter(_.record.market == m).map(o => o -> l.json.standing(o.record))
         .filter { case (o, st) => (!f.matchable || st.ok) && floorBps(o.record) <= f.coverage &&
           maxBlocks(o.record) >= lo && minBlocks(o.record) <= hi }
         .map { case (o, st) => (o, st, offerCurve(o.record)) }
-      // The best bid at exactly `d` blocks left: the lowest yield any eligible offer covering `d` accepts there.
-      def bidAt(d: Long): Option[Long] = bidders.iterator.collect {
+      val bidders = allBidders.sortBy { case (o, _, _) => (o.record.terms(0), o.boxId) }.take(MaxCurveOffers)
+      // Precompute/memoize best bid per distinct maturity so window spreads never rescan all bidders repeatedly.
+      val bidCache = mutable.HashMap.empty[Long, Option[Long]]
+      def bidAt(d: Long): Option[Long] = bidCache.getOrElseUpdate(d, bidders.iterator.collect {
         case (o, _, c) if d >= minBlocks(o.record) && d <= maxBlocks(o.record) => c.bpsAt(d)
-      }.reduceOption(_ min _)
-      val bidBlocks = bidders.flatMap { case (o, _, _) =>
-        Seq(minBlocks(o.record), maxBlocks(o.record)) ++ o.record.curve.map(_._2) }.distinct
+      }.reduceOption(_ min _))
+      val bidBlocks = bidders.iterator.flatMap { case (o, _, _) =>
+        Iterator(minBlocks(o.record), maxBlocks(o.record)) ++ o.record.curve.iterator.map(_._2)
+      }.filter(d => d >= lo && d <= hi).toVector.distinct.sorted.take(MaxSamples)
+      bidBlocks.foreach(bidAt)
 
       val rows = askRows(l, s, m).filter(keep(_, f, None, None))
-      val priced = rows.flatMap { r =>
-        r.open.record match {
-          case o: ZcOrder if window(o) =>
-            bestWindowQuote(o, h, lo, hi).map { case (blocks, bps, cost) =>
-              val gap = bestWindowSpread(o, h, lo, hi, bidAt, bidBlocks)
-              (Json.obj("boxId" -> r.open.boxId, "kind" -> r.kind, "bps" -> bps, "size" -> cost.toString, "blocks" -> blocks,
-                "window" -> true, "ok" -> r.standing.ok, "reason" -> r.standing.reasons.headOption,
-                "borrowedByMe" -> r.borrowedByMe, "bidAtBps" -> gap.map(_.bid), "spreadBps" -> gap.map(_.gap)), gap)
-            }
-          case _ => r.blocksLeft.filter(b => b >= lo && b <= hi).map { b =>
-            val bid = bidAt(b)
-            val gap = for (x <- bid; y <- r.yieldBps) yield Gap(b, x, y)
-            (Json.obj("boxId" -> r.open.boxId, "kind" -> r.kind, "bps" -> r.yieldBps, "size" -> r.cost.toString,
-              "blocks" -> b, "window" -> false, "ok" -> r.standing.ok, "reason" -> r.standing.reasons.headOption,
-              "borrowedByMe" -> r.borrowedByMe, "bidAtBps" -> bid, "spreadBps" -> gap.map(_.gap)), gap)
-          }
+      val (windowRows, plainRows) = rows.partition(r => r.open.record match {
+        case o: ZcOrder => window(o)
+        case _ => false
+      })
+      val topWindows = windowRows.flatMap { r =>
+        val o = r.open.record.asInstanceOf[ZcOrder]
+        bestWindowQuote(o, h, lo, hi).map(q => (r, o, q))
+      }.sortBy { case (r, _, (_, bps, _)) => (-bps, r.open.boxId) }.take(MaxDots)
+      val pricedWindows = topWindows.map { case (r, o, (blocks, bps, cost)) =>
+        val gap = bestWindowSpread(o, h, lo, hi, bidAt, bidBlocks)
+        (Json.obj("boxId" -> r.open.boxId, "kind" -> r.kind, "bps" -> bps, "size" -> cost.toString, "blocks" -> blocks,
+          "window" -> true, "ok" -> r.standing.ok, "reason" -> r.standing.reasons.headOption,
+          "borrowedByMe" -> r.borrowedByMe, "bidAtBps" -> gap.map(_.bid), "spreadBps" -> gap.map(_.gap)), gap)
+      }
+      val pricedPlain = plainRows.flatMap { r =>
+        r.blocksLeft.filter(b => b >= lo && b <= hi).map { b =>
+          val bid = bidAt(b)
+          val gap = for (x <- bid; y <- r.yieldBps) yield Gap(b, x, y)
+          (Json.obj("boxId" -> r.open.boxId, "kind" -> r.kind, "bps" -> r.yieldBps, "size" -> r.cost.toString,
+            "blocks" -> b, "window" -> false, "ok" -> r.standing.ok, "reason" -> r.standing.reasons.headOption,
+            "borrowedByMe" -> r.borrowedByMe, "bidAtBps" -> bid, "spreadBps" -> gap.map(_.gap)), gap)
         }
       }
+      val priced = pricedWindows ++ pricedPlain
       val asks = priced.map(_._1)
         .sortBy(j => (-(j \ "bps").asOpt[Long].getOrElse(Long.MinValue + 1), (j \ "boxId").as[String])).take(MaxBookRows)
       val tightest = priced.flatMap(_._2).sortBy(_.rank).headOption
 
-      val bids = bidders.map { case (o, st, c) =>
+      val bids = allBidders.map { case (o, st, c) =>
         val r = o.record
         val (a, b) = (math.max(lo, minBlocks(r)), math.min(hi, maxBlocks(r)))
         val ys = (Seq(a, b) ++ r.curve.map(_._2).filter(d => d >= a && d <= b)).map(c.bpsAt)
@@ -936,17 +946,39 @@ object ZcReads {
   })
 }
 
-/** A bounded least-recently-used cache, computing each value once per key. */
+/** A bounded least-recently-used cache, coalescing concurrent misses per key. */
 final class Lru[K, V](max: Int) {
   private val map = new java.util.LinkedHashMap[K, V](16, 0.75f, true) {
     override def removeEldestEntry(e: java.util.Map.Entry[K, V]): Boolean = size() > max
   }
+  private val inFlight = new ConcurrentHashMap[K, java.util.concurrent.CompletableFuture[V]]()
+
   def get(key: K, compute: () => V): V = {
     val hit = map.synchronized(Option(map.get(key)))
     hit.getOrElse {
-      val v = compute()
-      map.synchronized(map.put(key, v))
-      v
+      val mine = new java.util.concurrent.CompletableFuture[V]()
+      val existing = inFlight.putIfAbsent(key, mine)
+      if (existing != null) {
+        try existing.get()
+        catch {
+          case e: java.util.concurrent.ExecutionException if e.getCause != null => throw e.getCause
+        }
+      } else {
+        try {
+          val recheck = map.synchronized(Option(map.get(key)))
+          val v = recheck.getOrElse {
+            val computed = compute()
+            map.synchronized(map.put(key, computed))
+            computed
+          }
+          mine.complete(v)
+          v
+        } catch {
+          case ex: Throwable =>
+            mine.completeExceptionally(ex)
+            throw ex
+        } finally inFlight.remove(key, mine)
+      }
     }
   }
   def size: Int = map.synchronized(map.size())

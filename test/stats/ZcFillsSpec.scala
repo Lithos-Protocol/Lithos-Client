@@ -2,7 +2,7 @@ package stats
 
 import configs.ZcConfig
 import node.model.IndexedBox
-import org.mockito.ArgumentMatchers.anyString
+import org.mockito.ArgumentMatchers.{any, anyString}
 import org.mockito.Mockito.doAnswer
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
@@ -180,5 +180,119 @@ class ZcFillsSpec extends AnyFlatSpec with Matchers {
 
     // Changing fillsRetentionDays must not alter store identity (no wipe & re-replay)
     ZcFillStore.identity(forever) shouldBe ZcFillStore.identity(zc.copy(fillsRetentionDays = 1460))
+  }
+
+  it should "preserve cursor and history on header read failures, lagging node index, and unverified reorg anchors" in {
+    val c = chain()
+    val db = ZcFillStore.inMemory(zc)
+    val f = new ZcFills(zc, () => db, () => c.api, inline, enabled = true)
+    f.tick()
+    f.standing.status shouldBe "ready"
+    f.standing.indexedTo shouldBe Some(H + 3)
+    f.fills(ZcMarket.Erg, 0, None, None, None, 50).fills should have size 2
+
+    // Transient header read failure must mark stale without rolling back a single block
+    doAnswer(_ => scala.util.Failure(new RuntimeException("node timeout"))).when(c.api).chainSlice(any(), any())
+    f.tick()
+    f.standing.status shouldBe "stale"
+    f.standing.indexedTo shouldBe Some(H + 3)
+    db.cursor.map(_._1) shouldBe Some(H + 3)
+    f.fills(ZcMarket.Erg, 0, None, None, None, 50).fills should have size 2
+
+    // A lagging indexedHeight must also preserve cursor and fills without rolling back
+    val c2 = chain()
+    val db2 = ZcFillStore.inMemory(zc)
+    val f2 = new ZcFills(zc, () => db2, () => c2.api, inline, enabled = true)
+    f2.tick()
+    f2.standing.indexedTo shouldBe Some(H + 3)
+    c2.indexed = H + 1
+    f2.tick()
+    f2.standing.status shouldBe "stale"
+    db2.cursor.map(_._1) shouldBe Some(H + 3)
+    f2.fills(ZcMarket.Erg, 0, None, None, None, 50).fills should have size 2
+
+    // A deep reorg where the replacement anchor read fails must not clear the store first
+    val c3 = chain()
+    c3.extend(H + 1, H + 3, branch = 1)
+    val origChain = c3.api
+    val failingAnchor = org.mockito.Mockito.mock(classOf[node.NodeApi])
+    org.mockito.Mockito.when(failingAnchor.indexedHeight()).thenAnswer(_ => origChain.indexedHeight())
+    org.mockito.Mockito.when(failingAnchor.chainSlice(any(), any())).thenAnswer { inv =>
+      val from = inv.getArgument[Option[Int]](0)
+      val to = inv.getArgument[Option[Int]](1)
+      if (to.contains(start - 1)) scala.util.Failure(new RuntimeException("anchor unreachable"))
+      else origChain.chainSlice(from, to)
+    }
+    val db3NoUndo = new ZcFillStore(Some(new storage.InMemoryKeyValueStore()), ZcFillStore.identity(zc))
+    db3NoUndo.append(c3.header(H + 1), ZcFills.BlockFills(
+      Vector(ZcFill("tx:0", "aa" * 32, H + 1, 0L, "ERG", "new", "wallet", None, asset, asset, 100L, Erg, Erg, Some(100L), 200L, None)),
+      Map.empty, Map.empty))
+    db3NoUndo.initialize(H + 3, "ff" * 32) // H + 3 has no block/ undo record and disagrees with canonical header
+    val f3c = new ZcFills(zc, () => db3NoUndo, () => failingAnchor, inline, enabled = true)
+    f3c.tick()
+    f3c.standing.status shouldBe "unavailable"
+    db3NoUndo.cursor shouldBe Some((H + 3, "ff" * 32))
+    db3NoUndo.fillsPage(0, _ => true, None, 50)._1 should have size 1
+  }
+
+  it should "avoid idle full-prefix scans, advance persisted prune cursors, and page fills from ordered storage" in {
+    val backing = new storage.InMemoryKeyValueStore()
+    val fullScans = new java.util.concurrent.atomic.AtomicInteger(0)
+    val rangeScans = new java.util.concurrent.atomic.AtomicInteger(0)
+    val trackedStore = new storage.KeyValueStore {
+      override def path = backing.path
+      override def backend = backing.backend
+      override def get(k: Array[Byte]) = backing.get(k)
+      override def scanPrefix(p: Array[Byte]) = { fullScans.incrementAndGet(); backing.scanPrefix(p) }
+      override def scanKeys(p: Array[Byte]) = { fullScans.incrementAndGet(); backing.scanKeys(p) }
+      override def scanKeysRange(p: Array[Byte], s: Array[Byte], e: Boolean, l: Int) = {
+        rangeScans.incrementAndGet(); backing.scanKeysRange(p, s, e, l)
+      }
+      override def scanPrefixRange(p: Array[Byte], s: Array[Byte], e: Boolean, l: Int) = {
+        rangeScans.incrementAndGet(); backing.scanPrefixRange(p, s, e, l)
+      }
+      override def scanPrefixReverse(p: Array[Byte], s: Array[Byte], e: Boolean, l: Int) = {
+        rangeScans.incrementAndGet(); backing.scanPrefixReverse(p, s, e, l)
+      }
+      override def write(ms: Seq[storage.KeyValueMutation], d: storage.WriteDurability) = backing.write(ms, d)
+      override def readSnapshot[A](f: storage.KeyValueReadView => Either[storage.StoreError, A]) = backing.readSnapshot(f)
+      override def close() = backing.close()
+    }
+    val c = chain()
+    val settings = zc.copy(fillsRetentionDays = 1)
+    val db = new ZcFillStore(Some(trackedStore), ZcFillStore.identity(settings))
+    val f = new ZcFills(settings, () => db, () => c.api, inline, enabled = true)
+    f.tick()
+    fullScans.get() shouldBe 0
+
+    // Caught-up idle ticks must not invoke prune scans repeatedly
+    val scansAfterCatchup = rangeScans.get()
+    (1 to 5).foreach(_ => f.tick())
+    rangeScans.get() shouldBe scansAfterCatchup
+    fullScans.get() shouldBe 0
+
+    // Bounded reverse paging with opaque cursor and scan limit
+    val p1 = f.fills(ZcMarket.Erg, 0, None, None, None, 1)
+    p1.fills.map(_.kind) shouldBe Seq("resale")
+    p1.next shouldBe defined
+    val p2 = f.fills(ZcMarket.Erg, 0, None, None, p1.next, 1)
+    p2.fills.map(_.kind) shouldBe Seq("new")
+    p2.next shouldBe None
+    fullScans.get() shouldBe 0
+    an[IllegalArgumentException] should be thrownBy f.fills(ZcMarket.Erg, 0, None, None, Some("not-a-cursor"), 10)
+
+    // Persisted seek cursor sweeps matured bonds across multiple bounded pruneStep calls
+    val bonds = (1 to 6).map(i => id(50 + i) -> ZcFills.BondFacts("ERG", Erg, maturity = if (i <= 3) 10L else 9999999L)).toMap
+    db.append(c.header(H + 3).copy(height = H + 4, id = "ab" * 32, parentId = c.header(H + 3).id),
+      ZcFills.BlockFills(Vector.empty, bonds, Map.empty))
+    val step1 = db.pruneStep(cutoffHeight = H, limit = 2)
+    step1.more shouldBe true
+    val step2 = db.pruneStep(cutoffHeight = H, limit = 2)
+    val step3 = db.pruneStep(cutoffHeight = H, limit = 2)
+    val step4 = db.pruneStep(cutoffHeight = H, limit = 2)
+    step4.more shouldBe false
+    (1 to 3).foreach(i => db.bond(id(50 + i)) shouldBe None)
+    (4 to 6).foreach(i => db.bond(id(50 + i)) shouldBe defined)
+    fullScans.get() shouldBe 0
   }
 }

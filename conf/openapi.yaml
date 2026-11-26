@@ -5211,6 +5211,8 @@ paths:
           $ref: '#/components/responses/ZcNotModified'
         '400':
           $ref: '#/components/responses/ZcBadRequest'
+        '429':
+          $ref: '#/components/responses/ZcTooManyRequests'
         '503':
           $ref: '#/components/responses/ZcUnavailable'
   /sigmafi/zc/markets/{market}/orderbook:
@@ -5248,6 +5250,8 @@ paths:
           $ref: '#/components/responses/ZcNotModified'
         '400':
           $ref: '#/components/responses/ZcBadRequest'
+        '429':
+          $ref: '#/components/responses/ZcTooManyRequests'
         '503':
           $ref: '#/components/responses/ZcUnavailable'
   /sigmafi/zc/markets/{market}/fills:
@@ -5276,6 +5280,8 @@ paths:
                 $ref: '#/components/schemas/ZcFills'
         '400':
           $ref: '#/components/responses/ZcBadRequest'
+        '429':
+          $ref: '#/components/responses/ZcTooManyRequests'
         '503':
           $ref: '#/components/responses/ZcUnavailable'
   /sigmafi/zc/matches/{id}:
@@ -5529,7 +5535,8 @@ paths:
       description: >
         Lock collateral in an
         `Order` or a `PricedOrder`, depending on pricing and timing. An unguarded oracle order already under its own
-        ratio is refused unless `allowLiquidatable`.
+        ratio is refused unless `allowLiquidatable`. A LithosDex provision NFT is refused as collateral: wrap it and
+        use the receipt.
       operationId: createZcOrder
       security:
         - ApiKeyAuth: []
@@ -6358,8 +6365,10 @@ paths:
       summary: Claim a settled bond (quote)
       description: >
         What the send would do, at the snapshot `at`. Signs nothing. A write that cannot run now answers
-        200 with its `refusals`.
+        200 with its `refusals`. Needs the key, since the quote reads this wallet's share and bond-unit holdings.
       operationId: checkClaimZc
+      security:
+        - ApiKeyAuth: []
       tags:
         - sigmafi-zc
       parameters:
@@ -6375,6 +6384,8 @@ paths:
           $ref: '#/components/responses/ZcQuoted'
         '400':
           $ref: '#/components/responses/ZcBadRequest'
+        '403':
+          $ref: '#/components/responses/ZcForbidden'
         '404':
           $ref: '#/components/responses/ZcNotFound'
         '429':
@@ -7676,7 +7687,7 @@ components:
           schema:
             $ref: '#/components/schemas/ApiError'
     ZcTooManyRequests:
-      description: "Too many quotes or simulations: at most 4 run or wait at once across all callers, and a simulation at most 5 at once per caller, then 1 a second. Retry shortly."
+      description: "Too many concurrent quotes, simulations, or heavy reads (`/curves`, `/orderbook`, `/fills`): at most 4 quotes/simulations and at most 4 heavy reads run or wait at once across all callers, and simulations are additionally limited to 5 in flight per caller, then 1 a second. Retry shortly."
       content:
         application/json:
           schema:
@@ -7868,8 +7879,11 @@ components:
     ZcLimits:
       type: object
       description: >
-        Bounds on the rebuilt transaction, in the action's market unit (nanoERG for ERG, fee included; raw units for
-        SigUSD; nanoERG for actions with no market). Outside them the send answers 409.
+        Bounds on the rebuilt transaction. For fills, buys, repays, recollateralizations and claims, amounts are in the
+        action's market unit (nanoERG for ERG, fee included; raw units for SigUSD; nanoERG for actions with no market).
+        For posts (orders, offers, asks, lots, fractionalize and wraps), `maxPay` is always in nanoERG (box value plus
+        miner fee), since any token capital or collateral is fixed directly by the request body. Outside them the send
+        answers 409.
       properties:
         maxPay: {type: string}
         minReceive: {type: string}

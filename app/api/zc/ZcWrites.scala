@@ -57,7 +57,7 @@ class ZcWrites(node: NodeContext, engine: ActorRef, tracker: ZcTracker, resolver
   }
 
   def createOrder(b: Option[JsValue], send: Boolean): JsObject =
-    if (send) submit(ZcIntent.CreateOrder(body(b), tracker, resolver)) else checks.createOrder(body(b), send = false)
+    if (send) submit(ZcIntent.CreateOrder(body(b), tracker, resolver, capability)) else checks.createOrder(body(b), send = false)
 
   def createOffer(b: Option[JsValue], send: Boolean): JsObject =
     if (send) submit(ZcIntent.CreateOffer(body(b), tracker, resolver)) else checks.createOffer(body(b), send = false)
@@ -85,11 +85,11 @@ object ZcWrites {
   final val SendWindow: FiniteDuration = 30.seconds
   final val AnswerWait: FiniteDuration = SendWindow + 40.seconds
 
-  /** Live LithosDex provision NFTs among `ids`; a failed lookup refuses, since a lot must never hold one unwrapped. */
+  /** Live LithosDex provision NFTs among `ids`; a failed or incomplete lookup refuses, since orders and lots must never hold one unwrapped. */
   def provisionNfts(pools: LDPoolsApi)(ids: Seq[String]): Set[String] =
     if (ids.isEmpty) Set.empty
-    else Try(pools.lookupNfts(LDNftLookupRequest(ids))) match {
-      case Success(found) => found.nfts.filter(_.provisionNft).map(_.tokenId).toSet
-      case Failure(ex) => throw LithosUnavailable(s"could not check the lot's items for LithosDex provision NFTs: ${ex.getMessage}", ex)
+    else Try(pools.checkProvisionNfts(ids)) match {
+      case Success(found) => found
+      case Failure(ex) => throw LithosUnavailable(s"could not check tokens for LithosDex provision NFTs: ${ex.getMessage}", ex)
     }
 }

@@ -27,6 +27,14 @@ trait LDPoolsApi {
   /** POST /dex/provisions/nft: which tokens own a provision, on any pool */
   def lookupNfts(request: LDNftLookupRequest): LDNftLookupList
 
+  /**
+   * Live LithosDex provision NFTs among `tokenIds`, verified against the node's current canonical tip. Fails closed
+   * when the pool index cannot be verified fresh or complete; intended for signing guards.
+   */
+  def checkProvisionNfts(tokenIds: Seq[String]): Set[String] =
+    if (tokenIds.isEmpty) Set.empty
+    else lookupNfts(LDNftLookupRequest(tokenIds)).nfts.filter(_.provisionNft).map(_.tokenId).toSet
+
   /** GET /dex/pools/:poolNft/provisions: this wallet's provisions on the pool */
   def listPoolProvisions(poolNft: String): LDProvisionList
 

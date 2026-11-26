@@ -44,6 +44,28 @@ final class InMemoryKeyValueStore(initialEntries: Seq[(Array[Byte], Array[Byte])
   override def scanKeys(prefix: Array[Byte]): Either[StoreError, Vector[Array[Byte]]] =
     scanPrefix(prefix).map(_.map(_._1))
 
+  override def scanKeysRange(prefix: Array[Byte], startAt: Array[Byte], exclusive: Boolean,
+                             limit: Int): Either[StoreError, Vector[Array[Byte]]] =
+    scanPrefixRange(prefix, startAt, exclusive, limit).map(_.map(_._1))
+
+  override def scanPrefixRange(prefix: Array[Byte], startAt: Array[Byte], exclusive: Boolean,
+                               limit: Int): Either[StoreError, Vector[(Array[Byte], Array[Byte])]] = synchronized {
+    if (closed) Left(Closed(path))
+    else if (prefix == null) Left(InvalidArgument("prefix cannot be null"))
+    else if (startAt == null) Left(InvalidArgument("startAt cannot be null"))
+    else if (limit < 0) Left(InvalidArgument("limit cannot be negative"))
+    else Right(scanRange(entries, prefix, startAt, exclusive, limit))
+  }
+
+  override def scanPrefixReverse(prefix: Array[Byte], startAt: Array[Byte], exclusive: Boolean,
+                                 limit: Int): Either[StoreError, Vector[(Array[Byte], Array[Byte])]] = synchronized {
+    if (closed) Left(Closed(path))
+    else if (prefix == null) Left(InvalidArgument("prefix cannot be null"))
+    else if (startAt == null) Left(InvalidArgument("startAt cannot be null"))
+    else if (limit < 0) Left(InvalidArgument("limit cannot be negative"))
+    else Right(scanReverse(entries, prefix, startAt, exclusive, limit))
+  }
+
   override def write(mutations: Seq[KeyValueMutation],
                      durability: WriteDurability): Either[StoreError, Unit] = synchronized {
     if (closed) Left(Closed(path))
@@ -115,6 +137,32 @@ final class InMemoryKeyValueStore(initialEntries: Seq[(Array[Byte], Array[Byte])
       .map { case (key, value) => key.toArray -> value.clone() }
   }
 
+  private def scanRange(source: Map[Vector[Byte], Array[Byte]], prefix: Array[Byte], startAt: Array[Byte],
+                        exclusive: Boolean, limit: Int): Vector[(Array[Byte], Array[Byte])] =
+    if (limit == 0) Vector.empty
+    else {
+      val bound = startAt.toVector
+      scan(source, prefix).iterator.filter { case (key, _) =>
+        bound.isEmpty || {
+          val cmp = compareUnsigned(key.toVector, bound)
+          if (exclusive) cmp > 0 else cmp >= 0
+        }
+      }.take(limit).toVector
+    }
+
+  private def scanReverse(source: Map[Vector[Byte], Array[Byte]], prefix: Array[Byte], startAt: Array[Byte],
+                          exclusive: Boolean, limit: Int): Vector[(Array[Byte], Array[Byte])] =
+    if (limit == 0) Vector.empty
+    else {
+      val bound = startAt.toVector
+      scan(source, prefix).reverseIterator.filter { case (key, _) =>
+        bound.isEmpty || {
+          val cmp = compareUnsigned(key.toVector, bound)
+          if (exclusive) cmp < 0 else cmp <= 0
+        }
+      }.take(limit).toVector
+    }
+
   private def compareUnsigned(left: Vector[Byte], right: Vector[Byte]): Int = {
     val sharedLength = Math.min(left.length, right.length)
     var index = 0
@@ -143,6 +191,28 @@ final class InMemoryKeyValueStore(initialEntries: Seq[(Array[Byte], Array[Byte])
 
     override def scanKeys(prefix: Array[Byte]): Either[StoreError, Vector[Array[Byte]]] =
       scanPrefix(prefix).map(_.map(_._1))
+
+    override def scanKeysRange(prefix: Array[Byte], startAt: Array[Byte], exclusive: Boolean,
+                               limit: Int): Either[StoreError, Vector[Array[Byte]]] =
+      scanPrefixRange(prefix, startAt, exclusive, limit).map(_.map(_._1))
+
+    override def scanPrefixRange(prefix: Array[Byte], startAt: Array[Byte], exclusive: Boolean,
+                                 limit: Int): Either[StoreError, Vector[(Array[Byte], Array[Byte])]] = {
+      if (!active) Left(Closed(path))
+      else if (prefix == null) Left(InvalidArgument("prefix cannot be null"))
+      else if (startAt == null) Left(InvalidArgument("startAt cannot be null"))
+      else if (limit < 0) Left(InvalidArgument("limit cannot be negative"))
+      else Right(scanRange(snapshot, prefix, startAt, exclusive, limit))
+    }
+
+    override def scanPrefixReverse(prefix: Array[Byte], startAt: Array[Byte], exclusive: Boolean,
+                                   limit: Int): Either[StoreError, Vector[(Array[Byte], Array[Byte])]] = {
+      if (!active) Left(Closed(path))
+      else if (prefix == null) Left(InvalidArgument("prefix cannot be null"))
+      else if (startAt == null) Left(InvalidArgument("startAt cannot be null"))
+      else if (limit < 0) Left(InvalidArgument("limit cannot be negative"))
+      else Right(scanReverse(snapshot, prefix, startAt, exclusive, limit))
+    }
 
     def invalidate(): Unit = active = false
   }

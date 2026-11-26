@@ -348,4 +348,47 @@ class ZcReadsSpec extends AnyFlatSpec with Matchers with Eventually with org.sca
     (hit \ "id").as[String] shouldBe askId
     (hit \ "borrowedByMe").as[Boolean] shouldBe true
   }
+
+  "Lru" should "coalesce concurrent cache misses for the same key" in {
+    val cache = new Lru[String, Int](16)
+    val started = new java.util.concurrent.CountDownLatch(1)
+    val release = new java.util.concurrent.CountDownLatch(1)
+    val calls = new AtomicInteger(0)
+    val pool = java.util.concurrent.Executors.newFixedThreadPool(4)
+    try {
+      val tasks = (1 to 4).map { _ =>
+        pool.submit(new java.util.concurrent.Callable[Int] {
+          override def call(): Int = cache.get("k", () => {
+            calls.incrementAndGet()
+            started.countDown()
+            release.await(5, java.util.concurrent.TimeUnit.SECONDS)
+            42
+          })
+        })
+      }
+      started.await(5, java.util.concurrent.TimeUnit.SECONDS) shouldBe true
+      Thread.sleep(50)
+      release.countDown()
+      tasks.map(_.get(5, java.util.concurrent.TimeUnit.SECONDS)).toSet shouldBe Set(42)
+      calls.get() shouldBe 1
+    } finally pool.shutdownNow()
+  }
+
+  "orderbook" should "bound work across many multi-point offers and window orders" in {
+    val offers = (1 to 250).map { i =>
+      val curve = (1 to 10).map(j => (500L + i + j * 10L) -> (2000L * j + i * 3L))
+      ergOffer(id(200 + i), min = 1000L, max = 262800L, curve = curve)
+    }
+    val windows = (1 to 250).map { i =>
+      val curve = (1 to 5).map(j => (1000L + j * 500L) -> (10000L * j))
+      windowOrder(id(600 + i), 10000L, 100000L, 4000L, curve = curve)
+    }
+    val w = world(offers ++ windows)
+    val t0 = System.nanoTime()
+    val j = w.reads.orderbook("ERG", ZcFilters(matchable = false), Some(262800L), None, None)
+    val elapsedMs = (System.nanoTime() - t0) / 1000000L
+    rows(j, "asks") should have size ZcReads.MaxBookRows
+    rows(j, "bids") should have size ZcReads.MaxBookRows
+    elapsedMs should be < 5000L
+  }
 }

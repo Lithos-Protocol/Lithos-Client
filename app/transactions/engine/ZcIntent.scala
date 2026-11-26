@@ -12,7 +12,7 @@ import transactions.engine.execution.{ZcHeld, ZcRefusal, ZcWriteExecution}
 sealed trait ZcIntent {
   def tracker: ZcTracker
   def resolver: ZcResolver
-  /** Which of the given token ids are capability tokens, which a lot refuses. */
+  /** Which of the given token ids are capability tokens, which orders and lots refuse. */
   def capability: Seq[String] => Set[String] = _ => Set.empty
   def execute(execution: ZcWriteExecution): JsObject
 }
@@ -26,7 +26,7 @@ object ZcIntent {
 
   private[engine] def admissible(intent: ZcIntent): Boolean = intent match {
     case Cancel(boxId, _, _) => hex(boxId)
-    case CreateOrder(b, _, _) => Json.stringify(b).length <= MaxBodyChars
+    case CreateOrder(b, _, _, _) => Json.stringify(b).length <= MaxBodyChars
     case CreateOffer(b, _, _) => Json.stringify(b).length <= MaxBodyChars
     case CreateAsk(b, _, _) => Json.stringify(b).length <= MaxBodyChars
     case Write(action, id, b, _, _, _, _) => Write.Actions(action) && id.forall(hex) && Json.stringify(b).length <= MaxBodyChars
@@ -39,7 +39,8 @@ object ZcIntent {
     def execute(e: ZcWriteExecution): JsObject = e.collateralArb(planned, settings)
   }
 
-  final case class CreateOrder(body: JsObject, tracker: ZcTracker, resolver: ZcResolver) extends ZcIntent {
+  final case class CreateOrder(body: JsObject, tracker: ZcTracker, resolver: ZcResolver,
+                               override val capability: Seq[String] => Set[String] = _ => Set.empty) extends ZcIntent {
     def execute(e: ZcWriteExecution): JsObject = e.createOrder(body, send = true)
   }
   final case class CreateOffer(body: JsObject, tracker: ZcTracker, resolver: ZcResolver) extends ZcIntent {

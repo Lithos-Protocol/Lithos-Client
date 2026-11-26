@@ -116,6 +116,7 @@ class LDPoolIndexSpec extends TestKit(ActorSystem("ld-pool-index-spec")) with An
       val id = inv.getArgument[String](0)
       if (genesisFails && id.startsWith("a")) Failure(new RuntimeException("index unavailable"))
       else Success(id match {
+        case i if i == lit.provToken.toString => info(lit.provToken, litPool.boxId, LDHelpers.PROV_TOKEN_SUPPLY)
         case i if i == n2t.provToken.toString =>
           info(n2t.provToken, n2tPool.boxId, LDHelpers.PROV_TOKEN_SUPPLY + (if (provMintedMore) 1L else 0L))
         case i if i == t2t.provToken.toString => info(t2t.provToken, t2tPool.boxId, LDHelpers.PROV_TOKEN_SUPPLY)
@@ -125,10 +126,11 @@ class LDPoolIndexSpec extends TestKit(ActorSystem("ld-pool-index-spec")) with An
       })
     }
     when(api.indexedBoxById(anyString())).thenAnswer { inv =>
-      Success(Seq(n2tPool, t2tPool).find(_.boxId == inv.getArgument[String](0)).map(indexed(_)))
+      Success(Seq(litPool, n2tPool, t2tPool).find(_.boxId == inv.getArgument[String](0)).map(indexed(_)))
     }
     when(api.indexedTransactionById(anyString())).thenAnswer { inv =>
       Success(inv.getArgument[String](0) match {
+        case id if id == litPool.transactionId => Some(tx(litPool.transactionId, litPool, litVault))
         case `n2tGenesisTx` => Some(if (vaultApart) tx(n2tGenesisTx, n2tPool)
           else tx(n2tGenesisTx, Seq(n2tPool, n2tVault) ++ creatorProvision: _*))
         case `t2tGenesisTx` => Some(tx(t2tGenesisTx, t2tPool, t2tVault))
@@ -208,22 +210,59 @@ class LDPoolIndexSpec extends TestKit(ActorSystem("ld-pool-index-spec")) with An
 
   it should "read each genesis once, and retry one the node could not answer" in {
     val f = new Fixture()
-    f.index.refreshNow()
-    f.index.refreshNow()
+    f.index.refreshNow().genesisIncomplete shouldBe false
+    f.index.refreshNow().ownershipIncomplete shouldBe false
     verify(f.api, times(1)).indexedTransactionById(n2tGenesisTx)
     verify(f.api, times(1)).indexedTransactionById(t2tGenesisTx)
 
     val failing = new Fixture(genesisFails = true)
-    failing.index.refreshNow().pools.find(_.nft == n2t.poolNFT.toString).get.genesis shouldBe None
+    val firstFail = failing.index.refreshNow()
+    firstFail.pools.find(_.nft == n2t.poolNFT.toString).get.genesis shouldBe None
+    firstFail.genesisIncomplete shouldBe true
+    firstFail.ownershipIncomplete shouldBe true
     failing.index.refreshNow()
     verify(failing.api, times(2)).tokenById(n2t.provToken.toString)
 
-    withClue("after three failed reads the index stops trying, and the pool shows as unchecked: ") {
+    withClue("after three failed reads the index stops trying, and the pool shows as unchecked with incomplete genesis ownership: ") {
       val passes = (1 to 3).map(_ => failing.index.refreshNow())
       verify(failing.api, times(LDPoolIndex.MaxGenesisReads)).tokenById(n2t.provToken.toString)
       passes.last.pools.find(_.nft == n2t.poolNFT.toString).get.genesis.map(_.problems) shouldBe
         Some(Seq(LDPoolIndex.GenesisUnreadable))
+      passes.last.genesisIncomplete shouldBe true
+      passes.last.ownershipIncomplete shouldBe true
     }
+  }
+
+  it should "verify canonical tip freshness synchronously for freshSnapshot and fail closed when behind" in {
+    val f = new Fixture()
+    val header1 = "ab" * 32
+    val header2 = "cd" * 32
+    val trackedTip2 = TrackedPools.seeded(Tip + 1, header2,
+      Seq(f.litPool -> 90, f.n2tPool -> 150, f.t2tPool -> 160).flatMap { case (box, height) =>
+        TrackerFixtures.shapes.read(box, height) }, cut = false)
+    @volatile var currentTracked: Option[TrackedPools] = Some(f.tracked)
+    @volatile var awaited: Option[TrackedPools] = None
+    val idx = new LDPoolIndex(f.nodeContext, system.dispatcher, (_, _) => (), () => currentTracked,
+      (h, _) => awaited.filter(_.height == h))
+    idx.refreshNow()
+    idx.snapshot().headerId shouldBe header1
+
+    // Node advances to Tip + 1 while tracker has not caught up yet -> must fail closed with LithosUnavailable
+    when(f.api.info()).thenReturn(Success(ChainFixtures.infoAt(Tip + 1).copy(bestFullHeaderId = Some(header2))))
+    a[LithosApiErrors.LithosUnavailable] should be thrownBy idx.freshSnapshot(scala.concurrent.duration.Duration.Zero)
+
+    // Once awaitTracked delivers Tip + 1, freshSnapshot rebuilds synchronously at the canonical tip
+    awaited = Some(trackedTip2)
+    val fresh = idx.freshSnapshot(scala.concurrent.duration.Duration.Zero)
+    fresh.height shouldBe (Tip + 1)
+    fresh.headerId shouldBe header2
+    idx.snapshot().height shouldBe (Tip + 1)
+    idx.snapshot().headerId shouldBe header2
+
+    // Same height but different canonical header (reorg) must also fail closed until tracker matches headerId
+    val forkHeader = "ef" * 32
+    when(f.api.info()).thenReturn(Success(ChainFixtures.infoAt(Tip + 1).copy(bestFullHeaderId = Some(forkHeader))))
+    a[LithosApiErrors.LithosUnavailable] should be thrownBy idx.freshSnapshot(scala.concurrent.duration.Duration.Zero)
   }
 
   it should "rebuild from the tracker in the background, telling it the node's tip, with no scan of the node" in {

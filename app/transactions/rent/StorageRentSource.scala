@@ -50,11 +50,45 @@ class StorageRentSource(nodeContext: NodeContext,
    */
   private var held: Map[String, Int] = Map.empty
 
+  /** The same held boxes ordered oldest first, so builds never sort the full backlog on the actor thread. */
+  private var byAge: scala.collection.immutable.TreeSet[(Int, String)] = scala.collection.immutable.TreeSet.empty
+
+  /**
+   * Rotating revalidation cursor across due entries: each build reads up to [[MaxDueReads]] due boxes starting after
+   * `nextDue` and wraps around, so live boxes that cannot fund a sweep never starve newer collectible boxes.
+   */
+  private var nextDue: Option[(Int, String)] = None
+
+  /** Retry cooldown (block height until which a box whose read page failed is deferred while other due boxes run). */
+  private var retryAfter: Map[String, Int] = Map.empty
+
   /** The height the walk last stopped at on a failed read, and how many passes in a row did. */
   private var stalled: Option[(Int, Int)] = None
 
   private var scanning: Boolean = false
   private var ticker: Option[Cancellable] = None
+
+  private def addHeld(entries: Map[String, Int]): Unit = {
+    entries.foreach { case (id, created) =>
+      if (!held.contains(id)) {
+        held += id -> created
+        byAge += created -> id
+      }
+    }
+    while (held.size > MaxHeld && byAge.nonEmpty) {
+      val oldest @ (_, id) = byAge.head
+      byAge -= oldest
+      held -= id
+      retryAfter -= id
+    }
+  }
+
+  private def removeHeld(ids: Set[String]): Unit =
+    ids.foreach { id =>
+      held.get(id).foreach(created => byAge -= (created -> id))
+      held -= id
+      retryAfter -= id
+    }
 
   override def preStart(): Unit = {
     logger.info(s"StorageRentSource started: startBehindBlocks=${rentConfig.startBehindBlocks}, " +
@@ -83,7 +117,7 @@ class StorageRentSource(nodeContext: NodeContext,
       // Only advance past what was actually read, so a short pass resumes where it stopped rather
       // than skipping the blocks it never reached.
       cursor = Some(cursor.fold(pass.nextHeight)(math.max(_, pass.nextHeight)))
-      held ++= pass.found
+      addHeld(pass.found)
       if (pass.found.nonEmpty || pass.blocked.nonEmpty)
         logger.info(s"Rent scan ${pass.from}..${pass.nextHeight - 1} found ${pass.found.size} " +
           s"unspent and ${pass.blocked.size} re-emission boxes; holding ${held.size}")
@@ -111,12 +145,26 @@ class StorageRentSource(nodeContext: NodeContext,
     // Found spent while a sweep was being built. Forgotten rather than retried: nothing brings a
     // spent box back, and the walk will never offer it again.
     case Spent(ids) =>
-      held --= ids
+      removeHeld(ids)
+
+    // Live due boxes that StorageRent.plan cannot collect (negative wrapped fee, over-size recreation, or at min value).
+    case Uncollectible(ids) =>
+      removeHeld(ids)
+      logger.debug(s"Dropped ${ids.size} uncollectible due boxes; holding ${held.size}")
+
+    // Update retry backoff for boxes whose page read failed while other pages succeeded, clearing recovered ones.
+    case ReadResult(readIds, failedIds, blockHeight) =>
+      readIds.foreach(retryAfter -= _)
+      if (failedIds.nonEmpty) {
+        val until = blockHeight + FailedPageBackoffBlocks
+        failedIds.foreach(id => if (held.contains(id)) retryAfter += id -> until)
+      }
+      if (retryAfter.nonEmpty) retryAfter = retryAfter.filter { case (id, until) => held.contains(id) && until > blockHeight }
 
     // Refused by the node's own rent rule while a sweep was being built. Dropped until restart, when
     // the walk starts over and finds them again; offered every block, each would cost its sweep.
     case Refused(ids) =>
-      held --= ids
+      removeHeld(ids)
       logger.warn(s"Dropped ${ids.size} boxes the node's rent rule refuses; holding ${held.size}")
 
     // ── the candidate path ──────────────────────────────────────────────────
@@ -136,9 +184,10 @@ class StorageRentSource(nodeContext: NodeContext,
   }
 
   private def startBuild(blockHeight: Int, replyTo: Option[ActorRef]): Unit = {
-    // Read here rather than inside the build: everything the build touches has to be a value it
-    // was handed, because it runs off the mailbox.
-    val ids = dueAt(held, blockHeight)
+    // Select up to MaxDueReads due entries from the age-ordered index without sorting all held boxes.
+    val (window, advancedCursor) = selectDue(byAge, blockHeight, nextDue, retryAfter, MaxDueReads)
+    nextDue = advancedCursor
+    val ids = window.map(_._2)
     if (!limits.enabled || ids.isEmpty) preparation.answerEmpty(blockHeight, replyTo)
     else preparation.start(blockHeight, replyTo)(sweep(ids, blockHeight))
   }
@@ -147,11 +196,15 @@ class StorageRentSource(nodeContext: NodeContext,
    * Read the due boxes back in pages, keep what still exists, and build one sweep out of what fits.
    *
    * The read is the revalidation. Ids a page read does not return name boxes somebody has already
-   * spent, and they are forgotten. A failed page offers nothing and forgets nothing of its own.
+   * spent, and they are forgotten. A failed page offers nothing and forgets nothing of its own, and
+   * its ids are backed off briefly while other due boxes rotate through.
    */
   private def sweep(ids: Seq[String], blockHeight: Int): Seq[CandidateBundle] = {
     val read = readDue(ids, nodeApi.boxesWithPoolByIds)
     if (read.gone.nonEmpty) self ! Spent(read.gone)
+    val readOk = read.live.map(_.boxId).toSet ++ read.gone
+    if (readOk.nonEmpty || read.failedIds.nonEmpty)
+      self ! ReadResult(readOk, if (readOk.nonEmpty) read.failedIds else Set.empty, blockHeight)
     read.failure.foreach(reason => logger.warn(s"Rent sweep for block $blockHeight could not read back " +
       s"${read.unread} of its ${ids.size} due boxes, offering what it read: $reason"))
     if (read.live.isEmpty) Seq.empty[CandidateBundle] else build(read.live, blockHeight)
@@ -161,11 +214,18 @@ class StorageRentSource(nodeContext: NodeContext,
     nodeContext.getClient.execute { ctx =>
       val params = ctx.getDataSource.getParameters
       val protocol = ProtocolBoxes(ctx)
+      val uncollectible = Set.newBuilder[String]
       val candidates = live.flatMap { box =>
         val input: InputUTXO = box.toInputUTXO(ctx)
-        StorageRent.plan(input, box.creationHeight, blockHeight, params, ctx.getNetworkType, protocol)
-          .map(RentCandidate(input, _))
+        StorageRent.plan(input, box.creationHeight, blockHeight, params, ctx.getNetworkType, protocol) match {
+          case Some(action) => Some(RentCandidate(input, action))
+          case None =>
+            if (blockHeight.toLong - box.creationHeight >= StorageRent.StoragePeriod.toLong) uncollectible += box.boxId
+            None
+        }
       }
+      val dropped = uncollectible.result()
+      if (dropped.nonEmpty) self ! Uncollectible(dropped)
       val wallet = nodeContext.getNodeWallet
       val floor = StorageRent.proceedsFloor(
         transactions.candidate.CandidateCapital.collectionContract(wallet, useTrueProp), blockHeight, params)
@@ -272,6 +332,66 @@ object StorageRentSource {
     held.toSeq.collect { case (id, created) if blockHeight.toLong - created >= StorageRent.StoragePeriod => created -> id }
       .sorted.map(_._2)
 
+  /**
+   * Selects up to `limit` due entries `(creationHeight, boxId)` from an age-ordered index, rotating past `cursor`
+   * and wrapping around, while skipping entries whose retry cooldown (`retryAfter`) has not yet expired unless all
+   * due entries are in cooldown. Returns `(selected, nextCursor)`.
+   */
+  private[rent] def selectDue(byAge: scala.collection.immutable.TreeSet[(Int, String)],
+                              blockHeight: Int,
+                              cursor: Option[(Int, String)],
+                              retryAfter: Map[String, Int],
+                              limit: Int = MaxDueReads): (Vector[(Int, String)], Option[(Int, String)]) = {
+    val dueCutoffLong = blockHeight.toLong - StorageRent.StoragePeriod.toLong
+    if (limit <= 0 || dueCutoffLong < 0L || byAge.isEmpty) (Vector.empty, None)
+    else {
+      val dueCutoff = dueCutoffLong.min(Int.MaxValue).toInt
+      val ord = implicitly[Ordering[(Int, String)]]
+      def collect(ignoreCooldown: Boolean): (Vector[(Int, String)], Boolean) = {
+        val out = Vector.newBuilder[(Int, String)]
+        var count = 0
+        var wrapped = false
+        def accept(e: (Int, String)): Boolean =
+          ignoreCooldown || !retryAfter.get(e._2).exists(_ > blockHeight)
+        def takeFrom(it: Iterator[(Int, String)]): Unit = {
+          while (count < limit && it.hasNext) {
+            val e = it.next()
+            if (accept(e)) {
+              out += e
+              count += 1
+            }
+          }
+        }
+        cursor match {
+          case Some(c) =>
+            val after = byAge.from(c).iterator.dropWhile(e => ord.lteq(e, c)).takeWhile(_._1 <= dueCutoff)
+            takeFrom(after)
+            if (count < limit) {
+              wrapped = true
+              val head = byAge.iterator.takeWhile(e => e._1 <= dueCutoff && ord.lteq(e, c))
+              takeFrom(head)
+            }
+          case None =>
+            takeFrom(byAge.iterator.takeWhile(_._1 <= dueCutoff))
+        }
+        (out.result(), wrapped)
+      }
+      val (eligible, wrapped) = collect(ignoreCooldown = false)
+      val (selected, didWrap) = if (eligible.nonEmpty) (eligible, wrapped) else collect(ignoreCooldown = true)
+      val nextCursor =
+        if (selected.size < limit) None
+        else if (didWrap && selected.lastOption == cursor) None
+        else selected.lastOption
+      (selected, nextCursor)
+    }
+  }
+
+  /** Most unspent box ids retained at once, bounding memory if a historical spam wave leaves many dust boxes. */
+  final val MaxHeld: Int = 20000
+
+  /** Blocks a box whose page read failed (while other pages succeeded) is deferred so healthy pages rotate through. */
+  final val FailedPageBackoffBlocks: Int = 4
+
   /** Ids per node read of due boxes, so one response stays small whatever a block once created. */
   final val DuePage: Int = 100
 
@@ -283,10 +403,10 @@ object StorageRentSource {
 
   /**
    * What reading back due boxes found: the boxes still unspent, the ids pages returned nothing for,
-   * how many ids were left unread by failed pages or the read cap, and the last failure.
+   * the ids whose page read failed, how many ids were left unread by failed pages or the read cap, and the last failure.
    */
   private[rent] final case class DueRead(live: Seq[node.model.NodeBox], gone: Set[String], unread: Int,
-                                         failure: Option[String])
+                                         failure: Option[String], failedIds: Set[String] = Set.empty)
 
   /**
    * Reads the first [[MaxDueReads]] of `ids` in pages of [[DuePage]]. A failed page is skipped, its ids kept,
@@ -295,6 +415,7 @@ object StorageRentSource {
   private[rent] def readDue(ids: Seq[String], read: Seq[String] => Try[Seq[node.model.NodeBox]]): DueRead = {
     var live = Vector.empty[node.model.NodeBox]
     var gone = Set.empty[String]
+    var failedIds = Set.empty[String]
     var failed = 0
     var readIds = 0
     var failure = Option.empty[String]
@@ -309,16 +430,23 @@ object StorageRentSource {
           readIds += page.size
         case Failure(ex) =>
           failed += 1
+          failedIds ++= page
           failure = Some(s"${ex.getClass.getSimpleName}: ${ex.getMessage}")
       }
     }
-    DueRead(live, gone, ids.size - readIds, failure)
+    DueRead(live, gone, ids.size - readIds, failure, failedIds)
   }
 
   private[rent] final case class Scanned(result: Try[Pass])
 
   /** Boxes a build found already spent, so they stop being offered. */
   private[rent] final case class Spent(ids: Set[String])
+
+  /** Due boxes `StorageRent.plan` permanently cannot collect (wrapped negative fee, over-size, or no collectable ERG). */
+  private[rent] final case class Uncollectible(ids: Set[String])
+
+  /** Page read outcome, updating retry backoff for failed pages while clearing recovered ids. */
+  private[rent] final case class ReadResult(readIds: Set[String], failedIds: Set[String], blockHeight: Int)
 
   /** Boxes the node's rent rule refused during a build, so they stop being offered. */
   private[rent] final case class Refused(ids: Set[String])

@@ -205,13 +205,48 @@ class StorageRentSourceSpec extends AnyFlatSpec with Matchers with MockitoSugar 
   it should "stop after two failed pages, and read no more than one sweep can take" in {
     var calls = 0
     val down = StorageRentSource.readDue(dueIds(1000), _ => { calls += 1; scala.util.Failure(new RuntimeException("down")) })
-    (calls, down.live, down.gone, down.unread) shouldBe ((2, Seq.empty, Set.empty, 1000))
+    (calls, down.live, down.gone, down.unread, down.failedIds.size) shouldBe ((2, Seq.empty, Set.empty, 1000, 200))
     var read = 0
     val many = StorageRentSource.readDue(dueIds(StorageRent.MaxBoxes + 500), page => {
       read += page.size
       scala.util.Success(page.map(boxFor))
     })
-    (read, many.live.size, many.unread) shouldBe ((StorageRent.MaxBoxes, StorageRent.MaxBoxes, 500))
+    (read, many.live.size, many.unread, many.failedIds) shouldBe ((StorageRent.MaxBoxes, StorageRent.MaxBoxes, 500, Set.empty))
+  }
+
+  "Due selection" should "rotate past the first 1,000 live boxes across builds so later collectible boxes are not starved" in {
+    val total = StorageRent.MaxBoxes + 300
+    val byAge = scala.collection.immutable.TreeSet((0 until total).map(i => (900000 + i / 10) -> f"$i%064x"): _*)
+    val height = 900000 + total + period
+
+    val (first, cursor1) = StorageRentSource.selectDue(byAge, height, None, Map.empty)
+    first should have size StorageRent.MaxBoxes
+    cursor1 shouldBe Some(first.last)
+
+    // Next build continues where the first stopped, reaching the 300 newer boxes before wrapping around
+    val (second, cursor2) = StorageRentSource.selectDue(byAge, height, cursor1, Map.empty)
+    second should have size StorageRent.MaxBoxes
+    second.take(300).map(_._2) shouldBe byAge.toVector.drop(StorageRent.MaxBoxes).map(_._2)
+    (first.map(_._2).toSet ++ second.map(_._2).toSet) shouldBe byAge.map(_._2).toSet
+    cursor2 shouldBe Some(second.last)
+  }
+
+  it should "defer boxes whose page read failed while other due boxes are available, and retry once backoff expires" in {
+    val byAge = scala.collection.immutable.TreeSet((0 until 5).map(i => (900000 + i) -> f"$i%064x"): _*)
+    val height = 900010 + period
+    val backoff = Map(f"${0}%064x" -> (height + 2), f"${1}%064x" -> (height + 2))
+
+    val (skipped, _) = StorageRentSource.selectDue(byAge, height, None, backoff, limit = 3)
+    skipped.map(_._2) shouldBe Vector(f"${2}%064x", f"${3}%064x", f"${4}%064x")
+
+    // Once backoff expires, the failed ids re-enter rotation
+    val (recovered, _) = StorageRentSource.selectDue(byAge, height + 2, None, backoff, limit = 3)
+    recovered.map(_._2) shouldBe Vector(f"${0}%064x", f"${1}%064x", f"${2}%064x")
+
+    // If every due box is in cooldown, fall back immediately instead of returning empty
+    val allBackedOff = byAge.map(_._2 -> (height + 2)).toMap
+    val (fallback, _) = StorageRentSource.selectDue(byAge, height, None, allBackedOff, limit = 3)
+    fallback should have size 3
   }
 
   // ─── what a sweep takes ───────────────────────────────────────────────────

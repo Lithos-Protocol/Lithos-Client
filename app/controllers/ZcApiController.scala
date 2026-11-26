@@ -44,11 +44,19 @@ class ZcApiController @Inject()(cc: ControllerComponents, tracker: ZcTracker, re
 
   /** `result` on the dex pool under a preview slot, taken before it is queued; 429 when none is free. */
   private def preview(result: => Result): Future[Result] =
-    if (!previews.tryAcquire()) Future.successful(TooManyRequests(ApiHelper.makeError(429, "Too many requests",
-      s"at most ${ZcApiController.MaxPreviews} quotes and simulations run or wait at once; retry shortly")))
-    else Try(Future(try result finally previews.release())(dexContext)) match {
+    admit(previews, s"at most ${ZcApiController.MaxPreviews} quotes and simulations run or wait at once; retry shortly")(result)
+
+  /** Expensive public read (`curves`, `orderbook`, `fills`) bounded before queuing onto `dexContext`. */
+  private def heavyRead(ifRevision: Option[Long])(answer: => JsValue): Action[AnyContent] = Action.async { _ =>
+    if (ifRevision.exists(r => reads.revision.contains(r))) Future.successful(NotModified)
+    else admit(heavyReads, s"at most ${ZcApiController.MaxHeavyReads} market-curve, order-book or fill reads run or wait at once; retry shortly")(respond(answer))
+  }
+
+  private def admit(slots: Semaphore, busyMessage: String)(result: => Result): Future[Result] =
+    if (!slots.tryAcquire()) Future.successful(TooManyRequests(ApiHelper.makeError(429, "Too many requests", busyMessage)))
+    else Try(Future(try result finally slots.release())(dexContext)) match {
       case Success(running) => running
-      case Failure(ex) => previews.release(); Future.failed(ex)
+      case Failure(ex) => slots.release(); Future.failed(ex)
     }
 
   private def read(ifRevision: Option[Long])(answer: => JsValue): Action[AnyContent] = Action.async { _ =>
@@ -77,12 +85,12 @@ class ZcApiController @Inject()(cc: ControllerComponents, tracker: ZcTracker, re
   /** GET /sigmafi/zc/markets/:market/curves */
   def curves(market: String, coverage: Option[Long], kind: Option[String], matchable: Option[Boolean], grid: Option[Boolean],
              ifRevision: Option[Long]): Action[AnyContent] =
-    read(ifRevision)(reads.curves(market, filters(coverage, kind, matchable, grid)))
+    heavyRead(ifRevision)(reads.curves(market, filters(coverage, kind, matchable, grid)))
 
   /** GET /sigmafi/zc/markets/:market/orderbook */
   def orderbook(market: String, coverage: Option[Long], kind: Option[String], matchable: Option[Boolean], grid: Option[Boolean],
                 to: Option[Long], around: Option[Long], band: Option[Long], ifRevision: Option[Long]): Action[AnyContent] =
-    read(ifRevision)(reads.orderbook(market, filters(coverage, kind, matchable, grid), to, around, band))
+    heavyRead(ifRevision)(reads.orderbook(market, filters(coverage, kind, matchable, grid), to, around, band))
 
   /** GET /sigmafi/zc/matches/:id */
   def matches(id: String, ifRevision: Option[Long]): Action[AnyContent] = read(ifRevision)(reads.matches(id.trim.toLowerCase))
@@ -92,17 +100,15 @@ class ZcApiController @Inject()(cc: ControllerComponents, tracker: ZcTracker, re
    * `status`; `ifRevision` does not apply.
    */
   def fills(market: String, fromHeight: Option[Int], kind: Option[String], via: Option[String], cursor: Option[String],
-            limit: Option[Int]): Action[AnyContent] = Action.async { _ =>
-    offPool(respond {
-      val m = sigmafi.zc.ZcMarket.named(market).getOrElse(throw LithosBadRequest(s"unknown market $market: ERG or SigUSD"))
-      val size = limit.getOrElse(ZcReads.DefaultPage)
-      if (size < 1 || size > ZcReads.MaxPage) throw LithosBadRequest(s"limit must be 1 to ${ZcReads.MaxPage}")
-      kind.foreach(k => if (!Set("new", "resale", "shares").contains(k)) throw LithosBadRequest("kind must be new, resale or shares"))
-      via.foreach(v => if (!Set("offer", "wallet").contains(v)) throw LithosBadRequest("via must be offer or wallet"))
-      val page = fillIndex.fills(m, fromHeight.getOrElse(0), kind, via, cursor, size)
-      Json.obj("status" -> page.status, "observedAt" -> page.observedAt, "indexedTo" -> page.indexedTo,
-        "items" -> page.fills, "next" -> page.next)
-    })
+            limit: Option[Int]): Action[AnyContent] = heavyRead(None) {
+    val m = sigmafi.zc.ZcMarket.named(market).getOrElse(throw LithosBadRequest(s"unknown market $market: ERG or SigUSD"))
+    val size = limit.getOrElse(ZcReads.DefaultPage)
+    if (size < 1 || size > ZcReads.MaxPage) throw LithosBadRequest(s"limit must be 1 to ${ZcReads.MaxPage}")
+    kind.foreach(k => if (!Set("new", "resale", "shares").contains(k)) throw LithosBadRequest("kind must be new, resale or shares"))
+    via.foreach(v => if (!Set("offer", "wallet").contains(v)) throw LithosBadRequest("via must be offer or wallet"))
+    val page = fillIndex.fills(m, fromHeight.getOrElse(0), kind, via, cursor, size)
+    Json.obj("status" -> page.status, "observedAt" -> page.observedAt, "indexedTo" -> page.indexedTo,
+      "items" -> page.fills, "next" -> page.next)
   }
 
   /** GET /sigmafi/zc/auctions */
@@ -132,7 +138,7 @@ class ZcApiController @Inject()(cc: ControllerComponents, tracker: ZcTracker, re
     else preview(respond(reads.simulate(request.body.asJson.getOrElse(Json.obj()))))
   }
 
-  // ── writes: each check signs nothing and is open but the wrap's, each send needs the key ──────────────
+  // ── writes: each check signs nothing and is open but claim and wrap, each send needs the key ──────────
 
   def checkCreateOrder(): Action[AnyContent] = Action.async { r => preview(respond(writes.createOrder(r.body.asJson, send = false))) }
   def createOrder(): Action[AnyContent] = withApiKey(Action.async { r => offPool(respond(writes.createOrder(r.body.asJson, send = true))) })
@@ -171,7 +177,8 @@ class ZcApiController @Inject()(cc: ControllerComponents, tracker: ZcTracker, re
   def liquidate(assetId: String): Action[AnyContent] = zc("liquidate", Some(assetId), send = true)
   def checkExtinguish(assetId: String): Action[AnyContent] = zc("extinguish", Some(assetId), send = false)
   def extinguish(assetId: String): Action[AnyContent] = zc("extinguish", Some(assetId), send = true)
-  def checkClaim(tokenId: String): Action[AnyContent] = zc("claim", Some(tokenId), send = false)
+  // Keyed: the check reads how many shares (or bond units) this wallet holds
+  def checkClaim(tokenId: String): Action[AnyContent] = withApiKey(zc("claim", Some(tokenId), send = false))
   def claim(tokenId: String): Action[AnyContent] = zc("claim", Some(tokenId), send = true)
   // Keyed: the check reads how much of the token this wallet holds
   def checkCreateWrap(): Action[AnyContent] = withApiKey(zc("createWrap", None, send = false))
@@ -191,6 +198,7 @@ class ZcApiController @Inject()(cc: ControllerComponents, tracker: ZcTracker, re
   // ── plumbing ─────────────────────────────────────────────────────────────
 
   private val previews = new Semaphore(ZcApiController.MaxPreviews)
+  private val heavyReads = new Semaphore(ZcApiController.MaxHeavyReads)
   private val limiter = new ZcApiController.Buckets(ZcApiController.SimulateBurst, ZcApiController.SimulatePerSecond)
 
   /** 400 the request is wrong; 404 nothing by that id; 503 tracking is off or not seeded, or the node failed a read. */
@@ -228,6 +236,9 @@ object ZcApiController {
 
   /** Write checks and simulations running or queued at once, across every caller. */
   final val MaxPreviews = 4
+
+  /** Expensive public reads (`curves`, `orderbook`, `fills`) running or queued at once, across every caller. */
+  final val MaxHeavyReads = 4
 
   /** Most callers tracked; past it the table is cleared, which only forgives a burst. */
   final val MaxCallers = 10000

@@ -412,38 +412,49 @@ class DexPoolExecution(nodeContext: NodeContext, walletSelector: EngineFunding, 
    * Which of `tokenIds` own, or owned, a provision: each with its pool, how it was minted, and the provision now.
    * A deposit's NFT takes the id of the pool box the deposit spent, so one indexed box read rules out most tokens;
    * a pool creator's NFT is minted apart and is named by the pool's genesis, which the index already holds. The
-   * rest are grouped by pool, whose guard is scanned once for all of them. Answers hold for the tip they were read
-   * at; how an NFT was minted never changes and is kept. A token whose pool the index does not list is no NFT.
+   * rest are grouped by pool, whose guard is scanned once for all of them. Answers hold for the canonical tip
+   * `(height, headerId)` they were read at; how an NFT was minted never changes and is kept. When `requireFresh` is
+   * true (used by signing guards), the snapshot must match the node's current canonical tip. Any token whose ownership
+   * cannot be verified (truncated index, unreadable pool genesis, or failed metadata read) fails closed with
+   * [[LithosUnavailable]] and is never cached as a negative answer.
    */
-  def lookupNfts(tokenIds: Seq[String]): Map[String, DexPoolExecution.NftFound] = {
+  def lookupNfts(tokenIds: Seq[String], requireFresh: Boolean = false): Map[String, DexPoolExecution.NftFound] = {
     val ids = tokenIds.map(_.toLowerCase).distinct
     if (ids.size > DexPoolExecution.MaxNftLookups) throw LithosBadRequest(
       s"at most ${DexPoolExecution.MaxNftLookups} token ids per request, got ${ids.size}")
     ids.find(!_.matches("[0-9a-f]{64}")).foreach(id => throw LithosBadRequest(s"'$id' is not a 64-character token id"))
-    val snapshot = index.snapshot()
+    val snapshot = if (requireFresh) index.freshSnapshot() else index.snapshot()
     if (snapshot.status != "ready") throw LithosUnavailable("the pool index is still building; retry shortly")
-    val cached = Option(nftAnswers.get()).filter(_._1 == snapshot.height).map(_._2).getOrElse(Map.empty)
+    val tipKey = (snapshot.height, snapshot.headerId)
+    val cached = Option(nftAnswers.get()).filter(_._1 == tipKey).map(_._2).getOrElse(Map.empty)
     val todo = ids.filterNot(cached.contains)
-    val read = if (todo.isEmpty) Map.empty[String, Option[DexPoolExecution.NftFound]] else readNfts(todo, snapshot.pools)
-    // With a pool possibly missing from the index, a token matching no listed pool may still own a provision
-    val unknown = if (snapshot.truncated) read.collect { case (id, None) => id } else Nil
-    if (unknown.nonEmpty) throw LithosUnavailable(s"the pool index may be missing pools, so ${unknown.size} token(s) " +
-      s"cannot be ruled out as provision NFTs (${unknown.take(3).mkString(", ")}); retry once it is complete")
-    if (read.nonEmpty) nftAnswers.updateAndGet { held =>
-      val base = Option(held).filter(_._1 == snapshot.height).map(_._2).getOrElse(Map.empty)
-      if (base.size + read.size > DexPoolExecution.MaxCachedNftAnswers) held else (snapshot.height, base ++ read)
+    val read = if (todo.isEmpty) Map.empty[String, DexPoolExecution.NftVerdict] else readNfts(todo, snapshot)
+    val unknown = read.collect { case (id, DexPoolExecution.NftVerdict.Unknown(reason)) => id -> reason }
+    val verified = read.collect {
+      case (id, DexPoolExecution.NftVerdict.Found(nft)) => id -> Some(nft)
+      case (id, DexPoolExecution.NftVerdict.NotNft) => id -> None
     }
-    ids.flatMap(id => cached.get(id).orElse(read.get(id)).flatten.map(id -> _)).toMap
+    if (verified.nonEmpty) nftAnswers.updateAndGet { held =>
+      val base = Option(held).filter(_._1 == tipKey).map(_._2).getOrElse(Map.empty)
+      if (base.size + verified.size > DexPoolExecution.MaxCachedNftAnswers) held else (tipKey, base ++ verified)
+    }
+    if (unknown.nonEmpty) {
+      val reason = unknown.values.head
+      throw LithosUnavailable(s"$reason, so ${unknown.size} token(s) cannot be ruled out as provision NFTs " +
+        s"(${unknown.keys.take(3).mkString(", ")}); retry once complete")
+    }
+    ids.flatMap(id => cached.get(id).orElse(verified.get(id)).flatten.map(id -> _)).toMap
   }
 
-  /** Answers for the tip of the index snapshot they were read against, by token id. None is "no NFT". */
+  /** Verified answers for the `(height, headerId)` snapshot they were read against, by token id. None is verified "no NFT". */
   private val nftAnswers =
-    new java.util.concurrent.atomic.AtomicReference[(Int, Map[String, Option[DexPoolExecution.NftFound]])]()
+    new java.util.concurrent.atomic.AtomicReference[((Int, String), Map[String, Option[DexPoolExecution.NftFound]])]()
   /** How each NFT was minted, by token id; None when its box is a pool's but no deposit made it an owner. */
   private val nftMints = new java.util.concurrent.ConcurrentHashMap[String, Option[DexPoolExecution.NftMint]]()
 
-  private def readNfts(ids: Seq[String], pools: Seq[IndexedPool]): Map[String, Option[DexPoolExecution.NftFound]] = {
-    import DexPoolExecution.{NftFound, NftLive, NftMint}
+  private def readNfts(ids: Seq[String], snapshot: api.PoolIndexSnapshot): Map[String, DexPoolExecution.NftVerdict] = {
+    import DexPoolExecution.{NftFound, NftLive, NftMint, NftVerdict}
+    val pools = snapshot.pools
     val byNft = pools.map(p => p.nft -> p).toMap
     val atGenesis = pools.flatMap(p => p.genesisProvisions.map(g => g.owner -> (p, g))).toMap
     def treeOf(p: IndexedPool) = p.n2t.map(_.liquidityPool.ergoTreeHex).orElse(p.t2t.map(_.liquidityPool.ergoTreeHex))
@@ -461,14 +472,25 @@ class DexPoolExecution(nodeContext: NodeContext, walletSelector: EngineFunding, 
     // A creator's NFT whose pool genesis the index could not read: the NFT's own description names its pool. That
     // is only where to look; a provision under that pool's guard naming the token is the proof, as for any other.
     val unresolved = ids.filterNot(id => resolved.exists(_._1 == id))
-    val hinted = if (unresolved.isEmpty) Seq.empty else
-      Try(nodeApi.tokensByIds(unresolved).get).getOrElse(Seq.empty).flatMap { t =>
-        DexPoolExecution.PoolNamed.findFirstMatchIn(Option(t.description).getOrElse("")).map(_.group(1))
-          .flatMap(byNft.get).filter(_ => unresolved.contains(t.id)).map(pool => (t.id, pool, Option.empty[node.model.IndexedBox]))
-      }
+    val unresolvedSet = unresolved.toSet
+    val (hinted, metadataError) = if (unresolved.isEmpty) (Seq.empty, Option.empty[String])
+    else Option(nodeApi.tokensByIds(unresolved)) match {
+      case Some(scala.util.Success(infos)) =>
+        val matched = infos.flatMap { t =>
+          val tid = t.id.toLowerCase
+          DexPoolExecution.PoolNamed.findFirstMatchIn(Option(t.description).getOrElse("")).map(_.group(1))
+            .flatMap(byNft.get).filter(_ => unresolvedSet.contains(tid))
+            .map(pool => (tid, pool, Option.empty[node.model.IndexedBox]))
+        }
+        (matched, None)
+      case Some(scala.util.Failure(ex)) =>
+        (Seq.empty, Some(s"could not read token metadata from the node (${ex.getMessage})"))
+      case None =>
+        (Seq.empty, Some("could not read token metadata from the node"))
+    }
     val candidates = resolved ++ hinted
     val found = candidates.groupBy(_._2.nft).flatMap { case (nft, group) =>
-      withPool(nft) { (ctx, live) =>
+      withIndexedPool(group.head._2) { (ctx, live) =>
         val (guard, provToken) = live match {
           case n: LiveN2T => (n.contracts.provisionGuard.ergoTreeHex, n.contracts.provToken.toString)
           case t: LiveT2T => (t.contracts.provisionGuard.ergoTreeHex, t.contracts.provToken.toString)
@@ -511,7 +533,17 @@ class DexPoolExecution(nodeContext: NodeContext, walletSelector: EngineFunding, 
         }.toMap
       }
     }
-    ids.map(id => id -> found.getOrElse(id, None)).toMap
+    val unknownReason: Option[String] =
+      if (snapshot.truncated) Some("the pool index may be missing pools")
+      else if (snapshot.genesisIncomplete) Some("the pool index could not read every pool's genesis provisions")
+      else metadataError
+    ids.map { id =>
+      val verdict: NftVerdict = found.get(id).flatten match {
+        case Some(nft) => NftVerdict.Found(nft)
+        case None => unknownReason.fold[NftVerdict](NftVerdict.NotNft)(NftVerdict.Unknown)
+      }
+      id -> verdict
+    }.toMap
   }
 
   /**
@@ -644,17 +676,20 @@ class DexPoolExecution(nodeContext: NodeContext, walletSelector: EngineFunding, 
       if (snapshot.status != "ready") throw LithosUnavailable("the pool index is still building; retry shortly")
       throw LithosNotFound(s"no LithosDex pool with NFT $poolNft")
     }
+    withIndexedPool(indexed)(f)
+  }
+
+  private def withIndexedPool[A](indexed: IndexedPool)(f: (BlockchainContext, Live) => A): A =
     nodeContext.getClient.execute { ctx =>
       val live = (indexed.n2t, indexed.t2t) match {
         case (Some(c), _) =>
           LiveN2T(indexed, c, LDBoxes.singletonBox(ctx, nodeApi, c.poolNFT, c.liquidityPool.ergoTreeHex, "liquidity pool"))
         case (_, Some(c)) =>
           LiveT2T(indexed, c, LDBoxes.singletonBox(ctx, nodeApi, c.poolNFT, c.liquidityPool.ergoTreeHex, "liquidity pool"))
-        case _ => throw new IllegalStateException(s"pool $poolNft was indexed without a deployment")
+        case _ => throw new IllegalStateException(s"pool ${indexed.nft} was indexed without a deployment")
       }
       f(ctx, live)
     }
-  }
 
   private def vault(ctx: BlockchainContext, live: Live) = live match {
     case n: LiveN2T => LDBoxes.singletonBox(ctx, nodeApi, n.contracts.vaultNFT, n.contracts.feeVault.ergoTreeHex, "fee vault")
@@ -791,6 +826,14 @@ object DexPoolExecution {
 
   /** A token that owns a provision (`live`), or owned one since redeemed (`live` None, `mint` known). */
   final case class NftFound(pool: IndexedPool, mint: Option[NftMint], live: Option[NftLive])
+
+  /** Explicit outcome of checking one token id so missing evidence is never confused with a verified negative. */
+  sealed trait NftVerdict
+  object NftVerdict {
+    final case class Found(nft: NftFound) extends NftVerdict
+    case object NotNft extends NftVerdict
+    final case class Unknown(reason: String) extends NftVerdict
+  }
 
   /** Fees a request names, or the configured defaults, refused unless the cap sits under the fee. */
   private[execution] def orderFees(defaults: LithosDexOrdersConfig, executorFee: Option[String],

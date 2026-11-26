@@ -53,6 +53,10 @@ class LDPoolsApiImpl @Inject()(nodeContext: NodeContext, index: LDPoolIndex,
     })
   }
 
+  override def checkProvisionNfts(tokenIds: Seq[String]): Set[String] =
+    if (tokenIds.isEmpty) Set.empty
+    else orders.lookupNfts(tokenIds, requireFresh = true).collect { case (id, f) if f.live.isDefined => id }.toSet
+
   override def claimPoolProvision(poolNft: String, boxId: String, request: LDClaimRequest): LDClaimResult =
     orders.claim(poolNft, boxId, request)
 
