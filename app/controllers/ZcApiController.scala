@@ -23,8 +23,9 @@ import scala.util.{Failure, Success, Try}
 /**
  * The `/sigmafi/zc` reads. Every read is open except the portfolio, which names this wallet's funds. A read sent with
  * `ifRevision` equal to the tracker's revision answers 304 at once, so the UI's polls cost nothing between changes.
- * Reads run on the dex pool: they may make a few bounded node reads. `simulate` is rate-limited per caller and two run
- * at a time, since each runs the batch over the whole book.
+ * Reads run on the dex pool: they may make a few bounded node reads. Write checks and `simulate` can run the matcher
+ * over the whole book, so at most [[ZcApiController.MaxPreviews]] of them run or wait at once, counted before they are
+ * queued; `simulate` is also rate-limited per caller.
  */
 @Singleton
 class ZcApiController @Inject()(cc: ControllerComponents, tracker: ZcTracker, resolver: ZcResolver,
@@ -40,6 +41,15 @@ class ZcApiController @Inject()(cc: ControllerComponents, tracker: ZcTracker, re
     nodeContext.getNetwork, history = Some(history))
 
   private def offPool(result: => Result): Future[Result] = Future(result)(dexContext)
+
+  /** `result` on the dex pool under a preview slot, taken before it is queued; 429 when none is free. */
+  private def preview(result: => Result): Future[Result] =
+    if (!previews.tryAcquire()) Future.successful(TooManyRequests(ApiHelper.makeError(429, "Too many requests",
+      s"at most ${ZcApiController.MaxPreviews} quotes and simulations run or wait at once; retry shortly")))
+    else Try(Future(try result finally previews.release())(dexContext)) match {
+      case Success(running) => running
+      case Failure(ex) => previews.release(); Future.failed(ex)
+    }
 
   private def read(ifRevision: Option[Long])(answer: => JsValue): Action[AnyContent] = Action.async { _ =>
     if (ifRevision.exists(r => reads.revision.contains(r))) Future.successful(NotModified)
@@ -119,31 +129,25 @@ class ZcApiController @Inject()(cc: ControllerComponents, tracker: ZcTracker, re
     else if (!limiter.take(request.remoteAddress))
       Future.successful(TooManyRequests(ApiHelper.makeError(429, "Too many requests",
         s"at most ${ZcApiController.SimulateBurst} simulations at once, then ${ZcApiController.SimulatePerSecond} a second")))
-    else offPool {
-      val body = request.body.asJson.getOrElse(Json.obj())
-      if (!running.tryAcquire()) TooManyRequests(ApiHelper.makeError(429, "Too many requests", "two simulations are running"))
-      else try respond(reads.simulate(body)) finally running.release()
-    }
+    else preview(respond(reads.simulate(request.body.asJson.getOrElse(Json.obj()))))
   }
 
-  // ── writes: each check is open and signs nothing, each send needs the key ──────────────
+  // ── writes: each check signs nothing and is open but the wrap's, each send needs the key ──────────────
 
-  private def write(answer: => JsValue): Action[AnyContent] = Action.async { _ => offPool(respond(answer)) }
-
-  def checkCreateOrder(): Action[AnyContent] = Action.async { r => offPool(respond(writes.createOrder(r.body.asJson, send = false))) }
+  def checkCreateOrder(): Action[AnyContent] = Action.async { r => preview(respond(writes.createOrder(r.body.asJson, send = false))) }
   def createOrder(): Action[AnyContent] = withApiKey(Action.async { r => offPool(respond(writes.createOrder(r.body.asJson, send = true))) })
-  def checkCreateOffer(): Action[AnyContent] = Action.async { r => offPool(respond(writes.createOffer(r.body.asJson, send = false))) }
+  def checkCreateOffer(): Action[AnyContent] = Action.async { r => preview(respond(writes.createOffer(r.body.asJson, send = false))) }
   def createOffer(): Action[AnyContent] = withApiKey(Action.async { r => offPool(respond(writes.createOffer(r.body.asJson, send = true))) })
-  def checkCreateAsk(): Action[AnyContent] = Action.async { r => offPool(respond(writes.createAsk(r.body.asJson, send = false))) }
+  def checkCreateAsk(): Action[AnyContent] = Action.async { r => preview(respond(writes.createAsk(r.body.asJson, send = false))) }
   def createAsk(): Action[AnyContent] = withApiKey(Action.async { r => offPool(respond(writes.createAsk(r.body.asJson, send = true))) })
-  def checkCancel(boxId: String): Action[AnyContent] = write(writes.cancel(boxId, send = false))
-  def cancel(boxId: String): Action[AnyContent] = withApiKey(write(writes.cancel(boxId, send = true)))
+  def checkCancel(boxId: String): Action[AnyContent] = Action.async { _ => preview(respond(writes.cancel(boxId, send = false))) }
+  def cancel(boxId: String): Action[AnyContent] =
+    withApiKey(Action.async { _ => offPool(respond(writes.cancel(boxId, send = true))) })
 
-  /** One of the other writes: its check open, its send keyed. */
-  private def zc(action: String, id: Option[String], send: Boolean): Action[AnyContent] = {
-    val run = Action.async { r => offPool(respond(writes.write(action, id, r.body.asJson, send))) }
-    if (send) withApiKey(run) else run
-  }
+  /** One of the other writes: its check open under a preview slot, its send keyed. */
+  private def zc(action: String, id: Option[String], send: Boolean): Action[AnyContent] =
+    if (send) withApiKey(Action.async { r => offPool(respond(writes.write(action, id, r.body.asJson, send = true))) })
+    else Action.async { r => preview(respond(writes.write(action, id, r.body.asJson, send = false))) }
 
   def checkCreateLot(): Action[AnyContent] = zc("createLot", None, send = false)
   def createLot(): Action[AnyContent] = zc("createLot", None, send = true)
@@ -169,7 +173,8 @@ class ZcApiController @Inject()(cc: ControllerComponents, tracker: ZcTracker, re
   def extinguish(assetId: String): Action[AnyContent] = zc("extinguish", Some(assetId), send = true)
   def checkClaim(tokenId: String): Action[AnyContent] = zc("claim", Some(tokenId), send = false)
   def claim(tokenId: String): Action[AnyContent] = zc("claim", Some(tokenId), send = true)
-  def checkCreateWrap(): Action[AnyContent] = zc("createWrap", None, send = false)
+  // Keyed: the check reads how much of the token this wallet holds
+  def checkCreateWrap(): Action[AnyContent] = withApiKey(zc("createWrap", None, send = false))
   def createWrap(): Action[AnyContent] = zc("createWrap", None, send = true)
   def checkUnwrap(receiptId: String): Action[AnyContent] = zc("unwrap", Some(receiptId), send = false)
   def unwrap(receiptId: String): Action[AnyContent] = zc("unwrap", Some(receiptId), send = true)
@@ -185,7 +190,7 @@ class ZcApiController @Inject()(cc: ControllerComponents, tracker: ZcTracker, re
 
   // ── plumbing ─────────────────────────────────────────────────────────────
 
-  private val running = new Semaphore(ZcApiController.Concurrent)
+  private val previews = new Semaphore(ZcApiController.MaxPreviews)
   private val limiter = new ZcApiController.Buckets(ZcApiController.SimulateBurst, ZcApiController.SimulatePerSecond)
 
   /** 400 the request is wrong; 404 nothing by that id; 503 tracking is off or not seeded, or the node failed a read. */
@@ -221,8 +226,8 @@ object ZcApiController {
   final val SimulateBurst = 5
   final val SimulatePerSecond = 1
 
-  /** Simulations running at once across every caller. */
-  final val Concurrent = 2
+  /** Write checks and simulations running or queued at once, across every caller. */
+  final val MaxPreviews = 4
 
   /** Most callers tracked; past it the table is cleared, which only forgives a burst. */
   final val MaxCallers = 10000

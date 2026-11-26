@@ -49,7 +49,7 @@ object LDPoolSummary {
 /**
  * @param status    `building` until the first index completes, then `ready`
  * @param height    the tip the index was read at
- * @param truncated more pools exist than one index reads; the newest are listed
+ * @param truncated a pool may be missing: more exist than one index reads, or a vault read failed
  */
 case class LDPoolList(status: String, height: Int, truncated: Boolean, pools: Seq[LDPoolSummary])
 

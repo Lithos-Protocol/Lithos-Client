@@ -50,12 +50,6 @@ class StorageRentSource(nodeContext: NodeContext,
    */
   private var held: Map[String, Int] = Map.empty
 
-  /**
-   * Boxes that are due but carry re-emission tokens, which no rent transaction may spend today.
-   * Kept so they need not be rediscovered when the node closes that gap.
-   */
-  private var deferred: Set[String] = Set.empty
-
   /** The height the walk last stopped at on a failed read, and how many passes in a row did. */
   private var stalled: Option[(Int, Int)] = None
 
@@ -90,7 +84,6 @@ class StorageRentSource(nodeContext: NodeContext,
       // than skipping the blocks it never reached.
       cursor = Some(cursor.fold(pass.nextHeight)(math.max(_, pass.nextHeight)))
       held ++= pass.found
-      deferred ++= pass.blocked
       if (pass.found.nonEmpty || pass.blocked.nonEmpty)
         logger.info(s"Rent scan ${pass.from}..${pass.nextHeight - 1} found ${pass.found.size} " +
           s"unspent and ${pass.blocked.size} re-emission boxes; holding ${held.size}")
@@ -119,7 +112,6 @@ class StorageRentSource(nodeContext: NodeContext,
     // spent box back, and the walk will never offer it again.
     case Spent(ids) =>
       held --= ids
-      deferred --= ids
 
     // Refused by the node's own rent rule while a sweep was being built. Dropped until restart, when
     // the walk starts over and finds them again; offered every block, each would cost its sweep.
@@ -152,22 +144,18 @@ class StorageRentSource(nodeContext: NodeContext,
   }
 
   /**
-   * Read every remembered box back, keep what still exists, and build one sweep out of what fits.
+   * Read the due boxes back in pages, keep what still exists, and build one sweep out of what fits.
    *
-   * The read is the revalidation. Ids a successful read does not return name boxes somebody has
-   * already spent, and they are forgotten. A failed read offers nothing and forgets nothing.
+   * The read is the revalidation. Ids a page read does not return name boxes somebody has already
+   * spent, and they are forgotten. A failed page offers nothing and forgets nothing of its own.
    */
-  private def sweep(ids: Seq[String], blockHeight: Int): Seq[CandidateBundle] =
-    nodeApi.boxesWithPoolByIds(ids) match {
-      case Failure(ex) =>
-        logger.warn(s"Rent sweep for block $blockHeight could not read back its ${ids.size} due " +
-          s"boxes, offering none this build: ${ex.getMessage}")
-        Seq.empty[CandidateBundle]
-      case Success(live) =>
-        val gone = ids.toSet -- live.map(_.boxId).toSet
-        if (gone.nonEmpty) self ! Spent(gone)
-        if (live.isEmpty) Seq.empty[CandidateBundle] else build(live, blockHeight)
-    }
+  private def sweep(ids: Seq[String], blockHeight: Int): Seq[CandidateBundle] = {
+    val read = readDue(ids, nodeApi.boxesWithPoolByIds)
+    if (read.gone.nonEmpty) self ! Spent(read.gone)
+    read.failure.foreach(reason => logger.warn(s"Rent sweep for block $blockHeight could not read back " +
+      s"${read.unread} of its ${ids.size} due boxes, offering what it read: $reason"))
+    if (read.live.isEmpty) Seq.empty[CandidateBundle] else build(read.live, blockHeight)
+  }
 
   private def build(live: Seq[node.model.NodeBox], blockHeight: Int): Seq[CandidateBundle] =
     nodeContext.getClient.execute { ctx =>
@@ -279,10 +267,53 @@ object StorageRentSource {
    */
   def walkCeiling(tip: Int, lookahead: Int): Int = tip + 1 - StorageRent.StoragePeriod + lookahead
 
-  /** Held ids whose creation height makes them collectable in a block at `blockHeight`. */
+  /** Held ids whose creation height makes them collectable in a block at `blockHeight`, oldest first. */
   def dueAt(held: Map[String, Int], blockHeight: Int): Seq[String] =
-    held.collect { case (id, created) if blockHeight.toLong - created >= StorageRent.StoragePeriod => id }
-      .toSeq
+    held.toSeq.collect { case (id, created) if blockHeight.toLong - created >= StorageRent.StoragePeriod => created -> id }
+      .sorted.map(_._2)
+
+  /** Ids per node read of due boxes, so one response stays small whatever a block once created. */
+  final val DuePage: Int = 100
+
+  /** Most due ids one build reads back, which is also the most one sweep can take. */
+  final val MaxDueReads: Int = StorageRent.MaxBoxes
+
+  /** Failed pages one build tolerates before it stops reading, so a node that is down costs two calls. */
+  final val MaxFailedPages: Int = 2
+
+  /**
+   * What reading back due boxes found: the boxes still unspent, the ids pages returned nothing for,
+   * how many ids were left unread by failed pages or the read cap, and the last failure.
+   */
+  private[rent] final case class DueRead(live: Seq[node.model.NodeBox], gone: Set[String], unread: Int,
+                                         failure: Option[String])
+
+  /**
+   * Reads the first [[MaxDueReads]] of `ids` in pages of [[DuePage]]. A failed page is skipped, its ids kept,
+   * and the pages after it are still read, until [[MaxFailedPages]] have failed.
+   */
+  private[rent] def readDue(ids: Seq[String], read: Seq[String] => Try[Seq[node.model.NodeBox]]): DueRead = {
+    var live = Vector.empty[node.model.NodeBox]
+    var gone = Set.empty[String]
+    var failed = 0
+    var readIds = 0
+    var failure = Option.empty[String]
+    val pages = ids.take(MaxDueReads).grouped(DuePage)
+    while (pages.hasNext && failed < MaxFailedPages) {
+      val page = pages.next()
+      read(page) match {
+        case Success(boxes) =>
+          val found = boxes.filter(b => page.contains(b.boxId))
+          live ++= found
+          gone ++= page.toSet -- found.map(_.boxId)
+          readIds += page.size
+        case Failure(ex) =>
+          failed += 1
+          failure = Some(s"${ex.getClass.getSimpleName}: ${ex.getMessage}")
+      }
+    }
+    DueRead(live, gone, ids.size - readIds, failure)
+  }
 
   private[rent] final case class Scanned(result: Try[Pass])
 

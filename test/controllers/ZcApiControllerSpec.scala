@@ -42,7 +42,8 @@ class ZcApiControllerSpec
   private val config = Configuration(ConfigFactory.parseString(
     s"""lithos.apiKeyHash = "${org.bouncycastle.util.encoders.Hex.toHexString(Blake2b256.hash(apiKey))}""""))
 
-  private def controller(): (ZcApiController, ZcTracker) = {
+  /** @param heldChecks order checks wait on this before answering */
+  private def controller(heldChecks: Option[java.util.concurrent.CountDownLatch] = None): (ZcApiController, ZcTracker) = {
     val c = new ScriptedChain
     c.extend(H - 40, H)
     c.indexed = H
@@ -55,7 +56,12 @@ class ZcApiControllerSpec
     val fills = new stats.ZcFills(ZcConfig(enabled = true, 1000), () => stats.ZcFillStore.inMemory(ZcConfig(enabled = true, 1000)),
       () => c.api, ExecutionContext.global, enabled = false)
     val ctl = new ZcApiController(Helpers.stubControllerComponents(), t, r, mock[NodeContext], config, system, fills,
-      new api.zc.ZcWrites(mock[NodeContext], system.deadLetters, t, r, config, system),
+      new api.zc.ZcWrites(mock[NodeContext], system.deadLetters, t, r, config, system) {
+        override def createOrder(b: Option[play.api.libs.json.JsValue], send: Boolean): play.api.libs.json.JsObject = {
+          heldChecks.foreach(_.await(10, java.util.concurrent.TimeUnit.SECONDS))
+          Json.obj("held" -> true)
+        }
+      },
       new api.zc.ZcHistory(() => c.api, () => Set.empty[String], t, 0)) {
       override protected lazy val reads: ZcReads = built
     }
@@ -99,6 +105,23 @@ class ZcApiControllerSpec
       status(c.simulate(None).apply(FakeRequest(POST, "/").withJsonBody(body))))
     answers.take(ZcApiController.SimulateBurst).toSet shouldBe Set(OK)
     answers.drop(ZcApiController.SimulateBurst + 2) should contain(TOO_MANY_REQUESTS)
+  }
+
+  "Quotes and simulations" should "share the preview slots, refusing past them before anything is queued" in {
+    val latch = new java.util.concurrent.CountDownLatch(1)
+    val (c, _) = controller(Some(latch))
+    val held = (1 to ZcApiController.MaxPreviews).map(_ => c.checkCreateOrder().apply(FakeRequest(POST, "/").withJsonBody(Json.obj())))
+    status(c.checkCreateOrder().apply(FakeRequest(POST, "/").withJsonBody(Json.obj()))) shouldBe TOO_MANY_REQUESTS
+    val body = Json.obj("draft" -> Json.obj("type" -> "walletLend", "market" -> "ERG", "amount" -> "1000000000"))
+    status(c.simulate(None).apply(FakeRequest(POST, "/").withJsonBody(body))) shouldBe TOO_MANY_REQUESTS
+    latch.countDown()
+    held.map(status(_)).toSet shouldBe Set(OK)
+    status(c.checkCreateOrder().apply(FakeRequest(POST, "/").withJsonBody(Json.obj()))) shouldBe OK
+  }
+
+  "The wrap quote" should "need the API key, since it reads this wallet's holdings" in {
+    val (c, _) = controller()
+    status(c.checkCreateWrap().apply(FakeRequest(POST, "/").withJsonBody(Json.obj("tokenId" -> id(1))))) shouldBe FORBIDDEN
   }
 
   "Every ZC send" should "need the API key, and activity too" in {

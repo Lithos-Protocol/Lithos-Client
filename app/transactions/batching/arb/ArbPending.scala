@@ -157,22 +157,31 @@ object ArbPending {
     })
 
     // The pending ancestors `tx` needs that `carried` does not hold, in spend order; None when one is contested,
-    // spends a pool, or the chain would pass its bound
+    // spends a pool, or there are more than `room`. A worklist, and each parent counted before it is followed, so
+    // a deep chain costs `room` steps rather than the stack.
     def ancestors(tx: CompleteMempool.MempoolTx, carried: Set[String], room: Int)
     : Option[Vector[CompleteMempool.MempoolTx]] = {
+      def parents(t: CompleteMempool.MempoolTx) = t.body.inputs.flatMap(i => creators.get(i.boxId)).distinct.iterator
       var ordered = Vector.empty[CompleteMempool.MempoolTx]
       var seen = carried + tx.id
-      def visit(current: CompleteMempool.MempoolTx): Boolean =
-        current.body.inputs.flatMap(i => creators.get(i.boxId)).distinct.forall { parent =>
-          seen.contains(parent.id) || {
+      var found = 0
+      var stack = List(tx -> parents(tx))
+      while (stack.nonEmpty) {
+        val (current, rest) = stack.head
+        if (!rest.hasNext) {
+          stack = stack.tail
+          if (current.id != tx.id) ordered :+= current
+        } else {
+          val parent = rest.next()
+          if (!seen.contains(parent.id)) {
             seen += parent.id
-            !spendsPool(parent) && BatchingMempool.uncontested(parent, spenders) && visit(parent) && {
-              ordered :+= parent
-              ordered.size <= room
-            }
+            found += 1
+            if (found > room || spendsPool(parent) || !BatchingMempool.uncontested(parent, spenders)) return None
+            stack = (parent -> parents(parent)) :: stack
           }
         }
-      if (visit(tx)) Some(ordered) else None
+      }
+      Some(ordered)
     }
 
     var superseded = Set.empty[String]

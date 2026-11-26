@@ -3470,7 +3470,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/ApiError'
         '503':
-          description: "The pool index is still building, the node is unavailable, or a pool has more provisions than one scan reads. Never returns a partial answer."
+          description: "The pool index is still building or may be missing pools (`truncated` on the pool list) while a token matches none it lists, the node is unavailable, or a pool has more provisions than one scan reads. Never returns a partial answer."
           content:
             application/json:
               schema:
@@ -5519,6 +5519,8 @@ paths:
           $ref: '#/components/responses/ZcBadRequest'
         '404':
           $ref: '#/components/responses/ZcNotFound'
+        '429':
+          $ref: '#/components/responses/ZcTooManyRequests'
         '503':
           $ref: '#/components/responses/ZcUnavailable'
   /sigmafi/zc/orders:
@@ -5576,6 +5578,8 @@ paths:
           $ref: '#/components/responses/ZcBadRequest'
         '404':
           $ref: '#/components/responses/ZcNotFound'
+        '429':
+          $ref: '#/components/responses/ZcTooManyRequests'
         '503':
           $ref: '#/components/responses/ZcUnavailable'
   /sigmafi/zc/offers:
@@ -5631,6 +5635,8 @@ paths:
           $ref: '#/components/responses/ZcBadRequest'
         '404':
           $ref: '#/components/responses/ZcNotFound'
+        '429':
+          $ref: '#/components/responses/ZcTooManyRequests'
         '503':
           $ref: '#/components/responses/ZcUnavailable'
   /sigmafi/zc/asks:
@@ -5688,6 +5694,8 @@ paths:
           $ref: '#/components/responses/ZcBadRequest'
         '404':
           $ref: '#/components/responses/ZcNotFound'
+        '429':
+          $ref: '#/components/responses/ZcTooManyRequests'
         '503':
           $ref: '#/components/responses/ZcUnavailable'
   /sigmafi/zc/lots:
@@ -5747,6 +5755,8 @@ paths:
           $ref: '#/components/responses/ZcBadRequest'
         '404':
           $ref: '#/components/responses/ZcNotFound'
+        '429':
+          $ref: '#/components/responses/ZcTooManyRequests'
         '503':
           $ref: '#/components/responses/ZcUnavailable'
   /sigmafi/zc/orders/{boxId}/fill:
@@ -5808,6 +5818,8 @@ paths:
           $ref: '#/components/responses/ZcBadRequest'
         '404':
           $ref: '#/components/responses/ZcNotFound'
+        '429':
+          $ref: '#/components/responses/ZcTooManyRequests'
         '503':
           $ref: '#/components/responses/ZcUnavailable'
   /sigmafi/zc/asks/{boxId}/buy:
@@ -5868,6 +5880,8 @@ paths:
           $ref: '#/components/responses/ZcBadRequest'
         '404':
           $ref: '#/components/responses/ZcNotFound'
+        '429':
+          $ref: '#/components/responses/ZcTooManyRequests'
         '503':
           $ref: '#/components/responses/ZcUnavailable'
   /sigmafi/zc/lots/{boxId}/buy:
@@ -5927,6 +5941,8 @@ paths:
           $ref: '#/components/responses/ZcBadRequest'
         '404':
           $ref: '#/components/responses/ZcNotFound'
+        '429':
+          $ref: '#/components/responses/ZcTooManyRequests'
         '503':
           $ref: '#/components/responses/ZcUnavailable'
   /sigmafi/zc/vaults/{boxId}/buy:
@@ -5987,6 +6003,8 @@ paths:
           $ref: '#/components/responses/ZcBadRequest'
         '404':
           $ref: '#/components/responses/ZcNotFound'
+        '429':
+          $ref: '#/components/responses/ZcTooManyRequests'
         '503':
           $ref: '#/components/responses/ZcUnavailable'
   /sigmafi/zc/vaults/{boxId}/pull:
@@ -6047,6 +6065,8 @@ paths:
           $ref: '#/components/responses/ZcBadRequest'
         '404':
           $ref: '#/components/responses/ZcNotFound'
+        '429':
+          $ref: '#/components/responses/ZcTooManyRequests'
         '503':
           $ref: '#/components/responses/ZcUnavailable'
   /sigmafi/zc/bonds/{assetId}/fractionalize:
@@ -6108,6 +6128,8 @@ paths:
           $ref: '#/components/responses/ZcBadRequest'
         '404':
           $ref: '#/components/responses/ZcNotFound'
+        '429':
+          $ref: '#/components/responses/ZcTooManyRequests'
         '503':
           $ref: '#/components/responses/ZcUnavailable'
   /sigmafi/zc/bonds/{assetId}/repay:
@@ -6168,6 +6190,8 @@ paths:
           $ref: '#/components/responses/ZcBadRequest'
         '404':
           $ref: '#/components/responses/ZcNotFound'
+        '429':
+          $ref: '#/components/responses/ZcTooManyRequests'
         '503':
           $ref: '#/components/responses/ZcUnavailable'
   /sigmafi/zc/bonds/{assetId}/recollateralize:
@@ -6228,6 +6252,8 @@ paths:
           $ref: '#/components/responses/ZcBadRequest'
         '404':
           $ref: '#/components/responses/ZcNotFound'
+        '429':
+          $ref: '#/components/responses/ZcTooManyRequests'
         '503':
           $ref: '#/components/responses/ZcUnavailable'
   /sigmafi/zc/bonds/{assetId}/liquidate:
@@ -6288,6 +6314,8 @@ paths:
           $ref: '#/components/responses/ZcBadRequest'
         '404':
           $ref: '#/components/responses/ZcNotFound'
+        '429':
+          $ref: '#/components/responses/ZcTooManyRequests'
         '503':
           $ref: '#/components/responses/ZcUnavailable'
   /sigmafi/zc/bonds/{assetId}/extinguish:
@@ -6349,6 +6377,8 @@ paths:
           $ref: '#/components/responses/ZcBadRequest'
         '404':
           $ref: '#/components/responses/ZcNotFound'
+        '429':
+          $ref: '#/components/responses/ZcTooManyRequests'
         '503':
           $ref: '#/components/responses/ZcUnavailable'
   /sigmafi/zc/claims/{tokenId}:
@@ -6391,8 +6421,10 @@ paths:
       summary: Wrap a token (quote)
       description: >
         What the send would do, at the snapshot `at`. Signs nothing. A write that cannot run now answers
-        200 with its `refusals`.
+        200 with its `refusals`. Needs the key, since the quote reads how much of the token this wallet holds.
       operationId: checkCreateZcWrap
+      security:
+        - ApiKeyAuth: []
       tags:
         - sigmafi-zc
       requestBody:
@@ -6408,6 +6440,10 @@ paths:
           $ref: '#/components/responses/ZcBadRequest'
         '404':
           $ref: '#/components/responses/ZcNotFound'
+        '403':
+          $ref: '#/components/responses/ZcForbidden'
+        '429':
+          $ref: '#/components/responses/ZcTooManyRequests'
         '503':
           $ref: '#/components/responses/ZcUnavailable'
   /sigmafi/zc/wraps:
@@ -6467,6 +6503,8 @@ paths:
           $ref: '#/components/responses/ZcBadRequest'
         '404':
           $ref: '#/components/responses/ZcNotFound'
+        '429':
+          $ref: '#/components/responses/ZcTooManyRequests'
         '503':
           $ref: '#/components/responses/ZcUnavailable'
   /sigmafi/zc/wraps/{receiptId}/unwrap:
@@ -6526,6 +6564,8 @@ paths:
           $ref: '#/components/responses/ZcBadRequest'
         '404':
           $ref: '#/components/responses/ZcNotFound'
+        '429':
+          $ref: '#/components/responses/ZcTooManyRequests'
         '503':
           $ref: '#/components/responses/ZcUnavailable'
   /sigmafi/zc/mints/{boxId}:
@@ -6581,6 +6621,8 @@ paths:
           $ref: '#/components/responses/ZcBadRequest'
         '404':
           $ref: '#/components/responses/ZcNotFound'
+        '429':
+          $ref: '#/components/responses/ZcTooManyRequests'
         '503':
           $ref: '#/components/responses/ZcUnavailable'
   /sigmafi/zc/boxes/{boxId}/cancel:
@@ -7634,7 +7676,7 @@ components:
           schema:
             $ref: '#/components/schemas/ApiError'
     ZcTooManyRequests:
-      description: "Too many simulations: at most 5 at once per caller, then 1 a second."
+      description: "Too many quotes or simulations: at most 4 run or wait at once across all callers, and a simulation at most 5 at once per caller, then 1 a second. Retry shortly."
       content:
         application/json:
           schema:
@@ -11213,7 +11255,7 @@ components:
           description: The tip the index was read at
         truncated:
           type: boolean
-          description: More pools exist than one index reads; the newest are listed.
+          description: A pool may be missing from the list. More pools exist than one index reads, and the newest are listed, or the node could not answer for a pool's vault.
         pools:
           type: array
           items:

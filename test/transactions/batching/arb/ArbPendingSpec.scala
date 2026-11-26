@@ -134,6 +134,24 @@ class ArbPendingSpec extends AnyFlatSpec with Matchers with MockitoSugar {
     view(four.map(_._1), boxes ++ four.map(_._2)).chains(canonicalNft).members.size shouldBe 4
   }
 
+  "A swap's pending ancestors" should "be carried ahead of it in spend order, within the bound" in {
+    val (parents, child) = funded(3)
+    val chain = view(parents :+ child).chains(canonicalNft)
+    chain.members.map(_.id) shouldBe (parents :+ child).map(_.id)
+    chain.members.init.map(_.kind).distinct shouldBe Vector(CandidateTx.MempoolAncestor)
+    view(funded(4) match { case (ps, c) => ps :+ c }).chains.get(canonicalNft) shouldBe None
+  }
+
+  they should "leave the pool confirmed, on a small stack, when the chain behind the swap is thousands deep" in {
+    val (parents, child) = funded(5000)
+    var result: Either[Throwable, ArbPending] = Left(new IllegalStateException("did not run"))
+    val thread = new Thread(null, () => result = try Right(view(parents :+ child)) catch { case t: Throwable => Left(t) },
+      "deep-ancestors", 256L * 1024)
+    thread.start()
+    thread.join()
+    result.map(_.chains.get(canonicalNft)) shouldBe Right(None)
+  }
+
   "The arb stage" should "find a cycle behind the swap, carry the swap first, and declare the arb displaced" in {
     nodeContext.getClient.execute { ctx =>
       val stake = arbStakeBox(ctx, wallet, 10 * Erg + ArbLeg.MinCarryValue)
@@ -195,6 +213,21 @@ class ArbPendingSpec extends AnyFlatSpec with Matchers with MockitoSugar {
     val paid = last.outputs(1)
     val changed = last.copy(outputs = last.outputs.updated(1, paid.copy(assets = paid.assets :+ NodeAsset(token, back))))
     funding.copy(assets = funding.assets :+ NodeAsset(token, in)) -> (txs.init :+ changed)
+  }
+
+  /**
+   * The recorded swap funded through `n` pending transactions in a line, the first spending the seller's recorded
+   * funding box. Returns the line in spend order and the swap spending its last output.
+   */
+  private def funded(n: Int): (Vector[NodeTransaction], NodeTransaction) = {
+    val funding = swap.inputs(1)
+    val parents = (0 until n).toVector.map { k =>
+      val id = f"$k%08x" + "a1" * 28
+      val in = if (k == 0) funding.boxId else f"${k - 1}%08x" + "b2" * 28
+      NodeTransaction(id, Seq(funding.copy(boxId = in)), Seq.empty,
+        Seq(swap.outputs(1).copy(boxId = f"$k%08x" + "b2" * 28, transactionId = id)))
+    }
+    parents -> swap.copy(inputs = swap.inputs.updated(1, funding.copy(boxId = parents.last.outputs.head.boxId)))
   }
 
   /**

@@ -68,7 +68,8 @@ final case class IndexedPool(kind: VerifiedPool.Kind,
 /**
  * @param status    `building` until the first index completes, then `ready`
  * @param height    the tip the snapshot was read at
- * @param truncated a template held more pool boxes than one scan reads
+ * @param truncated a pool may be missing: a template held more pool boxes than one scan reads, or a pool's vault
+ *                  could not be read
  */
 final case class PoolIndexSnapshot(status: String, height: Int, truncated: Boolean, pools: Seq[IndexedPool],
                                    tokens: Map[String, TokenMeta])
@@ -152,13 +153,21 @@ class LDPoolIndex(nodeContext: NodeContext, ioContext: => scala.concurrent.Execu
       "ERG/token")
     val (t2tBoxes, t2tCut) = newest(all.collect { case t @ TrackedBox(_, _, _: PoolDeployment.LithosDexToken) => t },
       "token/token")
-    val pools =
-      n2tBoxes.flatMap(box => Try(n2tPool(ctx, box, registry)).getOrElse(None)) ++
-        t2tBoxes.flatMap(box => Try(t2tPool(ctx, box, registry)).getOrElse(None))
+    // A box that does not parse is no pool; a vault the node could not answer for leaves its pool out unread
+    var unread = 0
+    def pool(read: => Option[IndexedPool]): Option[IndexedPool] = Try(read) match {
+      case Success(p) => p
+      case Failure(_: VaultUnread) => unread += 1; None
+      case Failure(_) => None
+    }
+    val pools = n2tBoxes.flatMap(box => pool(n2tPool(ctx, box, registry))) ++
+      t2tBoxes.flatMap(box => pool(t2tPool(ctx, box, registry)))
+    if (unread > 0) logger.warn(s"$unread LithosDEX pool(s) left out of the index at ${state.height}: their vaults " +
+      "could not be read; the index reads as truncated until a rebuild reads them")
     // ERG:LIT first whatever else holds, then verified pools, then newest
     val canonical = lithosdex.LDHelpers.getPoolNFT(network).toString
     val sorted = pools.sortBy(p => (p.nft != canonical, !p.verified, -p.inclusionHeight, p.nft))
-    PoolIndexSnapshot("ready", state.height, state.cut || n2tCut || t2tCut, sorted,
+    PoolIndexSnapshot("ready", state.height, state.cut || n2tCut || t2tCut || unread > 0, sorted,
       metaFor(sorted.flatMap(p => p.tokenX.toSeq :+ p.tokenY), registry))
   }
 
@@ -193,9 +202,12 @@ class LDPoolIndex(nodeContext: NodeContext, ioContext: => scala.concurrent.Execu
           provisionsUnlessFailed(ctx, c.poolNFT.toString, c.provToken.toString, n2t = false, verified, judged))
       }
 
-  /** A vault singleton stays one once it stands, so only a first sighting costs the read. */
+  /** A vault singleton stays one once it stands, so only a first sighting costs the read. A failed read throws. */
   private def vaultStands(vaultNft: String, check: => Boolean): Boolean =
-    vaultsStanding.contains(vaultNft) || (check && vaultsStanding.add(vaultNft))
+    vaultsStanding.contains(vaultNft) || (Try(check) match {
+      case Success(stands) => stands && vaultsStanding.add(vaultNft)
+      case Failure(ex) => throw new VaultUnread(vaultNft, ex)
+    })
 
   /**
    * The genesis verdict for an unverified pool, read once and kept. The pool as created is the provision
@@ -329,6 +341,10 @@ object LDPoolIndex {
 
   /** Most pool boxes indexed per template. Each new one costs a vault read and, unverified, a genesis check. */
   final val MaxPoolsPerKind = 512
+
+  /** The node could not say whether a pool's vault stands, so the pool is neither listed nor ruled out. */
+  private final class VaultUnread(vaultNft: String, cause: Throwable)
+    extends RuntimeException(s"could not read vault $vaultNft: ${cause.getMessage}", cause)
 
   /** Reads of one pool's genesis that may fail before the index stops trying until restart. */
   final val MaxGenesisReads = 3

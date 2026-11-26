@@ -425,6 +425,10 @@ class DexPoolExecution(nodeContext: NodeContext, walletSelector: EngineFunding, 
     val cached = Option(nftAnswers.get()).filter(_._1 == snapshot.height).map(_._2).getOrElse(Map.empty)
     val todo = ids.filterNot(cached.contains)
     val read = if (todo.isEmpty) Map.empty[String, Option[DexPoolExecution.NftFound]] else readNfts(todo, snapshot.pools)
+    // With a pool possibly missing from the index, a token matching no listed pool may still own a provision
+    val unknown = if (snapshot.truncated) read.collect { case (id, None) => id } else Nil
+    if (unknown.nonEmpty) throw LithosUnavailable(s"the pool index may be missing pools, so ${unknown.size} token(s) " +
+      s"cannot be ruled out as provision NFTs (${unknown.take(3).mkString(", ")}); retry once it is complete")
     if (read.nonEmpty) nftAnswers.updateAndGet { held =>
       val base = Option(held).filter(_._1 == snapshot.height).map(_._2).getOrElse(Map.empty)
       if (base.size + read.size > DexPoolExecution.MaxCachedNftAnswers) held else (snapshot.height, base ++ read)

@@ -177,6 +177,43 @@ class StorageRentSourceSpec extends AnyFlatSpec with Matchers with MockitoSugar 
     StorageRentSource.dueAt(held, 900001 + period).toSet shouldBe Set(id("a"), id("b"))
   }
 
+  it should "be offered oldest first" in {
+    val held = Map(id("c") -> 900002, id("a") -> 900000, id("b") -> 900001)
+    StorageRentSource.dueAt(held, 900002 + period) shouldBe Seq(id("a"), id("b"), id("c"))
+  }
+
+  // ─── reading due boxes back ───────────────────────────────────────────────
+
+  private def dueIds(n: Int): Seq[String] = (0 until n).map(i => f"$i%064x")
+  private def boxFor(boxId: String): NodeBox = NodeBox(boxId, "00" * 32, Parameters.OneErg, 0, 1, "0008cd" + "02" * 33)
+
+  "Reading due boxes back" should "read in pages, forget what a page left out, and keep reading past a failed page" in {
+    var asked = Vector.empty[Int]
+    val failing = dueIds(250).slice(100, 200).toSet
+    val read = StorageRentSource.readDue(dueIds(250), page => {
+      asked :+= page.size
+      if (page.exists(failing.contains)) scala.util.Failure(new RuntimeException("response too large"))
+      else scala.util.Success(page.filterNot(_ == dueIds(250).head).map(boxFor))
+    })
+    asked shouldBe Vector(100, 100, 50)
+    read.live.map(_.boxId).toSet shouldBe (dueIds(250).toSet -- failing - dueIds(250).head)
+    read.gone shouldBe Set(dueIds(250).head)
+    read.unread shouldBe 100
+    read.failure.get should include("response too large")
+  }
+
+  it should "stop after two failed pages, and read no more than one sweep can take" in {
+    var calls = 0
+    val down = StorageRentSource.readDue(dueIds(1000), _ => { calls += 1; scala.util.Failure(new RuntimeException("down")) })
+    (calls, down.live, down.gone, down.unread) shouldBe ((2, Seq.empty, Set.empty, 1000))
+    var read = 0
+    val many = StorageRentSource.readDue(dueIds(StorageRent.MaxBoxes + 500), page => {
+      read += page.size
+      scala.util.Success(page.map(boxFor))
+    })
+    (read, many.live.size, many.unread) shouldBe ((StorageRent.MaxBoxes, StorageRent.MaxBoxes, 500))
+  }
+
   // ─── what a sweep takes ───────────────────────────────────────────────────
 
   private def candidates(count: Int, value: Long): Seq[RentCandidate] =

@@ -175,6 +175,26 @@ class LDPoolIndexSpec extends TestKit(ActorSystem("ld-pool-index-spec")) with An
     new Fixture(forged = true).index.refreshNow().pools.map(_.nft) should not contain t2t.poolNFT.toString
   }
 
+  it should "read as truncated, not complete, while a pool's vault cannot be read, and list it once it can" in {
+    val f = new Fixture()
+    var vaultDown = true
+    when(f.api.unspentBoxesByTokenId(anyString(), any[Paging], any[SortDirection], any[MempoolOptions]))
+      .thenAnswer { inv =>
+        inv.getArgument[String](0) match {
+          case id if id == t2t.vaultNFT.toString && vaultDown => Failure(new RuntimeException("node unavailable"))
+          case id if id == lit.vaultNFT.toString => Success(Seq(IndexedBox(f.litVault, "", 100, 1L)))
+          case id if id == n2t.vaultNFT.toString => Success(Seq(IndexedBox(f.n2tVault, "", 100, 1L)))
+          case id if id == t2t.vaultNFT.toString => Success(Seq(IndexedBox(f.t2tVault, "", 100, 1L)))
+          case _ => Success(Seq.empty[IndexedBox])
+        }
+      }
+    val down = f.index.refreshNow()
+    (down.truncated, down.pools.map(_.nft).contains(t2t.poolNFT.toString)) shouldBe ((true, false))
+    vaultDown = false
+    val up = f.index.refreshNow()
+    (up.truncated, up.pools.map(_.nft).contains(t2t.poolNFT.toString)) shouldBe ((false, true))
+  }
+
   it should "keep the provisions a genesis created, with their owners, for verified pools too" in {
     val owner = "a7" * 32
     val f = new Fixture(creator = Some(owner))

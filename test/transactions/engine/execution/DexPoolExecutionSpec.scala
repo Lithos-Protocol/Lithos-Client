@@ -80,7 +80,7 @@ class DexPoolExecutionSpec extends TestKit(ActorSystem("dex-pool-execution-spec"
    */
   private def fixture(status: String = "ready", uncheckedReads: Option[GenesisVerdict] = sound,
                       mempool: Option[CompleteMempool.Snapshot] = None,
-                      n2tGenesis: Seq[GenesisProvision] = Seq.empty): Fixture = {
+                      n2tGenesis: Seq[GenesisProvision] = Seq.empty, truncated: Boolean = false): Fixture = {
     val api = mock[NodeApi]
     val (node, _, _) = FakeNodeContext(api, numAddresses = 1)
     val boxes = node.getClient.execute { ctx: BlockchainContext =>
@@ -110,7 +110,7 @@ class DexPoolExecutionSpec extends TestKit(ActorSystem("dex-pool-execution-spec"
     when(api.indexedBoxById(anyString())).thenReturn(Success(None))
     when(api.unconfirmedOutputByBoxId(anyString())).thenReturn(Success(None))
     val index = new LDPoolIndex(node, system.dispatcher, (_, _) => (), () => None) {
-      override def snapshot(): PoolIndexSnapshot = PoolIndexSnapshot(status, 100, truncated = false,
+      override def snapshot(): PoolIndexSnapshot = PoolIndexSnapshot(status, 100, truncated = truncated,
         if (status == "ready") pools.map(p => if (p.nft == n2t.poolNFT.toString) p.copy(genesisProvisions = n2tGenesis) else p)
         else Seq.empty, Map.empty)
       // The unchecked pool is read at placement; the others keep what the snapshot says
@@ -284,6 +284,16 @@ class DexPoolExecutionSpec extends TestKit(ActorSystem("dex-pool-execution-spec"
     }
     a[LithosBadRequest] should be thrownBy f.exec.lookupNfts(Seq.fill(101)("ab").zipWithIndex.map { case (_, i) => f"$i%064x" })
     a[LithosBadRequest] should be thrownBy f.exec.lookupNfts(Seq("not-an-id"))
+  }
+
+  it should "refuse to rule a token out while the index may be missing its pool" in {
+    val stranger = "f0" * 32
+    fixture().exec.lookupNfts(Seq(stranger)) shouldBe empty
+    val f = fixture(truncated = true)
+    a[LithosUnavailable] should be thrownBy f.exec.lookupNfts(Seq(stranger))
+    withClue("nor answer from a cache filled while it was incomplete: ") {
+      a[LithosUnavailable] should be thrownBy f.exec.lookupNfts(Seq(stranger))
+    }
   }
 
   it should "say how each NFT was minted, name a redeemed one, find a creator's, and read each once a tip" in {
