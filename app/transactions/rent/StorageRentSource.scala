@@ -56,6 +56,9 @@ class StorageRentSource(nodeContext: NodeContext,
    */
   private var deferred: Set[String] = Set.empty
 
+  /** The height the walk last stopped at on a failed read, and how many passes in a row did. */
+  private var stalled: Option[(Int, Int)] = None
+
   private var scanning: Boolean = false
   private var ticker: Option[Cancellable] = None
 
@@ -91,6 +94,20 @@ class StorageRentSource(nodeContext: NodeContext,
       if (pass.found.nonEmpty || pass.blocked.nonEmpty)
         logger.info(s"Rent scan ${pass.from}..${pass.nextHeight - 1} found ${pass.found.size} " +
           s"unspent and ${pass.blocked.size} re-emission boxes; holding ${held.size}")
+      pass.stoppedBy match {
+        case None => stalled = None
+        case Some(reason) =>
+          val stall = stalledAgain(stalled, pass.nextHeight)
+          if (stall._2 >= MaxReadsPerHeight) {
+            logger.error(s"Rent scan skips block ${pass.nextHeight} after ${stall._2} failed reads; " +
+              s"boxes it created are not collected: $reason")
+            cursor = Some(pass.nextHeight + 1)
+            stalled = None
+          } else {
+            logger.warn(s"Rent scan stopped at ${pass.nextHeight}, read again next pass: $reason")
+            stalled = Some(stall)
+          }
+      }
 
     case Scanned(Failure(ex)) =>
       scanning = false
@@ -137,16 +154,24 @@ class StorageRentSource(nodeContext: NodeContext,
   /**
    * Read every remembered box back, keep what still exists, and build one sweep out of what fits.
    *
-   * The read is the revalidation. Ids that do not come back name boxes somebody has already spent,
-   * and they are forgotten rather than retried.
+   * The read is the revalidation. Ids a successful read does not return name boxes somebody has
+   * already spent, and they are forgotten. A failed read offers nothing and forgets nothing.
    */
   private def sweep(ids: Seq[String], blockHeight: Int): Seq[CandidateBundle] =
+    nodeApi.boxesWithPoolByIds(ids) match {
+      case Failure(ex) =>
+        logger.warn(s"Rent sweep for block $blockHeight could not read back its ${ids.size} due " +
+          s"boxes, offering none this build: ${ex.getMessage}")
+        Seq.empty[CandidateBundle]
+      case Success(live) =>
+        val gone = ids.toSet -- live.map(_.boxId).toSet
+        if (gone.nonEmpty) self ! Spent(gone)
+        if (live.isEmpty) Seq.empty[CandidateBundle] else build(live, blockHeight)
+    }
+
+  private def build(live: Seq[node.model.NodeBox], blockHeight: Int): Seq[CandidateBundle] =
     nodeContext.getClient.execute { ctx =>
       val params = ctx.getDataSource.getParameters
-      val live = nodeApi.boxesWithPoolByIds(ids).getOrElse(Seq.empty)
-      val gone = ids.toSet -- live.map(_.boxId).toSet
-      if (gone.nonEmpty) self ! Spent(gone)
-
       val protocol = ProtocolBoxes(ctx)
       val candidates = live.flatMap { box =>
         val input: InputUTXO = box.toInputUTXO(ctx)
@@ -181,22 +206,10 @@ class StorageRentSource(nodeContext: NodeContext,
     val ceiling = walkCeiling(tip, rentConfig.lookaheadBlocks)
     if (from > ceiling) return Pass(from, from, Map.empty, Set.empty)
 
-    val until = math.min(from + rentConfig.blocksPerScan, ceiling + 1)
-    var found = Map.empty[String, Int]
-    var blocked = Set.empty[String]
-    var reached = from
-    (from until until).foreach { height =>
-      val outputs = nodeApi.blockAt(height).getOrElse(Seq.empty)
-        .flatMap(_.blockTransactions.transactions.flatMap(_.outputs))
-      val (open, reEmission) =
-        StorageRent.sortByAge(outputs, ceiling, nodeContext.getNetwork, protocol)
-      val unspent = if (open.isEmpty) Set.empty[String]
-        else nodeApi.boxesWithPoolByIds(open.toSeq).getOrElse(Seq.empty).map(_.boxId).toSet
-      found ++= outputs.collect { case box if unspent.contains(box.boxId) => box.boxId -> box.creationHeight }
-      blocked ++= reEmission
-      reached = height + 1
-    }
-    Pass(from, reached, found, blocked)
+    walk(from, math.min(from + rentConfig.blocksPerScan, ceiling + 1),
+      height => nodeApi.blockAt(height).map(_.flatMap(_.blockTransactions.transactions.flatMap(_.outputs))),
+      ids => nodeApi.boxesWithPoolByIds(ids).map(_.map(_.boxId).toSet),
+      outputs => StorageRent.sortByAge(outputs, ceiling, nodeContext.getNetwork, protocol))
   }
 }
 
@@ -206,10 +219,49 @@ object StorageRentSource {
 
   /**
    * What one pass read, from where, and the height the next one starts at. `found` maps id to
-   * creation height.
+   * creation height. `stoppedBy` is the failed read that ended the pass at `nextHeight`.
    */
   private[rent] final case class Pass(from: Int, nextHeight: Int, found: Map[String, Int],
-                                      blocked: Set[String])
+                                      blocked: Set[String], stoppedBy: Option[String] = None)
+
+  /** Passes in a row a height may fail before the walk skips it, so one unreadable block cannot stop it. */
+  final val MaxReadsPerHeight: Int = 5
+
+  /** The stall after a pass stopped at `stoppedAt`: one more pass if it stopped there last time too. */
+  def stalledAgain(previous: Option[(Int, Int)], stoppedAt: Int): (Int, Int) =
+    stoppedAt -> previous.filter(_._1 == stoppedAt).fold(1)(_._2 + 1)
+
+  /**
+   * Reads heights `from` until `until`, keeping each block's unspent boxes that `sort` keeps.
+   *
+   * Stops at the first height whose block or unspent read fails, without reading past it, so the
+   * next pass reads that height again rather than skipping its boxes for good.
+   */
+  private[rent] def walk(from: Int, until: Int,
+                         outputsAt: Int => Try[Seq[node.model.NodeBox]],
+                         unspentAmong: Seq[String] => Try[Set[String]],
+                         sort: Seq[node.model.NodeBox] => (Set[String], Set[String])): Pass = {
+    var found = Map.empty[String, Int]
+    var blocked = Set.empty[String]
+    var reached = from
+    var stoppedBy = Option.empty[String]
+    while (stoppedBy.isEmpty && reached < until) {
+      val read = outputsAt(reached).flatMap { outputs =>
+        val (open, reEmission) = sort(outputs)
+        val unspent = if (open.isEmpty) Success(Set.empty[String]) else unspentAmong(open.toSeq)
+        unspent.map(kept =>
+          outputs.collect { case box if kept.contains(box.boxId) => box.boxId -> box.creationHeight } -> reEmission)
+      }
+      read match {
+        case Success((kept, reEmission)) =>
+          found ++= kept
+          blocked ++= reEmission
+          reached += 1
+        case Failure(ex) => stoppedBy = Some(s"${ex.getClass.getSimpleName}: ${ex.getMessage}")
+      }
+    }
+    Pass(from, reached, found, blocked, stoppedBy)
+  }
 
   /**
    * First inclusion height the walk reads, `behind` blocks before the newest block whose boxes are

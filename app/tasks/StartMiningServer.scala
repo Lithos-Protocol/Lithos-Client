@@ -111,6 +111,10 @@ class StartMiningServer @Inject()(system: ActorSystem, config: Configuration,
             system.actorOf(akka.actor.Props(new transactions.rent.StorageRentSource(
               nodeConfig, configs.RentConfig(config), rentLimits,
               stratumParams.candidate.useTruePropCollection)), "storage-rent-source")))
+        // Started either way: a node collecting rent itself pays it to the lender whether or not this
+        // client's own sweep is on.
+        system.actorOf(akka.actor.Props(new transactions.rent.RentClaimWatch(nodeConfig, stateFrame)),
+          "rent-claim-watch")
 
         // Batchers run from Module either way; this only decides whether the stratum asks them.
         def batcherSource(name: String, batcher: ActorRef): Option[mining.MiningMessages.CandidateSource] =

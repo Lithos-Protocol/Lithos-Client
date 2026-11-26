@@ -97,8 +97,11 @@ object ZcConfig {
   final val DefaultFillsRetentionDays = 1460
   final val MaxFillsRetentionDays = 36500
 
+  /** The first mainnet block holding a box under the pinned ZC contracts. */
+  final val MainnetFirstBlock = 1918857
+
   /** Mirrors `sigmafi.zc` in application.conf; keep the two in step. */
-  val Default: ZcConfig = ZcConfig(enabled = true, maxBoxes = 10000, fillsFromHeight = 0,
+  val Default: ZcConfig = ZcConfig(enabled = true, maxBoxes = 10000, fillsFromHeight = MainnetFirstBlock,
     fillsRetentionDays = DefaultFillsRetentionDays)
 
   def apply(config: Configuration): ZcConfig = {

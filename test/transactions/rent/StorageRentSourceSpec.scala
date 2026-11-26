@@ -246,6 +246,53 @@ class StorageRentSourceSpec extends AnyFlatSpec with Matchers with MockitoSugar 
       be <= StorageRent.MaxBoxes
   }
 
+  // ─── a pass over failing reads ────────────────────────────────────────────
+
+  private def keepAll(boxes: Seq[NodeBox]): (Set[String], Set[String]) = boxes.map(_.boxId).toSet -> Set.empty
+
+  private def blockOf(height: Int): Seq[NodeBox] = Seq(output(height.toString.last.toString, height))
+
+  private def everyBoxUnspent(ids: Seq[String]): scala.util.Try[Set[String]] = scala.util.Success(ids.toSet)
+
+  /** Read again from the height it stopped at, which is when the boxes behind the failure show up. */
+  "A pass" should "stop at a failed block read and read that height on the next pass" in {
+    val failing = StorageRentSource.walk(10, 15,
+      h => if (h == 12) scala.util.Failure(new RuntimeException("timeout")) else scala.util.Success(blockOf(h)),
+      everyBoxUnspent, keepAll)
+    failing.nextHeight shouldBe 12
+    failing.found.values.toSet shouldBe Set(10, 11)
+    failing.stoppedBy should not be empty
+
+    val next = StorageRentSource.walk(failing.nextHeight, 15, h => scala.util.Success(blockOf(h)),
+      everyBoxUnspent, keepAll)
+    withClue("the boxes of the height that failed must be found when it is read again: ") {
+      next.found.values.toSet shouldBe Set(12, 13, 14)
+    }
+  }
+
+  it should "stop at a failed unspent read rather than drop that block's boxes" in {
+    val pass = StorageRentSource.walk(10, 15, h => scala.util.Success(blockOf(h)),
+      ids => if (ids.exists(_.startsWith("1" * 2))) scala.util.Failure(new RuntimeException("timeout"))
+        else everyBoxUnspent(ids),
+      keepAll)
+    pass.nextHeight shouldBe 11
+    pass.found.values.toSet shouldBe Set(10)
+  }
+
+  /** Bounded, so one block that can never be read costs its own boxes and not every later block's. */
+  "A height that keeps failing" should "count its passes, and a different height starts over" in {
+    val stalls = Iterator.iterate(StorageRentSource.stalledAgain(None, 12))(s =>
+      StorageRentSource.stalledAgain(Some(s), 12))
+    stalls.drop(StorageRentSource.MaxReadsPerHeight - 1).next() shouldBe (12 -> StorageRentSource.MaxReadsPerHeight)
+    StorageRentSource.stalledAgain(Some(12 -> 4), 13) shouldBe (13 -> 1)
+  }
+
+  "A pass" should "read every height when nothing fails" in {
+    val pass = StorageRentSource.walk(10, 15, h => scala.util.Success(blockOf(h)), everyBoxUnspent, keepAll)
+    pass.nextHeight shouldBe 15
+    pass.stoppedBy shouldBe empty
+  }
+
   // ─── config ───────────────────────────────────────────────────────────────
 
   /**

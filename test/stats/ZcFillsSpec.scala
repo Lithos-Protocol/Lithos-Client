@@ -83,6 +83,21 @@ class ZcFillsSpec extends AnyFlatSpec with Matchers {
     f.standing.indexedTo shouldBe Some(H + 4)
   }
 
+  /** Testnet runs the mainnet start height: the history waits, then starts once the chain reaches it. */
+  it should "wait, rather than fail, on a chain not yet at its start height" in {
+    val c = chain()
+    val f = index(c, zc.copy(fillsFromHeight = H + 10))
+    f.tick()
+    f.standing.status shouldBe "loading"
+    c.sliceReads.get shouldBe 0
+
+    c.extend(H + 4, H + 12)
+    c.indexed = H + 12
+    f.tick()
+    f.standing.status shouldBe "ready"
+    f.standing.indexedTo shouldBe Some(H + 12)
+  }
+
   it should "stay off, reading nothing, until a start height is set" in {
     val c = chain()
     val f = index(c, zc.copy(fillsFromHeight = 0))

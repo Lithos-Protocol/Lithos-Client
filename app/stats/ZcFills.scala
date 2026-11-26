@@ -95,6 +95,11 @@ final class ZcFills(settings: ZcConfig, openStore: () => ZcFillStore, api: () =>
     val node = api()
     val source = new CanonicalBlockSource(node)
     val indexed = node.indexedHeight().get.indexedHeight
+    // A chain not yet at the start height, such as testnet under the mainnet default, waits rather than failing
+    if (db.cursor.isEmpty && indexed < settings.fillsFromHeight) {
+      state.set(Standing("loading", Some(System.currentTimeMillis()), None))
+      return
+    }
     if (db.cursor.isEmpty) {
       val start = settings.fillsFromHeight
       val parent = source.headerAt(start - 1).get
