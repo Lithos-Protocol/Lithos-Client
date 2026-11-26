@@ -2,6 +2,7 @@ package transactions.batching.tracking
 
 import akka.actor.ActorSystem
 import configs.{Contexts, NodeContext}
+import ergodexcl.ErgoDexClContracts
 import node.NodeApi
 import node.model.{IndexedBox, MempoolOptions, Paging, SortDirection}
 import org.ergoplatform.appkit.NetworkType
@@ -230,6 +231,10 @@ object PoolTracker {
       "LithosDex token pool template" -> (p => api.unspentBoxesByTemplateHash(shapes.t2tTemplateHash, p,
         SortDirection.Desc, MempoolOptions.ConfirmedOnly))) ++
       (if (shapes.network != NetworkType.MAINNET) Seq.empty else Seq(
+        "ErgoDEX CL position script" -> ((p: Paging) => api.unspentBoxesByErgoTree(ErgoDexClContracts.PositionErgoTree, p,
+          SortDirection.Desc, MempoolOptions.ConfirmedOnly)),
+        "ErgoDEX CL config" -> ((p: Paging) => api.unspentBoxesByTokenId(ErgoDexClContracts.ConfigToken, p,
+          SortDirection.Desc, MempoolOptions.ConfirmedOnly)),
         "SigmaUSD bank" -> ((p: Paging) => api.unspentBoxesByTokenId(SigmaUsdContracts.BankNft, p, SortDirection.Desc,
           MempoolOptions.ConfirmedOnly)),
         "SigmaUSD oracle pool" -> ((p: Paging) => api.unspentBoxesByTokenId(SigmaUsdContracts.OracleNft, p,

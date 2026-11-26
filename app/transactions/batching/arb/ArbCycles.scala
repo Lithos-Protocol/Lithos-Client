@@ -31,6 +31,12 @@ object ArbCycles {
   private val logger: Logger = LoggerFactory.getLogger("ArbCycles")
 
   /**
+   * Most legs through ErgoDEX CL positions one build takes. A CL leg carries the swap script and costs more to check
+   * than any other leg, so with every other slot at the dearest other leg the arb source's cost budget still holds.
+   */
+  final val MaxClLegs = 16
+
+  /**
    * Where a pool stands for this build: the box holding its state, and the transaction outside the cycle being
    * built that created it, which that cycle names as a package parent. None for a confirmed box. `carry` is a
    * pending chain the first bundle through the pool carries ahead of its own members, ending in `createdBy`.
@@ -169,6 +175,7 @@ object ArbCycles {
       var carryCreatedBy = Option.empty[String]
       var bundles = Vector.empty[CandidateBundle]
       var stopped = false
+      var clLegs = 0
       def used: Int = bundles.map(_.members.size).sum
       // What a bundle through `pools` adds to the package besides its own transactions: the chains they carry
       def carriedBy(pools: Seq[String]): Int = pools.flatMap(at(_).carry.map(_.id)).distinct.size
@@ -223,8 +230,10 @@ object ArbCycles {
       // SigmaFi ZC collateral arbitrage on the same stake and live pool states
       zc.foreach { z =>
         if (!stopped && z.maxBundles > 0 && used < slots && !selectUntil.isOverdue() && !buildUntil.isOverdue()) {
-          // A pool with a pending chain to carry is left out, since ZC bundles name only package parents
-          val carrying = at.collect { case (nft, p) if p.carry.nonEmpty => nft }.toSet
+          // Left out: a pool with a pending chain to carry, since ZC bundles name only package parents, and CL
+          // positions, whose fee outputs and data input the ZC builders do not write
+          val carrying = at.collect { case (nft, p) if p.carry.nonEmpty => nft }.toSet ++
+            states.collect { case (nft, p) if p.kind == ArbPoolKind.ErgoDexCl => nft }
           val rawPlaces = at.collect { case (nft, p) if p.carry.isEmpty => nft -> (p.box -> p.createdBy) }
           var reserveFailed = false
           val (zcBundles, nextCarry, nextCarryParent, nextStates, nextPlaces) =
@@ -244,7 +253,9 @@ object ArbCycles {
       }
 
       ArbSearch.select(index.routes, states, maxIn, minProfit, slots - used, selectUntil) { cycle =>
+        val cl = cycle.swaps.count(_.pool.kind == ArbPoolKind.ErgoDexCl)
         if (stopped || buildUntil.isOverdue()) { stopped = true; false }
+        else if (clLegs + cl > MaxClLegs) false
         else signed(ctx, wallet, cycle, at, carry, blockHeight, profitTo) match {
           case Failure(ex) =>
             logger.warn(s"Could not build arb cycle ${cycle.route.key} for block $blockHeight, dropping it whole: " +
@@ -253,7 +264,11 @@ object ArbCycles {
           case Success(legs) =>
             val pools = cycle.route.hops.map(_.nft)
             if (used + legs.size + carriedBy(pools) > slots) false
-            else take(legs, pools, ArbKind.cycle(cycle.swaps.map(_.pool)))
+            else {
+              val taken = take(legs, pools, ArbKind.cycle(cycle.swaps.map(_.pool)))
+              if (taken) clLegs += cl
+              taken
+            }
         }
       }
       bundles

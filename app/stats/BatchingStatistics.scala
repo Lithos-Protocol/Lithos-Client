@@ -6,7 +6,9 @@ import forwards.DFHelpers
 import forwards.contracts.DFContracts
 import node.model.{NodeAsset, NodeBox, NodeRegisters}
 import org.bouncycastle.util.encoders.Hex
+import ergodexcl.ErgoDexClContracts
 import org.ergoplatform.appkit.{ErgoType, ErgoValue, NetworkType}
+import sigmausd.SigmaUsdContracts
 import scorex.crypto.hash.Blake2b256
 import state.messages.{BlockInfo, BlockTx, TxOutput}
 import sigmafi.zc.{ZcContracts, ZcExpression}
@@ -429,7 +431,8 @@ private[stats] object BatchingStatistics {
 
   /**
    * One fee-less leg of an arb chain:
-   * - a DEX pool swap (`[pool, carry] -> [poolNext, carryOut, profit?]`)
+   * - a DEX pool swap (`[pool, carry] -> [poolNext, carryOut, profit?]`), the pool an ErgoDEX or LithosDex pool, the
+   *   SigmaUSD bank, or an ErgoDEX CL position, whose leg ends with the protocol fee outputs its context variable 3 names
    * - a token/token grid fill (`[pool, carry, gridOrder] -> [poolNext, carryOut, gridChild]`)
    * - a SigmaFi ZC collateral purchase (`[zcTarget, carry] -> protoOutputs ++ sweepOut? ++ [carryOut] ++ profitOut?`)
    * Anything else in the transaction, a fee output included, makes it no leg.
@@ -445,21 +448,44 @@ private[stats] object BatchingStatistics {
     poolArbLeg(block, tx, network).orElse(zcArbLeg(block, tx))
 
   private def poolArbLeg(block: BlockInfo, tx: BlockTx, network: NetworkType): Option[ArbLegTx] = {
-    val swaps = tx.inputs.size == 2 && tx.outputs.size >= 2 && tx.outputs.size <= 3
+    val swaps = tx.inputs.size == 2 && tx.outputs.size >= 2 && tx.outputs.size <= 4
     val fillsGrid = tx.inputs.size == 3 && tx.outputs.size == 3
     if ((!swaps && !fillsGrid) || tx.outputs.exists(_.ergoTree == Contract.FEE.ergoTreeHex)) None
     else for {
       pool <- block.inputBox(tx.inputs.head.id)
       carry <- block.inputBox(tx.inputs(1).id)
-      nft <- pool.assets.headOption.filter(_.amount == 1L).map(_.id.toString)
+      (nft, at) <- arbPoolNft(pool, network)
       next = tx.outputs.head
-      if next.ergoTree == pool.ergoTree && next.assets.headOption.exists(t => t.id.toString == nft && t.amount == 1L)
-      if tx.outputs(1).ergoTree != pool.ergoTree && poolProtocol(pool, network).isDefined
+      if next.ergoTree == pool.ergoTree && next.assets.lift(at).exists(t => t.id.toString == nft && t.amount == 1L)
+      if tx.outputs(1).ergoTree != pool.ergoTree
+      fees <- if (pool.ergoTree.equalsIgnoreCase(ErgoDexClContracts.PositionErgoTree) && !fillsGrid) clFeeOutputs(tx)
+        else Some(Set.empty[Int])
+      rest = (2 until tx.outputs.size).filterNot(fees.contains)
+      if rest.size <= 1 && rest.forall(_ == 2) && fees.forall(i => tx.outputs(i).ergoTree != tx.outputs(1).ergoTree)
       if !fillsGrid || block.inputBox(tx.inputs(2).id).exists(order =>
         tx.outputs(2).ergoTree == order.ergoTree && MachinaOrder.parseTokenGrid(box(order)).isDefined)
     } yield ArbLegTx(tx, carry, nft, carryIndex = 1,
-      profitIndex = if (fillsGrid || tx.outputs.size < 3) None else Some(2))
+      profitIndex = if (fillsGrid) None else rest.headOption)
   }
+
+  /**
+   * The NFT that names a pool an arb leg may swap through, and where the box holds it: the first token at one unit for
+   * ErgoDEX and LithosDex pools and CL positions, the third for the SigmaUSD bank.
+   */
+  private def arbPoolNft(pool: TxOutput, network: NetworkType): Option[(String, Int)] =
+    if (pool.ergoTree.equalsIgnoreCase(SigmaUsdContracts.BankErgoTree))
+      pool.assets.lift(2).filter(t => t.id.toString == SigmaUsdContracts.BankNft && t.amount == 1L).map(_ => SigmaUsdContracts.BankNft -> 2)
+    else if (poolProtocol(pool, network).isDefined || pool.ergoTree.equalsIgnoreCase(ErgoDexClContracts.PositionErgoTree))
+      pool.assets.headOption.filter(_.amount == 1L).map(_.id.toString -> 0)
+    else None
+
+  /** The protocol fee outputs a CL position's leg names in its context variable 3, all after the carry; None when unreadable. */
+  private def clFeeOutputs(tx: BlockTx): Option[Set[Int]] = Try {
+    val hex = tx.inputs.head.spendingProof.flatMap(_.ext.get("3")).get
+    val value = ErgoValue.fromHex(hex)
+    require(value.getType == ErgoType.collType(ErgoType.integerType()))
+    value.getValue.asInstanceOf[sigma.Coll[Int]].toArray.toSet[Int]
+  }.toOption.filter(_.forall(i => i >= 2 && i < tx.outputs.size))
 
   private def zcArbLeg(block: BlockInfo, tx: BlockTx): Option[ArbLegTx] = {
     if (tx.inputs.size != 2 || tx.outputs.size < 2 || tx.outputs.size > 5 ||

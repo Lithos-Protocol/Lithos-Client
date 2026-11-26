@@ -54,13 +54,17 @@ object ArbLeg {
    */
   final val MinCarryValue: Long = UTXO.MIN_CHANGE
 
-  /** What `carry` holds after `swap` and `minerFee`, or None when it lacks the input or falls below the floor. */
+  /**
+   * What `carry` holds after `swap`, the ERG its fee outputs take beside `amountIn`, and `minerFee`, or None when it
+   * lacks the input or falls below the floor.
+   */
   def carried(carry: ArbCarry, swap: ArbSwap, minerFee: Long): Option[ArbCarry] =
-    if (swap.amountIn <= 0L || swap.amountOut <= 0L || minerFee < 0L || carry.amountOf(swap.assetIn) < swap.amountIn) None
+    if (swap.amountIn <= 0L || swap.amountOut <= 0L || minerFee < 0L || swap.feeBoxErg < 0L ||
+      carry.amountOf(swap.assetIn) < swap.amountIn) None
     else {
       val ergIn = if (swap.assetIn.isErg) swap.amountIn else 0L
       val ergOut = if (swap.assetOut.isErg) swap.amountOut else 0L
-      val value = BigInt(carry.value) - ergIn + ergOut - minerFee
+      val value = BigInt(carry.value) - ergIn + ergOut - minerFee - swap.feeBoxErg
       // Amounts as plain pairs first: a Token cannot hold zero, and a fully spent input reaches zero here
       val spent = carry.tokens.map { t =>
         t.id.toString -> (if (swap.assetIn.tokenId.contains(t.id.toString)) t.amount - swap.amountIn else t.amount)
@@ -84,7 +88,8 @@ object ArbLeg {
   /**
    * Signs `swap` against `poolBox` with `carry` paying for it, the rest returned to `carryTo`, holding whatever
    * registers the pool's contract reads there, with the pool's data inputs read. With `profit`,
-   * that many nanoERG of the rest go to their own output 2 instead, at the contract given. Built for
+   * that many nanoERG of the rest go to their own output 2 instead, at the contract given. The pool's fee outputs
+   * follow, then the miner fee's. Built for
    * `blockHeight`, or for the newest input's height when that is later. Throws when the swap is not priced
    * against `poolBox`, the carry cannot pay for it and keep its floor, or the pool's contract refuses the successor.
    */
@@ -100,19 +105,25 @@ object ArbLeg {
     require(split >= 0L && left.value - split >= MinCarryValue,
       s"the carry holds ${left.value} nanoERG, too little to split off $split and keep $MinCarryValue")
 
-    val spent = swap.pool.input(poolBox) +: carry
+    val profitOuts = profit.filter(_._2 > 0L).toSeq
+    val fees = swap.pool.feeOutputs(swap)
+    val feesAt = fees.indices.map(_ + 2 + profitOuts.size)
+    val spent = swap.pool.legInput(poolBox, swap, feesAt) +: carry
     val height = math.max(blockHeight, TxBuilder.newestInput(spent))
     val poolOut = swap.pool.successor(poolBox, swap.after).setCreationHeight(height)
     require(poolOut.value - poolBox.value == swap.poolErgDelta,
       s"the successor moves ${poolOut.value - poolBox.value} nanoERG where the swap moves ${swap.poolErgDelta}")
+    require(fees.map(_.value).sum == (if (swap.assetIn.isErg) swap.protocolFee else 0L) + swap.feeBoxErg,
+      s"the fee outputs hold ${fees.map(_.value).sum} nanoERG where the swap pays ${swap.protocolFee} and ${swap.feeBoxErg}")
     val carryOut = UTXO(carryTo, left.value - split, left.tokens, swap.pool.carryRegisters(swap)).setCreationHeight(height)
-    val profitOut = profit.filter(_._2 > 0L).map { case (to, amount) => UTXO(to, amount).setCreationHeight(height) }
+    val profitOut = profitOuts.map { case (to, amount) => UTXO(to, amount).setCreationHeight(height) }
+    val feeOutputs = fees.map(_.setCreationHeight(height))
     val feeOut = if (minerFee > 0L) Seq(UTXO.feeBox(minerFee).setCreationHeight(height)) else Seq.empty
 
     val unsigned = TxBuilder(ctx)
       .setInputs(spent: _*)
       .setDataInputs(swap.pool.dataInputs(ctx): _*)
-      .setOutputs((Seq(poolOut, carryOut) ++ profitOut ++ feeOut): _*)
+      .setOutputs((Seq(poolOut, carryOut) ++ profitOut ++ feeOutputs ++ feeOut): _*)
       .buildTx(0L, wallet.p2pk)
     // Signing runs the pool's script, so a successor the contract refuses fails here.
     Batcher.withNodeMinimums(ctx, wallet.sign(unsigned))

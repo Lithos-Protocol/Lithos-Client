@@ -212,6 +212,58 @@ class ArbStatisticsSpec extends AnyFlatSpec with Matchers with MockitoSugar {
     }
   }
 
+  "A cycle through an ErgoDEX CL position" should "be recorded either way, its protocol fee output read as no profit" in {
+    import transactions.batching.arb.{ArbDiscovery, ArbPoolEntry, ClFixtures, ErgoDexClArbPool}
+    nodeContext.getClient.execute { ctx =>
+      val box = ClFixtures.ergRsv
+      val cl = ErgoDexClArbPool.read(box, ClFixtures.config(ctx)).get
+      val rsv = 100000000L
+      val price = rsv / cl.marginal(xIn = true)
+      // Dearer at the pool: ERG in at the position (fee in ERG after the carry), SigRSV out at the pool. Cheaper at
+      // the pool: SigRSV out at the position last (fee in SigRSV after the profit)
+      Seq(1.2 -> 3, 0.8 -> 4).foreach { case (ratio, lastOutputs) =>
+        val pool = nativePool(ctx, id(if (ratio > 1) 340 else 341), cl.y.tokenId.get, (price * ratio).toLong, rsv)
+        val stake = stakeBox(ctx, wallet, 10 * Erg + ArbLeg.MinCarryValue)
+        val bundles = ArbCycles.build(ctx, wallet, ArbDiscovery.index(height - 1, Seq(entry(ctx, pool),
+          ArbPoolEntry(cl, box))), ArbBasis.Empty, Some(stake), Seq.empty, 1000000L, height, 2,
+          stake.value - ArbLeg.MinCarryValue, 1000000L, wallet.contract, Deadline.now + 1.minute,
+          Deadline.now + 1.minute, _ => true)
+        withClue(s"at $ratio: ") {
+          bundles.size shouldBe 1
+          val txs = bundles.head.members.map(m => NodeSync.blockTx(decoded(m)))
+          txs.map(_.outputs.size) shouldBe (if (ratio > 1) Vector(3, 3) else Vector(2, lastOutputs))
+          val block = blockOf(txs, Seq(pool, box, stake))
+          cycles(block, ctx).map(c => (c.legs, c.fee.grossNanoErg)) shouldBe
+            Vector((txs.map(_.id), txs.last.outputs(2).value.toString))
+          txs.foreach(tx => BatchingStatistics.read(block, tx, ctx.getNetworkType, mine) shouldBe empty)
+        }
+      }
+    }
+  }
+
+  "A cycle through the SigmaUSD bank" should "be recorded, the bank's NFT held third" in {
+    import transactions.batching.arb.{ArbDiscovery, ArbPoolEntry, SigmaUsdArbPool}
+    nodeContext.getClient.execute { ctx =>
+      val source = scala.io.Source.fromResource("arb/sigmausd-bank.json")
+      val doc = try new com.google.gson.JsonParser().parse(source.mkString).getAsJsonObject finally source.close()
+      val bankBox = NodeCodecs.box(doc.getAsJsonObject("bank"))
+      val sides = SigmaUsdArbPool.read(bankBox, NodeCodecs.box(doc.getAsJsonObject("oracle")))
+      val bank = sides.head.bank
+      val cents = 10000000L
+      val usd = nativePool(ctx, id(342), sigmausd.SigmaUsdContracts.SigUsd, bank.scPrice * cents * 9 / 10, cents)
+      val stake = stakeBox(ctx, wallet, 10 * Erg + ArbLeg.MinCarryValue)
+      val bundles = ArbCycles.build(ctx, wallet, ArbDiscovery.index(height - 1, entry(ctx, usd) +:
+        sides.map(ArbPoolEntry(_, bankBox))), ArbBasis.Empty, Some(stake), Seq.empty, 1000000L, height, 2,
+        stake.value - ArbLeg.MinCarryValue, 1000000L, wallet.contract, Deadline.now + 1.minute,
+        Deadline.now + 1.minute, _ => true)
+      bundles.size shouldBe 1
+      val txs = bundles.head.members.map(m => NodeSync.blockTx(decoded(m)))
+      val block = blockOf(txs, Seq(usd, bankBox, stake))
+      cycles(block, ctx).map(c => (c.legs, c.fee.grossNanoErg)) shouldBe
+        Vector((txs.map(_.id), txs.last.outputs(2).value.toString))
+    }
+  }
+
   "A chain of legs" should "not be recorded as a cycle of one leg" in {
     nodeContext.getClient.execute { ctx =>
       val (confirmed, txs) = built(ctx, wallet, pairs = 1)

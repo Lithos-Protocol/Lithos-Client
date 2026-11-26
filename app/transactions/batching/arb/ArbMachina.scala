@@ -68,11 +68,14 @@ object ArbMachina {
 
   /**
    * The best fill of the token/token grid `order` through any token/token pool of its pair among `pools`, with
-   * the sale of its gap through its base token's deepest ERG pool among them, by the ERG the sale returns.
+   * the sale of its gap through its base token's deepest ERG pool among them, by the ERG the sale returns. CL
+   * positions take no part: a fill lays out its own transaction, and a sale returns the stake whole, which a CL
+   * leg's fee box would cut into.
    */
-  def gridCycle(order: MachinaOrder, pools: Iterable[ArbPool]): Option[GridCycle] =
+  def gridCycle(order: MachinaOrder, all: Iterable[ArbPool]): Option[GridCycle] =
     order.base.filter(_ => order.kind == MachinaKind.TokenGrid).flatMap { id =>
       val base = ArbAsset.token(id)
+      val pools = all.filter(_.kind != ArbPoolKind.ErgoDexCl)
       pools.filter(p => p.x.isErg && p.y == base).toVector.sortBy(p => (-ergDepth(p), p.nft)).headOption.flatMap { erg =>
         pools.filter(p => !p.x.isErg && p.trades(base)).toVector
           .flatMap(pool => MachinaFill.best(order.routedThrough(pool.nft), pool))

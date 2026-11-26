@@ -1,16 +1,22 @@
 package transactions.batching.arb
 
+import ergodexcl.ErgoDexClContracts
 import lithosdex.contracts.{LDContracts, LDT2TContracts}
 import lithosdex.{LDHelpers, LDLiquidityPool, LDT2TLiquidityPool}
 import transactions.batching.ergodex.ErgoDexPool
-import transactions.batching.lithosdex.{LDT2TExecution, LithosDexTransactions}
+import transactions.batching.lithosdex.{DexContracts, LDT2TExecution, LithosDexTransactions}
 import node.MutationConversions._
 import node.model.NodeBox
-import org.ergoplatform.appkit.{BlockchainContext, ErgoValue}
+import org.bouncycastle.util.encoders.Hex
+import org.ergoplatform.appkit.scalaapi.{scalaByteType, scalaIntType, scalaLongType}
+import org.ergoplatform.appkit.{BlockchainContext, ErgoType, ErgoValue}
 import org.ergoplatform.sdk.ErgoId
-import pricing.SigmaUsdBank
+import pricing.{ClPosition, ClProtocol, ClSwap, SigmaUsdBank}
+import sigma.ast.ErgoTree
+import sigma.{Coll, Colls}
 import sigmausd.SigmaUsdContracts
-import work.lithos.mutations.{InputUTXO, Token, UTXO}
+import utils.BoxMinimum
+import work.lithos.mutations.{Contract, InputUTXO, Token, UTXO}
 
 import scala.util.Try
 
@@ -25,7 +31,7 @@ object ArbAsset {
   def token(id: String): ArbAsset = ArbAsset(Some(id.toLowerCase))
 }
 
-/** The pool kinds a leg can swap through: four AMM kinds and the SigmaUSD bank. */
+/** The pool kinds a leg can swap through: four AMM kinds, ErgoDEX CL positions and the SigmaUSD bank. */
 sealed abstract class ArbPoolKind(val label: String)
 
 object ArbPoolKind {
@@ -33,20 +39,24 @@ object ArbPoolKind {
   case object ErgoDexToken extends ArbPoolKind("ergodex-t2t")
   case object LithosDexNative extends ArbPoolKind("lithosdex-n2t")
   case object LithosDexToken extends ArbPoolKind("lithosdex-t2t")
+  case object ErgoDexCl extends ArbPoolKind("ergodex-cl")
   case object SigmaUsdBank extends ArbPoolKind("sigmausd-bank")
 }
 
 /**
  * One swap priced against `pool`: `amountIn` of the pool's X when `xIn`, else of Y, for `amountOut` of the
  * other side, leaving the pool in state `after`. Every amount is what the pool's own contract checks.
+ * `protocolFee` is the part of `amountIn` paid to an output of its own rather than into the pool, and `feeBoxErg`
+ * the ERG the carry pays beside `amountIn` so that output meets the box minimum; both are 0 but for CL positions.
  */
-final case class ArbSwap(pool: ArbPool, amountIn: Long, xIn: Boolean, amountOut: Long, after: ArbPool) {
+final case class ArbSwap(pool: ArbPool, amountIn: Long, xIn: Boolean, amountOut: Long, after: ArbPool,
+                         protocolFee: Long = 0L, feeBoxErg: Long = 0L) {
   def assetIn: ArbAsset = if (xIn) pool.x else pool.y
   def assetOut: ArbAsset = if (xIn) pool.y else pool.x
 
-  /** How much the pool box's ERG changes: only a pool whose X is ERG takes or pays it. */
+  /** How much the pool box's ERG changes: only a pool whose X is ERG takes or pays it, less an ERG protocol fee. */
   def poolErgDelta: Long =
-    if (assetIn.isErg) amountIn else if (assetOut.isErg) -amountOut else 0L
+    if (assetIn.isErg) amountIn - protocolFee else if (assetOut.isErg) -amountOut else 0L
 }
 
 /**
@@ -108,6 +118,12 @@ sealed trait ArbPool {
 
   /** Registers the leg's carry output (output 1) must hold for this pool's contract. */
   def carryRegisters(swap: ArbSwap): Seq[ErgoValue[_]] = Seq.empty
+
+  /** Outputs a leg through this pool pays besides the successor, the carry and the profit, from the carry. */
+  def feeOutputs(swap: ArbSwap): Seq[UTXO] = Seq.empty
+
+  /** The pool input for a leg of `swap` whose [[feeOutputs]] sit at the output indices `feesAt`. */
+  def legInput(poolBox: InputUTXO, swap: ArbSwap, feesAt: Seq[Int]): InputUTXO = input(poolBox)
 }
 
 object ArbPool {
@@ -279,6 +295,157 @@ object LithosDexT2TArbPool {
   /** The pool `box` holds, under the token/token deployment `contracts` it was verified against. */
   def apply(box: InputUTXO, contracts: LDT2TContracts): LithosDexT2TArbPool =
     LithosDexT2TArbPool(LDT2TLiquidityPool(box), contracts, box.id.toString)
+}
+
+/**
+ * The ErgoDEX CL config box as a leg reads it: the box, read by every leg as data input 0; the key protocol fees go to
+ * (R4); the protocol fee's parameters (R5). `tokenFeeBox` is the ERG a fee output holding one token needs, and
+ * `ergFeeBox` the least ERG a fee output of ERG alone may hold, both at the node's per-byte rate for the largest such box.
+ */
+final case class ClConfig(box: NodeBox, feeTo: Contract, protocol: ClProtocol, tokenFeeBox: Long, ergFeeBox: Long)
+
+object ClConfig {
+
+  /**
+   * The config `box` holds, or None when it is not the config box or does not list the pinned swap script in R8, so a
+   * delisting stops every CL leg. The fee boxes are sized at `perByte` nanoERG per byte.
+   */
+  def read(ctx: BlockchainContext, box: NodeBox, perByte: Long): Option[ClConfig] = Try {
+    val feeTree = feeTreeOf(box).get
+    val registers = box.registerValues
+    require(registers.size >= 5 && registers(4).getType == ErgoType.collType(ErgoType.collType(ErgoType.byteType())))
+    val listed = registers(4).getValue.asInstanceOf[Coll[Coll[Byte]]].toArray.toSeq.map(h => Hex.toHexString(h.toArray))
+    require(listed.exists(_.equalsIgnoreCase(ErgoDexClContracts.SwapScriptHash)))
+    val feeTo = Contract(ErgoTree.fromBytes(feeTree))
+    val protocol = ClProtocol.of(ErgoDexClArbPool.longs(registers(1))).get
+    // Sized at the largest value, token amount and height, so the box is never short whatever it ends up holding
+    def least(tokens: Seq[Token]): Long = Math.multiplyExact(
+      BoxMinimum.bytes(ctx, UTXO(feeTo, Long.MaxValue, tokens).setCreationHeight(Int.MaxValue)).toLong, perByte)
+    ClConfig(box, feeTo, protocol,
+      least(Seq(Token(ErgoId.create(ErgoDexClContracts.ConfigToken), Long.MaxValue))), least(Seq.empty))
+  }.toOption
+
+  /** The script protocol fees go to, in lower-case hex, from the config box's R4; None when it is not the config box. */
+  def feeScript(box: NodeBox): Option[String] = feeTreeOf(box).map(Hex.toHexString)
+
+  private def feeTreeOf(box: NodeBox): Option[Array[Byte]] = Try {
+    require(box.assets.headOption.exists(a => a.tokenId == ErgoDexClContracts.ConfigToken && a.amount == 1L))
+    val registers = box.registerValues
+    require(registers.nonEmpty && registers.head.getType == ErgoType.collType(ErgoType.byteType()))
+    registers.head.getValue.asInstanceOf[Coll[Byte]].toArray
+  }.toOption
+}
+
+/**
+ * One ErgoDEX CL position of the pinned deployment, priced by `position`'s rule with the protocol fee `config` names.
+ * An ERG position's X is its ERG; a token/token position's X is its second token, and its ERG never moves. A leg
+ * spends the position at input 0 as its own leader with the swap script in context variable 1, its successor at
+ * output 0, the config box as data input 0, and the protocol fee to an output of its own at the config's key: ERG
+ * when it at least meets the box minimum, else padded to it from the carry; a token in a box whose ERG the carry pays.
+ * `amountIn` is everything the carry pays in the input asset, protocol fee included.
+ */
+final case class ErgoDexClArbPool(position: ClPosition, nft: String, boxId: String, x: ArbAsset, y: ArbAsset,
+                                  config: ClConfig) extends ArbPool {
+
+  override def kind: ArbPoolKind = ArbPoolKind.ErgoDexCl
+
+  private def protocolRate: Long = config.protocol.rate(position.feePpm)
+
+  override def quote(amountIn: Long, xIn: Boolean): Long = swap(amountIn, xIn).fold(0L)(_.amountOut)
+
+  override def swap(amountIn: Long, xIn: Boolean): Option[ArbSwap] =
+    position.swap(amountIn, xIn, protocolRate).map(arbSwap(_, xIn))
+
+  override def swapFor(amountOut: Long, xIn: Boolean): Option[ArbSwap] =
+    position.swapFor(amountOut, xIn, protocolRate).map(arbSwap(_, xIn))
+
+  override def marginal(xIn: Boolean): Double = position.marginal(xIn)
+
+  override def withBox(boxId: String): ArbPool = copy(boxId = boxId)
+
+  override def input(poolBox: InputUTXO): InputUTXO = poolBox
+
+  override def dataInputs(ctx: BlockchainContext): Seq[InputUTXO] = {
+    val input = config.box.toInputUTXO(ctx)
+    require(input.id.toString == config.box.boxId, s"CL config box ${config.box.boxId} reads back as ${input.id}")
+    Seq(input)
+  }
+
+  override def feeOutputs(swap: ArbSwap): Seq[UTXO] =
+    if (swap.protocolFee <= 0L) Seq.empty
+    else swap.assetIn.tokenId match {
+      case None => Seq(UTXO(config.feeTo, Math.addExact(swap.protocolFee, swap.feeBoxErg)))
+      case Some(id) => Seq(UTXO(config.feeTo, swap.feeBoxErg, Seq(Token(ErgoId.create(id), swap.protocolFee))))
+    }
+
+  /** Its own leader at input 0, successor at output 0 (offset 0), the config at data input 0. */
+  override def legInput(poolBox: InputUTXO, swap: ArbSwap, feesAt: Seq[Int]): InputUTXO =
+    DexContracts.attachCtxVars(poolBox, Seq[(Byte, ErgoValue[_])](
+      0.toByte -> ErgoValue.of(Colls.fromArray(Array(0, 0)), scalaIntType),
+      1.toByte -> ErgoValue.of(Colls.fromArray(ErgoDexClArbPool.SwapScriptBytes), scalaByteType),
+      2.toByte -> ErgoValue.of(0),
+      3.toByte -> ErgoValue.of(Colls.fromArray(feesAt.toArray), scalaIntType),
+      4.toByte -> ErgoValue.of(0)))
+
+  /** Script, R4, token order and a token/token position's ERG kept; R5 holds the fees `after` keeps. */
+  override def successor(poolBox: InputUTXO, after: ArbPool): UTXO = after match {
+    case ErgoDexClArbPool(next, nextNft, _, _, _, _) =>
+      require(nextNft == nft, s"the successor of CL position $nft cannot hold position $nextNft")
+      val ids = poolBox.tokens.map(_.id)
+      require(ids.headOption.exists(_.toString == nft) && poolBox.registers.nonEmpty,
+        s"box ${poolBox.id} is not CL position $nft")
+      val ergSide = ids.size == 2
+      val value = if (ergSide) Math.addExact(Math.addExact(ErgoDexClArbPool.LockedErg, next.x), next.feesX) else poolBox.value
+      val sides = (if (ergSide) Seq.empty else Seq(Token(ids(1), Math.addExact(Math.addExact(next.x, 1L), next.feesX)))) :+
+        Token(ids.last, Math.addExact(Math.addExact(next.y, 1L), next.feesY))
+      UTXO(poolBox.contract, value, Token(ids.head, 1L) +: sides,
+        Seq(poolBox.registers.head, ErgoValue.of(Colls.fromArray(Array(next.feesX, next.feesY)), scalaLongType)))
+    case other => throw new IllegalArgumentException(s"a CL position cannot be succeeded by a ${other.kind.label} pool")
+  }
+
+  private def arbSwap(s: ClSwap, xIn: Boolean): ArbSwap = {
+    val feeBoxErg =
+      if (s.protocolFee <= 0L) 0L
+      else if ((if (xIn) x else y).isErg) math.max(0L, config.ergFeeBox - s.protocolFee)
+      else config.tokenFeeBox
+    ArbSwap(this, s.paid, xIn, s.out, copy(position = s.after), s.protocolFee, feeBoxErg)
+  }
+}
+
+object ErgoDexClArbPool {
+
+  /** nanoERG an ERG position locks outside its curve. */
+  final val LockedErg: Long = 1000000L
+
+  private val SwapScriptBytes: Array[Byte] = Hex.decode(ErgoDexClContracts.SwapScript)
+
+  /**
+   * The position `box` holds under `config`, or None when it is not one the pinned swap script prices: at the pinned
+   * position script, its NFT first at one unit, two tokens (ERG/token) or three (token/token), R4 holding the curve's
+   * offsets and LP fee and R5 its two fee balances, in a state the contract accepts.
+   */
+  def read(box: NodeBox, config: ClConfig): Option[ErgoDexClArbPool] = Try {
+    require(box.ergoTree.equalsIgnoreCase(ErgoDexClContracts.PositionErgoTree))
+    val assets = box.assets
+    require((assets.size == 2 || assets.size == 3) && assets.head.amount == 1L)
+    val registers = box.registerValues
+    require(registers.size >= 2)
+    val curve = longs(registers.head)
+    val fees = longs(registers(1))
+    require(curve.size >= 3 && fees.size >= 2)
+    val ergSide = assets.size == 2
+    val x = if (ergSide) box.value - LockedErg - fees.head else assets(1).amount - 1L - fees.head
+    val position = ClPosition(x, assets.last.amount - 1L - fees(1), curve.head, curve(1), curve(2), fees.head, fees(1))
+    require(position.valid)
+    ErgoDexClArbPool(position, assets.head.tokenId, box.boxId,
+      if (ergSide) ArbAsset.Erg else ArbAsset.token(assets(1).tokenId), ArbAsset.token(assets.last.tokenId), config)
+  }.toOption
+
+  /** The longs a Coll[Long] register holds. */
+  private[arb] def longs(register: ErgoValue[_]): Seq[Long] = {
+    require(register.getType == ErgoType.collType(ErgoType.longType()), s"a register holds ${register.getType}, not longs")
+    register.getValue.asInstanceOf[Coll[Long]].toArray.toSeq
+  }
 }
 
 /**

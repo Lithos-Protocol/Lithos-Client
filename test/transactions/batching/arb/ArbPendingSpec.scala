@@ -81,6 +81,19 @@ class ArbPendingSpec extends AnyFlatSpec with Matchers with MockitoSugar {
     }
   }
 
+  "A cycle through a CL position" should "still be superseded, its protocol fee paid to the config's key" in {
+    val key = ClConfig.feeScript(ClFixtures.configBox).get
+    // One leg of the recorded arb as a CL leg would pay it: an extra output at the CL fee key
+    val leg = arb.head
+    val feeBox = leg.outputs.last.copy(boxId = "fe" * 32, ergoTree = key, value = 1000000L, assets = Seq.empty,
+      additionalRegisters = node.model.NodeRegisters.empty)
+    val withFee = swap +: (leg.copy(outputs = leg.outputs :+ feeBox) +: arb.tail)
+    ArbPending.of(snapshot(withFee), 1L, pools, reader(boxes), paid = Set(key)).superseded shouldBe firstLegs
+    withClue("without the key, the leg reads as a swap paying two scripts: ") {
+      ArbPending.of(snapshot(withFee), 1L, pools, reader(boxes)).superseded should not be firstLegs
+    }
+  }
+
   "A direct swap" should "be carried on its own, never superseded" in {
     val pending = view(Seq(swap))
     pending.chains(canonicalNft).members.map(_.id) shouldBe Vector(swap.id)

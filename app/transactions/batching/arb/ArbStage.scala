@@ -67,8 +67,8 @@ class ArbStage(nodeContext: NodeContext,
   /** The last pending view, which a build on the same observation reuses. */
   private var pendingView: Option[ArbPending] = None
   private var building = false
-  /** Pool and route counts and the route cap last logged, so the index logs only when they change. */
-  private var logged: (Int, Int, Boolean) = (-1, -1, false)
+  /** Pool and route counts and the route and position caps last logged, so the index logs only when they change. */
+  private var logged: (Int, Int, Boolean, Boolean) = (-1, -1, false, false)
   /** ZC boxes that priced for arb but failed to sign, skipped for an hour (bounded to 1,024 entries). */
   private val zcRefused = new java.util.concurrent.atomic.AtomicReference(Map.empty[String, Long])
 
@@ -120,11 +120,13 @@ class ArbStage(nodeContext: NodeContext,
         case Success(outcome) =>
           outcome.index.foreach { found =>
             if (index.forall(_.height <= found.height)) index = Some(found)
-            if ((found.pools.size, found.routes.size, found.cut) != logged) {
-              logged = (found.pools.size, found.routes.size, found.cut)
+            if ((found.pools.size, found.routes.size, found.cut, found.positionsCut) != logged) {
+              logged = (found.pools.size, found.routes.size, found.cut, found.positionsCut)
               logger.info(s"Arb pools at height ${found.height}: ${found.pools.size} pool(s) on " +
                 s"${found.routes.size} route(s)")
               if (found.cut) logger.warn(s"Arb found more than ${ArbDiscovery.MaxRoutes} routes; the longest are left out")
+              if (found.positionsCut) logger.warn(s"Arb found more than ${ArbDiscovery.MaxPositions} ErgoDEX CL " +
+                "positions; those holding the least ERG are left out")
             }
           }
           outcome.build.foreach(b => last = Some(b))
@@ -238,10 +240,12 @@ class ArbStage(nodeContext: NodeContext,
         previous.filter(p => p.revision == revision && p.anchor == snapshot.anchor).getOrElse {
           val nodeApi = nodeContext.getNodeApi
           val pools = tracked.pools.filter(t => PoolDeployment.dex(t.deployment)).map(t => t.nft -> t.box).toMap
+          val clFees = tracked.pools.filter(_.deployment == PoolDeployment.ErgoDexClConfig)
+            .flatMap(t => ClConfig.feeScript(t.box)).toSet
           // A view that cannot be built leaves every pool confirmed, as with the option off
           Try(ArbPending.of(snapshot, revision, pools,
             ids => nodeApi.boxesWithPoolByIds(ids).get.map(b => b.boxId -> b).toMap,
-            previous.map(_.boxes).getOrElse(Map.empty))).recover { case ex =>
+            previous.map(_.boxes).getOrElse(Map.empty), clFees)).recover { case ex =>
             logger.warn(s"Could not read the pending pool spends for block ${tracked.height + 1}; pricing " +
               s"confirmed pools only: ${ex.getMessage}")
             ArbPending.Empty

@@ -2,11 +2,14 @@ package transactions.batching.arb
 
 import scala.concurrent.duration.Deadline
 
-/** A route priced at one input: each leg's swap in order, the first taking ERG in, the last paying ERG out. */
+/**
+ * A route priced at one input: each leg's swap in order, the first taking ERG in, the last paying ERG out. Its profit
+ * is net of the ERG legs pay for fee outputs beside their inputs.
+ */
 final case class ArbCycle(route: ArbRoute, swaps: Vector[ArbSwap]) {
   def amountIn: Long = swaps.head.amountIn
   def amountOut: Long = swaps.last.amountOut
-  def profit: Long = amountOut - amountIn
+  def profit: Long = amountOut - amountIn - swaps.iterator.map(_.feeBoxErg).sum
   def legs: Int = swaps.size
 }
 

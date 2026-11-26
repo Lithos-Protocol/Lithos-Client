@@ -6,6 +6,7 @@ import node.model.NodeBox
 import org.ergoplatform.appkit.BlockchainContext
 import transactions.batching.ergodex.ErgoDexPool
 import transactions.batching.tracking.{PoolDeployment, TrackedBox, TrackedPools}
+import utils.BoxMinimum
 
 import scala.util.Try
 
@@ -24,30 +25,40 @@ final case class ArbPoolEntry(pool: ArbPool, box: NodeBox) {
       case _: ErgoDexArbPool => ErgoDexPool.parse(candidate).map(ErgoDexArbPool)
       case p: LithosDexArbPool => Some(LithosDexArbPool(candidate.toInputUTXO(ctx), p.contracts))
       case p: LithosDexT2TArbPool => Some(LithosDexT2TArbPool(candidate.toInputUTXO(ctx), p.contracts))
+      case p: ErgoDexClArbPool => ErgoDexClArbPool.read(candidate, p.config)
       case _: SigmaUsdArbPool => None
     }).toOption.flatten.filter(_.boxId == candidate.boxId)
 }
 
 /**
  * What discovery found as of block `headerId` at `height`: every pool some route passes through, by NFT, and the
- * routes. Valid for blocks built on that block alone. `cut` says the route cap left some routes out. `parsed`
- * holds every pool that qualified, routed or not, and `vaults` the LithosDex vault NFTs read as standing, so the
- * next block re-reads neither for a pool whose box did not move.
+ * routes. Valid for blocks built on that block alone. `cut` says the route cap left some routes out, and
+ * `positionsCut` that the CL position cap left some positions out. `parsed` holds every pool that qualified, routed
+ * or not, and `vaults` the LithosDex vault NFTs read as standing, so the next block re-reads neither for a pool whose
+ * box did not move.
  */
 final case class ArbIndex(height: Int, pools: Map[String, ArbPoolEntry], routes: Vector[ArbRoute],
                           cut: Boolean = false, headerId: String = "",
-                          parsed: Map[String, ArbPoolEntry] = Map.empty, vaults: Set[String] = Set.empty)
+                          parsed: Map[String, ArbPoolEntry] = Map.empty, vaults: Set[String] = Set.empty,
+                          positionsCut: Boolean = false)
 
 /**
  * Builds arb's pool index from the tracked pools: ErgoDEX native and token pools less denied ones and those
- * whose box is older than `maxPoolAgeBlocks`, LithosDex pools of both kinds whose vault stands, and both sides of the
- * SigmaUSD bank priced at the tracked oracle box (rebuilt every time, since the oracle moves without the bank). Nothing is
- * scanned; the only node reads are a LithosDex vault seen for the first time.
+ * whose box is older than `maxPoolAgeBlocks`, LithosDex pools of both kinds whose vault stands, ErgoDEX CL positions
+ * under the tracked config box while it lists the pinned swap script, and both sides of the SigmaUSD bank priced at the
+ * tracked oracle box. CL positions and the bank are read again every time, since their config and oracle move without
+ * them. Nothing is scanned; the only node reads are a LithosDex vault seen for the first time.
  */
 object ArbDiscovery {
 
   /** Most routes held; past it the longest are left out, and discovery says so. */
   final val MaxRoutes = 20000
+
+  /**
+   * Most CL positions read; past it those holding the least ERG are left out, and discovery says so. Anyone can open a
+   * position, so this bounds what a flood of them costs each build.
+   */
+  final val MaxPositions = 64
 
   /** Most vaults read for the first time in one build; a pool whose vault waits is left out until a later one. */
   final val MaxVaultReads = 4
@@ -77,23 +88,30 @@ object ArbDiscovery {
       !denied.contains(t.nft.toLowerCase) && (t.deployment match {
         case PoolDeployment.ErgoDexNative | PoolDeployment.ErgoDexToken =>
           tracked.height - t.inclusionHeight <= ergoDex.maxPoolAgeBlocks
-        case PoolDeployment.SigmaUsdOracle => false
+        case PoolDeployment.SigmaUsdOracle | PoolDeployment.ErgoDexClConfig => false
         case _ => true
       })
     }.toVector.sortBy(_.nft)
     val oracle = tracked.pools.find(_.deployment == PoolDeployment.SigmaUsdOracle).map(_.box)
-    val parsed = qualifying.flatMap { t =>
+    val (positions, others) = qualifying.partition(_.deployment == PoolDeployment.ErgoDexCl)
+    val kept = positions.sortBy(t => (-t.box.value, t.nft)).take(MaxPositions)
+    lazy val config = tracked.pools.find(_.deployment == PoolDeployment.ErgoDexClConfig)
+      .flatMap(t => ClConfig.read(ctx, t.box, BoxMinimum.perByte(ctx)))
+    val parsed = (others.flatMap { t =>
       if (t.deployment == PoolDeployment.SigmaUsdBank)
         oracle.toSeq.flatMap(o => SigmaUsdArbPool.read(t.box, o)).map(ArbPoolEntry(_, t.box))
       else known.get(t.nft).filter(_.box.boxId == t.boxId).orElse(if (!standing(t.deployment)) None else entry(ctx, t)).toSeq
-    }.map(e => e.nft -> e).toMap
+    } ++ kept.flatMap(t => config.flatMap(c => ErgoDexClArbPool.read(t.box, c)).map(ArbPoolEntry(_, t.box))))
+      .map(e => e.nft -> e).toMap
+    val positionsCut = positions.size > kept.size
 
     previous.filter(p => p.parsed.keySet == parsed.keySet) match {
       case Some(p) =>
         ArbIndex(tracked.height, p.pools.keysIterator.map(nft => nft -> parsed(nft)).toMap, p.routes, p.cut,
-          tracked.headerId, parsed, vaults)
+          tracked.headerId, parsed, vaults, positionsCut)
       case None =>
-        index(tracked.height, parsed.values.toSeq).copy(headerId = tracked.headerId, parsed = parsed, vaults = vaults)
+        index(tracked.height, parsed.values.toSeq)
+          .copy(headerId = tracked.headerId, parsed = parsed, vaults = vaults, positionsCut = positionsCut)
     }
   }
 
@@ -112,7 +130,8 @@ object ArbDiscovery {
       case PoolDeployment.ErgoDexNative | PoolDeployment.ErgoDexToken => ErgoDexPool.parse(box).map(ErgoDexArbPool)
       case PoolDeployment.LithosDexNative(c) => Some(LithosDexArbPool(box.toInputUTXO(ctx), c))
       case PoolDeployment.LithosDexToken(c) => Some(LithosDexT2TArbPool(box.toInputUTXO(ctx), c))
-      case PoolDeployment.SigmaUsdBank | PoolDeployment.SigmaUsdOracle => None
+      case PoolDeployment.ErgoDexCl | PoolDeployment.ErgoDexClConfig | PoolDeployment.SigmaUsdBank |
+           PoolDeployment.SigmaUsdOracle => None
     }
     pool.filter(_.boxId == box.boxId).map(ArbPoolEntry(_, box))
   }.toOption.flatten

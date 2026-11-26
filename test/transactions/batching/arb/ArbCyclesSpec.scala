@@ -301,6 +301,38 @@ class ArbCyclesSpec extends AnyFlatSpec with Matchers with MockitoSugar {
     }
   }
 
+  it should "hold its share of ErgoDEX CL legs, which carry the swap script, with every other slot at a grid leg" in {
+    import support.MachinaFixtures._
+    nodeContext.getClient.execute { ctx =>
+      val limits = configs.CandidateConfig.Default.limitsFor(configs.CandidateSourceConfig.Arb)
+      // The token/token grid's legs, the dearest legs but CL ones
+      val gridBox = tokenGridOrder.copy(value = 1000000L)
+      val grid = transactions.batching.ergodex.MachinaOrder.parseTokenGrid(
+        gridBox.copy(boxId = gridBox.toInputUTXO(ctx).id.toString)).get
+      val gridPools = Seq(fakuCigPool, fakuErgoDexPool).map(entry(ctx, _))
+      val gridStake = arbStakeBox(ctx, wallet, stakeValue)
+      val gridCost = ArbCycles.build(ctx, wallet, ArbDiscovery.index(height - 1, gridPools).copy(parsed =
+        gridPools.map(e => e.nft -> e).toMap), ArbBasis.Empty, Some(gridStake), Seq(grid), 1000000L, height, 8,
+        gridStake.value - ArbLeg.MinCarryValue, 1000000L, wallet.contract, Deadline.now + 1.minute,
+        Deadline.now + 1.minute, _ => true).flatMap(_.members).map(_.cost).max
+      val box = ClFixtures.ergRsv
+      val cl = ErgoDexClArbPool.read(box, ClFixtures.config(ctx)).get
+      val rsv = 100000000L
+      val pool = nativePool(ctx, id(330), cl.y.tokenId.get, (rsv / cl.marginal(xIn = true) * 1.2).toLong, rsv)
+      val stake = arbStakeBox(ctx, wallet, stakeValue)
+      val clLegs = ArbCycles.build(ctx, wallet, ArbDiscovery.index(height - 1, Seq(entry(ctx, pool),
+        ArbPoolEntry(cl, box))), ArbBasis.Empty, Some(stake), Seq.empty, 1000000L, height, 8,
+        stake.value - ArbLeg.MinCarryValue, 1000000L, wallet.contract, Deadline.now + 1.minute,
+        Deadline.now + 1.minute, _ => true).flatMap(_.members).filter(_.inputIds.contains(box.boxId))
+      clLegs.size shouldBe 1
+      info(s"CL leg: cost ${clLegs.head.cost}, ${clLegs.head.sizeBytes} bytes; grid leg $gridCost")
+      clLegs.head.cost should be > gridCost
+      (limits.maxTxs - ArbCycles.MaxClLegs).toLong * gridCost + ArbCycles.MaxClLegs.toLong * clLegs.head.cost should be <=
+        limits.maxCost
+      limits.maxTxs.toLong * clLegs.head.sizeBytes.toLong should be <= limits.maxBytes
+    }
+  }
+
   "Two cycles" should "run on one stake, the second spending the stake the first returned" in {
     nodeContext.getClient.execute { ctx =>
       val (p1, p2) = pair(ctx, 101, (1, 2))

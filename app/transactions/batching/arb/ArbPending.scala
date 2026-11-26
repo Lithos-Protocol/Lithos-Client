@@ -72,9 +72,12 @@ object ArbPending {
    * @param read   reads confirmed boxes by id, for the inputs the closed-cycle test needs; a box it leaves out
    *               makes its transaction carried
    * @param known  boxes an earlier view already read
+   * @param paid   scripts a pool spend pays besides the trader's own and the miner fee: the ErgoDEX CL protocol fee's
+   *               key, which a cycle through a CL position pays
    */
   def of(snapshot: CompleteMempool.Snapshot, revision: Long, pools: Map[String, NodeBox],
-         read: Seq[String] => Map[String, NodeBox], known: Map[String, NodeBox] = Map.empty): ArbPending = {
+         read: Seq[String] => Map[String, NodeBox], known: Map[String, NodeBox] = Map.empty,
+         paid: Set[String] = Set.empty): ArbPending = {
     val txs = snapshot.transactions
     val spenders = BatchingMempool.spenders(snapshot)
     val creators = BatchingMempool.creators(snapshot)
@@ -86,9 +89,11 @@ object ArbPending {
       box.assets.headOption.exists(a => trees.get(a.tokenId).contains(box.ergoTree.toLowerCase))
     def poolInput(id: String): Boolean = poolIds.contains(id) || outputs.get(id).exists(isPool)
     def spendsPool(tx: CompleteMempool.MempoolTx): Boolean = tx.body.inputs.exists(i => poolInput(i.boxId))
-    // The one script every output but pools and the fee pays, when there is one
+    val paidTrees = paid.map(_.toLowerCase)
+    // The one script every output but pools, the fee and the paid scripts pays, when there is one
     def outputScript(tx: CompleteMempool.MempoolTx): Option[String] = {
-      val others = tx.body.outputs.filterNot(b => isPool(b) || b.ergoTree.equalsIgnoreCase(FeeTree))
+      val others = tx.body.outputs.filterNot(b => isPool(b) || b.ergoTree.equalsIgnoreCase(FeeTree) ||
+        paidTrees.contains(b.ergoTree.toLowerCase))
         .map(_.ergoTree.toLowerCase).distinct
       if (others.size == 1) others.headOption else None
     }

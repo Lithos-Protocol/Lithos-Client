@@ -6,14 +6,15 @@ import org.bouncycastle.util.encoders.Hex
 import org.ergoplatform.appkit.NetworkType
 import scorex.crypto.hash.Blake2b256
 import transactions.batching.ergodex.{ErgoDexContracts, ErgoDexPool}
+import ergodexcl.ErgoDexClContracts
 import sigmausd.SigmaUsdContracts
 import transactions.batching.lithosdex.{DexContracts, LDDeployments}
 
 import scala.util.Try
 
 /**
- * The contract a tracked pool box sits at; a LithosDex one carries the deployment its own ids build. The SigmaUSD bank
- * and the oracle pool box it reads are followed beside the pools.
+ * The contract a tracked pool box sits at; a LithosDex one carries the deployment its own ids build. ErgoDEX CL
+ * positions and their config box, and the SigmaUSD bank and the oracle pool box it reads, are followed beside the pools.
  */
 sealed trait PoolDeployment
 
@@ -22,12 +23,14 @@ object PoolDeployment {
   case object ErgoDexToken extends PoolDeployment
   final case class LithosDexNative(contracts: LDContracts) extends PoolDeployment
   final case class LithosDexToken(contracts: LDT2TContracts) extends PoolDeployment
+  case object ErgoDexCl extends PoolDeployment
+  case object ErgoDexClConfig extends PoolDeployment
   case object SigmaUsdBank extends PoolDeployment
   case object SigmaUsdOracle extends PoolDeployment
 
-  /** Whether `deployment` is a DEX pool, which a swap moves, rather than the bank or its oracle. */
+  /** Whether `deployment` is a DEX pool or CL position, which a swap moves, rather than a box one reads or the bank. */
   def dex(deployment: PoolDeployment): Boolean = deployment match {
-    case SigmaUsdBank | SigmaUsdOracle => false
+    case ErgoDexClConfig | SigmaUsdBank | SigmaUsdOracle => false
     case _ => true
   }
 }
@@ -41,9 +44,11 @@ final case class TrackedBox(box: NodeBox, inclusionHeight: Int, deployment: Pool
 
 /**
  * Says whether a box is a pool this client tracks: at an ErgoDEX pool script and parsing as that shape, or at a
- * LithosDex pool template and verified as the deployment its own ids build. On mainnet also the SigmaUSD bank, at its
- * pinned script holding its NFT, and the box holding its oracle pool's NFT, whatever script it is at. No node reads; a vault's standing
- * is the consumer's to check. ErgoDEX boxes kept share one copy of their script's tree.
+ * LithosDex pool template and verified as the deployment its own ids build. On mainnet also ErgoDEX CL positions, at
+ * the pinned position script with their NFT first at one unit, and the box holding the CL config token, whatever script
+ * it is at; the SigmaUSD bank, at its pinned script holding its NFT, and the box holding its oracle pool's NFT, whatever
+ * script it is at. No node reads; a vault's standing is the consumer's to check. ErgoDEX boxes kept share one copy of
+ * their script's tree.
  */
 final class PoolShapes(val network: NetworkType) {
 
@@ -74,6 +79,12 @@ final class PoolShapes(val network: NetworkType) {
     } else if (tree.endsWith(t2tTemplateHex))
       LDDeployments.verifyT2T(tree, box.assets.map(a => a.tokenId -> a.amount))
         .map(c => TrackedBox(box, height, PoolDeployment.LithosDexToken(c)))
+    else if (network == NetworkType.MAINNET && tree.equalsIgnoreCase(ErgoDexClContracts.PositionErgoTree) &&
+      (box.assets.size == 2 || box.assets.size == 3) && box.assets.head.amount == 1L)
+      Some(TrackedBox(box, height, PoolDeployment.ErgoDexCl))
+    else if (network == NetworkType.MAINNET &&
+      box.assets.headOption.exists(a => a.tokenId == ErgoDexClContracts.ConfigToken && a.amount == 1L))
+      Some(TrackedBox(box, height, PoolDeployment.ErgoDexClConfig))
     else if (network == NetworkType.MAINNET && tree.equalsIgnoreCase(SigmaUsdContracts.BankErgoTree) &&
       box.assets.lift(2).exists(a => a.tokenId == SigmaUsdContracts.BankNft && a.amount == 1L))
       Some(TrackedBox(box, height, PoolDeployment.SigmaUsdBank))
