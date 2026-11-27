@@ -513,4 +513,26 @@ class ZcCollateralArbSpec extends AnyFlatSpec with Matchers {
       plan.get.valuation.unpriced.size shouldBe 17
     }
   }
+
+  it should "short-circuit bestPlan and evaluateSaleOrder when the deadline is already overdue" in {
+    client.execute { ctx =>
+      val h = ctx.getHeight + 1
+      val pA = poolEntry(nativePool(ctx, arbId(13), TokenA, 1000 * Erg, 1000000L))
+      val pools = Map(pA.nft -> pA.pool)
+      val askBox = nodeOf(seeded(ctx, UTXO(ZcContracts.script(ZcKind.SaleOrder, Some(ZcMarket.Erg)).contract, MinBox,
+        Seq(tok(TokenA, 1000000L)), Seq(bytes(sellerHash), longs(Erg, 10000L, 1L, h.toLong + 500L)), Some(h - 5))))
+      val ask = read[ZcAsk](askBox)
+      val book = bookOf(h - 1, askBox)
+
+      val overdue = Some(scala.concurrent.duration.Deadline.now - scala.concurrent.duration.DurationInt(1).second)
+      ZcCollateralArb.evaluateSaleOrder(ask, pools, _ => Some(seller), h.toLong, 8 * Erg, 6, 100000L,
+        ZcAssetPricer.Default, deadline = overdue) shouldBe None
+      ZcCollateralArb.bestPlan(book, Seq.empty, pools, _ => Some(seller), h, 8 * Erg, MinBox,
+        slots = 6, minLegProceeds = 100000L, spentBoxes = Set.empty, deadline = overdue) shouldBe None
+
+      // Without an overdue deadline the same SaleOrder still evaluates profitably.
+      ZcCollateralArb.evaluateSaleOrder(ask, pools, _ => Some(seller), h.toLong, 8 * Erg, 6, 100000L,
+        ZcAssetPricer.Default) shouldBe defined
+    }
+  }
 }

@@ -14,6 +14,7 @@ import transactions.candidate.BlockTxMessages.CandidateTx
 import work.lithos.mutations.{Contract, InputUTXO, Token, TxBuilder, UTXO}
 
 import scala.collection.JavaConverters._
+import scala.concurrent.duration.Deadline
 
 /**
  * A ZC collateral arb to broadcast: the plan, its one swap, the confirmed pool box that swap is priced against, and
@@ -67,7 +68,8 @@ object ZcMempoolArb {
    */
   def best(book: ZcBook, pools: Map[String, ArbPool], poolBoxes: Map[String, NodeBox],
            resolveScript: ZcRecord => Option[Contract], height: Int, settings: ZcCollateralArbConfig,
-           minLegProceeds: Long, excluded: Set[String]): Option[ZcMempoolPlan] = {
+           minLegProceeds: Long, excluded: Set[String],
+           deadline: Option[Deadline] = None): Option[ZcMempoolPlan] = {
     val usable = pools.filter { case (nft, p) => sellsForErg(p) && poolBoxes.get(nft).exists(_.boxId == p.boxId) }
     val minProfit = math.max(Math.addExact(settings.minProfitNanoErg, TxFee), ArbStage.MinProfitOutput)
     def admit(plan: ZcArbPlan): Boolean = fits(plan) && {
@@ -75,9 +77,9 @@ object ZcMempoolArb {
       val paid = Math.addExact(Math.addExact(plan.ergCost, plan.valuation.sweepErgCost), TxFee)
       net >= settings.minProfitNanoErg && paid <= settings.maxErgIn && returns(net, paid, settings.minReturnPercent)
     }
-    if (settings.maxErgIn <= TxFee || usable.isEmpty) None
+    if (settings.maxErgIn <= TxFee || usable.isEmpty || deadline.exists(_.isOverdue())) None
     else ZcCollateralArb.bestPlan(book, Seq.empty, usable, resolveScript, height, settings.maxErgIn - TxFee, minProfit,
-      slots = 2, minLegProceeds, excluded, admit = admit).flatMap { case (plan, _) =>
+      slots = 2, minLegProceeds, excluded, admit = admit, deadline = deadline).flatMap { case (plan, _) =>
       val swap = plan.allSwaps.head
       poolBoxes.get(swap.pool.nft).map(box => ZcMempoolPlan(plan, swap, box, height))
     }

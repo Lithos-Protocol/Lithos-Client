@@ -255,7 +255,8 @@ class ZcBatcher(nodeContext: NodeContext,
       var going = true
       while (going && sent < ZcMempoolArb.MaxPerPass && attempts < ZcBatcher.MaxArbAttemptsPerPass &&
         !passDeadline.isOverdue() && alive.get()) {
-        ZcMempoolArb.best(book, poolStates, poolBoxes, resolveScript, height, arb, minLegProceeds, skip) match {
+        ZcMempoolArb.best(book, poolStates, poolBoxes, resolveScript, height, arb, minLegProceeds, skip,
+          deadline = Some(passDeadline)) match {
           case None => going = false
           case Some(planned) =>
             attempts += 1

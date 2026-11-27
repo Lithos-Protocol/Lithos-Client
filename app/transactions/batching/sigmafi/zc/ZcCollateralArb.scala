@@ -124,8 +124,9 @@ object ZcCollateralArb {
                resolveScript: ZcRecord => Option[Contract], blockHeight: Int, maxErgIn: Long, minProfit: Long,
                slots: Int, minLegProceeds: Long, spentBoxes: Set[String],
                pricer: ZcAssetPricer = ZcAssetPricer.Default,
-               admit: ZcArbPlan => Boolean = _ => true): Option[(ZcArbPlan, Option[String])] = {
-    if (slots < 1 || maxErgIn < MinBox || minProfit < ArbStage.MinProfitOutput) None
+               admit: ZcArbPlan => Boolean = _ => true,
+               deadline: Option[Deadline] = None): Option[(ZcArbPlan, Option[String])] = {
+    if (slots < 1 || maxErgIn < MinBox || minProfit < ArbStage.MinProfitOutput || deadline.exists(_.isOverdue())) None
     else {
       val h = blockHeight.toLong
       val poolIdx: Option[ZcPoolIndex] = if (pricer eq ZcAssetPricer.Default) Some(ZcPoolIndex.of(pools)) else None
@@ -299,16 +300,19 @@ object ZcCollateralArb {
           if (beats) best = Some(plan -> parentTx)
         }
 
-      candidates.result().sortBy { case (rec, _, score) => (-score, rec.boxId) }
-        .take(MaxEvaluatedTargets).foreach { case (rec, parentTx, _) =>
-          val evaluated = rec match {
-            case l: ZcLot => evaluateLot(l, pools, resolveScript, h, maxErgIn, legCap, minLegProceeds, pricer, poolIdx)
-            case v: ZcShareVault => evaluateVault(v, pools, h, maxErgIn, legCap, minLegProceeds, pricer, poolIdx)
-            case a: ZcAsk => evaluateSaleOrder(a, pools, resolveScript, h, maxErgIn, legCap, minLegProceeds, pricer, poolIdx)
-            case _ => None
-          }
-          evaluated.foreach(consider(_, parentTx))
+      val ranked = candidates.result().sortBy { case (rec, _, score) => (-score, rec.boxId) }
+        .iterator.take(MaxEvaluatedTargets)
+      while (ranked.hasNext && !deadline.exists(_.isOverdue())) {
+        val (rec, parentTx, _) = ranked.next()
+        val evaluated = rec match {
+          case l: ZcLot => evaluateLot(l, pools, resolveScript, h, maxErgIn, legCap, minLegProceeds, pricer, poolIdx)
+          case v: ZcShareVault => evaluateVault(v, pools, h, maxErgIn, legCap, minLegProceeds, pricer, poolIdx)
+          case a: ZcAsk => evaluateSaleOrder(a, pools, resolveScript, h, maxErgIn, legCap, minLegProceeds, pricer,
+            poolIdx, deadline)
+          case _ => None
         }
+        evaluated.foreach(consider(_, parentTx))
+      }
       best
     }
   }
@@ -431,8 +435,10 @@ object ZcCollateralArb {
    */
   def evaluateSaleOrder(ask: ZcAsk, pools: Map[String, ArbPool], resolveScript: ZcRecord => Option[Contract],
                         height: Long, maxErgIn: Long, maxLegs: Int, minLegProceeds: Long,
-                        pricer: ZcAssetPricer, poolIdx: Option[ZcPoolIndex] = None): Option[ZcArbPlan] = {
-    if (ask.priced || height >= ask.expiry || ask.token.amount < 1L || maxLegs < 2) return None
+                        pricer: ZcAssetPricer, poolIdx: Option[ZcPoolIndex] = None,
+                        deadline: Option[Deadline] = None): Option[ZcArbPlan] = {
+    if (ask.priced || height >= ask.expiry || ask.token.amount < 1L || maxLegs < 2 || deadline.exists(_.isOverdue()))
+      return None
     val tokenId = ask.token.tokenId
     // Fast-path reject: unpriced tokens (bond units, shares, wraps for now) return None in O(1) with zero reads.
     val quick = poolIdx match {
@@ -498,7 +504,7 @@ object ZcCollateralArb {
       tryUnits(ask.token.amount).map { case (p, acq, v, net) => (ask.token.amount, p, acq, v, net) }
 
     val minF = math.max(1L, ZcRules.minFill(ask))
-    if (ask.token.amount > minF) {
+    if (ask.token.amount > minF && !deadline.exists(_.isOverdue())) {
       def affordable(u: Long): Boolean = {
         val pBig = ZcRules.fixedPrice(ask, u)
         if (pBig <= 0 || !pBig.isValidLong) false
@@ -521,7 +527,7 @@ object ZcCollateralArb {
         var hi = if (affordable(ask.token.amount - 1L)) ask.token.amount - 1L else {
           var a = minF
           var b = ask.token.amount - 1L
-          while (a < b) {
+          while (a < b && !deadline.exists(_.isOverdue())) {
             val mid = a + (b - a + 1L) / 2L
             if (affordable(mid)) a = mid else b = mid - 1L
           }
@@ -553,14 +559,18 @@ object ZcCollateralArb {
             }
           }
         }
-        while (hi - lo > 2L) {
+        while (hi - lo > 2L && !deadline.exists(_.isOverdue())) {
           val third = (hi - lo) / 3L
           val (m1, m2) = (lo + third, hi - third)
           if (signedNet(m1) < signedNet(m2)) lo = m1 + 1L else hi = m2
         }
-        (lo to hi).foreach { u =>
-          tryUnits(u).foreach { case (p, acq, v, net) =>
-            if (bestUnits.forall(b => net > b._5)) bestUnits = Some((u, p, acq, v, net))
+        if (hi - lo <= 2L) {
+          var u = lo
+          while (u <= hi && !deadline.exists(_.isOverdue())) {
+            tryUnits(u).foreach { case (p, acq, v, net) =>
+              if (bestUnits.forall(b => net > b._5)) bestUnits = Some((u, p, acq, v, net))
+            }
+            u += 1L
           }
         }
       }
@@ -761,13 +771,17 @@ object ZcCollateralArb {
       in
     }, identity)
 
+    val planDeadline = if (zcDeadline < buildUntil) zcDeadline else buildUntil
+
     while (!stopped && bundles.size < maxBundles && usedSlots < slots && unbuildable < MaxUnbuildablePerBuild &&
-      !zcDeadline.isOverdue() && !buildUntil.isOverdue()) {
+      !planDeadline.isOverdue()) {
       bestPlan(book, createdZc, states, resolveScript, blockHeight, maxErgIn, minProfit, slots - usedSlots,
-        minLegProceeds, spentZc, pricer) match {
+        minLegProceeds, spentZc, pricer, deadline = Some(planDeadline)) match {
         case None => stopped = true
         case Some((plan, zcParent)) =>
-          sign(ctx, wallet, plan, poolInput, carry, blockHeight, profitTo, minProfit) match {
+          if (buildUntil.isOverdue()) {
+            stopped = true
+          } else sign(ctx, wallet, plan, poolInput, carry, blockHeight, profitTo, minProfit) match {
             case Failure(ex) =>
               logger.warn(s"Could not build ZC collateral arb for ${plan.target.boxId} at $blockHeight, skipping: ${ex.getMessage}")
               spentZc += plan.target.boxId
