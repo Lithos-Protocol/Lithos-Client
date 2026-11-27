@@ -98,6 +98,30 @@ class TrackedPoolsSpec extends AnyFlatSpec with Matchers {
     full.cut shouldBe true
   }
 
+  it should "keep singletons outside the cap so trading pools are never dropped, and cap duplicate-NFT floods" in {
+    val (a0, a1, b0) = (pool(1, 100), pool(1, 101), pool(2, 100))
+    val oracle = NodeBox("99" * 32, "98" * 32, 10000000L, 0, 90, "0008cd" + "11" * 33,
+      Seq(node.model.NodeAsset(sigmausd.SigmaUsdContracts.OracleNft, 1L)), node.model.NodeRegisters.empty)
+    val withSingleton = seeded(100, a0, oracle)
+    withSingleton.boxes should have size 2
+
+    // At cap = 1 (1 pool + 1 singleton = 2 total boxes), a0's successor a1 must still replace a0
+    val traded = withSingleton.applied(101, "h101", "h100",
+      Seq(tx("t1", Seq(a0.boxId), Seq(a1))), shapes, cap = 1)
+    traded.pool(id(1)).map(_.boxId) shouldBe Some(a1.boxId)
+    traded.pool(sigmausd.SigmaUsdContracts.OracleNft).map(_.boxId) shouldBe Some(oracle.boxId)
+    traded.cut shouldBe false
+
+    // A fungible-token flood of 5 boxes sharing one NFT uses at most 2 slots, leaving room for real pools
+    val spam = (1 to 5).map(i => pool(9, 100 + i))
+    val flooded = traded.applied(102, "h102", "h101",
+      Seq(tx("t2", Seq.empty, spam :+ b0)), shapes, cap = 4)
+    flooded.byNft(id(9)) should have size 2
+    flooded.pool(id(9)) shouldBe None
+    flooded.pool(id(2)).map(_.boxId) shouldBe Some(b0.boxId)
+    flooded.cut shouldBe true
+  }
+
   "Pool shapes" should "take LithosDex pools of both kinds with the deployment their ids build" in {
     nodeContext.getClient.execute { ctx =>
       val canonical = canonicalPool(ctx, 1000 * Erg, 100000000L)

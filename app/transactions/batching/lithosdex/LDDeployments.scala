@@ -41,12 +41,26 @@ object LDDeployments {
     } yield contracts
   }
 
-  /** The deployment's vault: the only unspent box carrying its NFT, at the vault tree built from its ids. */
-  def vaultStands(nodeApi: NodeApi, contracts: LDContracts): Boolean = {
-    val boxes = nodeApi.unspentBoxesByTokenId(contracts.vaultNFT.toString, Paging(0, 2), SortDirection.Desc,
-      MempoolOptions.ConfirmedOnly).get
-    boxes.size == 1 && boxes.head.box.ergoTree.equalsIgnoreCase(contracts.feeVault.ergoTreeHex)
+  /** Outcome of checking a deployment's fee vault against the node's indexed unspent boxes. */
+  sealed trait VaultCheck
+  object VaultCheck {
+    case object Standing extends VaultCheck
+    case object Empty extends VaultCheck
+    case object Invalid extends VaultCheck
   }
+
+  /** Checks a deployment's vault NFT against the node's indexed unspent boxes, distinguishing empty from invalid. */
+  def checkVault(nodeApi: NodeApi, vaultNft: String, feeVaultErgoTree: String): VaultCheck = {
+    val boxes = nodeApi.unspentBoxesByTokenId(vaultNft, Paging(0, 2), SortDirection.Desc,
+      MempoolOptions.ConfirmedOnly).get
+    if (boxes.isEmpty) VaultCheck.Empty
+    else if (boxes.size == 1 && boxes.head.box.ergoTree.equalsIgnoreCase(feeVaultErgoTree)) VaultCheck.Standing
+    else VaultCheck.Invalid
+  }
+
+  /** The deployment's vault: the only unspent box carrying its NFT, at the vault tree built from its ids. */
+  def vaultStands(nodeApi: NodeApi, contracts: LDContracts): Boolean =
+    checkVault(nodeApi, contracts.vaultNFT.toString, contracts.feeVault.ergoTreeHex) == VaultCheck.Standing
 
   /**
    * The token/token deployment a pool box belongs to, by the same test as [[verify]]: four distinct tokens
@@ -66,11 +80,8 @@ object LDDeployments {
   }
 
   /** The token/token deployment's vault: the only unspent box carrying its NFT, at its vault tree. */
-  def vaultStands(nodeApi: NodeApi, contracts: LDT2TContracts): Boolean = {
-    val boxes = nodeApi.unspentBoxesByTokenId(contracts.vaultNFT.toString, Paging(0, 2), SortDirection.Desc,
-      MempoolOptions.ConfirmedOnly).get
-    boxes.size == 1 && boxes.head.box.ergoTree.equalsIgnoreCase(contracts.feeVault.ergoTreeHex)
-  }
+  def vaultStands(nodeApi: NodeApi, contracts: LDT2TContracts): Boolean =
+    checkVault(nodeApi, contracts.vaultNFT.toString, contracts.feeVault.ergoTreeHex) == VaultCheck.Standing
 
   /** Where CONST_VAULT_NFT sits among a pool tree's constants; the same in every deployment. */
   private lazy val VaultNftIndex: Int =

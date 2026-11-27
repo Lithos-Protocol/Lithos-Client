@@ -165,17 +165,31 @@ final class ZcResolver(api: () => NodeApi, tracker: ZcTracker, maxEntries: Int =
    * The scripts a transaction carries, by hash: None when the node could not be asked OR does not have the
    * transaction (e.g. a mempool tx that just confirmed, or an indexed tx not yet flushed), so a transient miss
    * never poisons the negative cache.
+   *
+   * Pending mempool transactions are fetched at most once per `txId` (their Var(64) disclosures and output trees are
+   * immutable for a given `txId`), remembered into `scripts`, and marked under a separate `"pt:"` key so repeated
+   * outputs or repeated `/asks`/`/offers` reads never re-fetch the same mempool tx, while confirmed lookups still
+   * read `indexedTransactionById` (which includes input trees) once the transaction confirms.
    */
   private def carried(txId: String, pending: Boolean, budget: ZcBudget): Option[Map[String, String]] = {
-    val answered: Option[(Seq[Map[String, String]], Seq[String])] =
-      if (pending) read(budget)(_.unconfirmedTransactionById(txId)).flatten
-        .map(tx => (tx.inputs.map(_.spendingProof.extension), tx.outputs.map(_.ergoTree)))
-      else read(budget)(_.indexedTransactionById(txId)).flatten
-        .map(tx => (tx.inputs.flatMap(_.spendingProof.map(_.extension)), (tx.inputs ++ tx.outputs).map(_.box.ergoTree)))
-    answered.map { case (exts, trees) =>
-      (exts.flatMap(_.get(ZcTx.DisclosureVar).toSeq.flatMap(ZcBoxes.disclosedTrees)) ++ trees)
-        .filter(_.length <= ZcTx.MaxScriptChars)
-        .flatMap(t => Try(Hex.toHexString(Blake2b256.hash(Hex.decode(t)))).toOption.map(_ -> t.toLowerCase)).toMap
+    val pendingKey = "pt:" + txId
+    if (pending && tried(pendingKey)) Some(Map.empty)
+    else {
+      val answered: Option[(Seq[Map[String, String]], Seq[String])] =
+        if (pending) read(budget)(_.unconfirmedTransactionById(txId)).flatten
+          .map(tx => (tx.inputs.map(_.spendingProof.extension), tx.outputs.map(_.ergoTree)))
+        else read(budget)(_.indexedTransactionById(txId)).flatten
+          .map(tx => (tx.inputs.flatMap(_.spendingProof.map(_.extension)), (tx.inputs ++ tx.outputs).map(_.box.ergoTree)))
+      answered.map { case (exts, trees) =>
+        val found = (exts.flatMap(_.get(ZcTx.DisclosureVar).toSeq.flatMap(ZcBoxes.disclosedTrees)) ++ trees)
+          .filter(_.length <= ZcTx.MaxScriptChars)
+          .flatMap(t => Try(Hex.toHexString(Blake2b256.hash(Hex.decode(t)))).toOption.map(_ -> t.toLowerCase)).toMap
+        if (pending) {
+          remember(found)
+          miss(pendingKey)
+        }
+        found
+      }
     }
   }
 

@@ -40,7 +40,7 @@ final case class ArbPoolEntry(pool: ArbPool, box: NodeBox) {
 final case class ArbIndex(height: Int, pools: Map[String, ArbPoolEntry], routes: Vector[ArbRoute],
                           cut: Boolean = false, headerId: String = "",
                           parsed: Map[String, ArbPoolEntry] = Map.empty, vaults: Set[String] = Set.empty,
-                          positionsCut: Boolean = false)
+                          positionsCut: Boolean = false, missingVaults: Map[String, Long] = Map.empty)
 
 /**
  * Builds arb's pool index from the tracked pools: ErgoDEX native and token pools less denied ones and those
@@ -63,27 +63,51 @@ object ArbDiscovery {
   /** Most vaults read for the first time in one build; a pool whose vault waits is left out until a later one. */
   final val MaxVaultReads = 4
 
+  /** How long a LithosDex vault confirmed missing/invalid is skipped before being checked again. */
+  final val MissingVaultTtlMs: Long = 600000L
+
+  /** Bound on remembered missing vaults so spam cannot grow the negative cache without limit. */
+  final val MaxMissingVaults: Int = 2048
+
   /**
    * The index for blocks built on `tracked`. A pool whose box `previous` parsed keeps that state, and the routes
    * are enumerated again only when the set of pools changed. `vaultStands` reads whether a LithosDex
-   * deployment's vault stands; an answer of true is kept, and a failed read leaves that pool out this time.
+   * deployment's vault stands; an answer of true is kept, a confirmed false is cached for [[MissingVaultTtlMs]],
+   * and a failed read leaves that pool out this time without caching.
    */
   def index(ctx: BlockchainContext, tracked: TrackedPools, previous: Option[ArbIndex], ergoDex: BatchingConfig,
-            denied: Set[String], vaultStands: PoolDeployment => Boolean): ArbIndex = {
+            denied: Set[String], vaultStands: PoolDeployment => Boolean,
+            nowMs: Long = System.currentTimeMillis()): ArbIndex = {
     val known = previous.map(_.parsed).getOrElse(Map.empty[String, ArbPoolEntry])
     var vaults = previous.map(_.vaults).getOrElse(Set.empty[String])
+    var missingVaults = previous.map(_.missingVaults.filter(_._2 > nowMs)).getOrElse(Map.empty[String, Long])
     var vaultReads = 0
 
-    // A vault already read as standing costs nothing; a new one is read while this build has reads left
+    // A vault already read as standing costs nothing; a confirmed missing one waits out its TTL;
+    // a new one is read while this build has reads left, with transient RPC failures left uncached.
     def standing(deployment: PoolDeployment): Boolean = vaultOf(deployment).forall { vault =>
-      vaults.contains(vault) || (vaultReads < MaxVaultReads && {
+      if (vaults.contains(vault)) true
+      else if (missingVaults.get(vault).exists(_ > nowMs)) false
+      else if (vaultReads >= MaxVaultReads) false
+      else {
         vaultReads += 1
-        val stands = Try(vaultStands(deployment)).getOrElse(false)
-        if (stands) vaults += vault
-        stands
-      })
+        Try(vaultStands(deployment)) match {
+          case scala.util.Success(true) =>
+            vaults += vault
+            missingVaults -= vault
+            true
+          case scala.util.Success(false) =>
+            if (missingVaults.size >= MaxMissingVaults) {
+              missingVaults = missingVaults.toVector.sortBy(_._2).drop(missingVaults.size - MaxMissingVaults + 1).toMap
+            }
+            missingVaults += vault -> (nowMs + MissingVaultTtlMs)
+            false
+          case scala.util.Failure(_) => false
+        }
+      }
     }
 
+    // Prioritize higher-ERG boxes so low-value fake pool dust cannot consume vault reads ahead of real pools.
     val qualifying = tracked.pools.filter { t =>
       !denied.contains(t.nft.toLowerCase) && (t.deployment match {
         case PoolDeployment.ErgoDexNative | PoolDeployment.ErgoDexToken =>
@@ -91,7 +115,7 @@ object ArbDiscovery {
         case PoolDeployment.SigmaUsdOracle | PoolDeployment.ErgoDexClConfig => false
         case _ => true
       })
-    }.toVector.sortBy(_.nft)
+    }.toVector.sortBy(t => (-t.box.value, t.nft))
     val oracle = tracked.pools.find(_.deployment == PoolDeployment.SigmaUsdOracle).map(_.box)
     val (positions, others) = qualifying.partition(_.deployment == PoolDeployment.ErgoDexCl)
     val kept = positions.sortBy(t => (-t.box.value, t.nft)).take(MaxPositions)
@@ -108,10 +132,11 @@ object ArbDiscovery {
     previous.filter(p => p.parsed.keySet == parsed.keySet) match {
       case Some(p) =>
         ArbIndex(tracked.height, p.pools.keysIterator.map(nft => nft -> parsed(nft)).toMap, p.routes, p.cut,
-          tracked.headerId, parsed, vaults, positionsCut)
+          tracked.headerId, parsed, vaults, positionsCut, missingVaults)
       case None =>
         index(tracked.height, parsed.values.toSeq)
-          .copy(headerId = tracked.headerId, parsed = parsed, vaults = vaults, positionsCut = positionsCut)
+          .copy(headerId = tracked.headerId, parsed = parsed, vaults = vaults, positionsCut = positionsCut,
+            missingVaults = missingVaults)
     }
   }
 

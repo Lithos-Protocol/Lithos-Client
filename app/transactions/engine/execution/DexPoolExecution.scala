@@ -412,11 +412,13 @@ class DexPoolExecution(nodeContext: NodeContext, walletSelector: EngineFunding, 
    * Which of `tokenIds` own, or owned, a provision: each with its pool, how it was minted, and the provision now.
    * A deposit's NFT takes the id of the pool box the deposit spent, so one indexed box read rules out most tokens;
    * a pool creator's NFT is minted apart and is named by the pool's genesis, which the index already holds. The
-   * rest are grouped by pool, whose guard is scanned once for all of them. Answers hold for the canonical tip
-   * `(height, headerId)` they were read at; how an NFT was minted never changes and is kept. When `requireFresh` is
-   * true (used by signing guards), the snapshot must match the node's current canonical tip. Any token whose ownership
-   * cannot be verified (truncated index, unreadable pool genesis, or failed metadata read) fails closed with
-   * [[LithosUnavailable]] and is never cached as a negative answer.
+   * rest are grouped by pool, whose guard is scanned once for all of them. Public reads cache settled answers for
+   * the canonical tip `(height, headerId)` they were read at; how an NFT was minted never changes and is kept
+   * separately in `nftMints`. When `requireFresh` is true (used by signing guards), the snapshot must match the
+   * node's current canonical tip and `nftAnswers` is bypassed so mempool deposits or dropped redemptions since an
+   * earlier lookup at the same tip are always observed live. Any token whose ownership cannot be verified (truncated
+   * index, unreadable pool genesis, or failed metadata read) fails closed with [[LithosUnavailable]] and is never
+   * cached as a negative answer.
    */
   def lookupNfts(tokenIds: Seq[String], requireFresh: Boolean = false): Map[String, DexPoolExecution.NftFound] = {
     val ids = tokenIds.map(_.toLowerCase).distinct
@@ -426,7 +428,11 @@ class DexPoolExecution(nodeContext: NodeContext, walletSelector: EngineFunding, 
     val snapshot = if (requireFresh) index.freshSnapshot() else index.snapshot()
     if (snapshot.status != "ready") throw LithosUnavailable("the pool index is still building; retry shortly")
     val tipKey = (snapshot.height, snapshot.headerId)
-    val cached = Option(nftAnswers.get()).filter(_._1 == tipKey).map(_._2).getOrElse(Map.empty)
+    // Signing guards (`requireFresh`) always recheck live mempool ownership and never reuse tip-scoped `nftAnswers`,
+    // since pending deposits or dropped redemptions change live ownership without advancing `(height, headerId)`.
+    val cached =
+      if (requireFresh) Map.empty[String, Option[DexPoolExecution.NftFound]]
+      else Option(nftAnswers.get()).filter(_._1 == tipKey).map(_._2).getOrElse(Map.empty)
     val todo = ids.filterNot(cached.contains)
     val read = if (todo.isEmpty) Map.empty[String, (DexPoolExecution.NftVerdict, Boolean)]
       else readNfts(todo, snapshot, requireFresh)
@@ -435,7 +441,7 @@ class DexPoolExecution(nodeContext: NodeContext, walletSelector: EngineFunding, 
       case (id, (DexPoolExecution.NftVerdict.Found(nft), true)) => id -> Some(nft)
       case (id, (DexPoolExecution.NftVerdict.NotNft, true)) => id -> None
     }
-    if (verified.nonEmpty) nftAnswers.updateAndGet { held =>
+    if (!requireFresh && verified.nonEmpty) nftAnswers.updateAndGet { held =>
       val base = Option(held).filter(_._1 == tipKey).map(_._2).getOrElse(Map.empty)
       if (base.size + verified.size > DexPoolExecution.MaxCachedNftAnswers) held else (tipKey, base ++ verified)
     }
@@ -573,17 +579,21 @@ class DexPoolExecution(nodeContext: NodeContext, walletSelector: EngineFunding, 
         }.toMap
       }
     }
+    val unspentPoolBoxes = resolved.collect { case (id, _, Some(b)) if b.spentTransactionId.isEmpty => id }.toSet
     val unknownReason: Option[String] =
       if (snapshot.truncated) Some("the pool index may be missing pools")
       else if (snapshot.genesisIncomplete) Some("the pool index could not read every pool's genesis provisions")
       else metadataError.orElse(mempoolError)
     ids.map { id =>
       val result: (NftVerdict, Boolean) = found.get(id).flatten match {
-        case Some(nft) => (NftVerdict.Found(nft), !unconfirmedPoolBoxes.contains(id))
+        case Some(nft) => (NftVerdict.Found(nft), !unconfirmedPoolBoxes.contains(id) && !unspentPoolBoxes.contains(id))
         case None if unknownReason.isDefined => (NftVerdict.Unknown(unknownReason.get), false)
         case None if unconfirmedPoolBoxes.contains(id) =>
           if (requireFresh) (NftVerdict.Unknown("token was minted from an unconfirmed pool box"), false)
           else (NftVerdict.NotNft, false)
+        case None if unspentPoolBoxes.contains(id) =>
+          // An unspent confirmed pool box may be spent by a pending deposit before the next block, so never cache NotNft
+          (NftVerdict.NotNft, false)
         case None if unindexedBoxes.contains(id) && !knownTokens.contains(id) =>
           if (requireFresh) (NftVerdict.Unknown("token is not yet indexed by the node (unconfirmed or indexer lagging)"), false)
           else (NftVerdict.NotNft, false)

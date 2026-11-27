@@ -391,4 +391,85 @@ class ZcReadsSpec extends AnyFlatSpec with Matchers with Eventually with org.sca
     rows(j, "bids") should have size ZcReads.MaxBookRows
     elapsedMs should be < 5000L
   }
+
+  "asks and offers" should "reuse cached priced rows across repeated small-page reads at the same revision" in {
+    val origin = IndexedBox(oracleOrder(asset), "order", H - 1001, 1L, Some("aa" * 32), Some(H - 1000))
+    val resale = ask(id(60), asset, 1L, Erg, 1L)
+    val w = world(market ++ Seq(oracleOrder(id(2)), resale, ergOffer(id(21))))
+    doAnswer(inv => Success(if (inv.getArgument[String](0) == asset) Some(origin) else None))
+      .when(w.chain.api).indexedBoxById(anyString())
+
+    // Prime and exercise repeated asks/offers pages with different sorts and limit=1 at the same snapshot
+    val a1 = w.reads.asks("ERG", ZcFilters(matchable = false), None, None, Some("apr"), None, Some(1))
+    val a2 = w.reads.asks("ERG", ZcFilters(matchable = false), None, None, Some("maturity"), Some("1"), Some(1))
+    val a3 = w.reads.asks("ERG", ZcFilters(matchable = false), None, None, Some("size"), None, Some(1))
+    items(a1) should have size 1
+    items(a2) should have size 1
+    items(a3) should have size 1
+    (a1 \ "total").as[Int] shouldBe 3
+
+    val o1 = w.reads.offers("ERG", ZcFilters(matchable = false), None, None, Some("apr"), None, Some(1))
+    val o2 = w.reads.offers("ERG", ZcFilters(matchable = false), None, None, Some("size"), Some("1"), Some(1))
+    items(o1) should have size 1
+    items(o2) should have size 1
+    (o1 \ "total").as[Int] shouldBe 2
+
+    // Lru.getIf does not store uncacheable results while still coalescing concurrent callers
+    val cache = new Lru[String, Int](8)
+    val calls = new AtomicInteger(0)
+    cache.getIf("k", () => (calls.incrementAndGet(), false)) shouldBe 1
+    cache.getIf("k", () => (calls.incrementAndGet(), true)) shouldBe 2
+    cache.getIf("k", () => (calls.incrementAndGet(), true)) shouldBe 2
+    calls.get() shouldBe 2
+  }
+
+  it should "deduplicate pending mempool tx script lookups so undisclosed spam cannot defeat asks caching" in {
+    val w = world(market)
+    val spamTxId = "ab" * 32
+    val spamOrders = (1 to 16).map { i =>
+      val boxId = f"dd$i%062x"
+      // Distinct undisclosed borrower hashes all created by one mempool tx
+      oracleOrder(boxId, borrower = 100 + i).copy(transactionId = spamTxId, index = i)
+    }
+    val mempoolTx = node.model.NodeTransaction(spamTxId, Seq.empty, Seq.empty, spamOrders)
+    val unconfCalls = new AtomicInteger(0)
+    doAnswer { inv =>
+      if (inv.getArgument[String](0) == spamTxId) {
+        unconfCalls.incrementAndGet()
+        Success(Some(mempoolTx))
+      } else Success(None)
+    }.when(w.chain.api).unconfirmedTransactionById(anyString())
+
+    val snap = state.synchronization.CompleteMempool.Snapshot(
+      blockId(H), Set(spamTxId), Set.empty, System.nanoTime(),
+      transactions = Vector(state.synchronization.CompleteMempool.MempoolTx(spamTxId, mempoolTx, 1000)))
+    w.tracker.observe(state.synchronization.CompleteMempool.Observation(1L, Some(snap), None))
+    eventually(w.tracker.view.flatMap(_.mempool).map(_.pending.size) shouldBe Some(16))
+
+    // First asks call reads the mempool tx once (not 16 times) and populates the pricedAsks cache
+    val a1 = w.reads.asks("ERG", ZcFilters(matchable = false), None, None, None, None, Some(10))
+    (a1 \ "total").as[Int] shouldBe 17
+    unconfCalls.get() shouldBe 1
+
+    // Second asks call hits the cached priced rows with zero additional mempool reads
+    val a2 = w.reads.asks("ERG", ZcFilters(matchable = false), None, None, Some("size"), None, Some(10))
+    (a2 \ "total").as[Int] shouldBe 17
+    unconfCalls.get() shouldBe 1
+
+    // Confirming the tx still allows a confirmed indexed lookup (pending negative cache never poisons confirmed scripts)
+    val confirmedReads = new AtomicInteger(0)
+    val disclosedTree = party(101)
+    val indexedTx = node.model.IndexedTransaction(spamTxId,
+      Seq(LDNodeFixtures.indexed(spamOrders.head.copy(ergoTree = disclosedTree), H - 1)),
+      Seq.empty, Seq.empty, H, 1, blockId(H), 0L, 0, 0L, 100)
+    doAnswer { inv =>
+      if (inv.getArgument[String](0) == spamTxId) {
+        confirmedReads.incrementAndGet()
+        Success(Some(indexedTx))
+      } else Success(None)
+    }.when(w.chain.api).indexedTransactionById(anyString())
+    val rec = transactions.batching.sigmafi.zc.ZcBoxes.read(spamOrders.head).get
+    w.resolver.script(rec, pending = false, new transactions.batching.sigmafi.zc.ZcBudget(4)) shouldBe Some(disclosedTree.toLowerCase)
+    confirmedReads.get() shouldBe 1
+  }
 }

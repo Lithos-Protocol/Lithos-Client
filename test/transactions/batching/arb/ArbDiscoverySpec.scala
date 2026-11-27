@@ -41,9 +41,10 @@ class ArbDiscoverySpec extends AnyFlatSpec with Matchers {
   }, cut = false)
 
   private def discover(state: TrackedPools, previous: Option[ArbIndex] = None,
-                       stands: PoolDeployment => Boolean = _ => true): ArbIndex =
+                       stands: PoolDeployment => Boolean = _ => true,
+                       nowMs: Long = 1000000L): ArbIndex =
     nodeContext.getClient.execute(ctx => ArbDiscovery.index(ctx, state, previous, BatchingConfig.Default,
-      Set(id(4)), stands))
+      Set(id(4)), stands, nowMs))
 
   "Discovery" should "index tracked ErgoDEX and LithosDex pools, less old and denied ones" in {
     val found = discover(tracked)
@@ -57,44 +58,75 @@ class ArbDiscoverySpec extends AnyFlatSpec with Matchers {
     found.cut shouldBe false
   }
 
-  it should "leave out a LithosDex pool whose vault does not stand, and read a standing vault once" in {
+  it should "leave out a LithosDex pool whose vault does not stand, cache missing vaults for their TTL, and read a standing vault once" in {
     var reads = 0
     val noCanonical: PoolDeployment => Boolean = {
       case PoolDeployment.LithosDexNative(_) => reads += 1; false
       case _ => reads += 1; true
     }
-    val first = discover(tracked, stands = noCanonical)
+    val t0 = 1000000L
+    val first = discover(tracked, stands = noCanonical, nowMs = t0)
     first.parsed.keySet should not contain CanonicalNft
     // Parsed, though without ERG:LIT no cycle passes through it
     first.parsed.keySet should contain(litRsnPool.assets.head.tokenId)
     reads shouldBe 2
-    // The token pool's vault was kept as standing; the canonical one is asked again
-    val second = discover(tracked, Some(first), noCanonical)
+    // The token pool's vault was kept as standing, and the canonical missing vault is negative-cached during TTL
+    val second = discover(tracked, Some(first), noCanonical, nowMs = t0 + 1000L)
+    reads shouldBe 2
+    // Once the missing-vault TTL expires, the canonical vault is checked again
+    val third = discover(tracked, Some(second), noCanonical, nowMs = t0 + ArbDiscovery.MissingVaultTtlMs + 1L)
     reads shouldBe 3
-    // The token pool's box moves, so it is parsed again, but its vault is not read again
+    // The token pool's box moves, so it is parsed again, but its standing vault is not read again
     val rsnNft = litRsnPool.assets.head.tokenId
     val movedRsn = shapes.read(litRsnPool, tip - 5).get.copy(box = litRsnPool.copy(boxId = "aa" * 32))
     discover(TrackedPools.seeded(tip, "h", tracked.boxes.values.filterNot(_.nft == rsnNft).toSeq :+ movedRsn,
-      cut = false), Some(second), noCanonical)
-    reads shouldBe 4
-    withClue("a vault read that throws leaves its pool out without failing discovery: ") {
-      // Without the LIT hub the RSN pool closes no cycle, so only the pair is left
-      discover(tracked, stands = _ => throw new RuntimeException("node down")).pools.keySet shouldBe Set(id(1), id(2))
+      cut = false), Some(third), noCanonical, nowMs = t0 + ArbDiscovery.MissingVaultTtlMs + 2L)
+    reads shouldBe 3
+    withClue("a vault read that throws leaves its pool out without failing discovery or negative-caching: ") {
+      var errReads = 0
+      val failing = discover(tracked, stands = _ => { errReads += 1; throw new RuntimeException("node down") }, nowMs = t0)
+      failing.pools.keySet shouldBe Set(id(1), id(2))
+      failing.missingVaults shouldBe empty
+      errReads shouldBe 2
+      // Next build immediately retries because transient errors are not negative-cached
+      val recovered = discover(tracked, Some(failing), stands = _ => { errReads += 1; true }, nowMs = t0 + 1000L)
+      recovered.parsed.keySet should contain(CanonicalNft)
+      errReads shouldBe 4
     }
   }
 
-  it should "read at most a few new vaults per build" in {
-    // Token pools under made-up deployments, each its own vault; the vault reads come before any box is parsed
+  it should "read at most a few new vaults per build and prevent dust spam from starving real pools" in {
+    // Low-value fake deployments with small NFTs (sorting before canonical c0...) and missing vaults
     val prov = ErgoId.create(id(900))
-    val pools = (1 to ArbDiscovery.MaxVaultReads + 3).map { i =>
-      val nft = id(800 + i)
-      TrackedBox(litRsnPool.copy(boxId = id(700 + i),
+    val fakePools = (1 to ArbDiscovery.MaxVaultReads + 2).map { i =>
+      val nft = f"0001$i%060x"
+      TrackedBox(litRsnPool.copy(boxId = id(700 + i), value = 1000000L,
         assets = litRsnPool.assets.updated(0, litRsnPool.assets.head.copy(tokenId = nft))), tip - 5,
         PoolDeployment.LithosDexToken(LDT2TContracts(ErgoId.create(nft), ErgoId.create(id(600 + i)), prov)))
     }
     var reads = 0
-    discover(TrackedPools.seeded(tip, "h", pools, cut = false), stands = _ => { reads += 1; false })
+    val onlyFakes = discover(TrackedPools.seeded(tip, "h", fakePools, cut = false), stands = _ => { reads += 1; false })
     reads shouldBe ArbDiscovery.MaxVaultReads
+    onlyFakes.missingVaults should have size ArbDiscovery.MaxVaultReads
+
+    // With canonical ERG:LIT (high ERG) and a lower-value real T2T pool alongside the fake dust boxes:
+    // high-ERG pools are checked first, and negative-cached fake vaults never starve subsequent builds
+    val all = TrackedPools.seeded(tip, "h", tracked.boxes.values.toSeq ++ fakePools, cut = false)
+    var realReads = 0
+    val stands: PoolDeployment => Boolean = {
+      case PoolDeployment.LithosDexNative(_) => realReads += 1; true
+      case PoolDeployment.LithosDexToken(c) if c.poolNFT.toString == litRsnPool.assets.head.tokenId => realReads += 1; true
+      case _ => realReads += 1; false
+    }
+    val b1 = discover(all, stands = stands, nowMs = 1000L)
+    b1.parsed.keySet should contain(CanonicalNft)
+    b1.parsed.keySet should contain(litRsnPool.assets.head.tokenId)
+    realReads shouldBe ArbDiscovery.MaxVaultReads
+    // Next block checks the remaining fake vaults, and after all fakes are cached, reads drop to 0
+    val b2 = discover(all, Some(b1), stands = stands, nowMs = 2000L)
+    val beforeSteady = realReads
+    discover(all, Some(b2), stands = stands, nowMs = 3000L)
+    realReads shouldBe beforeSteady
   }
 
   it should "keep an unmoved pool's parsed state and the routes, and re-read only a pool that moved" in {

@@ -387,6 +387,58 @@ class DexPoolExecutionSpec extends TestKit(ActorSystem("dex-pool-execution-spec"
     fMem.exec.lookupNfts(Seq(unconfPool.boxId), requireFresh = true).keySet shouldBe Set(unconfPool.boxId)
   }
 
+  it should "recheck live ownership on requireFresh when only the mempool changes at the same tip" in {
+    val f = fixture()
+    val (unspentPool, depositProv, spentPool, redeemProv, depositTx) = f.node.getClient.execute { ctx: BlockchainContext =>
+      def poolBox(index: Int, txId: String) = LDNodeFixtures.nodeBox(ctx, UTXO(n2t.liquidityPool, 9L * Parameters.OneErg,
+        Seq(Token(n2t.poolNFT, 1L), Token(tokenY, 900000000L), Token(n2t.provToken, 1001L)),
+        Seq(ErgoValue.of(LDHelpers.LOCKED_LP - 999000000L), longs(LDHelpers.GENESIS_FEE_PARAMS), longs(Array(0L, 0L)),
+          zero, zero)), index = index, txId = txId)
+      def provBox(owner: String, index: Int, txId: String) = LDNodeFixtures.nodeBox(ctx, UTXO(n2t.provisionGuard,
+        LDHelpers.PROVISION_MIN, Seq(Token(n2t.provToken, 1L)),
+        Seq(zero, zero, ErgoValue.of(Colls.fromArray(ErgoId.create(owner).getBytes), scalaByteType),
+          ErgoValue.of(1000L))), index = index, txId = txId)
+      val after = LDNodeFixtures.nodeBox(ctx, UTXO(n2t.liquidityPool, 10L * Parameters.OneErg,
+        Seq(Token(n2t.poolNFT, 1L), Token(tokenY, 1000000000L), Token(n2t.provToken, 1000L)),
+        Seq(ErgoValue.of(LDHelpers.LOCKED_LP - 1000000000L), longs(LDHelpers.GENESIS_FEE_PARAMS), longs(Array(0L, 0L)),
+          zero, zero)), index = 0, txId = "d9" * 32)
+      val p1 = poolBox(0, "c1" * 32)
+      val p2 = poolBox(1, "c2" * 32)
+      val pr1 = provBox(p1.boxId, 1, "c3" * 32)
+      val pr2 = provBox(p2.boxId, 1, "c4" * 32)
+      val depTx = IndexedTransaction("d9" * 32, Seq(LDNodeFixtures.indexed(p2)), Seq.empty,
+        Seq(LDNodeFixtures.indexed(after), LDNodeFixtures.indexed(pr2)), 80, 1, "block", 0L, 0, 1L, 100)
+      (p1, pr1, p2, pr2, depTx)
+    }
+    var mempoolProvisions = Seq.empty[NodeBox]
+    val indexedBoxes = Map(
+      unspentPool.boxId -> LDNodeFixtures.indexed(unspentPool),
+      spentPool.boxId -> LDNodeFixtures.indexed(spentPool).copy(spentTransactionId = Some(depositTx.id)))
+    when(f.nodeApi.indexedBoxById(anyString())).thenAnswer(inv => Success(indexedBoxes.get(inv.getArgument[String](0))))
+    when(f.nodeApi.indexedTransactionById(depositTx.id)).thenReturn(Success(Some(depositTx)))
+    when(f.nodeApi.unspentBoxesByErgoTree(anyString(), any[Paging], any[SortDirection], any[MempoolOptions])).thenAnswer { inv =>
+      Success(if (inv.getArgument[String](0) == n2t.provisionGuard.ergoTreeHex) mempoolProvisions.map(LDNodeFixtures.indexed(_))
+      else Seq.empty)
+    }
+
+    // Before mempool changes: unspentPool has no live position; spentPool appears redeemed (e.g. pending redeem in mempool)
+    f.exec.lookupNfts(Seq(unspentPool.boxId, spentPool.boxId), requireFresh = false).get(unspentPool.boxId) shouldBe None
+    f.exec.lookupNfts(Seq(spentPool.boxId), requireFresh = false)(spentPool.boxId).live shouldBe None
+    f.exec.lookupNfts(Seq(unspentPool.boxId), requireFresh = true) shouldBe empty
+    f.exec.lookupNfts(Seq(spentPool.boxId), requireFresh = true)(spentPool.boxId).live shouldBe None
+
+    // Only the mempool changes at the exact same (height, headerId):
+    // 1) a pending deposit spends unspentPool and creates depositProv
+    // 2) the pending redeem of spentPool disappears so redeemProv is live again
+    mempoolProvisions = Seq(depositProv, redeemProv)
+
+    val fresh = f.exec.lookupNfts(Seq(unspentPool.boxId, spentPool.boxId), requireFresh = true)
+    fresh(unspentPool.boxId).live shouldBe defined
+    fresh(spentPool.boxId).live shouldBe defined
+    // Immutable mint provenance for spentPool was reused from nftMints without re-reading the deposit transaction
+    verify(f.nodeApi, times(1)).indexedTransactionById(depositTx.id)
+  }
+
   it should "say how each NFT was minted, name a redeemed one, find a creator's, and read each once a tip" in {
     val creator = "a7" * 32
     val f = fixture(n2tGenesis = Seq(GenesisProvision(creator, 90, LDHelpers.GENESIS_SUPPLY - LDHelpers.MIN_SUPPLY,

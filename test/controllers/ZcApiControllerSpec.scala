@@ -159,13 +159,19 @@ class ZcApiControllerSpec
     val held = (1 to ZcApiController.MaxHeavyReads).map(_ =>
       ctl.orderbook("ERG", None, None, None, None, None, None, None, None).apply(FakeRequest()))
     status(ctl.orderbook("ERG", None, None, None, None, None, None, None, None).apply(FakeRequest())) shouldBe TOO_MANY_REQUESTS
+    status(ctl.asks("ERG", None, None, None, None, None, None, None, None, Some(1), None).apply(FakeRequest())) shouldBe TOO_MANY_REQUESTS
+    status(ctl.offers("ERG", None, None, None, None, None, None, None, None, Some(1), None).apply(FakeRequest())) shouldBe TOO_MANY_REQUESTS
     status(ctl.curves("ERG", None, None, None, None, None).apply(FakeRequest())) shouldBe TOO_MANY_REQUESTS
     status(ctl.matches(id(1), None).apply(FakeRequest())) shouldBe TOO_MANY_REQUESTS
     status(ctl.fills("ERG", None, None, None, None, None).apply(FakeRequest())) shouldBe TOO_MANY_REQUESTS
     // 304 revision polls bypass the heavy-read slots
     status(ctl.orderbook("ERG", None, None, None, None, None, None, None, t.view.map(_.revision)).apply(FakeRequest())) shouldBe NOT_MODIFIED
+    status(ctl.asks("ERG", None, None, None, None, None, None, None, None, Some(1), t.view.map(_.revision)).apply(FakeRequest())) shouldBe NOT_MODIFIED
+    status(ctl.offers("ERG", None, None, None, None, None, None, None, None, Some(1), t.view.map(_.revision)).apply(FakeRequest())) shouldBe NOT_MODIFIED
     latch.countDown()
     held.map(status(_)).toSet shouldBe Set(OK)
+    status(ctl.asks("ERG", None, None, None, None, None, None, None, None, Some(1), None).apply(FakeRequest())) shouldBe OK
+    status(ctl.offers("ERG", None, None, None, None, None, None, None, None, Some(1), None).apply(FakeRequest())) shouldBe OK
     status(ctl.fills("ERG", None, None, None, None, None).apply(FakeRequest())) shouldBe OK
   }
 

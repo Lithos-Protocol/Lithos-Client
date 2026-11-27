@@ -13,9 +13,10 @@ import org.slf4j.{Logger, LoggerFactory}
 import transactions.batching.lithosdex.LDDeployments
 import transactions.batching.tracking.{PoolDeployment, PoolTracker, TrackedBox, TrackedPools}
 
-import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.atomic.{AtomicBoolean, AtomicReference}
+import java.util.concurrent.{CompletableFuture, ConcurrentHashMap, ExecutionException}
+import java.util.concurrent.atomic.AtomicReference
 import javax.inject.{Inject, Singleton}
+import scala.collection.JavaConverters._
 import scala.concurrent.Future
 import scala.concurrent.duration._
 import scala.util.control.NonFatal
@@ -106,9 +107,11 @@ class LDPoolIndex(nodeContext: NodeContext, ioContext: => scala.concurrent.Execu
   private val logger: Logger = LoggerFactory.getLogger("LDPoolIndex")
   private lazy val io = ioContext
 
-  private val current = new AtomicReference(
-    PoolIndexSnapshot("building", 0, truncated = false, Seq.empty, Map.empty))
-  private val refreshing = new AtomicBoolean(false)
+  private val current = new AtomicReference(HeldState(
+    PoolIndexSnapshot("building", 0, truncated = false, Seq.empty, Map.empty),
+    source = None, vaultUnread = false, vaultFailures = 0, vaultRetryAfterMs = 0L, activePoolNfts = Set.empty))
+  private val buildLock = new Object
+  private var inFlights: List[InFlight] = Nil
 
   private val verdicts = new ConcurrentHashMap[String, GenesisVerdict]()
   private val geneses = new ConcurrentHashMap[String, Seq[GenesisProvision]]()
@@ -122,37 +125,107 @@ class LDPoolIndex(nodeContext: NodeContext, ioContext: => scala.concurrent.Execu
   private def nodeApi: NodeApi = nodeContext.getNodeApi
   private def network: NetworkType = nodeContext.getNetwork
 
-  private def publish(next: PoolIndexSnapshot): PoolIndexSnapshot =
-    current.updateAndGet { held =>
-      if (next.height > held.height) next
-      else if (next.height == held.height &&
-        (held.status != "ready" || next.headerId != held.headerId ||
-          (held.ownershipIncomplete && !next.ownershipIncomplete))) next
-      else held
+  private def sameTracked(a: TrackedPools, b: TrackedPools): Boolean = (a eq b) || a == b
+
+  private def heldFrom(built: BuiltResult, prior: HeldState): HeldState = {
+    val (failures, retryAfter) =
+      if (!built.vaultUnread) (0, 0L)
+      else {
+        val sameTip = prior.snapshot.height == built.snapshot.height && prior.snapshot.headerId == built.snapshot.headerId
+        val nextFailures = (if (sameTip) prior.vaultFailures else 0) + 1
+        val shift = math.min(nextFailures - 1, 6)
+        val delay = math.min(MaxVaultBackoffMs, VaultBackoffBaseMs << shift)
+        (nextFailures, nowMs() + delay)
+      }
+    HeldState(built.snapshot, Some(built.source), built.vaultUnread, failures, retryAfter, built.keptPoolNfts)
+  }
+
+  private def publish(built: BuiltResult): HeldState = {
+    val next = built.snapshot
+    val published = current.updateAndGet { held =>
+      val s = held.snapshot
+      val trackerMoved = held.source.forall(prev => !sameTracked(prev, built.source))
+      val accept =
+        if (next.height > s.height) true
+        else if (next.height == s.height) {
+          s.status != "ready" ||
+            next.headerId != s.headerId ||
+            trackerMoved ||
+            (s.ownershipIncomplete && !next.ownershipIncomplete) ||
+            (held.vaultUnread && !built.vaultUnread) ||
+            (held.vaultUnread && built.vaultUnread) ||
+            (s.genesisIncomplete && !next.genesisIncomplete)
+        } else false
+      if (accept) heldFrom(built, held) else held
+    }
+    if (published.snapshot.height == next.height && published.snapshot.headerId == next.headerId)
+      pruneCaches(built)
+    published
+  }
+
+  private def needsBackgroundRebuild(held: HeldState, s: TrackedPools): Boolean = {
+    val snap = held.snapshot
+    if (s.height > snap.height) true
+    else if (s.height < snap.height) false
+    else if (snap.status != "ready" || s.headerId != snap.headerId) true
+    else if (held.source.forall(prev => !sameTracked(prev, s))) true
+    else (held.vaultUnread && nowMs() >= held.vaultRetryAfterMs) ||
+      (snap.genesisIncomplete && anyGenesisRetryReady(held.activePoolNfts))
+  }
+
+  private def runInFlight(flight: InFlight): BuiltResult =
+    try {
+      val built = buildResult(flight.state, flight.signingCheck)
+      publish(built)
+      flight.promise.complete(built)
+      built
+    } catch {
+      case ex: Throwable =>
+        flight.promise.completeExceptionally(ex)
+        throw ex
+    } finally buildLock.synchronized {
+      inFlights = inFlights.filterNot(_ eq flight)
     }
 
-  /** The last snapshot, starting a rebuild in the background when the tracker has moved past it. */
+  private def awaitInFlight(flight: InFlight): BuiltResult =
+    try flight.promise.get()
+    catch {
+      case e: ExecutionException if e.getCause != null => throw e.getCause
+    }
+
+  /** The last snapshot, starting a rebuild in the background when the tracker has moved past it or retries are due. */
   def snapshot(): PoolIndexSnapshot = {
     Try(nodeApi.info().get).toOption.foreach(info =>
       for (height <- info.fullHeight; id <- info.bestFullHeaderId) Try(follow(height, id)))
     val held = current.get()
-    tracked().filter(s => s.height > held.height || (s.height == held.height &&
-      (s.headerId != held.headerId || (held.ownershipIncomplete && (held.truncated || anyGenesisRetryReady()))))).foreach { state =>
-      if (refreshing.compareAndSet(false, true))
-        Future {
-          try publish(build(state))
+    tracked().filter(needsBackgroundRebuild(held, _)).foreach { state =>
+      val start = buildLock.synchronized {
+        if (inFlights.exists(f => sameTracked(f.state, state) || !f.signingCheck)) None
+        else {
+          val flight = new InFlight(state, signingCheck = false, new CompletableFuture[BuiltResult]())
+          inFlights = flight :: inFlights
+          Some(flight)
+        }
+      }
+      start.foreach { flight =>
+        Try(Future {
+          try runInFlight(flight)
           catch {
             case NonFatal(ex) => logger.warn(s"The LithosDEX pool index did not rebuild at ${state.height}: ${ex.getMessage}")
-          } finally refreshing.set(false)
-        }(io)
+          }
+        }(io)).failed.foreach { ex =>
+          flight.promise.completeExceptionally(ex)
+          buildLock.synchronized { inFlights = inFlights.filterNot(_ eq flight) }
+        }
+      }
     }
-    current.get()
+    current.get().snapshot
   }
 
   /**
    * A snapshot verified against the node's current canonical tip, waiting briefly for the tracker and rebuilding
-   * synchronously when the cached snapshot is behind or incomplete. Throws [[LithosApiErrors.LithosUnavailable]] when
-   * the canonical tip cannot be read or reached.
+   * synchronously (sharing any matching in-flight build) when the cached snapshot is behind or has transient gaps.
+   * Throws [[LithosApiErrors.LithosUnavailable]] when the canonical tip cannot be read or reached.
    */
   def freshSnapshot(wait: FiniteDuration = FreshWait): PoolIndexSnapshot = {
     val info = nodeApi.info().getOrElse(
@@ -163,15 +236,30 @@ class LDPoolIndex(nodeContext: NodeContext, ioContext: => scala.concurrent.Execu
       throw LithosApiErrors.LithosUnavailable("the node has no canonical header id for pool index verification"))
     Try(follow(tipHeight, tipHeaderId))
     val held = current.get()
-    if (held.status == "ready" && held.height == tipHeight && held.headerId == tipHeaderId && !held.ownershipIncomplete) held
+    if (held.snapshot.status == "ready" && held.snapshot.height == tipHeight &&
+      held.snapshot.headerId == tipHeaderId && !held.snapshot.ownershipIncomplete) held.snapshot
     else {
       val state = tracked().filter(s => s.height == tipHeight && s.headerId == tipHeaderId)
         .orElse(awaitTracked(tipHeight, wait).filter(s => s.height == tipHeight && s.headerId == tipHeaderId))
         .getOrElse(throw LithosApiErrors.LithosUnavailable(
-          s"the pool index is at height ${held.height} (${held.headerId}), behind canonical tip $tipHeight ($tipHeaderId); retry shortly"))
-      val built = build(state, signingCheck = true)
-      publish(built)
-      built
+          s"the pool index is at height ${held.snapshot.height} (${held.snapshot.headerId}), behind canonical tip $tipHeight ($tipHeaderId); retry shortly"))
+      val latestHeld = current.get()
+      if (latestHeld.snapshot.status == "ready" && latestHeld.source.exists(sameTracked(_, state)) &&
+        !latestHeld.vaultUnread && !latestHeld.snapshot.genesisIncomplete) {
+        // Already built for this exact tracker state with no transient vault or genesis gaps (only capacity cut if truncated)
+        latestHeld.snapshot
+      } else {
+        val (flight, owner) = buildLock.synchronized {
+          inFlights.find(cur => sameTracked(cur.state, state) && (cur.signingCheck || !anyGenesisBackedOff())) match {
+            case Some(cur) => (cur, false)
+            case None =>
+              val next = new InFlight(state, signingCheck = true, new CompletableFuture[BuiltResult]())
+              inFlights = next :: inFlights
+              (next, true)
+          }
+        }
+        if (owner) runInFlight(flight).snapshot else awaitInFlight(flight).snapshot
+      }
     }
   }
 
@@ -186,12 +274,19 @@ class LDPoolIndex(nodeContext: NodeContext, ioContext: => scala.concurrent.Execu
 
   /** Rebuilds now from the tracker's newest state, on the calling thread, and keeps the result. */
   private[api] def refreshNow(): PoolIndexSnapshot = {
-    tracked().foreach(state => current.set(build(state)))
-    current.get()
+    tracked().foreach { state =>
+      val built = buildResult(state, signingCheck = false)
+      current.set(heldFrom(built, current.get()))
+      pruneCaches(built)
+    }
+    current.get().snapshot
   }
 
   /** The pools `state` holds at the LithosDex templates, each kind's newest [[MaxPoolsPerKind]]. */
-  private[api] def build(state: TrackedPools, signingCheck: Boolean = false): PoolIndexSnapshot = nodeContext.getClient.execute { ctx =>
+  private[api] def build(state: TrackedPools, signingCheck: Boolean = false): PoolIndexSnapshot =
+    buildResult(state, signingCheck).snapshot
+
+  private def buildResult(state: TrackedPools, signingCheck: Boolean): BuiltResult = nodeContext.getClient.execute { ctx =>
     val registry = VerifiedRegistry.forNetwork(network)
     def newest(boxes: Seq[TrackedBox], kind: String): (Seq[TrackedBox], Boolean) = {
       if (boxes.size > MaxPoolsPerKind) logger.warn(s"More than $MaxPoolsPerKind LithosDEX $kind pools are tracked; " +
@@ -199,10 +294,14 @@ class LDPoolIndex(nodeContext: NodeContext, ioContext: => scala.concurrent.Execu
       boxes.sortBy(b => (-b.inclusionHeight, b.boxId)).take(MaxPoolsPerKind) -> (boxes.size > MaxPoolsPerKind)
     }
     val all = state.pools.toVector
-    val (n2tBoxes, n2tCut) = newest(all.collect { case t @ TrackedBox(_, _, _: PoolDeployment.LithosDexNative) => t },
-      "ERG/token")
-    val (t2tBoxes, t2tCut) = newest(all.collect { case t @ TrackedBox(_, _, _: PoolDeployment.LithosDexToken) => t },
-      "token/token")
+    val allN2t = all.collect { case t @ TrackedBox(_, _, _: PoolDeployment.LithosDexNative) => t }
+    val allT2t = all.collect { case t @ TrackedBox(_, _, _: PoolDeployment.LithosDexToken) => t }
+    val (n2tBoxes, n2tCut) = newest(allN2t, "ERG/token")
+    val (t2tBoxes, t2tCut) = newest(allT2t, "token/token")
+    // Evaluated at most once per build, and only when a pool's vault check does not find a standing vault.
+    lazy val indexCoversTip: Try[Boolean] =
+      Option(nodeApi.indexedHeight()).getOrElse(Failure(new IllegalStateException("node indexed height unavailable")))
+        .map(_.indexedHeight >= state.height)
     // A box that does not parse is no pool; a vault the node could not answer for leaves its pool out unread
     var unread = 0
     var genesisUnread = 0
@@ -214,25 +313,43 @@ class LDPoolIndex(nodeContext: NodeContext, ioContext: => scala.concurrent.Execu
       case Failure(_: VaultUnread) => unread += 1; None
       case Failure(_) => None
     }
-    val pools = n2tBoxes.flatMap(box => pool(n2tPool(ctx, box, registry, signingCheck))) ++
-      t2tBoxes.flatMap(box => pool(t2tPool(ctx, box, registry, signingCheck)))
+    val pools = n2tBoxes.flatMap(box => pool(n2tPool(ctx, box, state.height, indexCoversTip, registry, signingCheck))) ++
+      t2tBoxes.flatMap(box => pool(t2tPool(ctx, box, state.height, indexCoversTip, registry, signingCheck)))
     if (unread > 0) logger.warn(s"$unread LithosDEX pool(s) left out of the index at ${state.height}: their vaults " +
       "could not be read; the index reads as truncated until a rebuild reads them")
     // ERG:LIT first whatever else holds, then verified pools, then newest
     val canonical = lithosdex.LDHelpers.getPoolNFT(network).toString
     val sorted = pools.sortBy(p => (p.nft != canonical, !p.verified, -p.inclusionHeight, p.nft))
-    PoolIndexSnapshot("ready", state.height, state.cut || n2tCut || t2tCut || unread > 0, sorted,
-      metaFor(sorted.flatMap(p => p.tokenX.toSeq :+ p.tokenY), registry),
-      headerId = state.headerId, genesisIncomplete = genesisUnread > 0)
+    val activeTokens = sorted.flatMap(p => p.tokenX.toSeq :+ p.tokenY).toSet
+    val capacityCut = state.cut || n2tCut || t2tCut
+    val snap = PoolIndexSnapshot("ready", state.height, capacityCut || unread > 0, sorted,
+      metaFor(activeTokens.toSeq, registry), headerId = state.headerId, genesisIncomplete = genesisUnread > 0)
+    def idsOf(boxes: Seq[TrackedBox]): (Set[String], Set[String], Set[String]) = {
+      val nfts = Set.newBuilder[String]
+      val vaults = Set.newBuilder[String]
+      val provs = Set.newBuilder[String]
+      boxes.foreach(_.deployment match {
+        case PoolDeployment.LithosDexNative(c) =>
+          nfts += c.poolNFT.toString; vaults += c.vaultNFT.toString; provs += c.provToken.toString
+        case PoolDeployment.LithosDexToken(c) =>
+          nfts += c.poolNFT.toString; vaults += c.vaultNFT.toString; provs += c.provToken.toString
+        case _ => ()
+      })
+      (nfts.result(), vaults.result(), provs.result())
+    }
+    val (keptNfts, _, _) = idsOf(n2tBoxes ++ t2tBoxes)
+    val (allNfts, allVaults, allProvs) = idsOf(allN2t ++ allT2t)
+    BuiltResult(snap, state, unread > 0, keptNfts, allNfts, allVaults, allProvs, activeTokens, capacityCut)
   }
 
-  private def n2tPool(ctx: BlockchainContext, box: TrackedBox, registry: VerifiedRegistry,
-                      signingCheck: Boolean): Option[(IndexedPool, Boolean)] = {
+  private def n2tPool(ctx: BlockchainContext, box: TrackedBox, stateHeight: Int, indexCoversTip: => Try[Boolean],
+                      registry: VerifiedRegistry, signingCheck: Boolean): Option[(IndexedPool, Boolean)] = {
     val contracts = box.deployment match {
       case PoolDeployment.LithosDexNative(c) => Some(c)
       case _ => None
     }
-    contracts.filter(c => vaultStands(c.vaultNFT.toString, LDDeployments.vaultStands(nodeApi, c))).map { c =>
+    contracts.filter(c => vaultStands(c.vaultNFT.toString, stateHeight, indexCoversTip,
+      LDDeployments.checkVault(nodeApi, c.vaultNFT.toString, c.feeVault.ergoTreeHex))).map { c =>
       val p = LDLiquidityPool(box.box.toInputUTXO(ctx))
       val verified = registry.pool(c.poolNFT.toString).exists(_.kind == VerifiedPool.Kind.N2T)
       val judged = if (verified) None
@@ -246,12 +363,13 @@ class LDPoolIndex(nodeContext: NodeContext, ioContext: => scala.concurrent.Execu
     }
   }
 
-  private def t2tPool(ctx: BlockchainContext, box: TrackedBox, registry: VerifiedRegistry,
-                      signingCheck: Boolean): Option[(IndexedPool, Boolean)] =
+  private def t2tPool(ctx: BlockchainContext, box: TrackedBox, stateHeight: Int, indexCoversTip: => Try[Boolean],
+                      registry: VerifiedRegistry, signingCheck: Boolean): Option[(IndexedPool, Boolean)] =
     (box.deployment match {
       case PoolDeployment.LithosDexToken(c) => Some(c)
       case _ => None
-    }).filter(c => vaultStands(c.vaultNFT.toString, LDDeployments.vaultStands(nodeApi, c))).map { c =>
+    }).filter(c => vaultStands(c.vaultNFT.toString, stateHeight, indexCoversTip,
+      LDDeployments.checkVault(nodeApi, c.vaultNFT.toString, c.feeVault.ergoTreeHex))).map { c =>
         val p = LDT2TLiquidityPool(box.box.toInputUTXO(ctx))
         val verified = registry.pool(c.poolNFT.toString).exists(_.kind == VerifiedPool.Kind.T2T)
         val judged = if (verified) None
@@ -264,10 +382,26 @@ class LDPoolIndex(nodeContext: NodeContext, ioContext: => scala.concurrent.Execu
           provisions.getOrElse(Seq.empty)) -> provisions.isDefined
       }
 
-  /** A vault singleton stays one once it stands, so only a first sighting costs the read. A failed read throws. */
-  private def vaultStands(vaultNft: String, check: => Boolean): Boolean =
+  /**
+   * A vault singleton stays one once it stands, so only a first sighting costs the read. Verification returns `true`
+   * independently of cache insertion (so concurrent builds never omit a verified pool). A non-standing vault read
+   * throws [[VaultUnread]] until the node's extraIndex covers `stateHeight`, so a newly confirmed pool is never
+   * silently dropped while the index lags the canonical tip.
+   */
+  private def vaultStands(vaultNft: String, stateHeight: Int, indexCoversTip: => Try[Boolean],
+                          check: => LDDeployments.VaultCheck): Boolean =
     vaultsStanding.contains(vaultNft) || (Try(check) match {
-      case Success(stands) => stands && vaultsStanding.add(vaultNft)
+      case Success(LDDeployments.VaultCheck.Standing) =>
+        vaultsStanding.add(vaultNft)
+        true
+      case Success(_) =>
+        indexCoversTip match {
+          case Success(true) => false
+          case Success(false) =>
+            throw new VaultUnread(vaultNft, new IllegalStateException(
+              s"the node's index has not reached height $stateHeight to verify vault $vaultNft"))
+          case Failure(ex) => throw new VaultUnread(vaultNft, ex)
+        }
       case Failure(ex) => throw new VaultUnread(vaultNft, ex)
     })
 
@@ -403,12 +537,36 @@ class LDPoolIndex(nodeContext: NodeContext, ioContext: => scala.concurrent.Execu
         (if (signingCheck) nowMs() - b.lastFailedMs < BackoffBaseMs else nowMs() < b.retryAfterMs)
     }
 
-  /** Whether any transiently failed pool genesis is ready to retry now. */
-  private def anyGenesisRetryReady(): Boolean = {
+  /** Whether any transiently failed pool genesis in `activePoolNfts` is ready to retry now. */
+  private def anyGenesisRetryReady(activePoolNfts: Set[String]): Boolean = {
     val now = nowMs()
     var ready = false
-    genesisBackoff.forEach((_, b) => if (now >= b.retryAfterMs) ready = true)
+    genesisBackoff.forEach((nft, b) => if (activePoolNfts.contains(nft) && now >= b.retryAfterMs) ready = true)
     ready
+  }
+
+  /** Whether any pool is currently waiting in genesis failure backoff (where signingCheck uses a shorter window). */
+  private def anyGenesisBackedOff(): Boolean = {
+    var active = false
+    genesisBackoff.forEach((_, b) => if (b.failures >= MaxGenesisReads) active = true)
+    active
+  }
+
+  /** Prunes departed pools from verification and retry caches so long-running clients keep bounded heap. */
+  private def pruneCaches(built: BuiltResult): Unit = {
+    genesisBackoff.keySet().retainAll(built.keptPoolNfts.asJava)
+    genesisReads.keySet().retainAll(built.allProvTokens.asJava)
+    if (!built.capacityTruncated) {
+      verdicts.keySet().retainAll(built.allPoolNfts.asJava)
+      geneses.keySet().retainAll(built.allPoolNfts.asJava)
+      vaultsStanding.retainAll(built.allVaultNfts.asJava)
+      if (!built.vaultUnread) tokenMeta.keySet().retainAll(built.activeTokens.asJava)
+    } else {
+      if (verdicts.size() > MaxCacheEntries) verdicts.keySet().retainAll(built.allPoolNfts.asJava)
+      if (geneses.size() > MaxCacheEntries) geneses.keySet().retainAll(built.allPoolNfts.asJava)
+      if (vaultsStanding.size() > MaxCacheEntries) vaultsStanding.retainAll(built.allVaultNfts.asJava)
+      if (!built.vaultUnread && tokenMeta.size() > MaxCacheEntries) tokenMeta.keySet().retainAll(built.activeTokens.asJava)
+    }
   }
 
   /** Counts one transient failed genesis read, backing off exponentially after [[MaxGenesisReads]] tries. */
@@ -458,6 +616,27 @@ object LDPoolIndex {
 
   private final case class GenesisBackoff(failures: Int, lastFailedMs: Long, retryAfterMs: Long)
 
+  private final case class BuiltResult(snapshot: PoolIndexSnapshot,
+                                       source: TrackedPools,
+                                       vaultUnread: Boolean,
+                                       keptPoolNfts: Set[String],
+                                       allPoolNfts: Set[String],
+                                       allVaultNfts: Set[String],
+                                       allProvTokens: Set[String],
+                                       activeTokens: Set[String],
+                                       capacityTruncated: Boolean)
+
+  private final case class HeldState(snapshot: PoolIndexSnapshot,
+                                     source: Option[TrackedPools],
+                                     vaultUnread: Boolean,
+                                     vaultFailures: Int,
+                                     vaultRetryAfterMs: Long,
+                                     activePoolNfts: Set[String])
+
+  private final class InFlight(val state: TrackedPools,
+                               val signingCheck: Boolean,
+                               val promise: CompletableFuture[BuiltResult])
+
   /** How long a signing guard waits for the pool tracker to reach the canonical tip before failing closed. */
   final val FreshWait: FiniteDuration = 5.seconds
 
@@ -467,6 +646,13 @@ object LDPoolIndex {
   /** Initial and maximum retry backoff for transient genesis read failures. */
   final val BackoffBaseMs: Long = 5000L
   final val MaxBackoffMs: Long = 300000L
+
+  /** Initial and maximum retry backoff for transient vault read failures on background refreshes. */
+  final val VaultBackoffBaseMs: Long = 1000L
+  final val MaxVaultBackoffMs: Long = 60000L
+
+  /** Ceiling for verification/metadata caches while capacity-truncated. */
+  final val MaxCacheEntries = 4096
 
   final val GenesisUnreadable = s"genesis cannot be checked: the node could not answer for it in $MaxGenesisReads tries"
 

@@ -99,6 +99,7 @@ class LDPoolIndexSpec extends TestKit(ActorSystem("ld-pool-index-spec")) with An
     @volatile var followed = Vector.empty[(Int, String)]
 
     when(api.info()).thenReturn(Success(ChainFixtures.infoAt(Tip).copy(bestFullHeaderId = Some("ab" * 32))))
+    when(api.indexedHeight()).thenReturn(Success(BlockchainIndexHeight(Tip, Tip)))
     when(api.unspentBoxesByTemplateHash(anyString(), any[Paging], any[SortDirection], any[MempoolOptions]))
       .thenReturn(Failure(new IllegalStateException("the index scans no pool template")))
     when(api.unspentBoxesByTokenId(anyString(), any[Paging], any[SortDirection], any[MempoolOptions]))
@@ -351,5 +352,168 @@ class LDPoolIndexSpec extends TestKit(ActorSystem("ld-pool-index-spec")) with An
     f.index.refreshNow()
     f.pools.getPool(t2t.poolNFT.toString).vault.vaultNFT shouldBe t2t.vaultNFT.toString
     a[LithosApiErrors.LithosNotFound] should be thrownBy f.pools.getPool("99" * 32)
+  }
+
+  it should "keep verified pools when two index builds verify the same vault concurrently" in {
+    val f = new Fixture()
+    val barrier = new java.util.concurrent.CyclicBarrier(2)
+    when(f.api.unspentBoxesByTokenId(anyString(), any[Paging], any[SortDirection], any[MempoolOptions])).thenAnswer { inv =>
+      inv.getArgument[String](0) match {
+        case id if id == lit.vaultNFT.toString =>
+          barrier.await(10, java.util.concurrent.TimeUnit.SECONDS)
+          Success(Seq(IndexedBox(f.litVault, "", 100, 1L)))
+        case id if id == n2t.vaultNFT.toString => Success(Seq(IndexedBox(f.n2tVault, "", 100, 1L)))
+        case id if id == t2t.vaultNFT.toString => Success(Seq(IndexedBox(f.t2tVault, "", 100, 1L)))
+        case _ => Success(Seq.empty[IndexedBox])
+      }
+    }
+    val pool = java.util.concurrent.Executors.newFixedThreadPool(2)
+    try {
+      val f1 = pool.submit(new java.util.concurrent.Callable[PoolIndexSnapshot] {
+        override def call(): PoolIndexSnapshot = f.index.build(f.tracked, signingCheck = false)
+      })
+      val f2 = pool.submit(new java.util.concurrent.Callable[PoolIndexSnapshot] {
+        override def call(): PoolIndexSnapshot = f.index.build(f.tracked, signingCheck = true)
+      })
+      val s1 = f1.get(15, java.util.concurrent.TimeUnit.SECONDS)
+      val s2 = f2.get(15, java.util.concurrent.TimeUnit.SECONDS)
+      Seq(s1, s2).foreach { s =>
+        s.pools.map(_.nft) should contain(lit.poolNFT.toString)
+        s.truncated shouldBe false
+        s.ownershipIncomplete shouldBe false
+      }
+    } finally pool.shutdownNow()
+  }
+
+  it should "treat an empty vault read as inconclusive while the node extraIndex lags the tip" in {
+    val f = new Fixture()
+    @volatile var vaultIndexed = false
+    @volatile var indexedHeight = Tip - 1
+    when(f.api.indexedHeight()).thenAnswer(_ => Success(BlockchainIndexHeight(indexedHeight, Tip)))
+    when(f.api.unspentBoxesByTokenId(anyString(), any[Paging], any[SortDirection], any[MempoolOptions])).thenAnswer { inv =>
+      inv.getArgument[String](0) match {
+        case id if id == lit.vaultNFT.toString => Success(Seq(IndexedBox(f.litVault, "", 100, 1L)))
+        case id if id == n2t.vaultNFT.toString => Success(Seq(IndexedBox(f.n2tVault, "", 100, 1L)))
+        case id if id == t2t.vaultNFT.toString =>
+          Success(if (vaultIndexed) Seq(IndexedBox(f.t2tVault, "", Tip, 1L)) else Seq.empty[IndexedBox])
+        case _ => Success(Seq.empty[IndexedBox])
+      }
+    }
+    val lagging = f.index.refreshNow()
+    lagging.truncated shouldBe true
+    lagging.ownershipIncomplete shouldBe true
+    lagging.pools.map(_.nft) should not contain t2t.poolNFT.toString
+
+    // Once extraIndex reaches Tip and the vault is indexed, the pool appears and completeness recovers
+    indexedHeight = Tip
+    vaultIndexed = true
+    val caughtUp = f.index.refreshNow()
+    caughtUp.truncated shouldBe false
+    caughtUp.ownershipIncomplete shouldBe false
+    caughtUp.pools.map(_.nft) should contain(t2t.poolNFT.toString)
+  }
+
+  it should "not rebuild permanently capacity-truncated snapshots repeatedly, coalesce freshSnapshot builds, and prune departed pools" in {
+    val f = new Fixture()
+    val cutState = f.tracked.copy(cut = true)
+    val fullState = f.tracked.copy(cut = false)
+    @volatile var currentTracked: TrackedPools = cutState
+    // Leaving t2t's vault empty while indexedHeight == Tip means each actual rebuild must re-check t2t.vaultNFT
+    val t2tChecks = new java.util.concurrent.atomic.AtomicInteger(0)
+    when(f.api.unspentBoxesByTokenId(anyString(), any[Paging], any[SortDirection], any[MempoolOptions])).thenAnswer { inv =>
+      inv.getArgument[String](0) match {
+        case id if id == lit.vaultNFT.toString => Success(Seq(IndexedBox(f.litVault, "", 100, 1L)))
+        case id if id == n2t.vaultNFT.toString => Success(Seq(IndexedBox(f.n2tVault, "", 100, 1L)))
+        case id if id == t2t.vaultNFT.toString =>
+          t2tChecks.incrementAndGet()
+          Success(Seq.empty[IndexedBox])
+        case _ => Success(Seq.empty[IndexedBox])
+      }
+    }
+    val idx = new LDPoolIndex(f.nodeContext, system.dispatcher, (_, _) => (), () => Some(currentTracked))
+    idx.snapshot()
+    org.scalatest.concurrent.Eventually.eventually(org.scalatest.concurrent.Eventually.timeout(
+      org.scalatest.time.Span(10, org.scalatest.time.Seconds))) {
+      idx.snapshot().status shouldBe "ready"
+    }
+    idx.snapshot().truncated shouldBe true
+    t2tChecks.get() shouldBe 1
+    // Repeated snapshot() and freshSnapshot() calls at the same capacity-truncated state must not trigger rebuilds
+    (1 to 5).foreach(_ => idx.snapshot().truncated shouldBe true)
+    idx.freshSnapshot(scala.concurrent.duration.Duration.Zero).truncated shouldBe true
+    Thread.sleep(100)
+    t2tChecks.get() shouldBe 1
+
+    // Once tracker state changes (no longer cut), snapshot() rebuilds and clears truncated
+    currentTracked = fullState
+    idx.snapshot()
+    org.scalatest.concurrent.Eventually.eventually(org.scalatest.concurrent.Eventually.timeout(
+      org.scalatest.time.Span(10, org.scalatest.time.Seconds))) {
+      idx.snapshot().truncated shouldBe false
+    }
+    t2tChecks.get() shouldBe 2
+
+    // Coalescing: two concurrent freshSnapshot() calls on the same state share one build
+    val f2 = new Fixture()
+    val entered = new java.util.concurrent.CountDownLatch(1)
+    val release = new java.util.concurrent.CountDownLatch(1)
+    val n2tVaultReads = new java.util.concurrent.atomic.AtomicInteger(0)
+    when(f2.api.unspentBoxesByTokenId(anyString(), any[Paging], any[SortDirection], any[MempoolOptions])).thenAnswer { inv =>
+      inv.getArgument[String](0) match {
+        case id if id == lit.vaultNFT.toString => Success(Seq(IndexedBox(f2.litVault, "", 100, 1L)))
+        case id if id == n2t.vaultNFT.toString =>
+          n2tVaultReads.incrementAndGet()
+          entered.countDown()
+          release.await(10, java.util.concurrent.TimeUnit.SECONDS)
+          Success(Seq(IndexedBox(f2.n2tVault, "", 100, 1L)))
+        case id if id == t2t.vaultNFT.toString => Success(Seq(IndexedBox(f2.t2tVault, "", 100, 1L)))
+        case _ => Success(Seq.empty[IndexedBox])
+      }
+    }
+    val exec = java.util.concurrent.Executors.newFixedThreadPool(2)
+    try {
+      val c1 = exec.submit(new java.util.concurrent.Callable[PoolIndexSnapshot] {
+        override def call(): PoolIndexSnapshot = f2.index.freshSnapshot(scala.concurrent.duration.Duration.Zero)
+      })
+      entered.await(10, java.util.concurrent.TimeUnit.SECONDS) shouldBe true
+      val c2 = exec.submit(new java.util.concurrent.Callable[PoolIndexSnapshot] {
+        override def call(): PoolIndexSnapshot = f2.index.freshSnapshot(scala.concurrent.duration.Duration.Zero)
+      })
+      Thread.sleep(50)
+      release.countDown()
+      val r1 = c1.get(15, java.util.concurrent.TimeUnit.SECONDS)
+      val r2 = c2.get(15, java.util.concurrent.TimeUnit.SECONDS)
+      r1.pools.map(_.nft) should contain(n2t.poolNFT.toString)
+      r2.pools.map(_.nft) should contain(n2t.poolNFT.toString)
+      n2tVaultReads.get() shouldBe 1
+    } finally exec.shutdownNow()
+
+    // Departed pools are pruned from caches once a newer non-truncated snapshot drops them
+    val f3 = new Fixture()
+    val onlyLit = TrackedPools.seeded(Tip + 1, "cd" * 32,
+      TrackerFixtures.shapes.read(f3.litPool, 90).toSeq, cut = false)
+    val readded = TrackedPools.seeded(Tip + 2, "ef" * 32,
+      Seq(f3.litPool -> 90, f3.t2tPool -> 160).flatMap { case (b, h) => TrackerFixtures.shapes.read(b, h) }, cut = false)
+    @volatile var state3: TrackedPools = f3.tracked
+    val t2tVaultCalls = new java.util.concurrent.atomic.AtomicInteger(0)
+    when(f3.api.unspentBoxesByTokenId(anyString(), any[Paging], any[SortDirection], any[MempoolOptions])).thenAnswer { inv =>
+      inv.getArgument[String](0) match {
+        case id if id == lit.vaultNFT.toString => Success(Seq(IndexedBox(f3.litVault, "", 100, 1L)))
+        case id if id == n2t.vaultNFT.toString => Success(Seq(IndexedBox(f3.n2tVault, "", 100, 1L)))
+        case id if id == t2t.vaultNFT.toString =>
+          t2tVaultCalls.incrementAndGet()
+          Success(Seq(IndexedBox(f3.t2tVault, "", 100, 1L)))
+        case _ => Success(Seq.empty[IndexedBox])
+      }
+    }
+    val idx3 = new LDPoolIndex(f3.nodeContext, system.dispatcher, (_, _) => (), () => Some(state3))
+    idx3.refreshNow()
+    t2tVaultCalls.get() shouldBe 1
+    state3 = onlyLit
+    idx3.refreshNow().pools.map(_.nft) shouldBe Seq(lit.poolNFT.toString)
+    // t2t was pruned from vaultsStanding when it departed, so re-adding it re-verifies its vault
+    state3 = readded
+    idx3.refreshNow().pools.map(_.nft) should contain(t2t.poolNFT.toString)
+    t2tVaultCalls.get() shouldBe 2
   }
 }

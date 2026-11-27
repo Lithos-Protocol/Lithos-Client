@@ -226,8 +226,8 @@ class ZcBatcher(nodeContext: NodeContext,
    * the pool tracker holds at the observation's block. A ZC box or pool any mempool transaction spends is skipped,
    * and so is each box an earlier send in this pass took. Returns the ZC boxes whose arb was refused or failed.
    */
-  private def collateralArbPass(ctx: BlockchainContext, book: ZcBook, observed: CompleteMempool.Observation,
-                                excluded: Set[String], height: Int): Set[String] = {
+  private[zc] def collateralArbPass(ctx: BlockchainContext, book: ZcBook, observed: CompleteMempool.Observation,
+                                    excluded: Set[String], height: Int): Set[String] = {
     val arb = settings.collateralArb
     val snapshot = observed.snapshot.get
     tracker.ownArbs.prune(snapshot.ids, snapshot.observedAt)
@@ -250,11 +250,15 @@ class ZcBatcher(nodeContext: NodeContext,
         resolver.script(r, pending = false, budget).flatMap(SigmaFiBoxes.parse).map(work.lithos.mutations.Contract(_))
       var refused = Set.empty[String]
       var sent = 0
+      var attempts = 0
+      val passDeadline = Deadline.now + collateralArbPassBudget
       var going = true
-      while (going && sent < ZcMempoolArb.MaxPerPass && alive.get()) {
+      while (going && sent < ZcMempoolArb.MaxPerPass && attempts < ZcBatcher.MaxArbAttemptsPerPass &&
+        !passDeadline.isOverdue() && alive.get()) {
         ZcMempoolArb.best(book, poolStates, poolBoxes, resolveScript, height, arb, minLegProceeds, skip) match {
           case None => going = false
           case Some(planned) =>
+            attempts += 1
             skip += planned.targetId
             poolStates -= planned.swap.pool.nft
             submitArb(planned) match {
@@ -265,9 +269,19 @@ class ZcBatcher(nodeContext: NodeContext,
                 logger.info(s"Broadcast ZC collateral arb $txId for ${planned.targetId} through pool " +
                   s"${planned.swap.pool.nft}: ${(result \ "netNanoErg").asOpt[String].getOrElse("?")} nanoERG net " +
                   s"on ${planned.paid} paid out")
+              case Success(result) if (result \ "outcome").asOpt[String].contains(EngineBroadcast.Uncertain) =>
+                (result \ "txId").asOpt[String].foreach(txId =>
+                  tracker.ownArbs.note(Seq(planned.targetId, planned.poolBox.boxId), txId))
+                refused += planned.targetId
+                going = false
+                logger.warn(s"ZC collateral arb for ${planned.targetId} had uncertain broadcast outcome: $result; stopping pass")
               case Success(result) =>
                 refused += planned.targetId
                 logger.warn(s"ZC collateral arb for ${planned.targetId} was not accepted: $result")
+              case Failure(ex: java.util.concurrent.TimeoutException) =>
+                refused += planned.targetId
+                going = false
+                logger.warn(s"ZC collateral arb for ${planned.targetId} timed out waiting on engine: ${ex.getMessage}; stopping pass")
               case Failure(ex) =>
                 refused += planned.targetId
                 logger.warn(s"ZC collateral arb for ${planned.targetId} was not sent: ${ex.getMessage}")
@@ -278,8 +292,10 @@ class ZcBatcher(nodeContext: NodeContext,
     }
   }
 
+  protected def collateralArbPassBudget: FiniteDuration = ZcBatcher.CollateralArbPassBudget
+
   /** Hands `planned` to the engine, which funds, signs, checks and sends it, and waits for its answer. */
-  private def submitArb(planned: ZcMempoolPlan): Try[JsObject] = Try {
+  protected def submitArb(planned: ZcMempoolPlan): Try[JsObject] = Try {
     val now = System.currentTimeMillis()
     val intent = ZcIntent.CollateralArb(planned, settings.collateralArb, tracker, resolver)
     val scheduled = TransactionEngine.Schedule(EngineIntent.Zc(intent), now, now + ArbSendWindow.toMillis)
@@ -343,6 +359,12 @@ class ZcBatcher(nodeContext: NodeContext,
 }
 
 object ZcBatcher {
+
+  /** Most collateral arb submissions attempted in one broadcast pass, whether accepted or refused. */
+  final val MaxArbAttemptsPerPass: Int = ZcMempoolArb.MaxPerPass * 2
+
+  /** Wall-clock ceiling for one collateral arb broadcast pass so engine slowness cannot stall ZC discovery. */
+  final val CollateralArbPassBudget: FiniteDuration = 90.seconds
 
   /** The book one build plans on, whether oracle-dependent work may run, and the pending refresh it reads, if any. */
   final case class OracleBasis(book: ZcBook, usable: Boolean, pending: Option[ZcRefresh]) {

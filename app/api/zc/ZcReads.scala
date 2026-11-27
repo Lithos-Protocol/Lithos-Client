@@ -46,6 +46,8 @@ class ZcReads(tracker: ZcTracker, resolver: ZcResolver, node: () => NodeApi, wal
     private val runs = new ConcurrentHashMap[ZcMarket, ZcBatchRun]()
     def run(m: ZcMarket): ZcBatchRun = runs.computeIfAbsent(m, mm => matcher.batch(mm))
     val derived = new Lru[String, JsObject](CacheEntries)
+    val pricedAsks = new Lru[(ZcMarket, Set[String]), Vector[AskRow]](16)
+    val pricedOffers = new Lru[ZcMarket, Vector[(ZcOpen[ZcOffer], ZcStanding)]](8)
   }
 
   private val current = new AtomicReference[Option[Snap]](None)
@@ -82,11 +84,11 @@ class ZcReads(tracker: ZcTracker, resolver: ZcResolver, node: () => NodeApi, wal
   def revision: Option[Long] = if (tracker.enabled) tracker.view.map(_.revision) else None
 
   /** What one request may look up, and what it found, so a page's records agree with each other. */
-  private final class Lookups(s: Snap) {
-    val budget = new ZcBudget(readsPerRequest)
+  private final class Lookups(s: Snap, presetHashes: Option[Set[String]] = None,
+                              val budget: ZcBudget = new ZcBudget(readsPerRequest)) {
     private val origins = mutable.Map.empty[String, Option[ZcOrigin]]
     private val chains = mutable.Map.empty[String, Option[(String, Long)]]
-    private lazy val mine: Set[String] = Try(walletHashes()).getOrElse(Set.empty)
+    private lazy val mine: Set[String] = presetHashes.getOrElse(Try(walletHashes()).getOrElse(Set.empty))
     def origin(t: String): Option[ZcOrigin] = origins.getOrElseUpdate(t, resolver.origin(t, budget))
     def chain(r: ZcRecord): Option[(String, Long)] = chains.getOrElseUpdate(r.boxId, resolver.chainRoot(r, budget))
     def disclosed(r: ZcRecord): Option[Boolean] = resolver.knownDisclosed(r).orElse {
@@ -148,13 +150,13 @@ class ZcReads(tracker: ZcTracker, resolver: ZcResolver, node: () => NodeApi, wal
 
   // ─── 2, 3. asks and offers ─────────────────────────────────────────────────
 
-  private def askRows(l: Lookups, s: Snap, m: ZcMarket): Vector[AskRow] = {
+  private def computeAskRows(l: Lookups, s: Snap, m: ZcMarket): Vector[AskRow] = {
     val j = l.json
     val orders = s.book.orders.filter(_.record.market == m).map { o =>
       val q = j.orderQuote(o.record)
       val window = orderWindow(o.record).exists { case (lo, hi) =>
         gridBetween(s.book.height + lo, s.book.height + hi).nonEmpty }
-      AskRow(o, () => j.orderJson(o), q.map(_._2), q.map(_._3), q.flatMap(x => (x._1 \ "cost").asOpt[String]).map(BigInt(_))
+      AskRow(o, q.map(_._2), q.map(_._3), q.flatMap(x => (x._1 \ "cost").asOpt[String]).map(BigInt(_))
         .getOrElse(BigInt(0)), j.defaultProspect(o.record).flatMap(j.coverBps), "new", j.standing(o.record),
         (o.record.mode == 0L && o.record.terms(3) % Grid == 0L) || window, l.known.mine(o.record.borrowerHash))
     }
@@ -162,12 +164,38 @@ class ZcReads(tracker: ZcTracker, resolver: ZcResolver, node: () => NodeApi, wal
       val claim = l.matcher.claimOf(a.record.token.tokenId).toOption
       val bond = claim.flatMap(c => s.book.bonds.get(c._1)).map(_.record)
       val q = j.askQuote(a.record, bond, claim.map(_._2).getOrElse(1L))
-      AskRow(a, () => j.askJson(a), q.map(_._2), q.map(_._3), q.flatMap(x => (x._1 \ "cost").asOpt[String]).map(BigInt(_))
+      AskRow(a, q.map(_._2), q.map(_._3), q.flatMap(x => (x._1 \ "cost").asOpt[String]).map(BigInt(_))
         .getOrElse(BigInt(0)), bond.map(ZcBondTerms.of).flatMap(j.coverBps),
         if (claim.exists(_._2 > 1L)) "shares" else "resale", j.standing(a.record), bond.exists(_.maturity % Grid == 0L),
         bond.exists(b => l.known.mine(b.borrowerHash)))
     }
     orders ++ asks
+  }
+
+  /**
+   * Priced ask rows for `m` at snapshot `s`, cached on `s` once all origins and disclosures fit within the request's
+   * read budget (coalescing concurrent misses). When the budget is exhausted mid-scan, the partial pass is returned
+   * uncached so later requests continue resolving remaining boxes.
+   */
+  private def cachedAskRows(s: Snap, m: ZcMarket, hashes: Set[String], budget: ZcBudget): Vector[AskRow] =
+    s.pricedAsks.getIf((m, hashes), () => {
+      val l = new Lookups(s, Some(hashes), budget)
+      val rows = computeAskRows(l, s, m)
+      (rows, l.budget.remaining > 0)
+    })
+
+  /** Priced offer rows for `m` at snapshot `s`, cached on `s` under the same budget rule as [[cachedAskRows]]. */
+  private def cachedOfferRows(s: Snap, m: ZcMarket, budget: ZcBudget): Vector[(ZcOpen[ZcOffer], ZcStanding)] =
+    s.pricedOffers.getIf(m, () => {
+      val l = new Lookups(s, Some(Set.empty), budget)
+      val rows = s.book.offers.filter(_.record.market == m).map(o => o -> l.json.standing(o.record))
+      (rows, l.budget.remaining > 0)
+    })
+
+  private def renderAsk(l: Lookups)(r: AskRow): JsObject = r.open.record match {
+    case _: ZcOrder => l.json.orderJson(r.open.asInstanceOf[ZcOpen[ZcOrder]])
+    case _: ZcAsk => l.json.askJson(r.open.asInstanceOf[ZcOpen[ZcAsk]])
+    case other => throw new IllegalStateException(s"unexpected ask row ${other.getClass.getSimpleName}")
   }
 
   private def keep(r: AskRow, f: ZcFilters, from: Option[Long], to: Option[Long]): Boolean =
@@ -182,24 +210,27 @@ class ZcReads(tracker: ZcTracker, resolver: ZcResolver, node: () => NodeApi, wal
   def asks(marketName: String, f: ZcFilters, from: Option[Long], to: Option[Long], sort: Option[String],
            cursor: Option[String], limit: Option[Int]): JsObject = {
     val s = snap()
-    val l = new Lookups(s)
     val m = market(marketName)
-    val rows = askRows(l, s, m).filter(keep(_, f, from, to))
+    val hashes = Try(walletHashes()).getOrElse(Set.empty)
+    val budget = new ZcBudget(readsPerRequest)
+    val rows = cachedAskRows(s, m, hashes, budget).filter(keep(_, f, from, to))
     val sorted = sort.getOrElse("apr") match {
       case "apr" => rows.sortBy(r => (-r.yieldBps.getOrElse(Long.MinValue + 1), r.open.boxId))
       case "maturity" => rows.sortBy(r => (r.blocksLeft.getOrElse(Long.MaxValue), r.open.boxId))
       case "size" => rows.sortBy(r => (-r.cost, r.open.boxId))
       case other => throw LithosBadRequest(s"sort must be apr, maturity or size, not $other")
     }
-    withAt(s, paged(sorted, cursor, limit, (r: AskRow) => r.open.pending)(_.json()))
+    val renderLookups = new Lookups(s, Some(hashes), budget)
+    withAt(s, paged(sorted, cursor, limit, (r: AskRow) => r.open.pending)(renderAsk(renderLookups)))
   }
 
   def offers(marketName: String, f: ZcFilters, from: Option[Long], to: Option[Long], sort: Option[String],
              cursor: Option[String], limit: Option[Int]): JsObject = {
     val s = snap()
-    val l = new Lookups(s)
     val m = market(marketName)
-    val rows = s.book.offers.filter(_.record.market == m).map(o => o -> l.json.standing(o.record)).filter { case (o, st) =>
+    val hashes = Try(walletHashes()).getOrElse(Set.empty)
+    val budget = new ZcBudget(readsPerRequest)
+    val rows = cachedOfferRows(s, m, budget).filter { case (o, st) =>
       val r = o.record
       (!f.matchable || st.ok) && floorBps(r) <= f.coverage && (f.kind != "shares" || buysShares(r)) &&
         from.forall(x => maxBlocks(r) >= x) && to.forall(x => minBlocks(r) <= x)
@@ -210,7 +241,8 @@ class ZcReads(tracker: ZcTracker, resolver: ZcResolver, node: () => NodeApi, wal
       case "size" => rows.sortBy(o => (-o.record.capital, o.boxId))
       case other => throw LithosBadRequest(s"sort must be apr, maturity or size, not $other")
     }
-    withAt(s, paged(sorted, cursor, limit, (o: ZcOpen[ZcOffer]) => o.pending)(l.json.offerJson))
+    val renderLookups = new Lookups(s, Some(hashes), budget)
+    withAt(s, paged(sorted, cursor, limit, (o: ZcOpen[ZcOffer]) => o.pending)(renderLookups.json.offerJson))
   }
 
   /**
@@ -235,10 +267,11 @@ class ZcReads(tracker: ZcTracker, resolver: ZcResolver, node: () => NodeApi, wal
   def curves(marketName: String, f: ZcFilters): JsObject = {
     val s = snap()
     val m = market(marketName)
-    val wf = Try(walletHashes()).getOrElse(Set.empty).hashCode
+    val hashes = Try(walletHashes()).getOrElse(Set.empty)
+    val wf = hashes.hashCode
     s.derived.get(s"curves:$m:$f:$wf", () => {
-      val l = new Lookups(s)
-      val offers = s.book.offers.filter(o => o.record.market == m).map(o => o -> l.json.standing(o.record))
+      val budget = new ZcBudget(readsPerRequest)
+      val offers = cachedOfferRows(s, m, budget)
       val matchableOffers = offers.filter { case (o, st) => st.ok && floorBps(o.record) <= f.coverage }
       val bidders = (if (f.matchable) matchableOffers else offers.filter(x => floorBps(x._1.record) <= f.coverage))
         .map(_._1.record).sortBy(o => (o.terms(0), o.boxId)).take(MaxCurveOffers)
@@ -251,7 +284,7 @@ class ZcReads(tracker: ZcTracker, resolver: ZcResolver, node: () => NodeApi, wal
             if (b.forall(y => x._2 < y._2)) Some(x) else b }
         Json.obj("blocks" -> d, "bps" -> best.map(_._2), "offerId" -> best.map(_._1.boxId))
       }
-      val rows = askRows(l, s, m)
+      val rows = cachedAskRows(s, m, hashes, budget)
       val shown = rows.filter(keep(_, f, None, None)).filter(_.yieldBps.isDefined).sortBy(r => (-r.yieldBps.get, r.open.boxId))
       val dots = shown.take(MaxDots)
       val askLine = dots.groupBy(r => r.blocksLeft.getOrElse(0L) / Grid).toVector.sortBy(_._1).map { case (_, rs) =>
@@ -302,11 +335,12 @@ class ZcReads(tracker: ZcTracker, resolver: ZcResolver, node: () => NodeApi, wal
       case (None, None) => (720L, BlocksPerYear, BlocksPerYear)
       case _ => throw LithosBadRequest("give either to (at least 720) or around, not both")
     }
-    val wf = Try(walletHashes()).getOrElse(Set.empty).hashCode
+    val hashes = Try(walletHashes()).getOrElse(Set.empty)
+    val wf = hashes.hashCode
     s.derived.get(s"book:$m:$f:$lo:$hi:$anchor:$wf", () => {
-      val l = new Lookups(s)
+      val budget = new ZcBudget(readsPerRequest)
       val h = s.book.height.toLong
-      val allBidders = s.book.offers.filter(_.record.market == m).map(o => o -> l.json.standing(o.record))
+      val allBidders = cachedOfferRows(s, m, budget)
         .filter { case (o, st) => (!f.matchable || st.ok) && floorBps(o.record) <= f.coverage &&
           maxBlocks(o.record) >= lo && minBlocks(o.record) <= hi }
         .map { case (o, st) => (o, st, offerCurve(o.record)) }
@@ -321,7 +355,7 @@ class ZcReads(tracker: ZcTracker, resolver: ZcResolver, node: () => NodeApi, wal
       }.filter(d => d >= lo && d <= hi).toVector.distinct.sorted.take(MaxSamples)
       bidBlocks.foreach(bidAt)
 
-      val rows = askRows(l, s, m).filter(keep(_, f, None, None))
+      val rows = cachedAskRows(s, m, hashes, budget).filter(keep(_, f, None, None))
       val (windowRows, plainRows) = rows.partition(r => r.open.record match {
         case o: ZcOrder => window(o)
         case _ => false
@@ -901,8 +935,8 @@ class ZcReads(tracker: ZcTracker, resolver: ZcResolver, node: () => NodeApi, wal
 
 object ZcReads {
 
-  /** One ask row: its record, and what sorting and filtering read from it. */
-  private[zc] final case class AskRow(open: ZcOpen[_ <: ZcRecord], json: () => JsObject, yieldBps: Option[Long],
+  /** One ask row: its record, and what sorting and filtering read from it. Immutable so it can be cached per snapshot. */
+  private[zc] final case class AskRow(open: ZcOpen[_ <: ZcRecord], yieldBps: Option[Long],
                                       blocksLeft: Option[Long], cost: BigInt, cover: Option[Long], kind: String,
                                       standing: ZcStanding, grid: Boolean, borrowedByMe: Boolean)
 
@@ -967,7 +1001,10 @@ final class Lru[K, V](max: Int) {
   }
   private val inFlight = new ConcurrentHashMap[K, java.util.concurrent.CompletableFuture[V]]()
 
-  def get(key: K, compute: () => V): V = {
+  def get(key: K, compute: () => V): V = getIf(key, () => (compute(), true))
+
+  /** Computes `key`, coalescing concurrent misses, and stores the result only when `compute()` flags it cacheable. */
+  def getIf(key: K, compute: () => (V, Boolean)): V = {
     val hit = map.synchronized(Option(map.get(key)))
     hit.getOrElse {
       val mine = new java.util.concurrent.CompletableFuture[V]()
@@ -981,8 +1018,8 @@ final class Lru[K, V](max: Int) {
         try {
           val recheck = map.synchronized(Option(map.get(key)))
           val v = recheck.getOrElse {
-            val computed = compute()
-            map.synchronized(map.put(key, computed))
+            val (computed, cacheable) = compute()
+            if (cacheable) map.synchronized(map.put(key, computed))
             computed
           }
           mine.complete(v)

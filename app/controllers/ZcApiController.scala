@@ -35,8 +35,21 @@ class ZcApiController @Inject()(cc: ControllerComponents, tracker: ZcTracker, re
 
   private val dexContext = new Contexts(system).dexContext
 
+  @volatile private var cachedWalletHashes: Option[(Set[String], Set[String])] = None
+
+  private def signableHashes(): Set[String] = {
+    val trees = nodeContext.getNodeWallet.signableTrees
+    cachedWalletHashes match {
+      case Some((cachedTrees, hashes)) if cachedTrees == trees => hashes
+      case _ =>
+        val hashes = trees.map(t => Hex.toHexString(Blake2b256.hash(Hex.decode(t))))
+        cachedWalletHashes = Some(trees -> hashes)
+        hashes
+    }
+  }
+
   protected lazy val reads: ZcReads = new ZcReads(tracker, resolver, () => nodeContext.getNodeApi,
-    () => nodeContext.getNodeWallet.signableTrees.map(t => Hex.toHexString(Blake2b256.hash(Hex.decode(t)))),
+    () => signableHashes(),
     () => nodeContext.getNodeApi.walletBalances().map(b => (b.balance, b.assets)).get,
     nodeContext.getNetwork, history = Some(history))
 
@@ -46,10 +59,10 @@ class ZcApiController @Inject()(cc: ControllerComponents, tracker: ZcTracker, re
   private def preview(result: => Result): Future[Result] =
     admit(previews, s"at most ${ZcApiController.MaxPreviews} quotes and simulations run or wait at once; retry shortly")(result)
 
-  /** Expensive public read (`curves`, `orderbook`, `fills`) bounded before queuing onto `dexContext`. */
+  /** Expensive public read (`asks`, `offers`, `curves`, `orderbook`, `matches`, `fills`) bounded before queuing onto `dexContext`. */
   private def heavyRead(ifRevision: Option[Long])(answer: => JsValue): Action[AnyContent] = Action.async { _ =>
     if (ifRevision.exists(r => reads.revision.contains(r))) Future.successful(NotModified)
-    else admit(heavyReads, s"at most ${ZcApiController.MaxHeavyReads} market-curve, order-book or fill reads run or wait at once; retry shortly")(respond(answer))
+    else admit(heavyReads, s"at most ${ZcApiController.MaxHeavyReads} market-book, curve or fill reads run or wait at once; retry shortly")(respond(answer))
   }
 
   private def admit(slots: Semaphore, busyMessage: String)(result: => Result): Future[Result] =
@@ -74,13 +87,13 @@ class ZcApiController @Inject()(cc: ControllerComponents, tracker: ZcTracker, re
   def asks(market: String, coverage: Option[Long], kind: Option[String], matchable: Option[Boolean], grid: Option[Boolean],
            from: Option[Long], to: Option[Long], sort: Option[String], cursor: Option[String], limit: Option[Int],
            ifRevision: Option[Long]): Action[AnyContent] =
-    read(ifRevision)(reads.asks(market, filters(coverage, kind, matchable, grid), from, to, sort, cursor, limit))
+    heavyRead(ifRevision)(reads.asks(market, filters(coverage, kind, matchable, grid), from, to, sort, cursor, limit))
 
   /** GET /sigmafi/zc/markets/:market/offers */
   def offers(market: String, coverage: Option[Long], kind: Option[String], matchable: Option[Boolean], grid: Option[Boolean],
              from: Option[Long], to: Option[Long], sort: Option[String], cursor: Option[String], limit: Option[Int],
              ifRevision: Option[Long]): Action[AnyContent] =
-    read(ifRevision)(reads.offers(market, filters(coverage, kind, matchable, grid), from, to, sort, cursor, limit))
+    heavyRead(ifRevision)(reads.offers(market, filters(coverage, kind, matchable, grid), from, to, sort, cursor, limit))
 
   /** GET /sigmafi/zc/markets/:market/curves */
   def curves(market: String, coverage: Option[Long], kind: Option[String], matchable: Option[Boolean], grid: Option[Boolean],
@@ -242,7 +255,7 @@ object ZcApiController {
   /** Write checks and simulations running or queued at once, across every caller. */
   final val MaxPreviews = 4
 
-  /** Expensive public reads (`curves`, `orderbook`, `fills`) running or queued at once, across every caller. */
+  /** Expensive public reads (`asks`, `offers`, `curves`, `orderbook`, `matches`, `fills`) running or queued at once, across every caller. */
   final val MaxHeavyReads = 4
 
   /** Most callers tracked; past it the table is cleared, which only forgives a burst. */

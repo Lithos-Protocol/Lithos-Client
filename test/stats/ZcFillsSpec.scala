@@ -295,4 +295,40 @@ class ZcFillsSpec extends AnyFlatSpec with Matchers {
     (4 to 6).foreach(i => db.bond(id(50 + i)) shouldBe defined)
     fullScans.get() shouldBe 0
   }
+
+  it should "page and prune fills cleanly on the pure-Java IQ80 LevelDB backend" in {
+    val dir = java.nio.file.Files.createTempDirectory("lithos-zc-fills-iq80-")
+    val kv = storage.TestIq80Store.open(dir)
+    try {
+      val c = chain()
+      val settings = zc.copy(fillsRetentionDays = 1)
+      val db = new ZcFillStore(Some(kv), ZcFillStore.identity(settings))
+      val f = new ZcFills(settings, () => db, () => c.api, inline, enabled = true)
+      f.tick()
+      f.standing.status shouldBe "ready"
+
+      // Newest-first paging with cursor across heights
+      val p1 = f.fills(ZcMarket.Erg, 0, None, None, None, 1)
+      p1.fills.map(x => (x.kind, x.height)) shouldBe Seq(("resale", H + 2))
+      p1.next shouldBe defined
+      val p2 = f.fills(ZcMarket.Erg, 0, None, None, p1.next, 1)
+      p2.fills.map(x => (x.kind, x.height)) shouldBe Seq(("new", H + 1))
+      p2.next shouldBe None
+
+      // fromHeight lower bound excludes older fill
+      f.fills(ZcMarket.Erg, H + 2, None, None, None, 10).fills.map(_.height) shouldBe Seq(H + 2)
+
+      // Pruning older fills works with forward-only range seeks on IQ80
+      db.append(c.header(H + 3).copy(height = H + ZcFills.RollbackBuffer + 10, id = "bc" * 32, parentId = c.header(H + 3).id),
+        ZcFills.BlockFills(Vector.empty, Map.empty, Map.empty))
+      db.pruneStep(cutoffHeight = H + 2, limit = 10)
+      f.fills(ZcMarket.Erg, 0, None, None, None, 10).fills.map(_.height) shouldBe Seq(H + 2)
+    } finally {
+      kv.close()
+      val paths = java.nio.file.Files.walk(dir)
+      try scala.collection.JavaConverters.asScalaIteratorConverter(paths.iterator()).asScala.toVector
+        .sortBy(_.getNameCount).reverse.foreach(java.nio.file.Files.deleteIfExists)
+      finally paths.close()
+    }
+  }
 }

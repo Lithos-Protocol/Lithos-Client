@@ -149,6 +149,7 @@ final case class TrackedPools(height: Int, headerId: String, boxes: Map[String, 
     require(parentId == headerId && blockHeight == height + 1,
       s"block $blockId at $blockHeight does not follow $headerId at $height")
     var kept = boxes
+    var nonSingletons = boxes.valuesIterator.count(b => !PoolDeployment.singleton(b.deployment))
     var nfts = byNft
     var removed = Vector.empty[TrackedBox]
     var added = Vector.empty[String]
@@ -156,13 +157,18 @@ final case class TrackedPools(height: Int, headerId: String, boxes: Map[String, 
     txs.foreach { tx =>
       tx.inputs.foreach(input => kept.get(input.boxId).foreach { gone =>
         kept -= gone.boxId
+        if (!PoolDeployment.singleton(gone.deployment)) nonSingletons -= 1
         nfts = TrackedPools.without(nfts, gone)
         removed :+= gone
       })
       tx.outputs.foreach(output => shapes.read(output, blockHeight).foreach { found =>
-        if (!PoolDeployment.singleton(found.deployment) && kept.size >= cap) short = true
+        val isSingleton = PoolDeployment.singleton(found.deployment)
+        // Protocol singletons bypass the cap; non-singleton pools are bounded by `cap` (excluding singletons) and
+        // any non-singleton NFT already held by 2+ boxes (proven fungible) stops consuming cap slots.
+        if (!isSingleton && (nonSingletons >= cap || nfts.getOrElse(found.nft, Set.empty).size >= 2)) short = true
         else if (!kept.contains(found.boxId)) {
           kept += found.boxId -> found
+          if (!isSingleton) nonSingletons += 1
           nfts = TrackedPools.plus(nfts, found)
           added :+= found.boxId
         }

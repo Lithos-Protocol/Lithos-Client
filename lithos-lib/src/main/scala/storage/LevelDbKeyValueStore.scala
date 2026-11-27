@@ -205,7 +205,10 @@ final class LevelDbKeyValueStore private (private val db: DB,
 object LevelDbKeyValueStore extends KeyValueStoreFactory {
   override val backendName: String = "leveldb"
 
-  override def open(path: Path): Either[StoreError, KeyValueStore] = {
+  override def open(path: Path): Either[StoreError, KeyValueStore] =
+    openWithFactory(path, LDBFactory.factory)
+
+  private[storage] def openWithFactory(path: Path, factory: org.iq80.leveldb.DBFactory): Either[StoreError, KeyValueStore] = {
     if (path == null) Left(InvalidArgument("Database path cannot be null"))
     else {
       var normalized = path
@@ -213,7 +216,6 @@ object LevelDbKeyValueStore extends KeyValueStoreFactory {
         normalized = path.toAbsolutePath.normalize()
         Files.createDirectories(normalized)
         val options = new org.iq80.leveldb.Options().createIfMissing(true)
-        val factory = LDBFactory.factory
         val db = factory.open(normalized.toFile, options)
         Right(new LevelDbKeyValueStore(
           db,
@@ -266,9 +268,10 @@ private final class LevelDbReadView(db: DB, options: ReadOptions, storePath: Pat
       var iterator: org.iq80.leveldb.DBIterator = null
       var result: Either[StoreError, Vector[(Array[Byte], Array[Byte])]] = null
       var closeFailure: Option[Throwable] = None
+      var fallbackToForward = false
+      val safePrefix = prefix.clone()
+      val safeStart = startAt.clone()
       try {
-        val safePrefix = prefix.clone()
-        val safeStart = startAt.clone()
         val entries = Vector.newBuilder[(Array[Byte], Array[Byte])]
         var count = 0
         iterator = db.iterator(options)
@@ -312,6 +315,8 @@ private final class LevelDbReadView(db: DB, options: ReadOptions, storePath: Pat
         }
         result = Right(entries.result())
       } catch {
+        // Pure-Java IQ80 LevelDB 0.12 throws UnsupportedOperationException on seekToLast/hasPrev/prev.
+        case _: UnsupportedOperationException => fallbackToForward = true
         case NonFatal(error) => result = Left(ReadFailed(storePath, "snapshot reverse prefix scan", error))
       } finally {
         if (iterator != null) {
@@ -319,10 +324,68 @@ private final class LevelDbReadView(db: DB, options: ReadOptions, storePath: Pat
           catch { case NonFatal(error) => closeFailure = Some(error) }
         }
       }
-      closeFailure match {
-        case Some(error) if result.isRight => Left(ReadFailed(storePath, "snapshot iterator close", error))
-        case _ => result
+      if (fallbackToForward) {
+        closeFailure match {
+          case Some(error) => Left(ReadFailed(storePath, "snapshot iterator close", error))
+          case None => scanPrefixReverseForward(safePrefix, safeStart, exclusive, limit)
+        }
+      } else {
+        closeFailure match {
+          case Some(error) if result.isRight => Left(ReadFailed(storePath, "snapshot iterator close", error))
+          case _ => result
+        }
       }
+    }
+  }
+
+  /** Forward-only reverse prefix scan using a bounded circular buffer, for backends without reverse iterators (IQ80). */
+  private def scanPrefixReverseForward(safePrefix: Array[Byte], safeStart: Array[Byte],
+                                       exclusive: Boolean, limit: Int): Either[StoreError, Vector[(Array[Byte], Array[Byte])]] = {
+    var iterator: org.iq80.leveldb.DBIterator = null
+    var result: Either[StoreError, Vector[(Array[Byte], Array[Byte])]] = null
+    var closeFailure: Option[Throwable] = None
+    try {
+      val ring = new Array[(Array[Byte], Array[Byte])](limit)
+      var head = 0
+      var count = 0
+      iterator = db.iterator(options)
+      iterator.seek(safePrefix)
+      var scanning = true
+      while (scanning && iterator.hasNext) {
+        val entry = iterator.next()
+        val k = entry.getKey
+        if (!startsWith(k, safePrefix)) scanning = false
+        else if (safeStart.nonEmpty && {
+          val cmp = KeyValueStore.compareUnsigned(k, safeStart)
+          if (exclusive) cmp >= 0 else cmp > 0
+        }) {
+          scanning = false
+        } else {
+          ring(head) = (k.clone(), entry.getValue.clone())
+          head = (head + 1) % limit
+          if (count < limit) count += 1
+        }
+      }
+      val out = Vector.newBuilder[(Array[Byte], Array[Byte])]
+      out.sizeHint(count)
+      var i = 0
+      while (i < count) {
+        val idx = (head - 1 - i + limit) % limit
+        out += ring(idx)
+        i += 1
+      }
+      result = Right(out.result())
+    } catch {
+      case NonFatal(error) => result = Left(ReadFailed(storePath, "snapshot reverse prefix scan", error))
+    } finally {
+      if (iterator != null) {
+        try iterator.close()
+        catch { case NonFatal(error) => closeFailure = Some(error) }
+      }
+    }
+    closeFailure match {
+      case Some(error) if result.isRight => Left(ReadFailed(storePath, "snapshot iterator close", error))
+      case _ => result
     }
   }
 

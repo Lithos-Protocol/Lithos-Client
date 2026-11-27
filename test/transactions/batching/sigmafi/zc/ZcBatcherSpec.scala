@@ -577,4 +577,89 @@ class ZcBatcherSpec extends TestKit(ActorSystem("zc-batcher-spec", ZcBatcherSpec
       pre.matches(book, h - 1, resolver.generation, Set.empty) shouldBe false
     }
   }
+
+  it should "cap collateralArbPass attempts and stop immediately on timeout or uncertain outcome while noting ownArbs" in {
+    import play.api.libs.json.{JsObject, Json}
+    import transactions.batching.arb.ArbFixtures
+    import transactions.batching.tracking.{PoolTracker, TrackerFixtures}
+    import transactions.engine.EngineBroadcast
+    import scala.util.{Failure, Try}
+
+    val chain = new ScriptedChain
+    val tip = 1900000
+    chain.extend(tip - 20, tip)
+    chain.indexed = tip
+    val anchor = chain.header(tip).id
+    val (nodeContext, _, _) = FakeNodeContext(chain.api, numAddresses = 2)
+    val tokenA = "aa" * 32
+
+    val (pools, lots) = nodeContext.getClient.execute { ctx =>
+      val count = ZcBatcher.MaxArbAttemptsPerPass + 3
+      val ps = (1 to count).map(i => ArbFixtures.nativePool(ctx, ArbFixtures.id(i), tokenA, 1000 * Erg, 1000000L))
+      val ls = (1 to count).map { i =>
+        val u = UTXO(ZcContracts.script(ZcKind.LotAuction, Some(ZcMarket.Erg)).contract, 3000000L,
+          Seq(Token(ErgoId.create(tokenA), 5000L)),
+          Seq(bytes(borrowerHash), longs(2 * Erg, 2 * Erg, (tip - 10).toLong, (tip + 100).toLong, (tip + 500).toLong, 2000000L)),
+          Some(tip - 10))
+        val in = u.toInput(ctx, ErgoId.create(f"bb$i%062x"), 0)
+        ZcBatchTransactions.nodeBoxOf(in.input, in.input.getTransactionId, 0)
+      }
+      (ps, ls)
+    }
+    chain.scans((pools ++ lots).map(LDNodeFixtures.indexed(_, tip - 5)): _*)
+    lots.foreach(l => discloseTx(chain.api, l, borrower.ergoTreeHex, tip - 5))
+
+    val poolTracker = new PoolTracker(() => chain.api, org.ergoplatform.appkit.NetworkType.MAINNET,
+      ExecutionContext.global, retryMs = 20L)
+    poolTracker.follow(tip, anchor)
+    awaitAssert(poolTracker.latest.map(_.headerId) shouldBe Some(anchor), 10.seconds, 50.millis)
+
+    val zcTracker = new ZcTracker(() => chain.api, ExecutionContext.global, ZcConfig.Default, retryMs = 20L)
+    zcTracker.poke()
+    awaitAssert(zcTracker.book.map(_.headerId) shouldBe Some(anchor), 10.seconds, 50.millis)
+    val resolver = new ZcResolver(() => chain.api, zcTracker)
+    val book = zcTracker.book.get
+    val observed = CompleteMempool.Observation(1L, Some(CompleteMempool.Snapshot(anchor, Set.empty, Set.empty,
+      System.nanoTime(), transactions = Vector.empty)), None)
+    val settings = SigmaFiBatchingConfig(BatchingConfig.Default.copy(scanIntervalMs = 3600000L, broadcast = false),
+      broadcastAfterBlocks = 1, minBatchingFeeNanoErg = Reserve, minActionFeeNanoErg = 2000000L,
+      collateralArb = configs.ZcCollateralArbConfig.Default.copy(broadcast = true))
+    val engine = TestProbe()
+
+    def runWith(answer: ZcMempoolPlan => Try[JsObject]): (Int, Set[String]) = {
+      val calls = new AtomicInteger(0)
+      val ref = akka.testkit.TestActorRef[ZcBatcher](Props(new ZcBatcher(nodeContext, settings,
+        servesCandidates = false, engine.ref, zcTracker, resolver, useTrueProp = false, pools = Some(poolTracker)) {
+        override protected def submitArb(planned: ZcMempoolPlan): Try[JsObject] = {
+          calls.incrementAndGet()
+          answer(planned)
+        }
+      }))
+      try {
+        val refused = nodeContext.getClient.execute(ctx =>
+          ref.underlyingActor.collateralArbPass(ctx, book, observed, Set.empty, tip + 1))
+        (calls.get(), refused)
+      } finally system.stop(ref)
+    }
+
+    // 1. Repeated rejections are bounded by MaxArbAttemptsPerPass
+    val (rejCalls, rejIds) = runWith(_ => Success(Json.obj("outcome" -> EngineBroadcast.Rejected, "reason" -> "busy")))
+    rejCalls shouldBe ZcBatcher.MaxArbAttemptsPerPass
+    rejIds should have size ZcBatcher.MaxArbAttemptsPerPass
+
+    // 2. TimeoutException stops the pass immediately after the first timed-out attempt
+    val (toCalls, toIds) = runWith(_ => Failure(new java.util.concurrent.TimeoutException("engine stalled")))
+    toCalls shouldBe 1
+    toIds should have size 1
+
+    // 3. Uncertain outcome notes target & pool boxes in tracker.ownArbs and stops the pass immediately
+    var uncertainPlan: ZcMempoolPlan = null
+    val (uncCalls, uncIds) = runWith { p =>
+      uncertainPlan = p
+      Success(Json.obj("txId" -> ("cc" * 32), "outcome" -> EngineBroadcast.Uncertain, "reason" -> "lost reply"))
+    }
+    uncCalls shouldBe 1
+    uncIds shouldBe Set(uncertainPlan.targetId)
+    zcTracker.ownArbs.boxes should contain allOf(uncertainPlan.targetId, uncertainPlan.poolBox.boxId)
+  }
 }

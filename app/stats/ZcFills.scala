@@ -320,33 +320,6 @@ final class ZcFillStore(database: Option[KeyValueStore], identity: JsObject) {
       }
     }
 
-  private def scanEntriesReverse(prefix: String, startAt: String, exclusive: Boolean, limit: Int): Vector[(String, Array[Byte])] =
-    if (limit <= 0) Vector.empty
-    else database match {
-      case Some(db) =>
-        KeyValueStore.orThrow(db.scanPrefixReverse(key(prefix), if (startAt.isEmpty) Array.emptyByteArray else key(startAt),
-          exclusive, limit)).map { case (k, v) => new String(k, UTF_8) -> v }
-      case None => memory.synchronized {
-        val prefixEnd = prefix.init + (prefix.last + 1).toChar
-        val upper = if (startAt.nonEmpty) startAt else prefixEnd
-        val inclusive = startAt.nonEmpty && !exclusive
-        val desc = memory.headMap(upper, inclusive).descendingMap()
-        val it = desc.entrySet().iterator()
-        val out = Vector.newBuilder[(String, Array[Byte])]
-        var count = 0
-        var going = true
-        while (going && count < limit && it.hasNext) {
-          val e = it.next()
-          val k = e.getKey
-          if (k.startsWith(prefix)) {
-            out += k -> e.getValue.clone()
-            count += 1
-          } else if (k < prefix) going = false
-        }
-        out.result()
-      }
-    }
-
   private def write(changes: Seq[KeyValueMutation]): Unit = database match {
     case Some(db) => KeyValueStore.orThrow(db.write(changes, WriteDurability.Synchronous))
     case None => memory.synchronized {
@@ -358,6 +331,8 @@ final class ZcFillStore(database: Option[KeyValueStore], identity: JsObject) {
   }
   private def put(name: String, v: JsValue): KeyValueMutation = Put(key(name), Json.stringify(v).getBytes(UTF_8))
   private def blockKey(h: Int) = f"block/$h%010d"
+  /** Inverted-height fill key so newest fills sort first under forward scans on both native and pure-Java LevelDB. */
+  private def fillKey(h: Int, id: String) = f"fill/${ZcFillStore.MaxHeightKey - math.max(0, h).toLong}%010d/$id"
 
   // A history written for another pin or start height describes other fills: it is replaced, never mixed
   get("identity") match {
@@ -374,7 +349,7 @@ final class ZcFillStore(database: Option[KeyValueStore], identity: JsObject) {
     write(Seq(put("cursor", Json.obj("height" -> height, "blockId" -> blockId))))
 
   def append(h: NodeHeader, added: BlockFills): Unit = {
-    val fillKeys = added.fills.map(f => f"fill/${f.height}%010d/${f.id}")
+    val fillKeys = added.fills.map(f => fillKey(f.height, f.id))
     val bondKeys = added.bonds.keys.map("bond/" + _).toVector
     val shareKeys = added.shares.keys.map("share/" + _).toVector
     write(added.fills.zip(fillKeys).map { case (f, k) => put(k, Json.toJson(f)) } ++
@@ -425,9 +400,9 @@ final class ZcFillStore(database: Option[KeyValueStore], identity: JsObject) {
         }
       }
 
-      // Sweep any remaining fill keys older than maxPrune using a bounded prefix seek.
-      val fillCutoff = f"fill/$maxPrune%010d"
-      val oldFills = scanKeysRange("fill/", "", exclusive = false, limit + 1).takeWhile(_ < fillCutoff)
+      // Sweep any remaining fill keys older than maxPrune using a bounded forward seek (inverted-height keys sort oldest last).
+      val oldFillStart = f"fill/${ZcFillStore.MaxHeightKey - (maxPrune.toLong - 1L)}%010d/"
+      val oldFills = scanKeysRange("fill/", oldFillStart, exclusive = false, limit + 1)
       val moreFills = oldFills.size > limit
       oldFills.take(limit).foreach(deletes += _)
 
@@ -484,14 +459,16 @@ final class ZcFillStore(database: Option[KeyValueStore], identity: JsObject) {
   def share(id: String): Option[(String, Long)] = get("share/" + id).map(j => ((j \ "bond").as[String], (j \ "n").as[Long]))
 
   /**
-   * Pages fills from `fromHeight` onward directly from reverse-ordered storage, examining at most `maxScanned` rows.
+   * Pages fills from `fromHeight` onward directly from forward-ordered inverted-height storage (supported natively on
+   * both JNI and pure-Java LevelDB backends), examining at most `maxScanned` rows.
    * Returns `(matchingPage, nextCursor)` where `nextCursor` is an opaque storage key for the next page.
    */
   def fillsPage(fromHeight: Int, predicate: ZcFill => Boolean, afterKey: Option[String],
                 limit: Int, maxScanned: Int = ZcFills.MaxRowsPerRead): (Vector[ZcFill], Option[String]) = {
     if (limit <= 0 || maxScanned <= 0) (Vector.empty, None)
     else {
-      val minKey = f"fill/${math.max(0, fromHeight)}%010d"
+      // ASCII '/' (47) < '0' (48), so every key at `height >= fromHeight` is strictly `< maxKeyExclusive`.
+      val maxKeyExclusive = f"fill/${ZcFillStore.MaxHeightKey - math.max(0, fromHeight).toLong}%010d0"
       val out = Vector.newBuilder[ZcFill]
       var collected = 0
       var scanned = 0
@@ -508,13 +485,13 @@ final class ZcFillStore(database: Option[KeyValueStore], identity: JsObject) {
           done = true
         } else {
           val batchSize = math.min(math.max(limit * 2, 64), remaining)
-          val batch = scanEntriesReverse("fill/", cursorKey, exclusive, batchSize)
+          val batch = scanEntriesRange("fill/", cursorKey, exclusive, batchSize)
           if (batch.isEmpty) done = true
           else {
             val it = batch.iterator
             while (it.hasNext && !done) {
               val (k, raw) = it.next()
-              if (k < minKey) done = true
+              if (k >= maxKeyExclusive) done = true
               else {
                 scanned += 1
                 lastScannedKey = Some(k)
@@ -549,7 +526,8 @@ final class ZcFillStore(database: Option[KeyValueStore], identity: JsObject) {
 
 object ZcFillStore {
 
-  final val SchemaVersion = 1
+  final val SchemaVersion = 2
+  private[stats] final val MaxHeightKey = 9999999999L
 
   def identity(zc: ZcConfig): JsObject =
     Json.obj("schema" -> SchemaVersion, "pin" -> ZcContracts.PinnedCommit, "from" -> zc.fillsFromHeight)
