@@ -32,6 +32,11 @@ class NodeConfig(config: Configuration) extends NodeContext {
           s""""${config.get[String]("node.networkType")}" is not a network type - use MAINNET or TESTNET""")
     }
 
+  // Before the prover and anything else that might compile a contract: the override decides which ids
+  // every contract is compiled against.
+  val deployment: Option[lfsm.DeploymentDescriptor] =
+    DeploymentConfig.install(DeploymentConfig(config), networkType, logger)
+
   private val secretStorage: SecretStorage =
     Try(SecretStorage.loadFrom(storagePath)) match {
       case Success(s) => s
