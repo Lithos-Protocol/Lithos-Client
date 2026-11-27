@@ -181,6 +181,72 @@ class ZcTrackerSpec extends AnyFlatSpec with Matchers with Eventually {
     c.scanPages.get should be > scans
   }
 
+  it should "defer periodic rescans by reseedBlocks after a truncated rescan without blocking recovery rescans" in {
+    val reseed = 20
+    val c = chain(order(id(51), value = 5 * Erg), order(id(52), value = 4 * Erg))
+    val t = tracker(c, cap = 4, reseed = reseed, recovery = 5)
+    seeded(c, t).book.cut shouldBe false
+    val scans0 = c.scanPages.get
+
+    // Flood the scan so the periodic rescan at tip + 20 is truncated while the live book stays complete
+    c.scans((1 to 6).map(i => LDNodeFixtures.indexed(order(id(60 + i), value = i * Erg), tip - 3)): _*)
+    c.extend(tip + 1, tip + reseed)
+    c.indexed = tip + reseed
+    t.offer(offered(c, tip + reseed))
+    eventually(t.view.map(_.book.height) shouldBe Some(tip + reseed))
+    eventually(c.scanPages.get should be > scans0)
+    Thread.sleep(200)
+    val scansAfterTruncated = c.scanPages.get
+    t.view.get.book.scannedAt shouldBe tip
+    t.view.get.book.cut shouldBe false
+
+    // Advancing past RescanBackoffBlocks (10) to tip + 35 (< tip + 40) must NOT trigger another periodic rescan
+    c.extend(tip + reseed + 1, tip + reseed + 15)
+    c.indexed = tip + reseed + 15
+    t.offer(offered(c, tip + reseed + 15))
+    eventually(t.view.map(_.book.height) shouldBe Some(tip + reseed + 15))
+    Thread.sleep(200)
+    c.scanPages.get shouldBe scansAfterTruncated
+
+    // If the live book later becomes cut and clears below 3/4 cap before tip + 40, recovery rescan still runs immediately
+    val hCut = tip + reseed + 16
+    c.extend(hCut, hCut + 1)
+    c.indexed = hCut + 1
+    t.offer(offered(c, hCut, nodeTx("e1" * 32, Seq(id(900)),
+      Seq(order(id(71), value = 6 * Erg), order(id(72), value = 7 * Erg), order(id(73), value = 8 * Erg)))))
+    eventually(t.view.map(v => (v.book.height, v.book.cut)) shouldBe Some((hCut, true)))
+
+    c.scans(LDNodeFixtures.indexed(order(id(51), value = 5 * Erg), tip - 3))
+    t.offer(offered(c, hCut + 1, nodeTx("e2" * 32, Seq(id(71), id(72), id(73)), Seq(wallet(id(74))))))
+    eventually(t.view.map(v => (v.book.scannedAt, v.book.cut)) shouldBe Some((hCut + 1, false)))
+    c.scanPages.get should be > scansAfterTruncated
+  }
+
+  it should "run the periodic rescan again once reseedBlocks pass after a truncated periodic rescan" in {
+    val reseed = 20
+    val c = chain(order(id(81), value = 5 * Erg))
+    val t = tracker(c, cap = 2, reseed = reseed, recovery = 5)
+    seeded(c, t).book.cut shouldBe false
+    val scans0 = c.scanPages.get
+
+    c.scans((1 to 4).map(i => LDNodeFixtures.indexed(order(id(82 + i), value = i * Erg), tip - 3)): _*)
+    c.extend(tip + 1, tip + reseed)
+    c.indexed = tip + reseed
+    t.offer(offered(c, tip + reseed))
+    eventually(t.view.map(_.book.height) shouldBe Some(tip + reseed))
+    eventually(c.scanPages.get should be > scans0)
+    Thread.sleep(200)
+    val scansAfterTruncated = c.scanPages.get
+    t.view.get.book.scannedAt shouldBe tip
+
+    c.scans(LDNodeFixtures.indexed(order(id(81), value = 5 * Erg), tip - 3))
+    c.extend(tip + reseed + 1, tip + 2 * reseed)
+    c.indexed = tip + 2 * reseed
+    t.offer(offered(c, tip + 2 * reseed))
+    eventually(t.view.map(_.book.scannedAt) shouldBe Some(tip + 2 * reseed))
+    c.scanPages.get should be > scansAfterTruncated
+  }
+
   "A cut book" should "rescan once the spam is spent, so the boxes it left out return" in {
     val c = chain(order(id(41), value = 2 * Erg), order(id(42), value = 9 * Erg), offer(id(43), value = 4 * Erg))
     val t = tracker(c, cap = 2, recovery = 1)

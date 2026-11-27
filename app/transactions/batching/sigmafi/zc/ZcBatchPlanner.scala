@@ -556,10 +556,18 @@ object ZcBatchPlanner {
                                   curParent = Some(built.tx.txId)
                                   builtCount += 1
                                 } else chainAlive = false
+                              case Failure(f: ZcBatchTransactions.MatchFault) =>
+                                onFailure()
+                                if (f.blameOffer) {
+                                  chainAlive = false
+                                  if (curParent.isEmpty) failed += initialOffer.boxId
+                                }
+                                if (f.blameSource) failed += order.boxId
+                                logger.warn(s"Could not match offer ${curOffer.boxId} with order ${order.boxId}: ${f.getMessage}")
                               case Failure(ex) =>
                                 onFailure()
                                 chainAlive = false
-                                if (curParent.isEmpty) failed += initialOffer.boxId else failed += order.boxId
+                                failed += order.boxId
                                 logger.warn(s"Could not match offer ${curOffer.boxId} with order ${order.boxId}: ${ex.getMessage}")
                             }
                         }
@@ -567,16 +575,19 @@ object ZcBatchPlanner {
 
                     case None =>
                       asksById.get(m.sourceId).foreach { ask =>
+                        val offerState = ZcOfferState.of(curOffer)
                         val ready = for {
-                          seller <- resolver.script(ask, pending = false, readBudget).flatMap(parsedContract)
                           src <- matcher.askSource(ZcOpen(ask, pending = false)).toOption
                           if !claimed.contains(src.bond.boxId)
+                          liveMatch <- matcher.evaluate(offerState, src).toOption
+                          if liveMatch.fee >= minAct
+                          seller <- resolver.script(ask, pending = false, readBudget).flatMap(parsedContract)
                           originBytes <- resolver.boxBytes(src.asset, ctx, readBudget)
                           reqBytes <- if (!src.shares) Some(None)
                             else resolver.boxBytes(ask.token.tokenId, ctx, readBudget).map(Some(_))
-                        } yield (seller, src, originBytes, reqBytes)
+                        } yield (seller, src, liveMatch, originBytes, reqBytes)
 
-                        ready.foreach { case (seller, src, originBytes, reqBytes) =>
+                        ready.foreach { case (seller, src, liveMatch, originBytes, reqBytes) =>
                           (inputOf(ask.box, ctx), inputOf(src.bond.record.box, ctx)) match {
                             case (None, _) =>
                               onFailure()
@@ -588,8 +599,8 @@ object ZcBatchPlanner {
                               logger.warn(s"Could not match offer ${curOffer.boxId} with ask ${ask.boxId}: bond data input invalid")
                             case (Some(askIn), Some(bondIn)) =>
                               Try(ZcBatchTransactions.matchAsk(ctx, wallet, curOffer, offerInput, ask, askIn,
-                                seller, owner, m.units, m.price, bondIn, oracleIn, originBytes, reqBytes, feeTo, minerFee,
-                                signingHeight)) match {
+                                seller, owner, liveMatch.units, liveMatch.price, bondIn, oracleIn, originBytes,
+                                reqBytes, feeTo, minerFee, signingHeight)) match {
                                 case Success(built) =>
                                   if (recordTx(built.tx, curParent.toSeq)) {
                                     curOffer = built.nextOffer
@@ -597,10 +608,18 @@ object ZcBatchPlanner {
                                     curParent = Some(built.tx.txId)
                                     builtCount += 1
                                   } else chainAlive = false
+                                case Failure(f: ZcBatchTransactions.MatchFault) =>
+                                  onFailure()
+                                  if (f.blameOffer) {
+                                    chainAlive = false
+                                    if (curParent.isEmpty) failed += initialOffer.boxId
+                                  }
+                                  if (f.blameSource) failed += ask.boxId
+                                  logger.warn(s"Could not match offer ${curOffer.boxId} with ask ${ask.boxId}: ${f.getMessage}")
                                 case Failure(ex) =>
                                   onFailure()
                                   chainAlive = false
-                                  if (curParent.isEmpty) failed += initialOffer.boxId else failed += ask.boxId
+                                  failed += ask.boxId
                                   logger.warn(s"Could not match offer ${curOffer.boxId} with ask ${ask.boxId}: ${ex.getMessage}")
                               }
                           }

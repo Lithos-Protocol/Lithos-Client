@@ -224,6 +224,8 @@ object ZcFills {
   final val RollbackBuffer = 64
   /** Most old block records (and matured fact entries) pruned per cycle, keeping background disk I/O bounded. */
   final val PruneBatchSize = 256
+  /** Blocks between full matured-bond and share-fact sweeps so live long-dated facts are not re-scanned every block. */
+  final val FactSweepInterval = 100
   /** Most fill rows examined by one public fills request before stopping and returning a continuation cursor. */
   final val MaxRowsPerRead = 2000
   /** Batch size used when clearing stored prefixes on a deep reorg or schema change. */
@@ -407,34 +409,52 @@ final class ZcFillStore(database: Option[KeyValueStore], identity: JsObject) {
       oldFills.take(limit).foreach(deletes += _)
 
       // Sweep long-dated bonds/shares that have now matured via bounded, persisted seek cursors.
-      val bondCursor = getString("prune/bond").getOrElse("")
-      val bondBatch = scanEntriesRange("bond/", bondCursor, exclusive = bondCursor.nonEmpty, limit)
-      bondBatch.foreach { case (bk, raw) =>
-        if (!deletes.contains(bk) && Try(Json.parse(raw).as[BondFacts]).toOption.forall(_.maturity < maxPrune))
-          deletes += bk
-      }
-      val nextBondCursor = if (bondBatch.size < limit) "" else bondBatch.last._1
-      val moreBonds = bondBatch.size >= limit
+      // Completed prefixes hold a "DONE" sentinel so a multi-step block/fill backlog never re-scans them, and a new
+      // sweep starts only once `maxPrune` advances by `FactSweepInterval` (or drops below the last recorded cutoff).
+      val rawBond = getString("prune/bond").getOrElse("")
+      val rawShare = getString("prune/share").getOrElse("")
+      val prevSweepAt = getString("prune/sweepAt").flatMap(s => Try(s.toInt).toOption)
+      val sweepDue = prevSweepAt.forall(at => maxPrune < at || maxPrune - at >= ZcFills.FactSweepInterval)
+      val startNewSweep = rawBond == ZcFillStore.SweepDone && rawShare == ZcFillStore.SweepDone && sweepDue
+      val bondCursor = if (startNewSweep) "" else rawBond
+      val shareCursor = if (startNewSweep) "" else rawShare
 
-      val shareCursor = getString("prune/share").getOrElse("")
-      val shareBatch = scanEntriesRange("share/", shareCursor, exclusive = shareCursor.nonEmpty, limit)
-      shareBatch.foreach { case (sk, raw) =>
-        if (!deletes.contains(sk)) {
-          val dead = Try(Json.parse(raw)).toOption.flatMap(j => (j \ "bond").asOpt[String]).forall { asset =>
-            deletes.contains("bond/" + asset) || bond(asset).forall(_.maturity < maxPrune)
+      val (nextBondCursor, moreBonds) =
+        if (bondCursor == ZcFillStore.SweepDone) (ZcFillStore.SweepDone, false)
+        else {
+          val bondBatch = scanEntriesRange("bond/", bondCursor, exclusive = bondCursor.nonEmpty, limit)
+          bondBatch.foreach { case (bk, raw) =>
+            if (!deletes.contains(bk) && Try(Json.parse(raw).as[BondFacts]).toOption.forall(_.maturity < maxPrune))
+              deletes += bk
           }
-          if (dead) deletes += sk
+          if (bondBatch.size < limit) (ZcFillStore.SweepDone, false) else (bondBatch.last._1, true)
         }
-      }
-      val nextShareCursor = if (shareBatch.size < limit) "" else shareBatch.last._1
-      val moreShares = shareBatch.size >= limit
+
+      val (nextShareCursor, moreShares) =
+        if (shareCursor == ZcFillStore.SweepDone) (ZcFillStore.SweepDone, false)
+        else {
+          val shareBatch = scanEntriesRange("share/", shareCursor, exclusive = shareCursor.nonEmpty, limit)
+          shareBatch.foreach { case (sk, raw) =>
+            if (!deletes.contains(sk)) {
+              val dead = Try(Json.parse(raw)).toOption.flatMap(j => (j \ "bond").asOpt[String]).forall { asset =>
+                deletes.contains("bond/" + asset) || bond(asset).forall(_.maturity < maxPrune)
+              }
+              if (dead) deletes += sk
+            }
+          }
+          if (shareBatch.size < limit) (ZcFillStore.SweepDone, false) else (shareBatch.last._1, true)
+        }
+
+      val sweepFinishedNow =
+        nextBondCursor == ZcFillStore.SweepDone && nextShareCursor == ZcFillStore.SweepDone &&
+          (bondCursor != ZcFillStore.SweepDone || shareCursor != ZcFillStore.SweepDone || prevSweepAt.isEmpty)
+      val nextSweepAt = if (sweepFinishedNow) Some(maxPrune) else prevSweepAt
 
       val mutations = Vector.newBuilder[KeyValueMutation]
       deletes.foreach(k => mutations += Delete(key(k)))
-      if (nextBondCursor != bondCursor)
-        mutations += (if (nextBondCursor.isEmpty) Delete(key("prune/bond")) else Put(key("prune/bond"), key(nextBondCursor)))
-      if (nextShareCursor != shareCursor)
-        mutations += (if (nextShareCursor.isEmpty) Delete(key("prune/share")) else Put(key("prune/share"), key(nextShareCursor)))
+      if (nextBondCursor != rawBond) mutations += Put(key("prune/bond"), key(nextBondCursor))
+      if (nextShareCursor != rawShare) mutations += Put(key("prune/share"), key(nextShareCursor))
+      if (nextSweepAt != prevSweepAt) nextSweepAt.foreach(h => mutations += Put(key("prune/sweepAt"), key(h.toString)))
       val changes = mutations.result()
       if (changes.nonEmpty) write(changes)
       PruneResult(deletes.size, moreBlocks || moreFills || moreBonds || moreShares)
@@ -451,7 +471,7 @@ final class ZcFillStore(database: Option[KeyValueStore], identity: JsObject) {
           else scanKeysRange(prefix, "", exclusive = false, ZcFills.ClearBatchSize)
       }
     }
-    write(Seq(Delete(key("cursor")), Delete(key("prune/bond")), Delete(key("prune/share"))))
+    write(Seq(Delete(key("cursor")), Delete(key("prune/bond")), Delete(key("prune/share")), Delete(key("prune/sweepAt"))))
   }
 
   def bond(asset: String): Option[BondFacts] = get("bond/" + asset).map(_.as[BondFacts])
@@ -528,6 +548,7 @@ object ZcFillStore {
 
   final val SchemaVersion = 2
   private[stats] final val MaxHeightKey = 9999999999L
+  private[stats] final val SweepDone = "DONE"
 
   def identity(zc: ZcConfig): JsObject =
     Json.obj("schema" -> SchemaVersion, "pin" -> ZcContracts.PinnedCommit, "from" -> zc.fillsFromHeight)

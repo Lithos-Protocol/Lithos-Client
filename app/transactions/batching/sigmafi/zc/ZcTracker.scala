@@ -67,6 +67,8 @@ class ZcTracker(api: () => NodeApi, io: ExecutionContext, settings: ZcConfig,
   private var warnedFor: Option[String] = None
   /** The lowest height a rescan may run at, pushed on after one fails. Guarded by `lock`. */
   private var rescanFrom = 0
+  /** The lowest height a periodic check rescan may run at, pushed on by `reseedBlocks` when truncated. Guarded by `lock`. */
+  private var periodicRescanFrom = 0
   private var revision = 0L
   private var fingerprint: Option[ZcView.Fingerprint] = None
   private var warnedCut = false
@@ -203,7 +205,7 @@ class ZcTracker(api: () => NodeApi, io: ExecutionContext, settings: ZcConfig,
    * evict boxes is back under three quarters of the cap, so boxes left out under pressure return. Holds `lock`.
    */
   private def rescanDue(book: ZcBook): Boolean = book.height >= rescanFrom && (
-    book.height - book.scannedAt >= reseedBlocks ||
+    (book.height - book.scannedAt >= reseedBlocks && book.height >= periodicRescanFrom) ||
       (book.cut && book.boxes.size < settings.maxBoxes * 3 / 4 && book.height - book.scannedAt >= recoveryBlocks))
 
   /** Moves the book to `wanted` (or seeds it), runs a due rescan, then republishes the view. */
@@ -211,6 +213,7 @@ class ZcTracker(api: () => NodeApi, io: ExecutionContext, settings: ZcConfig,
                    snapshot: Option[CompleteMempool.Snapshot]): Unit = {
     val known: String => Boolean = h => scripts.containsKey(h)
     val (moved, found) = advanceTarget(api(), book, wanted, settings.maxBoxes, known, logger)
+    if (book.forall(_.scannedAt != moved.scannedAt)) lock.synchronized { rescanFrom = 0; periodicRescanFrom = 0 }
     remember(found, moved)
     val next = checked(moved, known)
     if (next.cut && !warnedCut)
@@ -266,8 +269,10 @@ class ZcTracker(api: () => NodeApi, io: ExecutionContext, settings: ZcConfig,
         if (scanned.cut && !book.cut) {
           logger.warn(s"ZC tracking's periodic rescan at ${book.height} was truncated while the live book is complete; " +
             "keeping the tracked book")
-          later(RescanBackoffBlocks)
+          lock.synchronized(periodicRescanFrom = book.height + math.max(1, reseedBlocks))
+          book
         } else {
+          lock.synchronized { rescanFrom = 0; periodicRescanFrom = 0 }
           val (a, b) = (book.boxes.keySet, scanned.boxes.keySet)
           if (a != b && !book.cut && !scanned.cut)
             logger.warn(s"ZC tracking at ${book.height} held ${(a -- b).size} box(es) a rescan did not find and missed " +

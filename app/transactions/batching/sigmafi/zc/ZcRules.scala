@@ -360,6 +360,7 @@ object ZcRules {
   /** Why buying `units` from the ask cannot happen now, or None. */
   def fillRefusal(a: ZcAsk, units: Long, height: Long): Option[String] =
     if (height + 1L >= a.expiry) Some(s"the ask expired at ${a.expiry}")
+    else if (minFill(a) < 1L) Some(s"the ask's least fill ${minFill(a)} is invalid")
     else if (units < 1L || units > a.token.amount) Some(s"the ask holds ${a.token.amount}")
     else if (units < minFill(a) && units != a.token.amount) Some(s"under the ask's least fill of ${minFill(a)}")
     else None

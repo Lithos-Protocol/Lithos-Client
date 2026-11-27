@@ -241,4 +241,41 @@ class PoolTrackerSpec extends AnyFlatSpec with Matchers with Eventually {
     kept.pool(id(1)).map(_.boxId) shouldBe Some(pool(1, 100).boxId)
     kept.pool(id(2)).map(_.boxId) shouldBe Some(pool(2, 100).boxId)
   }
+
+  it should "defer the next periodic rescan by reseedBlocks rather than 10 blocks after a truncated rescan" in {
+    val c = chain()
+    val reseed = 20
+    val t = tracker(c, reseedBlocks = reseed)
+    warmed(c, t)
+    val scans0 = c.scanPages.get
+    val template = pool(9, 100)
+    val flood = (0 to PoolTracker.MaxScanned).map(i =>
+      LDNodeFixtures.indexed(template.copy(boxId = f"fa$i%062x"), tip - 10))
+    c.scans(flood: _*)
+    c.extend(tip + 1, tip + reseed)
+    c.indexed = tip + reseed
+    t.follow(tip + reseed, c.header(tip + reseed).id)
+    t.at(tip + reseed, 10.seconds).map(_.height) shouldBe Some(tip + reseed)
+    eventually(c.scanPages.get should be > scans0)
+    Thread.sleep(200)
+    val scansAfterTruncated = c.scanPages.get
+    t.latest.map(s => (s.height, s.scannedAt, s.cut)) shouldBe Some((tip + reseed, tip, false))
+
+    // Advancing past RescanBackoffBlocks (10) to tip + 35 (< tip + 40) must NOT trigger another periodic rescan
+    c.extend(tip + reseed + 1, tip + reseed + 15)
+    c.indexed = tip + reseed + 15
+    t.follow(tip + reseed + 15, c.header(tip + reseed + 15).id)
+    t.at(tip + reseed + 15, 10.seconds).map(_.height) shouldBe Some(tip + reseed + 15)
+    Thread.sleep(200)
+    c.scanPages.get shouldBe scansAfterTruncated
+
+    // Once a full reseedBlocks (20) passes from the truncated rescan, a clean periodic rescan runs and refreshes scannedAt
+    c.scans(LDNodeFixtures.indexed(pool(1, 100), tip - 3), LDNodeFixtures.indexed(pool(2, 100), tip - 3))
+    c.extend(tip + reseed + 16, tip + 2 * reseed)
+    c.indexed = tip + 2 * reseed
+    t.follow(tip + 2 * reseed, c.header(tip + 2 * reseed).id)
+    t.at(tip + 2 * reseed, 10.seconds).map(_.height) shouldBe Some(tip + 2 * reseed)
+    eventually(t.latest.map(_.scannedAt) shouldBe Some(tip + 2 * reseed))
+    c.scanPages.get should be > scansAfterTruncated
+  }
 }

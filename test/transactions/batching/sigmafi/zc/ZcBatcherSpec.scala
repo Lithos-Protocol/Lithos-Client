@@ -662,4 +662,266 @@ class ZcBatcherSpec extends TestKit(ActorSystem("zc-batcher-spec", ZcBatcherSpec
     uncIds shouldBe Set(uncertainPlan.targetId)
     zcTracker.ownArbs.boxes should contain allOf(uncertainPlan.targetId, uncertainPlan.poolBox.boxId)
   }
+
+  it should "blame only a poisoned order on leg 1 so the honest offer still fills the next order" in {
+    client.execute { ctx =>
+      val h = 1900000
+      val oracle = oracleNodeBox(ctx, 500000000L, h - 5)
+      val offer = ergOfferBox(ctx, h, capital = 10 * Erg)
+      // Poisoned order offers higher yield (ranks #1 in ZcMatcher) while packing 100 junk tokens so bondOut exceeds 4,096 B
+      val junkTokens = tok(SigUsd, 2000L) +: (1 to 100).map(i => tok(f"dd${i}%062x", 1L))
+      val poisonedOrder = nodeOf(seeded(ctx, UTXO(ZcContracts.script(ZcKind.Order, Some(ZcMarket.Erg)).contract,
+        Fee + MinBox, junkTokens,
+        Seq(longs(3 * Erg, Erg, 3 * Erg, h.toLong + 50000L, h.toLong + 5000L, Fee, 0L, 15000L, 60L), tokens(),
+          bytes(borrowerHash), bytes(expr(ZcExpression.OracleLiquidation, ZcMarket.Erg))), Some(h - 10))))
+      val honestOrder = ergOrderBox(ctx, h, expiryOffset = 5000L)
+
+      val chain = new ScriptedChain
+      val tracker = new ZcTracker(() => chain.api, ExecutionContext.global, ZcConfig.Default)
+      val resolver = new ZcResolver(() => chain.api, tracker)
+      discloseTx(chain.api, offer, lender.ergoTreeHex, h - 10)
+      discloseTx(chain.api, poisonedOrder, borrower.ergoTreeHex, h - 10)
+      discloseTx(chain.api, honestOrder, borrower.ergoTreeHex, h - 10)
+
+      val book = bookOf(h - 1, Some(oracle), offer -> (h - 10), poisonedOrder -> (h - 10), honestOrder -> (h - 10))
+      val built = ZcBatchPlanner.build(ctx, wallet, book, resolver, SigmaFiBatchingConfig.Default,
+        signingHeight = h, minerFee = 0L, feeTo = feeTo, slots = 10, allowance = CandidateBudget.Unbounded,
+        deadline = None)
+
+      built.failedIds shouldBe Set(poisonedOrder.boxId)
+      built.failedIds should not contain offer.boxId
+      val matched = built.txs.map(_._1).filter(_.kind == ZcBatchTransactions.KindMatchOrder)
+      matched should have size 1
+      matched.head.spentIds shouldBe Set(honestOrder.boxId, offer.boxId)
+    }
+  }
+
+  it should "blame only a poisoned offer with an oversized owner script and leave the honest order unpenalized" in {
+    client.execute { ctx =>
+      val h = 1900000
+      val oracle = oracleNodeBox(ctx, 500000000L, h - 5)
+      // A ~3 KB disclosed owner script passes script parsing but makes the MinBox delivery output fall under its
+      // per-byte minimum (~1.1M nanoERG > 1M MinBox).
+      val padHex = "01" * 3000
+      val bloatedOwner = Contract.fromErgoContract(ctx.compileContract(
+        org.ergoplatform.appkit.ConstantsBuilder.empty(),
+        s"""{ sigmaProp(fromBase16("$padHex")(HEIGHT % 1) == 1) }"""))
+      bloatedOwner.ergoTreeHex.length should be > 6000
+      val bloatedHash = Hex.toHexString(bloatedOwner.hashedPropBytes)
+      val badOffer = nodeOf(seeded(ctx, UTXO(ZcContracts.script(ZcKind.LendOffer, Some(ZcMarket.Erg)).contract,
+        10 * Erg, Seq.empty,
+        Seq(bytes(bloatedHash), longs(500L, 720L, 262800L, Fee, Reserve, 13000L, h.toLong + 5000L, 1L, 30L, 0L, 0L),
+          bytes(expr(ZcExpression.CollateralPolicy, ZcMarket.Erg)), longs(),
+          ZcUserTransactions.bytesList(Seq.empty), bytes("")),
+        Some(h - 10))))
+      val honestOrder = ergOrderBox(ctx, h, expiryOffset = 5000L)
+
+      val chain = new ScriptedChain
+      val tracker = new ZcTracker(() => chain.api, ExecutionContext.global, ZcConfig.Default)
+      val resolver = new ZcResolver(() => chain.api, tracker)
+      discloseTx(chain.api, badOffer, bloatedOwner.ergoTreeHex, h - 10)
+      discloseTx(chain.api, honestOrder, borrower.ergoTreeHex, h - 10)
+
+      val book = bookOf(h - 1, Some(oracle), badOffer -> (h - 10), honestOrder -> (h - 10))
+      val built = ZcBatchPlanner.build(ctx, wallet, book, resolver, SigmaFiBatchingConfig.Default,
+        signingHeight = h, minerFee = 0L, feeTo = feeTo, slots = 10, allowance = CandidateBudget.Unbounded,
+        deadline = None)
+
+      built.failedIds shouldBe Set(badOffer.boxId)
+      built.failedIds should not contain honestOrder.boxId
+    }
+  }
+
+  it should "diagnose a script-failing poisoned order on leg 1 so the honest offer is not blacklisted and fills the next order" in {
+    client.execute { ctx =>
+      val h = 1900000
+      val oracle = oracleNodeBox(ctx, 500000000L, h - 5)
+      val offer = ergOfferBox(ctx, h, capital = 10 * Erg)
+      // Order with wrong-typed R8 (Long instead of Coll[Byte]): ZcBoxes treats non-byte R8 as guardHash = None, so
+      // ZcRules/ZcMatcher/ZcSizing all accept it and rank it #1 (higher yield), while Order's on-chain
+      // SELF.R8[Coll[Byte]] fails script reduction on INPUTS(0) during wallet.sign.
+      val poisonedOrder = nodeOf(seeded(ctx, UTXO(ZcContracts.script(ZcKind.Order, Some(ZcMarket.Erg)).contract,
+        Fee + MinBox, Seq(tok(SigUsd, 4000L)),
+        Seq(longs(5 * Erg, Erg, 5 * Erg, h.toLong + 50000L, h.toLong + 5000L, Fee, 0L, 15000L, 60L), tokens(),
+          bytes(borrowerHash), bytes(expr(ZcExpression.OracleLiquidation, ZcMarket.Erg)),
+          ErgoValue.of(42L)),
+        Some(h - 10))))
+      val honestOrder = ergOrderBox(ctx, h, expiryOffset = 5000L)
+
+      val chain = new ScriptedChain
+      val tracker = new ZcTracker(() => chain.api, ExecutionContext.global, ZcConfig.Default)
+      val resolver = new ZcResolver(() => chain.api, tracker)
+      discloseTx(chain.api, offer, lender.ergoTreeHex, h - 10)
+      discloseTx(chain.api, poisonedOrder, borrower.ergoTreeHex, h - 10)
+      discloseTx(chain.api, honestOrder, borrower.ergoTreeHex, h - 10)
+
+      val book = bookOf(h - 1, Some(oracle), offer -> (h - 10), poisonedOrder -> (h - 10), honestOrder -> (h - 10))
+      val built = ZcBatchPlanner.build(ctx, wallet, book, resolver, SigmaFiBatchingConfig.Default,
+        signingHeight = h, minerFee = 0L, feeTo = feeTo, slots = 10, allowance = CandidateBudget.Unbounded,
+        deadline = None)
+
+      built.failedIds shouldBe Set(poisonedOrder.boxId)
+      built.failedIds should not contain offer.boxId
+      val matched = built.txs.map(_._1).filter(_.kind == ZcBatchTransactions.KindMatchOrder)
+      matched should have size 1
+      matched.head.spentIds shouldBe Set(honestOrder.boxId, offer.boxId)
+    }
+  }
+
+  it should "re-validate matchAsk against the live offer continuation after a failed leg 1 so a share ask fills whole" in {
+    client.execute { ctx =>
+      val h = 1900000
+      val oracle = oracleNodeBox(ctx, 500000000L, h - 15)
+      val oracleIn = InputUTXO(UTXO(Contract.SIGMA_TRUE, MinBox, Seq(tok(ZcContracts.OracleNft, 1L)),
+        Seq(ErgoValue.of(500000000L), ErgoValue.of(1)), Some(h - 15)).toInput(ctx, ErgoId.create(oracle.transactionId), 0).input)
+      // Create a real bond + Selective share mint so the ask's origin and request boxes are valid on-chain proofs
+      val mintOfferIn = seeded(ctx, UTXO(ZcContracts.script(ZcKind.LendOffer, Some(ZcMarket.Erg)).contract,
+        10 * Erg, Seq.empty,
+        Seq(bytes(lenderHash), longs(500L, 720L, 262800L, Fee, Reserve, 13000L, h.toLong + 5000L, 1L, 30L, 8000L, 5000L),
+          bytes(expr(ZcExpression.CollateralPolicy, ZcMarket.Erg)),
+          longs(ZcPricing.ShareCount, Fee, Fee, 10000L, 9000L, 720L, 2160L, 100L),
+          ZcUserTransactions.bytesList(Seq("ZCS-Bond-Shares", "{}", "6").map(_.getBytes("UTF-8"))),
+          bytes(ZcContracts.script(ZcKind.DutchAuctionMint, Some(ZcMarket.Erg)).treeHash)),
+        Some(h - 20)))
+      val mintOffer = ZcBoxes.read(nodeOf(mintOfferIn)).get.asInstanceOf[ZcOffer]
+      val originOrderIn = seeded(ctx, UTXO(ZcContracts.script(ZcKind.Order, Some(ZcMarket.Erg)).contract,
+        Fee + MinBox, Seq(tok(SigUsd, 2000L)),
+        Seq(longs(2 * Erg, Erg, 2 * Erg, h.toLong + 50000L, h.toLong + 5000L, Fee, 0L, 15000L, 60L), tokens(),
+          bytes(borrowerHash), bytes(expr(ZcExpression.OracleLiquidation, ZcMarket.Erg))), Some(h - 20)))
+      val originOrder = ZcBoxes.read(nodeOf(originOrderIn)).get.asInstanceOf[ZcOrder]
+      val filled = ZcBatchTransactions.matchOrder(ctx, wallet, mintOffer, mintOfferIn, originOrder, originOrderIn,
+        borrower, lender, h.toLong + 50000L, Erg, oracleIn, feeTo, 0L, h - 10)
+      val reqBox = ZcBatchTransactions.nodeBoxOf(filled.tx.signed.getOutputsToSpend.get(0), filled.tx.txId, 0)
+      val req = ZcBoxes.read(reqBox).get.asInstanceOf[ZcShareRequest]
+      val reqIn = InputUTXO(filled.tx.signed.getOutputsToSpend.get(0))
+      val bondBox = ZcBatchTransactions.nodeBoxOf(filled.tx.signed.getOutputsToSpend.get(1), filled.tx.txId, 1)
+      val bondIn = InputUTXO(filled.tx.signed.getOutputsToSpend.get(1))
+      val minted = ZcBatchTransactions.mintShares(ctx, wallet, req, reqIn, lender, Some((bondIn, originOrder.repayment, None)),
+        feeTo, 0L, h - 10)
+      val shareVaultBox = ZcBatchTransactions.nodeBoxOf(minted.signed.getOutputsToSpend.get(1), minted.txId, 1)
+
+      // Offer has 3 ERG, buys shares, and matches:
+      //  leg 1: poisoned oversized order asking 2 ERG (785% APR -> ranks #1, so ZcMatcher plans leg 2 as partial)
+      //  leg 2: SaleOrder for all 100M shares at 1.5 ERG (173% APR -> ranks #2)
+      // When leg 1 fails with MatchFault(blameSource = true), live curOffer still has 3 ERG and re-validation buys all 100M shares!
+      val offer = nodeOf(seeded(ctx, UTXO(ZcContracts.script(ZcKind.LendOffer, Some(ZcMarket.Erg)).contract,
+        3 * Erg, Seq.empty,
+        Seq(bytes(lenderHash), longs(500L, 720L, 262800L, Fee, Reserve, 13000L, h.toLong + 5000L, 1L, 30L, 8000L, 5000L),
+          bytes(expr(ZcExpression.CollateralPolicy, ZcMarket.Erg)), longs(),
+          ZcUserTransactions.bytesList(Seq.empty), bytes("")), Some(h - 10))))
+      val junkTokens = tok(SigUsd, 4000L) +: (1 to 100).map(i => tok(f"de${i}%062x", 1L))
+      val poisonedOrder = nodeOf(seeded(ctx, UTXO(ZcContracts.script(ZcKind.Order, Some(ZcMarket.Erg)).contract,
+        Fee + MinBox, junkTokens,
+        Seq(longs(5 * Erg, 2 * Erg, 5 * Erg, h.toLong + 50000L, h.toLong + 5000L, Fee, 0L, 15000L, 60L), tokens(),
+          bytes(borrowerHash), bytes(expr(ZcExpression.OracleLiquidation, ZcMarket.Erg))), Some(h - 10))))
+      val shareAsk = nodeOf(seeded(ctx, UTXO(ZcContracts.script(ZcKind.SaleOrder, Some(ZcMarket.Erg)).contract,
+        3000000L, Seq(tok(req.shareId, ZcPricing.ShareCount)),
+        Seq(bytes(borrowerHash), longs(3 * Erg / 2, ZcPricing.ShareCount, 1L, h.toLong + 5000L)), Some(h - 5))))
+
+      val chain = new ScriptedChain
+      val tracker = new ZcTracker(() => chain.api, ExecutionContext.global, ZcConfig.Default)
+      val resolver = new ZcResolver(() => chain.api, tracker)
+      discloseTx(chain.api, offer, lender.ergoTreeHex, h - 10)
+      discloseTx(chain.api, poisonedOrder, borrower.ergoTreeHex, h - 10)
+      discloseTx(chain.api, shareAsk, borrower.ergoTreeHex, h - 5)
+      when(chain.api.indexedBoxById(originOrder.boxId))
+        .thenReturn(Success(Some(IndexedBox(originOrder.box, "", h - 20, 1L, Some(filled.tx.txId), Some(h - 10)))))
+      when(chain.api.indexedBoxById(req.shareId))
+        .thenReturn(Success(Some(IndexedBox(reqBox, "", h - 10, 1L, Some(minted.txId), Some(h - 10)))))
+
+      val book = bookOf(h - 1, Some(oracle),
+        offer -> (h - 10), poisonedOrder -> (h - 10), bondBox -> (h - 10), shareVaultBox -> (h - 10), shareAsk -> (h - 5))
+      val built = ZcBatchPlanner.build(ctx, wallet, book, resolver, SigmaFiBatchingConfig.Default,
+        signingHeight = h, minerFee = 0L, feeTo = feeTo, slots = 10, allowance = CandidateBudget.Unbounded,
+        deadline = None)
+
+      built.failedIds shouldBe Set(poisonedOrder.boxId)
+      val askTxs = built.txs.map(_._1).filter(_.kind == ZcBatchTransactions.KindMatchAsk)
+      askTxs should have size 1
+      askTxs.head.spentIds shouldBe Set(shareAsk.boxId, offer.boxId)
+      // Live re-evaluation bought the full 100M shares (not the smaller partial fill planned when leg 1 was assumed to succeed)
+      ZcBoxes.payoutTag(ZcBatchTransactions.nodeBoxOf(askTxs.head.signed.getOutputsToSpend.get(0), askTxs.head.txId, 0)) shouldBe
+        Some(shareAsk.boxId -> ZcPricing.ShareCount)
+    }
+  }
+
+  it should "attribute ErgoScript signing failures to the exact failing input in matchOrder and matchAsk" in {
+    client.execute { ctx =>
+      val h = 1900000
+      val oracleIn = seeded(ctx, UTXO(Contract.SIGMA_TRUE, MinBox, Seq(tok(ZcContracts.OracleNft, 1L)),
+        Seq(ErgoValue.of(500000000L), ErgoValue.of(1)), Some(h - 5)))
+      val goodOfferIn = seeded(ctx, UTXO(ZcContracts.script(ZcKind.LendOffer, Some(ZcMarket.Erg)).contract,
+        10 * Erg, Seq.empty,
+        Seq(bytes(lenderHash), longs(500L, 720L, 262800L, Fee, Reserve, 13000L, h.toLong + 5000L, 1L, 30L, 0L, 0L),
+          bytes(expr(ZcExpression.CollateralPolicy, ZcMarket.Erg)), longs(),
+          ZcUserTransactions.bytesList(Seq.empty), bytes("")), Some(h - 10)))
+      val goodOffer = ZcBoxes.read(nodeOf(goodOfferIn)).get.asInstanceOf[ZcOffer]
+
+      // Expired offer fails INPUTS(1) while honest order passes INPUTS(0)
+      val expiredOfferIn = seeded(ctx, UTXO(ZcContracts.script(ZcKind.LendOffer, Some(ZcMarket.Erg)).contract,
+        10 * Erg, Seq.empty,
+        Seq(bytes(lenderHash), longs(500L, 720L, 262800L, Fee, Reserve, 13000L, h.toLong - 1L, 1L, 30L, 0L, 0L),
+          bytes(expr(ZcExpression.CollateralPolicy, ZcMarket.Erg)), longs(),
+          ZcUserTransactions.bytesList(Seq.empty), bytes("")), Some(h - 10)))
+      val expiredOffer = ZcBoxes.read(nodeOf(expiredOfferIn)).get.asInstanceOf[ZcOffer]
+
+      val goodOrderIn = seeded(ctx, UTXO(ZcContracts.script(ZcKind.Order, Some(ZcMarket.Erg)).contract,
+        Fee + MinBox, Seq(tok(SigUsd, 2000L)),
+        Seq(longs(2 * Erg, Erg, 2 * Erg, h.toLong + 50000L, h.toLong + 5000L, Fee, 0L, 15000L, 60L), tokens(),
+          bytes(borrowerHash), bytes(expr(ZcExpression.OracleLiquidation, ZcMarket.Erg))), Some(h - 10)))
+      val goodOrder = ZcBoxes.read(nodeOf(goodOrderIn)).get.asInstanceOf[ZcOrder]
+
+      // Expired order fails INPUTS(0) while honest offer passes INPUTS(1)
+      val expiredOrderIn = seeded(ctx, UTXO(ZcContracts.script(ZcKind.Order, Some(ZcMarket.Erg)).contract,
+        Fee + MinBox, Seq(tok(SigUsd, 2000L)),
+        Seq(longs(2 * Erg, Erg, 2 * Erg, h.toLong + 50000L, h.toLong - 1L, Fee, 0L, 15000L, 60L), tokens(),
+          bytes(borrowerHash), bytes(expr(ZcExpression.OracleLiquidation, ZcMarket.Erg))), Some(h - 10)))
+      val expiredOrder = ZcBoxes.read(nodeOf(expiredOrderIn)).get.asInstanceOf[ZcOrder]
+
+      val offerFault = intercept[ZcBatchTransactions.MatchFault] {
+        ZcBatchTransactions.matchOrder(ctx, wallet, expiredOffer, expiredOfferIn, goodOrder, goodOrderIn,
+          borrower, lender, h.toLong + 50000L, Erg, oracleIn, feeTo, 0L, h)
+      }
+      offerFault.blameOffer shouldBe true
+      offerFault.blameSource shouldBe false
+
+      val orderFault = intercept[ZcBatchTransactions.MatchFault] {
+        ZcBatchTransactions.matchOrder(ctx, wallet, goodOffer, goodOfferIn, expiredOrder, expiredOrderIn,
+          borrower, lender, h.toLong + 50000L, Erg, oracleIn, feeTo, 0L, h)
+      }
+      orderFault.blameOffer shouldBe false
+      orderFault.blameSource shouldBe true
+
+      // Same per-input script diagnosis for matchAsk
+      val filled = ZcBatchTransactions.matchOrder(ctx, wallet, goodOffer, goodOfferIn, goodOrder, goodOrderIn,
+        borrower, lender, h.toLong + 50000L, Erg, oracleIn, feeTo, 0L, h)
+      val bondIn = InputUTXO(filled.tx.signed.getOutputsToSpend.get(1))
+      val goodAskIn = seeded(ctx, UTXO(ZcContracts.script(ZcKind.SaleOrder, Some(ZcMarket.Erg)).contract, 3000000L,
+        Seq(tok(goodOrder.boxId, 1L)), Seq(bytes(borrowerHash), longs(Erg, 1L, 1L, h.toLong + 5000L)), Some(h - 5)))
+      val goodAsk = ZcBoxes.read(nodeOf(goodAskIn)).get.asInstanceOf[ZcAsk]
+      val expiredAskIn = seeded(ctx, UTXO(ZcContracts.script(ZcKind.SaleOrder, Some(ZcMarket.Erg)).contract, 3000000L,
+        Seq(tok(goodOrder.boxId, 1L)), Seq(bytes(borrowerHash), longs(Erg, 1L, 1L, h.toLong - 1L)), Some(h - 5)))
+      val expiredAsk = ZcBoxes.read(nodeOf(expiredAskIn)).get.asInstanceOf[ZcAsk]
+
+      val askFault = intercept[ZcBatchTransactions.MatchFault] {
+        ZcBatchTransactions.matchAsk(ctx, wallet, filled.nextOffer, filled.nextOfferInput, expiredAsk, expiredAskIn,
+          borrower, lender, 1L, Erg, bondIn, oracleIn, goodOrderIn.bytes, None, feeTo, 0L, h)
+      }
+      askFault.blameOffer shouldBe false
+      askFault.blameSource shouldBe true
+
+      val askOfferFault = intercept[ZcBatchTransactions.MatchFault] {
+        ZcBatchTransactions.matchAsk(ctx, wallet, expiredOffer, expiredOfferIn, goodAsk, goodAskIn,
+          borrower, lender, 1L, Erg, bondIn, oracleIn, goodOrderIn.bytes, None, feeTo, 0L, h)
+      }
+      askOfferFault.blameOffer shouldBe true
+      askOfferFault.blameSource shouldBe false
+
+      // ZcRules.fillRefusal also rejects asks with minFill < 1
+      val zeroMinFillIn = seeded(ctx, UTXO(ZcContracts.script(ZcKind.SaleOrder, Some(ZcMarket.Erg)).contract, 3000000L,
+        Seq(tok(goodOrder.boxId, 1L)), Seq(bytes(borrowerHash), longs(Erg, 1L, 0L, h.toLong + 5000L)), Some(h - 5)))
+      val zeroMinFillAsk = ZcBoxes.read(nodeOf(zeroMinFillIn)).get.asInstanceOf[ZcAsk]
+      ZcRules.fillRefusal(zeroMinFillAsk, 1L, h.toLong) shouldBe defined
+    }
+  }
 }

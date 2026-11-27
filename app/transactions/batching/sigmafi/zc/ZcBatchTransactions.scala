@@ -3,10 +3,16 @@ package transactions.batching.sigmafi.zc
 import mutations.NodeWallet
 import node.model.{NodeAsset, NodeBox, NodeRegisters}
 import org.bouncycastle.util.encoders.Hex
+import org.ergoplatform.appkit.impl.UnsignedTransactionImpl
 import org.ergoplatform.appkit.scalaapi.{scalaByteType, scalaLongType}
-import org.ergoplatform.appkit.{BlockchainContext, ErgoValue, InputBox, SignedTransaction}
+import org.ergoplatform.appkit.{BlockchainContext, ErgoValue, InputBox, SignedTransaction, UnsignedTransaction}
 import org.ergoplatform.sdk.ErgoId
+import org.ergoplatform.validation.ValidationRules
+import org.ergoplatform.wallet.interpreter.ErgoInterpreter
+import org.ergoplatform.{ErgoLikeContext, ErgoLikeInterpreter}
 import sigma.Colls
+import sigma.data.TrivialProp
+import sigmastate.interpreter.Interpreter.ReductionResult
 import sigmafi.zc.{ZcContracts, ZcExpression, ZcKind, ZcMarket}
 import transactions.batching.Batcher
 import transactions.candidate.BlockTxMessages.{CandidateTx, ChainFromPackage, Supersede}
@@ -15,6 +21,8 @@ import work.lithos.mutations.{Contract, InputUTXO, Token, TxBuilder, UTXO}
 
 import java.nio.charset.StandardCharsets.UTF_8
 import scala.collection.JavaConverters._
+import scala.util.Try
+import scala.util.control.NonFatal
 
 /**
  * One signed, self-funded ZC batching transaction: never spends a wallet box, pays its reward less any miner fee
@@ -297,6 +305,137 @@ object ZcBatchTransactions {
   }
 
   /**
+   * A deterministic fault on an offer match (pre-signing validation, signing script reduction, or post-signing output
+   * sizing), naming which side caused it so the planner blacklists the poisoned box instead of its counterparty.
+   */
+  final class MatchFault(val blameOffer: Boolean, val blameSource: Boolean, message: String, cause: Throwable = null)
+    extends IllegalArgumentException(message, cause)
+
+  private def checkedSizing(ctx: BlockchainContext, box: UTXO, blameOffer: Boolean, blameSource: Boolean,
+                            label: String): Unit = {
+    val refusal = try ZcSizing.refusal(ctx, box) catch {
+      case ex: IllegalArgumentException =>
+        throw new MatchFault(blameOffer, blameSource, s"$label invalid: ${ex.getMessage}", ex)
+    }
+    refusal.foreach(r => throw new MatchFault(blameOffer, blameSource, s"$label invalid: $r"))
+  }
+
+  private def safeAdd(a: Long, b: Long, blameOffer: Boolean, blameSource: Boolean, label: String): Long =
+    try Math.addExact(a, b) catch {
+      case ex: ArithmeticException =>
+        throw new MatchFault(blameOffer, blameSource, s"$label overflow: ${ex.getMessage}", ex)
+    }
+
+  private final class DiagnosticInterpreter extends ErgoLikeInterpreter {
+    override type CTX = ErgoLikeContext
+  }
+
+  /**
+   * Evaluates `INPUTS(0)` (source) and `INPUTS(1)` (offer) independently when signing an offer match fails, attributing
+   * the fault to the failing side so a poisoned order or ask cannot blacklist an honest lend offer.
+   */
+  private def diagnoseMatchSignFailure(ctx: BlockchainContext, unsigned: UnsignedTransaction, cause: Throwable): Throwable =
+    Try {
+      unsigned match {
+        case impl: UnsignedTransactionImpl =>
+          val boxesToSpend = impl.getBoxesToSpend.asScala.toIndexedSeq
+          if (boxesToSpend.size >= 2) {
+            val stateCtx = impl.getStateContext
+            val tx = impl.getTx
+            val spendBoxes = boxesToSpend.map(_.box)
+            val dataBoxes = impl.getDataBoxes.asScala.toIndexedSeq
+            val avlTree = ErgoInterpreter.avlTreeFromDigest(stateCtx.previousStateDigest)
+            val params = ctx.getDataSource.getParameters
+            val maxCost = params.getMaxBlockCost.toLong
+            val scriptVersion = math.max(0, params.getBlockVersion - 1).toByte
+            val interpreter = new DiagnosticInterpreter
+
+            def evalInput(idx: Int): Try[ReductionResult] = Try {
+              val ergoCtx = new ErgoLikeContext(
+                avlTree, stateCtx.sigmaLastHeaders, stateCtx.sigmaPreHeader,
+                dataBoxes, spendBoxes, tx, idx, boxesToSpend(idx).extension,
+                ValidationRules.currentSettings, maxCost, 0L, scriptVersion)
+              interpreter.fullReduction(spendBoxes(idx).ergoTree, ergoCtx)
+            }
+
+            val srcRes = evalInput(0)
+            val offerRes = evalInput(1)
+            val srcOk = srcRes.toOption.exists(_.value == TrivialProp.TrueProp)
+            val offerOk = offerRes.toOption.exists(_.value == TrivialProp.TrueProp)
+            if (!srcOk) {
+              val detail = srcRes.failed.toOption.map(_.getMessage).getOrElse(srcRes.get.value.toString)
+              new MatchFault(blameOffer = false, blameSource = true,
+                s"source input failed script reduction ($detail): ${cause.getMessage}", cause)
+            } else if (!offerOk) {
+              val detail = offerRes.failed.toOption.map(_.getMessage).getOrElse(offerRes.get.value.toString)
+              new MatchFault(blameOffer = true, blameSource = false,
+                s"offer input failed script reduction ($detail): ${cause.getMessage}", cause)
+            } else {
+              val srcCost = srcRes.get.cost
+              val offerCost = offerRes.get.cost
+              if (srcCost > offerCost)
+                new MatchFault(blameOffer = false, blameSource = true,
+                  s"source input cost ($srcCost) drove combined signing failure: ${cause.getMessage}", cause)
+              else if (offerCost > srcCost)
+                new MatchFault(blameOffer = true, blameSource = false,
+                  s"offer input cost ($offerCost) drove combined signing failure: ${cause.getMessage}", cause)
+              else cause
+            }
+          } else cause
+        case _ => cause
+      }
+    }.getOrElse(cause)
+
+  private def checkMatchNodeMinimums(ctx: BlockchainContext, signed: SignedTransaction,
+                                     outputBlame: Int => (Boolean, Boolean)): Unit = {
+    val perByte = ctx.getDataSource.getParameters.getMinValuePerByte.toLong
+    signed.getOutputsToSpend.asScala.zipWithIndex.foreach { case (box, index) =>
+      val bytes = box.getBytes.length
+      val problem =
+        if (bytes > Batcher.MaxBoxBytes)
+          Some(s"output $index is $bytes bytes, over the node's ${Batcher.MaxBoxBytes}-byte limit")
+        else if (box.getValue < bytes * perByte)
+          Some(s"output $index holds ${box.getValue} nanoERG, under the node's ${bytes * perByte} minimum for $bytes bytes")
+        else None
+      problem.foreach { msg =>
+        val (blameOffer, blameSource) = outputBlame(index)
+        if (blameOffer || blameSource) throw new MatchFault(blameOffer, blameSource, msg)
+        else throw new IllegalArgumentException(msg)
+      }
+    }
+  }
+
+  /** Signs a two-input offer match (`INPUTS(0)` = source, `INPUTS(1)` = offer), attributing failures to the culpable side. */
+  private def signMatch(ctx: BlockchainContext, wallet: NodeWallet, inputs: Seq[InputUTXO], outputs: Seq[UTXO],
+                        outputBlame: Int => (Boolean, Boolean), feeTo: Contract, reward: Long, minerFee: Long,
+                        height: Int, kind: String, spentIds: Set[String], dataInputs: Seq[InputUTXO],
+                        named: Seq[Contract]): ZcBatchTx = {
+    require(minerFee >= 0L, "miner fee cannot be negative")
+    val net = reward - minerFee
+    require(net >= MinBox, s"reward $reward does not cover miner fee $minerFee and a minimum output")
+    val feeOut = UTXO(feeTo, net, creationHeight = Some(height))
+    val allOutputs = outputs :+ feeOut
+    val finalInputs = ZcUserTransactions.disclosedAll(inputs, allOutputs, named)
+    val unsigned = TxBuilder(ctx)
+      .setInputs(finalInputs: _*)
+      .setDataInputs(dataInputs: _*)
+      .setOutputs(allOutputs: _*)
+      .setPreHeader(ctx.createPreHeader().height(height).build())
+      .buildTx(minerFee, wallet.p2pk, Seq.empty)
+    val signed = try wallet.sign(unsigned) catch {
+      case NonFatal(ex) => throw diagnoseMatchSignFailure(ctx, unsigned, ex)
+    }
+    checkMatchNodeMinimums(ctx, signed, outputBlame)
+    val expectedOutputs = allOutputs.size + (if (minerFee > 0L) 1 else 0)
+    require(signed.getOutputsToSpend.size == expectedOutputs,
+      s"$kind produced ${signed.getOutputsToSpend.size} outputs, expected $expectedOutputs (no change allowed)")
+    val feeBox = InputUTXO(signed.getOutputsToSpend.get(outputs.size))
+    require(feeBox.value == net && feeBox.tokens.isEmpty,
+      s"$kind reward output holds ${feeBox.value} nanoERG and ${feeBox.tokens.size} token(s), expected $net")
+    ZcBatchTx(signed, kind, spentIds, feeBox, reward)
+  }
+
+  /**
    * Matches `offer` against `originalOrder`, minting the bond asset from `INPUTS(0)` = order and paying the batcher
    * fee to `feeTo`. Returns the signed transaction plus the offer's live continuation for same-block chaining.
    */
@@ -314,28 +453,56 @@ object ZcBatchTransactions {
     val rule = ZcRules.rule(order.liqHash, m)
     val metadata = ZcMetadata.bond(ZcMetadata.BondFacts(m, asset, order.principal, order.repayment, start, maturity,
       ZcMetadata.ruleFields(rule, order.payload, order.liqHash)))
-    val (delivery, deliveryFunding) = unitDelivery(offer, owner, asset, utf8(metadata))
+    val (delivery, deliveryFunding) = try unitDelivery(offer, owner, asset, utf8(metadata)) catch {
+      case ex: IllegalArgumentException =>
+        throw new MatchFault(blameOffer = true, blameSource = false, ex.getMessage, ex)
+    }
+    checkedSizing(ctx, delivery, blameOffer = true, blameSource = false, s"offer ${offer.boxId} delivery box")
     val collateralErg = order.box.value - order.expiryFee
-    val bondOut = UTXO(script(ZcKind.Bond, Some(m)), Math.addExact(collateralErg, feeReserve),
+    if (collateralErg < 0L)
+      throw new MatchFault(blameOffer = false, blameSource = true, s"order ${order.boxId} expiry fee exceeds its ERG value")
+    val bondValue = safeAdd(collateralErg, feeReserve,
+      blameOffer = feeReserve >= collateralErg, blameSource = collateralErg > feeReserve, s"order ${order.boxId} bond value")
+    val bondOut = UTXO(script(ZcKind.Bond, Some(m)), bondValue,
       token(asset, 2L) +: order.box.assets.map(a => token(a.tokenId, a.amount)),
       Seq(bytes(asset), bytes(order.borrowerHash), longs(order.terms),
         tokenPairs(order.principalTokens.map(t => t.tokenId -> t.amount)),
         bytes(order.liqHash), longs(Seq(feeReserve, start, maturity))), Some(height))
-    val principalOut = UTXO(borrower, Math.addExact(order.expiryFee, order.principalErg),
+    checkedSizing(ctx, bondOut, blameOffer = false, blameSource = true, s"order ${order.boxId} bond box")
+    val principalValue = safeAdd(order.expiryFee, order.principalErg,
+      blameOffer = false, blameSource = true, s"order ${order.boxId} principal value")
+    val principalOut = UTXO(borrower, principalValue,
       order.principalTokens.map(t => token(t.tokenId, t.amount)), Seq(bytes(asset)))
+    checkedSizing(ctx, principalOut, blameOffer = false, blameSource = true, s"order ${order.boxId} principal box")
     val fee = ZcRules.fillFee(ZcOfferState.of(offer), order.principal)
-    val ergOut = Math.addExact(Math.addExact(fee, deliveryFunding), Math.addExact(feeReserve, order.principalErg))
-    val rest = offerContinuation(ctx, offer, offerInput, order.principal, ergOut)
+    val offerErg = safeAdd(
+      safeAdd(fee, deliveryFunding, blameOffer = true, blameSource = false, s"offer ${offer.boxId} erg out"),
+      feeReserve, blameOffer = true, blameSource = false, s"offer ${offer.boxId} erg out")
+    val ergOut = safeAdd(offerErg, order.principalErg,
+      blameOffer = order.principalErg <= offer.capital, blameSource = order.principalErg > offer.capital,
+      s"offer ${offer.boxId} total erg out")
+    val rest = try offerContinuation(ctx, offer, offerInput, order.principal, ergOut) catch {
+      case ex: IllegalArgumentException =>
+        throw new MatchFault(blameOffer = true, blameSource = false, ex.getMessage, ex)
+    }
 
     val guardedOrder = if (order.guardHash.isEmpty) orderInput
       else orderInput.withCtxVar(1.toByte, raw(ZcContracts.expression(ZcExpression.FillGuard, Some(m)).bytes))
-    val pricedOrder = order.pricingHash.filter(_ => order.priced).flatMap(ZcContracts.expressionByHash)
-      .fold(guardedOrder)(e => guardedOrder.withCtxVar(2.toByte, raw(e.bytes)))
+    val pricingExpr = if (!order.priced) None
+      else Some(order.pricingHash.flatMap(ZcContracts.expressionByHash).getOrElse(
+        throw new MatchFault(blameOffer = false, blameSource = true,
+          s"order ${order.boxId} names an unknown pricing expression")))
+    val pricedOrder = pricingExpr.fold(guardedOrder)(e => guardedOrder.withCtxVar(2.toByte, raw(e.bytes)))
     val policy = ZcContracts.expression(ZcExpression.CollateralPolicy, Some(m)).bytes
     val offerIn = offerInput.withCtxVar(0.toByte, int(3)).withCtxVar(1.toByte, raw(policy))
 
-    val built = signSelfFunded(ctx, wallet, Seq(pricedOrder, offerIn), Seq(delivery, bondOut, principalOut, rest),
-      feeTo, fee, minerFee, height, KindMatchOrder, Set(order.boxId, offer.boxId),
+    val blameOutput: Int => (Boolean, Boolean) = {
+      case 0 | 3 => (true, false)
+      case 1 | 2 => (false, true)
+      case _ => (false, false)
+    }
+    val built = signMatch(ctx, wallet, Seq(pricedOrder, offerIn), Seq(delivery, bondOut, principalOut, rest),
+      blameOutput, feeTo, fee, minerFee, height, KindMatchOrder, Set(order.boxId, offer.boxId),
       dataInputs = Seq(oracle), named = Seq(owner, borrower))
     val nextBox = built.signed.getOutputsToSpend.get(3)
     val nextNode = nodeBoxOf(nextBox, built.txId, 3)
@@ -362,23 +529,40 @@ object ZcBatchTransactions {
       case None => UTXO(seller, paidErg, Seq.empty, tag)
       case Some(id) => UTXO(seller, MinBox, Seq(token(id, price)), tag)
     }
-    val (delivery, deliveryFunding) =
+    checkedSizing(ctx, payout, blameOffer = false, blameSource = true, s"ask ${ask.boxId} payout box")
+    val (delivery, deliveryFunding) = try {
       if (shares) (UTXO(owner, MinBox, Seq(token(ask.token.tokenId, units)),
         Seq.fill(3)(raw(Array.emptyByteArray)) :+ bytes(offer.boxId)), MinBox)
       else unitDelivery(offer, owner, ask.token.tokenId, Seq.empty)
+    } catch {
+      case ex: IllegalArgumentException =>
+        throw new MatchFault(blameOffer = true, blameSource = false, ex.getMessage, ex)
+    }
+    checkedSizing(ctx, delivery, blameOffer = true, blameSource = false, s"offer ${offer.boxId} delivery box")
     val fee = ZcRules.fillFee(ZcOfferState.of(offer), price)
-    val ergOut = Math.addExact(Math.addExact(fee, deliveryFunding), paidErg)
-    val offerRest = offerContinuation(ctx, offer, offerInput, price, ergOut)
+    val offerErg = safeAdd(fee, deliveryFunding, blameOffer = true, blameSource = false, s"offer ${offer.boxId} erg out")
+    val ergOut = safeAdd(offerErg, paidErg,
+      blameOffer = price <= offer.capital, blameSource = price > offer.capital, s"offer ${offer.boxId} total erg out")
+    val offerRest = try offerContinuation(ctx, offer, offerInput, price, ergOut) catch {
+      case ex: IllegalArgumentException =>
+        throw new MatchFault(blameOffer = true, blameSource = false, ex.getMessage, ex)
+    }
     val remaining = ask.token.amount - units
     val askRest = if (remaining <= 0L) None
       else Some(UTXO(ask.script.contract, ask.box.value, Seq(token(ask.token.tokenId, remaining)), askInput.registers)
         .withRegNum(if (ask.priced) 8 else 6, bytes(ask.boxId)))
-    val totalReward = if (askRest.isDefined) fee else Math.addExact(fee, ask.box.value)
+    askRest.foreach(checkedSizing(ctx, _, blameOffer = false, blameSource = true, s"ask ${ask.boxId} continuation box"))
+    val totalReward = if (askRest.isDefined) fee
+      else safeAdd(fee, ask.box.value,
+        blameOffer = fee >= ask.box.value, blameSource = ask.box.value > fee, s"ask ${ask.boxId} total reward")
 
     val askBase = askRest.foldLeft(askInput.withCtxVar(0.toByte, int(0)))((b, _) => b.withCtxVar(1.toByte, int(3)))
-    val askIn = if (!ask.priced) askBase
-      else ask.pricingHash.flatMap(ZcContracts.expressionByHash).fold(askBase)(e =>
-        askBase.withCtxVar(2.toByte, raw(e.bytes)).withCtxVar(3.toByte, int(0)))
+    val askPricing = if (!ask.priced) None
+      else Some(ask.pricingHash.flatMap(ZcContracts.expressionByHash).getOrElse(
+        throw new MatchFault(blameOffer = false, blameSource = true,
+          s"ask ${ask.boxId} names an unknown pricing expression")))
+    val askIn = askPricing.fold(askBase)(e =>
+      askBase.withCtxVar(2.toByte, raw(e.bytes)).withCtxVar(3.toByte, int(0)))
     val policy = ZcContracts.expression(ZcExpression.CollateralPolicy, Some(m)).bytes
     val offerBase = offerInput
       .withCtxVar(0.toByte, int(2))
@@ -391,7 +575,14 @@ object ZcBatchTransactions {
     val offerIn = requestBytes.fold(offerBase)(bs => offerBase.withCtxVar(6.toByte, raw(bs)))
 
     val outputs = Seq(payout, delivery, offerRest) ++ askRest.toSeq
-    val built = signSelfFunded(ctx, wallet, Seq(askIn, offerIn), outputs, feeTo, totalReward, minerFee, height,
+    val hasAskRest = askRest.isDefined
+    val blameOutput: Int => (Boolean, Boolean) = {
+      case 0 => (false, true)
+      case 1 | 2 => (true, false)
+      case 3 if hasAskRest => (false, true)
+      case _ => (false, false)
+    }
+    val built = signMatch(ctx, wallet, Seq(askIn, offerIn), outputs, blameOutput, feeTo, totalReward, minerFee, height,
       KindMatchAsk, Set(ask.boxId, offer.boxId), dataInputs = Seq(bondInput, oracle), named = Seq(owner, seller))
     val nextOfferBox = built.signed.getOutputsToSpend.get(2)
     val nextOffer = ZcBoxes.read(nodeBoxOf(nextOfferBox, built.txId, 2), offer.script).collect { case o: ZcOffer => o }

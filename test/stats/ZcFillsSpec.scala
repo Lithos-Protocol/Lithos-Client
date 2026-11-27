@@ -296,6 +296,101 @@ class ZcFillsSpec extends AnyFlatSpec with Matchers {
     fullScans.get() shouldBe 0
   }
 
+  it should "skip completed bond/share prefixes during backlogs and throttle live fact sweeps to FactSweepInterval" in {
+    val backing = new storage.InMemoryKeyValueStore()
+    val bondScans = new java.util.concurrent.atomic.AtomicInteger(0)
+    val shareScans = new java.util.concurrent.atomic.AtomicInteger(0)
+    val trackedStore = new storage.KeyValueStore {
+      override def path = backing.path
+      override def backend = backing.backend
+      override def get(k: Array[Byte]) = backing.get(k)
+      override def scanPrefix(p: Array[Byte]) = backing.scanPrefix(p)
+      override def scanKeys(p: Array[Byte]) = backing.scanKeys(p)
+      override def scanKeysRange(p: Array[Byte], s: Array[Byte], e: Boolean, l: Int) = backing.scanKeysRange(p, s, e, l)
+      override def scanPrefixRange(p: Array[Byte], s: Array[Byte], e: Boolean, l: Int) = {
+        val prefix = new String(p, java.nio.charset.StandardCharsets.UTF_8)
+        if (prefix == "bond/") bondScans.incrementAndGet()
+        else if (prefix == "share/") shareScans.incrementAndGet()
+        backing.scanPrefixRange(p, s, e, l)
+      }
+      override def scanPrefixReverse(p: Array[Byte], s: Array[Byte], e: Boolean, l: Int) =
+        backing.scanPrefixReverse(p, s, e, l)
+      override def write(ms: Seq[storage.KeyValueMutation], d: storage.WriteDurability) = backing.write(ms, d)
+      override def readSnapshot[A](f: storage.KeyValueReadView => Either[storage.StoreError, A]) = backing.readSnapshot(f)
+      override def close() = backing.close()
+    }
+
+    val db = new ZcFillStore(Some(trackedStore), ZcFillStore.identity(zc))
+    val c = new ScriptedChain
+    c.extend(H, H)
+    val baseHeader = c.header(H)
+    val start = H
+    db.initialize(start, "aa" * 32)
+    val liveBond = id(70)
+    val soonMaturingBond = id(71)
+    val soonMaturingShare = id(72)
+    val baseCutoff = start + 6
+    val maturityHeight = baseCutoff + ZcFills.FactSweepInterval - 10
+    var parent = "aa" * 32
+    // Append 6 old blocks (creating a 3-step block/ backlog at limit = 2) plus a long-dated bond and a bond maturing
+    // before the next FactSweepInterval sweep.
+    (1 to 6).foreach { i =>
+      val h = start + i
+      val hid = f"b$i%063x"
+      val facts = if (i == 1)
+        ZcFills.BlockFills(Vector.empty,
+          Map(liveBond -> ZcFills.BondFacts("ERG", Erg, maturity = 9999999L),
+            soonMaturingBond -> ZcFills.BondFacts("ERG", Erg, maturity = maturityHeight.toLong)),
+          Map(soonMaturingShare -> (soonMaturingBond -> 100L)))
+      else ZcFills.BlockFills(Vector.empty, Map.empty, Map.empty)
+      db.append(baseHeader.copy(id = hid, height = h, timestamp = 1000L + i, parentId = parent), facts)
+      parent = hid
+    }
+    // Advance cursor far enough ahead of RollbackBuffer so cutoffHeight governs maxPrune
+    val tipH = baseCutoff + ZcFills.FactSweepInterval + ZcFills.RollbackBuffer + 20
+    db.append(baseHeader.copy(id = "cc" * 32, height = tipH, timestamp = 2000L, parentId = parent),
+      ZcFills.BlockFills(Vector.empty, Map.empty, Map.empty))
+
+    // Step 1 scans bond/ (2 entries == limit, so 1 more step) and share/ (1 entry < limit, so share/ finishes on step 1)
+    val s1 = db.pruneStep(cutoffHeight = baseCutoff + 1, limit = 2)
+    s1.more shouldBe true
+    bondScans.get() shouldBe 1
+    shareScans.get() shouldBe 1
+
+    // Step 2 finishes bond/ (0 remaining) while skipping completed share/; block/ backlog still has more
+    val s2 = db.pruneStep(cutoffHeight = baseCutoff + 1, limit = 2)
+    s2.more shouldBe true
+    bondScans.get() shouldBe 2
+    shareScans.get() shouldBe 1
+
+    // Step 3 drains the remaining block/ backlog while skipping BOTH completed bond/ and share/ prefixes!
+    val s3 = db.pruneStep(cutoffHeight = baseCutoff + 1, limit = 2)
+    s3.more shouldBe false
+    bondScans.get() shouldBe 2
+    shareScans.get() shouldBe 1
+
+    // Subsequent blocks within FactSweepInterval must NOT re-scan live bonds/shares on every block
+    (2 to 15).foreach { d =>
+      db.pruneStep(cutoffHeight = baseCutoff + d, limit = 2).more shouldBe false
+    }
+    bondScans.get() shouldBe 2
+    shareScans.get() shouldBe 1
+    db.bond(liveBond) shouldBe defined
+    db.bond(soonMaturingBond) shouldBe defined
+    db.share(soonMaturingShare) shouldBe defined
+
+    // Once maxPrune advances by FactSweepInterval, a new sweep runs and deletes the now-matured bond & dead share
+    var res = db.pruneStep(cutoffHeight = baseCutoff + 1 + ZcFills.FactSweepInterval, limit = 2)
+    while (res.more) {
+      res = db.pruneStep(cutoffHeight = baseCutoff + 1 + ZcFills.FactSweepInterval, limit = 2)
+    }
+    bondScans.get() should be > 2
+    shareScans.get() should be > 1
+    db.bond(liveBond) shouldBe defined
+    db.bond(soonMaturingBond) shouldBe None
+    db.share(soonMaturingShare) shouldBe None
+  }
+
   it should "page and prune fills cleanly on the pure-Java IQ80 LevelDB backend" in {
     val dir = java.nio.file.Files.createTempDirectory("lithos-zc-fills-iq80-")
     val kv = storage.TestIq80Store.open(dir)

@@ -136,11 +136,13 @@ class PoolTracker(api: () => NodeApi, network: NetworkType, io: ExecutionContext
             if (keepLive) {
               logger.warn(s"Pool tracking's periodic rescan at ${wanted._1} was truncated while the live state is " +
                 "complete; keeping the tracked pools")
-              rescanFrom = wanted._1 + RescanBackoffBlocks
+              rescanFrom = wanted._1 + math.max(1, reseedBlocks)
             } else {
+              val reseeded = rescan || current.forall(_.scannedAt != next.scannedAt)
               if (rescan) current.filter(_.headerId == next.headerId).foreach(compare(_, next))
               current = Some(next)
               failed = None
+              if (reseeded) rescanFrom = 0
             }
           case Failure(ex) if rescan =>
             logger.warn(s"Pool tracking's periodic rescan at ${wanted._1} failed, keeping the tracked pools: " +
