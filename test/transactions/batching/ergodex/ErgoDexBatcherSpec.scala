@@ -400,7 +400,7 @@ class ErgoDexBatcherSpec extends TestKit(ActorSystem("ergodex-batcher-spec", Erg
     f.stop()
   }
 
-  it should "read a LithosDex pool's fee vault once it stands, and again each scan while it does not" in {
+  it should "read a LithosDex pool's fee vault once when it stands, and negative-cache a missing vault within its TTL" in {
     import org.mockito.ArgumentMatchers.{eq => is}
     val (f, _, ld) = lithosDexRouting(1.5, Some(new transactions.batching.arb.MachinaHandoff(active = true, Set.empty)),
       scanIntervalMs = 1500L)
@@ -413,7 +413,7 @@ class ErgoDexBatcherSpec extends TestKit(ActorSystem("ergodex-batcher-spec", Erg
     val (g, _, _) = lithosDexRouting(1.5, Some(new transactions.batching.arb.MachinaHandoff(active = true, Set.empty)),
       vaultStands = false, scanIntervalMs = 1500L)
     awaitAssert(verify(g.api, org.mockito.Mockito.atLeast(4)).info(), 30.seconds, 250.millis)
-    verify(g.api, org.mockito.Mockito.atLeast(2)).unspentBoxesByTokenId(is(vaultNft), any[Paging], any[SortDirection],
+    verify(g.api, times(1)).unspentBoxesByTokenId(is(vaultNft), any[Paging], any[SortDirection],
       any[MempoolOptions])
     g.stop()
   }
@@ -490,23 +490,37 @@ class ErgoDexBatcherSpec extends TestKit(ActorSystem("ergodex-batcher-spec", Erg
     f.stop()
   }
 
-  "The source" should "scan once per index height, and again once the index moves" in {
+  "The source" should "scan once per index tip, and rescan on a same-height reorg or new height" in {
     val f = new Fixture(scanIntervalMs = 100L)
     @volatile var indexed = tip
+    @volatile var header = anchor
     when(f.api.indexedHeight()).thenAnswer(_ => Success(BlockchainIndexHeight(indexed, indexed)))
-    // Each scan reads the tip once; ticks at the same index height reuse the last scan
-    verify(f.api, timeout(10000).times(1)).info()
+    when(f.api.info()).thenAnswer(_ => Success(ChainFixtures.infoAt(indexed).copy(bestFullHeaderId = Some(header))))
+    val templatesPerScan = ErgoDexContracts.orders.count(_.executable) + MachinaContracts.templates.count(_.executable)
+    // Each scan queries every executable template once; ticks at the same (height, headerId) reuse the last scan
+    verify(f.api, timeout(10000).times(templatesPerScan))
+      .unspentBoxesByTemplateHash(anyString(), any[Paging], any[SortDirection], any[MempoolOptions])
     awaitAssert(verify(f.api, org.mockito.Mockito.atLeast(10)).indexedHeight(), 10.seconds, 100.millis)
-    verify(f.api, times(1)).info()
+    verify(f.api, times(templatesPerScan))
+      .unspentBoxesByTemplateHash(anyString(), any[Paging], any[SortDirection], any[MempoolOptions])
+    // Same-height reorg changes headerId -> must invalidate lastScan and rescan
+    header = "dd" * 32
+    verify(f.api, timeout(10000).times(templatesPerScan * 2))
+      .unspentBoxesByTemplateHash(anyString(), any[Paging], any[SortDirection], any[MempoolOptions])
+    // Advancing height -> rescans once more
     indexed = tip + 1
-    verify(f.api, timeout(10000).times(2)).info()
+    header = "ee" * 32
+    verify(f.api, timeout(10000).times(templatesPerScan * 3))
+      .unspentBoxesByTemplateHash(anyString(), any[Paging], any[SortDirection], any[MempoolOptions])
     f.stop()
   }
 
   it should "rescan every tick while the index is behind the chain" in {
     val f = new Fixture(scanIntervalMs = 100L)
     when(f.api.indexedHeight()).thenReturn(Success(BlockchainIndexHeight(tip - 1, tip)))
-    verify(f.api, timeout(10000).atLeast(3)).info()
+    val templatesPerScan = ErgoDexContracts.orders.count(_.executable) + MachinaContracts.templates.count(_.executable)
+    verify(f.api, timeout(10000).atLeast(templatesPerScan * 3))
+      .unspentBoxesByTemplateHash(anyString(), any[Paging], any[SortDirection], any[MempoolOptions])
     f.stop()
   }
 

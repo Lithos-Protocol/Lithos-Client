@@ -465,4 +465,52 @@ class ZcCollateralArbSpec extends AnyFlatSpec with Matchers {
       profitOut.value shouldBe plan.netProfit
     }
   }
+
+  it should "cap spot-score ranking by pool ERG liquidity so thin-pool spam cannot eclipse real arbs" in {
+    client.execute { ctx =>
+      val h = ctx.getHeight + 1
+      val spamToken = "ee" * 32
+      // Tiny 1 ERG pool holding 1000 units of spamToken (spot = 0.001 ERG/token, max ERG liquidity = 1 ERG)
+      val pSpam = poolEntry(nativePool(ctx, arbId(10), spamToken, 1 * Erg, 1000L))
+      // Deep 1000 ERG pool for TokenA
+      val pA = poolEntry(nativePool(ctx, arbId(11), TokenA, 1000 * Erg, 1000000L))
+      val pools = Map(pSpam.nft -> pSpam.pool, pA.nft -> pA.pool)
+
+      // 210 spam SaleOrders (past MaxEvaluatedTargets = 200) each holding 10,000,000 spamToken priced at 0.5 ERG
+      // Uncapped spot valuation would be 10,000 ERG each, eclipsing realLot; capped at 1 ERG depth -> net <= 0.5 ERG!
+      val spamAsks = (1 to 210).map { _ =>
+        nodeOf(seeded(ctx, UTXO(ZcContracts.script(ZcKind.SaleOrder, Some(ZcMarket.Erg)).contract, MinBox,
+          Seq(tok(spamToken, 10000000L)), Seq(bytes(sellerHash), longs(500000000L, 10000000L, 10000000L, h.toLong + 500L)),
+          Some(h - 5))))
+      }
+      // Real LotAuction netting ~3 ERG profit (5000 TokenA worth ~5 ERG for 2 ERG)
+      val realLot = nodeOf(seeded(ctx, UTXO(ZcContracts.script(ZcKind.LotAuction, Some(ZcMarket.Erg)).contract, 3000000L,
+        Seq(tok(TokenA, 5000L)),
+        Seq(bytes(sellerHash), longs(2 * Erg, 2 * Erg, h.toLong - 10, h.toLong + 100, h.toLong + 500, 2000000L)),
+        Some(h - 10))))
+
+      val book = bookOf(h - 1, (spamAsks :+ realLot): _*)
+      val found = ZcCollateralArb.bestPlan(book, Seq.empty, pools, _ => Some(seller), h, 8 * Erg, MinBox,
+        slots = 6, minLegProceeds = 100000L, spentBoxes = Set.empty)
+      found shouldBe defined
+      found.get._1.target.boxId shouldBe realLot.boxId
+    }
+  }
+
+  it should "filter untraded junk tokens before MaxBasketTokens so 16 dust tokens cannot hide a valuable token" in {
+    client.execute { ctx =>
+      val h = ctx.getHeight + 1
+      val pA = poolEntry(nativePool(ctx, arbId(12), TokenA, 1000 * Erg, 1000000L))
+      val pools = Map(pA.nft -> pA.pool)
+      val junk = (1 to 17).map(i => tok(f"aa${i}%062x", 1L))
+      val lot = read[ZcLot](nodeOf(seeded(ctx, UTXO(ZcContracts.script(ZcKind.LotAuction, Some(ZcMarket.Erg)).contract,
+        3000000L, junk :+ tok(TokenA, 5000L),
+        Seq(bytes(sellerHash), longs(2 * Erg, 2 * Erg, h.toLong - 10, h.toLong + 100, h.toLong + 500, 2000000L)),
+        Some(h - 10)))))
+      val plan = ZcCollateralArb.evaluateLot(lot, pools, _ => Some(seller), h.toLong, 8 * Erg, 6, 100000L, ZcAssetPricer.Default)
+      plan shouldBe defined
+      plan.get.valuation.liquidations.map(_.tokenId) shouldBe Vector(TokenA)
+      plan.get.valuation.unpriced.size shouldBe 17
+    }
+  }
 }

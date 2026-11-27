@@ -45,14 +45,32 @@ object CandidateMaterialized {
    * whether a mismatch rejects the candidate.
    */
   def apply(identity: CandidateIdentity, attempt: UUID, workMessage: String,
-            proof: JSONObject, requested: Seq[CandidateTx]): CandidateMaterialized = {
+            proof: JSONObject, requested: Seq[CandidateTx],
+            atomicGroups: Seq[Set[String]] = Seq.empty): CandidateMaterialized = {
     val proofs = parseProofs(proof)
     val leaves = proofs.map(_.leaf.toLowerCase).toSet
     val (proven, missing) = requested.partition(tx =>
       tx.leaf.nonEmpty && leaves.contains(tx.leaf.toLowerCase))
+    val provenIds = proven.map(_.id).toSet
+    val missingIds = missing.map(_.id).toSet
+    // A multi-leg stake-bearing arb/grid/ZC-arb bundle included only in part would leave ArbStake stranded
+    // (or economically drained into an illiquid token) even when no top-up covers the closing leg.
+    val partialAtomic = atomicGroups.flatMap { group =>
+      if (group.exists(provenIds.contains) && group.exists(missingIds.contains)) group.intersect(missingIds)
+      else Set.empty[String]
+    }.toSet
+    val fallbackPartialArb =
+      if (atomicGroups.nonEmpty) Set.empty[String]
+      else {
+        val stakeKinds = transactions.batching.arb.ArbKind.StakeBearing
+        val stakeMissing = missing.filter(tx => stakeKinds.contains(tx.kind)).map(_.id).toSet
+        if (stakeMissing.nonEmpty && proven.exists(tx => stakeKinds.contains(tx.kind))) stakeMissing
+        else Set.empty[String]
+      }
+    val unprovenInclusions = missing.filter(tx => LoadBearing.contains(tx.kind)).map(_.id).toSet ++
+      partialAtomic ++ fallbackPartialArb
     CandidateMaterialized(identity, attempt, workMessage, proofs,
-      proven.map(_.id).toSet, missing.map(_.id).toSet,
-      missing.filter(tx => LoadBearing.contains(tx.kind)).map(_.id).toSet,
+      provenIds, missingIds, unprovenInclusions,
       requested.map(_.sizeBytes.toLong).sum, requested.map(_.cost).sum)
   }
 

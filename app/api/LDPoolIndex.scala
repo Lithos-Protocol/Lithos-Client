@@ -112,10 +112,12 @@ class LDPoolIndex(nodeContext: NodeContext, ioContext: => scala.concurrent.Execu
 
   private val verdicts = new ConcurrentHashMap[String, GenesisVerdict]()
   private val geneses = new ConcurrentHashMap[String, Seq[GenesisProvision]]()
-  private val genesisFailures = new ConcurrentHashMap[String, Integer]()
+  private val genesisBackoff = new ConcurrentHashMap[String, GenesisBackoff]()
   private val genesisReads = new ConcurrentHashMap[String, (node.model.TokenInfo, IndexedBox, node.model.IndexedTransaction)]()
   private val vaultsStanding = ConcurrentHashMap.newKeySet[String]()
   private val tokenMeta = new ConcurrentHashMap[String, TokenMeta]()
+
+  protected def nowMs(): Long = System.currentTimeMillis()
 
   private def nodeApi: NodeApi = nodeContext.getNodeApi
   private def network: NetworkType = nodeContext.getNetwork
@@ -134,7 +136,8 @@ class LDPoolIndex(nodeContext: NodeContext, ioContext: => scala.concurrent.Execu
     Try(nodeApi.info().get).toOption.foreach(info =>
       for (height <- info.fullHeight; id <- info.bestFullHeaderId) Try(follow(height, id)))
     val held = current.get()
-    tracked().filter(s => s.height > held.height || (s.height == held.height && s.headerId != held.headerId)).foreach { state =>
+    tracked().filter(s => s.height > held.height || (s.height == held.height &&
+      (s.headerId != held.headerId || (held.ownershipIncomplete && (held.truncated || anyGenesisRetryReady()))))).foreach { state =>
       if (refreshing.compareAndSet(false, true))
         Future {
           try publish(build(state))
@@ -166,7 +169,7 @@ class LDPoolIndex(nodeContext: NodeContext, ioContext: => scala.concurrent.Execu
         .orElse(awaitTracked(tipHeight, wait).filter(s => s.height == tipHeight && s.headerId == tipHeaderId))
         .getOrElse(throw LithosApiErrors.LithosUnavailable(
           s"the pool index is at height ${held.height} (${held.headerId}), behind canonical tip $tipHeight ($tipHeaderId); retry shortly"))
-      val built = build(state)
+      val built = build(state, signingCheck = true)
       publish(built)
       built
     }
@@ -178,8 +181,8 @@ class LDPoolIndex(nodeContext: NodeContext, ioContext: => scala.concurrent.Execu
    */
   def genesisNow(pool: IndexedPool): Option[GenesisVerdict] =
     if (pool.verified) None
-    else pool.genesis.orElse(nodeContext.getClient.execute(ctx =>
-      verdict(ctx, pool.nft, pool.vaultNft, pool.provToken, n2t = pool.kind == VerifiedPool.Kind.N2T)))
+    else pool.genesis.filterNot(_.problems == Seq(GenesisUnreadable)).orElse(nodeContext.getClient.execute(ctx =>
+      verdict(ctx, pool.nft, pool.vaultNft, pool.provToken, n2t = pool.kind == VerifiedPool.Kind.N2T, signingCheck = true)))
 
   /** Rebuilds now from the tracker's newest state, on the calling thread, and keeps the result. */
   private[api] def refreshNow(): PoolIndexSnapshot = {
@@ -188,7 +191,7 @@ class LDPoolIndex(nodeContext: NodeContext, ioContext: => scala.concurrent.Execu
   }
 
   /** The pools `state` holds at the LithosDex templates, each kind's newest [[MaxPoolsPerKind]]. */
-  private[api] def build(state: TrackedPools): PoolIndexSnapshot = nodeContext.getClient.execute { ctx =>
+  private[api] def build(state: TrackedPools, signingCheck: Boolean = false): PoolIndexSnapshot = nodeContext.getClient.execute { ctx =>
     val registry = VerifiedRegistry.forNetwork(network)
     def newest(boxes: Seq[TrackedBox], kind: String): (Seq[TrackedBox], Boolean) = {
       if (boxes.size > MaxPoolsPerKind) logger.warn(s"More than $MaxPoolsPerKind LithosDEX $kind pools are tracked; " +
@@ -211,8 +214,8 @@ class LDPoolIndex(nodeContext: NodeContext, ioContext: => scala.concurrent.Execu
       case Failure(_: VaultUnread) => unread += 1; None
       case Failure(_) => None
     }
-    val pools = n2tBoxes.flatMap(box => pool(n2tPool(ctx, box, registry))) ++
-      t2tBoxes.flatMap(box => pool(t2tPool(ctx, box, registry)))
+    val pools = n2tBoxes.flatMap(box => pool(n2tPool(ctx, box, registry, signingCheck))) ++
+      t2tBoxes.flatMap(box => pool(t2tPool(ctx, box, registry, signingCheck)))
     if (unread > 0) logger.warn(s"$unread LithosDEX pool(s) left out of the index at ${state.height}: their vaults " +
       "could not be read; the index reads as truncated until a rebuild reads them")
     // ERG:LIT first whatever else holds, then verified pools, then newest
@@ -223,7 +226,8 @@ class LDPoolIndex(nodeContext: NodeContext, ioContext: => scala.concurrent.Execu
       headerId = state.headerId, genesisIncomplete = genesisUnread > 0)
   }
 
-  private def n2tPool(ctx: BlockchainContext, box: TrackedBox, registry: VerifiedRegistry): Option[(IndexedPool, Boolean)] = {
+  private def n2tPool(ctx: BlockchainContext, box: TrackedBox, registry: VerifiedRegistry,
+                      signingCheck: Boolean): Option[(IndexedPool, Boolean)] = {
     val contracts = box.deployment match {
       case PoolDeployment.LithosDexNative(c) => Some(c)
       case _ => None
@@ -231,8 +235,10 @@ class LDPoolIndex(nodeContext: NodeContext, ioContext: => scala.concurrent.Execu
     contracts.filter(c => vaultStands(c.vaultNFT.toString, LDDeployments.vaultStands(nodeApi, c))).map { c =>
       val p = LDLiquidityPool(box.box.toInputUTXO(ctx))
       val verified = registry.pool(c.poolNFT.toString).exists(_.kind == VerifiedPool.Kind.N2T)
-      val judged = if (verified) None else verdict(ctx, c.poolNFT.toString, c.vaultNFT.toString, c.provToken.toString, n2t = true)
-      val provisions = provisionsUnlessFailed(ctx, c.poolNFT.toString, c.provToken.toString, n2t = true, verified, judged)
+      val judged = if (verified) None
+        else verdict(ctx, c.poolNFT.toString, c.vaultNFT.toString, c.provToken.toString, n2t = true, signingCheck)
+      val provisions = provisionsUnlessFailed(ctx, c.poolNFT.toString, c.provToken.toString, n2t = true, verified, judged,
+        signingCheck)
       IndexedPool(VerifiedPool.Kind.N2T, c.poolNFT.toString, box.boxId, box.inclusionHeight, None, p.tokenY.toString,
         p.reservesX, p.reservesY, p.pendingX, p.pendingY, p.supply, p.feeParams.toSeq, p.provTokensLeft,
         c.vaultNFT.toString, c.provToken.toString, verified, judged, Some(c), None,
@@ -240,7 +246,8 @@ class LDPoolIndex(nodeContext: NodeContext, ioContext: => scala.concurrent.Execu
     }
   }
 
-  private def t2tPool(ctx: BlockchainContext, box: TrackedBox, registry: VerifiedRegistry): Option[(IndexedPool, Boolean)] =
+  private def t2tPool(ctx: BlockchainContext, box: TrackedBox, registry: VerifiedRegistry,
+                      signingCheck: Boolean): Option[(IndexedPool, Boolean)] =
     (box.deployment match {
       case PoolDeployment.LithosDexToken(c) => Some(c)
       case _ => None
@@ -248,8 +255,9 @@ class LDPoolIndex(nodeContext: NodeContext, ioContext: => scala.concurrent.Execu
         val p = LDT2TLiquidityPool(box.box.toInputUTXO(ctx))
         val verified = registry.pool(c.poolNFT.toString).exists(_.kind == VerifiedPool.Kind.T2T)
         val judged = if (verified) None
-          else verdict(ctx, c.poolNFT.toString, c.vaultNFT.toString, c.provToken.toString, n2t = false)
-        val provisions = provisionsUnlessFailed(ctx, c.poolNFT.toString, c.provToken.toString, n2t = false, verified, judged)
+          else verdict(ctx, c.poolNFT.toString, c.vaultNFT.toString, c.provToken.toString, n2t = false, signingCheck)
+        val provisions = provisionsUnlessFailed(ctx, c.poolNFT.toString, c.provToken.toString, n2t = false, verified,
+          judged, signingCheck)
         IndexedPool(VerifiedPool.Kind.T2T, c.poolNFT.toString, box.boxId, box.inclusionHeight, Some(p.tokenX.toString),
           p.tokenY.toString, p.reservesX, p.reservesY, p.pendingX, p.pendingY, p.supply, p.feeParams.toSeq,
           p.provTokensLeft, c.vaultNFT.toString, c.provToken.toString, verified, judged, None, Some(c),
@@ -265,28 +273,33 @@ class LDPoolIndex(nodeContext: NodeContext, ioContext: => scala.concurrent.Execu
 
   /**
    * The genesis verdict for an unverified pool, read once and kept. The pool as created is the provision
-   * token's mint box, and the vault is the output of that transaction holding the vault NFT. None when a
-   * read failed, so the next rebuild tries again.
+   * token's mint box, and the vault is the output of that transaction holding the vault NFT. Transient node/index
+   * failures back off exponentially without permanently caching `GenesisUnreadable`; a cleanly read box that fails
+   * to parse as a genesis is cached as uncheckable rather than poisoning ownership completeness.
    */
   private def verdict(ctx: BlockchainContext, poolNft: String, vaultNft: String, provToken: String,
-                      n2t: Boolean): Option[GenesisVerdict] =
-    Option(verdicts.get(poolNft)).orElse(if (gaveUp(poolNft)) {
-      val unread = GenesisVerdict(Seq(GenesisUnreadable), Seq.empty)
-      verdicts.put(poolNft, unread)
-      Some(unread)
+                      n2t: Boolean, signingCheck: Boolean): Option[GenesisVerdict] =
+    Option(verdicts.get(poolNft)).orElse(if (backedOff(poolNft, signingCheck)) {
+      Some(GenesisVerdict(Seq(GenesisUnreadable), Seq.empty))
     } else Try {
       val (prov, pool, genesisTx) = genesisOf(provToken)
       genesisTx.outputs.find(_.box.assets.exists(_.tokenId == vaultNft)) match {
         case None => GenesisVerdict(Seq(CannotBeChecked), Seq.empty)
         case Some(vault) =>
-          val (poolIn, vaultIn) = (pool.box.toInputUTXO(ctx), vault.box.toInputUTXO(ctx))
           val (poolMint, vaultMint) = (emission(poolNft).emissionAmount, emission(vaultNft).emissionAmount)
           // Every other unit of the provision token is in this transaction's outputs, so each must be a provision
           val provisions = genesisTx.outputs.filter(o => o.box.boxId != pool.box.boxId &&
             o.box.assets.exists(_.tokenId == provToken)).map(_.box.toInputUTXO(ctx))
           // An unreadable owner is left out and one the node never minted reads as 0; the checker reports both
           val owners = provisions.flatMap(p => Try(new ErgoId(p.registers(2).getValue.asInstanceOf[sigma.Coll[Byte]].toArray)
-            .toString).toOption).distinct.map(id => id -> nodeApi.tokenById(id).get.map(_.emissionAmount).getOrElse(0L)).toMap
+            .toString).toOption).distinct.map { id =>
+            val emitted = nodeApi.tokenById(id) match {
+              case Success(opt) => opt.map(_.emissionAmount).getOrElse(0L)
+              case Failure(ex) => throw new GenesisRpcError(s"could not read owner token $id: ${ex.getMessage}", ex)
+            }
+            id -> emitted
+          }.toMap
+          val (poolIn, vaultIn) = (pool.box.toInputUTXO(ctx), vault.box.toInputUTXO(ctx))
           if (n2t) {
             val r = LDGenesis.check(network, poolIn, vaultIn,
               LDGenesis.Emissions(poolMint, vaultMint, prov.emissionAmount, owners), provisions)
@@ -299,13 +312,20 @@ class LDPoolIndex(nodeContext: NodeContext, ioContext: => scala.concurrent.Execu
       }
     } match {
       case Success(v) => verdicts.put(poolNft, v); Some(v)
-      case Failure(ex) =>
+      case Failure(ex: GenesisRpcError) =>
         failedRead(poolNft, ex)
         None
+      case Failure(ex) =>
+        val uncheckable = GenesisVerdict(Seq(s"genesis cannot be checked: ${ex.getMessage}"), Seq.empty)
+        verdicts.put(poolNft, uncheckable)
+        Some(uncheckable)
     })
 
-  private def emission(id: String) = nodeApi.tokenById(id).get
-    .getOrElse(throw new IllegalStateException(s"the node has no token $id"))
+  private def emission(id: String) = nodeApi.tokenById(id) match {
+    case Success(Some(info)) => info
+    case Success(None) => throw new GenesisRpcError(s"the node has no token $id")
+    case Failure(ex) => throw new GenesisRpcError(s"could not read token $id: ${ex.getMessage}", ex)
+  }
 
   /**
    * The provision token's emission, the pool box as created (its mint box), and the transaction that created it,
@@ -315,10 +335,16 @@ class LDPoolIndex(nodeContext: NodeContext, ioContext: => scala.concurrent.Execu
   private def genesisOf(provToken: String): (node.model.TokenInfo, IndexedBox, node.model.IndexedTransaction) =
     Option(genesisReads.get(provToken)).getOrElse {
       val prov = emission(provToken)
-      val pool = nodeApi.indexedBoxById(prov.boxId).get
-        .getOrElse(throw new IllegalStateException(s"the node has no box ${prov.boxId}"))
-      val genesisTx = nodeApi.indexedTransactionById(pool.box.transactionId).get
-        .getOrElse(throw new IllegalStateException(s"the node has no transaction ${pool.box.transactionId}"))
+      val pool = nodeApi.indexedBoxById(prov.boxId) match {
+        case Success(Some(b)) => b
+        case Success(None) => throw new GenesisRpcError(s"the node has no box ${prov.boxId}")
+        case Failure(ex) => throw new GenesisRpcError(s"could not read box ${prov.boxId}: ${ex.getMessage}", ex)
+      }
+      val genesisTx = nodeApi.indexedTransactionById(pool.box.transactionId) match {
+        case Success(Some(tx)) => tx
+        case Success(None) => throw new GenesisRpcError(s"the node has no transaction ${pool.box.transactionId}")
+        case Failure(ex) => throw new GenesisRpcError(s"could not read transaction ${pool.box.transactionId}: ${ex.getMessage}", ex)
+      }
       val read = (prov, pool, genesisTx)
       genesisReads.put(provToken, read)
       read
@@ -326,54 +352,82 @@ class LDPoolIndex(nodeContext: NodeContext, ioContext: => scala.concurrent.Execu
 
   /** The genesis provisions, unless the unverified pool's verdict just failed to read the same genesis this pass. */
   private def provisionsUnlessFailed(ctx: BlockchainContext, poolNft: String, provToken: String, n2t: Boolean,
-                                     verified: Boolean, judged: Option[GenesisVerdict]): Option[Seq[GenesisProvision]] =
-    if (!verified && judged.isEmpty) None else genesisProvisions(ctx, poolNft, provToken, n2t)
+                                     verified: Boolean, judged: Option[GenesisVerdict],
+                                     signingCheck: Boolean): Option[Seq[GenesisProvision]] =
+    if (!verified && judged.isEmpty) None else genesisProvisions(ctx, poolNft, provToken, n2t, signingCheck)
 
   /**
    * The provisions `poolNft`'s genesis created, read once and kept, verified pools included. Each holds the
    * provision token at the pool's own guard and names a 32-byte owner in R6; the genesis checker judges the rest.
-   * None when a read failed (or gave up), so the snapshot records incomplete ownership evidence.
+   * None when a transient node read failed or is backed off; a cleanly read box that does not parse as a LithosDex
+   * genesis created no genesis provisions and caches `Seq.empty`.
    */
   private def genesisProvisions(ctx: BlockchainContext, poolNft: String, provToken: String,
-                                n2t: Boolean): Option[Seq[GenesisProvision]] =
-    Option(geneses.get(poolNft)).orElse(if (gaveUp(poolNft)) None
-    else Try {
-      val (_, pool, genesisTx) = genesisOf(provToken)
-      val assets = pool.box.assets.map(a => a.tokenId -> a.amount)
-      // The provision token's mint box is the pool only when the pool was created as this client creates one. A
-      // pool whose token was minted elsewhere and moved in later created no provision at genesis.
-      val guard =
-        if (n2t) LDDeployments.verify(network, pool.box.ergoTree, assets).map(_.provisionGuard.ergoTreeHex)
-        else LDDeployments.verifyT2T(pool.box.ergoTree, assets).map(_.provisionGuard.ergoTreeHex)
-      guard.toSeq.flatMap { guardTree =>
-        val poolIn = pool.box.toInputUTXO(ctx)
-        val (amountX, amountY) =
-          if (n2t) { val p = LDLiquidityPool(poolIn); (p.reservesX, p.reservesY) }
-          else { val p = LDT2TLiquidityPool(poolIn); (p.reservesX, p.reservesY) }
-        genesisTx.outputs.filter(o => o.box.boxId != pool.box.boxId && guardTree.equalsIgnoreCase(o.box.ergoTree) &&
-          o.box.assets.exists(_.tokenId == provToken)).flatMap { o =>
-          val p = Try(transactions.batching.lithosdex.LDBoxes.readProvision(o.box.toInputUTXO(ctx))).toOption
-          p.map(p => GenesisProvision(p.ownerNFT.toString, genesisTx.inclusionHeight, p.shares, amountX, amountY))
-        }
-      }
-    } match {
-      // The verdict, when the pool needs one, was kept before this ran, so nothing reads this genesis again
-      case Success(found) => geneses.put(poolNft, found); genesisReads.remove(provToken); Some(found)
+                                n2t: Boolean, signingCheck: Boolean): Option[Seq[GenesisProvision]] =
+    Option(geneses.get(poolNft)).orElse(if (backedOff(poolNft, signingCheck)) None
+    else Try(genesisOf(provToken)) match {
       case Failure(ex) =>
         failedRead(poolNft, ex)
         None
+      case Success((_, pool, genesisTx)) =>
+        val found = Try {
+          val assets = pool.box.assets.map(a => a.tokenId -> a.amount)
+          // The provision token's mint box is the pool only when the pool was created as this client creates one. A
+          // pool whose token was minted elsewhere and moved in later created no provision at genesis.
+          val guard =
+            if (n2t) LDDeployments.verify(network, pool.box.ergoTree, assets).map(_.provisionGuard.ergoTreeHex)
+            else LDDeployments.verifyT2T(pool.box.ergoTree, assets).map(_.provisionGuard.ergoTreeHex)
+          guard.toSeq.flatMap { guardTree =>
+            val poolIn = pool.box.toInputUTXO(ctx)
+            val (amountX, amountY) =
+              if (n2t) { val p = LDLiquidityPool(poolIn); (p.reservesX, p.reservesY) }
+              else { val p = LDT2TLiquidityPool(poolIn); (p.reservesX, p.reservesY) }
+            genesisTx.outputs.filter(o => o.box.boxId != pool.box.boxId && guardTree.equalsIgnoreCase(o.box.ergoTree) &&
+              o.box.assets.exists(_.tokenId == provToken)).flatMap { o =>
+              val p = Try(transactions.batching.lithosdex.LDBoxes.readProvision(o.box.toInputUTXO(ctx))).toOption
+              p.map(p => GenesisProvision(p.ownerNFT.toString, genesisTx.inclusionHeight, p.shares, amountX, amountY))
+            }
+          }
+        }.getOrElse(Seq.empty)
+        // The verdict, when the pool needs one, was kept before this ran, so nothing reads this genesis again
+        geneses.put(poolNft, found)
+        genesisReads.remove(provToken)
+        genesisBackoff.remove(poolNft)
+        Some(found)
     })
 
-  /** Whether `poolNft`'s genesis has failed to read [[MaxGenesisReads]] times, so it is not read again this run. */
-  private def gaveUp(poolNft: String): Boolean = genesisFailures.getOrDefault(poolNft, 0) >= MaxGenesisReads
+  /** Whether `poolNft`'s genesis is currently waiting in retry backoff after repeated transient failures. */
+  private def backedOff(poolNft: String, signingCheck: Boolean): Boolean =
+    Option(genesisBackoff.get(poolNft)).exists { b =>
+      b.failures >= MaxGenesisReads &&
+        (if (signingCheck) nowMs() - b.lastFailedMs < BackoffBaseMs else nowMs() < b.retryAfterMs)
+    }
 
-  /** Counts one failed genesis read, logging the first and the last, so a pool that never reads fills no log. */
+  /** Whether any transiently failed pool genesis is ready to retry now. */
+  private def anyGenesisRetryReady(): Boolean = {
+    val now = nowMs()
+    var ready = false
+    genesisBackoff.forEach((_, b) => if (now >= b.retryAfterMs) ready = true)
+    ready
+  }
+
+  /** Counts one transient failed genesis read, backing off exponentially after [[MaxGenesisReads]] tries. */
   private def failedRead(poolNft: String, ex: Throwable): Unit = {
-    val failures = genesisFailures.merge(poolNft, 1, (a: Integer, b: Integer) => a + b)
-    if (failures == 1) logger.info(s"Could not read the genesis of LithosDEX pool $poolNft: ${ex.getMessage}")
-    else if (failures >= MaxGenesisReads)
-      logger.warn(s"Could not read the genesis of LithosDEX pool $poolNft in $failures tries; it is not read again " +
-        s"until restart and shows as unchecked: ${ex.getMessage}")
+    val now = nowMs()
+    val updated = genesisBackoff.compute(poolNft, (_, prev) => {
+      val failures = Option(prev).map(_.failures).getOrElse(0) + 1
+      val retryAfter =
+        if (failures < MaxGenesisReads) 0L
+        else {
+          val shift = math.min(failures - MaxGenesisReads, 10)
+          now + math.min(MaxBackoffMs, BackoffBaseMs << shift)
+        }
+      GenesisBackoff(failures, now, retryAfter)
+    })
+    if (updated.failures == 1) logger.info(s"Could not read the genesis of LithosDEX pool $poolNft: ${ex.getMessage}")
+    else if (updated.failures == MaxGenesisReads)
+      logger.warn(s"Could not read the genesis of LithosDEX pool $poolNft in ${updated.failures} tries; " +
+        s"backing off retries and showing as unchecked until the node answers: ${ex.getMessage}")
   }
 
   /** Display facts for `ids`: the shipped list first, then the node's index in one call for the rest. */
@@ -398,11 +452,21 @@ object LDPoolIndex {
   private final class VaultUnread(vaultNft: String, cause: Throwable)
     extends RuntimeException(s"could not read vault $vaultNft: ${cause.getMessage}", cause)
 
+  /** Transient node/index failure while reading a pool's genesis. */
+  private final class GenesisRpcError(message: String, cause: Throwable = null)
+    extends RuntimeException(message, cause)
+
+  private final case class GenesisBackoff(failures: Int, lastFailedMs: Long, retryAfterMs: Long)
+
   /** How long a signing guard waits for the pool tracker to reach the canonical tip before failing closed. */
   final val FreshWait: FiniteDuration = 5.seconds
 
-  /** Reads of one pool's genesis that may fail before the index stops trying until restart. */
+  /** Reads of one pool's genesis that may fail before the index backs off retries exponentially. */
   final val MaxGenesisReads = 3
+
+  /** Initial and maximum retry backoff for transient genesis read failures. */
+  final val BackoffBaseMs: Long = 5000L
+  final val MaxBackoffMs: Long = 300000L
 
   final val GenesisUnreadable = s"genesis cannot be checked: the node could not answer for it in $MaxGenesisReads tries"
 

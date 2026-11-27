@@ -397,6 +397,7 @@ object ZcDrafts {
     val expiry = long(d, "expiry").getOrElse(end)
     val refund = long(d, "refundFeeNanoErg").getOrElse(DefaultRefundFee)
     check(items.nonEmpty || (m.tokenId.isDefined && erg > 0L), "name at least one item" + m.tokenId.fold("")(_ => ", or some nanoErg"))
+    check(items.size <= ZcSizing.MaxCollateralTokens, s"a lot may hold at most ${ZcSizing.MaxCollateralTokens} distinct tokens")
     check(items.map(_.tokenId).distinct.size == items.size && items.forall(_.amount >= 1L), "list each item once, with a positive amount")
     check(m.tokenId.isDefined || erg == 0L, "an ERG lot sells tokens only: its box's nanoERG return to the seller with the payment")
     check(erg >= 0L && refund >= 0L, "nanoErg and refundFeeNanoErg cannot be negative")

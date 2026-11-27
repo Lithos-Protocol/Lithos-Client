@@ -275,6 +275,7 @@ object LDLiquidityPool {
    * Tokens: 0 pool NFT, 1 tokenY, 2 provision token.
    */
   def apply(box: InputUTXO): LDLiquidityPool = {
+    require(box.tokens.size >= 3, s"pool box ${box.id} must hold at least 3 tokens")
     val poolNFT   = box.tokens.head
     val tokenY    = box.tokens(1)
     val provToken = box.tokens(2)
@@ -285,9 +286,20 @@ object LDLiquidityPool {
     val accX      = bigIntReg(box, 3)
     val accY      = bigIntReg(box, 4)
 
+    require(feeParams.length >= 3, s"pool box ${box.id} feeParams must have at least 3 entries")
+    require(pending.length >= 2, s"pool box ${box.id} pending fees must have at least 2 entries")
+    require(feeParams(0) > 0L && feeParams(0) <= LDHelpers.FEE_DENOM, s"invalid dexFeeNum ${feeParams(0)}")
+    require(feeParams(1) >= 0L && feeParams(1) < LDHelpers.FEE_DENOM, s"invalid ergFeeNum ${feeParams(1)}")
+    require(feeParams(2) >= 0L && feeParams(2) < LDHelpers.FEE_DENOM, s"invalid tokenFeeNum ${feeParams(2)}")
+    require(pending(0) >= 0L && pending(1) >= 0L, s"negative pending fees (${pending(0)}, ${pending(1)})")
+    require(liquidity >= 0L && liquidity < LDHelpers.LOCKED_LP, s"invalid liquidity register $liquidity")
+    val reservesX = box.value - pending(0)
+    val reservesY = tokenY.amount - pending(1)
+    require(reservesX > 0L && reservesY > 0L, s"non-positive pool reserves ($reservesX, $reservesY)")
+
     LDLiquidityPool(
-      reservesX = box.value - pending(0),
-      reservesY = tokenY.amount - pending(1),
+      reservesX = reservesX,
+      reservesY = reservesY,
       pendingX = pending(0),
       pendingY = pending(1),
       supply = LDHelpers.LOCKED_LP - liquidity,

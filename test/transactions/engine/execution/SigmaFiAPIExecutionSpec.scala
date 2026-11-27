@@ -63,6 +63,10 @@ class SigmaFiAPIExecutionSpec extends AnyPropSpec with SigmaFiFixtures with Mock
     // Checks never reach the wallet, so the funding side is never asked
     val execution = new SigmaFiAPIExecution(context, EngineFunding(ActorRef.noSender, 1.second, ExecutionContext.global))
 
+    def withCapability(cap: Seq[String] => Set[String]): SigmaFiAPIExecution =
+      new SigmaFiAPIExecution(context, EngineFunding(ActorRef.noSender, 1.second, ExecutionContext.global),
+        capability = cap)
+
     /** An execution that sends, observing `snapshot` as the mempool and funding through `funding`. */
     def sending(snapshot: state.synchronization.CompleteMempool.Snapshot, funding: EngineFunding): SigmaFiAPIExecution =
       new SigmaFiAPIExecution(context, funding) {
@@ -78,6 +82,17 @@ class SigmaFiAPIExecutionSpec extends AnyPropSpec with SigmaFiFixtures with Mock
     quote.paysNanoErgs shouldBe (5000000000L + SigmaFiAPIExecution.TxFee).toString
     quote.terms.get.batchingFee shouldBe "0"
     quote.terms.get.liquidation shouldBe Some("MaturityLiquidation")
+  }
+
+  property("create: refuses an unwrapped LithosDex provision NFT as collateral, and allows wrapped receipts") {
+    val rawLpNft = "11" * 32
+    val receipt = "22" * 32
+    val exec = new Fixture().withCapability(ids => ids.filter(_ == rawLpNft).toSet)
+    val badReq = request.copy(collateralTokens = Some(Seq(SFTokenAmount(rawLpNft, "1"))))
+    the[LithosUnprocessable].thrownBy(exec.createOrder(badReq, send = false)).getMessage should include("capability token")
+    the[LithosUnprocessable].thrownBy(exec.createOrder(badReq, send = true)).getMessage should include("capability token")
+    val okReq = request.copy(collateralTokens = Some(Seq(SFTokenAmount(receipt, "1"))))
+    exec.createOrder(okReq, send = false).isLeft shouldBe true
   }
 
   property("create: refuses a fee under the shipped floor, an unknown script, or a maturity too close") {

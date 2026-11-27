@@ -58,7 +58,7 @@ class SigmaFiApiControllerSpec
     "create order" -> c.checkCreateOrder(),
     "cancel order" -> c.checkCancelOrder(boxId),
     "fill" -> c.checkFillOrder(boxId), "repay" -> c.checkRepay(boxId),
-    "liquidate" -> c.checkLiquidate(boxId), "claim" -> c.checkClaim(boxId))
+    "liquidate" -> c.checkLiquidate(boxId))
 
   private def body(name: String) = orderBody
 
@@ -75,10 +75,10 @@ class SigmaFiApiControllerSpec
 
   private def answer(send: Boolean): Either[SFQuote, SFResult] = if (send) Right(result) else Left(quote)
 
-  "Every send, and the portfolio" should "be 403 without an api_key and never reach the API" in {
+  "Every send, checkClaim, and the portfolio" should "be 403 without an api_key and never reach the API" in {
     val api = mock[SigmaFiApi]
     val c = controller(api)
-    (sends(c) :+ ("portfolio" -> c.getPortfolio())).foreach { case (name, action) =>
+    (sends(c) ++ Seq("portfolio" -> c.getPortfolio(), "check claim" -> c.checkClaim(boxId))).foreach { case (name, action) =>
       withClue(s"$name: ")(status(action.apply(FakeRequest(POST, "/sigmafi").withJsonBody(body(name)))) shouldBe FORBIDDEN)
     }
     verify(api, never()).getPortfolio
@@ -90,7 +90,7 @@ class SigmaFiApiControllerSpec
     verify(api, never()).claim(anyString(), anyBoolean())
   }
 
-  "Every check" should "need no api_key, and only ever ask the API not to send" in {
+  "Every open check" should "need no api_key, and checkClaim should work with the key without sending" in {
     val api = stubbed()
     val c = controller(api)
     checks(c).foreach { case (name, action) =>
@@ -100,6 +100,9 @@ class SigmaFiApiControllerSpec
         (contentAsJson(response) \ "action").as[String] shouldBe "x"
       }
     }
+    val claimCheck = c.checkClaim(boxId).apply(keyed(FakeRequest(POST, "/sigmafi")))
+    status(claimCheck) shouldBe OK
+    (contentAsJson(claimCheck) \ "action").as[String] shouldBe "x"
     verify(api, never()).createOrder(any[SFOrderRequest], is(true))
     verify(api, never()).cancelOrder(anyString(), is(true))
     verify(api, never()).fillOrder(anyString(), is(true), org.mockito.ArgumentMatchers.eq(None))

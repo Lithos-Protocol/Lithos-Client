@@ -171,13 +171,42 @@ final class ZcMatcher(val book: ZcMarketBook, origin: String => Option[ZcOrigin]
       case a: ZcAskSource => evaluateAsk(s, a, ignoreYield)
     }
 
+  /**
+   * O(1) maturity-independent compatibility check for `(s, order)` before invoking [[windowMaturity]]: rejects
+   * incompatible policy, capital floor, Dutch token count, liquidation rule, oracle freshness, collateral cover and
+   * fill guard without computing breakpoints or running ternary searches.
+   */
+  private def orderPrecheckRefusal(s: ZcOfferState, order: ZcOrder): Option[String] = {
+    val o = s.offer
+    val at = height + 1L
+    if (at >= o.expiry) Some(s"the offer expired at ${o.expiry}")
+    else if (!policyValid(o)) Some("the offer names an unknown collateral policy")
+    else if (feeReserve(o) < 0L || !deliveryValid(o)) Some("the offer's reserve or delivery terms are invalid")
+    else if (minBlocks(o) < 1L || maxBlocks(o) < minBlocks(o)) Some("the offer's maturity bounds are invalid")
+    else if (o.market != order.market) Some(s"the offer lends ${o.market}, the bond repays ${order.market}")
+    else if (s.capital < order.principal) Some("the offer's capital is short")
+    else if (deliversDutch(o) && order.box.assets.size > ZcSizing.MaxCollateralTokens)
+      Some(s"the bond holds ${order.box.assets.size} collateral tokens, more than a Dutch vault can take")
+    else if (rule(order.liqHash, o.market) != ZcRule.Oracle) Some("the bond's rule is not the oracle rule")
+    else if (order.payload.size < 2 || order.payload(0) < floorBps(o) || order.payload(1) < maxAge(o) ||
+      order.payload(1) > ZcPricing.MaxOracleAge) Some("the bond's ratio or oracle age is under the offer's")
+    else oracle match {
+      case None => Some("no usable oracle")
+      case Some(or) if !fresh(or, maxAge(o), height) => Some(s"the oracle is older than the offer's ${maxAge(o)} blocks")
+      case Some(or) =>
+        val prospect = ZcBondTerms.prospect(order, height, at, order.principal)
+        if (!cover(prospect, or.price).exists(ZcPricing.atLeast(_, floorBps(o)))) Some("the collateral is under the offer's floor")
+        else if (belowOwnRatio(prospect, or.price)) Some("the bond is under its own ratio: liquidate it instead")
+        else guardRefusal(order, prospect, oracle, height)
+    }
+  }
+
   private def evaluateOrder(s: ZcOfferState, order: ZcOrder, ignoreYield: Boolean): Either[String, ZcMatch] = {
-    val maturity =
-      if (window(order)) windowMaturity(s, order, oracle, height, ignoreYield, lateBlocks)
+    for {
+      _ <- if (window(order)) orderPrecheckRefusal(s, order).toLeft(()) else Right(())
+      m <- if (window(order)) windowMaturity(s, order, oracle, height, ignoreYield, lateBlocks)
         .toRight("no maturity in the window suits the offer")
       else orderMaturity(order, height)
-    for {
-      m <- maturity
       principal <- resolvePrincipal(order, height, m)
       bond = ZcBondTerms.prospect(order, height, m, principal)
       _ <- offerRefusal(s, bond, principal, 1L, 1L, oracle, height, primary = true, ignoreYield = ignoreYield,
@@ -269,7 +298,7 @@ final class ZcMatcher(val book: ZcMarketBook, origin: String => Option[ZcOrigin]
     book.offers.iterator.filter { op =>
       val o = op.record
       val s = ZcOfferState.of(o)
-      o.market == market && height + 1L < o.expiry && !excluded(o) &&
+      o.market == market && ZcBoxes.offerAssetsValid(o.box, o.market) && height + 1L < o.expiry && !excluded(o) &&
         policyValid(o) && offerCurve(o).ordered && o.terms(0) >= 0L &&
         minBlocks(o) >= 1L && maxBlocks(o) >= minBlocks(o) &&
         feeReserve(o) >= 0L && deliveryValid(o) && batcherFee(o) >= ZcPricing.MinBatchingFee &&
@@ -323,10 +352,11 @@ final class ZcMatcher(val book: ZcMarketBook, origin: String => Option[ZcOrigin]
 
   /**
    * Up to `rounds` zcs1 batch rounds over `market`: each offer in priority order takes its best untaken source, then
-   * continues with what is left for the next round. Stops at the first round taking nothing.
+   * continues with what is left for the next round. Stops at the first round taking nothing or once `deadline` passes.
    */
   def batch(market: ZcMarket, rounds: Int = ZcMatcher.Rounds, extraOffers: Seq[ZcOfferState] = Seq.empty,
-            extraSources: Seq[ZcSource] = Seq.empty): ZcBatchRun = {
+            extraSources: Seq[ZcSource] = Seq.empty,
+            deadline: Option[scala.concurrent.duration.Deadline] = None): ZcBatchRun = {
     val allOffers = (offerStates(market) ++ extraOffers.filter(_.market == market))
       .sortBy(s => (-fillFee(s, s.capital), s.boxId))
     val base = sources(market)
@@ -341,25 +371,35 @@ final class ZcMatcher(val book: ZcMarketBook, origin: String => Option[ZcOrigin]
     var takenBy = Map.empty[String, ZcMatch]
     var round = 0
     var progress = true
-    while (progress && round < rounds) {
+    def overdue: Boolean = deadline.exists(_.isOverdue())
+    while (progress && round < rounds && !overdue) {
       round += 1
       progress = false
       val used = scala.collection.mutable.HashSet.empty[String]
       states = states.map { s =>
-        val best = open.iterator.filterNot(src => used.contains(src.boxId)).flatMap(src => evaluate(s, src).toOption)
-          .foldLeft(Option.empty[ZcMatch]) { (b, m) =>
-            if (b.forall(x => m.rank > x.rank || (m.rank == x.rank && m.sourceId < x.sourceId))) Some(m) else b
+        if (overdue) s
+        else {
+          var best = Option.empty[ZcMatch]
+          val it = open.iterator
+          while (it.hasNext && !overdue) {
+            val src = it.next()
+            if (!used.contains(src.boxId)) {
+              evaluate(s, src).foreach { m =>
+                if (best.forall(x => m.rank > x.rank || (m.rank == x.rank && m.sourceId < x.sourceId))) best = Some(m)
+              }
+            }
           }
-        best match {
-          case Some(m) =>
-            used += m.sourceId
-            taken = taken.updated(s.boxId, taken.getOrElse(s.boxId, Vector.empty) :+ m)
-            takenBy += m.sourceId -> m
-            progress = true
-            // An ERG offer's capital is its box: everything that left it, not only the price
-            val value = s.value - m.ergOut
-            s.copy(capital = if (token(s.offer)) s.capital - m.price else value, value = value)
-          case None => s
+          best match {
+            case Some(m) =>
+              used += m.sourceId
+              taken = taken.updated(s.boxId, taken.getOrElse(s.boxId, Vector.empty) :+ m)
+              takenBy += m.sourceId -> m
+              progress = true
+              // An ERG offer's capital is its box: everything that left it, not only the price
+              val value = s.value - m.ergOut
+              s.copy(capital = if (token(s.offer)) s.capital - m.price else value, value = value)
+            case None => s
+          }
         }
       }
       open = open.filterNot(src => used.contains(src.boxId))

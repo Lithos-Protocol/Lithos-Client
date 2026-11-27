@@ -341,6 +341,8 @@ class DexPoolExecutionSpec extends TestKit(ActorSystem("dex-pool-execution-spec"
     val reorgFixture = fixture(fresh = Some(() => PoolIndexSnapshot("ready", 100, truncated = false,
       pools.map(p => if (p.nft == n2t.poolNFT.toString) p.copy(genesisProvisions = genesis) else p),
       Map.empty, headerId = header)))
+    when(reorgFixture.nodeApi.tokensByIds(any[Seq[String]])).thenReturn(
+      Success(Seq(TokenInfo(creator, "00" * 32, 1L, "plain", "", 0))))
     when(reorgFixture.nodeApi.unspentBoxesByErgoTree(anyString(), any[Paging], any[SortDirection], any[MempoolOptions]))
       .thenAnswer { inv =>
         Success(if (inv.getArgument[String](0) == n2t.provisionGuard.ergoTreeHex) Seq(LDNodeFixtures.indexed(provision))
@@ -350,6 +352,39 @@ class DexPoolExecutionSpec extends TestKit(ActorSystem("dex-pool-execution-spec"
     header = "33" * 32
     genesis = Seq(GenesisProvision(creator, 100, 1000L, 10L * Parameters.OneErg, 1000000000L))
     reorgFixture.exec.lookupNfts(Seq(creator), requireFresh = true).keySet shouldBe Set(creator)
+  }
+
+  it should "detect unconfirmed chained-deposit NFTs and fail closed on unindexed tokens when requireFresh is set" in {
+    val unindexed = "c5" * 32
+    val f = fixture()
+    withClue("public read on an unindexed token returns empty without poisoning the negative cache: ") {
+      f.exec.lookupNfts(Seq(unindexed), requireFresh = false) shouldBe empty
+    }
+    withClue("signing check fails closed when neither box index nor token index knows the token: ") {
+      a[LithosUnavailable] should be thrownBy f.exec.lookupNfts(Seq(unindexed), requireFresh = true)
+    }
+
+    // Chained unconfirmed deposit spending an unconfirmed pool box whose boxId equals the new LP NFT
+    val fMem = fixture()
+    val (unconfPool, unconfProv) = fMem.node.getClient.execute { ctx: BlockchainContext =>
+      val pBox = LDNodeFixtures.nodeBox(ctx, UTXO(n2t.liquidityPool, 9L * Parameters.OneErg,
+        Seq(Token(n2t.poolNFT, 1L), Token(tokenY, 900000000L), Token(n2t.provToken, 1001L)),
+        Seq(ErgoValue.of(LDHelpers.LOCKED_LP - 999000000L), longs(LDHelpers.GENESIS_FEE_PARAMS), longs(Array(0L, 0L)),
+          zero, zero)), index = 0, txId = "c6" * 32)
+      val prov = LDNodeFixtures.nodeBox(ctx, UTXO(n2t.provisionGuard, LDHelpers.PROVISION_MIN, Seq(Token(n2t.provToken, 1L)),
+        Seq(zero, zero, ErgoValue.of(Colls.fromArray(ErgoId.create(pBox.boxId).getBytes), scalaByteType),
+          ErgoValue.of(1000L))), index = 1, txId = "c7" * 32)
+      (pBox, prov)
+    }
+    val unconfDeposit = NodeTransaction("c7" * 32, Seq(NodeInput(unconfPool.boxId, NodeSpendingProof.empty)),
+      Seq.empty, Seq(unconfPool.copy(boxId = "c8" * 32, transactionId = "c7" * 32), unconfProv))
+    when(fMem.nodeApi.unconfirmedInputByBoxId(unconfPool.boxId)).thenReturn(Success(Some(unconfDeposit)))
+    when(fMem.nodeApi.unspentBoxesByErgoTree(anyString(), any[Paging], any[SortDirection], any[MempoolOptions]))
+      .thenAnswer { inv =>
+        Success(if (inv.getArgument[String](0) == n2t.provisionGuard.ergoTreeHex) Seq(LDNodeFixtures.indexed(unconfProv))
+        else Seq.empty)
+      }
+    fMem.exec.lookupNfts(Seq(unconfPool.boxId), requireFresh = true).keySet shouldBe Set(unconfPool.boxId)
   }
 
   it should "say how each NFT was minted, name a redeemed one, find a creator's, and read each once a tip" in {

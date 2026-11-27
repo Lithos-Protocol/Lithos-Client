@@ -241,8 +241,15 @@ object ZcBoxes {
     path <- byte(box, 5) if path == 0.toByte || path == 1.toByte
   } yield ZcSettlement(box, script, hex(bondId), path == 1.toByte)
 
+  /** Whether `box` holds only assets valid for a `LendOffer` of market `m`: none for ERG, at most the market token for token offers. */
+  def offerAssetsValid(box: NodeBox, m: ZcMarket): Boolean = m.tokenId match {
+    case None => box.assets.isEmpty
+    case Some(id) => box.assets.size <= 1 && box.assets.forall(_.tokenId == id)
+  }
+
   private def offer(box: NodeBox, script: ZcScript): Option[ZcOffer] = for {
     m <- market(script)
+    if offerAssetsValid(box, m)
     owner <- bytes(box, 4) if owner.length == 32
     terms <- longs(box, 5) if offerTermsShape(m, terms.length)
     policyRecord <- bytes(box, 6) if policyRecord.length == 32 || policyRecord.length == 64

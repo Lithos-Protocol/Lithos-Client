@@ -196,6 +196,23 @@ class ArbPendingSpec extends AnyFlatSpec with Matchers with MockitoSugar {
     }
   }
 
+  it should "decline to carry a pool spend that spends two pools, spends an avoided box, or creates a ZC box" in {
+    val avoidedBox = swap.inputs(1).boxId
+    val avoidedView = ArbPending.of(snapshot(Seq(swap)), 1L, pools, reader(boxes), avoidBoxes = Set(avoidedBox))
+    avoidedView.chains.get(canonicalNft) shouldBe None
+
+    val zcOut = swap.outputs(1).copy(
+      ergoTree = sigmafi.zc.ZcContracts.script(sigmafi.zc.ZcKind.LotAuction, Some(sigmafi.zc.ZcMarket.Erg)).ergoTreeHex)
+    val zcSwap = swap.copy(outputs = swap.outputs.updated(1, zcOut))
+    val zcView = ArbPending.of(snapshot(Seq(zcSwap)), 1L, pools, reader(boxes))
+    zcView.chains.get(canonicalNft) shouldBe None
+
+    val otherPool = pools.filterNot(_._1 == canonicalNft).values.head
+    val multiPoolSwap = swap.copy(inputs = swap.inputs :+ swap.inputs.head.copy(boxId = otherPool.boxId))
+    val multiPoolView = ArbPending.of(snapshot(Seq(multiPoolSwap)), 1L, pools, reader(boxes))
+    multiPoolView.chains.get(canonicalNft) shouldBe None
+  }
+
   private def build(ctx: org.ergoplatform.appkit.BlockchainContext, stake: NodeBox, pending: ArbPending)
   : Vector[CandidateBundle] =
     ArbCycles.build(ctx, wallet, index(ctx, poolBoxes, height - 1), ArbBasis.Empty, Some(stake), Seq.empty,

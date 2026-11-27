@@ -49,6 +49,7 @@ class ZcReads(tracker: ZcTracker, resolver: ZcResolver, node: () => NodeApi, wal
   }
 
   private val current = new AtomicReference[Option[Snap]](None)
+  private val snapLock = new Object
   private val warming = new AtomicBoolean(false)
 
   /** The snapshot for the tracker's current view, built once per revision. 503 before the first seed. */
@@ -56,13 +57,24 @@ class ZcReads(tracker: ZcTracker, resolver: ZcResolver, node: () => NodeApi, wal
     if (!tracker.enabled) throw LithosUnavailable("ZC tracking is off (sigmafi.zc.enabled)")
     val view = tracker.view.getOrElse(throw LithosUnavailable("ZC tracking has not finished its first scan"))
     val gen = resolver.generation
+    def matches(s: Snap): Boolean =
+      s.view.revision == view.revision && s.view.book.headerId == view.book.headerId && s.generation == gen
     current.get() match {
-      case Some(s) if s.view.revision == view.revision && s.view.book.headerId == view.book.headerId && s.generation == gen => s
+      case Some(s) if matches(s) => s
       case _ =>
-        val s = new Snap(view, gen)
-        current.set(Some(s))
-        warm(s)
-        s
+        var built: Option[Snap] = None
+        val result = snapLock.synchronized {
+          current.get() match {
+            case Some(s) if matches(s) => s
+            case _ =>
+              val s = new Snap(view, gen)
+              current.set(Some(s))
+              built = Some(s)
+              s
+          }
+        }
+        built.foreach(warm)
+        result
     }
   }
 
@@ -283,8 +295,10 @@ class ZcReads(tracker: ZcTracker, resolver: ZcResolver, node: () => NodeApi, wal
     val (lo, hi, anchor) = (to, around) match {
       case (Some(t), None) if t >= 720L => (720L, t, t)
       case (None, Some(a)) if a > 0L =>
+        band.foreach(b => if (b < 0L) throw LithosBadRequest("band cannot be negative"))
         val b = band.getOrElse(math.max(720L, a / 10L))
-        (math.max(1L, a - b), a + b, a)
+        val hi = (BigInt(a) + b).min(BigInt(Long.MaxValue)).toLong
+        (math.max(1L, a - b), hi, a)
       case (None, None) => (720L, BlocksPerYear, BlocksPerYear)
       case _ => throw LithosBadRequest("give either to (at least 720) or around, not both")
     }

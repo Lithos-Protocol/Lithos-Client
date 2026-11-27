@@ -8,6 +8,8 @@ import transactions.engine.execution.SigmaFiAPIExecution
  * the wallet and are served without queuing.
  */
 sealed trait SigmaFiIntent {
+  /** Which of the given token ids are capability tokens (LithosDex provision NFTs), refused in orders. */
+  def capability: Seq[String] => Set[String] = _ => Set.empty
   def execute(execution: SigmaFiAPIExecution): SFResult
 }
 
@@ -17,7 +19,7 @@ object SigmaFiIntent {
 
   /** Whether the request is small enough to queue: ids of 64 hex characters, and short request fields. */
   private[engine] def admissible(intent: SigmaFiIntent): Boolean = intent match {
-    case CreateOrder(r) =>
+    case CreateOrder(r, _) =>
       r.collateralTokens.forall(_.size <= 32) && (Seq(r.collateralNanoErgs, r.repayment) ++ r.principalNanoErgs ++
         r.batchingFee ++ r.liquidation).forall(_.length <= 64)
     case CancelOrder(b) => id(b)
@@ -30,7 +32,8 @@ object SigmaFiIntent {
   private def sent(answer: Either[_, SFResult]): SFResult =
     answer.fold(_ => throw new IllegalStateException("a send answered with a quote"), identity)
 
-  final case class CreateOrder(request: SFOrderRequest) extends SigmaFiIntent {
+  final case class CreateOrder(request: SFOrderRequest,
+                               override val capability: Seq[String] => Set[String] = _ => Set.empty) extends SigmaFiIntent {
     def execute(e: SigmaFiAPIExecution): SFResult = sent(e.createOrder(request, send = true))
   }
   final case class CancelOrder(boxId: String) extends SigmaFiIntent {

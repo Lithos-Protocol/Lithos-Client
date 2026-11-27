@@ -34,6 +34,9 @@ object ArbKind {
   /** A SigmaFi ZC collateral arbitrage bundle (lot, Dutch vault auction or sale order + AMM legs). */
   final val ZcArb = "arb-zc"
 
+  /** Multi-leg arb kinds that spend `ArbStake` on leg 1 and return it on the closing leg, requiring bundle atomicity. */
+  final val StakeBearing: Set[String] = Set(ErgoDexCycle, LithosDexCycle, Grid, ZcArb)
+
   /** A pool cycle's kind, from the pools its legs swap through. */
   def cycle(pools: Seq[ArbPool]): String =
     if (pools.exists(p => p.kind == ArbPoolKind.LithosDexNative || p.kind == ArbPoolKind.LithosDexToken)) LithosDexCycle

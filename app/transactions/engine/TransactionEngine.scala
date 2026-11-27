@@ -214,9 +214,10 @@ class TransactionEngine @Inject()(node: NodeContext,
   private lazy val sigmaFiBonds = configs.SigmaFiBondsConfig(config)
 
   /** One attempt's SigmaFi execution, which signs and sends nothing once `stillEligible` turns false. */
-  protected def newSigmaFiExecution(stillEligible: () => Boolean): SigmaFiAPIExecution =
+  protected def newSigmaFiExecution(stillEligible: () => Boolean,
+                                    capability: Seq[String] => Set[String] = _ => Set.empty): SigmaFiAPIExecution =
     new SigmaFiAPIExecution(node, EngineFunding(self, EngineFunding.askTimeout(config), ec), sigmaFiBonds,
-      stillEligible) {
+      stillEligible, capability) {
       override protected def executionNode: _root_.node.NodeApi = TransactionEngine.this.nodeApi
     }
 
@@ -537,7 +538,7 @@ class TransactionEngine @Inject()(node: NodeContext,
   protected def executeOptional(work: EngineIntent, stillEligible: () => Boolean): Any = work match {
     case EngineIntent.Dex(request, _) => request.execute(dex, dexCache)
     case EngineIntent.Forwards(request, _) => request.execute(newForwardsExecution(stillEligible))
-    case EngineIntent.SigmaFi(request, _) => request.execute(newSigmaFiExecution(stillEligible))
+    case EngineIntent.SigmaFi(request, _) => request.execute(newSigmaFiExecution(stillEligible, request.capability))
     case EngineIntent.Zc(request, _) => request.execute(newZcExecution(request, stillEligible))
     case EngineIntent.Consolidate =>
       consolidation.execute(consolidationTarget, stillEligible,

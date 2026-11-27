@@ -131,4 +131,34 @@ class CandidateMaterializedSpec extends AnyFlatSpec with Matchers {
     result.unprovenInclusions shouldBe Set("topup")
     result.inclusionProven shouldBe false
   }
+
+  it should "reject partial inclusion of a multi-leg stake-bearing arb bundle even without a top-up" in {
+    import transactions.batching.arb.ArbKind
+    val gen = tx("genesis", "aa" * 32, kind = CandidateTx.Genesis)
+    val leg1 = tx("leg1", "bb" * 32, kind = ArbKind.ErgoDexCycle)
+    val leg2 = tx("leg2", "cc" * 32, kind = ArbKind.ErgoDexCycle)
+    val groups = Seq(Set("leg1", "leg2"))
+
+    // Partial inclusion: leg1 proven, leg2 missing -> must fail inclusionProven
+    val partial = CandidateMaterialized(identity, attempt, work, proofOf(Seq("aa" * 32, "bb" * 32)),
+      Seq(gen, leg1, leg2), groups)
+    partial.inclusionProven shouldBe false
+    partial.unprovenInclusions shouldBe Set("leg2")
+
+    // Whole bundle omitted: neither leg proven -> safe, inclusionProven stays true
+    val omitted = CandidateMaterialized(identity, attempt, work, proofOf(Seq("aa" * 32)),
+      Seq(gen, leg1, leg2), groups)
+    omitted.inclusionProven shouldBe true
+
+    // Whole bundle included: both legs proven -> safe
+    val whole = CandidateMaterialized(identity, attempt, work, proofOf(Seq("aa" * 32, "bb" * 32, "cc" * 32)),
+      Seq(gen, leg1, leg2), groups)
+    whole.inclusionProven shouldBe true
+
+    // Fallback when atomicGroups is empty: partial stake-bearing arb legs still fail inclusionProven
+    val fallbackPartial = CandidateMaterialized(identity, attempt, work, proofOf(Seq("aa" * 32, "bb" * 32)),
+      Seq(gen, leg1, leg2))
+    fallbackPartial.inclusionProven shouldBe false
+    fallbackPartial.unprovenInclusions shouldBe Set("leg2")
+  }
 }

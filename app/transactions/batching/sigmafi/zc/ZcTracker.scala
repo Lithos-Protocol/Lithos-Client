@@ -263,12 +263,18 @@ class ZcTracker(api: () => NodeApi, io: ExecutionContext, settings: ZcConfig,
     else Try(rescan(api(), book.height, book.headerId, settings.maxBoxes, known, logger)) match {
       case Success((scanned, found)) if scanned.headerId == book.headerId =>
         remember(found, scanned)
-        val (a, b) = (book.boxes.keySet, scanned.boxes.keySet)
-        if (a != b && !book.cut && !scanned.cut)
-          logger.warn(s"ZC tracking at ${book.height} held ${(a -- b).size} box(es) a rescan did not find and missed " +
-            s"${(b -- a).size}; replaced with the rescan")
-        // Origins come only from blocks applied, so the rescan keeps the book's for tokens it still holds state of
-        scanned.copy(origins = book.origins.filter { case (token, _) => scanned.stateOf(token).isDefined })
+        if (scanned.cut && !book.cut) {
+          logger.warn(s"ZC tracking's periodic rescan at ${book.height} was truncated while the live book is complete; " +
+            "keeping the tracked book")
+          later(RescanBackoffBlocks)
+        } else {
+          val (a, b) = (book.boxes.keySet, scanned.boxes.keySet)
+          if (a != b && !book.cut && !scanned.cut)
+            logger.warn(s"ZC tracking at ${book.height} held ${(a -- b).size} box(es) a rescan did not find and missed " +
+              s"${(b -- a).size}; replaced with the rescan")
+          // Origins come only from blocks applied, so the rescan keeps the book's for tokens it still holds state of
+          scanned.copy(origins = book.origins.filter { case (token, _) => scanned.stateOf(token).isDefined })
+        }
       case Success(_) => later(RescanBackoffBlocks)
       case Failure(_: IndexAhead) => later(1)
       case Failure(ex) =>

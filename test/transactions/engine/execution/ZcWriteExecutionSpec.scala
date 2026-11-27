@@ -223,6 +223,73 @@ class ZcWriteExecutionSpec extends AnyFlatSpec with Matchers with Eventually {
     e.reason should include("over the 1 the request allows")
   }
 
+  it should "enforce ERG limits on SigUSD bond liquidation and ERG recollateralization, and SigUSD limits on SigUSD claim" in {
+    val c = new ScriptedChain
+    val (ctx0, _, wallet) = FakeNodeContext(c.api)
+    val ownHash = Hex.toHexString(wallet.contract.hashedPropBytes)
+    val sigAsset = "d9" * 32
+    val settledAsset = "da" * 32
+    val (sigBond, settledBox, originOrder, authBox, h) = ctx0.getClient.execute { ctx: BlockchainContext =>
+      val h = ctx.getHeight
+      val maturity = h - 1L
+      val sigId = ErgoId.create(ZcContracts.SigUsdId)
+      val terms = Seq(1000L, 0L, ZcBoxes.MinBox, maturity, h.toLong, 5000000L, 0L)
+      val bondIn = UTXO(ZcContracts.script(ZcKind.Bond, Some(ZcMarket.SigUsd)).contract, 3 * Erg,
+        Seq(Token(ErgoId.create(sigAsset), 2L)),
+        Seq(bytes(sigAsset), bytes(ownHash), longs(terms: _*), tokens(ZcContracts.SigUsdId -> 900L),
+          bytes(expr(ZcExpression.MaturityLiquidation)), longs(500000L, h - 100L, maturity)), Some(h - 100))
+        .toInput(ctx, ErgoId.create("f5" * 32), 0).input
+      val bondNode = NodeBox(bondIn.getId.toString, "f5" * 32, bondIn.getValue, 0, bondIn.getCreationHeight,
+        Hex.toHexString(bondIn.getErgoTree.bytes),
+        bondIn.getTokens.asScala.map(t => NodeAsset(t.getId.toString, t.getValue)),
+        NodeRegisters(bondIn.getRegisters.asScala.zipWithIndex.map { case (v, k) => s"R${k + 4}" -> v.toHex }.toMap))
+      val ordDraft = ZcDrafts.orderOf(Json.obj("market" -> "SigUSD", "pricing" -> "fixed", "principal" -> "900",
+        "repayment" -> "1000", "timing" -> Json.obj("mode" -> "fixed", "maturity" -> (h + 50000), "exact" -> true),
+        "collateral" -> Json.obj("nanoErg" -> "3000000000"), "rule" -> Json.obj("kind" -> "maturity")), h.toLong)
+      val ordIn = ZcUserTransactions.orderBox(ordDraft, ownHash, h - 100).toInput(ctx, ErgoId.create("f6" * 32), 0).input
+      val ordNode = NodeBox(settledAsset, "f6" * 32, ordIn.getValue, 0, ordIn.getCreationHeight,
+        Hex.toHexString(ordIn.getErgoTree.bytes),
+        ordIn.getTokens.asScala.map(t => NodeAsset(t.getId.toString, t.getValue)),
+        NodeRegisters(ordIn.getRegisters.asScala.zipWithIndex.map { case (v, k) => s"R${k + 4}" -> v.toHex }.toMap))
+      val settleIn = UTXO(ZcContracts.script(ZcKind.BondVault, None).contract, ZcBoxes.MinBox,
+        Seq(Token(ErgoId.create(settledAsset), 2L), Token(sigId, 1000L)),
+        Seq(bytes("f7" * 32), org.ergoplatform.appkit.ErgoValue.of(0.toByte)), Some(h - 10))
+        .toInput(ctx, ErgoId.create("f8" * 32), 0).input
+      val settleNode = NodeBox(settleIn.getId.toString, "f8" * 32, settleIn.getValue, 0, settleIn.getCreationHeight,
+        Hex.toHexString(settleIn.getErgoTree.bytes),
+        settleIn.getTokens.asScala.map(t => NodeAsset(t.getId.toString, t.getValue)),
+        NodeRegisters(settleIn.getRegisters.asScala.zipWithIndex.map { case (v, k) => s"R${k + 4}" -> v.toHex }.toMap))
+      val authIn = UTXO(wallet.contract, ZcBoxes.MinBox).toInput(ctx, ErgoId.create("f9" * 32), 0).input
+      val authNode = NodeBox(authIn.getId.toString, "f9" * 32, authIn.getValue, 0, authIn.getCreationHeight,
+        Hex.toHexString(authIn.getErgoTree.bytes), Seq.empty, NodeRegisters.empty)
+      (bondNode, settleNode, ordNode, authNode, h)
+    }
+    c.extend(h - 40, h)
+    c.indexed = h
+    c.scans(Seq(sigBond, settledBox, authBox).map(b => LDNodeFixtures.indexed(b, h - 10)): _*)
+    val boxes = Seq(sigBond, settledBox, authBox).map(b => b.boxId -> b).toMap
+    when(c.api.boxesWithPoolByIds(any[Seq[String]])).thenAnswer(inv =>
+      Success(inv.getArgument[Seq[String]](0).flatMap(boxes.get)))
+    when(c.api.indexedBoxById(settledAsset)).thenReturn(
+      Success(Some(LDNodeFixtures.indexed(originOrder, h - 100).copy(spentTransactionId = Some("fa" * 32)))))
+    when(c.api.walletBalancesWithUnconfirmed()).thenReturn(Success(WalletBalances(h, 5 * Erg, Seq(NodeAsset(settledAsset, 1L)))))
+    val t = new ZcTracker(() => c.api, ExecutionContext.global, ZcConfig(enabled = true, 1000), retryMs = 20L)
+    t.poke()
+    eventually(t.view.map(_.book.height) shouldBe Some(h))
+    val r = new ZcResolver(() => c.api, t)
+    val exec = new ZcWriteExecution(ctx0, EngineFunding(null, 1.second, ExecutionContext.global), t, r) {
+      override protected def mempoolSnapshot(): CompleteMempool.Snapshot =
+        CompleteMempool.Snapshot(c.headerId(h), Set.empty, Set.empty, System.nanoTime())
+    }
+    // Liquidate on a SigUSD bond with feeReserve (0.0005 ERG) < TxFee (0.001 ERG) pays 500,000 nanoERG: maxPay=100,000 must refuse!
+    val liqErr = the[LithosStateChanged] thrownBy exec.liquidate(sigAsset, Json.obj("limits" -> Json.obj("maxPay" -> "100000")), send = true)
+    liqErr.reason should include("over the 100000")
+
+    // Claim on a repaid SigUSD settlement receives 1000 SigUSD: minReceive=1001 must refuse in SigUSD units (not 0 ERG)!
+    val claimErr = the[LithosStateChanged] thrownBy exec.claim(settledAsset, Json.obj("limits" -> Json.obj("minReceive" -> "1001")), send = true)
+    claimErr.reason should include("receives 1000, under the 1001")
+  }
+
   /**
    * An oracle-rule bond far under its ratio, a confirmed oracle box too old for it, and, when `refresh` is set, one
    * pending refresh whose new box is fresh. The engine is `engine`, so a held write's reschedule reaches it.

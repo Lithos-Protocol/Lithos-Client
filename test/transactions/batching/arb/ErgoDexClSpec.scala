@@ -258,6 +258,20 @@ class ErgoDexClSpec extends AnyFlatSpec with Matchers with MockitoSugar {
     }
   }
 
+  it should "reject a CL position box whose fees would underflow signed Long reserves" in {
+    nodeContext.getClient.execute { ctx =>
+      val poisoned = position(ctx, id(350), id(351) -> 1000L, a = 10 * Erg, b = 500L, feePpm = 3000L,
+        erg = 500000L, fees = (Long.MaxValue, 0L))
+      ErgoDexClArbPool.read(poisoned, config(ctx)) shouldBe None
+      new PoolShapes(NetworkType.MAINNET).read(poisoned, height) shouldBe None
+
+      val negFees = position(ctx, id(352), id(353) -> 1000L, a = 10 * Erg, b = 500L, feePpm = 3000L,
+        erg = 5 * Erg, fees = (-1000L, 0L))
+      ErgoDexClArbPool.read(negFees, config(ctx)) shouldBe None
+      new PoolShapes(NetworkType.MAINNET).read(negFees, height) shouldBe None
+    }
+  }
+
   it should "price a raised protocol fee from R5, which the script then demands" in {
     nodeContext.getClient.execute { ctx =>
       val raised = configWith(ctx, "d2" * 32, r5 = Some(Seq(10000L, 50L, 50L, 4000L, 1L, 10L)))

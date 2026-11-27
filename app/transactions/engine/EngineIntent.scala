@@ -47,7 +47,8 @@ object EngineIntent {
      */
     def key: String = "rollups:" + org.bouncycastle.util.encoders.Hex.toHexString(
       scorex.crypto.hash.Blake2b256(stubs
-        .map(stub => s"${stub.rollupBlockId}:${stub.txType}:${stub.currentPeriod}:${stub.fpInfo.map(_._2)}")
+        .map(stub => s"${stub.rollupBlockId}:${stub.txType}:${stub.currentPeriod}:" +
+          s"${stub.fpInfo.map(i => s"${org.bouncycastle.util.encoders.Hex.toHexString(i._1)}:${i._2}")}")
         .sorted.mkString("|").getBytes(java.nio.charset.StandardCharsets.UTF_8)))
   }
 

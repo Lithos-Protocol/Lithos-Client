@@ -38,7 +38,8 @@ import scala.util.{Failure, Success, Try}
 class SigmaFiAPIExecution(nodeContext: NodeContext,
                           walletSelector: EngineFunding,
                           bonds: SigmaFiBondsConfig = SigmaFiBondsConfig.Default,
-                          alive: () => Boolean = () => true) extends SigmaFiApi {
+                          alive: () => Boolean = () => true,
+                          capability: Seq[String] => Set[String] = _ => Set.empty) extends SigmaFiApi {
 
   import SigmaFiAPIExecution._
 
@@ -155,6 +156,9 @@ class SigmaFiAPIExecution(nodeContext: NodeContext,
       case _ => throw LithosBadRequest("give exactly one of 'maturityHeight' and 'durationBlocks'")
     }
     checkCollateral(collateralErg, collateral, loan.token)
+    capability(collateral.filter(_.amount == 1L).map(_.id.toString)).headOption.foreach(id =>
+      throw LithosUnprocessable(s"$id is a capability token (a LithosDex provision NFT): whoever spends a box holding it acts for its " +
+        "position, and an order or bond can be spent beside it. Wrap it (POST /sigmafi/zc/wraps) and use the receipt"))
     val terms = ZCOrderTerms(SigmaFiContracts.bond(loan.repayToken).hashedPropBytes, wallet.contract.hashedPropBytes,
       loan.erg, loan.token.map(t => t.id -> t.amount).toSeq, repayment, schedule, liq.hash)
     val plan = SigmaFiUserTransactions.createOrder(ctx, wallet, terms, collateralErg, collateral)

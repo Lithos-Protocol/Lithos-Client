@@ -119,11 +119,16 @@ class ZcApiControllerSpec
     status(c.checkCreateOrder().apply(FakeRequest(POST, "/").withJsonBody(Json.obj()))) shouldBe OK
   }
 
-  "The claim and wrap quotes" should "need the API key, since they read this wallet's holdings" in {
+  "Wallet-reading quotes" should "need the API key, since they read this wallet's holdings or keys" in {
     val (c, _) = controller()
-    status(c.checkCreateWrap().apply(FakeRequest(POST, "/").withJsonBody(Json.obj("tokenId" -> id(1))))) shouldBe FORBIDDEN
-    status(c.checkClaim(id(1)).apply(FakeRequest(POST, "/").withJsonBody(Json.obj()))) shouldBe FORBIDDEN
+    val x = id(1)
+    val keyedChecks = Seq(c.checkCreateWrap(), c.checkClaim(x), c.checkCancel(x), c.checkRepay(x),
+      c.checkRecollateralize(x), c.checkExtinguish(x), c.checkUnwrap(x))
+    keyedChecks.map(a => status(a.apply(FakeRequest(POST, "/").withJsonBody(Json.obj("tokenId" -> x)))))
+      .toSet shouldBe Set(FORBIDDEN)
     status(c.checkClaim("not-a-hex-id").apply(FakeRequest(POST, "/").withHeaders("api_key" -> apiKey)
+      .withJsonBody(Json.obj()))) shouldBe BAD_REQUEST
+    status(c.checkExtinguish("not-a-hex-id").apply(FakeRequest(POST, "/").withHeaders("api_key" -> apiKey)
       .withJsonBody(Json.obj()))) shouldBe BAD_REQUEST
   }
 
@@ -155,6 +160,7 @@ class ZcApiControllerSpec
       ctl.orderbook("ERG", None, None, None, None, None, None, None, None).apply(FakeRequest()))
     status(ctl.orderbook("ERG", None, None, None, None, None, None, None, None).apply(FakeRequest())) shouldBe TOO_MANY_REQUESTS
     status(ctl.curves("ERG", None, None, None, None, None).apply(FakeRequest())) shouldBe TOO_MANY_REQUESTS
+    status(ctl.matches(id(1), None).apply(FakeRequest())) shouldBe TOO_MANY_REQUESTS
     status(ctl.fills("ERG", None, None, None, None, None).apply(FakeRequest())) shouldBe TOO_MANY_REQUESTS
     // 304 revision polls bypass the heavy-read slots
     status(ctl.orderbook("ERG", None, None, None, None, None, None, None, t.view.map(_.revision)).apply(FakeRequest())) shouldBe NOT_MODIFIED
@@ -170,7 +176,9 @@ class ZcApiControllerSpec
       c.repay(x), c.recollateralize(x), c.liquidate(x), c.extinguish(x), c.claim(x), c.createWrap(), c.unwrap(x), c.mint(x),
       c.activity(None, None))
     sends.map(a => status(a.apply(FakeRequest(POST, "/").withJsonBody(play.api.libs.json.Json.obj())))).toSet shouldBe Set(FORBIDDEN)
-    // checkExtinguish is open (no key) and validates the bond asset id before hitting the node
-    status(c.checkExtinguish("not-a-hex-id").apply(FakeRequest(POST, "/").withJsonBody(play.api.libs.json.Json.obj()))) shouldBe BAD_REQUEST
+    // checkExtinguish requires the API key, and once authorized validates the bond asset id before hitting the node
+    status(c.checkExtinguish("not-a-hex-id").apply(FakeRequest(POST, "/").withJsonBody(play.api.libs.json.Json.obj()))) shouldBe FORBIDDEN
+    status(c.checkExtinguish("not-a-hex-id").apply(FakeRequest(POST, "/").withHeaders("api_key" -> apiKey)
+      .withJsonBody(play.api.libs.json.Json.obj()))) shouldBe BAD_REQUEST
   }
 }

@@ -466,8 +466,11 @@ class LithosPool(options: Options,
         fetched.materialized.exists(!_.inclusionProven) =>
         val materialized = fetched.materialized.get
         recordMaterialization(materialized, request.pkg)
-        // Members left out besides the top-up are what took it with them
-        val leftOut = materialized.unproven -- materialized.unprovenInclusions
+        // Members left out besides the genesis and top-up are what caused the omission or partial bundle
+        val loadBearingIds = request.pkg.map { pkg =>
+          Set(pkg.collateral.txId) ++ pkg.blockTxs.filter(_.kind == transactions.candidate.CandidateTopUp.Kind).map(_.id)
+        }.getOrElse(Set.empty)
+        val leftOut = materialized.unproven -- loadBearingIds
         if (leftOut.nonEmpty && leftOutRebuilds < MaxLeftOutRebuildsPerBlock) leaveOut(request, leftOut)
         else rejectExtras(request, "the returned proof did not account for " +
           materialized.unprovenInclusions.map(_.take(8)).mkString(", "))
@@ -778,7 +781,7 @@ object LithosPool {
         sizeBytes = pkg.collateral.signedSizeBytes, cost = pkg.collateral.cost,
         leaf = pkg.collateral.txId)
       CandidateMaterialized(request.identity, request.id, Hex.toHexString(candidate.msg),
-        candidate.proof, genesis +: pkg.blockTxs)
+        candidate.proof, genesis +: pkg.blockTxs, pkg.atomicGroups)
     }
     val observed = node.info()
     Fetched(candidate, chainTip(observed), observed.parameters.blockVersion, materialized)

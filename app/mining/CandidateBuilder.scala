@@ -332,7 +332,7 @@ class CandidateBuilder(client: ErgoClient,
     case SourcesDue(attempt) =>
       waitingRound(attempt).foreach(stopWaiting)
 
-    case BlockTxsCollected(attempt, txs, revenue, from, late, limits, share, revenueByTx, protocol) =>
+    case BlockTxsCollected(attempt, txs, revenue, from, late, limits, share, revenueByTx, protocol, atomicGroups) =>
       if (collectingFor.exists(_.attempt == attempt)) {
         if (nowNanos() - attempt.startedAt >= config.blockTxTimeout.milliseconds.toNanos) {
           expireCollection(attempt)
@@ -341,7 +341,7 @@ class CandidateBuilder(client: ErgoClient,
           currentPackage.filter(p => p.blockHeight == attempt.height &&
             p.collateral.txId == attempt.genesisId && !blockTxsBlockedAt.contains(attempt.height))
             .filter(_ => txs.nonEmpty || attempt.refresh || config.waitForBlockPackage).foreach { pkg =>
-              val updated = pkg.withBlockTxs(txs, revenue, from, late, limits, share, revenueByTx, protocol)
+              val updated = pkg.withBlockTxs(txs, revenue, from, late, limits, share, revenueByTx, protocol, atomicGroups)
               currentPackage = Some(updated)
               publish(updated, "augmentedBuildMs", collectStartedAt, refreshed = attempt.refresh)
             }
@@ -668,11 +668,15 @@ class CandidateBuilder(client: ErgoClient,
             bundles.flatMap(_.members).filter(tx =>
               tx.kind != CandidateTx.MempoolAncestor && selected.contains(tx.id)).map(_.id)
         }.flatten.toSet
+        val atomic = kept.collect {
+          case b if b.members.exists(tx => transactions.batching.arb.ArbKind.StakeBearing.contains(tx.kind)) =>
+            b.members.filter(tx => transactions.batching.arb.ArbKind.StakeBearing.contains(tx.kind)).map(_.id).toSet
+        }.filter(_.size > 1)
         // Carried so the served job can report what the packing was actually measured against.
         // Unbounded means the node's parameters could not be read, which is not a limit to publish.
         BlockTxsCollected(attempt, txs ++ topUp, ledger.availableErg, from, late,
           Some(blockBudget).filterNot(_ == CandidateBudget.Unbounded),
-          Some(packageBudget).filterNot(_ == CandidateBudget.Unbounded), revenue, protocol)
+          Some(packageBudget).filterNot(_ == CandidateBudget.Unbounded), revenue, protocol, atomic)
       }.getOrElse(Future.failed(new java.util.concurrent.RejectedExecutionException(
         "every engine candidate worker is busy")))
       }
@@ -834,7 +838,8 @@ object CandidateBuilder {
                                                limits: Option[CandidateBudget] = None,
                                                share: Option[CandidateBudget] = None,
                                                revenueByTx: Map[String, Long] = Map.empty,
-                                               protocol: Set[String] = Set.empty)
+                                               protocol: Set[String] = Set.empty,
+                                               atomicGroups: Seq[Set[String]] = Seq.empty)
 
   private[mining] case class CollectTimedOut(attempt: CollectionAttempt)
 

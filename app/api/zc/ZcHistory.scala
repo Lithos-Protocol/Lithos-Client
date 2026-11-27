@@ -51,32 +51,61 @@ final class ZcHistory(api: () => NodeApi, walletHashes: () => Set[String], track
 
   import ZcHistory._
 
-  private var events = Vector.empty[ZcEvent]
-  private var readTo = 0
-  private var refreshedAt = 0L
-  private var readAtHeight = -1
+  private final case class State(events: Vector[ZcEvent], readTo: Int, refreshedAt: Long, readAtHeight: Int)
+
+  @volatile private var state = State(Vector.empty, 0, 0L, -1)
+  private val refreshLock = new Object
+  private val refreshing = new java.util.concurrent.atomic.AtomicBoolean(false)
   /** Classified transactions, by id: none for one looked at and found to do nothing for ZC. */
   private val classified = mutable.LinkedHashMap.empty[String, Seq[ZcEvent]]
   /** This wallet's boxes holding a ZC token, from the transactions that made them. */
   private val tokenBoxes = mutable.LinkedHashMap.empty[String, Set[String]]
 
-  def status: String = if (startHeight <= 0) "not-configured" else if (readTo == 0) "loading" else "ready"
+  def status: String = if (startHeight <= 0) "not-configured" else if (state.readTo == 0) "loading" else "ready"
 
   /** Every event, newest first, after a refresh when the chain moved. */
-  def all(): Vector[ZcEvent] = synchronized { refresh(); events }
-
-  /** Cost basis and realized P&L, oldest event first. */
-  def ledger(): ZcLedger = synchronized {
+  def all(): Vector[ZcEvent] = {
     refresh()
-    ZcHistory.ledger(events.reverse, status)
+    state.events
   }
 
-  /** Reads what is new since the last refresh. A failed read leaves the history as it was and says so. */
+  /** Cost basis and realized P&L, oldest event first. */
+  def ledger(): ZcLedger = {
+    refresh()
+    val s = state
+    val st = if (startHeight <= 0) "not-configured" else if (s.readTo == 0) "loading" else "ready"
+    ZcHistory.ledger(s.events.reverse, st)
+  }
+
+  /**
+   * Reads what is new since the last refresh. Coalesces concurrent refreshes: once warm, callers that arrive while a
+   * refresh is in flight serve the latest published snapshot immediately instead of blocking on HTTP reads.
+   */
   private def refresh(): Unit = if (startHeight > 0) {
+    val snap = state
     val tip = tracker.view.map(_.book.height).getOrElse(0)
     val now = System.currentTimeMillis()
-    val from = math.max(startHeight, readTo - Reorg)
-    if (tip >= from && (tip != readAtHeight || now - refreshedAt > RefreshMs)) {
+    val from = math.max(startHeight, snap.readTo - Reorg)
+    val due = tip >= from && (tip != snap.readAtHeight || now - snap.refreshedAt > RefreshMs)
+    if (due) {
+      if (snap.readTo > 0 && !refreshing.compareAndSet(false, true)) ()
+      else {
+        val claimed = snap.readTo > 0 || refreshing.compareAndSet(false, true)
+        try refreshLock.synchronized {
+          refreshLocked()
+        } finally {
+          if (claimed) refreshing.set(false)
+        }
+      }
+    }
+  }
+
+  private def refreshLocked(): Unit = {
+    val snap = state
+    val tip = tracker.view.map(_.book.height).getOrElse(0)
+    val now = System.currentTimeMillis()
+    val from = math.max(startHeight, snap.readTo - Reorg)
+    if (tip >= from && (tip != snap.readAtHeight || now - snap.refreshedAt > RefreshMs)) {
       val hashes = walletHashes()
       var at = from
       var fresh = Vector.empty[ZcEvent]
@@ -88,31 +117,42 @@ final class ZcHistory(api: () => NodeApi, walletHashes: () => Set[String], track
             txs.sortBy(t => (t.inclusionHeight, t.id)).foreach(t => fresh ++= look(t, hashes))
             at = to + 1
           case Failure(ex) =>
-            if (readTo == 0) throw LithosUnavailable(s"could not read this wallet's transactions: ${ex.getMessage}", ex)
+            if (snap.readTo == 0) throw LithosUnavailable(s"could not read this wallet's transactions: ${ex.getMessage}", ex)
             failed = true
         }
       }
       if (!failed) {
-        events = (fresh.reverse ++ events.filter(_.height < from)).take(maxEvents)
-        readTo = tip
-        readAtHeight = tip
-        refreshedAt = now
+        val freshIds = fresh.iterator.map(_.txId).toSet
+        val kept = snap.events.filter(e => e.height < from && !freshIds.contains(e.txId))
+        state = State((fresh.reverse ++ kept).take(maxEvents), tip, now, tip)
       }
     }
   }
 
-  /** The events of `t`, reading its inputs only when it shows a ZC mark or spends a ZC token box of this wallet's. */
+  /**
+   * The events of `t`, reading its inputs only when it shows a ZC mark or spends a ZC token box of this wallet's.
+   * Reconciles cached heights against `t.inclusionHeight` so shallow reorgs never leave stale heights behind.
+   */
   private def look(t: WalletTransaction, hashes: Set[String]): Seq[ZcEvent] =
-    classified.getOrElse(t.id, {
-      if (!marked(t)) Seq.empty
-      else api().indexedTransactionById(t.id) match {
-        case Success(Some(full)) =>
-          val found = classify(full, hashes)
-          remember(t.id, found, full, hashes)
-          found
-        case _ => Seq.empty
-      }
-    })
+    classified.get(t.id) match {
+      case Some(cached) =>
+        if (cached.forall(_.height == t.inclusionHeight)) cached
+        else {
+          val adjusted = cached.map(_.copy(height = t.inclusionHeight))
+          classified(t.id) = adjusted
+          adjusted
+        }
+      case None =>
+        if (!marked(t)) Seq.empty
+        else api().indexedTransactionById(t.id) match {
+          case Success(Some(full)) =>
+            val found = classify(full, hashes).map(e =>
+              if (e.height == t.inclusionHeight) e else e.copy(height = t.inclusionHeight))
+            remember(t.id, found, full, hashes)
+            found
+          case _ => Seq.empty
+        }
+    }
 
   private def marked(t: WalletTransaction): Boolean =
     t.outputs.exists(o => ZcContracts.classify(o.ergoTree).isDefined || tagged(o)) ||

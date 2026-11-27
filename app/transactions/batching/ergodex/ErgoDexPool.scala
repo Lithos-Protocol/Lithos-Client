@@ -97,7 +97,7 @@ object ErgoDexPool {
       val y = box.assets(Y)
       feeNumOf(box).flatMap { fee =>
         // The NFT identifies the pool and must be a singleton; the other two are balances.
-        if (nft.amount != 1L || box.value <= 0 || lp.amount <= 0 || y.amount <= 0 ||
+        if (nft.amount != 1L || box.value < MinStorageRent || lp.amount <= 0 || y.amount <= 0 ||
           box.assets.map(_.tokenId).distinct.size != Count) None
         else Some(ErgoDexPool(nft.tokenId, lp.tokenId, y.tokenId,
           reservesX = box.value, reservesY = y.amount, lpSupply = lp.amount,

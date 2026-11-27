@@ -33,6 +33,9 @@ object PoolDeployment {
     case ErgoDexClConfig | SigmaUsdBank | SigmaUsdOracle => false
     case _ => true
   }
+
+  /** Protocol singletons (CL config, SigmaUSD bank and oracle) that must never be evicted by pool box caps. */
+  def singleton(deployment: PoolDeployment): Boolean = !dex(deployment)
 }
 
 /** A confirmed pool box, the height of the block that created it, and its deployment. */
@@ -80,7 +83,7 @@ final class PoolShapes(val network: NetworkType) {
       LDDeployments.verifyT2T(tree, box.assets.map(a => a.tokenId -> a.amount))
         .map(c => TrackedBox(box, height, PoolDeployment.LithosDexToken(c)))
     else if (network == NetworkType.MAINNET && tree.equalsIgnoreCase(ErgoDexClContracts.PositionErgoTree) &&
-      (box.assets.size == 2 || box.assets.size == 3) && box.assets.head.amount == 1L)
+      transactions.batching.arb.ErgoDexClArbPool.validPositionBox(box))
       Some(TrackedBox(box, height, PoolDeployment.ErgoDexCl))
     else if (network == NetworkType.MAINNET &&
       box.assets.headOption.exists(a => a.tokenId == ErgoDexClContracts.ConfigToken && a.amount == 1L))
@@ -138,7 +141,8 @@ final case class TrackedPools(height: Int, headerId: String, boxes: Map[String, 
   /**
    * This state with block `headerId` applied on it: each transaction in order drops the tracked boxes it spends,
    * then adds its outputs `shapes` reads as pools, so a pool spent twice in one block ends at its last box. Past
-   * `cap` boxes a new box is left out and `cut` set; a successor is never refused, since its pool's box left first.
+   * `cap` boxes a new pool box is left out and `cut` set; a successor is never refused, since its pool's box left
+   * first, and protocol singletons are never refused by `cap`.
    */
   def applied(blockHeight: Int, blockId: String, parentId: String, txs: Seq[NodeTransaction], shapes: PoolShapes,
               cap: Int): TrackedPools = {
@@ -156,7 +160,7 @@ final case class TrackedPools(height: Int, headerId: String, boxes: Map[String, 
         removed :+= gone
       })
       tx.outputs.foreach(output => shapes.read(output, blockHeight).foreach { found =>
-        if (kept.size >= cap) short = true
+        if (!PoolDeployment.singleton(found.deployment) && kept.size >= cap) short = true
         else if (!kept.contains(found.boxId)) {
           kept += found.boxId -> found
           nfts = TrackedPools.plus(nfts, found)

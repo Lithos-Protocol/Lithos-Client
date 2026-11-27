@@ -56,7 +56,7 @@ class Module(environment: Environment, configuration: Configuration) extends Abs
     bindActor(classOf[MempoolView], "mempool-view", p => p.withDispatcher("lithos-contexts.sync-dispatcher"))
     bindActor(classOf[SyncHandler], "sync-handler", p => p.withDispatcher("lithos-contexts.sync-dispatcher"))
 
-    bindActor(classOf[transactions.engine.TransactionEngine], "transaction-engine")
+    bindActor(classOf[transactions.engine.TransactionEngine], "transaction-engine", p => p.withDispatcher("lithos-contexts.tx-dispatcher"))
     bindActor(classOf[RollupEvaluator],      "rollup-evaluator",      p => p.withDispatcher("lithos-contexts.tx-dispatcher"))
     bindActor(classOf[RollupProcessor], "transaction-processor", p => p.withDispatcher("lithos-contexts.tx-dispatcher"))
     bindActor(classOf[RollupPublisher], "transaction-publisher", p => p.withDispatcher("lithos-contexts.tx-dispatcher"))

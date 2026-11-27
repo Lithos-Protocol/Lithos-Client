@@ -27,7 +27,7 @@ import scala.collection.mutable
  */
 final case class ArbPending(anchor: String, revision: Long, chains: Map[String, ArbPending.Chain],
                             superseded: Set[String], spenders: Map[String, Vector[String]],
-                            boxes: Map[String, NodeBox]) {
+                            boxes: Map[String, NodeBox], avoided: Set[String] = Set.empty) {
 
   /** Every pending transaction this view carries or stops at, which a build's inputs include. */
   lazy val key: Vector[String] =
@@ -77,7 +77,8 @@ object ArbPending {
    */
   def of(snapshot: CompleteMempool.Snapshot, revision: Long, pools: Map[String, NodeBox],
          read: Seq[String] => Map[String, NodeBox], known: Map[String, NodeBox] = Map.empty,
-         paid: Set[String] = Set.empty): ArbPending = {
+         paid: Set[String] = Set.empty, avoidBoxes: Set[String] = Set.empty,
+         avoidTrees: Set[String] = Set.empty): ArbPending = {
     val txs = snapshot.transactions
     val spenders = BatchingMempool.spenders(snapshot)
     val creators = BatchingMempool.creators(snapshot)
@@ -90,6 +91,7 @@ object ArbPending {
     def poolInput(id: String): Boolean = poolIds.contains(id) || outputs.get(id).exists(isPool)
     def spendsPool(tx: CompleteMempool.MempoolTx): Boolean = tx.body.inputs.exists(i => poolInput(i.boxId))
     val paidTrees = paid.map(_.toLowerCase)
+    val avoidTreeSet = avoidTrees.map(_.toLowerCase)
     // The one script every output but pools, the fee and the paid scripts pays, when there is one
     def outputScript(tx: CompleteMempool.MempoolTx): Option[String] = {
       val others = tx.body.outputs.filterNot(b => isPool(b) || b.ergoTree.equalsIgnoreCase(FeeTree) ||
@@ -108,6 +110,11 @@ object ArbPending {
     val kept = known ++ fetched
     val boxes = if (kept.size <= MaxKeptBoxes) kept else fetched
     def inputBox(id: String): Option[NodeBox] = outputs.get(id).orElse(boxes.get(id))
+    def isOtherProtocolTree(ergoTree: String): Boolean =
+      sigmafi.zc.ZcContracts.classify(ergoTree).isDefined || avoidTreeSet.contains(ergoTree.toLowerCase)
+    def touchesOtherProtocol(tx: CompleteMempool.MempoolTx): Boolean =
+      tx.body.inputs.exists(i => avoidBoxes.contains(i.boxId) || inputBox(i.boxId).exists(b => isOtherProtocolTree(b.ergoTree))) ||
+        tx.body.outputs.exists(o => isOtherProtocolTree(o.ergoTree))
 
     // A pool spend's script, when every non-pool input and every output but pools and the fee sits at it
     val shapes = mutable.Map.empty[String, Option[String]]
@@ -119,46 +126,56 @@ object ArbPending {
       })
 
     val closedCache = mutable.Map.empty[String, Boolean]
-    def closed(tx: CompleteMempool.MempoolTx): Boolean = closedCache.getOrElseUpdate(tx.id, shape(tx) match {
-      case None => false
-      case Some(script) =>
-        // Every pool spend linked to `tx` through boxes at `script`, each of the same shape
-        var members = Map(tx.id -> tx)
-        var frontier = Vector(tx)
-        var broken = false
-        while (frontier.nonEmpty && !broken) {
-          val next = frontier.flatMap { member =>
-            val forward = member.body.outputs.filter(_.ergoTree.equalsIgnoreCase(script))
-              .flatMap(o => spenders.getOrElse(o.boxId, Vector.empty))
-            val back = member.body.inputs.map(_.boxId).filterNot(poolInput).flatMap(creators.get)
-            (forward ++ back).filter(spendsPool)
-          }.filterNot(n => members.contains(n.id)).distinct
-          next.foreach { n =>
-            if (shape(n).contains(script)) members += n.id -> n else broken = true
-          }
-          if (members.size > MaxCycleTxs) broken = true
-          frontier = next
-        }
-        !broken && {
-          var erg = BigInt(0)
-          val tokens = mutable.Map.empty[String, BigInt].withDefaultValue(BigInt(0))
-          members.valuesIterator.foreach { m =>
-            m.body.outputs.filter(_.ergoTree.equalsIgnoreCase(script)).foreach { o =>
-              erg += o.value
-              o.assets.foreach(a => tokens(a.tokenId) += a.amount)
+    def closed(tx: CompleteMempool.MempoolTx): Boolean = closedCache.get(tx.id) match {
+      case Some(cached) => cached
+      case None =>
+        shape(tx) match {
+          case None =>
+            closedCache.put(tx.id, false)
+            false
+          case Some(script) =>
+            // Every pool spend linked to `tx` through boxes at `script`, each of the same shape
+            var members = Map(tx.id -> tx)
+            var frontier = Vector(tx)
+            var broken = false
+            var hitCap = false
+            while (frontier.nonEmpty && !broken) {
+              val next = frontier.flatMap { member =>
+                val forward = member.body.outputs.filter(_.ergoTree.equalsIgnoreCase(script))
+                  .flatMap(o => spenders.getOrElse(o.boxId, Vector.empty))
+                val back = member.body.inputs.map(_.boxId).filterNot(poolInput).flatMap(creators.get)
+                (forward ++ back).filter(spendsPool)
+              }.filterNot(n => members.contains(n.id)).distinct
+              next.foreach { n =>
+                if (shape(n).contains(script)) members += n.id -> n else broken = true
+              }
+              if (members.size > MaxCycleTxs) { broken = true; hitCap = true }
+              frontier = next
             }
-            m.body.inputs.map(_.boxId).filterNot(poolInput).flatMap(inputBox).foreach { i =>
-              erg -= i.value
-              i.assets.foreach(a => tokens(a.tokenId) -= a.amount)
+            val result = !broken && {
+              var erg = BigInt(0)
+              val tokens = mutable.Map.empty[String, BigInt].withDefaultValue(BigInt(0))
+              members.valuesIterator.foreach { m =>
+                m.body.outputs.filter(_.ergoTree.equalsIgnoreCase(script)).foreach { o =>
+                  erg += o.value
+                  o.assets.foreach(a => tokens(a.tokenId) += a.amount)
+                }
+                m.body.inputs.map(_.boxId).filterNot(poolInput).flatMap(inputBox).foreach { i =>
+                  erg -= i.value
+                  i.assets.foreach(a => tokens(a.tokenId) -= a.amount)
+                }
+              }
+              erg > 0 && tokens.valuesIterator.forall(_ == 0)
             }
-          }
-          erg > 0 && tokens.valuesIterator.forall(_ == 0)
+            if (!hitCap) members.keysIterator.foreach(closedCache.put(_, result))
+            else closedCache.put(tx.id, result)
+            result
         }
-    })
+    }
 
     // The pending ancestors `tx` needs that `carried` does not hold, in spend order; None when one is contested,
-    // spends a pool, or there are more than `room`. A worklist, and each parent counted before it is followed, so
-    // a deep chain costs `room` steps rather than the stack.
+    // spends a pool, touches another protocol, or there are more than `room`. A worklist, and each parent counted
+    // before it is followed, so a deep chain costs `room` steps rather than the stack.
     def ancestors(tx: CompleteMempool.MempoolTx, carried: Set[String], room: Int)
     : Option[Vector[CompleteMempool.MempoolTx]] = {
       def parents(t: CompleteMempool.MempoolTx) = t.body.inputs.flatMap(i => creators.get(i.boxId)).distinct.iterator
@@ -176,7 +193,8 @@ object ArbPending {
           if (!seen.contains(parent.id)) {
             seen += parent.id
             found += 1
-            if (found > room || spendsPool(parent) || !BatchingMempool.uncontested(parent, spenders)) return None
+            if (found > room || spendsPool(parent) || touchesOtherProtocol(parent) ||
+              !BatchingMempool.uncontested(parent, spenders)) return None
             stack = (parent -> parents(parent)) :: stack
           }
         }
@@ -186,7 +204,7 @@ object ArbPending {
 
     var superseded = Set.empty[String]
     // Follows one pool from its confirmed box: carries each single non-cycle spend, stops at closed cycles, and
-    // gives up (the pool stays confirmed) at a contested spend or past the bound
+    // gives up (the pool stays confirmed) at a contested spend, multi-pool spend, cross-protocol spend, or past the bound
     def walk(nft: String, confirmed: NodeBox): Option[Chain] = {
       var at = confirmed
       var carried = Vector.empty[CompleteMempool.MempoolTx]
@@ -202,15 +220,18 @@ object ArbPending {
         } else if (claims.size > 1 || !BatchingMempool.uncontested(claims.head, spenders)) result = Some(None)
         else {
           val swap = claims.head
-          val room = MaxCarried - carried.size - 1
-          val parents = if (room < 0) None else ancestors(swap, carried.map(_.id).toSet, room)
-          val next = swap.body.outputs.find(o => o.assets.headOption.exists(_.tokenId == nft) &&
-            o.ergoTree.equalsIgnoreCase(confirmed.ergoTree))
-          (parents, next) match {
-            case (Some(ps), Some(box)) =>
-              carried = carried ++ ps :+ swap
-              at = box
-            case _ => result = Some(None)
+          if (swap.body.inputs.count(i => poolInput(i.boxId)) != 1 || touchesOtherProtocol(swap)) result = Some(None)
+          else {
+            val room = MaxCarried - carried.size - 1
+            val parents = if (room < 0) None else ancestors(swap, carried.map(_.id).toSet, room)
+            val next = swap.body.outputs.find(o => o.assets.headOption.exists(_.tokenId == nft) &&
+              o.ergoTree.equalsIgnoreCase(confirmed.ergoTree))
+            (parents, next) match {
+              case (Some(ps), Some(box)) =>
+                carried = carried ++ ps :+ swap
+                at = box
+              case _ => result = Some(None)
+            }
           }
         }
       }
@@ -218,6 +239,6 @@ object ArbPending {
     }
     val chains = pools.flatMap { case (nft, confirmed) => walk(nft, confirmed).map(nft -> _) }
     ArbPending(snapshot.anchor, revision, chains, superseded,
-      spenders.collect { case (id, claims) if poolInput(id) => id -> claims.map(_.id) }, boxes)
+      spenders.collect { case (id, claims) if poolInput(id) => id -> claims.map(_.id) }, boxes, avoidBoxes)
   }
 }

@@ -183,7 +183,7 @@ object ZcUserTransactions {
   def shareRequestBox(asset: String, market: ZcMarket, terms: Seq[Long], auction: Boolean, metadata: Seq[String],
                       ownerHash: String): UTXO = {
     val kind = if (auction) script(ZcKind.DutchAuctionMint, Some(market)) else script(ZcKind.FractionalMint, None)
-    UTXO(kind, 2L * MinBox + terms(1) + terms(2), Seq(token(asset, 1L)),
+    UTXO(kind, Math.addExact(Math.addExact(2L * MinBox, terms(1)), terms(2)), Seq(token(asset, 1L)),
       utf8(metadata) ++ Seq(bytes(ownerHash), longs(terms), bytesList(metadata.map(_.getBytes(UTF_8)))))
   }
 

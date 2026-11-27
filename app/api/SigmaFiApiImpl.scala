@@ -18,16 +18,30 @@ import scala.concurrent.duration._
 
 /** Reads and checks are served here; every send is handed to the transaction engine, which owns the wallet. */
 @Singleton
-class SigmaFiApiImpl @Inject()(node: NodeContext,
-                               @Named("transaction-engine") engine: ActorRef,
-                               config: Configuration,
-                               system: ActorSystem) extends SigmaFiApi {
+class SigmaFiApiImpl(node: NodeContext,
+                     engine: ActorRef,
+                     config: Configuration,
+                     system: ActorSystem,
+                     capability: Seq[String] => Set[String]) extends SigmaFiApi {
+
+  @Inject def this(node: NodeContext,
+                   @Named("transaction-engine") engine: ActorRef,
+                   config: Configuration,
+                   system: ActorSystem,
+                   pools: LDPoolsApi) =
+    this(node, engine, config, system, api.zc.ZcWrites.provisionNfts(pools) _)
+
+  def this(node: NodeContext,
+           engine: ActorRef,
+           config: Configuration,
+           system: ActorSystem) =
+    this(node, engine, config, system, (_: Seq[String]) => Set.empty[String])
 
   /** How long the caller waits for the engine's answer. */
   protected def answerWait: FiniteDuration = SigmaFiApiImpl.AnswerWait
 
   private val reads = new SigmaFiAPIExecution(node, EngineFunding(engine, EngineFunding.AskTimeout, system.dispatcher),
-    SigmaFiBondsConfig(config))
+    SigmaFiBondsConfig(config), capability = capability)
 
   /**
    * The engine's answer. A 503 says nothing was sent when the engine refused or dropped the request, and says the
@@ -62,7 +76,7 @@ class SigmaFiApiImpl @Inject()(node: NodeContext,
   override def getPortfolio: SFPortfolio = reads.getPortfolio
 
   override def createOrder(request: SFOrderRequest, send: Boolean): Either[SFQuote, SFResult] =
-    act(reads.createOrder(request, send = false), send, SigmaFiIntent.CreateOrder(request))
+    act(reads.createOrder(request, send = false), send, SigmaFiIntent.CreateOrder(request, capability))
 
   override def cancelOrder(boxId: String, send: Boolean): Either[SFQuote, SFResult] =
     act(reads.cancelOrder(boxId, send = false), send, SigmaFiIntent.CancelOrder(boxId))

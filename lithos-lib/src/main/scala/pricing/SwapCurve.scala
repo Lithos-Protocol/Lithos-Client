@@ -50,7 +50,8 @@ object SwapCurve {
       curveIn(reserveIn, reserveOut, amountOut, feeNum, ErgoDexFeeDenominator)
 
     override def marginal(reserveIn: Long, reserveOut: Long): Double =
-      if (reserveIn <= 0L) 0.0 else reserveOut.toDouble * feeNum / (reserveIn.toDouble * ErgoDexFeeDenominator)
+      if (reserveIn <= 0L || reserveOut <= 0L || feeNum <= 0L || feeNum > ErgoDexFeeDenominator) 0.0
+      else reserveOut.toDouble * feeNum / (reserveIn.toDouble * ErgoDexFeeDenominator)
   }
 
   /**
@@ -60,32 +61,43 @@ object SwapCurve {
    */
   sealed abstract class LithosDex(val dexFeeNum: Long, val sideFeeNum: Long, roundsUp: Boolean) extends SwapCurve {
     private val D = LithosDexFeeDenominator
+    private val validFees: Boolean = dexFeeNum > 0L && dexFeeNum <= D && sideFeeNum >= 0L && sideFeeNum < D
 
-    override def sideFee(amountIn: Long): Long = {
-      val fee = BigInt(amountIn) * sideFeeNum
-      (if (roundsUp) ceilDiv(fee, D) else fee / D).toLong
-    }
+    override def sideFee(amountIn: Long): Long =
+      if (amountIn <= 0L || sideFeeNum <= 0L || sideFeeNum >= D) 0L
+      else {
+        val fee = BigInt(amountIn) * sideFeeNum
+        (if (roundsUp) ceilDiv(fee, D) else fee / D).toLong
+      }
 
     override def out(reserveIn: Long, reserveOut: Long, amountIn: Long): Long =
-      if (amountIn <= 0L) 0L else curveOut(reserveIn, reserveOut, amountIn - sideFee(amountIn), dexFeeNum, D)
+      if (amountIn <= 0L || !validFees) 0L
+      else curveOut(reserveIn, reserveOut, amountIn - sideFee(amountIn), dexFeeNum, D)
 
     override def in(reserveIn: Long, reserveOut: Long, amountOut: Long): Option[Long] =
-      curveIn(reserveIn, reserveOut, amountOut, dexFeeNum, D).flatMap { traded =>
+      if (!validFees) None
+      else curveIn(reserveIn, reserveOut, amountOut, dexFeeNum, D).flatMap { traded =>
         // The least input that leaves `traded` after the side fee. Both closed forms are exact; stepping up guards them
+        val denom = BigInt(D - sideFeeNum)
         val start =
-          if (roundsUp) ceilDiv(BigInt(traded) * D, BigInt(D - sideFeeNum))
-          else BigInt(traded - 1) * D / BigInt(D - sideFeeNum) + 1
-        if (!start.isValidLong) None
+          if (roundsUp) ceilDiv(BigInt(traded) * D, denom)
+          else BigInt(traded - 1) * D / denom + 1
+        if (start <= 0 || !start.isValidLong) None
         else {
           var amountIn = start.toLong
-          while (amountIn - sideFee(amountIn) < traded) amountIn = Math.addExact(amountIn, 1L)
-          Some(amountIn)
+          var steps = 0
+          while (amountIn - sideFee(amountIn) < traded && steps < MaxStepUp && amountIn < Long.MaxValue) {
+            amountIn += 1L
+            steps += 1
+          }
+          if (amountIn - sideFee(amountIn) >= traded) Some(amountIn) else None
         }
       }
 
     override def marginal(reserveIn: Long, reserveOut: Long): Double = {
       val d = D.toDouble
-      if (reserveIn <= 0L) 0.0 else (d - sideFeeNum) / d * (dexFeeNum / d) * (reserveOut.toDouble / reserveIn)
+      if (reserveIn <= 0L || reserveOut <= 0L || !validFees) 0.0
+      else (d - sideFeeNum) / d * (dexFeeNum / d) * (reserveOut.toDouble / reserveIn)
     }
   }
 
@@ -97,12 +109,14 @@ object SwapCurve {
   final case class LithosDexToken(override val dexFeeNum: Long, override val sideFeeNum: Long)
     extends LithosDex(dexFeeNum, sideFeeNum, roundsUp = true)
 
+  private final val MaxStepUp = 4
+
   /**
    * The constant-product curve every pool kind shares, with `feeNum / feeDenom` of the input kept by the pool:
    * `reserveOut · in · feeNum / (reserveIn · feeDenom + in · feeNum)`, rounded down.
    */
   def curveOut(reserveIn: Long, reserveOut: Long, amountIn: Long, feeNum: Long, feeDenom: Long): Long =
-    if (amountIn <= 0L) 0L
+    if (amountIn <= 0L || reserveIn <= 0L || reserveOut <= 0L || feeNum <= 0L || feeDenom <= 0L || feeNum > feeDenom) 0L
     else {
       val withFee = BigInt(amountIn) * feeNum
       val out = BigInt(reserveOut) * withFee / (BigInt(reserveIn) * feeDenom + withFee)
@@ -114,7 +128,8 @@ object SwapCurve {
    * `amountOut · (reserveIn · feeDenom + in · feeNum) ≤ reserveOut · in · feeNum`, solved for `in` and rounded up.
    */
   def curveIn(reserveIn: Long, reserveOut: Long, amountOut: Long, feeNum: Long, feeDenom: Long): Option[Long] =
-    if (amountOut <= 0L || amountOut >= reserveOut || reserveIn <= 0L) None
+    if (amountOut <= 0L || amountOut >= reserveOut || reserveIn <= 0L ||
+      feeNum <= 0L || feeDenom <= 0L || feeNum > feeDenom) None
     else {
       val in = ceilDiv(BigInt(amountOut) * reserveIn * feeDenom, BigInt(feeNum) * (reserveOut - amountOut))
       if (in.isValidLong) Some(in.toLong) else None

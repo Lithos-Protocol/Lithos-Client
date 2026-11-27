@@ -529,6 +529,11 @@ object ZcRules {
    * height first, then the widest gap between the yield earned and the yield required, then the shorter. The offer's
    * least maturity is checked at the last height a broadcast may land, `late` blocks on.
    */
+  /** Bounds on candidate points evaluated per `(offer, windowOrder)` pair in [[windowMaturity]]. */
+  private final val MaxWindowPeaks = 16
+  private final val MaxWindowGrid = 64
+  private final val MaxWindowCandidates = 128
+
   def windowMaturity(s: ZcOfferState, order: ZcOrder, oracle: Option[ZcOracle], height: Long,
                      ignoreYield: Boolean = false, late: Long = 0L): Option[Long] = {
     val o = s.offer
@@ -551,10 +556,12 @@ object ZcRules {
           val oPoints = o.curve.map(p => BigInt(at) + BigInt(p._2))
           val knots = (Seq(BigInt(from), BigInt(to)) ++ bPoints ++ oPoints)
             .filter(m => m >= fromBig && m <= toBig).map(_.toLong).distinct.sorted
-          val peaks = if (token(o)) Seq.empty[Long] else knots.sliding(2).collect {
-            case Seq(a, b) if b - a > 2L => interiorPeak(a, b, gapAt)
-          }.flatten.toSeq
-          val candidates = (knots ++ peaks ++ gridBetween(from, to)).filter(m => m >= from && m <= to).distinct
+          val peaks = if (token(o)) Seq.empty[Long]
+            else knots.sliding(2).collect { case Seq(a, b) if b - a > 2L => (a, b) }
+              .toVector.sortBy { case (a, b) => -(b - a) }.take(MaxWindowPeaks)
+              .flatMap { case (a, b) => interiorPeak(a, b, gapAt) }
+          val gridPoints = gridBetween(from, to).take(MaxWindowGrid)
+          val candidates = (gridPoints ++ knots ++ peaks).filter(m => m >= from && m <= to).distinct.take(MaxWindowCandidates)
           val feasible = candidates.flatMap { m =>
             resolvePrincipal(order, height, m).toOption.flatMap { principal =>
               val bond = ZcBondTerms.prospect(order, start, m, principal)

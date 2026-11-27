@@ -237,7 +237,8 @@ class ArbStage(nodeContext: NodeContext,
       .filter { case (_, snapshot) => snapshot.anchor.equalsIgnoreCase(tracked.headerId) } match {
       case None => ArbPending.Empty
       case Some((revision, snapshot)) =>
-        previous.filter(p => p.revision == revision && p.anchor == snapshot.anchor).getOrElse {
+        val avoidBoxes = zcTracker.fold(Set.empty[String])(_.ownArbs.boxes)
+        previous.filter(p => p.revision == revision && p.anchor == snapshot.anchor && p.avoided == avoidBoxes).getOrElse {
           val nodeApi = nodeContext.getNodeApi
           val pools = tracked.pools.filter(t => PoolDeployment.dex(t.deployment)).map(t => t.nft -> t.box).toMap
           val clFees = tracked.pools.filter(_.deployment == PoolDeployment.ErgoDexClConfig)
@@ -245,7 +246,7 @@ class ArbStage(nodeContext: NodeContext,
           // A view that cannot be built leaves every pool confirmed, as with the option off
           Try(ArbPending.of(snapshot, revision, pools,
             ids => nodeApi.boxesWithPoolByIds(ids).get.map(b => b.boxId -> b).toMap,
-            previous.map(_.boxes).getOrElse(Map.empty), clFees)).recover { case ex =>
+            previous.map(_.boxes).getOrElse(Map.empty), clFees, avoidBoxes)).recover { case ex =>
             logger.warn(s"Could not read the pending pool spends for block ${tracked.height + 1}; pricing " +
               s"confirmed pools only: ${ex.getMessage}")
             ArbPending.Empty

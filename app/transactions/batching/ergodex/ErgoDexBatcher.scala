@@ -125,12 +125,21 @@ class ErgoDexBatcher(nodeContext: NodeContext,
   private def routeLithosDex(machina: Seq[MachinaOrder], routed: Seq[(MachinaOrder, (ErgoDexPool, Int))], tip: Int,
                              denied: Set[String]): Vector[(String, String, Long)] = {
     val tokens = machina.map(_.tokenId).toSet
+    var vaultReads = 0
     val boxes = poolTracking.flatMap(_.latest).filter(state => tip - state.height <= TrackedLagBlocks).toSeq
       .flatMap(_.pools).collect {
         case t @ TrackedBox(box, _, PoolDeployment.LithosDexNative(contracts))
           if !denied.contains(t.nft.toLowerCase) && box.assets.lift(1).exists(a => tokens.contains(a.tokenId)) =>
           box -> contracts
-      }.filter { case (_, contracts) => vaultStands(contracts) }
+      }.filter { case (_, contracts) =>
+        val nft = contracts.vaultNFT.toString
+        if (standingVaults.contains(nft)) true
+        else if (vaultMissing(nft) || vaultReads >= MaxVaultReadsPerScan) false
+        else {
+          vaultReads += 1
+          vaultStands(contracts)
+        }
+      }
     if (boxes.isEmpty) Vector.empty
     else nodeContext.getClient.execute { ctx =>
       val pools = boxes.flatMap { case (box, contracts) => Try(LithosDexArbPool(box.toInputUTXO(ctx), contracts)).toOption }
@@ -145,17 +154,38 @@ class ErgoDexBatcher(nodeContext: NodeContext,
 
   /** Vault NFTs of LithosDex pools whose fee vault was found standing, at most [[MaxStandingVaults]]. */
   private val standingVaults = java.util.concurrent.ConcurrentHashMap.newKeySet[String]()
+  /** Vault NFTs recently found missing, to epoch ms when they may be retried, bounded to [[MaxStandingVaults]]. */
+  private val missingVaults = new java.util.concurrent.ConcurrentHashMap[String, java.lang.Long]()
+
+  private def vaultMissing(nft: String): Boolean =
+    Option(missingVaults.get(nft)).exists(_.longValue > System.currentTimeMillis())
 
   /**
    * Whether the fee vault of the pool `contracts` builds stands. A vault's contract recreates it on every spend,
-   * so one found standing is not read again; one that is not is read again at the next discovery.
+   * so one found standing is not read again; one that is not is cached as missing for [[MissingVaultTtlMs]].
    */
   private def vaultStands(contracts: _root_.lithosdex.contracts.LDContracts): Boolean = {
     val nft = contracts.vaultNFT.toString
-    standingVaults.contains(nft) || (Try(LDDeployments.vaultStands(nodeApi, contracts)).getOrElse(false) && {
-      if (standingVaults.size < MaxStandingVaults) standingVaults.add(nft)
-      true
-    })
+    if (standingVaults.contains(nft)) true
+    else Try(LDDeployments.vaultStands(nodeApi, contracts)) match {
+      case Success(true) =>
+        missingVaults.remove(nft)
+        if (standingVaults.size < MaxStandingVaults) standingVaults.add(nft)
+        true
+      case Success(false) =>
+        val now = System.currentTimeMillis()
+        if (missingVaults.size >= MaxStandingVaults) {
+          val it = missingVaults.entrySet().iterator()
+          var drop = math.max(1, MaxStandingVaults / 8)
+          while (it.hasNext && drop > 0) {
+            val e = it.next()
+            if (e.getValue.longValue <= now || drop > 0) { it.remove(); drop -= 1 }
+          }
+        }
+        missingVaults.put(nft, java.lang.Long.valueOf(now + MissingVaultTtlMs))
+        false
+      case Failure(_) => false
+    }
   }
 
   /**
@@ -374,4 +404,10 @@ object ErgoDexBatcher {
 
   /** Most standing vaults remembered: as many pool boxes as the tracker holds. */
   private final val MaxStandingVaults = PoolTracker.MaxBoxes
+
+  /** Most uncached LithosDex vault checks per discovery scan, matching `ArbDiscovery.MaxVaultReads`. */
+  private[ergodex] final val MaxVaultReadsPerScan = 4
+
+  /** How long a missing LithosDex fee vault is skipped before re-checking. */
+  private[ergodex] final val MissingVaultTtlMs = 5L * 60L * 1000L
 }

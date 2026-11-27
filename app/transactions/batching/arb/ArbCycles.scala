@@ -252,23 +252,29 @@ object ArbCycles {
         }
       }
 
+      val failedPools = scala.collection.mutable.HashSet.empty[String]
       ArbSearch.select(index.routes, states, maxIn, minProfit, slots - used, selectUntil) { cycle =>
         val cl = cycle.swaps.count(_.pool.kind == ArbPoolKind.ErgoDexCl)
+        val pools = cycle.route.hops.map(_.nft)
         if (stopped || buildUntil.isOverdue()) { stopped = true; false }
         else if (clLegs + cl > MaxClLegs) false
+        else if (cycle.route.pools.exists(failedPools.contains)) false
+        else if (used + cycle.legs + carriedBy(pools) > slots) false
         else signed(ctx, wallet, cycle, at, carry, blockHeight, profitTo) match {
+          case Failure(ex: PoolLegFailed) =>
+            failedPools += ex.nft
+            logger.warn(s"Could not build arb cycle ${cycle.route.key} for block $blockHeight (pool ${ex.nft.take(12)} " +
+              s"failed and is skipped for this build), dropping it whole: ${ex.getMessage}")
+            false
           case Failure(ex) =>
+            failedPools ++= cycle.route.pools
             logger.warn(s"Could not build arb cycle ${cycle.route.key} for block $blockHeight, dropping it whole: " +
               ex.getMessage)
             false
           case Success(legs) =>
-            val pools = cycle.route.hops.map(_.nft)
-            if (used + legs.size + carriedBy(pools) > slots) false
-            else {
-              val taken = take(legs, pools, ArbKind.cycle(cycle.swaps.map(_.pool)))
-              if (taken) clLegs += cl
-              taken
-            }
+            val taken = take(legs, pools, ArbKind.cycle(cycle.swaps.map(_.pool)))
+            if (taken) clLegs += cl
+            taken
         }
       }
       bundles
@@ -329,6 +335,9 @@ object ArbCycles {
     Vector(fill, leg)
   }
 
+  private final class PoolLegFailed(val nft: String, cause: Throwable)
+    extends RuntimeException(cause.getMessage, cause)
+
   /**
    * `cycle`'s legs signed in order, each pool at the box `at` names and the carry passing from leg to leg at
    * the stake's own script; the last leg returns the carry's ERG less the profit to that script as the next
@@ -339,17 +348,22 @@ object ArbCycles {
                      stake: InputUTXO, blockHeight: Int, profitTo: Contract): Try[Vector[SignedTransaction]] = Try {
     var carry = stake
     cycle.route.hops.zip(cycle.swaps).zipWithIndex.map { case ((hop, planned), i) =>
-      val poolBox = input(ctx, at(hop.nft))
-      val swap = planned.pool.withBox(poolBox.id.toString).swap(planned.amountIn, planned.xIn)
-        .filter(_.amountOut == planned.amountOut)
-        .getOrElse(throw new IllegalStateException(s"pool ${hop.nft} no longer fills leg ${i + 1} as priced"))
-      val last = i == cycle.legs - 1
-      val leg = ArbLeg.build(ctx, wallet, swap, poolBox, Seq(carry), stake.contract, blockHeight,
-        profit = if (last) Some(profitTo -> cycle.profit) else None)
-      carry = InputUTXO(leg.getOutputsToSpend.get(1))
-      if (last) require(carry.value == stake.value && carry.tokens.isEmpty &&
-        carry.contract.ergoTreeHex == stake.contract.ergoTreeHex,
-        s"the last leg returns ${carry.value} nanoERG and ${carry.tokens.size} token(s) where the stake was ${stake.value}")
+      val leg = try {
+        val poolBox = input(ctx, at(hop.nft))
+        val swap = planned.pool.withBox(poolBox.id.toString).swap(planned.amountIn, planned.xIn)
+          .filter(_.amountOut == planned.amountOut)
+          .getOrElse(throw new IllegalStateException(s"pool ${hop.nft} no longer fills leg ${i + 1} as priced"))
+        val last = i == cycle.legs - 1
+        val built = ArbLeg.build(ctx, wallet, swap, poolBox, Seq(carry), stake.contract, blockHeight,
+          profit = if (last) Some(profitTo -> cycle.profit) else None)
+        carry = InputUTXO(built.getOutputsToSpend.get(1))
+        if (last) require(carry.value == stake.value && carry.tokens.isEmpty &&
+          carry.contract.ergoTreeHex == stake.contract.ergoTreeHex,
+          s"the last leg returns ${carry.value} nanoERG and ${carry.tokens.size} token(s) where the stake was ${stake.value}")
+        built
+      } catch {
+        case scala.util.control.NonFatal(ex) => throw new PoolLegFailed(hop.nft, ex)
+      }
       leg
     }
   }

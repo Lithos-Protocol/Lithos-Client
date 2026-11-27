@@ -44,11 +44,13 @@ final class ZcResolver(api: () => NodeApi, tracker: ZcTracker, maxEntries: Int =
   private val origins = new ConcurrentHashMap[String, ZcOrigin]()
   private val scripts = new ConcurrentHashMap[String, String]()
   private val scriptChars = new AtomicLong(0L)
+  private val scriptLock = new Object
   /** Serialized ErgoBox bytes verified against their box id, for offer ask-origin/share-mint and Dutch-mint proofs. */
   private val serialized = new ConcurrentHashMap[String, Array[Byte]]()
   private val serializedBytes = new AtomicLong(0L)
-  /** Settled bond repayment and serialized bytes by bond box id, for Dutch share mints of settled bonds. */
-  private val settledBonds = new ConcurrentHashMap[String, (Long, Array[Byte])]()
+  private val bytesLock = new Object
+  /** Settled bond repayment by bond box id; serialized bytes share the bounded `serialized` cache. */
+  private val settledBonds = new ConcurrentHashMap[String, java.lang.Long]()
   /** A box's chain root, and an ERG offer chain's first capital. */
   private val roots = new ConcurrentHashMap[String, (String, Long)]()
   /** What was looked up and not found, to the height it may be tried again. */
@@ -178,19 +180,23 @@ final class ZcResolver(api: () => NodeApi, tracker: ZcTracker, maxEntries: Int =
   }
 
   /** Keeps `found`, first dropping scripts no tracked box names when it would not fit, then everything if still full. */
-  private def remember(found: Map[String, String]): Unit = found.foreach { case (h, t) =>
-    if (scriptChars.get() + t.length > maxScriptChars) {
-      val named = tracker.book.map(_.byParty).getOrElse(Map.empty)
-      val it = scripts.entrySet().iterator()
-      while (it.hasNext) {
-        val e = it.next()
-        if (!named.contains(e.getKey)) { it.remove(); scriptChars.addAndGet(-e.getValue.length.toLong) }
+  private def remember(found: Map[String, String]): Unit = if (found.nonEmpty) scriptLock.synchronized {
+    found.foreach { case (h, t) =>
+      if (!scripts.containsKey(h)) {
+        if (scriptChars.get() + t.length > maxScriptChars) {
+          val named = tracker.book.map(_.byParty).getOrElse(Map.empty)
+          val it = scripts.entrySet().iterator()
+          while (it.hasNext) {
+            val e = it.next()
+            if (!named.contains(e.getKey)) { it.remove(); scriptChars.addAndGet(-e.getValue.length.toLong) }
+          }
+          if (scriptChars.get() + t.length > maxScriptChars) { scripts.clear(); scriptChars.set(0L) }
+        }
+        if (scripts.putIfAbsent(h, t) == null) {
+          scriptChars.addAndGet(t.length.toLong)
+          learned.incrementAndGet()
+        }
       }
-      if (scriptChars.get() + t.length > maxScriptChars) { scripts.clear(); scriptChars.set(0L) }
-    }
-    if (scripts.putIfAbsent(h, t) == null) {
-      scriptChars.addAndGet(t.length.toLong)
-      learned.incrementAndGet()
     }
   }
 
@@ -222,7 +228,10 @@ final class ZcResolver(api: () => NodeApi, tracker: ZcTracker, maxEntries: Int =
 
   /** Repayment and verified serialized bytes of a settled bond box, for Dutch share mints on settled bonds. */
   def settledBond(bondBoxId: String, ctx: BlockchainContext, budget: ZcBudget): Option[(Long, Array[Byte])] =
-    Option(settledBonds.get(bondBoxId)).orElse {
+    (for {
+      rep <- Option(settledBonds.get(bondBoxId))
+      bs <- Option(serialized.get(bondBoxId))
+    } yield rep.longValue -> bs).orElse {
       val key = "sb:" + bondBoxId
       if (tried(key)) None
       else read(budget)(_.indexedBoxById(bondBoxId)) match {
@@ -235,31 +244,34 @@ final class ZcResolver(api: () => NodeApi, tracker: ZcTracker, maxEntries: Int =
             if Hex.toHexString(Blake2b256.hash(bytes)) == bondBoxId
           } yield repayment -> bytes
           resolved match {
-            case Some(pair) =>
+            case Some((repayment, bytes)) =>
               bound(settledBonds)
-              if (settledBonds.putIfAbsent(bondBoxId, pair) == null) learned.incrementAndGet()
-              rememberBytes(bondBoxId, pair._2)
-              Some(pair)
+              if (settledBonds.putIfAbsent(bondBoxId, java.lang.Long.valueOf(repayment)) == null)
+                learned.incrementAndGet()
+              rememberBytes(bondBoxId, bytes)
+              Some(repayment -> bytes)
             case None => miss(key); None
           }
       }
     }
 
-  private def rememberBytes(boxId: String, bs: Array[Byte]): Unit = {
-    if (serializedBytes.get() + bs.length > maxScriptChars) {
-      val it = serialized.entrySet().iterator()
-      var drop = math.max(1, serialized.size / 4)
-      while (it.hasNext && drop > 0) {
-        val e = it.next()
-        it.remove()
-        serializedBytes.addAndGet(-e.getValue.length.toLong)
-        drop -= 1
+  private def rememberBytes(boxId: String, bs: Array[Byte]): Unit = bytesLock.synchronized {
+    if (!serialized.containsKey(boxId)) {
+      if (serializedBytes.get() + bs.length > maxScriptChars) {
+        val it = serialized.entrySet().iterator()
+        var drop = math.max(1, serialized.size / 4)
+        while (it.hasNext && drop > 0) {
+          val e = it.next()
+          it.remove()
+          serializedBytes.addAndGet(-e.getValue.length.toLong)
+          drop -= 1
+        }
+        if (serializedBytes.get() + bs.length > maxScriptChars) { serialized.clear(); serializedBytes.set(0L) }
       }
-      if (serializedBytes.get() + bs.length > maxScriptChars) { serialized.clear(); serializedBytes.set(0L) }
-    }
-    if (serialized.putIfAbsent(boxId, bs) == null) {
-      serializedBytes.addAndGet(bs.length.toLong)
-      learned.incrementAndGet()
+      if (serialized.putIfAbsent(boxId, bs) == null) {
+        serializedBytes.addAndGet(bs.length.toLong)
+        learned.incrementAndGet()
+      }
     }
   }
 

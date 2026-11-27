@@ -223,13 +223,54 @@ class LDPoolIndexSpec extends TestKit(ActorSystem("ld-pool-index-spec")) with An
     failing.index.refreshNow()
     verify(failing.api, times(2)).tokenById(n2t.provToken.toString)
 
-    withClue("after three failed reads the index stops trying, and the pool shows as unchecked with incomplete genesis ownership: ") {
-      val passes = (1 to 3).map(_ => failing.index.refreshNow())
-      verify(failing.api, times(LDPoolIndex.MaxGenesisReads)).tokenById(n2t.provToken.toString)
+    withClue("after three failed reads the index backs off instead of locking permanently, and recovers once backoff elapses: ") {
+      var clock = 100000L
+      @volatile var down = true
+      val recoverable = new Fixture()
+      when(recoverable.api.tokenById(anyString())).thenAnswer { inv =>
+        val id = inv.getArgument[String](0)
+        if (down && id.startsWith("a")) Failure(new RuntimeException("transient outage"))
+        else Success(id match {
+          case i if i == lit.provToken.toString => Some(TokenInfo(lit.provToken.toString, recoverable.litPool.boxId, LDHelpers.PROV_TOKEN_SUPPLY, "", "", 0))
+          case i if i == n2t.provToken.toString => Some(TokenInfo(n2t.provToken.toString, recoverable.n2tPool.boxId, LDHelpers.PROV_TOKEN_SUPPLY, "", "", 0))
+          case i if i == t2t.provToken.toString => Some(TokenInfo(t2t.provToken.toString, recoverable.t2tPool.boxId, LDHelpers.PROV_TOKEN_SUPPLY, "", "", 0))
+          case i if Seq(n2t.poolNFT, n2t.vaultNFT, t2t.poolNFT, t2t.vaultNFT).exists(_.toString == i) =>
+            Some(TokenInfo(i, "00" * 32, 1L, "", "", 0))
+          case _ => None
+        })
+      }
+      val idx = new LDPoolIndex(recoverable.nodeContext, system.dispatcher, (_, _) => (), () => Some(recoverable.tracked)) {
+        override protected def nowMs(): Long = clock
+      }
+      val passes = (1 to 5).map(_ => idx.refreshNow())
+      verify(recoverable.api, times(LDPoolIndex.MaxGenesisReads)).tokenById(n2t.provToken.toString)
       passes.last.pools.find(_.nft == n2t.poolNFT.toString).get.genesis.map(_.problems) shouldBe
         Some(Seq(LDPoolIndex.GenesisUnreadable))
       passes.last.genesisIncomplete shouldBe true
-      passes.last.ownershipIncomplete shouldBe true
+      // Once the node recovers and backoff elapses, the index heals cleanly
+      down = false
+      clock += LDPoolIndex.BackoffBaseMs + 1L
+      val healed = idx.refreshNow()
+      healed.genesisIncomplete shouldBe false
+      healed.ownershipIncomplete shouldBe false
+      healed.pools.find(_.nft == n2t.poolNFT.toString).get.genesis shouldBe Some(GenesisVerdict(Seq.empty, Seq.empty))
+    }
+
+    withClue("a cleanly read non-genesis pool box that fails to parse does not poison ownership completeness: ") {
+      val badGenesis = new Fixture()
+      // Corrupt the genesis box registers so LDGenesis.check throws a parse error while RPC succeeds
+      val malformedBox = badGenesis.n2tPool.copy(additionalRegisters = NodeRegisters.empty)
+      when(badGenesis.api.indexedBoxById(anyString())).thenAnswer { inv =>
+        val id = inv.getArgument[String](0)
+        Success(Seq(badGenesis.litPool, malformedBox, badGenesis.t2tPool).find(_.boxId == id)
+          .map(IndexedBox(_, "", 100, 1L)))
+      }
+      val snap = badGenesis.index.refreshNow()
+      snap.genesisIncomplete shouldBe false
+      snap.ownershipIncomplete shouldBe false
+      val badPool = snap.pools.find(_.nft == n2t.poolNFT.toString).get
+      badPool.genesis.get.problems should not be empty
+      badPool.genesisProvisions shouldBe empty
     }
   }
 

@@ -411,14 +411,29 @@ class ZcStatisticsSpec extends AnyFlatSpec with Matchers {
       val tx = decoded(signed)
       val block = blockOf(h, Seq(tx), Seq(nodeOf(lotIn), pA.box, nodeOf(fundingIn)))
       val net = signed.getOutputsToSpend.get(2).getValue - fundingIn.value
+      val gross = net + ZcMempoolArb.TxFee
       BatchingStatistics.arbCycles(block, ctx.getNetworkType, mine) shouldBe Vector(BatchingStatistics.ArbCycle(
-        BatchingFee(tx.id, nodeOf(lotIn).boxId, "arb", net.toString, ZcMempoolArb.TxFee.toString, local = true), Seq(tx.id)))
+        BatchingFee(tx.id, nodeOf(lotIn).boxId, "arb", gross.toString, ZcMempoolArb.TxFee.toString, local = true), Seq(tx.id)))
       BatchingStatistics.arbCycles(block, ctx.getNetworkType, stranger).map(_.fee.local) shouldBe Vector(false)
       BatchingStatistics.read(block, tx, ctx.getNetworkType, mine) shouldBe empty
       // The wallet output paid elsewhere is no arb of anyone's
       val elsewhere = tx.copy(outputs = tx.outputs.updated(2, tx.outputs(2).copy(ergoTree = stranger)))
       BatchingStatistics.arbCycles(blockOf(h, Seq(elsewhere), Seq(nodeOf(lotIn), pA.box, nodeOf(fundingIn))),
         ctx.getNetworkType, mine) shouldBe empty
+    }
+  }
+
+  it should "require out.creationHeight > in.creationHeight for packed ZC refresh attribution" in {
+    client.execute { ctx =>
+      val h = 1900000
+      val old = h - RefreshAge.toInt - 100
+      val wrapVaultIn = seeded(ctx, UTXO(ZcContracts.script(ZcKind.WrapVault, None).contract, MinBox + 30000000L,
+        Seq(tok("aa" * 32, 2L), tok("ee" * 32, 1L)), Seq.empty, Some(old)))
+      val refreshedWrap = ZcBatchTransactions.refreshWrapVault(ctx, wallet, read[ZcWrapVault](nodeOf(wrapVaultIn)),
+        wrapVaultIn, wallet.contract, minerFee = 0L, height = h)
+      val rwTx = decoded(refreshedWrap.signed)
+      val staleOut = rwTx.copy(outputs = rwTx.outputs.updated(0, rwTx.outputs.head.copy(creationHeight = old)))
+      BatchingStatistics.read(blockOf(h, Seq(staleOut), Seq(nodeOf(wrapVaultIn))), staleOut, NetworkType.MAINNET, mine) shouldBe empty
     }
   }
 }

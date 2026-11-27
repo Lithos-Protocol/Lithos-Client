@@ -428,11 +428,12 @@ class DexPoolExecution(nodeContext: NodeContext, walletSelector: EngineFunding, 
     val tipKey = (snapshot.height, snapshot.headerId)
     val cached = Option(nftAnswers.get()).filter(_._1 == tipKey).map(_._2).getOrElse(Map.empty)
     val todo = ids.filterNot(cached.contains)
-    val read = if (todo.isEmpty) Map.empty[String, DexPoolExecution.NftVerdict] else readNfts(todo, snapshot)
-    val unknown = read.collect { case (id, DexPoolExecution.NftVerdict.Unknown(reason)) => id -> reason }
+    val read = if (todo.isEmpty) Map.empty[String, (DexPoolExecution.NftVerdict, Boolean)]
+      else readNfts(todo, snapshot, requireFresh)
+    val unknown = read.collect { case (id, (DexPoolExecution.NftVerdict.Unknown(reason), _)) => id -> reason }
     val verified = read.collect {
-      case (id, DexPoolExecution.NftVerdict.Found(nft)) => id -> Some(nft)
-      case (id, DexPoolExecution.NftVerdict.NotNft) => id -> None
+      case (id, (DexPoolExecution.NftVerdict.Found(nft), true)) => id -> Some(nft)
+      case (id, (DexPoolExecution.NftVerdict.NotNft, true)) => id -> None
     }
     if (verified.nonEmpty) nftAnswers.updateAndGet { held =>
       val base = Option(held).filter(_._1 == tipKey).map(_._2).getOrElse(Map.empty)
@@ -443,7 +444,9 @@ class DexPoolExecution(nodeContext: NodeContext, walletSelector: EngineFunding, 
       throw LithosUnavailable(s"$reason, so ${unknown.size} token(s) cannot be ruled out as provision NFTs " +
         s"(${unknown.keys.take(3).mkString(", ")}); retry once complete")
     }
-    ids.flatMap(id => cached.get(id).orElse(verified.get(id)).flatten.map(id -> _)).toMap
+    ids.flatMap(id => cached.get(id).orElse(verified.get(id)).flatten.orElse(read.get(id).collect {
+      case (DexPoolExecution.NftVerdict.Found(nft), _) => nft
+    }).map(id -> _)).toMap
   }
 
   /** Verified answers for the `(height, headerId)` snapshot they were read against, by token id. None is verified "no NFT". */
@@ -452,41 +455,78 @@ class DexPoolExecution(nodeContext: NodeContext, walletSelector: EngineFunding, 
   /** How each NFT was minted, by token id; None when its box is a pool's but no deposit made it an owner. */
   private val nftMints = new java.util.concurrent.ConcurrentHashMap[String, Option[DexPoolExecution.NftMint]]()
 
-  private def readNfts(ids: Seq[String], snapshot: api.PoolIndexSnapshot): Map[String, DexPoolExecution.NftVerdict] = {
+  private def readNfts(ids: Seq[String], snapshot: api.PoolIndexSnapshot,
+                       requireFresh: Boolean): Map[String, (DexPoolExecution.NftVerdict, Boolean)] = {
     import DexPoolExecution.{NftFound, NftLive, NftMint, NftVerdict}
     val pools = snapshot.pools
     val byNft = pools.map(p => p.nft -> p).toMap
     val atGenesis = pools.flatMap(p => p.genesisProvisions.map(g => g.owner -> (p, g))).toMap
     def treeOf(p: IndexedPool) = p.n2t.map(_.liquidityPool.ergoTreeHex).orElse(p.t2t.map(_.liquidityPool.ergoTreeHex))
+    def matchPool(box: node.model.NodeBox): Option[IndexedPool] = for {
+      first <- box.assets.headOption
+      pool <- byNft.get(first.tokenId) if treeOf(pool).contains(box.ergoTree)
+    } yield pool
+    def matchPoolBox(id: String, box: node.model.NodeBox): Option[IndexedPool] =
+      if (box.boxId == id) matchPool(box) else None
+    var unindexedBoxes = Set.empty[String]
+    var unconfirmedPoolBoxes = Set.empty[String]
+    var mempoolError = Option.empty[String]
+    def checkUnconfirmed(id: String): Option[IndexedPool] = {
+      val fromInput = Option(nodeApi.unconfirmedInputByBoxId(id)) match {
+        case Some(scala.util.Success(Some(tx))) =>
+          if (tx.inputs.headOption.exists(_.boxId == id)) tx.outputs.flatMap(matchPool).headOption else None
+        case Some(scala.util.Success(None)) | None => None
+        case Some(scala.util.Failure(ex)) =>
+          if (mempoolError.isEmpty)
+            mempoolError = Some(s"could not read unconfirmed box $id from the node (${ex.getMessage})")
+          None
+      }
+      fromInput.orElse(Option(nodeApi.unconfirmedOutputByBoxId(id)) match {
+        case Some(scala.util.Success(Some(box))) => matchPoolBox(id, box)
+        case Some(scala.util.Success(None)) | None => None
+        case Some(scala.util.Failure(ex)) =>
+          if (mempoolError.isEmpty)
+            mempoolError = Some(s"could not read unconfirmed box $id from the node (${ex.getMessage})")
+          None
+      })
+    }
     // Each id's pool, and the pool box its deposit spent when genesis did not mint it
     val resolved = ids.flatMap { id =>
       atGenesis.get(id).map { case (pool, _) => (id, pool, Option.empty[node.model.IndexedBox]) }.orElse {
         val box = nodeApi.indexedBoxById(id).getOrElse(throw LithosUnavailable(s"could not read box $id from the node"))
-        for {
-          b <- box if b.boxId == id
-          first <- b.box.assets.headOption
-          pool <- byNft.get(first.tokenId) if treeOf(pool).contains(b.box.ergoTree)
-        } yield (id, pool, Some(b))
+        box match {
+          case Some(b) => matchPoolBox(id, b.box).map(pool => (id, pool, Some(b)))
+          case None =>
+            checkUnconfirmed(id) match {
+              case Some(pool) =>
+                unconfirmedPoolBoxes += id
+                Some((id, pool, Option.empty[node.model.IndexedBox]))
+              case None =>
+                unindexedBoxes += id
+                None
+            }
+        }
       }
     }
     // A creator's NFT whose pool genesis the index could not read: the NFT's own description names its pool. That
     // is only where to look; a provision under that pool's guard naming the token is the proof, as for any other.
     val unresolved = ids.filterNot(id => resolved.exists(_._1 == id))
     val unresolvedSet = unresolved.toSet
-    val (hinted, metadataError) = if (unresolved.isEmpty) (Seq.empty, Option.empty[String])
+    val (hinted, knownTokens, metadataError) = if (unresolved.isEmpty) (Seq.empty, Set.empty[String], Option.empty[String])
     else Option(nodeApi.tokensByIds(unresolved)) match {
       case Some(scala.util.Success(infos)) =>
+        val known = infos.map(_.id.toLowerCase).toSet
         val matched = infos.flatMap { t =>
           val tid = t.id.toLowerCase
           DexPoolExecution.PoolNamed.findFirstMatchIn(Option(t.description).getOrElse("")).map(_.group(1))
             .flatMap(byNft.get).filter(_ => unresolvedSet.contains(tid))
             .map(pool => (tid, pool, Option.empty[node.model.IndexedBox]))
         }
-        (matched, None)
+        (matched, known, None)
       case Some(scala.util.Failure(ex)) =>
-        (Seq.empty, Some(s"could not read token metadata from the node (${ex.getMessage})"))
+        (Seq.empty, Set.empty[String], Some(s"could not read token metadata from the node (${ex.getMessage})"))
       case None =>
-        (Seq.empty, Some("could not read token metadata from the node"))
+        (Seq.empty, Set.empty[String], Some("could not read token metadata from the node"))
     }
     val candidates = resolved ++ hinted
     val found = candidates.groupBy(_._2.nft).flatMap { case (nft, group) =>
@@ -536,13 +576,20 @@ class DexPoolExecution(nodeContext: NodeContext, walletSelector: EngineFunding, 
     val unknownReason: Option[String] =
       if (snapshot.truncated) Some("the pool index may be missing pools")
       else if (snapshot.genesisIncomplete) Some("the pool index could not read every pool's genesis provisions")
-      else metadataError
+      else metadataError.orElse(mempoolError)
     ids.map { id =>
-      val verdict: NftVerdict = found.get(id).flatten match {
-        case Some(nft) => NftVerdict.Found(nft)
-        case None => unknownReason.fold[NftVerdict](NftVerdict.NotNft)(NftVerdict.Unknown)
+      val result: (NftVerdict, Boolean) = found.get(id).flatten match {
+        case Some(nft) => (NftVerdict.Found(nft), !unconfirmedPoolBoxes.contains(id))
+        case None if unknownReason.isDefined => (NftVerdict.Unknown(unknownReason.get), false)
+        case None if unconfirmedPoolBoxes.contains(id) =>
+          if (requireFresh) (NftVerdict.Unknown("token was minted from an unconfirmed pool box"), false)
+          else (NftVerdict.NotNft, false)
+        case None if unindexedBoxes.contains(id) && !knownTokens.contains(id) =>
+          if (requireFresh) (NftVerdict.Unknown("token is not yet indexed by the node (unconfirmed or indexer lagging)"), false)
+          else (NftVerdict.NotNft, false)
+        case None => (NftVerdict.NotNft, true)
       }
-      id -> verdict
+      id -> result
     }.toMap
   }
 

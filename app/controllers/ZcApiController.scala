@@ -93,7 +93,7 @@ class ZcApiController @Inject()(cc: ControllerComponents, tracker: ZcTracker, re
     heavyRead(ifRevision)(reads.orderbook(market, filters(coverage, kind, matchable, grid), to, around, band))
 
   /** GET /sigmafi/zc/matches/:id */
-  def matches(id: String, ifRevision: Option[Long]): Action[AnyContent] = read(ifRevision)(reads.matches(id.trim.toLowerCase))
+  def matches(id: String, ifRevision: Option[Long]): Action[AnyContent] = heavyRead(ifRevision)(reads.matches(id.trim.toLowerCase))
 
   /**
    * GET /sigmafi/zc/markets/:market/fills. From the fill history, not the tracker, so it carries the history's own
@@ -138,7 +138,7 @@ class ZcApiController @Inject()(cc: ControllerComponents, tracker: ZcTracker, re
     else preview(respond(reads.simulate(request.body.asJson.getOrElse(Json.obj()))))
   }
 
-  // ── writes: each check signs nothing and is open but claim and wrap, each send needs the key ──────────
+  // ── writes: wallet-independent checks are open under a preview slot; wallet-reading checks and sends need the key ──
 
   def checkCreateOrder(): Action[AnyContent] = Action.async { r => preview(respond(writes.createOrder(r.body.asJson, send = false))) }
   def createOrder(): Action[AnyContent] = withApiKey(Action.async { r => offPool(respond(writes.createOrder(r.body.asJson, send = true))) })
@@ -146,7 +146,9 @@ class ZcApiController @Inject()(cc: ControllerComponents, tracker: ZcTracker, re
   def createOffer(): Action[AnyContent] = withApiKey(Action.async { r => offPool(respond(writes.createOffer(r.body.asJson, send = true))) })
   def checkCreateAsk(): Action[AnyContent] = Action.async { r => preview(respond(writes.createAsk(r.body.asJson, send = false))) }
   def createAsk(): Action[AnyContent] = withApiKey(Action.async { r => offPool(respond(writes.createAsk(r.body.asJson, send = true))) })
-  def checkCancel(boxId: String): Action[AnyContent] = Action.async { _ => preview(respond(writes.cancel(boxId, send = false))) }
+  // Keyed: the check verifies ownership and reads this wallet's authorizing box
+  def checkCancel(boxId: String): Action[AnyContent] =
+    withApiKey(Action.async { _ => preview(respond(writes.cancel(boxId, send = false))) })
   def cancel(boxId: String): Action[AnyContent] =
     withApiKey(Action.async { _ => offPool(respond(writes.cancel(boxId, send = true))) })
 
@@ -169,13 +171,15 @@ class ZcApiController @Inject()(cc: ControllerComponents, tracker: ZcTracker, re
   def pull(boxId: String): Action[AnyContent] = zc("pull", Some(boxId), send = true)
   def checkFractionalize(assetId: String): Action[AnyContent] = zc("fractionalize", Some(assetId), send = false)
   def fractionalize(assetId: String): Action[AnyContent] = zc("fractionalize", Some(assetId), send = true)
-  def checkRepay(assetId: String): Action[AnyContent] = zc("repay", Some(assetId), send = false)
+  // Keyed: checks borrower ownership / wallet authorizing boxes
+  def checkRepay(assetId: String): Action[AnyContent] = withApiKey(zc("repay", Some(assetId), send = false))
   def repay(assetId: String): Action[AnyContent] = zc("repay", Some(assetId), send = true)
-  def checkRecollateralize(assetId: String): Action[AnyContent] = zc("recollateralize", Some(assetId), send = false)
+  def checkRecollateralize(assetId: String): Action[AnyContent] = withApiKey(zc("recollateralize", Some(assetId), send = false))
   def recollateralize(assetId: String): Action[AnyContent] = zc("recollateralize", Some(assetId), send = true)
   def checkLiquidate(assetId: String): Action[AnyContent] = zc("liquidate", Some(assetId), send = false)
   def liquidate(assetId: String): Action[AnyContent] = zc("liquidate", Some(assetId), send = true)
-  def checkExtinguish(assetId: String): Action[AnyContent] = zc("extinguish", Some(assetId), send = false)
+  // Keyed: checks borrower ownership and whether this wallet holds the bond unit / shares
+  def checkExtinguish(assetId: String): Action[AnyContent] = withApiKey(zc("extinguish", Some(assetId), send = false))
   def extinguish(assetId: String): Action[AnyContent] = zc("extinguish", Some(assetId), send = true)
   // Keyed: the check reads how many shares (or bond units) this wallet holds
   def checkClaim(tokenId: String): Action[AnyContent] = withApiKey(zc("claim", Some(tokenId), send = false))
@@ -183,7 +187,8 @@ class ZcApiController @Inject()(cc: ControllerComponents, tracker: ZcTracker, re
   // Keyed: the check reads how much of the token this wallet holds
   def checkCreateWrap(): Action[AnyContent] = withApiKey(zc("createWrap", None, send = false))
   def createWrap(): Action[AnyContent] = zc("createWrap", None, send = true)
-  def checkUnwrap(receiptId: String): Action[AnyContent] = zc("unwrap", Some(receiptId), send = false)
+  // Keyed: the check reads whether this wallet holds the wrap receipt
+  def checkUnwrap(receiptId: String): Action[AnyContent] = withApiKey(zc("unwrap", Some(receiptId), send = false))
   def unwrap(receiptId: String): Action[AnyContent] = zc("unwrap", Some(receiptId), send = true)
   def checkMint(boxId: String): Action[AnyContent] = zc("mint", Some(boxId), send = false)
   def mint(boxId: String): Action[AnyContent] = zc("mint", Some(boxId), send = true)

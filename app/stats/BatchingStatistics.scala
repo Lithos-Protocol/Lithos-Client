@@ -345,7 +345,8 @@ private[stats] object BatchingStatistics {
     def refreshPiece(in: TxOutput, i: Int): Option[(Int, String, BigInt)] = for {
       outIdx <- extInt(tx, i, "9").filter(_ >= 0)
       out <- tx.outputs.lift(outIdx)
-      if out.ergoTree == in.ergoTree && out.assets == in.assets && out.registers == in.registers
+      if out.ergoTree == in.ergoTree && out.assets == in.assets && out.registers == in.registers &&
+        out.creationHeight > in.creationHeight
       gross = BigInt(in.value) - out.value
       if gross > 0 && gross <= ZcPricing.RefreshBounty
     } yield (outIdx, in.id, gross)
@@ -592,8 +593,9 @@ private[stats] object BatchingStatistics {
       rec <- ZcBoxes.read(box(zcBox))
       protoCount <- zcArbProtoCount(rec, zcBox, tx.copy(outputs = tx.outputs.slice(1, tx.outputs.size - 2)))
       if protoCount == tx.outputs.size - 3
-      gross = BigInt(out.value) - funding.map(b => BigInt(b.value)).sum
-      if gross > 0 && gross.isValidLong
+      net = BigInt(out.value) - funding.map(b => BigInt(b.value)).sum
+      gross = net + BigInt(fee.value)
+      if net > 0 && gross.isValidLong
     } yield ArbCycle(BatchingFee(tx.id, rec.boxId, ArbProtocol, gross.toString, fee.value.toString,
       local = wallet == minerTree), Seq(tx.id))
 

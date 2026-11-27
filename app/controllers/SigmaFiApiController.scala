@@ -90,7 +90,8 @@ class SigmaFiApiController @Inject()(cc: ControllerComponents,
   def checkLiquidate(boxId: String): Action[AnyContent] = check(api.liquidate(boxId, send = false))
   def liquidate(boxId: String): Action[AnyContent] = sendKeyed(api.liquidate(boxId, send = true))
 
-  def checkClaim(tokenId: String): Action[AnyContent] = check(api.claim(tokenId, send = false))
+  // Keyed: the check reads whether this wallet holds the bond unit
+  def checkClaim(tokenId: String): Action[AnyContent] = withApiKey(check(api.claim(tokenId, send = false)))
   def claim(tokenId: String): Action[AnyContent] = sendKeyed(api.claim(tokenId, send = true))
 
   // ── plumbing ─────────────────────────────────────────────────────────────

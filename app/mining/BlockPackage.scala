@@ -28,7 +28,8 @@ case class BlockPackage(blockHeight: Int,
                         limits: Option[CandidateBudget] = None,
                         share: Option[CandidateBudget] = None,
                         revenueByTx: Map[String, Long] = Map.empty,
-                        protocolTxs: Set[String] = Set.empty) {
+                        protocolTxs: Set[String] = Set.empty,
+                        atomicGroups: Seq[Set[String]] = Seq.empty) {
 
   def identity: MiningMessages.CandidateIdentity =
     MiningMessages.CandidateIdentity(blockHeight, parentId, collateral.txId, revision)
@@ -43,15 +44,16 @@ case class BlockPackage(blockHeight: Int,
                    lateSources: Set[String] = Set.empty, blockLimits: Option[CandidateBudget] = None,
                    packageShare: Option[CandidateBudget] = None,
                    perTxRevenue: Map[String, Long] = Map.empty,
-                   protocol: Set[String] = Set.empty): BlockPackage =
+                   protocol: Set[String] = Set.empty,
+                   atomic: Seq[Set[String]] = Seq.empty): BlockPackage =
     copy(blockTxs = built, revision = revision + 1, revenue = ergRevenue, sources = from, late = lateSources,
       limits = blockLimits.orElse(limits), share = packageShare.orElse(share), revenueByTx = perTxRevenue,
-      protocolTxs = protocol)
+      protocolTxs = protocol, atomicGroups = atomic)
 
   /** Genesis alone: no additions, and so no sources and no late ones. */
   def withoutBlockTxs: BlockPackage =
     copy(blockTxs = Seq.empty, revenue = 0L, sources = Set.empty, late = Set.empty, revenueByTx = Map.empty,
-      protocolTxs = Set.empty)
+      protocolTxs = Set.empty, atomicGroups = Seq.empty)
 
   def describe: String =
     s"BlockPackage(height=$blockHeight, rev=$revision, collateral=${collateral.collateralId}, " +

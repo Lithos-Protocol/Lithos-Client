@@ -123,8 +123,8 @@ abstract class Batcher(nodeContext: NodeContext,
    */
   protected def scansConfirmedOnly: Boolean = false
 
-  /** The last scan's result and the index height it read, while that height may still be current. */
-  private val lastScan = new AtomicReference(Option.empty[(Int, Tracked)])
+  /** The last scan's result and the `(indexedHeight, bestFullHeaderId)` tip it read, while that tip may still be current. */
+  private val lastScan = new AtomicReference(Option.empty[((Int, String), Tracked)])
 
   /** The bundles offered for one block, built before `deadline`. Runs on the worker; a failure offers nothing. */
   protected def executions(orders: Tracked, blockHeight: Int, slots: Int, deadline: Deadline): Seq[CandidateBundle]
@@ -240,13 +240,16 @@ abstract class Batcher(nodeContext: NodeContext,
   private def scan(): Tracked =
     if (!scansConfirmedOnly) discover()
     else {
-      val indexed = Try(nodeApi.indexedHeight().get).toOption
-        .collect { case h if h.indexedHeight == h.fullHeight => h.indexedHeight }
+      val tip = for {
+        h <- Try(nodeApi.indexedHeight().get).toOption if h.indexedHeight == h.fullHeight
+        info <- Try(nodeApi.info().get).toOption if info.fullHeight.contains(h.indexedHeight)
+        header <- info.bestFullHeaderId if header.nonEmpty
+      } yield (h.indexedHeight, header)
       lastScan.get match {
-        case Some((height, found)) if indexed.contains(height) => found -- skippedOrders()
+        case Some((key, found)) if tip.contains(key) => found -- skippedOrders()
         case _ =>
           val found = discover()
-          lastScan.set(indexed.map(_ -> found))
+          lastScan.set(tip.map(_ -> found))
           found
       }
     }

@@ -28,11 +28,13 @@ import scala.util.{Failure, Success, Try}
  */
 @Singleton
 class PoolTracker(api: () => NodeApi, network: NetworkType, io: ExecutionContext,
-                  reseedBlocks: Int = PoolTracker.ReseedBlocks, retryMs: Long = PoolTracker.RetryMs) {
+                  reseedBlocks: Int = PoolTracker.ReseedBlocks, retryMs: Long = PoolTracker.RetryMs,
+                  completionEc: ExecutionContext = ExecutionContext.global) {
 
   @Inject def this(nodeContext: NodeContext, system: ActorSystem) =
     this(() => nodeContext.getNodeApi, nodeContext.getNetwork,
-      system.dispatchers.lookup(Contexts.key(Contexts.PoolTracking)))
+      system.dispatchers.lookup(Contexts.key(Contexts.PoolTracking)),
+      completionEc = system.dispatcher)
 
   import PoolTracker._
 
@@ -144,7 +146,7 @@ class PoolTracker(api: () => NodeApi, network: NetworkType, io: ExecutionContext
         }
         kick()
       } finally published.trySuccess(())
-    }(io)
+    }(completionEc)
   }
 
   /** Warns when a rescan finds other boxes than the blocks kept, which only a tracking fault explains. */
@@ -161,8 +163,11 @@ object PoolTracker {
   /** Most blocks read one by one to reach a target; further behind, a scan is cheaper. */
   final val MaxCatchUp = 32
 
-  /** Most boxes tracked: each ErgoDEX script held a few hundred pools in 2026, and the scans stopped at 2,000. */
+  /** Most non-singleton pool boxes tracked across all pool scripts. Singletons are kept outside this cap. */
   final val MaxBoxes = 5000
+
+  /** Per-deployment quota during a scan so dust spam on one pool script cannot evict other deployments. */
+  final val MaxPerDeployment = 1200
 
   /** Boxes read per script or template in a scan. */
   final val MaxScanned = 2000
@@ -221,7 +226,7 @@ object PoolTracker {
     require(indexed <= height, s"the node's index is at $indexed, past the block asked for at $height")
     require(height - indexed <= MaxCatchUp, s"the node's index is at $indexed, too far behind $height to catch up")
     val base = source.headerAt(indexed).get
-    val reads: Seq[(String, Paging => Try[Seq[IndexedBox]])] = Seq(
+    val poolReads: Seq[(String, Paging => Try[Seq[IndexedBox]])] = Seq(
       "ErgoDEX native pool script" -> (p => api.unspentBoxesByErgoTree(ErgoDexContracts.NativePoolErgoTree, p,
         SortDirection.Desc, MempoolOptions.ConfirmedOnly)),
       "ErgoDEX token pool script" -> (p => api.unspentBoxesByErgoTree(ErgoDexContracts.TokenPoolErgoTree, p,
@@ -232,15 +237,26 @@ object PoolTracker {
         SortDirection.Desc, MempoolOptions.ConfirmedOnly))) ++
       (if (shapes.network != NetworkType.MAINNET) Seq.empty else Seq(
         "ErgoDEX CL position script" -> ((p: Paging) => api.unspentBoxesByErgoTree(ErgoDexClContracts.PositionErgoTree, p,
-          SortDirection.Desc, MempoolOptions.ConfirmedOnly)),
+          SortDirection.Desc, MempoolOptions.ConfirmedOnly))))
+    val singletonReads: Seq[(String, Paging => Try[Seq[IndexedBox]])] =
+      if (shapes.network != NetworkType.MAINNET) Seq.empty else Seq(
         "ErgoDEX CL config" -> ((p: Paging) => api.unspentBoxesByTokenId(ErgoDexClContracts.ConfigToken, p,
           SortDirection.Desc, MempoolOptions.ConfirmedOnly)),
         "SigmaUSD bank" -> ((p: Paging) => api.unspentBoxesByTokenId(SigmaUsdContracts.BankNft, p, SortDirection.Desc,
           MempoolOptions.ConfirmedOnly)),
         "SigmaUSD oracle pool" -> ((p: Paging) => api.unspentBoxesByTokenId(SigmaUsdContracts.OracleNft, p,
-          SortDirection.Desc, MempoolOptions.ConfirmedOnly))))
+          SortDirection.Desc, MempoolOptions.ConfirmedOnly)))
     var cut = false
-    val found = reads.flatMap { case (name, read) =>
+    val perReadPools = poolReads.map { case (name, read) =>
+      val (boxes, exhausted) = utils.PagedScan.collect(MaxScanned)(read)(indexed =>
+        shapes.read(indexed.box, indexed.inclusionHeight))
+      if (!exhausted) {
+        cut = true
+        logger.warn(s"Pool tracking stopped the $name scan after $MaxScanned boxes; pools past it are read from the node")
+      }
+      boxes.groupBy(_.boxId).values.map(_.head).toVector
+    }
+    val singletons = singletonReads.flatMap { case (name, read) =>
       val (boxes, exhausted) = utils.PagedScan.collect(MaxScanned)(read)(indexed =>
         shapes.read(indexed.box, indexed.inclusionHeight))
       if (!exhausted) {
@@ -248,13 +264,28 @@ object PoolTracker {
         logger.warn(s"Pool tracking stopped the $name scan after $MaxScanned boxes; pools past it are read from the node")
       }
       boxes
-    }
+    }.groupBy(_.boxId).values.map(_.head).toVector
     val after = api.indexedHeight().get.indexedHeight
     require(after == indexed && source.headerAt(indexed).get.id == base.id,
       s"the node's index moved from $indexed while the pools were scanned")
-    val distinct = found.groupBy(_.boxId).values.map(_.head).toSeq
-    canonical(api, source, distinct, indexed)
-    val seeded = TrackedPools.seeded(indexed, base.id, distinct.take(MaxBoxes), cut || distinct.size > MaxBoxes)
+    val allDistinctPools = perReadPools.flatten.groupBy(_.boxId).values.map(_.head).toVector
+    // Multiple unspent boxes sharing the same first asset carry a fungible token, never a valid singleton pool NFT;
+    // excluding repeated NFTs here prevents fungible-token dust floods from displacing real pools under caps.
+    val nftCounts = scala.collection.mutable.HashMap.empty[String, Int].withDefaultValue(0)
+    allDistinctPools.foreach(b => nftCounts.update(b.nft, nftCounts(b.nft) + 1))
+    val uniqueByRead = perReadPools.map(_.filter(b => nftCounts(b.nft) == 1))
+    val quotaed = uniqueByRead.flatMap { bucket =>
+      if (bucket.size > MaxPerDeployment) {
+        cut = true
+        bucket.sortBy(b => (-b.box.value, -b.inclusionHeight, b.boxId)).take(MaxPerDeployment)
+      } else bucket
+    }.groupBy(_.boxId).values.map(_.head).toVector
+    val poolsTruncated = quotaed.size > MaxBoxes
+    val keptPools = if (poolsTruncated) quotaed.sortBy(b => (-b.box.value, -b.inclusionHeight, b.boxId)).take(MaxBoxes)
+      else quotaed
+    val kept = (keptPools ++ singletons).groupBy(_.boxId).values.map(_.head).toSeq
+    canonical(api, source, kept, indexed)
+    val seeded = TrackedPools.seeded(indexed, base.id, kept, cut || poolsTruncated)
     logger.info(s"Pool tracking scanned ${seeded.boxes.size} pool box(es) at $indexed")
     follow(api, source, shapes, seeded, height, headerId).getOrElse(
       throw new IllegalStateException(s"block $headerId at $height does not descend from the scanned block ${base.id}"))

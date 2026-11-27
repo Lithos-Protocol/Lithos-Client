@@ -424,7 +424,17 @@ object ErgoDexClArbPool {
    * position script, its NFT first at one unit, two tokens (ERG/token) or three (token/token), R4 holding the curve's
    * offsets and LP fee and R5 its two fee balances, in a state the contract accepts.
    */
-  def read(box: NodeBox, config: ClConfig): Option[ErgoDexClArbPool] = Try {
+  def read(box: NodeBox, config: ClConfig): Option[ErgoDexClArbPool] =
+    parsePosition(box).map { case (position, ergSide) =>
+      val assets = box.assets
+      ErgoDexClArbPool(position, assets.head.tokenId, box.boxId,
+        if (ergSide) ArbAsset.Erg else ArbAsset.token(assets(1).tokenId), ArbAsset.token(assets.last.tokenId), config)
+    }
+
+  /** Whether `box` holds a valid ErgoDEX CL position independent of the config box. */
+  def validPositionBox(box: NodeBox): Boolean = parsePosition(box).isDefined
+
+  private def parsePosition(box: NodeBox): Option[(ClPosition, Boolean)] = Try {
     require(box.ergoTree.equalsIgnoreCase(ErgoDexClContracts.PositionErgoTree))
     val assets = box.assets
     require((assets.size == 2 || assets.size == 3) && assets.head.amount == 1L)
@@ -432,13 +442,20 @@ object ErgoDexClArbPool {
     require(registers.size >= 2)
     val curve = longs(registers.head)
     val fees = longs(registers(1))
-    require(curve.size >= 3 && fees.size >= 2)
+    require(curve.size >= 3 && fees.size >= 2 && fees.head >= 0L && fees(1) >= 0L)
     val ergSide = assets.size == 2
-    val x = if (ergSide) box.value - LockedErg - fees.head else assets(1).amount - 1L - fees.head
-    val position = ClPosition(x, assets.last.amount - 1L - fees(1), curve.head, curve(1), curve(2), fees.head, fees(1))
+    val x = if (ergSide) {
+      require(box.value >= LockedErg && box.value - LockedErg >= fees.head)
+      box.value - LockedErg - fees.head
+    } else {
+      require(assets(1).amount >= 1L && assets(1).amount - 1L >= fees.head)
+      assets(1).amount - 1L - fees.head
+    }
+    require(assets.last.amount >= 1L && assets.last.amount - 1L >= fees(1))
+    val y = assets.last.amount - 1L - fees(1)
+    val position = ClPosition(x, y, curve.head, curve(1), curve(2), fees.head, fees(1))
     require(position.valid)
-    ErgoDexClArbPool(position, assets.head.tokenId, box.boxId,
-      if (ergSide) ArbAsset.Erg else ArbAsset.token(assets(1).tokenId), ArbAsset.token(assets.last.tokenId), config)
+    position -> ergSide
   }.toOption
 
   /** The longs a Coll[Long] register holds. */

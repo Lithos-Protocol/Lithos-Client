@@ -175,5 +175,16 @@ class ZcHistorySpec extends AnyFlatSpec with Matchers with Eventually {
     verify(c.api, times(1)).indexedTransactionById(anyString())
     h.ledger().costs(order1).paid shouldBe BigInt(Erg)
     new ZcHistory(() => c.api, () => wallet, t, 0).status shouldBe "not-configured"
+
+    // Shallow reorg: the same tx re-mines at a different height within the Reorg window -> height is reconciled without re-fetching
+    c.extend(1700121, 1700121)
+    c.indexed = 1700121
+    t.follow(1700121, c.header(1700121).id)
+    eventually(t.view.map(_.book.height) shouldBe Some(1700121))
+    val remined = marked.copy(inclusionHeight = 1700118)
+    when(c.api.walletTransactions(any[Option[Int]], any[Option[Int]], any[Option[Int]], any[Option[Int]]))
+      .thenReturn(Success(Seq(plain, remined)))
+    h.all().map(e => e.kind -> e.height) shouldBe Seq("lent" -> 1700118)
+    verify(c.api, times(1)).indexedTransactionById(anyString())
   }
 }

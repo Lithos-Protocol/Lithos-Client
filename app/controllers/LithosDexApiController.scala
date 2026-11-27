@@ -61,8 +61,9 @@ class LithosDexApiController @Inject()(cc: ControllerComponents,
   def getVault(): Action[AnyContent] = Action.async { _ => offPool(respond(api.getVault(ldCache))) }
 
   /** GET /dex/provisions */
-  def listProvisions(): Action[AnyContent] =
+  def listProvisions(): Action[AnyContent] = withApiKey {
     Action.async { _ => offPool(respond(api.listProvisions(ldCache))) }
+  }
 
   // ── swap ─────────────────────────────────────────────────────────────────
 
