@@ -112,14 +112,29 @@ class TrackedPoolsSpec extends AnyFlatSpec with Matchers {
     traded.pool(sigmausd.SigmaUsdContracts.OracleNft).map(_.boxId) shouldBe Some(oracle.boxId)
     traded.cut shouldBe false
 
-    // A fungible-token flood of 5 boxes sharing one NFT uses at most 2 slots, leaving room for real pools
+    // A fungible-token flood of 5 boxes sharing one NFT uses at most 2 slots, leaves room for real pools,
+    // and never marks the tracked state truncated (a valid singleton pool NFT can never exist in 2+ boxes).
     val spam = (1 to 5).map(i => pool(9, 100 + i))
     val flooded = traded.applied(102, "h102", "h101",
       Seq(tx("t2", Seq.empty, spam :+ b0)), shapes, cap = 4)
     flooded.byNft(id(9)) should have size 2
     flooded.pool(id(9)) shouldBe None
     flooded.pool(id(2)).map(_.boxId) shouldBe Some(b0.boxId)
-    flooded.cut shouldBe true
+    flooded.cut shouldBe false
+    flooded.lithosDexCut shouldBe false
+
+    // Overflowing the cap with an ErgoDEX pool sets cut = true but leaves lithosDexCut = false,
+    // whereas dropping a LithosDex pool at cap sets both.
+    val extraErgoDex = pool(3, 100)
+    val edCut = flooded.applied(103, "h103", "h102",
+      Seq(tx("t3", Seq.empty, Seq(extraErgoDex))), shapes, cap = 4)
+    edCut.cut shouldBe true
+    edCut.lithosDexCut shouldBe false
+
+    val ldCut = edCut.applied(104, "h104", "h103",
+      Seq(tx("t4", Seq.empty, Seq(litRsnPool))), shapes, cap = 4)
+    ldCut.cut shouldBe true
+    ldCut.lithosDexCut shouldBe true
   }
 
   "Pool shapes" should "take LithosDex pools of both kinds with the deployment their ids build" in {

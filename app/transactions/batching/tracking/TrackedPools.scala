@@ -36,6 +36,12 @@ object PoolDeployment {
 
   /** Protocol singletons (CL config, SigmaUSD bank and oracle) that must never be evicted by pool box caps. */
   def singleton(deployment: PoolDeployment): Boolean = !dex(deployment)
+
+  /** Whether `deployment` is a LithosDex pool (ERG/token or token/token). */
+  def lithosDex(deployment: PoolDeployment): Boolean = deployment match {
+    case _: LithosDexNative | _: LithosDexToken => true
+    case _ => false
+  }
 }
 
 /** A confirmed pool box, the height of the block that created it, and its deployment. */
@@ -118,7 +124,7 @@ final case class AppliedBlock(height: Int, headerId: String, parentId: String, r
  */
 final case class TrackedPools(height: Int, headerId: String, boxes: Map[String, TrackedBox],
                               byNft: Map[String, Set[String]], history: Vector[AppliedBlock], cut: Boolean,
-                              scannedAt: Int) extends BlockKept[TrackedPools] {
+                              scannedAt: Int, lithosDexCut: Boolean = false) extends BlockKept[TrackedPools] {
 
   /** The one box carrying `nft`, if exactly one does. */
   def pool(nft: String): Option[TrackedBox] = byNft.get(nft) match {
@@ -154,6 +160,7 @@ final case class TrackedPools(height: Int, headerId: String, boxes: Map[String, 
     var removed = Vector.empty[TrackedBox]
     var added = Vector.empty[String]
     var short = cut
+    var ldShort = lithosDexCut
     txs.foreach { tx =>
       tx.inputs.foreach(input => kept.get(input.boxId).foreach { gone =>
         kept -= gone.boxId
@@ -163,10 +170,14 @@ final case class TrackedPools(height: Int, headerId: String, boxes: Map[String, 
       })
       tx.outputs.foreach(output => shapes.read(output, blockHeight).foreach { found =>
         val isSingleton = PoolDeployment.singleton(found.deployment)
-        // Protocol singletons bypass the cap; non-singleton pools are bounded by `cap` (excluding singletons) and
-        // any non-singleton NFT already held by 2+ boxes (proven fungible) stops consuming cap slots.
-        if (!isSingleton && (nonSingletons >= cap || nfts.getOrElse(found.nft, Set.empty).size >= 2)) short = true
-        else if (!kept.contains(found.boxId)) {
+        // Protocol singletons bypass the cap. A non-singleton NFT already held by 2+ boxes is a fungible token,
+        // never a valid singleton pool NFT, so ignoring further boxes of it stops cap exhaustion without marking
+        // the tracked state truncated.
+        if (!isSingleton && nfts.getOrElse(found.nft, Set.empty).size >= 2) ()
+        else if (!isSingleton && nonSingletons >= cap) {
+          short = true
+          if (PoolDeployment.lithosDex(found.deployment)) ldShort = true
+        } else if (!kept.contains(found.boxId)) {
           kept += found.boxId -> found
           if (!isSingleton) nonSingletons += 1
           nfts = TrackedPools.plus(nfts, found)
@@ -176,7 +187,7 @@ final case class TrackedPools(height: Int, headerId: String, boxes: Map[String, 
     }
     TrackedPools(blockHeight, blockId, kept, nfts,
       (history :+ AppliedBlock(blockHeight, blockId, parentId, removed, added)).takeRight(TrackedPools.MaxHistory), short,
-      scannedAt)
+      scannedAt, ldShort)
   }
 
   /** This state as it stood at `at`, undoing retained blocks above it, or None when `at` is below [[base]]. */
@@ -195,7 +206,8 @@ final case class TrackedPools(height: Int, headerId: String, boxes: Map[String, 
         kept += box.boxId -> box
         nfts = TrackedPools.plus(nfts, box)
       }
-      TrackedPools(block.height - 1, block.parentId, kept, nfts, state.history.dropRight(1), state.cut, scannedAt)
+      TrackedPools(block.height - 1, block.parentId, kept, nfts, state.history.dropRight(1), state.cut, scannedAt,
+        state.lithosDexCut)
     })
 }
 
@@ -205,10 +217,11 @@ object TrackedPools {
   final val MaxHistory = 16
 
   /** A state read from a scan at `height`, with no history. */
-  def seeded(height: Int, headerId: String, found: Seq[TrackedBox], cut: Boolean): TrackedPools = {
+  def seeded(height: Int, headerId: String, found: Seq[TrackedBox], cut: Boolean,
+             lithosDexCut: Boolean = false): TrackedPools = {
     val boxes = found.map(box => box.boxId -> box).toMap
     TrackedPools(height, headerId, boxes, boxes.values.foldLeft(Map.empty[String, Set[String]])(plus),
-      Vector.empty, cut, height)
+      Vector.empty, cut, height, lithosDexCut)
   }
 
   private def plus(nfts: Map[String, Set[String]], box: TrackedBox): Map[String, Set[String]] =

@@ -216,4 +216,29 @@ class PoolTrackerSpec extends AnyFlatSpec with Matchers with Eventually {
     Thread.sleep(300)
     t.latest.map(s => (s.height, s.scannedAt, s.pool(id(3)))) shouldBe Some((tip + 2, tip, None))
   }
+
+  it should "keep a complete live state when a periodic rescan is truncated" in {
+    val c = chain()
+    val t = tracker(c, reseedBlocks = 2)
+    warmed(c, t)
+    val scans = c.scanPages.get
+    // Flood the native pool script with > MaxScanned boxes sharing one fungible token so the rescan is truncated
+    val template = pool(9, 100)
+    val flood = (0 to PoolTracker.MaxScanned).map(i =>
+      LDNodeFixtures.indexed(template.copy(boxId = f"f9$i%062x"), tip - 10))
+    c.scans(flood: _*)
+    c.extend(tip + 1, tip + 2)
+    c.indexed = tip + 2
+    t.follow(tip + 2, c.header(tip + 2).id)
+    t.at(tip + 2, 10.seconds).map(_.height) shouldBe Some(tip + 2)
+    eventually(c.scanPages.get should be > scans)
+    Thread.sleep(300)
+    val kept = t.latest.get
+    kept.height shouldBe (tip + 2)
+    kept.scannedAt shouldBe tip
+    kept.cut shouldBe false
+    kept.lithosDexCut shouldBe false
+    kept.pool(id(1)).map(_.boxId) shouldBe Some(pool(1, 100).boxId)
+    kept.pool(id(2)).map(_.boxId) shouldBe Some(pool(2, 100).boxId)
+  }
 }

@@ -415,8 +415,14 @@ class LDPoolIndexSpec extends TestKit(ActorSystem("ld-pool-index-spec")) with An
 
   it should "not rebuild permanently capacity-truncated snapshots repeatedly, coalesce freshSnapshot builds, and prune departed pools" in {
     val f = new Fixture()
-    val cutState = f.tracked.copy(cut = true)
-    val fullState = f.tracked.copy(cut = false)
+    val ergoDexOnlyCut = f.tracked.copy(cut = true, lithosDexCut = false)
+    val cutState = f.tracked.copy(cut = true, lithosDexCut = true)
+    val fullState = f.tracked.copy(cut = false, lithosDexCut = false)
+    withClue("non-LithosDex pool truncation must not mark the LithosDex pool index truncated: ") {
+      val nonLd = new LDPoolIndex(f.nodeContext, system.dispatcher, (_, _) => (), () => Some(ergoDexOnlyCut)).refreshNow()
+      nonLd.truncated shouldBe false
+      nonLd.ownershipIncomplete shouldBe false
+    }
     @volatile var currentTracked: TrackedPools = cutState
     // Leaving t2t's vault empty while indexedHeight == Tip means each actual rebuild must re-check t2t.vaultNFT
     val t2tChecks = new java.util.concurrent.atomic.AtomicInteger(0)

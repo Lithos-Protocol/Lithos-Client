@@ -158,7 +158,7 @@ class LDPoolIndex(nodeContext: NodeContext, ioContext: => scala.concurrent.Execu
         } else false
       if (accept) heldFrom(built, held) else held
     }
-    if (published.snapshot.height == next.height && published.snapshot.headerId == next.headerId)
+    if (published.snapshot eq next)
       pruneCaches(built)
     published
   }
@@ -321,7 +321,7 @@ class LDPoolIndex(nodeContext: NodeContext, ioContext: => scala.concurrent.Execu
     val canonical = lithosdex.LDHelpers.getPoolNFT(network).toString
     val sorted = pools.sortBy(p => (p.nft != canonical, !p.verified, -p.inclusionHeight, p.nft))
     val activeTokens = sorted.flatMap(p => p.tokenX.toSeq :+ p.tokenY).toSet
-    val capacityCut = state.cut || n2tCut || t2tCut
+    val capacityCut = state.lithosDexCut || n2tCut || t2tCut
     val snap = PoolIndexSnapshot("ready", state.height, capacityCut || unread > 0, sorted,
       metaFor(activeTokens.toSeq, registry), headerId = state.headerId, genesisIncomplete = genesisUnread > 0)
     def idsOf(boxes: Seq[TrackedBox]): (Set[String], Set[String], Set[String]) = {

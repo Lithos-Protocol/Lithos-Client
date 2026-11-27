@@ -131,9 +131,17 @@ class PoolTracker(api: () => NodeApi, network: NetworkType, io: ExecutionContext
         running = None
         result match {
           case Success(next) =>
-            if (rescan) current.filter(_.headerId == next.headerId).foreach(compare(_, next))
-            current = Some(next)
-            failed = None
+            val keepLive = rescan && current.exists(cur =>
+              (next.cut && !cur.cut) || (next.lithosDexCut && !cur.lithosDexCut))
+            if (keepLive) {
+              logger.warn(s"Pool tracking's periodic rescan at ${wanted._1} was truncated while the live state is " +
+                "complete; keeping the tracked pools")
+              rescanFrom = wanted._1 + RescanBackoffBlocks
+            } else {
+              if (rescan) current.filter(_.headerId == next.headerId).foreach(compare(_, next))
+              current = Some(next)
+              failed = None
+            }
           case Failure(ex) if rescan =>
             logger.warn(s"Pool tracking's periodic rescan at ${wanted._1} failed, keeping the tracked pools: " +
               ex.getMessage)
@@ -226,17 +234,17 @@ object PoolTracker {
     require(indexed <= height, s"the node's index is at $indexed, past the block asked for at $height")
     require(height - indexed <= MaxCatchUp, s"the node's index is at $indexed, too far behind $height to catch up")
     val base = source.headerAt(indexed).get
-    val poolReads: Seq[(String, Paging => Try[Seq[IndexedBox]])] = Seq(
-      "ErgoDEX native pool script" -> (p => api.unspentBoxesByErgoTree(ErgoDexContracts.NativePoolErgoTree, p,
+    val poolReads: Seq[(String, Boolean, Paging => Try[Seq[IndexedBox]])] = Seq(
+      ("ErgoDEX native pool script", false, p => api.unspentBoxesByErgoTree(ErgoDexContracts.NativePoolErgoTree, p,
         SortDirection.Desc, MempoolOptions.ConfirmedOnly)),
-      "ErgoDEX token pool script" -> (p => api.unspentBoxesByErgoTree(ErgoDexContracts.TokenPoolErgoTree, p,
+      ("ErgoDEX token pool script", false, p => api.unspentBoxesByErgoTree(ErgoDexContracts.TokenPoolErgoTree, p,
         SortDirection.Desc, MempoolOptions.ConfirmedOnly)),
-      "LithosDex ERG pool template" -> (p => api.unspentBoxesByTemplateHash(shapes.n2tTemplateHash, p,
+      ("LithosDex ERG pool template", true, p => api.unspentBoxesByTemplateHash(shapes.n2tTemplateHash, p,
         SortDirection.Desc, MempoolOptions.ConfirmedOnly)),
-      "LithosDex token pool template" -> (p => api.unspentBoxesByTemplateHash(shapes.t2tTemplateHash, p,
+      ("LithosDex token pool template", true, p => api.unspentBoxesByTemplateHash(shapes.t2tTemplateHash, p,
         SortDirection.Desc, MempoolOptions.ConfirmedOnly))) ++
       (if (shapes.network != NetworkType.MAINNET) Seq.empty else Seq(
-        "ErgoDEX CL position script" -> ((p: Paging) => api.unspentBoxesByErgoTree(ErgoDexClContracts.PositionErgoTree, p,
+        ("ErgoDEX CL position script", false, (p: Paging) => api.unspentBoxesByErgoTree(ErgoDexClContracts.PositionErgoTree, p,
           SortDirection.Desc, MempoolOptions.ConfirmedOnly))))
     val singletonReads: Seq[(String, Paging => Try[Seq[IndexedBox]])] =
       if (shapes.network != NetworkType.MAINNET) Seq.empty else Seq(
@@ -247,14 +255,16 @@ object PoolTracker {
         "SigmaUSD oracle pool" -> ((p: Paging) => api.unspentBoxesByTokenId(SigmaUsdContracts.OracleNft, p,
           SortDirection.Desc, MempoolOptions.ConfirmedOnly)))
     var cut = false
-    val perReadPools = poolReads.map { case (name, read) =>
+    var lithosDexCut = false
+    val perReadPools = poolReads.map { case (name, isLd, read) =>
       val (boxes, exhausted) = utils.PagedScan.collect(MaxScanned)(read)(indexed =>
         shapes.read(indexed.box, indexed.inclusionHeight))
       if (!exhausted) {
         cut = true
+        if (isLd) lithosDexCut = true
         logger.warn(s"Pool tracking stopped the $name scan after $MaxScanned boxes; pools past it are read from the node")
       }
-      boxes.groupBy(_.boxId).values.map(_.head).toVector
+      isLd -> boxes.groupBy(_.boxId).values.map(_.head).toVector
     }
     val singletons = singletonReads.flatMap { case (name, read) =>
       val (boxes, exhausted) = utils.PagedScan.collect(MaxScanned)(read)(indexed =>
@@ -268,24 +278,28 @@ object PoolTracker {
     val after = api.indexedHeight().get.indexedHeight
     require(after == indexed && source.headerAt(indexed).get.id == base.id,
       s"the node's index moved from $indexed while the pools were scanned")
-    val allDistinctPools = perReadPools.flatten.groupBy(_.boxId).values.map(_.head).toVector
+    val allDistinctPools = perReadPools.flatMap(_._2).groupBy(_.boxId).values.map(_.head).toVector
     // Multiple unspent boxes sharing the same first asset carry a fungible token, never a valid singleton pool NFT;
     // excluding repeated NFTs here prevents fungible-token dust floods from displacing real pools under caps.
     val nftCounts = scala.collection.mutable.HashMap.empty[String, Int].withDefaultValue(0)
     allDistinctPools.foreach(b => nftCounts.update(b.nft, nftCounts(b.nft) + 1))
-    val uniqueByRead = perReadPools.map(_.filter(b => nftCounts(b.nft) == 1))
-    val quotaed = uniqueByRead.flatMap { bucket =>
+    val uniqueByRead = perReadPools.map { case (isLd, bucket) => isLd -> bucket.filter(b => nftCounts(b.nft) == 1) }
+    val quotaed = uniqueByRead.flatMap { case (isLd, bucket) =>
       if (bucket.size > MaxPerDeployment) {
         cut = true
+        if (isLd) lithosDexCut = true
         bucket.sortBy(b => (-b.box.value, -b.inclusionHeight, b.boxId)).take(MaxPerDeployment)
       } else bucket
     }.groupBy(_.boxId).values.map(_.head).toVector
     val poolsTruncated = quotaed.size > MaxBoxes
-    val keptPools = if (poolsTruncated) quotaed.sortBy(b => (-b.box.value, -b.inclusionHeight, b.boxId)).take(MaxBoxes)
-      else quotaed
+    val keptPools = if (poolsTruncated) {
+      val (take, drop) = quotaed.sortBy(b => (-b.box.value, -b.inclusionHeight, b.boxId)).splitAt(MaxBoxes)
+      if (drop.exists(b => PoolDeployment.lithosDex(b.deployment))) lithosDexCut = true
+      take
+    } else quotaed
     val kept = (keptPools ++ singletons).groupBy(_.boxId).values.map(_.head).toSeq
     canonical(api, source, kept, indexed)
-    val seeded = TrackedPools.seeded(indexed, base.id, kept, cut || poolsTruncated)
+    val seeded = TrackedPools.seeded(indexed, base.id, kept, cut || poolsTruncated, lithosDexCut)
     logger.info(s"Pool tracking scanned ${seeded.boxes.size} pool box(es) at $indexed")
     follow(api, source, shapes, seeded, height, headerId).getOrElse(
       throw new IllegalStateException(s"block $headerId at $height does not descend from the scanned block ${base.id}"))
