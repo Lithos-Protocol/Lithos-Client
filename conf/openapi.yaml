@@ -3411,8 +3411,10 @@ paths:
       description: >
         Every provision held by this wallet, including those whose `ownerNFT` sits in one of its
         redeem orders. `accrued*` is what it has earned, `claimable*` is what can be paid now, and
-        `unflushed*` is the difference a flush would release.
+        `unflushed*` is the difference a flush would release. Needs the key, since it reads this wallet's holdings.
       operationId: listLDProvisions
+      security:
+        - ApiKeyAuth: []
       tags:
         - lithosdex
       responses:
@@ -4996,8 +4998,10 @@ paths:
   /sigmafi/old/claims/{tokenId}/check:
     post:
       summary: Quote a claim
-      description: What a claim of this bond asset takes, and what it leaves locked. Signs nothing.
+      description: What a claim of this bond asset takes, and what it leaves locked. Signs nothing. Needs the key, since the quote reads whether this wallet holds the bond unit.
       operationId: checkSFClaim
+      security:
+        - ApiKeyAuth: []
       tags:
         - sigmafi
       parameters:
@@ -5005,6 +5009,8 @@ paths:
       responses:
         '200':
           $ref: '#/components/responses/SigmaFiQuoted'
+        '403':
+          $ref: '#/components/responses/SigmaFiForbidden'
         '404':
           $ref: '#/components/responses/SigmaFiNotFound'
         '422':
@@ -6116,8 +6122,10 @@ paths:
       summary: Repay a bond (quote)
       description: >
         What the send would do, at the snapshot `at`. Signs nothing. A write that cannot run now answers
-        200 with its `refusals`.
+        200 with its `refusals`. Needs the key, since the quote reads this wallet's ownership and funding boxes.
       operationId: checkRepayZcBond
+      security:
+        - ApiKeyAuth: []
       tags:
         - sigmafi-zc
       parameters:
@@ -6133,6 +6141,8 @@ paths:
           $ref: '#/components/responses/ZcQuoted'
         '400':
           $ref: '#/components/responses/ZcBadRequest'
+        '403':
+          $ref: '#/components/responses/ZcForbidden'
         '404':
           $ref: '#/components/responses/ZcNotFound'
         '429':
@@ -6178,8 +6188,10 @@ paths:
       summary: Add collateral (quote)
       description: >
         What the send would do, at the snapshot `at`. Signs nothing. A write that cannot run now answers
-        200 with its `refusals`.
+        200 with its `refusals`. Needs the key, since the quote reads this wallet's ownership and funding boxes.
       operationId: checkRecollateralizeZcBond
+      security:
+        - ApiKeyAuth: []
       tags:
         - sigmafi-zc
       parameters:
@@ -6195,6 +6207,8 @@ paths:
           $ref: '#/components/responses/ZcQuoted'
         '400':
           $ref: '#/components/responses/ZcBadRequest'
+        '403':
+          $ref: '#/components/responses/ZcForbidden'
         '404':
           $ref: '#/components/responses/ZcNotFound'
         '429':
@@ -6302,8 +6316,10 @@ paths:
       summary: Extinguish a bond (quote)
       description: >
         What the send would do, at the snapshot `at`. Signs nothing. A write that cannot run now answers
-        200 with its `refusals`.
+        200 with its `refusals`. Needs the key, since the quote reads this wallet's bond-unit and share holdings.
       operationId: checkExtinguishZcBond
+      security:
+        - ApiKeyAuth: []
       tags:
         - sigmafi-zc
       parameters:
@@ -6319,6 +6335,8 @@ paths:
           $ref: '#/components/responses/ZcQuoted'
         '400':
           $ref: '#/components/responses/ZcBadRequest'
+        '403':
+          $ref: '#/components/responses/ZcForbidden'
         '404':
           $ref: '#/components/responses/ZcNotFound'
         '429':
@@ -6495,8 +6513,10 @@ paths:
       summary: Unwrap (quote)
       description: >
         What the send would do, at the snapshot `at`. Signs nothing. A write that cannot run now answers
-        200 with its `refusals`.
+        200 with its `refusals`. Needs the key, since the quote reads whether this wallet holds the receipt.
       operationId: checkUnwrapZc
+      security:
+        - ApiKeyAuth: []
       tags:
         - sigmafi-zc
       parameters:
@@ -6512,6 +6532,8 @@ paths:
           $ref: '#/components/responses/ZcQuoted'
         '400':
           $ref: '#/components/responses/ZcBadRequest'
+        '403':
+          $ref: '#/components/responses/ZcForbidden'
         '404':
           $ref: '#/components/responses/ZcNotFound'
         '429':
@@ -6619,8 +6641,10 @@ paths:
       summary: Cancel a box (quote)
       description: >
         What the send would do, at the snapshot `at`. Signs nothing. A write that cannot run now answers
-        200 with its `refusals`.
+        200 with its `refusals`. Needs the key, since the quote checks this wallet owns the box.
       operationId: checkCancelZcBox
+      security:
+        - ApiKeyAuth: []
       tags:
         - sigmafi-zc
       parameters:
@@ -6630,6 +6654,8 @@ paths:
           $ref: '#/components/responses/ZcQuoted'
         '400':
           $ref: '#/components/responses/ZcBadRequest'
+        '403':
+          $ref: '#/components/responses/ZcForbidden'
         '404':
           $ref: '#/components/responses/ZcNotFound'
         '429':
